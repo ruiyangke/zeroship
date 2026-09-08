@@ -616,7 +616,7 @@ async fn after_connect_runs_once_for_a_reused_connection() {
 
     let mut backend_pid = None;
     for _ in 0..4 {
-        let client = pool.get().await.unwrap();
+        let client = pool.acquire().await.unwrap();
         match backend_pid {
             Some(expected) => assert_eq!(client.process_id(), expected),
             None => backend_pid = Some(client.process_id()),
@@ -679,17 +679,17 @@ async fn after_connect_failure_discards_the_connection() {
         })
     });
     let pool = connect_pool(&url, config).await;
-    let held = pool.get().await.unwrap();
+    let held = pool.acquire().await.unwrap();
 
     let error = pool
-        .get()
+        .acquire()
         .await
         .expect_err("a connection whose after_connect failed was handed out");
     assert_eq!(error.code(), Some(&SqlState::DIVISION_BY_ZERO));
     assert_eq!(pool.total_count(), 1, "failed connection leaked a slot");
     assert_eq!(pool.active_count(), 1, "failed connection became active");
 
-    let replacement = pool.get().await.unwrap();
+    let replacement = pool.acquire().await.unwrap();
     let rejected_pid = failed_pid
         .get()
         .expect("the failing hook did not record its backend");
@@ -712,7 +712,7 @@ async fn after_connect_failure_discards_the_connection() {
         "replacement inherited failed hook state"
     );
     assert_eq!(calls.get(), 3);
-    assert_eq!(pool.metrics.evictions.get(), 1);
+    assert_eq!(pool.metrics().evictions.get(), 1);
 
     drop(replacement);
     drop(held);
@@ -871,7 +871,7 @@ async fn a_validation_error_discards_an_otherwise_live_session() {
                     format!("construct scripted pool: {}", common::error_chain(&error))
                 })?;
 
-            let first = Box::pin(pool.get()).await.map_err(|error| {
+            let first = Box::pin(pool.acquire()).await.map_err(|error| {
                 format!(
                     "successful-validation control failed: {}",
                     common::error_chain(&error)
@@ -879,12 +879,12 @@ async fn a_validation_error_discards_an_otherwise_live_session() {
             })?;
             let after_success = (
                 first.process_id(),
-                pool.metrics.connections_created.get(),
-                pool.metrics.evictions.get(),
+                pool.metrics().connections_created.get(),
+                pool.metrics().evictions.get(),
             );
             drop(first);
 
-            let second = Box::pin(pool.get()).await.map_err(|error| {
+            let second = Box::pin(pool.acquire()).await.map_err(|error| {
                 format!(
                     "checkout after validation refusal failed: {}",
                     common::error_chain(&error)
@@ -892,8 +892,8 @@ async fn a_validation_error_discards_an_otherwise_live_session() {
             })?;
             let after_refusal = (
                 second.process_id(),
-                pool.metrics.connections_created.get(),
-                pool.metrics.evictions.get(),
+                pool.metrics().connections_created.get(),
+                pool.metrics().evictions.get(),
             );
             drop(second);
 
@@ -1053,9 +1053,9 @@ async fn fresh_after_connect_eligibility_preserves_idle_fatal() {
     let pool = Pool::connect_with_config(connection_config, pool_config)
         .await
         .expect("initial warm-up failed");
-    let held = pool.get().await.expect("check out the warm connection");
+    let held = pool.acquire().await.expect("check out the warm connection");
 
-    let outcome = compio::time::timeout(Duration::from_secs(5), pool.get()).await;
+    let outcome = compio::time::timeout(Duration::from_secs(5), pool.acquire()).await;
     let error = match outcome {
         Ok(Err(error)) => Some(error),
         Ok(Ok(client)) => {
@@ -1113,7 +1113,7 @@ async fn before_acquire_false_discards_and_retries() {
     });
     let pool = connect_pool(&url, config).await;
 
-    let client = pool.get().await.unwrap();
+    let client = pool.acquire().await.unwrap();
     let rejected_pid = rejected_pid
         .get()
         .expect("before_acquire did not inspect the first candidate");
@@ -1122,8 +1122,8 @@ async fn before_acquire_false_discards_and_retries() {
     assert_eq!(pool.total_count(), 1);
     assert_eq!(pool.active_count(), 1);
     assert_eq!(pool.idle_count(), 0);
-    assert_eq!(pool.metrics.connections_created.get(), 2);
-    assert_eq!(pool.metrics.evictions.get(), 1);
+    assert_eq!(pool.metrics().connections_created.get(), 2);
+    assert_eq!(pool.metrics().evictions.get(), 1);
     let row = client
         .query_one(
             "SELECT 42::int4, \
@@ -1177,12 +1177,12 @@ async fn a_failing_before_acquire_evicts_and_reaches_the_caller() {
     });
     let pool = connect_pool(&url, config).await;
 
-    let evictions_before = pool.metrics.evictions.get();
+    let evictions_before = pool.metrics().evictions.get();
     let idle_before = pool.idle_count();
     assert_eq!(idle_before, 2, "both warm connections should be idle");
 
     let error = pool
-        .get()
+        .acquire()
         .await
         .expect_err("a failing before_acquire was retried away");
 
@@ -1197,7 +1197,7 @@ async fn a_failing_before_acquire_evicts_and_reaches_the_caller() {
         "the hook error was swallowed and retried onto a second candidate"
     );
     assert_eq!(
-        pool.metrics.evictions.get(),
+        pool.metrics().evictions.get(),
         evictions_before + 1,
         "the candidate whose validation failed was not counted as an eviction"
     );
@@ -1210,7 +1210,7 @@ async fn a_failing_before_acquire_evicts_and_reaches_the_caller() {
     // The pool is still usable: the surviving idle connection serves the next
     // caller, so the failure retired one candidate and not the pool.
     let client = pool
-        .get()
+        .acquire()
         .await
         .expect("the failed acquire poisoned the whole pool");
     assert_eq!(
@@ -1244,16 +1244,16 @@ async fn cancelling_an_async_hook_releases_its_capacity_slot() {
     pool_config.acquire_timeout(Duration::from_secs(1));
     let pool = connect_pool(&url, pool_config).await;
 
-    pool.get()
+    pool.acquire()
         .await
         .expect_err("checkout outlived its acquire_timeout inside a hook");
     assert_eq!(calls.get(), 1);
     assert_eq!(pool.active_count(), 0);
     assert_eq!(pool.idle_count(), 0);
     assert_eq!(pool.total_count(), 0, "cancelled hook leaked its slot");
-    assert_eq!(pool.metrics.timeouts.get(), 1);
+    assert_eq!(pool.metrics().timeouts.get(), 1);
 
-    let client = pool.get().await.unwrap();
+    let client = pool.acquire().await.unwrap();
     // Still 1: the cancelled checkout took the only warm entry with it
     // (`total_count` is 0 above), so this second checkout is served by a
     // freshly opened connection, which `before_acquire` does not inspect. The
@@ -1279,7 +1279,7 @@ async fn after_release_false_discards_the_dirty_session() {
     let pool = connect_pool(&url, config).await;
 
     let first_pid = {
-        let client = pool.get().await.unwrap();
+        let client = pool.acquire().await.unwrap();
         client
             .batch_execute("SET cpg_hooks_after_release.marker = 'dirty'")
             .await
@@ -1291,9 +1291,9 @@ async fn after_release_false_discards_the_dirty_session() {
     assert_eq!(pool.active_count(), 0);
     assert_eq!(pool.idle_count(), 0, "rejected connection became idle");
     assert_eq!(pool.total_count(), 0, "rejected connection kept its slot");
-    assert_eq!(pool.metrics.evictions.get(), 1);
+    assert_eq!(pool.metrics().evictions.get(), 1);
 
-    let client = pool.get().await.unwrap();
+    let client = pool.acquire().await.unwrap();
     assert_ne!(
         client.process_id(),
         first_pid,
@@ -1383,7 +1383,7 @@ async fn the_session_attrs_probe_runs_before_after_connect() {
     let pool = Pool::connect_with_config(permissive, pool_config)
         .await
         .expect("target_session_attrs=any must accept the same writable server");
-    let client = pool.get().await.expect("check out the accepted session");
+    let client = pool.acquire().await.expect("check out the accepted session");
     assert_eq!(
         calls.get(),
         1,
@@ -1446,7 +1446,7 @@ async fn before_acquire_is_not_consulted_for_a_freshly_connected_client() {
     });
     let pool = connect_pool(&url, config).await;
 
-    let client = pool.get().await.expect(
+    let client = pool.acquire().await.expect(
         "a rejecting before_acquire must not block the FRESH connection opened to replace the \
          candidate it rejected: the hook is a recycling check, and consulting it here reopens \
          until acquire_timeout",
@@ -1459,11 +1459,11 @@ async fn before_acquire_is_not_consulted_for_a_freshly_connected_client() {
          freshly opened replacement was offered to it too"
     );
     assert_eq!(
-        pool.metrics.connections_created.get(),
+        pool.metrics().connections_created.get(),
         2,
         "the warm-up connection plus its replacement"
     );
-    assert_eq!(pool.metrics.evictions.get(), 1);
+    assert_eq!(pool.metrics().evictions.get(), 1);
 
     // It is a usable client, not merely a returned handle.
     let row = client

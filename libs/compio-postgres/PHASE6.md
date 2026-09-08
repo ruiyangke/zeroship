@@ -19,7 +19,7 @@ column that `build_update_one` always writes.
 | `src/query.rs` | +92 | feature | Added `pub async fn query_text_params` - Parse with empty OID list (server infers), Bind with text format for params (code 0) and binary format for results (code 1). Matches legacy `zeroship-pg` semantics exactly |
 | `src/row.rs` | +16 | feature | Added `Row::raw_value<I>(idx)` for callers that decode wire bytes manually (used by plugin-db for TIMESTAMP -> Unix ms conversion) |
 | `src/connect_raw.rs` | +20 | **bug fix** | `Handshake::next()` was dropping unread messages from each `BackendMessages` batch - the startup sequence (`AuthenticationOk + ParameterStatus* + BackendKeyData + ReadyForQuery`) arrives as one batch, we were returning the first and throwing the rest away. Added a `pending: BackendMessages` field that persists the iterator across calls |
-| `src/lib.rs` | +1 | wiring | `mod pool;` + `pub use pool::{Pool, PoolConfig, PoolMetrics, PooledClient};` |
+| `src/lib.rs` | +1 | wiring | `mod pool;` + `pub use pool::{Pool, PoolConfig, PoolMetrics, PoolConnection};` |
 
 ## Downstream crates migrated
 

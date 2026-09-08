@@ -167,7 +167,7 @@ pub(crate) async fn relay_alias_for(
             return None;
         }
     };
-    let mut conn = match pool.get().await {
+    let mut conn = match pool.acquire().await {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!(error = %e, "relay alias lookup: pool get failed (failing closed on email)");
@@ -573,7 +573,7 @@ pub(crate) async fn mint_session_from_code(
             Ok(p) => p,
             Err(e) => return db_error(e),
         };
-        let mut conn = match pool.get().await {
+        let mut conn = match pool.acquire().await {
             Ok(c) => c,
             Err(e) => return db_error(e),
         };
@@ -832,7 +832,7 @@ pub async fn session(req: HttpRequest, state: State<Arc<GateState>>) -> HttpResp
             Ok(p) => p,
             Err(e) => return db_error(e),
         };
-        let mut conn = match pool.get().await {
+        let mut conn = match pool.acquire().await {
             Ok(c) => c,
             Err(e) => return db_error(e),
         };
@@ -889,7 +889,7 @@ pub async fn session(req: HttpRequest, state: State<Arc<GateState>>) -> HttpResp
                     Ok(p) => p,
                     Err(e) => return db_error(e),
                 };
-                let mut conn = match pool.get().await {
+                let mut conn = match pool.acquire().await {
                     Ok(c) => c,
                     Err(e) => return db_error(e),
                 };
@@ -979,7 +979,7 @@ pub async fn session(req: HttpRequest, state: State<Arc<GateState>>) -> HttpResp
         Err(RotationError::LoginRequired) => {
             // Anchor-dead: delete the row + clear the breadcrumb.
             if let Ok(pool) = crate::db::checkout(db_cfg).await {
-                if let Ok(mut conn) = pool.get().await {
+                if let Ok(mut conn) = pool.acquire().await {
                     let _ = anchors::delete(&mut conn, route.app_id, anchor_id).await;
                 }
             }
@@ -1230,7 +1230,7 @@ async fn do_refresh(
             Ok(p) => p,
             Err(e) => return Err(RotationError::Upstream(format!("pool checkout: {e}"))),
         };
-        let mut conn = match pool.get().await {
+        let mut conn = match pool.acquire().await {
             Ok(c) => c,
             Err(e) => return Err(RotationError::Upstream(format!("pool get: {e}"))),
         };
@@ -1331,7 +1331,7 @@ async fn session_cookie_family_revoked(
             return true;
         }
     };
-    let conn = match pool.get().await {
+    let conn = match pool.acquire().await {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!(error = %e, "/session: revocation pool get failed (failing closed)");
@@ -1488,7 +1488,7 @@ pub async fn issue_interactive_session_cookie(
         .await
         .map_err(|e| format!("identity mapping pool checkout failed: {e}"))?;
     let mut conn = pool
-        .get()
+        .acquire()
         .await
         .map_err(|e| format!("identity mapping session checkout failed: {e}"))?;
     crate::identities::upsert(&mut conn, client_id, global_user_id, &pws_sub)

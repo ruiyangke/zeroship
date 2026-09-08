@@ -133,7 +133,7 @@ async fn returning_a_lease_with_a_live_copy_handle_evicts_the_connection() {
             .await
             .expect("create one-connection pool");
 
-        let client = pool.get().await.expect("borrow the first connection");
+        let client = pool.acquire().await.expect("borrow the first connection");
         let first_pid = client.process_id();
         let table = common::test_object_name("copy_mode_pool_probe");
         client
@@ -152,7 +152,7 @@ async fn returning_a_lease_with_a_live_copy_handle_evicts_the_connection() {
             "an active COPY connection was deposited into the idle pool"
         );
 
-        let replacement = pool.get().await.expect("borrow a replacement connection");
+        let replacement = pool.acquire().await.expect("borrow a replacement connection");
         assert_ne!(
             replacement.process_id(),
             first_pid,

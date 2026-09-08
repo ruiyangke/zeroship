@@ -578,7 +578,7 @@ async fn token_inner(
                     tracing::error!(error = %err, "token: dedicated database pool checkout failed");
                     OAuthError::server_error("token database unavailable")
                 })?;
-            let mut conn = pool.get().await.map_err(|err| {
+            let mut conn = pool.acquire().await.map_err(|err| {
                 tracing::error!(error = %err, "token: dedicated database session checkout failed");
                 OAuthError::server_error("token database unavailable")
             })?;

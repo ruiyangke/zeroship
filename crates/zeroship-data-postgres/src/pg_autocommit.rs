@@ -68,7 +68,7 @@ pub async fn roled_rows(
     sql: &str,
     params: &[&str],
 ) -> Result<Vec<compio_postgres::Row>, DbError> {
-    let mut client = pool.get().await.map_err(|e| pg_error::classify(&e))?;
+    let mut client = pool.acquire().await.map_err(|e| pg_error::classify(&e))?;
 
     // P2-C1: run the per-app role + DB-1 timeout guards via `SET LOCAL`
     // inside an explicit transaction, exactly like the explicit-tx path

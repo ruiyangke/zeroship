@@ -1797,7 +1797,7 @@ mod tests {
             // in the app role (required for SET LOCAL ROLE) and (b)
             // assert the connection returns to it after cancellation.
             let login_user = {
-                let c = pool.get().await.expect("checkout for setup");
+                let c = pool.acquire().await.expect("checkout for setup");
                 let rows = c
                     .query_text_params("SELECT current_user AS u", &[])
                     .await
@@ -1808,7 +1808,7 @@ mod tests {
             // Provision the per-app role directly (NOLOGIN) and grant the
             // login user membership so `SET LOCAL ROLE` succeeds.
             {
-                let c = pool.get().await.expect("checkout for role setup");
+                let c = pool.acquire().await.expect("checkout for role setup");
                 let _ = c
                     .simple_query(&format!("DROP ROLE IF EXISTS {role_ident}"))
                     .await;
@@ -1844,7 +1844,7 @@ mod tests {
 
             // Re-check out (size-1 pool → same backend). The pool's dirty
             // barrier drains the rolled-back tx; assert NO residual state.
-            let c = pool.get().await.expect("re-checkout after cancel");
+            let c = pool.acquire().await.expect("re-checkout after cancel");
             let user_after = {
                 let rows = c
                     .query_text_params("SELECT current_user AS u", &[])

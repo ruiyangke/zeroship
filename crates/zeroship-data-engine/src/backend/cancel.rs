@@ -43,8 +43,6 @@
 //! dropped at the adapter tier's `ThreadDbContext::retire_transaction` for
 //! tidiness, not for correctness.
 
-use std::rc::Rc;
-
 use compio_postgres::{CancelToken, Pool};
 
 use crate::backend::sqlite::reservation::TerminalOutcome as SqliteTerminalOutcome;
@@ -87,7 +85,7 @@ pub enum CancelDelivery {
 pub struct PostgresCanceller {
     /// The pool the lease came from, so the cancellation connection is opened
     /// with the same TLS connector the session was.
-    pool: Rc<Pool>,
+    pool: Pool,
     token: CancelToken,
 }
 
@@ -124,7 +122,7 @@ impl TxConnection {
     pub fn canceller(&self) -> Option<TxCanceller> {
         match self {
             Self::Postgres(pg) => Some(TxCanceller::Postgres(Box::new(PostgresCanceller {
-                pool: Rc::clone(pg.pool()),
+                pool: pg.pool().clone(),
                 token: pg.cancel_token(),
             }))),
             Self::Sqlite(handle) => handle.cancel_handle().map(TxCanceller::Sqlite),

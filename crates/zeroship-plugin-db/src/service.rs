@@ -122,7 +122,7 @@ thread_local! {
     /// It said `acquire_dedicated_client` "calls `compio_postgres::connect`
     /// straight through for each explicit transaction" and named moving it onto
     /// a pooled checkout as a later step. That move has landed:
-    /// `PostgresBackend::acquire_dedicated_client` is `self.pool.get_owned()`,
+    /// `PostgresBackend::acquire_dedicated_client` is `self.pool.acquire()`,
     /// so an explicit transaction borrows from the data-plane pool and opens no
     /// socket of its own.
     static BACKENDS_OPENED: Cell<u64> = const { Cell::new(0) };

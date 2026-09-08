@@ -277,13 +277,13 @@ pub use zeroship_data_query_builder::descriptors::EncryptionMode;
 /// lives on a focused sub-trait. The super-trait bound
 /// is the carved capability set:
 ///
-/// - [`SqlExecutor`] — the `Client = compio_postgres::OwnedPooledClient`
+/// - [`SqlExecutor`] — the `Client = compio_postgres::PoolConnection`
 ///   pin was dropped from this super-bound so a `SqliteBackend` whose
 ///   `SqlExecutor::Client = SqliteSessionHandle` can also satisfy
 ///   `Backend`. PG-only consumers that *need* the concrete client
 ///   type continue to bound on
 ///   [`PgSqlExecutor`] / [`PgLockManager`] (which still pin
-///   `Client = compio_postgres::OwnedPooledClient`).
+///   `Client = compio_postgres::PoolConnection`).
 /// - [`LockManager`]
 /// - [`SchemaIntrospect`] with `LiveSchema = crate::catalog::LiveSchema`
 ///
@@ -410,18 +410,18 @@ mod tests {
     /// the omnibus `Backend` trait — or detaches the impl block from
     /// the `PostgresBackend` type — this stops compiling.
     fn assert_postgres_backend_impls_sql_executor() {
-        fn assert_impl<T: SqlExecutor<Client = compio_postgres::OwnedPooledClient>>() {}
+        fn assert_impl<T: SqlExecutor<Client = compio_postgres::PoolConnection>>() {}
         assert_impl::<PostgresBackend>();
     }
 
     /// Compile-time: [`PostgresBackend`] satisfies the carved
     /// [`LockManager`] capability super-trait. The
     /// `: SqlExecutor` super-bound on `LockManager` plus the
-    /// `Client = compio_postgres::OwnedPooledClient` constraint here pin the
+    /// `Client = compio_postgres::PoolConnection` constraint here pin the
     /// shape end-to-end — a regression in either direction fails
     /// compilation in this module.
     fn assert_postgres_backend_impls_lock_manager() {
-        fn assert_impl<T: LockManager<Client = compio_postgres::OwnedPooledClient>>() {}
+        fn assert_impl<T: LockManager<Client = compio_postgres::PoolConnection>>() {}
         assert_impl::<PostgresBackend>();
     }
 
@@ -443,10 +443,8 @@ mod tests {
     }
 
     /// Compile-time: [`PostgresBackend`] satisfies the PG-only
-    /// [`PgLockManager`] extension trait. The returned `PooledClient<'p>` keeps
-    /// the `'p` lifetime threaded through
-    /// [`LockGuard`] without needing a GAT on
-    /// [`LockManager`] (Open Q5 resolution).
+    /// [`PgLockManager`] extension trait. Its owned `PoolConnection` can be
+    /// retained by [`LockGuard`] across awaits without borrowing the pool.
     fn assert_postgres_backend_impls_pg_lock_manager() {
         fn assert_impl<T: PgLockManager>() {}
         assert_impl::<PostgresBackend>();
@@ -527,7 +525,7 @@ mod tests {
     /// `SchemaIntrospect<LiveSchema = LiveSchema>` super-bound so the
     /// `Backend<LiveSchema = …>` shorthand below still resolves.
     fn assert_associated_types_pinned() {
-        fn pinned_client<T: Backend<Client = compio_postgres::OwnedPooledClient>>() {}
+        fn pinned_client<T: Backend<Client = compio_postgres::PoolConnection>>() {}
         fn pinned_live_schema<T: Backend<LiveSchema = crate::catalog::LiveSchema>>() {}
         pinned_client::<PostgresBackend>();
         pinned_live_schema::<PostgresBackend>();
@@ -666,7 +664,7 @@ mod tests {
     #[allow(dead_code)]
     async fn assert_lock_scope_dispatches_through_try_acquire(
         backend: &PostgresBackend,
-        client: &compio_postgres::OwnedPooledClient,
+        client: &compio_postgres::PoolConnection,
     ) -> Result<bool, DbError> {
         // GlobalApp arm — exercises acquire / try_acquire / release.
         let global = LockScope::GlobalApp {

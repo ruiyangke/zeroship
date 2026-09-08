@@ -274,8 +274,8 @@ One name per type.
 
 **Ownership.** A session owns its resources and carries no borrows. A session
 that borrows its pool checkout cannot offer a `finish` returning a `'static`
-future, so the choice is an **owned pooled lease**: `Pool::get_owned` preserving
-the borrowed wrapper's return and timeout behaviour. `PgOpSession` drives raw
+future, so `Pool::acquire` returns an owned `PoolConnection` with automatic
+return and a bounded acquisition deadline. `PgOpSession` drives raw
 `BEGIN`/`COMMIT`/`ROLLBACK` and must **not** store `Transaction<'_>`, which holds
 `&'a mut Client`. Raw transaction control carries the obligation the borrowing
 wrapper discharges: PostgreSQL may answer `COMMIT` with a `ROLLBACK` tag, checked

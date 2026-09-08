@@ -25,7 +25,7 @@
 //! SQL, and the roled autocommit funnel - plus `lock_guard::LockGuard` (gated
 //! behind `test-helpers`, so it is absent from a default-feature build), which
 //! travels with the backend because its `acquire` is bound to
-//! `LockManager<Client = compio_postgres::OwnedPooledClient>`.
+//! `LockManager<Client = compio_postgres::PoolConnection>`.
 //!
 //! # What deliberately does NOT live here
 //!
@@ -111,7 +111,7 @@ pub use postgres::PostgresBackend;
 /// implement this trait — it would have its own audit-helper signatures (a
 /// `SqliteExecutor` accessor returning `&sqlite::Connection`, etc.).
 #[cfg(any(test, feature = "test-helpers"))]
-pub trait PgSqlExecutor: SqlExecutor<Client = compio_postgres::OwnedPooledClient> {
+pub trait PgSqlExecutor: SqlExecutor<Client = compio_postgres::PoolConnection> {
     /// Borrow the underlying `compio_postgres::Pool`. Free-function
     /// audit helpers in `zeroship_plugin_db::audit` take `&Pool` directly; this
     /// accessor lets generic consumers (e.g.
@@ -125,38 +125,26 @@ pub trait PgSqlExecutor: SqlExecutor<Client = compio_postgres::OwnedPooledClient
 /// [`crate::lock_guard::LockGuard`] holds for the life of the
 /// advisory lock.
 ///
-/// **Open Q5 is now moot, and this paragraph is kept as history rather than as
-/// a live trade-off.** It read: the primitive had to return a
-/// `PooledClient<'p>` whose `'p` borrow lifetime threaded through `LockGuard`,
-/// and the alternative was a GAT on [`LockManager`](zeroship_data_core::storage::LockManager) of the form
-/// `type PooledLockClient<'p>: 'p where Self: 'p` — workable with
-/// async-fn-in-trait but fighting the trait solver at consumer sites, so the
-/// PG extension trait was taken and cross-backend lifetime threading deferred.
-/// `OwnedPooledClient` removes the lifetime outright: the lease owns an `Rc` of
-/// the pool and still returns on drop, so neither branch of that choice is
-/// needed. See `docs/archive/p0-implementation-plan.md` §3 Q5 and
-/// `docs/archive/db-system-design.md` §7 for the original framing.
+/// The connection owns its pool handle and returns on drop, so lock guards
+/// can retain it across callbacks without a borrow of the acquiring handle.
 ///
-/// The `: LockManager<Client = compio_postgres::OwnedPooledClient>` super-bound
+/// The `: LockManager<Client = compio_postgres::PoolConnection>` super-bound
 /// is load-bearing: the returned lease is the [`SqlExecutor::Client`](zeroship_data_core::storage::SqlExecutor::Client) that
 /// [`LockManager::acquire_advisory_lock`](zeroship_data_core::storage::LockManager::acquire_advisory_lock) takes, so the orchestrator can hand
 /// it straight into `LockGuard::acquire` without an adapter.
 #[cfg(any(test, feature = "test-helpers"))]
-pub trait PgLockManager: LockManager<Client = compio_postgres::OwnedPooledClient> {
+pub trait PgLockManager: LockManager<Client = compio_postgres::PoolConnection> {
     /// Acquire a pool-leased client for advisory-lock duty.
     ///
-    /// Returns an [`compio_postgres::OwnedPooledClient`]: the lease owns an
-    /// `Rc` of the pool and still returns on drop, so
-    /// [`crate::lock_guard::LockGuard`] no longer has to thread a
-    /// `'p` borrow lifetime through itself. The Q5 note above is therefore
-    /// historical - the GAT alternative it weighs was solving a lifetime
-    /// problem the owned lease removes outright.
+    /// Returns a [`compio_postgres::PoolConnection`] that owns its pool handle.
+    /// [`crate::lock_guard::LockGuard`] can store it across callbacks and return
+    /// it on release, or discard it when lock cleanup cannot be confirmed.
     ///
-    /// Postgres impl wraps `self.pool().get_owned().await` and maps the
+    /// Postgres impl wraps `self.pool().acquire().await` and maps the
     /// pool error to [`DbError::Transient`](zeroship_data_core::error::DbError::Transient) with the same operator-
     /// facing message the bootstrap call site used to emit inline.
     #[allow(async_fn_in_trait)]
     async fn acquire_pooled_client_for_lock(
         &self,
-    ) -> Result<compio_postgres::OwnedPooledClient, DbError>;
+    ) -> Result<compio_postgres::PoolConnection, DbError>;
 }

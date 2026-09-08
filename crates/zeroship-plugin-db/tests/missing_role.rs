@@ -333,7 +333,7 @@ async fn pool_reconnect_missing_app_shaped_login_role_stays_internal() {
         .expect("warm pool as the temporary login role");
     compio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-    let err = match pool.get().await {
+    let err = match pool.acquire().await {
         Ok(_) => panic!("expired pool entry must reconnect after its login role is dropped"),
         Err(err) => err,
     };

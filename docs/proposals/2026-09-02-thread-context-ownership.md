@@ -15,7 +15,7 @@ this struct's fields do not belong to one tier:
 | field | holds | tier |
 | --- | --- | --- |
 | `pool` | `Rc<compio_postgres::Pool>` | vendor |
-| `tx_conns` | `OwnedPooledClient` / `SqliteSessionHandle` | vendor |
+| `tx_conns` | `PoolConnection` / `SqliteSessionHandle` | vendor |
 | `tx_cancellers` | `CancelToken` / `SqliteCancelHandle` | vendor |
 | `transactions` | `TxReducer`, the SC-1 state machines | engine |
 | `tx_claims`, `tx_waiters`, `tx_slot_waiters`, `withdrawn_tx_sessions` | admission and slot bookkeeping | engine |
@@ -101,7 +101,7 @@ hazard its doc warns about stops being a thing to remember.
 
 **`session` is opaque.** The engine holds it and can only call `exec`, `settle`,
 `cleanup`, `canceller`. It never matches variants, never names
-`OwnedPooledClient`. Same inversion already proven twice this week -
+`PoolConnection`. The same ownership inversion applies -
 `TxConnection::exec` (`c2bd6bd99`) and `PostgresBackend::query_roled_rows_as_json`
 (`f7df8d3df`) - each of which also deleted an unreachable error arm that existed
 only because the pairing was re-proved at runtime.

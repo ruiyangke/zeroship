@@ -42,10 +42,13 @@ instead, and the workspace enforces that (see the "The environment" section of
 
 ## Pool ownership and lifecycle
 
-`Pool::get()` returns a borrowed lease; `Pool::get_owned()` returns a lease
-that keeps the pool alive with `Rc`. Both use the same capacity, FIFO queue,
-acquisition budget, and return path. An owned lease can stay with a transaction
-across callbacks without opening a connection outside the pool.
+`Pool::acquire()` returns an owned `PoolConnection`. The lease keeps the pool
+alive across callbacks and can outlive the handle that acquired it. Ordinary
+queries and transactions use this same lease type.
+
+`Pool` is a cloneable handle over private `Rc` state. Clones share capacity,
+the FIFO queue, acquisition settings, metrics, and shutdown. Handles and leases
+stay on their compio thread. `Pool::metrics()` exposes the shared counters.
 
 The FIFO queue has no tenant identity. Long-held transaction leases can occupy
 capacity needed by ordinary queries; tenant admission policy belongs above the
@@ -62,7 +65,7 @@ hooks, and each checkout, including waiting and validation. Use
 `Error::is_pool_timeout()` and `Error::is_pool_closed()` to classify acquisition
 failures; command deadlines and transport failures retain their own meanings.
 
-`discard()` consumes either lease type, closes its physical connection, and
+`discard()` consumes the lease, closes its physical connection, and
 releases capacity without running a reuse hook. Use it when cleanup cannot be
 confirmed. Ordinary return rolls back an unfinished transaction before reuse;
 it preserves session settings and prepared statements.
@@ -72,6 +75,9 @@ inside connection setup or hooks. Their next poll cancels the pending work and
 drops its candidate. Close waits for checked-out leases to return; it does not
 depend on acquisition futures being polled again. Checked-out clients remain
 usable during that drain.
+
+Dropping the last pool handle or lease closes idle connections and cancels the
+housekeeper. Closing any handle explicitly starts shutdown for every clone.
 
 These ownership and lifecycle boundaries follow the patterns described by
 [SQLx's pool](https://docs.rs/sqlx/latest/sqlx/struct.Pool.html) and

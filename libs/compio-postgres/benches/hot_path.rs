@@ -126,7 +126,7 @@ pub use error::Error;
 pub use fallible_iterator;
 pub use generic_client::GenericClient;
 pub use live::{drain_connections, live_connections};
-pub use pool::{Pool, PoolConfig, PoolHookFuture, PoolMetrics, PooledClient};
+pub use pool::{Pool, PoolConfig, PoolHookFuture, PoolMetrics, PoolConnection};
 pub use portal::Portal;
 pub use query::RowStream;
 pub use row::{Row, SimpleQueryRow};

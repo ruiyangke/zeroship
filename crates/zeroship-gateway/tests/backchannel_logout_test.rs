@@ -2082,7 +2082,7 @@ async fn per_app_bcl_deletes_reload_recovery_anchor() {
     // anchor survives and this fails — "sign out everywhere" stays resurrectable.
     {
         let pool = db::checkout(&db_cfg).await.expect("checkout");
-        let mut conn = pool.get().await.expect("conn");
+        let mut conn = pool.acquire().await.expect("conn");
         assert!(
             anchors::read_live(&mut conn, app_id, anchor_id)
                 .await

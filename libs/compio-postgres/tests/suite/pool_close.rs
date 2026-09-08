@@ -111,7 +111,8 @@ async fn abandon_running_query(client: &Client, observer: &Pool) {
     );
 }
 
-async fn discarded_lease_closes_session_and_wakes_waiter(owned: bool) {
+#[compio::test]
+async fn discarded_connection_closes_session_and_wakes_waiter() {
     let release_calls = Rc::new(Cell::new(0));
     let calls = Rc::clone(&release_calls);
     let mut config = config(1, 1);
@@ -121,21 +122,15 @@ async fn discarded_lease_closes_session_and_wakes_waiter(owned: bool) {
     });
     let pool = Rc::new(connect_pool(&test_url(), config).await);
     let observer = connect_pool(&test_url(), PoolConfig::new()).await;
-    let (pid, discard): (i32, Box<dyn FnOnce() + '_>) = if owned {
-        let client = pool.get_owned().await.unwrap();
-        abandon_running_query(&client, &observer).await;
-        (client.process_id(), Box::new(move || client.discard()))
-    } else {
-        let client = pool.get().await.unwrap();
-        abandon_running_query(&client, &observer).await;
-        (client.process_id(), Box::new(move || client.discard()))
-    };
+    let client = pool.acquire().await.unwrap();
+    abandon_running_query(&client, &observer).await;
+    let pid = client.process_id();
     let wakes = Arc::new(AtomicUsize::new(0));
     let waker = counting_waker(&wakes);
-    let mut waiter = Box::pin(pool.get());
+    let mut waiter = Box::pin(pool.acquire());
     assert!(poll_with_waker(waiter.as_mut(), &waker).is_pending());
     assert_eq!(pool.pending_count(), 1);
-    discard();
+    client.discard();
     assert_eq!(pool.active_count(), 0);
     assert_eq!(pool.idle_count(), 0);
     assert_eq!(pool.total_count(), 0);
@@ -183,16 +178,6 @@ async fn discarded_lease_closes_session_and_wakes_waiter(owned: bool) {
 }
 
 #[compio::test]
-async fn discarding_a_borrowed_lease_stops_its_query_and_releases_capacity() {
-    discarded_lease_closes_session_and_wakes_waiter(false).await;
-}
-
-#[compio::test]
-async fn discarding_an_owned_lease_stops_its_query_and_releases_capacity() {
-    discarded_lease_closes_session_and_wakes_waiter(true).await;
-}
-
-#[compio::test]
 async fn acquire_after_close_fails_immediately_with_pool_closed_error() {
     let url = test_url();
     let pool = connect_pool(&url, config(1, 1)).await;
@@ -203,14 +188,14 @@ async fn acquire_after_close_fails_immediately_with_pool_closed_error() {
 
     let wake_count = Arc::new(AtomicUsize::new(0));
     let waker = counting_waker(&wake_count);
-    let mut acquire = Box::pin(pool.get());
+    let mut acquire = Box::pin(pool.acquire());
     match poll_with_waker(acquire.as_mut(), &waker) {
         Poll::Ready(Err(error)) => assert_pool_closed(&error),
         Poll::Ready(Ok(_)) => panic!("closed pool handed out a connection"),
         Poll::Pending => panic!("acquire after close parked instead of failing immediately"),
     }
     assert_eq!(
-        pool.metrics.timeouts.get(),
+        pool.metrics().timeouts.get(),
         0,
         "close was reported as a timeout"
     );
@@ -220,14 +205,14 @@ async fn acquire_after_close_fails_immediately_with_pool_closed_error() {
 async fn close_wakes_every_parked_fifo_waiter_with_pool_closed_error() {
     let url = test_url();
     let pool = Rc::new(connect_pool(&url, config(1, 1)).await);
-    let held = pool.get().await.unwrap();
+    let held = pool.acquire().await.unwrap();
 
     let first_wakes = Arc::new(AtomicUsize::new(0));
     let second_wakes = Arc::new(AtomicUsize::new(0));
     let first_waker = counting_waker(&first_wakes);
     let second_waker = counting_waker(&second_wakes);
-    let mut first = Box::pin(pool.get());
-    let mut second = Box::pin(pool.get());
+    let mut first = Box::pin(pool.acquire());
+    let mut second = Box::pin(pool.acquire());
     assert!(poll_with_waker(first.as_mut(), &first_waker).is_pending());
     assert!(poll_with_waker(second.as_mut(), &second_waker).is_pending());
     assert_eq!(pool.pending_count(), 2);
@@ -262,7 +247,7 @@ async fn close_wakes_every_parked_fifo_waiter_with_pool_closed_error() {
         }
     }
     assert_eq!(
-        pool.metrics.timeouts.get(),
+        pool.metrics().timeouts.get(),
         0,
         "waiters were reported as timeouts"
     );
@@ -283,11 +268,12 @@ async fn close_wakes_every_parked_fifo_waiter_with_pool_closed_error() {
 async fn close_waits_for_a_borrower_and_finishes_when_it_is_dropped() {
     let url = test_url();
     let pool = connect_pool(&url, config(1, 1)).await;
-    let held = pool.get().await.unwrap();
+    let held = pool.acquire().await.unwrap();
 
     let wakes = Arc::new(AtomicUsize::new(0));
     let waker = counting_waker(&wakes);
-    let mut close = Box::pin(pool.close());
+    let clone = pool.clone();
+    let mut close = Box::pin(clone.close());
     assert!(
         poll_with_waker(close.as_mut(), &waker).is_pending(),
         "close returned while its borrower was still held"
@@ -317,7 +303,7 @@ async fn close_discards_every_idle_entry_and_its_capacity_slot() {
 
     assert_drained(&pool);
     assert_eq!(
-        pool.metrics.evictions.get(),
+        pool.metrics().evictions.get(),
         0,
         "intentional shutdown was counted as unhealthy eviction"
     );
@@ -327,7 +313,7 @@ async fn close_discards_every_idle_entry_and_its_capacity_slot() {
 async fn concurrent_and_repeated_close_calls_are_idempotent() {
     let url = test_url();
     let pool = connect_pool(&url, config(1, 1)).await;
-    let held = pool.get().await.unwrap();
+    let held = pool.acquire().await.unwrap();
 
     let first_wakes = Arc::new(AtomicUsize::new(0));
     let second_wakes = Arc::new(AtomicUsize::new(0));
@@ -357,11 +343,11 @@ async fn concurrent_and_repeated_close_calls_are_idempotent() {
 async fn close_discards_an_entry_already_assigned_to_a_waiter() {
     let url = test_url();
     let pool = connect_pool(&url, config(1, 1)).await;
-    let held = pool.get().await.unwrap();
+    let held = pool.acquire().await.unwrap();
 
     let waiter_wakes = Arc::new(AtomicUsize::new(0));
     let waiter_waker = counting_waker(&waiter_wakes);
-    let mut waiter = Box::pin(pool.get());
+    let mut waiter = Box::pin(pool.acquire());
     assert!(poll_with_waker(waiter.as_mut(), &waiter_waker).is_pending());
     assert_eq!(pool.pending_count(), 1);
     assert_eq!(waiter_wakes.load(Ordering::Relaxed), 0);
@@ -402,7 +388,7 @@ async fn after_release_is_skipped_when_a_borrower_returns_during_close() {
         true
     });
     let pool = connect_pool(&url, config).await;
-    let held = pool.get().await.unwrap();
+    let held = pool.acquire().await.unwrap();
 
     let waker = Waker::noop();
     let mut close = Box::pin(pool.close());
@@ -443,7 +429,7 @@ async fn close_interrupts_acquisition_without_waiting_for_its_hook() {
 
     let wakes = Arc::new(AtomicUsize::new(0));
     let waker = counting_waker(&wakes);
-    let mut acquire = Box::pin(pool.get());
+    let mut acquire = Box::pin(pool.acquire());
     assert!(poll_with_waker(acquire.as_mut(), &waker).is_pending());
     assert!(entered.get(), "checkout never entered before_acquire");
     assert_eq!(wakes.load(Ordering::Relaxed), 0);
@@ -476,7 +462,7 @@ async fn close_interrupts_acquisition_without_waiting_for_its_hook() {
         release_tx.send(()).is_err(),
         "closed acquisition retained its hook"
     );
-    assert_eq!(pool.metrics.timeouts.get(), 0);
+    assert_eq!(pool.metrics().timeouts.get(), 0);
     assert_drained(&pool);
 }
 
@@ -484,16 +470,16 @@ async fn close_interrupts_acquisition_without_waiting_for_its_hook() {
 async fn close_accounts_for_active_idle_and_assigned_entries_together() {
     let url = test_url();
     let pool = connect_pool(&url, config(3, 3)).await;
-    let first = pool.get().await.unwrap();
-    let second = pool.get().await.unwrap();
-    let last = pool.get().await.unwrap();
+    let first = pool.acquire().await.unwrap();
+    let second = pool.acquire().await.unwrap();
+    let last = pool.acquire().await.unwrap();
     assert_eq!(pool.active_count(), 3);
     assert_eq!(pool.idle_count(), 0);
     assert_eq!(pool.total_count(), 3);
 
     let waiter_wakes = Arc::new(AtomicUsize::new(0));
     let waiter_waker = counting_waker(&waiter_wakes);
-    let mut waiter = Box::pin(pool.get());
+    let mut waiter = Box::pin(pool.acquire());
     assert!(poll_with_waker(waiter.as_mut(), &waiter_waker).is_pending());
     assert_eq!(waiter_wakes.load(Ordering::Relaxed), 0);
     assert_eq!(pool.pending_count(), 1);
@@ -540,7 +526,7 @@ async fn close_accounts_for_active_idle_and_assigned_entries_together() {
 async fn cancelling_close_leaves_the_pool_closed_and_a_later_close_resumes() {
     let url = test_url();
     let pool = connect_pool(&url, config(1, 1)).await;
-    let held = pool.get().await.unwrap();
+    let held = pool.acquire().await.unwrap();
 
     let cancelled_wakes = Arc::new(AtomicUsize::new(0));
     let cancelled_waker = counting_waker(&cancelled_wakes);
@@ -551,7 +537,7 @@ async fn cancelling_close_leaves_the_pool_closed_and_a_later_close_resumes() {
     assert!(pool.is_closed());
 
     let error = pool
-        .get()
+        .acquire()
         .await
         .expect_err("cancelled close reopened the pool");
     assert_pool_closed(&error);
@@ -578,7 +564,7 @@ async fn closing_one_pool_does_not_wait_for_another_pools_borrower() {
     let url = test_url();
     let first_pool = connect_pool(&url, config(1, 1)).await;
     let second_pool = connect_pool(&url, config(1, 1)).await;
-    let unrelated_borrower = second_pool.get().await.unwrap();
+    let unrelated_borrower = second_pool.acquire().await.unwrap();
 
     let waker = Waker::noop();
     let mut close = Box::pin(first_pool.close());

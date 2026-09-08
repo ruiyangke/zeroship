@@ -68,7 +68,7 @@
 //!
 //! # Client command deadlines
 //!
-//! [`PoolConfig::command_timeout`] and [`PooledClient::command`] provide the
+//! [`PoolConfig::command_timeout`] and [`PoolConnection::command`] provide the
 //! automatic, genuinely cancelling command deadline. The pool is the natural
 //! owner because [`CancelToken::cancel_query`] needs a TLS connector at cancel
 //! time, while a bare [`Client`] deliberately does not retain that connector.
@@ -193,9 +193,7 @@ pub use crate::error::Error;
 pub use crate::generic_client::GenericClient;
 pub use crate::live::{drain_connections, live_connections};
 pub use crate::maybe_tls_stream::{MaybeTlsReadHalf, MaybeTlsWriteHalf};
-pub use crate::pool::{
-    OwnedPooledClient, Pool, PoolConfig, PoolHookFuture, PoolMetrics, PooledClient,
-};
+pub use crate::pool::{Pool, PoolConfig, PoolConnection, PoolHookFuture, PoolMetrics};
 pub use crate::portal::Portal;
 pub use crate::query::RowStream;
 pub use crate::row::{Row, SimpleQueryRow};

@@ -1444,7 +1444,7 @@ async fn token_exchange_is_identity_only_and_sets_both_cookies() {
         )
         .await
         .expect("pool");
-        let conn = pool.get().await.expect("conn");
+        let conn = pool.acquire().await.expect("conn");
         let rows = conn
             .query(
                 "SELECT user_id, app_id FROM zeroship.gateway_sessions \
@@ -1573,7 +1573,7 @@ async fn anchor_abs_expiry_is_created_at_plus_30d_not_slid() {
     // Create an anchor directly through the REAL store and assert
     // abs_expires_at ≈ created_at + 30d (set once at create).
     let pool = zeroship_gateway::db::checkout(&db_cfg).await.expect("pool");
-    let mut conn = pool.get().await.expect("conn");
+    let mut conn = pool.acquire().await.expect("conn");
     let refresh_enc = zeroship_core::crypto::encrypt(
         &zeroship_core::crypto::derive_key("k"),
         b"aad",
@@ -1643,7 +1643,7 @@ async fn session_mint_recovers_after_reload_one_refresh() {
     //    and /session?mint=1 must fall through to anchor reload-recovery.
     {
         let pool = zeroship_gateway::db::checkout(&db_cfg).await.unwrap();
-        let conn = pool.get().await.unwrap();
+        let conn = pool.acquire().await.unwrap();
         conn.execute(
             "UPDATE zeroship.gateway_sessions SET revoked_at = NOW() WHERE user_id = $1",
             &[&user_id],
@@ -1731,7 +1731,7 @@ async fn session_mint_recovers_after_reload_one_refresh() {
     // (carrying the rotated name + avatar), keyed by the canonical app UUID.
     {
         let pool = zeroship_gateway::db::checkout(&db_cfg).await.unwrap();
-        let conn = pool.get().await.unwrap();
+        let conn = pool.acquire().await.unwrap();
         let rows = conn
             .query(
                 "SELECT name, avatar_url FROM zeroship.gateway_sessions \
@@ -1882,7 +1882,7 @@ async fn backchannel_logout_revokes_refreshed_session_with_sid_logout_token() {
 
     {
         let pool = zeroship_gateway::db::checkout(&db_cfg).await.expect("pool");
-        let mut conn = pool.get().await.expect("conn");
+        let mut conn = pool.acquire().await.expect("conn");
         let row = conn
             .query_one(
                 "SELECT revoked_at IS NOT NULL AS revoked \
@@ -2006,7 +2006,7 @@ async fn session_mint_persists_rotated_refresh_token_for_next_rotation() {
 
     {
         let pool = zeroship_gateway::db::checkout(&db_cfg).await.expect("pool");
-        let mut conn = pool.get().await.expect("conn");
+        let mut conn = pool.acquire().await.expect("conn");
         let anchor = anchors::read_live(
             &mut conn,
             Uuid::parse_str(APP_UUID).expect("fixed app uuid"),
@@ -2118,7 +2118,7 @@ async fn session_mint_invalid_grant_deletes_anchor_and_requires_login() {
 
     {
         let pool = zeroship_gateway::db::checkout(&db_cfg).await.expect("pool");
-        let mut conn = pool.get().await.expect("conn");
+        let mut conn = pool.acquire().await.expect("conn");
         let anchor = anchors::read_live(
             &mut conn,
             Uuid::parse_str(APP_UUID).expect("fixed app uuid"),
@@ -2461,7 +2461,7 @@ async fn cookie_mint_writes_identity_so_reset_evicts_cookie_session() {
         )
         .await
         .expect("pool");
-        let mut conn = pool.get().await.expect("conn");
+        let mut conn = pool.acquire().await.expect("conn");
         let persisted = zeroship_gateway::identities::lookup_pairwise_sub(
             &mut conn, CLIENT_ID, user_id,
         )
@@ -2600,7 +2600,7 @@ async fn interactive_cookie_mint_writes_identity_so_reset_evicts_session() {
         )
         .await
         .expect("pool");
-        let mut conn = pool.get().await.expect("conn");
+        let mut conn = pool.acquire().await.expect("conn");
         let persisted =
             zeroship_gateway::identities::lookup_pairwise_sub(&mut conn, CLIENT_ID, user_id)
                 .await

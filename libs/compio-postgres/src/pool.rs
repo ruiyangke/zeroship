@@ -24,7 +24,7 @@
 //! the Client is dropped (on pool eviction) the sender closes, the task's
 //! receiver observes `None`, and the task terminates gracefully.
 //!
-//! On [`PooledClient::drop`], the entry is returned to the pool (or evicted
+//! On [`PoolConnection::drop`], the entry is returned to the pool (or evicted
 //! if the connection is closed or past `max_lifetime`). A connection released
 //! with a transaction still open on the wire gets a fire-and-forget ROLLBACK
 //! first, so the next borrower never inherits it; see `Pool::return_client`
@@ -32,7 +32,7 @@
 //!
 //! [`Pool::close`] is the coordinated shutdown path. It irreversibly rejects
 //! acquisitions, wakes queued callers, drops idle and assigned entries, stops
-//! housekeeping, and waits for this pool's borrowed [`PooledClient`]s to be
+//! housekeeping, and waits for this pool's [`PoolConnection`] leases to be
 //! returned. It deliberately does not use the driver's thread-wide connection
 //! drain, which would couple one pool's shutdown to unrelated pools.
 //!
@@ -119,10 +119,11 @@ type AfterReleaseHook = dyn Fn(&Client) -> bool;
 /// capacity. The candidate connection remains counted and unavailable while
 /// its callback is running, so a recursive checkout can exhaust the pool and
 /// deadlock.
-/// A callback that needs to refer to its pool should capture a [`Weak`] handle;
-/// capturing a strong [`Rc`] can form a cycle that keeps the pool alive.
+/// A callback that needs to refer to its pool should capture an external
+/// [`Weak`] handle; retaining a clone of the pool in its own hook creates a
+/// reference cycle.
 ///
-/// `after_release` is synchronous because it runs from [`PooledClient::drop`].
+/// `after_release` is synchronous because it runs from [`PoolConnection::drop`].
 /// It must return quickly and must not block, start a nested runtime, re-enter
 /// the pool, or panic. Return `false` when asynchronous cleanup would otherwise
 /// be required; the pool discards that session and opens a clean one later. A
@@ -265,7 +266,7 @@ impl PoolConfig {
         self.acquire_timeout
     }
 
-    /// Set the client command deadline applied by [`PooledClient::command`].
+    /// Set the client command deadline applied by [`PoolConnection::command`].
     ///
     /// This builds clock (1), a client-side command deadline. When it expires,
     /// the pool first keeps a session that is already proven idle and free of
@@ -290,7 +291,7 @@ impl PoolConfig {
     ///
     /// This is pool policy, not a libpq connection parameter, and therefore is
     /// not accepted in a `PostgreSQL` connection string. See
-    /// [`PooledClient::command`] for the exclusive command scope and its
+    /// [`PoolConnection::command`] for the exclusive command scope and its
     /// streaming limitations.
     pub fn command_timeout(&mut self, command_timeout: Duration) -> &mut Self {
         self.command_timeout = Some(command_timeout);
@@ -498,7 +499,7 @@ impl PoolEntry {
         // Pool lifecycle hooks receive `&Client`, so lease scoping must be in
         // place before the first hook can retain a token. Idle and hook tokens
         // remain inactive; checkout installs a fresh active generation only at
-        // the final, non-awaiting handoff to a PooledClient.
+        // the final, non-awaiting handoff to a PoolConnection.
         client.enter_pool();
         Self {
             client,
@@ -559,7 +560,7 @@ impl PoolEntry {
 pub struct PoolMetrics {
     /// Total connections created since pool start.
     pub connections_created: Cell<u64>,
-    /// Total times `get()` timed out waiting for a connection.
+    /// Acquisitions that exceeded their deadline.
     pub timeouts: Cell<u64>,
     /// Total connections evicted (lifetime, idle, broken, or hook rejection).
     pub evictions: Cell<u64>,
@@ -748,12 +749,19 @@ impl Transport {
 /// refill). Without the housekeeper, the pool still works but connections
 /// are never proactively evicted.
 ///
-/// Dropping a pool without calling [`Pool::close`] preserves the original
-/// immediate RAII behaviour: idle clients and the retained housekeeper handle
-/// are dropped, with no asynchronous coordination step. Ordinary ownership
-/// keeps the pool alive while a [`PooledClient`] borrows it; deliberately
-/// forgetting a borrower bypasses its return path and cannot be recovered.
+/// Cloning this handle shares the connection budget, waiters, and shutdown
+/// state. Each [`PoolConnection`] owns a handle, so it can outlive the caller
+/// that acquired it. Handles and connections stay on their compio thread.
+///
+/// Dropping the last handle or lease releases idle clients and cancels the
+/// housekeeper. Use [`Pool::close`] to reject acquisitions and drain leases
+/// explicitly; closing any clone closes the shared pool.
+#[derive(Clone)]
 pub struct Pool {
+    inner: Rc<PoolInner>,
+}
+
+struct PoolInner {
     transport: Transport,
     config: PoolConfig,
     /// Idle connections available for checkout.
@@ -787,10 +795,10 @@ pub struct Pool {
     close_event_waiters: RefCell<Vec<Rc<CloseWaiterSlot>>>,
     /// Retaining the handle makes dropping the pool cancel housekeeping even
     /// if the task is blocked in a connection attempt. The task itself holds
-    /// only a `Weak<Pool>`, so this field does not form a reference cycle.
+    /// only a weak reference to the shared state, avoiding a reference cycle.
     housekeeper: RefCell<Option<compio::runtime::JoinHandle<()>>>,
     /// Observability counters.
-    pub metrics: PoolMetrics,
+    metrics: PoolMetrics,
 }
 
 impl Pool {
@@ -806,7 +814,7 @@ impl Pool {
     /// returned borrow is refused, and a cancel racing pool return retires the
     /// physical session rather than risking the next borrower.
     pub async fn cancel_query(&self, token: &CancelToken) -> Result<(), Error> {
-        self.transport.cancel_query(token).await
+        self.inner.transport.cancel_query(token).await
     }
 
     /// Gracefully close this pool and wait for all borrowed clients to return.
@@ -839,11 +847,11 @@ impl Pool {
     /// Whether graceful shutdown has begun.
     #[must_use]
     pub fn is_closed(&self) -> bool {
-        self.closed.get()
+        self.inner.closed.get()
     }
 
     fn ensure_open(&self) -> Result<(), Error> {
-        if self.closed.get() {
+        if self.inner.closed.get() {
             Err(Error::pool_closed())
         } else {
             Ok(())
@@ -950,21 +958,23 @@ impl Pool {
 
         let total = entries.len();
         let pool = Self {
-            transport,
-            config: pool_config,
-            idle: RefCell::new(entries),
-            active: Cell::new(0),
-            total: Cell::new(total),
-            waiters: RefCell::new(VecDeque::new()),
-            handoffs: RefCell::new(Vec::new()),
-            closed: Cell::new(false),
-            close_waiters: RefCell::new(Vec::new()),
-            close_event_waiters: RefCell::new(Vec::new()),
-            housekeeper: RefCell::new(None),
-            metrics: PoolMetrics::new(),
+            inner: Rc::new(PoolInner {
+                transport,
+                config: pool_config,
+                idle: RefCell::new(entries),
+                active: Cell::new(0),
+                total: Cell::new(total),
+                waiters: RefCell::new(VecDeque::new()),
+                handoffs: RefCell::new(Vec::new()),
+                closed: Cell::new(false),
+                close_waiters: RefCell::new(Vec::new()),
+                close_event_waiters: RefCell::new(Vec::new()),
+                housekeeper: RefCell::new(None),
+                metrics: PoolMetrics::new(),
+            }),
         };
         for _ in 0..total {
-            pool.metrics.inc_created();
+            pool.inner.metrics.inc_created();
         }
         Ok(pool)
     }
@@ -1033,26 +1043,24 @@ impl Pool {
         Ok(entries)
     }
 
-    /// Start the background housekeeper task. Runs every 30 seconds:
-    ///   1. Evict connections past max_lifetime
-    ///   2. Evict idle connections past idle_timeout (keep min_idle)
-    ///   3. Refill to min_idle
+    /// Start periodic maintenance: evict expired or idle connections and
+    /// replenish the configured minimum idle capacity.
     ///
     /// Must be called on the compio event loop thread that owns the pool.
-    /// The housekeeper holds a `Weak<Pool>` across awaits, and the pool retains
-    /// its task handle. Dropping the last strong `Rc` therefore releases the
-    /// pool and cancels even a blocked housekeeping connection attempt. Calling
+    /// The housekeeper holds a weak reference to shared state across awaits,
+    /// and that state retains its task handle. Dropping the last pool handle or
+    /// lease cancels even a blocked housekeeping connection attempt. Calling
     /// this after [`Pool::close`] is a no-op.
-    pub fn start_housekeeper(self: &std::rc::Rc<Self>) {
+    pub fn start_housekeeper(&self) {
         self.start_housekeeper_with_interval(Duration::from_secs(30));
     }
 
     /// Interval-injectable form used by deterministic lifecycle tests.
-    fn start_housekeeper_with_interval(self: &std::rc::Rc<Self>, interval: Duration) {
-        if self.closed.get() {
+    fn start_housekeeper_with_interval(&self, interval: Duration) {
+        if self.inner.closed.get() {
             return;
         }
-        let weak = std::rc::Rc::downgrade(self);
+        let weak = Rc::downgrade(&self.inner);
         let handle = compio::runtime::spawn(async move {
             loop {
                 compio::time::sleep(interval).await;
@@ -1065,7 +1073,7 @@ impl Pool {
         // a completed output inline (async-task 4.7.1, task.rs:249-264), and a
         // housekeeper panic can carry a caller-owned payload from `after_connect`.
         // Its destructor is therefore arbitrary code and may re-enter the pool.
-        let replaced = self.housekeeper.borrow_mut().replace(handle);
+        let replaced = self.inner.housekeeper.borrow_mut().replace(handle);
         drop(replaced);
     }
 
@@ -1073,20 +1081,20 @@ impl Pool {
     /// bit is set before any other mutation, and every counter/owner transition
     /// is committed before an arbitrary acquisition Waker is invoked.
     fn begin_close(&self) {
-        if self.closed.replace(true) {
+        if self.inner.closed.replace(true) {
             return;
         }
 
         // Dropping a compio JoinHandle cancels its task. Do this after marking
         // closed so a cancellation guard, or a task already queued to resume,
         // can only release capacity and can never refill the pool.
-        let housekeeper = self.housekeeper.borrow_mut().take();
+        let housekeeper = self.inner.housekeeper.borrow_mut().take();
         drop(housekeeper);
 
-        let mut discarded_entries = std::mem::take(&mut *self.idle.borrow_mut());
-        let queued_waiters: Vec<_> = self.waiters.borrow_mut().drain(..).collect();
-        let assigned_handoffs = std::mem::take(&mut *self.handoffs.borrow_mut());
-        let closing = std::mem::take(&mut *self.close_event_waiters.borrow_mut());
+        let mut discarded_entries = std::mem::take(&mut *self.inner.idle.borrow_mut());
+        let queued_waiters: Vec<_> = self.inner.waiters.borrow_mut().drain(..).collect();
+        let assigned_handoffs = std::mem::take(&mut *self.inner.handoffs.borrow_mut());
+        let closing = std::mem::take(&mut *self.inner.close_event_waiters.borrow_mut());
         let mut wakers: Vec<_> = closing
             .into_iter()
             .filter_map(|slot| slot.waker.borrow_mut().take())
@@ -1124,12 +1132,12 @@ impl Pool {
         if slots == 0 {
             return;
         }
-        let total = self.total.get();
+        let total = self.inner.total.get();
         debug_assert!(
             slots <= total,
             "pool total underflow: releasing {slots} slot(s) from {total}"
         );
-        self.total.set(total.saturating_sub(slots));
+        self.inner.total.set(total.saturating_sub(slots));
     }
 
     fn discard_unowned_entry(&self, entry: PoolEntry) {
@@ -1142,7 +1150,7 @@ impl Pool {
     /// Client or waking caller code.
     fn reap_ineligible_idle(&self) -> usize {
         let discarded = {
-            let mut idle = self.idle.borrow_mut();
+            let mut idle = self.inner.idle.borrow_mut();
             let mut discarded = Vec::new();
             let mut kept = Vec::with_capacity(idle.len());
             for entry in idle.drain(..) {
@@ -1159,7 +1167,7 @@ impl Pool {
         if count > 0 {
             self.release_total_slots(count);
             for _ in 0..count {
-                self.metrics.inc_evictions();
+                self.inner.metrics.inc_evictions();
             }
             self.wake_one_waiter();
         }
@@ -1168,7 +1176,7 @@ impl Pool {
     }
 
     fn remove_handoff_slot(&self, slot: &Rc<WaiterSlot>) {
-        let mut handoffs = self.handoffs.borrow_mut();
+        let mut handoffs = self.inner.handoffs.borrow_mut();
         if let Some(index) = handoffs
             .iter()
             .position(|assigned| Rc::ptr_eq(assigned, slot))
@@ -1178,11 +1186,11 @@ impl Pool {
     }
 
     fn wake_close_waiters_if_drained(&self) {
-        if self.active.get() != 0 {
+        if self.inner.active.get() != 0 {
             return;
         }
 
-        let slots = std::mem::take(&mut *self.close_waiters.borrow_mut());
+        let slots = std::mem::take(&mut *self.inner.close_waiters.borrow_mut());
         let wakers = slots
             .into_iter()
             .filter_map(|slot| slot.waker.borrow_mut().take())
@@ -1197,35 +1205,10 @@ impl Pool {
     /// including connection setup, validation, and hooks, shares
     /// `acquire_timeout`. Shutdown interrupts pending acquisition; cancellation
     /// discards its candidate and releases its capacity slot.
-    pub async fn get(&self) -> Result<PooledClient<'_>, Error> {
-        self.checkout().await
-    }
-
-    /// Acquire a connection whose lease owns an `Rc` of this pool.
     ///
-    /// Same acquisition path as [`Pool::get`] - same FIFO fairness, same
-    /// `acquire_timeout`, same return-on-drop - but the borrow carries no
-    /// lifetime, so a caller can hold it inside an owned, `'static` future.
-    /// That is what [`OwnedPooledClient`] exists for: a session that drives raw
-    /// `BEGIN`/`COMMIT` and outlives the stack frame that opened it cannot hold
-    /// `PooledClient<'a>`, and `Transaction<'a>` (which borrows `&'a mut
-    /// Client`) is unavailable for the same reason.
-    ///
-    /// # Errors
-    ///
-    /// Identical to [`Pool::get`]: pool closed, acquisition timeout, or a
-    /// connection/lifecycle-hook failure.
-    pub async fn get_owned(self: &Rc<Self>) -> Result<OwnedPooledClient, Error> {
-        let mut lease = self.checkout().await?;
-        Ok(OwnedPooledClient {
-            entry: lease.entry.take(),
-            pool: Rc::clone(self),
-        })
-    }
-
-    /// The shared acquisition body behind [`Pool::get`] and
-    /// [`Pool::get_owned`]: one deadline, one FIFO turn, one entry.
-    async fn checkout(&self) -> Result<PooledClient<'_>, Error> {
+    /// The returned connection owns a clone of this pool handle. It can be
+    /// stored across callbacks without borrowing the handle used to acquire it.
+    pub async fn acquire(&self) -> Result<PoolConnection, Error> {
         self.ensure_open()?;
         let acquisition = async {
             let mut closing = std::pin::pin!(CloseWaiter::new(self, CloseEvent::Started));
@@ -1246,20 +1229,20 @@ impl Pool {
             })
             .await
         };
-        match compio::time::timeout(self.config.acquire_timeout, acquisition).await {
+        match compio::time::timeout(self.inner.config.acquire_timeout, acquisition).await {
             Ok(result) => result,
             Err(_) => {
                 // If shutdown raced the timeout, report the terminal state and
                 // do not count a capacity timeout. The pool cannot become open
                 // again, so this is the more specific and stable answer.
                 self.ensure_open()?;
-                self.metrics.inc_timeouts();
+                self.inner.metrics.inc_timeouts();
                 Err(Error::pool_timeout(format!(
                     "acquisition exceeded {:?} (pool: {} idle, {} total, {} maximum)",
-                    self.config.acquire_timeout,
-                    self.idle.borrow().len(),
-                    self.total.get(),
-                    self.config.max_size,
+                    self.inner.config.acquire_timeout,
+                    self.inner.idle.borrow().len(),
+                    self.inner.total.get(),
+                    self.inner.config.max_size,
                 )))
             }
         }
@@ -1267,8 +1250,8 @@ impl Pool {
 
     /// Commit ownership before shutdown-listener cleanup can invoke caller
     /// wakers. Cancellation or unwinding must always have a lease to return.
-    async fn get_inner_leased(&self) -> Result<PooledClient<'_>, Error> {
-        Ok(PooledClient::new(self.get_inner().await?, self))
+    async fn get_inner_leased(&self) -> Result<PoolConnection, Error> {
+        Ok(PoolConnection::new(self.get_inner().await?, self))
     }
 
     async fn get_inner(&self) -> Result<PoolEntry, Error> {
@@ -1278,23 +1261,23 @@ impl Pool {
         // so without this turn bit a fresh caller can reserve the freed slot
         // first. Once a waiter removes itself from the head it retains that
         // turn across validation rejection and connection retries.
-        let mut has_fifo_turn = self.waiters.borrow().is_empty();
+        let mut has_fifo_turn = self.inner.waiters.borrow().is_empty();
         loop {
             self.ensure_open()?;
 
             if !has_fifo_turn {
                 if let Some(entry) = Waiter::new(self).await {
-                    self.idle.borrow_mut().push(entry);
+                    self.inner.idle.borrow_mut().push(entry);
                 }
                 has_fifo_turn = true;
                 continue;
             }
 
             // 1. Try to pop an idle connection
-            let entry = self.idle.borrow_mut().pop();
+            let entry = self.inner.idle.borrow_mut().pop();
             if let Some(mut entry) = entry {
                 // Adopt the popped slot: it is already counted in `total`, and
-                // until a PooledClient owns it (or it is pushed back to idle)
+                // until a PoolConnection owns it (or it is pushed back to idle)
                 // its decrement must ride on Drop so cancellation during the
                 // dirty barrier / alive validation below - or an eviction
                 // `continue` - releases it exactly once. The manual
@@ -1306,7 +1289,7 @@ impl Pool {
                 // reader published terminal poison, or COPY still owns the
                 // protocol, this entry cannot be handed out.
                 if !entry.is_pool_eligible() {
-                    self.metrics.inc_evictions();
+                    self.inner.metrics.inc_evictions();
                     continue;
                 }
 
@@ -1349,13 +1332,13 @@ impl Pool {
                     match validation {
                         Ok(_) => entry.client.clear_dirty(),
                         Err(_) => {
-                            self.metrics.inc_evictions();
+                            self.inner.metrics.inc_evictions();
                             continue;
                         }
                     }
                     // The barrier itself provides the alive-check; skip the
                     // second `simple_query("")` below.
-                } else if entry.last_used.elapsed() > self.config.validation_bypass {
+                } else if entry.last_used.elapsed() > self.inner.config.validation_bypass {
                     let validation = entry.client.simple_query("").await;
                     self.ensure_open()?;
                     if validation.is_err() {
@@ -1363,21 +1346,21 @@ impl Pool {
                         // outside the bypass window gets a cheap server round
                         // trip. Dirty connections used the stronger barrier
                         // above instead.
-                        self.metrics.inc_evictions();
+                        self.inner.metrics.inc_evictions();
                         continue;
                     }
                 }
 
-                let before_acquire = self.config.run_before_acquire(&entry.client).await;
+                let before_acquire = self.inner.config.run_before_acquire(&entry.client).await;
                 self.ensure_open()?;
                 match before_acquire {
                     Ok(true) => {}
                     Ok(false) => {
-                        self.metrics.inc_evictions();
+                        self.inner.metrics.inc_evictions();
                         continue;
                     }
                     Err(e) => {
-                        self.metrics.inc_evictions();
+                        self.inner.metrics.inc_evictions();
                         return Err(e);
                     }
                 }
@@ -1386,7 +1369,7 @@ impl Pool {
                 // a vote to reuse, not authority to override lifecycle facts
                 // that changed while it awaited.
                 if !entry.is_pool_eligible() {
-                    self.metrics.inc_evictions();
+                    self.inner.metrics.inc_evictions();
                     continue;
                 }
 
@@ -1396,8 +1379,8 @@ impl Pool {
                 // these two synchronous statements.
                 self.ensure_open()?;
                 entry.touch();
-                self.active.set(self.active.get() + 1);
-                // PooledClient now owns the slot; its Drop -> return_client
+                self.inner.active.set(self.inner.active.get() + 1);
+                // PoolConnection now owns the slot; its Drop -> return_client
                 // handles total/active. Disarm so the guard doesn't also
                 // decrement total.
                 permit.disarm();
@@ -1409,12 +1392,12 @@ impl Pool {
             // callers in the same loop see the bumped `total` and don't race
             // past `max_size`. The reservation rides on a PermitGuard: if this
             // future is cancelled while parked at `connect_one().await` (the
-            // outer `acquire_timeout`, or a caller dropping the get()), the
+            // outer `acquire_timeout`, or a caller dropping acquisition), the
             // guard's Drop releases the slot - without it the `+1` would leak
             // forever (POOL-1). On Err the guard also releases it on return.
-            if self.total.get() < self.config.max_size {
+            if self.inner.total.get() < self.inner.config.max_size {
                 let permit = PermitGuard::reserve(self);
-                let connected = self.transport.connect_one().await;
+                let connected = self.inner.transport.connect_one().await;
                 self.ensure_open()?;
                 let client = match connected {
                     Ok(c) => c,
@@ -1423,18 +1406,18 @@ impl Pool {
                         return Err(e);
                     }
                 };
-                self.metrics.inc_created();
-                let mut entry = PoolEntry::new(client, self.config.max_lifetime);
-                let after_connect = self.config.run_after_connect(&entry.client).await;
+                self.inner.metrics.inc_created();
+                let mut entry = PoolEntry::new(client, self.inner.config.max_lifetime);
+                let after_connect = self.inner.config.run_after_connect(&entry.client).await;
                 self.ensure_open()?;
                 if let Err(e) = after_connect {
-                    self.metrics.inc_evictions();
+                    self.inner.metrics.inc_evictions();
                     // `entry` is dropped and `permit` releases the reserved
                     // slot; this connection is never made active or idle.
                     return Err(e);
                 }
                 if !entry.is_pool_eligible() {
-                    self.metrics.inc_evictions();
+                    self.inner.metrics.inc_evictions();
                     return Err(entry.ineligibility_error(|| {
                         pool_error("after_connect left the new pool connection unusable")
                     }));
@@ -1450,8 +1433,7 @@ impl Pool {
                 // back on the next iteration opens ANOTHER connection, is
                 // refused again, and repeats until `acquire_timeout` -- a full
                 // TCP connect plus startup handshake each time. Measured before
-                // this change: ~3 connections per 300ms, extrapolating to
-                // roughly 300 for a single `get()` at the 30s default. A hook
+                // this change, rejection repeatedly opened connections. A hook
                 // like "reject if the server is in recovery" answers false for
                 // every connection during a failover and turns one checkout
                 // into sustained load on an already-struggling server.
@@ -1462,8 +1444,8 @@ impl Pool {
                 // Pinned by `before_acquire_is_not_consulted_for_a_freshly_connected_client`.
                 self.ensure_open()?;
                 entry.touch();
-                self.active.set(self.active.get() + 1);
-                // PooledClient now owns the slot; its Drop -> return_client
+                self.inner.active.set(self.inner.active.get() + 1);
+                // PoolConnection now owns the slot; its Drop -> return_client
                 // handles total/active. Disarm so the guard doesn't also
                 // decrement total.
                 permit.disarm();
@@ -1486,14 +1468,14 @@ impl Pool {
                 // iteration will synchronously pop it through that common path.
                 // There is no await between this deposit and the pop, so a fresh
                 // caller cannot barge ahead of this waiter.
-                self.idle.borrow_mut().push(entry);
+                self.inner.idle.borrow_mut().push(entry);
             }
             has_fifo_turn = true;
             // else: woken for capacity/idle - loop and retry the acquire.
         }
     }
 
-    /// Return a connection to the pool (called by `PooledClient::drop`).
+    /// Return a connection to the pool (called by `PoolConnection::drop`).
     fn return_client(&self, mut entry: PoolEntry) {
         // The lease boundary is an authority boundary. Revoke before any hook
         // or pool publication. If a token escaped this lease, retire the
@@ -1504,7 +1486,9 @@ impl Pool {
         // The returning client is no longer active. (When the entry is handed
         // directly to a waiter below, checkout re-bumps `active` only after
         // validating it, so a successful hand-off nets zero.)
-        self.active.set(self.active.get().saturating_sub(1));
+        self.inner
+            .active
+            .set(self.inner.active.get().saturating_sub(1));
         // The entry is counted in `total` but is neither active nor available
         // until this synchronous return path decides its fate. The guard makes
         // rejection and hook panic release that slot exactly once and wake the
@@ -1515,7 +1499,7 @@ impl Pool {
         // is no keep/discard decision left to delegate to user code: close the
         // session, release its exact capacity slot, then notify every close
         // caller if this was the last borrower.
-        if self.closed.get() {
+        if self.inner.closed.get() {
             drop(entry);
             drop(permit);
             self.wake_close_waiters_if_drained();
@@ -1524,7 +1508,7 @@ impl Pool {
 
         if entry.client.pool_cancel_lease_prevents_reuse() {
             entry.client.force_close();
-            self.metrics.inc_evictions();
+            self.inner.metrics.inc_evictions();
             return;
         }
 
@@ -1534,7 +1518,7 @@ impl Pool {
         //   - read-retired: the dedicated reader synchronously marked poison
         //     before its main task could close the Client channel
         if !entry.is_pool_eligible() {
-            self.metrics.inc_evictions();
+            self.inner.metrics.inc_evictions();
             return;
         }
 
@@ -1542,7 +1526,7 @@ impl Pool {
         // synchronous keep-or-discard predicate, and the entry stays invisible
         // to both `idle` and waiter slots until it returns. False drops the
         // session; closing it also rolls back any open transaction.
-        let keep = self.config.run_after_release(&entry.client);
+        let keep = self.inner.config.run_after_release(&entry.client);
         // Re-check after arbitrary hook code. Re-entry is forbidden by the
         // hook contract, and the synchronous hook cannot otherwise interleave
         // a close on this single-threaded path. Only forbidden re-entry can
@@ -1562,25 +1546,25 @@ impl Pool {
         // parked, i.e. two stacked contract violations. The call stays for
         // accounting safety, not because a test can pin it; a mutation report
         // calling it unbound is correct and needs no new test.
-        if self.closed.get() {
+        if self.inner.closed.get() {
             drop(entry);
             drop(permit);
             self.wake_close_waiters_if_drained();
             return;
         }
         if !keep {
-            self.metrics.inc_evictions();
+            self.inner.metrics.inc_evictions();
             return;
         }
         if !entry.is_pool_eligible() {
-            self.metrics.inc_evictions();
+            self.inner.metrics.inc_evictions();
             return;
         }
 
         // Clear any transaction still open on the wire before anyone else can
         // see this connection.
         //
-        // `Transaction` borrows the client mutably, so a `PooledClient` cannot
+        // `Transaction` borrows the client mutably, so a `PoolConnection` cannot
         // be released while one is alive and its Drop already queues the
         // ROLLBACK. A transaction opened as raw SQL (`BEGIN` through
         // `execute`/`batch_execute`) has no such guard, and without this the
@@ -1679,7 +1663,7 @@ impl Pool {
     /// through here; it calls the sibling `deposit_freed_entry` under an armed
     /// `ReturnPermitGuard`.
     fn redeposit_freed_entry(&self, entry: PoolEntry) {
-        if self.closed.get() {
+        if self.inner.closed.get() {
             self.discard_unowned_entry(entry);
             return;
         }
@@ -1689,7 +1673,7 @@ impl Pool {
             // publication boundary instead of advertising a corpse until a
             // later checkout or housekeeping pass happens to reap it.
             self.release_total_slots(1);
-            self.metrics.inc_evictions();
+            self.inner.metrics.inc_evictions();
             self.wake_one_waiter();
             drop(entry);
             return;
@@ -1704,7 +1688,10 @@ impl Pool {
     /// disarm after this returns, then wake, so a panicking waker cannot make a
     /// deposited entry disappear from `total`.
     fn deposit_freed_entry(&self, entry: PoolEntry) -> Option<Waker> {
-        debug_assert!(!self.closed.get(), "deposited an entry into a closed pool");
+        debug_assert!(
+            !self.inner.closed.get(),
+            "deposited an entry into a closed pool"
+        );
         match self.take_front_waiter() {
             Some(slot) => {
                 // Deposit into the waiter's rendezvous slot and wake it. The
@@ -1712,11 +1699,11 @@ impl Pool {
                 // "waiting"); it now owns the right to this entry via its
                 // retained `Rc<WaiterSlot>` clone.
                 *slot.entry.borrow_mut() = Some(entry);
-                self.handoffs.borrow_mut().push(Rc::clone(&slot));
+                self.inner.handoffs.borrow_mut().push(Rc::clone(&slot));
                 slot.waker.borrow_mut().take()
             }
             None => {
-                self.idle.borrow_mut().push(entry);
+                self.inner.idle.borrow_mut().push(entry);
                 None
             }
         }
@@ -1725,7 +1712,7 @@ impl Pool {
     /// Pop the front waiter for a direct connection hand-off. The caller takes
     /// responsibility for depositing an entry and waking it.
     fn take_front_waiter(&self) -> Option<Rc<WaiterSlot>> {
-        self.waiters.borrow_mut().pop_front()
+        self.inner.waiters.borrow_mut().pop_front()
     }
 
     /// Wake the first waiter for newly available capacity without removing its
@@ -1733,10 +1720,10 @@ impl Pool {
     /// takes the capacity before the waiter is polled, and lets `Waiter::drop`
     /// pass the wake onward if that waiter is cancelled while capacity remains.
     fn wake_one_waiter(&self) {
-        if self.closed.get() {
+        if self.inner.closed.get() {
             return;
         }
-        let slot = self.waiters.borrow().front().cloned();
+        let slot = self.inner.waiters.borrow().front().cloned();
         // Take the waker OUT of the borrow before waking. As the scrutinee of an
         // `if let` the `RefMut` would still be live inside the body: Rust 2024
         // moved that drop ahead of the `else` block, not ahead of the `then`
@@ -1771,24 +1758,25 @@ impl Pool {
     }
 
     fn has_available_resource(&self) -> bool {
-        !self.closed.get()
-            && (!self.idle.borrow().is_empty() || self.total.get() < self.config.max_size)
+        !self.inner.closed.get()
+            && (!self.inner.idle.borrow().is_empty()
+                || self.inner.total.get() < self.inner.config.max_size)
     }
 
     /// Run one housekeeper cycle. A strong pool reference is held only while
     /// reading or mutating pool state, never across a connection await.
     /// Returns false once the pool has been dropped or closed.
-    async fn housekeep(weak: &Weak<Self>) -> bool {
+    async fn housekeep(weak: &Weak<PoolInner>) -> bool {
         // The sole production caller stores this task's handle inside the open
         // pool, so dropping or closing the pool cancels a sleeping task before
         // it can enter another cycle. These entry guards are construction-
         // unreachable there; keeping the private one-cycle helper total over a
         // Weak makes direct lifecycle tests possible without changing that
         // ownership argument.
-        let Some(pool) = weak.upgrade() else {
+        let Some(pool) = weak.upgrade().map(|inner| Self { inner }) else {
             return false;
         };
-        if pool.closed.get() {
+        if pool.inner.closed.get() {
             return false;
         }
 
@@ -1796,7 +1784,7 @@ impl Pool {
         // every borrow before awaiting.
 
         let (before, evicted_unusable, evicted_idle, discarded) = {
-            let mut idle = pool.idle.borrow_mut();
+            let mut idle = pool.inner.idle.borrow_mut();
             let before = idle.len();
 
             // Evicted entries are CARRIED OUT, not dropped here. Dropping a
@@ -1830,7 +1818,7 @@ impl Pool {
             *idle = kept;
 
             // 2. Evict idle-too-long, keeping at least min_idle.
-            let target = pool.config.min_idle;
+            let target = pool.inner.config.min_idle;
             let mut evicted_idle = 0usize;
             while idle.len() > target {
                 // The loop condition makes the idle set nonempty: `target` is
@@ -1840,7 +1828,7 @@ impl Pool {
                     .enumerate()
                     .min_by_key(|(_, e)| e.last_used)
                     .expect("nonempty idle set has an LRU entry");
-                if !lru.is_idle_too_long(pool.config.idle_timeout) {
+                if !lru.is_idle_too_long(pool.inner.config.idle_timeout) {
                     break;
                 }
                 discarded.push(idle.swap_remove(lru_idx));
@@ -1852,10 +1840,10 @@ impl Pool {
 
         let mut evicted = evicted_unusable + evicted_idle;
         if evicted > 0 {
-            let cur = pool.total.get();
-            pool.total.set(cur.saturating_sub(evicted));
+            let cur = pool.inner.total.get();
+            pool.inner.total.set(cur.saturating_sub(evicted));
             for _ in 0..evicted {
-                pool.metrics.inc_evictions();
+                pool.inner.metrics.inc_evictions();
             }
             pool.wake_one_waiter();
         }
@@ -1882,10 +1870,10 @@ impl Pool {
             // clone the connection recipe. The weak permit accounts for an
             // error or cancellation without retaining the pool.
             let (transport, pool_config, permit) = {
-                let Some(pool) = weak.upgrade() else {
+                let Some(pool) = weak.upgrade().map(|inner| Self { inner }) else {
                     return false;
                 };
-                if pool.closed.get() {
+                if pool.inner.closed.get() {
                     return false;
                 }
                 // Entries deposited by an earlier iteration have crossed the
@@ -1893,16 +1881,16 @@ impl Pool {
                 // became ineligible before using the live idle count as the
                 // refill stop condition.
                 evicted += pool.reap_ineligible_idle();
-                if pool.closed.get() {
+                if pool.inner.closed.get() {
                     return false;
                 }
-                if pool.idle.borrow().len() >= pool.config.min_idle
-                    || pool.total.get() >= pool.config.max_size
+                if pool.inner.idle.borrow().len() >= pool.inner.config.min_idle
+                    || pool.inner.total.get() >= pool.inner.config.max_size
                 {
                     break;
                 }
-                let transport = pool.transport.clone();
-                let pool_config = pool.config.clone();
+                let transport = pool.inner.transport.clone();
+                let pool_config = pool.inner.config.clone();
                 let permit = WeakPermitGuard::reserve(&pool);
                 (transport, pool_config, permit)
             };
@@ -1914,25 +1902,25 @@ impl Pool {
                     // `connect_one` is pending cancels the task before the
                     // await can resume; keep the fallible upgrade as the
                     // boundary that enforces that ownership construction.
-                    let Some(pool) = weak.upgrade() else {
+                    let Some(pool) = weak.upgrade().map(|inner| Self { inner }) else {
                         return false;
                     };
-                    pool.metrics.inc_created();
+                    pool.inner.metrics.inc_created();
                     drop(pool);
 
                     let entry = PoolEntry::new(client, pool_config.max_lifetime);
                     let after_connect = pool_config.run_after_connect(&entry.client).await;
-                    let Some(pool) = weak.upgrade() else {
+                    let Some(pool) = weak.upgrade().map(|inner| Self { inner }) else {
                         return false;
                     };
-                    if pool.closed.get() {
+                    if pool.inner.closed.get() {
                         return false;
                     }
                     if let Err(e) = after_connect {
                         // The successful open check above and the absence of
                         // an await or callback make another weak/closed guard
                         // impossible here.
-                        pool.metrics.inc_evictions();
+                        pool.inner.metrics.inc_evictions();
                         drop(pool);
                         eprintln!(
                             "[compio-postgres] housekeeper: after_connect rejected connection: {e}"
@@ -1946,7 +1934,7 @@ impl Pool {
                         let error = entry.ineligibility_error(|| {
                             pool_error("after_connect left connection unusable")
                         });
-                        pool.metrics.inc_evictions();
+                        pool.inner.metrics.inc_evictions();
                         drop(pool);
                         eprintln!(
                             "[compio-postgres] housekeeper: after_connect left connection \
@@ -1974,7 +1962,11 @@ impl Pool {
                     // ends in a communication error. Reporting it would put a
                     // connection failure in the log of every clean shutdown.
                     // The same `closed` check guards the summary below.
-                    if weak.upgrade().is_some_and(|pool| !pool.closed.get()) {
+                    if weak
+                        .upgrade()
+                        .map(|inner| Self { inner })
+                        .is_some_and(|pool| !pool.inner.closed.get())
+                    {
                         eprintln!(
                             "[compio-postgres] housekeeper: failed to create connection: {e}"
                         );
@@ -1984,16 +1976,16 @@ impl Pool {
             }
         }
 
-        let Some(pool) = weak.upgrade() else {
+        let Some(pool) = weak.upgrade().map(|inner| Self { inner }) else {
             return false;
         };
-        if pool.closed.get() {
+        if pool.inner.closed.get() {
             return false;
         }
         if evicted > 0 || created > 0 {
-            let after_idle = pool.idle.borrow().len();
-            let active = pool.active.get();
-            let total = pool.total.get();
+            let after_idle = pool.inner.idle.borrow().len();
+            let active = pool.inner.active.get();
+            let total = pool.inner.total.get();
             eprintln!(
                 "[compio-postgres] housekeeper: before={before}, evicted={evicted}, \
                  created={created}, idle={after_idle}, active={active}, total={total}",
@@ -2011,7 +2003,7 @@ impl Pool {
         sql: &str,
         params: &[&(dyn crate::types::ToSql + Sync)],
     ) -> Result<Vec<crate::Row>, Error> {
-        let mut client = self.get().await?;
+        let mut client = self.acquire().await?;
         client
             .command(async |client| client.query(sql, params).await)
             .await
@@ -2025,7 +2017,7 @@ impl Pool {
         sql: &str,
         params: &[&str],
     ) -> Result<Vec<crate::Row>, Error> {
-        let mut client = self.get().await?;
+        let mut client = self.acquire().await?;
         client
             .command(async |client| client.query_text_params(sql, params).await)
             .await
@@ -2042,7 +2034,7 @@ impl Pool {
         sql: &str,
         params: &[&(dyn crate::types::ToSql + Sync)],
     ) -> Result<u64, Error> {
-        let mut client = self.get().await?;
+        let mut client = self.acquire().await?;
         client
             .command(async |client| client.execute(sql, params).await)
             .await
@@ -2060,22 +2052,28 @@ impl Pool {
     /// Returns [`Error`] if a connection cannot be acquired or the server
     /// rejects any statement in the batch.
     pub async fn batch_execute(&self, sql: &str) -> Result<(), Error> {
-        let mut client = self.get().await?;
+        let mut client = self.acquire().await?;
         client
             .command(async |client| client.batch_execute(sql).await)
             .await
+    }
+
+    /// Observability counters shared by every clone of this pool.
+    #[must_use]
+    pub fn metrics(&self) -> &PoolMetrics {
+        &self.inner.metrics
     }
 
     // -- Pool stats (for metrics endpoint) --------------------------------
 
     /// Number of idle connections available.
     pub fn idle_count(&self) -> usize {
-        self.idle.borrow().len()
+        self.inner.idle.borrow().len()
     }
 
     /// Number of connections currently borrowed.
     pub fn active_count(&self) -> usize {
-        self.active.get()
+        self.inner.active.get()
     }
 
     /// Total occupied capacity slots.
@@ -2084,28 +2082,28 @@ impl Pool {
     /// connection being opened, validated, or passed through an async hook so
     /// those in-flight candidates cannot race past `max_size`.
     pub fn total_count(&self) -> usize {
-        self.total.get()
+        self.inner.total.get()
     }
 
     /// Number of callers waiting for a connection.
     pub fn pending_count(&self) -> usize {
-        self.waiters.borrow().len()
+        self.inner.waiters.borrow().len()
     }
 }
 
 /// RAII guard for a `total` permit held between reservation/adoption and the
-/// moment the slot is safely owned by a returned [`PooledClient`] (or pushed
+/// moment the slot is safely owned by a returned [`PoolConnection`] (or pushed
 /// back to `idle`).
 ///
 /// `total` is the pool's hand-maintained capacity counter. Every path that
 /// touches it crosses an `.await` (on-demand `connect_one`, the dirty barrier,
-/// alive-bypass validation). `Pool::get` runs `get_inner`
+/// alive-bypass validation). `Pool::acquire` runs `get_inner`
 /// under `compio::time::timeout`, a `select!` that DROPS the inner future when
 /// the timer wins - so a post-await `total -= 1` statement is skipped on
 /// cancellation, leaking the permit forever (POOL-1). Tying the decrement to
 /// `Drop` makes it fire on every exit: success, error, early return, panic,
 /// and - crucially - cancellation. The guard is `disarm()`ed once a
-/// `PooledClient` owns the slot (its own Drop -> `return_client` then accounts
+/// `PoolConnection` owns the slot (its own Drop -> `return_client` then accounts
 /// for it) or the entry is back in `idle`.
 struct PermitGuard<'a> {
     pool: &'a Pool,
@@ -2115,7 +2113,7 @@ struct PermitGuard<'a> {
 impl<'a> PermitGuard<'a> {
     /// Reserve a NEW slot (`total += 1`) on the on-demand connect path.
     fn reserve(pool: &'a Pool) -> Self {
-        pool.total.set(pool.total.get() + 1);
+        pool.inner.total.set(pool.inner.total.get() + 1);
         let guard = Self { pool, armed: true };
         pool.wake_one_waiter_if_available();
         guard
@@ -2132,7 +2130,7 @@ impl<'a> PermitGuard<'a> {
     }
 
     /// Hand off the slot: the caller now owns it (via a returned
-    /// `PooledClient` or an entry pushed back to `idle`), so Drop must NOT
+    /// `PoolConnection` or an entry pushed back to `idle`), so Drop must NOT
     /// decrement `total`.
     fn disarm(mut self) {
         self.armed = false;
@@ -2142,7 +2140,10 @@ impl<'a> PermitGuard<'a> {
 impl Drop for PermitGuard<'_> {
     fn drop(&mut self) {
         if self.armed {
-            self.pool.total.set(self.pool.total.get().saturating_sub(1));
+            self.pool
+                .inner
+                .total
+                .set(self.pool.inner.total.get().saturating_sub(1));
             self.pool.wake_one_waiter();
         }
     }
@@ -2172,7 +2173,10 @@ impl<'a> ReturnPermitGuard<'a> {
 impl Drop for ReturnPermitGuard<'_> {
     fn drop(&mut self) {
         if self.armed {
-            self.pool.total.set(self.pool.total.get().saturating_sub(1));
+            self.pool
+                .inner
+                .total
+                .set(self.pool.inner.total.get().saturating_sub(1));
             self.pool.wake_one_waiter();
         }
     }
@@ -2182,15 +2186,15 @@ impl Drop for ReturnPermitGuard<'_> {
 /// connection is being opened. If the pool still exists, error/cancellation
 /// releases the reserved slot and notifies one waiter.
 struct WeakPermitGuard {
-    pool: Weak<Pool>,
+    pool: Weak<PoolInner>,
     armed: bool,
 }
 
 impl WeakPermitGuard {
-    fn reserve(pool: &Rc<Pool>) -> Self {
-        pool.total.set(pool.total.get() + 1);
+    fn reserve(pool: &Pool) -> Self {
+        pool.inner.total.set(pool.inner.total.get() + 1);
         let guard = Self {
-            pool: Rc::downgrade(pool),
+            pool: Rc::downgrade(&pool.inner),
             armed: true,
         };
         pool.wake_one_waiter_if_available();
@@ -2205,9 +2209,11 @@ impl WeakPermitGuard {
 impl Drop for WeakPermitGuard {
     fn drop(&mut self) {
         if self.armed
-            && let Some(pool) = self.pool.upgrade()
+            && let Some(pool) = self.pool.upgrade().map(|inner| Pool { inner })
         {
-            pool.total.set(pool.total.get().saturating_sub(1));
+            pool.inner
+                .total
+                .set(pool.inner.total.get().saturating_sub(1));
             pool.wake_one_waiter();
         }
     }
@@ -2215,21 +2221,21 @@ impl Drop for WeakPermitGuard {
 
 impl std::fmt::Debug for Pool {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let idle = self.idle.borrow().len();
-        let waiters = self.waiters.borrow().len();
-        let handoffs = self.handoffs.borrow().len();
-        let close_waiters = self.close_waiters.borrow().len();
+        let idle = self.inner.idle.borrow().len();
+        let waiters = self.inner.waiters.borrow().len();
+        let handoffs = self.inner.handoffs.borrow().len();
+        let close_waiters = self.inner.close_waiters.borrow().len();
         f.debug_struct("Pool")
             .field("connection_config", &"***")
             .field("idle", &idle)
-            .field("active", &self.active.get())
-            .field("total", &self.total.get())
-            .field("max_size", &self.config.max_size)
+            .field("active", &self.inner.active.get())
+            .field("total", &self.inner.total.get())
+            .field("max_size", &self.inner.config.max_size)
             .field("waiters", &waiters)
             .field("handoffs", &handoffs)
-            .field("closed", &self.closed.get())
+            .field("closed", &self.inner.closed.get())
             .field("close_waiters", &close_waiters)
-            .field("pool_config", &self.config)
+            .field("pool_config", &self.inner.config)
             .finish()
     }
 }
@@ -2324,7 +2330,7 @@ impl<'a> Waiter<'a> {
         let Some(slot) = &self.slot else {
             return false;
         };
-        let mut waiters = self.pool.waiters.borrow_mut();
+        let mut waiters = self.pool.inner.waiters.borrow_mut();
         let Some(index) = waiters.iter().position(|queued| Rc::ptr_eq(queued, slot)) else {
             return false;
         };
@@ -2339,7 +2345,7 @@ impl<'a> Waiter<'a> {
         let Some(slot) = &self.slot else {
             return false;
         };
-        let mut waiters = self.pool.waiters.borrow_mut();
+        let mut waiters = self.pool.inner.waiters.borrow_mut();
         if waiters.front().is_some_and(|front| Rc::ptr_eq(front, slot)) {
             waiters.pop_front();
             true
@@ -2357,7 +2363,7 @@ impl Future for Waiter<'_> {
         // discards tracked assigned entries before waking their recipients; a
         // defensive reclaim in Drop handles any entry deposited by a broken
         // future caller without ever exposing it to checkout.
-        if self.pool.closed.get() {
+        if self.pool.inner.closed.get() {
             return Poll::Ready(None);
         }
 
@@ -2365,7 +2371,7 @@ impl Future for Waiter<'_> {
         // hand-off and queue state, then inspect both from scratch in case the
         // callback re-entered the pool. Re-check close for the same reason.
         let new_waker = cx.waker().clone();
-        if self.pool.closed.get() {
+        if self.pool.inner.closed.get() {
             return Poll::Ready(None);
         }
 
@@ -2383,7 +2389,7 @@ impl Future for Waiter<'_> {
         // availability. A later waiter must remain parked even if it receives a
         // spurious poll while the head owns the first claim.
         let current_slot = self.slot.as_ref().map(Rc::clone);
-        let mut waiters = self.pool.waiters.borrow_mut();
+        let mut waiters = self.pool.inner.waiters.borrow_mut();
 
         // The waker this poll REPLACES, carried out so it is destroyed with no
         // borrow held. Assigning through the `RefMut` would drop the old
@@ -2513,14 +2519,14 @@ impl<'a> CloseWaiter<'a> {
     fn ready(&self) -> bool {
         match self.event {
             CloseEvent::Started => self.pool.is_closed(),
-            CloseEvent::Drained => self.pool.active.get() == 0,
+            CloseEvent::Drained => self.pool.inner.active.get() == 0,
         }
     }
 
     fn registrations(&self) -> &'a RefCell<Vec<Rc<CloseWaiterSlot>>> {
         match self.event {
-            CloseEvent::Started => &self.pool.close_event_waiters,
-            CloseEvent::Drained => &self.pool.close_waiters,
+            CloseEvent::Started => &self.pool.inner.close_event_waiters,
+            CloseEvent::Drained => &self.pool.inner.close_waiters,
         }
     }
 
@@ -2589,7 +2595,7 @@ impl Drop for CloseWaiter<'_> {
 }
 
 // ---------------------------------------------------------------------------
-// PooledClient
+// PoolConnection
 // ---------------------------------------------------------------------------
 
 /// How long timeout recovery may spend sending `CancelRequest` and proving that
@@ -2633,24 +2639,24 @@ impl Drop for CommandRecoveryGuard<'_> {
     }
 }
 
-/// A borrowed connection that returns to the pool on drop.
+/// An owned connection lease that keeps its pool alive and returns on drop.
 ///
 /// Dereferences to [`Client`] - call any client method (`.query(...)`,
-/// `.execute(...)`, `.transaction()`, ...) directly on the borrow. Those direct
+/// `.execute(...)`, `.transaction()`, ...) directly on the lease. Those direct
 /// calls retain bare-Client semantics and do not acquire a command deadline;
-/// use [`PooledClient::command`] to apply this pool's configured deadline.
+/// use [`PoolConnection::command`] to apply this pool's configured deadline.
 /// [`Pool::query`], [`Pool::execute`], and the other Pool convenience methods
 /// enter that scope automatically.
 ///
-/// A [`CancelToken`] obtained through this borrow is lease-scoped. Returning
-/// the borrow revokes the token; if it is retained, the pool retires the
+/// A [`CancelToken`] obtained through this lease is lease-scoped. Returning
+/// the lease revokes the token; if it is retained, the pool retires the
 /// physical session instead of letting the token target its next borrower.
-pub struct PooledClient<'a> {
+pub struct PoolConnection {
     entry: Option<PoolEntry>,
-    pool: &'a Pool,
+    pool: Pool,
 }
 
-impl PooledClient<'_> {
+impl PoolConnection {
     /// Consume this lease and close its physical connection immediately.
     ///
     /// Use this when session cleanup cannot be confirmed. The connection is
@@ -2660,12 +2666,18 @@ impl PooledClient<'_> {
         self.force_close();
     }
 
-    fn new(mut entry: PoolEntry, pool: &Pool) -> PooledClient<'_> {
+    fn new(mut entry: PoolEntry, pool: &Pool) -> PoolConnection {
         entry.client.activate_pool_cancel_lease();
-        PooledClient {
+        PoolConnection {
             entry: Some(entry),
-            pool,
+            pool: pool.clone(),
         }
+    }
+
+    /// The pool this connection came from.
+    #[must_use]
+    pub fn pool(&self) -> &Pool {
+        &self.pool
     }
 
     /// Run one exclusive logical command under the pool's command deadline.
@@ -2704,8 +2716,8 @@ impl PooledClient<'_> {
     /// # Example
     ///
     /// ```no_run
-    /// # use compio_postgres::{Error, PooledClient};
-    /// async fn load(client: &mut PooledClient<'_>) -> Result<i32, Error> {
+    /// # use compio_postgres::{Error, PoolConnection};
+    /// async fn load(client: &mut PoolConnection) -> Result<i32, Error> {
     ///     client
     ///         .command(async |client| {
     ///             client
@@ -2732,24 +2744,17 @@ impl PooledClient<'_> {
             // than putting a panic edge on a public database operation.
             return Err(Error::closed());
         };
-        run_pool_command(self.pool, &mut entry.client, operation).await
+        run_pool_command(&self.pool, &mut entry.client, operation).await
     }
 }
 
-/// The deadline + cancellation-recovery body shared by
-/// [`PooledClient::command`] and [`OwnedPooledClient::command`].
-///
-/// It lives outside both types because the two leases differ only in how they
-/// hold the pool (`&'a Pool` versus `Rc<Pool>`); duplicating the recovery
-/// state machine is how the two would drift, and the arm that decides whether a
-/// mid-`CancelRequest` session is retired or reused is the last place in this
-/// file that should exist twice.
+/// Apply the pool's command deadline and confirm cancellation recovery.
 async fn run_pool_command<T, F>(pool: &Pool, client: &mut Client, operation: F) -> Result<T, Error>
 where
     F: for<'client> AsyncFnOnce(&'client mut Client) -> Result<T, Error>,
 {
-    let command_timeout = pool.config.command_timeout;
-    let transport = &pool.transport;
+    let command_timeout = pool.inner.config.command_timeout;
+    let transport = &pool.inner.transport;
 
     let Some(command_timeout) = command_timeout else {
         return operation(client).await;
@@ -2838,95 +2843,7 @@ where
     }
 }
 
-/// A checked-out connection that owns its pool handle and returns on drop.
-///
-/// The lifetime-free peer of [`PooledClient`]. Everything else is the same:
-/// same acquisition path, same FIFO fairness, same `acquire_timeout`, same
-/// `return_client` on drop, same lease-scoped [`CancelToken`] revocation. Get
-/// one from [`Pool::get_owned`].
-///
-/// Reach for this when the lease must outlive the frame that took it - a
-/// session object that drives raw `BEGIN`/`COMMIT` across `await` points and is
-/// stored somewhere `'static`. `PooledClient<'a>` and `Transaction<'a>` both
-/// borrow, so neither can be held by such a value.
-pub struct OwnedPooledClient {
-    entry: Option<PoolEntry>,
-    pool: Rc<Pool>,
-}
-
-impl OwnedPooledClient {
-    /// Consume this lease and close its physical connection immediately.
-    ///
-    /// Use this when session cleanup cannot be confirmed. The connection is
-    /// never offered to another borrower; dropping the lease releases its
-    /// capacity and wakes a queued acquisition. Release hooks are skipped.
-    pub fn discard(self) {
-        self.force_close();
-    }
-
-    /// Run one exclusive logical command under the pool's command deadline.
-    ///
-    /// Identical in every respect to [`PooledClient::command`] - both call the
-    /// same body - including that a successful recovery returns an [`Error`]
-    /// for which [`Error::is_command_timeout`] is true.
-    ///
-    /// # Errors
-    ///
-    /// See [`PooledClient::command`].
-    pub async fn command<T, F>(&mut self, operation: F) -> Result<T, Error>
-    where
-        F: for<'client> AsyncFnOnce(&'client mut Client) -> Result<T, Error>,
-    {
-        let pool = Rc::clone(&self.pool);
-        let Some(entry) = self.entry.as_mut() else {
-            return Err(Error::closed());
-        };
-        run_pool_command(&pool, &mut entry.client, operation).await
-    }
-
-    /// The pool this lease came from.
-    #[must_use]
-    pub fn pool(&self) -> &Rc<Pool> {
-        &self.pool
-    }
-}
-
-impl Deref for OwnedPooledClient {
-    type Target = Client;
-    fn deref(&self) -> &Self::Target {
-        &self
-            .entry
-            .as_ref()
-            .expect("an owned pooled lease retains its entry until Drop returns it")
-            .client
-    }
-}
-
-impl DerefMut for OwnedPooledClient {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self
-            .entry
-            .as_mut()
-            .expect("an owned pooled lease retains its entry until Drop returns it")
-            .client
-    }
-}
-
-impl Drop for OwnedPooledClient {
-    fn drop(&mut self) {
-        if let Some(entry) = self.entry.take() {
-            self.pool.return_client(entry);
-        }
-    }
-}
-
-impl std::fmt::Debug for OwnedPooledClient {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("OwnedPooledClient").finish()
-    }
-}
-
-impl Deref for PooledClient<'_> {
+impl Deref for PoolConnection {
     type Target = Client;
     fn deref(&self) -> &Self::Target {
         &self
@@ -2937,7 +2854,7 @@ impl Deref for PooledClient<'_> {
     }
 }
 
-impl DerefMut for PooledClient<'_> {
+impl DerefMut for PoolConnection {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self
             .entry
@@ -2947,7 +2864,7 @@ impl DerefMut for PooledClient<'_> {
     }
 }
 
-impl Drop for PooledClient<'_> {
+impl Drop for PoolConnection {
     fn drop(&mut self) {
         if let Some(entry) = self.entry.take() {
             self.pool.return_client(entry);
@@ -2955,9 +2872,9 @@ impl Drop for PooledClient<'_> {
     }
 }
 
-impl std::fmt::Debug for PooledClient<'_> {
+impl std::fmt::Debug for PoolConnection {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PooledClient").finish()
+        f.debug_struct("PoolConnection").finish()
     }
 }
 
@@ -3314,23 +3231,25 @@ mod tests {
 
     fn test_pool(config: PoolConfig, idle: Vec<PoolEntry>, active: usize, total: usize) -> Pool {
         Pool {
-            transport: Transport::resolve(
-                "postgres://postgres@127.0.0.1/test?sslmode=disable"
-                    .parse()
-                    .unwrap(),
-            )
-            .unwrap(),
-            config,
-            idle: RefCell::new(idle),
-            active: Cell::new(active),
-            total: Cell::new(total),
-            waiters: RefCell::new(VecDeque::new()),
-            handoffs: RefCell::new(Vec::new()),
-            closed: Cell::new(false),
-            close_waiters: RefCell::new(Vec::new()),
-            close_event_waiters: RefCell::new(Vec::new()),
-            housekeeper: RefCell::new(None),
-            metrics: PoolMetrics::new(),
+            inner: Rc::new(PoolInner {
+                transport: Transport::resolve(
+                    "postgres://postgres@127.0.0.1/test?sslmode=disable"
+                        .parse()
+                        .unwrap(),
+                )
+                .unwrap(),
+                config,
+                idle: RefCell::new(idle),
+                active: Cell::new(active),
+                total: Cell::new(total),
+                waiters: RefCell::new(VecDeque::new()),
+                handoffs: RefCell::new(Vec::new()),
+                closed: Cell::new(false),
+                close_waiters: RefCell::new(Vec::new()),
+                close_event_waiters: RefCell::new(Vec::new()),
+                housekeeper: RefCell::new(None),
+                metrics: PoolMetrics::new(),
+            }),
         }
     }
 
@@ -3347,7 +3266,7 @@ mod tests {
                 let borrowed = slot
                     .borrow()
                     .upgrade()
-                    .map(|pool| pool.housekeeper.try_borrow_mut().is_err());
+                    .map(|pool| pool.inner.housekeeper.try_borrow_mut().is_err());
                 HOUSEKEEPER_DROP_BORROWED.with(|observed| observed.set(borrowed));
             });
         }
@@ -3363,10 +3282,10 @@ mod tests {
         fn write_str(&mut self, _text: &str) -> std::fmt::Result {
             self.wrote = true;
             let borrowed = [
-                self.pool.idle.try_borrow_mut().is_err(),
-                self.pool.waiters.try_borrow_mut().is_err(),
-                self.pool.handoffs.try_borrow_mut().is_err(),
-                self.pool.close_waiters.try_borrow_mut().is_err(),
+                self.pool.inner.idle.try_borrow_mut().is_err(),
+                self.pool.inner.waiters.try_borrow_mut().is_err(),
+                self.pool.inner.handoffs.try_borrow_mut().is_err(),
+                self.pool.inner.close_waiters.try_borrow_mut().is_err(),
             ];
             for (observed, now) in self.borrowed.iter_mut().zip(borrowed) {
                 *observed |= now;
@@ -3426,16 +3345,16 @@ mod tests {
         client
             .tx_status_handle()
             .store(crate::connection::READ_RETIRED_STATUS, Ordering::Release);
-        let held = PooledClient {
-            entry: Some(PoolEntry::new(client, pool.config.max_lifetime)),
-            pool: &pool,
+        let held = PoolConnection {
+            entry: Some(PoolEntry::new(client, pool.inner.config.max_lifetime)),
+            pool: pool.clone(),
         };
 
         drop(held);
         assert_eq!(pool.idle_count(), 0, "read-retired entry became idle");
         assert_eq!(pool.total_count(), 0, "read-retired entry kept its slot");
         assert_eq!(pool.active_count(), 0);
-        assert_eq!(pool.metrics.evictions.get(), 1);
+        assert_eq!(pool.inner.metrics.evictions.get(), 1);
     }
 
     #[test]
@@ -3485,7 +3404,7 @@ mod tests {
             2,
             "checkout did not inspect the fallback entry"
         );
-        assert_eq!(pool.metrics.evictions.get(), 1);
+        assert_eq!(pool.inner.metrics.evictions.get(), 1);
         assert_eq!(pool.total_count(), 1);
         assert_eq!(pool.active_count(), 1);
         assert_eq!(pool.idle_count(), 0);
@@ -3510,9 +3429,9 @@ mod tests {
             true
         });
         let pool = test_pool(config, Vec::new(), 1, 1);
-        let held = PooledClient {
+        let held = PoolConnection {
             entry: Some(PoolEntry::new(client, Duration::from_secs(600))),
-            pool: &pool,
+            pool: pool.clone(),
         };
 
         drop(held);
@@ -3520,7 +3439,7 @@ mod tests {
         assert_eq!(pool.active_count(), 0);
         assert_eq!(pool.idle_count(), 0, "hook-closed entry became available");
         assert_eq!(pool.total_count(), 0, "hook-closed entry kept its slot");
-        assert_eq!(pool.metrics.evictions.get(), 1);
+        assert_eq!(pool.inner.metrics.evictions.get(), 1);
     }
 
     #[test]
@@ -3538,7 +3457,10 @@ mod tests {
         });
         let pool = test_pool(config, Vec::new(), 1, 1);
         let (client, _receiver) = fake_client(21);
-        let held = PooledClient::new(PoolEntry::new(client, pool.config.max_lifetime), &pool);
+        let held = PoolConnection::new(
+            PoolEntry::new(client, pool.inner.config.max_lifetime),
+            &pool,
+        );
 
         drop(held);
 
@@ -3552,7 +3474,7 @@ mod tests {
             "an inactive release-hook token retired a reusable session"
         );
         assert_eq!(pool.total_count(), 1);
-        assert_eq!(pool.metrics.evictions.get(), 0);
+        assert_eq!(pool.inner.metrics.evictions.get(), 0);
     }
 
     #[compio::test]
@@ -3564,7 +3486,10 @@ mod tests {
         };
         let pool = test_pool(config, Vec::new(), 1, 1);
         let (client, _receiver) = fake_client(22);
-        let held = PooledClient::new(PoolEntry::new(client, pool.config.max_lifetime), &pool);
+        let held = PoolConnection::new(
+            PoolEntry::new(client, pool.inner.config.max_lifetime),
+            &pool,
+        );
         let inner = Arc::clone(held.inner());
         let bytes_written = Rc::new(Cell::new(0));
         let token = held.cancel_token();
@@ -3608,7 +3533,7 @@ mod tests {
         assert_eq!(pool.active_count(), 0);
         assert_eq!(pool.idle_count(), 0, "uncertain session became reusable");
         assert_eq!(pool.total_count(), 0, "uncertain session kept its slot");
-        assert_eq!(pool.metrics.evictions.get(), 1);
+        assert_eq!(pool.inner.metrics.evictions.get(), 1);
         assert!(
             inner
                 .send(RequestMessages::Single(FrontendMessage::Raw(
@@ -3629,7 +3554,10 @@ mod tests {
         config.command_timeout(Duration::from_millis(1));
         let pool = test_pool(config, Vec::new(), 1, 1);
         let (client, _receiver) = fake_client(22);
-        let mut held = PooledClient::new(PoolEntry::new(client, pool.config.max_lifetime), &pool);
+        let mut held = PoolConnection::new(
+            PoolEntry::new(client, pool.inner.config.max_lifetime),
+            &pool,
+        );
 
         let error = held
             .command(async |_| std::future::pending::<Result<(), Error>>().await)
@@ -3644,7 +3572,7 @@ mod tests {
             "a timeout before any request retired a reusable session"
         );
         assert_eq!(pool.total_count(), 1);
-        assert_eq!(pool.metrics.evictions.get(), 0);
+        assert_eq!(pool.inner.metrics.evictions.get(), 0);
     }
 
     #[compio::test]
@@ -3665,7 +3593,10 @@ mod tests {
             None,
             None,
         );
-        let mut held = PooledClient::new(PoolEntry::new(client, pool.config.max_lifetime), &pool);
+        let mut held = PoolConnection::new(
+            PoolEntry::new(client, pool.inner.config.max_lifetime),
+            &pool,
+        );
 
         let error = held
             .command(async |client| {
@@ -3700,7 +3631,7 @@ mod tests {
         assert_eq!(pool.active_count(), 0);
         assert_eq!(pool.idle_count(), 0);
         assert_eq!(pool.total_count(), 0);
-        assert_eq!(pool.metrics.evictions.get(), 1);
+        assert_eq!(pool.inner.metrics.evictions.get(), 1);
     }
 
     #[compio::test]
@@ -3713,7 +3644,10 @@ mod tests {
         config.command_timeout(Duration::from_millis(1));
         let pool = test_pool(config, Vec::new(), 1, 1);
         let (client, _receiver) = fake_client(23);
-        let mut held = PooledClient::new(PoolEntry::new(client, pool.config.max_lifetime), &pool);
+        let mut held = PoolConnection::new(
+            PoolEntry::new(client, pool.inner.config.max_lifetime),
+            &pool,
+        );
 
         let error = held
             .command(async |client| {
@@ -3744,7 +3678,10 @@ mod tests {
         config.command_timeout(Duration::from_millis(1));
         let pool = test_pool(config, Vec::new(), 1, 1);
         let (client, _receiver) = fake_client(24);
-        let mut held = PooledClient::new(PoolEntry::new(client, pool.config.max_lifetime), &pool);
+        let mut held = PoolConnection::new(
+            PoolEntry::new(client, pool.inner.config.max_lifetime),
+            &pool,
+        );
 
         let error = held
             .command(async move |client| {
@@ -3778,7 +3715,9 @@ mod tests {
         });
         let mut pool = test_pool(config, Vec::new(), 0, 0);
         let url = format!("postgres://postgres@{address}/fake?sslmode=disable");
-        pool.transport = Transport::resolve(url.parse().unwrap()).unwrap();
+        Rc::get_mut(&mut pool.inner)
+            .expect("fixture pool is unshared")
+            .transport = Transport::resolve(url.parse().unwrap()).unwrap();
 
         let outcome = pool.get_inner_leased().await;
         assert!(
@@ -3788,8 +3727,8 @@ mod tests {
         assert_eq!(pool.active_count(), 0);
         assert_eq!(pool.idle_count(), 0);
         assert_eq!(pool.total_count(), 0, "failed checkout leaked its permit");
-        assert_eq!(pool.metrics.connections_created.get(), 1);
-        assert_eq!(pool.metrics.evictions.get(), 1);
+        assert_eq!(pool.inner.metrics.connections_created.get(), 1);
+        assert_eq!(pool.inner.metrics.evictions.get(), 1);
 
         let _ = finish_tx.send(());
         assert_eq!(count_rx.recv().unwrap(), 1);
@@ -3847,9 +3786,9 @@ mod tests {
             "nothing clears `dirty` once its command settles, which is the whole defect"
         );
 
-        let held = PooledClient {
-            entry: Some(PoolEntry::new(client, pool.config.max_lifetime)),
-            pool: &pool,
+        let held = PoolConnection {
+            entry: Some(PoolEntry::new(client, pool.inner.config.max_lifetime)),
+            pool: pool.clone(),
         };
         drop(held);
         queued_rollbacks(&mut receiver)
@@ -3900,9 +3839,9 @@ mod tests {
         };
         let pool = test_pool(config, Vec::new(), 1, 2);
         let (stale, stale_receiver) = fake_client(11);
-        let held = PooledClient {
-            entry: Some(PoolEntry::new(stale, pool.config.max_lifetime)),
-            pool: &pool,
+        let held = PoolConnection {
+            entry: Some(PoolEntry::new(stale, pool.inner.config.max_lifetime)),
+            pool: pool.clone(),
         };
 
         let mut acquire = Box::pin(pool.get_inner_leased());
@@ -3919,9 +3858,10 @@ mod tests {
         );
 
         let (fresh, _fresh_receiver) = fake_client(22);
-        pool.idle
+        pool.inner
+            .idle
             .borrow_mut()
-            .push(PoolEntry::new(fresh, pool.config.max_lifetime));
+            .push(PoolEntry::new(fresh, pool.inner.config.max_lifetime));
         drop(stale_receiver);
 
         match poll_once(acquire.as_mut()) {
@@ -3945,9 +3885,9 @@ mod tests {
         };
         let pool = test_pool(config, Vec::new(), 1, 2);
         let (stale, stale_receiver) = fake_client(12);
-        let held = PooledClient {
-            entry: Some(PoolEntry::new(stale, pool.config.max_lifetime)),
-            pool: &pool,
+        let held = PoolConnection {
+            entry: Some(PoolEntry::new(stale, pool.inner.config.max_lifetime)),
+            pool: pool.clone(),
         };
 
         let mut acquire = Box::pin(pool.get_inner_leased());
@@ -3957,9 +3897,10 @@ mod tests {
 
         drop(stale_receiver);
         let (fresh, _fresh_receiver) = fake_client(22);
-        pool.idle
+        pool.inner
+            .idle
             .borrow_mut()
-            .push(PoolEntry::new(fresh, pool.config.max_lifetime));
+            .push(PoolEntry::new(fresh, pool.inner.config.max_lifetime));
 
         match poll_once(acquire.as_mut()) {
             Poll::Ready(Ok(client)) => assert_eq!(
@@ -3982,9 +3923,9 @@ mod tests {
         };
         let pool = test_pool(config, Vec::new(), 1, 1);
         let (client, receiver) = fake_client(13);
-        let held = PooledClient {
-            entry: Some(PoolEntry::new(client, pool.config.max_lifetime)),
-            pool: &pool,
+        let held = PoolConnection {
+            entry: Some(PoolEntry::new(client, pool.inner.config.max_lifetime)),
+            pool: pool.clone(),
         };
         let mut waiter = Box::pin(Waiter::new(&pool));
 
@@ -4009,7 +3950,7 @@ mod tests {
             0,
             "closed handoff kept its capacity slot"
         );
-        assert_eq!(pool.metrics.evictions.get(), 1);
+        assert_eq!(pool.inner.metrics.evictions.get(), 1);
     }
 
     #[test]
@@ -4022,14 +3963,20 @@ mod tests {
         };
         let pool = test_pool(config, Vec::new(), 2, 2);
         let (handoff_client, mut handoff_receiver) = fake_client(14);
-        let handed = PooledClient {
-            entry: Some(PoolEntry::new(handoff_client, pool.config.max_lifetime)),
-            pool: &pool,
+        let handed = PoolConnection {
+            entry: Some(PoolEntry::new(
+                handoff_client,
+                pool.inner.config.max_lifetime,
+            )),
+            pool: pool.clone(),
         };
         let (survivor_client, _survivor_receiver) = fake_client(15);
-        let survivor = PooledClient {
-            entry: Some(PoolEntry::new(survivor_client, pool.config.max_lifetime)),
-            pool: &pool,
+        let survivor = PoolConnection {
+            entry: Some(PoolEntry::new(
+                survivor_client,
+                pool.inner.config.max_lifetime,
+            )),
+            pool: pool.clone(),
         };
         let mut waiter = Box::pin(Waiter::new(&pool));
 
@@ -4038,7 +3985,7 @@ mod tests {
         assert_eq!(pool.active_count(), 1);
         assert_eq!(pool.total_count(), 2);
         assert_eq!(pool.idle_count(), 0);
-        assert_eq!(pool.handoffs.borrow().len(), 1);
+        assert_eq!(pool.inner.handoffs.borrow().len(), 1);
         assert!(matches!(
             handoff_receiver.try_recv(),
             Err(mpsc::TryRecvError::Empty)
@@ -4046,15 +3993,15 @@ mod tests {
 
         // Model re-entry after close has published its linearization bit but
         // before begin_close has drained the assigned-handoff registry.
-        pool.closed.set(true);
+        pool.inner.closed.set(true);
         drop(waiter);
 
         assert_eq!(pool.active_count(), 1, "handoff reclaim touched a borrower");
         assert_eq!(pool.total_count(), 1, "unowned handoff kept its slot");
         assert_eq!(pool.idle_count(), 0, "closed pool republished the handoff");
-        assert_eq!(pool.handoffs.borrow().len(), 0);
+        assert_eq!(pool.inner.handoffs.borrow().len(), 0);
         assert_eq!(
-            pool.metrics.evictions.get(),
+            pool.inner.metrics.evictions.get(),
             0,
             "shutdown discard was counted as an eviction"
         );
@@ -4078,9 +4025,9 @@ mod tests {
         };
         let pool = test_pool(config, Vec::new(), 1, 1);
         let (client, _receiver) = fake_client(33);
-        let held = PooledClient {
-            entry: Some(PoolEntry::new(client, pool.config.max_lifetime)),
-            pool: &pool,
+        let held = PoolConnection {
+            entry: Some(PoolEntry::new(client, pool.inner.config.max_lifetime)),
+            pool: pool.clone(),
         };
 
         let mut acquire = Box::pin(pool.get_inner_leased());
@@ -4110,9 +4057,9 @@ mod tests {
         let waker = counting_waker(&wake_count);
         let mut waiter = Box::pin(Waiter::new(&pool));
         assert!(poll_with_waker(waiter.as_mut(), &waker).is_pending());
-        let held = PooledClient {
+        let held = PoolConnection {
             entry: Some(entry),
-            pool: &pool,
+            pool: pool.clone(),
         };
 
         drop(held);
@@ -4151,9 +4098,9 @@ mod tests {
         let config = counting_after_release_config(&calls);
         let (expired_client, _expired_receiver) = fake_client(342);
         let expired_pool = test_pool(config, Vec::new(), 1, 1);
-        drop(PooledClient {
+        drop(PoolConnection {
             entry: Some(PoolEntry::new(expired_client, Duration::ZERO)),
-            pool: &expired_pool,
+            pool: expired_pool.clone(),
         });
         assert_eq!(calls.get(), 0, "after_release ran for an expired entry");
         assert_eq!(expired_pool.total_count(), 0);
@@ -4171,9 +4118,9 @@ mod tests {
             "fixture entry did not close"
         );
         let closed_pool = test_pool(config, Vec::new(), 1, 1);
-        drop(PooledClient {
+        drop(PoolConnection {
             entry: Some(closed_entry),
-            pool: &closed_pool,
+            pool: closed_pool.clone(),
         });
         assert_eq!(calls.get(), 0, "after_release ran for a closed entry");
         assert_eq!(closed_pool.total_count(), 0);
@@ -4205,9 +4152,9 @@ mod tests {
         let pool = Rc::new(pool);
         *pool_slot.borrow_mut() = Rc::downgrade(&pool);
         let (client, _receiver) = fake_client(341);
-        let held = PooledClient {
-            entry: Some(PoolEntry::new(client, pool.config.max_lifetime)),
-            pool: &pool,
+        let held = PoolConnection {
+            entry: Some(PoolEntry::new(client, pool.inner.config.max_lifetime)),
+            pool: pool.as_ref().clone(),
         };
 
         drop(held);
@@ -4228,7 +4175,10 @@ mod tests {
         };
         let pool = test_pool(config, Vec::new(), 1, 1);
         let (client, _receiver) = fake_client(34);
-        let held = PooledClient::new(PoolEntry::new(client, pool.config.max_lifetime), &pool);
+        let held = PoolConnection::new(
+            PoolEntry::new(client, pool.inner.config.max_lifetime),
+            &pool,
+        );
 
         let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _held = held;
@@ -4242,11 +4192,11 @@ mod tests {
             1,
             "unwind discarded a reusable connection"
         );
-        assert_eq!(pool.metrics.evictions.get(), 0);
+        assert_eq!(pool.inner.metrics.evictions.get(), 0);
 
         // `get_inner_leased`, not `get_inner`: the assertions below drop this
         // and require the entry to go BACK to the pool, which is
-        // `PooledClient`'s Drop. A bare `PoolEntry` has no such Drop, so
+        // `PoolConnection`'s Drop. A bare `PoolEntry` has no such Drop, so
         // `get_inner` would leave active_count at 1 forever.
         let mut acquire = Box::pin(pool.get_inner_leased());
         let reused = match poll_once(acquire.as_mut()) {
@@ -4278,9 +4228,9 @@ mod tests {
         };
         let pool = test_pool(config, Vec::new(), 1, 1);
         let (client, _receiver) = fake_client(35);
-        let held = PooledClient {
-            entry: Some(PoolEntry::new(client, pool.config.max_lifetime)),
-            pool: &pool,
+        let held = PoolConnection {
+            entry: Some(PoolEntry::new(client, pool.inner.config.max_lifetime)),
+            pool: pool.clone(),
         };
         let panic_waker = Waker::from(Arc::new(PanicWake));
         let mut waiter = Box::pin(Waiter::new(&pool));
@@ -4678,7 +4628,7 @@ mod tests {
             let queue = WAITER_CLONE_POOL.with(|pool| {
                 pool.borrow()
                     .as_ref()
-                    .is_some_and(|pool| pool.waiters.try_borrow_mut().is_err())
+                    .is_some_and(|pool| pool.inner.waiters.try_borrow_mut().is_err())
             });
             let slot = WAITER_CLONE_SLOT.with(|slot| {
                 slot.borrow()
@@ -4720,6 +4670,7 @@ mod tests {
         let mut waiter = Box::pin(Waiter::new(&pool));
         assert!(poll_once(waiter.as_mut()).is_pending());
         let slot = pool
+            .inner
             .waiters
             .borrow()
             .front()
@@ -4756,7 +4707,7 @@ mod tests {
             let queue = CLOSE_CLONE_POOL.with(|pool| {
                 pool.borrow()
                     .as_ref()
-                    .is_some_and(|pool| pool.close_waiters.try_borrow_mut().is_err())
+                    .is_some_and(|pool| pool.inner.close_waiters.try_borrow_mut().is_err())
             });
             let slot = CLOSE_CLONE_SLOT.with(|slot| {
                 slot.borrow()
@@ -4790,10 +4741,11 @@ mod tests {
     #[test]
     fn cloning_a_close_waiter_waker_does_not_borrow_pool_state() {
         let pool = Rc::new(test_pool(PoolConfig::default(), Vec::new(), 0, 1));
-        pool.active.set(1);
+        pool.inner.active.set(1);
         let mut waiter = Box::pin(CloseWaiter::new(&pool, CloseEvent::Drained));
         assert!(poll_once(waiter.as_mut()).is_pending());
         let slot = pool
+            .inner
             .close_waiters
             .borrow()
             .first()
@@ -4882,6 +4834,7 @@ mod tests {
         assert!(poll_with_waker(waiter.as_mut(), &waker).is_pending());
 
         let slot = pool
+            .inner
             .waiters
             .borrow()
             .front()
@@ -4972,14 +4925,16 @@ mod tests {
                 ..PoolConfig::default()
             };
             let mut pool = test_pool(config, Vec::new(), 0, 0);
-            pool.transport = Transport::resolve(
+            Rc::get_mut(&mut pool.inner)
+                .expect("fixture pool is unshared")
+                .transport = Transport::resolve(
                 format!("postgres://postgres@{address}/fake?sslmode=disable")
                     .parse()
                     .unwrap(),
             )
             .unwrap();
             let pool = Rc::new(pool);
-            let weak = Rc::downgrade(&pool);
+            let weak = Rc::downgrade(&pool.inner);
             let housekeeping = compio::runtime::spawn(async move { Pool::housekeep(&weak).await });
 
             compio::time::timeout(Duration::from_secs(5), started_rx)
@@ -5125,7 +5080,7 @@ mod tests {
         .expect("spawned housekeeper did not run");
         assert_eq!(pool.idle_count(), 0, "expired connection was not evicted");
         assert_eq!(pool.total_count(), 0, "eviction did not release capacity");
-        assert_eq!(pool.metrics.evictions.get(), 1);
+        assert_eq!(pool.inner.metrics.evictions.get(), 1);
     }
 
     #[compio::test]
@@ -5144,7 +5099,7 @@ mod tests {
             let _ = completed_tx.send(());
             std::panic::panic_any(HousekeeperPanicPayload);
         });
-        *pool.housekeeper.borrow_mut() = Some(completed);
+        *pool.inner.housekeeper.borrow_mut() = Some(completed);
         completed_rx
             .await
             .expect("the completed housekeeper did not run");
@@ -5170,17 +5125,17 @@ mod tests {
         };
         let pool = Rc::new(test_pool(config, Vec::new(), 0, 0));
         pool.start_housekeeper_with_interval(Duration::from_secs(60));
-        assert!(pool.housekeeper.borrow().is_some());
+        assert!(pool.inner.housekeeper.borrow().is_some());
 
         pool.close().await;
         assert!(
-            pool.housekeeper.borrow().is_none(),
+            pool.inner.housekeeper.borrow().is_none(),
             "close retained the housekeeper task"
         );
 
         pool.start_housekeeper_with_interval(Duration::ZERO);
         assert!(
-            pool.housekeeper.borrow().is_none(),
+            pool.inner.housekeeper.borrow().is_none(),
             "closed pool restarted its housekeeper"
         );
     }
@@ -5223,9 +5178,9 @@ mod tests {
         let mut entry = PoolEntry::new(client, config.max_lifetime);
         entry.last_used = Instant::now() - Duration::from_secs(1);
         let pool = Rc::new(test_pool(config, vec![entry], 0, 1));
-        pool.closed.set(true);
+        pool.inner.closed.set(true);
         assert!(
-            !Pool::housekeep(&Rc::downgrade(&pool)).await,
+            !Pool::housekeep(&Rc::downgrade(&pool.inner)).await,
             "a cycle started against a closed pool"
         );
         assert_eq!(
@@ -5246,12 +5201,12 @@ mod tests {
         let (client, _receiver) = fake_client(441);
         let entry = PoolEntry::new(client, config.max_lifetime);
         let pool = Rc::new(test_pool(config, vec![entry], 0, 1));
-        let weak = Rc::downgrade(&pool);
+        let weak = Rc::downgrade(&pool.inner);
 
         assert!(Pool::housekeep(&weak).await);
         assert_eq!(pool.idle_count(), 1, "recent idle entry was reaped");
         assert_eq!(pool.total_count(), 1);
-        assert_eq!(pool.metrics.evictions.get(), 0);
+        assert_eq!(pool.inner.metrics.evictions.get(), 0);
     }
 
     #[compio::test]
@@ -5267,14 +5222,14 @@ mod tests {
         let expired = PoolEntry::new(expired_client, Duration::ZERO);
         let recent = PoolEntry::new(recent_client, config.max_lifetime);
         let pool = Rc::new(test_pool(config, vec![expired, recent], 0, 2));
-        let weak = Rc::downgrade(&pool);
+        let weak = Rc::downgrade(&pool.inner);
 
         assert!(Pool::housekeep(&weak).await);
-        let idle = pool.idle.borrow();
+        let idle = pool.inner.idle.borrow();
         assert_eq!(idle.len(), 1);
         assert_eq!(idle[0].client.process_id(), 456);
         assert_eq!(pool.total_count(), 1);
-        assert_eq!(pool.metrics.evictions.get(), 1);
+        assert_eq!(pool.inner.metrics.evictions.get(), 1);
     }
 
     #[compio::test]
@@ -5288,7 +5243,7 @@ mod tests {
         let events = park_query_events_on_housekeeping_wake(&client, HousekeepingPoolWake::Drop);
         let expired = PoolEntry::new(client, Duration::ZERO);
         let pool = Rc::new(test_pool(config, vec![expired], 0, 1));
-        let weak = Rc::downgrade(&pool);
+        let weak = Rc::downgrade(&pool.inner);
         install_housekeeping_wake_pool(pool);
 
         assert!(!Pool::housekeep(&weak).await);
@@ -5310,11 +5265,14 @@ mod tests {
         let events = park_query_events_on_housekeeping_wake(&client, HousekeepingPoolWake::Close);
         let expired = PoolEntry::new(client, Duration::ZERO);
         let pool = Rc::new(test_pool(config, vec![expired], 0, 1));
-        let weak = Rc::downgrade(&pool);
+        let weak = Rc::downgrade(&pool.inner);
         install_housekeeping_wake_pool(Rc::clone(&pool));
 
         assert!(!Pool::housekeep(&weak).await);
-        assert!(pool.closed.get(), "eviction cleanup close was ignored");
+        assert!(
+            pool.inner.closed.get(),
+            "eviction cleanup close was ignored"
+        );
         assert_eq!(pool.idle_count(), 0);
         assert_eq!(pool.total_count(), 0);
         drop(events);
@@ -5334,14 +5292,16 @@ mod tests {
             ..PoolConfig::default()
         };
         let mut pool = test_pool(config, Vec::new(), 0, 0);
-        pool.transport = Transport::resolve(
+        Rc::get_mut(&mut pool.inner)
+            .expect("fixture pool is unshared")
+            .transport = Transport::resolve(
             format!("postgres://postgres@{address}/test?sslmode=disable")
                 .parse()
                 .unwrap(),
         )
         .unwrap();
         let pool = Rc::new(pool);
-        let weak = Rc::downgrade(&pool);
+        let weak = Rc::downgrade(&pool.inner);
 
         assert!(
             Box::pin(compio::time::timeout(
@@ -5354,8 +5314,8 @@ mod tests {
         server.join().expect("closed-peer server panicked");
         assert_eq!(pool.idle_count(), 0);
         assert_eq!(pool.total_count(), 0, "failed refill leaked its permit");
-        assert_eq!(pool.metrics.connections_created.get(), 0);
-        assert_eq!(pool.metrics.evictions.get(), 0);
+        assert_eq!(pool.inner.metrics.connections_created.get(), 0);
+        assert_eq!(pool.inner.metrics.evictions.get(), 0);
     }
 
     #[compio::test]
@@ -5372,11 +5332,12 @@ mod tests {
         assert!(poll_with_waker(waiter.as_mut(), &waker).is_pending());
 
         let (client, _receiver) = fake_client(45);
-        pool.active.set(1);
-        pool.idle
+        pool.inner.active.set(1);
+        pool.inner
+            .idle
             .borrow_mut()
             .push(PoolEntry::new(client, Duration::ZERO));
-        let weak = Rc::downgrade(&pool);
+        let weak = Rc::downgrade(&pool.inner);
 
         assert!(Pool::housekeep(&weak).await);
         assert_eq!(pool.total_count(), 1);
@@ -5400,17 +5361,17 @@ mod tests {
         let mut timed_out = PoolEntry::new(client, config.max_lifetime);
         timed_out.last_used = Instant::now() - Duration::from_secs(2);
         let pool = Rc::new(test_pool(config, vec![timed_out], 0, 1));
-        let weak = Rc::downgrade(&pool);
+        let weak = Rc::downgrade(&pool.inner);
         install_housekeeping_wake_pool(Rc::clone(&pool));
 
         assert!(!Pool::housekeep(&weak).await);
         assert!(
-            pool.closed.get(),
+            pool.inner.closed.get(),
             "idle eviction cleanup did not close the pool"
         );
         assert_eq!(pool.idle_count(), 0);
         assert_eq!(pool.total_count(), 0);
-        assert_eq!(pool.metrics.evictions.get(), 1);
+        assert_eq!(pool.inner.metrics.evictions.get(), 1);
         drop(events);
     }
 
@@ -5430,14 +5391,16 @@ mod tests {
         second.last_used = Instant::now() - Duration::from_secs(1);
 
         let mut pool = test_pool(config, vec![first, second], 0, 2);
-        pool.transport = Transport::resolve(
+        Rc::get_mut(&mut pool.inner)
+            .expect("fixture pool is unshared")
+            .transport = Transport::resolve(
             "postgres://postgres@127.0.0.1:1/test?sslmode=disable"
                 .parse()
                 .unwrap(),
         )
         .unwrap();
         let pool = Rc::new(pool);
-        let weak = Rc::downgrade(&pool);
+        let weak = Rc::downgrade(&pool.inner);
 
         assert!(
             compio::time::timeout(Duration::from_millis(250), Pool::housekeep(&weak))
@@ -5446,7 +5409,7 @@ mod tests {
         );
         assert_eq!(pool.idle_count(), 1, "idle eviction crossed min_idle");
         assert_eq!(pool.total_count(), 1);
-        assert_eq!(pool.metrics.evictions.get(), 1);
+        assert_eq!(pool.inner.metrics.evictions.get(), 1);
     }
 
     #[compio::test]
@@ -5465,17 +5428,17 @@ mod tests {
         oldest.last_used = Instant::now() - Duration::from_secs(2);
 
         let pool = Rc::new(test_pool(config, vec![recent, oldest], 0, 2));
-        let weak = Rc::downgrade(&pool);
+        let weak = Rc::downgrade(&pool.inner);
 
         assert!(Pool::housekeep(&weak).await);
-        let idle = pool.idle.borrow();
+        let idle = pool.inner.idle.borrow();
         assert_eq!(idle.len(), 1, "idle eviction crossed min_idle");
         assert_eq!(
             idle[0].client.process_id(),
             453,
             "idle eviction kept the oldest entry instead of the recent one"
         );
-        assert_eq!(pool.metrics.evictions.get(), 1);
+        assert_eq!(pool.inner.metrics.evictions.get(), 1);
     }
 
     #[compio::test]
@@ -5491,7 +5454,7 @@ mod tests {
         let mut waiter = Box::pin(Waiter::new(&pool));
         assert!(poll_with_waker(waiter.as_mut(), &waker).is_pending());
 
-        let weak = Rc::downgrade(&pool);
+        let weak = Rc::downgrade(&pool.inner);
         assert!(Pool::housekeep(&weak).await);
         assert_eq!(pool.total_count(), 2);
         assert_eq!(wake_count.load(Ordering::Relaxed), 0);
@@ -5517,9 +5480,11 @@ mod tests {
             })
         });
         let mut pool = test_pool(config, Vec::new(), 0, 0);
-        pool.transport = Transport::resolve(url.parse().unwrap()).unwrap();
+        Rc::get_mut(&mut pool.inner)
+            .expect("fixture pool is unshared")
+            .transport = Transport::resolve(url.parse().unwrap()).unwrap();
         let pool = Rc::new(pool);
-        let weak = Rc::downgrade(&pool);
+        let weak = Rc::downgrade(&pool.inner);
 
         assert!(Pool::housekeep(&weak).await);
         assert_eq!(calls.get(), 1);
@@ -5551,19 +5516,21 @@ mod tests {
             Box::pin(async { Err(pool_error("scripted housekeeping rejection")) })
         });
         let mut pool = test_pool(config, Vec::new(), 0, 0);
-        pool.transport = Transport::resolve(
+        Rc::get_mut(&mut pool.inner)
+            .expect("fixture pool is unshared")
+            .transport = Transport::resolve(
             format!("postgres://postgres@{address}/fake?sslmode=disable")
                 .parse()
                 .unwrap(),
         )
         .unwrap();
         let pool = Rc::new(pool);
-        let weak = Rc::downgrade(&pool);
+        let weak = Rc::downgrade(&pool.inner);
 
         assert!(Pool::housekeep(&weak).await);
         assert_eq!(calls.get(), 1, "housekeeping never ran after_connect");
-        assert_eq!(pool.metrics.connections_created.get(), 1);
-        assert_eq!(pool.metrics.evictions.get(), 1);
+        assert_eq!(pool.inner.metrics.connections_created.get(), 1);
+        assert_eq!(pool.inner.metrics.evictions.get(), 1);
         assert_eq!(pool.idle_count(), 0);
         assert_eq!(pool.active_count(), 0);
         assert_eq!(pool.total_count(), 0);
@@ -5590,19 +5557,21 @@ mod tests {
             Box::pin(async { Ok(()) })
         });
         let mut pool = test_pool(config, Vec::new(), 0, 0);
-        pool.transport = Transport::resolve(
+        Rc::get_mut(&mut pool.inner)
+            .expect("fixture pool is unshared")
+            .transport = Transport::resolve(
             format!("postgres://postgres@{address}/fake?sslmode=disable")
                 .parse()
                 .unwrap(),
         )
         .unwrap();
         let pool = Rc::new(pool);
-        let weak = Rc::downgrade(&pool);
+        let weak = Rc::downgrade(&pool.inner);
 
         assert!(Pool::housekeep(&weak).await);
         assert_eq!(calls.get(), 1, "housekeeping never ran after_connect");
-        assert_eq!(pool.metrics.connections_created.get(), 1);
-        assert_eq!(pool.metrics.evictions.get(), 1);
+        assert_eq!(pool.inner.metrics.connections_created.get(), 1);
+        assert_eq!(pool.inner.metrics.evictions.get(), 1);
         assert_eq!(pool.idle_count(), 0);
         assert_eq!(pool.active_count(), 0);
         assert_eq!(pool.total_count(), 0);
@@ -5652,14 +5621,16 @@ mod tests {
             Box::pin(async { Ok(()) })
         });
         let mut pool = test_pool(config, Vec::new(), 0, 0);
-        pool.transport = Transport::resolve(
+        Rc::get_mut(&mut pool.inner)
+            .expect("fixture pool is unshared")
+            .transport = Transport::resolve(
             format!("postgres://postgres@{address}/fake?sslmode=disable")
                 .parse()
                 .unwrap(),
         )
         .unwrap();
         let pool = Rc::new(pool);
-        let weak = Rc::downgrade(&pool);
+        let weak = Rc::downgrade(&pool.inner);
         install_housekeeping_wake_pool(pool);
 
         let keep_running = Box::pin(compio::time::timeout(
@@ -5693,14 +5664,16 @@ mod tests {
             Box::pin(async { Ok(()) })
         });
         let mut pool = test_pool(config, Vec::new(), 0, 0);
-        pool.transport = Transport::resolve(
+        Rc::get_mut(&mut pool.inner)
+            .expect("fixture pool is unshared")
+            .transport = Transport::resolve(
             format!("postgres://postgres@{address}/fake?sslmode=disable")
                 .parse()
                 .unwrap(),
         )
         .unwrap();
         let pool = Rc::new(pool);
-        let weak = Rc::downgrade(&pool);
+        let weak = Rc::downgrade(&pool.inner);
         install_housekeeping_wake_pool(pool);
 
         assert!(
@@ -5734,14 +5707,16 @@ mod tests {
             Box::pin(async { Ok(()) })
         });
         let mut pool = test_pool(config, Vec::new(), 0, 0);
-        pool.transport = Transport::resolve(
+        Rc::get_mut(&mut pool.inner)
+            .expect("fixture pool is unshared")
+            .transport = Transport::resolve(
             format!("postgres://postgres@{address}/fake?sslmode=disable")
                 .parse()
                 .unwrap(),
         )
         .unwrap();
         let pool = Rc::new(pool);
-        let weak = Rc::downgrade(&pool);
+        let weak = Rc::downgrade(&pool.inner);
         install_housekeeping_wake_pool(Rc::clone(&pool));
 
         assert!(
@@ -5752,10 +5727,10 @@ mod tests {
             .await
             .expect("housekeeping did not finish after its hook closed the pool")
         );
-        assert!(pool.closed.get(), "after_connect close was ignored");
+        assert!(pool.inner.closed.get(), "after_connect close was ignored");
         assert_eq!(pool.idle_count(), 0);
         assert_eq!(pool.total_count(), 0);
-        assert_eq!(pool.metrics.connections_created.get(), 1);
+        assert_eq!(pool.inner.metrics.connections_created.get(), 1);
 
         drop(pool);
         let _ = finish_tx.send(());
@@ -5785,14 +5760,16 @@ mod tests {
             Box::pin(async { Err(pool_error("scripted housekeeping rejection")) })
         });
         let mut pool = test_pool(config, vec![expired], 0, 1);
-        pool.transport = Transport::resolve(
+        Rc::get_mut(&mut pool.inner)
+            .expect("fixture pool is unshared")
+            .transport = Transport::resolve(
             format!("postgres://postgres@{address}/fake?sslmode=disable")
                 .parse()
                 .unwrap(),
         )
         .unwrap();
         let pool = Rc::new(pool);
-        let weak = Rc::downgrade(&pool);
+        let weak = Rc::downgrade(&pool.inner);
         install_housekeeping_wake_pool(pool);
 
         assert!(
@@ -5840,14 +5817,16 @@ mod tests {
             Box::pin(async { Err(pool_error("scripted housekeeping rejection")) })
         });
         let mut pool = test_pool(config, vec![expired], 0, 1);
-        pool.transport = Transport::resolve(
+        Rc::get_mut(&mut pool.inner)
+            .expect("fixture pool is unshared")
+            .transport = Transport::resolve(
             format!("postgres://postgres@{address}/fake?sslmode=disable")
                 .parse()
                 .unwrap(),
         )
         .unwrap();
         let pool = Rc::new(pool);
-        let weak = Rc::downgrade(&pool);
+        let weak = Rc::downgrade(&pool.inner);
         install_housekeeping_wake_pool(Rc::clone(&pool));
 
         assert!(
@@ -5864,13 +5843,13 @@ mod tests {
             "hook did not install its observer"
         );
         assert!(
-            pool.closed.get(),
+            pool.inner.closed.get(),
             "rejected connection cleanup close was ignored"
         );
         assert_eq!(pool.idle_count(), 0);
         assert_eq!(pool.total_count(), 0);
-        assert_eq!(pool.metrics.connections_created.get(), 1);
-        assert_eq!(pool.metrics.evictions.get(), 2);
+        assert_eq!(pool.inner.metrics.connections_created.get(), 1);
+        assert_eq!(pool.inner.metrics.evictions.get(), 2);
 
         drop(pool);
         let _ = finish_tx.send(());
@@ -5917,14 +5896,16 @@ mod tests {
         });
 
         let mut pool = test_pool(config, Vec::new(), 0, 0);
-        pool.transport = Transport::resolve(
+        Rc::get_mut(&mut pool.inner)
+            .expect("fixture pool is unshared")
+            .transport = Transport::resolve(
             format!("postgres://postgres@{address}/fake?sslmode=disable")
                 .parse()
                 .unwrap(),
         )
         .unwrap();
         let pool = Rc::new(pool);
-        let weak = Rc::downgrade(&pool);
+        let weak = Rc::downgrade(&pool.inner);
         let housekeeping = compio::runtime::spawn(async move { Pool::housekeep(&weak).await });
 
         compio::time::timeout(Duration::from_secs(5), async {
@@ -5937,8 +5918,8 @@ mod tests {
 
         // Concurrent acquisitions take capacity while the refill is parked. The
         // parked candidate holds one slot itself, so the rest are active.
-        pool.total.set(contended_total);
-        pool.active.set(contended_total - 1);
+        pool.inner.total.set(contended_total);
+        pool.inner.active.set(contended_total - 1);
         release_tx.send(()).expect("after_connect gate was dropped");
         assert!(
             compio::time::timeout(Duration::from_secs(5), housekeeping)
@@ -6037,14 +6018,16 @@ mod tests {
         });
 
         let mut pool = test_pool(config, Vec::new(), 0, 0);
-        pool.transport = Transport::resolve(
+        Rc::get_mut(&mut pool.inner)
+            .expect("fixture pool is unshared")
+            .transport = Transport::resolve(
             format!("postgres://postgres@{address}/fake?sslmode=disable")
                 .parse()
                 .unwrap(),
         )
         .unwrap();
         let pool = Rc::new(pool);
-        let weak = Rc::downgrade(&pool);
+        let weak = Rc::downgrade(&pool.inner);
         let housekeeping = compio::runtime::spawn(async move { Pool::housekeep(&weak).await });
 
         compio::time::timeout(Duration::from_secs(5), second_entered_rx)
@@ -6109,14 +6092,16 @@ mod tests {
 
         let seeded = PoolEntry::new(seeded, Duration::from_secs(600));
         let mut pool = test_pool(config, vec![seeded], 0, 1);
-        pool.transport = Transport::resolve(
+        Rc::get_mut(&mut pool.inner)
+            .expect("fixture pool is unshared")
+            .transport = Transport::resolve(
             format!("postgres://postgres@{address}/fake?sslmode=disable")
                 .parse()
                 .unwrap(),
         )
         .unwrap();
         let pool = Rc::new(pool);
-        let weak = Rc::downgrade(&pool);
+        let weak = Rc::downgrade(&pool.inner);
         install_housekeeping_wake_pool(Rc::clone(&pool));
 
         assert!(
@@ -6128,11 +6113,11 @@ mod tests {
             .expect("housekeeping did not finish after refill reaping closed the pool")
         );
         assert_eq!(calls.get(), 1, "housekeeping connected after close");
-        assert!(pool.closed.get(), "refill reap close was ignored");
+        assert!(pool.inner.closed.get(), "refill reap close was ignored");
         assert_eq!(pool.idle_count(), 0);
         assert_eq!(pool.total_count(), 0);
-        assert_eq!(pool.metrics.connections_created.get(), 1);
-        assert_eq!(pool.metrics.evictions.get(), 1);
+        assert_eq!(pool.inner.metrics.connections_created.get(), 1);
+        assert_eq!(pool.inner.metrics.evictions.get(), 1);
 
         drop(events);
         drop(pool);
@@ -6165,14 +6150,16 @@ mod tests {
 
         let seeded = PoolEntry::new(seeded, Duration::from_secs(600));
         let mut pool = test_pool(config, vec![seeded], 0, 1);
-        pool.transport = Transport::resolve(
+        Rc::get_mut(&mut pool.inner)
+            .expect("fixture pool is unshared")
+            .transport = Transport::resolve(
             format!("postgres://postgres@{address}/fake?sslmode=disable")
                 .parse()
                 .unwrap(),
         )
         .unwrap();
         let pool = Rc::new(pool);
-        let weak = Rc::downgrade(&pool);
+        let weak = Rc::downgrade(&pool.inner);
 
         assert!(Pool::housekeep(&weak).await);
 
@@ -6180,8 +6167,8 @@ mod tests {
         assert_eq!(pool.idle_count(), 2, "refill did not restore min_idle");
         assert_eq!(pool.active_count(), 0);
         assert_eq!(pool.total_count(), 2);
-        assert_eq!(pool.metrics.connections_created.get(), 2);
-        assert_eq!(pool.metrics.evictions.get(), 1);
+        assert_eq!(pool.inner.metrics.connections_created.get(), 2);
+        assert_eq!(pool.inner.metrics.evictions.get(), 1);
 
         drop(pool);
         let _ = finish_tx.send(());
@@ -6212,19 +6199,21 @@ mod tests {
         let (seeded, _seeded_receiver) = fake_client(99);
         let entry = PoolEntry::new(seeded, remaining_lifetime);
         let mut pool = test_pool(config, vec![entry], 0, 1);
-        pool.transport = Transport::resolve(
+        Rc::get_mut(&mut pool.inner)
+            .expect("fixture pool is unshared")
+            .transport = Transport::resolve(
             format!("postgres://postgres@{address}/fake?sslmode=disable")
                 .parse()
                 .unwrap(),
         )
         .unwrap();
 
-        let client = compio::time::timeout(Duration::from_secs(5), pool.get())
+        let client = compio::time::timeout(Duration::from_secs(5), pool.acquire())
             .await
             .expect("checkout did not finish")
             .expect("checkout failed");
         let process_id = client.process_id();
-        let evictions = pool.metrics.evictions.get();
+        let evictions = pool.inner.metrics.evictions.get();
 
         drop(client);
         drop(pool);
@@ -6370,7 +6359,9 @@ mod tests {
         };
         let url = format!("postgres://postgres@{address}/fake?sslmode=disable");
         let mut pool = test_pool(config, Vec::new(), 0, 4);
-        pool.transport = Transport::resolve(url.parse().unwrap()).unwrap();
+        Rc::get_mut(&mut pool.inner)
+            .expect("fixture pool is unshared")
+            .transport = Transport::resolve(url.parse().unwrap()).unwrap();
         let pool = Rc::new(pool);
         let first_count = Arc::new(AtomicUsize::new(0));
         let second_count = Arc::new(AtomicUsize::new(0));
@@ -6384,8 +6375,8 @@ mod tests {
         // Model two in-progress attempts ending before their waiters are
         // repolled. Both released slots can serve queued callers; neither
         // hand-off counts as idle, so the live refill target remains unmet.
-        pool.total.set(2);
-        let weak = Rc::downgrade(&pool);
+        pool.inner.total.set(2);
+        let weak = Rc::downgrade(&pool.inner);
         assert!(
             compio::time::timeout(Duration::from_secs(5), Pool::housekeep(&weak))
                 .await
@@ -6458,9 +6449,11 @@ mod tests {
         };
         let url = format!("postgres://postgres@{address}/blackhole?sslmode=disable");
         let mut pool = test_pool(config, Vec::new(), 0, 0);
-        pool.transport = Transport::resolve(url.parse().unwrap()).unwrap();
+        Rc::get_mut(&mut pool.inner)
+            .expect("fixture pool is unshared")
+            .transport = Transport::resolve(url.parse().unwrap()).unwrap();
         let pool = Rc::new(pool);
-        let weak = Rc::downgrade(&pool);
+        let weak = Rc::downgrade(&pool.inner);
         pool.start_housekeeper_with_interval(Duration::ZERO);
 
         compio::time::timeout(Duration::from_secs(5), started_rx)
@@ -6536,6 +6529,7 @@ mod tests {
         assert!(poll_with_waker(waiter.as_mut(), &probe).is_pending());
 
         let slot = pool
+            .inner
             .waiters
             .borrow()
             .front()
@@ -6571,7 +6565,10 @@ mod tests {
         };
         let pool = test_pool(config, Vec::new(), 1, 1);
         let (client, _receiver) = fake_client(100);
-        let mut held = PooledClient::new(PoolEntry::new(client, pool.config.max_lifetime), &pool);
+        let mut held = PoolConnection::new(
+            PoolEntry::new(client, pool.inner.config.max_lifetime),
+            &pool,
+        );
 
         {
             let exposed = std::ops::DerefMut::deref_mut(&mut held);
@@ -6588,7 +6585,7 @@ mod tests {
         assert_eq!(pool.active_count(), 0);
         assert_eq!(pool.idle_count(), 0);
         assert_eq!(pool.total_count(), 0);
-        assert_eq!(pool.metrics.evictions.get(), 1);
+        assert_eq!(pool.inner.metrics.evictions.get(), 1);
     }
 
     #[compio::test]
@@ -6725,22 +6722,39 @@ mod tests {
         );
     }
 
-    // -----------------------------------------------------------------
-    // `Pool::get_owned` / `OwnedPooledClient`
-    //
-    // What these rule on: the owned lease is accounted exactly like the
-    // borrowed one (active while held, back to idle on drop, pool handle
-    // released) and it is bounded by `max_size` - a second checkout parks
-    // in the same FIFO rather than opening a connection of its own. That
-    // second property is the whole point of the type on the plugin-db
-    // side, where a transaction used to call `connect()` directly and had
-    // no ceiling at all.
-    //
-    // What they do NOT rule on: anything about `command()`'s deadline or
-    // its CancelRequest recovery. Both leases call the same
-    // `run_pool_command` body and the borrowed lease's own tests cover it;
-    // nothing here would notice if that body were wrong.
-    // -----------------------------------------------------------------
+    #[compio::test]
+    async fn a_connection_outlives_its_originating_pool_handle() {
+        let config = PoolConfig {
+            max_size: 1,
+            min_idle: 0,
+            validation_bypass: Duration::from_secs(60),
+            ..PoolConfig::default()
+        };
+        let (client, mut receiver) = fake_client(77);
+        let entry = PoolEntry::new(client, config.max_lifetime);
+        let (lease, weak) = {
+            let pool = test_pool(config, vec![entry], 0, 1);
+            pool.start_housekeeper();
+            let weak = Rc::downgrade(&pool.inner);
+            (pool.acquire().await.expect("acquire connection"), weak)
+        };
+
+        assert!(weak.upgrade().is_some(), "lease lost its pool state");
+        assert!(!lease.is_closed(), "dropping a handle closed its lease");
+        let pool = lease.pool().clone();
+        drop(lease);
+        assert_eq!(pool.active_count(), 0);
+        assert_eq!(pool.idle_count(), 1);
+        let reused = pool.acquire().await.expect("reuse returned connection");
+        assert_eq!(reused.process_id(), 77);
+        drop(pool);
+        drop(reused);
+        assert!(weak.upgrade().is_none(), "last lease retained pool state");
+        assert!(
+            receiver.next().await.is_none(),
+            "last lease kept the session open"
+        );
+    }
 
     #[compio::test]
     async fn an_owned_lease_is_active_while_held_and_idle_again_on_drop() {
@@ -6754,12 +6768,12 @@ mod tests {
         let entry = PoolEntry::new(client, config.max_lifetime);
         let pool = Rc::new(test_pool(config, vec![entry], 0, 1));
 
-        let lease = pool.get_owned().await.expect("owned checkout");
+        let lease = pool.acquire().await.expect("owned checkout");
         assert_eq!(lease.process_id(), 77);
         assert_eq!(pool.active_count(), 1);
         assert_eq!(pool.idle_count(), 0);
         assert_eq!(
-            Rc::strong_count(&pool),
+            Rc::strong_count(&pool.inner),
             2,
             "the owned lease must hold a pool handle of its own"
         );
@@ -6769,14 +6783,14 @@ mod tests {
         assert_eq!(pool.active_count(), 0, "owned lease did not return");
         assert_eq!(pool.idle_count(), 1, "owned lease did not re-enter idle");
         assert_eq!(
-            Rc::strong_count(&pool),
+            Rc::strong_count(&pool.inner),
             1,
             "the owned lease leaked its pool handle"
         );
     }
 
     #[compio::test]
-    async fn a_second_owned_checkout_is_bounded_by_max_size() {
+    async fn cloned_pool_handles_share_connection_capacity() {
         let config = PoolConfig {
             max_size: 1,
             min_idle: 0,
@@ -6785,18 +6799,19 @@ mod tests {
         };
         let (client, _receiver) = fake_client(91);
         let entry = PoolEntry::new(client, config.max_lifetime);
-        let pool = Rc::new(test_pool(config, vec![entry], 0, 1));
+        let pool = test_pool(config, vec![entry], 0, 1);
+        let clone = pool.clone();
 
-        let first = pool.get_owned().await.expect("first owned checkout");
+        let first = pool.acquire().await.expect("first owned checkout");
         let wake_count = Arc::new(AtomicUsize::new(0));
         let waker = counting_waker(&wake_count);
-        let mut second = Box::pin(pool.get_owned());
+        let mut second = Box::pin(clone.acquire());
         assert!(
             poll_with_waker(second.as_mut(), &waker).is_pending(),
             "a second owned checkout must queue behind max_size, not connect"
         );
         assert_eq!(
-            pool.metrics.connections_created.get(),
+            pool.inner.metrics.connections_created.get(),
             0,
             "the queued checkout opened a connection instead of waiting"
         );

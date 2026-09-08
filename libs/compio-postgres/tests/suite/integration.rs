@@ -454,7 +454,7 @@ async fn test_isolation_is_per_schema() {
     );
 
     let pool = Pool::connect(&url, 2).await.unwrap();
-    let conn = pool.get().await.unwrap();
+    let conn = pool.acquire().await.unwrap();
     let rows = conn
         .query("SELECT current_schema()::text AS s", &[])
         .await
@@ -911,7 +911,7 @@ async fn concurrent_connections() {
     // Acquire 5 connections, run a query on each, verify all succeed
     let mut results = Vec::new();
     for i in 0..5i32 {
-        let conn = pool.get().await.unwrap();
+        let conn = pool.acquire().await.unwrap();
         let rows = conn.query("SELECT $1::int4 as val", &[&i]).await.unwrap();
         results.push(rows[0].get::<_, i32>("val"));
         // conn dropped -> returned to pool
@@ -1681,11 +1681,11 @@ async fn pool_exhaustion() {
     );
 
     // Acquire 2 connections without returning them
-    let _c1 = pool.get().await.unwrap();
-    let _c2 = pool.get().await.unwrap();
+    let _c1 = pool.acquire().await.unwrap();
+    let _c2 = pool.acquire().await.unwrap();
 
     // Third acquisition should fail with connection timeout (pool exhausted).
-    let err = pool.get().await;
+    let err = pool.acquire().await;
     match err {
         Err(e) => {
             // The pool wraps its timeout error in Error::connect; check that
@@ -1773,7 +1773,7 @@ async fn update_with_returning() {
 // ---------------------------------------------------------------------------
 // 24. get_cancellation_during_connect_does_not_leak_permits (POOL-1)
 //
-// Regression: `Pool::get` wraps `get_inner` in `compio::time::timeout`, a
+// Regression: `Pool::acquire` wraps `get_inner` in `compio::time::timeout`, a
 // `select!` that DROPS the inner future when the timer wins. On the on-demand
 // connect path the capacity permit is the hand-maintained `total` counter,
 // incremented before `connect_one().await` and decremented only by the
@@ -1813,7 +1813,7 @@ async fn get_cancellation_during_connect_does_not_leak_permits() {
     // The warm-up opened exactly one connection (min_idle=0 -> warm = max(0,1)
     // = 1). Hold it so `idle` is empty and every further get() must take the
     // on-demand connect path.
-    let c1 = pool.get().await.expect("warm connection acquires locally");
+    let c1 = pool.acquire().await.expect("warm connection acquires locally");
     assert_eq!(
         pool.total_count(),
         1,
@@ -1825,7 +1825,7 @@ async fn get_cancellation_during_connect_does_not_leak_permits() {
     for i in 0..100 {
         // Box::pin so an explicit `drop(fut)` genuinely drops the future (the
         // cancellation), not just a `Pin<&mut _>` borrow of it.
-        let mut fut = Box::pin(pool.get());
+        let mut fut = Box::pin(pool.acquire());
 
         // Poll until the on-demand connect has reserved its permit. The first
         // poll pops idle (empty), passes the `total < max_size` gate, reserves
@@ -1886,7 +1886,7 @@ async fn get_cancellation_during_connect_does_not_leak_permits() {
     // entry available; a fresh get() must reclaim it locally and succeed.
     drop(c1);
     let c2 = pool
-        .get()
+        .acquire()
         .await
         .expect("pool bricked: get() fails after cancellations even with an idle conn");
     drop(c2);
@@ -1901,7 +1901,7 @@ async fn get_cancellation_during_connect_does_not_leak_permits() {
 // ---------------------------------------------------------------------------
 // 25. freed_connection_goes_to_front_waiter_not_a_barging_fresh_caller (POOL-2)
 //
-// FIFO fairness regression. When a `PooledClient` drops, the freed entry must
+// FIFO fairness regression. When a `PoolConnection` drops, the freed entry must
 // go to the connection that has been queued LONGEST (the front parked waiter),
 // not to a fresh caller that wanders in afterwards.
 //
@@ -1976,7 +1976,7 @@ async fn freed_connection_goes_to_front_waiter_not_a_barging_fresh_caller() {
     );
 
     // Acquire and hold the only slot. idle now empty, pool full.
-    let c1 = pool.get().await.expect("warm connection acquires locally");
+    let c1 = pool.acquire().await.expect("warm connection acquires locally");
     assert_eq!(pool.idle_count(), 0);
     assert_eq!(pool.active_count(), 1);
     assert_eq!(pool.total_count(), 1);
@@ -1996,7 +1996,7 @@ async fn freed_connection_goes_to_front_waiter_not_a_barging_fresh_caller() {
         compio::runtime::spawn(async move {
             a_reached_get.set(true);
             let c = pool
-                .get()
+                .acquire()
                 .await
                 .expect("waiter A must obtain the freed conn");
             order.borrow_mut().push('A');
@@ -2027,7 +2027,7 @@ async fn freed_connection_goes_to_front_waiter_not_a_barging_fresh_caller() {
 
     // CRITICAL: before yielding to A, a FRESH caller C (never parked) tries to
     // acquire. Pre-fix this synchronously pops the idle entry and barges A.
-    let c = pool.get().await;
+    let c = pool.acquire().await;
     order.borrow_mut().push('C');
     drop(c);
 
@@ -2089,7 +2089,7 @@ async fn handed_off_connection_is_reclaimed_if_waiter_is_cancelled() {
     assert_eq!(pool.total_count(), 1);
 
     // Hold the only slot.
-    let c1 = pool.get().await.expect("warm connection acquires locally");
+    let c1 = pool.acquire().await.expect("warm connection acquires locally");
     assert_eq!(pool.idle_count(), 0);
     assert_eq!(pool.active_count(), 1);
 
@@ -2098,7 +2098,7 @@ async fn handed_off_connection_is_reclaimed_if_waiter_is_cancelled() {
     let a_handle = {
         let pool = Rc::clone(&pool);
         compio::runtime::spawn(async move {
-            let _c = pool.get().await.expect("(unreached) A is cancelled first");
+            let _c = pool.acquire().await.expect("(unreached) A is cancelled first");
             // Hold forever-ish if somehow reached, so a bug is visible.
             yield_n(1_000_000).await;
         })
@@ -2161,7 +2161,7 @@ async fn handed_off_connection_is_reclaimed_if_waiter_is_cancelled() {
 
     // And the reclaimed connection is fully usable: a fresh get() reclaims it
     // locally (no network round-trip under the 60 s bypass) and runs a query.
-    let c = pool.get().await.expect("reclaimed connection is reusable");
+    let c = pool.acquire().await.expect("reclaimed connection is reusable");
     assert_eq!(
         pool.active_count(),
         1,
@@ -3913,7 +3913,7 @@ async fn frontend_encode_failure_is_not_blamed_on_the_server() {
 // borrower.
 //
 // `Transaction`'s Drop already covers the typed API - it borrows the client
-// mutably, so the `PooledClient` cannot be released while a `Transaction`
+// mutably, so the `PoolConnection` cannot be released while a `Transaction`
 // lives, and Drop queues a ROLLBACK. Nothing covered a transaction opened as
 // raw SQL (`BEGIN` via batch_execute / execute), which is what these tests
 // pin.
@@ -3937,7 +3937,7 @@ async fn released_open_transaction_is_not_inherited_by_the_next_borrower() {
     let table = common::test_object_name("tx_leak");
 
     {
-        let client = pool.get().await.unwrap();
+        let client = pool.acquire().await.unwrap();
         client
             .batch_execute(&format!("CREATE TABLE {table} (id int)"))
             .await
@@ -3947,7 +3947,7 @@ async fn released_open_transaction_is_not_inherited_by_the_next_borrower() {
     // Open a transaction and write inside it in one simple-Query message,
     // then release the connection without committing or rolling back.
     {
-        let client = pool.get().await.unwrap();
+        let client = pool.acquire().await.unwrap();
         client
             .batch_execute(&format!("BEGIN; INSERT INTO {table} VALUES (1); SELECT 1"))
             .await
@@ -3959,7 +3959,7 @@ async fn released_open_transaction_is_not_inherited_by_the_next_borrower() {
         );
     }
 
-    let client = pool.get().await.unwrap();
+    let client = pool.acquire().await.unwrap();
     assert_eq!(
         client.transaction_status(),
         Some(TransactionStatus::Idle),
@@ -3988,7 +3988,7 @@ async fn released_transaction_aborted_by_a_later_batch_is_not_inherited_by_the_n
     // rollback. Releasing there would hand the next borrower a connection
     // that answers 25P02 to everything.
     {
-        let client = pool.get().await.unwrap();
+        let client = pool.acquire().await.unwrap();
         client.batch_execute("BEGIN").await.unwrap();
         client
             .batch_execute("SELECT * FROM no_such_table_here")
@@ -4004,7 +4004,7 @@ async fn released_transaction_aborted_by_a_later_batch_is_not_inherited_by_the_n
         );
     }
 
-    let client = pool.get().await.unwrap();
+    let client = pool.acquire().await.unwrap();
     let one: i32 = client.query_one_scalar("SELECT 1", &[]).await.unwrap();
     assert_eq!(one, 1, "the next borrower inherited an aborted transaction");
     assert_eq!(client.transaction_status(), Some(TransactionStatus::Idle));
@@ -4016,7 +4016,7 @@ async fn released_transaction_aborted_in_one_batch_is_not_inherited_by_the_next_
     let pool = single_connection_pool(&url).await;
 
     {
-        let client = pool.get().await.unwrap();
+        let client = pool.acquire().await.unwrap();
         let error = client
             .batch_execute("BEGIN; SELECT 1 / 0")
             .await
@@ -4024,7 +4024,7 @@ async fn released_transaction_aborted_in_one_batch_is_not_inherited_by_the_next_
         assert_eq!(error.code(), Some(&SqlState::DIVISION_BY_ZERO));
     }
 
-    let client = pool.get().await.unwrap();
+    let client = pool.acquire().await.unwrap();
     let one: i32 = match client.query_one_scalar("SELECT 1::int4", &[]).await {
         Ok(one) => one,
         Err(error) => panic!(
@@ -4044,7 +4044,7 @@ async fn older_response_stream_does_not_hide_a_later_failed_transaction() {
     let pool = single_connection_pool(&url).await;
 
     {
-        let client = pool.get().await.unwrap();
+        let client = pool.acquire().await.unwrap();
         let older = client.simple_query_raw("").await.unwrap();
         let mut older = Box::pin(older);
 
@@ -4067,7 +4067,7 @@ async fn older_response_stream_does_not_hide_a_later_failed_transaction() {
         );
     }
 
-    let client = pool.get().await.unwrap();
+    let client = pool.acquire().await.unwrap();
     let one: i32 = match client.query_one_scalar("SELECT 1::int4", &[]).await {
         Ok(one) => one,
         Err(error) => panic!(
@@ -4085,12 +4085,12 @@ async fn dropped_unpolled_begin_stream_is_not_inherited_by_the_next_borrower() {
     let pool = single_connection_pool(&url).await;
 
     {
-        let client = pool.get().await.unwrap();
+        let client = pool.acquire().await.unwrap();
         let stream = client.simple_query_raw("BEGIN").await.unwrap();
         drop(stream);
     }
 
-    let client = pool.get().await.unwrap();
+    let client = pool.acquire().await.unwrap();
     let one: i32 = client
         .query_one_scalar("SELECT 1::int4", &[])
         .await
@@ -4112,7 +4112,7 @@ async fn errored_batch_in_an_implicit_transaction_rolls_back_session_changes_and
     let backend_pid;
 
     {
-        let client = pool.get().await.unwrap();
+        let client = pool.acquire().await.unwrap();
         backend_pid = client.process_id();
         client
             .batch_execute("SET application_name = 'cpg_before_error'")
@@ -4141,7 +4141,7 @@ async fn errored_batch_in_an_implicit_transaction_rolls_back_session_changes_and
         );
     }
 
-    let client = pool.get().await.unwrap();
+    let client = pool.acquire().await.unwrap();
     assert_eq!(
         client.process_id(),
         backend_pid,
@@ -4182,7 +4182,7 @@ async fn released_session_changes_in_an_aborted_transaction_are_rolled_back() {
     let table = common::test_object_name("aborted_batch_temp");
 
     {
-        let client = pool.get().await.unwrap();
+        let client = pool.acquire().await.unwrap();
         client
             .batch_execute("SET application_name = 'cpg_before_aborted_batch'")
             .await
@@ -4205,7 +4205,7 @@ async fn released_session_changes_in_an_aborted_transaction_are_rolled_back() {
         assert_eq!(client.transaction_status(), Some(TransactionStatus::Failed));
     }
 
-    let client = pool.get().await.unwrap();
+    let client = pool.acquire().await.unwrap();
     let one: i32 = client
         .query_one_scalar("SELECT 1::int4", &[])
         .await
@@ -4246,7 +4246,7 @@ async fn clean_release_hands_off_same_connection_without_queuing_rollback() {
 
     let url = require_pg().await;
     let pool = Rc::new(single_connection_pool(&url).await);
-    let client = pool.get().await.unwrap();
+    let client = pool.acquire().await.unwrap();
     let backend_pid = client.process_id();
     let one: i32 = client
         .query_one_scalar("SELECT 1::int4", &[])
@@ -4259,7 +4259,7 @@ async fn clean_release_hands_off_same_connection_without_queuing_rollback() {
     let waiter = {
         let pool = Rc::clone(&pool);
         compio::runtime::spawn(async move {
-            let client = pool.get().await.expect("the waiting borrower acquires");
+            let client = pool.acquire().await.expect("the waiting borrower acquires");
             (client.process_id(), client.is_dirty())
         })
     };
@@ -4302,7 +4302,7 @@ async fn release_rollback_keeps_session_state_the_next_borrower_may_rely_on() {
     let schema = test_schema();
     let statement;
     {
-        let client = pool.get().await.unwrap();
+        let client = pool.acquire().await.unwrap();
         let got: bool = client
             .query_one_scalar(
                 "SELECT pg_try_advisory_lock(hashtext($1)::int4)",
@@ -4321,7 +4321,7 @@ async fn release_rollback_keeps_session_state_the_next_borrower_may_rely_on() {
         client.batch_execute("BEGIN").await.unwrap();
     }
 
-    let client = pool.get().await.unwrap();
+    let client = pool.acquire().await.unwrap();
     assert_eq!(client.transaction_status(), Some(TransactionStatus::Idle));
 
     let held: i64 = client
@@ -5111,8 +5111,8 @@ async fn a_pool_never_opens_more_connections_than_its_max_size() {
         "warmup opened more connections than max_size"
     );
 
-    let held = pool.get().await.unwrap();
-    let second = compio::time::timeout(std::time::Duration::from_secs(2), pool.get()).await;
+    let held = pool.acquire().await.unwrap();
+    let second = compio::time::timeout(std::time::Duration::from_secs(2), pool.acquire()).await;
     assert!(
         second.is_err(),
         "a second connection was handed out while max_size=1 was already checked out"
@@ -7053,7 +7053,7 @@ async fn cancelled_cached_plan_error_is_not_handed_to_the_next_borrower() {
 
     let backend_pid;
     {
-        let client = pool.get().await.unwrap();
+        let client = pool.acquire().await.unwrap();
         backend_pid = client.process_id();
         client
             .batch_execute(&format!(
@@ -7084,7 +7084,7 @@ async fn cancelled_cached_plan_error_is_not_handed_to_the_next_borrower() {
         drop(stale);
     }
 
-    let client = pool.get().await.unwrap();
+    let client = pool.acquire().await.unwrap();
     assert_eq!(
         client.process_id(),
         backend_pid,
@@ -7563,7 +7563,7 @@ async fn foreign_statement_is_rejected_locally() {
 }
 
 /// The ownership check must preserve every wrapper that uses the same
-/// `InnerClient`: direct `Client` calls, `Transaction`, and a `PooledClient`
+/// `InnerClient`: direct `Client` calls, `Transaction`, and a `PoolConnection`
 /// borrow.
 #[compio::test]
 async fn statement_works_on_its_owner_through_transaction_and_pool() {
@@ -7584,7 +7584,7 @@ async fn statement_works_on_its_owner_through_transaction_and_pool() {
     transaction.commit().await.unwrap();
 
     let pool = single_connection_pool(&url).await;
-    let mut pooled = Box::pin(pool.get()).await.unwrap();
+    let mut pooled = Box::pin(pool.acquire()).await.unwrap();
     let pooled_statement = pooled.prepare("SELECT $1::int4 + 1").await.unwrap();
     let through_pool: i32 = pooled
         .query_one_scalar(&pooled_statement, &[&42_i32])
@@ -7873,7 +7873,7 @@ async fn an_abandoned_copy_in_returns_a_usable_entry_to_the_pool() {
     let table = common::test_object_name("cpg_pooled_abandoned_copy");
 
     let borrowed_pid = {
-        let client = pool.get().await.unwrap();
+        let client = pool.acquire().await.unwrap();
         let pid = client.process_id();
         client
             .batch_execute(&format!("CREATE TABLE IF NOT EXISTS {table} (n int4)"))
@@ -7894,7 +7894,7 @@ async fn an_abandoned_copy_in_returns_a_usable_entry_to_the_pool() {
         pid
     };
 
-    let client = compio::time::timeout(std::time::Duration::from_secs(5), pool.get())
+    let client = compio::time::timeout(std::time::Duration::from_secs(5), pool.acquire())
         .await
         .expect("reacquiring after an abandoned COPY hung")
         .expect("the pool refused to hand back an entry");

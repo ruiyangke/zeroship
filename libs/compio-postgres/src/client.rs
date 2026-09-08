@@ -3334,7 +3334,7 @@ impl Client {
     /// cancellation of a query running on this connection.
     ///
     /// When this client belongs to a [`Pool`](crate::Pool) borrow, the token is
-    /// valid only for that borrow. Returning the [`PooledClient`](crate::PooledClient)
+    /// valid only for that borrow. Returning the [`PoolConnection`](crate::PoolConnection)
     /// revokes it and retires the physical session if the token escaped.
     pub fn cancel_token(&self) -> CancelToken {
         CancelToken {

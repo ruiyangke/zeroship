@@ -1,6 +1,6 @@
 //! Live PostgreSQL coverage for the pool's client command deadline.
 //!
-//! These tests hold one `PooledClient` across the timeout and the follow-up
+//! These tests hold one `PoolConnection` across the timeout and the follow-up
 //! query. A replacement connection would hide response-drain bugs, which are
 //! the highest-risk failure mode for an out-of-band CancelRequest.
 
@@ -50,7 +50,7 @@ async fn overrun_is_cancelled_and_the_same_client_remains_usable() {
     compio::time::timeout(OUTER_WATCHDOG, async {
         let transport = common::test_transport(&test_url(), common::suite_tls()).await;
         let pool = connect_pool(Duration::from_millis(100)).await;
-        let mut client = pool.get().await.expect("check out the only connection");
+        let mut client = pool.acquire().await.expect("check out the only connection");
         let announced_pid = client.process_id();
 
         let started = Instant::now();
@@ -89,7 +89,7 @@ async fn timeout_inside_raw_transaction_rolls_back_before_same_client_reuse() {
     compio::time::timeout(OUTER_WATCHDOG, async {
         let transport = common::test_transport(&test_url(), common::suite_tls()).await;
         let pool = connect_pool(Duration::from_millis(100)).await;
-        let mut client = pool.get().await.expect("check out the only connection");
+        let mut client = pool.acquire().await.expect("check out the only connection");
         let announced_pid = client.process_id();
 
         let error = client
@@ -114,7 +114,7 @@ async fn command_inside_the_deadline_is_untouched() {
     compio::time::timeout(OUTER_WATCHDOG, async {
         let transport = common::test_transport(&test_url(), common::suite_tls()).await;
         let pool = connect_pool(Duration::from_millis(750)).await;
-        let mut client = pool.get().await.expect("check out the only connection");
+        let mut client = pool.acquire().await.expect("check out the only connection");
         let announced_pid = client.process_id();
 
         let row = client
@@ -139,7 +139,7 @@ async fn direct_pooled_client_query_does_not_enter_command_scope() {
     compio::time::timeout(OUTER_WATCHDOG, async {
         let transport = common::test_transport(&test_url(), common::suite_tls()).await;
         let pool = connect_pool(Duration::from_millis(50)).await;
-        let client = pool.get().await.expect("check out the only connection");
+        let client = pool.acquire().await.expect("check out the only connection");
         let announced_pid = client.process_id();
 
         let started = Instant::now();
@@ -164,7 +164,7 @@ async fn direct_pooled_client_query_does_not_enter_command_scope() {
 async fn server_statement_timeout_remains_a_server_error() {
     compio::time::timeout(OUTER_WATCHDOG, async {
         let pool = connect_pool(Duration::from_millis(750)).await;
-        let mut client = pool.get().await.expect("check out the only connection");
+        let mut client = pool.acquire().await.expect("check out the only connection");
 
         let error = client
             .command(async |client| {
@@ -188,18 +188,16 @@ async fn server_statement_timeout_remains_a_server_error() {
     .expect("server statement_timeout exceeded the outer test watchdog");
 }
 
-/// `OwnedPooledClient::command` is documented as "identical in every respect to
-/// `PooledClient::command` - both call the same body". The borrowed form is
-/// covered by the test below; the owned form was not, so nothing checked that
-/// an owned lease enters the pool's command deadline at all. A `command` that
-/// skipped the scope would run without any deadline and look perfectly healthy.
-///
-/// Also exercises `pool()` and the owned `Deref`, both unexecuted.
+/// A lease retained after its originating handle is dropped must still use
+/// the shared command deadline and return the recovered session to that pool.
 #[compio::test]
 async fn owned_lease_command_enters_the_command_scope() {
     compio::time::timeout(OUTER_WATCHDOG, async {
-        let pool = std::rc::Rc::new(connect_pool(Duration::from_millis(100)).await);
-        let mut lease = pool.get_owned().await.expect("take an owned pool lease");
+        let mut lease = {
+            let pool = connect_pool(Duration::from_millis(100)).await;
+            pool.acquire().await.expect("take an owned pool lease")
+        };
+        let pool = lease.pool().clone();
 
         let before = lease
             .query("SELECT pg_backend_pid()", &[])
@@ -225,10 +223,11 @@ async fn owned_lease_command_enters_the_command_scope() {
             after, before,
             "the owned command discarded a session whose cancellation recovered"
         );
-        assert!(
-            std::rc::Rc::ptr_eq(lease.pool(), &pool),
-            "the lease reported a different pool than it came from"
-        );
+        assert_eq!(pool.active_count(), 1);
+        drop(lease);
+        assert_eq!(pool.active_count(), 0);
+        let reused = pool.acquire().await.expect("reuse recovered session");
+        assert_eq!(reused.process_id(), before);
     })
     .await
     .expect("owned lease command cancellation hung");

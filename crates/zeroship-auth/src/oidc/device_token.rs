@@ -485,7 +485,7 @@ pub(super) async fn exchange_device_code(
             tracing::error!(error = %err, "device token: dedicated database pool checkout failed");
             OAuthError::server_error("device token database unavailable")
         })?;
-    let mut conn = pool.get().await.map_err(|err| {
+    let mut conn = pool.acquire().await.map_err(|err| {
         tracing::error!(error = %err, "device token: dedicated database session checkout failed");
         OAuthError::server_error("device token database unavailable")
     })?;
