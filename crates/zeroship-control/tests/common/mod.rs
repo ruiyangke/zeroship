@@ -102,6 +102,43 @@ pub fn require_control_db() -> String {
         .clone()
 }
 
+/// Refuse the calling test because a backend it requires is not there.
+///
+/// THE NON-DATABASE PEER OF [`require_control_db`], and deliberately the same
+/// vocabulary: a run with no backend is a REFUSAL - the statement that no
+/// verdict was reachable - not a skip, which cargo counts as a pass. Every
+/// caller below used to announce a skip instead, so a checkout without a
+/// broker, or without the durable-workflows harness, reported those targets
+/// green while running none of their subjects.
+///
+/// It PANICS rather than ending the process, which is where it parts company
+/// with `zeroship_testkit::live_db`. That module exits because an unmigrated
+/// database voids EVERY module in a target and hundreds of FAILED lines are
+/// the presentation it exists to remove. These backends void a handful of
+/// tests in a target whose other modules need nothing from them, so the
+/// per-test verdict is the informative one and the siblings must still run.
+///
+/// A refusal names the REMEDY, not just the gap: `remedy` is the command to
+/// run and what it does, so a first encounter needs no source dive.
+#[track_caller]
+pub fn refuse_missing_backend(backend: &str, problem: &str, remedy: &str) -> ! {
+    panic!(
+        "REFUSED: this test requires {backend}, and it is not there.\n\
+         \n\
+         \x20   backend   {backend}\n\
+         \x20   problem   {problem}\n\
+         \n\
+         \x20   NO VERDICT WAS REACHABLE. The subject never ran, so this\n\
+         \x20   failure says nothing about the code.\n\
+         \n\
+         \x20   {remedy}\n\
+         \n\
+         \x20   There is no environment variable that makes this a skip. A\n\
+         \x20   backend this suite cannot reach is a failed run, not a green\n\
+         \x20   one."
+    )
+}
+
 pub struct PlatformJwks {
     base: String,
     shutdown: Option<mpsc::Sender<()>>,

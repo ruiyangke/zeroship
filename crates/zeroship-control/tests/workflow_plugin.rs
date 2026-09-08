@@ -31,8 +31,8 @@ use crate::common;
 const TEST_CONTROL_KEY: &str = "test-control-key";
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
 
-fn db_url() -> Option<String> {
-    zeroship_core::config::test_database_url_opt()
+fn db_url() -> String {
+    common::require_control_db()
 }
 
 fn tmpdir(label: &str) -> PathBuf {
@@ -576,10 +576,7 @@ async fn v8_binding_getter_exclusions_are_undefined() {
 
 #[compio::test]
 async fn v8_binding_round_trips_through_the_control_instance_api() {
-    let Some(db_url) = db_url() else {
-        zeroship_test_support::skip("skipping workflow plugin control round-trip (no test database)");
-        return;
-    };
+    let db_url = db_url();
     let fx = build_fixture(&db_url, "round-trip").await;
     let app_id = seed_app(&fx, &["Checkout"]).await;
     let control = ControlServer::start(Arc::clone(&fx.state));

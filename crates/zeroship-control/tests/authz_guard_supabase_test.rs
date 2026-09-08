@@ -86,17 +86,28 @@ struct Fixture {
 }
 
 impl Fixture {
-    async fn new(label: &str) -> Option<Self> {
+    /// A REFUSAL, not a skip, when the database will not take a connection.
+    ///
+    /// `db_url()` has already preflighted the DSN, so a failure here is the
+    /// server declining THIS connection - most often the `max_connections`
+    /// ceiling, with something in the process holding connections open across
+    /// tests. Both arms used to announce a skip, which cargo counts as a pass,
+    /// so a connection ceiling reached mid-run turned every remaining test in
+    /// this module green without executing one of them.
+    async fn new(label: &str) -> Self {
         let db_url = db_url();
 
         let (control_pg_client, control_pg_conn) = match connect(&db_url, NoTls).await {
             Ok(pg) => pg,
-            Err(err) => {
-                zeroship_test_support::skip(&format!(
-                    "[authz_guard_supabase_test] test DB unreachable ({err}) - skipping"
-                ));
-                return None;
-            }
+            Err(err) => common::refuse_missing_backend(
+                "a connection to the control test database",
+                &format!("the database preflighted clean but refused this connection: {err}"),
+                "If the server is up, this is usually its connection ceiling; look\n\
+                 \x20   for a test in this binary holding clients open across bodies\n\
+                 \x20   (`common::drain_pg` is what waits for them to close). If it is\n\
+                 \x20   down, bring the backends up and rewrite the overlay from them:\n\
+                 \x20     tests/provision_test_backends.sh",
+            ),
         };
         compio::runtime::spawn(async move {
             let _ = control_pg_conn.run().await;
@@ -105,12 +116,15 @@ impl Fixture {
 
         let registry = match Registry::new(&db_url).await {
             Ok(registry) => registry,
-            Err(err) => {
-                zeroship_test_support::skip(&format!(
-                    "[authz_guard_supabase_test] registry DB connect failed ({err}) - skipping"
-                ));
-                return None;
-            }
+            Err(err) => common::refuse_missing_backend(
+                "a registry pool on the control test database",
+                &format!("the registry could not open its pool: {err}"),
+                "If the server is up, this is usually its connection ceiling; look\n\
+                 \x20   for a test in this binary holding clients open across bodies\n\
+                 \x20   (`common::drain_pg` is what waits for them to close). If it is\n\
+                 \x20   down, bring the backends up and rewrite the overlay from them:\n\
+                 \x20     tests/provision_test_backends.sh",
+            ),
         };
         zeroship_control::plan_catalog::seed_plans(&registry)
             .await
@@ -182,14 +196,14 @@ impl Fixture {
             ),
         });
 
-        Some(Self {
+        Self {
             state,
             blob_root,
             deploy_tmp_dir,
             users: Vec::new(),
             subjects: Vec::new(),
             apps: Vec::new(),
-        })
+        }
     }
 
     async fn seed_linked_principal(&mut self, subject: &str, grants: &[&str]) -> Uuid {
@@ -341,9 +355,7 @@ async fn raw_app_deploy_check(
 
 #[compio::test]
 async fn gotrue_authenticated_token_resolves_linked_principal_and_deploy_grant() {
-    let Some(mut fx) = Fixture::new("positive").await else {
-        return;
-    };
+    let mut fx = Fixture::new("positive").await;
     let subject = Uuid::new_v4().to_string();
     let principal_id = fx
         .seed_linked_principal(&subject, &["apps:deploy", "apps:read"])
@@ -375,9 +387,7 @@ async fn gotrue_authenticated_token_resolves_linked_principal_and_deploy_grant()
 
 #[compio::test]
 async fn gotrue_token_linked_to_anonymized_user_returns_401() {
-    let Some(mut fx) = Fixture::new("anonymized-owner").await else {
-        return;
-    };
+    let mut fx = Fixture::new("anonymized-owner").await;
     let subject = Uuid::new_v4().to_string();
     let principal_id = fx
         .seed_linked_principal(&subject, &["apps:deploy"])
@@ -415,9 +425,7 @@ async fn gotrue_token_linked_to_anonymized_user_returns_401() {
 
 #[compio::test]
 async fn gotrue_unlinked_subject_is_unauthorized() {
-    let Some(fx) = Fixture::new("unlinked").await else {
-        return;
-    };
+    let fx = Fixture::new("unlinked").await;
     let app = init_control!(fx);
     let token = gotrue_token(&Uuid::new_v4().to_string(), "authenticated");
 
@@ -439,9 +447,7 @@ async fn gotrue_unlinked_subject_is_unauthorized() {
 
 #[compio::test]
 async fn gotrue_non_authenticated_role_is_unauthorized() {
-    let Some(mut fx) = Fixture::new("role").await else {
-        return;
-    };
+    let mut fx = Fixture::new("role").await;
     let subject = Uuid::new_v4().to_string();
     fx.seed_linked_principal(&subject, &["apps:deploy"]).await;
     let app = init_control!(fx);
@@ -463,9 +469,7 @@ async fn gotrue_non_authenticated_role_is_unauthorized() {
 
 #[compio::test]
 async fn gotrue_principal_without_deploy_grant_is_forbidden() {
-    let Some(mut fx) = Fixture::new("no-deploy").await else {
-        return;
-    };
+    let mut fx = Fixture::new("no-deploy").await;
     let subject = Uuid::new_v4().to_string();
     let principal_id = fx.seed_linked_principal(&subject, &["apps:read"]).await;
     let app_id = fx.create_owned_app(principal_id, "supabase-no-deploy").await;
@@ -488,9 +492,7 @@ async fn gotrue_principal_without_deploy_grant_is_forbidden() {
 
 #[compio::test]
 async fn gotrue_expired_or_wrong_issuer_token_is_unauthorized() {
-    let Some(mut fx) = Fixture::new("verify-rejects").await else {
-        return;
-    };
+    let mut fx = Fixture::new("verify-rejects").await;
     let subject = Uuid::new_v4().to_string();
     fx.seed_linked_principal(&subject, &["apps:deploy"]).await;
     let app = init_control!(fx);

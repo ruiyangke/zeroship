@@ -72,6 +72,37 @@ fn enabled() -> bool {
     zeroship_core::test_env!("ZEROSHIP_DW_E2E").as_deref() == Some("1")
 }
 
+/// Refuse unless `tests/e2e_durable_workflows.sh` is driving this binary.
+///
+/// The fleet IS the backend here: these tests drive the real control workflow
+/// engine against a real gateway, a real worker and a really deployed `.zship`,
+/// and none of that exists unless the harness stood it up. Every caller used to
+/// announce a skip, which cargo counts as a pass, so a plain
+/// `cargo test -p zeroship-control` reported the durable-workflows keystone
+/// green without ever starting a process.
+///
+/// `enabled()` stays the predicate rather than being folded in here: the
+/// `ZEROSHIP_DW_E2E` read is what `tests/test_only_env_gate.sh` enumerates, and
+/// this function only formats the refusal.
+fn require_dw_e2e_fleet() {
+    if enabled() {
+        return;
+    }
+    common::refuse_missing_backend(
+        "the durable-workflows e2e fleet",
+        "ZEROSHIP_DW_E2E is not 1, so no migrated database, deployed workflow \
+         bundle, gateway or worker has been stood up for this run",
+        "Drive this target through the harness that provisions all of it:\n\
+         \x20     tests/e2e_durable_workflows.sh\n\
+         \n\
+         \x20   It boots a disposable Postgres, applies the platform\n\
+         \x20   migrations, starts real control, gateway and worker processes,\n\
+         \x20   deploys a real workflow .zship, and then runs these tests with\n\
+         \x20   ZEROSHIP_DW_E2E=1 and the ZEROSHIP_DW_E2E_* coordinates this\n\
+         \x20   file reads.",
+    );
+}
+
 /// `value` is the caller's already-read result for `name` (a `test_env!` read
 /// at the call site) - the read stays at each literal call site so it remains
 /// enumerable; this helper only formats the panic.
@@ -868,12 +899,7 @@ async fn bench_counts(fx: &Fixture, run_ids: &[String]) -> (i64, i64) {
 fn dw23_workflow_engine_load_bench() {
     let rt = compio::runtime::Runtime::new().expect("compio runtime");
     rt.block_on(async {
-        if !enabled() {
-            zeroship_test_support::skip(
-                "skip: run via tests/e2e_durable_workflows.sh --bench"
-            );
-            return;
-        }
+        require_dw_e2e_fleet();
 
         let db_url = required_env("a test database", zeroship_core::config::test_database_url_opt());
         let gateway_url = required_env("ZEROSHIP_DW_E2E_GATEWAY_URL", zeroship_core::test_env!("ZEROSHIP_DW_E2E_GATEWAY_URL"));
@@ -2755,10 +2781,7 @@ async fn run_debug(fx: &Fixture, run_id: &str) -> String {
 #[test]
 #[serial]
 fn durable_workflows_m1_keystone_real_spine() {
-    if !enabled() {
-        zeroship_test_support::skip("skip: set ZEROSHIP_DW_E2E=1 via tests/e2e_durable_workflows.sh");
-        return;
-    }
+    require_dw_e2e_fleet();
 
     let handle = thread::Builder::new()
         .name("dw-keystone".to_owned())
@@ -4886,10 +4909,7 @@ async fn keystone_real_spine() {
 #[compio::test]
 #[serial]
 async fn bare_await_body_io_is_rejected() {
-    if !enabled() {
-        zeroship_test_support::skip("skip: set ZEROSHIP_DW_E2E=1 via tests/e2e_durable_workflows.sh");
-        return;
-    }
+    require_dw_e2e_fleet();
 
     let db_url = required_env("a test database", zeroship_core::config::test_database_url_opt());
     let gateway_url = required_env("ZEROSHIP_DW_E2E_GATEWAY_URL", zeroship_core::test_env!("ZEROSHIP_DW_E2E_GATEWAY_URL"));
@@ -4937,10 +4957,7 @@ async fn bare_await_body_io_is_rejected() {
 #[compio::test]
 #[serial]
 async fn scheduler_misfire_lost_register_recovers() {
-    if !enabled() {
-        zeroship_test_support::skip("skip: set ZEROSHIP_DW_E2E=1 via tests/e2e_durable_workflows.sh");
-        return;
-    }
+    require_dw_e2e_fleet();
 
     let db_url = required_env("a test database", zeroship_core::config::test_database_url_opt());
     let gateway_url = required_env("ZEROSHIP_DW_E2E_GATEWAY_URL", zeroship_core::test_env!("ZEROSHIP_DW_E2E_GATEWAY_URL"));
@@ -5043,10 +5060,7 @@ async fn scheduler_misfire_lost_register_recovers() {
 #[compio::test]
 #[serial]
 async fn scheduler_overfire_duplicate_dispatch_noops() {
-    if !enabled() {
-        zeroship_test_support::skip("skip: set ZEROSHIP_DW_E2E=1 via tests/e2e_durable_workflows.sh");
-        return;
-    }
+    require_dw_e2e_fleet();
 
     let db_url = required_env("a test database", zeroship_core::config::test_database_url_opt());
     let gateway_url = required_env("ZEROSHIP_DW_E2E_GATEWAY_URL", zeroship_core::test_env!("ZEROSHIP_DW_E2E_GATEWAY_URL"));
@@ -5151,10 +5165,7 @@ async fn scheduler_overfire_duplicate_dispatch_noops() {
 #[compio::test]
 #[serial]
 async fn compensation_saga_rollback_real_spine() {
-    if !enabled() {
-        zeroship_test_support::skip("skip: set ZEROSHIP_DW_E2E=1 via tests/e2e_durable_workflows.sh");
-        return;
-    }
+    require_dw_e2e_fleet();
 
     let db_url = required_env("a test database", zeroship_core::config::test_database_url_opt());
     let control_url = required_env("ZEROSHIP_DW_E2E_CONTROL_URL", zeroship_core::test_env!("ZEROSHIP_DW_E2E_CONTROL_URL"));

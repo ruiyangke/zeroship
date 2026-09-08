@@ -9,8 +9,11 @@
 //! Requires `CONTROL_TEST_DB` pointing at a migrated disposable database. Each
 //! test clones that migrated DB into its own throwaway database because the
 //! engine claims due workflow runs globally across the connected database.
-//! Tests skip when `CONTROL_TEST_DB` is unset, matching the rest of the control
-//! integration suite.
+//!
+//! An unset `CONTROL_TEST_DB` is a REFUSAL naming `tests/run_billing_suite.sh`,
+//! never a skip. It used to skip, and `tests/run_billing_suite.sh` records what
+//! that bought: dropping the export made this binary's tests announce
+//! "CONTROL_TEST_DB not set" and pass without executing.
 
 #![allow(clippy::await_holding_lock, clippy::future_not_send)]
 
@@ -234,16 +237,27 @@ async fn try_pg(
     Ok(client)
 }
 
-async fn isolated_fixture(label: &str) -> Option<Fixture> {
+async fn isolated_fixture(label: &str) -> Fixture {
     isolated_fixture_with_gateway(label, "http://127.0.0.1:9").await
 }
 
-async fn isolated_fixture_with_gateway(label: &str, gateway_url: &str) -> Option<Fixture> {
+async fn isolated_fixture_with_gateway(label: &str, gateway_url: &str) -> Fixture {
     let Some(base_url) = db_url() else {
-        zeroship_test_support::skip("skip: CONTROL_TEST_DB not set");
-        return None;
+        common::refuse_missing_backend(
+            "a migrated disposable PostgreSQL named by CONTROL_TEST_DB",
+            "CONTROL_TEST_DB is unset, so there is no database to clone a \
+             per-test one from",
+            "Run this target through the suite that provisions and exports it:\n\
+             \x20     tests/run_billing_suite.sh\n\
+             \n\
+             \x20   It creates a per-run database, applies the platform\n\
+             \x20   migrations to it, and exports CONTROL_TEST_DB. Point the\n\
+             \x20   tests at an already-migrated database instead with:\n\
+             \x20     CONTROL_TEST_DB=<dsn> cargo test -p zeroship-control \\\n\
+             \x20       --features live-db-tests --test workflow_engine_test",
+        );
     };
-    Some(build_isolated_fixture_with_gateway(&base_url, label, gateway_url).await)
+    build_isolated_fixture_with_gateway(&base_url, label, gateway_url).await
 }
 
 async fn build_isolated_fixture_with_gateway(
@@ -1883,9 +1897,7 @@ fn child_dedup_key_is_parent_and_ordinal_deterministic() {
 #[compio::test]
 #[serial]
 async fn control_scheduler_reconcile_seeds_from_per_app_journal() {
-    let Some(fx) = isolated_fixture("scheduler-boot-reconcile").await else {
-        return;
-    };
+    let fx = isolated_fixture("scheduler-boot-reconcile").await;
     let (app_id, deploy_id) = seed_app_and_deploy(&fx, "scheduler-boot-reconcile").await;
     let due_run = seed_run(
         &fx,
@@ -1956,9 +1968,7 @@ async fn control_scheduler_reconcile_seeds_from_per_app_journal() {
 #[compio::test]
 #[serial]
 async fn archived_app_timer_is_parked_and_rebuilt_after_unarchive() {
-    let Some(fx) = isolated_fixture("archived-timer").await else {
-        return;
-    };
+    let fx = isolated_fixture("archived-timer").await;
     workflow_engine::reset_inflight_dispatches_for_test();
     let (app_id, deploy_id) = seed_app_and_deploy(&fx, "archived-timer").await;
     let run_id = seed_run(
@@ -2057,9 +2067,7 @@ async fn archived_app_timer_is_parked_and_rebuilt_after_unarchive() {
 
 #[compio::test]
 async fn archived_app_is_rejected_at_the_worker_claim_boundary() {
-    let Some(fx) = isolated_fixture("archived-worker-claim").await else {
-        return;
-    };
+    let fx = isolated_fixture("archived-worker-claim").await;
     let (app_id, deploy_id) = seed_app_and_deploy(&fx, "archived-worker-claim").await;
     let run_id = seed_run(
         &fx,
@@ -2112,9 +2120,7 @@ async fn archived_app_is_rejected_at_the_worker_claim_boundary() {
 
 #[compio::test]
 async fn claim_journal_preserves_same_name_child_occurrences() {
-    let Some(fx) = isolated_fixture("child-journal-occurrence").await else {
-        return;
-    };
+    let fx = isolated_fixture("child-journal-occurrence").await;
     let (app_id, deploy_id) = seed_app_and_deploy(&fx, "child-journal-occurrence").await;
     let run_id = seed_run(
         &fx,
@@ -2183,9 +2189,7 @@ async fn claim_journal_preserves_same_name_child_occurrences() {
 
 #[compio::test]
 async fn child_spawn_is_idempotent_and_terminal_hook_wakes_parent() {
-    let Some(fx) = isolated_fixture("child-spawn-idempotent").await else {
-        return;
-    };
+    let fx = isolated_fixture("child-spawn-idempotent").await;
     let (app_id, deploy_id) = seed_app_and_deploy(&fx, "child-spawn-idempotent").await;
     let parent = seed_run(
         &fx,
@@ -2414,9 +2418,7 @@ async fn child_spawn_is_idempotent_and_terminal_hook_wakes_parent() {
 
 #[compio::test]
 async fn concurrent_child_terminals_keep_claimed_parent_registered() {
-    let Some(fx) = isolated_fixture("child-join-parent-strand").await else {
-        return;
-    };
+    let fx = isolated_fixture("child-join-parent-strand").await;
     let (app_id, deploy_id) = seed_app_and_deploy(&fx, "child-join-parent-strand").await;
     let parent = seed_run(
         &fx,
@@ -2644,9 +2646,7 @@ async fn concurrent_child_terminals_keep_claimed_parent_registered() {
 
 #[compio::test]
 async fn claim_compensation_drain_registers_parent_wake() {
-    let Some(fx) = isolated_fixture("claim-comp-drain-parent").await else {
-        return;
-    };
+    let fx = isolated_fixture("claim-comp-drain-parent").await;
     let (app_id, deploy_id) = seed_app_and_deploy(&fx, "claim-comp-drain-parent").await;
     let parent = seed_run(
         &fx,
@@ -2773,9 +2773,7 @@ async fn claim_compensation_drain_registers_parent_wake() {
 
 #[compio::test]
 async fn parent_cancel_cascades_cooperatively_to_descendants() {
-    let Some(fx) = isolated_fixture("child-cascade").await else {
-        return;
-    };
+    let fx = isolated_fixture("child-cascade").await;
     let (app_id, deploy_id) = seed_app_and_deploy(&fx, "child-cascade").await;
     let parent = seed_run(&fx, app_id, &deploy_id, "queued", -1_000, None, None, None, None).await;
     let child = zeroship_core::typed_id::new_workflow_run_id();
@@ -2874,9 +2872,7 @@ async fn parent_cancel_cascades_cooperatively_to_descendants() {
 
 #[compio::test]
 async fn cancel_requested_inflight_child_apply_cancels_without_committing_step() {
-    let Some(fx) = isolated_fixture("child-cascade-sleep").await else {
-        return;
-    };
+    let fx = isolated_fixture("child-cascade-sleep").await;
     let (app_id, deploy_id) = seed_app_and_deploy(&fx, "child-cascade-sleep").await;
     let parent = seed_run(
         &fx,
@@ -2998,9 +2994,7 @@ async fn cancel_requested_inflight_child_apply_cancels_without_committing_step()
 
 #[compio::test]
 async fn cancel_requested_parked_child_dispatch_is_replay_free_many_iterations() {
-    let Some(fx) = isolated_fixture("child-cancel-replay-free-many").await else {
-        return;
-    };
+    let fx = isolated_fixture("child-cancel-replay-free-many").await;
     let (app_id, deploy_id) = seed_app_and_deploy(&fx, "child-cancel-replay-free-many").await;
     let parent = seed_run(
         &fx,
@@ -3132,9 +3126,7 @@ async fn cancel_requested_parked_child_dispatch_is_replay_free_many_iterations()
 
 #[compio::test]
 async fn cascade_cancel_repair_registers_all_sleeping_children_due_now() {
-    let Some(fx) = isolated_fixture("child-cascade-sleep-two").await else {
-        return;
-    };
+    let fx = isolated_fixture("child-cascade-sleep-two").await;
     let (app_id, deploy_id) = seed_app_and_deploy(&fx, "child-cascade-sleep-two").await;
     let parent = seed_run(
         &fx,
@@ -3300,9 +3292,7 @@ async fn cascade_cancel_repair_registers_all_sleeping_children_due_now() {
 
 #[compio::test]
 async fn max_live_descendants_rejects_child_spawn_as_catchable_step_failure() {
-    let Some(fx) = isolated_fixture("child-live-cap").await else {
-        return;
-    };
+    let fx = isolated_fixture("child-live-cap").await;
     let (app_id, deploy_id) = seed_app_and_deploy(&fx, "child-live-cap").await;
     let parent = seed_run(
         &fx,
@@ -3369,9 +3359,7 @@ async fn max_live_descendants_rejects_child_spawn_as_catchable_step_failure() {
 
 #[compio::test]
 async fn blob_output_step_refcount_co_commits_with_journal_row() {
-    let Some(fx) = isolated_fixture("blob-ref-commit").await else {
-        return;
-    };
+    let fx = isolated_fixture("blob-ref-commit").await;
     compio::time::timeout(Duration::from_secs(10), async {
         let (app_id, deploy_id) = seed_app_and_deploy(&fx, "blob-ref-commit").await;
         let run_id = seed_run(
@@ -3467,9 +3455,7 @@ async fn blob_output_step_refcount_co_commits_with_journal_row() {
 
 #[compio::test]
 async fn workflow_blob_ref_gc_reclaims_zero_refs_but_not_referenced_hashes() {
-    let Some(fx) = isolated_fixture("blob-ref-gc").await else {
-        return;
-    };
+    let fx = isolated_fixture("blob-ref-gc").await;
     compio::time::timeout(Duration::from_secs(10), async {
         let (app_id, deploy_id) = seed_app_and_deploy(&fx, "blob-ref-gc").await;
         let run_id = seed_run(
@@ -3610,8 +3596,8 @@ async fn workflow_blob_ref_gc_reclaims_zero_refs_but_not_referenced_hashes() {
 /// `workflow_blob_is_referenced` exists to answer.
 ///
 /// Returns (deleted, first app's row survives, object survives).
-async fn ref_sweep_over_a_shared_hash(label: &str, second_app_holds_it: bool) -> Option<(usize, bool, bool)> {
-    let fx = isolated_fixture(label).await?;
+async fn ref_sweep_over_a_shared_hash(label: &str, second_app_holds_it: bool) -> (usize, bool, bool) {
+    let fx = isolated_fixture(label).await;
     let (first, _) = seed_app_and_deploy(&fx, &format!("{label}-first")).await;
     let (second, _) = seed_app_and_deploy(&fx, &format!("{label}-second")).await;
 
@@ -3667,7 +3653,7 @@ async fn ref_sweep_over_a_shared_hash(label: &str, second_app_holds_it: bool) ->
 
     drop(fx);
     common::drain_pg().await;
-    Some((swept.deleted, row_survives, object_survives))
+    (swept.deleted, row_survives, object_survives)
 }
 
 /// A blob another app still holds must keep BOTH its row and its object.
@@ -3692,11 +3678,7 @@ async fn ref_sweep_over_a_shared_hash(label: &str, second_app_holds_it: bool) ->
 /// app's row, which no sweep should touch and which is not asserted here.
 #[compio::test]
 async fn ref_sweep_keeps_a_blob_a_second_app_still_references() {
-    let Some((deleted, row_survives, object_survives)) =
-        ref_sweep_over_a_shared_hash("blob-shared-held", true).await
-    else {
-        return;
-    };
+    let (deleted, row_survives, object_survives) = ref_sweep_over_a_shared_hash("blob-shared-held", true).await;
     assert_eq!(deleted, 0, "a blob another app holds must not be collected");
     assert!(
         row_survives,
@@ -3713,11 +3695,7 @@ async fn ref_sweep_keeps_a_blob_a_second_app_still_references() {
 /// on one variable.
 #[compio::test]
 async fn ref_sweep_collects_a_shared_hash_no_other_app_holds() {
-    let Some((deleted, row_survives, object_survives)) =
-        ref_sweep_over_a_shared_hash("blob-shared-free", false).await
-    else {
-        return;
-    };
+    let (deleted, row_survives, object_survives) = ref_sweep_over_a_shared_hash("blob-shared-free", false).await;
     assert_eq!(deleted, 1, "with no other holder the blob is collectible");
     assert!(!row_survives, "and its row goes");
     assert!(!object_survives, "and so do its bytes");
@@ -3725,9 +3703,7 @@ async fn ref_sweep_collects_a_shared_hash_no_other_app_holds() {
 
 #[compio::test]
 async fn workflow_blob_orphan_gc_reclaims_only_unreferenced_old_files() {
-    let Some(fx) = isolated_fixture("blob-orphan-gc").await else {
-        return;
-    };
+    let fx = isolated_fixture("blob-orphan-gc").await;
     compio::time::timeout(Duration::from_secs(10), async {
         let (_app_id, _deploy_id) = seed_app_and_deploy(&fx, "blob-orphan-gc").await;
         let old = SystemTime::now()
@@ -3803,9 +3779,7 @@ async fn workflow_blob_orphan_gc_reclaims_only_unreferenced_old_files() {
 
 #[compio::test]
 async fn signal_fanout_redrain_registers_delivered_pending_broadcast() {
-    let Some(fx) = isolated_fixture("fanout-redrain-register").await else {
-        return;
-    };
+    let fx = isolated_fixture("fanout-redrain-register").await;
     let (app_id, deploy_id) = seed_app_and_deploy(&fx, "fanout-redrain-register").await;
     let run_id = seed_run(
         &fx,
@@ -3923,9 +3897,7 @@ async fn signal_fanout_redrain_registers_delivered_pending_broadcast() {
 #[compio::test]
 #[serial]
 async fn workflow_retention_reaps_only_expired_terminal_runs() {
-    let Some(fx) = isolated_fixture("retention-gc").await else {
-        return;
-    };
+    let fx = isolated_fixture("retention-gc").await;
     compio::time::timeout(Duration::from_secs(10), async {
         let (app_id, deploy_id) = seed_app_and_deploy(&fx, "retention-gc").await;
         let window_ms = 2 * 24 * 60 * 60 * 1_000;
@@ -4209,9 +4181,7 @@ async fn workflow_retention_reaps_only_expired_terminal_runs() {
 #[compio::test]
 #[serial]
 async fn deploy_retention_reclaims_superseded_manifest_after_pinned_run_terminal() {
-    let Some(fx) = isolated_fixture("deploy-retention-drain").await else {
-        return;
-    };
+    let fx = isolated_fixture("deploy-retention-drain").await;
     compio::time::timeout(Duration::from_secs(10), async {
         let (app_id, old_deploy) = seed_app_and_deploy(&fx, "deploy-retention-drain").await;
         age_deploy(
@@ -4348,9 +4318,7 @@ async fn deploy_retention_reclaims_superseded_manifest_after_pinned_run_terminal
 #[compio::test]
 #[serial]
 async fn deploy_retention_counts_are_per_app() {
-    let Some(fx) = isolated_fixture("deploy-retention-per-app").await else {
-        return;
-    };
+    let fx = isolated_fixture("deploy-retention-per-app").await;
     compio::time::timeout(Duration::from_secs(10), async {
         let (app_a, old_a) = seed_app_and_deploy(&fx, "deploy-retention-app-a").await;
         let (app_b, old_b) = seed_app_and_deploy(&fx, "deploy-retention-app-b").await;
@@ -4456,9 +4424,7 @@ async fn deploy_retention_counts_are_per_app() {
 #[compio::test]
 #[serial]
 async fn retention_and_schedule_sweeps_visit_multiple_app_journals() {
-    let Some(fx) = isolated_fixture("multi-app-sweeps").await else {
-        return;
-    };
+    let fx = isolated_fixture("multi-app-sweeps").await;
     compio::time::timeout(Duration::from_secs(10), async {
         let (app_a, deploy_a) = seed_app_and_deploy(&fx, "sweep-a").await;
         let (app_b, deploy_b) = seed_app_and_deploy(&fx, "sweep-b").await;
@@ -4578,9 +4544,7 @@ async fn retention_and_schedule_sweeps_visit_multiple_app_journals() {
 
 #[compio::test]
 async fn schedule_overlap_policy_skip_blocks_live_run_and_allow_fires_concurrent_run() {
-    let Some(fx) = isolated_fixture("schedule-overlap-policy").await else {
-        return;
-    };
+    let fx = isolated_fixture("schedule-overlap-policy").await;
     compio::time::timeout(Duration::from_secs(10), async {
         let (app_id, deploy_id) = seed_app_and_deploy(&fx, "schedule-overlap-policy").await;
         let interval_ms = 1_000;
@@ -4683,9 +4647,7 @@ async fn schedule_overlap_policy_skip_blocks_live_run_and_allow_fires_concurrent
 /// The assertions are what fail this test, and all of them remain.
 #[compio::test]
 async fn schedule_catch_up_backfill_is_bounded_by_max_and_drops_excess() {
-    let Some(fx) = isolated_fixture("schedule-catch-up-policy").await else {
-        return;
-    };
+    let fx = isolated_fixture("schedule-catch-up-policy").await;
     let (app_id, deploy_id) = seed_app_and_deploy(&fx, "schedule-catch-up-policy").await;
     let interval_ms = 1_000;
     let planned = aligned_planned_instant(9, interval_ms);
@@ -4744,9 +4706,7 @@ async fn schedule_catch_up_backfill_is_bounded_by_max_and_drops_excess() {
 
 #[compio::test]
 async fn archived_app_schedule_remains_due_until_unarchive() {
-    let Some(fx) = isolated_fixture("archived-schedule").await else {
-        return;
-    };
+    let fx = isolated_fixture("archived-schedule").await;
     let (app_id, deploy_id) = seed_app_and_deploy(&fx, "archived-schedule").await;
     let planned = aligned_planned_instant(2, 1_000);
     let schedule_id = insert_interval_schedule(
@@ -4817,9 +4777,7 @@ async fn archived_app_schedule_remains_due_until_unarchive() {
 /// three-transaction deadlock cycle.
 #[compio::test]
 async fn schedule_fire_does_not_invert_archive_lifecycle_lock_order() {
-    let Some(fx) = isolated_fixture("schedule-archive-lock-order").await else {
-        return;
-    };
+    let fx = isolated_fixture("schedule-archive-lock-order").await;
     let (app_id, deploy_id) = seed_app_and_deploy(&fx, "schedule-archive-lock-order").await;
     let planned = aligned_planned_instant(2, 1_000);
     let schedule_id = insert_interval_schedule(
@@ -4976,9 +4934,7 @@ async fn schedule_fire_does_not_invert_archive_lifecycle_lock_order() {
 /// [`schedule_catch_up_backfill_is_bounded_by_max_and_drops_excess`].
 #[compio::test]
 async fn schedule_normal_cadence_fires_one_tick_and_rearms() {
-    let Some(fx) = isolated_fixture("schedule-normal-cadence").await else {
-        return;
-    };
+    let fx = isolated_fixture("schedule-normal-cadence").await;
     let (app_id, deploy_id) = seed_app_and_deploy(&fx, "schedule-normal-cadence").await;
     let interval_ms = 1_000;
     let planned = aligned_planned_instant(2, interval_ms);
@@ -5044,9 +5000,7 @@ async fn schedule_normal_cadence_fires_one_tick_and_rearms() {
 /// remove.
 #[compio::test]
 async fn schedule_sweep_fires_claims_whose_batch_lease_already_expired() {
-    let Some(fx) = isolated_fixture("schedule-expired-lease").await else {
-        return;
-    };
+    let fx = isolated_fixture("schedule-expired-lease").await;
     let (app_id, deploy_id) = seed_app_and_deploy(&fx, "schedule-expired-lease").await;
     let interval_ms = 1_000;
     let planned = aligned_planned_instant(4, interval_ms);
@@ -5107,9 +5061,7 @@ async fn schedule_sweep_fires_claims_whose_batch_lease_already_expired() {
 
 #[compio::test]
 async fn batch_step_result_applies_atomically_and_preserves_effn1() {
-    let Some(fx) = isolated_fixture("batch-apply").await else {
-        return;
-    };
+    let fx = isolated_fixture("batch-apply").await;
     compio::time::timeout(Duration::from_secs(10), async {
         let (app_id, deploy_id) = seed_app_and_deploy(&fx, "batch-apply").await;
 
@@ -5321,9 +5273,7 @@ async fn batch_step_result_applies_atomically_and_preserves_effn1() {
 
 #[compio::test]
 async fn caught_step_failure_continues_run_to_completion() {
-    let Some(fx) = isolated_fixture("caught-step-failure").await else {
-        return;
-    };
+    let fx = isolated_fixture("caught-step-failure").await;
     let (app_id, deploy_id) = seed_app_and_deploy(&fx, "caught-step-failure").await;
     let run_id = seed_run(
         &fx,
@@ -5400,9 +5350,7 @@ async fn caught_step_failure_continues_run_to_completion() {
 
 #[compio::test]
 async fn uncaught_step_failure_fails_after_one_extra_replay() {
-    let Some(fx) = isolated_fixture("uncaught-step-failure").await else {
-        return;
-    };
+    let fx = isolated_fixture("uncaught-step-failure").await;
     let (app_id, deploy_id) = seed_app_and_deploy(&fx, "uncaught-step-failure").await;
     let run_id = seed_run(
         &fx,
@@ -5514,9 +5462,7 @@ async fn uncaught_step_failure_fails_after_one_extra_replay() {
 
 #[compio::test]
 async fn zero_progress_frontier_trips_stuck_strikes_to_stalled() {
-    let Some(fx) = isolated_fixture("stuck-strikes").await else {
-        return;
-    };
+    let fx = isolated_fixture("stuck-strikes").await;
     let (app_id, deploy_id) = seed_app_and_deploy(&fx, "stuck-strikes").await;
     fx.pg
         .execute(
@@ -5598,9 +5544,7 @@ async fn zero_progress_frontier_trips_stuck_strikes_to_stalled() {
 
 #[compio::test]
 async fn tick_claims_due_run_and_sets_owner_and_nonce() {
-    let Some(fx) = isolated_fixture("claim").await else {
-        return;
-    };
+    let fx = isolated_fixture("claim").await;
     let (app_id, deploy_id) = seed_app_and_deploy(&fx, "claim").await;
     let run_id = seed_run(
         &fx, app_id, &deploy_id, "queued", -1_000, None, None, None, None,
@@ -5647,9 +5591,7 @@ async fn tick_claims_due_run_and_sets_owner_and_nonce() {
 #[compio::test]
 #[serial]
 async fn concurrent_ticks_claim_disjoint_rows() {
-    let Some(fx) = isolated_fixture("concurrent").await else {
-        return;
-    };
+    let fx = isolated_fixture("concurrent").await;
     let (app_id, deploy_id) = seed_app_and_deploy(&fx, "concurrent").await;
     for _ in 0..8 {
         seed_run(
@@ -5699,9 +5641,7 @@ async fn concurrent_ticks_claim_disjoint_rows() {
 #[serial]
 async fn stale_lease_is_taken_over_after_ttl() {
     let _timing_guard = timing_test_guard();
-    let Some(fx) = isolated_fixture("stale").await else {
-        return;
-    };
+    let fx = isolated_fixture("stale").await;
     let (app_id, deploy_id) = seed_app_and_deploy(&fx, "stale").await;
     let run_id = seed_run(
         &fx,
@@ -5754,9 +5694,7 @@ async fn stale_lease_is_taken_over_after_ttl() {
 #[compio::test]
 #[serial]
 async fn lease_handoff_rejects_stale_writer_after_second_owner_commits() {
-    let Some(fx) = isolated_fixture("lease-handoff-guard").await else {
-        return;
-    };
+    let fx = isolated_fixture("lease-handoff-guard").await;
     let (app_id, deploy_id) = seed_app_and_deploy(&fx, "lease-handoff-guard").await;
     let run_id = seed_run(
         &fx,
@@ -5844,9 +5782,7 @@ async fn lease_handoff_rejects_stale_writer_after_second_owner_commits() {
 
 #[compio::test]
 async fn sleep_suspension_resolves_into_journal_row_at_wake() {
-    let Some(fx) = isolated_fixture("sleep").await else {
-        return;
-    };
+    let fx = isolated_fixture("sleep").await;
     let (app_id, deploy_id) = seed_app_and_deploy(&fx, "sleep").await;
     let run_id = seed_run(
         &fx,
@@ -5897,9 +5833,7 @@ async fn sleep_suspension_resolves_into_journal_row_at_wake() {
 
 #[compio::test]
 async fn apply_outcome_checkpoints_idempotently() {
-    let Some(fx) = isolated_fixture("apply").await else {
-        return;
-    };
+    let fx = isolated_fixture("apply").await;
     let (app_id, deploy_id) = seed_app_and_deploy(&fx, "apply").await;
     let run_id = seed_run(
         &fx,
@@ -5971,9 +5905,7 @@ async fn apply_outcome_checkpoints_idempotently() {
 }
 
 async fn assert_journal_bytes_grows_and_state_cap_errors_without_oversized_row() {
-    let Some(fx) = isolated_fixture("journal-cap").await else {
-        return;
-    };
+    let fx = isolated_fixture("journal-cap").await;
     let first_output = serde_json::json!({"small": "ok"});
     let second_output = serde_json::json!({"large": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"});
     let first_size = pg_json_size(&fx, &first_output).await;
@@ -6075,9 +6007,7 @@ async fn assert_journal_bytes_grows_and_state_cap_errors_without_oversized_row()
 
 #[compio::test]
 async fn pause_resume_controls_cover_due_skip_and_restore_state() {
-    let Some(fx) = isolated_fixture("pause-resume").await else {
-        return;
-    };
+    let fx = isolated_fixture("pause-resume").await;
     let (app_id, deploy_id) = seed_app_and_deploy(&fx, "pause-resume").await;
     let cases = [
         ("queued", None, -1_000),
@@ -6249,9 +6179,7 @@ async fn pause_resume_controls_cover_due_skip_and_restore_state() {
 
 #[compio::test]
 async fn pause_signal_resume_registers_no_timeout_waiting_run() {
-    let Some(fx) = isolated_fixture("pause-signal-resume").await else {
-        return;
-    };
+    let fx = isolated_fixture("pause-signal-resume").await;
     let (app_id, deploy_id) = seed_app_and_deploy(&fx, "pause-signal-resume").await;
     let run_id = seed_run(
         &fx,
@@ -6396,9 +6324,7 @@ async fn pause_signal_resume_registers_no_timeout_waiting_run() {
 async fn preserve_ack_parks_no_timeout_wait_off_inflight_reaper() {
     let _timing_guard = timing_test_guard();
     workflow_engine::reset_inflight_dispatches_for_test();
-    let Some(fx) = isolated_fixture("preserve-park").await else {
-        return;
-    };
+    let fx = isolated_fixture("preserve-park").await;
     let (app_id, deploy_id) = seed_app_and_deploy(&fx, "preserve-park").await;
     let run_id = seed_run(
         &fx,
@@ -6523,9 +6449,7 @@ async fn preserve_ack_parks_no_timeout_wait_off_inflight_reaper() {
 
 #[compio::test]
 async fn pause_mid_dispatch_lands_checkpoint_but_suppresses_requeue() {
-    let Some(fx) = isolated_fixture("pause-mid").await else {
-        return;
-    };
+    let fx = isolated_fixture("pause-mid").await;
     let (app_id, deploy_id) = seed_app_and_deploy(&fx, "pause-mid").await;
     let run_id = seed_run(
         &fx,
@@ -6695,9 +6619,7 @@ async fn pause_mid_dispatch_lands_checkpoint_but_suppresses_requeue() {
 #[compio::test]
 async fn cancel_mid_dispatch_discards_late_outcome() {
     let _timing_guard = timing_test_guard();
-    let Some(fx) = isolated_fixture("cancel-mid").await else {
-        return;
-    };
+    let fx = isolated_fixture("cancel-mid").await;
     let (app_id, deploy_id) = seed_app_and_deploy(&fx, "cancel-mid").await;
     let run_id = seed_run(
         &fx,
@@ -6771,9 +6693,7 @@ async fn cancel_mid_dispatch_discards_late_outcome() {
 #[compio::test]
 #[serial]
 async fn restart_rewinds_prefix_requeues_and_guards_completed_compensation() {
-    let Some(fx) = isolated_fixture("restart").await else {
-        return;
-    };
+    let fx = isolated_fixture("restart").await;
     let (app_id, deploy_id) = seed_app_and_deploy(&fx, "restart").await;
     let app = test::init_service(
         web::App::new()
@@ -6978,9 +6898,7 @@ async fn restart_rewinds_prefix_requeues_and_guards_completed_compensation() {
 async fn per_app_cap_does_not_livelock_queued_runs() {
     let _timing_guard = timing_test_guard();
     workflow_engine::reset_inflight_dispatches_for_test();
-    let Some(fx) = isolated_fixture("cap").await else {
-        return;
-    };
+    let fx = isolated_fixture("cap").await;
     let (app_id, deploy_id) = seed_app_and_deploy(&fx, "cap").await;
     let mut run_ids = Vec::new();
     for _ in 0..6 {
@@ -7068,9 +6986,7 @@ async fn gateway_402_backpressure_parks_claim_without_step_attempt() {
         )
     })
     .await;
-    let Some(fx) = isolated_fixture_with_gateway("gw-402", &gateway.url("")).await else {
-        return;
-    };
+    let fx = isolated_fixture_with_gateway("gw-402", &gateway.url("")).await;
     let (app_id, deploy_id) = seed_app_and_deploy(&fx, "gw-402").await;
     let run_id = seed_run(
         &fx, app_id, &deploy_id, "queued", -1_000, None, None, None, None,
@@ -7268,8 +7184,8 @@ struct TwoAppReap {
 /// as the real `zeroship_control` role.
 ///
 /// `second` is the ONLY variable between the tests below.
-async fn reap_over_two_apps(label: &str, second: SecondJournal) -> Option<TwoAppReap> {
-    let fx = isolated_fixture(label).await?;
+async fn reap_over_two_apps(label: &str, second: SecondJournal) -> TwoAppReap {
+    let fx = isolated_fixture(label).await;
 
     let (good_app, good_deploy) = seed_app_and_deploy(&fx, "readable").await;
     let good_run = seed_parked_cancel_run(&fx, good_app, &good_deploy).await;
@@ -7310,11 +7226,11 @@ async fn reap_over_two_apps(label: &str, second: SecondJournal) -> Option<TwoApp
 
     drop(fx);
     common::drain_pg().await;
-    Some(TwoAppReap {
+    TwoAppReap {
         registered: reap.registered,
         coverage: reap.coverage,
         good_wake_at,
-    })
+    }
 }
 
 /// TWO apps, both with a parked cancel, one journal `zeroship_control` cannot
@@ -7350,9 +7266,7 @@ async fn reap_over_two_apps(label: &str, second: SecondJournal) -> Option<TwoApp
 /// migration corpus this test DB was built from does.
 #[compio::test]
 async fn parked_cancel_reaper_skips_an_app_whose_journal_is_unreadable() {
-    let Some(result) = reap_over_two_apps("skip-unreadable-journal", SecondJournal::Unreadable).await else {
-        return;
-    };
+    let result = reap_over_two_apps("skip-unreadable-journal", SecondJournal::Unreadable).await;
     assert_eq!(
         result.registered, 1,
         "the reaper must reap the readable app's parked cancel and skip the unreadable one"
@@ -7408,9 +7322,7 @@ async fn parked_cancel_reaper_skips_an_app_whose_journal_is_unreadable() {
 /// would pass the test above and fail this one.
 #[compio::test]
 async fn parked_cancel_reaper_reaps_both_apps_when_both_journals_are_readable() {
-    let Some(result) = reap_over_two_apps("reap-both-journals", SecondJournal::Usable).await else {
-        return;
-    };
+    let result = reap_over_two_apps("reap-both-journals", SecondJournal::Usable).await;
     assert_eq!(
         result.registered, 2,
         "with both journals readable the reaper must reap both apps' parked cancels"
@@ -7520,8 +7432,8 @@ struct FleetSweep {
 
 /// Run ONE retention tick over a fleet of `apps` apps and report how many
 /// database sessions it opened.
-async fn retention_over_fleet(label: &str, apps: usize) -> Option<FleetSweep> {
-    let fx = isolated_fixture(label).await?;
+async fn retention_over_fleet(label: &str, apps: usize) -> FleetSweep {
+    let fx = isolated_fixture(label).await;
     let window_ms = 2 * 24 * 60 * 60 * 1_000;
     let terminal_at = Utc::now() - ChronoDuration::milliseconds(window_ms + 60_000);
     for i in 0..apps {
@@ -7542,11 +7454,11 @@ async fn retention_over_fleet(label: &str, apps: usize) -> Option<FleetSweep> {
 
     drop(fx);
     common::drain_pg().await;
-    Some(FleetSweep {
+    FleetSweep {
         apps,
         sessions_opened: after - before,
         runs_reaped: stats.runs,
-    })
+    }
 }
 
 /// A retention tick over a 12-app fleet must open the SAME number of database
@@ -7575,12 +7487,8 @@ async fn retention_over_fleet(label: &str, apps: usize) -> Option<FleetSweep> {
 /// count is flat between two sizes, not that it is flat at scale.
 #[compio::test]
 async fn retention_tick_opens_the_same_connections_for_a_large_fleet_as_a_small_one() {
-    let Some(small) = retention_over_fleet("fleet-conn-small", 2).await else {
-        return;
-    };
-    let Some(large) = retention_over_fleet("fleet-conn-large", 12).await else {
-        return;
-    };
+    let small = retention_over_fleet("fleet-conn-small", 2).await;
+    let large = retention_over_fleet("fleet-conn-large", 12).await;
 
     // A floor, not an equality: the CONTROL_TEST_DB template may already hold
     // journalled apps of its own with expired runs. The point of asserting it
@@ -7641,9 +7549,7 @@ async fn retention_tick_opens_the_same_connections_for_a_large_fleet_as_a_small_
 /// old code did.
 #[compio::test]
 async fn run_lookup_finds_a_readable_apps_run_while_another_journal_is_unreadable() {
-    let Some(fx) = isolated_fixture("lookup-readable-wins").await else {
-        return;
-    };
+    let fx = isolated_fixture("lookup-readable-wins").await;
     let (good_app, good_deploy) = seed_app_and_deploy(&fx, "lookup-good").await;
     let run_id = seed_run(&fx, good_app, &good_deploy, "sleeping", 60_000, None, None, None, None)
         .await;
@@ -7678,9 +7584,7 @@ async fn run_lookup_finds_a_readable_apps_run_while_another_journal_is_unreadabl
 /// confused. It must now be an error.
 #[compio::test]
 async fn run_lookup_refuses_to_report_absent_while_a_journal_is_unreadable() {
-    let Some(fx) = isolated_fixture("lookup-unknown-errors").await else {
-        return;
-    };
+    let fx = isolated_fixture("lookup-unknown-errors").await;
     let (good_app, good_deploy) = seed_app_and_deploy(&fx, "lookup-good").await;
     let _present = seed_run(&fx, good_app, &good_deploy, "sleeping", 60_000, None, None, None, None)
         .await;
@@ -7882,8 +7786,8 @@ struct FleetSweeps {
 /// nothing else here reads; workflow retention prunes the aged terminal run
 /// (whose blob-hash set is empty, so it does not reach the blob store); and the
 /// blob ref sweep runs last against a blob no run references.
-async fn sweeps_over_two_apps(label: &str, second: SecondJournal) -> Option<FleetSweeps> {
-    let fx = isolated_fixture(label).await?;
+async fn sweeps_over_two_apps(label: &str, second: SecondJournal) -> FleetSweeps {
+    let fx = isolated_fixture(label).await;
     let ctl = control_role_fixture(&fx, label).await;
 
     let (readable, readable_blob) =
@@ -7945,7 +7849,7 @@ async fn sweeps_over_two_apps(label: &str, second: SecondJournal) -> Option<Flee
     drop(ctl);
     drop(fx);
     common::drain_pg().await;
-    Some(FleetSweeps {
+    FleetSweeps {
         reconcile,
         fanout,
         deploy,
@@ -7953,7 +7857,7 @@ async fn sweeps_over_two_apps(label: &str, second: SecondJournal) -> Option<Flee
         blob_ref,
         readable_blob_present,
         readable_blob_row_present,
-    })
+    }
 }
 
 /// Every sweep that takes its app list from `journalled_fleet` must report the
@@ -7999,9 +7903,7 @@ async fn sweeps_over_two_apps(label: &str, second: SecondJournal) -> Option<Flee
 /// assertion failing, which is a confusing place to read it.
 #[compio::test]
 async fn fleet_sweeps_all_report_the_tenant_they_excluded() {
-    let Some(swept) = sweeps_over_two_apps("sweep-coverage-revoked", SecondJournal::Unreadable).await else {
-        return;
-    };
+    let swept = sweeps_over_two_apps("sweep-coverage-revoked", SecondJournal::Unreadable).await;
 
     assert_eq!(
         swept.reconcile.registered, 1,
@@ -8075,9 +7977,7 @@ async fn fleet_sweeps_all_report_the_tenant_they_excluded() {
 /// ref sweep, whose delete count moves 0 -> 2 on this single variable.
 #[compio::test]
 async fn fleet_sweeps_report_full_coverage_when_every_journal_is_readable() {
-    let Some(swept) = sweeps_over_two_apps("sweep-coverage-readable", SecondJournal::Usable).await else {
-        return;
-    };
+    let swept = sweeps_over_two_apps("sweep-coverage-readable", SecondJournal::Usable).await;
 
     assert_eq!(swept.reconcile.registered, 2, "both apps' wake rows");
     assert_eq!(swept.reconcile.coverage.apps_skipped, 0);
@@ -8156,11 +8056,7 @@ async fn fleet_sweeps_report_full_coverage_when_every_journal_is_readable() {
 /// eating a later one's work would surface as the later assertion failing.
 #[compio::test]
 async fn fleet_sweeps_all_report_a_tenant_whose_journal_is_incomplete() {
-    let Some(swept) = sweeps_over_two_apps("sweep-coverage-incomplete", SecondJournal::Incomplete)
-        .await
-    else {
-        return;
-    };
+    let swept = sweeps_over_two_apps("sweep-coverage-incomplete", SecondJournal::Incomplete).await;
 
     // The blob sweep goes FIRST because it is the one whose WORK count moves,
     // and an assertion that panics earlier would leave that number unmeasured
@@ -8308,9 +8204,7 @@ async fn seed_topic_broadcast(
 #[compio::test]
 #[serial]
 async fn fanout_refuses_a_broadcast_whose_journal_is_incomplete() {
-    let Some(fx) = isolated_fixture("fanout-incomplete-journal").await else {
-        return;
-    };
+    let fx = isolated_fixture("fanout-incomplete-journal").await;
 
     let (broken_app, broken_deploy) = seed_app_and_deploy(&fx, "fanout-broken").await;
     let broken_run = seed_run(
@@ -8422,10 +8316,7 @@ async fn fanout_refuses_a_broadcast_whose_journal_is_incomplete() {
 /// carrying the claim.
 #[compio::test]
 async fn parked_cancel_reaper_counts_an_app_whose_journal_is_incomplete() {
-    let Some(result) = reap_over_two_apps("reap-incomplete-journal", SecondJournal::Incomplete).await
-    else {
-        return;
-    };
+    let result = reap_over_two_apps("reap-incomplete-journal", SecondJournal::Incomplete).await;
     assert_eq!(
         result.registered, 1,
         "the reaper must reap the complete app's parked cancel"
@@ -8467,9 +8358,7 @@ async fn parked_cancel_reaper_counts_an_app_whose_journal_is_incomplete() {
 /// same limit.
 #[compio::test]
 async fn parked_cancel_reaper_counts_the_apps_its_batch_limit_never_reached() {
-    let Some(fx) = isolated_fixture("sweep-coverage-batch-limit").await else {
-        return;
-    };
+    let fx = isolated_fixture("sweep-coverage-batch-limit").await;
     let (first_app, first_deploy) = seed_app_and_deploy(&fx, "limit-a").await;
     let _first_run = seed_parked_cancel_run(&fx, first_app, &first_deploy).await;
     let (second_app, second_deploy) = seed_app_and_deploy(&fx, "limit-b").await;
@@ -8536,11 +8425,11 @@ async fn parked_cancel_reaper_counts_the_apps_its_batch_limit_never_reached() {
 async fn in_loop_denial_over_two_apps(
     label: &str,
     deny_second: bool,
-) -> Option<(
+) -> (
     workflow_signal_fanout::FanoutStats,
     workflow_retention::RetentionStats,
-)> {
-    let fx = isolated_fixture(label).await?;
+) {
+    let fx = isolated_fixture(label).await;
     let ctl = control_role_fixture(&fx, label).await;
 
     let _readable = seed_app_for_all_sweeps(&fx, &ctl, &format!("{label}-readable")).await;
@@ -8579,7 +8468,7 @@ async fn in_loop_denial_over_two_apps(
     drop(ctl);
     drop(fx);
     common::drain_pg().await;
-    Some((fanout, retention))
+    (fanout, retention)
 }
 
 /// The SECOND path into `apps_skipped`: a journal the catalog called readable
@@ -8603,11 +8492,7 @@ async fn in_loop_denial_over_two_apps(
 /// (a schema dropped mid-tick) is a different SQLSTATE and is not exercised.
 #[compio::test]
 async fn fleet_sweeps_count_a_journal_denied_after_the_catalog_said_readable() {
-    let Some((fanout, retention)) =
-        in_loop_denial_over_two_apps("sweep-coverage-in-loop-denied", true).await
-    else {
-        return;
-    };
+    let (fanout, retention) = in_loop_denial_over_two_apps("sweep-coverage-in-loop-denied", true).await;
 
     assert_eq!(
         fanout.subscriptions_expired, 1,
@@ -8636,11 +8521,7 @@ async fn fleet_sweeps_count_a_journal_denied_after_the_catalog_said_readable() {
 /// consistent with a sweep that miscounts every app it visits.
 #[compio::test]
 async fn fleet_sweeps_count_no_skips_when_every_journal_answers() {
-    let Some((fanout, retention)) =
-        in_loop_denial_over_two_apps("sweep-coverage-in-loop-clean", false).await
-    else {
-        return;
-    };
+    let (fanout, retention) = in_loop_denial_over_two_apps("sweep-coverage-in-loop-clean", false).await;
 
     assert_eq!(fanout.subscriptions_expired, 2);
     assert_eq!(
