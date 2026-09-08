@@ -133,8 +133,6 @@ fn the_table_fence_holds() {
         "pg_class",
         "PG_CLASS",
         "pg_",
-        "__zero_migrate_journal",
-        "__ZERO_MIGRATE_x",
         "__zeroship_migrations",
         "__ZEROSHIP_x",
         "sqlite_master",
@@ -151,7 +149,22 @@ fn the_table_fence_holds() {
     }
     // The control: a name that merely resembles a reserved one must pass, or
     // the fence is a blanket refusal wearing a table's clothes.
-    for name in ["page_views", "zeroship_apps", "__zs_internal", "sqlited", "pgx"] {
+    //
+    // The two `__zero_migrate` witnesses MOVED here from the refused list on
+    // 2026-09-07, rather than being deleted, so this test rules on the change in
+    // both directions. That prefix fenced an empty namespace: the engine's
+    // journal tables are `__zeroship_schema_*`, and the one live object carrying
+    // the token is the rebuild table, named `{table}__zero_migrate_rebuild` - a
+    // SUFFIX, which a prefix list never covered.
+    for name in [
+        "page_views",
+        "zeroship_apps",
+        "__zs_internal",
+        "sqlited",
+        "pgx",
+        "__zero_migrate_journal",
+        "__ZERO_MIGRATE_x",
+    ] {
         assert!(
             Ident::parse_as(name, IdentRole::Collection).is_ok(),
             "the table fence over-matched {name:?}"

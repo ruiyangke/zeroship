@@ -93,8 +93,15 @@ pub const MAX_IDENT_BYTES: usize = 63;
 ///
 /// Public only so the data-plane suite can enforce exact parity without adding
 /// a production dependency to this zero-dependency crate.
+///
+/// `"__zero_migrate"` sat beside `"__zeroship"` until 2026-09-07 and prefixed
+/// nothing: the engine's journal tables are `__zeroship_schema_*`, and the one
+/// live object carrying the token is the SQLite rebuild table, built as
+/// `{table}__zero_migrate_rebuild` - a SUFFIX, which a prefix list cannot cover
+/// in either direction. It was fencing an empty namespace while the collision it
+/// looked like it addressed was structurally out of reach.
 #[doc(hidden)]
-pub const PLATFORM_RESERVED_COLLECTION_PREFIXES: &[&str] = &["__zero_migrate", "__zeroship"];
+pub const PLATFORM_RESERVED_COLLECTION_PREFIXES: &[&str] = &["__zeroship"];
 
 /// Where an identifier is about to be used. The fences differ per role, so the
 /// role is a required argument to [`Ident::parse_as`] rather than something a

@@ -39,7 +39,7 @@ pub enum QueryError {
     /// the active effective policy.
     /// Distinct from [`Self::InvalidIdent`] so the SDK can surface a typed code
     /// (`reserved_system_field_name`) that's distinguishable from the
-    /// generic `InvalidIdent` thrown by the `_*` / `__zero_migrate_*` prefix
+    /// generic `InvalidIdent` thrown by the `_*` prefix
     /// reservations. Filter-time use of these names is unrestricted
     /// (`db.users.find({ id: ... })` is the canonical query shape); the
     /// fence only fires on declaration paths (`field_to_column_for_dialect`).
@@ -273,7 +273,7 @@ mod schema_renderer_tests {
 /// This is public only so the downstream parity suite can enforce exact
 /// agreement without adding a production dependency across the engine boundary.
 #[doc(hidden)]
-pub const PLATFORM_RESERVED_COLLECTION_PREFIXES: &[&str] = &["__zero_migrate", "__zeroship"];
+pub const PLATFORM_RESERVED_COLLECTION_PREFIXES: &[&str] = &["__zeroship"];
 
 /// Validate a collection name: alphanumeric + underscores only.
 ///
@@ -284,7 +284,7 @@ pub const PLATFORM_RESERVED_COLLECTION_PREFIXES: &[&str] = &["__zero_migrate", "
 /// - Must not start with a registered backend's reserved catalog prefix
 ///   (case-insensitive).
 /// - Must not start with a platform-owned prefix (case-insensitive):
-///   `__zero_migrate` or `__zeroship`.
+///   `__zeroship`.
 pub fn validate_collection(vendors: VendorSet, name: &str) -> Result<(), QueryError> {
     if name.is_empty() {
         return Err(QueryError::InvalidCollection(
@@ -367,13 +367,14 @@ pub(crate) const RESERVED_NAMES: &[ReservedName] = &[
     // `_score` on vector / spatial search). Reserved so creator-declared
     // columns can't shadow them.
     ReservedName::Prefix("_"),
-    // Platform bookkeeping table prefixes. Mirrors the
-    // `validate_collection` reservations for table-name shape.
-    //
-    // SHADOWED, and kept for the mirror rather than for effect: the scan returns on
-    // its first match and `Prefix("_")` above catches every name this could, so this
-    // entry is never reached. Do not "restore" it as a live rule.
-    ReservedName::Prefix("__zero_migrate_"),
+    // `ReservedName::Prefix("__zero_migrate_")` SAT HERE until 2026-09-07, kept
+    // for the mirror with `validate_collection` rather than for effect - the scan
+    // returns on its first match and `Prefix("_")` above catches every name it
+    // could. It went with the collection-side reservation, which is what it
+    // mirrored: the engine's journal is `__zeroship_schema_migrations` and
+    // nothing in the tree is named with a `__zero_migrate` PREFIX. Column-level
+    // coverage is unchanged, because `Prefix("_")` was always the rule doing the
+    // work.
     // `ReservedName::Prefix("sqlite_")` USED TO SIT HERE, in a table this file calls
     // PLATFORM-reserved. It is not a platform reservation: it is one BACKEND's internal
     // schema namespace, and it was the only row here that belonged to a vendor rather
@@ -4049,23 +4050,37 @@ columns = [
         }
     }
 
-    /// Names starting with `__zero_migrate` (any case) must be rejected.
+    /// `__zero_migrate` is NOT reserved, and `__zeroship` is. The engine half of
+    /// the pair; `zeroship-schema` carries the same assertion, and the slice pin
+    /// keeps the two lists identical.
+    ///
+    /// This asserted the opposite until 2026-09-07. The prefix fenced an empty
+    /// namespace: this engine's journal tables are `__zeroship_schema_*`, and
+    /// the one live object carrying the token is the rebuild table, named
+    /// `{table}__zero_migrate_rebuild` - a SUFFIX a prefix list cannot cover.
     #[test]
-    fn validate_collection_rejects_zero_migrate_prefix() {
-        for name in &[
-            "__zero_migrate_migrations",
-            "__ZERO_MIGRATE_audit",
-            "__zero_migrate",
-        ] {
+    fn the_collection_fence_reserves_zeroship_and_not_zero_migrate() {
+        let mut ruled_on = 0_usize;
+        for name in ["__zero_migrate_migrations", "__ZERO_MIGRATE_audit", "__zero_migrate"] {
+            assert!(
+                validate_collection(crate::test_fixtures::VENDORS, name).is_ok(),
+                "'{name}' is refused, but nothing is named with that prefix"
+            );
+            ruled_on += 1;
+        }
+        for name in ["__zeroship_schema_migrations", "__ZEROSHIP_audit", "__zeroship"] {
             let err = validate_collection(crate::test_fixtures::VENDORS, name).unwrap_err();
             match err {
                 QueryError::InvalidCollection(msg) => assert!(
-                    msg.contains("__zero_migrate") || msg.contains("reserved"),
+                    msg.contains("__zeroship") || msg.contains("reserved"),
                     "for '{name}': {msg}"
                 ),
                 other => panic!("expected InvalidCollection for '{name}', got {other:?}"),
             }
+            ruled_on += 1;
         }
+        assert_eq!(ruled_on, 6);
+        println!("ruled on {ruled_on} collection names");
     }
 
     /// This covers the schema-query DDL helper, not declarative IR loading.
@@ -4992,7 +5007,7 @@ columns = [
 
     /// `validate_field_name_for_declaration` MUST still enforce all
     /// the underlying `validate_field_name` rules (ASCII allowlist,
-    /// length cap, null bytes, the `_*` / `__zero_migrate_*` / `_masked` reserved
+    /// length cap, null bytes, the `_*` / `_masked` reserved
     /// shapes). Regression fence for the wrapper composition.
     #[test]
     fn validate_field_name_for_declaration_layers_underlying_rules() {
