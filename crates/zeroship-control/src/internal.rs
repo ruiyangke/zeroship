@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use ntex::web;
 use ntex::web::types::{Path, State};
-use uuid::Uuid;
+use zeroship_core::app_id::AppId;
 use zeroship_core::readiness::ReadinessGate;
 use zeroship_core::service_assertion::{
     thumbprint_key_id, AssertionError, ReplayStore, ServiceAssertionVerifier, ServiceIssuer,
@@ -373,17 +373,17 @@ pub async fn get_app_env(
     {
         return resp;
     }
-    let Ok(id) = Uuid::parse_str(&app_id) else {
+    let Ok(id) = AppId::parse(&app_id) else {
         return web::HttpResponse::BadRequest()
             .json(&serde_json::json!({"error": "bad app_id"}));
     };
-    match state.env_store.merged_env_for_worker(id).await {
+    match state.env_store.merged_env_for_worker(&id).await {
         Ok(value) => web::HttpResponse::Ok().json(&value),
         Err(crate::env_store::EnvError::AppNotFound) => {
             web::HttpResponse::NotFound().json(&serde_json::json!({"error":"app not found"}))
         }
         Err(e) => {
-            tracing::error!(app_id = %id, error = %e, "control-internal: env fetch error");
+            tracing::error!(app_id = %id.as_str(), error = %e, "control-internal: env fetch error");
             web::HttpResponse::InternalServerError()
                 .json(&serde_json::json!({"error":"internal error"}))
         }
@@ -448,11 +448,11 @@ pub async fn get_app_version(
     if let Some(resp) = check_service_auth(&req, &state, endpoints::CONTROL_APP).await {
         return resp;
     }
-    let uid = match app_id.parse::<Uuid>() {
+    let uid = match AppId::parse(&app_id) {
         Ok(u) => u,
         Err(_) => {
             return web::HttpResponse::BadRequest()
-                .json(&serde_json::json!({"error":"invalid uuid"}))
+                .json(&serde_json::json!({"error":"invalid app id"}))
         }
     };
     match state.registry.get_versions().await {

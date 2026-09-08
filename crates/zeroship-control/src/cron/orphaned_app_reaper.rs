@@ -52,7 +52,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use uuid::Uuid;
+use zeroship_core::app_id::AppId;
 
 use crate::registry::RegistryError;
 use crate::AppState;
@@ -126,11 +126,11 @@ pub async fn tick(state: &AppState) -> Result<ReaperReport, RegistryError> {
             Ok(Some(_)) => report.archived += 1,
             Ok(None) => {
                 // The row disappeared through operator SQL after detection.
-                tracing::debug!(app_id = %id, "orphaned_app_reaper: app already gone");
+                tracing::debug!(app_id = %id.as_str(), "orphaned_app_reaper: app already gone");
             }
             Err(e) => {
                 tracing::error!(
-                    app_id = %id,
+                    app_id = %id.as_str(),
                     error = %e,
                     "orphaned_app_reaper: archive failed; skipping (retried next tick)"
                 );
@@ -151,7 +151,7 @@ pub async fn tick(state: &AppState) -> Result<ReaperReport, RegistryError> {
 /// against a database a previous run left rows in. Membership of THIS list is
 /// the property; the count is not.
 #[allow(clippy::future_not_send)]
-pub async fn find_orphaned_apps(state: &AppState) -> Result<Vec<Uuid>, RegistryError> {
+pub async fn find_orphaned_apps(state: &AppState) -> Result<Vec<AppId>, RegistryError> {
     let conn = state.registry.conn().await?;
     let rows = conn
         .query(
@@ -167,7 +167,14 @@ pub async fn find_orphaned_apps(state: &AppState) -> Result<Vec<Uuid>, RegistryE
         )
         .await
         .map_err(|e| RegistryError::Database(format!("orphaned-app detection: {e}")))?;
-    Ok(rows.iter().map(|r| r.get::<_, Uuid>(0)).collect())
+    rows.iter()
+        .map(|r| {
+            let raw: String = r.get(0);
+            AppId::parse(&raw).map_err(|e| {
+                RegistryError::Database(format!("apps.id {raw} is not a canonical app id: {e}"))
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]

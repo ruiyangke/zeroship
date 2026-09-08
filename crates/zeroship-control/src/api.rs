@@ -11,6 +11,7 @@ use ntex::web::types::{Json, Path, State};
 use serde::Deserialize;
 use uuid::Uuid;
 use zeroship_authz::{Action, Resource};
+use zeroship_core::app_id::AppId;
 use zeroship_core::organization_id::OrganizationId;
 
 use crate::app_oauth_client;
@@ -181,7 +182,7 @@ fn error_response(e: RegistryError) -> web::HttpResponse {
 /// `remedy` is a command, not a sentence. The CLI prints this body raw, so a
 /// creator can copy the line out of the terminal.
 fn schema_precondition_response(
-    app_id: &uuid::Uuid,
+    app_id: &AppId,
     descriptor_sha256: &Option<String>,
     applied_sha256: &Option<String>,
 ) -> web::HttpResponse {
@@ -205,7 +206,7 @@ fn schema_precondition_response(
         "detail": detail,
         "deploy_descriptor_sha256": descriptor_sha256,
         "applied_descriptor_sha256": applied_sha256,
-        "remedy": format!("zeroship migrate --app={app_id}"),
+        "remedy": format!("zeroship migrate --app={}", app_id.as_str()),
     }))
 }
 
@@ -376,7 +377,7 @@ mod create_app_response_tests {
 
     fn record() -> zeroship_core::types::AppRecord {
         zeroship_core::types::AppRecord {
-            id: uuid::Uuid::nil(),
+            id: zeroship_core::app_id::AppId::mint(),
             name: "sample".to_string(),
             plan_id: "free".to_string(),
             deploy_hash: None,
@@ -512,12 +513,15 @@ pub async fn create_app(
             // No manifest exists at create, so no declared scopes yet — the
             // client gets the baseline allowlist; the first deploy mirrors the
             // manifest's `auth.scopes`.
+            //
+            // `AppRecord::id` carries the app's typed id directly, so no
+            // read-back by name is needed.
             if let Err(e) = state
                 .provision_app_oauth_client(&record.id, &record.name, &[])
                 .await
             {
                 tracing::error!(
-                    app_id = %record.id,
+                    app_id = %record.id.as_str(),
                     app_name = %record.name,
                     error = %e,
                     "control: per-app OAuth client provisioning failed on create (will retry on deploy)"
@@ -567,15 +571,15 @@ pub async fn get_app(
     if let Some(resp) = crate::env_handlers::admin_rate_limit(&req, &state).await {
         return resp;
     }
-    let uid = match id.parse::<Uuid>() {
+    let uid = match AppId::parse(&id) {
         Ok(u) => u,
         Err(_) => {
             return web::HttpResponse::BadRequest()
-                .json(&serde_json::json!({"error":"invalid uuid"}))
+                .json(&serde_json::json!({"error":"invalid app id"}))
         }
     };
     if let Err(resp) = authz
-        .require(Action::AppsRead, Resource::App { id: uid.to_string() }, &state)
+        .require(Action::AppsRead, Resource::App { id: uid.clone() }, &state)
         .await
     {
         return resp;
@@ -609,15 +613,15 @@ pub async fn archive_app(
     if let Some(resp) = crate::env_handlers::admin_rate_limit(&req, &state).await {
         return resp;
     }
-    let uid = match id.parse::<Uuid>() {
+    let uid = match AppId::parse(&id) {
         Ok(u) => u,
         Err(_) => {
             return web::HttpResponse::BadRequest()
-                .json(&serde_json::json!({"error":"invalid uuid"}))
+                .json(&serde_json::json!({"error":"invalid app id"}))
         }
     };
     if let Err(resp) = authz
-        .require(Action::AppsArchive, Resource::App { id: uid.to_string() }, &state)
+        .require(Action::AppsArchive, Resource::App { id: uid.clone() }, &state)
         .await
     {
         return resp;
@@ -644,15 +648,15 @@ pub async fn unarchive_app(
     if let Some(resp) = crate::env_handlers::admin_rate_limit(&req, &state).await {
         return resp;
     }
-    let uid = match id.parse::<Uuid>() {
+    let uid = match AppId::parse(&id) {
         Ok(u) => u,
         Err(_) => {
             return web::HttpResponse::BadRequest()
-                .json(&serde_json::json!({"error":"invalid uuid"}))
+                .json(&serde_json::json!({"error":"invalid app id"}))
         }
     };
     if let Err(resp) = authz
-        .require(Action::AppsArchive, Resource::App { id: uid.to_string() }, &state)
+        .require(Action::AppsArchive, Resource::App { id: uid.clone() }, &state)
         .await
     {
         return resp;
@@ -690,21 +694,21 @@ pub async fn delete_app(
     if let Some(resp) = crate::env_handlers::admin_rate_limit(&req, &state).await {
         return resp;
     }
-    let uid = match id.parse::<Uuid>() {
+    let uid = match AppId::parse(&id) {
         Ok(u) => u,
         Err(_) => {
             return web::HttpResponse::BadRequest()
-                .json(&serde_json::json!({"error":"invalid uuid"}))
+                .json(&serde_json::json!({"error":"invalid app id"}))
         }
     };
     if let Err(resp) = authz
-        .require(Action::AppsArchive, Resource::App { id: uid.to_string() }, &state)
+        .require(Action::AppsArchive, Resource::App { id: uid.clone() }, &state)
         .await
     {
         return resp;
     }
     let ip = crate::http_util::source_ip(&req, state.trust_proxy);
-    match crate::organizations::delete_app(&state.registry, authz.principal_id, uid, ip.as_deref())
+    match crate::organizations::delete_app(&state.registry, authz.principal_id, &uid, ip.as_deref())
         .await
     {
         Ok(()) => web::HttpResponse::NoContent().finish(),
@@ -738,17 +742,17 @@ pub async fn deploy(
         return resp;
     }
 
-    // Authz + uuid + content-type rejections happen BEFORE any body byte
+    // Authz + app-id + content-type rejections happen BEFORE any body byte
     // is consumed, so rejected callers cannot tie up tmp file slots.
-    let uid = match id.parse::<Uuid>() {
+    let uid = match AppId::parse(&id) {
         Ok(u) => u,
         Err(_) => {
             return web::HttpResponse::BadRequest()
-                .json(&serde_json::json!({"error":"invalid uuid"}))
+                .json(&serde_json::json!({"error":"invalid app id"}))
         }
     };
     if let Err(resp) = authz
-        .require(Action::AppsDeploy, Resource::App { id: uid.to_string() }, &state)
+        .require(Action::AppsDeploy, Resource::App { id: uid.clone() }, &state)
         .await
     {
         return resp;
@@ -927,7 +931,7 @@ pub async fn deploy(
                     Ok(m) => (m.auth.scopes, m.runtime_descriptor.map(|entry| entry.hash)),
                     Err(e) => {
                         tracing::error!(
-                            app_id = %uid,
+                            app_id = %uid.as_str(),
                             error = %e,
                             "control: could not re-parse ingested manifest for declared scopes"
                         );
@@ -967,7 +971,7 @@ pub async fn deploy(
                         .await
                     {
                         tracing::error!(
-                            app_id = %uid,
+                            app_id = %uid.as_str(),
                             error = %e,
                             "control: per-app OAuth client reconcile failed on deploy"
                         );
@@ -975,7 +979,7 @@ pub async fn deploy(
                 }
                 Ok(None) => {}
                 Err(e) => tracing::error!(
-                    app_id = %uid,
+                    app_id = %uid.as_str(),
                     error = %e,
                     "control: deploy could not load app for OAuth client reconcile"
                 ),
@@ -1081,11 +1085,11 @@ pub async fn set_plan(
     state: State<Arc<AppState>>,
     body: Json<SetPlanBody>,
 ) -> web::HttpResponse {
-    let uid = match id.parse::<Uuid>() {
+    let uid = match AppId::parse(&id) {
         Ok(u) => u,
         Err(_) => {
             return web::HttpResponse::BadRequest()
-                .json(&serde_json::json!({"error": "invalid uuid"}))
+                .json(&serde_json::json!({"error": "invalid app id"}))
         }
     };
 
@@ -1101,7 +1105,7 @@ pub async fn set_plan(
     // wrapper with the static set, so no token could reach it either - and it
     // is gone with it. Operator-only tiers are now assigned by editing the
     // catalog row, not by holding a cross-tenant grant.
-    let billing_scope = match billing_resource(&state, uid).await {
+    let billing_scope = match billing_resource(&state, &uid).await {
         Ok(scope) => scope,
         Err(resp) => return resp,
     };
@@ -1167,7 +1171,7 @@ pub async fn set_plan(
     let app_row = match conn
         .query(
             "SELECT plan_id, organization_id FROM zeroship.apps WHERE id = $1",
-            &[&uid],
+            &[&uid.as_str()],
         )
         .await
     {
@@ -1236,14 +1240,14 @@ pub async fn set_spend_limit(
     state: State<Arc<AppState>>,
     body: Json<SetSpendLimitBody>,
 ) -> web::HttpResponse {
-    let uid = match id.parse::<Uuid>() {
+    let uid = match AppId::parse(&id) {
         Ok(u) => u,
         Err(_) => {
             return web::HttpResponse::BadRequest()
-                .json(&serde_json::json!({"error": "invalid uuid"}))
+                .json(&serde_json::json!({"error": "invalid app id"}))
         }
     };
-    let billing_scope = match billing_resource(&state, uid).await {
+    let billing_scope = match billing_resource(&state, &uid).await {
         Ok(scope) => scope,
         Err(resp) => return resp,
     };
@@ -1278,7 +1282,7 @@ pub async fn set_spend_limit(
             crate::audit::log_with_detail(
                 &state.registry,
                 crate::audit::AuditEntry {
-                    app_id: Some(uid),
+                    app_id: Some(&uid),
                     organization_id: None,
                     // #7 — populate the actor from the AuthzGuard so a
                     // billing-write audit row records WHO changed the cap.
@@ -1304,14 +1308,14 @@ pub async fn get_spend_limit(
     authz: AuthzGuard,
     state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
-    let uid = match id.parse::<Uuid>() {
+    let uid = match AppId::parse(&id) {
         Ok(u) => u,
         Err(_) => {
             return web::HttpResponse::BadRequest()
-                .json(&serde_json::json!({"error": "invalid uuid"}))
+                .json(&serde_json::json!({"error": "invalid app id"}))
         }
     };
-    let billing_scope = match billing_resource(&state, uid).await {
+    let billing_scope = match billing_resource(&state, &uid).await {
         Ok(scope) => scope,
         Err(resp) => return resp,
     };
@@ -1332,7 +1336,7 @@ pub async fn get_spend_limit(
              LEFT JOIN zeroship.app_spend_limit l ON l.app_id = a.id \
              LEFT JOIN zeroship.app_spend_state s ON s.app_id = a.id \
              WHERE a.id = $1",
-            &[&uid],
+            &[&uid.as_str()],
         )
         .await
     {
@@ -1419,7 +1423,7 @@ pub struct OrganizationScopeQuery {
 /// A missing app is a 404, not a denial: the caller is told the app does not
 /// exist rather than that they may not read it, which is the honest answer for
 /// a resource that has no owner to be denied by.
-async fn billing_resource(state: &AppState, app_id: Uuid) -> Result<Resource, web::HttpResponse> {
+async fn billing_resource(state: &AppState, app_id: &AppId) -> Result<Resource, web::HttpResponse> {
     match crate::organizations::organization_of_app(state.control_pg.as_ref(), app_id).await {
         Ok(Some(id)) => Ok(Resource::Organization { id }),
         Ok(None) => Err(web::HttpResponse::NotFound()
@@ -1447,14 +1451,14 @@ pub async fn list_app_invoices(
     authz: AuthzGuard,
     state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
-    let uid = match id.parse::<Uuid>() {
+    let uid = match AppId::parse(&id) {
         Ok(u) => u,
         Err(_) => {
             return web::HttpResponse::BadRequest()
-                .json(&serde_json::json!({"error": "invalid uuid"}))
+                .json(&serde_json::json!({"error": "invalid app id"}))
         }
     };
-    let billing_scope = match billing_resource(&state, uid).await {
+    let billing_scope = match billing_resource(&state, &uid).await {
         Ok(scope) => scope,
         Err(resp) => return resp,
     };
@@ -1539,14 +1543,14 @@ pub async fn get_projected_charge(
     authz: AuthzGuard,
     state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
-    let uid = match id.parse::<Uuid>() {
+    let uid = match AppId::parse(&id) {
         Ok(u) => u,
         Err(_) => {
             return web::HttpResponse::BadRequest()
-                .json(&serde_json::json!({"error": "invalid uuid"}))
+                .json(&serde_json::json!({"error": "invalid app id"}))
         }
     };
-    let billing_scope = match billing_resource(&state, uid).await {
+    let billing_scope = match billing_resource(&state, &uid).await {
         Ok(scope) => scope,
         Err(resp) => return resp,
     };
@@ -1613,14 +1617,14 @@ pub async fn get_billing_status(
     authz: AuthzGuard,
     state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
-    let uid = match id.parse::<Uuid>() {
+    let uid = match AppId::parse(&id) {
         Ok(u) => u,
         Err(_) => {
             return web::HttpResponse::BadRequest()
-                .json(&serde_json::json!({"error": "invalid uuid"}))
+                .json(&serde_json::json!({"error": "invalid app id"}))
         }
     };
-    let billing_scope = match billing_resource(&state, uid).await {
+    let billing_scope = match billing_resource(&state, &uid).await {
         Ok(scope) => scope,
         Err(resp) => return resp,
     };
@@ -1673,11 +1677,11 @@ async fn resolve_billing_organization(
 /// missing. Used to bound a creator override.
 async fn resolve_plan_default_cents(
     state: &AppState,
-    app_id: &Uuid,
+    app_id: &AppId,
 ) -> Result<Option<u64>, RegistryError> {
     let conn = state.registry.conn().await?;
     let rows = conn
-        .query("SELECT plan_id FROM zeroship.apps WHERE id = $1", &[app_id])
+        .query("SELECT plan_id FROM zeroship.apps WHERE id = $1", &[&app_id.as_str()])
         .await?;
     let Some(row) = rows.first() else {
         return Ok(None);
@@ -1696,14 +1700,14 @@ pub async fn get_usage(
     authz: AuthzGuard,
     state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
-    let uid = match id.parse::<Uuid>() {
+    let uid = match AppId::parse(&id) {
         Ok(u) => u,
         Err(_) => {
             return web::HttpResponse::BadRequest()
-                .json(&serde_json::json!({"error":"invalid uuid"}))
+                .json(&serde_json::json!({"error":"invalid app id"}))
         }
     };
-    let billing_scope = match billing_resource(&state, uid).await {
+    let billing_scope = match billing_resource(&state, &uid).await {
         Ok(scope) => scope,
         Err(resp) => return resp,
     };
@@ -1717,7 +1721,7 @@ pub async fn get_usage(
     // (the metering pipeline), scoped to the current calendar-month period.
     // Returns the same `metric → total` map shape the dashboard consumes.
     let metering = crate::metering::Metering::new(state.registry.clone());
-    match metering.current_period_totals(&uid).await {
+    match metering.current_period_totals_for_app(&uid).await {
         Ok(usage) => web::HttpResponse::Ok().json(&usage),
         Err(e) => error_response(e),
     }
@@ -1728,15 +1732,15 @@ pub async fn get_app_logs(
     authz: AuthzGuard,
     state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
-    let uid = match id.parse::<Uuid>() {
+    let uid = match AppId::parse(&id) {
         Ok(u) => u,
         Err(_) => {
             return web::HttpResponse::BadRequest()
-                .json(&serde_json::json!({"error":"invalid uuid"}))
+                .json(&serde_json::json!({"error":"invalid app id"}))
         }
     };
     if let Err(resp) = authz
-        .require(Action::DeploymentsRead, Resource::App { id: uid.to_string() }, &state)
+        .require(Action::DeploymentsRead, Resource::App { id: uid.clone() }, &state)
         .await
     {
         return resp;
@@ -1750,7 +1754,7 @@ pub async fn get_app_logs(
             Err(e) => {
                 tracing::warn!(
                     worker_url = %worker_url,
-                    app_id = %uid,
+                    app_id = %uid.as_str(),
                     error = %e,
                     "control: worker log fetch failed",
                 );
@@ -1772,17 +1776,15 @@ pub async fn get_app_logs(
 
 /// The worker URL this app's buffered logs are read from.
 ///
-/// TRANSITIONAL, and named rather than inlined so it can be bound by a test
-/// that needs no worker. The worker reads this path segment as a typed app id
-/// and refuses a uuid rendering outright, so control renders the id the same
-/// way the gateway renders `/dispatch`. Control is the OTHER producer of a
-/// worker path, and a producer that kept spelling the uuid here would take a
-/// 400 on every log fetch.
-fn worker_logs_url(worker_url: &str, app_id: &Uuid) -> String {
+/// Named rather than inlined so it can be bound by a test that needs no
+/// worker. The worker reads this path segment as a typed app id, so control
+/// renders it the same way the gateway renders `/dispatch`: the app id's own
+/// canonical `app_<base62>` form, never a uuid rendering.
+fn worker_logs_url(worker_url: &str, app_id: &AppId) -> String {
     format!(
         "{}/logs/{}",
         worker_url.trim_end_matches('/'),
-        zeroship_core::app_id::canonical_app_id_for(app_id).as_str()
+        app_id.as_str()
     )
 }
 
@@ -1805,7 +1807,7 @@ fn worker_authorization(state: &AppState) -> Option<String> {
 async fn fetch_worker_logs(
     worker_url: &str,
     authorization: Option<&str>,
-    app_id: &Uuid,
+    app_id: &AppId,
 ) -> Result<Vec<String>, String> {
     let url = worker_logs_url(worker_url, app_id);
     let client = cyper::Client::new();
@@ -2299,25 +2301,17 @@ mod worker_log_path_tests {
     /// This is the arm that binds control as a producer of a worker path. The
     /// only other one is the gateway's `/dispatch`, and the two have to agree,
     /// because the worker parses both segments with the same
-    /// `zeroship_core::app_id::AppId::parse` and that parse refuses a uuid
-    /// rendering outright - so a producer still spelling the uuid takes a 400
-    /// on every request rather than degrading quietly.
+    /// `zeroship_core::app_id::AppId::parse`, which accepts only the canonical
+    /// `app_<base62>` rendering.
     ///
     /// The live-database harness that exercises this path end to end mounts a
     /// stub worker on `/logs/{app_id}`, which matches ANY segment, so it cannot
     /// see the rendering at all. This is where the rendering is checked, and it
     /// needs no worker and no database.
-    ///
-    /// MUTATION-CHECKED: rendering the uuid instead - the spelling this line
-    /// carried until the request path was typed - fails on the `AppId::parse`
-    /// call, quoting the parser's own refusal and the segment it refused, and
-    /// fails nothing else in the crate. It never reaches the `assert_ne!`,
-    /// which is there for the narrower case of a rendering that parses but is
-    /// still the uuid's own text.
     #[test]
-    fn the_log_url_carries_a_parseable_app_id_and_never_a_uuid() {
-        let stored = uuid::Uuid::new_v4();
-        let url = worker_logs_url("http://worker.internal:8080/", &stored);
+    fn the_log_url_carries_the_app_id_verbatim() {
+        let app_id = zeroship_core::app_id::AppId::mint();
+        let url = worker_logs_url("http://worker.internal:8080/", &app_id);
 
         let segment = url.rsplit('/').next().expect("the url has a last segment");
         assert!(
@@ -2329,14 +2323,9 @@ mod worker_log_path_tests {
             panic!("the worker parses this segment with AppId::parse, and it said {e}: {segment}")
         });
         assert_eq!(
-            parsed.uuid(),
-            stored,
+            parsed.as_str(),
+            app_id.as_str(),
             "and it must still name the app the caller asked for"
-        );
-        assert_ne!(
-            segment,
-            stored.to_string(),
-            "the uuid rendering is what the worker refuses"
         );
     }
 }

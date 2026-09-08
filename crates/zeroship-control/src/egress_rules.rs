@@ -53,8 +53,8 @@ use ntex::web::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use uuid::Uuid;
 use zeroship_authz::{Action as AuthzAction, Resource};
+use zeroship_core::app_id::AppId;
 use zeroship_core::net_policy::{normalize_name, Destination, EgressRule, Verdict};
 use zeroship_core::types::{AppNetPolicyLimits, FREE_TIER_NET_POLICY_LIMITS};
 
@@ -120,7 +120,7 @@ pub struct DeleteEgressRuleBody {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct EgressRuleRecord {
-    pub app_id: Uuid,
+    pub app_id: AppId,
     pub verdict: Verdict,
     /// `"name"` or `"cidr"`, derived from the destination rather than stored
     /// twice as a fact the caller could contradict.
@@ -164,7 +164,7 @@ pub struct EgressRuleLimits {
 
 #[derive(Debug, Serialize)]
 pub struct EgressRuleList {
-    pub app_id: Uuid,
+    pub app_id: AppId,
     pub rules: Vec<EgressRuleRecord>,
     /// The manifest's `net.requests` hints, inert until a rule exists.
     pub requests: Vec<EgressRequest>,
@@ -266,18 +266,18 @@ impl EgressRuleError {
 
 /// The app's plan-derived net caps. A missing app is `AppNotFound`; a missing
 /// or corrupt plan row falls back to the free tier, never to "unbounded".
-async fn plan_net_limits(pg: &Client, app_id: Uuid) -> Result<AppNetPolicyLimits, EgressRuleError> {
+async fn plan_net_limits(pg: &Client, app_id: &AppId) -> Result<AppNetPolicyLimits, EgressRuleError> {
     let rows = pg
         .query(
             "SELECT p.net_policy_limits_json \
              FROM zeroship.apps a \
              LEFT JOIN zeroship.plans p ON p.id = a.plan_id \
              WHERE a.id = $1",
-            &[&app_id],
+            &[&app_id.as_str()],
         )
         .await
         .map_err(|err| {
-            tracing::error!(error = %err, app_id = %app_id, "control: app plan lookup failed");
+            tracing::error!(error = %err, app_id = %app_id.as_str(), "control: app plan lookup failed");
             EgressRuleError::Db
         })?;
     let Some(row) = rows.first() else {
@@ -289,7 +289,7 @@ async fn plan_net_limits(pg: &Client, app_id: Uuid) -> Result<AppNetPolicyLimits
             serde_json::from_value::<AppNetPolicyLimits>(j)
                 .map_err(|err| {
                     tracing::warn!(
-                        app_id = %app_id,
+                        app_id = %app_id.as_str(),
                         error = %err,
                         "control: plan net_policy_limits_json parse failure - using free-tier caps"
                     );
@@ -302,7 +302,7 @@ async fn plan_net_limits(pg: &Client, app_id: Uuid) -> Result<AppNetPolicyLimits
 /// How many rules of one verdict the app currently holds.
 async fn count_rules(
     pg: &Client,
-    app_id: Uuid,
+    app_id: &AppId,
     verdict: Verdict,
 ) -> Result<u32, EgressRuleError> {
     let verdict_text = verdict.as_str();
@@ -310,11 +310,11 @@ async fn count_rules(
         .query(
             "SELECT COUNT(*)::BIGINT AS n FROM zeroship.app_egress_rules \
              WHERE app_id = $1 AND verdict = $2",
-            &[&app_id, &verdict_text],
+            &[&app_id.as_str(), &verdict_text],
         )
         .await
         .map_err(|err| {
-            tracing::error!(error = %err, app_id = %app_id, "control: egress rule count failed");
+            tracing::error!(error = %err, app_id = %app_id.as_str(), "control: egress rule count failed");
             EgressRuleError::Db
         })?;
     let n: i64 = rows.first().map_or(0, |row| row.get("n"));
@@ -322,15 +322,15 @@ async fn count_rules(
 }
 
 /// List an app's rules, its manifest hints, and the plan ceiling.
-pub async fn list_rules(pg: &Client, app_id: Uuid) -> Result<EgressRuleList, EgressRuleError> {
+pub async fn list_rules(pg: &Client, app_id: &AppId) -> Result<EgressRuleList, EgressRuleError> {
     let manifest_rows = pg
         .query(
             "SELECT manifest_json FROM zeroship.apps WHERE id = $1",
-            &[&app_id],
+            &[&app_id.as_str()],
         )
         .await
         .map_err(|err| {
-            tracing::error!(error = %err, app_id = %app_id, "control: app manifest lookup failed");
+            tracing::error!(error = %err, app_id = %app_id.as_str(), "control: app manifest lookup failed");
             EgressRuleError::Db
         })?;
     let Some(manifest_row) = manifest_rows.first() else {
@@ -346,14 +346,14 @@ pub async fn list_rules(pg: &Client, app_id: Uuid) -> Result<EgressRuleList, Egr
              FROM zeroship.app_egress_rules \
              WHERE app_id = $1 \
              ORDER BY kind ASC, destination ASC, port ASC",
-            &[&app_id],
+            &[&app_id.as_str()],
         )
         .await
         .map_err(|err| {
-            tracing::error!(error = %err, app_id = %app_id, "control: app egress rule list failed");
+            tracing::error!(error = %err, app_id = %app_id.as_str(), "control: app egress rule list failed");
             EgressRuleError::Db
         })?;
-    let rules = rows_to_records(&rows);
+    let rules = rows_to_records(&rows)?;
 
     let requests = manifest_net_requests(manifest_json.as_deref(), app_id);
     let accepted_keys = rules
@@ -371,7 +371,7 @@ pub async fn list_rules(pg: &Client, app_id: Uuid) -> Result<EgressRuleList, Egr
     let used_accept_rules = count_of(&rules, Verdict::Accept);
     let used_reject_rules = count_of(&rules, Verdict::Reject);
     Ok(EgressRuleList {
-        app_id,
+        app_id: app_id.clone(),
         rules,
         requests,
         pending_requests,
@@ -395,7 +395,7 @@ pub async fn list_rules(pg: &Client, app_id: Uuid) -> Result<EgressRuleList, Egr
 /// to reject is an UPDATE and cannot leave the two opposing rows behind.
 pub async fn upsert_rule(
     pg: &Client,
-    app_id: Uuid,
+    app_id: &AppId,
     body: &EgressRuleBody,
     created_by: &str,
 ) -> Result<SetEgressRuleResult, EgressRuleError> {
@@ -457,7 +457,7 @@ pub async fn upsert_rule(
                 note = EXCLUDED.note \
              RETURNING app_id, verdict, kind, destination, port, created_by, created_at, note",
             &[
-                &app_id,
+                &app_id.as_str(),
                 &verdict_text,
                 &kind,
                 &destination,
@@ -470,7 +470,7 @@ pub async fn upsert_rule(
         .await
         .map_err(|err| {
             tracing::error!(
-                error = %err, app_id = %app_id, destination = %destination, port,
+                error = %err, app_id = %app_id.as_str(), destination = %destination, port,
                 "control: app egress rule upsert failed"
             );
             EgressRuleError::Db
@@ -491,19 +491,19 @@ pub async fn upsert_rule(
         .query(
             "SELECT app_id, verdict, kind, destination, port, created_by, created_at, note \
              FROM zeroship.app_egress_rules WHERE app_id = $1",
-            &[&app_id],
+            &[&app_id.as_str()],
         )
         .await
         .map_err(|err| {
-            tracing::error!(error = %err, app_id = %app_id, "control: egress rule reread failed");
+            tracing::error!(error = %err, app_id = %app_id.as_str(), "control: egress rule reread failed");
             EgressRuleError::Db
         })?;
     let written_key = (kind, destination.clone(), rule.port());
-    let record = rows_to_records(&all)
+    let record = rows_to_records(&all)?
         .into_iter()
         .find(|r| (r.kind, r.destination.clone(), r.port) == written_key)
         .unwrap_or_else(|| {
-            written_record(&rule, app_id, row.get("created_by"), row.get("created_at"), note.clone())
+            written_record(&rule, app_id.clone(), row.get("created_by"), row.get("created_at"), note.clone())
         });
 
     Ok(SetEgressRuleResult {
@@ -523,16 +523,16 @@ pub async fn upsert_rule(
 /// it again on every new port. Keeping the two honestly separate is the point -
 /// a shared name over two different questions is how a test of one comes to
 /// read as coverage of the other.
-async fn count_range_accepts(pg: &Client, app_id: Uuid) -> Result<u32, EgressRuleError> {
+async fn count_range_accepts(pg: &Client, app_id: &AppId) -> Result<u32, EgressRuleError> {
     let rows = pg
         .query(
             "SELECT COUNT(*)::BIGINT AS n FROM zeroship.app_egress_rules \
              WHERE app_id = $1 AND verdict = 'accept' AND kind = 'cidr'",
-            &[&app_id],
+            &[&app_id.as_str()],
         )
         .await
         .map_err(|err| {
-            tracing::error!(error = %err, app_id = %app_id, "control: range accept count failed");
+            tracing::error!(error = %err, app_id = %app_id.as_str(), "control: range accept count failed");
             EgressRuleError::Db
         })?;
     let n: i64 = rows.first().map_or(0, |row| row.get("n"));
@@ -549,7 +549,7 @@ async fn count_range_accepts(pg: &Client, app_id: Uuid) -> Result<u32, EgressRul
 /// enough to name the rule.
 pub async fn delete_rule(
     pg: &Client,
-    app_id: Uuid,
+    app_id: &AppId,
     destination: &str,
     port: u16,
 ) -> Result<(), EgressRuleError> {
@@ -566,12 +566,12 @@ pub async fn delete_rule(
         .execute(
             "DELETE FROM zeroship.app_egress_rules \
              WHERE app_id = $1 AND kind = $2 AND destination = $3 AND port = $4",
-            &[&app_id, &kind, &destination, &port],
+            &[&app_id.as_str(), &kind, &destination, &port],
         )
         .await
         .map_err(|err| {
             tracing::error!(
-                error = %err, app_id = %app_id, destination = %destination, port,
+                error = %err, app_id = %app_id.as_str(), destination = %destination, port,
                 "control: app egress rule delete failed"
             );
             EgressRuleError::Db
@@ -608,17 +608,17 @@ fn count_of(rules: &[EgressRuleRecord], verdict: Verdict) -> u32 {
 /// name-versus-range overlaps are settled at connect time against a resolved
 /// address, so reporting a guess for them here would be reporting a lookup this
 /// endpoint did not do.
-fn rows_to_records(rows: &[compio_postgres::Row]) -> Vec<EgressRuleRecord> {
+fn rows_to_records(rows: &[compio_postgres::Row]) -> Result<Vec<EgressRuleRecord>, EgressRuleError> {
     let parsed: Vec<(EgressRuleRecord, Option<Destination>)> = rows
         .iter()
         .map(|row| {
             let raw: String = row.get("verdict");
             let verdict = parse_verdict(&raw);
-            let record = row_to_record(row, verdict);
+            let record = row_to_record(row, verdict)?;
             let destination = Destination::parse(&record.destination).ok();
-            (record, destination)
+            Ok((record, destination))
         })
-        .collect();
+        .collect::<Result<_, EgressRuleError>>()?;
 
     let reject_ranges: Vec<(&Destination, u16)> = parsed
         .iter()
@@ -627,7 +627,7 @@ fn rows_to_records(rows: &[compio_postgres::Row]) -> Vec<EgressRuleRecord> {
         .filter(|(d, _)| matches!(d, Destination::Range(_)))
         .collect();
 
-    parsed
+    Ok(parsed
         .iter()
         .map(|(record, destination)| {
             let mut record = record.clone();
@@ -647,7 +647,7 @@ fn rows_to_records(rows: &[compio_postgres::Row]) -> Vec<EgressRuleRecord> {
             }
             record
         })
-        .collect()
+        .collect())
 }
 
 /// A verdict read back from the database, for EVERY reader of the table.
@@ -687,7 +687,7 @@ pub(crate) fn parse_verdict(raw: &str) -> Verdict {
 /// in a file whose subject is verdicts.
 fn written_record(
     rule: &EgressRule,
-    app_id: Uuid,
+    app_id: AppId,
     created_by: String,
     created_at: DateTime<Utc>,
     note: Option<String>,
@@ -707,11 +707,20 @@ fn written_record(
     }
 }
 
-fn row_to_record(row: &compio_postgres::Row, verdict: Verdict) -> EgressRuleRecord {
+fn row_to_record(row: &compio_postgres::Row, verdict: Verdict) -> Result<EgressRuleRecord, EgressRuleError> {
     let port_i32: i32 = row.get("port");
     let kind: String = row.get("kind");
-    EgressRuleRecord {
-        app_id: row.get("app_id"),
+    let app_id_raw: String = row.get("app_id");
+    let app_id = AppId::parse(&app_id_raw).map_err(|e| {
+        tracing::error!(
+            app_id = %app_id_raw,
+            error = %e,
+            "control: app_egress_rules.app_id is not a canonical app id"
+        );
+        EgressRuleError::Db
+    })?;
+    Ok(EgressRuleRecord {
+        app_id,
         verdict,
         kind: if kind == "cidr" { "cidr" } else { "name" },
         destination: row.get("destination"),
@@ -720,10 +729,10 @@ fn row_to_record(row: &compio_postgres::Row, verdict: Verdict) -> EgressRuleReco
         created_at: row.get("created_at"),
         note: row.get("note"),
         effective_verdict: verdict,
-    }
+    })
 }
 
-fn manifest_net_requests(manifest_json: Option<&str>, app_id: Uuid) -> Vec<EgressRequest> {
+fn manifest_net_requests(manifest_json: Option<&str>, app_id: &AppId) -> Vec<EgressRequest> {
     let Some(raw) = manifest_json else {
         return Vec::new();
     };
@@ -731,7 +740,7 @@ fn manifest_net_requests(manifest_json: Option<&str>, app_id: Uuid) -> Vec<Egres
         Ok(manifest) => manifest,
         Err(err) => {
             tracing::warn!(
-                app_id = %app_id,
+                app_id = %app_id.as_str(),
                 error = %err,
                 "control: app egress rule list could not parse manifest requests"
             );
@@ -759,7 +768,7 @@ fn hint_destination_key(host: &str) -> String {
     Destination::parse(host).map_or_else(|_| normalize_name(host), |d| d.to_text())
 }
 
-fn bad_uuid() -> web::HttpResponse {
+fn bad_app_id() -> web::HttpResponse {
     web::HttpResponse::BadRequest().json(&json!({"error": "bad app_id"}))
 }
 
@@ -776,14 +785,14 @@ pub async fn list(
     if let Some(r) = admin_rate_limit(&req, &state).await {
         return r;
     }
-    let Ok(app_id) = Uuid::parse_str(&path) else {
-        return bad_uuid();
+    let Ok(app_id) = AppId::parse(&path) else {
+        return bad_app_id();
     };
     if let Err(resp) = authz
         .require(
             AuthzAction::EnvRead,
             Resource::App {
-                id: app_id.to_string(),
+                id: app_id.clone(),
             },
             &state,
         )
@@ -791,7 +800,7 @@ pub async fn list(
     {
         return resp;
     }
-    match list_rules(state.control_pg.as_ref(), app_id).await {
+    match list_rules(state.control_pg.as_ref(), &app_id).await {
         Ok(list) => web::HttpResponse::Ok().json(&list),
         Err(e) => e.into_response(),
     }
@@ -807,14 +816,14 @@ pub async fn create(
     if let Some(r) = admin_rate_limit(&req, &state).await {
         return r;
     }
-    let Ok(app_id) = Uuid::parse_str(&path) else {
-        return bad_uuid();
+    let Ok(app_id) = AppId::parse(&path) else {
+        return bad_app_id();
     };
     if let Err(resp) = authz
         .require(
             AuthzAction::EnvWrite,
             Resource::App {
-                id: app_id.to_string(),
+                id: app_id.clone(),
             },
             &state,
         )
@@ -824,7 +833,7 @@ pub async fn create(
     }
     match upsert_rule(
         state.control_pg.as_ref(),
-        app_id,
+        &app_id,
         &body,
         &authz.principal_id.to_string(),
     )
@@ -841,7 +850,7 @@ pub async fn create(
                 &req,
                 &state,
                 &authz,
-                app_id,
+                &app_id,
                 AuditAction::SetAppEgressRule,
                 &resource,
             )
@@ -862,14 +871,14 @@ pub async fn delete(
     if let Some(r) = admin_rate_limit(&req, &state).await {
         return r;
     }
-    let Ok(app_id) = Uuid::parse_str(&path) else {
-        return bad_uuid();
+    let Ok(app_id) = AppId::parse(&path) else {
+        return bad_app_id();
     };
     if let Err(resp) = authz
         .require(
             AuthzAction::EnvWrite,
             Resource::App {
-                id: app_id.to_string(),
+                id: app_id.clone(),
             },
             &state,
         )
@@ -879,7 +888,7 @@ pub async fn delete(
     }
     match delete_rule(
         state.control_pg.as_ref(),
-        app_id,
+        &app_id,
         &body.destination,
         body.port,
     )
@@ -891,7 +900,7 @@ pub async fn delete(
                 &req,
                 &state,
                 &authz,
-                app_id,
+                &app_id,
                 AuditAction::DeleteAppEgressRule,
                 &resource,
             )
@@ -906,7 +915,7 @@ async fn log_rule_audit(
     req: &web::HttpRequest,
     state: &AppState,
     authz: &AuthzGuard,
-    app_id: Uuid,
+    app_id: &AppId,
     action: AuditAction,
     resource: &str,
 ) {
@@ -1036,10 +1045,10 @@ mod tests {
     /// creator writing a reject would have been shown an accept.
     #[test]
     fn the_written_record_reports_the_verdict_that_was_written() {
-        let app_id = Uuid::new_v4();
+        let app_id = AppId::mint();
         let now = Utc::now();
         let reject = EgressRule::parse(Verdict::Reject, "93.184.216.7/32", 443).unwrap();
-        let record = written_record(&reject, app_id, "usr_x".to_string(), now, None);
+        let record = written_record(&reject, app_id.clone(), "usr_x".to_string(), now, None);
         assert_eq!(record.verdict, Verdict::Reject);
         assert_eq!(record.effective_verdict, Verdict::Reject);
         assert_eq!(record.kind, "cidr");

@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use compio_postgres::error::SqlState;
 use compio_postgres::GenericClient;
-use uuid::Uuid;
+use zeroship_core::app_id::AppId;
 use zeroship_plugin_workflow::advance::{
     WorkflowAdvanceNackKind, WorkflowAdvanceRegistration, WorkflowAdvanceResponse,
     WorkflowRunDispatchRequest,
@@ -46,7 +46,7 @@ const GATEWAY_DISPATCH_TIMEOUT: Duration = Duration::from_secs(35);
 /// old number and calling every app incomplete.
 const JOURNAL_TABLE_COUNT: usize = pg::JOURNAL_TABLE_SUFFIXES.len();
 static INFLIGHT_DISPATCHES: AtomicUsize = AtomicUsize::new(0);
-static PROVISIONED_WORKFLOW_JOURNALS: OnceLock<Mutex<HashSet<Uuid>>> = OnceLock::new();
+static PROVISIONED_WORKFLOW_JOURNALS: OnceLock<Mutex<HashSet<AppId>>> = OnceLock::new();
 
 #[doc(hidden)]
 pub fn reset_inflight_dispatches_for_test() {
@@ -63,7 +63,7 @@ pub(crate) fn journal_sql(tables: &WorkflowTables, sql: &str) -> String {
 
 pub(crate) async fn provision_tables<C>(
     conn: &C,
-    app_id: &Uuid,
+    app_id: &AppId,
 ) -> Result<WorkflowTables, RegistryError>
 where
     C: GenericClient + Sync,
@@ -84,7 +84,7 @@ where
     cache
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .insert(*app_id);
+        .insert(app_id.clone());
     Ok(tables)
 }
 
@@ -141,7 +141,7 @@ pub(crate) fn is_journal_scoped_error(err: &compio_postgres::Error) -> bool {
 /// fleet-wide outage, and swapping one for a sweep that quietly covers fewer
 /// tenants every tick would be the same defect with the alarm removed.
 pub(crate) fn skip_journal_scoped<T>(
-    app_id: &Uuid,
+    app_id: &AppId,
     operation: &str,
     result: Result<T, compio_postgres::Error>,
 ) -> Result<Option<T>, RegistryError> {
@@ -149,7 +149,7 @@ pub(crate) fn skip_journal_scoped<T>(
         Ok(value) => Ok(Some(value)),
         Err(err) if is_journal_scoped_error(&err) => {
             tracing::warn!(
-                app_id = %app_id,
+                app_id = %app_id.as_str(),
                 operation,
                 error = %err,
                 "skipping app in workflow sweep: its journal is unreadable"
@@ -181,7 +181,7 @@ pub(crate) fn skip_journal_scoped<T>(
 /// deliberately: `NotProvisioned` means "this app holds nothing", and the
 /// fan-out completes a broadcast on the strength of it - which would drop the
 /// live subscribers of an app whose `subscriptions` table is right there.
-pub(crate) async fn probe_journal<C>(conn: &C, app_id: &Uuid) -> Result<AppJournal, RegistryError>
+pub(crate) async fn probe_journal<C>(conn: &C, app_id: &AppId) -> Result<AppJournal, RegistryError>
 where
     C: GenericClient + Sync,
 {
@@ -205,7 +205,8 @@ where
                 Ok(AppJournal::NotProvisioned)
             } else {
                 Ok(AppJournal::Unreachable(format!(
-                    "app {app_id}'s workflow journal is incomplete: {present} of {} tables exist",
+                    "app {}'s workflow journal is incomplete: {present} of {} tables exist",
+                    app_id.as_str(),
                     names.len()
                 )))
             }
@@ -223,7 +224,7 @@ where
 /// sweeps take their app list from [`journalled_fleet`] instead.
 pub(crate) async fn existing_tables<C>(
     conn: &C,
-    app_id: &Uuid,
+    app_id: &AppId,
 ) -> Result<Option<WorkflowTables>, RegistryError>
 where
     C: GenericClient + Sync,
@@ -236,9 +237,9 @@ where
 }
 
 /// One app that has a workflow journal, and whether a sweep may use it.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) struct JournalledApp {
-    pub app_id: Uuid,
+    pub app_id: AppId,
     /// How many of the journal's tables the catalog lists in `app_<uuid>`.
     ///
     /// Anything other than all of them is a journal no sweep may touch - see
@@ -271,7 +272,7 @@ impl JournalledApp {
     /// Both arms mean the same thing to a caller - this tenant is EXCLUDED, and
     /// nothing may be concluded about what its journal holds - so they share a
     /// return type and differ only in the cause the WARN names.
-    pub(crate) fn exclusion(self) -> Option<&'static str> {
+    pub(crate) fn exclusion(&self) -> Option<&'static str> {
         if !self.readable {
             Some("its journal schema is unreadable on this connection")
         } else if self.tables_present != JOURNAL_TABLE_COUNT {
@@ -354,7 +355,7 @@ where
                              AND has_table_privilege(c.oid, 'SELECT')) AS readable \
                FROM zeroship.apps a \
                JOIN pg_catalog.pg_namespace n \
-                 ON n.nspname = 'app_' || a.id::text \
+                 ON n.nspname = a.id \
                JOIN pg_catalog.pg_class c \
                  ON c.relnamespace = n.oid \
                 AND c.relkind = 'r' \
@@ -365,14 +366,21 @@ where
         )
         .await
         .map_err(RegistryError::from)?;
-    Ok(rows
-        .into_iter()
-        .map(|row| JournalledApp {
-            app_id: row.get("app_id"),
-            tables_present: usize::try_from(row.get::<_, i64>("tables_present")).unwrap_or(0),
-            readable: row.get("readable"),
+    rows.into_iter()
+        .map(|row| {
+            let raw: String = row.get("app_id");
+            let app_id = AppId::parse(&raw).map_err(|e| {
+                RegistryError::Database(format!(
+                    "apps.id {raw} is not a canonical app id: {e}"
+                ))
+            })?;
+            Ok(JournalledApp {
+                app_id,
+                tables_present: usize::try_from(row.get::<_, i64>("tables_present")).unwrap_or(0),
+                readable: row.get("readable"),
+            })
         })
-        .collect())
+        .collect()
 }
 
 /// How much of the fleet one sweep tick actually covered.
@@ -489,9 +497,9 @@ impl SweepCoverage {
 /// tick for every other tenant.
 pub(crate) struct JournalledFleet {
     /// In id order.
-    pub(crate) usable: Vec<Uuid>,
+    pub(crate) usable: Vec<AppId>,
     /// In id order. Already WARNed about by the time this returns.
-    pub(crate) excluded: Vec<Uuid>,
+    pub(crate) excluded: Vec<AppId>,
 }
 
 pub(crate) async fn journalled_fleet<C>(conn: &C) -> Result<JournalledFleet, RegistryError>
@@ -505,7 +513,7 @@ where
     for app in journalled_apps(conn).await? {
         if let Some(reason) = app.exclusion() {
             tracing::warn!(
-                app_id = %app.app_id,
+                app_id = %app.app_id.as_str(),
                 tables_present = app.tables_present,
                 "skipping app in workflow sweep: {reason}"
             );
@@ -531,11 +539,11 @@ where
     C: GenericClient + Sync,
 {
     let mut fleet = journalled_fleet(conn).await?;
-    let app_ids: Vec<Uuid> = fleet
+    let app_ids: Vec<AppId> = fleet
         .usable
         .iter()
         .chain(&fleet.excluded)
-        .copied()
+        .cloned()
         .collect();
     let dispatchable = dispatchable_app_ids(conn, &app_ids).await?;
     fleet.usable.retain(|app_id| dispatchable.contains(app_id));
@@ -547,15 +555,15 @@ where
 
 async fn dispatchable_app_ids<C>(
     conn: &C,
-    app_ids: &[Uuid],
-) -> Result<HashSet<Uuid>, RegistryError>
+    app_ids: &[AppId],
+) -> Result<HashSet<AppId>, RegistryError>
 where
     C: GenericClient + Sync,
 {
     if app_ids.is_empty() {
         return Ok(HashSet::new());
     }
-    let app_ids = app_ids.to_vec();
+    let app_ids: Vec<&str> = app_ids.iter().map(AppId::as_str).collect();
     let rows = conn
         .query(
             "SELECT id \
@@ -566,12 +574,21 @@ where
         )
         .await
         .map_err(RegistryError::from)?;
-    Ok(rows.into_iter().map(|row| row.get("id")).collect())
+    rows.into_iter()
+        .map(|row| {
+            let raw: String = row.get("id");
+            AppId::parse(&raw).map_err(|e| {
+                RegistryError::Database(format!(
+                    "apps.id {raw} is not a canonical app id: {e}"
+                ))
+            })
+        })
+        .collect()
 }
 
 async fn app_accepts_background_dispatch<C>(
     conn: &C,
-    app_id: &Uuid,
+    app_id: &AppId,
 ) -> Result<bool, RegistryError>
 where
     C: GenericClient + Sync,
@@ -584,7 +601,7 @@ where
                   WHERE id = $1 \
                     AND archived_at IS NULL \
              ) AS accepted",
-            &[app_id],
+            &[&app_id.as_str()],
         )
         .await
         .map_err(RegistryError::from)?
@@ -632,7 +649,8 @@ where
     if let Some(app_id) = fleet.excluded.first() {
         return Err(RegistryError::Database(format!(
             "cannot decide whether workflow run {run_id} exists: \
-             app {app_id}'s journal is unreadable on this connection"
+             app {}'s journal is unreadable on this connection",
+            app_id.as_str()
         )));
     }
     Ok(None)
@@ -649,7 +667,7 @@ where
 pub async fn __find_run_app_for_test(
     registry: &Registry,
     run_id: &str,
-) -> Result<Option<Uuid>, RegistryError> {
+) -> Result<Option<AppId>, RegistryError> {
     let conn = registry.conn().await?;
     Ok(find_run_tables(&conn, run_id).await?.map(|t| t.app_id))
 }
@@ -986,15 +1004,17 @@ async fn reconcile_scheduler_from_journal_with_store(
         reconcile.coverage.swept_one();
         for row in rows {
             let run_id: String = row.get("id");
-            let app_id: Uuid = row.get("app_id");
             let cancel_requested: bool = row.get("cancel_requested");
             let wake_at: DateTime<Utc> = if cancel_requested {
                 Utc::now()
             } else {
                 row.get("wake_at")
             };
+            // `tables` is per-app (`WorkflowTables::for_app_id(&app_id)` above),
+            // so every row read through it belongs to the outer loop's app - the
+            // selected `app_id` column is redundant with it, not a second source.
             scheduler_store
-                .ack_register_next(&run_id, app_id, wake_at)
+                .ack_register_next(&run_id, &app_id, wake_at)
                 .await
                 .map_err(scheduler_store_error_to_registry)?;
             reconcile.registered = reconcile.registered.saturating_add(1);
@@ -1090,10 +1110,12 @@ pub async fn reap_parked_cancel_requested_batch(
         reap.coverage.swept_one();
         for row in rows {
             let run_id: String = row.get("id");
-            let app_id: Uuid = row.get("app_id");
             let wake_at: DateTime<Utc> = row.get("wake_at");
+            // `tables` is per-app, so the row's `app_id` column is redundant
+            // with the outer loop's - see the identical note in
+            // `reconcile_scheduler_from_journal_with_store`.
             scheduler_store
-                .ack_register_next(&run_id, app_id, wake_at)
+                .ack_register_next(&run_id, &app_id, wake_at)
                 .await
                 .map_err(scheduler_store_error_to_registry)?;
             reap.registered = reap.registered.saturating_add(1);
@@ -1210,7 +1232,7 @@ where
         if fired.is_empty() {
             break;
         }
-        let app_ids: Vec<Uuid> = fired.iter().map(|timer| timer.app_id).collect();
+        let app_ids: Vec<AppId> = fired.iter().map(|timer| timer.app_id.clone()).collect();
         let dispatchable = dispatchable_app_ids(&conn, &app_ids).await?;
 
         for timer in fired {
@@ -1225,7 +1247,7 @@ where
                     .await
                     .map_err(scheduler_store_error_to_registry)?;
                 tracing::info!(
-                    app_id = %timer.app_id,
+                    app_id = %timer.app_id.as_str(),
                     run_id = %timer.run_id,
                     "workflow engine parked timer for archived app"
                 );
@@ -1270,7 +1292,7 @@ where
         .await
         .map_err(scheduler_store_error_to_registry)?;
     let conn = state.registry.conn().await?;
-    let app_ids: Vec<Uuid> = lapsed.iter().map(|timer| timer.app_id).collect();
+    let app_ids: Vec<AppId> = lapsed.iter().map(|timer| timer.app_id.clone()).collect();
     let dispatchable = dispatchable_app_ids(&conn, &app_ids).await?;
     let mut redispatched = 0usize;
     for timer in lapsed {
@@ -1280,7 +1302,7 @@ where
                 .await
                 .map_err(scheduler_store_error_to_registry)?;
             tracing::info!(
-                app_id = %timer.app_id,
+                app_id = %timer.app_id.as_str(),
                 run_id = %timer.run_id,
                 "workflow inflight reaper parked run for archived app"
             );
@@ -1519,7 +1541,7 @@ async fn apply_workflow_advance_registration(
 ) -> Result<(), RegistryError> {
     if let Some(next_wake_at) = registration.next_wake_at {
         scheduler_store
-            .ack_register_next(&registration.run_id, registration.app_id, next_wake_at)
+            .ack_register_next(&registration.run_id, &registration.app_id, next_wake_at)
             .await
             .map_err(scheduler_store_error_to_registry)?;
     } else if registration.terminal {
@@ -1581,7 +1603,7 @@ async fn apply_step_result_on_registry(
         workflow_limits::workflow_journal_limits_for_app(&conn, &tables.app_id)
             .await
             .map_err(|e| WorkflowError::Db(e.to_string()))?;
-    let store = PgStore::new(registry.workflow_store_db_url().to_string(), tables.app_id);
+    let store = PgStore::new(registry.workflow_store_db_url().to_string(), &tables.app_id);
     apply::apply_step_result_on_store(&store, &apply_config, result).await
 }
 
@@ -1709,7 +1731,7 @@ async fn ack_register_next<C>(
     exec: AckExec,
     conn: &C,
     run_id: &str,
-    app_id: Uuid,
+    app_id: &AppId,
     wake_at: DateTime<Utc>,
 ) -> Result<(), RegistryError>
 where
@@ -1935,7 +1957,10 @@ where
     C: GenericClient + Sync,
 {
     let run_id: String = row.get("id");
-    let app_id: Uuid = row.get("app_id");
+    // `tables` already carries the app this row was read through
+    // (`WorkflowTables::for_app_id`), so the row's own `app_id` column is
+    // redundant with it, not a second source.
+    let app_id = &tables.app_id;
     let state: String = row.get("state");
     let mut wake_at: Option<DateTime<Utc>> = row.get("wake_at");
     let cancel_requested: bool = row.get("cancel_requested");
@@ -2228,7 +2253,7 @@ mod tests {
 
     #[test]
     fn cascade_cancel_children_sql_orders_child_locks_before_update() {
-        let tables = WorkflowTables::for_app_id(&Uuid::nil());
+        let tables = WorkflowTables::for_app_id(&AppId::mint());
         let sql = cascade_cancel_children_sql(&tables);
         let normalized = sql.split_whitespace().collect::<Vec<_>>().join(" ");
 
@@ -2296,7 +2321,7 @@ mod tests {
     fn test_dispatch_request() -> WorkflowRunDispatchRequest {
         WorkflowRunDispatchRequest {
             run_id: "run_test".to_string(),
-            app_id: Uuid::new_v4(),
+            app_id: AppId::mint(),
         }
     }
 
@@ -2348,7 +2373,7 @@ mod tests {
         let seen = seen.lock().expect("seen lock");
         assert_eq!(seen.len(), 1);
         assert_eq!(seen[0]["runId"], request.run_id);
-        assert_eq!(seen[0]["appId"], request.app_id.to_string());
+        assert_eq!(seen[0]["appId"], request.app_id.as_str());
         assert_eq!(seen[0].as_object().expect("dispatch body object").len(), 2);
     }
 

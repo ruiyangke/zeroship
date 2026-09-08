@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use compio_postgres::GenericClient;
-use uuid::Uuid;
 
+use zeroship_core::app_id::AppId;
 use zeroship_core::config::DeclaredEnvKey;
 
 use crate::config::ControlSettingsConsumer;
@@ -75,7 +75,7 @@ impl DeployRetentionStats {
 
 #[derive(Debug)]
 struct DeployCandidate {
-    app_id: Uuid,
+    app_id: AppId,
     deploy_id: String,
     deploy_hash: String,
 }
@@ -183,7 +183,7 @@ pub async fn tick_with_config(
 /// message is required.
 pub async fn deploy_pinned_run_count<C>(
     conn: &C,
-    app_id: &Uuid,
+    app_id: &AppId,
     deploy_id: &str,
 ) -> Result<i64, RegistryError>
 where
@@ -202,7 +202,7 @@ where
                     AND deploy_id = $2 \
                     AND state NOT IN ('completed','failed','cancelled','stalled')",
             ),
-            &[app_id, &deploy_id],
+            &[&app_id.as_str(), &deploy_id],
         )
         .await
         .map_err(RegistryError::from)?;
@@ -212,7 +212,7 @@ where
 /// Return true only when a deploy is superseded and has no live pinned runs.
 pub async fn deploy_bundle_reclaimable<C>(
     conn: &C,
-    app_id: &Uuid,
+    app_id: &AppId,
     deploy_id: &str,
 ) -> Result<bool, RegistryError>
 where
@@ -226,7 +226,7 @@ where
 
 async fn superseded_deploys<C>(
     conn: &C,
-    app_id: &Uuid,
+    app_id: &AppId,
     cutoff: &DateTime<Utc>,
     limit: i64,
 ) -> Result<Vec<DeployCandidate>, RegistryError>
@@ -250,14 +250,14 @@ where
                 ) \
               ORDER BY d.activated_at, d.created_at, d.id \
               LIMIT $3",
-            &[app_id, cutoff, &limit],
+            &[&app_id.as_str(), cutoff, &limit],
         )
         .await
         .map_err(RegistryError::from)?;
     Ok(rows
         .into_iter()
         .map(|row| DeployCandidate {
-            app_id: *app_id,
+            app_id: app_id.clone(),
             deploy_id: row.get("id"),
             deploy_hash: row.get("deploy_hash"),
         })
@@ -266,7 +266,7 @@ where
 
 async fn deploy_is_superseded<C>(
     conn: &C,
-    app_id: &Uuid,
+    app_id: &AppId,
     deploy_id: &str,
 ) -> Result<bool, RegistryError>
 where
@@ -289,7 +289,7 @@ where
                                   > (d.activated_at, d.created_at, d.id) \
                        ) \
                 ) AS superseded",
-            &[&deploy_id, app_id],
+            &[&deploy_id, &app_id.as_str()],
         )
         .await
         .map_err(RegistryError::from)?;
@@ -311,7 +311,7 @@ where
                FROM zeroship.app_deploys \
               WHERE id = $1 AND app_id = $2 \
               FOR UPDATE SKIP LOCKED",
-            &[&candidate.deploy_id, &candidate.app_id],
+            &[&candidate.deploy_id, &candidate.app_id.as_str()],
         )
         .await
         .map_err(RegistryError::from)?;
@@ -334,7 +334,7 @@ where
         Ok(deleted) => Ok(deleted),
         Err(e) => {
             tracing::warn!(
-                app_id = %candidate.app_id,
+                app_id = %candidate.app_id.as_str(),
                 deploy_id = %candidate.deploy_id,
                 deploy_hash = %candidate.deploy_hash,
                 error = %e,

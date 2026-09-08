@@ -701,7 +701,7 @@ impl AppState {
     /// by re-provisioning on deploy).
     pub async fn provision_app_oauth_client(
         &self,
-        app_id: &uuid::Uuid,
+        app_id: &zeroship_core::app_id::AppId,
         name: &str,
         declared_scopes: &[zeroship_bundle::ScopeDef],
     ) -> Result<String, String> {

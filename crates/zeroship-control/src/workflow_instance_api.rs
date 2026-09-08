@@ -18,9 +18,9 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use uuid::Uuid;
 use zeroship_authn::rate_limit::{self, Quota, RateLimitDecision};
-use zeroship_core::{crypto, typed_id};
+use zeroship_core::app_id::AppId;
+use zeroship_core::{crypto, typed_id, workflow_signal_token};
 use zeroship_plugin_workflow::engine::{cap_exceeded, WORKFLOW_STATE_CAP_ERROR_CODE};
 use zeroship_plugin_workflow::errors::WorkflowError;
 use zeroship_plugin_workflow::store::pg::{self, WorkflowTables};
@@ -332,7 +332,7 @@ fn workflow_pg_error_from_parts(code: Option<&SqlState>, message: String) -> Wor
 fn check_app_scoped_auth(
     req: &web::HttpRequest,
     state: &AppState,
-    app_id: &Uuid,
+    app_id: &AppId,
 ) -> Result<(), web::HttpResponse> {
     let header = req
         .headers()
@@ -346,7 +346,7 @@ fn check_app_scoped_auth(
                 && zeroship_core::auth::validate_app_scoped_control_token(
                     key,
                     state.control_key.expose_secret(),
-                    &app_id.to_string(),
+                    app_id.as_str(),
                 ) => Ok(()),
         _ => {
             tracing::warn!(
@@ -393,7 +393,7 @@ fn check_control_auth(
 fn app_id_from_channel(
     req: &web::HttpRequest,
     state: &AppState,
-) -> Result<Uuid, web::HttpResponse> {
+) -> Result<AppId, web::HttpResponse> {
     let raw = [APP_ID_HEADER, ALT_APP_ID_HEADER, "x-app-id", "x-app"]
         .into_iter()
         .find_map(|name| req.headers().get(name).and_then(|v| v.to_str().ok()))
@@ -411,11 +411,8 @@ fn app_id_from_channel(
     Ok(app_id)
 }
 
-fn parse_app_id(raw: &str) -> Result<Uuid, String> {
-    Uuid::parse_str(raw).or_else(|_| {
-        typed_id::parse_with_prefix(raw, typed_id::APP_PREFIX)
-            .map_err(|e| format!("invalid app id: {e}"))
-    })
+fn parse_app_id(raw: &str) -> Result<AppId, String> {
+    AppId::parse(raw).map_err(|e| format!("invalid app id: {e}"))
 }
 
 fn validate_workflow_name(name: &str) -> Result<(), WorkflowApiError> {
@@ -693,7 +690,7 @@ fn retry_after_header(secs: f64) -> String {
 
 async fn active_deploy_for_workflow<C>(
     conn: &C,
-    app_id: &Uuid,
+    app_id: &AppId,
     workflow_name: &str,
 ) -> Result<ActiveDeploy, WorkflowApiError>
 where
@@ -710,7 +707,7 @@ where
                 AND d.activated_at IS NOT NULL \
               ORDER BY d.activated_at DESC, d.created_at DESC, d.id DESC \
               LIMIT 1",
-            &[app_id],
+            &[&app_id.as_str()],
         )
         .await
         .map_err(workflow_pg_error)?;
@@ -734,7 +731,7 @@ where
     }
 }
 
-async fn active_deploy_id_for_app<C>(conn: &C, app_id: &Uuid) -> Result<String, WorkflowApiError>
+async fn active_deploy_id_for_app<C>(conn: &C, app_id: &AppId) -> Result<String, WorkflowApiError>
 where
     C: compio_postgres::GenericClient + Sync,
 {
@@ -749,7 +746,7 @@ where
                 AND d.activated_at IS NOT NULL \
               ORDER BY d.activated_at DESC, d.created_at DESC, d.id DESC \
               LIMIT 1",
-            &[app_id],
+            &[&app_id.as_str()],
         )
         .await
         .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
@@ -758,8 +755,8 @@ where
         .ok_or_else(|| WorkflowApiError::BadRequest("app has no active deploy".to_string()))
 }
 
-fn signal_key_aad(app_id: &Uuid, kid: &str) -> Vec<u8> {
-    format!("workflow-signal-key:{app_id}:{kid}").into_bytes()
+fn signal_key_aad(app_id: &AppId, kid: &str) -> Vec<u8> {
+    format!("workflow-signal-key:{}:{kid}", app_id.as_str()).into_bytes()
 }
 
 fn signal_token_replay_key(token: &str) -> String {
@@ -771,7 +768,7 @@ fn master_crypto_key(state: &AppState) -> [u8; 32] {
     crypto::derive_key(state.master_key.expose_secret())
 }
 
-fn encrypt_signal_secret(state: &AppState, app_id: &Uuid, kid: &str, secret: &[u8]) -> Result<Vec<u8>, WorkflowApiError> {
+fn encrypt_signal_secret(state: &AppState, app_id: &AppId, kid: &str, secret: &[u8]) -> Result<Vec<u8>, WorkflowApiError> {
     let key = master_crypto_key(state);
     crypto::encrypt(&key, &signal_key_aad(app_id, kid), secret)
         .map_err(|e| WorkflowApiError::Database(format!("encrypt workflow signal key: {e}")))
@@ -779,7 +776,7 @@ fn encrypt_signal_secret(state: &AppState, app_id: &Uuid, kid: &str, secret: &[u
 
 fn decrypt_signal_secret(
     state: &AppState,
-    app_id: &Uuid,
+    app_id: &AppId,
     kid: &str,
     secret_ct: &[u8],
 ) -> Result<Vec<u8>, WorkflowApiError> {
@@ -791,7 +788,7 @@ fn decrypt_signal_secret(
 async fn active_or_create_signal_secret<C>(
     conn: &C,
     state: &AppState,
-    app_id: &Uuid,
+    app_id: &AppId,
 ) -> Result<Vec<u8>, WorkflowApiError>
 where
     C: compio_postgres::GenericClient + Sync,
@@ -806,7 +803,7 @@ where
               ORDER BY CASE status WHEN 'active' THEN 0 WHEN 'next' THEN 1 ELSE 2 END, \
                        created_at DESC, id DESC \
               LIMIT 1",
-            &[app_id, &SIGNAL_KEY_VERIFIER],
+            &[&app_id.as_str(), &SIGNAL_KEY_VERIFIER],
         )
         .await
         .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
@@ -827,7 +824,7 @@ where
          VALUES ($1, $2, $3, $4, $5, $6, 'active')",
         &[
             &id,
-            app_id,
+            &app_id.as_str(),
             &kid,
             &SIGNAL_KEY_VERIFIER,
             &secret_ct,
@@ -841,7 +838,7 @@ where
 
 async fn load_signal_verification_secrets(
     state: &AppState,
-    app_id: &Uuid,
+    app_id: &AppId,
 ) -> Result<Vec<Vec<u8>>, WorkflowApiError> {
     let mut conn = state.registry.conn().await?;
     let tx = conn
@@ -857,7 +854,7 @@ async fn load_signal_verification_secrets(
                 AND status IN ('active', 'next', 'retiring') \
               ORDER BY CASE status WHEN 'active' THEN 0 WHEN 'next' THEN 1 ELSE 2 END, \
                        created_at DESC, id DESC",
-            &[app_id, &SIGNAL_KEY_VERIFIER],
+            &[&app_id.as_str(), &SIGNAL_KEY_VERIFIER],
         )
         .await
         .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
@@ -873,7 +870,7 @@ async fn load_signal_verification_secrets(
     Ok(secrets)
 }
 
-fn unverified_signal_token_app_id(token: &str) -> Result<Uuid, WorkflowApiError> {
+fn unverified_signal_token_app_id(token: &str) -> Result<AppId, WorkflowApiError> {
     let body = token
         .strip_prefix(typed_id::WORKFLOW_SIGNAL_TOKEN_PREFIX)
         .and_then(|s| s.strip_prefix('_'))
@@ -896,11 +893,11 @@ fn unverified_signal_token_app_id(token: &str) -> Result<Uuid, WorkflowApiError>
 async fn verify_signal_token(
     state: &AppState,
     token: &str,
-) -> Result<typed_id::WorkflowSignalTokenClaims, WorkflowApiError> {
+) -> Result<workflow_signal_token::WorkflowSignalTokenClaims, WorkflowApiError> {
     let app_id = unverified_signal_token_app_id(token)?;
     let secrets = load_signal_verification_secrets(state, &app_id).await?;
     for secret in secrets {
-        match typed_id::verify_workflow_signal_token(token, &secret) {
+        match workflow_signal_token::verify_workflow_signal_token(token, &secret) {
             Ok(claims) => return Ok(claims),
             Err(_) => continue,
         }
@@ -911,7 +908,7 @@ async fn verify_signal_token(
 }
 
 fn validate_signal_token_time(
-    claims: &typed_id::WorkflowSignalTokenClaims,
+    claims: &workflow_signal_token::WorkflowSignalTokenClaims,
     now_unix: i64,
 ) -> Result<(), WorkflowApiError> {
     if claims.exp.saturating_add(SIGNAL_TOKEN_TIMESTAMP_TOLERANCE_SECS) < now_unix {
@@ -922,14 +919,14 @@ fn validate_signal_token_time(
     Ok(())
 }
 
-fn claims_expiry(claims: &typed_id::WorkflowSignalTokenClaims) -> Result<DateTime<Utc>, WorkflowApiError> {
+fn claims_expiry(claims: &workflow_signal_token::WorkflowSignalTokenClaims) -> Result<DateTime<Utc>, WorkflowApiError> {
     Utc.timestamp_opt(claims.exp, 0)
         .single()
         .ok_or_else(|| WorkflowApiError::Unauthorized("invalid signal token expiry".to_string()))
 }
 
 fn resolve_ingress_signal_type(
-    claims: &typed_id::WorkflowSignalTokenClaims,
+    claims: &workflow_signal_token::WorkflowSignalTokenClaims,
     requested: Option<String>,
 ) -> Result<String, WorkflowApiError> {
     let signal_type = match requested {
@@ -980,7 +977,7 @@ fn workflow_container_has(value: &Value, workflow_name: &str) -> bool {
 
 async fn check_create_journal_capacity<C>(
     conn: &C,
-    app_id: &Uuid,
+    app_id: &AppId,
     input_journal_bytes: i64,
 ) -> Result<(), WorkflowApiError>
 where
@@ -1003,7 +1000,7 @@ where
 
 async fn ensure_app_workflows_enabled<C>(
     conn: &C,
-    app_id: &Uuid,
+    app_id: &AppId,
 ) -> Result<(), WorkflowApiError>
 where
     C: compio_postgres::GenericClient + Sync,
@@ -1034,7 +1031,7 @@ async fn ensure_public_ingress_enabled(state: &AppState) -> Result<(), WorkflowA
 
 async fn check_signal_journal_capacity<C>(
     conn: &C,
-    app_id: &Uuid,
+    app_id: &AppId,
     payload_journal_bytes: i64,
 ) -> Result<(), WorkflowApiError>
 where
@@ -1051,7 +1048,7 @@ where
 
 async fn provision_workflow_journal<C>(
     conn: &C,
-    app_id: &Uuid,
+    app_id: &AppId,
 ) -> Result<WorkflowTables, WorkflowApiError>
 where
     C: compio_postgres::GenericClient + Sync,
@@ -1063,7 +1060,7 @@ where
 
 async fn check_app_journal_capacity<C>(
     conn: &C,
-    app_id: &Uuid,
+    app_id: &AppId,
     delta: i64,
     app_max_bytes: i64,
 ) -> Result<(), WorkflowApiError>
@@ -1086,7 +1083,7 @@ where
 /// parameters purely to stay under clippy's `too_many_arguments` threshold;
 /// every field is still required and read exactly once.
 struct NewRun<'a> {
-    app_id: &'a Uuid,
+    app_id: &'a AppId,
     workflow_name: &'a str,
     deploy_id: &'a str,
     input: &'a Value,
@@ -1124,7 +1121,7 @@ where
         &[
             &run_id,
             &workflow_name,
-            app_id,
+            &app_id.as_str(),
             &deploy_id,
             input,
             &input_journal_bytes,
@@ -1169,7 +1166,7 @@ where
             &[
                 &run_id,
                 &workflow_name,
-                app_id,
+                &app_id.as_str(),
                 &deploy_id,
                 input,
                 &input_journal_bytes,
@@ -1185,7 +1182,7 @@ where
 async fn existing_keyed_run<C>(
     conn: &C,
     tables: &WorkflowTables,
-    app_id: &Uuid,
+    app_id: &AppId,
     workflow_name: &str,
     dedup_key: &String,
 ) -> Result<Option<String>, WorkflowApiError>
@@ -1200,7 +1197,7 @@ where
         runs = tables.runs
     );
     let rows = conn
-        .query(&sql, &[app_id, &workflow_name, &dedup_key])
+        .query(&sql, &[&app_id.as_str(), &workflow_name, &dedup_key])
         .await
         .map_err(workflow_pg_error)?;
     Ok(rows.first().map(|row| row.get("id")))
@@ -1241,7 +1238,7 @@ where
 
 pub(crate) async fn start_scheduled_workflow_run<C>(
     tx: &C,
-    app_id: &Uuid,
+    app_id: &AppId,
     workflow_name: &str,
     deploy_id: &str,
     input: &Value,
@@ -1308,7 +1305,7 @@ fn workflow_api_error_to_registry(error: WorkflowApiError) -> RegistryError {
 
 async fn create_run_inner(
     state: &AppState,
-    app_id: Uuid,
+    app_id: AppId,
     workflow_name: String,
     body: CreateRunBody,
 ) -> Result<(StatusCode, Value), WorkflowApiError> {
@@ -1408,7 +1405,7 @@ async fn create_run_inner(
                             dispatch_nonce = NULL \
                       WHERE app_id = $1 AND workflow_name = $2 AND dedup_key = $3 \
                       RETURNING id", runs = tables.runs),
-                    &[&app_id, &workflow_name, key],
+                    &[&app_id.as_str(), &workflow_name, key],
                 )
                 .await
                 .map_err(workflow_pg_error)?;
@@ -1495,7 +1492,7 @@ async fn create_run_inner(
 
 async fn start_many_inner(
     state: &AppState,
-    app_id: Uuid,
+    app_id: AppId,
     workflow_name: String,
     body: StartManyBody,
 ) -> Result<Value, WorkflowApiError> {
@@ -1617,7 +1614,7 @@ async fn start_many_inner(
                                 dispatch_nonce = NULL \
                           WHERE app_id = $1 AND workflow_name = $2 AND dedup_key = $3 \
                           RETURNING id", runs = tables.runs),
-                        &[&app_id, &workflow_name, key],
+                        &[&app_id.as_str(), &workflow_name, key],
                     )
                     .await
                     .map_err(workflow_pg_error)?;
@@ -1709,9 +1706,9 @@ async fn start_many_inner(
 
 async fn consume_signal_rate_limit(
     state: &AppState,
-    app_id: Uuid,
+    app_id: &AppId,
 ) -> Result<(), WorkflowApiError> {
-    let key = format!("control:workflow_signal:app:{app_id}");
+    let key = format!("control:workflow_signal:app:{}", app_id.as_str());
     let quota = Quota {
         capacity: SIGNAL_RATE_LIMIT_CAPACITY,
         refill_per_sec: SIGNAL_RATE_LIMIT_REFILL_PER_SEC,
@@ -1779,7 +1776,7 @@ pub async fn get_run_status(
     );
     let rows = match state
         .control_pg
-        .query(&sql, &[&run_id, &app_id])
+        .query(&sql, &[&run_id, &app_id.as_str()])
         .await
     {
         Ok(rows) => rows,
@@ -1819,7 +1816,7 @@ pub async fn get_run_output(
     );
     let rows = match state
         .control_pg
-        .query(&sql, &[&run_id, &app_id])
+        .query(&sql, &[&run_id, &app_id.as_str()])
         .await
     {
         Ok(rows) => rows,
@@ -1867,7 +1864,7 @@ pub async fn get_step_output(
     );
     let rows = match state
         .control_pg
-        .query(&sql, &[&path.run_id, &app_id, &path.name, &occurrence])
+        .query(&sql, &[&path.run_id, &app_id.as_str(), &path.name, &occurrence])
         .await
     {
         Ok(rows) => rows,
@@ -1883,7 +1880,7 @@ pub async fn get_step_output(
 async fn output_row_response(
     req: &web::HttpRequest,
     state: &AppState,
-    app_id: Uuid,
+    app_id: AppId,
     row: &compio_postgres::Row,
 ) -> web::HttpResponse {
     let output_kind: String = row.get("output_kind");
@@ -2006,7 +2003,7 @@ fn parse_bytes_range(
     Ok(Some((start, end)))
 }
 
-async fn record_workflow_output_read_usage(state: &AppState, app_id: &Uuid, bytes: i64) {
+async fn record_workflow_output_read_usage(state: &AppState, app_id: &AppId, bytes: i64) {
     let mut deltas = vec![("storage_ops".to_string(), 1)];
     if bytes > 0 {
         deltas.push(("storage_egress_bytes".to_string(), bytes));
@@ -2018,7 +2015,7 @@ async fn record_workflow_output_read_usage(state: &AppState, app_id: &Uuid, byte
         .await
     {
         tracing::warn!(
-            app_id = %app_id,
+            app_id = %app_id.as_str(),
             error = %e,
             "workflow output read metering failed"
         );
@@ -2046,7 +2043,7 @@ pub async fn signal_run(
     if let Err(e) = signal_payload_size(&body.payload) {
         return e.response();
     }
-    if let Err(e) = consume_signal_rate_limit(&state, app_id).await {
+    if let Err(e) = consume_signal_rate_limit(&state, &app_id).await {
         return e.response();
     }
 
@@ -2080,7 +2077,7 @@ pub async fn signal_run(
         runs = tables.runs
     );
     let rows = match tx
-        .query(&lock_sql, &[&run_id, &app_id])
+        .query(&lock_sql, &[&run_id, &app_id.as_str()])
         .await
     {
         Ok(rows) => rows,
@@ -2121,7 +2118,7 @@ pub async fn signal_run(
             runs = tables.runs
         );
         if let Err(e) = tx
-            .execute(&wake_sql, &[&run_id, &app_id])
+            .execute(&wake_sql, &[&run_id, &app_id.as_str()])
             .await
         {
             return WorkflowApiError::Database(e.to_string()).response();
@@ -2163,7 +2160,7 @@ pub async fn create_run_signal_token(
 
 async fn create_run_signal_token_inner(
     state: &AppState,
-    app_id: Uuid,
+    app_id: AppId,
     run_id: &str,
     body: CreateSignalTokenBody,
 ) -> Result<Value, WorkflowApiError> {
@@ -2183,7 +2180,7 @@ async fn create_run_signal_token_inner(
         runs = tables.runs
     );
     let rows = tx
-        .query(&run_sql, &[&run_id, &app_id])
+        .query(&run_sql, &[&run_id, &app_id.as_str()])
         .await
         .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
     let Some(row) = rows.first() else {
@@ -2210,15 +2207,15 @@ async fn create_run_signal_token_inner(
         .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
 
     let exp = Utc::now().timestamp().saturating_add(ttl_secs);
-    let claims = typed_id::WorkflowSignalTokenClaims {
-        app_id: app_id.to_string(),
+    let claims = workflow_signal_token::WorkflowSignalTokenClaims {
+        app_id: app_id.as_str().to_owned(),
         run_id: Some(run_id.to_string()),
         topic: None,
         types,
         exp,
         epoch: i64::from(epoch),
     };
-    let token = typed_id::sign_workflow_signal_token(&claims, &secret)
+    let token = workflow_signal_token::sign_workflow_signal_token(&claims, &secret)
         .map_err(WorkflowApiError::Database)?;
     Ok(json!({
         "token": token,
@@ -2248,7 +2245,7 @@ pub async fn create_topic_signal_token(
 
 async fn create_topic_signal_token_inner(
     state: &AppState,
-    app_id: Uuid,
+    app_id: AppId,
     topic: &str,
     body: CreateSignalTokenBody,
 ) -> Result<Value, WorkflowApiError> {
@@ -2266,15 +2263,15 @@ async fn create_topic_signal_token_inner(
         .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
 
     let exp = Utc::now().timestamp().saturating_add(ttl_secs);
-    let claims = typed_id::WorkflowSignalTokenClaims {
-        app_id: app_id.to_string(),
+    let claims = workflow_signal_token::WorkflowSignalTokenClaims {
+        app_id: app_id.as_str().to_owned(),
         run_id: None,
         topic: Some(topic.to_string()),
         types,
         exp,
         epoch: 0,
     };
-    let token = typed_id::sign_workflow_signal_token(&claims, &secret)
+    let token = workflow_signal_token::sign_workflow_signal_token(&claims, &secret)
         .map_err(WorkflowApiError::Database)?;
     Ok(json!({
         "token": token,
@@ -2304,7 +2301,7 @@ pub async fn publish_topic_signal(
 
 async fn publish_topic_signal_inner(
     state: &AppState,
-    app_id: Uuid,
+    app_id: AppId,
     topic: &str,
     body: PublishTopicBody,
     origin: &str,
@@ -2427,7 +2424,7 @@ fn is_terminal_or_compensating(state: &str) -> bool {
 
 async fn deliver_ingress_run_signal(
     state: &AppState,
-    app_id: Uuid,
+    app_id: AppId,
     run_id: &str,
     signal_type: &str,
     payload: &Value,
@@ -2456,7 +2453,7 @@ async fn deliver_ingress_run_signal(
         runs = tables.runs
     );
     let rows = tx
-        .query(&lock_sql, &[&run_id, &app_id])
+        .query(&lock_sql, &[&run_id, &app_id.as_str()])
         .await
         .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
     let Some(row) = rows.first() else {
@@ -2519,7 +2516,7 @@ async fn deliver_ingress_run_signal(
         );
         tx.execute(
             &wake_sql,
-            &[&run_id, &app_id],
+            &[&run_id, &app_id.as_str()],
         )
         .await
         .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
@@ -2540,7 +2537,7 @@ async fn deliver_ingress_run_signal(
 /// `too_many_arguments` threshold; every field is still required and read
 /// exactly once.
 struct TopicBroadcast<'a> {
-    app_id: Uuid,
+    app_id: AppId,
     topic: &'a str,
     signal_type: &'a str,
     payload: &'a Value,
@@ -2579,7 +2576,7 @@ async fn insert_topic_broadcast(
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
             &[
                 &broadcast_id,
-                &app_id,
+                &app_id.as_str(),
                 &topic,
                 &signal_type,
                 payload,
@@ -2651,7 +2648,7 @@ pub async fn restart_run(
 
 async fn restart_run_inner(
     state: &AppState,
-    app_id: Uuid,
+    app_id: AppId,
     run_id: &str,
     body: RestartBody,
 ) -> Result<Value, WorkflowApiError> {
@@ -2690,7 +2687,7 @@ async fn restart_run_inner(
                FROM {runs} \
               WHERE id = $1 AND app_id = $2 \
               FOR UPDATE", runs = tables.runs),
-            &[&run_id, &app_id],
+            &[&run_id, &app_id.as_str()],
         )
         .await
         .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
@@ -2868,7 +2865,7 @@ async fn restart_run_inner(
     .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
 
     let restarted_from: Option<i32> = (!full_restart).then_some(target_ordinal);
-    let restarted_by = format!("app:{app_id}");
+    let restarted_by = format!("app:{}", app_id.as_str());
     tx.execute(
         &format!("UPDATE {runs} \
             SET state = 'queued', \
@@ -2905,7 +2902,7 @@ async fn restart_run_inner(
             &signal_epoch_bump,
             &restarted_from,
             &restarted_by,
-            &app_id,
+            &app_id.as_str(),
         ],
     )
     .await
@@ -2965,7 +2962,7 @@ async fn control_transition(
                FROM {runs} \
               WHERE id = $1 AND app_id = $2 \
               FOR UPDATE", runs = tables.runs),
-            &[&run_id, &app_id],
+            &[&run_id, &app_id.as_str()],
         )
         .await
     {
@@ -3012,7 +3009,7 @@ async fn control_transition(
                       RETURNING state",
                         runs = tables.runs
                     ),
-                    &[&run_id, &app_id],
+                    &[&run_id, &app_id.as_str()],
                 )
                 .await
                 .map_err(workflow_pg_error)
@@ -3044,7 +3041,7 @@ async fn control_transition(
                     wake_frontier,
                     runs = tables.runs,
                 );
-                tx.query(&sql, &[&run_id, &app_id])
+                tx.query(&sql, &[&run_id, &app_id.as_str()])
                     .await
                     .map_err(workflow_pg_error)
             }
@@ -3131,7 +3128,7 @@ async fn control_transition(
                           RETURNING state",
                             runs = tables.runs
                         ),
-                        &[&run_id, &app_id, &error],
+                        &[&run_id, &app_id.as_str(), &error],
                     )
                     .await
                     .map_err(workflow_pg_error)
@@ -3155,7 +3152,7 @@ async fn control_transition(
                           RETURNING state",
                             runs = tables.runs
                         ),
-                        &[&run_id, &app_id],
+                        &[&run_id, &app_id.as_str()],
                     )
                     .await
                     .map_err(workflow_pg_error)
@@ -3180,7 +3177,7 @@ async fn control_transition(
                       RETURNING state",
                         runs = tables.runs
                     ),
-                    &[&run_id, &app_id],
+                    &[&run_id, &app_id.as_str()],
                 )
                 .await
                 .map_err(workflow_pg_error)
@@ -3277,7 +3274,7 @@ pub async fn list_runs(
     );
     let rows = match state
         .control_pg
-        .query(&sql, &[&app_id, &state_param, &workflow_param, &limit, &offset])
+        .query(&sql, &[&app_id.as_str(), &state_param, &workflow_param, &limit, &offset])
         .await
     {
         Ok(rows) => rows,
@@ -3374,6 +3371,7 @@ mod tests {
     use super::*;
     use crate::api::infrastructure_error_test_support::{assert_logged_trace_id, capture};
     use ntex::util::{stream_recv, BytesMut};
+    use uuid::Uuid;
 
     async fn body_json(mut resp: web::HttpResponse) -> Value {
         let mut body = resp.take_body();
@@ -3454,7 +3452,7 @@ mod tests {
 
     #[test]
     fn signal_token_time_enforces_expiry_with_tolerance() {
-        let claims = typed_id::WorkflowSignalTokenClaims {
+        let claims = workflow_signal_token::WorkflowSignalTokenClaims {
             app_id: Uuid::nil().to_string(),
             run_id: Some("run_abc".to_string()),
             topic: None,
@@ -3468,7 +3466,7 @@ mod tests {
 
     #[test]
     fn ingress_signal_type_must_be_authorized() {
-        let claims = typed_id::WorkflowSignalTokenClaims {
+        let claims = workflow_signal_token::WorkflowSignalTokenClaims {
             app_id: Uuid::nil().to_string(),
             run_id: Some("run_abc".to_string()),
             topic: None,

@@ -10,7 +10,7 @@ use std::time::{Duration, SystemTime};
 
 use chrono::Utc;
 use compio_postgres::{Client, GenericClient};
-use uuid::Uuid;
+use zeroship_core::app_id::AppId;
 use zeroship_plugin_workflow::store::pg::WorkflowTables;
 
 use crate::cron::workflow_engine::SweepCoverage;
@@ -292,21 +292,21 @@ const BLOB_REFERENCED_BY_OUTPUT_SQL: &str = "SELECT \
 async fn workflow_blob_is_referenced<C>(
     conn: &C,
     hash: &str,
-    owner: Option<&Uuid>,
+    owner: Option<&AppId>,
 ) -> Result<bool, RegistryError>
 where
     C: GenericClient + Sync,
 {
     for app in super::workflow_engine::journalled_apps(conn).await? {
-        let app_id = app.app_id;
         if let Some(reason) = app.exclusion() {
             tracing::warn!(
-                app_id = %app_id,
+                app_id = %app.app_id.as_str(),
                 hash = %hash,
                 "retaining workflow blob: {reason}, so it cannot be proven unreferenced"
             );
             return Ok(true);
         }
+        let app_id = app.app_id;
         let tables = WorkflowTables::for_app_id(&app_id);
         let sql = if owner == Some(&app_id) {
             BLOB_REFERENCED_BY_OUTPUT_SQL
