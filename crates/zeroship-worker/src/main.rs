@@ -5,6 +5,7 @@
 // time.
 #![recursion_limit = "256"]
 
+mod enrol;
 mod handler;
 mod health;
 mod sync;
@@ -38,6 +39,14 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 /// Operator-facing spelling of the control key, for a diagnostic that has to
 /// name something the operator can actually set.
 const CONTROL_KEY_LABEL: &str = "ZEROSHIP_CONTROL_KEY / --control-key-file";
+
+/// The listen backlog for this worker's HTTP socket.
+///
+/// Declared here because the listener is created BEFORE the server is - see the
+/// bind site in `main`, and the reason it has to be. `HttpServer::backlog` is
+/// what would otherwise carry it; this binary never called it, so this is the
+/// same declaration moved to the one place that now needs it.
+const WORKER_LISTEN_BACKLOG: i32 = 1024;
 
 type SlotReaperTask = compio::runtime::JoinHandle<Result<(), zeroship_data_core::error::DbError>>;
 
@@ -76,7 +85,7 @@ where
 /// ONE, and unconditional: a worker that cannot poll control for versions is a
 /// worker with nothing to do. The dispatch credential is NOT here and is not an
 /// omission - it is an ed25519 key file loaded by
-/// [`build_service_auth`], which refuses a file it cannot read or that other
+/// [`load_role_material`], which refuses a file it cannot read or that other
 /// local users can, checks this audit cannot express and a strength floor on a
 /// shared string cannot replace.
 /// [`zeroship_core::config::audit_credentials`] handles the three material
@@ -176,6 +185,13 @@ pub struct WorkerConfig {
     /// dispatch with, and its own ed25519 key for the control-plane reads it
     /// makes.
     ///
+    /// THE INSTANCE IDENTITY, ALWAYS, AND NEVER THE ROLE. It mints under
+    /// `svc/worker/<wkr_id>` on a key drawn at boot in memory, and is addressed
+    /// as `svc/worker`. The operator's shared role key does not reach this
+    /// field and cannot: `crate::enrol::enrol` consumes it and returns this,
+    /// and this struct is not constructed until it has. That is the whole of
+    /// "the role key authenticates the enrolment call and nothing else".
+    ///
     /// INBOUND takes the transport-only profile - the dispatch hop is the app
     /// data path, so no `jti` is claimed and no shared store is consulted.
     /// OUTBOUND to control takes the FULL profile, because those reads fire
@@ -218,7 +234,14 @@ pub struct WorkerConfig {
     pub workflow_advance_unsigned: bool,
 }
 
-/// Load this worker's service identity, or refuse to start.
+/// Load the operator's `svc/worker` key material, or refuse to start.
+///
+/// It is NOT this process's serving identity, and that is the change this
+/// function's name now carries. The role key is shared by every worker replica,
+/// so an assertion minted under it names a fleet; what serves is the INSTANCE
+/// identity `crate::enrol::enrol` exchanges this material for, once, after the
+/// port is bound. See that module for why there are two keyrings and why the
+/// split is forced rather than chosen.
 ///
 /// The verifier is the TRANSPORT-ONLY one. The worker is a callee on exactly
 /// one edge - the gateway's dispatch hop - and that hop carries every end-user
@@ -246,12 +269,11 @@ pub struct WorkerConfig {
 /// opposite - an empty `worker_key` turned the envelope check off and the
 /// bearer check with it - so the missing-key branch here is the point of the
 /// change, not an edge case of it.
-fn build_service_auth(
+fn load_role_material(
     key_file: &std::path::Path,
     peers_file: &std::path::Path,
-) -> zeroship_core::service_peers::ServiceAuth {
-    use zeroship_core::service_assertion::TransportAssertionVerifier;
-    use zeroship_core::service_peers::{service_issuer, ServiceAuth, ServiceKeyring};
+) -> crate::enrol::RoleMaterial {
+    use zeroship_core::service_peers::{service_issuer, ServiceKeyring};
     use zeroship_core::user_envelope::UserEnvelopeVerifier;
 
     let issuer = match service_issuer(zeroship_core::service_peers::WORKER_SERVICE_NAME) {
@@ -268,7 +290,7 @@ fn build_service_auth(
             std::process::exit(1);
         }
     };
-    let mut keyring = match ServiceKeyring::load(issuer, key_file, peers_file) {
+    let mut keyring = match ServiceKeyring::load(issuer.clone(), key_file, peers_file) {
         Ok(keyring) => keyring,
         Err(error) => {
             tracing::error!(
@@ -283,11 +305,16 @@ fn build_service_auth(
         tracing::error!("worker: refusing to start - peer bundle already taken");
         std::process::exit(1);
     };
-    // Built BEFORE the bundle is consumed, and fatal if it cannot be. A worker
-    // that came up without it would verify the dispatch hop and then have no
-    // way to check who the request is FOR - and the only shapes available then
-    // are "trust the header" or "drop every user to anonymous", one unsafe and
-    // one silently wrong.
+    // Built HERE, while the material is being read, and fatal if it cannot be.
+    // A worker that came up without it would verify the dispatch hop and then
+    // have no way to check who the request is FOR - and the only shapes
+    // available then are "trust the header" or "drop every user to anonymous",
+    // one unsafe and one silently wrong.
+    //
+    // It is deliberately NOT deferred to the point where the instance identity
+    // is assembled. Deferring it would make F4's gateway-key refusal conditional
+    // on the control plane being reachable, which is the same defect the comment
+    // at this function's call site records about the database.
     let user_envelope = match UserEnvelopeVerifier::for_issuer(&bundle, &gateway) {
         Ok(verifier) => verifier,
         Err(error) => {
@@ -299,8 +326,7 @@ fn build_service_auth(
             std::process::exit(1);
         }
     };
-    ServiceAuth::new(keyring, Arc::new(TransportAssertionVerifier::new(bundle)))
-        .verifying_user_envelopes(user_envelope)
+    crate::enrol::RoleMaterial::new(keyring, bundle, user_envelope, issuer)
 }
 
 fn main() -> std::io::Result<()> {
@@ -532,10 +558,10 @@ fn main() -> std::io::Result<()> {
     // hop claims no `jti` precisely so inbound authentication needs no database
     // at all. Reading two files needs no async runtime, so nothing is lost by
     // doing it first.
-    let service_auth = Arc::new(build_service_auth(
+    let role_material = load_role_material(
         settings.service_key_file.get(),
         settings.service_peers_file.get(),
-    ));
+    );
 
     ntex::rt::System::build()
         .name("zeroship-worker")
@@ -589,23 +615,7 @@ fn main() -> std::io::Result<()> {
         "worker app-kernel namespaces"
     );
 
-    let config = Arc::new(WorkerConfig {
-        service_auth,
-        control_url,
-        control_key,
-        db_url: if db_url.is_empty() { None } else { Some(db_url) },
-        kv_url: kv_url_opt,
-        storage_backend,
-        max_isolates,
-        max_pinned_isolates_per_app,
-        poll_interval_secs: poll_interval,
-        shutdown_timeout_secs: shutdown_timeout,
-        blob_store,
-        workflow_blob_store,
-        max_step_blob_bytes: *settings.max_step_blob_bytes.get(),
-        workflow_advance_unsigned,
-    });
-
+    let db_url_opt = if db_url.is_empty() { None } else { Some(db_url) };
     let bind_addr = format!("{bind_host}:{port}");
 
     // Shared version snapshot populated by a SINGLE process-wide poller and
@@ -619,27 +629,15 @@ fn main() -> std::io::Result<()> {
     let shared_envs: SharedEnvs = Arc::new(RwLock::new(std::collections::HashMap::new()));
     let shared_logs = logs::new_store();
 
-    tracing::info!(
-        bind = %bind_addr,
-        threads = workers_count,
-        max_isolates = config.max_isolates,
-        max_pinned_isolates_per_app = config.max_pinned_isolates_per_app,
-        shutdown_timeout_secs = config.shutdown_timeout_secs,
-        "worker listening"
-    );
     if !socket_path.is_empty() {
         tracing::info!(socket = %socket_path, "worker also bound to unix socket");
         // Remove stale socket file
         let _ = std::fs::remove_file(&socket_path);
     }
 
-    // Start the single process-wide version poller BEFORE ntex spawns worker
-    // threads so the shared map is already being populated when they come up.
-    // Poller also GCs SharedEnvs against the current known-app set, so
-    // env entries for deleted apps don't leak forever.
-    // ONE readiness state for the whole process: the poller below stamps it on
-    // every successful control poll, and every ntex worker thread's `/readyz`
-    // reads that same stamp plus the same blob-store gate.
+    // ONE readiness state for the whole process: the version poller stamps it
+    // on every successful control poll, and every ntex worker thread's
+    // `/readyz` reads that same stamp plus the same blob-store gate.
     let readiness = Arc::new(health::WorkerReadiness::new());
 
     // ── Metering infrastructure ──────────────────────────────────────────
@@ -671,7 +669,7 @@ fn main() -> std::io::Result<()> {
     // call an app happens to make. That is not a new failure for this binary:
     // the slot reaper below already connects at boot and fails the process when
     // the database is unusable.
-    let db_service = match config.db_url.as_deref() {
+    let db_service = match db_url_opt.as_deref() {
         Some(url) => Some(
             zeroship_plugin_db::service::DbService::new(
                 zeroship_plugin_db::service::DbServiceConfig {
@@ -687,17 +685,6 @@ fn main() -> std::io::Result<()> {
         None => None,
     };
 
-    // The single process-wide version poller. Started after the service exists
-    // because a deleted app's CDC teardown runs through the service's operator
-    // lifecycle handle, and still before `web::server` below spawns any worker
-    // thread, so the shared version map is already filling when they come up.
-    sync::start_version_poller(
-        config.clone(),
-        shared_versions.clone(),
-        shared_envs.clone(),
-        readiness.clone(),
-        db_service.clone(),
-    );
     // The producer's four `metering.*` declarations, already resolved. The
     // worker deliberately has no TOML overlay source (9b205f6ed, a credential
     // boundary), so its tiers are flag then `ZEROSHIP_METERING_*` then the
@@ -769,7 +756,7 @@ fn main() -> std::io::Result<()> {
     // supervised with the HTTP server below: if its maintenance session or
     // sweep fails, this process stops rather than continuing CDC after losing
     // the lease that tells peer reapers it is live.
-    let slot_reaper_task = if let Some(db_url) = config.db_url.as_deref() {
+    let slot_reaper_task = if let Some(db_url) = db_url_opt.as_deref() {
         Some(
             slot_reaper::start(db_url, &meter_source)
                 .await
@@ -782,6 +769,100 @@ fn main() -> std::io::Result<()> {
     } else {
         None
     };
+
+    // ── THE PORT, THEN THE IDENTITY ──────────────────────────────────────
+    //
+    // The listener is created HERE, eagerly, and handed to ntex below instead
+    // of letting `HttpServer::bind` create it. The order is the point:
+    // enrolment ADVERTISES this port to control, control writes a row carrying
+    // it, and NOTHING REAPS THAT ROW. Enrolling before the socket exists would
+    // therefore let a bind failure leave a live-looking registry entry pointing
+    // at a port nothing listens on. `bind` is reachable only through the server
+    // builder, and the server cannot be built until the identity enrolment
+    // returns is in hand - so the bind moves out here rather than the enrolment
+    // moving earlier. Socket options match what `HttpServer::bind` would have
+    // applied: `ntex::server::bind_addr` is the same function it calls.
+    let listeners = match ntex::server::bind_addr(&bind_addr, WORKER_LISTEN_BACKLOG) {
+        Ok(listeners) => listeners,
+        Err(error) => {
+            tracing::error!(bind = %bind_addr, %error, "worker: refusing to start - cannot bind");
+            return Err(error);
+        }
+    };
+
+    // EVERY FAILURE HERE REFUSES THE BOOT, and that is the whole of it. A
+    // worker that logged this and carried on would serve traffic under the
+    // SHARED role key while control's registry either knows nothing about it or
+    // holds a row for a process that never finished starting - and from the
+    // outside it would look exactly like a worker that enrolled, which is the
+    // failure shape this platform keeps re-learning.
+    //
+    // `enrol` CONSUMES the role material, so the operator's shared key is
+    // spent on this one call and is unreachable afterwards. What comes back
+    // mints under `svc/worker/<wkr_id>` and is addressed as `svc/worker`;
+    // everything below - the version poller, every reconcile, every dispatch -
+    // is handed that and only that.
+    let service_auth = match enrol::enrol(role_material, &control_url, port).await {
+        Ok(auth) => Arc::new(auth),
+        Err(error) => {
+            tracing::error!(
+                control_url = %control_url,
+                port,
+                %error,
+                "worker: refusing to start - this process could not enrol an instance identity"
+            );
+            std::process::exit(1);
+        }
+    };
+
+    let config = Arc::new(WorkerConfig {
+        service_auth,
+        control_url,
+        control_key,
+        db_url: db_url_opt,
+        kv_url: kv_url_opt,
+        storage_backend,
+        max_isolates,
+        max_pinned_isolates_per_app,
+        poll_interval_secs: poll_interval,
+        shutdown_timeout_secs: shutdown_timeout,
+        blob_store,
+        workflow_blob_store,
+        max_step_blob_bytes: *settings.max_step_blob_bytes.get(),
+        workflow_advance_unsigned,
+    });
+
+    // The single process-wide version poller. Started after the `env.db`
+    // service exists because a deleted app's CDC teardown runs through that
+    // service's operator lifecycle handle, and still before `web::server` below
+    // spawns any worker thread, so the shared version map is already filling
+    // when they come up. Poller also GCs SharedEnvs against the current
+    // known-app set, so env entries for deleted apps don't leak forever.
+    //
+    // It is also the LAST thing before the server that talks to control, and it
+    // is now downstream of enrolment - so no outbound call this process makes
+    // can be minted under the role key. Nothing before this point mints at all:
+    // the poller's own credential is the shared control key
+    // (`sync::version_poll_authorization`), and the two service-assertion
+    // callers - `fetch_app_version` and `fetch_app_env` - are reachable only
+    // from the per-thread reconcile loop, the dispatch handler and the log
+    // reader, all of which start when `server.run()` spawns worker threads.
+    sync::start_version_poller(
+        config.clone(),
+        shared_versions.clone(),
+        shared_envs.clone(),
+        readiness.clone(),
+        db_service.clone(),
+    );
+
+    tracing::info!(
+        bind = %bind_addr,
+        threads = workers_count,
+        max_isolates = config.max_isolates,
+        max_pinned_isolates_per_app = config.max_pinned_isolates_per_app,
+        shutdown_timeout_secs = config.shutdown_timeout_secs,
+        "worker listening"
+    );
 
     // ntex installs SIGINT/SIGTERM handlers by default; `shutdown_timeout`
     // bounds how long worker threads have to drain in-flight requests
@@ -830,8 +911,13 @@ fn main() -> std::io::Result<()> {
             })))
     })
     .workers(workers_count)
-    .shutdown_timeout(ntex::time::Seconds(shutdown_timeout_secs))
-    .bind(&bind_addr)?;
+    .shutdown_timeout(ntex::time::Seconds(shutdown_timeout_secs));
+
+    // One listener per resolved address, exactly as `HttpServer::bind` does:
+    // `localhost` resolves to both loopback families and both must be served.
+    for listener in listeners {
+        server = server.listen(listener)?;
+    }
 
     // Also listen on Unix domain socket if configured
     if !socket_path.is_empty() {
@@ -880,6 +966,51 @@ mod tests {
         assert!(
             !server_factory.contains(&start_call),
             "the reaper must not be multiplied by ntex worker threads"
+        );
+    }
+
+    /// The socket exists BEFORE the enrolment that advertises it, and the
+    /// serving identity is whatever that enrolment returned.
+    ///
+    /// Neither half is expressible in the type system. Both statements live in
+    /// one function and either order compiles; what is at stake is a registry
+    /// row pointing at a port nothing listens on, and nothing reaps those rows.
+    ///
+    /// The markers are SPLIT so this test's own source does not match them -
+    /// the same trick the reaper test above uses, and for the same reason: a
+    /// self-matching marker makes the ordering assertion vacuously true.
+    #[test]
+    fn the_port_is_bound_before_the_enrolment_that_advertises_it() {
+        let source = include_str!("main.rs");
+        let bind = ["ntex::server::", "bind_addr(&bind_addr"].concat();
+        let enrol = ["enrol::", "enrol(role_material"].concat();
+        let config = ["Arc::new(", "WorkerConfig {"].concat();
+        let poller = ["sync::", "start_version_poller("].concat();
+        for marker in [&bind, &enrol, &config, &poller] {
+            assert_eq!(
+                source.matches(marker.as_str()).count(),
+                1,
+                "{marker} must appear exactly once in the boot path"
+            );
+        }
+        let at = |marker: &str| source.find(marker).expect("marker present");
+        assert!(
+            at(&bind) < at(&enrol),
+            "the port must be held before it is advertised"
+        );
+        assert!(
+            at(&enrol) < at(&config),
+            "the serving identity must be the one enrolment returned"
+        );
+        // The one control-plane caller started before the HTTP server. It uses
+        // the SHARED control key rather than a service assertion, so this is
+        // not what stops a role-key mint - the type system does that, by
+        // consuming the role material. It is here so the poller cannot be moved
+        // above enrolment and start observing a control plane that has not yet
+        // admitted this process.
+        assert!(
+            at(&enrol) < at(&poller),
+            "the version poller must not run before this process has an identity"
         );
     }
 

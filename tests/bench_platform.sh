@@ -96,15 +96,15 @@ docker exec pg-test psql -U postgres -c "DROP TABLE IF EXISTS usage_history, usa
 # like any other. The port half names the worker's port below and nothing else,
 # because that is the only process here that enrols.
 #
-# Latent until enrolment is mandatory, which is exactly why it is stated now
-# rather than found later: the refusal would arrive while every readiness probe
-# in this file stayed green, and this harness reports timings rather than
-# verdicts, so it would read as a performance change.
+# It was stated here while enrolment was still latent, and it is LOAD-BEARING
+# now: the worker enrols at boot and REFUSES TO START when control refuses it.
+# That is the better failure for this file, which reports timings rather than
+# verdicts - a worker that started with its enrolment refused would have read
+# as a performance change.
 #
 # The port is named ONCE and read twice - here and by the worker below. Two
-# literals that have to agree are a drift waiting to happen, and the way this
-# one drifts is silent: the worker still starts, and only its enrolment is
-# refused.
+# literals that have to agree are a drift waiting to happen, and this one now
+# drifts loudly: the worker exits instead of serving.
 BENCH_WORKER_PORT=8080
 export ZEROSHIP_CONTROL_WORKER_ENROLMENT_NETWORKS="127.0.0.0/8"
 export ZEROSHIP_CONTROL_WORKER_ENROLMENT_PORTS="$BENCH_WORKER_PORT"

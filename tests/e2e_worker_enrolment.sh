@@ -16,7 +16,8 @@
 # `envelope_unset` with a 503 to every enrolment. A gap in configuration is
 # invisible to a test that supplies its own configuration.
 #
-# WHAT IS ASSERTED, and the one-variable control that makes it mean something:
+# WHAT IS ASSERTED, and the one-variable control that makes each pair mean
+# something:
 #
 #   A  the stack's control plane, with the envelope tests/lib/e2e_stack.sh
 #      declares, ADMITS an enrolment from loopback claiming the port the worker
@@ -24,20 +25,30 @@
 #   B  a SECOND control plane, same binary, same database, same peer document,
 #      same request - with the network half of the envelope cleared and NOTHING
 #      ELSE CHANGED - refuses it with `envelope_unset` and writes no row.
+#   C  the REAL `zeroship-worker` binary the stack booted enrolled ITSELF, and
+#      the row it produced carries the derived address and a public key that is
+#      NOT the operator's `svc/worker` role key. A and B drive the endpoint as
+#      the worker would; C is the only arm that rules on the worker's own boot
+#      path, and it is what the harness header used to say was out of scope.
+#   D  a real worker pointed at the UNDECLARED control plane REFUSES TO START -
+#      it exits non-zero and never serves - against a control differing in the
+#      `--control-url` and nothing else, which boots and enrols.
 #
 # Without B, A cannot tell a working declaration from an endpoint that admits
 # everything. The one variable is `control.worker_enrolment_networks`; the port
 # half is left declared on purpose, so B's refusal names the deployment state
 # rather than a second missing setting.
 #
-# THE PORT IS NOT A LITERAL ANYWHERE IN THIS PAIR. The declaration derives it
-# from $ZEROSHIP_WORKER_PORT, the enrolment claims the same variable, and A
-# additionally proves something is really listening there - so a declaration
-# that drifted off the worker's port fails here instead of failing the first
-# time a worker boots.
+# Without D's control arm, D's refusal is satisfied by a worker that cannot
+# start anywhere. Without D at all, C is satisfied by a worker that enrols when
+# it can and boots anyway when it cannot - which is the defect shape a fence
+# that logs instead of exiting produces, because it prints what success prints.
 #
-# NOT IN SCOPE, deliberately: the worker's own boot path. Nothing in the worker
-# calls this endpoint yet. This harness drives it as the worker will.
+# NO PORT IS A LITERAL ANYWHERE IN THIS FILE. The declaration derives its range
+# from the two reserved worker ports, the enrolment claims the same variables,
+# and A additionally proves something is really listening there - so a
+# declaration that drifted off the worker's port fails here instead of failing
+# the first time a worker boots.
 #
 # Run: tests/e2e_worker_enrolment.sh
 # ============================================================================
@@ -62,9 +73,21 @@ gate_arms_init worker_enrolment
 # shellcheck source=tests/lib/e2e_ports.sh
 source "$ROOT/tests/lib/e2e_ports.sh"
 zs_ports_reserve ZEROSHIP_CONTROL_PORT ZEROSHIP_WORKER_PORT ZEROSHIP_GATEWAY_PORT \
-                 PG_PORT CONTROL_UNDECLARED_PORT || exit 1
+                 PG_PORT CONTROL_UNDECLARED_PORT WORKER_REFUSAL_PORT || exit 1
 RUN_TOKEN="$$_$(date +%s%N)"
 export PG_CONTAINER="zs-e2e-enrol-pg-$RUN_TOKEN"
+
+# The declared port range has to cover BOTH workers this harness boots: the
+# stack's own, and arm D's. Derived from the two allocations rather than
+# written out, for the reason tests/lib/e2e_stack.sh gives about its own
+# derivation - a literal drifts the first time a port moves, and control then
+# refuses with `port_outside_envelope` while every health probe stays green.
+if [ "$ZEROSHIP_WORKER_PORT" -le "$WORKER_REFUSAL_PORT" ]; then
+  ZEROSHIP_CONTROL_WORKER_ENROLMENT_PORTS="$ZEROSHIP_WORKER_PORT-$WORKER_REFUSAL_PORT"
+else
+  ZEROSHIP_CONTROL_WORKER_ENROLMENT_PORTS="$WORKER_REFUSAL_PORT-$ZEROSHIP_WORKER_PORT"
+fi
+export ZEROSHIP_CONTROL_WORKER_ENROLMENT_PORTS
 
 # shellcheck source=tests/lib/e2e_stack.sh
 source "$ROOT/tests/lib/e2e_stack.sh"
@@ -77,12 +100,71 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "=== Stack ==="
-stack_up || exit 2
-
 CONTROL_URL="http://localhost:$ZEROSHIP_CONTROL_PORT"
 UNDECLARED_URL="http://localhost:$CONTROL_UNDECLARED_PORT"
 psql_q() { docker exec -i "$PG_CONTAINER" psql -U postgres -d zeroship -tAc "$1"; }
+
+echo "=== Stack ==="
+stack_up || exit 2
+
+# READ BEFORE ANYTHING ELSE WRITES. Arm C rules on what the stack's own worker
+# did while it was booting, and arm A inserts a row with the same address a few
+# lines below, so the snapshot has to be taken here or the two become
+# indistinguishable.
+BOOT_ROWS="$(psql_q "select id || '|' || host(advertise_host) || '|' || advertise_port || '|' || status || '|' || encode(public_key, 'base64') from zeroship.worker_instances order by registered_at")"
+BOOT_ROW_COUNT="$(printf '%s' "$BOOT_ROWS" | grep -c '|' )"
+
+# ---------------------------------------------------------------------------
+# C: the REAL worker's own boot path
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== C: the zeroship-worker binary the stack booted enrolled itself ==="
+
+# The operator's `svc/worker` ROLE key, which is the one thing on disk. The
+# instance key is drawn at boot from the CSPRNG and never written anywhere, so
+# the row must NOT carry this value. Without this comparison the arm is
+# satisfied by a worker that enrolled the key it already held - which is the
+# shape `ServiceKeyring::from_parts` refuses for a different reason and which
+# would make every instance's signature verifiable as the role's.
+ROLE_PUB_B64="$(openssl pkey -in "$ZEROSHIP_WORKER_SERVICE_KEY_FILE" -pubout -outform DER 2>/dev/null \
+                 | tail -c 32 | openssl base64 -A)"
+C_ROW="$(printf '%s\n' "$BOOT_ROWS" | grep "|$ZEROSHIP_WORKER_PORT|" | head -1)"
+C_ID="$(printf '%s' "$C_ROW" | cut -d'|' -f1)"
+note "C rows at boot=$BOOT_ROW_COUNT row=${C_ROW:-<none>}"
+note "C role public key (must NOT be the row's)=$ROLE_PUB_B64"
+
+c_facts=0
+c_ruled() { c_facts=$((c_facts + 1)); }
+
+c_ruled; printf '%s' "$C_ID" | grep -Eq '^wkr_[0-9A-Za-z]{22}$' \
+  && pass "C the worker enrolled itself at boot (id $C_ID)" \
+  || fail "C no worker_instances row for the stack's worker on :$ZEROSHIP_WORKER_PORT"
+c_ruled; [ "$(printf '%s' "$C_ROW" | cut -d'|' -f2)" = "127.0.0.1" ] \
+  && pass "C the row carries the OBSERVED loopback address" \
+  || fail "C advertise_host is '$(printf '%s' "$C_ROW" | cut -d'|' -f2)', expected 127.0.0.1"
+c_ruled; [ "$(printf '%s' "$C_ROW" | cut -d'|' -f4)" = "active" ] \
+  && pass "C the row is active" \
+  || fail "C status is '$(printf '%s' "$C_ROW" | cut -d'|' -f4)', expected active"
+C_ROW_PUB="$(printf '%s' "$C_ROW" | cut -d'|' -f5)"
+c_ruled; [ -n "$C_ROW_PUB" ] && [ -n "$ROLE_PUB_B64" ] && [ "$C_ROW_PUB" != "$ROLE_PUB_B64" ] \
+  && pass "C the enrolled key is NOT the on-disk role key, so it was drawn at boot" \
+  || fail "C enrolled key '${C_ROW_PUB:-<none>}' vs role key '${ROLE_PUB_B64:-<none>}'"
+# The worker has to LEARN its instance id, not merely cause a row: everything
+# it mints afterwards is signed under `svc/worker/<that id>`. Its own log is
+# where that shows, and grepping it also proves the row came from THIS process
+# rather than from a stale one in the shared database.
+#
+# THE EMPTINESS GUARD IS NOT DEFENSIVE PADDING. Without it `grep -q ""` matches
+# every line of any non-empty file, so this assertion PASSED on the pre-change
+# tree - where there was no row at all and its four siblings had just failed.
+c_ruled; [ -n "$C_ID" ] && grep -q "$C_ID" "$WORK/worker.log" 2>/dev/null \
+  && pass "C the worker's own log names the instance id it now mints under" \
+  || fail "C $WORK/worker.log never names an instance id (row id '${C_ID:-<none>}')"
+
+# Floor 3 of the 5 above: a collapse of the enumeration - the row shape
+# changing, the log line going away - cannot read as clean, and dropping one
+# assertion stays a decision rather than a break.
+gate_arm worker_enrolled_at_boot "$c_facts" 3 || true
 
 # `:-` so that DELETING the declaration from tests/lib/e2e_stack.sh - the
 # mutation this pair exists to be checked against - reaches the assertions below
@@ -224,6 +306,107 @@ b_ruled; [ -n "$B_ROWS_BEFORE" ] && [ "$B_ROWS_AFTER" = "$B_ROWS_BEFORE" ] \
   || fail "B row count moved $B_ROWS_BEFORE -> $B_ROWS_AFTER on a refused enrolment"
 
 gate_arm refused_without_declaration "$b_facts" 2 || true
+
+# ---------------------------------------------------------------------------
+# D: a refused enrolment must REFUSE STARTUP, not be logged and survived
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== D: a real worker whose enrolment is refused does not start ==="
+
+# THE TWO LAUNCHES DIFFER IN `--control-url` AND IN NOTHING ELSE. D1 points at
+# the control plane arm B left running with its network declaration cleared, so
+# its enrolment comes back `envelope_unset`; D2 points at the stack's declared
+# one. Both bind the same port, in turn, so the port is not the variable.
+#
+# WHY THE PAIR AND NOT JUST D1. A worker that cannot start for any reason at all
+# satisfies D1 - a broken binary, a missing peer document, a typo in a flag all
+# print exactly what a working fence prints. D2 is what says the refusal came
+# from the enrolment verdict.
+#
+# WHY THE EXIT CODE AND NOT A LOG LINE. A fence that logs its refusal and then
+# carries on emits the same line as one that exits; the difference is only
+# visible in whether the process is still there and whether anything answers on
+# its port. Both are asserted.
+#
+# Sets WORKER_PID rather than echoing it: a command substitution would run the
+# launch in a SUBSHELL, the worker would be that subshell's child rather than
+# this one's, and `wait` would then refuse the pid instead of returning the exit
+# status the whole arm turns on.
+worker_launch() {
+  local control="$1" log="$2"
+  "$E2E_BIN/zeroship-worker" --port "$WORKER_REFUSAL_PORT" --threads 1 \
+    --control-url "$control" --blob-store "$WORK/blobs" --poll-interval 2 \
+    > "$log" 2>&1 &
+  WORKER_PID=$!
+}
+
+worker_launch "$UNDECLARED_URL" "$WORK/worker-refused.log"
+D1_PID="$WORKER_PID"
+echo "$D1_PID" >> "$PIDFILE"
+D1_EXIT="still-running"
+for _ in $(seq 1 45); do
+  kill -0 "$D1_PID" 2>/dev/null || { wait "$D1_PID"; D1_EXIT="$?"; break; }
+  sleep 1
+done
+D1_LISTENING="$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 \
+  "http://localhost:$WORKER_REFUSAL_PORT/readyz")"
+note "D1 exit=$D1_EXIT readyz=$D1_LISTENING log tail:"
+tail -3 "$WORK/worker-refused.log" 2>/dev/null | sed 's/^/      /'
+
+# D1's verdict is already captured above. Reap it before D2 binds the SAME
+# port: a D1 that did not exit still holds the socket, so D2 would fail to bind
+# and then report D1's own readiness as its own - which is how the pre-change
+# run printed `D2 readyz=200` with no second worker in existence.
+if kill -0 "$D1_PID" 2>/dev/null; then
+  kill -9 "$D1_PID" 2>/dev/null
+  wait "$D1_PID" 2>/dev/null
+fi
+for _ in $(seq 1 20); do
+  curl -s -o /dev/null --max-time 2 "http://localhost:$WORKER_REFUSAL_PORT/readyz" || break
+  sleep 1
+done
+
+D2_ROWS_BEFORE="$(psql_q "select count(*) from zeroship.worker_instances where advertise_port = $WORKER_REFUSAL_PORT")"
+worker_launch "$CONTROL_URL" "$WORK/worker-admitted.log"
+D2_PID="$WORKER_PID"
+echo "$D2_PID" >> "$PIDFILE"
+D2_READY="000"
+for _ in $(seq 1 45); do
+  D2_READY="$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 \
+    "http://localhost:$WORKER_REFUSAL_PORT/readyz")"
+  [ "$D2_READY" = "200" ] && break
+  kill -0 "$D2_PID" 2>/dev/null || break
+  sleep 1
+done
+D2_ROWS_AFTER="$(psql_q "select count(*) from zeroship.worker_instances where advertise_port = $WORKER_REFUSAL_PORT")"
+note "D2 readyz=$D2_READY rows on :$WORKER_REFUSAL_PORT $D2_ROWS_BEFORE -> $D2_ROWS_AFTER"
+if [ "$D2_READY" != "200" ]; then
+  tail -5 "$WORK/worker-admitted.log" 2>/dev/null | sed 's/^/      /'
+fi
+kill "$D2_PID" 2>/dev/null || true
+
+d_facts=0
+d_ruled() { d_facts=$((d_facts + 1)); }
+
+d_ruled; [ "$D1_EXIT" != "still-running" ] && [ "$D1_EXIT" != "0" ] \
+  && pass "D1 the worker EXITED non-zero ($D1_EXIT) when control refused its enrolment" \
+  || fail "D1 worker exit was '$D1_EXIT'; a refused enrolment must refuse startup"
+d_ruled; [ "$D1_LISTENING" = "000" ] \
+  && pass "D1 nothing ever answered on :$WORKER_REFUSAL_PORT, so no traffic could reach it" \
+  || fail "D1 something answered /readyz on :$WORKER_REFUSAL_PORT (HTTP $D1_LISTENING)"
+d_ruled; grep -qi "enrol" "$WORK/worker-refused.log" 2>/dev/null \
+  && pass "D1 the refusal names enrolment, so it is not an unrelated boot failure" \
+  || fail "D1 $WORK/worker-refused.log never mentions enrolment"
+d_ruled; [ "$D2_READY" = "200" ] \
+  && pass "D2 the SAME command against the declared control plane serves, so D1 is about the verdict" \
+  || fail "D2 the control worker never became ready (HTTP $D2_READY)"
+d_ruled; [ -n "$D2_ROWS_BEFORE" ] && [ -n "$D2_ROWS_AFTER" ] && [ "$D2_ROWS_AFTER" -gt "$D2_ROWS_BEFORE" ] \
+  && pass "D2 and it enrolled a row for :$WORKER_REFUSAL_PORT" \
+  || fail "D2 row count for :$WORKER_REFUSAL_PORT stayed $D2_ROWS_BEFORE -> $D2_ROWS_AFTER"
+
+# Floor 4 of 5: D1 alone is three of these and is worthless without D2's pair,
+# so the floor sits above what either half contributes on its own.
+gate_arm refuses_startup_on_refused_enrolment "$d_facts" 4 || true
 
 echo ""
 gate_arms_finish || FAIL=$((FAIL + 1))
