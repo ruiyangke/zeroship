@@ -2071,6 +2071,47 @@ written into the other. What may promote a long-unhealthy instance to `gone` is 
 retention decision with an operator in it, not a probe timeout - and it is not
 settled here.
 
+### Step 4's delivery order
+
+This step grew into four pieces that land separately. They are numbered here
+rather than renumbering the sequence, because the citations elsewhere in this
+file name step 4 as a whole.
+
+**4a. The registry.** LANDED. Control writes `zeroship.worker_instances`, derives
+the advertised address from the enrolment connection, mints the ring key, and
+resolves an instance's key back from its own ACTIVE row.
+
+**4b. Worker boot enrolment.** LANDED. The worker generates an Ed25519 keypair at
+boot, in memory, enrols presenting only its listening port and public key, and
+refuses to start when control refuses it.
+
+**4c. The health monitor.** NOT STARTED. Design above.
+*Red test, and it is a PAIR because either arm alone passes against the wrong
+thing:* enrol an instance, then kill the process WITHOUT touching its row.
+(i) The monitor must report it unhealthy while the row still reads `active` - the
+two disagreeing, with the monitor right, is the whole point. (ii) The row's
+`status` must STILL read `active` afterwards, which is what proves the monitor did
+not write its observation into the column. The paired control is a live instance,
+which must report healthy and also leave its row untouched.
+*The arms must observe the PROBE RESULT and the ROW, never a log line.* A monitor
+that logs "unhealthy" and changes nothing prints what a working one prints; that
+exact substitution survived three of four arms when it was tried on the worker's
+startup refusal.
+
+**4d. The eligible set.** NOT STARTED. Design above, and it carries the ring-key
+coupling: control's ring and the gateway's must consume the same key or they are
+two different orders.
+*Red test:* the gateway dispatches an app only to a worker in the set control
+published for it, proven by a fleet where the set is a strict subset. The arm that
+matters is the SECOND one: fill every worker in the set to `max_per_worker` and
+assert the dispatch does NOT reach a worker outside it. Without that arm the fence
+is untested exactly where it fails - a load-dependent bypass tests green.
+*Precondition:* `tests/e2e_platform.sh` must be green first. It is the only harness
+covering three-worker routing consistency and cross-worker isolation, and it is
+red today for a reason attributed to the organization re-rooting but not proven.
+Landing 4d against a standing red makes a real regression indistinguishable from
+it.
+
 *Prerequisite, and it is unavoidable under any variant of this step.* Per-instance
 worker identity must land first. `ServiceKeyring::load` in
 `crates/zeroship-core/src/service_peers.rs` reads one signing key per BINARY ROLE
