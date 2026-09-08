@@ -89,16 +89,24 @@ pub struct ErasureBlocker {
 #[serde(rename_all = "snake_case")]
 pub enum BillingRemedy {
     SettleInvoices,
-    BillOutstandingUsage,
+    AttachPaymentMethod,
+    ReconcileClosedPeriod,
     #[serde(other)]
     Unknown,
 }
 
 impl BillingRemedy {
-    /// One sentence a person can act on. Every arm names the route that is
-    /// wired end to end - attaching a default payment method - because a
-    /// refusal that names no next step is a dead end, and it is the only
-    /// remedy a creator can reach today.
+    /// One sentence a person can act on, in the words of the page rather than
+    /// the words of the API. Two arms name the one thing a creator can do -
+    /// attach a payment method - because a refusal that names no next step is a
+    /// dead end.
+    ///
+    /// `ReconcileClosedPeriod` is the arm that does NOT, and saying so is the
+    /// point. Control raises it when the payment method is already on file and
+    /// a closed period was simply never invoiced; the automatic sweep bills
+    /// only the immediately previous month, so nothing the person does here
+    /// moves it. Telling them to add a card they already have would read as
+    /// progress and produce none.
     #[must_use]
     pub const fn instruction(self) -> &'static str {
         match self {
@@ -106,10 +114,14 @@ impl BillingRemedy {
                 "add a payment method to this organization; the outstanding invoice is \
                  then collected automatically"
             }
-            Self::BillOutstandingUsage => {
-                "this organization has usage that was never invoiced, which happens when \
-                 no payment method is on file; add one so the outstanding usage can be \
-                 billed and paid"
+            Self::AttachPaymentMethod => {
+                "this organization has usage that was never invoiced because no payment \
+                 method is on file; add one so the outstanding usage can be billed and paid"
+            }
+            Self::ReconcileClosedPeriod => {
+                "this organization has usage from a past month that was never invoiced, and \
+                 the payment method on file is not what is missing; contact support to have \
+                 that month billed"
             }
             Self::Unknown => "settle this organization's outstanding billing",
         }
@@ -399,7 +411,8 @@ mod tests {
     fn every_billing_remedy_renders_an_instruction() {
         for remedy in [
             BillingRemedy::SettleInvoices,
-            BillingRemedy::BillOutstandingUsage,
+            BillingRemedy::AttachPaymentMethod,
+            BillingRemedy::ReconcileClosedPeriod,
             BillingRemedy::Unknown,
         ] {
             assert!(!remedy.instruction().is_empty());

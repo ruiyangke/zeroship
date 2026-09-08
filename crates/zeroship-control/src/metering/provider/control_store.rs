@@ -144,7 +144,6 @@ impl LiteStore for ControlLiteStore {
         period: BillingPeriod,
     ) -> Result<InvoiceRef, ProviderError> {
         let stripe = self.stripe();
-        let catalog = PlanCatalog::new(self.registry.clone());
         let pricing = PricingStore::new(self.registry.clone());
         let weights = pricing.weights().await?;
         let default_fx = pricing.default_fx_pico_cents_per_unit().await?;
@@ -155,7 +154,6 @@ impl LiteStore for ControlLiteStore {
             &self.stripe_store,
             self.tax_provider.as_ref(),
             &stripe,
-            &catalog,
             &weights,
             default_fx,
             organization,
