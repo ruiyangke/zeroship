@@ -273,6 +273,26 @@ fn issuer_identifiers_reject_everything_that_is_not_one() {
         "a parsed issuer names the same principal the allowlist is written against"
     );
 
+    // The ADMITTED shapes, first, so the refusals below are a statement about
+    // what is wrong with them rather than about a parser that takes nothing.
+    // The deeper paths are what per-instance service identity rests on: a worker
+    // instance mints under `svc/worker/<wkr_id>`, and a typed id is base62 with
+    // an underscore-joined prefix. If any of these stopped parsing, that
+    // identity would need a wire change rather than a name.
+    for admitted in [
+        "spiffe://zeroship.ai/svc/worker",
+        "spiffe://zeroship.ai/svc/worker/wkr_3Kd9QmZp2XvB",
+        "spiffe://zeroship.ai/svc/worker/wkr_3Kd9QmZp2XvB/thread-7",
+    ] {
+        let parsed = ServiceIssuer::parse(admitted)
+            .unwrap_or_else(|_| panic!("{admitted:?} must parse as a service issuer identifier"));
+        assert_eq!(
+            parsed.as_str(),
+            admitted,
+            "an issuer identifier travels on the wire exactly as it was written"
+        );
+    }
+
     for malformed in [
         // The shape an early draft of this design proposed for `aud`.
         "control/get_routes",
