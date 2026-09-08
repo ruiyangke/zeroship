@@ -2069,6 +2069,32 @@ Part 2 must confirm the worker's copy has no consumer before it constructs a
 second one, and must not mint one on the instance key on the strength of this
 paragraph alone.
 
+*How control learns an instance key, SETTLED 2026-09-07.* Control must verify an
+assertion whose `iss` names an instance and whose signature is over a key only
+control has ever seen - it wrote the row. `ServiceTrustBundle::keys_for` is an
+exact-string lookup over the OPERATOR's peer file, and nothing puts an instance
+key there.
+
+Control resolves the instance key BEFORE verifying, and hands verification a
+bundle carrying that one extra key. It does not gain a key-resolver seam that
+verification calls back into. `zeroship-core` is a leaf crate holding
+inter-service wire types; giving it a database-shaped trait so a verifier can
+read a row would invert that, and the alternative costs nothing - the role and
+instance are now separable at parse time, so control can ask "does this issuer
+name an instance?" and do the lookup itself before any verification begins.
+
+Two constraints on that augmented bundle, both load-bearing. The instance key is
+published under the INSTANCE issuer only, never under the role: publishing it
+under the role would let one instance's key verify an assertion attributed to the
+role, which is the collapse the whole split exists to prevent. And the operator
+file remains the only source for ROLE keys - an instance row must never be able
+to introduce or replace a key for `svc/worker` itself.
+
+Left open deliberately: this is a database read on control's hottest service
+edge. Cache it when there is a measurement saying it matters, not before, and
+note that any cache needs an invalidation story for a revoked instance - a cached
+key outliving its revocation is the failure mode, and it is worse than the read.
+
 *What making enrolment MANDATORY costs, stated before it is paid.* Control's
 enrolment envelope has no declaration anywhere in the tree - not in the compose
 topology, not in any harness under `tests/`, not in any ops config - so control
