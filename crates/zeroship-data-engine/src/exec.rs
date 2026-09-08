@@ -1452,19 +1452,19 @@ mod tests {
             assert!(bad.is_err(), "the bad query must fail");
 
             let events = meter.drain();
-            let id = uuid::Uuid::parse_str(app_id).unwrap();
+            let id = zeroship_core::app_id::AppId::parse(app_id).unwrap();
             assert_eq!(
-                usage_value(&events, id, "db_writes"),
+                usage_value(&events, &id, "db_writes"),
                 Some(1),
                 "one mutation = 1 db_writes; got {events:?}"
             );
             assert_eq!(
-                usage_value(&events, id, "db_rows_written"),
+                usage_value(&events, &id, "db_rows_written"),
                 Some(1),
                 "the insert returned 1 row; got {events:?}"
             );
             assert_eq!(
-                usage_value(&events, id, "db_reads"),
+                usage_value(&events, &id, "db_reads"),
                 Some(2),
                 "one query + one count = 2 db_reads (the FAILED query did NOT bill); got {events:?}"
             );
@@ -1476,12 +1476,12 @@ mod tests {
 
     fn usage_value(
         events: &[zeroship_core::usage_event::UsageEvent],
-        app_id: uuid::Uuid,
+        app_id: &zeroship_core::app_id::AppId,
         meter: &str,
     ) -> Option<u64> {
         events
             .iter()
-            .find(|event| event.subject.app == Some(app_id) && event.meter == meter)
+            .find(|event| event.subject.app.as_ref() == Some(app_id) && event.meter == meter)
             .map(|event| event.value)
     }
 

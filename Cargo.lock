@@ -7282,6 +7282,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tracing",
  "uuid",
+ "zeroship-id",
  "zeroship-test-support",
  "zstd",
 ]
@@ -7452,6 +7453,7 @@ dependencies = [
  "zeroship-bundle",
  "zeroship-config-contract",
  "zeroship-config-macros",
+ "zeroship-id",
  "zeroship-test-support",
 ]
 
@@ -7591,6 +7593,15 @@ dependencies = [
  "zeroship-metering",
  "zeroship-test-support",
  "zeroship-testkit",
+]
+
+[[package]]
+name = "zeroship-id"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "uuid",
 ]
 
 [[package]]

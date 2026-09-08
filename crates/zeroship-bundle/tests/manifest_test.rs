@@ -5,6 +5,7 @@
 //! produced manifests omitting the new fields whenever they're empty.
 //! These tests pin both directions.
 
+use zeroship_id::AppId;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use zeroship_bundle::{
