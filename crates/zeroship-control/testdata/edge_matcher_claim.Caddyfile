@@ -66,6 +66,33 @@ http://control.{$ZEROSHIP_DOMAIN:zeroship.localhost} {
 	handle /v1/* {
 		reverse_proxy migrate-server:9091
 	}
+	# Stripe delivers here FROM THE INTERNET, so this one /internal route must
+	# stay reachable and is listed before the refusal below. It is authenticated
+	# by signature against `stripe_webhook_secret`, not by service assertion, and
+	# control refuses every request when that secret is unset.
+	#
+	# The `/internal/` prefix is therefore doing two jobs, and that is a naming
+	# defect this carve-out works around rather than fixes: one public webhook
+	# living under a prefix whose every other member is service-to-service.
+	# Moving it to an honest path is the better end state and is not done here
+	# because the URL is configured OUTSIDE this repository, in Stripe.
+	handle /internal/webhooks/* {
+		reverse_proxy control:9090
+	}
+	# EVERY OTHER /internal ROUTE IS SERVICE-TO-SERVICE AND IS NOT PUBLIC.
+	# Without this, the catch-all below forwarded them from the public edge, and
+	# `/internal/workers/enrol` in particular then observed CADDY's address as
+	# the peer - so control derived the proxy's address for every enrolment and
+	# the `ProxyFronted` arm could not fire, because its input is control's own
+	# `trust_proxy` declaration rather than an observation.
+	#
+	# Refusing here restores the derivation as a side effect: internal callers
+	# reach control directly on the compose network, so the observed peer is the
+	# real worker again. `tests/deploy_scripts_gate.sh` asserts this block is
+	# present, because nothing in Rust would notice it being deleted.
+	handle /internal/* {
+		respond 404
+	}
 	handle {
 		reverse_proxy control:9090
 	}
