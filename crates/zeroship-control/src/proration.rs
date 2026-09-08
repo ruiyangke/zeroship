@@ -124,7 +124,7 @@ pub async fn record_plan_change<C: GenericClient + Sync>(
     let flipped = tx
         .execute(
             "UPDATE zeroship.apps SET plan_id = $1, updated_at = NOW() \
-             WHERE id = $2 \
+             WHERE id = $2 AND deleted_at IS NULL \
                AND EXISTS (SELECT 1 FROM zeroship.plans WHERE id = $1 AND NOT archived)",
             &[&to_plan_id, app_id],
         )

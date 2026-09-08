@@ -540,3 +540,121 @@ async fn the_closure_funnel_terminates_for_a_sole_creator_who_deployed() {
 
     common::drain_pg().await;
 }
+
+/// Every write that could resurrect a deleted app refuses it - enumerated,
+/// because a fence proved at one call site says nothing about the next.
+///
+/// `a_deleted_app_is_not_restored` above already passed before these fences
+/// existed, and that is exactly why it was not enough: `unarchive_app` carries
+/// its `deleted_at IS NULL` in a PRECEDING READ, which answers the sequential
+/// question correctly and leaves the write itself matching `WHERE id = $1`.
+/// Meanwhile `set_deploy_with_manifest` restored `deploy_hash` and
+/// `manifest_json` that the delete had nulled, `set_plan` re-planned a corpse,
+/// and every env write rebuilt the environment the delete destroys on purpose.
+///
+/// Each refusal is PAIRED with the same call on a live app, because a surface
+/// that refused everything would satisfy the first half alone.
+#[compio::test]
+async fn a_deleted_app_refuses_every_write_that_would_resurrect_it() {
+    let fx = Fx::new().await;
+    let dead = fx.first_deploy("resurrect").await;
+    let live = fx.first_deploy("stillhere").await;
+    let env = zeroship_control::env_store::EnvStore::new(
+        Registry::new(&common::require_control_db())
+            .await
+            .expect("registry for the env store"),
+        "test-master-key-for-the-resurrection-fence",
+    )
+    .expect("env store");
+
+    fx.registry
+        .archive_app(&dead.app)
+        .await
+        .expect("archive")
+        .expect("the app exists");
+    organizations::delete_app(&fx.registry, dead.owner, dead.app, None)
+        .await
+        .expect("delete");
+
+    // The delete nulled these. Nothing may put them back.
+    let redeployed = fx
+        .registry
+        .set_deploy_with_manifest(&dead.app, "sha256:resurrected", "{}", None)
+        .await
+        .expect("the deploy write must refuse, not error");
+    assert!(
+        !redeployed,
+        "a deploy landed on a deleted app and restored the manifest the delete cleared"
+    );
+    let (_, _, deploy_hash) = fx.app_state(dead.app).await;
+    assert!(
+        deploy_hash.is_none(),
+        "the deleted app carries a deploy hash again: {deploy_hash:?}"
+    );
+
+    assert!(
+        !fx.registry
+            .set_plan(&dead.app, &dead_plan(&fx, &dead).await)
+            .await
+            .expect("the plan write must refuse, not error"),
+        "a deleted app was re-planned, which is a billing subject that should not exist"
+    );
+
+    assert!(
+        matches!(
+            env.set_var(dead.app, "RESURRECTED", "yes").await,
+            Err(zeroship_control::env_store::EnvError::AppNotFound)
+        ),
+        "a var was written to a deleted app, rebuilding the environment the delete destroyed"
+    );
+    assert!(
+        matches!(
+            env.set_secret(dead.app, "RESURRECTED", "yes").await,
+            Err(zeroship_control::env_store::EnvError::AppNotFound)
+        ),
+        "a secret was written to a deleted app"
+    );
+    assert!(
+        matches!(
+            env.set_expose(dead.app, &["RESURRECTED".to_string()]).await,
+            Err(zeroship_control::env_store::EnvError::AppNotFound)
+        ),
+        "an exposure set was written to a deleted app"
+    );
+    assert_eq!(
+        fx.count(
+            "SELECT count(*) AS n FROM zeroship.app_vars WHERE app_id = $1",
+            dead.app
+        )
+        .await,
+        0,
+        "a refused var write still left the row behind, so the refusal was not atomic"
+    );
+
+    // THE CONTROL. Every one of those calls, on an app that is merely live.
+    assert!(
+        fx.registry
+            .set_deploy_with_manifest(&live.app, "sha256:ordinary", "{}", None)
+            .await
+            .expect("deploy on a live app"),
+        "the deploy fence refuses a live app too, so it is not discriminating"
+    );
+    env.set_var(live.app, "ORDINARY", "yes")
+        .await
+        .expect("a var on a live app");
+    env.set_secret(live.app, "ORDINARY", "yes")
+        .await
+        .expect("a secret on a live app");
+    env.set_expose(live.app, &["ORDINARY".to_string()])
+        .await
+        .expect("an exposure on a live app");
+
+    common::drain_pg().await;
+}
+
+/// The plan a deleted app would be moved to, seeded live so the refusal under
+/// test is the app's state and not a missing plan.
+async fn dead_plan(fx: &Fx, d: &Deployed) -> String {
+    let _ = d;
+    fx.seed_plan("resurrectplan").await
+}
