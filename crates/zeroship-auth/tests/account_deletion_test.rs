@@ -541,9 +541,7 @@ async fn cancellation_does_not_restore_pre_deletion_app_credentials() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn the_cancel_route_is_reachable_over_http_and_restores_the_account() {
-    let Some(dsn) = zeroship_core::config::test_database_url_opt() else {
-        return;
-    };
+    let dsn = crate::common::test_database_url();
     let mut db = open(&dsn).await;
     let fixture = boot_cancel_server(&dsn).await;
 
@@ -620,9 +618,7 @@ async fn the_cancel_route_is_reachable_over_http_and_restores_the_account() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn the_cancel_route_refuses_a_token_it_never_issued() {
-    let Some(dsn) = zeroship_core::config::test_database_url_opt() else {
-        return;
-    };
+    let dsn = crate::common::test_database_url();
     let mut db = open(&dsn).await;
     let fixture = boot_cancel_server(&dsn).await;
 
@@ -1067,9 +1063,7 @@ async fn reaper_erases_a_user_holding_every_previously_blocking_reference() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn reaper_erases_as_the_real_auth_role() {
-    let Some(dsn) = zeroship_core::config::test_database_url_opt() else {
-        return;
-    };
+    let dsn = crate::common::test_database_url();
     let db = open(&dsn).await;
     let _reaper = common::lease_sweep(common::sweep_lock::ACCOUNT_REAPER).await;
     let (_mock, control) = clear_control().await;
