@@ -156,6 +156,7 @@ impl Fixture {
             webhook_limiter: Arc::new(RateLimiter::new(Quota::per_minute(10_000, 100))),
             origin_scheme: zeroship_core::config::OriginScheme::Https,
             trust_proxy: false,
+            worker_enrolment: zeroship_control::worker_enrolment::EnrolmentEnvelope::closed(),
             deploy_tmp_dir: deploy_tmp_dir.clone(),
             control_pg: Arc::new(control_pg_client),
             app_base_domain: "zeroship.localhost".to_string(),

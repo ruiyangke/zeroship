@@ -181,6 +181,10 @@ pub struct ControlSection {
     pub supabase_jwt_issuer: Option<String>,
     /// Apex domain hosted creator apps serve under.
     pub app_base_domain: Option<String>,
+    /// Comma-separated CIDRs a worker instance may enrol from.
+    pub worker_enrolment_networks: Option<String>,
+    /// Listening ports a worker instance may claim, as `<low>-<high>`.
+    pub worker_enrolment_ports: Option<String>,
     /// Audit retention horizon in months.
     pub audit_retention_months: Option<u32>,
     /// Audit retention cron tick in seconds.

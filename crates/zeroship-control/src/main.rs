@@ -385,6 +385,23 @@ fn main() -> std::io::Result<()> {
     let trust_proxy = *settings.trust_proxy.get();
     let origin_scheme = *settings.origin_scheme.get();
 
+    // The worker-enrolment envelope, resolved here so a malformed declaration
+    // fails the boot rather than every enrolment at run time. `trust_proxy` is
+    // folded in because behind a trusted proxy the observed peer is the proxy,
+    // and the derivation this envelope guards would place every worker at one
+    // address; the envelope refuses outright instead.
+    let worker_enrolment = match zeroship_control::worker_enrolment::EnrolmentEnvelope::parse(
+        settings.worker_enrolment_networks.get(),
+        settings.worker_enrolment_ports.get(),
+        trust_proxy,
+    ) {
+        Ok(envelope) => envelope,
+        Err(message) => {
+            eprintln!("control: invalid worker enrolment envelope: {message}");
+            std::process::exit(2);
+        }
+    };
+
     // No hand-rolled value parse here any more: the declaration resolves to
     // `AuthProviderKind`, so clap and the overlay reject an unknown spelling
     // before this function is reached.
@@ -607,6 +624,13 @@ fn main() -> std::io::Result<()> {
         report.field("log_filter", CheckValue::Plain(filter.clone()));
         report.field("log_format", CheckValue::Plain(log_format_str));
         report.field("trust_proxy", CheckValue::Flag(trust_proxy));
+        // Report whether an envelope was DECLARED, not what it contains: an
+        // operator checking a config wants to know that the enrolment route is
+        // live at all, and an undeclared envelope refuses every enrolment.
+        report.field(
+            "worker_enrolment_declared",
+            CheckValue::Flag(worker_enrolment.is_declared()),
+        );
         report.field("origin_scheme", CheckValue::Plain(origin_scheme.to_string()));
         report.field("blob_store", CheckValue::Plain(blob_store_root.clone()));
         report.field("blob_store_remote", CheckValue::Flag(blob_store_is_remote));
@@ -1057,6 +1081,7 @@ fn main() -> std::io::Result<()> {
         admin_limiter: Arc::new(RateLimiter::new(Quota::per_minute(30, 60))),
         webhook_limiter: Arc::new(RateLimiter::new(Quota::per_minute(50, 600))),
         trust_proxy,
+        worker_enrolment,
         deploy_tmp_dir,
         control_pg,
         app_base_domain,
@@ -1286,6 +1311,10 @@ fn main() -> std::io::Result<()> {
             .service(
                 web::resource("/internal/routes")
                     .route(web::get().to(internal::get_routes)),
+            )
+            .service(
+                web::resource("/internal/workers/enrol")
+                    .route(web::post().to(internal::enrol_worker_instance)),
             )
             // The erasure seam: the auth service asks, before it opens the
             // grace window and again before the reaper deletes, whether this
