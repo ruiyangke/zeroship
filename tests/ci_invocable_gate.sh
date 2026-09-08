@@ -19,10 +19,15 @@
 # rides along in a commit about something else.
 #
 # WHAT IT DOES NOT CHECK, deliberately. Not "every .sh is executable" - that is
-# false: tests/lib/{binary_freshness,dispatch_frame,e2e_stack,measurement_integrity,
-# skip_census}.sh are SOURCED and correctly non-executable. Sourcing needs the
-# read bit, not the exec bit, so a blanket rule would demand the wrong thing on
-# five files and teach people to add exec bits that mean nothing.
+# false. Most of tests/lib/ is SOURCED and correctly non-executable; sourcing
+# needs the read bit, not the exec bit, so a blanket rule would demand the wrong
+# thing on those files and teach people to add exec bits that mean nothing.
+#
+# This paragraph used to NAME the sourced files. The list went stale in both
+# directions - it named `skip_census.sh`, deleted with the skip protocol, and
+# had never grown to cover the sourced libraries added since - which is the
+# reason it is now a property. Read the modes if you want the set:
+#   ls -l tests/lib/*.sh
 #
 # The invariant is narrower and is the one that actually broke: if CI runs it as
 # a COMMAND, it must be executable. Files that CI sources, or invokes behind an

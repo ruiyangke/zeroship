@@ -123,18 +123,23 @@ services:
     # in postgres-init.sql would appear to succeed and change nothing.
     #
     # CONCRETE COST of leaving it at the default: TEN plugin-db integration
-    # tests skip themselves on a `replica` server (`pg_has_logical_wal`), and
-    # crates/plugin-db/tests/integration.rs:2243 already anticipates this,
-    # saying CI's pg-test image gets `-c wal_level=logical` "once the rollout
-    # lands". This is that rollout for the compose stack.
+    # tests FAIL on a `replica` server (`pg_has_logical_wal`). They used to
+    # SKIP, which is worse and is why this setting was pinned here in the first
+    # place - the run reported the same "11 passed; 0 failed" either way and
+    # only the elapsed time differed. They refuse now, naming this setting and
+    # that it needs a RESTART rather than a reload, so a stack brought up
+    # without it is loud instead of hollow. Pin it anyway: a red suite is not a
+    # working development stack. crates/zeroship-plugin-db/tests/integration.rs
+    # anticipated this, saying CI's pg-test image gets `-c wal_level=logical`
+    # "once the rollout lands". This is that rollout for the compose stack.
     #
     # TEN, not the 12 this said until 2026-08-18. Counted three ways that day
     # and they agree: `pg_has_logical_wal` has 10 call sites, a full run on a
-    # `replica` server announces 10 wal-worded ZEROSHIP-TEST-SKIPPED markers
-    # (plus one for postgis), and the same run on a `logical` server announces
-    # none of them. Nearby comments still say eleven and twelve - the number was
-    # written once and copied, and nothing re-ran it. See NOTES-s31.md for the
-    # two-server transcript.
+    # `replica` server announced one skip per wal-gated test (plus one for
+    # postgis), and the same run on a `logical` server announced none of them.
+    # Nearby comments still say eleven and twelve - the number was written once
+    # and copied, and nothing re-ran it. Count the call sites; that is the one
+    # of the three that is still measurable now the announcements are gone.
     # max_prepared_transactions is also a restart-only setting. PostgreSQL's
     # default is zero, which makes PREPARE TRANSACTION unavailable and leaves
     # pgoutput's `two_phase` protocol untestable. compio-postgres exercises the

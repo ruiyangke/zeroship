@@ -94,9 +94,6 @@ cd "$ROOT" || exit 2
 # Distinguishes a real failure from a run that could not happen.
 # shellcheck source=tests/lib/measurement_integrity.sh
 . "$ROOT/tests/lib/measurement_integrity.sh"
-# A test that announced it did nothing must not count as a pass.
-# shellcheck source=tests/lib/skip_census.sh
-. "$ROOT/tests/lib/skip_census.sh"
 # The database, named after the migration set.
 # shellcheck source=tests/lib/suite_db.sh
 . "$ROOT/tests/lib/suite_db.sh"
@@ -292,21 +289,14 @@ if [ "$posture_live_ran" -lt "$POSTURE_LIVE_MIN" ]; then
   status=1
 fi
 
-# A test that skipped is not a test that passed. No allowlist: nothing in this
-# crate announces a skip today, and an entry added here would have to name a
-# backend this script deliberately does not provision.
-census_rc=0
-zs_skip_census "$LOG" '' || census_rc=$?
-if [ "$census_rc" -eq "$ZS_SKIP_REFUSED_STATUS" ]; then
-  echo "FAIL: the skip census refused ${LOG}, so this run proved nothing about skips." >&2
-  status=1
-elif [ "$census_rc" -ne 0 ]; then
-  echo "FAIL: ${ZS_SKIP_COUNT} test(s) skipped despite a provisioned database." >&2
-  zs_skip_lines "$LOG" '' | sort -u | head -20 >&2
-  status=1
-fi
-
-# The blunt instrument, kept for what the named count above cannot see: the
+# THE SKIP CENSUS THAT STOOD HERE IS GONE. It carried no allowlist, because
+# nothing in this crate announced a skip - so it was the arm of this script that
+# ruled on the emptiest set, and it is the one whose deletion changes least.
+# Workspace-wide, a test that cannot reach its backend now FAILS rather than
+# announcing, so there is no marker to count in this log.
+#
+# The blunt instrument below is unaffected, and it is what the named count could
+# never see anyway: the
 # other 108 tests quietly disappearing.
 #
 # MEASURED 2026-08-29 against a migrated PostgreSQL 18: 116 passed

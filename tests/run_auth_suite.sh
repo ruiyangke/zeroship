@@ -137,9 +137,6 @@ cd "$ROOT"
 # Distinguishes a real failure from a run that could not happen. See the library
 # header; `tests/lib_measurement_integrity_selftest.sh` covers both directions.
 . "$ROOT/tests/lib/measurement_integrity.sh"
-# Counts the tests that announced they did nothing, so a green tally cannot hide
-# them; `tests/lib_skip_census_selftest.sh` covers both directions.
-. "$ROOT/tests/lib/skip_census.sh"
 # Names the database after the MIGRATION SET, so every run needing this schema
 # shares one and a branch that changes the schema gets its own without being
 # told to. See that file's header; `tests/lib_suite_db_selftest.sh` covers both
@@ -301,10 +298,9 @@ echo "------------------------------------------------------------------"
 # target was already satisfied by whichever name happened to be exported, which
 # is another way of saying the two names never meant different things.
 #
-# It is in the list below now. It needs no allowlist entry and gets none: it
-# announces through `zeroship_test_support::skip`, so if it ever stops seeing a
-# database the census below counts it and this gate goes red, which is the
-# required behaviour - a self-skip here is a FAILURE, not a pass.
+# It is in the list below now, and it needs nothing to make a lost database
+# visible: the target REFUSES when it cannot resolve one, so this gate goes red
+# on the run itself rather than on a marker counted afterwards.
 #
 # GATEWAY_ANCHORS_DB_URL used to be set nowhere in this repo, so the 13 gated
 # tests in `auth_token_anchors_test` and the 1 in `browser_auth_test` announced
@@ -382,64 +378,37 @@ for spec in \
 done
 
 echo "------------------------------------------------------------------"
-# The point of the whole script: a test that skipped is not a test that passed.
+# THE SKIP CENSUS THAT STOOD HERE IS GONE, and so is the allowlist it consulted.
 #
-# The counting itself now lives in tests/lib/skip_census.sh, which this script
-# sources at the top, so the same census runs here, in run_billing_suite.sh, and
-# over the blanket `cargo test --workspace` in CI. It used to be open-coded here
-# and nowhere else, which is why every crate outside the auth suite could
-# announce a skip into a log no gate ever read. Moving it did not weaken this
-# gate: the allowlist and the failure below are unchanged, and the library adds
-# `grep -a`, without which a log carrying a single NUL byte reports its skips as
-# one nameless "binary file matches" line instead of naming the backend.
+# It searched this log for a marker every skipping test wrote to stderr, failed
+# the run on any occurrence not named in `SKIP_ALLOWLIST`, and carried one
+# standing entry (`AUTH_TEST_SMTP_SINK`, a live SMTP sink this script cannot
+# stand up). An operator decision removed skipping from the workspace outright:
+# every backend guard now REFUSES - it fails the test, naming what was missing
+# and the command that provisions it - so there is no marker to count, nothing
+# for an allowlist to excuse, and a missing SMTP sink reddens this suite like
+# any other absent backend.
 #
-# tests/lib_skip_census_selftest.sh covers the library in both directions.
-
-# Skips this gate reports but does not fail on. Each entry names a backend this
-# script does not provision, and the decision to leave it unprovisioned:
+# WHY COUNTING WAS THE WEAKER DESIGN, kept because it is the argument for what
+# replaced it. A census only sees a test that ANNOUNCES. The paragraph below
+# records the measurement that made that concrete here: seven OIDC targets
+# gated on `let Some(fx) = Fixture::boot(...) else { return; }` and returned in
+# silence, so 75 tests reported "ok" in ~0.00s against no database while the
+# census printed "0 skipped" and exited 0. Widening the marker cannot fix that;
+# only the test failing can.
 #
-#   GATEWAY_ANCHORS_DB_URL is NO LONGER HERE, deliberately. This script now
-#     exports it (see above), so a skip announcing it means the export broke or
-#     a test stopped seeing it - a regression, not a tolerated gap. Leaving the
-#     entry in place after provisioning the backend would make exactly that
-#     regression undetectable, which is the failure this whole allowlist exists
-#     to avoid.
-#   AUTH_TEST_SMTP_SINK - one zeroship-mailer test
-#     (smtp_plaintext_sink_delivers_relay_forward) wants a live SMTP sink at a
-#     host:port this script has no way to stand up. Its two siblings in the same
-#     binary gate only on AUTH_DB_URL and ARE covered; the allowlist matches on
-#     the reason rather than the binary precisely so exempting this one does not
-#     blind the gate to the rest of the file.
-SKIP_ALLOWLIST='AUTH_TEST_SMTP_SINK'
-
-# Two non-zero statuses, two different findings, and they must not print the
-# same sentence. 1 is "the census ruled and found skips". 2 is "the census could
-# not rule" - the log is missing or empty, so the suite above it very likely
-# never ran. The old single branch would have reported the second as
-# "FAIL:  test(s) skipped", with the count blank, blaming a run that had not
-# happened.
-census_rc=0
-zs_skip_census "$LOG" "$SKIP_ALLOWLIST" || census_rc=$?
-if [ "$census_rc" -eq "$ZS_SKIP_REFUSED_STATUS" ]; then
-  echo "FAIL: the skip census refused ${LOG}, so this run proved nothing about skips." >&2
-  status=1
-elif [ "$census_rc" -ne 0 ]; then
-  echo "FAIL: ${ZS_SKIP_COUNT} test(s) skipped despite a provisioned database." >&2
-  echo "A skipped auth test is a silent pass. Offending lines:" >&2
-  zs_skip_lines "$LOG" "$SKIP_ALLOWLIST" | sort -u | head -20 >&2
-  status=1
-fi
+# The floor below is what survives, and it now guards a narrower gap than it
+# used to - not because the floor changed, but because the silent-return arm it
+# was compensating for no longer exists.
 
 passed="$(grep -oE '^test result: ok\. [0-9]+ passed' "$LOG" | grep -oE '[0-9]+' | awk '{s+=$1} END {print s+0}')"
 
-# The skip check above counts problems and requires none, so it succeeds when it
-# finds nothing - including when there was nothing it COULD find. It only sees a
-# test that announces, and 7 of the OIDC suites do not: they gate on
-# `let Some(fx) = Fixture::boot(...).await else { return; };` and return in
-# silence. Measured with no database: 75 tests across
-# oidc_{refresh_token,authorization_code,userinfo,brokered_login,login_consent,
-# backchannel_logout}_test and device_grant_test all report "ok" in ~0.00s, and
-# the grep above finds zero. The gate would print "0 skipped" and exit 0.
+# A count of failures requires none, so it succeeds when it finds nothing -
+# including when there was nothing it COULD find. That was the census's blind
+# spot and the reason this floor exists: measured with no database, 75 tests
+# across oidc_{refresh_token,authorization_code,userinfo,brokered_login,
+# login_consent,backchannel_logout}_test and device_grant_test all reported
+# "ok" in ~0.00s, having asserted nothing.
 #
 # So require a MINIMUM instead of forbidding a maximum. The floor tracks the
 # measured total at ~7 percent headroom, the same margin the CI test-target floor
@@ -475,13 +444,18 @@ fi
 
 echo "=================================================================="
 if [ "$status" -eq 0 ]; then
-  # ZS_SKIP_TOLERATED, not `tolerated`: the census lives in
-  # tests/lib/skip_census.sh and exports the ZS_-prefixed names. Under `set -u`
-  # the unprefixed spelling aborted the script HERE, on the success line, so a
-  # fully green suite exited 1 with no verdict printed and the failure looked
-  # like a test failure. Only the success branch was affected, which is why it
-  # survived: a red run takes the else branch and reports normally.
-  echo "AUTH SUITE: ${passed} tests passed, 0 unexpected skips, ${ZS_SKIP_TOLERATED} allowlisted (floor ${AUTH_MIN_PASSED})"
+  # No skip counts here any more: nothing in the workspace skips, so a line
+  # reporting "0 unexpected skips" would be a measurement of an empty set
+  # printed as if it were a finding.
+  #
+  # The bug this line once carried is worth keeping in view, because only the
+  # SUCCESS branch reported the totals: it named a census variable without its
+  # exported `ZS_` prefix, and under `set -u` a fully green suite therefore
+  # aborted HERE, exiting non-zero with no verdict printed, which read as a test
+  # failure. A red run took the else branch and reported normally, which is why
+  # it survived. Anything added to this branch is reached only when everything
+  # else passed, so it is the least exercised line in the script.
+  echo "AUTH SUITE: ${passed} tests passed (floor ${AUTH_MIN_PASSED})"
 else
   echo "AUTH SUITE: FAILED"
 fi

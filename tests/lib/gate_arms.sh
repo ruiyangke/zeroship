@@ -11,7 +11,10 @@
 #                                       while THREE live phantom identifiers sat
 #                                       in the file it guards.
 #   skip_marker_gate.sh                 8 raw hits, 8 excused by its own
-#                                       allowlist, 0 ruled on. Green.
+#                                       allowlist, 0 ruled on. Green. That gate
+#                                       is DELETED - the skip protocol it
+#                                       policed is gone - but it remains the
+#                                       clearest instance of the shape.
 #   deploy_scripts_gate.sh argv scan    1 pre-filter row, on the single service
 #                                       the filter excludes. 0 examined. Green.
 #   compose_secret_strength_gate.sh     derived its rule set by regexing another
