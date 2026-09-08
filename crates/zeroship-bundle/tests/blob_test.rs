@@ -1,6 +1,7 @@
 //! Tests for the content-addressed blob store. Uses `compio::test`
 //! since `LocalDiskBlobStore` is async over compio's filesystem APIs.
 
+use zeroship_id::AppId;
 use std::path::PathBuf;
 
 use uuid::Uuid;
@@ -173,7 +174,7 @@ async fn local_disk_put_blob_idempotent() {
 async fn local_disk_round_trip_manifest() {
     let root = tmpdir();
     let store = LocalDiskBlobStore::new(root.clone()).unwrap();
-    let app_id = Uuid::new_v4();
+    let app_id = AppId::mint();
     let deploy_hash = sha256_hex(b"deploy-payload");
 
     let json = br#"{"version":1,"rules":[],"assets":{}}"#;
@@ -198,7 +199,7 @@ async fn local_disk_round_trip_manifest() {
     store.put_manifest(&app_id, &deploy_hash, json).await.unwrap();
 
     // Missing manifest → NotFound.
-    let other = Uuid::new_v4();
+    let other = AppId::mint();
     let err = store
         .get_manifest(&other, &deploy_hash)
         .await

@@ -1,8 +1,10 @@
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 use zeroship_bundle::Manifest;
+
+use crate::app_id::AppId;
+use crate::user_id::UserId;
 
 /// A registered application record.
 ///
@@ -12,7 +14,7 @@ use zeroship_bundle::Manifest;
 /// at all is in `db/migrations-ts/20260905000200_drop_app_api_key.ts`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppRecord {
-    pub id: Uuid,
+    pub id: AppId,
     pub name: String,
     pub plan_id: String,
     pub deploy_hash: Option<String>,
@@ -267,10 +269,10 @@ pub struct RouteEntry {
 }
 
 /// Map of app id → current deploy/config snapshot.
-pub type VersionMap = HashMap<Uuid, AppVersionInfo>;
+pub type VersionMap = HashMap<AppId, AppVersionInfo>;
 
 /// Map of app id → route entry for fast lookup.
-pub type RouteMap = HashMap<Uuid, RouteEntry>;
+pub type RouteMap = HashMap<AppId, RouteEntry>;
 
 /// Authentication lifecycle state pushed to gateways with the route table.
 ///
@@ -281,7 +283,7 @@ pub type RouteMap = HashMap<Uuid, RouteEntry>;
 /// credentials would let an attacker force-log-out another user.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GatewayPrincipalLifecycle {
-    pub user_id: Uuid,
+    pub user_id: UserId,
     pub disabled: bool,
     pub anonymized: bool,
     pub deletion_requested: bool,
@@ -302,7 +304,7 @@ impl GatewayPrincipalLifecycle {
     }
 
     #[must_use]
-    pub fn disabled(user_id: Uuid, pairwise_subjects: Vec<String>) -> Self {
+    pub fn disabled(user_id: UserId, pairwise_subjects: Vec<String>) -> Self {
         Self {
             user_id,
             disabled: true,
@@ -314,7 +316,7 @@ impl GatewayPrincipalLifecycle {
     }
 
     #[must_use]
-    pub fn anonymized(user_id: Uuid, pairwise_subjects: Vec<String>) -> Self {
+    pub fn anonymized(user_id: UserId, pairwise_subjects: Vec<String>) -> Self {
         Self {
             user_id,
             disabled: false,
@@ -326,7 +328,7 @@ impl GatewayPrincipalLifecycle {
     }
 
     #[must_use]
-    pub fn deletion_requested(user_id: Uuid, pairwise_subjects: Vec<String>) -> Self {
+    pub fn deletion_requested(user_id: UserId, pairwise_subjects: Vec<String>) -> Self {
         Self {
             user_id,
             disabled: false,
@@ -338,7 +340,7 @@ impl GatewayPrincipalLifecycle {
     }
 
     #[must_use]
-    pub fn deletion_scheduled(user_id: Uuid, pairwise_subjects: Vec<String>) -> Self {
+    pub fn deletion_scheduled(user_id: UserId, pairwise_subjects: Vec<String>) -> Self {
         Self {
             user_id,
             disabled: false,
@@ -395,15 +397,15 @@ pub struct AppUsage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ControlEvent {
-    Deploy { app_id: Uuid, hash: String },
-    Delete { app_id: Uuid },
-    PlanChange { app_id: Uuid, plan_id: String },
+    Deploy { app_id: AppId, hash: String },
+    Delete { app_id: AppId },
+    PlanChange { app_id: AppId, plan_id: String },
     /// A spend-state transition for an app, emitted by the spend-reconcile
     /// cron on each tick that changes an app's [`SpendState`]. Per decision
     /// D1 this is for the audit log / future SSE fan-out ONLY — there is no
     /// live `ControlEvent` delivery path today; enforcement rides the pulled
     /// [`RouteEntry::spend_state`], not this event.
-    SpendState { app_id: Uuid, state: SpendState },
+    SpendState { app_id: AppId, state: SpendState },
 }
 
 /// Canonical errors for zeroship-common operations.
