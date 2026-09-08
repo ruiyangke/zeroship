@@ -279,7 +279,7 @@ impl EnvStore {
                  RETURNING app_id
              )
              UPDATE zeroship.apps SET env_version = env_version + 1
-             WHERE id = (SELECT app_id FROM upsert)",
+             WHERE id = (SELECT app_id FROM upsert) AND deleted_at IS NULL",
             &[&app_id, &key, &value],
         )
         .await
@@ -297,6 +297,11 @@ impl EnvStore {
         // The outer UPDATE's row count doubles as the "did anything get
         // deleted" answer: no matching var leaves the subselect NULL, so the
         // UPDATE touches nothing and reports 0.
+        //
+        // zs-allow-deleted: removing a var from a deleted app resurrects
+        // nothing, and `delete_app` has already taken the rows anyway. Fencing
+        // this would turn cleanup into an error and would make a caller
+        // draining an app's env report a failure for work that is done.
         let n = conn
             .execute(
                 "WITH del AS (
@@ -368,7 +373,7 @@ impl EnvStore {
                  RETURNING app_id
              )
              UPDATE zeroship.apps SET env_version = env_version + 1
-             WHERE id = (SELECT app_id FROM upsert)",
+             WHERE id = (SELECT app_id FROM upsert) AND deleted_at IS NULL",
             &[&app_id, &key, &ct],
         )
         .await
@@ -383,6 +388,9 @@ impl EnvStore {
             .conn()
             .await
             .map_err(|e| EnvError::Db(format!("{e}")))?;
+        // zs-allow-deleted: the same reasoning as `delete_var` - removing a
+        // secret from a deleted app takes away what the delete already took,
+        // and refusing it would make draining an app's env report a failure.
         let n = conn
             .execute(
                 "WITH del AS (
@@ -535,7 +543,8 @@ impl EnvStore {
         // could be lost on its own, leaving workers pinned to the previous
         // membership with no signal that anything changed.
         tx.execute(
-            "UPDATE zeroship.apps SET env_version = env_version + 1 WHERE id = $1",
+            "UPDATE zeroship.apps SET env_version = env_version + 1 \
+             WHERE id = $1 AND deleted_at IS NULL",
             &[&app_id],
         )
         .await
