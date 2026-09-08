@@ -7,6 +7,7 @@ use serde::{de, Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
+use zeroship_core::app_id::AppId;
 use zeroship_core::typed_id;
 
 pub const DEFAULT_TICK_SECS: u64 = 1;
@@ -255,7 +256,7 @@ pub struct ChildWorkflowOptions {
 #[serde(rename_all = "camelCase")]
 pub struct StepRequest {
     pub run_id: String,
-    pub app_id: Uuid,
+    pub app_id: AppId,
     pub workflow_name: String,
     pub deploy_id: String,
     pub deploy_hash: String,
