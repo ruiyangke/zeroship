@@ -256,6 +256,7 @@ mod tests {
         let quoted_role = zeroship_schema::query::quote_ident(&role);
 
         let migration = zeroship_migrate_server::apply::runtime_role_provisioning_sql(
+            &zeroship_core::app_id::AppId::mint(),
             &schema,
             "zs_migrator_fixture",
         )
@@ -340,7 +341,9 @@ mod tests {
         for single_input in [TENANT_APP_ID, SCHEMA_NAME] {
             let as_schema = SchemaName::new(single_input).expect("fixture schema name");
             let migration = zeroship_migrate_server::apply::runtime_role_provisioning_sql(
-                &as_schema, MIGRATOR,
+                &zeroship_core::app_id::AppId::mint(),
+                &as_schema,
+                MIGRATOR,
             )
             .expect("provisioning role name");
             let data_plane = per_app_role_name(single_input).expect("data-plane role name");
@@ -363,9 +366,12 @@ mod tests {
         // about the statement the data plane sends, and the two role spellings
         // are both carried in the failure message so one assertion diagnoses it.
         let schema = SchemaName::new(SCHEMA_NAME).expect("fixture schema name");
-        let provisioned =
-            zeroship_migrate_server::apply::runtime_role_provisioning_sql(&schema, MIGRATOR)
-                .expect("provisioning role name");
+        let provisioned = zeroship_migrate_server::apply::runtime_role_provisioning_sql(
+            &zeroship_core::app_id::AppId::mint(),
+            &schema,
+            MIGRATOR,
+        )
+        .expect("provisioning role name");
         let setup_sql = crate::pg_session_sql::tx_session_setup_sql(&schema).expect("tx setup sql");
         assert!(
             setup_sql.starts_with(&format!(
@@ -424,6 +430,7 @@ mod tests {
 
         let schema = SchemaName::new(SCHEMA_NAME).expect("fixture schema name");
         let provisioned = zeroship_migrate_server::apply::runtime_role_provisioning_sql(
+            &zeroship_core::app_id::AppId::mint(),
             &schema,
             "zs_migrator_fixture",
         )
