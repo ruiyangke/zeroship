@@ -1216,6 +1216,112 @@ async fn reaper_refuses_and_records_when_the_preflight_names_a_blocker() {
     cleanup(&db, &[user.id]).await;
 }
 
+/// The MONEY rule, at the reaper.
+///
+/// This is the third enforcement point of the rule whose SQL is bound in
+/// `crates/zeroship-control/tests/deletion_owes_test.rs`. It is a separate
+/// point rather than a repeat of the ownership one: the blocker arrives with an
+/// EMPTY `blockers` list, because the organization is dissolved and the
+/// ownership rule deliberately says nothing about closed organizations. A
+/// reaper that read only `blockers` would erase this human and walk away from
+/// the invoice.
+///
+/// The refusal must also be selectable as a MONEY refusal - `stage = billing` -
+/// so "whose erasure is money holding up" is one query rather than a grep of
+/// reason strings. The paired control is the clear answer that erases the same
+/// user under the same fixture: one variable, the answer.
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn reaper_refuses_and_records_billing_when_the_organization_still_owes() {
+    let Some(mut db) = pg().await else {
+        return;
+    };
+    let _reaper = common::lease_sweep(common::sweep_lock::ACCOUNT_REAPER).await;
+    let mock = MockControl::start(Answer::Clear).await;
+    let control = ControlAccess {
+        control_url: mock.base.clone(),
+        keyring: mock.keyring(),
+    };
+    let tag = Uuid::new_v4().simple().to_string();
+    let debtor = users::create(
+        &db,
+        &format!("acctdel-owes-{tag}@zeroship.test"),
+        "Owes",
+        None,
+    )
+    .await
+    .unwrap();
+    users::request_deletion(&mut db, debtor.id, account_reaper::GRACE_DAYS)
+        .await
+        .unwrap()
+        .unwrap();
+    backdate_schedule(&db, debtor.id).await;
+
+    // The window opened clear. The billing sweep then finalized last month's
+    // invoice on an organization this human had already closed - which needs
+    // nobody to act, and is why the request-time check cannot stand in here.
+    mock.set(Answer::OwesBilling {
+        slug: format!("owing-{tag}"),
+        owed_cents: 4_200,
+    });
+    let report = account_reaper::tick(&mut db, &control).await.expect("tick");
+    assert!(report.failed >= 1, "{report:?}");
+    assert_eq!(report.erased, 0, "nothing may be erased on a debt: {report:?}");
+
+    assert!(
+        !db.query("SELECT 1 FROM zeroship.users WHERE id = $1", &[&debtor.id])
+            .await
+            .unwrap()
+            .is_empty(),
+        "a human who owes is left pending, not half-erased"
+    );
+    let details = audit_detail(&db, debtor.id, "account_erasure_failed").await;
+    assert_eq!(details.len(), 1, "one durable record, on this user");
+    assert_eq!(
+        details[0]["stage"], "billing",
+        "a money refusal must be selectable as one: {}",
+        details[0]
+    );
+    let reason = details[0]["reason"].as_str().expect("reason");
+    assert!(
+        reason.contains(&format!("owing-{tag}")) && reason.contains("4200"),
+        "the record names the organization and what it owes: {reason}"
+    );
+    assert!(
+        mock.asked().contains(&debtor.id.to_string()),
+        "the reaper really asked about this principal"
+    );
+
+    // The control: same fixture, same user shape, and the answer is the only
+    // thing that moved. Without it a reaper that refused everything would pass
+    // the arm above.
+    let settled = users::create(
+        &db,
+        &format!("acctdel-settled-{tag}@zeroship.test"),
+        "Settled",
+        None,
+    )
+    .await
+    .unwrap();
+    users::request_deletion(&mut db, settled.id, account_reaper::GRACE_DAYS)
+        .await
+        .unwrap()
+        .unwrap();
+    backdate_schedule(&db, settled.id).await;
+    mock.set(Answer::Clear);
+    let report = account_reaper::tick(&mut db, &control).await.expect("tick");
+    assert!(report.erased >= 1, "a settled human is erased: {report:?}");
+    assert!(
+        db.query("SELECT 1 FROM zeroship.users WHERE id = $1", &[&settled.id])
+            .await
+            .unwrap()
+            .is_empty(),
+        "the settled user's row is gone"
+    );
+
+    cleanup(&db, &[debtor.id, settled.id]).await;
+}
+
 /// An unanswerable preflight is a refusal too. The failure mode being ruled out
 /// is the one where "control is down" and "control said yes" are the same
 /// outcome.
@@ -1460,4 +1566,230 @@ async fn reaper_ignores_a_schedule_without_a_deletion_request() {
         "a schedule alone is a deny state, not erasure authorization"
     );
     cleanup(&db, &[user.id]).await;
+}
+
+// ---------------------------------------------------------------------------
+// The ownership rule under concurrency
+// ---------------------------------------------------------------------------
+
+/// Wait until one backend is BLOCKED on the reaper's organization row lock.
+///
+/// The barrier is what makes the interleaving a fact rather than a hope: the
+/// departure is committed while the erasure is provably parked on the lock, so
+/// "the co-owner left after the preflight answered clear and before the erasure
+/// committed" is the ordering the assertions rule on, not a timing that
+/// happened to come out that way once.
+///
+/// It is BOUNDED and returns rather than hangs. A reaper that takes no lock
+/// never blocks, and a barrier that waited forever for that would turn the
+/// defect this test exists for into a hung suite instead of a red assertion.
+#[allow(clippy::future_not_send)]
+async fn wait_until_blocked_on_the_organization_lock(observer: &Client) -> bool {
+    for _ in 0..400 {
+        let waiting = observer
+            .query(
+                "SELECT 1 FROM pg_stat_activity \
+                  WHERE datname = current_database() \
+                    AND wait_event_type = 'Lock' \
+                    AND query LIKE '%zeroship.organizations%FOR UPDATE%'",
+                &[],
+            )
+            .await
+            .expect("read pg_stat_activity");
+        if !waiting.is_empty() {
+            return true;
+        }
+        compio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    false
+}
+
+/// TRIGGER A, and the reason the fence has to be inside the transaction.
+///
+/// The preflight is an HTTP round trip, so it answers BEFORE the erasure
+/// transaction opens. A co-owner who departs in that window is doing something
+/// legitimate - two owners were seated when their `leave` ran - and the reaper
+/// then deletes the other one. Both statements commit and the organization has
+/// no owner, which `zeroship_control::organizations`'s module header names as
+/// the state no route can repair.
+///
+/// The interleaving is forced, not raced: the departure takes the organization
+/// row lock and holds it, the reaper's tick parks on that same lock, and only
+/// then does the departure commit. Both orders of the same pair are safe once
+/// the lock is shared - this is the one where the reaper is second.
+///
+/// It runs the tick as the REAL `zeroship_auth` role. The fence reads
+/// control-owned tables, and a re-check that raises `42501` under the role the
+/// service actually connects as would be no fence at all; a suite that only
+/// ever connects as `postgres` cannot tell the two apart.
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn a_departure_after_the_preflight_cannot_leave_the_organization_ownerless() {
+    let Some(dsn) = zeroship_core::config::test_database_url_opt() else {
+        zeroship_test_support::skip("skipping account_deletion_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
+        return;
+    };
+    let Some(mut db) = open(&dsn).await else {
+        return;
+    };
+    let _reaper = common::lease_sweep(common::sweep_lock::ACCOUNT_REAPER).await;
+    let Some(as_auth) = open(&as_auth_role(&dsn)).await else {
+        return;
+    };
+    let Some(mut departing) = open(&dsn).await else {
+        return;
+    };
+    let Some(observer) = open(&dsn).await else {
+        return;
+    };
+    let (mock, control) = clear_control().await;
+
+    let tag = Uuid::new_v4().simple().to_string();
+    let organization_id = format!("org_{}", &tag[..22]);
+    let slug = format!("acctdel-{}", &tag[..12]);
+    let victim = users::create(
+        &db,
+        &format!("acctdel-race-victim-{tag}@zeroship.test"),
+        "Victim",
+        None,
+    )
+    .await
+    .unwrap();
+    let co_owner = users::create(
+        &db,
+        &format!("acctdel-race-peer-{tag}@zeroship.test"),
+        "Co Owner",
+        None,
+    )
+    .await
+    .unwrap();
+    db.execute(
+        "INSERT INTO zeroship.organizations \
+             (id, slug, name, billing_email, created_by) \
+         VALUES ($1, $2::text::citext, $3, $4::text::citext, $5)",
+        &[
+            &organization_id,
+            &slug,
+            &"Shared",
+            &format!("billing-{tag}@zeroship.test"),
+            &victim.id,
+        ],
+    )
+    .await
+    .expect("seat the organization");
+    db.execute(
+        "INSERT INTO zeroship.organization_members (organization_id, user_id, role) \
+         VALUES ($1, $2, 'owner'), ($1, $3, 'owner')",
+        &[&organization_id, &victim.id, &co_owner.id],
+    )
+    .await
+    .expect("seat two owners");
+
+    users::request_deletion(&mut db, victim.id, account_reaper::GRACE_DAYS)
+        .await
+        .unwrap()
+        .unwrap();
+    backdate_schedule(&db, victim.id).await;
+
+    // The departure, in the shape `leave_organization` takes it: the
+    // organization row lock FIRST, then the delete under its own owners-remain
+    // predicate. Uncommitted, so the erasure has to meet it.
+    let departure = departing
+        .transaction()
+        .await
+        .expect("begin the co-owner's departure");
+    departure
+        .query(
+            "SELECT id FROM zeroship.organizations WHERE id = $1 FOR UPDATE",
+            &[&organization_id],
+        )
+        .await
+        .expect("the departure takes the organization row lock");
+    let left = departure
+        .execute(
+            "DELETE FROM zeroship.organization_members m \
+              WHERE m.organization_id = $1 AND m.user_id = $2 \
+                AND (m.role <> 'owner' \
+                     OR (SELECT count(*) FROM zeroship.organization_members owners \
+                          WHERE owners.organization_id = $1 AND owners.role = 'owner') > 1)",
+            &[&organization_id, &co_owner.id],
+        )
+        .await
+        .expect("the departure runs");
+    assert_eq!(
+        left, 1,
+        "the departure is legitimate: two owners are seated when it runs"
+    );
+
+    let control_for_tick = control.clone();
+    let erasure = compio::runtime::spawn(async move {
+        let mut conn = as_auth;
+        account_reaper::tick(&mut conn, &control_for_tick).await
+    });
+
+    let parked = wait_until_blocked_on_the_organization_lock(&observer).await;
+    departure.commit().await.expect("the co-owner has left");
+    let report = erasure.await.expect("join erasure").expect("tick");
+
+    let owners = db
+        .query(
+            "SELECT user_id FROM zeroship.organization_members \
+              WHERE organization_id = $1 AND role = 'owner'",
+            &[&organization_id],
+        )
+        .await
+        .expect("count owners");
+    let victim_row = db
+        .query("SELECT 1 FROM zeroship.users WHERE id = $1", &[&victim.id])
+        .await
+        .expect("read the victim");
+    let details = audit_detail(&db, victim.id, "account_erasure_failed").await;
+    let asked = mock.asked();
+
+    // Teardown before the assertions: the organization outlives a failing
+    // assertion otherwise, and its slug is unique among live organizations.
+    db.execute(
+        "DELETE FROM zeroship.organization_members WHERE organization_id = $1",
+        &[&organization_id],
+    )
+    .await
+    .expect("unseat");
+    db.execute(
+        "DELETE FROM zeroship.organizations WHERE id = $1",
+        &[&organization_id],
+    )
+    .await
+    .expect("close the organization");
+    cleanup(&db, &[victim.id, co_owner.id]).await;
+
+    assert!(
+        asked.contains(&victim.id.to_string()),
+        "the preflight really answered, and answered clear, before the erasure"
+    );
+    assert!(
+        !owners.is_empty(),
+        "the organization was left with NO owner - the state no route repairs"
+    );
+    assert_eq!(
+        victim_row.len(),
+        1,
+        "a refused erasure leaves the account pending, not half-erased"
+    );
+    assert!(report.failed >= 1, "the refusal counts as a failure: {report:?}");
+    assert_eq!(details.len(), 1, "one durable record, on this user");
+    assert_eq!(
+        details[0]["stage"], "ownership",
+        "the in-transaction fence is selectable apart from a preflight that \
+         answered no: {}",
+        details[0]
+    );
+    // Last, because it rules on the MECHANISM rather than the outcome. The
+    // assertions above can all hold on a run where the erasure simply finished
+    // first; this one says the ordering was imposed by the lock, so a green is
+    // evidence about the fence and not about scheduling.
+    assert!(
+        parked,
+        "the erasure never blocked on the organization row lock, so the fence \
+         is not inside the transaction"
+    );
 }
