@@ -325,7 +325,10 @@ async fn serve_static_streaming(
                 start,
                 length,
                 STREAM_CHUNK_BYTES,
-                Some(StreamEgressMeter::new(Arc::clone(&state.meter), app_id.uuid())),
+                Some(StreamEgressMeter::new(
+                    Arc::clone(&state.meter),
+                    crate::sync::app_id_uuid(app_id),
+                )),
             );
             let mut resp = HttpResponse::PartialContent();
             resp.content_type(hit.content_type.clone());
@@ -355,7 +358,10 @@ async fn serve_static_streaming(
         path,
         chosen.size,
         STREAM_CHUNK_BYTES,
-        Some(StreamEgressMeter::new(Arc::clone(&state.meter), app_id.uuid())),
+        Some(StreamEgressMeter::new(
+            Arc::clone(&state.meter),
+            crate::sync::app_id_uuid(app_id),
+        )),
     );
     let status = hit.status.unwrap_or(200);
     let st = ntex::http::StatusCode::from_u16(status).unwrap_or(ntex::http::StatusCode::OK);
@@ -623,7 +629,7 @@ mod tests {
     /// arm the way the router does. The meter subject stays the uuid, which is
     /// why the two spellings appear side by side below.
     fn typed_app_id(stored: &uuid::Uuid) -> AppId {
-        zeroship_core::app_id::canonical_app_id_for(stored)
+        crate::sync::route_table_app_id(stored)
     }
 
     fn usage_value(

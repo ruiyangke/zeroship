@@ -66,12 +66,12 @@ const X_ZS_AUTH: &str = "x-zs-auth";
 /// Resolved per-request route facts the auth endpoints need.
 pub(crate) struct RouteCtx {
     pub(crate) app_name: String,
-    /// The app's stable UUID (the `RouteMap` key from `lookup_by_name`). This —
-    /// NOT the subdomain slug `app_name` — is the CANONICAL key for the
-    /// `zeroship.gateway_sessions` + `zeroship.app_session_anchors` rows, whose
-    /// `app_id` columns are UUID and bound natively. Keying on the immutable
-    /// UUID (the slug can be renamed) is what lets a `/token`-minted cookie
-    /// validate on the real SPA→app dispatch path.
+    /// The app's stable UUID, decoded from the `AppId` `lookup_by_name`
+    /// returns. This — NOT the subdomain slug `app_name` — is the CANONICAL
+    /// key for the `zeroship.gateway_sessions` + `zeroship.app_session_anchors`
+    /// rows, whose `app_id` columns are UUID and bound natively. Keying on the
+    /// immutable UUID (the slug can be renamed) is what lets a `/token`-minted
+    /// cookie validate on the real SPA→app dispatch path.
     pub(crate) app_id: Uuid,
     pub(crate) host: String,
     pub(crate) client_id: String,
@@ -123,8 +123,14 @@ pub(crate) fn resolve_route(req: &HttpRequest, state: &GateState) -> Result<Rout
 
     // `RouteCtx::app_id` is the DATABASE key for the gateway-session and
     // anchor rows, whose `app_id` columns are UUID and bound natively, so the
-    // typed id the route table now carries is unwrapped once, here.
-    Ok(RouteCtx { app_name, app_id: app_id.uuid(), host, client_id, sector_identifier })
+    // typed id the route table carries is decoded once, here.
+    Ok(RouteCtx {
+        app_name,
+        app_id: crate::sync::app_id_uuid(&app_id),
+        host,
+        client_id,
+        sector_identifier,
+    })
 }
 
 /// Derive the per-app pairwise subject (`pws_…`) the identity projection

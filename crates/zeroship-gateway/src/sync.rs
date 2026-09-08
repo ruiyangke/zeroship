@@ -9,6 +9,7 @@ use uuid::Uuid;
 use zeroship_core::app_id::AppId;
 use zeroship_core::readiness::SyncFreshness;
 use zeroship_core::types::{GatewaySnapshot, RouteEntry, RouteMap};
+use zeroship_core::typed_id;
 
 use zeroship_core::types::SpendState;
 
@@ -17,6 +18,40 @@ use crate::enforce::{ConcurrencyRegistry, RateLimitRegistry};
 use crate::GateState;
 
 const CONTROL_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Render the `RouteMap` wire key — the raw [`Uuid`] `zeroship.apps.id`
+/// still serializes as — into the canonical [`AppId`] every route-table
+/// consumer keys on: [`RouteCache::update`]'s route table, its name index,
+/// the rate and concurrency registries, and `router::dispatch`'s
+/// workflow-advance route lookup, which probes the very table this
+/// function's other caller builds. There is no second way to turn a
+/// `Uuid` into an `AppId` anywhere in this crate — calling this, and only
+/// this, is what keeps every one of those in agreement.
+///
+/// Delegates to [`AppId::parse`], so the id it returns is one `parse`
+/// already admits. [`typed_id::uuid_to_base62`] is a bijection over the
+/// whole hundred-and-twenty-eight-bit range, so the `expect` below can
+/// never panic for any `Uuid`.
+pub(crate) fn route_table_app_id(stored: &Uuid) -> AppId {
+    let printed = format!("{}_{}", AppId::PREFIX, typed_id::uuid_to_base62(stored));
+    AppId::parse(&printed).expect("uuid_to_base62 always yields a valid app id body")
+}
+
+/// Decode the uuid embedded in `app_id`'s printed form, for the consumers
+/// still keyed on the raw uuid rather than the typed id: the
+/// `gateway_sessions`/`app_session_anchors` DATABASE columns (bound
+/// natively as `uuid`), the idempotency store's persisted key namespace,
+/// and the metering counter key (`zeroship_metering::meter::Meter::drain`
+/// still decodes it with `Uuid::parse_str`). Every `AppId` reaching this
+/// function was built by `AppId::mint`, `AppId::parse`, or
+/// [`route_table_app_id`] above, all of which validate the printed body
+/// against the app prefix before returning, so the decode below can never
+/// fail; the `expect` documents that invariant rather than adding a new
+/// error path.
+pub(crate) fn app_id_uuid(app_id: &AppId) -> Uuid {
+    typed_id::parse_with_prefix(app_id.as_str(), AppId::PREFIX)
+        .expect("AppId always parses under its own prefix")
+}
 
 impl std::fmt::Debug for RouteCache {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -195,19 +230,15 @@ impl RouteCache {
         let mut name_idx = HashMap::new();
         let mut compiled: HashMap<AppId, Arc<CompiledRoute>> = HashMap::new();
         for (id, entry) in new_routes {
-            // TRANSITIONAL, and the gateway's ONE conversion. `RouteMap` is a
-            // wire type and still keys on the `Uuid` the control plane stores,
-            // so the typed id is minted here, once, at the edge of the pull.
-            // Everything downstream of this line - the route table, the name
-            // index, the rate and concurrency registries, the ring, the path
-            // the worker is addressed at - carries the typed id.
-            //
-            // It is the CANONICAL rendering, not `AppId::from_uuid`'s. The two
-            // differ, deliberately: this id is an identity the gateway and the
-            // worker have to agree on, and the worker's `AppId::parse` admits
-            // only this one. `from_uuid` is for derivation inputs, which the
-            // gateway composes none of.
-            let id = zeroship_core::app_id::canonical_app_id_for(&id);
+            // `RouteMap` is a wire type and still keys on the `Uuid` the
+            // control plane stores, so the typed id is minted here, once, at
+            // the edge of the pull, via `route_table_app_id`. Everything
+            // downstream of this line - the route table, the name index, the
+            // rate and concurrency registries, the ring, the path the worker
+            // is addressed at - carries the typed id, and it is an identity
+            // the gateway and the worker have to agree on: the worker's
+            // `AppId::parse` admits only this rendering.
+            let id = route_table_app_id(&id);
             // Validate before the app enters the table, and drop it if the
             // manifest does not validate. The manifest IS the authorization
             // policy, so a manifest we cannot interpret leaves us with no
@@ -261,12 +292,11 @@ impl RouteCache {
 
     /// Resolve a route by app id.
     ///
-    /// The key is an [`AppId`], and [`AppId`] compares by its PRINTED form, so
-    /// a caller holding the other transitional rendering of the same uuid
-    /// misses here rather than matching. That is the point: the route table is
-    /// built from one rendering, and a producer that disagreed used to be able
-    /// to drop an entry silently. Now it cannot: it gets a 404 that names an
-    /// app, which is a miss an operator can see.
+    /// The key is an [`AppId`], and [`AppId`] compares by its PRINTED form.
+    /// The table is built by [`route_table_app_id`], the only function in
+    /// this crate that turns a `Uuid` into an `AppId`, so every caller
+    /// reaching this with an `AppId` built the same way hits; a lookup that
+    /// misses is an unknown app, not a rendering disagreement.
     pub fn lookup_by_app_id(&self, app_id: &AppId) -> Option<Arc<CompiledRoute>> {
         let routes = self.routes.read().unwrap();
         routes.get(app_id).cloned()
@@ -653,30 +683,19 @@ mod tests {
         ));
     }
 
-    /// The route table is keyed on the CANONICAL rendering of the app id, and
-    /// probing it with the other transitional rendering MISSES.
+    /// The route table is keyed on the CANONICAL rendering of the app id -
+    /// the one [`route_table_app_id`] produces from the `RouteMap` wire key.
     ///
-    /// This is the paired half of the worker's `/dispatch` refusal, and it is
-    /// the arm that makes a producer/consumer disagreement visible. Both
-    /// renderings carry the same hundred and twenty eight bits and both are an
-    /// `AppId`, so the compiler cannot tell them apart; only equality can, and
-    /// only because [`zeroship_core::app_id::AppId`] compares by its printed
-    /// form. If it compared by the embedded uuid instead, a gateway keying the
-    /// table one way and a caller probing it the other would silently agree,
-    /// which is the failure the typed id exists to remove.
-    ///
-    /// MUTATION-CHECKED, AND THE BLAST RADIUS WAS WIDER THAN EXPECTED. Spelling
-    /// `update`'s conversion as `AppId::from_uuid` - the other transitional
-    /// constructor, same argument, same type, and the natural thing to write -
-    /// fails this test on its FIRST assertion. It also fails four others in
-    /// `router::dispatch::tests`: both degrade arms and both internal
-    /// workflow-advance arms, each of which probes a registry or the route
-    /// table that `update` populated. That is the point rather than a
-    /// complication: the rendering the table is keyed on is load-bearing in
-    /// several places at once, and the mutation would have shipped a gateway
-    /// addressing every worker at a path the worker refuses.
+    /// This is the paired half of the worker's `/dispatch` refusal: the
+    /// worker's `AppId::parse` admits only this rendering, so a gateway that
+    /// built its route table's keys one way and addressed a worker with a
+    /// differently-rendered id would be refused there. [`route_table_app_id`]
+    /// is the ONLY function in this crate that turns a `Uuid` into an
+    /// `AppId` - there is no second constructor a caller could reach for
+    /// instead - so a producer/consumer rendering disagreement is a compile
+    /// error today rather than a runtime miss this test would need to catch.
     #[test]
-    fn the_route_table_misses_on_the_other_rendering_of_the_same_id() {
+    fn the_route_table_is_keyed_on_the_canonical_rendering() {
         let stored = Uuid::new_v4();
         let mut routes: RouteMap = HashMap::new();
         routes.insert(stored, route_entry("keyed.zeroship.ai", None, None));
@@ -688,25 +707,25 @@ mod tests {
             &ConcurrencyRegistry::new(100),
         );
 
-        let canonical = zeroship_core::app_id::canonical_app_id_for(&stored);
+        let canonical = route_table_app_id(&stored);
         assert!(
             cache.lookup_by_app_id(&canonical).is_some(),
             "the table is keyed on the rendering the gateway sends to workers"
         );
-        assert!(
-            cache.lookup_by_app_id(&AppId::from_uuid(&stored)).is_none(),
-            "the derivation rendering must MISS, so a rendering disagreement is \
-             a 404 an operator can see and not a silently dropped entry"
-        );
 
-        // The control: the miss is about the RENDERING, not about the table
-        // being empty or the id being unknown. Same table, same uuid, one
-        // spelling hits and the other does not.
+        // The control: the same app resolved two independent ways - directly
+        // by its canonical id, and by the subdomain name it was registered
+        // under - must agree, and the canonical id must still decode back to
+        // the uuid the control plane stored it under.
         let (by_name, _) = cache
             .lookup_by_name("keyed.zeroship.ai")
             .expect("the host resolves");
         assert_eq!(by_name, canonical);
-        assert_eq!(by_name.uuid(), stored, "and it still carries the stored bits");
+        assert_eq!(
+            app_id_uuid(&by_name),
+            stored,
+            "and it still decodes back to the stored bits"
+        );
     }
 
     #[test]
@@ -744,7 +763,7 @@ mod tests {
         let (id, compiled) = cache
             .lookup_by_name("provisioned.zeroship.ai")
             .expect("provisioned host resolves");
-        assert_eq!(id.uuid(), provisioned_id);
+        assert_eq!(app_id_uuid(&id), provisioned_id);
         assert_eq!(
             compiled.entry.oauth_client_id.as_deref(),
             Some("oac_provisioned")
@@ -922,7 +941,7 @@ mod tests {
         let (id, compiled) = cache
             .lookup_by_oauth_client_id("oac_myapp")
             .expect("per-app client resolves to its route");
-        assert_eq!(id.uuid(), provisioned_id);
+        assert_eq!(app_id_uuid(&id), provisioned_id);
         assert_eq!(compiled.entry.name, "myapp.zeroship.localhost");
 
         // Un-provisioned app's None oauth_client_id is never matched by a real
