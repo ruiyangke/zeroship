@@ -506,6 +506,12 @@ mod tests {
             (IdentRole::Namespace, "__zeroship_reserved", false),
             (IdentRole::Collection, "pg_class", false),
             (IdentRole::Column, "pg_attribute", false),
+            // Accepted, and that IS the deliberate behaviour: this role exists
+            // so the platform can name its own stored columns. The refusal half
+            // is `the_stored_prefix_is_reserved_against_creators_and_nameable_
+            // by_the_platform` in `tests/ident_refusals.rs`, which pins that
+            // `pg_`, `sqlite_` and the classification names still fail here.
+            (IdentRole::StoredColumn, "__zs_raw__ssn", true),
             (IdentRole::Alias, "__zeroship_internal", false),
             (IdentRole::Constraint, "pg_constraint", true),
             (IdentRole::Index, "pg_index", true),
@@ -516,11 +522,24 @@ mod tests {
                 expected_acceptance,
                 "unexpected reservation verdict for {role} witness {witness:?}"
             );
+            // A new variant makes this match non-exhaustive, which is a COMPILE
+            // error, so a role cannot be added without landing in `cases`.
+            //
+            // `assert_eq!(cases.len(), 6)` stood here and did not do that job:
+            // it compared the array to its own literal length, so it agreed with
+            // itself forever. `StoredColumn` was added on 2026-09-07 and this
+            // test stayed green, under a message saying a new role must be
+            // given behaviour deliberately.
+            match role {
+                IdentRole::Namespace
+                | IdentRole::Collection
+                | IdentRole::Column
+                | IdentRole::StoredColumn
+                | IdentRole::Alias
+                | IdentRole::Constraint
+                | IdentRole::Index => {}
+            }
         }
-        assert_eq!(
-            cases.len(),
-            6,
-            "a new role must be given reservation behavior deliberately"
-        );
+        println!("ruled on {} roles", cases.len());
     }
 }

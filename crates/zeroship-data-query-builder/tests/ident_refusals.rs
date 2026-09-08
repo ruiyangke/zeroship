@@ -13,14 +13,38 @@
 
 use zeroship_data_query_builder::{Ident, IdentError, IdentRole};
 
-const ALL_ROLES: [IdentRole; 6] = [
+const ALL_ROLES: [IdentRole; 7] = [
     IdentRole::Namespace,
     IdentRole::Collection,
     IdentRole::Column,
+    IdentRole::StoredColumn,
     IdentRole::Alias,
     IdentRole::Constraint,
     IdentRole::Index,
 ];
+
+/// `ALL_ROLES` fell a variant behind the enum and nothing said so.
+///
+/// `StoredColumn` was added to LOOSEN a fence and was the one role this sweep
+/// never ran against, because the array's length is its own declaration and a
+/// `[IdentRole; 6]` is as valid a Rust type after a seventh variant lands as
+/// before. Length cannot notice a missing element.
+///
+/// A match can. Listing every variant makes a new one a non-exhaustive-pattern
+/// COMPILE error here, so the next role cannot be added without this array being
+/// looked at. It costs nothing at runtime and it cannot go vacuous, which the
+/// `assert_eq!` on a literal could and did.
+fn _all_roles_covers_the_enum(role: IdentRole) {
+    match role {
+        IdentRole::Namespace
+        | IdentRole::Collection
+        | IdentRole::Column
+        | IdentRole::StoredColumn
+        | IdentRole::Alias
+        | IdentRole::Constraint
+        | IdentRole::Index => {}
+    }
+}
 
 /// The shape rules apply to every role, so injection has no role-shaped hole.
 #[test]
