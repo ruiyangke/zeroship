@@ -2201,6 +2201,30 @@ until the envelope is declared where workers are expected to boot. That is the
 honest cost of the F4 shape and it is not avoidable by a worker-side setting:
 the refusal is control's.
 
+*The constraint on ever hardening enrolment, decided before this proposal and
+still binding.* Making enrolment a BOUNDARY rather than a distinguisher means
+answering "who deserves a credential, and how" - which
+`docs/proposals/2026-08-16-service-identity.md` calls LAYER 3, the attestation and
+bootstrap layer, and names SPIFFE/SPIRE and cloud workload identity as its
+occupants. That proposal declined to adopt it, and the reason is a product
+constraint rather than a preference: zeroship is self-hosted into unknown
+environments, and "a default that imposes infrastructure (a CA, a SPIRE cluster, a
+service mesh) is not deployable by a user on a single VPS."
+
+**So no hardening design here may require SPIRE, a service mesh, a CA, or a cloud
+provider's workload identity.** What this tree adopted is LAYER 2 only: identity
+presented as a signed JWT-shaped assertion. The `spiffe://` spelling in
+`ServiceIssuer` is a NAMING CONVENTION and nothing more - there is no issuing
+authority, no attestation, no rotation, no agent, and nothing named SPIRE, SVID or
+workload API appears in any crate. It was chosen so the identifiers would carry
+unchanged into X.509 SANs if mTLS ever arrived. Do not read it as a commitment to
+the ecosystem it borrows from.
+
+The consequence is worth stating rather than discovering: with LAYER 3 excluded,
+the strongest available fence is bounded by what the operator can provision by
+hand and what control can observe for itself. A design that reaches past that has
+left the product's deployment story, whatever its security merit.
+
 The loopback arm was a SEPARATE and now-fixed defect, and conflating the two
 would leave the real one unpaid. That arm sat above the network comparison, so
 no declaration could admit a single-host deployment; it now rules through the
