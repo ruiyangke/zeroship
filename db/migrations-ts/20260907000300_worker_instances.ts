@@ -11,9 +11,17 @@ import { createFunction, grant, now, raw, t, table } from "@zeroship/migrate";
 // authenticates with the SHARED role key, so a holder of that key can enrol
 // many instances. Per-instance identity is a DISTINGUISHER against a role-key
 // holder, NOT a boundary. What it buys is attribution, per-instance revocation,
-// a countable and rate-limitable event, and it is what makes a per-app placement
-// fence writable at all. No comment in this file, and no doc citing it, may say
-// it is a boundary.
+// a countable event, and it is what makes a per-app placement fence writable at
+// all. No comment in this file, and no doc citing it, may say it is a boundary.
+//
+// THIS LIST SAID "a countable and RATE-LIMITABLE event" UNTIL 2026-09-08, AND
+// NOTHING RATE-LIMITS ENROLMENT. There is no budget, quota or duplicate check on
+// the endpoint, so a role-key holder may enrol without bound. The word was
+// written in the same breath as the careful refusal to call this a boundary,
+// which is how an unearned claim gets in: beside a true one, in a list of
+// benefits, where it reads as delivered rather than merely possible. Enrolment
+// IS a discrete event that COULD be limited; nothing does it. Say "could" in a
+// design and "does" only where something does.
 //
 // THE RING KEY IS CONTROL'S, AND THE REGISTRANT CONTRIBUTES NOTHING TO IT.
 // `HashRing::new` in crates/zeroship-gateway/src/proxy.rs derives ring position
