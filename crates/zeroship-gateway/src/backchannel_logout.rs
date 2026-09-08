@@ -82,13 +82,17 @@ pub async fn handle(
             // The per-app session/anchor rows are keyed by the app's STABLE
             // UUID (`apps.id`), not the renameable subdomain slug — so the
             // per-app revoke scope carries the app id, never `route.entry.name`.
-            // The route table is keyed by the typed id now; the session and
+            // The route table is keyed by the typed id; the session and
             // anchor rows this function revokes are keyed by `apps.id`, which
-            // is still a uuid column. Unwrap once, here, so every use below is
+            // is still a uuid column. Decode once, here, so every use below is
             // reading the id the DATABASE holds rather than the one the
             // gateway routes by.
             state.routes.lookup_by_oauth_client_id(cand).map(|(id, route)| {
-                (cand.clone(), id.uuid(), route.entry.sector_identifier.clone())
+                (
+                    cand.clone(),
+                    crate::sync::app_id_uuid(&id),
+                    route.entry.sector_identifier.clone(),
+                )
             })
         }) else {
             tracing::warn!(

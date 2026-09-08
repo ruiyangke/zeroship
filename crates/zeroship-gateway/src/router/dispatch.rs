@@ -164,11 +164,11 @@ pub async fn workflow_advance_internal(
     }
 
     // `WorkflowStepRequest` is a wire type the control plane produces, and it
-    // still carries the stored uuid. This is the second transitional
-    // conversion in this crate - the peer of the one in `sync::update` - and it
-    // uses the same canonical rendering, because it probes the very table that
-    // one builds. Rendering it any other way is a guaranteed miss.
-    let app_id = zeroship_core::app_id::canonical_app_id_for(&request.app_id);
+    // still carries the stored uuid. This is the second call to
+    // `route_table_app_id` in this crate - the peer of the one in
+    // `sync::update` - and it has to be: it probes the very table that one
+    // builds, so rendering it any other way is a guaranteed miss.
+    let app_id = crate::sync::route_table_app_id(&request.app_id);
     let Some(compiled_route) = state.routes.lookup_by_app_id(&app_id) else {
         return HttpResponse::NotFound().json(&serde_json::json!({"error": "app route not found"}));
     };
@@ -1699,18 +1699,19 @@ fn record_gateway_egress(state: &GateState, app_id: &AppId, response: &mut HttpR
     }
     if let BodySize::Sized(n) = response.body().size() {
         if n > 0 {
-            // TRANSITIONAL, and it is NOT `app_derivation::meter_key`.
-            //
-            // `zeroship_metering::meter::Meter::drain` parses this key back with
-            // `Uuid::parse_str` and, on failure, SKIPS AND EVICTS the counters
-            // behind a `tracing::warn!` - so an app whose key stops parsing
-            // serves traffic and is never billed, with the log noise decaying by
-            // design. Handing it the printed typed id would do exactly that.
-            // The meter key stays the uuid until the metering slice re-keys the
-            // map, and this `.uuid()` is what says so out loud.
-            state
-                .meter
-                .increment(&app_id.uuid().to_string(), "gateway_egress_bytes", n);
+            // NOT `app_derivation::meter_key`. `zeroship_metering::meter::
+            // Meter::drain` parses this key back with `Uuid::parse_str` and,
+            // on failure, SKIPS AND EVICTS the counters behind a
+            // `tracing::warn!` - so an app whose key stops parsing serves
+            // traffic and is never billed, with the log noise decaying by
+            // design. Handing it the printed typed id would do exactly that,
+            // so the meter key is the uuid `crate::sync::app_id_uuid` decodes
+            // out of the route table's `AppId`, not the typed id itself.
+            state.meter.increment(
+                &crate::sync::app_id_uuid(app_id).to_string(),
+                "gateway_egress_bytes",
+                n,
+            );
         }
     }
 }
@@ -2013,12 +2014,13 @@ pub(super) async fn handle_idempotency_pre_dispatch(
 
     let decision = idempotency::pre_dispatch(
         state.idempotency_store.as_ref(),
-        // TRANSITIONAL. The dedupe namespace is a PERSISTED key space
-        // (`idem:{app_id}:{wire_id}:...`) with its own TTL, so its rendering is
-        // a storage decision rather than a routing one and it stays the uuid
-        // until that store is re-keyed. `capture_response` below unwraps the
-        // same way; the pair has to agree or every store misses its own read.
-        &app_id.uuid(),
+        // The dedupe namespace is a PERSISTED key space
+        // (`idem:{app_id}:{wire_id}:...`) with its own TTL, so its rendering
+        // is a storage decision rather than a routing one and stays the uuid
+        // `crate::sync::app_id_uuid` decodes out of the route table's
+        // `AppId`. `capture_response` below decodes the same way; the pair
+        // has to agree or every store misses its own read.
+        &crate::sync::app_id_uuid(app_id),
         wire_id,
         principal,
         idem_key.as_deref(),
@@ -2254,7 +2256,7 @@ pub(super) async fn capture_response_for_idempotency(
         state.idempotency_store.as_ref(),
         // The write half of the pair `pre_dispatch` documents: same namespace,
         // so necessarily the same rendering.
-        &app_id.uuid(),
+        &crate::sync::app_id_uuid(app_id),
         &handle.entry_key,
         &handle.lock_key,
         &handle.body_hash,
@@ -2663,14 +2665,14 @@ async fn handle_auth_callback(
 ) -> HttpResponse {
     // Resolve the app by subdomain — same logic the manifest dispatcher uses
     // for normal requests — then key the gateway_sessions row by the app's
-    // STABLE UUID (`app_uuid`), NOT the slug. This is the canonical session
-    // key (the `app_id` column is UUID, bound natively); a slug-keyed row
-    // would never match on the real SPA→app request path. The slug can be
-    // renamed; the UUID is the immutable identity.
+    // STABLE id (`app_id`), NOT the slug. The `app_id` DATABASE column is
+    // UUID and bound natively, so the typed id is decoded for it below; a
+    // slug-keyed row would never match on the real SPA→app request path.
+    // The slug can be renamed; the app id is the immutable identity.
     let Some(app_name) = extract_app_name(&req, None) else {
         return render_callback_error("host header missing or unparseable");
     };
-    let Some((app_uuid, route)) = state.routes.lookup_by_name(&app_name) else {
+    let Some((app_id, route)) = state.routes.lookup_by_name(&app_name) else {
         return render_callback_error("app not found for this host");
     };
     // The interactive flow now issues the SAME signed `zeroship-sess+jwt` cookie the
@@ -2762,8 +2764,8 @@ async fn handle_auth_callback(
         &crate::sessions::NewSession {
             user_id: &claims.sub,
             // `zeroship.gateway_sessions.app_id` is a UUID column bound
-            // natively, so the route table's typed id is unwrapped for it.
-            app_id: app_uuid.uuid(),
+            // natively, so the route table's `AppId` is decoded for it.
+            app_id: crate::sync::app_id_uuid(&app_id),
             email: claims.email.as_deref(),
             name: claims.name.as_deref(),
             avatar_url: claims.picture.as_deref(),
@@ -2967,12 +2969,12 @@ mod tests {
 
     /// The typed app id for an app the control plane stores as `stored`.
     ///
-    /// Exactly what `sync::update` mints at snapshot load, so a test that keys
-    /// a registry, the ring, or a route lookup builds the same key production
-    /// does. Spelling `AppId::from_uuid` here instead would compile and then
-    /// miss every one of them.
+    /// Delegates to `crate::sync::route_table_app_id`, exactly what
+    /// `sync::update` mints at snapshot load, so a test that keys a
+    /// registry, the ring, or a route lookup builds the same key production
+    /// does.
     fn typed_app_id(stored: &Uuid) -> AppId {
-        zeroship_core::app_id::canonical_app_id_for(stored)
+        crate::sync::route_table_app_id(stored)
     }
 
     fn manifest_with_resources(resources: HashMap<String, ResourceEntry>) -> Manifest {
@@ -4630,7 +4632,7 @@ mod tests {
                 assert_eq!(
                     handle.entry_key,
                     crate::idempotency::entry_key(
-                        &app_id.uuid(),
+                        &crate::sync::app_id_uuid(&app_id),
                         "todos.add",
                         crate::idempotency::Principal::Anon,
                         "5c7f4a1b-8d2e-4c3f-9a6b-1e2d3c4b5a60",
