@@ -44,5 +44,7 @@
   { "file": "20260906000200_apps_project_ownership_key.ts", "name": "apps_project_ownership_key", "opCount": 2 },
   { "file": "20260906000300_organization_dissolution.ts", "name": "organization_dissolution", "opCount": 5 },
   { "file": "20260907000000_user_erasure_edges.ts", "name": "user_erasure_edges", "opCount": 11 },
+  { "file": "20260907000100_session_object.ts", "name": "session_object", "opCount": 32 },
+  { "file": "20260907000200_drop_oauth_refresh_tokens.ts", "name": "drop_oauth_refresh_tokens", "opCount": 1 },
   { "file": "20260907000300_worker_instances.ts", "name": "worker_instances", "opCount": 10 }
 ]
