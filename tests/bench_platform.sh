@@ -86,13 +86,36 @@ BENCH_DSN="${BENCH_DSN:-postgres://postgres:test@localhost:5434/postgres}"
 e2e_export_database_urls "$BENCH_DSN"
 docker exec pg-test psql -U postgres -c "DROP TABLE IF EXISTS usage_history, usage, apps CASCADE" > /dev/null 2>&1
 
+# THIS HARNESS DECLARES ITS OWN ENROLMENT ENVELOPE. It sources the stack
+# library for helpers but never calls `stack_workspace`, which is where the
+# declaration is exported, so it would otherwise start a control plane with a
+# CLOSED envelope and refuse every enrolment as `envelope_unset`.
+#
+# Loopback is admitted BECAUSE IT IS DECLARED, never by default: everything
+# below runs on localhost, and an undeclared envelope refuses a loopback peer
+# like any other. The port half names the worker's port below and nothing else,
+# because that is the only process here that enrols.
+#
+# Latent until enrolment is mandatory, which is exactly why it is stated now
+# rather than found later: the refusal would arrive while every readiness probe
+# in this file stayed green, and this harness reports timings rather than
+# verdicts, so it would read as a performance change.
+#
+# The port is named ONCE and read twice - here and by the worker below. Two
+# literals that have to agree are a drift waiting to happen, and the way this
+# one drifts is silent: the worker still starts, and only its enrolment is
+# refused.
+BENCH_WORKER_PORT=8080
+export ZEROSHIP_CONTROL_WORKER_ENROLMENT_NETWORKS="127.0.0.0/8"
+export ZEROSHIP_CONTROL_WORKER_ENROLMENT_PORTS="$BENCH_WORKER_PORT"
+
 # Start platform
 "$BIN/zeroship-control" --port 9090 \
     --blob-store /tmp/zeroship-bench-bundles > /dev/null 2>&1 &
 PIDS+=($!)
 sleep 3
 
-"$BIN/zeroship-worker" --port 8080 --threads $CORES --control-url http://localhost:9090 \
+"$BIN/zeroship-worker" --port "$BENCH_WORKER_PORT" --threads $CORES --control-url http://localhost:9090 \
     --poll-interval 60 > /dev/null 2>&1 &
 PIDS+=($!)
 sleep 2
