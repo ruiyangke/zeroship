@@ -34,7 +34,17 @@ struct Fx {
 }
 
 impl Fx {
-    async fn new() -> Option<Self> {
+    /// A fixture, or no run at all.
+    ///
+    /// IT RETURNS `Self` AND NOT `Option<Self>` ON PURPOSE. There is no
+    /// database state this can decline for: `common::require_control_db` ENDS
+    /// the process when the DSN is absent or the schema is not there, so the
+    /// only value an `Option` could carry is `Some`. It carried one anyway
+    /// until 2026-09-08, and every caller spelled `let Some(fx) = ... else {
+    /// return }` - the exact shape that used to mean "pass silently", left
+    /// standing as a template for the next test to copy. Returning the value
+    /// makes that shape unwritable rather than merely unreachable.
+    async fn new() -> Self {
         let url = common::require_control_db();
         let (pg, conn) = connect(&url, NoTls).await.expect("control-pg connect");
         compio::runtime::spawn(async move {
@@ -42,7 +52,7 @@ impl Fx {
         })
         .detach();
         let registry = Registry::new(&url).await.expect("registry");
-        Some(Self { registry, pg })
+        Self { registry, pg }
     }
 
     async fn seed_user(&self, label: &str) -> Uuid {
@@ -119,7 +129,7 @@ impl Fx {
 /// the organization and the first thing that has to happen.
 #[compio::test]
 async fn a_sole_owner_is_blocked_and_told_what_to_do() {
-    let Some(fx) = Fx::new().await else { return };
+    let fx = Fx::new().await;
     let owner = fx.seed_user("erasure-sole").await;
     let organization = fx.organization(owner, "erasure-sole").await;
 
@@ -148,7 +158,7 @@ async fn a_sole_owner_is_blocked_and_told_what_to_do() {
 /// successor is.
 #[compio::test]
 async fn transferring_ownership_moves_the_blocker_to_the_successor() {
-    let Some(fx) = Fx::new().await else { return };
+    let fx = Fx::new().await;
     let owner = fx.seed_user("erasure-xfer").await;
     let organization = fx.organization(owner, "erasure-xfer").await;
     let successor = fx.seed_user("erasure-heir").await;
@@ -198,7 +208,7 @@ async fn transferring_ownership_moves_the_blocker_to_the_successor() {
 /// refuses it. Without this case the clause would be an unbound guard.
 #[compio::test]
 async fn a_second_owner_row_clears_the_blocker_for_both() {
-    let Some(fx) = Fx::new().await else { return };
+    let fx = Fx::new().await;
     let owner = fx.seed_user("erasure-co").await;
     let organization = fx.organization(owner, "erasure-co").await;
     let peer = fx.seed_user("erasure-peer").await;
@@ -226,7 +236,7 @@ async fn a_second_owner_row_clears_the_blocker_for_both() {
 /// while clearing everyone else on it.
 #[compio::test]
 async fn a_non_owner_seat_is_never_a_blocker_and_the_owner_still_is() {
-    let Some(fx) = Fx::new().await else { return };
+    let fx = Fx::new().await;
     let owner = fx.seed_user("erasure-owner").await;
     let organization = fx.organization(owner, "erasure-member").await;
     let member = fx.seed_user("erasure-dev").await;
@@ -264,7 +274,7 @@ async fn a_non_owner_seat_is_never_a_blocker_and_the_owner_still_is() {
 /// a successor for it would be a refusal with no remedy.
 #[compio::test]
 async fn a_dissolved_organization_is_not_a_blocker() {
-    let Some(fx) = Fx::new().await else { return };
+    let fx = Fx::new().await;
     let owner = fx.seed_user("erasure-closed").await;
     let organization = fx.organization(owner, "erasure-closed").await;
     fx.drop_projects(&organization).await;
@@ -288,7 +298,7 @@ async fn a_dissolved_organization_is_not_a_blocker() {
 /// pass on a preflight that blocked everybody.
 #[compio::test]
 async fn a_principal_with_no_seat_is_clear() {
-    let Some(fx) = Fx::new().await else { return };
+    let fx = Fx::new().await;
     let nobody = fx.seed_user("erasure-nobody").await;
     assert!(preflight(&fx.pg, nobody, LocalInvoicing::Yes).await.expect("preflight").is_clear());
     fx.cleanup(&[], &[nobody]).await;
