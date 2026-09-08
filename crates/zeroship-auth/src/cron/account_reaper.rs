@@ -442,8 +442,9 @@ async fn erase_one_tx(conn: &(impl GenericClient + Sync), user_id: Uuid) -> Resu
 ///
 /// # Two statements, and the order is the mechanism
 ///
-/// The first LOCKS every live organization this human holds an owner seat on.
-/// The second re-reads the rule. They are separate statements deliberately: in
+/// The first LOCKS every live organization this human holds ANY seat on. The
+/// second re-reads the rule, and it is the one that asks about ownership. They
+/// are separate statements deliberately: in
 /// READ COMMITTED each statement takes its own snapshot, so the second one sees
 /// whatever committed while the first was blocked on a concurrent departure.
 /// Folding them into one statement puts the decisive `NOT EXISTS` in the
@@ -455,14 +456,30 @@ async fn erase_one_tx(conn: &(impl GenericClient + Sync), user_id: Uuid) -> Resu
 /// erased seat is gone - so it refuses instead. Neither order produces an
 /// ownerless organization.
 ///
-/// # Why the candidate set cannot grow underneath us
+/// # Why the locking statement asks about SEATS and the re-check asks about OWNERSHIP
 ///
-/// A seat added to this human after the locking statement would be a live
-/// organization nobody locked. It cannot commit: an INSERT into
-/// `organization_members` takes `FOR KEY SHARE` on the referenced
+/// The set this transaction must serialize against is not "organizations this
+/// human owns" but "organizations this human could be the last owner of by the
+/// time the DELETE runs", and those differ, because ownership is reachable by
+/// PROMOTION. `transfer_ownership` in the control plane raises a sitting member
+/// to owner with a plain `UPDATE organization_members SET role`, and a
+/// referencing-side RI trigger fires only when the key columns change - so that
+/// UPDATE takes NO lock on `zeroship.users`, and holding this human's row
+/// `FOR UPDATE` does not serialize it. Locking only the owner seats therefore
+/// leaves every organization where this human is currently a developer
+/// unlocked, the promotion commits underneath the erasure, and the seat is
+/// cascaded away: an ownerless organization, by the one route the earlier
+/// argument here claimed was closed.
+///
+/// So the lock is taken over every seat, and `role = 'owner'` is asked only in
+/// the re-check, which runs in a later snapshot and therefore sees a promotion
+/// that committed while the lock was being waited for.
+///
+/// A brand-new seat is a different case and IS closed by the users-row lock: an
+/// INSERT into `organization_members` takes `FOR KEY SHARE` on the referenced
 /// `zeroship.users` row for its foreign key, and the caller already holds
-/// `FOR UPDATE` on exactly that row. So the set can only SHRINK while this
-/// transaction runs, and shrinking is what the second statement rules on.
+/// `FOR UPDATE` on exactly that row. Promotion had to be handled here because
+/// it is the one way in which the set grows WITHOUT touching that row.
 ///
 /// # Deterministic lock order
 ///
@@ -485,14 +502,13 @@ async fn refuse_if_it_strands_an_organization(
           WHERE o.dissolved_at IS NULL \
             AND EXISTS (SELECT 1 FROM zeroship.organization_members m \
                          WHERE m.organization_id = o.id \
-                           AND m.user_id = $1 \
-                           AND m.role = 'owner') \
+                           AND m.user_id = $1) \
           ORDER BY o.id \
           FOR UPDATE",
         &[&user_id],
     )
     .await
-    .map_err(|e| AuthError::Db(format!("account_reaper lock owned organizations: {e}")))?;
+    .map_err(|e| AuthError::Db(format!("account_reaper lock seated organizations: {e}")))?;
 
     let stranded = conn
         .query(

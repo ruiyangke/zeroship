@@ -1793,3 +1793,199 @@ async fn a_departure_after_the_preflight_cannot_leave_the_organization_ownerless
          is not inside the transaction"
     );
 }
+
+/// TRIGGER C, and the reason the lock is taken over SEATS rather than owner
+/// seats.
+///
+/// Triggers A and B both need this human to already hold an owner seat, so a
+/// fence that locked exactly the organizations they own closed both. Ownership
+/// is also reachable by PROMOTION: `transfer_ownership` raises a sitting member
+/// with `UPDATE organization_members SET role`, and a referencing-side RI
+/// trigger fires only when the key columns change - so that UPDATE takes no
+/// lock on `zeroship.users`, and holding the victim's row `FOR UPDATE` does not
+/// serialize it.
+///
+/// The victim here is a DEVELOPER when the preflight answers, which is why it
+/// answers clear. A fence locking only owner seats locks nothing at all for
+/// this organization, the promotion commits underneath the erasure, and the
+/// cascade takes the freshly-granted owner seat with it.
+///
+/// The interleaving is forced the same way as trigger A: the transfer takes the
+/// organization row lock and holds it, the tick parks on that lock, and only
+/// then does the transfer commit. So a green says the re-check saw a promotion
+/// that landed after the lock was requested - which is the whole claim.
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn a_promotion_after_the_preflight_cannot_leave_the_organization_ownerless() {
+    let Some(dsn) = zeroship_core::config::test_database_url_opt() else {
+        zeroship_test_support::skip("skipping account_deletion_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
+        return;
+    };
+    let Some(mut db) = open(&dsn).await else {
+        return;
+    };
+    let _reaper = common::lease_sweep(common::sweep_lock::ACCOUNT_REAPER).await;
+    let Some(as_auth) = open(&as_auth_role(&dsn)).await else {
+        return;
+    };
+    let Some(mut transferring) = open(&dsn).await else {
+        return;
+    };
+    let Some(observer) = open(&dsn).await else {
+        return;
+    };
+    let (mock, control) = clear_control().await;
+
+    let tag = Uuid::new_v4().simple().to_string();
+    let organization_id = format!("org_{}", &tag[..22]);
+    let slug = format!("acctdel-{}", &tag[..12]);
+    let victim = users::create(
+        &db,
+        &format!("acctdel-promo-victim-{tag}@zeroship.test"),
+        "Victim",
+        None,
+    )
+    .await
+    .unwrap();
+    let sitting_owner = users::create(
+        &db,
+        &format!("acctdel-promo-owner-{tag}@zeroship.test"),
+        "Sitting Owner",
+        None,
+    )
+    .await
+    .unwrap();
+    db.execute(
+        "INSERT INTO zeroship.organizations \
+             (id, slug, name, billing_email, created_by) \
+         VALUES ($1, $2::text::citext, $3, $4::text::citext, $5)",
+        &[
+            &organization_id,
+            &slug,
+            &"Handover",
+            &format!("billing-{tag}@zeroship.test"),
+            &sitting_owner.id,
+        ],
+    )
+    .await
+    .expect("seat the organization");
+    // The victim is a DEVELOPER. This is what makes the preflight answer clear
+    // and what a role-filtered lock would decline to lock.
+    db.execute(
+        "INSERT INTO zeroship.organization_members (organization_id, user_id, role) \
+         VALUES ($1, $2, 'developer'), ($1, $3, 'owner')",
+        &[&organization_id, &victim.id, &sitting_owner.id],
+    )
+    .await
+    .expect("seat one owner and one developer");
+
+    users::request_deletion(&mut db, victim.id, account_reaper::GRACE_DAYS)
+        .await
+        .unwrap()
+        .unwrap();
+    backdate_schedule(&db, victim.id).await;
+
+    // The handover, in the shape `transfer_ownership` takes it: the
+    // organization row lock FIRST, then promote the incoming owner and step the
+    // outgoing one down. Uncommitted, so the erasure has to meet it.
+    let transfer = transferring
+        .transaction()
+        .await
+        .expect("begin the ownership transfer");
+    transfer
+        .query(
+            "SELECT id FROM zeroship.organizations WHERE id = $1 FOR UPDATE",
+            &[&organization_id],
+        )
+        .await
+        .expect("the transfer takes the organization row lock");
+    let promoted = transfer
+        .execute(
+            "UPDATE zeroship.organization_members \
+                SET role = 'owner', changed_at = NOW(), changed_by = $3 \
+              WHERE organization_id = $1 AND user_id = $2",
+            &[&organization_id, &victim.id, &sitting_owner.id],
+        )
+        .await
+        .expect("promote the incoming owner");
+    assert_eq!(promoted, 1, "the promotion is legitimate when it runs");
+    transfer
+        .execute(
+            "UPDATE zeroship.organization_members \
+                SET role = 'admin', changed_at = NOW(), changed_by = $3 \
+              WHERE organization_id = $1 AND user_id = $2",
+            &[&organization_id, &sitting_owner.id, &sitting_owner.id],
+        )
+        .await
+        .expect("step the outgoing owner down");
+
+    let control_for_tick = control.clone();
+    let erasure = compio::runtime::spawn(async move {
+        let mut conn = as_auth;
+        account_reaper::tick(&mut conn, &control_for_tick).await
+    });
+
+    let parked = wait_until_blocked_on_the_organization_lock(&observer).await;
+    transfer.commit().await.expect("the handover completed");
+    let report = erasure.await.expect("join erasure").expect("tick");
+
+    let owners = db
+        .query(
+            "SELECT user_id FROM zeroship.organization_members \
+              WHERE organization_id = $1 AND role = 'owner'",
+            &[&organization_id],
+        )
+        .await
+        .expect("count owners");
+    let victim_row = db
+        .query("SELECT 1 FROM zeroship.users WHERE id = $1", &[&victim.id])
+        .await
+        .expect("read the victim");
+    let details = audit_detail(&db, victim.id, "account_erasure_failed").await;
+    let asked = mock.asked();
+
+    db.execute(
+        "DELETE FROM zeroship.organization_members WHERE organization_id = $1",
+        &[&organization_id],
+    )
+    .await
+    .expect("unseat");
+    db.execute(
+        "DELETE FROM zeroship.organizations WHERE id = $1",
+        &[&organization_id],
+    )
+    .await
+    .expect("close the organization");
+    cleanup(&db, &[victim.id, sitting_owner.id]).await;
+
+    assert!(
+        asked.contains(&victim.id.to_string()),
+        "the preflight really answered, and answered clear, before the erasure"
+    );
+    assert!(
+        !owners.is_empty(),
+        "the organization was left with NO owner - a promotion the fence never \
+         locked against"
+    );
+    assert_eq!(
+        victim_row.len(),
+        1,
+        "a refused erasure leaves the account pending, not half-erased"
+    );
+    assert!(
+        report.failed >= 1,
+        "the refusal counts as a failure: {report:?}"
+    );
+    assert_eq!(details.len(), 1, "one durable record, on this user");
+    assert_eq!(
+        details[0]["stage"], "ownership",
+        "the in-transaction fence is selectable apart from a preflight that \
+         answered no: {}",
+        details[0]
+    );
+    assert!(
+        parked,
+        "the erasure never blocked on the organization row lock, so the lock \
+         did not cover a seat the victim held"
+    );
+}
