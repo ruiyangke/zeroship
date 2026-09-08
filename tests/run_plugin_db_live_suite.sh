@@ -25,23 +25,30 @@
 #   + pgvector image, wal_level=logical    102 passed /  1 failed
 #   + `CREATE EXTENSION vector` in the DB  103 passed /  0 failed, 8 ignored
 #
-#   1. `-c wal_level=logical`. WITHOUT IT, TEN TESTS SKIP AND STILL REPORT
-#      PASSED. Measured on two servers differing in nothing else:
+#   1. `-c wal_level=logical`. IT IS STILL NOT OPTIONAL, but the way a missing
+#      setting presents has changed, and the old measurement is why the change
+#      was made. Ten tests USED TO SKIP AND STILL REPORT PASSED. Measured on two
+#      servers differing in nothing else:
 #        replica  test result: ok. 11 passed; 0 failed; 1 ignored;  3.31s
 #        logical  test result: ok. 11 passed; 0 failed; 1 ignored; 11.25s
-#      IDENTICAL result lines. On replica all of them skipped; on logical all
-#      of them executed. That is the entire reason the census below is a hard
-#      failure rather than a report: the cargo tally cannot see the difference.
+#      IDENTICAL result lines, distinguishable only by elapsed time. On replica
+#      all of them skipped; on logical all of them executed. The cargo tally
+#      could not see the difference, so a census over the run log had to.
+#
+#      THE TESTS THEMSELVES NOW REFUSE. A server without logical WAL fails them,
+#      naming the setting, that it is postmaster-level, and that `ALTER SYSTEM
+#      SET` needs a RESTART and not a reload. Two result lines that differ only
+#      in duration is no longer a state this suite can reach, which is what
+#      retired the census that used to be the only thing telling them apart.
 #
 #      TEN, not the eleven this said until 2026-08-18. Re-measured that day on
-#      the FULL target against two servers differing only in wal_level:
-#        replica  11 ZEROSHIP-TEST-SKIPPED markers (10 wal-worded + 1 postgis)
-#        logical   1 marker (postgis)
-#      and `pg_has_logical_wal` has exactly 10 call sites. The older figure was
-#      taken on a filtered run and copied into three files; the re-measurement
-#      differs from it by one and I did not reproduce the original setup, so
-#      treat ten as "what the tree does today" rather than as a correction of
-#      what it did then.
+#      the FULL target against two servers differing only in wal_level: the
+#      replica announced one skip per wal-gated test plus one for postgis, the
+#      logical server only the postgis one, and `pg_has_logical_wal` has exactly
+#      10 call sites. The older figure was taken on a filtered run and copied
+#      into three files; the re-measurement differs from it by one and I did not
+#      reproduce the original setup, so treat ten as "what the tree did then"
+#      rather than as a correction of what it did before that.
 #      NOTE this cannot be expressed in a GitHub `services:` block, which takes
 #      no command arguments - hence the explicit `docker run` in ci.yml, the
 #      same pattern golden-path and dev-vs-deployed already use.
@@ -187,13 +194,6 @@ SUITE_LOG="${SUITE_LOG:-${TMPDIR:-/tmp}/plugin-db-live.log}"
 # Re-measure on a dedicated cluster or this number will not reproduce.
 PLUGIN_DB_MIN_PASSED=114
 
-# Only postgis. An EMPTY allowlist would be wrong in the other direction:
-# `grep -E ''` matches every line, so zs_skip_lines branches on empty rather
-# than passing it through - see the note in tests/lib/skip_census.sh.
-PLUGIN_DB_SKIP_ALLOWLIST="postgis"
-
-. "$ROOT/tests/lib/skip_census.sh"
-
 echo "==> zeroship-plugin-db live-database suite"
 echo "    PG_TEST_URL=${PG_TEST_URL%%\?*}"
 
@@ -239,35 +239,27 @@ rc=0
 if [ "$passed" -lt "$PLUGIN_DB_MIN_PASSED" ]; then
   echo "FAIL: ${passed} passed is below the floor of ${PLUGIN_DB_MIN_PASSED}." >&2
   echo "      Either a test target stopped running, or the database is missing" >&2
-  echo "      a prerequisite. Check the census below before assuming a product" >&2
-  echo "      regression: a suite that cannot reach Postgres reports few passes," >&2
-  echo "      and one that reaches a REPLICA server reports the full count with" >&2
-  echo "      ten of them hollow." >&2
+  echo "      a prerequisite. Read the FAILURES above before assuming a product" >&2
+  echo "      regression: a missing wal_level, pgvector or PostGIS now names" >&2
+  echo "      itself in the failing test rather than lowering this count" >&2
+  echo "      silently." >&2
   rc=1
 fi
 
-# A non-zero return is a FAILURE here, not a report, and the distinction is the
-# one tests/lib/skip_census.sh draws itself: a gate that has provisioned the
-# backend treats a skip as a break, a gate that has not still prints the census
-# so the gap is visible. This job provisions it, so it is the former.
+# THE SKIP CENSUS THAT STOOD HERE IS GONE, along with the `postgis` entry that
+# was the only thing it excused. It searched this log for the announcements the
+# wal- and extension-gated tests wrote and failed the run on any it did not
+# tolerate.
 #
-# A REFUSAL (status 2) is a third outcome, distinct from both: the log is
-# missing or empty, so no census happened and the diagnosis below - which blames
-# a Postgres started without wal_level=logical - would be a guess about a run
-# that produced no evidence at all.
-census_rc=0
-zs_skip_census "$SUITE_LOG" "$PLUGIN_DB_SKIP_ALLOWLIST" || census_rc=$?
-if [ "$census_rc" -eq "$ZS_SKIP_REFUSED_STATUS" ]; then
-  echo "FAIL: the skip census refused ${SUITE_LOG}, so this run proved nothing" >&2
-  echo "      about skips. Do not read the ${passed} passes above as coverage" >&2
-  echo "      until the log the suite tees to is the log censused here." >&2
-  rc=1
-elif [ "$census_rc" -ne 0 ]; then
-  echo "FAIL: ${ZS_SKIP_COUNT} test(s) announced they exercised nothing." >&2
-  echo "      The likeliest cause is a Postgres that came up WITHOUT" >&2
-  echo "      -c wal_level=logical, which makes ten replication tests skip" >&2
-  echo "      while the cargo tally still reads '11 passed; 0 failed'." >&2
-  rc=1
-fi
-
+# The wal_level failure it was built for is now caught by the tests themselves.
+# Those guards REFUSE: on a server started without `-c wal_level=logical` the
+# replication tests FAIL, naming the setting, that it is postmaster-level, and
+# that `ALTER SYSTEM SET` needs a restart rather than a reload. The identical
+# result lines this file's header records - the same "11 passed; 0 failed"
+# printed by a server where all eleven ran and by one where ten did nothing -
+# cannot happen any more, because the second server does not print a pass.
+#
+# So the diagnosis moved from this script to the failing test, which is where a
+# reader who ran cargo directly can also see it. The floor above still guards
+# the other direction: a target that stops running entirely.
 exit "$rc"

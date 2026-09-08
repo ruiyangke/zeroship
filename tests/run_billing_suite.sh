@@ -91,9 +91,6 @@ cd "$ROOT"
 # Distinguishes a real failure from a run that could not happen. See the library
 # header; `tests/lib_measurement_integrity_selftest.sh` covers both directions.
 . "$ROOT/tests/lib/measurement_integrity.sh"
-# Counts the tests that announced they did nothing, so "ALL GROUPS PASSED"
-# cannot hide one; `tests/lib_skip_census_selftest.sh` covers both directions.
-. "$ROOT/tests/lib/skip_census.sh"
 # Names the database per run. This script drops its database WITH (FORCE) at
 # the top, which terminates every other backend on it first - so a fixed name
 # means a second run of this script, or of the auth suite pointed at the same
@@ -101,28 +98,23 @@ cd "$ROOT"
 # product defects. `tests/lib_scratch_db_selftest.sh` covers both directions.
 . "$ROOT/tests/lib/scratch_db.sh"
 
-# Skips this gate TOLERATES. Everything else fails it, the same way
-# run_auth_suite.sh has always worked. The census treats an empty allowlist as
-# matching NOTHING, never as matching everything, which is the one way this
-# could fail open - so each entry has to be added deliberately.
+# THE SKIP ALLOWLIST THAT STOOD HERE IS GONE, and its two entries are now
+# ordinary failures. It tolerated `ZEROSHIP_DW_E2E` (the durable-workflows
+# end-to-end spine, which tests/e2e_durable_workflows.sh owns and sets the
+# variable for) and `REDPANDA_BROKERS` (the real-broker half of the billing
+# pipeline, which this script runs when the variable is set and cannot stand up
+# a broker for itself).
 #
-# MEASURED 2026-08-18 on a full green run (748 passed, 0 failed): exactly six
-# tests announce, and both reasons below account for all six.
+# The operator decision that removed skipping covers every backend, not just the
+# databases this script provisions, so both of those tests now FAIL here rather
+# than announcing. THAT IS A REAL CONSEQUENCE AND IT IS NOT SOFTENED ANYWHERE:
+# running this script without a Redpanda broker and without the durable-workflows
+# fleet is a red run. `#[ignore]` was considered and rejected - it would be a
+# second skip mechanism under another name, and tests/e2e_durable_workflows.sh
+# drives those tests WITHOUT `--ignored`, so it would stop reaching them.
 #
-#   ZEROSHIP_DW_E2E   five tests in durable_workflows_keystone_e2e. They are the
-#                     durable-workflows end-to-end spine and belong to a
-#                     DIFFERENT gate - tests/e2e_durable_workflows.sh sets the
-#                     variable and runs them. Running them here would run them
-#                     twice, not once more.
-#   REDPANDA_BROKERS  one test, the real-broker half of the billing pipeline.
-#                     This script runs it when the variable is set (CI sets it,
-#                     see the redpanda block below); locally it needs a broker
-#                     this script does not stand up.
-#
-# NEITHER IS POSTGRES OR REDIS. That is the line: the two backends the operator
-# decision names are provisioned before the run and a skip announcing either one
-# fails this gate. Do not add an entry here for a database.
-BILLING_SKIP_ALLOWLIST="ZEROSHIP_DW_E2E|REDPANDA_BROKERS"
+# The old note here said "neither is Postgres or Redis. That is the line."
+# There is no line any more; there is no allowlist to draw one in.
 
 # The server's coordinates come from the generated overlay, not from four
 # `${PG_x:-...}` lines here and four identical ones in run_auth_suite.sh. See
@@ -365,47 +357,26 @@ else
 fi
 
 echo "=================================================================="
-# A test that returned early because its backend was absent still counts as
-# PASSED, so it is inside the ${passed} total below and inside "ALL GROUPS
-# PASSED". The per-group ran-count above cannot see it either: that check catches
-# a filter matching nothing (`running 0 tests`), and a skipping test genuinely
-# runs - it just does not test anything. Only the announcement distinguishes
-# them, so count it and print it next to the tally.
+# THE SKIP CENSUS THAT STOOD HERE IS GONE. The problem it solved is worth
+# stating, because the fix moved rather than disappeared: a test that returned
+# early because its backend was absent still counted as PASSED, so it sat inside
+# the ${passed} total below and inside "ALL GROUPS PASSED", and the per-group
+# ran-count above could not see it either - that check catches a filter matching
+# nothing (`running 0 tests`), while a skipping test genuinely runs and simply
+# tests nothing.
 #
-# FAILED, NOT MERELY REPORTED. This was `|| true` with a comment saying the
-# report becomes a gate "once that decision is made" and offering
-# ZEROSHIP_REQUIRE_LIVE_BACKENDS=1 as the alternative. The decision is made and
-# that flag is deleted: Postgres and Redis are required, this script provisions
-# a database and fails at the top if no server answers, and the two remaining
-# tolerated absences are named in BILLING_SKIP_ALLOWLIST above with the gate
-# that does cover them.
+# The census distinguished them by counting an announcement. That worked only
+# for tests that announced, and only when somebody ran the suite script rather
+# than cargo directly. Backend guards now REFUSE instead: the test fails, naming
+# what was missing and the command that provisions it, so `run_group` reports it
+# like any other failure and there is nothing left for a census to add.
 #
-# The auth gate has worked this way throughout, and the asymmetry was the whole
-# problem: the same announcement failed one suite and was printed by the other,
-# so which of two gates you ran decided whether a missing backend counted.
-#
-# Status 2 is a REFUSAL, not a skip count: the log is missing or empty, so the
-# suite above it very likely never ran and there is no census to read. Reported
-# separately because the two demand opposite responses, and because the blank
-# ZS_SKIP_COUNT a refusal leaves behind would otherwise print as
-# "FAIL:  test(s) skipped".
-census_rc=0
-zs_skip_census "$SUITE_LOG" "$BILLING_SKIP_ALLOWLIST" || census_rc=$?
-if [ "$census_rc" -eq "$ZS_SKIP_REFUSED_STATUS" ]; then
-  echo "FAIL: the skip census refused ${SUITE_LOG}, so this run proved nothing about skips." >&2
-  fail=1
-  failed+=("skip-census-refused")
-  billing_skips="refused"
-elif [ "$census_rc" -ne 0 ]; then
-  echo "FAIL: ${ZS_SKIP_COUNT} test(s) skipped that this gate does not tolerate." >&2
-  echo "A skipped billing test is a silent pass. Offending lines:" >&2
-  zs_skip_lines "$SUITE_LOG" "$BILLING_SKIP_ALLOWLIST" | sort -u | head -20 >&2
-  fail=1
-  failed+=("skip-census")
-  billing_skips="$ZS_SKIP_COUNT"
-else
-  billing_skips="$ZS_SKIP_COUNT"
-fi
+# The history that motivated the census stays worth knowing. This check was once
+# `|| true`, with a comment saying it would become a gate "once that decision is
+# made" and offering ZEROSHIP_REQUIRE_LIVE_BACKENDS=1 as the alternative - so
+# the same announcement failed the auth suite and was merely printed by this
+# one, and which of two gates you happened to run decided whether a missing
+# backend counted. Asymmetries like that are what a single hard failure removes.
 
 if [ "$fail" -ne 0 ]; then
   echo "LIVE-DATABASE SUITE FAILED: ${failed[*]}" >&2
@@ -473,13 +444,12 @@ if [ "$passed" -lt "$BILLING_MIN_PASSED" ]; then
 fi
 
 # Printed on SUCCESS, not only inside a failure message: a count nobody sees
-# until the gate has already failed cannot warn anyone. The skip count rides in
-# the same line for the same reason - "ALL GROUPS PASSED (713 tests)" is exactly
-# the sentence that made a skipping test invisible, so the qualifier belongs
-# where that sentence is read, not 40 lines earlier in the scrollback.
+# until the gate has already failed cannot warn anyone. The floor rides in the
+# same line for that reason - "ALL GROUPS PASSED (713 tests)" on its own is the
+# sentence that let a suite shrink unnoticed, so the qualifier belongs where
+# that sentence is read, not 40 lines earlier in the scrollback.
 #
-# BOTH numbers, not one. `billing_skips` is the count this gate does NOT
-# tolerate, and with the allowlist populated it reads 0 on a healthy run - so
-# printing it alone would say "0 skipped" on a run where six tests announced,
-# which is the sentence this whole census exists to stop being printed.
-echo "LIVE-DATABASE SUITE: ALL GROUPS PASSED (${passed} tests, floor ${BILLING_MIN_PASSED}, ${billing_skips} unexpected skips, ${ZS_SKIP_TOLERATED} allowlisted)"
+# The two skip counts that used to ride here are gone with the census. Reporting
+# "0 unexpected skips" now would measure an empty set and print it as a finding:
+# nothing in the workspace skips, so the number cannot be anything else.
+echo "LIVE-DATABASE SUITE: ALL GROUPS PASSED (${passed} tests, floor ${BILLING_MIN_PASSED})"

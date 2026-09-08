@@ -20,8 +20,12 @@
 #     [ $FAIL -eq 0 ] && exit 0 || exit 1
 #
 # So the harness announces the breakage and passes anyway. That is the same
-# defect class as a Rust test that returns early and still counts as passed
-# (see tests/lib/skip_census.sh), arriving by a different route.
+# defect class as a Rust test that returns early because its backend is absent
+# and still counts as passed, arriving by a different route. The Rust half of
+# that family is closed: those tests now FAIL, naming what was missing, and the
+# census that used to count their announcements is deleted. This one is not - a
+# catch-all recording known() still passes on a real 500 - which is why this
+# selftest pins the exit rule rather than trusting the announcement.
 #
 # WHAT THIS SELFTEST PINS, and what it does not. It drives the REAL pass/fail/
 # known definitions and the REAL exit rule, so it proves the SEMANTICS: an

@@ -66,9 +66,10 @@ GP_SECURITY_DIR="/tmp/zeroship-golden-security-$$"
 # a differently-named ambient variable.
 #
 # The bypass arm survives - it is the right arm when the deploy API is not the
-# thing under test - but it ANNOUNCES itself with the repo's skip marker, so
-# `tests/lib/skip_census.sh` over this run's log finds it and a reader gets a
-# different sentence rather than a shorter list of ticks.
+# thing under test - but it NAMES ITSELF in the summary this script always
+# prints, so a reader gets a different sentence rather than a shorter list of
+# ticks, and CI asserts the deploy arm's line is present rather than counting
+# an announcement the bypass arm makes.
 GP_PROVISION=deploy
 for _arg in "$@"; do
   case "$_arg" in
@@ -1398,12 +1399,20 @@ else
   # not be able to read as a run that covered the command this file is named
   # after.
   #
-  # The marker is the one `tests/lib/skip_census.sh` counts and
-  # `zeroship_test_support::skip` emits, byte for byte, so one search over a run
-  # log finds every announced no-op in the workspace and this is one of them.
-  # stderr for the same reason that function uses it: it is the channel that
-  # survives a passing run.
-  echo "ZEROSHIP-TEST-SKIPPED: golden_path step 3: --provision=dev-provision selected, so \`zeroship deploy\` was NOT exercised - the app was written straight into the registry and blob store" >&2
+  # THE SKIP MARKER THAT PREFIXED THIS LINE IS GONE with the census that read
+  # it. The announcement stays - a reader scrolling this log still needs to be
+  # told, at the point it happens, that the command this file is named after did
+  # not run - but it is no longer spelled as a workspace-wide token, because
+  # nothing counts that token any more and a dead sentinel reads as a live one.
+  #
+  # What ENFORCES the arm is now the summary line at the bottom, which is
+  # printed on every run and names whichever arm was taken; CI greps for the
+  # deploy arm's line. Asserting the presence of the covered arm also catches a
+  # log that was truncated or never written, which counting an announcement made
+  # by the OTHER arm could not.
+  #
+  # stderr, because that is the channel that survives a passing run.
+  echo "golden_path step 3: --provision=dev-provision selected, so \`zeroship deploy\` was NOT exercised - the app was written straight into the registry and blob store" >&2
   GP_ARM_PASS_DELTA=4
   OUT=$("$BIN/dev-provision" --db "$DB_URL" --blob-store /tmp/gp-bundles --name "$APP_NAME" --zship "$ZSHIP")
   APP_ID=$(echo "$OUT" | awk -F= '$1 == "app_id" { print $2 }')
@@ -4783,13 +4792,13 @@ if [ "$GP_PROVISION" = "deploy" ]; then
 else
   echo "  step 3 arm: --provision=dev-provision -- \`zeroship deploy\` was NOT exercised;"
   echo "              the app was written straight into the registry and blob store."
-  # The marker token is deliberately NOT spelled here. It is printed once, by
-  # the announcement at step 3, and a second literal in this summary would make
-  # a census over this log report two skips for one skipped arm - the same
-  # self-counting-instrument trap the floor's own comment block documents.
-  echo "              This run says nothing about the deploy CLI. Step 3 announced"
-  echo "              itself with the repo's skip marker; tests/lib/skip_census.sh"
-  echo "              over this log counts it."
+  # THIS BRANCH'S `step 3 arm:` LINE IS WHAT CI RULES ON, by requiring the
+  # OTHER branch's line to be present. That is why both branches print the same
+  # prefix and differ after it: a grep for the covered arm fails on this arm, on
+  # a truncated log, and on no log at all, which is three failure modes one
+  # assertion covers.
+  echo "              This run says nothing about the deploy CLI. Step 3 said so"
+  echo "              where it happened; this line is the durable record of it."
 fi
 for _s in $GP_EXPECTED_STEPS; do
   printf '    step %s: %s outcome(s)\n' "$_s" "${GP_STEP_OUTCOMES[$_s]-MISSING}"

@@ -192,8 +192,9 @@ to create schemas to create one.
    `zeroship-{auth,authn,authz,mailer}` plus seven named `zeroship-gateway` binaries;
    `tests/run_billing_suite.sh` runs `zeroship-{control,migrated,migrate-adapter,metering,stream}`.
    So the one class of machine that can see the failure is also the class that never runs the
-   target. Note the `eprintln!` skip is invisible to `tests/lib/skip_census.sh`, which keys on the
-   `ZEROSHIP-TEST-SKIPPED:` sentinel these tests do not emit.
+   target. This used to add that the `eprintln!` skip was invisible to a marker census; that census
+   and the marker are deleted, so the observation is now simply that an `eprintln!` and a return
+   are invisible to everything, which is the point.
 
 **Reproduction, and the control.** Verified by EXECUTION on main, not inferred from the diff. On a
 detached worktree at `2935fc34a` (`git worktree add --detach <path> main`, plus the three
@@ -213,8 +214,9 @@ applies to every package in neither suite.
 
 **Fix direction.** Two halves, and the second is the one that matters.
 - *The tests:* have the setup create the per-app schema through whatever the control plane uses, or
-  point the tests at an app the harness provisioned; alternatively emit the
-  `ZEROSHIP-TEST-SKIPPED:` sentinel so the census counts them rather than `eprintln!`.
+  point the tests at an app the harness provisioned. The third option this listed - emit the skip
+  sentinel so a census counts them - is no longer available and would be refused if it were: an
+  absent backend fails the test now, naming what was missing and the command that provisions it.
 - *The gate:* `zeroship-worker` (and any other package in neither suite) needs to be in one. A test
   that is green only because nothing runs it is the failure mode both suites were written to stop —
   `tests/run_auth_suite.sh`'s own header says a suite that passes because it never ran is worse

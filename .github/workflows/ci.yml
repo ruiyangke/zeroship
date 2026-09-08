@@ -471,24 +471,19 @@ jobs:
         run: tests/session_keyring_fixture_gate.sh --self-test
       - name: Auth fixtures that drive a token exchange configure a keyring
         run: tests/session_keyring_fixture_gate.sh
-      # tests/lib/skip_census.sh counts skips by one token, so a test that
-      # skips WITHOUT printing it is invisible to the census whose whole job is
-      # to stop a suite quietly covering less than it claims. 49 lines across
-      # ten files were in that state on 2026-08-19; the self-test runs first
-      # because a gate that reports zero offenders and a gate whose detector
-      # matches nothing print the same thing.
+      # THE TWO SKIP-MARKER STEPS THAT STOOD HERE ARE GONE with the gate they
+      # ran, and with the whole skip protocol: a test that cannot reach its
+      # backend now fails, so there is no marker for a gate to police and no
+      # census for a marker-less skip to hide from.
       #
-      # AND ON THE REAL TREE IT WAS THE SECOND ONE. Measured 2026-08-20: 8 rows
-      # found, 0 removed by the marker filter, all 8 removed by an ALLOW list of
-      # bare path prefixes, so the run examined nothing and printed the clean
-      # line anyway. The gate now prints found/excused/unruled, refuses a zero
-      # pre-filter, fails an ALLOW entry that matches nothing, and matches the
-      # excused SHAPE rather than the whole file - a marker-less skip injected
-      # into a WPT runner was excused before that change and is named after it.
-      - name: Skip-marker gate self-test
-        run: tests/skip_marker_gate.sh --self-test
-      - name: No test skips in a string the census cannot see
-        run: tests/skip_marker_gate.sh
+      # The gate's own history is the sharpest example this file has of a check
+      # that examined nothing, and it is why the surviving gates all declare
+      # per-arm counts. Measured 2026-08-20 on the real tree: 8 rows found, 0
+      # removed by the marker filter, all 8 removed by an ALLOW list of bare
+      # path prefixes - so the run ruled on nothing and printed exactly what a
+      # clean tree prints. tests/gate_arm_census.sh exists because of it and
+      # still names it.
+      #
       # A `//` comment in dispatch.rs said the transparent WebSocket proxy was
       # wired in a `proxy::` helper. That name existed in exactly one place in
       # the repo: the comment claiming it. It sat 760 lines from the function
@@ -803,7 +798,6 @@ jobs:
       # THE FIRST THREE ARE ATTACHED TO THE SUBJECT: each sources the shipping
       # library rather than restating it, so breaking the library breaks the
       # test. Proven by my own one-line mutations, restored after each:
-      #   skip_census.sh:105   count forced to 0     ->  17/0 becomes 8 passed, 9 failed
       #   e2e_stack.sh:85      SKIPPED stops rising  ->   9/0 becomes 9 checks, 1 failed
       #   binary_freshness.sh:104  `if false; then`  ->  12/0 becomes 7 passed, 5 failed
       #   scratch_db.sh:69     fixed name, no token  ->  20/0 becomes 17 passed, 3 failed
@@ -839,7 +833,6 @@ jobs:
         run: |
           set -e
           tests/lib_binary_freshness_selftest.sh
-          tests/lib_skip_census_selftest.sh
           tests/lib_scratch_db_selftest.sh
           tests/lib_suite_db_selftest.sh
           tests/lib_sweep_db_selftest.sh
@@ -1055,48 +1048,19 @@ jobs:
       # and enumerates - which is why it sits after the teardown.
       - name: Every declared compio-postgres suite test compiles somewhere
         run: tests/compio_postgres_test_visibility_gate.sh
-      # Every test above that returned early because its backend was absent is
-      # inside the "N passed" totals and inside this job's green tick. Nothing
-      # said so until this step: Rust cannot mark a test ignored at RUNTIME, so
-      # the harness has already committed to counting it by the time the body
-      # discovers the variable is unset.
+      # THE SKIP CENSUS STEP THAT STOOD HERE IS GONE. It counted the tests that
+      # ran, exercised nothing, and were still inside this job's "N passed"
+      # totals - Rust cannot mark a test ignored at RUNTIME, so the harness had
+      # already committed to counting it by the time the body discovered its
+      # backend was absent.
       #
-      # This job provisions NO backend at all, so a census here is expected to be
-      # non-zero - the 7 PG-gated proofs in the platform-migrate step above all
-      # skip, because nothing here starts a Postgres and so `PG_TEST_URL` and
-      # the test overlay are both empty. This used to name
-      # ZERO_MIGRATE_TEST_PG_URL as the cause and count 9; 3d03b876e collapsed
-      # that name away and it now has no reader anywhere in the tree, and 9 was
-      # the crate-wide total (7 here plus one each in smoke_apply_pg.rs and
-      # author_and_apply_pg.rs, which run under `cargo test --workspace`).
-      # It REPORTS and does not fail, on purpose. Failing a job that
-      # deliberately stands up no services would make the only honest outcome a
-      # red tick, and the fix people would reach for is deleting the check.
-      # Whether CI should provision any of these is an operator decision; this
-      # step exists so that decision is made against a number instead of a
-      # silence.
-      #
-      # `if: always()` so the census still prints when a test above failed. A
-      # skip and a failure are different problems and the run should surface
-      # both, not let the first one seen hide the other.
-      - name: Skip census (tests that ran but exercised nothing)
-        if: always()
-        run: |
-          . tests/lib/skip_census.sh
-          census_rc=0
-          zs_skip_census "$RUNNER_TEMP/rust-tests.log" || census_rc=$?
-          # `|| true` tolerates a SKIP COUNT, which is this step's whole point.
-          # It must not tolerate a REFUSAL: status 2 means the log every cargo
-          # step above tees to is missing or empty, so this step measured
-          # nothing and the notice below would be a claim made out of no
-          # evidence. That is the exact false green this arm exists to remove.
-          if [ "$census_rc" -eq "$ZS_SKIP_REFUSED_STATUS" ]; then
-            echo "::error title=Skip census could not run::$RUNNER_TEMP/rust-tests.log is missing or empty; no census was taken over this job."
-            exit 1
-          fi
-          if [ "${ZS_SKIP_COUNT:-0}" -gt 0 ]; then
-            echo "::notice title=Skipped live-backend tests::${ZS_SKIP_COUNT} test(s) passed without exercising anything; see the Skip census step."
-          fi
+      # This job provisions NO backend, so the census was expected to be non-zero
+      # here and REPORTED rather than failed: failing a job that deliberately
+      # stands up no services would make the only honest outcome a red tick, and
+      # the fix people reach for is deleting the check. That reasoning is now
+      # moot. Those tests FAIL when they cannot reach a backend, so this job
+      # either provisions what a test needs or does not run it - there is no
+      # third state for a census to describe.
       # The gate's own self-test: fixtures only, no build, seconds. It runs
       # BEFORE the gate so that a gate which has stopped discriminating is
       # reported as such rather than as a clean workspace.
@@ -1750,9 +1714,9 @@ jobs:
   #   chunking or timeouts is under load.
   #
   #   which arm ran, IF SOMEONE CHANGES IT. That is the one thing this file no
-  #   longer has to be trusted about: the bypass arm announces itself with the
-  #   repo's ZEROSHIP-TEST-SKIPPED marker and the census step below turns that
-  #   announcement into a red tick.
+  #   longer has to be trusted about: the harness prints a `step 3 arm:` line
+  #   naming the arm it took, and the step below requires the DEPLOY arm's line
+  #   to be in the log.
   golden-path:
     runs-on: ubuntu-latest
     # A bound, because one of the seven local runs taken while wiring this up
@@ -1892,41 +1856,37 @@ jobs:
           ZS_FRESHNESS_STRICT: 1
           PG_CONTAINER: compose-postgres-1
           PG_USER: postgres
-      # THE ARM IS ENFORCED, not merely printed. golden_path.sh's bypass arm
-      # announces itself with the repo's ZEROSHIP-TEST-SKIPPED marker - the same
-      # token `zeroship_test_support::skip` writes and `tests/lib/skip_census.sh`
-      # counts - and this step turns that announcement into a red tick. So a
-      # future edit that puts CI back on the arm which does not run `zeroship
-      # deploy` fails here instead of printing the same green as a covered run.
+      # THE ARM IS ENFORCED, not merely printed, and this step is what enforces
+      # it. A run on the bypass arm does not exercise `zeroship deploy` at all -
+      # the app is written straight into the registry and blob store - so it must
+      # not be able to report as one that did.
       #
-      # The allowlist is EMPTY on purpose: this harness starts every backend it
-      # needs, so it has no legitimate reason to announce a skip at all. An empty
-      # allowlist is handled explicitly by zs_skip_census (an empty ERE would
-      # otherwise match every line and tolerate everything).
+      # IT ASSERTS THE POSITIVE, AND THAT IS A DELIBERATE CHANGE OF SHAPE. This
+      # used to count the skip marker the bypass arm announced, which made "the
+      # covered arm ran" indistinguishable from "the harness produced no output
+      # at all" unless the census also refused on an empty log. The skip protocol
+      # is deleted workspace-wide, and grepping for the arm the job REQUIRES is
+      # both simpler and stronger: a missing log, a truncated log and the wrong
+      # arm all fail, because none of them contain the line.
+      #
+      # The string comes from golden_path.sh's own summary block, which prints
+      # one `step 3 arm:` line unconditionally on every run, naming the arm it
+      # took. -F, because the line contains no regex metacharacters worth
+      # interpreting and a `--` in a pattern is an argument-parsing hazard.
       #
       # `if: always()` because the harness is red at HEAD by design; a step
       # without it would never run.
-      - name: Golden path skip census (the deploy arm must not have been bypassed)
+      - name: Golden path deploy arm (the deploy CLI must have been exercised)
         if: always()
         run: |
-          . tests/lib/skip_census.sh
-          census_rc=0
-          zs_skip_census "$RUNNER_TEMP/golden-path.log" || census_rc=$?
-          # Both non-zero statuses are red here, but they are DIFFERENT reds and
-          # the message has to say which. 2 means the log is missing or empty -
-          # the harness never wrote one, so nothing is known about whether the
-          # deploy arm ran. Printing "the golden path announced a skipped arm"
-          # for that would send the reader to look for an announcement that was
-          # never made.
-          if [ "$census_rc" -eq "$ZS_SKIP_REFUSED_STATUS" ]; then
-            echo "FAIL: the skip census refused $RUNNER_TEMP/golden-path.log - it is missing" >&2
-            echo "      or empty, so the harness produced no evidence about the deploy arm." >&2
-            exit 1
-          fi
-          if [ "$census_rc" -ne 0 ]; then
-            echo "FAIL: the golden path announced a skipped arm. The line above names it." >&2
-            echo "      A run that did not exercise \`zeroship deploy\` must not report as" >&2
-            echo "      one that did; that is the whole reason the arm is an argument." >&2
+          if ! grep -qF 'step 3 arm: --provision=deploy' "$RUNNER_TEMP/golden-path.log"; then
+            echo "FAIL: $RUNNER_TEMP/golden-path.log does not report the deploy arm." >&2
+            echo "      Either the harness took --provision=dev-provision, which does NOT" >&2
+            echo "      run \`zeroship deploy\`, or it produced no summary at all. Both are" >&2
+            echo "      runs that say nothing about the deploy CLI. The arm this job gates" >&2
+            echo "      is passed explicitly in the step above; check that first." >&2
+            grep -F 'step 3 arm:' "$RUNNER_TEMP/golden-path.log" >&2 || \
+              echo "      (no 'step 3 arm:' line in the log at all)" >&2
             exit 1
           fi
       # The .zship artifact contract, run over whatever the step above just

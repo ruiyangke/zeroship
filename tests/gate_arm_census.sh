@@ -12,7 +12,10 @@
 #                                  three live phantom identifiers sat in the
 #                                  file it guards.
 #   skip_marker_gate.sh            8 raw hits, 8 excused by its own allowlist,
-#                                  0 ruled on. Green.
+#                                  0 ruled on. Green. (That gate is DELETED -
+#                                  the skip protocol it policed no longer
+#                                  exists. The failure it demonstrates does not
+#                                  depend on the gate still being here.)
 #   deploy_scripts_gate.sh         the argv scan had one pre-filter row, on the
 #                                  single service the filter excludes. 0
 #                                  examined. Green.
@@ -78,22 +81,20 @@ usage() {
 
 # THE ONLY NUMBER HERE, and it counts FILES, not findings.
 #
-# RE-MEASURED 2026-09-05 by `find tests -maxdepth 1 -name '*_gate.sh' | wc -l`:
-# 43, after rls_binding_gate.sh landed. It read
-# 42 before that, after napi_symbol_shape_gate.sh, and
-# 41 before that, after source_citation_scan.sh, zship_artifact_contract.sh and
-# verdaccio_config_guard.sh were renamed into the glob - three checks a NAME had
-# been exempting from every meta-check. It read 37 + 1 = 38 earlier the same
-# day, for ci_wiring_gate.sh, and 36 + 1 = 37 before that, for
-# decision_four_gate.sh, and
-# 35 + 1 = 36 before that, for sync_claim_gate.sh, and
-# 34 + 1 = 35 before that, for noop_cfg_pair_gate.sh, and
-# 33 + 1 = 34 before that, for worker_replication_privilege_gate.sh;
-# before that it was 31, and two gates arrived without moving it, so it was two
-# behind the tree and would not have noticed the glob losing two files. THAT IS
-# THE FOURTH TIME THIS NUMBER HAS DRIFTED BEHIND (24 against 25, then 26
-# against 30, then 31 against 33), which says the instruction below is read
-# less often than gates are added.
+# THE LADDER OF PAST READINGS THAT STOOD HERE IS DELETED, and its own state is
+# the argument. It recorded every value this pin had held and the gate that
+# moved it, each entry written by hand by whoever noticed - and its most recent
+# entry, dated four days before the pin below last moved, was more than ten
+# behind the pin it was annotating. A history of a number, maintained by the
+# same people who forget to maintain the number, rots faster than the number
+# does and reads with more authority.
+#
+# What that history was really saying is kept, because it justifies the equality
+# check further down: this pin has repeatedly been found sitting BEHIND the
+# tree, back when it was a lower bound and every stale reading passed.
+#
+# Do not restate the count in prose. Re-measure it:
+#   find tests -maxdepth 1 -name '*_gate.sh' | wc -l
 #
 # Gates are added and deleted by hand, so a drop is a decision somebody made and
 # must be recorded here in the same commit, not an accident to be absorbed. Set
@@ -123,7 +124,7 @@ usage() {
 # The count itself is deliberately the ONLY magnitude here. The history of how
 # often it drifted was prose that had to be maintained by hand and rotted the
 # same way the pin did.
-GATE_FILE_COUNT=56
+GATE_FILE_COUNT=55
 
 DIR=""
 RUN=()
