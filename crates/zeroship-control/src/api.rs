@@ -661,6 +661,52 @@ pub async fn unarchive_app(
     }
 }
 
+/// Delete an app. The terminal transition, and the last step of the
+/// account-closure funnel: after it, the project that owned the app can be
+/// deleted, the organization that owned the project can be dissolved, and its
+/// sole owner can be erased.
+///
+/// Gated on `apps:archive`, the SAME scope [`archive_app`] uses, because the
+/// two are one lifecycle authority and a creator consenting to "archive and
+/// delete your apps" approved one sentence, not two. The `admin` FLOOR that
+/// separates them is not in Cedar at all: it rides in the effect statement in
+/// [`crate::organizations::delete_app`], which is where
+/// [`crate::organizations::delete_project`] keeps its own, so ending an app and
+/// ending the project it lives in need the same authority.
+///
+/// Refusals come back from that function, so this handler decides nothing:
+/// still live, already gone, or below admin.
+pub async fn delete_app(
+    req: web::HttpRequest,
+    id: Path<String>,
+    authz: AuthzGuard,
+    state: State<Arc<AppState>>,
+) -> web::HttpResponse {
+    if let Some(resp) = crate::env_handlers::admin_rate_limit(&req, &state).await {
+        return resp;
+    }
+    let uid = match id.parse::<Uuid>() {
+        Ok(u) => u,
+        Err(_) => {
+            return web::HttpResponse::BadRequest()
+                .json(&serde_json::json!({"error":"invalid uuid"}))
+        }
+    };
+    if let Err(resp) = authz
+        .require(Action::AppsArchive, Resource::App { id: uid.to_string() }, &state)
+        .await
+    {
+        return resp;
+    }
+    let ip = crate::http_util::source_ip(&req, state.trust_proxy);
+    match crate::organizations::delete_app(&state.registry, authz.principal_id, uid, ip.as_deref())
+        .await
+    {
+        Ok(()) => web::HttpResponse::NoContent().finish(),
+        Err(e) => e.into_response(),
+    }
+}
+
 /// Streaming `.zship` ingest. Replaces the legacy raw-bundle path —
 /// deploy bundles now arrive as zstd-compressed tar archives carrying
 /// `manifest.json` + `blobs/<sha256>` entries. See

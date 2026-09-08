@@ -61,6 +61,7 @@ await control.apps.setPlan(appId, { plan_id: "pro" });
 await control.apps.logs(appId);
 await control.apps.archive(appId);
 await control.apps.unarchive(appId);
+await control.apps.delete(appId); // terminal; the app must be archived first
 
 await control.env.setVar(appId, { key: "PUBLIC_URL", value: "https://..." });
 await control.env.setSecret(appId, { key: "OPENAI_API_KEY", value: "sk-..." });
@@ -233,11 +234,19 @@ with no invalidation signal to miss. Ask again.
 
 ### App archive lifecycle
 
-Apps are archived, not hard-deleted. `control.apps.archive(appId)` sends
-`PUT /api/apps/{id}/archive`; `control.apps.unarchive(appId)` sends `DELETE` to
-the same resource. Both return the current `AppRecord`. Its `archived_at` is a
-timestamp after archive and `null` after unarchive, and both operations are
-safe to retry.
+Archive is reversible, delete is terminal, and the order is enforced rather
+than advised. `control.apps.archive(appId)` sends `PUT /api/apps/{id}/archive`;
+`control.apps.unarchive(appId)` sends `DELETE` to the same resource. Both return
+the current `AppRecord`. Its `archived_at` is a timestamp after archive and
+`null` after unarchive, and both operations are safe to retry.
+
+`control.apps.delete(appId)` sends `DELETE /api/apps/{id}` and ends the app.
+Read the two `DELETE`s carefully: on the app's `archive` RESOURCE it restores;
+on the APP it ends. Delete refuses an app that is not archived and names
+archive as the missing step, needs `admin` in the owning organization, and
+returns no body. It is not retryable in the sense the two above are: a second
+call is refused, because ending the app cuts the edge every authority check on
+it is resolved through. See "App deletion" below for what survives it and why.
 
 After the gateway route feed and workflow schedulers converge, archive stops
 new gateway dispatch and scheduled workflow dispatch. Work already admitted
@@ -271,6 +280,45 @@ belongs to `zeroship-migrate-server`, not control. Metering ingest remains
 enabled so late and in-flight reports are not lost, and storage or other
 retained resources may continue to accrue charges. Billing may still finalize
 an open invoice from usage recorded before archive.
+
+### App deletion
+
+Delete is the last step of the account-closure funnel. A creator closing their
+account is refused while they are the sole owner of a live organization; the
+organization is refused while it owns projects; a project is refused while it
+owns apps. `DELETE /api/apps/{id}` is what ends that chain, and it is the reason
+every refusal above now names a step that can actually be taken.
+
+**The app row survives its own deletion, and that is the design rather than an
+omission.** Two of its children point in opposite directions: a finalized
+`invoice_lines` row pins the app with `ON DELETE RESTRICT`, so a row delete is
+refused outright once the app has been invoiced, while `usage_aggregates`
+cascades, so a row delete instead destroys the input the unbilled-usage
+predicate reads. A hard delete is therefore impossible or destructive depending
+only on whether the reconciler has run. Deletion is a marker: nothing cascades,
+and `zeroship_control` holds no `DELETE` privilege on the table at all.
+
+What ends is reachability. The app leaves its project, which is what lets the
+project be deleted afterwards; its current artifact pointer is cleared, so no
+route or worker can serve it again; and its whole environment - vars, secrets,
+and the `process.env` expose list - is destroyed, because that is live
+capability rather than a record of anything.
+
+What is kept is evidence and identity. Every billing record outlives the app:
+usage aggregates, usage history, invoice lines, plan-change events, spend-state
+history. The reconciler and the "does this organization owe" predicate both
+reach an app through its organization rather than through its project, so a
+deleted app is still billed and still owes; an unpaid invoice cannot be walked
+away from by deleting the app that incurred it. The audit trail records who
+ended the app, when, and which project it left. And the app's NAME - its
+routable hostname - is retired rather than released: old links, cookies and
+OAuth redirect URIs still point at it, so it is never handed to a later
+registrant.
+
+Deploy blobs are content-addressed and shared by hash across apps and deploys,
+so reclaiming them is a sweep over the store, not part of this call. The app's
+database schema and role are privileged teardown and belong to
+`zeroship-migrate-server`, exactly as they do for archive.
 
 ### `egressRules` is the raw-stream rule set
 
