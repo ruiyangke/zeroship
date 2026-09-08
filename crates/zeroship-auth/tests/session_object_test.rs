@@ -16,7 +16,7 @@ use std::io::Write as _;
 use compio_postgres::{connect, Client, NoTls};
 use uuid::Uuid;
 use zeroship_auth::session_store::{
-    self, Audience, NewSession, Rotation, SecretSlot, SessionKind, SessionSecretKeys,
+    self, Audience, NewSession, RotatedSession, SecretSlot, SessionKind, SessionSecretKeys,
 };
 use zeroship_auth::store::users;
 
@@ -43,7 +43,10 @@ fn keys(tag: &str) -> SessionSecretKeys {
     std::fs::create_dir_all(&dir).expect("key dir");
     let hash_path = dir.join("hash");
     let idem_path = dir.join("idem");
-    write_owner_only(&hash_path, b"1:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff\n");
+    write_owner_only(
+        &hash_path,
+        b"1:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff\n",
+    );
     write_owner_only(&idem_path, b"session-object-test-idempotency-master-secret");
     SessionSecretKeys::from_files(&hash_path, &idem_path).expect("load session keys")
 }
@@ -131,8 +134,8 @@ fn tag() -> String {
 /// being minted for a session that has ended.
 ///
 /// Deleting `s.revoked_at IS NULL` from `ROTATE_SESSION_SQL` makes this fail by
-/// returning `Rotated`, and the control below keeps that failure from being
-/// read as a broken fixture.
+/// returning a `RotatedSession`, and the control below keeps that failure from
+/// being read as a broken fixture.
 #[compio::test]
 async fn a_revoked_session_cannot_mint() {
     let Some(db) = pg().await else {
@@ -167,20 +170,11 @@ async fn a_revoked_session_cannot_mint() {
         .expect("the revoked row is still findable by its hash");
     assert_eq!(presented.slot(), SecretSlot::Current);
 
-    let rotation = session_store::rotate(
-        &db,
-        &keys,
-        &presented,
-        &scopes,
-        IDLE_DAYS,
-        IDEM_WINDOW_SECS,
-    )
-    .await
-    .expect("rotate");
-    assert!(
-        matches!(rotation, Rotation::NotLive),
-        "a revoked session minted a credential"
-    );
+    let rotation =
+        session_store::rotate(&db, &keys, &presented, &scopes, IDLE_DAYS, IDEM_WINDOW_SECS)
+            .await
+            .expect("rotate");
+    assert!(rotation.is_none(), "a revoked session minted a credential");
 }
 
 /// The control for the arm above, differing in ONE variable: the session is not
@@ -214,23 +208,21 @@ async fn a_live_session_mints_where_a_revoked_one_does_not() {
         .await
         .expect("peek")
         .expect("live secret resolves");
-    let rotation = session_store::rotate(
-        &db,
-        &keys,
-        &presented,
-        &scopes,
-        IDLE_DAYS,
-        IDEM_WINDOW_SECS,
-    )
-    .await
-    .expect("rotate");
+    let rotation =
+        session_store::rotate(&db, &keys, &presented, &scopes, IDLE_DAYS, IDEM_WINDOW_SECS)
+            .await
+            .expect("rotate");
     match rotation {
-        Rotation::Rotated { row, secret: next, proof } => {
+        Some(RotatedSession {
+            row,
+            secret: next,
+            proof,
+        }) => {
             assert_ne!(next, secret, "rotation returned the same secret");
             assert_eq!(proof.session_id(), row.id);
             assert_eq!(proof.person_id(), person_id);
         }
-        Rotation::NotLive => panic!("a live session refused to mint"),
+        None => panic!("a live session refused to mint"),
     }
 }
 
@@ -269,16 +261,11 @@ async fn an_expired_session_cannot_mint_and_the_same_row_could_before() {
         .await
         .expect("peek")
         .expect("resolves");
-    let Rotation::Rotated { secret: next, .. } = session_store::rotate(
-        &db,
-        &keys,
-        &presented,
-        &scopes,
-        IDLE_DAYS,
-        IDEM_WINDOW_SECS,
-    )
-    .await
-    .expect("rotate") else {
+    let Some(RotatedSession { secret: next, .. }) =
+        session_store::rotate(&db, &keys, &presented, &scopes, IDLE_DAYS, IDEM_WINDOW_SECS)
+            .await
+            .expect("rotate")
+    else {
         panic!("the control rotation refused");
     };
 
@@ -297,20 +284,11 @@ async fn an_expired_session_cannot_mint_and_the_same_row_could_before() {
         .await
         .expect("peek")
         .expect("resolves");
-    let rotation = session_store::rotate(
-        &db,
-        &keys,
-        &presented,
-        &scopes,
-        IDLE_DAYS,
-        IDEM_WINDOW_SECS,
-    )
-    .await
-    .expect("rotate");
-    assert!(
-        matches!(rotation, Rotation::NotLive),
-        "an expired session minted a credential"
-    );
+    let rotation =
+        session_store::rotate(&db, &keys, &presented, &scopes, IDLE_DAYS, IDEM_WINDOW_SECS)
+            .await
+            .expect("rotate");
+    assert!(rotation.is_none(), "an expired session minted a credential");
 }
 
 /// A suspended grant refuses creation, and an active one creates. The
@@ -441,18 +419,12 @@ async fn advancing_the_credential_epoch_stops_the_next_mint() {
         .await
         .expect("peek")
         .expect("resolves");
-    let rotation = session_store::rotate(
-        &db,
-        &keys,
-        &presented,
-        &scopes,
-        IDLE_DAYS,
-        IDEM_WINDOW_SECS,
-    )
-    .await
-    .expect("rotate");
+    let rotation =
+        session_store::rotate(&db, &keys, &presented, &scopes, IDLE_DAYS, IDEM_WINDOW_SECS)
+            .await
+            .expect("rotate");
     assert!(
-        matches!(rotation, Rotation::NotLive),
+        rotation.is_none(),
         "a session minted after its person's credential epoch moved"
     );
 }
@@ -492,16 +464,11 @@ async fn a_superseded_secret_replays_once_and_then_is_refused() {
         .await
         .expect("peek")
         .expect("resolves");
-    let Rotation::Rotated { secret: second, .. } = session_store::rotate(
-        &db,
-        &keys,
-        &presented,
-        &scopes,
-        IDLE_DAYS,
-        IDEM_WINDOW_SECS,
-    )
-    .await
-    .expect("rotate") else {
+    let Some(RotatedSession { secret: second, .. }) =
+        session_store::rotate(&db, &keys, &presented, &scopes, IDLE_DAYS, IDEM_WINDOW_SECS)
+            .await
+            .expect("rotate")
+    else {
         panic!("rotation refused");
     };
     assert_ne!(first, second);
@@ -572,16 +539,11 @@ async fn the_live_secret_is_not_replayable() {
         .await
         .expect("peek")
         .expect("resolves");
-    let Rotation::Rotated { secret: second, .. } = session_store::rotate(
-        &db,
-        &keys,
-        &presented,
-        &scopes,
-        IDLE_DAYS,
-        IDEM_WINDOW_SECS,
-    )
-    .await
-    .expect("rotate") else {
+    let Some(RotatedSession { secret: second, .. }) =
+        session_store::rotate(&db, &keys, &presented, &scopes, IDLE_DAYS, IDEM_WINDOW_SECS)
+            .await
+            .expect("rotate")
+    else {
         panic!("rotation refused");
     };
 
@@ -628,7 +590,10 @@ async fn a_session_with_no_secret_can_never_be_presented() {
         .await
         .expect("create session")
         .expect("session created");
-    assert!(created.secret.is_none(), "a secretless session handed one back");
+    assert!(
+        created.secret.is_none(),
+        "a secretless session handed one back"
+    );
     assert_eq!(created.proof.session_id(), created.row.id);
 
     let row = session_store::lock_and_read(&db, &created.row.id)
@@ -729,7 +694,10 @@ async fn a_second_consent_advances_scopes_and_never_rewrites_the_subject() {
     )
     .await
     .expect("second consent");
-    assert_eq!(again, grant_id, "a second consent minted a second grant row");
+    assert_eq!(
+        again, grant_id,
+        "a second consent minted a second grant row"
+    );
 
     let rows = db
         .query(

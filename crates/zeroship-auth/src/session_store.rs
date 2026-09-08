@@ -270,17 +270,18 @@ impl PeekedSession {
     }
 }
 
-/// The outcome of rotating on a presented session secret.
+/// A rotated session and the credential it hands back.
+///
+/// [`rotate`] returns `Ok(None)` when the validating read refuses, which is the
+/// same shape and the same meaning [`create`] uses. Two functions whose refusal
+/// means the same thing say it the same way; an enum with one large variant and
+/// one empty one said it differently for no gain.
 #[derive(Debug)]
-pub enum Rotation {
-    /// The row rotated. `secret` is the successor to hand back.
-    Rotated {
-        row: SessionRow,
-        secret: String,
-        proof: ValidatedSession,
-    },
-    /// The validating read refused. Nothing was minted.
-    NotLive,
+pub struct RotatedSession {
+    pub row: SessionRow,
+    /// The successor secret to hand back.
+    pub secret: String,
+    pub proof: ValidatedSession,
 }
 
 /// The response a lost rotation is allowed to replay exactly once.
@@ -407,9 +408,8 @@ impl SessionSecretKeys {
 }
 
 fn idem_aad(superseded_hash: &[u8], session_id: &str) -> Vec<u8> {
-    let mut aad = Vec::with_capacity(
-        IDEM_AAD_PREFIX.len() + superseded_hash.len() + session_id.len() + 1,
-    );
+    let mut aad =
+        Vec::with_capacity(IDEM_AAD_PREFIX.len() + superseded_hash.len() + session_id.len() + 1);
     aad.extend_from_slice(IDEM_AAD_PREFIX);
     aad.extend_from_slice(superseded_hash);
     aad.push(0);
@@ -835,7 +835,7 @@ pub async fn rotate(
     new_scopes: &[String],
     idle_days: i64,
     idem_window_secs: i64,
-) -> Result<Rotation> {
+) -> Result<Option<RotatedSession>> {
     let new_secret = generate_secret();
     let new_hash = keys.active_hash(&new_secret);
     let cached = CachedResponse {
@@ -864,15 +864,15 @@ pub async fn rotate(
         .await
         .map_err(|err| AuthError::Db(format!("session rotate: {err}")))?;
     let Some(row) = rows.first() else {
-        return Ok(Rotation::NotLive);
+        return Ok(None);
     };
     let row = row_to_session(row);
     let proof = row.proof();
-    Ok(Rotation::Rotated {
+    Ok(Some(RotatedSession {
         row,
         secret: new_secret,
         proof,
-    })
+    }))
 }
 
 /// The rotating validating read.
@@ -1123,11 +1123,7 @@ fn row_to_session(row: &Row) -> SessionRow {
     row_to_session_with_grant(row, row.get("subject"), row.get("grant_scopes"))
 }
 
-fn row_to_session_with_grant(
-    row: &Row,
-    subject: String,
-    grant_scopes: Vec<String>,
-) -> SessionRow {
+fn row_to_session_with_grant(row: &Row, subject: String, grant_scopes: Vec<String>) -> SessionRow {
     SessionRow {
         id: row.get("id"),
         person_id: row.get("person_id"),
@@ -1165,10 +1161,7 @@ mod predicate_tests {
     /// and left in its sibling, which is how the three drift apart.
     #[test]
     fn every_validating_statement_carries_the_same_liveness_predicates() {
-        for (name, sql) in [
-            ("rotate", ROTATE_SESSION_SQL),
-            ("replay", CONSUME_IDEM_SQL),
-        ] {
+        for (name, sql) in [("rotate", ROTATE_SESSION_SQL), ("replay", CONSUME_IDEM_SQL)] {
             for predicate in [
                 "s.revoked_at IS NULL",
                 "s.idle_expires_at > NOW()",

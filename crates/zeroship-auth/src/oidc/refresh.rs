@@ -30,12 +30,12 @@ use zeroship_core::auth::validate_client_secret;
 use crate::advisory_lock::{lock_refresh_family_xact, lock_refresh_user_xact};
 use crate::config::AuthConfig;
 use crate::oidc::authorization_code::{
-    clean_optional, load_client, parse_scopes, required_param, scope_subset,
-    sort_dedup, OAuthClient, OAuthError, TokenRequest, TokenResponse, TOKEN_TYPE_BEARER,
+    clean_optional, load_client, parse_scopes, required_param, scope_subset, sort_dedup,
+    OAuthClient, OAuthError, TokenRequest, TokenResponse, TOKEN_TYPE_BEARER,
 };
 use crate::oidc::{device_token, introspect, Issuer, ACCESS_TOKEN_TTL_SECS};
 use crate::session_store::{
-    self, Audience, PeekedSession, Rotation, SecretSlot, SessionKind, SessionRow,
+    self, Audience, PeekedSession, RotatedSession, SecretSlot, SessionKind, SessionRow,
     SessionSecretKeys, ValidatedSession,
 };
 
@@ -124,9 +124,7 @@ impl RefreshSessionPool {
             .max_size(self.inner.pool_size)
             .min_idle(1)
             .acquire_timeout(Duration::from_secs(REFRESH_POOL_ACQUIRE_TIMEOUT_SECS));
-        let pool = Rc::new(
-            Pool::connect_with_pool_config(&self.inner.db_url, pool_config).await?,
-        );
+        let pool = Rc::new(Pool::connect_with_pool_config(&self.inner.db_url, pool_config).await?);
         pool.start_housekeeper();
         let pool = REFRESH_POOLS.with(|pools| {
             let mut pools = pools.borrow_mut();
@@ -243,50 +241,64 @@ pub(super) struct EstablishedSession {
 /// by control under (`zeroship-cli`, principal UUID): a platform family storing
 /// a pairwise subject would revoke a subject nothing ever presents. Every other
 /// client is an APP audience with the pairwise subject over its sector.
+/// The grant a token exchange is establishing a session for.
+///
+/// A bag rather than eight positional parameters: `user_id`, the scopes and the
+/// credential version are three values a caller can transpose without the type
+/// checker noticing, and the two booleans at the end were the worst of it.
+pub(super) struct Establish<'a> {
+    pub client: &'a OAuthClient,
+    pub user_id: Uuid,
+    pub granted_scopes: &'a [String],
+    /// The credential epoch the authenticating event observed. The creating
+    /// statement pins the session to it.
+    pub auth_credential_version: i64,
+    pub kind: SessionKind,
+    /// Whether the caller is entitled to a rotating secret - `offline_access`
+    /// granted and the client allowed to refresh.
+    pub with_secret: bool,
+}
+
 #[allow(clippy::future_not_send)]
 pub(super) async fn establish_session(
     db: &(impl GenericClient + ?Sized),
     issuer: &Issuer,
     keys: &SessionSecretKeys,
-    client: &OAuthClient,
-    user_id: Uuid,
-    granted_scopes: &[String],
-    auth_credential_version: i64,
-    kind: SessionKind,
-    with_secret: bool,
+    params: &Establish<'_>,
 ) -> Result<EstablishedSession, OAuthError> {
+    let Establish {
+        client,
+        user_id,
+        granted_scopes,
+        auth_credential_version,
+        kind,
+        with_secret,
+    } = *params;
     lock_refresh_user_xact(db, user_id).await.map_err(|err| {
         tracing::error!(error = %err, user_id = %user_id, "session issuance user lock failed");
         OAuthError::server_error("session issuance unavailable")
     })?;
 
     let user_id_string = user_id.to_string();
-    let (audience, subject) = if device_token::platform_cli_policy_selected(db, &client.client_id)
-        .await?
-    {
-        (Audience::Platform, user_id_string.clone())
-    } else {
-        (
-            Audience::App {
-                client_id: client.client_id.clone(),
-            },
-            issuer.pairwise_subject(&user_id_string, &client.sector_identifier),
-        )
-    };
+    let (audience, subject) =
+        if device_token::platform_cli_policy_selected(db, &client.client_id).await? {
+            (Audience::Platform, user_id_string.clone())
+        } else {
+            (
+                Audience::App {
+                    client_id: client.client_id.clone(),
+                },
+                issuer.pairwise_subject(&user_id_string, &client.sector_identifier),
+            )
+        };
 
-    let grant_id = session_store::upsert_grant(
-        db,
-        user_id,
-        &audience,
-        &subject,
-        granted_scopes,
-        None,
-    )
-    .await
-    .map_err(|err| {
-        tracing::error!(error = %err, user_id = %user_id, "grant upsert failed");
-        OAuthError::server_error("session issuance unavailable")
-    })?;
+    let grant_id =
+        session_store::upsert_grant(db, user_id, &audience, &subject, granted_scopes, None)
+            .await
+            .map_err(|err| {
+                tracing::error!(error = %err, user_id = %user_id, "grant upsert failed");
+                OAuthError::server_error("session issuance unavailable")
+            })?;
 
     let created = session_store::create(
         db,
@@ -501,11 +513,11 @@ async fn exchange_refresh_token_inner(
         OAuthError::server_error("refresh rotation unavailable")
     })?;
 
-    let Rotation::Rotated {
+    let Some(RotatedSession {
         row: rotated,
         secret,
         proof,
-    } = rotation
+    }) = rotation
     else {
         // The row exists but the validating read refused it: revoked, expired,
         // suspended, or the person's credential epoch moved. One
@@ -588,8 +600,7 @@ async fn replay_or_kill(
     })
 }
 
-const REFRESH_PRINCIPAL_ACTIVE_SQL: &str =
-    "SELECT 1 FROM zeroship.users \
+const REFRESH_PRINCIPAL_ACTIVE_SQL: &str = "SELECT 1 FROM zeroship.users \
      WHERE id = $1 \
        AND disabled_at IS NULL \
        AND anonymized_at IS NULL \
@@ -658,11 +669,19 @@ async fn revoke_inner(
     refresh_pool: &RefreshSessionPool,
 ) -> Result<(), OAuthError> {
     let _hint = form.token_type_hint.as_deref();
-    let Some(raw_token) = form.token.as_deref().map(str::trim).filter(|t| !t.is_empty()) else {
+    let Some(raw_token) = form
+        .token
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+    else {
         return Ok(());
     };
-    let client_auth =
-        client_auth_from_request(req, form.client_id.as_deref(), form.client_secret.as_deref());
+    let client_auth = client_auth_from_request(
+        req,
+        form.client_id.as_deref(),
+        form.client_secret.as_deref(),
+    );
     let keys = session_keys(cfg)?;
     let client_id = match authenticated_client_id(db, form.client_id.as_deref(), &client_auth).await
     {
@@ -905,14 +924,16 @@ pub(super) async fn revoke_sessions_for_subject_in_transaction(
         })?;
     }
     for session_id in &session_ids {
-        lock_refresh_family_xact(db, session_id).await.map_err(|err| {
-            tracing::error!(
-                error = %err,
-                session_id = %session_id,
-                "access-token revoke: session lock failed"
-            );
-            OAuthError::server_error("revoke unavailable")
-        })?;
+        lock_refresh_family_xact(db, session_id)
+            .await
+            .map_err(|err| {
+                tracing::error!(
+                    error = %err,
+                    session_id = %session_id,
+                    "access-token revoke: session lock failed"
+                );
+                OAuthError::server_error("revoke unavailable")
+            })?;
     }
 
     for session_id in &session_ids {
@@ -1009,7 +1030,9 @@ pub(super) fn authenticate_client(
     match client.token_endpoint_auth_method.as_str() {
         "none" => {
             if client_auth.method != ClientAuthMethod::None {
-                return Err(OAuthError::invalid_client("public client must not authenticate with a secret"));
+                return Err(OAuthError::invalid_client(
+                    "public client must not authenticate with a secret",
+                ));
             }
             Ok(())
         }
@@ -1025,7 +1048,9 @@ pub(super) fn authenticate_client(
             }
             verify_client_secret(client, client_auth)
         }
-        _ => Err(OAuthError::invalid_client("unsupported client authentication method")),
+        _ => Err(OAuthError::invalid_client(
+            "unsupported client authentication method",
+        )),
     }
 }
 
@@ -1083,10 +1108,7 @@ pub(super) async fn introspect_refresh_token(
         return Ok(None);
     };
     let now = chrono::Utc::now();
-    if row.revoked_at.is_some()
-        || row.idle_expires_at <= now
-        || row.absolute_expires_at <= now
-    {
+    if row.revoked_at.is_some() || row.idle_expires_at <= now || row.absolute_expires_at <= now {
         return Ok(None);
     }
     if !refresh_user_active(db, row.person_id).await? {
@@ -1105,7 +1127,9 @@ pub(super) async fn introspect_refresh_token(
 
 fn verify_client_secret(client: &OAuthClient, client_auth: &ClientAuth) -> Result<(), OAuthError> {
     let Some(stored_hash) = client.client_secret_hash.as_deref() else {
-        return Err(OAuthError::invalid_client("client secret is not configured"));
+        return Err(OAuthError::invalid_client(
+            "client secret is not configured",
+        ));
     };
     let Some(secret) = client_auth.client_secret.as_deref() else {
         return Err(OAuthError::invalid_client("client secret is required"));
