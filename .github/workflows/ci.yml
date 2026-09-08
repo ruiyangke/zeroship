@@ -459,6 +459,18 @@ jobs:
       # postgres.
       - name: A due user can actually be erased
         run: tests/user_erasure_reachability_gate.sh
+      # A control-plane fixture assembled an AuthConfig in Rust and set every
+      # secret except the refresh keyring, so its token exchange answered
+      # "refresh hash key is not configured" and the one end-to-end proof that
+      # a `zeroship login` token authorizes a control endpoint was red. Auth's
+      # own boot refuses without those files; a fixture that builds the config
+      # by hand skips that refusal. Self-test first: a fixture scan that
+      # matches nothing and a tree with no unfenced fixtures print the same
+      # thing.
+      - name: Session keyring fixture gate self-test
+        run: tests/session_keyring_fixture_gate.sh --self-test
+      - name: Auth fixtures that drive a token exchange configure a keyring
+        run: tests/session_keyring_fixture_gate.sh
       # tests/lib/skip_census.sh counts skips by one token, so a test that
       # skips WITHOUT printing it is invisible to the census whose whole job is
       # to stop a suite quietly covering less than it claims. 49 lines across
