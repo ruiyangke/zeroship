@@ -43,25 +43,49 @@ const CLI_SCOPE: &str = "offline_access apps:deploy apps:read";
 /// able to mint its personal organization before it can create anything. They
 /// confer no authority over anything that already exists - the self-service
 /// band grants both at `Resource::Any` only.
-const EXPECTED_REGISTERED_SCOPES: [&str; 8] = [
+///
+/// The membership and project scopes are the verb table
+/// `zeroship organization` ships. A scope missing from the REGISTRATION is
+/// refused with `invalid_scope` at the device-authorization endpoint, so a
+/// short list here is a login that fails outright rather than a verb that
+/// fails later.
+const EXPECTED_REGISTERED_SCOPES: [&str; 17] = [
     "apps:archive",
     "apps:deploy",
     "apps:read",
     "apps:write",
+    "organization:admin",
     "organization:create",
+    "organization:members:leave",
+    "organization:members:read",
+    "organization:members:write",
     "organization:read",
+    "project:create",
+    "project:members:read",
+    "project:members:write",
+    "project:read",
+    "project:write",
     "secrets:read",
     "offline_access",
 ];
 /// The scopes the CLI's token may carry AUTHORITY for. `offline_access` is
 /// deliberately absent: it manages the grant, it does not widen it.
-const EXPECTED_ISSUABLE_SCOPES: [&str; 7] = [
+const EXPECTED_ISSUABLE_SCOPES: [&str; 16] = [
     "apps:archive",
     "apps:deploy",
     "apps:read",
     "apps:write",
+    "organization:admin",
     "organization:create",
+    "organization:members:leave",
+    "organization:members:read",
+    "organization:members:write",
     "organization:read",
+    "project:create",
+    "project:members:read",
+    "project:members:write",
+    "project:read",
+    "project:write",
     "secrets:read",
 ];
 

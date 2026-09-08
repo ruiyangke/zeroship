@@ -730,15 +730,25 @@ mod tests {
         // reads, so this measures the request instead of restating it. A
         // missing entry here is a `zeroship deploy` that 403s on one verb.
         //
-        // The two organization scopes are the ZERO-CONFIG FIRST DEPLOY: an app
-        // belongs to a project and a project to an organization, so a token
-        // carrying `apps:write` alone can no longer name a place to put the
-        // app. Their absence here is a first deploy that is refused, which is
-        // exactly the failure this literal exists to make visible.
+        // `organization:create` / `organization:read` are the ZERO-CONFIG
+        // FIRST DEPLOY: an app belongs to a project and a project to an
+        // organization, so a token carrying `apps:write` alone can no longer
+        // name a place to put the app. Their absence here is a first deploy
+        // that is refused, which is exactly the failure this literal exists to
+        // make visible.
+        //
+        // The membership and project scopes are the verb table
+        // `zeroship organization` ships. Every one of them was outside the
+        // ceiling, so every one of those verbs answered 403 for every token
+        // this function can ask for - `leave` included, which exists precisely
+        // so a member can depart.
         assert_eq!(
             requested_scope(),
-            "apps:archive apps:deploy apps:read apps:write organization:create \
-             organization:read secrets:read offline_access"
+            "apps:archive apps:deploy apps:read apps:write organization:admin \
+             organization:create organization:members:leave organization:members:read \
+             organization:members:write organization:read project:create \
+             project:members:read project:members:write project:read project:write \
+             secrets:read offline_access"
         );
     }
 

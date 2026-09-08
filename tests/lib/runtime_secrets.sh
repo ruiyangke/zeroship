@@ -102,9 +102,10 @@ _e2e_keep_or_generate_hex_key() {
 # The default client id is `zeroship-console`, NOT `zeroship-cli`. The CLI id is
 # the one control intersects against the principal's live
 # `zeroship.principal_grants` rows, and an unseeded principal falls back to
-# `PLATFORM_CLI_ISSUABLE_SCOPES` -- apps:archive apps:deploy apps:read apps:write
-# secrets:read -- which would silently drop env:*, secrets:write
-# and every billing scope a harness asks for.
+# `PLATFORM_CLI_ISSUABLE_SCOPES` (read it in
+# crates/zeroship-core/src/device_grant.rs; the enumeration that used to stand
+# here had already gone stale), which carries no env:*, no secrets:write and no billing
+# scope -- all of which these harnesses ask for.
 E2E_PLATFORM_OP_CLIENT_ID="zeroship-console"
 
 _e2e_write_platform_op_js() {

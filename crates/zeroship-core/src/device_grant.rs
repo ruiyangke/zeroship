@@ -67,11 +67,46 @@ pub const PLATFORM_CLI_CLIENT_ID: &str = "zeroship-cli";
 /// asks for a refresh token) but confers no resource authority, and folding it
 /// in here would let it through that intersection as though
 /// it did.
-pub const PLATFORM_CLI_ISSUABLE_SCOPES: [&str; 7] = [
+///
+/// The organization and project half of this list is the verb table
+/// `zeroship organization` ships (`crates/zeroship-cli/src/organizations.rs`,
+/// `SUBCOMMANDS` and `PROJECT_VERBS`). A verb the CLI advertises and no token
+/// the CLI can mint may ask for is a documented command that answers 403 for
+/// every credential, which is what `leave` - the verb that exists so a member
+/// can exercise the self-departure carve-out - did.
+///
+/// SCOPE IS NOT AUTHORITY, and that is why widening this is not a grant. A
+/// bearer's wrapper policy is built at `Resource::Any`
+/// (`crates/zeroship-authz/src/scope.rs`, `scopes_to_policy`), so it narrows
+/// the ACTION and nothing else; the rank comparison in the static bands is what
+/// stands between a token and an organization its holder has no seat in, and
+/// the bearer path further intersects this ceiling with the principal's own
+/// stored grants (`crates/zeroship-authn/src/lib.rs`,
+/// `platform_cli_entitlement`).
+pub const PLATFORM_CLI_ISSUABLE_SCOPES: [&str; 16] = [
     "apps:archive",
     "apps:deploy",
     "apps:read",
     "apps:write",
+    // `organization:admin` is the one entry here whose loss a stolen token
+    // would genuinely change, so it is the one that had to be argued rather
+    // than assumed. It bands `dissolve` and `transfer` at owner rank, and
+    // `invite`/`role` escalate to it when the seat being handed out is itself
+    // admin or owner (`require_seat_authority`).
+    //
+    // It is INCLUDED. Withholding it would not move the authority somewhere
+    // safer: the CLI is the only shipped client for the organization lifecycle
+    // - the console host block in `deploy/ops/Caddyfile` points at a console
+    // this image does not ship - so a ceiling without it leaves no way for
+    // anyone to close an organization or hand it on, and leaves `invite` and
+    // `role` working for ordinary seats and refusing privileged ones. The
+    // alternative the exclusion would force is deleting those verbs, which
+    // removes the tool and not the authority: the owner's seat still holds it.
+    // What bounds the risk instead is that it is named on its own line of the
+    // consent screen at every `zeroship login`, that the band still requires
+    // owner rank on the CONCRETE organization, and that the credential carrying
+    // it is a short-lived access token behind a revocable refresh family.
+    "organization:admin",
     // `organization:create` and `organization:read` are the ZERO-CONFIG FIRST
     // DEPLOY. An app belongs to a project and a project belongs to an
     // organization, so `zeroship deploy` on a fresh account has to be able to
@@ -83,7 +118,23 @@ pub const PLATFORM_CLI_ISSUABLE_SCOPES: [&str; 7] = [
     // self-service band grants both at `Resource::Any` only, and reading or
     // writing a CONCRETE organization needs a rank the band cannot supply.
     "organization:create",
+    // `organization:members:leave` is banded at ANY SEATED MEMBER by
+    // `deploy/policies/creator/organization_depart.cedar`, specifically so a
+    // viewer can depart. The route it gates names no user, so the seat it can
+    // reach is the caller's own by construction. It confers nothing over anyone
+    // else and is the clearest case in this list for being reachable.
+    "organization:members:leave",
+    "organization:members:read",
+    "organization:members:write",
     "organization:read",
+    // The project verbs. A project is where an app lives, so these are the
+    // continuation of the same first-deploy story, and each is banded on the
+    // CONCRETE project or its organization.
+    "project:create",
+    "project:members:read",
+    "project:members:write",
+    "project:read",
+    "project:write",
     "secrets:read",
 ];
 
@@ -96,13 +147,28 @@ pub const OFFLINE_ACCESS_SCOPE: &str = "offline_access";
 /// REGISTRATION, so a scope missing here is refused with `invalid_scope`
 /// before anything else happens. `offline_access` therefore has to be listed
 /// even though it grants no authority.
-pub const PLATFORM_CLI_REGISTERED_SCOPES: [&str; 8] = [
+///
+/// It is otherwise [`PLATFORM_CLI_ISSUABLE_SCOPES`] exactly, and the two have
+/// to move together: a scope added to the ceiling and forgotten here is a
+/// `zeroship login` that fails outright, not a verb that fails later.
+/// `the_registration_is_the_issuable_ceiling_plus_offline_access` holds them
+/// to that.
+pub const PLATFORM_CLI_REGISTERED_SCOPES: [&str; 17] = [
     "apps:archive",
     "apps:deploy",
     "apps:read",
     "apps:write",
+    "organization:admin",
     "organization:create",
+    "organization:members:leave",
+    "organization:members:read",
+    "organization:members:write",
     "organization:read",
+    "project:create",
+    "project:members:read",
+    "project:members:write",
+    "project:read",
+    "project:write",
     "secrets:read",
     OFFLINE_ACCESS_SCOPE,
 ];
@@ -251,6 +317,30 @@ pub fn valid_user_code(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The registration is the ceiling plus `offline_access`, exactly.
+    ///
+    /// The two are separate constants because they mean different things, and
+    /// that is precisely how they can drift: a scope added to the ceiling and
+    /// forgotten here is refused with `invalid_scope` at the
+    /// device-authorization endpoint, so the CLI cannot even log in, and a
+    /// scope added here alone is advertised on the consent screen for an
+    /// authority the intersection then strips.
+    #[test]
+    fn the_registration_is_the_issuable_ceiling_plus_offline_access() {
+        let mut expected: Vec<&str> = PLATFORM_CLI_ISSUABLE_SCOPES.to_vec();
+        expected.push(OFFLINE_ACCESS_SCOPE);
+        expected.sort_unstable();
+
+        let mut registered: Vec<&str> = PLATFORM_CLI_REGISTERED_SCOPES.to_vec();
+        registered.sort_unstable();
+
+        assert_eq!(registered, expected);
+        assert!(
+            !PLATFORM_CLI_ISSUABLE_SCOPES.contains(&OFFLINE_ACCESS_SCOPE),
+            "offline_access manages the grant; it must not widen the authority ceiling"
+        );
+    }
 
     #[test]
     fn a_generated_code_is_accepted_by_the_validator() {
