@@ -1,3 +1,4 @@
+use zeroship_core::app_id::AppId;
 use chrono::{DateTime, Utc};
 use compio_postgres::{Client, GenericClient, NoTls};
 use uuid::Uuid;
@@ -94,7 +95,7 @@ impl WorkflowSchedulerStore {
     pub async fn register_timer(
         &self,
         run_id: &str,
-        app_id: Uuid,
+        app_id: &AppId,
         wake_at: DateTime<Utc>,
     ) -> Result<TimerRow, WorkflowSchedulerStoreError> {
         let mut conn = self.open_conn().await?;
@@ -115,7 +116,7 @@ impl WorkflowSchedulerStore {
         &self,
         conn: &C,
         run_id: &str,
-        app_id: Uuid,
+        app_id: &AppId,
         wake_at: DateTime<Utc>,
     ) -> Result<TimerRow, WorkflowSchedulerStoreError>
     where
@@ -137,10 +138,10 @@ impl WorkflowSchedulerStore {
                     self.quoted_schema(),
                     schema = self.quoted_schema()
                 ),
-                &[&run_id, &app_id, &wake_at],
+                &[&run_id, &app_id.as_str(), &wake_at],
             )
             .await?;
-        Ok(TimerRow::from_row(&row))
+        TimerRow::from_row(&row)
     }
 
     #[allow(clippy::future_not_send)]
@@ -163,7 +164,7 @@ impl WorkflowSchedulerStore {
                 &[&horizon, &limit],
             )
             .await?;
-        Ok(rows.iter().map(TimerRow::from_row).collect())
+        rows.iter().map(TimerRow::from_row).collect()
     }
 
     #[allow(clippy::future_not_send)]
@@ -187,7 +188,8 @@ impl WorkflowSchedulerStore {
             return Ok(None);
         };
         let run_id: String = row.get("run_id");
-        let app_id: Uuid = row.get("app_id");
+        let app_id = AppId::parse(row.get::<_, &str>("app_id"))
+            .map_err(|e| WorkflowSchedulerStoreError::MalformedAppId(e.to_string()))?;
         let wake_at: DateTime<Utc> = row.get("wake_at");
         let generation: i64 = row.get("generation");
         tx.execute(
@@ -199,7 +201,7 @@ impl WorkflowSchedulerStore {
                     deadline = EXCLUDED.deadline, \
                     dispatch_generation = EXCLUDED.dispatch_generation, \
                     dispatched_at = now()", self.quoted_schema()),
-            &[&run_id, &app_id, &deadline, &generation],
+            &[&run_id, &app_id.as_str(), &deadline, &generation],
         )
         .await?;
         tx.commit().await?;
@@ -263,21 +265,24 @@ impl WorkflowSchedulerStore {
         tx.commit().await?;
         Ok(rows
             .iter()
-            .map(|row| FiredTimer {
-                run_id: row.get("run_id"),
-                app_id: row.get("app_id"),
-                wake_at: row.get("wake_at"),
-                dispatch_generation: row.get("generation"),
-                deadline: row.get("deadline"),
+            .map(|row| {
+                Ok::<_, WorkflowSchedulerStoreError>(FiredTimer {
+                    run_id: row.get("run_id"),
+                    app_id: AppId::parse(row.get::<_, &str>("app_id"))
+                        .map_err(|e| WorkflowSchedulerStoreError::MalformedAppId(e.to_string()))?,
+                    wake_at: row.get("wake_at"),
+                    dispatch_generation: row.get("generation"),
+                    deadline: row.get("deadline"),
+                })
             })
-            .collect())
+            .collect::<Result<Vec<_>, _>>()?)
     }
 
     #[allow(clippy::future_not_send)]
     pub async fn ack_register_next(
         &self,
         run_id: &str,
-        app_id: Uuid,
+        app_id: &AppId,
         next_wake_at: DateTime<Utc>,
     ) -> Result<TimerRow, WorkflowSchedulerStoreError> {
         let mut conn = self.open_conn().await?;
@@ -297,7 +302,7 @@ impl WorkflowSchedulerStore {
         &self,
         conn: &C,
         run_id: &str,
-        app_id: Uuid,
+        app_id: &AppId,
         next_wake_at: DateTime<Utc>,
     ) -> Result<TimerRow, WorkflowSchedulerStoreError>
     where
@@ -328,10 +333,10 @@ impl WorkflowSchedulerStore {
                     self.quoted_schema(),
                     schema = self.quoted_schema()
                 ),
-                &[&run_id, &app_id, &next_wake_at, &generation],
+                &[&run_id, &app_id.as_str(), &next_wake_at, &generation],
             )
             .await?;
-        Ok(TimerRow::from_row(&row))
+        TimerRow::from_row(&row)
     }
 
     #[allow(clippy::future_not_send)]
@@ -410,7 +415,8 @@ impl WorkflowSchedulerStore {
             return Ok(None);
         };
         let run_id: String = row.get("run_id");
-        let app_id: Uuid = row.get("app_id");
+        let app_id = AppId::parse(row.get::<_, &str>("app_id"))
+            .map_err(|e| WorkflowSchedulerStoreError::MalformedAppId(e.to_string()))?;
         let generation: i64 = row.get::<_, i64>("dispatch_generation") + 1;
         let row = tx
             .query_one(
@@ -426,11 +432,11 @@ impl WorkflowSchedulerStore {
                     self.quoted_schema(),
                     schema = self.quoted_schema()
                 ),
-                &[&run_id, &app_id, &wake_at, &generation],
+                &[&run_id, &app_id.as_str(), &wake_at, &generation],
             )
             .await?;
         tx.commit().await?;
-        Ok(Some(TimerRow::from_row(&row)))
+        TimerRow::from_row(&row).map(Some)
     }
 
     #[allow(clippy::future_not_send)]
@@ -444,7 +450,7 @@ impl WorkflowSchedulerStore {
                 &[&run_id],
             )
             .await?;
-        Ok(rows.first().map(TimerRow::from_row))
+        rows.first().map(TimerRow::from_row).transpose()
     }
 
     #[allow(clippy::future_not_send)]
@@ -461,7 +467,7 @@ impl WorkflowSchedulerStore {
                 &[&run_id],
             )
             .await?;
-        Ok(rows.first().map(InflightTimer::from_row))
+        rows.first().map(InflightTimer::from_row).transpose()
     }
 
     #[allow(clippy::future_not_send)]
@@ -498,7 +504,7 @@ impl WorkflowSchedulerStore {
             )
             .await?;
         tx.commit().await?;
-        Ok(rows.iter().map(LapsedInflightTimer::from_row).collect())
+        rows.iter().map(LapsedInflightTimer::from_row).collect()
     }
 
     #[cfg(test)]
@@ -523,7 +529,7 @@ impl WorkflowSchedulerStore {
 CREATE SCHEMA IF NOT EXISTS {schema};
 CREATE TABLE IF NOT EXISTS {schema}.workflow_scheduler_timers (
   run_id text PRIMARY KEY,
-  app_id uuid NOT NULL,
+  app_id text NOT NULL,
   wake_at timestamptz NOT NULL,
   generation bigint NOT NULL DEFAULT 0,
   registered_at timestamptz NOT NULL DEFAULT now()
@@ -531,7 +537,7 @@ CREATE TABLE IF NOT EXISTS {schema}.workflow_scheduler_timers (
 CREATE INDEX IF NOT EXISTS workflow_scheduler_timers_due_idx ON {schema}.workflow_scheduler_timers (wake_at);
 CREATE TABLE IF NOT EXISTS {schema}.workflow_scheduler_inflight (
   run_id text PRIMARY KEY,
-  app_id uuid NOT NULL,
+  app_id text NOT NULL,
   deadline timestamptz NOT NULL,
   dispatch_generation bigint NOT NULL,
   dispatched_at timestamptz NOT NULL DEFAULT now()
@@ -545,28 +551,29 @@ CREATE INDEX IF NOT EXISTS workflow_scheduler_inflight_deadline_idx ON {schema}.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TimerRow {
     pub run_id: String,
-    pub app_id: Uuid,
+    pub app_id: AppId,
     pub wake_at: DateTime<Utc>,
     pub generation: i64,
     pub registered_at: DateTime<Utc>,
 }
 
 impl TimerRow {
-    fn from_row(row: &compio_postgres::Row) -> Self {
-        Self {
+    fn from_row(row: &compio_postgres::Row) -> Result<Self, WorkflowSchedulerStoreError> {
+        Ok(Self {
             run_id: row.get("run_id"),
-            app_id: row.get("app_id"),
+            app_id: AppId::parse(row.get::<_, &str>("app_id"))
+                .map_err(|e| WorkflowSchedulerStoreError::MalformedAppId(e.to_string()))?,
             wake_at: row.get("wake_at"),
             generation: row.get("generation"),
             registered_at: row.get("registered_at"),
-        }
+        })
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InflightTimer {
     pub run_id: String,
-    pub app_id: Uuid,
+    pub app_id: AppId,
     pub deadline: DateTime<Utc>,
     pub dispatch_generation: i64,
     pub dispatched_at: DateTime<Utc>,
@@ -575,40 +582,42 @@ pub struct InflightTimer {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LapsedInflightTimer {
     pub run_id: String,
-    pub app_id: Uuid,
+    pub app_id: AppId,
     pub deadline: DateTime<Utc>,
     pub dispatch_generation: i64,
     pub dispatched_at: DateTime<Utc>,
 }
 
 impl LapsedInflightTimer {
-    fn from_row(row: &compio_postgres::Row) -> Self {
-        Self {
+    fn from_row(row: &compio_postgres::Row) -> Result<Self, WorkflowSchedulerStoreError> {
+        Ok(Self {
             run_id: row.get("run_id"),
-            app_id: row.get("app_id"),
+            app_id: AppId::parse(row.get::<_, &str>("app_id"))
+                .map_err(|e| WorkflowSchedulerStoreError::MalformedAppId(e.to_string()))?,
             deadline: row.get("deadline"),
             dispatch_generation: row.get("dispatch_generation"),
             dispatched_at: row.get("dispatched_at"),
-        }
+        })
     }
 }
 
 impl InflightTimer {
-    fn from_row(row: &compio_postgres::Row) -> Self {
-        Self {
+    fn from_row(row: &compio_postgres::Row) -> Result<Self, WorkflowSchedulerStoreError> {
+        Ok(Self {
             run_id: row.get("run_id"),
-            app_id: row.get("app_id"),
+            app_id: AppId::parse(row.get::<_, &str>("app_id"))
+                .map_err(|e| WorkflowSchedulerStoreError::MalformedAppId(e.to_string()))?,
             deadline: row.get("deadline"),
             dispatch_generation: row.get("dispatch_generation"),
             dispatched_at: row.get("dispatched_at"),
-        }
+        })
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FiredTimer {
     pub run_id: String,
-    pub app_id: Uuid,
+    pub app_id: AppId,
     pub wake_at: DateTime<Utc>,
     pub dispatch_generation: i64,
     pub deadline: DateTime<Utc>,
@@ -623,6 +632,13 @@ pub enum WorkflowSchedulerStoreError {
          Apply db/migrations-ts (20260811000100_workflow_scheduler_store.ts) against this database"
     )]
     NotProvisioned { schema: String },
+    /// A stored `app_id` is not a well-formed typed id.
+    ///
+    /// `zeroship.workflow_scheduler_{timers,inflight}.app_id` is text holding
+    /// `app_<base62>`, and the timer wheel keys tenants on the decoded value, so
+    /// a row that cannot decode is not a row to dispatch on a best guess.
+    #[error("workflow scheduler row has a malformed app_id: {0}")]
+    MalformedAppId(String),
 }
 
 fn assert_valid_schema_name(schema: &str) {
