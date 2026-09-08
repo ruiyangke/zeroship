@@ -14,7 +14,7 @@ export default {
     table("app_session_anchors", { schema: "zeroship" }).create({
       columns: {
         id: t.uuid().notNull().default(uuidV4()),
-        app_id: t.uuid().notNull(),
+        app_id: t.text().notNull(),
         client_id: t.text().notNull(),
         global_user_id: t.uuid().notNull(),
         refresh_token_enc: t.bytes().notNull(),
@@ -143,7 +143,7 @@ export default {
       columns: {
         id: t.uuid().notNull().default(uuidV4()),
         user_id: t.uuid().notNull(),
-        app_id: t.uuid().notNull(),
+        app_id: t.text().notNull(),
         email: t.text({ caseSensitive: false }),
         name: t.text(),
         avatar_url: t.text(),
