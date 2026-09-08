@@ -220,9 +220,9 @@ pub const USER_PREFIX: &str = "usr";
 /// App entity typed-id prefix. There is no `new_app_id` free function beside
 /// the other `new_*_id` minters: an app id's ONLY minter is
 /// [`crate::app_id::AppId::mint`], because the value seeds the per-app schema
-/// name, both role names, the publication digest, the encryption salt and the
-/// app-secret AAD, and a `String` returned from here would reach all of them
-/// with no type to say which rendering each one wanted.
+/// name, both role names, the publication digest and the encryption salt, and a
+/// `String` returned from here would reach all of them with no type saying
+/// which of those it was.
 pub const APP_PREFIX: &str = "app";
 pub const SESSION_PREFIX: &str = "ses";
 

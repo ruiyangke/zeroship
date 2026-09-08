@@ -1,22 +1,21 @@
 //! [`declare_entity_id`] - the shared shape of a typed entity id, and the
 //! compile-time proof that it kept its absences.
 //!
-//! # Why a macro, when [`crate::app_id::AppId`] is hand-written
+//! # Why a macro
 //!
-//! `AppId` is not generated from this macro and must not be. It carries a
-//! second field and a [`crate::app_id::AppId::uuid`] accessor because two call
-//! sites - the app-secret AAD and the CHWBL ring position - derive from the
-//! embedded bits rather than the printed id, and its module doc justifies each
-//! absence against a specific derivation an app id seeds (a schema name, a role
-//! name, a replication slot, an RLS GUC). None of that is true of the ids
-//! declared here: they are keys and nothing else, so they hold the text alone
-//! and expose no route to the bits.
+//! Every typed entity id has the same shape - the printed text and nothing
+//! else - and the same absences. The absence tests are long, they need a paired
+//! control to be meaningful, and a hand-written copy that silently lost one
+//! assertion would print exactly what a complete one prints. Generating them
+//! means a new entity id cannot be declared without them.
 //!
-//! What IS shared is the discipline, and it is the reason this is a macro
-//! rather than three copies: the absence tests are long, they need a paired
-//! control to be meaningful, and a copy that silently lost one assertion would
-//! print exactly what a complete one prints. Generating them means a new entity
-//! id cannot be declared without them.
+//! [`crate::app_id::AppId`] was hand-written until the id became text, because
+//! it also held the uuid its column stored and handed the embedded bits to two
+//! call sites. Neither turned out to need them, the column is text, and `AppId`
+//! is declared here like the rest. There is no id in the tree with a second
+//! field and no reason to add one: a value derived from the bits does not move
+//! when the printed form does, which is what makes such a derivation fail
+//! quietly rather than loudly.
 //!
 //! # The absences, and the failure each prevents
 //!
@@ -75,10 +74,9 @@ macro_rules! declare_entity_id {
             /// Mint a fresh id. This is the ONLY minter.
             ///
             /// Delegates to [`crate::typed_id::generate`] rather than composing
-            /// the encoder itself: unlike [`crate::app_id::AppId::mint`] this
-            /// type keeps no uuid field, so there is nothing to save by
-            /// inlining and a second composition would be a second thing to
-            /// drift.
+            /// the encoder itself: this type keeps no uuid field, so there is
+            /// nothing to save by inlining and a second composition would be a
+            /// second thing to drift.
             #[must_use]
             pub fn mint() -> Self {
                 Self {
@@ -294,10 +292,10 @@ macro_rules! declare_entity_id {
             /// true.
             ///
             /// Lived only in `crate::app_id`'s own tests until 2026-09-08, so
-            /// the three macro-declared ids asserted nothing of the kind. It
-            /// moved here rather than being copied, because `AppId` adopting the
-            /// macro would otherwise delete it with no compile error, no gate
-            /// failure and no diff line saying a test went.
+            /// the macro-declared ids asserted nothing of the kind. It moved
+            /// here rather than being copied, because `AppId` adopting the macro
+            /// the same week would otherwise have deleted it with no compile
+            /// error, no gate failure and no diff line saying a test went.
             #[test]
             fn there_is_no_inherent_as_bytes() {
                 let id = $name::mint();
@@ -360,6 +358,19 @@ macro_rules! declare_entity_id {
             /// The boundary rejection that matters most: another entity's id is
             /// the wrong TYPE, and the parser must say so rather than accept a
             /// well-formed base62 body under a foreign tag.
+            ///
+            /// The hyphenated-uuid arm is the one the typed-id sweep turns on.
+            /// Every id column in this schema is `text`, and the shape it used
+            /// to hold is a hyphenated uuid; a parser that admitted one would
+            /// let the old rendering back in as a value of this type, and both
+            /// renderings would then key the same maps.
+            ///
+            /// The three body arms after it separate the failures a single
+            /// "wrong shape" check would blur: a body one character short or
+            /// long, a body of exactly the right length whose value is above
+            /// the hundred-and-twenty-eight-bit range, and a body of the right
+            /// length carrying one character outside base62. The middle one is
+            /// the only refusal that needs the decoder to run.
             #[test]
             fn parse_refuses_a_foreign_prefix_and_a_malformed_body() {
                 let foreign = $name::mint();
@@ -367,6 +378,11 @@ macro_rules! declare_entity_id {
                 assert!(
                     $name::parse(&foreign).is_err(),
                     "a foreign prefix must be refused: {foreign}"
+                );
+
+                assert!(
+                    $name::parse("0191e7a2-b3c4-4d5e-8f90-123456789abc").is_err(),
+                    "a hyphenated uuid must not become a typed id by accident"
                 );
 
                 assert!($name::parse("").is_err(), "empty must be refused");
@@ -382,6 +398,38 @@ macro_rules! declare_entity_id {
                     $name::parse(&format!("{}_!!!", $name::PREFIX)).is_err(),
                     "a body outside base62 must be refused"
                 );
+
+                let minted = $name::mint();
+                let body = minted.as_str().split_once('_').expect("has a body").1;
+                for (bad, why) in [
+                    (
+                        format!("{}_{}", $name::PREFIX, &body[..body.len() - 1]),
+                        "one character short",
+                    ),
+                    (
+                        format!("{}_{body}0", $name::PREFIX),
+                        "one character long",
+                    ),
+                    (
+                        format!("{}_ZZZZZZZZZZZZZZZZZZZZZZ", $name::PREFIX),
+                        "the right length, above the representable range",
+                    ),
+                    (
+                        format!("{}_-{}", $name::PREFIX, &body[1..]),
+                        "the right length, one character outside the alphabet",
+                    ),
+                ] {
+                    assert!(
+                        $name::parse(&bad).is_err(),
+                        "{bad} must be refused: {why}"
+                    );
+                }
+
+                // The control for all of the above: the body they are mutations
+                // of is one this parser accepts, so each refusal is measuring
+                // its own mutation rather than a parser that refuses whatever
+                // it is handed.
+                assert!($name::parse(minted.as_str()).is_ok());
             }
 
             /// Ordering is byte order over the printed id, which is creation
@@ -421,6 +469,17 @@ macro_rules! declare_entity_id {
                     .is_err(),
                     "a bare uuid on the wire must be a decode failure"
                 );
+
+                // Not a string at all. `deserialize_str` is what refuses these,
+                // and it is the arm a hand-written visitor most easily loses:
+                // a `visit_u64` or a `visit_unit` added for convenience would
+                // admit a value `parse` never saw.
+                for bad in ["\"\"", "42", "null", "true", "[]", "{}"] {
+                    assert!(
+                        serde_json::from_str::<$name>(bad).is_err(),
+                        "{bad} must not decode as a typed id"
+                    );
+                }
             }
         }
     };
