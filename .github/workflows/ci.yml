@@ -169,12 +169,16 @@ jobs:
       # tests reported green in a job that had neither backend. Those targets now
       # FAIL when nothing answers, so the backends have to be here.
       #
+      # `zeroship-mailer` is the same shape and is why the SMTP sink is in that
+      # script's set: its plaintext-transport test is not feature-gated, so
+      # `--workspace` builds and runs it here, and it fails without a sink.
+      #
       # The SAME script a developer runs, not a `services:` block that would be a
-      # second definition of the same two servers. `services:` also cannot pass
+      # second definition of the same servers. `services:` also cannot pass
       # `-c wal_level=logical`, which is why plugin-db-live-gate below uses an
       # explicit `docker run`; going through compose keeps this job on the
       # definition the compose file already carries.
-      - name: Provision the required test backends (postgres, redis)
+      - name: Provision the required test backends (postgres, redis, smtp sink)
         run: bash tests/provision_test_backends.sh
       # `--no-fail-fast` because cargo otherwise stops at the FIRST failing
       # target and never builds or runs the ones after it. Those targets do not
@@ -183,15 +187,21 @@ jobs:
       # unchanged either way - the job still fails if anything fails - but
       # without this the run only tells you about the first thing that broke.
       #
-      # Tee'd into a log so the skip census at the end of this job can read it.
-      # `set -o pipefail` is load-bearing: GitHub's default shell is `bash -e`
-      # WITHOUT pipefail, so `cargo test | tee` would report tee's status, which
-      # is 0 whenever tee could write - and every failing test in the workspace
-      # would sail through as a pass. The billing gate hit this exact trap and
-      # solved it with PIPESTATUS; pipefail is the same fix in one line.
+      # THE `| tee` THAT STOOD ON THIS LINE AND FIVE OTHERS IS GONE. It wrote a
+      # combined log for the skip census at the end of this job to read; the
+      # census was deleted and nothing else ever read the file, so what was left
+      # was a pipeline whose only remaining effect was to put a second command
+      # between cargo and its exit status.
+      #
+      # `set -o pipefail` stays on every one of those steps, because the reason
+      # it was added outlives the pipe: GitHub's default shell is `bash -e`
+      # WITHOUT pipefail, so the moment anyone pipes cargo into anything the
+      # status reported is the LAST command's - 0 whenever it could write - and
+      # every failing test in the workspace sails through as a pass. The billing
+      # gate hit that trap and solved it with PIPESTATUS.
       - run: |
           set -o pipefail
-          cargo test --workspace --no-fail-fast 2>&1 | tee -a "$RUNNER_TEMP/rust-tests.log"
+          cargo test --workspace --no-fail-fast
       # --no-fail-fast fixes the STOPPING; this fixes the COUNTING. Nothing
       # anywhere records how many test targets there are supposed to be, so a
       # suite that quietly stops being built - a new `required-features` gate, a
@@ -439,6 +449,17 @@ jobs:
         run: tests/organization_route_authorization_gate.sh
       - name: The role ladder and the Cedar bands name the same ranks
         run: tests/organization_policy_ladder_gate.sh
+      # THESE THREE LANDED WITHOUT A STEP and tests/ci_wiring_gate.sh has been
+      # red on them since. All three are text scans that need no build and no
+      # database, so the reason they were unwired was that nobody wired them,
+      # which is exactly the state that gate exists to make visible: an
+      # uninvoked gate and a clean tree print the same thing.
+      - name: The app-id sweep's frontier does not go backwards
+        run: tests/app_id_frontier_gate.sh
+      - name: Every write that could resurrect a deleted app carries its fence
+        run: tests/deleted_app_write_fence_gate.sh
+      - name: A credential is minted only from a validating read of its row
+        run: tests/mint_reads_row_gate.sh
       # The Cedar schema is the only thing that makes a typo'd action id
       # visible, and strict validation only rules on the ids the POLICIES
       # quote. This compares the schema against the Rust vocabulary and against
@@ -965,8 +986,7 @@ jobs:
       # other live-database gates rather than here.
       - run: |
           set -o pipefail
-          cargo test -p zeroship-plugin-db --features test-helpers --test sqlite_integration 2>&1 \
-            | tee -a "$RUNNER_TEMP/rust-tests.log"
+          cargo test -p zeroship-plugin-db --features test-helpers --test sqlite_integration
       # The ENGINE tier's own suite. `cargo test --workspace` above does reach
       # it - it is an ordinary member - but that step is the one #146 records as
       # currently unbuildable, and a crate whose 290 tests run only through a
@@ -980,8 +1000,7 @@ jobs:
       # belong with the other live gates, not here.
       - run: |
           set -o pipefail
-          cargo test -p zeroship-data-engine 2>&1 \
-            | tee -a "$RUNNER_TEMP/rust-tests.log"
+          cargo test -p zeroship-data-engine
       # The migration service's suite: the service's own targets, the two live-PG
       # session proofs (`smoke_apply_pg`, `author_and_apply_pg`) and the
       # `CompioPgSession` unit test. Without a database the PG proofs skip
@@ -998,8 +1017,7 @@ jobs:
       # db/released_migrations.tsv. No CI job holds it.
       - run: |
           set -o pipefail
-          cargo test -p zeroship-migrate-server 2>&1 \
-            | tee -a "$RUNNER_TEMP/rust-tests.log"
+          cargo test -p zeroship-migrate-server
       # compio-postgres' `tls` feature has never been compiled by any workflow,
       # let alone run: `tls` appeared ZERO times in .github/ until this step.
       # The default feature set is empty, so `cargo test --workspace` above
@@ -1016,8 +1034,7 @@ jobs:
       # `verify-full` gets.
       - run: |
           set -o pipefail
-          cargo test -p compio-postgres --features tls 2>&1 \
-            | tee -a "$RUNNER_TEMP/rust-tests.log"
+          cargo test -p compio-postgres --features tls
       # The live half: the four servers `tls_live_setup.sh` stands up, and the
       # 22 checks that read `pg_stat_ssl` to find out what transport the SERVER
       # thinks it is serving. `--features live-tls-tests` is what builds the
@@ -1032,7 +1049,7 @@ jobs:
       - run: |
           set -o pipefail
           cargo test -p compio-postgres --features tls,live-tls-tests --test tls_live \
-            -- --test-threads=1 2>&1 | tee -a "$RUNNER_TEMP/rust-tests.log"
+            -- --test-threads=1
       - name: Tear down the TLS test servers
         if: always()
         run: bash libs/compio-postgres/tests/tls_live_setup.sh --down
@@ -1054,13 +1071,13 @@ jobs:
       # already committed to counting it by the time the body discovered its
       # backend was absent.
       #
-      # This job provisions NO backend, so the census was expected to be non-zero
-      # here and REPORTED rather than failed: failing a job that deliberately
-      # stands up no services would make the only honest outcome a red tick, and
-      # the fix people reach for is deleting the check. That reasoning is now
-      # moot. Those tests FAIL when they cannot reach a backend, so this job
-      # either provisions what a test needs or does not run it - there is no
-      # third state for a census to describe.
+      # It REPORTED rather than failed, on the ground that this job provisioned
+      # no backend at the time and failing a job that deliberately stands up no
+      # services makes the only honest outcome a red tick - after which the fix
+      # people reach for is deleting the check. Both halves of that are moot now:
+      # the job provisions its backends near the top, and those tests FAIL when
+      # they cannot reach one. This job either provisions what a test needs or
+      # does not run it; there is no third state for a census to describe.
       # The gate's own self-test: fixtures only, no build, seconds. It runs
       # BEFORE the gate so that a gate which has stopped discriminating is
       # reported as such rather than as a clean workspace.
@@ -1147,9 +1164,10 @@ jobs:
   # role has no search_path either) - the same shape as a `services:` container.
   # Same command, same server, one variable apart:
   #   no overlay    exit 2,  0 `test result:` lines, 0 tests
-  #   overlay       exit 0, 26 `test result:` lines,
-  #                 "AUTH SUITE: 641 tests passed, 0 unexpected skips,
-  #                  1 allowlisted (floor 604)"
+  #   overlay       exit 0, 26 `test result:` lines, and an "AUTH SUITE: ...
+  #                 tests passed" line clearing its floor
+  # (that line carried a skip census and an allowlist count when this was
+  # measured; both are deleted, and the script no longer prints either)
   # THE NUMBERS ARE auth-gate's. billing-gate was NOT run: it additionally needs
   # a Redpanda this machine had no free port for, and its 748-test suite plus a
   # cold zeroship-control build did not fit the session. Its overlay hurdle is
@@ -1224,6 +1242,16 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 20
+      # No billing test sends mail. The sink is here because the overlay writer
+      # below waits on EVERY backend before describing any of them, and because
+      # the provisioner describes the workspace's test backends as a SET - a job
+      # that adopts the set adopts all of it. Per-job subsets would be a second,
+      # hand-maintained statement of which tests need what.
+      smtp:
+        image: axllent/mailpit:latest
+        ports:
+          - 1025:1025
+          - 8025:8025
     env:
       PG_HOST: localhost
       PG_PORT: 5440
@@ -1277,11 +1305,12 @@ jobs:
         env:
           REDPANDA_BROKERS: 127.0.0.1:19092
 
-  # The auth tests resolve their database from AUTH_DB_URL and return early when
-  # it is unset, which cargo reports as a pass. `cargo test --workspace` above
-  # therefore proves nothing about them. tests/run_auth_suite.sh provisions an
-  # isolated database, runs the suite against it, and fails if any test reports
-  # that it skipped, so a missing database cannot masquerade as a pass.
+  # The auth tests used to resolve their database from AUTH_DB_URL and return
+  # early when it was unset, which cargo reports as a pass. `cargo test
+  # --workspace` above therefore proved nothing about them.
+  # tests/run_auth_suite.sh provisions an isolated database and runs the suite
+  # against it; the tests themselves refuse a run with no database, so a missing
+  # one cannot masquerade as a pass in either vector.
   #
   # It could not masquerade as anything, because it did not run: see the long
   # comment on billing-gate for the absent-overlay defect both jobs had and for
@@ -1311,6 +1340,20 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 20
+      # The plaintext SMTP sink zeroship-mailer's transport test dials. This job
+      # runs `cargo test -p zeroship-mailer` as a whole package (the binary list
+      # in run_auth_suite.sh), and that test FAILS without a sink rather than
+      # skipping, so the sink is a service of this job like the two above.
+      #
+      # NO `--health-cmd`, and that is not an omission: the provisioner step
+      # below waits on this port itself with a bounded probe and fails naming the
+      # address, which is the same readiness contract with one fewer guess about
+      # what the image ships to probe with.
+      smtp:
+        image: axllent/mailpit:latest
+        ports:
+          - 1025:1025
+          - 8025:8025
     env:
       PG_HOST: localhost
       PG_PORT: 5440
@@ -1366,19 +1409,20 @@ jobs:
   # and GitHub service containers accept none. Same reason golden-path and
   # dev-vs-deployed launch theirs this way.
   #
-  # WITHOUT that flag TEN TESTS SKIP AND STILL COUNT AS PASSED. Measured on
-  # two servers differing in nothing else, both printing the IDENTICAL
-  # `103 passed; 0 failed; 8 ignored` and both clearing the floor:
-  #     logical  -> exit 0, census  1 allowlisted /  0 not
-  #     replica  -> exit 1, census 11 total       / 10 not allowlisted
-  # The census is the ONLY thing that tells them apart, which is why the script
-  # treats it as a failure rather than a report.
+  # WITHOUT that flag THE WAL-GUARDED TESTS USED TO SKIP AND STILL COUNT AS
+  # PASSED, and a census over the run log was the ONLY thing that told a
+  # `replica` server from a `logical` one - the two printed identical result
+  # lines and both cleared the floor. That census is deleted along with the rest
+  # of the skip apparatus. The guards REFUSE now: on a server without logical
+  # WAL those tests FAIL, naming the setting, that it is postmaster-level, and
+  # that `ALTER SYSTEM SET` needs a restart rather than a reload. The flag is no
+  # less load-bearing; what changed is that omitting it is now visible in cargo's
+  # own output rather than only in a marker somebody had to count.
   #
-  # The figures above read 12/11 until 2026-08-18. Re-measured that day on the
-  # full target against two servers differing only in wal_level: 11 markers on
-  # `replica` (10 wal-worded, 1 postgis) against 1 on `logical`, and
-  # `pg_has_logical_wal` has exactly 10 call sites. Ten is what the tree does
-  # today; the old number was copied into three files and re-run in none.
+  # The history is kept because it is the argument for the replacement, not a
+  # footnote to it: the figures here read 12/11 until 2026-08-18, having been
+  # copied into three files and re-run in none, which is the same defect in the
+  # instrument that the instrument existed to catch.
   plugin-db-live-gate:
     runs-on: ubuntu-latest
     steps:
@@ -1398,7 +1442,20 @@ jobs:
       # pgvector because two tests build vector columns, and the extension has
       # to be CREATED in the target database, not merely available: a fresh
       # database with it available still fails `type "vector" does not exist`.
-      - name: Start Postgres (pgvector, logical WAL)
+      #
+      # POSTGIS IS INSTALLED HERE, and it is a package rather than an image
+      # because no published image carries both extensions - `pgvector/pgvector`
+      # and `postgis/postgis` are disjoint. `pgvector/pgvector:pg16` is
+      # `postgres:16-bookworm` plus a compiled pgvector (its Dockerfile says so),
+      # so it carries the PGDG apt repository the base image installs postgres
+      # from, and `postgresql-16-postgis-3` is in that repository.
+      #
+      # It became a REQUIREMENT rather than a nicety when the skip apparatus was
+      # deleted: `spatial_near_runs_under_per_app_role_via_rls` announced a skip
+      # on a server without the extension and was excused by name in a census in
+      # run_plugin_db_live_suite.sh. That census is gone and the test FAILS
+      # instead, so a server without postgis is a red job, not a quieter one.
+      - name: Start Postgres (pgvector, postgis, logical WAL)
         run: |
           docker run -d --name plugin-db-pg -p 5441:5432 \
             -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=zeroship \
@@ -1406,8 +1463,12 @@ jobs:
             pgvector/pgvector:pg16 -c wal_level=logical
           for i in $(seq 1 40); do
             if docker exec plugin-db-pg pg_isready -U postgres; then
+              docker exec plugin-db-pg bash -c \
+                'apt-get update && apt-get install -y --no-install-recommends postgresql-16-postgis-3'
               docker exec plugin-db-pg psql -U postgres -d zeroship \
-                -v ON_ERROR_STOP=1 -c 'CREATE EXTENSION IF NOT EXISTS vector;'
+                -v ON_ERROR_STOP=1 \
+                -c 'CREATE EXTENSION IF NOT EXISTS vector;' \
+                -c 'CREATE EXTENSION IF NOT EXISTS postgis;'
               exit 0
             fi
             sleep 3
@@ -1461,9 +1522,9 @@ jobs:
           --health-retries 20
       # NOT used by any test here - the worker's live tests build their kernel
       # with `kv_url: None`. It is here because the overlay writer below waits
-      # on BOTH backends before describing either (`--check` skips the
-      # `docker compose up`, and nothing else), so a job without Redis cannot
-      # get a file written and the suite then refuses for want of one.
+      # on EVERY backend before describing any of them (`--check` skips the
+      # `docker compose up`, and nothing else), so a job missing one cannot get
+      # a file written and the suite then refuses for want of it.
       redis:
         image: redis:7-alpine
         ports:
@@ -1473,6 +1534,16 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 20
+      # And the SMTP sink, for exactly the reason stated above rather than for a
+      # worker test: the provisioner describes the workspace's test backends as
+      # a SET, and a job that adopts the set adopts all of it. Splitting it into
+      # per-job subsets would be a second, hand-maintained statement of which
+      # tests need what.
+      smtp:
+        image: axllent/mailpit:latest
+        ports:
+          - 1025:1025
+          - 8025:8025
     env:
       PG_HOST: localhost
       PG_PORT: 5440
