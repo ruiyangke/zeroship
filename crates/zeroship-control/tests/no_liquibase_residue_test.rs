@@ -42,6 +42,19 @@ fn control_crate_has_no_operational_liquibase_residue() {
     // Don't grep this guard test itself (it necessarily names the residue).
     let self_path = crate_root.join("tests/no_liquibase_residue_test.rs");
 
+    // A SWEEP THAT SCANNED NOTHING PRINTS WHAT A CLEAN TREE PRINTS. `collect_rs`
+    // returns on an unreadable directory, so a wrong root, a renamed `src/` or a
+    // permissions problem leaves `files` empty and `offenders` empty with it -
+    // green, having ruled on nothing. The floor is the FILE THIS TEST IS IN plus
+    // the module it guards, which cannot both vanish while this test still runs.
+    assert!(
+        files.contains(&self_path),
+        "the sweep did not reach its own source, so it scanned nothing: it \
+         looked under {} and found {} file(s)",
+        crate_root.display(),
+        files.len()
+    );
+
     let mut offenders: Vec<String> = Vec::new();
     for file in &files {
         if file == &self_path {
@@ -68,8 +81,8 @@ fn control_crate_has_no_operational_liquibase_residue() {
     assert!(
         offenders.is_empty(),
         "control crate still has operational Liquibase residue (the platform DB \
-         is migrated by `zeroship-platform-migrate --migrations-dir db/migrations-ts`, \
-         not Liquibase). Offending lines:\n{}",
+         is migrated by `deploy/ops/db-migrate.sh` over `db/migrations-ts`, not \
+         Liquibase). Offending lines:\n{}",
         offenders.join("\n")
     );
 }

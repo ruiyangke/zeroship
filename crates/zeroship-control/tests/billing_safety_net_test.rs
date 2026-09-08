@@ -890,6 +890,20 @@ fn period_band_is_reserved_for_the_allocator() {
         collect_rs(&crate_root.join(sub), &mut files);
     }
 
+    // The positive control above binds the MATCHER; this binds the SWEEP.
+    // `collect_rs` returns on an unreadable directory, so a wrong root or a
+    // renamed subtree leaves `files` empty and `offenders` empty with it -
+    // green, having ruled on nothing. Both exempt paths are files this test
+    // names by hand, so the sweep must have reached both of them.
+    for known in &exempt {
+        assert!(
+            files.contains(known),
+            "the sweep never reached {}, so it ruled on {} file(s) and possibly none of the right ones",
+            known.display(),
+            files.len()
+        );
+    }
+
     let mut offenders: Vec<String> = Vec::new();
     for file in &files {
         if exempt.contains(file) {
