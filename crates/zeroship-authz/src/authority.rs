@@ -33,9 +33,32 @@
 //! the member held a higher project role, which is the opposite of narrowing.
 //! Keeping it in one pure function is what lets it be exercised without a
 //! database while the SQL beside it stays an ordinary join.
+//!
+//! # One rendering per id
+//!
+//! Every id this module binds is `text`, and every one of them is parsed before
+//! it gets here: the app id by [`AppId`] on the [`Resource`] itself, the project
+//! and organization ids by `Resource::validate_ids`. Nothing in this file
+//! chooses between two spellings of the same id, and there is nothing left to
+//! refuse - which is why the app arm of [`resolve`] is a single call rather than
+//! a parse followed by one.
+//!
+//! That matters more here than it reads. A mis-rendered id does not fail this
+//! query: `zeroship.apps` is reached by a LEFT JOIN, so an id in a rendering the
+//! column does not hold contributes NO ROW, every rank comes back NULL, and the
+//! caller is told they hold no seat on an app they own. The type is what makes
+//! that unreachable.
+//!
+//! **This binds `zeroship.apps.id` as `text`, and that is a REQUIREMENT ON THE
+//! COLUMN, not a description of one.** The column carried `uuid` while an app id
+//! was a uuid. `AppId` exposes no route to those bits - there is no `uuid()` to
+//! call - so text against text is the only comparison this join can make, and a
+//! database whose `apps.id` is still `uuid` fails it outright with a type error
+//! rather than resolving anything. Loud, and on the first query.
 
 use compio_postgres::Client;
 use uuid::Uuid;
+use zeroship_core::app_id::AppId;
 
 use crate::{AuthzError, Resource};
 
@@ -116,39 +139,8 @@ pub async fn resolve(
         Resource::Project { id } => {
             resolve_narrowed(pg, principal_id, Some(id.as_str()), None).await
         }
-        Resource::App { id } => {
-            let app_id = app_uuid_or_refuse(id)?;
-            resolve_narrowed(pg, principal_id, None, Some(app_id)).await
-        }
+        Resource::App { id } => resolve_narrowed(pg, principal_id, None, Some(id)).await,
     }
-}
-
-/// Decide ACCEPT or REFUSE for an app id, never which of two behaviours to take.
-///
-/// Two renderings name one app and both are accepted:
-///
-/// - `app_<base62>`, the canonical typed id ([`zeroship_core::app_id::AppId`]).
-/// - a bare uuid, in any spelling `uuid::Uuid` accepts. THAT ARM IS
-///   TRANSITIONAL: `zeroship.apps.id` is still a `uuid` column, so a uuid is
-///   what the control plane holds and what its path segments carry today. It
-///   goes when the column flips.
-///
-/// A rendering this function has not been taught is a REFUSAL, not a deny.
-/// The shape it replaces parsed a uuid and, on failure, fell through to the
-/// unranked read - so a caller presenting the CANONICAL `app_` id got rank
-/// zero and a 403 that named nothing, indistinguishable from "you hold no seat
-/// on this app". Branching on the shape of an id string is the same defect the
-/// CLI's deleted `is_uuid` produced, where a typed id silently took the other
-/// branch; the fix there and here is that one value means one thing.
-fn app_uuid_or_refuse(id: &str) -> Result<Uuid, AuthzError> {
-    if let Ok(app_id) = zeroship_core::app_id::AppId::parse(id) {
-        return Ok(app_id.uuid());
-    }
-    Uuid::parse_str(id).map_err(|_| {
-        AuthzError::Validation(format!(
-            "app resource id {id:?} is neither an app typed id (app_<base62>) nor a uuid"
-        ))
-    })
 }
 
 const USER_ATTRS: &str = "u.email_verified_at IS NOT NULL AS email_verified, \
@@ -207,12 +199,18 @@ async fn resolve_organization(
 ///
 /// Duplicating this as two nearly identical statements is what would let the
 /// narrowing drift between the two paths, so it is written once.
+///
+/// Both bound ids are `text`, and both arrive already parsed - the app id as an
+/// [`AppId`], the project id as a validated [`Resource::Project`] id. There is
+/// no cast to get wrong and no second rendering to pick between, which is what
+/// the deleted `app_uuid_or_refuse` existed to arbitrate.
 async fn resolve_narrowed(
     pg: &Client,
     principal_id: Uuid,
     project_id: Option<&str>,
-    app_id: Option<Uuid>,
+    app_id: Option<&AppId>,
 ) -> Result<Authority, AuthzError> {
+    let app_id = app_id.map(AppId::as_str);
     let sql = format!(
         "SELECT {USER_ATTRS}, \
                 organization_role.rank         AS organization_rank, \
@@ -220,7 +218,7 @@ async fn resolve_narrowed(
                 project_role.rank              AS project_rank, \
                 (SELECT rank FROM zeroship.organization_roles WHERE role = $4) AS admin_rank \
            FROM zeroship.users u \
-           LEFT JOIN zeroship.apps a ON a.id = $3::uuid \
+           LEFT JOIN zeroship.apps a ON a.id = $3::text \
            LEFT JOIN zeroship.projects p ON p.id = COALESCE($2::text, a.project_id) \
            LEFT JOIN zeroship.organization_members m \
                   ON m.organization_id = p.organization_id AND m.user_id = u.id \
@@ -356,9 +354,7 @@ pub async fn project_probe_resources(
 
 #[cfg(test)]
 mod tests {
-    use super::{app_uuid_or_refuse, effective_project_rank};
-    use crate::AuthzError;
-    use uuid::Uuid;
+    use super::effective_project_rank;
 
     const VIEWER: i32 = 10;
     const DEVELOPER: i32 = 20;
@@ -424,48 +420,20 @@ mod tests {
         );
     }
 
-    /// The CANONICAL app id must resolve, not deny.
-    ///
-    /// REGRESSION. The previous shape parsed a uuid and fell through to the
-    /// unranked read when that failed, so `app_<base62>` - the rendering
-    /// `canonical_app_id_for` produces and the worker already parses - yielded
-    /// rank zero. That is a 403 for a correctly formed id, reported as "no
-    /// seat". Restoring the fall-through makes the first assertion fail.
-    #[test]
-    fn a_typed_app_id_resolves_to_the_same_uuid_as_its_bare_spelling() {
-        let stored = Uuid::new_v4();
-        let typed = zeroship_core::app_id::canonical_app_id_for(&stored);
-
-        assert_eq!(
-            app_uuid_or_refuse(typed.as_str()).expect("the canonical rendering must be accepted"),
-            stored,
-            "a typed app id must name the same app as its uuid"
-        );
-        assert_eq!(
-            app_uuid_or_refuse(&stored.to_string()).expect("the uuid arm is transitional but live"),
-            stored
-        );
-    }
-
-    /// An id in neither rendering is a REFUSAL, never a silent rank zero.
-    ///
-    /// The distinction is the whole point: "this id names nothing" and "you
-    /// hold no seat here" are different answers, and the old shape collapsed
-    /// them into the second one.
-    #[test]
-    fn an_unteachable_rendering_is_refused_rather_than_denied() {
-        for raw in [
-            "",
-            "not-an-id",
-            "org_0000000000000000000000",
-            "prj_0000000000000000000000",
-        ] {
-            let err = app_uuid_or_refuse(raw)
-                .expect_err("an id that names no app must be refused, not denied");
-            assert!(
-                matches!(err, AuthzError::Validation(_)),
-                "refusal must be a validation error, not a database or deny outcome: {err:?}"
-            );
-        }
-    }
+    // WHAT USED TO BE HERE, AND WHY IT IS NOT.
+    //
+    // Two tests pinned `app_uuid_or_refuse`: that the canonical `app_<base62>`
+    // rendering resolved rather than falling through to the unranked read, and
+    // that an id in neither taught rendering was a REFUSAL rather than a silent
+    // rank zero. Both bound a function that existed only because
+    // `Resource::App` carried a `String` and two renderings of an app id were
+    // live at once.
+    //
+    // `Resource::App` carries an `AppId`, so neither test has an input left to
+    // build: there is one rendering, `AppId::parse` is the only way in, and the
+    // refusal happens at the crate boundary instead of inside the resolve. The
+    // boundary itself is bound in `resource.rs`
+    // (`a_non_canonical_app_id_does_not_deserialize`) and the parse is bound in
+    // `zeroship_core::app_id`. Re-asserting either here would be a second copy
+    // of a check this module no longer performs.
 }

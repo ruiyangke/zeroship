@@ -77,9 +77,8 @@ fn user_entity(principal_id: uuid::Uuid, authority: &Authority) -> Result<Entity
 /// Returns [`AuthzError::CedarEntities`] when Cedar rejects the uid.
 pub(crate) fn resource_entity_uid(resource: &Resource) -> Result<EntityUid, AuthzError> {
     match resource {
-        Resource::App { id } | Resource::Project { id } | Resource::Organization { id } => {
-            uid(resource.cedar_type(), id)
-        }
+        Resource::App { id } => uid(resource.cedar_type(), id.as_str()),
+        Resource::Project { id } | Resource::Organization { id } => uid(resource.cedar_type(), id),
         Resource::Any => uid(resource.cedar_type(), "*"),
     }
 }
@@ -133,7 +132,7 @@ mod tests {
         for resource in [
             Resource::Any,
             Resource::App {
-                id: Uuid::nil().to_string(),
+                id: zeroship_core::app_id::AppId::mint(),
             },
             Resource::Project {
                 id: "prj_0123456789abcdefghijkl".to_owned(),
