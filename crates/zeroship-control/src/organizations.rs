@@ -1189,7 +1189,8 @@ pub async fn create_organization(
     .map_err(|err| db_error(&err, "seat first owner"))?;
 
     // A project from the first moment. An organization with no project cannot
-    // hold an app (`apps.project_id` is NOT NULL), so minting one here is what
+    // hold a live app (`apps_live_app_has_project` allows a NULL `project_id`
+    // only once `deleted_at` is set), so minting one here is what
     // keeps "create an organization, then deploy" a two-step flow instead of a
     // three-step one.
     tx.execute(
