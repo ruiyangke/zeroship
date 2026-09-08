@@ -2085,7 +2085,23 @@ resolves an instance's key back from its own ACTIVE row.
 boot, in memory, enrols presenting only its listening port and public key, and
 refuses to start when control refuses it.
 
-**4c. The health monitor.** NOT STARTED. Design above.
+**4c. The health monitor.** LANDED. `crates/zeroship-control/src/worker_health.rs`
+sweeps the declared-enrolled set, probes each at its derived address, and holds
+the reading in its own `HealthView`. It issues exactly one statement against the
+registry, the SELECT that reads the set; it never writes `status`, and it ships
+no reaper.
+
+The view is PROCESS-LOCAL for now, spawned in `main.rs` beside the crons. Its
+reader is 4d, and `AppState` is a struct literal with no builder, so hanging an
+unread field off it today would mean editing every construction site to carry
+something nothing consumes. The change that reads the view is the change that
+should move it onto the state.
+
+`latest` returns an `Option`, because NEVER PROBED and UNHEALTHY are different
+facts: collapsing them would make an instance ineligible for the sweep that
+follows its own enrolment. `healthy_within` requires FRESHNESS, so a monitor that
+stopped sweeping cannot leave the fleet looking permanently healthy.
+
 *Red test, and it is a PAIR because either arm alone passes against the wrong
 thing:* enrol an instance, then kill the process WITHOUT touching its row.
 (i) The monitor must report it unhealthy while the row still reads `active` - the
@@ -2097,6 +2113,14 @@ which must report healthy and also leave its row untouched.
 that logs "unhealthy" and changes nothing prints what a working one prints; that
 exact substitution survived three of four arms when it was tried on the worker's
 startup refusal.
+
+BOTH ARMS ARE MUTATION-BOUND, EACH BY ITS OWN MUTATION, which is what makes the
+pair a pair rather than one assertion with a spare. Making `tick` write `gone` on
+a failed probe - the catastrophic implementation - reddens only arm (ii), which
+reports the row reading `gone` where `active` was required. Making `probe` return
+healthy unconditionally reddens only arm (i), which reports the dead instance
+observed healthy. Neither mutation reddens the other's arm, so neither assertion
+is carrying the other.
 
 **4d. The eligible set.** NOT STARTED. Design above, and it carries the ring-key
 coupling: control's ring and the gateway's must consume the same key or they are

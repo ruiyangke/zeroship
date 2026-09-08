@@ -1137,6 +1137,37 @@ fn main() -> std::io::Result<()> {
         "control: audit-retention + orphaned-app-reaper crons spawned"
     );
 
+    // The worker health monitor. It probes each enrolled instance at the address
+    // control DERIVED for it and holds the result in its own state; it issues no
+    // write to `zeroship.worker_instances`, which is the property its live test
+    // binds. See `worker_health` for why writing an observation into `status`
+    // would turn a network blip into permanent eviction.
+    //
+    // THE VIEW IS PROCESS-LOCAL HERE, AND THAT IS SEQUENCING RATHER THAN AN
+    // OVERSIGHT. Its reader is the per-app eligible set, which is not built yet.
+    // `AppState` is a struct literal with no builder, so hanging an unread field
+    // off it now would mean editing every construction site to carry something
+    // nothing consumes. The change that READS the view is the change that should
+    // move it onto the state, in the same patch as its first reader.
+    let worker_health_view = Arc::new(zeroship_control::worker_health::HealthView::new());
+    {
+        let pg = Arc::clone(&state.control_pg);
+        let view = Arc::clone(&worker_health_view);
+        compio::runtime::spawn(async move {
+            zeroship_control::worker_health::run(
+                pg,
+                view,
+                zeroship_control::worker_health::DEFAULT_SWEEP_SECS,
+            )
+            .await;
+        })
+        .detach();
+    }
+    tracing::info!(
+        sweep_secs = zeroship_control::worker_health::DEFAULT_SWEEP_SECS,
+        "control: worker health monitor spawned"
+    );
+
     let bind_addr = format!("{bind_host}:{port}");
     tracing::info!(bind = %bind_addr, "zeroship-control listening");
 
