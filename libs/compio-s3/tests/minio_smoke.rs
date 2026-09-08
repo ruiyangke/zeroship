@@ -3,8 +3,9 @@
 //! This test is **self-contained**: it starts its own `MinIO` container, creates
 //! a bucket, exercises the full v1 client surface (put / get / head / list /
 //! delete plus a multipart round-trip with parts ≥ 5 `MiB`), and tears the
-//! container down. It **skips cleanly** when Docker is unavailable so CI / dev
-//! machines without Docker stay green.
+//! container down. It **REFUSES** when Docker is unavailable: a machine
+//! without Docker gets a named failure saying what to install, never a green
+//! that exercised no client at all.
 
 #![allow(clippy::future_not_send)]
 //!
@@ -50,8 +51,10 @@ fn cleanup() {
 }
 
 /// Start `MinIO` and create the test bucket via the bundled `mc` client.
-/// Returns `true` on success.
-fn start_minio() -> bool {
+///
+/// Returns normally or does not return: a container that will not start is the
+/// absence of the thing under test, not a reason to report a pass.
+fn start_minio() {
     cleanup();
     let run = Command::new("docker")
         .args([
@@ -71,8 +74,7 @@ fn start_minio() -> bool {
         ])
         .status();
     if !matches!(run, Ok(s) if s.success()) {
-        common::skip("skip: failed to start MinIO container");
-        return false;
+        common::minio_unavailable("`docker run` did not exit 0", CONTAINER, PORT);
     }
 
     // Wait for readiness, then create the bucket using `mc` inside the
@@ -108,13 +110,20 @@ fn start_minio() -> bool {
                 .stderr(std::process::Stdio::null())
                 .status();
             if matches!(mb, Ok(s) if s.success()) {
-                return true;
+                return;
             }
         }
     }
-    common::skip("skip: MinIO did not become ready / bucket create failed");
+    // Tear the container down BEFORE refusing. The refusal panics, so anything
+    // after the call is unreachable, and leaving a half-started container named
+    // CONTAINER behind would make the next run fail at `docker run` instead -
+    // a different message for the same underlying problem.
     cleanup();
-    false
+    common::minio_unavailable(
+        "the container started but never became ready (mc alias/mb kept failing)",
+        CONTAINER,
+        PORT,
+    );
 }
 
 fn client() -> S3Client {
@@ -128,12 +137,9 @@ fn client() -> S3Client {
 #[test]
 fn minio_full_surface_and_multipart() {
     if !docker_available() {
-        common::skip("skip: docker unavailable");
-        return;
+        common::docker_unavailable();
     }
-    if !start_minio() {
-        return;
-    }
+    start_minio();
 
     // The whole async body runs on a single compio thread; tear down the
     // container at the end regardless of outcome.
