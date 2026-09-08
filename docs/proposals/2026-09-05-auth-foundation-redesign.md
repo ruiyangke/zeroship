@@ -2032,6 +2032,58 @@ byte-identical claims. Until a worker can be told apart from its peers, an
 eligible-set comparison has nothing to compare, and the step's fence is
 unwritable - which is what F7 already says about itself.
 
+*SETTLED 2026-09-07, because the obvious two shapes each break a fence and an
+implementer stopped rather than pick one.* The worker holds TWO keyrings, and
+which one is used where is part of the design rather than an implementation
+detail:
+
+- **The ROLE keyring**, loaded from the operator's key file under `svc/worker`,
+  is used for the ENROLMENT CALL ONLY. It is what the worker already holds, and
+  enrolment must authenticate as the role because at that moment no instance
+  exists.
+- **The INSTANCE keyring**, built on a keypair generated at boot in memory,
+  mints under `svc/worker/<wkr_id>` and is addressed as `svc/worker` via the
+  `addressed_as` split. Everything after enrolment uses it.
+
+Two keyrings rather than one is forced, not chosen. `ServiceKeyring::from_parts`
+builds the minter from the issuer at construction, so the issuer cannot be
+changed afterwards and minting under the instance name REQUIRES constructing on
+the instance key. Keeping the role key and merely relabelling it is refused by
+that same constructor as `OwnKeyUnderForeignIssuer`, and correctly: the peer
+bundle publishes that key under `svc/worker`, so every holder of the bundle
+would accept the instance's signature as the role's.
+
+**The instance keyring's own-key check must be REPLACED, not inherited, and this
+is the load-bearing half.** `from_parts` refuses a process whose own public half
+is published under a FOREIGN issuer. Against a key generated at boot that
+refusal is vacuous by construction - a fresh key is in no bundle - so carrying it
+over unchanged would make the worker the one process whose F4 own-key check
+cannot fire, while still reporting exactly what a check that ruled and approved
+reports. The instance keyring therefore refuses when its public half appears in
+the bundle AT ALL. That predicate has content on a boot-generated key: it fires
+on a key collision or on a planted key, and it is false on every honest boot.
+
+The `UserEnvelopeSigner` minted by `from_parts` is the gateway's capability - the
+only non-definition consumer found is `crates/zeroship-gateway/src/oidc_rp.rs`.
+Part 2 must confirm the worker's copy has no consumer before it constructs a
+second one, and must not mint one on the instance key on the strength of this
+paragraph alone.
+
+*What making enrolment MANDATORY costs, stated before it is paid.* Control's
+enrolment envelope has no declaration anywhere in the tree - not in the compose
+topology, not in any harness under `tests/`, not in any ops config - so control
+boots with a closed envelope and refuses every enrolment as `envelope_unset`.
+A worker that refuses to start on a failed enrolment therefore starts NOWHERE
+until the envelope is declared where workers are expected to boot. That is the
+honest cost of the F4 shape and it is not avoidable by a worker-side setting:
+the refusal is control's.
+
+The loopback arm was a SEPARATE and now-fixed defect, and conflating the two
+would leave the real one unpaid. That arm sat above the network comparison, so
+no declaration could admit a single-host deployment; it now rules through the
+declared networks like any other address. Fixing it made a single-host
+declaration EXPRESSIBLE. It did not make one EXIST.
+
 *REJECTED, with reasons, so it is not re-proposed: having the GATEWAY sign an
 attestation of its own routing decision* and letting the worker relay it to
 control. It is superficially attractive because the gateway already decides
