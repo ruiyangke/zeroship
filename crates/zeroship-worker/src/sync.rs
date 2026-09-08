@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-use uuid::Uuid;
 use zeroship_bundle::{BlobStore, Manifest};
 use zeroship_core::app_id::AppId;
 use zeroship_core::types::{AppVersionInfo, VersionMap};
@@ -12,50 +11,17 @@ use crate::{cache, WorkerConfig};
 
 const CONTROL_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// Decode the [`Uuid`] embedded in a typed app id's printed form.
-///
-/// This is the worker's ONE conversion from the gateway-facing [`AppId`]
-/// back to the uuid the isolate cache, the env cache, the version feed and
-/// the meter are all keyed by (`zeroship_core::types::VersionMap` is still a
-/// `Uuid`-keyed wire type). `handler::dispatch`, `handler::workflow_advance_unsigned`
-/// and `logs::get_logs` each parse their `{app_id}` path segment with
-/// `AppId::parse` and call this exactly once on the result, so one uuid
-/// drives every downstream lookup for one request.
-///
-/// Every value reaching this function already parsed under `AppId::PREFIX`,
-/// so the decode below can never fail; the `expect` documents that
-/// invariant rather than adding a second error path this crate would have
-/// to test.
-pub(crate) fn app_id_uuid(app_id: &AppId) -> Uuid {
-    zeroship_core::typed_id::parse_with_prefix(app_id.as_str(), AppId::PREFIX)
-        .expect("AppId always parses under its own prefix")
-}
-
-/// Render a raw [`Uuid`] the control plane stores as the canonical
-/// [`AppId`] string the worker's routes accept - the inverse of
-/// [`app_id_uuid`]. Used only by tests, which hold the stored uuid and need
-/// to address the worker's endpoints the way the gateway does.
-#[cfg(test)]
-pub(crate) fn uuid_app_id(stored: &Uuid) -> AppId {
-    let printed = format!(
-        "{}_{}",
-        AppId::PREFIX,
-        zeroship_core::typed_id::uuid_to_base62(stored)
-    );
-    AppId::parse(&printed).expect("uuid_to_base62 always yields a valid app id body")
-}
-
 /// Resolve the worker-entry blob hash from a manifest. Returns `None` for
 /// SSG-only deploys (worker missing) and logs+returns `None` if the
 /// manifest is malformed (entry not in modules) so the worker stays
 /// loud rather than silently running stale code.
-pub(crate) fn worker_entry_hash(manifest: &Manifest, app_id: &Uuid) -> Option<String> {
+pub(crate) fn worker_entry_hash(manifest: &Manifest, app_id: &AppId) -> Option<String> {
     let worker = manifest.worker.as_ref()?;
     match worker.modules.get(&worker.entry) {
         Some(h) => Some(h.clone()),
         None => {
             tracing::warn!(
-                app_id = %app_id,
+                app_id = app_id.as_str(),
                 entry = ?worker.entry,
                 "worker-sync: manifest.worker.entry missing from modules"
             );
@@ -74,7 +40,7 @@ pub(crate) fn worker_entry_hash(manifest: &Manifest, app_id: &Uuid) -> Option<St
 pub(crate) async fn runtime_descriptor_json(
     manifest: &Manifest,
     blob_store: &Arc<dyn BlobStore>,
-    app_id: &Uuid,
+    app_id: &AppId,
 ) -> Result<Option<String>, String> {
     let Some(desc) = manifest.runtime_descriptor.as_ref() else {
         return Ok(None);
@@ -85,7 +51,7 @@ pub(crate) async fn runtime_descriptor_json(
             Ok(s) => Ok(Some(s)),
             Err(e) => {
                 tracing::error!(
-                    app_id = %app_id,
+                    app_id = app_id.as_str(),
                     descriptor_hash = %hash,
                     error = %e,
                     "worker-sync: runtime_descriptor blob is not UTF-8; refusing to load app"
@@ -95,7 +61,7 @@ pub(crate) async fn runtime_descriptor_json(
         },
         Err(e) => {
             tracing::error!(
-                app_id = %app_id,
+                app_id = app_id.as_str(),
                 descriptor_hash = %hash,
                 error = %e,
                 "worker-sync: runtime_descriptor blob fetch failed; refusing to load app"
@@ -129,7 +95,7 @@ pub struct CachedEnv {
 /// `Arc<CachedEnv>` lets the handler clone an Arc (cheap) under the
 /// read lock and use it after dropping the lock — so the hot path
 /// never holds the lock across `await`.
-pub type SharedEnvs = Arc<RwLock<HashMap<Uuid, Arc<CachedEnv>>>>;
+pub type SharedEnvs = Arc<RwLock<HashMap<AppId, Arc<CachedEnv>>>>;
 
 /// Start the single process-wide version-polling task. All ntex worker
 /// threads observe its output through `shared`. Also takes a handle
@@ -183,7 +149,7 @@ async fn version_poll_loop(
                                 previous
                                     .keys()
                                     .filter(|app_id| !versions.contains_key(app_id))
-                                    .copied(),
+                                    .cloned(),
                             );
                         }
                     }
@@ -194,19 +160,19 @@ async fn version_poll_loop(
                 // the URL and building a fresh two-connection pool for every
                 // deleted app the way the old free function did.
                 if let Some(service) = db_service.as_deref() {
-                    let pending: Vec<Uuid> = pending_cdc_deprovision.iter().copied().collect();
+                    let pending: Vec<AppId> = pending_cdc_deprovision.iter().cloned().collect();
                     for app_id in pending {
-                        match service.lifecycle().deprovision_app(&app_id.to_string()).await {
+                        match service.lifecycle().deprovision_app(app_id.as_str()).await {
                             Ok(()) => {
                                 pending_cdc_deprovision.remove(&app_id);
                                 tracing::info!(
-                                    app_id = %app_id,
+                                    app_id = app_id.as_str(),
                                     "worker-sync: deleted app CDC deprovisioned"
                                 );
                             }
                             Err(error) => {
                                 tracing::error!(
-                                    app_id = %app_id,
+                                    app_id = app_id.as_str(),
                                     error = %error,
                                     "worker-sync: deleted app CDC deprovision failed; retrying"
                                 );
@@ -379,10 +345,10 @@ async fn reconcile_once(config: &WorkerConfig, versions: &VersionMap, envs: &Sha
     // refreshes envs for apps thread A loaded too. The version dedup
     // (`cached_env_version == info.env_version`) skips work that's
     // already up-to-date, so this isn't N-thread amplification.
-    let env_app_ids: Vec<Uuid> = envs
+    let env_app_ids: Vec<AppId> = envs
         .read()
         .ok()
-        .map(|e| e.keys().copied().collect())
+        .map(|e| e.keys().cloned().collect())
         .unwrap_or_default();
     for app_id in &env_app_ids {
         let Some(info) = versions.get(app_id) else { continue };
@@ -390,13 +356,13 @@ async fn reconcile_once(config: &WorkerConfig, versions: &VersionMap, envs: &Sha
         if cached_version == Some(info.env_version) { continue; }
         match fetch_app_env(&config.control_url, &config.service_auth, app_id).await {
             Ok(env_json) => {
-                if let Err(e) = put_env_from_json(envs, *app_id, &env_json, info.env_version) {
-                    tracing::warn!(app_id = %app_id, error = %e, "worker-sync: env parse failed");
+                if let Err(e) = put_env_from_json(envs, app_id.clone(), &env_json, info.env_version) {
+                    tracing::warn!(app_id = app_id.as_str(), error = %e, "worker-sync: env parse failed");
                 }
             }
             Err(e) => {
                 crate::metrics::inc(&crate::metrics::ENV_FETCH_FAILURES);
-                tracing::warn!(app_id = %app_id, error = %e, "worker-sync: env-only refresh failed");
+                tracing::warn!(app_id = app_id.as_str(), error = %e, "worker-sync: env-only refresh failed");
             }
         }
     }
@@ -450,7 +416,7 @@ async fn reconcile_once(config: &WorkerConfig, versions: &VersionMap, envs: &Sha
                                     Ok(json) => Some(json),
                                     Err(e) => {
                                         crate::metrics::inc(&crate::metrics::ENV_FETCH_FAILURES);
-                                        tracing::warn!(app_id = %local_id, error = %e, "worker-sync: fetch env failed");
+                                        tracing::warn!(app_id = local_id.as_str(), error = %e, "worker-sync: fetch env failed");
                                         continue; // don't swap V8 with no env
                                     }
                                 }
@@ -459,8 +425,8 @@ async fn reconcile_once(config: &WorkerConfig, versions: &VersionMap, envs: &Sha
                             };
 
                             if let Some(env_json) = env_for_load.as_deref() {
-                                if let Err(e) = put_env_from_json(envs, *local_id, env_json, info.env_version) {
-                                    tracing::warn!(app_id = %local_id, error = %e, "worker-sync: env parse failed");
+                                if let Err(e) = put_env_from_json(envs, local_id.clone(), env_json, info.env_version) {
+                                    tracing::warn!(app_id = local_id.as_str(), error = %e, "worker-sync: env parse failed");
                                     continue;
                                 }
                             }
@@ -472,14 +438,14 @@ async fn reconcile_once(config: &WorkerConfig, versions: &VersionMap, envs: &Sha
                                 Some(m) => match runtime_descriptor_json(m, &config.blob_store, local_id).await {
                                     Ok(json) => json,
                                     Err(e) => {
-                                        tracing::warn!(app_id = %local_id, error = %e, "worker-sync: descriptor load failed");
+                                        tracing::warn!(app_id = local_id.as_str(), error = %e, "worker-sync: descriptor load failed");
                                         continue;
                                     }
                                 },
                                 None => None,
                             };
                             let Some(env_entry) = get_env(envs, local_id) else {
-                                tracing::warn!(app_id = %local_id, "worker-sync: env cache missing before app load");
+                                tracing::warn!(app_id = local_id.as_str(), "worker-sync: env cache missing before app load");
                                 continue;
                             };
                             // The manifest is always `Some` here: the
@@ -492,7 +458,7 @@ async fn reconcile_once(config: &WorkerConfig, versions: &VersionMap, envs: &Sha
                             // posture the worker had before it enforced at all.
                             let declared = info.manifest.clone().unwrap_or_default();
                             match cache::load_app(
-                                *local_id,
+                                local_id.clone(),
                                 &bytes,
                                 info.runtime.clone(),
                                 info.net_policy.clone(),
@@ -505,34 +471,34 @@ async fn reconcile_once(config: &WorkerConfig, versions: &VersionMap, envs: &Sha
                                     // Record what the fresh isolate was loaded
                                     // against — the reload decision above keys
                                     // off this on the next cycle.
-                                    cache::set_loaded_meta(*local_id, cache::LoadedMeta {
+                                    cache::set_loaded_meta(local_id.clone(), cache::LoadedMeta {
                                         deploy_hash: info.deploy_hash.clone(),
                                         env_version: info.env_version,
                                         net_policy: info.net_policy.clone(),
                                     });
                                     tracing::info!(
-                                        app_id = %local_id,
+                                        app_id = local_id.as_str(),
                                         plan_id = %info.plan_id,
                                         blob_prefix = &bundle_hash[..bundle_hash.len().min(8)],
                                         "worker-sync: app updated"
                                     );
                                 }
                                 Err(e) => {
-                                    tracing::warn!(app_id = %local_id, error = %e, "worker-sync: app load failed");
+                                    tracing::warn!(app_id = local_id.as_str(), error = %e, "worker-sync: app load failed");
                                     continue;
                                 }
                             }
                         }
                         Err(e) => {
                             crate::metrics::inc(&crate::metrics::BUNDLE_FETCH_FAILURES);
-                            tracing::warn!(app_id = %local_id, error = %e, "worker-sync: fetch bundle failed");
+                            tracing::warn!(app_id = local_id.as_str(), error = %e, "worker-sync: fetch bundle failed");
                         }
                     }
                 }
             }
             // App deleted from control plane — evict
             None => {
-                tracing::info!(app_id = %local_id, "worker-sync: evicting deleted app");
+                tracing::info!(app_id = local_id.as_str(), "worker-sync: evicting deleted app");
                 cache::evict_app(local_id);
                 cache::remove_loaded_meta(local_id);
                 // Env entry GC'd centrally by version_poll_loop's
@@ -552,9 +518,9 @@ async fn reconcile_once(config: &WorkerConfig, versions: &VersionMap, envs: &Sha
 pub async fn fetch_app_version(
     url_base: &str,
     service_auth: &zeroship_core::service_peers::ServiceAuth,
-    app_id: &Uuid,
+    app_id: &AppId,
 ) -> Result<AppVersionInfo, String> {
-    let url = format!("{url_base}/internal/apps/{app_id}");
+    let url = format!("{url_base}/internal/apps/{}", app_id.as_str());
     let body = http_get(&url, control_authorization(service_auth)?.as_deref()).await?;
     serde_json::from_str(&body).map_err(|e| e.to_string())
 }
@@ -571,9 +537,9 @@ pub async fn fetch_app_version(
 pub async fn fetch_app_env(
     url_base: &str,
     service_auth: &zeroship_core::service_peers::ServiceAuth,
-    app_id: &Uuid,
+    app_id: &AppId,
 ) -> Result<String, String> {
-    let url = format!("{url_base}/internal/apps/{app_id}/env");
+    let url = format!("{url_base}/internal/apps/{}/env", app_id.as_str());
     http_get(&url, control_authorization(service_auth)?.as_deref()).await
 }
 
@@ -613,7 +579,7 @@ fn control_authorization(
 /// keeping them as bytes-in / bytes-out is the only sensible path.
 pub fn put_env_from_json(
     envs: &SharedEnvs,
-    app_id: Uuid,
+    app_id: AppId,
     env_json: &str,
     version: i64,
 ) -> Result<(), String> {
@@ -631,21 +597,21 @@ pub fn put_env_from_json(
 
 /// Read the cached env entry for an app. Cheap — clones an Arc under a
 /// brief read lock; never holds the lock across `await`.
-pub fn get_env(envs: &SharedEnvs, app_id: &Uuid) -> Option<Arc<CachedEnv>> {
+pub fn get_env(envs: &SharedEnvs, app_id: &AppId) -> Option<Arc<CachedEnv>> {
     envs.read().ok()?.get(app_id).cloned()
 }
 
 /// Read just the version of the cached env, if any. Used by reconcile
 /// to dedup across threads — if SharedEnvs already has the latest
 /// version, no fetch needed.
-pub fn cached_env_version(envs: &SharedEnvs, app_id: &Uuid) -> Option<i64> {
+pub fn cached_env_version(envs: &SharedEnvs, app_id: &AppId) -> Option<i64> {
     envs.read().ok()?.get(app_id).map(|e| e.version)
 }
 
 /// Remove the cached env for an app. Used when the bundle load /
 /// env-fetch fails so the next request retries from scratch.
 #[allow(dead_code)]
-pub fn remove_env(envs: &SharedEnvs, app_id: &Uuid) {
+pub fn remove_env(envs: &SharedEnvs, app_id: &AppId) {
     if let Ok(mut e) = envs.write() {
         e.remove(app_id);
     }
@@ -907,7 +873,7 @@ mod tests {
     fn tmpdir(label: &str) -> std::path::PathBuf {
         let path = std::env::temp_dir().join(format!(
             "zs-worker-sync-{label}-{}",
-            Uuid::new_v4().simple()
+            uuid::Uuid::new_v4().simple()
         ));
         std::fs::create_dir_all(&path).expect("mkdir tmp");
         path
@@ -920,7 +886,7 @@ mod tests {
             let root = tmpdir("descriptor-schema-less");
             let blob_store: Arc<dyn BlobStore> =
                 Arc::new(LocalDiskBlobStore::new(root.clone()).expect("blob store"));
-            let app_id = Uuid::new_v4();
+            let app_id = AppId::mint();
             let manifest = Manifest::default();
 
             let descriptor = runtime_descriptor_json(&manifest, &blob_store, &app_id)
@@ -938,7 +904,7 @@ mod tests {
             let root = tmpdir("descriptor-missing-blob");
             let blob_store: Arc<dyn BlobStore> =
                 Arc::new(LocalDiskBlobStore::new(root.clone()).expect("blob store"));
-            let app_id = Uuid::new_v4();
+            let app_id = AppId::mint();
             let descriptor_hash = "c".repeat(64);
             let manifest = Manifest {
                 runtime_descriptor: Some(RuntimeDescriptorEntry {
@@ -958,7 +924,7 @@ mod tests {
         });
     }
 
-    fn dispatch_req(app_id: &Uuid) -> ntex::http::Request {
+    fn dispatch_req(app_id: &AppId) -> ntex::http::Request {
         let frame = zeroship_core::dispatch_frame::encode_dispatch_frame(
             "GET",
             "http://example.test/env-probe",
@@ -967,10 +933,7 @@ mod tests {
         )
         .expect("dispatch frame");
         test::TestRequest::post()
-            // The route takes the app id in its printed, typed form; this test
-            // holds the uuid the version feed serves, so it renders it the way
-            // the gateway does rather than spelling the uuid into the URL.
-            .uri(&format!("/dispatch/{}", uuid_app_id(app_id).as_str()))
+            .uri(&format!("/dispatch/{}", app_id.as_str()))
             .header(
                 "authorization",
                 crate::handler::tests::gateway_authorization(),
@@ -1004,7 +967,7 @@ mod tests {
             // so safe alongside handler.rs tests in the same process.
             zeroship_runtime::init::init_v8();
 
-            let app_id = Uuid::new_v4();
+            let app_id = AppId::mint();
             // Reads one var and one secret off the materialized `env`
             // argument, plus the var again via `process.env` — the two
             // V8 surfaces SEC-7 is about.
@@ -1046,7 +1009,7 @@ mod tests {
             let envs: SharedEnvs = Arc::new(RwLock::new(HashMap::new()));
             put_env_from_json(
                 &envs,
-                app_id,
+                app_id.clone(),
                 r#"{"vars":{"API_TOKEN":"var-old"},"secrets":{"SIGNING_SECRET":"sec-old"},"expose":[]}"#,
                 1,
             )
@@ -1056,7 +1019,7 @@ mod tests {
             // Load the app the way the worker does, recording that the
             // isolate was hydrated against env version 1.
             crate::cache::load_app(
-                app_id,
+                app_id.clone(),
                 source,
                 AppRuntimeLimits::default(),
                 AppNetPolicy::default(),
@@ -1067,7 +1030,7 @@ mod tests {
             )
             .expect("app loads");
             crate::cache::set_loaded_meta(
-                app_id,
+                app_id.clone(),
                 crate::cache::LoadedMeta {
                     deploy_hash: Some("deploy-h1".to_string()),
                     env_version: 1,
@@ -1118,7 +1081,7 @@ mod tests {
             //    exactly `put_env_from_json` with the new payload+version.
             put_env_from_json(
                 &envs,
-                app_id,
+                app_id.clone(),
                 r#"{"vars":{"API_TOKEN":"var-new"},"secrets":{"SIGNING_SECRET":"sec-new"},"expose":[]}"#,
                 2,
             )
@@ -1146,7 +1109,7 @@ mod tests {
             .expect("manifest");
             let mut versions: VersionMap = HashMap::new();
             versions.insert(
-                app_id,
+                app_id.clone(),
                 AppVersionInfo {
                     deploy_hash: Some("deploy-h1".to_string()),
                     plan_id: "starter".to_string(),

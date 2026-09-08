@@ -38,8 +38,8 @@
 //! policy for this request admit the principal the request actually carries?
 
 use ntex::web::HttpResponse;
-use uuid::Uuid;
 use zeroship_bundle::compiled::{admit, Admission, CompiledManifest};
+use zeroship_core::app_id::AppId;
 
 /// The platform's refusal of a dispatch, before any creator code ran.
 ///
@@ -103,10 +103,10 @@ impl Refusal {
     /// Emit the operator-facing record. Separate from `response` so the log
     /// happens exactly once per refusal, at the call site that owns the
     /// request identifiers.
-    pub fn log(&self, app_id: &Uuid, method: &str, path: &str) {
+    pub fn log(&self, app_id: &AppId, method: &str, path: &str) {
         tracing::warn!(
             target: "zeroship_worker::policy",
-            app_id = %app_id,
+            app_id = app_id.as_str(),
             method = %method,
             path = %path,
             refusal = self.code(),

@@ -2,7 +2,6 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, RwLock};
 
 use ntex::web::{self, HttpRequest, HttpResponse};
-use uuid::Uuid;
 
 use zeroship_core::app_id::AppId;
 
@@ -11,22 +10,22 @@ use crate::WorkerConfig;
 
 const MAX_LINES_PER_APP: usize = 1000;
 
-pub type SharedLogs = Arc<RwLock<HashMap<Uuid, VecDeque<String>>>>;
+pub type SharedLogs = Arc<RwLock<HashMap<AppId, VecDeque<String>>>>;
 
 pub fn new_store() -> SharedLogs {
     Arc::new(RwLock::new(HashMap::new()))
 }
 
-pub fn append(store: &SharedLogs, app_id: Uuid, lines: Vec<String>) {
+pub fn append(store: &SharedLogs, app_id: &AppId, lines: Vec<String>) {
     if lines.is_empty() {
         return;
     }
 
     let Ok(mut guard) = store.write() else {
-        tracing::error!(app_id = %app_id, "worker-logs: log store lock poisoned");
+        tracing::error!(app_id = app_id.as_str(), "worker-logs: log store lock poisoned");
         return;
     };
-    let ring = guard.entry(app_id).or_default();
+    let ring = guard.entry(app_id.clone()).or_default();
     for line in lines {
         ring.push_back(line);
     }
@@ -35,7 +34,7 @@ pub fn append(store: &SharedLogs, app_id: Uuid, lines: Vec<String>) {
     }
 }
 
-pub fn get(store: &SharedLogs, app_id: &Uuid) -> Vec<String> {
+pub fn get(store: &SharedLogs, app_id: &AppId) -> Vec<String> {
     store
         .read()
         .ok()
@@ -69,11 +68,8 @@ pub async fn get_logs(
     // The path segment is a typed app id, the same as `/dispatch/{app_id}`,
     // and for the same reason: the caller and this process have to agree about
     // the RENDERING of the identity, and only one of the two spellings parses.
-    // The store below is keyed by the uuid the control plane serves, so the id
-    // is unwrapped here rather than carried - the transitional conversion
-    // `handler::dispatch` documents in full.
     let app_id = match AppId::parse(path.as_str()) {
-        Ok(id) => crate::sync::app_id_uuid(&id),
+        Ok(id) => id,
         Err(_) => {
             return HttpResponse::BadRequest()
                 .json(&serde_json::json!({"error": "invalid app_id"}));
@@ -90,10 +86,10 @@ mod tests {
     #[test]
     fn keeps_only_the_last_1000_lines_per_app() {
         let store = new_store();
-        let app_id = Uuid::new_v4();
+        let app_id = AppId::mint();
         append(
             &store,
-            app_id,
+            &app_id,
             (0..1005).map(|i| format!("line {i}")).collect(),
         );
 
@@ -106,7 +102,7 @@ mod tests {
     #[test]
     fn empty_app_returns_empty_lines() {
         let store = new_store();
-        assert!(get(&store, &Uuid::new_v4()).is_empty());
+        assert!(get(&store, &AppId::mint()).is_empty());
     }
 
     /// The log path segment is the SAME identity as the dispatch path segment,
@@ -119,19 +115,15 @@ mod tests {
     /// a server: the pair below is exactly what the handler branches on.
     #[test]
     fn the_log_path_accepts_one_rendering_of_an_app_id_and_refuses_the_other() {
-        let raw = Uuid::new_v4();
+        let raw = uuid::Uuid::new_v4();
 
         assert!(
             AppId::parse(&raw.to_string()).is_err(),
             "a uuid rendering must not be readable as an app id"
         );
-
-        let canonical = crate::sync::uuid_app_id(&raw);
-        let parsed = AppId::parse(canonical.as_str()).expect("the canonical rendering parses");
-        assert_eq!(
-            crate::sync::app_id_uuid(&parsed),
-            raw,
-            "and it must unwrap to the uuid the store is keyed by"
+        assert!(
+            AppId::parse(AppId::mint().as_str()).is_ok(),
+            "the typed rendering the gateway and the control plane both send is admitted"
         );
     }
 }
