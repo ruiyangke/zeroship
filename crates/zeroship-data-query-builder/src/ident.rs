@@ -94,12 +94,12 @@ pub const MAX_IDENT_BYTES: usize = 63;
 /// Public only so the data-plane suite can enforce exact parity without adding
 /// a production dependency to this zero-dependency crate.
 ///
-/// `"__zero_migrate"` sat beside `"__zeroship"` until 2026-09-07 and prefixed
-/// nothing: the engine's journal tables are `__zeroship_schema_*`, and the one
-/// live object carrying the token is the SQLite rebuild table, built as
-/// `{table}__zero_migrate_rebuild` - a SUFFIX, which a prefix list cannot cover
-/// in either direction. It was fencing an empty namespace while the collision it
-/// looked like it addressed was structurally out of reach.
+/// `"__zero_migrate"` is deliberately absent. The engine's journal tables are
+/// `__zeroship_schema_*`, and the one live object carrying that token is the
+/// SQLite rebuild table, built as `{table}__zero_migrate_rebuild` - a SUFFIX,
+/// which a prefix list cannot cover in either direction. Adding it back would
+/// fence an empty namespace and still miss the collision it looks like it
+/// addresses.
 #[doc(hidden)]
 pub const PLATFORM_RESERVED_COLLECTION_PREFIXES: &[&str] = &["__zeroship"];
 
@@ -536,11 +536,9 @@ mod tests {
             // A new variant makes this match non-exhaustive, which is a COMPILE
             // error, so a role cannot be added without landing in `cases`.
             //
-            // `assert_eq!(cases.len(), 6)` stood here and did not do that job:
-            // it compared the array to its own literal length, so it agreed with
-            // itself forever. `StoredColumn` was added on 2026-09-07 and this
-            // test stayed green, under a message saying a new role must be
-            // given behaviour deliberately.
+            // A length assertion cannot do this job: comparing the array to its
+            // own literal length agrees with itself forever, so a role added to
+            // the enum and omitted from `cases` goes unnoticed.
             match role {
                 IdentRole::Namespace
                 | IdentRole::Collection

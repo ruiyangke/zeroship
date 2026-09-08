@@ -54,20 +54,19 @@ FAIL=0
 # deleted outright, taking the last one with it - so the end state is CEILING=0
 # and this gate is deleted with the bridge it was written to police.
 #
-# IT WAS 8, AND PART OF THE DROP IS NOT PROGRESS OF THE KIND THE NUMBER SUGGESTS.
-# Five of the removed sites were the app-lifecycle lock's holders, and they did
-# not stop converting - they now share ONE conversion inside
+# A FALLING CEILING IS NOT BY ITSELF PROGRESS OF THE KIND THE NUMBER SUGGESTS.
+# The app-lifecycle lock's holders share ONE conversion inside
 # `app_derivation::lifecycle_lock_seed_for_stored_uuid`, in a file this gate
-# EXCLUDES as a defining module. So one degradation moved out of the count
-# rather than out of the tree. That is the intended shape (the derivation seam
-# is where a transitional conversion belongs, and one conversion cannot half-move
-# the way five could) but a reader comparing 8 to 4 should know that four of the
-# four are real removals and one is a relocation.
+# EXCLUDES as a defining module, so that degradation sits outside the count while
+# still being in the tree. That is the intended shape - the derivation seam is
+# where a transitional conversion belongs, and one conversion cannot half-move
+# the way several could - but lowering CEILING is only a real removal when the
+# call site left the tree rather than moving behind that seam.
 CEILING=4
 
 # ONE definition, used by the real scan and by the anti-vacuity control alike.
-# It was two copies for the length of one edit, and they had already drifted on
-# the comment filter before either ran.
+# Two copies drift - the comment filter in particular - and a control that
+# filters differently from the scan it controls proves nothing about it.
 count_from_uuid() {
   local root="$1" n=0 f
   for f in $(grep -rl 'AppId::from_uuid' --include='*.rs' "$root" 2>/dev/null \
