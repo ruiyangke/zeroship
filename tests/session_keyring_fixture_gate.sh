@@ -17,8 +17,8 @@
 # (`zeroship_test_support::session_key_files`) exists and every fixture now
 # reaches it, but that is a fact about today's tree. The operation - write a
 # refresh-hmac / refresh-idem pair, point an `AuthConfig` at it - was open-coded
-# at six sites when it was measured, and the missing copy was found by a red
-# test rather than by anything mechanical. The next fixture is written by
+# across several fixtures in three crates, and the missing copy was found by a
+# red test rather than by anything mechanical. The next fixture is written by
 # copying a neighbour, and if the neighbour it copies happens to be one that
 # does not need a keyring, nothing notices until an exchange 500s.
 #
@@ -106,12 +106,34 @@ drives_token_exchange() {
 #                          by proving every such builder reaches the shared
 #                          helper. Without arm 3 this route would accept any
 #                          function that happened to carry the name.
+# Every route matches a CALL, and matches it against the file with `//`
+# comments stripped.
+#
+# Route 3 used to be a bare `grep -l 'test_auth_config'`, and a bare mention is
+# not evidence of anything: a fixture that hand-built an AuthConfig, mounted the
+# router, drove /oauth2/token, configured NO keyring, and carried one comment
+# reading "unlike common's test_auth_config..." was reported as FENCED. That is
+# the shape this gate exists to catch, so the detector was answering the
+# opposite of the question. Requiring `(` and dropping comment text is what
+# closes it; a call inside a `/* */` block would still slip through, which is
+# why arm 3 keeps a planted probe rather than trusting this function's spelling.
+#
+# A fixture that must NOT have a keyring - one asserting the production refusal
+# when the keyring is absent - declares itself with ZS_KEYRING_EXEMPT and a
+# reason. That is a sanctioned way out, so such a test never has to be written
+# to defeat the detector.
 has_keyring() {
-  local f="$1"
-  if grep -l 'session_key_files(' -- "$f" >/dev/null; then return 0; fi
-  if grep -l 'refresh_hash_key_file' -- "$f" >/dev/null \
-     && grep -l 'refresh_idem_key_file' -- "$f" >/dev/null; then return 0; fi
-  grep -l 'test_auth_config' -- "$f" >/dev/null
+  local f="$1" body
+  body="$(sed 's://.*::' -- "$f")"
+  case "$body" in
+    *'ZS_KEYRING_EXEMPT'*) return 0 ;;
+    *'session_key_files('*) return 0 ;;
+  esac
+  if printf '%s' "$body" | grep -q 'refresh_hash_key_file' \
+     && printf '%s' "$body" | grep -q 'refresh_idem_key_file'; then
+    return 0
+  fi
+  printf '%s' "$body" | grep -qE '\btest_auth_config(_with)?[[:space:]]*\('
 }
 
 # $1 = test-source root(s). Files defining an `AuthConfig` fixture builder.
