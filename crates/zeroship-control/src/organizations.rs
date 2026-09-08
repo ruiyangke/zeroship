@@ -1335,11 +1335,13 @@ pub async fn update_organization(
 /// call and this statement inserts nothing.
 ///
 /// It also carries the `admin` FLOOR, for the same reason
-/// [`add_project_member`] does. The strict inequality alone lets a developer
-/// seat a viewer, because rank 20 does outrank rank 10 - so without the floor,
-/// the band Cedar puts on `organization:members:write` would be the ONLY thing
-/// refusing that, and this module's promise is that Cedar is never the only
-/// fence.
+/// [`add_project_member`] does. The strict inequality alone lets any member
+/// seat anyone below them, so a developer could seat a viewer - and without the
+/// floor the band Cedar puts on `organization:members:write` would be the ONLY
+/// thing refusing that, while this module's promise is that Cedar is never the
+/// only fence. The ranks themselves are seeded rows in
+/// `zeroship.organization_roles`; read the ladder there rather than trusting a
+/// number quoted here.
 pub async fn add_member(
     registry: &Registry,
     principal: Uuid,
@@ -1456,6 +1458,7 @@ pub async fn change_member_role(
           WHERE m.organization_id = $1 AND m.user_id = $2 \
             AND target_role.role = $3 \
             AND held_role.role = m.role \
+            AND actor_role.rank >= {admin} \
             AND actor_role.rank > target_role.rank \
             AND actor_role.billing_rank >= target_role.billing_rank \
             AND actor_role.rank > held_role.rank \
@@ -1465,6 +1468,7 @@ pub async fn change_member_role(
                       WHERE owners.organization_id = $1 AND owners.role = $5) > 1) \
          RETURNING m.role, m.added_at, held_role.role AS previous_role",
         seat = actor_seat("$1", "$4"),
+        admin = ladder_rank_of(ROLE_ADMIN),
     );
     let rows = tx
         .query(
@@ -1541,6 +1545,7 @@ pub async fn remove_member(
           USING zeroship.organization_roles target_role, {seat} \
           WHERE m.organization_id = $1 AND m.user_id = $2 \
             AND target_role.role = m.role \
+            AND actor_role.rank >= {admin} \
             AND actor_role.rank > target_role.rank \
             AND actor_role.billing_rank >= target_role.billing_rank \
             AND (m.role <> $4 \
@@ -1548,6 +1553,7 @@ pub async fn remove_member(
                       WHERE owners.organization_id = $1 AND owners.role = $4) > 1) \
          RETURNING m.role",
         seat = actor_seat("$1", "$3"),
+        admin = ladder_rank_of(ROLE_ADMIN),
     );
     let rows = tx
         .query(&sql, &[&organization_id, &user_id, &principal, &ROLE_OWNER])
