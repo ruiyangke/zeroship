@@ -110,5 +110,6 @@
   "organization_billing_status_history": "zeroship_platform",
   "organization_accounts": "zeroship_platform",
   "organization_account_history": "zeroship_platform",
-  "organization_fee_policy": "zeroship_platform"
+  "organization_fee_policy": "zeroship_platform",
+  "worker_instances": "zeroship_platform"
 }
