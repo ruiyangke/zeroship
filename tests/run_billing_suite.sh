@@ -343,17 +343,21 @@ fi
 # memory transport (a real rewind cold-start seek bug once shipped precisely
 # because this path had no CI). The control-side half
 # (`billing_pipeline_redpanda_e2e`) is an ungated target and therefore already
-# ran in the control invocation above, self-skipping unless REDPANDA_BROKERS is
-# set. Only the zeroship-stream half needs naming here.
-if [ -n "${REDPANDA_BROKERS:-}" ]; then
-  echo "------------------------------------------------------------------"
-  echo "==> real-broker: zeroship-stream::redpanda_roundtrip (REDPANDA_BROKERS=$REDPANDA_BROKERS)"
-  if run_group cargo test -p zeroship-stream --test redpanda_roundtrip -- "${THREAD_ARG[@]}"; then :; else
-    fail=1; failed+=("zeroship-stream::redpanda_roundtrip")
-  fi
-else
-  echo "------------------------------------------------------------------"
-  echo "==> SKIP real-broker tests: REDPANDA_BROKERS unset (set it + run a redpanda broker to gate the real stream path)"
+# ran in the control invocation above, where it REFUSES without a broker. Only
+# the zeroship-stream half needs naming here.
+#
+# IT IS NAMED UNCONDITIONALLY, and the `if [ -n "${REDPANDA_BROKERS:-}" ]` that
+# stood here is gone with the rest of the skip apparatus. That branch printed
+# "==> SKIP real-broker tests" and ran nothing, which is the same escape hatch
+# the tests themselves lost, one level up - and it was already contradicted by
+# the control-side half three groups above, which had turned the same missing
+# broker into a failure. A run without a broker was therefore red either way;
+# the branch only decided whether the stream half was ALSO measured. Both halves
+# now name the broker as missing, which is what the header above promises.
+echo "------------------------------------------------------------------"
+echo "==> real-broker: zeroship-stream::redpanda_roundtrip (REDPANDA_BROKERS=${REDPANDA_BROKERS:-unset})"
+if run_group cargo test -p zeroship-stream --test redpanda_roundtrip -- "${THREAD_ARG[@]}"; then :; else
+  fail=1; failed+=("zeroship-stream::redpanda_roundtrip")
 fi
 
 echo "=================================================================="

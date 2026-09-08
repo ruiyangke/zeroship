@@ -5,22 +5,23 @@
 # WHY THIS EXISTS
 # ---------------
 # The auth tests resolve their database from the generated test overlay
-# (deploy/ops/zeroship.test.toml, or PG_TEST_URL overriding it) and return
-# early when neither supplies one. Cargo captures test output by default, so a
-# skipped test is indistinguishable from a passing one: `cargo test -p
-# zeroship-auth` reports success while test bodies do nothing at all. A suite
-# that passes because it never ran is worse than a red one, because it is
-# trusted.
+# (deploy/ops/zeroship.test.toml, or PG_TEST_URL overriding it). They USED TO
+# return early when neither supplied one, and cargo captures test output by
+# default, so a skipped test was indistinguishable from a passing one: `cargo
+# test -p zeroship-auth` reported success while test bodies did nothing at all.
+# A suite that passes because it never ran is worse than a red one, because it
+# is trusted.
 #
-# This script reports the real passed and skipped counts on every run, so no
-# figure is written down here to go stale.
+# THAT IS NOW THE TESTS' OWN JOB, not this script's. A test that cannot reach
+# its backend FAILS, naming what was missing and the command that provisions it;
+# there is no announcement to count, no census here that counts one, and no
+# allowlist that excuses one. This script provisions an isolated database and
+# points the tests at it. What it still rules on afterwards is the floor below -
+# the one thing a run cannot tell you about itself, because a suite that
+# silently stopped being built prints nothing at all rather than a failure.
 #
-# This script provisions an isolated database, points the tests at it, and then
-# checks that they ACTUALLY RAN. If any test announces that it skipped, the run
-# fails - a missing database can never masquerade as a pass. The one exception
-# is an allowlist further down that names each tolerated skip and why; it is
-# there so a deferred decision reads as a deferred decision rather than as a
-# blind spot in the check.
+# It reports the real passed count on every run, so no figure is written down
+# here to go stale.
 #
 # USAGE
 # -----
@@ -108,9 +109,10 @@
 # it away costs nothing and no one has to decide whether it was still wanted.
 #
 # PROVISION FIRST. This script creates and migrates a DATABASE; it does not
-# create a SERVER, and it fails at line ~110 if none is listening. Stand one up
-# with `tests/provision_test_backends.sh`, which brings up deploy/compose's
-# postgres on the port below.
+# create a SERVER, and it refuses rather than guessing if none is listening.
+# Stand one up with `tests/provision_test_backends.sh`, which brings up
+# deploy/compose's postgres on the port below - and the SMTP sink, which the
+# `zeroship-mailer` package run below needs and fails without.
 #
 # ENV (defaults target deploy/compose's postgres service, published on :5440)
 #   The comment here read "the dev compose Postgres on :5440" for months while
@@ -275,12 +277,14 @@ status=0
 cargo test -p zeroship-auth --no-fail-fast -- --test-threads "$TEST_THREADS" --nocapture 2>&1 | tee "$LOG" || status=1
 
 echo "------------------------------------------------------------------"
-# Every other database-gated binary in the workspace. These self-skip exactly
-# like the auth crate's, and until they were listed here nothing ever ran them
-# with a database: `cargo test --workspace` provisions none, and no other gate
-# names them. Measured on zeroship-authz before adding it - "ok. 1 passed" in
-# 0.00s without a DSN against the same "ok. 1 passed" in 0.22s with one. Same
-# count, same exit code, only the clock differed.
+# Every other database-gated binary in the workspace. These used to self-skip
+# exactly like the auth crate's, and until they were listed here nothing ever
+# ran them with a database: `cargo test --workspace` provisions none, and no
+# other gate names them. Measured on zeroship-authz before adding it - "ok. 1
+# passed" in 0.00s without a DSN against the same "ok. 1 passed" in 0.22s with
+# one. Same count, same exit code, only the clock differed. That measurement is
+# why they are listed here; it is not reproducible today, because the same run
+# without a DSN now fails instead of printing the first line.
 #
 # `oidc_rp_e2e` used to be excluded BY NAME here, on the stated ground that it
 # "also wants CONTROL_TEST_DB, which this script does not provision, so it would
@@ -334,6 +338,10 @@ echo "------------------------------------------------------------------"
 # never executed. A private name for a value that already exists is a test that
 # does not run, and it looks exactly like a test that passes.
 
+# `zeroship-mailer` is run as a whole package and needs one backend more than a
+# database: its plaintext-transport test dials a real SMTP sink and fails
+# without one. tests/provision_test_backends.sh stands that sink up at the
+# address the test falls back to, so nothing is exported for it here.
 echo "==> Other database-gated binaries (authn, authz, mailer, gateway)"
 # `zeroship-authn` is here because it was in NO gate at all. Its PostgreSQL
 # integration targets announce a skip for every test that cannot reach their
@@ -382,12 +390,19 @@ echo "------------------------------------------------------------------"
 #
 # It searched this log for a marker every skipping test wrote to stderr, failed
 # the run on any occurrence not named in `SKIP_ALLOWLIST`, and carried one
-# standing entry (`AUTH_TEST_SMTP_SINK`, a live SMTP sink this script cannot
-# stand up). An operator decision removed skipping from the workspace outright:
+# standing entry (`AUTH_TEST_SMTP_SINK`, a live SMTP sink nothing in the tree
+# stood up). An operator decision removed skipping from the workspace outright:
 # every backend guard now REFUSES - it fails the test, naming what was missing
-# and the command that provisions it - so there is no marker to count, nothing
-# for an allowlist to excuse, and a missing SMTP sink reddens this suite like
-# any other absent backend.
+# and the command that provisions it - so there is no marker to count and
+# nothing for an allowlist to excuse.
+#
+# THE STANDING ENTRY BECAME A PROVISIONING STEP, which is the only honest way to
+# retire an exemption. `zeroship-mailer` is run below as a whole package, and its
+# plaintext-transport test dials a real sink; that sink is now one of the
+# backends `tests/provision_test_backends.sh` stands up, at the address the test
+# falls back to. An allowlist row saying "we cannot provide this" and a test that
+# fails for want of it are the same defect wearing different clothes - the fix
+# for both is to provide it.
 #
 # WHY COUNTING WAS THE WEAKER DESIGN, kept because it is the argument for what
 # replaced it. A census only sees a test that ANNOUNCES. The paragraph below
