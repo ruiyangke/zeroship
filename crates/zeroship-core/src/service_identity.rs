@@ -542,7 +542,16 @@ pub fn service_allowlist() -> &'static [ServiceAuthorization] {
                 principal("svc/worker"),
                 &[
                     endpoints::CONTROL_VERSIONS,
-                    // App and env reads also require the existing app scope.
+                    // NO APP SCOPE NARROWS THESE TWO TODAY, and this comment
+                    // claimed one until 2026-09-07. `get_app_env` and
+                    // `get_app_version` verify the assertion, DISCARD the
+                    // identity, and serve whatever app the path names, so
+                    // holding `svc/worker` is holding every app's environment.
+                    // The narrowing is step 4 of
+                    // docs/proposals/2026-09-05-auth-foundation-redesign.md and
+                    // it cannot be written before per-instance worker identity:
+                    // every replica signs as this same principal, so there is
+                    // nothing here to compare an eligible set against.
                     endpoints::CONTROL_APP,
                     endpoints::CONTROL_APP_ENV,
                 ],
