@@ -594,3 +594,96 @@ async fn a_public_key_that_is_not_an_ed25519_key_is_refused_before_any_derivatio
     drop(fixture);
     common::drain_pg().await;
 }
+
+/// The frozen-column trigger, which is the ONLY thing making the registry's
+/// "immutable" and "insert-once" true rather than prose.
+///
+/// Control must hold UPDATE so `status` can progress, and a table grant cannot
+/// be column-selective, so without the trigger any control-side path could
+/// rotate a worker's ring position or swap its public key. The trigger was
+/// driven by hand against live Postgres when it landed and bound by nothing.
+/// This is the arm that binds it.
+#[ntex::test]
+async fn identity_and_address_are_frozen_after_enrolment() {
+    let fixture = build_fixture(declared_envelope()).await;
+    let key = instance_key(0x22);
+
+    let response = enrol(
+        &fixture.state,
+        peer(IN_ENVELOPE_PEER),
+        request(&key, ADVERTISED_PORT),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let instance_id = body_json(response).await["instance_id"]
+        .as_str()
+        .expect("instance_id")
+        .to_string();
+
+    let pg = &fixture.state.control_pg;
+
+    // THE ONE-VARIABLE CONTROL, TAKEN FIRST. `status` is the column that MAY
+    // move, so a trigger that refused every UPDATE would satisfy all four
+    // refusal arms below while silently breaking the lifecycle the column
+    // exists for. Without this the arms prove only that writes fail.
+    let progressed = pg
+        .execute(
+            "UPDATE zeroship.worker_instances SET status = 'draining' WHERE id = $1",
+            &[&instance_id],
+        )
+        .await;
+
+    // Each frozen column attempted on its own. These are autocommit statements,
+    // so a refusal does not poison the attempts after it.
+    let rotated_ring = pg
+        .execute(
+            "UPDATE zeroship.worker_instances SET ring_key = $2 WHERE id = $1",
+            &[&instance_id, &vec![0x99_u8; RING_KEY_BYTES]],
+        )
+        .await;
+    let swapped_key = pg
+        .execute(
+            "UPDATE zeroship.worker_instances SET public_key = $2 WHERE id = $1",
+            &[&instance_id, &vec![0x55_u8; PUBLIC_KEY_LENGTH]],
+        )
+        .await;
+    let moved_host = pg
+        .execute(
+            "UPDATE zeroship.worker_instances SET advertise_host = $2 WHERE id = $1",
+            &[
+                &instance_id,
+                &"10.7.3.250".parse::<std::net::IpAddr>().expect("host"),
+            ],
+        )
+        .await;
+    let moved_port = pg
+        .execute(
+            "UPDATE zeroship.worker_instances SET advertise_port = $2 WHERE id = $1",
+            &[&instance_id, &(i32::from(ADVERTISED_PORT) + 1)],
+        )
+        .await;
+
+    // Clean up BEFORE asserting: a failing assertion panics past anything after
+    // it, which is how a probe row survives exactly the runs that matter.
+    forget(pg, &instance_id).await;
+
+    assert!(
+        progressed.is_ok(),
+        "status must still progress, or the trigger refuses everything and the \
+         refusal arms below prove nothing: {progressed:?}"
+    );
+    for (what, outcome) in [
+        ("ring_key", &rotated_ring),
+        ("public_key", &swapped_key),
+        ("advertise_host", &moved_host),
+        ("advertise_port", &moved_port),
+    ] {
+        assert!(
+            outcome.is_err(),
+            "{what} is documented as frozen at enrolment but the UPDATE succeeded"
+        );
+    }
+
+    drop(fixture);
+    common::drain_pg().await;
+}
