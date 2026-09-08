@@ -842,12 +842,8 @@ fn an_unservable_node_in_a_write_is_refused_with_a_typed_error() {
 
     // In the RETURNING list.
     let returning = Returning::rows(
-        Projection::rows(vec![ProjectedField {
-            source: zeroship_data_query_builder::ProjectionSource::Path(nested()),
-            alias: alias("customer"),
-            exposure: zeroship_data_query_builder::Exposure::Declared,
-        }])
-        .expect("row projection"),
+        Projection::rows(vec![ProjectedField::path(nested(), alias("customer"))])
+            .expect("row projection"),
     )
     .expect("returning");
     let outcome = postgres::render_insert(&insert_one(returning));

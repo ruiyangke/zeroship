@@ -50,7 +50,7 @@ fn a_row_projection_carries_exactly_what_it_was_given() {
     let aliases: Vec<&str> = projection
         .fields()
         .iter()
-        .map(|f| f.alias.as_str())
+        .map(|f| f.alias().as_str())
         .collect();
     assert_eq!(aliases.len(), 2, "the projection widened: {aliases:?}");
     assert!(aliases.contains(&"name") && aliases.contains(&"id"));
@@ -98,10 +98,10 @@ fn a_declared_platform_field_stays_declared() {
     let entries: Vec<&ProjectedField> = projection
         .fields()
         .iter()
-        .filter(|f| f.alias.as_str() == "deleted_at")
+        .filter(|f| f.alias().as_str() == "deleted_at")
         .collect();
     assert_eq!(entries.len(), 1, "the union duplicated a declared field");
-    assert_eq!(entries[0].exposure, Exposure::Declared);
+    assert_eq!(entries[0].exposure(), Exposure::Declared);
     assert!(projection.visible_aliases().contains(&"deleted_at"));
     println!("ruled on 1 declared platform field");
 }
@@ -207,7 +207,7 @@ fn a_stored_field_takes_both_names_from_the_caller() {
         column("ssn"),
     )
     .expect("stored field");
-    assert_eq!(field.alias.as_str(), "ssn");
+    assert_eq!(field.alias().as_str(), "ssn");
     println!("ruled on 1 stored field");
 }
 
