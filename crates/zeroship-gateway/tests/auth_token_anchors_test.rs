@@ -18,9 +18,10 @@
 //! OP refresh") is exact. No stubs of the issuer or the single-flight.
 //!
 //! The DB-backed handler tests (token-exchange → anchor row →
-//! session?mint=1) are gated on a test database (set `PG_TEST_URL`; the
-//! established env-skip convention — no live PG in CI by default). The mock-OP
-//! single-flight test and the cookie/Origin tests run unconditionally.
+//! session?mint=1) REQUIRE a test database: with none configured they refuse
+//! and name `tests/provision_test_backends.sh`, rather than skipping into a
+//! green. The mock-OP single-flight test and the cookie/Origin tests run
+//! unconditionally.
 
 mod common;
 

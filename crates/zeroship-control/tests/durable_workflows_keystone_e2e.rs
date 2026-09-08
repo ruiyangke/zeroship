@@ -2764,9 +2764,10 @@ async fn run_debug(fx: &Fixture, run_id: &str) -> String {
 ///
 /// BOTH HALVES OF THE SHAPE BELOW MATTER. The overflow happened while `block_on`
 /// placed the future on the stack, which is BEFORE the body's first line - so it
-/// fired on the skip path too, where this test does nothing. `enabled()` is now
-/// checked outside any future, so a run without `ZEROSHIP_DW_E2E` constructs
-/// nothing; the enabled run gets 16 MiB, six times the measured need.
+/// fired even on the run that had no fleet and did nothing. The fleet check is
+/// now made outside any future, so a run without `ZEROSHIP_DW_E2E` refuses
+/// without constructing one; the enabled run gets 16 MiB, six times the
+/// measured need.
 ///
 /// ONE BEHAVIOUR CHANGES, and it is worth knowing: libtest's output capture is
 /// thread-local, so the body's `println!`s now reach the terminal instead of
