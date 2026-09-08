@@ -38,6 +38,33 @@
 # CONTAINERS resolve those same names to Caddy - required for server-side OIDC
 # token exchange / JWKS fetch to hit the same issuer the browser sees.
 
+# --- two facts this file states ONCE, because two things must agree on each --
+#
+# A worker instance enrols with control, which derives the address it will
+# advertise from the OBSERVED peer socket and validates the pair against an
+# operator-declared envelope in CONTROL's config. Both halves of that envelope
+# describe THIS topology, so both are stated here and aliased into the two
+# places that must not disagree.
+
+# The worker's listen port, aliased into its own `--port` and into control's
+# enrolment port range. Writing it twice is how the range drifts off the
+# listener, and control then refuses the enrolment as `port_outside_envelope`
+# while every health probe stays green.
+x-worker-port: &worker-port "8080"
+
+# The bridge subnet the compose default network hands every container, aliased
+# into that network's IPAM and into control's enrolment network list.
+#
+# PINNED RATHER THAN DRIVER-ASSIGNED, and that is the change: without an `ipam`
+# block Docker picks a free /16 out of its default address pool at network
+# create time, so no file could state what the peers' addresses would be and the
+# envelope could only be guessed at. The peers here are bridge addresses, never
+# loopback - the worker dials `control:9090` on this network.
+#
+# Override it if 172.30/16 collides with something else on the host; both
+# consumers move together.
+x-compose-subnet: &compose-subnet "${ZEROSHIP_COMPOSE_SUBNET:-172.30.0.0/16}"
+
 services:
   verdaccio:
     image: verdaccio/verdaccio:6
@@ -379,6 +406,22 @@ services:
       # byte-identical on control + gateway - both derive the per-app `pws_`.
       # Never rotate without a per-app `pws_` migration.
       ZEROSHIP_PAIRWISE_SALT: ${ZEROSHIP_PAIRWISE_SALT:?run zeroship dev init}
+      # --- the worker-enrolment envelope -------------------------------------
+      #
+      # A worker instance enrols its boot-generated public key here; control
+      # takes the host from the observed peer socket, takes the port from the
+      # body, and refuses anything these two settings do not cover. BOTH halves
+      # must be non-empty or the envelope counts as undeclared and every
+      # enrolment is refused `envelope_unset` with a 503 - absence refuses, it
+      # does not default open.
+      #
+      # Neither value is written out here. The network list is the pinned
+      # subnet of the default network below, and the port range is the worker
+      # service's own `--port`, so a change to either topology fact moves this
+      # declaration with it instead of leaving it describing a stack that no
+      # longer exists.
+      ZEROSHIP_CONTROL_WORKER_ENROLMENT_NETWORKS: *compose-subnet
+      ZEROSHIP_CONTROL_WORKER_ENROLMENT_PORTS: *worker-port
       # --- Console runtime env: NOTHING FORWARDS THESE ANY MORE --------------
       # These were read from THIS process env at install time by the console
       # seed, which wrote them onto the console app's env store. That seed was
@@ -657,7 +700,9 @@ services:
     command:
       - zeroship-worker
       - --port
-      - "8080"
+      # THE port. Control's enrolment port range is the same alias, so the range
+      # cannot drift off the listener.
+      - *worker-port
       - --threads
       - "4"
       - --bind
@@ -960,6 +1005,21 @@ services:
         condition: service_started
       auth:
         condition: service_started
+
+networks:
+  # The network every service above already shares, declared here only to PIN
+  # its subnet.
+  #
+  # It was implicit and driver-assigned until the worker-enrolment envelope
+  # needed it: control validates a worker's observed peer address against a
+  # declared CIDR list, and a subnet Docker picks at create time out of its
+  # default address pool is not something any file can declare. Pinning it makes
+  # the envelope on the control service a statement about this topology rather
+  # than a guess at what the daemon will hand out.
+  default:
+    ipam:
+      config:
+        - subnet: *compose-subnet
 
 volumes:
   # The platform database. See the warning at the postgres service: this volume

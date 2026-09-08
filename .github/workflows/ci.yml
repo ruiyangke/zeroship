@@ -2342,6 +2342,25 @@ jobs:
           tests/e2e_gateway_path_backslash.sh 2>&1 | tee "$RUNNER_TEMP/dvd-backslash.log"
         env:
           ZS_FRESHNESS_STRICT: 1
+      # Control refuses every worker enrolment unless an operator DECLARED an
+      # address envelope, and no file in this repository declared one until
+      # tests/lib/e2e_stack.sh did - so the endpoint was unreachable in every
+      # deployment here while its unit tests, which supply their own envelope,
+      # stayed green. That is precisely the gap a crate-local test cannot see,
+      # and it is why this is wired rather than left to be run by hand.
+      #
+      # It carries its own one-variable control: a SECOND control plane, same
+      # binary and same database, with the network half cleared and nothing else
+      # changed, must refuse the identical request as `envelope_unset`. Without
+      # it a green run could not tell a working declaration from an endpoint
+      # that admits everything.
+      #
+      # Starts its own Postgres through tests/lib/e2e_stack.sh, so PG_CONTAINER
+      # is deliberately not set here.
+      - name: Worker enrolment (the declared envelope admits, an undeclared one refuses)
+        run: |
+          set -o pipefail
+          tests/e2e_worker_enrolment.sh 2>&1 | tee "$RUNNER_TEMP/dvd-enrolment.log"
       # The probe that CONFIRMED #199 by execution, and until now it ran in NO
       # workflow: `grep -rn e2e_gateway_workflow_advance_authz .github/`
       # returned nothing while the same search for golden_path.sh returned

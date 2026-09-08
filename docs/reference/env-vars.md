@@ -480,6 +480,12 @@ conflict fails without rotating either side.
 | `ZEROSHIP_DOMAIN` | `zeroship.localhost` | Drives `--app-base-domain`, the OIDC issuer, gateway/auth public URLs, Caddy's site blocks and its network aliases. |
 | `ZEROSHIP_ORIGIN_SCHEME` | `http` | The scheme PUBLIC urls advertise. Compose injects it into control and gateway and uses it to build gateway/auth public URLs. Behind a TLS-terminating proxy the origin serves http while public URLs say https. |
 
+### Optional, and compose-local rather than a service setting
+
+| Variable | Default | When to set it |
+| --- | --- | --- |
+| `ZEROSHIP_COMPOSE_SUBNET` | `172.30.0.0/16` | The subnet of the compose default network. It is PINNED rather than driver-assigned because control's worker-enrolment envelope validates a worker's observed peer address against a declared CIDR list, and a subnet the daemon picks at network-create time is not something the file can declare. One YAML anchor feeds both the network's `ipam` and `ZEROSHIP_CONTROL_WORKER_ENROLMENT_NETWORKS`, so the two cannot disagree. Set it if that range collides with another network on the host. |
+
 ### Generated scalar secrets
 
 `zeroship dev init` adds these to the gitignored `.env`. Each is generated from
