@@ -84,7 +84,7 @@ pub const AUDIT_UNMASK_TABLE: &str = "__zeroship_audit_unmask";
 /// - `Backend` is `async fn`-in-trait. Object-safety for those traits
 ///   would require `Box<dyn Future>` per call — a per-CRUD-op
 ///   allocation on a hot path that runs ~200K times/sec under load.
-/// - The associated types (`Client = compio_postgres::OwnedPooledClient`,
+/// - The associated types (`Client = compio_postgres::PoolConnection`,
 ///   `LiveSchema = crate::catalog::LiveSchema`) cannot be erased behind a
 ///   `dyn` without losing the concrete client type that
 ///   [`LockManager::acquire_advisory_lock`] and the audit-row helpers

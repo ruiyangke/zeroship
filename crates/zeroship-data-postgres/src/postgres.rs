@@ -46,10 +46,7 @@ use zeroship_data_query_builder::descriptors::{GeoPoint, VectorMetric};
 /// context; this wrapper just provides the trait facade.
 pub struct PostgresBackend {
     pool: Rc<compio_postgres::Pool>,
-    /// Configured URL — used by [`Self::acquire_dedicated_client`] to
-    /// open a fresh connection outside the pool (for the
-    /// `db.transaction(fn)` and `migrationBegin` paths that need a
-    /// connection that survives across pool-return points).
+    /// Configured URL, retained for backend configuration accessors.
     url: String,
     /// Per-backend column-key cache. Lazily resolves
     /// `(app_id, key_id) → AeadKey` from this isolate's in-process root
@@ -298,7 +295,7 @@ impl PostgresBackend {
 // ---------------------------------------------------------------------------
 
 impl SqlExecutor for PostgresBackend {
-    type Client = compio_postgres::OwnedPooledClient;
+    type Client = compio_postgres::PoolConnection;
 
     /// Reserve an owned lease from the same pool used by ordinary operations.
     ///
@@ -307,7 +304,7 @@ impl SqlExecutor for PostgresBackend {
     /// tenant role setup belongs to the transaction protocol.
     async fn acquire_dedicated_client(&self, _app_id: &str) -> Result<Self::Client, DbError> {
         self.pool
-            .get_owned()
+            .acquire()
             .await
             .map_err(|error| pg_error::classify(&error))
     }
@@ -337,7 +334,7 @@ impl SqlExecutor for PostgresBackend {
         // into a prepared statement`. `batch_execute` issues a single
         // `Query` message and runs the `;`-separated statements in one
         // implicit transaction.
-        let client = self.pool.get().await.map_err(|e| pg_error::classify(&e))?;
+        let client = self.pool.acquire().await.map_err(|e| pg_error::classify(&e))?;
         client
             .batch_execute(sql)
             .await
@@ -713,10 +710,10 @@ impl SpatialIndex for PostgresBackend {
 impl PgLockManager for PostgresBackend {
     async fn acquire_pooled_client_for_lock(
         &self,
-    ) -> Result<compio_postgres::OwnedPooledClient, DbError> {
+    ) -> Result<compio_postgres::PoolConnection, DbError> {
         // Keep one typed pool-checkout error so operator log lines stay
         // grep-able across test-helper callers.
-        self.pool.get_owned().await.map_err(|e| DbError::Transient {
+        self.pool.acquire().await.map_err(|e| DbError::Transient {
             message: format!("db: failed to acquire orchestrator client: {e}"),
         })
     }
@@ -1498,7 +1495,7 @@ mod tests {
     //!    up so any future bound change to `Backend` (adding a method,
     //!    tightening a lifetime, swapping an associated type) fails
     //!    compilation here, not at a distant call site.
-    //! 2. Associated-type identities — pin `Client = compio_postgres::OwnedPooledClient`
+    //! 2. Associated-type identities — pin `Client = compio_postgres::PoolConnection`
     //!    and `LiveSchema = zeroship_data_query_builder::catalog::LiveSchema` so a refactor that
     //!    accidentally swaps either is caught here.
     //! 3. The `Backend: 'static` bound on the trait — re-asserted at
@@ -1528,8 +1525,8 @@ mod tests {
     /// the omnibus trait or detaches the impl block fails here at
     /// build time.
     fn assert_postgres_backend_impls_sub_traits() {
-        fn impls_sql_executor<T: SqlExecutor<Client = compio_postgres::OwnedPooledClient>>() {}
-        fn impls_lock_manager<T: LockManager<Client = compio_postgres::OwnedPooledClient>>() {}
+        fn impls_sql_executor<T: SqlExecutor<Client = compio_postgres::PoolConnection>>() {}
+        fn impls_lock_manager<T: LockManager<Client = compio_postgres::PoolConnection>>() {}
         fn impls_schema_introspect<
             T: SchemaIntrospect<LiveSchema = zeroship_data_query_builder::catalog::LiveSchema>,
         >() {

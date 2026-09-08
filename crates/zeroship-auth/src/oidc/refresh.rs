@@ -362,7 +362,7 @@ pub(super) async fn exchange_refresh_token(
             tracing::error!(error = %err, "refresh: dedicated database pool checkout failed");
             OAuthError::server_error("refresh database unavailable")
         })?;
-    let mut conn = pool.get().await.map_err(|err| {
+    let mut conn = pool.acquire().await.map_err(|err| {
         tracing::error!(error = %err, "refresh: dedicated database session checkout failed");
         OAuthError::server_error("refresh database unavailable")
     })?;
@@ -721,7 +721,7 @@ async fn revoke_inner(
             tracing::error!(error = %err, "revoke: dedicated database pool checkout failed");
             OAuthError::server_error("revoke unavailable")
         })?;
-    let mut conn = pool.get().await.map_err(|err| {
+    let mut conn = pool.acquire().await.map_err(|err| {
         tracing::error!(error = %err, "revoke: dedicated database session checkout failed");
         OAuthError::server_error("revoke unavailable")
     })?;
@@ -783,7 +783,7 @@ pub async fn revoke_person_sessions(
         .await
         .map_err(|err| format!("refresh user revoke pool checkout ({reason}): {err}"))?;
     let mut conn = pool
-        .get()
+        .acquire()
         .await
         .map_err(|err| format!("refresh user revoke session checkout ({reason}): {err}"))?;
     let tx = conn
@@ -843,7 +843,7 @@ async fn revoke_sessions_for_subject(
             tracing::error!(error = %err, "access-token revoke: dedicated database pool checkout failed");
             OAuthError::server_error("revoke unavailable")
         })?;
-    let mut conn = pool.get().await.map_err(|err| {
+    let mut conn = pool.acquire().await.map_err(|err| {
         tracing::error!(error = %err, "access-token revoke: dedicated database session checkout failed");
         OAuthError::server_error("revoke unavailable")
     })?;
@@ -970,7 +970,7 @@ pub async fn sweep_sessions(refresh_pool: &RefreshSessionPool) -> Result<(u64, u
         .await
         .map_err(|err| format!("session sweep pool checkout: {err}"))?;
     let conn = pool
-        .get()
+        .acquire()
         .await
         .map_err(|err| format!("session sweep session checkout: {err}"))?;
     session_store::sweep(&*conn, SESSION_RETENTION_DAYS).await

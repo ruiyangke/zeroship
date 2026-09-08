@@ -174,15 +174,15 @@ fn assert_dead_lease_was_discarded(pool: &Pool) -> (usize, usize) {
         total_after_drop, 0,
         "the dead lease kept its pool capacity slot"
     );
-    assert_eq!(pool.metrics.connections_created.get(), 1);
-    assert_eq!(pool.metrics.evictions.get(), 1);
+    assert_eq!(pool.metrics().connections_created.get(), 1);
+    assert_eq!(pool.metrics().evictions.get(), 1);
 
     (idle_after_drop, total_after_drop)
 }
 
 async fn assert_replacement_uses_a_new_backend(pool: &Pool, killed_pid: i32) -> i32 {
     let replacement = pool
-        .get()
+        .acquire()
         .await
         .expect("check out a replacement for the dead pooled backend");
     let replacement_pid: i32 = replacement
@@ -203,8 +203,8 @@ async fn assert_replacement_uses_a_new_backend(pool: &Pool, killed_pid: i32) -> 
     assert_eq!(pool.active_count(), 0);
     assert_eq!(pool.idle_count(), 1);
     assert_eq!(pool.total_count(), 1);
-    assert_eq!(pool.metrics.connections_created.get(), 2);
-    assert_eq!(pool.metrics.evictions.get(), 1);
+    assert_eq!(pool.metrics().connections_created.get(), 2);
+    assert_eq!(pool.metrics().evictions.get(), 1);
 
     replacement_pid
 }
@@ -491,7 +491,7 @@ async fn all_idle_pool_backends_are_replaced_after_mass_termination() {
         let mut pooled_clients = Vec::with_capacity(POOL_WIDTH);
         let mut pooled_pids = Vec::with_capacity(POOL_WIDTH);
         for _ in 0..POOL_WIDTH {
-            let client = pool.get().await.expect("check out every warm pool entry");
+            let client = pool.acquire().await.expect("check out every warm pool entry");
             let pid: i32 = client
                 .query_one_scalar("SELECT pg_backend_pid()::int4", &[])
                 .await
@@ -584,7 +584,7 @@ async fn all_idle_pool_backends_are_replaced_after_mass_termination() {
         // This first query is the recovery contract. `get()` must discard all
         // dead idle candidates and the query must run on a fresh connection.
         let first_recovered = pool
-            .get()
+            .acquire()
             .await
             .expect("recover the pool after every idle backend died");
         let post_kill_pid: i32 = first_recovered
@@ -605,7 +605,7 @@ async fn all_idle_pool_backends_are_replaced_after_mass_termination() {
         let mut recovered_pids = vec![post_kill_pid];
         for _ in 1..POOL_WIDTH {
             let client = pool
-                .get()
+                .acquire()
                 .await
                 .expect("refill the pool after mass termination");
             let pid: i32 = client
@@ -628,8 +628,8 @@ async fn all_idle_pool_backends_are_replaced_after_mass_termination() {
         );
         drop(recovered_clients);
 
-        let created_after_recovery = pool.metrics.connections_created.get();
-        let evictions_after_recovery = pool.metrics.evictions.get();
+        let created_after_recovery = pool.metrics().connections_created.get();
+        let evictions_after_recovery = pool.metrics().evictions.get();
         assert_eq!(created_after_recovery, (POOL_WIDTH * 2) as u64);
         assert_eq!(evictions_after_recovery, POOL_WIDTH as u64);
         assert_eq!(pool.idle_count(), POOL_WIDTH);
@@ -648,7 +648,7 @@ async fn all_idle_pool_backends_are_replaced_after_mass_termination() {
             let mut round_pids = Vec::with_capacity(POOL_WIDTH);
             for _ in 0..POOL_WIDTH {
                 let client = pool
-                    .get()
+                    .acquire()
                     .await
                     .unwrap_or_else(|error| panic!("recovery round {round} failed: {error}"));
                 let pid: i32 = client
@@ -674,11 +674,11 @@ async fn all_idle_pool_backends_are_replaced_after_mass_termination() {
             assert_eq!(pool.active_count(), 0);
             assert_eq!(pool.total_count(), POOL_WIDTH);
             assert_eq!(
-                pool.metrics.connections_created.get(),
+                pool.metrics().connections_created.get(),
                 created_after_recovery,
                 "recovery round {round} opened another connection"
             );
-            assert_eq!(pool.metrics.evictions.get(), evictions_after_recovery);
+            assert_eq!(pool.metrics().evictions.get(), evictions_after_recovery);
             assert_eq!(
                 compio_postgres::live_connections(),
                 expected_live,
@@ -719,7 +719,7 @@ async fn all_idle_pool_backends_are_replaced_after_mass_termination() {
 /// A pooled backend killed while its lease is checked out but idle must fail
 /// that lease's next query and lose its capacity slot when the lease is
 /// dropped. This reaches the release-path ruling that idle-pool recovery does
-/// not: the dead `PooledClient` itself returns to the pool.
+/// not: the dead `PoolConnection` itself returns to the pool.
 #[compio::test]
 async fn a_checked_out_idle_pool_backend_is_discarded_after_termination() {
     compio::time::timeout(WATCHDOG, async {
@@ -739,7 +739,7 @@ async fn a_checked_out_idle_pool_backend_is_discarded_after_termination() {
             .await
             .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
 
-        let borrower = pool.get().await.expect("check out the only pool entry");
+        let borrower = pool.acquire().await.expect("check out the only pool entry");
         let killed_pid: i32 = borrower
             .query_one_scalar("SELECT pg_backend_pid()::int4", &[])
             .await
@@ -850,7 +850,7 @@ async fn a_checked_out_pool_backend_killed_mid_query_is_discarded() {
             .await
             .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
 
-        let borrower = pool.get().await.expect("check out the only pool entry");
+        let borrower = pool.acquire().await.expect("check out the only pool entry");
         let killed_pid: i32 = borrower
             .query_one_scalar("SELECT pg_backend_pid()::int4", &[])
             .await

@@ -13,7 +13,7 @@
 //! not a connection. `exec_query` honours `route.in_tx()` and issues on the
 //! app's parked transaction client; `VectorIndex::vector_search` and
 //! `SpatialIndex::spatial_near` used to call the handle directly, which lowers
-//! to `pg_autocommit::roled_json` - its own `pool.get()` + `BEGIN` + `COMMIT`.
+//! to `pg_autocommit::roled_json` - its own `pool.acquire()` + `BEGIN` + `COMMIT`.
 //!
 //! The consequence, one per family member and neither implying the other: a
 //! vector `search` or a spatial `near` issued inside `db.transaction(fn)`

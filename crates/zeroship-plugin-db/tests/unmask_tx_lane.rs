@@ -14,7 +14,7 @@
 //! `exec_query`, which honours `route.in_tx()` and issues on the app's parked
 //! transaction client; the other three call the handle directly, and every
 //! `BackendHandle` read lowers to `pg_autocommit::roled_rows`, which does its
-//! own `pool.get()` + `BEGIN` + `COMMIT`.
+//! own `pool.acquire()` + `BEGIN` + `COMMIT`.
 //!
 //! Two consequences follow, and they are INDEPENDENT - each has its own test
 //! here and each can reproduce without the other:

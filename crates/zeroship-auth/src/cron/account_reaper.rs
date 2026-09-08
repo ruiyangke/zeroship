@@ -185,7 +185,7 @@ pub async fn run(refresh_pool: crate::oidc::refresh::RefreshSessionPool, control
                 .await
                 .map_err(|e| AuthError::Db(format!("account_reaper pool: {e}")))?;
             let mut conn = pool
-                .get()
+                .acquire()
                 .await
                 .map_err(|e| AuthError::Db(format!("account_reaper checkout: {e}")))?;
             if !advisory_lock::try_acquire_advisory_lock(&conn, ACCOUNT_REAPER_SWEEP_LOCK).await? {

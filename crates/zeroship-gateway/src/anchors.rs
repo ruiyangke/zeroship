@@ -23,7 +23,7 @@
 //! on `GET /__zeroship/auth/session?mint=1` (still here). The anchor remains the
 //! reload-recovery + server-held refresh-family custody store.
 //!
-//! Every store fn takes a `&mut Client` (a `PooledClient` derefs mutably to
+//! Every store fn takes a `&mut Client` (a `PoolConnection` derefs mutably to
 //! it), so the caller checks a pooled connection out for exactly ONE operation
 //! and releases it on drop — NO connection is ever held across the outbound
 //! OP HTTP call.

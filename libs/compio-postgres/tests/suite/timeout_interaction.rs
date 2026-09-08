@@ -367,7 +367,7 @@ fn assert_single_retirement(pool: &Pool) {
     assert_eq!(pool.idle_count(), 0, "retired session became idle");
     assert_eq!(pool.total_count(), 0, "retired session kept its pool slot");
     assert_eq!(
-        pool.metrics.evictions.get(),
+        pool.metrics().evictions.get(),
         1,
         "pool did not record exactly one eviction for the retired session"
     );
@@ -400,7 +400,7 @@ async fn read_timeout_wins_deterministically_when_both_clocks_are_eligible() {
         let pool = Pool::connect_with_config(connection_config, pool_config)
             .await
             .expect("open pool against mid-response scripted peer");
-        let mut client = pool.get().await.expect("check out scripted session");
+        let mut client = pool.acquire().await.expect("check out scripted session");
 
         let error = compio::time::timeout(
             OPERATION_WATCHDOG,
@@ -456,7 +456,7 @@ async fn read_timeout_during_command_recovery_keeps_command_classification() {
         let pool = Pool::connect_with_config(connection_config, pool_config)
             .await
             .expect("open pool against recovery-silence peer");
-        let mut client = pool.get().await.expect("check out scripted session");
+        let mut client = pool.acquire().await.expect("check out scripted session");
 
         let error = compio::time::timeout(
             OPERATION_WATCHDOG,
@@ -516,7 +516,7 @@ async fn command_timeout_recovers_without_a_read_timeout() {
         let pool = Pool::connect_with_config(connection_config, pool_config)
             .await
             .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
-        let mut client = pool.get().await.expect("check out live PostgreSQL session");
+        let mut client = pool.acquire().await.expect("check out live PostgreSQL session");
         let announced_pid = client.process_id();
 
         let error = compio::time::timeout(
@@ -547,7 +547,7 @@ async fn command_timeout_recovers_without_a_read_timeout() {
         drop(client);
         assert_eq!(pool.idle_count(), 1);
         assert_eq!(pool.total_count(), 1);
-        assert_eq!(pool.metrics.evictions.get(), 0);
+        assert_eq!(pool.metrics().evictions.get(), 0);
         compio::time::timeout(OPERATION_WATCHDOG, pool.close())
             .await
             .expect("command-only pool close exceeded its watchdog");
@@ -575,7 +575,7 @@ async fn read_timeout_retires_an_entry_without_a_command_timeout() {
         let pool = Pool::connect_with_config(connection_config, pool_config)
             .await
             .expect("open pool against partial-frame peer");
-        let mut client = pool.get().await.expect("check out scripted session");
+        let mut client = pool.acquire().await.expect("check out scripted session");
 
         let error = compio::time::timeout(
             OPERATION_WATCHDOG,
@@ -638,7 +638,7 @@ async fn acquire_timeout_cannot_steal_a_connection_in_command_recovery() {
         let pool = Pool::connect_with_config(connection_config, pool_config)
             .await
             .expect("open pool against gated-recovery peer");
-        let mut client = pool.get().await.expect("check out recovery session");
+        let mut client = pool.acquire().await.expect("check out recovery session");
         assert_eq!(client.process_id(), 404);
 
         // Both pool futures contain the full connection/recovery state
@@ -654,7 +654,7 @@ async fn acquire_timeout_cannot_steal_a_connection_in_command_recovery() {
             assert_eq!(pool.idle_count(), 0, "recovering lease became idle");
             assert_eq!(pool.total_count(), 1);
 
-            let acquire = compio::time::timeout(OPERATION_WATCHDOG, pool.get())
+            let acquire = compio::time::timeout(OPERATION_WATCHDOG, pool.acquire())
                 .await
                 .expect("competing get() exceeded its operation watchdog");
             // Unblock the command on either outcome so a failed assertion
@@ -685,7 +685,7 @@ async fn acquire_timeout_cannot_steal_a_connection_in_command_recovery() {
                 error.is_pool_timeout(),
                 "competing caller got the wrong pool error: {error:?}"
             );
-            assert_eq!(pool.metrics.timeouts.get(), 1);
+            assert_eq!(pool.metrics().timeouts.get(), 1);
             assert_eq!(pool.pending_count(), 0, "timed-out waiter remained queued");
             assert_eq!(pool.active_count(), 1, "recovery lease was returned early");
             assert_eq!(pool.idle_count(), 0, "recovery entry was handed off early");
@@ -705,7 +705,7 @@ async fn acquire_timeout_cannot_steal_a_connection_in_command_recovery() {
         assert_eq!(pool.active_count(), 1);
         assert_eq!(pool.idle_count(), 0);
         assert_eq!(pool.total_count(), 1);
-        assert_eq!(pool.metrics.evictions.get(), 0);
+        assert_eq!(pool.metrics().evictions.get(), 0);
         assert_eq!(
             client.process_id(),
             404,
@@ -797,7 +797,7 @@ async fn command_recovery_waits_for_cancel_eof_before_sync_and_reuse() {
             .await
             .expect("open pool against cancel-EOF-gated peer");
         let mut client = pool
-            .get()
+            .acquire()
             .await
             .expect("check out cancel-EOF-gated session");
 
@@ -900,7 +900,7 @@ async fn dropping_command_during_timeout_recovery_retires_session_before_reuse()
             let pool = Pool::connect_with_config(connection_config, pool_config)
                 .await
                 .expect("open pool against abandonment peer");
-            let mut client = Box::pin(pool.get())
+            let mut client = Box::pin(pool.acquire())
                 .await
                 .expect("check out abandonment session");
             assert_eq!(client.process_id(), 606);
@@ -952,7 +952,7 @@ async fn dropping_command_during_timeout_recovery_retires_session_before_reuse()
                 .send(true)
                 .expect("scripted peer dropped its replacement control");
 
-            let replacement = Box::pin(compio::time::timeout(OPERATION_WATCHDOG, pool.get()))
+            let replacement = Box::pin(compio::time::timeout(OPERATION_WATCHDOG, pool.acquire()))
                 .await
                 .expect("replacement acquisition exceeded its watchdog")
                 .expect("pool could not replace the abandoned recovery session");

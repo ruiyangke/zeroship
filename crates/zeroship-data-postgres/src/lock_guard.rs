@@ -16,7 +16,7 @@
 //! derivation via [`zeroship_data_core::capability::LockScope::to_keys`]). The
 //! invariant is: *every* exit path from the locked region — Ok, Err,
 //! panic — must either explicitly issue `pg_advisory_unlock` before
-//! parking the `OwnedPooledClient` back into the pool, OR transfer
+//! parking the `PoolConnection` back into the pool, OR transfer
 //! ownership of the still-locked client to the next stage that will
 //! release it.
 //!
@@ -60,12 +60,12 @@
 //!
 //! # Internal representation
 //!
-//! The guard stores the client as `Option<OwnedPooledClient>` so
+//! The guard stores the client as `Option<PoolConnection>` so
 //! `release()` can move it out without `mem::replace` / `ManuallyDrop`
 //! gymnastics. After that call the `Option` is `None` and `released` is
 //! `true`, so subsequent `Drop` is a no-op (idempotent).
 
-use compio_postgres::OwnedPooledClient;
+use compio_postgres::PoolConnection;
 
 use zeroship_data_core::capability::LockScope;
 use zeroship_data_core::storage::LockManager;
@@ -90,7 +90,7 @@ pub struct LockGuard {
     /// The pooled client that holds the advisory lock at session
     /// scope. `None` after `release()` has moved it
     /// out; `Drop` then becomes a no-op.
-    client: Option<OwnedPooledClient>,
+    client: Option<PoolConnection>,
     /// First key passed to `pg_advisory_lock(hashtext($1), hashtext($2))`,
     /// derived from the [`LockScope`] via [`LockScope::to_keys`]
     /// (`"{app_id}:{name}"`). Stored so `release()` can issue the
@@ -137,9 +137,9 @@ impl LockGuard {
     /// are unaffected: on `Ok` the lock is held by `self.client` and
     /// will be released via [`Self::release`];
     /// on `Err` no lock is held and `client` drops back to the pool.
-    pub async fn acquire<B: LockManager<Client = compio_postgres::OwnedPooledClient>>(
+    pub async fn acquire<B: LockManager<Client = compio_postgres::PoolConnection>>(
         backend: &B,
-        client: OwnedPooledClient,
+        client: PoolConnection,
         scope: &LockScope,
     ) -> Result<Self, DbError> {
         let (key, tag) = scope.to_keys();
@@ -170,7 +170,7 @@ impl LockGuard {
     /// `query_text_params` are swallowed (matches the pre-existing
     /// inline sites; the session-scoped lock will auto-release when
     /// the backend session ends if the explicit unlock failed).
-    pub async fn release(mut self) -> Result<Option<OwnedPooledClient>, DbError> {
+    pub async fn release(mut self) -> Result<Option<PoolConnection>, DbError> {
         if self.released {
             return Ok(self.client.take());
         }

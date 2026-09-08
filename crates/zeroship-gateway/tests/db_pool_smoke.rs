@@ -20,7 +20,7 @@
 //! Coverage:
 //!   - `db::checkout` lazily builds the per-thread pool on first use and
 //!     returns the per-thread `Rc<Pool>` to check connections out of.
-//!   - N concurrent `pool.get()` checkouts each run a trivial query and
+//!   - N concurrent `pool.acquire()` checkouts each run a trivial query and
 //!     return the right answer — exercising the pool handing out multiple
 //!     distinct connections rather than serializing through one.
 //!   - Connections are released on drop, so a second wave of checkouts
@@ -57,7 +57,7 @@ async fn pool_checkout_runs_concurrent_trivial_queries() {
 
     let mut guards = Vec::new();
     for i in 0..6i32 {
-        let conn = pool.get().await.expect("pool.get");
+        let conn = pool.acquire().await.expect("pool.get");
         let rows = conn
             .query("SELECT $1::int4 AS n", &[&i])
             .await
@@ -73,7 +73,7 @@ async fn pool_checkout_runs_concurrent_trivial_queries() {
     // Second wave after release: the pool must hand connections back out
     // without re-exhausting (proves release-on-drop works).
     for i in 0..6i32 {
-        let conn = pool.get().await.expect("pool.get (second wave)");
+        let conn = pool.acquire().await.expect("pool.get (second wave)");
         let rows = conn
             .query("SELECT $1::int4 AS n", &[&i])
             .await

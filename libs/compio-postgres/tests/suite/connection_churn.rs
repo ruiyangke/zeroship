@@ -179,7 +179,7 @@ async fn run_churn() {
         let pool = Pool::connect_with_config(config.clone(), pool_config)
             .await
             .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
-        let pool_opened = pool.metrics.connections_created.get() as usize;
+        let pool_opened = pool.metrics().connections_created.get() as usize;
         assert_eq!(
             pool_opened, POOL_WIDTH,
             "pool churn iteration {iteration} opened {pool_opened} physical \
@@ -189,11 +189,11 @@ async fn run_churn() {
         sample_peak(&mut peak_live);
 
         let first = pool
-            .get()
+            .acquire()
             .await
             .expect("check out the first pool connection");
         let second = pool
-            .get()
+            .acquire()
             .await
             .expect("check out the second pool connection");
         assert_ne!(

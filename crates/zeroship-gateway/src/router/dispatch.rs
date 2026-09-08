@@ -2750,7 +2750,7 @@ async fn handle_auth_callback(
             return render_callback_error("session create failed");
         }
     };
-    let mut conn = match pool.get().await {
+    let mut conn = match pool.acquire().await {
         Ok(c) => c,
         Err(e) => {
             tracing::error!(error = %e, "gateway: pg pool checkout failed (session create)");

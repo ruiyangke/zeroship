@@ -2209,7 +2209,7 @@ mod sc1_driver {
     ///
     /// The disposition SC-1 gives unknown backend health is to destroy the
     /// physical connection rather than return it, and on PostgreSQL that is not
-    /// what a drop does: `OwnedPooledClient::drop` calls
+    /// what a drop does: `PoolConnection::drop` calls
     /// `pool.return_client(entry)`, which republishes the lease as idle.
     ///
     /// **The route changed and the name did not, so the route is asserted.**

@@ -169,7 +169,7 @@ impl zeroship_core::service_assertion::ReplayStore for PoolReplayStore {
             let pool = zeroship_gateway::db::checkout(&self.db).await.map_err(|error| {
                 zeroship_core::service_assertion::ReplayStoreError(error.to_string())
             })?;
-            let client = pool.get().await.map_err(|error| {
+            let client = pool.acquire().await.map_err(|error| {
                 zeroship_core::service_assertion::ReplayStoreError(error.to_string())
             })?;
             zeroship_authn::service_replay::claim_replay_key(&*client, key, expires_at).await

@@ -583,7 +583,7 @@ async fn signout_local_revokes_family_marker_deletes_anchor_and_hits_op_revoke()
 
     let anchor_id = {
         let pool = zeroship_gateway::db::checkout(&db).await.expect("pool");
-        let mut conn = pool.get().await.expect("conn");
+        let mut conn = pool.acquire().await.expect("conn");
         let a = anchors::create(
             &mut conn,
             &anchors::NewAnchor {
@@ -634,7 +634,7 @@ async fn signout_local_revokes_family_marker_deletes_anchor_and_hits_op_revoke()
     // (b) anchor row deleted (read_live now returns None).
     {
         let pool = zeroship_gateway::db::checkout(&db).await.expect("pool");
-        let mut conn = pool.get().await.expect("conn");
+        let mut conn = pool.acquire().await.expect("conn");
         let still =
             anchors::read_live(&mut conn, Uuid::parse_str(APP_UUID).expect("valid APP_UUID"), anchor_id)
                 .await

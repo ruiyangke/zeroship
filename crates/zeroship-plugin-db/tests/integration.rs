@@ -2582,7 +2582,7 @@ SELECT con.conname AS name, con.condeferrable AS def, con.condeferred AS init_de
     // because the FK check is deferred to COMMIT. We insert into `a`
     // referencing a `b` row that doesn't exist yet, then create the
     // `b` row referencing the `a` row, all within the tx.
-    let client = pool.get().await.unwrap();
+    let client = pool.acquire().await.unwrap();
     client.execute("BEGIN", &[]).await.unwrap();
     client
         .execute(
@@ -8213,7 +8213,7 @@ fn direct_connection_sites_do_not_grow() {
 }
 
 // ---------------------------------------------------------------------------
-// `OwnedPooledClient`: the transaction connection is a pool checkout
+// `PoolConnection`: the transaction connection is a pool checkout
 //
 // Until 2026-08-27 `acquire_dedicated_client` called
 // `compio_postgres::connect` directly and spawned a detached task per
@@ -8237,7 +8237,7 @@ async fn a_dedicated_client_is_a_pool_checkout_and_returns_on_drop() {
     );
 
     let active_before = pool.active_count();
-    let created_before = pool.metrics.connections_created.get();
+    let created_before = pool.metrics().connections_created.get();
 
     let client = {
         use zeroship_plugin_db::backend::SqlExecutor as _;
@@ -8256,7 +8256,7 @@ async fn a_dedicated_client_is_a_pool_checkout_and_returns_on_drop() {
     // The warm pool already holds idle connections, so this checkout must not
     // have opened a new backend at all.
     assert_eq!(
-        pool.metrics.connections_created.get(),
+        pool.metrics().connections_created.get(),
         created_before,
         "the checkout opened a new connection instead of reusing an idle one"
     );

@@ -56,7 +56,7 @@
 //!
 //! [`Action::WithdrawSession`](crate::transaction::reducer::Action::WithdrawSession) says "destroy the physical connection rather than
 //! returning it". On PostgreSQL the transaction session is a
-//! [`compio_postgres::OwnedPooledClient`], whose `Drop` calls
+//! [`compio_postgres::PoolConnection`], whose `Drop` calls
 //! `pool.return_client(entry)` - so **dropping a withdrawn session hands it to
 //! the next borrower**, which is the exact opposite of the action. Withdrawal is
 //! therefore this module's private `destroy_session`, which closes the client's request channel
@@ -1186,7 +1186,7 @@ async fn cancel_and_reclaim(app_id: &str, token: CommandToken) -> CleanupAck {
 /// pool. This is the ONLY disposition that may do that.
 fn release_session(app_id: &str) {
     let client = crate::tx_lanes::with_mut(|l| {
-        // BEFORE the drop, and load-bearing. `OwnedPooledClient::drop` returns
+        // BEFORE the drop, and load-bearing. `PoolConnection::drop` returns
         // the lease, and `Pool::return_client` RETIRES any session whose cancel
         // lease has escaped (`Arc::strong_count(lease) > 1`). A canceller still
         // parked here holds exactly such a reference, so leaving it would
@@ -1201,7 +1201,7 @@ fn release_session(app_id: &str) {
 
 /// [`Action::WithdrawSession`]: destroy the physical connection.
 ///
-/// **A drop is not a withdrawal.** `OwnedPooledClient::drop` calls
+/// **A drop is not a withdrawal.** `PoolConnection::drop` calls
 /// `pool.return_client(entry)`, which republishes the lease as idle - so the
 /// next borrower inherits precisely the session SC-1 withdrew. Closing the
 /// client's request channel first makes `PoolEntry::is_pool_eligible` false

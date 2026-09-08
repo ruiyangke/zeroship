@@ -86,7 +86,7 @@ async fn a_session_guc_survives_a_release() {
     let pool = single_connection_pool(&url).await;
 
     let first_pid = {
-        let client = pool.get().await.expect("first checkout");
+        let client = pool.acquire().await.expect("first checkout");
         client
             .batch_execute("SET cpg_carry.marker = 'set-by-first-borrower'")
             .await
@@ -98,7 +98,7 @@ async fn a_session_guc_survives_a_release() {
             .get::<_, i32>(0)
     };
 
-    let client = pool.get().await.expect("second checkout");
+    let client = pool.acquire().await.expect("second checkout");
     let second_pid: i32 = client
         .query_one("SELECT pg_backend_pid()", &[])
         .await
@@ -137,7 +137,7 @@ async fn a_session_advisory_lock_survives_a_release() {
     let key: i64 = i64::from(std::process::id()) + 0x5000_0000;
 
     let first_pid = {
-        let client = pool.get().await.expect("first checkout");
+        let client = pool.acquire().await.expect("first checkout");
         let acquired: bool = client
             .query_one("SELECT pg_try_advisory_lock($1)", &[&key])
             .await
@@ -151,7 +151,7 @@ async fn a_session_advisory_lock_survives_a_release() {
             .get::<_, i32>(0)
     };
 
-    let client = pool.get().await.expect("second checkout");
+    let client = pool.acquire().await.expect("second checkout");
     let second_pid: i32 = client
         .query_one("SELECT pg_backend_pid()", &[])
         .await
@@ -199,7 +199,7 @@ async fn an_open_transaction_does_not_survive_a_release() {
     let pool = single_connection_pool(&url).await;
 
     let first_pid = {
-        let client = pool.get().await.expect("first checkout");
+        let client = pool.acquire().await.expect("first checkout");
         client
             .batch_execute("BEGIN; SET LOCAL cpg_carry.in_txn = 'yes'")
             .await
@@ -211,7 +211,7 @@ async fn an_open_transaction_does_not_survive_a_release() {
             .get::<_, i32>(0)
     };
 
-    let client = pool.get().await.expect("second checkout");
+    let client = pool.acquire().await.expect("second checkout");
     let second_pid: i32 = client
         .query_one("SELECT pg_backend_pid()", &[])
         .await
@@ -263,7 +263,7 @@ async fn a_listen_registration_survives_a_release() {
     let pool = single_connection_pool(&url).await;
 
     let first_pid = {
-        let client = pool.get().await.expect("first checkout");
+        let client = pool.acquire().await.expect("first checkout");
         client
             .batch_execute("LISTEN cpg_carry_channel")
             .await
@@ -275,7 +275,7 @@ async fn a_listen_registration_survives_a_release() {
             .get::<_, i32>(0)
     };
 
-    let client = pool.get().await.expect("second checkout");
+    let client = pool.acquire().await.expect("second checkout");
     let second_pid: i32 = client
         .query_one("SELECT pg_backend_pid()", &[])
         .await

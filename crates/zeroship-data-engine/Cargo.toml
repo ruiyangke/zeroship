@@ -48,7 +48,7 @@ zeroship-metering = { workspace = true }
 # The system-field and shape policy `crud/system_fields_pass.rs` and
 # `system_shape_charter.rs` read.
 zeroship-migrate-policy = { workspace = true }
-# `CancelToken` + `Pool` in `cancel.rs`, `OwnedPooledClient` in `tx_lanes.rs`.
+# `CancelToken` + `Pool` in `cancel.rs`, `PoolConnection` in `tx_lanes.rs`.
 # See the header: this is the vendor edge this tier is allowed to carry.
 compio-postgres = { workspace = true, features = ["with-uuid-1"] }
 # `time::timeout` / `time::sleep` / `runtime::spawn` in the transaction driver.

@@ -57,7 +57,7 @@ async fn drop_test_schema(pool: &Pool, schema: &str) -> Result<(), String> {
     );
     let cleanup = async {
         let client = pool
-            .get()
+            .acquire()
             .await
             .map_err(|error| common::error_chain(&error))?;
         client
@@ -88,7 +88,7 @@ async fn a_raw_begin_does_not_leak_to_the_next_borrower() {
         TEST_TIMEOUT,
         std::panic::AssertUnwindSafe(async {
             {
-                let client = pool.get().await.expect("first checkout");
+                let client = pool.acquire().await.expect("first checkout");
                 client
                     .batch_execute(&format!(
                         "DROP SCHEMA IF EXISTS {schema} CASCADE; CREATE SCHEMA {schema};
@@ -102,7 +102,7 @@ async fn a_raw_begin_does_not_leak_to_the_next_borrower() {
             // guard is involved, which is the case that has no other protection,
             // and releases without committing.
             let leaked_pid: i32 = {
-                let client = pool.get().await.expect("second checkout");
+                let client = pool.acquire().await.expect("second checkout");
                 client
                     .batch_execute(&format!("BEGIN; INSERT INTO {relation} VALUES (1);"))
                     .await
@@ -117,7 +117,7 @@ async fn a_raw_begin_does_not_leak_to_the_next_borrower() {
             // Borrower 2 gets the same backend. If the transaction leaked it
             // sees its own uncommitted row and reports an assigned transaction
             // id.
-            let client = pool.get().await.expect("third checkout");
+            let client = pool.acquire().await.expect("third checkout");
 
             // THE SAME BACKEND, ASSERTED. The comment above says `max_size(1)`
             // guarantees this. It does not: evict-and-reconnect stays inside a
@@ -231,7 +231,7 @@ async fn a_stale_dirty_flag_does_not_suppress_the_release_rollback() {
         TEST_TIMEOUT,
         std::panic::AssertUnwindSafe(async {
             {
-                let client = pool.get().await.expect("first checkout");
+                let client = pool.acquire().await.expect("first checkout");
                 client
                     .batch_execute(&format!(
                         "DROP SCHEMA IF EXISTS {schema} CASCADE; CREATE SCHEMA {schema};
@@ -242,7 +242,7 @@ async fn a_stale_dirty_flag_does_not_suppress_the_release_rollback() {
             }
 
             let leaked_pid: i32 = {
-                let mut client = pool.get().await.expect("second checkout");
+                let mut client = pool.acquire().await.expect("second checkout");
 
                 // (1) Dirty the session and let its ROLLBACK settle. Abandoning
                 // a `Transaction` is the ordinary way a session becomes dirty.
@@ -274,7 +274,7 @@ async fn a_stale_dirty_flag_does_not_suppress_the_release_rollback() {
                 rows[0].get("pid")
             };
 
-            let client = pool.get().await.expect("third checkout");
+            let client = pool.acquire().await.expect("third checkout");
             let reused_pid: i32 = client
                 .query("SELECT pg_backend_pid() AS pid", &[])
                 .await
@@ -357,7 +357,7 @@ async fn an_aborted_transaction_does_not_leak_to_the_next_borrower() {
     // transaction, and the release happens with the server still in that
     // state.
     let poisoned_pid: i32 = {
-        let client = pool.get().await.expect("first checkout");
+        let client = pool.acquire().await.expect("first checkout");
         let pid: i32 = client
             .query("SELECT pg_backend_pid() AS pid", &[])
             .await
@@ -377,7 +377,7 @@ async fn an_aborted_transaction_does_not_leak_to_the_next_borrower() {
 
     // Borrower 2 gets the same backend. An inherited aborted transaction
     // shows up as 25P02 on a statement that has nothing to do with the first.
-    let client = pool.get().await.expect("second checkout");
+    let client = pool.acquire().await.expect("second checkout");
 
     // THE SAME BACKEND, ASSERTED, for the reason recorded on
     // `a_raw_begin_does_not_leak_to_the_next_borrower`: `max_size(1)` does not
@@ -431,7 +431,7 @@ async fn a_terminated_backend_is_not_handed_to_the_next_borrower() {
     let pool = connect_pool(&url, config).await;
 
     let pid: i32 = {
-        let client = pool.get().await.expect("first checkout");
+        let client = pool.acquire().await.expect("first checkout");
         let rows = client
             .query("SELECT pg_backend_pid()::int4 AS pid", &[])
             .await
@@ -455,7 +455,7 @@ async fn a_terminated_backend_is_not_handed_to_the_next_borrower() {
     // The pooled entry is now dead. A checkout must evict and replace it, not
     // hand back the corpse.
     let client = pool
-        .get()
+        .acquire()
         .await
         .expect("checkout after the backend was killed");
     let rows = client

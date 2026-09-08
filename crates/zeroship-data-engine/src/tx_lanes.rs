@@ -11,7 +11,7 @@
 //!
 //! # Why it may name both vendors
 //!
-//! [`TxConnection`] holds `OwnedPooledClient` on one arm and
+//! [`TxConnection`] holds `PoolConnection` on one arm and
 //! `SqliteSessionHandle` on the other, which looks like a vendor-embedding
 //! violation and is not: `data-engine` sits ABOVE both vendor crates and is the
 //! tier that dispatches between them. The proposal says exactly that of
@@ -29,7 +29,7 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
-use compio_postgres::OwnedPooledClient;
+use compio_postgres::PoolConnection;
 
 use crate::backend::sqlite::session::SqliteSessionHandle;
 use zeroship_core::change_event::ChangeEvent;
@@ -83,7 +83,7 @@ pub struct TxLane {
 /// **A lane cannot outlive its session, and the disposition is destroy.**
 ///
 /// Removing a lane drops whatever is still parked in it, and for PostgreSQL a
-/// plain drop is the WRONG disposition: `OwnedPooledClient::drop` returns the
+/// plain drop is the WRONG disposition: `PoolConnection::drop` returns the
 /// lease to the pool, which would publish a connection still inside its
 /// transaction block to the next borrower - on a worker thread that multiplexes
 /// co-resident apps, potentially a different tenant's.
@@ -142,7 +142,7 @@ impl Drop for TxLane {
 // with open transactions, box it - the lint's assumption would then be true.
 #[allow(clippy::large_enum_variant)]
 pub enum TxConnection {
-    Postgres(OwnedPooledClient),
+    Postgres(PoolConnection),
     Sqlite(SqliteSessionHandle),
 }
 
@@ -159,7 +159,7 @@ impl TxConnection {
     ///
     /// **This takes no backend, and that is the point.** Each variant holds
     /// exactly the `SqlExecutor::Client` of the backend that produced it -
-    /// `PostgresBackend::Client = OwnedPooledClient`, `SqliteBackend::Client =
+    /// `PostgresBackend::Client = PoolConnection`, `SqliteBackend::Client =
     /// SqliteSessionHandle` - so the variant already names the vendor. Passing a
     /// `BackendHandle` alongside and matching on the pair, as this operation did
     /// until 2026-09-02, re-proved that pairing at runtime and needed an
@@ -244,7 +244,7 @@ impl TxConnection {
 /// Destroy a transaction session's physical connection instead of returning it.
 ///
 /// **This is what SC-1's `WithdrawSession` means, and a plain `drop` is not it.**
-/// `OwnedPooledClient::drop` calls `pool.return_client(entry)`, which
+/// `PoolConnection::drop` calls `pool.return_client(entry)`, which
 /// republishes the lease as idle - so dropping a withdrawn session hands the
 /// next borrower exactly the connection the protocol withdrew. The lease's
 /// consuming `discard()` closes the physical connection and releases its pool

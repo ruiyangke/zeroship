@@ -210,7 +210,7 @@ pub async fn request(
             return redirect_to_me();
         }
     };
-    let mut conn = match pool.get().await {
+    let mut conn = match pool.acquire().await {
         Ok(conn) => conn,
         Err(e) => {
             tracing::error!(error = %e, user_id = %user.id, "account deletion session unavailable");
