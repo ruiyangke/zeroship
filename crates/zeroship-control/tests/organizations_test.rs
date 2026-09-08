@@ -348,6 +348,148 @@ async fn an_admin_seats_below_itself_and_never_at_its_own_rank() {
     org.cleanup(&fx).await;
 }
 
+/// A developer seats nobody, and an admin seats the SAME viewer.
+///
+/// The strict inequality is not enough here and that is the whole point: a
+/// developer outranks a viewer, so `actor.rank > target.rank` holds and the
+/// INSERT matched until the `admin` floor was added to it. Until then the only
+/// thing refusing this pair was the band Cedar puts on
+/// `organization:members:write`, while the sibling `add_project_member` two
+/// hundred lines away carried the floor in its own statement - and the module
+/// header promised that Cedar is never the only fence.
+///
+/// The two calls differ in ONE variable, the actor's rank, so the refusal is
+/// attributable to the floor and not to the role being granted.
+#[compio::test]
+async fn a_developer_seats_nobody_where_an_admin_seats_a_viewer() {
+    let Some(fx) = Fx::new().await else {
+        return;
+    };
+    let mut org = Org::new(&fx, "floororg").await;
+    let developer = org.seat(&fx, "developer", "developer").await;
+    let admin = org.seat(&fx, "admin", "admin").await;
+    let target = seed_user(&fx.pg, "target").await;
+
+    let err = organizations::add_member(
+        &fx.registry,
+        developer,
+        &org.id,
+        &AddMemberBody {
+            user_id: target,
+            role: "viewer".to_string(),
+        },
+        None,
+    )
+    .await
+    .expect_err("a developer must seat nobody, even a viewer it outranks");
+    assert!(
+        matches!(err, OrganizationError::Insufficient(_)),
+        "expected an authority refusal, got {err:?}"
+    );
+    assert_eq!(
+        org.role_of(&fx, target).await,
+        None,
+        "the floor is in the INSERT, so a refused seating cannot have written a row"
+    );
+
+    // The control: same target, same role, an actor one rank higher.
+    organizations::add_member(
+        &fx.registry,
+        admin,
+        &org.id,
+        &AddMemberBody {
+            user_id: target,
+            role: "viewer".to_string(),
+        },
+        None,
+    )
+    .await
+    .expect("an admin may seat a viewer");
+    assert_eq!(org.role_of(&fx, target).await.as_deref(), Some("viewer"));
+
+    org.seeded.push(target);
+    org.cleanup(&fx).await;
+}
+
+/// The same floor on the invite, because inviting is seating with a delay.
+///
+/// Without it a developer issues an invitation that redemption will honour, and
+/// the escalation lands later and from a different route than the call that
+/// authorized it.
+#[compio::test]
+async fn a_developer_invites_nobody_where_an_admin_invites_a_viewer() {
+    let Some(fx) = Fx::new().await else {
+        return;
+    };
+    let mut org = Org::new(&fx, "invfloor").await;
+    let developer = org.seat(&fx, "developer", "developer").await;
+    let admin = org.seat(&fx, "admin", "admin").await;
+    let joiner = seed_user(&fx.pg, "joiner").await;
+    let joiner_email = email_of(&fx.pg, joiner).await;
+
+    let err = organizations::create_invite(
+        &fx.registry,
+        developer,
+        &org.id,
+        &CreateInviteBody {
+            email: joiner_email.clone(),
+            role: "viewer".to_string(),
+        },
+        None,
+    )
+    .await
+    .expect_err("a developer must invite nobody, even at viewer");
+    assert!(
+        matches!(err, OrganizationError::Insufficient(_)),
+        "expected an authority refusal, got {err:?}"
+    );
+    assert_eq!(
+        pending_invites(&fx, &org.id, &joiner_email).await,
+        0,
+        "the floor is in the INSERT, so a refused invitation cannot have written a row"
+    );
+
+    // The control: same address, same role, an actor one rank higher.
+    let issued = organizations::create_invite(
+        &fx.registry,
+        admin,
+        &org.id,
+        &CreateInviteBody {
+            email: joiner_email.clone(),
+            role: "viewer".to_string(),
+        },
+        None,
+    )
+    .await
+    .expect("an admin may invite a viewer");
+    assert_eq!(issued.invite.role, "viewer");
+    assert_eq!(pending_invites(&fx, &org.id, &joiner_email).await, 1);
+
+    let _ = fx
+        .pg
+        .execute(
+            "DELETE FROM zeroship.organization_invites WHERE organization_id = $1",
+            &[&org.id],
+        )
+        .await;
+    org.seeded.push(joiner);
+    org.cleanup(&fx).await;
+}
+
+/// How many unconsumed invitations one organization holds for one address.
+async fn pending_invites(fx: &Fx, organization_id: &str, email: &str) -> i64 {
+    let rows = fx
+        .pg
+        .query(
+            "SELECT COUNT(*)::bigint AS n FROM zeroship.organization_invites \
+              WHERE organization_id = $1 AND email = $2::citext AND consumed_at IS NULL",
+            &[&organization_id, &email],
+        )
+        .await
+        .expect("count invites");
+    rows[0].get("n")
+}
+
 /// The BILLING axis refuses independently of the rank axis.
 ///
 /// `admin` is rank 30 / billing_rank 10; `billing` is rank 10 / billing_rank
