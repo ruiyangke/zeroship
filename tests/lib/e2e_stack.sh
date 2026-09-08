@@ -208,9 +208,19 @@ stack_workspace() {
 stack_pg_up() {
   # --- ephemeral Postgres ---------------------------------------------------
   docker rm -f "$PG_CONTAINER" >/dev/null 2>&1 || true
+  # `max_slot_wal_keep_size` is NOT tuning. `zeroship-worker` reads it in
+  # crates/zeroship-worker/src/db_posture.rs and REFUSES TO START on the
+  # PostgreSQL default of -1 (unlimited), because an abandoned replication slot
+  # would then retain WAL until pg_wal fills the cluster disk. This container
+  # carried the default, so `stack_up` could bring control up and then died at
+  # "worker unhealthy" with the refusal buried in $WORK/worker.log - the same
+  # finite value deploy/compose/docker-compose.yml sets on its postgres service,
+  # which tests/compose_db_posture_gate.sh already fences there and cannot see
+  # here.
   docker run --name "$PG_CONTAINER" -d -p "$PG_PORT:5432" \
     -e POSTGRES_PASSWORD=zeroship -e POSTGRES_USER=postgres -e POSTGRES_DB=zeroship \
-    postgres:16 -c max_connections=300 >/dev/null || { _stk_bad "docker run postgres failed"; return 1; }
+    postgres:16 -c max_connections=300 -c max_slot_wal_keep_size=8GB >/dev/null \
+    || { _stk_bad "docker run postgres failed"; return 1; }
   # Readiness = three CONSECUTIVE successful queries, not one pg_isready.
   # Measured 2026-08-09 by sampling both probes ~30x/s against a fresh
   # postgres:16: there is a window in which `pg_isready` reports ready and
