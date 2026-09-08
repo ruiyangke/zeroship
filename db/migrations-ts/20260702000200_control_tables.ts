@@ -36,12 +36,6 @@ export default {
       },
       primaryKey: ["app_id", "user_id"],
     });
-    // The shape the id must hold, mirroring `organizations_id_shape`. The
-    // character class is case-inclusive because `zeroship_core::typed_id`'s
-    // BASE62 alphabet is `0..9A..Za..z` and case is significant in it; a
-    // lower-only class would refuse most minted ids. Twenty-two characters is
-    // base62 of 128 bits.
-    table("apps", { schema: "zeroship" }).check("apps_id_shape").add({ expr: (col) => col("id").regex("^app_[0-9A-Za-z]{22}$") });
     table("app_members", { schema: "zeroship" }).check("app_members_role_check").add({ expr: (col) => col("role").in(["owner", "editor", "viewer"]) });
     table("app_net_grants", { schema: "zeroship" }).create({
       columns: {
@@ -176,6 +170,17 @@ export default {
       },
       primaryKey: ["id"],
     });
+    // Must follow the create above: the recorder folds a pending schema after
+    // each envelope, and a constraint naming a table the fold has not seen yet
+    // fails the whole file with `table \`apps\` does not exist`.
+    //
+    // The character class is case-inclusive because `zeroship_core::typed_id`'s
+    // BASE62 alphabet is `0..9A..Za..z` and case is significant in it; a
+    // lower-only class would refuse most minted ids. Twenty-two characters is
+    // base62 of 128 bits.
+    table("apps", { schema: "zeroship" })
+      .check("apps_id_shape")
+      .add({ expr: (col) => col("id").regex("^app_[0-9A-Za-z]{22}$") });
     table("creator_account_history", { schema: "zeroship" }).create({
       columns: {
         id: t.uuid().notNull().default(uuidV4()),

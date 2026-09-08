@@ -1,4 +1,4 @@
-import { table } from "@zeroship/migrate";
+import { raw, table } from "@zeroship/migrate";
 
 export default {
   name: "constraints_indexes_fks",
@@ -193,5 +193,40 @@ export default {
     table("totp_credentials", { schema: "zeroship" }).foreignKey("totp_credentials_user_id_fkey").add({ columns: ["user_id"], references: { table: "users", columns: ["id"] }, onDelete: "cascade" });
     table("usage_aggregates", { schema: "zeroship" }).foreignKey("usage_aggregates_app_id_fkey").add({ columns: ["app_id"], references: { table: "apps", columns: ["id"] }, onDelete: "cascade" });
     table("usage_aggregates", { schema: "zeroship" }).foreignKey("usage_aggregates_metric_fkey").add({ columns: ["metric"], references: { table: "billing_metrics", columns: ["metric"], schema: "zeroship" }, deferrable: true, initiallyDeferred: true });
+
+    // ---- typed-id collations that the RLS file would otherwise strand -------
+    //
+    // These eight `app_id` columns are the ones named in a `tenant_isolation`
+    // USING/WITH CHECK expression, and PostgreSQL answers `cannot alter type of
+    // a column used in a policy definition` for every one of them. They must
+    // therefore be collated HERE, after the tables exist and before
+    // 20260702000800_policies_rls creates the policies - not in
+    // 20260831000001_sortable_entity_id_collations with the rest of the domain.
+    //
+    // Only the policy-referenced column moves. Each of these tables keeps its
+    // OTHER typed-id columns in the later map, because a single `ALTER TABLE`
+    // carrying several `ALTER COLUMN` clauses fails as a whole if any one clause
+    // names a policy column - so the split is per column, not per table.
+    const policyPinnedIdColumnsByTable: Readonly<Record<string, readonly string[]>> = {
+      app_secrets: ["app_id"],
+      app_session_anchors: ["app_id"],
+      app_spend_limit: ["app_id"],
+      app_spend_state: ["app_id"],
+      gateway_sessions: ["app_id"],
+      plan_change_events: ["app_id"],
+      spend_state_history: ["app_id"],
+      usage_aggregates: ["app_id"],
+    };
+    for (const [tableName, columns] of Object.entries(policyPinnedIdColumnsByTable)) {
+      const alterations = columns
+        .map((column) => `ALTER COLUMN "${column}" TYPE text COLLATE "C"`)
+        .join(", ");
+      raw({
+        sql: `ALTER TABLE "zeroship"."${tableName}" ${alterations}`,
+        reason:
+          "typed-id text domains need bytewise comparison, and a policy on the column makes this "
+          + "the last point the type can be altered at all",
+      });
+    }
   },
 };
