@@ -19,9 +19,11 @@
 //! must never happen is the reverse.
 
 use zeroship_core::database_role::per_app_role_name;
-use zeroship_schema::SchemaName;
+use zeroship_data_query_builder::SchemaName;
 
-use zeroship_data_core::budgets::{DB_IDLE_IN_TX_TIMEOUT_MS, DB_LOCK_TIMEOUT_MS, DB_STATEMENT_TIMEOUT_MS};
+use zeroship_data_core::budgets::{
+    DB_IDLE_IN_TX_TIMEOUT_MS, DB_LOCK_TIMEOUT_MS, DB_STATEMENT_TIMEOUT_MS,
+};
 use zeroship_data_core::error::DbError;
 
 /// Compose the per-app role from the SCHEMA, the way the migration service does.
@@ -40,9 +42,9 @@ use zeroship_data_core::error::DbError;
 /// `pg_error::is_missing_per_app_session_role` stops matching - which turns an
 /// actionable SCHEMA_NOT_PROVISIONED into a generic failure.
 fn quoted_per_app_role(schema: &SchemaName) -> Result<String, DbError> {
-    Ok(zeroship_schema::query::quote_ident(&per_app_role_name(
-        schema.as_str(),
-    )?))
+    Ok(zeroship_data_query_builder::compile::quote_ident(
+        &per_app_role_name(schema.as_str())?,
+    ))
 }
 
 /// Combined per-transaction client setup: `SET LOCAL ROLE` + the DB-1 timeout

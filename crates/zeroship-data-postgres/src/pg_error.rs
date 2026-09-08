@@ -14,8 +14,8 @@
 //! [`DbError`].
 
 use zeroship_data_core::error::{
-    DbError, DenyReason, GRANT_REVOKED, GRANT_REVOKED_MESSAGE, MISSING_ROLE_HINT,
-    MISSING_ROLE_MESSAGE, SCHEMA_NOT_PROVISIONED, SessionSetupDisposition, SessionSetupError,
+    DbError, DenyReason, SessionSetupDisposition, SessionSetupError, GRANT_REVOKED,
+    GRANT_REVOKED_MESSAGE, MISSING_ROLE_HINT, MISSING_ROLE_MESSAGE, SCHEMA_NOT_PROVISIONED,
 };
 
 /// Does this server error match the role set by per-app session setup?
@@ -48,7 +48,7 @@ use zeroship_data_core::error::{
 fn is_missing_per_app_session_role(
     code: &compio_postgres::error::SqlState,
     primary_message: &str,
-    schema: &zeroship_schema::SchemaName,
+    schema: &zeroship_data_query_builder::SchemaName,
 ) -> bool {
     use compio_postgres::error::SqlState;
 
@@ -70,7 +70,7 @@ fn is_missing_per_app_session_role(
 /// `autocommit_local_session_setup_sql` on the call this is classifying.
 pub(crate) fn classify_pg_per_app_session_setup(
     e: &compio_postgres::Error,
-    schema: &zeroship_schema::SchemaName,
+    schema: &zeroship_data_query_builder::SchemaName,
 ) -> SessionSetupError {
     if e.as_db_error()
         .is_some_and(|db| is_missing_per_app_session_role(db.code(), db.message(), schema))
@@ -113,7 +113,7 @@ pub(crate) fn classify_pg_per_app_session_setup(
 #[cfg(feature = "test-helpers")]
 pub fn classify_pg_per_app_session_setup_for_tests(
     e: &compio_postgres::Error,
-    schema: &zeroship_schema::SchemaName,
+    schema: &zeroship_data_query_builder::SchemaName,
 ) -> DbError {
     classify_pg_per_app_session_setup(e, schema).into_db_error()
 }
@@ -250,10 +250,11 @@ mod tests {
     fn per_app_role_composers_match_across_services() {
         use compio_postgres::error::SqlState;
 
-        let schema = zeroship_schema::SchemaName::new("role_parity").expect("parity fixture");
+        let schema =
+            zeroship_data_query_builder::SchemaName::new("role_parity").expect("parity fixture");
         let role = zeroship_core::database_role::per_app_role_name(schema.as_str())
             .expect("parity fixture role name");
-        let quoted_role = zeroship_schema::query::quote_ident(&role);
+        let quoted_role = zeroship_data_query_builder::compile::quote_ident(&role);
 
         let migration = zeroship_migrate_server::apply::runtime_role_provisioning_sql(
             &schema,
@@ -304,7 +305,7 @@ mod tests {
     /// identities could hand each of them a different one and nothing objected.
     ///
     /// **THE FIX IS THE TYPE, AND THIS TEST NOW RECORDS THAT.** Both composers
-    /// take [`zeroship_schema::SchemaName`], so the failing call this test was
+    /// take [`zeroship_data_query_builder::SchemaName`], so the failing call this test was
     /// written to make fail is no longer expressible - `tx_session_setup_sql`
     /// cannot be handed a tenant id, because a tenant id is a `&str` and a
     /// `&str` is not a `SchemaName` and there is no `From`, `AsRef` or `Deref`
@@ -326,7 +327,7 @@ mod tests {
     #[test]
     fn per_app_role_composers_agree_across_the_two_identities_not_one_string() {
         use zeroship_core::database_role::per_app_role_name;
-        use zeroship_schema::SchemaName;
+        use zeroship_data_query_builder::SchemaName;
 
         // The two identities the decoupling separates. One string is both today.
         const TENANT_APP_ID: &str = "0191e7a2-b3c4-4d5e-8f90-123456789abc";
@@ -339,10 +340,9 @@ mod tests {
         // is satisfied in the diverged world too.
         for single_input in [TENANT_APP_ID, SCHEMA_NAME] {
             let as_schema = SchemaName::new(single_input).expect("fixture schema name");
-            let migration = zeroship_migrate_server::apply::runtime_role_provisioning_sql(
-                &as_schema, MIGRATOR,
-            )
-            .expect("provisioning role name");
+            let migration =
+                zeroship_migrate_server::apply::runtime_role_provisioning_sql(&as_schema, MIGRATOR)
+                    .expect("provisioning role name");
             let data_plane = per_app_role_name(single_input).expect("data-plane role name");
             assert_eq!(
                 migration.role_name(),
@@ -370,7 +370,7 @@ mod tests {
         assert!(
             setup_sql.starts_with(&format!(
                 "SET LOCAL ROLE {};",
-                zeroship_schema::query::quote_ident(provisioned.role_name())
+                zeroship_data_query_builder::compile::quote_ident(provisioned.role_name())
             )),
             "session setup does not name the role the migration service provisioned, so \
              SET LOCAL ROLE names an identifier that was never created.\n  provisioned \
@@ -408,7 +408,7 @@ mod tests {
     /// -- the one error that tells a creator to run `zeroship migrate`.
     ///
     /// **THE MISMATCHED CALL IS NOW A COMPILE ERROR.** The classifier takes the
-    /// same [`zeroship_schema::SchemaName`] the setup builder does, so the two
+    /// same [`zeroship_data_query_builder::SchemaName`] the setup builder does, so the two
     /// call sites in `pg_autocommit.rs` cannot be given different identities.
     /// What is asserted below is that the classifier recognises a role derived
     /// from the schema it was handed, in a fixture where the tenant string is
@@ -417,7 +417,7 @@ mod tests {
     #[test]
     fn missing_role_stays_classified_when_schema_and_tenant_diverge() {
         use compio_postgres::error::SqlState;
-        use zeroship_schema::SchemaName;
+        use zeroship_data_query_builder::SchemaName;
 
         const TENANT_APP_ID: &str = "0191e7a2-b3c4-4d5e-8f90-123456789abc";
         const SCHEMA_NAME: &str = "db_0191e7a2b3c44d5e8f90123456789abc";
@@ -442,11 +442,7 @@ mod tests {
         );
         let foreign = format!("role \"{tenant_derived}\" does not exist");
         assert!(
-            !is_missing_per_app_session_role(
-                &SqlState::INVALID_PARAMETER_VALUE,
-                &foreign,
-                &schema,
-            ),
+            !is_missing_per_app_session_role(&SqlState::INVALID_PARAMETER_VALUE, &foreign, &schema,),
             "control: a role this schema did not derive must not be classified: {foreign}"
         );
 
@@ -473,7 +469,7 @@ mod tests {
         assert!(is_missing_per_app_session_role(
             &SqlState::INVALID_PARAMETER_VALUE,
             r#"role "app_nonexistent_role" does not exist"#,
-            &zeroship_schema::SchemaName::new("nonexistent").expect("fixture schema"),
+            &zeroship_data_query_builder::SchemaName::new("nonexistent").expect("fixture schema"),
         ));
     }
 
@@ -484,7 +480,7 @@ mod tests {
         assert!(!is_missing_per_app_session_role(
             &SqlState::INVALID_PARAMETER_VALUE,
             r#"invalid value for parameter "statement_timeout": "yes""#,
-            &zeroship_schema::SchemaName::new("nonexistent").expect("fixture schema"),
+            &zeroship_data_query_builder::SchemaName::new("nonexistent").expect("fixture schema"),
         ));
     }
 
@@ -495,7 +491,7 @@ mod tests {
         assert!(!is_missing_per_app_session_role(
             &SqlState::UNDEFINED_TABLE,
             r#"role "app_nonexistent_role" does not exist"#,
-            &zeroship_schema::SchemaName::new("nonexistent").expect("fixture schema"),
+            &zeroship_data_query_builder::SchemaName::new("nonexistent").expect("fixture schema"),
         ));
     }
 
@@ -506,12 +502,12 @@ mod tests {
         assert!(!is_missing_per_app_session_role(
             &SqlState::UNDEFINED_OBJECT,
             r#"role "app_x_role" does not exist"#,
-            &zeroship_schema::SchemaName::new("x").expect("fixture schema"),
+            &zeroship_data_query_builder::SchemaName::new("x").expect("fixture schema"),
         ));
         assert!(!is_missing_per_app_session_role(
             &SqlState::INVALID_AUTHORIZATION_SPECIFICATION,
             r#"role "app_x_role" does not exist"#,
-            &zeroship_schema::SchemaName::new("x").expect("fixture schema"),
+            &zeroship_data_query_builder::SchemaName::new("x").expect("fixture schema"),
         ));
     }
 

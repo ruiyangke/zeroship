@@ -31,13 +31,13 @@
 //!
 //! # The validation is the existing one, unchanged
 //!
-//! [`SchemaName::new`] delegates to [`crate::query::validate_schema`] - the same
+//! [`SchemaName::new`] delegates to [`crate::compile::validate_schema`] - the same
 //! predicate every `build_*` function called per operation before this type
 //! existed - and returns the same [`QueryError`] values byte for byte. This
 //! moves *when* an illegal name is refused (once, at construction) without
 //! changing *what* is refused or what the refusal says.
 
-use crate::query::{QueryError, quote_ident, validate_schema};
+use crate::compile::{quote_ident, validate_schema, QueryError};
 
 /// A validated physical database schema name.
 ///
@@ -52,7 +52,7 @@ impl SchemaName {
     /// # Errors
     ///
     /// Returns the same [`QueryError::InvalidCollection`] value that
-    /// [`crate::query::validate_schema`] has always produced for an empty name
+    /// [`crate::compile::validate_schema`] has always produced for an empty name
     /// or one carrying a character outside `[A-Za-z0-9_-]`.
     pub fn new(name: &str) -> Result<Self, QueryError> {
         validate_schema(name)?;

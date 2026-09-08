@@ -67,7 +67,7 @@ use zeroship_data_core::error::DbError;
 use crate::backend::BackendHandle;
 
 /// The six canonical classification values. Mirrors the SDK's
-/// `Classification` type (`sdks/db/src/types.ts`) and `crate::diff::Classification`.
+/// `Classification` type (`sdks/db/src/types.ts`) and `crate::catalog::Classification`.
 pub const VALID_CLASSIFICATIONS: &[&str] = &["public", "pii", "spi", "phi", "pci", "internal"];
 
 /// Per-app mask policy. Maps actor-role string → set

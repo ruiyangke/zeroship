@@ -35,7 +35,7 @@ sqlite-vec = { workspace = true }
 sha2 = { workspace = true, optional = true }
 
 zeroship-data-core = { workspace = true }
-zeroship-schema = { workspace = true }
+zeroship-data-query-builder = { workspace = true }
 zeroship-core = { workspace = true }
 
 serde_json = { workspace = true }

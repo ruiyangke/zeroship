@@ -2,7 +2,7 @@
 //!
 //! # Why this module exists
 //!
-//! `crates/zeroship-schema/src/schema_name.rs` enumerates what a single app-id
+//! `crates/zeroship-data-query-builder/src/schema_name.rs` enumerates what a single app-id
 //! string simultaneously is: tenant identity, `PostgreSQL` schema name,
 //! role-name stem, encryption salt, publication key, replication-slot key,
 //! `SQLite` `ATTACH` alias, transaction-lane key, broker routing key and CDC
@@ -103,7 +103,7 @@ pub enum DerivationError {
 /// on it; this is that derivation, hoisted so the data plane and the migration
 /// service cannot answer the question differently.
 ///
-/// The result is not a `zeroship_schema::SchemaName`: this crate is below that
+/// The result is not a `zeroship_data_query_builder::SchemaName`: this crate is below that
 /// one, and the validation belongs at the mint, not here.
 #[must_use]
 pub fn schema_name(app: &AppId) -> String {

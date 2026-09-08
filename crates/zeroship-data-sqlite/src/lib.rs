@@ -31,9 +31,9 @@ use std::sync::Arc;
 use serde_json::Value;
 use tempfile::TempDir;
 
+use zeroship_data_core::error::DbError;
 use zeroship_data_core::storage::SchemaIntrospect;
 use zeroship_data_core::storage::{DialectBuilder, LockManager, SqlExecutor};
-use zeroship_data_core::error::DbError;
 
 use self::change_sink::ChangeSink;
 
@@ -252,9 +252,7 @@ impl SqliteBackend {
         params: &[&str],
     ) -> Result<Vec<serde_json::Value>, DbError> {
         let typed = self.session.query_typed(sql, params).await?;
-        Ok(crate::row_json::typed_rows_to_json_value(
-            &typed,
-        ))
+        Ok(crate::row_json::typed_rows_to_json_value(&typed))
     }
 
     /// Production constructor used by the runtime URL-scheme
@@ -447,7 +445,6 @@ impl SqliteBackend {
             key_store,
         }
     }
-
 }
 
 struct OpenedBackend {
@@ -759,10 +756,10 @@ impl SchemaIntrospect for SqliteBackend {
     // PG-style `pg_type` strings with SQLite affinity names
     // (`TEXT`/`INTEGER`/`REAL`/`BLOB`/`NUMERIC`). Classifier
     // teaching about the new vocabulary follows in a later PR.
-    type LiveSchema = zeroship_schema::diff::LiveSchema;
+    type LiveSchema = zeroship_data_query_builder::catalog::LiveSchema;
 
     /// Walk the SQLite catalog for `app_id`'s attached database and
-    /// produce a [`zeroship_schema::diff::LiveSchema`] in the same shape the PG
+    /// produce a [`zeroship_data_query_builder::catalog::LiveSchema`] in the same shape the PG
     /// impl emits — populated via four PRAGMA round-trips per table:
     ///
     /// 1. `SELECT name FROM "<app_id>".sqlite_master WHERE type='table'`
@@ -795,7 +792,7 @@ impl SchemaIntrospect for SqliteBackend {
     /// only user-declared tables; surfacing system tables would
     /// trigger spurious "drop table" classifications.
     async fn introspect_schema(&self, app_id: &str) -> Result<Self::LiveSchema, DbError> {
-        let mut out = zeroship_schema::diff::LiveSchema::default();
+        let mut out = zeroship_data_query_builder::catalog::LiveSchema::default();
 
         // 1. Table list. The `app_id` is interpolated as a quoted
         //    identifier — the dialect's `quote_ident` doubles embedded
@@ -833,7 +830,7 @@ impl SchemaIntrospect for SqliteBackend {
             // encryption metadata from the `/* zero-migrate:enc:<mode>:<keyId>:
             // <wraps> */` sentinel the DDL emitter writes for every
             // `t.encrypted(...)`-declared column (see
-            // `zeroship_schema::query::field_to_column`). PRAGMA `table_info`
+            // `zeroship_data_query_builder::compile::field_to_column`). PRAGMA `table_info`
             // surfaces the declared type but strips comments; the
             // sentinel only survives in `sqlite_master.sql`.
             //
@@ -877,7 +874,7 @@ impl SchemaIntrospect for SqliteBackend {
                 let mask = mask_by_parent.get(&name).cloned();
                 col_map.insert(
                     name,
-                    zeroship_schema::diff::ColumnInfo {
+                    zeroship_data_query_builder::catalog::ColumnInfo {
                         pg_type,
                         not_null,
                         default_expr,
@@ -943,7 +940,7 @@ impl SchemaIntrospect for SqliteBackend {
 
                 idx_map.insert(
                     idx_name,
-                    zeroship_schema::diff::IndexInfo {
+                    zeroship_data_query_builder::catalog::IndexInfo {
                         is_unique,
                         columns,
                         // SQLite indexes are always considered valid
@@ -983,7 +980,7 @@ impl SchemaIntrospect for SqliteBackend {
                 let constraint_name = format!("fk_{fk_id}_{from_col}");
                 fk_map.insert(
                     from_col.clone(),
-                    zeroship_schema::diff::ForeignKeyInfo {
+                    zeroship_data_query_builder::catalog::ForeignKeyInfo {
                         constraint_name,
                         column: from_col,
                         target_table,
@@ -1050,7 +1047,7 @@ impl DialectBuilder for SqliteBackend {
     // per call — rustc inlines the value away because every method on
     // `SqliteDialect` is `&self` and side-effect-free.
 
-    fn sql_dialect(&self) -> zeroship_schema::query::SqlDialect {
+    fn sql_dialect(&self) -> zeroship_data_query_builder::compile::SqlDialect {
         SqliteDialect.sql_dialect()
     }
 
@@ -1153,7 +1150,7 @@ impl zeroship_data_core::storage::VectorIndex for SqliteBackend {
         column: &str,
         query: &[f32],
         k: usize,
-        metric: zeroship_schema::descriptors::VectorMetric,
+        metric: zeroship_data_query_builder::descriptors::VectorMetric,
         filter: &serde_json::Value,
         schema: &serde_json::Value,
     ) -> Result<Vec<serde_json::Value>, DbError> {
@@ -1212,7 +1209,7 @@ impl SqliteBackend {
         column: &str,
         query: &[f32],
         k: usize,
-        metric: zeroship_schema::descriptors::VectorMetric,
+        metric: zeroship_data_query_builder::descriptors::VectorMetric,
         filter: &serde_json::Value,
         schema: &serde_json::Value,
     ) -> Result<Vec<serde_json::Value>, DbError> {
@@ -1235,11 +1232,11 @@ impl SqliteBackend {
         // returns the WHERE expression text directly (or an empty
         // string if `filter` is non-object / `Null`).
         let mut params: Vec<String> = Vec::new();
-        let where_expr = zeroship_schema::query::build_where_with_dialect(
+        let where_expr = zeroship_data_query_builder::compile::build_where_with_dialect(
             filter,
             &mut params,
             schema_hint,
-            zeroship_schema::query::SqlDialect::Sqlite,
+            zeroship_data_query_builder::compile::SqlDialect::Sqlite,
         )
         .map_err(DbError::from)?;
 
@@ -1279,9 +1276,7 @@ impl SqliteBackend {
         )?;
         let param_refs: Vec<&str> = params.iter().map(String::as_str).collect();
         let typed = session.query_typed_internal(&sql, &param_refs).await?;
-        Ok(crate::row_json::typed_rows_to_json_value(
-            &typed,
-        ))
+        Ok(crate::row_json::typed_rows_to_json_value(&typed))
     }
 }
 
@@ -1291,12 +1286,12 @@ impl SqliteBackend {
 /// the app id - see `attach_app_file`. The parameter states which of the two
 /// meanings the query builder is being handed.
 fn build_spatial_near_base_query(
-    schema_name: &zeroship_schema::SchemaName,
+    schema_name: &zeroship_data_query_builder::SchemaName,
     collection: &str,
     filter: &serde_json::Value,
     schema_hint: &serde_json::Value,
-) -> Result<zeroship_schema::query::BuiltQuery, DbError> {
-    zeroship_schema::query::build_find_with_schema_and_unmask_and_soft_delete_with_dialect(
+) -> Result<zeroship_data_query_builder::compile::BuiltQuery, DbError> {
+    zeroship_data_query_builder::compile::build_find_with_schema_and_unmask_and_soft_delete_with_dialect(
         schema_name,
         collection,
         filter,
@@ -1307,7 +1302,7 @@ fn build_spatial_near_base_query(
         schema_hint,
         /* unmask_columns */ &[],
         /* filter_soft_deleted */ false,
-        zeroship_schema::query::SqlDialect::Sqlite,
+        zeroship_data_query_builder::compile::SqlDialect::Sqlite,
     )
     .map_err(DbError::from)
 }
@@ -1342,7 +1337,7 @@ impl zeroship_data_core::storage::SpatialIndex for SqliteBackend {
         binding: &zeroship_data_core::binding::DbBinding,
         collection: &str,
         column: &str,
-        point: zeroship_schema::descriptors::GeoPoint,
+        point: zeroship_data_query_builder::descriptors::GeoPoint,
         radius_m: f64,
         filter: &serde_json::Value,
         limit: Option<usize>,
@@ -1380,7 +1375,7 @@ impl SqliteBackend {
         binding: &zeroship_data_core::binding::DbBinding,
         collection: &str,
         column: &str,
-        point: zeroship_schema::descriptors::GeoPoint,
+        point: zeroship_data_query_builder::descriptors::GeoPoint,
         radius_m: f64,
         filter: &serde_json::Value,
         limit: Option<usize>,
@@ -1461,8 +1456,7 @@ impl SqliteBackend {
         let mut out: Vec<serde_json::Value> = Vec::with_capacity(scored.len());
         for (d, idx) in scored {
             let row = &typed.rows[idx];
-            let mut obj =
-                crate::row_json::typed_row_to_json_object(&typed.columns, row);
+            let mut obj = crate::row_json::typed_row_to_json_object(&typed.columns, row);
             obj.insert(
                 "_distance_m".to_string(),
                 serde_json::Number::from_f64(d)
@@ -1504,9 +1498,9 @@ impl SqliteBackend {
 /// Recover per-column encryption metadata from the
 /// `/* zero-migrate:enc:<mode>:<keyId>:<wraps> */` sentinel comments the DDL
 /// emitter writes into the `CREATE TABLE` text (see
-/// `zeroship_schema::query::field_to_column`).
+/// `zeroship_data_query_builder::compile::field_to_column`).
 ///
-/// Returns a map from column name → [`zeroship_schema::diff::EncryptionMeta`].
+/// Returns a map from column name → [`zeroship_data_query_builder::catalog::EncryptionMeta`].
 /// Columns without an attached sentinel are absent from the map (which
 /// is the same shape `EncryptionMeta` round-trips through —
 /// `ColumnInfo::encryption = None` for plain columns).
@@ -1521,7 +1515,7 @@ impl SqliteBackend {
 ///
 /// **The SENTINEL BODY is not parsed here.** Locating the comment is this
 /// function's job; interpreting it belongs to
-/// [`zeroship_schema::mask_codec::parse_encryption_sentinel`], the one
+/// [`zeroship_data_query_builder::mask_codec::parse_encryption_sentinel`], the one
 /// authority on the wire shape (shared with the PG introspector and the
 /// migration backend). Hand-parsing it here made a third opinion of it, and
 /// the third opinion drifted: it enforced a `[A-Za-z0-9_]` keyId alphabet the
@@ -1535,7 +1529,7 @@ impl SqliteBackend {
 /// trade-off acknowledgement.
 fn parse_encryption_sentinels(
     create_table_text: &str,
-) -> std::collections::HashMap<String, zeroship_schema::diff::EncryptionMeta> {
+) -> std::collections::HashMap<String, zeroship_data_query_builder::catalog::EncryptionMeta> {
     let mut out = std::collections::HashMap::new();
     // Walk the body, finding each `/* zero-migrate:enc:...` marker. For each one,
     // rewind to the most recent double-quoted identifier to recover the
@@ -1546,7 +1540,10 @@ fn parse_encryption_sentinels(
     // DISPATCHES on the marker and then hands the whole body - prefix included -
     // to the codec, so a literal that drifts from the codec's prefix does not
     // fail to parse, it finds nothing, and a column reads back unencrypted.
-    let marker = format!("/* {}", zeroship_schema::mask_codec::ENC_SENTINEL_PREFIX);
+    let marker = format!(
+        "/* {}",
+        zeroship_data_query_builder::mask_codec::ENC_SENTINEL_PREFIX
+    );
     let marker = marker.as_str();
     let mut search_pos = 0usize;
     while let Some(found) = create_table_text[search_pos..].find(marker) {
@@ -1590,7 +1587,7 @@ fn parse_encryption_sentinels(
         // sentinel this crate cannot interpret produces the codec's typed error
         // rather than a silent absence. Structured exactly like the mask
         // sibling below, for the same reason: both failure arms are LOUD.
-        match zeroship_schema::mask_codec::parse_encryption_sentinel(body) {
+        match zeroship_data_query_builder::mask_codec::parse_encryption_sentinel(body) {
             Ok(meta) => {
                 // Rewind from `abs_marker` to find the column name. The
                 // column name is the most recent `"…"` token before the
@@ -1627,7 +1624,7 @@ fn parse_encryption_sentinels(
 /// Recover per-parent-column mask metadata from the
 /// `/* zero-migrate:mask:kind=…,classification=… */` sentinel comments the DDL
 /// emitter writes alongside every `<col>_masked` sibling column (see
-/// `zeroship_schema::query::build_create_table_with_fks`).
+/// `zeroship_data_query_builder::compile::build_create_table_with_fks`).
 ///
 /// Returns a map keyed on the **PARENT** column name (the sibling's
 /// existence is the discoverability hook, but the mask metadata
@@ -1647,12 +1644,15 @@ fn parse_encryption_sentinels(
 /// [`parse_encryption_sentinels`] — no `regex` dep required.
 fn parse_mask_sentinels(
     create_table_text: &str,
-) -> std::collections::HashMap<String, zeroship_schema::diff::MaskMeta> {
-    use zeroship_schema::diff::MaskMeta;
+) -> std::collections::HashMap<String, zeroship_data_query_builder::catalog::MaskMeta> {
+    use zeroship_data_query_builder::catalog::MaskMeta;
     let mut out = std::collections::HashMap::new();
     // Composed from the shared prefix, for the reason
     // [`parse_encryption_sentinels`] states at its own marker.
-    let marker = format!("/* {}", zeroship_schema::mask_codec::MASK_SENTINEL_PREFIX);
+    let marker = format!(
+        "/* {}",
+        zeroship_data_query_builder::mask_codec::MASK_SENTINEL_PREFIX
+    );
     let marker = marker.as_str();
     let mut search_pos = 0usize;
     while let Some(found) = create_table_text[search_pos..].find(marker) {
@@ -1678,7 +1678,7 @@ fn parse_mask_sentinels(
         };
         let body = create_table_text[body_start..body_start + end_rel].trim();
         // Reuse the canonical parser so the wire shape is centralised.
-        match zeroship_schema::mask_codec::parse_mask_sentinel(body) {
+        match zeroship_data_query_builder::mask_codec::parse_mask_sentinel(body) {
             Ok((kind, classification)) => {
                 let before = &create_table_text[..abs_marker];
                 // The sentinel rides the MASKED column, which after the
@@ -1699,7 +1699,8 @@ fn parse_mask_sentinels(
                             MaskMeta {
                                 kind,
                                 classification,
-                                sibling_column: zeroship_schema::query::raw_column_name(&column),
+                                sibling_column:
+                                    zeroship_data_query_builder::compile::raw_column_name(&column),
                             },
                         );
                     }
@@ -1865,7 +1866,7 @@ mod backup_sqlite {
 
     use super::SqliteBackend;
     use zeroship_data_core::capability::{
-        BusyPolicy, LockScope, SNAPSHOT_RESTORE_LOCK_TAG, SnapshotHandle, SnapshotOpts,
+        BusyPolicy, LockScope, SnapshotHandle, SnapshotOpts, SNAPSHOT_RESTORE_LOCK_TAG,
     };
     use zeroship_data_core::error::DbError;
 
@@ -2272,8 +2273,8 @@ mod tests {
                 std::sync::Arc::new(crate::NullChangeSink),
                 zeroship_data_core::encryption::LocalKeySource::env_var(),
             )
-                .await
-                .expect("open in-memory backend");
+            .await
+            .expect("open in-memory backend");
             let temp_dir_path = backend.db_dir().to_path_buf();
             assert!(
                 temp_dir_path.exists(),
@@ -2298,12 +2299,12 @@ mod tests {
             "location": { "type": "geoPoint" }
         });
         let bq = build_spatial_near_base_query(
-            &zeroship_schema::SchemaName::new("app1").expect("fixture schema name"),
+            &zeroship_data_query_builder::SchemaName::new("app1").expect("fixture schema name"),
             "places",
             &serde_json::json!({}),
             &schema,
         )
-            .expect("spatial base query");
+        .expect("spatial base query");
         assert!(
             !bq.sql.starts_with("SELECT *"),
             "spatial base query must not use SELECT * when masked columns exist: {}",
@@ -2317,7 +2318,10 @@ mod tests {
             bq.sql,
         );
         assert!(
-            !bq.sql.contains(&zeroship_schema::query::raw_column_name("ssn")),
+            !bq.sql
+                .contains(&zeroship_data_query_builder::compile::raw_column_name(
+                    "ssn"
+                )),
             "spatial base query must never name the raw column: {}",
             bq.sql,
         );
@@ -2352,7 +2356,10 @@ mod tests {
     // this catalog. The assertion is ungated with it - a witness that only
     // compiles under `test-helpers` says nothing about the build that ships.
     fn assert_sqlite_backend_impls_schema_introspect() {
-        fn assert_impl<T: SchemaIntrospect<LiveSchema = zeroship_schema::diff::LiveSchema>>() {}
+        fn assert_impl<
+            T: SchemaIntrospect<LiveSchema = zeroship_data_query_builder::catalog::LiveSchema>,
+        >() {
+        }
         assert_impl::<SqliteBackend>();
     }
 
@@ -2385,8 +2392,8 @@ mod tests {
     /// associated type — trips here, not at the
     /// `BackendHandle::as_change_stream_sqlite()` accessor.
     fn assert_sqlite_change_stream_impls_change_stream() {
-        use zeroship_data_core::storage::ChangeStream;
         use crate::cdc::{SqliteChangeStream, SqliteConsumerHandle};
+        use zeroship_data_core::storage::ChangeStream;
         fn assert_impl<T: ChangeStream<ConsumerHandle = SqliteConsumerHandle>>() {}
         assert_impl::<SqliteChangeStream>();
     }
@@ -2536,9 +2543,15 @@ mod tests {
             \"name\" TEXT \n)";
         let got = parse_encryption_sentinels(ddl);
         let m = got.get("ssn").expect("ssn must be parsed");
-        assert!(matches!(m.mode, zeroship_schema::descriptors::EncryptionMode::Randomised));
+        assert!(matches!(
+            m.mode,
+            zeroship_data_query_builder::descriptors::EncryptionMode::Randomised
+        ));
         assert_eq!(m.key_id, "default");
-        assert!(matches!(m.wraps, zeroship_schema::diff::WrappedType::String));
+        assert!(matches!(
+            m.wraps,
+            zeroship_data_query_builder::catalog::WrappedType::String
+        ));
         assert!(
             !got.contains_key("name"),
             "non-encrypted col must be absent"
@@ -2555,10 +2568,13 @@ mod tests {
         let m = got.get("salary").expect("salary must be parsed");
         assert!(matches!(
             m.mode,
-            zeroship_schema::descriptors::EncryptionMode::Deterministic
+            zeroship_data_query_builder::descriptors::EncryptionMode::Deterministic
         ));
         assert_eq!(m.key_id, "payroll_v2");
-        assert!(matches!(m.wraps, zeroship_schema::diff::WrappedType::Number));
+        assert!(matches!(
+            m.wraps,
+            zeroship_data_query_builder::catalog::WrappedType::Number
+        ));
     }
 
     /// US spelling `randomized` round-trips as canonical Randomised
@@ -2569,8 +2585,14 @@ mod tests {
         let ddl = "CREATE TABLE t (\"a\" BYTEA /* zero-migrate:enc:randomized:default:bytes */)";
         let got = parse_encryption_sentinels(ddl);
         let m = got.get("a").expect("a must be parsed");
-        assert!(matches!(m.mode, zeroship_schema::descriptors::EncryptionMode::Randomised));
-        assert!(matches!(m.wraps, zeroship_schema::diff::WrappedType::Bytes));
+        assert!(matches!(
+            m.mode,
+            zeroship_data_query_builder::descriptors::EncryptionMode::Randomised
+        ));
+        assert!(matches!(
+            m.wraps,
+            zeroship_data_query_builder::catalog::WrappedType::Bytes
+        ));
     }
 
     /// Multiple encrypted columns in one CREATE TABLE — each attaches
@@ -2584,11 +2606,11 @@ mod tests {
         assert_eq!(got.len(), 2);
         assert!(matches!(
             got["ssn"].mode,
-            zeroship_schema::descriptors::EncryptionMode::Randomised
+            zeroship_data_query_builder::descriptors::EncryptionMode::Randomised
         ));
         assert!(matches!(
             got["tin"].mode,
-            zeroship_schema::descriptors::EncryptionMode::Deterministic
+            zeroship_data_query_builder::descriptors::EncryptionMode::Deterministic
         ));
         assert_eq!(got["tin"].key_id, "tax");
     }
@@ -2642,7 +2664,7 @@ mod tests {
     ///
     /// The hand-rolled walker this replaced enforced that alphabet itself and
     /// dropped anything else in silence. That check was a THIRD opinion on the
-    /// wire shape: `zeroship_schema::mask_codec::parse_encryption_sentinel`
+    /// wire shape: `zeroship_data_query_builder::mask_codec::parse_encryption_sentinel`
     /// requires only a non-empty keyId, and `t.encrypted()` already fences the
     /// alphabet at author time (`sdks/db/src/types.ts`, `/^[A-Za-z0-9_]+$/`).
     /// The decided direction is one authority for the wire, enforcement at the
@@ -2685,15 +2707,15 @@ mod tests {
     /// Every `(mode, wraps)` the emitter can produce round-trips through the
     /// walker unchanged, and silently.
     ///
-    /// The input is BUILT by `zeroship_schema::mask_codec::build_encryption_sentinel`
+    /// The input is BUILT by `zeroship_data_query_builder::mask_codec::build_encryption_sentinel`
     /// rather than hand-written, so this pins walker-against-emitter rather
     /// than walker-against-one-literal: a change to the wire shape moves both
     /// sides and this test keeps passing, which is the point of collapsing the
     /// parse onto the codec.
     #[test]
     fn parse_encryption_sentinel_round_trips_every_built_sentinel() {
-        use zeroship_schema::descriptors::EncryptionMode;
-        use zeroship_schema::diff::{EncryptionMeta, WrappedType};
+        use zeroship_data_query_builder::catalog::{EncryptionMeta, WrappedType};
+        use zeroship_data_query_builder::descriptors::EncryptionMode;
 
         for mode in [EncryptionMode::Randomised, EncryptionMode::Deterministic] {
             for wraps in [WrappedType::String, WrappedType::Number, WrappedType::Bytes] {
@@ -2702,7 +2724,8 @@ mod tests {
                     key_id: "default".to_string(),
                     wraps,
                 };
-                let sentinel = zeroship_schema::mask_codec::build_encryption_sentinel(&meta);
+                let sentinel =
+                    zeroship_data_query_builder::mask_codec::build_encryption_sentinel(&meta);
                 let ddl = format!("CREATE TABLE t (\"ssn\" BYTEA /* {sentinel} */ NOT NULL)");
                 let (got, events) = capture_events(|| parse_encryption_sentinels(&ddl));
                 let parsed = got.get("ssn").unwrap_or_else(|| {
@@ -2827,8 +2850,8 @@ mod tests {
     /// and carries the sentinel.
     #[test]
     fn sqlite_introspection_reads_mask_sentinel_in_create_sql() {
-        use zeroship_schema::diff::{Classification, MaskKind};
-        let raw = zeroship_schema::query::raw_column_name("ssn");
+        use zeroship_data_query_builder::catalog::{Classification, MaskKind};
+        let raw = zeroship_data_query_builder::compile::raw_column_name("ssn");
         let ddl = format!(
             "CREATE TABLE \"app\".\"users\" (\n  \
              \"id\" INTEGER PRIMARY KEY,\n  \
@@ -2850,15 +2873,15 @@ mod tests {
     /// Multiple masked columns in one table → one entry per field.
     #[test]
     fn sqlite_introspection_multiple_masked_columns() {
-        use zeroship_schema::diff::{Classification, MaskKind};
+        use zeroship_data_query_builder::catalog::{Classification, MaskKind};
         let ddl = format!(
             "CREATE TABLE t (\n  \
              \"{}\" TEXT,\n  \
              \"ssn\" TEXT /* zero-migrate:mask:kind=last4,classification=spi */,\n  \
              \"{}\" TEXT,\n  \
              \"email\" TEXT /* zero-migrate:mask:kind=email,classification=pii */\n)",
-            zeroship_schema::query::raw_column_name("ssn"),
-            zeroship_schema::query::raw_column_name("email"),
+            zeroship_data_query_builder::compile::raw_column_name("ssn"),
+            zeroship_data_query_builder::compile::raw_column_name("email"),
         );
         let got = parse_mask_sentinels(&ddl);
         assert_eq!(got.len(), 2);

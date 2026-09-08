@@ -458,7 +458,7 @@ async fn decrypt_rows_on_read(
 /// Remove every key that is not on the row's declared surface.
 ///
 /// The LAST stage. It used to be described here as "the one that closes the
-/// `RETURNING *` leak", because twelve SQL sites in `zeroship-schema` emitted
+/// `RETURNING *` leak", because twelve SQL sites in `zeroship-data-query-builder` emitted
 /// `RETURNING *` - every physical column, including a masked field's raw
 /// column - and none of them passed through the projection allowlist, which was
 /// SELECT-side only. Without this stage `await db.users.insert({ ssn })` handed
@@ -466,7 +466,7 @@ async fn decrypt_rows_on_read(
 /// declare, invisible to any review written against the generated types.
 ///
 /// **Those twelve sites now project explicitly**
-/// (`zeroship_schema::query::build_returning_expr`), so no statement this
+/// (`zeroship_data_query_builder::compile::build_returning_expr`), so no statement this
 /// runtime issues produces an off-surface key any more. **This stage is still
 /// required**, and the reason has not changed: a statement is not the only
 /// producer of a row. The WAL consumer decodes pgoutput with no schema in reach
@@ -479,7 +479,7 @@ async fn decrypt_rows_on_read(
 /// itself. A strip placed earlier would delete their input.
 fn restrict_rows_to_surface(schema: &Value, surface: &RowSurface<'_>, rows: &mut [Value]) {
     let allowed = match surface {
-        RowSurface::Declared => crate::query::read_surface_columns(schema),
+        RowSurface::Declared => crate::compile::read_surface_columns(schema),
         RowSurface::Projected(names) => names.iter().cloned().collect(),
     };
     for row in rows.iter_mut() {
@@ -564,7 +564,7 @@ mod tests {
             "prefs": "{\"theme\":\"dark\"}"
         });
 
-        normalize_row_on_read(&crate::query::empty_read_schema(), &mut row).expect("normalize");
+        normalize_row_on_read(&crate::compile::empty_read_schema(), &mut row).expect("normalize");
 
         assert_eq!(row["created_at"], serde_json::json!(1_778_115_723_004i64));
         assert_eq!(

@@ -142,7 +142,7 @@ export type InferInsertSchema<S> = S extends infer T
 /**
  * platform-managed system fields injected into every
  * `Row<S>`. Mirrors `SYSTEM_FIELD_NAMES` on the Rust side
- * (`crates/zeroship-schema/src/query.rs`). Creator schemas cannot declare
+ * (`crates/zeroship-data-query-builder/src/compile.rs`). Creator schemas cannot declare
  * fields with these names — the SDK-side reservation in
  * `@zeroship/bootstrap/install-schema` and the migration policy enforce the
  * fence before runtime CRUD can address a collection.
@@ -537,7 +537,7 @@ export type MaskKind =
  * - `internal` — platform-internal metadata, system-field overrides.
  *
  * The six names are also reserved as column names by
- * `crates/zeroship-schema/src/query.rs::validate_field_name` so creator
+ * `crates/zeroship-data-query-builder/src/compile.rs::validate_field_name` so creator
  * schemas cannot accidentally collide with the taxonomy.
  */
 export type Classification =

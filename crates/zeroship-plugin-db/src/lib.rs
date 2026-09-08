@@ -44,7 +44,7 @@ use std::time::Duration;
 use compio_postgres::Pool;
 use zeroship_runtime::plugin::{NativePlugin, NativeRegistrar};
 
-use crate::context::{BackendInitState, with_mut as ctx_mut};
+use crate::context::{with_mut as ctx_mut, BackendInitState};
 use zeroship_data_core::error::DbError;
 
 // Module visibility note:
@@ -115,10 +115,10 @@ pub mod op_error;
 pub use zeroship_data_core::lock_policy;
 // The DDL builders + `QueryError` + `SqlDialect` +
 // the system-field / validation helpers were extracted into the leaf crate
-// `zeroship-schema`. plugin-db re-exports the module wholesale so every
-// existing `crate::query::…` reference (and `use crate::query;` then
-// `query::…`) resolves unchanged — behaviour identical, no call-site churn.
-pub use zeroship_schema::query;
+// `zeroship-data-query-builder`. plugin-db re-exports the module wholesale so every
+// existing `crate::compile::…` reference (and `use crate::compile;` then
+// `compile::…`) resolves unchanged — behaviour identical, no call-site churn.
+pub use zeroship_data_query_builder::compile;
 pub mod v8_classes;
 
 // ---------------------------------------------------------------------------
@@ -158,8 +158,8 @@ pub use zeroship_data_engine::backend_selection;
 // The per-isolate dispatch enum and the transaction lane owner. Crate-private
 // here: nothing outside names either, and the tx-route TYPE has to be nameable
 // wherever the `exec` entry points are, which is why only `tx_route` is `pub`.
-pub(crate) use zeroship_data_engine::{backend_handle, tx_lanes};
 pub use zeroship_data_engine::tx_route;
+pub(crate) use zeroship_data_engine::{backend_handle, tx_lanes};
 // The operator charter the worker parses once at construction. `pub(crate)`
 // because nothing outside the crate has business reading the assignment
 // authority - the descriptor mirror is what consumers verify against.
@@ -225,19 +225,8 @@ pub fn collection_schema(
 pub(crate) use zeroship_data_engine::crud;
 #[cfg(feature = "test-helpers")]
 pub use zeroship_data_engine::crud;
-// The diff classifier (`compute_diff`, `ChangeKind`, `ChangeClass`, `DiffOp`)
-// and vendor-neutral schema metadata (`MaskMeta`, `EncryptionMeta`, `MaskKind`,
-// `Classification`, `WrappedType`, `LiveSchema`, `ColumnInfo`) live in the leaf
-// crate `zeroship-schema`. plugin-db re-exports that neutral module so every
-// `crate::diff::…` reference resolves unchanged. PostgreSQL catalog reads live
-// separately in `backend::pg_introspect`; no old schema-crate path is retained.
-// The original `pub(crate)` vs `pub` (under `test-helpers`) visibility is
-// preserved by the cfg gate; integration suites reach neutral `diff::{…}`
-// values only under `test-helpers`.
-#[cfg(not(feature = "test-helpers"))]
-pub(crate) use zeroship_schema::diff;
-#[cfg(feature = "test-helpers")]
-pub use zeroship_schema::diff;
+// Runtime catalog metadata consumed by the protection pipelines.
+pub use zeroship_data_query_builder::catalog;
 // `read_set` MOVED to `zeroship-data-core` on 2026-09-03, ahead of `broker`,
 // which is the only in-crate item it had to shed before the broker could follow
 // it. The read-set is a domain value - a normalised predicate over a row - and
@@ -525,9 +514,8 @@ impl NativePlugin for DbPlugin {
         // Same refusal as `mint_db`: an app id that is not a legal schema name
         // has no binding to key the descriptor under, so publish nothing rather
         // than key it under a schema that cannot be addressed.
-        let binding = v8_classes::db::binding_for_isolate(scope, app_id).ok_or_else(|| {
-            format!("app id {app_id:?} is not a legal database schema name")
-        })?;
+        let binding = v8_classes::db::binding_for_isolate(scope, app_id)
+            .ok_or_else(|| format!("app id {app_id:?} is not a legal database schema name"))?;
         zeroship_data_core::schema_cache::with_mut(|c| c.replace_for_binding(&binding, schemas));
         Ok(())
     }
@@ -557,8 +545,7 @@ impl NativePlugin for DbPlugin {
         // that module is its only reader. Outside the `ctx_mut` borrow above for
         // the same reason the charter stamp is.
         metrics::stamp(self.meter.clone());
-        ctx_mut(|c| {
-        });
+        ctx_mut(|c| {});
         // Stamp the operator charter's assignment projection, so the write pass
         // reads the authority this process was composed with rather than
         // deriving one on its first write.
@@ -608,7 +595,7 @@ mod runtime_descriptor_binding_tests {
     use std::rc::Rc;
 
     use serde_json::json;
-    use zeroship_runtime::{RuntimeState, SharedState, init_v8};
+    use zeroship_runtime::{init_v8, RuntimeState, SharedState};
 
     use super::*;
 
@@ -667,7 +654,7 @@ mod runtime_descriptor_binding_tests {
         let binding = zeroship_data_core::binding::DbBinding::new(
             APP,
             DEPLOY,
-            zeroship_schema::SchemaName::new(APP).unwrap(),
+            zeroship_data_query_builder::SchemaName::new(APP).unwrap(),
         );
         let schema = descriptor::collection_schema(&binding, "users")
             .expect("declared collection must resolve before any read");
@@ -709,7 +696,7 @@ mod runtime_descriptor_binding_tests {
         let binding = zeroship_data_core::binding::DbBinding::new(
             APP,
             DEPLOY,
-            zeroship_schema::SchemaName::new(APP).unwrap(),
+            zeroship_data_query_builder::SchemaName::new(APP).unwrap(),
         );
         let error = descriptor::collection_schema(&binding, "stale")
             .expect_err("schema-less binding must declare no collection");
@@ -771,7 +758,8 @@ pub fn set_postgres_pool_for_tests(pool: Rc<compio_postgres::Pool>, url: &str) {
     // `isolate_key_source` takes a context borrow of its own, and nesting the
     // two panics. Production reaches the same shape through
     // `PostgresBackend::connect`, which is handed the source by its caller.
-    let pg = crate::backend::PostgresBackend::new(pool, url.to_string(), context::isolate_key_source());
+    let pg =
+        crate::backend::PostgresBackend::new(pool, url.to_string(), context::isolate_key_source());
     ctx_mut(|c| c.set_postgres_backend(Rc::new(pg)));
 }
 
@@ -1010,7 +998,7 @@ pub async fn finalize_rows_on_read_for_tests(
 #[cfg(feature = "test-helpers")]
 #[doc(hidden)]
 pub async fn exec_mutation_with_emit_for_tests(
-    bq: query::BuiltQuery,
+    bq: compile::BuiltQuery,
     app_id: &str,
     collection: &str,
     op: zeroship_core::change_event::ChangeOp,
@@ -1036,7 +1024,7 @@ pub async fn exec_mutation_with_emit_for_tests(
 #[doc(hidden)]
 pub async fn exec_query_for_tests(
     app_id: &str,
-    bq: query::BuiltQuery,
+    bq: compile::BuiltQuery,
 ) -> Result<Vec<serde_json::Value>, String> {
     let backend = tx_scope::ensure_backend()
         .await
@@ -1058,78 +1046,41 @@ pub fn pool_counts_for_tests() -> Option<(usize, usize, usize)> {
     transaction::probe::pool_counts(&context::with(|c| c.backend())?)
 }
 
-/// **Test-only**: install a real Postgres client into the active
-/// isolate's `ThreadDbContext::tx_conn` slot (formerly the `TX_CONN`
-/// thread-local, folded into `ThreadDbContext`) so the Gap B
-/// integration tests can drive the deferred-broker-emit queue/drain
-/// machinery without standing up a V8 isolate. Returns the
-/// connection-task handle so the caller can detach it.
-///
-/// Asynchronous because it has to open a fresh Postgres connection
-/// (the same shape the production `exec_begin` does). Pair with
-/// [`uninstall_tx_marker_for_tests`] to release the slot.
+/// Open a real transaction through admission, role setup and the reducer.
 #[cfg(any(test, feature = "test-helpers"))]
 #[doc(hidden)]
-pub async fn install_tx_marker_for_tests(app_id: &str, url: &str) {
-    // A pooled checkout, like the production path: `TxConnection::Postgres`
-    // now carries an `OwnedPooledClient`, and a helper that opened a raw
-    // connection would be testing a shape production no longer has.
-    let pool = Rc::new(
-        Pool::connect(url, 2)
-            .await
-            .expect("install_tx_marker_for_tests: pool connect failed"),
-    );
-    let client = pool
-        .get_owned()
+pub async fn begin_transaction_for_tests(app_id: &str, url: &str) {
+    let pool = Rc::new(Pool::connect(url, 2).await.expect("fixture pool"));
+    auth::bootstrap::ensure_per_app_role(&pool, app_id)
         .await
-        .expect("install_tx_marker_for_tests: pooled checkout failed");
-    // Issue a real BEGIN so the dummy connection behaves like a real
-    // tx — not strictly required (the queueing path keys off
-    // `ThreadDbContext::has_tx_for`), but matches the production state
-    // machine more honestly.
-    let _ = client.execute("BEGIN", &[]).await;
-    crate::tx_lanes::with_mut(|l| {
-        let _previous = l.install_tx_client(app_id, crate::tx_lanes::TxConnection::Postgres(client));
-        debug_assert!(
-            _previous.is_none(),
-            "install_tx_marker_for_tests: slot already occupied"
-        );
-    });
+        .expect("fixture role");
+    let backend =
+        backend::BackendHandle::Postgres(Rc::new(backend::postgres::PostgresBackend::new(
+            pool,
+            url.to_owned(),
+            encryption::LocalKeySource::EnvVar,
+        )));
+    let admission = transaction::TxAdmission::acquire(app_id.to_owned()).await;
+    transaction::exec_begin_or_savepoint(
+        false,
+        None,
+        app_id,
+        zeroship_data_query_builder::SchemaName::new(app_id).expect("fixture schema"),
+        backend,
+    )
+    .await
+    .expect("fixture BEGIN");
+    admission.handed_to_reducer();
 }
 
-/// **Test-only**: drop the transaction-connection slot, rolling back
-/// the dummy tx server-side via an explicit `ROLLBACK` on the wire
-/// (NOT just relying on connection close). Mirrors
-/// [`install_tx_marker_for_tests`].
-///
-/// Async + sends `ROLLBACK` before dropping the Client because the
-/// per-isolate `ThreadDbContext` is thread-local and the test's
-/// compio runtime drops between tests. With `--test-threads=1` every
-/// test shares one thread; if a prior test's Client is dropped without
-/// explicit `ROLLBACK` the PG backend on the other end can linger as
-/// `idle in transaction` for a window after Runtime::drop (the
-/// connection task is dropped before its terminate-flush path runs,
-/// and the server only observes EOF when the OS reaps the fd). A
-/// later `pg_create_logical_replication_slot()` call (the p8a2
-/// auto-spawn test) then blocks waiting for that ghost transaction —
-/// the p8a2 ordering hang.
+/// Roll back the fixture transaction and release its admission.
 #[cfg(any(test, feature = "test-helpers"))]
 #[doc(hidden)]
-pub async fn uninstall_tx_marker_for_tests(app_id: &str) {
-    if let Some(client) = crate::tx_lanes::with_mut(|l| l.take_tx_client_for(app_id)) {
-        match client {
-            crate::tx_lanes::TxConnection::Postgres(client) => {
-                // Best-effort: a connection already torn down (panic recovery)
-                // is fine — drop closes the fd.
-                let _ = client.batch_execute("ROLLBACK").await;
-                drop(client);
-            }
-            crate::tx_lanes::TxConnection::Sqlite(client) => {
-                let _ = client.exec("ROLLBACK", &[]).await;
-                drop(client);
-            }
-        }
-    }
+pub async fn rollback_transaction_for_tests(app_id: &str) {
+    assert!(matches!(
+        transaction::exec_settle(app_id, false, None).await,
+        transaction::SettleOutcome::Ok
+    ));
 }
 
 /// **Test-only**: push a `ChangeEvent` onto the pending-emits queue
@@ -1375,8 +1326,8 @@ pub async fn init_pool_async() -> Result<(), String> {
                     &path,
                     context::isolate_key_source(),
                 )
-                    .await
-                    .map_err(DbError::into_string)?;
+                .await
+                .map_err(DbError::into_string)?;
                 service::note_backend_open();
                 ctx_mut(|c| c.set_sqlite_backend(Rc::new(backend)));
             }
@@ -1393,7 +1344,7 @@ pub async fn init_pool_async() -> Result<(), String> {
 
 #[cfg(test)]
 mod backend_init_input_tests {
-    use super::{BackendUrl, backend_init_inputs};
+    use super::{backend_init_inputs, BackendUrl};
 
     /// Nothing installed is the DISABLED state and stays a success.
     ///
@@ -1449,7 +1400,7 @@ mod backend_init_input_tests {
 
 #[cfg(test)]
 mod backend_url_tests {
-    use super::{BackendUrl, backend_for_url};
+    use super::{backend_for_url, BackendUrl};
     use std::path::PathBuf;
 
     #[test]

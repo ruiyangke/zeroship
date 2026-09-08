@@ -478,7 +478,7 @@ export function expandUnionToFlatColumns(def: FieldDef): NormalizedSchema {
  * Nothing here inspects the target for an app prefix, and this check
  * does not run at all for schema applied by the migration engine at
  * deploy. What structurally keeps an FK inside one app is the DDL
- * renderer in `crates/zeroship-schema/src/query.rs` -- see the foreign
+ * renderer in `crates/zeroship-migrate-core/src/schema/query.rs` -- see the foreign
  * keys section of `docs/reference/db.md`.
  */
 export function validateRefTargets(

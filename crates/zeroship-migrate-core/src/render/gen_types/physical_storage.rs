@@ -9,7 +9,7 @@
 //!
 //! **The raw column's half of that is closed as of 2026-09-04.** The data plane's
 //! three CRUD consumers (the write relocation, the read strip and the unmask SELECT)
-//! read `storage.rawColumn` through `zeroship_schema::query::declared_raw_column`
+//! read `storage.rawColumn` through `zeroship_data_query_builder::compile::declared_raw_column`
 //! instead of formatting it. What still derives is the pair of backend
 //! introspectors, and no descriptor can serve them: introspection reports what a
 //! database contains, and the catalog records no mask-to-raw pairing to report.

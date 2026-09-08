@@ -1007,7 +1007,7 @@ record.
   and nothing replaced them, deliberately.
 - **Do not use `<field>_masked` or `mask_sibling_column_for_field`.** The storage
   flip shipped: the sibling is `__zs_raw__<field>`
-  (`crates/zeroship-schema/src/query.rs:2207`, `raw_column_name` at `:2232`),
+  (`crates/zeroship-schema/src/query.rs:2207`, `raw_column_name` at `:2232`), (DELETED; runtime compilation now lives in `crates/zeroship-data-query-builder/src/compile.rs`, and migration DDL in `crates/zeroship-migrate-core/src/schema/query.rs`.)
   covered by `crates/zeroship-plugin-db/tests/mask_flip.rs` and documented at
   `docs/reference/db.md:1602`. `mask_sibling_column_for_field` occurs zero times
   in `crates/`.

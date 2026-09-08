@@ -75,11 +75,11 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
+use crate::exec::{clear_pending_emits, drain_pending_emits_on_commit};
 use crate::tx_lanes::TxConnection;
 use zeroship_data_core::error::{
     BeginIntent, DbError, IsolationLevel, OpenSessionError, SessionSetupDisposition,
 };
-use crate::exec::{clear_pending_emits, drain_pending_emits_on_commit};
 
 use super::reducer::deadline::{DeadlineGeneration, DeadlineKind};
 use super::reducer::frames::{FrameClose, FrameId};
@@ -242,7 +242,7 @@ pub struct StepConfig {
     /// `Option` for exactly the reason `backend` is: the seven
     /// `StepConfig::default()` paths drive events that cannot emit `IssueBegin`.
     /// [`begin_top_level`] always supplies `Some`.
-    pub schema: Option<zeroship_schema::SchemaName>,
+    pub schema: Option<zeroship_data_query_builder::SchemaName>,
 }
 
 /// Admit a top-level transaction, then drive it to `Idle`.
@@ -258,7 +258,7 @@ pub struct StepConfig {
 /// held. The orchestrator no longer has to remember to release it per-arm.
 pub async fn begin_top_level(
     app_id: &str,
-    schema: zeroship_schema::SchemaName,
+    schema: zeroship_data_query_builder::SchemaName,
     isolation_level: Option<IsolationLevel>,
     backend: crate::backend::BackendHandle,
 ) -> Result<Driven, DbError> {
@@ -356,52 +356,119 @@ pub async fn settle_root(app_id: &str, intent: SettleIntent) -> Driven {
 /// statement that errors reports `errored: true`, and the reducer parks the
 /// transaction where PostgreSQL has already put it.
 ///
-/// **No production caller yet, and that is a stated gap rather than an
-/// oversight.** Creator CRUD issued inside a transaction goes through
-/// `exec::run_sql` / `exec::exec_sqlite_json`, which take the session with a
-/// bare [`crate::tx_lanes::TxClientSlotGuard`] and report nothing to the state
-/// machine. Routing them here is the same work the module header already names
-/// as open - "capturing the async scope at each CRUD dispatch site" - and it is
-/// not folded into this change because every one of those call sites has tests
-/// that install a transaction session with no reducer behind it. Until then a
-/// failed creator statement leaves the reducer reading `Idle` while PostgreSQL
-/// reads `Failed`; forced cleanup still handles it correctly, because the goal
-/// `OpenTransaction` fixes from `Idle` and `Poisoned` alike and the health
-/// oracle is sampled from the server rather than from the reducer.
-#[allow(
-    dead_code,
-    reason = "exercised by transaction::run_on_tx_conn's tests; see the paragraph above \
-              for the production call sites that must move onto it"
-)]
+/// Row-returning ORM statements use [`execute_operation`]; this entry point
+/// runs statements whose result is only success or failure.
 pub async fn run_operation(app_id: &str, sql: &str, params: &[&str]) -> Result<(), DbError> {
-    let started = step(app_id, TxEvent::OperationRequested, &StepConfig::default()).await;
-    if let Some(refusal) = started.refusal() {
-        return Err(protocol_error(refusal, started.error));
-    }
-    let Some(token) = started.issued_operation else {
-        return Err(DbError::internal(
-            "db: the reducer accepted an operation without issuing one",
-        ));
-    };
+    execute_operation(app_id, exec_on_session(app_id, sql, params)).await
+}
 
-    let result = exec_on_session(app_id, sql, params).await;
-    let errored = result.is_err();
-    let finished = step(
+/// Execute a row-producing statement under the transaction protocol. Both
+/// vendor executors use this boundary, so SQL failures poison the reducer and
+/// settlement waits for the operation to return its connection.
+pub fn execute_operation<'a, T, F>(
+    app_id: &'a str,
+    operation: F,
+) -> impl std::future::Future<Output = Result<T, DbError>> + use<'a, T, F>
+where
+    F: std::future::Future<Output = Result<T, DbError>>,
+{
+    let operation = Box::pin(operation);
+    async move {
+        let started = Box::pin(step(
+            app_id,
+            TxEvent::OperationRequested,
+            &StepConfig::default(),
+        ))
+        .await;
+        if let Some(refusal) = started.refusal() {
+            return Err(protocol_error(refusal, started.error));
+        }
+        let Some(token) = started.issued_operation else {
+            return Err(DbError::internal(
+                "db: the reducer accepted an operation without issuing one",
+            ));
+        };
+
+        let generation = operation_generation(app_id)
+            .ok_or_else(|| DbError::internal("operation has no backend generation"))?;
+        let mut lease = OperationLease {
+            app_id: app_id.to_owned(),
+            token,
+            generation,
+            armed: true,
+        };
+        let result = operation.await;
+        let errored = result.is_err();
+        let finished = complete_operation(app_id, generation, token, errored).await;
+        lease.armed = false;
+        // The statement's own error is what the creator must see; the reducer's
+        // `TransactionNotReady` reply on the errored arm is the state transition,
+        // not the diagnosis.
+        match result {
+            Ok(value) => {
+                if let Some(refusal) = finished.refusal() {
+                    return Err(protocol_error(refusal, finished.error));
+                }
+                Ok(value)
+            }
+            Err(error) => {
+                let _ = finished;
+                Err(error)
+            }
+        }
+    }
+}
+
+struct OperationLease {
+    app_id: String,
+    token: CommandToken,
+    generation: BackendGeneration,
+    armed: bool,
+}
+
+impl Drop for OperationLease {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let app_id = self.app_id.clone();
+        let token = self.token;
+        let generation = self.generation;
+        compio::runtime::spawn(async move {
+            complete_operation(&app_id, generation, token, true).await;
+        })
+        .detach();
+    }
+}
+
+fn operation_generation(app_id: &str) -> Option<BackendGeneration> {
+    crate::tx_lanes::with(|lanes| {
+        lanes
+            .transaction_reducer(app_id)
+            .and_then(TxReducer::generation)
+    })
+}
+
+async fn complete_operation(
+    app_id: &str,
+    generation: BackendGeneration,
+    token: CommandToken,
+    errored: bool,
+) -> Driven {
+    // Command tokens restart for each reducer. The backend generation prevents
+    // a late completion from acting on a replacement transaction.
+    if operation_generation(app_id) != Some(generation) {
+        return Driven {
+            reply: Some(Err(TxProtocolError::StaleBackendGeneration)),
+            ..Driven::default()
+        };
+    }
+    Box::pin(step(
         app_id,
         TxEvent::OperationCompleted { token, errored },
         &StepConfig::default(),
-    )
-    .await;
-    // The statement's own error is what the creator must see; the reducer's
-    // `TransactionNotReady` reply on the errored arm is the state transition,
-    // not the diagnosis.
-    match result {
-        Ok(()) => Ok(()),
-        Err(error) => {
-            let _ = finished;
-            Err(error)
-        }
-    }
+    ))
+    .await
 }
 
 /// Deliver an expired timer.
@@ -751,11 +818,14 @@ fn current_frame(app_id: &str) -> Option<FrameId> {
 /// to lose if the worker role stops inheriting app roles.
 async fn open_session(
     app_id: &str,
-    schema: &zeroship_schema::SchemaName,
+    schema: &zeroship_data_query_builder::SchemaName,
     begin: BeginIntent,
     backend: &crate::backend::BackendHandle,
 ) -> Result<(), OpenSessionError> {
-    install(app_id, backend.open_tx_session(app_id, schema, begin).await?);
+    install(
+        app_id,
+        backend.open_tx_session(app_id, schema, begin).await?,
+    );
     // Drop any broker residue from an interrupted prior run so it cannot leak
     // into this transaction's drain.
     clear_pending_emits(app_id);
@@ -883,11 +953,7 @@ impl CleanupIdentity {
         Self::read(lanes, app_id, self.token) == Some(self)
     }
 
-    fn read(
-        lanes: &crate::tx_lanes::TxLanes,
-        app_id: &str,
-        token: CommandToken,
-    ) -> Option<Self> {
+    fn read(lanes: &crate::tx_lanes::TxLanes, app_id: &str, token: CommandToken) -> Option<Self> {
         let reducer = lanes.transaction_reducer(app_id)?;
         if reducer.state() != super::reducer::TxState::Cancelling
             || reducer.cancellation_token() != Some(token)
@@ -1177,7 +1243,9 @@ fn budgets() -> TxBudgets {
         // the SQLite arm too, and reaching for it through the PostgreSQL
         // session-setup module is what made a cross-backend policy number look
         // like a PostgreSQL detail.
-        execution: Duration::from_millis(u64::from(zeroship_data_core::budgets::DB_IDLE_IN_TX_TIMEOUT_MS)),
+        execution: Duration::from_millis(u64::from(
+            zeroship_data_core::budgets::DB_IDLE_IN_TX_TIMEOUT_MS,
+        )),
         cancellation_sql: Duration::from_secs(5),
         terminal_sql: Duration::from_secs(10),
     }
@@ -1267,7 +1335,7 @@ pub fn outcome_error(
         (SettleIntent::Commit, TerminalOutcome::RolledBack) => Some(coded(
             "commit_rolled_back",
             format!(
-                "commit failed - PostgreSQL rolled the transaction back and its \
+                "commit failed - the database transaction was rolled back and its \
                  writes were discarded{detail_text}"
             ),
         )),
@@ -1335,5 +1403,71 @@ mod tests {
              completion could then authenticate against a later session"
         );
     }
+    #[compio::test]
+    async fn late_operation_completion_cannot_poison_a_replacement_transaction() {
+        use super::*;
+        use crate::transaction::reducer::TxState;
+        fn install_in_flight(app: &str, generation: BackendGeneration) -> CommandToken {
+            crate::reset_engine_for_tests();
+            crate::tx_lanes::with_mut(|lanes| assert!(lanes.try_claim_tx(app)));
+            admit_in_preparing(app);
+            let expected = expected_authority(app);
+            let actions = apply(
+                app,
+                TxEvent::AuthorityObserved {
+                    authority: authority_of(app).unwrap(),
+                    observed: Box::new(observation_for(&expected)),
+                },
+            )
+            .unwrap();
+            let token = actions
+                .into_iter()
+                .find_map(|a| match a {
+                    Action::IssueBegin { token } => Some(token),
+                    _ => None,
+                })
+                .unwrap();
+            apply(
+                app,
+                TxEvent::BeginCompleted {
+                    token,
+                    outcome: BeginOutcome::Opened(generation),
+                },
+            )
+            .unwrap();
+            apply(app, TxEvent::OperationRequested)
+                .unwrap()
+                .into_iter()
+                .find_map(|a| match a {
+                    Action::IssueDataSql { token } => Some(token),
+                    _ => None,
+                })
+                .unwrap()
+        }
+        let app = "late_completion";
+        let previous = BackendGeneration(next_backend_generation());
+        let previous_token = install_in_flight(app, previous);
+        let current = BackendGeneration(next_backend_generation());
+        let current_token = install_in_flight(app, current);
+        assert_eq!(
+            previous_token, current_token,
+            "fixture must reproduce token reuse"
+        );
+        let stale = complete_operation(app, previous, previous_token, true).await;
+        assert_eq!(
+            stale.refusal(),
+            Some(TxProtocolError::StaleBackendGeneration)
+        );
+        assert_eq!(
+            crate::tx_lanes::with(|l| l.transaction_reducer(app).unwrap().state()),
+            TxState::InFlight
+        );
+        let finished = complete_operation(app, current, current_token, false).await;
+        assert!(finished.refusal().is_none());
+        assert_eq!(
+            crate::tx_lanes::with(|l| l.transaction_reducer(app).unwrap().state()),
+            TxState::Idle
+        );
+        crate::reset_engine_for_tests();
+    }
 }
-

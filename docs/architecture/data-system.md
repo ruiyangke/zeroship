@@ -7,6 +7,33 @@ How creator data is stored, reached, isolated and evolved.
 migration DSL, and `docs/proposals/2026-08-28-app-database-decoupling.md` for the decoupling
 design in full.
 
+## Runtime ORM
+
+`zeroship-data-engine` exposes `Database`, `Collection`, and `ModelCollection` for
+Rust callers. The worker's V8 adapter uses the same `PreparedOperation` path.
+Preparation resolves the deployment's collection descriptor and captures the
+request's actor, read set, and transaction route before execution can yield.
+The ORM database handle is an execution context, separate from the persisted
+Database entity described below.
+
+`zeroship-data-query-builder` owns runtime query compilation, typed predicates,
+`SchemaName`, catalog metadata, and the sentinel codec used by introspection.
+The migration engine owns DDL, schema differencing, and schema changes. Runtime
+code does not contain another schema emitter, and database fixtures use the
+migration engine's emitter.
+
+Writes and reads pass through the existing system-field, masking, encryption,
+and result-decoding stages. Binary interpretation belongs to the compiled SQL
+expression; a text value cannot select a binary binding by carrying a prefix.
+Transaction statements report completion to the reducer, which rolls back a
+poisoned transaction. Rust callback transactions use the same protocol as the
+worker, including savepoints and cancellation cleanup. Handles returned from a
+Rust transaction callback expire when that callback finishes.
+
+Implementation: `crates/zeroship-data-engine/src/orm.rs`,
+`crates/zeroship-data-query-builder/src/filter.rs`, and
+`crates/zeroship-plugin-db/src/v8_classes/dispatch.rs`.
+
 **What is DESIGNED AND NOT BUILT is marked *(designed)* throughout**: the Datastore/Database/Grant
 entities, datastore placement, the per-grant role graph, the schema epoch's producer, and the
 `__zeroship_admin` system schema. Everything else describes code in the tree. The distinction

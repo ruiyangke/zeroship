@@ -252,7 +252,7 @@ citations this entry does not have (`Client::new_with_statement_cache`,
 ### L17 - a partitioned creator table is invisible to introspection, and nothing yet proves the descriptor covers it
 
 `read_live_schema` filters `AND c.relkind = 'r'`
-(`crates/zeroship-schema/src/diff.rs:641`). That predicate **includes physical
+(`crates/zeroship-schema/src/diff.rs:641`). That predicate **includes physical (DELETED; runtime compilation now lives in `crates/zeroship-data-query-builder/src/compile.rs`, and migration DDL in `crates/zeroship-migrate-core/src/schema/query.rs`.)
 partitions** (a partition is `relkind = 'r'` with `relispartition = true`) and
 **excludes the partitioned parent**, which is `relkind = 'p'`. So for a
 partitioned creator table the parent is invisible: `build_runtime_schema` returns

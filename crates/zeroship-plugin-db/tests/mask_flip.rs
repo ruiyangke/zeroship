@@ -42,23 +42,29 @@
 //!   --features test-helpers --test mask_flip -- --test-threads=1
 //! ```
 
+#[path = "support/schema.rs"]
+mod schema_fixture;
+#[allow(unused_imports)]
+use schema_fixture::{fixture_table_sql, fixture_table_sql_for};
+#[allow(unused_imports)]
+use zeroship_migrate::schema::query::FkEmission;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use compio_postgres::{NoTls, Pool};
 use serde_json::{json, Value};
 use zeroship_data_core::binding::DbBinding;
+use zeroship_data_core::error::DbError;
+use zeroship_plugin_db::compile::{
+    build_aggregate, build_distinct, build_find_with_schema, build_insert, build_where,
+    raw_column_name, read_surface_columns, validate_field_name,
+};
 use zeroship_plugin_db::crud::mask_policy::dispatch_set_mask_policy;
 use zeroship_plugin_db::crud::unmask::{
     audit_query_hint_granted, authorize_query_hint, dispatch_bulk_unmask, dispatch_unmask,
     dispatch_unmask_for_query, parse_args, parse_bulk_args, BulkUnmaskArgs, BulkUnmaskItem,
     UnmaskFieldArgs,
-};
-use zeroship_data_core::error::DbError;
-use zeroship_plugin_db::query::{
-    build_aggregate, build_create_table_with_fks, build_distinct, build_find_with_schema,
-    build_insert, build_where, raw_column_name, read_surface_columns, validate_field_name,
-    FkEmission,
 };
 
 #[path = "support/mod.rs"]
@@ -188,8 +194,13 @@ async fn fixture(pool: &Rc<Pool>, url: &str, app: &str, collection: &str, schema
     pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[])
         .await
         .unwrap();
-    let ddl = build_create_table_with_fks(&zeroship_schema::SchemaName::new(app).expect("fixture schema name"), collection, schema, &FkEmission::Inline)
-        .expect("the platform's own CREATE TABLE emitter");
+    let ddl = fixture_table_sql(
+        &zeroship_data_query_builder::SchemaName::new(app).expect("fixture schema name"),
+        collection,
+        schema,
+        &FkEmission::Inline,
+    )
+    .expect("the platform's own CREATE TABLE emitter");
     pool.batch_execute(&ddl)
         .await
         .unwrap_or_else(|e| panic!("emitted DDL must apply: {e}\n{ddl}"));
@@ -241,7 +252,13 @@ async fn insert_through_the_pipeline(
         .as_str()
         .unwrap_or_else(|| panic!("the write pipeline must mint an id: {}", docs[0]))
         .to_string();
-    let bq = build_insert(&zeroship_schema::SchemaName::new(app).expect("fixture schema name"), collection, schema, &docs[0]).expect("insert builder");
+    let bq = build_insert(
+        &zeroship_data_query_builder::SchemaName::new(app).expect("fixture schema name"),
+        collection,
+        schema,
+        &docs[0],
+    )
+    .expect("insert builder");
     assert!(
         !bq.sql.contains("RETURNING *") && bq.sql.contains(r#"RETURNING "id""#),
         "the write path's shape is a named projection; this suite is written against it: {}",
@@ -273,7 +290,14 @@ fn row_to_json(row: &compio_postgres::Row) -> Value {
 
 async fn run_find(pool: &Rc<Pool>, app: &str, filter: &Value, schema: &Value) -> Vec<Value> {
     let bq = build_find_with_schema(
-        &zeroship_schema::SchemaName::new(app).expect("fixture schema name"), "people", filter, Some(50), None, None, None, schema,
+        &zeroship_data_query_builder::SchemaName::new(app).expect("fixture schema name"),
+        "people",
+        filter,
+        Some(50),
+        None,
+        None,
+        None,
+        schema,
     )
     .expect("find builder");
     let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
@@ -400,8 +424,7 @@ async fn a_range_filter_on_a_masked_column_cannot_narrow_the_plaintext() {
     // returns nothing". This arm differs in ONE: same column, same operator,
     // same masked path, a bound chosen to sit BELOW every mask rather than
     // above it. A correct implementation must return both rows.
-    let below_every_mask =
-        run_find(&pool, app, &json!({ "ssn": { "$gt": "!" } }), &schema).await;
+    let below_every_mask = run_find(&pool, app, &json!({ "ssn": { "$gt": "!" } }), &schema).await;
     let mut reached: Vec<String> = below_every_mask
         .iter()
         .map(|r| r["id"].as_str().unwrap().to_string())
@@ -419,7 +442,13 @@ async fn a_range_filter_on_a_masked_column_cannot_narrow_the_plaintext() {
     // unmasked `nickname` column MUST separate the rows. Without this arm an
     // implementation that refused every filter, or returned no rows at all,
     // would pass every assertion above.
-    let rows = run_find(&pool, app, &json!({ "nickname": { "$gt": "mmm" } }), &schema).await;
+    let rows = run_find(
+        &pool,
+        app,
+        &json!({ "nickname": { "$gt": "mmm" } }),
+        &schema,
+    )
+    .await;
     assert_eq!(
         rows.len(),
         1,
@@ -433,7 +462,7 @@ async fn a_range_filter_on_a_masked_column_cannot_narrow_the_plaintext() {
     // column sorts by the mask, so a `limit 1` cannot name the largest SSN.
     let ordered = {
         let bq = build_find_with_schema(
-            &zeroship_schema::SchemaName::new(app).expect("fixture schema name"),
+            &zeroship_data_query_builder::SchemaName::new(app).expect("fixture schema name"),
             "people",
             &json!({}),
             Some(1),
@@ -516,11 +545,9 @@ async fn the_real_value_is_still_stored_and_still_reachable_by_the_audited_path(
     // column: pointing it back at the field's own column reddens no other test
     // in this file, because every other assertion here is about what a query
     // CANNOT reach. The unmask path is the one reader that must reach it.
-    pool.batch_execute(
-        &zeroship_migrate_server::provisioning::audit_unmask_table_sql(app),
-    )
-    .await
-    .expect("the audit table the deploy provisions");
+    pool.batch_execute(&zeroship_migrate_server::provisioning::audit_unmask_table_sql(app))
+        .await
+        .expect("the audit table the deploy provisions");
     // The unmask fetch runs `SET LOCAL ROLE app_<id>_role`, so the per-app role
     // and its grants have to exist - the deploy's `zeroship migrate` creates
     // them, and this stands in for it.
@@ -552,9 +579,7 @@ async fn the_real_value_is_still_stored_and_still_reachable_by_the_audited_path(
     // And the audit row the guarantee rests on was written.
     let audit = pool
         .query_text_params(
-            &format!(
-                "SELECT outcome, \"column\" FROM \"{app}\".\"__zeroship_audit_unmask\""
-            ),
+            &format!("SELECT outcome, \"column\" FROM \"{app}\".\"__zeroship_audit_unmask\""),
             &[],
         )
         .await
@@ -1020,7 +1045,13 @@ async fn app_js_claiming_the_auto_system_actor_is_refused_by_the_parser() {
          rejection, and a test that never got past the parser would assert \
          nothing about it",
     );
-    let err = match dispatch_unmask(&unmask_route(app).await, &DbBinding::cold_start(app), forged).await {
+    let err = match dispatch_unmask(
+        &unmask_route(app).await,
+        &DbBinding::cold_start(app),
+        forged,
+    )
+    .await
+    {
         Ok(leaked) => panic!(
             "DB-3 is back: app JS claiming the reserved `auto` system actor was \
              authorized, and the plaintext came back: {leaked:?}"
@@ -1079,13 +1110,17 @@ async fn app_js_claiming_the_auto_system_actor_is_refused_by_the_parser() {
         &json!({ "kind": "support", "id": "usr_support_1" }),
     ))
     .expect("the same payload shape must parse");
-    let result = dispatch_unmask(&unmask_route(app).await, &DbBinding::cold_start(app), permitted)
-        .await
-        .expect(
-            "the same payload naming a non-reserved kind the policy permits must \
+    let result = dispatch_unmask(
+        &unmask_route(app).await,
+        &DbBinding::cold_start(app),
+        permitted,
+    )
+    .await
+    .expect(
+        "the same payload naming a non-reserved kind the policy permits must \
              reach the value; if this fails the refusal above proved nothing \
              about the actor",
-        );
+    );
     assert_eq!(
         result.plaintext, ssn,
         "the control must recover the very value the forged call was refused",
@@ -1135,7 +1170,13 @@ async fn app_js_claiming_the_auto_system_actor_is_refused_by_the_bulk_parser() {
         &json!({ "kind": "auto", "id": "usr_support_1" }),
     ))
     .expect("the payload must PARSE; DB-3 is an authorization fence");
-    let err = match dispatch_bulk_unmask(&unmask_route(app).await, &DbBinding::cold_start(app), forged).await {
+    let err = match dispatch_bulk_unmask(
+        &unmask_route(app).await,
+        &DbBinding::cold_start(app),
+        forged,
+    )
+    .await
+    {
         Ok(leaked) => panic!(
             "DB-3 is back on the bulk path: app JS claiming the reserved `auto` \
              system actor was authorized, and the plaintext came back: \
@@ -1187,12 +1228,16 @@ async fn app_js_claiming_the_auto_system_actor_is_refused_by_the_bulk_parser() {
         &json!({ "kind": "support", "id": "usr_support_1" }),
     ))
     .expect("the same payload shape must parse");
-    let granted = dispatch_bulk_unmask(&unmask_route(app).await, &DbBinding::cold_start(app), permitted)
-        .await
-        .expect(
-            "the same batch naming a non-reserved kind the policy permits must \
+    let granted = dispatch_bulk_unmask(
+        &unmask_route(app).await,
+        &DbBinding::cold_start(app),
+        permitted,
+    )
+    .await
+    .expect(
+        "the same batch naming a non-reserved kind the policy permits must \
              reach the value; if this fails the refusal above proved nothing",
-        );
+    );
     assert_eq!(
         granted.results[&person.id]["ssn"], ssn,
         "the control must recover the very value the forged batch was refused: {:?}",
@@ -1248,16 +1293,24 @@ async fn a_rejected_impersonation_is_distinguishable_from_an_absent_actor() {
         &json!({ "kind": "auto", "id": "usr_support_1" }),
     ))
     .expect("the forged payload must parse; DB-3 is a fence, not a shape check");
-    dispatch_unmask(&unmask_route(app).await, &DbBinding::cold_start(app), forged)
-        .await
-        .expect_err("the forged claim must be refused");
+    dispatch_unmask(
+        &unmask_route(app).await,
+        &DbBinding::cold_start(app),
+        forged,
+    )
+    .await
+    .expect_err("the forged claim must be refused");
 
     // ---- (2) no actor at all, same row, same column, same policy
     let anonymous = parse_args(&unmask_args_json(&person.id, &Value::Null))
         .expect("an actor-less payload must parse");
-    dispatch_unmask(&unmask_route(app).await, &DbBinding::cold_start(app), anonymous)
-        .await
-        .expect_err("an absent actor must be refused");
+    dispatch_unmask(
+        &unmask_route(app).await,
+        &DbBinding::cold_start(app),
+        anonymous,
+    )
+    .await
+    .expect_err("an absent actor must be refused");
 
     let audit = audit_rows(&pool, app).await;
     assert_eq!(audit.len(), 2, "both refusals are audited: {audit:?}");
@@ -1490,9 +1543,13 @@ async fn a_bulk_unmask_batch_with_one_forbidden_column_is_refused_whole() {
         reason: Some("mask_flip integration test".to_string()),
         rejected_claim: None,
     };
-    let err = dispatch_bulk_unmask(&unmask_route(app).await, &DbBinding::cold_start(app), two_rows.clone())
-        .await
-        .expect_err("one forbidden pair on ONE row must refuse every row");
+    let err = dispatch_bulk_unmask(
+        &unmask_route(app).await,
+        &DbBinding::cold_start(app),
+        two_rows.clone(),
+    )
+    .await
+    .expect_err("one forbidden pair on ONE row must refuse every row");
     assert_eq!(refusal_code(&err), "bulk_unmask_partial_unauthorized");
     let rendered = format!("{err:?}");
     assert!(
@@ -1547,9 +1604,13 @@ async fn a_bulk_unmask_batch_with_one_forbidden_column_is_refused_whole() {
         reason: Some("mask_flip integration test".to_string()),
         rejected_claim: None,
     };
-    let err = dispatch_bulk_unmask(&unmask_route(app).await, &DbBinding::cold_start(app), both_denied)
-        .await
-        .expect_err("two forbidden pairs must still refuse the whole batch");
+    let err = dispatch_bulk_unmask(
+        &unmask_route(app).await,
+        &DbBinding::cold_start(app),
+        both_denied,
+    )
+    .await
+    .expect_err("two forbidden pairs must still refuse the whole batch");
     assert_eq!(refusal_code(&err), "bulk_unmask_partial_unauthorized");
     assert!(
         format!("{err:?}").contains("2 (row, column) pair(s) not authorized"),
@@ -1583,12 +1644,20 @@ async fn a_bulk_unmask_batch_with_one_forbidden_column_is_refused_whole() {
     // ---- CONTROL 2, differing in one variable: the policy. The SAME two-row
     // batch now passes whole, and BOTH rows hand over their values - so the
     // refusal above withheld two real values, and the arm can pass.
-    dispatch_set_mask_policy(&unmask_backend().await, app, json!({ "support": ["pii", "pci"] }))
-        .await
-        .expect("widen the app's declared mask policy");
-    let granted = dispatch_bulk_unmask(&unmask_route(app).await, &DbBinding::cold_start(app), two_rows)
-        .await
-        .expect("the same batch must pass once the policy grants both classes");
+    dispatch_set_mask_policy(
+        &unmask_backend().await,
+        app,
+        json!({ "support": ["pii", "pci"] }),
+    )
+    .await
+    .expect("widen the app's declared mask policy");
+    let granted = dispatch_bulk_unmask(
+        &unmask_route(app).await,
+        &DbBinding::cold_start(app),
+        two_rows,
+    )
+    .await
+    .expect("the same batch must pass once the policy grants both classes");
     assert_eq!(granted.results[&person.id]["ssn"], ssn);
     assert_eq!(
         granted.results[&second.id]["email"], "grace@example.com",
@@ -1746,9 +1815,13 @@ async fn a_query_hint_naming_one_forbidden_column_is_refused_whole() {
     // ---- CONTROL 2, differing in one variable: the policy. The same hint now
     // passes, and the promotion the dispatcher runs after the SELECT hands back
     // both plaintexts.
-    dispatch_set_mask_policy(&unmask_backend().await, app, json!({ "support": ["pii", "pci"] }))
-        .await
-        .expect("widen the app's declared mask policy");
+    dispatch_set_mask_policy(
+        &unmask_backend().await,
+        app,
+        json!({ "support": ["pii", "pci"] }),
+    )
+    .await
+    .expect("widen the app's declared mask policy");
     authorize_query_hint(
         &unmask_backend().await,
         &DbBinding::cold_start(app),
@@ -1882,12 +1955,12 @@ async fn a_query_hint_reads_the_column_its_alias_resolved_to() {
     )
     .await
     .expect(
-            "the read must find the column the fence authorised. If this errors \
+        "the read must find the column the fence authorised. If this errors \
              on a missing column, the hint authorised `contact_email` and then \
              read `__zs_raw__contactEmail`: the caller's spelling survived \
              because the query-hint path discarded the canonical name its two \
              siblings adopt",
-        );
+    );
     assert_eq!(
         rows[0]["contact_email"],
         json!(email),
@@ -1903,7 +1976,7 @@ async fn a_query_hint_reads_the_column_its_alias_resolved_to() {
 
 /// **Outward.** No row-returning write verb may hand back the raw column.
 ///
-/// The twelve write sites in `zeroship-schema` emitted `RETURNING *` - every
+/// The twelve write sites in `zeroship-data-query-builder` emitted `RETURNING *` - every
 /// physical column, never passing through the projection allowlist, which was
 /// SELECT-side only. Without the read pipeline's row-surface stage, `insert`
 /// returned the real value under a key the generated `Row<S>` type does not
@@ -1967,7 +2040,7 @@ async fn no_write_verb_hands_back_a_column_the_descriptor_does_not_declare() {
         .query_text_params(
             &format!(
                 r#"SELECT {} AS raw FROM "{app}"."people" WHERE "id" = $1"#,
-                zeroship_plugin_db::query::quote_ident(&raw_column_name("ssn")),
+                zeroship_plugin_db::compile::quote_ident(&raw_column_name("ssn")),
             ),
             &[minted_id.as_str()],
         )
@@ -1977,13 +2050,10 @@ async fn no_write_verb_hands_back_a_column_the_descriptor_does_not_declare() {
 
     // BOUNDARY 2, the runtime's.
     let allowed: BTreeSet<String> = read_surface_columns(&schema);
-    let finalized = zeroship_plugin_db::finalize_rows_on_read_for_tests(
-        app,
-        "people",
-        returned.clone(),
-    )
-    .await
-    .expect("read pipeline");
+    let finalized =
+        zeroship_plugin_db::finalize_rows_on_read_for_tests(app, "people", returned.clone())
+            .await
+            .expect("read pipeline");
     let keys: BTreeSet<String> = finalized[0].as_object().unwrap().keys().cloned().collect();
     assert!(
         keys.is_subset(&allowed),
@@ -2021,13 +2091,10 @@ async fn no_write_verb_hands_back_a_column_the_descriptor_does_not_declare() {
     smuggled[raw_column_name("ssn")] = json!("123-45-6789");
     smuggled["__zs_shadow_key"] = json!("aux-42");
     smuggled["totally_undeclared"] = json!("leak-me");
-    let finalized = zeroship_plugin_db::finalize_rows_on_read_for_tests(
-        app,
-        "people",
-        vec![smuggled],
-    )
-    .await
-    .expect("read pipeline");
+    let finalized =
+        zeroship_plugin_db::finalize_rows_on_read_for_tests(app, "people", vec![smuggled])
+            .await
+            .expect("read pipeline");
     let keys: BTreeSet<String> = finalized[0].as_object().unwrap().keys().cloned().collect();
     assert!(
         keys.is_subset(&allowed),
@@ -2035,7 +2102,9 @@ async fn no_write_verb_hands_back_a_column_the_descriptor_does_not_declare() {
         keys.difference(&allowed).collect::<Vec<_>>(),
     );
     assert!(
-        !serde_json::to_string(&finalized[0]).unwrap().contains("leak-me"),
+        !serde_json::to_string(&finalized[0])
+            .unwrap()
+            .contains("leak-me"),
         "and neither did its value: {finalized:?}",
     );
 
@@ -2063,19 +2132,14 @@ fn the_raw_column_is_refused_on_every_inbound_surface() {
     let refusals: Vec<(&str, bool)> = vec![
         (
             "filter key",
-            build_where(
-                &json!({ raw.clone(): "x" }),
-                &mut Vec::new(),
-                &schema,
-            )
-            .is_err(),
+            build_where(&json!({ raw.clone(): "x" }), &mut Vec::new(), &schema).is_err(),
         ),
         (
             // The aggregate matcher and `$group.by` below both validate
             // against the same declared shape.
             "aggregate $match",
             build_aggregate(
-                &zeroship_schema::SchemaName::new("app1").expect("fixture schema name"),
+                &zeroship_data_query_builder::SchemaName::new("app1").expect("fixture schema name"),
                 "people",
                 &json!([{ "$match": { raw.clone(): "x" } }]),
                 &schema,
@@ -2085,7 +2149,7 @@ fn the_raw_column_is_refused_on_every_inbound_surface() {
         (
             "select",
             build_find_with_schema(
-                &zeroship_schema::SchemaName::new("app1").expect("fixture schema name"),
+                &zeroship_data_query_builder::SchemaName::new("app1").expect("fixture schema name"),
                 "people",
                 &json!({}),
                 Some(1),
@@ -2099,7 +2163,7 @@ fn the_raw_column_is_refused_on_every_inbound_surface() {
         (
             "orderBy",
             build_find_with_schema(
-                &zeroship_schema::SchemaName::new("app1").expect("fixture schema name"),
+                &zeroship_data_query_builder::SchemaName::new("app1").expect("fixture schema name"),
                 "people",
                 &json!({}),
                 Some(1),
@@ -2113,7 +2177,7 @@ fn the_raw_column_is_refused_on_every_inbound_surface() {
         (
             "$group.by",
             build_aggregate(
-                &zeroship_schema::SchemaName::new("app1").expect("fixture schema name"),
+                &zeroship_data_query_builder::SchemaName::new("app1").expect("fixture schema name"),
                 "people",
                 &json!([{ "$group": { "by": [raw.clone()] } }]),
                 &schema,
@@ -2122,7 +2186,14 @@ fn the_raw_column_is_refused_on_every_inbound_surface() {
         ),
         (
             "distinct",
-            build_distinct(&zeroship_schema::SchemaName::new("app1").expect("fixture schema name"), "people", &raw, &json!({}), &schema).is_err(),
+            build_distinct(
+                &zeroship_data_query_builder::SchemaName::new("app1").expect("fixture schema name"),
+                "people",
+                &raw,
+                &json!({}),
+                &schema,
+            )
+            .is_err(),
         ),
         (
             // The exact function the write pipeline's document-key and
@@ -2140,10 +2211,17 @@ fn the_raw_column_is_refused_on_every_inbound_surface() {
     // The control: the LOGICAL name is ACCEPTED on those same surfaces. Without
     // it, a validator that refused everything would pass all seven above.
     assert!(build_where(&json!({ "ssn": "x" }), &mut Vec::new(), &schema).is_ok());
-    assert!(build_distinct(&zeroship_schema::SchemaName::new("app1").expect("fixture schema name"), "people", "ssn", &json!({}), &schema).is_ok());
+    assert!(build_distinct(
+        &zeroship_data_query_builder::SchemaName::new("app1").expect("fixture schema name"),
+        "people",
+        "ssn",
+        &json!({}),
+        &schema
+    )
+    .is_ok());
     assert!(validate_field_name("ssn").is_ok());
     assert!(build_find_with_schema(
-        &zeroship_schema::SchemaName::new("app1").expect("fixture schema name"),
+        &zeroship_data_query_builder::SchemaName::new("app1").expect("fixture schema name"),
         "people",
         &json!({}),
         Some(1),
@@ -2343,7 +2421,13 @@ async fn a_unique_masked_field_admits_rows_that_share_a_mask() {
     // `build_create_indexes` emits CONCURRENTLY, which cannot run inside the
     // implicit transaction `batch_execute` uses, so the fixture's DDL carries
     // the table alone. Apply the index the platform would build.
-    for spec in zeroship_plugin_db::query::build_create_indexes(&zeroship_schema::SchemaName::new(app).expect("fixture schema name"), "people", &schema).unwrap() {
+    for spec in schema_fixture::fixture_indexes(
+        &zeroship_data_query_builder::SchemaName::new(app).expect("fixture schema name"),
+        "people",
+        &schema,
+    )
+    .unwrap()
+    {
         pool.execute(&spec.sql.replace("CONCURRENTLY ", ""), &[])
             .await
             .unwrap_or_else(|e| panic!("index must build: {e}\n{}", spec.sql));
@@ -2408,7 +2492,13 @@ async fn a_unique_masked_field_admits_rows_that_share_a_mask() {
     zeroship_plugin_db::prepare_insert_many_docs_for_tests(&mut docs, app, "people", None)
         .await
         .expect("write pipeline");
-    let bq = build_insert(&zeroship_schema::SchemaName::new(app).expect("fixture schema name"), "people", &schema, &docs[0]).unwrap();
+    let bq = build_insert(
+        &zeroship_data_query_builder::SchemaName::new(app).expect("fixture schema name"),
+        "people",
+        &schema,
+        &docs[0],
+    )
+    .unwrap();
     let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
     let err = pool
         .query_text_params(&bq.sql, &param_refs)
@@ -2540,12 +2630,13 @@ async fn deleting_the_mask_key_from_the_descriptor_must_not_write_plaintext() {
     // nothing about the warm one production actually runs.
     zeroship_plugin_db::cache_schema_for_tests(app, "people", unmasked.clone());
     let mut docs = json!([{ "ssn": "987-65-4321", "nickname": "bob" }]);
-    let err = zeroship_plugin_db::prepare_insert_many_docs_for_tests(&mut docs, app, "people", None)
-        .await
-        .expect_err(
-            "a descriptor that dropped the mask must not be able to write the \
+    let err =
+        zeroship_plugin_db::prepare_insert_many_docs_for_tests(&mut docs, app, "people", None)
+            .await
+            .expect_err(
+                "a descriptor that dropped the mask must not be able to write the \
              plaintext this table still protects",
-        );
+            );
     assert!(
         format!("{err:?}").contains("protection_removed_from_descriptor"),
         "the refusal must carry the typed code a creator branches on, got {err:?}",
@@ -2573,9 +2664,7 @@ async fn deleting_the_mask_key_from_the_descriptor_must_not_write_plaintext() {
     // And the plaintext is nowhere in the field's own column.
     let leaked = pool
         .query_text_params(
-            &format!(
-                "SELECT count(*)::text AS n FROM \"{app}\".\"people\" WHERE \"ssn\" = $1"
-            ),
+            &format!("SELECT count(*)::text AS n FROM \"{app}\".\"people\" WHERE \"ssn\" = $1"),
             &["987-65-4321"],
         )
         .await
@@ -2629,12 +2718,13 @@ async fn deleting_the_encrypted_key_from_the_descriptor_must_not_write_plaintext
     let plain = encrypted_schema_without_the_encrypted_key();
     zeroship_plugin_db::cache_schema_for_tests(app, "people", plain.clone());
     let mut docs = json!([{ "secret": "hunter3-also-real", "nickname": "bob" }]);
-    let err = zeroship_plugin_db::prepare_insert_many_docs_for_tests(&mut docs, app, "people", None)
-        .await
-        .expect_err(
-            "a descriptor that dropped the encryption block must not be able to \
+    let err =
+        zeroship_plugin_db::prepare_insert_many_docs_for_tests(&mut docs, app, "people", None)
+            .await
+            .expect_err(
+                "a descriptor that dropped the encryption block must not be able to \
              write the plaintext this column still protects",
-        );
+            );
     assert!(
         format!("{err:?}").contains("protection_removed_from_descriptor"),
         "the refusal must carry the typed code a creator branches on, got {err:?}",
@@ -2690,7 +2780,7 @@ fn confined_ceiling_for(app_uuid: &uuid::Uuid) -> zeroship_migrate_policy::Effec
 /// Create `<app>.<collection>` the way PRODUCTION creates a creator table.
 ///
 /// [`fixture`] renders its DDL with the DATA PLANE's emitter,
-/// `zeroship_schema::query::build_create_table_with_fks`, whose only callers are
+/// `zeroship_data_query_builder::compile::build_create_table_with_fks`, whose only callers are
 /// tests (measured 2026-09-04: no `src` call site outside its own module in any
 /// crate). Every creator table that exists on the platform is instead rendered by
 /// the MIGRATION ENGINE and applied by `zeroship-migrate-server`. A protection
@@ -2807,9 +2897,9 @@ async fn a_migration_engine_built_table_refuses_a_mask_downgrade() {
         .expect("the engine must attach a mask sentinel to the masked column");
     assert_eq!(
         stored,
-        zeroship_schema::mask_codec::build_mask_sentinel(
-            zeroship_schema::diff::MaskKind::Full,
-            zeroship_schema::diff::Classification::Pci,
+        zeroship_data_query_builder::mask_codec::build_mask_sentinel(
+            zeroship_data_query_builder::catalog::MaskKind::Full,
+            zeroship_data_query_builder::catalog::Classification::Pci,
         ),
         "the migration engine writes the protection record and the data plane \
          reads it; a spelling only one of them knows is a fence with no input",
@@ -2917,11 +3007,11 @@ async fn a_migration_engine_built_table_refuses_an_encryption_downgrade() {
         .expect("the engine must attach an encryption sentinel to the encrypted column");
     assert_eq!(
         stored,
-        zeroship_schema::mask_codec::build_encryption_sentinel(
-            &zeroship_schema::diff::EncryptionMeta {
-                mode: zeroship_schema::descriptors::EncryptionMode::Randomised,
+        zeroship_data_query_builder::mask_codec::build_encryption_sentinel(
+            &zeroship_data_query_builder::catalog::EncryptionMeta {
+                mode: zeroship_data_query_builder::descriptors::EncryptionMode::Randomised,
                 key_id: "k1".to_string(),
-                wraps: zeroship_schema::diff::WrappedType::String,
+                wraps: zeroship_data_query_builder::catalog::WrappedType::String,
             }
         ),
         "the migration engine writes the protection record and the data plane \

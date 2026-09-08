@@ -1,6 +1,6 @@
 //! Leaf-crate errors for the schema layer.
 //!
-//! `zeroship-schema` cannot depend on plugin-db's runtime-coupled `DbError`.
+//! `zeroship-data-query-builder` cannot depend on plugin-db's runtime-coupled `DbError`.
 //! The sentinel codec therefore returns the small, self-contained error below;
 //! plugin-db maps it into its neutral data-plane error at the call boundary.
 

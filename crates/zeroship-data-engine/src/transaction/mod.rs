@@ -145,9 +145,9 @@ pub mod driver;
 #[cfg(any(test, feature = "test-helpers"))]
 pub mod probe;
 
-use zeroship_data_core::error::DbError;
 use crate::exec::clear_pending_emits;
 use crate::tx_route::TxRoute;
+use zeroship_data_core::error::DbError;
 
 /// Maximum nesting depth for `env.db.transaction(...)` calls — the
 /// outermost `BEGIN` plus this many `SAVEPOINT` levels. A `transaction()`
@@ -159,17 +159,13 @@ use crate::tx_route::TxRoute;
 /// guard, not a workload limit.
 pub const MAX_SAVEPOINT_DEPTH: u32 = 8;
 
-
-
 // ---------------------------------------------------------------------------
 // TxFinalizer — heap state shared by the resolve / reject handlers
 // ---------------------------------------------------------------------------
 
-
 // ---------------------------------------------------------------------------
 // transaction_dispatch — the v8_method entry point
 // ---------------------------------------------------------------------------
-
 
 /// Future that resolves once this app owns the top-level-transaction
 /// claim (see [`crate::context::ThreadDbContext::try_claim_tx`]).
@@ -397,7 +393,6 @@ impl Drop for AtomicWriteFrame {
     }
 }
 
-
 // ---------------------------------------------------------------------------
 // exec_begin_or_savepoint — the async begin/savepoint SQL
 // ---------------------------------------------------------------------------
@@ -417,7 +412,7 @@ pub async fn exec_begin_or_savepoint(
     nested: bool,
     isolation_level: Option<zeroship_data_core::error::IsolationLevel>,
     app_id: &str,
-    schema: zeroship_schema::SchemaName,
+    schema: zeroship_data_query_builder::SchemaName,
     backend: crate::backend::BackendHandle,
 ) -> Result<Option<reducer::frames::FrameId>, DbError> {
     if nested {
@@ -484,7 +479,6 @@ fn frame_refusal(refusal: reducer::TxProtocolError, detail: Option<DbError>) -> 
     driver::protocol_error(refusal, detail)
 }
 
-
 /// Run one creator data statement inside `app_id`'s open transaction.
 ///
 /// Goes through the reducer's operation guard: the statement takes the session,
@@ -510,16 +504,9 @@ pub async fn run_on_tx_conn(app_id: &str, sql: &str) -> Result<(), DbError> {
 // run_begin_continuation — mint view, call callback, attach handlers
 // ---------------------------------------------------------------------------
 
-
-
-
 // ---------------------------------------------------------------------------
 // V8 handler callbacks — reclaim the finalizer, spawn the settle op
 // ---------------------------------------------------------------------------
-
-
-
-
 
 // ---------------------------------------------------------------------------
 // exec_settle — COMMIT / ROLLBACK / RELEASE / ROLLBACK TO
@@ -624,7 +611,6 @@ pub async fn exec_settle(
     }
 }
 
-
 pub fn commit_failed_indeterminate(error: DbError) -> DbError {
     DbError::Coded {
         code: "commit_failed_indeterminate".to_string(),
@@ -680,8 +666,8 @@ thread_local! {
 /// tenant it names - which is the shape this typing change exists to make
 /// visible.
 #[cfg(test)]
-fn test_schema() -> zeroship_schema::SchemaName {
-    zeroship_schema::SchemaName::new("app_sqlite").expect("fixture schema name")
+fn test_schema() -> zeroship_data_query_builder::SchemaName {
+    zeroship_data_query_builder::SchemaName::new("app_sqlite").expect("fixture schema name")
 }
 
 #[cfg(test)]
@@ -707,8 +693,8 @@ mod tests {
     use std::path::PathBuf;
     use std::rc::Rc;
 
-    use crate::backend::SqlExecutor;
     use crate::backend::sqlite::SqliteBackend;
+    use crate::backend::SqlExecutor;
 
     fn run<F: std::future::Future>(f: F) -> F::Output {
         compio::runtime::Runtime::new()
@@ -784,10 +770,11 @@ mod tests {
                 .await
                 .expect("begin");
 
-            let first = exec_begin_or_savepoint(true, None, "app_sqlite", test_schema(), test_backend())
-                .await
-                .expect("first nested frame")
-                .expect("a nested begin opens a frame");
+            let first =
+                exec_begin_or_savepoint(true, None, "app_sqlite", test_schema(), test_backend())
+                    .await
+                    .expect("first nested frame")
+                    .expect("a nested begin opens a frame");
             // Roll it back, which on PostgreSQL leaves the savepoint defined -
             // the precondition that makes a reused name dangerous.
             match exec_settle("app_sqlite", false, Some(first)).await {
@@ -795,10 +782,11 @@ mod tests {
                 other => panic!("expected Ok for the first frame settle, got {other:?}"),
             }
 
-            let second = exec_begin_or_savepoint(true, None, "app_sqlite", test_schema(), test_backend())
-                .await
-                .expect("second nested frame")
-                .expect("a nested begin opens a frame");
+            let second =
+                exec_begin_or_savepoint(true, None, "app_sqlite", test_schema(), test_backend())
+                    .await
+                    .expect("second nested frame")
+                    .expect("a nested begin opens a frame");
             assert_ne!(
                 first, second,
                 "a frame id is minted from a monotonic sequence and never reused"
@@ -925,8 +913,8 @@ mod tests {
                 test_schema(),
                 test_backend(),
             )
-                .await
-                .expect("begin sqlite tx");
+            .await
+            .expect("begin sqlite tx");
             run_on_tx_conn("app_sqlite", "INSERT INTO notes (title) VALUES ('kept')")
                 .await
                 .expect("insert inside sqlite tx");

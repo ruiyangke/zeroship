@@ -838,13 +838,13 @@ impl DmlRenderer for SqliteDmlRenderer {
 
     fn synth_now(&self) -> String {
         // BOUND, as of 2026-09-04, by `mod sqlite_now_parity` at the bottom of
-        // `crates/zeroship-schema/src/query.rs`, which holds this string, the
+        // `crates/zeroship-data-query-builder/src/compile.rs`, which holds this string, the
         // DEFAULT clause `schema.rs` renders, and the data plane's own
         // expression against one literal stated in that module.
         //
         // NOT `CURRENT_TIMESTAMP`, which SQLite renders space-separated
         // ("YYYY-MM-DD HH:MM:SS"). The data plane writes the ISO-T spelling for
-        // every Unix-ms bind (`zeroship-schema/src/query.rs:3085`), and these
+        // every Unix-ms bind (`zeroship-data-query-builder/src/compile.rs:3085`), and these
         // columns are compared BYTEWISE - ' ' is 0x20, 'T' is 0x54 - so two
         // spellings in one column invert same-day ordering.
         //
@@ -1074,8 +1074,9 @@ fn render_sqlite_trigger_op(
             let qname = zeroship_migrate_backend::dml::quote_bare_ident_for_backend(
                 "trigger", name, &RENDERER,
             )?;
-            let qtable =
-                zeroship_migrate_backend::dml::quote_bare_ident_for_backend("table", table, &RENDERER)?;
+            let qtable = zeroship_migrate_backend::dml::quote_bare_ident_for_backend(
+                "table", table, &RENDERER,
+            )?;
             let events_sql = events
                 .iter()
                 .map(|e| e.as_sql())
@@ -1183,7 +1184,9 @@ fn render_sqlite_trigger_stmt(
             let qcols: Result<Vec<_>, _> = columns
                 .iter()
                 .map(|c| {
-                    zeroship_migrate_backend::dml::quote_bare_ident_for_backend("column", c, &RENDERER)
+                    zeroship_migrate_backend::dml::quote_bare_ident_for_backend(
+                        "column", c, &RENDERER,
+                    )
                 })
                 .collect();
             let qcols = qcols?;

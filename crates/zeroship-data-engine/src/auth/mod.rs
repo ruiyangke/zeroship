@@ -42,7 +42,7 @@
 //! The schema this design used was spelled with the `__zeroship` prefix, and
 //! that prefix is still fenced off from creator code by five surfaces: the
 //! namespace, column and alias reservation tables in
-//! `zeroship-data-query-builder`'s `ident`, `zeroship-schema`'s `RESERVED_NAMES`,
+//! `zeroship-data-query-builder`'s `ident`, `zeroship-data-query-builder`'s `RESERVED_NAMES`,
 //! and the `PLATFORM_RESERVED_COLLECTION_PREFIXES` list that three crates pin
 //! against each other. Those fences are NOT guarding a dead name. `__zeroship_`
 //! is the live prefix of tables that exist in every app schema today - the

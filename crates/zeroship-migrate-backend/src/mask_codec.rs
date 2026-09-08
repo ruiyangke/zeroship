@@ -29,7 +29,7 @@ use crate::schema_error::MaskSentinelError;
 /// a legacy writer" could inject that writer's prefix. Nothing ever injected
 /// one - `SentinelPrefix` occurred ten times in the whole tree, all inside its
 /// own defining file - and the reader that was supposed to be interoperated
-/// with (`zeroship-schema`'s copy of this codec, which the data plane uses to
+/// with (`zeroship-data-query-builder`'s copy of this codec, which the data plane uses to
 /// read the live catalog) simply spelled the sentinel differently and never
 /// learned this one.
 ///
@@ -253,15 +253,15 @@ mod tests {
     /// Not a tautology over the constants: every OTHER assertion in this module
     /// spells the sentinel out, so renaming a constant alone would go red there
     /// too - but only here does the failure message say what the wire is. The
-    /// peer that must agree is `zeroship_schema::mask_codec`'s pair of the same
+    /// peer that must agree is `zeroship_data_query_builder::mask_codec`'s pair of the same
     /// names, which the data plane reads the live catalog with. Nothing in the
     /// type system relates them (their `MaskKind`/`Classification` types are
     /// separate), so the binding is behavioural, and it lives in the peer rather
     /// than here: `cross_codec_parity`, at the bottom of
-    /// `crates/zeroship-schema/src/mask_codec.rs`, builds with THIS emitter and
+    /// `crates/zeroship-data-query-builder/src/mask_codec.rs`, builds with THIS emitter and
     /// parses with that codec and vice versa, over both sentinel families and
     /// both backends' dispatch sites. It sits on that side because
-    /// `zeroship-schema` already carries the test-only `zeroship-migrate-core`
+    /// `zeroship-data-query-builder` already carries the test-only `zeroship-migrate-core`
     /// dev-dependency; this crate has no edge back and must not grow one.
     ///
     /// **This doc named `zeroship-plugin-db`'s `mask_flip.rs` until
@@ -408,12 +408,10 @@ mod tests {
 
     #[test]
     fn parse_encryption_sentinel_rejects_missing_prefix() {
-        assert!(
-            parse_encryption_sentinel("randomised:default:string")
-                .unwrap_err()
-                .message()
-                .contains("enc_sentinel_malformed")
-        );
+        assert!(parse_encryption_sentinel("randomised:default:string")
+            .unwrap_err()
+            .message()
+            .contains("enc_sentinel_malformed"));
     }
 
     #[test]

@@ -8,7 +8,7 @@
 //! must not carry a family for a feature that no longer exists". That is
 //! checked rather than trusted - `to_tsquery`, `tsvector`, `ts_rank`,
 //! `plainto_tsquery`, `websearch_to_tsquery`, `fts5` and `bm25` appear nowhere
-//! in `crates/zeroship-schema/src/query.rs`,
+//! in `crates/zeroship-data-query-builder/src/compile.rs`,
 //! `crates/zeroship-plugin-db/src/` or `sdks/db/src/` (swept 2026-08-28); the
 //! only occurrences in the tree are in `docs/archive/` and in the removal notes
 //! at `crates/zeroship-migrate-core/src/render/declarative.rs:1824-1831`.
@@ -66,7 +66,7 @@
 //! * the SDK validates `1..=1000` (`sdks/db/src/collection/vector-geo.ts:22-35`,
 //!   error `INVALID_K`);
 //! * the `PostgreSQL` builder refuses over `MAX_SEARCH_LIMIT = 500`
-//!   (`crates/zeroship-schema/src/query.rs:597`, enforced at `:4964`);
+//!   (`crates/zeroship-data-query-builder/src/compile.rs:597`, enforced at `:4964`);
 //! * the `SQLite` arm has **no cap at all** - `build_vector_search_sql` never
 //!   calls the validator and formats `k` straight into the statement
 //!   (`crates/zeroship-data-sqlite/src/vector.rs:117`).
@@ -77,7 +77,7 @@
 //! and `MAX_QUERY_LIMIT` are the same number - and it has **no absent value**,
 //! so the two different caller-side defaults (`k` defaults to 10 at
 //! `crates/zeroship-data-engine/src/crud/mod.rs:2138`, `near.limit` defaults to
-//! 100 at `crates/zeroship-schema/src/query.rs:5058`) have nowhere to live.
+//! 100 at `crates/zeroship-data-query-builder/src/compile.rs:5058`) have nowhere to live.
 
 use crate::ident::Ident;
 use crate::literal::{Finite, LiteralError, QueryVector};
@@ -102,7 +102,7 @@ pub const MAX_RADIUS_METRES: f64 = 20_037_508.342_789_244;
 /// All three are ordered *smaller is better*, which is why
 /// [`Self::InnerProduct`] is the **negative** inner product rather than the
 /// inner product: it is what lets one ascending sort rank every metric
-/// (`crates/zeroship-schema/src/descriptors.rs:31-35`).
+/// (`crates/zeroship-data-query-builder/src/descriptors.rs:31-35`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum VectorMetric {
     Cosine,
@@ -134,7 +134,7 @@ impl VectorMetric {
 /// numbers are trivially transposable and neither the type system nor
 /// `PostGIS` will catch it: `ST_MakePoint` takes `(x, y)` = `(lng, lat)`, the
 /// inverse of the `{lat, lng}` order the SDK and the Rust trait use
-/// (`crates/zeroship-schema/src/query.rs:5030-5037`). A transposed pair inside
+/// (`crates/zeroship-data-query-builder/src/compile.rs:5030-5037`). A transposed pair inside
 /// both valid ranges - `(45, 45)` - is a different place on Earth and no error
 /// anywhere.
 ///
@@ -276,7 +276,7 @@ impl SearchCriterion {
 ///
 /// The shipped builders already carry the seam this closes: the vector arm
 /// orders by re-emitting the distance expression
-/// (`crates/zeroship-schema/src/query.rs:5013`) while the geo arm orders by the
+/// (`crates/zeroship-data-query-builder/src/compile.rs:5013`) while the geo arm orders by the
 /// output alias (`:5082`). Two spellings of one concept, in two functions
 /// forty lines apart.
 ///
@@ -314,7 +314,11 @@ impl Search {
     /// appends the criterion's scalar itself, so a caller neither spells the
     /// synthetic alias nor can omit it.
     #[must_use]
-    pub fn builder(collection: Ident, criterion: SearchCriterion, projection: Projection) -> SearchBuilder {
+    pub fn builder(
+        collection: Ident,
+        criterion: SearchCriterion,
+        projection: Projection,
+    ) -> SearchBuilder {
         SearchBuilder {
             namespace: None,
             collection,
@@ -492,17 +496,27 @@ pub enum SearchError {
     /// range failure and never reaches these variants - it is refused one step
     /// earlier as [`SearchError::Literal`], because every comparison against
     /// NaN is false and a range check alone would pass it.
-    LatitudeOutOfRange { degrees: Finite },
-    LongitudeOutOfRange { degrees: Finite },
-    RadiusOutOfRange { metres: Finite },
+    LatitudeOutOfRange {
+        degrees: Finite,
+    },
+    LongitudeOutOfRange {
+        degrees: Finite,
+    },
+    RadiusOutOfRange {
+        metres: Finite,
+    },
     /// The filter was nested past [`MAX_PREDICATE_DEPTH`].
-    FilterTooDeep { depth: usize },
+    FilterTooDeep {
+        depth: usize,
+    },
     /// An aggregate operand appeared in a search's filter.
     AggregateInFilter,
     /// An aggregate projection was offered to a search.
     AggregateProjection,
     /// A tiebreak key named the ranking scalar.
-    TiebreakNamesTheScalar { alias: &'static str },
+    TiebreakNamesTheScalar {
+        alias: &'static str,
+    },
     /// The scalar could not be added to the projection.
     Projection(ProjectionError),
     /// A limit outside the shared row bound. Re-exported from [`PlanError`] so
@@ -521,11 +535,9 @@ impl fmt::Display for SearchError {
                  (longitude, latitude), so a transposed pair is a common cause",
                 degrees.get()
             ),
-            Self::LongitudeOutOfRange { degrees } => write!(
-                f,
-                "a longitude of {} is outside -180..=180",
-                degrees.get()
-            ),
+            Self::LongitudeOutOfRange { degrees } => {
+                write!(f, "a longitude of {} is outside -180..=180", degrees.get())
+            }
             Self::RadiusOutOfRange { metres } => write!(
                 f,
                 "a radius of {} m is not in 0 < r <= {MAX_RADIUS_METRES}, the antipodal \

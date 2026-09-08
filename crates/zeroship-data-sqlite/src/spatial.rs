@@ -38,8 +38,8 @@
 //! is the canonical layout. A big-endian target would silently swap
 //! the byte order on read — this module does not handle that case.
 
-use zeroship_schema::descriptors::GeoPoint;
 use zeroship_data_core::error::DbError;
+use zeroship_data_query_builder::descriptors::GeoPoint;
 
 /// Earth's mean radius in metres (IUGG / WGS84 standard). The
 /// haversine formula treats Earth as a perfect sphere — actual

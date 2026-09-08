@@ -30,12 +30,12 @@ impl DialectBuilder for SqliteDialect {
     // impl and the one on `SqliteBackend` were `error[E0046]: not all trait
     // items implemented, missing: sql_dialect` in any build that turned on
     // `zeroship-data-core/test-helpers` without this crate's own feature.
-    fn sql_dialect(&self) -> zeroship_schema::query::SqlDialect {
-        zeroship_schema::query::SqlDialect::Sqlite
+    fn sql_dialect(&self) -> zeroship_data_query_builder::compile::SqlDialect {
+        zeroship_data_query_builder::compile::SqlDialect::Sqlite
     }
 
     /// Double-quote the identifier, escaping any embedded `"` by
-    /// doubling. Matches `zeroship_schema::query::quote_ident` (the PG-side
+    /// doubling. Matches `zeroship_data_query_builder::compile::quote_ident` (the PG-side
     /// helper) — SQLite's identifier-quoting rules are a superset of
     /// PG's in this regard (both support the `"…""…"` escape).
     ///
@@ -74,7 +74,7 @@ impl DialectBuilder for SqliteDialect {
             // `t.encrypted(...)`-declared columns always
             // store the ciphertext wire blob (`[version_flag | nonce |
             // ct+tag]`) as BLOB regardless of `wraps`. The DDL emitter
-            // (`zeroship_schema::query::field_to_column`) inspects `def.encrypted`
+            // (`zeroship_data_query_builder::compile::field_to_column`) inspects `def.encrypted`
             // BEFORE calling `map_zs_type` and shortcuts to BLOB on the
             // SQLite arm — but if a future path reaches this branch
             // with `zs_type = "encrypted"`, BLOB is the safe answer.

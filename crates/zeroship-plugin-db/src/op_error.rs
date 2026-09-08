@@ -317,44 +317,32 @@ mod tests {
                 other => panic!("expected CodedError, got {other:?}"),
             }
         }
-        assert!(
-            op_hint(DbError::Serialization {
-                message: "x".into()
-            })
-            .is_some()
-        );
-        assert!(
-            op_hint(DbError::Transient {
-                message: "x".into()
-            })
-            .is_some()
-        );
+        assert!(op_hint(DbError::Serialization {
+            message: "x".into()
+        })
+        .is_some());
+        assert!(op_hint(DbError::Transient {
+            message: "x".into()
+        })
+        .is_some());
         // LockContention is retriable — must also carry a hint.
-        assert!(
-            op_hint(DbError::LockContention {
-                message: "x".into()
-            })
-            .is_some()
-        );
+        assert!(op_hint(DbError::LockContention {
+            message: "x".into()
+        })
+        .is_some());
         // Non-retryable violations must not advise a retry.
-        assert!(
-            op_hint(DbError::UniqueViolation {
-                message: "x".into()
-            })
-            .is_none()
-        );
-        assert!(
-            op_hint(DbError::FkViolation {
-                message: "x".into()
-            })
-            .is_none()
-        );
-        assert!(
-            op_hint(DbError::Internal {
-                message: "x".into()
-            })
-            .is_none()
-        );
+        assert!(op_hint(DbError::UniqueViolation {
+            message: "x".into()
+        })
+        .is_none());
+        assert!(op_hint(DbError::FkViolation {
+            message: "x".into()
+        })
+        .is_none());
+        assert!(op_hint(DbError::Internal {
+            message: "x".into()
+        })
+        .is_none());
     }
 
     /// The helper returns the first element of a non-empty slice. The
@@ -556,15 +544,15 @@ mod tests {
     fn from_query_error_assigns_distinct_codes() {
         let cases = [
             (
-                crate::query::QueryError::InvalidFilter("bad".into()),
+                crate::compile::QueryError::InvalidFilter("bad".into()),
                 "invalid_filter",
             ),
             (
-                crate::query::QueryError::InvalidCollection("bad".into()),
+                crate::compile::QueryError::InvalidCollection("bad".into()),
                 "invalid_collection",
             ),
             (
-                crate::query::QueryError::InvalidIdent("bad".into()),
+                crate::compile::QueryError::InvalidIdent("bad".into()),
                 "invalid_identifier",
             ),
         ];
@@ -585,8 +573,9 @@ mod tests {
     /// the seven system fields.
     #[test]
     fn from_query_error_reserved_system_field_carries_hint() {
-        let qe =
-            crate::query::QueryError::ReservedSystemFieldName("Field name 'id' is reserved".into());
+        let qe = crate::compile::QueryError::ReservedSystemFieldName(
+            "Field name 'id' is reserved".into(),
+        );
         let db = DbError::from(qe);
         match db {
             DbError::ValidationFailed { code, hint, .. } => {
@@ -612,7 +601,7 @@ mod tests {
     }
 
     /// Relocated from `query.rs`'s test module
-    /// (which moved to the leaf crate `zeroship-schema`, where `DbError`
+    /// (which moved to the leaf crate `zeroship-data-query-builder`, where `DbError`
     /// is not nameable). Pins the end-to-end lift: the schema-crate
     /// validator `validate_field_name_for_declaration` rejects a reserved
     /// system field, and `From<QueryError> for DbError` (which lives here)
@@ -620,13 +609,13 @@ mod tests {
     /// system fields. Behaviour-identical to the pre-extraction test.
     #[test]
     fn system_field_reservation_error_carries_correct_code() {
-        let err = crate::query::validate_field_name_for_declaration("id").unwrap_err();
+        let err = crate::compile::validate_field_name_for_declaration("id").unwrap_err();
         let db_err = DbError::from(err);
         match db_err {
             DbError::ValidationFailed { code, hint, .. } => {
                 assert_eq!(code, "reserved_system_field_name");
                 let hint = hint.expect("reservation hint required for SDK remediation");
-                for name in crate::query::SYSTEM_FIELD_NAMES {
+                for name in crate::compile::SYSTEM_FIELD_NAMES {
                     assert!(
                         hint.contains(name),
                         "reservation hint must list all 7 system fields; missing {name:?}"
@@ -643,7 +632,7 @@ mod tests {
     /// code with a hint listing the three write-once names.
     #[test]
     fn from_query_error_immutable_system_field_carries_hint() {
-        let qe = crate::query::QueryError::ImmutableSystemField(
+        let qe = crate::compile::QueryError::ImmutableSystemField(
             "UPDATE patch attempted to overwrite immutable system field `id`".into(),
         );
         let db = DbError::from(qe);

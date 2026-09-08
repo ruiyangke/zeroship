@@ -20,7 +20,7 @@
 //!
 //! # What this type deliberately does NOT have
 //!
-//! Following `zeroship_schema::schema_name::SchemaName`, which was defined the
+//! Following `zeroship_data_query_builder::schema_name::SchemaName`, which was defined the
 //! same way and for the same reason, this type is characterised by its
 //! ABSENCES. Each one is a named failure it exists to prevent.
 //!
@@ -93,7 +93,7 @@ use core::fmt;
 use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::typed_id::{self, APP_PREFIX, ParseError};
+use crate::typed_id::{self, ParseError, APP_PREFIX};
 
 /// The typed id of one creator app: `app_<base62(uuidv7)>`.
 ///
@@ -323,7 +323,10 @@ mod tests {
     impl_probe!(probe_as_ref_str, ::core::convert::AsRef<str>);
     impl_probe!(probe_borrow_str, ::core::borrow::Borrow<str>);
     impl_probe!(probe_from_str_ref, ::core::convert::From<&'static str>);
-    impl_probe!(probe_from_string, ::core::convert::From<::std::string::String>);
+    impl_probe!(
+        probe_from_string,
+        ::core::convert::From<::std::string::String>
+    );
     impl_probe!(probe_partial_eq_str, ::core::cmp::PartialEq<str>);
 
     /// The absences the module doc names, asserted mechanically.
@@ -672,6 +675,9 @@ mod tests {
             second.as_str(),
             first.as_str()
         );
-        assert!(second.as_str() > first.as_str(), "and by the printed id too");
+        assert!(
+            second.as_str() > first.as_str(),
+            "and by the printed id too"
+        );
     }
 }

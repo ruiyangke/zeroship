@@ -74,10 +74,7 @@ use zeroship_data_core::error::DbError;
 /// a read served before the schema arrived returned every physical column and
 /// accepted any field name. A collection the descriptor does not declare is not
 /// a collection this isolate can serve, and saying so is the whole fix.
-pub fn collection_schema(
-    binding: &DbBinding,
-    collection: &str,
-) -> Result<Arc<Value>, DbError> {
+pub fn collection_schema(binding: &DbBinding, collection: &str) -> Result<Arc<Value>, DbError> {
     zeroship_data_core::schema_cache::with(|c| c.require(binding, collection))
 }
 
@@ -118,12 +115,12 @@ mod tests {
         let pinned = DbBinding::new(
             "app_two_deploys",
             "deploy_pinned",
-            zeroship_schema::SchemaName::new("app_two_deploys").unwrap(),
+            zeroship_data_query_builder::SchemaName::new("app_two_deploys").unwrap(),
         );
         let current = DbBinding::new(
             "app_two_deploys",
             "deploy_current",
-            zeroship_schema::SchemaName::new("app_two_deploys").unwrap(),
+            zeroship_data_query_builder::SchemaName::new("app_two_deploys").unwrap(),
         );
         zeroship_data_core::schema_cache::with_mut(|c| {
             c.insert_one(
