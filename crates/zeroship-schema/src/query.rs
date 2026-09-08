@@ -639,7 +639,7 @@ pub fn effective_query_limit(explicit: Option<i64>) -> i64 {
 }
 
 /// Platform-owned collection prefixes mirrored by every collection validator.
-pub(crate) const PLATFORM_RESERVED_COLLECTION_PREFIXES: &[&str] = &["__zero_migrate", "__zeroship"];
+pub(crate) const PLATFORM_RESERVED_COLLECTION_PREFIXES: &[&str] = &["__zeroship"];
 
 /// Catalog prefixes owned by the backends the runtime can address.
 ///
@@ -669,7 +669,7 @@ fn reserved_backend_catalog_prefix(name: &str) -> Option<(&'static str, &'static
 /// - Must not start with a shipping backend's catalog prefix
 ///   (case-insensitive).
 /// - Must not start with a platform-owned prefix (case-insensitive):
-///   `__zero_migrate` or `__zeroship`.
+///   `__zeroship`.
 pub fn validate_collection(name: &str) -> Result<(), QueryError> {
     if name.is_empty() {
         return Err(QueryError::InvalidCollection(
@@ -11038,23 +11038,37 @@ mod tests {
         }
     }
 
-    /// Names starting with `__zero_migrate` (any case) must be rejected.
+    /// `__zero_migrate` is NOT reserved, and `__zeroship` is. Both halves,
+    /// because either alone reads as an accident.
+    ///
+    /// This asserted the opposite until 2026-09-07. The prefix was fencing an
+    /// empty namespace: the engine's journal tables are `__zeroship_schema_*`,
+    /// and the one live object carrying the token is the SQLite rebuild table,
+    /// named `{table}__zero_migrate_rebuild` - a SUFFIX, which a prefix list
+    /// cannot cover.
     #[test]
-    fn validate_collection_rejects_zero_migrate_prefix() {
-        for name in &[
-            "__zero_migrate_migrations",
-            "__ZERO_MIGRATE_audit",
-            "__zero_migrate",
-        ] {
+    fn the_collection_fence_reserves_zeroship_and_not_zero_migrate() {
+        let mut ruled_on = 0_usize;
+        for name in ["__zero_migrate_migrations", "__ZERO_MIGRATE_audit", "__zero_migrate"] {
+            assert!(
+                validate_collection(name).is_ok(),
+                "'{name}' is refused, but nothing is named with that prefix"
+            );
+            ruled_on += 1;
+        }
+        for name in ["__zeroship_schema_migrations", "__ZEROSHIP_audit", "__zeroship"] {
             let err = validate_collection(name).unwrap_err();
             match err {
                 QueryError::InvalidCollection(msg) => assert!(
-                    msg.contains("__zero_migrate") || msg.contains("reserved"),
+                    msg.contains("__zeroship") || msg.contains("reserved"),
                     "for '{name}': {msg}"
                 ),
                 other => panic!("expected InvalidCollection for '{name}', got {other:?}"),
             }
+            ruled_on += 1;
         }
+        assert_eq!(ruled_on, 6);
+        println!("ruled on {ruled_on} collection names");
     }
 
     #[test]
