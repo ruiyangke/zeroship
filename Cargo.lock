@@ -7262,7 +7262,6 @@ dependencies = [
  "tracing",
  "uuid",
  "zeroship-core",
- "zeroship-test-support",
  "zeroship-testkit",
 ]
 
