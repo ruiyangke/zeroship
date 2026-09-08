@@ -254,13 +254,11 @@ macro_rules! declare_entity_id {
                 assert!(probe_borrow_str::Probe::<String>::IMPLEMENTED);
                 assert!(probe_from_str_ref::Probe::<String>::IMPLEMENTED);
                 assert!(probe_from_string::Probe::<String>::IMPLEMENTED);
-                // This control was MISSING until 2026-09-08: eight absences were
-                // asserted and seven controlled, so `partial_eq_str` was the one
-                // probe that could have broken into answering `false`
-                // unconditionally and still printed exactly what a correct run
-                // prints. The imbalance is invisible by reading - both lists are
-                // long and neither is ordered - which is why the fix is a control
-                // rather than a comment.
+                // Every absence above needs a control here. A probe broken into
+                // answering `false` unconditionally prints exactly what a correct
+                // run prints, and the imbalance is invisible by reading: both
+                // lists are long and neither is ordered. Count them, do not scan
+                // them.
                 assert!(probe_partial_eq_str::Probe::<String>::IMPLEMENTED);
             }
 
@@ -291,10 +289,8 @@ macro_rules! declare_entity_id {
             /// defeatable by a real inherent method rather than unconditionally
             /// true.
             ///
-            /// Lived only in `crate::app_id`'s own tests until 2026-09-08, so
-            /// the macro-declared ids asserted nothing of the kind. It moved
-            /// here rather than being copied, because `AppId` adopting the macro
-            /// the same week would otherwise have deleted it with no compile
+            /// It belongs to the macro rather than to any one id's own tests: a
+            /// copy per type is a copy that can be deleted with no compile
             /// error, no gate failure and no diff line saying a test went.
             #[test]
             fn there_is_no_inherent_as_bytes() {

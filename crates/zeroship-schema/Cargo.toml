@@ -8,9 +8,6 @@ description = "Vendor-neutral schema-authority core — DDL builders, diff class
 # Schema-shape values (`Value`) flow through every DDL builder + the diff
 # classifier.
 serde_json = { workspace = true }
-# `zeroship-core` is the inter-service / typed-id leaf; depending on it keeps
-# this crate at the same trust layer (no v8, no runtime).
-zeroship-core = { workspace = true }
 # `sha2` produces the deterministic 10-char hex fingerprint the identifier
 # cap appends when a DERIVED name exceeds the 63-byte NAMEDATALEN limit
 # (`ident::cap_ident_name`, the crate's only such site). This is a NAME-hashing use
@@ -20,6 +17,16 @@ zeroship-core = { workspace = true }
 sha2 = { workspace = true }
 
 [dev-dependencies]
+# DEV ONLY, and it must stay that way. This crate's production code names
+# nothing from `zeroship-core`; the sole reference is
+# `zeroship_core::typed_id::USER_PREFIX` inside `query.rs`'s `#[cfg(test)] mod
+# reserved_id_prefix_parity`. As a normal dependency the edge links aes-gcm,
+# ed25519-dalek, jsonwebtoken and an HTTP client into a crate whose description
+# says "no database driver, v8, runtime, or crypto".
+#
+# Keep the test rather than dropping the edge with it: it is the only binding
+# between the platform's user-id prefix and this crate's reserved list.
+zeroship-core = { workspace = true }
 # Test-only parity edges: the production crates stay separated by the migration
 # engine boundary, while this suite compares the accept/refuse behavior they run.
 zeroship-data-query-builder = { workspace = true }

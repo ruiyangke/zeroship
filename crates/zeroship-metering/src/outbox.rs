@@ -613,13 +613,12 @@ struct PendingWalEvent {
 /// event is published and then removed on success; an undecodable one can never
 /// be published, so retaining it means the next read meets it again.
 ///
-/// **`load_pending` aborted the whole read on the first undecodable entry until
-/// 2026-09-08**, with a `?` on the decode inside the iteration. One malformed
-/// record therefore stopped the process publishing ANY usage, permanently,
-/// behind a caller log line reading "events stay in the WAL for the next
-/// attempt" - which is true, and reads as a healthy retry. The Kafka side has
-/// carried a dead-letter path for this shape for some time; the producer-side
-/// WAL had none.
+/// **`load_pending` must never abort the read on an undecodable entry.** A `?`
+/// on the decode inside the iteration lets one malformed record stop the process
+/// publishing ANY usage, permanently, behind a caller log line reading "events
+/// stay in the WAL for the next attempt" - which is true, and reads as a healthy
+/// retry. The Kafka side carries a dead-letter path for this shape; this is the
+/// producer side's.
 #[derive(Debug, Default)]
 struct LoadedWal {
     pending: Vec<PendingWalEvent>,
@@ -1386,13 +1385,12 @@ mod tests {
 
     /// One undecodable row must not stop the healthy rows beside it.
     ///
-    /// `load_pending` aborted the whole read on the first decode failure until
-    /// 2026-09-08, so a single malformed record stopped the process publishing
-    /// ANY usage, permanently, behind a caller log line reading "events stay in
-    /// the WAL for the next attempt" - true, and indistinguishable from a
-    /// healthy retry. Restoring the `?` on the decode makes this test fail by
-    /// returning `Err` rather than by losing the event, which is the shape the
-    /// defect actually had.
+    /// A `?` on the decode inside `load_pending` aborts the whole read, so a
+    /// single malformed record stops the process publishing ANY usage,
+    /// permanently, behind a caller log line reading "events stay in the WAL for
+    /// the next attempt" - true, and indistinguishable from a healthy retry.
+    /// Reintroducing that `?` makes this test fail by returning `Err` rather
+    /// than by losing the event, which is the shape the defect takes.
     ///
     /// The poisoned payload is injected through the same table `append` writes,
     /// because the reachable way to get one is a shape change to `UsageEvent` -
