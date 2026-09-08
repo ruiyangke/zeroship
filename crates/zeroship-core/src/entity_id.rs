@@ -256,6 +256,84 @@ macro_rules! declare_entity_id {
                 assert!(probe_borrow_str::Probe::<String>::IMPLEMENTED);
                 assert!(probe_from_str_ref::Probe::<String>::IMPLEMENTED);
                 assert!(probe_from_string::Probe::<String>::IMPLEMENTED);
+                // This control was MISSING until 2026-09-08: eight absences were
+                // asserted and seven controlled, so `partial_eq_str` was the one
+                // probe that could have broken into answering `false`
+                // unconditionally and still printed exactly what a correct run
+                // prints. The imbalance is invisible by reading - both lists are
+                // long and neither is ordered - which is why the fix is a control
+                // rather than a comment.
+                assert!(probe_partial_eq_str::Probe::<String>::IMPLEMENTED);
+            }
+
+            /// Sentinel returned by the blanket fallback below. A receiver that
+            /// has its OWN inherent `as_bytes` resolves to that instead, and the
+            /// binding stops compiling.
+            struct NoInherentAsBytes;
+
+            trait AsBytesFallback {
+                fn as_bytes(&self) -> NoInherentAsBytes {
+                    NoInherentAsBytes
+                }
+            }
+
+            impl<T> AsBytesFallback for T {}
+
+            /// No route to the bits, asserted mechanically rather than promised.
+            ///
+            /// The macro's `parse` discards the decoded uuid deliberately, and
+            /// this is what holds that open: an inherent `as_bytes` would be a
+            /// route to the 128 bits, and a value derived from those bits does
+            /// not move when the printed form does - which is what makes such a
+            /// derivation fail quietly rather than loudly.
+            ///
+            /// PAIRED WITH A CONTROL, and the control is `uuid::Uuid` on
+            /// purpose: its inherent `as_bytes` wins over the blanket fallback
+            /// at the same autoref step, so the second half proves the shadow is
+            /// defeatable by a real inherent method rather than unconditionally
+            /// true.
+            ///
+            /// Lived only in `crate::app_id`'s own tests until 2026-09-08, so
+            /// the three macro-declared ids asserted nothing of the kind. It
+            /// moved here rather than being copied, because `AppId` adopting the
+            /// macro would otherwise delete it with no compile error, no gate
+            /// failure and no diff line saying a test went.
+            #[test]
+            fn there_is_no_inherent_as_bytes() {
+                let id = $name::mint();
+                let _: NoInherentAsBytes = id.as_bytes();
+
+                let control = ::uuid::Uuid::nil();
+                let raw: &[u8; 16] = control.as_bytes();
+                assert_eq!(raw, &[0u8; 16]);
+            }
+
+            /// The id survives a serde MAP KEY position, and a uuid-shaped key
+            /// is a decode failure rather than a dropped entry.
+            ///
+            /// A map key is the position where a wrong shape is quietest: serde
+            /// reports a bad key as an error only if the key type refuses it, and
+            /// a `String` key would accept anything. This is the only map-key
+            /// position test in the tree.
+            #[test]
+            fn works_as_a_serde_map_key_and_refuses_a_uuid_shaped_one() {
+                let mut map = ::std::collections::BTreeMap::new();
+                let id = $name::mint();
+                map.insert(id.clone(), 7u8);
+
+                let json = ::serde_json::to_string(&map).expect("serializes as a map key");
+                assert_eq!(json, format!("{{\"{}\":7}}", id.as_str()));
+
+                let back: ::std::collections::BTreeMap<$name, u8> =
+                    ::serde_json::from_str(&json).expect("round trips");
+                assert_eq!(back, map);
+
+                let uuid_keyed = "{\"0191e7a2-b3c4-4d5e-8f90-123456789abc\":7}";
+                assert!(
+                    ::serde_json::from_str::<::std::collections::BTreeMap<$name, u8>>(uuid_keyed)
+                        .is_err(),
+                    "a uuid-shaped key must be a decode failure, not a dropped entry"
+                );
             }
 
             #[test]

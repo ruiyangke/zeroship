@@ -7447,6 +7447,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
+ "xxhash-rust",
  "zeroize",
  "zeroship-bundle",
  "zeroship-config-contract",

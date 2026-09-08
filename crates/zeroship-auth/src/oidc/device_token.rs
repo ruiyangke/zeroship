@@ -34,7 +34,9 @@ const INITIAL_POLL_INTERVAL_SECS: i32 = 5;
 const USER_CODE_ATTEMPTS: usize = 8;
 const DEFAULT_DEVICE_SCOPE: &str = "openid";
 const PLATFORM_CLI_CLIENT_NAME: &str = "zeroship CLI";
-pub(crate) use zeroship_core::device_grant::{OP_PROVIDER as OP_DEVICE_PROVIDER, PLATFORM_PROVIDER};
+pub(crate) use zeroship_core::device_grant::{
+    OP_PROVIDER as OP_DEVICE_PROVIDER, PLATFORM_PROVIDER,
+};
 
 fn platform_cli_redirect_uris() -> Vec<String> {
     Vec::new()
@@ -95,9 +97,7 @@ async fn platform_cli_registration_is_exact(
 ///
 /// The fixed row is also checked at device authorization and redemption. This
 /// startup reconciliation is availability plumbing, not the policy boundary.
-pub async fn reconcile_platform_cli_client(
-    db: &(impl GenericClient + ?Sized),
-) -> AuthResult<()> {
+pub async fn reconcile_platform_cli_client(db: &(impl GenericClient + ?Sized)) -> AuthResult<()> {
     let redirects = platform_cli_redirect_uris();
     let scopes = platform_cli_scopes();
     let updated = db
@@ -152,7 +152,10 @@ pub(super) async fn platform_cli_policy_selected(
     match platform_cli_registration_is_exact(db).await {
         Ok(true) => Ok(true),
         Ok(false) => {
-            tracing::error!(client_id, "platform CLI registration is not the fixed policy");
+            tracing::error!(
+                client_id,
+                "platform CLI registration is not the fixed policy"
+            );
             Err(OAuthError::server_error("client misconfigured"))
         }
         Err(err) => {
@@ -291,7 +294,12 @@ async fn device_authorization_inner(
         ));
     }
 
-    let requested_scopes = match params.scope.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    let requested_scopes = match params
+        .scope
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         Some(scope) => parse_scopes(scope),
         None => vec![DEFAULT_DEVICE_SCOPE.to_string()],
     };
@@ -335,7 +343,8 @@ async fn device_authorization_inner(
             })?;
         if inserted.is_some() {
             let verification_uri = format!("{}/device", cfg.public_url());
-            let verification_uri_complete = verification_uri_complete(&verification_uri, &user_code);
+            let verification_uri_complete =
+                verification_uri_complete(&verification_uri, &user_code);
             return Ok(DeviceAuthorizationResponse {
                 device_code,
                 user_code,
@@ -526,7 +535,10 @@ async fn exchange_device_code_locked(
             OAuthError::server_error("device token store unavailable")
         })?;
     let Some(row) = row else {
-        return Err(device_error("expired_token", "device code is invalid or expired"));
+        return Err(device_error(
+            "expired_token",
+            "device code is invalid or expired",
+        ));
     };
 
     let status: String = row.get("status");
@@ -558,7 +570,10 @@ async fn exchange_device_code_locked(
                 tracing::error!(error = %err, "device token: slow_down stamp failed");
                 OAuthError::server_error("device token store unavailable")
             })?;
-            return Err(device_error("slow_down", "device code was polled too quickly"));
+            return Err(device_error(
+                "slow_down",
+                "device code was polled too quickly",
+            ));
         }
     }
 
@@ -582,7 +597,10 @@ async fn exchange_device_code_locked(
         }
         "denied" => {
             delete_device_grant(db, device_code_hash).await?;
-            Err(device_error("access_denied", "device authorization was denied"))
+            Err(device_error(
+                "access_denied",
+                "device authorization was denied",
+            ))
         }
         "approved" => {
             let Some(user_id) = row.get::<_, Option<Uuid>>("principal_id") else {
@@ -590,16 +608,14 @@ async fn exchange_device_code_locked(
                 return Err(OAuthError::server_error("device grant is incomplete"));
             };
             let auth_credential_version: i64 = row.get("auth_credential_version");
-            lock_refresh_user_xact(db, user_id)
-                .await
-                .map_err(|err| {
-                    tracing::error!(
-                        error = %err,
-                        user_id = %user_id,
-                        "device token: user lock failed"
-                    );
-                    OAuthError::server_error("device token validation unavailable")
-                })?;
+            lock_refresh_user_xact(db, user_id).await.map_err(|err| {
+                tracing::error!(
+                    error = %err,
+                    user_id = %user_id,
+                    "device token: user lock failed"
+                );
+                OAuthError::server_error("device token validation unavailable")
+            })?;
             let owner = db
                 .query(
                     "SELECT 1 FROM zeroship.users \
@@ -683,15 +699,17 @@ async fn exchange_device_code_locked(
                 db,
                 issuer,
                 &refresh::session_keys(cfg)?,
-                client,
-                user_id,
-                &granted_scopes,
-                auth_credential_version,
-                SessionKind::Cli,
-                granted_scopes
-                    .iter()
-                    .any(|scope| scope == OFFLINE_ACCESS_SCOPE)
-                    && client.refresh_allowed,
+                &refresh::Establish {
+                    client,
+                    user_id,
+                    granted_scopes: &granted_scopes,
+                    auth_credential_version,
+                    kind: SessionKind::Cli,
+                    with_secret: granted_scopes
+                        .iter()
+                        .any(|scope| scope == OFFLINE_ACCESS_SCOPE)
+                        && client.refresh_allowed,
+                },
             )
             .await?;
             let access_token = mint_grant_access_token(
@@ -763,11 +781,7 @@ fn authenticate_device_client(
     Ok(())
 }
 
-fn oauth_error(
-    status: StatusCode,
-    error: &'static str,
-    description: &'static str,
-) -> OAuthError {
+fn oauth_error(status: StatusCode, error: &'static str, description: &'static str) -> OAuthError {
     OAuthError {
         status,
         error,

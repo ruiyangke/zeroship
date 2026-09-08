@@ -43,8 +43,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route(web::post().to(device_token::device_authorization)),
     )
     .service(
-        web::resource(zeroship_core::device_grant::TOKEN_PATH)
-            .route(web::post().to(token_post)),
+        web::resource(zeroship_core::device_grant::TOKEN_PATH).route(web::post().to(token_post)),
     );
     refresh::configure(cfg);
 }
@@ -253,7 +252,14 @@ pub async fn authorize_get(
     db: web::types::State<Arc<Client>>,
     issuer: web::types::State<Arc<Issuer>>,
 ) -> HttpResponse {
-    authorize(req, query.into_inner(), cfg.as_ref(), db.as_ref(), issuer.as_ref()).await
+    authorize(
+        req,
+        query.into_inner(),
+        cfg.as_ref(),
+        db.as_ref(),
+        issuer.as_ref(),
+    )
+    .await
 }
 
 #[allow(clippy::future_not_send)]
@@ -264,7 +270,14 @@ pub async fn authorize_post(
     db: web::types::State<Arc<Client>>,
     issuer: web::types::State<Arc<Issuer>>,
 ) -> HttpResponse {
-    authorize(req, form.into_inner(), cfg.as_ref(), db.as_ref(), issuer.as_ref()).await
+    authorize(
+        req,
+        form.into_inner(),
+        cfg.as_ref(),
+        db.as_ref(),
+        issuer.as_ref(),
+    )
+    .await
 }
 
 #[allow(clippy::future_not_send)]
@@ -304,7 +317,9 @@ async fn authorize_inner(
         .iter()
         .any(|registered| registered == redirect_uri)
     {
-        return Err(OAuthError::invalid_request("redirect_uri is not registered"));
+        return Err(OAuthError::invalid_request(
+            "redirect_uri is not registered",
+        ));
     }
 
     let return_to = return_to::request_target(req);
@@ -349,9 +364,11 @@ async fn authorize_inner(
         }
         return authorization_error_see_other(&auth_request, issuer, "invalid_request");
     }
-    if let Err(err) = require_eq(params.code_challenge_method.as_deref(), PKCE_METHOD_S256, || {
-        OAuthError::invalid_request("code_challenge_method must be S256")
-    }) {
+    if let Err(err) = require_eq(
+        params.code_challenge_method.as_deref(),
+        PKCE_METHOD_S256,
+        || OAuthError::invalid_request("code_challenge_method must be S256"),
+    ) {
         if prompt.none {
             return prompt_none_error_see_other(&auth_request, issuer, "invalid_request");
         }
@@ -691,14 +708,23 @@ async fn exchange_authorization_code(
     };
 
     if consumed.client_id != client.client_id || consumed.redirect_uri != redirect_uri {
-        return Err(OAuthError::invalid_grant("authorization code binding mismatch"));
+        return Err(OAuthError::invalid_grant(
+            "authorization code binding mismatch",
+        ));
     }
     if consumed.pkce_method != PKCE_METHOD_S256
         || !zeroship_core::pkce::verify_s256(code_verifier, &consumed.pkce_challenge)
     {
         return Err(OAuthError::invalid_grant("pkce verification failed"));
     }
-    if !consent_covers(db, consumed.user_id, &client.client_id, &consumed.granted_scopes).await? {
+    if !consent_covers(
+        db,
+        consumed.user_id,
+        &client.client_id,
+        &consumed.granted_scopes,
+    )
+    .await?
+    {
         return Err(OAuthError::invalid_grant("consent no longer covers grant"));
     }
 
@@ -716,13 +742,18 @@ async fn exchange_authorization_code(
         db,
         issuer,
         &refresh::session_keys(cfg)?,
-        client,
-        consumed.user_id,
-        &consumed.granted_scopes,
-        consumed.auth_credential_version,
-        SessionKind::Browser,
-        consumed.granted_scopes.iter().any(|scope| scope == "offline_access")
-            && client.refresh_allowed,
+        &refresh::Establish {
+            client,
+            user_id: consumed.user_id,
+            granted_scopes: &consumed.granted_scopes,
+            auth_credential_version: consumed.auth_credential_version,
+            kind: SessionKind::Browser,
+            with_secret: consumed
+                .granted_scopes
+                .iter()
+                .any(|scope| scope == "offline_access")
+                && client.refresh_allowed,
+        },
     )
     .await?;
     let refresh_token = established.secret;
@@ -739,7 +770,11 @@ async fn exchange_authorization_code(
     )
     .await?;
 
-    let id_token = if consumed.granted_scopes.iter().any(|scope| scope == "openid") {
+    let id_token = if consumed
+        .granted_scopes
+        .iter()
+        .any(|scope| scope == "openid")
+    {
         let nonce = consumed
             .nonce
             .as_deref()
@@ -1032,9 +1067,7 @@ pub(crate) async fn persist_consent_grant(
             &[&user_id, &client_id],
         )
         .await
-        .map_err(|err| {
-            format!("oauth grant lookup failed: {err}")
-        })?;
+        .map_err(|err| format!("oauth grant lookup failed: {err}"))?;
     let mut granted = existing
         .first()
         .map(|row| row.get::<_, Vec<String>>("granted_scopes"))
@@ -1053,9 +1086,7 @@ pub(crate) async fn persist_consent_grant(
         &[&user_id, &client_id, &granted],
     )
     .await
-    .map_err(|err| {
-        format!("oauth grant upsert failed: {err}")
-    })?;
+    .map_err(|err| format!("oauth grant upsert failed: {err}"))?;
     Ok(granted)
 }
 
@@ -1103,7 +1134,10 @@ async fn touch_consent_grant(
     Ok(())
 }
 
-pub(super) fn required_param<'a>(value: Option<&'a str>, name: &'static str) -> Result<&'a str, OAuthError> {
+pub(super) fn required_param<'a>(
+    value: Option<&'a str>,
+    name: &'static str,
+) -> Result<&'a str, OAuthError> {
     let value = value.map(str::trim).unwrap_or("");
     if value.is_empty() {
         return Err(OAuthError::invalid_request(name));
@@ -1147,7 +1181,9 @@ pub(super) fn scope_subset(requested: &[String], allowed: &[String]) -> bool {
 }
 
 pub(super) fn clean_optional(value: Option<String>) -> Option<String> {
-    value.map(|value| value.trim().to_string()).filter(|value| !value.is_empty())
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 fn generate_code() -> String {
@@ -1282,7 +1318,10 @@ pub(crate) fn return_to_after_prompt_interaction(return_to: &str, satisfied: &[&
 
 fn login_redirect(req: &HttpRequest, auth_request: &AuthRequest, cfg: &AuthConfig) -> HttpResponse {
     let location = auth_request
-        .provider_start_location(cfg.google_client_id().is_some(), cfg.github_client_id().is_some())
+        .provider_start_location(
+            cfg.google_client_id().is_some(),
+            cfg.github_client_id().is_some(),
+        )
         .unwrap_or_else(|| return_to::login_location(&return_to::request_target(req)));
     see_other(&location)
         .header("cache-control", "no-store")
@@ -1372,7 +1411,10 @@ pub(super) fn authenticate_brokered_client(
     client: &OAuthClient,
     client_auth: &ClientAuth,
 ) -> Result<(), OAuthError> {
-    if !matches!(client_auth.method, ClientAuthMethod::Basic | ClientAuthMethod::Post) {
+    if !matches!(
+        client_auth.method,
+        ClientAuthMethod::Basic | ClientAuthMethod::Post
+    ) {
         return Err(OAuthError::invalid_client(
             "broker client authentication required",
         ));
@@ -1390,14 +1432,16 @@ pub(super) fn authenticate_brokered_client(
             "broker client secret is required",
         ));
     };
-    let ok = issuer.verify_broker_secret(&client.client_id, secret).map_err(|err| {
-        tracing::error!(
-            error = %err,
-            client_id = %client.client_id,
-            "broker secret verification unavailable"
-        );
-        OAuthError::server_error("broker secret unavailable")
-    })?;
+    let ok = issuer
+        .verify_broker_secret(&client.client_id, secret)
+        .map_err(|err| {
+            tracing::error!(
+                error = %err,
+                client_id = %client.client_id,
+                "broker secret verification unavailable"
+            );
+            OAuthError::server_error("broker secret unavailable")
+        })?;
     if ok {
         Ok(())
     } else {
@@ -1417,8 +1461,7 @@ const fn access_identity_upsert_sql() -> &'static str {
      WHERE zeroship.app_user_identities.pairwise_sub = EXCLUDED.pairwise_sub"
 }
 
-const ACCESS_MINT_PRINCIPAL_ACTIVE_SQL: &str =
-    "SELECT 1 FROM zeroship.users \
+const ACCESS_MINT_PRINCIPAL_ACTIVE_SQL: &str = "SELECT 1 FROM zeroship.users \
      WHERE id = $1 \
        AND disabled_at IS NULL \
        AND anonymized_at IS NULL \
@@ -1539,8 +1582,7 @@ mod access_identity_tests {
         for (path, body) in [
             (
                 &hash_path,
-                "1:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff\n"
-                    .as_bytes(),
+                "1:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff\n".as_bytes(),
             ),
             (&idem_path, "mint-race-idempotency-master-secret".as_bytes()),
         ] {
@@ -1571,12 +1613,14 @@ mod access_identity_tests {
             tx,
             issuer,
             &test_keys(&tag),
-            client,
-            user_id,
-            &["openid".to_string()],
-            0,
-            SessionKind::Browser,
-            false,
+            &refresh::Establish {
+                client,
+                user_id,
+                granted_scopes: &["openid".to_string()],
+                auth_credential_version: 0,
+                kind: SessionKind::Browser,
+                with_secret: false,
+            },
         )
         .await
         .expect("establish session")
@@ -1708,10 +1752,7 @@ mod access_identity_tests {
             let nanos = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |d| d.as_nanos());
-            zeroship_core::crypto::derive_key(&format!(
-                "mint-race-{}-{nanos}",
-                std::process::id()
-            ))
+            zeroship_core::crypto::derive_key(&format!("mint-race-{}-{nanos}", std::process::id()))
         })
     }
 
@@ -1720,8 +1761,7 @@ mod access_identity_tests {
         let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(payload)
             .expect("decode JWT payload");
-        serde_json::from_slice::<serde_json::Value>(&decoded)
-            .expect("parse JWT payload")["iat"]
+        serde_json::from_slice::<serde_json::Value>(&decoded).expect("parse JWT payload")["iat"]
             .as_i64()
             .expect("iat")
     }
@@ -1746,9 +1786,9 @@ mod access_identity_tests {
         assert!(sql.contains("pairwise_sub"));
         assert!(sql.contains("ON CONFLICT (app_client_id, global_user_id)"));
         assert!(sql.contains("revoked_at = NULL"));
-        assert!(sql.contains(
-            "WHERE zeroship.app_user_identities.pairwise_sub = EXCLUDED.pairwise_sub"
-        ));
+        assert!(
+            sql.contains("WHERE zeroship.app_user_identities.pairwise_sub = EXCLUDED.pairwise_sub")
+        );
     }
 
     #[test]
@@ -1772,9 +1812,16 @@ mod access_identity_tests {
         let (_dsn, setup, mut mint, _deletion, user_id, client, issuer) = mint_fixture().await;
         let tx = mint.transaction().await.expect("mint transaction");
         let proof = proof_for(&tx, &issuer, &client, user_id).await;
-        mint_access_token(&tx, &issuer, &client, user_id, &["openid".to_string()], &proof)
-            .await
-            .expect("mint token");
+        mint_access_token(
+            &tx,
+            &issuer,
+            &client,
+            user_id,
+            &["openid".to_string()],
+            &proof,
+        )
+        .await
+        .expect("mint token");
 
         let contender_acquired: bool = setup
             .query_one(
@@ -1812,12 +1859,14 @@ mod access_identity_tests {
             &tx,
             &issuer,
             &test_keys(&tag),
-            &client,
-            user_id,
-            &["openid".to_string()],
-            0,
-            SessionKind::Browser,
-            false,
+            &refresh::Establish {
+                client: &client,
+                user_id,
+                granted_scopes: &["openid".to_string()],
+                auth_credential_version: 0,
+                kind: SessionKind::Browser,
+                with_secret: false,
+            },
         )
         .await
         .map(|_| ());
