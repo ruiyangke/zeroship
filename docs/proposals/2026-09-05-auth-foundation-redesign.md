@@ -2225,6 +2225,49 @@ the strongest available fence is bounded by what the operator can provision by
 hand and what control can observe for itself. A design that reaches past that has
 left the product's deployment story, whatever its security merit.
 
+*The derivation is defeated by the shipped edge, and the fence that exists to
+catch it cannot fire.* Measured on 2026-09-08. `deploy/ops/Caddyfile`'s control
+block is `handle /v1/*` to the migration service plus an UNFILTERED catch-all
+`handle { reverse_proxy control:9090 }`, so `/internal/workers/enrol` is forwarded
+from the public edge. Control sets no `trust_proxy` and its default is false, so
+`EnrolmentEnvelope`'s `ProxyFronted` arm cannot fire. Caddy sits inside the
+declared enrolment network, so the peer check approves.
+
+Two consequences, different in kind. The ADMISSION test bounds nothing once the
+edge forwards the route - though the role key is still required, so this is not an
+unauthenticated hole. Worse, the DERIVATION is defeated: every enrolment behind
+the proxy records the PROXY'S address. That is exactly the "everything is the
+proxy" collapse the arm was written to prevent, and it is silent because THE
+ARM'S INPUT IS A DECLARATION RATHER THAN AN OBSERVATION. It is not an
+interception - the recorded address is the proxy's, not an attacker's - but it
+becomes a dispatch failure the moment the eligible set reads that column.
+
+**Recommendation: refuse `/internal/*` AT THE EDGE, and gate that refusal.** Add a
+`handle /internal/*` block ahead of the catch-all that answers without proxying.
+It is the smallest change, it matches what `/internal` already means, and it fixes
+BOTH consequences at once: internal callers then reach control directly on the
+bridge network, so the observed peer is the real worker again and the derivation
+recovers on its own. Because the fix is edge configuration that nothing in Rust
+would notice drifting, it must be paired with a gate over the Caddyfile -
+`tests/deploy_scripts_gate.sh` already enforces a collision boundary on that same
+file, so the precedent and the place both exist.
+
+*Rejected, with reasons.* Deriving proxy-frontedness from an OBSERVATION: control
+cannot tell per request whether it sits behind a proxy - a forwarded header is a
+hint an attacker also controls, and "every enrolment arrives from one address" is
+a statistical signal, not a verdict on the request in hand. A fence that needs
+several samples cannot refuse the first one. NARROWING the declared network to
+exclude the edge: it works, but it demands the operator enumerate which addresses
+inside their own subnet are not workers, which is exactly the error-prone
+inventory the derivation exists to avoid.
+
+*The stronger alternative, deliberately not recommended yet.* Bind enrolment to a
+listener that is not the public one, so the route is unreachable from the edge by
+construction rather than by configuration. That survives Caddyfile drift, which
+the recommendation does not. It costs a second bind, its own config, and a compose
+topology that routes to it - and it should be taken if enrolment ever gates
+something an attacker wants, which is what the eligible set will make true.
+
 The loopback arm was a SEPARATE and now-fixed defect, and conflating the two
 would leave the real one unpaid. That arm sat above the network comparison, so
 no declaration could admit a single-host deployment; it now rules through the
