@@ -150,12 +150,12 @@ fn the_table_fence_holds() {
     // The control: a name that merely resembles a reserved one must pass, or
     // the fence is a blanket refusal wearing a table's clothes.
     //
-    // The two `__zero_migrate` witnesses MOVED here from the refused list on
-    // 2026-09-07, rather than being deleted, so this test rules on the change in
-    // both directions. That prefix fenced an empty namespace: the engine's
-    // journal tables are `__zeroship_schema_*`, and the one live object carrying
-    // the token is the rebuild table, named `{table}__zero_migrate_rebuild` - a
-    // SUFFIX, which a prefix list never covered.
+    // The two `__zero_migrate` witnesses are ACCEPTED on purpose, and are here
+    // rather than absent so this test rules in both directions. That prefix
+    // fences an empty namespace: the engine's journal tables are
+    // `__zeroship_schema_*`, and the one live object carrying the token is the
+    // rebuild table, named `{table}__zero_migrate_rebuild` - a SUFFIX, which a
+    // prefix list cannot cover.
     for name in [
         "page_views",
         "zeroship_apps",
@@ -251,11 +251,10 @@ fn an_alias_may_carry_a_platform_underscore_name_that_a_column_may_not() {
 /// does not have.
 #[test]
 fn the_system_field_names_are_referenceable_columns() {
-    // Spelled locally on purpose. This crate held its own copy of this list and
-    // unioned it into every row projection until 2026-09-07; the list was
-    // platform policy and left with the union. What survives is a claim about
-    // the IDENTIFIER FENCE - that these ordinary names are not reserved - and
-    // that claim needs a witness, not a shared constant.
+    // Spelled locally on purpose. The claim under test is about the IDENTIFIER
+    // FENCE - that these ordinary names are not reserved - and that needs a
+    // witness of its own. A shared constant would make the test agree with
+    // whatever the constant said.
     let mut ruled_on = 0_usize;
     for name in [
         "id",
@@ -300,11 +299,10 @@ fn an_illegal_character_refusal_does_not_echo_the_name() {
 /// only reads must not be nameable from a worker-built plan.
 ///
 /// The witness is any `__zeroship`-prefixed name; the fence is
-/// `Reservation::Prefix`, so no particular spelling is load-bearing. Until
-/// 2026-09-07 the witness was the name of a platform system schema that was
-/// deleted in 2026-08, which read as though that schema still existed. It does
-/// not, and the fence is not weaker for it: `__zeroship_` is the live prefix of
-/// the migration journal, the unmask audit table and the workflow journal in
+/// `Reservation::Prefix`, so no particular spelling is load-bearing. Do not use
+/// the name of a platform system schema here - it reads as though that schema
+/// exists. The fence guards live objects either way: `__zeroship_` is the prefix
+/// of the migration journal, the unmask audit table and the workflow journal in
 /// every app schema.
 #[test]
 fn the_namespace_fence_refuses_the_platform_schema() {
