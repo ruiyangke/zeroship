@@ -3,6 +3,7 @@ use std::sync::{Arc, RwLock};
 
 use uuid::Uuid;
 use zeroship_bundle::{BlobStore, Manifest};
+use zeroship_core::app_id::AppId;
 use zeroship_core::types::{AppVersionInfo, VersionMap};
 use zeroship_runtime::{EnvSnapshot, RuntimeLimits};
 
@@ -10,6 +11,39 @@ use crate::health::WorkerReadiness;
 use crate::{cache, WorkerConfig};
 
 const CONTROL_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Decode the [`Uuid`] embedded in a typed app id's printed form.
+///
+/// This is the worker's ONE conversion from the gateway-facing [`AppId`]
+/// back to the uuid the isolate cache, the env cache, the version feed and
+/// the meter are all keyed by (`zeroship_core::types::VersionMap` is still a
+/// `Uuid`-keyed wire type). `handler::dispatch`, `handler::workflow_advance_unsigned`
+/// and `logs::get_logs` each parse their `{app_id}` path segment with
+/// `AppId::parse` and call this exactly once on the result, so one uuid
+/// drives every downstream lookup for one request.
+///
+/// Every value reaching this function already parsed under `AppId::PREFIX`,
+/// so the decode below can never fail; the `expect` documents that
+/// invariant rather than adding a second error path this crate would have
+/// to test.
+pub(crate) fn app_id_uuid(app_id: &AppId) -> Uuid {
+    zeroship_core::typed_id::parse_with_prefix(app_id.as_str(), AppId::PREFIX)
+        .expect("AppId always parses under its own prefix")
+}
+
+/// Render a raw [`Uuid`] the control plane stores as the canonical
+/// [`AppId`] string the worker's routes accept - the inverse of
+/// [`app_id_uuid`]. Used only by tests, which hold the stored uuid and need
+/// to address the worker's endpoints the way the gateway does.
+#[cfg(test)]
+pub(crate) fn uuid_app_id(stored: &Uuid) -> AppId {
+    let printed = format!(
+        "{}_{}",
+        AppId::PREFIX,
+        zeroship_core::typed_id::uuid_to_base62(stored)
+    );
+    AppId::parse(&printed).expect("uuid_to_base62 always yields a valid app id body")
+}
 
 /// Resolve the worker-entry blob hash from a manifest. Returns `None` for
 /// SSG-only deploys (worker missing) and logs+returns `None` if the
@@ -936,10 +970,7 @@ mod tests {
             // The route takes the app id in its printed, typed form; this test
             // holds the uuid the version feed serves, so it renders it the way
             // the gateway does rather than spelling the uuid into the URL.
-            .uri(&format!(
-                "/dispatch/{}",
-                zeroship_core::app_id::canonical_app_id_for(app_id).as_str()
-            ))
+            .uri(&format!("/dispatch/{}", uuid_app_id(app_id).as_str()))
             .header(
                 "authorization",
                 crate::handler::tests::gateway_authorization(),
