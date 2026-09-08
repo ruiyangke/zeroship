@@ -6,7 +6,7 @@ use zeroship_core::service_identity::{
 };
 
 /// Every operation the catalog names, in one place for the table-wide guards.
-const CATALOG: [ServiceEndpoint; 13] = [
+const CATALOG: [ServiceEndpoint; 14] = [
     endpoints::GATEWAY_BACKCHANNEL_LOGOUT,
     endpoints::GATEWAY_WORKFLOW_ADVANCE,
     endpoints::CONTROL_ROUTES,
@@ -14,6 +14,7 @@ const CATALOG: [ServiceEndpoint; 13] = [
     endpoints::CONTROL_VERSIONS,
     endpoints::CONTROL_APP,
     endpoints::CONTROL_APP_ENV,
+    endpoints::CONTROL_WORKER_ENROL,
     endpoints::CONTROL_BILLING_RECONCILE,
     endpoints::CONTROL_SPEND_RECONCILE,
     endpoints::CONTROL_ERASURE_PREFLIGHT,
@@ -113,6 +114,12 @@ fn endpoint_catalog_records_exact_measured_operations() {
             "/internal/apps/{app_id}/env",
         ),
         (
+            endpoints::CONTROL_WORKER_ENROL,
+            "control",
+            "POST",
+            "/internal/workers/enrol",
+        ),
+        (
             endpoints::CONTROL_BILLING_RECONCILE,
             "control",
             "POST",
@@ -191,6 +198,11 @@ fn measured_allowlist_is_encoded_and_enforced_row_by_row() {
             endpoints::CONTROL_VERSIONS,
             endpoints::CONTROL_APP,
             endpoints::CONTROL_APP_ENV,
+            // Enrolment authenticates with the SHARED role key, so this grant
+            // DISTINGUISHES instances rather than fencing a role-key holder
+            // out. It is in the row because per-instance identity is what makes
+            // narrowing the two app reads above writable at all.
+            endpoints::CONTROL_WORKER_ENROL,
         ],
         &all,
     );

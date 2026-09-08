@@ -447,6 +447,8 @@ pub mod endpoints {
         ServiceEndpoint::new("control", "POST", "/internal/billing/reconcile");
     pub const CONTROL_SPEND_RECONCILE: ServiceEndpoint =
         ServiceEndpoint::new("control", "POST", "/internal/spend/reconcile");
+    pub const CONTROL_WORKER_ENROL: ServiceEndpoint =
+        ServiceEndpoint::new("control", "POST", "/internal/workers/enrol");
     pub const CONTROL_ERASURE_PREFLIGHT: ServiceEndpoint = ServiceEndpoint::new(
         "control",
         "GET",
@@ -554,6 +556,14 @@ pub fn service_allowlist() -> &'static [ServiceAuthorization] {
                     // nothing here to compare an eligible set against.
                     endpoints::CONTROL_APP,
                     endpoints::CONTROL_APP_ENV,
+                    // Enrolment authenticates with THIS SHARED ROLE KEY, so a
+                    // holder of it can enrol many instances. That is a
+                    // DISTINGUISHER, not a boundary: what it buys is
+                    // attribution, per-instance revocation and a countable
+                    // event, and it is what makes the narrowing above writable
+                    // at all. Do not read this grant as a fence against a
+                    // role-key holder.
+                    endpoints::CONTROL_WORKER_ENROL,
                 ],
             ),
         ]
