@@ -4031,14 +4031,19 @@ fn operator_deprovisioning_reuses_one_pool_and_reparses_nothing() {
 // ---------------------------------------------------------------------------
 // VectorIndex / vector_search / typed errors.
 //
-// These tests exercise the pgvector adapter end-to-end. They are `#[ignore]`d
-// statically, so a default `cargo test` does not probe at all; `--ignored` is
-// what asks for them, and `require_pgvector` then FAILS rather than skipping if
-// the server has no extension. Swap the image to `pgvector/pgvector:pg16`
-// (docs/runbooks/docker-compose.md) to run them.
+// These tests exercise the pgvector adapter end-to-end. They carry no
+// `#[ignore]`: an ordinary run enters them and `require_pgvector` FAILS, naming
+// the extension and the image that carries it, when the server has none. Swap
+// the image to `pgvector/pgvector:pg16` (docs/runbooks/docker-compose.md) to run
+// them for real.
 //
-// THERE IS NO ENVIRONMENT VARIABLE THAT TOGGLES THIS. This comment named a
-// `ZEROSHIP_PGVECTOR_AVAILABLE=1` until 2026-09-08; a repository-wide search
+// THIS COMMENT DESCRIBED THE OPPOSITE ARRANGEMENT UNTIL THE ATTRIBUTES WENT.
+// It said they were `#[ignore]`d statically and that `--ignored` was the request
+// that reached the refusal - which made the refusal unreachable from every job
+// this repository actually runs, since none of them passes `--ignored`.
+//
+// THERE IS NO ENVIRONMENT VARIABLE THAT TOGGLES THIS EITHER. This comment named
+// a `ZEROSHIP_PGVECTOR_AVAILABLE=1` until 2026-09-08; a repository-wide search
 // found the name here and nowhere else, so it was an escape hatch that had
 // never existed, described as if it did.
 //
@@ -4097,11 +4102,10 @@ async fn require_pgvector(pool: &Pool) {
 /// expected SET (membership, not strict order -- FP determinism not
 /// promised across pgvector versions).
 ///
-/// **Marked `#[ignore]`** in the default test environment because the
-/// `postgres:16` image used by the CI/dev `pg-test` container doesn't
-/// bundle the `vector` extension. Switch the image to
-/// `pgvector/pgvector:pg16` (see docs/runbooks/docker-compose.md) and
-/// run with `--ignored` to exercise this path.
+/// Requires the `vector` extension, which a stock `postgres` image does not
+/// bundle. `require_pgvector` refuses the run and names the image that carries
+/// it (see docs/runbooks/docker-compose.md); there is no attribute that turns
+/// the absence into a pass.
 #[compio::test]
 async fn vector_search_returns_k_nearest() {
     use zeroship_plugin_db::backend::{PostgresBackend, VectorIndex, VectorMetric};
@@ -4255,11 +4259,18 @@ async fn vector_search_returns_k_nearest() {
 /// with the DDL half deleted the second arm would otherwise go unruled-on.
 ///
 /// The DROP requires sufficient privileges; tests run as the bootstrap
-/// `postgres` superuser, which has them. If the test environment has
-/// the extension installed AND can't drop it (e.g. used by other
-/// objects), this test will silently re-skip — we don't fail the suite
-/// in that case because the typed-error assertion is the load-bearing
-/// part of the contract, not the drop itself.
+/// `postgres` superuser, which has them. An extension that survives the drop -
+/// because another object depends on it - FAILS this test, naming the query
+/// that finds the dependents. The drop is the fixture, not a cleanup: with the
+/// extension still installed the typed-error arm is never reached, so a pass
+/// there would report a contract nobody checked.
+///
+/// THIS COMMENT DESCRIBED THE OPPOSITE UNTIL 2026-09-08, AND IT DESCRIBED
+/// NEITHER THE CODE BELOW NOR ITS OWN REASONING. It said the test would
+/// "silently re-skip" and that "we don't fail the suite in that case because
+/// the typed-error assertion is the load-bearing part of the contract" - which
+/// is the argument FOR failing, since a re-skip is precisely the case where
+/// that load-bearing assertion did not run.
 #[compio::test]
 async fn pgvector_extension_missing_reports_typed_error() {
     use zeroship_data_core::error::DbError;
@@ -4441,11 +4452,16 @@ async fn vector_dimension_mismatch_rejected_at_insert() {
 // ---------------------------------------------------------------------------
 // SpatialIndex (PG arm) test gates.
 //
-// These tests require PostGIS. The default `pg-test` container
-// (`postgres:16`) doesn't bundle PostGIS, so the spatial gates are
-// `#[ignore]`-marked and run via `--ignored` against a PostGIS-bundled
-// image — see docs/runbooks/docker-compose.md and the open question
-// at the bottom of the report.
+// These tests require PostGIS, which a stock `postgres` image does not bundle.
+// They run unconditionally and `require_postgis` refuses a server without the
+// extension, naming a bundled image to point them at - see
+// docs/runbooks/docker-compose.md.
+//
+// ONE OF THE TWO WAS `#[ignore]`-MARKED AND THE OTHER WAS NOT, which is the
+// state that made the attribute indefensible rather than merely wrong:
+// `spatial_near_runs_under_per_app_role_via_rls` has always called
+// `require_postgis` from an ordinary run, so the "PostGIS is optional here"
+// story the attribute told was already false for its own sibling.
 // ---------------------------------------------------------------------------
 
 
@@ -4457,12 +4473,9 @@ async fn vector_dimension_mismatch_rejected_at_insert() {
 /// ordering — ST_Distance is FP-deterministic in modern PostGIS but we
 /// don't pin the order).
 ///
-/// **`#[ignore]`** until the test environment swaps to a PostGIS-bundled
-/// image, which is what keeps a default `cargo test` from probing at all.
-/// A `--ignored` run is a request to exercise it, so `require_postgis`
-/// FAILS on an image without the extension rather than skipping.
+/// Requires PostGIS: `require_postgis` FAILS on an image without the extension
+/// rather than skipping, and no attribute removes this test from the run.
 #[compio::test]
-#[ignore = "requires PostGIS — swap `pg-test` image to a PostGIS-bundled variant"]
 async fn near_returns_within_radius() {
     use zeroship_plugin_db::backend::{GeoPoint, PostgresBackend, SpatialIndex};
 
@@ -5594,8 +5607,8 @@ async fn pg_bytea_decoder_preserves_raw_binary_prefix_bytes() {
 //   1. `snapshot_restore_round_trip_pg` — gate #4. Insert N rows;
 //      `snapshot()` to a tempfile-backed `file://` URI; truncate via
 //      raw `DROP/CREATE`; `restore()`; assert rows recovered.
-//      `#[ignore]`-d when `pg_dump` / `pg_restore` are not on PATH
-//      (CI minimal images don't always carry them).
+//      `require_pg_client_tool` refuses the run when `pg_dump` or
+//      `pg_restore` is off PATH.
 //   2. (deleted) `pitr_pg_records_target` asserted the row landed in a
 //      `pitr_targets` table in the platform-owned system schema. That
 //      table lost its installer when the schema was deleted, so the test
@@ -5607,34 +5620,38 @@ async fn pg_bytea_decoder_preserves_raw_binary_prefix_bytes() {
 //      expect `Coded { code: "migration_in_progress" }`. No subprocess.
 //   4. `snapshot_uri_content_hash_round_trip` — `snapshot()` →
 //      `SnapshotHandle.content_hash` matches SHA-256 of the on-disk
-//      dump file. `#[ignore]`-d for the same reason as #1.
+//      dump file. Needs `pg_dump` for the same reason as #1.
 
 use zeroship_plugin_db::backend::{
     Backup as _, BusyPolicy as BackupBusyPolicy, LockScope, SnapshotOpts,
 };
 
-/// Refuse the run unless `pg_dump` answers `--version` on PATH.
+/// Refuse the run unless `tool` answers `--version` on PATH.
 ///
-/// The snapshot/restore round-trip tests `#[ignore]` themselves statically, so
-/// nothing reaches this unless a runner passed `--ignored` - which is a request
-/// to exercise them. Honouring that request with a skip was the defect: a
-/// deliberate `--ignored` run on a machine without the client tools printed the
-/// same green as one that had dumped and restored a real schema.
+/// The callers used to `#[ignore]` themselves statically, so this refusal was
+/// reachable only from a run that passed `--ignored` - and nothing in this
+/// repository passes it. The attribute therefore did not defer the check, it
+/// deleted the tests from every job that could have run them, which is the same
+/// silent green the refusal exists to prevent.
+///
+/// It takes the binary NAME because restore needs `pg_restore` as well as
+/// `pg_dump`, and a probe of only the first reports a machine as ready when the
+/// round-trip's second half cannot run.
 ///
 /// # Panics
 ///
-/// When `pg_dump` is absent, naming the packages that carry it.
-fn require_pg_dump() {
-    let answered = std::process::Command::new("pg_dump")
+/// When `tool` is absent, naming the packages that carry it.
+fn require_pg_client_tool(tool: &str) {
+    let answered = std::process::Command::new(tool)
         .arg("--version")
         .output()
         .is_ok_and(|output| output.status.success());
     assert!(
         answered,
-        "`pg_dump` is not on PATH, and this test requires it.\n\
+        "`{tool}` is not on PATH, and this test requires it.\n\
          \n\
          \x20 backend: the PostgreSQL CLIENT tools, in this process's PATH\n\
-         \x20 probe:   `pg_dump --version` did not succeed\n\
+         \x20 probe:   `{tool} --version` did not succeed\n\
          \n\
          This is a LOCAL binary, not the server: a reachable database does not\n\
          supply it, and the container-hosted server this suite talks to has it\n\
@@ -5651,8 +5668,8 @@ fn require_pg_dump() {
          A major version at or above the server's is the safe direction; an\n\
          older `pg_dump` refuses a newer server outright.\n\
          \n\
-         There is no environment variable that makes this a skip. You reached\n\
-         this test by asking for it with --ignored."
+         There is no environment variable and no attribute that makes this a\n\
+         skip."
     );
 }
 
@@ -5745,14 +5762,14 @@ async fn snapshot_during_migration_returns_typed_error() {
 /// into a per-app schema, snapshot to a `file://` URI, drop the
 /// schema's table contents, restore, assert the rows are back.
 ///
-/// `#[ignore]`-d statically because `pg_dump` / `pg_restore` aren't
-/// available in every test environment. Run with
-/// `cargo test … snapshot_restore_round_trip_pg -- --ignored`.
+/// Needs `pg_dump` AND `pg_restore` on PATH; a machine without them fails here
+/// naming the package that carries them, rather than reporting a round-trip it
+/// never performed.
 #[compio::test]
-#[ignore = "needs pg_dump/pg_restore on PATH"]
 async fn snapshot_restore_round_trip_pg() {
     let url = require_pg().await;
-    require_pg_dump();
+    require_pg_client_tool("pg_dump");
+    require_pg_client_tool("pg_restore");
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     // Per-app schema fresh every run.
     let app_id = crate::test_app_id!();
@@ -5869,12 +5886,12 @@ async fn snapshot_restore_round_trip_pg() {
 /// any drift here would let a corrupt dump pass restore's hash
 /// check.
 ///
-/// `#[ignore]`-d statically because `pg_dump` isn't always on PATH.
+/// Needs `pg_dump` on PATH, and says so by failing rather than by vanishing
+/// from the run.
 #[compio::test]
-#[ignore = "needs pg_dump on PATH"]
 async fn snapshot_uri_content_hash_round_trip() {
     let url = require_pg().await;
-    require_pg_dump();
+    require_pg_client_tool("pg_dump");
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     let app_id = crate::test_app_id!();
     let app_id = app_id.as_str();
