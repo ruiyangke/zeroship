@@ -490,6 +490,105 @@ async fn pending_invites(fx: &Fx, organization_id: &str, email: &str) -> i64 {
     rows[0].get("n")
 }
 
+/// The same floor on removal, because unseating is an authority change too.
+///
+/// The strict inequality alone lets any member unseat anyone below them, so
+/// without the floor a developer evicts a viewer and only Cedar's band refuses
+/// it. This is the sibling of the seating case, and it went unfixed when that
+/// one did.
+#[compio::test]
+async fn a_developer_removes_nobody_where_an_admin_removes_a_viewer() {
+    let Some(fx) = Fx::new().await else {
+        return;
+    };
+    let mut org = Org::new(&fx, "rmfloor").await;
+    let developer = org.seat(&fx, "developer", "developer").await;
+    let admin = org.seat(&fx, "admin", "admin").await;
+    let target = org.seat(&fx, "target", "viewer").await;
+
+    let err = organizations::remove_member(&fx.registry, developer, &org.id, target, None)
+        .await
+        .expect_err("a developer must unseat nobody, even a viewer it outranks");
+    assert!(
+        matches!(err, OrganizationError::Insufficient(_)),
+        "expected an authority refusal, got {err:?}"
+    );
+    assert_eq!(
+        org.role_of(&fx, target).await.as_deref(),
+        Some("viewer"),
+        "the floor is in the DELETE, so a refused removal cannot have taken the row"
+    );
+
+    // The control: same target, an actor one rank higher.
+    organizations::remove_member(&fx.registry, admin, &org.id, target, None)
+        .await
+        .expect("an admin may remove a viewer");
+    assert_eq!(org.role_of(&fx, target).await, None);
+
+    org.cleanup(&fx).await;
+}
+
+/// The same floor on re-roling.
+///
+/// The target role here is the one the seat ALREADY holds, and that is not a
+/// contrivance - it is the only re-role the two-axis comparison would otherwise
+/// let a developer perform. A developer clears `rank >` and `billing_rank >=`
+/// against `viewer` and nothing else on the ladder, in either the held or the
+/// target position, so every other target is refused by an axis rather than by
+/// the floor and would leave the floor unmeasured. What the floor adds is that
+/// a developer may not write to a seat row at all.
+#[compio::test]
+async fn a_developer_reroles_nobody_where_an_admin_reroles_a_viewer() {
+    let Some(fx) = Fx::new().await else {
+        return;
+    };
+    let mut org = Org::new(&fx, "rolefloor").await;
+    let developer = org.seat(&fx, "developer", "developer").await;
+    let admin = org.seat(&fx, "admin", "admin").await;
+    let target = org.seat(&fx, "target", "viewer").await;
+
+    let err = organizations::change_member_role(
+        &fx.registry,
+        developer,
+        &org.id,
+        target,
+        &ChangeRoleBody {
+            role: "viewer".to_string(),
+        },
+        None,
+    )
+    .await
+    .expect_err("a developer must re-role nobody, not even a viewer to viewer");
+    assert!(
+        matches!(err, OrganizationError::Insufficient(_)),
+        "expected an authority refusal, got {err:?}"
+    );
+    assert_eq!(
+        org.role_of(&fx, target).await.as_deref(),
+        Some("viewer"),
+        "the floor is in the UPDATE, so a refused re-role cannot have rewritten the seat"
+    );
+
+    // The control: same target, an actor one rank higher. The new role is one
+    // the admin's own billing_rank covers, so a green here is the floor
+    // yielding rather than an axis happening to permit it.
+    organizations::change_member_role(
+        &fx.registry,
+        admin,
+        &org.id,
+        target,
+        &ChangeRoleBody {
+            role: "developer".to_string(),
+        },
+        None,
+    )
+    .await
+    .expect("an admin may re-role a viewer");
+    assert_eq!(org.role_of(&fx, target).await.as_deref(), Some("developer"));
+
+    org.cleanup(&fx).await;
+}
+
 /// The BILLING axis refuses independently of the rank axis.
 ///
 /// `admin` is rank 30 / billing_rank 10; `billing` is rank 10 / billing_rank
