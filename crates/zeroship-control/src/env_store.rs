@@ -137,6 +137,42 @@ impl Drop for EnvStore {
     }
 }
 
+/// Take the app row's lock and refuse if the app has been deleted.
+///
+/// Every write that CREATES environment state has to call this first, inside
+/// the transaction that does the write. `organizations::delete_app` destroys
+/// the environment on purpose - "the environment goes with the app... none of
+/// them is evidence of anything" - so a var, secret or exposure written
+/// afterwards resurrects exactly what the delete set out to destroy, and the
+/// app's `env_version` advertises it to workers.
+///
+/// The lock is what makes this a fence rather than a look. `delete_app` updates
+/// the same `zeroship.apps` row, so `FOR UPDATE` here either sees the deletion
+/// already committed and refuses, or holds the row until this transaction ends
+/// and makes the deletion wait. A bare `SELECT` would leave the window this
+/// repository has been bitten by twice: read says live, delete commits, write
+/// lands on a corpse.
+///
+/// DELETING a var or secret needs no fence. Removing more of what the delete
+/// already removed is not a resurrection, and refusing it would turn cleanup
+/// into an error.
+async fn lock_live_app(
+    tx: &compio_postgres::Transaction<'_>,
+    app_id: Uuid,
+) -> Result<(), EnvError> {
+    let rows = tx
+        .query(
+            "SELECT 1 FROM zeroship.apps WHERE id = $1 AND deleted_at IS NULL FOR UPDATE",
+            &[&app_id],
+        )
+        .await
+        .map_err(|e| EnvError::Db(e.to_string()))?;
+    if rows.is_empty() {
+        return Err(EnvError::AppNotFound);
+    }
+    Ok(())
+}
+
 impl EnvStore {
     /// Build a store with a primary master key. `master_key` must be
     /// non-empty. An empty master key would
@@ -225,12 +261,17 @@ impl EnvStore {
         if value.len() > MAX_VALUE_BYTES {
             return Err(EnvError::TooLarge(value.len()));
         }
-        let conn = self
+        let mut conn = self
             .registry
             .conn()
             .await
             .map_err(|e| EnvError::Db(format!("{e}")))?;
-        conn.execute(
+        let tx = conn
+            .transaction()
+            .await
+            .map_err(|e| EnvError::Db(e.to_string()))?;
+        lock_live_app(&tx, app_id).await?;
+        tx.execute(
             "WITH upsert AS (
                  INSERT INTO zeroship.app_vars(app_id, key_name, value) VALUES($1, $2, $3)
                  ON CONFLICT (app_id, key_name) DO UPDATE
@@ -243,6 +284,7 @@ impl EnvStore {
         )
         .await
         .map_err(|e| EnvError::Db(e.to_string()))?;
+        tx.commit().await.map_err(|e| EnvError::Db(e.to_string()))?;
         Ok(())
     }
 
@@ -308,12 +350,17 @@ impl EnvStore {
         }
         let aad = app_secret_aad(app_id, key);
         let ct = crypto::encrypt(&self.primary_key, &aad, value.as_bytes())?;
-        let conn = self
+        let mut conn = self
             .registry
             .conn()
             .await
             .map_err(|e| EnvError::Db(format!("{e}")))?;
-        conn.execute(
+        let tx = conn
+            .transaction()
+            .await
+            .map_err(|e| EnvError::Db(e.to_string()))?;
+        lock_live_app(&tx, app_id).await?;
+        tx.execute(
             "WITH upsert AS (
                  INSERT INTO zeroship.app_secrets(app_id, key_name, ciphertext) VALUES($1, $2, $3)
                  ON CONFLICT (app_id, key_name) DO UPDATE
@@ -326,6 +373,7 @@ impl EnvStore {
         )
         .await
         .map_err(|e| EnvError::Db(e.to_string()))?;
+        tx.commit().await.map_err(|e| EnvError::Db(e.to_string()))?;
         Ok(())
     }
 
@@ -463,6 +511,10 @@ impl EnvStore {
             .transaction()
             .await
             .map_err(|e| EnvError::Db(e.to_string()))?;
+        // Before the DELETE, not after: this call REPLACES the exposure set, so
+        // on a deleted app the delete-then-insert would otherwise strip and
+        // then rebuild a set that should not exist at all.
+        lock_live_app(&tx, app_id).await?;
         tx.execute(
             "DELETE FROM zeroship.app_env_expose WHERE app_id = $1",
             &[&app_id],

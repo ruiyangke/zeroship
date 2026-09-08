@@ -554,7 +554,7 @@ impl Registry {
                 "UPDATE zeroship.apps \
                     SET archived_at = NULL, \
                         updated_at = CASE WHEN archived_at IS NOT NULL THEN NOW() ELSE updated_at END \
-                  WHERE id = $1 \
+                  WHERE id = $1 AND deleted_at IS NULL \
                   RETURNING id, name, plan_id, deploy_hash, \
                             archived_at::text, created_at::text, updated_at::text",
                 &[id],
@@ -619,7 +619,7 @@ impl Registry {
         let n = tx
             .execute(
                 "UPDATE zeroship.apps SET deploy_hash = $1, manifest_json = $2, \
-                 updated_at = NOW() WHERE id = $3 \
+                 updated_at = NOW() WHERE id = $3 AND deleted_at IS NULL \
                    AND CASE WHEN $4::text IS NULL \
                             THEN NOT EXISTS (SELECT 1 FROM zeroship.app_schema_applies \
                                               WHERE app_id = $3 AND status = 'applied') \
@@ -635,11 +635,21 @@ impl Registry {
             )
             .await?;
         if n == 0 {
-            // Zero rows is ambiguous: no such app, or the schema predicate
-            // refused. Disambiguate for the MESSAGE only — the decision was
-            // already taken atomically above, so this read cannot re-open it.
+            // Zero rows is ambiguous: no such app, the app is DELETED, or the
+            // schema predicate refused. Disambiguate for the MESSAGE only — the
+            // decision was already taken atomically above, so this read cannot
+            // re-open it.
+            //
+            // A deleted app reads as ABSENT rather than as a schema refusal,
+            // which is both the truthful answer and the one `unarchive_app`
+            // already gives (`Ok(None)`). Reporting `SchemaNotApplied` for a
+            // corpse would send a creator to re-run a migration against an app
+            // that no longer has a schema to migrate.
             let app_rows = tx
-                .query("SELECT 1 FROM zeroship.apps WHERE id = $1", &[id])
+                .query(
+                    "SELECT 1 FROM zeroship.apps WHERE id = $1 AND deleted_at IS NULL",
+                    &[id],
+                )
                 .await?;
             if app_rows.is_empty() {
                 tx.commit().await?;
@@ -718,7 +728,7 @@ impl Registry {
         let n = conn
             .execute(
                 "UPDATE zeroship.apps SET plan_id = $1, updated_at = NOW() \
-                 WHERE id = $2 \
+                 WHERE id = $2 AND deleted_at IS NULL \
                    AND EXISTS (SELECT 1 FROM zeroship.plans \
                                WHERE id = $1 AND NOT archived)",
                 &[&plan_id, id],
@@ -727,14 +737,22 @@ impl Registry {
         if n > 0 {
             return Ok(true);
         }
-        // Zero rows: the app doesn't exist, or the plan is unknown/archived.
-        // Disambiguate so the caller gets a typed error for a bad plan rather
-        // than a misleading `Ok(false)` (= "no such app").
+        // Zero rows: the app doesn't exist, the app is DELETED, or the plan is
+        // unknown/archived. Disambiguate so the caller gets a typed error for a
+        // bad plan rather than a misleading `Ok(false)` (= "no such app").
+        //
+        // A deleted app counts as absent here, and the ordering matters: asking
+        // only whether the row EXISTS sends a deleted app down the plan-guard
+        // branch, where `validate_plan` finds nothing wrong and the fallthrough
+        // blames a concurrent archive that never happened.
         let app_exists = conn
-            .query("SELECT 1 FROM zeroship.apps WHERE id = $1", &[id])
+            .query(
+                "SELECT 1 FROM zeroship.apps WHERE id = $1 AND deleted_at IS NULL",
+                &[id],
+            )
             .await?;
         if app_exists.is_empty() {
-            return Ok(false); // genuinely no such app
+            return Ok(false); // genuinely no such app, or no longer one
         }
         // The app exists ⇒ the plan guard is why nothing updated. Reuse the
         // shared validator to produce the precise unknown-vs-archived message.
