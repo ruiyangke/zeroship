@@ -527,12 +527,17 @@ async fn only_the_worker_may_enrol_an_instance() {
 
 /// The handler's read of the transport, bound over a REAL socket.
 ///
-/// A loopback client gets `peer_is_loopback`, where the in-process arm above
-/// gets a 403 for having no peer at all. A handler that ignored `req.peer_addr()`
-/// could not tell those apart, so this pair is what makes the derivation's
-/// input the connection rather than a default.
+/// A loopback client gets `peer_outside_envelope` against a declaration that
+/// does not name loopback, where the in-process arm above gets a 403 for having
+/// no peer at all. A handler that ignored `req.peer_addr()` could not tell those
+/// apart, so this pair is what makes the derivation's input the connection
+/// rather than a default.
+///
+/// Its own paired control is
+/// [`a_real_loopback_connection_is_admitted_when_the_envelope_declares_it`],
+/// which differs only in the declared networks.
 #[ntex::test]
-async fn a_real_loopback_connection_is_refused_as_loopback() {
+async fn a_real_loopback_connection_is_refused_as_outside_the_envelope() {
     let fixture = build_fixture(declared_envelope()).await;
     let before = count_instances(&fixture.state.control_pg).await;
 
@@ -561,10 +566,78 @@ async fn a_real_loopback_connection_is_refused_as_loopback() {
     let body: serde_json::Value =
         serde_json::from_slice(&response.body().await.expect("body")).expect("json");
     assert_eq!(
-        body["reason"], "peer_is_loopback",
+        body["reason"], "peer_outside_envelope",
         "a real connection must be judged on its observed peer, not on a default"
     );
     assert_eq!(count_instances(&fixture.state.control_pg).await, before);
+
+    drop(server);
+    drop(fixture);
+    common::drain_pg().await;
+}
+
+/// A SINGLE-HOST DEPLOYMENT CAN ENROL, over a real socket, end to end.
+///
+/// This is the arm that would have caught the defect fixed on 2026-09-07: the
+/// loopback refusal sat above the network comparison, so this case was
+/// unreachable no matter what the operator declared, and every developer
+/// machine and every worker-launching harness in `tests/` was unenrollable.
+///
+/// It differs from the refusal above in the DECLARED NETWORKS and nothing else.
+/// Together they prove the rule consults the declaration rather than carrying a
+/// verdict of its own - which a suite of refusals alone cannot show, because a
+/// fence that refuses everything passes every one of them.
+#[ntex::test]
+async fn a_real_loopback_connection_is_admitted_when_the_envelope_declares_it() {
+    let single_host = EnrolmentEnvelope::parse("127.0.0.0/8", ENROLMENT_PORTS, false)
+        .expect("the declaration parses");
+    let fixture = build_fixture(single_host).await;
+
+    let state = Arc::clone(&fixture.state);
+    let server = test::server(move || {
+        let state = state.clone();
+        async move {
+            web::App::new().state(state).service(
+                web::resource("/internal/workers/enrol")
+                    .route(web::post().to(internal::enrol_worker_instance)),
+            )
+        }
+    })
+    .await;
+
+    let mut response = server
+        .post("/internal/workers/enrol")
+        .header("authorization", fixture.worker_header())
+        .send_json(&json!({
+            "port": ADVERTISED_PORT,
+            "public_key": URL_SAFE_NO_PAD.encode(instance_key(0x77)),
+        }))
+        .await
+        .expect("the enrolment response arrives");
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let body: serde_json::Value =
+        serde_json::from_slice(&response.body().await.expect("body")).expect("json");
+    let instance_id = body["instance_id"].as_str().expect("instance_id").to_string();
+
+    let row = fixture
+        .state
+        .control_pg
+        .query_one(
+            "SELECT advertise_host, advertise_port FROM zeroship.worker_instances WHERE id = $1",
+            &[&instance_id],
+        )
+        .await
+        .expect("the enrolled row is readable");
+
+    // Cleaned up BEFORE the assertions, for the reason the admitted arm above
+    // records: a panic skips whatever follows it.
+    forget(&fixture.state.control_pg, &instance_id).await;
+
+    // The stored host is the loopback address the transport OBSERVED, not
+    // anything the caller sent - the request body carries no host field at all.
+    let host: std::net::IpAddr = row.get("advertise_host");
+    assert_eq!(host, "127.0.0.1".parse::<std::net::IpAddr>().expect("host"));
+    assert_eq!(row.get::<_, i32>("advertise_port"), i32::from(ADVERTISED_PORT));
 
     drop(server);
     drop(fixture);

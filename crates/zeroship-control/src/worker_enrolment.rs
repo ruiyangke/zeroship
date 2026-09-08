@@ -124,8 +124,6 @@ pub enum EnrolmentRefusal {
     /// The transport exposed no peer address. There is no fallback to a
     /// caller-supplied host, by design.
     PeerAddressUnobservable,
-    /// The peer is a loopback address.
-    PeerIsLoopback,
     /// The peer is the unspecified address.
     PeerIsUnspecified,
     /// The peer address is outside every declared network.
@@ -142,7 +140,6 @@ impl EnrolmentRefusal {
             Self::EnvelopeUnset => "envelope_unset",
             Self::ProxyFronted => "proxy_fronted",
             Self::PeerAddressUnobservable => "peer_address_unobservable",
-            Self::PeerIsLoopback => "peer_is_loopback",
             Self::PeerIsUnspecified => "peer_is_unspecified",
             Self::PeerOutsideEnvelope => "peer_outside_envelope",
             Self::PortOutsideEnvelope => "port_outside_envelope",
@@ -283,9 +280,31 @@ impl EnrolmentEnvelope {
     /// exists to prevent. `claimed_port` is the one thing the registrant
     /// contributes.
     ///
-    /// An IPv4-mapped IPv6 peer is canonicalised BEFORE the loopback check.
-    /// Without that, `::ffff:127.0.0.1` answers `false` to
-    /// `Ipv6Addr::is_loopback` and walks straight past the loopback fence.
+    /// An IPv4-mapped IPv6 peer is canonicalised BEFORE the network comparison,
+    /// in both directions. A dual-stack listener reports `::ffff:10.7.3.9` for a
+    /// v4 client, which `contains` would not find in a v4 network, and the
+    /// derived host must be the v4 spelling or the `inet` column and every URL
+    /// built from it carry a mapped form of an address the operator declared in
+    /// v4.
+    ///
+    /// # Loopback is ruled on by the declared networks, not by a fence above them
+    ///
+    /// There is no standalone loopback refusal, and there was one until
+    /// 2026-09-07. It sat ABOVE the network comparison, so declaring
+    /// `127.0.0.0/8` could not admit a loopback peer and no single-host
+    /// deployment could enrol - which is every developer machine and every
+    /// harness in `tests/` that launches a worker. A fence whose declared input
+    /// cannot express a configuration the operator states outright is a defect,
+    /// not a policy.
+    ///
+    /// Admitting a declared loopback costs nothing the derivation was protecting.
+    /// The address is still OBSERVED rather than claimed, so a registrant cannot
+    /// choose it; ring position is minted by control and never derived from the
+    /// address, so there is nothing to grind toward; and a same-host caller
+    /// already reads the `svc/worker` key file, so it gains no reach it lacked.
+    /// The collapse case - every peer looking identical because a proxy sits in
+    /// front - is a DIFFERENT arm, `ProxyFronted`, which stays unconditional and
+    /// stays first.
     ///
     /// # Errors
     ///
@@ -305,9 +324,6 @@ impl EnrolmentEnvelope {
         }
         let observed = peer.ok_or(EnrolmentRefusal::PeerAddressUnobservable)?;
         let host = observed.ip().to_canonical();
-        if host.is_loopback() {
-            return Err(EnrolmentRefusal::PeerIsLoopback);
-        }
         if host.is_unspecified() {
             return Err(EnrolmentRefusal::PeerIsUnspecified);
         }
@@ -351,8 +367,10 @@ pub struct WorkerEnrolmentAccepted {
 /// `web/test.rs` asserts `req.peer_addr() == None`), so an in-process handler
 /// test can only ever exercise the unobservable-peer arm; the accepted arms are
 /// driven here, and the handler's real read of the transport is bound by a
-/// live-server arm that gets a genuine loopback peer and is refused BY NAME for
-/// being loopback rather than for having no peer.
+/// live-server arm that gets a genuine loopback peer and is refused BY NAME as
+/// outside the declared envelope rather than for having no peer. The two
+/// refusals being distinct is what gives that arm its power: it proves the
+/// handler read an address, not merely that it failed.
 pub async fn enrol(
     state: &AppState,
     peer: Option<SocketAddr>,
@@ -506,24 +524,65 @@ mod tests {
     }
 
     #[test]
-    fn a_loopback_peer_is_refused() {
-        for text in ["127.0.0.1:51314", "[::1]:51314"] {
+    fn a_loopback_peer_is_refused_when_the_envelope_does_not_declare_it() {
+        for text in ["127.0.0.1:51314", "[::1]:51314", "[::ffff:127.0.0.1]:51314"] {
             assert_eq!(
                 envelope().derive_address(peer(text), 8080),
-                Err(EnrolmentRefusal::PeerIsLoopback),
-                "{text} must be refused as loopback"
+                Err(EnrolmentRefusal::PeerOutsideEnvelope),
+                "{text} is outside 10.7.0.0/16 and must be refused"
             );
         }
     }
 
+    /// THE PAIRED CONTROL, differing from the case above in the declared
+    /// networks and NOTHING ELSE. Without it that test passes against an
+    /// envelope that refuses loopback unconditionally - which is exactly what
+    /// this module did until 2026-09-07 - and the suite cannot tell a rule that
+    /// consults the declaration from one that ignores it.
+    ///
+    /// The v4-mapped spelling is in here rather than in a test of its own
+    /// because canonicalisation is load-bearing in the ADMIT direction too: an
+    /// uncanonicalised `::ffff:127.0.0.1` is not found in `127.0.0.0/8`, so a
+    /// dual-stack control would refuse the single-host deployment its operator
+    /// just declared.
     #[test]
-    fn an_ipv4_mapped_loopback_peer_is_refused_as_loopback() {
-        // `Ipv6Addr::is_loopback` answers FALSE for `::ffff:127.0.0.1`, so
-        // without the canonicalisation this walks past the fence. A dual-stack
-        // listener reports exactly this spelling for a v4 client.
+    fn a_loopback_peer_is_admitted_when_the_envelope_declares_it() {
+        let single_host =
+            EnrolmentEnvelope::parse("127.0.0.0/8", "8080-8090", false).expect("declaration parses");
+        for text in ["127.0.0.1:51314", "[::ffff:127.0.0.1]:51314"] {
+            let derived = single_host
+                .derive_address(peer(text), 8085)
+                .unwrap_or_else(|refusal| panic!("{text} must be admitted, got {refusal:?}"));
+            assert_eq!(derived.ip(), "127.0.0.1".parse::<IpAddr>().expect("host"));
+            assert_eq!(derived.port(), 8085);
+        }
+    }
+
+    /// The unspecified address stays refused EVEN WHEN A DECLARED NETWORK
+    /// CONTAINS IT, which is the deliberate asymmetry with loopback. Loopback is
+    /// a real destination an operator may legitimately mean; `0.0.0.0` is not a
+    /// destination at all, so admitting it would write a row the dispatcher
+    /// cannot use.
+    ///
+    /// The declaration here is `0.0.0.0/8` rather than the default route: the
+    /// grammar refuses `0.0.0.0/0` outright as declaring no bound, so there is
+    /// no such thing as a widest declaration to test against. `0.0.0.0/8` is the
+    /// strongest one that exists AND contains the address, which is what makes
+    /// this a control rather than a refusal that would have fired anyway.
+    #[test]
+    fn the_unspecified_peer_is_refused_even_inside_a_declared_network() {
+        let containing =
+            EnrolmentEnvelope::parse("0.0.0.0/8", "8080-8090", false).expect("declaration parses");
         assert_eq!(
-            envelope().derive_address(peer("[::ffff:127.0.0.1]:51314"), 8080),
-            Err(EnrolmentRefusal::PeerIsLoopback)
+            containing.derive_address(peer("0.0.0.0:51314"), 8080),
+            Err(EnrolmentRefusal::PeerIsUnspecified)
+        );
+        // The paired control: a NON-unspecified address in that same network is
+        // admitted, so the refusal above is about the address and not about the
+        // declaration being rejected somewhere upstream.
+        assert!(
+            containing.derive_address(peer("0.1.2.3:51314"), 8080).is_ok(),
+            "0.1.2.3 is inside 0.0.0.0/8 and is a real address"
         );
     }
 
