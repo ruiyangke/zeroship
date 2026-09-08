@@ -305,6 +305,7 @@ async fn build_test_state_with_admin_quota(
         webhook_limiter: Arc::new(RateLimiter::new(Quota::per_minute(10_000, 100))),
         origin_scheme: zeroship_core::config::OriginScheme::Https,
         trust_proxy: trust_proxy_for_limiter,
+        worker_enrolment: zeroship_control::worker_enrolment::EnrolmentEnvelope::closed(),
         deploy_tmp_dir: deploy_tmp_dir.clone(),
         control_pg,
         app_base_domain: "zeroship.localhost".to_string(),

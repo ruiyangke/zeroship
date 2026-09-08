@@ -193,6 +193,38 @@ pub async fn get_app_env(
     }
 }
 
+/// POST /internal/workers/enrol - a worker registers ONE live process.
+///
+/// Guarded by the same full assertion profile as the privileged reads above,
+/// and at a lower rate still: a worker enrols once per boot. The endpoint
+/// grant is `CONTROL_WORKER_ENROL`, held by `svc/worker` alone.
+///
+/// The caller supplies its listening PORT and its instance PUBLIC KEY. It
+/// supplies no host, and this handler offers no way to. The one thing this
+/// function does that its callee cannot is read `req.peer_addr()` - the address
+/// the TRANSPORT observed - and hand it over. There is deliberately no fallback
+/// when the transport exposes none: that fallback is the vulnerability, and
+/// `crates/zeroship-control/src/worker_enrolment.rs` says what it would cost.
+///
+/// The `X-Forwarded-For` machinery this crate carries for audit and rate-limit
+/// identity ([`crate::http_util::source_ip`]) is NOT reachable from here, on
+/// purpose: a forwarded header is a caller-supplied host wearing a proxy's
+/// clothes. Control's own `trust_proxy` instead REFUSES enrolment outright,
+/// because behind a trusted proxy every observed peer is the proxy and the
+/// derivation would place every worker at one address.
+pub async fn enrol_worker_instance(
+    req: web::HttpRequest,
+    state: State<Arc<AppState>>,
+    body: web::types::Json<crate::worker_enrolment::WorkerEnrolmentRequest>,
+) -> web::HttpResponse {
+    if let Some(resp) =
+        check_service_auth(&req, &state.service_auth, endpoints::CONTROL_WORKER_ENROL).await
+    {
+        return resp;
+    }
+    crate::worker_enrolment::enrol(&state, req.peer_addr(), body.into_inner()).await
+}
+
 pub async fn get_versions(
     req: web::HttpRequest,
     state: State<Arc<AppState>>,

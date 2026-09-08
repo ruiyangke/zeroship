@@ -100,6 +100,10 @@ cyper = { workspace = true }
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] }
 url = { workspace = true }
 http = { workspace = true }
+# The worker-enrolment envelope is a CIDR list. Same crate `zeroship-core`
+# already parses egress destinations with, so one grammar answers "is this
+# address inside that range" everywhere in the tree.
+ipnet = { workspace = true }
 tracing = { workspace = true }
 # Phase 3 U7 — control plane OIDC RP module + console session store.
 # `hmac` is already present above (used by the legacy stripe webhook

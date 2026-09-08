@@ -54,6 +54,7 @@ pub mod stripe_handlers;
 pub mod stripe_store;
 pub mod tax;
 pub mod void_reissue;
+pub mod worker_enrolment;
 pub mod workflow_instance_api;
 pub(crate) mod workflow_limits;
 pub(crate) mod workflow_rollout;
@@ -524,6 +525,15 @@ pub struct AppState {
     /// XFF; otherwise an attacker with direct network reach can spoof
     /// audit log IPs and rate-limit buckets.
     pub trust_proxy: bool,
+    /// Where a worker instance may enrol FROM, and on what port it may claim to
+    /// be listening. Operator-declared, held here because nothing on the wire
+    /// may widen it; see [`worker_enrolment::EnrolmentEnvelope`] for why an
+    /// undeclared envelope refuses instead of defaulting open.
+    ///
+    /// It is a field on this struct rather than per-resource ntex state so a
+    /// route registered without it is a compile error rather than a 500 nobody
+    /// reads as a policy that stopped being enforced.
+    pub worker_enrolment: worker_enrolment::EnrolmentEnvelope,
     /// Directory where in-flight `.zship` deploy bodies are streamed
     /// before mmap+ingest. Defaults to `std::env::temp_dir()`. Operators
     /// may pin it to a fast local disk (`--deploy-tmp-dir`) so deploy

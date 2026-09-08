@@ -227,6 +227,32 @@ pub struct ControlSettings {
     #[config(name = "control.app_base_domain", default = "zeroship.ai".to_owned())]
     pub app_base_domain: Operational<String>,
 
+    /// Comma-separated CIDRs a worker instance may enrol FROM.
+    ///
+    /// Half of the enrolment envelope. Control derives a worker's advertised
+    /// host from the observed peer address of the enrolment connection and
+    /// refuses anything this list does not cover; the registrant supplies no
+    /// host at all. A default route (`0.0.0.0/0`, `::/0`) is refused as a
+    /// declaration, because it is the absence of a bound spelled as one.
+    ///
+    /// EMPTY - the default - REFUSES EVERY ENROLMENT. It does not default open,
+    /// and it does not refuse the boot either: absence disables exactly this
+    /// route, the way `ServiceAuth::unconfigured` refuses each guarded edge
+    /// rather than skipping the check. Refusing the boot is what
+    /// `service_key_file` does, and it is right there because a control plane
+    /// without it can serve no guarded edge at all.
+    #[config(name = "control.worker_enrolment_networks", default = String::new())]
+    pub worker_enrolment_networks: Operational<String>,
+
+    /// Listening ports a worker instance may claim, as `<low>-<high>` or one
+    /// port.
+    ///
+    /// The other half of the envelope, and the ONLY thing about its own address
+    /// a registrant contributes. Empty - the default - refuses every enrolment,
+    /// for the reason above; so does a range containing port zero.
+    #[config(name = "control.worker_enrolment_ports", default = String::new())]
+    pub worker_enrolment_ports: Operational<String>,
+
     /// Retention horizon (months) for the append-only audit tables
     /// `zeroship.app_audit` + `zeroship.authz_decisions`. Rows older than this
     /// are swept by the in-process retention cron.

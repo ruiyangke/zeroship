@@ -206,7 +206,7 @@ OUTSIDE these two markers is hand-maintained and is never rewritten
 by the generator.
 -->
 
-**162 canonical settings**: 124 operational, 31 secret, 5 bootstrap controls, 2 command controls. Every environment name below is `ZEROSHIP_<CANONICAL>` and every overlay path is the canonical name itself, because both are computed from the one declaration rather than spelled twice.
+**164 canonical settings**: 126 operational, 31 secret, 5 bootstrap controls, 2 command controls. Every environment name below is `ZEROSHIP_<CANONICAL>` and every overlay path is the canonical name itself, because both are computed from the one declaration rather than spelled twice.
 
 ### shared (no scope prefix: read by more than one binary)
 
@@ -329,6 +329,8 @@ by the generator.
 | `control.supabase_jwks_url` | operational | `ZEROSHIP_CONTROL_SUPABASE_JWKS_URL` | `control.supabase_jwks_url` | zeroship-control `--supabase-jwks-url` | empty |
 | `control.supabase_jwt_issuer` | operational | `ZEROSHIP_CONTROL_SUPABASE_JWT_ISSUER` | `control.supabase_jwt_issuer` | zeroship-control `--supabase-jwt-issuer` | empty |
 | `control.tax_provider` | operational | `ZEROSHIP_CONTROL_TAX_PROVIDER` | `control.tax_provider` | zeroship-control `--tax-provider` | `native` |
+| `control.worker_enrolment_networks` | operational | `ZEROSHIP_CONTROL_WORKER_ENROLMENT_NETWORKS` | `control.worker_enrolment_networks` | zeroship-control `--worker-enrolment-networks` | empty |
+| `control.worker_enrolment_ports` | operational | `ZEROSHIP_CONTROL_WORKER_ENROLMENT_PORTS` | `control.worker_enrolment_ports` | zeroship-control `--worker-enrolment-ports` | empty |
 
 ### data-cdc-server
 
