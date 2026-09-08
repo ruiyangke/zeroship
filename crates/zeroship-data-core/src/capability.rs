@@ -47,7 +47,7 @@
 //! imported into this module - but a DEFAULT `cargo doc` never rendered items
 //! that were `cfg`-gated out of it, so `tests/run_doc_gate.sh` never saw them.
 //! They are qualified paths now. The same thing happened to `SchemaIntrospect`'s
-//! two `crate::diff::` links in `storage.rs` the day before, for the same
+//! two `crate::catalog::` links in `storage.rs` the day before, for the same
 //! reason. Measured over `cargo doc -p zeroship-data-core --no-deps`: 20
 //! unresolved links under `--all-features` before, 16 after; 16 either way on
 //! default features.

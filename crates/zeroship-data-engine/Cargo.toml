@@ -31,10 +31,8 @@ description = "The data plane's ENGINE tier: CRUD passes, the SC-1 transaction p
 # `lock_policy`, `schema_cache` and the capability/storage trait surface every
 # pass here is written against.
 zeroship-data-core = { workspace = true }
-# `crate::query` (the DDL/DML builders + `SqlDialect`) and `crate::diff` (the
-# neutral schema metadata the mask and encryption passes read), both re-exported
-# from lib.rs so every in-file `crate::query::…` / `crate::diff::…` resolves.
-zeroship-schema = { workspace = true }
+# Runtime SQL compilation and the catalog metadata used by protection passes.
+zeroship-data-query-builder = { workspace = true }
 # `BackendHandle::Postgres`, the routed autocommit funnel, `pg_error`,
 # `pg_row_json` and the PG session SQL the transaction driver issues.
 zeroship-data-postgres = { workspace = true }
@@ -56,6 +54,7 @@ compio-postgres = { workspace = true, features = ["with-uuid-1"] }
 # `time::timeout` / `time::sleep` / `runtime::spawn` in the transaction driver.
 compio = { workspace = true }
 serde_json = { workspace = true }
+serde = { workspace = true }
 # Byte-column round-tripping (`crud/bytes_pass.rs`) and the ciphertext envelope.
 base64 = { workspace = true }
 tracing = { workspace = true }
@@ -65,6 +64,8 @@ zeroize = { version = "1", features = ["alloc", "derive"] }
 aes-gcm = { workspace = true }
 
 [dev-dependencies]
+zeroship-migrate = { workspace = true }
+zeroship-migrate-sqlite = { workspace = true }
 # The two constructors gated on `test-helpers` in the vendor and domain tiers -
 # `DbBinding::cold_start` chief among them. Declared with the feature ON here
 # and NOT in `[dependencies]`, which is the trap `zeroship-data-core`'s own

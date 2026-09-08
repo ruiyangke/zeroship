@@ -1,7 +1,7 @@
 use serde_json::Value;
 
+use crate::compile;
 use crate::exec::exec_query;
-use crate::query;
 use crate::tx_route::TxRoute;
 use zeroship_data_core::binding::DbBinding;
 use zeroship_data_core::error::DbError;
@@ -42,11 +42,7 @@ pub enum ApplyMode<'a> {
 /// strip existed and returned a set of "the creator supplied this, skip your
 /// bump" hints; under `assign` there is no such thing as a creator-supplied
 /// value for an assigned column.
-pub fn inspect_update(
-    app_id: &str,
-    collection: &str,
-    patch: &mut Value,
-) -> Result<(), DbError> {
+pub fn inspect_update(app_id: &str, collection: &str, patch: &mut Value) -> Result<(), DbError> {
     super::system_fields_pass::apply_system_fields_on_update(patch, app_id, collection)
 }
 
@@ -57,7 +53,7 @@ pub fn inspect_update(
 fn validate_user_doc_keys(doc: &Value) -> Result<(), DbError> {
     if let Some(obj) = doc.as_object() {
         for key in obj.keys() {
-            query::validate_field_name(key)?;
+            compile::validate_field_name(key)?;
         }
     }
     Ok(())
@@ -100,11 +96,11 @@ fn validate_update_patch_keys(patch: &Value) -> Result<(), DbError> {
             // Document-level operator (e.g. $set): its nested keys are fields.
             if let Some(nested) = value.as_object() {
                 for nested_key in nested.keys() {
-                    query::validate_field_name(nested_key)?;
+                    compile::validate_field_name(nested_key)?;
                 }
             }
         } else {
-            query::validate_field_name(key)?;
+            compile::validate_field_name(key)?;
         }
     }
     Ok(())
@@ -149,7 +145,7 @@ fn validate_update_patch_keys(patch: &Value) -> Result<(), DbError> {
 /// distinguishable in the signature.
 pub async fn apply(
     keys: &crate::encryption::KeyStore,
-    dialect: query::SqlDialect,
+    dialect: compile::SqlDialect,
     route: &TxRoute,
     binding: &DbBinding,
     collection: &str,
@@ -298,7 +294,7 @@ impl<'a> WriteStages<'a> {
     async fn apply_to_doc(
         &self,
         keys: &crate::encryption::KeyStore,
-        dialect: query::SqlDialect,
+        dialect: compile::SqlDialect,
         app_id: &str,
         collection: &str,
         row_pk: &str,
@@ -329,7 +325,7 @@ impl<'a> WriteStages<'a> {
         } else {
             Vec::new()
         };
-        if self.has_sqlite_binary && dialect == query::SqlDialect::Sqlite {
+        if self.has_sqlite_binary && dialect == compile::SqlDialect::Sqlite {
             super::encode_sqlite_binary_doc_with_schema(schema, row)?;
         }
         // AFTER encryption: a `t.encrypted({ wraps: t.bytes() })` column is the
@@ -353,7 +349,7 @@ impl<'a> WriteStages<'a> {
     async fn apply_to_update(
         &self,
         keys: &crate::encryption::KeyStore,
-        dialect: query::SqlDialect,
+        dialect: compile::SqlDialect,
         app_id: &str,
         collection: &str,
         row_pk: &str,
@@ -383,7 +379,7 @@ impl<'a> WriteStages<'a> {
         } else {
             Vec::new()
         };
-        if self.has_sqlite_binary && dialect == query::SqlDialect::Sqlite {
+        if self.has_sqlite_binary && dialect == compile::SqlDialect::Sqlite {
             super::encode_sqlite_binary_update_with_schema(schema, patch)?;
         }
         if self.has_plain_bytes {
@@ -435,7 +431,7 @@ pub struct TargetRowId {
 /// caller resolved for the whole operation, not a second derivation here.
 pub async fn resolve_target_row_ids(
     route: &TxRoute,
-    dialect: query::SqlDialect,
+    dialect: compile::SqlDialect,
     collection: &str,
     filter: &Value,
     limit: i64,
@@ -444,9 +440,15 @@ pub async fn resolve_target_row_ids(
     note_target_row_resolution_for_tests();
     let mut sql_filter = filter.clone();
     super::maybe_lower_sqlite_boolean_filter(dialect, schema, &mut sql_filter);
-    let built =
-        query::build_write_target_probe(route.schema(), collection, schema, &sql_filter, limit, dialect)
-            .map_err(DbError::from)?;
+    let built = compile::build_write_target_probe(
+        route.schema(),
+        collection,
+        schema,
+        &sql_filter,
+        limit,
+        dialect,
+    )
+    .map_err(DbError::from)?;
     note_target_row_resolution_sql_for_tests(&built.sql);
     let rows = exec_query(route, built).await?;
     Ok(rows
@@ -562,7 +564,7 @@ fn update_target(patch: &mut Value) -> &mut Value {
 /// [`apply`]'s parameter keeps one dialect per write op rather than re-asking.
 async fn rewrite_upsert_doc_id_to_existing_row_id(
     keys: &crate::encryption::KeyStore,
-    dialect: query::SqlDialect,
+    dialect: compile::SqlDialect,
     doc: &mut Value,
     route: &TxRoute,
     collection: &str,
@@ -610,9 +612,14 @@ async fn rewrite_upsert_doc_id_to_existing_row_id(
     }
     note_upsert_conflict_probe_for_tests();
     super::maybe_lower_sqlite_boolean_filter(dialect, schema, &mut filter);
-    let built =
-        query::build_conflict_probe_with_dialect(route.schema(), collection, schema, &filter, dialect)
-            .map_err(DbError::from)?;
+    let built = compile::build_conflict_probe_with_dialect(
+        route.schema(),
+        collection,
+        schema,
+        &filter,
+        dialect,
+    )
+    .map_err(DbError::from)?;
     let rows = exec_query(route, built).await?;
     let Some(existing_id) = rows.first().and_then(|row| match row.get("id") {
         Some(Value::String(id)) => Some(id.clone()),
@@ -770,7 +777,7 @@ mod tests {
     use zeroship_data_core::binding::DbBinding;
 
     use super::{
-        ApplyMode, apply, inspect_update, validate_update_patch_keys, validate_user_doc_keys,
+        apply, inspect_update, validate_update_patch_keys, validate_user_doc_keys, ApplyMode,
     };
     use crate::backend::sqlite::SqliteBackend;
 
@@ -810,10 +817,10 @@ mod tests {
         run(async {
             let collection = "people";
             assert!(
-                !crate::query::RESERVED_ID_PREFIXES.is_empty(),
+                !crate::compile::RESERVED_ID_PREFIXES.is_empty(),
                 "the reserved-prefix fence must rule on at least one platform prefix"
             );
-            for (index, &prefix) in crate::query::RESERVED_ID_PREFIXES.iter().enumerate() {
+            for (index, &prefix) in crate::compile::RESERVED_ID_PREFIXES.iter().enumerate() {
                 let app_id = format!("app_reserved_descriptor_id_prefix_{index}");
                 let binding = DbBinding::cold_start(&app_id);
                 crate::cache_schema_for_tests(
@@ -897,11 +904,34 @@ mod tests {
     }
 
     use crate::backend::SqlExecutor;
-    use crate::encryption;
-    use crate::query::{
-        FkEmission, SqlDialect, build_create_table_with_fks_for_dialect, build_insert_with_dialect,
-    };
     use crate::cache_schema_for_tests;
+    use crate::compile::{build_insert_with_dialect, SqlDialect};
+    use crate::encryption;
+    use zeroship_migrate::schema::query::FkEmission;
+    fn sqlite_fixture_sql(
+        schema: &zeroship_data_query_builder::SchemaName,
+        table: &str,
+        fields: &Value,
+        fks: &FkEmission<'_>,
+        dialect: SqlDialect,
+    ) -> Result<String, zeroship_migrate::schema::query::QueryError> {
+        assert_eq!(dialect, SqlDialect::Sqlite);
+        let policy =
+            zeroship_migrate_server::policy::ManagedPolicyConfig::default_confined([7u8; 32], 1)
+                .unwrap()
+                .current_ceiling_for_app(&uuid::Uuid::nil(), None)
+                .unwrap()
+                .policy;
+        zeroship_migrate::schema::query::build_create_table_with_fks_for_dialect(
+            zeroship_migrate::shipping_vendors(),
+            schema.as_str(),
+            table,
+            fields,
+            fks,
+            &zeroship_migrate_sqlite::DIALECT,
+            &policy,
+        )
+    }
 
     fn run<F: std::future::Future>(f: F) -> F::Output {
         compio::runtime::Runtime::new()
@@ -991,7 +1021,7 @@ mod tests {
             "the field's own column must carry the mask after the relocation stage",
         );
 
-        let raw_col = crate::query::raw_column_name("ssn");
+        let raw_col = crate::compile::raw_column_name("ssn");
         let ciphertext_b64 = row
             .get(&raw_col)
             .and_then(Value::as_str)
@@ -1083,8 +1113,8 @@ mod tests {
             let route = crate::exec::ambient_route_for_tests(app_id, handle.clone());
             cache_schema_for_tests(app_id, collection, schema);
 
-            let ddl = build_create_table_with_fks_for_dialect(
-                &zeroship_schema::SchemaName::new(app_id).expect("fixture schema name"),
+            let ddl = sqlite_fixture_sql(
+                &zeroship_data_query_builder::SchemaName::new(app_id).expect("fixture schema name"),
                 collection,
                 &ddl_schema,
                 &FkEmission::Inline,
@@ -1135,7 +1165,7 @@ mod tests {
             // `schema` was moved into `cache_schema_for_tests`; `ddl_schema` is
             // its byte-identical twin and is still owned here.
             let insert_built = build_insert_with_dialect(
-                &zeroship_schema::SchemaName::new(app_id).expect("fixture schema name"),
+                &zeroship_data_query_builder::SchemaName::new(app_id).expect("fixture schema name"),
                 collection,
                 &ddl_schema,
                 &insert_doc,
@@ -1244,7 +1274,7 @@ mod tests {
                  encryption pass wrote to",
             );
             let update_ciphertext = update_target
-                .get(crate::query::raw_column_name("ssn").as_str())
+                .get(crate::compile::raw_column_name("ssn").as_str())
                 .and_then(Value::as_str)
                 .expect("update ssn ciphertext in the raw column");
             let update_key = backend
@@ -1351,7 +1381,7 @@ mod tests {
             let handle = crate::backend::BackendHandle::Sqlite(Rc::clone(&backend));
             let route = crate::exec::ambient_route_for_tests(app_id, handle);
 
-            // `zeroship-schema`'s DDL emitter, so the `zero-migrate:mask:`
+            // `zeroship-data-query-builder`'s DDL emitter, so the `zero-migrate:mask:`
             // sentinel and the `__zs_raw__ssn` sibling are built rather than
             // spelled out here.
             //
@@ -1364,8 +1394,8 @@ mod tests {
             // `zeroship-plugin-db`'s `mask_flip.rs`, which builds with the
             // ENGINE's emitter; this case still earns its place as the SQLITE
             // arm of the fence, which that live-PostgreSQL suite cannot reach.
-            let ddl = build_create_table_with_fks_for_dialect(
-                &zeroship_schema::SchemaName::new(app_id).expect("fixture schema name"),
+            let ddl = sqlite_fixture_sql(
+                &zeroship_data_query_builder::SchemaName::new(app_id).expect("fixture schema name"),
                 collection,
                 &masked,
                 &FkEmission::Inline,

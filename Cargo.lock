@@ -7479,7 +7479,7 @@ dependencies = [
  "tracing",
  "zeroize",
  "zeroship-core",
- "zeroship-schema",
+ "zeroship-data-query-builder",
 ]
 
 [[package]]
@@ -7490,6 +7490,7 @@ dependencies = [
  "base64",
  "compio",
  "compio-postgres",
+ "serde",
  "serde_json",
  "tempfile",
  "tracing",
@@ -7499,11 +7500,13 @@ dependencies = [
  "zeroship-core",
  "zeroship-data-core",
  "zeroship-data-postgres",
+ "zeroship-data-query-builder",
  "zeroship-data-sqlite",
  "zeroship-metering",
+ "zeroship-migrate",
  "zeroship-migrate-policy",
  "zeroship-migrate-server",
- "zeroship-schema",
+ "zeroship-migrate-sqlite",
 ]
 
 [[package]]
@@ -7519,13 +7522,21 @@ dependencies = [
  "uuid",
  "zeroship-core",
  "zeroship-data-core",
+ "zeroship-data-query-builder",
  "zeroship-migrate-server",
- "zeroship-schema",
 ]
 
 [[package]]
 name = "zeroship-data-query-builder"
 version = "0.1.0"
+dependencies = [
+ "base64",
+ "serde_json",
+ "zeroship-core",
+ "zeroship-migrate",
+ "zeroship-migrate-backend",
+ "zeroship-migrate-core",
+]
 
 [[package]]
 name = "zeroship-data-sqlite"
@@ -7544,7 +7555,7 @@ dependencies = [
  "uuid",
  "zeroship-core",
  "zeroship-data-core",
- "zeroship-schema",
+ "zeroship-data-query-builder",
 ]
 
 [[package]]
@@ -7815,13 +7826,13 @@ dependencies = [
  "zeroship-authn",
  "zeroship-authz",
  "zeroship-core",
+ "zeroship-data-query-builder",
  "zeroship-migrate",
  "zeroship-migrate-backend",
  "zeroship-migrate-ir",
  "zeroship-migrate-policy",
  "zeroship-migrate-postgres",
  "zeroship-runtime",
- "zeroship-schema",
  "zeroship-test-support",
 ]
 
@@ -7881,7 +7892,6 @@ dependencies = [
  "zeroship-plugin-workflow",
  "zeroship-runtime",
  "zeroship-runtime-macros",
- "zeroship-schema",
  "zeroship-test-support",
 ]
 
@@ -8000,19 +8010,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
-]
-
-[[package]]
-name = "zeroship-schema"
-version = "0.1.0"
-dependencies = [
- "serde_json",
- "sha2 0.10.9",
- "zeroship-core",
- "zeroship-data-query-builder",
- "zeroship-migrate",
- "zeroship-migrate-backend",
- "zeroship-migrate-core",
 ]
 
 [[package]]

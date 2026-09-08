@@ -59,12 +59,12 @@ zeroship-migrate-backend = { workspace = true }
 # PostgreSQL host, so it names the vendor it wants rather than reaching for a
 # re-export the facade deliberately no longer carries.
 zeroship-migrate-postgres = { workspace = true }
-# For `zeroship_schema::SchemaName` only. The physical schema this service
+# For `zeroship_data_query_builder::SchemaName` only. The physical schema this service
 # creates is the same value the data plane later derives its runtime role from,
 # and `runtime_role_provisioning_sql` is one half of that pair - so both halves
 # take the validated type rather than a `&str` either identity would satisfy.
 # A leaf crate: it depends on `zeroship-core` and nothing else of ours.
-zeroship-schema = { workspace = true }
+zeroship-data-query-builder = { workspace = true }
 toml = { workspace = true }
 
 [dev-dependencies]

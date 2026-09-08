@@ -217,13 +217,7 @@ zeroship-bundle = { path = "crates/zeroship-bundle" }
 compio-postgres = { path = "libs/compio-postgres" }
 compio-redis = { path = "libs/compio-redis" }
 compio-s3 = { path = "libs/compio-s3" }
-zeroship-schema = { path = "crates/zeroship-schema" }
-# SC-3's `DbPlan`: the runtime query plan in which a fragment of SQL text is not
-# a representable value. A true leaf - it declares no dependencies of its own,
-# which is what lets the whole grammar be built and tested without a database, a
-# runtime or an isolate, and what makes `Serialize` impossible to derive on a
-# plan rather than merely discouraged. Nothing consumes it yet; porting
-# `zeroship-schema`'s runtime query builders onto it is a later step.
+# Runtime data contracts and the ORM implementation.
 zeroship-data-core = { path = "crates/zeroship-data-core" }
 zeroship-data-postgres = { path = "crates/zeroship-data-postgres" }
 zeroship-data-sqlite = { path = "crates/zeroship-data-sqlite" }

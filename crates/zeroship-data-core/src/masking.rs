@@ -24,7 +24,7 @@
 //! wire spelling, which makes it a schema-payload parser rather than a
 //! transform; its one caller is `apply_mask_on_write`.
 
-use zeroship_schema::diff::MaskKind;
+use zeroship_data_query_builder::catalog::MaskKind;
 
 /// Apply a single mask transform.
 ///

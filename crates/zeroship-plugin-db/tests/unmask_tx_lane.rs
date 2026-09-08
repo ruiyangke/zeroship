@@ -44,14 +44,21 @@
 //!   --features test-helpers --test unmask_tx_lane -- --test-threads=1
 //! ```
 
+#[path = "support/schema.rs"]
+mod schema_fixture;
+#[allow(unused_imports)]
+use schema_fixture::{fixture_table_sql, fixture_table_sql_for};
+#[allow(unused_imports)]
+use zeroship_migrate::schema::query::FkEmission;
+
 use std::rc::Rc;
 
 use compio_postgres::{NoTls, Pool};
 use serde_json::{json, Value};
 use zeroship_data_core::binding::DbBinding;
 use zeroship_data_core::error::DbError;
+use zeroship_plugin_db::compile::SqlDialect;
 use zeroship_plugin_db::crud::mask_policy::dispatch_set_mask_policy;
-use zeroship_plugin_db::query::{build_create_table_with_fks, FkEmission, SqlDialect};
 use zeroship_plugin_db::tx_route::{CapturedRoute, TxRoute};
 
 #[path = "support/mod.rs"]
@@ -74,7 +81,9 @@ async fn require_pg() -> String {
             drop(client);
             url
         }
-        Err(e) => panic!("the unmask-tx-lane suite requires a reachable server at PG_TEST_URL: {e}"),
+        Err(e) => {
+            panic!("the unmask-tx-lane suite requires a reachable server at PG_TEST_URL: {e}")
+        }
     }
 }
 
@@ -114,8 +123,13 @@ async fn fixture_with_schema(pool: &Rc<Pool>, url: &str, app: &str, schema: Valu
     pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[])
         .await
         .unwrap();
-    let ddl = build_create_table_with_fks(&zeroship_schema::SchemaName::new(app).expect("fixture schema name"), "people", &schema, &FkEmission::Inline)
-        .expect("the platform's own CREATE TABLE emitter");
+    let ddl = fixture_table_sql(
+        &zeroship_data_query_builder::SchemaName::new(app).expect("fixture schema name"),
+        "people",
+        &schema,
+        &FkEmission::Inline,
+    )
+    .expect("the platform's own CREATE TABLE emitter");
     pool.batch_execute(&ddl)
         .await
         .unwrap_or_else(|e| panic!("emitted DDL must apply: {e}\n{ddl}"));
@@ -228,7 +242,7 @@ async fn a_find_unmask_inside_a_transaction_reaches_the_row_that_transaction_ins
         .await
         .expect("install the app's declared mask policy");
 
-    zeroship_plugin_db::install_tx_marker_for_tests(app, &url).await;
+    zeroship_plugin_db::begin_transaction_for_tests(app, &url).await;
 
     let id = insert_on(
         tx_route(app).await,
@@ -276,7 +290,7 @@ async fn a_find_unmask_inside_a_transaction_reaches_the_row_that_transaction_ins
     )
     .await;
 
-    zeroship_plugin_db::uninstall_tx_marker_for_tests(app).await;
+    zeroship_plugin_db::rollback_transaction_for_tests(app).await;
 
     let unmasked = unmasked.unwrap_or_else(|e| {
         panic!(
@@ -341,7 +355,7 @@ async fn a_denied_unmask_audit_row_survives_the_rollback_of_its_transaction() {
         "no unmask has been attempted yet",
     );
 
-    zeroship_plugin_db::install_tx_marker_for_tests(app, &url).await;
+    zeroship_plugin_db::begin_transaction_for_tests(app, &url).await;
 
     // The control write: an ordinary insert that shares the transaction the
     // denied attempt is made inside.
@@ -371,7 +385,7 @@ async fn a_denied_unmask_audit_row_survives_the_rollback_of_its_transaction() {
     );
 
     // ROLLBACK the transaction both writes were made inside.
-    zeroship_plugin_db::uninstall_tx_marker_for_tests(app).await;
+    zeroship_plugin_db::rollback_transaction_for_tests(app).await;
 
     // ---- CONTROL: the ordinary write inside that transaction is gone.
     let surviving = pool
@@ -438,7 +452,7 @@ async fn an_encrypted_unmask_inside_a_transaction_reaches_the_row_that_transacti
         .await
         .expect("install the app's declared mask policy");
 
-    zeroship_plugin_db::install_tx_marker_for_tests(app, &url).await;
+    zeroship_plugin_db::begin_transaction_for_tests(app, &url).await;
 
     let id = insert_on(
         tx_route(app).await,
@@ -478,7 +492,7 @@ async fn an_encrypted_unmask_inside_a_transaction_reaches_the_row_that_transacti
     )
     .await;
 
-    zeroship_plugin_db::uninstall_tx_marker_for_tests(app).await;
+    zeroship_plugin_db::rollback_transaction_for_tests(app).await;
 
     let inside = inside.unwrap_or_else(|e| {
         panic!(

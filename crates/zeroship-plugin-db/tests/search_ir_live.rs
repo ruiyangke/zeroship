@@ -32,7 +32,7 @@
 //! **The shipped product path does not use the IR.** No crate outside
 //! `zeroship-data-query-builder` depends on it - the dependency this target adds is a
 //! `[dev-dependencies]` one, declared for these tests. `env.db.<coll>.search()`
-//! still reaches `zeroship_schema::query::build_vector_search`
+//! still reaches `zeroship_data_query_builder::compile::build_vector_search`
 //! (`crates/zeroship-data-postgres/src/postgres.rs:456`).
 //!
 //! That is why `the_ir_and_the_shipped_builder_rank_identically` is here. It is
@@ -187,11 +187,8 @@ fn vector_text(values: &[f32]) -> String {
 /// a typed parameter to whatever the driver takes.
 ///
 /// It is written **here** rather than in the IR because it is the driver's
-/// half, and it is worth noticing what it is not: there is no per-dialect
-/// branch and no sentinel prefix. Every arm is a total function of the value's
-/// type, which is the property `Literal` buys - the encoding the SQLite arm
-/// smuggles through `SQLITE_BINARY_BIND_PREFIX` on a `String` parameter
-/// (`crates/zeroship-schema/src/query.rs:593`) has no analogue.
+/// half. Parameters are encoded from their types, and binary interpretation
+/// belongs to the compiled expression.
 ///
 /// Text format is used because it is the channel the shipped path uses
 /// (`query_text_params`, reached from
@@ -226,6 +223,7 @@ fn column(name: &str) -> Ident {
 
 fn docs_projection() -> Projection {
     Projection::rows(vec![
+        ProjectedField::column(column("id")).expect("identity field"),
         ProjectedField::column(column("title")).expect("field"),
         ProjectedField::column(column("tenant_id")).expect("field"),
     ])
@@ -400,13 +398,13 @@ fn the_ir_and_the_shipped_builder_rank_identically() {
             "tenant_id": { "type": "number" },
             "embedding": { "type": "vector", "vectorDims": DIMS },
         });
-        let shipped = zeroship_schema::query::build_vector_search(
-            &zeroship_schema::SchemaName::new(SCHEMA).expect("fixture schema name"),
+        let shipped = zeroship_data_query_builder::compile::build_vector_search(
+            &zeroship_data_query_builder::SchemaName::new(SCHEMA).expect("fixture schema name"),
             "docs",
             "embedding",
             &query,
             10,
-            zeroship_schema::descriptors::VectorMetric::Cosine,
+            zeroship_data_query_builder::descriptors::VectorMetric::Cosine,
             &json!({ "tenant_id": 1 }),
             &schema_hint,
         )
@@ -497,8 +495,8 @@ fn postgres_serves_the_inner_product_that_sqlite_refuses() {
         );
 
         // The SQLite half: the same metric, refused.
-        use zeroship_plugin_db::backend::{VectorIndex, VectorMetric as BackendMetric};
         use zeroship_data_core::binding::DbBinding;
+        use zeroship_plugin_db::backend::{VectorIndex, VectorMetric as BackendMetric};
         let dir = tempfile::tempdir().expect("tempdir");
         let sqlite = zeroship_plugin_db::backend_selection::new_sqlite_backend(
             std::path::PathBuf::from(dir.path()),

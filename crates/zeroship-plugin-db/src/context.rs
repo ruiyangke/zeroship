@@ -325,8 +325,8 @@ impl ThreadDbContext {
     /// dialect is needed to BUILD a statement, so "no selection yet" has to
     /// answer something. "Selected, and not one of the two I know about" does
     /// not, and now cannot.
-    pub(crate) fn sql_dialect(&self) -> zeroship_schema::query::SqlDialect {
-        use zeroship_schema::query::SqlDialect;
+    pub(crate) fn sql_dialect(&self) -> zeroship_data_query_builder::compile::SqlDialect {
+        use zeroship_data_query_builder::compile::SqlDialect;
         match &self.backend {
             Some(BackendHandle::Sqlite(_)) => SqlDialect::Sqlite,
             Some(BackendHandle::Postgres(_)) => SqlDialect::Postgres,

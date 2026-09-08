@@ -241,7 +241,7 @@ raw column named with a leading underscore is therefore already unrepresentable
 on every path a creator can reach, and the entire inbound half of the flip
 disappears: no new reservation, no filter-builder change, no schema hint threaded
 through. Adding a `_raw` suffix reservation instead would have to land in **two**
-independent tables (`crates/zeroship-schema/src/query.rs:754` and
+independent tables (`crates/zeroship-schema/src/query.rs:754` and (DELETED; runtime compilation now lives in `crates/zeroship-data-query-builder/src/compile.rs`, and migration DDL in `crates/zeroship-migrate-core/src/schema/query.rs`.)
 `crates/zeroship-migrate-core/src/schema/query.rs:379`) with no dependency edge to keep them
 agreeing. Choosing a name no existing gate admits is strictly better than adding
 a fence, because a fence protects only the surfaces someone remembered to fence.
@@ -380,7 +380,7 @@ including the two the design records as owed for steps 3 and 5a.
 | **SC-3** | shared core plus the read family built (`5c83046fc`), zero dependencies, and the SEARCH **and WRITE** families ported onto the IR - `search.rs` 562 lines, `write.rs` 1057, so neither is a stub (counted 2026-08-29). `crates/zeroship-data-query-builder/src/` also carries `plan.rs`, `predicate.rs`, `projection.rs`, `path.rs`, `literal.rs`, `ident.rs` and a `render/` module. **Still absent:** the remaining families and the ledger. Unmask was deliberately left off the IR to avoid colliding with the SC-6 flip |
 | **SC-4** | **decision 4 is implemented** (`8c6caa465`, dev-ness as a typed input) and SC-4 does not record it. Decision 1 unblocked and small; decision 2 underspecified by SC-4's own admission |
 | **SC-1** | **the reducer is BUILT AND WIRED** (checked 2026-08-29). `crates/zeroship-data-engine/src/transaction/reducer/` carries `deadline.rs`, `frames.rs`, `identity.rs` and its own `tests.rs`, and it is reached from `crates/zeroship-data-engine/src/transaction/driver.rs` and `.../transaction/probe.rs`. |
-| **SC-6** | **the flip is IN THE TREE** (checked 2026-08-29): `mask_sibling_column_for_field` no longer exists, and `__zs_raw__` / `raw_column_name` appear 44 times in `crates/zeroship-schema/src/query.rs` and 14 in `.../src/diff.rs`. The masked field's own column holds the mask and `__zs_raw__<field>` holds the plaintext. **Owed:** adding `.mask()` to a column that already holds data is now a real engine backfill for unencrypted columns; the ENCRYPTED case stays refused by decision, because `BackfillSpec` is structured SQL and the engine holds no key material |
+| **SC-6** | **the flip is IN THE TREE** (checked 2026-08-29): `mask_sibling_column_for_field` no longer exists, and `__zs_raw__` / `raw_column_name` appear 44 times in `crates/zeroship-schema/src/query.rs` and 14 in `.../src/diff.rs`. The masked field's own column holds the mask and `__zs_raw__<field>` holds the plaintext. **Owed:** adding `.mask()` to a column that already holds data is now a real engine backfill for unencrypted columns; the ENCRYPTED case stays refused by decision, because `BackfillSpec` is structured SQL and the engine holds no key material | (DELETED; runtime compilation now lives in `crates/zeroship-data-query-builder/src/compile.rs`, and migration DDL in `crates/zeroship-migrate-core/src/schema/query.rs`.)
 
 At zero and named as such in the design: the private module map, the
 artifact/init channel, `DbIsolateBinding`, the deletion of `registerModel`, the

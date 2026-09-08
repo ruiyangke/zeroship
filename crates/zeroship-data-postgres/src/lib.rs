@@ -55,7 +55,7 @@ pub mod pg_error;
 // The whole introspection chain follows `SchemaIntrospect`'s gate in data-core,
 // and that trait is UNGATED as of 2026-09-04 - the protection floor on the write
 // path reads this catalog, so it ships. Nothing new is linked by that: this
-// module names `compio_postgres::Pool` and `zeroship_schema::diff`, both already
+// module names `compio_postgres::Pool` and `zeroship_data_query_builder::catalog`, both already
 // normal dependencies of the crate.
 pub mod pg_introspect;
 pub mod pg_row_json;

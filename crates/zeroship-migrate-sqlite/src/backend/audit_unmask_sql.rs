@@ -69,7 +69,7 @@ use super::authorizer::Mode;
 /// The unqualified table name, shared with the data plane's INSERT.
 ///
 /// `__zeroship_` is a reserved prefix: `zeroship_schema`'s `validate_collection`
-/// (`crates/zeroship-schema/src/query.rs`) refuses a creator collection that
+/// (`crates/zeroship-data-query-builder/src/compile.rs`) refuses a creator collection that
 /// starts with it, which is what keeps a creator from declaring a colliding
 /// table of their own. See the module doc of `provisioning` in
 /// `zeroship-migrate-server` for the caveat on the FORKED copy of that check.
@@ -139,9 +139,7 @@ pub fn audit_unmask_ddl(schema: &str) -> Vec<String> {
         // The index NAMES are qualified so two apps attached into one session
         // cannot collide on them; the ON clause names the bare table, which is
         // the only shape SQLite accepts.
-        format!(
-            r#"CREATE INDEX IF NOT EXISTS {q}."{AUDIT_UNMASK_TABLE}_ts_idx" ON {t} (ts)"#
-        ),
+        format!(r#"CREATE INDEX IF NOT EXISTS {q}."{AUDIT_UNMASK_TABLE}_ts_idx" ON {t} (ts)"#),
         format!(
             r#"CREATE INDEX IF NOT EXISTS {q}."{AUDIT_UNMASK_TABLE}_actor_idx" ON {t} (actor_id, ts)"#
         ),

@@ -370,7 +370,7 @@ generator instead.
 **`SYSTEM_FIELD_NAMES` is NOT one of them, and this paragraph said it was.** It
 is a trusted producer, for a reason that only became visible once the write pass
 was converted: `implicit_read_projection_parts`
-(`crates/zeroship-schema/src/query.rs:3644-3656`) runs two loops, and only the
+(`crates/zeroship-schema/src/query.rs:3644-3656`) runs two loops, and only the (DELETED; runtime compilation now lives in `crates/zeroship-data-query-builder/src/compile.rs`, and migration DDL in `crates/zeroship-migrate-core/src/schema/query.rs`.)
 SECOND consults `readable`. The seven are projected unconditionally; everything
 else is projected at the creator-authored descriptor's discretion. Deleting the
 const would move the platform's own columns into the discretionary loop, where

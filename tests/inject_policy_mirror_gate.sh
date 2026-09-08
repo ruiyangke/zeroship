@@ -67,56 +67,12 @@
 #     tests/e2e_db_app_end_to_end.sh stage 4 and tests/golden_path.sh.
 #   - A rule ASSEMBLED at runtime (string concatenation, a builder, a serde
 #     struct rendered to TOML) carries no `author_primary_key =` line and is
-#     invisible to arm 1. `zeroship-schema`'s `build_system_field_columns`
-#     (crates/zeroship-schema/src/query.rs) is a live example: it emits the same
-#     seven columns from Rust, is a genuine SEVENTH producer of this shape, and
-#     it cannot be made to consume the fragment: it renders DDL directly, with
-#     no policy document in the path, and the two producers disagree on the
-#     id/created_by/updated_by TYPE (varchar(255) via the engine vs TEXT here,
-#     measured 2026-08-10 on a deployed app schema). Closing THE TYPES needs a
-#     check of a different kind - comparing rendered DDL, not text. See the
-#     fragment's header. Both producers now pin the same bytewise comparison
-#     intent, but this gate still cannot prove that rendered-DDL agreement.
-#
-#     THE NAMES, HOWEVER, ARE TEXT, and arm 5 now compares them. That paragraph
-#     read as though the whole seventh producer were out of reach, and the part
-#     that was in reach went unguarded for as long as it did partly because this
-#     header said it could not be done. What the Rust producer publishes as
-#     `SYSTEM_FIELD_NAMES` is an ordered list of the same seven names, and
-#     nothing bound it to the fragment.
-#
-#     Why that matters more than a tidiness argument: `SYSTEM_FIELD_NAMES` is
-#     not only DDL input. `implicit_read_projection_parts`
-#     (crates/zeroship-schema/src/query.rs) walks it to build the SELECT column
-#     list, reached from four production builders in that file, and
-#     `read_surface_columns` derives from it.
-#
-#     THE FIRST DRAFT OF THIS ARM GOT THE CONSEQUENCE WRONG, and the wrong
-#     version is the intuitive one, so it is written out here rather than
-#     silently replaced. It said an eighth column added to the fragment alone
-#     would never be projected. It would be. `implicit_read_projection_parts`
-#     runs TWO loops: the const first, then every readable descriptor key not
-#     already covered, and real descriptors carry the injected columns as
-#     ordinary readable fields (examples/db-todos/generated/zeroship/
-#     schema.runtime.json), generated from this same fragment.
-#
-#     The real asymmetry is sharper, and it runs both ways.
-#
-#     Const-only (a name here that the fragment does not inject): the first loop
-#     projects it UNCONDITIONALLY, so every SELECT and every RETURNING names a
-#     column no migration created. That is not a degraded read, it is every read
-#     and every write of every collection failing on `column does not exist`.
-#
-#     Fragment-only (an eighth injected column not added here): it is created,
-#     assigned, and projected - but only via the SECOND loop, which honours
-#     `readable`. The seven in the const are projected without consulting it.
-#     So the const is what makes the platform's own columns unhideable by a
-#     hand-edited descriptor, and an eighth column would not inherit that: the
-#     creator could drop the key or set `readable: false` and stop projecting
-#     the value the platform still writes to their row.
-#
-#     Either way the two lists have to move together, which is what this arm
-#     enforces. Only the failure mode differs.
+#     invisible to arm 1. Runtime code no longer emits DDL; the migration
+#     engine reads the shared charter directly. The remaining runtime mirror
+#     is SYSTEM_FIELD_NAMES, which controls unconditional read projections.
+#     Arm 5 compares its names and order against the charter so a runtime read
+#     cannot require a column the migration did not create or let a descriptor
+#     hide a field the platform assigns.
 #   - It reads TRACKED files only, via `git ls-files`. Build output
 #     (sdks/vite-plugin/dist/), node_modules, target/, and sibling worktrees
 #     under .worktrees/ are all ignored and therefore unscanned. That is
@@ -443,18 +399,8 @@ if ! gate_arm rule_lines "$rule_lines" 5; then
 fi
 
 # ---------------------------------------------------------------------------
-# Arm 5 (the seventh producer's NAME SET): the fragment assigns seven columns;
-# `zeroship-schema` publishes those same seven as an ordered Rust const. Prove
-# the two lists still agree, in content AND in order.
-#
-# ORDER, not just membership. `build_system_field_columns` renders its DDL by
-# walking the const, and the const's own rustdoc says "Order MUST match
-# SYSTEM_FIELD_NAMES" of the column emitter. A set comparison would pass on a
-# reordering that changes the emitted column order of every creator table.
-#
-# WHAT THIS ARM DOES NOT CLOSE. Types, nullability, defaults and collation are
-# still uncompared - see the header. This arm rules on names and their order,
-# which is exactly the part that is text on both sides.
+# Compare the charter's assigned fields with the runtime projection order.
+# Types, defaults and index emission are owned by the migration engine.
 # ---------------------------------------------------------------------------
 #
 # A NOTE ON THE SINGLE PATH BELOW. An earlier draft of this arm special-cased a
@@ -464,7 +410,7 @@ fi
 # better than the code it rejected - a missing file makes the extractor yield
 # nothing, which is already the floor's job to catch, so there is one path and
 # one declaration. Do not reintroduce an early gate_arm call here.
-RUST_NAMES_FILE="crates/zeroship-schema/src/query.rs"
+RUST_NAMES_FILE="crates/zeroship-data-query-builder/src/compile.rs"
 
 # The fragment's side: every injected column carrying an `assign =` binding, in
 # declaration order. `assign` is the discriminator on purpose - it selects the
@@ -536,73 +482,8 @@ if [ "$fragment_names" != "$rust_names" ]; then
     exit 2
 fi
 
-# ---------------------------------------------------------------------------
-# Arm 6 (the same drift, one level down): the fragment's three system INDEXES
-# are restated in Rust as `SYSTEM_INDEXED_COLS` - once per dialect, three
-# identical copies in one file. Prove all three still match the fragment.
-#
-# Arm 5 compares assigned COLUMNS and is blind to this: an index set can drift
-# with every column name still agreeing. The consequence is quieter than arm 5's
-# and therefore more likely to survive review - nothing errors, the platform
-# simply stops indexing a column it indexes on the other two dialects, and the
-# first symptom is a sequential scan on someone's production soft-delete filter.
-#
-# Order is compared here too. These are single-column indexes, so order carries
-# no semantics for the database, but the three copies are maintained by hand
-# against the fragment and a divergence in order is the cheapest available
-# signal that one of them was edited in isolation.
-# ---------------------------------------------------------------------------
-charter_index_cols=$(
-    sed -n '/^\[\[inject\]\]/,/^\[\[/p' "$ROOT/$FRAGMENT" \
-        | grep -E '^\s*\{ *name *= *"ix_' \
-        | sed -E 's/.*columns *= *\[([^]]*)\].*/\1/' \
-        | tr -d '" ' | tr ',' '\n' | grep . \
-        || true
-)
-charter_index_n=$(printf '%s\n' "$charter_index_cols" | grep -c . || true)
-
-# Every Rust restatement, normalised to one comma-joined line each. Compared
-# individually rather than through `sort -u`: collapsing them first would hide
-# the case where two dialects agree with the fragment and the third does not.
-mapfile -t rust_index_decls < <(
-    grep -h 'SYSTEM_INDEXED_COLS: &\[&str\] = ' "$ROOT/$RUST_NAMES_FILE" \
-        | sed -E 's/.*= *&\[([^]]*)\].*/\1/' \
-        | tr -d '" ' \
-        || true
-)
-charter_index_joined=$(printf '%s\n' "$charter_index_cols" | paste -sd, -)
-
-# Examined = Rust declarations this arm actually compared. Gated on the charter
-# side having produced something: with an empty fragment list every declaration
-# would "disagree" for a reason that is about the extractor, not the tree.
-index_examined=0
-[ "$charter_index_n" -gt 0 ] && index_examined=${#rust_index_decls[@]}
-
-# Floor 2 against today's 3: one dialect may legitimately be retired, all three
-# vanishing at once means the grep stopped matching.
-if ! gate_arm index_agreement "$index_examined" 2; then
-    echo "  FAIL: the fragment yielded $charter_index_n system index column(s) and"
-    echo "        ${#rust_index_decls[@]} SYSTEM_INDEXED_COLS declaration(s) were found."
-    echo "        The extraction broke; re-point this arm, do not lower the floor."
-    gate_arms_finish || true
-    exit 2
-fi
-
-index_drift=0
-for decl in "${rust_index_decls[@]}"; do
-    [ "$decl" = "$charter_index_joined" ] && continue
-    index_drift=1
-    echo "  FAIL: a SYSTEM_INDEXED_COLS copy has drifted from the fragment."
-    echo "        $FRAGMENT system indexes: $charter_index_joined"
-    echo "        $RUST_NAMES_FILE copy:    $decl"
-done
-if [ "$index_drift" -ne 0 ]; then
-    echo "        The fragment creates these indexes; the Rust copies tell each"
-    echo "        dialect's DDL builder which columns to index. A copy that"
-    echo "        drifts silently unindexes a column on one dialect only."
-    gate_arms_finish || true
-    exit 2
-fi
+# Index emission reads the charter through the migration engine. There is no
+# runtime DDL emitter or duplicate SYSTEM_INDEXED_COLS list to compare.
 
 echo "  ok: one [[inject]] rule ($rule_lines semantic lines), $consumers_n consumers," \
      "generated view fresh, $name_agreement_n platform column names agree with" \

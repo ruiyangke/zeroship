@@ -13,19 +13,8 @@ zeroship-runtime-macros = { workspace = true }
 # (no external crate) — flagged in the PR 3 commit body per the
 # "new Cargo dep" disclosure rule.
 zeroship-core = { workspace = true }
-# **Schema-authority P1** — the vendor-neutral schema-description layer (DDL
-# builders, diff classifier, sentinel codec, schema-shape descriptor enums)
-# lives in the leaf crate `zeroship-schema`. plugin-db's data plane and vendor
-# tiers call *into* it for DDL / diff / codec / metadata values, and re-export
-# the moved neutral items from their original module paths
-# (`crate::query`, `crate::diff`, `crate::backend::{VectorMetric,…}`) so
-# neutral call sites resolve unchanged. This also listed
-# `crate::crud::mask_backfill::{build,parse}_mask_sentinel` until 2026-09-02;
-# that module is deleted, and its two live consumers (`backend::pg_introspect`,
-# `backend::sqlite`) call `zeroship_schema::mask_codec` directly rather than
-# through any re-export. PostgreSQL introspection stays here in
-# `backend::pg_introspect`; no vendor type crosses into the schema crate.
-zeroship-schema = { workspace = true }
+# Runtime SQL compilation, catalog metadata and protection sentinel decoding.
+zeroship-data-query-builder = { workspace = true }
 # The data plane's domain tier. `DbError` and `DbBinding` moved out of this
 # crate; what stayed behind is the ADAPTER's half of the error hierarchy, the
 # `ToOpError` lowering in `src/op_error.rs`.
@@ -139,7 +128,6 @@ zeroship-test-support = { workspace = true }
 # search family's lowering is exercised by `tests/search_ir_live.rs`, which
 # executes the SQL it renders against a real server - the half its own crate
 # cannot reach, having no dependencies at all.
-zeroship-data-query-builder = { workspace = true }
 compio = { workspace = true }
 serde_json = { workspace = true }
 # Test-only constructors (`row_for_test` / `column_for_test`) for the
@@ -195,7 +183,7 @@ zeroship-migrate-sqlite = { workspace = true }
 # The SAME argument again, for the PROTECTION-FLOOR fixture. The floor's input is
 # the mask/encryption sentinel a creator table carries, and in production that
 # sentinel is written by the migration engine - never by
-# `zeroship_schema::query::build_create_table_with_fks`, whose only callers are
+# `zeroship_data_query_builder::compile::build_create_table_with_fks`, whose only callers are
 # tests (measured: zero `src` call sites outside its own module). A fixture that
 # builds its table with the data plane's emitter therefore cannot see a
 # disagreement between the two, which is exactly the defect that shipped. The

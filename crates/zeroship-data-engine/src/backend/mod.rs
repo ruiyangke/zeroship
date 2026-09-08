@@ -12,7 +12,7 @@
 //!
 //! ## What this is NOT
 //!
-//! - **Not a query-IR layer.** [`crate::query`] still emits Postgres
+//! - **Not a query-IR layer.** [`crate::compile`] still emits Postgres
 //!   DDL/DML directly via `quote_ident`, `ON CONFLICT`, `RETURNING`,
 //!   etc. The architecture critic explicitly scoped that out — see
 //!   `query.rs` (4099 LOC) and the review's R2 recommendation: "wait
@@ -31,7 +31,7 @@
 //! ## Trait shape
 //!
 //! Associated types `Client` / `LiveSchema` keep the consumer files
-//! free of `compio_postgres::Client` / `crate::diff::LiveSchema`
+//! free of `compio_postgres::Client` / `crate::catalog::LiveSchema`
 //! direct references — they go through `B::Client` / `B::LiveSchema`
 //! instead. The PG impl ties them to the concrete types in
 //! [`postgres::PostgresBackend`].
@@ -117,19 +117,18 @@ impl Backend for SqliteBackend {}
 // why - its trait is `cfg(feature)` in data-core while plugin-db impls it under
 // `cfg(any(test, feature))`, and the mismatch was invisible to every `cargo
 // check` configuration and appeared only in the lib-TEST target.
-pub use zeroship_data_postgres::{PostgresBackend, pg_error, pg_row_json, postgres};
+pub use zeroship_data_postgres::{pg_error, pg_row_json, postgres, PostgresBackend};
 // `pg_autocommit` and `pg_session_sql` lost their last UNGATED consumer in this
 // crate when the PostgreSQL tier left: what still names them is `exec.rs`'s test
 // module, `auth/bootstrap.rs` (itself gated) and `crates/zeroship-plugin-db/tests/integration.rs`. The
 // gate keeps a default build warning-free without hiding them from the callers
 // that exist.
 #[cfg(any(test, feature = "test-helpers"))]
-pub use zeroship_data_postgres::{pg_autocommit, pg_session_sql};
-#[cfg(any(test, feature = "test-helpers"))]
-pub use zeroship_data_postgres::{PgLockManager, PgSqlExecutor, lock_guard, pg_introspect};
-#[cfg(any(test, feature = "test-helpers"))]
 pub use zeroship_data_postgres::lock_guard::LockGuard;
-
+#[cfg(any(test, feature = "test-helpers"))]
+pub use zeroship_data_postgres::{lock_guard, pg_introspect, PgLockManager, PgSqlExecutor};
+#[cfg(any(test, feature = "test-helpers"))]
+pub use zeroship_data_postgres::{pg_autocommit, pg_session_sql};
 
 // The vocabulary these capability traits speak in moved to
 // `zeroship-data-core` on 2026-09-02: every one is a value type or a constant
@@ -203,26 +202,20 @@ pub use zeroship_data_core::storage::{
 // `tests/shipped_config_gate.sh` builds the configuration that actually ships.
 pub use zeroship_data_core::storage::SchemaIntrospect;
 
-
-
-
-
-
 // `VectorMetric` is a schema-shape descriptor
-// (consumed by the DDL builder in `zeroship_schema::query` to pick the
+// (consumed by the DDL builder in `zeroship_data_query_builder::compile` to pick the
 // pgvector opclass). It was relocated into the leaf crate
-// `zeroship-schema` and is re-exported here so existing
+// `zeroship-data-query-builder` and is re-exported here so existing
 // `crate::backend::VectorMetric` references resolve unchanged.
-pub use zeroship_schema::descriptors::VectorMetric;
-
+pub use zeroship_data_query_builder::descriptors::VectorMetric;
 
 // `GeoPoint` is a schema-shape descriptor
-// (consumed by `zeroship_schema::query::build_spatial_near` and the
+// (consumed by `zeroship_data_query_builder::compile::build_spatial_near` and the
 // `geoPoint` DDL emitter). It was relocated into the leaf crate
-// `zeroship-schema` and is re-exported here so existing
+// `zeroship-data-query-builder` and is re-exported here so existing
 // `crate::backend::GeoPoint` references (the `SpatialIndex` trait input,
 // the SQLite haversine impl) resolve unchanged.
-pub use zeroship_schema::descriptors::GeoPoint;
+pub use zeroship_data_query_builder::descriptors::GeoPoint;
 
 // ===========================================================================
 // The Backup capability trait
@@ -267,18 +260,15 @@ pub use zeroship_schema::descriptors::GeoPoint;
 // The encryption module the AEAD path delegates to is at
 // `crate::encryption`.
 
-
 // `EncryptionMode` is a schema-shape descriptor
 // (the `t.encrypted({mode})` facet; the DDL builder emits the `zsenc`
 // sentinel from it, and the data-plane AEAD path reconstructs the AAD from
-// it). It was relocated into the leaf crate `zeroship-schema` and is
+// it). It was relocated into the leaf crate `zeroship-data-query-builder` and is
 // re-exported here so existing `crate::backend::EncryptionMode` references
 // (`encryption::aad`, the CRUD passes) resolve
 // unchanged. The mode's semantics (AAD shape / nonce derivation) are
 // implemented by the data-plane crypto in plugin-db, which STAYS here.
-pub use zeroship_schema::descriptors::EncryptionMode;
-
-
+pub use zeroship_data_query_builder::descriptors::EncryptionMode;
 
 /// The data-store boundary. One impl per storage backend; today only
 /// Postgres ([`PostgresBackend`]).
@@ -295,7 +285,7 @@ pub use zeroship_schema::descriptors::EncryptionMode;
 ///   [`PgSqlExecutor`] / [`PgLockManager`] (which still pin
 ///   `Client = compio_postgres::OwnedPooledClient`).
 /// - [`LockManager`]
-/// - [`SchemaIntrospect`] with `LiveSchema = crate::diff::LiveSchema`
+/// - [`SchemaIntrospect`] with `LiveSchema = crate::catalog::LiveSchema`
 ///
 /// The audit-table operations that used to live here
 /// (`ensure_audit_table`, `next_schema_version`, `write_audit_row`, …)
@@ -372,7 +362,7 @@ pub use zeroship_schema::descriptors::EncryptionMode;
 /// implement the whole sub-trait set.
 #[cfg(any(test, feature = "test-helpers"))]
 pub trait Backend:
-    SqlExecutor + LockManager + SchemaIntrospect<LiveSchema = crate::diff::LiveSchema> + 'static
+    SqlExecutor + LockManager + SchemaIntrospect<LiveSchema = crate::catalog::LiveSchema> + 'static
 {
 }
 
@@ -383,8 +373,6 @@ pub trait Backend:
 // composes is impl'd in the vendor crate; this line adds no behaviour.
 #[cfg(any(test, feature = "test-helpers"))]
 impl Backend for PostgresBackend {}
-
-
 
 #[cfg(test)]
 mod tests {
@@ -439,9 +427,9 @@ mod tests {
 
     /// Compile-time: [`PostgresBackend`] satisfies
     /// [`SchemaIntrospect`] with the associated type pinned to
-    /// [`crate::diff::LiveSchema`].
+    /// [`crate::catalog::LiveSchema`].
     fn assert_postgres_backend_impls_schema_introspect() {
-        fn assert_impl<T: SchemaIntrospect<LiveSchema = crate::diff::LiveSchema>>() {}
+        fn assert_impl<T: SchemaIntrospect<LiveSchema = crate::catalog::LiveSchema>>() {}
         assert_impl::<PostgresBackend>();
     }
 
@@ -468,7 +456,7 @@ mod tests {
     // `zeroship-plugin-db`'s `change_stream_pg.rs` with the engine cut. It was
     // the ONE thing in this file that named a CDC module, and it is the reason
     // the file was contested (#170): everything else here re-exports
-    // `zeroship-data-core`, both vendor crates and `zeroship-schema`, plus this
+    // `zeroship-data-core`, both vendor crates and `zeroship-data-query-builder`, plus this
     // crate's own `BackendHandle` - all at or below the engine tier. The
     // assertion pins a fact about `PgChangeStream`, so it belongs beside
     // `PgChangeStream`.
@@ -488,7 +476,6 @@ mod tests {
     /// backends.
     #[allow(dead_code)]
     fn _assert_spatial_index<T: SpatialIndex>() {}
-
 
     /// Compile-time: the [`Backup`] trait's shape is pinned. Both
     /// backends implement it; the per-backend instantiations are
@@ -532,7 +519,7 @@ mod tests {
     }
 
     /// Compile-time: the associated types stay anchored to the concrete
-    /// `compio_postgres::Client` / `crate::diff::LiveSchema`. A
+    /// `compio_postgres::Client` / `crate::catalog::LiveSchema`. A
     /// regression here would silently change every `B::Client` /
     /// `B::LiveSchema` consumer's expectations. `LiveSchema` flows
     /// through [`SchemaIntrospect`] now (moved off
@@ -541,7 +528,7 @@ mod tests {
     /// `Backend<LiveSchema = …>` shorthand below still resolves.
     fn assert_associated_types_pinned() {
         fn pinned_client<T: Backend<Client = compio_postgres::OwnedPooledClient>>() {}
-        fn pinned_live_schema<T: Backend<LiveSchema = crate::diff::LiveSchema>>() {}
+        fn pinned_live_schema<T: Backend<LiveSchema = crate::catalog::LiveSchema>>() {}
         pinned_client::<PostgresBackend>();
         pinned_live_schema::<PostgresBackend>();
     }

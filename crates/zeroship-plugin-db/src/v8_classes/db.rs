@@ -44,12 +44,12 @@ use zeroship_runtime_macros::v8_class;
 #[allow(unused_imports)]
 use zeroship_runtime_macros::{v8_constructor, v8_getter, v8_method};
 
-use zeroship_data_core::binding::{COLD_START_DEPLOY_TOKEN, DbBinding};
-use zeroship_data_core::error::IsolationLevel;
-use crate::v8_classes::transaction::transaction_dispatch;
 use crate::v8_bridge::v8_value_to_serde_json;
 use crate::v8_classes::collection::mint_collection;
 use crate::v8_classes::db_platform::mint_db_platform;
+use crate::v8_classes::transaction::transaction_dispatch;
+use zeroship_data_core::binding::{DbBinding, COLD_START_DEPLOY_TOKEN};
+use zeroship_data_core::error::IsolationLevel;
 
 // ---------------------------------------------------------------------------
 // Db state
@@ -395,7 +395,7 @@ pub fn mint_db<'s>(
 /// cache keys cannot drift from the receivers that later read them.
 ///
 /// **This is the DATA PLANE's one app-id-to-schema derivation.** Every other
-/// data-plane consumer takes the [`zeroship_schema::SchemaName`] off the
+/// data-plane consumer takes the [`zeroship_data_query_builder::SchemaName`] off the
 /// binding instead of deriving its own.
 ///
 /// It is NOT the only one in the tree, and changing it alone does not complete
@@ -417,7 +417,7 @@ pub(crate) fn binding_for_isolate(
     scope: &mut v8::PinScope<'_, '_>,
     app_id: &str,
 ) -> Option<DbBinding> {
-    let schema = zeroship_schema::SchemaName::new(app_id).ok()?;
+    let schema = zeroship_data_query_builder::SchemaName::new(app_id).ok()?;
     // The worker injects `deploy_hash` as `ZEROSHIP_DEPLOY_ID`; pinned workflow
     // runtimes carry the hash they were started on. Absent in dev/raw-JS
     // harnesses means the historical `cold_start` token.
@@ -437,7 +437,7 @@ mod tests {
 
     use std::collections::HashMap;
 
-    use serde_json::{Value, json};
+    use serde_json::{json, Value};
     use zeroship_runtime::Runtime;
 
     use super::normalize_isolation_level;
@@ -521,8 +521,11 @@ mod tests {
 
         let pinned_runtime = runtime_for_deploy(APP, PINNED);
         let pinned_collection = mint_collection_binding(&pinned_runtime, APP, COLLECTION);
-        let pinned_binding =
-            DbBinding::new(APP, PINNED, zeroship_schema::SchemaName::new(APP).unwrap());
+        let pinned_binding = DbBinding::new(
+            APP,
+            PINNED,
+            zeroship_data_query_builder::SchemaName::new(APP).unwrap(),
+        );
         crate::cache_schema_for_deploy_for_tests(
             &pinned_binding,
             COLLECTION,
@@ -549,8 +552,11 @@ mod tests {
             "the current deploy must not read the pinned deploy's descriptor entry",
         );
 
-        let current_binding =
-            DbBinding::new(APP, CURRENT, zeroship_schema::SchemaName::new(APP).unwrap());
+        let current_binding = DbBinding::new(
+            APP,
+            CURRENT,
+            zeroship_data_query_builder::SchemaName::new(APP).unwrap(),
+        );
         crate::cache_schema_for_deploy_for_tests(
             &current_binding,
             COLLECTION,
@@ -618,7 +624,7 @@ mod tests {
     /// Minting must refuse an app id that is not a legal schema name.
     ///
     /// `binding_for_isolate` used to stamp the app id into a `DbBinding` with no
-    /// validation at all, so a name `zeroship_schema::query::validate_schema`
+    /// validation at all, so a name `zeroship_data_query_builder::compile::validate_schema`
     /// rejected survived the mint. The refusal surfaced only LATER and only PER
     /// OPERATION, inside the query builder, as `QueryError::InvalidCollection`
     /// -- so an isolate could hold a live `env.db` whose every operation was
@@ -631,7 +637,7 @@ mod tests {
     /// is what forces the two meanings apart.
     ///
     /// **THE DEFERRED REFUSAL IS NOW UNREACHABLE, WHICH IS THE POINT.** The
-    /// builders take a [`zeroship_schema::SchemaName`], so the control below
+    /// builders take a [`zeroship_data_query_builder::SchemaName`], so the control below
     /// asserts the refusal where it now lives - at construction - rather than at
     /// a per-operation `build_find_with_schema` that can no longer be handed an
     /// illegal name.
@@ -648,11 +654,11 @@ mod tests {
         // CONTROL, differing in one variable: the fixture really is a name the
         // shared validator rejects, so the arm below is not asserting against an
         // arbitrary string.
-        let refused = zeroship_schema::SchemaName::new(ILLEGAL);
+        let refused = zeroship_data_query_builder::SchemaName::new(ILLEGAL);
         assert!(
             matches!(
                 refused,
-                Err(zeroship_schema::query::QueryError::InvalidCollection(_))
+                Err(zeroship_data_query_builder::compile::QueryError::InvalidCollection(_))
             ),
             "control: the fixture must be a name validate_schema rejects, got {refused:?}"
         );

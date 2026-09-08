@@ -178,16 +178,8 @@ fn limit_and_offset_are_bound_not_interpolated() {
 
 /// A BINARY value is a typed variant, not a tagged string.
 ///
-/// The shape this replaces carried every parameter as a `String` and smuggled
-/// bytes through by two different mechanisms for one concept
-/// (`query.rs:106-122`): `decode($N, 'base64')::bytea` wrapped into the SQL on
-/// the `PostgreSQL` arm, and `SQLITE_BINARY_BIND_PREFIX` (`query.rs:593`)
-/// prefixed onto the param VALUE on the `SQLite` arm.
-///
-/// The assertions below are deliberately about what is ABSENT. A test that only
-/// checked the value round-trips would pass while the wrapper was still emitted,
-/// and a typed parameter that keeps its wrapper has not replaced the tag - it
-/// has joined it.
+/// A typed renderer must preserve bytes in its parameter list, with neither
+/// a value prefix nor a decoding wrapper in SQL.
 #[test]
 fn a_binary_value_is_a_typed_parameter_with_no_wrapper_and_no_sentinel() {
     let payload = vec![0x00_u8, 0xff, 0x10, b'_', b'_', b'z', b's', b'b', b'i', b'n'];

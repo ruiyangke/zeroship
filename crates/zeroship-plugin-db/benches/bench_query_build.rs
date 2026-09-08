@@ -48,12 +48,10 @@
 
 use std::time::Duration;
 
-use criterion::{
-    black_box, criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion,
-};
+use criterion::{black_box, criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
 use serde_json::json;
 
-use zeroship_plugin_db::query::{build_find_with_schema, build_insert};
+use zeroship_plugin_db::compile::{build_find_with_schema, build_insert};
 
 /// The descriptor entry the benchmarked read is projected through.
 ///
@@ -125,7 +123,8 @@ fn small_insert_doc() -> serde_json::Value {
 // ---------------------------------------------------------------------------
 
 fn bench_build_find(c: &mut Criterion) {
-    let app_id = "app_01HJQK2A8R000000000000000";
+    let schema_name = zeroship_data_query_builder::SchemaName::new("app_01HJQK2A8R000000000000000")
+        .expect("benchmark schema");
     let collection = "users";
     let schema = users_schema();
 
@@ -140,36 +139,33 @@ fn bench_build_find(c: &mut Criterion) {
     group.warm_up_time(Duration::from_secs(1));
 
     for (name, filter) in &workloads {
-        group.bench_with_input(
-            BenchmarkId::from_parameter(name),
-            filter,
-            |b, filter| {
-                b.iter_batched_ref(
-                    || filter.clone(),
-                    |filter| {
-                        let built = build_find_with_schema(
-                            app_id,
-                            collection,
-                            filter,
-                            Some(50),
-                            Some(0),
-                            None,
-                            None,
-                            &schema,
-                        )
-                        .expect("build_find_with_schema should succeed on benchmark fixture");
-                        black_box(built);
-                    },
-                    BatchSize::SmallInput,
-                );
-            },
-        );
+        group.bench_with_input(BenchmarkId::from_parameter(name), filter, |b, filter| {
+            b.iter_batched_ref(
+                || filter.clone(),
+                |filter| {
+                    let built = build_find_with_schema(
+                        &schema_name,
+                        collection,
+                        filter,
+                        Some(50),
+                        Some(0),
+                        None,
+                        None,
+                        &schema,
+                    )
+                    .expect("build_find_with_schema should succeed on benchmark fixture");
+                    black_box(built);
+                },
+                BatchSize::SmallInput,
+            );
+        });
     }
     group.finish();
 }
 
 fn bench_build_insert(c: &mut Criterion) {
-    let app_id = "app_01HJQK2A8R000000000000000";
+    let schema_name = zeroship_data_query_builder::SchemaName::new("app_01HJQK2A8R000000000000000")
+        .expect("benchmark schema");
     let collection = "users";
     let doc = small_insert_doc();
     // The write builder now projects its `RETURNING` list from the descriptor,
@@ -184,7 +180,7 @@ fn bench_build_insert(c: &mut Criterion) {
         b.iter_batched_ref(
             || doc.clone(),
             |doc| {
-                let built = build_insert(app_id, collection, &schema, doc)
+                let built = build_insert(&schema_name, collection, &schema, doc)
                     .expect("build_insert should succeed on benchmark fixture");
                 black_box(built);
             },

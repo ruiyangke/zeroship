@@ -5,7 +5,7 @@
 `crates/zeroship-migrate-server/src/apply.rs:284` still reads `let schema = app_id.to_string();`;
 `ls crates/ | grep -i cdc` returns nothing. Four prerequisites HAVE landed and are relied on
 below: the explicit write-verb projection and primary-key row narrowing
-(`crates/zeroship-schema/src/query.rs`, live arms in
+(`crates/zeroship-schema/src/query.rs`, live arms in (DELETED; runtime compilation now lives in `crates/zeroship-data-query-builder/src/compile.rs`, and migration DDL in `crates/zeroship-migrate-core/src/schema/query.rs`.)
 `crates/zeroship-plugin-db/tests/column_grants.rs`), the deploy-time schema precondition
 (`crates/zeroship-control/src/api.rs:167`), and the edge split routing `/v1/*` to the
 migration service (`deploy/ops/Caddyfile`). The stale-binding classifier is built and
@@ -134,7 +134,7 @@ already exists one module over as `OPERATOR_POOLS: HashMap<DbResourceKey, Rc<Poo
 The migration service emits column-level grants from the owner's own IR, withholding every
 column whose classification is not `none` and granting the column that holds the mask
 instead. It already writes classification and mask kind as `COMMENT ON COLUMN` sentinels
-(`crates/zeroship-schema/src/mask_codec.rs`,
+(`crates/zeroship-schema/src/mask_codec.rs`, (DELETED; runtime compilation now lives in `crates/zeroship-data-query-builder/src/compile.rs`, and migration DDL in `crates/zeroship-migrate-core/src/schema/query.rs`.)
 `crates/zeroship-migrate-backend/src/mask_codec.rs`) and is the one process in the tree that
 does not execute creator code, so this satisfies the AGENTS.md privilege invariant with no
 `SECURITY DEFINER` wrapper and no system-schema state. A creator migration cannot widen the

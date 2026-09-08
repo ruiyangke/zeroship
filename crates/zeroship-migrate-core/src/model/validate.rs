@@ -2619,36 +2619,37 @@ fn validate_vendor_key_storage_op(
             // is about to be, while the catalog says only what it was. Only a
             // column NOTHING in view declares - an earlier migration's, or an
             // unmanaged table's - falls through to the live catalog.
-            let refusal = match logical_column_matches(declared, schema_mode, schema, table, column)
-                .pop()
-            {
-                Some(contract) => crate::render::lower::rendered_storage_for_column_facets(
-                    vendors,
-                    target_dialect,
-                    &contract.ty,
-                    contract.value_format.as_ref(),
-                    contract.id_prefix.as_deref(),
-                    contract.case_sensitive,
-                )
-                .and_then(|rendered| {
-                    backend.unprefixed_key_storage_refusal(
-                        position,
-                        table,
-                        column,
-                        zeroship_migrate_backend::schema::KeyStorageEvidence::RenderedType(&rendered),
+            let refusal =
+                match logical_column_matches(declared, schema_mode, schema, table, column).pop() {
+                    Some(contract) => crate::render::lower::rendered_storage_for_column_facets(
+                        vendors,
+                        target_dialect,
+                        &contract.ty,
+                        contract.value_format.as_ref(),
+                        contract.id_prefix.as_deref(),
+                        contract.case_sensitive,
                     )
-                }),
-                None => catalog.column(table, column).and_then(|catalog_column| {
-                    backend.unprefixed_key_storage_refusal(
-                        position,
-                        table,
-                        column,
-                        zeroship_migrate_backend::schema::KeyStorageEvidence::CatalogColumn(
-                            catalog_column,
-                        ),
-                    )
-                }),
-            };
+                    .and_then(|rendered| {
+                        backend.unprefixed_key_storage_refusal(
+                            position,
+                            table,
+                            column,
+                            zeroship_migrate_backend::schema::KeyStorageEvidence::RenderedType(
+                                &rendered,
+                            ),
+                        )
+                    }),
+                    None => catalog.column(table, column).and_then(|catalog_column| {
+                        backend.unprefixed_key_storage_refusal(
+                            position,
+                            table,
+                            column,
+                            zeroship_migrate_backend::schema::KeyStorageEvidence::CatalogColumn(
+                                catalog_column,
+                            ),
+                        )
+                    }),
+                };
             let Some(refusal) = refusal else {
                 continue;
             };
@@ -9062,10 +9063,10 @@ fn validate_default_expr(
 ///
 /// The list has TWO real peers, and both are copies rather than references:
 ///
-/// * `zeroship_schema::query::RESERVED_ID_PREFIXES` - the runtime data plane's,
+/// * `zeroship_data_query_builder::compile::RESERVED_ID_PREFIXES` - the runtime data plane's,
 ///   which `system_fields_pass` reaches. Bound to this one over both the
 ///   constant and the accept/refuse verdict by
-///   `zeroship-schema/src/query.rs`'s `mod reserved_id_prefix_parity`.
+///   `zeroship-data-query-builder/src/compile.rs`'s `mod reserved_id_prefix_parity`.
 /// * `ID_RESERVED_PREFIX` in `sdks/db/src/types.ts` - the SDK's build-time
 ///   fence. UNBOUND: nothing relates it to either Rust list.
 ///
@@ -11197,9 +11198,7 @@ mod tests {
             ),
             (
                 "addColumn",
-                op_json(
-                    r#"{"op":"addColumn","table":"things","column":"pg_added","type":"text"}"#,
-                ),
+                op_json(r#"{"op":"addColumn","table":"things","column":"pg_added","type":"text"}"#),
             ),
             (
                 "renameColumn",
@@ -11222,8 +11221,7 @@ mod tests {
             "creator column declarations reached lower without the reserved-name gate: {accepted:?}"
         );
 
-        let reference =
-            op_json(r#"{"op":"dropColumn","table":"things","column":"pg_existing"}"#);
+        let reference = op_json(r#"{"op":"dropColumn","table":"things","column":"pg_existing"}"#);
         validate_ir(
             crate::test_fixtures::VENDORS,
             &ir_with(vec![reference]),
