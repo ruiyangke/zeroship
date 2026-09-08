@@ -86,6 +86,12 @@ pub fn skip(reason: &str) {
 /// copy is how the gap opened, so new fixtures call this rather than restating
 /// the two writes.
 ///
+/// THAT IS NOW ENFORCED RATHER THAN ASKED FOR. `tests/session_keyring_fixture_gate.sh`
+/// refuses a test file that mounts the auth router and drives a token exchange
+/// without reaching a keyring, and separately proves that every
+/// `test_auth_config` fixture builder reaches THIS function - which is what
+/// lets the gate accept a call to one of those builders as evidence.
+///
 /// Memoised: `SessionSecretKeys::from_files` reads the files on every exchange,
 /// and a per-call temp directory would leave one behind per token request. The
 /// directory name carries the process id and a clock reading, so two live
