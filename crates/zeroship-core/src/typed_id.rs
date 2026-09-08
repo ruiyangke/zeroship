@@ -716,6 +716,33 @@ pub fn new_provider_dead_letter_id() -> String {
     generate(PROVIDER_DEAD_LETTER_PREFIX)
 }
 
+/// Worker-instance typed-id prefix: one row in `zeroship.worker_instances` per
+/// live worker PROCESS. Three chars to match the global
+/// `^[a-z]{3}_[A-Za-z0-9]{22}$` shape, and disjoint from every prefix above —
+/// notably from `wak` (wake jobs), which is the only other `w`-leading
+/// three-char prefix, and from the `w`-leading workflow family
+/// (`wfd`/`wsk`/`wsb`/`wbc`/`wst`).
+///
+/// MINTED BY CONTROL AT ENROLMENT, never by the registrant. The worker presents
+/// its boot-generated Ed25519 public key and its listening port; control assigns
+/// the id, the ring key and the address. An instance is a CHILD of the
+/// `svc/worker` role it enrols under: it mints under `svc/worker/<wkr_id>` and
+/// is addressed as `svc/worker`.
+///
+/// Because enrolment authenticates with the SHARED role key, a holder of that
+/// key can enrol many instances. The id is therefore a DISTINGUISHER against a
+/// role-key holder, not a boundary: what it buys is attribution, per-instance
+/// revocation, and a countable event.
+pub const WORKER_INSTANCE_PREFIX: &str = "wkr";
+
+/// Generate a new worker-instance ID: `wkr_{base62(uuidv7)}`. Minted by the
+/// control plane when it accepts an enrolment; the `zeroship.worker_instances.id`
+/// column stores the full typed-id string under a `worker_instances_id_shape`
+/// CHECK, with no SQL `DEFAULT` because there is no in-database base62 generator.
+pub fn new_worker_instance_id() -> String {
+    generate(WORKER_INSTANCE_PREFIX)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1073,6 +1100,67 @@ mod tests {
         assert_ne!(prefix, REFUND_PREFIX);
         assert_ne!(prefix, SPEND_HISTORY_PREFIX);
         assert_ne!(prefix, ORGANIZATION_BILLING_HISTORY_PREFIX);
+    }
+
+    /// `wkr` must collide with nothing, and the sweep is over the WHOLE
+    /// registry rather than a family, because a worker instance is not a member
+    /// of one: it is addressed by the control plane and by nothing else.
+    ///
+    /// WHAT THIS DOES NOT CATCH: a prefix added to the module after this list
+    /// was written is not in the list, so this test cannot see it. Adding a
+    /// prefix means adding it here; the failure of that is silent.
+    #[test]
+    fn worker_instance_prefix_is_three_chars_and_disjoint() {
+        assert_eq!(
+            WORKER_INSTANCE_PREFIX.len(),
+            3,
+            "worker-instance prefix must be 3 chars (R16-API2)"
+        );
+        let w = new_worker_instance_id();
+        assert!(w.starts_with("wkr_"), "got {w}");
+        assert_eq!(w.len(), 26, "wkr_ + 22 base62 = 26 chars");
+        let (prefix, _) = parse(&w).expect("new_worker_instance_id must roundtrip");
+        assert_eq!(prefix, "wkr");
+
+        let registry = [
+            ("users", USER_PREFIX),
+            ("apps", APP_PREFIX),
+            ("sessions", SESSION_PREFIX),
+            ("grants", GRANT_PREFIX),
+            ("organizations", ORGANIZATION_PREFIX),
+            ("projects", PROJECT_PREFIX),
+            ("organization_invites", INVITE_PREFIX),
+            ("wake_jobs", WAKE_PREFIX),
+            ("app_oauth_clients", APP_OAUTH_CLIENT_PREFIX),
+            ("plans", PLAN_PREFIX),
+            ("invoices", INVOICE_PREFIX),
+            ("invoice_payments", INVOICE_PAYMENT_PREFIX),
+            ("credit_ledger", CREDIT_PREFIX),
+            ("refunds", REFUND_PREFIX),
+            ("plan_change_events", PLAN_CHANGE_EVENT_PREFIX),
+            ("spend_state_history", SPEND_HISTORY_PREFIX),
+            ("organization_billing_status_history", ORGANIZATION_BILLING_HISTORY_PREFIX),
+            ("billing_disputes", DISPUTE_PREFIX),
+            ("payout_failures", PAYOUT_FAILURE_PREFIX),
+            ("connect_checkout_failures", CHECKOUT_FAILURE_PREFIX),
+            ("billing_reconciliation_findings", RECONCILE_FINDING_PREFIX),
+            ("workflow_runs", WORKFLOW_RUN_PREFIX),
+            ("workflow_signals", WORKFLOW_SIGNAL_PREFIX),
+            ("workflow_crons", WORKFLOW_CRON_PREFIX),
+            ("workflow_schedules", WORKFLOW_SCHEDULE_PREFIX),
+            ("workflow_dispatches", WORKFLOW_DISPATCH_PREFIX),
+            ("workflow_signal_keys", WORKFLOW_SIGNAL_KEY_PREFIX),
+            ("workflow_subscriptions", WORKFLOW_SUBSCRIPTION_PREFIX),
+            ("workflow_broadcasts", WORKFLOW_BROADCAST_PREFIX),
+            ("workflow_signal_tokens", WORKFLOW_SIGNAL_TOKEN_PREFIX),
+            ("provider_dead_letter", PROVIDER_DEAD_LETTER_PREFIX),
+        ];
+        for (owner, other) in registry {
+            assert_ne!(
+                WORKER_INSTANCE_PREFIX, other,
+                "wkr must be disjoint from every registered prefix; {owner} already uses it"
+            );
+        }
     }
 
     #[test]
