@@ -233,6 +233,21 @@ for port in $ZEROSHIP_CONTROL_PORT "${WORKER_PORTS[@]}" $ZEROSHIP_GATEWAY_PORT; 
     lsof -ti :"$port" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
 done
 
+# THIS HARNESS RUNS SEVERAL WORKERS, SO IT STATES ITS OWN ENROLMENT PORT RANGE.
+# `stack_workspace` derives the range from $ZEROSHIP_WORKER_PORT, which the stack
+# library defaults to a single port this harness never uses; the workers here are
+# WORKER_PORTS. Without this, control would admit that one port and refuse every
+# worker in this file as `port_outside_envelope`.
+#
+# It is latent until enrolment is mandatory - nothing calls the enrolment
+# endpoint yet - which is exactly why it is stated here rather than discovered
+# later: the refusal would arrive with every health probe still green.
+#
+# Derived from the array, never written out, and the range assumes WORKER_PORTS
+# is contiguous and ascending, which the declaration above keeps true.
+ZEROSHIP_CONTROL_WORKER_ENROLMENT_PORTS="${WORKER_PORTS[0]}-${WORKER_PORTS[${#WORKER_PORTS[@]}-1]}"
+export ZEROSHIP_CONTROL_WORKER_ENROLMENT_PORTS
+
 stack_workspace || { echo "  ✗ stack_workspace failed"; exit 2; }
 stack_pg_up || { echo "  ✗ ephemeral Postgres bring-up failed"; exit 2; }
 
