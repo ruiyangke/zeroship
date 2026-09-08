@@ -137,8 +137,8 @@ export default {
         // The billed party and the notified party separate here for the first
         // time.
         billing_email: t.text({ caseSensitive: false }).notNull(),
-        personal_owner_id: t.uuid(),
-        created_by: t.uuid(),
+        personal_owner_id: t.text(),
+        created_by: t.text(),
         created_at: t.timestamp().notNull().default(now()),
         updated_at: t.timestamp().notNull().default(now()),
       },
@@ -186,7 +186,7 @@ export default {
         organization_id: t.text().notNull(),
         slug: t.text({ caseSensitive: false }).notNull(),
         name: t.text().notNull(),
-        created_by: t.uuid(),
+        created_by: t.text(),
         created_at: t.timestamp().notNull().default(now()),
         updated_at: t.timestamp().notNull().default(now()),
       },
@@ -234,12 +234,12 @@ export default {
     table("organization_members", { schema: "zeroship" }).create({
       columns: {
         organization_id: t.text().notNull(),
-        user_id: t.uuid().notNull(),
+        user_id: t.text().notNull(),
         role: t.text().notNull(),
         added_at: t.timestamp().notNull().default(now()),
-        added_by: t.uuid(),
+        added_by: t.text(),
         changed_at: t.timestamp().notNull().default(now()),
-        changed_by: t.uuid(),
+        changed_by: t.text(),
       },
       primaryKey: ["organization_id", "user_id"],
     });
@@ -303,12 +303,12 @@ export default {
       columns: {
         project_id: t.text().notNull(),
         organization_id: t.text().notNull(),
-        user_id: t.uuid().notNull(),
+        user_id: t.text().notNull(),
         role: t.text().notNull(),
         added_at: t.timestamp().notNull().default(now()),
-        added_by: t.uuid(),
+        added_by: t.text(),
         changed_at: t.timestamp().notNull().default(now()),
-        changed_by: t.uuid(),
+        changed_by: t.text(),
       },
       primaryKey: ["project_id", "user_id"],
     });
@@ -390,14 +390,14 @@ export default {
         role: t.text().notNull(),
         role_rank: t.int().notNull(),
         role_billing_rank: t.int().notNull(),
-        invited_by: t.uuid(),
+        invited_by: t.text(),
         invited_by_rank: t.int().notNull(),
         invited_by_billing_rank: t.int().notNull(),
         purpose: t.text().notNull(),
         issued_at: t.timestamp().notNull().default(now()),
         expires_at: t.timestamp().notNull(),
         consumed_at: t.timestamp(),
-        consumed_by: t.uuid(),
+        consumed_by: t.text(),
         // NULL until a delivery attempt resolves. The row is written BEFORE the
         // mail is sent, so that a redemption can never arrive before the hash it
         // is matched against exists; the outcome is recorded by a later update.
@@ -529,11 +529,11 @@ export default {
     // altering them to a collated `text` would destroy their case-insensitive
     // comparison.
     const typedIdColumnsByTable: Readonly<Record<string, readonly string[]>> = {
-      organizations: ["id"],
-      projects: ["id", "organization_id"],
-      organization_members: ["organization_id"],
-      project_members: ["project_id", "organization_id"],
-      organization_invites: ["id", "organization_id"],
+      organizations: ["id", "created_by", "personal_owner_id"],
+      projects: ["id", "organization_id", "created_by"],
+      organization_members: ["organization_id", "user_id", "added_by", "changed_by"],
+      project_members: ["project_id", "organization_id", "user_id", "added_by", "changed_by"],
+      organization_invites: ["id", "organization_id", "invited_by", "consumed_by"],
       apps: ["project_id"],
     };
     for (const [tableName, columns] of Object.entries(typedIdColumnsByTable)) {
