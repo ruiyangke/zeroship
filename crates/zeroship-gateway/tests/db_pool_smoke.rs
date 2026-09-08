@@ -11,10 +11,11 @@
 //! Live-PG smoke test for the gateway's per-worker connection pool
 //! (`zeroship_gateway::db`).
 //!
-//! Skipped silently unless there is a test database (set `PG_TEST_URL` or run
-//! `tests/provision_test_backends.sh`; same env-skip convention as the rest
-//! of the gateway PG tests). Needs no `auth`
-//! schema — it runs a trivial `SELECT 1`, so any reachable Postgres works.
+//! REFUSES unless there is a reachable test database, naming
+//! `tests/provision_test_backends.sh` - the same convention as the rest of the
+//! gateway PG tests, and no environment variable turns it back into a skip.
+//! It asks for NO schema: it runs a trivial `SELECT 1`, so any Postgres that
+//! answers works.
 //!
 //! Coverage:
 //!   - `db::checkout` lazily builds the per-thread pool on first use and
@@ -27,14 +28,13 @@
 //!   - Repeated `db::checkout` calls return the SAME cached `Rc<Pool>`
 //!     (no per-call reconnect), and the returned `Rc` is shared.
 
+mod common;
+
 use zeroship_gateway::db::DbConfig;
 
 #[compio::test]
 async fn pool_checkout_runs_concurrent_trivial_queries() {
-    let Some(dsn) = zeroship_core::config::test_database_url_opt() else {
-        zeroship_test_support::skip("skipping (no test database; set PG_TEST_URL)");
-        return;
-    };
+    let dsn = common::require_any_db();
 
     // Pool of 8; check out 6 connections "at once" (hold them all live),
     // run a trivial query on each, assert the answers. Holding all six

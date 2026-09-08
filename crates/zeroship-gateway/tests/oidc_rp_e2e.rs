@@ -84,8 +84,8 @@ fn gateway_identity() -> &'static std::sync::Arc<zeroship_core::service_peers::S
     IDENTITY.get_or_init(|| std::sync::Arc::new(zeroship_gateway::test_gateway_service_auth()))
 }
 
-fn db_url() -> Option<String> {
-    common::platform_db_or_skip()
+fn db_url() -> String {
+    common::require_platform_db()
 }
 
 fn location(resp: &cyper::Response) -> String {
@@ -795,10 +795,7 @@ async fn cleanup(db: &Client, user_id: Uuid, app_id: Uuid, client_id: &str) {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn gateway_bearer_rejects_real_op_id_token_but_accepts_access_token() {
-    let Some(db_url) = db_url() else {
-        zeroship_test_support::skip("[oidc_rp_e2e] skip (no test database; set PG_TEST_URL)");
-        return;
-    };
+    let db_url = db_url();
 
     let pg_client = connect_test_db(&db_url).await;
     let signing = op_signing();
@@ -900,10 +897,7 @@ async fn gateway_bearer_rejects_real_op_id_token_but_accepts_access_token() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn gateway_bearer_rejects_access_token_for_different_resource_audience() {
-    let Some(db_url) = db_url() else {
-        zeroship_test_support::skip("[oidc_rp_e2e] skip (no test database; set PG_TEST_URL)");
-        return;
-    };
+    let db_url = db_url();
 
     let pg_client = connect_test_db(&db_url).await;
     let signing = op_signing();
@@ -958,10 +952,7 @@ async fn gateway_bearer_rejects_access_token_for_different_resource_audience() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn gateway_oidc_rp_full_dance_against_platform_op() {
-    let Some(db_url) = db_url() else {
-        zeroship_test_support::skip("[oidc_rp_e2e] skip (no test database; set PG_TEST_URL)");
-        return;
-    };
+    let db_url = db_url();
 
     let (pg_client, pg_connection) = compio_postgres::connect(&db_url, NoTls)
         .await
@@ -1192,10 +1183,7 @@ async fn gateway_oidc_rp_full_dance_against_platform_op() {
 #[ntex::test]
 #[allow(clippy::future_not_send, clippy::too_many_lines)]
 async fn app_session_revoke_at_the_op_ends_the_gateway_session() {
-    let Some(db_url) = db_url() else {
-        zeroship_test_support::skip("[oidc_rp_e2e] skip (no test database; set PG_TEST_URL)");
-        return;
-    };
+    let db_url = db_url();
 
     let pg_client = connect_test_db(&db_url).await;
     let signing = op_signing();
