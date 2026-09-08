@@ -1,8 +1,8 @@
 //! The integration-test target behind `--features live-db-tests`: the files
 //! that CANNOT run without a reachable, migrated PostgreSQL.
 //!
-//! One `[[test]]` carrying `required-features = ["live-db-tests"]` gates all 41
-//! modules below exactly as 41 separate `[[test]]` blocks did. See
+//! One `[[test]]` carrying `required-features = ["live-db-tests"]` gates every
+//! module below exactly as one `[[test]]` block per module did. See
 //! `tests/main.rs` for why the collapse stops at four targets rather than one,
 //! for the measured before-figure, and for the full list of what sharing a
 //! process does NOT protect against. The "Live-database test gate" comment in
@@ -11,20 +11,23 @@
 //! WHAT THIS DOES NOT PROTECT AGAINST
 //! ----------------------------------
 //! The short form of `tests/main.rs`'s list, because it bites hardest here:
-//! these 41 modules share ONE process and ONE database. The eleven `static
-//! Mutex` gates in this directory are per-MODULE, so two modules driving the
-//! same fleet-wide, advisory-locked sweep - six separate `RECONCILE_LOCK`s, two
-//! separate `SWEEP_LOCK`s - are no longer held apart by anything. Until now the
+//! every module below shares ONE process and ONE database. The `static Mutex`
+//! gates in this directory are per-MODULE, so two modules driving the same
+//! fleet-wide, advisory-locked sweep - each declaring its own `RECONCILE_LOCK`
+//! or `SWEEP_LOCK` - are no longer held apart by anything. Until now the
 //! PROCESS did it: cargo runs test binaries one at a time and never two at once.
+//! Count them with `grep -rn 'static [A-Z_]*: Mutex' .` rather than trusting a
+//! number here; a tally in a comment does not re-measure itself, and every one
+//! this passage used to carry had drifted by the time it was read.
 //!
 //! `common` is compiled once for the whole target, so a `static` in it is shared
-//! by all 41 modules rather than being one cell per binary. The billing period
-//! helper was such a `static`; merging collapsed five memoised months into one
+//! by every module rather than being one cell per binary. The billing period
+//! helper was such a `static`; merging collapsed its memoised months into one
 //! and exposed a bug older than the merge, in which a test asserted on a
 //! period-wide count it did not own. That is FIXED - every caller now reserves a
 //! private window from `common::next_isolated_period()`, whose header explains
 //! why a lock cannot do the same job. The general lesson stands for the next
-//! `static` added here: sharing a process makes one visible to 41 modules.
+//! `static` added here: sharing a process makes one visible to every module.
 //!
 //! THREADING
 //! ---------
