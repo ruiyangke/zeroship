@@ -79,8 +79,8 @@ fn read_set_cookie(headers: &ntex::http::HeaderMap, name: &str) -> Option<String
 // `compio_postgres::Client` is `!Send` — the futures inherit that
 // structurally. The lint is informational, not actionable here.
 #[allow(clippy::future_not_send)]
-async fn pg() -> Option<compio_postgres::Client> {
-    let dsn = zeroship_core::config::test_database_url_opt()?;
+async fn pg() -> compio_postgres::Client {
+    let dsn = crate::common::test_database_url();
     let (client, connection) = connect(&dsn, NoTls).await.expect("connect");
     compio::runtime::spawn(async move {
         if let Err(e) = connection.run().await {
@@ -88,7 +88,7 @@ async fn pg() -> Option<compio_postgres::Client> {
         }
     })
     .detach();
-    Some(client)
+    client
 }
 
 async fn pg_connect(dsn: &str) -> Client {
@@ -185,17 +185,8 @@ async fn drop_magic_links_insert_delay(client: &Client, name: &str) {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn reset_post_revokes_all_sessions_and_audits_counts() {
-    let dsn = match zeroship_core::config::test_database_url_opt() {
-        Some(dsn) => dsn,
-        None => {
-            zeroship_test_support::skip("skipping password_reset_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-            return;
-        }
-    };
-    let Some(client) = pg().await else {
-        zeroship_test_support::skip("skipping password_reset_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let dsn = crate::common::test_database_url();
+    let client = pg().await;
 
     let email = format!(
         "reset-revoke-sessions-{}@zeroship.test",
@@ -357,17 +348,8 @@ async fn reset_post_revokes_all_sessions_and_audits_counts() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn reset_post_consumes_magic_login_state_for_same_email() {
-    let dsn = match zeroship_core::config::test_database_url_opt() {
-        Some(dsn) => dsn,
-        None => {
-            zeroship_test_support::skip("skipping password_reset_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-            return;
-        }
-    };
-    let Some(client) = pg().await else {
-        zeroship_test_support::skip("skipping password_reset_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let dsn = crate::common::test_database_url();
+    let client = pg().await;
 
     let email = format!(
         "reset-consume-magic-{}@zeroship.test",
@@ -470,17 +452,8 @@ async fn reset_post_consumes_magic_login_state_for_same_email() {
 
 #[compio::test]
 async fn concurrent_issue_leaves_one_active_reset_token() {
-    let dsn = match zeroship_core::config::test_database_url_opt() {
-        Some(dsn) => dsn,
-        None => {
-            zeroship_test_support::skip("skipping password_reset_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-            return;
-        }
-    };
-    let Some(client) = pg().await else {
-        zeroship_test_support::skip("skipping password_reset_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let dsn = crate::common::test_database_url();
+    let client = pg().await;
 
     let email = format!(
         "reset-concurrent-{}@zeroship.test",
@@ -534,10 +507,7 @@ async fn concurrent_issue_leaves_one_active_reset_token() {
 
 #[compio::test]
 async fn issue_then_redeem_roundtrip() {
-    let Some(client) = pg().await else {
-        zeroship_test_support::skip("skipping password_reset_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let client = pg().await;
 
     let email = format!("reset-{}@zeroship.test", Uuid::new_v4().simple());
     let user = users::create(&client, &email, "Test", None)
@@ -583,10 +553,7 @@ async fn issue_then_redeem_roundtrip() {
 
 #[compio::test]
 async fn complete_rolls_back_token_consume_with_transaction() {
-    let Some(client) = pg().await else {
-        zeroship_test_support::skip("skipping password_reset_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let client = pg().await;
 
     let email = format!(
         "reset-rollback-{}@zeroship.test",
@@ -687,17 +654,8 @@ async fn complete_rolls_back_token_consume_with_transaction() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn reset_post_revokes_app_session_anchor_and_writes_family_marker() {
-    let dsn = match zeroship_core::config::test_database_url_opt() {
-        Some(dsn) => dsn,
-        None => {
-            zeroship_test_support::skip("skipping password_reset_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-            return;
-        }
-    };
-    let Some(client) = pg().await else {
-        zeroship_test_support::skip("skipping password_reset_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let dsn = crate::common::test_database_url();
+    let client = pg().await;
 
     let email = format!("reset-anchor-{}@zeroship.test", Uuid::new_v4().simple());
     let user = users::create(&client, &email, "Test", None)
@@ -979,17 +937,8 @@ async fn reset_post_revokes_app_session_anchor_and_writes_family_marker() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn reset_still_applies_when_user_holds_a_refresh_token_for_the_same_app() {
-    let dsn = match zeroship_core::config::test_database_url_opt() {
-        Some(dsn) => dsn,
-        None => {
-            zeroship_test_support::skip("skipping password_reset_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-            return;
-        }
-    };
-    let Some(client) = pg().await else {
-        zeroship_test_support::skip("skipping password_reset_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let dsn = crate::common::test_database_url();
+    let client = pg().await;
 
     const OLD_PASSWORD: &str = "old reset password phrase";
     const NEW_PASSWORD: &str = "new reset password phrase";
@@ -1236,10 +1185,7 @@ async fn reset_still_applies_when_user_holds_a_refresh_token_for_the_same_app() 
 /// consumed against A only — B is never touched.
 #[compio::test]
 async fn complete_binds_issue_time_user_not_current_email_owner() {
-    let Some(client) = pg().await else {
-        zeroship_test_support::skip("skipping password_reset_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let client = pg().await;
 
     let suffix = Uuid::new_v4().simple();
     let email_a = format!("reset-l4-victim-{suffix}@zeroship.test");
@@ -1339,10 +1285,7 @@ async fn complete_binds_issue_time_user_not_current_email_owner() {
 
 #[compio::test]
 async fn new_issue_supersedes_previous_reset_token() {
-    let Some(client) = pg().await else {
-        zeroship_test_support::skip("skipping password_reset_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let client = pg().await;
 
     let email = format!(
         "reset-supersede-{}@zeroship.test",

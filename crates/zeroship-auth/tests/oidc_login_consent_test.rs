@@ -48,11 +48,8 @@ struct Fixture {
 
 impl Fixture {
     #[allow(clippy::future_not_send)]
-    async fn boot() -> Option<Self> {
-        let Some(db_url) = db_url() else {
-            zeroship_test_support::skip("[op_login_consent_test] skip (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-            return None;
-        };
+    async fn boot() -> Self {
+        let db_url = db_url();
         let (pg_client, pg_connection) = connect(&db_url, NoTls).await.expect("connect pg");
         compio::runtime::spawn(async move {
             if let Err(err) = pg_connection.run().await {
@@ -99,7 +96,7 @@ impl Fixture {
         })
         .await;
 
-        Some(Self {
+        Self {
             auth_base: srv.url("").trim_end_matches('/').to_string(),
             srv,
             db,
@@ -109,7 +106,7 @@ impl Fixture {
             user_id,
             email,
             http: cyper::Client::new(),
-        })
+        }
     }
 
     async fn cleanup(self) {
@@ -158,9 +155,7 @@ impl Fixture {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn end_to_end_native_authorize_login_consent_token_flow() {
-    let Some(fx) = Fixture::boot().await else {
-        return;
-    };
+    let fx = Fixture::boot().await;
     let verifier = pkce_verifier();
     let authorize_path = authorize_path(&fx.client_id, "openid email", &verifier, "state-e2e", Some("nonce-e2e"));
 
@@ -228,9 +223,7 @@ async fn end_to_end_native_authorize_login_consent_token_flow() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn idp_hint_google_redirects_native_authorize_to_provider_start() {
-    let Some(fx) = Fixture::boot().await else {
-        return;
-    };
+    let fx = Fixture::boot().await;
     let authorize_path = format!(
         "{}&idp_hint=google&prompt=login",
         authorize_path(
@@ -278,9 +271,7 @@ async fn idp_hint_google_redirects_native_authorize_to_provider_start() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn idp_hint_unconfigured_provider_falls_back_to_native_login_form() {
-    let Some(fx) = Fixture::boot().await else {
-        return;
-    };
+    let fx = Fixture::boot().await;
     let authorize_path = format!(
         "{}&idp_hint=github&prompt=login",
         authorize_path(
@@ -321,9 +312,7 @@ async fn idp_hint_unconfigured_provider_falls_back_to_native_login_form() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn native_authorize_echoes_state_verbatim() {
-    let Some(fx) = Fixture::boot().await else {
-        return;
-    };
+    let fx = Fixture::boot().await;
     let verifier = pkce_verifier();
     let state = "  tok with spaces  ";
     let authorize_path = authorize_path(
@@ -366,9 +355,7 @@ async fn native_authorize_echoes_state_verbatim() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn consent_covered_short_circuits_and_new_scope_bounces() {
-    let Some(fx) = Fixture::boot().await else {
-        return;
-    };
+    let fx = Fixture::boot().await;
     fx.insert_grant(&["openid", "email"]).await;
     let cookies = fx.create_session_cookie().await;
     let verifier = pkce_verifier();
@@ -400,9 +387,7 @@ async fn consent_covered_short_circuits_and_new_scope_bounces() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn prompt_none_without_session_redirects_login_required_to_rp() {
-    let Some(fx) = Fixture::boot().await else {
-        return;
-    };
+    let fx = Fixture::boot().await;
     let verifier = pkce_verifier();
     let authorize_path = authorize_path_with_prompt(
         &fx.client_id,
@@ -437,9 +422,7 @@ async fn prompt_none_without_session_redirects_login_required_to_rp() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn prompt_none_with_session_but_no_consent_redirects_consent_required_to_rp() {
-    let Some(fx) = Fixture::boot().await else {
-        return;
-    };
+    let fx = Fixture::boot().await;
     let cookies = fx.create_session_cookie().await;
     let verifier = pkce_verifier();
     let authorize_path = authorize_path_with_prompt(
@@ -474,9 +457,7 @@ async fn prompt_none_with_session_but_no_consent_redirects_consent_required_to_r
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn prompt_none_with_session_and_prior_consent_issues_code_silently() {
-    let Some(fx) = Fixture::boot().await else {
-        return;
-    };
+    let fx = Fixture::boot().await;
     fx.insert_grant(&["openid", "email"]).await;
     let cookies = fx.create_session_cookie().await;
     let verifier = pkce_verifier();
@@ -513,9 +494,7 @@ async fn prompt_none_with_session_and_prior_consent_issues_code_silently() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn prompt_none_combined_with_login_redirects_invalid_request_to_rp() {
-    let Some(fx) = Fixture::boot().await else {
-        return;
-    };
+    let fx = Fixture::boot().await;
     let verifier = pkce_verifier();
     let authorize_path = authorize_path_with_prompt(
         &fx.client_id,
@@ -545,9 +524,7 @@ async fn prompt_none_combined_with_login_redirects_invalid_request_to_rp() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn prompt_none_invalid_pkce_redirects_error_to_rp_without_rendering() {
-    let Some(fx) = Fixture::boot().await else {
-        return;
-    };
+    let fx = Fixture::boot().await;
     let mut serializer = url::form_urlencoded::Serializer::new(String::new());
     serializer
         .append_pair("client_id", &fx.client_id)
@@ -593,9 +570,7 @@ async fn prompt_none_invalid_pkce_redirects_error_to_rp_without_rendering() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn prompt_login_forces_login_screen_even_with_valid_session() {
-    let Some(fx) = Fixture::boot().await else {
-        return;
-    };
+    let fx = Fixture::boot().await;
     let cookies = fx.create_session_cookie().await;
     let verifier = pkce_verifier();
     let authorize_path = authorize_path_with_prompt(
@@ -632,9 +607,7 @@ async fn prompt_login_forces_login_screen_even_with_valid_session() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn prompt_consent_forces_consent_screen_even_with_prior_grant() {
-    let Some(fx) = Fixture::boot().await else {
-        return;
-    };
+    let fx = Fixture::boot().await;
     fx.insert_grant(&["openid", "email"]).await;
     let cookies = fx.create_session_cookie().await;
     let verifier = pkce_verifier();
@@ -672,9 +645,7 @@ async fn prompt_consent_forces_consent_screen_even_with_prior_grant() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn consent_deny_redirects_access_denied_to_registered_redirect_uri() {
-    let Some(fx) = Fixture::boot().await else {
-        return;
-    };
+    let fx = Fixture::boot().await;
     let cookies = fx.create_session_cookie().await;
     let verifier = pkce_verifier();
     let authorize_path = authorize_path(&fx.client_id, "openid email", &verifier, "state-deny", Some("nonce-deny"));
@@ -710,9 +681,7 @@ async fn consent_deny_redirects_access_denied_to_registered_redirect_uri() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn open_redirect_guards_keep_login_and_consent_on_safe_targets() {
-    let Some(fx) = Fixture::boot().await else {
-        return;
-    };
+    let fx = Fixture::boot().await;
     // Each iteration consumes a LOGIN_EIP rate-limit token (capacity 5), so keep
     // this to ≤5 distinct full-login vectors. The exhaustive control-char matrix
     // (NUL/TAB/CR/LF/DEL) is unit-tested in `return_to::tests`; here we prove the
@@ -770,9 +739,7 @@ async fn open_redirect_guards_keep_login_and_consent_on_safe_targets() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn consent_requires_session_and_csrf() {
-    let Some(fx) = Fixture::boot().await else {
-        return;
-    };
+    let fx = Fixture::boot().await;
     let authorize_path = authorize_path(&fx.client_id, "openid email", &pkce_verifier(), "state-gates", Some("nonce-gates"));
     let consent_loc = format!("/consent?{}", form(&[("return_to", authorize_path.as_str())]));
     let no_session = get(&fx, &consent_loc, None).await;
@@ -805,9 +772,7 @@ async fn consent_requires_session_and_csrf() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn native_consent_rejects_scope_outside_client_registration() {
-    let Some(fx) = Fixture::boot().await else {
-        return;
-    };
+    let fx = Fixture::boot().await;
     let cookies = fx.create_session_cookie().await;
     // The client is registered for openid/profile/email only; `payments:charge`
     // is over-broad. `load_native_consent_context` must reject it (LOW-3) BEFORE
@@ -841,9 +806,7 @@ async fn native_consent_rejects_scope_outside_client_registration() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn totp_login_preserves_native_return_to() {
-    let Some(fx) = Fixture::boot().await else {
-        return;
-    };
+    let fx = Fixture::boot().await;
     let secret = totp::generate_secret();
     let key = totp::key_from_config(fx.cfg.settings.totp_enc_key.expose_str()).expect("totp key");
     totp_store::enroll(
@@ -902,8 +865,8 @@ async fn totp_login_preserves_native_return_to() {
     fx.cleanup().await;
 }
 
-fn db_url() -> Option<String> {
-    zeroship_core::config::test_database_url_opt()
+fn db_url() -> String {
+    crate::common::test_database_url()
 }
 
 fn test_issuer() -> Issuer {

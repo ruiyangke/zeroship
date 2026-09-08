@@ -1,5 +1,6 @@
 //! Relay `MessageID` idempotency: the reserve/confirm dedup split (sub-spec
-//! §7.1 / §8 never-silent-drop). Live PG (`PG_TEST_URL` or the TOML overlay); skips without it.
+//! §7.1 / §8 never-silent-drop). Live PG (`PG_TEST_URL` or the TOML overlay); a
+//! run that cannot reach one is REFUSED, not skipped.
 //!
 //! The security bug this guards (security review finding 2): the dedup sentinel
 //! must be committed only at a TERMINAL outcome, never before a retryable (503)
@@ -13,8 +14,8 @@ use compio_postgres::{connect, NoTls};
 use zeroship_auth::store::relay;
 
 #[allow(clippy::future_not_send)]
-async fn pg_or_skip() -> Option<compio_postgres::Client> {
-    let dsn = zeroship_core::config::test_database_url_opt()?;
+async fn pg() -> compio_postgres::Client {
+    let dsn = crate::common::test_database_url();
     let (client, connection) = connect(&dsn, NoTls).await.expect("connect");
     compio::runtime::spawn(async move {
         if let Err(e) = connection.run().await {
@@ -22,7 +23,7 @@ async fn pg_or_skip() -> Option<compio_postgres::Client> {
         }
     })
     .detach();
-    Some(client)
+    client
 }
 
 /// The core regression: a transient 503 (no commit) followed by a retry must
@@ -34,10 +35,7 @@ async fn pg_or_skip() -> Option<compio_postgres::Client> {
 ///   4. a later replay → probe sees the committed sentinel ⇒ dropped
 #[compio::test]
 async fn transient_503_then_retry_is_not_deduped_away() {
-    let Some(client) = pg_or_skip().await else {
-        zeroship_test_support::skip("skip (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let client = pg().await;
     let message_id = format!("mid-{}", uuid::Uuid::new_v4().simple());
 
     // 1. First sighting — probe is fresh.
@@ -88,10 +86,7 @@ async fn transient_503_then_retry_is_not_deduped_away() {
 /// and a fresh id probes false until committed.
 #[compio::test]
 async fn commit_is_idempotent_and_probe_tracks_it() {
-    let Some(client) = pg_or_skip().await else {
-        zeroship_test_support::skip("skip (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let client = pg().await;
     let message_id = format!("mid-{}", uuid::Uuid::new_v4().simple());
 
     assert!(!relay::already_seen(&client, &message_id).await.expect("probe"));

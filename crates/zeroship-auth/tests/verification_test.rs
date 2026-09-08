@@ -1,8 +1,11 @@
 //! Live-PG roundtrip for `auth::identity::verification`.
 //!
-//! Skipped unless a test database is available (`PG_TEST_URL` or the TOML overlay). Each test scopes itself with a
-//! random email so concurrent runs don't collide; the cleanup at the end
-//! removes every row that test inserted (verifications + the seeded user).
+//! Requires a live PostgreSQL (`PG_TEST_URL` or the TOML overlay). A run
+//! that cannot reach one is REFUSED, not skipped.
+//!
+//! Each test scopes itself with a random email so concurrent runs don't
+//! collide; the cleanup at the end removes every row that test inserted
+//! (verifications + the seeded user).
 
 use compio_postgres::{connect, Client, NoTls};
 use uuid::Uuid;
@@ -13,8 +16,8 @@ use zeroship_auth::store::{users};
 // `compio_postgres::Client` is `!Send` — the futures inherit that
 // structurally. The lint is informational, not actionable here.
 #[allow(clippy::future_not_send)]
-async fn pg() -> Option<compio_postgres::Client> {
-    let dsn = zeroship_core::config::test_database_url_opt()?;
+async fn pg() -> compio_postgres::Client {
+    let dsn = crate::common::test_database_url();
     let (client, connection) = connect(&dsn, NoTls).await.expect("connect");
     compio::runtime::spawn(async move {
         if let Err(e) = connection.run().await {
@@ -22,7 +25,7 @@ async fn pg() -> Option<compio_postgres::Client> {
         }
     })
     .detach();
-    Some(client)
+    client
 }
 
 async fn pg_connect(dsn: &str) -> Client {
@@ -93,17 +96,8 @@ async fn drop_verifications_insert_delay(client: &Client, name: &str) {
 
 #[compio::test]
 async fn concurrent_issue_leaves_one_active_verification_token() {
-    let dsn = match zeroship_core::config::test_database_url_opt() {
-        Some(dsn) => dsn,
-        None => {
-            zeroship_test_support::skip("skipping verification_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-            return;
-        }
-    };
-    let Some(client) = pg().await else {
-        zeroship_test_support::skip("skipping verification_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let dsn = crate::common::test_database_url();
+    let client = pg().await;
 
     let email = format!(
         "verify-concurrent-{}@zeroship.test",
@@ -158,10 +152,7 @@ async fn concurrent_issue_leaves_one_active_verification_token() {
 
 #[compio::test]
 async fn issue_then_redeem_roundtrip() {
-    let Some(client) = pg().await else {
-        zeroship_test_support::skip("skipping verification_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let client = pg().await;
 
     let email = format!("verify-{}@zeroship.test", Uuid::new_v4().simple());
     let user = users::create(&client, &email, "Test", None)
@@ -208,10 +199,7 @@ async fn issue_then_redeem_roundtrip() {
 
 #[compio::test]
 async fn redeem_and_mark_verified_rolls_back_token_consume_with_transaction() {
-    let Some(client) = pg().await else {
-        zeroship_test_support::skip("skipping verification_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let client = pg().await;
 
     let email = format!(
         "verify-rollback-{}@zeroship.test",
@@ -269,10 +257,7 @@ async fn redeem_and_mark_verified_rolls_back_token_consume_with_transaction() {
 
 #[compio::test]
 async fn new_issue_supersedes_previous() {
-    let Some(client) = pg().await else {
-        zeroship_test_support::skip("skipping verification_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let client = pg().await;
 
     let email = format!(
         "verify-supersede-{}@zeroship.test",

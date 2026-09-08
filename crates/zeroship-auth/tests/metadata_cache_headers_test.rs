@@ -22,18 +22,16 @@ use common::test_auth_config;
 const ISSUER: &str = "https://auth.zeroship.test/oauth2";
 
 /// Boot the real route table behind the real security-headers middleware and
-/// return its base URL, or `None` when no live database is configured.
+/// return its base URL.
 ///
-/// The skip is ANNOUNCED, not silent - `zeroship_test_support::skip` writes the
-/// marker straight to the stderr handle, which the harness does not capture, and
-/// `tests/run_auth_suite.sh` counts any marker outside its allowlist as a
-/// failure. So the blind spot a bare `return` would create is closed by the
-/// suite, not by panicking here. Panicking instead would take
-/// `cargo test --workspace` red on every machine without Postgres, which is the
-/// state this repo just finished getting out of, and this target has no
-/// `required-features` gate to keep it out of that run.
-async fn boot() -> Option<(web::test::TestServer, cyper::Client)> {
-    let db_url = zeroship_core::config::test_database_url_opt()?;
+/// THERE IS NO NO-DATABASE ARM. This used to return `None` and announce a
+/// skip, on the argument that `tests/run_auth_suite.sh` counted the marker so
+/// the blind spot was closed by the suite rather than by the test. That put the
+/// decision in a shell script nobody runs by hand, and left `cargo test` green
+/// on a machine that had exercised no route at all.
+/// [`crate::common::test_database_url`] now refuses the run instead.
+async fn boot() -> (web::test::TestServer, cyper::Client) {
+    let db_url = crate::common::test_database_url();
 
     let (pg_client, pg_connection) = connect(&db_url, NoTls).await.expect("connect pg");
     compio::runtime::spawn(async move {
@@ -72,7 +70,7 @@ async fn boot() -> Option<(web::test::TestServer, cyper::Client)> {
     })
     .await;
 
-    Some((srv, cyper::Client::new()))
+    (srv, cyper::Client::new())
 }
 
 async fn cache_control(srv: &web::test::TestServer, http: &cyper::Client, path: &str) -> String {
@@ -97,10 +95,7 @@ async fn cache_control(srv: &web::test::TestServer, http: &cyper::Client, path: 
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn jwks_reaches_the_wire_cacheable() {
-    let Some((srv, http)) = boot().await else {
-        zeroship_test_support::skip("[metadata_cache_headers] skip (need a test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let (srv, http) = boot().await;
     let value = cache_control(&srv, &http, "/oauth2/.well-known/jwks.json").await;
     assert!(
         value.contains("max-age=300") && value.starts_with("public"),
@@ -118,10 +113,7 @@ async fn jwks_reaches_the_wire_cacheable() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn discovery_reaches_the_wire_cacheable_on_every_mounted_path() {
-    let Some((srv, http)) = boot().await else {
-        zeroship_test_support::skip("[metadata_cache_headers] skip (need a test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let (srv, http) = boot().await;
     for path in [
         "/oauth2/.well-known/openid-configuration",
         "/oauth2/.well-known/oauth-authorization-server",
@@ -148,10 +140,7 @@ async fn discovery_reaches_the_wire_cacheable_on_every_mounted_path() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn routes_without_an_explicit_value_still_default_to_no_store() {
-    let Some((srv, http)) = boot().await else {
-        zeroship_test_support::skip("[metadata_cache_headers] skip (need a test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let (srv, http) = boot().await;
     let resp = http
         .get(srv.url("/static/style.css"))
         .expect("build request")

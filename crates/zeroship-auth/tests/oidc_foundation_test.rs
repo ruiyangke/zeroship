@@ -148,8 +148,7 @@ fn wrong_alg_hs256_token(claims: &Value, kid: &str) -> String {
 }
 
 fn db_url() -> String {
-    zeroship_core::config::test_database_url_opt()
-        .expect("a test database must be set (PG_TEST_URL or the TOML overlay) so op_foundation_test runs against Postgres")
+    crate::common::test_database_url()
 }
 
 async fn open_conn() -> Client {

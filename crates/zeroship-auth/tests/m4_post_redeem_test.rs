@@ -50,8 +50,8 @@ struct M4TestCtx {
 
 impl M4TestCtx {
     #[allow(clippy::future_not_send)]
-    async fn boot() -> Option<Self> {
-        let db_url = zeroship_core::config::test_database_url_opt()?;
+    async fn boot() -> Self {
+        let db_url = crate::common::test_database_url();
         let (pg_client, pg_connection) =
             compio_postgres::connect(&db_url, compio_postgres::NoTls)
                 .await
@@ -67,11 +67,11 @@ impl M4TestCtx {
         let cfg = Arc::new(test_auth_config(&db_url));
         let refresh_pool = zeroship_auth::oidc::refresh::RefreshSessionPool::new(db_url, 4);
 
-        Some(Self {
+        Self {
             cfg,
             pg,
             refresh_pool,
-        })
+        }
     }
 
     #[allow(clippy::future_not_send)]
@@ -145,10 +145,7 @@ impl M4TestCtx {
 #[test]
 fn verify_get_renders_interstitial_does_not_consume_token() {
     run_compio(async {
-    let Some(ctx) = M4TestCtx::boot().await else {
-        zeroship_test_support::skip("skipping m4_post_redeem_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let ctx = M4TestCtx::boot().await;
     let (user_id, email, token) = ctx.seed_verification().await;
     let app = init_app!(&ctx);
 
@@ -178,10 +175,7 @@ fn verify_get_renders_interstitial_does_not_consume_token() {
 #[test]
 fn verify_post_redeem_consumes_token_and_marks_verified() {
     run_compio(async {
-    let Some(ctx) = M4TestCtx::boot().await else {
-        zeroship_test_support::skip("skipping m4_post_redeem_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let ctx = M4TestCtx::boot().await;
     let (user_id, email, token) = ctx.seed_verification().await;
     let app = init_app!(&ctx);
     let csrf = csrf_from_verify_get(&app, &token).await;
@@ -219,10 +213,7 @@ fn verify_post_redeem_consumes_token_and_marks_verified() {
 #[test]
 fn verify_post_redeem_with_invalid_csrf_rejected() {
     run_compio(async {
-    let Some(ctx) = M4TestCtx::boot().await else {
-        zeroship_test_support::skip("skipping m4_post_redeem_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let ctx = M4TestCtx::boot().await;
     let (_, email, token) = ctx.seed_verification().await;
     let app = init_app!(&ctx);
     let body = url::form_urlencoded::Serializer::new(String::new())
@@ -240,10 +231,7 @@ fn verify_post_redeem_with_invalid_csrf_rejected() {
 #[test]
 fn verify_post_redeem_with_invalid_token_renders_error_page() {
     run_compio(async {
-    let Some(ctx) = M4TestCtx::boot().await else {
-        zeroship_test_support::skip("skipping m4_post_redeem_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let ctx = M4TestCtx::boot().await;
     let app = init_app!(&ctx);
     let request_id = format!("m4-invalid-{}", Uuid::new_v4().simple());
     let token = format!("missing-{}", Uuid::new_v4().simple());
@@ -274,10 +262,7 @@ fn verify_post_redeem_with_invalid_token_renders_error_page() {
 #[test]
 fn verify_post_redeem_idempotent_second_call_returns_error() {
     run_compio(async {
-    let Some(ctx) = M4TestCtx::boot().await else {
-        zeroship_test_support::skip("skipping m4_post_redeem_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let ctx = M4TestCtx::boot().await;
     let (_, email, token) = ctx.seed_verification().await;
     let app = init_app!(&ctx);
     let csrf = csrf_from_verify_get(&app, &token).await;
@@ -313,10 +298,7 @@ fn verify_post_redeem_idempotent_second_call_returns_error() {
 #[test]
 fn reset_get_html_includes_history_replace_state_script() {
     run_compio(async {
-    let Some(ctx) = M4TestCtx::boot().await else {
-        zeroship_test_support::skip("skipping m4_post_redeem_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let ctx = M4TestCtx::boot().await;
     let app = init_app!(&ctx);
 
     let resp = call_get(&app, "/reset?token=ABC").await;
@@ -329,10 +311,7 @@ fn reset_get_html_includes_history_replace_state_script() {
 #[test]
 fn cache_control_no_store_on_all_three_interstitials() {
     run_compio(async {
-    let Some(ctx) = M4TestCtx::boot().await else {
-        zeroship_test_support::skip("skipping m4_post_redeem_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let ctx = M4TestCtx::boot().await;
     let app = init_app!(&ctx);
 
     let verify = call_get(&app, "/verify?token=ABC").await;

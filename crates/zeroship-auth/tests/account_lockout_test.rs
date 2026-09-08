@@ -57,10 +57,7 @@ const BAD_PW: &str = "definitely the wrong password here";
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn consecutive_failures_lock_account_then_success_resets() {
-    let Some(db_url) = zeroship_core::config::test_database_url_opt() else {
-        zeroship_test_support::skip("skipping account_lockout_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let db_url = crate::common::test_database_url();
     let (pg_client, pg_connection) = connect(&db_url, NoTls).await.expect("connect pg");
     compio::runtime::spawn(async move {
         if let Err(e) = pg_connection.run().await {
@@ -175,13 +172,12 @@ async fn consecutive_failures_lock_account_then_success_resets() {
         .ok();
 }
 
-/// Connect + spawn the PG driver, returning a shared client. Returns `None`
-/// (and prints a skip note) when no test database is configured.
-async fn connect_pg(label: &'static str) -> Option<Arc<compio_postgres::Client>> {
-    let Some(db_url) = zeroship_core::config::test_database_url_opt() else {
-        zeroship_test_support::skip(&format!("skipping {label} (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))"));
-        return None;
-    };
+/// Connect + spawn the PG driver, returning a shared client.
+///
+/// The DSN comes from [`crate::common::test_database_url`], which refuses the
+/// whole run rather than letting a test proceed without a database.
+async fn connect_pg(label: &'static str) -> Arc<compio_postgres::Client> {
+    let db_url = crate::common::test_database_url();
     let (pg_client, pg_connection) = connect(&db_url, NoTls).await.expect("connect pg");
     compio::runtime::spawn(async move {
         if let Err(e) = pg_connection.run().await {
@@ -189,7 +185,7 @@ async fn connect_pg(label: &'static str) -> Option<Arc<compio_postgres::Client>>
         }
     })
     .detach();
-    Some(Arc::new(pg_client))
+    Arc::new(pg_client)
 }
 
 /// Lock a real user by driving THRESHOLD consecutive wrong-password attempts
@@ -246,9 +242,7 @@ async fn lock_account_via_failures(
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn locked_account_recovers_via_password_reset() {
-    let Some(pg) = connect_pg("locked_account_recovers_via_password_reset").await else {
-        return;
-    };
+    let pg = connect_pg("locked_account_recovers_via_password_reset").await;
 
     let email = format!("lockout-reset-{}@zeroship.test", Uuid::new_v4().simple());
     let old_phc = password::hash(GOOD_PW).expect("hash old password");
@@ -325,11 +319,7 @@ async fn locked_account_recovers_via_password_reset() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn locked_account_recovers_at_eligibility_gate_after_lockout_clear() {
-    let Some(pg) =
-        connect_pg("locked_account_recovers_at_eligibility_gate_after_lockout_clear").await
-    else {
-        return;
-    };
+    let pg = connect_pg("locked_account_recovers_at_eligibility_gate_after_lockout_clear").await;
 
     let email = format!("lockout-elig-{}@zeroship.test", Uuid::new_v4().simple());
     let phc = password::hash(GOOD_PW).expect("hash password");
@@ -395,10 +385,7 @@ async fn locked_account_recovers_at_eligibility_gate_after_lockout_clear() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn locked_absent_and_wrongpw_are_status_indistinguishable() {
-    let Some(pg) = connect_pg("locked_absent_and_wrongpw_are_status_indistinguishable").await
-    else {
-        return;
-    };
+    let pg = connect_pg("locked_absent_and_wrongpw_are_status_indistinguishable").await;
 
     let req = TestRequest::default().to_http_request();
 
@@ -503,9 +490,7 @@ async fn locked_absent_and_wrongpw_are_status_indistinguishable() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn failure_arms_perform_equivalent_db_roundtrips() {
-    let Some(pg) = connect_pg("failure_arms_perform_equivalent_db_roundtrips").await else {
-        return;
-    };
+    let pg = connect_pg("failure_arms_perform_equivalent_db_roundtrips").await;
 
     // A real, password-bearing user for the wrong-password arm (arm 6b).
     let real_email = format!("f7-real-{}@zeroship.test", Uuid::new_v4().simple());

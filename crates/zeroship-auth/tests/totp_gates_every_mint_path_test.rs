@@ -16,8 +16,8 @@
 //! that were actually used - a magic-link user must not end up holding a
 //! session that claims a password login.
 //!
-//! Skipped unless a test database is available; the skip is announced so
-//! `tests/run_auth_suite.sh` can tell a skip from a pass.
+//! Requires a live PostgreSQL (`PG_TEST_URL` or the TOML overlay). A run
+//! that cannot reach one is REFUSED, not skipped.
 
 use std::sync::{Arc, Mutex};
 
@@ -89,8 +89,8 @@ struct Fixture {
 
 impl Fixture {
     #[allow(clippy::future_not_send)]
-    async fn boot() -> Option<Self> {
-        let db_url = zeroship_core::config::test_database_url_opt()?;
+    async fn boot() -> Self {
+        let db_url = crate::common::test_database_url();
 
         let (pg_client, pg_connection) = connect(&db_url, NoTls).await.expect("connect pg");
         compio::runtime::spawn(async move {
@@ -140,13 +140,13 @@ impl Fixture {
         .await;
         let auth_base = srv.url("").trim_end_matches('/').to_string();
 
-        Some(Self {
+        Self {
             srv,
             auth_base,
             pg,
             http: cyper::Client::new(),
             mailer,
-        })
+        }
     }
 
     fn url(&self, path: &str) -> String {
@@ -347,12 +347,7 @@ async fn start_magic(fx: &Fixture, email: &str, return_to: &str) -> (String, Str
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn magic_same_device_redeem_demands_second_factor() {
-    let Some(fx) = Fixture::boot().await else {
-        zeroship_test_support::skip(
-            "[totp_gates_every_mint_path same-device] skip (need a test database (set PG_TEST_URL or run tests/provision_test_backends.sh))",
-        );
-        return;
-    };
+    let fx = Fixture::boot().await;
     let email = format!("totp-magic-same-{}@zeroship.test", Uuid::new_v4().simple());
     let (user, secret) = seed_user_with_totp(&fx.pg, &email, None).await;
     let return_to = native_authorize_return_to();
@@ -439,12 +434,7 @@ async fn magic_same_device_redeem_demands_second_factor() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn magic_cross_device_complete_demands_second_factor() {
-    let Some(fx) = Fixture::boot().await else {
-        zeroship_test_support::skip(
-            "[totp_gates_every_mint_path cross-device] skip (need a test database (set PG_TEST_URL or run tests/provision_test_backends.sh))",
-        );
-        return;
-    };
+    let fx = Fixture::boot().await;
     let email = format!("totp-magic-cross-{}@zeroship.test", Uuid::new_v4().simple());
     let (user, secret) = seed_user_with_totp(&fx.pg, &email, None).await;
     let return_to = native_authorize_return_to();
@@ -541,10 +531,7 @@ async fn magic_cross_device_complete_demands_second_factor() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn link_confirm_demands_second_factor_before_linking() {
-    let Some(fx) = Fixture::boot().await else {
-        zeroship_test_support::skip("[totp_gates_every_mint_path link] skip (need a test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let fx = Fixture::boot().await;
     let email = format!("totp-link-{}@zeroship.test", Uuid::new_v4().simple());
     let phc = password::hash(LINK_PASSWORD).expect("hash password");
     let (user, secret) = seed_user_with_totp(&fx.pg, &email, Some(&phc)).await;

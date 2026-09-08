@@ -9,7 +9,8 @@
 //! (3) the second-factor evaluation the handler performs (valid TOTP code OR a
 //! single-use backup code) accepts/rejects correctly against the real store.
 //!
-//! Skipped unless a test database (`PG_TEST_URL` or the TOML overlay) is available. Run `--test-threads=1`.
+//! Requires a live PostgreSQL (`PG_TEST_URL` or the TOML overlay). A run
+//! that cannot reach one is REFUSED, not skipped. Run `--test-threads=1`.
 
 use compio_postgres::{connect, Client, NoTls};
 use uuid::Uuid;
@@ -19,8 +20,8 @@ use zeroship_auth::sessions::totp_challenge::{FirstFactor, TotpChallenge};
 use zeroship_auth::store::{totp as totp_store, users};
 
 #[allow(clippy::future_not_send)]
-async fn pg() -> Option<Client> {
-    let dsn = zeroship_core::config::test_database_url_opt()?;
+async fn pg() -> Client {
+    let dsn = crate::common::test_database_url();
     let (client, connection) = connect(&dsn, NoTls).await.expect("connect");
     compio::runtime::spawn(async move {
         if let Err(e) = connection.run().await {
@@ -28,7 +29,7 @@ async fn pg() -> Option<Client> {
         }
     })
     .detach();
-    Some(client)
+    client
 }
 
 fn key() -> [u8; 32] {
@@ -52,10 +53,7 @@ async fn cleanup(db: &Client, ids: &[Uuid]) {
 /// this is the `is_enabled` branch in the `/login` POST success path.
 #[compio::test]
 async fn only_confirmed_credential_gates_login() {
-    let Some(db) = pg().await else {
-        zeroship_test_support::skip("skipping totp_login_challenge_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let db = pg().await;
     let tag = Uuid::new_v4().simple().to_string();
     let user = users::create(&db, &format!("totp-gate-{tag}@zeroship.test"), "Gate", Some("phc"))
         .await
@@ -89,9 +87,7 @@ async fn only_confirmed_credential_gates_login() {
 /// a version mismatch (the `post_2fa` re-check) invalidates it.
 #[compio::test]
 async fn challenge_stash_binds_user_and_credential_version() {
-    let Some(db) = pg().await else {
-        return;
-    };
+    let db = pg().await;
     let tag = Uuid::new_v4().simple().to_string();
     let user = users::create(&db, &format!("totp-stash-{tag}@zeroship.test"), "Stash", Some("phc"))
         .await
@@ -131,9 +127,7 @@ async fn challenge_stash_binds_user_and_credential_version() {
 /// accepted; a wrong code is rejected; a backup code works exactly once.
 #[compio::test]
 async fn second_factor_accepts_totp_then_backup_code_once() {
-    let Some(db) = pg().await else {
-        return;
-    };
+    let db = pg().await;
     let tag = Uuid::new_v4().simple().to_string();
     let user = users::create(&db, &format!("totp-2f-{tag}@zeroship.test"), "TwoF", Some("phc"))
         .await

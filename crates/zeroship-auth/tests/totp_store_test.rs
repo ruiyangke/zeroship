@@ -1,6 +1,7 @@
 //! TOTP 2FA store + crypto lifecycle — live PG (ISS-11).
 //!
-//! Skipped unless a test database (`PG_TEST_URL` or the TOML overlay) is available. These drive the REAL
+//! Requires a live PostgreSQL (`PG_TEST_URL` or the TOML overlay). A run
+//! that cannot reach one is REFUSED, not skipped. These drive the REAL
 //! `store::totp` transactions and the REAL `identity::totp` crypto/verify — no
 //! shims — so a green run exercises the same code the `/me/2fa/*` handlers and
 //! the login challenge call in production. Run with `--test-threads=1`.
@@ -14,8 +15,8 @@ use zeroship_auth::identity::totp;
 use zeroship_auth::store::{totp as totp_store, users};
 
 #[allow(clippy::future_not_send)]
-async fn pg() -> Option<Client> {
-    let dsn = zeroship_core::config::test_database_url_opt()?;
+async fn pg() -> Client {
+    let dsn = crate::common::test_database_url();
     let (client, connection) = connect(&dsn, NoTls).await.expect("connect");
     compio::runtime::spawn(async move {
         if let Err(e) = connection.run().await {
@@ -23,7 +24,7 @@ async fn pg() -> Option<Client> {
         }
     })
     .detach();
-    Some(client)
+    client
 }
 
 fn key() -> [u8; 32] {
@@ -47,10 +48,7 @@ async fn cleanup(db: &Client, ids: &[Uuid]) {
 
 #[compio::test]
 async fn enroll_stores_encrypted_and_unconfirmed() {
-    let Some(db) = pg().await else {
-        zeroship_test_support::skip("skipping totp_store_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let db = pg().await;
     let tag = Uuid::new_v4().simple().to_string();
     let user = users::create(&db, &format!("totp-enroll-{tag}@zeroship.test"), "Enroll", Some("phc"))
         .await
@@ -89,9 +87,7 @@ async fn enroll_stores_encrypted_and_unconfirmed() {
 
 #[compio::test]
 async fn confirm_activates_and_issues_backup_codes() {
-    let Some(db) = pg().await else {
-        return;
-    };
+    let db = pg().await;
     let tag = Uuid::new_v4().simple().to_string();
     let user = users::create(&db, &format!("totp-confirm-{tag}@zeroship.test"), "Confirm", Some("phc"))
         .await
@@ -123,9 +119,7 @@ async fn confirm_activates_and_issues_backup_codes() {
 
 #[compio::test]
 async fn confirm_without_enrollment_is_a_noop() {
-    let Some(db) = pg().await else {
-        return;
-    };
+    let db = pg().await;
     let tag = Uuid::new_v4().simple().to_string();
     let user = users::create(&db, &format!("totp-noconf-{tag}@zeroship.test"), "NoConf", Some("phc"))
         .await
@@ -142,9 +136,7 @@ async fn confirm_without_enrollment_is_a_noop() {
 
 #[compio::test]
 async fn current_code_verifies_against_stored_secret() {
-    let Some(db) = pg().await else {
-        return;
-    };
+    let db = pg().await;
     let tag = Uuid::new_v4().simple().to_string();
     let user = users::create(&db, &format!("totp-verify-{tag}@zeroship.test"), "Verify", Some("phc"))
         .await
@@ -170,9 +162,7 @@ async fn current_code_verifies_against_stored_secret() {
 
 #[compio::test]
 async fn backup_code_works_once_then_is_rejected() {
-    let Some(db) = pg().await else {
-        return;
-    };
+    let db = pg().await;
     let tag = Uuid::new_v4().simple().to_string();
     let user = users::create(&db, &format!("totp-backup-{tag}@zeroship.test"), "Backup", Some("phc"))
         .await
@@ -212,9 +202,7 @@ async fn backup_code_works_once_then_is_rejected() {
 
 #[compio::test]
 async fn disable_removes_credential_and_codes() {
-    let Some(db) = pg().await else {
-        return;
-    };
+    let db = pg().await;
     let tag = Uuid::new_v4().simple().to_string();
     let user = users::create(&db, &format!("totp-disable-{tag}@zeroship.test"), "Disable", Some("phc"))
         .await
@@ -242,9 +230,7 @@ async fn disable_removes_credential_and_codes() {
 
 #[compio::test]
 async fn re_enroll_resets_to_pending() {
-    let Some(db) = pg().await else {
-        return;
-    };
+    let db = pg().await;
     let tag = Uuid::new_v4().simple().to_string();
     let user = users::create(&db, &format!("totp-reenroll-{tag}@zeroship.test"), "ReEnroll", Some("phc"))
         .await
@@ -298,9 +284,7 @@ async fn re_enroll_resets_to_pending() {
 
 #[compio::test]
 async fn credential_cascades_on_user_delete() {
-    let Some(db) = pg().await else {
-        return;
-    };
+    let db = pg().await;
     let tag = Uuid::new_v4().simple().to_string();
     let user = users::create(&db, &format!("totp-cascade-{tag}@zeroship.test"), "Cascade", Some("phc"))
         .await

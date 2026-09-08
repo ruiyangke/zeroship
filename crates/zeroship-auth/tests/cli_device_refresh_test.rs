@@ -158,13 +158,8 @@ struct Fixture {
 
 impl Fixture {
     #[allow(clippy::future_not_send)]
-    async fn boot() -> Option<Self> {
-        let Some(db_url) = db_url() else {
-            zeroship_test_support::skip(
-                "[cli_device_refresh] skip (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))",
-            );
-            return None;
-        };
+    async fn boot() -> Self {
+        let db_url = db_url();
         let (pg_client, pg_connection) = connect(&db_url, NoTls).await.expect("connect pg");
         compio::runtime::spawn(async move {
             if let Err(err) = pg_connection.run().await {
@@ -232,14 +227,14 @@ impl Fixture {
         })
         .await;
         let auth_base = format!("http://{}", srv.addr());
-        Some(Self {
+        Self {
             srv,
             auth_base,
             db,
             issuer,
             user_id,
             key_dir,
-        })
+        }
     }
 
     /// Drive the RFC 8628 legs a human drives, and return the token response.
@@ -472,9 +467,7 @@ fn assert_platform_principal_token(fx: &Fixture, access_token: &str, scope: &str
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn the_cli_registration_permits_refresh_and_registers_offline_access() {
-    let Some(fx) = Fixture::boot().await else {
-        return;
-    };
+    let fx = Fixture::boot().await;
     let row = fx
         .db
         .query_one(
@@ -510,9 +503,7 @@ async fn the_cli_registration_permits_refresh_and_registers_offline_access() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn the_cli_device_grant_returns_a_short_access_token_and_a_refresh_token() {
-    let Some(fx) = Fixture::boot().await else {
-        return;
-    };
+    let fx = Fixture::boot().await;
     let (token, device_code) = fx.login().await;
 
     assert_eq!(token.token_type, "Bearer");
@@ -555,9 +546,7 @@ async fn the_cli_device_grant_returns_a_short_access_token_and_a_refresh_token()
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn the_refresh_family_and_its_replay_window_are_bounded() {
-    let Some(fx) = Fixture::boot().await else {
-        return;
-    };
+    let fx = Fixture::boot().await;
     let (token, _device_code) = fx.login().await;
     let first_refresh = token.refresh_token.clone().expect("root refresh token");
 
@@ -627,9 +616,7 @@ async fn the_refresh_family_and_its_replay_window_are_bounded() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn the_cli_device_grant_caps_scope_to_the_client_registration_only() {
-    let Some(fx) = Fixture::boot().await else {
-        return;
-    };
+    let fx = Fixture::boot().await;
     let rows = fx
         .db
         .query(
@@ -657,9 +644,7 @@ async fn the_cli_device_grant_caps_scope_to_the_client_registration_only() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn a_cli_refresh_rotation_keeps_the_platform_principal_token_shape() {
-    let Some(fx) = Fixture::boot().await else {
-        return;
-    };
+    let fx = Fixture::boot().await;
     let (token, _device_code) = fx.login().await;
     let first_refresh = token.refresh_token.clone().expect("root refresh token");
 
@@ -691,9 +676,7 @@ async fn a_cli_refresh_rotation_keeps_the_platform_principal_token_shape() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn reusing_a_rotated_cli_refresh_token_kills_the_family_and_recalls_the_access_token() {
-    let Some(fx) = Fixture::boot().await else {
-        return;
-    };
+    let fx = Fixture::boot().await;
     let (token, _device_code) = fx.login().await;
     let first_refresh = token.refresh_token.clone().expect("root refresh token");
     let sub = fx.user_id.to_string();
@@ -767,8 +750,8 @@ async fn post_form(url: &str, body: String) -> (u16, String) {
     (status, body)
 }
 
-fn db_url() -> Option<String> {
-    zeroship_core::config::test_database_url_opt()
+fn db_url() -> String {
+    crate::common::test_database_url()
 }
 
 fn test_issuer() -> Issuer {

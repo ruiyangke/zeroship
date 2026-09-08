@@ -1,8 +1,10 @@
 //! Live-PG roundtrip for `auth::identity::magic_link`.
 //!
-//! Skipped unless a test database is available (`PG_TEST_URL` or the TOML overlay). Each test scopes itself with a
-//! random email so concurrent runs don't collide; the cleanup at the end
-//! removes every row that test inserted.
+//! Requires a live PostgreSQL (`PG_TEST_URL` or the TOML overlay). A run
+//! that cannot reach one is REFUSED, not skipped.
+//!
+//! Each test scopes itself with a random email so concurrent runs don't
+//! collide; the cleanup at the end removes every row that test inserted.
 
 use std::time::Duration;
 
@@ -16,9 +18,9 @@ use zeroship_auth::ui::magic::completions_store::{self, ConsumeError};
 // `compio_postgres::Client` is `!Send` — the futures inherit that
 // structurally. The lint is informational, not actionable here.
 #[allow(clippy::future_not_send)]
-async fn pg() -> Option<compio_postgres::Client> {
-    let dsn = zeroship_core::config::test_database_url_opt()?;
-    Some(pg_connect(&dsn).await)
+async fn pg() -> compio_postgres::Client {
+    let dsn = crate::common::test_database_url();
+    pg_connect(&dsn).await
 }
 
 async fn pg_connect(dsn: &str) -> Client {
@@ -188,17 +190,8 @@ fn sha256(s: &str) -> [u8; 32] {
 
 #[compio::test]
 async fn wrong_code_does_not_mutate_reserved_completion() {
-    let dsn = match zeroship_core::config::test_database_url_opt() {
-        Some(dsn) => dsn,
-        None => {
-            zeroship_test_support::skip("skipping magic_link_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-            return;
-        }
-    };
-    let Some(client) = pg().await else {
-        zeroship_test_support::skip("skipping magic_link_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let dsn = crate::common::test_database_url();
+    let client = pg().await;
 
     let csrf_nonce = format!("completion-reserved-{}", Uuid::new_v4().simple());
     let email = format!("magic-reserved-{}@example.test", Uuid::new_v4().simple());
@@ -284,17 +277,8 @@ async fn wrong_code_does_not_mutate_reserved_completion() {
 
 #[compio::test]
 async fn concurrent_issue_leaves_one_active_token() {
-    let dsn = match zeroship_core::config::test_database_url_opt() {
-        Some(dsn) => dsn,
-        None => {
-            zeroship_test_support::skip("skipping magic_link_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-            return;
-        }
-    };
-    let Some(client) = pg().await else {
-        zeroship_test_support::skip("skipping magic_link_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let dsn = crate::common::test_database_url();
+    let client = pg().await;
 
     let email = format!("magic-concurrent-{}@example.test", Uuid::new_v4().simple());
     let insert_delay = install_magic_links_insert_delay(&client, &email).await;
@@ -338,10 +322,7 @@ async fn concurrent_issue_leaves_one_active_token() {
 
 #[compio::test]
 async fn issue_then_redeem_happy_path() {
-    let Some(client) = pg().await else {
-        zeroship_test_support::skip("skipping magic_link_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let client = pg().await;
 
     let email = format!("magic-happy-{}@example.test", Uuid::new_v4().simple());
     let issued = magic_link::issue(&client, &email, "login")
@@ -379,10 +360,7 @@ async fn issue_then_redeem_happy_path() {
 
 #[compio::test]
 async fn second_redeem_returns_none() {
-    let Some(client) = pg().await else {
-        zeroship_test_support::skip("skipping magic_link_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let client = pg().await;
 
     let email = format!("magic-once-{}@example.test", Uuid::new_v4().simple());
     let issued = magic_link::issue(&client, &email, "login")
@@ -419,10 +397,7 @@ async fn second_redeem_returns_none() {
 
 #[compio::test]
 async fn pending_consume_can_be_cleared_and_retried_before_finalize() {
-    let Some(client) = pg().await else {
-        zeroship_test_support::skip("skipping magic_link_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let client = pg().await;
 
     let email = format!("magic-pending-retry-{}@example.test", Uuid::new_v4().simple());
     let issued = magic_link::issue(&client, &email, "login")
@@ -487,10 +462,7 @@ async fn pending_consume_can_be_cleared_and_retried_before_finalize() {
 
 #[compio::test]
 async fn stale_magic_link_reservation_cannot_finalize_or_clear_newer_reservation() {
-    let Some(client) = pg().await else {
-        zeroship_test_support::skip("skipping magic_link_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let client = pg().await;
 
     let email = format!("magic-stale-reservation-{}@example.test", Uuid::new_v4().simple());
     let issued = magic_link::issue(&client, &email, "login")
@@ -564,10 +536,7 @@ async fn stale_magic_link_reservation_cannot_finalize_or_clear_newer_reservation
 
 #[compio::test]
 async fn second_redeem_while_pending_returns_in_flight() {
-    let Some(client) = pg().await else {
-        zeroship_test_support::skip("skipping magic_link_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let client = pg().await;
 
     let email = format!("magic-inflight-{}@example.test", Uuid::new_v4().simple());
     let issued = magic_link::issue(&client, &email, "login")
@@ -602,10 +571,7 @@ async fn second_redeem_while_pending_returns_in_flight() {
 
 #[compio::test]
 async fn stale_pending_redeem_burns_link_as_consumed() {
-    let Some(client) = pg().await else {
-        zeroship_test_support::skip("skipping magic_link_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let client = pg().await;
 
     let email = format!("magic-stale-pending-{}@example.test", Uuid::new_v4().simple());
     let issued = magic_link::issue(&client, &email, "login")
@@ -659,10 +625,7 @@ async fn stale_pending_redeem_burns_link_as_consumed() {
 
 #[compio::test]
 async fn redeem_rejects_reset_purpose_row_without_consuming_it() {
-    let Some(client) = pg().await else {
-        zeroship_test_support::skip("skipping magic_link_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let client = pg().await;
 
     let email = format!("magic-reset-purpose-{}@example.test", Uuid::new_v4().simple());
     let raw_token = format!("reset-token-{}", Uuid::new_v4().simple());
@@ -715,10 +678,7 @@ async fn redeem_rejects_reset_purpose_row_without_consuming_it() {
 
 #[compio::test]
 async fn expired_token_returns_none() {
-    let Some(client) = pg().await else {
-        zeroship_test_support::skip("skipping magic_link_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let client = pg().await;
 
     let email = format!("magic-expired-{}@example.test", Uuid::new_v4().simple());
     let issued = magic_link::issue(&client, &email, "login")
@@ -751,10 +711,7 @@ async fn expired_token_returns_none() {
 
 #[compio::test]
 async fn new_issue_supersedes_previous_unconsumed() {
-    let Some(client) = pg().await else {
-        zeroship_test_support::skip("skipping magic_link_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let client = pg().await;
 
     let email = format!("magic-super-{}@example.test", Uuid::new_v4().simple());
     let first = magic_link::issue(&client, &email, "login")
@@ -784,10 +741,7 @@ async fn new_issue_supersedes_previous_unconsumed() {
 
 #[compio::test]
 async fn login_issue_does_not_supersede_reset_token() {
-    let Some(client) = pg().await else {
-        zeroship_test_support::skip("skipping magic_link_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let client = pg().await;
 
     let email = format!("magic-reset-kept-{}@example.test", Uuid::new_v4().simple());
     // A reset token binds to the issuing user's immutable id (security finding
@@ -826,10 +780,7 @@ async fn login_issue_does_not_supersede_reset_token() {
 
 #[compio::test]
 async fn magic_completion_invalidates_after_five_wrong_codes() {
-    let Some(client) = pg().await else {
-        zeroship_test_support::skip("skipping magic_link_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let client = pg().await;
 
     let csrf_nonce = format!("completion-attempts-{}", Uuid::new_v4().simple());
     let email = format!("magic-complete-{}@example.test", Uuid::new_v4().simple());
@@ -899,12 +850,8 @@ async fn magic_completion_invalidates_after_five_wrong_codes() {
 
 #[compio::test]
 async fn concurrent_correct_magic_completions_do_not_count_as_wrong_attempts() {
-    let Some(seed_client) = pg().await else {
-        zeroship_test_support::skip("skipping magic_link_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
-    let dsn = zeroship_core::config::test_database_url_opt()
-        .expect("test database URL present after pg");
+    let seed_client = pg().await;
+    let dsn = crate::common::test_database_url();
 
     let csrf_nonce = format!("completion-race-{}", Uuid::new_v4().simple());
     let email = format!("magic-race-{}@example.test", Uuid::new_v4().simple());
@@ -978,10 +925,7 @@ async fn concurrent_correct_magic_completions_do_not_count_as_wrong_attempts() {
 
 #[compio::test]
 async fn stale_magic_completion_reservation_cannot_finalize_newer_reservation() {
-    let Some(client) = pg().await else {
-        zeroship_test_support::skip("skipping magic_link_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let client = pg().await;
 
     let csrf_nonce = format!("completion-stale-{}", Uuid::new_v4().simple());
     let email = format!("magic-completion-stale-{}@example.test", Uuid::new_v4().simple());

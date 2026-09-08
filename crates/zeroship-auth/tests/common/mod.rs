@@ -29,6 +29,44 @@ use zeroship_auth::headers::SecurityHeaders;
 use zeroship_auth::server;
 use zeroship_core::config::{Secret, SourceKind};
 
+/// The database every live test in this target uses, or no run at all.
+///
+/// THIS IS THE ONE PLACE THE DECISION IS MADE. Every module here used to open
+/// with its own `let Some(dsn) = test_database_url_opt() else { skip(); return; }`,
+/// and a skip is a pass: an unconfigured machine reported a green auth suite
+/// having exercised no login, no token exchange and no OIDC flow. `skip` is
+/// gone from the workspace and there is no environment variable that brings it
+/// back. A database this target cannot reach is a failed run, not a green one.
+///
+/// IT REFUSES ONCE FOR THE WHOLE PROCESS RATHER THAN PANICKING PER TEST.
+/// `tests/main.rs` is a single binary over every module in this directory, so a
+/// panicking helper would print one FAILED line per live test - hundreds of
+/// verdicts about code that never executed, which is the presentation
+/// `zeroship_testkit::live_db` exists to remove. `require_configured` prints
+/// one block naming what was missing and `tests/provision_test_backends.sh`,
+/// then leaves the process with `live_db::REFUSED_EXIT_CODE`, which cargo
+/// reports as a failed run and which no test can be mistaken for.
+///
+/// The schema list is [`zeroship_testkit::live_db::PLATFORM_SCHEMAS`], the same
+/// pair this crate's own lib tests require (`src/oidc/authorization_code.rs`).
+/// Reachable is not sufficient here: these fixtures read `zeroship.signing_keys`
+/// and `zeroship.oauth_clients` on their first statement, so a database that
+/// answers but was never migrated turns every module in this target red with a
+/// missing-relation error that reads exactly like a regression.
+///
+/// Memoised, so the preflight dials once however many modules ask.
+#[must_use]
+pub fn test_database_url() -> String {
+    static DSN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    DSN.get_or_init(|| {
+        zeroship_testkit::live_db::require_configured(
+            zeroship_core::config::test_database_url_opt(),
+            zeroship_testkit::live_db::PLATFORM_SCHEMAS,
+        )
+    })
+    .clone()
+}
+
 /// The OP signing key belonging to this test PROCESS, and to no other.
 ///
 /// Every integration test binary in this crate shares ONE suite database.
@@ -292,8 +330,7 @@ const SWEEP_LEASE_TIMEOUT_MS: u32 = 900_000;
 /// Take a [`SweepLease`] on `key`, waiting for any peer run that holds it.
 #[allow(clippy::future_not_send)]
 pub async fn lease_sweep(key: i64) -> SweepLease {
-    let db_url = zeroship_core::config::test_database_url_opt()
-        .expect("a sweep lease needs the test database its caller already resolved");
+    let db_url = crate::common::test_database_url();
     let session = dedicated_test_db(&db_url).await;
     // A literal, because `SET` takes no bind parameters. The value is a
     // constant in this file and reaches the server as one.
@@ -541,9 +578,9 @@ impl Fixture {
     // The Fixture holds ntex's `TestServer` + cyper client, both of which
     // are intentionally `!Send`. Test helper futures here inherit that.
     #[allow(clippy::future_not_send)]
-    pub async fn boot(client_id_prefix: &str) -> Option<Self> {
+    pub async fn boot(client_id_prefix: &str) -> Self {
         let db_url =
-            zeroship_core::config::test_database_url_opt()?;
+            crate::common::test_database_url();
 
         let (pg_client, pg_connection) =
             compio_postgres::connect(&db_url, compio_postgres::NoTls)
@@ -586,14 +623,14 @@ impl Fixture {
         let test_client_id = format!("{client_id_prefix}-{}", Uuid::new_v4().simple());
         let test_redirect: &'static str = "http://127.0.0.1:9999/cb";
 
-        Some(Self {
+        Self {
             srv,
             auth_base,
             pg,
             http: cyper::Client::new(),
             test_client_id,
             test_redirect,
-        })
+        }
     }
 
     // `TestServer` + cyper client are `!Send`; see note on `boot`.

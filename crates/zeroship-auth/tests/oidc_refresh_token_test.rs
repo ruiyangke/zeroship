@@ -55,11 +55,8 @@ struct Fixture {
 
 impl Fixture {
     #[allow(clippy::future_not_send)]
-    async fn boot(scopes: &[&str]) -> Option<Self> {
-        let Some(db_url) = db_url() else {
-            zeroship_test_support::skip("[op_refresh_token_test] skip (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-            return None;
-        };
+    async fn boot(scopes: &[&str]) -> Self {
+        let db_url = db_url();
         let (pg_client, pg_connection) = connect(&db_url, NoTls).await.expect("connect pg");
         compio::runtime::spawn(async move {
             if let Err(err) = pg_connection.run().await {
@@ -130,7 +127,7 @@ impl Fixture {
         })
         .await;
 
-        Some(Self {
+        Self {
             auth_base: srv.url("").trim_end_matches('/').to_string(),
             srv,
             db,
@@ -139,7 +136,7 @@ impl Fixture {
             app_id,
             user_id,
             session_cookie,
-        })
+        }
     }
 
     async fn cleanup(self) {
@@ -154,9 +151,7 @@ impl Fixture {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn offline_access_authorization_code_returns_refresh_token_bound_to_family() {
-    let Some(fx) = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await else {
-        return;
-    };
+    let fx = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await;
     let token = issue_refresh(&fx, FULL_SCOPE).await;
     assert_eq!(token.token_type, "Bearer");
     assert!(token.expires_in > 0);
@@ -193,9 +188,7 @@ async fn offline_access_authorization_code_returns_refresh_token_bound_to_family
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn stale_credential_version_recheck_rejects_refresh_issuance() {
-    let Some(fx) = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await else {
-        return;
-    };
+    let fx = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await;
     let verifier = pkce_verifier();
     let authorize = send_authorize(&fx, FULL_SCOPE, &verifier)
         .await
@@ -221,9 +214,7 @@ async fn stale_credential_version_recheck_rejects_refresh_issuance() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn deletion_revokes_refresh_family_even_after_cancellation() {
-    let Some(fx) = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await else {
-        return;
-    };
+    let fx = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await;
     let root = issue_refresh(&fx, FULL_SCOPE).await;
     let root_refresh = root.refresh_token.expect("root refresh token");
     let rotated = refresh_request(&fx, &root_refresh, Some(NARROW_SCOPE))
@@ -238,7 +229,7 @@ async fn deletion_revokes_refresh_family_even_after_cancellation() {
         .expect("successor refresh token");
     let family_id = refresh_family_id(&fx).await;
 
-    let mut deletion = dedicated_test_db(&db_url().expect("test database URL")).await;
+    let mut deletion = dedicated_test_db(&db_url()).await;
     let deletion_request = users::request_deletion(&mut deletion, fx.user_id, 30)
         .await
         .expect("request account deletion")
@@ -282,9 +273,7 @@ async fn deletion_revokes_refresh_family_even_after_cancellation() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn authorization_code_replay_revokes_refresh_token_issued_by_first_exchange() {
-    let Some(fx) = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await else {
-        return;
-    };
+    let fx = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await;
     let verifier = pkce_verifier();
     let authorize = send_authorize(&fx, FULL_SCOPE, &verifier)
         .await
@@ -323,9 +312,7 @@ async fn authorization_code_replay_revokes_refresh_token_issued_by_first_exchang
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn refresh_rotation_returns_new_refresh_narrows_scope_and_no_id_token() {
-    let Some(fx) = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await else {
-        return;
-    };
+    let fx = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await;
     let root = issue_refresh(&fx, FULL_SCOPE).await;
     let root_refresh = root.refresh_token.expect("root refresh token");
 
@@ -364,9 +351,7 @@ async fn refresh_rotation_returns_new_refresh_narrows_scope_and_no_id_token() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn garbage_refresh_token_rejects_before_dedicated_pool_checkout() {
-    let Some(fx) = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await else {
-        return;
-    };
+    let fx = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await;
     let before = fx.refresh_pool.checkout_count();
 
     let rejected = refresh_request(&fx, "zrt_garbage-token-material-that-will-not-match", None)
@@ -386,9 +371,7 @@ async fn garbage_refresh_token_rejects_before_dedicated_pool_checkout() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn refresh_scope_cannot_widen_past_family_granted_scopes() {
-    let Some(fx) = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await else {
-        return;
-    };
+    let fx = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await;
     let root = issue_refresh(&fx, "openid profile offline_access").await;
     let root_refresh = root.refresh_token.expect("root refresh token");
 
@@ -426,9 +409,7 @@ async fn replay_after_attacker_rotation_kills_family() {
 
 #[allow(clippy::future_not_send)]
 async fn replay_after_rotation_kills_family(label: &str) {
-    let Some(fx) = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await else {
-        return;
-    };
+    let fx = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await;
     let root = issue_refresh(&fx, FULL_SCOPE).await;
     let root_refresh = root.refresh_token.expect("root refresh token");
     let first_rotation = refresh_request(&fx, &root_refresh, Some(NARROW_SCOPE))
@@ -451,9 +432,7 @@ async fn replay_after_rotation_kills_family(label: &str) {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn legit_lost_response_retry_recovers_without_family_kill() {
-    let Some(fx) = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await else {
-        return;
-    };
+    let fx = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await;
     let root = issue_refresh(&fx, FULL_SCOPE).await;
     let root_refresh = root.refresh_token.expect("root refresh token");
     let first = refresh_request(&fx, &root_refresh, Some(NARROW_SCOPE))
@@ -481,9 +460,7 @@ async fn legit_lost_response_retry_recovers_without_family_kill() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn second_replay_of_a_spent_predecessor_kills_family() {
-    let Some(fx) = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await else {
-        return;
-    };
+    let fx = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await;
     let root = issue_refresh(&fx, FULL_SCOPE).await;
     let root_refresh = root.refresh_token.expect("root refresh token");
     let family_id = refresh_family_id(&fx).await;
@@ -526,9 +503,7 @@ async fn second_replay_of_a_spent_predecessor_kills_family() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn unreadable_idempotency_record_kills_family_instead_of_answering_invalid_grant() {
-    let Some(fx) = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await else {
-        return;
-    };
+    let fx = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await;
     let root = issue_refresh(&fx, FULL_SCOPE).await;
     let root_refresh = root.refresh_token.expect("root refresh token");
     let family_id = refresh_family_id(&fx).await;
@@ -564,9 +539,7 @@ async fn unreadable_idempotency_record_kills_family_instead_of_answering_invalid
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn concurrent_refresh_same_token_serializes_to_one_successor_without_family_kill() {
-    let Some(fx) = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await else {
-        return;
-    };
+    let fx = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await;
     let root = issue_refresh(&fx, FULL_SCOPE).await;
     let root_refresh = root.refresh_token.expect("root refresh token");
 
@@ -605,9 +578,7 @@ async fn concurrent_refresh_same_token_serializes_to_one_successor_without_famil
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn refresh_rotation_does_not_commit_shared_request_socket_transaction() {
-    let Some(fx) = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await else {
-        return;
-    };
+    let fx = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await;
     let root = issue_refresh(&fx, FULL_SCOPE).await;
     let root_refresh = root.refresh_token.expect("root refresh token");
     let marker = format!("p5b-shared-tx-{}", Uuid::new_v4().simple());
@@ -658,9 +629,7 @@ async fn refresh_rotation_does_not_commit_shared_request_socket_transaction() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn revoke_refresh_token_kills_family_and_is_uniform() {
-    let Some(fx) = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await else {
-        return;
-    };
+    let fx = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await;
     let root = issue_refresh(&fx, FULL_SCOPE).await;
     let root_refresh = root.refresh_token.expect("root refresh token");
     let family_id = refresh_family_id(&fx).await;
@@ -684,9 +653,7 @@ async fn revoke_refresh_token_kills_family_and_is_uniform() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn revoked_access_token_family_is_inactive_for_introspection_and_userinfo() {
-    let Some(fx) = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await else {
-        return;
-    };
+    let fx = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await;
     let token = issue_refresh(&fx, FULL_SCOPE).await;
     let claims = test_issuer()
         .verify_access_token(&token.access_token)
@@ -725,9 +692,7 @@ async fn revoked_access_token_family_is_inactive_for_introspection_and_userinfo(
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn revoke_access_token_writes_family_marker_for_introspection() {
-    let Some(fx) = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await else {
-        return;
-    };
+    let fx = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await;
     let token = issue_refresh(&fx, FULL_SCOPE).await;
 
     let revoke = revoke_access_request(&fx, &token.access_token)
@@ -759,9 +724,7 @@ async fn revoke_access_token_writes_family_marker_for_introspection() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn revoke_access_token_kills_sibling_refresh_family_durably() {
-    let Some(fx) = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await else {
-        return;
-    };
+    let fx = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await;
     let token = issue_refresh(&fx, FULL_SCOPE).await;
     let sibling_refresh = token.refresh_token.expect("sibling refresh token");
 
@@ -803,9 +766,7 @@ async fn revoke_access_token_kills_sibling_refresh_family_durably() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn introspect_active_access_token_returns_rfc7662_claims() {
-    let Some(fx) = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await else {
-        return;
-    };
+    let fx = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await;
     let token = issue_refresh(&fx, FULL_SCOPE).await;
     let claims = test_issuer()
         .verify_access_token(&token.access_token)
@@ -837,13 +798,8 @@ async fn introspect_active_access_token_returns_rfc7662_claims() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn introspect_access_token_is_confined_to_authenticated_client() {
-    let Some(fx_a) = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await else {
-        return;
-    };
-    let Some(fx_b) = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await else {
-        fx_a.cleanup().await;
-        return;
-    };
+    let fx_a = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await;
+    let fx_b = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await;
     let token_b = issue_refresh(&fx_b, FULL_SCOPE).await;
 
     let resp = introspect_request(
@@ -867,9 +823,7 @@ async fn introspect_access_token_is_confined_to_authenticated_client() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn introspect_expired_access_token_is_inactive() {
-    let Some(fx) = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await else {
-        return;
-    };
+    let fx = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await;
     let scopes = vec!["openid".to_string(), "profile".to_string()];
     let user_id = fx.user_id.to_string();
     let audience = format!("app:{}", fx.app_id);
@@ -904,9 +858,7 @@ async fn introspect_expired_access_token_is_inactive() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn introspect_refresh_token_before_and_after_revoke() {
-    let Some(fx) = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await else {
-        return;
-    };
+    let fx = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await;
     let root = issue_refresh(&fx, FULL_SCOPE).await;
     let root_refresh = root.refresh_token.expect("root refresh token");
 
@@ -954,13 +906,8 @@ async fn introspect_refresh_token_before_and_after_revoke() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn introspect_refresh_token_is_confined_to_authenticated_client() {
-    let Some(fx_a) = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await else {
-        return;
-    };
-    let Some(fx_b) = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await else {
-        fx_a.cleanup().await;
-        return;
-    };
+    let fx_a = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await;
+    let fx_b = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await;
     let token_b = issue_refresh(&fx_b, FULL_SCOPE).await;
     let refresh_b = token_b.refresh_token.expect("client B refresh token");
 
@@ -985,9 +932,7 @@ async fn introspect_refresh_token_is_confined_to_authenticated_client() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn introspect_rotated_refresh_token_is_inactive() {
-    let Some(fx) = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await else {
-        return;
-    };
+    let fx = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await;
     let root = issue_refresh(&fx, FULL_SCOPE).await;
     let root_refresh = root.refresh_token.expect("root refresh token");
 
@@ -1018,9 +963,7 @@ async fn introspect_rotated_refresh_token_is_inactive() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn introspect_reuse_detected_refresh_family_is_inactive() {
-    let Some(fx) = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await else {
-        return;
-    };
+    let fx = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await;
     let root = issue_refresh(&fx, FULL_SCOPE).await;
     let root_refresh = root.refresh_token.expect("root refresh token");
     let first = refresh_request(&fx, &root_refresh, Some(NARROW_SCOPE))
@@ -1059,9 +1002,7 @@ async fn introspect_reuse_detected_refresh_family_is_inactive() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn introspect_requires_valid_client_auth_before_token_status() {
-    let Some(fx) = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await else {
-        return;
-    };
+    let fx = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await;
     let token = issue_refresh(&fx, FULL_SCOPE).await;
     let refresh_token = token.refresh_token.expect("root refresh token");
 
@@ -1088,9 +1029,7 @@ async fn introspect_requires_valid_client_auth_before_token_status() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn introspect_authenticates_before_missing_token_validation() {
-    let Some(fx) = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await else {
-        return;
-    };
+    let fx = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await;
 
     let unauthenticated = introspect_form_request(&fx, None, None, None)
         .await
@@ -1110,9 +1049,7 @@ async fn introspect_authenticates_before_missing_token_validation() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn introspect_unknown_or_garbage_token_is_uniformly_inactive() {
-    let Some(fx) = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await else {
-        return;
-    };
+    let fx = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await;
 
     let resp = introspect_request(
         &fx,
@@ -1143,9 +1080,7 @@ fn discovery_metadata_advertises_token_introspection_endpoint() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn bulk_credential_bump_revoke_does_not_deadlock_concurrent_rotation() {
-    let Some(fx) = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await else {
-        return;
-    };
+    let fx = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await;
     let root = issue_refresh(&fx, FULL_SCOPE).await;
     let root_refresh = root.refresh_token.expect("root refresh token");
     let rotate = refresh_request(&fx, &root_refresh, Some(NARROW_SCOPE));
@@ -1167,8 +1102,8 @@ async fn bulk_credential_bump_revoke_does_not_deadlock_concurrent_rotation() {
     fx.cleanup().await;
 }
 
-fn db_url() -> Option<String> {
-    zeroship_core::config::test_database_url_opt()
+fn db_url() -> String {
+    crate::common::test_database_url()
 }
 
 fn test_issuer() -> Issuer {
