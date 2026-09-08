@@ -41,13 +41,9 @@ const typedIdColumnsByTable: Readonly<Record<string, readonly string[]>> = {
   app_oauth_clients: ["app_id"],
   app_schema_applies: ["app_id", "submitted_by"],
   app_scope_defs: ["app_id"],
-  app_secrets: ["app_id"],
-  app_spend_limit: ["app_id"],
-  app_spend_state: ["app_id"],
   app_usage: ["app_id"],
   app_usage_history: ["app_id"],
   app_vars: ["app_id"],
-  usage_aggregates: ["app_id"],
   // `billing_metrics` spells its app reference `owner_app`. The domain is the
   // same and so is the collation; only the column name differs.
   billing_metrics: ["owner_app"],
@@ -93,16 +89,16 @@ const typedIdColumnsByTable: Readonly<Record<string, readonly string[]>> = {
   invoice_payments: ["id", "invoice_id"],
   invoices: ["creator_id", "id"],
   payout_failures: ["creator_id", "id"],
-  plan_change_events: ["app_id", "id", "from_plan_id", "to_plan_id"],
+  plan_change_events: ["id", "from_plan_id", "to_plan_id"],
   plans: ["id"],
   provider_dead_letter: ["id"],
   refund_provider_refs: ["refund_id"],
   refunds: ["id", "invoice_id"],
-  spend_state_history: ["app_id", "id"],
+  spend_state_history: ["id"],
 
   // Auth refresh-family identity.
-  app_session_anchors: ["app_id", "global_user_id", "refresh_family_id"],
-  gateway_sessions: ["app_id", "user_id"],
+  app_session_anchors: ["global_user_id", "refresh_family_id"],
+  gateway_sessions: ["user_id"],
   oauth_refresh_tokens: ["refresh_family_id", "user_id"],
 
   // Durable workflows.
