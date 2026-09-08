@@ -2006,6 +2006,53 @@ over. The process-ownership table in 3.4 already lists env leases and placement
 decisions under what `zeroship-control` MAY MINT, so this step aligns the
 sequence with the model rather than adding to it.
 
+*How control comes to HAVE a placement view, settled 2026-09-07.* There is no
+app-to-worker assignment to look up, and that is not an oversight: `HashRing::select`
+in `crates/zeroship-gateway/src/proxy.rs` hashes the app onto the ring and returns
+the first worker whose in-flight count is under `max_per_worker`, falling back to
+the least loaded when all are saturated, and workers load apps on demand and evict
+by LRU (`evict_lru` in `crates/zeroship-worker/src/cache.rs`). Placement is
+emergent and load-dependent, and one app may be served by several workers at once.
+So the placement view cannot be an observation control collects. It is a FUNCTION
+control computes: per app, the CHWBL primary plus a bounded number of ring
+successors over a roster control already holds, published on the route feed control
+already owns and the gateway already pulls. The gateway keeps routing and keeps
+bounded-load spillover, but spills only WITHIN that eligible set. Control answers
+an environment request by comparing the caller's per-instance identity against the
+set it computed itself - satisfying F7's "computed by the party that is not being
+narrowed" literally rather than by proxy. The successor count is a config symbol,
+not a constant in this prose; it bounds spillover to the eligible set instead of
+the fleet, which makes it a capacity parameter that is also a security parameter.
+
+*Prerequisite, and it is unavoidable under any variant of this step.* Per-instance
+worker identity must land first. `ServiceKeyring::load` in
+`crates/zeroship-core/src/service_peers.rs` reads one signing key per BINARY ROLE
+and `WORKER_SERVICE_NAME` is a constant, so every replica in a fleet mints
+byte-identical claims. Until a worker can be told apart from its peers, an
+eligible-set comparison has nothing to compare, and the step's fence is
+unwritable - which is what F7 already says about itself.
+
+*REJECTED, with reasons, so it is not re-proposed: having the GATEWAY sign an
+attestation of its own routing decision* and letting the worker relay it to
+control. It is superficially attractive because the gateway already decides
+placement and already holds a signing key, so it looks like one more caller rather
+than a new capability. It fails on this proposal's own terms. The 3.4 table gives
+the gateway `ZeroShip-User` envelopes and nothing else, and gives control the env
+leases and placement decisions; the attestation adds a second mint to the process
+that terminates every creator-app request and moves the placement decision off
+control, running the thesis backwards. F7 requires control to consult a view the
+worker cannot write; under the attestation control consults nothing and verifies a
+signature over a claim a third party computed, which 7.4 rules out in terms - a
+narrowing computed by the narrowed party is replaced by a decision taken by the
+other party, not by another derivation, and moving the deriving party one process
+sideways is still a derivation. It also puts adversary-influenced input into the
+decision, and it breaks the worker's background reconcile loop, which has no
+dispatch to bind a token to and would fall back to serving a stale environment -
+reintroducing SEC-7 silently. Worst of all it is invisible to its own guard: F2's
+custody-manifest arm refuses a secret-classed field on the gateway's config, and
+minting needs no new field because the key is already there, so the instrument
+built to catch this shape would have stayed green.
+
 *Open decision, NOT decided here: whether the lease is PULLED or PUSHED.* Pulled
 means the worker asks on app load; pushed means control hands the environment
 over when it assigns the app. Push is the stronger property, because a process
@@ -2016,8 +2063,13 @@ delivers.** Recorded in 10.2 so the decision has a register entry rather than
 living only here, and F7's enforcement enumeration is written to be
 direction-independent for the same reason.
 
-*Premise:* steps 2 and 3.
-*Red test:* F7's cross-node refusal arm.
+*Premise:* steps 2 and 3, and per-instance worker identity, which is a
+prerequisite rather than a part of this step: until a worker is distinguishable
+from its peers there is nothing for the eligible-set comparison to compare.
+*Red test:* F7's cross-node refusal arm - a worker holding a valid identity that
+is NOT in the app's eligible set is refused the environment, with the control
+being a worker that IS in the set and is served. Both arms are unwritable before
+the prerequisite lands, which is what F7 already says about itself.
 
 **Step 5. The session object, and MINT-READS-ROW.** Create `zeroship.sessions`
 and `zeroship.grants`, move the refresh-family rotation algorithm onto the session
