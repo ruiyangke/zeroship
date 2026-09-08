@@ -2633,6 +2633,68 @@ to name only a project, and the session row stopped exempting the platform case
 from the foreign key every other session carries. See the `grant_id` paragraph in
 3.2 for why the exemption was the defect.
 
+**D-F. Worker identity becomes PER-INSTANCE, and it is a DISTINGUISHER rather than
+a boundary.** Decided by the operator, who asked for a worker registry and health
+monitor. Control writes the row; the worker generates an Ed25519 keypair at boot,
+in memory, never on disk, and enrols the public half.
+
+*Why, and this is the durable part.* Step 4's fence is unwritable without it. Every
+replica loads the same `svc/worker` key file and mints byte-identical claims, so an
+eligible-set comparison has nothing to compare. Per-instance identity is what makes
+the narrowing WRITABLE - it is not itself the narrowing.
+
+*What it does NOT buy, stated so nothing later reads it as more.* Enrolment
+authenticates with the SHARED role key, so a holder of that key can enrol as many
+instances as it likes and each is as genuine as the last. What it buys is
+attribution, per-instance revocation, and a countable event. Every artifact that
+describes it is forbidden from calling it a boundary. The only mechanism that would
+make it one is item 12.
+
+**D-G. No enrolment hardening may require LAYER 3 infrastructure.** Decided by the
+operator, and it re-affirms a call already made in
+`docs/proposals/2026-08-16-service-identity.md`.
+
+*Why.* That proposal split identity into LAYER 2 - how a credential is PRESENTED,
+X.509 over mTLS or a signed JWT, pick one - and LAYER 3, WHO gets a credential and
+how, which is attestation, rotation and bootstrap, and where SPIFFE/SPIRE and cloud
+workload identity live. This tree adopted LAYER 2 only, because "a default that
+imposes infrastructure (a CA, a SPIRE cluster, a service mesh) is not deployable by
+a user on a single VPS." Hardening enrolment IS a layer 3 question, which is
+precisely why the bar has to be stated rather than assumed.
+
+*A naming convention is not a commitment.* The `spiffe://` spelling in
+`ServiceIssuer` has no issuing authority, no attestation, no rotation and no agent
+behind it; nothing named SPIRE, SVID or workload API appears in any crate. It was
+chosen so identifiers would carry unchanged into X.509 SANs if mTLS ever arrived.
+
+*The consequence, stated rather than discovered.* With layer 3 excluded, the
+strongest available fence is bounded by what an operator can provision by hand and
+what control can observe for itself. A design reaching past that has left the
+product's deployment story whatever its security merit.
+
+**D-H. Four design calls settled while building step 4, recorded here because each
+is easy to get wrong in the same direction.** Settled during implementation; the
+reasoning for each is in step 4 and is not repeated.
+
+- *The worker holds TWO keyrings* - the role one for the enrolment call only, an
+  instance one for everything after - and that is FORCED, not preferred:
+  `from_parts` builds the minter from the issuer, so the issuer cannot change after
+  construction. The instance keyring's own-key check is REPLACED rather than
+  inherited, because the inherited one is vacuous against a key generated seconds
+  earlier.
+- *Control resolves an instance key from its own ACTIVE row*, before verification,
+  rather than gaining a callback into `zeroship-core`. That crate is a leaf of
+  inter-service wire types and must not learn about databases. The `status` filter
+  in that lookup IS per-instance revocation; there is no second mechanism.
+- *The ring key and the eligible set land TOGETHER.* Control's ring is ordered by
+  minted ring keys and the gateway's by configured URLs; those orders are
+  unrelated, so shipping either half alone is a disagreement rather than a partial
+  fence.
+- *Observed liveness stays OUT of the declared `status` column.* `gone` is terminal
+  with no path back, so a monitor writing it on a failed probe converts a transient
+  blip into the permanent eviction of a healthy worker, worst during exactly the
+  partition that caused the blip.
+
 ### 10.2 The numbered items, settled ones marked in place
 
 1. **SETTLED as D-D, account half only.** The suspension half of this item was
@@ -2740,6 +2802,59 @@ from the foreign key every other session carries. See the `grant_id` paragraph i
     And pairwise subjects are still APP-scoped in the tree today
     (`crates/zeroship-auth/src/oidc/authorization_code.rs`), so whichever way
     this goes, step 9 is a move rather than a rewrite.
+
+11. **Is a GATED EDGE REFUSAL enough to stop the proxy defeating the address
+    derivation, or should enrolment bind to a listener that is not the public
+    one?** OPEN. The measured defect and the recommendation are in step 4: the
+    edge forwards `/internal/*` unfiltered, control's `trust_proxy` is unset so
+    the `ProxyFronted` arm cannot fire, and the proxy sits inside the declared
+    network, so every enrolment behind it records the PROXY'S address.
+
+    *The trade, stated so a decision is possible.* Refusing the route at the edge
+    is one config block plus a gate, and it fixes both halves at once because
+    internal callers then reach control directly and the observed peer is the real
+    worker again. Its weakness is that it is edge configuration: correct today,
+    silently wrong if the Caddyfile drifts, which is why the gate is not optional.
+    A separate non-public listener survives that drift because the route becomes
+    unreachable by construction, at the cost of a second bind, its own config and
+    compose routing. The trigger for preferring it is stated in step 4: take it
+    once enrolment gates something an attacker wants, which item 4d makes true.
+
+12. **Should worker instances take STATIC per-instance keys, provisioned by the
+    operator, instead of the boot-generated ones D-F settles?** OPEN, and it is
+    the only mechanism that turns enrolment from a distinguisher into a real
+    boundary WITHOUT the layer 3 infrastructure D-G bars.
+
+    *The trade.* Today a holder of the shared `svc/worker` key can enrol any
+    number of instances. If each instance instead authenticated with a key only
+    that instance holds, a role-key holder could not mint new ones - a genuine
+    boundary. The cost is autoscaling: every new instance needs an operator step
+    before it can join, which is exactly the property a fleet that scales on
+    demand cannot have. This is a product decision about deployment shape, not a
+    security decision with an obviously right answer, which is why it is here
+    rather than settled.
+
+    *What weakens the urgency, and it is worth weighing.* `svc/worker`'s allowlist
+    grants carry NO app scope today, so a role-key holder already reaches every
+    app's environment WITHOUT enrolling. Registration therefore grants an attacker
+    little at present. The deadline is item 4d, when being enrolled starts deciding
+    who RECEIVES dispatched traffic - and dispatch forwards cookies and the
+    gateway-signed user envelope. Raise the fence before that lands, not after.
+
+13. **The registry's unfinished lifecycle: four questions the operator owns.**
+    OPEN, grouped because they share one root - `status` is a closed set of three
+    values with a writer for one.
+
+    - What promotes an instance to `gone`? Nothing writes it, `gone` is terminal,
+      and control holds no `DELETE`, so rows accumulate one per boot, all reading
+      `active`, none with a process behind them.
+    - Should `ring_key`'s width be pinned in the schema? It is deliberately a
+      minting decision rather than a wire constant today.
+    - Should `(advertise_host, advertise_port)` carry a UNIQUE? It was omitted on
+      purpose: a `gone` row would otherwise block the same worker re-registering
+      after a restart.
+    - What is the successor count k for the eligible set? It bounds spillover, so
+      it is a capacity parameter that is also a security parameter.
 
 ---
 
