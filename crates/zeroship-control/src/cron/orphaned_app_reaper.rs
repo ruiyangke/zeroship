@@ -33,12 +33,21 @@
 //! platform-owned app is never a reap candidate.
 //!
 //! The grace window (`created_at < NOW() - 5 minutes`) is defensive insurance.
-//! `create_app` can no longer write an app whose project does not exist -
-//! `apps.project_id` is NOT NULL against a RESTRICT foreign key - and the
+//! `create_app` can no longer write an app whose project does not exist - a
+//! LIVE app always names one (`apps_live_app_has_project`: `project_id IS NOT
+//! NULL OR deleted_at IS NOT NULL`), against a RESTRICT foreign key - and the
 //! zero-config path seats the caller as their personal organization's owner
 //! before it creates anything. So an owner-less app is still never a transient
 //! state, but the grace costs nothing and guards a future create path that is
 //! not atomic.
+//!
+//! `project_id` LOST ITS NOT NULL when app deletion landed: a deleted app
+//! detaches from its project, so the owner lateral finds no project and reports
+//! no owner. That does not reach this sweep, and not by luck - deletion implies
+//! archive (`apps_deleted_app_is_archived`), and the detection query already
+//! requires `archived_at IS NULL`. A deleted app is therefore never a reap
+//! candidate, and the `archived_at` predicate is the reason. Do not relax it
+//! into a `deleted_at`-blind scan.
 
 use std::sync::Arc;
 use std::time::Duration;

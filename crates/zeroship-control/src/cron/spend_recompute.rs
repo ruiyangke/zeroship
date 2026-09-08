@@ -659,8 +659,11 @@ mod live_db_tests {
         label: &str,
     ) -> Uuid {
         let name = format!("{label}-{}", Uuid::new_v4());
-        // An app needs a project and a project needs an organization:
-        // `apps.project_id` is NOT NULL against a RESTRICT foreign key. The
+        // A LIVE app needs a project and a project needs an organization:
+        // `apps_live_app_has_project` (`project_id IS NOT NULL OR deleted_at IS
+        // NOT NULL`) against a RESTRICT foreign key. Only a deleted app may
+        // detach, and this fixture seeds live apps, so the project is still
+        // mandatory here. The
         // organization here has no members, because recompute is a fleet-wide
         // sweep keyed on the app and this fixture asserts nothing about
         // authority.

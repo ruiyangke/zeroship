@@ -59,8 +59,10 @@ pub const PLATFORM_CLI_CLIENT_ID: &str = "zeroship-cli";
 /// Exact AUTHORITY ceiling registered for the first-party platform CLI client.
 ///
 /// These are the scopes a CLI token may actually carry authority for. The
-/// bearer path intersects them with the principal's stored grants
-/// (`crates/zeroship-authn/src/lib.rs`, `platform_cli_entitlement`).
+/// bearer path intersects them with the principal's stored
+/// `zeroship.principal_grants` rows (`crates/zeroship-authn/src/lib.rs`,
+/// `platform_cli_entitlement`) - but see the note at the bottom of this doc
+/// before reading that intersection as a bound.
 ///
 /// This is deliberately NOT the same list as
 /// [`PLATFORM_CLI_REGISTERED_SCOPES`]: `offline_access` may be REQUESTED (it
@@ -75,14 +77,27 @@ pub const PLATFORM_CLI_CLIENT_ID: &str = "zeroship-cli";
 /// every credential, which is what `leave` - the verb that exists so a member
 /// can exercise the self-departure carve-out - did.
 ///
-/// SCOPE IS NOT AUTHORITY, and that is why widening this is not a grant. A
-/// bearer's wrapper policy is built at `Resource::Any`
+/// SCOPE IS NOT AUTHORITY, and that is why widening this is not a grant. The
+/// load-bearing reason is the RANK BAND, and it is the only one. A bearer's
+/// wrapper policy is built at `Resource::Any`
 /// (`crates/zeroship-authz/src/scope.rs`, `scopes_to_policy`), so it narrows
-/// the ACTION and nothing else; the rank comparison in the static bands is what
-/// stands between a token and an organization its holder has no seat in, and
-/// the bearer path further intersects this ceiling with the principal's own
-/// stored grants (`crates/zeroship-authn/src/lib.rs`,
-/// `platform_cli_entitlement`).
+/// the ACTION and nothing else. `enforce` (`crates/zeroship-authz/src/eval.rs`)
+/// then runs a two-pass AND whenever a `token_policy` is present: it authorizes
+/// the principal WITHOUT the token against the platform bands first and returns
+/// `Deny` on anything but `Allow`, and only then evaluates the wrapper. A scope
+/// therefore cannot reach past the seat its holder actually has; the rank
+/// comparison in the static bands is what stands between a token and an
+/// organization its holder has no seat in.
+///
+/// THE STORED-GRANT INTERSECTION IS NOT A SECOND BOUND ON THIS LIST, and this
+/// doc claimed it was. `zeroship_authn::platform_cli::materialize_default_grants`
+/// seeds `zeroship.principal_grants` FROM THIS VERY CONSTANT, so for a
+/// default-seeded principal the intersection is the ceiling against itself - a
+/// no-op that would widen in lockstep with any edit here. What it does do is
+/// narrow a principal whose rows DIVERGE from the default: one an operator has
+/// revoked grants from, or one seeded by some other writer. It is a
+/// per-principal revocation surface, never a check on the contents of this
+/// array.
 pub const PLATFORM_CLI_ISSUABLE_SCOPES: [&str; 19] = [
     "apps:archive",
     "apps:deploy",

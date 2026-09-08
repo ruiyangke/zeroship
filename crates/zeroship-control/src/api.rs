@@ -28,8 +28,13 @@ pub struct CreateAppBody {
     pub name: String,
     #[serde(default = "default_plan")]
     pub plan_id: String,
-    /// The project the app belongs to. `apps.project_id` is NOT NULL, so every
-    /// app has one.
+    /// The project the app belongs to. Every LIVE app has one:
+    /// `apps.project_id` is nullable, and `apps_live_app_has_project`
+    /// (`project_id IS NOT NULL OR deleted_at IS NOT NULL`) is what keeps that
+    /// from widening. The one row allowed to carry NULL is a deleted app, which
+    /// detaches from its project so the RESTRICT foreign key stops pinning it.
+    /// Create never mints such a row, so this field is still required of every
+    /// app this body can produce.
     ///
     /// OPTIONAL, and the absence is the zero-config path rather than a default
     /// buried in a constant: with no project named, control mints (or finds)
