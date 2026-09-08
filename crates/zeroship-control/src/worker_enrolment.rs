@@ -62,6 +62,16 @@
 //! racy and unenforced, which is the shape this codebase records as "claims that
 //! read as protection". So: not idempotent, said plainly, rather than idempotent
 //! in appearance.
+//!
+//! # The row is READ as well as written, and the read is where revocation lives
+//!
+//! `active_instance_public_key` is `public_key`'s reader. Control resolves it
+//! before verifying an assertion whose `iss` names an instance
+//! (`crate::internal::check_service_auth`), because no peer document has ever
+//! carried an instance key: the keypair is drawn in the worker's memory at
+//! boot. The `status` filter on that read is the ONLY thing that makes marking
+//! a row `draining` or `gone` mean anything, which is why it is stated on the
+//! reader rather than left to the caller.
 
 use std::net::SocketAddr;
 use std::ops::RangeInclusive;
@@ -473,6 +483,47 @@ async fn insert_instance(
     )
     .await?;
     Ok(instance_id)
+}
+
+/// The verification key an ACTIVE instance's assertions are checked under, or
+/// nothing.
+///
+/// THE `status` FILTER IS PER-INSTANCE REVOCATION, AND IT IS THE WHOLE OF IT.
+/// The registry buys attribution, a countable event, and the ability to retire
+/// one process without touching the role key every worker shares; the third is
+/// bought HERE and nowhere else. Resolve the key without the filter and marking
+/// a row `gone` changes nothing at all, while looking exactly like a revocation
+/// mechanism that ran and approved.
+///
+/// It admits exactly the status [`enrol`] writes, read from the same constant,
+/// so the accepted set cannot drift from the written one. The other two members
+/// of the column's closed set authenticate nothing.
+///
+/// # Errors
+///
+/// Returns the driver's error when the registry cannot be read. A caller must
+/// refuse on that rather than fall through to anything else: control that
+/// cannot reach the registry has not established that this instance is live.
+pub(crate) async fn active_instance_public_key(
+    pg: &compio_postgres::Client,
+    instance_id: &str,
+) -> Result<Option<[u8; PUBLIC_KEY_LENGTH]>, compio_postgres::Error> {
+    let rows = pg
+        .query(
+            "SELECT public_key FROM zeroship.worker_instances WHERE id = $1 AND status = $2",
+            &[&instance_id, &ENROLLED_STATUS],
+        )
+        .await?;
+    let Some(row) = rows.first() else {
+        return Ok(None);
+    };
+    let stored: &[u8] = row.get(0);
+    // `worker_instances_public_key_shape` already refuses every other width, so
+    // this arm cannot fire on a row this platform wrote. It is here because the
+    // alternative is an unwrap inside an authentication path over a value read
+    // from a table: a width the database somehow holds must refuse the CALLER,
+    // not the process.
+    Ok(<[u8; PUBLIC_KEY_LENGTH]>::try_from(stored).ok())
 }
 
 #[cfg(test)]
