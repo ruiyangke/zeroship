@@ -31,11 +31,11 @@
 //! # What is asserted, and what is deliberately not
 //!
 //! The assertions are about the RULE - does this organization owe money - not
-//! about today's SQL. Two of them are about a change in flight: the unbilled
-//! arm keys on metered UNITS today and is being moved onto MONEY, so a closed
-//! period whose usage prices to zero must stop blocking while one that priced
-//! to money and was never invoiced must keep blocking. Both are written here as
-//! the rule requires them.
+//! about today's SQL. So the unbilled cases are written in terms of what a
+//! closed period PRICED TO: one that prices to zero must not block however much
+//! metered volume it carries, one that priced to money and reached no invoice
+//! must block, and an invoice STATUS decides only whether the period was
+//! accounted for at all.
 
 #![allow(clippy::future_not_send)]
 
@@ -82,6 +82,20 @@ const NO_QUOTA: i64 = 0;
 /// A quota that swallows [`METERED_UNITS`] whole, so the same usage prices to
 /// nothing. This is the free tier's ordinary month.
 const COVERING_QUOTA: i64 = 1_000_000;
+
+/// What [`METERED_UNITS`] comes to under a [`NO_QUOTA`] plan, in cents.
+///
+/// Derived from the two constants above and [`Fx::plan`]'s FX, not measured: a
+/// thousand units cost a cent, and none of the volume is covered. Naming it is
+/// what lets a refusal be asserted on the AMOUNT it quotes rather than on the
+/// bare fact that something was reported - a predicate that reported every
+/// period at zero cents would pass the second and fail the first.
+const PRICED_PERIOD_CENTS: i64 = 100;
+
+/// A standing charge, in cents. An app on a plan carrying one owes it whether
+/// or not it served a single request, which is the whole content of the roster
+/// case below.
+const BASE_FEE_CENTS: i64 = 500;
 
 struct Fx {
     registry: Registry,
@@ -167,14 +181,21 @@ impl Fx {
     /// nothing. Neither figure means anything without the other, which is why
     /// they are named together rather than spelled at the call sites.
     async fn plan(&self, included_units: i64) -> String {
+        self.plan_priced(0, included_units).await
+    }
+
+    /// The same plan with a standing charge on it. A base fee is the one term
+    /// that prices a period for an app which served nothing, so it is the only
+    /// way to tell "the whole roster was priced" from "only the accruers were".
+    async fn plan_priced(&self, base_fee_cents: i64, included_units: i64) -> String {
         let id = format!("owes-{}", Uuid::new_v4().simple());
         self.pg
             .execute(
                 "INSERT INTO zeroship.plans \
                    (id, name, base_fee_cents, included_units, fx_pico_cents_per_unit, \
                     spend_limit_default_cents, runtime_limits_json) \
-                 VALUES ($1, $1, 0, $2, 1000000000, 0, '{}'::jsonb)",
-                &[&id, &included_units],
+                 VALUES ($1, $1, $2, $3, 1000000000, 0, '{}'::jsonb)",
+                &[&id, &base_fee_cents, &included_units],
             )
             .await
             .expect("insert plan");
@@ -192,15 +213,7 @@ impl Fx {
         units: i64,
         period_months_ago: i32,
     ) -> Uuid {
-        let project: String = self
-            .pg
-            .query_one(
-                "SELECT id FROM zeroship.projects WHERE organization_id = $1 LIMIT 1",
-                &[&organization],
-            )
-            .await
-            .expect("the organization's default project")
-            .get("id");
+        let app = self.app(organization, plan).await;
         let metric = format!("owes_{}", Uuid::new_v4().simple());
         self.pg
             .execute(
@@ -222,6 +235,33 @@ impl Fx {
             )
             .await
             .expect("weight the metric");
+        let months = i64::from(period_months_ago);
+        self.pg
+            .execute(
+                "INSERT INTO zeroship.usage_aggregates (app_id, period, metric, total) \
+                 VALUES ($1, (date_trunc('month', NOW()) \
+                              - make_interval(months => $2::int))::date, $3, $4)",
+                &[&app, &period_months_ago, &metric, &units],
+            )
+            .await
+            .unwrap_or_else(|e| panic!("insert usage ({months} months back): {e}"));
+        app
+    }
+
+    /// One app on `plan`, in the organization's default project, that never
+    /// served a request. It contributes no `usage_aggregates` row at all, so it
+    /// is invisible to any read that starts from usage - which is exactly the
+    /// property the roster case turns on.
+    async fn app(&self, organization: &str, plan: &str) -> Uuid {
+        let project: String = self
+            .pg
+            .query_one(
+                "SELECT id FROM zeroship.projects WHERE organization_id = $1 LIMIT 1",
+                &[&organization],
+            )
+            .await
+            .expect("the organization's default project")
+            .get("id");
         let app = Uuid::new_v4();
         self.pg
             .execute(
@@ -237,16 +277,6 @@ impl Fx {
             )
             .await
             .expect("insert app");
-        let months = i64::from(period_months_ago);
-        self.pg
-            .execute(
-                "INSERT INTO zeroship.usage_aggregates (app_id, period, metric, total) \
-                 VALUES ($1, (date_trunc('month', NOW()) \
-                              - make_interval(months => $2::int))::date, $3, $4)",
-                &[&app, &period_months_ago, &metric, &units],
-            )
-            .await
-            .unwrap_or_else(|e| panic!("insert usage ({months} months back): {e}"));
         app
     }
 
@@ -414,6 +444,65 @@ async fn assert_refused(fx: &Fx, owner: Uuid, organization: &str, owed_cents: i6
     }
 }
 
+/// Both enforcement points refuse over a closed period that priced to money and
+/// was never billed, and the refusal QUOTES that price.
+///
+/// The claimed-cash figure is asserted to be zero on purpose. An unbilled period
+/// carries a price and no claim, so `owed_cents` is the wrong number to reach
+/// for and a refusal that offered only that one said "you owe" and "you owe
+/// nothing" in the same breath. Both figures are checked here so neither can
+/// quietly become the other.
+async fn assert_unbilled_refused(fx: &Fx, owner: Uuid, organization: &str, unbilled_cents: i64) {
+    let report = preflight(&fx.pg, owner, LocalInvoicing::Yes)
+        .await
+        .expect("preflight");
+    let blocker = report
+        .billing_blockers
+        .iter()
+        .find(|b| b.organization_id == organization)
+        .unwrap_or_else(|| panic!("no money blocker for {organization}: {report:?}"));
+    assert_eq!(
+        blocker.owed_cents, 0,
+        "an unbilled period is not a claim, so no cash is owed on it yet"
+    );
+    assert_eq!(
+        blocker.unbilled_period_count, 1,
+        "one closed period is unaccounted for"
+    );
+    assert_eq!(
+        blocker.outstanding.unbilled_cents(),
+        unbilled_cents,
+        "the refusal has to quote what the unbilled period priced to"
+    );
+
+    match fx.dissolve(owner, organization).await {
+        Err(OrganizationError::OrganizationOwesBilling(outstanding)) => {
+            assert_eq!(outstanding.owed_cents(), 0);
+            assert_eq!(outstanding.unbilled_cents(), unbilled_cents);
+        }
+        other => panic!("dissolve did not refuse on the money rule: {other:?}"),
+    }
+}
+
+/// Neither enforcement point cites MONEY over this organization.
+///
+/// Weaker than [`assert_allowed`] and deliberately so: every organization here
+/// still owns an app, so `dissolve` answers the projects rider and can never
+/// succeed. What is asserted is which refusal comes out, which is the whole of
+/// what the money rule decides.
+async fn assert_money_clear(fx: &Fx, owner: Uuid, organization: &str) {
+    let blockers = fx.money_blockers(owner).await;
+    assert!(
+        !blockers.iter().any(|id| id == organization),
+        "{organization} owes nothing and must not be a money blocker: {blockers:?}"
+    );
+    if let Err(OrganizationError::OrganizationOwesBilling(outstanding)) =
+        fx.dissolve(owner, organization).await
+    {
+        panic!("dissolve cited the money rule over a settled organization: {outstanding:?}");
+    }
+}
+
 /// Neither point holds this organization back. `dissolve` is destructive, so it
 /// runs last and its success is the strongest form of "allowed" available.
 async fn assert_allowed(fx: &Fx, owner: Uuid, organization: &str) {
@@ -533,14 +622,21 @@ async fn a_chargeback_reopens_a_paid_invoice() {
     common::drain_pg().await;
 }
 
-/// A DRAFT invoice must NOT refuse.
+/// A DRAFT invoice is not a CLAIM, so the unpaid-invoice arm must not refuse on
+/// it.
 ///
 /// This is a decision, not an accident, and it is worth stating: a draft is the
 /// reconciler's scratch row. Its `total_cents` is zero until the finalize
-/// UPDATE writes one, so there is no amount a refusal could quote and no claim
+/// UPDATE writes one, so there is no amount that arm could quote and no claim
 /// anybody could settle - "pay this" would name a number that does not exist
 /// yet. The claim begins at finalize, and finalizing the SAME row is the one
 /// variable this pair moves.
+///
+/// This organization carries NO usage, which is what keeps the case about the
+/// invoice arm alone. A draft over a period that did accrue is the other arm's
+/// question and has its own pair below: not being a claim is not the same as
+/// having settled the period, and reading it as both is how a real debt escaped
+/// every enforcement point at once.
 #[compio::test]
 async fn a_draft_invoice_is_not_yet_a_claim_and_finalizing_it_makes_one() {
     let fx = Fx::new().await;
@@ -802,6 +898,99 @@ async fn a_void_over_a_period_with_usage_agrees_with_the_plain_void() {
         !blockers.iter().any(|id| id == &voided),
         "a void releases the period; the usage arm must not re-open it: {blockers:?}"
     );
+
+    common::drain_pg().await;
+}
+
+/// A DRAFT over a period that owed money must not settle it.
+///
+/// This is the shape a crashed reconcile leaves behind: the row is claimed
+/// before any provider call, so a draft means billing STARTED and did not
+/// finish. It is not a claim - every amount on it is zero by CHECK - so the
+/// invoice arm cannot see it. If it also counted as "this period was billed",
+/// the organization produced no blocker of any kind over a real debt and could
+/// be closed and its sole owner erased.
+///
+/// One organization, one variable: the SAME row reaches finalize and is paid.
+#[compio::test]
+async fn a_draft_invoice_does_not_settle_the_period_it_claimed() {
+    let fx = Fx::new().await;
+    let metered = fx.plan(NO_QUOTA).await;
+
+    let owner = fx.seed_user("owes-draft-stuck").await;
+    let stuck = fx.organization(owner, "owes-draft-stuck").await;
+    fx.app_with_usage(&stuck, &metered, METERED_UNITS, 2).await;
+    let claimed = fx.invoice(&stuck, DRAFT, PRICED_PERIOD_CENTS, 0).await;
+    assert_unbilled_refused(&fx, owner, &stuck, PRICED_PERIOD_CENTS).await;
+
+    // Finalizing is what turns the claim into one, and the cash then clears it.
+    // Nothing else about the organization moves.
+    fx.finalize(&claimed, PRICED_PERIOD_CENTS).await;
+    fx.pay(&claimed, PRICED_PERIOD_CENTS, CHARGE).await;
+    assert_money_clear(&fx, owner, &stuck).await;
+
+    common::drain_pg().await;
+}
+
+/// A draft sends the period back to the PRICER, it does not assert a debt.
+///
+/// The opposite failure is the more expensive one: a predicate that refused
+/// every organization holding any draft would make the ordinary free-tier month
+/// permanently undeletable, since the reconciler claims a row for a period it
+/// will price to nothing too. The pair differs in the included quota alone -
+/// the one term that decides whether the usage was worth anything.
+#[compio::test]
+async fn a_draft_sends_the_period_to_the_pricer_rather_than_asserting_a_debt() {
+    let fx = Fx::new().await;
+
+    let free_owner = fx.seed_user("owes-draft-free").await;
+    let free = fx.organization(free_owner, "owes-draft-free").await;
+    let generous = fx.plan(COVERING_QUOTA).await;
+    fx.app_with_usage(&free, &generous, METERED_UNITS, 2).await;
+    fx.invoice(&free, DRAFT, 0, 0).await;
+    assert_money_clear(&fx, free_owner, &free).await;
+
+    let billable_owner = fx.seed_user("owes-draft-billable").await;
+    let billable = fx.organization(billable_owner, "owes-draft-billable").await;
+    let metered = fx.plan(NO_QUOTA).await;
+    fx.app_with_usage(&billable, &metered, METERED_UNITS, 2).await;
+    fx.invoice(&billable, DRAFT, 0, 0).await;
+    assert_unbilled_refused(&fx, billable_owner, &billable, PRICED_PERIOD_CENTS).await;
+
+    common::drain_pg().await;
+}
+
+/// The unbilled arm prices the organization's WHOLE app roster, not the apps
+/// that accrued.
+///
+/// That is what the reconciler does - its per-organization path resolves apps
+/// through `owned_app_ids` and its usage prefilter only picks which
+/// organizations a sweep visits - and the claim was carried in prose alone, so
+/// narrowing this read to accruers changed no test.
+///
+/// The organization below is built so the ACCRUING app contributes nothing: its
+/// usage sits inside the included quota. Everything the period comes to is the
+/// standing charge of an app that never served a request, and an app set
+/// narrowed to accruers cannot see that app at all. The control differs in that
+/// idle app's base fee and in nothing else.
+#[compio::test]
+async fn a_non_accruing_app_on_a_base_fee_plan_is_priced_into_the_period() {
+    let fx = Fx::new().await;
+    let covered = fx.plan(COVERING_QUOTA).await;
+    let standing_charge = fx.plan_priced(BASE_FEE_CENTS, NO_QUOTA).await;
+    let no_standing_charge = fx.plan_priced(0, NO_QUOTA).await;
+
+    let owner = fx.seed_user("owes-roster-base").await;
+    let charged = fx.organization(owner, "owes-roster-base").await;
+    fx.app_with_usage(&charged, &covered, METERED_UNITS, 2).await;
+    fx.app(&charged, &standing_charge).await;
+    assert_unbilled_refused(&fx, owner, &charged, BASE_FEE_CENTS).await;
+
+    let control_owner = fx.seed_user("owes-roster-free").await;
+    let uncharged = fx.organization(control_owner, "owes-roster-free").await;
+    fx.app_with_usage(&uncharged, &covered, METERED_UNITS, 2).await;
+    fx.app(&uncharged, &no_standing_charge).await;
+    assert_money_clear(&fx, control_owner, &uncharged).await;
 
     common::drain_pg().await;
 }
