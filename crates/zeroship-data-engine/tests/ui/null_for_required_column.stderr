@@ -1,0 +1,20 @@
+error[E0277]: the trait bound `Option<std::string::String>: EncodeValue<zeroship_data_engine::orm::sql_types::Text>` is not satisfied
+ --> tests/ui/null_for_required_column.rs:3:46
+  |
+3 | fn main() { let _ = schema::posts::title.set(None::<String>); }
+  |                                          --- ^^^^^^^^^^^^^^ the trait `EncodeValue<zeroship_data_engine::orm::sql_types::Text>` is not implemented for `Option<std::string::String>`
+  |                                          |
+  |                                          required by a bound introduced by this call
+  |
+help: the trait `EncodeValue<zeroship_data_engine::orm::sql_types::Text>` is not implemented for `Option<std::string::String>`
+      but trait `EncodeValue<Nullable<_>>` is implemented for it
+ --> src/orm/codecs.rs
+  |
+  | impl<S, T: EncodeValue<S>> EncodeValue<Nullable<S>> for Option<T> {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  = help: for that trait implementation, expected `Nullable<_>`, found `zeroship_data_engine::orm::sql_types::Text`
+note: required by a bound in `zeroship_data_engine::orm::Field::<C>::set`
+ --> src/orm/model.rs
+  |
+  |     pub fn set<T: EncodeValue<C::SqlType>>(self, value: T) -> Result<Patch<C::Entity>, DbError> {
+  |                   ^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `Field::<C>::set`

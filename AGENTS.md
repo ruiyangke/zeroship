@@ -177,6 +177,13 @@ crates/
                       (no `build` — builds go through @zeroship/vite-plugin)
 ```
 
+**Database verification is required.** `zeroship-data-engine` and
+`zeroship-plugin-db` include PostgreSQL tests in ordinary `cargo test`. Do not
+put required database cases behind opt-in features, ignore them, or report success
+when the server or its required extensions are unavailable. Integration helpers
+are enabled by test dependencies. `tests/run_plugin_db_live_suite.sh` runs both
+packages and rejects feature-gated test targets.
+
 **Writing or changing a gate.** Every arm of every gate declares the number of
 items THAT ARM RULED ON and a floor that number must clear
 (`tests/lib/gate_arms.sh`; worked example `tests/ws_subscription_stub_gate.sh`).

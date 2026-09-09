@@ -15,8 +15,7 @@
 //!
 //! ```text
 //! PG_TEST_URL=postgres://postgres:postgres@127.0.0.1:5478/postgres \
-//! cargo test -p zeroship-plugin-db --features test-helpers \
-//!   --test test_helpers -- --test-threads=1 search_ir_live::
+//! cargo test -p zeroship-plugin-db --test test_helpers -- search_ir_live::
 //! ```
 //!
 //! The server needs **both** `vector` and `postgis`; the tests create the
@@ -25,7 +24,7 @@
 //! run that measured nothing, and the divergence this family is about is
 //! invisible without a server that has both.
 //!
-//! `--test-threads=1` because every test in this file builds the same schema.
+//! Tests share a schema and serialize its lifetime through the runtime entry.
 //!
 //! # What these arms do NOT establish
 //!
@@ -58,6 +57,12 @@ const SCHEMA: &str = "search_ir_live";
 const DIMS: usize = 8;
 
 fn run<F: std::future::Future>(f: F) -> F::Output {
+    // Keep the shared schema intact until this test's runtime has shut down.
+    // Acquire outside the async block so waiting never stalls its executor.
+    static FIXTURE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _fixture = FIXTURE_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
     compio::runtime::Runtime::new()
         .expect("compio runtime build")
         .block_on(f)

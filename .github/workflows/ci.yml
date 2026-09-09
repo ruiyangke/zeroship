@@ -39,7 +39,7 @@ jobs:
           tests/commit_msg_gate.sh --range "$range"
 
   rust:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -180,6 +180,21 @@ jobs:
       # definition the compose file already carries.
       - name: Provision the required test backends (postgres, redis, smtp sink)
         run: bash tests/provision_test_backends.sh
+      - name: Install snapshot clients matching the test server
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client-16
+          echo '/usr/lib/postgresql/16/bin' >> "$GITHUB_PATH"
+      - name: Install the extensions required by ordinary database tests
+        run: |
+          set -euo pipefail
+          pg_container="$(docker ps --filter label=com.docker.compose.service=postgres --format '{{.ID}}')"
+          test -n "$pg_container"
+          docker exec "$pg_container" bash -c \
+            'apt-get update && apt-get install -y --no-install-recommends postgresql-16-pgvector postgresql-16-postgis-3'
+          docker exec "$pg_container" psql -U postgres -d zeroship -v ON_ERROR_STOP=1 \
+            -c 'CREATE EXTENSION IF NOT EXISTS vector' \
+            -c 'CREATE EXTENSION IF NOT EXISTS postgis'
       # The provisioner stands the servers up and writes the overlay; it does
       # not apply the platform corpus, and says so in its own "what it does not
       # provision" header. That was survivable while a target without a migrated
@@ -1412,7 +1427,7 @@ jobs:
   # copied into three files and re-run in none, which is the same defect in the
   # instrument that the instrument existed to catch.
   plugin-db-live-gate:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -1462,6 +1477,11 @@ jobs:
             sleep 3
           done
           echo "postgres failed to become ready" >&2; docker logs plugin-db-pg; exit 1
+      - name: Install snapshot clients matching the test server
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client-16
+          echo '/usr/lib/postgresql/16/bin' >> "$GITHUB_PATH"
       - name: Run the plugin-db live-database gate
         run: tests/run_plugin_db_live_suite.sh
         env:

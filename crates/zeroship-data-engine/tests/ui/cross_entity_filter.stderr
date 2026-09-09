@@ -1,0 +1,25 @@
+error[E0308]: mismatched types
+ --> tests/ui/cross_entity_filter.rs:6:24
+  |
+6 |     let _ = filter.and(second::posts::title.eq("second").unwrap());
+  |                    --- ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `first::posts::Entity`, found `second::posts::Entity`
+  |                    |
+  |                    arguments to this method are incorrect
+  |
+  = note: `second::posts::Entity` and `first::posts::Entity` have similar names, but are actually distinct types
+note: `second::posts::Entity` is defined in module `crate::second::posts` of the current crate
+ --> tests/ui/cross_entity_filter.rs:3:1
+  |
+3 | schema!(pub second = "../fixtures/schema.runtime.json");
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: `first::posts::Entity` is defined in module `crate::first::posts` of the current crate
+ --> tests/ui/cross_entity_filter.rs:2:1
+  |
+2 | schema!(pub first = "../fixtures/schema.runtime.json");
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: method defined here
+ --> src/orm/model.rs
+  |
+  |     pub fn and(self, other: Self) -> Self {
+  |            ^^^
+  = note: this error originates in the macro `schema` (in Nightly builds, run with -Z macro-backtrace for more info)
