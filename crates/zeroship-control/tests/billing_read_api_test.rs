@@ -510,10 +510,10 @@ async fn invoice_history_is_creator_scoped_with_no_operator_exception() {
     };
     let usage = std::collections::HashMap::new();
     let (inv_a, amt_a) =
-        seed_finalized_invoice(&pg, &organization_a, &app_a, &plan, period, &price, &usage, &weights)
+        seed_finalized_invoice(&pg, organization_a, &app_a, &plan, period, &price, &usage, &weights)
             .await;
     let (_inv_b, _amt_b) =
-        seed_finalized_invoice(&pg, &organization_b, &app_b, &plan, period, &price, &usage, &weights)
+        seed_finalized_invoice(&pg, organization_b, &app_b, &plan, period, &price, &usage, &weights)
             .await;
 
     // PATs: organization A (read on app A), organization B (read on app B), operator.
@@ -673,7 +673,7 @@ async fn invoice_line_detail_reproduces_amount_from_frozen_snapshot() {
         spend_limit_default_cents: 0,
     };
     let (inv, amt) =
-        seed_finalized_invoice(&pg, &organization, &app, &plan, period, &price, &usage, &weights).await;
+        seed_finalized_invoice(&pg, organization, &app, &plan, period, &price, &usage, &weights).await;
     assert_eq!(amt, 750, "sanity: seeded amount is the overage+base total");
 
     let pat = issue_bearer(&fx.state, user, "billing:read").await;
@@ -829,10 +829,10 @@ async fn credit_balance_pm_and_billing_status_are_creator_scoped() {
     let organization_b = app_organization(&pg, &app_b).await;
     let organization_b = organization_b.as_str();
     ensure_organization_billing(&pg, organization_b, false).await;
-    seed_customer_ref(&pg, &organization_a, &format!("cus_{}", Uuid::new_v4().simple())).await;
+    seed_customer_ref(&pg, organization_a, &format!("cus_{}", Uuid::new_v4().simple())).await;
 
     // Creator A: grant $50, then a finalized invoice consumes $20 → balance $30.
-    zeroship_control::credit::grant(&*pg, &organization_a, zeroship_control::credit::GrantRequest { amount_cents: 5000, currency: "usd", kind: "promo", expires_at: None, note: Some("seed grant A"), idempotency_key: &format!("idem-{}", Uuid::new_v4().simple()) })
+    zeroship_control::credit::grant(&*pg, organization_a, zeroship_control::credit::GrantRequest { amount_cents: 5000, currency: "usd", kind: "promo", expires_at: None, note: Some("seed grant A"), idempotency_key: &format!("idem-{}", Uuid::new_v4().simple()) })
     .await
     .expect("grant A");
     // Seed a consume entry referencing the grant (faithful negative companion).
@@ -847,7 +847,7 @@ async fn credit_balance_pm_and_billing_status_are_creator_scoped() {
     // A finalized invoice the consume can reference.
     let (inv_a, _amt) = seed_finalized_invoice(
         &pg,
-        &organization_a,
+        organization_a,
         &app_a,
         &plan,
         period,
@@ -876,7 +876,7 @@ async fn credit_balance_pm_and_billing_status_are_creator_scoped() {
     .expect("seed consume");
 
     // Creator B: grant $10 only → balance $10 (must NOT leak into A's read).
-    zeroship_control::credit::grant(&*pg, &organization_b, zeroship_control::credit::GrantRequest { amount_cents: 1000, currency: "usd", kind: "grant", expires_at: None, note: Some("seed grant B"), idempotency_key: &format!("idem-{}", Uuid::new_v4().simple()) })
+    zeroship_control::credit::grant(&*pg, organization_b, zeroship_control::credit::GrantRequest { amount_cents: 1000, currency: "usd", kind: "grant", expires_at: None, note: Some("seed grant B"), idempotency_key: &format!("idem-{}", Uuid::new_v4().simple()) })
     .await
     .expect("grant B");
 
@@ -1052,7 +1052,7 @@ async fn invoice_detail_denies_a_different_creator() {
     };
     let (inv_a, _) = seed_finalized_invoice(
         &pg,
-        &organization_a,
+        organization_a,
         &app_a,
         &plan,
         period,

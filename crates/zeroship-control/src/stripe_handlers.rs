@@ -188,7 +188,7 @@ pub async fn onboard(
                 Err(e) => return stripe_err_response(e),
             };
             let acct = match stripe
-                .create_connect_account(&email, &organization_id.to_string(), CONNECT_ACCOUNT_COUNTRY)
+                .create_connect_account(&email, organization_id, CONNECT_ACCOUNT_COUNTRY)
                 .await
             {
                 Ok(a) => a,
@@ -278,7 +278,7 @@ pub async fn billing_setup(
                 Ok(None) => return err_json(404, "organization not found"),
                 Err(e) => return stripe_err_response(e),
             };
-            let cus = match stripe.create_customer(&email, &organization_id.to_string()).await {
+            let cus = match stripe.create_customer(&email, organization_id).await {
                 Ok(c) => c,
                 Err(e) => return stripe_err_response(e),
             };
