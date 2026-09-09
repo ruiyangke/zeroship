@@ -1,11 +1,3 @@
-// This test target is its own crate ROOT and overflows rustc's layout query
-// computing the layout of `support::grant_all_runtime_table_columns()`.
-// `recursion_limit` is per crate root, so the crate's lib and its sibling test
-// targets do not cover this one. Caught by `tests/clippy_gate.sh`, which lints
-// `--all-targets`; a bare `cargo test -p zeroship-plugin-db --lib` never builds
-// this file, which is why it compiled clean until the gate ran.
-#![recursion_limit = "256"]
-
 //! End-to-end tests for the native `Db.transaction(fn)`
 //! orchestrator against real Postgres.
 //!
@@ -49,7 +41,8 @@
 //! (`deploy/ops/zeroship.test.toml`, written by
 //! `tests/provision_test_backends.sh`) or by `PG_TEST_URL`. There is no
 //! compiled default; see `crates/zeroship-core/src/config/test_overlay.rs`.
-//! Run: `cargo test -p zeroship-plugin-db --test native_transaction -- --test-threads=1`
+//! Run: `cargo test -p zeroship-plugin-db --features test-helpers --test test_helpers \
+//!        -- --test-threads=1 native_transaction::`
 //!
 //! Each runtime receives the same descriptor shape that a deploy carries; the
 //! tables are applied ahead of boot by the fixture. The orchestrator logic is
@@ -60,7 +53,10 @@
 //! `sqlite_integration.rs`, and the SDK-side mock tests in
 //! `sdks/db/tests/p9-pr3-native-transaction.test.ts`.
 
-mod support;
+// `support` is declared once by `tests/test_helpers.rs`, the entry file this
+// module hangs off; its header says why a second declaration here would be a
+// second copy of the `Once` guarding the residue sweep.
+use crate::support;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -1706,8 +1702,8 @@ const _procedures = { poisonThenCommit };
 /// Run with:
 ///
 /// ```text
-/// cargo test -p zeroship-plugin-db --test native_transaction \
-///   --features test-helpers -- --test-threads=1 sc1_live
+/// cargo test -p zeroship-plugin-db --features test-helpers --test test_helpers \
+///   -- --test-threads=1 native_transaction::sc1_live
 /// ```
 ///
 /// Everything these arms create is a `TEMP` table, which dies with the
@@ -2030,8 +2026,8 @@ mod sc1_live {
 /// Run with:
 ///
 /// ```text
-/// cargo test -p zeroship-plugin-db --test native_transaction \
-///   --features test-helpers -- --test-threads=1 sc1_driver
+/// cargo test -p zeroship-plugin-db --features test-helpers --test test_helpers \
+///   -- --test-threads=1 native_transaction::sc1_driver
 /// ```
 mod sc1_driver {
     use compio_postgres::{Client, NoTls, Pool};

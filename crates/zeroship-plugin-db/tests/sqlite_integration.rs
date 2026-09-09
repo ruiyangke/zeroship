@@ -1,8 +1,3 @@
-// The parity Postgres fixture chains four awaits over compio-postgres futures in one
-// block; each layer is a large generated state machine, and the default 128 is not
-// enough to compute its layout. A compile-budget knob, not a behaviour change.
-#![recursion_limit = "256"]
-
 //! SQLite-side integration tests.
 //!
 //! Ordinary package tests exercise the `SqliteSession` actor end-to-end:
@@ -18,22 +13,18 @@
 //! through, so these tests pin the actor's behaviour in isolation.
 //! The higher-level orchestrator mirror is covered separately.
 
-#[path = "support/schema.rs"]
-mod schema_fixture;
+// `support`, `schema_fixture` and `parity` are declared once by
+// `tests/test_helpers.rs`, the entry file this module hangs off; its header says
+// why a second declaration here would be a second copy of their statics.
+use crate::parity;
 #[allow(unused_imports)]
-use schema_fixture::{fixture_table_sql, fixture_table_sql_for};
+use crate::schema_fixture::{fixture_table_sql, fixture_table_sql_for};
 #[allow(unused_imports)]
 use zeroship_migrate::schema::query::FkEmission;
 
 use std::path::PathBuf;
 
 use std::rc::Rc;
-
-#[path = "support/mod.rs"]
-mod support;
-
-#[path = "parity/mod.rs"]
-mod parity;
 
 use zeroship_core::change_event::ChangeOp;
 use zeroship_data_core::binding::DbBinding;

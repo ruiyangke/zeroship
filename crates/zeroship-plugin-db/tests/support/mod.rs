@@ -260,10 +260,27 @@ async fn sweep_prior_run_namespaces(pool: &compio_postgres::Pool) {
 
 /// Run [`sweep_prior_run_residue`] exactly once per test binary, as a BARRIER.
 ///
-/// `Once::call_once` blocks every other caller until the first returns, and every
-/// test in these binaries reaches `require_pg` before it touches the database. So
-/// the sweep observes a database with no live sibling in it, which is the only
-/// condition under which an unbounded sweep is correct.
+/// `Once::call_once` blocks every other caller until the first returns, so no
+/// two callers sweep at once and none proceeds until the first has finished.
+///
+/// WHAT MAKES AN UNBOUNDED SWEEP CORRECT IS THE PREFIX, NOT THE PROCESS, and
+/// that distinction started mattering when the crate's per-file test targets
+/// were merged into one binary per feature set. This function drops everything
+/// matching [`TEST_APP_PREFIX`], and the only things wearing that prefix are ids
+/// minted by `test_app_id!`. Exactly the two modules that call `test_app_id!`
+/// also call THIS - so every schema the sweep can destroy belongs to a module
+/// that is already behind this barrier.
+///
+/// The sibling modules sharing the binary are not protected by the barrier and
+/// do not need to be: they never mint the prefix, so the sweep cannot see their
+/// fixtures. If a module ever starts minting `test_app_id!` ids without calling
+/// this first, that stops being true and the sweep becomes able to delete a live
+/// sibling's schema mid-run.
+///
+/// This paragraph previously said the sweep was safe because "every test in
+/// these binaries reaches `require_pg` first". That was true of a one-file
+/// binary and is not true of a merged one - `require_pg` does not call this, and
+/// several modules here reach PostgreSQL through neither.
 ///
 /// It runs on its own thread with its own compio runtime because the callers are
 /// already inside a `block_on`, and a nested one panics.

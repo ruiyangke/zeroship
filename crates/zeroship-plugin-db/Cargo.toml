@@ -3,6 +3,16 @@ name = "zeroship-plugin-db"
 version = "0.1.0"
 edition = "2021"
 description = "Database plugin — zeroship.db.* native primitives"
+# One integration-test target per FEATURE RESOLUTION, not one per file. The
+# `[[test]]` blocks at the bottom of this file are the whole set; every other
+# `tests/*.rs` is a `mod` declaration inside one of them. `tests/main.rs` carries
+# the reasoning and the shape.
+#
+# `autotests = false` is what makes those module lists load-bearing: a new
+# `tests/<name>.rs` that neither entry file names is compiled by NOTHING and
+# reports no failure. Five of these files were auto-discovered before this line
+# existed, so the discovery it turns off was real.
+autotests = false
 
 [dependencies]
 zeroship-runtime = { workspace = true }
@@ -110,7 +120,7 @@ tempfile = { workspace = true }
 # uses the Rust impl on the PG side.
 
 [dev-dependencies]
-# Integration helpers are enabled by test builds; database tests are unconditional.
+# Integration helpers are automatic in test builds; database tests are required.
 zeroship-plugin-db = { path = ".", features = ["test-helpers"] }
 # `DbBinding::cold_start` is gated behind `test-helpers` in the domain tier: it
 # builds a deploy identity from an app id, and shipping that constructor in a
@@ -234,46 +244,19 @@ test-helpers = [
     "zeroship-data-sqlite/test-helpers",
     "zeroship-data-engine/test-helpers",
 ]
-# Every integration target runs under ordinary cargo test.
+# Ordinary cargo test runs every integration target. The shared database
+# fixtures stay together; distributed CDC retains its own process.
 [[test]]
-name = "integration"
-path = "tests/integration.rs"
+name = "main"
+path = "tests/main.rs"
 
 [[test]]
-name = "sqlite_integration"
-path = "tests/sqlite_integration.rs"
-
-[[test]]
-name = "native_transaction"
-path = "tests/native_transaction.rs"
+name = "test_helpers"
+path = "tests/test_helpers.rs"
 
 [[test]]
 name = "distributed_live"
 path = "tests/distributed_live.rs"
-
-[[test]]
-name = "missing_role"
-path = "tests/missing_role.rs"
-
-[[test]]
-name = "search_ir_live"
-path = "tests/search_ir_live.rs"
-
-[[test]]
-name = "mask_flip"
-path = "tests/mask_flip.rs"
-
-[[test]]
-name = "column_grants"
-path = "tests/column_grants.rs"
-
-[[test]]
-name = "unmask_tx_lane"
-path = "tests/unmask_tx_lane.rs"
-
-[[test]]
-name = "search_tx_lane"
-path = "tests/search_tx_lane.rs"
 
 [lints]
 workspace = true
