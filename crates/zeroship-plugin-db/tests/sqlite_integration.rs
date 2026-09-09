@@ -27,17 +27,17 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use zeroship_core::change_event::ChangeOp;
-use zeroship_data_core::binding::DbBinding;
-use zeroship_data_core::error::DbError;
+use zeroship_data_orm::binding::DbBinding;
+use zeroship_data_orm::error::DbError;
+use zeroship_plugin_db::backend::sqlite::SqliteBackend;
 use zeroship_plugin_db::backend::sqlite::reservation::{CancelCleanup, TerminalOutcome};
 use zeroship_plugin_db::backend::sqlite::session::TerminalIntent;
-use zeroship_plugin_db::backend::sqlite::SqliteBackend;
 use zeroship_plugin_db::backend::{
     BackendHandle, LockManager, LockScope, SchemaIntrospect, SqlExecutor,
 };
 use zeroship_plugin_db::backend_selection::new_sqlite_backend;
 // The bounded-retry surface is the policy extension trait, not `LockManager`.
-use zeroship_plugin_db::broker::{subscribe, Subscription, SubscriptionMessage};
+use zeroship_plugin_db::broker::{Subscription, SubscriptionMessage, subscribe};
 use zeroship_plugin_db::compile::raw_column_name;
 use zeroship_plugin_db::lock_policy::BoundedLockAcquire;
 
@@ -1769,7 +1769,7 @@ fn backfill_pauses_broker_via_orchestrator_api_and_emits_one_resync() {
     // ChangeStream trait surface:
     //
     // 1. ensure_app_schema + CREATE TABLE.
-    // 2. Wrap the backend in a `BackendHandle::Sqlite(Rc<...>)` — the
+    // 2. Wrap the backend in a `BackendHandle::new(Rc<...>)` — the
     //    same enum shape the per-isolate context owns. Subscribe BEFORE
     //    the pause window so `resume_app_with_resync` sees the
     //    subscription on guard drop.
@@ -1811,23 +1811,25 @@ fn backfill_pauses_broker_via_orchestrator_api_and_emits_one_resync() {
         // returns. `as_change_stream_sqlite()` then yields the
         // `SqliteChangeStream` adapter whose `pause_broker(app_id)`
         // mints the `BrokerPauseGuard`.
-        let handle = BackendHandle::Sqlite(Rc::new(backend));
+        let handle = BackendHandle::new(Rc::new(backend));
 
         let sub = subscribe_local("app_orch", "items");
 
         // Engage backfill pause through the trait-method API. The
         // adapter holds an Rc-clone of the backend so subsequent
         // `pool_exec` calls below route through the same dispatcher.
-        let cs = handle
-            .as_change_stream_sqlite()
-            .expect("BackendHandle::Sqlite must expose ChangeStream");
+        let cs = zeroship_data_orm::backend::sqlite::cdc::SqliteChangeStream::new(
+            handle
+                .get_rc::<zeroship_data_orm::backend::SqliteBackend>()
+                .expect("SQLite fixture"),
+        );
         let guard = zeroship_plugin_db::broker::BrokerPauseGuard::new("app_orch".to_string());
 
         // Pull a Rc-clone of the inner backend so we can issue the
         // 100 INSERTs against it. (The `BackendHandle::Sqlite` arm owns
         // the master Rc; `as_sqlite()` returns a borrow.)
         let backend_ref = handle
-            .as_sqlite()
+            .get::<zeroship_data_orm::backend::SqliteBackend>()
             .expect("BackendHandle::Sqlite::as_sqlite");
 
         // INSERT 100 rows under the suppression window. The orchestrator-
@@ -2093,7 +2095,7 @@ fn engine_shadow_relation(
     )
     .expect("the migration engine must render a descriptor for a vector field");
 
-    let value: zeroship_data_query_builder::value::Value =
+    let value: zeroship_data_sql::value::Value =
         serde_json::from_str(&artifacts.runtime_json).expect("the runtime descriptor is JSON");
     let auxiliary = value["collections"][collection]["fields"][column]["storage"]["auxiliary"]
         .as_array()
@@ -2170,7 +2172,7 @@ fn the_search_really_depends_on_the_name_the_engine_records() {
         zeroship_plugin_db::cache_schema_for_tests(
             "vector_wrongname",
             "docs",
-            zeroship_data_query_builder::value!({ "embedding": { "type": "vector", "vectorDims": 8 } }),
+            zeroship_data_sql::value!({ "embedding": { "type": "vector", "vectorDims": 8 } }),
         );
 
         // The engine's name, with one byte changed. Everything else - the vec0
@@ -2217,7 +2219,7 @@ fn the_search_really_depends_on_the_name_the_engine_records() {
                 &mk_unit_vec(0, dims),
                 4,
                 VectorMetric::Cosine,
-                &zeroship_data_query_builder::value::Value::Null,
+                &zeroship_data_sql::value::Value::Null,
                 &zeroship_plugin_db::collection_schema(
                     &DbBinding::cold_start("vector_wrongname"),
                     "docs",
@@ -2268,7 +2270,7 @@ fn vector_search_returns_k_nearest_sqlite() {
         zeroship_plugin_db::cache_schema_for_tests(
             "vector_topk",
             "docs",
-            zeroship_data_query_builder::value!({ "embedding": { "type": "vector", "vectorDims": 8 } }),
+            zeroship_data_sql::value!({ "embedding": { "type": "vector", "vectorDims": 8 } }),
         );
 
         // Create the vec0 vtable + mirror triggers BEFORE inserting
@@ -2300,7 +2302,7 @@ fn vector_search_returns_k_nearest_sqlite() {
                 &query,
                 10,
                 VectorMetric::Cosine,
-                &zeroship_data_query_builder::value::Value::Null,
+                &zeroship_data_sql::value::Value::Null,
                 &zeroship_plugin_db::collection_schema(
                     &DbBinding::cold_start("vector_topk"),
                     "docs",
@@ -2315,7 +2317,7 @@ fn vector_search_returns_k_nearest_sqlite() {
             .iter()
             .filter_map(|r| {
                 r.get("id")
-                    .and_then(zeroship_data_query_builder::value::Value::as_i64)
+                    .and_then(zeroship_data_sql::value::Value::as_i64)
             })
             .collect();
         // SQLite's INTEGER PRIMARY KEY AUTOINCREMENT starts at 1; row
@@ -2328,7 +2330,7 @@ fn vector_search_returns_k_nearest_sqlite() {
         for r in &rows {
             let d = r
                 .get("_distance")
-                .and_then(zeroship_data_query_builder::value::Value::as_f64)
+                .and_then(zeroship_data_sql::value::Value::as_f64)
                 .expect("row must carry _distance");
             assert!(d.is_finite(), "_distance must be finite, got {d}");
             assert!(d >= 0.0, "cosine distance is non-negative, got {d}");
@@ -2336,7 +2338,7 @@ fn vector_search_returns_k_nearest_sqlite() {
         // Row #1 should be the nearest (distance ~ 0).
         let first_id = rows[0]
             .get("id")
-            .and_then(zeroship_data_query_builder::value::Value::as_i64)
+            .and_then(zeroship_data_sql::value::Value::as_i64)
             .expect("first row id");
         assert_eq!(
             first_id, 1,
@@ -2344,7 +2346,7 @@ fn vector_search_returns_k_nearest_sqlite() {
         );
         let first_d = rows[0]
             .get("_distance")
-            .and_then(zeroship_data_query_builder::value::Value::as_f64)
+            .and_then(zeroship_data_sql::value::Value::as_f64)
             .expect("first row _distance");
         assert!(
             first_d.abs() < 1e-5,
@@ -2423,7 +2425,7 @@ fn vector_search_respects_filter_sqlite() {
         zeroship_plugin_db::cache_schema_for_tests(
             "vector_filter",
             "docs",
-            zeroship_data_query_builder::value!({
+            zeroship_data_sql::value!({
                 "tenant": { "type": "string" },
                 "embedding": { "type": "vector", "vectorDims": 4 },
             }),
@@ -2467,7 +2469,7 @@ fn vector_search_respects_filter_sqlite() {
         // have tenant='a'. The filter uses the `$eq` operator the
         // SDK already emits.
         let query = mk_unit_vec(0, 4);
-        let filter = zeroship_data_query_builder::value!({ "tenant": { "$eq": "a" } });
+        let filter = zeroship_data_sql::value!({ "tenant": { "$eq": "a" } });
         let rows = backend
             .vector_search(
                 &DbBinding::cold_start("vector_filter"),
@@ -2494,7 +2496,7 @@ fn vector_search_respects_filter_sqlite() {
         for r in &rows {
             let tenant = r
                 .get("tenant")
-                .and_then(zeroship_data_query_builder::value::Value::as_str)
+                .and_then(zeroship_data_sql::value::Value::as_str)
                 .expect("row must carry tenant");
             assert_eq!(
                 tenant, "a",
@@ -2537,7 +2539,7 @@ fn vector_l2_distance_matches_cosine_for_unit_vectors_sqlite() {
         zeroship_plugin_db::cache_schema_for_tests(
             "vector_math",
             "docs",
-            zeroship_data_query_builder::value!({
+            zeroship_data_sql::value!({
                 "emb_cos": { "type": "vector", "vectorDims": 4 },
                 "emb_l2": { "type": "vector", "vectorDims": 4 },
             }),
@@ -2580,7 +2582,7 @@ fn vector_l2_distance_matches_cosine_for_unit_vectors_sqlite() {
                 &v1,
                 2,
                 VectorMetric::Cosine,
-                &zeroship_data_query_builder::value::Value::Null,
+                &zeroship_data_sql::value::Value::Null,
                 &zeroship_plugin_db::collection_schema(
                     &DbBinding::cold_start("vector_math"),
                     "docs",
@@ -2597,7 +2599,7 @@ fn vector_l2_distance_matches_cosine_for_unit_vectors_sqlite() {
                 &v1,
                 2,
                 VectorMetric::L2,
-                &zeroship_data_query_builder::value::Value::Null,
+                &zeroship_data_sql::value::Value::Null,
                 &zeroship_plugin_db::collection_schema(
                     &DbBinding::cold_start("vector_math"),
                     "docs",
@@ -2610,16 +2612,16 @@ fn vector_l2_distance_matches_cosine_for_unit_vectors_sqlite() {
         // The row with id=2 (the OTHER unit vector) must appear in
         // both result sets; its cosine and L2 distances must satisfy
         // L2² ≈ 2 * cos_distance.
-        let find = |rows: &[zeroship_data_query_builder::value::Value], target_id: i64| -> f64 {
+        let find = |rows: &[zeroship_data_sql::value::Value], target_id: i64| -> f64 {
             rows.iter()
                 .find(|r| {
                     r.get("id")
-                        .and_then(zeroship_data_query_builder::value::Value::as_i64)
+                        .and_then(zeroship_data_sql::value::Value::as_i64)
                         == Some(target_id)
                 })
                 .and_then(|r| {
                     r.get("_distance")
-                        .and_then(zeroship_data_query_builder::value::Value::as_f64)
+                        .and_then(zeroship_data_sql::value::Value::as_f64)
                 })
                 .expect("row with target id must be present")
         };
@@ -2701,7 +2703,7 @@ fn near_returns_within_radius() {
         zeroship_plugin_db::cache_schema_for_tests(
             "near_radius",
             "places",
-            zeroship_data_query_builder::value!({ "location": { "type": "geoPoint" } }),
+            zeroship_data_sql::value!({ "location": { "type": "geoPoint" } }),
         );
 
         let london = GeoPoint {
@@ -2744,7 +2746,7 @@ fn near_returns_within_radius() {
                 "location",
                 london,
                 1000.0,
-                &zeroship_data_query_builder::value::Value::Null,
+                &zeroship_data_sql::value::Value::Null,
                 None,
                 &zeroship_plugin_db::collection_schema(
                     &DbBinding::cold_start("near_radius"),
@@ -2759,7 +2761,7 @@ fn near_returns_within_radius() {
             .iter()
             .filter_map(|r| {
                 r.get("id")
-                    .and_then(zeroship_data_query_builder::value::Value::as_i64)
+                    .and_then(zeroship_data_sql::value::Value::as_i64)
             })
             .collect();
         let expected: std::collections::BTreeSet<i64> = expected_within.into_iter().collect();
@@ -2771,7 +2773,7 @@ fn near_returns_within_radius() {
         for r in &rows {
             let d = r
                 .get("_distance_m")
-                .and_then(zeroship_data_query_builder::value::Value::as_f64)
+                .and_then(zeroship_data_sql::value::Value::as_f64)
                 .expect("row must carry _distance_m");
             assert!(d.is_finite(), "_distance_m must be finite, got {d}");
             assert!(
@@ -2782,7 +2784,7 @@ fn near_returns_within_radius() {
         // The dead-centre row (id=1) is the closest.
         let first_id = rows[0]
             .get("id")
-            .and_then(zeroship_data_query_builder::value::Value::as_i64)
+            .and_then(zeroship_data_sql::value::Value::as_i64)
             .expect("first row id");
         assert_eq!(
             first_id, 1,
@@ -2790,7 +2792,7 @@ fn near_returns_within_radius() {
         );
         let first_d = rows[0]
             .get("_distance_m")
-            .and_then(zeroship_data_query_builder::value::Value::as_f64)
+            .and_then(zeroship_data_sql::value::Value::as_f64)
             .expect("first row _distance_m");
         assert!(
             first_d < 1.0,
@@ -2840,7 +2842,7 @@ fn a_near_inside_a_transaction_sees_the_row_that_transaction_inserted() {
         zeroship_plugin_db::cache_schema_for_tests(
             app,
             "places",
-            zeroship_data_query_builder::value!({ "location": { "type": "geoPoint" } }),
+            zeroship_data_sql::value!({ "location": { "type": "geoPoint" } }),
         );
 
         let london = GeoPoint {
@@ -2848,20 +2850,19 @@ fn a_near_inside_a_transaction_sees_the_row_that_transaction_inserted() {
             lng: -0.1278,
         };
 
-        let handle = BackendHandle::Sqlite(std::rc::Rc::new(backend));
-        let admission =
-            zeroship_data_engine::transaction::TxAdmission::acquire(app.to_owned()).await;
-        zeroship_data_engine::transaction::exec_begin_or_savepoint(
+        let handle = BackendHandle::new(std::rc::Rc::new(backend));
+        let admission = zeroship_data_orm::transaction::TxAdmission::acquire(app.to_owned()).await;
+        zeroship_data_orm::transaction::exec_begin_or_savepoint(
             false,
             None,
             app,
-            zeroship_data_query_builder::SchemaName::new(app).unwrap(),
+            zeroship_data_sql::SchemaName::new(app).unwrap(),
             handle.clone(),
         )
         .await
         .unwrap();
         admission.handed_to_reducer();
-        zeroship_data_engine::transaction::driver::run_operation(
+        zeroship_data_orm::transaction::driver::run_operation(
             app,
             &format!(
                 "INSERT INTO \"{app}\".\"places\" (location) VALUES ({})",
@@ -2873,7 +2874,7 @@ fn a_near_inside_a_transaction_sees_the_row_that_transaction_inserted() {
         .expect("write inside the transaction");
 
         let binding = DbBinding::cold_start(app);
-        let args = zeroship_data_query_builder::value!({
+        let args = zeroship_data_sql::value!({
             "field": "location",
             "point": { "lat": london.lat, "lng": london.lng },
             "radius": 1000.0,
@@ -2927,14 +2928,14 @@ fn a_near_inside_a_transaction_sees_the_row_that_transaction_inserted() {
         assert!(
             inside[0]
                 .get("_distance_m")
-                .and_then(zeroship_data_query_builder::value::Value::as_f64)
+                .and_then(zeroship_data_sql::value::Value::as_f64)
                 .is_some_and(|d| d < 1.0),
             "the row must carry its synthetic distance: {inside:?}",
         );
 
         assert!(matches!(
-            zeroship_data_engine::transaction::exec_settle(app, false, None).await,
-            zeroship_data_engine::transaction::SettleOutcome::Ok
+            zeroship_data_orm::transaction::exec_settle(app, false, None).await,
+            zeroship_data_orm::transaction::SettleOutcome::Ok
         ));
     });
     zeroship_plugin_db::reset_context_for_tests();
@@ -3041,8 +3042,8 @@ export default { fetch: _zsFetch, rpc: _shimRpc };
 // ---------------------------------------------------------------------------
 
 /// `email` unique + plaintext, `ssn` randomised-encrypted with a `last4` mask.
-fn users_encrypted_ssn_schema(key_id: &str) -> zeroship_data_query_builder::value::Value {
-    zeroship_data_query_builder::value!({
+fn users_encrypted_ssn_schema(key_id: &str) -> zeroship_data_sql::value::Value {
+    zeroship_data_sql::value!({
         "email": {"type": "string", "required": true, "unique": true},
         "name": {"type": "string", "required": true},
         "ssn": {
@@ -3055,8 +3056,8 @@ fn users_encrypted_ssn_schema(key_id: &str) -> zeroship_data_query_builder::valu
 
 /// As above, plus `email` itself deterministically encrypted - the shape the
 /// deterministic-conflict upsert needs (a unique index over ciphertext).
-fn users_deterministic_email_schema(key_id: &str) -> zeroship_data_query_builder::value::Value {
-    zeroship_data_query_builder::value!({
+fn users_deterministic_email_schema(key_id: &str) -> zeroship_data_sql::value::Value {
+    zeroship_data_sql::value!({
         "email": {
             "type": "string",
             "required": true,
@@ -3075,8 +3076,8 @@ fn users_deterministic_email_schema(key_id: &str) -> zeroship_data_query_builder
 /// One randomised-encrypted column and no mask - the fast-path fixtures assert
 /// a PLAIN write skips row resolution, so the encrypted column must exist but
 /// stay untouched by the write under test.
-fn users_encrypted_secret_schema(key_id: &str) -> zeroship_data_query_builder::value::Value {
-    zeroship_data_query_builder::value!({
+fn users_encrypted_secret_schema(key_id: &str) -> zeroship_data_sql::value::Value {
+    zeroship_data_sql::value!({
         "email": {"type": "string", "required": true, "unique": true},
         "name": {"type": "string", "required": true},
         "secret": {
@@ -3212,7 +3213,7 @@ struct SqliteRuntimeSource {
 
 fn sqlite_runtime_source(
     collection: &str,
-    schema: &zeroship_data_query_builder::value::Value,
+    schema: &zeroship_data_sql::value::Value,
     body: &str,
 ) -> SqliteRuntimeSource {
     let source = format!(
@@ -3234,7 +3235,7 @@ fn dispatch_sqlite_runtime(
     dir: &tempfile::TempDir,
     source: &SqliteRuntimeSource,
     name: &str,
-) -> zeroship_data_query_builder::value::Value {
+) -> zeroship_data_sql::value::Value {
     let url = parity::sqlite_url(dir);
     let (status, body) = parity::dispatch_zs_with_descriptor(
         &url,
@@ -3265,16 +3266,16 @@ fn insert_many_encrypts_ciphertext_before_sqlite_storage() {
         use std::collections::HashMap;
 
         use base64::Engine as _;
-        use zeroship_plugin_db::backend::sqlite::session::TypedCell;
         use zeroship_plugin_db::backend::EncryptionMode;
-        use zeroship_plugin_db::compile::{build_insert_many_with_dialect, SqlDialect};
+        use zeroship_plugin_db::backend::sqlite::session::TypedCell;
+        use zeroship_plugin_db::compile::{SqlDialect, build_insert_many_with_dialect};
         use zeroship_plugin_db::encryption;
 
         let key_id = "c1_insert_many";
         let _keys = with_root_key("c1_insert_many", &"d".repeat(64));
         let app_id = "app_demo";
         let collection = "bulk_people";
-        let schema = zeroship_data_query_builder::value!({
+        let schema = zeroship_data_sql::value!({
             "name": { "type": "string" },
             "ssn": {
                 "type": "string",
@@ -3284,7 +3285,7 @@ fn insert_many_encrypts_ciphertext_before_sqlite_storage() {
         });
         let (backend, _dir) = unmask_setup_with_schema(app_id, collection, schema.clone()).await;
         let ddl = fixture_table_sql_for(
-            &zeroship_data_query_builder::SchemaName::new(app_id).expect("fixture schema name"),
+            &zeroship_data_sql::SchemaName::new(app_id).expect("fixture schema name"),
             collection,
             &schema,
             &FkEmission::Inline,
@@ -3299,7 +3300,7 @@ fn insert_many_encrypts_ciphertext_before_sqlite_storage() {
             backend.pool_exec(trimmed, &[]).await.expect("DDL exec");
         }
 
-        let mut docs = zeroship_data_query_builder::value!([
+        let mut docs = zeroship_data_sql::value!([
             { "name": "Alice", "ssn": "123-45-6789" },
             { "name": "Bob", "ssn": "987-65-4321" }
         ]);
@@ -3338,7 +3339,7 @@ fn insert_many_encrypts_ciphertext_before_sqlite_storage() {
             .collect();
 
         let built = build_insert_many_with_dialect(
-            &zeroship_data_query_builder::SchemaName::new(app_id).expect("fixture schema name"),
+            &zeroship_data_sql::SchemaName::new(app_id).expect("fixture schema name"),
             collection,
             &schema,
             &docs,
@@ -3513,8 +3514,8 @@ fn upsert_conflict_update_preserves_insert_only_fields_and_encrypts_sqlite_runti
     let _keys = with_root_key("c2_upsert_runtime_conflict", &"f".repeat(64));
 
     run(async {
-        use zeroship_plugin_db::backend::sqlite::session::TypedCell;
         use zeroship_plugin_db::backend::EncryptionMode;
+        use zeroship_plugin_db::backend::sqlite::session::TypedCell;
         use zeroship_plugin_db::encryption;
 
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3584,19 +3585,19 @@ const _procedures = { upsertConflict };
         assert!(
             first
                 .get("created_by")
-                .is_none_or(zeroship_data_query_builder::value::Value::is_null),
+                .is_none_or(zeroship_data_sql::value::Value::is_null),
             "a supplied created_by must not land on the insert arm: {first:?}"
         );
         assert!(
             second
                 .get("created_by")
-                .is_none_or(zeroship_data_query_builder::value::Value::is_null),
+                .is_none_or(zeroship_data_sql::value::Value::is_null),
             "a supplied created_by must not land on the conflict arm: {second:?}"
         );
         assert!(
             second
                 .get("updated_by")
-                .is_none_or(zeroship_data_query_builder::value::Value::is_null),
+                .is_none_or(zeroship_data_sql::value::Value::is_null),
             "a supplied updated_by must not land on the conflict arm: {second:?}"
         );
         assert_eq!(
@@ -3703,8 +3704,8 @@ fn upsert_conflict_with_deterministic_key_keeps_randomised_ciphertext_readable_s
     let _keys = with_root_key("c2_upsert_det_conflict_runtime", &"6".repeat(64));
 
     run(async {
-        use zeroship_plugin_db::backend::sqlite::session::TypedCell;
         use zeroship_plugin_db::backend::EncryptionMode;
+        use zeroship_plugin_db::backend::sqlite::session::TypedCell;
         use zeroship_plugin_db::encryption;
 
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3838,8 +3839,8 @@ fn update_non_id_filter_keeps_randomised_ciphertext_readable_sqlite_runtime() {
     let _keys = with_root_key("c1_update_non_id_runtime", &"7".repeat(64));
 
     run(async {
-        use zeroship_plugin_db::backend::sqlite::session::TypedCell;
         use zeroship_plugin_db::backend::EncryptionMode;
+        use zeroship_plugin_db::backend::sqlite::session::TypedCell;
         use zeroship_plugin_db::encryption;
 
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3955,8 +3956,8 @@ fn update_many_non_id_filter_encrypts_per_row_sqlite_runtime() {
     let _keys = with_root_key("c1_update_many_non_id_runtime", &"8".repeat(64));
 
     run(async {
-        use zeroship_plugin_db::backend::sqlite::session::TypedCell;
         use zeroship_plugin_db::backend::EncryptionMode;
+        use zeroship_plugin_db::backend::sqlite::session::TypedCell;
         use zeroship_plugin_db::encryption;
 
         let dir = tempfile::tempdir().expect("tempdir");
@@ -5245,9 +5246,9 @@ fn cross_backend_ciphertext_decrypt_via_shared_key() {
 /// columns.
 #[test]
 fn encrypted_column_e2e_crud_round_trip_sqlite() {
-    use zeroship_plugin_db::backend::sqlite::session::TypedCell;
     use zeroship_plugin_db::backend::SqlExecutor as _;
-    use zeroship_plugin_db::compile::{build_insert_with_dialect, SqlDialect};
+    use zeroship_plugin_db::backend::sqlite::session::TypedCell;
+    use zeroship_plugin_db::compile::{SqlDialect, build_insert_with_dialect};
     use zeroship_plugin_db::crud::encryption_pass::{decrypt_row_on_read, encrypt_row_on_write};
 
     let _keys = with_root_key("p5_e2e_crud", &"c".repeat(64));
@@ -5276,7 +5277,7 @@ fn encrypted_column_e2e_crud_round_trip_sqlite() {
         // The schema the encryption pass sees — declares `ssn` as a
         // randomised-encrypted column wrapping the string type, keyed
         // to the e2e-test-specific env var.
-        let schema = zeroship_data_query_builder::value!({
+        let schema = zeroship_data_sql::value!({
             "ssn": {
                 "type": "string",
                 "encrypted": {
@@ -5289,7 +5290,7 @@ fn encrypted_column_e2e_crud_round_trip_sqlite() {
 
         let plaintext = "123-45-6789";
         let row_pk = "row_e2e";
-        let mut doc = zeroship_data_query_builder::value!({
+        let mut doc = zeroship_data_sql::value!({
             "id": row_pk,
             "ssn": plaintext,
         });
@@ -5309,7 +5310,7 @@ fn encrypted_column_e2e_crud_round_trip_sqlite() {
 
         // Bind the ciphertext directly.
         let bq = build_insert_with_dialect(
-            &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
+            &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
             "users",
             &schema,
             &doc,
@@ -5321,10 +5322,11 @@ fn encrypted_column_e2e_crud_round_trip_sqlite() {
             "SQLite dialect must not emit `decode(...)::bytea`: {}",
             bq.sql,
         );
-        assert!(bq
-            .params
-            .iter()
-            .any(|value| value.as_bytes() == Some(ciphertext.as_slice())));
+        assert!(
+            bq.params
+                .iter()
+                .any(|value| value.as_bytes() == Some(ciphertext.as_slice()))
+        );
         assert!(!bq.sql.contains("unhex("));
 
         // Execute the compiled INSERT through the typed RETURNING surface.
@@ -5370,9 +5372,9 @@ fn encrypted_column_e2e_crud_round_trip_sqlite() {
             ssn_bytes, ciphertext,
             "stored ciphertext must match the protection pass"
         );
-        let mut row_value = zeroship_data_query_builder::value!({
+        let mut row_value = zeroship_data_sql::value!({
             "id": id_text,
-            "ssn": zeroship_data_query_builder::value::Value::Bytes(ssn_bytes),
+            "ssn": zeroship_data_sql::value::Value::Bytes(ssn_bytes),
         });
 
         decrypt_row_on_read(
@@ -5415,7 +5417,7 @@ fn encrypted_column_e2e_crud_round_trip_sqlite() {
 /// SQLite-flavoured `CREATE TABLE` path.
 #[test]
 fn a_raw_column_is_emitted_for_a_masked_field_sqlite() {
-    let schema = zeroship_data_query_builder::value!({
+    let schema = zeroship_data_sql::value!({
         "ssn": {
             "type": "string",
             "mask": { "kind": "last4", "classification": "spi" }
@@ -5423,7 +5425,7 @@ fn a_raw_column_is_emitted_for_a_masked_field_sqlite() {
         "name": { "type": "string" }
     });
     let sql = fixture_table_sql(
-        &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
+        &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
         "users",
         &schema,
         &FkEmission::Inline,
@@ -5465,7 +5467,7 @@ fn a_raw_column_is_emitted_for_a_masked_field_sqlite() {
 /// alongside the plaintext.
 #[test]
 fn dual_write_insert_persists_parent_and_sibling_sqlite() {
-    use zeroship_plugin_db::compile::{build_insert_with_dialect, SqlDialect};
+    use zeroship_plugin_db::compile::{SqlDialect, build_insert_with_dialect};
 
     run(async {
         let (backend, _dir) = fresh_backend();
@@ -5494,7 +5496,7 @@ fn dual_write_insert_persists_parent_and_sibling_sqlite() {
         // the mask pass has populated `ssn_masked`. The SQL builder
         // walks the row map, so the sibling key naturally lands on
         // the INSERT column list (no special-casing needed).
-        let doc = zeroship_data_query_builder::value!({
+        let doc = zeroship_data_sql::value!({
             "ssn": "123-45-6789",
             "ssn_masked": "***-**-6789"
         });
@@ -5502,9 +5504,9 @@ fn dual_write_insert_persists_parent_and_sibling_sqlite() {
         // only: `ssn_masked` is a PHYSICAL column the mask pass writes, never a
         // declared field, so it is on the INSERT column list and not on the
         // projection - which is the shape this test is about.
-        let schema = zeroship_data_query_builder::value!({ "ssn": { "type": "string" } });
+        let schema = zeroship_data_sql::value!({ "ssn": { "type": "string" } });
         let bq = build_insert_with_dialect(
-            &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
+            &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
             "users",
             &schema,
             &doc,
@@ -5553,7 +5555,7 @@ fn dual_write_insert_persists_parent_and_sibling_sqlite() {
 #[test]
 fn a_select_serves_the_masked_column_sqlite() {
     use zeroship_plugin_db::compile::{
-        build_find_with_schema, build_insert_with_dialect, SqlDialect,
+        SqlDialect, build_find_with_schema, build_insert_with_dialect,
     };
 
     run(async {
@@ -5583,24 +5585,23 @@ fn a_select_serves_the_masked_column_sqlite() {
         // here - masking + encryption are orthogonal in
         // `apply_mask_on_write` design), the field's own column stores
         // the masked string.
-        let schema = zeroship_data_query_builder::value!({
+        let schema = zeroship_data_sql::value!({
             "ssn": {
                 "type": "string",
                 "mask": { "kind": "last4", "classification": "spi" }
             },
             "name": { "type": "string" }
         });
-        let mut doc = zeroship_data_query_builder::value!({
+        let mut doc = zeroship_data_sql::value!({
             "id": "usr_01",
             "ssn": "***-**-6789",
             "name": "alice"
         });
-        doc.as_object_mut().expect("doc object").insert(
-            raw_ssn.clone(),
-            zeroship_data_query_builder::value!("123-45-6789"),
-        );
+        doc.as_object_mut()
+            .expect("doc object")
+            .insert(raw_ssn.clone(), zeroship_data_sql::value!("123-45-6789"));
         let bq = build_insert_with_dialect(
-            &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
+            &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
             "users",
             &schema,
             &doc,
@@ -5622,9 +5623,9 @@ fn a_select_serves_the_masked_column_sqlite() {
         // raw column at all. Verify the SQL shape BEFORE running the
         // query - this is the load-bearing assertion this test pins.
         let bq = build_find_with_schema(
-            &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
+            &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
             "users",
-            &zeroship_data_query_builder::value!({ "id": "usr_01" }),
+            &zeroship_data_sql::value!({ "id": "usr_01" }),
             None,
             None,
             None,
@@ -5689,7 +5690,7 @@ fn a_select_serves_the_masked_column_sqlite() {
 fn aliased_select_skips_kind_none_sqlite() {
     use zeroship_plugin_db::compile::build_find_with_schema;
 
-    let schema = zeroship_data_query_builder::value!({
+    let schema = zeroship_data_sql::value!({
         "ssn": {
             "type": "string",
             "encrypted": { "mode": "randomised", "keyId": "default", "wraps": "string" },
@@ -5698,9 +5699,9 @@ fn aliased_select_skips_kind_none_sqlite() {
         "name": { "type": "string" }
     });
     let bq = build_find_with_schema(
-        &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
+        &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
         "users",
-        &zeroship_data_query_builder::value!({}),
+        &zeroship_data_sql::value!({}),
         None,
         None,
         None,
@@ -5908,8 +5909,8 @@ fn snapshot_restore_round_trip_sqlite() {
 /// keeps inserting throughout.
 #[test]
 fn vacuum_into_snapshot_consistent_under_concurrent_writer() {
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::Duration;
 
     run(async {
@@ -6048,7 +6049,7 @@ fn vacuum_into_snapshot_consistent_under_concurrent_writer() {
 // `pitr_replay` refused with `Configuration { code: "pitr_pg_only" }` on both
 // target forms. It went on 2026-09-07 with the method: the refusal it pinned
 // described a per-vendor divergence that did not exist, because the PG arm
-// could not replay either. `zeroship_data_core::storage::Backup`'s rustdoc
+// could not replay either. `zeroship_data_orm::storage::Backup`'s rustdoc
 // carries the reason. Nothing replaced this test, and nothing should - there is
 // no behaviour left to assert.
 
@@ -6228,13 +6229,13 @@ fn restore_hash_mismatch_rejected_sqlite() {
 
 #[test]
 fn p55_pr1_build_create_table_refuses_masked_suffix_field_sqlite() {
-    let schema = zeroship_data_query_builder::value!({
+    let schema = zeroship_data_sql::value!({
         "name": {"type": "string"},
         // `_masked` is reserved for Path B sibling columns.
         "card_pan_masked": {"type": "string"},
     });
     let result = fixture_table_sql(
-        &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
+        &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
         "cards",
         &schema,
         &FkEmission::Inline,
@@ -6249,13 +6250,13 @@ fn p55_pr1_build_create_table_refuses_masked_suffix_field_sqlite() {
 
 #[test]
 fn p55_pr1_build_create_table_refuses_classification_name_field_sqlite() {
-    let schema = zeroship_data_query_builder::value!({
+    let schema = zeroship_data_sql::value!({
         "name": {"type": "string"},
         // `phi` collides with the platform classification taxonomy.
         "phi": {"type": "string"},
     });
     let result = fixture_table_sql(
-        &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
+        &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
         "patients",
         &schema,
         &FkEmission::Inline,
@@ -6293,7 +6294,7 @@ use zeroship_plugin_db::crud::unmask;
 async fn unmask_setup_with_schema(
     app_id: &str,
     collection: &str,
-    schema: zeroship_data_query_builder::value::Value,
+    schema: zeroship_data_sql::value::Value,
 ) -> (Rc<SqliteBackend>, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("tempdir");
     let backend = Rc::new(
@@ -6344,7 +6345,7 @@ fn configure_cold_sqlite_unmask_fixture(
     dir: &tempfile::TempDir,
     app_id: &str,
     collection: &str,
-    schema: zeroship_data_query_builder::value::Value,
+    schema: zeroship_data_sql::value::Value,
 ) {
     zeroship_plugin_db::reset_context_for_tests();
     let url = format!("sqlite:{}", dir.path().join("zs-control.sqlite").display());
@@ -6397,7 +6398,9 @@ async fn assert_cold_open_installs_a_fresh_backend(fixture: &SqliteBackend) {
         "a cold isolate must be OPENED by ensure_backend: a plain context read answers \
              not_configured here, which is what every fresh isolate would get",
     );
-    let opened = opened.as_sqlite().expect("the SQLite arm");
+    let opened = opened
+        .get::<zeroship_data_orm::backend::SqliteBackend>()
+        .expect("the SQLite arm");
     assert!(
         !std::ptr::eq(opened, fixture),
         "the cold fixture's backend is still installed, so nothing was opened"
@@ -6407,7 +6410,12 @@ async fn assert_cold_open_installs_a_fresh_backend(fixture: &SqliteBackend) {
         .await
         .expect("the second resolution must see the backend the first one opened");
     assert!(
-        std::ptr::eq(again.as_sqlite().expect("the SQLite arm"), opened),
+        std::ptr::eq(
+            again
+                .get::<zeroship_data_orm::backend::SqliteBackend>()
+                .expect("the SQLite arm"),
+            opened
+        ),
         "the open must INSTALL into the isolate, not hand back a private handle: \
          a second resolution opened a different backend"
     );
@@ -6449,7 +6457,7 @@ async fn read_audit_rows(backend: &SqliteBackend, app_id: &str) -> Vec<(String, 
 /// nothing else does. See [`assert_cold_open_installs_a_fresh_backend`].
 #[test]
 fn cold_unmask_open_comes_from_ensure_backend_not_the_fixture() {
-    let schema = zeroship_data_query_builder::value!({
+    let schema = zeroship_data_sql::value!({
         "id":  { "type": "string" },
         "ssn": {
             "type": "string",
@@ -6477,7 +6485,7 @@ fn cold_unmask_open_comes_from_ensure_backend_not_the_fixture() {
 #[test]
 fn cold_unmask_with_auto_actor_attaches_before_read() {
     let _keys = with_root_key("p55_pr4_auto", &"a".repeat(64));
-    let schema = zeroship_data_query_builder::value!({
+    let schema = zeroship_data_sql::value!({
         "id": { "type": "string" },
         "ssn": {
             "type": "string",
@@ -6517,11 +6525,11 @@ fn cold_unmask_with_auto_actor_attaches_before_read() {
             .expect("CREATE TABLE");
 
         // Encrypt + insert one row inline.
-        use zeroship_plugin_db::compile::{build_insert_with_dialect, SqlDialect};
+        use zeroship_plugin_db::compile::{SqlDialect, build_insert_with_dialect};
         use zeroship_plugin_db::crud::encryption_pass::encrypt_row_on_write;
         let row_pk = "usr_auto_01";
         let plaintext = "123-45-6789";
-        let mut doc = zeroship_data_query_builder::value!({
+        let mut doc = zeroship_data_sql::value!({
             "id": row_pk,
             "ssn": plaintext,
         });
@@ -6545,13 +6553,10 @@ fn cold_unmask_with_auto_actor_attaches_before_read() {
         {
             let obj = doc.as_object_mut().expect("doc object");
             obj.insert(raw_ssn.clone(), ciphertext);
-            obj.insert(
-                "ssn".to_string(),
-                zeroship_data_query_builder::value!("***-**-6789"),
-            );
+            obj.insert("ssn".to_string(), zeroship_data_sql::value!("***-**-6789"));
         }
         let bq = build_insert_with_dialect(
-            &zeroship_data_query_builder::SchemaName::new(app_id).expect("fixture schema name"),
+            &zeroship_data_sql::SchemaName::new(app_id).expect("fixture schema name"),
             collection,
             &schema,
             &doc,
@@ -6581,7 +6586,7 @@ fn cold_unmask_with_auto_actor_attaches_before_read() {
             collection: collection.to_string(),
             row_pk: row_pk.to_string(),
             column: "ssn".to_string(),
-            actor: Some(zeroship_data_query_builder::value!({ "kind": "auto", "id": null })),
+            actor: Some(zeroship_data_sql::value!({ "kind": "auto", "id": null })),
             reason: Some("integration test".to_string()),
             rejected_claim: None,
         };
@@ -6637,7 +6642,7 @@ fn cold_unmask_with_auto_actor_attaches_before_read() {
 #[test]
 fn unmask_with_user_actor_returns_forbidden_audit_logged() {
     let _keys = with_root_key("p55_pr4_user", &"b".repeat(64));
-    let schema = zeroship_data_query_builder::value!({
+    let schema = zeroship_data_sql::value!({
         "id": { "type": "string" },
         "ssn": {
             "type": "string",
@@ -6674,7 +6679,7 @@ fn unmask_with_user_actor_returns_forbidden_audit_logged() {
             collection: collection.to_string(),
             row_pk: "usr_anywhere".to_string(),
             column: "ssn".to_string(),
-            actor: Some(zeroship_data_query_builder::value!({ "kind": "user", "id": "usr_xyz" })),
+            actor: Some(zeroship_data_sql::value!({ "kind": "user", "id": "usr_xyz" })),
             reason: None,
             rejected_claim: None,
         };
@@ -6686,7 +6691,7 @@ fn unmask_with_user_actor_returns_forbidden_audit_logged() {
         .await
         .expect_err("dispatch_unmask must refuse user actor under PR 4 stub");
         match err {
-            zeroship_data_core::error::DbError::Coded { code, .. } => {
+            zeroship_data_orm::error::DbError::Coded { code, .. } => {
                 assert_eq!(code, "unmask_not_permitted");
             }
             other => panic!("expected Coded::unmask_not_permitted, got {other:?}"),
@@ -6711,7 +6716,7 @@ fn unmask_with_user_actor_returns_forbidden_audit_logged() {
 #[test]
 fn unmask_column_not_masked_returns_typed_error() {
     // Schema declares `name` as a bare string — no mask block.
-    let schema = zeroship_data_query_builder::value!({
+    let schema = zeroship_data_sql::value!({
         "id":   { "type": "string" },
         "name": { "type": "string" },
     });
@@ -6724,7 +6729,7 @@ fn unmask_column_not_masked_returns_typed_error() {
             collection: collection.to_string(),
             row_pk: "any_pk".to_string(),
             column: "name".to_string(),
-            actor: Some(zeroship_data_query_builder::value!({ "kind": "auto" })),
+            actor: Some(zeroship_data_sql::value!({ "kind": "auto" })),
             reason: None,
             rejected_claim: None,
         };
@@ -6736,7 +6741,7 @@ fn unmask_column_not_masked_returns_typed_error() {
         .await
         .expect_err("unmask of non-masked column must refuse");
         match err {
-            zeroship_data_core::error::DbError::ValidationFailed { code, .. } => {
+            zeroship_data_orm::error::DbError::ValidationFailed { code, .. } => {
                 assert_eq!(code, "unmask_column_not_masked");
             }
             other => panic!("expected ValidationFailed::unmask_column_not_masked, got {other:?}"),
@@ -6750,7 +6755,7 @@ fn unmask_column_not_masked_returns_typed_error() {
 /// row's classification text matches.
 #[test]
 fn unmask_writes_audit_row_with_correct_classification() {
-    let schema = zeroship_data_query_builder::value!({
+    let schema = zeroship_data_sql::value!({
         "id":      { "type": "string" },
         "diag":    {
             "type": "string",
@@ -6770,7 +6775,7 @@ fn unmask_writes_audit_row_with_correct_classification() {
             collection: collection.to_string(),
             row_pk: "pat_01".to_string(),
             column: "diag".to_string(),
-            actor: Some(zeroship_data_query_builder::value!({ "kind": "user", "id": "doctor_x" })),
+            actor: Some(zeroship_data_sql::value!({ "kind": "user", "id": "doctor_x" })),
             reason: Some("chart review".to_string()),
             rejected_claim: None,
         };
@@ -6794,8 +6799,8 @@ fn unmask_writes_audit_row_with_correct_classification() {
 
 /// The unmask SELECT names the raw column the DESCRIPTOR declares.
 ///
-/// The end-to-end half of the change `zeroship_data_query_builder::compile::declared_raw_column`
-/// carries. The unit tests in `zeroship-data-engine`'s `crud::mask_pass` bind the
+/// The end-to-end half of the change `zeroship_data_sql::compile::declared_raw_column`
+/// carries. The unit tests in `zeroship-data-orm`'s `crud::mask_pass` bind the
 /// WRITE side - which column the plaintext is relocated INTO - in the engine's
 /// default-feature build. Nothing there rules on the READ, because the read is a
 /// SELECT against a real database and the fetch helpers are private.
@@ -6812,7 +6817,7 @@ fn unmask_writes_audit_row_with_correct_classification() {
 #[test]
 fn unmask_reads_the_raw_column_the_descriptor_declares() {
     let declared_raw = "__zs_raw2__ssn";
-    let schema = zeroship_data_query_builder::value!({
+    let schema = zeroship_data_sql::value!({
         "id": { "type": "string" },
         "ssn": {
             "type": "string",
@@ -6856,7 +6861,7 @@ fn unmask_reads_the_raw_column_the_descriptor_declares() {
             collection: collection.to_string(),
             row_pk: "per_01".to_string(),
             column: "ssn".to_string(),
-            actor: Some(zeroship_data_query_builder::value!({ "kind": "auto", "id": null })),
+            actor: Some(zeroship_data_sql::value!({ "kind": "auto", "id": null })),
             reason: Some("integration test".to_string()),
             rejected_claim: None,
         };
@@ -6900,7 +6905,7 @@ use zeroship_plugin_db::crud::mask_policy;
 async fn policy_setup(
     app_id: &str,
     collection: &str,
-    schema: zeroship_data_query_builder::value::Value,
+    schema: zeroship_data_sql::value::Value,
 ) -> (Rc<SqliteBackend>, tempfile::TempDir) {
     let (backend, dir) = unmask_setup_with_schema(app_id, collection, schema).await;
     zeroship_plugin_db::clear_mask_policy_cache_for_tests(app_id);
@@ -6912,7 +6917,7 @@ async fn policy_setup(
 #[test]
 fn unmask_with_user_role_in_policy_returns_plaintext() {
     let _keys = with_root_key("p55_pr5_grant", &"c".repeat(64));
-    let schema = zeroship_data_query_builder::value!({
+    let schema = zeroship_data_sql::value!({
         "id": { "type": "string" },
         "email": {
             "type": "string",
@@ -6931,7 +6936,7 @@ fn unmask_with_user_role_in_policy_returns_plaintext() {
         let (backend, _dir) = policy_setup(app_id, collection, schema.clone()).await;
 
         // Define the policy: `user` can unmask `pii`.
-        let policy_v = zeroship_data_query_builder::value!({
+        let policy_v = zeroship_data_sql::value!({
             "user": ["public", "pii"],
         });
         mask_policy::dispatch_set_mask_policy(&unmask_backend().await, app_id, policy_v)
@@ -6958,11 +6963,11 @@ fn unmask_with_user_role_in_policy_returns_plaintext() {
             .expect("CREATE TABLE");
 
         // Encrypt + insert one row.
-        use zeroship_plugin_db::compile::{build_insert_with_dialect, SqlDialect};
+        use zeroship_plugin_db::compile::{SqlDialect, build_insert_with_dialect};
         use zeroship_plugin_db::crud::encryption_pass::encrypt_row_on_write;
         let row_pk = "usr_grant_01";
         let plaintext = "alice@example.com";
-        let mut doc = zeroship_data_query_builder::value!({
+        let mut doc = zeroship_data_sql::value!({
             "id": row_pk,
             "email": plaintext,
         });
@@ -6988,11 +6993,11 @@ fn unmask_with_user_role_in_policy_returns_plaintext() {
             obj.insert(raw_email.clone(), ciphertext);
             obj.insert(
                 "email".to_string(),
-                zeroship_data_query_builder::value!("a****@example.com"),
+                zeroship_data_sql::value!("a****@example.com"),
             );
         }
         let bq = build_insert_with_dialect(
-            &zeroship_data_query_builder::SchemaName::new(app_id).expect("fixture schema name"),
+            &zeroship_data_sql::SchemaName::new(app_id).expect("fixture schema name"),
             collection,
             &schema,
             &doc,
@@ -7014,7 +7019,7 @@ fn unmask_with_user_role_in_policy_returns_plaintext() {
             collection: collection.to_string(),
             row_pk: row_pk.to_string(),
             column: "email".to_string(),
-            actor: Some(zeroship_data_query_builder::value!({ "kind": "user", "id": "usr_xyz" })),
+            actor: Some(zeroship_data_sql::value!({ "kind": "user", "id": "usr_xyz" })),
             reason: Some("user requested own data".to_string()),
             rejected_claim: None,
         };
@@ -7061,7 +7066,7 @@ fn unmask_with_user_role_in_policy_returns_plaintext() {
 /// path emits an audit row.
 #[test]
 fn unmask_with_user_role_not_in_policy_denied() {
-    let schema = zeroship_data_query_builder::value!({
+    let schema = zeroship_data_sql::value!({
         "id": { "type": "string" },
         "ssn": {
             "type": "string",
@@ -7075,7 +7080,7 @@ fn unmask_with_user_role_not_in_policy_denied() {
         let (backend, _dir) = policy_setup(app_id, collection, schema.clone()).await;
 
         // Policy: `user` can only unmask `public`.
-        let policy_v = zeroship_data_query_builder::value!({
+        let policy_v = zeroship_data_sql::value!({
             "user": ["public"],
         });
         mask_policy::dispatch_set_mask_policy(&unmask_backend().await, app_id, policy_v)
@@ -7086,7 +7091,7 @@ fn unmask_with_user_role_not_in_policy_denied() {
             collection: collection.to_string(),
             row_pk: "usr_anywhere".to_string(),
             column: "ssn".to_string(),
-            actor: Some(zeroship_data_query_builder::value!({ "kind": "user", "id": "usr_xyz" })),
+            actor: Some(zeroship_data_sql::value!({ "kind": "user", "id": "usr_xyz" })),
             reason: None,
             rejected_claim: None,
         };
@@ -7098,7 +7103,7 @@ fn unmask_with_user_role_not_in_policy_denied() {
         .await
         .expect_err("policy does not allow user → pii; must refuse");
         match err {
-            zeroship_data_core::error::DbError::Coded { code, .. } => {
+            zeroship_data_orm::error::DbError::Coded { code, .. } => {
                 assert_eq!(code, "unmask_not_permitted");
             }
             other => panic!("expected Coded::unmask_not_permitted, got {other:?}"),
@@ -7118,7 +7123,7 @@ fn unmask_with_user_role_not_in_policy_denied() {
 /// allowing everything when no policy is declared" hole.
 #[test]
 fn unmask_default_deny_when_no_policy() {
-    let schema = zeroship_data_query_builder::value!({
+    let schema = zeroship_data_sql::value!({
         "id": { "type": "string" },
         "name": {
             "type": "string",
@@ -7136,7 +7141,7 @@ fn unmask_default_deny_when_no_policy() {
             collection: collection.to_string(),
             row_pk: "usr_anywhere".to_string(),
             column: "name".to_string(),
-            actor: Some(zeroship_data_query_builder::value!({ "kind": "user", "id": "usr_xyz" })),
+            actor: Some(zeroship_data_sql::value!({ "kind": "user", "id": "usr_xyz" })),
             reason: None,
             rejected_claim: None,
         };
@@ -7148,7 +7153,7 @@ fn unmask_default_deny_when_no_policy() {
         .await
         .expect_err("no policy + non-auto actor → default-deny");
         match err {
-            zeroship_data_core::error::DbError::Coded { code, .. } => {
+            zeroship_data_orm::error::DbError::Coded { code, .. } => {
                 assert_eq!(code, "unmask_not_permitted");
             }
             other => panic!("expected Coded::unmask_not_permitted, got {other:?}"),
@@ -7167,14 +7172,14 @@ fn unmask_default_deny_when_no_policy() {
 /// `invalid_mask_classification`.
 #[test]
 fn unmask_invalid_classification_rejected_at_dispatch_time() {
-    let schema = zeroship_data_query_builder::value!({ "id": { "type": "string" } });
+    let schema = zeroship_data_sql::value!({ "id": { "type": "string" } });
     let app_id = "app_unmask_invalid_classification";
     let collection = "users";
 
     run(async {
         let (_backend, _dir) = policy_setup(app_id, collection, schema).await;
 
-        let bad_policy = zeroship_data_query_builder::value!({
+        let bad_policy = zeroship_data_sql::value!({
             "admin": ["public", "badclass"],
         });
         let err =
@@ -7182,7 +7187,7 @@ fn unmask_invalid_classification_rejected_at_dispatch_time() {
                 .await
                 .expect_err("rust validator must refuse unknown classification");
         match err {
-            zeroship_data_core::error::DbError::ValidationFailed { code, .. } => {
+            zeroship_data_orm::error::DbError::ValidationFailed { code, .. } => {
                 assert_eq!(code, "invalid_mask_classification");
             }
             other => {
@@ -7197,7 +7202,7 @@ fn unmask_invalid_classification_rejected_at_dispatch_time() {
 /// Pins the write-through semantics.
 #[test]
 fn policy_refresh_after_set_mask_policy_op_takes_effect() {
-    let schema = zeroship_data_query_builder::value!({
+    let schema = zeroship_data_sql::value!({
         "id": { "type": "string" },
         "data": {
             "type": "string",
@@ -7230,7 +7235,7 @@ fn policy_refresh_after_set_mask_policy_op_takes_effect() {
             collection: collection.to_string(),
             row_pk: "any".to_string(),
             column: "data".to_string(),
-            actor: Some(zeroship_data_query_builder::value!({ "kind": "support", "id": "sup_1" })),
+            actor: Some(zeroship_data_sql::value!({ "kind": "support", "id": "sup_1" })),
             reason: None,
             rejected_claim: None,
         };
@@ -7242,14 +7247,14 @@ fn policy_refresh_after_set_mask_policy_op_takes_effect() {
         .await
         .expect_err("no policy → default deny for support");
         match err {
-            zeroship_data_core::error::DbError::Coded { code, .. } => {
+            zeroship_data_orm::error::DbError::Coded { code, .. } => {
                 assert_eq!(code, "unmask_not_permitted");
             }
             other => panic!("expected Coded::unmask_not_permitted, got {other:?}"),
         }
 
         // Step 2 — install a policy granting support → internal.
-        let policy_v = zeroship_data_query_builder::value!({
+        let policy_v = zeroship_data_sql::value!({
             "support": ["internal"],
         });
         mask_policy::dispatch_set_mask_policy(&unmask_backend().await, app_id, policy_v)
@@ -7268,7 +7273,7 @@ fn policy_refresh_after_set_mask_policy_op_takes_effect() {
         .await
         .expect_err("auth passes; SELECT misses");
         match err {
-            zeroship_data_core::error::DbError::ValidationFailed { code, .. } => {
+            zeroship_data_orm::error::DbError::ValidationFailed { code, .. } => {
                 assert_eq!(
                     code, "unmask_not_found",
                     "support → internal must pass authz; failure is now the SELECT miss"
@@ -7369,7 +7374,7 @@ fn malformed_mask_sentinel_skipped_on_sqlite() {
 // Bulk unmask end-to-end (SQLite)
 // ---------------------------------------------------------------------------
 
-use zeroship_plugin_db::crud::unmask::{dispatch_bulk_unmask, BulkUnmaskArgs, BulkUnmaskItem};
+use zeroship_plugin_db::crud::unmask::{BulkUnmaskArgs, BulkUnmaskItem, dispatch_bulk_unmask};
 
 /// **cold-open gate, bulk unmask**: the same guard as the single-unmask
 /// cold-open gate, over the fixture shape THIS family uses - a mask policy
@@ -7381,7 +7386,7 @@ use zeroship_plugin_db::crud::unmask::{dispatch_bulk_unmask, BulkUnmaskArgs, Bul
 /// `tx_scope::ensure_backend` exactly as the single-unmask dispatch does.
 #[test]
 fn cold_bulk_unmask_open_comes_from_ensure_backend_not_the_fixture() {
-    let schema = zeroship_data_query_builder::value!({
+    let schema = zeroship_data_sql::value!({
         "id":    { "type": "string" },
         "email": {
             "type": "string",
@@ -7399,7 +7404,7 @@ fn cold_bulk_unmask_open_comes_from_ensure_backend_not_the_fixture() {
         mask_policy::dispatch_set_mask_policy(
             &unmask_backend().await,
             app_id,
-            zeroship_data_query_builder::value!({ "user": ["pii"] }),
+            zeroship_data_sql::value!({ "user": ["pii"] }),
         )
         .await
         .expect("set_mask_policy");
@@ -7416,7 +7421,7 @@ fn cold_bulk_unmask_open_comes_from_ensure_backend_not_the_fixture() {
 /// `unmask_backend` - and is bound by the cold-open gate directly above.
 #[test]
 fn cold_bulk_unmask_attaches_before_read() {
-    let schema = zeroship_data_query_builder::value!({
+    let schema = zeroship_data_sql::value!({
         "id":    { "type": "string" },
         "email": {
             "type": "string",
@@ -7467,7 +7472,7 @@ fn cold_bulk_unmask_attaches_before_read() {
         }
 
         // Policy: `user` can unmask pii AND spi.
-        let policy_v = zeroship_data_query_builder::value!({ "user": ["pii", "spi"] });
+        let policy_v = zeroship_data_sql::value!({ "user": ["pii", "spi"] });
         mask_policy::dispatch_set_mask_policy(&unmask_backend().await, app_id, policy_v)
             .await
             .expect("set_mask_policy");
@@ -7490,7 +7495,7 @@ fn cold_bulk_unmask_attaches_before_read() {
                     columns: vec!["email".into()],
                 },
             ],
-            actor: Some(zeroship_data_query_builder::value!({ "kind": "user", "id": "actor_x" })),
+            actor: Some(zeroship_data_sql::value!({ "kind": "user", "id": "actor_x" })),
             reason: Some("ops dashboard".into()),
             rejected_claim: None,
         };
@@ -7505,18 +7510,18 @@ fn cold_bulk_unmask_attaches_before_read() {
         let u1 = result.results.get("u1").expect("u1 row");
         assert_eq!(
             u1.get("email")
-                .and_then(zeroship_data_query_builder::value::Value::as_str),
+                .and_then(zeroship_data_sql::value::Value::as_str),
             Some("alice@example.com")
         );
         assert_eq!(
             u1.get("ssn")
-                .and_then(zeroship_data_query_builder::value::Value::as_str),
+                .and_then(zeroship_data_sql::value::Value::as_str),
             Some("123-45-6789")
         );
         let u2 = result.results.get("u2").expect("u2 row");
         assert_eq!(
             u2.get("email")
-                .and_then(zeroship_data_query_builder::value::Value::as_str),
+                .and_then(zeroship_data_sql::value::Value::as_str),
             Some("bob@example.com")
         );
 
@@ -7552,7 +7557,7 @@ fn cold_bulk_unmask_attaches_before_read() {
 /// plaintext returned for the authorised pair either.
 #[test]
 fn bulk_unmask_authorization_atomic_one_unauthorized_fails_all() {
-    let schema = zeroship_data_query_builder::value!({
+    let schema = zeroship_data_sql::value!({
         "id":    { "type": "string" },
         "email": {
             "type": "string",
@@ -7584,7 +7589,7 @@ fn bulk_unmask_authorization_atomic_one_unauthorized_fails_all() {
             .expect("CREATE TABLE");
 
         // Policy: `user` can ONLY unmask pii; spi is forbidden.
-        let policy_v = zeroship_data_query_builder::value!({ "user": ["pii"] });
+        let policy_v = zeroship_data_sql::value!({ "user": ["pii"] });
         mask_policy::dispatch_set_mask_policy(&unmask_backend().await, app_id, policy_v)
             .await
             .expect("set_mask_policy");
@@ -7597,7 +7602,7 @@ fn bulk_unmask_authorization_atomic_one_unauthorized_fails_all() {
                 row_pk: "u1".into(),
                 columns: vec!["email".into(), "ssn".into()],
             }],
-            actor: Some(zeroship_data_query_builder::value!({ "kind": "user", "id": "actor_x" })),
+            actor: Some(zeroship_data_sql::value!({ "kind": "user", "id": "actor_x" })),
             reason: None,
             rejected_claim: None,
         };
@@ -7609,7 +7614,7 @@ fn bulk_unmask_authorization_atomic_one_unauthorized_fails_all() {
         .await
         .expect_err("bulk must refuse atomically");
         match err {
-            zeroship_data_core::error::DbError::Coded { code, .. } => {
+            zeroship_data_orm::error::DbError::Coded { code, .. } => {
                 assert_eq!(code, "bulk_unmask_partial_unauthorized");
             }
             other => panic!("expected Coded::bulk_unmask_partial_unauthorized, got {other:?}"),
@@ -7630,7 +7635,7 @@ fn bulk_unmask_authorization_atomic_one_unauthorized_fails_all() {
 /// typed `unmask_column_not_masked` error BEFORE any audit row writes.
 #[test]
 fn bulk_unmask_unknown_column_returns_typed_error_e2e() {
-    let schema = zeroship_data_query_builder::value!({
+    let schema = zeroship_data_sql::value!({
         "id":  { "type": "string" },
         "ssn": {
             "type": "string",
@@ -7649,7 +7654,7 @@ fn bulk_unmask_unknown_column_returns_typed_error_e2e() {
                 row_pk: "u1".into(),
                 columns: vec!["does_not_exist".into()],
             }],
-            actor: Some(zeroship_data_query_builder::value!({ "kind": "auto" })),
+            actor: Some(zeroship_data_sql::value!({ "kind": "auto" })),
             reason: None,
             rejected_claim: None,
         };
@@ -7661,7 +7666,7 @@ fn bulk_unmask_unknown_column_returns_typed_error_e2e() {
         .await
         .expect_err("unknown column must refuse");
         match err {
-            zeroship_data_core::error::DbError::ValidationFailed { code, .. } => {
+            zeroship_data_orm::error::DbError::ValidationFailed { code, .. } => {
                 assert_eq!(code, "unmask_column_not_masked");
             }
             other => panic!("expected ValidationFailed::unmask_column_not_masked, got {other:?}"),
@@ -7686,7 +7691,7 @@ use zeroship_plugin_db::crud::unmask::{
 /// resolved by the `find` dispatch through `tx_scope::ensure_backend`.
 #[test]
 fn cold_query_unmask_hint_open_comes_from_ensure_backend_not_the_fixture() {
-    let schema = zeroship_data_query_builder::value!({
+    let schema = zeroship_data_sql::value!({
         "id":  { "type": "string" },
         "ssn": {
             "type": "string",
@@ -7704,7 +7709,7 @@ fn cold_query_unmask_hint_open_comes_from_ensure_backend_not_the_fixture() {
         mask_policy::dispatch_set_mask_policy(
             &unmask_backend().await,
             app_id,
-            zeroship_data_query_builder::value!({ "user": ["spi"] }),
+            zeroship_data_sql::value!({ "user": ["spi"] }),
         )
         .await
         .expect("set_mask_policy");
@@ -7721,7 +7726,7 @@ fn cold_query_unmask_hint_open_comes_from_ensure_backend_not_the_fixture() {
 /// `unmask_backend` - and is bound by the cold-open gate directly above.
 #[test]
 fn cold_query_unmask_hint_attaches_before_read() {
-    let schema = zeroship_data_query_builder::value!({
+    let schema = zeroship_data_sql::value!({
         "id":    { "type": "string" },
         "email": {
             "type": "string",
@@ -7772,7 +7777,7 @@ fn cold_query_unmask_hint_attaches_before_read() {
             .expect("INSERT");
 
         // Policy: `user` can unmask both pii and spi.
-        let policy_v = zeroship_data_query_builder::value!({ "user": ["pii", "spi"] });
+        let policy_v = zeroship_data_sql::value!({ "user": ["pii", "spi"] });
         mask_policy::dispatch_set_mask_policy(&unmask_backend().await, app_id, policy_v)
             .await
             .expect("set_mask_policy");
@@ -7789,7 +7794,7 @@ fn cold_query_unmask_hint_attaches_before_read() {
         // columns. We're driving `dispatch_unmask_for_query` directly
         // since the full V8 round-trip is out of scope for this
         // integration test.
-        let actor = Some(zeroship_data_query_builder::value!({ "kind": "user", "id": "actor_x" }));
+        let actor = Some(zeroship_data_sql::value!({ "kind": "user", "id": "actor_x" }));
         let reason = Some("dashboard view".to_string());
 
         // Step 1 — upfront auth fence.
@@ -7806,7 +7811,7 @@ fn cold_query_unmask_hint_attaches_before_read() {
         .expect("authorize_query_hint must succeed");
 
         // Step 2 — simulate post-wrap row + run unmask-for-query.
-        let mut rows = vec![zeroship_data_query_builder::value!({
+        let mut rows = vec![zeroship_data_sql::value!({
             "id": "u1",
             "email": {
                 "sentinel": "__zsmask__",
@@ -7891,7 +7896,7 @@ fn cold_query_unmask_hint_attaches_before_read() {
 /// query entirely; we do not silently degrade to masked-only.
 #[test]
 fn per_query_unmask_hint_rejects_unauthorized_actor() {
-    let schema = zeroship_data_query_builder::value!({
+    let schema = zeroship_data_sql::value!({
         "id":  { "type": "string" },
         "ssn": {
             "type": "string",
@@ -7905,12 +7910,12 @@ fn per_query_unmask_hint_rejects_unauthorized_actor() {
         let (backend, _dir) = unmask_setup_with_schema(app_id, collection, schema).await;
         zeroship_plugin_db::clear_mask_policy_cache_for_tests(app_id);
         // Policy: `user` can only unmask `pii`, NOT `spi`.
-        let policy_v = zeroship_data_query_builder::value!({ "user": ["pii"] });
+        let policy_v = zeroship_data_sql::value!({ "user": ["pii"] });
         mask_policy::dispatch_set_mask_policy(&unmask_backend().await, app_id, policy_v)
             .await
             .expect("set_mask_policy");
 
-        let actor = Some(zeroship_data_query_builder::value!({ "kind": "user", "id": "actor_x" }));
+        let actor = Some(zeroship_data_sql::value!({ "kind": "user", "id": "actor_x" }));
         let err = authorize_query_hint(
             &unmask_backend().await,
             &DbBinding::cold_start(app_id),
@@ -7923,7 +7928,7 @@ fn per_query_unmask_hint_rejects_unauthorized_actor() {
         .await
         .expect_err("must refuse");
         match err {
-            zeroship_data_core::error::DbError::Coded { code, .. } => {
+            zeroship_data_orm::error::DbError::Coded { code, .. } => {
                 assert_eq!(code, "unmask_not_permitted");
             }
             other => panic!("expected Coded::unmask_not_permitted, got {other:?}"),
@@ -7940,7 +7945,7 @@ fn per_query_unmask_hint_rejects_unauthorized_actor() {
 /// the typed `unmask_column_not_masked` error before any DB hit.
 #[test]
 fn per_query_unmask_hint_unknown_column_returns_typed_error() {
-    let schema = zeroship_data_query_builder::value!({
+    let schema = zeroship_data_sql::value!({
         "id":  { "type": "string" },
         "ssn": {
             "type": "string",
@@ -7953,7 +7958,7 @@ fn per_query_unmask_hint_unknown_column_returns_typed_error() {
     run(async {
         let (_backend, _dir) = unmask_setup_with_schema(app_id, collection, schema).await;
         zeroship_plugin_db::clear_mask_policy_cache_for_tests(app_id);
-        let actor = Some(zeroship_data_query_builder::value!({ "kind": "auto" }));
+        let actor = Some(zeroship_data_sql::value!({ "kind": "auto" }));
         let err = authorize_query_hint(
             &unmask_backend().await,
             &DbBinding::cold_start(app_id),
@@ -7966,7 +7971,7 @@ fn per_query_unmask_hint_unknown_column_returns_typed_error() {
         .await
         .expect_err("must refuse on unknown");
         match err {
-            zeroship_data_core::error::DbError::ValidationFailed { code, .. } => {
+            zeroship_data_orm::error::DbError::ValidationFailed { code, .. } => {
                 assert_eq!(code, "unmask_column_not_masked");
             }
             other => panic!("expected ValidationFailed::unmask_column_not_masked, got {other:?}"),
@@ -8002,11 +8007,11 @@ fn sqlite_ddl_has_seven_system_field_columns_end_to_end() {
             .await
             .expect("ensure_app_schema");
 
-        let schema = zeroship_data_query_builder::value!({
+        let schema = zeroship_data_sql::value!({
             "title": { "type": "string", "required": true },
         });
         let sql = fixture_table_sql_for(
-            &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
+            &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
             "posts",
             &schema,
             &FkEmission::Inline,
@@ -8081,9 +8086,9 @@ fn freshly_created_table_has_three_indexes_end_to_end() {
             .expect("ensure_app_schema");
 
         let sql = fixture_table_sql_for(
-            &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
+            &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
             "posts",
-            &zeroship_data_query_builder::value!({}),
+            &zeroship_data_sql::value!({}),
             &FkEmission::Inline,
             SqlDialect::Sqlite,
         )
@@ -8140,9 +8145,9 @@ fn inserting_a_row_without_user_fields_succeeds_via_system_fields_only() {
             .expect("ensure_app_schema");
 
         let sql = fixture_table_sql_for(
-            &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
+            &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
             "posts",
-            &zeroship_data_query_builder::value!({}),
+            &zeroship_data_sql::value!({}),
             &FkEmission::Inline,
             SqlDialect::Sqlite,
         )
@@ -8211,7 +8216,7 @@ fn inserting_a_row_without_user_fields_succeeds_via_system_fields_only() {
 /// up V8 — exercises the SQL builder + SQLite engine round-trip.
 #[test]
 fn insert_end_to_end_populates_system_fields_sqlite() {
-    use zeroship_plugin_db::compile::{build_insert_with_dialect, SqlDialect};
+    use zeroship_plugin_db::compile::{SqlDialect, build_insert_with_dialect};
     use zeroship_plugin_db::crud::system_fields_pass::apply_system_fields_on_insert;
 
     run(async {
@@ -8222,11 +8227,11 @@ fn insert_end_to_end_populates_system_fields_sqlite() {
             .expect("ensure_app_schema");
 
         // 1. Stand up the table with the 7 system-field columns.
-        let schema = zeroship_data_query_builder::value!({
+        let schema = zeroship_data_sql::value!({
             "title": {"type": "string", "required": true},
         });
         let ddl = fixture_table_sql_for(
-            &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
+            &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
             "posts",
             &schema,
             &FkEmission::Inline,
@@ -8248,13 +8253,13 @@ fn insert_end_to_end_populates_system_fields_sqlite() {
         // field. The auto-mint pass injects `id`, `created_by`,
         // `updated_by`; the DB fires its DEFAULT for the timestamps +
         // version.
-        let mut doc = zeroship_data_query_builder::value!({ "title": "PR 3 hello" });
+        let mut doc = zeroship_data_sql::value!({ "title": "PR 3 hello" });
         // The pass takes the collection's descriptor entry (the write pipeline
         // resolves it once per op and hands it down); the only thing it reads
         // out of it is a declared `t.id(prefix)`, and this one declares none.
         apply_system_fields_on_insert(
             &mut doc,
-            &zeroship_data_query_builder::value!({ "title": { "type": "string", "required": true } }),
+            &zeroship_data_sql::value!({ "title": { "type": "string", "required": true } }),
             "posts",
             Some("usr_actor_e2e"),
         )
@@ -8276,7 +8281,7 @@ fn insert_end_to_end_populates_system_fields_sqlite() {
         // so route through the dedicated client's `query` path (the
         // pool's `pool_exec` rejects result-bearing statements).
         let built = build_insert_with_dialect(
-            &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
+            &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
             "posts",
             &schema,
             &doc,
@@ -8342,7 +8347,7 @@ fn insert_end_to_end_populates_system_fields_sqlite() {
 /// PG-only path until the cross-app FK rework lands.
 #[test]
 fn insert_with_fk_uses_text_keys_end_to_end_sqlite() {
-    use zeroship_plugin_db::compile::{build_insert_with_dialect, SqlDialect};
+    use zeroship_plugin_db::compile::{SqlDialect, build_insert_with_dialect};
     use zeroship_plugin_db::crud::system_fields_pass::apply_system_fields_on_insert;
 
     run(async {
@@ -8360,12 +8365,12 @@ fn insert_with_fk_uses_text_keys_end_to_end_sqlite() {
         let empty: std::collections::HashSet<String> = std::collections::HashSet::new();
         // One binding for the table's shape and for the write's projection: the
         // DDL emitter and the INSERT builder must not read two literals.
-        let schema = zeroship_data_query_builder::value!({
+        let schema = zeroship_data_sql::value!({
             "title": {"type": "string", "required": true},
             "authorId": {"type": "ref", "refTarget": "users"},
         });
         let posts_ddl = fixture_table_sql_for(
-            &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
+            &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
             "posts",
             &schema,
             &FkEmission::Deferred(&empty),
@@ -8396,13 +8401,13 @@ fn insert_with_fk_uses_text_keys_end_to_end_sqlite() {
         // declared INTEGER affinity at introspection. With the
         // cascade applied the affinity is TEXT - no surprise on
         // read-back.
-        let mut post_doc = zeroship_data_query_builder::value!({
+        let mut post_doc = zeroship_data_sql::value!({
             "title": "fk-ok",
             "authorId": "usr_01HXY3Z9PQR2STUV4WXY5Z6789",
         });
         apply_system_fields_on_insert(
             &mut post_doc,
-            &zeroship_data_query_builder::value!({
+            &zeroship_data_sql::value!({
                 "title": {"type": "string", "required": true},
                 "authorId": {"type": "ref", "refTarget": "users"},
             }),
@@ -8411,7 +8416,7 @@ fn insert_with_fk_uses_text_keys_end_to_end_sqlite() {
         )
         .expect("derived prefix must be accepted");
         let built = build_insert_with_dialect(
-            &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
+            &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
             "posts",
             &schema,
             &post_doc,
@@ -8459,8 +8464,8 @@ fn insert_with_fk_uses_text_keys_end_to_end_sqlite() {
 #[test]
 fn update_end_to_end_bumps_version_by_one_sqlite() {
     use zeroship_plugin_db::compile::{
-        build_insert_with_dialect, build_update_many_with_system_fields, SqlDialect,
-        SystemFieldAutoBump,
+        SqlDialect, SystemFieldAutoBump, build_insert_with_dialect,
+        build_update_many_with_system_fields,
     };
 
     run(async {
@@ -8470,11 +8475,11 @@ fn update_end_to_end_bumps_version_by_one_sqlite() {
             .await
             .expect("ensure_app_schema");
 
-        let schema = zeroship_data_query_builder::value!({
+        let schema = zeroship_data_sql::value!({
             "title": {"type": "string", "required": true},
         });
         let ddl = fixture_table_sql_for(
-            &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
+            &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
             "posts",
             &schema,
             &FkEmission::Inline,
@@ -8490,12 +8495,12 @@ fn update_end_to_end_bumps_version_by_one_sqlite() {
         }
 
         // INSERT row at version 1 (DDL default).
-        let doc = zeroship_data_query_builder::value!({
+        let doc = zeroship_data_sql::value!({
             "id": "post_v1bump",
             "title": "original",
         });
         let ins = build_insert_with_dialect(
-            &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
+            &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
             "posts",
             &schema,
             &doc,
@@ -8510,15 +8515,15 @@ fn update_end_to_end_bumps_version_by_one_sqlite() {
             .expect("INSERT");
 
         // UPDATE via the system-fields-aware builder.
-        let filter = zeroship_data_query_builder::value!({ "id": "post_v1bump" });
-        let update = zeroship_data_query_builder::value!({ "title": "v2" });
+        let filter = zeroship_data_sql::value!({ "id": "post_v1bump" });
+        let update = zeroship_data_sql::value!({ "title": "v2" });
         let autobump = SystemFieldAutoBump {
             dispatch_write: true,
             actor_id: Some("usr_e2e_updater"),
             ..Default::default()
         };
         let upd = build_update_many_with_system_fields(
-            &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
+            &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
             "posts",
             &schema,
             &filter,
@@ -8562,17 +8567,17 @@ fn update_end_to_end_bumps_version_by_one_sqlite() {
 #[test]
 fn update_end_to_end_with_correct_version_succeeds_and_bumps_sqlite() {
     use zeroship_plugin_db::compile::{
-        build_insert_with_dialect, build_update_many_with_system_fields, SqlDialect,
-        SystemFieldAutoBump,
+        SqlDialect, SystemFieldAutoBump, build_insert_with_dialect,
+        build_update_many_with_system_fields,
     };
 
     run(async {
         let (backend, _dir) = fresh_backend();
         backend.attach_app_file("app_demo").await.unwrap();
 
-        let schema = zeroship_data_query_builder::value!({ "title": {"type": "string"} });
+        let schema = zeroship_data_sql::value!({ "title": {"type": "string"} });
         let ddl = fixture_table_sql_for(
-            &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
+            &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
             "posts",
             &schema,
             &FkEmission::Inline,
@@ -8587,9 +8592,9 @@ fn update_end_to_end_with_correct_version_succeeds_and_bumps_sqlite() {
             backend.pool_exec(t, &[]).await.unwrap();
         }
 
-        let doc = zeroship_data_query_builder::value!({ "id": "post_cas_ok", "title": "v1" });
+        let doc = zeroship_data_sql::value!({ "id": "post_cas_ok", "title": "v1" });
         let ins = build_insert_with_dialect(
-            &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
+            &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
             "posts",
             &schema,
             &doc,
@@ -8601,15 +8606,15 @@ fn update_end_to_end_with_correct_version_succeeds_and_bumps_sqlite() {
         client.query_values(&ins.sql, ins_params).await.unwrap();
 
         // CAS at the correct version (1).
-        let filter = zeroship_data_query_builder::value!({ "id": "post_cas_ok", "version": 1 });
-        let update = zeroship_data_query_builder::value!({ "title": "v2" });
+        let filter = zeroship_data_sql::value!({ "id": "post_cas_ok", "version": 1 });
+        let update = zeroship_data_sql::value!({ "title": "v2" });
         let autobump = SystemFieldAutoBump {
             dispatch_write: true,
             actor_id: Some("usr_cas_ok"),
             ..Default::default()
         };
         let upd = build_update_many_with_system_fields(
-            &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
+            &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
             "posts",
             &schema,
             &filter,
@@ -8644,17 +8649,17 @@ fn update_end_to_end_with_correct_version_succeeds_and_bumps_sqlite() {
 #[test]
 fn update_end_to_end_with_stale_version_affects_zero_rows_sqlite() {
     use zeroship_plugin_db::compile::{
-        build_insert_with_dialect, build_update_many_with_system_fields, SqlDialect,
-        SystemFieldAutoBump,
+        SqlDialect, SystemFieldAutoBump, build_insert_with_dialect,
+        build_update_many_with_system_fields,
     };
 
     run(async {
         let (backend, _dir) = fresh_backend();
         backend.attach_app_file("app_demo").await.unwrap();
 
-        let schema = zeroship_data_query_builder::value!({ "title": {"type": "string"} });
+        let schema = zeroship_data_sql::value!({ "title": {"type": "string"} });
         let ddl = fixture_table_sql_for(
-            &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
+            &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
             "posts",
             &schema,
             &FkEmission::Inline,
@@ -8669,9 +8674,9 @@ fn update_end_to_end_with_stale_version_affects_zero_rows_sqlite() {
             backend.pool_exec(t, &[]).await.unwrap();
         }
 
-        let doc = zeroship_data_query_builder::value!({ "id": "post_cas_stale", "title": "v1" });
+        let doc = zeroship_data_sql::value!({ "id": "post_cas_stale", "title": "v1" });
         let ins = build_insert_with_dialect(
-            &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
+            &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
             "posts",
             &schema,
             &doc,
@@ -8683,15 +8688,15 @@ fn update_end_to_end_with_stale_version_affects_zero_rows_sqlite() {
         client.query_values(&ins.sql, ins_params).await.unwrap();
 
         // CAS at the wrong version (row is at 1; we expect 99).
-        let filter = zeroship_data_query_builder::value!({ "id": "post_cas_stale", "version": 99 });
-        let update = zeroship_data_query_builder::value!({ "title": "v_nope" });
+        let filter = zeroship_data_sql::value!({ "id": "post_cas_stale", "version": 99 });
+        let update = zeroship_data_sql::value!({ "title": "v_nope" });
         let autobump = SystemFieldAutoBump {
             dispatch_write: true,
             actor_id: Some("usr_cas_stale"),
             ..Default::default()
         };
         let upd = build_update_many_with_system_fields(
-            &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
+            &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
             "posts",
             &schema,
             &filter,
@@ -8723,17 +8728,17 @@ fn update_end_to_end_with_stale_version_affects_zero_rows_sqlite() {
 #[test]
 fn update_end_to_end_concurrent_two_updates_one_wins_one_loses_sqlite() {
     use zeroship_plugin_db::compile::{
-        build_insert_with_dialect, build_update_many_with_system_fields, SqlDialect,
-        SystemFieldAutoBump,
+        SqlDialect, SystemFieldAutoBump, build_insert_with_dialect,
+        build_update_many_with_system_fields,
     };
 
     run(async {
         let (backend, _dir) = fresh_backend();
         backend.attach_app_file("app_demo").await.unwrap();
 
-        let schema = zeroship_data_query_builder::value!({ "title": {"type": "string"} });
+        let schema = zeroship_data_sql::value!({ "title": {"type": "string"} });
         let ddl = fixture_table_sql_for(
-            &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
+            &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
             "posts",
             &schema,
             &FkEmission::Inline,
@@ -8748,9 +8753,9 @@ fn update_end_to_end_concurrent_two_updates_one_wins_one_loses_sqlite() {
             backend.pool_exec(t, &[]).await.unwrap();
         }
 
-        let doc = zeroship_data_query_builder::value!({ "id": "post_race", "title": "v0" });
+        let doc = zeroship_data_sql::value!({ "id": "post_race", "title": "v0" });
         let ins = build_insert_with_dialect(
-            &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
+            &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
             "posts",
             &schema,
             &doc,
@@ -8762,15 +8767,15 @@ fn update_end_to_end_concurrent_two_updates_one_wins_one_loses_sqlite() {
         client.query_values(&ins.sql, ins_params).await.unwrap();
 
         // First UPDATE at version=1 wins.
-        let filter1 = zeroship_data_query_builder::value!({ "id": "post_race", "version": 1 });
-        let update1 = zeroship_data_query_builder::value!({ "title": "v_winner" });
+        let filter1 = zeroship_data_sql::value!({ "id": "post_race", "version": 1 });
+        let update1 = zeroship_data_sql::value!({ "title": "v_winner" });
         let ab = SystemFieldAutoBump {
             dispatch_write: true,
             actor_id: Some("usr_a"),
             ..Default::default()
         };
         let upd1 = build_update_many_with_system_fields(
-            &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
+            &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
             "posts",
             &schema,
             &filter1,
@@ -8784,10 +8789,10 @@ fn update_end_to_end_concurrent_two_updates_one_wins_one_loses_sqlite() {
         assert_eq!(r1.len(), 1, "first CAS wins");
 
         // Second UPDATE at version=1 loses (row is now at version=2).
-        let filter2 = zeroship_data_query_builder::value!({ "id": "post_race", "version": 1 });
-        let update2 = zeroship_data_query_builder::value!({ "title": "v_loser" });
+        let filter2 = zeroship_data_sql::value!({ "id": "post_race", "version": 1 });
+        let update2 = zeroship_data_sql::value!({ "title": "v_loser" });
         let upd2 = build_update_many_with_system_fields(
-            &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
+            &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
             "posts",
             &schema,
             &filter2,
@@ -8818,17 +8823,17 @@ fn update_end_to_end_concurrent_two_updates_one_wins_one_loses_sqlite() {
 #[test]
 fn update_end_to_end_without_version_filter_succeeds_blindly_sqlite() {
     use zeroship_plugin_db::compile::{
-        build_insert_with_dialect, build_update_many_with_system_fields, SqlDialect,
-        SystemFieldAutoBump,
+        SqlDialect, SystemFieldAutoBump, build_insert_with_dialect,
+        build_update_many_with_system_fields,
     };
 
     run(async {
         let (backend, _dir) = fresh_backend();
         backend.attach_app_file("app_demo").await.unwrap();
 
-        let schema = zeroship_data_query_builder::value!({ "title": {"type": "string"} });
+        let schema = zeroship_data_sql::value!({ "title": {"type": "string"} });
         let ddl = fixture_table_sql_for(
-            &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
+            &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
             "posts",
             &schema,
             &FkEmission::Inline,
@@ -8843,9 +8848,9 @@ fn update_end_to_end_without_version_filter_succeeds_blindly_sqlite() {
             backend.pool_exec(t, &[]).await.unwrap();
         }
 
-        let doc = zeroship_data_query_builder::value!({ "id": "post_blind", "title": "v0" });
+        let doc = zeroship_data_sql::value!({ "id": "post_blind", "title": "v0" });
         let ins = build_insert_with_dialect(
-            &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
+            &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
             "posts",
             &schema,
             &doc,
@@ -8859,16 +8864,15 @@ fn update_end_to_end_without_version_filter_succeeds_blindly_sqlite() {
         // No version in filter — last-writer-wins. Three consecutive
         // updates land in order; version is bumped each time.
         for new_title in ["v1", "v2", "v3"] {
-            let filter = zeroship_data_query_builder::value!({ "id": "post_blind" });
-            let update = zeroship_data_query_builder::value!({ "title": new_title });
+            let filter = zeroship_data_sql::value!({ "id": "post_blind" });
+            let update = zeroship_data_sql::value!({ "title": new_title });
             let ab = SystemFieldAutoBump {
                 dispatch_write: true,
                 actor_id: Some("usr_blind"),
                 ..Default::default()
             };
             let upd = build_update_many_with_system_fields(
-                &zeroship_data_query_builder::SchemaName::new("app_demo")
-                    .expect("fixture schema name"),
+                &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
                 "posts",
                 &schema,
                 &filter,
@@ -8910,16 +8914,16 @@ fn update_end_to_end_without_version_filter_succeeds_blindly_sqlite() {
 #[test]
 fn soft_delete_end_to_end_sets_deleted_at_and_bumps_version_sqlite() {
     use zeroship_plugin_db::compile::{
-        build_insert_with_dialect, build_soft_delete_many_with_system_fields, SqlDialect,
-        SystemFieldAutoBump,
+        SqlDialect, SystemFieldAutoBump, build_insert_with_dialect,
+        build_soft_delete_many_with_system_fields,
     };
 
     run(async {
         let (backend, _dir) = fresh_backend();
         backend.attach_app_file("app_demo").await.unwrap();
-        let schema = zeroship_data_query_builder::value!({ "title": { "type": "string" } });
+        let schema = zeroship_data_sql::value!({ "title": { "type": "string" } });
         let ddl = fixture_table_sql_for(
-            &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
+            &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
             "posts",
             &schema,
             &FkEmission::Inline,
@@ -8934,10 +8938,9 @@ fn soft_delete_end_to_end_sets_deleted_at_and_bumps_version_sqlite() {
             backend.pool_exec(t, &[]).await.unwrap();
         }
 
-        let doc =
-            zeroship_data_query_builder::value!({ "id": "post_sd1", "title": "to be deleted" });
+        let doc = zeroship_data_sql::value!({ "id": "post_sd1", "title": "to be deleted" });
         let ins = build_insert_with_dialect(
-            &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
+            &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
             "posts",
             &schema,
             &doc,
@@ -8948,13 +8951,13 @@ fn soft_delete_end_to_end_sets_deleted_at_and_bumps_version_sqlite() {
         let client = backend.acquire_dedicated_client("app_demo").await.unwrap();
         client.query_values(&ins.sql, p).await.unwrap();
 
-        let filter = zeroship_data_query_builder::value!({ "id": "post_sd1" });
+        let filter = zeroship_data_sql::value!({ "id": "post_sd1" });
         let ab = SystemFieldAutoBump {
             actor_id: Some("usr_deleter"),
             ..Default::default()
         };
         let sd = build_soft_delete_many_with_system_fields(
-            &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
+            &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
             "posts",
             &schema,
             &filter,
@@ -8987,16 +8990,16 @@ fn soft_delete_end_to_end_sets_deleted_at_and_bumps_version_sqlite() {
 #[test]
 fn soft_delete_on_already_soft_deleted_row_affects_zero_rows_sqlite() {
     use zeroship_plugin_db::compile::{
-        build_insert_with_dialect, build_soft_delete_many_with_system_fields, SqlDialect,
-        SystemFieldAutoBump,
+        SqlDialect, SystemFieldAutoBump, build_insert_with_dialect,
+        build_soft_delete_many_with_system_fields,
     };
 
     run(async {
         let (backend, _dir) = fresh_backend();
         backend.attach_app_file("app_demo").await.unwrap();
-        let schema = zeroship_data_query_builder::value!({ "title": { "type": "string" } });
+        let schema = zeroship_data_sql::value!({ "title": { "type": "string" } });
         let ddl = fixture_table_sql_for(
-            &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
+            &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
             "posts",
             &schema,
             &FkEmission::Inline,
@@ -9011,9 +9014,9 @@ fn soft_delete_on_already_soft_deleted_row_affects_zero_rows_sqlite() {
             backend.pool_exec(t, &[]).await.unwrap();
         }
 
-        let doc = zeroship_data_query_builder::value!({ "id": "post_idem", "title": "x" });
+        let doc = zeroship_data_sql::value!({ "id": "post_idem", "title": "x" });
         let ins = build_insert_with_dialect(
-            &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
+            &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
             "posts",
             &schema,
             &doc,
@@ -9024,13 +9027,13 @@ fn soft_delete_on_already_soft_deleted_row_affects_zero_rows_sqlite() {
         let client = backend.acquire_dedicated_client("app_demo").await.unwrap();
         client.query_values(&ins.sql, p).await.unwrap();
 
-        let filter = zeroship_data_query_builder::value!({ "id": "post_idem" });
+        let filter = zeroship_data_sql::value!({ "id": "post_idem" });
         let ab = SystemFieldAutoBump {
             actor_id: Some("usr_x"),
             ..Default::default()
         };
         let sd = build_soft_delete_many_with_system_fields(
-            &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
+            &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
             "posts",
             &schema,
             &filter,
@@ -9049,16 +9052,16 @@ fn soft_delete_on_already_soft_deleted_row_affects_zero_rows_sqlite() {
 #[test]
 fn find_with_soft_delete_filter_hides_soft_deleted_rows_sqlite() {
     use zeroship_plugin_db::compile::{
-        build_find_with_schema_and_unmask_and_soft_delete, build_insert_with_dialect,
-        build_soft_delete_many_with_system_fields, SqlDialect, SystemFieldAutoBump,
+        SqlDialect, SystemFieldAutoBump, build_find_with_schema_and_unmask_and_soft_delete,
+        build_insert_with_dialect, build_soft_delete_many_with_system_fields,
     };
 
     run(async {
         let (backend, _dir) = fresh_backend();
         backend.attach_app_file("app_demo").await.unwrap();
-        let schema = zeroship_data_query_builder::value!({ "title": { "type": "string" } });
+        let schema = zeroship_data_sql::value!({ "title": { "type": "string" } });
         let ddl = fixture_table_sql_for(
-            &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
+            &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
             "posts",
             &schema,
             &FkEmission::Inline,
@@ -9074,10 +9077,9 @@ fn find_with_soft_delete_filter_hides_soft_deleted_rows_sqlite() {
         }
 
         for id in &["post_alive_a", "post_alive_b", "post_dead"] {
-            let doc = zeroship_data_query_builder::value!({ "id": id, "title": id });
+            let doc = zeroship_data_sql::value!({ "id": id, "title": id });
             let ins = build_insert_with_dialect(
-                &zeroship_data_query_builder::SchemaName::new("app_demo")
-                    .expect("fixture schema name"),
+                &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
                 "posts",
                 &schema,
                 &doc,
@@ -9093,10 +9095,10 @@ fn find_with_soft_delete_filter_hides_soft_deleted_rows_sqlite() {
             ..Default::default()
         };
         let sd = build_soft_delete_many_with_system_fields(
-            &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
+            &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
             "posts",
             &schema,
-            &zeroship_data_query_builder::value!({ "id": "post_dead" }),
+            &zeroship_data_sql::value!({ "id": "post_dead" }),
             SqlDialect::Sqlite,
             &ab,
         )
@@ -9106,14 +9108,14 @@ fn find_with_soft_delete_filter_hides_soft_deleted_rows_sqlite() {
         client.query_values(&sd.sql, p).await.unwrap();
 
         let q = build_find_with_schema_and_unmask_and_soft_delete(
-            &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
+            &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
             "posts",
-            &zeroship_data_query_builder::value!({}),
+            &zeroship_data_sql::value!({}),
             None,
             None,
             None,
             None,
-            &zeroship_data_query_builder::value!({ "title": { "type": "string" } }),
+            &zeroship_data_sql::value!({ "title": { "type": "string" } }),
             &[],
             true,
         )
@@ -9122,14 +9124,14 @@ fn find_with_soft_delete_filter_hides_soft_deleted_rows_sqlite() {
         assert_eq!(rows.len(), 2, "soft-deleted row hidden by auto-filter");
 
         let q2 = build_find_with_schema_and_unmask_and_soft_delete(
-            &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
+            &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
             "posts",
-            &zeroship_data_query_builder::value!({}),
+            &zeroship_data_sql::value!({}),
             None,
             None,
             None,
             None,
-            &zeroship_data_query_builder::value!({ "title": { "type": "string" } }),
+            &zeroship_data_sql::value!({ "title": { "type": "string" } }),
             &[],
             false,
         )
@@ -9142,16 +9144,16 @@ fn find_with_soft_delete_filter_hides_soft_deleted_rows_sqlite() {
 #[test]
 fn restore_clears_deleted_at_and_bumps_version_sqlite() {
     use zeroship_plugin_db::compile::{
-        build_insert_with_dialect, build_restore_many_with_system_fields,
-        build_soft_delete_many_with_system_fields, SqlDialect, SystemFieldAutoBump,
+        SqlDialect, SystemFieldAutoBump, build_insert_with_dialect,
+        build_restore_many_with_system_fields, build_soft_delete_many_with_system_fields,
     };
 
     run(async {
         let (backend, _dir) = fresh_backend();
         backend.attach_app_file("app_demo").await.unwrap();
-        let schema = zeroship_data_query_builder::value!({ "title": { "type": "string" } });
+        let schema = zeroship_data_sql::value!({ "title": { "type": "string" } });
         let ddl = fixture_table_sql_for(
-            &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
+            &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
             "posts",
             &schema,
             &FkEmission::Inline,
@@ -9166,9 +9168,9 @@ fn restore_clears_deleted_at_and_bumps_version_sqlite() {
             backend.pool_exec(t, &[]).await.unwrap();
         }
 
-        let doc = zeroship_data_query_builder::value!({ "id": "post_rs", "title": "x" });
+        let doc = zeroship_data_sql::value!({ "id": "post_rs", "title": "x" });
         let ins = build_insert_with_dialect(
-            &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
+            &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
             "posts",
             &schema,
             &doc,
@@ -9184,10 +9186,10 @@ fn restore_clears_deleted_at_and_bumps_version_sqlite() {
             ..Default::default()
         };
         let sd = build_soft_delete_many_with_system_fields(
-            &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
+            &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
             "posts",
             &schema,
-            &zeroship_data_query_builder::value!({ "id": "post_rs" }),
+            &zeroship_data_sql::value!({ "id": "post_rs" }),
             SqlDialect::Sqlite,
             &ab,
         )
@@ -9196,10 +9198,10 @@ fn restore_clears_deleted_at_and_bumps_version_sqlite() {
         client.query_values(&sd.sql, p).await.unwrap();
 
         let rs = build_restore_many_with_system_fields(
-            &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
+            &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
             "posts",
             &schema,
-            &zeroship_data_query_builder::value!({ "id": "post_rs" }),
+            &zeroship_data_sql::value!({ "id": "post_rs" }),
             SqlDialect::Sqlite,
             &ab,
         )
@@ -9223,16 +9225,16 @@ fn restore_clears_deleted_at_and_bumps_version_sqlite() {
 #[test]
 fn restore_on_already_live_row_affects_zero_rows_sqlite() {
     use zeroship_plugin_db::compile::{
-        build_insert_with_dialect, build_restore_many_with_system_fields, SqlDialect,
-        SystemFieldAutoBump,
+        SqlDialect, SystemFieldAutoBump, build_insert_with_dialect,
+        build_restore_many_with_system_fields,
     };
 
     run(async {
         let (backend, _dir) = fresh_backend();
         backend.attach_app_file("app_demo").await.unwrap();
-        let schema = zeroship_data_query_builder::value!({ "title": { "type": "string" } });
+        let schema = zeroship_data_sql::value!({ "title": { "type": "string" } });
         let ddl = fixture_table_sql_for(
-            &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
+            &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
             "posts",
             &schema,
             &FkEmission::Inline,
@@ -9247,9 +9249,9 @@ fn restore_on_already_live_row_affects_zero_rows_sqlite() {
             backend.pool_exec(t, &[]).await.unwrap();
         }
 
-        let doc = zeroship_data_query_builder::value!({ "id": "post_live", "title": "x" });
+        let doc = zeroship_data_sql::value!({ "id": "post_live", "title": "x" });
         let ins = build_insert_with_dialect(
-            &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
+            &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
             "posts",
             &schema,
             &doc,
@@ -9265,10 +9267,10 @@ fn restore_on_already_live_row_affects_zero_rows_sqlite() {
             ..Default::default()
         };
         let rs = build_restore_many_with_system_fields(
-            &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
+            &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
             "posts",
             &schema,
-            &zeroship_data_query_builder::value!({ "id": "post_live" }),
+            &zeroship_data_sql::value!({ "id": "post_live" }),
             SqlDialect::Sqlite,
             &ab,
         )
@@ -9290,17 +9292,17 @@ fn restore_on_already_live_row_affects_zero_rows_sqlite() {
 #[test]
 fn soft_delete_then_restore_full_lifecycle_sqlite() {
     use zeroship_plugin_db::compile::{
-        build_find_with_schema_and_unmask_and_soft_delete, build_insert_with_dialect,
-        build_restore_many_with_system_fields, build_soft_delete_many_with_system_fields,
-        SqlDialect, SystemFieldAutoBump,
+        SqlDialect, SystemFieldAutoBump, build_find_with_schema_and_unmask_and_soft_delete,
+        build_insert_with_dialect, build_restore_many_with_system_fields,
+        build_soft_delete_many_with_system_fields,
     };
 
     run(async {
         let (backend, _dir) = fresh_backend();
         backend.attach_app_file("app_demo").await.unwrap();
-        let schema = zeroship_data_query_builder::value!({ "title": { "type": "string" } });
+        let schema = zeroship_data_sql::value!({ "title": { "type": "string" } });
         let ddl = fixture_table_sql_for(
-            &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
+            &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
             "posts",
             &schema,
             &FkEmission::Inline,
@@ -9315,9 +9317,9 @@ fn soft_delete_then_restore_full_lifecycle_sqlite() {
             backend.pool_exec(t, &[]).await.unwrap();
         }
 
-        let doc = zeroship_data_query_builder::value!({ "id": "post_lc", "title": "lifecycle" });
+        let doc = zeroship_data_sql::value!({ "id": "post_lc", "title": "lifecycle" });
         let ins = build_insert_with_dialect(
-            &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
+            &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
             "posts",
             &schema,
             &doc,
@@ -9329,14 +9331,14 @@ fn soft_delete_then_restore_full_lifecycle_sqlite() {
         client.query_values(&ins.sql, p).await.unwrap();
 
         let find_default = build_find_with_schema_and_unmask_and_soft_delete(
-            &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
+            &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
             "posts",
-            &zeroship_data_query_builder::value!({}),
+            &zeroship_data_sql::value!({}),
             None,
             None,
             None,
             None,
-            &zeroship_data_query_builder::value!({ "title": { "type": "string" } }),
+            &zeroship_data_sql::value!({ "title": { "type": "string" } }),
             &[],
             true,
         )
@@ -9349,10 +9351,10 @@ fn soft_delete_then_restore_full_lifecycle_sqlite() {
             ..Default::default()
         };
         let sd = build_soft_delete_many_with_system_fields(
-            &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
+            &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
             "posts",
             &schema,
-            &zeroship_data_query_builder::value!({ "id": "post_lc" }),
+            &zeroship_data_sql::value!({ "id": "post_lc" }),
             SqlDialect::Sqlite,
             &ab,
         )
@@ -9364,14 +9366,14 @@ fn soft_delete_then_restore_full_lifecycle_sqlite() {
         assert!(r.is_empty(), "soft-deleted row hidden");
 
         let find_inc = build_find_with_schema_and_unmask_and_soft_delete(
-            &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
+            &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
             "posts",
-            &zeroship_data_query_builder::value!({}),
+            &zeroship_data_sql::value!({}),
             None,
             None,
             None,
             None,
-            &zeroship_data_query_builder::value!({ "title": { "type": "string" } }),
+            &zeroship_data_sql::value!({ "title": { "type": "string" } }),
             &[],
             false,
         )
@@ -9380,10 +9382,10 @@ fn soft_delete_then_restore_full_lifecycle_sqlite() {
         assert_eq!(r.len(), 1, "include_deleted reveals it");
 
         let rs = build_restore_many_with_system_fields(
-            &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
+            &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
             "posts",
             &schema,
-            &zeroship_data_query_builder::value!({ "id": "post_lc" }),
+            &zeroship_data_sql::value!({ "id": "post_lc" }),
             SqlDialect::Sqlite,
             &ab,
         )
@@ -9408,16 +9410,16 @@ fn soft_delete_then_restore_full_lifecycle_sqlite() {
 #[test]
 fn soft_delete_many_sets_deleted_at_on_all_matching_live_rows_sqlite() {
     use zeroship_plugin_db::compile::{
-        build_insert_with_dialect, build_soft_delete_many_with_system_fields, SqlDialect,
-        SystemFieldAutoBump,
+        SqlDialect, SystemFieldAutoBump, build_insert_with_dialect,
+        build_soft_delete_many_with_system_fields,
     };
 
     run(async {
         let (backend, _dir) = fresh_backend();
         backend.attach_app_file("app_demo").await.unwrap();
-        let schema = zeroship_data_query_builder::value!({ "author": { "type": "string" }, "title": { "type": "string" } });
+        let schema = zeroship_data_sql::value!({ "author": { "type": "string" }, "title": { "type": "string" } });
         let ddl = fixture_table_sql_for(
-            &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
+            &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
             "posts",
             &schema,
             &FkEmission::Inline,
@@ -9439,11 +9441,9 @@ fn soft_delete_many_sets_deleted_at_on_all_matching_live_rows_sqlite() {
             ("post_b1", "usr_b"),
             ("post_b2", "usr_b"),
         ] {
-            let doc =
-                zeroship_data_query_builder::value!({ "id": id, "author": author, "title": id });
+            let doc = zeroship_data_sql::value!({ "id": id, "author": author, "title": id });
             let ins = build_insert_with_dialect(
-                &zeroship_data_query_builder::SchemaName::new("app_demo")
-                    .expect("fixture schema name"),
+                &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
                 "posts",
                 &schema,
                 &doc,
@@ -9467,10 +9467,10 @@ fn soft_delete_many_sets_deleted_at_on_all_matching_live_rows_sqlite() {
             ..Default::default()
         };
         let sd = build_soft_delete_many_with_system_fields(
-            &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
+            &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
             "posts",
             &schema,
-            &zeroship_data_query_builder::value!({ "author": "usr_a" }),
+            &zeroship_data_sql::value!({ "author": "usr_a" }),
             SqlDialect::Sqlite,
             &ab,
         )
@@ -9507,12 +9507,12 @@ fn soft_delete_many_sets_deleted_at_on_all_matching_live_rows_sqlite() {
 fn purge_path_uses_hard_delete_sql_unchanged_sqlite() {
     use zeroship_plugin_db::compile::build_delete_one;
 
-    let schema = zeroship_data_query_builder::value!({ "title": { "type": "string" } });
+    let schema = zeroship_data_sql::value!({ "title": { "type": "string" } });
     let q = build_delete_one(
-        &zeroship_data_query_builder::SchemaName::new("app1").expect("fixture schema name"),
+        &zeroship_data_sql::SchemaName::new("app1").expect("fixture schema name"),
         "posts",
         &schema,
-        &zeroship_data_query_builder::value!({ "id": "x" }),
+        &zeroship_data_sql::value!({ "id": "x" }),
     )
     .unwrap();
     assert!(q.sql.starts_with("DELETE FROM"));
@@ -10775,7 +10775,7 @@ fn an_app_files_write_upgrade_is_plain_busy_because_it_is_not_in_wal() {
 ///           `CURRENT_TIMESTAMP` -> "YYYY-MM-DD HH:MM:SS", SPACE-separated.
 ///   row B - the runtime's own INSERT builder, which since `bcd639b23` converts a
 ///           Unix-ms bind via `strftime('%Y-%m-%dT%H:%M:%fZ', ...)`
-///           (`zeroship-data-query-builder/src/compile.rs:3085`) -> "YYYY-MM-DDTHH:MM:SS.sssZ",
+///           (`zeroship-data-sql/src/compile.rs:3085`) -> "YYYY-MM-DDTHH:MM:SS.sssZ",
 ///           with a T.
 ///
 /// Row B is stamped one hour EARLIER than row A, so ascending order must return B
@@ -10793,11 +10793,11 @@ fn an_app_files_write_upgrade_is_plain_busy_because_it_is_not_in_wal() {
 ///   `ORDER BY occurred_at ASC` returned `a_default` first.
 /// Both emitters now spell it one way - `synth_now()`
 /// (`zeroship-migrate-sqlite/src/dml.rs`) and `SQLITE_NOW_EXPR`
-/// (`zeroship-data-query-builder/src/compile.rs`). Reverting either one alone turns this red
+/// (`zeroship-data-sql/src/compile.rs`). Reverting either one alone turns this red
 /// again, which is why the test drives both.
 #[test]
 fn dbbind134_sqlite_timestamp_spellings_invert_same_day_ordering() {
-    use zeroship_plugin_db::compile::{build_insert_with_dialect, SqlDialect};
+    use zeroship_plugin_db::compile::{SqlDialect, build_insert_with_dialect};
 
     run(async {
         let app = "t134_spelling";
@@ -10809,9 +10809,9 @@ fn dbbind134_sqlite_timestamp_spellings_invert_same_day_ordering() {
         // this test wrote `DEFAULT CURRENT_TIMESTAMP` as a literal, which meant
         // it could never observe a change to the emitter it claimed to test -
         // the comment asserted a mechanism the code did not drive.
-        let schema = zeroship_data_query_builder::value!({ "occurred_at": { "type": "date" } });
+        let schema = zeroship_data_sql::value!({ "occurred_at": { "type": "date" } });
         let ddl = fixture_table_sql_for(
-            &zeroship_data_query_builder::SchemaName::new(app).expect("fixture schema name"),
+            &zeroship_data_sql::SchemaName::new(app).expect("fixture schema name"),
             coll,
             &schema,
             &FkEmission::Inline,
@@ -10849,12 +10849,12 @@ fn dbbind134_sqlite_timestamp_spellings_invert_same_day_ordering() {
 
         // Row B: through the RUNTIME's builder, which converts a Unix-ms bind
         // for a declared timestamp column.
-        let doc = zeroship_data_query_builder::value!({
+        let doc = zeroship_data_sql::value!({
             "id": "b_bind",
             "occurred_at": 1_756_700_000_000_i64,
         });
         let bq = build_insert_with_dialect(
-            &zeroship_data_query_builder::SchemaName::new(app).expect("fixture schema name"),
+            &zeroship_data_sql::SchemaName::new(app).expect("fixture schema name"),
             coll,
             &schema,
             &doc,

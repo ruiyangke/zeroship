@@ -96,7 +96,7 @@ while IFS=$'\t' read -r package gated; do
     exit 1
   fi
 done < <(printf '%s' "$metadata" | jq -r '
-  .packages[] | select(.name == "zeroship-data-engine" or .name == "zeroship-plugin-db") |
+  .packages[] | select(.name == "zeroship-data-orm" or .name == "zeroship-plugin-db") |
   [.name, ((.features | has("live-db-tests")) or
     any(.targets[]; ((.["required-features"] // []) | length) > 0))] | @tsv')
 gate_arm ordinary_database_targets "$checked" 2 || exit 1
@@ -233,7 +233,7 @@ echo "    PG_TEST_URL=${PG_TEST_URL%%\?*}"
 suite_rc=0
 : > "$SUITE_LOG"
 # Ordinary package tests include every database target and enable their helpers.
-cargo test -p zeroship-data-engine -p zeroship-plugin-db --no-fail-fast \
+cargo test -p zeroship-data-orm -p zeroship-plugin-db --no-fail-fast \
   -- --nocapture --test-threads=1 2>&1 | tee -a "$SUITE_LOG"
 suite_rc=${PIPESTATUS[0]}
 

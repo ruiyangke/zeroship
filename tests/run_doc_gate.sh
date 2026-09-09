@@ -112,7 +112,7 @@
 # First, the decision was not open, it was already made HERE: this gate builds
 # both configurations and demands zero in each, so neither is privileged, and
 # a cfg-gated internal must be a code span because that is the only construct
-# correct in both. The note at crates/zeroship-data-engine/src/backend/mod.rs that framed
+# correct in both. The note at crates/zeroship-data-orm/src/backend/mod.rs that framed
 # it as undecided predates this file and said so explicitly ("zeroship has no
 # doc gate today, so nothing currently encodes either answer").
 #

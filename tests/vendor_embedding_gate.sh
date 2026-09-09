@@ -118,7 +118,7 @@ vendor_hit_lines() {
 # ignore this gate. The roots below are the crates the data-plane split requires
 # to be vendor-free, and adding one is a design decision, not housekeeping.
 #
-# `zeroship-data-engine/src` JOINED THE ROOTS ON 2026-09-03, in the commit that
+# `zeroship-data-orm/src` JOINED THE ROOTS ON 2026-09-03, in the commit that
 # created it. It had to: four of the six baseline entries below were files that
 # left `zeroship-plugin-db/src` that day, and a root list pinned to the old tree
 # would have left every one of them unscanned while their baseline keys went
@@ -129,9 +129,8 @@ vendor_hit_lines() {
 # entries are baselined rather than absent.
 ROOTS="
 crates/zeroship-plugin-db/src
-crates/zeroship-data-engine/src
-crates/zeroship-data-query-builder/src
-crates/zeroship-data-core/src
+crates/zeroship-data-orm/src
+crates/zeroship-data-sql/src
 "
 
 # Files that are ALLOWED to name a vendor: the vendor tiers themselves, plus the
@@ -150,6 +149,7 @@ file_key() {
 
 is_vendor_tier() {
   case "$(file_key "$1")" in
+    zeroship-data-orm/backend/postgres/*|zeroship-data-orm/backend/sqlite/*) return 0 ;;
     zeroship-plugin-db/backend/postgres.rs) return 0 ;;
     zeroship-plugin-db/backend/pg_*.rs|zeroship-plugin-db/backend/sqlite/*) return 0 ;;
     zeroship-plugin-db/replication.rs|zeroship-plugin-db/slot_reaper.rs) return 0 ;;
@@ -189,14 +189,12 @@ key_to_path() {
 #
 # RE-KEYED 2026-09-03: FOUR OF THE SIX CHANGED CRATE, NONE CHANGED SUBSTANCE.
 # `exec.rs`, `backend/cancel.rs`, `auth/bootstrap.rs` and `tx_lanes.rs` are the
-# ENGINE tier and left for `zeroship-data-engine`. This is the third occurrence
+# ENGINE tier and left for `zeroship-data-orm`. This is the third occurrence
 # of the "a move relocates an entry, it does not clear one" case the closing
 # note below describes, and the first where four moved at once. `lib.rs` and
 # `service.rs` are the adapter's and stayed.
 BASELINE_FILES="
-zeroship-data-engine/backend/cancel.rs
-zeroship-data-engine/auth/bootstrap.rs
-zeroship-data-engine/tx_lanes.rs
+zeroship-data-orm/auth/bootstrap.rs
 zeroship-plugin-db/lib.rs
 zeroship-plugin-db/service.rs
 "
@@ -284,7 +282,7 @@ in_baseline() {
 # (tests/decision_four_gate.sh) had already fixed: the walk's `#[cfg(` arm
 # matched ANYWHERE in the line and was tested BEFORE the comment arm, so a
 # COMMENT that merely QUOTED `#[cfg(test)]` above a `mod x;` declaration read as
-# a gate. It cost this gate two files - `zeroship-data-engine/backend/mod.rs`
+# a gate. It cost this gate two files - `zeroship-data-orm/backend/mod.rs`
 # and `crud/unmask.rs`, each disabled by prose written to explain a visibility
 # decision. Neither names a vendor, so nothing was concealed; the two gates
 # simply disagreed about which files exist to rule on, which is the shape a

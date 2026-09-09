@@ -2,7 +2,7 @@
  * **P5.5 PR 7** — per-query unmask hint shape pin.
  *
  * The runtime side (the `dispatch_find_one` / `dispatch_find` glue
- * in `crates/zeroship-data-engine/src/crud/mod.rs`) consumes `opts.unmask` /
+ * in `crates/zeroship-data-orm/src/crud/mod.rs`) consumes `opts.unmask` /
  * `opts.actor` / `opts.unmaskReason` from the JS-facing find opts.
  * These tests pin the JS-side opts shape so a future SDK refactor
  * doesn't silently drop the fields before they reach the native

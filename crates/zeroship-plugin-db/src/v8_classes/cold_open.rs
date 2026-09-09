@@ -58,9 +58,9 @@
 
 use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
-use zeroship_data_core::binding::DbBinding;
+use zeroship_data_orm::binding::DbBinding;
 use zeroship_runtime::state::{OpErrorKind, OpResult, ResolveValue};
-use zeroship_runtime::{init_v8, RuntimeState, SharedState};
+use zeroship_runtime::{RuntimeState, SharedState, init_v8};
 
 macro_rules! cold_isolate {
     (let $scope:ident, let $state:ident) => {
@@ -319,7 +319,7 @@ fn a_query_hint_carrying_find_opens_the_cold_isolates_backend() {
     crate::cache_schema_for_tests(
         app_id,
         "users",
-        zeroship_data_query_builder::value!({
+        zeroship_data_sql::value!({
             "id":  { "type": "string" },
             "ssn": {
                 "type": "string",

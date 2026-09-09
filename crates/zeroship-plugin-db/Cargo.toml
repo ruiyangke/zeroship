@@ -24,22 +24,10 @@ zeroship-runtime-macros = { workspace = true }
 # "new Cargo dep" disclosure rule.
 zeroship-core = { workspace = true }
 # Runtime SQL compilation, catalog metadata and protection sentinel decoding.
-zeroship-data-query-builder = { workspace = true }
-# The data plane's domain tier. `DbError` and `DbBinding` moved out of this
-# crate; what stayed behind is the ADAPTER's half of the error hierarchy, the
-# `ToOpError` lowering in `src/op_error.rs`.
-zeroship-data-core = { workspace = true }
-zeroship-data-postgres = { workspace = true }
-zeroship-data-sqlite = { workspace = true }
-# The ENGINE tier, extracted from this crate on 2026-09-03: `crud`,
-# `transaction`, `exec`, `backend`, `backend_handle`, `backend_selection`,
-# `tx_route`, `tx_lanes`, `metrics`, `system_shape_charter`, `descriptor` and
-# `auth`. `src/lib.rs` re-exports every one of them under the same visibility
-# ladder they had as modules, so both this crate's own files and its 12
-# integration targets resolve `crate::crud::…` / `zeroship_plugin_db::exec::…`
-# unchanged. The edge runs one way only, and this manifest is where that is
-# enforced: `zeroship-data-engine` does not name this crate in either table.
-zeroship-data-engine = { workspace = true }
+zeroship-data-sql = { workspace = true }
+# The ORM owns data behavior and built-in drivers. The adapter owns V8 and
+# worker lifecycle; the ORM never depends on this crate.
+zeroship-data-orm = { workspace = true }
 # The operator charter is the worker's assignment authority, and it must not
 # arrive from the creator-authored descriptor. `zeroship-migrate-policy` is a
 # leaf (serde/toml/sha2/hmac/hex/thiserror/schemars and nothing of ours), so
@@ -122,21 +110,8 @@ tempfile = { workspace = true }
 [dev-dependencies]
 # Integration helpers are automatic in test builds; database tests are required.
 zeroship-plugin-db = { path = ".", features = ["test-helpers"] }
-# `DbBinding::cold_start` is gated behind `test-helpers` in the domain tier: it
-# builds a deploy identity from an app id, and shipping that constructor in a
-# release binary would retire the check that nothing in production does so.
-zeroship-data-core = { workspace = true, features = ["test-helpers"] }
-zeroship-data-postgres = { workspace = true, features = ["test-helpers"] }
-zeroship-data-sqlite = { workspace = true, features = ["test-helpers"] }
-# Same reason, one tier up: this crate's own `#[cfg(test)]` unit tests call
-# `zeroship_data_engine::backend_selection::new_sqlite_backend` (from
-# `context.rs`) and `exec::ambient_route_for_tests`, both gated
-# `cfg(any(test, feature = "test-helpers"))` in the engine - where `test` is the
-# ENGINE's test build, never this crate's. The feature is what carries.
-#
-# This also cited `reset_engine_for_tests`, which no file here has ever called.
-# That symbol is now plain `cfg(test)` in the engine, private to it.
-zeroship-data-engine = { workspace = true, features = ["test-helpers"] }
+# Integration fixtures need test bindings and low-level adapter access.
+zeroship-data-orm = { workspace = true, features = ["test-helpers"] }
 # The DbPlan IR. A DEV dependency on purpose: nothing in this crate's `src/`
 # uses it yet, and declaring it a normal dependency would say otherwise. The
 # search family's lowering is exercised by `tests/search_ir_live.rs`, which
@@ -197,7 +172,7 @@ zeroship-migrate-sqlite = { workspace = true }
 # The SAME argument again, for the PROTECTION-FLOOR fixture. The floor's input is
 # the mask/encryption sentinel a creator table carries, and in production that
 # sentinel is written by the migration engine - never by
-# `zeroship_data_query_builder::compile::build_create_table_with_fks`, whose only callers are
+# `zeroship_data_sql::compile::build_create_table_with_fks`, whose only callers are
 # tests (measured: zero `src` call sites outside its own module). A fixture that
 # builds its table with the data plane's emitter therefore cannot see a
 # disagreement between the two, which is exactly the defect that shipped. The
@@ -242,10 +217,7 @@ harness = false
 # The same symbols are visible to the in-crate unit tests via
 # `#[cfg(test)]` so `cargo test --lib` does NOT need this feature.
 test-helpers = [
-    "zeroship-data-core/test-helpers",
-    "zeroship-data-postgres/test-helpers",
-    "zeroship-data-sqlite/test-helpers",
-    "zeroship-data-engine/test-helpers",
+    "zeroship-data-orm/test-helpers",
 ]
 # Ordinary cargo test runs every integration target. The shared database
 # fixtures stay together; distributed CDC retains its own process.

@@ -41,14 +41,14 @@ use std::cell::Cell;
 
 use zeroship_runtime::state::{OpError, OpResult, ResolveValue, SharedState};
 
-use zeroship_data_core::binding::DbBinding;
-use zeroship_data_core::error::{DbError, IsolationLevel};
 use crate::op_error::ToOpError;
 use crate::transaction::{
-    exec_begin_or_savepoint, exec_settle, reducer, SettleOutcome, TxAdmission,
+    SettleOutcome, TxAdmission, exec_begin_or_savepoint, exec_settle, reducer,
 };
 use crate::v8_bridge::runtime_state;
 use crate::v8_classes::collection::mint_collection;
+use zeroship_data_orm::binding::DbBinding;
+use zeroship_data_orm::error::{DbError, IsolationLevel};
 
 /// Mint the collections-only `tx` view for a `Db.transaction(fn)`
 /// callback.
@@ -94,7 +94,6 @@ pub(crate) fn mint_tx_view<'s>(
 
     Ok(view)
 }
-
 
 // ---------------------------------------------------------------------------
 // The V8 half of `Db.transaction(fn)`
@@ -393,7 +392,10 @@ fn run_begin_continuation(
             // Callback threw synchronously → straight to rollback, then
             // reject the outer with the captured exception.
             let op_err = exc.map_or_else(
-                || zeroship_data_core::error::DbError::internal("db.transaction: callback threw").to_op_error(),
+                || {
+                    zeroship_data_orm::error::DbError::internal("db.transaction: callback threw")
+                        .to_op_error()
+                },
                 |g| {
                     let local = v8::Local::new(scope, &g);
                     zeroship_runtime::state::OpError::js_value(
@@ -641,7 +643,7 @@ mod tests {
 
     use zeroship_runtime::init_v8;
 
-    use zeroship_data_core::binding::DbBinding;
+    use zeroship_data_orm::binding::DbBinding;
 
     fn assert_absent(scope: &mut v8::PinScope, obj: v8::Local<v8::Object>, name: &str) {
         let key = v8::String::new(scope, name).unwrap();
@@ -719,7 +721,7 @@ mod tests {
     // They rule on `build_settle_resolve_value`, which is defined in THIS file
     // and lowers an engine `SettleOutcome` into a runtime `ResolveValue`. They
     // could not travel with the module whose outcomes they check:
-    // `zeroship-data-engine` declares neither `v8` nor `zeroship-runtime`, by
+    // `zeroship-data-orm` declares neither `v8` nor `zeroship-runtime`, by
     // design, so `ResolveValue` is not nameable there.
     // ---------------------------------------------------------------------
 
@@ -732,7 +734,7 @@ mod tests {
     #[test]
     fn a_settles_own_code_reaches_the_creator_unwrapped() {
         use crate::transaction::SettleOutcome;
-        use zeroship_data_core::error::DbError;
+        use zeroship_data_orm::error::DbError;
         use zeroship_runtime::state::ResolveValue;
 
         for outcome in [

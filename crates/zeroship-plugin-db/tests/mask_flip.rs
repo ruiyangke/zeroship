@@ -47,18 +47,18 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use compio_postgres::{NoTls, Pool};
-use zeroship_data_core::binding::DbBinding;
-use zeroship_data_core::error::DbError;
-use zeroship_data_query_builder::value::{value, Value};
+use zeroship_data_orm::binding::DbBinding;
+use zeroship_data_orm::error::DbError;
+use zeroship_data_sql::value::{Value, value};
 use zeroship_plugin_db::compile::{
     build_aggregate, build_distinct, build_find_with_schema, build_insert, build_where,
     raw_column_name, read_surface_columns, validate_field_name,
 };
 use zeroship_plugin_db::crud::mask_policy::dispatch_set_mask_policy;
 use zeroship_plugin_db::crud::unmask::{
-    audit_query_hint_granted, authorize_query_hint, dispatch_bulk_unmask, dispatch_unmask,
-    dispatch_unmask_for_query, parse_args, parse_bulk_args, BulkUnmaskArgs, BulkUnmaskItem,
-    UnmaskFieldArgs,
+    BulkUnmaskArgs, BulkUnmaskItem, UnmaskFieldArgs, audit_query_hint_granted,
+    authorize_query_hint, dispatch_bulk_unmask, dispatch_unmask, dispatch_unmask_for_query,
+    parse_args, parse_bulk_args,
 };
 
 fn test_url() -> String {
@@ -186,7 +186,7 @@ async fn fixture(pool: &Rc<Pool>, url: &str, app: &str, collection: &str, schema
         .await
         .unwrap();
     let ddl = fixture_table_sql(
-        &zeroship_data_query_builder::SchemaName::new(app).expect("fixture schema name"),
+        &zeroship_data_sql::SchemaName::new(app).expect("fixture schema name"),
         collection,
         schema,
         &FkEmission::Inline,
@@ -244,7 +244,7 @@ async fn insert_through_the_pipeline(
         .unwrap_or_else(|| panic!("the write pipeline must mint an id: {}", docs[0]))
         .to_string();
     let bq = build_insert(
-        &zeroship_data_query_builder::SchemaName::new(app).expect("fixture schema name"),
+        &zeroship_data_sql::SchemaName::new(app).expect("fixture schema name"),
         collection,
         schema,
         &docs[0],
@@ -256,10 +256,13 @@ async fn insert_through_the_pipeline(
         bq.sql,
     );
     let param_refs = &bq.params;
-    let rows =
-        zeroship_data_postgres::params::query(&pool.acquire().await.unwrap(), &bq.sql, param_refs)
-            .await
-            .unwrap_or_else(|e| panic!("insert must apply: {e}\n{}", bq.sql));
+    let rows = zeroship_data_orm::backend::postgres::params::query(
+        &pool.acquire().await.unwrap(),
+        &bq.sql,
+        param_refs,
+    )
+    .await
+    .unwrap_or_else(|e| panic!("insert must apply: {e}\n{}", bq.sql));
     Inserted {
         id,
         rows: rows.iter().map(row_to_value).collect(),
@@ -268,7 +271,7 @@ async fn insert_through_the_pipeline(
 
 /// Every column of a returned row as a JSON string value, keyed by column name.
 fn row_to_value(row: &compio_postgres::Row) -> Value {
-    let mut map = zeroship_data_query_builder::value::Map::new();
+    let mut map = zeroship_data_sql::value::Map::new();
     for (i, column) in row.columns().iter().enumerate() {
         let value: Option<String> = row.try_get(i).unwrap_or(None);
         map.insert(
@@ -281,7 +284,7 @@ fn row_to_value(row: &compio_postgres::Row) -> Value {
 
 async fn run_find(pool: &Rc<Pool>, app: &str, filter: &Value, schema: &Value) -> Vec<Value> {
     let bq = build_find_with_schema(
-        &zeroship_data_query_builder::SchemaName::new(app).expect("fixture schema name"),
+        &zeroship_data_sql::SchemaName::new(app).expect("fixture schema name"),
         "people",
         filter,
         Some(50),
@@ -292,10 +295,13 @@ async fn run_find(pool: &Rc<Pool>, app: &str, filter: &Value, schema: &Value) ->
     )
     .expect("find builder");
     let param_refs = &bq.params;
-    let rows =
-        zeroship_data_postgres::params::query(&pool.acquire().await.unwrap(), &bq.sql, param_refs)
-            .await
-            .unwrap();
+    let rows = zeroship_data_orm::backend::postgres::params::query(
+        &pool.acquire().await.unwrap(),
+        &bq.sql,
+        param_refs,
+    )
+    .await
+    .unwrap();
     rows.iter().map(row_to_value).collect()
 }
 
@@ -456,7 +462,7 @@ async fn a_range_filter_on_a_masked_column_cannot_narrow_the_plaintext() {
     // column sorts by the mask, so a `limit 1` cannot name the largest SSN.
     let ordered = {
         let bq = build_find_with_schema(
-            &zeroship_data_query_builder::SchemaName::new(app).expect("fixture schema name"),
+            &zeroship_data_sql::SchemaName::new(app).expect("fixture schema name"),
             "people",
             &value!({}),
             Some(1),
@@ -472,9 +478,13 @@ async fn a_range_filter_on_a_masked_column_cannot_narrow_the_plaintext() {
             bq.sql,
         );
         let param_refs = &bq.params;
-        zeroship_data_postgres::params::query(&pool.acquire().await.unwrap(), &bq.sql, param_refs)
-            .await
-            .unwrap()
+        zeroship_data_orm::backend::postgres::params::query(
+            &pool.acquire().await.unwrap(),
+            &bq.sql,
+            param_refs,
+        )
+        .await
+        .unwrap()
     };
     assert_eq!(ordered.len(), 1, "the ordered query still returns a row");
 
@@ -554,7 +564,7 @@ async fn the_real_value_is_still_stored_and_still_reachable_by_the_audited_path(
 
     let result = zeroship_plugin_db::crud::unmask::dispatch_unmask(
         &unmask_route(app).await,
-        &zeroship_data_core::binding::DbBinding::cold_start(app),
+        &zeroship_data_orm::binding::DbBinding::cold_start(app),
         zeroship_plugin_db::crud::unmask::UnmaskFieldArgs {
             collection: "people".to_string(),
             row_pk: person.id.clone(),
@@ -1372,7 +1382,7 @@ fn bulk_args(row_pk: &str, columns: &[&str], actor: Option<Value>) -> BulkUnmask
 ///
 /// That second half is the property worth binding. The all-or-nothing decision
 /// is `if !unauthorized.is_empty()` at
-/// `crates/zeroship-data-engine/src/crud/unmask.rs:1093`, which returns before
+/// `crates/zeroship-data-orm/src/crud/unmask.rs:1093`, which returns before
 /// the decrypt loop at `:1119` runs at all, and the reason is in that
 /// function's own doc: a partial grant leaks the authorisation verdict through
 /// which columns came back populated, which is a read oracle over the policy
@@ -1578,7 +1588,7 @@ async fn a_bulk_unmask_batch_with_one_forbidden_column_is_refused_whole() {
     // Every arm above carries exactly ONE unauthorized pair, and a fence that
     // broke out of the loop on the first denial would satisfy all of them: one
     // audit row, one refusal, same code. The loop at
-    // `crates/zeroship-data-engine/src/crud/unmask.rs:1080-1089` has no `break`
+    // `crates/zeroship-data-orm/src/crud/unmask.rs:1080-1089` has no `break`
     // and no early return - it pushes every denied pair and refuses once at
     // `:1093` - and TWO observable things follow that a short-circuit would get
     // wrong. The refusal counts the pairs (`unauthorized.len()` at `:1107`), so
@@ -1678,9 +1688,9 @@ async fn a_bulk_unmask_batch_with_one_forbidden_column_is_refused_whole() {
 /// see - which would conceal the authorisation failure from the caller.
 ///
 /// The all-or-nothing decision is the same `if !unauthorized.is_empty()` shape
-/// as the batch, at `crates/zeroship-data-engine/src/crud/unmask.rs:1289`.
+/// as the batch, at `crates/zeroship-data-orm/src/crud/unmask.rs:1289`.
 /// `dispatch_find` calls this at
-/// `crates/zeroship-data-engine/src/crud/mod.rs:686`, before
+/// `crates/zeroship-data-orm/src/crud/mod.rs:686`, before
 /// `build_find_with_schema_and_unmask_and_soft_delete_with_dialect`, so a
 /// refusal here means the unmasking SELECT is never issued at all.
 ///
@@ -1972,7 +1982,7 @@ async fn a_query_hint_reads_the_column_its_alias_resolved_to() {
 
 /// **Outward.** No row-returning write verb may hand back the raw column.
 ///
-/// The twelve write sites in `zeroship-data-query-builder` emitted `RETURNING *` - every
+/// The twelve write sites in `zeroship-data-sql` emitted `RETURNING *` - every
 /// physical column, never passing through the projection allowlist, which was
 /// SELECT-side only. Without the read pipeline's row-surface stage, `insert`
 /// returned the real value under a key the generated `Row<S>` type does not
@@ -2135,7 +2145,7 @@ fn the_raw_column_is_refused_on_every_inbound_surface() {
             // against the same declared shape.
             "aggregate $match",
             build_aggregate(
-                &zeroship_data_query_builder::SchemaName::new("app1").expect("fixture schema name"),
+                &zeroship_data_sql::SchemaName::new("app1").expect("fixture schema name"),
                 "people",
                 &value!([{ "$match": { (raw.clone()): "x" } }]),
                 &schema,
@@ -2145,7 +2155,7 @@ fn the_raw_column_is_refused_on_every_inbound_surface() {
         (
             "select",
             build_find_with_schema(
-                &zeroship_data_query_builder::SchemaName::new("app1").expect("fixture schema name"),
+                &zeroship_data_sql::SchemaName::new("app1").expect("fixture schema name"),
                 "people",
                 &value!({}),
                 Some(1),
@@ -2159,7 +2169,7 @@ fn the_raw_column_is_refused_on_every_inbound_surface() {
         (
             "orderBy",
             build_find_with_schema(
-                &zeroship_data_query_builder::SchemaName::new("app1").expect("fixture schema name"),
+                &zeroship_data_sql::SchemaName::new("app1").expect("fixture schema name"),
                 "people",
                 &value!({}),
                 Some(1),
@@ -2173,7 +2183,7 @@ fn the_raw_column_is_refused_on_every_inbound_surface() {
         (
             "$group.by",
             build_aggregate(
-                &zeroship_data_query_builder::SchemaName::new("app1").expect("fixture schema name"),
+                &zeroship_data_sql::SchemaName::new("app1").expect("fixture schema name"),
                 "people",
                 &value!([{ "$group": { "by": [raw.clone()] } }]),
                 &schema,
@@ -2183,7 +2193,7 @@ fn the_raw_column_is_refused_on_every_inbound_surface() {
         (
             "distinct",
             build_distinct(
-                &zeroship_data_query_builder::SchemaName::new("app1").expect("fixture schema name"),
+                &zeroship_data_sql::SchemaName::new("app1").expect("fixture schema name"),
                 "people",
                 &raw,
                 &value!({}),
@@ -2207,26 +2217,30 @@ fn the_raw_column_is_refused_on_every_inbound_surface() {
     // The control: the LOGICAL name is ACCEPTED on those same surfaces. Without
     // it, a validator that refused everything would pass all seven above.
     assert!(build_where(&value!({ "ssn": "x" }), &mut Vec::new(), &schema).is_ok());
-    assert!(build_distinct(
-        &zeroship_data_query_builder::SchemaName::new("app1").expect("fixture schema name"),
-        "people",
-        "ssn",
-        &value!({}),
-        &schema
-    )
-    .is_ok());
+    assert!(
+        build_distinct(
+            &zeroship_data_sql::SchemaName::new("app1").expect("fixture schema name"),
+            "people",
+            "ssn",
+            &value!({}),
+            &schema
+        )
+        .is_ok()
+    );
     assert!(validate_field_name("ssn").is_ok());
-    assert!(build_find_with_schema(
-        &zeroship_data_query_builder::SchemaName::new("app1").expect("fixture schema name"),
-        "people",
-        &value!({}),
-        Some(1),
-        None,
-        Some(&value!({ "ssn": 1 })),
-        Some(&value!(["ssn"])),
-        &schema,
-    )
-    .is_ok());
+    assert!(
+        build_find_with_schema(
+            &zeroship_data_sql::SchemaName::new("app1").expect("fixture schema name"),
+            "people",
+            &value!({}),
+            Some(1),
+            None,
+            Some(&value!({ "ssn": 1 })),
+            Some(&value!(["ssn"])),
+            &schema,
+        )
+        .is_ok()
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -2246,7 +2260,7 @@ fn the_raw_column_is_refused_on_every_inbound_surface() {
 /// over-delivers, which is the bias `read_set` already declares.
 #[test]
 fn a_masked_predicate_is_lowered_for_the_change_stream() {
-    use zeroship_plugin_db::read_set::{normalise_filter, Predicate, PredicateOp};
+    use zeroship_plugin_db::read_set::{Predicate, PredicateOp, normalise_filter};
     let schema = flip_schema();
 
     let Some(Predicate::All(conjuncts)) =
@@ -2418,7 +2432,7 @@ async fn a_unique_masked_field_admits_rows_that_share_a_mask() {
     // implicit transaction `batch_execute` uses, so the fixture's DDL carries
     // the table alone. Apply the index the platform would build.
     for spec in schema_fixture::fixture_indexes(
-        &zeroship_data_query_builder::SchemaName::new(app).expect("fixture schema name"),
+        &zeroship_data_sql::SchemaName::new(app).expect("fixture schema name"),
         "people",
         &schema,
     )
@@ -2489,17 +2503,20 @@ async fn a_unique_masked_field_admits_rows_that_share_a_mask() {
         .await
         .expect("write pipeline");
     let bq = build_insert(
-        &zeroship_data_query_builder::SchemaName::new(app).expect("fixture schema name"),
+        &zeroship_data_sql::SchemaName::new(app).expect("fixture schema name"),
         "people",
         &schema,
         &docs[0],
     )
     .unwrap();
     let param_refs = &bq.params;
-    let err =
-        zeroship_data_postgres::params::query(&pool.acquire().await.unwrap(), &bq.sql, param_refs)
-            .await
-            .expect_err("a duplicate REAL value must still be refused");
+    let err = zeroship_data_orm::backend::postgres::params::query(
+        &pool.acquire().await.unwrap(),
+        &bq.sql,
+        param_refs,
+    )
+    .await
+    .expect_err("a duplicate REAL value must still be refused");
     assert!(
         format!("{err:?}").contains("23505") || format!("{err:?}").contains("unique"),
         "expected a unique violation on the raw column, got {err:?}",
@@ -2776,7 +2793,7 @@ fn confined_ceiling_for(app_uuid: &uuid::Uuid) -> zeroship_migrate_policy::Effec
 /// Create `<app>.<collection>` the way PRODUCTION creates a creator table.
 ///
 /// [`fixture`] renders its DDL with the DATA PLANE's emitter,
-/// `zeroship_data_query_builder::compile::build_create_table_with_fks`, whose only callers are
+/// `zeroship_data_sql::compile::build_create_table_with_fks`, whose only callers are
 /// tests (measured 2026-09-04: no `src` call site outside its own module in any
 /// crate). Every creator table that exists on the platform is instead rendered by
 /// the MIGRATION ENGINE and applied by `zeroship-migrate-server`. A protection
@@ -2893,9 +2910,9 @@ async fn a_migration_engine_built_table_refuses_a_mask_downgrade() {
         .expect("the engine must attach a mask sentinel to the masked column");
     assert_eq!(
         stored,
-        zeroship_data_query_builder::mask_codec::build_mask_sentinel(
-            zeroship_data_query_builder::catalog::MaskKind::Full,
-            zeroship_data_query_builder::catalog::Classification::Pci,
+        zeroship_data_sql::mask_codec::build_mask_sentinel(
+            zeroship_data_sql::catalog::MaskKind::Full,
+            zeroship_data_sql::catalog::Classification::Pci,
         ),
         "the migration engine writes the protection record and the data plane \
          reads it; a spelling only one of them knows is a fence with no input",
@@ -3003,11 +3020,11 @@ async fn a_migration_engine_built_table_refuses_an_encryption_downgrade() {
         .expect("the engine must attach an encryption sentinel to the encrypted column");
     assert_eq!(
         stored,
-        zeroship_data_query_builder::mask_codec::build_encryption_sentinel(
-            &zeroship_data_query_builder::catalog::EncryptionMeta {
-                mode: zeroship_data_query_builder::descriptors::EncryptionMode::Randomised,
+        zeroship_data_sql::mask_codec::build_encryption_sentinel(
+            &zeroship_data_sql::catalog::EncryptionMeta {
+                mode: zeroship_data_sql::descriptors::EncryptionMode::Randomised,
                 key_id: "k1".to_string(),
-                wraps: zeroship_data_query_builder::catalog::WrappedType::String,
+                wraps: zeroship_data_sql::catalog::WrappedType::String,
             }
         ),
         "the migration engine writes the protection record and the data plane \

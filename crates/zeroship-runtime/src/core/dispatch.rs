@@ -236,7 +236,7 @@ pub fn build_error_body(
 ///    refusal (P9).
 ///
 /// 2. The **creator-facing provisioning refusal** `schema_not_provisioned`
-///    (`crates/zeroship-data-core/src/error.rs`). The app's per-app Postgres role does
+///    (`crates/zeroship-data-orm/src/error.rs`). The app's per-app Postgres role does
 ///    not exist, so `zeroship migrate` was never run for it. It is on this
 ///    list because the message is platform-authored, fixed, and interpolates
 ///    nothing -- the server text and the role name (which embeds the app id)
@@ -246,7 +246,7 @@ pub fn build_error_body(
 ///    worker log the creator cannot read.
 ///
 /// 3. The **developer-facing DB validation / CAS guardrail** family
-///    (`crates/zeroship-data-core/src/error.rs`). These are `DbError::ValidationFailed`
+///    (`crates/zeroship-data-orm/src/error.rs`). These are `DbError::ValidationFailed`
 ///    (and `QueryError`-derived) refusals: the plugin rejected the *shape* of
 ///    a request before touching any row. They are platform-owned static
 ///    message strings whose only variable content is the caller's own
@@ -261,7 +261,7 @@ pub fn build_error_body(
 ///
 /// ## Every code is listed TWICE, and that is not redundancy
 ///
-/// The names above are what `crates/zeroship-data-core/src/error.rs` throws. They are
+/// The names above are what `crates/zeroship-data-orm/src/error.rs` throws. They are
 /// not what arrives here on the path a creator actually takes.
 /// `@zeroship/db` re-stamps every native error through `canonicalErrorCode`
 /// (`sdks/db/src/errors.ts:27`) *inside the isolate*, before the throw
@@ -923,7 +923,7 @@ mod tests {
     /// backend-generated, so a creator branching on the text would be
     /// branching on which tier they are running. The value-bearing `DETAIL:`
     /// line is already stripped upstream by `scrub_constraint_detail`
-    /// (`crates/zeroship-data-core/src/error.rs`), so this is about a stable contract,
+    /// (`crates/zeroship-data-orm/src/error.rs`), so this is about a stable contract,
     /// not about a leak.
     ///
     /// NOT asserted here: that the code is safe to expose in general. This is

@@ -1,5 +1,5 @@
 //! Materialize protected native database values directly in V8.
-use zeroship_data_query_builder::value::Value;
+use zeroship_data_sql::value::Value;
 use zeroship_runtime::state::{NativeValue, OpError, ResolveValue};
 
 struct ResultValue {

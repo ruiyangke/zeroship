@@ -8,7 +8,7 @@
 # in agreement, and NOTHING enforces it. The comment answers the auditor's
 # question before anyone goes and checks, so the pair is never checked.
 #
-#   crates/zeroship-data-query-builder/src/mask_codec.rs  and its peer in
+#   crates/zeroship-data-sql/src/mask_codec.rs  and its peer in
 #   zeroship-migrate-backend both cited a round-trip guard in
 #   crates/zeroship-plugin-db/tests/mask_flip.rs. That test needs
 #   `--features test-helpers` PLUS a live PostgreSQL, builds and parses with ONE
@@ -16,7 +16,7 @@
 #   caught the divergence it was cited as preventing, and a real fail-open
 #   divergence had already shipped. Now bound by `mod cross_codec_parity`.
 #
-#   crates/zeroship-data-query-builder/src/compile.rs and zeroship-migrate-backend/src/schema.rs
+#   crates/zeroship-data-sql/src/compile.rs and zeroship-migrate-backend/src/schema.rs
 #   both said `raw_column_name` "must stay byte-identical" AND that "two hashing
 #   implementations in two crates could not be checked to agree by any
 #   compiler". That is a statement of the hazard wearing the uniform of a guard.
@@ -30,7 +30,7 @@
 # claim that is not on the ledger is a refusal.
 #
 # WHY THE LEDGER IS KEYED BY (FILE, NAMED CRATE) AND NOT BY LINE. Line numbers
-# in these files drift under ordinary editing - `zeroship-data-query-builder/src/compile.rs`
+# in these files drift under ordinary editing - `zeroship-data-sql/src/compile.rs`
 # moved one of these claims by 125 lines during the sweep that produced this
 # ledger. A line-keyed ledger would go red on a comment reflow, be relaxed, and
 # stop meaning anything. The pair "this file claims agreement with that crate"
@@ -88,14 +88,10 @@ fail() { FAIL=$((FAIL + 1)); echo "  FAIL $1"; }
 # live in here, which is the point: a root set that contained only one side
 # could not see a cross-boundary claim at all.
 # ---------------------------------------------------------------------------
-ROOTS="crates/zeroship-data-core/src
-crates/zeroship-data-cdc-server/src
-crates/zeroship-data-engine/src
-crates/zeroship-data-postgres/src
-crates/zeroship-data-query-builder/src
-crates/zeroship-data-sqlite/src
+ROOTS="crates/zeroship-data-cdc-server/src
+crates/zeroship-data-orm/src
+crates/zeroship-data-sql/src
 crates/zeroship-plugin-db/src
-crates/zeroship-data-query-builder/src
 crates/zeroship-migrate/src
 crates/zeroship-migrate-backend/src
 crates/zeroship-migrate-core/src
@@ -135,7 +131,7 @@ libs/compio-postgres/src"
 # shows up as an arm-1 refusal naming the new pairs rather than as silence.
 #
 # `must equal` joined the list on 2026-09-04, found by anchoring arm 2's lookup
-# (see there). `crates/zeroship-data-query-builder/src/ident.rs:44` had rewritten its own
+# (see there). `crates/zeroship-data-sql/src/ident.rs:44` had rewritten its own
 # claim away from "byte-for-byte identical" - which matches nothing here, the
 # hyphenation differs - to the conditional obligation "`cap_ident_name(n)` must
 # equal `plan::author::cap_ident_name(zeroship_migrate::shipping_vendors(), n)`".
@@ -204,16 +200,16 @@ claim_pairs() {
 # also the one a rewrite could quietly turn into a real claim.
 # ---------------------------------------------------------------------------
 LEDGER='
-crates/zeroship-data-postgres/src/pg_session_sql.rs	zeroship_migrate_server	unbound
+crates/zeroship-data-orm/src/backend/postgres/pg_session_sql.rs	zeroship_migrate_server	unbound
 crates/zeroship-cdc-wire/src/ids.rs	zeroship_core	bound=crates/zeroship-cdc-wire/tests/typed_id_oracle.rs#zeroship_core::typed_id
-crates/zeroship-data-engine/src/exec.rs	compio_postgres	prose
-crates/zeroship-data-sqlite/src/vector.rs	zeroship_migrate_core	bound=crates/zeroship-plugin-db/tests/sqlite_integration.rs#fn engine_shadow_relation
+crates/zeroship-data-orm/src/exec.rs	compio_postgres	prose
+crates/zeroship-data-orm/src/backend/sqlite/vector.rs	zeroship_migrate_core	bound=crates/zeroship-plugin-db/tests/sqlite_integration.rs#fn engine_shadow_relation
 crates/zeroship-migrate-backend/src/backend.rs	zeroship_migrate_postgres	prose
 crates/zeroship-migrate-backend/src/constraint_definition.rs	zeroship_migrate	prose
 crates/zeroship-migrate-backend/src/ddl.rs	zeroship_migrate	prose
 crates/zeroship-migrate-backend/src/dml.rs	zeroship_migrate_sqlite	prose
-crates/zeroship-migrate-backend/src/mask_codec.rs	zeroship_data_query_builder	bound=crates/zeroship-data-query-builder/src/mask_codec.rs#mod cross_codec_parity
-crates/zeroship-migrate-backend/src/schema.rs	zeroship_data_query_builder	bound=crates/zeroship-data-query-builder/src/compile.rs#mod raw_column_parity
+crates/zeroship-migrate-backend/src/mask_codec.rs	zeroship_data_sql	bound=crates/zeroship-data-sql/src/mask_codec.rs#mod cross_codec_parity
+crates/zeroship-migrate-backend/src/schema.rs	zeroship_data_sql	bound=crates/zeroship-data-sql/src/compile.rs#mod raw_column_parity
 crates/zeroship-migrate-core/src/apply/executor.rs	zeroship_migrate_sqlite	prose
 crates/zeroship-migrate-core/src/ops/squash.rs	zeroship_migrate_postgres	prose
 crates/zeroship-migrate-core/src/render/backends/mod.rs	zeroship_migrate_backend	prose
@@ -232,10 +228,10 @@ crates/zeroship-migrate-sqlite/src/backend/actor.rs	zeroship_migrate_backend	bou
 crates/zeroship-migrate-sqlite/src/backend/audit_unmask_sql.rs	zeroship_migrate_server	bound=crates/zeroship-plugin-db/tests/audit_table_parity.rs#POSTGRES_CREATOR
 crates/zeroship-migrate-sqlite/src/backend/audit_unmask_sql.rs	zeroship_plugin_db	bound=crates/zeroship-plugin-db/tests/audit_table_parity.rs#SQLITE_CREATOR
 crates/zeroship-migrate-sqlite/src/dml.rs	zeroship_migrate_backend	prose
-crates/zeroship-migrate-sqlite/src/schema.rs	zeroship_data_query_builder	bound=crates/zeroship-data-query-builder/src/compile.rs#mod sqlite_now_parity
+crates/zeroship-migrate-sqlite/src/schema.rs	zeroship_data_sql	bound=crates/zeroship-data-sql/src/compile.rs#mod sqlite_now_parity
 crates/zeroship-plugin-db/src/drop_namespace.rs	zeroship_migrate_server	prose
-crates/zeroship-data-query-builder/src/mask_codec.rs	zeroship_migrate_backend	bound=crates/zeroship-data-query-builder/src/mask_codec.rs#mod cross_codec_parity
-crates/zeroship-data-query-builder/src/compile.rs	zeroship_migrate_backend	bound=crates/zeroship-data-query-builder/src/compile.rs#mod raw_column_parity
+crates/zeroship-data-sql/src/mask_codec.rs	zeroship_migrate_backend	bound=crates/zeroship-data-sql/src/mask_codec.rs#mod cross_codec_parity
+crates/zeroship-data-sql/src/compile.rs	zeroship_migrate_backend	bound=crates/zeroship-data-sql/src/compile.rs#mod raw_column_parity
 '
 
 # WHY THE ROW ABOVE FOR `actor.rs` NAMES A VARIANT AND NOT THE FUNCTION.
@@ -407,7 +403,7 @@ fi
 # satisfied by any crate whose name it PREFIXES. Arm 1 above already guards
 # against this by matching `$file\t$crate\t` with the terminator; this arm had
 # no terminator to use, and no anchor either. Measured 2026-09-04: one ledger
-# row - `crates/zeroship-data-query-builder/src/ident.rs` <-> `zeroship_migrate` - was being
+# row - `crates/zeroship-data-sql/src/ident.rs` <-> `zeroship_migrate` - was being
 # vouched for by the `zeroship_migrate_core` pair, and the claim it records
 # ("`cap_ident_name(n)` must equal `plan::author::cap_ident_name(...)`",
 # ident.rs:47-49) was invisible to the enumeration because `must equal` was not

@@ -136,7 +136,7 @@ values for one grep, each stated confidently, and the reason is that none of
 them said where the boundary was:
 
 ```
-crates/zeroship-schema/src/query.rs, measured 2026-08-28 (DELETED; runtime compilation now lives in `crates/zeroship-data-query-builder/src/compile.rs`, and migration DDL in `crates/zeroship-migrate-core/src/schema/query.rs`.)
+crates/zeroship-schema/src/query.rs, measured 2026-08-28 (DELETED; runtime compilation now lives in `crates/zeroship-data-sql/src/compile.rs`, and migration DDL in `crates/zeroship-migrate-core/src/schema/query.rs`.)
   grep -c "RETURNING \*"                              34
   before `mod tests` at :6035                         20
   of those 20, on comment lines (`//` or ` *`)         8
@@ -329,7 +329,7 @@ from "read the secret" to "recover the secret", not to "safe".
 
 **Evidence:** `zeroship-schema/src/query.rs:5477-5484` (the read-path order
 builder), `:5487-5528` (the emitter using the raw key), `:5500`, `:5521`;
-`crates/zeroship-data-engine/src/crud/mask_pass.rs:150-152`
+`crates/zeroship-data-orm/src/crud/mask_pass.rs:150-152`
 
 **It compounds with L24.** The only gate on the order-by key is
 `validate_read_identifier` (`:5483`), which L24 establishes **fails open when
@@ -707,7 +707,7 @@ Argument and acceptance arm: SC-4.
 ("fix(db): remove full-text search") and its merge `93bc20126` ("Merge branch
 'feat/db-delete-fts'") are both ancestors of HEAD, and
 `to_tsvector|plainto_tsquery|websearch_to_tsquery|tsquery` now occurs **0
-times** across `crates/zeroship-schema/src/` and (DELETED; runtime compilation now lives in `crates/zeroship-data-query-builder/src/compile.rs`, and migration DDL in `crates/zeroship-migrate-core/src/schema/query.rs`.)
+times** across `crates/zeroship-schema/src/` and (DELETED; runtime compilation now lives in `crates/zeroship-data-sql/src/compile.rs`, and migration DDL in `crates/zeroship-migrate-core/src/schema/query.rs`.)
 `crates/zeroship-plugin-db/src/`. The removal is complete in the data plane,
 not merely landed on a side branch.
 
@@ -1058,7 +1058,7 @@ that can even notice a deploy change, and it notices it against a value L10
 shows is wrong.
 
 **What the fix does, and what it deliberately leaves.** A new `DbBinding`
-(`crates/zeroship-data-core/src/binding.rs`) captures `ZEROSHIP_DEPLOY_ID` from
+(`crates/zeroship-data-orm/src/binding.rs`) captures `ZEROSHIP_DEPLOY_ID` from
 the **active runtime's own environment** at `mint_db`, is stored immutably on the
 `Db` and every `Collection` it mints, and is threaded through each asynchronous
 CRUD continuation. The token is therefore never recovered from process-global

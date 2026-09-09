@@ -208,7 +208,7 @@ crates/zeroship-auth/tests/common/mod.rs:tests/common.rs
 crates/zeroship-runtime/tests/call_fetch_handler.rs:tests/http.rs
 crates/zeroship-migrate-server/tests/typed_id_parity.rs:tests/core_id_parity.rs
 crates/zeroship-runtime/src/core/init.rs:crates/runtime/src/embed/websocket.js
-crates/zeroship-data-sqlite/src/session.rs:examples/simple-rust/demo.rs
+crates/zeroship-data-orm/src/backend/sqlite/session.rs:examples/simple-rust/demo.rs
 crates/zeroship-migrate-ir/src/id.rs:tests/core_id_parity.rs
 crates/zeroship-migrate-sqlite/src/backend/mod.rs:tests/sqlite_journal.rs
 crates/zeroship-config-contract/src/raw_env.rs:crates/core/src/config/env.rs

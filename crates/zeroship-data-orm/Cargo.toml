@@ -1,0 +1,45 @@
+[package]
+name = "zeroship-data-orm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Backend-independent ORM with native Rust models, protected execution, and database driver adapters."
+
+[dependencies]
+async-trait = { workspace = true }
+zeroship-data-sql = { workspace = true }
+zeroship-data-macros = { workspace = true }
+zeroship-core = { workspace = true }
+zeroship-metering = { workspace = true }
+zeroship-migrate-policy = { workspace = true }
+compio = { workspace = true }
+compio-postgres = { workspace = true, features = ["with-uuid-1"] }
+rusqlite = { workspace = true, features = ["bundled", "preupdate_hook"] }
+flume = { workspace = true }
+sqlite-vec = { workspace = true }
+tempfile = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+base64 = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+aes-gcm = { workspace = true }
+hkdf = { workspace = true }
+hmac = { workspace = true }
+sha2 = { workspace = true }
+zeroize = { version = "1", features = ["alloc", "derive"] }
+
+[dev-dependencies]
+zeroship-data-orm = { path = ".", features = ["test-helpers"] }
+trybuild = "1.0"
+zeroship-migrate-postgres = { workspace = true }
+zeroship-migrate = { workspace = true }
+zeroship-migrate-sqlite = { workspace = true }
+zeroship-migrate-server = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[features]
+test-helpers = []
+
+[lints]
+workspace = true

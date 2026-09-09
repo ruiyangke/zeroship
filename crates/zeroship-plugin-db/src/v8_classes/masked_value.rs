@@ -40,17 +40,17 @@
 #![allow(unsafe_code)]
 
 use crate::op_error::ToOpError;
-use zeroship_data_query_builder::value::Value;
+use zeroship_data_sql::value::Value;
 use zeroship_runtime::state::{OpError, OpResult, ResolveValue};
 use zeroship_runtime_macros::v8_class;
 #[allow(unused_imports)]
 use zeroship_runtime_macros::{v8_async_method, v8_constructor, v8_getter, v8_method};
 
 use crate::crud::unmask::{
-    dispatch_bulk_unmask, dispatch_unmask, BulkUnmaskArgs, BulkUnmaskItem, UnmaskFieldArgs,
+    BulkUnmaskArgs, BulkUnmaskItem, UnmaskFieldArgs, dispatch_bulk_unmask, dispatch_unmask,
 };
 use crate::v8_bridge::{decode_native, runtime_state, setup_js_promise};
-use zeroship_data_core::binding::DbBinding;
+use zeroship_data_orm::binding::DbBinding;
 
 // ---------------------------------------------------------------------------
 // MaskedValue state
@@ -201,7 +201,7 @@ impl MaskedValue {
                 Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
             };
             let opts_v = if arg1.is_null_or_undefined() {
-                Value::Object(zeroship_data_query_builder::value::Map::new())
+                Value::Object(zeroship_data_sql::value::Map::new())
             } else {
                 match decode_native(scope, arg1) {
                     Ok(v) => v,
@@ -212,7 +212,7 @@ impl MaskedValue {
         } else {
             // Single-column path: arg0 is `opts`.
             let opts_v = if arg0.is_null_or_undefined() {
-                Value::Object(zeroship_data_query_builder::value::Map::new())
+                Value::Object(zeroship_data_sql::value::Map::new())
             } else {
                 match decode_native(scope, arg0) {
                     Ok(v) => v,
@@ -238,7 +238,7 @@ impl MaskedValue {
         opts: v8::Local<v8::Value>,
     ) -> v8::Local<'s, v8::Value> {
         let mut opts_v = if opts.is_null_or_undefined() {
-            Value::Object(zeroship_data_query_builder::value::Map::new())
+            Value::Object(zeroship_data_sql::value::Map::new())
         } else {
             match decode_native(scope, opts) {
                 Ok(v) => v,
@@ -361,7 +361,7 @@ impl MaskedValue {
                         // `false` answer; every other error re-throws.
                         if matches!(
                             &e,
-                            zeroship_data_core::error::DbError::Coded { code, .. }
+                            zeroship_data_orm::error::DbError::Coded { code, .. }
                                 if code == "unmask_not_permitted"
                         ) {
                             OpResult::JsValue {
@@ -456,7 +456,7 @@ impl MaskedValue {
                     // `Record<col, plaintext>`, not the wider
                     // `Record<row_pk, Record<col, plaintext>>` shape.
                     let cols_map = result.results.get(&row_pk).cloned().unwrap_or_default();
-                    let mut payload = zeroship_data_query_builder::value::Map::new();
+                    let mut payload = zeroship_data_sql::value::Map::new();
                     for (col, pt) in cols_map {
                         payload.insert(col, pt);
                     }
@@ -696,11 +696,7 @@ impl RehydrateWalker {
                 }
             }
         }
-        if changed {
-            Some(value)
-        } else {
-            None
-        }
+        if changed { Some(value) } else { None }
     }
 
     fn mint_replacement<'s, 'a>(
@@ -834,11 +830,13 @@ mod tests {
         };
         assert!(walker.walk(scope, input).is_none());
         let key = v8::String::new(scope, "inspected").unwrap();
-        assert!(context
-            .global(scope)
-            .get(scope, key.into())
-            .unwrap()
-            .is_false());
+        assert!(
+            context
+                .global(scope)
+                .get(scope, key.into())
+                .unwrap()
+                .is_false()
+        );
     }
 
     /// Smoke: construct a fresh MaskedValue inside a V8 context and

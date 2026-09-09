@@ -9057,16 +9057,16 @@ fn validate_default_expr(
 /// `RESERVED_AUTO_PREFIXES`" until 2026-09-04. `RESERVED_AUTO_PREFIXES` has
 /// never existed anywhere in `crates/`, `sdks/` or `packages/` - that comment
 /// was its only occurrence. `system_fields_pass` is real
-/// (`crates/zeroship-data-engine/src/crud/system_fields_pass.rs`) and holds no
+/// (`crates/zeroship-data-orm/src/crud/system_fields_pass.rs`) and holds no
 /// prefix list at all: its `prefix_for_collection` routes every declared and
 /// every derived prefix through the runtime's `validate_id_prefix`.
 ///
 /// The list has TWO real peers, and both are copies rather than references:
 ///
-/// * `zeroship_data_query_builder::compile::RESERVED_ID_PREFIXES` - the runtime data plane's,
+/// * `zeroship_data_sql::compile::RESERVED_ID_PREFIXES` - the runtime data plane's,
 ///   which `system_fields_pass` reaches. Bound to this one over both the
 ///   constant and the accept/refuse verdict by
-///   `zeroship-data-query-builder/src/compile.rs`'s `mod reserved_id_prefix_parity`.
+///   `zeroship-data-sql/src/compile.rs`'s `mod reserved_id_prefix_parity`.
 /// * `ID_RESERVED_PREFIX` in `sdks/db/src/types.ts` - the SDK's build-time
 ///   fence. UNBOUND: nothing relates it to either Rust list.
 ///

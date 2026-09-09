@@ -287,14 +287,14 @@ impl SchemaRenderer for SqliteSchemaRenderer {
 
     fn current_timestamp_expr(&self) -> &'static str {
         // Must match `synth_now()` in this crate's `dml.rs` and `SQLITE_NOW_EXPR`
-        // in `zeroship-data-query-builder`. Bare `CURRENT_TIMESTAMP` renders space-separated
+        // in `zeroship-data-sql`. Bare `CURRENT_TIMESTAMP` renders space-separated
         // ("YYYY-MM-DD HH:MM:SS") while the data plane binds ISO-T; these columns
         // are compared BYTEWISE (' ' = 0x20 < 'T' = 0x54), so two spellings in one
         // column invert same-day ordering. The parentheses are required by SQLite
         // in a DEFAULT clause and harmless in an assignment.
         //
         // BOUND, as of 2026-09-04, by `mod sqlite_now_parity` at the bottom of
-        // `crates/zeroship-data-query-builder/src/compile.rs`. It drives the SQLite vendor out
+        // `crates/zeroship-data-sql/src/compile.rs`. It drives the SQLite vendor out
         // of the shipping composition and compares all three declarations against
         // a literal stated once in that module, so a COORDINATED edit of the
         // three fails as well - which is what the per-crate literal pins each of

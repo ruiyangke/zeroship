@@ -9,7 +9,9 @@ design in full.
 
 ## Runtime ORM
 
-`zeroship-data-engine` exposes `Database`, `Collection`, and `EntityCollection` for
+Crate responsibilities and driver contracts: `docs/architecture/data-orm.md`.
+
+`zeroship-data-orm` exposes `Database`, `Collection`, and `EntityCollection` for
 Rust callers. The worker's V8 adapter uses the same `PreparedOperation` path.
 
 ```text
@@ -46,7 +48,7 @@ request's actor, read set, and transaction route before execution can yield.
 The ORM database handle is an execution context, separate from the persisted
 Database entity described below.
 
-`zeroship-data-query-builder` owns runtime query compilation, typed predicates,
+`zeroship-data-sql` owns runtime query compilation, typed predicates,
 `SchemaName`, catalog metadata, and the sentinel codec used by introspection.
 The migration engine owns DDL, schema differencing, and schema changes. Runtime
 code does not contain another schema emitter, and database fixtures use the
@@ -69,8 +71,8 @@ consumes that lease with `discard()` so an uncertain session cannot be reused.
 Pool shutdown interrupts pending acquisition without invalidating leases still
 held by callers. The pool contract is documented in `libs/compio-postgres/README.md`.
 
-Implementation: `crates/zeroship-data-engine/src/orm.rs`,
-`crates/zeroship-data-query-builder/src/filter.rs`, and
+Implementation: `crates/zeroship-data-orm/src/orm.rs`,
+`crates/zeroship-data-sql/src/filter.rs`, and
 `crates/zeroship-plugin-db/src/v8_classes/dispatch.rs`.
 
 **What is DESIGNED AND NOT BUILT is marked *(designed)* throughout**: the Datastore/Database/Grant
@@ -106,7 +108,7 @@ Three ideas, and the whole design is the consequence of separating them:
 ### What it replaces
 
 Today an app id **is** the schema name, the role name, the encryption salt and the publication key -
-one string playing five parts. `crates/zeroship-data-core/src/broker.rs:78-79` says so plainly:
+one string playing five parts. `crates/zeroship-data-orm/src/broker.rs:78-79` says so plainly:
 "`schema` is conflated with `app_id` (every app has its own schema named after `app_id`)."
 
 That conflation is why an app cannot have a database that outlives it, and why two apps cannot
@@ -362,7 +364,7 @@ Two consequences measured on live PostgreSQL:
 the catalog.** It is generated from the creator's migration DSL, folded at build time, shipped in
 the artifact, and immutable for the isolate's life.
 
-`crates/zeroship-data-engine/src/descriptor.rs` is the whole surface: `collection_schema` returns the
+`crates/zeroship-data-orm/src/descriptor.rs` is the whole surface: `collection_schema` returns the
 field map or a typed error, and **there is no third state**. An absent schema used to mean "carry
 on", which is how the read path came to fail open.
 
@@ -381,8 +383,8 @@ than served the wrong columns.
 is `zs_bind_<gid>_e<E>`; an apply that advances the epoch mints the roles for `E+1` and drops those
 for `E-1`. An isolate carrying a stale epoch therefore fails at `SET LOCAL ROLE`, which is the
 **first statement of the setup batch that already exists** (`tx_session_setup_sql` and
-`autocommit_local_session_setup_sql`, `crates/zeroship-data-engine/src/auth/bootstrap.rs:204-212` and
-`:226-233`, issued as one simple query at `crates/zeroship-data-engine/src/exec.rs:322`). Nothing has
+`autocommit_local_session_setup_sql`, `crates/zeroship-data-orm/src/auth/bootstrap.rs:204-212` and
+`:226-233`, issued as one simple query at `crates/zeroship-data-orm/src/exec.rs:322`). Nothing has
 to remember to check: the batch is the only route to a usable connection, and a stale epoch never
 gets one.
 
@@ -409,10 +411,10 @@ So the comparison form buys nothing the name does not, and costs a statement in 
 forever.
 
 **Only the producer is missing; the consumer ships.**
-`crates/zeroship-data-engine/src/transaction/reducer/identity.rs:97` defines `SchemaEpoch`, and `:265-267`
+`crates/zeroship-data-orm/src/transaction/reducer/identity.rs:97` defines `SchemaEpoch`, and `:265-267`
 compares the observed epoch against the expected one and returns `Verdict::ReResolve` - retryable,
 distinct from the terminal denials above it. What has no input is `expected_authority` at
-`crates/zeroship-data-engine/src/transaction/driver.rs:142-148`, which mints `SchemaEpoch::new(0)`, and
+`crates/zeroship-data-orm/src/transaction/driver.rs:142-148`, which mints `SchemaEpoch::new(0)`, and
 `observation_for` at `:157-167`, which echoes it back; the doc comment at `:140-141` says so outright:
 "The wiring is real; the *input* is not yet." Building the epoch is supplying one input to a
 classifier that already ships.
@@ -441,10 +443,10 @@ the role graph ships.
 
 `__zeroship_admin` **does not exist.** It was deleted on 2026-08-27 - six tables and 32
 definer-rights routines - because the worker could call every one of them, and a privileged call the
-worker can make is not a boundary. `crates/zeroship-data-engine/src/auth/bootstrap.rs:15-18` records
+worker can make is not a boundary. `crates/zeroship-data-orm/src/auth/bootstrap.rs:15-18` records
 that nothing replaced it, and `db/migrations-ts/` provisions no such schema. One live statement still
 names it and therefore fails on every database: the PITR placeholder at
-`crates/zeroship-data-postgres/src/postgres.rs:1333`, whose own comment at `:839-844` says so.
+`crates/zeroship-data-orm/src/backend/postgres/implementation.rs`, whose own comment at `:839-844` says so.
 
 **This work creates it**, and the shape is the invariant's one permitted use - state a separate
 service writes and the worker only reads:

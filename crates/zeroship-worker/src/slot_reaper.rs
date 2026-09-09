@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use compio::runtime::JoinHandle;
-use zeroship_data_core::error::DbError;
+use zeroship_data_orm::error::DbError;
 use zeroship_plugin_db::slot_reaper::{
     OperatorSlotReaper, ABANDONED_INACTIVITY_THRESHOLD, SWEEP_INTERVAL,
 };

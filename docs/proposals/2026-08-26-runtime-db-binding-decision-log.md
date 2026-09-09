@@ -398,7 +398,7 @@ unsourced sentence is the one that cost a reviewer's strongest finding.
 
 **"Only the producer is missing" was too narrow, and it was in AGENTS.md.** I wrote that the schema
 epoch's consumer ships and only its producer is absent. Verified against
-`crates/zeroship-data-engine/src/transaction/reducer/mod.rs:966-972`:
+`crates/zeroship-data-orm/src/transaction/reducer/mod.rs:966-972`:
 
 ```rust
 if !opened {
@@ -510,13 +510,13 @@ one changes a shape:
 
 | What breaks | Where | Task |
 | --- | --- | --- |
-| unmask returns 42501 under column grants | `crates/zeroship-data-engine/src/crud/unmask.rs:497` | #45 |
+| unmask returns 42501 under column grants | `crates/zeroship-data-orm/src/crud/unmask.rs:497` | #45 |
 | the id leaks by three channels, incl. persisted `currentUser()` rows | `crates/zeroship-migrate-postgres/src/backend/session.rs:935` | #52 |
 | an app editor can read a sibling app's classified rows | `deploy/policies/creator/app_editor.cedar` | #53 |
 | cost accrues to one app, throttling hits it, the causer is unthrottled | `crates/zeroship-metering/src/meter.rs:1` | #57 |
 | binding a 2nd app refuses its first deploy | `crates/zeroship-control/src/registry.rs:469` | #49 |
 | an apply with no deploy strands running isolates | same | #51 |
-| SQLite CDC + transaction lanes key on alias==app_id | `crates/zeroship-data-sqlite/src/cdc.rs:121` | #54 |
+| SQLite CDC + transaction lanes key on alias==app_id | `crates/zeroship-data-orm/src/backend/sqlite/cdc.rs:121` | #54 |
 | teardown is app-keyed end to end | `crates/zeroship-plugin-db/src/drop_namespace.rs:69` | #55 |
 
 Every path above is a full repo path on purpose: `tests/doc_citation_gate.sh` only
@@ -615,7 +615,7 @@ measurements under it were wrong, and each was wrong in a different way.
 
 **Evidence, and the corrected forms.**
 
-1. **"34 `RETURNING *` sites in `crates/zeroship-schema/src/query.rs`."** That is (DELETED; runtime compilation now lives in `crates/zeroship-data-query-builder/src/compile.rs`, and migration DDL in `crates/zeroship-migrate-core/src/schema/query.rs`.)
+1. **"34 `RETURNING *` sites in `crates/zeroship-schema/src/query.rs`."** That is (DELETED; runtime compilation now lives in `crates/zeroship-data-sql/src/compile.rs`, and migration DDL in `crates/zeroship-migrate-core/src/schema/query.rs`.)
    the raw `grep -c`. **The corrected derivation, with its boundaries, is stated
    once - in the design, section 6** - and deliberately not repeated here, since
    one fact fully stated in two documents is the failure class collected at the
@@ -636,7 +636,7 @@ measurements under it were wrong, and each was wrong in a different way.
    answers.)*
 2. **"`strip_encryption_markers` retains it (`encryption_pass.rs:502-505`)."**
    The function is `#[cfg(any(test, feature = "test-helpers"))]`
-   (`crates/zeroship-data-engine/src/crud/encryption_pass.rs:501`), so it is not
+   (`crates/zeroship-data-orm/src/crud/encryption_pass.rs:501`), so it is not
    on the production path at all, and it strips `__zsbin__` markers from a
    **write** document before binding rather than from a returned row. It is
    neither outbound nor live.
@@ -656,15 +656,15 @@ measurements under it were wrong, and each was wrong in a different way.
 3. **"The SQLite introspector drops all mask metadata with no `else`
    (`zeroship-data-sqlite/src/lib.rs:2220-2237`)."** True as written and irrelevant on the
    production path: `parse_mask_sentinels`
-   (`crates/zeroship-data-sqlite/src/lib.rs:2232`) and its only
+   (`crates/zeroship-data-orm/src/backend/sqlite/mod.rs:2232`) and its only
    caller, the `SchemaIntrospect for SqliteBackend` impl (`:804`, call at
    `:917`), are both `#[cfg(any(test, feature = "test-helpers"))]`. The dev tier
-   does not run it, and `crates/zeroship-data-engine/src/descriptor.rs:30-32`
+   does not run it, and `crates/zeroship-data-orm/src/descriptor.rs:30-32`
    states so in the tree's own words: "On SQLite it was never live at all".
 
    **The same defect IS production on PostgreSQL, and the note did not mention
    it.** `read_live_schema` filters on the suffix at
-   `crates/zeroship-schema/src/diff.rs:671` - (DELETED; runtime compilation now lives in `crates/zeroship-data-query-builder/src/compile.rs`, and migration DDL in `crates/zeroship-migrate-core/src/schema/query.rs`.)
+   `crates/zeroship-schema/src/diff.rs:671` - (DELETED; runtime compilation now lives in `crates/zeroship-data-sql/src/compile.rs`, and migration DDL in `crates/zeroship-migrate-core/src/schema/query.rs`.)
    `if comment.starts_with("__zsmask:") && column.ends_with("_masked")` - and
    strips it at `:716`. A `__zsmask:` sentinel on a column not ending `_masked`
    falls through both `if`s and is discarded with no warning, while the
@@ -880,8 +880,8 @@ same shape.)*
 **The schema never existed in production, which is what made the deletion free.**
 `ensure_admin_schema` and every installer are
 `#[cfg(any(test, feature = "test-helpers"))]`
-(`crates/zeroship-data-engine/src/auth/bootstrap.rs:95-96`), no migration or SQL
-file created it, and `crates/zeroship-data-core/src/encryption/keys.rs:495`
+(`crates/zeroship-data-orm/src/auth/bootstrap.rs:95-96`), no migration or SQL
+file created it, and `crates/zeroship-data-orm/src/encryption/keys.rs:495`
 instructs operators to run a bootstrap migration **that does not exist**. The
 epoch design would therefore have landed the *first* production provisioner for
 that schema; decision 7 deleted the subject instead. Per the no-back-compat rule
@@ -926,7 +926,7 @@ without checking.** In production the mutation-side producer is *suppressed*:
 runs for an app "it owns the publish path for events this isolate writes", so
 "in production with the consumer active, EVERY mutation previously paid the
 build cost only to discard the result"
-(`crates/zeroship-data-engine/src/exec.rs:455-466` for the reasoning; the call at
+(`crates/zeroship-data-orm/src/exec.rs:455-466` for the reasoning; the call at
 `:501`). The real producer is `wal_consumer::emit_for_tuple`
 (`crates/zeroship-plugin-db/src/wal_consumer.rs:589`) - which holds no lease, has
 no operation context, and in which the string `epoch` does not appear once in
@@ -1021,7 +1021,7 @@ was built anyway.**
 **And the counter-example, which is the stronger half.** DB-3: app JS reached a
 privileged unmask call and could pass `actor: { kind: "auto" }` to read its own
 PII/PHI/PCI at will, patched by `sanitize_app_actor` stripping reserved system
-kinds (`crates/zeroship-data-engine/src/crud/unmask.rs:282-303`). That is not a
+kinds (`crates/zeroship-data-orm/src/crud/unmask.rs:282-303`). That is not a
 bug the shape happened to have; it is what the shape produces. A privileged call
 the worker can make is a privileged call creator code can reach, and the only
 defence available is a hand-maintained list of arguments to strip.
@@ -1031,7 +1031,7 @@ has no `session_ctx` at all.** The SQLite backend says so in its own words -
 "SQLite has no `session_ctx` table - there is no per-PID session-context concept
 here", and downstream audit paths "bind context through the session actor's
 per-call state instead"
-(`crates/zeroship-data-sqlite/src/lib.rs:1652-1655`). **Two tiers
+(`crates/zeroship-data-orm/src/backend/sqlite/mod.rs:1652-1655`). **Two tiers
 disagreeing about where identity is enforced is either a contract-parity break
 or evidence that one of them is sufficient; it was read as neither, and the
 question stayed open.**
@@ -1040,7 +1040,7 @@ question stayed open.**
 "`SessionMinter` and the backup/snapshot contracts are either assigned a
 destination in SC-3's ledger or deleted with the feature they serve" - resolves
 as a deletion. The SQLite side goes too
-(`crates/zeroship-data-sqlite/src/session_minter.rs` - DELETED
+(`crates/zeroship-data-orm/src/backend/sqlite/session_minter.rs` - DELETED
 2026-09-02, along with the trait, `SessionInit`, `MintedToken`, the
 `SqliteBackend` impl and its secrets constructor, and the nine integration
 tests; the PG half had gone on 2026-08-27), and the
@@ -1199,7 +1199,7 @@ having no effect:
 
 **Both were written as settled. Both were contradicted by live code the whole
 time** - `dispatch_set_mask_policy`
-(`crates/zeroship-data-engine/src/crud/mask_policy.rs:224`), reached from the
+(`crates/zeroship-data-orm/src/crud/mask_policy.rs:224`), reached from the
 `setMaskPolicy` V8 method (`v8_classes/db_platform.rs:145-155`), plus a store
 that persists the result durably - **and neither statement caused the
 contradiction to be found.** It was found by asking where the policy comes from,
@@ -1280,7 +1280,7 @@ matters because **a provisioner written by porting the installer's statements
 would port this one.**
 
 **It also removes an SPI member the deletion list did not account for.**
-`Backup::pitr_replay` (`crates/zeroship-data-core/src/storage.rs:603`) goes
+`Backup::pitr_replay` (`crates/zeroship-data-orm/src/storage.rs:603`) goes
 with the table, along with its PostgreSQL implementation, which does nothing but
 `INSERT INTO __zeroship_admin.pitr_targets` (`backend/postgres.rs:1702-1718`),
 and its SQLite stub (`zeroship-data-sqlite/src/lib.rs:2362`). Nothing calls it:
@@ -1301,7 +1301,7 @@ key_version)`. There is no key table and no getter, so the constraint is moot.
 separation more tightly than per-column keys ever did, that `SECURITY DEFINER`
 is a query-time boundary against a bytes-at-rest threat, and that `key_id`
 defaults to the literal `"default"` in both producers
-(`crates/zeroship-schema/src/query.rs:2295`, `diff.rs:1636`) so per-column (DELETED; runtime compilation now lives in `crates/zeroship-data-query-builder/src/compile.rs`, and migration DDL in `crates/zeroship-migrate-core/src/schema/query.rs`.)
+(`crates/zeroship-schema/src/query.rs:2295`, `diff.rs:1636`) so per-column (DELETED; runtime compilation now lives in `crates/zeroship-data-sql/src/compile.rs`, and migration DDL in `crates/zeroship-migrate-core/src/schema/query.rs`.)
 keying was already nominal - is in the design under "Key custody", because it is
 current rather than historical.
 
@@ -1446,13 +1446,13 @@ across clusters.
 `runtime_schema_for` missed the deploy-keyed cache, called
 `read_live_schema(pool, app_id)`, narrowed the result to the one collection, and
 cached **only that slice**
-(`crates/zeroship-data-engine/src/crud/introspect_schema.rs:96-110`, DELETED in
+(`crates/zeroship-data-orm/src/crud/introspect_schema.rs:96-110`, DELETED in
 `632c1d1fa` when the descriptor became the sole schema authority; read it there).
 `read_live_schema` selected every column of every table in the app's schema -
 `WHERE n.nspname = $1`, no table predicate - over `pg_attribute` joined to
 `pg_class` and `pg_namespace`, `LEFT JOIN`ed to `pg_attrdef` and
 `pg_description`, with a correlated subquery over `pg_depend`/`pg_proc` per
-column (`crates/zeroship-schema/src/diff.rs:606-640`). An app with N collections (DELETED; runtime compilation now lives in `crates/zeroship-data-query-builder/src/compile.rs`, and migration DDL in `crates/zeroship-migrate-core/src/schema/query.rs`.)
+column (`crates/zeroship-schema/src/diff.rs:606-640`). An app with N collections (DELETED; runtime compilation now lives in `crates/zeroship-data-sql/src/compile.rs`, and migration DDL in `crates/zeroship-migrate-core/src/schema/query.rs`.)
 paid **N whole-schema catalog reads** where one would populate all N. *(This is
 the cost that dominates at millions of apps, because the long tail is
 rarely-hit apps, so a large fraction of requests are cold starts - and it is
@@ -1745,7 +1745,7 @@ and citations of behaviour need checking exactly like citations of lines.)*
    schema is created anyway**, because the real site interpolates the
    identifier:
    `format!(r#"CREATE SCHEMA "{ADMIN_SCHEMA}" AUTHORIZATION "{PLATFORM_ROLE}""#)`
-   (`crates/zeroship-data-engine/src/auth/bootstrap.rs:145-150`). So the arm as
+   (`crates/zeroship-data-orm/src/auth/bootstrap.rs:145-150`). So the arm as
    written passes on today's tree, passes after the deletion it is meant to
    enforce, and passes if a second provisioner is added tomorrow using the same
    idiom - **it cannot observe its own subject.** It must match the interpolated
@@ -1813,7 +1813,7 @@ future migrator-created table, while the reserved-prefix revoke lives in
 measurement about the provisioner, not about the epoch, and it still holds.
 
 **And restore's home was named but its machinery never existed.**
-`restore` at `crates/zeroship-data-postgres/src/postgres.rs:871` is the site the design
+`restore` at `crates/zeroship-data-orm/src/backend/postgres/implementation.rs` is the site the design
 moves out of the data-plane crate into the migration service - **which today has
 no restore machinery at all**, so the tooling (`pg_restore` invocation, snapshot
 handle, blob access) is named work rather than a move.
@@ -1879,7 +1879,7 @@ known item".
 The reachability of the third is in the design under step 5c, because it is
 current: `db.collection(name)` mints a collection for any non-empty string
 (`v8_classes/db.rs:119-139`) and `schema = None` yields `SELECT *`
-(`crates/zeroship-schema/src/query.rs:3000-3012`). (DELETED; runtime compilation now lives in `crates/zeroship-data-query-builder/src/compile.rs`, and migration DDL in `crates/zeroship-migrate-core/src/schema/query.rs`.)
+(`crates/zeroship-schema/src/query.rs:3000-3012`). (DELETED; runtime compilation now lives in `crates/zeroship-data-sql/src/compile.rs`, and migration DDL in `crates/zeroship-migrate-core/src/schema/query.rs`.)
 
 ### The command-tag obligation, and where it was being dropped
 
@@ -1903,7 +1903,7 @@ are invisible at the call site.)*
 
 **True.** Neither is supportable, and what is measurable was stated instead:
 `read_live_schema` and `estimate_row_count`
-(`crates/zeroship-schema/src/lib.rs:22-23`) lost their only consumer; the other (DELETED; runtime compilation now lives in `crates/zeroship-data-query-builder/src/compile.rs`, and migration DDL in `crates/zeroship-migrate-core/src/schema/query.rs`.)
+(`crates/zeroship-schema/src/lib.rs:22-23`) lost their only consumer; the other (DELETED; runtime compilation now lives in `crates/zeroship-data-sql/src/compile.rs`, and migration DDL in `crates/zeroship-migrate-core/src/schema/query.rs`.)
 five modules still have plugin-db callers nobody has audited. **The crate is
 15,034 lines across 7 modules** and this document set does not claim it is
 retired.

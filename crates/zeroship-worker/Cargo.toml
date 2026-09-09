@@ -18,10 +18,8 @@ zeroship-core = { workspace = true }
 zeroship-bundle = { workspace = true }
 zeroship-runtime = { workspace = true }
 zeroship-plugin-db = { workspace = true }
-# The worker handles `DbError` directly (the slot reaper's return type). That
-# vocabulary belongs to data-core, not to the adapter that happens to surface
-# it, so the dependency is named rather than reached through plugin-db.
-zeroship-data-core = { workspace = true }
+# The worker handles the ORM's typed errors directly in its slot reaper.
+zeroship-data-orm = { workspace = true }
 zeroship-plugin-kv = { workspace = true }
 zeroship-metering = { workspace = true }
 zeroship-stream = { workspace = true }

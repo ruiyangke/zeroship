@@ -2,7 +2,7 @@
 //!
 //! # Why this module exists
 //!
-//! `crates/zeroship-data-query-builder/src/schema_name.rs` enumerates what a single app-id
+//! `crates/zeroship-data-sql/src/schema_name.rs` enumerates what a single app-id
 //! string simultaneously is: tenant identity, `PostgreSQL` schema name,
 //! role-name stem, encryption salt, publication key, replication-slot key,
 //! `SQLite` `ATTACH` alias, transaction-lane key, broker routing key and CDC
@@ -48,7 +48,7 @@
 //! # What is NOT here yet
 //!
 //! The seam is typed on [`AppId`], and much of the tree still carries an app id
-//! as `&str` - `zeroship_data_core::encryption::keys::resolve`,
+//! as `&str` - `zeroship_data_orm::encryption::keys::resolve`,
 //! `zeroship_plugin_db::replication`, `zeroship_plugin_kv::backend::scope`,
 //! `zeroship_plugin_storage::backend`. Those sites cannot construct an
 //! [`AppId`] without a fallible parse that would refuse the non-uuid app ids
@@ -103,7 +103,7 @@ pub enum DerivationError {
 /// on it; this is that derivation, hoisted so the data plane and the migration
 /// service cannot answer the question differently.
 ///
-/// The result is not a `zeroship_data_query_builder::SchemaName`: this crate is below that
+/// The result is not a `zeroship_data_sql::SchemaName`: this crate is below that
 /// one, and the validation belongs at the mint, not here.
 #[must_use]
 pub fn schema_name(app: &AppId) -> String {

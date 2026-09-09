@@ -329,7 +329,7 @@ seat_app_owner "$APP" "$CREATOR" owner psql_exec
 # That is the state a creator reaches by following the documented chain up to
 # `zeroship deploy`, and this arm pins the thing that is missing: the per-app
 # role. Every `env.db` call opens a transaction and issues
-# `SET LOCAL ROLE "app_<id>_role"` (crates/zeroship-data-engine/src/auth/bootstrap.rs), so
+# `SET LOCAL ROLE "app_<id>_role"` (crates/zeroship-data-orm/src/auth/bootstrap.rs), so
 # an absent role fails the first database call and reaches the end user as an
 # opaque `internal error`.
 #
@@ -454,7 +454,7 @@ done
 # that the ASSERTION discriminates.
 #
 # THE PRODUCT ARM IS PROVEN TOO, separately and by hand (2026-08-11, not
-# automated here because it needs a rebuild). `crates/zeroship-data-engine/src/exec.rs`
+# automated here because it needs a rebuild). `crates/zeroship-data-orm/src/exec.rs`
 # Postgres write path, `emit_db_metric(app_id, DB_WRITES, 1)` -> `2`, one line,
 # then `cargo build --release -p zeroship-worker` and this harness unmutated:
 #   db_writes=62 db_rows_written=31 rows=31   -> RED, "does not match Postgres"

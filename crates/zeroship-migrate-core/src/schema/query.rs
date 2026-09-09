@@ -268,7 +268,7 @@ mod schema_renderer_tests {
  * next person to add encrypted-column support would have built on top of it.
  */
 
-/// Platform-owned collection prefixes mirrored by `zeroship-data-query-builder`.
+/// Platform-owned collection prefixes mirrored by `zeroship-data-sql`.
 ///
 /// This is public only so the downstream parity suite can enforce exact
 /// agreement without adding a production dependency across the engine boundary.
@@ -4045,7 +4045,7 @@ columns = [
     }
 
     /// `__zero_migrate` is NOT reserved, and `__zeroship` is. The engine half of
-    /// the pair; `zeroship-data-query-builder` carries the same assertion, and the slice pin
+    /// the pair; `zeroship-data-sql` carries the same assertion, and the slice pin
     /// keeps the two lists identical.
     ///
     /// This asserted the opposite until 2026-09-07. The prefix fenced an empty

@@ -56,7 +56,7 @@ use crate::broker::{
     has_subscribers,
     publish,
 };
-use zeroship_data_core::error::DbError;
+use zeroship_data_orm::error::DbError;
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -65,7 +65,7 @@ use zeroship_data_core::error::DbError;
 /// Errors raised by one controlled WAL-consumer attempt.
 ///
 /// Note: pre-flight failures from [`WalConsumer::new`] do NOT flow
-/// through this enum — they are surfaced as [`zeroship_data_core::error::DbError`]
+/// through this enum — they are surfaced as [`zeroship_data_orm::error::DbError`]
 /// directly so the SDK can branch on `.code` (e.g. `invalid_app_id`
 /// vs `not_provisioned`). See the doc comment on `WalConsumer::new`.
 #[derive(Debug)]
@@ -190,7 +190,7 @@ impl WalConsumer {
     ///
     /// # Errors
     ///
-    /// Returns a typed [`zeroship_data_core::error::DbError`] so the SDK can
+    /// Returns a typed [`zeroship_data_orm::error::DbError`] so the SDK can
     /// distinguish failure classes by `.code`:
     ///
     /// - [`DbError::ValidationFailed`] with `code = "invalid_app_id"`:

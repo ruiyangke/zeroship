@@ -20,7 +20,7 @@
 //!
 //! # The absences, and the failure each prevents
 //!
-//! Following `zeroship_data_query_builder::schema_name::SchemaName` and
+//! Following `zeroship_data_sql::schema_name::SchemaName` and
 //! [`crate::app_id::AppId`], a typed entity id is characterised by what it
 //! refuses:
 //!

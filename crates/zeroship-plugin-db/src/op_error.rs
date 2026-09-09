@@ -13,7 +13,7 @@
 //! the point: every file that lowers a domain error to the runtime says so in
 //! its imports.
 
-use zeroship_data_core::error::DbError;
+use zeroship_data_orm::error::DbError;
 use zeroship_runtime::state::OpError;
 
 /// Lower a domain error to the runtime's op-boundary error.
@@ -106,7 +106,7 @@ impl ToOpError for DbError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zeroship_data_core::error::*;
+    use zeroship_data_orm::error::*;
 
     #[test]
     fn missing_role_message_names_the_command_and_leaks_no_identity() {
@@ -317,32 +317,44 @@ mod tests {
                 other => panic!("expected CodedError, got {other:?}"),
             }
         }
-        assert!(op_hint(DbError::Serialization {
-            message: "x".into()
-        })
-        .is_some());
-        assert!(op_hint(DbError::Transient {
-            message: "x".into()
-        })
-        .is_some());
+        assert!(
+            op_hint(DbError::Serialization {
+                message: "x".into()
+            })
+            .is_some()
+        );
+        assert!(
+            op_hint(DbError::Transient {
+                message: "x".into()
+            })
+            .is_some()
+        );
         // LockContention is retriable — must also carry a hint.
-        assert!(op_hint(DbError::LockContention {
-            message: "x".into()
-        })
-        .is_some());
+        assert!(
+            op_hint(DbError::LockContention {
+                message: "x".into()
+            })
+            .is_some()
+        );
         // Non-retryable violations must not advise a retry.
-        assert!(op_hint(DbError::UniqueViolation {
-            message: "x".into()
-        })
-        .is_none());
-        assert!(op_hint(DbError::FkViolation {
-            message: "x".into()
-        })
-        .is_none());
-        assert!(op_hint(DbError::Internal {
-            message: "x".into()
-        })
-        .is_none());
+        assert!(
+            op_hint(DbError::UniqueViolation {
+                message: "x".into()
+            })
+            .is_none()
+        );
+        assert!(
+            op_hint(DbError::FkViolation {
+                message: "x".into()
+            })
+            .is_none()
+        );
+        assert!(
+            op_hint(DbError::Internal {
+                message: "x".into()
+            })
+            .is_none()
+        );
     }
 
     /// The helper returns the first element of a non-empty slice. The
@@ -601,7 +613,7 @@ mod tests {
     }
 
     /// Relocated from `query.rs`'s test module
-    /// (which moved to the leaf crate `zeroship-data-query-builder`, where `DbError`
+    /// (which moved to the leaf crate `zeroship-data-sql`, where `DbError`
     /// is not nameable). Pins the end-to-end lift: the schema-crate
     /// validator `validate_field_name_for_declaration` rejects a reserved
     /// system field, and `From<QueryError> for DbError` (which lives here)

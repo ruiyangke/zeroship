@@ -57,9 +57,9 @@ use zeroship_migrate::schema::query::FkEmission;
 use std::rc::Rc;
 
 use compio_postgres::{NoTls, Pool};
-use zeroship_data_core::binding::DbBinding;
-use zeroship_data_core::error::DbError;
-use zeroship_data_query_builder::value::{value, Value};
+use zeroship_data_orm::binding::DbBinding;
+use zeroship_data_orm::error::DbError;
+use zeroship_data_sql::value::{Value, value};
 use zeroship_plugin_db::compile::{BuiltQuery, SqlDialect};
 use zeroship_plugin_db::tx_route::{CapturedRoute, TxRoute};
 
@@ -119,7 +119,7 @@ async fn fixture(pool: &Rc<Pool>, url: &str, app: &str, collection: &str, schema
         .await
         .unwrap();
     let ddl = fixture_table_sql(
-        &zeroship_data_query_builder::SchemaName::new(app).expect("fixture schema name"),
+        &zeroship_data_sql::SchemaName::new(app).expect("fixture schema name"),
         collection,
         &schema,
         &FkEmission::Inline,

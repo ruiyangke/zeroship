@@ -1,13 +1,13 @@
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use zeroship_data_query_builder::value::{value, Value};
+use zeroship_data_sql::value::{Value, value};
 use zeroship_plugin_db::service::{DbService, DbServiceConfig};
 use zeroship_runtime::channel::CancelFlag;
 use zeroship_runtime::plugin::NativePlugin;
 use zeroship_runtime::runtime::Runtime;
-use zeroship_runtime::{init_v8, EnvSnapshot, FetchOutcome, ModuleEntry, RequestCtx, SettledFetch};
+use zeroship_runtime::{EnvSnapshot, FetchOutcome, ModuleEntry, RequestCtx, SettledFetch, init_v8};
 
 pub struct MatrixSnapshot {
     pub seed: Value,
@@ -512,13 +512,15 @@ pub fn dispatch_zs_with_descriptor(
         specifier: "index.js".into(),
         source: source.into(),
     }];
-    let plugins: Vec<Arc<dyn NativePlugin>> = vec![DbService::new(DbServiceConfig {
-        url: url.to_string(),
-        worker_id: "parity-test-worker".to_string(),
-        meter: None,
-    })
-    .expect("db service")
-    .plugin()];
+    let plugins: Vec<Arc<dyn NativePlugin>> = vec![
+        DbService::new(DbServiceConfig {
+            url: url.to_string(),
+            worker_id: "parity-test-worker".to_string(),
+            meter: None,
+        })
+        .expect("db service")
+        .plugin(),
+    ];
     let env_vars = std::collections::HashMap::from([("APP_ID".to_string(), app_id.to_string())]);
     let runtime = Runtime::builder()
         .modules(modules)

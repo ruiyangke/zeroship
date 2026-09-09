@@ -219,13 +219,13 @@ still happens elsewhere. It does not happen anywhere. Measured across
 
   **CORRECTED 2026-09-04: ALL THREE OF THOSE NUMBERS ARE NOW WRONG, and the
   cited file does not exist.** The 2026-09-03 engine extraction moved the data
-  plane out of `zeroship-plugin-db` into `zeroship-data-engine`, which
+  plane out of `zeroship-plugin-db` into `zeroship-data-orm`, which
   invalidated the measurement rather than merely the path - so repointing the
   citation alone would have left two stale counts standing beside a freshly
   corrected link. Re-measured today with `grep -rio epoch`:
   `crates/zeroship-schema/src/` **6** (not 0), `crates/zeroship-plugin-db/src/`
-  **0** (not 20), `crates/zeroship-data-engine/src/` **69**. The quoted
-  negation is verbatim at `crates/zeroship-data-engine/src/auth/mod.rs:36-38`.
+  **0** (not 20), `crates/zeroship-data-orm/src/` **69**. The quoted
+  negation is verbatim at `crates/zeroship-data-orm/src/auth/mod.rs:36-38`.
 
   The 69 also change what the bullet ARGUED. It was offered as evidence that the
   data plane does not carry an epoch; the data plane now carries the whole
@@ -241,7 +241,7 @@ still happens elsewhere. It does not happen anywhere. Measured across
 is left standing rather than deleted because a later document leans on it.** The
 carrier and all four of the code citations below are gone.
 `crates/zeroship-plugin-db/src/audit.rs` does not exist; the deletion is recorded
-in two places - `crates/zeroship-data-engine/src/backend/mod.rs:300-304` says the
+in two places - `crates/zeroship-data-orm/src/backend/mod.rs:300-304` says the
 audit-table operations "(`ensure_audit_table`, `next_schema_version`,
 `write_audit_row`, ...) and the `IndexBuilder` capability they existed to record
 are both DELETED", because with the data plane's last DDL removed the provenance

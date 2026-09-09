@@ -72,7 +72,7 @@ argument.** Measured 2026-09-01 across the whole tree.
 `Display`-round-tripped at `:190`, and folded into the policy seal at
 `crates/zeroship-migrate-policy/src/seal.rs:517`. That is the complete set of
 readers. The write pass matches it as `Increment(_)` and DISCARDS the amount
-(`crates/zeroship-data-engine/src/crud/system_fields_pass.rs:383`); the actual
+(`crates/zeroship-data-orm/src/crud/system_fields_pass.rs:383`); the actual
 step is a literal `+ 1` emitted from three places in `zeroship-schema`
 (`query.rs:4279` update, `:4780` soft delete, `:4825` restore) plus the PG
 upsert's `COALESCE(..., 0) + 1` at `:6476`.
@@ -370,7 +370,7 @@ generator instead.
 **`SYSTEM_FIELD_NAMES` is NOT one of them, and this paragraph said it was.** It
 is a trusted producer, for a reason that only became visible once the write pass
 was converted: `implicit_read_projection_parts`
-(`crates/zeroship-schema/src/query.rs:3644-3656`) runs two loops, and only the (DELETED; runtime compilation now lives in `crates/zeroship-data-query-builder/src/compile.rs`, and migration DDL in `crates/zeroship-migrate-core/src/schema/query.rs`.)
+(`crates/zeroship-schema/src/query.rs:3644-3656`) runs two loops, and only the (DELETED; runtime compilation now lives in `crates/zeroship-data-sql/src/compile.rs`, and migration DDL in `crates/zeroship-migrate-core/src/schema/query.rs`.)
 SECOND consults `readable`. The seven are projected unconditionally; everything
 else is projected at the creator-authored descriptor's discretion. Deleting the
 const would move the platform's own columns into the discretionary loop, where

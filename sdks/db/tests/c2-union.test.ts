@@ -6,7 +6,7 @@
  * expansion that hands off to the Rust DDL emitter.
  *
  * Postgres-side DDL coverage lives in
- * `crates/zeroship-data-query-builder/src/compile.rs` golden tests.
+ * `crates/zeroship-data-sql/src/compile.rs` golden tests.
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";

@@ -31,7 +31,7 @@ cited line:
 
 | Fragment | Origin | Layer |
 | --- | --- | --- |
-| `db: autocommit session setup (per-app <U+00A7>17.5 + DB-1 guards): ` | `crates/zeroship-data-engine/src/exec.rs:326` (literal), applied at `exec.rs:322-329` | plugin-db call site |
+| `db: autocommit session setup (per-app <U+00A7>17.5 + DB-1 guards): ` | `crates/zeroship-data-orm/src/exec.rs:326` (literal), applied at `exec.rs:322-329` | plugin-db call site |
 | inner `db: ` | `crates/zeroship-plugin-db/src/error.rs:721` -- `format!("db: {e}")` in `walk_pg_chain` | plugin-db classifier |
 | `db error` | `libs/compio-postgres/src/error/mod.rs:395` -- `Kind::Db => fmt.write_str("db error")` | driver Display |
 | ` <U+2014> caused by: ` | `crates/zeroship-plugin-db/src/error.rs:724` -- `msg.push_str(&format!(" <U+2014> caused by: {src}"))` | plugin-db source-chain walk |
@@ -185,20 +185,20 @@ multi-layer database error the platform produces.
 This is the finding most improved by classification. **The majority of guard
 tokens are legitimate.** `SEC-1` and `SEC-4` appear in `assert!` messages
 (`crates/zeroship-plugin-db/src/context.rs:1206-1275`,
-`crates/zeroship-data-engine/src/crud/mask_pass.rs:1055-1065`) -- a DEVELOPER audience,
+`crates/zeroship-data-orm/src/crud/mask_pass.rs:1055-1065`) -- a DEVELOPER audience,
 where naming the guard being tested is exactly right. A blanket ban on guard
 tokens in strings would delete these correctly-written test assertions.
 
 The runtime offenders are a small, tightly-scoped set:
 
-- `crates/zeroship-data-engine/src/exec.rs:316` -- `db: autocommit BEGIN (per-app U+00A7 17.5 + DB-1 guards): `
-- `crates/zeroship-data-engine/src/exec.rs:326` -- `db: autocommit session setup (...)` (the anchor)
-- `crates/zeroship-data-engine/src/exec.rs:344` -- `db: autocommit COMMIT (...)`
-- `crates/zeroship-data-engine/src/transaction/mod.rs:171` -- `db: tx session setup (...)`
-- `crates/zeroship-data-engine/src/auth/bootstrap.rs:1786` -- `per-app role MUST be NOREPLICATION (U+00A7 17.5 slot-ownership-stays-platform)`
+- `crates/zeroship-data-orm/src/exec.rs:316` -- `db: autocommit BEGIN (per-app U+00A7 17.5 + DB-1 guards): `
+- `crates/zeroship-data-orm/src/exec.rs:326` -- `db: autocommit session setup (...)` (the anchor)
+- `crates/zeroship-data-orm/src/exec.rs:344` -- `db: autocommit COMMIT (...)`
+- `crates/zeroship-data-orm/src/transaction/mod.rs:171` -- `db: tx session setup (...)`
+- `crates/zeroship-data-orm/src/auth/bootstrap.rs:1786` -- `per-app role MUST be NOREPLICATION (U+00A7 17.5 slot-ownership-stays-platform)`
 - `crates/zeroship-core/src/logout_token.rs:195,204` -- `(forbidden by OIDC BCL U+00A7 2.4)` (arguably legitimate: a public RFC citation, not an internal doc)
 - `crates/zeroship-runtime/src/web/streams/readable_default_controller.rs:1230` -- `see streams-native.md U+00A7 VII`
-- `crates/zeroship-schema/src/query.rs:8728` -- `(was INTEGER pre-PR 3 -- see proposal U+00A7 9 PR 3)` (DELETED; runtime compilation now lives in `crates/zeroship-data-query-builder/src/compile.rs`, and migration DDL in `crates/zeroship-migrate-core/src/schema/query.rs`.)
+- `crates/zeroship-schema/src/query.rs:8728` -- `(was INTEGER pre-PR 3 -- see proposal U+00A7 9 PR 3)` (DELETED; runtime compilation now lives in `crates/zeroship-data-sql/src/compile.rs`, and migration DDL in `crates/zeroship-migrate-core/src/schema/query.rs`.)
 
 **Four lines in `plugin-db` account for the entire observed problem.** That is a
 mechanical fix, not a program.
@@ -248,7 +248,7 @@ sharing one variant. The mechanism exists; the variants are too coarse.
 The `leak` regex tag returned 833 hits, 52 in err/log positions in non-test
 files. **This tag is heavily false-positive and its raw count should not be
 quoted.** Inspection showed the bulk are SQL DDL strings matching on `_role` or
-`information_schema` -- e.g. `crates/zeroship-data-engine/src/auth/bootstrap.rs:147,160,728`
+`information_schema` -- e.g. `crates/zeroship-data-orm/src/auth/bootstrap.rs:147,160,728`
 (`CREATE SCHEMA`, `GRANT EXECUTE`), `crates/zeroship-migrate-server/src/provisioning.rs:123`.
 These are SQL being *built*, not messages being *shown*.
 
@@ -292,7 +292,7 @@ Specific leak sites worth fixing, all traced to OPERATOR-ONLY over HTTP:
   verbatim (`crates/zeroship-plugin-kv/src/error.rs:187`, `Err(_) => raw.to_string()`) --
   and a malformed URL can still contain a password. Reaches app JS; requires
   operator misconfiguration.
-- **`crates/zeroship-data-postgres/src/postgres.rs:976-1035`** -- pg_dump/pg_restore
+- **`crates/zeroship-data-orm/src/backend/postgres/implementation.rs`** -- pg_dump/pg_restore
   stderr passthrough carrying internal hostname, IP, port and role name; the
   catch-all arm keeps 4096 bytes of raw stderr.
 
@@ -589,8 +589,8 @@ where typographic dashes are arguably correct. Recommend scoping to
 `sdks/ui`.
 
 **Option 1b. Delete doc markers and guard IDs from the four runtime sites.**
-`crates/zeroship-data-engine/src/exec.rs:316,326,344` and
-`crates/zeroship-data-engine/src/transaction/mod.rs:171`. Replace
+`crates/zeroship-data-orm/src/exec.rs:316,326,344` and
+`crates/zeroship-data-orm/src/transaction/mod.rs:171`. Replace
 `db: autocommit session setup (per-app U+00A7 17.5 + DB-1 guards): ` with
 `db: autocommit session setup: `. The guard rationale belongs in the comment
 directly above, where it already is (`exec.rs:301`).
@@ -602,7 +602,7 @@ Cost: under an hour. Risk: very low.
 `{error}` at `crates/zeroship-control/src/cron/workflow_engine.rs:1084` to match its
 sibling at `:1080`; interpolate `redact_url(...)` rather than the raw inner error
 at `crates/zeroship-plugin-kv/src/backend/redis.rs:170`; and either bound or drop the
-4096-byte raw-stderr arm at `crates/zeroship-data-postgres/src/postgres.rs:976-1035`.
+4096-byte raw-stderr arm at `crates/zeroship-data-orm/src/backend/postgres/implementation.rs`.
 Cost: an hour. Risk: very low. All three are currently contained by the 5xx rail,
 so this is defence in depth rather than an active exposure -- which is also the
 argument for doing it cheaply now rather than scheduling it.

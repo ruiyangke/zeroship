@@ -2,7 +2,7 @@
 //!
 //! # Why this target exists separately from the IR's own tests
 //!
-//! `zeroship-data-query-builder` declares no dependencies at all, so its tests can
+//! `zeroship-data-sql` declares no dependencies at all, so its tests can
 //! compare the SQL it renders against a fixture string and nothing more. A
 //! string comparison cannot tell whether `"embedding" <=> $1::vector` is
 //! syntax `pgvector` accepts, whether `ST_DWithin` over a `geography` column
@@ -29,10 +29,10 @@
 //! # What these arms do NOT establish
 //!
 //! **The shipped product path does not use the IR.** No crate outside
-//! `zeroship-data-query-builder` depends on it - the dependency this target adds is a
+//! `zeroship-data-sql` depends on it - the dependency this target adds is a
 //! `[dev-dependencies]` one, declared for these tests. `env.db.<coll>.search()`
-//! still reaches `zeroship_data_query_builder::compile::build_vector_search`
-//! (`crates/zeroship-data-postgres/src/postgres.rs:456`).
+//! still reaches `zeroship_data_sql::compile::build_vector_search`
+//! (`crates/zeroship-data-orm/src/backend/postgres/implementation.rs:456`).
 //!
 //! That is why `the_ir_and_the_shipped_builder_rank_identically` is here. It is
 //! the only arm that ties the two together, and it does it the one way that is
@@ -46,9 +46,9 @@
 #![allow(clippy::items_after_statements)]
 
 use compio_postgres::Pool;
-use zeroship_data_query_builder::render::postgres::render_search;
-use zeroship_data_query_builder::value;
-use zeroship_data_query_builder::{
+use zeroship_data_sql::render::postgres::render_search;
+use zeroship_data_sql::value;
+use zeroship_data_sql::{
     CompareOp, GeoPoint, Ident, IdentRole, Literal, Operand, Predicate, ProjectedField, Projection,
     QueryVector, RadiusMetres, RowLimit, Search, SearchCriterion, VectorMetric,
 };
@@ -186,7 +186,7 @@ fn vector_text(values: &[f32]) -> String {
     out
 }
 
-/// The seam a consumer of [`zeroship_data_query_builder::RenderedSql`] must implement:
+/// The seam a consumer of [`zeroship_data_sql::RenderedSql`] must implement:
 /// a typed parameter to whatever the driver takes.
 ///
 /// It is written **here** rather than in the IR because it is the driver's
@@ -195,7 +195,7 @@ fn vector_text(values: &[f32]) -> String {
 ///
 /// Text format is used because it is the channel the shipped path uses
 /// (`query_text_params`, reached from
-/// `crates/zeroship-data-engine/src/exec.rs`), so the differential arm below
+/// `crates/zeroship-data-orm/src/exec.rs`), so the differential arm below
 /// compares two statements over one execution mechanism rather than over two.
 fn bind_text(params: &[Literal]) -> Vec<String> {
     params
@@ -274,7 +274,7 @@ async fn ranked_ids(pool: &Pool, plan: &Search) -> Vec<String> {
 /// server - so no `ToSql` impl can be written against it in advance.
 ///
 /// That is precisely the constraint
-/// [`zeroship_data_query_builder::render::ValueFormat::vector_placeholder`] documents,
+/// [`zeroship_data_sql::render::ValueFormat::vector_placeholder`] documents,
 /// observed rather than quoted, and it is why `query_text_params` (an empty OID
 /// list, server-side inference) is the channel both this fixture and the
 /// shipped path use.
@@ -401,19 +401,19 @@ fn the_ir_and_the_shipped_builder_rank_identically() {
             "tenant_id": { "type": "number" },
             "embedding": { "type": "vector", "vectorDims": DIMS },
         });
-        let shipped = zeroship_data_query_builder::compile::build_vector_search(
-            &zeroship_data_query_builder::SchemaName::new(SCHEMA).expect("fixture schema name"),
+        let shipped = zeroship_data_sql::compile::build_vector_search(
+            &zeroship_data_sql::SchemaName::new(SCHEMA).expect("fixture schema name"),
             "docs",
             "embedding",
             &query,
             10,
-            zeroship_data_query_builder::descriptors::VectorMetric::Cosine,
+            zeroship_data_sql::descriptors::VectorMetric::Cosine,
             &value!({ "tenant_id": 1 }),
             &schema_hint,
         )
         .expect("the shipped builder accepts this search");
         let shipped_params = &shipped.params;
-        let shipped_rows = zeroship_data_postgres::params::query(
+        let shipped_rows = zeroship_data_orm::backend::postgres::params::query(
             &pool.acquire().await.unwrap(),
             &shipped.sql,
             shipped_params,
@@ -501,7 +501,7 @@ fn postgres_serves_the_inner_product_that_sqlite_refuses() {
         );
 
         // The SQLite half: the same metric, refused.
-        use zeroship_data_core::binding::DbBinding;
+        use zeroship_data_orm::binding::DbBinding;
         use zeroship_plugin_db::backend::{VectorIndex, VectorMetric as BackendMetric};
         let dir = tempfile::tempdir().expect("tempdir");
         let sqlite = zeroship_plugin_db::backend_selection::new_sqlite_backend(
@@ -518,13 +518,13 @@ fn postgres_serves_the_inner_product_that_sqlite_refuses() {
                 &unit_vector(3),
                 5,
                 BackendMetric::InnerProduct,
-                &zeroship_data_query_builder::value::Value::Null,
-                &zeroship_data_query_builder::value::Value::Null,
+                &zeroship_data_sql::value::Value::Null,
+                &zeroship_data_sql::value::Value::Null,
             )
             .await
             .expect_err("vec0 has no inner-product metric");
         let refused_code = match &refused {
-            zeroship_data_core::error::DbError::Configuration { code, .. } => *code,
+            zeroship_data_orm::error::DbError::Configuration { code, .. } => *code,
             other => panic!("expected a typed Configuration refusal, got {other:?}"),
         };
         assert_eq!(refused_code, "vector_unsupported_metric");
@@ -541,13 +541,13 @@ fn postgres_serves_the_inner_product_that_sqlite_refuses() {
                 &unit_vector(3),
                 5,
                 BackendMetric::Cosine,
-                &zeroship_data_query_builder::value::Value::Null,
-                &zeroship_data_query_builder::value::Value::Null,
+                &zeroship_data_sql::value::Value::Null,
+                &zeroship_data_sql::value::Value::Null,
             )
             .await
             .expect_err("there is no table, so this fails too - but for another reason");
         let other_code = match &other {
-            zeroship_data_core::error::DbError::Configuration { code, .. } => Some(*code),
+            zeroship_data_orm::error::DbError::Configuration { code, .. } => Some(*code),
             _ => None,
         };
         assert_ne!(
@@ -656,7 +656,7 @@ fn a_geo_search_finds_the_near_rows_and_the_coordinate_order_is_load_bearing() {
 /// Asserted by executing the **same SQL string** twice with different arguments
 /// and getting different row counts - which is the property the shipped SQLite
 /// arm does not have, formatting `k` into the statement
-/// (`crates/zeroship-data-sqlite/src/vector.rs:117`) so every `k`
+/// (`crates/zeroship-data-orm/src/backend/sqlite/vector.rs:117`) so every `k`
 /// is a distinct statement and a distinct cache entry.
 #[test]
 fn one_statement_serves_every_k() {

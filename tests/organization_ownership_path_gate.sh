@@ -190,7 +190,7 @@ names_a_per_app_membership_table() {
 }
 
 # The symbols the deleted authority cache was made of. Each is distinctive:
-# `cache_get`/`cache_put` are NOT here, because `zeroship-data-engine`'s mask
+# `cache_get`/`cache_put` are NOT here, because `zeroship-data-orm`'s mask
 # policy has its own per-thread cache under those names and banning them would
 # be banning an unrelated, legitimate thing.
 CACHE_SYMBOLS='EntityCache EntityCacheKey ENTITY_CACHE ENTITY_CACHE_TTL ENTITY_CACHE_CAPACITY lock_entity_cache resource_cache_key'

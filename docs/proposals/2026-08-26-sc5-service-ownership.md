@@ -112,10 +112,10 @@ handle") and defines by pointing here.
 **The consuming side is built; the producing side is not.** The reducer's
 `AuthorityIdentity`, `AuthorityDomain`, `SchemaEpoch`, `LifecycleState`,
 `MaskCeiling`, `classify` and all three `Verdict` arms exist and are tested
-(`crates/zeroship-data-engine/src/transaction/reducer/identity.rs`). The single
+(`crates/zeroship-data-orm/src/transaction/reducer/identity.rs`). The single
 production construction site mints incarnation 0, domain `(0, 0)`, epoch 0,
 `Stable` and an empty ceiling, and `observation_for` echoes the expectation back
-(`crates/zeroship-data-engine/src/transaction/driver.rs:141-165`, which says so in
+(`crates/zeroship-data-orm/src/transaction/driver.rs:141-165`, which says so in
 its own doc comment), so `classify` can only return `Current` in production and
 the three typed denial codes are unreachable outside tests. Fork C is the input
 that machine is waiting for; `driver.rs`'s two functions are the ones that change.
@@ -232,7 +232,7 @@ truth about the tier and is worth stating rather than simulating.
 The attach generation fences a *file*. What ships is app-keyed exactly like
 production: `SqliteBackend::attach_app_file` takes an `app_id`, derives
 `zs-{app_id}.sqlite`, aliases the attachment by app id and dedups on
-`app_id_cache` (`crates/zeroship-data-sqlite/src/lib.rs:680-704`, field at
+`app_id_cache` (`crates/zeroship-data-orm/src/backend/sqlite/mod.rs:680-704`, field at
 `:167`). One file per app, one app per file. If an app may hold several
 databases, the file name, the alias and the cache key can no longer all be the
 app id.
@@ -447,7 +447,7 @@ the in-flight operation returns its own result unaffected (it uses the operator
 pool and touches no data-plane pool); the next operation for the same app is denied
 at its authority read. Red when deprovision yanks the backend from under live `Rc`
 holders. **Scoped to PostgreSQL deliberately:** SC-2's `Command::ReattachFile`
-(`crates/zeroship-data-sqlite/src/session.rs:306`) **must** settle or abort
+(`crates/zeroship-data-orm/src/backend/sqlite/session.rs:306`) **must** settle or abort
 outstanding reservations and detach both connections before restore's file swap, so
 an unscoped no-abort rule and SC-2 are jointly unsatisfiable on SQLite. Graceful
 deprovision and forced file detach are different events.

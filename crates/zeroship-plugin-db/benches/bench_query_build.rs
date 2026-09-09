@@ -48,8 +48,8 @@
 
 use std::time::Duration;
 
-use criterion::{black_box, criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
-use zeroship_data_query_builder::value;
+use criterion::{BatchSize, BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use zeroship_data_sql::value;
 
 use zeroship_plugin_db::compile::{build_find_with_schema, build_insert};
 
@@ -61,7 +61,7 @@ use zeroship_plugin_db::compile::{build_find_with_schema, build_insert};
 /// does the same identifier validation and projection expansion it does at
 /// runtime — a benchmark against a `SELECT *` builder would be measuring work
 /// production no longer performs.
-fn users_schema() -> zeroship_data_query_builder::value::Value {
+fn users_schema() -> zeroship_data_sql::value::Value {
     value!({
         "status": { "type": "string" },
         "role": { "type": "string" },
@@ -78,13 +78,13 @@ fn users_schema() -> zeroship_data_query_builder::value::Value {
 // ---------------------------------------------------------------------------
 
 /// Trivial: `find()` with no filter. Smallest query the SDK can produce.
-fn empty_filter() -> zeroship_data_query_builder::value::Value {
+fn empty_filter() -> zeroship_data_sql::value::Value {
     value!({})
 }
 
 /// Median: `find({ status: "active", role: "admin" })`. The most common
 /// shape in CRUD-style SDK use (1-3 top-level equalities).
-fn small_filter() -> zeroship_data_query_builder::value::Value {
+fn small_filter() -> zeroship_data_sql::value::Value {
     value!({
         "status": "active",
         "role": "admin",
@@ -93,7 +93,7 @@ fn small_filter() -> zeroship_data_query_builder::value::Value {
 
 /// Complex: `$and` + `$or` + `$in` + range. Mirrors the harder query
 /// shape an analytics page or admin filter would produce.
-fn complex_filter() -> zeroship_data_query_builder::value::Value {
+fn complex_filter() -> zeroship_data_sql::value::Value {
     value!({
         "$and": [
             { "status": { "$in": ["active", "pending", "trial"] } },
@@ -107,7 +107,7 @@ fn complex_filter() -> zeroship_data_query_builder::value::Value {
 }
 
 /// Insert doc — typical user record shape.
-fn small_insert_doc() -> zeroship_data_query_builder::value::Value {
+fn small_insert_doc() -> zeroship_data_sql::value::Value {
     value!({
         "id": "usr_01HJQK2A8R000000000000000",
         "email": "alice@example.com",
@@ -123,7 +123,7 @@ fn small_insert_doc() -> zeroship_data_query_builder::value::Value {
 // ---------------------------------------------------------------------------
 
 fn bench_build_find(c: &mut Criterion) {
-    let schema_name = zeroship_data_query_builder::SchemaName::new("app_01HJQK2A8R000000000000000")
+    let schema_name = zeroship_data_sql::SchemaName::new("app_01HJQK2A8R000000000000000")
         .expect("benchmark schema");
     let collection = "users";
     let schema = users_schema();
@@ -164,7 +164,7 @@ fn bench_build_find(c: &mut Criterion) {
 }
 
 fn bench_build_insert(c: &mut Criterion) {
-    let schema_name = zeroship_data_query_builder::SchemaName::new("app_01HJQK2A8R000000000000000")
+    let schema_name = zeroship_data_sql::SchemaName::new("app_01HJQK2A8R000000000000000")
         .expect("benchmark schema");
     let collection = "users";
     let doc = small_insert_doc();

@@ -11,7 +11,7 @@
 //!   set on `Db` under a V8 private symbol (`ZS_PLATFORM`). Holds the
 //!   platform-internal callables; unreachable from creator JS.
 //! - [`collection`] — per-collection CRUD. Each method walks its
-//!   `v8::Local<Value>` args directly into a `zeroship_data_query_builder::value::Value` via
+//!   `v8::Local<Value>` args directly into a `zeroship_data_sql::value::Value` via
 //!   `v8_bridge::decode_native` (no JSON.stringify/parse) and
 //!   calls a shared [`dispatch`] helper.
 //! - [`dispatch`] — the 17 `dispatch_*` helpers those methods call. They

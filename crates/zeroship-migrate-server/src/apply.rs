@@ -7,7 +7,7 @@ use uuid::Uuid;
 use zeroship_core::app_derivation;
 use zeroship_core::app_id::AppId;
 use zeroship_core::database_role::{per_app_role_name, PerAppRoleNameError};
-use zeroship_data_query_builder::SchemaName;
+use zeroship_data_sql::SchemaName;
 use zeroship_migrate::apply::journal::DeployRecoveryScope;
 use zeroship_migrate::{
     resolve_create_table_policy, Approval, ApprovalScope, DeclarativeApplyError, EngineError,
@@ -206,7 +206,7 @@ pub enum ApplyRequestError {
     #[error("inspect migration database schema: {0}")]
     InspectSchema(compio_postgres::Error),
     /// `reason` is a rendered string rather than a `#[source]` because
-    /// `zeroship_data_query_builder::compile::QueryError` implements `Display` but not
+    /// `zeroship_data_sql::compile::QueryError` implements `Display` but not
     /// `std::error::Error`, so it cannot be a source in this chain.
     #[error("app schema name {schema:?} is not a legal identifier: {reason}")]
     SchemaName { schema: String, reason: String },
@@ -1338,9 +1338,9 @@ impl RuntimeRoleProvisioningSql {
 ///
 /// # Why a full revoke, SELECT included
 ///
-/// The data plane never reads the journal. `zeroship-data-engine`'s
+/// The data plane never reads the journal. `zeroship-data-orm`'s
 /// `descriptor.rs` is its sole schema authority (the runtime descriptor rides in
-/// the `.zship`), and no CRUD, transaction or CDC path in `zeroship-data-engine`
+/// the `.zship`), and no CRUD, transaction or CDC path in `zeroship-data-orm`
 /// or `zeroship-plugin-db` names any journal table. Nothing is left to grant.
 ///
 /// # Why the sweep is by PREFIX and takes the audit table too
@@ -1510,7 +1510,7 @@ fn grant_runtime_audit_append_privileges_sql(schema: &SchemaName, runtime_role: 
 ///
 /// The role this composes is what the data plane's `SET LOCAL ROLE` must name,
 /// and the data plane composes that name on its own side
-/// (`zeroship_data_postgres::pg_session_sql::tx_session_setup_sql`). While both
+/// (`zeroship_data_orm::backend::postgres::pg_session_sql::tx_session_setup_sql`). While both
 /// took `&str`, "they agree" was only ever true of the value each caller
 /// happened to hold: the parameter here is the SCHEMA and the one there was the
 /// TENANT, and the two are the same string only until the physical schema stops

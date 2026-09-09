@@ -2,18 +2,18 @@
 
 use std::future::Future;
 
-use zeroship_data_query_builder::value::Value;
+use zeroship_data_sql::value::Value;
 use zeroship_runtime::state::{OpResult, ResolveValue, SharedState};
 
-use zeroship_data_core::binding::DbBinding;
-use zeroship_data_core::error::DbError;
+use zeroship_data_orm::binding::DbBinding;
+use zeroship_data_orm::error::DbError;
 
 use crate::compile;
 use crate::crud::mask_policy::dispatch_set_mask_policy;
 use crate::crud::unmask::{dispatch_bulk_unmask, dispatch_unmask, parse_args, parse_bulk_args};
 use crate::op_error::ToOpError;
 use crate::v8_bridge::{runtime_state, setup_js_promise};
-use zeroship_data_engine::orm::{Operation, Output, PreparedOperation};
+use zeroship_data_orm::orm::{Operation, Output, PreparedOperation};
 
 /// Look up the current request's authenticated actor id (typed_id
 /// string), if any.
@@ -536,7 +536,7 @@ pub(crate) fn dispatch_unmask_field<'s>(
                 // `result.plaintext` directly; for `wraps = bytes` the
                 // SDK base64-decodes on its side.
                 crate::v8_values::resolve(
-                    zeroship_data_query_builder::value!({ "plaintext": result.plaintext }),
+                    zeroship_data_sql::value!({ "plaintext": result.plaintext }),
                     false,
                 )
             },
@@ -586,16 +586,16 @@ pub(crate) fn dispatch_bulk_unmask_field<'s>(
                 // `BTreeMap` serialises as a JSON object with sorted
                 // keys — deterministic for golden-snapshot tests. The reshaping is
                 // JS-wire lowering, so it belongs on this side of the boundary.
-                let mut obj = zeroship_data_query_builder::value::Map::new();
+                let mut obj = zeroship_data_sql::value::Map::new();
                 for (row_pk, cols) in result.results {
-                    let mut col_obj = zeroship_data_query_builder::value::Map::new();
+                    let mut col_obj = zeroship_data_sql::value::Map::new();
                     for (c, pt) in cols {
                         col_obj.insert(c, pt);
                     }
                     obj.insert(row_pk, Value::Object(col_obj));
                 }
                 crate::v8_values::resolve(
-                    zeroship_data_query_builder::value!({ "results": Value::Object(obj) }),
+                    zeroship_data_sql::value!({ "results": Value::Object(obj) }),
                     false,
                 )
             },

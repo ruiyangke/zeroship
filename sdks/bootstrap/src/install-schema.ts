@@ -1139,7 +1139,7 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
   //
   // The native `env.db.transaction(callback, opts)` v8_method owns
   // begin / commit / rollback / nested-savepoint (see
-  // `crates/zeroship-data-engine/src/transaction/mod.rs`). It calls
+  // `crates/zeroship-data-orm/src/transaction/mod.rs`). It calls
   // `callback(rawTxView)` once BEGIN/SAVEPOINT succeeds and returns a
   // promise that resolves with the callback's result on commit (callback
   // resolved) or rejects with the callback's error on rollback (callback

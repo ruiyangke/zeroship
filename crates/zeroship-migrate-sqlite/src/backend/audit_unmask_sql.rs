@@ -69,7 +69,7 @@ use super::authorizer::Mode;
 /// The unqualified table name, shared with the data plane's INSERT.
 ///
 /// `__zeroship_` is a reserved prefix: `zeroship_schema`'s `validate_collection`
-/// (`crates/zeroship-data-query-builder/src/compile.rs`) refuses a creator collection that
+/// (`crates/zeroship-data-sql/src/compile.rs`) refuses a creator collection that
 /// starts with it, which is what keeps a creator from declaring a colliding
 /// table of their own. See the module doc of `provisioning` in
 /// `zeroship-migrate-server` for the caveat on the FORKED copy of that check.

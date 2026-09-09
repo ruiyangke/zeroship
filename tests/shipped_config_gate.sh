@@ -11,13 +11,13 @@
 # ---------------------------------------------------------------------------
 #
 # d6418b39b added `BackendHandle::introspect_schema` to
-# crates/zeroship-data-engine/src/backend_handle.rs as UNGATED production code,
+# crates/zeroship-data-orm/src/backend_handle.rs as UNGATED production code,
 # called from the production write path by
-# `zeroship_data_engine::crud::protection_floor`. The trait it calls,
+# `zeroship_data_orm::crud::protection_floor`. The trait it calls,
 # `SchemaIntrospect`, and both vendor impls were `#[cfg(feature =
 # "test-helpers")]`. So:
 #
-#     cargo check -p zeroship-data-engine --lib   ->  3 errors
+#     cargo check -p zeroship-data-orm --lib   ->  3 errors
 #     cargo check -p zeroship-worker     --bins   ->  1 error
 #
 #     error[E0432]: unresolved import `crate::backend::SchemaIntrospect`
@@ -57,7 +57,7 @@
 # That is why arm 2 here audits the target set and prints rustc's own errors.
 #
 # THE MECHANISM, and it is not a quirk of one crate. `test-helpers` is declared
-# in zeroship-data-engine's `[dev-dependencies]` and NOT in `[dependencies]`
+# in zeroship-data-orm's `[dev-dependencies]` and NOT in `[dependencies]`
 # (the same shape zeroship-plugin-db uses). Under resolver v3 a dev-dependency's
 # features are unified into the normal dependency edge WHENEVER A TEST TARGET IS
 # IN THE UNIT GRAPH. `--all-targets` puts one there. `--all-features` turns the
@@ -69,8 +69,8 @@
 #
 # Measured, on this same tree, from the two `compiler-artifact` feature arrays:
 #
-#     cargo check --workspace --lib --bins    zeroship-data-engine features: []
-#     cargo check --workspace --all-targets   zeroship-data-engine features:
+#     cargo check --workspace --lib --bins    zeroship-data-orm features: []
+#     cargo check --workspace --all-targets   zeroship-data-orm features:
 #                                                 ["test-helpers"]
 #
 # That contrast is what arm 3 rules on directly, and it is why this gate is not
@@ -135,23 +135,10 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 gate_arms_init shipped_config
 
 # ---------------------------------------------------------------------------
-# THE FLOORS. Measured 2026-09-04 by running this gate, whose arms print the
-# sets they derive:
-#
-#   shipped_targets     55   (44 workspace members; 57 lib/bin targets less the
-#                             2 behind `bench-bins`)
-#   built_targets       55   (equal to the expectation on a green tree; the
-#                             arm ALSO refuses on any shortfall, so its floor is
-#                             the vacuity guard and not the verdict)
-#   test_helpers_off     5   (zeroship-data-{core,postgres,sqlite,engine},
-#                             zeroship-plugin-db)
-#
-# Set well under today's numbers: far enough that ordinary editing does not
-# reach them, close enough that a collapse does.
-# ---------------------------------------------------------------------------
+# Floors guard target enumeration and both crates retaining test helpers.
 MIN_TARGETS=30
 MIN_BUILT=30
-MIN_FEATURE_MEMBERS=3
+MIN_FEATURE_MEMBERS=2
 
 fail=0
 TMP="$(mktemp -d)"
