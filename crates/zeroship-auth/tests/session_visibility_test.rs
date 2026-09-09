@@ -14,6 +14,8 @@
 
 use compio_postgres::{connect, Client, NoTls};
 use uuid::Uuid;
+use zeroship_core::app_id::AppId;
+use zeroship_core::user_id::UserId;
 
 use crate::common;
 
@@ -34,8 +36,8 @@ async fn pg() -> Option<Client> {
 
 /// Seed a real `zeroship.apps` row (gateway_sessions.app_id FKs into it) and
 /// return its id.
-async fn seed_app(client: &Client) -> Uuid {
-    let app_id = Uuid::new_v4();
+async fn seed_app(client: &Client) -> AppId {
+    let app_id = AppId::mint();
     let plan_id = "session-visibility-test-plan";
     client
         .execute(
@@ -57,8 +59,8 @@ async fn seed_app(client: &Client) -> Uuid {
             "INSERT INTO zeroship.apps (id, name, plan_id, project_id, organization_id) \
              SELECT $1, $2, $3, p.id, p.organization_id FROM zeroship.projects p WHERE p.id = $4",
             &[
-                &app_id,
-                &format!("iss10-app-{}", app_id.simple()),
+                &app_id.as_str(),
+                &format!("iss10-app-{}", uuid::Uuid::new_v4().simple()),
                 &plan_id,
                 &project_id
             ],
@@ -69,7 +71,7 @@ async fn seed_app(client: &Client) -> Uuid {
 }
 
 /// Seed one live gateway session for `user_id`@`app_id`, returning its id.
-async fn seed_gateway_session(client: &Client, user_id: Uuid, app_id: Uuid, email: &str) -> Uuid {
+async fn seed_gateway_session(client: &Client, user_id: &UserId, app_id: &AppId, email: &str) -> Uuid {
     let rows = client
         .query(
             "INSERT INTO zeroship.gateway_sessions \
@@ -77,7 +79,7 @@ async fn seed_gateway_session(client: &Client, user_id: Uuid, app_id: Uuid, emai
              VALUES ($1, $2, $3::citext, $4, true, \
                      NOW() + INTERVAL '30 minutes', NOW() + INTERVAL '12 hours') \
              RETURNING id",
-            &[&user_id, &app_id, &email, &"Test"],
+            &[&user_id.as_str(), &app_id.as_str(), &email, &"Test"],
         )
         .await
         .expect("seed gateway session");
@@ -109,9 +111,9 @@ async fn cleanup(client: &Client, email: &str) {
 
 /// Delete any apps we seeded (cascades the gateway sessions, but we already
 /// cleaned those). Best-effort.
-async fn cleanup_app(client: &Client, app_id: Uuid) {
+async fn cleanup_app(client: &Client, app_id: &AppId) {
     let _ = client
-        .execute("DELETE FROM zeroship.apps WHERE id = $1", &[&app_id])
+        .execute("DELETE FROM zeroship.apps WHERE id = $1", &[&app_id.as_str()])
         .await;
 }
 
@@ -133,7 +135,7 @@ async fn list_returns_idp_and_gateway_sessions() {
     let idp = sessions::create(
         &client,
         &sessions::CreateSession {
-            user_id: user.id,
+            user_id: &user.id,
             auth_method: "password",
             amr: vec!["pwd".to_string()],
             acr: None,
@@ -146,9 +148,9 @@ async fn list_returns_idp_and_gateway_sessions() {
     .expect("seed idp session");
 
     let app_id = seed_app(&client).await;
-    let gw_id = seed_gateway_session(&client, user.id, app_id, &email).await;
+    let gw_id = seed_gateway_session(&client, &user.id, &app_id, &email).await;
 
-    let list = sessions::list_by_user(&client, user.id)
+    let list = sessions::list_by_user(&client, &user.id)
         .await
         .expect("list_by_user");
 
@@ -166,10 +168,10 @@ async fn list_returns_idp_and_gateway_sessions() {
         .find(|s| s.kind == SessionKind::App)
         .expect("gateway row present");
     assert_eq!(gw_row.id, gw_id);
-    assert_eq!(gw_row.app_id, Some(app_id), "gateway session carries app_id");
+    assert_eq!(gw_row.app_id.as_ref(), Some(&app_id), "gateway session carries app_id");
 
     cleanup(&client, &email).await;
-    cleanup_app(&client, app_id).await;
+    cleanup_app(&client, &app_id).await;
 }
 
 /// list_by_user excludes revoked and expired sessions of BOTH kinds.
@@ -188,7 +190,7 @@ async fn list_excludes_revoked_and_expired() {
     let live = sessions::create(
         &client,
         &sessions::CreateSession {
-            user_id: user.id,
+            user_id: &user.id,
             auth_method: "password",
             amr: vec!["pwd".to_string()],
             acr: None,
@@ -204,7 +206,7 @@ async fn list_excludes_revoked_and_expired() {
     let revoked = sessions::create(
         &client,
         &sessions::CreateSession {
-            user_id: user.id,
+            user_id: &user.id,
             auth_method: "password",
             amr: vec!["pwd".to_string()],
             acr: None,
@@ -230,7 +232,7 @@ async fn list_excludes_revoked_and_expired() {
                 (user_id, auth_method, amr, idle_expires_at, abs_expires_at) \
              VALUES ($1, 'password', ARRAY['pwd'], \
                      NOW() - INTERVAL '1 minute', NOW() + INTERVAL '12 hours')",
-            &[&user.id],
+            &[&user.id.as_str()],
         )
         .await
         .expect("seed expired idp session");
@@ -243,12 +245,12 @@ async fn list_excludes_revoked_and_expired() {
                 (user_id, app_id, email, name, email_verified, idle_expires_at, abs_expires_at) \
              VALUES ($1, $2, $3::citext, $4, true, \
                      NOW() - INTERVAL '1 minute', NOW() + INTERVAL '12 hours')",
-            &[&user.id, &app_id, &email, &"Test"],
+            &[&user.id.as_str(), &app_id.as_str(), &email, &"Test"],
         )
         .await
         .expect("seed expired gateway session");
 
-    let list = sessions::list_by_user(&client, user.id)
+    let list = sessions::list_by_user(&client, &user.id)
         .await
         .expect("list_by_user");
 
@@ -260,7 +262,7 @@ async fn list_excludes_revoked_and_expired() {
     assert_eq!(list[0].id, live.id);
 
     cleanup(&client, &email).await;
-    cleanup_app(&client, app_id).await;
+    cleanup_app(&client, &app_id).await;
 }
 
 /// list_by_user never returns ANOTHER user's sessions.
@@ -283,7 +285,7 @@ async fn list_excludes_other_users_sessions() {
     sessions::create(
         &client,
         &sessions::CreateSession {
-            user_id: user_b.id,
+            user_id: &user_b.id,
             auth_method: "password",
             amr: vec!["pwd".to_string()],
             acr: None,
@@ -295,10 +297,10 @@ async fn list_excludes_other_users_sessions() {
     .await
     .expect("seed user_b idp session");
     let app_id = seed_app(&client).await;
-    seed_gateway_session(&client, user_b.id, app_id, &email_b).await;
+    seed_gateway_session(&client, &user_b.id, &app_id, &email_b).await;
 
     // user_a has nothing.
-    let list_a = sessions::list_by_user(&client, user_a.id)
+    let list_a = sessions::list_by_user(&client, &user_a.id)
         .await
         .expect("list_by_user a");
     assert!(
@@ -308,7 +310,7 @@ async fn list_excludes_other_users_sessions() {
 
     cleanup(&client, &email_a).await;
     cleanup(&client, &email_b).await;
-    cleanup_app(&client, app_id).await;
+    cleanup_app(&client, &app_id).await;
 }
 
 // ─── revoke_one_for_user ───────────────────────────────────────────────────
@@ -328,7 +330,7 @@ async fn revoke_one_idp_session_succeeds() {
     let s = sessions::create(
         &client,
         &sessions::CreateSession {
-            user_id: user.id,
+            user_id: &user.id,
             auth_method: "password",
             amr: vec!["pwd".to_string()],
             acr: None,
@@ -340,14 +342,14 @@ async fn revoke_one_idp_session_succeeds() {
     .await
     .expect("seed idp session");
 
-    let revoked = sessions::revoke_one_for_user(&client, user.id, s.id, SessionKind::Idp)
+    let revoked = sessions::revoke_one_for_user(&client, &user.id, s.id, SessionKind::Idp)
         .await
         .expect("revoke_one_for_user")
         .expect("revoking the user's own idp session reports what it ended");
     assert_eq!(revoked.kind, SessionKind::Idp);
     assert!(revoked.app_id.is_none(), "an idp session has no app_id");
 
-    let list = sessions::list_by_user(&client, user.id)
+    let list = sessions::list_by_user(&client, &user.id)
         .await
         .expect("list_by_user");
     assert!(
@@ -382,20 +384,20 @@ async fn revoke_one_gateway_session_succeeds() {
         .await
         .expect("seed user");
     let app_id = seed_app(&client).await;
-    let gw_id = seed_gateway_session(&client, user.id, app_id, &email).await;
+    let gw_id = seed_gateway_session(&client, &user.id, &app_id, &email).await;
 
-    let revoked = sessions::revoke_one_for_user(&client, user.id, gw_id, SessionKind::App)
+    let revoked = sessions::revoke_one_for_user(&client, &user.id, gw_id, SessionKind::App)
         .await
         .expect("revoke_one_for_user gateway")
         .expect("revoking the user's own gateway session reports what it ended");
     assert_eq!(revoked.kind, SessionKind::App);
     assert_eq!(
-        revoked.app_id,
-        Some(app_id),
+        revoked.app_id.as_ref(),
+        Some(&app_id),
         "the app arm must report which app to send the back-channel logout to"
     );
 
-    let list = sessions::list_by_user(&client, user.id)
+    let list = sessions::list_by_user(&client, &user.id)
         .await
         .expect("list_by_user");
     assert!(
@@ -404,7 +406,7 @@ async fn revoke_one_gateway_session_succeeds() {
     );
 
     cleanup(&client, &email).await;
-    cleanup_app(&client, app_id).await;
+    cleanup_app(&client, &app_id).await;
 }
 
 /// THE IDOR GUARD. user_a tries to revoke user_b's session by id. Must return
@@ -428,7 +430,7 @@ async fn revoke_other_users_session_is_noop_idor_guard() {
     let b_idp = sessions::create(
         &client,
         &sessions::CreateSession {
-            user_id: user_b.id,
+            user_id: &user_b.id,
             auth_method: "password",
             amr: vec!["pwd".to_string()],
             acr: None,
@@ -442,14 +444,14 @@ async fn revoke_other_users_session_is_noop_idor_guard() {
 
     // user_b's gateway session.
     let app_id = seed_app(&client).await;
-    let b_gw = seed_gateway_session(&client, user_b.id, app_id, &email_b).await;
+    let b_gw = seed_gateway_session(&client, &user_b.id, &app_id, &email_b).await;
 
     // user_a attempts to revoke BOTH of user_b's sessions by id.
     let idp_attempt =
-        sessions::revoke_one_for_user(&client, user_a.id, b_idp.id, SessionKind::Idp)
+        sessions::revoke_one_for_user(&client, &user_a.id, b_idp.id, SessionKind::Idp)
             .await
             .expect("idor idp attempt");
-    let gw_attempt = sessions::revoke_one_for_user(&client, user_a.id, b_gw, SessionKind::App)
+    let gw_attempt = sessions::revoke_one_for_user(&client, &user_a.id, b_gw, SessionKind::App)
         .await
         .expect("idor gateway attempt");
 
@@ -463,7 +465,7 @@ async fn revoke_other_users_session_is_noop_idor_guard() {
     );
 
     // user_b's sessions are still live.
-    let b_list = sessions::list_by_user(&client, user_b.id)
+    let b_list = sessions::list_by_user(&client, &user_b.id)
         .await
         .expect("list_by_user b");
     assert_eq!(
@@ -474,7 +476,7 @@ async fn revoke_other_users_session_is_noop_idor_guard() {
 
     cleanup(&client, &email_a).await;
     cleanup(&client, &email_b).await;
-    cleanup_app(&client, app_id).await;
+    cleanup_app(&client, &app_id).await;
 }
 
 /// Revoking an already-revoked or nonexistent id is a no-op (returns false).
@@ -491,7 +493,7 @@ async fn revoke_already_revoked_or_missing_is_noop() {
     let s = sessions::create(
         &client,
         &sessions::CreateSession {
-            user_id: user.id,
+            user_id: &user.id,
             auth_method: "password",
             amr: vec!["pwd".to_string()],
             acr: None,
@@ -504,13 +506,13 @@ async fn revoke_already_revoked_or_missing_is_noop() {
     .expect("seed idp session");
 
     // First revoke succeeds.
-    assert!(sessions::revoke_one_for_user(&client, user.id, s.id, SessionKind::Idp)
+    assert!(sessions::revoke_one_for_user(&client, &user.id, s.id, SessionKind::Idp)
         .await
         .expect("first revoke")
         .is_some());
     // Second revoke of the same (already-revoked) id is a no-op.
     assert!(
-        sessions::revoke_one_for_user(&client, user.id, s.id, SessionKind::Idp)
+        sessions::revoke_one_for_user(&client, &user.id, s.id, SessionKind::Idp)
             .await
             .expect("second revoke")
             .is_none(),
@@ -518,14 +520,14 @@ async fn revoke_already_revoked_or_missing_is_noop() {
     );
     // A totally unknown id is a no-op.
     assert!(
-        sessions::revoke_one_for_user(&client, user.id, Uuid::new_v4(), SessionKind::Idp)
+        sessions::revoke_one_for_user(&client, &user.id, Uuid::new_v4(), SessionKind::Idp)
             .await
             .expect("missing revoke")
             .is_none(),
         "revoking a nonexistent id reports nothing ended"
     );
     assert!(
-        sessions::revoke_one_for_user(&client, user.id, Uuid::new_v4(), SessionKind::App)
+        sessions::revoke_one_for_user(&client, &user.id, Uuid::new_v4(), SessionKind::App)
             .await
             .expect("missing gateway revoke")
             .is_none(),

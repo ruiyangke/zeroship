@@ -173,8 +173,14 @@ async fn login_failure_responses_are_indistinguishable() {
     .expect("hash ok");
     pg_client
         .execute(
-            "INSERT INTO zeroship.users (email, name, password_hash) VALUES ($1::citext, $2, $3)",
-            &[&real_email.as_str(), &"Real User", &phc.as_str()],
+            "INSERT INTO zeroship.users (id, email, name, password_hash) \
+             VALUES ($1, $2::citext, $3, $4)",
+            &[
+                &zeroship_core::user_id::UserId::mint().as_str(),
+                &real_email.as_str(),
+                &"Real User",
+                &phc.as_str(),
+            ],
         )
         .await
         .expect("insert real user");

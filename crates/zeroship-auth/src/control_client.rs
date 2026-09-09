@@ -214,13 +214,15 @@ fn control_authorization(keyring: &ServiceKeyring) -> Result<String, PreflightEr
 pub async fn erasure_preflight(
     control_url: &str,
     keyring: &ServiceKeyring,
-    principal: uuid::Uuid,
+    principal: &zeroship_core::user_id::UserId,
 ) -> Result<ErasurePreflight, PreflightError> {
     let authorization = control_authorization(keyring)?;
+    // The path segment carries the printed typed id, which is what
+    // `zeroship.users.id` holds and what control keys every dependent table on.
     let url = format!(
         "{}/internal/principals/{}/erasure-preflight",
         control_url.trim_end_matches('/'),
-        principal
+        principal.as_str()
     );
     let client = cyper::Client::new();
     let request = client

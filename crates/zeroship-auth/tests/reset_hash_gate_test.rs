@@ -221,7 +221,7 @@ async fn reset_post_with_a_live_token_still_completes() {
     let stored: String = pg
         .query_one(
             "SELECT password_hash FROM zeroship.users WHERE id = $1",
-            &[&user.id],
+            &[&user.id.as_str()],
         )
         .await
         .expect("read password hash")
@@ -244,7 +244,7 @@ async fn reset_post_with_a_live_token_still_completes() {
 
     pg.execute(
         "DELETE FROM zeroship.audit_events WHERE actor_user_id = $1",
-        &[&user.id],
+        &[&user.id.as_str()],
     )
     .await
     .ok();
@@ -254,7 +254,7 @@ async fn reset_post_with_a_live_token_still_completes() {
     )
     .await
     .ok();
-    pg.execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id])
+    pg.execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id.as_str()])
         .await
         .ok();
     pg.execute(

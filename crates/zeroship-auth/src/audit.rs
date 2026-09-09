@@ -15,7 +15,7 @@ use crate::store::audit as store;
 pub struct AuditEvent<'a> {
     pub event_type: &'a str,
     pub outcome: &'a str, // "success" | "failure"
-    pub user_id: Option<&'a uuid::Uuid>,
+    pub user_id: Option<&'a zeroship_core::user_id::UserId>,
     pub client_id: Option<&'a str>,
     pub request_id: Option<String>,
     pub ip: Option<std::net::IpAddr>,

@@ -10,6 +10,7 @@ use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
 use ntex::web::{self, HttpResponse};
 use serde_json::{json, Value};
 use uuid::Uuid;
+use zeroship_core::user_id::UserId;
 use zeroship_auth::oidc::{
     backchannel_logout, Issuer, LogoutTokenClaims, LOGOUT_TOKEN_TYP,
 };
@@ -69,7 +70,7 @@ async fn logout_emission_posts_signed_logout_token_with_sid() {
     let session = session_store::create(
         &db,
         &session_store::CreateSession {
-            user_id,
+            user_id: &user_id,
             auth_method: "pwd",
             amr: vec!["pwd".to_string()],
             acr: None,
@@ -87,13 +88,13 @@ async fn logout_emission_posts_signed_logout_token_with_sid() {
     // minted shape (`is_pairwise_subject` requires exactly 20 base62 chars), so
     // the old value could never have come off a real token.
     let sub = issuer.pairwise_subject(
-        &user_id.to_string(),
+        user_id.as_str(),
         &format!("https://{client_id}.zeroship.localhost"),
     );
 
     backchannel_logout::record_rp_participation(
         &db,
-        user_id,
+        &user_id,
         &sid,
         &client_id,
         &sub,
@@ -152,7 +153,7 @@ async fn logout_emission_posts_signed_logout_token_with_sid() {
         "logout_token MUST NOT contain nonce: {raw}"
     );
 
-    cleanup(&db, user_id, session.id, &client_id).await;
+    cleanup(&db, &user_id, session.id, &client_id).await;
 }
 
 async fn capture_logout_token(
@@ -179,13 +180,13 @@ fn raw_claims(token: &str) -> Value {
     serde_json::from_slice(&decoded).expect("payload json")
 }
 
-async fn seed_user(db: &Client) -> Uuid {
-    let user_id = Uuid::new_v4();
+async fn seed_user(db: &Client) -> UserId {
+    let user_id = UserId::mint();
     let email = format!("bcl-emit-{}@zeroship.test", Uuid::new_v4().simple());
     db.execute(
         "INSERT INTO zeroship.users (id, email, email_verified_at, name) \
          VALUES ($1, $2::citext, NOW(), 'BCL Emit User')",
-        &[&user_id, &email],
+        &[&user_id.as_str(), &email],
     )
     .await
     .expect("seed user");
@@ -207,7 +208,7 @@ async fn seed_oauth_client(db: &Client, client_id: &str, backchannel_logout_uri:
     .expect("seed oauth client");
 }
 
-async fn cleanup(db: &Client, user_id: Uuid, session_id: Uuid, client_id: &str) {
+async fn cleanup(db: &Client, user_id: &UserId, session_id: Uuid, client_id: &str) {
     db.execute(
         "DELETE FROM zeroship.oidc_session_clients WHERE idp_session_id = $1",
         &[&session_id],
@@ -226,7 +227,7 @@ async fn cleanup(db: &Client, user_id: Uuid, session_id: Uuid, client_id: &str) 
     )
     .await
     .ok();
-    db.execute("DELETE FROM zeroship.users WHERE id = $1", &[&user_id])
+    db.execute("DELETE FROM zeroship.users WHERE id = $1", &[&user_id.as_str()])
         .await
         .ok();
 }

@@ -8,7 +8,7 @@ use ntex::http::StatusCode;
 use ntex::web::{self, HttpRequest, HttpResponse};
 use serde::Serialize;
 use serde_json::json;
-use uuid::Uuid;
+use zeroship_core::user_id::UserId;
 
 use crate::oidc::claims::{scope_gated_identity_claims, ScopeGatedIdentityClaims};
 use crate::oidc::Issuer;
@@ -116,7 +116,7 @@ async fn userinfo_inner(
     let Some(global_user_id) = global_user_id_for_active_pairwise_sub(db, &claims.sub).await? else {
         return Err(UserInfoError::InvalidToken);
     };
-    let user_id = global_user_id.to_string();
+    let user_id = global_user_id.as_str().to_string();
     let Some(user) = users::find_by_id(db, &user_id).await.map_err(|err| {
         tracing::error!(error = %err, "userinfo: user lookup failed");
         UserInfoError::Server
@@ -141,7 +141,7 @@ async fn userinfo_inner(
 async fn global_user_id_for_active_pairwise_sub(
     db: &Client,
     pairwise_sub: &str,
-) -> Result<Option<Uuid>, UserInfoError> {
+) -> Result<Option<UserId>, UserInfoError> {
     let rows = db
         .query(
             "SELECT aui.global_user_id \
@@ -163,7 +163,7 @@ async fn global_user_id_for_active_pairwise_sub(
         })?;
     rows.first()
         .map(|row| {
-            row.try_get::<_, Uuid>("global_user_id").map_err(|err| {
+            crate::entity_ids::user_id(row, "global_user_id").map_err(|err| {
                 tracing::error!(error = %err, "userinfo: reverse-map row decode failed");
                 UserInfoError::Server
             })

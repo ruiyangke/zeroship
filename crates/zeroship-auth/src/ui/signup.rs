@@ -208,7 +208,7 @@ pub async fn post(
     //       defeating enumeration defense for known-bouncer addresses;
     //     - users can request a resend later (deferred to a future phase).
     if let Some(user) = &created {
-        match verification::issue(db.as_ref(), user.id, &user.email).await {
+        match verification::issue(db.as_ref(), &user.id, &user.email).await {
             Ok(issued) => {
                 let link = format!(
                     "{}/verify?token={}",
@@ -251,7 +251,7 @@ pub async fn post(
                     vec!["verification".into()],
                 );
                 if let Err(e) = mailer.send(db.as_ref(), msg).await {
-                    tracing::warn!(error = %e, user_id = %user.id, "verification email send failed");
+                    tracing::warn!(error = %e, user_id = user.id.as_str(), "verification email send failed");
                 }
 
                 audit::emit(
@@ -266,7 +266,7 @@ pub async fn post(
                 .await;
             }
             Err(e) => {
-                tracing::error!(error = %e, user_id = %user.id, "verification token issue failed");
+                tracing::error!(error = %e, user_id = user.id.as_str(), "verification token issue failed");
                 // Don't fail the signup — the user can request resend later.
             }
         }

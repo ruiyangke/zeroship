@@ -189,9 +189,9 @@ pub async fn post(
         return redirect("/login");
     };
 
-    if let Err(e) = eligibility::check_user_eligible(db.as_ref(), session.user_id).await {
+    if let Err(e) = eligibility::check_user_eligible(db.as_ref(), &session.user_id).await {
         if !e.is_account_state() {
-            tracing::error!(error = %e, user_id = %session.user_id, "device grant eligibility check failed");
+            tracing::error!(error = %e, user_id = session.user_id.as_str(), "device grant eligibility check failed");
             return render_form(
                 user_code,
                 Some("invalid or expired code"),
@@ -220,7 +220,7 @@ pub async fn post(
         db.as_ref(),
         user_code,
         &pending.provider,
-        session.user_id,
+        &session.user_id,
         session.id,
         session.credential_version,
     )
@@ -245,7 +245,7 @@ pub async fn post(
             )
         }
         Err(e) => {
-            tracing::error!(error = %e, user_id = %session.user_id, "native device grant approval failed");
+            tracing::error!(error = %e, user_id = session.user_id.as_str(), "native device grant approval failed");
             render_form(
                 user_code,
                 Some("invalid or expired code"),
@@ -284,7 +284,7 @@ async fn rate_limit_failed_user_code_attempt(
 ) -> Option<HttpResponse> {
     let ip = headers::client_ip(req);
     if let Some(session) = session {
-        let key = format!("device:user_ip:{}:{ip}", session.user_id);
+        let key = format!("device:user_ip:{}:{ip}", session.user_id.as_str());
         if let Some(resp) = consume_failed_attempt_bucket(db, &key, Quota::LOGIN_EIP).await
         {
             return Some(resp);

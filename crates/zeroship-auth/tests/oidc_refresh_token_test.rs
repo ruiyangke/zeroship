@@ -10,6 +10,8 @@ use ntex::web;
 use serde::Deserialize;
 use serde_json::Value;
 use uuid::Uuid;
+use zeroship_core::app_id::AppId;
+use zeroship_core::user_id::UserId;
 use zeroship_auth::headers::SecurityHeaders;
 use zeroship_auth::oidc::{AccessTokenMint, Issuer};
 use zeroship_auth::oidc::refresh::RefreshSessionPool;
@@ -48,8 +50,8 @@ struct Fixture {
     db: Arc<Client>,
     refresh_pool: RefreshSessionPool,
     client_id: String,
-    app_id: Uuid,
-    user_id: Uuid,
+    app_id: AppId,
+    user_id: UserId,
     session_cookie: String,
 }
 
@@ -74,15 +76,15 @@ impl Fixture {
             .await
             .expect("publish active OP key");
 
-        let user_id = Uuid::new_v4();
-        let app_id = Uuid::new_v4();
+        let user_id = UserId::mint();
+        let app_id = AppId::mint();
         let client_id = format!("oac_p5b_{}", Uuid::new_v4().simple());
         let app_name = format!("p5b-refresh-{}", Uuid::new_v4().simple());
-        seed_user_client(&db, user_id, app_id, &app_name, &client_id, scopes).await;
+        seed_user_client(&db, &user_id, &app_id, &app_name, &client_id, scopes).await;
         let session = session_store::create(
             &db,
             &session_store::CreateSession {
-                user_id,
+                user_id: &user_id,
                 auth_method: "pwd",
                 amr: vec!["pwd".to_string()],
                 acr: None,
@@ -143,7 +145,7 @@ impl Fixture {
     }
 
     async fn cleanup(self) {
-        cleanup_seeded_rows(&self.db, self.user_id, self.app_id, &self.client_id).await;
+        cleanup_seeded_rows(&self.db, &self.user_id, &self.app_id, &self.client_id).await;
         // No key directory to remove: the keyring is the process-wide one
         // `session_key_files` memoises, and every other fixture in this binary
         // is pointed at the same files.
@@ -171,7 +173,7 @@ async fn offline_access_authorization_code_returns_refresh_token_bound_to_family
              FROM zeroship.sessions s \
              JOIN zeroship.grants g ON g.id = s.grant_id \
              WHERE s.client_id = $1 AND s.person_id = $2",
-            &[&fx.client_id, &fx.user_id],
+            &[&fx.client_id, &fx.user_id.as_str()],
         )
         .await
         .expect("session row");
@@ -182,7 +184,7 @@ async fn offline_access_authorization_code_returns_refresh_token_bound_to_family
     assert!(family_id.starts_with("ses_"));
     assert_eq!(
         sub,
-        test_issuer().pairwise_subject(&fx.user_id.to_string(), SECTOR)
+        test_issuer().pairwise_subject(fx.user_id.as_str(), SECTOR)
     );
     assert!(family_scopes.iter().any(|s| s == "offline_access"));
     assert_eq!(hash_len, 32, "refresh token hash is HMAC-SHA256 bytes only");
@@ -204,7 +206,7 @@ async fn stale_credential_version_recheck_rejects_refresh_issuance() {
     fx.db
         .execute(
             "UPDATE zeroship.users SET credential_version = credential_version + 1 WHERE id = $1",
-            &[&fx.user_id],
+            &[&fx.user_id.as_str()],
         )
         .await
         .expect("bump credential_version");
@@ -239,7 +241,7 @@ async fn deletion_revokes_refresh_family_even_after_cancellation() {
     let family_id = refresh_family_id(&fx).await;
 
     let mut deletion = dedicated_test_db(&db_url().expect("test database URL")).await;
-    let deletion_request = users::request_deletion(&mut deletion, fx.user_id, 30)
+    let deletion_request = users::request_deletion(&mut deletion, &fx.user_id, 30)
         .await
         .expect("request account deletion")
         .expect("refresh owner exists");
@@ -261,7 +263,7 @@ async fn deletion_revokes_refresh_family_even_after_cancellation() {
         .json::<Value>()
         .await
         .expect("refresh rejection json");
-    let sub = test_issuer().pairwise_subject(&fx.user_id.to_string(), SECTOR);
+    let sub = test_issuer().pairwise_subject(fx.user_id.as_str(), SECTOR);
     let marker = fx
         .db
         .query(
@@ -351,7 +353,7 @@ async fn refresh_rotation_returns_new_refresh_narrows_scope_and_no_id_token() {
             "SELECT COUNT(*) FILTER (WHERE rotated_at IS NOT NULL)::BIGINT AS rotated, \
                     COUNT(*) FILTER (WHERE revoked_at IS NULL)::BIGINT AS live \
              FROM zeroship.sessions WHERE client_id = $1 AND person_id = $2",
-            &[&fx.client_id, &fx.user_id],
+            &[&fx.client_id, &fx.user_id.as_str()],
         )
         .await
         .expect("session row counts");
@@ -403,7 +405,7 @@ async fn refresh_scope_cannot_widen_past_family_granted_scopes() {
         .query_one(
             "SELECT COUNT(*) FILTER (WHERE rotated_at IS NOT NULL)::BIGINT AS consumed \
              FROM zeroship.sessions WHERE client_id = $1 AND person_id = $2",
-            &[&fx.client_id, &fx.user_id],
+            &[&fx.client_id, &fx.user_id.as_str()],
         )
         .await
         .expect("session rotation count");
@@ -871,8 +873,8 @@ async fn introspect_expired_access_token_is_inactive() {
         return;
     };
     let scopes = vec!["openid".to_string(), "profile".to_string()];
-    let user_id = fx.user_id.to_string();
-    let audience = format!("app:{}", fx.app_id);
+    let user_id = fx.user_id.as_str().to_string();
+    let audience = format!("app:{}", fx.app_id.as_str());
     let expired = test_issuer()
         .sign_unregistered_access_token_fixture(&AccessTokenMint {
             user_id: &user_id,
@@ -926,9 +928,9 @@ async fn introspect_refresh_token_before_and_after_revoke() {
     assert_eq!(body["token_type"], "refresh_token");
     assert!(body["exp"].as_i64().is_some_and(|exp| exp > 0));
     assert!(body["iat"].as_i64().is_some_and(|iat| iat > 0));
-    let expected_sub = test_issuer().pairwise_subject(&fx.user_id.to_string(), SECTOR);
+    let expected_sub = test_issuer().pairwise_subject(fx.user_id.as_str(), SECTOR);
     assert_eq!(body["sub"].as_str(), Some(expected_sub.as_str()));
-    let expected_aud = format!("app:{}", fx.app_id);
+    let expected_aud = format!("app:{}", fx.app_id.as_str());
     assert_eq!(body["aud"].as_str(), Some(expected_aud.as_str()));
     assert_eq!(body["iss"], ISSUER);
 
@@ -1151,7 +1153,7 @@ async fn bulk_credential_bump_revoke_does_not_deadlock_concurrent_rotation() {
     let rotate = refresh_request(&fx, &root_refresh, Some(NARROW_SCOPE));
     let revoke = zeroship_auth::oidc::refresh::revoke_person_sessions(
         &fx.refresh_pool,
-        fx.user_id,
+        &fx.user_id,
         "credential_bump_test",
     );
     let (rotate, revoke) = futures::join!(rotate, revoke);
@@ -1178,8 +1180,8 @@ fn test_issuer() -> Issuer {
 
 async fn seed_user_client(
     db: &Client,
-    user_id: Uuid,
-    app_id: Uuid,
+    user_id: &UserId,
+    app_id: &AppId,
     app_name: &str,
     client_id: &str,
     scopes: &[&str],
@@ -1188,7 +1190,7 @@ async fn seed_user_client(
     db.execute(
         "INSERT INTO zeroship.users (id, email, email_verified_at, name) \
          VALUES ($1, $2::citext, NOW(), 'P5b User')",
-        &[&user_id, &email],
+        &[&user_id.as_str(), &email],
     )
     .await
     .expect("seed user");
@@ -1208,7 +1210,7 @@ async fn seed_user_client(
         "INSERT INTO zeroship.apps (id, name, project_id, organization_id) \
          SELECT $1, $2, p.id, p.organization_id FROM zeroship.projects p WHERE p.id = $3",
         &[
-            &app_id,
+            &app_id.as_str(),
             &app_name,
             &project_id
         ],
@@ -1229,16 +1231,16 @@ async fn seed_user_client(
     db.execute(
         "INSERT INTO zeroship.app_oauth_clients (app_id, client_id, sector_identifier) \
          VALUES ($1, $2, $3)",
-        &[&app_id, &client_id, &SECTOR],
+        &[&app_id.as_str(), &client_id, &SECTOR],
     )
     .await
     .expect("seed app oauth client");
-    let pairwise_sub = test_issuer().pairwise_subject(&user_id.to_string(), SECTOR);
+    let pairwise_sub = test_issuer().pairwise_subject(user_id.as_str(), SECTOR);
     db.execute(
         "INSERT INTO zeroship.app_user_identities \
             (app_client_id, global_user_id, pairwise_sub) \
          VALUES ($1, $2, $3)",
-        &[&client_id, &user_id, &pairwise_sub],
+        &[&client_id, &user_id.as_str(), &pairwise_sub],
     )
     .await
     .expect("seed app user identity");
@@ -1246,13 +1248,13 @@ async fn seed_user_client(
         "INSERT INTO zeroship.oauth_grants \
              (user_id, client_id, granted_scopes, granted_at, updated_at) \
          VALUES ($1, $2, $3, NOW(), NOW())",
-        &[&user_id, &client_id, &scope_vec],
+        &[&user_id.as_str(), &client_id, &scope_vec],
     )
     .await
     .expect("seed oauth grant");
 }
 
-async fn cleanup_seeded_rows(db: &Client, user_id: Uuid, app_id: Uuid, client_id: &str) {
+async fn cleanup_seeded_rows(db: &Client, user_id: &UserId, app_id: &AppId, client_id: &str) {
     let _ = db
         .execute("DELETE FROM zeroship.token_revocations WHERE client_id = $1", &[&client_id])
         .await;
@@ -1286,7 +1288,7 @@ async fn cleanup_seeded_rows(db: &Client, user_id: Uuid, app_id: Uuid, client_id
     let _ = db
         .execute(
             "DELETE FROM zeroship.idp_sessions WHERE user_id = $1",
-            &[&user_id],
+            &[&user_id.as_str()],
         )
         .await;
     let _ = db
@@ -1298,8 +1300,8 @@ async fn cleanup_seeded_rows(db: &Client, user_id: Uuid, app_id: Uuid, client_id
     let _ = db
         .execute("DELETE FROM zeroship.oauth_clients WHERE client_id = $1", &[&client_id])
         .await;
-    let _ = db.execute("DELETE FROM zeroship.apps WHERE id = $1", &[&app_id]).await;
-    let _ = db.execute("DELETE FROM zeroship.users WHERE id = $1", &[&user_id]).await;
+    let _ = db.execute("DELETE FROM zeroship.apps WHERE id = $1", &[&app_id.as_str()]).await;
+    let _ = db.execute("DELETE FROM zeroship.users WHERE id = $1", &[&user_id.as_str()]).await;
 }
 
 #[allow(clippy::future_not_send)]
@@ -1501,7 +1503,7 @@ async fn refresh_family_id(fx: &Fixture) -> String {
              FROM zeroship.sessions \
              WHERE client_id = $1 AND person_id = $2 \
              LIMIT 1",
-            &[&fx.client_id, &fx.user_id],
+            &[&fx.client_id, &fx.user_id.as_str()],
         )
         .await
         .expect("refresh session id")

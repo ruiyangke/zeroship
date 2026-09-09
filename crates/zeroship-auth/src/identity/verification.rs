@@ -27,7 +27,7 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use compio_postgres::Client;
 use rand::RngCore;
 use sha2::{Digest, Sha256};
-use uuid::Uuid;
+use zeroship_core::user_id::UserId;
 
 use crate::error::{AuthError, Result};
 
@@ -49,7 +49,7 @@ pub struct IssuedToken {
 /// Result of a successful [`redeem`] — the row's identifying fields.
 #[derive(Debug, Clone)]
 pub struct RedeemedToken {
-    pub user_id: Uuid,
+    pub user_id: UserId,
     pub email: String,
 }
 
@@ -64,7 +64,7 @@ pub struct RedeemedToken {
 /// # Errors
 ///
 /// [`AuthError::Db`] on PG failure.
-pub async fn issue(db: &Client, user_id: Uuid, email: &str) -> Result<IssuedToken> {
+pub async fn issue(db: &Client, user_id: &UserId, email: &str) -> Result<IssuedToken> {
     // 1. Generate token.
     let mut token_bytes = [0u8; TOKEN_LEN_BYTES];
     rand::thread_rng().fill_bytes(&mut token_bytes);
@@ -88,7 +88,7 @@ pub async fn issue(db: &Client, user_id: Uuid, email: &str) -> Result<IssuedToke
         db.execute(
             "UPDATE zeroship.email_verifications SET consumed_at = NOW() \
              WHERE user_id = $1 AND consumed_at IS NULL",
-            &[&user_id],
+            &[&user_id.as_str()],
         )
         .await
         .map_err(|e| AuthError::Db(format!("verification supersede previous: {e}")))?;
@@ -100,7 +100,7 @@ pub async fn issue(db: &Client, user_id: Uuid, email: &str) -> Result<IssuedToke
              VALUES ($1, $2, $3::citext, NOW() + ($4::text || ' hours')::interval)",
             &[
                 &token_hash.as_slice(),
-                &user_id,
+                &user_id.as_str(),
                 &email,
                 &TTL_HOURS.to_string(),
             ],
@@ -144,10 +144,14 @@ pub async fn redeem(db: &Client, raw_token: &str) -> Result<Option<RedeemedToken
         )
         .await
         .map_err(|e| AuthError::Db(format!("verification redeem: {e}")))?;
-    Ok(rows.first().map(|r| RedeemedToken {
-        user_id: r.get("user_id"),
-        email: r.get("email"),
-    }))
+    rows.first()
+        .map(|r| {
+            Ok(RedeemedToken {
+                user_id: crate::entity_ids::user_id(r, "user_id")?,
+                email: r.get("email"),
+            })
+        })
+        .transpose()
 }
 
 /// Atomically redeem a verification token and mark the linked user
@@ -196,10 +200,14 @@ pub async fn redeem_and_mark_verified(
         )
         .await
         .map_err(|e| AuthError::Db(format!("verification redeem and mark verified: {e}")))?;
-    Ok(rows.first().map(|r| RedeemedToken {
-        user_id: r.get("user_id"),
-        email: r.get("email"),
-    }))
+    rows.first()
+        .map(|r| {
+            Ok(RedeemedToken {
+                user_id: crate::entity_ids::user_id(r, "user_id")?,
+                email: r.get("email"),
+            })
+        })
+        .transpose()
 }
 
 fn sha256(s: &str) -> [u8; 32] {

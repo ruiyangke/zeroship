@@ -197,16 +197,16 @@ async fn seed_user_with_totp(
         .await
         .expect("create user");
     let secret = totp::generate_secret();
-    let encrypted = totp::encrypt_secret(&totp_key(), user.id, &secret).expect("encrypt secret");
-    totp_store::enroll(pg, user.id, &encrypted, false)
+    let encrypted = totp::encrypt_secret(&totp_key(), &user.id, &secret).expect("encrypt secret");
+    totp_store::enroll(pg, &user.id, &encrypted, false)
         .await
         .expect("enroll totp");
     let (_, hashes) = totp::generate_backup_codes().expect("backup codes");
-    totp_store::confirm(pg, user.id, &hashes)
+    totp_store::confirm(pg, &user.id, &hashes)
         .await
         .expect("confirm totp");
     assert!(
-        totp_store::is_enabled(pg, user.id).await.expect("is_enabled"),
+        totp_store::is_enabled(pg, &user.id).await.expect("is_enabled"),
         "seeded credential must be confirmed, else the test proves nothing"
     );
     (user, secret)
@@ -295,12 +295,12 @@ async fn assert_demands_second_factor(resp: cyper::Response, what: &str) -> Stri
 #[allow(clippy::future_not_send)]
 async fn session_claims(
     pg: &compio_postgres::Client,
-    user_id: Uuid,
+    user_id: zeroship_core::user_id::UserId,
 ) -> (String, Vec<String>, Option<String>) {
     let row = pg
         .query_one(
             "SELECT auth_method, amr, acr FROM zeroship.idp_sessions WHERE user_id = $1",
-            &[&user_id],
+            &[&user_id.as_str()],
         )
         .await
         .expect("load minted session");
@@ -560,7 +560,7 @@ async fn link_confirm_demands_second_factor_before_linking() {
     .expect("unix seconds")
         + 600;
     let pending = PendingLink {
-        user_id: user.id,
+        user_id: user.id.clone(),
         provider: "github".into(),
         subject: subject.clone(),
         email: email.clone(),
@@ -588,7 +588,7 @@ async fn link_confirm_demands_second_factor_before_linking() {
         .pg
         .query_one(
             "SELECT COUNT(*) FROM zeroship.federated_identities WHERE user_id = $1",
-            &[&user.id],
+            &[&user.id.as_str()],
         )
         .await
         .expect("count identities")
@@ -620,7 +620,7 @@ async fn link_confirm_demands_second_factor_before_linking() {
         .query_one(
             "SELECT COUNT(*) FROM zeroship.federated_identities \
              WHERE user_id = $1 AND provider = 'github' AND subject = $2",
-            &[&user.id, &subject.as_str()],
+            &[&user.id.as_str(), &subject.as_str()],
         )
         .await
         .expect("count identities")

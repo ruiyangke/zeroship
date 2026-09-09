@@ -19,6 +19,7 @@ use ntex::web;
 use serde::Deserialize;
 use serde_json::Value;
 use uuid::Uuid;
+use zeroship_core::user_id::UserId;
 use zeroship_auth::headers::SecurityHeaders;
 use zeroship_auth::oidc::device_token::DEVICE_CODE_GRANT_TYPE;
 use zeroship_auth::oidc::refresh::RefreshSessionPool;
@@ -152,7 +153,7 @@ struct Fixture {
     auth_base: String,
     db: Arc<Client>,
     issuer: Arc<Issuer>,
-    user_id: Uuid,
+    user_id: UserId,
     key_dir: PathBuf,
 }
 
@@ -186,12 +187,12 @@ impl Fixture {
             .await
             .expect("reconcile platform CLI client");
 
-        let user_id = Uuid::new_v4();
+        let user_id = UserId::mint();
         let email = format!("cli-device-{}@zeroship.test", Uuid::new_v4().simple());
         db.execute(
             "INSERT INTO zeroship.users (id, email, email_verified_at, name) \
              VALUES ($1, $2::citext, NOW(), 'CLI Device User')",
-            &[&user_id, &email],
+            &[&user_id.as_str(), &email],
         )
         .await
         .expect("seed CLI device user");
@@ -298,7 +299,7 @@ impl Fixture {
                      status = 'approved' \
                  WHERE user_code = $3 AND provider = $4",
                 &[
-                    &self.user_id,
+                    &self.user_id.as_str(),
                     &Uuid::new_v4().to_string(),
                     &user_code,
                     &OP_PROVIDER,
@@ -346,7 +347,7 @@ impl Fixture {
                  FROM zeroship.sessions \
                  WHERE person_id = $1 AND revoked_at IS NULL \
                  ORDER BY created_at DESC LIMIT 1",
-                &[&self.user_id],
+                &[&self.user_id.as_str()],
             )
             .await
             .expect("load live refresh family row");
@@ -368,7 +369,7 @@ impl Fixture {
                  WHERE person_id = $1 AND rotated_at IS NOT NULL \
                    AND idem_expires_at IS NOT NULL \
                  ORDER BY rotated_at DESC LIMIT 1",
-                &[&self.user_id],
+                &[&self.user_id.as_str()],
             )
             .await
             .expect("load rotated predecessor row");
@@ -397,33 +398,33 @@ impl Fixture {
             .db
             .execute(
                 "DELETE FROM zeroship.sessions WHERE person_id = $1",
-                &[&self.user_id],
+                &[&self.user_id.as_str()],
             )
             .await;
         let _ = self
             .db
             .execute(
                 "DELETE FROM zeroship.grants WHERE person_id = $1",
-                &[&self.user_id],
+                &[&self.user_id.as_str()],
             )
             .await;
         let _ = self
             .db
             .execute(
                 "DELETE FROM zeroship.token_revocations WHERE sub = $1",
-                &[&self.user_id.to_string()],
+                &[&self.user_id.as_str()],
             )
             .await;
         let _ = self
             .db
             .execute(
                 "DELETE FROM zeroship.device_grants WHERE principal_id = $1",
-                &[&self.user_id],
+                &[&self.user_id.as_str()],
             )
             .await;
         let _ = self
             .db
-            .execute("DELETE FROM zeroship.users WHERE id = $1", &[&self.user_id])
+            .execute("DELETE FROM zeroship.users WHERE id = $1", &[&self.user_id.as_str()])
             .await;
         let _ = std::fs::remove_dir_all(&self.key_dir);
         drop(self.srv);
@@ -438,7 +439,7 @@ fn assert_platform_principal_token(fx: &Fixture, access_token: &str, scope: &str
         .expect("verify CLI access token");
     assert_eq!(
         claims.sub,
-        fx.user_id.to_string(),
+        fx.user_id.as_str().to_string(),
         "control keys authorization off the platform principal UUID, not a pairwise subject"
     );
     assert_eq!(claims.aud, CONTROL_AUDIENCE);
@@ -635,7 +636,7 @@ async fn the_cli_device_grant_caps_scope_to_the_client_registration_only() {
         .query(
             "SELECT COUNT(*)::BIGINT AS n FROM zeroship.principal_grants \
              WHERE principal_id = $1",
-            &[&fx.user_id],
+            &[&fx.user_id.as_str()],
         )
         .await
         .expect("count principal grants");
@@ -696,7 +697,7 @@ async fn reusing_a_rotated_cli_refresh_token_kills_the_family_and_recalls_the_ac
     };
     let (token, _device_code) = fx.login().await;
     let first_refresh = token.refresh_token.clone().expect("root refresh token");
-    let sub = fx.user_id.to_string();
+    let sub = fx.user_id.as_str().to_string();
     assert_eq!(
         fx.revocation_marker(&sub).await,
         0,

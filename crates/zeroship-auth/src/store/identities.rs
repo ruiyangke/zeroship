@@ -7,14 +7,17 @@
 //! "already linked to another user" policy decision.
 
 use compio_postgres::Client;
-use uuid::Uuid;
+use zeroship_core::user_id::UserId;
 
+use crate::entity_ids;
 use crate::error::{AuthError, Result};
 
 #[derive(Debug, Clone)]
 pub struct Identity {
-    pub id: Uuid,
-    pub user_id: Uuid,
+    /// `zeroship.federated_identities.id` — a `uuid` surrogate key. The row is
+    /// addressed by `(provider, subject)`; this id names no platform entity.
+    pub id: uuid::Uuid,
+    pub user_id: UserId,
     pub provider: String,
     pub subject: String,
     pub email_at_link: Option<String>,
@@ -46,7 +49,7 @@ pub async fn find_by_provider_subject(
         )
         .await
         .map_err(|e| AuthError::Db(format!("identities find: {e}")))?;
-    Ok(rows.first().map(row_to_identity))
+    rows.first().map(row_to_identity).transpose()
 }
 
 /// Link an identity to an existing user.
@@ -64,7 +67,7 @@ pub async fn find_by_provider_subject(
 /// inspect the error and apply policy (reject re-link to a different user).
 pub async fn link(
     conn: &Client,
-    user_id: Uuid,
+    user_id: &UserId,
     provider: &str,
     subject: &str,
     email_at_link: Option<&str>,
@@ -75,14 +78,14 @@ pub async fn link(
             "INSERT INTO zeroship.federated_identities (user_id, provider, subject, email_at_link, raw_profile) \
              VALUES ($1, $2, $3, $4::citext, $5) \
              RETURNING id, user_id, provider, subject, email_at_link::text",
-            &[&user_id, &provider, &subject, &email_at_link, &raw_profile],
+            &[&user_id.as_str(), &provider, &subject, &email_at_link, &raw_profile],
         )
         .await
         .map_err(|e| AuthError::Db(format!("identities link: {e}")))?;
     let row = rows
         .first()
         .ok_or_else(|| AuthError::Db("identities link: empty return".into()))?;
-    Ok(row_to_identity(row))
+    row_to_identity(row)
 }
 
 /// List a user's linked identities (for the /me page).
@@ -90,17 +93,17 @@ pub async fn link(
 /// # Errors
 ///
 /// Returns `AuthError::Db` on PG failure.
-pub async fn list_for_user(conn: &Client, user_id: Uuid) -> Result<Vec<Identity>> {
+pub async fn list_for_user(conn: &Client, user_id: &UserId) -> Result<Vec<Identity>> {
     let rows = conn
         .query(
             "SELECT id, user_id, provider, subject, email_at_link::text \
              FROM zeroship.federated_identities WHERE user_id = $1 \
              ORDER BY linked_at",
-            &[&user_id],
+            &[&user_id.as_str()],
         )
         .await
         .map_err(|e| AuthError::Db(format!("identities list: {e}")))?;
-    Ok(rows.iter().map(row_to_identity).collect())
+    rows.iter().map(row_to_identity).collect()
 }
 
 /// Unlink an identity. Returns `true` if a row was deleted, `false` if no
@@ -109,11 +112,11 @@ pub async fn list_for_user(conn: &Client, user_id: Uuid) -> Result<Vec<Identity>
 /// # Errors
 ///
 /// Returns `AuthError::Db` on PG failure.
-pub async fn unlink(conn: &Client, user_id: Uuid, provider: &str) -> Result<bool> {
+pub async fn unlink(conn: &Client, user_id: &UserId, provider: &str) -> Result<bool> {
     let affected = conn
         .execute(
             "DELETE FROM zeroship.federated_identities WHERE user_id = $1 AND provider = $2",
-            &[&user_id, &provider],
+            &[&user_id.as_str(), &provider],
         )
         .await
         .map_err(|e| AuthError::Db(format!("identities unlink: {e}")))?;
@@ -141,10 +144,10 @@ pub async fn unlink(conn: &Client, user_id: Uuid, provider: &str) -> Result<bool
 /// Returns `AuthError::Db` on PG failure.
 pub async fn unlink_preserving_credential(
     conn: &Client,
-    user_id: Uuid,
+    user_id: &UserId,
     provider: &str,
 ) -> Result<GuardedUnlink> {
-    let lock_key = crate::advisory_lock::identity_unlink_lock_key(&user_id);
+    let lock_key = crate::advisory_lock::identity_unlink_lock_key(user_id);
     crate::advisory_lock::with_advisory_lock(conn, lock_key, || async {
         unlink_preserving_credential_locked(conn, user_id, provider).await
     })
@@ -153,7 +156,7 @@ pub async fn unlink_preserving_credential(
 
 async fn unlink_preserving_credential_locked(
     conn: &Client,
-    user_id: Uuid,
+    user_id: &UserId,
     provider: &str,
 ) -> Result<GuardedUnlink> {
     let row = conn
@@ -197,7 +200,7 @@ async fn unlink_preserving_credential_locked(
                      FROM target t \
                      WHERE t.had_target \
                  ) AS had_target",
-            &[&user_id, &provider],
+            &[&user_id.as_str(), &provider],
         )
         .await
         .map_err(|e| AuthError::Db(format!("identities guarded unlink: {e}")))?;
@@ -211,12 +214,12 @@ async fn unlink_preserving_credential_locked(
     })
 }
 
-fn row_to_identity(row: &compio_postgres::Row) -> Identity {
-    Identity {
+fn row_to_identity(row: &compio_postgres::Row) -> Result<Identity> {
+    Ok(Identity {
         id: row.get("id"),
-        user_id: row.get("user_id"),
+        user_id: entity_ids::user_id(row, "user_id")?,
         provider: row.get("provider"),
         subject: row.get("subject"),
         email_at_link: row.try_get::<_, String>("email_at_link").ok(),
-    }
+    })
 }

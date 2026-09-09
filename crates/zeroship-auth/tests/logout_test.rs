@@ -217,7 +217,7 @@ async fn logout_post_revokes_local_session_cookie() {
     let session = sessions::create(
         &pg_client,
         &sessions::CreateSession {
-            user_id: user.id,
+            user_id: &user.id,
             auth_method: "password",
             amr: vec!["pwd".to_string()],
             acr: None,
@@ -282,13 +282,13 @@ async fn logout_post_revokes_local_session_cookie() {
         .get("revoked");
     assert!(revoked, "logout must revoke the local session cookie id");
 
-    pg.execute("DELETE FROM zeroship.audit_events WHERE actor_user_id = $1", &[&user.id])
+    pg.execute("DELETE FROM zeroship.audit_events WHERE actor_user_id = $1", &[&user.id.as_str()])
         .await
         .ok();
     pg.execute("DELETE FROM zeroship.idp_sessions WHERE id = $1", &[&session.id])
         .await
         .ok();
-    pg.execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id])
+    pg.execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id.as_str()])
         .await
         .ok();
 }

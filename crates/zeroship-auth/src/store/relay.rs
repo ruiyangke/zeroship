@@ -28,7 +28,7 @@
 
 use compio_postgres::Client;
 use rand::Rng;
-use uuid::Uuid;
+use zeroship_core::user_id::UserId;
 
 use crate::error::{AuthError, Result};
 
@@ -51,7 +51,7 @@ pub struct AliasTarget {
     /// The per-app OAuth client_id (`oac_<base62>`) — the per-app rate-limit
     /// bucket key + the value a revoke cascade matches on.
     pub app_client_id: String,
-    pub global_user_id: Uuid,
+    pub global_user_id: UserId,
 }
 
 /// Mint (or reuse) a relay alias at CONSENT time (sub-spec §2/§6.1).
@@ -115,7 +115,7 @@ pub struct AliasTarget {
 pub async fn mint_alias_at_consent(
     conn: &Client,
     app_client_id: &str,
-    global_user_id: Uuid,
+    global_user_id: &UserId,
     relay_domain: &str,
 ) -> Result<Option<String>> {
     let existing = conn
@@ -123,7 +123,7 @@ pub async fn mint_alias_at_consent(
             "SELECT relay_email, revoked_at IS NULL AS active \
              FROM zeroship.app_user_identities \
              WHERE app_client_id = $1 AND global_user_id = $2",
-            &[&app_client_id, &global_user_id],
+            &[&app_client_id, &global_user_id.as_str()],
         )
         .await
         .map_err(|e| AuthError::Db(format!("consent alias select: {e}")))?;
@@ -140,7 +140,7 @@ pub async fn mint_alias_at_consent(
             conn.execute(
                 "UPDATE zeroship.app_user_identities SET revoked_at = NULL \
                  WHERE app_client_id = $1 AND global_user_id = $2",
-                &[&app_client_id, &global_user_id],
+                &[&app_client_id, &global_user_id.as_str()],
             )
             .await
             .map_err(|e| AuthError::Db(format!("consent alias un-revoke: {e}")))?;
@@ -157,7 +157,7 @@ pub async fn mint_alias_at_consent(
                      SET relay_email = $3, revoked_at = NULL \
                  WHERE app_client_id = $1 AND global_user_id = $2 \
                    AND relay_email IS NULL",
-                &[&app_client_id, &global_user_id, &alias],
+                &[&app_client_id, &global_user_id.as_str(), &alias],
             )
             .await;
         match affected {
@@ -168,7 +168,7 @@ pub async fn mint_alias_at_consent(
                     .query_one(
                         "SELECT relay_email FROM zeroship.app_user_identities \
                          WHERE app_client_id = $1 AND global_user_id = $2",
-                        &[&app_client_id, &global_user_id],
+                        &[&app_client_id, &global_user_id.as_str()],
                     )
                     .await
                     .map_err(|e| AuthError::Db(format!("consent alias readback: {e}")))?;
@@ -243,11 +243,15 @@ pub async fn resolve_active_alias(conn: &Client, alias: &str) -> Result<Option<A
         )
         .await
         .map_err(|e| AuthError::Db(format!("relay alias resolve: {e}")))?;
-    Ok(rows.first().map(|row| AliasTarget {
-        real_inbox: row.get("real_inbox"),
-        app_client_id: row.get("app_client_id"),
-        global_user_id: row.get("global_user_id"),
-    }))
+    rows.first()
+        .map(|row| {
+            Ok(AliasTarget {
+                real_inbox: row.get("real_inbox"),
+                app_client_id: row.get("app_client_id"),
+                global_user_id: crate::entity_ids::user_id(row, "global_user_id")?,
+            })
+        })
+        .transpose()
 }
 
 /// Locally disable (revoke) the relay alias for `(app_client_id, global_user_id)`
@@ -270,7 +274,7 @@ pub async fn resolve_active_alias(conn: &Client, alias: &str) -> Result<Option<A
 pub async fn revoke_local_alias(
     conn: &Client,
     app_client_id: &str,
-    global_user_id: Uuid,
+    global_user_id: &UserId,
 ) -> Result<u64> {
     conn.execute(
         "UPDATE zeroship.app_user_identities \
@@ -278,7 +282,7 @@ pub async fn revoke_local_alias(
           WHERE app_client_id = $1 \
             AND global_user_id = $2 \
             AND revoked_at IS NULL",
-        &[&app_client_id, &global_user_id],
+        &[&app_client_id, &global_user_id.as_str()],
     )
     .await
     .map_err(|e| AuthError::Db(format!("relay local alias revoke: {e}")))

@@ -139,7 +139,7 @@ pub async fn enroll(
         return json_status(StatusCode::UNAUTHORIZED, &json!({ "error": "unauthenticated" }));
     };
 
-    let active = match totp_store::find_confirmed(db.as_ref(), user.id).await {
+    let active = match totp_store::find_confirmed(db.as_ref(), &user.id).await {
         Ok(c) => c,
         Err(e) => {
             tracing::error!(error = %e, "totp find_confirmed failed");
@@ -151,7 +151,7 @@ pub async fn enroll(
         // brute-forceable and belongs behind the verify throttle. The
         // no-credential and pending arms below never touch it, keeping first
         // enrollment free of throttle state.
-        if rate_limited(db.as_ref(), user.id).await {
+        if rate_limited(db.as_ref(), &user.id).await {
             return json_status(StatusCode::TOO_MANY_REQUESTS, &json!({ "error": "rate_limited" }));
         }
         if !verify_reauth(&cfg, &user, cred, form.code.as_deref(), form.password.as_deref()).await {
@@ -178,7 +178,7 @@ pub async fn enroll(
     // under the write, so a confirm that landed since then loses the race and the
     // enrollment is refused rather than disarming a credential nobody proved
     // ownership of.
-    match totp_store::enroll(db.as_ref(), user.id, &ciphertext, active.is_some()).await {
+    match totp_store::enroll(db.as_ref(), &user.id, &ciphertext, active.is_some()).await {
         Ok(true) => {}
         Ok(false) => {
             audit::emit(
@@ -196,7 +196,7 @@ pub async fn enroll(
             return json_status(StatusCode::UNAUTHORIZED, &json!({ "error": "reauth_required" }));
         }
         Err(e) => {
-            tracing::error!(error = %e, user_id = %user.id, "totp enroll store failed");
+            tracing::error!(error = %e, user_id = user.id.as_str(), "totp enroll store failed");
             return json_status(StatusCode::INTERNAL_SERVER_ERROR, &json!({ "error": "server_error" }));
         }
     }
@@ -247,7 +247,7 @@ pub async fn confirm(
         return json_status(StatusCode::UNAUTHORIZED, &json!({ "error": "unauthenticated" }));
     };
     // Bound brute-force of the 6-digit code against the pending secret.
-    if rate_limited(db.as_ref(), user.id).await {
+    if rate_limited(db.as_ref(), &user.id).await {
         return json_status(StatusCode::TOO_MANY_REQUESTS, &json!({ "error": "rate_limited" }));
     }
 
@@ -258,7 +258,7 @@ pub async fn confirm(
             return json_status(StatusCode::INTERNAL_SERVER_ERROR, &json!({ "error": "server_error" }));
         }
     };
-    let Some(cred) = (match totp_store::find(db.as_ref(), user.id).await {
+    let Some(cred) = (match totp_store::find(db.as_ref(), &user.id).await {
         Ok(c) => c,
         Err(e) => {
             tracing::error!(error = %e, "totp find failed");
@@ -267,7 +267,7 @@ pub async fn confirm(
     }) else {
         return json_status(StatusCode::BAD_REQUEST, &json!({ "error": "no_pending_enrollment" }));
     };
-    let secret = match totp::decrypt_secret(&key, user.id, &cred.encrypted_secret) {
+    let secret = match totp::decrypt_secret(&key, &user.id, &cred.encrypted_secret) {
         Ok(s) => s,
         Err(e) => {
             tracing::error!(error = %e, "totp secret decrypt failed");
@@ -299,7 +299,7 @@ pub async fn confirm(
             return json_status(StatusCode::INTERNAL_SERVER_ERROR, &json!({ "error": "server_error" }));
         }
     };
-    match totp_store::confirm(db.as_ref(), user.id, &hashes).await {
+    match totp_store::confirm(db.as_ref(), &user.id, &hashes).await {
         Ok(true) => {}
         Ok(false) => {
             return json_status(StatusCode::BAD_REQUEST, &json!({ "error": "no_pending_enrollment" }));
@@ -347,11 +347,11 @@ pub async fn disable(
     let Some(user) = resolve_user(&req, db.as_ref()).await else {
         return json_status(StatusCode::UNAUTHORIZED, &json!({ "error": "unauthenticated" }));
     };
-    if rate_limited(db.as_ref(), user.id).await {
+    if rate_limited(db.as_ref(), &user.id).await {
         return json_status(StatusCode::TOO_MANY_REQUESTS, &json!({ "error": "rate_limited" }));
     }
 
-    let Some(cred) = (match totp_store::find_confirmed(db.as_ref(), user.id).await {
+    let Some(cred) = (match totp_store::find_confirmed(db.as_ref(), &user.id).await {
         Ok(c) => c,
         Err(e) => {
             tracing::error!(error = %e, "totp find_confirmed failed");
@@ -387,7 +387,7 @@ pub async fn disable(
         return json_status(StatusCode::UNAUTHORIZED, &json!({ "error": "reauth_required" }));
     }
 
-    if let Err(e) = totp_store::disable(db.as_ref(), user.id).await {
+    if let Err(e) = totp_store::disable(db.as_ref(), &user.id).await {
         tracing::error!(error = %e, "totp disable store failed");
         return json_status(StatusCode::INTERNAL_SERVER_ERROR, &json!({ "error": "server_error" }));
     }
@@ -426,7 +426,7 @@ fn mint_enrollment(cfg: &AuthConfig, user: &UserRow) -> Option<(totp::Provisioni
     let provisioning = totp::provisioning(&secret, TOTP_ISSUER, &user.email)
         .inspect_err(|e| tracing::error!(error = %e, "totp provisioning failed"))
         .ok()?;
-    let ciphertext = totp::encrypt_secret(&key, user.id, &secret)
+    let ciphertext = totp::encrypt_secret(&key, &user.id, &secret)
         .inspect_err(|e| tracing::error!(error = %e, "totp secret encrypt failed"))
         .ok()?;
     Some((provisioning, ciphertext))
@@ -486,7 +486,7 @@ async fn notify_second_factor_removed(
         vec!["second-factor-removed".into()],
     );
     if let Err(e) = mailer.send(db, msg).await {
-        tracing::warn!(error = %e, user_id = %user.id, "second-factor-removed notice send failed");
+        tracing::warn!(error = %e, user_id = user.id.as_str(), "second-factor-removed notice send failed");
     }
 }
 
@@ -506,7 +506,7 @@ async fn verify_reauth(
     // TOTP-code proof.
     if let Some(code) = code.filter(|c| !c.trim().is_empty()) {
         if let Ok(key) = totp::key_from_config(cfg.settings.totp_enc_key.expose_str()) {
-            if let Ok(secret) = totp::decrypt_secret(&key, user.id, &cred.encrypted_secret) {
+            if let Ok(secret) = totp::decrypt_secret(&key, &user.id, &cred.encrypted_secret) {
                 if totp::verify_code(&secret, code) {
                     return true;
                 }
@@ -533,8 +533,8 @@ async fn verify_reauth(
 /// Best-effort: a store fault is treated as NOT throttled (fail-open on the
 /// throttle only — the credential decision itself is still fail-closed).
 #[allow(clippy::future_not_send)]
-async fn rate_limited(db: &compio_postgres::Client, user_id: uuid::Uuid) -> bool {
-    let key = format!("totp:verify:{user_id}");
+async fn rate_limited(db: &compio_postgres::Client, user_id: &zeroship_core::user_id::UserId) -> bool {
+    let key = format!("totp:verify:{}", user_id.as_str());
     match rate_limit::consume(db, &key, Quota::TOTP_VERIFY).await {
         Ok(RateLimitDecision::Allowed) => false,
         Ok(RateLimitDecision::Throttled(_)) => true,
@@ -570,7 +570,7 @@ async fn resolve_user(
         .unwrap_or("");
     let session_id = session_cookie::parse_cookie(cookie_header)?;
     let session = sessions::validate(db, session_id).await.ok().flatten()?;
-    users::find_by_id(db, &session.user_id.to_string())
+    users::find_by_id(db, session.user_id.as_str())
         .await
         .ok()
         .flatten()

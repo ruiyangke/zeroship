@@ -246,24 +246,25 @@ async fn github_native_callback_resumes_authorize_with_session_cookie() {
         .await
         .expect("user select");
     assert_eq!(user_rows.len(), 1, "native callback creates one user row");
-    let user_id: uuid::Uuid = user_rows[0].get("id");
+    let user_id = zeroship_core::user_id::UserId::parse(user_rows[0].get::<_, &str>("id"))
+        .expect("the created user row carries a typed user id");
 
     fx.pg
         .execute(
             "DELETE FROM zeroship.federated_identities WHERE user_id = $1",
-            &[&user_id],
+            &[&user_id.as_str()],
         )
         .await
         .ok();
     fx.pg
         .execute(
             "DELETE FROM zeroship.idp_sessions WHERE user_id = $1",
-            &[&user_id],
+            &[&user_id.as_str()],
         )
         .await
         .ok();
     fx.pg
-        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user_id])
+        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user_id.as_str()])
         .await
         .ok();
     fx.cleanup().await;
@@ -366,12 +367,12 @@ async fn github_native_confirmation_bounce_carries_return_to() {
     fx.pg
         .execute(
             "DELETE FROM zeroship.idp_sessions WHERE user_id = $1",
-            &[&existing.id],
+            &[&existing.id.as_str()],
         )
         .await
         .ok();
     fx.pg
-        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&existing.id])
+        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&existing.id.as_str()])
         .await
         .ok();
     fx.cleanup().await;

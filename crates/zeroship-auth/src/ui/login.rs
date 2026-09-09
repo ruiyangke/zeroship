@@ -216,12 +216,12 @@ async fn post_native(
         }
     };
 
-    match totp_store::is_enabled(db, verified.id).await {
+    match totp_store::is_enabled(db, &verified.id).await {
         Ok(true) => {
             return render_challenge(
                 cfg,
                 &TotpChallenge::new(
-                    verified.id,
+                    &verified.id,
                     verified.credential_version,
                     return_to.clone(),
                     FirstFactor::Password,
@@ -230,7 +230,7 @@ async fn post_native(
         }
         Ok(false) => {}
         Err(e) => {
-            tracing::error!(error = %e, user_id = %verified.id, "totp is_enabled check failed");
+            tracing::error!(error = %e, user_id = verified.id.as_str(), "totp is_enabled check failed");
             return render_error(PublicErrorMessage::ContactSupport);
         }
     }
@@ -238,7 +238,7 @@ async fn post_native(
     finish_login_native(
         cfg,
         db,
-        verified.id,
+        &verified.id,
         verified.credential_version,
         &return_to,
         &["pwd"],
@@ -289,7 +289,7 @@ pub(crate) fn render_challenge(cfg: &AuthConfig, stash: &TotpChallenge) -> HttpR
 #[allow(clippy::future_not_send, clippy::too_many_arguments)]
 async fn finish_login(
     db: &compio_postgres::Client,
-    user_id: uuid::Uuid,
+    user_id: &zeroship_core::user_id::UserId,
     credential_version: i64,
     amr: &[&str],
 ) -> Option<sessions::Session> {
@@ -315,7 +315,7 @@ async fn finish_login(
     };
 
     if let Err(e) = users::touch_last_login(db, user_id).await {
-        tracing::warn!(error = %e, user_id = %user_id, "touch_last_login failed");
+        tracing::warn!(error = %e, user_id = user_id.as_str(), "touch_last_login failed");
     }
 
     Some(session)
@@ -325,7 +325,7 @@ async fn finish_login(
 async fn finish_login_native(
     _cfg: &AuthConfig,
     db: &compio_postgres::Client,
-    user_id: uuid::Uuid,
+    user_id: &zeroship_core::user_id::UserId,
     credential_version: i64,
     return_to: &str,
     amr: &[&str],
@@ -416,7 +416,7 @@ pub async fn post_2fa(
 
     // 3. Re-fetch the user; credential_version must still match (a password
     // change / forced logout since factor 1 invalidates this challenge).
-    let user = match users::find_by_id(db.as_ref(), &stash.user_id.to_string()).await {
+    let user = match users::find_by_id(db.as_ref(), stash.user_id.as_str()).await {
         Ok(Some(u)) => u,
         Ok(None) => return redirect_to_login(&return_to),
         Err(e) => {
@@ -433,7 +433,7 @@ pub async fn post_2fa(
     }
 
     // 4. Rate-limit the verify (per-user).
-    let rl_key = format!("totp:verify:{}", user.id);
+    let rl_key = format!("totp:verify:{}", user.id.as_str());
     match rate_limit::consume(db.as_ref(), &rl_key, Quota::TOTP_VERIFY).await {
         Ok(RateLimitDecision::Allowed) => {}
         Ok(RateLimitDecision::Throttled(_)) => {
@@ -450,7 +450,7 @@ pub async fn post_2fa(
     }
 
     // 5. The credential must still be confirmed/enabled.
-    let cred = match totp_store::find_confirmed(db.as_ref(), user.id).await {
+    let cred = match totp_store::find_confirmed(db.as_ref(), &user.id).await {
         Ok(Some(c)) => c,
         Ok(None) => return redirect_to_login(&return_to),
         Err(e) => {
@@ -468,7 +468,7 @@ pub async fn post_2fa(
         }
     };
     let mut second_factor_ok = false;
-    if let Ok(secret) = totp::decrypt_secret(&key, user.id, &cred.encrypted_secret) {
+    if let Ok(secret) = totp::decrypt_secret(&key, &user.id, &cred.encrypted_secret) {
         if totp::verify_code(&secret, &form.code) {
             second_factor_ok = true;
         }
@@ -476,7 +476,7 @@ pub async fn post_2fa(
 
     // 5b. Otherwise try an unused backup code (constant-time per-code via Argon2).
     if !second_factor_ok {
-        match totp_store::unused_backup_codes(db.as_ref(), user.id).await {
+        match totp_store::unused_backup_codes(db.as_ref(), &user.id).await {
             Ok(codes) => {
                 for c in &codes {
                     if totp::verify_backup_code(&form.code, &c.code_hash).unwrap_or(false) {
@@ -541,7 +541,7 @@ pub async fn post_2fa(
             finish_login_native(
                 cfg.as_ref(),
                 db.as_ref(),
-                user.id,
+                &user.id,
                 user.credential_version,
                 &return_to,
                 &["pwd", "otp"],

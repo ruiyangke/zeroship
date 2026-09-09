@@ -923,7 +923,7 @@ pub fn oidc_at_hash(access_token: &str) -> String {
 /// is a programming error rather than a request-shaped one, and it is reported
 /// as an internal error without naming either identifier.
 fn bind_proof_to_person(proof: &ValidatedSession, minting_for: &str) -> Result<()> {
-    if proof.person_id().to_string() == minting_for {
+    if proof.person_id().as_str() == minting_for {
         return Ok(());
     }
     tracing::error!(

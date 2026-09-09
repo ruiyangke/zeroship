@@ -106,7 +106,7 @@ pub async fn request(
 
     // The ownership precondition, before anything is written. Every arm that is
     // not a clear answer is a refusal.
-    match control_client::erasure_preflight(cfg.control_url(), &service_keyring, user.id).await {
+    match control_client::erasure_preflight(cfg.control_url(), &service_keyring, &user.id).await {
         Ok(report) if report.is_clear() => {}
         Ok(report) => {
             let blockers = report
@@ -180,7 +180,7 @@ pub async fn request(
             // form, and neither is a licence to proceed.
             tracing::error!(
                 error = %e,
-                user_id = %user.id,
+                user_id = user.id.as_str(),
                 credentialed = !matches!(e, PreflightError::NoCredential(_)),
                 "account deletion refused: erasure preflight unavailable"
             );
@@ -206,41 +206,41 @@ pub async fn request(
     let pool = match refresh_pool.checkout_pool("account deletion").await {
         Ok(pool) => pool,
         Err(e) => {
-            tracing::error!(error = %e, user_id = %user.id, "account deletion pool unavailable");
+            tracing::error!(error = %e, user_id = user.id.as_str(), "account deletion pool unavailable");
             return redirect_to_me();
         }
     };
     let mut conn = match pool.get().await {
         Ok(conn) => conn,
         Err(e) => {
-            tracing::error!(error = %e, user_id = %user.id, "account deletion session unavailable");
+            tracing::error!(error = %e, user_id = user.id.as_str(), "account deletion session unavailable");
             return redirect_to_me();
         }
     };
-    let request = match users::request_deletion(&mut conn, user.id, GRACE_DAYS).await {
+    let request = match users::request_deletion(&mut conn, &user.id, GRACE_DAYS).await {
         Ok(Some(r)) => r,
         Ok(None) => {
             // No such user. Land on /me.
             return redirect_to_me();
         }
         Err(e) => {
-            tracing::error!(error = %e, user_id = %user.id, "request_deletion failed");
+            tracing::error!(error = %e, user_id = user.id.as_str(), "request_deletion failed");
             return redirect_to_me();
         }
     };
     drop(conn);
     drop(pool);
 
-    match oidc::backchannel_logout::emit_for_user(db.as_ref(), issuer.as_ref(), user.id).await {
+    match oidc::backchannel_logout::emit_for_user(db.as_ref(), issuer.as_ref(), &user.id).await {
         Ok(report) => tracing::info!(
-            user_id = %user.id,
+            user_id = user.id.as_str(),
             attempted = report.attempted,
             delivered = report.delivered,
             "account-deletion: emitted OIDC back-channel logout tokens"
         ),
         Err(e) => tracing::error!(
             error = %e,
-            user_id = %user.id,
+            user_id = user.id.as_str(),
             "account-deletion: BCL emission failed"
         ),
     }
@@ -401,7 +401,7 @@ async fn send_confirmation(
         vec!["account-deletion".into()],
     );
     if let Err(e) = mailer.send(db, msg).await {
-        tracing::warn!(error = %e, user_id = %request.user_id, "account-deletion confirmation email send failed");
+        tracing::warn!(error = %e, user_id = request.user_id.as_str(), "account-deletion confirmation email send failed");
     }
 }
 
@@ -536,7 +536,7 @@ async fn resolve_user(
         .unwrap_or("");
     let session_id = session_cookie::parse_cookie(cookie_header)?;
     let session = sessions::validate(db, session_id).await.ok().flatten()?;
-    users::find_by_id(db, &session.user_id.to_string())
+    users::find_by_id(db, session.user_id.as_str())
         .await
         .ok()
         .flatten()

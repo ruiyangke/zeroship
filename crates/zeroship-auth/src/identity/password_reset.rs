@@ -74,7 +74,7 @@ pub struct RedeemedToken {
 /// Result of a successful [`complete`] — the row's linked user.
 #[derive(Debug, Clone)]
 pub struct CompletedReset {
-    pub user_id: uuid::Uuid,
+    pub user_id: zeroship_core::user_id::UserId,
     pub email: String,
 }
 
@@ -390,10 +390,14 @@ pub async fn complete(
         )
         .await
         .map_err(|e| AuthError::Db(format!("password_reset complete: {e}")))?;
-    Ok(rows.first().map(|r| CompletedReset {
-        user_id: r.get("user_id"),
-        email: r.get("email"),
-    }))
+    rows.first()
+        .map(|r| {
+            Ok(CompletedReset {
+                user_id: crate::entity_ids::user_id(r, "user_id")?,
+                email: r.get("email"),
+            })
+        })
+        .transpose()
 }
 
 fn sha256(s: &str) -> [u8; 32] {

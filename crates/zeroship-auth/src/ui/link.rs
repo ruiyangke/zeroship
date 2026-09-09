@@ -168,7 +168,7 @@ pub async fn post(
     // Trusted, gateway-authored client IP (SEC-3) — not the spoofable
     // leftmost X-Forwarded-For token.
     let ip = crate::headers::client_ip(&req);
-    let link_attempt_key = format!("link_attempt:{}:{ip}", pending.user_id);
+    let link_attempt_key = format!("link_attempt:{}:{ip}", pending.user_id.as_str());
     match rate_limit::consume(db.as_ref(), &link_attempt_key, Quota::LINK_ATTEMPT).await {
         Ok(RateLimitDecision::Allowed) => {}
         Ok(RateLimitDecision::Throttled(_)) => {
@@ -295,9 +295,9 @@ pub async fn post(
         );
     };
 
-    if let Err(e) = eligibility::check_user_eligible(db.as_ref(), u.id).await {
+    if let Err(e) = eligibility::check_user_eligible(db.as_ref(), &u.id).await {
         if !e.is_account_state() {
-            tracing::error!(error = %e, user_id = %u.id, "link eligibility check failed");
+            tracing::error!(error = %e, user_id = u.id.as_str(), "link eligibility check failed");
             return render_error_page(PublicErrorMessage::ContactSupport);
         }
         audit::emit(
@@ -339,12 +339,12 @@ pub async fn post(
     // asks for no local second factor - so the row must not outlive a
     // challenge the user never completed. The assertion rides in the signed
     // stash and is applied by `finish_after_second_factor`.
-    match totp_store::is_enabled(db.as_ref(), u.id).await {
+    match totp_store::is_enabled(db.as_ref(), &u.id).await {
         Ok(true) => {
             return render_challenge(
                 &cfg,
                 &TotpChallenge::new(
-                    u.id,
+                    &u.id,
                     u.credential_version,
                     native_return_to.to_string(),
                     FirstFactor::OauthLink {
@@ -357,7 +357,7 @@ pub async fn post(
         }
         Ok(false) => {}
         Err(e) => {
-            tracing::error!(error = %e, user_id = %u.id, "link totp is_enabled check failed");
+            tracing::error!(error = %e, user_id = u.id.as_str(), "link totp is_enabled check failed");
             return render_error_page(PublicErrorMessage::ContactSupport);
         }
     }
@@ -365,7 +365,7 @@ pub async fn post(
     // 5a. Create the identity row.
     if let Err(e) = identities::link(
         db.as_ref(),
-        u.id,
+        &u.id,
         &pending.provider,
         &pending.subject,
         Some(&pending.email),
@@ -382,7 +382,7 @@ pub async fn post(
     let session = match sessions::create(
         db.as_ref(),
         &sessions::CreateSession {
-            user_id: u.id,
+            user_id: &u.id,
             auth_method: &pending.provider,
             // The user provided BOTH a federation assertion (oauth) AND a
             // local password to confirm the link. Both factors land in amr.
@@ -403,8 +403,8 @@ pub async fn post(
     };
 
     // 5c. Bump last_login_at (non-fatal).
-    if let Err(e) = users::touch_last_login(db.as_ref(), u.id).await {
-        tracing::warn!(error = %e, user_id = %u.id, "touch_last_login failed");
+    if let Err(e) = users::touch_last_login(db.as_ref(), &u.id).await {
+        tracing::warn!(error = %e, user_id = u.id.as_str(), "touch_last_login failed");
     }
 
     audit::emit(
@@ -498,7 +498,7 @@ pub(crate) async fn finish_after_second_factor(
         return render_error_page(PublicErrorMessage::InvalidRequest);
     };
 
-    if let Err(e) = identities::link(db, user.id, provider, subject, Some(email), None).await {
+    if let Err(e) = identities::link(db, &user.id, provider, subject, Some(email), None).await {
         tracing::error!(error = %e, "identities::link failed");
         return render_error_page(PublicErrorMessage::ContactSupport);
     }
@@ -506,7 +506,7 @@ pub(crate) async fn finish_after_second_factor(
     let session = match sessions::create(
         db,
         &sessions::CreateSession {
-            user_id: user.id,
+            user_id: &user.id,
             auth_method: provider,
             // A federation assertion, the local password, and a TOTP or backup
             // code all landed, so all three land in amr.
@@ -526,8 +526,8 @@ pub(crate) async fn finish_after_second_factor(
         }
     };
 
-    if let Err(e) = users::touch_last_login(db, user.id).await {
-        tracing::warn!(error = %e, user_id = %user.id, "touch_last_login failed");
+    if let Err(e) = users::touch_last_login(db, &user.id).await {
+        tracing::warn!(error = %e, user_id = user.id.as_str(), "touch_last_login failed");
     }
 
     audit::emit(

@@ -819,7 +819,7 @@ async fn login_issue_does_not_supersede_reset_token() {
         .await
         .ok();
     client
-        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id])
+        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id.as_str()])
         .await
         .ok();
 }

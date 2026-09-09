@@ -75,12 +75,12 @@ impl M4TestCtx {
     }
 
     #[allow(clippy::future_not_send)]
-    async fn seed_verification(&self) -> (Uuid, String, String) {
+    async fn seed_verification(&self) -> (zeroship_core::user_id::UserId, String, String) {
         let email = format!("m4-verify-{}@zeroship.test", Uuid::new_v4().simple());
         let user = users::create(&self.pg, &email, "M4 Verify", None)
             .await
             .expect("seed verify user");
-        let issued = verification::issue(&self.pg, user.id, &email)
+        let issued = verification::issue(&self.pg, &user.id, &email)
             .await
             .expect("issue verification token");
         (user.id, email, issued.raw)
@@ -164,7 +164,7 @@ fn verify_get_renders_interstitial_does_not_consume_token() {
         .query_one(
             "SELECT COUNT(*) FROM zeroship.email_verifications \
              WHERE user_id = $1 AND consumed_at IS NULL",
-            &[&user_id],
+            &[&user_id.as_str()],
         )
         .await
         .expect("count verification rows")
@@ -205,7 +205,7 @@ fn verify_post_redeem_consumes_token_and_marks_verified() {
         .pg
         .query_one(
             "SELECT email_verified_at IS NOT NULL AS verified FROM zeroship.users WHERE id = $1",
-            &[&user_id],
+            &[&user_id.as_str()],
         )
         .await
         .expect("load user")

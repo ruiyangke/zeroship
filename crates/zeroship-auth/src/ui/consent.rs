@@ -10,7 +10,9 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 use zeroship_authz::{self as authz, AuthzContext, Resource, Scope};
-use zeroship_core::typed_id::app_id_from_oauth_client_id;
+use zeroship_core::app_id::AppId;
+use zeroship_core::typed_id::APP_OAUTH_CLIENT_PREFIX;
+use zeroship_core::user_id::UserId;
 
 use crate::advisory_lock::{oauth_grant_lock_key, with_advisory_lock};
 use crate::audit::{self, AuditEvent};
@@ -92,7 +94,7 @@ async fn get_consent_native(
             return render_error(PublicErrorMessage::InvalidRequest);
         }
     };
-    let info = native_consent_request(&ctx, session.user_id);
+    let info = native_consent_request(&ctx, &session.user_id);
     let app_scope_defs = match load_app_scope_defs(db, &ctx.client.client_id).await {
         Ok(defs) => defs,
         Err(e) => {
@@ -173,7 +175,7 @@ async fn post_consent_accept_native(
             return render_error(PublicErrorMessage::InvalidRequest);
         }
     };
-    let info = native_consent_request(&ctx, session.user_id);
+    let info = native_consent_request(&ctx, &session.user_id);
     let app_scope_defs = match load_app_scope_defs(db, &ctx.client.client_id).await {
         Ok(defs) => defs,
         Err(e) => {
@@ -206,7 +208,7 @@ async fn post_consent_accept_native(
     let cumulative_scopes = match with_advisory_lock(&lock_conn, lock_key, || async {
         let cumulative = persist_consent_grant(
             &lock_conn,
-            session.user_id,
+            &session.user_id,
             &ctx.client.client_id,
             &requested_scopes,
         )
@@ -219,7 +221,7 @@ async fn post_consent_accept_native(
             match crate::store::relay::mint_alias_at_consent(
                 &lock_conn,
                 &ctx.client.client_id,
-                session.user_id,
+                &session.user_id,
                 cfg.settings.relay_domain.get(),
             )
             .await
@@ -420,9 +422,12 @@ async fn load_native_oauth_client(
     })
 }
 
-fn native_consent_request(ctx: &NativeConsentContext, subject: Uuid) -> NativeConsentRequest {
+fn native_consent_request(
+    ctx: &NativeConsentContext,
+    subject: &UserId,
+) -> NativeConsentRequest {
     NativeConsentRequest {
-        subject: subject.to_string(),
+        subject: subject.as_str().to_string(),
         client: NativeConsentClient {
             client_id: ctx.client.client_id.clone(),
             client_name: Some(ctx.client.client_name.clone()),
@@ -578,16 +583,30 @@ struct ScopeDef {
     description: Option<String>,
 }
 
-/// Resolve the per-app `client_id` (`oac_<base62-app-id>`) back to its app UUID.
+/// Resolve the per-app OAuth `client_id` (`oac_<body>`) back to its [`AppId`].
+///
 /// Returns `None` for any client that is not a per-app end-user client (the
 /// builder/console/admin clients, e.g. `zeroship-builder-…`), which have no
 /// `app_scope_defs` and only ever request identity + platform scopes.
 ///
-/// Delegates to the shared `zeroship_core::typed_id` decoder — the exact
-/// inverse of control's `client_id_for_app`, so the prefix can never drift
-/// between the minter (control) and this decoder (auth).
-fn app_id_from_client_id(client_id: &str) -> Option<Uuid> {
-    app_id_from_oauth_client_id(client_id)
+/// **The derivation is a re-prefixing of one shared body, not a decode.** The
+/// two identifiers are `app_<body>` and `oac_<body>` over the SAME base62
+/// body: control's `client_id_for_app` carries it over verbatim from the app
+/// id's printed form. So the inverse swaps the tag back and asks
+/// [`AppId::parse`] to rule on the result, which refuses a body of the wrong
+/// length, outside base62, or above the representable range - exactly the set
+/// the minter can never have produced.
+///
+/// Reconstructing a uuid from the body and re-encoding it would agree on every
+/// input today, and that agreement is the hazard: it derives the id from bits
+/// the printed form is authoritative over, so it would keep answering
+/// confidently if the two renderings ever stopped matching. The prefix constant
+/// is the shared one, so the minter and this cannot drift on the tag either.
+fn app_id_from_client_id(client_id: &str) -> Option<AppId> {
+    let body = client_id
+        .strip_prefix(APP_OAUTH_CLIENT_PREFIX)?
+        .strip_prefix('_')?;
+    AppId::parse(&format!("{}_{body}", AppId::PREFIX)).ok()
 }
 
 /// Load the app's declared end-user scopes from `zeroship.app_scope_defs`,
@@ -607,7 +626,7 @@ async fn load_app_scope_defs(
             "SELECT scope_id, label, description \
              FROM zeroship.app_scope_defs \
              WHERE app_id = $1",
-            &[&app_id],
+            &[&app_id.as_str()],
         )
         .await
     {
@@ -723,8 +742,18 @@ async fn classify_and_authorize(
         return Ok(ClassifiedScopes { can_grant: true, has_unknown: false });
     }
 
-    let principal_id = Uuid::parse_str(&info.subject)
-        .map_err(|e| format!("consent subject is not a UUID: {e}"))?;
+    // THE DELEGATION GATE IS BLOCKED AT THIS BOUNDARY, AND THE REFUSAL IS
+    // LOUD RATHER THAN SILENT. `zeroship_authz::AuthzContext::principal_id` is
+    // a `uuid::Uuid`, and `authz`'s own reads key `zeroship.principal_grants`
+    // and `zeroship.organization_members` on that value - both of which are
+    // `text` columns holding `usr_<base62>`. The consent subject IS the printed
+    // user id, so this parse fails and every delegated scope is refused with
+    // the message below. Feeding a uuid decoded from the id's body would only
+    // move the failure into authz's own binds. The gate opens when
+    // `AuthzContext` takes a `UserId`; nothing in this crate can open it.
+    let principal_id = Uuid::parse_str(&info.subject).map_err(|e| {
+        format!("the delegation gate takes a uuid principal and the consent subject is a typed user id: {e}")
+    })?;
     let policies = platform_policies()?;
     let now = now_unix()?;
 
@@ -1200,17 +1229,38 @@ mod tests {
         ));
     }
 
+    /// The app id and its OAuth `client_id` share ONE body under two prefixes,
+    /// and this pins that the decoder recovers the app id the minter's body
+    /// belongs to.
+    ///
+    /// The two sides sit in different crates - control mints, this decodes - so
+    /// nothing makes the compiler compare them. What is compared here is the
+    /// shared encoder: `app_oauth_client_id` produces the `oac_` form, the app
+    /// id whose printed body is that same encoding is built beside it, and the
+    /// decoder must map the first onto the second.
     #[test]
-    fn app_id_round_trips_through_oac_client_id() {
-        let app = Uuid::new_v4();
-        // Mint via the shared core helper (the SAME path control uses) and decode
-        // via the consent classifier — they must round-trip, pinning the no-drift
-        // contract across the control (minter) / auth (decoder) crate boundary.
-        let client_id = zeroship_core::typed_id::app_oauth_client_id(&app);
-        assert!(client_id.starts_with("oac_"), "got {client_id}");
-        assert_eq!(app_id_from_client_id(&client_id), Some(app));
+    fn the_decoder_recovers_the_app_id_whose_body_the_client_id_carries() {
+        let embedded = Uuid::now_v7();
+        let client_id = zeroship_core::typed_id::app_oauth_client_id(&embedded);
+        assert!(
+            client_id.starts_with(&format!("{APP_OAUTH_CLIENT_PREFIX}_")),
+            "got {client_id}"
+        );
+        let expected = AppId::parse(&format!(
+            "{}_{}",
+            AppId::PREFIX,
+            zeroship_core::typed_id::uuid_to_base62(&embedded)
+        ))
+        .expect("the encoded body is a well-formed app id body");
+        assert_eq!(app_id_from_client_id(&client_id), Some(expected));
+
         // Non-per-app clients (builder/console) resolve to None.
         assert_eq!(app_id_from_client_id("zeroship-builder-abc"), None);
+        // A body the minter can never have produced is refused rather than
+        // re-prefixed into an id nothing keys on: outside base62, and the right
+        // shape but the wrong length.
         assert_eq!(app_id_from_client_id("oac_not-base62"), None);
+        assert_eq!(app_id_from_client_id("oac_"), None);
+        assert_eq!(app_id_from_client_id("oac_0000000000000000000000000"), None);
     }
 }

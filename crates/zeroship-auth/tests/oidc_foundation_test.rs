@@ -175,7 +175,7 @@ async fn access_token_roundtrip_served_jwks_public_only_and_issuer_consistency()
     // with a live session rather than a fabricated uuid. That is the fence, not
     // fixture ceremony: the id below is the one the creating statement returned.
     let (proof, person_id) = common::validated_session(&db, "oidc-foundation").await;
-    let user_id = person_id.to_string();
+    let user_id = person_id.as_str().to_string();
     let scopes = scopes();
     let token = issuer
         .issue_access_token(&db, &access_mint(&user_id, &scopes), &proof)
