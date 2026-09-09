@@ -6,6 +6,7 @@ use ntex::http::Payload;
 use ntex::web::{self, FromRequest, HttpRequest, HttpResponse};
 use serde_json::json;
 use uuid::Uuid;
+use zeroship_core::user_id::UserId;
 use zeroship_authz::{self as authz, Action, AuthzContext, AuthzDecision, Resource};
 use zeroship_authn::{AuthnRejection, VerifiedPrincipal};
 
@@ -13,7 +14,7 @@ use crate::{http_util, AppState};
 
 #[derive(Debug)]
 pub struct AuthzGuard {
-    pub principal_id: Uuid,
+    pub principal_id: UserId,
     pub token_policy: Option<authz::Policy>,
     pub request_ip: Option<IpAddr>,
     pub request_id: String,
@@ -67,7 +68,7 @@ impl AuthzGuard {
         };
 
         let ctx = AuthzContext {
-            principal_id: self.principal_id,
+            principal_id: legacy_principal_uuid(&self.principal_id),
             token_policy: self.token_policy.clone(),
             action,
             resource,
@@ -110,7 +111,7 @@ impl AuthzGuard {
             }
         };
         let ctx = AuthzContext {
-            principal_id: self.principal_id,
+            principal_id: legacy_principal_uuid(&self.principal_id),
             token_policy: self.token_policy.clone(),
             action,
             resource: Resource::Any,
@@ -159,7 +160,7 @@ async fn guard_from_bearer(
     if verified.seed_platform_cli_grants {
         match zeroship_authn::platform_cli::materialize_default_grants(
             state.control_pg.as_ref(),
-            verified.principal_id,
+            &verified.principal_id,
         )
         .await
         {
@@ -186,7 +187,7 @@ async fn guard_from_bearer(
             // of the capability, hence `error` and not `warn`.
             tracing::error!(
                 error = %err,
-                principal_id = %verified.principal_id,
+                principal_id = %verified.principal_id.as_str(),
                 "control: materializing default platform CLI grants failed; \
                  operator narrowing will not take effect for this principal"
             );
@@ -205,6 +206,21 @@ fn request_id(req: &HttpRequest) -> String {
         .filter(|value| !value.is_empty())
         .map(str::to_owned)
         .unwrap_or_else(|| Uuid::new_v4().to_string())
+}
+
+/// Decode a validated [`UserId`]'s base62 body back to the uuid it encodes,
+/// for [`AuthzContext`]'s still-`uuid::Uuid`-typed `principal_id` field
+/// (`zeroship_authz`, out of scope for this change). The id was already
+/// validated by `UserId::parse` when this guard was built, so the decode
+/// cannot fail. A one-way adapter at a single declared boundary, not a
+/// general conversion — remove it the day `AuthzContext.principal_id`
+/// becomes `UserId`.
+fn legacy_principal_uuid(principal_id: &UserId) -> Uuid {
+    zeroship_core::typed_id::parse_with_prefix(
+        principal_id.as_str(),
+        zeroship_core::typed_id::USER_PREFIX,
+    )
+    .expect("principal_id is a validated UserId; its base62 body always decodes")
 }
 
 fn now_unix() -> Result<i64, String> {

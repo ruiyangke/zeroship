@@ -23,7 +23,6 @@ use std::sync::Mutex;
 use chrono::NaiveDate;
 use compio_postgres::GenericClient;
 use serde::Serialize;
-use uuid::Uuid;
 use zeroship_core::app_id::AppId;
 
 use crate::metering::{current_period_start_unix, period_date};
@@ -321,7 +320,7 @@ pub async fn list_invoices_for_organization(
 /// `charge_cents`.
 #[derive(Debug, Clone, Serialize)]
 pub struct InvoiceLineDetail {
-    pub app_id: Uuid,
+    pub app_id: AppId,
     pub segment_no: i16,
     pub plan_id: String,
     pub included_units: i64,
@@ -425,29 +424,33 @@ pub async fn get_invoice_detail(
             &[&invoice_id],
         )
         .await?;
-    let lines = line_rows
-        .iter()
-        .map(|r| {
-            let included_units: i64 = r.get("included_units");
-            let usage_snapshot: serde_json::Value = r.get("usage_snapshot");
-            let weights_snapshot: serde_json::Value = r.get("weights_snapshot");
-            let (compute_units, billable_units) =
-                derive_line_cu(&usage_snapshot, &weights_snapshot, included_units);
-            InvoiceLineDetail {
-                app_id: r.get("app_id"),
-                segment_no: r.get("segment_no"),
-                plan_id: r.get("plan_id"),
-                included_units,
-                fx_pico_cents_per_unit: r.get("fx_pico_cents_per_unit"),
-                base_fee_cents: r.get("base_fee_cents"),
-                amount_cents: r.get("amount_cents"),
-                usage_snapshot,
-                weights_snapshot,
-                compute_units,
-                billable_units,
-            }
-        })
-        .collect();
+    let mut lines = Vec::with_capacity(line_rows.len());
+    for r in &line_rows {
+        let included_units: i64 = r.get("included_units");
+        let usage_snapshot: serde_json::Value = r.get("usage_snapshot");
+        let weights_snapshot: serde_json::Value = r.get("weights_snapshot");
+        let (compute_units, billable_units) =
+            derive_line_cu(&usage_snapshot, &weights_snapshot, included_units);
+        let raw_app_id: String = r.get("app_id");
+        let app_id = AppId::parse(&raw_app_id).map_err(|e| {
+            RegistryError::Database(format!(
+                "get_invoice_detail: invoice_lines row has a malformed app id {raw_app_id:?}: {e}"
+            ))
+        })?;
+        lines.push(InvoiceLineDetail {
+            app_id,
+            segment_no: r.get("segment_no"),
+            plan_id: r.get("plan_id"),
+            included_units,
+            fx_pico_cents_per_unit: r.get("fx_pico_cents_per_unit"),
+            base_fee_cents: r.get("base_fee_cents"),
+            amount_cents: r.get("amount_cents"),
+            usage_snapshot,
+            weights_snapshot,
+            compute_units,
+            billable_units,
+        });
+    }
 
     Ok(Some(InvoiceDetail {
         summary,
@@ -1139,7 +1142,16 @@ async fn unbilled_priced_periods<C: GenericClient + Sync>(
         )
         .await
         .map_err(|e| RegistryError::Database(e.to_string()))?;
-    let app_ids: Vec<Uuid> = app_rows.iter().map(|r| r.get::<_, Uuid>("app_id")).collect();
+    let mut app_ids = Vec::with_capacity(app_rows.len());
+    for r in &app_rows {
+        let raw: String = r.get("app_id");
+        let app_id = AppId::parse(&raw).map_err(|e| {
+            RegistryError::Database(format!(
+                "unbilled_priced_periods: apps row has a malformed app id {raw:?}: {e}"
+            ))
+        })?;
+        app_ids.push(app_id);
+    }
 
     // The pricing inputs, read ONCE for the whole organization: the global cost
     // model and the global default FX are exactly what the reconciler's sweep
@@ -1166,7 +1178,7 @@ async fn unbilled_priced_periods<C: GenericClient + Sync>(
         if charge == 0 {
             continue;
         }
-        let apps: HashSet<Uuid> = lines.iter().map(crate::cron::billing_reconcile::billed_app)
+        let apps: HashSet<&AppId> = lines.iter().map(crate::cron::billing_reconcile::billed_app)
             .collect();
         periods.push(UnbilledPeriod {
             period: period.to_string(),

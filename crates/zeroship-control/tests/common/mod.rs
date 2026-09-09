@@ -18,6 +18,7 @@ use serde_json::json;
 use uuid::Uuid;
 use zeroship_core::app_id::AppId;
 use zeroship_core::auth_provider::{AuthProvider, PlatformConfig, PlatformProvider};
+use zeroship_core::user_id::UserId;
 use zeroship_control::Registry;
 
 pub const PLATFORM_ISSUER: &str = "https://auth.zeroship.test/oauth2";
@@ -313,10 +314,10 @@ pub async fn ensure_builtin_plans(registry: &Registry) {
 /// use this. It should build that shape explicitly, because the placement is
 /// then the thing under test.
 #[allow(dead_code)]
-pub async fn personal_project_for(registry: &Registry, owner: Uuid) -> String {
+pub async fn personal_project_for(registry: &Registry, owner: &UserId) -> String {
     zeroship_control::organizations::ensure_personal_project(registry, owner)
         .await
-        .unwrap_or_else(|err| panic!("provision personal project for {owner}: {err:?}"))
+        .unwrap_or_else(|err| panic!("provision personal project for {}: {err:?}", owner.as_str()))
         .as_str()
         .to_string()
 }

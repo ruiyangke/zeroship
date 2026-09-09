@@ -337,9 +337,10 @@ impl Metering {
     }
 
     /// `owner_app` is the printed app id, bound directly as the `text` column
-    /// it names. Taking a bare string rather than either typed id lets both
-    /// callers - one holding an [`AppId`], the other a stored [`Uuid`] pending
-    /// its own conversion - share one registrar.
+    /// it names. Taking a bare string rather than [`AppId`] keeps this private
+    /// helper decoupled from the identity type: every caller already holds an
+    /// [`AppId`] and passes `app_id.as_str()`, so the string is the shape the
+    /// column and the SQL bind actually need.
     async fn register_metric<C: compio_postgres::GenericClient + Sync>(
         conn: &C,
         owner_app: &str,
@@ -381,7 +382,7 @@ impl Metering {
     /// `metric → total` map.
     pub async fn period_totals(
         &self,
-        app_id: &Uuid,
+        app_id: &AppId,
         period_start_unix_secs: i64,
     ) -> Result<HashMap<String, i64>, RegistryError> {
         let conn = self.registry.conn().await?;
@@ -391,14 +392,14 @@ impl Metering {
     /// As [`Metering::period_totals`] but on a borrowed connection.
     pub async fn period_totals_on<C: compio_postgres::GenericClient + Sync>(
         conn: &C,
-        app_id: &Uuid,
+        app_id: &AppId,
         period_start_unix_secs: i64,
     ) -> Result<HashMap<String, i64>, RegistryError> {
         let rows = conn
             .query(
                 "SELECT metric, total FROM zeroship.usage_aggregates \
                  WHERE app_id = $1 AND period = $2::date",
-                &[app_id, &period_date(period_start_unix_secs)],
+                &[&app_id.as_str(), &period_date(period_start_unix_secs)],
             )
             .await?;
         let mut out = HashMap::new();
@@ -412,40 +413,26 @@ impl Metering {
     /// period.
     pub async fn current_period_totals(
         &self,
-        app_id: &Uuid,
+        app_id: &AppId,
     ) -> Result<HashMap<String, i64>, RegistryError> {
         self.period_totals(app_id, current_period_start_unix()).await
     }
 
-    /// [`Self::current_period_totals`], keyed by the typed app id rather than
-    /// the stored uuid. `zeroship.usage_aggregates.app_id` is `text` holding
-    /// the canonical `app_<base62>` rendering; this binds that column's own
-    /// shape instead of going through a `Uuid`-typed parameter that a real app
-    /// id can no longer satisfy.
+    /// [`Self::current_period_totals`] on a fresh connection. Kept as a
+    /// separate entry point for callers (e.g. the `env.db` usage read in
+    /// [`crate::api`]) that already hold nothing but the app id and want the
+    /// current period in one call.
     pub async fn current_period_totals_for_app(
         &self,
         app_id: &zeroship_core::app_id::AppId,
     ) -> Result<HashMap<String, i64>, RegistryError> {
-        let conn = self.registry.conn().await?;
-        let period = period_date(current_period_start_unix());
-        let rows = conn
-            .query(
-                "SELECT metric, total FROM zeroship.usage_aggregates \
-                 WHERE app_id = $1 AND period = $2::date",
-                &[&app_id.as_str(), &period],
-            )
-            .await?;
-        let mut out = HashMap::new();
-        for row in &rows {
-            out.insert(row.get::<_, String>("metric"), row.get::<_, i64>("total"));
-        }
-        Ok(out)
+        self.current_period_totals(app_id).await
     }
 
     /// Read the aggregated total for a `(app_id, period_start, metric)` bucket.
     pub async fn total(
         &self,
-        app_id: &Uuid,
+        app_id: &AppId,
         period_start_unix_secs: i64,
         metric: &str,
     ) -> Result<i64, RegistryError> {
@@ -455,7 +442,7 @@ impl Metering {
                 "SELECT total FROM zeroship.usage_aggregates \
                  WHERE app_id = $1 AND period = $2::date \
                    AND metric = $3",
-                &[app_id, &period_date(period_start_unix_secs), &metric],
+                &[&app_id.as_str(), &period_date(period_start_unix_secs), &metric],
             )
             .await?;
         Ok(rows.first().map_or(0, |r| r.get("total")))

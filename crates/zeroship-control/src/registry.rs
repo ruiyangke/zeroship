@@ -4,7 +4,6 @@ use std::collections::HashMap;
 
 use compio_postgres::error::SqlState;
 use compio_postgres::{Client, NoTls};
-use uuid::Uuid;
 use zeroship_core::app_derivation;
 use zeroship_core::app_id::AppId;
 use zeroship_core::user_id::UserId;
@@ -267,7 +266,7 @@ impl Registry {
         &self,
         name: &str,
         plan_id: &str,
-        owner_id: &Uuid,
+        owner_id: &UserId,
         project_id: Option<&str>,
     ) -> Result<AppRecord, RegistryError> {
         validate_app_name(name)?;
@@ -280,11 +279,12 @@ impl Registry {
             Some(project_id) => project_id,
             None => {
                 personal_project =
-                    crate::organizations::ensure_personal_project(self, *owner_id)
+                    crate::organizations::ensure_personal_project(self, owner_id)
                         .await
                         .map_err(|err| {
                             RegistryError::Database(format!(
-                                "provision personal project for {owner_id}: {err:?}"
+                                "provision personal project for {}: {err:?}",
+                                owner_id.as_str()
                             ))
                         })?;
                 personal_project.as_str()
@@ -335,7 +335,7 @@ impl Registry {
                     ),
                     developer = crate::organizations::ladder_rank_of(crate::organizations::ROLE_DEVELOPER),
                 ),
-                &[&app_id.as_str(), &name, &plan_id, &project_id, owner_id],
+                &[&app_id.as_str(), &name, &plan_id, &project_id, &owner_id.as_str()],
             )
             .await?;
         let Some(row) = rows.first() else {
@@ -399,7 +399,7 @@ impl Registry {
     /// membership could not express.
     pub async fn list_apps_for_owner(
         &self,
-        owner_id: &Uuid,
+        owner_id: &UserId,
     ) -> Result<Vec<AppRecord>, RegistryError> {
         let conn = self.conn().await?;
         let rows = conn
@@ -426,7 +426,7 @@ impl Registry {
                     ),
                     viewer = crate::organizations::ladder_rank_of(crate::organizations::ROLE_VIEWER),
                 ),
-                &[owner_id],
+                &[&owner_id.as_str()],
             )
             .await?;
         rows.iter().map(row_to_record).collect()

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use uuid::Uuid;
+use zeroship_core::app_id::AppId;
 
 use super::{
     AdjustmentNote, BillingPeriod, IngestAck, InvoiceRef, LiteStore, ProviderError, UsageEvent,
@@ -58,6 +59,19 @@ impl ControlLiteStore {
         ))
         .with_base_url(self.stripe_base_url.clone())
     }
+
+    /// [`billing_reconcile::owned_app_ids_for_registry`] without the
+    /// `LiteStore::owned_app_ids` trait's `Uuid` bridge. Every call in this
+    /// module that immediately feeds the typed app id into another typed-id
+    /// function (`Metering::period_totals_on`, `billing_reconcile::lookup_plan_id_on`,
+    /// `billing_reconcile::bill_organization_with_parts`) goes through this
+    /// instead, so the id is validated once and never round-trips through a
+    /// `Uuid` it does not need.
+    async fn owned_app_ids_typed(&self, organization: &str) -> Result<Vec<AppId>, ProviderError> {
+        billing_reconcile::owned_app_ids_for_registry(&self.registry, organization)
+            .await
+            .map_err(ProviderError::from)
+    }
 }
 
 #[async_trait::async_trait(?Send)]
@@ -70,9 +84,32 @@ impl LiteStore for ControlLiteStore {
     }
 
     async fn owned_app_ids(&self, organization: &str) -> Result<Vec<Uuid>, ProviderError> {
-        billing_reconcile::owned_app_ids_for_registry(&self.registry, organization)
+        // `LiteStore::owned_app_ids` still promises `uuid::Uuid` (out of scope
+        // for this change; see `metering::provider::types::AdjustmentNote.app_id`
+        // for the sibling case). `billing_reconcile::owned_app_ids_for_registry`
+        // reads and validates the typed `AppId`; decode its base62 body back to
+        // the uuid it encodes to satisfy this trait's shape rather than widen
+        // it. Every INTERNAL use in this file goes through
+        // `owned_app_ids_typed` instead, so this bridge exists solely for
+        // callers outside this module that still want the trait's `Uuid` form.
+        let typed = billing_reconcile::owned_app_ids_for_registry(&self.registry, organization)
             .await
-            .map_err(ProviderError::from)
+            .map_err(ProviderError::from)?;
+        typed
+            .iter()
+            .map(|id| {
+                zeroship_core::typed_id::parse_with_prefix(
+                    id.as_str(),
+                    zeroship_core::typed_id::APP_PREFIX,
+                )
+                .map_err(|e| {
+                    ProviderError::Store(format!(
+                        "lite: app id {} failed to decode: {e}",
+                        id.as_str()
+                    ))
+                })
+            })
+            .collect()
     }
 
     async fn period_billable_units(
@@ -81,7 +118,7 @@ impl LiteStore for ControlLiteStore {
         period_start: i64,
     ) -> Result<u64, ProviderError> {
         let conn = self.registry.conn().await?;
-        let app_ids = self.owned_app_ids(organization).await?;
+        let app_ids = self.owned_app_ids_typed(organization).await?;
         let pricing = PricingStore::new(self.registry.clone());
         let weights = pricing.weights().await?;
         let catalog = PlanCatalog::new(self.registry.clone());
@@ -113,14 +150,14 @@ impl LiteStore for ControlLiteStore {
     ) -> Result<u64, ProviderError> {
         let conn = self.registry.conn().await?;
         let period = crate::metering::period_date(period_start);
-        let app_ids = self.owned_app_ids(organization).await?;
+        let app_ids = self.owned_app_ids_typed(organization).await?;
         let mut units = 0u64;
         for app_id in app_ids {
             let rows = conn
                 .query(
                     "SELECT total FROM zeroship.usage_aggregates \
                      WHERE app_id = $1 AND period = $2::date AND metric = $3",
-                    &[&app_id, &period, &meter],
+                    &[&app_id.as_str(), &period, &meter],
                 )
                 .await?;
             let Some(row) = rows.first() else {
@@ -147,7 +184,7 @@ impl LiteStore for ControlLiteStore {
         let pricing = PricingStore::new(self.registry.clone());
         let weights = pricing.weights().await?;
         let default_fx = pricing.default_fx_pico_cents_per_unit().await?;
-        let app_ids = self.owned_app_ids(organization).await?;
+        let app_ids = self.owned_app_ids_typed(organization).await?;
 
         let billed = billing_reconcile::bill_organization_with_parts(
             &self.registry,

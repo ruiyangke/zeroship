@@ -47,7 +47,7 @@ pub async fn list_grants(
              JOIN zeroship.oauth_clients c ON c.client_id = g.client_id \
              WHERE g.user_id = $1 \
              ORDER BY g.granted_at DESC",
-            &[&authz.principal_id],
+            &[&authz.principal_id.as_str()],
         )
         .await
     {
@@ -168,7 +168,7 @@ pub async fn revoke_grant(
 /// — same single `zeroship` DB.)
 async fn revoke_grant_cascade(
     state: &AppState,
-    user_id: &uuid::Uuid,
+    user_id: &zeroship_core::user_id::UserId,
     client_id: &str,
 ) -> Result<u64, crate::registry::RegistryError> {
     let mut conn = state.registry.conn().await?;
@@ -183,7 +183,7 @@ async fn revoke_grant_cascade(
     let deleted = tx
         .execute(
             "DELETE FROM zeroship.oauth_grants WHERE user_id = $1 AND client_id = $2",
-            &[user_id, &client_id],
+            &[&user_id.as_str(), &client_id],
         )
         .await?;
     // SAME txn — revoke the relay alias for THIS (app, user). Keyed DIRECTLY on
@@ -195,7 +195,7 @@ async fn revoke_grant_cascade(
           WHERE app_client_id = $2 \
             AND global_user_id = $1 \
             AND revoked_at IS NULL",
-        &[user_id, &client_id],
+        &[&user_id.as_str(), &client_id],
     )
     .await?;
     // SAME txn — write the per-app token-family marker so the live ACCESS token
@@ -215,7 +215,7 @@ async fn revoke_grant_cascade(
     if let Some(sector) = sector {
         let pws = zeroship_core::auth::derive_pairwise(
             &state.pairwise_salt,
-            &user_id.to_string(),
+            user_id.as_str(),
             &sector,
         );
         tx.execute(

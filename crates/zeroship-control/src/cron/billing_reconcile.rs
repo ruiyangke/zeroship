@@ -66,7 +66,7 @@ use std::time::Duration;
 
 use chrono::{Datelike, TimeZone, Utc};
 use sha2::{Digest, Sha256};
-use uuid::Uuid;
+use zeroship_core::app_id::AppId;
 
 use crate::metering::provider::{
     AdjustmentNote, AggregateQuery, BillingPeriod, CorrectionCapability, SubjectRef,
@@ -356,11 +356,11 @@ pub fn period_settled(
 #[must_use]
 pub fn invoice_item_idempotency_key(
     organization_id: &str,
-    app_id: &Uuid,
+    app_id: &AppId,
     period_start_unix: i64,
     segment_no: i16,
 ) -> String {
-    format!("billitem:{organization_id}:{app_id}:{period_start_unix}:{segment_no}")
+    format!("billitem:{organization_id}:{}:{period_start_unix}:{segment_no}", app_id.as_str())
 }
 
 /// Deterministic Stripe `Idempotency-Key` for the per-run invoice create.
@@ -514,15 +514,32 @@ async fn sweep<S: StripeApi>(
             &[&period],
         )
         .await?;
-    let active_apps: std::collections::HashSet<Uuid> =
-        active_app_rows.iter().map(|r| r.get::<_, Uuid>("app_id")).collect();
+    // `usage_aggregates.app_id` is `text` holding the canonical `app_<base62>`
+    // rendering. Parse-and-validate every row rather than trusting it blind: an
+    // FX-abort-style fail-closed error beats silently skipping a row that would
+    // have been billable (a dropped row here is dropped revenue).
+    let mut active_apps: HashSet<AppId> = HashSet::with_capacity(active_app_rows.len());
+    for row in &active_app_rows {
+        let raw: String = row.get("app_id");
+        let app_id = AppId::parse(&raw).map_err(|e| {
+            RegistryError::Database(format!(
+                "billing_reconcile: usage_aggregates row has a malformed app id {raw:?}: {e}"
+            ))
+        })?;
+        active_apps.insert(app_id);
+    }
 
     // BTreeMap for deterministic organization ordering (stable invoice
     // sequencing). Only apps that accrued usage this period are retained (see
     // pre-filter above).
-    let mut apps_by_organization: BTreeMap<String, Vec<Uuid>> = BTreeMap::new();
+    let mut apps_by_organization: BTreeMap<String, Vec<AppId>> = BTreeMap::new();
     for row in &owner_rows {
-        let app_id: Uuid = row.get("app_id");
+        let raw: String = row.get("app_id");
+        let app_id = AppId::parse(&raw).map_err(|e| {
+            RegistryError::Database(format!(
+                "billing_reconcile: apps row has a malformed app id {raw:?}: {e}"
+            ))
+        })?;
         if !active_apps.contains(&app_id) {
             continue;
         }
@@ -788,7 +805,7 @@ pub async fn reconcile_pass_for_meter(
     // other kept resolving a human owner, every subject in the fleet would look
     // like drift and the safety net would report the migration itself as a
     // fleet-wide `subject_attribution_mismatch`.
-    let mut subjects: HashMap<(String, Uuid), SubjectPeriodTotals> = HashMap::new();
+    let mut subjects: HashMap<(String, AppId), SubjectPeriodTotals> = HashMap::new();
     let local_rows = conn
         .query(
             "SELECT a.organization_id, u.app_id, \
@@ -803,10 +820,15 @@ pub async fn reconcile_pass_for_meter(
         .await?;
     for row in &local_rows {
         let organization_id: String = row.get("organization_id");
-        let app_id: Uuid = row.get("app_id");
+        let raw: String = row.get("app_id");
+        let app_id = AppId::parse(&raw).map_err(|e| {
+            RegistryError::Database(format!(
+                "billing_reconcile: usage_aggregates row has a malformed app id {raw:?}: {e}"
+            ))
+        })?;
         let witness_quantity: i64 = row.get("witness_quantity");
         subjects
-            .entry((organization_id.clone(), app_id))
+            .entry((organization_id.clone(), app_id.clone()))
             .or_insert_with(|| SubjectPeriodTotals::new(organization_id, app_id, meter_name))
             .witness_quantity = witness_quantity;
     }
@@ -823,25 +845,30 @@ pub async fn reconcile_pass_for_meter(
         .await?;
     for row in &line_rows {
         let organization_id: String = row.get("organization_id");
-        let app_id: Uuid = row.get("app_id");
+        let raw: String = row.get("app_id");
+        let app_id = AppId::parse(&raw).map_err(|e| {
+            RegistryError::Database(format!(
+                "billing_reconcile: invoice_lines row has a malformed app id {raw:?}: {e}"
+            ))
+        })?;
         let usage: serde_json::Value = row.get("usage_snapshot");
         let amount_cents: i64 = row.get("amount_cents");
         let Some(quantity) = invoice_line_quantity_for_meter(&usage, meter_name) else {
             continue;
         };
         let subject = subjects
-            .entry((organization_id.clone(), app_id))
+            .entry((organization_id.clone(), app_id.clone()))
             .or_insert_with(|| SubjectPeriodTotals::new(organization_id, app_id, meter_name));
         subject.invoiced_quantity += quantity;
         subject.invoiced_amount_cents += amount_cents;
     }
 
-    let mut apps_by_organization: HashMap<&str, HashSet<Uuid>> = HashMap::new();
+    let mut apps_by_organization: HashMap<&str, HashSet<AppId>> = HashMap::new();
     for (organization_id, app_id) in subjects.keys() {
         apps_by_organization
             .entry(organization_id.as_str())
             .or_default()
-            .insert(*app_id);
+            .insert(app_id.clone());
     }
 
     let mut provider_cache: HashMap<String, Option<i64>> = HashMap::new();
@@ -871,7 +898,7 @@ pub async fn reconcile_pass_for_meter(
             None => None,
         };
 
-        let entity_id = correction_entity_id(totals.app_id, &totals.meter, period);
+        let entity_id = correction_entity_id(&totals.app_id, &totals.meter, period);
         let history = load_correction_history(&conn, &entity_id).await?;
         let correction_capability = match ownership {
             InvoiceOwnership::OwnedInvoicer => state.billing_stack.invoicer.correction(),
@@ -950,7 +977,7 @@ pub async fn reconcile_pass_for_meter(
 #[derive(Debug, Clone)]
 struct SubjectPeriodTotals {
     organization_id: String,
-    app_id: Uuid,
+    app_id: AppId,
     meter: String,
     witness_quantity: i64,
     invoiced_quantity: i64,
@@ -958,7 +985,7 @@ struct SubjectPeriodTotals {
 }
 
 impl SubjectPeriodTotals {
-    fn new(organization_id: String, app_id: Uuid, meter: &str) -> Self {
+    fn new(organization_id: String, app_id: AppId, meter: &str) -> Self {
         Self {
             organization_id,
             app_id,
@@ -1017,9 +1044,9 @@ async fn apply_correction<C>(
 where
     C: compio_postgres::GenericClient + Sync,
 {
-    let entity_id = correction_entity_id(totals.app_id, &totals.meter, period);
+    let entity_id = correction_entity_id(&totals.app_id, &totals.meter, period);
     let dedup_key = correction_dedup_key(
-        totals.app_id,
+        &totals.app_id,
         &totals.meter,
         period,
         correction.correction_seq,
@@ -1034,12 +1061,25 @@ where
             } else {
                 "late usage over-bill"
             };
+            // `metering::provider::types::AdjustmentNote.app_id` is still
+            // `Option<uuid::Uuid>` (out of scope for this change). Decode the
+            // id's own base62 body back to the uuid it encodes via the shared
+            // typed-id codec rather than widen that field: `totals.app_id` was
+            // validated by `AppId::parse` when this row was read, so the
+            // decode below cannot fail. This is a one-way adapter at a single
+            // declared boundary, not a general conversion — remove it the day
+            // `AdjustmentNote.app_id` becomes `Option<AppId>`.
+            let legacy_app_id = zeroship_core::typed_id::parse_with_prefix(
+                totals.app_id.as_str(),
+                zeroship_core::typed_id::APP_PREFIX,
+            )
+            .expect("totals.app_id is a validated AppId; its base62 body always decodes");
             invoicer
                 .adjustment_note(
                     &SubjectRef(totals.organization_id.to_string()),
                     &AdjustmentNote {
                         period,
-                        app_id: Some(totals.app_id),
+                        app_id: Some(legacy_app_id),
                         meter: totals.meter.clone(),
                         quantity_delta: correction.quantity_delta,
                         correction_seq: correction.correction_seq,
@@ -1151,7 +1191,7 @@ async fn record_provider_reject_finding<C>(
 where
     C: compio_postgres::GenericClient + Sync,
 {
-    let entity_id = correction_entity_id(totals.app_id, &totals.meter, period);
+    let entity_id = correction_entity_id(&totals.app_id, &totals.meter, period);
     record_safety_net_finding(
         conn,
         ReconcileFindingKind::ProviderReject,
@@ -1170,7 +1210,7 @@ where
         }),
         Some(format!(
             "provider_reject:{}:{}:{}:{}",
-            totals.app_id, period.start, totals.meter, reason
+            totals.app_id.as_str(), period.start, totals.meter, reason
         )),
     )
     .await
@@ -1229,18 +1269,26 @@ fn safety_net_finding_dedup_key(
     format!("{kind}:{entity_id}:{hex}")
 }
 
-fn correction_entity_id(app_id: Uuid, meter: &str, period: BillingPeriod) -> String {
-    format!("billing-correction:{app_id}:{meter}:{}", period.start)
+/// The durable `billing_reconciliation_findings.entity_id` for one
+/// `(app, meter, period)` safety-net subject: `billing-correction:app_<base62>:
+/// <meter>:<period_start>`, built from the app id's printed `app_<base62>`
+/// form (`AppId::as_str`), never its byte representation. `load_correction_history`
+/// looks this key up on every later tick, so the format is load-bearing: a
+/// key built one way must always compare equal to itself built the same way
+/// again, or the same subject's history goes invisible.
+fn correction_entity_id(app_id: &AppId, meter: &str, period: BillingPeriod) -> String {
+    format!("billing-correction:{}:{meter}:{}", app_id.as_str(), period.start)
 }
 
 fn correction_dedup_key(
-    app_id: Uuid,
+    app_id: &AppId,
     meter: &str,
     period: BillingPeriod,
     correction_seq: u32,
 ) -> String {
     format!(
-        "billing_correction:{app_id}:{meter}:{}:{correction_seq}",
+        "billing_correction:{}:{meter}:{}:{correction_seq}",
+        app_id.as_str(),
         period.start
     )
 }
@@ -1263,7 +1311,7 @@ pub(crate) async fn bill_organization<S: StripeApi>(
     weights: &MetricWeights,
     default_fx: Option<u64>,
     organization_id: &str,
-    app_ids: &[Uuid],
+    app_ids: &[AppId],
     period_start: i64,
 ) -> Result<bool, RegistryError> {
     bill_organization_with_parts(
@@ -1293,7 +1341,7 @@ pub(crate) async fn bill_organization_with_parts<S: StripeApi>(
     weights: &MetricWeights,
     default_fx: Option<u64>,
     organization_id: &str,
-    app_ids: &[Uuid],
+    app_ids: &[AppId],
     period_start: i64,
 ) -> Result<bool, RegistryError> {
     // `period` is the first-of-month `billing_period` DATE (the claim key). Bound
@@ -1432,10 +1480,17 @@ pub(crate) async fn bill_organization_with_parts<S: StripeApi>(
             &[&invoice_id],
         )
         .await?;
-    let posted: std::collections::HashSet<(Uuid, i16)> = posted_rows
-        .iter()
-        .map(|r| (r.get::<_, Uuid>("app_id"), r.get::<_, i16>("segment_no")))
-        .collect();
+    let mut posted: std::collections::HashSet<(AppId, i16)> =
+        std::collections::HashSet::with_capacity(posted_rows.len());
+    for row in &posted_rows {
+        let raw: String = row.get("app_id");
+        let app_id = AppId::parse(&raw).map_err(|e| {
+            RegistryError::Database(format!(
+                "billing_reconcile: billing_line_provider_refs row has a malformed app id {raw:?}: {e}"
+            ))
+        })?;
+        posted.insert((app_id, row.get::<_, i16>("segment_no")));
+    }
     // Which (app, segment) lines already have an intent (snapshot) row written?
     let line_rows = conn
         .query(
@@ -1443,10 +1498,17 @@ pub(crate) async fn bill_organization_with_parts<S: StripeApi>(
             &[&invoice_id],
         )
         .await?;
-    let line_exists: std::collections::HashSet<(Uuid, i16)> = line_rows
-        .iter()
-        .map(|r| (r.get::<_, Uuid>("app_id"), r.get::<_, i16>("segment_no")))
-        .collect();
+    let mut line_exists: std::collections::HashSet<(AppId, i16)> =
+        std::collections::HashSet::with_capacity(line_rows.len());
+    for row in &line_rows {
+        let raw: String = row.get("app_id");
+        let app_id = AppId::parse(&raw).map_err(|e| {
+            RegistryError::Database(format!(
+                "billing_reconcile: invoice_lines row has a malformed app id {raw:?}: {e}"
+            ))
+        })?;
+        line_exists.insert((app_id, row.get::<_, i16>("segment_no")));
+    }
 
     // MAJOR-1: reconcile the EXISTING draft's (app, segment) set against the FRESHLY
     // built one BEFORE posting. A prior crashed drive may have posted/recorded MORE
@@ -1458,11 +1520,11 @@ pub(crate) async fn bill_organization_with_parts<S: StripeApi>(
     // immutability trigger fires only on a finalized parent), so we delete the orphans
     // here: drop the Stripe item (adopting an un-ref'd-but-possibly-posted item via
     // its deterministic metadata key first), then the provider-ref, then the line.
-    let fresh_keys: std::collections::HashSet<(Uuid, i16)> =
-        lines.iter().map(|l| (l.app_id, l.segment_no)).collect();
-    let orphans: Vec<(Uuid, i16)> = line_exists
+    let fresh_keys: std::collections::HashSet<(AppId, i16)> =
+        lines.iter().map(|l| (l.app_id.clone(), l.segment_no)).collect();
+    let orphans: Vec<(AppId, i16)> = line_exists
         .union(&posted)
-        .copied()
+        .cloned()
         .filter(|k| !fresh_keys.contains(k))
         .collect();
     for (orphan_app, orphan_seg) in &orphans {
@@ -1470,12 +1532,12 @@ pub(crate) async fn bill_organization_with_parts<S: StripeApi>(
         //    know its external id; otherwise (line-only intent) it may STILL have been
         //    posted (crash between POST and ref-insert), so look it up by its
         //    deterministic metadata key and delete it if present.
-        let item_id: Option<String> = if posted.contains(&(*orphan_app, *orphan_seg)) {
+        let item_id: Option<String> = if posted.contains(&(orphan_app.clone(), *orphan_seg)) {
             conn.query(
                 "SELECT external_id FROM zeroship.billing_line_provider_refs \
                  WHERE invoice_id = $1 AND app_id = $2 AND segment_no = $3 \
                    AND provider = 'stripe' AND ref_kind = 'invoice_item'",
-                &[&invoice_id, orphan_app, orphan_seg],
+                &[&invoice_id, &orphan_app.as_str(), orphan_seg],
             )
             .await?
             .first()
@@ -1497,7 +1559,7 @@ pub(crate) async fn bill_organization_with_parts<S: StripeApi>(
                 .map_err(|e| RegistryError::Database(format!("delete_invoice_item: {e}")))?;
             tracing::warn!(
                 organization_id = %organization_id,
-                app_id = %orphan_app,
+                app_id = %orphan_app.as_str(),
                 segment_no = orphan_seg,
                 "billing_reconcile: deleted an orphaned Stripe invoice item (re-drive built fewer segments)"
             );
@@ -1508,13 +1570,13 @@ pub(crate) async fn bill_organization_with_parts<S: StripeApi>(
         conn.execute(
             "DELETE FROM zeroship.billing_line_provider_refs \
              WHERE invoice_id = $1 AND app_id = $2 AND segment_no = $3",
-            &[&invoice_id, orphan_app, orphan_seg],
+            &[&invoice_id, &orphan_app.as_str(), orphan_seg],
         )
         .await?;
         conn.execute(
             "DELETE FROM zeroship.invoice_lines \
              WHERE invoice_id = $1 AND app_id = $2 AND segment_no = $3",
-            &[&invoice_id, orphan_app, orphan_seg],
+            &[&invoice_id, &orphan_app.as_str(), orphan_seg],
         )
         .await?;
     }
@@ -1525,7 +1587,7 @@ pub(crate) async fn bill_organization_with_parts<S: StripeApi>(
     };
     for line in &lines {
         let app_id = &line.app_id;
-        let key = (*app_id, line.segment_no);
+        let key = (app_id.clone(), line.segment_no);
         // Confirmed posted in a prior drive — skip outright (no re-POST).
         if posted.contains(&key) {
             continue;
@@ -1564,7 +1626,7 @@ pub(crate) async fn bill_organization_with_parts<S: StripeApi>(
                weights_snapshot = EXCLUDED.weights_snapshot",
             &[
                 &invoice_id,
-                app_id,
+                &app_id.as_str(),
                 &line.segment_no,
                 &line.plan_id,
                 &included_i64,
@@ -1592,7 +1654,7 @@ pub(crate) async fn bill_organization_with_parts<S: StripeApi>(
             if item_id.is_some() {
                 tracing::warn!(
                     organization_id = %organization_id,
-                    app_id = %app_id,
+                    app_id = %app_id.as_str(),
                     segment_no = line.segment_no,
                     "billing_reconcile: adopted an already-posted invoice item on re-drive (intent recovery)"
                 );
@@ -1635,7 +1697,7 @@ pub(crate) async fn bill_organization_with_parts<S: StripeApi>(
                (invoice_id, app_id, segment_no, provider, ref_kind, external_id) \
              VALUES ($1, $2, $3, 'stripe', 'invoice_item', $4) \
              ON CONFLICT (invoice_id, app_id, segment_no, provider, ref_kind) DO NOTHING",
-            &[&invoice_id, app_id, &line.segment_no, &item_id],
+            &[&invoice_id, &app_id.as_str(), &line.segment_no, &item_id],
         )
         .await?;
     }
@@ -1834,7 +1896,7 @@ pub(crate) async fn price_period_lines<C: compio_postgres::GenericClient + Sync>
     conn: &C,
     weights: &MetricWeights,
     default_fx: Option<u64>,
-    app_ids: &[Uuid],
+    app_ids: &[AppId],
     period_start: i64,
 ) -> Result<(Vec<BilledLine>, u64), RegistryError> {
     let period = period_date(period_start);
@@ -1852,7 +1914,7 @@ pub(crate) async fn price_period_lines<C: compio_postgres::GenericClient + Sync>
             .await?
             .is_none()
         {
-            tracing::warn!(app_id = %app_id, plan_id = %current_plan_id, "billing_reconcile: plan not in catalog — skipping app");
+            tracing::warn!(app_id = %app_id.as_str(), plan_id = %current_plan_id, "billing_reconcile: plan not in catalog — skipping app");
             continue;
         }
 
@@ -1866,7 +1928,7 @@ pub(crate) async fn price_period_lines<C: compio_postgres::GenericClient + Sync>
                  FROM zeroship.plan_change_events \
                  WHERE app_id = $1 AND period = $2::date \
                  ORDER BY effective_at, id",
-                &[app_id, &period],
+                &[&app_id.as_str(), &period],
             )
             .await?;
         let mut period_changes: Vec<crate::proration::PlanChange> =
@@ -1882,8 +1944,9 @@ pub(crate) async fn price_period_lines<C: compio_postgres::GenericClient + Sync>
             let usage_at_change: std::collections::HashMap<String, i64> =
                 serde_json::from_value(usage_json).map_err(|e| {
                     RegistryError::Database(format!(
-                        "billing_reconcile: corrupt usage_at_change for app {app_id} — \
-                         refusing to price off an empty snapshot (would over-bill): {e}"
+                        "billing_reconcile: corrupt usage_at_change for app {} — \
+                         refusing to price off an empty snapshot (would over-bill): {e}",
+                        app_id.as_str()
                     ))
                 })?;
             period_changes.push(crate::proration::PlanChange {
@@ -1945,7 +2008,7 @@ pub(crate) async fn price_period_lines<C: compio_postgres::GenericClient + Sync>
                 Ok(b) => b,
                 Err(crate::pricing::PricingError::UnresolvedFx) => {
                     tracing::error!(
-                        app_id = %app_id,
+                        app_id = %app_id.as_str(),
                         plan_id = %seg.plan_id,
                         segment_no = seg.segment_no,
                         "billing_reconcile: global default FX missing — cannot price; ABORTING sweep"
@@ -1954,7 +2017,8 @@ pub(crate) async fn price_period_lines<C: compio_postgres::GenericClient + Sync>
                 }
                 Err(e @ crate::pricing::PricingError::ComputeUnitOverflow { .. }) => {
                     return Err(RegistryError::Database(format!(
-                        "billing_reconcile: {e} — refusing to bill app {app_id} segment {}",
+                        "billing_reconcile: {e} — refusing to bill app {} segment {}",
+                        app_id.as_str(),
                         seg.segment_no
                     )));
                 }
@@ -1964,9 +2028,9 @@ pub(crate) async fn price_period_lines<C: compio_postgres::GenericClient + Sync>
                 // skip today). The N=0 path skips a $0 app exactly as before.
                 continue;
             }
-            let desc = segment_description(*app_id, seg, period_start, segments.len());
+            let desc = segment_description(app_id, seg, period_start, segments.len());
             lines.push(BilledLine {
-                app_id: *app_id,
+                app_id: app_id.clone(),
                 segment_no: seg.segment_no,
                 plan_id: seg.plan_id.clone(),
                 desc,
@@ -1993,8 +2057,8 @@ pub(crate) async fn price_period_lines<C: compio_postgres::GenericClient + Sync>
 /// reconciler's own business; the deletion predicate needs only to count the
 /// distinct apps behind a period's charge.
 #[must_use]
-pub(crate) fn billed_app(line: &BilledLine) -> Uuid {
-    line.app_id
+pub(crate) fn billed_app(line: &BilledLine) -> &AppId {
+    &line.app_id
 }
 
 /// One priced per-SEGMENT line during a reconcile, carrying the frozen charge
@@ -2002,7 +2066,7 @@ pub(crate) fn billed_app(line: &BilledLine) -> Uuid {
 /// with N plan-change events emits N+1 of these (one per segment); the no-change
 /// path emits exactly one at `segment_no = 0`.
 pub(crate) struct BilledLine {
-    app_id: Uuid,
+    app_id: AppId,
     segment_no: i16,
     plan_id: String,
     /// The base, un-enriched per-segment description (`segment_description`). The
@@ -2032,12 +2096,13 @@ pub(crate) struct BilledLine {
 /// Stripe-hosted invoice reads correctly per segment, e.g.
 /// `"Infra usage — app <id> — 2026-05 (pln_… days 11–30)"`.
 fn segment_description(
-    app_id: Uuid,
+    app_id: &AppId,
     seg: &crate::proration::BilledSegment,
     period_start_unix: i64,
     segment_count: usize,
 ) -> String {
     let label = month_label(period_start_unix);
+    let app_id = app_id.as_str();
     if segment_count <= 1 {
         format!("Infra usage — app {app_id} — {label}")
     } else {
@@ -2140,7 +2205,7 @@ fn build_invoice_item_enrichment(
 pub(crate) async fn owned_app_ids(
     state: &AppState,
     organization_id: &str,
-) -> Result<Vec<Uuid>, RegistryError> {
+) -> Result<Vec<AppId>, RegistryError> {
     owned_app_ids_for_registry(&state.registry, organization_id).await
 }
 
@@ -2148,7 +2213,7 @@ pub(crate) async fn owned_app_ids(
 pub(crate) async fn owned_app_ids_for_registry(
     registry: &crate::registry::Registry,
     organization_id: &str,
-) -> Result<Vec<Uuid>, RegistryError> {
+) -> Result<Vec<AppId>, RegistryError> {
     let conn = registry.conn().await?;
     let rows = conn
         .query(
@@ -2158,7 +2223,17 @@ pub(crate) async fn owned_app_ids_for_registry(
             &[&organization_id],
         )
         .await?;
-    Ok(rows.iter().map(|r| r.get::<_, Uuid>("app_id")).collect())
+    let mut out = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let raw: String = row.get("app_id");
+        let app_id = AppId::parse(&raw).map_err(|e| {
+            RegistryError::Database(format!(
+                "owned_app_ids: apps row has a malformed app id {raw:?}: {e}"
+            ))
+        })?;
+        out.push(app_id);
+    }
+    Ok(out)
 }
 
 /// Read back the finalized Stripe provider invoice id persisted for
@@ -2191,10 +2266,10 @@ pub(crate) async fn lookup_invoice_id_for_registry(
 #[allow(clippy::future_not_send)]
 pub(crate) async fn lookup_plan_id_on<C: compio_postgres::GenericClient + Sync>(
     conn: &C,
-    app_id: &Uuid,
+    app_id: &AppId,
 ) -> Result<Option<String>, RegistryError> {
     let rows = conn
-        .query("SELECT plan_id FROM zeroship.apps WHERE id = $1", &[app_id])
+        .query("SELECT plan_id FROM zeroship.apps WHERE id = $1", &[&app_id.as_str()])
         .await?;
     Ok(rows.first().map(|r| r.get::<_, String>("plan_id")))
 }
@@ -2238,8 +2313,8 @@ mod tests {
     #[test]
     fn idempotency_keys_are_deterministic_and_distinct() {
         let organization = "org_0000000000000000000001";
-        let app_a = Uuid::from_u128(1);
-        let app_b = Uuid::from_u128(2);
+        let app_a = AppId::mint();
+        let app_b = AppId::mint();
         let p = 1_700_000_000i64;
         // Stable for a fixed tuple.
         assert_eq!(
@@ -2618,7 +2693,7 @@ mod tests {
         // app, then one finalized invoice. Drive it against a RECORDING fake
         // (no PG, no cyper) to pin the per-app amount + the deterministic keys.
         let organization = "org_00000000000000000000AA";
-        let app = Uuid::from_u128(0xBB);
+        let app = AppId::mint();
         let period = previous_period_start_unix(
             Utc.with_ymd_and_hms(2026, 6, 13, 0, 0, 0).unwrap().timestamp(),
         );
@@ -2641,11 +2716,11 @@ mod tests {
         // same path the sweep takes), so the unit test exercises the real
         // description + metadata derivation, not a hand-written stub.
         let line = BilledLine {
-            app_id: app,
+            app_id: app.clone(),
             segment_no: 0,
             plan_id: "pln_x".to_string(),
             desc: segment_description(
-                app,
+                &app,
                 &crate::proration::BilledSegment {
                     segment_no: 0,
                     plan_id: "pln_x".to_string(),
@@ -2692,7 +2767,10 @@ mod tests {
         let items = fake.items.borrow();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].amount, 750, "the per-app amount equals charge_cents total");
-        assert_eq!(items[0].idempotency_key, format!("billitem:{organization}:{app}:{period}:0"));
+        assert_eq!(
+            items[0].idempotency_key,
+            format!("billitem:{organization}:{}:{period}:0", app.as_str())
+        );
         assert_eq!(fake.invoices.borrow()[0].1, format!("billrun:{organization}:{period}"));
 
         // Enrichment: the description carries the CU, the metadata the full

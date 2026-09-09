@@ -9,6 +9,7 @@
 use serde_json::{json, Value};
 use uuid::Uuid;
 use zeroship_core::app_id::AppId;
+use zeroship_core::user_id::UserId;
 
 use crate::registry::{Registry, RegistryError};
 
@@ -234,7 +235,7 @@ pub struct AuditEntry<'a> {
     /// nullable - an audit row must stay readable after the organization it
     /// names is gone.
     pub organization_id: Option<&'a str>,
-    pub actor_user_id: Option<Uuid>,
+    pub actor_user_id: Option<&'a UserId>,
     pub action: Action,
     pub resource: Option<&'a str>,
     pub source_ip: Option<&'a str>,
@@ -271,10 +272,11 @@ pub async fn log(registry: &Registry, entry: AuditEntry<'_>) {
 /// `resource` alone is not enough to reconstruct the mutation.
 pub async fn log_with_detail(registry: &Registry, entry: AuditEntry<'_>, detail: &Value) {
     let app_id = entry.app_id.map(AppId::as_str);
+    let actor_user_id = entry.actor_user_id.map(UserId::as_str);
     let stdout_payload = json!({
         "app_id": app_id,
         "organization_id": entry.organization_id,
-        "actor_user_id": entry.actor_user_id,
+        "actor_user_id": actor_user_id,
         "action": entry.action.as_str(),
         "resource": entry.resource,
         "source_ip": entry.source_ip,
@@ -301,7 +303,7 @@ pub async fn log_with_detail(registry: &Registry, entry: AuditEntry<'_>, detail:
             &[
                 &app_id,
                 &entry.organization_id,
-                &entry.actor_user_id,
+                &actor_user_id,
                 &entry.action.as_str(),
                 &entry.resource,
                 &entry.source_ip,
@@ -346,10 +348,11 @@ pub async fn log_in_tx<C: compio_postgres::GenericClient + Sync>(
     detail: &Value,
 ) {
     let app_id = entry.app_id.map(AppId::as_str);
+    let actor_user_id = entry.actor_user_id.map(UserId::as_str);
     let stdout_payload = json!({
         "app_id": app_id,
         "organization_id": entry.organization_id,
-        "actor_user_id": entry.actor_user_id,
+        "actor_user_id": actor_user_id,
         "action": entry.action.as_str(),
         "resource": entry.resource,
         "source_ip": entry.source_ip,
@@ -367,7 +370,7 @@ pub async fn log_in_tx<C: compio_postgres::GenericClient + Sync>(
             &[
                 &app_id,
                 &entry.organization_id,
-                &entry.actor_user_id,
+                &actor_user_id,
                 &entry.action.as_str(),
                 &entry.resource,
                 &entry.source_ip,
@@ -399,23 +402,34 @@ pub async fn recent_for_app(
             &[&app_id.as_str(), &limit],
         )
         .await?;
-    Ok(rows
-        .iter()
-        .map(|r| AuditRow {
-            id: r.get("id"),
-            actor_user_id: r.get("actor_user_id"),
-            action: r.get("action"),
-            resource: r.get("resource"),
-            source_ip: r.get("source_ip"),
-            at: r.get("at_text"),
+    rows.iter()
+        .map(|r| {
+            let raw_actor: Option<String> = r.get("actor_user_id");
+            let actor_user_id = raw_actor
+                .map(|raw| {
+                    UserId::parse(&raw).map_err(|e| {
+                        RegistryError::Database(format!(
+                            "app_audit row has a malformed actor_user_id {raw:?}: {e}"
+                        ))
+                    })
+                })
+                .transpose()?;
+            Ok(AuditRow {
+                id: r.get("id"),
+                actor_user_id,
+                action: r.get("action"),
+                resource: r.get("resource"),
+                source_ip: r.get("source_ip"),
+                at: r.get("at_text"),
+            })
         })
-        .collect())
+        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuditRow {
     pub id: Uuid,
-    pub actor_user_id: Option<Uuid>,
+    pub actor_user_id: Option<UserId>,
     pub action: String,
     pub resource: Option<String>,
     pub source_ip: Option<String>,
