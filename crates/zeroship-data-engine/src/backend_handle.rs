@@ -357,7 +357,7 @@ pub async fn read_raw_column_bytes(
                 let q_col = sq.quote_ident(raw_column);
                 let sql = format!("SELECT {q_col} FROM {q_app}.{q_coll} WHERE id = ?1");
                 let (_lane_claim, lane) = sqlite_lane(route, sq)?;
-                let typed = lane.query_typed_internal(&sql, &[row_pk.into()]).await?;
+                let typed = lane.query_typed(&sql, &[row_pk.into()]).await?;
                 if typed.rows.is_empty() {
                     return Ok(ScalarRead::NoRow);
                 }
@@ -427,7 +427,7 @@ pub async fn read_raw_column_value(
                 let q_col = sq.quote_ident(raw_column);
                 let sql = format!("SELECT {q_col} FROM {q_app}.{q_coll} WHERE id = ?1");
                 let (_lane_claim, lane) = sqlite_lane(route, sq)?;
-                let rows = lane.query_typed_internal(&sql, &[row_pk.into()]).await?;
+                let rows = lane.query_typed(&sql, &[row_pk.into()]).await?;
                 Ok(native_scalar(
                     sqlite::row_json::typed_rows_to_values(&rows),
                     raw_column,

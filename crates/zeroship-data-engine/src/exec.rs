@@ -362,7 +362,7 @@ async fn exec_sqlite_values(
             TxConnection::Sqlite(client) => {
                 #[cfg(test)]
                 tests::record_sqlite_tx_route();
-                let typed = client.query_typed_internal(sql, params).await?;
+                let typed = client.query_typed(sql, params).await?;
                 Ok(crate::backend::sqlite::row_json::typed_rows_to_values(
                     &typed,
                 ))

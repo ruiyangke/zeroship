@@ -1251,17 +1251,6 @@ impl SqliteSessionHandle {
         self.session.settle(reservation, intent).await
     }
 
-    /// Forward a `query` through the underlying session.
-    ///
-    /// `pub` under the `test-helpers` feature so the integration target can
-    /// read PRAGMA values back without reaching into the actor surface.
-    #[cfg(feature = "test-helpers")]
-    pub async fn query(&self, sql: &str, params: &[&str]) -> Result<Vec<Row>, DbError> {
-        self.session
-            .query_on(&self.reservation(), sql, params)
-            .await
-    }
-
     /// Execute native parameters and return the driver's text projection.
     #[cfg(feature = "test-helpers")]
     pub async fn query_values(&self, sql: &str, params: &[Value]) -> Result<Vec<Row>, DbError> {
@@ -1280,34 +1269,21 @@ impl SqliteSessionHandle {
             .map_err(|_| DbError::internal("sqlite actor closed"))?
     }
 
-    /// Forward a `query_typed` through the underlying session. `pub` under
-    /// `test-helpers` so the e2e encrypted-column round-trip can read BLOB
-    /// columns as raw bytes rather than the `<N bytes blob>` stringification.
-    #[cfg(feature = "test-helpers")]
-    pub async fn query_typed(&self, sql: &str, params: &[Value]) -> Result<TypedRows, DbError> {
-        self.session
-            .query_typed_on(&self.reservation(), sql, params)
-            .await
-    }
-
-    /// Crate-private `query` for the unmask RPC dispatch.
+    /// Forward a `query` through the underlying session.
     ///
-    /// Separate symbol from the `cfg(test-helpers)` `query` above so the
-    /// production `crate::crud::unmask::dispatch_unmask` path can reach the
-    /// session without forcing the feature on default builds.
-    pub async fn query_internal(&self, sql: &str, params: &[&str]) -> Result<Vec<Row>, DbError> {
+    /// Public and ungated. `crate::crud::unmask::dispatch_unmask` runs through
+    /// here on the production path; the integration target uses the same method
+    /// to read PRAGMA values back without reaching into the actor surface.
+    pub async fn query(&self, sql: &str, params: &[&str]) -> Result<Vec<Row>, DbError> {
         self.session
             .query_on(&self.reservation(), sql, params)
             .await
     }
 
-    /// Crate-private `query_typed` counterpart for the unmask RPC dispatch
-    /// (the encrypted-column read path needs raw `TypedCell::Blob` bytes).
-    pub async fn query_typed_internal(
-        &self,
-        sql: &str,
-        params: &[Value],
-    ) -> Result<TypedRows, DbError> {
+    /// Forward a `query_typed` through the underlying session, preserving cell
+    /// types: the encrypted-column read path needs raw `TypedCell::Blob` bytes
+    /// rather than the `<N bytes blob>` stringification.
+    pub async fn query_typed(&self, sql: &str, params: &[Value]) -> Result<TypedRows, DbError> {
         self.session
             .query_typed_on(&self.reservation(), sql, params)
             .await
