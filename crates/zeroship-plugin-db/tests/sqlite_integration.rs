@@ -5,8 +5,7 @@
 
 //! SQLite-side integration tests.
 //!
-//! Behind `required-features = ["test-helpers"]`. The first four
-//! behaviour tests exercise the `SqliteSession` actor end-to-end:
+//! Ordinary package tests exercise the `SqliteSession` actor end-to-end:
 //!
 //! - bootstrap PRAGMAs land (`journal_mode = wal`, `busy_timeout = 5000`)
 //! - `SqlExecutor::pool_exec` round-trips DDL + DML

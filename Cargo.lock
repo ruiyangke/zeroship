@@ -7492,18 +7492,32 @@ dependencies = [
  "tempfile",
  "tracing",
  "tracing-subscriber",
+ "trybuild",
  "uuid",
  "zeroize",
  "zeroship-core",
  "zeroship-data-core",
+ "zeroship-data-macros",
  "zeroship-data-postgres",
  "zeroship-data-query-builder",
  "zeroship-data-sqlite",
  "zeroship-metering",
  "zeroship-migrate",
  "zeroship-migrate-policy",
+ "zeroship-migrate-postgres",
  "zeroship-migrate-server",
  "zeroship-migrate-sqlite",
+]
+
+[[package]]
+name = "zeroship-data-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro-crate",
+ "proc-macro2",
+ "quote",
+ "serde_json",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -7886,6 +7900,7 @@ dependencies = [
  "zeroship-migrate-postgres",
  "zeroship-migrate-server",
  "zeroship-migrate-sqlite",
+ "zeroship-plugin-db",
  "zeroship-plugin-workflow",
  "zeroship-runtime",
  "zeroship-runtime-macros",

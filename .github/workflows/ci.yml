@@ -987,35 +987,11 @@ jobs:
           # comment came to say "64 assertions, floor 63" while the script's own
           # floor was 107. One copy, next to the code that reads it.
           bash tests/test_target_census_gate.sh "$RUNNER_TEMP/targets.json"
-      # `cargo test --workspace` SKIPS any target whose `required-features` are
-      # not enabled, and skips it silently - the target is never built, so it
-      # contributes no test count and no failure. plugin-db puts three suites
-      # behind `test-helpers`, which is why none of them have ever run here.
-      #
-      # Only the SQLite one is listed: it needs no server and runs in seconds,
-      # so it is real coverage this job was missing. This comment carried an
-      # exact test count until 2026-09-07, when deleting one test made it wrong
-      # and nothing re-measured it; the count is not asserted anywhere, so it
-      # was a maintenance obligation with no gate behind it. Its
-      # two siblings (`integration`, `native_transaction`) need a live
-      # PostgreSQL that this job does not provision, and they belong with the
-      # other live-database gates rather than here.
+      # Data tests require the PostgreSQL provisioned by this job. Test builds
+      # enable integration helpers without an opt-in feature.
       - run: |
           set -o pipefail
-          cargo test -p zeroship-plugin-db --features test-helpers --test sqlite_integration
-      # The ENGINE tier's own suite. `cargo test --workspace` above does reach
-      # it - it is an ordinary member - but that step is the one #146 records as
-      # currently unbuildable, and a crate whose 290 tests run only through a
-      # step that cannot start is a crate whose tests do not run. Named
-      # explicitly for the same reason the sqlite suite above is: a package
-      # named here fails loudly, a package reached only by a wildcard fails
-      # silently.
-      #
-      # No feature flag: `zeroship-data-engine`'s default build compiles its
-      # whole `#[cfg(test)]` surface. Its `live-db-tests` arms need a server and
-      # belong with the other live gates, not here.
-      - run: |
-          set -o pipefail
+          cargo test -p zeroship-plugin-db --test sqlite_integration
           cargo test -p zeroship-data-engine
       # The migration service's suite: the service's own targets, the two live-PG
       # session proofs (`smoke_apply_pg`, `author_and_apply_pg`) and the
@@ -1412,13 +1388,9 @@ jobs:
       - name: Run the auth live-database gate
         run: tests/run_auth_suite.sh
 
-  # The live-Postgres gate for zeroship-plugin-db: 111 tests that ran in NO job
-  # at all until 2026-08-12. The `rust` job skips the target for want of
-  # `test-helpers` and defers it to "the other live-database gates", but
-  # billing-gate runs control and migrated by name and this crate declares no
-  # `live-db-tests` feature, so the binary fell between the two. What that cost
-  # is not hypothetical: `b2_ref_creates_foreign_key` asserted the FK default
-  # the project decided AGAINST and sat red unnoticed (fixed a182cc22a).
+  # Required database verification for the engine and worker DB adapter.
+  # Ordinary package tests include every integration target. This job supplies
+  # the logical WAL and extensions required by CDC and spatial operations.
   #
   # Postgres is an explicit `docker run`, NOT a `services:` entry, and that is
   # forced rather than stylistic: `-c wal_level=logical` is a command argument

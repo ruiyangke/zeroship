@@ -2,40 +2,390 @@ use super::*;
 use zeroship_data_core::{encryption::LocalKeySource, storage::SqlExecutor};
 use zeroship_data_query_builder::value;
 
-#[derive(Debug)]
+schema!(pub test_schema = "../../tests/fixtures/schema.runtime.json");
+use test_schema::posts;
+
+#[derive(Debug, FromRow)]
+#[orm(entity = posts)]
 struct Post {
     id: String,
     title: String,
     version: i64,
 }
+#[derive(Insertable)]
+#[orm(entity = posts)]
 struct NewPost {
     title: String,
 }
-impl Model for Post {
-    const COLLECTION: &'static str = "posts";
-    type Insert = NewPost;
-    fn from_row(mut row: Row) -> Result<Self, DbError> {
-        Ok(Self {
-            id: row.take("id")?,
-            title: row.take("title")?,
-            version: row.take("version")?,
-        })
-    }
+
+#[derive(Debug, FromRow)]
+#[orm(entity = posts)]
+struct Details {
+    id: String,
+    created_at: i64,
+    title: String,
+    payload: Option<Vec<u8>>,
+    counter: i64,
+    nickname: Option<String>,
+    score: Option<f64>,
 }
 
-impl EncodeRecord for NewPost {
-    fn into_record(self) -> Record {
-        [("title".into(), self.title.into())].into()
+#[derive(Insertable)]
+#[orm(entity = posts)]
+struct NewDetails {
+    title: String,
+    payload: Option<Vec<u8>>,
+    #[orm(default)]
+    counter: Defaulted<i64>,
+    #[orm(default)]
+    nickname: Defaulted<Option<String>>,
+    score: Option<f64>,
+}
+
+#[derive(Default, Changeset)]
+#[orm(entity = posts)]
+struct EditDetails {
+    nickname: Change<Option<String>>,
+    counter: Change<i64>,
+    payload: Change<Option<Vec<u8>>>,
+}
+
+#[derive(Debug, FromRow)]
+#[orm(entity = posts)]
+struct Summary {
+    #[orm(column = "title")]
+    name: String,
+}
+
+#[test]
+fn metadata_fixture_is_the_migration_engines_output() {
+    let migration: zeroship_migrate::model::ir::MigrationIr =
+        serde_json::from_str(include_str!("../../tests/fixtures/orm-migration.json")).unwrap();
+    let policy = zeroship_migrate::effective_policy_from_charter_toml(
+        zeroship_migrate_server::policy::CONFINED_CEILING_TOML,
+    )
+    .unwrap();
+    let generated = zeroship_migrate::render_artifacts(
+        zeroship_migrate::shipping_vendors(),
+        &migration.ops,
+        &zeroship_migrate_postgres::DIALECT,
+        "orm_fixture",
+        &policy,
+    )
+    .unwrap();
+    assert_eq!(
+        generated.runtime_json,
+        include_str!("../../tests/fixtures/schema.runtime.json")
+    );
+}
+
+#[compio::test]
+async fn defaults_null_changes_projections_and_native_buffers() {
+    let (db, _directory) = database().await;
+    exercise_native_models(&db).await;
+}
+
+#[compio::test]
+async fn postgres_native_models_round_trip() {
+    crate::reset_engine_for_tests();
+    let backend = Rc::new(
+        zeroship_data_postgres::PostgresBackend::connect(
+            &zeroship_core::config::test_database_url(),
+            4,
+            LocalKeySource::EnvVar,
+        )
+        .await
+        .unwrap(),
+    );
+    let app = format!("zsorm_{}", uuid::Uuid::new_v4().simple());
+    let binding = DbBinding::cold_start(&app);
+    let quoted_schema = crate::compile::quote_ident(&app);
+    backend
+        .pool_exec(&format!("CREATE SCHEMA {quoted_schema}"), &[])
+        .await
+        .unwrap();
+    for sql in table_statements(&app, &zeroship_migrate_postgres::DIALECT) {
+        backend.pool_exec(&sql, &[]).await.unwrap();
+    }
+    crate::auth::bootstrap::ensure_per_app_role(backend.pool(), &app)
+        .await
+        .unwrap();
+    let role = zeroship_core::database_role::per_app_role_name(&app).unwrap();
+    let quoted_role = crate::compile::quote_ident(&role);
+    backend
+        .pool_exec(
+            &format!(
+                "GRANT SELECT, INSERT, UPDATE, DELETE ON {quoted_schema}.posts TO {quoted_role}"
+            ),
+            &[],
+        )
+        .await
+        .unwrap();
+    let db = Database::from_schema(
+        binding,
+        BackendHandle::Postgres(backend.clone()),
+        vec![("posts".into(), <posts::Entity as Entity>::schema().clone())],
+    )
+    .unwrap();
+    exercise_native_models(&db).await;
+    drop(db);
+    backend
+        .pool_exec(&format!("DROP SCHEMA {quoted_schema} CASCADE"), &[])
+        .await
+        .unwrap();
+    backend
+        .pool_exec(&format!("DROP OWNED BY {quoted_role}"), &[])
+        .await
+        .unwrap();
+    backend
+        .pool_exec(&format!("DROP ROLE {quoted_role}"), &[])
+        .await
+        .unwrap();
+}
+
+async fn exercise_native_models(db: &Database) {
+    let records = db.entity::<posts::Entity>().unwrap();
+    let row: Details = records
+        .insert(NewDetails {
+            title: "native".into(),
+            payload: Some(vec![0, 255, 128]),
+            counter: Defaulted::Default,
+            nickname: Defaulted::Default,
+            score: Some(1.25),
+        })
+        .await
+        .unwrap();
+    assert_eq!(row.payload, Some(vec![0, 255, 128]));
+    assert!(row.created_at > 0);
+    assert_eq!(row.counter, 7);
+    assert_eq!(row.nickname.as_deref(), Some("anonymous"));
+    assert_eq!(row.score, Some(1.25));
+
+    let edited: Details = records
+        .update(
+            posts::id.eq(row.id.clone()).unwrap(),
+            EditDetails {
+                nickname: Change::Set(None),
+                counter: Change::Set(i64::MAX),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(edited.nickname, None);
+    assert_eq!(edited.counter, i64::MAX);
+    assert_eq!(edited.payload, row.payload);
+
+    let null: Details = records
+        .insert(NewDetails {
+            title: "explicit null".into(),
+            payload: None,
+            counter: Defaulted::Value(9),
+            nickname: Defaulted::Value(None),
+            score: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(null.nickname, None);
+    assert_eq!(null.counter, 9);
+
+    let summary: Vec<Summary> = records
+        .find(posts::title.eq("native").unwrap(), Default::default())
+        .await
+        .unwrap();
+    assert_eq!(summary[0].name, "native");
+    assert_eq!(Summary::COLUMNS, &["title"]);
+
+    let failed: Result<Details, _> = records
+        .insert(NewDetails {
+            title: "invalid".into(),
+            payload: None,
+            counter: Defaulted::Default,
+            nickname: Defaulted::Default,
+            score: Some(f64::NAN),
+        })
+        .await;
+    assert!(failed.unwrap_err().to_string().contains("posts.score"));
+    let absent: Vec<Summary> = records
+        .find(posts::title.eq("invalid").unwrap(), Default::default())
+        .await
+        .unwrap();
+    assert!(absent.is_empty());
+
+    let result: Result<(), DbError> = db
+        .transaction(|tx| async move {
+            let records = tx.entity::<posts::Entity>()?;
+            let _: Post = records
+                .insert(NewPost {
+                    title: "rollback derived".into(),
+                })
+                .await?;
+            Err(DbError::internal("rollback"))
+        })
+        .await;
+    assert!(result.is_err());
+    let rows: Vec<Summary> = records
+        .find(
+            posts::title.eq("rollback derived").unwrap(),
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    assert!(rows.is_empty());
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct Title(String);
+impl EncodeValue<sql_types::Text> for Title {
+    fn encode_value(self) -> Result<Value, DbError> {
+        if self.0.is_empty() {
+            Err(DbError::validation(
+                "empty_title",
+                "title must not be empty",
+            ))
+        } else {
+            Ok(Value::String(self.0))
+        }
     }
 }
-impl Post {
-    const ID: Field<Self, String> = Field::new("id");
-    const TITLE: Field<Self, String> = Field::new("title");
+impl DecodeValue<sql_types::Text> for Title {
+    fn decode_value(value: Value) -> Result<Self, DbError> {
+        <String as DecodeValue<sql_types::Text>>::decode_value(value).map(Self)
+    }
+}
+#[derive(Debug, FromRow)]
+#[orm(entity = posts)]
+struct NativeProjection {
+    title: Title,
+    payload: Option<Vec<u8>>,
+}
+#[derive(Insertable)]
+#[orm(entity = posts)]
+struct DomainInsert {
+    title: Title,
+    payload: Option<Vec<u8>>,
+}
+
+#[test]
+fn derives_move_allocations_and_contextualize_codec_errors() {
+    let text = String::from("domain title");
+    let text_address = text.as_ptr();
+    let bytes = vec![0, 255, 128];
+    let bytes_address = bytes.as_ptr();
+    let record = DomainInsert {
+        title: Title(text),
+        payload: Some(bytes),
+    }
+    .into_record()
+    .unwrap();
+    assert_eq!(record["title"].as_str().unwrap().as_ptr(), text_address);
+    assert_eq!(
+        record["payload"].as_bytes().unwrap().as_ptr(),
+        bytes_address
+    );
+    let projection = NativeProjection::from_row(Row::new(record)).unwrap();
+    assert_eq!(projection.title.0.as_ptr(), text_address);
+    let decoded_bytes = projection.payload.unwrap();
+    assert_eq!(decoded_bytes.as_ptr(), bytes_address);
+
+    let error = DomainInsert {
+        title: Title(String::new()),
+        payload: None,
+    }
+    .into_record()
+    .unwrap_err();
+    assert!(error.message_str().contains("posts.title: encode"));
+    let error = NativeProjection::from_row(Row::new(Record::new())).unwrap_err();
+    assert!(error.message_str().contains("posts.title: missing field"));
+    let error = NativeProjection::from_row(Row::new([("title".into(), Value::Bool(true))].into()))
+        .unwrap_err();
+    assert!(error.message_str().contains("posts.title: decode"));
+}
+
+#[test]
+fn native_codecs_check_ranges_and_protected_values() {
+    use sql_types::*;
+    assert!(<u64 as EncodeValue<BigInt>>::encode_value(u64::MAX).is_err());
+    assert!(<i64 as EncodeValue<Integer>>::encode_value(i64::MAX).is_err());
+    assert!(<u8 as DecodeValue<Integer>>::decode_value(Value::from(-1)).is_err());
+    assert!(<f64 as EncodeValue<Number>>::encode_value(f64::INFINITY).is_err());
+    assert!(
+        <f32 as DecodeValue<Number>>::decode_value(Value::try_from(f64::MAX).unwrap()).is_err()
+    );
+    let exact = Decimal("12345678901234567890.123456789".into());
+    let encoded = <Decimal as EncodeValue<Number>>::encode_value(exact.clone()).unwrap();
+    assert_eq!(
+        <Decimal as DecodeValue<Number>>::decode_value(encoded).unwrap(),
+        exact
+    );
+    assert!(<Decimal as EncodeValue<Number>>::encode_value(Decimal("true".into())).is_err());
+    let mut sentinel = value!({
+        "sentinel": "__zsmask__", "masked": "***", "classification": "pii",
+        "_sig": "forged"
+    });
+    assert!(<Protected<String> as DecodeValue<Text>>::decode_value(sentinel.clone()).is_err());
+    sentinel["_sig"] = Value::from(crate::crud::mask_pass::mask_sentinel_signature());
+    assert_eq!(
+        <Protected<String> as DecodeValue<Text>>::decode_value(sentinel).unwrap(),
+        Protected::Masked {
+            display: "***".into(),
+            classification: "pii".into()
+        }
+    );
+    assert_eq!(
+        <Option<Protected<String>> as DecodeValue<Nullable<Text>>>::decode_value(Value::Null)
+            .unwrap(),
+        None
+    );
+}
+
+#[compio::test]
+async fn typed_handles_refuse_descriptor_drift() {
+    let (db, _directory) = database().await;
+    let records = db.entity::<posts::Entity>().unwrap();
+    let mut changed = <posts::Entity as Entity>::schema().clone();
+    changed["title"]["type"] = Value::from("boolean");
+    zeroship_data_core::schema_cache::with_mut(|cache| {
+        cache.insert_one(db.binding(), "posts", changed);
+    });
+    assert!(matches!(
+        db.entity::<posts::Entity>(),
+        Err(DbError::Configuration {
+            code: "orm_schema_mismatch",
+            ..
+        })
+    ));
+    let result: Result<Vec<Post>, _> = records.find(Filter::all(), Default::default()).await;
+    assert!(matches!(
+        result,
+        Err(DbError::Configuration {
+            code: "orm_schema_mismatch",
+            ..
+        })
+    ));
 }
 
 async fn database() -> (Database, tempfile::TempDir) {
     crate::reset_engine_for_tests();
     let directory = tempfile::tempdir().unwrap();
+    let binding = DbBinding::cold_start("orm_fixture");
+    let migration_backend = crate::backend_selection::open_sqlite_backend(
+        directory
+            .path()
+            .join(format!("zs-{}.sqlite", binding.app_id())),
+        LocalKeySource::EnvVar,
+    )
+    .await
+    .unwrap();
+    for sql in table_statements("main", &zeroship_migrate_sqlite::DIALECT) {
+        migration_backend.pool_exec(&sql, &[]).await.unwrap();
+    }
+    migration_backend
+        .pool_exec("CREATE UNIQUE INDEX unique_title ON posts(title)", &[])
+        .await
+        .unwrap();
+    drop(migration_backend);
     let backend = Rc::new(
         crate::backend_selection::open_sqlite_backend(
             directory.path().join("control.sqlite"),
@@ -44,38 +394,8 @@ async fn database() -> (Database, tempfile::TempDir) {
         .await
         .unwrap(),
     );
-    let binding = DbBinding::cold_start("orm_fixture");
     backend.attach_app_file(binding.app_id()).await.unwrap();
-    let schema =
-        value!({ "title": { "type": "string", "required": true }, "payload": {"type":"bytes"} });
-    let policy =
-        zeroship_migrate_server::policy::ManagedPolicyConfig::default_confined([7u8; 32], 1)
-            .unwrap()
-            .current_ceiling_for_app(&uuid::Uuid::nil(), None)
-            .unwrap()
-            .policy;
-    let statements =
-        zeroship_migrate::schema::query::build_create_table_with_fks_for_dialect_scoped_statements(
-            zeroship_migrate::shipping_vendors(),
-            binding.schema().as_str(),
-            "posts",
-            &serde_json::to_value(&schema).unwrap(),
-            &zeroship_migrate::schema::query::FkEmission::Inline,
-            &zeroship_migrate_sqlite::DIALECT,
-            false,
-            &policy,
-        )
-        .unwrap();
-    for sql in statements {
-        backend.pool_exec(&sql, &[]).await.unwrap();
-    }
-    backend
-        .pool_exec(
-            "CREATE UNIQUE INDEX orm_fixture.unique_title ON posts(title)",
-            &[],
-        )
-        .await
-        .unwrap();
+    let schema = <posts::Entity as Entity>::schema().clone();
     let database = Database::from_schema(
         binding,
         BackendHandle::Sqlite(backend),
@@ -83,6 +403,25 @@ async fn database() -> (Database, tempfile::TempDir) {
     )
     .unwrap();
     (database, directory)
+}
+
+fn table_statements(app: &str, dialect: &zeroship_migrate::DialectId) -> Vec<String> {
+    let effective_policy = zeroship_migrate::effective_policy_from_charter_toml(
+        zeroship_migrate_server::policy::CONFINED_CEILING_TOML,
+    )
+    .unwrap();
+    zeroship_migrate::render_ir_envelope_sql_statements(
+        zeroship_migrate::shipping_vendors(),
+        include_str!("../../tests/fixtures/orm-migration.json"),
+        dialect,
+        &zeroship_migrate::PreviewOpts {
+            default_schema: app.into(),
+            owner_app: app.into(),
+            effective_policy,
+        },
+    )
+    .unwrap()
+    .1
 }
 
 fn count(output: Output) -> i64 {
@@ -96,18 +435,18 @@ fn count(output: Output) -> i64 {
 async fn mapped_models_use_the_migration_schema_and_orm_lifecycle() {
     let (db, _directory) = database().await;
     assert!(db.collection("not_declared").is_err());
-    let posts = db.model::<Post>().unwrap();
-    let inserted = posts
+    let posts = db.entity::<posts::Entity>().unwrap();
+    let inserted: Post = posts
         .insert(NewPost {
             title: "hello".into(),
         })
         .await
         .unwrap();
     assert!(inserted.id.starts_with("post_"));
-    let updated = posts
+    let updated: Post = posts
         .update(
-            Post::ID.eq(inserted.id.clone()),
-            Post::TITLE.set("edited".into()),
+            posts::id.eq(inserted.id.clone()).unwrap(),
+            posts::title.set("edited").unwrap(),
         )
         .await
         .unwrap()
@@ -116,19 +455,19 @@ async fn mapped_models_use_the_migration_schema_and_orm_lifecycle() {
     assert!(updated.version > inserted.version);
     assert_eq!(
         posts
-            .find(Filter::all(), FindOptions::default())
+            .find::<Post>(Filter::all(), FindOptions::default())
             .await
             .unwrap()
             .len(),
         1
     );
     posts
-        .delete(Post::ID.eq(inserted.id.clone()))
+        .delete::<Post>(posts::id.eq(inserted.id.clone()).unwrap())
         .await
         .unwrap()
         .unwrap();
     assert!(posts
-        .find(Filter::all(), FindOptions::default())
+        .find::<Post>(Filter::all(), FindOptions::default())
         .await
         .unwrap()
         .is_empty());
@@ -151,7 +490,7 @@ async fn mapped_models_use_the_migration_schema_and_orm_lifecycle() {
         .unwrap();
     assert_eq!(
         posts
-            .find(Filter::all(), FindOptions::default())
+            .find::<Post>(Filter::all(), FindOptions::default())
             .await
             .unwrap()
             .len(),
@@ -186,9 +525,9 @@ async fn transactions_commit_rollback_and_expire_escaped_collections() {
         .await;
     assert!(result.is_err());
     let posts = db
-        .model::<Post>()
+        .entity::<posts::Entity>()
         .unwrap()
-        .find(Filter::all(), FindOptions::default())
+        .find::<Post>(Filter::all(), FindOptions::default())
         .await
         .unwrap();
     assert_eq!(

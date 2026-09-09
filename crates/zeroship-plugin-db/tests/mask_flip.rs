@@ -33,13 +33,12 @@
 //! hand-written fixture agrees with whichever one its author had in mind.
 //!
 //! Requires a live PostgreSQL, named by `PG_TEST_URL` or by the overlay
-//! (`deploy/ops/zeroship.test.toml`). Opt-in behind `required-features =
-//! ["test-helpers"]`, so an unreachable server FAILS rather than skipping: a
-//! skipping run of a security suite is indistinguishable from a passing one.
+//! (`deploy/ops/zeroship.test.toml`). Ordinary package tests include this target;
+//! an unreachable server fails the run.
 //!
 //! ```text
 //! PG_TEST_URL=postgres://... cargo test -p zeroship-plugin-db \
-//!   --features test-helpers --test mask_flip -- --test-threads=1
+//!   --test mask_flip -- --test-threads=1
 //! ```
 
 #[path = "support/schema.rs"]

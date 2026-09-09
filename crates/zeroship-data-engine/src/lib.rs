@@ -14,6 +14,8 @@
 // correctness guard.
 #![recursion_limit = "256"]
 
+extern crate self as zeroship_data_engine;
+
 zeroship_core::declare_env_consumer!(
     /// The engine tier's own environment reads.
     ///

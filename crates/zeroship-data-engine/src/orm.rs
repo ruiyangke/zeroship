@@ -6,7 +6,8 @@
 
 use std::{cell::Cell, future::Future, marker::PhantomData, rc::Rc};
 use zeroship_core::change_event::ChangeOp;
-use zeroship_data_core::{binding::DbBinding, error::DbError};
+use zeroship_data_core::binding::DbBinding;
+pub use zeroship_data_core::error::DbError;
 pub use zeroship_data_query_builder::value::Value;
 
 use crate::{backend::BackendHandle, compile::BuiltQuery, crud, tx_route::CapturedRoute};
@@ -86,12 +87,17 @@ impl Database {
         &self.binding
     }
 
-    /// Map a declared collection to a Rust model. The migration descriptor
-    /// remains authoritative for storage and protection.
-    pub fn model<M: Model>(&self) -> Result<ModelCollection<M>, DbError> {
-        Ok(ModelCollection {
-            collection: self.collection(M::COLLECTION)?,
-            model: PhantomData,
+    /// Bind generated collection metadata to this deployment's descriptor.
+    pub fn entity<E: Entity>(&self) -> Result<EntityCollection<E>, DbError> {
+        let collection = self.collection(E::COLLECTION)?;
+        let schema = crate::descriptor::collection_schema(&self.binding, E::COLLECTION)?;
+        if schema.as_ref() != E::schema() {
+            return Err(schema_mismatch::<E>());
+        }
+        Ok(EntityCollection {
+            collection,
+            schema,
+            entity: PhantomData,
         })
     }
 
@@ -217,76 +223,105 @@ impl Collection {
     }
 }
 
-/// A Rust row mapping. Insert data is separate from returned rows so callers
-/// need not manufacture the platform's generated identity and audit fields.
-pub trait Model: Sized {
-    const COLLECTION: &'static str;
-    type Insert: EncodeRecord;
-    fn from_row(row: Row) -> Result<Self, DbError>;
-}
-
-/// A collection whose native rows map into a model.
+/// A collection checked against migration-derived Rust metadata.
 #[derive(Debug)]
-pub struct ModelCollection<M: Model> {
+pub struct EntityCollection<E: Entity> {
     collection: Collection,
-    model: PhantomData<M>,
+    schema: std::sync::Arc<Value>,
+    entity: PhantomData<E>,
 }
-
-impl<M: Model> ModelCollection<M> {
-    pub fn find(
-        &self,
-        filter: Filter<M>,
-        options: FindOptions,
-    ) -> impl Future<Output = Result<Vec<M>, DbError>> + use<M> {
-        let future = self
-            .collection
-            .find(filter.into_value(), options.into_value());
-        async move { decode_rows(future.await?) }
+fn schema_mismatch<E: Entity>() -> DbError {
+    DbError::config("orm_schema_mismatch", format!(
+        "collection '{}': Rust metadata differs from the installed runtime descriptor; regenerate from the deployment's schema.runtime.json",
+        E::COLLECTION,
+    ))
+}
+impl<E: Entity> EntityCollection<E> {
+    fn validate(&self) -> Result<(), DbError> {
+        let current =
+            crate::descriptor::collection_schema(&self.collection.database.binding, E::COLLECTION)?;
+        if std::sync::Arc::ptr_eq(&current, &self.schema)
+            || current.as_ref() == self.schema.as_ref()
+        {
+            Ok(())
+        } else {
+            Err(schema_mismatch::<E>())
+        }
     }
-    pub fn insert(&self, document: M::Insert) -> impl Future<Output = Result<M, DbError>> + use<M> {
+    pub fn find<R: FromRow<E>>(
+        &self,
+        filter: Filter<E>,
+        options: FindOptions,
+    ) -> impl Future<Output = Result<Vec<R>, DbError>> + use<E, R> {
+        let future = self.validate().map(|()| {
+            self.collection
+                .find(filter.into_value(), options.into_value::<E, R>())
+        });
+        async move { decode_rows::<E, R>(future?.await?) }
+    }
+    pub fn insert<I: Insertable<E>, R: FromRow<E>>(
+        &self,
+        document: I,
+    ) -> impl Future<Output = Result<R, DbError>> + use<E, I, R> {
         let future = self
-            .collection
-            .insert(Value::Object(document.into_record()));
+            .validate()
+            .and_then(|()| document.into_record())
+            .map(|record| self.collection.insert(Value::Object(record)));
         async move {
-            decode_rows(future.await?)?
+            decode_rows::<E, R>(future?.await?)?
                 .pop()
                 .ok_or_else(|| DbError::internal("insert returned no row"))
         }
     }
-    pub fn update(
+    pub fn update<C: Changeset<E>, R: FromRow<E>>(
         &self,
-        filter: Filter<M>,
-        patch: Patch<M>,
-    ) -> impl Future<Output = Result<Option<M>, DbError>> + use<M> {
+        filter: Filter<E>,
+        changes: C,
+    ) -> impl Future<Output = Result<Option<R>, DbError>> + use<E, C, R> {
         let future = self
-            .collection
-            .update(filter.into_value(), patch.into_value());
-        async move { Ok(decode_rows(future.await?)?.pop()) }
+            .validate()
+            .and_then(|()| changes.into_changes())
+            .map(|fields| {
+                self.collection
+                    .update(filter.into_value(), Value::Object(fields))
+            });
+        async move { Ok(decode_rows::<E, R>(future?.await?)?.pop()) }
     }
-    pub fn delete(
+    pub fn delete<R: FromRow<E>>(
         &self,
-        filter: Filter<M>,
-    ) -> impl Future<Output = Result<Option<M>, DbError>> + use<M> {
-        let future = self.collection.delete(filter.into_value());
-        async move { Ok(decode_rows(future.await?)?.pop()) }
+        filter: Filter<E>,
+    ) -> impl Future<Output = Result<Option<R>, DbError>> + use<E, R> {
+        let future = self
+            .validate()
+            .map(|()| self.collection.delete(filter.into_value()));
+        async move { Ok(decode_rows::<E, R>(future?.await?)?.pop()) }
     }
 }
-
-fn decode_rows<M: Model>(output: Output) -> Result<Vec<M>, DbError> {
+fn decode_rows<E: Entity, R: FromRow<E>>(output: Output) -> Result<Vec<R>, DbError> {
     let Output::Rows { rows, .. } = output else {
         return Err(DbError::internal("expected model rows"));
     };
     rows.into_iter()
         .map(|row| match row {
-            Value::Object(fields) => M::from_row(Row::new(fields)),
+            Value::Object(fields) => R::from_row(Row::new(fields)),
             _ => Err(DbError::internal("database returned a non-record row")),
         })
         .collect()
 }
-
+mod codecs;
 mod model;
-pub use model::{DecodeValue, EncodeRecord, Field, Filter, FindOptions, Patch, Row};
+pub use codecs::{sql_types, Decimal, Point, Protected};
+pub use model::*;
+pub use zeroship_data_macros::{schema, Changeset, FromRow, Insertable};
 pub use zeroship_data_query_builder::value::Record;
+
+/// Implementation support for generated metadata.
+#[doc(hidden)]
+pub mod __private {
+    pub fn schema_value(json: &str) -> super::Value {
+        serde_json::from_str(json).expect("schema macro emitted validated descriptor JSON")
+    }
+}
 
 #[cfg(test)]
 mod tests;

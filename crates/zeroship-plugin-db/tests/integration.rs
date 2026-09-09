@@ -12,17 +12,11 @@
 //! Run:
 //! ```text
 //! RUST_MIN_STACK=33554432 \
-//! cargo test -p zeroship-plugin-db --test integration --features test-helpers
+//! cargo test -p zeroship-plugin-db --test integration
 //! ```
 //!
-//! `--features test-helpers` is this target's `required-features`. Without it
-//! cargo does not build the target at all - it FILTERS IT OUT, printing
-//! `error: target `integration` ... requires the features: `test-helpers``
-//! only if you named the target explicitly. A plain `cargo test -p
-//! zeroship-plugin-db` names no target, so it silently runs the lib tests
-//! alone and reports a healthy green while none of the 99 tests in this file
-//! were compiled. This line omitted the flag until 2026-08-27, so the command
-//! documented here did not run.
+//! Ordinary package tests include this target and require PostgreSQL.
+//! Test builds enable integration helpers through the self dev-dependency.
 //!
 //! # This suite runs at the default thread count, and that took three fixes
 //!
@@ -153,9 +147,7 @@ async fn require_pg() -> String {
             //
             // A panic costs the honest thing instead: this test fails, its
             // siblings keep running, and the summary says what happened. The
-            // target is opt-in behind `required-features = ["test-helpers"]`,
-            // so reaching here means someone asked for the live-Postgres suite
-            // and did not have Postgres - which is a failure, not a pass.
+            // database is required by the ordinary test suite.
             panic!("live-Postgres suite requires a reachable server at PG_TEST_URL: {e}");
         }
     }
@@ -2654,17 +2646,8 @@ SELECT con.conname AS name, con.condeferrable AS def, con.condeferred AS init_de
 // `replica`. They used to skip, and the paragraph below is the measurement that
 // ended it.
 //
-// DO NOT READ A SKIP AS "CI COVERS THIS". Measured 2026-08-12: NO CI
-// job runs this binary at all. `PG_TEST_URL` is set by no workflow,
-// `--test integration` is invoked by no workflow, and there is no
-// `pg-test` image anywhere in the tree. The `rust` job deliberately
-// omits it (ci.yml, "they belong with the other live-database gates
-// rather than here"), but the live-DB gate runs
-// `--features zeroship-control/live-db-tests,zeroship-migrate-server/live-db-tests`
-// and this crate declared NO `live-db-tests` feature, so the deferral
-// named a destination that could not accept it. FIXED 2026-08-12: the
-// crate now declares `live-db-tests = ["test-helpers"]`, and
-// tests/run_plugin_db_live_suite.sh runs this target with it.
+// PostgreSQL coverage runs under ordinary cargo test. The live-suite runner
+// provisions its prerequisites and runs both data packages without feature gates.
 //
 // AND THE SKIP WAS INVISIBLE TO A SUMMING GATE. Measured on two
 // throwaway servers differing only in wal_level, the tests below printed the
