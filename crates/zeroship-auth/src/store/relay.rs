@@ -48,7 +48,7 @@ pub struct AliasTarget {
     /// The user's REAL inbox (`zeroship.users.email`). Used ONLY as the SMTP
     /// envelope recipient — never written into any forwarded header.
     pub real_inbox: String,
-    /// The per-app OAuth client_id (`oac_<base62>`) — the per-app rate-limit
+    /// The per-app OAuth client_id (`oac_<body>`) — the per-app rate-limit
     /// bucket key + the value a revoke cascade matches on.
     pub app_client_id: String,
     pub global_user_id: UserId,

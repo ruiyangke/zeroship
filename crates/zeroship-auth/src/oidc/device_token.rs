@@ -169,7 +169,7 @@ pub(super) async fn platform_cli_policy_selected(
 /// Mint the access token a grant for `client` must hand back.
 ///
 /// The first-party CLI client is a PLATFORM PRINCIPAL client: its token's
-/// `sub` is the printed `zeroship.users.id` (`usr_<base62>`) and its `aud` is
+/// `sub` is the printed `zeroship.users.id` (`usr_<body>`) and its `aud` is
 /// control's configured resource audience, because control is the only thing
 /// that consumes it (`zeroship_authn::BearerVerifier::verify_bearer` compares
 /// both, and `crates/authz`'s `token_revocations` lookup is keyed on

@@ -73,7 +73,7 @@ pub async fn find_by_email(conn: &Client, email: &str) -> Result<Option<UserRow>
 
 /// Look up a user by their primary key (`zeroship.users.id`).
 ///
-/// The argument is the printed typed id (`usr_<base62>`) — the native subject
+/// The argument is the printed typed id (`usr_<body>`) — the native subject
 /// shape surfaced through consent context. It is a `&str` rather than a
 /// [`UserId`] because the callers that are not already holding one are handing
 /// over an attacker-influenced token subject.
@@ -127,7 +127,7 @@ pub async fn create(
     password_hash: Option<&str>,
 ) -> Result<UserRow> {
     // `zeroship.users.id` carries no database default: a SQL-side generator for
-    // `usr_<base62>` would be a second minter beside `UserId::mint`, and one
+    // a printed `usr_` id would be a second minter beside `UserId::mint`, and one
     // producer per identifier is what keeps the id answerable. Every insert
     // supplies the id, so this statement mints it.
     let id = UserId::mint();
