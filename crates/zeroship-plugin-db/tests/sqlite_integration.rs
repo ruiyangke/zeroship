@@ -1,7 +1,6 @@
 //! SQLite-side integration tests.
 //!
-//! Behind `required-features = ["test-helpers"]`. The first four
-//! behaviour tests exercise the `SqliteSession` actor end-to-end:
+//! Ordinary package tests exercise the `SqliteSession` actor end-to-end:
 //!
 //! - bootstrap PRAGMAs land (`journal_mode = wal`, `busy_timeout = 5000`)
 //! - `SqlExecutor::pool_exec` round-trips DDL + DML
@@ -729,8 +728,8 @@ fn introspect_after_create_table_round_trip() {
 // ships a `CommitPacket` via flume, the publisher task wakes on
 // `recv_async`, resolves column names via `PRAGMA table_info` through
 // the session actor, then calls `broker::publish` on the compio
-// thread. The thread-local broker is the test consumer (we subscribe
-// directly on the compio thread).
+// thread. The process-wide broker is the test consumer. Each fixture uses a
+// distinct app id so parallel tests cannot consume each other's changes.
 //
 // Each test:
 //   1. Spins up a fresh backend (which also spawns the publisher task).
@@ -772,10 +771,7 @@ fn drain(sub: &Subscription) -> Vec<SubscriptionMessage> {
     out
 }
 
-/// Helper: subscribe to `(app_id, collection)` on the thread-local
-/// broker. The broker lives in a thread-local cell — the publisher
-/// task and this test future run on the same compio thread, so the
-/// subscription is visible to the publisher's `broker::publish` calls.
+/// Subscribe to this fixture's `(app_id, collection)` on the process broker.
 fn subscribe_local(app_id: &str, collection: &str) -> Subscription {
     subscribe(app_id, collection)
 }
@@ -785,14 +781,14 @@ fn insert_publishes_via_preupdate_hook() {
     run(async {
         let (backend, _dir) = fresh_backend();
         backend
-            .attach_app_file("app_cdc")
+            .attach_app_file("cdc_insert")
             .await
             .expect("ensure_app_schema");
 
         // Create a user table the CDC hook will fire against.
         backend
             .pool_exec(
-                "CREATE TABLE \"app_cdc\".\"items\" (\
+                "CREATE TABLE \"cdc_insert\".\"items\" (\
                      id INTEGER PRIMARY KEY, \
                      name TEXT NOT NULL\
                  )",
@@ -804,13 +800,13 @@ fn insert_publishes_via_preupdate_hook() {
         // Subscribe BEFORE the mutation. The DDL above is not a
         // user-table write; it goes through `sqlite_master` which the
         // dispatcher filters, so no event is queued.
-        let sub = subscribe_local("app_cdc", "items");
+        let sub = subscribe_local("cdc_insert", "items");
 
         // INSERT a row — the preupdate hook fires, commit hook ships
         // the packet, publisher resolves column names + publishes.
         backend
             .pool_exec(
-                "INSERT INTO \"app_cdc\".\"items\" (name) VALUES ('alice')",
+                "INSERT INTO \"cdc_insert\".\"items\" (name) VALUES ('alice')",
                 &[],
             )
             .await
@@ -827,7 +823,7 @@ fn insert_publishes_via_preupdate_hook() {
         match &msgs[0] {
             SubscriptionMessage::Change(ev) => {
                 assert_eq!(ev.op, ChangeOp::Insert);
-                assert_eq!(ev.app_id, "app_cdc");
+                assert_eq!(ev.app_id, "cdc_insert");
                 assert_eq!(ev.collection, "items");
                 assert!(
                     !ev.new_tuple.is_empty(),
@@ -858,13 +854,13 @@ fn insert_publishes_logical_typed_id_not_sqlite_rowid() {
     run(async {
         let (backend, _dir) = fresh_backend();
         backend
-            .attach_app_file("app_cdc")
+            .attach_app_file("cdc_typed_id")
             .await
             .expect("ensure_app_schema");
 
         backend
             .pool_exec(
-                "CREATE TABLE \"app_cdc\".\"typed_items\" (\
+                "CREATE TABLE \"cdc_typed_id\".\"typed_items\" (\
                      id TEXT PRIMARY KEY, \
                      name TEXT NOT NULL\
                  )",
@@ -873,13 +869,13 @@ fn insert_publishes_logical_typed_id_not_sqlite_rowid() {
             .await
             .expect("CREATE TABLE typed_items");
 
-        let sub = subscribe_local("app_cdc", "typed_items");
+        let sub = subscribe_local("cdc_typed_id", "typed_items");
         let typed_id = "usr_02HXSQLITECDCLOGICALPK";
 
         backend
             .pool_exec(
                 &format!(
-                    "INSERT INTO \"app_cdc\".\"typed_items\" (id, name) \
+                    "INSERT INTO \"cdc_typed_id\".\"typed_items\" (id, name) \
                      VALUES ('{typed_id}', 'alice')"
                 ),
                 &[],
@@ -907,12 +903,12 @@ fn update_publishes_change_event_with_pre_image() {
     run(async {
         let (backend, _dir) = fresh_backend();
         backend
-            .attach_app_file("app_cdc")
+            .attach_app_file("cdc_update")
             .await
             .expect("ensure_app_schema");
         backend
             .pool_exec(
-                "CREATE TABLE \"app_cdc\".\"items\" (\
+                "CREATE TABLE \"cdc_update\".\"items\" (\
                      id INTEGER PRIMARY KEY, \
                      name TEXT NOT NULL\
                  )",
@@ -925,7 +921,7 @@ fn update_publishes_change_event_with_pre_image() {
         // event is not part of what `drain` sees.
         backend
             .pool_exec(
-                "INSERT INTO \"app_cdc\".\"items\" (id, name) VALUES (1, 'alice')",
+                "INSERT INTO \"cdc_update\".\"items\" (id, name) VALUES (1, 'alice')",
                 &[],
             )
             .await
@@ -937,13 +933,13 @@ fn update_publishes_change_event_with_pre_image() {
         // publisher has fanned out the prior packet).
         drain_publisher().await;
 
-        let sub = subscribe_local("app_cdc", "items");
+        let sub = subscribe_local("cdc_update", "items");
 
         // UPDATE the row — the preupdate hook should capture both
         // OLD ('alice') and NEW ('bob') tuples.
         backend
             .pool_exec(
-                "UPDATE \"app_cdc\".\"items\" SET name = 'bob' WHERE id = 1",
+                "UPDATE \"cdc_update\".\"items\" SET name = 'bob' WHERE id = 1",
                 &[],
             )
             .await
@@ -991,12 +987,12 @@ fn rollback_does_not_publish() {
     run(async {
         let (backend, _dir) = fresh_backend();
         backend
-            .attach_app_file("app_cdc")
+            .attach_app_file("cdc_rollback")
             .await
             .expect("ensure_app_schema");
         backend
             .pool_exec(
-                "CREATE TABLE \"app_cdc\".\"items\" (\
+                "CREATE TABLE \"cdc_rollback\".\"items\" (\
                      id INTEGER PRIMARY KEY, \
                      name TEXT NOT NULL\
                  )",
@@ -1005,7 +1001,7 @@ fn rollback_does_not_publish() {
             .await
             .expect("CREATE TABLE items");
 
-        let sub = subscribe_local("app_cdc", "items");
+        let sub = subscribe_local("cdc_rollback", "items");
 
         // BEGIN / INSERT / ROLLBACK — each statement routes through
         // the session actor (same worker thread; serialised by the
@@ -1014,7 +1010,7 @@ fn rollback_does_not_publish() {
         backend.pool_exec("BEGIN", &[]).await.expect("BEGIN");
         backend
             .pool_exec(
-                "INSERT INTO \"app_cdc\".\"items\" (name) VALUES ('alice')",
+                "INSERT INTO \"cdc_rollback\".\"items\" (name) VALUES ('alice')",
                 &[],
             )
             .await
@@ -1036,12 +1032,12 @@ fn mixed_ops_in_one_tx_ordered_by_buffer_index() {
     run(async {
         let (backend, _dir) = fresh_backend();
         backend
-            .attach_app_file("app_cdc")
+            .attach_app_file("cdc_mixed")
             .await
             .expect("ensure_app_schema");
         backend
             .pool_exec(
-                "CREATE TABLE \"app_cdc\".\"items\" (\
+                "CREATE TABLE \"cdc_mixed\".\"items\" (\
                      id INTEGER PRIMARY KEY, \
                      name TEXT NOT NULL\
                  )",
@@ -1054,14 +1050,14 @@ fn mixed_ops_in_one_tx_ordered_by_buffer_index() {
         // pollute the assertions.
         backend
             .pool_exec(
-                "INSERT INTO \"app_cdc\".\"items\" (id, name) VALUES (10, 'b_pre'), (20, 'c_pre')",
+                "INSERT INTO \"cdc_mixed\".\"items\" (id, name) VALUES (10, 'b_pre'), (20, 'c_pre')",
                 &[],
             )
             .await
             .expect("INSERT seed rows");
         drain_publisher().await;
 
-        let sub = subscribe_local("app_cdc", "items");
+        let sub = subscribe_local("cdc_mixed", "items");
 
         // BEGIN; INSERT a; UPDATE b; DELETE c; INSERT d; COMMIT.
         // Each statement fires the preupdate hook once; the commit
@@ -1070,25 +1066,25 @@ fn mixed_ops_in_one_tx_ordered_by_buffer_index() {
         backend.pool_exec("BEGIN", &[]).await.expect("BEGIN");
         backend
             .pool_exec(
-                "INSERT INTO \"app_cdc\".\"items\" (id, name) VALUES (1, 'a')",
+                "INSERT INTO \"cdc_mixed\".\"items\" (id, name) VALUES (1, 'a')",
                 &[],
             )
             .await
             .expect("INSERT a");
         backend
             .pool_exec(
-                "UPDATE \"app_cdc\".\"items\" SET name = 'b_post' WHERE id = 10",
+                "UPDATE \"cdc_mixed\".\"items\" SET name = 'b_post' WHERE id = 10",
                 &[],
             )
             .await
             .expect("UPDATE b");
         backend
-            .pool_exec("DELETE FROM \"app_cdc\".\"items\" WHERE id = 20", &[])
+            .pool_exec("DELETE FROM \"cdc_mixed\".\"items\" WHERE id = 20", &[])
             .await
             .expect("DELETE c");
         backend
             .pool_exec(
-                "INSERT INTO \"app_cdc\".\"items\" (id, name) VALUES (2, 'd')",
+                "INSERT INTO \"cdc_mixed\".\"items\" (id, name) VALUES (2, 'd')",
                 &[],
             )
             .await
@@ -10279,12 +10275,12 @@ fn writes_on_both_connections_reach_the_broker() {
     run(async {
         let (backend, _dir) = fresh_backend();
         backend
-            .attach_app_file("app_cdc")
+            .attach_app_file("cdc_connections")
             .await
             .expect("ensure_app_schema");
         backend
             .pool_exec(
-                "CREATE TABLE \"app_cdc\".\"items\" (\
+                "CREATE TABLE \"cdc_connections\".\"items\" (\
                      id INTEGER PRIMARY KEY, \
                      name TEXT NOT NULL\
                  )",
@@ -10293,12 +10289,12 @@ fn writes_on_both_connections_reach_the_broker() {
             .await
             .expect("CREATE TABLE items");
 
-        let sub = subscribe_local("app_cdc", "items");
+        let sub = subscribe_local("cdc_connections", "items");
 
         // op_conn: an ordinary autocommit write.
         backend
             .pool_exec(
-                "INSERT INTO \"app_cdc\".\"items\" (name) VALUES ('from_op_conn')",
+                "INSERT INTO \"cdc_connections\".\"items\" (name) VALUES ('from_op_conn')",
                 &[],
             )
             .await
@@ -10306,14 +10302,14 @@ fn writes_on_both_connections_reach_the_broker() {
 
         // tx_conn: a write inside an explicit creator transaction, committed.
         let tx = backend
-            .acquire_dedicated_client("app_cdc")
+            .acquire_dedicated_client("cdc_connections")
             .await
             .expect("acquire tx client");
         backend.client_exec(&tx, "BEGIN", &[]).await.expect("BEGIN");
         backend
             .client_exec(
                 &tx,
-                "INSERT INTO \"app_cdc\".\"items\" (name) VALUES ('from_tx_conn')",
+                "INSERT INTO \"cdc_connections\".\"items\" (name) VALUES ('from_tx_conn')",
                 &[],
             )
             .await

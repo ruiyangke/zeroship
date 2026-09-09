@@ -84,6 +84,23 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+. "$ROOT/tests/lib/gate_arms.sh"
+gate_arms_init data_database_required
+
+metadata=$(cargo metadata --no-deps --format-version 1) || exit 1
+checked=0
+while IFS=$'\t' read -r package gated; do
+  checked=$((checked + 1))
+  if [ "$gated" = true ]; then
+    echo "FAIL: $package must include database tests without feature gates" >&2
+    exit 1
+  fi
+done < <(printf '%s' "$metadata" | jq -r '
+  .packages[] | select(.name == "zeroship-data-engine" or .name == "zeroship-plugin-db") |
+  [.name, ((.features | has("live-db-tests")) or
+    any(.targets[]; ((.["required-features"] // []) | length) > 0))] | @tsv')
+gate_arm ordinary_database_targets "$checked" 2 || exit 1
+
 # The server may come from the generated overlay, so this no longer demands
 # PG_TEST_URL be exported - it demands that SOMETHING names a Postgres. The
 # overlay is written by tests/provision_test_backends.sh; PG_TEST_URL overrides
@@ -212,56 +229,14 @@ PLUGIN_DB_MIN_PASSED=114
 echo "==> zeroship-plugin-db live-database suite"
 echo "    PG_TEST_URL=${PG_TEST_URL%%\?*}"
 
-# The live-Postgres files this gate owns. `integration` and
-# `native_transaction` are the two
-# siblings ci.yml names together as belonging "with the other live-database
-# gates"; running only the first would leave the second in exactly the limbo
-# this script exists to end. `distributed_live` joined them on 2026-08-12 for
-# the same reason: it dials the same server, needs the same wal_level=logical,
-# and was reachable only by hand until it was listed here.
-#
-# FOUR OF THE FIVE ARE NO LONGER TARGETS. `zeroship-plugin-db` now links one
-# integration-test target per FEATURE RESOLUTION, not one per file, so
-# `integration`, `native_transaction`, `missing_role` and `column_grants` are
-# modules of the `test_helpers` target; `crates/zeroship-plugin-db/tests/main.rs`
-# says why. Selecting one is therefore a libtest FILTER on its module path
-# rather than `--test <name>`, and the composition below is unchanged by that:
-# the same files run, in the same five separate processes, so the floor above
-# still compares like with like.
-#
-# A libtest filter is a SUBSTRING match with no anchor, which is what the
-# `--skip` on the first leg is for: `integration::` also selects
-# `sqlite_integration::`, a module this gate does not own and whose tests need no
-# server. Leave it in; without it this leg silently grows.
-#
-# `--test-threads=1` is required, not tidiness: these tests share one database
-# and create identically-named schemas, which is the same hazard #78 fixed for
-# compio-postgres. It is also what keeps `support::sweep_prior_run_residue_once`
-# away from a live sibling now that the files share a process - see the
-# `test_helpers.rs` header.
+# Run all targets; database fixtures within each target run serially.
 suite_rc=0
 : > "$SUITE_LOG"
-# `live-db-tests` NOT `test-helpers`: it is a superset
-# (live-db-tests = ["test-helpers"]), `distributed_live` declares
-# `required-features = ["live-db-tests"]`, and `test_helpers` declares
-# `required-features = ["test-helpers"]`. Passing the narrower feature makes
-# cargo REFUSE the distributed target with "requires the features", while the
-# superset lets both targets build.
-run_leg() {
-  echo "--- cargo test $* ---" | tee -a "$SUITE_LOG"
-  cargo test -p zeroship-plugin-db --features live-db-tests "$@" 2>&1 | tee -a "$SUITE_LOG"
-  [ "${PIPESTATUS[0]}" -ne 0 ] && suite_rc=1
-  return 0
-}
-run_leg --test test_helpers -- --test-threads=1 --skip sqlite_integration:: integration::
-run_leg --test test_helpers -- --test-threads=1 native_transaction::
-run_leg --test test_helpers -- --test-threads=1 missing_role::
-run_leg --test test_helpers -- --test-threads=1 column_grants::
-run_leg --test distributed_live -- --test-threads=1
+# Ordinary package tests include every database target and enable their helpers.
+cargo test -p zeroship-data-engine -p zeroship-plugin-db --no-fail-fast \
+  -- --nocapture --test-threads=1 2>&1 | tee -a "$SUITE_LOG"
+suite_rc=${PIPESTATUS[0]}
 
-# Sum EVERY `test result:` line rather than reading the last one. One binary
-# emits one line today, but a tail would silently start lying the moment a
-# second target is added here.
 passed=$(grep -a '^test result:' "$SUITE_LOG" | sed 's/.*ok\. \([0-9]*\) passed.*/\1/;t;s/.*FAILED\. \([0-9]*\) passed.*/\1/;t;d' \
   | awk '{s+=$1} END {print s+0}')
 failed=$(grep -a '^test result:' "$SUITE_LOG" | sed 's/.*; \([0-9]*\) failed.*/\1/;t;d' \
@@ -281,6 +256,9 @@ if [ "$passed" -lt "$PLUGIN_DB_MIN_PASSED" ]; then
   echo "      silently." >&2
   rc=1
 fi
+
+gate_arm database_tests "$passed" "$PLUGIN_DB_MIN_PASSED" || rc=1
+gate_arms_finish || rc=1
 
 # THE SKIP CENSUS THAT STOOD HERE IS GONE, along with the `postgis` entry that
 # was the only thing it excused. It searched this log for the announcements the

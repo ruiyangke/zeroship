@@ -641,9 +641,8 @@ mod tests {
 // and owner rights no longer carry it through a `REVOKE`. Ownership, grants and
 // revokes are catalog facts, so this module goes to the catalog.
 //
-// Gated behind `live-db-tests` (which implies `test-helpers`) so
-// `cargo test -p zeroship-plugin-db --lib` stays database-free.
-#[cfg(all(test, feature = "live-db-tests"))]
+// Live PostgreSQL coverage is required by the ordinary engine test suite.
+#[cfg(test)]
 mod live_reserved_sweep_tests {
     use super::*;
     use compio_postgres::{Client, NoTls};

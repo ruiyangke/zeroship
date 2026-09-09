@@ -23,7 +23,7 @@
 //!
 //! ```text
 //! docker compose -f deploy/compose/docker-compose.yml up -d postgres
-//! cargo test -p zeroship-plugin-db --features live-db-tests \
+//! cargo test -p zeroship-plugin-db \
 //!   --test distributed_live -- --test-threads=1
 //! ```
 
@@ -865,7 +865,7 @@ fn db_live_stream_crosses_v8_isolates_and_releases_worker_slot() {
             .await
             .unwrap_or_else(|error| {
                 panic!(
-                    "live-db-tests requires compose Postgres at {url}; start it with `docker compose -f deploy/compose/docker-compose.yml up -d postgres`: {error}"
+                    "distributed live tests require PostgreSQL at {url}; start it with `docker compose -f deploy/compose/docker-compose.yml up -d postgres`: {error}"
                 )
             });
         compio::runtime::spawn(async move {

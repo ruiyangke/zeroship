@@ -6,13 +6,10 @@
 // behaviour change.
 #![recursion_limit = "256"]
 
-//! The integration-test target behind `--features test-helpers`: everything in
-//! this directory that reaches a `*_for_tests` symbol, a live PostgreSQL, or
-//! both.
+//! Shared database integration fixtures, included by ordinary package tests.
+//! PostgreSQL is required; unavailable databases and extensions fail the run.
 //!
-//! See `tests/main.rs` for why this crate has three integration-test targets
-//! rather than one, for how to add a file, and for how to filter down to a
-//! single module.
+//! See `tests/main.rs` for adding a module or selecting a test subset.
 //!
 //! THE SHARED FIXTURES ARE DECLARED HERE, ONCE
 //! -------------------------------------------

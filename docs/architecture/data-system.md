@@ -9,11 +9,11 @@ design in full.
 
 ## Runtime ORM
 
-`zeroship-data-engine` exposes `Database`, `Collection`, and `ModelCollection` for
+`zeroship-data-engine` exposes `Database`, `Collection`, and `EntityCollection` for
 Rust callers. The worker's V8 adapter uses the same `PreparedOperation` path.
 
 ```text
-Rust model -- EncodeRecord / Row::take --+
+Rust model -- derives / native codecs --+
                                        |
 V8 values -- native capture ------------+--> PreparedOperation
                                              |
@@ -31,9 +31,13 @@ V8 values -- native capture ------------+--> PreparedOperation
 ```
 
 The shared value layer preserves integers, booleans, text and binary buffers.
-Rust model mapping does not require Serde. The V8 adapter captures arguments
-before yielding and materializes results directly when the runtime re-enters
-V8. JSON encoding belongs to JSON columns, persisted metadata, and explicit
+Rust model mapping does not require Serde. Rust collection and column metadata is
+generated from the migration runtime descriptor by `schema!`. Focused `FromRow`,
+`Insertable`, and `Changeset` derives check field names and logical types against
+that metadata. Read projections and write inputs are independent. Typed handles
+refuse metadata that differs from the host's installed field descriptor. The V8
+adapter captures arguments before yielding and materializes results directly
+when the runtime re-enters V8. JSON encoding belongs to JSON columns, persisted metadata, and explicit
 wire contracts. The native path still allocates records and copies V8 inputs;
 it does not promise allocation-free queries.
 

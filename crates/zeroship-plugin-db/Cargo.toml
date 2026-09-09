@@ -120,6 +120,8 @@ tempfile = { workspace = true }
 # uses the Rust impl on the PG side.
 
 [dev-dependencies]
+# Integration helpers are automatic in test builds; database tests are required.
+zeroship-plugin-db = { path = ".", features = ["test-helpers"] }
 # `DbBinding::cold_start` is gated behind `test-helpers` in the domain tier: it
 # builds a deploy identity from an app id, and shipping that constructor in a
 # release binary would retire the check that nothing in production does so.
@@ -245,29 +247,8 @@ test-helpers = [
     "zeroship-data-sqlite/test-helpers",
     "zeroship-data-engine/test-helpers",
 ]
-# Live logical-decoding coverage is separate from the broader helper-gated
-# integration suite because it requires the compose Postgres on port 5440.
-live-db-tests = ["test-helpers", "zeroship-data-engine/live-db-tests"]
-
-# THE THREE INTEGRATION-TEST TARGETS. `autotests = false` at the top of this
-# file, so these are the whole set and every other `tests/*.rs` is a module of
-# one of them.
-#
-# The split is forced, not stylistic: `required-features` is a property of the
-# TARGET, so two files needing different features cannot share one.
-#
-#   main              no `required-features`. Must keep running under a bare
-#                     `cargo test -p zeroship-plugin-db`, so nothing it declares
-#                     may reach a helper symbol or a database.
-#   test_helpers      the helper-gated files. Several of them FAIL rather than
-#                     skip without a server: a skipping run of a security suite
-#                     is indistinguishable from a passing one, which is why the
-#                     guard is `required-features` rather than a runtime check.
-#   distributed_live  narrower still - it needs the compose Postgres with
-#                     logical WAL, which `live-db-tests` is the name for.
-#
-# Each entry file's `mod` list carries the per-file reasoning that used to sit
-# on the per-file `[[test]]` stanzas here.
+# Ordinary cargo test runs every integration target. The shared database
+# fixtures stay together; distributed CDC retains its own process.
 [[test]]
 name = "main"
 path = "tests/main.rs"
@@ -275,12 +256,10 @@ path = "tests/main.rs"
 [[test]]
 name = "test_helpers"
 path = "tests/test_helpers.rs"
-required-features = ["test-helpers"]
 
 [[test]]
 name = "distributed_live"
 path = "tests/distributed_live.rs"
-required-features = ["live-db-tests"]
 
 [lints]
 workspace = true

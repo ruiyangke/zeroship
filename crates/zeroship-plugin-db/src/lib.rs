@@ -52,8 +52,8 @@ use zeroship_data_core::error::DbError;
 // Most modules are `pub(crate)` in normal builds. Several are also
 // consumed by external test crates under `tests/`, which are compiled
 // as separate crate targets. Those need `pub` visibility when the
-// `test-helpers` Cargo feature is enabled (the `[[test]] integration`
-// target lists `required-features = ["test-helpers"]`).
+// `test-helpers` Cargo feature is enabled automatically by the package
+// self dev-dependency. Ordinary test builds include every integration target.
 // The cfg-fork below keeps the release surface tight while exposing
 // the modules for tests.
 //
