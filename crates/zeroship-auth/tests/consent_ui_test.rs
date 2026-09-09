@@ -16,7 +16,7 @@ const ISSUER: &str = "https://auth.zeroship.test/oauth2";
 const REDIRECT_URI: &str = "https://builder.zeroship.test/callback";
 
 /// Mirror of control plane `client_id_for_app` (`oac_<body>`). The app id and
-/// its OAuth client id share ONE base62 body under two prefixes, so the mirror
+/// its OAuth client id share ONE body under two prefixes, so the mirror
 /// carries the body over verbatim, exactly as the control plane does.
 /// Reproduced here (not imported from `zeroship-control`) to avoid pulling the
 /// control crate into auth's test graph.
@@ -56,7 +56,7 @@ impl ConsentTestApp {
         Self::boot_inner(scopes, app_role, skip, &client_id, None, &[]).await
     }
 
-    /// Boot a per-app end-user OAuth client (`oac_<base62-app-id>`) — the Slice
+    /// Boot a per-app end-user OAuth client (`oac_<app-id-body>`) — the Slice
     /// 1d/3b client identity. Seeds a real `zeroship.apps` row (the FK target for
     /// `app_scope_defs`) and the app's declared scopes, so the consent
     /// classifier resolves `client_id → app_id → app_scope_defs`. `skip_consent`
