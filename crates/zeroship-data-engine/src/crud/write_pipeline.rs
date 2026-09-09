@@ -1165,7 +1165,7 @@ mod tests {
                 .await
                 .expect("acquire client");
             client
-                .query_typed_internal(&insert_built.sql, insert_params)
+                .query_typed(&insert_built.sql, insert_params)
                 .await
                 .expect("seed insert");
             let seeded_id = insert_doc

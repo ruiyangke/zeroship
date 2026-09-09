@@ -470,15 +470,10 @@ impl SqliteBackend {
     /// exclusive - taking it for a read would serialise that read behind any
     /// open creator transaction, which is exactly the coupling SC-2 Decision 1
     /// removes.
-    #[cfg(not(feature = "test-helpers"))]
-    pub fn autocommit_client(&self) -> SqliteSessionHandle {
-        SqliteSessionHandle::new(self.session.clone())
-    }
-
-    /// `pub` under `test-helpers` so the integration target can hold a probe
-    /// on `op_conn` while a transaction owns `tx_conn` - which is the state
-    /// Decision 1 exists to make representable.
-    #[cfg(feature = "test-helpers")]
+    ///
+    /// The integration target also holds one of these as a probe on `op_conn`
+    /// while a transaction owns `tx_conn` - the state Decision 1 exists to make
+    /// representable. That needs no gate: this is `pub` for everyone.
     pub fn autocommit_client(&self) -> SqliteSessionHandle {
         SqliteSessionHandle::new(self.session.clone())
     }
@@ -1275,7 +1270,7 @@ impl SqliteBackend {
             schema_hint,
         )?;
         let param_refs = &params;
-        let typed = session.query_typed_internal(&sql, param_refs).await?;
+        let typed = session.query_typed(&sql, param_refs).await?;
         Ok(crate::row_json::typed_rows_to_values(&typed))
     }
 }
@@ -1388,7 +1383,7 @@ impl SqliteBackend {
         let schema_hint = schema;
         let bq = build_spatial_near_base_query(binding.schema(), collection, filter, schema_hint)?;
         let param_refs = &bq.params;
-        let typed = session.query_typed_internal(&bq.sql, param_refs).await?;
+        let typed = session.query_typed(&bq.sql, param_refs).await?;
 
         // Locate the BLOB column. Cache the index outside the row
         // loop so we don't scan `columns` per row.

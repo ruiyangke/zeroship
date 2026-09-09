@@ -925,7 +925,7 @@ mod tests {
             }
 
             let rows = probe
-                .query_internal("SELECT COUNT(*) FROM notes", &[])
+                .query("SELECT COUNT(*) FROM notes", &[])
                 .await
                 .expect("count notes after commit");
             assert_eq!(rows[0][0].as_deref(), Some("1"));
@@ -994,7 +994,7 @@ mod tests {
             }
 
             let rows = probe
-                .query_internal("SELECT COUNT(*) FROM notes", &[])
+                .query("SELECT COUNT(*) FROM notes", &[])
                 .await
                 .expect("count notes after commit");
             assert_eq!(rows[0][0].as_deref(), Some("2"));
@@ -1032,7 +1032,7 @@ mod tests {
             }
 
             let rows = probe
-                .query_internal("SELECT COUNT(*) FROM notes", &[])
+                .query("SELECT COUNT(*) FROM notes", &[])
                 .await
                 .expect("count notes after rollback");
             assert_eq!(rows[0][0].as_deref(), Some("0"));
@@ -1116,7 +1116,7 @@ mod tests {
             drop(held);
 
             let rows = probe
-                .query_internal("SELECT COUNT(*) FROM notes", &[])
+                .query("SELECT COUNT(*) FROM notes", &[])
                 .await
                 .expect("count notes after the forced cleanup");
             assert_eq!(
@@ -1183,7 +1183,7 @@ mod tests {
             }
 
             let rows = probe
-                .query_internal("SELECT title FROM notes ORDER BY id", &[])
+                .query("SELECT title FROM notes ORDER BY id", &[])
                 .await
                 .expect("read notes after rollback");
             assert_eq!(
@@ -1225,7 +1225,7 @@ mod tests {
             drop(frame);
 
             let rows = probe
-                .query_internal("SELECT COUNT(*) FROM notes", &[])
+                .query("SELECT COUNT(*) FROM notes", &[])
                 .await
                 .expect("count notes after frame cancellation");
             assert_eq!(
