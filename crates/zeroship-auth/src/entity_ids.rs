@@ -18,7 +18,7 @@ use zeroship_core::user_id::UserId;
 
 use crate::error::{AuthError, Result};
 
-/// Read a non-null `usr_<base62>` column.
+/// Read a non-null `usr_` column.
 ///
 /// # Errors
 ///
@@ -31,7 +31,7 @@ pub fn user_id(row: &Row, column: &str) -> Result<UserId> {
     parse_user_id(raw, column)
 }
 
-/// Read a nullable `usr_<base62>` column. A SQL NULL is `Ok(None)`; a present
+/// Read a nullable `usr_` column. A SQL NULL is `Ok(None)`; a present
 /// but unparseable value is still an error.
 ///
 /// # Errors
@@ -45,7 +45,7 @@ pub fn optional_user_id(row: &Row, column: &str) -> Result<Option<UserId>> {
     raw.map(|raw| parse_user_id(raw, column)).transpose()
 }
 
-/// Read a non-null `app_<base62>` column.
+/// Read a non-null `app_` column.
 ///
 /// # Errors
 ///
@@ -58,7 +58,7 @@ pub fn app_id(row: &Row, column: &str) -> Result<AppId> {
     parse_app_id(raw, column)
 }
 
-/// Read a nullable `app_<base62>` column. A SQL NULL is `Ok(None)`; a present
+/// Read a nullable `app_` column. A SQL NULL is `Ok(None)`; a present
 /// but unparseable value is still an error.
 ///
 /// # Errors

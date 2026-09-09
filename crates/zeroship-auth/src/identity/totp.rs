@@ -90,7 +90,7 @@ pub fn generate_secret() -> Vec<u8> {
 
 /// Associated data for the at-rest encryption of `user_id`'s secret.
 ///
-/// The bound identity is the PRINTED id (`usr_<base62>`), which is what
+/// The bound identity is the PRINTED id (`usr_<body>`), which is what
 /// `zeroship.totp_credentials.user_id` stores. This is the only function that
 /// composes the AAD, and both [`encrypt_secret`] and [`decrypt_secret`] go
 /// through it, so a secret sealed for one person cannot open for another and

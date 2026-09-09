@@ -590,11 +590,11 @@ struct ScopeDef {
 /// `app_scope_defs` and only ever request identity + platform scopes.
 ///
 /// **The derivation is a re-prefixing of one shared body, not a decode.** The
-/// two identifiers are `app_<body>` and `oac_<body>` over the SAME base62
-/// body: control's `client_id_for_app` carries it over verbatim from the app
-/// id's printed form. So the inverse swaps the tag back and asks
-/// [`AppId::parse`] to rule on the result, which refuses a body of the wrong
-/// length, outside base62, or above the representable range - exactly the set
+/// two identifiers are `app_<body>` and `oac_<body>` over the SAME body:
+/// control's `client_id_for_app` carries it over verbatim from the app id's
+/// printed form. So the inverse swaps the tag back and asks [`AppId::parse`]
+/// to rule on the result, which refuses a body of the wrong length, outside
+/// the typed-id alphabet, or above the representable range - exactly the set
 /// the minter can never have produced.
 ///
 /// Reconstructing a uuid from the body and re-encoding it would agree on every
@@ -1246,11 +1246,32 @@ mod tests {
 
         // Non-per-app clients (builder/console) resolve to None.
         assert_eq!(app_id_from_client_id("zeroship-builder-abc"), None);
+
         // A body the minter can never have produced is refused rather than
-        // re-prefixed into an id nothing keys on: outside base62, and the right
-        // shape but the wrong length.
-        assert_eq!(app_id_from_client_id("oac_not-base62"), None);
-        assert_eq!(app_id_from_client_id("oac_"), None);
-        assert_eq!(app_id_from_client_id("oac_0000000000000000000000000"), None);
+        // re-prefixed into an id nothing keys on. The wrong-length arms are
+        // DERIVED from a minted body rather than written out: a literal of some
+        // fixed width stops testing the length the moment the encoder's width
+        // moves, and starts passing for the opposite reason.
+        let minted = AppId::mint();
+        let body = minted
+            .as_str()
+            .strip_prefix(AppId::PREFIX)
+            .and_then(|rest| rest.strip_prefix('_'))
+            .expect("a printed app id is <PREFIX>_<body>");
+        for bad in [
+            format!("{APP_OAUTH_CLIENT_PREFIX}_"),
+            format!("{APP_OAUTH_CLIENT_PREFIX}_{body}0"),
+            format!("{APP_OAUTH_CLIENT_PREFIX}_{}", &body[..body.len() - 1]),
+            format!("{APP_OAUTH_CLIENT_PREFIX}_-{}", &body[1..]),
+        ] {
+            assert_eq!(app_id_from_client_id(&bad), None, "must be refused: {bad}");
+        }
+        // The control for those four: the body they are mutations of is one the
+        // decoder accepts, so each refusal measures its own mutation rather
+        // than a decoder that refuses whatever it is handed.
+        assert_eq!(
+            app_id_from_client_id(&format!("{APP_OAUTH_CLIENT_PREFIX}_{body}")).as_ref(),
+            Some(&minted)
+        );
     }
 }
