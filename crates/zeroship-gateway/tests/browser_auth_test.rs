@@ -53,7 +53,11 @@ const TEST_BROKER_MASTER: &[u8] = b"gateway-browser-test-broker-master-32-bytes"
 /// inserts its live anchor/session rows under the same id, so both must
 /// agree on exactly this value.
 fn app_id() -> AppId {
-    AppId::parse(&format!("app_{}", "0".repeat(22))).expect("valid app id literal")
+    AppId::parse(&format!(
+        "app_{}",
+        "0".repeat(zeroship_core::typed_id::BODY_LEN)
+    ))
+    .expect("valid app id literal")
 }
 
 // ─── BlobStore stub ──────────────────────────────────────────────────────
