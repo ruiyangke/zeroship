@@ -17,6 +17,7 @@
 
 use compio_postgres::{connect, Client, NoTls};
 use uuid::Uuid;
+use zeroship_core::user_id::UserId;
 use zeroship_gateway::identities;
 
 #[allow(clippy::future_not_send)]
@@ -30,14 +31,14 @@ async fn pg_or_skip() -> Option<Client> {
     Some(client)
 }
 
-async fn seed_user(client: &Client, label: &str) -> Uuid {
-    let user_id = Uuid::new_v4();
-    let email = format!("{label}-{}@zeroship.test", user_id.simple());
+async fn seed_user(client: &Client, label: &str) -> UserId {
+    let user_id = UserId::mint();
+    let email = format!("{label}-{}@zeroship.test", Uuid::new_v4().simple());
     client
         .execute(
             "INSERT INTO zeroship.users (id, email, name, email_verified_at) \
              VALUES ($1, $2::citext, $3, NOW())",
-            &[&user_id, &email, &label],
+            &[&user_id.as_str(), &email, &label],
         )
         .await
         .expect("seed user");
@@ -74,15 +75,15 @@ async fn seed_oauth_client(client: &Client, client_id: &str) {
 /// value any real credential for this pair carries. Since the stored subject is
 /// IMMUTABLE (`identities::upsert` refuses to rewrite it), a fabricated seed
 /// turns the first token mint added to this binary into an opaque 500.
-fn fixture_pairwise_sub(client_id: &str, user_id: Uuid) -> String {
+fn fixture_pairwise_sub(client_id: &str, user_id: &UserId) -> String {
     zeroship_core::auth::derive_pairwise(
         &zeroship_core::crypto::derive_key("identities-relay-test-salt"),
-        &user_id.to_string(),
+        user_id.as_str(),
         &format!("https://{client_id}.zeroship.test"),
     )
 }
 
-async fn cleanup(client: &Client, client_id: &str, user_id: Uuid) {
+async fn cleanup(client: &Client, client_id: &str, user_id: &UserId) {
     let _ = client
         .execute(
             "DELETE FROM zeroship.app_user_identities WHERE app_client_id = $1",
@@ -90,7 +91,7 @@ async fn cleanup(client: &Client, client_id: &str, user_id: Uuid) {
         )
         .await;
     let _ = client
-        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user_id])
+        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user_id.as_str()])
         .await;
     let _ = client
         .execute(
@@ -109,7 +110,7 @@ async fn lookup_relay_email_returns_active_alias_and_fails_closed_on_revoke() {
     let client_id = format!("oac_relayswap_{}", Uuid::new_v4().simple());
     seed_oauth_client(&client, &client_id).await;
     let user_id = seed_user(&client, "relayswap").await;
-    let pairwise_sub = fixture_pairwise_sub(&client_id, user_id);
+    let pairwise_sub = fixture_pairwise_sub(&client_id, &user_id);
     let relay_email = format!("{}@relay.zeroship.localhost", Uuid::new_v4().simple());
 
     // Active alias row (relay_email set, revoked_at NULL).
@@ -118,14 +119,14 @@ async fn lookup_relay_email_returns_active_alias_and_fails_closed_on_revoke() {
             "INSERT INTO zeroship.app_user_identities \
                 (app_client_id, global_user_id, pairwise_sub, relay_email) \
              VALUES ($1, $2, $3, $4)",
-            &[&client_id, &user_id, &pairwise_sub, &relay_email],
+            &[&client_id, &user_id.as_str(), &pairwise_sub, &relay_email],
         )
         .await
         .expect("insert active alias");
 
     // Active ⇒ the swap source returns the alias (apps see the alias, §7).
     assert_eq!(
-        identities::lookup_relay_email(&mut client, &client_id, user_id)
+        identities::lookup_relay_email(&mut client, &client_id, &user_id)
             .await
             .expect("lookup active"),
         Some(relay_email.clone()),
@@ -138,19 +139,19 @@ async fn lookup_relay_email_returns_active_alias_and_fails_closed_on_revoke() {
         .execute(
             "UPDATE zeroship.app_user_identities SET revoked_at = now() \
              WHERE app_client_id = $1 AND global_user_id = $2",
-            &[&client_id, &user_id],
+            &[&client_id, &user_id.as_str()],
         )
         .await
         .expect("revoke alias");
     assert_eq!(
-        identities::lookup_relay_email(&mut client, &client_id, user_id)
+        identities::lookup_relay_email(&mut client, &client_id, &user_id)
             .await
             .expect("lookup revoked"),
         None,
         "a revoked alias must read as None (fail closed — no real-email leak)"
     );
 
-    cleanup(&client, &client_id, user_id).await;
+    cleanup(&client, &client_id, &user_id).await;
 }
 
 /// The immutable-binding guard in `identities::upsert`, exercised through the
@@ -181,15 +182,15 @@ async fn upsert_refuses_to_rebind_a_stored_pairwise_subject() {
     // the same user genuinely projects to under two sector identifiers, which
     // is exactly the configuration drift the guard exists to refuse.
     let salt = zeroship_core::auth::derive_pairwise_salt(b"identities-rebind-fixture-salt");
-    let user_sub = user_id.to_string();
+    let user_sub = user_id.as_str();
     let subject_a = zeroship_core::auth::derive_pairwise(
         &salt,
-        &user_sub,
+        user_sub,
         "https://rebind-a.zeroship.test",
     );
     let subject_b = zeroship_core::auth::derive_pairwise(
         &salt,
-        &user_sub,
+        user_sub,
         "https://rebind-b.zeroship.test",
     );
     assert_ne!(
@@ -197,17 +198,17 @@ async fn upsert_refuses_to_rebind_a_stored_pairwise_subject() {
         "the fixture must offer the guard two genuinely different subjects"
     );
 
-    identities::upsert(&mut client, &client_id, user_id, &subject_a)
+    identities::upsert(&mut client, &client_id, &user_id, &subject_a)
         .await
         .expect("first bind must be accepted");
 
     // Re-deriving the SAME subject is the normal re-login path and must still
     // pass, so the test cannot be satisfied by a guard that rejects everything.
-    identities::upsert(&mut client, &client_id, user_id, &subject_a)
+    identities::upsert(&mut client, &client_id, &user_id, &subject_a)
         .await
         .expect("re-binding the same subject is idempotent, not a conflict");
 
-    let err = identities::upsert(&mut client, &client_id, user_id, &subject_b)
+    let err = identities::upsert(&mut client, &client_id, &user_id, &subject_b)
         .await
         .expect_err("re-binding a DIFFERENT subject must fail closed");
     let message = format!("{err}");
@@ -219,14 +220,14 @@ async fn upsert_refuses_to_rebind_a_stored_pairwise_subject() {
     // The row must still carry the FIRST subject: failing closed means the
     // stored identity survived, not that the write half-landed.
     assert_eq!(
-        identities::lookup_pairwise_sub(&mut client, &client_id, user_id)
+        identities::lookup_pairwise_sub(&mut client, &client_id, &user_id)
             .await
             .expect("lookup after refused rebind"),
         Some(subject_a.clone()),
         "the refused rebind must leave the original subject stored"
     );
 
-    cleanup(&client, &client_id, user_id).await;
+    cleanup(&client, &client_id, &user_id).await;
 }
 
 #[compio::test]
@@ -238,7 +239,7 @@ async fn lookup_relay_email_is_none_when_no_alias_minted() {
     let client_id = format!("oac_noalias_{}", Uuid::new_v4().simple());
     seed_oauth_client(&client, &client_id).await;
     let user_id = seed_user(&client, "noalias").await;
-    let pairwise_sub = fixture_pairwise_sub(&client_id, user_id);
+    let pairwise_sub = fixture_pairwise_sub(&client_id, &user_id);
 
     // Identity row exists (gateway upserted the pairwise mapping) but no alias
     // minted yet — relay_email NULL (consent ran before, or no email scope).
@@ -247,19 +248,19 @@ async fn lookup_relay_email_is_none_when_no_alias_minted() {
             "INSERT INTO zeroship.app_user_identities \
                 (app_client_id, global_user_id, pairwise_sub) \
              VALUES ($1, $2, $3)",
-            &[&client_id, &user_id, &pairwise_sub],
+            &[&client_id, &user_id.as_str(), &pairwise_sub],
         )
         .await
         .expect("insert row without alias");
 
     // No alias ⇒ None ⇒ the arm fails closed (empty email).
     assert_eq!(
-        identities::lookup_relay_email(&mut client, &client_id, user_id)
+        identities::lookup_relay_email(&mut client, &client_id, &user_id)
             .await
             .expect("lookup no-alias"),
         None,
         "absent alias must read as None (fail closed)"
     );
 
-    cleanup(&client, &client_id, user_id).await;
+    cleanup(&client, &client_id, &user_id).await;
 }

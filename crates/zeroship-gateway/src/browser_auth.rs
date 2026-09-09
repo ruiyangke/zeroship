@@ -365,7 +365,7 @@ pub async fn signout(req: HttpRequest, body: Bytes, state: State<Arc<GateState>>
         // against the wrong app resolves to `None` here, so this READ both
         // loads the anchor AND enforces the former post-hoc
         // `anchor.app_id == route.app_id` check.
-        match anchors::read_live(&mut conn, route.app_id, anchor_id).await {
+        match anchors::read_live(&mut conn, &route.app_id, anchor_id).await {
             Ok(Some(a)) => a,
             Ok(None) => return signout_cleared(&route.host),
             Err(e) => {
@@ -391,7 +391,7 @@ pub async fn signout(req: HttpRequest, body: Bytes, state: State<Arc<GateState>>
         .map(|sector| {
             zeroship_core::auth::derive_pairwise(
                 &state.pairwise_salt,
-                &anchor.global_user_id.to_string(),
+                anchor.global_user_id.as_str(),
                 sector,
             )
         });
@@ -441,7 +441,7 @@ pub async fn signout(req: HttpRequest, body: Bytes, state: State<Arc<GateState>>
         // (c) Delete the anchor row(s) and collect the family ciphertexts
         //     for the (best-effort) OP revoke fan-out.
         if want_global {
-            match anchors::delete_all_for_user(&mut conn, route.app_id, anchor.global_user_id)
+            match anchors::delete_all_for_user(&mut conn, &route.app_id, &anchor.global_user_id)
                 .await
             {
                 Ok(deleted) => {
@@ -460,7 +460,7 @@ pub async fn signout(req: HttpRequest, body: Bytes, state: State<Arc<GateState>>
             }
         } else {
             families.push((anchor.refresh_token_enc.clone(), anchor.client_id.clone()));
-            if let Err(e) = anchors::delete(&mut conn, route.app_id, anchor_id).await {
+            if let Err(e) = anchors::delete(&mut conn, &route.app_id, anchor_id).await {
                 tracing::error!(error = %e, "/signout(local): anchor delete failed");
                 return error_response(
                     HttpResponse::InternalServerError(),
@@ -477,7 +477,7 @@ pub async fn signout(req: HttpRequest, body: Bytes, state: State<Arc<GateState>>
     //     marker above are the authoritative revocation; an OP hiccup must
     //     not block signout, so failures are logged, not surfaced.
     for (refresh_enc, client_id) in &families {
-        let aad = anchor_aad(client_id, &anchor.global_user_id.to_string());
+        let aad = anchor_aad(client_id, anchor.global_user_id.as_str());
         let refresh = match zeroship_core::crypto::decrypt(&state.anchor_enc_key, &aad, refresh_enc)
         {
             Ok(pt) => String::from_utf8_lossy(&pt).into_owned(),

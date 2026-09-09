@@ -19,6 +19,9 @@
 use compio_postgres::Client;
 use uuid::Uuid;
 
+use zeroship_core::app_id::AppId;
+use zeroship_core::user_id::UserId;
+
 use crate::error::{GatewayError, Result};
 use crate::rls;
 
@@ -29,10 +32,11 @@ pub struct AppSession {
     /// OIDC OP session id (`sid`) from the ID token, used to correlate
     /// Back-Channel Logout tokens to the local RP session.
     pub sid: Option<String>,
-    /// The app's stable UUID (`apps.id`). The `zeroship.gateway_sessions.app_id`
-    /// column is UUID and bound natively — the canonical session key is the
-    /// immutable app id, never the renameable subdomain slug.
-    pub app_id: Uuid,
+    /// The app's stable typed id (`apps.id`). The `zeroship.gateway_sessions
+    /// .app_id` column is `text` and holds `app_id.as_str()` — the canonical
+    /// session key is the immutable app id, never the renameable subdomain
+    /// slug.
+    pub app_id: AppId,
     pub email: Option<String>,
     pub name: Option<String>,
     pub avatar_url: Option<String>,
@@ -58,10 +62,11 @@ pub struct NewSession<'a> {
     pub user_id: &'a str,
     /// OIDC OP session id (`sid`) from the validated ID token, if present.
     pub sid: Option<&'a str>,
-    /// The app's stable UUID (`apps.id`), bound natively into the UUID
-    /// `app_id` column. Keyed on the immutable app id (the subdomain slug can
-    /// be renamed), matching the live per-request dispatch arm.
-    pub app_id: Uuid,
+    /// The app's stable typed id (`apps.id`), bound into the `text` `app_id`
+    /// column as `app_id.as_str()`. Keyed on the immutable app id (the
+    /// subdomain slug can be renamed), matching the live per-request
+    /// dispatch arm.
+    pub app_id: &'a AppId,
     pub email: Option<&'a str>,
     pub name: Option<&'a str>,
     pub avatar_url: Option<&'a str>,
@@ -96,7 +101,7 @@ pub const ABSOLUTE_HOURS: i64 = 12;
 ///
 /// [`GatewayError::Db`] on PG failure or empty return.
 pub async fn create(conn: &mut Client, params: &NewSession<'_>) -> Result<AppSession> {
-    let user_id = Uuid::parse_str(params.user_id)
+    let user_id = UserId::parse(params.user_id)
         .map_err(|e| GatewayError::Db(format!("gateway_sessions create: invalid user_id: {e}")))?;
     let amr: Vec<String> = params.amr.to_vec();
     let tx = conn
@@ -119,8 +124,8 @@ pub async fn create(conn: &mut Client, params: &NewSession<'_>) -> Result<AppSes
                        email_verified, granted_scopes, auth_time, amr, sid, \
                        idle_expires_at, abs_expires_at",
             &[
-                &user_id,
-                &params.app_id,
+                &user_id.as_str(),
+                &params.app_id.as_str(),
                 &params.email,
                 &params.name,
                 &params.avatar_url,
@@ -140,7 +145,7 @@ pub async fn create(conn: &mut Client, params: &NewSession<'_>) -> Result<AppSes
         let row = rows
             .first()
             .ok_or_else(|| GatewayError::Db("gateway_sessions create: empty return".into()))?;
-        row_to_session(row)
+        row_to_session(row)?
     };
     tx.commit()
         .await
@@ -203,10 +208,10 @@ pub async fn create(conn: &mut Client, params: &NewSession<'_>) -> Result<AppSes
 /// [`GatewayError::Db`] on PG failure (including an unparseable `user_id`).
 pub async fn revoke_app_sessions_for_user(
     conn: &mut Client,
-    app_id: Uuid,
+    app_id: &AppId,
     user_id: &str,
 ) -> Result<u64> {
-    let user_id = Uuid::parse_str(user_id).map_err(|e| {
+    let user_id = UserId::parse(user_id).map_err(|e| {
         GatewayError::Db(format!(
             "gateway_sessions revoke_app_sessions_for_user: invalid user_id: {e}"
         ))
@@ -221,7 +226,7 @@ pub async fn revoke_app_sessions_for_user(
         .execute(
             "UPDATE zeroship.gateway_sessions SET revoked_at = NOW() \
              WHERE user_id = $1 AND app_id = $2 AND revoked_at IS NULL",
-            &[&user_id, &app_id],
+            &[&user_id.as_str(), &app_id.as_str()],
         )
         .await
         .map_err(|e| {
@@ -244,10 +249,10 @@ pub async fn revoke_app_sessions_for_user(
 /// audit/revocation row during `?mint=1` rotation.
 pub async fn latest_sid_for_user(
     conn: &mut Client,
-    app_id: Uuid,
+    app_id: &AppId,
     user_id: &str,
 ) -> Result<Option<String>> {
-    let user_id = Uuid::parse_str(user_id).map_err(|e| {
+    let user_id = UserId::parse(user_id).map_err(|e| {
         GatewayError::Db(format!(
             "gateway_sessions latest_sid_for_user: invalid user_id: {e}"
         ))
@@ -263,7 +268,7 @@ pub async fn latest_sid_for_user(
              WHERE user_id = $1 AND app_id = $2 AND sid IS NOT NULL \
              ORDER BY issued_at DESC \
              LIMIT 1",
-            &[&user_id, &app_id],
+            &[&user_id.as_str(), &app_id.as_str()],
         )
         .await
         .map_err(|e| GatewayError::Db(format!("gateway_sessions latest_sid_for_user: {e}")))?;
@@ -282,12 +287,12 @@ pub async fn latest_sid_for_user(
 /// different user's rows.
 pub async fn revoke_app_sessions_for_sid(
     conn: &mut Client,
-    app_id: Uuid,
+    app_id: &AppId,
     sid: &str,
     sub: Option<&str>,
-) -> Result<Vec<Uuid>> {
+) -> Result<Vec<UserId>> {
     let parsed_sub = match sub {
-        Some(sub) => Some(Uuid::parse_str(sub).map_err(|e| {
+        Some(sub) => Some(UserId::parse(sub).map_err(|e| {
             GatewayError::Db(format!(
                 "gateway_sessions revoke_app_sessions_for_sid: invalid user_id: {e}"
             ))
@@ -315,7 +320,7 @@ pub async fn revoke_app_sessions_for_sid(
              SELECT user_id FROM targets \
              UNION \
              SELECT user_id FROM revoked",
-            &[&app_id, &sid, &user_id],
+            &[&app_id.as_str(), &sid, &user_id.as_str()],
         )
         .await
     } else {
@@ -333,7 +338,7 @@ pub async fn revoke_app_sessions_for_sid(
              SELECT user_id FROM targets \
              UNION \
              SELECT user_id FROM revoked",
-            &[&app_id, &sid],
+            &[&app_id.as_str(), &sid],
         )
         .await
     }
@@ -348,7 +353,12 @@ pub async fn revoke_app_sessions_for_sid(
 
     let mut users = Vec::new();
     for row in rows {
-        let user_id: Uuid = row.get("user_id");
+        let user_id: &str = row.get("user_id");
+        let user_id = UserId::parse(user_id).map_err(|e| {
+            GatewayError::Db(format!(
+                "gateway_sessions revoke_app_sessions_for_sid: invalid stored user_id: {e}"
+            ))
+        })?;
         if !users.contains(&user_id) {
             users.push(user_id);
         }
@@ -356,13 +366,18 @@ pub async fn revoke_app_sessions_for_sid(
     Ok(users)
 }
 
-fn row_to_session(row: &compio_postgres::Row) -> AppSession {
-    let user_id: Uuid = row.get("user_id");
-    AppSession {
+fn row_to_session(row: &compio_postgres::Row) -> Result<AppSession> {
+    let user_id: &str = row.get("user_id");
+    let user_id = UserId::parse(user_id)
+        .map_err(|e| GatewayError::Db(format!("gateway_sessions create: invalid user_id: {e}")))?;
+    let app_id: String = row.get("app_id");
+    let app_id = AppId::parse(&app_id)
+        .map_err(|e| GatewayError::Db(format!("gateway_sessions create: invalid app_id: {e}")))?;
+    Ok(AppSession {
         id: row.get("id"),
-        user_id: user_id.to_string(),
+        user_id: user_id.as_str().to_string(),
         sid: row.try_get("sid").ok().flatten(),
-        app_id: row.get("app_id"),
+        app_id,
         email: row.try_get("email").ok(),
         name: row.try_get("name").ok(),
         avatar_url: row.try_get("avatar_url").ok(),
@@ -372,5 +387,5 @@ fn row_to_session(row: &compio_postgres::Row) -> AppSession {
         amr: row.try_get("amr").unwrap_or_default(),
         idle_expires_at: row.get("idle_expires_at"),
         abs_expires_at: row.get("abs_expires_at"),
-    }
+    })
 }
