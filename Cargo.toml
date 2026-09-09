@@ -227,6 +227,7 @@ zeroship-data-sqlite = { path = "crates/zeroship-data-sqlite" }
 # vendor crates and BELOW the adapter, and its manifest header records why it is
 # the one non-vendor crate allowed to name a driver.
 zeroship-data-engine = { path = "crates/zeroship-data-engine" }
+zeroship-data-macros = { path = "crates/zeroship-data-macros" }
 zeroship-data-query-builder = { path = "crates/zeroship-data-query-builder" }
 # The CDC relay SERVICE, a peer of `zeroship-migrate-server` and NOT a library
 # tier. Its entry here exists so ONE crate can name it -

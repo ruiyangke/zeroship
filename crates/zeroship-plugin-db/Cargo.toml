@@ -110,6 +110,8 @@ tempfile = { workspace = true }
 # uses the Rust impl on the PG side.
 
 [dev-dependencies]
+# Integration helpers are enabled by test builds; database tests are unconditional.
+zeroship-plugin-db = { path = ".", features = ["test-helpers"] }
 # `DbBinding::cold_start` is gated behind `test-helpers` in the domain tier: it
 # builds a deploy identity from an app id, and shipping that constructor in a
 # release binary would retire the check that nothing in production does so.
@@ -232,106 +234,46 @@ test-helpers = [
     "zeroship-data-sqlite/test-helpers",
     "zeroship-data-engine/test-helpers",
 ]
-# Live logical-decoding coverage is separate from the broader helper-gated
-# integration suite because it requires the compose Postgres on port 5440.
-live-db-tests = ["test-helpers", "zeroship-data-engine/live-db-tests"]
-
+# Every integration target runs under ordinary cargo test.
 [[test]]
 name = "integration"
 path = "tests/integration.rs"
-required-features = ["test-helpers"]
 
-# SQLite-side integration target. PR 0 makes the backend unconditional,
-# so only `test-helpers` remains gated.
 [[test]]
 name = "sqlite_integration"
 path = "tests/sqlite_integration.rs"
-required-features = ["test-helpers"]
 
-# Native `Db.transaction(fn)` orchestrator E2E (P9 PR 3). Reaches the
-# `test-helpers`-gated symbols such as `set_db_url_for_tests`, so it must carry
-# the same `required-features` guard as the integration
-# targets above — otherwise bare `cargo test -p zeroship-plugin-db`
-# auto-discovers it and fails to compile (E0425/E0603).
 [[test]]
 name = "native_transaction"
 path = "tests/native_transaction.rs"
-required-features = ["test-helpers"]
 
 [[test]]
 name = "distributed_live"
 path = "tests/distributed_live.rs"
-required-features = ["live-db-tests"]
 
-# The missing-per-app-role classification (`schema_not_provisioned`). Needs
-# a live server because `compio_postgres::Error` has no public constructor,
-# so the SQLSTATE this classifies can only be produced by PostgreSQL itself.
-# It touches no `test-helpers` symbol, but carries the guard anyway so bare
-# `cargo test -p zeroship-plugin-db` does not auto-discover a target that
-# panics without a database.
 [[test]]
 name = "missing_role"
 path = "tests/missing_role.rs"
-required-features = ["test-helpers"]
 
-# The DbPlan search family, executed. `zeroship-data-query-builder` renders SQL with no
-# database in reach, so its own tests can only compare strings; this target runs
-# the same statements against real PostgreSQL with pgvector and PostGIS, and
-# holds the one arm that needs both backends in one process - the metric
-# Postgres serves and SQLite refuses.
-#
-# Guarded like its siblings so bare `cargo test -p zeroship-plugin-db` does not
-# auto-discover a target that panics without a database.
 [[test]]
 name = "search_ir_live"
 path = "tests/search_ir_live.rs"
-required-features = ["test-helpers"]
 
-# The masking storage flip. Its own target rather than another section of
-# `integration.rs` because every fixture in it builds its table from the
-# PLATFORM'S OWN DDL emitter and writes through the real write pipeline - the
-# flip's risk is the emitter and the data plane disagreeing about which physical
-# column holds what, and a hand-written fixture agrees with whichever one its
-# author had in mind. Guarded like its siblings, and it FAILS rather than skips
-# without a database: a skipping run of a security suite is indistinguishable
-# from a passing one.
 [[test]]
 name = "mask_flip"
 path = "tests/mask_flip.rs"
-required-features = ["test-helpers"]
 
-# The write builders' `RETURNING` projection, executed by a role that holds
-# COLUMN-level grants. Its own target rather than another section of
-# `integration.rs` because it needs a fixture nothing else in the tree has: a
-# role that may WRITE a masked field's raw column and may not READ it. That
-# grant is unusable while any write verb stars, so this is the target that says
-# whether the projection is real rather than whether the SQL text changed.
-# Guarded like its siblings, and it FAILS rather than skips without a database.
 [[test]]
 name = "column_grants"
 path = "tests/column_grants.rs"
-required-features = ["test-helpers"]
 
-# Which CONNECTION a `find({ unmask })` uses inside `db.transaction(fn)`. Its
-# own target rather than another section of `mask_flip.rs` because every fixture
-# in it has to park a real transaction connection in the per-isolate slot, and
-# the question it rules on is about lanes rather than about masking storage.
-# Guarded like its siblings, and it FAILS rather than skips without a database.
 [[test]]
 name = "unmask_tx_lane"
 path = "tests/unmask_tx_lane.rs"
-required-features = ["test-helpers"]
 
-# Which CONNECTION the SEARCH FAMILY uses inside `db.transaction(fn)` - the
-# sibling question to `unmask_tx_lane`, asked of `run_search` / `run_near`. Its
-# own target because it needs a server carrying BOTH `vector` and `postgis`,
-# which the unmask fixtures do not, and because it parks a real transaction
-# connection the masking targets never open. Guarded like its siblings, and it
-# FAILS rather than skips without a database or without an extension.
 [[test]]
 name = "search_tx_lane"
 path = "tests/search_tx_lane.rs"
-required-features = ["test-helpers"]
 
 [lints]
 workspace = true

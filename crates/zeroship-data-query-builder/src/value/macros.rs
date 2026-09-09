@@ -1,5 +1,5 @@
 /// Construct native records and arrays. Expression values use the native Serde
-/// adapter; Rust model mapping uses `EncodeRecord` to move owned fields.
+/// adapter; Rust insert mappings move owned fields through native codecs.
 #[macro_export]
 macro_rules! value {
     (@items $out:ident;) => {};

@@ -1,0 +1,49 @@
+{
+  "ir_version": 1,
+  "name": "orm_models",
+  "ops": [
+    {
+      "op": "createTable",
+      "name": "posts",
+      "columns": [
+        {
+          "name": "title",
+          "type": "text",
+          "nullable": false
+        },
+        {
+          "name": "payload",
+          "type": "bytes"
+        },
+        {
+          "name": "counter",
+          "type": "bigInt",
+          "nullable": false,
+          "default": {
+            "literal": {
+              "value": 7
+            }
+          }
+        },
+        {
+          "name": "nickname",
+          "type": "text",
+          "default": {
+            "literal": {
+              "value": "anonymous"
+            }
+          }
+        },
+        {
+          "name": "score",
+          "type": "double"
+        }
+      ],
+      "runtimeOptions": {
+        "softDelete": true,
+        "versioning": true,
+        "strictness": "strict"
+      }
+    }
+  ]
+}

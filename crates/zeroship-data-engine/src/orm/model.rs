@@ -1,207 +1,229 @@
-//! Native Rust model mapping. Values move between model fields and records;
-//! neither direction constructs a JSON representation.
+//! Typed mappings over native records and migration-derived column contracts.
 use std::marker::PhantomData;
 use zeroship_data_core::error::DbError;
 use zeroship_data_query_builder::value::{Record, Value};
 
-pub trait EncodeRecord {
-    fn into_record(self) -> Record;
+/// Collection metadata generated from the deployment's runtime descriptor.
+pub trait Entity: Sized + 'static {
+    const COLLECTION: &'static str;
+    fn schema() -> &'static Value;
 }
-impl EncodeRecord for Record {
-    fn into_record(self) -> Record {
-        self
+pub trait Column: 'static {
+    type Entity: Entity;
+    type SqlType;
+    const NAME: &'static str;
+}
+pub trait ReadableColumn: Column {}
+pub trait FilterableColumn: Column {}
+pub trait WritableColumn: Column {}
+pub trait DefaultableColumn: WritableColumn {}
+/// An insert derive implements this for each field it supplies.
+pub trait HasColumn<C: Column> {}
+
+pub trait FromRow<E: Entity>: Sized {
+    const COLUMNS: &'static [&'static str];
+    fn from_row(row: Row) -> Result<Self, DbError>;
+}
+pub trait Insertable<E: Entity> {
+    fn into_record(self) -> Result<Record, DbError>;
+}
+pub trait Changeset<E: Entity> {
+    fn into_changes(self) -> Result<Record, DbError>;
+}
+pub trait EncodeValue<S> {
+    fn encode_value(self) -> Result<Value, DbError>;
+}
+pub trait DecodeValue<S>: Sized {
+    fn decode_value(value: Value) -> Result<Self, DbError>;
+}
+
+/// An insert field supplies a value or requests its database default.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Defaulted<T> {
+    #[default]
+    Default,
+    Value(T),
+}
+/// Omitting an update field differs from explicitly setting its nullable value.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Change<T> {
+    #[default]
+    Keep,
+    Set(T),
+}
+
+pub trait DefaultInput<C: Column> {
+    fn encode_default(self, record: &mut Record) -> Result<(), DbError>;
+}
+impl<C: DefaultableColumn, T: EncodeValue<C::SqlType>> DefaultInput<C> for Defaulted<T> {
+    fn encode_default(self, record: &mut Record) -> Result<(), DbError> {
+        encode_default::<C, T>(record, self)
+    }
+}
+pub trait ChangeInput<C: Column> {
+    fn encode_change(self, record: &mut Record) -> Result<(), DbError>;
+}
+impl<C: WritableColumn, T: EncodeValue<C::SqlType>> ChangeInput<C> for Change<T> {
+    fn encode_change(self, record: &mut Record) -> Result<(), DbError> {
+        encode_change::<C, T>(record, self)
     }
 }
 
-pub trait DecodeValue: Sized {
-    fn decode(value: Value) -> Result<Self, DbError>;
-}
-fn mismatch(expected: &str) -> DbError {
-    DbError::validation("model_decode_failed", format!("expected {expected}"))
-}
-impl DecodeValue for String {
-    fn decode(value: Value) -> Result<Self, DbError> {
-        match value {
-            Value::String(v) => Ok(v),
-            _ => Err(mismatch("text")),
-        }
-    }
-}
-impl DecodeValue for Vec<u8> {
-    fn decode(value: Value) -> Result<Self, DbError> {
-        match value {
-            Value::Bytes(v) => Ok(v),
-            _ => Err(mismatch("bytes")),
-        }
-    }
-}
-impl DecodeValue for bool {
-    fn decode(value: Value) -> Result<Self, DbError> {
-        match value {
-            Value::Bool(v) => Ok(v),
-            _ => Err(mismatch("boolean")),
-        }
-    }
-}
-impl DecodeValue for i64 {
-    fn decode(value: Value) -> Result<Self, DbError> {
-        value.as_i64().ok_or_else(|| mismatch("integer"))
-    }
-}
-impl DecodeValue for f64 {
-    fn decode(value: Value) -> Result<Self, DbError> {
-        value.as_f64().ok_or_else(|| mismatch("number"))
-    }
-}
-impl<T: DecodeValue> DecodeValue for Option<T> {
-    fn decode(value: Value) -> Result<Self, DbError> {
-        if value.is_null() {
-            Ok(None)
-        } else {
-            T::decode(value).map(Some)
-        }
-    }
-}
-impl DecodeValue for Value {
-    fn decode(value: Value) -> Result<Self, DbError> {
-        Ok(value)
-    }
-}
-
-/// A protected result row. Taking a field moves its allocation into the model.
 #[derive(Debug)]
 pub struct Row(Record);
 impl Row {
     pub(crate) fn new(fields: Record) -> Self {
         Self(fields)
     }
-    pub fn take<T: DecodeValue>(&mut self, name: &str) -> Result<T, DbError> {
-        let value = self.0.swap_remove(name).ok_or_else(|| {
-            DbError::validation("model_decode_failed", format!("missing field '{name}'"))
+    /// Move a field into the model using its generated column contract.
+    pub fn take<C, T>(&mut self) -> Result<T, DbError>
+    where
+        C: ReadableColumn,
+        T: DecodeValue<C::SqlType>,
+    {
+        let value = self.0.swap_remove(C::NAME).ok_or_else(|| {
+            DbError::validation(
+                "model_decode_failed",
+                format!("{}.{}: missing field", C::Entity::COLLECTION, C::NAME),
+            )
         })?;
-        T::decode(value)
+        T::decode_value(value).map_err(|error| field_error::<C>("decode", error))
     }
 }
-
-/// A declared field tied to its model and Rust input type.
-#[derive(Debug)]
-pub struct Field<M, T> {
-    name: &'static str,
-    marker: PhantomData<fn(M) -> T>,
+fn field_error<C: Column>(operation: &str, error: DbError) -> DbError {
+    DbError::validation(
+        "model_value_failed",
+        format!(
+            "{}.{}: {operation}: {error}",
+            C::Entity::COLLECTION,
+            C::NAME
+        ),
+    )
 }
-impl<M, T> Copy for Field<M, T> {}
-impl<M, T> Clone for Field<M, T> {
+pub fn encode_field<C, T>(record: &mut Record, value: T) -> Result<(), DbError>
+where
+    C: WritableColumn,
+    T: EncodeValue<C::SqlType>,
+{
+    let value = value
+        .encode_value()
+        .map_err(|error| field_error::<C>("encode", error))?;
+    record.insert(C::NAME.into(), value);
+    Ok(())
+}
+/// Used by insert fields carrying `#[orm(default)]`.
+pub fn encode_default<C, T>(record: &mut Record, value: Defaulted<T>) -> Result<(), DbError>
+where
+    C: DefaultableColumn,
+    T: EncodeValue<C::SqlType>,
+{
+    if let Defaulted::Value(value) = value {
+        encode_field::<C, _>(record, value)?;
+    }
+    Ok(())
+}
+pub fn encode_change<C, T>(record: &mut Record, value: Change<T>) -> Result<(), DbError>
+where
+    C: WritableColumn,
+    T: EncodeValue<C::SqlType>,
+{
+    if let Change::Set(value) = value {
+        encode_field::<C, _>(record, value)?;
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+pub struct Field<C>(PhantomData<fn() -> C>);
+impl<C> Copy for Field<C> {}
+impl<C> Clone for Field<C> {
     fn clone(&self) -> Self {
         *self
     }
 }
-impl<M, T> Field<M, T> {
-    pub const fn new(name: &'static str) -> Self {
-        Self {
-            name,
-            marker: PhantomData,
-        }
+impl<C: Column> Default for Field<C> {
+    fn default() -> Self {
+        Self::new()
     }
-    pub fn try_eq(self, value: T) -> Result<Filter<M>, DbError>
-    where
-        T: TryInto<Value>,
-        T::Error: std::fmt::Display,
-    {
+}
+impl<C: Column> Field<C> {
+    pub const fn new() -> Self {
+        Self(PhantomData)
+    }
+}
+impl<C: FilterableColumn> Field<C> {
+    pub fn eq<T: EncodeValue<C::SqlType>>(self, value: T) -> Result<Filter<C::Entity>, DbError> {
         let value = value
-            .try_into()
-            .map_err(|e| DbError::validation("invalid_value", e.to_string()))?;
+            .encode_value()
+            .map_err(|error| field_error::<C>("filter", error))?;
         Ok(Filter {
-            value: Value::Object([(self.name.into(), value)].into()),
-            model: PhantomData,
+            value: Value::Object([(C::NAME.into(), value)].into()),
+            entity: PhantomData,
         })
     }
-    pub fn try_set(self, value: T) -> Result<Patch<M>, DbError>
-    where
-        T: TryInto<Value>,
-        T::Error: std::fmt::Display,
-    {
-        let value = value
-            .try_into()
-            .map_err(|e| DbError::validation("invalid_value", e.to_string()))?;
+}
+impl<C: WritableColumn> Field<C> {
+    pub fn set<T: EncodeValue<C::SqlType>>(self, value: T) -> Result<Patch<C::Entity>, DbError> {
+        let mut fields = Record::new();
+        encode_field::<C, _>(&mut fields, value)?;
         Ok(Patch {
-            fields: [(self.name.into(), value)].into(),
-            model: PhantomData,
+            fields,
+            entity: PhantomData,
         })
-    }
-    pub fn eq(self, value: T) -> Filter<M>
-    where
-        T: Into<Value>,
-    {
-        Filter {
-            value: Value::Object([(self.name.into(), value.into())].into()),
-            model: PhantomData,
-        }
-    }
-    pub fn set(self, value: T) -> Patch<M>
-    where
-        T: Into<Value>,
-    {
-        Patch {
-            fields: [(self.name.into(), value.into())].into(),
-            model: PhantomData,
-        }
     }
 }
 
-/// A filter whose fields belong to the same model.
 #[derive(Debug)]
-pub struct Filter<M> {
+pub struct Filter<E> {
     value: Value,
-    model: PhantomData<fn() -> M>,
+    entity: PhantomData<fn() -> E>,
 }
-impl<M> Default for Filter<M> {
+impl<E> Default for Filter<E> {
     fn default() -> Self {
         Self::all()
     }
 }
-impl<M> Filter<M> {
+impl<E> Filter<E> {
     pub fn all() -> Self {
         Self {
             value: Value::Object(Record::new()),
-            model: PhantomData,
+            entity: PhantomData,
         }
     }
     pub fn and(self, other: Self) -> Self {
-        Self {
-            value: Value::Object(
-                [("$and".into(), Value::Array(vec![self.value, other.value]))].into(),
-            ),
-            model: PhantomData,
-        }
+        self.combine("$and", other)
     }
     pub fn or(self, other: Self) -> Self {
+        self.combine("$or", other)
+    }
+    fn combine(self, operator: &str, other: Self) -> Self {
         Self {
             value: Value::Object(
-                [("$or".into(), Value::Array(vec![self.value, other.value]))].into(),
+                [(operator.into(), Value::Array(vec![self.value, other.value]))].into(),
             ),
-            model: PhantomData,
+            entity: PhantomData,
         }
     }
     pub(crate) fn into_value(self) -> Value {
         self.value
     }
 }
-
 #[derive(Debug)]
-pub struct Patch<M> {
+pub struct Patch<E> {
     fields: Record,
-    model: PhantomData<fn() -> M>,
+    entity: PhantomData<fn() -> E>,
 }
-impl<M> Patch<M> {
+impl<E> Patch<E> {
     pub fn and(mut self, other: Self) -> Self {
         self.fields.extend(other.fields);
         self
     }
-    pub(crate) fn into_value(self) -> Value {
-        Value::Object(self.fields)
+}
+impl<E: Entity> Changeset<E> for Patch<E> {
+    fn into_changes(self) -> Result<Record, DbError> {
+        Ok(self.fields)
     }
 }
-
 #[derive(Default, Debug)]
 pub struct FindOptions {
     pub limit: Option<i64>,
@@ -209,8 +231,12 @@ pub struct FindOptions {
     pub include_deleted: bool,
 }
 impl FindOptions {
-    pub(crate) fn into_value(self) -> Value {
+    pub(crate) fn into_value<E: Entity, R: FromRow<E>>(self) -> Value {
         let mut fields = Record::new();
+        fields.insert(
+            "select".into(),
+            Value::Array(R::COLUMNS.iter().map(|name| Value::from(*name)).collect()),
+        );
         if let Some(limit) = self.limit {
             fields.insert("limit".into(), limit.into());
         }
@@ -221,47 +247,5 @@ impl FindOptions {
             fields.insert("include_deleted".into(), true.into());
         }
         Value::Object(fields)
-    }
-}
-
-macro_rules! decode_integer {
-    ($($ty:ty),*) => { $(impl DecodeValue for $ty {
-        fn decode(value: Value) -> Result<Self, DbError> {
-            match value {
-                Value::Number(n) => n.as_i64().and_then(|v| Self::try_from(v).ok())
-                    .or_else(|| n.as_u64().and_then(|v| Self::try_from(v).ok()))
-                    .ok_or_else(|| mismatch(stringify!($ty))),
-                _ => Err(mismatch(stringify!($ty))),
-            }
-        }
-    })* };
-}
-decode_integer!(i8, i16, i32, isize, u8, u16, u32, u64, usize);
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn row_mapping_moves_buffers_and_rejects_wrong_types() {
-        let bytes = vec![1u8, 2, 3];
-        let pointer = bytes.as_ptr();
-        let text = String::from("owned text");
-        let text_pointer = text.as_ptr();
-        let mut row = Row::new(
-            [
-                ("bytes".into(), bytes.into()),
-                ("text".into(), text.into()),
-                ("too_large".into(), 256.into()),
-            ]
-            .into(),
-        );
-        let decoded_bytes = row.take::<Vec<u8>>("bytes").unwrap();
-        assert_eq!(decoded_bytes.as_ptr(), pointer);
-        let decoded_text = row.take::<String>("text").unwrap();
-        assert_eq!(decoded_text.as_ptr(), text_pointer);
-        assert!(row.take::<u8>("too_large").is_err());
-        assert!(row.take::<String>("missing").is_err());
-        assert!(Field::<(), f64>::new("score").try_eq(f64::NAN).is_err());
-        assert!(Field::<(), f64>::new("score").try_set(1.25).is_ok());
     }
 }

@@ -111,13 +111,8 @@ fn block_on<F: std::future::Future>(fut: F) -> F::Output {
 
 /// Connects, or fails the test.
 ///
-/// Deliberately NOT a skip. This binary is already opt-in behind
-/// `required-features = ["test-helpers"]`, so reaching here means someone
-/// asked for the live-Postgres suite; answering "8 passed" without a database
-/// tells them the opposite of the truth. These four transaction tests were
-/// broken for a long time behind exactly that green, and a skipping run is
-/// indistinguishable from a passing one at a glance - only the clock differs
-/// (0.02s against nothing, ~11s against Postgres).
+/// PostgreSQL is required by ordinary package tests. An unavailable server
+/// fails the test instead of reporting success without exercising a transaction.
 fn require_pg() -> String {
     // Every test in this binary funnels through here, so this is the one place
     // that has to install the subscriber. Without it the runtime's sanitization
