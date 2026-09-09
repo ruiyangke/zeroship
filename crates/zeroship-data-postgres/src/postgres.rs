@@ -31,7 +31,7 @@ use zeroship_data_query_builder::catalog::LiveSchema;
 use super::pg_introspect;
 use super::{pg_autocommit, pg_error};
 #[cfg(any(test, feature = "test-helpers"))]
-use super::{PgLockManager, PgSqlExecutor};
+use super::PgLockManager;
 use zeroship_data_core::storage::SchemaIntrospect;
 use zeroship_data_core::storage::{
     DialectBuilder, LockManager, SpatialIndex, SqlExecutor, VectorIndex,
@@ -280,15 +280,19 @@ impl PostgresBackend {
     }
 }
 
-// Capability impls -- four blocks, one per sub-trait:
+// Capability impls -- one block per sub-trait:
 //
 //   1. `impl SqlExecutor for PostgresBackend`      -- 3 methods.
 //   2. `impl LockManager for PostgresBackend`      -- 3 methods.
 //   3. `impl SchemaIntrospect for PostgresBackend` -- 2 methods +
 //      `type LiveSchema`.
-//   4. `impl PgSqlExecutor for PostgresBackend`    -- 1 method --
-//      the PG-only `pool_handle()` accessor that lets free-function
-//      helpers reach `&Pool` without naming `PostgresBackend`.
+//
+// A fourth, `impl PgSqlExecutor`, carried a `pool_handle()` accessor handing
+// out the raw pool. A bare checkout off that pool runs as the shared
+// `zeroship_worker` login role with no `SET LOCAL ROLE`, so it was a standing
+// way around the per-app role fence. Its last caller went with
+// `crud/mask_drift.rs`; trait, impl and witnesses were deleted 2026-09-09.
+// Reaching a tenant schema needs a roled entry point, not a pool handle.
 //
 // `impl Backend for PostgresBackend {}` below is a one-line composition
 // marker -- every operation lives on the sub-trait impls above.
@@ -439,13 +443,6 @@ impl SchemaIntrospect for PostgresBackend {
         pg_introspect::estimate_row_count(&self.pool, app_id, collection)
             .await
             .map_err(pg_error::classify_schema_error)
-    }
-}
-
-#[cfg(any(test, feature = "test-helpers"))]
-impl PgSqlExecutor for PostgresBackend {
-    fn pool_handle(&self) -> &Rc<compio_postgres::Pool> {
-        &self.pool
     }
 }
 
@@ -1518,7 +1515,7 @@ mod tests {
     //! seam break.
 
     use super::*;
-    use crate::{PgLockManager, PgSqlExecutor};
+    use crate::PgLockManager;
     use zeroship_data_core::storage::{DialectBuilder, LockManager, SqlExecutor};
     // A plain `use` is private, so `use super::*` above does not re-export the
     // module-level import; the assertion below needs its own. UNGATED since
@@ -1543,12 +1540,10 @@ mod tests {
             T: SchemaIntrospect<LiveSchema = zeroship_data_query_builder::catalog::LiveSchema>,
         >() {
         }
-        fn impls_pg_sql_executor<T: PgSqlExecutor>() {}
         fn impls_pg_lock_manager<T: PgLockManager>() {}
         impls_sql_executor::<PostgresBackend>();
         impls_lock_manager::<PostgresBackend>();
         impls_schema_introspect::<PostgresBackend>();
-        impls_pg_sql_executor::<PostgresBackend>();
         impls_pg_lock_manager::<PostgresBackend>();
 
         // `DialectBuilder` impl lands directly on the backend
