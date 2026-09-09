@@ -1000,9 +1000,15 @@ jobs:
       # two siblings (`integration`, `native_transaction`) need a live
       # PostgreSQL that this job does not provision, and they belong with the
       # other live-database gates rather than here.
+      #
+      # `sqlite_integration` IS A MODULE, NOT A TARGET, since the crate's
+      # per-file test targets were merged into one binary per feature set. So
+      # this selects it with a libtest filter rather than `--test`. The trailing
+      # `::` is load-bearing: a libtest filter is an unanchored substring match,
+      # so the bare module name would also select anything containing it.
       - run: |
           set -o pipefail
-          cargo test -p zeroship-plugin-db --features test-helpers --test sqlite_integration
+          cargo test -p zeroship-plugin-db --features test-helpers --test test_helpers -- sqlite_integration::
       # The ENGINE tier's own suite. `cargo test --workspace` above does reach
       # it - it is an ordinary member - but that step is the one #146 records as
       # currently unbuildable, and a crate whose 290 tests run only through a
