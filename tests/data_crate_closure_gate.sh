@@ -60,6 +60,7 @@ good() {
 GUARDED_CRATES="
 zeroship-data-core
 zeroship-data-query-builder
+zeroship-data-macros
 "
 
 # compio-postgres  the PostgreSQL driver. data-core holding one is the whole

@@ -60,10 +60,8 @@ description = "The CDC relay service: the separate process that holds REPLICATIO
 #   compio-postgres        No replication stream is opened yet. See src/lib.rs
 #                          for what blocks it.
 #
-# [[test]] required-features: NOT DECLARED, unlike the peer's `live-db-tests`
-# gate. This crate has no integration target at all, and a `[[test]]` naming a
-# file that does not exist fails to build. The feature comes back with the first
-# test that needs a database.
+# This crate has no integration target. Database tests, when added, belong
+# to ordinary cargo test and must fail when their database is unavailable.
 
 [[package.metadata.zeroship-config.targets]]
 target = "zeroship-data-cdc-server"

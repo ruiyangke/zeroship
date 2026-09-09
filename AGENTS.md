@@ -159,6 +159,7 @@ crates/
 ├── zeroship-runtime-macros/ #[v8_class] proc macro (V8 ObjectTemplate-backed classes)
 ├── zeroship-plugin-db/      env.db.* ADAPTER: V8 classes, per-isolate composition, service lifecycle and CDC. CRUD dispatch prepares and executes the engine's ORM operations, then encodes results for V8.
 ├── zeroship-data-engine/    ORM: bound Database and Collection handles, Rust model mapping, CRUD protection passes, transaction protocol, routed execution, transaction lanes and per-app role provisioning. BackendHandle dispatches over both vendors. No V8 or adapter dependency.
+├── zeroship-data-macros/    Migration-derived Rust collection metadata and FromRow, Insertable, Changeset derives. Re-exported through data-engine::orm; no runtime or driver dependency.
 ├── zeroship-plugin-kv/      env.kv.* native ops
 ├── zeroship-plugin-storage/ env.storage.* native ops
 ├── zeroship-metering/ Meter (atomic per-(app,metric) counters) + compio usage-event outbox task; NO V8. The data plugins emit usage metrics into it; there is no env.meter.
@@ -175,6 +176,13 @@ crates/
 +-- zeroship-cli/     CLI: serve, deploy, migrate, config, login, logout, whoami, organization, secret, var, dev
                       (no `build` — builds go through @zeroship/vite-plugin)
 ```
+
+**Database verification is required.** `zeroship-data-engine` and
+`zeroship-plugin-db` include PostgreSQL tests in ordinary `cargo test`. Do not
+put required database cases behind opt-in features, ignore them, or report success
+when the server or its required extensions are unavailable. Integration helpers
+are enabled by test dependencies. `tests/run_plugin_db_live_suite.sh` runs both
+packages and rejects feature-gated test targets.
 
 **Writing or changing a gate.** Every arm of every gate declares the number of
 items THAT ARM RULED ON and a floor that number must clear

@@ -27,6 +27,7 @@ description = "The data plane's ENGINE tier: CRUD passes, the SC-1 transaction p
 # crate into the test binary - the `--test` one and the plain rlib the adapter
 # depends on - giving every `thread_local!` here two independent instances.
 [dependencies]
+zeroship-data-macros = { workspace = true }
 # `DbError`, `DbBinding`, `encryption`, `broker`, `read_set`, `budgets`,
 # `lock_policy`, `schema_cache` and the capability/storage trait surface every
 # pass here is written against.
@@ -64,6 +65,8 @@ zeroize = { version = "1", features = ["alloc", "derive"] }
 aes-gcm = { workspace = true }
 
 [dev-dependencies]
+trybuild = "1.0"
+zeroship-migrate-postgres = { workspace = true }
 zeroship-migrate = { workspace = true }
 zeroship-migrate-sqlite = { workspace = true }
 # The two constructors gated on `test-helpers` in the vendor and domain tiers -
@@ -95,8 +98,8 @@ zeroship-migrate-server = { workspace = true }
 
 [features]
 # The engine's cross-crate test seam. Every `pub` item behind it is reachable
-# from `zeroship-plugin-db`'s integration targets, which compile the adapter
-# with `--features test-helpers` and therefore compile THIS crate with it too.
+# from `zeroship-plugin-db`'s integration targets, whose dev-dependencies enable
+# the adapter's helpers and therefore enable this crate's helpers too.
 #
 # It is a feature and not `cfg(test)` for the reason data-core's manifest
 # records: `cfg(test)` across a crate boundary is the defining crate's test
@@ -108,10 +111,6 @@ test-helpers = [
     "zeroship-data-postgres/test-helpers",
     "zeroship-data-sqlite/test-helpers",
 ]
-# Arms that need a live PostgreSQL listener. Mirrors the adapter's feature of
-# the same name so a `-p zeroship-plugin-db --features live-db-tests` build
-# turns on the engine's live arms too.
-live-db-tests = ["test-helpers"]
 
 [lints]
 workspace = true
