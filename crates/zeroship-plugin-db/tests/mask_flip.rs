@@ -1,10 +1,3 @@
-// This test target is its own crate ROOT and overflows rustc's layout query.
-// `recursion_limit` is per crate root, so the crate's lib and its sibling test
-// targets do not cover this one. Caught by `tests/clippy_gate.sh`, which lints
-// `--all-targets`; a bare `cargo test -p zeroship-plugin-db --lib` never builds
-// this file, which is why it compiled clean until the gate ran.
-#![recursion_limit = "256"]
-
 //! The masking storage flip: the filter oracle, and the three silent
 //! consequences of closing it.
 //!
@@ -39,13 +32,15 @@
 //!
 //! ```text
 //! PG_TEST_URL=postgres://... cargo test -p zeroship-plugin-db \
-//!   --features test-helpers --test mask_flip -- --test-threads=1
+//!   --features test-helpers --test test_helpers -- --test-threads=1 mask_flip::
 //! ```
 
-#[path = "support/schema.rs"]
-mod schema_fixture;
+// `support` and `schema_fixture` are declared once by `tests/test_helpers.rs`,
+// the entry file this module hangs off; its header says why a second declaration
+// here would be a second copy of their statics.
 #[allow(unused_imports)]
-use schema_fixture::{fixture_table_sql, fixture_table_sql_for};
+use crate::schema_fixture::{fixture_table_sql, fixture_table_sql_for};
+use crate::{schema_fixture, support};
 #[allow(unused_imports)]
 use zeroship_migrate::schema::query::FkEmission;
 
@@ -66,9 +61,6 @@ use zeroship_plugin_db::crud::unmask::{
     dispatch_unmask_for_query, parse_args, parse_bulk_args, BulkUnmaskArgs, BulkUnmaskItem,
     UnmaskFieldArgs,
 };
-
-#[path = "support/mod.rs"]
-mod support;
 
 fn test_url() -> String {
     zeroship_core::config::test_database_url()
