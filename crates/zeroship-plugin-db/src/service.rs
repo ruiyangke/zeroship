@@ -380,7 +380,7 @@ impl DbLifecycle<'_> {
     ///
     pub async fn deprovision_app(&self, app_id: &str) -> Result<(), DbError> {
         crate::cdc_lifecycle::shutdown_app(app_id).await;
-        crate::broker::drop_app(Some(app_id));
+        crate::broker::drop_app(app_id);
         match self.service.backend() {
             BackendUrl::Sqlite { .. } => Ok(()),
             BackendUrl::Postgres => {

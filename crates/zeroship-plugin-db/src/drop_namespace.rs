@@ -164,7 +164,7 @@ pub async fn drop_namespace(
     // this thread). Under --force this delivers the terminal close to
     // any subscriber the gate counted; with no subscriptions it is a
     // cheap miss.
-    crate::broker::drop_app(Some(app_id));
+    crate::broker::drop_app(app_id);
 
     // ---- Step 3: consumer cancel (courtesy) + slot teardown ----
     // Refuse new readiness handshakes and signal this process's consumer.

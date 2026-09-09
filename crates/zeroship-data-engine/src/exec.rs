@@ -746,8 +746,8 @@ mod tests {
     ///   - that app's WAL suppression entry,
     ///   - the per-test build counter and SQLite route (both thread-local).
     ///
-    /// **Scoped on purpose.** This used to call `drop_app(None)` - dropping
-    /// EVERY app's subscriptions process-wide - and to decrement the
+    /// **Scoped on purpose.** This used to drop EVERY app's subscriptions
+    /// through what was then `drop_app`'s unscoped `None` arm - and to decrement the
     /// suppression refcount for a hardcoded list of keys belonging to other
     /// tests. Its doc comment described all of that as "thread-local state",
     /// but `broker`'s registry and `wal_consumer::SUPPRESSED_APPS` are
@@ -761,7 +761,7 @@ mod tests {
     /// hiding it - a global reset erases the evidence of exactly the bug the
     /// suppression refcount exists to prevent.
     fn reset_world(app_id: &str) {
-        crate::broker::drop_app(Some(app_id));
+        crate::broker::drop_app(app_id);
         crate::broker::unsuppress_app(app_id);
         reset_counter();
         reset_sqlite_route();
@@ -772,8 +772,8 @@ mod tests {
     /// The broker registry and `wal_consumer::SUPPRESSED_APPS` are
     /// process-global statics and cargo runs these tests on parallel threads,
     /// so a cleanup with global blast radius corrupts whatever else is running.
-    /// `reset_world` used to call `drop_app(None)`, which is what this arm
-    /// pins: it stands in for a concurrent test that owns `theirs` and checks
+    /// `reset_world` used to drop every app's subscriptions, which is what this
+    /// arm pins: it stands in for a concurrent test that owns `theirs` and checks
     /// that our cleanup leaves it intact. On the pre-fix helper the
     /// subscription assertion fails.
     #[test]

@@ -633,7 +633,7 @@ mod tests {
             "refusal hint must tell the creator how to recover: {outcome}"
         );
 
-        broker::drop_app(Some(&app_id));
+        broker::drop_app(&app_id);
         assert_eq!(
             broker::app_subscription_count(&app_id),
             0,
