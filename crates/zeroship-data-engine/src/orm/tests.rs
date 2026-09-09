@@ -370,19 +370,24 @@ async fn database() -> (Database, tempfile::TempDir) {
     crate::reset_engine_for_tests();
     let directory = tempfile::tempdir().unwrap();
     let binding = DbBinding::cold_start("orm_fixture");
-    let migration_backend = crate::backend_selection::open_sqlite_backend(
-        directory
+    let migration_backend = zeroship_migrate_sqlite::SqliteBackend::open(
+        &directory
             .path()
             .join(format!("zs-{}.sqlite", binding.app_id())),
-        LocalKeySource::EnvVar,
+        &directory.path().join("migrations.sqlite"),
     )
-    .await
     .unwrap();
-    for sql in table_statements("main", &zeroship_migrate_sqlite::DIALECT) {
-        migration_backend.pool_exec(&sql, &[]).await.unwrap();
-    }
+    // A rendered migration unit can contain table and index statements.
+    // Apply it through the migration backend's batch executor.
     migration_backend
-        .pool_exec("CREATE UNIQUE INDEX unique_title ON posts(title)", &[])
+        .restore_schema_sqlite(
+            &table_statements("main", &zeroship_migrate_sqlite::DIALECT).join("\n"),
+        )
+        .await
+        .unwrap();
+    migration_backend
+        .actor()
+        .exec("CREATE UNIQUE INDEX unique_title ON posts(title)")
         .await
         .unwrap();
     drop(migration_backend);

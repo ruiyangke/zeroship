@@ -5816,8 +5816,8 @@ fn require_pg_client_tool(tool: &str) {
          \n\
          This is a LOCAL binary, not the server: a reachable database does not\n\
          supply it, and the container-hosted server this suite talks to has it\n\
-         inside the container where this process cannot reach it. Nothing in\n\
-         this repository installs it.\n\
+         inside the container where this process cannot reach it. CI installs\n\
+         matching clients; local runs must also put them on PATH.\n\
          \n\
          Install the client package for your system - `postgresql-client` on\n\
          Debian and Ubuntu, `postgresql` on Fedora and Arch, `postgresql@16` in\n\
