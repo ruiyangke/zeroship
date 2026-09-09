@@ -108,7 +108,11 @@ pub mod tx_route;
 /// app kept apart uses [`cache_schema_for_deploy_for_tests`] instead.
 #[cfg(any(test, feature = "test-helpers"))]
 #[doc(hidden)]
-pub fn cache_schema_for_tests(app_id: &str, collection: &str, schema: serde_json::Value) {
+pub fn cache_schema_for_tests(
+    app_id: &str,
+    collection: &str,
+    schema: zeroship_data_query_builder::value::Value,
+) {
     cache_schema_for_deploy_for_tests(
         &zeroship_data_core::binding::DbBinding::cold_start(app_id),
         collection,
@@ -124,7 +128,7 @@ pub fn cache_schema_for_tests(app_id: &str, collection: &str, schema: serde_json
 pub fn cache_schema_for_deploy_for_tests(
     binding: &zeroship_data_core::binding::DbBinding,
     collection: &str,
-    schema: serde_json::Value,
+    schema: zeroship_data_query_builder::value::Value,
 ) {
     zeroship_data_core::schema_cache::with_mut(|c| c.insert_one(binding, collection, schema));
 }
@@ -159,4 +163,4 @@ pub fn reset_engine_for_tests() {
 
 /// The ORM used by Rust callers and the native worker adapter.
 pub mod orm;
-pub use orm::{Collection, Database};
+pub use orm::{Collection, Database, Value};

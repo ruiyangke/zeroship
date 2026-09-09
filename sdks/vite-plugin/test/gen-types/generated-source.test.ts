@@ -94,6 +94,7 @@ export default {
     table("hits").create({
       columns: {
         path: t.text().notNull(),
+        counter: t.bigInt().notNull(),
       },
     });
   },
@@ -167,6 +168,8 @@ describe("generated schema source (record -> genArtifacts)", () => {
       const envDb = await fs.readFile(join(outDir, ENV_DB_FILE), "utf8");
 
       // Every `from "..."` / bare `import "..."` specifier in the emitted module.
+      assert.match(envDb, /counter: t\.bigInt\(\)\.required\(\)/);
+
       const specifiers = new Set<string>();
       for (const m of envDb.matchAll(/\bfrom\s+"([^"]+)"/g)) specifiers.add(m[1]!);
       for (const m of envDb.matchAll(/\bimport\s+"([^"]+)"/g)) specifiers.add(m[1]!);

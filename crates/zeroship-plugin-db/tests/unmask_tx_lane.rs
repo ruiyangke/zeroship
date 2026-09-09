@@ -50,9 +50,9 @@ use zeroship_migrate::schema::query::FkEmission;
 use std::rc::Rc;
 
 use compio_postgres::{NoTls, Pool};
-use serde_json::{json, Value};
 use zeroship_data_core::binding::DbBinding;
 use zeroship_data_core::error::DbError;
+use zeroship_data_query_builder::value::{value, Value};
 use zeroship_plugin_db::compile::SqlDialect;
 use zeroship_plugin_db::crud::mask_policy::dispatch_set_mask_policy;
 use zeroship_plugin_db::tx_route::{CapturedRoute, TxRoute};
@@ -93,7 +93,7 @@ async fn release_pg(pool: Rc<Pool>) {
 /// encrypted sibling (`read_raw_column_bytes`) reaches the pool through the
 /// same funnel, so the lane question is the same for both.
 fn masked_schema() -> Value {
-    json!({
+    value!({
         "ssn": {
             "type": "string",
             "mask": { "kind": "full", "classification": "pci" }
@@ -231,7 +231,7 @@ async fn a_find_unmask_inside_a_transaction_reaches_the_row_that_transaction_ins
     fixture(&pool, &url, app).await;
     // A policy the request's actor satisfies, so the fence GRANTS and the
     // failure below cannot be an authorization refusal wearing another code.
-    dispatch_set_mask_policy(&backend().await, app, json!({ "support": ["pci"] }))
+    dispatch_set_mask_policy(&backend().await, app, value!({ "support": ["pci"] }))
         .await
         .expect("install the app's declared mask policy");
 
@@ -240,12 +240,12 @@ async fn a_find_unmask_inside_a_transaction_reaches_the_row_that_transaction_ins
     let id = insert_on(
         tx_route(app).await,
         app,
-        json!({ "ssn": "123-45-6789", "nickname": "aaa" }),
+        value!({ "ssn": "123-45-6789", "nickname": "aaa" }),
     )
     .await;
 
     // ---- CONTROL: the same find, same route, same row, no unmask hint.
-    let rows = find_on(tx_route(app).await, app, json!({ "id": &id }), json!({}))
+    let rows = find_on(tx_route(app).await, app, value!({ "id": &id }), value!({}))
         .await
         .expect("a plain find inside the transaction must see the row it inserted");
     assert_eq!(
@@ -254,16 +254,21 @@ async fn a_find_unmask_inside_a_transaction_reaches_the_row_that_transaction_ins
         "the transaction lane must see its own uncommitted row; without this the \
          arm below rules on nothing: {rows:?}",
     );
-    assert_eq!(rows[0]["id"], json!(id));
+    assert_eq!(rows[0]["id"], value!(id));
 
     // ---- and the row really is UNCOMMITTED: a pooled read must NOT see it.
     //
     // This is what makes the subject arm a lane question rather than a
     // visibility accident. Same row, same instant, a route that differs only in
     // `in_tx`.
-    let outside = find_on(pool_route(app).await, app, json!({ "id": &id }), json!({}))
-        .await
-        .expect("a pooled find is authorised to run");
+    let outside = find_on(
+        pool_route(app).await,
+        app,
+        value!({ "id": &id }),
+        value!({}),
+    )
+    .await
+    .expect("a pooled find is authorised to run");
     assert!(
         outside.is_empty(),
         "the row must be invisible outside the transaction, or the subject arm \
@@ -274,8 +279,8 @@ async fn a_find_unmask_inside_a_transaction_reaches_the_row_that_transaction_ins
     let unmasked = find_on(
         tx_route(app).await,
         app,
-        json!({ "id": &id }),
-        json!({
+        value!({ "id": &id }),
+        value!({
             "unmask": ["ssn"],
             "actor": { "kind": "support", "id": "usr_support_1" },
             "unmaskReason": "unmask tx lane regression",
@@ -297,7 +302,7 @@ async fn a_find_unmask_inside_a_transaction_reaches_the_row_that_transaction_ins
     assert_eq!(unmasked.len(), 1, "the unmasked find returns the same row");
     assert_eq!(
         unmasked[0]["ssn"],
-        json!("123-45-6789"),
+        value!("123-45-6789"),
         "the unmask hint must promote the plaintext: {unmasked:?}",
     );
 
@@ -330,7 +335,7 @@ async fn a_denied_unmask_audit_row_survives_the_rollback_of_its_transaction() {
     fixture(&pool, &url, app).await;
     // The policy grants `support` and nothing else, so `intern` below is
     // refused by the policy path rather than by the no-policy fallback.
-    dispatch_set_mask_policy(&backend().await, app, json!({ "support": ["pci"] }))
+    dispatch_set_mask_policy(&backend().await, app, value!({ "support": ["pci"] }))
         .await
         .expect("install the app's declared mask policy");
 
@@ -339,7 +344,7 @@ async fn a_denied_unmask_audit_row_survives_the_rollback_of_its_transaction() {
     let committed = insert_on(
         pool_route(app).await,
         app,
-        json!({ "ssn": "111-11-1111", "nickname": "committed" }),
+        value!({ "ssn": "111-11-1111", "nickname": "committed" }),
     )
     .await;
     assert_eq!(
@@ -355,15 +360,15 @@ async fn a_denied_unmask_audit_row_survives_the_rollback_of_its_transaction() {
     let rolled_back = insert_on(
         tx_route(app).await,
         app,
-        json!({ "ssn": "222-22-2222", "nickname": "rolled back" }),
+        value!({ "ssn": "222-22-2222", "nickname": "rolled back" }),
     )
     .await;
 
     let err = find_on(
         tx_route(app).await,
         app,
-        json!({ "id": &committed }),
-        json!({
+        value!({ "id": &committed }),
+        value!({
             "unmask": ["ssn"],
             "actor": { "kind": "intern", "id": "usr_intern_1" },
             "unmaskReason": "unmask tx lane regression",
@@ -403,11 +408,11 @@ async fn a_denied_unmask_audit_row_survives_the_rollback_of_its_transaction() {
         1,
         "the denied attempt must leave exactly one durable audit row: {audit:?}",
     );
-    assert_eq!(audit[0]["outcome"], json!("denied"));
-    assert_eq!(audit[0]["actor_role"], json!("intern"));
+    assert_eq!(audit[0]["outcome"], value!("denied"));
+    assert_eq!(audit[0]["actor_role"], value!("intern"));
     assert_eq!(
         audit[0]["column"],
-        json!("ssn"),
+        value!("ssn"),
         "the audit row names the logical field",
     );
 
@@ -441,7 +446,7 @@ async fn an_encrypted_unmask_inside_a_transaction_reaches_the_row_that_transacti
     // encrypts with it and the unmask fetch decrypts with it.
     let _keys = zeroship_plugin_db::supply_root_keys_for_tests(&[("default", &"c".repeat(64))]);
     fixture_with_schema(&pool, &url, app, encrypted_schema()).await;
-    dispatch_set_mask_policy(&backend().await, app, json!({ "support": ["pci"] }))
+    dispatch_set_mask_policy(&backend().await, app, value!({ "support": ["pci"] }))
         .await
         .expect("install the app's declared mask policy");
 
@@ -450,7 +455,7 @@ async fn an_encrypted_unmask_inside_a_transaction_reaches_the_row_that_transacti
     let id = insert_on(
         tx_route(app).await,
         app,
-        json!({ "ssn": "123-45-6789", "nickname": "aaa" }),
+        value!({ "ssn": "123-45-6789", "nickname": "aaa" }),
     )
     .await;
 
@@ -458,7 +463,7 @@ async fn an_encrypted_unmask_inside_a_transaction_reaches_the_row_that_transacti
         collection: "people".to_string(),
         row_pk: id.clone(),
         column: "ssn".to_string(),
-        actor: Some(json!({ "kind": "support", "id": "usr_support_1" })),
+        actor: Some(value!({ "kind": "support", "id": "usr_support_1" })),
         reason: Some("unmask tx lane regression".to_string()),
         rejected_claim: None,
     };
@@ -505,7 +510,7 @@ async fn an_encrypted_unmask_inside_a_transaction_reaches_the_row_that_transacti
 /// [`masked_schema`] with the masked column also ENCRYPTED, so its raw sibling
 /// is BYTEA and the fetch takes `read_raw_column_bytes`.
 fn encrypted_schema() -> Value {
-    json!({
+    value!({
         "ssn": {
             "type": "string",
             "mask": { "kind": "last4", "classification": "pci" },
@@ -529,7 +534,7 @@ async fn audit_rows(pool: &Rc<Pool>, app: &str) -> Vec<Value> {
         .unwrap();
     rows.iter()
         .map(|row| {
-            let mut map = serde_json::Map::new();
+            let mut map = zeroship_data_query_builder::value::Map::new();
             for (i, column) in row.columns().iter().enumerate() {
                 let value: Option<String> = row.try_get(i).unwrap_or(None);
                 map.insert(

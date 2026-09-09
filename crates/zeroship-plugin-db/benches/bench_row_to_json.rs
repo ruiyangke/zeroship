@@ -1,13 +1,13 @@
-//! Row-decoding microbench — measures `row_to_json` against synthesised
+//! Row-decoding microbench — measures `row_to_value` against synthesised
 //! `compio_postgres::Row` values of varying width.
 //!
 //! ## Why this bench exists
 //!
 //! This harness measures the index-lookup fix that dropped
-//! `row_to_json`'s per-column resolution from O(N²) (linear `position`
+//! `row_to_value`'s per-column resolution from O(N²) (linear `position`
 //! over `row.columns()` keyed on column NAME) to O(N) (direct `usize`
 //! index). The pre-existing `bench_query_build` harness covers SQL
-//! construction only — it never enters `v8_bridge::row_to_json` at all,
+//! construction only — it never enters `v8_bridge::row_to_value` at all,
 //! so that win was otherwise invisible to benchmarking.
 //!
 //! This file unblocks measurement by synthesising rows from outside the
@@ -19,11 +19,11 @@
 //! ## Workloads
 //!
 //! Three column-count points (narrow / medium / wide) mixing the OID
-//! branches `column_to_json` actually decodes in production:
+//! branches `column_to_value` actually decodes in production:
 //! `INT4` (23), `INT8` (20), `BOOL` (16), `TEXT` (25), `JSONB` (3802),
 //! `TIMESTAMPTZ` (1184). The exact wire-format encoding for each is
 //! built once outside the bench loop; the timed work is purely the
-//! `Row::columns() → column_to_json` traversal.
+//! `Row::columns() → column_to_value` traversal.
 //!
 //! ## Running
 //!
@@ -38,15 +38,15 @@ use compio_postgres::types::Type;
 use compio_postgres::Row;
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 
-use zeroship_plugin_db::row_to_json_for_bench;
+use zeroship_plugin_db::row_to_value_for_bench;
 
 // ---------------------------------------------------------------------------
 // Wire-format encoders for the OID branches we exercise
 // ---------------------------------------------------------------------------
 //
-// All Postgres binary wire encodings; column_to_json's branches consume
+// All Postgres binary wire encodings; column_to_value's branches consume
 // them as-is. Sourced from postgres-types' ToSql impls (verified against
-// crates/zeroship-plugin-db/src/v8_bridge.rs::column_to_json:372-505).
+// crates/zeroship-plugin-db/src/v8_bridge.rs::column_to_value:372-505).
 
 fn enc_int4(v: i32) -> Vec<u8> {
     v.to_be_bytes().to_vec()
@@ -112,7 +112,7 @@ fn build_row(fixtures: Vec<ColFixture>) -> Row {
 }
 
 /// One "unit" of the realistic column mix — 6 OIDs covering every
-/// branch in `column_to_json` we exercise here.
+/// branch in `column_to_value` we exercise here.
 fn unit_fixtures(prefix: &str) -> Vec<ColFixture> {
     vec![
         fixture(format!("{prefix}_id"), Type::INT8, enc_int8(42)),
@@ -167,7 +167,9 @@ fn medium_row() -> Row {
 /// extras. The shape an analytics page or a row with many JSON
 /// expansions would produce.
 fn wide_row() -> Row {
-    let mut f: Vec<ColFixture> = (0..8).flat_map(|i| unit_fixtures(&format!("u{i}"))).collect();
+    let mut f: Vec<ColFixture> = (0..8)
+        .flat_map(|i| unit_fixtures(&format!("u{i}")))
+        .collect();
     f.push(fixture("tail_id", Type::INT8, enc_int8(7)));
     f.push(fixture("tail_flag", Type::BOOL, enc_bool(true)));
     assert_eq!(f.len(), 50, "wide_row should have 50 columns");
@@ -179,7 +181,7 @@ fn wide_row() -> Row {
 // ---------------------------------------------------------------------------
 
 fn bench_row_to_json(c: &mut Criterion) {
-    let mut group = c.benchmark_group("row_to_json");
+    let mut group = c.benchmark_group("row_to_value");
     group.measurement_time(Duration::from_secs(3));
     group.warm_up_time(Duration::from_secs(1));
 
@@ -191,19 +193,19 @@ fn bench_row_to_json(c: &mut Criterion) {
     // column count. Catches wire-format breakage in `enc_*` before the
     // bench produces nonsense numbers.
     {
-        let v = row_to_json_for_bench(&narrow);
+        let v = row_to_value_for_bench(&narrow);
         assert_eq!(
             v.as_object().expect("narrow → object").len(),
             3,
             "narrow row should decode 3 columns",
         );
-        let v = row_to_json_for_bench(&medium);
+        let v = row_to_value_for_bench(&medium);
         assert_eq!(
             v.as_object().expect("medium → object").len(),
             10,
             "medium row should decode 10 columns",
         );
-        let v = row_to_json_for_bench(&wide);
+        let v = row_to_value_for_bench(&wide);
         assert_eq!(
             v.as_object().expect("wide → object").len(),
             50,
@@ -213,17 +215,17 @@ fn bench_row_to_json(c: &mut Criterion) {
 
     group.bench_function("narrow_3cols", |b| {
         b.iter(|| {
-            black_box(row_to_json_for_bench(black_box(&narrow)));
+            black_box(row_to_value_for_bench(black_box(&narrow)));
         });
     });
     group.bench_function("medium_10cols", |b| {
         b.iter(|| {
-            black_box(row_to_json_for_bench(black_box(&medium)));
+            black_box(row_to_value_for_bench(black_box(&medium)));
         });
     });
     group.bench_function("wide_50cols", |b| {
         b.iter(|| {
-            black_box(row_to_json_for_bench(black_box(&wide)));
+            black_box(row_to_value_for_bench(black_box(&wide)));
         });
     });
 

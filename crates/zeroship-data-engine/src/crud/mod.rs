@@ -35,7 +35,7 @@
 //! `#[v8_class]` methods *before* reaching a dispatch helper - write ops
 //! trust their callers.
 
-use serde_json::Value;
+use zeroship_data_query_builder::value::Value;
 
 use crate::compile;
 use crate::exec::{exec_mutation_with_emit, exec_query};
@@ -285,7 +285,7 @@ pub async fn exec_aggregate_read(
 /// The ENGINE composition behind `distinct`. Also non-default `ApplyOptions`,
 /// and different ones again from [`exec_aggregate_read`]: a DISTINCT over a
 /// masked column selects the column holding the MASK, so the decrypt stage has
-/// nothing to do and would be handed a mask string where it expects base64.
+/// nothing to do and would be handed a mask string where it expects native ciphertext.
 pub async fn exec_distinct_read(
     binding: DbBinding,
     coll: String,
@@ -396,9 +396,6 @@ fn lower_boolean_doc_with_schema(schema: &Value, doc: &mut Value) {
         return;
     };
     for (field, value) in obj.iter_mut() {
-        if field.starts_with("__zsbin__") {
-            continue;
-        }
         if schema_field_type(schema, field) == Some("boolean") {
             lower_boolean_scalar(value);
         }
@@ -413,7 +410,7 @@ fn lower_boolean_update_with_schema(schema: &Value, patch: &mut Value) {
         lower_boolean_doc_with_schema(schema, set_doc);
     }
     for (field, value) in obj {
-        if field.starts_with('$') || field.starts_with("__zsbin__") {
+        if field.starts_with('$') {
             continue;
         }
         if schema_field_type(schema, field) != Some("boolean") {
@@ -482,7 +479,9 @@ fn lower_boolean_filter_value(value: &mut Value) {
 
 fn lower_boolean_scalar(value: &mut Value) {
     if let Value::Bool(b) = value {
-        *value = Value::Number(serde_json::Number::from(i64::from(u8::from(*b))));
+        *value = Value::Number(zeroship_data_query_builder::value::Number::from(i64::from(
+            u8::from(*b),
+        )));
     }
 }
 
@@ -492,11 +491,6 @@ fn schema_field_type<'a>(schema: &'a Value, field: &str) -> Option<&'a str> {
 
 fn schema_field<'a>(schema: &'a Value, field: &str) -> Option<&'a Value> {
     schema.as_object()?.get(field)
-}
-
-fn sqlite_binary_base64(bytes: &[u8]) -> String {
-    use base64::Engine as _;
-    base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
 fn encode_sqlite_binary_scalar(
@@ -543,9 +537,7 @@ fn encode_sqlite_binary_scalar(
                 })?;
                 vector.push(n as f32);
             }
-            *value = Value::String(sqlite_binary_base64(
-                &crate::backend::sqlite::vector::vec_to_le_bytes(&vector),
-            ));
+            *value = Value::Bytes(crate::backend::sqlite::vector::vec_to_le_bytes(&vector));
             Ok(())
         }
         Some("geoPoint") => {
@@ -567,12 +559,13 @@ fn encode_sqlite_binary_scalar(
                     format!("db: geoPoint column '{field}' is missing numeric lng"),
                 )
             })?;
-            *value = Value::String(sqlite_binary_base64(
-                &crate::backend::sqlite::spatial::point_to_blob(crate::backend::GeoPoint {
+            *value = Value::Bytes(
+                crate::backend::sqlite::spatial::point_to_blob(crate::backend::GeoPoint {
                     lat,
                     lng,
-                }),
-            ));
+                })
+                .to_vec(),
+            );
             Ok(())
         }
         _ => Ok(()),
@@ -586,25 +579,11 @@ fn encode_sqlite_binary_doc_with_schema(schema: &Value, doc: &mut Value) -> Resu
     let Some(schema_obj) = schema.as_object() else {
         return Ok(());
     };
-    let mut marks = Vec::new();
     for (field, field_def) in schema_obj {
-        if obj.contains_key(&format!("__zsbin__{field}")) {
-            continue;
-        }
         let Some(value) = obj.get_mut(field) else {
             continue;
         };
         encode_sqlite_binary_scalar(field, field_def, value)?;
-        if matches!(
-            field_def.get("type").and_then(Value::as_str),
-            Some("vector" | "geoPoint")
-        ) && !value.is_null()
-        {
-            marks.push(field.clone());
-        }
-    }
-    for field in marks {
-        obj.insert(format!("__zsbin__{field}"), Value::Bool(true));
     }
     Ok(())
 }
@@ -619,20 +598,13 @@ fn encode_sqlite_binary_update_with_schema(
     if let Some(set_doc) = obj.get_mut("$set") {
         encode_sqlite_binary_doc_with_schema(schema, set_doc)?;
     }
-    let mut marks = Vec::new();
     for (field, value) in obj.iter_mut() {
-        if field.starts_with('$') || field.starts_with("__zsbin__") {
+        if field.starts_with('$') {
             continue;
         }
         let Some(field_def) = schema_field(schema, field) else {
             continue;
         };
-        if matches!(
-            field_def.get("type").and_then(Value::as_str),
-            Some("vector" | "geoPoint")
-        ) {
-            marks.push(field.clone());
-        }
         match value {
             Value::Array(_) | Value::String(_) | Value::Object(_) | Value::Null => {
                 if let Some(set_val) = value.as_object_mut().and_then(|ops| ops.get_mut("$set")) {
@@ -643,9 +615,6 @@ fn encode_sqlite_binary_update_with_schema(
             }
             _ => {}
         }
-    }
-    for field in marks {
-        obj.insert(format!("__zsbin__{field}"), Value::Bool(true));
     }
     Ok(())
 }
@@ -1071,20 +1040,7 @@ pub async fn run_update_one(
                     .and_then(|v| v.as_str());
                 return Err(DbError::version_mismatch(&coll, row_id, expected_version));
             }
-            // Probe found nothing and the caller supplied no CAS predicate:
-            // resolve with JS `null`. Returned as an EMPTY ROW SET rather
-            // than a bespoke `ResolveValue::Json("null")`, because
-            // `first_row_or_null_masked(vec![], false)` lowers to exactly
-            // that string - so the success path has one shape, not two.
-            //
-            // THE `false` IS LOAD-BEARING; DO NOT DERIVE IT. An empty row
-            // vector does NOT imply "nothing was masked": `read_pipeline`
-            // computes `has_masked` from the SCHEMA, not from the rows, so
-            // it is `true` for zero rows on any collection with a masked
-            // column. Deriving it here - which reads like a consistency fix,
-            // since every other arm does derive it - would silently turn
-            // this arm's `ResolveValue::Json` into `JsonWithRehydration`
-            // and hand JS a rehydration pass over `null`.
+            // An absent match has no row to decode or masked value to rehydrate.
             return Ok((Vec::new(), false));
         };
         Some(target_row)
@@ -1107,7 +1063,7 @@ pub async fn run_update_one(
     .await?;
     maybe_lower_sqlite_boolean_update(route.dialect(), &schema, &mut update);
     let sql_filter = if let Some(target_row) = target_row {
-        let mut sql_filter = serde_json::json!({ "id": target_row.id_value });
+        let mut sql_filter = zeroship_data_query_builder::value!({ "id": target_row.id_value });
         if let Some(expected_version) = cas_version {
             sql_filter["version"] = Value::from(expected_version);
         }
@@ -1280,7 +1236,7 @@ pub async fn run_update_many(
                 )
                 .await?;
                 maybe_lower_sqlite_boolean_update(dialect, &schema, &mut row_update);
-                let mut row_filter = serde_json::json!({ "id": row_id });
+                let mut row_filter = zeroship_data_query_builder::value!({ "id": row_id });
                 if let Some(expected_version) = cas_version {
                     row_filter["version"] = Value::from(expected_version);
                 }
@@ -1619,7 +1575,7 @@ pub fn plan_aggregate(
             .and_then(|stages| stages.first())
             .and_then(|stage| stage.get("$match"))
             .cloned()
-            .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
+            .unwrap_or_else(|| Value::Object(zeroship_data_query_builder::value::Map::new()));
         record_read_set(binding, collection, &captured_filter);
     }
 
@@ -1679,7 +1635,7 @@ pub fn plan_distinct(
     // A DISTINCT over a masked column returns MASKS - the column with the
     // field's own name is the one it selects, and that column holds the mask.
     // So the read pipeline's decrypt stage has nothing to do for it, and would
-    // be handed a mask string where it expects base64. Derived from the same
+    // be handed a mask string where it expects native ciphertext. Derived from the same
     // descriptor entry the builder uses; an undeclared collection rejects
     // before either.
     let schema_hint = crate::descriptor::collection_schema(binding, collection)?;
@@ -1918,7 +1874,7 @@ pub fn plan_search(
     let mut filter = args
         .get("filter")
         .cloned()
-        .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
+        .unwrap_or_else(|| Value::Object(zeroship_data_query_builder::value::Map::new()));
     // The backend arms resolve the same entry for their projection; this one is
     // for the SQLite boolean lowering of the caller's filter.
     //
@@ -1984,7 +1940,7 @@ pub async fn run_search(
     // Metering, success arm only. The search family is a read op on
     // either backend and reaches the database WITHOUT passing
     // through `exec::run_sql` - the PG arm goes to
-    // `PostgresBackend::query_roled_json`, the SQLite arm to its own
+    // `PostgresBackend::query_roled_values`, the SQLite arm to its own
     // scan - so until 2026-09-01 it was billed as nothing at all.
     // Counted here at the op boundary rather than in either vendor:
     // the vendor tier must not reach up into the engine for the
@@ -2092,7 +2048,7 @@ pub fn plan_near(
     let mut filter = args
         .get("filter")
         .cloned()
-        .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
+        .unwrap_or_else(|| Value::Object(zeroship_data_query_builder::value::Map::new()));
 
     // Same as `plan_search`: the backend arm resolves the entry again for its
     // own projection; this one lowers the caller's filter, and `dialect` is a
@@ -2141,7 +2097,7 @@ pub async fn run_near(
     // Metering, success arm only. The search family is a read op on
     // either backend and reaches the database WITHOUT passing
     // through `exec::run_sql` - the PG arm goes to
-    // `PostgresBackend::query_roled_json`, the SQLite arm to its own
+    // `PostgresBackend::query_roled_values`, the SQLite arm to its own
     // scan - so until 2026-09-01 it was billed as nothing at all.
     // Counted here at the op boundary rather than in either vendor:
     // the vendor tier must not reach up into the engine for the
@@ -2270,8 +2226,7 @@ async fn prepare_upsert_doc_for_write(
 /// backend at all. What still differs is how the ciphertext is bound:
 ///
 /// - **PG arm** (chosen at runtime, not compiled in): the SQL builder
-///   emits `decode($N, 'base64')::bytea` so the BYTEA column receives
-///   raw bytes.
+///   binds the native ciphertext directly.
 /// - **SQLite arm** (chosen at runtime, not compiled in): the keys are
 ///   env-var-sourced. The SQL builder (when called with `SqlDialect::Sqlite`)
 ///   emits `unhex($N)` over a hex parameter to produce the BLOB.
@@ -2377,7 +2332,6 @@ fn schema_has_sqlite_binary_columns(schema: &Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base64::Engine as _;
 
     // `configured_sqlite_dialect_does_not_require_an_open_backend` MOVED to
     // `crate::tx_route`'s test module (2026-09-03), as
@@ -2388,11 +2342,11 @@ mod tests {
 
     #[test]
     fn lower_boolean_filter_with_schema_keeps_json_booleans_untouched() {
-        let schema = serde_json::json!({
+        let schema = zeroship_data_query_builder::value!({
             "active": { "type": "boolean" },
             "payload": { "type": "json" }
         });
-        let mut filter = serde_json::json!({
+        let mut filter = zeroship_data_query_builder::value!({
             "$and": [
                 { "active": { "$in": [true, false] } },
                 { "payload": true }
@@ -2403,7 +2357,7 @@ mod tests {
 
         assert_eq!(
             filter["$and"][0]["active"]["$in"],
-            serde_json::json!([1, 0])
+            zeroship_data_query_builder::value!([1, 0])
         );
         assert_eq!(filter["$and"][1]["payload"], Value::Bool(true));
     }
@@ -2411,7 +2365,7 @@ mod tests {
     #[test]
     fn validate_unmask_projection_rejects_explicit_select_without_id() {
         let err = validate_unmask_projection(
-            Some(&serde_json::json!(["ssn", "email"])),
+            Some(&zeroship_data_query_builder::value!(["ssn", "email"])),
             &["ssn".to_string()],
         )
         .expect_err("explicit unmask projection without id must be refused");
@@ -2432,7 +2386,7 @@ mod tests {
     fn validate_unmask_projection_accepts_implicit_or_id_inclusive_select() {
         validate_unmask_projection(None, &["ssn".to_string()]).expect("implicit select ok");
         validate_unmask_projection(
-            Some(&serde_json::json!(["id", "ssn"])),
+            Some(&zeroship_data_query_builder::value!(["id", "ssn"])),
             &["ssn".to_string()],
         )
         .expect("id-inclusive projection ok");
@@ -2440,12 +2394,12 @@ mod tests {
 
     #[test]
     fn encode_sqlite_binary_doc_with_schema_packs_vector_and_geopoint() {
-        let schema = serde_json::json!({
+        let schema = zeroship_data_query_builder::value!({
             "embedding": { "type": "vector", "vectorDims": 4 },
             "loc": { "type": "geoPoint" },
             "name": { "type": "string" }
         });
-        let mut doc = serde_json::json!({
+        let mut doc = zeroship_data_query_builder::value!({
             "embedding": [1.0, 0.0, 0.5, -1.25],
             "loc": { "lat": 37.7749, "lng": -122.4194 },
             "name": "Alpha HQ"
@@ -2453,22 +2407,10 @@ mod tests {
 
         encode_sqlite_binary_doc_with_schema(&schema, &mut doc).expect("encode sqlite blobs");
 
-        let embedding = doc["embedding"]
-            .as_str()
-            .expect("embedding should be sentinel-wrapped base64");
-        let loc = doc["loc"]
-            .as_str()
-            .expect("loc should be sentinel-wrapped base64");
-
-        assert_eq!(doc["__zsbin__embedding"], serde_json::json!(true));
-        assert_eq!(doc["__zsbin__loc"], serde_json::json!(true));
-
-        let embedding_bytes = base64::engine::general_purpose::STANDARD
-            .decode(embedding)
-            .expect("decode vector blob");
-        let loc_bytes = base64::engine::general_purpose::STANDARD
-            .decode(loc)
-            .expect("decode geo blob");
+        let embedding_bytes = doc["embedding"].as_bytes().expect("native vector buffer");
+        let loc_bytes = doc["loc"].as_bytes().expect("native geography buffer");
+        assert!(doc.get("__zsbin__embedding").is_none());
+        assert!(doc.get("__zsbin__loc").is_none());
 
         assert_eq!(
             embedding_bytes,

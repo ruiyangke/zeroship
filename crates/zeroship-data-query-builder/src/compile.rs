@@ -1,4 +1,4 @@
-//! Filter JSON → parameterized SQL translation.
+//! Native filter records to parameterized SQL.
 //!
 //! Translates MongoDB-style filter objects into PostgreSQL WHERE clauses
 //! with parameterized queries to prevent SQL injection.
@@ -13,14 +13,14 @@
 //! All user values are bound as parameters (`$1`, `$2`, ...).
 //! Column and table names are quoted with double-quotes to prevent injection.
 
-use serde_json::Value;
+use crate::value::Value;
 
 use crate::schema_name::SchemaName;
 
 /// A declared collection with no creator fields. Projection still includes
 /// the platform fields; this is never a replacement for a missing descriptor.
 pub fn empty_read_schema() -> Value {
-    Value::Object(serde_json::Map::new())
+    Value::Object(crate::value::Map::new())
 }
 
 /// Errors from query building.
@@ -72,18 +72,16 @@ impl std::fmt::Display for QueryError {
     }
 }
 
-/// A built SQL query with text parameters.
+/// A built SQL query with native parameters.
 ///
-/// Parameters are always serialized as text strings — the PostgreSQL driver
-/// handles type inference from context (column types).
+/// Parameters retain native scalar and structured types until driver binding.
 #[derive(Debug)]
 pub struct BuiltQuery {
     pub sql: String,
-    pub params: Vec<String>,
+    pub params: Vec<Value>,
 }
 
-/// Runtime SQL dialect. Binary values are decoded by an explicit expression:
-/// PostgreSQL uses decode, SQLite uses unhex, and MySQL uses FROM_BASE64.
+/// Runtime SQL dialect. Drivers bind binary parameters directly.
 /// MySQL compilation has no corresponding runtime backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SqlDialect {
@@ -97,22 +95,17 @@ const SQLITE_NOW_EXPR: &str = "(strftime('%Y-%m-%dT%H:%M:%fZ','now'))";
 impl SqlDialect {
     pub fn binary_bind_placeholder(self, n: usize) -> String {
         match self {
-            Self::Postgres => format!("decode(${n}, 'base64')::bytea"),
-            Self::Sqlite => format!("unhex(${n})"),
-            Self::Mysql => "FROM_BASE64(?)".to_string(),
+            Self::Mysql => "?".into(),
+            _ => format!("${n}"),
         }
     }
 
-    /// Binary interpretation belongs to the compiled expression, never to a
-    /// prefix in a user-supplied text value.
-    pub fn encode_binary_param(self, value: String) -> Result<String, QueryError> {
-        use base64::Engine as _;
-        match self {
-            Self::Sqlite => base64::engine::general_purpose::STANDARD
-                .decode(value)
-                .map(|bytes| bytes.iter().map(|byte| format!("{byte:02x}")).collect())
-                .map_err(|e| QueryError::InvalidFilter(format!("invalid binary value: {e}"))),
-            Self::Postgres | Self::Mysql => Ok(value),
+    pub fn encode_binary_param(self, value: Value) -> Result<Value, QueryError> {
+        match value {
+            Value::Bytes(_) | Value::Null => Ok(value),
+            _ => Err(QueryError::InvalidFilter(
+                "binary field requires native bytes".into(),
+            )),
         }
     }
 
@@ -645,7 +638,7 @@ pub fn raw_column_name(field: &str) -> String {
 /// strip and unmask fetch reach it. Those three named this function directly
 /// until 2026-09-04; they ask the DESCRIPTOR now, and this is the fallback
 /// underneath that question rather than their answer.
-pub fn raw_column_for_field(field: &str, def: &serde_json::Value) -> Option<String> {
+pub fn raw_column_for_field(field: &str, def: &crate::value::Value) -> Option<String> {
     let mask_meta = def.get("mask").and_then(|v| v.as_object())?;
     let kind = mask_meta
         .get("kind")
@@ -715,7 +708,7 @@ pub fn raw_column_for_field(field: &str, def: &serde_json::Value) -> Option<Stri
 /// could name.
 pub fn declared_raw_column(
     field: &str,
-    def: &serde_json::Value,
+    def: &crate::value::Value,
 ) -> Result<Option<String>, QueryError> {
     // A field with no effective mask has no raw column, and a `rawColumn` on
     // one is ignored rather than refused: there is nothing to place, so there
@@ -728,7 +721,7 @@ pub fn declared_raw_column(
     let Some(declared) = def
         .get("storage")
         .and_then(|storage| storage.get("rawColumn"))
-        .and_then(serde_json::Value::as_str)
+        .and_then(crate::value::Value::as_str)
     else {
         // Absent means the derivation, not a refusal. Every hand-written test
         // schema in the tree and any field map that did not go through the
@@ -769,7 +762,7 @@ pub fn declared_raw_column(
 /// timestamps are assigned by the system-field pass and are not declared in
 /// this schema, so they cannot enter this arm.
 fn is_creator_timestamp_number(schema_hint: &Value, field: &str, value: &Value) -> bool {
-    value.is_number()
+    (value.is_number() || matches!(value, Value::Timestamp(_)))
         && schema_hint
             .get(field)
             .and_then(|def| def.get("type"))
@@ -784,13 +777,26 @@ fn is_creator_timestamp_number(schema_hint: &Value, field: &str, value: &Value) 
 /// the parameter protocol stays unchanged and the indexed column remains bare
 /// in comparisons. MySQL is render-only and keeps its existing bare bind.
 fn push_creator_value_bind(
-    params: &mut Vec<String>,
+    params: &mut Vec<Value>,
     value: &Value,
     field: &str,
     schema_hint: &Value,
     dialect: SqlDialect,
 ) -> String {
-    params.push(value_to_param(value));
+    let json_column = matches!(
+        schema_hint
+            .get(field)
+            .and_then(|field| field.get("type"))
+            .and_then(Value::as_str),
+        Some("json" | "object" | "array")
+    );
+    let parameter =
+        if json_column && !matches!(value, Value::Json(_) | Value::Array(_) | Value::Object(_)) {
+            Value::Json(value.to_string())
+        } else {
+            value_to_param(value)
+        };
+    params.push(parameter);
     let n = params.len();
     if !is_creator_timestamp_number(schema_hint, field, value) {
         return format!("${n}");
@@ -816,7 +822,7 @@ pub fn build_write_target_probe(
     limit: i64,
     dialect: SqlDialect,
 ) -> Result<BuiltQuery, QueryError> {
-    let select = serde_json::json!(["id"]);
+    let select = crate::value!(["id"]);
     let mut built =
         build_find_with_schema_and_unmask_and_soft_delete_with_dialect_and_limit_ceiling(
             schema_name,
@@ -862,9 +868,6 @@ pub fn build_conflict_probe_with_dialect(
     let mut conditions = Vec::new();
 
     for (field, value) in obj {
-        if field.starts_with("__zsbin__") {
-            continue;
-        }
         validate_field_name(field)?;
         let col = quote_ident(field);
         if value.is_null() {
@@ -873,7 +876,7 @@ pub fn build_conflict_probe_with_dialect(
         }
 
         let raw = value_to_param(value);
-        let binary_bind = obj.contains_key(&format!("__zsbin__{field}"));
+        let binary_bind = matches!(value, Value::Bytes(_));
         let param_value = if binary_bind {
             dialect.encode_binary_param(raw)?
         } else {
@@ -908,7 +911,7 @@ pub fn build_conflict_probe_with_dialect(
 ///
 /// Same shape as the deleted `build_find` (see the test-local stand-in of that
 /// name), plus an optional `schema` (the cached
-/// `serde_json::Value` from `ThreadDbContext::schema_for`). When the
+/// `crate::value::Value` from `ThreadDbContext::schema_for`). When the
 /// schema is `Some(_)` and declares masked columns (`def.mask = Some({...})`
 /// with `kind != "none"`), the SELECT clause emits
 /// `"<col>_masked" AS "<col>"` in place of the bare parent column, and
@@ -1075,7 +1078,7 @@ fn build_find_with_schema_and_unmask_and_soft_delete_with_dialect_and_limit_ceil
     let schema = schema_name.quoted();
     let table = quote_ident(collection);
 
-    let mut params: Vec<String> = Vec::new();
+    let mut params: Vec<Value> = Vec::new();
     let where_clause = build_where_with_dialect(filter, &mut params, schema_hint, dialect)?;
     if let Some(lim) = limit {
         validate_limit_bound("find.limit", lim, limit_ceiling)?;
@@ -1565,7 +1568,7 @@ pub fn build_count_with_soft_delete(
     let schema = schema_name.quoted();
     let table = quote_ident(collection);
 
-    let mut params: Vec<String> = Vec::new();
+    let mut params: Vec<Value> = Vec::new();
     let where_clause = build_where_with_dialect(filter, &mut params, schema_hint, dialect)?;
 
     let mut sql = format!("SELECT COUNT(*) AS count FROM {schema}.{table}");
@@ -1626,23 +1629,13 @@ pub fn build_insert_with_dialect(
     let schema = schema_name.quoted();
     let table = quote_ident(collection);
 
-    // A write pass marks each binary-bind column with a sibling
-    // `__zsbin__<col>` key (`Value::Bool(true)`); the value at `<col>`
-    // is base64 text that the column wants as raw bytes. Walk the doc
-    // once to collect those marker keys so we can:
-    //   1. Skip emitting marker keys as columns.
-    //   2. Wrap binary-bind placeholders with the dialect's bind
-    //      shape ([`SqlDialect::binary_bind_placeholder`]).
     let binary_bind_cols = collect_binary_bind_cols(obj);
 
     let mut columns = Vec::new();
     let mut placeholders = Vec::new();
-    let mut params: Vec<String> = Vec::new();
+    let mut params: Vec<Value> = Vec::new();
 
     for (key, value) in obj {
-        if key.starts_with("__zsbin__") {
-            continue;
-        }
         columns.push(quote_ident(key));
         // Postgres' text-format param protocol (`query_text_params`,
         // `&[&str]`) cannot represent NULL — an empty string would be
@@ -1677,26 +1670,10 @@ pub fn build_insert_with_dialect(
     Ok(BuiltQuery { sql, params })
 }
 
-/// Collect the set of column names a write pass has marked as
-/// binary-bind: the param at that column is base64 TEXT and the column
-/// wants RAW BYTES. The marker is a sibling key `__zsbin__<col> = true`,
-/// inserted by `crate::crud::encryption_pass::encrypt_row_on_write` for
-/// ciphertext and by `crate::crud::bytes_pass::encode_bytes_on_write`
-/// for a plain `t.bytes()` column. Callers walk the doc once with this
-/// set to know which placeholders need the
-/// `decode($N, 'base64')::bytea` cast.
-pub fn collect_binary_bind_cols(
-    obj: &serde_json::Map<String, Value>,
-) -> std::collections::HashSet<&str> {
-    let mut out = std::collections::HashSet::new();
-    for (k, v) in obj {
-        if let Some(name) = k.strip_prefix("__zsbin__") {
-            if v.as_bool() == Some(true) {
-                out.insert(name);
-            }
-        }
-    }
-    out
+pub fn collect_binary_bind_cols(obj: &crate::value::Record) -> std::collections::HashSet<&str> {
+    obj.iter()
+        .filter_map(|(key, value)| matches!(value, Value::Bytes(_)).then_some(key.as_str()))
+        .collect()
 }
 
 /// Build SET clauses from an update object, supporting update operators.
@@ -1722,7 +1699,7 @@ pub fn collect_binary_bind_cols(
 ///                                ELSE "col" || $N::jsonb END`
 pub fn build_set_clauses(
     update: &Value,
-    params: &mut Vec<String>,
+    params: &mut Vec<Value>,
     schema_hint: &Value,
 ) -> Result<Vec<String>, QueryError> {
     build_set_clauses_with_dialect(update, params, schema_hint, SqlDialect::Postgres)
@@ -1773,20 +1750,9 @@ pub struct SystemFieldAutoBump<'a> {
     pub skip_updated_by: bool,
 }
 
-/// Dialect-aware SET-clause builder for `build_update_one` /
-/// `build_update_many`. PG keeps the `decode($N, 'base64')::bytea` cast;
-/// SQLite uses `unhex($N)` with a hex-encoded bind.
-///
-/// Emits the dialect-appropriate `updated_at` auto-bump
-/// (`NOW()` on PG, `CURRENT_TIMESTAMP` on SQLite). To compose the full
-/// `version` / `updated_at` / `updated_by` auto-bump set used by the
-/// CRUD dispatch path, callers should use
-/// [`build_set_clauses_with_system_fields`] instead — this wrapper
-/// only auto-bumps `updated_at`, matching behaviour for
-/// existing direct callers.
 pub fn build_set_clauses_with_dialect(
     update: &Value,
-    params: &mut Vec<String>,
+    params: &mut Vec<Value>,
     schema_hint: &Value,
     dialect: SqlDialect,
 ) -> Result<Vec<String>, QueryError> {
@@ -1825,7 +1791,7 @@ pub fn build_set_clauses_with_dialect(
 /// the on-disk values.
 pub fn build_set_clauses_with_system_fields(
     update: &Value,
-    params: &mut Vec<String>,
+    params: &mut Vec<Value>,
     schema_hint: &Value,
     dialect: SqlDialect,
     autobump: &SystemFieldAutoBump<'_>,
@@ -1834,33 +1800,19 @@ pub fn build_set_clauses_with_system_fields(
         .as_object()
         .ok_or_else(|| QueryError::InvalidFilter("update must be an object".to_string()))?;
 
-    // Collect binary-bind markers from the update
-    // doc (top-level AND nested `$set`). The write pass deposits
-    // both the base64 value and a `__zsbin__<col>` marker; we use the
-    // marker set to wrap the placeholder via the dialect's bind shape
-    // (`SqlDialect::binary_bind_placeholder`).
     let mut binary_bind_cols = collect_binary_bind_cols(update_obj);
     if let Some(set_obj) = update_obj.get("$set").and_then(|v| v.as_object()) {
         binary_bind_cols.extend(collect_binary_bind_cols(set_obj));
     }
 
-    // Collect all fields: flatten $set inline, keep other keys as-is.
-    // Skip every `__zsbin__*` marker key: they are a side-channel from
-    // the write passes, not user-declared columns.
     let mut fields: Vec<(&String, &Value)> = Vec::new();
     for (key, value) in update_obj.iter() {
-        if key.starts_with("__zsbin__") {
-            continue;
-        }
         if key == "$set" {
             // Flatten $set fields into the top level
             let obj = value
                 .as_object()
                 .ok_or_else(|| QueryError::InvalidFilter("$set must be an object".to_string()))?;
             for (k, v) in obj.iter() {
-                if k.starts_with("__zsbin__") {
-                    continue;
-                }
                 fields.push((k, v));
             }
         } else {
@@ -1912,19 +1864,19 @@ pub fn build_set_clauses_with_system_fields(
                     }
                     "$push" => {
                         // Serialize as JSON so numbers stay numbers, strings stay strings
-                        params.push(op_val.to_string());
+                        params.push((op_val).into());
                         format!("{col} = {col} || ${}::jsonb", params.len())
                     }
                     "$pull" => {
                         // Remove array element by value: filter out matching elements
-                        params.push(op_val.to_string());
+                        params.push((op_val).into());
                         let n = params.len();
                         format!(
                             "{col} = (SELECT COALESCE(jsonb_agg(elem), '[]'::jsonb) FROM jsonb_array_elements({col}) elem WHERE elem != ${n}::jsonb)"
                         )
                     }
                     "$addToSet" => {
-                        params.push(op_val.to_string());
+                        params.push((op_val).into());
                         let n = params.len();
                         format!(
                             "{col} = CASE WHEN {col} @> ${n}::jsonb THEN {col} ELSE {col} || ${n}::jsonb END"
@@ -2016,7 +1968,7 @@ pub fn build_set_clauses_with_system_fields(
     if on_pr4_dispatch_path && !autobump.skip_updated_by && !already_has_updated_by {
         match autobump.actor_id {
             Some(actor) => {
-                params.push(actor.to_string());
+                params.push((actor).into());
                 let n = params.len();
                 set_clauses.push(format!("\"updated_by\" = ${n}"));
             }
@@ -2092,7 +2044,7 @@ pub fn build_update_one_with_system_fields(
     let schema = schema_name.quoted();
     let table = quote_ident(collection);
 
-    let mut params: Vec<String> = Vec::new();
+    let mut params: Vec<Value> = Vec::new();
     let set_clauses =
         build_set_clauses_with_system_fields(update, &mut params, schema_hint, dialect, autobump)?;
 
@@ -2169,11 +2121,6 @@ pub fn build_insert_many_with_dialect(
     let schema = schema_name.quoted();
     let table = quote_ident(collection);
 
-    // Binary-bind union across all docs. We treat
-    // a column as binary-bind iff ANY doc carries the `__zsbin__<col>`
-    // marker (the write passes mark every doc consistently: the
-    // decision is schema-driven, so every row in the batch gets the
-    // marker after the pass runs).
     let mut binary_bind_cols: std::collections::HashSet<String> = std::collections::HashSet::new();
     for doc in arr {
         if let Some(obj) = doc.as_object() {
@@ -2183,9 +2130,6 @@ pub fn build_insert_many_with_dialect(
         }
     }
 
-    // Union all columns across all documents (not just the first).
-    // Skip every `__zsbin__*` marker key: they are a side-channel from
-    // the write passes, not user-declared columns.
     let mut column_set = std::collections::BTreeSet::<&String>::new();
     let mut bind_count = 0usize;
     for doc in arr {
@@ -2193,9 +2137,6 @@ pub fn build_insert_many_with_dialect(
             QueryError::InvalidFilter("insertMany: each document must be an object".to_string())
         })?;
         for (key, value) in obj {
-            if key.starts_with("__zsbin__") {
-                continue;
-            }
             column_set.insert(key);
             if !value.is_null() {
                 bind_count = bind_count.checked_add(1).ok_or_else(|| {
@@ -2230,7 +2171,7 @@ pub fn build_insert_many_with_dialect(
     let column_names: Vec<&String> = column_set.into_iter().collect();
     let columns: Vec<String> = column_names.iter().map(|k| quote_ident(k)).collect();
 
-    let mut params: Vec<String> = Vec::with_capacity(bind_count);
+    let mut params: Vec<Value> = Vec::with_capacity(bind_count);
     let mut value_groups: Vec<String> = Vec::with_capacity(arr.len());
 
     for doc in arr {
@@ -2335,7 +2276,7 @@ pub fn build_update_many_with_system_fields(
     let schema = schema_name.quoted();
     let table = quote_ident(collection);
 
-    let mut params: Vec<String> = Vec::new();
+    let mut params: Vec<Value> = Vec::new();
     let set_clauses =
         build_set_clauses_with_system_fields(update, &mut params, schema_hint, dialect, autobump)?;
 
@@ -2367,7 +2308,7 @@ pub fn build_delete_many(
     let schema = schema_name.quoted();
     let table = quote_ident(collection);
 
-    let mut params: Vec<String> = Vec::new();
+    let mut params: Vec<Value> = Vec::new();
     let where_clause = build_where_with_dialect(filter, &mut params, schema_hint, dialect)?;
 
     let mut sql = format!("DELETE FROM {schema}.{table}");
@@ -2412,7 +2353,7 @@ pub fn build_delete_one_with_dialect(
     let schema = schema_name.quoted();
     let table = quote_ident(collection);
 
-    let mut params: Vec<String> = Vec::new();
+    let mut params: Vec<Value> = Vec::new();
     let where_clause = build_where_with_dialect(filter, &mut params, schema_hint, dialect)?;
 
     let (target_col, lock_clause) = single_row_write_target(dialect);
@@ -2485,7 +2426,7 @@ fn single_row_write_target(dialect: SqlDialect) -> (&'static str, &'static str) 
 /// (the soft-delete-specific stamp), then the standard `version` /
 /// `updated_at` / `updated_by` bumps in that order.
 fn build_soft_delete_set_clauses(
-    params: &mut Vec<String>,
+    params: &mut Vec<Value>,
     dialect: SqlDialect,
     autobump: &SystemFieldAutoBump<'_>,
 ) -> Vec<String> {
@@ -2509,7 +2450,7 @@ fn build_soft_delete_set_clauses(
 /// the column would have it name the actor of an earlier write.
 fn push_updated_by_clause(
     clauses: &mut Vec<String>,
-    params: &mut Vec<String>,
+    params: &mut Vec<Value>,
     autobump: &SystemFieldAutoBump<'_>,
 ) {
     if autobump.skip_updated_by {
@@ -2517,7 +2458,7 @@ fn push_updated_by_clause(
     }
     match autobump.actor_id {
         Some(actor) => {
-            params.push(actor.to_string());
+            params.push((actor).into());
             let n = params.len();
             clauses.push(format!("\"updated_by\" = ${n}"));
         }
@@ -2530,7 +2471,7 @@ fn push_updated_by_clause(
 /// [`build_soft_delete_set_clauses`]. The timestamp expression isn't
 /// needed for `deleted_at` here (we write `NULL` directly, not a stamp).
 fn build_restore_set_clauses(
-    params: &mut Vec<String>,
+    params: &mut Vec<Value>,
     dialect: SqlDialect,
     autobump: &SystemFieldAutoBump<'_>,
 ) -> Vec<String> {
@@ -2578,7 +2519,7 @@ pub fn build_soft_delete_one_with_system_fields(
     let schema = schema_name.quoted();
     let table = quote_ident(collection);
 
-    let mut params: Vec<String> = Vec::new();
+    let mut params: Vec<Value> = Vec::new();
     let set_clauses = build_soft_delete_set_clauses(&mut params, dialect, autobump);
 
     let where_clause = build_where_with_dialect(filter, &mut params, schema_hint, dialect)?;
@@ -2624,7 +2565,7 @@ pub fn build_soft_delete_many_with_system_fields(
     let schema = schema_name.quoted();
     let table = quote_ident(collection);
 
-    let mut params: Vec<String> = Vec::new();
+    let mut params: Vec<Value> = Vec::new();
     let set_clauses = build_soft_delete_set_clauses(&mut params, dialect, autobump);
 
     let where_clause = build_where_with_dialect(filter, &mut params, schema_hint, dialect)?;
@@ -2662,7 +2603,7 @@ pub fn build_restore_one_with_system_fields(
     let schema = schema_name.quoted();
     let table = quote_ident(collection);
 
-    let mut params: Vec<String> = Vec::new();
+    let mut params: Vec<Value> = Vec::new();
     let set_clauses = build_restore_set_clauses(&mut params, dialect, autobump);
 
     let where_clause = build_where_with_dialect(filter, &mut params, schema_hint, dialect)?;
@@ -2696,7 +2637,7 @@ pub fn build_restore_many_with_system_fields(
     let schema = schema_name.quoted();
     let table = quote_ident(collection);
 
-    let mut params: Vec<String> = Vec::new();
+    let mut params: Vec<Value> = Vec::new();
     let set_clauses = build_restore_set_clauses(&mut params, dialect, autobump);
 
     let where_clause = build_where_with_dialect(filter, &mut params, schema_hint, dialect)?;
@@ -2809,7 +2750,7 @@ pub fn build_aggregate_with_result_columns(
         QueryError::InvalidFilter("aggregate: pipeline must be an array".to_string())
     })?;
 
-    let mut params: Vec<String> = Vec::new();
+    let mut params: Vec<Value> = Vec::new();
     let mut where_clause = String::new();
     let mut select_cols: Vec<String> = Vec::new();
     // The UNQUOTED result key for every entry pushed onto `select_cols`, in
@@ -3086,7 +3027,7 @@ pub fn build_distinct_with_soft_delete_with_dialect(
     // behind them.
     let select_expr = col.clone();
 
-    let mut params: Vec<String> = Vec::new();
+    let mut params: Vec<Value> = Vec::new();
     let where_clause = build_where_with_dialect(filter, &mut params, schema_hint, dialect)?;
 
     let mut sql = format!("SELECT DISTINCT {select_expr} FROM {schema}.{table}");
@@ -3180,9 +3121,9 @@ pub fn build_vector_search(
     // Param 1: vector literal. Param 2: k. The filter's own params
     // (rendered into `build_where`'s `params` vec) start at $3 because
     // we pre-push two entries before invoking the helper.
-    let mut params: Vec<String> = Vec::with_capacity(2 + 4);
-    params.push(vec_lit);
-    params.push(k.to_string());
+    let mut params: Vec<Value> = Vec::with_capacity(2 + 4);
+    params.push(vec_lit.into());
+    params.push((k).into());
 
     let where_clause = build_where(filter, &mut params, schema_hint)?;
 
@@ -3247,11 +3188,20 @@ pub fn build_spatial_near(
     // Bind order: (lng, lat, radius_m, limit). Note the swap: ST_MakePoint
     // takes (x, y) = (lng, lat), the inverse of the SDK's {lat, lng}
     // input shape.
-    let mut params: Vec<String> = Vec::with_capacity(4 + 4);
-    params.push(point.lng.to_string());
-    params.push(point.lat.to_string());
-    params.push(radius_m.to_string());
-    params.push(limit.to_string());
+    let mut params: Vec<Value> = Vec::with_capacity(4 + 4);
+    params.push(Value::Number(
+        crate::value::Number::from_f64(point.lng)
+            .ok_or_else(|| QueryError::InvalidFilter("non-finite spatial operand".into()))?,
+    ));
+    params.push(Value::Number(
+        crate::value::Number::from_f64(point.lat)
+            .ok_or_else(|| QueryError::InvalidFilter("non-finite spatial operand".into()))?,
+    ));
+    params.push(Value::Number(
+        crate::value::Number::from_f64(radius_m)
+            .ok_or_else(|| QueryError::InvalidFilter("non-finite spatial operand".into()))?,
+    ));
+    params.push((limit).into());
 
     let where_clause = build_where(filter, &mut params, schema_hint)?;
 
@@ -3279,7 +3229,7 @@ pub fn build_spatial_near(
 /// to `COUNT(*)` generates `COUNT(*) > $1` instead of `"cnt" > $1`.
 fn build_having(
     filter: &Value,
-    params: &mut Vec<String>,
+    params: &mut Vec<Value>,
     agg_exprs: &std::collections::HashMap<String, String>,
     schema_hint: &Value,
     dialect: SqlDialect,
@@ -3290,7 +3240,7 @@ fn build_having(
 
 fn build_having_inner(
     filter: &Value,
-    params: &mut Vec<String>,
+    params: &mut Vec<Value>,
     agg_exprs: &std::collections::HashMap<String, String>,
     schema_hint: &Value,
     dialect: SqlDialect,
@@ -3382,7 +3332,7 @@ fn build_having_inner(
 /// conversion as WHERE; accumulator aliases stay untyped and retain a bare
 /// placeholder because no descriptor declares their result type.
 fn push_having_value_bind(
-    params: &mut Vec<String>,
+    params: &mut Vec<Value>,
     value: &Value,
     creator_field: Option<&str>,
     schema_hint: &Value,
@@ -3402,7 +3352,7 @@ fn push_having_value_bind(
 fn build_having_condition(
     col_expr: &str,
     value: &Value,
-    params: &mut Vec<String>,
+    params: &mut Vec<Value>,
     creator_field: Option<&str>,
     schema_hint: &Value,
     dialect: SqlDialect,
@@ -3448,7 +3398,7 @@ fn build_having_condition(
 /// bind expression. This wrapper emits PostgreSQL SQL.
 pub fn build_where(
     filter: &Value,
-    params: &mut Vec<String>,
+    params: &mut Vec<Value>,
     schema_hint: &Value,
 ) -> Result<String, QueryError> {
     build_where_with_dialect(filter, params, schema_hint, SqlDialect::Postgres)
@@ -3456,7 +3406,7 @@ pub fn build_where(
 
 pub fn build_where_with_dialect(
     filter: &Value,
-    params: &mut Vec<String>,
+    params: &mut Vec<Value>,
     schema_hint: &Value,
     dialect: SqlDialect,
 ) -> Result<String, QueryError> {
@@ -3741,21 +3691,10 @@ fn build_order_term_expr(col: &str, descending: bool, dialect: SqlDialect) -> St
     }
 }
 
-/// Convert a JSON value to a text parameter string for Postgres.
-fn value_to_param_inner(value: &Value) -> String {
-    match value {
-        Value::String(s) => s.clone(),
-        Value::Number(n) => n.to_string(),
-        Value::Bool(b) => b.to_string(),
-        Value::Null => String::new(), // should not be used as param (use IS NULL)
-        // For arrays/objects, serialize as JSON text (stored as JSONB in PG)
-        other => other.to_string(),
-    }
-}
-
-/// Convert a JSON value to a Postgres text param; used cross-module (B1 migrations).
-pub fn value_to_param(value: &Value) -> String {
-    value_to_param_inner(value)
+/// Preserve the native value through SQL compilation. Only transport encoding
+/// may materialize a textual representation.
+pub fn value_to_param(value: &Value) -> Value {
+    value.clone()
 }
 
 /// Build an UPSERT (INSERT ... ON CONFLICT DO UPDATE) query:
@@ -3832,15 +3771,12 @@ pub fn build_upsert_with_dialect(
 
     let mut columns = Vec::new();
     let mut placeholders = Vec::new();
-    let mut params: Vec<String> = Vec::new();
+    let mut params: Vec<Value> = Vec::new();
     let mut update_clauses = Vec::new();
     let mut doc_has_version = false;
     let mut doc_has_updated_at = false;
 
     for (key, value) in obj {
-        if key.starts_with("__zsbin__") {
-            continue;
-        }
         columns.push(quote_ident(key));
 
         match key.as_str() {
@@ -3979,7 +3915,7 @@ pub fn build_find_or_create(
 
     let mut columns = Vec::new();
     let mut placeholders = Vec::new();
-    let mut params: Vec<String> = Vec::new();
+    let mut params: Vec<Value> = Vec::new();
 
     for (key, value) in obj {
         columns.push(quote_ident(key));
@@ -4029,7 +3965,7 @@ pub fn build_find_or_create(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use crate::value;
 
     /// Wrap a fixture app id as the physical schema the builders now take.
     ///
@@ -4051,7 +3987,7 @@ mod tests {
     /// tests are about WHERE / ORDER BY / LIMIT shape, so they declare the
     /// columns they name and let the projection be the ordinary allowlist.
     fn tschema() -> Value {
-        json!({
+        value!({
             "age":        { "type": "number" },
             "amount":     { "type": "number" },
             "bio":        { "type": "string" },
@@ -4076,7 +4012,7 @@ mod tests {
     }
 
     fn timestamp_test_schema() -> Value {
-        json!({
+        value!({
             "date_only": { "type": "calendarDate" },
             "occurred_at": { "type": "date" },
             "optional": { "type": "string" },
@@ -4148,18 +4084,18 @@ mod tests {
 
     #[test]
     fn test_simple_eq_filter() {
-        let filter = json!({"name": "alice"});
+        let filter = value!({"name": "alice"});
         let q = build_find(&s("app1"), "users", &filter, None, None, None, None).unwrap();
         assert_eq!(
             q.sql,
             format!(r#"{} FROM "app1"."users" WHERE "name" = $1"#, tselect())
         );
-        assert_eq!(q.params, vec!["alice"]);
+        assert_eq!(q.params, value!(["alice"]).as_array().unwrap().clone());
     }
 
     #[test]
     fn test_comparison_operators() {
-        let filter = json!({"age": {"$gte": 18, "$lt": 65}});
+        let filter = value!({"age": {"$gte": 18, "$lt": 65}});
         let q = build_find(&s("app1"), "users", &filter, None, None, None, None).unwrap();
         assert!(q.sql.contains(r#""age" >= $1"#));
         assert!(q.sql.contains(r#""age" < $2"#));
@@ -4168,10 +4104,13 @@ mod tests {
 
     #[test]
     fn test_in_operator() {
-        let filter = json!({"status": {"$in": ["active", "pending"]}});
+        let filter = value!({"status": {"$in": ["active", "pending"]}});
         let q = build_find(&s("app1"), "users", &filter, None, None, None, None).unwrap();
         assert!(q.sql.contains(r#""status" IN ($1, $2)"#));
-        assert_eq!(q.params, vec!["active", "pending"]);
+        assert_eq!(
+            q.params,
+            value!(["active", "pending"]).as_array().unwrap().clone()
+        );
     }
 
     /// A `null` member of `$in` must mean `IS NULL`, exactly as a bare
@@ -4192,7 +4131,7 @@ mod tests {
     /// "just bind a real NULL" is NOT the fix - that matches nothing.
     #[test]
     fn in_with_null_member_means_is_null_not_empty_string() {
-        let filter = json!({"status": {"$in": [null]}});
+        let filter = value!({"status": {"$in": [null]}});
         let q = build_find(&s("app1"), "users", &filter, None, None, None, None).unwrap();
         assert!(
             q.sql.contains(r#""status" IS NULL"#),
@@ -4200,7 +4139,7 @@ mod tests {
             q.sql
         );
         assert!(
-            !q.params.iter().any(|p| p.is_empty()),
+            !q.params.iter().any(|p| p.as_str() == Some("")),
             "a null must never be bound as the empty string; params={:?}",
             q.params
         );
@@ -4210,7 +4149,7 @@ mod tests {
     /// `IN (...)` and the null becomes an `IS NULL` disjunct.
     #[test]
     fn in_with_mixed_null_and_values_keeps_both_arms() {
-        let filter = json!({"status": {"$in": ["active", null]}});
+        let filter = value!({"status": {"$in": ["active", null]}});
         let q = build_find(&s("app1"), "users", &filter, None, None, None, None).unwrap();
         assert!(
             q.sql.contains(r#""status" IN ($1)"#),
@@ -4234,7 +4173,7 @@ mod tests {
     /// rather than a bound empty string.
     #[test]
     fn nin_with_null_member_means_is_not_null() {
-        let filter = json!({"status": {"$nin": [null]}});
+        let filter = value!({"status": {"$nin": [null]}});
         let q = build_find(&s("app1"), "users", &filter, None, None, None, None).unwrap();
         assert!(
             q.sql.contains(r#""status" IS NOT NULL"#),
@@ -4242,7 +4181,7 @@ mod tests {
             q.sql
         );
         assert!(
-            !q.params.iter().any(|p| p.is_empty()),
+            !q.params.iter().any(|p| p.as_str() == Some("")),
             "a null must never be bound as the empty string; params={:?}",
             q.params
         );
@@ -4250,7 +4189,7 @@ mod tests {
 
     #[test]
     fn nin_with_mixed_null_and_values_keeps_both_arms() {
-        let filter = json!({"status": {"$nin": ["active", null]}});
+        let filter = value!({"status": {"$nin": ["active", null]}});
         let q = build_find(&s("app1"), "users", &filter, None, None, None, None).unwrap();
         assert!(
             q.sql.contains(r#""status" NOT IN ($1)"#),
@@ -4262,7 +4201,7 @@ mod tests {
             "the null member must add an IS NOT NULL arm; got {}",
             q.sql
         );
-        assert_eq!(q.params, vec!["active"]);
+        assert_eq!(q.params, value!(["active"]).as_array().unwrap().clone());
     }
 
     /// An empty `$in` matches nothing, and must say so with a constant
@@ -4276,7 +4215,7 @@ mod tests {
     /// empty result set.
     #[test]
     fn empty_in_matches_nothing_without_emitting_invalid_sql() {
-        let filter = json!({"status": {"$in": []}});
+        let filter = value!({"status": {"$in": []}});
         let q = build_find(&s("app1"), "users", &filter, None, None, None, None).unwrap();
         assert!(
             !q.sql.contains("IN ()"),
@@ -4295,7 +4234,7 @@ mod tests {
     /// everything.
     #[test]
     fn empty_nin_matches_everything_without_emitting_invalid_sql() {
-        let filter = json!({"status": {"$nin": []}});
+        let filter = value!({"status": {"$nin": []}});
         let q = build_find(&s("app1"), "users", &filter, None, None, None, None).unwrap();
         assert!(
             !q.sql.contains("NOT IN ()"),
@@ -4312,15 +4251,18 @@ mod tests {
 
     #[test]
     fn test_or_combinator() {
-        let filter = json!({"$or": [{"name": "alice"}, {"name": "bob"}]});
+        let filter = value!({"$or": [{"name": "alice"}, {"name": "bob"}]});
         let q = build_find(&s("app1"), "users", &filter, None, None, None, None).unwrap();
         assert!(q.sql.contains("OR"));
-        assert_eq!(q.params, vec!["alice", "bob"]);
+        assert_eq!(
+            q.params,
+            value!(["alice", "bob"]).as_array().unwrap().clone()
+        );
     }
 
     #[test]
     fn test_empty_filter() {
-        let filter = json!({});
+        let filter = value!({});
         let q = build_find(&s("app1"), "users", &filter, None, None, None, None).unwrap();
         assert_eq!(q.sql, format!(r#"{} FROM "app1"."users""#, tselect()));
         assert!(q.params.is_empty());
@@ -4335,7 +4277,7 @@ mod tests {
 
     #[test]
     fn test_limit_offset() {
-        let filter = json!({});
+        let filter = value!({});
         let q = build_find(&s("app1"), "users", &filter, Some(10), Some(20), None, None).unwrap();
         assert!(q.sql.contains("LIMIT 10"));
         assert!(q.sql.contains("OFFSET 20"));
@@ -4343,7 +4285,7 @@ mod tests {
 
     #[test]
     fn test_insert() {
-        let doc = json!({"name": "alice", "age": 30});
+        let doc = value!({"name": "alice", "age": 30});
         let q = build_insert(&s("app1"), "users", &tschema(), &doc).unwrap();
         assert!(q.sql.contains("INSERT INTO"));
         assert!(q.sql.contains(&treturning()), "sql: {}", q.sql);
@@ -4353,7 +4295,7 @@ mod tests {
     #[test]
     fn creator_timestamp_numeric_write_bind_is_lowered_per_dialect() {
         let schema = timestamp_test_schema();
-        let doc = json!({"occurred_at": -1});
+        let doc = value!({"occurred_at": -1});
 
         let pg =
             build_insert_with_dialect(&s("app1"), "events", &schema, &doc, SqlDialect::Postgres)
@@ -4363,7 +4305,7 @@ mod tests {
             "sql: {}",
             pg.sql
         );
-        assert_eq!(pg.params, vec!["-1"]);
+        assert_eq!(pg.params, value!([-1]).as_array().unwrap().clone());
 
         let sqlite =
             build_insert_with_dialect(&s("app1"), "events", &schema, &doc, SqlDialect::Sqlite)
@@ -4375,13 +4317,13 @@ mod tests {
             "sql: {}",
             sqlite.sql
         );
-        assert_eq!(sqlite.params, vec!["-1"]);
+        assert_eq!(sqlite.params, value!([-1]).as_array().unwrap().clone());
     }
 
     #[test]
     fn creator_timestamp_numeric_filter_bind_is_lowered_per_dialect() {
         let schema = timestamp_test_schema();
-        let filter = json!({
+        let filter = value!({
             "occurred_at": {
                 "$gt": -1,
                 "$in": [-1, 0, null],
@@ -4396,7 +4338,10 @@ mod tests {
             pg.contains(r#""occurred_at" IN (to_timestamp($2/1000.0), to_timestamp($3/1000.0))"#)
         );
         assert!(pg.contains(r#"OR "occurred_at" IS NULL"#));
-        assert_eq!(pg_params, vec!["-1", "-1", "0"]);
+        assert_eq!(
+            pg_params,
+            vec![Value::from(-1), Value::from(-1), Value::from(0)]
+        );
 
         let mut sqlite_params = Vec::new();
         let sqlite =
@@ -4408,13 +4353,16 @@ mod tests {
             r#""occurred_at" IN (strftime('%Y-%m-%dT%H:%M:%fZ', $2/1000.0, 'unixepoch'), strftime('%Y-%m-%dT%H:%M:%fZ', $3/1000.0, 'unixepoch'))"#
         ));
         assert!(sqlite.contains(r#"OR "occurred_at" IS NULL"#));
-        assert_eq!(sqlite_params, vec!["-1", "-1", "0"]);
+        assert_eq!(
+            sqlite_params,
+            vec![Value::from(-1), Value::from(-1), Value::from(0)]
+        );
     }
 
     #[test]
     fn creator_timestamp_bind_lowering_is_type_and_value_driven() {
         let schema = timestamp_test_schema();
-        let doc = json!({
+        let doc = value!({
             "occurred_at": "1969-12-31T23:59:59.999Z",
             "date_only": -1,
             "optional": null,
@@ -4427,12 +4375,12 @@ mod tests {
             assert!(q.sql.contains("NULL"), "sql: {}", q.sql);
             assert_eq!(
                 q.params,
-                vec!["1969-12-31T23:59:59.999Z", "-1"],
+                vec![Value::from("1969-12-31T23:59:59.999Z"), Value::from(-1)],
                 "dialect: {dialect:?}"
             );
         }
 
-        let filter = json!({
+        let filter = value!({
             "occurred_at": "1969-12-31T23:59:59.999Z",
             "date_only": -1,
             "optional": null,
@@ -4442,12 +4390,15 @@ mod tests {
             build_where_with_dialect(&filter, &mut params, &schema, SqlDialect::Sqlite).unwrap();
         assert!(!sql.contains("strftime"), "sql: {sql}");
         assert!(sql.contains(r#""optional" IS NULL"#), "sql: {sql}");
-        assert_eq!(params, vec!["1969-12-31T23:59:59.999Z", "-1"]);
+        assert_eq!(
+            params,
+            vec![Value::from("1969-12-31T23:59:59.999Z"), Value::from(-1)]
+        );
     }
 
     #[test]
     fn test_invalid_collection() {
-        let filter = json!({});
+        let filter = value!({});
         let result = build_find(
             &s("app1"),
             "users; DROP TABLE",
@@ -4462,7 +4413,7 @@ mod tests {
 
     #[test]
     fn test_exists_operator() {
-        let filter = json!({"email": {"$exists": true}});
+        let filter = value!({"email": {"$exists": true}});
         let q = build_find(&s("app1"), "users", &filter, None, None, None, None).unwrap();
         assert!(q.sql.contains(r#""email" IS NOT NULL"#));
         assert!(q.params.is_empty());
@@ -4470,26 +4421,26 @@ mod tests {
 
     #[test]
     fn test_count() {
-        let filter = json!({"active": true});
+        let filter = value!({"active": true});
         let q = build_count(&s("app1"), "users", &tschema(), &filter).unwrap();
         assert!(q.sql.contains("SELECT COUNT(*)"));
-        assert_eq!(q.params, vec!["true"]);
+        assert_eq!(q.params, value!([true]).as_array().unwrap().clone());
     }
 
     #[test]
     fn test_ilike_operator() {
-        let filter = json!({"name": {"$ilike": "%alice%"}});
+        let filter = value!({"name": {"$ilike": "%alice%"}});
         let q = build_find(&s("app1"), "users", &filter, None, None, None, None).unwrap();
         assert_eq!(
             q.sql,
             format!(r#"{} FROM "app1"."users" WHERE "name" ILIKE $1"#, tselect())
         );
-        assert_eq!(q.params, vec!["%alice%"]);
+        assert_eq!(q.params, value!(["%alice%"]).as_array().unwrap().clone());
     }
 
     #[test]
     fn test_ilike_operator_sqlite_uses_like_nocase() {
-        let filter = json!({"name": {"$ilike": "%alice%"}});
+        let filter = value!({"name": {"$ilike": "%alice%"}});
         let q = build_find_with_schema_and_unmask_and_soft_delete_with_dialect(
             &s("app1"),
             "users",
@@ -4511,12 +4462,12 @@ mod tests {
                 tselect()
             )
         );
-        assert_eq!(q.params, vec!["%alice%"]);
+        assert_eq!(q.params, value!(["%alice%"]).as_array().unwrap().clone());
     }
 
     #[test]
     fn test_not_operator() {
-        let filter = json!({"$not": {"role": "admin"}});
+        let filter = value!({"$not": {"role": "admin"}});
         let q = build_find(&s("app1"), "users", &filter, None, None, None, None).unwrap();
         assert_eq!(
             q.sql,
@@ -4525,52 +4476,52 @@ mod tests {
                 tselect()
             )
         );
-        assert_eq!(q.params, vec!["admin"]);
+        assert_eq!(q.params, value!(["admin"]).as_array().unwrap().clone());
     }
 
     #[test]
     fn test_update_inc() {
-        let filter = json!({"id": 1});
-        let update = json!({"views": {"$inc": 1}});
+        let filter = value!({"id": 1});
+        let update = value!({"views": {"$inc": 1}});
         let q = build_update_one(&s("app1"), "posts", &tschema(), &filter, &update).unwrap();
         assert!(
             q.sql.contains(r#""views" = "views" + $1::numeric"#),
             "sql: {}",
             q.sql
         );
-        assert_eq!(q.params[0], "1");
+        assert_eq!(q.params[0], value!(1));
     }
 
     #[test]
     fn test_update_dec() {
-        let filter = json!({"id": 1});
-        let update = json!({"stock": {"$dec": 1}});
+        let filter = value!({"id": 1});
+        let update = value!({"stock": {"$dec": 1}});
         let q = build_update_one(&s("app1"), "items", &tschema(), &filter, &update).unwrap();
         assert!(
             q.sql.contains(r#""stock" = "stock" - $1::numeric"#),
             "sql: {}",
             q.sql
         );
-        assert_eq!(q.params[0], "1");
+        assert_eq!(q.params[0], value!(1));
     }
 
     #[test]
     fn test_update_mul() {
-        let filter = json!({"id": 1});
-        let update = json!({"price": {"$mul": 1.1}});
+        let filter = value!({"id": 1});
+        let update = value!({"price": {"$mul": 1.1}});
         let q = build_update_one(&s("app1"), "items", &tschema(), &filter, &update).unwrap();
         assert!(
             q.sql.contains(r#""price" = "price" * $1::numeric"#),
             "sql: {}",
             q.sql
         );
-        assert_eq!(q.params[0], "1.1");
+        assert_eq!(q.params[0], value!(1.1));
     }
 
     #[test]
     fn test_update_push() {
-        let filter = json!({"id": 1});
-        let update = json!({"tags": {"$push": "new"}});
+        let filter = value!({"id": 1});
+        let update = value!({"tags": {"$push": "new"}});
         let q = build_update_one(&s("app1"), "posts", &tschema(), &filter, &update).unwrap();
         // Appends the JSON-encoded value to the jsonb array. The `::jsonb`
         // cast (not `to_jsonb(::text)`) keeps numbers, booleans, and objects
@@ -4580,15 +4531,15 @@ mod tests {
             "sql: {}",
             q.sql
         );
-        // Param is JSON-encoded: a string `"new"` is stored as `"\"new\""`
+        // Param is JSON-encoded: a string `"new"` is stored as `"new"`
         // so Postgres parses it back as a JSON string on ::jsonb cast.
-        assert_eq!(q.params[0], "\"new\"");
+        assert_eq!(q.params[0], "new");
     }
 
     #[test]
     fn test_update_pull() {
-        let filter = json!({"id": 1});
-        let update = json!({"tags": {"$pull": "old"}});
+        let filter = value!({"id": 1});
+        let update = value!({"tags": {"$pull": "old"}});
         let q = build_update_one(&s("app1"), "posts", &tschema(), &filter, &update).unwrap();
         // Removes array elements by value. An earlier implementation used
         // `"tags" - $1`, but that's the jsonb "remove key" operator and
@@ -4598,13 +4549,13 @@ mod tests {
             "sql: {}",
             q.sql
         );
-        assert_eq!(q.params[0], "\"old\"");
+        assert_eq!(q.params[0], "old");
     }
 
     #[test]
     fn test_update_add_to_set() {
-        let filter = json!({"id": 1});
-        let update = json!({"tags": {"$addToSet": "unique"}});
+        let filter = value!({"id": 1});
+        let update = value!({"tags": {"$addToSet": "unique"}});
         let q = build_update_one(&s("app1"), "posts", &tschema(), &filter, &update).unwrap();
         // Appends only if the array doesn't already contain the value
         // (jsonb @> containment check). Both sides use ::jsonb so type is
@@ -4616,13 +4567,13 @@ mod tests {
             "sql: {}",
             q.sql
         );
-        assert_eq!(q.params[0], "\"unique\"");
+        assert_eq!(q.params[0], "unique");
     }
 
     #[test]
     fn test_update_mixed_operators() {
-        let filter = json!({"id": 1});
-        let update = json!({"name": "New", "views": {"$inc": 1}});
+        let filter = value!({"id": 1});
+        let update = value!({"name": "New", "views": {"$inc": 1}});
         let q = build_update_one(&s("app1"), "posts", &tschema(), &filter, &update).unwrap();
         // Both plain set and $inc should appear
         assert!(q.sql.contains(r#""name" = $"#), "sql: {}", q.sql);
@@ -4631,13 +4582,13 @@ mod tests {
             "sql: {}",
             q.sql
         );
-        assert!(q.params.contains(&"New".to_string()));
-        assert!(q.params.contains(&"1".to_string()));
+        assert!(q.params.contains(&Value::from("New")));
+        assert!(q.params.contains(&Value::from(1)));
     }
 
     #[test]
     fn test_insert_many() {
-        let docs = json!([
+        let docs = value!([
             {"name": "alice", "age": 30},
             {"name": "bob",   "age": 25}
         ]);
@@ -4661,7 +4612,7 @@ mod tests {
         // builder BEFORE allocating the multi-row SQL + param vec. A batch at
         // the cap is accepted.
         let over: Vec<Value> = (0..=MAX_INSERT_MANY_BATCH)
-            .map(|i| json!({ "n": i }))
+            .map(|i| value!({ "n": i }))
             .collect();
         let err =
             build_insert_many(&s("app1"), "users", &tschema(), &Value::Array(over)).unwrap_err();
@@ -4670,13 +4621,13 @@ mod tests {
             other => panic!("expected InvalidFilter, got {other:?}"),
         }
         let at_cap: Vec<Value> = (0..MAX_INSERT_MANY_BATCH)
-            .map(|i| json!({ "n": i }))
+            .map(|i| value!({ "n": i }))
             .collect();
         assert!(build_insert_many(&s("app1"), "users", &tschema(), &Value::Array(at_cap)).is_ok());
     }
 
     fn full_non_null_insert_many_batch(column_count: usize) -> Value {
-        let template: serde_json::Map<String, Value> = (0..column_count)
+        let template: crate::value::Map<String, Value> = (0..column_count)
             .map(|column| (format!("field_{column}"), Value::from(column)))
             .collect();
         Value::Array(
@@ -4697,11 +4648,11 @@ mod tests {
             (0..MAX_INSERT_MANY_BATCH)
                 .map(|row| {
                     let width = base_width + usize::from(row < wider_rows);
-                    let mut doc: serde_json::Map<String, Value> = (0..width)
+                    let mut doc: crate::value::Map<String, Value> = (0..width)
                         .map(|column| (format!("field_{column}"), Value::from(column)))
                         .collect();
                     doc.insert("explicit_null".to_string(), Value::Null);
-                    doc.insert("__zsbin__field_0".to_string(), Value::Bool(true));
+                    doc.insert("field_0".to_string(), Value::Bytes(vec![1]));
                     Value::Object(doc)
                 })
                 .collect(),
@@ -4836,15 +4787,15 @@ mod tests {
 
     #[test]
     fn test_insert_many_empty() {
-        let docs = json!([]);
+        let docs = value!([]);
         let result = build_insert_many(&s("app1"), "users", &tschema(), &docs);
         assert!(result.is_err(), "expected error for empty array");
     }
 
     #[test]
     fn test_update_many() {
-        let filter = json!({"active": true});
-        let update = json!({"status": "verified"});
+        let filter = value!({"active": true});
+        let update = value!({"status": "verified"});
         let q = build_update_many(&s("app1"), "users", &tschema(), &filter, &update).unwrap();
         assert!(
             q.sql.starts_with(r#"UPDATE "app1"."users" SET"#),
@@ -4858,7 +4809,7 @@ mod tests {
 
     #[test]
     fn test_delete_many() {
-        let filter = json!({"active": false});
+        let filter = value!({"active": false});
         let q = build_delete_many(
             &s("app1"),
             "users",
@@ -4874,12 +4825,12 @@ mod tests {
         );
         assert!(q.sql.contains(&treturning()), "sql: {}", q.sql);
         assert!(!q.sql.contains("LIMIT 1 FOR UPDATE"), "sql: {}", q.sql);
-        assert_eq!(q.params, vec!["false"]);
+        assert_eq!(q.params, value!([false]).as_array().unwrap().clone());
     }
 
     #[test]
     fn test_delete_many_no_filter() {
-        let filter = json!({});
+        let filter = value!({});
         let q = build_delete_many(
             &s("app1"),
             "users",
@@ -4895,8 +4846,8 @@ mod tests {
 
     #[test]
     fn test_find_with_select() {
-        let filter = json!({});
-        let select = json!(["name", "email"]);
+        let filter = value!({});
+        let select = value!(["name", "email"]);
         let q = build_find(
             &s("app1"),
             "users",
@@ -4916,14 +4867,14 @@ mod tests {
 
     #[test]
     fn test_find_without_select() {
-        let filter = json!({});
+        let filter = value!({});
         let q = build_find(&s("app1"), "users", &filter, None, None, None, None).unwrap();
         assert!(q.sql.starts_with(&tselect()), "sql: {}", q.sql);
     }
 
     #[test]
     fn test_distinct() {
-        let filter = json!({});
+        let filter = value!({});
         let q = build_distinct(&s("app1"), "users", "country", &filter, &tschema()).unwrap();
         assert!(
             q.sql
@@ -4937,7 +4888,7 @@ mod tests {
 
     #[test]
     fn test_distinct_with_filter() {
-        let filter = json!({"active": true});
+        let filter = value!({"active": true});
         let q = build_distinct(&s("app1"), "users", "role", &filter, &tschema()).unwrap();
         assert!(
             q.sql
@@ -4946,7 +4897,7 @@ mod tests {
             q.sql
         );
         assert!(q.sql.contains(r#"ORDER BY "role""#), "sql: {}", q.sql);
-        assert_eq!(q.params, vec!["true"]);
+        assert_eq!(q.params, value!([true]).as_array().unwrap().clone());
     }
 
     /// After the storage flip, `email`'s own column already holds the
@@ -4954,7 +4905,7 @@ mod tests {
     /// The raw column (holding the real value) must never be named.
     #[test]
     fn distinct_on_a_masked_field_reads_the_masked_column() {
-        let schema = json!({
+        let schema = value!({
             "email": {
                 "type": "string",
                 "mask": { "kind": "email", "classification": "pii" }
@@ -4964,7 +4915,7 @@ mod tests {
             &s("app1"),
             "users",
             "email",
-            &json!({}),
+            &value!({}),
             false,
             &schema,
             SqlDialect::Postgres,
@@ -4986,7 +4937,7 @@ mod tests {
 
     #[test]
     fn test_aggregate_basic() {
-        let pipeline = json!([
+        let pipeline = value!([
             {"$match": {"active": true}},
             {"$group": {"by": "country", "count": {"$count": true}}},
             {"$sort": {"count": -1}},
@@ -5006,7 +4957,7 @@ mod tests {
 
     #[test]
     fn test_aggregate_multi_group() {
-        let pipeline = json!([
+        let pipeline = value!([
             {"$group": {"by": ["country", "city"], "total": {"$sum": "revenue"}}}
         ]);
         let q = build_aggregate(&s("app1"), "orders", &pipeline, &tschema()).unwrap();
@@ -5024,19 +4975,19 @@ mod tests {
 
     #[test]
     fn test_aggregate_having() {
-        let pipeline = json!([
+        let pipeline = value!([
             {"$group": {"by": "category", "cnt": {"$count": true}}},
             {"$having": {"cnt": {"$gte": 10}}}
         ]);
         let q = build_aggregate(&s("app1"), "products", &pipeline, &tschema()).unwrap();
         assert!(q.sql.contains("HAVING COUNT(*) >= $1"), "sql: {}", q.sql);
         assert!(q.sql.contains("GROUP BY"), "sql: {}", q.sql);
-        assert_eq!(q.params, vec!["10"]);
+        assert_eq!(q.params, value!([10]).as_array().unwrap().clone());
     }
 
     #[test]
     fn aggregate_having_creator_timestamp_numeric_bind_is_lowered_per_dialect() {
-        let pipeline = json!([
+        let pipeline = value!([
             {"$group": {"by": "occurred_at", "cnt": {"$count": true}}},
             {"$having": {"$and": [
                 {"occurred_at": {"$gt": -1}},
@@ -5060,7 +5011,7 @@ mod tests {
             "sql: {}",
             pg.sql
         );
-        assert_eq!(pg.params, vec!["-1", "10"]);
+        assert_eq!(pg.params, value!([-1, 10]).as_array().unwrap().clone());
 
         let sqlite = build_aggregate_with_soft_delete_with_dialect(
             &s("app1"),
@@ -5078,12 +5029,12 @@ mod tests {
             "sql: {}",
             sqlite.sql
         );
-        assert_eq!(sqlite.params, vec!["-1", "10"]);
+        assert_eq!(sqlite.params, value!([-1, 10]).as_array().unwrap().clone());
     }
 
     #[test]
     fn test_aggregate_no_group() {
-        let pipeline = json!([
+        let pipeline = value!([
             {"$match": {"active": true}}
         ]);
         let q = build_aggregate(&s("app1"), "users", &pipeline, &tschema()).unwrap();
@@ -5109,7 +5060,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     fn mask_only_ssn_schema() -> Value {
-        json!({
+        value!({
             "ssn": {
                 "type": "string",
                 "mask": { "kind": "last4", "classification": "spi" }
@@ -5120,7 +5071,7 @@ mod tests {
 
     #[test]
     fn sec4_aggregate_group_by_masked_field_reads_the_masked_column() {
-        let pipeline = json!([
+        let pipeline = value!([
             {"$group": {"by": "ssn", "n": {"$count": true}}}
         ]);
         let schema = mask_only_ssn_schema();
@@ -5156,7 +5107,7 @@ mod tests {
 
     #[test]
     fn sec4_aggregate_max_on_masked_field_reads_the_masked_column() {
-        let pipeline = json!([
+        let pipeline = value!([
             {"$group": {"by": "tenant", "top": {"$max": "ssn"}}}
         ]);
         let schema = mask_only_ssn_schema();
@@ -5196,7 +5147,7 @@ mod tests {
             ("$first", r#"(array_agg("ssn"))[1] AS "v""#),
         ];
         for (op, expected_expr) in expected {
-            let pipeline = json!([
+            let pipeline = value!([
                 {"$group": {"by": "tenant", "v": {op: "ssn"}}}
             ]);
             let q = build_aggregate_with_soft_delete_with_dialect(
@@ -5228,8 +5179,8 @@ mod tests {
 
     #[test]
     fn test_update_one_plain() {
-        let filter = json!({"id": 1});
-        let update = json!({"name": "bob"});
+        let filter = value!({"id": 1});
+        let update = value!({"name": "bob"});
         let q = build_update_one(&s("app1"), "users", &tschema(), &filter, &update).unwrap();
         // Plain field: value → SET "name" = $1
         assert!(q.sql.contains(r#""name" = $1"#), "sql: {}", q.sql);
@@ -5244,8 +5195,8 @@ mod tests {
 
     #[test]
     fn test_update_one_set_operator() {
-        let filter = json!({"id": 1});
-        let update = json!({"$set": {"name": "carol"}});
+        let filter = value!({"id": 1});
+        let update = value!({"$set": {"name": "carol"}});
         let q = build_update_one(&s("app1"), "users", &tschema(), &filter, &update).unwrap();
         assert!(q.sql.contains(r#""name" = $1"#), "sql: {}", q.sql);
         assert!(
@@ -5259,7 +5210,7 @@ mod tests {
 
     #[test]
     fn test_delete_one() {
-        let filter = json!({});
+        let filter = value!({});
         let q = build_delete_one(&s("app1"), "users", &tschema(), &filter).unwrap();
         assert!(
             q.sql.contains("WHERE id = (SELECT id FROM") && q.sql.contains("LIMIT 1 FOR UPDATE)"),
@@ -5273,7 +5224,7 @@ mod tests {
 
     #[test]
     fn test_delete_one_with_filter() {
-        let filter = json!({"role": "guest"});
+        let filter = value!({"role": "guest"});
         let q = build_delete_one(&s("app1"), "users", &tschema(), &filter).unwrap();
         assert!(
             q.sql.contains("WHERE id = (SELECT id FROM"),
@@ -5283,12 +5234,12 @@ mod tests {
         // Filter should appear in the subquery
         assert!(q.sql.contains(r#""role" = $1"#), "sql: {}", q.sql);
         assert!(q.sql.contains(&treturning()), "sql: {}", q.sql);
-        assert_eq!(q.params, vec!["guest"]);
+        assert_eq!(q.params, value!(["guest"]).as_array().unwrap().clone());
     }
 
     #[test]
     fn test_order_by_object() {
-        let order = json!({"name": 1, "age": -1});
+        let order = value!({"name": 1, "age": -1});
         let clause = build_order_by(&order).unwrap();
         assert!(
             clause.contains(r#""name" ASC NULLS LAST"#),
@@ -5302,7 +5253,7 @@ mod tests {
 
     #[test]
     fn test_order_by_array() {
-        let order = json!([["name", 1], ["age", -1]]);
+        let order = value!([["name", 1], ["age", -1]]);
         let clause = build_order_by(&order).unwrap();
         // Array form preserves declaration order
         assert!(
@@ -5321,7 +5272,7 @@ mod tests {
 
     #[test]
     fn test_order_by_sqlite_emulates_postgres_null_ordering() {
-        let order = json!({"name": 1, "age": -1});
+        let order = value!({"name": 1, "age": -1});
         let clause = build_order_by_with_dialect(&order, SqlDialect::Sqlite).unwrap();
         assert!(
             clause.contains(r#""name" IS NULL ASC, "name" ASC"#),
@@ -5335,8 +5286,8 @@ mod tests {
 
     #[test]
     fn test_find_with_order() {
-        let filter = json!({});
-        let order = json!({"created_at": -1});
+        let filter = value!({});
+        let order = value!({"created_at": -1});
         let q = build_find(
             &s("app1"),
             "posts",
@@ -5357,8 +5308,8 @@ mod tests {
 
     #[test]
     fn build_find_sqlite_orders_nullable_columns_like_postgres() {
-        let filter = json!({});
-        let order = json!({"optional": 1});
+        let filter = value!({});
+        let order = value!({"optional": 1});
         let q = build_find_with_schema_and_unmask_and_soft_delete_with_dialect(
             &s("app1"),
             "posts",
@@ -5387,18 +5338,21 @@ mod tests {
 
     #[test]
     fn test_and_combinator() {
-        let filter = json!({"$and": [{"status": "active"}, {"verified": true}]});
+        let filter = value!({"$and": [{"status": "active"}, {"verified": true}]});
         let q = build_find(&s("app1"), "users", &filter, None, None, None, None).unwrap();
         assert!(q.sql.contains("AND"), "sql: {}", q.sql);
         assert!(q.sql.contains(r#""status" = $1"#), "sql: {}", q.sql);
         assert!(q.sql.contains(r#""verified" = $2"#), "sql: {}", q.sql);
-        assert_eq!(q.params, vec!["active", "true"]);
+        assert_eq!(
+            q.params,
+            value!(["active", true]).as_array().unwrap().clone()
+        );
     }
 
     #[test]
     fn test_nested_and_or() {
         // { $and: [{ $or: [{a: 1}, {b: 2}] }, {c: 3}] }
-        let filter = json!({"$and": [{"$or": [{"a": 1}, {"b": 2}]}, {"c": 3}]});
+        let filter = value!({"$and": [{"$or": [{"a": 1}, {"b": 2}]}, {"c": 3}]});
         let q = build_find(&s("app1"), "t", &filter, None, None, None, None).unwrap();
         assert!(q.sql.contains("OR"), "sql: {}", q.sql);
         assert!(q.sql.contains("AND"), "sql: {}", q.sql);
@@ -5408,7 +5362,7 @@ mod tests {
     #[test]
     fn test_null_eq() {
         // { field: null } → IS NULL (implicit $eq)
-        let filter = json!({"bio": null});
+        let filter = value!({"bio": null});
         let q = build_find(&s("app1"), "users", &filter, None, None, None, None).unwrap();
         assert_eq!(
             q.sql,
@@ -5420,7 +5374,7 @@ mod tests {
     #[test]
     fn test_ne_null() {
         // { field: { $ne: null } } → IS NOT NULL
-        let filter = json!({"bio": {"$ne": null}});
+        let filter = value!({"bio": {"$ne": null}});
         let q = build_find(&s("app1"), "users", &filter, None, None, None, None).unwrap();
         assert_eq!(
             q.sql,
@@ -5435,43 +5389,46 @@ mod tests {
     #[test]
     fn test_multiple_operators_on_field() {
         // { age: { $gte: 18, $lt: 65 } } — both conditions must appear
-        let filter = json!({"age": {"$gte": 18, "$lt": 65}});
+        let filter = value!({"age": {"$gte": 18, "$lt": 65}});
         let q = build_find(&s("app1"), "users", &filter, None, None, None, None).unwrap();
         assert!(q.sql.contains(r#""age" >= $"#), "sql: {}", q.sql);
         assert!(q.sql.contains(r#""age" < $"#), "sql: {}", q.sql);
         assert_eq!(q.params.len(), 2);
         // Both values present
-        assert!(q.params.contains(&"18".to_string()));
-        assert!(q.params.contains(&"65".to_string()));
+        assert!(q.params.contains(&Value::from(18)));
+        assert!(q.params.contains(&Value::from(65)));
     }
 
     #[test]
     fn test_nin_operator() {
-        let filter = json!({"role": {"$nin": ["admin", "moderator"]}});
+        let filter = value!({"role": {"$nin": ["admin", "moderator"]}});
         let q = build_find(&s("app1"), "users", &filter, None, None, None, None).unwrap();
         assert!(
             q.sql.contains(r#""role" NOT IN ($1, $2)"#),
             "sql: {}",
             q.sql
         );
-        assert_eq!(q.params, vec!["admin", "moderator"]);
+        assert_eq!(
+            q.params,
+            value!(["admin", "moderator"]).as_array().unwrap().clone()
+        );
     }
 
     #[test]
     fn test_like_operator() {
-        let filter = json!({"name": {"$like": "ali%"}});
+        let filter = value!({"name": {"$like": "ali%"}});
         let q = build_find(&s("app1"), "users", &filter, None, None, None, None).unwrap();
         assert_eq!(
             q.sql,
             format!(r#"{} FROM "app1"."users" WHERE "name" LIKE $1"#, tselect())
         );
-        assert_eq!(q.params, vec!["ali%"]);
+        assert_eq!(q.params, value!(["ali%"]).as_array().unwrap().clone());
     }
 
     #[test]
     fn test_empty_and() {
         // { $and: [] } → no WHERE clause
-        let filter = json!({"$and": []});
+        let filter = value!({"$and": []});
         let q = build_find(&s("app1"), "users", &filter, None, None, None, None).unwrap();
         assert!(
             !q.sql.contains("WHERE"),
@@ -5483,7 +5440,7 @@ mod tests {
 
     #[test]
     fn test_empty_or() {
-        let filter = json!({"$or": []});
+        let filter = value!({"$or": []});
         let q = build_find(&s("app1"), "users", &filter, None, None, None, None).unwrap();
         assert!(
             q.sql.contains("WHERE FALSE"),
@@ -5495,7 +5452,7 @@ mod tests {
     #[test]
     fn test_not_with_multiple_fields() {
         // { $not: { a: 1, b: 2 } }
-        let filter = json!({"$not": {"a": 1, "b": 2}});
+        let filter = value!({"$not": {"a": 1, "b": 2}});
         let q = build_find(&s("app1"), "t", &filter, None, None, None, None).unwrap();
         assert!(q.sql.contains("NOT ("), "sql: {}", q.sql);
         assert!(q.sql.contains(r#""a" = $"#), "sql: {}", q.sql);
@@ -5509,7 +5466,7 @@ mod tests {
 
     #[test]
     fn test_collection_sql_injection() {
-        let filter = json!({});
+        let filter = value!({});
         let result = build_find(
             &s("app1"),
             "users; DROP TABLE users",
@@ -5548,7 +5505,7 @@ mod tests {
     #[test]
     fn test_field_name_with_quotes() {
         // Field name containing double quotes should be escaped (doubled) in the identifier
-        let filter = json!({"name": "alice"});
+        let filter = value!({"name": "alice"});
         let _q = build_find(&s("app1"), "users", &filter, None, None, None, None).unwrap();
         // Standard field works; now verify quote_ident escapes embedded quotes
         let quoted = super::quote_ident(r#"col"name"#);
@@ -5557,7 +5514,7 @@ mod tests {
 
     #[test]
     fn test_collection_empty() {
-        let filter = json!({});
+        let filter = value!({});
         let result = build_find(&s("app1"), "", &filter, None, None, None, None);
         assert!(result.is_err(), "empty collection name should fail");
         let msg = result.unwrap_err().to_string();
@@ -5573,22 +5530,22 @@ mod tests {
 
     #[test]
     fn test_insert_with_boolean() {
-        let doc = json!({"active": true});
+        let doc = value!({"active": true});
         let q = build_insert(&s("app1"), "users", &tschema(), &doc).unwrap();
-        assert_eq!(q.params, vec!["true"]);
+        assert_eq!(q.params, value!([true]).as_array().unwrap().clone());
     }
 
     #[test]
     fn test_insert_with_null_field() {
-        let doc = json!({"name": "alice", "bio": null});
+        let doc = value!({"name": "alice", "bio": null});
         let q = build_insert(&s("app1"), "users", &tschema(), &doc).unwrap();
         // null is inlined as a SQL `NULL` literal — not bound as a
         // text-format parameter (the wire protocol can't represent
         // NULL as a parameter; empty string would fail enum / NOT
         // NULL CHECKs).
-        assert!(q.params.contains(&"alice".to_string()));
+        assert!(q.params.contains(&Value::from("alice")));
         assert!(
-            !q.params.contains(&String::new()),
+            !q.params.contains(&Value::from("")),
             "null must not be bound as empty-string param"
         );
         assert!(
@@ -5600,20 +5557,20 @@ mod tests {
 
     #[test]
     fn test_insert_with_number() {
-        let doc = json!({"age": 30});
+        let doc = value!({"age": 30});
         let q = build_insert(&s("app1"), "users", &tschema(), &doc).unwrap();
-        assert_eq!(q.params, vec!["30"]);
+        assert_eq!(q.params, value!([30]).as_array().unwrap().clone());
     }
 
     #[test]
     fn test_insert_with_nested_json() {
-        let doc = json!({"settings": {"theme": "dark"}});
+        let doc = value!({"settings": {"theme": "dark"}});
         let q = build_insert(&s("app1"), "users", &tschema(), &doc).unwrap();
         // Nested object is serialized as JSON text
         assert_eq!(q.params.len(), 1);
         let param = &q.params[0];
         assert!(
-            param.contains("theme") && param.contains("dark"),
+            param.get("theme").and_then(Value::as_str) == Some("dark"),
             "nested object should be JSON-serialized: {param}"
         );
     }
@@ -5627,7 +5584,7 @@ mod tests {
         // Empty pipeline → no $group, select * is fine (not an error in current impl)
         // The spec says "no $group → error", but the current code returns SELECT * FROM.
         // Test that the function at minimum returns without panicking and produces valid SQL.
-        let pipeline = json!([]);
+        let pipeline = value!([]);
         let q = build_aggregate(&s("app1"), "users", &pipeline, &tschema()).unwrap();
         assert!(q.sql.starts_with(&tselect()), "sql: {}", q.sql);
     }
@@ -5635,17 +5592,17 @@ mod tests {
     #[test]
     fn test_aggregate_match_only() {
         // Only $match without $group → select * (same as no_group test)
-        let pipeline = json!([{"$match": {"status": "active"}}]);
+        let pipeline = value!([{"$match": {"status": "active"}}]);
         let q = build_aggregate(&s("app1"), "users", &pipeline, &tschema()).unwrap();
         assert!(q.sql.starts_with(&tselect()), "sql: {}", q.sql);
         assert!(!q.sql.contains("GROUP BY"), "sql: {}", q.sql);
         assert!(q.sql.contains("WHERE"), "sql: {}", q.sql);
-        assert_eq!(q.params, vec!["active"]);
+        assert_eq!(q.params, value!(["active"]).as_array().unwrap().clone());
     }
 
     #[test]
     fn test_aggregate_all_agg_functions() {
-        let pipeline = json!([{
+        let pipeline = value!([{
             "$group": {
                 "by": "category",
                 "n":   {"$count": true},
@@ -5670,7 +5627,7 @@ mod tests {
 
     #[test]
     fn test_unsupported_filter_operator() {
-        let filter = json!({"name": {"$regex": "^ali"}});
+        let filter = value!({"name": {"$regex": "^ali"}});
         let result = build_find(&s("app1"), "users", &filter, None, None, None, None);
         assert!(result.is_err(), "unsupported operator should fail");
         let msg = result.unwrap_err().to_string();
@@ -5679,8 +5636,8 @@ mod tests {
 
     #[test]
     fn test_unsupported_update_operator() {
-        let filter = json!({});
-        let update = json!({"name": {"$unset": true}});
+        let filter = value!({});
+        let update = value!({"name": {"$unset": true}});
         let result = build_update_one(&s("app1"), "users", &tschema(), &filter, &update);
         assert!(result.is_err(), "unsupported update operator should fail");
         let msg = result.unwrap_err().to_string();
@@ -5689,7 +5646,7 @@ mod tests {
 
     #[test]
     fn test_insert_empty_doc() {
-        let doc = json!({});
+        let doc = value!({});
         let result = build_insert(&s("app1"), "users", &tschema(), &doc);
         assert!(result.is_err(), "empty document should fail");
         let msg = result.unwrap_err().to_string();
@@ -5701,7 +5658,7 @@ mod tests {
 
     #[test]
     fn test_insert_non_object() {
-        let doc = json!("just a string");
+        let doc = value!("just a string");
         let result = build_insert(&s("app1"), "users", &tschema(), &doc);
         assert!(result.is_err(), "non-object document should fail");
         let msg = result.unwrap_err().to_string();
@@ -5710,8 +5667,8 @@ mod tests {
 
     #[test]
     fn test_update_empty_fields() {
-        let filter = json!({});
-        let update = json!({});
+        let filter = value!({});
+        let update = value!({});
         let result = build_update_one(&s("app1"), "users", &tschema(), &filter, &update);
         assert!(result.is_err(), "empty update should fail");
         let msg = result.unwrap_err().to_string();
@@ -5723,7 +5680,7 @@ mod tests {
 
     #[test]
     fn test_in_non_array() {
-        let filter = json!({"field": {"$in": "not-an-array"}});
+        let filter = value!({"field": {"$in": "not-an-array"}});
         let result = build_find(&s("app1"), "users", &filter, None, None, None, None);
         assert!(result.is_err(), "$in with non-array should fail");
         let msg = result.unwrap_err().to_string();
@@ -5732,7 +5689,7 @@ mod tests {
 
     #[test]
     fn test_exists_non_bool() {
-        let filter = json!({"field": {"$exists": "yes"}});
+        let filter = value!({"field": {"$exists": "yes"}});
         let result = build_find(&s("app1"), "users", &filter, None, None, None, None);
         assert!(result.is_err(), "$exists with non-bool should fail");
         let msg = result.unwrap_err().to_string();
@@ -5745,7 +5702,7 @@ mod tests {
 
     #[test]
     fn test_aggregate_first_without_sort() {
-        let pipeline = json!([
+        let pipeline = value!([
             {"$group": {"by": "department", "top_name": {"$first": "name"}}}
         ]);
         let q = build_aggregate(&s("app1"), "employees", &pipeline, &tschema()).unwrap();
@@ -5759,7 +5716,7 @@ mod tests {
 
     #[test]
     fn test_aggregate_first_with_sort() {
-        let pipeline = json!([
+        let pipeline = value!([
             {"$sort": {"salary": -1}},
             {"$group": {"by": "department", "top_name": {"$first": "name"}}}
         ]);
@@ -5775,7 +5732,7 @@ mod tests {
 
     #[test]
     fn test_aggregate_first_with_multi_sort() {
-        let pipeline = json!([
+        let pipeline = value!([
             {"$sort": {"salary": -1, "name": 1}},
             {"$group": {"by": "department", "top_name": {"$first": "name"}}}
         ]);
@@ -5792,7 +5749,7 @@ mod tests {
 
     #[test]
     fn test_aggregate_first_sort_does_not_affect_other_aggs() {
-        let pipeline = json!([
+        let pipeline = value!([
             {"$sort": {"salary": -1}},
             {"$group": {
                 "by": "department",
@@ -5816,8 +5773,8 @@ mod tests {
 
     #[test]
     fn test_upsert_basic() {
-        let doc = json!({"name": "alice", "age": 30});
-        let conflict = json!(["name"]);
+        let doc = value!({"name": "alice", "age": 30});
+        let conflict = value!(["name"]);
         let q = build_upsert(&s("app1"), "users", &tschema(), &doc, &conflict).unwrap();
         assert!(q.sql.contains("INSERT INTO"), "sql: {}", q.sql);
         assert!(q.sql.contains("ON CONFLICT"), "sql: {}", q.sql);
@@ -5835,8 +5792,8 @@ mod tests {
 
     #[test]
     fn test_upsert_multiple_conflict_fields() {
-        let doc = json!({"email": "a@b.com", "name": "alice", "age": 30});
-        let conflict = json!(["email", "name"]);
+        let doc = value!({"email": "a@b.com", "name": "alice", "age": 30});
+        let conflict = value!(["email", "name"]);
         let q = build_upsert(&s("app1"), "users", &tschema(), &doc, &conflict).unwrap();
         assert!(
             q.sql.contains(r#"ON CONFLICT ("email", "name")"#),
@@ -5865,8 +5822,8 @@ mod tests {
     #[test]
     fn test_upsert_all_conflict_cols() {
         // When all columns are conflict columns, we still produce a valid DO UPDATE SET
-        let doc = json!({"email": "a@b.com"});
-        let conflict = json!(["email"]);
+        let doc = value!({"email": "a@b.com"});
+        let conflict = value!(["email"]);
         let q = build_upsert(&s("app1"), "users", &tschema(), &doc, &conflict).unwrap();
         assert!(q.sql.contains("DO UPDATE SET"), "sql: {}", q.sql);
         assert!(q.sql.contains(&treturning()), "sql: {}", q.sql);
@@ -5874,7 +5831,7 @@ mod tests {
 
     #[test]
     fn test_upsert_preserves_insert_only_system_fields_on_conflict() {
-        let doc = json!({
+        let doc = value!({
             "email": "a@b.com",
             "id": "user_new",
             "created_at": "2026-05-25T00:00:00Z",
@@ -5882,7 +5839,7 @@ mod tests {
             "updated_by": "usr_actor",
             "name": "alice"
         });
-        let conflict = json!(["email"]);
+        let conflict = value!(["email"]);
         let q = build_upsert(&s("app1"), "users", &tschema(), &doc, &conflict).unwrap();
         assert!(
             !q.sql.contains(r#""id" = EXCLUDED."id""#),
@@ -5913,8 +5870,8 @@ mod tests {
     /// [`the_upserts_version_bump_qualifies_the_column_it_reads`].
     #[test]
     fn test_upsert_autobumps_version_and_updated_at_when_omitted() {
-        let doc = json!({"email": "a@b.com", "name": "alice"});
-        let conflict = json!(["email"]);
+        let doc = value!({"email": "a@b.com", "name": "alice"});
+        let conflict = value!(["email"]);
         let q = build_upsert_with_dialect(
             &s("app1"),
             "users",
@@ -5940,13 +5897,13 @@ mod tests {
 
     #[test]
     fn test_upsert_respects_creator_supplied_version_and_updated_at() {
-        let doc = json!({
+        let doc = value!({
             "email": "a@b.com",
             "name": "alice",
             "version": 99,
             "updated_at": "2026-05-25T00:00:00Z"
         });
-        let conflict = json!(["email"]);
+        let conflict = value!(["email"]);
         let q = build_upsert_with_dialect(
             &s("app1"),
             "users",
@@ -5980,32 +5937,32 @@ mod tests {
 
     #[test]
     fn test_upsert_empty_doc_error() {
-        let doc = json!({});
-        let conflict = json!(["name"]);
+        let doc = value!({});
+        let conflict = value!(["name"]);
         let result = build_upsert(&s("app1"), "users", &tschema(), &doc, &conflict);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_upsert_empty_conflict_fields_error() {
-        let doc = json!({"name": "alice"});
-        let conflict = json!([]);
+        let doc = value!({"name": "alice"});
+        let conflict = value!([]);
         let result = build_upsert(&s("app1"), "users", &tschema(), &doc, &conflict);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_upsert_invalid_collection_error() {
-        let doc = json!({"name": "alice"});
-        let conflict = json!(["name"]);
+        let doc = value!({"name": "alice"});
+        let conflict = value!(["name"]);
         let result = build_upsert(&s("app1"), "users; DROP TABLE", &tschema(), &doc, &conflict);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_find_or_create_emits_xmax_returning() {
-        let doc = json!({"email": "a@b.com", "name": "alice"});
-        let conflict = json!(["email"]);
+        let doc = value!({"email": "a@b.com", "name": "alice"});
+        let conflict = value!(["email"]);
         let q = build_find_or_create(&s("app1"), "users", &tschema(), &doc, &conflict).unwrap();
         assert!(q.sql.contains("INSERT INTO"), "sql: {}", q.sql);
         assert!(q.sql.contains(r#"ON CONFLICT ("email")"#), "sql: {}", q.sql);
@@ -6025,15 +5982,15 @@ mod tests {
 
     #[test]
     fn test_find_or_create_rejects_empty_conflict() {
-        let doc = json!({"email": "a@b.com"});
-        let conflict = json!([]);
+        let doc = value!({"email": "a@b.com"});
+        let conflict = value!([]);
         assert!(build_find_or_create(&s("app1"), "users", &tschema(), &doc, &conflict).is_err());
     }
 
     #[test]
     fn test_find_or_create_rejects_empty_doc() {
-        let doc = json!({});
-        let conflict = json!(["email"]);
+        let doc = value!({});
+        let conflict = value!(["email"]);
         assert!(build_find_or_create(&s("app1"), "users", &tschema(), &doc, &conflict).is_err());
     }
 
@@ -6050,8 +6007,8 @@ mod tests {
         // Regression: old shape wrapped with `to_jsonb($N::text)` which
         // stringified numbers. New shape uses `$N::jsonb` with the operand
         // serialized as JSON, so `42` stays a JSON number.
-        let filter = json!({"id": 1});
-        let update = json!({"scores": {"$push": 42}});
+        let filter = value!({"id": 1});
+        let update = value!({"scores": {"$push": 42}});
         let q = build_update_one(&s("app1"), "games", &tschema(), &filter, &update).unwrap();
         assert!(
             q.sql.contains(r#""scores" = "scores" || $1::jsonb"#),
@@ -6060,45 +6017,37 @@ mod tests {
         );
         // Param is the JSON text "42", not "\"42\"" — Postgres parses it
         // back as a JSON number on the ::jsonb cast.
-        assert_eq!(q.params[0], "42");
+        assert_eq!(q.params[0], value!(42));
     }
 
     #[test]
     fn test_update_push_bool_preserves_type() {
-        let filter = json!({"id": 1});
-        let update = json!({"flags": {"$push": true}});
+        let filter = value!({"id": 1});
+        let update = value!({"flags": {"$push": true}});
         let q = build_update_one(&s("app1"), "games", &tschema(), &filter, &update).unwrap();
         assert!(
             q.sql.contains(r#""flags" = "flags" || $1::jsonb"#),
             "sql: {}",
             q.sql
         );
-        assert_eq!(q.params[0], "true");
+        assert_eq!(q.params[0], value!(true));
     }
 
     #[test]
     fn test_update_push_object_preserves_type() {
-        let filter = json!({"id": 1});
-        let update = json!({"entries": {"$push": {"k": "v", "n": 3}}});
+        let filter = value!({"id": 1});
+        let update = value!({"entries": {"$push": {"k": "v", "n": 3}}});
         let q = build_update_one(&s("app1"), "log", &tschema(), &filter, &update).unwrap();
         assert!(
             q.sql.contains(r#""entries" = "entries" || $1::jsonb"#),
             "sql: {}",
             q.sql
         );
-        // Object → compact JSON text. Keys serialized in serde_json::Value
+        // Object → compact JSON text. Keys serialized in crate::value::Value
         // order (preserves insertion via the default feature? -- we don't
         // assert ordering, just that both keys are present).
-        assert!(
-            q.params[0].contains(r#""k":"v""#),
-            "params[0] = {}",
-            q.params[0]
-        );
-        assert!(
-            q.params[0].contains(r#""n":3"#),
-            "params[0] = {}",
-            q.params[0]
-        );
+        assert!(q.params[0]["k"] == "v", "params[0] = {}", q.params[0]);
+        assert!(q.params[0]["n"] == 3, "params[0] = {}", q.params[0]);
     }
 
     #[test]
@@ -6106,8 +6055,8 @@ mod tests {
         // Regression: old shape `"tags" - $1` is the jsonb "remove key"
         // operator — it mutates objects, not arrays. The subquery form
         // correctly removes array elements equal to the value.
-        let filter = json!({"id": 1});
-        let update = json!({"scores": {"$pull": 100}});
+        let filter = value!({"id": 1});
+        let update = value!({"scores": {"$pull": 100}});
         let q = build_update_one(&s("app1"), "games", &tschema(), &filter, &update).unwrap();
         assert!(
             q.sql
@@ -6115,13 +6064,13 @@ mod tests {
             "sql: {}",
             q.sql
         );
-        assert_eq!(q.params[0], "100");
+        assert_eq!(q.params[0], value!(100));
     }
 
     #[test]
     fn test_update_add_to_set_number() {
-        let filter = json!({"id": 1});
-        let update = json!({"ids": {"$addToSet": 7}});
+        let filter = value!({"id": 1});
+        let update = value!({"ids": {"$addToSet": 7}});
         let q = build_update_one(&s("app1"), "games", &tschema(), &filter, &update).unwrap();
         assert!(
             q.sql.contains(
@@ -6133,15 +6082,15 @@ mod tests {
         // $addToSet reuses the same parameter index for the containment
         // check and the append — only one param is pushed.
         assert_eq!(q.params.len(), 2, "params: {:?}", q.params); // the op param + the filter param (id = 1)
-        assert_eq!(q.params[0], "7");
+        assert_eq!(q.params[0], value!(7));
     }
 
     #[test]
     fn test_update_updated_at_auto_injected() {
         // Every UPDATE implicitly bumps updated_at unless the caller
         // explicitly set it. This is part of the platform contract.
-        let filter = json!({"id": 1});
-        let update = json!({"name": "bob"});
+        let filter = value!({"id": 1});
+        let update = value!({"name": "bob"});
         let q = build_update_one(&s("app1"), "users", &tschema(), &filter, &update).unwrap();
         assert!(q.sql.contains(r#""updated_at" = NOW()"#), "sql: {}", q.sql);
     }
@@ -6150,9 +6099,9 @@ mod tests {
     fn test_update_updated_at_not_overridden_when_explicit() {
         // If the caller explicitly provides updated_at, we must NOT add
         // our own `NOW()` clause — would collide and the user's value wins.
-        let filter = json!({"id": 1});
+        let filter = value!({"id": 1});
         let explicit_ts = "2026-01-01T00:00:00Z";
-        let update = json!({"name": "bob", "updated_at": explicit_ts});
+        let update = value!({"name": "bob", "updated_at": explicit_ts});
         let q = build_update_one(&s("app1"), "users", &tschema(), &filter, &update).unwrap();
         assert!(
             !q.sql.contains("NOW()"),
@@ -6160,7 +6109,7 @@ mod tests {
             q.sql
         );
         assert!(
-            q.params.contains(&explicit_ts.to_string()),
+            q.params.contains(&Value::from(explicit_ts)),
             "params: {:?}",
             q.params
         );
@@ -6171,26 +6120,26 @@ mod tests {
         // Regression: early impl processed only the $set key and dropped
         // sibling top-level fields. After 6a309b3 the builder flattens
         // $set into the top level, so both `name` and `age` must appear.
-        let filter = json!({"id": 1});
-        let update = json!({"$set": {"name": "alice"}, "age": 30});
+        let filter = value!({"id": 1});
+        let update = value!({"$set": {"name": "alice"}, "age": 30});
         let q = build_update_one(&s("app1"), "users", &tschema(), &filter, &update).unwrap();
         assert!(q.sql.contains(r#""name" = $"#), "sql: {}", q.sql);
         assert!(q.sql.contains(r#""age" = $"#), "sql: {}", q.sql);
-        assert!(q.params.contains(&"alice".to_string()));
-        assert!(q.params.contains(&"30".to_string()));
+        assert!(q.params.contains(&Value::from("alice")));
+        assert!(q.params.contains(&Value::from(30)));
     }
 
     #[test]
     fn test_update_set_coexists_with_inc() {
         // Mixed $set (flattened) + $inc on a sibling field. Both must
         // produce SET clauses and share the same params vector.
-        let filter = json!({"id": 1});
-        let update = json!({"$set": {"name": "alice"}, "views": {"$inc": 5}});
+        let filter = value!({"id": 1});
+        let update = value!({"$set": {"name": "alice"}, "views": {"$inc": 5}});
         let q = build_update_one(&s("app1"), "posts", &tschema(), &filter, &update).unwrap();
         assert!(q.sql.contains(r#""name" = $"#), "sql: {}", q.sql);
         assert!(q.sql.contains(r#""views" = "views" + $"#), "sql: {}", q.sql);
-        assert!(q.params.contains(&"alice".to_string()));
-        assert!(q.params.contains(&"5".to_string()));
+        assert!(q.params.contains(&Value::from("alice")));
+        assert!(q.params.contains(&Value::from(5)));
     }
 
     #[test]
@@ -6198,10 +6147,10 @@ mod tests {
         // $inc operand is pushed via value_to_param — a float should render
         // as "1.5" (not "1.5e0" or similar), so Postgres's ::numeric cast
         // accepts it without a client-side conversion.
-        let filter = json!({"id": 1});
-        let update = json!({"balance": {"$inc": 1.5}});
+        let filter = value!({"id": 1});
+        let update = value!({"balance": {"$inc": 1.5}});
         let q = build_update_one(&s("app1"), "accounts", &tschema(), &filter, &update).unwrap();
-        assert_eq!(q.params[0], "1.5");
+        assert_eq!(q.params[0], value!(1.5));
     }
 
     #[test]
@@ -6209,23 +6158,23 @@ mod tests {
         // Negative $inc must still render with the `+` operator (caller
         // uses $dec for subtraction semantically). Postgres handles the
         // minus sign on the numeric literal fine.
-        let filter = json!({"id": 1});
-        let update = json!({"stock": {"$inc": -3}});
+        let filter = value!({"id": 1});
+        let update = value!({"stock": {"$inc": -3}});
         let q = build_update_one(&s("app1"), "items", &tschema(), &filter, &update).unwrap();
         assert!(
             q.sql.contains(r#""stock" = "stock" + $1::numeric"#),
             "sql: {}",
             q.sql
         );
-        assert_eq!(q.params[0], "-3");
+        assert_eq!(q.params[0], value!(-3));
     }
 
     #[test]
     fn test_update_param_indexing_with_filter() {
         // SET params come first, WHERE params come after. The `$N`
         // placeholders must be contiguous across both halves.
-        let filter = json!({"status": "active"});
-        let update = json!({"name": "alice", "views": {"$inc": 1}});
+        let filter = value!({"status": "active"});
+        let update = value!({"name": "alice", "views": {"$inc": 1}});
         let q = build_update_one(&s("app1"), "posts", &tschema(), &filter, &update).unwrap();
         // Two SET params: name ($1), inc ($2); one WHERE param: status ($3).
         assert_eq!(q.params.len(), 3, "params: {:?}", q.params);
@@ -6238,8 +6187,8 @@ mod tests {
         // Empty update object should surface as an error rather than
         // produce `SET (nothing)` or `SET "updated_at" = NOW()` alone,
         // which would silently bump timestamps without user intent.
-        let filter = json!({"id": 1});
-        let update = json!({});
+        let filter = value!({"id": 1});
+        let update = value!({});
         let err = build_update_one(&s("app1"), "users", &tschema(), &filter, &update).unwrap_err();
         // Variant is QueryError::InvalidFilter — compare Display form so
         // this doesn't need to import the enum.
@@ -6251,8 +6200,8 @@ mod tests {
 
     #[test]
     fn test_update_unknown_operator_rejected() {
-        let filter = json!({"id": 1});
-        let update = json!({"tags": {"$weirdOp": "val"}});
+        let filter = value!({"id": 1});
+        let update = value!({"tags": {"$weirdOp": "val"}});
         let err = build_update_one(&s("app1"), "posts", &tschema(), &filter, &update).unwrap_err();
         assert!(
             format!("{err}").contains("$weirdOp"),
@@ -6264,8 +6213,8 @@ mod tests {
     fn test_update_many_auto_updates_timestamp() {
         // updateMany shares the same build_set_clauses path, so the
         // auto-timestamp behaviour must hold there too.
-        let filter = json!({"status": "draft"});
-        let update = json!({"status": "published"});
+        let filter = value!({"status": "draft"});
+        let update = value!({"status": "published"});
         let q = build_update_many(&s("app1"), "posts", &tschema(), &filter, &update).unwrap();
         assert!(q.sql.contains(r#""updated_at" = NOW()"#), "sql: {}", q.sql);
         // updateMany must not wrap the WHERE in a LIMIT 1 subquery.
@@ -6275,8 +6224,8 @@ mod tests {
     #[test]
     fn test_update_set_without_top_level_fields() {
         // Pure $set with no siblings — flattening must still work.
-        let filter = json!({"id": 1});
-        let update = json!({"$set": {"name": "alice", "age": 30}});
+        let filter = value!({"id": 1});
+        let update = value!({"$set": {"name": "alice", "age": 30}});
         let q = build_update_one(&s("app1"), "users", &tschema(), &filter, &update).unwrap();
         assert!(q.sql.contains(r#""name" = $"#), "sql: {}", q.sql);
         assert!(q.sql.contains(r#""age" = $"#), "sql: {}", q.sql);
@@ -6286,8 +6235,8 @@ mod tests {
     fn test_update_set_non_object_rejected() {
         // `$set` value that isn't an object should error, not be
         // silently treated as a scalar $set on a column named "$set".
-        let filter = json!({"id": 1});
-        let update = json!({"$set": "not an object"});
+        let filter = value!({"id": 1});
+        let update = value!({"$set": "not an object"});
         let err = build_update_one(&s("app1"), "users", &tschema(), &filter, &update).unwrap_err();
         assert!(
             format!("{err}").contains("$set"),
@@ -6299,8 +6248,8 @@ mod tests {
     fn test_update_string_column_name_is_quoted() {
         // Column names get quoted via quote_ident, so a column with a
         // reserved word as its name still works.
-        let filter = json!({"id": 1});
-        let update = json!({"user": "alice"}); // "user" is a reserved word
+        let filter = value!({"id": 1});
+        let update = value!({"user": "alice"}); // "user" is a reserved word
         let q = build_update_one(&s("app1"), "accounts", &tschema(), &filter, &update).unwrap();
         assert!(q.sql.contains(r#""user" = $"#), "sql: {}", q.sql);
     }
@@ -6318,8 +6267,8 @@ mod tests {
 
     #[test]
     fn update_appends_version_increment_to_set_clause() {
-        let filter = json!({ "id": "post_x" });
-        let update = json!({ "title": "new" });
+        let filter = value!({ "id": "post_x" });
+        let update = value!({ "title": "new" });
         let autobump = SystemFieldAutoBump {
             dispatch_write: true,
             actor_id: Some("usr_actor"),
@@ -6344,8 +6293,8 @@ mod tests {
 
     #[test]
     fn update_appends_version_increment_for_anonymous_dispatch_write() {
-        let filter = json!({ "id": "post_x" });
-        let update = json!({ "title": "new" });
+        let filter = value!({ "id": "post_x" });
+        let update = value!({ "title": "new" });
         let autobump = SystemFieldAutoBump {
             dispatch_write: true,
             ..Default::default()
@@ -6369,8 +6318,8 @@ mod tests {
 
     #[test]
     fn update_appends_updated_at_now_pg() {
-        let filter = json!({ "id": "post_x" });
-        let update = json!({ "title": "new" });
+        let filter = value!({ "id": "post_x" });
+        let update = value!({ "title": "new" });
         let autobump = SystemFieldAutoBump {
             dispatch_write: true,
             actor_id: Some("usr_actor"),
@@ -6395,8 +6344,8 @@ mod tests {
 
     #[test]
     fn update_appends_updated_at_current_timestamp_sqlite() {
-        let filter = json!({ "id": "post_x" });
-        let update = json!({ "title": "new" });
+        let filter = value!({ "id": "post_x" });
+        let update = value!({ "title": "new" });
         let autobump = SystemFieldAutoBump {
             dispatch_write: true,
             actor_id: Some("usr_actor"),
@@ -6427,8 +6376,8 @@ mod tests {
 
     #[test]
     fn update_appends_updated_by_from_session_actor() {
-        let filter = json!({ "id": "post_x" });
-        let update = json!({ "title": "new" });
+        let filter = value!({ "id": "post_x" });
+        let update = value!({ "title": "new" });
         // `dispatch_write` is now what gates the `updated_by` assignment, not
         // the actor's presence. It had to move: an anonymous dispatch write
         // assigns NULL, so "an actor is bound" can no longer distinguish a
@@ -6456,7 +6405,7 @@ mod tests {
         );
         // The actor id must be present in the params vector.
         assert!(
-            q.params.contains(&"usr_session".to_string()),
+            q.params.contains(&Value::from("usr_session")),
             "params must include actor id: {:?}",
             q.params,
         );
@@ -6467,8 +6416,8 @@ mod tests {
         // No actor: the dispatch path emits no `updated_by` SET clause.
         // Note: with `actor_id = None` AND no `skip_*` flags, the
         // default fallback applies — only `updated_at` auto-bumps.
-        let filter = json!({ "id": "post_x" });
-        let update = json!({ "title": "new" });
+        let filter = value!({ "id": "post_x" });
+        let update = value!({ "title": "new" });
         let autobump = SystemFieldAutoBump::default();
         let q = build_update_one_with_system_fields(
             &s("app1"),
@@ -6491,8 +6440,8 @@ mod tests {
     fn update_respects_creator_supplied_version_pr4() {
         // When the creator's patch carries `version: 99`, the auto-bump
         // MUST NOT fire (the explicit value wins per Q-SF-B).
-        let filter = json!({ "id": "post_x" });
-        let update = json!({ "title": "new", "version": 99 });
+        let filter = value!({ "id": "post_x" });
+        let update = value!({ "title": "new", "version": 99 });
         let autobump = SystemFieldAutoBump {
             actor_id: Some("usr_actor"),
             skip_version: true,
@@ -6521,7 +6470,7 @@ mod tests {
             q.sql,
         );
         assert!(
-            q.params.contains(&"99".to_string()),
+            q.params.contains(&Value::from(99)),
             "params: {:?}",
             q.params
         );
@@ -6529,9 +6478,9 @@ mod tests {
 
     #[test]
     fn update_respects_creator_supplied_updated_at_pr4() {
-        let filter = json!({ "id": "post_x" });
+        let filter = value!({ "id": "post_x" });
         let explicit = "2026-01-01T00:00:00Z";
-        let update = json!({ "title": "new", "updated_at": explicit });
+        let update = value!({ "title": "new", "updated_at": explicit });
         let autobump = SystemFieldAutoBump {
             actor_id: Some("usr_actor"),
             skip_updated_at: true,
@@ -6553,7 +6502,7 @@ mod tests {
             q.sql,
         );
         assert!(
-            q.params.contains(&explicit.to_string()),
+            q.params.contains(&Value::from(explicit)),
             "params: {:?}",
             q.params
         );
@@ -6564,11 +6513,9 @@ mod tests {
         // Build a doc with an encrypted-column marker. The auto-bump
         // version/updated_at/updated_by SET clauses must NOT be wrapped
         // with the encrypted-column placeholder shape.
-        let filter = json!({ "id": "post_x" });
-        // `__zsbin__secret` marks the `secret` column encrypted.
-        let update = json!({
-            "secret": "ciphertext",
-            "__zsbin__secret": true,
+        let filter = value!({ "id": "post_x" });
+        let update = value!({
+            "secret": Value::Bytes(b"ciphertext".to_vec()),
         });
         let autobump = SystemFieldAutoBump {
             actor_id: Some("usr_actor"),
@@ -6586,8 +6533,8 @@ mod tests {
         .unwrap();
         // Encrypted column gets the decode(...)::bytea wrap.
         assert!(
-            q.sql.contains("decode("),
-            "encrypted column must still get decode wrap: {}",
+            q.params.iter().any(|p| p.as_bytes().is_some()),
+            "encrypted column must have a native binary bind: {}",
             q.sql,
         );
         // Auto-bumps are plain SET clauses — must NOT be inside a decode().
@@ -6607,10 +6554,9 @@ mod tests {
     fn update_auto_bump_uses_distinct_bind_params_from_encryption_pass() {
         // Encryption pass binds the ciphertext as $1. The updated_by
         // auto-bump must bind to $2 (or later) — not collide with $1.
-        let filter = json!({ "id": "post_x" });
-        let update = json!({
-            "secret": "ciphertext",
-            "__zsbin__secret": true,
+        let filter = value!({ "id": "post_x" });
+        let update = value!({
+            "secret": Value::Bytes(b"ciphertext".to_vec()),
         });
         let autobump = SystemFieldAutoBump {
             dispatch_write: true,
@@ -6637,7 +6583,7 @@ mod tests {
         let cipher_pos = q
             .params
             .iter()
-            .position(|p| p == "ciphertext")
+            .position(|p| p.as_bytes() == Some(b"ciphertext".as_slice()))
             .expect("ciphertext must be bound");
         assert!(
             actor_pos > cipher_pos,
@@ -6652,8 +6598,8 @@ mod tests {
         // `build_where` emits `"version" = $N`. The SQL builder
         // doesn't need special CAS handling; the auto-bump SET
         // composes with the WHERE naturally.
-        let filter = json!({ "id": "post_x", "version": 5 });
-        let update = json!({ "title": "new" });
+        let filter = value!({ "id": "post_x", "version": 5 });
+        let update = value!({ "title": "new" });
         let autobump = SystemFieldAutoBump {
             actor_id: Some("usr_actor"),
             ..Default::default()
@@ -6675,19 +6621,15 @@ mod tests {
             q.sql,
         );
         // The version `5` must appear as a bound param.
-        assert!(
-            q.params.contains(&"5".to_string()),
-            "params: {:?}",
-            q.params
-        );
+        assert!(q.params.contains(&Value::from(5)), "params: {:?}", q.params);
     }
 
     #[test]
     fn update_default_path_emits_dialect_aware_updated_at_sqlite() {
         // Direct calls to the legacy wrapper on the SQLite arm: the
         // auto-bump is dialect-aware rather than hardcoding NOW().
-        let filter = json!({ "id": "post_x" });
-        let update = json!({ "title": "new" });
+        let filter = value!({ "id": "post_x" });
+        let update = value!({ "title": "new" });
         let q = build_update_one_with_dialect(
             &s("app1"),
             "posts",
@@ -6713,8 +6655,8 @@ mod tests {
         // and the SET clause stamps version=99 verbatim (the
         // auto-bump is suppressed because the creator supplied an
         // explicit value).
-        let filter = serde_json::json!({ "id": "post_x", "version": 5 });
-        let update = serde_json::json!({ "title": "new", "version": 99 });
+        let filter = crate::value!({ "id": "post_x", "version": 5 });
+        let update = crate::value!({ "title": "new", "version": 99 });
         let autobump = SystemFieldAutoBump {
             actor_id: Some("usr_actor"),
             // The caller's `apply_system_fields_on_update` would set
@@ -6746,28 +6688,18 @@ mod tests {
         );
         // Bind values must include BOTH `99` (SET) and `5` (WHERE).
         assert!(
-            q.params.contains(&"99".to_string()),
+            q.params.contains(&Value::from(99)),
             "params: {:?}",
             q.params
         );
-        assert!(
-            q.params.contains(&"5".to_string()),
-            "params: {:?}",
-            q.params
-        );
+        assert!(q.params.contains(&Value::from(5)), "params: {:?}", q.params);
     }
 
     #[test]
     fn update_encrypted_column_still_routes_through_encryption_pass() {
-        // The encrypted-column marker continues to wrap the placeholder
-        // with `decode($N, 'base64')::bytea`. Auto-bump columns
-        // (version/updated_at/updated_by) are NOT subject to the
-        // marker — only the creator-supplied `ssn` column gets the
-        // encryption wrap.
-        let filter = serde_json::json!({ "id": "post_x" });
-        let update = serde_json::json!({
-            "ssn": "Y2lwaGVydGV4dF9ibG9i",
-            "__zsbin__ssn": true,
+        let filter = crate::value!({ "id": "post_x" });
+        let update = crate::value!({
+            "ssn": Value::Bytes(b"ciphertext_blob".to_vec()),
         });
         let autobump = SystemFieldAutoBump {
             actor_id: Some("usr_actor"),
@@ -6785,8 +6717,8 @@ mod tests {
         .unwrap();
         // `ssn` gets the decode(...)::bytea wrap.
         assert!(
-            q.sql.contains("decode("),
-            "encrypted column wrapped: {}",
+            q.params.iter().any(|p| p.as_bytes().is_some()),
+            "encrypted column bound: {}",
             q.sql,
         );
         // The encrypted column SQL fragment contains the cast.
@@ -6797,14 +6729,11 @@ mod tests {
             .unwrap_or(q.sql.len());
         let ssn_clause = &q.sql[ssn_idx..ssn_end];
         assert!(
-            ssn_clause.contains("decode("),
+            ssn_clause.contains(" = $"),
             "ssn SET clause must include decode wrap: {ssn_clause}"
         );
     }
 
-    /// The auto-bump SQL must NOT carry an `__zsbin__updated_by`
-    /// marker — system fields are platform-managed plaintext and bypass
-    /// encryption by construction.
     #[test]
     fn update_auto_bump_columns_bypass_mask_pass() {
         // Mask-pass markers (sibling `<col>_masked` columns) only fire
@@ -6813,8 +6742,8 @@ mod tests {
         // schema-iteration loop naturally skips them. We confirm the
         // SQL doesn't accidentally emit a sibling for any auto-bump
         // column.
-        let filter = serde_json::json!({ "id": "post_x" });
-        let update = serde_json::json!({ "title": "new" });
+        let filter = crate::value!({ "id": "post_x" });
+        let update = crate::value!({ "title": "new" });
         let autobump = SystemFieldAutoBump {
             actor_id: Some("usr_actor"),
             ..Default::default()
@@ -6854,8 +6783,8 @@ mod tests {
         // every creator-supplied clause so the SQL diff is grep-able
         // (and the encryption/mask passes — which iterate the
         // creator's keys — never touch the auto-bumps).
-        let filter = json!({ "id": "post_x" });
-        let update = json!({ "title": "new" });
+        let filter = value!({ "id": "post_x" });
+        let update = value!({ "title": "new" });
         let autobump = SystemFieldAutoBump {
             dispatch_write: true,
             actor_id: Some("usr_actor"),
@@ -7000,14 +6929,14 @@ mod tests {
     //     for the active variant are NOT NULL
     // -----------------------------------------------------------------
 
-    fn c2_events_union_schema() -> serde_json::Value {
+    fn c2_events_union_schema() -> crate::value::Value {
         // Equivalent of:
         //   events: t.union(
         //     t.object({ kind: t.literal("login"), userId: t.number().required(), ip: t.string().required() }),
         //     t.object({ kind: t.literal("error"), message: t.string().required(), stack: t.string() }),
         //     t.object({ kind: t.literal("metric"), name: t.string().required(), value: t.number().required() }),
         //   )
-        json!({
+        value!({
             "kind": {
                 "type": "string",
                 "required": true,
@@ -7420,8 +7349,8 @@ mod tests {
     /// `build_field_condition_with_dialect` calling `validate_field_name`.
     #[test]
     fn build_where_rejects_reserved_masked_suffix_in_filter() {
-        let filter = serde_json::json!({ "ssn_masked": "***-**-6789" });
-        let mut params: Vec<String> = Vec::new();
+        let filter = crate::value!({ "ssn_masked": "***-**-6789" });
+        let mut params: Vec<Value> = Vec::new();
         let err = build_where(&filter, &mut params, &tschema()).unwrap_err();
         match err {
             QueryError::InvalidIdent(msg) => {
@@ -7500,10 +7429,10 @@ mod tests {
     #[test]
     fn build_where_accepts_system_field_names_in_filter() {
         for name in SYSTEM_FIELD_NAMES {
-            let mut filter_obj = serde_json::Map::new();
-            filter_obj.insert((*name).to_string(), serde_json::json!("any-value"));
-            let filter = serde_json::Value::Object(filter_obj);
-            let mut params: Vec<String> = Vec::new();
+            let mut filter_obj = crate::value::Map::new();
+            filter_obj.insert((*name).to_string(), crate::value!("any-value"));
+            let filter = crate::value::Value::Object(filter_obj);
+            let mut params: Vec<Value> = Vec::new();
             let clause = build_where(&filter, &mut params, &tschema())
                 .unwrap_or_else(|e| panic!("filter on {name:?} must build, got {e:?}"));
             assert!(
@@ -7591,19 +7520,19 @@ mod tests {
     #[test]
     fn dialect_pg_encrypted_placeholder_is_decode_bytea_cast() {
         let p = SqlDialect::Postgres.binary_bind_placeholder(3);
-        assert_eq!(p, "decode($3, 'base64')::bytea");
+        assert_eq!(p, "$3");
     }
 
     #[test]
     fn dialect_sqlite_binary_placeholder_decodes_the_parameter() {
         let p = SqlDialect::Sqlite.binary_bind_placeholder(7);
-        assert_eq!(p, "unhex($7)");
+        assert_eq!(p, "$7");
     }
 
     #[test]
     fn dialect_mysql_encrypted_placeholder_is_from_base64_param() {
         let p = SqlDialect::Mysql.binary_bind_placeholder(7);
-        assert_eq!(p, "FROM_BASE64(?)");
+        assert_eq!(p, "?");
     }
 
     // -----------------------------------------------------------------
@@ -7614,7 +7543,7 @@ mod tests {
     /// `None` for non-masked / kind=none columns.
     #[test]
     fn raw_column_for_field_returns_the_raw_column_for_masked() {
-        let def = serde_json::json!({
+        let def = crate::value!({
             "type": "string",
             "mask": { "kind": "last4", "classification": "spi" }
         });
@@ -7657,7 +7586,7 @@ mod tests {
 
     #[test]
     fn raw_column_for_field_returns_none_for_unmasked() {
-        let def = serde_json::json!({ "type": "string" });
+        let def = crate::value!({ "type": "string" });
         assert_eq!(raw_column_for_field("name", &def), None);
     }
 
@@ -7667,8 +7596,8 @@ mod tests {
 
     /// A masked field def as the migration fold emits it: `storage.rawColumn`
     /// present, spelled by the emitter that wrote the DDL.
-    fn masked_def_with_raw(raw: &str) -> serde_json::Value {
-        serde_json::json!({
+    fn masked_def_with_raw(raw: &str) -> crate::value::Value {
+        crate::value!({
             "type": "string",
             "mask": { "kind": "last4", "classification": "spi" },
             "storage": { "valueColumn": "ssn", "rawColumn": raw },
@@ -7734,7 +7663,7 @@ mod tests {
     /// fields rather than to a stricter one.
     #[test]
     fn declared_raw_column_falls_back_to_the_derivation_when_absent() {
-        let def = serde_json::json!({
+        let def = crate::value!({
             "type": "string",
             "mask": { "kind": "last4", "classification": "spi" },
         });
@@ -7744,7 +7673,7 @@ mod tests {
         );
         // A `storage` block that carries `valueColumn` but no `rawColumn` is
         // the same case, and is what the fold emits for an UNMASKED field.
-        let partial = serde_json::json!({
+        let partial = crate::value!({
             "type": "string",
             "mask": { "kind": "last4", "classification": "spi" },
             "storage": { "valueColumn": "ssn" },
@@ -7764,10 +7693,10 @@ mod tests {
     #[test]
     fn declared_raw_column_is_none_for_a_field_that_declares_no_mask() {
         assert_eq!(
-            declared_raw_column("name", &serde_json::json!({ "type": "string" })).unwrap(),
+            declared_raw_column("name", &crate::value!({ "type": "string" })).unwrap(),
             None,
         );
-        let opted_out = serde_json::json!({
+        let opted_out = crate::value!({
             "type": "string",
             "mask": { "kind": "none", "classification": "spi" },
             "storage": { "valueColumn": "ssn", "rawColumn": "nickname" },
@@ -7777,7 +7706,7 @@ mod tests {
 
     #[test]
     fn raw_column_for_field_returns_none_for_kind_none() {
-        let def = serde_json::json!({
+        let def = crate::value!({
             "type": "string",
             "encrypted": { "mode": "randomised", "keyId": "default", "wraps": "string" },
             "mask": { "kind": "none", "classification": "spi" }
@@ -7790,7 +7719,7 @@ mod tests {
     /// columns atomically.
     #[test]
     fn build_insert_includes_sibling_column_when_present() {
-        let doc = serde_json::json!({
+        let doc = crate::value!({
             "id": "usr_01",
             "ssn": "123-45-6789",
             "ssn_masked": "***-**-6789"
@@ -7840,13 +7769,13 @@ mod tests {
     /// - NEVER name the raw column anywhere in the built SQL.
     #[test]
     fn default_read_does_not_touch_the_raw_column() {
-        let schema = serde_json::json!({
+        let schema = crate::value!({
             "ssn":   { "type": "string", "encrypted": { "mode": "randomised" },
                        "mask": { "kind": "last4", "classification": "spi" } },
             "email": { "type": "string" },
             "name":  { "type": "string" },
         });
-        let filter = serde_json::json!({ "id": 7 });
+        let filter = crate::value!({ "id": 7 });
         let bq = build_find_with_schema(
             &s("app1"),
             "users",
@@ -7887,12 +7816,12 @@ mod tests {
     /// read. The raw column never appears.
     #[test]
     fn an_explicit_projection_of_a_masked_column_reads_the_masked_column() {
-        let schema = serde_json::json!({
+        let schema = crate::value!({
             "ssn": { "type": "string",
                      "mask": { "kind": "last4", "classification": "spi" } },
         });
-        let filter = serde_json::json!({});
-        let select = serde_json::json!(["id", "ssn"]);
+        let filter = crate::value!({});
+        let select = crate::value!(["id", "ssn"]);
         let bq = build_find_with_schema(
             &s("app1"),
             "users",
@@ -7927,13 +7856,13 @@ mod tests {
     /// this layer.
     #[test]
     fn unmask_hint_does_not_change_the_projection() {
-        let schema = serde_json::json!({
+        let schema = crate::value!({
             "ssn":   { "type": "string", "encrypted": { "mode": "randomised" },
                        "mask": { "kind": "last4", "classification": "spi" } },
             "email": { "type": "string",
                        "mask": { "kind": "full", "classification": "pii" } },
         });
-        let filter = serde_json::json!({});
+        let filter = crate::value!({});
 
         let bq_no_hint = build_find_with_schema(
             &s("app1"),
@@ -7983,11 +7912,11 @@ mod tests {
     /// End-to-end gate covering the find path.
     #[test]
     fn creator_cannot_query_by_masked_sibling() {
-        let schema = serde_json::json!({
+        let schema = crate::value!({
             "ssn": { "type": "string",
                      "mask": { "kind": "last4", "classification": "spi" } },
         });
-        let filter = serde_json::json!({ "ssn_masked": "***-**-6789" });
+        let filter = crate::value!({ "ssn_masked": "***-**-6789" });
         let err = build_find_with_schema(
             &s("app1"),
             "users",
@@ -8017,11 +7946,11 @@ mod tests {
     /// and the raw column must never appear.
     #[test]
     fn implicit_select_expands_to_explicit_when_any_column_masked() {
-        let schema = serde_json::json!({
+        let schema = crate::value!({
             "ssn": { "type": "string",
                      "mask": { "kind": "last4", "classification": "spi" } },
         });
-        let filter = serde_json::json!({});
+        let filter = crate::value!({});
         let bq = build_find_with_schema(
             &s("app1"),
             "users",
@@ -8057,11 +7986,11 @@ mod tests {
     /// "absent" through a `&Value`, and it is closed.
     #[test]
     fn a_non_object_schema_is_an_error_not_an_unrestricted_projection() {
-        for bad in [Value::Null, json!([]), json!("users"), json!(7)] {
+        for bad in [Value::Null, value!([]), value!("users"), value!(7)] {
             let refused = build_find_with_schema(
                 &s("app1"),
                 "users",
-                &serde_json::json!({}),
+                &crate::value!({}),
                 None,
                 None,
                 None,
@@ -8081,7 +8010,7 @@ mod tests {
     /// actually caches (`crates/zeroship-migrate-core/src/render/gen_types.rs:327-360`
     /// stamps it; the runtime descriptor carries it verbatim).
     fn l26_masked_schema() -> Value {
-        serde_json::json!({
+        crate::value!({
             "ssn": {
                 "type": "string",
                 "mask": { "kind": "last4", "classification": "pci" },
@@ -8116,10 +8045,10 @@ mod tests {
         let bq = build_find_with_schema(
             &s("app1"),
             "users",
-            &serde_json::json!({}),
+            &crate::value!({}),
             Some(10),
             None,
-            Some(&serde_json::json!({ "ssn": 1 })),
+            Some(&crate::value!({ "ssn": 1 })),
             None,
             &schema,
         )
@@ -8148,10 +8077,10 @@ mod tests {
         let bq = build_find_with_schema(
             &s("app1"),
             "users",
-            &serde_json::json!({}),
+            &crate::value!({}),
             None,
             None,
-            Some(&serde_json::json!([["ssn", -1]])),
+            Some(&crate::value!([["ssn", -1]])),
             None,
             &schema,
         )
@@ -8170,7 +8099,7 @@ mod tests {
     /// must never appear.
     #[test]
     fn vector_search_expands_masked_projection_when_schema_cached() {
-        let schema = serde_json::json!({
+        let schema = crate::value!({
             "ssn": { "type": "string",
                      "mask": { "kind": "last4", "classification": "spi" } },
             "embedding": { "type": "vector" },
@@ -8182,7 +8111,7 @@ mod tests {
             &[0.1, 0.2],
             5,
             crate::descriptors::VectorMetric::Cosine,
-            &serde_json::json!({}),
+            &crate::value!({}),
             &schema,
         )
         .expect("vector search sql");
@@ -8209,7 +8138,7 @@ mod tests {
     /// must never appear.
     #[test]
     fn spatial_near_expands_masked_projection_when_schema_cached() {
-        let schema = serde_json::json!({
+        let schema = crate::value!({
             "ssn": { "type": "string",
                      "mask": { "kind": "last4", "classification": "spi" } },
             "location": { "type": "geoPoint" },
@@ -8223,7 +8152,7 @@ mod tests {
                 lng: -122.4,
             },
             1000.0,
-            &serde_json::json!({}),
+            &crate::value!({}),
             Some(10),
             &schema,
         )
@@ -8247,13 +8176,13 @@ mod tests {
 
     #[test]
     fn implicit_find_projection_with_schema_uses_allowlist() {
-        let schema = serde_json::json!({
+        let schema = crate::value!({
             "name": { "type": "string" },
         });
         let bq = build_find_with_schema(
             &s("app1"),
             "users",
-            &serde_json::json!({}),
+            &crate::value!({}),
             None,
             None,
             None,
@@ -8275,7 +8204,7 @@ mod tests {
 
     #[test]
     fn read_side_identifiers_reject_internal_physical_columns() {
-        let schema = serde_json::json!({
+        let schema = crate::value!({
             "name": { "type": "string" },
             "ssn": {
                 "type": "string",
@@ -8286,11 +8215,11 @@ mod tests {
         let select_err = build_find_with_schema(
             &s("app1"),
             "users",
-            &serde_json::json!({}),
+            &crate::value!({}),
             None,
             None,
             None,
-            Some(&serde_json::json!(["ssn_masked"])),
+            Some(&crate::value!(["ssn_masked"])),
             &schema,
         )
         .expect_err("select on masked sibling must be refused");
@@ -8299,10 +8228,10 @@ mod tests {
         let sort_err = build_find_with_schema(
             &s("app1"),
             "users",
-            &serde_json::json!({}),
+            &crate::value!({}),
             None,
             None,
-            Some(&serde_json::json!({ "ssn_masked": 1 })),
+            Some(&crate::value!({ "ssn_masked": 1 })),
             None,
             &schema,
         )
@@ -8313,7 +8242,7 @@ mod tests {
             &s("app1"),
             "users",
             "ssn_masked",
-            &serde_json::json!({}),
+            &crate::value!({}),
             false,
             &schema,
             SqlDialect::Postgres,
@@ -8324,7 +8253,7 @@ mod tests {
         let aggregate_err = build_aggregate_with_soft_delete_with_dialect(
             &s("app1"),
             "users",
-            &serde_json::json!([
+            &crate::value!([
                 { "$group": { "by": "name", "cnt": { "$count": true } } },
                 { "$sort": { "ssn_masked": 1 } }
             ]),
@@ -8338,13 +8267,13 @@ mod tests {
 
     #[test]
     fn find_limit_over_max_is_rejected() {
-        let schema = serde_json::json!({
+        let schema = crate::value!({
             "name": { "type": "string" },
         });
         let err = build_find_with_schema(
             &s("app1"),
             "users",
-            &serde_json::json!({}),
+            &crate::value!({}),
             Some(MAX_QUERY_LIMIT + 1),
             None,
             None,
@@ -8361,7 +8290,7 @@ mod tests {
 
     #[test]
     fn vector_search_k_over_max_is_rejected() {
-        let schema = serde_json::json!({
+        let schema = crate::value!({
             "embedding": { "type": "vector" },
         });
         let err = build_vector_search(
@@ -8371,7 +8300,7 @@ mod tests {
             &[0.1, 0.2],
             MAX_SEARCH_LIMIT + 1,
             crate::descriptors::VectorMetric::Cosine,
-            &serde_json::json!({}),
+            &crate::value!({}),
             &schema,
         )
         .expect_err("search.k over the cap must be rejected");
@@ -8384,12 +8313,12 @@ mod tests {
 
     #[test]
     fn deeply_nested_filter_is_rejected() {
-        let schema = serde_json::json!({
+        let schema = crate::value!({
             "name": { "type": "string" },
         });
-        let mut filter = serde_json::json!({ "name": "alice" });
+        let mut filter = crate::value!({ "name": "alice" });
         for _ in 0..MAX_FILTER_NESTING_DEPTH {
-            filter = serde_json::json!({ "$and": [filter] });
+            filter = crate::value!({ "$and": [filter] });
         }
         let err = build_find_with_schema(
             &s("app1"),
@@ -8411,9 +8340,9 @@ mod tests {
 
     #[test]
     fn filter_clause_count_over_max_is_rejected() {
-        let mut filter = serde_json::Map::new();
+        let mut filter = crate::value::Map::new();
         for idx in 0..=MAX_FILTER_CLAUSE_COUNT {
-            filter.insert(format!("f{idx}"), serde_json::json!(idx));
+            filter.insert(format!("f{idx}"), crate::value!(idx));
         }
         let mut params = Vec::new();
         let err = build_where(&Value::Object(filter), &mut params, &tschema())
@@ -8457,7 +8386,7 @@ mod tests {
 
     #[test]
     fn build_soft_delete_one_emits_update_with_deleted_at_now() {
-        let filter = serde_json::json!({ "id": "post_x" });
+        let filter = crate::value!({ "id": "post_x" });
         let autobump = SystemFieldAutoBump {
             actor_id: Some("usr_actor"),
             ..Default::default()
@@ -8491,7 +8420,7 @@ mod tests {
 
     #[test]
     fn build_soft_delete_one_sqlite_uses_current_timestamp() {
-        let filter = serde_json::json!({ "id": "post_x" });
+        let filter = crate::value!({ "id": "post_x" });
         let autobump = SystemFieldAutoBump {
             actor_id: Some("usr"),
             ..Default::default()
@@ -8518,7 +8447,7 @@ mod tests {
 
     #[test]
     fn build_soft_delete_many_omits_single_row_narrowing() {
-        let filter = serde_json::json!({ "author": "usr_x" });
+        let filter = crate::value!({ "author": "usr_x" });
         let autobump = SystemFieldAutoBump {
             actor_id: Some("usr_actor"),
             ..Default::default()
@@ -8545,7 +8474,7 @@ mod tests {
     /// `updated_by` for audit or authorization is entitled to believe it.
     #[test]
     fn build_soft_delete_one_no_actor_nulls_updated_by() {
-        let filter = serde_json::json!({ "id": "post_x" });
+        let filter = crate::value!({ "id": "post_x" });
         let autobump = SystemFieldAutoBump::default();
         let q = build_soft_delete_one_with_system_fields(
             &s("app1"),
@@ -8567,7 +8496,7 @@ mod tests {
     /// The same for `restore()`, which shares the bump triple.
     #[test]
     fn build_restore_one_no_actor_nulls_updated_by() {
-        let filter = serde_json::json!({ "id": "post_x" });
+        let filter = crate::value!({ "id": "post_x" });
         let autobump = SystemFieldAutoBump::default();
         let q = build_restore_one_with_system_fields(
             &s("app1"),
@@ -8593,8 +8522,8 @@ mod tests {
     /// clause at all, because it is not writing on any actor's behalf.
     #[test]
     fn build_update_one_anonymous_dispatch_write_nulls_updated_by() {
-        let filter = serde_json::json!({ "id": "post_x" });
-        let update = serde_json::json!({ "title": "x" });
+        let filter = crate::value!({ "id": "post_x" });
+        let update = crate::value!({ "title": "x" });
         let dispatched = build_update_one_with_system_fields(
             &s("app1"),
             "posts",
@@ -8633,7 +8562,7 @@ mod tests {
 
     #[test]
     fn build_restore_one_clears_deleted_at_and_scopes_to_soft_deleted() {
-        let filter = serde_json::json!({ "id": "post_x" });
+        let filter = crate::value!({ "id": "post_x" });
         let autobump = SystemFieldAutoBump {
             actor_id: Some("usr_actor"),
             ..Default::default()
@@ -8656,7 +8585,7 @@ mod tests {
 
     #[test]
     fn build_restore_many_omits_single_row_narrowing() {
-        let filter = serde_json::json!({ "author": "usr_x" });
+        let filter = crate::value!({ "author": "usr_x" });
         let autobump = SystemFieldAutoBump {
             actor_id: Some("usr_actor"),
             ..Default::default()
@@ -8677,7 +8606,7 @@ mod tests {
 
     #[test]
     fn build_find_with_soft_delete_flag_appends_filter() {
-        let filter = serde_json::json!({ "title": "hi" });
+        let filter = crate::value!({ "title": "hi" });
         let q = build_find_with_schema_and_unmask_and_soft_delete(
             &s("app1"),
             "posts",
@@ -8700,7 +8629,7 @@ mod tests {
 
     #[test]
     fn build_find_with_soft_delete_flag_off_is_byte_identical_to_legacy() {
-        let filter = serde_json::json!({ "title": "hi" });
+        let filter = crate::value!({ "title": "hi" });
         let q_legacy = build_find_with_schema_and_unmask(
             &s("app1"),
             "posts",
@@ -8732,7 +8661,7 @@ mod tests {
 
     #[test]
     fn build_find_empty_filter_with_soft_delete_flag_emits_lone_predicate() {
-        let filter = serde_json::json!({});
+        let filter = crate::value!({});
         let q = build_find_with_schema_and_unmask_and_soft_delete(
             &s("app1"),
             "posts",
@@ -8755,7 +8684,7 @@ mod tests {
 
     #[test]
     fn build_count_with_soft_delete_appends_filter() {
-        let filter = serde_json::json!({});
+        let filter = crate::value!({});
         let q = build_count_with_soft_delete(
             &s("app1"),
             "posts",
@@ -8780,7 +8709,7 @@ mod tests {
 
     #[test]
     fn build_aggregate_with_soft_delete_appends_filter() {
-        let pipeline = serde_json::json!([
+        let pipeline = crate::value!([
             { "$match": { "country": "US" } },
             { "$group": { "by": "city", "n": { "$count": 1 } } },
         ]);
@@ -8795,7 +8724,7 @@ mod tests {
 
     #[test]
     fn build_distinct_with_soft_delete_appends_filter() {
-        let filter = serde_json::json!({});
+        let filter = crate::value!({});
         let q = build_distinct_with_soft_delete(
             &s("app1"),
             "users",
@@ -8810,7 +8739,7 @@ mod tests {
 
     #[test]
     fn legacy_build_count_is_byte_identical_to_soft_delete_off() {
-        let filter = serde_json::json!({ "id": "x" });
+        let filter = crate::value!({ "id": "x" });
         let q_legacy = build_count(&s("app1"), "posts", &tschema(), &filter).unwrap();
         let q_new = build_count_with_soft_delete(
             &s("app1"),
@@ -8826,8 +8755,8 @@ mod tests {
 
     #[test]
     fn build_update_one_sqlite_uses_rowid_narrowing() {
-        let filter = serde_json::json!({ "id": "post_1" });
-        let update = serde_json::json!({ "title": "next" });
+        let filter = crate::value!({ "id": "post_1" });
+        let update = crate::value!({ "title": "next" });
         let q = build_update_one_with_system_fields(
             &s("app1"),
             "posts",
@@ -8844,7 +8773,7 @@ mod tests {
 
     #[test]
     fn build_delete_one_sqlite_uses_rowid_narrowing() {
-        let filter = serde_json::json!({ "id": "post_1" });
+        let filter = crate::value!({ "id": "post_1" });
         let q = build_delete_one_with_dialect(
             &s("app1"),
             "posts",
@@ -8859,7 +8788,7 @@ mod tests {
 
     #[test]
     fn build_soft_delete_one_sqlite_uses_rowid_narrowing() {
-        let filter = serde_json::json!({ "id": "post_1" });
+        let filter = crate::value!({ "id": "post_1" });
         let q = build_soft_delete_one_with_system_fields(
             &s("app1"),
             "posts",
@@ -8882,8 +8811,8 @@ mod tests {
 
     /// A descriptor carrying a masked column, an encrypted column, and an FK —
     /// the goodies PHASE 4 must round-trip through emit→apply→drift.
-    fn goodies_schema() -> serde_json::Value {
-        json!({
+    fn goodies_schema() -> crate::value::Value {
+        value!({
             "ssn": {
                 "type": "string",
                 "mask": { "kind": "last4", "classification": "pii" }
@@ -8912,11 +8841,11 @@ mod tests {
     /// count is asserted by the callers against
     /// [`WRITE_BUILDERS_EMITTING_RETURNING`].
     fn every_write_query(schema: &Value) -> Vec<(&'static str, BuiltQuery)> {
-        let doc = serde_json::json!({ "ssn": "123-45-6789" });
-        let docs = serde_json::json!([{ "ssn": "1" }, { "ssn": "2" }]);
-        let filter = serde_json::json!({ "id": "usr_1" });
-        let update = serde_json::json!({ "ssn": "9" });
-        let conflict = serde_json::json!(["id"]);
+        let doc = crate::value!({ "ssn": "123-45-6789" });
+        let docs = crate::value!([{ "ssn": "1" }, { "ssn": "2" }]);
+        let filter = crate::value!({ "id": "usr_1" });
+        let update = crate::value!({ "ssn": "9" });
+        let conflict = crate::value!(["id"]);
         let autobump = SystemFieldAutoBump {
             actor_id: Some("usr_actor"),
             ..Default::default()
@@ -9107,7 +9036,7 @@ mod tests {
     /// refusal rather than a served column.
     #[test]
     fn an_unreadable_field_leaves_every_projection_and_is_refused_by_name() {
-        let schema = serde_json::json!({
+        let schema = crate::value!({
             "public_note": { "type": "string", "readable": true },
             "internal_note": { "type": "string", "readable": false },
         });
@@ -9154,8 +9083,8 @@ mod tests {
     #[test]
     fn only_find_or_create_carries_the_created_computed_column() {
         let schema = write_projection_schema();
-        let doc = serde_json::json!({ "ssn": "1" });
-        let conflict = serde_json::json!(["id"]);
+        let doc = crate::value!({ "ssn": "1" });
+        let conflict = crate::value!(["id"]);
         let upsert = build_upsert_with_dialect(
             &s("app1"),
             "users",
@@ -9201,7 +9130,7 @@ mod tests {
     /// not there.
     #[test]
     fn the_projection_reads_the_declared_value_column_under_the_logical_name() {
-        let schema = serde_json::json!({
+        let schema = crate::value!({
             "amount": { "type": "number", "storage": { "valueColumn": "amount_v2" } },
         });
         let queries = every_write_query(&schema);
@@ -9235,8 +9164,8 @@ mod tests {
     #[test]
     fn the_upserts_version_bump_qualifies_the_column_it_reads() {
         let schema = write_projection_schema();
-        let doc = serde_json::json!({ "ssn": "1" });
-        let conflict = serde_json::json!(["id"]);
+        let doc = crate::value!({ "ssn": "1" });
+        let conflict = crate::value!(["id"]);
         for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite] {
             let q =
                 build_upsert_with_dialect(&s("app1"), "users", &schema, &doc, &conflict, dialect)
@@ -9262,7 +9191,7 @@ mod tests {
     /// schema at all. A non-object is a refusal, not a fallback to `*`.
     #[test]
     fn a_write_builder_refuses_a_non_object_schema_rather_than_starring() {
-        let doc = serde_json::json!({ "ssn": "1" });
+        let doc = crate::value!({ "ssn": "1" });
         let err = build_insert_with_dialect(
             &s("app1"),
             "users",
@@ -9779,7 +9708,7 @@ mod sqlite_now_parity {
 /// value conversions. Values never become SQL fragments.
 pub fn build_where_plan(
     predicate: &crate::Predicate,
-    params: &mut Vec<String>,
+    params: &mut Vec<Value>,
     schema: &Value,
     dialect: SqlDialect,
 ) -> Result<String, QueryError> {
@@ -9800,9 +9729,13 @@ fn filter_literal(value: &crate::Literal) -> Result<Value, QueryError> {
     Ok(match value {
         Literal::Bool(v) => Value::Bool(*v),
         Literal::Int(v) => Value::from(*v),
-        Literal::Float(v) => Value::from(v.get()),
+        Literal::Float(v) => {
+            Value::Number(crate::value::Number::from_f64(v.get()).expect("finite literal"))
+        }
         Literal::Text(v) => Value::String(v.clone()),
-        Literal::Bytes(_) | Literal::Vector(_) => {
+        Literal::Json(v) => Value::Json(v.clone()),
+        Literal::Bytes(v) => Value::Bytes(v.clone()),
+        Literal::Vector(_) => {
             return Err(QueryError::InvalidFilter(
                 "binary and vector predicates require their column-specific operation".into(),
             ))
@@ -9821,7 +9754,7 @@ fn filter_column(operand: &crate::Operand) -> Result<&str, QueryError> {
 
 fn render_filter(
     predicate: &crate::Predicate,
-    params: &mut Vec<String>,
+    params: &mut Vec<Value>,
     schema: &Value,
     dialect: SqlDialect,
     root: bool,
@@ -9913,7 +9846,7 @@ fn render_filter(
             escape,
         } => {
             let col = quote_ident(filter_column(lhs)?);
-            params.push(pattern.as_str().to_owned());
+            params.push(pattern.as_str().into());
             let slot = params.len();
             let negated = matches!(op, PatternOp::NotLike | PatternOp::NotILike);
             let insensitive = matches!(op, PatternOp::ILike | PatternOp::NotILike);
@@ -9924,7 +9857,7 @@ fn render_filter(
             };
             let mut sql = format!("{col} {}{word} ${slot}", if negated { "NOT " } else { "" });
             if let Some(escape) = escape {
-                params.push(escape.get().to_string());
+                params.push((escape.get()).into());
                 sql.push_str(&format!(" ESCAPE ${}", params.len()));
             }
             if insensitive {
@@ -9947,13 +9880,13 @@ pub(crate) fn validate_filter_budget(filter: &Value) -> Result<(), QueryError> {
 #[cfg(test)]
 mod binary_expression_tests {
     use super::*;
-    use serde_json::json;
+    use crate::value;
 
     #[test]
     fn binary_values_follow_the_column_expression_on_every_write_shape() {
         let schema = SchemaName::new("binary_fixture").unwrap();
-        let fields = json!({"payload":{"type":"bytes"}});
-        let document = json!({"id":"row_a", "payload":"AAH/", "__zsbin__payload":true});
+        let fields = value!({"payload":{"type":"bytes"}});
+        let document = value!({"id":"row_a", "payload":Value::Bytes(vec![0, 1, 255])});
         for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite] {
             let queries = [
                 build_insert_with_dialect(&schema, "files", &fields, &document, dialect).unwrap(),
@@ -9961,7 +9894,7 @@ mod binary_expression_tests {
                     &schema,
                     "files",
                     &fields,
-                    &json!([document.clone()]),
+                    &value!([document.clone()]),
                     dialect,
                 )
                 .unwrap(),
@@ -9969,8 +9902,8 @@ mod binary_expression_tests {
                     &schema,
                     "files",
                     &fields,
-                    &json!({"id":"row_a"}),
-                    &json!({"payload":"AAH/", "__zsbin__payload":true}),
+                    &value!({"id":"row_a"}),
+                    &value!({"payload":Value::Bytes(vec![0, 1, 255])}),
                     dialect,
                 )
                 .unwrap(),
@@ -9979,21 +9912,16 @@ mod binary_expression_tests {
                     "files",
                     &fields,
                     &document,
-                    &json!(["id"]),
+                    &value!(["id"]),
                     dialect,
                 )
                 .unwrap(),
             ];
             for query in queries {
-                let encoding = if dialect == SqlDialect::Sqlite {
-                    "0001ff"
-                } else {
-                    "AAH/"
-                };
                 let slot = query
                     .params
                     .iter()
-                    .position(|p| p == encoding)
+                    .position(|p| p.as_bytes() == Some([0, 1, 255].as_slice()))
                     .expect("binary parameter");
                 assert!(
                     query
@@ -10014,12 +9942,12 @@ mod binary_expression_tests {
             let query = build_insert_with_dialect(
                 &schema,
                 "notes",
-                &json!({"body":{"type":"string"}}),
-                &json!({"body":value}),
+                &value!({"body":{"type":"string"}}),
+                &value!({"body":value}),
                 SqlDialect::Sqlite,
             )
             .unwrap();
-            assert_eq!(query.params, [value]);
+            assert_eq!(query.params, value!([value]).as_array().unwrap().clone());
             assert!(!query.sql.contains("unhex("));
         }
     }

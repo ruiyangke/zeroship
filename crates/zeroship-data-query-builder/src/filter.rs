@@ -1,11 +1,11 @@
 //! Decode the SDK filter vocabulary into the typed predicate grammar.
 
 use crate::compile::QueryError;
+use crate::value::Value;
 use crate::{
     CompareOp, Finite, Ident, IdentRole, Literal, MembershipOp, Operand, PatternOp, Predicate,
     TextPattern,
 };
-use serde_json::Value;
 
 fn invalid(message: impl Into<String>) -> QueryError {
     QueryError::InvalidFilter(message.into())
@@ -150,7 +150,10 @@ fn literal(value: &Value) -> Result<Option<Literal>, QueryError> {
             Finite::new(n.as_f64().ok_or_else(|| invalid("invalid number"))?)
                 .map_err(|e| invalid(e.to_string()))?,
         ),
-        Value::String(v) => Literal::Text(v.clone()),
-        v => Literal::Text(v.to_string()),
+        Value::String(v) | Value::Decimal(v) => Literal::Text(v.clone()),
+        Value::Bytes(v) => Literal::Bytes(v.clone()),
+        Value::Timestamp(v) => Literal::Int(*v),
+        Value::Json(v) => Literal::Json(v.clone()),
+        v => Literal::Json(v.to_string()),
     }))
 }

@@ -1222,6 +1222,26 @@ fn name_reads_as_an_app_id(name: &str) -> bool {
         && name[..APP_ID_PREFIX.len()].eq_ignore_ascii_case(APP_ID_PREFIX)
 }
 
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Convert a query row into an `AppRecord`.
+///
+/// Columns: id (UUID), name (TEXT), plan_id (UUID), deploy_hash (TEXT | NULL),
+///          archived_at (TEXT | NULL), created_at (TEXT), updated_at (TEXT).
+fn row_to_record(row: &compio_postgres::Row) -> AppRecord {
+    AppRecord {
+        id: row.get("id"),
+        name: row.get("name"),
+        plan_id: row.get("plan_id"),
+        deploy_hash: row.get("deploy_hash"),
+        archived_at: row.get("archived_at"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+    }
+}
+
 #[cfg(test)]
 mod name_validation_tests {
     use super::*;
@@ -1309,25 +1329,5 @@ mod name_validation_tests {
             validate_app_name(""),
             Err(RegistryError::InvalidInput(_))
         ));
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/// Convert a query row into an `AppRecord`.
-///
-/// Columns: id (UUID), name (TEXT), plan_id (UUID), deploy_hash (TEXT | NULL),
-///          archived_at (TEXT | NULL), created_at (TEXT), updated_at (TEXT).
-fn row_to_record(row: &compio_postgres::Row) -> AppRecord {
-    AppRecord {
-        id: row.get("id"),
-        name: row.get("name"),
-        plan_id: row.get("plan_id"),
-        deploy_hash: row.get("deploy_hash"),
-        archived_at: row.get("archived_at"),
-        created_at: row.get("created_at"),
-        updated_at: row.get("updated_at"),
     }
 }

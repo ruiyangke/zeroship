@@ -226,7 +226,8 @@ pub(crate) fn refuse_mv_subscription(collection: &str) -> Option<OpError> {
             ),
             Some(
                 "Subscribe to the collection the view is derived from (or call \
-                 db.materializedView(name).refresh() on demand and re-read).".to_string(),
+                 db.materializedView(name).refresh() on demand and re-read)."
+                    .to_string(),
             ),
         ));
     }
@@ -245,8 +246,8 @@ mod mv_refusal_tests {
 
     #[test]
     fn refuses_zeroship_mv_prefix() {
-        let err = refuse_mv_subscription("__zeroship_mv_orders")
-            .expect("MV-prefixed name must refuse");
+        let err =
+            refuse_mv_subscription("__zeroship_mv_orders").expect("MV-prefixed name must refuse");
         // `OpError::coded` stamps `code` onto a `CodedError` variant —
         // we don't reach into the variant body here (it's exposed via
         // the JS bridge layer); the existence of `Some(_)` is the
@@ -411,7 +412,7 @@ mod tests {
 
     use std::collections::HashMap;
 
-    use serde_json::Value;
+    use zeroship_data_query_builder::value::Value;
     use zeroship_runtime::{Runtime, RuntimeState, SharedState};
 
     use crate::{broker, v8_classes::db::mint_db};

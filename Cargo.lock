@@ -7528,6 +7528,8 @@ name = "zeroship-data-query-builder"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "indexmap 2.14.0",
+ "serde",
  "serde_json",
  "zeroship-core",
  "zeroship-migrate",

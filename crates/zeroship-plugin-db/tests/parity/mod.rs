@@ -1,13 +1,13 @@
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
-use serde_json::{Value, json};
+use zeroship_data_query_builder::value::{value, Value};
 use zeroship_plugin_db::service::{DbService, DbServiceConfig};
 use zeroship_runtime::channel::CancelFlag;
 use zeroship_runtime::plugin::NativePlugin;
 use zeroship_runtime::runtime::Runtime;
-use zeroship_runtime::{EnvSnapshot, FetchOutcome, ModuleEntry, RequestCtx, SettledFetch, init_v8};
+use zeroship_runtime::{init_v8, EnvSnapshot, FetchOutcome, ModuleEntry, RequestCtx, SettledFetch};
 
 pub struct MatrixSnapshot {
     pub seed: Value,
@@ -70,7 +70,7 @@ pub const DEV_APP_ID: &str = "default";
 /// The matrix's deployed field shape. Kept beside the JS so the pre-apply, the
 /// runtime descriptor, and the procedures cannot drift.
 fn matrix_schema() -> Value {
-    json!({
+    value!({
         "_meta": {"strictness": "lenient"},
         "title": {"type": "string", "required": true},
         "flag": {"type": "boolean", "required": true},
@@ -300,7 +300,7 @@ import { env } from "zeroship";
 
 const COLLECTION = "__COLLECTION__";
 const TYPED_DATE_ISO = "__TYPED_DATE_ISO__";
-const TYPED_BYTES_B64 = "__TYPED_BYTES_B64__";
+const TYPED_BYTES = new Uint8Array(__TYPED_BYTES__);
 
 function projectRows(rows) {
     return rows.map((row) => ({
@@ -323,7 +323,7 @@ function projectTypedRow(row) {
         flag: row.flag,
         occurred_at: row.occurred_at,
         occurred_at_kind: typeof row.occurred_at,
-        payload_bytes: row.payload_bytes,
+        payload_bytes: Array.from(row.payload_bytes),
         payload_json: row.payload_json,
     };
 }
@@ -422,7 +422,7 @@ async function typedRoundTrip(_input, _ctx) {
         optional: "typed",
         rank: 41,
         occurred_at: new Date(TYPED_DATE_ISO),
-        payload_bytes: TYPED_BYTES_B64,
+        payload_bytes: TYPED_BYTES,
         payload_json: payloadJson,
     });
     const sourceRows = await coll.find(
@@ -439,7 +439,7 @@ async function typedRoundTrip(_input, _ctx) {
         optional: "typed-echo",
         rank: 42,
         occurred_at: source.occurred_at,
-        payload_bytes: TYPED_BYTES_B64,
+        payload_bytes: TYPED_BYTES,
         payload_json: payloadJson,
     });
     const echoRows = await coll.find(
@@ -460,22 +460,24 @@ const _procedures = { seed, transactionMatrix, typedRoundTrip };
 "#
     .replace("__COLLECTION__", collection)
     .replace("__TYPED_DATE_ISO__", TYPED_DATE_ISO)
-    .replace("__TYPED_BYTES_B64__", &typed_bytes_b64())
-        + SHIM
+    .replace(
+        "__TYPED_BYTES__",
+        &serde_json::to_string(&TYPED_BYTES_RAW).unwrap(),
+    ) + SHIM
 }
 
 pub fn runtime_descriptor(collection: &str, schema: &Value) -> String {
     let mut fields = schema.clone();
     let strictness = fields
         .as_object_mut()
-        .and_then(|map| map.remove("_meta"))
+        .and_then(|map| map.shift_remove("_meta"))
         .and_then(|meta| {
             meta.get("strictness")
                 .and_then(Value::as_str)
                 .map(str::to_owned)
         })
         .unwrap_or_else(|| "strict".to_string());
-    serde_json::to_string(&json!({
+    serde_json::to_string(&value!({
         "version": 2,
         "collections": {
             (collection): {
@@ -510,15 +512,13 @@ pub fn dispatch_zs_with_descriptor(
         specifier: "index.js".into(),
         source: source.into(),
     }];
-    let plugins: Vec<Arc<dyn NativePlugin>> = vec![
-        DbService::new(DbServiceConfig {
-            url: url.to_string(),
-            worker_id: "parity-test-worker".to_string(),
-            meter: None,
-        })
-        .expect("db service")
-        .plugin(),
-    ];
+    let plugins: Vec<Arc<dyn NativePlugin>> = vec![DbService::new(DbServiceConfig {
+        url: url.to_string(),
+        worker_id: "parity-test-worker".to_string(),
+        meter: None,
+    })
+    .expect("db service")
+    .plugin()];
     let env_vars = std::collections::HashMap::from([("APP_ID".to_string(), app_id.to_string())]);
     let runtime = Runtime::builder()
         .modules(modules)
@@ -601,7 +601,7 @@ pub fn extract_json(body: &Value) -> Value {
 }
 
 pub fn expected_seed_projection() -> Value {
-    json!([
+    value!([
         {
             "title": "alpha",
             "flag": false,
@@ -642,7 +642,7 @@ pub fn expected_seed_projection() -> Value {
 }
 
 pub fn expected_tx_projection() -> Value {
-    json!([
+    value!([
         {
             "title": "outer",
             "flag": true,
@@ -671,13 +671,13 @@ pub fn expected_tx_projection() -> Value {
 }
 
 pub fn expected_typed_projection() -> Value {
-    json!({
+    value!({
         "source": {
             "title": "typed-roundtrip",
             "flag": true,
             "occurred_at": TYPED_DATE_MS,
             "occurred_at_kind": "number",
-            "payload_bytes": typed_bytes_b64(),
+            "payload_bytes": TYPED_BYTES_RAW,
             "payload_json": {
                 "nested": { "ok": true },
                 "items": [1, "two", false],
@@ -689,7 +689,7 @@ pub fn expected_typed_projection() -> Value {
             "flag": true,
             "occurred_at": TYPED_DATE_MS,
             "occurred_at_kind": "number",
-            "payload_bytes": typed_bytes_b64(),
+            "payload_bytes": TYPED_BYTES_RAW,
             "payload_json": {
                 "nested": { "ok": true },
                 "items": [1, "two", false],

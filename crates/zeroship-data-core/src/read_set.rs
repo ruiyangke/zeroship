@@ -90,8 +90,8 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use serde_json::Value;
 use zeroship_data_query_builder::catalog::MaskKind;
+use zeroship_data_query_builder::value::Value;
 
 use crate::masking::apply_mask_kind;
 
@@ -348,7 +348,11 @@ pub fn normalise_filter(filter: &Value, schema: &Value) -> Option<Predicate> {
             }
             // Arrays as rhs are typically the $in shape but bare —
             // unsupported.
-            Value::Array(_) => return None,
+            Value::Json(_)
+            | Value::Array(_)
+            | Value::Bytes(_)
+            | Value::Timestamp(_)
+            | Value::Decimal(_) => return None,
         }
     }
     Some(Predicate::All(conjuncts))
@@ -607,7 +611,7 @@ pub fn record_if_active(collection: &str, filter: &Value, schema: &Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use zeroship_data_query_builder::value;
 
     fn row(pairs: &[(&str, &str)]) -> HashMap<String, String> {
         pairs
@@ -620,20 +624,21 @@ mod tests {
 
     #[test]
     fn normalise_empty_filter_is_always_true() {
-        let p = normalise_filter(&json!({}), &json!({})).expect("empty filter normalises");
+        let p = normalise_filter(&value!({}), &value!({})).expect("empty filter normalises");
         assert!(p.matches(&row(&[])));
     }
 
     #[test]
     fn normalise_bare_equality() {
-        let p = normalise_filter(&json!({ "userId": 42 }), &json!({})).expect("scalar normalises");
+        let p =
+            normalise_filter(&value!({ "userId": 42 }), &value!({})).expect("scalar normalises");
         assert!(p.matches(&row(&[("userId", "42")])));
         assert!(!p.matches(&row(&[("userId", "99")])));
     }
 
     #[test]
     fn normalise_multi_field_and() {
-        let p = normalise_filter(&json!({ "userId": 42, "status": "active" }), &json!({}))
+        let p = normalise_filter(&value!({ "userId": 42, "status": "active" }), &value!({}))
             .expect("conjunction normalises");
         assert!(p.matches(&row(&[("userId", "42"), ("status", "active")])));
         assert!(!p.matches(&row(&[("userId", "42"), ("status", "archived")])));
@@ -642,14 +647,14 @@ mod tests {
 
     #[test]
     fn normalise_explicit_eq_operator() {
-        let p = normalise_filter(&json!({ "userId": { "$eq": 42 } }), &json!({}))
+        let p = normalise_filter(&value!({ "userId": { "$eq": 42 } }), &value!({}))
             .expect("op normalises");
         assert!(p.matches(&row(&[("userId", "42")])));
     }
 
     #[test]
     fn normalise_gt_range_query() {
-        let p = normalise_filter(&json!({ "createdAt": { "$gt": 1000 } }), &json!({})).unwrap();
+        let p = normalise_filter(&value!({ "createdAt": { "$gt": 1000 } }), &value!({})).unwrap();
         assert!(p.matches(&row(&[("createdAt", "1500")])));
         assert!(!p.matches(&row(&[("createdAt", "500")])));
         assert!(!p.matches(&row(&[("createdAt", "1000")])));
@@ -658,8 +663,8 @@ mod tests {
     #[test]
     fn normalise_range_combination() {
         let p = normalise_filter(
-            &json!({ "createdAt": { "$gte": 1000, "$lt": 2000 } }),
-            &json!({}),
+            &value!({ "createdAt": { "$gte": 1000, "$lt": 2000 } }),
+            &value!({}),
         )
         .unwrap();
         assert!(p.matches(&row(&[("createdAt", "1000")])));
@@ -670,19 +675,19 @@ mod tests {
 
     #[test]
     fn normalise_or_falls_back_coarse() {
-        let p = normalise_filter(&json!({ "$or": [ { "a": 1 }, { "b": 2 } ] }), &json!({}));
+        let p = normalise_filter(&value!({ "$or": [ { "a": 1 }, { "b": 2 } ] }), &value!({}));
         assert!(p.is_none(), "$or should collapse to coarse-grained");
     }
 
     #[test]
     fn normalise_in_falls_back_coarse() {
-        let p = normalise_filter(&json!({ "userId": { "$in": [1, 2, 3] } }), &json!({}));
+        let p = normalise_filter(&value!({ "userId": { "$in": [1, 2, 3] } }), &value!({}));
         assert!(p.is_none(), "$in should collapse to coarse-grained");
     }
 
     #[test]
     fn normalise_like_falls_back_coarse() {
-        let p = normalise_filter(&json!({ "name": { "$like": "j%" } }), &json!({}));
+        let p = normalise_filter(&value!({ "name": { "$like": "j%" } }), &value!({}));
         assert!(p.is_none(), "$like should collapse to coarse-grained");
     }
 
@@ -691,13 +696,13 @@ mod tests {
         // Null/IS NULL semantics need a NULL-aware tuple representation;
         // the WAL consumer's text-encoded tuple can't distinguish "absent"
         // from "explicit NULL" so we conservatively bail out.
-        let p = normalise_filter(&json!({ "deletedAt": null }), &json!({}));
+        let p = normalise_filter(&value!({ "deletedAt": null }), &value!({}));
         assert!(p.is_none());
     }
 
     #[test]
     fn normalise_array_filter_falls_back_coarse() {
-        let p = normalise_filter(&json!({ "tags": ["x", "y"] }), &json!({}));
+        let p = normalise_filter(&value!({ "tags": ["x", "y"] }), &value!({}));
         assert!(p.is_none());
     }
 
@@ -708,14 +713,14 @@ mod tests {
         let p = Predicate::All(vec![Conjunct {
             column: "userId".into(),
             op: PredicateOp::Eq,
-            value: json!(42),
+            value: value!(42),
         }]);
         assert!(!p.matches(&row(&[("otherCol", "42")])));
     }
 
     #[test]
     fn predicate_bool_eq() {
-        let p = normalise_filter(&json!({ "active": true }), &json!({})).unwrap();
+        let p = normalise_filter(&value!({ "active": true }), &value!({})).unwrap();
         assert!(p.matches(&row(&[("active", "true")])));
         assert!(!p.matches(&row(&[("active", "false")])));
     }
@@ -736,7 +741,7 @@ mod tests {
     fn read_set_entry_filters_by_predicate() {
         let entry = ReadSetEntry {
             collection: "messages".into(),
-            predicate: normalise_filter(&json!({ "userId": 42 }), &json!({})),
+            predicate: normalise_filter(&value!({ "userId": 42 }), &value!({})),
         };
         assert!(entry.matches(&row(&[("userId", "42")])));
         assert!(!entry.matches(&row(&[("userId", "99")])));
@@ -761,7 +766,7 @@ mod tests {
     #[test]
     fn record_no_op_when_inactive() {
         // No `Active::begin` — record should be a no-op.
-        record_if_active("messages", &json!({ "userId": 42 }), &json!({}));
+        record_if_active("messages", &value!({ "userId": 42 }), &value!({}));
         assert!(!is_active());
     }
 
@@ -792,12 +797,12 @@ mod tests {
     #[test]
     fn ensure_capture_resets_on_a_new_dispatch_generation() {
         ensure_capture(1, true);
-        record_if_active("messages", &json!({ "userId": 42 }), &json!({}));
+        record_if_active("messages", &value!({ "userId": 42 }), &value!({}));
         assert_eq!(snapshot_for("messages").len(), 1);
 
         // Same frame: the buffer is kept and appended to.
         ensure_capture(1, true);
-        record_if_active("messages", &json!({ "userId": 7 }), &json!({}));
+        record_if_active("messages", &value!({ "userId": 7 }), &value!({}));
         assert_eq!(snapshot_for("messages").len(), 2, "same frame must append");
 
         // New frame: the buffer is discarded.
@@ -817,8 +822,8 @@ mod tests {
     #[test]
     fn snapshot_for_clones_and_filters_by_collection() {
         ensure_capture(10, true);
-        record_if_active("messages", &json!({ "userId": 42 }), &json!({}));
-        record_if_active("todos", &json!({ "done": false }), &json!({}));
+        record_if_active("messages", &value!({ "userId": 42 }), &value!({}));
+        record_if_active("todos", &value!({ "done": false }), &value!({}));
 
         assert_eq!(snapshot_for("messages").len(), 1);
         assert_eq!(
@@ -842,7 +847,7 @@ mod tests {
     #[test]
     fn snapshot_for_is_empty_when_that_collection_was_never_read() {
         ensure_capture(20, true);
-        record_if_active("messages", &json!({ "userId": 42 }), &json!({}));
+        record_if_active("messages", &value!({ "userId": 42 }), &value!({}));
         assert!(
             snapshot_for("todos").is_empty(),
             "an unread collection yields nothing, so the caller must skip set_read_set"
@@ -857,7 +862,7 @@ mod tests {
     #[test]
     fn ensure_capture_is_inert_when_not_recording() {
         ensure_capture(30, false);
-        record_if_active("messages", &json!({ "userId": 42 }), &json!({}));
+        record_if_active("messages", &value!({ "userId": 42 }), &value!({}));
         assert!(
             snapshot_for("messages").is_empty(),
             "a non-query frame must record nothing"

@@ -589,7 +589,7 @@ async fn record_plan_change_like_set_plan(
     proration::record_plan_change_tx(
         &state.registry,
         &app,
-        &organization,
+        organization,
         from_plan_id.as_deref(),
         to_plan,
         now_unix,
@@ -1470,7 +1470,7 @@ async fn shrinking_redrive_removes_orphaned_segment_and_stripe_item() {
     // deterministic metadata key so the orphan-reconciler can DELETE it, and a
     // provider-ref so the reconciler knows its external id directly.
     let orphan_key =
-        billing_reconcile::invoice_item_idempotency_key(&organization, &app, period, 1);
+        billing_reconcile::invoice_item_idempotency_key(organization, &app, period, 1);
     let orphan_item_id = fx.mock.preload_invoice_item(&customer, &orphan_key);
     fx.state
         .control_pg

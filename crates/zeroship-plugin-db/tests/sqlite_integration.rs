@@ -2097,7 +2097,7 @@ fn engine_shadow_relation(
     )
     .expect("the migration engine must render a descriptor for a vector field");
 
-    let value: serde_json::Value =
+    let value: zeroship_data_query_builder::value::Value =
         serde_json::from_str(&artifacts.runtime_json).expect("the runtime descriptor is JSON");
     let auxiliary = value["collections"][collection]["fields"][column]["storage"]["auxiliary"]
         .as_array()
@@ -2174,7 +2174,7 @@ fn the_search_really_depends_on_the_name_the_engine_records() {
         zeroship_plugin_db::cache_schema_for_tests(
             "vector_wrongname",
             "docs",
-            serde_json::json!({ "embedding": { "type": "vector", "vectorDims": 8 } }),
+            zeroship_data_query_builder::value!({ "embedding": { "type": "vector", "vectorDims": 8 } }),
         );
 
         // The engine's name, with one byte changed. Everything else - the vec0
@@ -2221,7 +2221,7 @@ fn the_search_really_depends_on_the_name_the_engine_records() {
                 &mk_unit_vec(0, dims),
                 4,
                 VectorMetric::Cosine,
-                &serde_json::Value::Null,
+                &zeroship_data_query_builder::value::Value::Null,
                 &zeroship_plugin_db::collection_schema(
                     &DbBinding::cold_start("vector_wrongname"),
                     "docs",
@@ -2272,7 +2272,7 @@ fn vector_search_returns_k_nearest_sqlite() {
         zeroship_plugin_db::cache_schema_for_tests(
             "vector_topk",
             "docs",
-            serde_json::json!({ "embedding": { "type": "vector", "vectorDims": 8 } }),
+            zeroship_data_query_builder::value!({ "embedding": { "type": "vector", "vectorDims": 8 } }),
         );
 
         // Create the vec0 vtable + mirror triggers BEFORE inserting
@@ -2304,7 +2304,7 @@ fn vector_search_returns_k_nearest_sqlite() {
                 &query,
                 10,
                 VectorMetric::Cosine,
-                &serde_json::Value::Null,
+                &zeroship_data_query_builder::value::Value::Null,
                 &zeroship_plugin_db::collection_schema(
                     &DbBinding::cold_start("vector_topk"),
                     "docs",
@@ -2317,7 +2317,10 @@ fn vector_search_returns_k_nearest_sqlite() {
         assert_eq!(rows.len(), 10, "expected k=10 rows, got {}", rows.len());
         let ids: Vec<i64> = rows
             .iter()
-            .filter_map(|r| r.get("id").and_then(serde_json::Value::as_i64))
+            .filter_map(|r| {
+                r.get("id")
+                    .and_then(zeroship_data_query_builder::value::Value::as_i64)
+            })
             .collect();
         // SQLite's INTEGER PRIMARY KEY AUTOINCREMENT starts at 1; row
         // 1 is the i=0 insert, which has zero cosine distance to its
@@ -2329,7 +2332,7 @@ fn vector_search_returns_k_nearest_sqlite() {
         for r in &rows {
             let d = r
                 .get("_distance")
-                .and_then(serde_json::Value::as_f64)
+                .and_then(zeroship_data_query_builder::value::Value::as_f64)
                 .expect("row must carry _distance");
             assert!(d.is_finite(), "_distance must be finite, got {d}");
             assert!(d >= 0.0, "cosine distance is non-negative, got {d}");
@@ -2337,7 +2340,7 @@ fn vector_search_returns_k_nearest_sqlite() {
         // Row #1 should be the nearest (distance ~ 0).
         let first_id = rows[0]
             .get("id")
-            .and_then(serde_json::Value::as_i64)
+            .and_then(zeroship_data_query_builder::value::Value::as_i64)
             .expect("first row id");
         assert_eq!(
             first_id, 1,
@@ -2345,7 +2348,7 @@ fn vector_search_returns_k_nearest_sqlite() {
         );
         let first_d = rows[0]
             .get("_distance")
-            .and_then(serde_json::Value::as_f64)
+            .and_then(zeroship_data_query_builder::value::Value::as_f64)
             .expect("first row _distance");
         assert!(
             first_d.abs() < 1e-5,
@@ -2424,7 +2427,7 @@ fn vector_search_respects_filter_sqlite() {
         zeroship_plugin_db::cache_schema_for_tests(
             "vector_filter",
             "docs",
-            serde_json::json!({
+            zeroship_data_query_builder::value!({
                 "tenant": { "type": "string" },
                 "embedding": { "type": "vector", "vectorDims": 4 },
             }),
@@ -2468,7 +2471,7 @@ fn vector_search_respects_filter_sqlite() {
         // have tenant='a'. The filter uses the `$eq` operator the
         // SDK already emits.
         let query = mk_unit_vec(0, 4);
-        let filter = serde_json::json!({ "tenant": { "$eq": "a" } });
+        let filter = zeroship_data_query_builder::value!({ "tenant": { "$eq": "a" } });
         let rows = backend
             .vector_search(
                 &DbBinding::cold_start("vector_filter"),
@@ -2495,7 +2498,7 @@ fn vector_search_respects_filter_sqlite() {
         for r in &rows {
             let tenant = r
                 .get("tenant")
-                .and_then(serde_json::Value::as_str)
+                .and_then(zeroship_data_query_builder::value::Value::as_str)
                 .expect("row must carry tenant");
             assert_eq!(
                 tenant, "a",
@@ -2538,7 +2541,7 @@ fn vector_l2_distance_matches_cosine_for_unit_vectors_sqlite() {
         zeroship_plugin_db::cache_schema_for_tests(
             "vector_math",
             "docs",
-            serde_json::json!({
+            zeroship_data_query_builder::value!({
                 "emb_cos": { "type": "vector", "vectorDims": 4 },
                 "emb_l2": { "type": "vector", "vectorDims": 4 },
             }),
@@ -2581,7 +2584,7 @@ fn vector_l2_distance_matches_cosine_for_unit_vectors_sqlite() {
                 &v1,
                 2,
                 VectorMetric::Cosine,
-                &serde_json::Value::Null,
+                &zeroship_data_query_builder::value::Value::Null,
                 &zeroship_plugin_db::collection_schema(
                     &DbBinding::cold_start("vector_math"),
                     "docs",
@@ -2598,7 +2601,7 @@ fn vector_l2_distance_matches_cosine_for_unit_vectors_sqlite() {
                 &v1,
                 2,
                 VectorMetric::L2,
-                &serde_json::Value::Null,
+                &zeroship_data_query_builder::value::Value::Null,
                 &zeroship_plugin_db::collection_schema(
                     &DbBinding::cold_start("vector_math"),
                     "docs",
@@ -2611,10 +2614,17 @@ fn vector_l2_distance_matches_cosine_for_unit_vectors_sqlite() {
         // The row with id=2 (the OTHER unit vector) must appear in
         // both result sets; its cosine and L2 distances must satisfy
         // L2² ≈ 2 * cos_distance.
-        let find = |rows: &[serde_json::Value], target_id: i64| -> f64 {
+        let find = |rows: &[zeroship_data_query_builder::value::Value], target_id: i64| -> f64 {
             rows.iter()
-                .find(|r| r.get("id").and_then(serde_json::Value::as_i64) == Some(target_id))
-                .and_then(|r| r.get("_distance").and_then(serde_json::Value::as_f64))
+                .find(|r| {
+                    r.get("id")
+                        .and_then(zeroship_data_query_builder::value::Value::as_i64)
+                        == Some(target_id)
+                })
+                .and_then(|r| {
+                    r.get("_distance")
+                        .and_then(zeroship_data_query_builder::value::Value::as_f64)
+                })
                 .expect("row with target id must be present")
         };
         let cos_d = find(&cos_rows, 2);
@@ -2695,7 +2705,7 @@ fn near_returns_within_radius() {
         zeroship_plugin_db::cache_schema_for_tests(
             "near_radius",
             "places",
-            serde_json::json!({ "location": { "type": "geoPoint" } }),
+            zeroship_data_query_builder::value!({ "location": { "type": "geoPoint" } }),
         );
 
         let london = GeoPoint {
@@ -2738,7 +2748,7 @@ fn near_returns_within_radius() {
                 "location",
                 london,
                 1000.0,
-                &serde_json::Value::Null,
+                &zeroship_data_query_builder::value::Value::Null,
                 None,
                 &zeroship_plugin_db::collection_schema(
                     &DbBinding::cold_start("near_radius"),
@@ -2751,7 +2761,10 @@ fn near_returns_within_radius() {
 
         let returned_ids: std::collections::BTreeSet<i64> = rows
             .iter()
-            .filter_map(|r| r.get("id").and_then(serde_json::Value::as_i64))
+            .filter_map(|r| {
+                r.get("id")
+                    .and_then(zeroship_data_query_builder::value::Value::as_i64)
+            })
             .collect();
         let expected: std::collections::BTreeSet<i64> = expected_within.into_iter().collect();
         assert_eq!(
@@ -2762,7 +2775,7 @@ fn near_returns_within_radius() {
         for r in &rows {
             let d = r
                 .get("_distance_m")
-                .and_then(serde_json::Value::as_f64)
+                .and_then(zeroship_data_query_builder::value::Value::as_f64)
                 .expect("row must carry _distance_m");
             assert!(d.is_finite(), "_distance_m must be finite, got {d}");
             assert!(
@@ -2773,7 +2786,7 @@ fn near_returns_within_radius() {
         // The dead-centre row (id=1) is the closest.
         let first_id = rows[0]
             .get("id")
-            .and_then(serde_json::Value::as_i64)
+            .and_then(zeroship_data_query_builder::value::Value::as_i64)
             .expect("first row id");
         assert_eq!(
             first_id, 1,
@@ -2781,7 +2794,7 @@ fn near_returns_within_radius() {
         );
         let first_d = rows[0]
             .get("_distance_m")
-            .and_then(serde_json::Value::as_f64)
+            .and_then(zeroship_data_query_builder::value::Value::as_f64)
             .expect("first row _distance_m");
         assert!(
             first_d < 1.0,
@@ -2831,7 +2844,7 @@ fn a_near_inside_a_transaction_sees_the_row_that_transaction_inserted() {
         zeroship_plugin_db::cache_schema_for_tests(
             app,
             "places",
-            serde_json::json!({ "location": { "type": "geoPoint" } }),
+            zeroship_data_query_builder::value!({ "location": { "type": "geoPoint" } }),
         );
 
         let london = GeoPoint {
@@ -2864,7 +2877,7 @@ fn a_near_inside_a_transaction_sees_the_row_that_transaction_inserted() {
         .expect("write inside the transaction");
 
         let binding = DbBinding::cold_start(app);
-        let args = serde_json::json!({
+        let args = zeroship_data_query_builder::value!({
             "field": "location",
             "point": { "lat": london.lat, "lng": london.lng },
             "radius": 1000.0,
@@ -2918,7 +2931,7 @@ fn a_near_inside_a_transaction_sees_the_row_that_transaction_inserted() {
         assert!(
             inside[0]
                 .get("_distance_m")
-                .and_then(serde_json::Value::as_f64)
+                .and_then(zeroship_data_query_builder::value::Value::as_f64)
                 .is_some_and(|d| d < 1.0),
             "the row must carry its synthetic distance: {inside:?}",
         );
@@ -3032,8 +3045,8 @@ export default { fetch: _zsFetch, rpc: _shimRpc };
 // ---------------------------------------------------------------------------
 
 /// `email` unique + plaintext, `ssn` randomised-encrypted with a `last4` mask.
-fn users_encrypted_ssn_schema(key_id: &str) -> serde_json::Value {
-    serde_json::json!({
+fn users_encrypted_ssn_schema(key_id: &str) -> zeroship_data_query_builder::value::Value {
+    zeroship_data_query_builder::value!({
         "email": {"type": "string", "required": true, "unique": true},
         "name": {"type": "string", "required": true},
         "ssn": {
@@ -3046,8 +3059,8 @@ fn users_encrypted_ssn_schema(key_id: &str) -> serde_json::Value {
 
 /// As above, plus `email` itself deterministically encrypted - the shape the
 /// deterministic-conflict upsert needs (a unique index over ciphertext).
-fn users_deterministic_email_schema(key_id: &str) -> serde_json::Value {
-    serde_json::json!({
+fn users_deterministic_email_schema(key_id: &str) -> zeroship_data_query_builder::value::Value {
+    zeroship_data_query_builder::value!({
         "email": {
             "type": "string",
             "required": true,
@@ -3066,8 +3079,8 @@ fn users_deterministic_email_schema(key_id: &str) -> serde_json::Value {
 /// One randomised-encrypted column and no mask - the fast-path fixtures assert
 /// a PLAIN write skips row resolution, so the encrypted column must exist but
 /// stay untouched by the write under test.
-fn users_encrypted_secret_schema(key_id: &str) -> serde_json::Value {
-    serde_json::json!({
+fn users_encrypted_secret_schema(key_id: &str) -> zeroship_data_query_builder::value::Value {
+    zeroship_data_query_builder::value!({
         "email": {"type": "string", "required": true, "unique": true},
         "name": {"type": "string", "required": true},
         "secret": {
@@ -3203,7 +3216,7 @@ struct SqliteRuntimeSource {
 
 fn sqlite_runtime_source(
     collection: &str,
-    schema: &serde_json::Value,
+    schema: &zeroship_data_query_builder::value::Value,
     body: &str,
 ) -> SqliteRuntimeSource {
     let source = format!(
@@ -3225,7 +3238,7 @@ fn dispatch_sqlite_runtime(
     dir: &tempfile::TempDir,
     source: &SqliteRuntimeSource,
     name: &str,
-) -> serde_json::Value {
+) -> zeroship_data_query_builder::value::Value {
     let url = parity::sqlite_url(dir);
     let (status, body) = parity::dispatch_zs_with_descriptor(
         &url,
@@ -3265,7 +3278,7 @@ fn insert_many_encrypts_ciphertext_before_sqlite_storage() {
         let _keys = with_root_key("c1_insert_many", &"d".repeat(64));
         let app_id = "app_demo";
         let collection = "bulk_people";
-        let schema = serde_json::json!({
+        let schema = zeroship_data_query_builder::value!({
             "name": { "type": "string" },
             "ssn": {
                 "type": "string",
@@ -3290,7 +3303,7 @@ fn insert_many_encrypts_ciphertext_before_sqlite_storage() {
             backend.pool_exec(trimmed, &[]).await.expect("DDL exec");
         }
 
-        let mut docs = serde_json::json!([
+        let mut docs = zeroship_data_query_builder::value!([
             { "name": "Alice", "ssn": "123-45-6789" },
             { "name": "Bob", "ssn": "987-65-4321" }
         ]);
@@ -3303,7 +3316,7 @@ fn insert_many_encrypts_ciphertext_before_sqlite_storage() {
         .await
         .expect("prepare insertMany docs");
 
-        let expected_by_id: HashMap<String, (String, String)> = docs
+        let expected_by_id: HashMap<String, (Vec<u8>, String)> = docs
             .as_array()
             .expect("docs array")
             .iter()
@@ -3316,9 +3329,9 @@ fn insert_many_encrypts_ciphertext_before_sqlite_storage() {
                         .to_string(),
                     (
                         obj.get(raw_column_name("ssn").as_str())
-                            .and_then(|v| v.as_str())
-                            .expect("base64 ciphertext marker doc, relocated to the raw column")
-                            .to_string(),
+                            .and_then(|v| v.as_bytes())
+                            .expect("native ciphertext in the raw column")
+                            .to_vec(),
                         obj.get("ssn")
                             .and_then(|v| v.as_str())
                             .expect("masked sibling stays on the field's own column")
@@ -3336,13 +3349,13 @@ fn insert_many_encrypts_ciphertext_before_sqlite_storage() {
             SqlDialect::Sqlite,
         )
         .expect("build insertMany");
-        let params: Vec<&str> = built.params.iter().map(String::as_str).collect();
+        let params = &built.params;
         let client = backend
             .acquire_dedicated_client(app_id)
             .await
             .expect("acquire client");
         client
-            .query_typed(&built.sql, &params)
+            .query_typed(&built.sql, params)
             .await
             .expect("INSERT ... RETURNING");
 
@@ -3376,7 +3389,7 @@ fn insert_many_encrypts_ciphertext_before_sqlite_storage() {
                 TypedCell::Text(s) => s.clone(),
                 other => panic!("ssn (the masked column) must be TEXT, got {other:?}"),
             };
-            let (prepared_ciphertext_b64, prepared_masked) = expected_by_id
+            let (prepared_ciphertext, prepared_masked) = expected_by_id
                 .get(&id)
                 .expect("stored row id should match prepared docs");
             assert_eq!(masked, *prepared_masked, "masked sibling must be persisted");
@@ -3400,9 +3413,7 @@ fn insert_many_encrypts_ciphertext_before_sqlite_storage() {
                 masked, "987-65-4321",
                 "ssn (field's own column) must not hold plaintext",
             );
-            let expected_ciphertext = base64::engine::general_purpose::STANDARD
-                .decode(prepared_ciphertext_b64)
-                .expect("prepared ciphertext base64");
+            let expected_ciphertext = prepared_ciphertext.clone();
             assert_eq!(
                 stored_blob, expected_ciphertext,
                 "raw stored bytes must match the write-side ciphertext",
@@ -3577,19 +3588,19 @@ const _procedures = { upsertConflict };
         assert!(
             first
                 .get("created_by")
-                .is_none_or(serde_json::Value::is_null),
+                .is_none_or(zeroship_data_query_builder::value::Value::is_null),
             "a supplied created_by must not land on the insert arm: {first:?}"
         );
         assert!(
             second
                 .get("created_by")
-                .is_none_or(serde_json::Value::is_null),
+                .is_none_or(zeroship_data_query_builder::value::Value::is_null),
             "a supplied created_by must not land on the conflict arm: {second:?}"
         );
         assert!(
             second
                 .get("updated_by")
-                .is_none_or(serde_json::Value::is_null),
+                .is_none_or(zeroship_data_query_builder::value::Value::is_null),
             "a supplied updated_by must not land on the conflict arm: {second:?}"
         );
         assert_eq!(
@@ -5269,7 +5280,7 @@ fn encrypted_column_e2e_crud_round_trip_sqlite() {
         // The schema the encryption pass sees — declares `ssn` as a
         // randomised-encrypted column wrapping the string type, keyed
         // to the e2e-test-specific env var.
-        let schema = serde_json::json!({
+        let schema = zeroship_data_query_builder::value!({
             "ssn": {
                 "type": "string",
                 "encrypted": {
@@ -5282,13 +5293,12 @@ fn encrypted_column_e2e_crud_round_trip_sqlite() {
 
         let plaintext = "123-45-6789";
         let row_pk = "row_e2e";
-        let mut doc = serde_json::json!({
+        let mut doc = zeroship_data_query_builder::value!({
             "id": row_pk,
             "ssn": plaintext,
         });
 
-        // Step 1 — encryption pass swaps ssn into base64 ciphertext +
-        // installs the `__zsbin__ssn` marker.
+        // The encryption pass replaces ssn with native ciphertext bytes.
         encrypt_row_on_write(
             backend.key_store(),
             "app_demo",
@@ -5299,18 +5309,9 @@ fn encrypted_column_e2e_crud_round_trip_sqlite() {
         )
         .await
         .expect("encrypt_row_on_write");
-        assert!(
-            doc.get("__zsbin__ssn").and_then(|v| v.as_bool()) == Some(true),
-            "encryption pass must install the marker key: {doc:?}",
-        );
-        // Pull out the base64 ciphertext for a later equality check.
-        let ct_b64_before_bind = doc
-            .get("ssn")
-            .and_then(|v| v.as_str())
-            .expect("ssn must be a base64 string after encrypt")
-            .to_string();
+        let ciphertext = doc["ssn"].as_bytes().expect("native ciphertext").to_vec();
 
-        // Binary decoding is explicit in SQL; values remain text binds.
+        // Bind the ciphertext directly.
         let bq = build_insert_with_dialect(
             &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
             "users",
@@ -5324,29 +5325,20 @@ fn encrypted_column_e2e_crud_round_trip_sqlite() {
             "SQLite dialect must not emit `decode(...)::bytea`: {}",
             bq.sql,
         );
-        assert!(
-            bq.sql.contains("unhex("),
-            "binary conversion must be in the SQL expression"
-        );
-        let bytes = base64::Engine::decode(
-            &base64::engine::general_purpose::STANDARD,
-            &ct_b64_before_bind,
-        )
-        .unwrap();
-        let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
-        assert!(
-            bq.params.contains(&hex),
-            "the expression consumes the ciphertext as hex"
-        );
+        assert!(bq
+            .params
+            .iter()
+            .any(|value| value.as_bytes() == Some(ciphertext.as_slice())));
+        assert!(!bq.sql.contains("unhex("));
 
         // Execute the compiled INSERT through the typed RETURNING surface.
-        let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
+        let param_refs = &bq.params;
         let client = backend
             .acquire_dedicated_client("app_demo")
             .await
             .expect("acquire client");
         let _affected = client
-            .query_typed(&bq.sql, &param_refs)
+            .query_typed(&bq.sql, param_refs)
             .await
             .expect("INSERT ... RETURNING via SQLite session");
 
@@ -5357,7 +5349,7 @@ fn encrypted_column_e2e_crud_round_trip_sqlite() {
         let typed = client
             .query_typed(
                 "SELECT id, ssn FROM \"app_demo\".\"users\" WHERE id = ?",
-                &[row_pk],
+                &[row_pk.into()],
             )
             .await
             .expect("SELECT typed");
@@ -5378,29 +5370,13 @@ fn encrypted_column_e2e_crud_round_trip_sqlite() {
         // pass produced (base64-decoded back to raw). If the session's
         // sentinel strip / base64 decode is wrong, the stored bytes
         // diverge from the plaintext ciphertext.
-        let expected_bytes = {
-            use base64::Engine as _;
-            base64::engine::general_purpose::STANDARD
-                .decode(&ct_b64_before_bind)
-                .expect("encryption pass must have produced valid base64")
-        };
         assert_eq!(
-            ssn_bytes, expected_bytes,
-            "stored BLOB must equal the raw ciphertext (sentinel strip + base64 decode in session)",
+            ssn_bytes, ciphertext,
+            "stored ciphertext must match the protection pass"
         );
-
-        // Step 5 — render the BLOB row as the JSON shape
-        // `decrypt_row_on_read` expects (`\xHHHH` hex string).
-        let mut hex = String::with_capacity(2 + ssn_bytes.len() * 2);
-        hex.push('\\');
-        hex.push('x');
-        for b in &ssn_bytes {
-            use std::fmt::Write as _;
-            let _ = write!(hex, "{b:02x}");
-        }
-        let mut row_value = serde_json::json!({
+        let mut row_value = zeroship_data_query_builder::value!({
             "id": id_text,
-            "ssn": hex,
+            "ssn": zeroship_data_query_builder::value::Value::Bytes(ssn_bytes),
         });
 
         decrypt_row_on_read(
@@ -5443,7 +5419,7 @@ fn encrypted_column_e2e_crud_round_trip_sqlite() {
 /// SQLite-flavoured `CREATE TABLE` path.
 #[test]
 fn a_raw_column_is_emitted_for_a_masked_field_sqlite() {
-    let schema = serde_json::json!({
+    let schema = zeroship_data_query_builder::value!({
         "ssn": {
             "type": "string",
             "mask": { "kind": "last4", "classification": "spi" }
@@ -5522,7 +5498,7 @@ fn dual_write_insert_persists_parent_and_sibling_sqlite() {
         // the mask pass has populated `ssn_masked`. The SQL builder
         // walks the row map, so the sibling key naturally lands on
         // the INSERT column list (no special-casing needed).
-        let doc = serde_json::json!({
+        let doc = zeroship_data_query_builder::value!({
             "ssn": "123-45-6789",
             "ssn_masked": "***-**-6789"
         });
@@ -5530,7 +5506,7 @@ fn dual_write_insert_persists_parent_and_sibling_sqlite() {
         // only: `ssn_masked` is a PHYSICAL column the mask pass writes, never a
         // declared field, so it is on the INSERT column list and not on the
         // projection - which is the shape this test is about.
-        let schema = serde_json::json!({ "ssn": { "type": "string" } });
+        let schema = zeroship_data_query_builder::value!({ "ssn": { "type": "string" } });
         let bq = build_insert_with_dialect(
             &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
             "users",
@@ -5545,13 +5521,13 @@ fn dual_write_insert_persists_parent_and_sibling_sqlite() {
             bq.sql,
         );
 
-        let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
+        let param_refs = &bq.params;
         let client = backend
             .acquire_dedicated_client("app_demo")
             .await
             .expect("acquire client");
         let _ = client
-            .query(&bq.sql, &param_refs)
+            .query_values(&bq.sql, param_refs)
             .await
             .expect("dual-write INSERT must succeed");
 
@@ -5611,21 +5587,22 @@ fn a_select_serves_the_masked_column_sqlite() {
         // here - masking + encryption are orthogonal in
         // `apply_mask_on_write` design), the field's own column stores
         // the masked string.
-        let schema = serde_json::json!({
+        let schema = zeroship_data_query_builder::value!({
             "ssn": {
                 "type": "string",
                 "mask": { "kind": "last4", "classification": "spi" }
             },
             "name": { "type": "string" }
         });
-        let mut doc = serde_json::json!({
+        let mut doc = zeroship_data_query_builder::value!({
             "id": "usr_01",
             "ssn": "***-**-6789",
             "name": "alice"
         });
-        doc.as_object_mut()
-            .expect("doc object")
-            .insert(raw_ssn.clone(), serde_json::json!("123-45-6789"));
+        doc.as_object_mut().expect("doc object").insert(
+            raw_ssn.clone(),
+            zeroship_data_query_builder::value!("123-45-6789"),
+        );
         let bq = build_insert_with_dialect(
             &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
             "users",
@@ -5634,12 +5611,15 @@ fn a_select_serves_the_masked_column_sqlite() {
             SqlDialect::Sqlite,
         )
         .expect("build_insert_with_dialect");
-        let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
+        let param_refs = &bq.params;
         let client = backend
             .acquire_dedicated_client("app_demo")
             .await
             .expect("acquire client");
-        client.query(&bq.sql, &param_refs).await.expect("INSERT");
+        client
+            .query_values(&bq.sql, param_refs)
+            .await
+            .expect("INSERT");
 
         // Build a default read with schema awareness: the SELECT must
         // name the field's own column directly AND must NOT reference the
@@ -5648,7 +5628,7 @@ fn a_select_serves_the_masked_column_sqlite() {
         let bq = build_find_with_schema(
             &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
             "users",
-            &serde_json::json!({ "id": "usr_01" }),
+            &zeroship_data_query_builder::value!({ "id": "usr_01" }),
             None,
             None,
             None,
@@ -5681,8 +5661,11 @@ fn a_select_serves_the_masked_column_sqlite() {
         // Execute the SELECT and verify the row returns the masked
         // string under the field's own column, and the real value is
         // nowhere in the row.
-        let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
-        let rows = client.query(&bq.sql, &param_refs).await.expect("SELECT");
+        let param_refs = &bq.params;
+        let rows = client
+            .query_values(&bq.sql, param_refs)
+            .await
+            .expect("SELECT");
         assert_eq!(rows.len(), 1);
         let row = &rows[0];
         assert_eq!(
@@ -5710,7 +5693,7 @@ fn a_select_serves_the_masked_column_sqlite() {
 fn aliased_select_skips_kind_none_sqlite() {
     use zeroship_plugin_db::compile::build_find_with_schema;
 
-    let schema = serde_json::json!({
+    let schema = zeroship_data_query_builder::value!({
         "ssn": {
             "type": "string",
             "encrypted": { "mode": "randomised", "keyId": "default", "wraps": "string" },
@@ -5721,7 +5704,7 @@ fn aliased_select_skips_kind_none_sqlite() {
     let bq = build_find_with_schema(
         &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
         "users",
-        &serde_json::json!({}),
+        &zeroship_data_query_builder::value!({}),
         None,
         None,
         None,
@@ -6249,7 +6232,7 @@ fn restore_hash_mismatch_rejected_sqlite() {
 
 #[test]
 fn p55_pr1_build_create_table_refuses_masked_suffix_field_sqlite() {
-    let schema = serde_json::json!({
+    let schema = zeroship_data_query_builder::value!({
         "name": {"type": "string"},
         // `_masked` is reserved for Path B sibling columns.
         "card_pan_masked": {"type": "string"},
@@ -6270,7 +6253,7 @@ fn p55_pr1_build_create_table_refuses_masked_suffix_field_sqlite() {
 
 #[test]
 fn p55_pr1_build_create_table_refuses_classification_name_field_sqlite() {
-    let schema = serde_json::json!({
+    let schema = zeroship_data_query_builder::value!({
         "name": {"type": "string"},
         // `phi` collides with the platform classification taxonomy.
         "phi": {"type": "string"},
@@ -6314,7 +6297,7 @@ use zeroship_plugin_db::crud::unmask;
 async fn unmask_setup_with_schema(
     app_id: &str,
     collection: &str,
-    schema: serde_json::Value,
+    schema: zeroship_data_query_builder::value::Value,
 ) -> (Rc<SqliteBackend>, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("tempdir");
     let backend = Rc::new(
@@ -6365,7 +6348,7 @@ fn configure_cold_sqlite_unmask_fixture(
     dir: &tempfile::TempDir,
     app_id: &str,
     collection: &str,
-    schema: serde_json::Value,
+    schema: zeroship_data_query_builder::value::Value,
 ) {
     zeroship_plugin_db::reset_context_for_tests();
     let url = format!("sqlite:{}", dir.path().join("zs-control.sqlite").display());
@@ -6470,7 +6453,7 @@ async fn read_audit_rows(backend: &SqliteBackend, app_id: &str) -> Vec<(String, 
 /// nothing else does. See [`assert_cold_open_installs_a_fresh_backend`].
 #[test]
 fn cold_unmask_open_comes_from_ensure_backend_not_the_fixture() {
-    let schema = serde_json::json!({
+    let schema = zeroship_data_query_builder::value!({
         "id":  { "type": "string" },
         "ssn": {
             "type": "string",
@@ -6498,7 +6481,7 @@ fn cold_unmask_open_comes_from_ensure_backend_not_the_fixture() {
 #[test]
 fn cold_unmask_with_auto_actor_attaches_before_read() {
     let _keys = with_root_key("p55_pr4_auto", &"a".repeat(64));
-    let schema = serde_json::json!({
+    let schema = zeroship_data_query_builder::value!({
         "id": { "type": "string" },
         "ssn": {
             "type": "string",
@@ -6542,7 +6525,7 @@ fn cold_unmask_with_auto_actor_attaches_before_read() {
         use zeroship_plugin_db::crud::encryption_pass::encrypt_row_on_write;
         let row_pk = "usr_auto_01";
         let plaintext = "123-45-6789";
-        let mut doc = serde_json::json!({
+        let mut doc = zeroship_data_query_builder::value!({
             "id": row_pk,
             "ssn": plaintext,
         });
@@ -6556,29 +6539,20 @@ fn cold_unmask_with_auto_actor_attaches_before_read() {
         )
         .await
         .expect("encrypt_row_on_write");
-        // `encrypt_row_on_write` alone (no `mask_pass` call - that pass is
-        // crate-private) leaves the ciphertext under the LOGICAL key, plus
-        // an `__zsbin__ssn` binary-bind marker so the SQL builder base64
-        // decodes it into the BLOB column. Relocate both by hand exactly as
-        // `mask_pass::relocate_masked_columns` does: the real value (here,
-        // ciphertext) AND its binary-bind marker move to the raw column;
-        // the field's own column gets the precomputed mask.
+        // Relocate the native ciphertext to the raw column, as the mask pass
+        // does, and store the precomputed mask in the logical column.
         let ciphertext = doc
             .as_object_mut()
             .expect("doc object")
-            .remove("ssn")
+            .shift_remove("ssn")
             .expect("ciphertext produced by encrypt_row_on_write");
-        let bin_marker = doc
-            .as_object_mut()
-            .expect("doc object")
-            .remove("__zsbin__ssn");
         {
             let obj = doc.as_object_mut().expect("doc object");
             obj.insert(raw_ssn.clone(), ciphertext);
-            if let Some(marker) = bin_marker {
-                obj.insert(format!("__zsbin__{raw_ssn}"), marker);
-            }
-            obj.insert("ssn".to_string(), serde_json::json!("***-**-6789"));
+            obj.insert(
+                "ssn".to_string(),
+                zeroship_data_query_builder::value!("***-**-6789"),
+            );
         }
         let bq = build_insert_with_dialect(
             &zeroship_data_query_builder::SchemaName::new(app_id).expect("fixture schema name"),
@@ -6592,9 +6566,9 @@ fn cold_unmask_with_auto_actor_attaches_before_read() {
             .acquire_dedicated_client(app_id)
             .await
             .expect("acquire client");
-        let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
+        let param_refs = &bq.params;
         let _ = client
-            .query_typed(&bq.sql, &param_refs)
+            .query_typed(&bq.sql, param_refs)
             .await
             .expect("INSERT");
 
@@ -6611,7 +6585,7 @@ fn cold_unmask_with_auto_actor_attaches_before_read() {
             collection: collection.to_string(),
             row_pk: row_pk.to_string(),
             column: "ssn".to_string(),
-            actor: Some(serde_json::json!({ "kind": "auto", "id": null })),
+            actor: Some(zeroship_data_query_builder::value!({ "kind": "auto", "id": null })),
             reason: Some("integration test".to_string()),
             rejected_claim: None,
         };
@@ -6667,7 +6641,7 @@ fn cold_unmask_with_auto_actor_attaches_before_read() {
 #[test]
 fn unmask_with_user_actor_returns_forbidden_audit_logged() {
     let _keys = with_root_key("p55_pr4_user", &"b".repeat(64));
-    let schema = serde_json::json!({
+    let schema = zeroship_data_query_builder::value!({
         "id": { "type": "string" },
         "ssn": {
             "type": "string",
@@ -6704,7 +6678,7 @@ fn unmask_with_user_actor_returns_forbidden_audit_logged() {
             collection: collection.to_string(),
             row_pk: "usr_anywhere".to_string(),
             column: "ssn".to_string(),
-            actor: Some(serde_json::json!({ "kind": "user", "id": "usr_xyz" })),
+            actor: Some(zeroship_data_query_builder::value!({ "kind": "user", "id": "usr_xyz" })),
             reason: None,
             rejected_claim: None,
         };
@@ -6741,7 +6715,7 @@ fn unmask_with_user_actor_returns_forbidden_audit_logged() {
 #[test]
 fn unmask_column_not_masked_returns_typed_error() {
     // Schema declares `name` as a bare string — no mask block.
-    let schema = serde_json::json!({
+    let schema = zeroship_data_query_builder::value!({
         "id":   { "type": "string" },
         "name": { "type": "string" },
     });
@@ -6754,7 +6728,7 @@ fn unmask_column_not_masked_returns_typed_error() {
             collection: collection.to_string(),
             row_pk: "any_pk".to_string(),
             column: "name".to_string(),
-            actor: Some(serde_json::json!({ "kind": "auto" })),
+            actor: Some(zeroship_data_query_builder::value!({ "kind": "auto" })),
             reason: None,
             rejected_claim: None,
         };
@@ -6780,7 +6754,7 @@ fn unmask_column_not_masked_returns_typed_error() {
 /// row's classification text matches.
 #[test]
 fn unmask_writes_audit_row_with_correct_classification() {
-    let schema = serde_json::json!({
+    let schema = zeroship_data_query_builder::value!({
         "id":      { "type": "string" },
         "diag":    {
             "type": "string",
@@ -6800,7 +6774,7 @@ fn unmask_writes_audit_row_with_correct_classification() {
             collection: collection.to_string(),
             row_pk: "pat_01".to_string(),
             column: "diag".to_string(),
-            actor: Some(serde_json::json!({ "kind": "user", "id": "doctor_x" })),
+            actor: Some(zeroship_data_query_builder::value!({ "kind": "user", "id": "doctor_x" })),
             reason: Some("chart review".to_string()),
             rejected_claim: None,
         };
@@ -6842,7 +6816,7 @@ fn unmask_writes_audit_row_with_correct_classification() {
 #[test]
 fn unmask_reads_the_raw_column_the_descriptor_declares() {
     let declared_raw = "__zs_raw2__ssn";
-    let schema = serde_json::json!({
+    let schema = zeroship_data_query_builder::value!({
         "id": { "type": "string" },
         "ssn": {
             "type": "string",
@@ -6886,7 +6860,7 @@ fn unmask_reads_the_raw_column_the_descriptor_declares() {
             collection: collection.to_string(),
             row_pk: "per_01".to_string(),
             column: "ssn".to_string(),
-            actor: Some(serde_json::json!({ "kind": "auto", "id": null })),
+            actor: Some(zeroship_data_query_builder::value!({ "kind": "auto", "id": null })),
             reason: Some("integration test".to_string()),
             rejected_claim: None,
         };
@@ -6930,7 +6904,7 @@ use zeroship_plugin_db::crud::mask_policy;
 async fn policy_setup(
     app_id: &str,
     collection: &str,
-    schema: serde_json::Value,
+    schema: zeroship_data_query_builder::value::Value,
 ) -> (Rc<SqliteBackend>, tempfile::TempDir) {
     let (backend, dir) = unmask_setup_with_schema(app_id, collection, schema).await;
     zeroship_plugin_db::clear_mask_policy_cache_for_tests(app_id);
@@ -6942,7 +6916,7 @@ async fn policy_setup(
 #[test]
 fn unmask_with_user_role_in_policy_returns_plaintext() {
     let _keys = with_root_key("p55_pr5_grant", &"c".repeat(64));
-    let schema = serde_json::json!({
+    let schema = zeroship_data_query_builder::value!({
         "id": { "type": "string" },
         "email": {
             "type": "string",
@@ -6961,7 +6935,7 @@ fn unmask_with_user_role_in_policy_returns_plaintext() {
         let (backend, _dir) = policy_setup(app_id, collection, schema.clone()).await;
 
         // Define the policy: `user` can unmask `pii`.
-        let policy_v = serde_json::json!({
+        let policy_v = zeroship_data_query_builder::value!({
             "user": ["public", "pii"],
         });
         mask_policy::dispatch_set_mask_policy(&unmask_backend().await, app_id, policy_v)
@@ -6992,7 +6966,7 @@ fn unmask_with_user_role_in_policy_returns_plaintext() {
         use zeroship_plugin_db::crud::encryption_pass::encrypt_row_on_write;
         let row_pk = "usr_grant_01";
         let plaintext = "alice@example.com";
-        let mut doc = serde_json::json!({
+        let mut doc = zeroship_data_query_builder::value!({
             "id": row_pk,
             "email": plaintext,
         });
@@ -7006,29 +6980,20 @@ fn unmask_with_user_role_in_policy_returns_plaintext() {
         )
         .await
         .expect("encrypt_row_on_write");
-        // `encrypt_row_on_write` alone (no `mask_pass` call - that pass is
-        // crate-private) leaves the ciphertext under the LOGICAL key, plus
-        // an `__zsbin__email` binary-bind marker so the SQL builder base64
-        // decodes it into the BLOB column. Relocate both by hand exactly as
-        // `mask_pass::relocate_masked_columns` does: the real value (here,
-        // ciphertext) AND its binary-bind marker move to the raw column;
-        // the field's own column gets the precomputed mask.
+        // Relocate the native ciphertext to the raw column, as the mask pass
+        // does, and store the precomputed mask in the logical column.
         let ciphertext = doc
             .as_object_mut()
             .expect("doc object")
-            .remove("email")
+            .shift_remove("email")
             .expect("ciphertext produced by encrypt_row_on_write");
-        let bin_marker = doc
-            .as_object_mut()
-            .expect("doc object")
-            .remove("__zsbin__email");
         {
             let obj = doc.as_object_mut().expect("doc object");
             obj.insert(raw_email.clone(), ciphertext);
-            if let Some(marker) = bin_marker {
-                obj.insert(format!("__zsbin__{raw_email}"), marker);
-            }
-            obj.insert("email".to_string(), serde_json::json!("a****@example.com"));
+            obj.insert(
+                "email".to_string(),
+                zeroship_data_query_builder::value!("a****@example.com"),
+            );
         }
         let bq = build_insert_with_dialect(
             &zeroship_data_query_builder::SchemaName::new(app_id).expect("fixture schema name"),
@@ -7042,9 +7007,9 @@ fn unmask_with_user_role_in_policy_returns_plaintext() {
             .acquire_dedicated_client(app_id)
             .await
             .expect("acquire client");
-        let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
+        let param_refs = &bq.params;
         let _ = client
-            .query_typed(&bq.sql, &param_refs)
+            .query_typed(&bq.sql, param_refs)
             .await
             .expect("INSERT");
 
@@ -7053,7 +7018,7 @@ fn unmask_with_user_role_in_policy_returns_plaintext() {
             collection: collection.to_string(),
             row_pk: row_pk.to_string(),
             column: "email".to_string(),
-            actor: Some(serde_json::json!({ "kind": "user", "id": "usr_xyz" })),
+            actor: Some(zeroship_data_query_builder::value!({ "kind": "user", "id": "usr_xyz" })),
             reason: Some("user requested own data".to_string()),
             rejected_claim: None,
         };
@@ -7100,7 +7065,7 @@ fn unmask_with_user_role_in_policy_returns_plaintext() {
 /// path emits an audit row.
 #[test]
 fn unmask_with_user_role_not_in_policy_denied() {
-    let schema = serde_json::json!({
+    let schema = zeroship_data_query_builder::value!({
         "id": { "type": "string" },
         "ssn": {
             "type": "string",
@@ -7114,7 +7079,7 @@ fn unmask_with_user_role_not_in_policy_denied() {
         let (backend, _dir) = policy_setup(app_id, collection, schema.clone()).await;
 
         // Policy: `user` can only unmask `public`.
-        let policy_v = serde_json::json!({
+        let policy_v = zeroship_data_query_builder::value!({
             "user": ["public"],
         });
         mask_policy::dispatch_set_mask_policy(&unmask_backend().await, app_id, policy_v)
@@ -7125,7 +7090,7 @@ fn unmask_with_user_role_not_in_policy_denied() {
             collection: collection.to_string(),
             row_pk: "usr_anywhere".to_string(),
             column: "ssn".to_string(),
-            actor: Some(serde_json::json!({ "kind": "user", "id": "usr_xyz" })),
+            actor: Some(zeroship_data_query_builder::value!({ "kind": "user", "id": "usr_xyz" })),
             reason: None,
             rejected_claim: None,
         };
@@ -7157,7 +7122,7 @@ fn unmask_with_user_role_not_in_policy_denied() {
 /// allowing everything when no policy is declared" hole.
 #[test]
 fn unmask_default_deny_when_no_policy() {
-    let schema = serde_json::json!({
+    let schema = zeroship_data_query_builder::value!({
         "id": { "type": "string" },
         "name": {
             "type": "string",
@@ -7175,7 +7140,7 @@ fn unmask_default_deny_when_no_policy() {
             collection: collection.to_string(),
             row_pk: "usr_anywhere".to_string(),
             column: "name".to_string(),
-            actor: Some(serde_json::json!({ "kind": "user", "id": "usr_xyz" })),
+            actor: Some(zeroship_data_query_builder::value!({ "kind": "user", "id": "usr_xyz" })),
             reason: None,
             rejected_claim: None,
         };
@@ -7206,14 +7171,14 @@ fn unmask_default_deny_when_no_policy() {
 /// `invalid_mask_classification`.
 #[test]
 fn unmask_invalid_classification_rejected_at_dispatch_time() {
-    let schema = serde_json::json!({ "id": { "type": "string" } });
+    let schema = zeroship_data_query_builder::value!({ "id": { "type": "string" } });
     let app_id = "app_unmask_invalid_classification";
     let collection = "users";
 
     run(async {
         let (_backend, _dir) = policy_setup(app_id, collection, schema).await;
 
-        let bad_policy = serde_json::json!({
+        let bad_policy = zeroship_data_query_builder::value!({
             "admin": ["public", "badclass"],
         });
         let err =
@@ -7236,7 +7201,7 @@ fn unmask_invalid_classification_rejected_at_dispatch_time() {
 /// Pins the write-through semantics.
 #[test]
 fn policy_refresh_after_set_mask_policy_op_takes_effect() {
-    let schema = serde_json::json!({
+    let schema = zeroship_data_query_builder::value!({
         "id": { "type": "string" },
         "data": {
             "type": "string",
@@ -7269,7 +7234,7 @@ fn policy_refresh_after_set_mask_policy_op_takes_effect() {
             collection: collection.to_string(),
             row_pk: "any".to_string(),
             column: "data".to_string(),
-            actor: Some(serde_json::json!({ "kind": "support", "id": "sup_1" })),
+            actor: Some(zeroship_data_query_builder::value!({ "kind": "support", "id": "sup_1" })),
             reason: None,
             rejected_claim: None,
         };
@@ -7288,7 +7253,7 @@ fn policy_refresh_after_set_mask_policy_op_takes_effect() {
         }
 
         // Step 2 — install a policy granting support → internal.
-        let policy_v = serde_json::json!({
+        let policy_v = zeroship_data_query_builder::value!({
             "support": ["internal"],
         });
         mask_policy::dispatch_set_mask_policy(&unmask_backend().await, app_id, policy_v)
@@ -7420,7 +7385,7 @@ use zeroship_plugin_db::crud::unmask::{dispatch_bulk_unmask, BulkUnmaskArgs, Bul
 /// `tx_scope::ensure_backend` exactly as the single-unmask dispatch does.
 #[test]
 fn cold_bulk_unmask_open_comes_from_ensure_backend_not_the_fixture() {
-    let schema = serde_json::json!({
+    let schema = zeroship_data_query_builder::value!({
         "id":    { "type": "string" },
         "email": {
             "type": "string",
@@ -7438,7 +7403,7 @@ fn cold_bulk_unmask_open_comes_from_ensure_backend_not_the_fixture() {
         mask_policy::dispatch_set_mask_policy(
             &unmask_backend().await,
             app_id,
-            serde_json::json!({ "user": ["pii"] }),
+            zeroship_data_query_builder::value!({ "user": ["pii"] }),
         )
         .await
         .expect("set_mask_policy");
@@ -7455,7 +7420,7 @@ fn cold_bulk_unmask_open_comes_from_ensure_backend_not_the_fixture() {
 /// `unmask_backend` - and is bound by the cold-open gate directly above.
 #[test]
 fn cold_bulk_unmask_attaches_before_read() {
-    let schema = serde_json::json!({
+    let schema = zeroship_data_query_builder::value!({
         "id":    { "type": "string" },
         "email": {
             "type": "string",
@@ -7506,7 +7471,7 @@ fn cold_bulk_unmask_attaches_before_read() {
         }
 
         // Policy: `user` can unmask pii AND spi.
-        let policy_v = serde_json::json!({ "user": ["pii", "spi"] });
+        let policy_v = zeroship_data_query_builder::value!({ "user": ["pii", "spi"] });
         mask_policy::dispatch_set_mask_policy(&unmask_backend().await, app_id, policy_v)
             .await
             .expect("set_mask_policy");
@@ -7529,7 +7494,7 @@ fn cold_bulk_unmask_attaches_before_read() {
                     columns: vec!["email".into()],
                 },
             ],
-            actor: Some(serde_json::json!({ "kind": "user", "id": "actor_x" })),
+            actor: Some(zeroship_data_query_builder::value!({ "kind": "user", "id": "actor_x" })),
             reason: Some("ops dashboard".into()),
             rejected_claim: None,
         };
@@ -7543,12 +7508,21 @@ fn cold_bulk_unmask_attaches_before_read() {
         // Plaintext recovered for every pair.
         let u1 = result.results.get("u1").expect("u1 row");
         assert_eq!(
-            u1.get("email").map(String::as_str),
+            u1.get("email")
+                .and_then(zeroship_data_query_builder::value::Value::as_str),
             Some("alice@example.com")
         );
-        assert_eq!(u1.get("ssn").map(String::as_str), Some("123-45-6789"));
+        assert_eq!(
+            u1.get("ssn")
+                .and_then(zeroship_data_query_builder::value::Value::as_str),
+            Some("123-45-6789")
+        );
         let u2 = result.results.get("u2").expect("u2 row");
-        assert_eq!(u2.get("email").map(String::as_str), Some("bob@example.com"));
+        assert_eq!(
+            u2.get("email")
+                .and_then(zeroship_data_query_builder::value::Value::as_str),
+            Some("bob@example.com")
+        );
 
         // Exactly ONE audit row covering the whole call.
         let audit = read_audit_rows(backend.as_ref(), app_id).await;
@@ -7582,7 +7556,7 @@ fn cold_bulk_unmask_attaches_before_read() {
 /// plaintext returned for the authorised pair either.
 #[test]
 fn bulk_unmask_authorization_atomic_one_unauthorized_fails_all() {
-    let schema = serde_json::json!({
+    let schema = zeroship_data_query_builder::value!({
         "id":    { "type": "string" },
         "email": {
             "type": "string",
@@ -7614,7 +7588,7 @@ fn bulk_unmask_authorization_atomic_one_unauthorized_fails_all() {
             .expect("CREATE TABLE");
 
         // Policy: `user` can ONLY unmask pii; spi is forbidden.
-        let policy_v = serde_json::json!({ "user": ["pii"] });
+        let policy_v = zeroship_data_query_builder::value!({ "user": ["pii"] });
         mask_policy::dispatch_set_mask_policy(&unmask_backend().await, app_id, policy_v)
             .await
             .expect("set_mask_policy");
@@ -7627,7 +7601,7 @@ fn bulk_unmask_authorization_atomic_one_unauthorized_fails_all() {
                 row_pk: "u1".into(),
                 columns: vec!["email".into(), "ssn".into()],
             }],
-            actor: Some(serde_json::json!({ "kind": "user", "id": "actor_x" })),
+            actor: Some(zeroship_data_query_builder::value!({ "kind": "user", "id": "actor_x" })),
             reason: None,
             rejected_claim: None,
         };
@@ -7660,7 +7634,7 @@ fn bulk_unmask_authorization_atomic_one_unauthorized_fails_all() {
 /// typed `unmask_column_not_masked` error BEFORE any audit row writes.
 #[test]
 fn bulk_unmask_unknown_column_returns_typed_error_e2e() {
-    let schema = serde_json::json!({
+    let schema = zeroship_data_query_builder::value!({
         "id":  { "type": "string" },
         "ssn": {
             "type": "string",
@@ -7679,7 +7653,7 @@ fn bulk_unmask_unknown_column_returns_typed_error_e2e() {
                 row_pk: "u1".into(),
                 columns: vec!["does_not_exist".into()],
             }],
-            actor: Some(serde_json::json!({ "kind": "auto" })),
+            actor: Some(zeroship_data_query_builder::value!({ "kind": "auto" })),
             reason: None,
             rejected_claim: None,
         };
@@ -7716,7 +7690,7 @@ use zeroship_plugin_db::crud::unmask::{
 /// resolved by the `find` dispatch through `tx_scope::ensure_backend`.
 #[test]
 fn cold_query_unmask_hint_open_comes_from_ensure_backend_not_the_fixture() {
-    let schema = serde_json::json!({
+    let schema = zeroship_data_query_builder::value!({
         "id":  { "type": "string" },
         "ssn": {
             "type": "string",
@@ -7734,7 +7708,7 @@ fn cold_query_unmask_hint_open_comes_from_ensure_backend_not_the_fixture() {
         mask_policy::dispatch_set_mask_policy(
             &unmask_backend().await,
             app_id,
-            serde_json::json!({ "user": ["spi"] }),
+            zeroship_data_query_builder::value!({ "user": ["spi"] }),
         )
         .await
         .expect("set_mask_policy");
@@ -7751,7 +7725,7 @@ fn cold_query_unmask_hint_open_comes_from_ensure_backend_not_the_fixture() {
 /// `unmask_backend` - and is bound by the cold-open gate directly above.
 #[test]
 fn cold_query_unmask_hint_attaches_before_read() {
-    let schema = serde_json::json!({
+    let schema = zeroship_data_query_builder::value!({
         "id":    { "type": "string" },
         "email": {
             "type": "string",
@@ -7802,7 +7776,7 @@ fn cold_query_unmask_hint_attaches_before_read() {
             .expect("INSERT");
 
         // Policy: `user` can unmask both pii and spi.
-        let policy_v = serde_json::json!({ "user": ["pii", "spi"] });
+        let policy_v = zeroship_data_query_builder::value!({ "user": ["pii", "spi"] });
         mask_policy::dispatch_set_mask_policy(&unmask_backend().await, app_id, policy_v)
             .await
             .expect("set_mask_policy");
@@ -7819,7 +7793,7 @@ fn cold_query_unmask_hint_attaches_before_read() {
         // columns. We're driving `dispatch_unmask_for_query` directly
         // since the full V8 round-trip is out of scope for this
         // integration test.
-        let actor = Some(serde_json::json!({ "kind": "user", "id": "actor_x" }));
+        let actor = Some(zeroship_data_query_builder::value!({ "kind": "user", "id": "actor_x" }));
         let reason = Some("dashboard view".to_string());
 
         // Step 1 — upfront auth fence.
@@ -7836,7 +7810,7 @@ fn cold_query_unmask_hint_attaches_before_read() {
         .expect("authorize_query_hint must succeed");
 
         // Step 2 — simulate post-wrap row + run unmask-for-query.
-        let mut rows = vec![serde_json::json!({
+        let mut rows = vec![zeroship_data_query_builder::value!({
             "id": "u1",
             "email": {
                 "sentinel": "__zsmask__",
@@ -7921,7 +7895,7 @@ fn cold_query_unmask_hint_attaches_before_read() {
 /// query entirely; we do not silently degrade to masked-only.
 #[test]
 fn per_query_unmask_hint_rejects_unauthorized_actor() {
-    let schema = serde_json::json!({
+    let schema = zeroship_data_query_builder::value!({
         "id":  { "type": "string" },
         "ssn": {
             "type": "string",
@@ -7935,12 +7909,12 @@ fn per_query_unmask_hint_rejects_unauthorized_actor() {
         let (backend, _dir) = unmask_setup_with_schema(app_id, collection, schema).await;
         zeroship_plugin_db::clear_mask_policy_cache_for_tests(app_id);
         // Policy: `user` can only unmask `pii`, NOT `spi`.
-        let policy_v = serde_json::json!({ "user": ["pii"] });
+        let policy_v = zeroship_data_query_builder::value!({ "user": ["pii"] });
         mask_policy::dispatch_set_mask_policy(&unmask_backend().await, app_id, policy_v)
             .await
             .expect("set_mask_policy");
 
-        let actor = Some(serde_json::json!({ "kind": "user", "id": "actor_x" }));
+        let actor = Some(zeroship_data_query_builder::value!({ "kind": "user", "id": "actor_x" }));
         let err = authorize_query_hint(
             &unmask_backend().await,
             &DbBinding::cold_start(app_id),
@@ -7970,7 +7944,7 @@ fn per_query_unmask_hint_rejects_unauthorized_actor() {
 /// the typed `unmask_column_not_masked` error before any DB hit.
 #[test]
 fn per_query_unmask_hint_unknown_column_returns_typed_error() {
-    let schema = serde_json::json!({
+    let schema = zeroship_data_query_builder::value!({
         "id":  { "type": "string" },
         "ssn": {
             "type": "string",
@@ -7983,7 +7957,7 @@ fn per_query_unmask_hint_unknown_column_returns_typed_error() {
     run(async {
         let (_backend, _dir) = unmask_setup_with_schema(app_id, collection, schema).await;
         zeroship_plugin_db::clear_mask_policy_cache_for_tests(app_id);
-        let actor = Some(serde_json::json!({ "kind": "auto" }));
+        let actor = Some(zeroship_data_query_builder::value!({ "kind": "auto" }));
         let err = authorize_query_hint(
             &unmask_backend().await,
             &DbBinding::cold_start(app_id),
@@ -8032,7 +8006,7 @@ fn sqlite_ddl_has_seven_system_field_columns_end_to_end() {
             .await
             .expect("ensure_app_schema");
 
-        let schema = serde_json::json!({
+        let schema = zeroship_data_query_builder::value!({
             "title": { "type": "string", "required": true },
         });
         let sql = fixture_table_sql_for(
@@ -8113,7 +8087,7 @@ fn freshly_created_table_has_three_indexes_end_to_end() {
         let sql = fixture_table_sql_for(
             &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
             "posts",
-            &serde_json::json!({}),
+            &zeroship_data_query_builder::value!({}),
             &FkEmission::Inline,
             SqlDialect::Sqlite,
         )
@@ -8172,7 +8146,7 @@ fn inserting_a_row_without_user_fields_succeeds_via_system_fields_only() {
         let sql = fixture_table_sql_for(
             &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
             "posts",
-            &serde_json::json!({}),
+            &zeroship_data_query_builder::value!({}),
             &FkEmission::Inline,
             SqlDialect::Sqlite,
         )
@@ -8252,7 +8226,7 @@ fn insert_end_to_end_populates_system_fields_sqlite() {
             .expect("ensure_app_schema");
 
         // 1. Stand up the table with the 7 system-field columns.
-        let schema = serde_json::json!({
+        let schema = zeroship_data_query_builder::value!({
             "title": {"type": "string", "required": true},
         });
         let ddl = fixture_table_sql_for(
@@ -8278,13 +8252,13 @@ fn insert_end_to_end_populates_system_fields_sqlite() {
         // field. The auto-mint pass injects `id`, `created_by`,
         // `updated_by`; the DB fires its DEFAULT for the timestamps +
         // version.
-        let mut doc = serde_json::json!({ "title": "PR 3 hello" });
+        let mut doc = zeroship_data_query_builder::value!({ "title": "PR 3 hello" });
         // The pass takes the collection's descriptor entry (the write pipeline
         // resolves it once per op and hands it down); the only thing it reads
         // out of it is a declared `t.id(prefix)`, and this one declares none.
         apply_system_fields_on_insert(
             &mut doc,
-            &serde_json::json!({ "title": { "type": "string", "required": true } }),
+            &zeroship_data_query_builder::value!({ "title": { "type": "string", "required": true } }),
             "posts",
             Some("usr_actor_e2e"),
         )
@@ -8313,13 +8287,13 @@ fn insert_end_to_end_populates_system_fields_sqlite() {
             SqlDialect::Sqlite,
         )
         .expect("build_insert");
-        let params: Vec<&str> = built.params.iter().map(String::as_str).collect();
+        let params = &built.params;
         let client = backend
             .acquire_dedicated_client("app_demo")
             .await
             .expect("acquire client (insert)");
         let returning_rows = client
-            .query(&built.sql, &params)
+            .query_values(&built.sql, params)
             .await
             .unwrap_or_else(|e| panic!("INSERT: {}\n{e:?}", built.sql));
         assert_eq!(returning_rows.len(), 1, "INSERT RETURNING * gives one row");
@@ -8390,7 +8364,7 @@ fn insert_with_fk_uses_text_keys_end_to_end_sqlite() {
         let empty: std::collections::HashSet<String> = std::collections::HashSet::new();
         // One binding for the table's shape and for the write's projection: the
         // DDL emitter and the INSERT builder must not read two literals.
-        let schema = serde_json::json!({
+        let schema = zeroship_data_query_builder::value!({
             "title": {"type": "string", "required": true},
             "authorId": {"type": "ref", "refTarget": "users"},
         });
@@ -8426,13 +8400,13 @@ fn insert_with_fk_uses_text_keys_end_to_end_sqlite() {
         // declared INTEGER affinity at introspection. With the
         // cascade applied the affinity is TEXT - no surprise on
         // read-back.
-        let mut post_doc = serde_json::json!({
+        let mut post_doc = zeroship_data_query_builder::value!({
             "title": "fk-ok",
             "authorId": "usr_01HXY3Z9PQR2STUV4WXY5Z6789",
         });
         apply_system_fields_on_insert(
             &mut post_doc,
-            &serde_json::json!({
+            &zeroship_data_query_builder::value!({
                 "title": {"type": "string", "required": true},
                 "authorId": {"type": "ref", "refTarget": "users"},
             }),
@@ -8448,13 +8422,13 @@ fn insert_with_fk_uses_text_keys_end_to_end_sqlite() {
             SqlDialect::Sqlite,
         )
         .expect("build posts insert");
-        let params: Vec<&str> = built.params.iter().map(String::as_str).collect();
+        let params = &built.params;
         let client = backend
             .acquire_dedicated_client("app_demo")
             .await
             .expect("client");
         client
-            .query(&built.sql, &params)
+            .query_values(&built.sql, params)
             .await
             .unwrap_or_else(|e| panic!("post INSERT: {}\n{e:?}", built.sql));
 
@@ -8500,7 +8474,7 @@ fn update_end_to_end_bumps_version_by_one_sqlite() {
             .await
             .expect("ensure_app_schema");
 
-        let schema = serde_json::json!({
+        let schema = zeroship_data_query_builder::value!({
             "title": {"type": "string", "required": true},
         });
         let ddl = fixture_table_sql_for(
@@ -8520,7 +8494,7 @@ fn update_end_to_end_bumps_version_by_one_sqlite() {
         }
 
         // INSERT row at version 1 (DDL default).
-        let doc = serde_json::json!({
+        let doc = zeroship_data_query_builder::value!({
             "id": "post_v1bump",
             "title": "original",
         });
@@ -8532,13 +8506,16 @@ fn update_end_to_end_bumps_version_by_one_sqlite() {
             SqlDialect::Sqlite,
         )
         .unwrap();
-        let ins_params: Vec<&str> = ins.params.iter().map(String::as_str).collect();
+        let ins_params = &ins.params;
         let client = backend.acquire_dedicated_client("app_demo").await.unwrap();
-        client.query(&ins.sql, &ins_params).await.expect("INSERT");
+        client
+            .query_values(&ins.sql, ins_params)
+            .await
+            .expect("INSERT");
 
         // UPDATE via the system-fields-aware builder.
-        let filter = serde_json::json!({ "id": "post_v1bump" });
-        let update = serde_json::json!({ "title": "v2" });
+        let filter = zeroship_data_query_builder::value!({ "id": "post_v1bump" });
+        let update = zeroship_data_query_builder::value!({ "title": "v2" });
         let autobump = SystemFieldAutoBump {
             dispatch_write: true,
             actor_id: Some("usr_e2e_updater"),
@@ -8554,8 +8531,11 @@ fn update_end_to_end_bumps_version_by_one_sqlite() {
             &autobump,
         )
         .unwrap();
-        let upd_params: Vec<&str> = upd.params.iter().map(String::as_str).collect();
-        let returning = client.query(&upd.sql, &upd_params).await.expect("UPDATE");
+        let upd_params = &upd.params;
+        let returning = client
+            .query_values(&upd.sql, upd_params)
+            .await
+            .expect("UPDATE");
         assert_eq!(returning.len(), 1, "UPDATE returned 1 row");
 
         // SELECT and confirm version bumped to 2 and updated_by was set.
@@ -8594,7 +8574,7 @@ fn update_end_to_end_with_correct_version_succeeds_and_bumps_sqlite() {
         let (backend, _dir) = fresh_backend();
         backend.attach_app_file("app_demo").await.unwrap();
 
-        let schema = serde_json::json!({ "title": {"type": "string"} });
+        let schema = zeroship_data_query_builder::value!({ "title": {"type": "string"} });
         let ddl = fixture_table_sql_for(
             &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
             "posts",
@@ -8611,7 +8591,7 @@ fn update_end_to_end_with_correct_version_succeeds_and_bumps_sqlite() {
             backend.pool_exec(t, &[]).await.unwrap();
         }
 
-        let doc = serde_json::json!({ "id": "post_cas_ok", "title": "v1" });
+        let doc = zeroship_data_query_builder::value!({ "id": "post_cas_ok", "title": "v1" });
         let ins = build_insert_with_dialect(
             &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
             "posts",
@@ -8620,13 +8600,13 @@ fn update_end_to_end_with_correct_version_succeeds_and_bumps_sqlite() {
             SqlDialect::Sqlite,
         )
         .unwrap();
-        let ins_params: Vec<&str> = ins.params.iter().map(String::as_str).collect();
+        let ins_params = &ins.params;
         let client = backend.acquire_dedicated_client("app_demo").await.unwrap();
-        client.query(&ins.sql, &ins_params).await.unwrap();
+        client.query_values(&ins.sql, ins_params).await.unwrap();
 
         // CAS at the correct version (1).
-        let filter = serde_json::json!({ "id": "post_cas_ok", "version": 1 });
-        let update = serde_json::json!({ "title": "v2" });
+        let filter = zeroship_data_query_builder::value!({ "id": "post_cas_ok", "version": 1 });
+        let update = zeroship_data_query_builder::value!({ "title": "v2" });
         let autobump = SystemFieldAutoBump {
             dispatch_write: true,
             actor_id: Some("usr_cas_ok"),
@@ -8642,8 +8622,8 @@ fn update_end_to_end_with_correct_version_succeeds_and_bumps_sqlite() {
             &autobump,
         )
         .unwrap();
-        let upd_params: Vec<&str> = upd.params.iter().map(String::as_str).collect();
-        let returning = client.query(&upd.sql, &upd_params).await.unwrap();
+        let upd_params = &upd.params;
+        let returning = client.query_values(&upd.sql, upd_params).await.unwrap();
         assert_eq!(returning.len(), 1, "CAS matched: 1 affected row");
 
         let rows = client
@@ -8676,7 +8656,7 @@ fn update_end_to_end_with_stale_version_affects_zero_rows_sqlite() {
         let (backend, _dir) = fresh_backend();
         backend.attach_app_file("app_demo").await.unwrap();
 
-        let schema = serde_json::json!({ "title": {"type": "string"} });
+        let schema = zeroship_data_query_builder::value!({ "title": {"type": "string"} });
         let ddl = fixture_table_sql_for(
             &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
             "posts",
@@ -8693,7 +8673,7 @@ fn update_end_to_end_with_stale_version_affects_zero_rows_sqlite() {
             backend.pool_exec(t, &[]).await.unwrap();
         }
 
-        let doc = serde_json::json!({ "id": "post_cas_stale", "title": "v1" });
+        let doc = zeroship_data_query_builder::value!({ "id": "post_cas_stale", "title": "v1" });
         let ins = build_insert_with_dialect(
             &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
             "posts",
@@ -8702,13 +8682,13 @@ fn update_end_to_end_with_stale_version_affects_zero_rows_sqlite() {
             SqlDialect::Sqlite,
         )
         .unwrap();
-        let ins_params: Vec<&str> = ins.params.iter().map(String::as_str).collect();
+        let ins_params = &ins.params;
         let client = backend.acquire_dedicated_client("app_demo").await.unwrap();
-        client.query(&ins.sql, &ins_params).await.unwrap();
+        client.query_values(&ins.sql, ins_params).await.unwrap();
 
         // CAS at the wrong version (row is at 1; we expect 99).
-        let filter = serde_json::json!({ "id": "post_cas_stale", "version": 99 });
-        let update = serde_json::json!({ "title": "v_nope" });
+        let filter = zeroship_data_query_builder::value!({ "id": "post_cas_stale", "version": 99 });
+        let update = zeroship_data_query_builder::value!({ "title": "v_nope" });
         let autobump = SystemFieldAutoBump {
             dispatch_write: true,
             actor_id: Some("usr_cas_stale"),
@@ -8724,8 +8704,8 @@ fn update_end_to_end_with_stale_version_affects_zero_rows_sqlite() {
             &autobump,
         )
         .unwrap();
-        let upd_params: Vec<&str> = upd.params.iter().map(String::as_str).collect();
-        let returning = client.query(&upd.sql, &upd_params).await.unwrap();
+        let upd_params = &upd.params;
+        let returning = client.query_values(&upd.sql, upd_params).await.unwrap();
         assert!(returning.is_empty(), "stale CAS: 0 affected rows");
 
         // Row stays at version 1 and original title.
@@ -8755,7 +8735,7 @@ fn update_end_to_end_concurrent_two_updates_one_wins_one_loses_sqlite() {
         let (backend, _dir) = fresh_backend();
         backend.attach_app_file("app_demo").await.unwrap();
 
-        let schema = serde_json::json!({ "title": {"type": "string"} });
+        let schema = zeroship_data_query_builder::value!({ "title": {"type": "string"} });
         let ddl = fixture_table_sql_for(
             &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
             "posts",
@@ -8772,7 +8752,7 @@ fn update_end_to_end_concurrent_two_updates_one_wins_one_loses_sqlite() {
             backend.pool_exec(t, &[]).await.unwrap();
         }
 
-        let doc = serde_json::json!({ "id": "post_race", "title": "v0" });
+        let doc = zeroship_data_query_builder::value!({ "id": "post_race", "title": "v0" });
         let ins = build_insert_with_dialect(
             &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
             "posts",
@@ -8781,13 +8761,13 @@ fn update_end_to_end_concurrent_two_updates_one_wins_one_loses_sqlite() {
             SqlDialect::Sqlite,
         )
         .unwrap();
-        let ins_params: Vec<&str> = ins.params.iter().map(String::as_str).collect();
+        let ins_params = &ins.params;
         let client = backend.acquire_dedicated_client("app_demo").await.unwrap();
-        client.query(&ins.sql, &ins_params).await.unwrap();
+        client.query_values(&ins.sql, ins_params).await.unwrap();
 
         // First UPDATE at version=1 wins.
-        let filter1 = serde_json::json!({ "id": "post_race", "version": 1 });
-        let update1 = serde_json::json!({ "title": "v_winner" });
+        let filter1 = zeroship_data_query_builder::value!({ "id": "post_race", "version": 1 });
+        let update1 = zeroship_data_query_builder::value!({ "title": "v_winner" });
         let ab = SystemFieldAutoBump {
             dispatch_write: true,
             actor_id: Some("usr_a"),
@@ -8803,13 +8783,13 @@ fn update_end_to_end_concurrent_two_updates_one_wins_one_loses_sqlite() {
             &ab,
         )
         .unwrap();
-        let p1: Vec<&str> = upd1.params.iter().map(String::as_str).collect();
-        let r1 = client.query(&upd1.sql, &p1).await.unwrap();
+        let p1 = &upd1.params;
+        let r1 = client.query_values(&upd1.sql, p1).await.unwrap();
         assert_eq!(r1.len(), 1, "first CAS wins");
 
         // Second UPDATE at version=1 loses (row is now at version=2).
-        let filter2 = serde_json::json!({ "id": "post_race", "version": 1 });
-        let update2 = serde_json::json!({ "title": "v_loser" });
+        let filter2 = zeroship_data_query_builder::value!({ "id": "post_race", "version": 1 });
+        let update2 = zeroship_data_query_builder::value!({ "title": "v_loser" });
         let upd2 = build_update_many_with_system_fields(
             &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
             "posts",
@@ -8820,8 +8800,8 @@ fn update_end_to_end_concurrent_two_updates_one_wins_one_loses_sqlite() {
             &ab,
         )
         .unwrap();
-        let p2: Vec<&str> = upd2.params.iter().map(String::as_str).collect();
-        let r2 = client.query(&upd2.sql, &p2).await.unwrap();
+        let p2 = &upd2.params;
+        let r2 = client.query_values(&upd2.sql, p2).await.unwrap();
         assert!(r2.is_empty(), "second CAS loses");
 
         // Final state: winner's title, version=2.
@@ -8850,7 +8830,7 @@ fn update_end_to_end_without_version_filter_succeeds_blindly_sqlite() {
         let (backend, _dir) = fresh_backend();
         backend.attach_app_file("app_demo").await.unwrap();
 
-        let schema = serde_json::json!({ "title": {"type": "string"} });
+        let schema = zeroship_data_query_builder::value!({ "title": {"type": "string"} });
         let ddl = fixture_table_sql_for(
             &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
             "posts",
@@ -8867,7 +8847,7 @@ fn update_end_to_end_without_version_filter_succeeds_blindly_sqlite() {
             backend.pool_exec(t, &[]).await.unwrap();
         }
 
-        let doc = serde_json::json!({ "id": "post_blind", "title": "v0" });
+        let doc = zeroship_data_query_builder::value!({ "id": "post_blind", "title": "v0" });
         let ins = build_insert_with_dialect(
             &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
             "posts",
@@ -8876,15 +8856,15 @@ fn update_end_to_end_without_version_filter_succeeds_blindly_sqlite() {
             SqlDialect::Sqlite,
         )
         .unwrap();
-        let ins_params: Vec<&str> = ins.params.iter().map(String::as_str).collect();
+        let ins_params = &ins.params;
         let client = backend.acquire_dedicated_client("app_demo").await.unwrap();
-        client.query(&ins.sql, &ins_params).await.unwrap();
+        client.query_values(&ins.sql, ins_params).await.unwrap();
 
         // No version in filter — last-writer-wins. Three consecutive
         // updates land in order; version is bumped each time.
         for new_title in ["v1", "v2", "v3"] {
-            let filter = serde_json::json!({ "id": "post_blind" });
-            let update = serde_json::json!({ "title": new_title });
+            let filter = zeroship_data_query_builder::value!({ "id": "post_blind" });
+            let update = zeroship_data_query_builder::value!({ "title": new_title });
             let ab = SystemFieldAutoBump {
                 dispatch_write: true,
                 actor_id: Some("usr_blind"),
@@ -8901,8 +8881,8 @@ fn update_end_to_end_without_version_filter_succeeds_blindly_sqlite() {
                 &ab,
             )
             .unwrap();
-            let p: Vec<&str> = upd.params.iter().map(String::as_str).collect();
-            let r = client.query(&upd.sql, &p).await.unwrap();
+            let p = &upd.params;
+            let r = client.query_values(&upd.sql, p).await.unwrap();
             assert_eq!(r.len(), 1, "blind UPDATE succeeds");
         }
 
@@ -8941,7 +8921,7 @@ fn soft_delete_end_to_end_sets_deleted_at_and_bumps_version_sqlite() {
     run(async {
         let (backend, _dir) = fresh_backend();
         backend.attach_app_file("app_demo").await.unwrap();
-        let schema = serde_json::json!({ "title": { "type": "string" } });
+        let schema = zeroship_data_query_builder::value!({ "title": { "type": "string" } });
         let ddl = fixture_table_sql_for(
             &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
             "posts",
@@ -8958,7 +8938,8 @@ fn soft_delete_end_to_end_sets_deleted_at_and_bumps_version_sqlite() {
             backend.pool_exec(t, &[]).await.unwrap();
         }
 
-        let doc = serde_json::json!({ "id": "post_sd1", "title": "to be deleted" });
+        let doc =
+            zeroship_data_query_builder::value!({ "id": "post_sd1", "title": "to be deleted" });
         let ins = build_insert_with_dialect(
             &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
             "posts",
@@ -8967,11 +8948,11 @@ fn soft_delete_end_to_end_sets_deleted_at_and_bumps_version_sqlite() {
             SqlDialect::Sqlite,
         )
         .unwrap();
-        let p: Vec<&str> = ins.params.iter().map(String::as_str).collect();
+        let p = &ins.params;
         let client = backend.acquire_dedicated_client("app_demo").await.unwrap();
-        client.query(&ins.sql, &p).await.unwrap();
+        client.query_values(&ins.sql, p).await.unwrap();
 
-        let filter = serde_json::json!({ "id": "post_sd1" });
+        let filter = zeroship_data_query_builder::value!({ "id": "post_sd1" });
         let ab = SystemFieldAutoBump {
             actor_id: Some("usr_deleter"),
             ..Default::default()
@@ -8985,8 +8966,8 @@ fn soft_delete_end_to_end_sets_deleted_at_and_bumps_version_sqlite() {
             &ab,
         )
         .unwrap();
-        let p: Vec<&str> = sd.params.iter().map(String::as_str).collect();
-        let returning = client.query(&sd.sql, &p).await.unwrap();
+        let p = &sd.params;
+        let returning = client.query_values(&sd.sql, p).await.unwrap();
         assert_eq!(returning.len(), 1, "soft-delete returned 1 row");
 
         let rows = client
@@ -9017,7 +8998,7 @@ fn soft_delete_on_already_soft_deleted_row_affects_zero_rows_sqlite() {
     run(async {
         let (backend, _dir) = fresh_backend();
         backend.attach_app_file("app_demo").await.unwrap();
-        let schema = serde_json::json!({ "title": { "type": "string" } });
+        let schema = zeroship_data_query_builder::value!({ "title": { "type": "string" } });
         let ddl = fixture_table_sql_for(
             &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
             "posts",
@@ -9034,7 +9015,7 @@ fn soft_delete_on_already_soft_deleted_row_affects_zero_rows_sqlite() {
             backend.pool_exec(t, &[]).await.unwrap();
         }
 
-        let doc = serde_json::json!({ "id": "post_idem", "title": "x" });
+        let doc = zeroship_data_query_builder::value!({ "id": "post_idem", "title": "x" });
         let ins = build_insert_with_dialect(
             &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
             "posts",
@@ -9043,11 +9024,11 @@ fn soft_delete_on_already_soft_deleted_row_affects_zero_rows_sqlite() {
             SqlDialect::Sqlite,
         )
         .unwrap();
-        let p: Vec<&str> = ins.params.iter().map(String::as_str).collect();
+        let p = &ins.params;
         let client = backend.acquire_dedicated_client("app_demo").await.unwrap();
-        client.query(&ins.sql, &p).await.unwrap();
+        client.query_values(&ins.sql, p).await.unwrap();
 
-        let filter = serde_json::json!({ "id": "post_idem" });
+        let filter = zeroship_data_query_builder::value!({ "id": "post_idem" });
         let ab = SystemFieldAutoBump {
             actor_id: Some("usr_x"),
             ..Default::default()
@@ -9061,10 +9042,10 @@ fn soft_delete_on_already_soft_deleted_row_affects_zero_rows_sqlite() {
             &ab,
         )
         .unwrap();
-        let p1: Vec<&str> = sd.params.iter().map(String::as_str).collect();
-        let r1 = client.query(&sd.sql, &p1).await.unwrap();
+        let p1 = &sd.params;
+        let r1 = client.query_values(&sd.sql, p1).await.unwrap();
         assert_eq!(r1.len(), 1, "first soft-delete hits");
-        let r2 = client.query(&sd.sql, &p1).await.unwrap();
+        let r2 = client.query_values(&sd.sql, p1).await.unwrap();
         assert!(r2.is_empty(), "re-soft-deleting is a no-op");
     });
 }
@@ -9079,7 +9060,7 @@ fn find_with_soft_delete_filter_hides_soft_deleted_rows_sqlite() {
     run(async {
         let (backend, _dir) = fresh_backend();
         backend.attach_app_file("app_demo").await.unwrap();
-        let schema = serde_json::json!({ "title": { "type": "string" } });
+        let schema = zeroship_data_query_builder::value!({ "title": { "type": "string" } });
         let ddl = fixture_table_sql_for(
             &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
             "posts",
@@ -9097,7 +9078,7 @@ fn find_with_soft_delete_filter_hides_soft_deleted_rows_sqlite() {
         }
 
         for id in &["post_alive_a", "post_alive_b", "post_dead"] {
-            let doc = serde_json::json!({ "id": id, "title": id });
+            let doc = zeroship_data_query_builder::value!({ "id": id, "title": id });
             let ins = build_insert_with_dialect(
                 &zeroship_data_query_builder::SchemaName::new("app_demo")
                     .expect("fixture schema name"),
@@ -9107,9 +9088,9 @@ fn find_with_soft_delete_filter_hides_soft_deleted_rows_sqlite() {
                 SqlDialect::Sqlite,
             )
             .unwrap();
-            let p: Vec<&str> = ins.params.iter().map(String::as_str).collect();
+            let p = &ins.params;
             let client = backend.acquire_dedicated_client("app_demo").await.unwrap();
-            client.query(&ins.sql, &p).await.unwrap();
+            client.query_values(&ins.sql, p).await.unwrap();
         }
         let ab = SystemFieldAutoBump {
             actor_id: Some("usr_actor"),
@@ -9119,24 +9100,24 @@ fn find_with_soft_delete_filter_hides_soft_deleted_rows_sqlite() {
             &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
             "posts",
             &schema,
-            &serde_json::json!({ "id": "post_dead" }),
+            &zeroship_data_query_builder::value!({ "id": "post_dead" }),
             SqlDialect::Sqlite,
             &ab,
         )
         .unwrap();
-        let p: Vec<&str> = sd.params.iter().map(String::as_str).collect();
+        let p = &sd.params;
         let client = backend.acquire_dedicated_client("app_demo").await.unwrap();
-        client.query(&sd.sql, &p).await.unwrap();
+        client.query_values(&sd.sql, p).await.unwrap();
 
         let q = build_find_with_schema_and_unmask_and_soft_delete(
             &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
             "posts",
-            &serde_json::json!({}),
+            &zeroship_data_query_builder::value!({}),
             None,
             None,
             None,
             None,
-            &serde_json::json!({ "title": { "type": "string" } }),
+            &zeroship_data_query_builder::value!({ "title": { "type": "string" } }),
             &[],
             true,
         )
@@ -9147,12 +9128,12 @@ fn find_with_soft_delete_filter_hides_soft_deleted_rows_sqlite() {
         let q2 = build_find_with_schema_and_unmask_and_soft_delete(
             &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
             "posts",
-            &serde_json::json!({}),
+            &zeroship_data_query_builder::value!({}),
             None,
             None,
             None,
             None,
-            &serde_json::json!({ "title": { "type": "string" } }),
+            &zeroship_data_query_builder::value!({ "title": { "type": "string" } }),
             &[],
             false,
         )
@@ -9172,7 +9153,7 @@ fn restore_clears_deleted_at_and_bumps_version_sqlite() {
     run(async {
         let (backend, _dir) = fresh_backend();
         backend.attach_app_file("app_demo").await.unwrap();
-        let schema = serde_json::json!({ "title": { "type": "string" } });
+        let schema = zeroship_data_query_builder::value!({ "title": { "type": "string" } });
         let ddl = fixture_table_sql_for(
             &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
             "posts",
@@ -9189,7 +9170,7 @@ fn restore_clears_deleted_at_and_bumps_version_sqlite() {
             backend.pool_exec(t, &[]).await.unwrap();
         }
 
-        let doc = serde_json::json!({ "id": "post_rs", "title": "x" });
+        let doc = zeroship_data_query_builder::value!({ "id": "post_rs", "title": "x" });
         let ins = build_insert_with_dialect(
             &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
             "posts",
@@ -9198,9 +9179,9 @@ fn restore_clears_deleted_at_and_bumps_version_sqlite() {
             SqlDialect::Sqlite,
         )
         .unwrap();
-        let p: Vec<&str> = ins.params.iter().map(String::as_str).collect();
+        let p = &ins.params;
         let client = backend.acquire_dedicated_client("app_demo").await.unwrap();
-        client.query(&ins.sql, &p).await.unwrap();
+        client.query_values(&ins.sql, p).await.unwrap();
 
         let ab = SystemFieldAutoBump {
             actor_id: Some("usr_x"),
@@ -9210,25 +9191,25 @@ fn restore_clears_deleted_at_and_bumps_version_sqlite() {
             &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
             "posts",
             &schema,
-            &serde_json::json!({ "id": "post_rs" }),
+            &zeroship_data_query_builder::value!({ "id": "post_rs" }),
             SqlDialect::Sqlite,
             &ab,
         )
         .unwrap();
-        let p: Vec<&str> = sd.params.iter().map(String::as_str).collect();
-        client.query(&sd.sql, &p).await.unwrap();
+        let p = &sd.params;
+        client.query_values(&sd.sql, p).await.unwrap();
 
         let rs = build_restore_many_with_system_fields(
             &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
             "posts",
             &schema,
-            &serde_json::json!({ "id": "post_rs" }),
+            &zeroship_data_query_builder::value!({ "id": "post_rs" }),
             SqlDialect::Sqlite,
             &ab,
         )
         .unwrap();
-        let p: Vec<&str> = rs.params.iter().map(String::as_str).collect();
-        let returning = client.query(&rs.sql, &p).await.unwrap();
+        let p = &rs.params;
+        let returning = client.query_values(&rs.sql, p).await.unwrap();
         assert_eq!(returning.len(), 1, "restore hit the soft-deleted row");
 
         let rows = client
@@ -9253,7 +9234,7 @@ fn restore_on_already_live_row_affects_zero_rows_sqlite() {
     run(async {
         let (backend, _dir) = fresh_backend();
         backend.attach_app_file("app_demo").await.unwrap();
-        let schema = serde_json::json!({ "title": { "type": "string" } });
+        let schema = zeroship_data_query_builder::value!({ "title": { "type": "string" } });
         let ddl = fixture_table_sql_for(
             &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
             "posts",
@@ -9270,7 +9251,7 @@ fn restore_on_already_live_row_affects_zero_rows_sqlite() {
             backend.pool_exec(t, &[]).await.unwrap();
         }
 
-        let doc = serde_json::json!({ "id": "post_live", "title": "x" });
+        let doc = zeroship_data_query_builder::value!({ "id": "post_live", "title": "x" });
         let ins = build_insert_with_dialect(
             &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
             "posts",
@@ -9279,9 +9260,9 @@ fn restore_on_already_live_row_affects_zero_rows_sqlite() {
             SqlDialect::Sqlite,
         )
         .unwrap();
-        let p: Vec<&str> = ins.params.iter().map(String::as_str).collect();
+        let p = &ins.params;
         let client = backend.acquire_dedicated_client("app_demo").await.unwrap();
-        client.query(&ins.sql, &p).await.unwrap();
+        client.query_values(&ins.sql, p).await.unwrap();
 
         let ab = SystemFieldAutoBump {
             actor_id: Some("usr_x"),
@@ -9291,13 +9272,13 @@ fn restore_on_already_live_row_affects_zero_rows_sqlite() {
             &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
             "posts",
             &schema,
-            &serde_json::json!({ "id": "post_live" }),
+            &zeroship_data_query_builder::value!({ "id": "post_live" }),
             SqlDialect::Sqlite,
             &ab,
         )
         .unwrap();
-        let p: Vec<&str> = rs.params.iter().map(String::as_str).collect();
-        let returning = client.query(&rs.sql, &p).await.unwrap();
+        let p = &rs.params;
+        let returning = client.query_values(&rs.sql, p).await.unwrap();
         assert!(returning.is_empty(), "restoring a live row is a no-op");
         let rows = client
             .query(
@@ -9321,7 +9302,7 @@ fn soft_delete_then_restore_full_lifecycle_sqlite() {
     run(async {
         let (backend, _dir) = fresh_backend();
         backend.attach_app_file("app_demo").await.unwrap();
-        let schema = serde_json::json!({ "title": { "type": "string" } });
+        let schema = zeroship_data_query_builder::value!({ "title": { "type": "string" } });
         let ddl = fixture_table_sql_for(
             &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
             "posts",
@@ -9338,7 +9319,7 @@ fn soft_delete_then_restore_full_lifecycle_sqlite() {
             backend.pool_exec(t, &[]).await.unwrap();
         }
 
-        let doc = serde_json::json!({ "id": "post_lc", "title": "lifecycle" });
+        let doc = zeroship_data_query_builder::value!({ "id": "post_lc", "title": "lifecycle" });
         let ins = build_insert_with_dialect(
             &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
             "posts",
@@ -9347,19 +9328,19 @@ fn soft_delete_then_restore_full_lifecycle_sqlite() {
             SqlDialect::Sqlite,
         )
         .unwrap();
-        let p: Vec<&str> = ins.params.iter().map(String::as_str).collect();
+        let p = &ins.params;
         let client = backend.acquire_dedicated_client("app_demo").await.unwrap();
-        client.query(&ins.sql, &p).await.unwrap();
+        client.query_values(&ins.sql, p).await.unwrap();
 
         let find_default = build_find_with_schema_and_unmask_and_soft_delete(
             &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
             "posts",
-            &serde_json::json!({}),
+            &zeroship_data_query_builder::value!({}),
             None,
             None,
             None,
             None,
-            &serde_json::json!({ "title": { "type": "string" } }),
+            &zeroship_data_query_builder::value!({ "title": { "type": "string" } }),
             &[],
             true,
         )
@@ -9375,13 +9356,13 @@ fn soft_delete_then_restore_full_lifecycle_sqlite() {
             &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
             "posts",
             &schema,
-            &serde_json::json!({ "id": "post_lc" }),
+            &zeroship_data_query_builder::value!({ "id": "post_lc" }),
             SqlDialect::Sqlite,
             &ab,
         )
         .unwrap();
-        let p: Vec<&str> = sd.params.iter().map(String::as_str).collect();
-        client.query(&sd.sql, &p).await.unwrap();
+        let p = &sd.params;
+        client.query_values(&sd.sql, p).await.unwrap();
 
         let r = client.query(&find_default.sql, &[]).await.unwrap();
         assert!(r.is_empty(), "soft-deleted row hidden");
@@ -9389,12 +9370,12 @@ fn soft_delete_then_restore_full_lifecycle_sqlite() {
         let find_inc = build_find_with_schema_and_unmask_and_soft_delete(
             &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
             "posts",
-            &serde_json::json!({}),
+            &zeroship_data_query_builder::value!({}),
             None,
             None,
             None,
             None,
-            &serde_json::json!({ "title": { "type": "string" } }),
+            &zeroship_data_query_builder::value!({ "title": { "type": "string" } }),
             &[],
             false,
         )
@@ -9406,13 +9387,13 @@ fn soft_delete_then_restore_full_lifecycle_sqlite() {
             &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
             "posts",
             &schema,
-            &serde_json::json!({ "id": "post_lc" }),
+            &zeroship_data_query_builder::value!({ "id": "post_lc" }),
             SqlDialect::Sqlite,
             &ab,
         )
         .unwrap();
-        let p: Vec<&str> = rs.params.iter().map(String::as_str).collect();
-        client.query(&rs.sql, &p).await.unwrap();
+        let p = &rs.params;
+        client.query_values(&rs.sql, p).await.unwrap();
 
         let r = client.query(&find_default.sql, &[]).await.unwrap();
         assert_eq!(r.len(), 1, "restored row visible to default find");
@@ -9438,8 +9419,7 @@ fn soft_delete_many_sets_deleted_at_on_all_matching_live_rows_sqlite() {
     run(async {
         let (backend, _dir) = fresh_backend();
         backend.attach_app_file("app_demo").await.unwrap();
-        let schema =
-            serde_json::json!({ "author": { "type": "string" }, "title": { "type": "string" } });
+        let schema = zeroship_data_query_builder::value!({ "author": { "type": "string" }, "title": { "type": "string" } });
         let ddl = fixture_table_sql_for(
             &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
             "posts",
@@ -9463,7 +9443,8 @@ fn soft_delete_many_sets_deleted_at_on_all_matching_live_rows_sqlite() {
             ("post_b1", "usr_b"),
             ("post_b2", "usr_b"),
         ] {
-            let doc = serde_json::json!({ "id": id, "author": author, "title": id });
+            let doc =
+                zeroship_data_query_builder::value!({ "id": id, "author": author, "title": id });
             let ins = build_insert_with_dialect(
                 &zeroship_data_query_builder::SchemaName::new("app_demo")
                     .expect("fixture schema name"),
@@ -9473,9 +9454,9 @@ fn soft_delete_many_sets_deleted_at_on_all_matching_live_rows_sqlite() {
                 SqlDialect::Sqlite,
             )
             .unwrap();
-            let p: Vec<&str> = ins.params.iter().map(String::as_str).collect();
+            let p = &ins.params;
             let client = backend.acquire_dedicated_client("app_demo").await.unwrap();
-            client.query(&ins.sql, &p).await.unwrap();
+            client.query_values(&ins.sql, p).await.unwrap();
         }
         backend
             .pool_exec(
@@ -9493,14 +9474,14 @@ fn soft_delete_many_sets_deleted_at_on_all_matching_live_rows_sqlite() {
             &zeroship_data_query_builder::SchemaName::new("app_demo").expect("fixture schema name"),
             "posts",
             &schema,
-            &serde_json::json!({ "author": "usr_a" }),
+            &zeroship_data_query_builder::value!({ "author": "usr_a" }),
             SqlDialect::Sqlite,
             &ab,
         )
         .unwrap();
-        let p: Vec<&str> = sd.params.iter().map(String::as_str).collect();
+        let p = &sd.params;
         let client = backend.acquire_dedicated_client("app_demo").await.unwrap();
-        let returning = client.query(&sd.sql, &p).await.unwrap();
+        let returning = client.query_values(&sd.sql, p).await.unwrap();
         assert_eq!(
             returning.len(),
             2,
@@ -9530,12 +9511,12 @@ fn soft_delete_many_sets_deleted_at_on_all_matching_live_rows_sqlite() {
 fn purge_path_uses_hard_delete_sql_unchanged_sqlite() {
     use zeroship_plugin_db::compile::build_delete_one;
 
-    let schema = serde_json::json!({ "title": { "type": "string" } });
+    let schema = zeroship_data_query_builder::value!({ "title": { "type": "string" } });
     let q = build_delete_one(
         &zeroship_data_query_builder::SchemaName::new("app1").expect("fixture schema name"),
         "posts",
         &schema,
-        &serde_json::json!({ "id": "x" }),
+        &zeroship_data_query_builder::value!({ "id": "x" }),
     )
     .unwrap();
     assert!(q.sql.starts_with("DELETE FROM"));
@@ -9751,7 +9732,7 @@ fn p6c_data_plane_reaches_the_app_file_on_demand() {
         zeroship_plugin_db::set_sqlite_backend_for_tests(backend.clone());
 
         // Both statements go through `exec::exec_*_for_tests`, which is the
-        // PRODUCTION data-plane entry - the same `TxRoute` -> `exec_sqlite_json`
+        // PRODUCTION data-plane entry - the same `TxRoute` -> `exec_sqlite_values`
         // path a CRUD op takes. Calling `backend.pool_exec` directly would test
         // a layer BELOW the one that knows the app_id, and so could not observe
         // whether the data plane binds the file for itself.
@@ -10832,7 +10813,7 @@ fn dbbind134_sqlite_timestamp_spellings_invert_same_day_ordering() {
         // this test wrote `DEFAULT CURRENT_TIMESTAMP` as a literal, which meant
         // it could never observe a change to the emitter it claimed to test -
         // the comment asserted a mechanism the code did not drive.
-        let schema = serde_json::json!({ "occurred_at": { "type": "date" } });
+        let schema = zeroship_data_query_builder::value!({ "occurred_at": { "type": "date" } });
         let ddl = fixture_table_sql_for(
             &zeroship_data_query_builder::SchemaName::new(app).expect("fixture schema name"),
             coll,
@@ -10872,7 +10853,7 @@ fn dbbind134_sqlite_timestamp_spellings_invert_same_day_ordering() {
 
         // Row B: through the RUNTIME's builder, which converts a Unix-ms bind
         // for a declared timestamp column.
-        let doc = serde_json::json!({
+        let doc = zeroship_data_query_builder::value!({
             "id": "b_bind",
             "occurred_at": 1_756_700_000_000_i64,
         });
@@ -10892,9 +10873,9 @@ fn dbbind134_sqlite_timestamp_spellings_invert_same_day_ordering() {
         // `build_insert` emits a RETURNING clause, so this goes through `query`
         // rather than `pool_exec` - the latter refuses a statement that yields
         // rows ("Execute returned results - did you mean to call query?").
-        let params: Vec<&str> = bq.params.iter().map(String::as_str).collect();
+        let params = &bq.params;
         client
-            .query(&bq.sql, &params)
+            .query_values(&bq.sql, params)
             .await
             .expect("insert row B through the runtime builder");
 

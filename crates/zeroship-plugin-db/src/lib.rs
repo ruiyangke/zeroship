@@ -196,7 +196,7 @@ pub fn isolate_key_source() -> encryption::LocalKeySource {
 pub fn collection_schema(
     binding: &zeroship_data_core::binding::DbBinding,
     collection: &str,
-) -> Result<std::sync::Arc<serde_json::Value>, DbError> {
+) -> Result<std::sync::Arc<zeroship_data_query_builder::value::Value>, DbError> {
     descriptor::collection_schema(binding, collection)
 }
 // `cross_app_fk` WAS DECLARED HERE and is deleted (2026-09-02), under the
@@ -565,7 +565,7 @@ impl NativePlugin for DbPlugin {
 
 fn descriptor_schemas(
     descriptor: Option<&serde_json::Value>,
-) -> Result<Vec<(String, serde_json::Value)>, String> {
+) -> Result<Vec<(String, zeroship_data_query_builder::value::Value)>, String> {
     let Some(descriptor) = descriptor else {
         return Ok(Vec::new());
     };
@@ -583,7 +583,10 @@ fn descriptor_schemas(
                 .ok_or_else(|| {
                     format!("descriptor collection {name:?} has no object `fields` field")
                 })?;
-            Ok((name.clone(), serde_json::Value::Object(fields.clone())))
+            Ok((
+                name.clone(),
+                zeroship_data_query_builder::value::to_value(fields).map_err(|e| e.to_string())?,
+            ))
         })
         .collect()
 }
@@ -594,7 +597,7 @@ mod runtime_descriptor_binding_tests {
     use std::collections::HashMap;
     use std::rc::Rc;
 
-    use serde_json::json;
+    use zeroship_data_query_builder::value;
     use zeroship_runtime::{init_v8, RuntimeState, SharedState};
 
     use super::*;
@@ -630,7 +633,7 @@ mod runtime_descriptor_binding_tests {
         let scope = &mut v8::ContextScope::new(handle_scope, context);
         install_runtime_state(scope);
 
-        let runtime_descriptor = json!({
+        let runtime_descriptor = value!({
             "version": 2,
             "collections": {
                 "users": {
@@ -648,7 +651,11 @@ mod runtime_descriptor_binding_tests {
             }
         });
         plugin()
-            .bind_runtime_descriptor(scope, APP, Some(&runtime_descriptor))
+            .bind_runtime_descriptor(
+                scope,
+                APP,
+                Some(&serde_json::to_value(&runtime_descriptor).unwrap()),
+            )
             .expect("bind descriptor");
 
         let binding = zeroship_data_core::binding::DbBinding::new(
@@ -675,7 +682,7 @@ mod runtime_descriptor_binding_tests {
         let scope = &mut v8::ContextScope::new(handle_scope, context);
         install_runtime_state(scope);
 
-        let runtime_descriptor = json!({
+        let runtime_descriptor = value!({
             "version": 2,
             "collections": {
                 "stale": {
@@ -687,7 +694,11 @@ mod runtime_descriptor_binding_tests {
         });
         let plugin = plugin();
         plugin
-            .bind_runtime_descriptor(scope, APP, Some(&runtime_descriptor))
+            .bind_runtime_descriptor(
+                scope,
+                APP,
+                Some(&serde_json::to_value(&runtime_descriptor).unwrap()),
+            )
             .expect("bind descriptor");
         plugin
             .bind_runtime_descriptor(scope, APP, None)
@@ -722,7 +733,7 @@ mod runtime_descriptor_binding_tests {
 // `pg_row_json` becomes `data-postgres`, the benches move with it and this line
 // is deleted rather than rewritten.
 #[doc(hidden)]
-pub use backend::pg_row_json::{first_row_or_null_for_bench, row_to_json_for_bench};
+pub use backend::pg_row_json::{first_row_or_null_for_bench, row_to_value_for_bench};
 
 /// **Test-only**: install this thread's DB resources directly, bypassing the
 /// usual `DbService` → `DbPlugin::register()` path. Used by integration tests
@@ -918,7 +929,7 @@ pub fn clear_mask_policy_cache_for_tests(app_id: &str) {
 #[cfg(feature = "test-helpers")]
 #[doc(hidden)]
 pub async fn prepare_insert_many_docs_for_tests(
-    docs: &mut serde_json::Value,
+    docs: &mut zeroship_data_query_builder::value::Value,
     app_id: &str,
     collection: &str,
     actor_id: Option<&str>,
@@ -957,8 +968,8 @@ pub async fn prepare_insert_many_docs_for_tests(
 pub async fn finalize_rows_on_read_for_tests(
     app_id: &str,
     collection: &str,
-    rows: Vec<serde_json::Value>,
-) -> Result<Vec<serde_json::Value>, DbError> {
+    rows: Vec<zeroship_data_query_builder::value::Value>,
+) -> Result<Vec<zeroship_data_query_builder::value::Value>, DbError> {
     let binding = zeroship_data_core::binding::DbBinding::cold_start(app_id);
     let backend = tx_scope::ensure_backend().await?;
     // The route comes from the ambient parked-tx slot rather than from a V8
@@ -1002,7 +1013,7 @@ pub async fn exec_mutation_with_emit_for_tests(
     app_id: &str,
     collection: &str,
     op: zeroship_core::change_event::ChangeOp,
-) -> Result<Vec<serde_json::Value>, String> {
+) -> Result<Vec<zeroship_data_query_builder::value::Value>, String> {
     let backend = tx_scope::ensure_backend()
         .await
         .map_err(DbError::into_string)?;
@@ -1025,7 +1036,7 @@ pub async fn exec_mutation_with_emit_for_tests(
 pub async fn exec_query_for_tests(
     app_id: &str,
     bq: compile::BuiltQuery,
-) -> Result<Vec<serde_json::Value>, String> {
+) -> Result<Vec<zeroship_data_query_builder::value::Value>, String> {
     let backend = tx_scope::ensure_backend()
         .await
         .map_err(DbError::into_string)?;
@@ -1651,7 +1662,7 @@ mod reset_clears_every_thread_local {
             c.insert_one(
                 &binding,
                 "users",
-                serde_json::json!({ "email": { "type": "string" } }),
+                zeroship_data_query_builder::value!({ "email": { "type": "string" } }),
             );
         });
         assert!(zeroship_data_core::schema_cache::with(|c| c.get(&binding, "users")).is_some());
@@ -1665,3 +1676,5 @@ mod reset_clears_every_thread_local {
         );
     }
 }
+
+mod v8_values;

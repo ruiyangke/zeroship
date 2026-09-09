@@ -1,6 +1,6 @@
 //! Database fixtures use the migration engine that creates creator tables.
 
-use serde_json::Value;
+use zeroship_data_query_builder::value::Value;
 use zeroship_data_query_builder::{compile::SqlDialect, SchemaName};
 use zeroship_migrate::schema::query::{FkEmission, IndexSpec, QueryError};
 
@@ -36,7 +36,7 @@ pub fn fixture_table_sql_for(
         zeroship_migrate::shipping_vendors(),
         schema.as_str(),
         collection,
-        fields,
+        &serde_json::to_value(fields).expect("encode migration descriptor"),
         fks,
         dialect,
         &policy,
@@ -53,7 +53,7 @@ pub fn fixture_indexes(
         zeroship_migrate::shipping_vendors(),
         schema.as_str(),
         collection,
-        fields,
+        &serde_json::to_value(fields).expect("encode migration descriptor"),
         &zeroship_migrate_postgres::DIALECT,
     )
 }

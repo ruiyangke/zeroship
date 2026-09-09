@@ -60,7 +60,7 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
-use serde_json::Value;
+use zeroship_data_query_builder::value::Value;
 
 use zeroship_data_core::error::DbError;
 
@@ -201,7 +201,7 @@ impl MaskPolicy {
     pub fn to_json(&self) -> Value {
         let mut role_names: Vec<&String> = self.roles.keys().collect();
         role_names.sort();
-        let mut obj = serde_json::Map::with_capacity(role_names.len());
+        let mut obj = zeroship_data_query_builder::value::Map::new();
         for role in role_names {
             let set = &self.roles[role];
             let mut cls: Vec<&String> = set.iter().collect();
@@ -262,7 +262,9 @@ pub async fn dispatch_set_mask_policy(
     // on every boot. This used to be an `as_postgres()` / `as_sqlite()` pair
     // here, which put both backend names and SQLite's sidecar strategy into the
     // engine.
-    backend.persist_mask_policy(app_id, &policy.to_json()).await?;
+    backend
+        .persist_mask_policy(app_id, &policy.to_json())
+        .await?;
     cache_put(app_id, Some(policy));
     Ok(())
 }
@@ -324,7 +326,6 @@ pub fn reset_for_tests() {
 
 // ---------------------------------------------------------------------------
 
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -334,7 +335,7 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    use serde_json::json;
+    use zeroship_data_query_builder::value;
 
     fn run<F: std::future::Future>(f: F) -> F::Output {
         compio::runtime::Runtime::new()
@@ -421,7 +422,7 @@ mod tests {
 
     #[test]
     fn from_json_parses_well_formed_policy() {
-        let v = json!({
+        let v = value!({
             "admin":   ["public", "pii", "spi"],
             "support": ["public", "pii"],
             "user":    ["public"],
@@ -438,7 +439,7 @@ mod tests {
 
     #[test]
     fn from_json_rejects_non_object() {
-        let v = json!("not an object");
+        let v = value!("not an object");
         let err = MaskPolicy::from_json(&v).unwrap_err();
         match err {
             DbError::ValidationFailed { code, .. } => {
@@ -450,7 +451,7 @@ mod tests {
 
     #[test]
     fn from_json_rejects_non_array_value() {
-        let v = json!({ "admin": "pii" });
+        let v = value!({ "admin": "pii" });
         let err = MaskPolicy::from_json(&v).unwrap_err();
         match err {
             DbError::ValidationFailed { code, .. } => {
@@ -462,7 +463,7 @@ mod tests {
 
     #[test]
     fn from_json_rejects_unknown_classification() {
-        let v = json!({ "admin": ["public", "badclass"] });
+        let v = value!({ "admin": ["public", "badclass"] });
         let err = MaskPolicy::from_json(&v).unwrap_err();
         match err {
             DbError::ValidationFailed { code, message, .. } => {
@@ -478,7 +479,7 @@ mod tests {
 
     #[test]
     fn from_json_rejects_non_string_classification() {
-        let v = json!({ "admin": [42] });
+        let v = value!({ "admin": [42] });
         let err = MaskPolicy::from_json(&v).unwrap_err();
         match err {
             DbError::ValidationFailed { code, .. } => {
@@ -490,7 +491,7 @@ mod tests {
 
     #[test]
     fn from_json_accepts_all_six_classifications() {
-        let v = json!({
+        let v = value!({
             "admin": ["public", "pii", "spi", "phi", "pci", "internal"],
         });
         let p = MaskPolicy::from_json(&v).expect("parse");
@@ -501,7 +502,7 @@ mod tests {
 
     #[test]
     fn from_json_empty_array_yields_empty_set() {
-        let v = json!({ "auto": [] });
+        let v = value!({ "auto": [] });
         let p = MaskPolicy::from_json(&v).expect("parse");
         // Even though auto is listed with an empty set, the explicit
         // listing means the fallback rule does NOT apply.
@@ -510,7 +511,7 @@ mod tests {
 
     #[test]
     fn to_json_round_trips() {
-        let original = json!({
+        let original = value!({
             "admin":   ["pii", "public"],
             "support": ["public"],
         });

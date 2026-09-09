@@ -12,15 +12,14 @@
 
 #![allow(unsafe_code)]
 
-use serde_json::Value;
+use zeroship_data_query_builder::value::Value;
 use zeroship_runtime::state::OpError;
 #[allow(unused_imports)]
 use zeroship_runtime_macros::{v8_class, v8_constructor, v8_method, v8_name};
 
 use zeroship_runtime::state::ResolveValue;
 
-
-use crate::v8_bridge::{read_json_arg, runtime_state, setup_js_promise};
+use crate::v8_bridge::{read_native_arg, runtime_state, setup_js_promise};
 use crate::v8_classes::dispatch::settle;
 
 /// `db.replication.watchdog()` dispatch.
@@ -114,14 +113,13 @@ impl Replication {
         // today: this keeps `resolve_watchdog_app_id` unit-testable for
         // the "ignore any caller-supplied override" invariant and
         // mirrors the `setup` pattern.
-        let opts_v = match read_json_arg(scope, Some(opts)) {
+        let opts_v = match read_native_arg(scope, Some(opts)) {
             Ok(v) => v,
             Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
         };
         let app_id = resolve_watchdog_app_id(&self.app_id, &opts_v);
         replication_watchdog_dispatch(scope, app_id).into()
     }
-
 }
 
 /// Resolve the app_id used by `Replication::watchdog` for dispatch.
@@ -188,7 +186,7 @@ mod tests {
     //! Regression guards for app-scoped replication diagnostics.
 
     use super::resolve_watchdog_app_id;
-    use serde_json::json;
+    use zeroship_data_query_builder::value;
 
     // -----------------------------------------------------------------
     // Sibling regression guards for the CRITICAL cross-tenant scoping
@@ -202,18 +200,18 @@ mod tests {
 
     #[test]
     fn watchdog_app_id_ignores_string_override() {
-        let opts = json!({"appId": "victim_app"});
+        let opts = value!({"appId": "victim_app"});
         assert_eq!(resolve_watchdog_app_id("app_a", &opts), "app_a");
     }
 
     #[test]
     fn watchdog_app_id_ignores_non_string_override() {
         for shape in [
-            json!({"appId": 123}),
-            json!({"appId": true}),
-            json!({"appId": null}),
-            json!({"appId": ["app_b"]}),
-            json!({"appId": {"name": "app_b"}}),
+            value!({"appId": 123}),
+            value!({"appId": true}),
+            value!({"appId": null}),
+            value!({"appId": ["app_b"]}),
+            value!({"appId": {"name": "app_b"}}),
         ] {
             assert_eq!(
                 resolve_watchdog_app_id("app_a", &shape),
@@ -225,8 +223,7 @@ mod tests {
 
     #[test]
     fn watchdog_app_id_empty_opts_uses_stamped() {
-        assert_eq!(resolve_watchdog_app_id("app_a", &json!({})), "app_a");
-        assert_eq!(resolve_watchdog_app_id("app_a", &json!(null)), "app_a");
+        assert_eq!(resolve_watchdog_app_id("app_a", &value!({})), "app_a");
+        assert_eq!(resolve_watchdog_app_id("app_a", &value!(null)), "app_a");
     }
-
 }

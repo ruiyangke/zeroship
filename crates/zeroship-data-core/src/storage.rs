@@ -456,7 +456,11 @@ pub trait DialectBuilder: 'static {
         dead_code,
         reason = "These dialect hooks are still covered by unit/integration tests while the production query builders route through free functions."
     )]
-    fn map_zs_type(&self, zs_type: &str, opts: &serde_json::Value) -> String;
+    fn map_zs_type(
+        &self,
+        zs_type: &str,
+        opts: &zeroship_data_query_builder::value::Value,
+    ) -> String;
 
     /// SQL fragment that evaluates to "now" on the server. PG: `NOW()`;
     /// SQLite: `CURRENT_TIMESTAMP`. Returned as a `&'static str` so
@@ -616,9 +620,9 @@ pub trait VectorIndex: 'static {
         query: &[f32],
         k: usize,
         metric: VectorMetric,
-        filter: &serde_json::Value,
-        schema: &serde_json::Value,
-    ) -> Result<Vec<serde_json::Value>, DbError>;
+        filter: &zeroship_data_query_builder::value::Value,
+        schema: &zeroship_data_query_builder::value::Value,
+    ) -> Result<Vec<zeroship_data_query_builder::value::Value>, DbError>;
 }
 
 /// Spatial-index capability — the "build an R-tree-like index over a
@@ -655,10 +659,10 @@ pub trait SpatialIndex: 'static {
         column: &str,
         point: GeoPoint,
         radius_m: f64,
-        filter: &serde_json::Value,
+        filter: &zeroship_data_query_builder::value::Value,
         limit: Option<usize>,
-        schema: &serde_json::Value,
-    ) -> Result<Vec<serde_json::Value>, DbError>;
+        schema: &zeroship_data_query_builder::value::Value,
+    ) -> Result<Vec<zeroship_data_query_builder::value::Value>, DbError>;
 }
 
 /// Snapshot + restore for the per-app data store.
