@@ -78,7 +78,7 @@ async fn seed_oauth_client(client: &Client, client_id: &str) {
 fn fixture_pairwise_sub(client_id: &str, user_id: &UserId) -> String {
     zeroship_core::auth::derive_pairwise(
         &zeroship_core::crypto::derive_key("identities-relay-test-salt"),
-        user_id.as_str(),
+        user_id,
         &format!("https://{client_id}.zeroship.test"),
     )
 }
@@ -182,15 +182,14 @@ async fn upsert_refuses_to_rebind_a_stored_pairwise_subject() {
     // the same user genuinely projects to under two sector identifiers, which
     // is exactly the configuration drift the guard exists to refuse.
     let salt = zeroship_core::auth::derive_pairwise_salt(b"identities-rebind-fixture-salt");
-    let user_sub = user_id.as_str();
     let subject_a = zeroship_core::auth::derive_pairwise(
         &salt,
-        user_sub,
+        &user_id,
         "https://rebind-a.zeroship.test",
     );
     let subject_b = zeroship_core::auth::derive_pairwise(
         &salt,
-        user_sub,
+        &user_id,
         "https://rebind-b.zeroship.test",
     );
     assert_ne!(

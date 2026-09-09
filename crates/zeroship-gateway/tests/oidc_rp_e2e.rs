@@ -890,7 +890,7 @@ async fn gateway_bearer_rejects_real_op_id_token_but_accepts_access_token() {
         serde_json::from_slice(&access_body).expect("worker returned projected user JSON");
     let expected_pws = zeroship_core::auth::derive_pairwise(
         &[9u8; 32],
-        user_id.as_str(),
+        &user_id,
         SECTOR,
     );
     assert_eq!(
@@ -945,7 +945,7 @@ async fn gateway_bearer_rejects_access_token_for_different_resource_audience() {
 
     let wrong_resource_audience = format!("app:{}", Uuid::new_v4());
     let scopes = vec!["openid".to_string(), "email".to_string()];
-    let global_user = Uuid::new_v4().to_string();
+    let global_user = UserId::mint();
     let wrong_aud_token = issuer
         .sign_unregistered_principal_access_token_fixture(&PrincipalAccessTokenMint {
             principal_id: &global_user,
@@ -1428,7 +1428,7 @@ async fn app_session_revoke_at_the_op_ends_the_gateway_session() {
 
     let pws = zeroship_core::auth::derive_pairwise(
         &state.pairwise_salt,
-        user_id.as_str(),
+        &user_id,
         SECTOR,
     );
     let _ = pg_client

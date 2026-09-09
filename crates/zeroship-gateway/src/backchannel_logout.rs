@@ -505,9 +505,8 @@ async fn teardown_per_app_user(
     global_user_id: &UserId,
     anchor_families: &mut Vec<(UserId, crate::anchors::DeletedFamily)>,
 ) -> Result<(), crate::error::GatewayError> {
-    let global_sub = global_user_id.as_str();
     if let Some(sector) = sector {
-        let pws = zeroship_core::auth::derive_pairwise(&state.pairwise_salt, global_sub, sector);
+        let pws = zeroship_core::auth::derive_pairwise(&state.pairwise_salt, global_user_id, sector);
         if let Err(e) = zeroship_authz::wrapper_revocation::revoke_family(conn, client_id, &pws).await
         {
             tracing::error!(

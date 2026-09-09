@@ -515,7 +515,7 @@ fn test_pairwise_salt() -> [u8; 32] {
 fn test_pairwise_subject(user_id: &UserId, app_host: &str) -> String {
     zeroship_core::auth::derive_pairwise(
         &test_pairwise_salt(),
-        user_id.as_str(),
+        user_id,
         &format!("https://{app_host}"),
     )
 }
@@ -1418,7 +1418,7 @@ async fn token_exchange_is_identity_only_and_sets_both_cookies() {
     // User.id is the per-app pws_ (§6.3), never the global UUID.
     let expected_pws = zeroship_core::auth::derive_pairwise(
         &state.pairwise_salt,
-        user_id.as_str(),
+        &user_id,
         &format!("https://{APP_HOST}"),
     );
     assert!(expected_pws.starts_with("pws_"), "{expected_pws}");
@@ -1710,7 +1710,7 @@ async fn session_mint_recovers_after_reload_one_refresh() {
     let body: serde_json::Value = read_json(resp).await;
     let expected_pws = zeroship_core::auth::derive_pairwise(
         &state.pairwise_salt,
-        user_id.as_str(),
+        &user_id,
         &format!("https://{APP_HOST}"),
     );
     // /session projects the user id as the pws_, NOT the global UUID.
@@ -1955,7 +1955,7 @@ async fn backchannel_logout_revokes_refreshed_session_with_sid_logout_token() {
     let cleanup_client = connect_pg(&dsn).await;
     let pws = zeroship_core::auth::derive_pairwise(
         &state.pairwise_salt,
-        user_id.as_str(),
+        &user_id,
         &format!("https://{BCL_REFRESH_APP_HOST}"),
     );
     let _ = cleanup_client
@@ -2222,7 +2222,7 @@ async fn session_steady_state_reads_gateway_session_without_op() {
 
     let expected_pws = zeroship_core::auth::derive_pairwise(
         &state.pairwise_salt,
-        user_id.as_str(),
+        &user_id,
         &format!("https://{APP_HOST}"),
     );
     assert_eq!(body["user"]["id"], expected_pws);
@@ -2294,7 +2294,7 @@ async fn session_minted_cookie_verifies_locally_bound_to_route_client() {
         .expect("the POST /session-minted cookie MUST verify under the route client_id");
     let expected_pws = zeroship_core::auth::derive_pairwise(
         &state.pairwise_salt,
-        user_id.as_str(),
+        &user_id,
         &format!("https://{APP_HOST}"),
     );
     assert_eq!(claims.app, CLIENT_ID, "cookie binds to the route client_id (app claim)");
@@ -2478,7 +2478,7 @@ async fn cookie_mint_writes_identity_so_reset_evicts_cookie_session() {
     // the reset teardown must write a family marker for.
     let expected_pws = zeroship_core::auth::derive_pairwise(
         &state.pairwise_salt,
-        user_id.as_str(),
+        &user_id,
         &format!("https://{APP_HOST}"),
     );
 
@@ -2611,7 +2611,7 @@ async fn interactive_cookie_mint_writes_identity_so_reset_evicts_session() {
     // value the reset teardown must write a family marker for, and the value the
     // production cookie arm keys `is_family_revoked_since` on.
     let expected_pws =
-        zeroship_core::auth::derive_pairwise(&state.pairwise_salt, user_id.as_str(), &sector);
+        zeroship_core::auth::derive_pairwise(&state.pairwise_salt, &user_id, &sector);
 
     // The cookie's `iat` — captured BEFORE the mint so the post-reset
     // `is_family_revoked_since(client_id, pws_, iat)` reflects "a token minted
@@ -2834,7 +2834,7 @@ async fn mint_racing_concurrent_reset_fails_closed_no_fresh_cookie() {
     );
     let expected_pws = zeroship_core::auth::derive_pairwise(
         &state.pairwise_salt,
-        user_id.as_str(),
+        &user_id,
         &format!("https://{APP_HOST}"),
     );
     let marker_count: i64 = assert_client

@@ -1224,7 +1224,7 @@ async fn handler_sid_miss_falls_back_to_app_scoped_sub_revoke() {
     .expect("create other app session");
 
     let pairwise_salt = zeroship_core::auth::derive_pairwise_salt(b"bcl-sid-fallback-stash");
-    let pws = zeroship_core::auth::derive_pairwise(&pairwise_salt, &target_user_string, &sector);
+    let pws = zeroship_core::auth::derive_pairwise(&pairwise_salt, &target_user, &sector);
     let jti = format!("jti-{}", Uuid::new_v4().simple());
     let token = sign_logout_token_with_aud_and_sid(
         &key,
@@ -1754,7 +1754,7 @@ async fn per_app_bcl_writes_token_family_marker() {
     .expect("create session");
 
     let pairwise_salt = zeroship_core::auth::derive_pairwise_salt(b"bcl-perapp-stash");
-    let pws = zeroship_core::auth::derive_pairwise(&pairwise_salt, &target_user_string, &sector);
+    let pws = zeroship_core::auth::derive_pairwise(&pairwise_salt, &target_user, &sector);
     let live_token_iat = i64::try_from(
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
