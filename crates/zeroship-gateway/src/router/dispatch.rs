@@ -28,6 +28,7 @@ use uuid::Uuid;
 
 use zeroship_bundle::RequiredPrincipal;
 use zeroship_core::app_id::AppId;
+use zeroship_core::user_id::UserId;
 use zeroship_core::service_identity::{endpoints, AuthError as ServiceAuthError};
 
 use crate::{enforce, idempotency, oidc_rp, proxy, GateState};
@@ -95,7 +96,7 @@ pub fn extract_app_name(req: &HttpRequest, path_name: Option<&str>) -> Option<St
 #[serde(rename_all = "camelCase")]
 struct WorkflowStepRequest {
     run_id: String,
-    app_id: Uuid,
+    app_id: AppId,
 }
 
 /// Internal durable-workflow advance edge.
@@ -163,13 +164,8 @@ pub async fn workflow_advance_internal(
         }));
     }
 
-    // `WorkflowStepRequest` is a wire type the control plane produces, and it
-    // still carries the stored uuid. This is the second call to
-    // `route_table_app_id` in this crate - the peer of the one in
-    // `sync::update` - and it has to be: it probes the very table that one
-    // builds, so rendering it any other way is a guaranteed miss.
-    let app_id = crate::sync::route_table_app_id(&request.app_id);
-    let Some(compiled_route) = state.routes.lookup_by_app_id(&app_id) else {
+    let app_id = &request.app_id;
+    let Some(compiled_route) = state.routes.lookup_by_app_id(app_id) else {
         return HttpResponse::NotFound().json(&serde_json::json!({"error": "app route not found"}));
     };
 
@@ -193,7 +189,7 @@ pub async fn workflow_advance_internal(
     let worker_authorization = state.worker_authorization();
     let worker_response = match proxy::forward_workflow_advance(
         &state.hash_ring,
-        &app_id,
+        app_id,
         &compiled_route.entry.plan_id,
         &request_id,
         &worker_body,
@@ -1699,19 +1695,14 @@ fn record_gateway_egress(state: &GateState, app_id: &AppId, response: &mut HttpR
     }
     if let BodySize::Sized(n) = response.body().size() {
         if n > 0 {
-            // NOT `app_derivation::meter_key`. `zeroship_metering::meter::
-            // Meter::drain` parses this key back with `Uuid::parse_str` and,
-            // on failure, SKIPS AND EVICTS the counters behind a
-            // `tracing::warn!` - so an app whose key stops parsing serves
-            // traffic and is never billed, with the log noise decaying by
-            // design. Handing it the printed typed id would do exactly that,
-            // so the meter key is the uuid `crate::sync::app_id_uuid` decodes
-            // out of the route table's `AppId`, not the typed id itself.
-            state.meter.increment(
-                &crate::sync::app_id_uuid(app_id).to_string(),
-                "gateway_egress_bytes",
-                n,
-            );
+            // `zeroship_metering::meter::Meter::drain` parses this key back
+            // with `AppId::parse` and, on failure, SKIPS AND EVICTS the
+            // counters behind a `tracing::warn!` - so an app whose key stops
+            // parsing serves traffic and is never billed, with the log noise
+            // decaying by design. The meter key is therefore the typed id's
+            // printed form, `app_id.as_str()`, which is exactly what
+            // `AppId::parse` admits.
+            state.meter.increment(app_id.as_str(), "gateway_egress_bytes", n);
         }
     }
 }
@@ -2015,12 +2006,10 @@ pub(super) async fn handle_idempotency_pre_dispatch(
     let decision = idempotency::pre_dispatch(
         state.idempotency_store.as_ref(),
         // The dedupe namespace is a PERSISTED key space
-        // (`idem:{app_id}:{wire_id}:...`) with its own TTL, so its rendering
-        // is a storage decision rather than a routing one and stays the uuid
-        // `crate::sync::app_id_uuid` decodes out of the route table's
-        // `AppId`. `capture_response` below decodes the same way; the pair
+        // (`idem:{app_id}:{wire_id}:...`) keyed on the app's printed typed
+        // id. `capture_response` below is fed the same `app_id`; the pair
         // has to agree or every store misses its own read.
-        &crate::sync::app_id_uuid(app_id),
+        app_id,
         wire_id,
         principal,
         idem_key.as_deref(),
@@ -2256,7 +2245,7 @@ pub(super) async fn capture_response_for_idempotency(
         state.idempotency_store.as_ref(),
         // The write half of the pair `pre_dispatch` documents: same namespace,
         // so necessarily the same rendering.
-        &crate::sync::app_id_uuid(app_id),
+        app_id,
         &handle.entry_key,
         &handle.lock_key,
         &handle.body_hash,
@@ -2763,9 +2752,9 @@ async fn handle_auth_callback(
         &mut conn,
         &crate::sessions::NewSession {
             user_id: &claims.sub,
-            // `zeroship.gateway_sessions.app_id` is a UUID column bound
-            // natively, so the route table's `AppId` is decoded for it.
-            app_id: crate::sync::app_id_uuid(&app_id),
+            // `zeroship.gateway_sessions.app_id` is a `text` column that
+            // holds the route table's typed id directly.
+            app_id: &app_id,
             email: claims.email.as_deref(),
             name: claims.name.as_deref(),
             avatar_url: claims.picture.as_deref(),
@@ -2794,9 +2783,9 @@ async fn handle_auth_callback(
 
     // 5. Mint the SIGNED `zeroship-sess+jwt` session cookie from the validated claims
     //    (the SAME mint path the SDK popup flow uses — one cookie shape, one
-    //    verifier). `claims.sub` is the global UUID; the helper derives the
+    //    verifier). `claims.sub` is the global user id; the helper derives the
     //    per-app `pws_` + relay alias before signing.
-    let Ok(global_user_id) = uuid::Uuid::parse_str(&claims.sub) else {
+    let Ok(global_user_id) = UserId::parse(&claims.sub) else {
         return render_callback_error("id_token sub is not a global user id");
     };
     let amr = claims.amr.clone().unwrap_or_default();
@@ -2805,7 +2794,7 @@ async fn handle_auth_callback(
         db_cfg,
         &client_id,
         sector_identifier.as_deref(),
-        global_user_id,
+        &global_user_id,
         claims.iat,
         claims.name.as_deref(),
         claims.picture.as_deref(),
@@ -2967,16 +2956,6 @@ mod tests {
         .expect("broker secret")
     }
 
-    /// The typed app id for an app the control plane stores as `stored`.
-    ///
-    /// Delegates to `crate::sync::route_table_app_id`, exactly what
-    /// `sync::update` mints at snapshot load, so a test that keys a
-    /// registry, the ring, or a route lookup builds the same key production
-    /// does.
-    fn typed_app_id(stored: &Uuid) -> AppId {
-        crate::sync::route_table_app_id(stored)
-    }
-
     fn manifest_with_resources(resources: HashMap<String, ResourceEntry>) -> Manifest {
         Manifest {
             version: 1,
@@ -2987,12 +2966,12 @@ mod tests {
 
     fn usage_value(
         events: &[zeroship_core::usage_event::UsageEvent],
-        app_id: Uuid,
+        app_id: &AppId,
         meter: &str,
     ) -> Option<u64> {
         events
             .iter()
-            .find(|event| event.subject.app == Some(app_id) && event.meter == meter)
+            .find(|event| event.subject.app.as_ref() == Some(app_id) && event.meter == meter)
             .map(|event| event.value)
     }
 
@@ -3061,7 +3040,7 @@ mod tests {
         }
         async fn put_manifest(
             &self,
-            _app_id: &uuid::Uuid,
+            _app_id: &AppId,
             _deploy_hash: &str,
             _json: &[u8],
         ) -> Result<(), zeroship_bundle::BlobError> {
@@ -3069,21 +3048,21 @@ mod tests {
         }
         async fn get_manifest(
             &self,
-            _app_id: &uuid::Uuid,
+            _app_id: &AppId,
             _deploy_hash: &str,
         ) -> Result<bytes::Bytes, zeroship_bundle::BlobError> {
             Err(zeroship_bundle::BlobError::NotFound("unused".into()))
         }
         async fn delete_manifest(
             &self,
-            _app_id: &uuid::Uuid,
+            _app_id: &AppId,
             _deploy_hash: &str,
         ) -> Result<bool, zeroship_bundle::BlobError> {
             Ok(false)
         }
         async fn delete_app_manifests(
             &self,
-            _app_id: &uuid::Uuid,
+            _app_id: &AppId,
         ) -> Result<(), zeroship_bundle::BlobError> {
             Ok(())
         }
@@ -3217,10 +3196,10 @@ mod tests {
         build_test_state_with_workers(vec!["http://0.0.0.0:0".into()])
     }
 
-    fn workflow_step_request(app_id: Uuid) -> Value {
+    fn workflow_step_request(app_id: &AppId) -> Value {
         serde_json::json!({
             "runId": "run_test",
-            "appId": app_id,
+            "appId": app_id.as_str(),
         })
     }
 
@@ -3243,14 +3222,14 @@ mod tests {
 
     fn install_workflow_route(
         state: &GateState,
-        app_id: Uuid,
+        app_id: &AppId,
         spend_state: zeroship_core::types::SpendState,
         account_state: zeroship_core::types::AccountState,
     ) {
         let mut entry = worker_spend_route(spend_state);
         entry.account_state = account_state;
         let mut routes = zeroship_core::types::RouteMap::new();
-        routes.insert(app_id, entry);
+        routes.insert(app_id.clone(), entry);
         state.routes.update_snapshot(
             zeroship_core::types::GatewaySnapshot {
                 routes,
@@ -3280,10 +3259,10 @@ mod tests {
         let mut state = build_test_state_with_workers(vec![worker.url("/")]);
         let (service_auth, control_header) = control_credentialled_service_auth();
         Arc::get_mut(&mut state).expect("sole owner").service_auth = service_auth;
-        let app_id = Uuid::new_v4();
+        let app_id = AppId::mint();
         install_workflow_route(
             &state,
-            app_id,
+            &app_id,
             zeroship_core::types::SpendState::Allow,
             zeroship_core::types::AccountState::Active,
         );
@@ -3298,7 +3277,7 @@ mod tests {
         let req = ntex::web::test::TestRequest::post()
             .uri("/__zeroship/internal/workflow-advance")
             .header("authorization", control_header.as_str())
-            .set_payload(serde_json::to_vec(&workflow_step_request(app_id)).unwrap())
+            .set_payload(serde_json::to_vec(&workflow_step_request(&app_id)).unwrap())
             .to_request();
         let resp = ntex::web::test::call_service(&app, req).await;
         assert_eq!(resp.status(), ntex::http::StatusCode::OK);
@@ -3307,13 +3286,13 @@ mod tests {
         assert_eq!(result["ack"], true);
         assert_eq!(result["runId"], "run_test");
         assert_eq!(result["registrations"][0]["runId"], "run_test");
-        assert_eq!(result["registrations"][0]["appId"], app_id.to_string());
+        assert_eq!(result["registrations"][0]["appId"], app_id.as_str());
         assert_eq!(result["registrations"][0]["terminal"], true);
 
         let seen = seen.lock().expect("seen lock");
         assert_eq!(seen.len(), 1);
         assert_eq!(seen[0]["runId"], "run_test");
-        assert_eq!(seen[0]["appId"], app_id.to_string());
+        assert_eq!(seen[0]["appId"], app_id.as_str());
         let keys = seen[0].as_object().expect("worker request object");
         assert_eq!(keys.len(), 2);
     }
@@ -3321,7 +3300,7 @@ mod tests {
     #[test]
     fn workflow_sleep_frontier_normalizes_duration_wake_at() {
         let request: WorkflowStepRequest =
-            serde_json::from_value(workflow_step_request(Uuid::new_v4())).unwrap();
+            serde_json::from_value(workflow_step_request(&AppId::mint())).unwrap();
         let worker_result = serde_json::json!({
             "kind": "Sleep",
             "runId": "run_test",
@@ -3348,7 +3327,7 @@ mod tests {
     #[test]
     fn workflow_wait_frontier_normalizes_timeout_and_max_signal_age() {
         let request: WorkflowStepRequest =
-            serde_json::from_value(workflow_step_request(Uuid::new_v4())).unwrap();
+            serde_json::from_value(workflow_step_request(&AppId::mint())).unwrap();
         let worker_result = serde_json::json!({
             "kind": "Wait",
             "runId": "run_test",
@@ -3379,7 +3358,7 @@ mod tests {
     #[test]
     fn workflow_step_completed_preserves_side_effect_step_kind() {
         let request: WorkflowStepRequest =
-            serde_json::from_value(workflow_step_request(Uuid::new_v4())).unwrap();
+            serde_json::from_value(workflow_step_request(&AppId::mint())).unwrap();
         let worker_result = serde_json::json!({
             "kind": "StepCompleted",
             "runId": "run_test",
@@ -3405,7 +3384,7 @@ mod tests {
     #[test]
     fn workflow_continue_as_new_preserves_seed_input() {
         let request: WorkflowStepRequest =
-            serde_json::from_value(workflow_step_request(Uuid::new_v4())).unwrap();
+            serde_json::from_value(workflow_step_request(&AppId::mint())).unwrap();
         let worker_result = serde_json::json!({
             "kind": "ContinueAsNew",
             "runId": "run_test",
@@ -3426,7 +3405,7 @@ mod tests {
     #[test]
     fn workflow_run_failed_batch_uses_batch_error_when_outcome_error_missing() {
         let request: WorkflowStepRequest =
-            serde_json::from_value(workflow_step_request(Uuid::new_v4())).unwrap();
+            serde_json::from_value(workflow_step_request(&AppId::mint())).unwrap();
         let worker_result = serde_json::json!({
             "kind": "RunFailed",
             "runId": "run_test",
@@ -3457,7 +3436,7 @@ mod tests {
     #[test]
     fn workflow_batch_normalizes_only_trailing_suspension() {
         let request: WorkflowStepRequest =
-            serde_json::from_value(workflow_step_request(Uuid::new_v4())).unwrap();
+            serde_json::from_value(workflow_step_request(&AppId::mint())).unwrap();
         let worker_result = serde_json::json!({
             "runId": "run_test",
             "dispatchNonce": "wfd_test",
@@ -3503,7 +3482,7 @@ mod tests {
     #[test]
     fn workflow_batch_preserves_compensable_on_every_completed_step() {
         let request: WorkflowStepRequest =
-            serde_json::from_value(workflow_step_request(Uuid::new_v4())).unwrap();
+            serde_json::from_value(workflow_step_request(&AppId::mint())).unwrap();
         let worker_result = serde_json::json!({
             "runId": "run_test",
             "dispatchNonce": "wfd_test",
@@ -3553,7 +3532,7 @@ mod tests {
     #[test]
     fn workflow_legacy_checkpoints_preserve_compensation_metadata() {
         let request: WorkflowStepRequest =
-            serde_json::from_value(workflow_step_request(Uuid::new_v4())).unwrap();
+            serde_json::from_value(workflow_step_request(&AppId::mint())).unwrap();
         let worker_result = serde_json::json!({
             "runId": "run_test",
             "dispatchNonce": "wfd_test",
@@ -3671,10 +3650,10 @@ mod tests {
         let mut state = build_test_state_with_workers(Vec::new());
         let (service_auth, control_header) = control_credentialled_service_auth();
         Arc::get_mut(&mut state).expect("sole owner").service_auth = service_auth;
-        let app_id = Uuid::new_v4();
+        let app_id = AppId::mint();
         install_workflow_route(
             &state,
-            app_id,
+            &app_id,
             zeroship_core::types::SpendState::Block,
             zeroship_core::types::AccountState::Active,
         );
@@ -3689,7 +3668,7 @@ mod tests {
         let req = ntex::web::test::TestRequest::post()
             .uri("/__zeroship/internal/workflow-advance")
             .header("authorization", control_header.as_str())
-            .set_payload(serde_json::to_vec(&workflow_step_request(app_id)).unwrap())
+            .set_payload(serde_json::to_vec(&workflow_step_request(&app_id)).unwrap())
             .to_request();
         let resp = ntex::web::test::call_service(&app, req).await;
         assert_eq!(resp.status(), ntex::http::StatusCode::PAYMENT_REQUIRED);
@@ -3714,10 +3693,10 @@ mod tests {
         let mut state = build_test_state_with_workers(Vec::new());
         let (service_auth, control_header) = control_credentialled_service_auth();
         Arc::get_mut(&mut state).expect("sole owner").service_auth = service_auth;
-        let app_id = Uuid::new_v4();
+        let app_id = AppId::mint();
         install_workflow_route(
             &state,
-            app_id,
+            &app_id,
             zeroship_core::types::SpendState::Allow,
             zeroship_core::types::AccountState::Active,
         );
@@ -3732,7 +3711,7 @@ mod tests {
         for header in [None, Some("Bearer not-an-assertion".to_string())] {
             let mut req = ntex::web::test::TestRequest::post()
                 .uri("/__zeroship/internal/workflow-advance")
-                .set_payload(serde_json::to_vec(&workflow_step_request(app_id)).unwrap());
+                .set_payload(serde_json::to_vec(&workflow_step_request(&app_id)).unwrap());
             if let Some(value) = header.clone() {
                 req = req.header("authorization", value);
             }
@@ -3752,7 +3731,7 @@ mod tests {
             ntex::web::test::TestRequest::post()
                 .uri("/__zeroship/internal/workflow-advance")
                 .header("authorization", control_header.as_str())
-                .set_payload(serde_json::to_vec(&workflow_step_request(app_id)).unwrap())
+                .set_payload(serde_json::to_vec(&workflow_step_request(&app_id)).unwrap())
                 .to_request(),
         )
         .await;
@@ -3774,10 +3753,10 @@ mod tests {
         let mut state = build_test_state_with_workers(Vec::new());
         Arc::get_mut(&mut state).expect("sole owner").service_auth =
             std::sync::Arc::new(zeroship_core::service_peers::ServiceAuth::unconfigured());
-        let app_id = Uuid::new_v4();
+        let app_id = AppId::mint();
         install_workflow_route(
             &state,
-            app_id,
+            &app_id,
             zeroship_core::types::SpendState::Allow,
             zeroship_core::types::AccountState::Active,
         );
@@ -3794,7 +3773,7 @@ mod tests {
             &app,
             ntex::web::test::TestRequest::post()
                 .uri("/__zeroship/internal/workflow-advance")
-                .set_payload(serde_json::to_vec(&workflow_step_request(app_id)).unwrap())
+                .set_payload(serde_json::to_vec(&workflow_step_request(&app_id)).unwrap())
                 .to_request(),
         )
         .await;
@@ -3804,10 +3783,10 @@ mod tests {
     #[ntex::test]
     async fn public_vhost_workflow_advance_path_is_404() {
         let state = build_test_state_with_workers(Vec::new());
-        let app_id = Uuid::new_v4();
+        let app_id = AppId::mint();
         install_workflow_route(
             &state,
-            app_id,
+            &app_id,
             zeroship_core::types::SpendState::Allow,
             zeroship_core::types::AccountState::Active,
         );
@@ -3822,7 +3801,7 @@ mod tests {
         let req = ntex::web::test::TestRequest::post()
             .uri("/__zeroship/internal/workflow-advance")
             .header("host", "spend-app.zeroship.localhost")
-            .set_payload(serde_json::to_vec(&workflow_step_request(app_id)).unwrap())
+            .set_payload(serde_json::to_vec(&workflow_step_request(&app_id)).unwrap())
             .to_request();
         let resp = ntex::web::test::call_service(&app, req).await;
         assert_eq!(resp.status(), ntex::http::StatusCode::NOT_FOUND);
@@ -4041,7 +4020,7 @@ mod tests {
         use zeroship_bundle::RateLimit;
 
         let registry = PerRuleRateLimitRegistry::new();
-        let app = typed_app_id(&uuid::Uuid::nil());
+        let app = AppId::mint();
         let limit = RateLimit {
             rpm: None,
             rps: Some(1),
@@ -4309,7 +4288,7 @@ mod tests {
     #[test]
     fn per_session_rule_cannot_be_evaded_by_rotating_the_cookie_value() {
         let reg = crate::enforce::PerRuleRateLimitRegistry::new();
-        let app_id = typed_app_id(&uuid::Uuid::nil());
+        let app_id = AppId::mint();
         let rl = RateLimit {
             rps: Some(1),
             rpm: None,
@@ -4371,7 +4350,7 @@ mod tests {
         // the registry's key uses, otherwise the second call would
         // hit a fresh bucket and pass.
         let reg = crate::enforce::PerRuleRateLimitRegistry::new();
-        let app_id = typed_app_id(&uuid::Uuid::nil());
+        let app_id = AppId::mint();
         let rl = RateLimit { rps: Some(1), rpm: None, per: RateLimitPer::Ip };
         let req = ntex::web::test::TestRequest::default().to_http_request();
         let bucket_id = compute_bucket_id(&req, rl.per, false, true);
@@ -4391,7 +4370,7 @@ mod tests {
         // RateLimitPer::Session must hit independent buckets even when
         // the IP is the same.
         let reg = crate::enforce::PerRuleRateLimitRegistry::new();
-        let app_id = typed_app_id(&uuid::Uuid::nil());
+        let app_id = AppId::mint();
         let rl = RateLimit { rps: Some(1), rpm: None, per: RateLimitPer::Session };
 
         let req_a = ntex::web::test::TestRequest::default()
@@ -4579,7 +4558,7 @@ mod tests {
         let outcome = handle_idempotency_pre_dispatch(
             &req,
             &state,
-            &typed_app_id(&uuid::Uuid::new_v4()),
+            &AppId::mint(),
             "/__zeroship/v1/todos.add",
             &policy,
             None,
@@ -4609,7 +4588,7 @@ mod tests {
     #[compio::test]
     async fn idempotency_first_request_proceeds_holds_lock() {
         let state = make_minimal_state();
-        let app_id = typed_app_id(&uuid::Uuid::new_v4());
+        let app_id = AppId::mint();
         let req = ntex::web::test::TestRequest::default()
             .header("idempotency-key", "5c7f4a1b-8d2e-4c3f-9a6b-1e2d3c4b5a60")
             .to_http_request();
@@ -4632,7 +4611,7 @@ mod tests {
                 assert_eq!(
                     handle.entry_key,
                     crate::idempotency::entry_key(
-                        &crate::sync::app_id_uuid(&app_id),
+                        &app_id,
                         "todos.add",
                         crate::idempotency::Principal::Anon,
                         "5c7f4a1b-8d2e-4c3f-9a6b-1e2d3c4b5a60",
@@ -4647,7 +4626,7 @@ mod tests {
     #[compio::test]
     async fn idempotency_second_same_body_replays_cached_response() {
         let state = make_minimal_state();
-        let app_id = typed_app_id(&uuid::Uuid::new_v4());
+        let app_id = AppId::mint();
         let req = ntex::web::test::TestRequest::default()
             .header("idempotency-key", "7b1e9d40-3c5a-4f21-8e77-90ab12cd34ef")
             .to_http_request();
@@ -4724,7 +4703,7 @@ mod tests {
     #[compio::test]
     async fn idempotency_second_different_body_returns_409_already_exists() {
         let state = make_minimal_state();
-        let app_id = typed_app_id(&uuid::Uuid::new_v4());
+        let app_id = AppId::mint();
         let req_with_key = |body_label: &str| {
             ntex::web::test::TestRequest::default()
                 .header("idempotency-key", "0e3c5a91-77bd-4d2f-b418-6c9a0f5e2d31")
@@ -4806,7 +4785,7 @@ mod tests {
     async fn idempotency_per_procedure_ttl_flows_into_handle() {
         // A mutation pinned to 48h yields handle.ttl_hours = 48.
         let state = make_minimal_state();
-        let app_id = typed_app_id(&uuid::Uuid::new_v4());
+        let app_id = AppId::mint();
         let req = ntex::web::test::TestRequest::default()
             .header("idempotency-key", "7b1e9d40-3c5a-4f21-8e77-90ab12cd34ef")
             .to_http_request();
@@ -4993,7 +4972,7 @@ mod tests {
             .map(|i| format!("http://worker-{i}:8080"))
             .collect();
         let ring = crate::proxy::HashRing::new(workers, u32::MAX);
-        let app = typed_app_id(&uuid::Uuid::nil());
+        let app = AppId::mint();
 
         let (a, _) = ring.select_with_affinity(&app, "sub:alice");
         let (b, _) = ring.select_with_affinity(&app, "sub:alice");
@@ -5015,7 +4994,7 @@ mod tests {
             .map(|i| format!("http://worker-{i}:8080"))
             .collect();
         let ring = crate::proxy::HashRing::new(workers, u32::MAX);
-        let app = typed_app_id(&uuid::Uuid::nil());
+        let app = AppId::mint();
 
         let mut hits = std::collections::HashSet::new();
         for u in 0..32 {
@@ -5506,10 +5485,10 @@ mod tests {
     async fn over_limit_request_blocked_at_gateway() {
         use zeroship_core::types::SpendState;
         let state = build_idempotency_state();
-        let app_id = Uuid::new_v4();
+        let app_id = AppId::mint();
 
         let mut routes: zeroship_core::types::RouteMap = std::collections::HashMap::new();
-        routes.insert(app_id, worker_spend_route(SpendState::Block));
+        routes.insert(app_id.clone(), worker_spend_route(SpendState::Block));
         state.routes.update_snapshot(
             zeroship_core::types::GatewaySnapshot {
                 routes,
@@ -5565,10 +5544,10 @@ mod tests {
     async fn degraded_app_is_throttled_on_a_static_resource() {
         use zeroship_core::types::SpendState;
         let state = build_test_state_with_limits(vec!["http://0.0.0.0:0".into()], 1, 8, 100);
-        let app_id = Uuid::new_v4();
+        let app_id = AppId::mint();
 
         let mut routes: zeroship_core::types::RouteMap = std::collections::HashMap::new();
-        routes.insert(app_id, static_spend_route(SpendState::Degrade));
+        routes.insert(app_id.clone(), static_spend_route(SpendState::Degrade));
         state
             .routes
             .update(routes, &state.rate_limiters, &state.concurrency);
@@ -5607,10 +5586,10 @@ mod tests {
     async fn a_non_degraded_app_is_not_throttled_on_static() {
         use zeroship_core::types::SpendState;
         let state = build_test_state_with_limits(vec!["http://0.0.0.0:0".into()], 1, 8, 100);
-        let app_id = Uuid::new_v4();
+        let app_id = AppId::mint();
 
         let mut routes: zeroship_core::types::RouteMap = std::collections::HashMap::new();
-        routes.insert(app_id, static_spend_route(SpendState::Allow));
+        routes.insert(app_id.clone(), static_spend_route(SpendState::Allow));
         state
             .routes
             .update(routes, &state.rate_limiters, &state.concurrency);
@@ -5647,10 +5626,10 @@ mod tests {
     async fn over_limit_static_asset_blocked_at_gateway() {
         use zeroship_core::types::SpendState;
         let state = build_idempotency_state();
-        let app_id = Uuid::new_v4();
+        let app_id = AppId::mint();
 
         let mut routes: zeroship_core::types::RouteMap = std::collections::HashMap::new();
-        routes.insert(app_id, static_spend_route(SpendState::Block));
+        routes.insert(app_id.clone(), static_spend_route(SpendState::Block));
         state
             .routes
             .update(routes, &state.rate_limiters, &state.concurrency);
@@ -5687,9 +5666,9 @@ mod tests {
     async fn allowed_static_asset_passes_spend_gate() {
         use zeroship_core::types::SpendState;
         let state = build_idempotency_state();
-        let app_id = Uuid::new_v4();
+        let app_id = AppId::mint();
         let mut routes: zeroship_core::types::RouteMap = std::collections::HashMap::new();
-        routes.insert(app_id, static_spend_route(SpendState::Allow));
+        routes.insert(app_id.clone(), static_spend_route(SpendState::Allow));
         state
             .routes
             .update(routes, &state.rate_limiters, &state.concurrency);
@@ -5733,10 +5712,10 @@ mod tests {
         use zeroship_core::types::SpendState;
         let state = build_idempotency_state();
         let meter = Arc::clone(&state.meter);
-        let app_id = Uuid::new_v4();
+        let app_id = AppId::mint();
 
         let mut routes: zeroship_core::types::RouteMap = std::collections::HashMap::new();
-        routes.insert(app_id, static_spend_route(SpendState::Allow));
+        routes.insert(app_id.clone(), static_spend_route(SpendState::Allow));
         state
             .routes
             .update(routes, &state.rate_limiters, &state.concurrency);
@@ -5760,13 +5739,13 @@ mod tests {
 
         let events = meter.drain();
         assert_eq!(
-            usage_value(&events, app_id, "gateway_egress_bytes"),
+            usage_value(&events, &app_id, "gateway_egress_bytes"),
             Some(served.len() as u64),
             "static (gateway-owned) egress must be metered as gateway_egress_bytes \
              equal to the served body length",
         );
         assert_eq!(
-            usage_value(&events, app_id, "egress_bytes"),
+            usage_value(&events, &app_id, "egress_bytes"),
             None,
             "the gateway must NEVER touch the worker-owned egress_bytes metric",
         );
@@ -5785,10 +5764,10 @@ mod tests {
         use zeroship_core::types::SpendState;
         let state = build_idempotency_state();
         let meter = Arc::clone(&state.meter);
-        let app_id = Uuid::new_v4();
+        let app_id = AppId::mint();
 
         let mut routes: zeroship_core::types::RouteMap = std::collections::HashMap::new();
-        routes.insert(app_id, worker_spend_route(SpendState::Allow));
+        routes.insert(app_id.clone(), worker_spend_route(SpendState::Allow));
         state
             .routes
             .update(routes, &state.rate_limiters, &state.concurrency);
@@ -5808,7 +5787,7 @@ mod tests {
 
         let events = meter.drain();
         assert_eq!(
-            usage_value(&events, app_id, "gateway_egress_bytes"),
+            usage_value(&events, &app_id, "gateway_egress_bytes"),
             None,
             "the gateway must NOT meter a worker-proxied response body as \
              gateway_egress_bytes (no double-count vs the worker's egress_bytes)",
@@ -5865,10 +5844,10 @@ mod tests {
     async fn gateway_error_envelope_is_not_metered() {
         let state = build_idempotency_state();
         let meter = Arc::clone(&state.meter);
-        let app_id = Uuid::new_v4();
+        let app_id = AppId::mint();
 
         let mut routes: zeroship_core::types::RouteMap = std::collections::HashMap::new();
-        routes.insert(app_id, max_input_route(8));
+        routes.insert(app_id.clone(), max_input_route(8));
         state
             .routes
             .update(routes, &state.rate_limiters, &state.concurrency);
@@ -5906,13 +5885,13 @@ mod tests {
         // The gateway must record NOTHING for an error envelope: no
         // gateway_egress_bytes, and (the gateway never owns it) no egress_bytes.
         assert_eq!(
-            usage_value(&events, app_id, "gateway_egress_bytes"),
+            usage_value(&events, &app_id, "gateway_egress_bytes"),
             None,
             "a gateway error/4xx envelope is platform overhead and must NOT \
              be metered as gateway_egress_bytes",
         );
         assert_eq!(
-            usage_value(&events, app_id, "egress_bytes"),
+            usage_value(&events, &app_id, "egress_bytes"),
             None,
             "the gateway never touches egress_bytes",
         );
@@ -5923,11 +5902,11 @@ mod tests {
     /// instances using the same stable source must still emit distinct IDs.
     #[test]
     fn gateway_usage_event_ids_are_restart_unique() {
-        let app_id = Uuid::new_v4();
+        let app_id = AppId::mint();
         let first = zeroship_metering::Meter::with_source("gate-pod-3");
         let second = zeroship_metering::Meter::with_source("gate-pod-3");
-        first.increment(&app_id.to_string(), "gateway_egress_bytes", 1);
-        second.increment(&app_id.to_string(), "gateway_egress_bytes", 1);
+        first.increment(app_id.as_str(), "gateway_egress_bytes", 1);
+        second.increment(app_id.as_str(), "gateway_egress_bytes", 1);
 
         let first_event = first.drain().pop().expect("first usage event");
         let second_event = second.drain().pop().expect("second usage event");
@@ -5946,9 +5925,9 @@ mod tests {
     async fn allowed_request_passes_spend_gate() {
         use zeroship_core::types::SpendState;
         let state = build_idempotency_state();
-        let app_id = Uuid::new_v4();
+        let app_id = AppId::mint();
         let mut routes: zeroship_core::types::RouteMap = std::collections::HashMap::new();
-        routes.insert(app_id, worker_spend_route(SpendState::Allow));
+        routes.insert(app_id.clone(), worker_spend_route(SpendState::Allow));
         state
             .routes
             .update(routes, &state.rate_limiters, &state.concurrency);
@@ -5985,23 +5964,20 @@ mod tests {
         let rate = RateLimitRegistry::new(1000, 2000);
         let concurrency = ConcurrencyRegistry::new(DEGRADE_FACTOR);
 
-        let degraded_app = Uuid::new_v4();
-        let normal_app = Uuid::new_v4();
+        let degraded_key = AppId::mint();
+        let normal_key = AppId::mint();
         let mut routes: zeroship_core::types::RouteMap = std::collections::HashMap::new();
         let mut degraded = spend_route(SpendState::Degrade);
         degraded.name = "degraded.zeroship.localhost".into();
         let mut normal = spend_route(SpendState::Allow);
         normal.name = "normal.zeroship.localhost".into();
-        routes.insert(degraded_app, degraded);
-        routes.insert(normal_app, normal);
+        routes.insert(degraded_key.clone(), degraded);
+        routes.insert(normal_key.clone(), normal);
 
         cache.update(routes, &rate, &concurrency);
-        // The route table arrives keyed by the stored uuid and the registries
-        // are keyed by the typed id `update` mints from it, so this asserts on
-        // the id the gateway actually enforces against - not on a second
-        // rendering that would silently miss every gauge.
-        let degraded_key = typed_app_id(&degraded_app);
-        let normal_key = typed_app_id(&normal_app);
+        // The route table and the rate/concurrency registries are both keyed
+        // on `AppId` end to end, so this asserts on the exact id the gateway
+        // enforces against.
         assert!(concurrency.is_degraded(&degraded_key));
         assert!(!concurrency.is_degraded(&normal_key));
 
@@ -6028,13 +6004,10 @@ mod tests {
         let cache = crate::sync::RouteCache::new();
         let rate = RateLimitRegistry::new(1000, 2000);
         let concurrency = ConcurrencyRegistry::new(DEGRADE_FACTOR);
-        let app = Uuid::new_v4();
-        // The wire map is keyed by the stored uuid; the registry by the typed
-        // id `update` mints from it.
-        let key = typed_app_id(&app);
+        let key = AppId::mint();
 
         let mut routes: zeroship_core::types::RouteMap = std::collections::HashMap::new();
-        routes.insert(app, spend_route(SpendState::Degrade));
+        routes.insert(key.clone(), spend_route(SpendState::Degrade));
         cache.update(routes, &rate, &concurrency);
         assert!(concurrency.is_degraded(&key));
         let g1 = acquire_concurrency(&concurrency, &key).expect("first admits");
@@ -6045,7 +6018,7 @@ mod tests {
         drop(g1);
 
         let mut routes2: zeroship_core::types::RouteMap = std::collections::HashMap::new();
-        routes2.insert(app, spend_route(SpendState::Allow));
+        routes2.insert(key.clone(), spend_route(SpendState::Allow));
         cache.update(routes2, &rate, &concurrency);
         assert!(!concurrency.is_degraded(&key));
         let mut guards = Vec::new();
@@ -6114,9 +6087,9 @@ mod tests {
     async fn suspended_account_blocked_at_gateway() {
         use zeroship_core::types::{AccountState, SpendState};
         let state = build_idempotency_state();
-        let app_id = Uuid::new_v4();
+        let app_id = AppId::mint();
         let mut routes: zeroship_core::types::RouteMap = std::collections::HashMap::new();
-        routes.insert(app_id, account_worker_route(AccountState::Suspended, SpendState::Allow));
+        routes.insert(app_id.clone(), account_worker_route(AccountState::Suspended, SpendState::Allow));
         state.routes.update(routes, &state.rate_limiters, &state.concurrency);
 
         assert_402_code(drive_ping(state.clone()).await, "ACCOUNT_SUSPENDED").await;
@@ -6129,9 +6102,9 @@ mod tests {
     async fn past_due_account_not_blocked_at_gateway() {
         use zeroship_core::types::{AccountState, SpendState};
         let state = build_idempotency_state();
-        let app_id = Uuid::new_v4();
+        let app_id = AppId::mint();
         let mut routes: zeroship_core::types::RouteMap = std::collections::HashMap::new();
-        routes.insert(app_id, account_worker_route(AccountState::PastDue, SpendState::Allow));
+        routes.insert(app_id.clone(), account_worker_route(AccountState::PastDue, SpendState::Allow));
         state.routes.update(routes, &state.rate_limiters, &state.concurrency);
 
         let resp = drive_ping(state.clone()).await;
@@ -6148,9 +6121,9 @@ mod tests {
     async fn active_account_passes_gate() {
         use zeroship_core::types::{AccountState, SpendState};
         let state = build_idempotency_state();
-        let app_id = Uuid::new_v4();
+        let app_id = AppId::mint();
         let mut routes: zeroship_core::types::RouteMap = std::collections::HashMap::new();
-        routes.insert(app_id, account_worker_route(AccountState::Active, SpendState::Allow));
+        routes.insert(app_id.clone(), account_worker_route(AccountState::Active, SpendState::Allow));
         state.routes.update(routes, &state.rate_limiters, &state.concurrency);
 
         let resp = drive_ping(state.clone()).await;
@@ -6173,9 +6146,9 @@ mod tests {
         // Suspended beats Allow spend.
         {
             let state = build_idempotency_state();
-            let app_id = Uuid::new_v4();
+            let app_id = AppId::mint();
             let mut routes: zeroship_core::types::RouteMap = std::collections::HashMap::new();
-            routes.insert(app_id, account_worker_route(AccountState::Suspended, SpendState::Allow));
+            routes.insert(app_id.clone(), account_worker_route(AccountState::Suspended, SpendState::Allow));
             state.routes.update(routes, &state.rate_limiters, &state.concurrency);
             assert_402_code(drive_ping(state.clone()).await, "ACCOUNT_SUSPENDED").await;
         }
@@ -6183,9 +6156,9 @@ mod tests {
         // Active account, Block spend → spend gate fires.
         {
             let state = build_idempotency_state();
-            let app_id = Uuid::new_v4();
+            let app_id = AppId::mint();
             let mut routes: zeroship_core::types::RouteMap = std::collections::HashMap::new();
-            routes.insert(app_id, account_worker_route(AccountState::Active, SpendState::Block));
+            routes.insert(app_id.clone(), account_worker_route(AccountState::Active, SpendState::Block));
             state.routes.update(routes, &state.rate_limiters, &state.concurrency);
             assert_402_code(drive_ping(state.clone()).await, "SPEND_LIMIT").await;
         }
@@ -6194,9 +6167,9 @@ mod tests {
         // evaluated first), so the code is ACCOUNT_SUSPENDED, not SPEND_LIMIT.
         {
             let state = build_idempotency_state();
-            let app_id = Uuid::new_v4();
+            let app_id = AppId::mint();
             let mut routes: zeroship_core::types::RouteMap = std::collections::HashMap::new();
-            routes.insert(app_id, account_worker_route(AccountState::Suspended, SpendState::Block));
+            routes.insert(app_id.clone(), account_worker_route(AccountState::Suspended, SpendState::Block));
             state.routes.update(routes, &state.rate_limiters, &state.concurrency);
             assert_402_code(drive_ping(state.clone()).await, "ACCOUNT_SUSPENDED").await;
         }
@@ -6408,7 +6381,7 @@ mod tests {
         let state = build_test_state_with_limits(vec![worker.url.clone()], 100, 100, 100);
         let mut routes: zeroship_core::types::RouteMap = std::collections::HashMap::new();
         routes.insert(
-            Uuid::new_v4(),
+            AppId::mint(),
             idempotent_mutation_route_with_oauth(oauth_client_id),
         );
         state
@@ -6818,11 +6791,11 @@ mod tests {
             build_test_state_inner(vec![worker.url.clone()], 100, 100, 100, Some(verifier));
         let mut routes: zeroship_core::types::RouteMap = std::collections::HashMap::new();
         routes.insert(
-            Uuid::new_v4(),
+            AppId::mint(),
             authenticated_idempotent_route(TEST_AUTH_HOST, RequiredPrincipal::User),
         );
         routes.insert(
-            Uuid::new_v4(),
+            AppId::mint(),
             authenticated_idempotent_route(TEST_ANON_HOST, RequiredPrincipal::Anonymous),
         );
         state.routes.update_snapshot(
@@ -7112,7 +7085,7 @@ mod tests {
         let outcome = handle_idempotency_pre_dispatch(
             &req,
             &state,
-            &typed_app_id(&uuid::Uuid::new_v4()),
+            &AppId::mint(),
             "/__zeroship/v1/todos.add",
             &policy,
             // The gate said "allowed" but handed over no header — the

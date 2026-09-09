@@ -1138,7 +1138,7 @@ mod tests {
         }
         async fn put_manifest(
             &self,
-            _a: &uuid::Uuid,
+            _a: &zeroship_core::app_id::AppId,
             _d: &str,
             _j: &[u8],
         ) -> Result<(), zeroship_bundle::BlobError> {
@@ -1146,21 +1146,21 @@ mod tests {
         }
         async fn get_manifest(
             &self,
-            _a: &uuid::Uuid,
+            _a: &zeroship_core::app_id::AppId,
             _d: &str,
         ) -> Result<bytes::Bytes, zeroship_bundle::BlobError> {
             Err(zeroship_bundle::BlobError::NotFound("unused".into()))
         }
         async fn delete_manifest(
             &self,
-            _a: &uuid::Uuid,
+            _a: &zeroship_core::app_id::AppId,
             _d: &str,
         ) -> Result<bool, zeroship_bundle::BlobError> {
             Ok(false)
         }
         async fn delete_app_manifests(
             &self,
-            _a: &uuid::Uuid,
+            _a: &zeroship_core::app_id::AppId,
         ) -> Result<(), zeroship_bundle::BlobError> {
             Ok(())
         }
@@ -2893,18 +2893,18 @@ mod tests {
         let base = srv.url("").trim_end_matches('/').to_string();
         let state = build_state_for_op(gateway_signing, &base);
 
-        let user_id = Uuid::parse_str("0192f1aa-bbbb-7ccc-8ddd-eeeeffff0088").unwrap();
+        let user_id = zeroship_core::user_id::UserId::mint();
         let sector = "https://myapp.zeroship.ai";
         let host = "myapp.zeroship.ai";
         let (client_id, resource_aud) = op_app_binding(OP_APP_UUID);
         let issued_pws = zeroship_core::auth::derive_pairwise(
             &state.pairwise_salt,
-            &user_id.to_string(),
+            user_id.as_str(),
             sector,
         );
         let mut routes = zeroship_core::types::RouteMap::new();
         routes.insert(
-            Uuid::parse_str(OP_APP_UUID).unwrap(),
+            zeroship_core::app_id::AppId::mint(),
             zeroship_core::types::RouteEntry {
                 name: host.to_string(),
                 plan_id: "free".to_string(),
@@ -3055,14 +3055,14 @@ mod tests {
 
     fn install_disabled_principal_snapshot(
         state: &crate::GateState,
-        user_id: Uuid,
+        user_id: zeroship_core::user_id::UserId,
         client_id: &str,
         sector: &str,
         host: &str,
     ) {
         let mut routes = zeroship_core::types::RouteMap::new();
         routes.insert(
-            Uuid::new_v4(),
+            zeroship_core::app_id::AppId::mint(),
             zeroship_core::types::RouteEntry {
                 name: host.to_string(),
                 plan_id: "free".to_string(),
@@ -3076,7 +3076,7 @@ mod tests {
         );
         let pairwise = zeroship_core::auth::derive_pairwise(
             &state.pairwise_salt,
-            &user_id.to_string(),
+            user_id.as_str(),
             sector,
         );
         let lifecycle = zeroship_core::types::GatewayPrincipalLifecycle::disabled(
@@ -3161,14 +3161,14 @@ mod tests {
             "http://127.0.0.1:1",
             None,
         );
-        let user_id = Uuid::new_v4();
+        let user_id = zeroship_core::user_id::UserId::mint();
         let client_id = "oac_cookie_lifecycle";
         let sector = "https://cookie-lifecycle.zeroship.test";
         let host = "cookie-lifecycle.zeroship.test";
-        install_disabled_principal_snapshot(&state, user_id, client_id, sector, host);
+        install_disabled_principal_snapshot(&state, user_id.clone(), client_id, sector, host);
         let pws = zeroship_core::auth::derive_pairwise(
             &state.pairwise_salt,
-            &user_id.to_string(),
+            user_id.as_str(),
             sector,
         );
         let token = issue_signed_session_cookie(&state, client_id, &pws, "", &[]);
@@ -3201,19 +3201,19 @@ mod tests {
             "http://127.0.0.1:1",
             None,
         );
-        let user_id = Uuid::new_v4();
+        let user_id = zeroship_core::user_id::UserId::mint();
         let client_id = "oac_sign_lifecycle";
         let sector = "https://sign-lifecycle.zeroship.test";
         install_disabled_principal_snapshot(
             &state,
-            user_id,
+            user_id.clone(),
             client_id,
             sector,
             "sign-lifecycle.zeroship.test",
         );
         let pws = zeroship_core::auth::derive_pairwise(
             &state.pairwise_salt,
-            &user_id.to_string(),
+            user_id.as_str(),
             sector,
         );
 

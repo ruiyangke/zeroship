@@ -30,6 +30,8 @@ use std::sync::{Arc, Mutex};
 use ed25519_dalek::SigningKey;
 use ntex::web::{self, test};
 use uuid::Uuid;
+use zeroship_core::app_id::AppId;
+use zeroship_core::user_id::UserId;
 
 use zeroship_gateway::{
     anchors, backchannel_logout,
@@ -62,8 +64,8 @@ const INITIAL_REFRESH_TOKEN: &str = "rt_initial_seed";
 struct MockOP {
     signing: SigningKey,
     kid: String,
-    /// The global user UUID every token's `sub` carries.
-    user_id: Uuid,
+    /// The global user id every token's `sub` carries.
+    user_id: UserId,
     client_id: String,
     /// Count of `grant_type=refresh_token` calls — the single-flight proof.
     refresh_calls: AtomicU32,
@@ -96,7 +98,7 @@ impl MockOP {
         Self {
             signing,
             kid,
-            user_id: Uuid::new_v4(),
+            user_id: UserId::mint(),
             client_id: client_id.to_string(),
             refresh_calls: AtomicU32::new(0),
             invalid_grant: AtomicBool::new(false),
@@ -176,7 +178,7 @@ impl MockOP {
         let now = now_secs();
         self.sign(serde_json::json!({
             "iss": MOCK_ISSUER,
-            "sub": self.user_id.to_string(),
+            "sub": self.user_id.as_str(),
             "aud": self.client_id,
             "exp": now + 3600,
             "iat": now,
@@ -197,7 +199,7 @@ impl MockOP {
         self.sign_with_typ(
             serde_json::json!({
                 "iss": MOCK_ISSUER,
-                "sub": self.user_id.to_string(),
+                "sub": self.user_id.as_str(),
                 "aud": "https://api.zeroship.ai",
                 "client_id": self.client_id,
                 "exp": now + 3600,
@@ -222,7 +224,7 @@ impl MockOP {
         let now = now_secs();
         self.sign(serde_json::json!({
             "iss": MOCK_ISSUER,
-            "sub": self.user_id.to_string(),
+            "sub": self.user_id.as_str(),
             "aud": self.client_id,
             "exp": now + 3600,
             "iat": now,
@@ -252,7 +254,7 @@ impl MockOP {
                 "iat": now,
                 "exp": now + 120,
                 "jti": jti,
-                "sub": self.user_id.to_string(),
+                "sub": self.user_id.as_str(),
                 "sid": self.sid.clone(),
                 "events": { zeroship_core::logout_token::BCL_EVENT: {} },
             }),
@@ -463,7 +465,7 @@ impl zeroship_bundle::BlobStore for StubBlobStore {
     }
     async fn put_manifest(
         &self,
-        _app_id: &uuid::Uuid,
+        _app_id: &AppId,
         _deploy_hash: &str,
         _json: &[u8],
     ) -> Result<(), zeroship_bundle::BlobError> {
@@ -471,21 +473,21 @@ impl zeroship_bundle::BlobStore for StubBlobStore {
     }
     async fn get_manifest(
         &self,
-        _app_id: &uuid::Uuid,
+        _app_id: &AppId,
         _deploy_hash: &str,
     ) -> Result<bytes::Bytes, zeroship_bundle::BlobError> {
         Err(zeroship_bundle::BlobError::NotFound("unused".into()))
     }
     async fn delete_manifest(
         &self,
-        _app_id: &uuid::Uuid,
+        _app_id: &AppId,
         _deploy_hash: &str,
     ) -> Result<bool, zeroship_bundle::BlobError> {
         Ok(false)
     }
     async fn delete_app_manifests(
         &self,
-        _app_id: &uuid::Uuid,
+        _app_id: &AppId,
     ) -> Result<(), zeroship_bundle::BlobError> {
         Ok(())
     }
@@ -498,22 +500,22 @@ const PAIRWISE_TEST_SALT_SEED: &str = "pairwise-test-salt";
 const BCL_REFRESH_APP_HOST: &str = "bcl-refresh.zeroship.ai";
 const BCL_REFRESH_APP_NAME: &str = "bcl-refresh";
 const BCL_REFRESH_CLIENT_ID: &str = "oac_bcl_refresh";
-const BCL_REFRESH_APP_UUID: &str = "00000000-0000-7000-8000-0000000000bb";
-/// The app's STABLE UUID — the `RouteMap` key. Fixed (not random) so the
+const BCL_REFRESH_APP_ID: &str = "app_0000000000000000000002";
+/// The app's STABLE typed id — the `RouteMap` key. Fixed (not random) so the
 /// live-dispatch regression test can assert that the `/token`-minted
-/// `gateway_sessions` row is keyed by THIS UUID (not the `myapp` slug), which
+/// `gateway_sessions` row is keyed by THIS id (not the `myapp` slug), which
 /// is exactly what lets the cookie validate on the real SPA→app dispatch arm
-/// (the `app_id` column is UUID, bound natively).
-const APP_UUID: &str = "00000000-0000-7000-8000-0000000000aa";
+/// (the `app_id` column is `text`, holding `app_id.as_str()`).
+const APP_ID: &str = "app_0000000000000000000001";
 
 fn test_pairwise_salt() -> [u8; 32] {
     zeroship_core::crypto::derive_key(PAIRWISE_TEST_SALT_SEED)
 }
 
-fn test_pairwise_subject(user_id: Uuid, app_host: &str) -> String {
+fn test_pairwise_subject(user_id: &UserId, app_host: &str) -> String {
     zeroship_core::auth::derive_pairwise(
         &test_pairwise_salt(),
-        &user_id.to_string(),
+        user_id.as_str(),
         &format!("https://{app_host}"),
     )
 }
@@ -524,7 +526,7 @@ fn build_state(op_base: &str, db: Option<zeroship_gateway::db::DbConfig>) -> Arc
     build_state_with_route(
         op_base,
         db,
-        APP_UUID,
+        APP_ID,
         APP_NAME,
         APP_HOST,
         CLIENT_ID,
@@ -618,7 +620,7 @@ fn build_route_map_for(
     use zeroship_core::types::RouteEntry;
     let mut m = std::collections::HashMap::new();
     m.insert(
-        Uuid::parse_str(app_uuid).expect("fixed app uuid"),
+        AppId::parse(app_uuid).expect("fixed app id"),
         RouteEntry {
             name: app_name.into(),
             plan_id: "free".into(),
@@ -921,7 +923,7 @@ fn leader_mint_future(
     anchor_id: Uuid,
 ) -> anchors::SharedRotationFuture {
     use futures::FutureExt as _;
-    let user_id = op.user_id;
+    let user_id = op.user_id.clone();
     (Box::pin(async move {
         // The guard's Drop removes the entry on resolution OR cancellation —
         // identical to `auth_token::rotate_family`'s leader future.
@@ -1173,7 +1175,7 @@ async fn op_refresh(oidc: &OidcRp, op: &MockOP) -> Result<(), String> {
         .verify_access_token(&tokens.access_token)
         .await
         .map_err(|e| e.to_string())?;
-    assert_eq!(raw.sub, op.user_id.to_string());
+    assert_eq!(raw.sub, op.user_id.as_str());
     Ok(())
 }
 
@@ -1203,7 +1205,7 @@ fn db_url() -> Option<String> {
 }
 
 /// Seed the global user row the anchor FKs into, returning its id.
-async fn seed_user(dsn: &str, user_id: Uuid) {
+async fn seed_user(dsn: &str, user_id: &UserId) {
     let (client, conn) = compio_postgres::connect(dsn, compio_postgres::NoTls)
         .await
         .expect("connect");
@@ -1232,19 +1234,19 @@ async fn seed_user(dsn: &str, user_id: Uuid) {
              SELECT $1, $2, p.id, p.organization_id FROM zeroship.projects p WHERE p.id = $3 \
              ON CONFLICT (id) DO NOTHING",
             &[
-                &Uuid::parse_str(APP_UUID).expect("app uuid"),
+                &APP_ID,
                 &format!("anchor-test-{APP_NAME}"),
                 &project_id
             ],
         )
         .await
         .expect("seed app");
-    let email = format!("anchor-{}@zeroship.test", user_id.simple());
+    let email = format!("anchor-{}@zeroship.test", Uuid::new_v4().simple());
     client
         .execute(
             "INSERT INTO zeroship.users (id, email, name, email_verified_at) \
              VALUES ($1, $2::citext, $3, NOW()) ON CONFLICT (id) DO NOTHING",
-            &[&user_id, &email, &"Anchor Test"],
+            &[&user_id.as_str(), &email, &"Anchor Test"],
         )
         .await
         .expect("seed user");
@@ -1258,7 +1260,7 @@ const REAL_EMAIL: &str = "user@example.com";
 /// Seed an active relay alias for `(CLIENT_ID, user_id)` in the row maintained
 /// by pairwise projection and populated with the alias at consent. The
 /// email-claim swap reads THIS and projects it instead of the real email.
-async fn seed_relay_alias(dsn: &str, user_id: Uuid, relay_email: &str) {
+async fn seed_relay_alias(dsn: &str, user_id: &UserId, relay_email: &str) {
     seed_relay_alias_for(dsn, CLIENT_ID, APP_HOST, user_id, relay_email).await;
 }
 
@@ -1266,7 +1268,7 @@ async fn seed_relay_alias_for(
     dsn: &str,
     client_id: &str,
     app_host: &str,
-    user_id: Uuid,
+    user_id: &UserId,
     relay_email: &str,
 ) {
     let (client, conn) = compio_postgres::connect(dsn, compio_postgres::NoTls)
@@ -1284,13 +1286,13 @@ async fn seed_relay_alias_for(
              VALUES ($1, $2, $3, $4) \
              ON CONFLICT (app_client_id, global_user_id) \
              DO UPDATE SET relay_email = EXCLUDED.relay_email, revoked_at = NULL",
-            &[&client_id, &user_id, &pairwise_sub, &relay_email],
+            &[&client_id, &user_id.as_str(), &pairwise_sub, &relay_email],
         )
         .await
         .expect("seed relay alias");
 }
 
-async fn cleanup_identities(dsn: &str, user_id: Uuid) {
+async fn cleanup_identities(dsn: &str, user_id: &UserId) {
     let (client, conn) = compio_postgres::connect(dsn, compio_postgres::NoTls)
         .await
         .expect("connect");
@@ -1301,12 +1303,12 @@ async fn cleanup_identities(dsn: &str, user_id: Uuid) {
     let _ = client
         .execute(
             "DELETE FROM zeroship.app_user_identities WHERE global_user_id = $1",
-            &[&user_id],
+            &[&user_id.as_str()],
         )
         .await;
 }
 
-async fn cleanup(dsn: &str, user_id: Uuid) {
+async fn cleanup(dsn: &str, user_id: &UserId) {
     let (client, conn) = compio_postgres::connect(dsn, compio_postgres::NoTls)
         .await
         .expect("connect");
@@ -1317,17 +1319,17 @@ async fn cleanup(dsn: &str, user_id: Uuid) {
     let _ = client
         .execute(
             "DELETE FROM zeroship.app_session_anchors WHERE global_user_id = $1",
-            &[&user_id],
+            &[&user_id.as_str()],
         )
         .await;
     let _ = client
         .execute(
             "DELETE FROM zeroship.gateway_sessions WHERE user_id = $1",
-            &[&user_id],
+            &[&user_id.as_str()],
         )
         .await;
     let _ = client
-        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user_id])
+        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user_id.as_str()])
         .await;
 }
 
@@ -1344,8 +1346,8 @@ async fn token_exchange_is_identity_only_and_sets_both_cookies() {
         return;
     };
     let op = Arc::new(MockOP::new(CLIENT_ID));
-    seed_user(&dsn, op.user_id).await;
-    let user_id = op.user_id;
+    seed_user(&dsn, &op.user_id).await;
+    let user_id = op.user_id.clone();
     let (base, _srv) = boot_mock_op(op.clone()).await;
     let db = zeroship_gateway::db::DbConfig::new(dsn.clone(), 8);
     let state = build_state(&base, Some(db));
@@ -1416,16 +1418,16 @@ async fn token_exchange_is_identity_only_and_sets_both_cookies() {
     // User.id is the per-app pws_ (§6.3), never the global UUID.
     let expected_pws = zeroship_core::auth::derive_pairwise(
         &state.pairwise_salt,
-        &user_id.to_string(),
+        user_id.as_str(),
         &format!("https://{APP_HOST}"),
     );
     assert!(expected_pws.starts_with("pws_"), "{expected_pws}");
     assert_eq!(body["user"]["id"], expected_pws);
-    assert_ne!(body["user"]["id"], user_id.to_string());
+    assert_ne!(body["user"]["id"], user_id.as_str());
     // The global UUID must NOT appear anywhere in the SPA-facing body.
     let raw_body = serde_json::to_string(&body).unwrap();
     assert!(
-        !raw_body.contains(&user_id.to_string()),
+        !raw_body.contains(user_id.as_str()),
         "global UUID must NOT appear in the identity body"
     );
 
@@ -1442,7 +1444,7 @@ async fn token_exchange_is_identity_only_and_sets_both_cookies() {
     assert_eq!(claims.app, CLIENT_ID, "cookie app binds to the route client_id");
     assert_eq!(claims.sub, expected_pws, "cookie sub is the per-app pws_");
     assert!(
-        !session_token.contains(&user_id.to_string()),
+        !session_token.contains(user_id.as_str()),
         "global UUID must NOT appear in the signed session cookie"
     );
 
@@ -1460,7 +1462,7 @@ async fn token_exchange_is_identity_only_and_sets_both_cookies() {
             .query(
                 "SELECT user_id, app_id FROM zeroship.gateway_sessions \
                  WHERE user_id = $1 AND app_id = $2",
-                &[&user_id, &Uuid::parse_str(APP_UUID).expect("fixed app uuid")],
+                &[&user_id.as_str(), &APP_ID],
             )
             .await
             .expect("audit row query");
@@ -1470,7 +1472,7 @@ async fn token_exchange_is_identity_only_and_sets_both_cookies() {
         );
     }
 
-    cleanup(&dsn, user_id).await;
+    cleanup(&dsn, &user_id).await;
 }
 
 /// §2.3 — the MANDATORY relay-email swap on the `/token` identity projection.
@@ -1484,10 +1486,10 @@ async fn token_exchange_swaps_email_for_relay_alias() {
         return;
     };
     let op = Arc::new(MockOP::new(CLIENT_ID));
-    seed_user(&dsn, op.user_id).await;
-    let user_id = op.user_id;
-    let relay_email = format!("{}@relay.zeroship.localhost", user_id.simple());
-    seed_relay_alias(&dsn, user_id, &relay_email).await;
+    seed_user(&dsn, &op.user_id).await;
+    let user_id = op.user_id.clone();
+    let relay_email = format!("{}@relay.zeroship.localhost", Uuid::new_v4().simple());
+    seed_relay_alias(&dsn, &user_id, &relay_email).await;
     let (base, _srv) = boot_mock_op(op.clone()).await;
     let db = zeroship_gateway::db::DbConfig::new(dsn.clone(), 8);
     let state = build_state(&base, Some(db));
@@ -1507,7 +1509,7 @@ async fn token_exchange_swaps_email_for_relay_alias() {
 
     let body: serde_json::Value = read_json(resp).await;
 
-    let expected_pws = test_pairwise_subject(user_id, APP_HOST);
+    let expected_pws = test_pairwise_subject(&user_id, APP_HOST);
     assert_eq!(
         body["user"]["id"],
         serde_json::json!(expected_pws),
@@ -1524,8 +1526,8 @@ async fn token_exchange_swaps_email_for_relay_alias() {
         "real email must be ABSENT from the identity body"
     );
 
-    cleanup_identities(&dsn, user_id).await;
-    cleanup(&dsn, user_id).await;
+    cleanup_identities(&dsn, &user_id).await;
+    cleanup(&dsn, &user_id).await;
 }
 
 /// §2.3 — fail-closed when NO alias is present (e.g. consent minted none yet).
@@ -1539,10 +1541,10 @@ async fn token_exchange_fails_closed_when_no_alias() {
         return;
     };
     let op = Arc::new(MockOP::new(CLIENT_ID));
-    seed_user(&dsn, op.user_id).await;
-    let user_id = op.user_id;
+    seed_user(&dsn, &op.user_id).await;
+    let user_id = op.user_id.clone();
     // Deliberately seed NO app_user_identities row → no alias.
-    cleanup_identities(&dsn, user_id).await;
+    cleanup_identities(&dsn, &user_id).await;
     let (base, _srv) = boot_mock_op(op.clone()).await;
     let db = zeroship_gateway::db::DbConfig::new(dsn.clone(), 8);
     let state = build_state(&base, Some(db));
@@ -1574,8 +1576,8 @@ async fn token_exchange_fails_closed_when_no_alias() {
         "real email must be ABSENT even when no alias exists (fail closed)"
     );
 
-    cleanup_identities(&dsn, user_id).await;
-    cleanup(&dsn, user_id).await;
+    cleanup_identities(&dsn, &user_id).await;
+    cleanup(&dsn, &user_id).await;
 }
 
 #[ntex::test]
@@ -1585,8 +1587,8 @@ async fn anchor_abs_expiry_is_created_at_plus_30d_not_slid() {
         return;
     };
     let op = Arc::new(MockOP::new(CLIENT_ID));
-    seed_user(&dsn, op.user_id).await;
-    let user_id = op.user_id;
+    seed_user(&dsn, &op.user_id).await;
+    let user_id = op.user_id.clone();
     let (base, _srv) = boot_mock_op(op.clone()).await;
     let db_cfg = zeroship_gateway::db::DbConfig::new(dsn.clone(), 4);
 
@@ -1603,9 +1605,9 @@ async fn anchor_abs_expiry_is_created_at_plus_30d_not_slid() {
     let anchor = anchors::create(
         &mut conn,
         &anchors::NewAnchor {
-            app_id: Uuid::parse_str(APP_UUID).expect("fixed app uuid"),
+            app_id: &AppId::parse(APP_ID).expect("fixed app id"),
             client_id: CLIENT_ID,
-            global_user_id: user_id,
+            global_user_id: &user_id,
             refresh_token_enc: &refresh_enc,
             refresh_family_id: "fam",
             granted_scopes: &["openid".to_string()],
@@ -1623,7 +1625,7 @@ async fn anchor_abs_expiry_is_created_at_plus_30d_not_slid() {
     let _ = base; // keep the mock alive for symmetry
     drop(conn);
     drop(pool);
-    cleanup(&dsn, user_id).await;
+    cleanup(&dsn, &user_id).await;
 }
 
 #[ntex::test]
@@ -1638,10 +1640,10 @@ async fn session_mint_recovers_after_reload_one_refresh() {
         return;
     };
     let op = Arc::new(MockOP::new(CLIENT_ID));
-    seed_user(&dsn, op.user_id).await;
-    let user_id = op.user_id;
-    let relay_email = format!("{}@relay.zeroship.localhost", user_id.simple());
-    seed_relay_alias(&dsn, user_id, &relay_email).await;
+    seed_user(&dsn, &op.user_id).await;
+    let user_id = op.user_id.clone();
+    let relay_email = format!("{}@relay.zeroship.localhost", Uuid::new_v4().simple());
+    seed_relay_alias(&dsn, &user_id, &relay_email).await;
     let (base, _srv) = boot_mock_op(op.clone()).await;
     let db_cfg = zeroship_gateway::db::DbConfig::new(dsn.clone(), 8);
     let state = build_state(&base, Some(db_cfg.clone()));
@@ -1669,7 +1671,7 @@ async fn session_mint_recovers_after_reload_one_refresh() {
         let conn = pool.get().await.unwrap();
         conn.execute(
             "UPDATE zeroship.gateway_sessions SET revoked_at = NOW() WHERE user_id = $1",
-            &[&user_id],
+            &[&user_id.as_str()],
         )
         .await
         .unwrap();
@@ -1708,12 +1710,12 @@ async fn session_mint_recovers_after_reload_one_refresh() {
     let body: serde_json::Value = read_json(resp).await;
     let expected_pws = zeroship_core::auth::derive_pairwise(
         &state.pairwise_salt,
-        &user_id.to_string(),
+        user_id.as_str(),
         &format!("https://{APP_HOST}"),
     );
     // /session projects the user id as the pws_, NOT the global UUID.
     assert_eq!(body["user"]["id"], expected_pws);
-    assert_ne!(body["user"]["id"], user_id.to_string());
+    assert_ne!(body["user"]["id"], user_id.as_str());
     // NO JWT in the body, and the relay-swapped email (never the real one).
     assert!(body.get("access_token").is_none(), "no access_token in reload-recovery body");
     assert!(body.get("id_token").is_none(), "no id_token in reload-recovery body");
@@ -1721,7 +1723,7 @@ async fn session_mint_recovers_after_reload_one_refresh() {
     assert_eq!(body["user"]["email"], serde_json::json!(relay_email));
     let raw_body = serde_json::to_string(&body).unwrap();
     assert!(!raw_body.contains(REAL_EMAIL), "real email absent from reload-recovery body");
-    assert!(!raw_body.contains(&user_id.to_string()), "global UUID absent from reload-recovery body");
+    assert!(!raw_body.contains(user_id.as_str()), "global UUID absent from reload-recovery body");
 
     // Exactly ONE OP refresh happened on the family rotation.
     assert_eq!(
@@ -1760,7 +1762,7 @@ async fn session_mint_recovers_after_reload_one_refresh() {
                 "SELECT name, avatar_url FROM zeroship.gateway_sessions \
                  WHERE user_id = $1 AND app_id = $2 AND revoked_at IS NULL \
                  ORDER BY issued_at DESC LIMIT 1",
-                &[&user_id, &Uuid::parse_str(APP_UUID).expect("fixed app uuid")],
+                &[&user_id.as_str(), &APP_ID],
             )
             .await
             .expect("audit row query");
@@ -1771,8 +1773,8 @@ async fn session_mint_recovers_after_reload_one_refresh() {
         assert_eq!(avatar.as_deref(), Some(ROTATED_AVATAR), "audit row avatar = rotated");
     }
 
-    cleanup_identities(&dsn, user_id).await;
-    cleanup(&dsn, user_id).await;
+    cleanup_identities(&dsn, &user_id).await;
+    cleanup(&dsn, &user_id).await;
 }
 
 #[ntex::test]
@@ -1789,22 +1791,22 @@ async fn backchannel_logout_revokes_refreshed_session_with_sid_logout_token() {
     };
     let op = Arc::new(MockOP::new(BCL_REFRESH_CLIENT_ID));
     op.omit_refresh_id_token_on_refresh();
-    let user_id = op.user_id;
+    let user_id = op.user_id.clone();
     let _email = seed_app_and_client_for(
         &dsn,
-        user_id,
-        BCL_REFRESH_APP_UUID,
+        &user_id,
+        BCL_REFRESH_APP_ID,
         BCL_REFRESH_APP_NAME,
         BCL_REFRESH_APP_HOST,
         BCL_REFRESH_CLIENT_ID,
     )
     .await;
-    let relay_email = format!("{}@relay.zeroship.localhost", user_id.simple());
+    let relay_email = format!("{}@relay.zeroship.localhost", Uuid::new_v4().simple());
     seed_relay_alias_for(
         &dsn,
         BCL_REFRESH_CLIENT_ID,
         BCL_REFRESH_APP_HOST,
-        user_id,
+        &user_id,
         &relay_email,
     )
     .await;
@@ -1813,13 +1815,13 @@ async fn backchannel_logout_revokes_refreshed_session_with_sid_logout_token() {
     let state = build_state_with_route(
         &base,
         Some(db_cfg.clone()),
-        BCL_REFRESH_APP_UUID,
+        BCL_REFRESH_APP_ID,
         BCL_REFRESH_APP_NAME,
         BCL_REFRESH_APP_HOST,
         BCL_REFRESH_CLIENT_ID,
     );
     let app = test::init_service(anchors_bcl_app!(state.clone())).await;
-    let app_id = Uuid::parse_str(BCL_REFRESH_APP_UUID).expect("fixed app uuid");
+    let app_id = BCL_REFRESH_APP_ID;
 
     // 1. Login: real code exchange -> session row with sid + reload anchor.
     let req = test::TestRequest::post()
@@ -1845,7 +1847,7 @@ async fn backchannel_logout_revokes_refreshed_session_with_sid_logout_token() {
                 "SELECT sid FROM zeroship.gateway_sessions \
                  WHERE user_id = $1 AND app_id = $2 AND revoked_at IS NULL \
                  ORDER BY issued_at DESC LIMIT 1",
-                &[&user_id, &app_id],
+                &[&user_id.as_str(), &app_id],
             )
             .await
             .expect("initial session row");
@@ -1878,10 +1880,10 @@ async fn backchannel_logout_revokes_refreshed_session_with_sid_logout_token() {
         let client = connect_pg(&dsn).await;
         let row = client
             .query_one(
-                "SELECT id, sid FROM zeroship.gateway_sessions \
+                "SELECT id AS session_id, sid FROM zeroship.gateway_sessions \
                  WHERE user_id = $1 AND app_id = $2 AND revoked_at IS NULL \
                  ORDER BY issued_at DESC LIMIT 1",
-                &[&user_id, &app_id],
+                &[&user_id.as_str(), &app_id],
             )
             .await
             .expect("refreshed session row");
@@ -1891,7 +1893,10 @@ async fn backchannel_logout_revokes_refreshed_session_with_sid_logout_token() {
             Some(op.sid.as_str()),
             "refreshed session row must preserve sid even though refresh returned no id_token"
         );
-        row.get::<_, Uuid>("id")
+        // `gateway_sessions.id` is its own uuid primary key, unrelated to
+        // either identity domain — aliased so it reads distinctly from the
+        // `app_id`/`user_id` columns bound above.
+        row.get::<_, Uuid>("session_id")
     };
 
     // 3. Global/session logout arrives as a real signed BCL logout_token carrying
@@ -1920,7 +1925,7 @@ async fn backchannel_logout_revokes_refreshed_session_with_sid_logout_token() {
         let revoked: bool = row.get("revoked");
         assert!(revoked, "BCL must revoke the refreshed gateway session row");
         assert!(
-            anchors::read_live(&mut conn, app_id, anchor_id)
+            anchors::read_live(&mut conn, &AppId::parse(app_id).expect("fixed app id"), anchor_id)
                 .await
                 .expect("post-BCL anchor read")
                 .is_none(),
@@ -1950,7 +1955,7 @@ async fn backchannel_logout_revokes_refreshed_session_with_sid_logout_token() {
     let cleanup_client = connect_pg(&dsn).await;
     let pws = zeroship_core::auth::derive_pairwise(
         &state.pairwise_salt,
-        &user_id.to_string(),
+        user_id.as_str(),
         &format!("https://{BCL_REFRESH_APP_HOST}"),
     );
     let _ = cleanup_client
@@ -1965,8 +1970,8 @@ async fn backchannel_logout_revokes_refreshed_session_with_sid_logout_token() {
             &[&BCL_REFRESH_CLIENT_ID, &pws],
         )
         .await;
-    cleanup_identities(&dsn, user_id).await;
-    cleanup(&dsn, user_id).await;
+    cleanup_identities(&dsn, &user_id).await;
+    cleanup(&dsn, &user_id).await;
     let _ = cleanup_client
         .execute("DELETE FROM zeroship.apps WHERE id = $1", &[&app_id])
         .await;
@@ -1990,10 +1995,10 @@ async fn session_mint_persists_rotated_refresh_token_for_next_rotation() {
     };
     let op = Arc::new(MockOP::new(CLIENT_ID));
     op.enforce_refresh_reuse_detection();
-    seed_user(&dsn, op.user_id).await;
-    let user_id = op.user_id;
-    let relay_email = format!("{}@relay.zeroship.localhost", user_id.simple());
-    seed_relay_alias(&dsn, user_id, &relay_email).await;
+    seed_user(&dsn, &op.user_id).await;
+    let user_id = op.user_id.clone();
+    let relay_email = format!("{}@relay.zeroship.localhost", Uuid::new_v4().simple());
+    seed_relay_alias(&dsn, &user_id, &relay_email).await;
     let (base, _srv) = boot_mock_op(op.clone()).await;
     let db_cfg = zeroship_gateway::db::DbConfig::new(dsn.clone(), 8);
     let state = build_state(&base, Some(db_cfg.clone()));
@@ -2038,13 +2043,13 @@ async fn session_mint_persists_rotated_refresh_token_for_next_rotation() {
         let mut conn = pool.get().await.expect("conn");
         let anchor = anchors::read_live(
             &mut conn,
-            Uuid::parse_str(APP_UUID).expect("fixed app uuid"),
+            &AppId::parse(APP_ID).expect("fixed app id"),
             anchor_id,
         )
         .await
         .expect("read rotated anchor")
         .expect("anchor remains live after rotation");
-        let aad = format!("zs-anchor-refresh:{CLIENT_ID}:{user_id}").into_bytes();
+        let aad = format!("zs-anchor-refresh:{CLIENT_ID}:{}", user_id.as_str()).into_bytes();
         let plaintext = zeroship_core::crypto::decrypt(
             &state.anchor_enc_key,
             &aad,
@@ -2075,8 +2080,8 @@ async fn session_mint_persists_rotated_refresh_token_for_next_rotation() {
         "second rotation must present the first rotation's NEW refresh token"
     );
 
-    cleanup_identities(&dsn, user_id).await;
-    cleanup(&dsn, user_id).await;
+    cleanup_identities(&dsn, &user_id).await;
+    cleanup(&dsn, &user_id).await;
 }
 
 #[ntex::test]
@@ -2089,10 +2094,10 @@ async fn session_mint_invalid_grant_deletes_anchor_and_requires_login() {
         return;
     };
     let op = Arc::new(MockOP::new(CLIENT_ID));
-    seed_user(&dsn, op.user_id).await;
-    let user_id = op.user_id;
-    let relay_email = format!("{}@relay.zeroship.localhost", user_id.simple());
-    seed_relay_alias(&dsn, user_id, &relay_email).await;
+    seed_user(&dsn, &op.user_id).await;
+    let user_id = op.user_id.clone();
+    let relay_email = format!("{}@relay.zeroship.localhost", Uuid::new_v4().simple());
+    seed_relay_alias(&dsn, &user_id, &relay_email).await;
     let (base, _srv) = boot_mock_op(op.clone()).await;
     let db_cfg = zeroship_gateway::db::DbConfig::new(dsn.clone(), 8);
     let state = build_state(&base, Some(db_cfg.clone()));
@@ -2153,7 +2158,7 @@ async fn session_mint_invalid_grant_deletes_anchor_and_requires_login() {
         let mut conn = pool.get().await.expect("conn");
         let anchor = anchors::read_live(
             &mut conn,
-            Uuid::parse_str(APP_UUID).expect("fixed app uuid"),
+            &AppId::parse(APP_ID).expect("fixed app id"),
             anchor_id,
         )
         .await
@@ -2164,8 +2169,8 @@ async fn session_mint_invalid_grant_deletes_anchor_and_requires_login() {
         );
     }
 
-    cleanup_identities(&dsn, user_id).await;
-    cleanup(&dsn, user_id).await;
+    cleanup_identities(&dsn, &user_id).await;
+    cleanup(&dsn, &user_id).await;
 }
 
 #[ntex::test]
@@ -2179,10 +2184,10 @@ async fn session_steady_state_reads_gateway_session_without_op() {
         return;
     };
     let op = Arc::new(MockOP::new(CLIENT_ID));
-    seed_user(&dsn, op.user_id).await;
-    let user_id = op.user_id;
-    let relay_email = format!("{}@relay.zeroship.localhost", user_id.simple());
-    seed_relay_alias(&dsn, user_id, &relay_email).await;
+    seed_user(&dsn, &op.user_id).await;
+    let user_id = op.user_id.clone();
+    let relay_email = format!("{}@relay.zeroship.localhost", Uuid::new_v4().simple());
+    seed_relay_alias(&dsn, &user_id, &relay_email).await;
     let (base, _srv) = boot_mock_op(op.clone()).await;
     let db_cfg = zeroship_gateway::db::DbConfig::new(dsn.clone(), 8);
     let state = build_state(&base, Some(db_cfg.clone()));
@@ -2217,7 +2222,7 @@ async fn session_steady_state_reads_gateway_session_without_op() {
 
     let expected_pws = zeroship_core::auth::derive_pairwise(
         &state.pairwise_salt,
-        &user_id.to_string(),
+        user_id.as_str(),
         &format!("https://{APP_HOST}"),
     );
     assert_eq!(body["user"]["id"], expected_pws);
@@ -2234,8 +2239,8 @@ async fn session_steady_state_reads_gateway_session_without_op() {
         "a live-session read must skip OP entirely (no family rotation)"
     );
 
-    cleanup_identities(&dsn, user_id).await;
-    cleanup(&dsn, user_id).await;
+    cleanup_identities(&dsn, &user_id).await;
+    cleanup(&dsn, &user_id).await;
 }
 
 #[ntex::test]
@@ -2253,10 +2258,10 @@ async fn session_minted_cookie_verifies_locally_bound_to_route_client() {
         return;
     };
     let op = Arc::new(MockOP::new(CLIENT_ID));
-    seed_user(&dsn, op.user_id).await;
-    let user_id = op.user_id;
-    let relay_email = format!("{}@relay.zeroship.localhost", user_id.simple());
-    seed_relay_alias(&dsn, user_id, &relay_email).await;
+    seed_user(&dsn, &op.user_id).await;
+    let user_id = op.user_id.clone();
+    let relay_email = format!("{}@relay.zeroship.localhost", Uuid::new_v4().simple());
+    seed_relay_alias(&dsn, &user_id, &relay_email).await;
     let (base, _srv) = boot_mock_op(op.clone()).await;
     let db_cfg = zeroship_gateway::db::DbConfig::new(dsn.clone(), 8);
     let state = build_state(&base, Some(db_cfg.clone()));
@@ -2289,14 +2294,14 @@ async fn session_minted_cookie_verifies_locally_bound_to_route_client() {
         .expect("the POST /session-minted cookie MUST verify under the route client_id");
     let expected_pws = zeroship_core::auth::derive_pairwise(
         &state.pairwise_salt,
-        &user_id.to_string(),
+        user_id.as_str(),
         &format!("https://{APP_HOST}"),
     );
     assert_eq!(claims.app, CLIENT_ID, "cookie binds to the route client_id (app claim)");
     assert_eq!(claims.sub, expected_pws, "cookie sub is the per-app pws_");
     assert_eq!(claims.email, relay_email, "cookie carries the relay alias, never the real email");
     assert!(
-        !session_token.contains(&user_id.to_string()),
+        !session_token.contains(user_id.as_str()),
         "global UUID must not appear in the signed cookie"
     );
 
@@ -2308,8 +2313,8 @@ async fn session_minted_cookie_verifies_locally_bound_to_route_client() {
         "a cookie minted for CLIENT_ID MUST NOT verify for a different app client_id"
     );
 
-    cleanup_identities(&dsn, user_id).await;
-    cleanup(&dsn, user_id).await;
+    cleanup_identities(&dsn, &user_id).await;
+    cleanup(&dsn, &user_id).await;
 }
 
 /// Open a throwaway compio-postgres client for the F1 seeding/assertions.
@@ -2332,11 +2337,11 @@ async fn connect_pg(dsn: &str) -> compio_postgres::Client {
 ///
 /// Deliberately seeds NO `app_user_identities` row — that is the row the REAL
 /// mint must write itself; pre-seeding it is exactly what masked H1 (F1).
-async fn seed_app_and_client(dsn: &str, user_id: Uuid) -> String {
+async fn seed_app_and_client(dsn: &str, user_id: &UserId) -> String {
     seed_app_and_client_for(
         dsn,
         user_id,
-        APP_UUID,
+        APP_ID,
         APP_NAME,
         APP_HOST,
         CLIENT_ID,
@@ -2346,19 +2351,19 @@ async fn seed_app_and_client(dsn: &str, user_id: Uuid) -> String {
 
 async fn seed_app_and_client_for(
     dsn: &str,
-    user_id: Uuid,
+    user_id: &UserId,
     app_uuid: &str,
     app_name: &str,
     app_host: &str,
     client_id: &str,
 ) -> String {
     let client = connect_pg(dsn).await;
-    let email = format!("anchor-{}@zeroship.test", user_id.simple());
+    let email = format!("anchor-{}@zeroship.test", user_id.as_str());
     client
         .execute(
             "INSERT INTO zeroship.users (id, email, name, email_verified_at) \
              VALUES ($1, $2::citext, $3, NOW()) ON CONFLICT (id) DO NOTHING",
-            &[&user_id, &email, &"F1 Test"],
+            &[&user_id.as_str(), &email, &"F1 Test"],
         )
         .await
         .expect("seed user");
@@ -2383,8 +2388,8 @@ async fn seed_app_and_client_for(
              SELECT $1, $2, p.id, p.organization_id FROM zeroship.projects p WHERE p.id = $3 \
              ON CONFLICT (id) DO NOTHING",
             &[
-                &Uuid::parse_str(app_uuid).expect("app uuid"),
-                &format!("{app_name}-{}", user_id.simple()),
+                &app_uuid,
+                &format!("{app_name}-{}", user_id.as_str()),
                 &project_id
             ],
         )
@@ -2393,27 +2398,27 @@ async fn seed_app_and_client_for(
     email
 }
 
-async fn cleanup_f1(dsn: &str, user_id: Uuid) {
+async fn cleanup_f1(dsn: &str, user_id: &UserId) {
     let client = connect_pg(dsn).await;
     let _ = client
         .execute(
             "DELETE FROM zeroship.app_session_anchors WHERE global_user_id = $1",
-            &[&user_id],
+            &[&user_id.as_str()],
         )
         .await;
     let _ = client
         .execute(
             "DELETE FROM zeroship.gateway_sessions WHERE user_id = $1",
-            &[&user_id],
+            &[&user_id.as_str()],
         )
         .await;
     let _ = client
         .execute(
             "DELETE FROM zeroship.app_user_identities WHERE global_user_id = $1",
-            &[&user_id],
+            &[&user_id.as_str()],
         )
         .await;
-    let email = format!("anchor-{}@zeroship.test", user_id.simple());
+    let email = format!("anchor-{}@zeroship.test", user_id.as_str());
     let _ = client
         .execute(
             "DELETE FROM zeroship.magic_links WHERE email = $1::citext",
@@ -2421,7 +2426,7 @@ async fn cleanup_f1(dsn: &str, user_id: Uuid) {
         )
         .await;
     let _ = client
-        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user_id])
+        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user_id.as_str()])
         .await;
 }
 
@@ -2461,8 +2466,8 @@ async fn cookie_mint_writes_identity_so_reset_evicts_cookie_session() {
     };
 
     let op = Arc::new(MockOP::new(CLIENT_ID));
-    let user_id = op.user_id;
-    let email = seed_app_and_client(&dsn, user_id).await;
+    let user_id = op.user_id.clone();
+    let email = seed_app_and_client(&dsn, &user_id).await;
 
     let (base, _srv) = boot_mock_op(op.clone()).await;
     let db_cfg = zeroship_gateway::db::DbConfig::new(dsn.clone(), 8);
@@ -2473,7 +2478,7 @@ async fn cookie_mint_writes_identity_so_reset_evicts_cookie_session() {
     // the reset teardown must write a family marker for.
     let expected_pws = zeroship_core::auth::derive_pairwise(
         &state.pairwise_salt,
-        &user_id.to_string(),
+        user_id.as_str(),
         &format!("https://{APP_HOST}"),
     );
 
@@ -2504,7 +2509,7 @@ async fn cookie_mint_writes_identity_so_reset_evicts_cookie_session() {
         .expect("pool");
         let mut conn = pool.get().await.expect("conn");
         let persisted = zeroship_gateway::identities::lookup_pairwise_sub(
-            &mut conn, CLIENT_ID, user_id,
+            &mut conn, CLIENT_ID, &user_id,
         )
         .await
         .expect("identity lookup");
@@ -2552,7 +2557,7 @@ async fn cookie_mint_writes_identity_so_reset_evicts_cookie_session() {
          cookie-only victim's live __Host-zeroship_app_session is rejected (F1)"
     );
 
-    cleanup_f1(&dsn, user_id).await;
+    cleanup_f1(&dsn, &user_id).await;
 }
 
 /// FAITHFUL REGRESSION for security finding 0.0 — the F1 MISSED SIBLING: the
@@ -2594,8 +2599,8 @@ async fn interactive_cookie_mint_writes_identity_so_reset_evicts_session() {
     };
 
     let op = Arc::new(MockOP::new(CLIENT_ID));
-    let user_id = op.user_id;
-    let email = seed_app_and_client(&dsn, user_id).await;
+    let user_id = op.user_id.clone();
+    let email = seed_app_and_client(&dsn, &user_id).await;
 
     let (base, _srv) = boot_mock_op(op.clone()).await;
     let db_cfg = zeroship_gateway::db::DbConfig::new(dsn.clone(), 8);
@@ -2606,7 +2611,7 @@ async fn interactive_cookie_mint_writes_identity_so_reset_evicts_session() {
     // value the reset teardown must write a family marker for, and the value the
     // production cookie arm keys `is_family_revoked_since` on.
     let expected_pws =
-        zeroship_core::auth::derive_pairwise(&state.pairwise_salt, &user_id.to_string(), &sector);
+        zeroship_core::auth::derive_pairwise(&state.pairwise_salt, user_id.as_str(), &sector);
 
     // The cookie's `iat` — captured BEFORE the mint so the post-reset
     // `is_family_revoked_since(client_id, pws_, iat)` reflects "a token minted
@@ -2620,7 +2625,7 @@ async fn interactive_cookie_mint_writes_identity_so_reset_evicts_session() {
         &db_cfg,
         CLIENT_ID,
         Some(sector.as_str()),
-        user_id,
+        &user_id,
         cookie_iat,
         Some("Interactive User"),
         None,
@@ -2646,7 +2651,7 @@ async fn interactive_cookie_mint_writes_identity_so_reset_evicts_session() {
         .expect("pool");
         let mut conn = pool.get().await.expect("conn");
         let persisted =
-            zeroship_gateway::identities::lookup_pairwise_sub(&mut conn, CLIENT_ID, user_id)
+            zeroship_gateway::identities::lookup_pairwise_sub(&mut conn, CLIENT_ID, &user_id)
                 .await
                 .expect("identity lookup");
         assert_eq!(
@@ -2691,7 +2696,7 @@ async fn interactive_cookie_mint_writes_identity_so_reset_evicts_session() {
          persist app_user_identities so the reset teardown can revoke its family (0.0)"
     );
 
-    cleanup_f1(&dsn, user_id).await;
+    cleanup_f1(&dsn, &user_id).await;
 }
 
 /// FAITHFUL REGRESSION for security finding F4 (`?mint=1` rotation fails OPEN
@@ -2734,10 +2739,10 @@ async fn mint_racing_concurrent_reset_fails_closed_no_fresh_cookie() {
     };
 
     let op = Arc::new(MockOP::new(CLIENT_ID));
-    let user_id = op.user_id;
-    let email = seed_app_and_client(&dsn, user_id).await;
-    let relay_email = format!("{}@relay.zeroship.localhost", user_id.simple());
-    seed_relay_alias(&dsn, user_id, &relay_email).await;
+    let user_id = op.user_id.clone();
+    let email = seed_app_and_client(&dsn, &user_id).await;
+    let relay_email = format!("{}@relay.zeroship.localhost", Uuid::new_v4().simple());
+    seed_relay_alias(&dsn, &user_id, &relay_email).await;
 
     let (base, _srv) = boot_mock_op(op.clone()).await;
     let db_cfg = zeroship_gateway::db::DbConfig::new(dsn.clone(), 8);
@@ -2818,7 +2823,7 @@ async fn mint_racing_concurrent_reset_fails_closed_no_fresh_cookie() {
         .query_one(
             "SELECT COUNT(*) FROM zeroship.app_session_anchors \
              WHERE global_user_id = $1 AND revoked_at IS NULL",
-            &[&user_id],
+            &[&user_id.as_str()],
         )
         .await
         .expect("count live anchors")
@@ -2829,7 +2834,7 @@ async fn mint_racing_concurrent_reset_fails_closed_no_fresh_cookie() {
     );
     let expected_pws = zeroship_core::auth::derive_pairwise(
         &state.pairwise_salt,
-        &user_id.to_string(),
+        user_id.as_str(),
         &format!("https://{APP_HOST}"),
     );
     let marker_count: i64 = assert_client
@@ -2843,5 +2848,5 @@ async fn mint_racing_concurrent_reset_fails_closed_no_fresh_cookie() {
         .get(0);
     assert_eq!(marker_count, 1, "the reset must have written the family marker");
 
-    cleanup_f1(&dsn, user_id).await;
+    cleanup_f1(&dsn, &user_id).await;
 }

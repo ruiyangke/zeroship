@@ -27,6 +27,8 @@ use ed25519_dalek::SigningKey;
 use ntex::web::{self, test};
 use uuid::Uuid;
 
+use zeroship_core::app_id::AppId;
+use zeroship_core::user_id::UserId;
 use zeroship_gateway::{
     anchors,
     blob_cache::{BlobCache, DiskBlobCache},
@@ -40,14 +42,19 @@ use zeroship_gateway::{
 
 const APP_HOST: &str = "myapp.zeroship.ai";
 const APP_NAME: &str = "myapp";
-// The app's stable UUID — the CANONICAL key for gateway_sessions/anchors (NOT
-// the subdomain slug). Anchors/sessions are keyed by this, matching /token,
-// /session, /signout, and the live dispatch arm (RouteCtx.app_id).
-const APP_UUID: &str = "0192b3c4-d5e6-7f80-9a1b-2c3d4e5f6071";
 const CLIENT_ID: &str = "oac_myapp";
 const GATEWAY_ISS: &str = "https://api.zeroship.ai";
 const OP_ISS: &str = "https://auth.zeroship.ai";
 const TEST_BROKER_MASTER: &[u8] = b"gateway-browser-test-broker-master-32-bytes";
+
+/// A fixed, deterministic app id — the CANONICAL key for
+/// gateway_sessions/anchors (NOT the subdomain slug). `build_route_map`
+/// keys the in-memory route table on this, and the DB-gated signout test
+/// inserts its live anchor/session rows under the same id, so both must
+/// agree on exactly this value.
+fn app_id() -> AppId {
+    AppId::parse(&format!("app_{}", "0".repeat(22))).expect("valid app id literal")
+}
 
 // ─── BlobStore stub ──────────────────────────────────────────────────────
 
@@ -95,7 +102,7 @@ impl zeroship_bundle::BlobStore for StubBlobStore {
     }
     async fn put_manifest(
         &self,
-        _a: &Uuid,
+        _a: &AppId,
         _d: &str,
         _j: &[u8],
     ) -> Result<(), zeroship_bundle::BlobError> {
@@ -103,21 +110,21 @@ impl zeroship_bundle::BlobStore for StubBlobStore {
     }
     async fn get_manifest(
         &self,
-        _a: &Uuid,
+        _a: &AppId,
         _d: &str,
     ) -> Result<bytes::Bytes, zeroship_bundle::BlobError> {
         Err(zeroship_bundle::BlobError::NotFound("unused".into()))
     }
     async fn delete_manifest(
         &self,
-        _a: &Uuid,
+        _a: &AppId,
         _d: &str,
     ) -> Result<bool, zeroship_bundle::BlobError> {
         Ok(false)
     }
     async fn delete_app_manifests(
         &self,
-        _a: &Uuid,
+        _a: &AppId,
     ) -> Result<(), zeroship_bundle::BlobError> {
         Ok(())
     }
@@ -230,7 +237,7 @@ fn build_route_map(provisioned: bool) -> zeroship_core::types::RouteMap {
     use zeroship_core::types::RouteEntry;
     let mut m = std::collections::HashMap::new();
     m.insert(
-        Uuid::parse_str(APP_UUID).expect("valid APP_UUID"),
+        app_id(),
         RouteEntry {
             name: APP_NAME.into(),
             plan_id: "free".into(),
@@ -573,13 +580,14 @@ async fn signout_local_revokes_family_marker_deletes_anchor_and_hits_op_revoke()
 
     // Seed the GLOBAL user first — app_session_anchors.global_user_id has a
     // FK to zeroship.users(id) (ON DELETE CASCADE).
-    let global_user_id = Uuid::new_v4();
-    seed_user(&dsn, global_user_id).await;
+    let global_user_id = UserId::mint();
+    seed_user(&dsn, &global_user_id).await;
 
     // Seed an anchor row with an encrypted refresh family (encrypted with
     // the SAME AAD the gateway uses, so signout can decrypt + OP-revoke).
     let refresh_plain = "rt_seeded_family_secret";
-    let aad = format!("zs-anchor-refresh:{CLIENT_ID}:{global_user_id}").into_bytes();
+    let aad =
+        format!("zs-anchor-refresh:{CLIENT_ID}:{}", global_user_id.as_str()).into_bytes();
     let refresh_enc =
         zeroship_core::crypto::encrypt(&state.anchor_enc_key, &aad, refresh_plain.as_bytes())
             .expect("encrypt");
@@ -590,9 +598,9 @@ async fn signout_local_revokes_family_marker_deletes_anchor_and_hits_op_revoke()
         let a = anchors::create(
             &mut conn,
             &anchors::NewAnchor {
-                app_id: Uuid::parse_str(APP_UUID).expect("valid APP_UUID"),
+                app_id: &app_id(),
                 client_id: CLIENT_ID,
-                global_user_id,
+                global_user_id: &global_user_id,
                 refresh_token_enc: &refresh_enc,
                 refresh_family_id: "rfam_test",
                 granted_scopes: &["openid".to_string()],
@@ -606,7 +614,7 @@ async fn signout_local_revokes_family_marker_deletes_anchor_and_hits_op_revoke()
     // The pws_ subject the family marker should be keyed on.
     let pws_sub = zeroship_core::auth::derive_pairwise(
         &state.pairwise_salt,
-        &global_user_id.to_string(),
+        global_user_id.as_str(),
         &format!("https://{APP_HOST}"),
     );
 
@@ -639,7 +647,7 @@ async fn signout_local_revokes_family_marker_deletes_anchor_and_hits_op_revoke()
         let pool = zeroship_gateway::db::checkout(&db).await.expect("pool");
         let mut conn = pool.get().await.expect("conn");
         let still =
-            anchors::read_live(&mut conn, Uuid::parse_str(APP_UUID).expect("valid APP_UUID"), anchor_id)
+            anchors::read_live(&mut conn, &app_id(), anchor_id)
                 .await
                 .expect("read");
         assert!(still.is_none(), "anchor row must be deleted after signout");
@@ -676,13 +684,13 @@ async fn signout_local_revokes_family_marker_deletes_anchor_and_hits_op_revoke()
         "signout must best-effort revoke the family at OP exactly once"
     );
     drop(mock);
-    cleanup_user(&dsn, global_user_id).await;
+    cleanup_user(&dsn, &global_user_id).await;
 }
 
 // ─── helpers ─────────────────────────────────────────────────────────────
 
 /// Seed the GLOBAL user row the anchor FK requires (`zeroship.users(id)`).
-async fn seed_user(dsn: &str, user_id: Uuid) {
+async fn seed_user(dsn: &str, user_id: &UserId) {
     let (client, conn) = compio_postgres::connect(dsn, compio_postgres::NoTls)
         .await
         .expect("connect");
@@ -711,26 +719,26 @@ async fn seed_user(dsn: &str, user_id: Uuid) {
              SELECT $1, $2, p.id, p.organization_id FROM zeroship.projects p WHERE p.id = $3 \
              ON CONFLICT (id) DO NOTHING",
             &[
-                &Uuid::parse_str(APP_UUID).expect("valid APP_UUID"),
+                &app_id().as_str(),
                 &format!("browser-auth-{APP_NAME}"),
                 &project_id
             ],
         )
         .await
         .expect("seed app");
-    let email = format!("signout-{}@zeroship.test", user_id.simple());
+    let email = format!("signout-{}@zeroship.test", Uuid::new_v4().simple());
     client
         .execute(
             "INSERT INTO zeroship.users (id, email, name, email_verified_at) \
              VALUES ($1, $2::citext, $3, NOW()) ON CONFLICT (id) DO NOTHING",
-            &[&user_id, &email, &"Signout Test"],
+            &[&user_id.as_str(), &email, &"Signout Test"],
         )
         .await
         .expect("seed user");
 }
 
 /// Cascade-delete the seeded user (anchors cascade via the FK).
-async fn cleanup_user(dsn: &str, user_id: Uuid) {
+async fn cleanup_user(dsn: &str, user_id: &UserId) {
     let (client, conn) = compio_postgres::connect(dsn, compio_postgres::NoTls)
         .await
         .expect("connect");
@@ -741,11 +749,11 @@ async fn cleanup_user(dsn: &str, user_id: Uuid) {
     let _ = client
         .execute(
             "DELETE FROM zeroship.app_session_anchors WHERE global_user_id = $1",
-            &[&user_id],
+            &[&user_id.as_str()],
         )
         .await;
     let _ = client
-        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user_id])
+        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user_id.as_str()])
         .await;
 }
 

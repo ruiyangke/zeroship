@@ -327,7 +327,7 @@ async fn serve_static_streaming(
                 STREAM_CHUNK_BYTES,
                 Some(StreamEgressMeter::new(
                     Arc::clone(&state.meter),
-                    crate::sync::app_id_uuid(app_id),
+                    app_id.clone(),
                 )),
             );
             let mut resp = HttpResponse::PartialContent();
@@ -360,7 +360,7 @@ async fn serve_static_streaming(
         STREAM_CHUNK_BYTES,
         Some(StreamEgressMeter::new(
             Arc::clone(&state.meter),
-            crate::sync::app_id_uuid(app_id),
+            app_id.clone(),
         )),
     );
     let status = hit.status.unwrap_or(200);
@@ -624,22 +624,14 @@ mod tests {
     use crate::GateState;
     use zeroship_bundle::{BlobError, BlobStore, PutOutcome};
 
-    /// The typed app id for an app the control plane stores as `stored` -
-    /// exactly what `sync::update` mints, so these tests address the static
-    /// arm the way the router does. The meter subject stays the uuid, which is
-    /// why the two spellings appear side by side below.
-    fn typed_app_id(stored: &uuid::Uuid) -> AppId {
-        crate::sync::route_table_app_id(stored)
-    }
-
     fn usage_value(
         events: &[zeroship_core::usage_event::UsageEvent],
-        app_id: uuid::Uuid,
+        app_id: &AppId,
         meter: &str,
     ) -> Option<u64> {
         events
             .iter()
-            .find(|event| event.subject.app == Some(app_id) && event.meter == meter)
+            .find(|event| event.subject.app.as_ref() == Some(app_id) && event.meter == meter)
             .map(|event| event.value)
     }
 
@@ -785,7 +777,7 @@ mod tests {
         }
         async fn put_manifest(
             &self,
-            _app_id: &uuid::Uuid,
+            _app_id: &AppId,
             _deploy_hash: &str,
             _json: &[u8],
         ) -> Result<(), BlobError> {
@@ -793,19 +785,19 @@ mod tests {
         }
         async fn get_manifest(
             &self,
-            _app_id: &uuid::Uuid,
+            _app_id: &AppId,
             _deploy_hash: &str,
         ) -> Result<bytes::Bytes, BlobError> {
             unimplemented!("not used by the gateway")
         }
         async fn delete_manifest(
             &self,
-            _app_id: &uuid::Uuid,
+            _app_id: &AppId,
             _deploy_hash: &str,
         ) -> Result<bool, BlobError> {
             unimplemented!("not used by the gateway")
         }
-        async fn delete_app_manifests(&self, _app_id: &uuid::Uuid) -> Result<(), BlobError> {
+        async fn delete_app_manifests(&self, _app_id: &AppId) -> Result<(), BlobError> {
             unimplemented!("not used by the gateway")
         }
     }
@@ -1193,7 +1185,7 @@ mod tests {
         let state = make_state(mock.store(), disk);
         let hit = static_hit(&hash, payload.len() as u64);
         let req = bare_request();
-        let mut resp = serve_static_hit(&state, &req, hit, &typed_app_id(&uuid::Uuid::new_v4()), std::time::Instant::now()).await;
+        let mut resp = serve_static_hit(&state, &req, hit, &AppId::mint(), std::time::Instant::now()).await;
 
         assert_eq!(resp.status(), ntex::http::StatusCode::OK);
         let body = resp.take_body();
@@ -1227,7 +1219,7 @@ mod tests {
         let state = make_state(mock.store(), disk);
         let hit = static_hit(&hash, payload.len() as u64);
         let req = bare_request();
-        let mut resp = serve_static_hit(&state, &req, hit, &typed_app_id(&uuid::Uuid::new_v4()), std::time::Instant::now()).await;
+        let mut resp = serve_static_hit(&state, &req, hit, &AppId::mint(), std::time::Instant::now()).await;
 
         assert_eq!(resp.status(), ntex::http::StatusCode::OK);
         let body = resp.take_body();
@@ -1272,7 +1264,7 @@ mod tests {
         let state = make_state(mock.store(), disk);
         let hit = static_hit(&hash, payload.len() as u64);
         let req = bare_request();
-        let mut resp = serve_static_hit(&state, &req, hit, &typed_app_id(&uuid::Uuid::new_v4()), std::time::Instant::now()).await;
+        let mut resp = serve_static_hit(&state, &req, hit, &AppId::mint(), std::time::Instant::now()).await;
 
         assert_eq!(resp.status(), ntex::http::StatusCode::OK);
         let body = resp.take_body();
@@ -1339,11 +1331,11 @@ mod tests {
 
         let state = make_state(mock.store(), disk);
         let meter = Arc::clone(&state.meter);
-        let app_id = uuid::Uuid::new_v4();
+        let app_id = AppId::mint();
         let hit = static_hit(&hash, payload.len() as u64);
         let req = bare_request();
         let mut resp =
-            serve_static_hit(&state, &req, hit, &typed_app_id(&app_id), std::time::Instant::now()).await;
+            serve_static_hit(&state, &req, hit, &app_id, std::time::Instant::now()).await;
         assert_eq!(resp.status(), ntex::http::StatusCode::OK);
 
         // Consume ~1.5 MiB, then DROP the body → client disconnect.
@@ -1359,10 +1351,10 @@ mod tests {
         }
 
         let events = meter.drain();
-        let billed = usage_value(&events, app_id, "gateway_egress_bytes")
+        let billed = usage_value(&events, &app_id, "gateway_egress_bytes")
             .expect("gateway_egress_bytes recorded by the drain");
         assert_eq!(
-            usage_value(&events, app_id, "egress_bytes"),
+            usage_value(&events, &app_id, "egress_bytes"),
             None,
             "the gateway never touches egress_bytes",
         );
@@ -1399,11 +1391,11 @@ mod tests {
 
         let state = make_state(mock.store(), disk);
         let meter = Arc::clone(&state.meter);
-        let app_id = uuid::Uuid::new_v4();
+        let app_id = AppId::mint();
         let hit = static_hit(&hash, payload.len() as u64);
         let req = bare_request();
         let mut resp =
-            serve_static_hit(&state, &req, hit, &typed_app_id(&app_id), std::time::Instant::now()).await;
+            serve_static_hit(&state, &req, hit, &app_id, std::time::Instant::now()).await;
         assert_eq!(resp.status(), ntex::http::StatusCode::OK);
 
         let got = collect_body(resp.take_body()).await;
@@ -1414,12 +1406,12 @@ mod tests {
 
         let events = meter.drain();
         assert_eq!(
-            usage_value(&events, app_id, "gateway_egress_bytes"),
+            usage_value(&events, &app_id, "gateway_egress_bytes"),
             Some(size as u64),
             "full delivery bills the whole asset size across the drain's deltas",
         );
         assert_eq!(
-            usage_value(&events, app_id, "egress_bytes"),
+            usage_value(&events, &app_id, "egress_bytes"),
             None,
             "the gateway never touches egress_bytes",
         );
@@ -1434,7 +1426,7 @@ mod tests {
         let state = make_state(mock.store(), disk);
         let hit = static_hit(&hex_hash(0x77), STREAM_THRESHOLD_BYTES + 1);
         let req = bare_request();
-        let resp = serve_static_hit(&state, &req, hit, &typed_app_id(&uuid::Uuid::new_v4()), std::time::Instant::now()).await;
+        let resp = serve_static_hit(&state, &req, hit, &AppId::mint(), std::time::Instant::now()).await;
         assert_eq!(resp.status(), ntex::http::StatusCode::NOT_FOUND);
 
         std::fs::remove_dir_all(&root).ok();
@@ -1488,7 +1480,7 @@ mod tests {
         let req = ntex::web::test::TestRequest::default()
             .header("if-none-match", format!("\"{}\"", hash))
             .to_http_request();
-        let resp = serve_static_hit(&state, &req, hit, &typed_app_id(&uuid::Uuid::new_v4()), std::time::Instant::now()).await;
+        let resp = serve_static_hit(&state, &req, hit, &AppId::mint(), std::time::Instant::now()).await;
 
         assert_eq!(resp.status(), ntex::http::StatusCode::NOT_MODIFIED);
         // ETag, Cache-Control, Accept-Ranges all present on the 304.
@@ -1512,7 +1504,7 @@ mod tests {
         let req = ntex::web::test::TestRequest::default()
             .header("if-none-match", "*")
             .to_http_request();
-        let resp = serve_static_hit(&state, &req, hit, &typed_app_id(&uuid::Uuid::new_v4()), std::time::Instant::now()).await;
+        let resp = serve_static_hit(&state, &req, hit, &AppId::mint(), std::time::Instant::now()).await;
         assert_eq!(resp.status(), ntex::http::StatusCode::NOT_MODIFIED);
         assert_eq!(mock.calls_for(&hash), 0);
 
@@ -1531,7 +1523,7 @@ mod tests {
         let req = ntex::web::test::TestRequest::default()
             .header("if-none-match", format!("\"abc\", \"{}\", \"def\"", hash))
             .to_http_request();
-        let resp = serve_static_hit(&state, &req, hit, &typed_app_id(&uuid::Uuid::new_v4()), std::time::Instant::now()).await;
+        let resp = serve_static_hit(&state, &req, hit, &AppId::mint(), std::time::Instant::now()).await;
         assert_eq!(resp.status(), ntex::http::StatusCode::NOT_MODIFIED);
         assert_eq!(mock.calls_for(&hash), 0);
 
@@ -1553,7 +1545,7 @@ mod tests {
         let req = ntex::web::test::TestRequest::default()
             .header("if-none-match", format!("W/\"{}\"", hash))
             .to_http_request();
-        let resp = serve_static_hit(&state, &req, hit, &typed_app_id(&uuid::Uuid::new_v4()), std::time::Instant::now()).await;
+        let resp = serve_static_hit(&state, &req, hit, &AppId::mint(), std::time::Instant::now()).await;
         assert_eq!(resp.status(), ntex::http::StatusCode::OK);
         assert_eq!(mock.calls_for(&hash), 1, "weak match must fetch the blob");
 
@@ -1575,7 +1567,7 @@ mod tests {
         let req = ntex::web::test::TestRequest::default()
             .header("range", "bytes=0-9")
             .to_http_request();
-        let mut resp = serve_static_hit(&state, &req, hit, &typed_app_id(&uuid::Uuid::new_v4()), std::time::Instant::now()).await;
+        let mut resp = serve_static_hit(&state, &req, hit, &AppId::mint(), std::time::Instant::now()).await;
         assert_eq!(resp.status(), ntex::http::StatusCode::PARTIAL_CONTENT);
         assert_eq!(hdr(&resp, "content-range").as_deref(), Some("bytes 0-9/100"));
         assert_eq!(hdr(&resp, "accept-ranges").as_deref(), Some("bytes"));
@@ -1599,7 +1591,7 @@ mod tests {
         let req = ntex::web::test::TestRequest::default()
             .header("range", "bytes=10-")
             .to_http_request();
-        let mut resp = serve_static_hit(&state, &req, hit, &typed_app_id(&uuid::Uuid::new_v4()), std::time::Instant::now()).await;
+        let mut resp = serve_static_hit(&state, &req, hit, &AppId::mint(), std::time::Instant::now()).await;
         assert_eq!(resp.status(), ntex::http::StatusCode::PARTIAL_CONTENT);
         assert_eq!(hdr(&resp, "content-range").as_deref(), Some("bytes 10-99/100"));
         let got = collect_body(resp.take_body()).await;
@@ -1621,7 +1613,7 @@ mod tests {
         let req = ntex::web::test::TestRequest::default()
             .header("range", "bytes=-20")
             .to_http_request();
-        let mut resp = serve_static_hit(&state, &req, hit, &typed_app_id(&uuid::Uuid::new_v4()), std::time::Instant::now()).await;
+        let mut resp = serve_static_hit(&state, &req, hit, &AppId::mint(), std::time::Instant::now()).await;
         assert_eq!(resp.status(), ntex::http::StatusCode::PARTIAL_CONTENT);
         assert_eq!(hdr(&resp, "content-range").as_deref(), Some("bytes 80-99/100"));
         let got = collect_body(resp.take_body()).await;
@@ -1643,7 +1635,7 @@ mod tests {
         let req = ntex::web::test::TestRequest::default()
             .header("range", "bytes=200-300")
             .to_http_request();
-        let resp = serve_static_hit(&state, &req, hit, &typed_app_id(&uuid::Uuid::new_v4()), std::time::Instant::now()).await;
+        let resp = serve_static_hit(&state, &req, hit, &AppId::mint(), std::time::Instant::now()).await;
         assert_eq!(resp.status(), ntex::http::StatusCode::RANGE_NOT_SATISFIABLE);
         assert_eq!(hdr(&resp, "content-range").as_deref(), Some("bytes */100"));
 
@@ -1663,7 +1655,7 @@ mod tests {
         let req = ntex::web::test::TestRequest::default()
             .header("range", "bytes=0-10,20-30")
             .to_http_request();
-        let mut resp = serve_static_hit(&state, &req, hit, &typed_app_id(&uuid::Uuid::new_v4()), std::time::Instant::now()).await;
+        let mut resp = serve_static_hit(&state, &req, hit, &AppId::mint(), std::time::Instant::now()).await;
         assert_eq!(resp.status(), ntex::http::StatusCode::OK, "multi-range degrades to 200");
         let got = collect_body(resp.take_body()).await;
         assert_eq!(got, payload, "full body served on multi-range");
@@ -1688,7 +1680,7 @@ mod tests {
         let req = ntex::web::test::TestRequest::default()
             .header("range", "bytes=100-199")
             .to_http_request();
-        let mut resp = serve_static_hit(&state, &req, hit, &typed_app_id(&uuid::Uuid::new_v4()), std::time::Instant::now()).await;
+        let mut resp = serve_static_hit(&state, &req, hit, &AppId::mint(), std::time::Instant::now()).await;
         assert_eq!(resp.status(), ntex::http::StatusCode::PARTIAL_CONTENT);
         assert_eq!(
             hdr(&resp, "content-range"),
@@ -1763,7 +1755,7 @@ mod tests {
         // 200 OK
         let hit = hex_static_hit(0x40, payload.len() as u64);
         let req = bare_request();
-        let resp200 = serve_static_hit(&state, &req, hit, &typed_app_id(&uuid::Uuid::new_v4()), std::time::Instant::now()).await;
+        let resp200 = serve_static_hit(&state, &req, hit, &AppId::mint(), std::time::Instant::now()).await;
         assert_eq!(resp200.status(), ntex::http::StatusCode::OK);
         assert_eq!(hdr(&resp200, "accept-ranges").as_deref(), Some("bytes"));
 
@@ -1772,7 +1764,7 @@ mod tests {
         let req = ntex::web::test::TestRequest::default()
             .header("range", "bytes=0-9")
             .to_http_request();
-        let resp206 = serve_static_hit(&state, &req, hit, &typed_app_id(&uuid::Uuid::new_v4()), std::time::Instant::now()).await;
+        let resp206 = serve_static_hit(&state, &req, hit, &AppId::mint(), std::time::Instant::now()).await;
         assert_eq!(resp206.status(), ntex::http::StatusCode::PARTIAL_CONTENT);
         assert_eq!(hdr(&resp206, "accept-ranges").as_deref(), Some("bytes"));
 
@@ -1781,7 +1773,7 @@ mod tests {
         let req = ntex::web::test::TestRequest::default()
             .header("if-none-match", format!("\"{}\"", hash))
             .to_http_request();
-        let resp304 = serve_static_hit(&state, &req, hit, &typed_app_id(&uuid::Uuid::new_v4()), std::time::Instant::now()).await;
+        let resp304 = serve_static_hit(&state, &req, hit, &AppId::mint(), std::time::Instant::now()).await;
         assert_eq!(resp304.status(), ntex::http::StatusCode::NOT_MODIFIED);
         assert_eq!(hdr(&resp304, "accept-ranges").as_deref(), Some("bytes"));
 
@@ -1802,7 +1794,7 @@ mod tests {
         let hit = hex_static_hit(0x50, payload.len() as u64);
 
         let req = bare_request();
-        let resp = serve_static_hit(&state, &req, hit, &typed_app_id(&uuid::Uuid::new_v4()), std::time::Instant::now()).await;
+        let resp = serve_static_hit(&state, &req, hit, &AppId::mint(), std::time::Instant::now()).await;
         assert_eq!(resp.status(), ntex::http::StatusCode::OK);
         assert_eq!(hdr(&resp, "accept-ranges").as_deref(), Some("bytes"));
 
@@ -1861,7 +1853,7 @@ mod tests {
         let req = ntex::web::test::TestRequest::default()
             .header("accept-encoding", "br, gzip")
             .to_http_request();
-        let mut resp = serve_static_hit(&state, &req, hit, &typed_app_id(&uuid::Uuid::new_v4()), std::time::Instant::now()).await;
+        let mut resp = serve_static_hit(&state, &req, hit, &AppId::mint(), std::time::Instant::now()).await;
         assert_eq!(resp.status(), ntex::http::StatusCode::OK);
         assert_eq!(hdr(&resp, "content-encoding").as_deref(), Some("br"));
         assert!(
@@ -1902,7 +1894,7 @@ mod tests {
         let req = ntex::web::test::TestRequest::default()
             .header("accept-encoding", "identity")
             .to_http_request();
-        let mut resp = serve_static_hit(&state, &req, hit, &typed_app_id(&uuid::Uuid::new_v4()), std::time::Instant::now()).await;
+        let mut resp = serve_static_hit(&state, &req, hit, &AppId::mint(), std::time::Instant::now()).await;
         assert_eq!(resp.status(), ntex::http::StatusCode::OK);
         assert!(
             resp.headers().get("content-encoding").is_none(),
@@ -1935,7 +1927,7 @@ mod tests {
 
         // No Accept-Encoding header → identity.
         let req = bare_request();
-        let mut resp = serve_static_hit(&state, &req, hit, &typed_app_id(&uuid::Uuid::new_v4()), std::time::Instant::now()).await;
+        let mut resp = serve_static_hit(&state, &req, hit, &AppId::mint(), std::time::Instant::now()).await;
         assert_eq!(resp.status(), ntex::http::StatusCode::OK);
         assert!(resp.headers().get("content-encoding").is_none());
         let got = collect_body(resp.take_body()).await;
@@ -1966,7 +1958,7 @@ mod tests {
         let req = ntex::web::test::TestRequest::default()
             .header("accept-encoding", "br")
             .to_http_request();
-        let resp = serve_static_hit(&state, &req, hit, &typed_app_id(&uuid::Uuid::new_v4()), std::time::Instant::now()).await;
+        let resp = serve_static_hit(&state, &req, hit, &AppId::mint(), std::time::Instant::now()).await;
         let vary = hdr(&resp, "vary").expect("vary header set when variant chosen");
         assert!(vary.contains("Accept-Encoding"), "Vary contains Accept-Encoding: {vary}");
 
@@ -1995,7 +1987,7 @@ mod tests {
             .header("accept-encoding", "br")
             .header("if-none-match", format!("\"{}\"", br_hash))
             .to_http_request();
-        let resp = serve_static_hit(&state, &req, hit, &typed_app_id(&uuid::Uuid::new_v4()), std::time::Instant::now()).await;
+        let resp = serve_static_hit(&state, &req, hit, &AppId::mint(), std::time::Instant::now()).await;
         assert_eq!(resp.status(), ntex::http::StatusCode::NOT_MODIFIED);
         // 304 must carry Vary so caches don't conflate variants.
         let vary = hdr(&resp, "vary").expect("vary on 304 with variant");
@@ -2033,7 +2025,7 @@ mod tests {
             .header("accept-encoding", "br")
             .header("range", "bytes=0-9")
             .to_http_request();
-        let resp = serve_static_hit(&state, &req, hit, &typed_app_id(&uuid::Uuid::new_v4()), std::time::Instant::now()).await;
+        let resp = serve_static_hit(&state, &req, hit, &AppId::mint(), std::time::Instant::now()).await;
         assert_eq!(resp.status(), ntex::http::StatusCode::PARTIAL_CONTENT);
         assert_eq!(
             hdr(&resp, "content-range").as_deref(),
