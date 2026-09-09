@@ -281,7 +281,7 @@ mod tests {
     /// the uuid this crate used as its app-id fixture while the id was a uuid,
     /// so a reader comparing this file against its history is looking at one
     /// app throughout and not two.
-    const FIXTURE: &str = "app_02xfbOcLMnlN2aR6iBlNi0";
+    const FIXTURE: &str = "app_03cgepu94hyemwpcipafo7264";
 
     fn fixture() -> AppId {
         AppId::parse(FIXTURE).expect("the fixture is a canonical app id")
@@ -305,7 +305,7 @@ mod tests {
 
         assert_eq!(
             role_name(&app).expect("the fixture role name fits"),
-            "app_app_02xfbOcLMnlN2aR6iBlNi0_role"
+            "app_app_03cgepu94hyemwpcipafo7264_role"
         );
         assert_eq!(
             role_name(&app).expect("the fixture role name fits"),
@@ -315,7 +315,7 @@ mod tests {
 
         assert_eq!(
             publication_name(&app),
-            "__zs_pub_f8b1e007c4a2c908f4b15e2dcb6c"
+            "__zs_pub_2b19d2d9cc47ffdd41163308916b"
         );
         assert_eq!(
             publication_name(&app),
@@ -332,11 +332,11 @@ mod tests {
         // differential against it is in that crate, next to the function.
         assert_eq!(
             worker_slot_name(&app, "worker-a").expect("the fixture slot name composes"),
-            "__zs_slot_f8b1e007c4a2c908f4b15e2dcb6c__6a65e237ae44c42895b5"
+            "__zs_slot_2b19d2d9cc47ffdd41163308916b__6a65e237ae44c42895b5"
         );
         assert_eq!(
             worker_slot_name_prefix(&app),
-            "__zs_slot_f8b1e007c4a2c908f4b15e2dcb6c__"
+            "__zs_slot_2b19d2d9cc47ffdd41163308916b__"
         );
         assert!(
             worker_slot_name(&app, "worker-a")
@@ -356,15 +356,15 @@ mod tests {
         assert_eq!(bundle_path_segment(&app), FIXTURE);
 
         // `backend::scope` wraps the id in Redis hash-tag braces.
-        assert_eq!(kv_scope(&app), "{app_02xfbOcLMnlN2aR6iBlNi0}");
+        assert_eq!(kv_scope(&app), "{app_03cgepu94hyemwpcipafo7264}");
 
         // The storage kernel enforces `<app_id>/<bucket>/<key>`.
-        assert_eq!(storage_prefix(&app), "app_02xfbOcLMnlN2aR6iBlNi0/");
+        assert_eq!(storage_prefix(&app), "app_03cgepu94hyemwpcipafo7264/");
 
         // The text the four advisory-lock statements bind.
         assert_eq!(
             lifecycle_lock_seed(&app),
-            "zeroship:app-lifecycle:app_02xfbOcLMnlN2aR6iBlNi0"
+            "zeroship:app-lifecycle:app_03cgepu94hyemwpcipafo7264"
         );
 
         // The ring hashes the printed id. It held the embedded uuid bits until

@@ -35,7 +35,7 @@
 //!
 //! # Ordering
 //!
-//! `Ord` is byte order over the printed id, which is base62 over a `UUIDv7`
+//! `Ord` is byte order over the printed id, which is base36 over a `UUIDv7`
 //! body, which is creation order - but ONLY when the storing column is pinned to
 //! bytewise collation. `db/migrations-ts/20260831000001_sortable_entity_id_collations.ts`
 //! carries that map and its header explains why a locale collation breaks it.
@@ -44,7 +44,7 @@
 //! collated column silently stops using the copy's index. That failure does not
 //! error; it degrades.
 
-/// Declare a typed entity id: a newtype over the printed `<prefix>_<base62>`
+/// Declare a typed entity id: a newtype over the printed `<prefix>_<base36>`
 /// form, constructible only by minting or parsing, with its absences asserted.
 ///
 /// Generates the type, `PREFIX`, `mint`, `parse`, `as_str`, `Serialize`,
@@ -89,7 +89,7 @@ macro_rules! declare_entity_id {
             /// Delegates to [`crate::typed_id::parse_with_prefix`], so it
             /// refuses exactly what that refuses: a wrong prefix is a
             /// [`crate::typed_id::ParseError::WrongPrefix`], and a wrong
-            /// length, a character outside base62, a missing separator or a
+            /// length, a character outside base36, a missing separator or a
             /// body above the hundred-and-twenty-eight-bit range is a
             /// [`crate::typed_id::ParseError::Malformed`].
             ///
@@ -141,7 +141,7 @@ macro_rules! declare_entity_id {
                         &self,
                         f: &mut ::core::fmt::Formatter<'_>,
                     ) -> ::core::fmt::Result {
-                        write!(f, "a typed id of the form {}_<base62>", $prefix)
+                        write!(f, "a typed id of the form {}_<base36>", $prefix)
                     }
 
                     fn visit_str<E: ::serde::de::Error>(
@@ -353,7 +353,7 @@ macro_rules! declare_entity_id {
 
             /// The boundary rejection that matters most: another entity's id is
             /// the wrong TYPE, and the parser must say so rather than accept a
-            /// well-formed base62 body under a foreign tag.
+            /// well-formed base36 body under a foreign tag.
             ///
             /// The hyphenated-uuid arm is the one the typed-id sweep turns on.
             /// Every id column in this schema is `text`, and the shape it used
@@ -365,7 +365,7 @@ macro_rules! declare_entity_id {
             /// "wrong shape" check would blur: a body one character short or
             /// long, a body of exactly the right length whose value is above
             /// the hundred-and-twenty-eight-bit range, and a body of the right
-            /// length carrying one character outside base62. The middle one is
+            /// length carrying one character outside base36. The middle one is
             /// the only refusal that needs the decoder to run.
             #[test]
             fn parse_refuses_a_foreign_prefix_and_a_malformed_body() {
@@ -392,7 +392,7 @@ macro_rules! declare_entity_id {
                 );
                 assert!(
                     $name::parse(&format!("{}_!!!", $name::PREFIX)).is_err(),
-                    "a body outside base62 must be refused"
+                    "a body outside base36 must be refused"
                 );
 
                 let minted = $name::mint();

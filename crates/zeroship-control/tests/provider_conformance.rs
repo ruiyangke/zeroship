@@ -721,7 +721,7 @@ fn subject_ref(label: &str) -> SubjectRef {
     bytes.copy_from_slice(&digest[..16]);
     SubjectRef(format!(
         "org_{}",
-        zeroship_core::typed_id::uuid_to_base62(&Uuid::from_bytes(bytes))
+        zeroship_core::typed_id::uuid_to_base36(&Uuid::from_bytes(bytes))
     ))
 }
 
@@ -778,7 +778,7 @@ fn stable_uuid(label: &str) -> Uuid {
 /// [`subject_ref`] uses for organizations: base62 over a label digest, because
 /// an app id is text with a fixed prefix, not a uuid.
 fn stable_app_id(label: &str) -> AppId {
-    let encoded = zeroship_core::typed_id::uuid_to_base62(&stable_uuid(label));
+    let encoded = zeroship_core::typed_id::uuid_to_base36(&stable_uuid(label));
     AppId::parse(&format!("app_{encoded}")).expect("stable app id is canonical")
 }
 

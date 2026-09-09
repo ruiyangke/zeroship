@@ -110,7 +110,7 @@
 use sha2::{Digest, Sha256};
 use zeroship_migrate_backend::dml::IdentQuoteError;
 use zeroship_migrate_ir::backend::IdentifierLimit;
-use zeroship_migrate_ir::id::base62_encode_bytes;
+use zeroship_migrate_ir::id::base36_encode_bytes;
 
 /// This vendor's DECLARED identifier byte cap, read off its own
 /// [`BackendDescriptor`](zeroship_migrate_ir::backend::BackendDescriptor) rather than
@@ -179,7 +179,7 @@ pub fn migrator_role_name(project_id: &str) -> Result<String, RoleError> {
     if sanitized.is_empty() {
         return Err(RoleError::BadRoleName(project_id.to_string()));
     }
-    let suffix = base62_encode_bytes(&Sha256::digest(project_id.as_bytes()));
+    let suffix = base36_encode_bytes(&Sha256::digest(project_id.as_bytes()));
     const PREFIX: &str = "migrator_";
     const SEP_LEN: usize = 1;
     // Was a third literal `63`. It now reads the one definition, which resolves

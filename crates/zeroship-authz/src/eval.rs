@@ -4,7 +4,7 @@ use std::str::FromStr;
 
 use cedar_policy::{Context, Decision, PolicySet, Request, Response, RestrictedExpression, Schema};
 use compio_postgres::Client;
-use uuid::Uuid;
+use zeroship_core::user_id::UserId;
 
 use crate::authority::{self, Authority};
 use crate::entities::{assemble_entities, cedar_string, resource_entity_uid, uid};
@@ -34,7 +34,7 @@ pub enum AuthzDecision {
 /// falsified one.
 #[derive(Debug)]
 pub struct AuthzContext<'a> {
-    pub principal_id: Uuid,
+    pub principal_id: UserId,
     pub token_policy: Option<Policy>,
     pub action: Action,
     pub resource: Resource,
@@ -67,8 +67,8 @@ pub async fn enforce(
     platform: &PlatformPolicies,
     ctx: &AuthzContext<'_>,
 ) -> Result<AuthzDecision, AuthzError> {
-    let authority = authority::resolve(pg, ctx.principal_id, &ctx.resource).await?;
-    let entities = assemble_entities(ctx.principal_id, &authority, &ctx.resource)?;
+    let authority = authority::resolve(pg, &ctx.principal_id, &ctx.resource).await?;
+    let entities = assemble_entities(&ctx.principal_id, &authority, &ctx.resource)?;
 
     if ctx.token_policy.is_some() {
         let principal_request = build_request(ctx, &authority, platform.schema())?;
@@ -174,12 +174,12 @@ pub async fn is_authorized_anywhere(
     ctx: &AuthzContext<'_>,
 ) -> Result<bool, AuthzError> {
     let mut resources = vec![Resource::Any];
-    resources.extend(authority::organization_resources(pg, ctx.principal_id).await?);
-    resources.extend(authority::project_probe_resources(pg, ctx.principal_id).await?);
+    resources.extend(authority::organization_resources(pg, &ctx.principal_id).await?);
+    resources.extend(authority::project_probe_resources(pg, &ctx.principal_id).await?);
 
     for resource in resources {
         let probe = AuthzContext {
-            principal_id: ctx.principal_id,
+            principal_id: ctx.principal_id.clone(),
             token_policy: None,
             action: ctx.action,
             resource,
@@ -211,7 +211,7 @@ fn build_request(
     authority: &Authority,
     schema: &Schema,
 ) -> Result<Request, AuthzError> {
-    let principal = uid("User", &ctx.principal_id.to_string())?;
+    let principal = uid("User", ctx.principal_id.as_str())?;
     let action = uid("Action", ctx.action.cedar_id())?;
     let resource = resource_entity_uid(&ctx.resource)?;
     let context = build_context(ctx, authority)?;
@@ -296,7 +296,7 @@ async fn audit_decision(
                 (actor_user_id, action, resource_type, resource_id, decision, matched_policies, request_ip, request_id) \
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
             &[
-                &ctx.principal_id,
+                &ctx.principal_id.as_str(),
                 &ctx.action.cedar_id(),
                 &resource_type,
                 &resource_id,
@@ -414,7 +414,7 @@ mod tests {
             for resource in &resources {
                 ruled_on += 1;
                 let ctx = AuthzContext {
-                    principal_id: uuid::Uuid::nil(),
+                    principal_id: zeroship_core::user_id::UserId::mint(),
                     token_policy: None,
                     action: *action,
                     resource: resource.clone(),
@@ -468,10 +468,14 @@ mod tests {
             effective_rank: 40,
             billing_rank: 20,
         };
-        let entities = crate::assemble_entities(uuid::Uuid::nil(), &authority, &Resource::Any)
+        // ONE principal for both halves. The entity set is keyed by the
+        // principal's printed form, so a request naming a different one looks up
+        // an entity that is not there and the test proves nothing.
+        let principal = zeroship_core::user_id::UserId::mint();
+        let entities = crate::assemble_entities(&principal, &authority, &Resource::Any)
             .expect("entities assemble");
         let request = cedar_policy::Request::new(
-            uid("User", &uuid::Uuid::nil().to_string()).expect("principal uid"),
+            uid("User", principal.as_str()).expect("principal uid"),
             uid("Action", Action::AppsRead.cedar_id()).expect("action uid"),
             resource_entity_uid(&Resource::Any).expect("resource uid"),
             cedar_policy::Context::empty(),

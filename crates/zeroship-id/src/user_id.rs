@@ -25,7 +25,7 @@ use crate::entity_id::declare_entity_id;
 use crate::typed_id::USER_PREFIX;
 
 declare_entity_id! {
-    /// The typed id of one platform user: `usr_<base62(uuidv7)>`.
+    /// The typed id of one platform user: `usr_<base36(uuidv7)>`.
     UserId,
     USER_PREFIX,
     user_id_tests,

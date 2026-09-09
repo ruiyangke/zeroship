@@ -6816,7 +6816,7 @@ mod tests {
     fn session_cookie_for(issuer: &crate::session_token::Issuer, seed: u128) -> String {
         let global = zeroship_core::user_id::UserId::parse(&format!(
             "usr_{}",
-            zeroship_core::typed_id::uuid_to_base62(&Uuid::from_u128(seed))
+            zeroship_core::typed_id::uuid_to_base36(&Uuid::from_u128(seed))
         ))
         .expect("seed produces a valid typed user id");
         let sub = zeroship_core::auth::derive_pairwise(

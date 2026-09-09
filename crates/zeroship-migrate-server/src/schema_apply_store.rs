@@ -51,6 +51,7 @@ use compio_postgres::{Client, NoTls};
 use serde_json::Value;
 use uuid::Uuid;
 use zeroship_core::app_id::AppId;
+use zeroship_core::user_id::UserId;
 
 use crate::policy::ManagedPosture;
 
@@ -133,7 +134,7 @@ impl SchemaApplyStore {
                     &input.ceiling_id,
                     &ceiling_version,
                     &input.descriptor_sha256,
-                    &input.principal_id,
+                    &input.principal_id.as_str(),
                 ],
             )
             .await
@@ -238,7 +239,7 @@ impl SchemaApplyStore {
 pub struct SchemaApplyInput<'a> {
     pub app_id: &'a AppId,
     pub migration_id: Uuid,
-    pub principal_id: Uuid,
+    pub principal_id: &'a UserId,
     pub request_body: Value,
     pub effective_profile: &'a ManagedPosture,
     pub ceiling_id: &'a str,

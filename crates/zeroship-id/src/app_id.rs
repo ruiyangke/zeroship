@@ -42,7 +42,7 @@ use crate::entity_id::declare_entity_id;
 use crate::typed_id::APP_PREFIX;
 
 declare_entity_id! {
-    /// The typed id of one creator app: `app_<base62(uuidv7)>`.
+    /// The typed id of one creator app: `app_<base36(uuidv7)>`.
     AppId,
     APP_PREFIX,
     app_id_tests,
@@ -53,7 +53,7 @@ mod tests {
     use super::AppId;
     use crate::typed_id::{self, APP_PREFIX, ParseError};
 
-    /// The one look-alike no other entity id has: `oac_<base62-app-id>` is
+    /// The one look-alike no other entity id has: `oac_<base36-app-id>` is
     /// MINTED FROM the app id and carries the SAME hundred and twenty eight
     /// bits in the same encoding, so only the prefix separates them. That is
     /// why the boundary check is a prefix check, and why this arm asserts the
@@ -62,7 +62,7 @@ mod tests {
     /// body is identical.
     ///
     /// The generic refusals - a foreign prefix, a hyphenated uuid, a body of
-    /// the wrong length or outside base62, a non-string on the wire - are
+    /// the wrong length or outside base36, a non-string on the wire - are
     /// asserted for every macro-declared id in
     /// [`crate::entity_id::declare_entity_id`] and are not repeated here.
     #[test]
@@ -80,7 +80,7 @@ mod tests {
 
         // The control: the two ids differ ONLY by prefix, so the arm above is
         // measuring the boundary and not a body the parser would refuse anyway.
-        let canonical = format!("{APP_PREFIX}_{}", typed_id::uuid_to_base62(&app));
+        let canonical = format!("{APP_PREFIX}_{}", typed_id::uuid_to_base36(&app));
         assert_eq!(
             canonical.strip_prefix(APP_PREFIX),
             client_id.strip_prefix(typed_id::APP_OAUTH_CLIENT_PREFIX),

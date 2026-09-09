@@ -12,6 +12,7 @@
 
 mod common;
 
+use zeroship_core::user_id::UserId;
 use common::live_dsn;
 use compio_postgres::{connect, Client, NoTls};
 use std::future::Future;
@@ -411,7 +412,7 @@ fn a_deleted_membership_denies_the_very_next_request() {
         pg.execute(
             "DELETE FROM zeroship.organization_members \
              WHERE organization_id = $1 AND user_id = $2",
-            &[&fixture.organization_id, &fixture.user_id],
+            &[&fixture.organization_id, &fixture.user_id.as_str()],
         )
         .await
         .expect("revoke the membership");
@@ -441,12 +442,12 @@ fn an_unseated_creator_is_denied_cross_tenant_reads() {
     run_db_test(|pg| async move {
         let victim = Fixture::new(&pg, "c1-victim", "owner").await;
 
-        let attacker_id = Uuid::new_v4();
+        let attacker_id = UserId::mint();
         pg.execute(
             "INSERT INTO zeroship.users (id, email, name) VALUES ($1, $2::citext, $3)",
             &[
-                &attacker_id,
-                &format!("c1-attacker-{attacker_id}@example.com"),
+                &attacker_id.as_str(),
+                &format!("c1-attacker-{}@example.com", attacker_id.as_str()),
                 &"c1-attacker",
             ],
         )
@@ -461,7 +462,7 @@ fn an_unseated_creator_is_denied_cross_tenant_reads() {
             Action::DeploymentsRead,
         ] {
             let ctx = AuthzContext {
-                principal_id: attacker_id,
+                principal_id: attacker_id.clone(),
                 token_policy: None,
                 action,
                 resource: victim.app(),
@@ -478,7 +479,7 @@ fn an_unseated_creator_is_denied_cross_tenant_reads() {
         // The same attacker must not reach the organization itself either.
         for action in [Action::OrganizationRead, Action::OrganizationMembersRead] {
             let ctx = AuthzContext {
-                principal_id: attacker_id,
+                principal_id: attacker_id.clone(),
                 token_policy: None,
                 action,
                 resource: victim.organization(),
@@ -508,11 +509,11 @@ fn an_unseated_creator_is_denied_cross_tenant_reads() {
         let _ = pg
             .execute(
                 "DELETE FROM zeroship.authz_decisions WHERE actor_user_id = $1",
-                &[&attacker_id],
+                &[&attacker_id.as_str()],
             )
             .await;
         let _ = pg
-            .execute("DELETE FROM zeroship.users WHERE id = $1", &[&attacker_id])
+            .execute("DELETE FROM zeroship.users WHERE id = $1", &[&attacker_id.as_str()])
             .await;
         victim.cleanup(&pg).await;
     });
@@ -561,7 +562,7 @@ fn audit_records_the_resource_type_and_matched_bands() {
                      FROM zeroship.authz_decisions \
                      WHERE actor_user_id = $1 AND action = $2 \
                      ORDER BY occurred_at DESC LIMIT 1",
-                    &[&fixture.user_id, &action.cedar_id()],
+                    &[&fixture.user_id.as_str(), &action.cedar_id()],
                 )
                 .await
                 .expect("select audit row");
@@ -690,7 +691,7 @@ where
 
 #[derive(Debug)]
 pub struct Fixture {
-    pub user_id: Uuid,
+    pub user_id: UserId,
     pub organization_id: String,
     pub project_id: String,
     /// ONE field, where there used to be a `Uuid` and a `String` rendering of
@@ -708,14 +709,18 @@ impl Fixture {
     /// [`Fixture::seat_on_project`], so the "before" state of every narrowing
     /// test is an organization seat and nothing else.
     async fn new(pg: &Client, label: &str, organization_role: &str) -> Self {
-        let user_id = Uuid::new_v4();
+        let user_id = UserId::mint();
         let organization_id = typed_id("org");
         let project_id = typed_id("prj");
         let app_id = AppId::mint();
 
         pg.execute(
             "INSERT INTO zeroship.users (id, email, name) VALUES ($1, $2::citext, $3)",
-            &[&user_id, &format!("{label}-{user_id}@example.com"), &label],
+            &[
+                &user_id.as_str(),
+                &format!("{label}-{}@example.com", user_id.as_str()),
+                &label,
+            ],
         )
         .await
         .expect("insert user");
@@ -764,7 +769,7 @@ impl Fixture {
         pg.execute(
             "INSERT INTO zeroship.organization_members (organization_id, user_id, role) \
              VALUES ($1, $2, $3)",
-            &[&organization_id, &user_id, &organization_role],
+            &[&organization_id, &user_id.as_str(), &organization_role],
         )
         .await
         .expect("insert organization membership");
@@ -799,7 +804,7 @@ impl Fixture {
             &[
                 &self.project_id,
                 &self.organization_id,
-                &self.user_id,
+                &self.user_id.as_str(),
                 &role,
             ],
         )
@@ -825,9 +830,9 @@ impl Fixture {
         }
     }
 
-    const fn ctx(&self, action: Action, resource: Resource) -> AuthzContext<'_> {
+    fn ctx(&self, action: Action, resource: Resource) -> AuthzContext<'_> {
         AuthzContext {
-            principal_id: self.user_id,
+            principal_id: self.user_id.clone(),
             token_policy: None,
             action,
             resource,
@@ -837,7 +842,7 @@ impl Fixture {
         }
     }
 
-    const fn ctx_with_policy(
+    fn ctx_with_policy(
         &self,
         action: Action,
         resource: Resource,
@@ -845,7 +850,7 @@ impl Fixture {
         policy: Policy,
     ) -> AuthzContext<'_> {
         AuthzContext {
-            principal_id: self.user_id,
+            principal_id: self.user_id.clone(),
             token_policy: Some(policy),
             action,
             resource,
@@ -861,7 +866,7 @@ impl Fixture {
             "DELETE FROM zeroship.project_members WHERE user_id = $1",
             "DELETE FROM zeroship.organization_members WHERE user_id = $1",
         ] {
-            let _ = pg.execute(sql, &[&self.user_id]).await;
+            let _ = pg.execute(sql, &[&self.user_id.as_str()]).await;
         }
         let _ = pg
             .execute(
@@ -882,7 +887,7 @@ impl Fixture {
             )
             .await;
         let _ = pg
-            .execute("DELETE FROM zeroship.users WHERE id = $1", &[&self.user_id])
+            .execute("DELETE FROM zeroship.users WHERE id = $1", &[&self.user_id.as_str()])
             .await;
     }
 }

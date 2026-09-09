@@ -180,7 +180,7 @@ export default {
     // base62 of 128 bits.
     table("apps", { schema: "zeroship" })
       .check("apps_id_shape")
-      .add({ expr: (col) => col("id").regex("^app_[0-9A-Za-z]{22}$") });
+      .add({ expr: (col) => col("id").regex("^app_[0-9a-z]{25}$") });
     table("creator_account_history", { schema: "zeroship" }).create({
       columns: {
         id: t.uuid().notNull().default(uuidV4()),

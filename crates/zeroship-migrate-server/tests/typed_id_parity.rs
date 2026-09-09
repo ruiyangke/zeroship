@@ -37,8 +37,8 @@ fn vectors() -> Vec<Uuid> {
 #[test]
 fn core_and_engine_encode_ids_identically() {
     for id in vectors() {
-        let core = zeroship_core::typed_id::uuid_to_base62(&id);
-        let engine = zeroship_migrate_ir::id::uuid_to_base62(&id);
+        let core = zeroship_core::typed_id::uuid_to_base36(&id);
+        let engine = zeroship_migrate_ir::id::uuid_to_base36(&id);
         assert_eq!(
             core, engine,
             "typed-id ENCODE diverged between zeroship_core and zeroship_migrate_ir for {id}"
@@ -51,12 +51,12 @@ fn core_and_engine_decode_each_others_ids() {
     // Cross-decode, not just same-side round-trip: a shared bug in one
     // direction would still let each side round-trip its own output.
     for id in vectors() {
-        let core = zeroship_core::typed_id::uuid_to_base62(&id);
-        let engine = zeroship_migrate_ir::id::uuid_to_base62(&id);
+        let core = zeroship_core::typed_id::uuid_to_base36(&id);
+        let engine = zeroship_migrate_ir::id::uuid_to_base36(&id);
 
-        let core_reads_engine = zeroship_core::typed_id::base62_to_uuid(&engine)
+        let core_reads_engine = zeroship_core::typed_id::base36_to_uuid(&engine)
             .expect("core must parse an engine-encoded id");
-        let engine_reads_core = zeroship_migrate_ir::id::base62_to_uuid(&core)
+        let engine_reads_core = zeroship_migrate_ir::id::base36_to_uuid(&core)
             .expect("engine must parse a core-encoded id");
 
         assert_eq!(core_reads_engine, id, "core misread an engine-encoded id");
@@ -86,11 +86,11 @@ fn both_sides_use_the_same_alphabet_in_the_same_order() {
 
     let core: Vec<String> = ascending
         .iter()
-        .map(zeroship_core::typed_id::uuid_to_base62)
+        .map(zeroship_core::typed_id::uuid_to_base36)
         .collect();
     let engine: Vec<String> = ascending
         .iter()
-        .map(zeroship_migrate_ir::id::uuid_to_base62)
+        .map(zeroship_migrate_ir::id::uuid_to_base36)
         .collect();
 
     assert_eq!(core, engine, "encoded sequences differ");

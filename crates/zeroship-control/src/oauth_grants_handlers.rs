@@ -213,11 +213,7 @@ async fn revoke_grant_cascade(
         .await?
         .map(|row| row.get("sector_identifier"));
     if let Some(sector) = sector {
-        let pws = zeroship_core::auth::derive_pairwise(
-            &state.pairwise_salt,
-            user_id.as_str(),
-            &sector,
-        );
+        let pws = zeroship_core::auth::derive_pairwise(&state.pairwise_salt, user_id, &sector);
         tx.execute(
             "INSERT INTO zeroship.token_revocations (client_id, sub, revoked_after) \
              VALUES ($1, $2, NOW()) \

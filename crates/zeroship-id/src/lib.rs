@@ -1,7 +1,7 @@
 //! The platform's entity-id vocabulary.
 //!
 //! Every entity this platform names carries a typed id: a three-or-four letter
-//! prefix, an underscore, and base62 of a UUIDv7 - `app_…`, `usr_…`, `org_…`,
+//! prefix, an underscore, and base36 of a UUIDv7 - `app_…`, `usr_…`, `org_…`,
 //! `prj_…`, `ivt_…`. [`typed_id`] is the codec, [`entity_id::declare_entity_id`]
 //! is the one way a type is declared, and each id module is that macro plus the
 //! prose saying what the entity is.

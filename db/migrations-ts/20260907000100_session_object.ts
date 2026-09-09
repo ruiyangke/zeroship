@@ -79,7 +79,7 @@ export default {
     });
     table("grants", { schema: "zeroship" })
       .check("grants_id_shape")
-      .add({ expr: (col) => col("id").regex("^grt_[0-9A-Za-z]{22}$") });
+      .add({ expr: (col) => col("id").regex("^grt_[0-9a-z]{25}$") });
     table("grants", { schema: "zeroship" })
       .check("grants_audience_kind_check")
       .add({ expr: (col) => col("audience_kind").in(["platform", "app"]) });
@@ -198,7 +198,7 @@ export default {
     });
     table("sessions", { schema: "zeroship" })
       .check("sessions_id_shape")
-      .add({ expr: (col) => col("id").regex("^ses_[0-9A-Za-z]{22}$") });
+      .add({ expr: (col) => col("id").regex("^ses_[0-9a-z]{25}$") });
     table("sessions", { schema: "zeroship" })
       .check("sessions_audience_kind_check")
       .add({ expr: (col) => col("audience_kind").in(["platform", "app"]) });
