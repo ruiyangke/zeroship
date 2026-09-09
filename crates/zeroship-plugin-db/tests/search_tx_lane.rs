@@ -61,9 +61,9 @@ use zeroship_migrate::schema::query::FkEmission;
 use std::rc::Rc;
 
 use compio_postgres::{NoTls, Pool};
-use serde_json::{json, Value};
 use zeroship_data_core::binding::DbBinding;
 use zeroship_data_core::error::DbError;
+use zeroship_data_query_builder::value::{value, Value};
 use zeroship_plugin_db::compile::{BuiltQuery, SqlDialect};
 use zeroship_plugin_db::tx_route::{CapturedRoute, TxRoute};
 
@@ -171,7 +171,7 @@ async fn find_on(
     filter: Value,
 ) -> Result<Vec<Value>, DbError> {
     let binding = DbBinding::cold_start(app);
-    let plan = zeroship_plugin_db::crud::plan_find(&binding, collection, &filter, &json!({}));
+    let plan = zeroship_plugin_db::crud::plan_find(&binding, collection, &filter, &value!({}));
     zeroship_plugin_db::crud::run_find(binding, collection.to_string(), route, filter, plan)
         .await
         .map(|r| r.rows)
@@ -239,7 +239,7 @@ async fn a_vector_search_inside_a_transaction_sees_the_row_that_transaction_inse
         &url,
         app,
         coll,
-        json!({
+        value!({
             "embedding": { "type": "vector", "vectorDims": 4 },
             "title": { "type": "string" },
         }),
@@ -252,7 +252,7 @@ async fn a_vector_search_inside_a_transaction_sees_the_row_that_transaction_inse
         DbBinding::cold_start(app),
         coll.to_string(),
         tx_route(app).await,
-        json!({ "embedding": [1.0, 0.0, 0.0, 0.0], "title": "in the transaction" }),
+        value!({ "embedding": [1.0, 0.0, 0.0, 0.0], "title": "in the transaction" }),
         None,
     )
     .await
@@ -263,7 +263,7 @@ async fn a_vector_search_inside_a_transaction_sees_the_row_that_transaction_inse
         .to_string();
 
     // ---- CONTROL 1: the transaction lane sees its own uncommitted row.
-    let inside_plain = find_on(tx_route(app).await, app, coll, json!({ "id": &id }))
+    let inside_plain = find_on(tx_route(app).await, app, coll, value!({ "id": &id }))
         .await
         .expect("a plain find inside the transaction must be authorised to run");
     assert_eq!(
@@ -273,7 +273,7 @@ async fn a_vector_search_inside_a_transaction_sees_the_row_that_transaction_inse
          subject arm below rules on nothing: {inside_plain:?}",
     );
 
-    let args = json!({ "vector": [1.0, 0.0, 0.0, 0.0], "k": 10 });
+    let args = value!({ "vector": [1.0, 0.0, 0.0, 0.0], "k": 10 });
 
     // ---- CONTROL 2: the same search, POOLED. Differs in one token: `in_tx`.
     let outside = search_on(pool_route(app).await, app, coll, args.clone())
@@ -304,7 +304,7 @@ async fn a_vector_search_inside_a_transaction_sees_the_row_that_transaction_inse
          pooled search did not (control 2), so an empty result here means the \
          scan took the autocommit lane: {inside:?}",
     );
-    assert_eq!(inside[0]["id"], json!(id));
+    assert_eq!(inside[0]["id"], value!(id));
     assert!(
         inside[0].get("_distance").is_some(),
         "the row must carry pgvector's synthetic distance column: {inside:?}",
@@ -345,7 +345,7 @@ async fn a_spatial_near_inside_a_transaction_sees_the_row_that_transaction_inser
         &url,
         app,
         coll,
-        json!({
+        value!({
             "location": { "type": "geoPoint" },
             "title": { "type": "string" },
         }),
@@ -363,9 +363,9 @@ async fn a_spatial_near_inside_a_transaction_sees_the_row_that_transaction_inser
                  VALUES ($1, ST_GeogFromText($2), $3) RETURNING id"
             ),
             params: vec![
-                id.clone(),
-                "SRID=4326;POINT(-0.1278 51.5074)".to_string(),
-                "in the transaction".to_string(),
+                id.clone().into(),
+                "SRID=4326;POINT(-0.1278 51.5074)".into(),
+                "in the transaction".into(),
             ],
         },
     )
@@ -373,7 +373,7 @@ async fn a_spatial_near_inside_a_transaction_sees_the_row_that_transaction_inser
     .expect("the geo insert must apply on the transaction lane");
 
     // ---- CONTROL 1: the transaction lane sees its own uncommitted row.
-    let inside_plain = find_on(tx_route(app).await, app, coll, json!({ "id": &id }))
+    let inside_plain = find_on(tx_route(app).await, app, coll, value!({ "id": &id }))
         .await
         .expect("a plain find inside the transaction must be authorised to run");
     assert_eq!(
@@ -383,7 +383,7 @@ async fn a_spatial_near_inside_a_transaction_sees_the_row_that_transaction_inser
          subject arm below rules on nothing: {inside_plain:?}",
     );
 
-    let args = json!({
+    let args = value!({
         "field": "location",
         "point": { "lat": 51.5074, "lng": -0.1278 },
         "radius": 1000.0,
@@ -419,7 +419,7 @@ async fn a_spatial_near_inside_a_transaction_sees_the_row_that_transaction_inser
          pooled near did not (control 2), so an empty result here means the scan \
          took the autocommit lane: {inside:?}",
     );
-    assert_eq!(inside[0]["id"], json!(id));
+    assert_eq!(inside[0]["id"], value!(id));
     assert!(
         inside[0].get("_distance_m").is_some(),
         "the row must carry PostGIS's synthetic distance column: {inside:?}",

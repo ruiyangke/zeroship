@@ -11,7 +11,7 @@
 //! direction census only flags upward edges while ENGINE -> SQLITE is downward.
 //! Both instruments were right; the code was simply in the wrong tier.
 //!
-//! **The seam is `serde_json::Value`, deliberately.** A store that took
+//! **The seam is `zeroship_data_query_builder::value::Value`, deliberately.** A store that took
 //! `MaskPolicy` would name an engine type from the vendor tier - the upward
 //! edge that the `auth::bootstrap` re-exports were deleted for. It costs
 //! nothing to avoid: the persisted form was always JSON, so the caller converts
@@ -21,8 +21,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
-use serde_json::Value;
 use zeroship_data_core::error::DbError;
+use zeroship_data_query_builder::value::Value;
 
 use super::SqliteBackend;
 
@@ -71,11 +71,7 @@ fn policy_file_lock(path: &Path) -> Result<std::sync::MutexGuard<'static, ()>, D
 /// # Errors
 ///
 /// Any I/O or serialisation failure along the five steps above.
-pub async fn persist(
-    sq: &SqliteBackend,
-    app_id: &str,
-    policy_json: &Value,
-) -> Result<(), DbError> {
+pub async fn persist(sq: &SqliteBackend, app_id: &str, policy_json: &Value) -> Result<(), DbError> {
     let path = policy_path(sq);
     let app_id = app_id.to_string();
     let policy_json = policy_json.clone();
@@ -99,8 +95,10 @@ fn persist_blocking(path: PathBuf, app_id: String, policy_json: Value) -> Result
                 path.display()
             ))
         })?,
-        Ok(_) => Value::Object(serde_json::Map::new()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Value::Object(serde_json::Map::new()),
+        Ok(_) => Value::Object(zeroship_data_query_builder::value::Map::new()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Value::Object(zeroship_data_query_builder::value::Map::new())
+        }
         Err(e) => {
             return Err(DbError::internal(format!(
                 "mask_policies.json: read {}: {e}",
@@ -110,7 +108,7 @@ fn persist_blocking(path: PathBuf, app_id: String, policy_json: Value) -> Result
     };
     let mut obj = match existing {
         Value::Object(o) => o,
-        _ => serde_json::Map::new(),
+        _ => zeroship_data_query_builder::value::Map::new(),
     };
 
     // 2. Merge.
@@ -178,7 +176,8 @@ fn load_blocking(path: PathBuf, app_id: String) -> Result<Option<Value>, DbError
 #[cfg(test)]
 mod tests {
     use super::{load, load_blocking, persist, persist_blocking};
-    use serde_json::{json, Value};
+    use zeroship_data_query_builder::value;
+    use zeroship_data_query_builder::value::Value;
 
     /// Round-trip through the async pair, off the event-loop thread.
     ///
@@ -191,14 +190,13 @@ mod tests {
             .expect("compio runtime")
             .block_on(async {
                 let dir = tempfile::tempdir().expect("create tempdir");
-                let backend =
-                    crate::SqliteBackend::new(
-                        dir.path().to_path_buf(),
-                        std::sync::Arc::new(crate::NullChangeSink),
-                        zeroship_data_core::encryption::LocalKeySource::env_var(),
-                    )
-                        .expect("open sqlite backend");
-                let stored = json!({ "admin": ["public", "pii"], "support": ["public"] });
+                let backend = crate::SqliteBackend::new(
+                    dir.path().to_path_buf(),
+                    std::sync::Arc::new(crate::NullChangeSink),
+                    zeroship_data_core::encryption::LocalKeySource::env_var(),
+                )
+                .expect("open sqlite backend");
+                let stored = value!({ "admin": ["public", "pii"], "support": ["public"] });
 
                 persist(&backend, "app_async", &stored)
                     .await
@@ -222,8 +220,8 @@ mod tests {
     fn the_sidecar_serialises_concurrent_writers() {
         let dir = tempfile::tempdir().expect("create tempdir");
         let path = dir.path().join("mask_policies.json");
-        let policy_a = json!({ "admin": ["pii", "spi"] });
-        let policy_b = json!({ "support": ["public"] });
+        let policy_a = value!({ "admin": ["pii", "spi"] });
+        let policy_b = value!({ "support": ["public"] });
 
         std::thread::scope(|scope| {
             let path_a = path.clone();
@@ -256,7 +254,7 @@ mod tests {
         let loaded_b = load_blocking(path, "app_b".to_string())
             .expect("load app_b")
             .expect("app_b entry");
-        assert_eq!(loaded_a, json!({ "admin": ["pii", "spi"] }));
-        assert_eq!(loaded_b, json!({ "support": ["public"] }));
+        assert_eq!(loaded_a, value!({ "admin": ["pii", "spi"] }));
+        assert_eq!(loaded_b, value!({ "support": ["public"] }));
     }
 }

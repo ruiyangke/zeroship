@@ -958,15 +958,18 @@ pub struct SpawnedTimer {
 /// A boxed closure run inside the pump's V8 scope by [`ResolveValue::Continuation`].
 type ResolveContinuation = Box<dyn FnOnce(&mut v8::PinScope, &SharedState)>;
 
-/// A value to resolve or reject a promise with, materialized in V8 by the
-/// runtime loop. Used by [`OpResult::JsValue`] so async class methods can
-/// hand back arbitrary V8 chunks (not just UTF-8 strings).
-///
-/// The existing `OpResult::Completed.value: String` channel is wrong for
-/// streams because it round-trips chunks through UTF-8 and silently
-/// mangles binary. This variant keeps the dispatch loop in `runtime.rs`
-/// but lets async class methods resolve or reject with real JS values.
+/// An owned result that can be materialized after the runtime re-enters V8.
+pub trait NativeValue: Send {
+    fn into_v8<'s>(
+        self: Box<Self>,
+        scope: &mut v8::PinScope<'s, '_>,
+    ) -> Result<v8::Local<'s, v8::Value>, OpError>;
+}
+
+/// A promise settlement value consumed by the runtime pump.
 pub enum ResolveValue {
+    /// Materialize owned native data when the pump re-enters its V8 scope.
+    Native(Box<dyn NativeValue>),
     /// Resolve with `undefined`.
     Undefined,
     /// Resolve with the given V8 value.
@@ -977,34 +980,11 @@ pub enum ResolveValue {
     /// Resolve with a JS string materialised from this UTF-8 buffer.
     String(String),
     /// Resolve with the JS value produced by `JSON.parse(<this>)`.
-    /// Used by callers (e.g. plugin-db CRUD) that need to hand back
+    /// Used by callers with an explicit JSON contract to hand back
     /// real JS objects / `null` / numbers without pre-building the
     /// `v8::Global<Value>` (which would require carrying a V8 scope
     /// across the spawned async op).
     Json(String),
-    /// **P9 PR 2** — resolve with `JSON.parse(<this>)` and then run
-    /// `transform` over the parsed value to mint plugin-supplied v8_class
-    /// instances (today: `MaskedValue` for `__zsmask__`-tagged sentinels
-    /// emitted by `crud::mask_pass::wrap_row_on_read`).
-    ///
-    /// `transform` is a `fn` (not a closure) so the variant stays `Send`
-    /// across the spawned-op future boundary. The pump invokes it inside
-    /// the V8 scope where the parsed value is live; the function may
-    /// recursively walk the value and replace sub-objects with
-    /// v8_class-backed instances. A `None` return means "leave the value
-    /// unchanged" — the pump still resolves with the post-parse Local.
-    ///
-    /// Plugin-db is the only producer; the runtime itself has no
-    /// knowledge of which sentinels exist — that lives in the supplied
-    /// `transform` function pointer.
-    JsonWithRehydration {
-        json: String,
-        transform:
-            for<'s, 'a> fn(
-                &mut v8::PinScope<'s, 'a>,
-                v8::Local<'s, v8::Value>,
-            ) -> Option<v8::Local<'s, v8::Value>>,
-    },
     /// Resolve with a JS Boolean.
     Bool(bool),
     /// Resolve with a JS Number from an unsigned 32-bit integer.

@@ -175,7 +175,7 @@ pub(crate) fn from_sqlite(e: rusqlite::Error) -> DbError {
 /// at `crates/zeroship-data-postgres/src/postgres.rs:442` so the SDK's
 /// existing PG-side parser handles the SQLite arm unchanged.
 fn build_constraint_envelope(code: &str, message: &str) -> String {
-    serde_json::to_string(&serde_json::json!({
+    serde_json::to_string(&zeroship_data_query_builder::value!({
         "code": code,
         "message": message,
     }))
@@ -229,7 +229,7 @@ mod tests {
                 envelope_json,
             } => {
                 assert_eq!(code, "unique_violation");
-                let v: serde_json::Value =
+                let v: zeroship_data_query_builder::value::Value =
                     serde_json::from_str(&envelope_json).expect("envelope must be valid JSON");
                 assert_eq!(v["code"], "unique_violation");
             }

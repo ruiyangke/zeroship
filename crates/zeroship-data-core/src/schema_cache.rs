@@ -6,7 +6,7 @@
 //! `docs/proposals/2026-09-02-thread-context-ownership.md` identifies as FOUR
 //! OWNERS wearing one struct. That proposal assigns this one to
 //! `zeroship-data-core`, and the assignment is not a preference: the whole owner
-//! names `DbBinding`, `serde_json::Value` and `Arc` and NOTHING else - no
+//! names `DbBinding`, `zeroship_data_query_builder::value::Value` and `Arc` and NOTHING else - no
 //! driver, no V8, no runtime, no engine type. It was rank-0 vocabulary sitting
 //! in the adapter.
 //!
@@ -26,7 +26,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use serde_json::Value;
+use zeroship_data_query_builder::value::Value;
 
 use crate::error::DbError;
 
@@ -192,7 +192,8 @@ mod tests {
     use super::*;
 
     fn binding(app: &str, deploy: &str) -> DbBinding {
-        let schema = zeroship_data_query_builder::SchemaName::new(app).expect("fixture schema name");
+        let schema =
+            zeroship_data_query_builder::SchemaName::new(app).expect("fixture schema name");
         DbBinding::new(app, deploy, schema)
     }
 
@@ -205,20 +206,38 @@ mod tests {
         cache.replace_for_binding(
             &a,
             vec![
-                ("users".into(), serde_json::json!({"v": 1})),
-                ("posts".into(), serde_json::json!({"v": 1})),
+                (
+                    "users".into(),
+                    zeroship_data_query_builder::value!({"v": 1}),
+                ),
+                (
+                    "posts".into(),
+                    zeroship_data_query_builder::value!({"v": 1}),
+                ),
             ],
         );
-        cache.replace_for_binding(&b, vec![("users".into(), serde_json::json!({"v": 9}))]);
+        cache.replace_for_binding(
+            &b,
+            vec![(
+                "users".into(),
+                zeroship_data_query_builder::value!({"v": 9}),
+            )],
+        );
 
         // Replacing app_a with a SHORTER list must drop `posts` and must not
         // touch app_b - the retain is prefix-scoped, which is the property a
         // plain `clear()` would break.
-        cache.replace_for_binding(&a, vec![("users".into(), serde_json::json!({"v": 2}))]);
+        cache.replace_for_binding(
+            &a,
+            vec![(
+                "users".into(),
+                zeroship_data_query_builder::value!({"v": 2}),
+            )],
+        );
 
         assert_eq!(
             cache.get(&a, "users").as_deref(),
-            Some(&serde_json::json!({"v": 2})),
+            Some(&zeroship_data_query_builder::value!({"v": 2})),
             "the surviving collection must carry the NEW value"
         );
         assert!(
@@ -227,7 +246,7 @@ mod tests {
         );
         assert_eq!(
             cache.get(&b, "users").as_deref(),
-            Some(&serde_json::json!({"v": 9})),
+            Some(&zeroship_data_query_builder::value!({"v": 9})),
             "a different binding must be untouched by the replace"
         );
     }
@@ -238,7 +257,13 @@ mod tests {
         let old = binding("app_a", "deploy_1");
         let new = binding("app_a", "deploy_2");
 
-        cache.replace_for_binding(&old, vec![("users".into(), serde_json::json!({"v": 1}))]);
+        cache.replace_for_binding(
+            &old,
+            vec![(
+                "users".into(),
+                zeroship_data_query_builder::value!({"v": 1}),
+            )],
+        );
 
         assert!(
             cache.get(&new, "users").is_none(),
@@ -259,8 +284,8 @@ mod tests {
         cache.replace_for_binding(
             &a,
             vec![
-                ("users".into(), serde_json::json!({})),
-                ("posts".into(), serde_json::json!({})),
+                ("users".into(), zeroship_data_query_builder::value!({})),
+                ("posts".into(), zeroship_data_query_builder::value!({})),
             ],
         );
 
@@ -288,7 +313,13 @@ mod tests {
     fn an_undeclared_collection_is_an_error_and_never_a_silent_miss() {
         let mut cache = SchemaCache::new();
         let a = binding("app_a", "d1");
-        cache.replace_for_binding(&a, vec![("users".into(), serde_json::json!({"v": 1}))]);
+        cache.replace_for_binding(
+            &a,
+            vec![(
+                "users".into(),
+                zeroship_data_query_builder::value!({"v": 1}),
+            )],
+        );
 
         let err = cache
             .require(&a, "posts")
@@ -308,7 +339,10 @@ mod tests {
     fn empty_replacement_leaves_the_binding_schema_less() {
         let mut cache = SchemaCache::new();
         let a = binding("app_a", "d1");
-        cache.replace_for_binding(&a, vec![("users".into(), serde_json::json!({}))]);
+        cache.replace_for_binding(
+            &a,
+            vec![("users".into(), zeroship_data_query_builder::value!({}))],
+        );
         cache.replace_for_binding(&a, vec![]);
         assert!(cache.get(&a, "users").is_none());
         assert!(cache.entries_for_binding(&a).is_empty());

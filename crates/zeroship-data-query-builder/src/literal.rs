@@ -252,6 +252,8 @@ pub enum Literal {
     Int(i64),
     Float(Finite),
     Text(String),
+    /// Encoded JSON, distinct from an ordinary text parameter.
+    Json(String),
     Bytes(Vec<u8>),
     /// An embedding, bound whole. See [`QueryVector`].
     Vector(QueryVector),
@@ -304,6 +306,7 @@ impl Literal {
             Self::Int(_) => "int",
             Self::Float(_) => "float",
             Self::Text(_) => "text",
+            Self::Json(_) => "json",
             Self::Bytes(_) => "bytes",
             Self::Vector(_) => "vector",
         }

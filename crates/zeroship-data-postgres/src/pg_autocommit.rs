@@ -22,10 +22,10 @@
 //! type would have to lie to at least one of them:
 //!
 //! - the two search methods want JSON, and get it via
-//!   [`crate::pg_row_json::rows_to_json_value`];
+//!   [`crate::pg_row_json::rows_to_values`];
 //! - the two unmask readers want ONE CELL, and one of them wants it as RAW
 //!   BYTES. Routing that through JSON is not an option:
-//!   `pg_row_json::column_to_json` base64-encodes BYTEA, so an encrypted
+//!   `pg_row_json::column_to_value` base64-encodes BYTEA, so an encrypted
 //!   ciphertext would arrive as text and have to be decoded back before it
 //!   could be decrypted - re-introducing the text round-trip that made every
 //!   PostgreSQL unmask of an encrypted column fail until 2026-09-01;
@@ -37,7 +37,7 @@
 
 use std::rc::Rc;
 
-use serde_json::Value;
+use zeroship_data_query_builder::value::Value;
 
 use crate::pg_error;
 use crate::pg_session_sql::autocommit_local_session_setup_sql;
@@ -66,7 +66,7 @@ pub async fn roled_rows(
     pool: &Rc<compio_postgres::Pool>,
     schema: &SchemaName,
     sql: &str,
-    params: &[&str],
+    params: &[Value],
 ) -> Result<Vec<compio_postgres::Row>, DbError> {
     let mut client = pool.acquire().await.map_err(|e| pg_error::classify(&e))?;
 
@@ -100,8 +100,11 @@ pub async fn roled_rows(
         classified.into_db_error()
     })?;
 
+    let bindings: Vec<_> = params.iter().map(crate::params::Parameter).collect();
+    let refs: Vec<&(dyn compio_postgres::types::ToSql + Sync)> =
+        bindings.iter().map(|value| value as _).collect();
     let rows = tx
-        .query_text_params(sql, params)
+        .query(sql, &refs)
         .await
         .map_err(|e| pg_error::classify(&e))?;
 
@@ -130,10 +133,10 @@ pub(crate) async fn roled_json(
     pool: &Rc<compio_postgres::Pool>,
     schema: &SchemaName,
     sql: &str,
-    params: &[&str],
+    params: &[Value],
 ) -> Result<Vec<Value>, DbError> {
     let rows = roled_rows(pool, schema, sql, params).await?;
-    Ok(crate::pg_row_json::rows_to_json_value(&rows))
+    Ok(crate::pg_row_json::rows_to_values(&rows))
 }
 
 /// Read column 0 of the first row as raw bytes, under the per-app role.
@@ -151,7 +154,7 @@ pub(crate) async fn roled_scalar_bytes(
     pool: &Rc<compio_postgres::Pool>,
     schema: &SchemaName,
     sql: &str,
-    params: &[&str],
+    params: &[Value],
 ) -> Result<ScalarRead<Vec<u8>>, DbError> {
     scalar_bytes(&roled_rows(pool, schema, sql, params).await?)
 }
@@ -197,7 +200,7 @@ pub(crate) async fn roled_scalar_text(
     pool: &Rc<compio_postgres::Pool>,
     schema: &SchemaName,
     sql: &str,
-    params: &[&str],
+    params: &[Value],
 ) -> Result<ScalarRead<String>, DbError> {
     scalar_text(&roled_rows(pool, schema, sql, params).await?)
 }
@@ -232,7 +235,7 @@ pub(crate) async fn roled_statement(
     pool: &Rc<compio_postgres::Pool>,
     schema: &SchemaName,
     sql: &str,
-    params: &[&str],
+    params: &[Value],
 ) -> Result<(), DbError> {
     roled_rows(pool, schema, sql, params).await?;
     Ok(())

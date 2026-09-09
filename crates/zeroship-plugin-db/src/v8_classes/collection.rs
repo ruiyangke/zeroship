@@ -2,20 +2,19 @@
 //!
 //! A `Collection` instance is returned by `Db::collection`.
 //! Each CRUD method on it decodes its V8 arguments directly into a
-//! `serde_json::Value` (via `v8_value_to_serde_json`)
+//! `zeroship_data_query_builder::value::Value` (via `decode_native`)
 //! and calls the shared `dispatch_*` helper in [`crate::crud`] — no
 //! JSON.stringify / parse round-trip on the CRUD hot path.
 
 #![allow(unsafe_code)]
 
-use serde_json::Value;
+use zeroship_data_query_builder::value::Value;
 use zeroship_runtime::state::OpError;
 #[allow(unused_imports)]
 use zeroship_runtime_macros::{v8_class, v8_constructor, v8_getter, v8_method, v8_name};
 
 use zeroship_data_core::binding::DbBinding;
 
-use crate::v8_bridge::{read_json_arg, refuse_if_query_capability};
 use super::dispatch::{
     dispatch_aggregate, dispatch_bulk_unmask_field, dispatch_count, dispatch_delete_many,
     dispatch_delete_one, dispatch_distinct, dispatch_find, dispatch_insert, dispatch_insert_many,
@@ -23,6 +22,7 @@ use super::dispatch::{
     dispatch_restore_one, dispatch_search, dispatch_unmask_field, dispatch_update_many,
     dispatch_update_one, dispatch_upsert,
 };
+use crate::v8_bridge::{read_native_arg, refuse_if_query_capability};
 
 // ---------------------------------------------------------------------------
 // Collection state
@@ -57,7 +57,7 @@ impl Collection {
     /// isolate at a DIFFERENT deploy must see for an entry it never installed.
     pub(crate) fn resolved_runtime_schema_for_tests(
         &self,
-    ) -> (String, Option<serde_json::Value>) {
+    ) -> (String, Option<zeroship_data_query_builder::value::Value>) {
         let schema = crate::descriptor::collection_schema(&self.binding, &self.name)
             .ok()
             .map(|facts| (*facts).clone());
@@ -86,11 +86,11 @@ impl Collection {
         filter: v8::Local<v8::Value>,
         opts: v8::Local<v8::Value>,
     ) -> v8::Local<'s, v8::Value> {
-        let filter_v = match read_json_arg(scope, Some(filter)) {
+        let filter_v = match read_native_arg(scope, Some(filter)) {
             Ok(v) => v,
             Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
         };
-        let opts_v = match read_json_arg(scope, Some(opts)) {
+        let opts_v = match read_native_arg(scope, Some(opts)) {
             Ok(v) => v,
             Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
         };
@@ -103,12 +103,10 @@ impl Collection {
         scope: &mut v8::PinScope<'s, '_>,
         doc: v8::Local<v8::Value>,
     ) -> v8::Local<'s, v8::Value> {
-        if let Some(p) =
-            refuse_if_query_capability(scope, "ctx.db.insert")
-        {
+        if let Some(p) = refuse_if_query_capability(scope, "ctx.db.insert") {
             return p.into();
         }
-        let doc_v = match read_json_arg(scope, Some(doc)) {
+        let doc_v = match read_native_arg(scope, Some(doc)) {
             Ok(v) => v,
             Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
         };
@@ -122,12 +120,10 @@ impl Collection {
         scope: &mut v8::PinScope<'s, '_>,
         docs: v8::Local<v8::Value>,
     ) -> v8::Local<'s, v8::Value> {
-        if let Some(p) =
-            refuse_if_query_capability(scope, "ctx.db.insertMany")
-        {
+        if let Some(p) = refuse_if_query_capability(scope, "ctx.db.insertMany") {
             return p.into();
         }
-        let docs_v = match read_json_arg(scope, Some(docs)) {
+        let docs_v = match read_native_arg(scope, Some(docs)) {
             Ok(v) => v,
             Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
         };
@@ -142,16 +138,14 @@ impl Collection {
         filter: v8::Local<v8::Value>,
         update: v8::Local<v8::Value>,
     ) -> v8::Local<'s, v8::Value> {
-        if let Some(p) =
-            refuse_if_query_capability(scope, "ctx.db.update")
-        {
+        if let Some(p) = refuse_if_query_capability(scope, "ctx.db.update") {
             return p.into();
         }
-        let filter_v = match read_json_arg(scope, Some(filter)) {
+        let filter_v = match read_native_arg(scope, Some(filter)) {
             Ok(v) => v,
             Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
         };
-        let update_v = match read_json_arg(scope, Some(update)) {
+        let update_v = match read_native_arg(scope, Some(update)) {
             Ok(v) => v,
             Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
         };
@@ -166,16 +160,14 @@ impl Collection {
         filter: v8::Local<v8::Value>,
         update: v8::Local<v8::Value>,
     ) -> v8::Local<'s, v8::Value> {
-        if let Some(p) =
-            refuse_if_query_capability(scope, "ctx.db.updateMany")
-        {
+        if let Some(p) = refuse_if_query_capability(scope, "ctx.db.updateMany") {
             return p.into();
         }
-        let filter_v = match read_json_arg(scope, Some(filter)) {
+        let filter_v = match read_native_arg(scope, Some(filter)) {
             Ok(v) => v,
             Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
         };
-        let update_v = match read_json_arg(scope, Some(update)) {
+        let update_v = match read_native_arg(scope, Some(update)) {
             Ok(v) => v,
             Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
         };
@@ -189,12 +181,10 @@ impl Collection {
         scope: &mut v8::PinScope<'s, '_>,
         filter: v8::Local<v8::Value>,
     ) -> v8::Local<'s, v8::Value> {
-        if let Some(p) =
-            refuse_if_query_capability(scope, "ctx.db.delete")
-        {
+        if let Some(p) = refuse_if_query_capability(scope, "ctx.db.delete") {
             return p.into();
         }
-        let filter_v = match read_json_arg(scope, Some(filter)) {
+        let filter_v = match read_native_arg(scope, Some(filter)) {
             Ok(v) => v,
             Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
         };
@@ -208,12 +198,10 @@ impl Collection {
         scope: &mut v8::PinScope<'s, '_>,
         filter: v8::Local<v8::Value>,
     ) -> v8::Local<'s, v8::Value> {
-        if let Some(p) =
-            refuse_if_query_capability(scope, "ctx.db.deleteMany")
-        {
+        if let Some(p) = refuse_if_query_capability(scope, "ctx.db.deleteMany") {
             return p.into();
         }
-        let filter_v = match read_json_arg(scope, Some(filter)) {
+        let filter_v = match read_native_arg(scope, Some(filter)) {
             Ok(v) => v,
             Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
         };
@@ -233,7 +221,7 @@ impl Collection {
         if let Some(p) = refuse_if_query_capability(scope, "ctx.db.purge") {
             return p.into();
         }
-        let filter_v = match read_json_arg(scope, Some(filter)) {
+        let filter_v = match read_native_arg(scope, Some(filter)) {
             Ok(v) => v,
             Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
         };
@@ -251,7 +239,7 @@ impl Collection {
         if let Some(p) = refuse_if_query_capability(scope, "ctx.db.purgeMany") {
             return p.into();
         }
-        let filter_v = match read_json_arg(scope, Some(filter)) {
+        let filter_v = match read_native_arg(scope, Some(filter)) {
             Ok(v) => v,
             Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
         };
@@ -269,7 +257,7 @@ impl Collection {
         if let Some(p) = refuse_if_query_capability(scope, "ctx.db.restore") {
             return p.into();
         }
-        let filter_v = match read_json_arg(scope, Some(filter)) {
+        let filter_v = match read_native_arg(scope, Some(filter)) {
             Ok(v) => v,
             Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
         };
@@ -287,7 +275,7 @@ impl Collection {
         if let Some(p) = refuse_if_query_capability(scope, "ctx.db.restoreMany") {
             return p.into();
         }
-        let filter_v = match read_json_arg(scope, Some(filter)) {
+        let filter_v = match read_native_arg(scope, Some(filter)) {
             Ok(v) => v,
             Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
         };
@@ -305,22 +293,18 @@ impl Collection {
         doc: v8::Local<v8::Value>,
         opts: v8::Local<v8::Value>,
     ) -> Result<v8::Local<'s, v8::Value>, OpError> {
-        if let Some(p) = refuse_if_query_capability(scope, "ctx.db.upsert")
-        {
+        if let Some(p) = refuse_if_query_capability(scope, "ctx.db.upsert") {
             return Ok(p.into());
         }
-        let doc_v = match read_json_arg(scope, Some(doc)) {
+        let doc_v = match read_native_arg(scope, Some(doc)) {
             Ok(v) => v,
             Err(e) => return Ok(crate::v8_bridge::throw_decode_error(scope, &e)),
         };
-        let opts_v = match read_json_arg(scope, Some(opts)) {
+        let opts_v = match read_native_arg(scope, Some(opts)) {
             Ok(v) => v,
             Err(e) => return Ok(crate::v8_bridge::throw_decode_error(scope, &e)),
         };
-        let conflict_v = opts_v
-            .get("conflictFields")
-            .cloned()
-            .unwrap_or(Value::Null);
+        let conflict_v = opts_v.get("conflictFields").cloned().unwrap_or(Value::Null);
         let conflict_arr = match conflict_v.as_array() {
             Some(arr) => arr,
             None => {
@@ -331,6 +315,10 @@ impl Collection {
                     Value::Bool(_) => "boolean".to_string(),
                     Value::Object(_) => "object".to_string(),
                     Value::Array(_) => unreachable!(),
+                    Value::Bytes(_) => "bytes".into(),
+                    Value::Timestamp(_) => "timestamp".into(),
+                    Value::Decimal(_) => "decimal".into(),
+                    Value::Json(_) => "JSON".into(),
                 };
                 return Err(OpError::type_error(format!(
                     "upsert: opts.conflictFields must be an array of strings (got {detail})"
@@ -356,11 +344,11 @@ impl Collection {
         filter: v8::Local<v8::Value>,
         opts: v8::Local<v8::Value>,
     ) -> v8::Local<'s, v8::Value> {
-        let filter_v = match read_json_arg(scope, Some(filter)) {
+        let filter_v = match read_native_arg(scope, Some(filter)) {
             Ok(v) => v,
             Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
         };
-        let opts_v = match read_json_arg(scope, Some(opts)) {
+        let opts_v = match read_native_arg(scope, Some(opts)) {
             Ok(v) => v,
             Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
         };
@@ -380,11 +368,11 @@ impl Collection {
         filter: v8::Local<v8::Value>,
         opts: v8::Local<v8::Value>,
     ) -> Result<v8::Local<'s, v8::Value>, OpError> {
-        let filter_v = match read_json_arg(scope, Some(filter)) {
+        let filter_v = match read_native_arg(scope, Some(filter)) {
             Ok(v) => v,
             Err(e) => return Ok(crate::v8_bridge::throw_decode_error(scope, &e)),
         };
-        let opts_v = match read_json_arg(scope, Some(opts)) {
+        let opts_v = match read_native_arg(scope, Some(opts)) {
             Ok(v) => v,
             Err(e) => return Ok(crate::v8_bridge::throw_decode_error(scope, &e)),
         };
@@ -392,11 +380,17 @@ impl Collection {
             .get("field")
             .and_then(Value::as_str)
             .filter(|s| !s.is_empty())
-            .ok_or_else(|| OpError::type_error(
-                "distinct: opts.field must be a non-empty string",
-            ))?
+            .ok_or_else(|| OpError::type_error("distinct: opts.field must be a non-empty string"))?
             .to_string();
-        Ok(dispatch_distinct(scope, self.binding.clone(), &self.name, &field, filter_v, opts_v).into())
+        Ok(dispatch_distinct(
+            scope,
+            self.binding.clone(),
+            &self.name,
+            &field,
+            filter_v,
+            opts_v,
+        )
+        .into())
     }
 
     /// `collection.aggregate(pipeline, opts?)` — run an aggregation
@@ -411,11 +405,11 @@ impl Collection {
         pipeline: v8::Local<v8::Value>,
         opts: v8::Local<v8::Value>,
     ) -> v8::Local<'s, v8::Value> {
-        let pipeline_v = match read_json_arg(scope, Some(pipeline)) {
+        let pipeline_v = match read_native_arg(scope, Some(pipeline)) {
             Ok(v) => v,
             Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
         };
-        let opts_v = match read_json_arg(scope, Some(opts)) {
+        let opts_v = match read_native_arg(scope, Some(opts)) {
             Ok(v) => v,
             Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
         };
@@ -436,7 +430,7 @@ impl Collection {
         scope: &mut v8::PinScope<'s, '_>,
         args: v8::Local<v8::Value>,
     ) -> v8::Local<'s, v8::Value> {
-        let args_v = match read_json_arg(scope, Some(args)) {
+        let args_v = match read_native_arg(scope, Some(args)) {
             Ok(v) => v,
             Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
         };
@@ -465,7 +459,7 @@ impl Collection {
         scope: &mut v8::PinScope<'s, '_>,
         args: v8::Local<v8::Value>,
     ) -> v8::Local<'s, v8::Value> {
-        let args_v = match read_json_arg(scope, Some(args)) {
+        let args_v = match read_native_arg(scope, Some(args)) {
             Ok(v) => v,
             Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
         };
@@ -499,21 +493,21 @@ impl Collection {
         column: v8::Local<v8::Value>,
         opts: v8::Local<v8::Value>,
     ) -> v8::Local<'s, v8::Value> {
-        let row_pk_v = match read_json_arg(scope, Some(row_pk)) {
+        let row_pk_v = match read_native_arg(scope, Some(row_pk)) {
             Ok(v) => v,
             Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
         };
-        let column_v = match read_json_arg(scope, Some(column)) {
+        let column_v = match read_native_arg(scope, Some(column)) {
             Ok(v) => v,
             Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
         };
-        let opts_v = match read_json_arg(scope, Some(opts)) {
+        let opts_v = match read_native_arg(scope, Some(opts)) {
             Ok(v) => v,
             Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
         };
         let mut args = match opts_v {
             Value::Object(map) => map,
-            _ => serde_json::Map::new(),
+            _ => zeroship_data_query_builder::value::Map::new(),
         };
         args.insert("collection".to_string(), Value::String(self.name.clone()));
         args.insert("row_pk".to_string(), row_pk_v);
@@ -545,17 +539,17 @@ impl Collection {
         items: v8::Local<v8::Value>,
         opts: v8::Local<v8::Value>,
     ) -> v8::Local<'s, v8::Value> {
-        let items_v = match read_json_arg(scope, Some(items)) {
+        let items_v = match read_native_arg(scope, Some(items)) {
             Ok(v) => v,
             Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
         };
-        let opts_v = match read_json_arg(scope, Some(opts)) {
+        let opts_v = match read_native_arg(scope, Some(opts)) {
             Ok(v) => v,
             Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
         };
         let mut args = match opts_v {
             Value::Object(map) => map,
-            _ => serde_json::Map::new(),
+            _ => zeroship_data_query_builder::value::Map::new(),
         };
         args.insert("collection".to_string(), Value::String(self.name.clone()));
         args.insert("items".to_string(), items_v);
@@ -619,10 +613,7 @@ pub(crate) fn mint_collection<'s>(
         .ok_or_else(|| OpError::type_error("Collection prototype missing"))?;
     obj.set_prototype(scope, proto_v);
 
-    let state = Collection {
-        name,
-        binding,
-    };
+    let state = Collection { name, binding };
     let boxed: Box<Collection> = Box::new(state);
     let raw = Box::into_raw(boxed);
     let raw_addr = raw as usize;

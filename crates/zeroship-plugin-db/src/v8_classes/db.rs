@@ -44,7 +44,7 @@ use zeroship_runtime_macros::v8_class;
 #[allow(unused_imports)]
 use zeroship_runtime_macros::{v8_constructor, v8_getter, v8_method};
 
-use crate::v8_bridge::v8_value_to_serde_json;
+use crate::v8_bridge::decode_native;
 use crate::v8_classes::collection::mint_collection;
 use crate::v8_classes::db_platform::mint_db_platform;
 use crate::v8_classes::transaction::transaction_dispatch;
@@ -188,13 +188,13 @@ impl Db {
                     "db.transaction: opts must be an object, got {got}"
                 )));
             }
-            let parsed = v8_value_to_serde_json(scope, opts).map_err(|e| {
+            let parsed = decode_native(scope, opts).map_err(|e| {
                 OpError::type_error(format!("db.transaction: opts could not be decoded ({e:?})"))
             })?;
             let raw = parsed
                 .as_object()
                 .and_then(|o| o.get("isolationLevel"))
-                .and_then(serde_json::Value::as_str)
+                .and_then(zeroship_data_query_builder::value::Value::as_str)
                 .map(str::to_string);
             match raw {
                 Some(s) => Some(normalize_isolation_level(&s)?),
@@ -437,7 +437,8 @@ mod tests {
 
     use std::collections::HashMap;
 
-    use serde_json::{json, Value};
+    use zeroship_data_query_builder::value;
+    use zeroship_data_query_builder::value::Value;
     use zeroship_runtime::Runtime;
 
     use super::normalize_isolation_level;
@@ -529,7 +530,7 @@ mod tests {
         crate::cache_schema_for_deploy_for_tests(
             &pinned_binding,
             COLLECTION,
-            json!({ "marker": { "type": "string" } }),
+            value!({ "marker": { "type": "string" } }),
         );
         pinned_runtime.exit_isolate();
 
@@ -539,7 +540,7 @@ mod tests {
             resolve_collection_binding(&pinned_runtime, &pinned_collection),
             (
                 PINNED.to_string(),
-                Some(json!({ "marker": { "type": "string" } }))
+                Some(value!({ "marker": { "type": "string" } }))
             ),
             "the pinned deploy must resolve the entry it installed",
         );
@@ -560,7 +561,7 @@ mod tests {
         crate::cache_schema_for_deploy_for_tests(
             &current_binding,
             COLLECTION,
-            json!({ "other": { "type": "string" } }),
+            value!({ "other": { "type": "string" } }),
         );
         current_runtime.exit_isolate();
 
@@ -568,7 +569,7 @@ mod tests {
             resolve_collection_binding(&pinned_runtime, &pinned_collection),
             (
                 PINNED.to_string(),
-                Some(json!({ "marker": { "type": "string" } }))
+                Some(value!({ "marker": { "type": "string" } }))
             ),
             "installing the current deploy redirected the pinned binding",
         );
@@ -576,7 +577,7 @@ mod tests {
             resolve_collection_binding(&current_runtime, &current_collection),
             (
                 CURRENT.to_string(),
-                Some(json!({ "other": { "type": "string" } }))
+                Some(value!({ "other": { "type": "string" } }))
             ),
             "the current binding must retain its own deploy token and descriptor entry",
         );

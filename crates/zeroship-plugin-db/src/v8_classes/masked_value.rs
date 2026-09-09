@@ -40,19 +40,17 @@
 #![allow(unsafe_code)]
 
 use crate::op_error::ToOpError;
-use serde_json::Value;
-use zeroship_runtime::state::{
-    IntoResolveValue, JsonValue, OpError, OpResult, ResolveValue,
-};
+use zeroship_data_query_builder::value::Value;
+use zeroship_runtime::state::{OpError, OpResult, ResolveValue};
 use zeroship_runtime_macros::v8_class;
 #[allow(unused_imports)]
 use zeroship_runtime_macros::{v8_async_method, v8_constructor, v8_getter, v8_method};
 
-use zeroship_data_core::binding::DbBinding;
 use crate::crud::unmask::{
     dispatch_bulk_unmask, dispatch_unmask, BulkUnmaskArgs, BulkUnmaskItem, UnmaskFieldArgs,
 };
-use crate::v8_bridge::{runtime_state, setup_js_promise, v8_value_to_serde_json};
+use crate::v8_bridge::{decode_native, runtime_state, setup_js_promise};
+use zeroship_data_core::binding::DbBinding;
 
 // ---------------------------------------------------------------------------
 // MaskedValue state
@@ -198,14 +196,14 @@ impl MaskedValue {
     ) -> v8::Local<'s, v8::Value> {
         if arg0.is_array() {
             // Multi-column path: arg0 is `columns`, arg1 is `opts`.
-            let cols_v = match v8_value_to_serde_json(scope, arg0) {
+            let cols_v = match decode_native(scope, arg0) {
                 Ok(v) => v,
                 Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
             };
             let opts_v = if arg1.is_null_or_undefined() {
-                Value::Object(serde_json::Map::new())
+                Value::Object(zeroship_data_query_builder::value::Map::new())
             } else {
-                match v8_value_to_serde_json(scope, arg1) {
+                match decode_native(scope, arg1) {
                     Ok(v) => v,
                     Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
                 }
@@ -214,14 +212,15 @@ impl MaskedValue {
         } else {
             // Single-column path: arg0 is `opts`.
             let opts_v = if arg0.is_null_or_undefined() {
-                Value::Object(serde_json::Map::new())
+                Value::Object(zeroship_data_query_builder::value::Map::new())
             } else {
-                match v8_value_to_serde_json(scope, arg0) {
+                match decode_native(scope, arg0) {
                     Ok(v) => v,
                     Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
                 }
             };
-            self.dispatch_unmask_single(scope, opts_v, /* probe = */ false).into()
+            self.dispatch_unmask_single(scope, opts_v, /* probe = */ false)
+                .into()
         }
     }
 
@@ -239,9 +238,9 @@ impl MaskedValue {
         opts: v8::Local<v8::Value>,
     ) -> v8::Local<'s, v8::Value> {
         let mut opts_v = if opts.is_null_or_undefined() {
-            Value::Object(serde_json::Map::new())
+            Value::Object(zeroship_data_query_builder::value::Map::new())
         } else {
-            match v8_value_to_serde_json(scope, opts) {
+            match decode_native(scope, opts) {
                 Ok(v) => v,
                 Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
             }
@@ -252,7 +251,8 @@ impl MaskedValue {
             obj.entry("reason".to_string())
                 .or_insert_with(|| Value::String("permission probe".into()));
         }
-        self.dispatch_unmask_single(scope, opts_v, /* probe = */ true).into()
+        self.dispatch_unmask_single(scope, opts_v, /* probe = */ true)
+            .into()
     }
 
     /// `mv.toString()` — yields the masked string. Same coercion-safe
@@ -346,18 +346,11 @@ impl MaskedValue {
                             request_id,
                         }
                     } else {
-                        // Resolve with the BARE plaintext
-                        // string. The SDK `MaskedValue` is now an ambient
-                        // `declare class` (no JS body), so this native
-                        // method IS the implementation of `unmask(): Promise<T>`
-                        // — there is no JS wrapper to unwrap a `{ plaintext }`
-                        // envelope. `dispatch_unmask` already returns the
-                        // plaintext encoded per the column's `wraps`
-                        // (UTF-8 string / stringified number / base64
-                        // bytes); the caller decodes per their schema.
+                        // The native method implements unmask(): Promise<T>;
+                        // resolve with the declared plaintext type directly.
                         OpResult::JsValue {
                             resolver,
-                            value: ResolveValue::String(result.plaintext),
+                            value: crate::v8_values::resolve(result.plaintext, false),
                             request_id,
                         }
                     }
@@ -462,19 +455,14 @@ impl MaskedValue {
                     // SDK's `MaskedValue.unmask(cols)` overload expects
                     // `Record<col, plaintext>`, not the wider
                     // `Record<row_pk, Record<col, plaintext>>` shape.
-                    let cols_map = result
-                        .results
-                        .get(&row_pk)
-                        .cloned()
-                        .unwrap_or_default();
-                    let mut payload = serde_json::Map::with_capacity(cols_map.len());
+                    let cols_map = result.results.get(&row_pk).cloned().unwrap_or_default();
+                    let mut payload = zeroship_data_query_builder::value::Map::new();
                     for (col, pt) in cols_map {
-                        payload.insert(col, Value::String(pt));
+                        payload.insert(col, pt);
                     }
                     OpResult::JsValue {
                         resolver,
-                        value: JsonValue(Value::Object(payload).to_string())
-                            .into_resolve_value(),
+                        value: crate::v8_values::resolve(Value::Object(payload), false),
                         request_id,
                     }
                 }
@@ -555,7 +543,7 @@ pub(crate) fn mint_masked_value<'s>(
 
 /// Walk the parsed-JSON V8 value and replace every `__zsmask__`-tagged
 /// sentinel object with a native `MaskedValue` v8_class instance. The
-/// runtime calls this from the `ResolveValue::JsonWithRehydration` arm
+/// native result adapter calls this after direct V8 materialization
 /// of the spawned-op pump (see `crates/zeroship-runtime/src/core/runtime.rs`).
 ///
 /// The function is the post-parse hook plugin-db registers; the runtime
@@ -630,6 +618,11 @@ impl RehydrateWalker {
         if self.depth >= self.cap {
             return None;
         }
+        // Binary fields are leaves. Enumerating a typed array would turn
+        // mask rehydration into a property walk over every byte.
+        if value.is_array_buffer_view() || value.is_array_buffer() {
+            return None;
+        }
         if value.is_array() {
             // Walk array elements; replace in place when a child gets
             // rewritten.
@@ -685,8 +678,7 @@ impl RehydrateWalker {
         // a JSONB column) are extremely unlikely to contain sentinels,
         // but we still walk for completeness.
         let mut changed = false;
-        if let Some(names) =
-            obj.get_own_property_names(scope, v8::GetPropertyNamesArgs::default())
+        if let Some(names) = obj.get_own_property_names(scope, v8::GetPropertyNamesArgs::default())
         {
             for i in 0..names.length() {
                 let Some(key_v) = names.get_index(scope, i) else {
@@ -704,7 +696,11 @@ impl RehydrateWalker {
                 }
             }
         }
-        if changed { Some(value) } else { None }
+        if changed {
+            Some(value)
+        } else {
+            None
+        }
     }
 
     fn mint_replacement<'s, 'a>(
@@ -720,12 +716,24 @@ impl RehydrateWalker {
         let masked_key = str_key(scope, "masked")?;
         let masked = obj
             .get(scope, masked_key)
-            .and_then(|v| if v.is_string() { Some(v.to_rust_string_lossy(scope)) } else { None })
+            .and_then(|v| {
+                if v.is_string() {
+                    Some(v.to_rust_string_lossy(scope))
+                } else {
+                    None
+                }
+            })
             .unwrap_or_default();
         let classification_key = str_key(scope, "classification")?;
         let classification = obj
             .get(scope, classification_key)
-            .and_then(|v| if v.is_string() { Some(v.to_rust_string_lossy(scope)) } else { None })
+            .and_then(|v| {
+                if v.is_string() {
+                    Some(v.to_rust_string_lossy(scope))
+                } else {
+                    None
+                }
+            })
             .unwrap_or_else(|| "pii".to_string());
 
         let meta_key = str_key(scope, "_meta")?;
@@ -793,10 +801,7 @@ impl RehydrateWalker {
 /// propagation in `walk` / `mint_replacement` short-circuits gracefully
 /// on alloc failure (returns `None` for that subtree; the rest of the
 /// walk continues).
-fn str_key<'s, 'a>(
-    scope: &mut v8::PinScope<'s, 'a>,
-    s: &str,
-) -> Option<v8::Local<'s, v8::Value>> {
+fn str_key<'s, 'a>(scope: &mut v8::PinScope<'s, 'a>, s: &str) -> Option<v8::Local<'s, v8::Value>> {
     v8::String::new(scope, s).map(Into::into)
 }
 
@@ -809,6 +814,32 @@ mod tests {
     use super::*;
 
     use zeroship_runtime::init_v8;
+
+    #[test]
+    fn mask_rehydration_does_not_inspect_binary_fields() {
+        init_v8();
+        let mut isolate = v8::Isolate::new(v8::CreateParams::default());
+        v8::scope!(let handles, &mut isolate);
+        let context = v8::Context::new(handles, Default::default());
+        let scope = &mut v8::ContextScope::new(handles, context);
+        let source = v8::String::new(scope, "globalThis.inspected = false; const bytes = new Uint8Array([0, 255]); Object.defineProperty(bytes, 'sentinel', {get() { inspected = true; }}); bytes").unwrap();
+        let input = v8::Script::compile(scope, source, None)
+            .unwrap()
+            .run(scope)
+            .unwrap();
+        let mut walker = RehydrateWalker {
+            binding: DbBinding::cold_start("app_a"),
+            depth: 0,
+            cap: 16,
+        };
+        assert!(walker.walk(scope, input).is_none());
+        let key = v8::String::new(scope, "inspected").unwrap();
+        assert!(context
+            .global(scope)
+            .get(scope, key.into())
+            .unwrap()
+            .is_false());
+    }
 
     /// Smoke: construct a fresh MaskedValue inside a V8 context and
     /// assert the brand-check on the resulting Object recognises it.
@@ -883,7 +914,11 @@ mod tests {
         // the runtime SharedState, absent in a bare test isolate; the walker
         // carries the binding itself and is the unit under test).
         fn new_walker() -> RehydrateWalker {
-            RehydrateWalker { binding: DbBinding::cold_start("app_a"), depth: 0, cap: 16 }
+            RehydrateWalker {
+                binding: DbBinding::cold_start("app_a"),
+                depth: 0,
+                cap: 16,
+            }
         }
 
         let forged = build_sentinel(scope, None);
@@ -891,7 +926,10 @@ mod tests {
             new_walker().walk(scope, forged.into()).is_none(),
             "an unsigned (forged) sentinel must not be minted"
         );
-        assert!(!MaskedValue::is_instance(scope, forged.into()), "forged stays a plain object");
+        assert!(
+            !MaskedValue::is_instance(scope, forged.into()),
+            "forged stays a plain object"
+        );
 
         let wrong = build_sentinel(scope, Some("not-the-real-signature"));
         assert!(
@@ -899,10 +937,16 @@ mod tests {
             "a wrong-signature sentinel must not be minted"
         );
 
-        let signed = build_sentinel(scope, Some(crate::crud::mask_pass::mask_sentinel_signature()));
+        let signed = build_sentinel(
+            scope,
+            Some(crate::crud::mask_pass::mask_sentinel_signature()),
+        );
         let out = new_walker().walk(scope, signed.into());
         assert!(out.is_some(), "a correctly-signed sentinel must be minted");
-        assert!(MaskedValue::is_instance(scope, out.unwrap()), "minted into a MaskedValue");
+        assert!(
+            MaskedValue::is_instance(scope, out.unwrap()),
+            "minted into a MaskedValue"
+        );
     }
 
     #[test]
@@ -994,7 +1038,8 @@ mod tests {
         // invoking it with `obj` as the receiver.
         let key = v8::String::new(scope, "toString").unwrap();
         let fn_v = obj.get(scope, key.into()).unwrap();
-        let func = v8::Local::<v8::Function>::try_from(fn_v).expect("toString should be a Function");
+        let func =
+            v8::Local::<v8::Function>::try_from(fn_v).expect("toString should be a Function");
         let result = func
             .call(scope, obj.into(), &[])
             .expect("toString should return a value");

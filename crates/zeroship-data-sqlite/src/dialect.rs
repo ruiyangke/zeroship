@@ -64,7 +64,11 @@ impl DialectBuilder for SqliteDialect {
     /// - Unknown types fall through to `TEXT` (the most permissive
     ///   affinity) with a debug log warning so the operator sees the
     ///   miss; production runs should hit only the typed branches.
-    fn map_zs_type(&self, zs_type: &str, _opts: &serde_json::Value) -> String {
+    fn map_zs_type(
+        &self,
+        zs_type: &str,
+        _opts: &zeroship_data_query_builder::value::Value,
+    ) -> String {
         match zs_type {
             "text" => "TEXT",
             "bigint" | "int8" | "integer" | "int" | "int4" => "INTEGER",
@@ -143,7 +147,6 @@ impl DialectBuilder for SqliteDialect {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     //! Unit tests for the pure-function dialect hooks. The hooks
@@ -160,11 +163,10 @@ mod tests {
         assert_eq!(d.quote_ident(""), "\"\"");
     }
 
-
     #[test]
     fn map_zs_type_covers_p1_vocabulary() {
         let d = SqliteDialect;
-        let no_opts = serde_json::json!({});
+        let no_opts = zeroship_data_query_builder::value!({});
         assert_eq!(d.map_zs_type("text", &no_opts), "TEXT");
         assert_eq!(d.map_zs_type("bigint", &no_opts), "INTEGER");
         assert_eq!(d.map_zs_type("int8", &no_opts), "INTEGER");
@@ -193,6 +195,9 @@ mod tests {
     fn now_fn_and_last_insert_rowid() {
         let d = SqliteDialect;
         assert_eq!(d.now_fn(), "CURRENT_TIMESTAMP");
-        assert_eq!(d.last_insert_rowid_sql(), Some("SELECT last_insert_rowid()"));
+        assert_eq!(
+            d.last_insert_rowid_sql(),
+            Some("SELECT last_insert_rowid()")
+        );
     }
 }

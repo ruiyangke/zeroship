@@ -18,6 +18,8 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
+import { t, type UpdateExpression } from "../src/types";
+
 import { validateDoc } from "../src/validate";
 
 function validate(type: string, value: unknown): { ok: true; doc: unknown } | { ok: false; message: string } {
@@ -51,6 +53,15 @@ describe("integral column types from the runtime descriptor", () => {
     const r = validate("bigInt", 2 ** 60);
     assert.equal(r.ok, false);
     assert.match((r as { message: string }).message, /represent exactly/);
+  });
+
+  it("preserves bigint inputs and refuses database integer overflow", () => {
+    const maximum = (1n << 63n) - 1n;
+    const accepted = validate("bigInt", maximum);
+    assert.equal(accepted.ok, true);
+    if (accepted.ok) assert.deepEqual(accepted.doc, {q: maximum});
+    assert.equal(validate("bigInt", maximum + 1n).ok, false);
+    assert.equal(validate("bigInt", -(1n << 63n) - 1n).ok, false);
   });
 
   it("accepts whole numbers in integral columns and fractions in float", () => {
@@ -94,7 +105,7 @@ describe("unknown field types fail closed", () => {
       ["array", []],
       ["date", "2026-08-08"],
       ["timestamp", "2026-08-08T00:00:00Z"],
-      ["bytes", "blob"],
+      ["bytes", new Uint8Array([1, 2, 3])],
       ["geoPoint", { lat: 1, lon: 2 }],
       ["calendarDate", "2026-08-08"],
       ["id", "usr_1"],
@@ -111,9 +122,24 @@ describe("unknown field types fail closed", () => {
     // vector / geoPoint / bytes / actor are deliberately not field-validated
     // here. They belong to the union, so the unknown-type guard must not catch
     // them - otherwise this fix trades one outage for another.
-    assert.equal(validate("bytes", "blob").ok, true);
+    assert.equal(validate("bytes", new Uint8Array([1, 2, 3])).ok, true);
+    assert.equal(validate("bytes", "blob").ok, false);
     assert.equal(validate("vector", [1, 2]).ok, true);
     assert.equal(validate("geoPoint", { lat: 1, lon: 2 }).ok, true);
     assert.equal(validate("actor", "usr_1").ok, true);
   });
+});
+
+it("types bigint arithmetic without widening ordinary numeric fields", () => {
+  const schema = { counter: t.bigInt().required(), score: t.number().required() };
+  const patch: UpdateExpression<typeof schema> = {
+    counter: { $inc: 1n },
+    $mul: { counter: 2n, score: 2 },
+  };
+  assert.deepEqual(patch.counter, { $inc: 1n });
+  const invalid: UpdateExpression<typeof schema> = {
+    // @ts-expect-error a floating point field does not accept bigint arithmetic
+    score: { $inc: 1n },
+  };
+  void invalid;
 });

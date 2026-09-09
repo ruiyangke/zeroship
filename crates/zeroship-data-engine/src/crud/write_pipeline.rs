@@ -1,4 +1,4 @@
-use serde_json::Value;
+use zeroship_data_query_builder::value::Value;
 
 use crate::compile;
 use crate::exec::exec_query;
@@ -159,8 +159,7 @@ pub async fn apply(
         "the write route must belong to the app being written"
     );
     // DB-8: validate every USER-supplied document field key BEFORE the system /
-    // encryption / mask passes below add their own (reserved-suffix / `__zsbin__`)
-    // sibling columns. The write SQL builders only `quote_ident`'d these keys —
+    // encryption / mask passes below add their own reserved sibling columns. The write SQL builders only `quote_ident`'d these keys —
     // they skipped the `validate_field_name` fence the read/filter path enforces,
     // letting a write smuggle a null-byte key, a >63-byte key (NAMEDATALEN
     // truncation collision), or a reserved name (e.g. `ssn_masked`) straight into
@@ -333,7 +332,7 @@ impl<'a> WriteStages<'a> {
         // ordering also means the ciphertext it deposits is never re-read as a
         // plain bytes value.
         if self.has_plain_bytes {
-            super::bytes_pass::encode_bytes_on_write(schema, dialect, row)?;
+            super::bytes_pass::validate_bytes_on_write(schema, row)?;
         }
         // LAST. Every stage above reads and writes a masked field under its
         // LOGICAL key and knows nothing about the flip; this one moves the
@@ -383,7 +382,7 @@ impl<'a> WriteStages<'a> {
             super::encode_sqlite_binary_update_with_schema(schema, patch)?;
         }
         if self.has_plain_bytes {
-            super::bytes_pass::encode_bytes_on_update(schema, dialect, patch)?;
+            super::bytes_pass::validate_bytes_on_update(schema, patch)?;
         }
         // LAST, on the same sub-document the encryption pass wrote to (`$set`
         // when the patch uses one). A field the patch does not mention is
@@ -502,7 +501,7 @@ fn update_touches_randomised_encrypted_field(schema: &Value, patch: &Value) -> b
     }
 
     update_obj.iter().any(|(field, value)| {
-        if field.starts_with('$') || field.starts_with("__zsbin__") {
+        if field.starts_with('$') {
             return false;
         }
         schema_obj
@@ -521,7 +520,7 @@ fn doc_touches_randomised_encrypted_field(schema: &Value, doc: &Value) -> bool {
     };
 
     doc_obj.iter().any(|(field, value)| {
-        if field.starts_with("__zsbin__") || value.is_null() {
+        if value.is_null() {
             return false;
         }
         schema_obj
@@ -585,7 +584,7 @@ async fn rewrite_upsert_doc_id_to_existing_row_id(
         return Ok(());
     }
 
-    let mut filter_obj = serde_json::Map::with_capacity(conflict_arr.len());
+    let mut filter_obj = zeroship_data_query_builder::value::Map::new();
     for field in conflict_arr.iter().filter_map(Value::as_str) {
         let Some(value) = obj.get(field).cloned() else {
             return Ok(());
@@ -700,7 +699,7 @@ fn deterministic_conflict_probe_schema(
     let Some(schema_obj) = schema.as_object() else {
         return Ok(None);
     };
-    let mut out = serde_json::Map::new();
+    let mut out = zeroship_data_query_builder::value::Map::new();
     for field in conflict_fields.iter().filter_map(Value::as_str) {
         let Some(def) = schema_obj.get(field) else {
             continue;
@@ -740,7 +739,7 @@ mod tests {
     /// touching a generated file, by sending `id` on an ordinary insert.
     #[test]
     fn a_supplied_id_is_refused_at_the_document_boundary() {
-        let doc = serde_json::json!({ "title": "hi", "id": "usr_034HQyaJ0C11GCzHMMrWwz" });
+        let doc = zeroship_data_query_builder::value!({ "title": "hi", "id": "usr_034HQyaJ0C11GCzHMMrWwz" });
         match super::refuse_platform_assigned_id(&doc) {
             Err(zeroship_data_core::error::DbError::ValidationFailed { code, .. }) => {
                 assert_eq!(code, "platform_assigned_field");
@@ -753,7 +752,7 @@ mod tests {
     /// above, so prove an ordinary document still passes.
     #[test]
     fn a_document_without_an_id_passes_the_boundary() {
-        let doc = serde_json::json!({ "title": "hi" });
+        let doc = zeroship_data_query_builder::value!({ "title": "hi" });
         super::refuse_platform_assigned_id(&doc)
             .expect("a document that supplies no id must be accepted");
     }
@@ -762,7 +761,7 @@ mod tests {
     /// to the validators beside this one.
     #[test]
     fn a_non_object_payload_is_not_this_fence_s_business() {
-        let doc = serde_json::json!("not a document");
+        let doc = zeroship_data_query_builder::value!("not a document");
         super::refuse_platform_assigned_id(&doc)
             .expect("a non-object payload is another validator's concern");
     }
@@ -770,8 +769,7 @@ mod tests {
     use std::path::PathBuf;
     use std::rc::Rc;
 
-    use base64::Engine as _;
-    use serde_json::Value;
+    use zeroship_data_query_builder::value::Value;
 
     use crate::tx_route::TxRoute;
     use zeroship_data_core::binding::DbBinding;
@@ -783,33 +781,33 @@ mod tests {
 
     #[test]
     fn db8_rejects_reserved_and_malformed_user_doc_keys() {
-        use serde_json::json;
+        use zeroship_data_query_builder::value;
         // A normal document passes.
-        assert!(validate_user_doc_keys(&json!({ "name": "a", "ssn": "x" })).is_ok());
+        assert!(validate_user_doc_keys(&value!({ "name": "a", "ssn": "x" })).is_ok());
         // The user must not forge the masked sibling suffix the platform emits.
-        assert!(validate_user_doc_keys(&json!({ "ssn_masked": "x" })).is_err());
+        assert!(validate_user_doc_keys(&value!({ "ssn_masked": "x" })).is_err());
         // Nor a platform-internal `_`-prefixed name (covers `__zsbin__` markers,
         // `__zs_`, synthetic `_rank`/`_score`).
-        assert!(validate_user_doc_keys(&json!({ "__zsbin__ssn": true })).is_err());
-        assert!(validate_user_doc_keys(&json!({ "_rank": 1 })).is_err());
+        assert!(validate_user_doc_keys(&value!({ "__zsbin__ssn": true })).is_err());
+        assert!(validate_user_doc_keys(&value!({ "_rank": 1 })).is_err());
         // Null-byte and >63-byte keys (NAMEDATALEN truncation collision).
-        assert!(validate_user_doc_keys(&json!({ "a\u{0}b": 1 })).is_err());
+        assert!(validate_user_doc_keys(&value!({ "a\u{0}b": 1 })).is_err());
         let long = "x".repeat(64);
-        assert!(validate_user_doc_keys(&json!({ long: 1 })).is_err());
+        assert!(validate_user_doc_keys(&value!({ long: 1 })).is_err());
     }
 
     #[test]
     fn db8_update_patch_validates_field_keys_not_operators() {
-        use serde_json::json;
+        use zeroship_data_query_builder::value;
         // Plain field keys + a field-scoped operator value pass.
         assert!(
-            validate_update_patch_keys(&json!({ "name": "a", "views": { "$inc": 1 } })).is_ok()
+            validate_update_patch_keys(&value!({ "name": "a", "views": { "$inc": 1 } })).is_ok()
         );
         // $set's nested field keys are validated; the operator key itself is skipped.
-        assert!(validate_update_patch_keys(&json!({ "$set": { "name": "a" } })).is_ok());
-        assert!(validate_update_patch_keys(&json!({ "$set": { "ssn_masked": "x" } })).is_err());
+        assert!(validate_update_patch_keys(&value!({ "$set": { "name": "a" } })).is_ok());
+        assert!(validate_update_patch_keys(&value!({ "$set": { "ssn_masked": "x" } })).is_err());
         // A top-level reserved field key is rejected.
-        assert!(validate_update_patch_keys(&json!({ "ssn_masked": "x" })).is_err());
+        assert!(validate_update_patch_keys(&value!({ "ssn_masked": "x" })).is_err());
     }
 
     #[test]
@@ -826,12 +824,12 @@ mod tests {
                 crate::cache_schema_for_tests(
                     &app_id,
                     collection,
-                    serde_json::json!({
+                    zeroship_data_query_builder::value!({
                         "id": { "type": "id", "idPrefix": prefix },
                         "name": { "type": "string" }
                     }),
                 );
-                let mut doc = serde_json::json!({ "name": "Alice" });
+                let mut doc = zeroship_data_query_builder::value!({ "name": "Alice" });
 
                 // The dialect is unobservable in this case and stated rather
                 // than defaulted: the fixture schema declares no encrypted,
@@ -874,12 +872,12 @@ mod tests {
             crate::cache_schema_for_tests(
                 app_id,
                 collection,
-                serde_json::json!({
+                zeroship_data_query_builder::value!({
                     "id": { "type": "id", "idPrefix": "blog" },
                     "name": { "type": "string" }
                 }),
             );
-            let mut doc = serde_json::json!({ "name": "Alice" });
+            let mut doc = zeroship_data_query_builder::value!({ "name": "Alice" });
 
             let (_dir, route) = empty_backend_route(app_id);
             apply(
@@ -926,7 +924,7 @@ mod tests {
             zeroship_migrate::shipping_vendors(),
             schema.as_str(),
             table,
-            fields,
+            &serde_json::to_value(fields).expect("migration metadata"),
             fks,
             &zeroship_migrate_sqlite::DIALECT,
             &policy,
@@ -1022,31 +1020,20 @@ mod tests {
         );
 
         let raw_col = crate::compile::raw_column_name("ssn");
-        let ciphertext_b64 = row
+        let ciphertext = row
             .get(&raw_col)
-            .and_then(Value::as_str)
-            .expect("the raw column should carry the ciphertext base64");
-        assert_ne!(
-            ciphertext_b64, expected_plaintext,
-            "write pipeline must not leave plaintext in the write doc",
-        );
-        // The binary-bind marker followed the value to the raw column, or the
-        // INSERT would bind base64 text into a BYTEA column.
-        assert!(
-            row.get(format!("__zsbin__{raw_col}").as_str()).is_some()
-                && row.get("__zsbin__ssn").is_none(),
-            "the binary-bind marker must name the raw column: {row}",
-        );
-        let ciphertext = base64::engine::general_purpose::STANDARD
-            .decode(ciphertext_b64)
-            .expect("ciphertext base64 must decode");
+            .and_then(Value::as_bytes)
+            .expect("native ciphertext");
+        assert_ne!(ciphertext, expected_plaintext.as_bytes());
+        assert!(row.get(format!("__zsbin__{raw_col}").as_str()).is_none());
+
         let key = backend
             .key_store()
             .resolve(app_id, key_id)
             .await
             .expect("resolve key");
         let aad = encryption::canonical_aad(collection, "ssn", Some(id.as_bytes()));
-        let plaintext = crate::encryption::aead::decrypt(&key, &ciphertext, &aad)
+        let plaintext = crate::encryption::aead::decrypt(&key, ciphertext, &aad)
             .expect("decrypt prepared ciphertext");
         assert_eq!(
             plaintext,
@@ -1076,7 +1063,7 @@ mod tests {
             let app_id = "app_write_pipeline";
             let binding = DbBinding::cold_start(app_id);
             let collection = "users";
-            let schema = serde_json::json!({
+            let schema = zeroship_data_query_builder::value!({
                 "email": { "type": "string", "required": true, "unique": true },
                 "name": { "type": "string", "required": true },
                 "ssn": {
@@ -1085,7 +1072,7 @@ mod tests {
                     "mask": { "kind": "last4", "classification": "spi" }
                 }
             });
-            let ddl_schema = serde_json::json!({
+            let ddl_schema = zeroship_data_query_builder::value!({
                 "email": { "type": "string", "required": true, "unique": true },
                 "name": { "type": "string", "required": true },
                 "ssn": {
@@ -1129,7 +1116,7 @@ mod tests {
                 backend.pool_exec(trimmed, &[]).await.expect("DDL exec");
             }
 
-            let mut insert_doc = serde_json::json!({
+            let mut insert_doc = zeroship_data_query_builder::value!({
                 "email": "seed@example.com",
                 "name": "Seed",
                 "ssn": "123-45-6789"
@@ -1172,13 +1159,13 @@ mod tests {
                 SqlDialect::Sqlite,
             )
             .expect("build insert");
-            let insert_params: Vec<&str> = insert_built.params.iter().map(String::as_str).collect();
+            let insert_params = &insert_built.params;
             let client = backend
                 .acquire_dedicated_client(app_id)
                 .await
                 .expect("acquire client");
             client
-                .query_typed_internal(&insert_built.sql, &insert_params)
+                .query_typed_internal(&insert_built.sql, insert_params)
                 .await
                 .expect("seed insert");
             let seeded_id = insert_doc
@@ -1187,7 +1174,7 @@ mod tests {
                 .expect("seeded row id")
                 .to_string();
 
-            let mut bulk_docs = serde_json::json!([
+            let mut bulk_docs = zeroship_data_query_builder::value!([
                 {
                     "email": "bulk-a@example.com",
                     "name": "Bulk A",
@@ -1235,7 +1222,7 @@ mod tests {
             )
             .await;
 
-            let mut update_patch = serde_json::json!({
+            let mut update_patch = zeroship_data_query_builder::value!({
                 "$set": {
                     "ssn": "555-55-5555",
                     "updated_by": "usr_override"
@@ -1275,7 +1262,7 @@ mod tests {
             );
             let update_ciphertext = update_target
                 .get(crate::compile::raw_column_name("ssn").as_str())
-                .and_then(Value::as_str)
+                .and_then(Value::as_bytes)
                 .expect("update ssn ciphertext in the raw column");
             let update_key = backend
                 .key_store()
@@ -1284,9 +1271,7 @@ mod tests {
                 .expect("resolve update key");
             let update_plaintext = crate::encryption::aead::decrypt(
                 &update_key,
-                &base64::engine::general_purpose::STANDARD
-                    .decode(update_ciphertext)
-                    .expect("decode update ciphertext"),
+                update_ciphertext,
                 &encryption::canonical_aad(collection, "ssn", Some(seeded_id.as_bytes())),
             )
             .expect("decrypt update ciphertext");
@@ -1295,8 +1280,8 @@ mod tests {
                 "update pipeline must encrypt against the filter row id",
             );
 
-            let conflict_fields = serde_json::json!(["email"]);
-            let mut upsert_doc = serde_json::json!({
+            let conflict_fields = zeroship_data_query_builder::value!(["email"]);
+            let mut upsert_doc = zeroship_data_query_builder::value!({
                 "id": "user_new",
                 "email": "seed@example.com",
                 "name": "Seed Updated",
@@ -1362,7 +1347,7 @@ mod tests {
             let app_id = "app_sqlite_protection_floor";
             let binding = DbBinding::cold_start(app_id);
             let collection = "people";
-            let masked = serde_json::json!({
+            let masked = zeroship_data_query_builder::value!({
                 "ssn": { "type": "string", "mask": { "kind": "last4", "classification": "spi" } },
                 // The control: same type, no mask. Every refusal below has to be
                 // about `ssn` and not about the collection being unwritable.
@@ -1413,7 +1398,8 @@ mod tests {
             // Control: under the mask-declaring descriptor the write prepares,
             // and the mask lands in the field's own column.
             cache_schema_for_tests(app_id, collection, masked);
-            let mut ok_doc = serde_json::json!({ "ssn": "123-45-6789", "nickname": "alice" });
+            let mut ok_doc =
+                zeroship_data_query_builder::value!({ "ssn": "123-45-6789", "nickname": "alice" });
             apply(
                 backend.key_store(),
                 SqlDialect::Sqlite,
@@ -1435,12 +1421,13 @@ mod tests {
             cache_schema_for_tests(
                 app_id,
                 collection,
-                serde_json::json!({
+                zeroship_data_query_builder::value!({
                     "ssn": { "type": "string" },
                     "nickname": { "type": "string" },
                 }),
             );
-            let mut doc = serde_json::json!({ "ssn": "987-65-4321", "nickname": "bob" });
+            let mut doc =
+                zeroship_data_query_builder::value!({ "ssn": "987-65-4321", "nickname": "bob" });
             let err = apply(
                 backend.key_store(),
                 SqlDialect::Sqlite,

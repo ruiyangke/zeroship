@@ -118,7 +118,7 @@ pub(crate) fn build_vector_search_sql(
     query_hex: &str,
     k: usize,
     where_expr: &str,
-    schema_hint: &serde_json::Value,
+    schema_hint: &zeroship_data_query_builder::value::Value,
 ) -> Result<String, DbError> {
     let qschema = quote_ident(app_id);
     let qcoll = quote_ident(collection);
@@ -186,7 +186,7 @@ mod tests {
 
     #[test]
     fn build_vector_search_sql_reads_masked_sibling_when_schema_cached() {
-        let schema = serde_json::json!({
+        let schema = zeroship_data_query_builder::value!({
             "ssn": {
                 "type": "string",
                 "mask": { "kind": "last4", "classification": "spi" }

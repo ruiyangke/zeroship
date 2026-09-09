@@ -67,8 +67,7 @@
 //! access to non-system callers. Without a configured policy, only the
 //! `auto` system actor can unmask.
 
-use base64::Engine as _;
-use serde_json::Value;
+use zeroship_data_query_builder::value::Value;
 
 use crate::backend::{BackendHandle, ScalarRead};
 use zeroship_data_core::binding::DbBinding;
@@ -108,15 +107,10 @@ pub struct UnmaskFieldArgs {
     pub rejected_claim: Option<Value>,
 }
 
-/// Result of a successful unmask. The wire shape is `{ plaintext: <str> }`;
-/// for `wraps = "bytes"` the SDK base64-decodes the string. The Rust
-/// side never carries raw `Vec<u8>` over the V8 boundary because
-/// `serde_json::Value` cannot represent binary directly.
-///
-/// Same visibility rationale as [`UnmaskFieldArgs`].
+/// Native plaintext returned after authorization and audit.
 #[derive(Debug, Clone)]
 pub struct UnmaskFieldResult {
-    pub plaintext: String,
+    pub plaintext: Value,
 }
 
 // ---------------------------------------------------------------------------
@@ -623,16 +617,15 @@ fn meter_audit_write(app_id: &str) {
 /// `EncryptionMode`, and decrypt through `encryption::aead`. The SELECT is
 /// still per-arm because the SQL differs; the decrypt is not, and stopped
 /// being so when `EncryptedColumn` was deleted on 2026-09-02.
-/// Returns the plaintext as a UTF-8 string (for `wraps = string`)
-/// or base64-encoded raw bytes (for `wraps = bytes`); `wraps = number`
-/// surfaces the f64's `to_string()` form.
+/// Returns the plaintext as a native string, byte buffer, or number according
+/// to the declared wrapped type.
 #[allow(unused_variables)]
 async fn fetch_and_decrypt(
     raw_column: &str,
     route: &crate::tx_route::TxRoute,
     args: &UnmaskFieldArgs,
     enc_meta: &ColumnEncryptionMeta,
-) -> Result<String, DbError> {
+) -> Result<Value, DbError> {
     // The prepared route arrives as an argument. This re-resolved a BACKEND
     // through the funnel until 2026-09-03, which was idempotent but pointless:
     // every reaching path runs `prepare_unmask_backend` first, so the second
@@ -683,15 +676,7 @@ async fn fetch_and_decrypt(
         // text protocol - the legacy shape `decrypt_row_on_read` still keeps a
         // compatibility arm for, and one this call has never produced.
         //
-        // The same reasoning is why this reads bytes through
-        // `read_roled_scalar_bytes` rather than the JSON funnel the search
-        // methods use: `pg_row_json::column_to_json` base64-encodes BYTEA, so
-        // routing ciphertext through it would put the text round-trip back.
-        //
-        // Nothing caught it because every live PG unmask fixture declared a
-        // masked but UNENCRYPTED column, and the SQLite twin below reads
-        // `TypedCell::Blob` and was always correct. The regression test is
-        // `unmask_encrypted_column_on_pg_reads_bytea_raw_sibling`.
+        // Ciphertext is read as bytes on the captured transaction route.
         let bytes = match crate::backend_handle::read_raw_column_bytes(
             route,
             &args.collection,
@@ -742,7 +727,7 @@ async fn fetch_plaintext_parent(
     raw_column: &str,
     route: &crate::tx_route::TxRoute,
     args: &UnmaskFieldArgs,
-) -> Result<String, DbError> {
+) -> Result<Value, DbError> {
     // The prepared route arrives as an argument, for the reason spelled out
     // on `fetch_and_decrypt`.
     let app_id = route.app_id();
@@ -755,11 +740,11 @@ async fn fetch_plaintext_parent(
     // Text, not bytes: this is the PLAINTEXT-storage path, so the raw sibling
     // is the column's own declared type. The encrypted path above reads bytes.
     //
-    // The vendor split moved into `backend_handle::read_raw_column_text` on
+    // The vendor split moved into `backend_handle::read_raw_column_value` on
     // 2026-09-02 (#119); the two error codes below are engine-tier policy and
     // stay here, which is why the backend returns a tri-state rather than
     // minting them itself.
-    match crate::backend_handle::read_raw_column_text(
+    match crate::backend_handle::read_raw_column_value(
         route,
         &args.collection,
         raw_column,
@@ -787,22 +772,15 @@ async fn fetch_plaintext_parent(
     }
 }
 
-/// Convert decrypted plaintext bytes into the JSON-wire string form per
-/// the column's `wraps` declaration:
-///
-/// - `"string"` → UTF-8 decode.
-/// - `"number"` → f64 big-endian decode + `to_string()`.
-/// - `"bytes"`  → base64 encode.
-///
-/// Only reachable through `fetch_and_decrypt`'s feature-gated arms.
-/// `#[allow(dead_code)]` keeps a no-backend build clean (no arm in
+/// Recover the declared native plaintext type after decryption.` keeps a no-backend build clean (no arm in
 /// `fetch_and_decrypt` calls it under `--no-default-features`).
 #[allow(dead_code)]
-fn wrap_plaintext_per_wraps(bytes: &[u8], wraps: &str) -> Result<String, DbError> {
+fn wrap_plaintext_per_wraps(bytes: &[u8], wraps: &str) -> Result<Value, DbError> {
     match wraps {
         "string" => Ok(std::str::from_utf8(bytes)
             .map_err(|e| DbError::internal(format!("unmask: plaintext not UTF-8: {e}")))?
-            .to_string()),
+            .to_string()
+            .into()),
         "number" => {
             if bytes.len() != 8 {
                 return Err(DbError::internal(format!(
@@ -812,9 +790,9 @@ fn wrap_plaintext_per_wraps(bytes: &[u8], wraps: &str) -> Result<String, DbError
             }
             let mut arr = [0u8; 8];
             arr.copy_from_slice(bytes);
-            Ok(f64::from_be_bytes(arr).to_string())
+            Value::try_from(f64::from_be_bytes(arr)).map_err(DbError::internal)
         }
-        "bytes" => Ok(base64::engine::general_purpose::STANDARD.encode(bytes)),
+        "bytes" => Ok(Value::Bytes(bytes.to_vec())),
         other => Err(DbError::internal(format!(
             "unmask: unknown wraps '{other}'"
         ))),
@@ -1017,7 +995,7 @@ pub struct BulkUnmaskArgs {
 /// so the JS caller materialises it directly.
 #[derive(Debug, Clone, Default)]
 pub struct BulkUnmaskResult {
-    pub results: std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
+    pub results: std::collections::BTreeMap<String, std::collections::BTreeMap<String, Value>>,
 }
 
 /// Public dispatch entry for `zeroship.db.bulkUnmaskFields`.
@@ -1568,7 +1546,7 @@ pub async fn dispatch_unmask_for_query(
                 // already carries: the SELECT projects descriptor keys, so
                 // inserting under the caller's spelling would leave the masked
                 // value in place and add a second, differently-spelled field.
-                obj.insert(canonical.clone(), Value::String(plaintext));
+                obj.insert(canonical.clone(), plaintext);
             }
         }
     }
@@ -1658,7 +1636,7 @@ pub fn parse_args(v: &Value) -> Result<UnmaskFieldArgs, DbError> {
 }
 
 /// Decode the JSON args coming from V8 into [`UnmaskFieldArgs`]. The
-/// V8 boundary already converted the JS object to `serde_json::Value`
+/// V8 boundary already converted the JS object to `zeroship_data_query_builder::value::Value`
 /// via `read_json_arg`; we just pluck the typed fields.
 fn parse_args_inner(v: &Value) -> Result<UnmaskFieldArgs, DbError> {
     let obj = v.as_object().ok_or_else(|| DbError::ValidationFailed {
@@ -1692,7 +1670,10 @@ fn parse_args_inner(v: &Value) -> Result<UnmaskFieldArgs, DbError> {
     })
 }
 
-fn require_string(obj: &serde_json::Map<String, Value>, key: &str) -> Result<String, DbError> {
+fn require_string(
+    obj: &zeroship_data_query_builder::value::Map<String, Value>,
+    key: &str,
+) -> Result<String, DbError> {
     obj.get(key)
         .and_then(|v| v.as_str())
         .ok_or_else(|| DbError::ValidationFailed {
@@ -1807,7 +1788,7 @@ fn parse_bulk_args_inner(v: &Value) -> Result<BulkUnmaskArgs, DbError> {
 }
 
 fn require_string_with_code(
-    obj: &serde_json::Map<String, Value>,
+    obj: &zeroship_data_query_builder::value::Map<String, Value>,
     key: &str,
     code: &'static str,
     method: &str,
@@ -1825,7 +1806,7 @@ fn require_string_with_code(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use zeroship_data_query_builder::value;
 
     // Every dispatch unit below refuses in the descriptor / validation
     // prologue, or returns on an empty input, BEFORE `prepare_unmask_backend`
@@ -1839,25 +1820,25 @@ mod tests {
         // App JS claiming the privileged system actor is stripped to None, so
         // check_unmask_authorization's "unauthenticated → denied" arm applies —
         // an app handler can no longer unmask its PII via {actor:{kind:"auto"}}.
-        let forged = sanitize_app_actor(Some(json!({ "kind": "auto" })));
+        let forged = sanitize_app_actor(Some(value!({ "kind": "auto" })));
         assert_eq!(forged.actor, None);
         // ...and the refused claim is RETAINED, so the audit row can record
         // that someone tried. Dropping it made a forged claim indistinguishable
         // from an absent actor in `__zeroship_audit_unmask`.
-        assert_eq!(forged.rejected_claim, Some(json!({ "kind": "auto" })));
+        assert_eq!(forged.rejected_claim, Some(value!({ "kind": "auto" })));
 
         // A non-reserved, app-declared actor kind passes through unchanged, and
         // produces no rejected claim.
-        let ordinary = sanitize_app_actor(Some(json!({ "kind": "support_agent" })));
-        assert_eq!(ordinary.actor, Some(json!({ "kind": "support_agent" })));
+        let ordinary = sanitize_app_actor(Some(value!({ "kind": "support_agent" })));
+        assert_eq!(ordinary.actor, Some(value!({ "kind": "support_agent" })));
         assert_eq!(ordinary.rejected_claim, None);
 
         // No actor / missing kind stay as-is (denied downstream regardless),
         // and neither is a refused CLAIM - nothing was claimed.
         assert_eq!(sanitize_app_actor(None).actor, None);
         assert_eq!(sanitize_app_actor(None).rejected_claim, None);
-        assert_eq!(sanitize_app_actor(Some(json!({}))).actor, Some(json!({})));
-        assert_eq!(sanitize_app_actor(Some(json!({}))).rejected_claim, None);
+        assert_eq!(sanitize_app_actor(Some(value!({}))).actor, Some(value!({})));
+        assert_eq!(sanitize_app_actor(Some(value!({}))).rejected_claim, None);
     }
 
     #[test]
@@ -1866,7 +1847,7 @@ mod tests {
         // None) hits check_unmask_authorization's "unauthenticated → denied"
         // arm — which returns before consulting any policy. Pre-fix the raw
         // {kind:"auto"} reached the no-policy fallback and was GRANTED.
-        let sanitized = sanitize_app_actor(Some(json!({ "kind": "auto" })));
+        let sanitized = sanitize_app_actor(Some(value!({ "kind": "auto" })));
         assert_eq!(sanitized.actor, None);
         assert!(
             !check_unmask_authorization("app_x", &sanitized.actor, "pii").unwrap(),
@@ -1890,24 +1871,24 @@ mod tests {
 
     #[test]
     fn authz_stub_grants_auto_actor() {
-        let actor = Some(json!({ "kind": "auto", "id": null }));
+        let actor = Some(value!({ "kind": "auto", "id": null }));
         assert!(check_unmask_authorization("authz_stub_grants_auto_1", &actor, "spi").unwrap());
-        let actor = Some(json!({ "kind": "auto", "id": "system" }));
+        let actor = Some(value!({ "kind": "auto", "id": "system" }));
         assert!(check_unmask_authorization("authz_stub_grants_auto_2", &actor, "pii").unwrap());
     }
 
     #[test]
     fn authz_stub_denies_user_actor() {
-        let actor = Some(json!({ "kind": "user", "id": "usr_xyz" }));
+        let actor = Some(value!({ "kind": "user", "id": "usr_xyz" }));
         assert!(!check_unmask_authorization("authz_stub_denies_user_1", &actor, "spi").unwrap());
-        let actor = Some(json!({ "kind": "user", "id": "usr_xyz" }));
+        let actor = Some(value!({ "kind": "user", "id": "usr_xyz" }));
         assert!(!check_unmask_authorization("authz_stub_denies_user_2", &actor, "pii").unwrap());
     }
 
     #[test]
     fn authz_stub_denies_other_kinds() {
         for kind in ["operator", "ai-builder", "anonymous", "service", ""] {
-            let actor = Some(json!({ "kind": kind }));
+            let actor = Some(value!({ "kind": kind }));
             let app_id = format!("authz_stub_denies_other_{kind}");
             assert!(
                 !check_unmask_authorization(&app_id, &actor, "pii").unwrap(),
@@ -1920,10 +1901,10 @@ mod tests {
     fn authz_stub_denies_unauthenticated() {
         assert!(!check_unmask_authorization("authz_stub_unauth_1", &None, "pii").unwrap());
         // Empty object — no `kind` field — also denied.
-        let actor = Some(json!({}));
+        let actor = Some(value!({}));
         assert!(!check_unmask_authorization("authz_stub_unauth_2", &actor, "pii").unwrap());
         // Actor that isn't an object (e.g. JS passed a string) — denied.
-        let actor = Some(json!("auto"));
+        let actor = Some(value!("auto"));
         assert!(!check_unmask_authorization("authz_stub_unauth_3", &actor, "pii").unwrap());
     }
 
@@ -1951,13 +1932,13 @@ mod tests {
     fn pr5_policy_grants_role_with_classification() {
         use crate::crud::mask_policy::MaskPolicy;
         let app_id = "pr5_grants_role_classification";
-        let policy = MaskPolicy::from_json(&json!({
+        let policy = MaskPolicy::from_json(&value!({
             "user": ["public", "pii"],
         }))
         .unwrap();
         let _g = PolicyGuard::install(app_id, policy);
 
-        let actor = Some(json!({ "kind": "user", "id": "usr_x" }));
+        let actor = Some(value!({ "kind": "user", "id": "usr_x" }));
         assert!(check_unmask_authorization(app_id, &actor, "pii").unwrap());
         assert!(check_unmask_authorization(app_id, &actor, "public").unwrap());
         assert!(!check_unmask_authorization(app_id, &actor, "spi").unwrap());
@@ -1967,13 +1948,13 @@ mod tests {
     fn pr5_policy_unknown_role_denied() {
         use crate::crud::mask_policy::MaskPolicy;
         let app_id = "pr5_unknown_role_denied";
-        let policy = MaskPolicy::from_json(&json!({
+        let policy = MaskPolicy::from_json(&value!({
             "user": ["public"],
         }))
         .unwrap();
         let _g = PolicyGuard::install(app_id, policy);
 
-        let actor = Some(json!({ "kind": "operator", "id": "op_1" }));
+        let actor = Some(value!({ "kind": "operator", "id": "op_1" }));
         assert!(!check_unmask_authorization(app_id, &actor, "public").unwrap());
     }
 
@@ -1983,13 +1964,13 @@ mod tests {
         let app_id = "pr5_auto_fallback";
         // Policy DOES list `user`, but NOT `auto` — the system actor
         // retains its uniform access via the fallback rule.
-        let policy = MaskPolicy::from_json(&json!({
+        let policy = MaskPolicy::from_json(&value!({
             "user": ["public"],
         }))
         .unwrap();
         let _g = PolicyGuard::install(app_id, policy);
 
-        let actor = Some(json!({ "kind": "auto" }));
+        let actor = Some(value!({ "kind": "auto" }));
         assert!(check_unmask_authorization(app_id, &actor, "pii").unwrap());
         assert!(check_unmask_authorization(app_id, &actor, "spi").unwrap());
         assert!(check_unmask_authorization(app_id, &actor, "internal").unwrap());
@@ -1999,13 +1980,13 @@ mod tests {
     fn pr5_auto_explicit_restriction_honoured() {
         use crate::crud::mask_policy::MaskPolicy;
         let app_id = "pr5_auto_explicit_restriction";
-        let policy = MaskPolicy::from_json(&json!({
+        let policy = MaskPolicy::from_json(&value!({
             "auto": ["public"],
         }))
         .unwrap();
         let _g = PolicyGuard::install(app_id, policy);
 
-        let actor = Some(json!({ "kind": "auto" }));
+        let actor = Some(value!({ "kind": "auto" }));
         assert!(check_unmask_authorization(app_id, &actor, "public").unwrap());
         assert!(!check_unmask_authorization(app_id, &actor, "pii").unwrap());
         assert!(!check_unmask_authorization(app_id, &actor, "spi").unwrap());
@@ -2013,7 +1994,7 @@ mod tests {
 
     #[test]
     fn lookup_mask_meta_accepts_field_name_alias_for_snake_case_schema() {
-        let schema = json!({
+        let schema = value!({
             "contact_email": {
                 "type": "string",
                 "mask": {
@@ -2029,7 +2010,7 @@ mod tests {
 
     #[test]
     fn parse_args_round_trip() {
-        let v = json!({
+        let v = value!({
             "collection": "users",
             "row_pk": "usr_01",
             "column": "ssn",
@@ -2047,7 +2028,7 @@ mod tests {
 
     #[test]
     fn parse_args_rejects_missing_field() {
-        let v = json!({ "collection": "users", "row_pk": "x" });
+        let v = value!({ "collection": "users", "row_pk": "x" });
         let err = parse_args(&v).unwrap_err();
         assert!(matches!(
             err,
@@ -2060,7 +2041,7 @@ mod tests {
 
     #[test]
     fn parse_args_rejects_empty_row_pk() {
-        let v = json!({
+        let v = value!({
             "collection": "users",
             "row_pk": "",
             "column": "ssn",
@@ -2080,7 +2061,7 @@ mod tests {
 
     #[test]
     fn parse_args_treats_null_actor_as_none() {
-        let v = json!({
+        let v = value!({
             "collection": "users",
             "row_pk": "u1",
             "column": "ssn",
@@ -2104,14 +2085,13 @@ mod tests {
         #[allow(clippy::approx_constant)]
         let bytes = 3.14f64.to_be_bytes();
         let s = wrap_plaintext_per_wraps(&bytes, "number").unwrap();
-        assert_eq!(s, "3.14");
+        assert_eq!(s.as_f64(), Some(f64::from_be_bytes(bytes)));
     }
 
     #[test]
-    fn wrap_plaintext_bytes_base64() {
+    fn wrap_plaintext_bytes_preserves_buffer() {
         let s = wrap_plaintext_per_wraps(&[0xde, 0xad, 0xbe, 0xef], "bytes").unwrap();
-        // base64 of [0xde, 0xad, 0xbe, 0xef] is `3q2+7w==`.
-        assert_eq!(s, "3q2+7w==");
+        assert_eq!(s.as_bytes(), Some([0xde, 0xad, 0xbe, 0xef].as_slice()));
     }
 
     // ---------------------------------------------------------------
@@ -2120,7 +2100,7 @@ mod tests {
 
     #[test]
     fn parse_bulk_args_round_trip_well_formed() {
-        let v = json!({
+        let v = value!({
             "collection": "users",
             "items": [
                 { "rowPk": "usr_01", "columns": ["ssn", "email"] },
@@ -2145,7 +2125,7 @@ mod tests {
         // Mirror the single-cell `row_pk` accepted shape — bulk SDK
         // calls coming through `row_pk` (rather than `rowPk`) must
         // still parse.
-        let v = json!({
+        let v = value!({
             "collection": "users",
             "items": [{ "row_pk": "u1", "columns": ["ssn"] }],
         });
@@ -2155,7 +2135,7 @@ mod tests {
 
     #[test]
     fn parse_bulk_args_rejects_non_object() {
-        let v = json!("nope");
+        let v = value!("nope");
         let err = parse_bulk_args(&v).unwrap_err();
         match err {
             DbError::ValidationFailed { code, .. } => {
@@ -2167,7 +2147,7 @@ mod tests {
 
     #[test]
     fn parse_bulk_args_rejects_missing_collection() {
-        let v = json!({ "items": [{ "rowPk": "u1", "columns": ["ssn"] }] });
+        let v = value!({ "items": [{ "rowPk": "u1", "columns": ["ssn"] }] });
         let err = parse_bulk_args(&v).unwrap_err();
         match err {
             DbError::ValidationFailed { code, .. } => {
@@ -2179,7 +2159,7 @@ mod tests {
 
     #[test]
     fn parse_bulk_args_rejects_non_array_items() {
-        let v = json!({ "collection": "users", "items": "not-an-array" });
+        let v = value!({ "collection": "users", "items": "not-an-array" });
         let err = parse_bulk_args(&v).unwrap_err();
         match err {
             DbError::ValidationFailed { code, message, .. } => {
@@ -2192,7 +2172,7 @@ mod tests {
 
     #[test]
     fn parse_bulk_args_rejects_empty_row_pk() {
-        let v = json!({
+        let v = value!({
             "collection": "users",
             "items": [{ "rowPk": "", "columns": ["ssn"] }],
         });
@@ -2207,7 +2187,7 @@ mod tests {
 
     #[test]
     fn parse_bulk_args_rejects_non_string_column() {
-        let v = json!({
+        let v = value!({
             "collection": "users",
             "items": [{ "rowPk": "u1", "columns": [42] }],
         });
@@ -2223,7 +2203,7 @@ mod tests {
 
     #[test]
     fn parse_bulk_args_treats_null_actor_as_none() {
-        let v = json!({
+        let v = value!({
             "collection": "users",
             "items": [{ "rowPk": "u1", "columns": ["ssn"] }],
             "actor": null,
@@ -2243,7 +2223,7 @@ mod tests {
         let args = BulkUnmaskArgs {
             collection: "users".into(),
             items: vec![],
-            actor: Some(json!({ "kind": "auto" })),
+            actor: Some(value!({ "kind": "auto" })),
             reason: None,
             rejected_claim: None,
         };
@@ -2270,7 +2250,7 @@ mod tests {
         crate::cache_schema_for_tests(
             app_id,
             "users",
-            json!({ "ssn": { "type": "string", "mask": { "kind": "last4" } } }),
+            value!({ "ssn": { "type": "string", "mask": { "kind": "last4" } } }),
         );
         let binding = DbBinding::cold_start(app_id);
         let runtime = compio::runtime::Runtime::new().unwrap();
@@ -2280,7 +2260,7 @@ mod tests {
                 row_pk: "u1".into(),
                 columns: vec!["mystery".into()],
             }],
-            actor: Some(json!({ "kind": "auto" })),
+            actor: Some(value!({ "kind": "auto" })),
             reason: None,
             rejected_claim: None,
         };
@@ -2313,7 +2293,7 @@ mod tests {
                 row_pk: "u1".into(),
                 columns: vec!["ssn".into()],
             }],
-            actor: Some(json!({ "kind": "auto" })),
+            actor: Some(value!({ "kind": "auto" })),
             reason: None,
             rejected_claim: None,
         };
@@ -2344,7 +2324,7 @@ mod tests {
                 &binding,
                 "users",
                 &[],
-                &Some(json!({ "kind": "user" })),
+                &Some(value!({ "kind": "user" })),
                 None,
                 &None,
             )
@@ -2362,7 +2342,7 @@ mod tests {
         crate::cache_schema_for_tests(
             app_id,
             "users",
-            json!({ "ssn": { "type": "string", "mask": { "kind": "last4" } } }),
+            value!({ "ssn": { "type": "string", "mask": { "kind": "last4" } } }),
         );
         let binding = DbBinding::cold_start(app_id);
         let runtime = compio::runtime::Runtime::new().unwrap();
@@ -2374,7 +2354,7 @@ mod tests {
                     &binding,
                     "users",
                     &["nonexistent".to_string()],
-                    &Some(json!({ "kind": "auto" })),
+                    &Some(value!({ "kind": "auto" })),
                     None,
                     &None,
                 )
@@ -2393,7 +2373,7 @@ mod tests {
     fn dispatch_unmask_for_query_empty_columns_is_noop() {
         let binding = DbBinding::cold_start("qhint_unit_empty_dispatch_app");
         let runtime = compio::runtime::Runtime::new().unwrap();
-        let mut rows = vec![json!({ "id": "u1", "name": "alice" })];
+        let mut rows = vec![value!({ "id": "u1", "name": "alice" })];
         let original = rows.clone();
         runtime
             .block_on(async {

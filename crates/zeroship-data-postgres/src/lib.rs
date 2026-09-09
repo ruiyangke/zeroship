@@ -64,7 +64,6 @@ pub mod postgres;
 
 pub use postgres::PostgresBackend;
 
-
 /// Postgres-specific extension trait exposing the underlying pool
 /// handle so free-function consumers — chiefly the audit helpers in
 /// `zeroship_plugin_db::audit` — can reach an `&compio_postgres::Pool` without
@@ -148,3 +147,6 @@ pub trait PgLockManager: LockManager<Client = compio_postgres::PoolConnection> {
         &self,
     ) -> Result<compio_postgres::PoolConnection, DbError>;
 }
+
+/// Native PostgreSQL parameter encoding.
+pub mod params;

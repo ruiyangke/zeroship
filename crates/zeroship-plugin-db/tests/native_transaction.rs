@@ -362,7 +362,7 @@ fn user_email_versions(url: &str, app: &str) -> Vec<(String, i32)> {
             .query(
                 &format!(
                     "SELECT email, version FROM \"{app}\".users \
-                     WHERE name = 'Red Team' ORDER BY id"
+                     WHERE name = 'Red Team' ORDER BY email"
                 ),
                 &[],
             )
@@ -924,8 +924,55 @@ export default { fetch: _fetch, rpc: _procedures };
     );
 }
 
-/// Commit on resolve: the callback inserts a row and resolves; the row
-/// persists and is visible after the transaction commits.
+/// Worker arguments and results preserve binary slices and wide integers.
+#[test]
+fn native_bytes_and_bigints_round_trip_through_worker_transactions() {
+    let url = require_pg();
+    let app = crate::test_app_id!();
+    let app = app.as_str();
+    reset_schema(&url, app);
+    let role = zeroship_core::database_role::per_app_role_name(app).unwrap();
+    exec_owner_sql(
+        &url,
+        &format!(
+            "ALTER TABLE \"{app}\".notes ADD COLUMN payload BYTEA, ADD COLUMN counter BIGINT; \
+         GRANT SELECT, INSERT, UPDATE ON \"{app}\".notes TO \"{role}\""
+        ),
+    );
+    let mut descriptor: serde_json::Value =
+        serde_json::from_str(&notes_runtime_descriptor()).unwrap();
+    descriptor["collections"]["notes"]["fields"]["payload"] = serde_json::json!({"type":"bytes"});
+    descriptor["collections"]["notes"]["fields"]["counter"] = serde_json::json!({"type":"bigInt"});
+    let src = build_src(
+        r#"
+function unwrap(result) { if (result.error) throw result.error; return result.data; }
+async function nativeValues() {
+    const result = await env.db.transaction(async tx => {
+        const inserted = await tx.notes.insert({
+            title: "native", payload: new Uint8Array([9, 0, 255, 8]).subarray(1, 3),
+            counter: 9223372036854775806n,
+        });
+        if (!(inserted.payload instanceof Uint8Array)) throw new Error("bytes lost their type");
+        if (typeof inserted.counter !== "bigint") throw new Error("integer lost precision");
+        const updated = await tx.notes.update({id: inserted.id}, {counter: {$inc: 1n}});
+        return {bytes: Array.from(updated.payload), counter: updated.counter.toString()};
+    });
+    return unwrap(result);
+}
+nativeValues.config = {kind: "action"};
+const _procedures = {nativeValues};
+"#,
+    );
+    let (status, body) =
+        dispatch_zs_with_descriptor(&url, &src, "nativeValues", app, descriptor.to_string());
+    assert_eq!(status, 200, "native worker values: {body}");
+    assert_eq!(
+        body["json"],
+        serde_json::json!({"bytes":[0,255], "counter":"9223372036854775807"})
+    );
+    assert_eq!(count_notes(&url, app), 1);
+}
+
 #[test]
 fn transaction_commits_on_resolve() {
     let url = require_pg();

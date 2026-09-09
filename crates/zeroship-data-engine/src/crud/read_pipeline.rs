@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
-use base64::Engine as _;
-use serde_json::Value;
+use zeroship_data_query_builder::value::Value;
 
 use zeroship_data_core::binding::DbBinding;
 use zeroship_data_core::error::DbError;
@@ -272,37 +271,19 @@ fn normalize_json_value(value: &mut Value) {
 
 fn normalize_bytes_value(value: &mut Value) -> Result<(), DbError> {
     match value {
-        Value::Null | Value::String(_) => Ok(()),
-        Value::Array(arr) => {
-            let mut raw = Vec::with_capacity(arr.len());
-            for cell in arr.iter() {
-                let Some(n) = cell.as_u64() else {
-                    return Err(DbError::internal(format!(
-                        "normalize_row_on_read: bytes field expected byte array, got {cell:?}"
-                    )));
-                };
-                let byte = u8::try_from(n).map_err(|_| {
-                    DbError::internal(format!(
-                        "normalize_row_on_read: bytes field byte out of range: {n}"
-                    ))
-                })?;
-                raw.push(byte);
-            }
-            *value = Value::String(base64::engine::general_purpose::STANDARD.encode(raw));
-            Ok(())
-        }
-        other => Err(DbError::internal(format!(
-            "normalize_row_on_read: bytes field expected string/array/null, got {other:?}"
-        ))),
+        Value::Null | Value::Bytes(_) => Ok(()),
+        _ => Err(DbError::internal(
+            "bytes column did not return native bytes",
+        )),
     }
 }
 
 fn normalize_timestamp_value(value: &mut Value) -> Result<(), DbError> {
     match value {
-        Value::Null | Value::Number(_) => Ok(()),
+        Value::Null | Value::Number(_) | Value::Timestamp(_) => Ok(()),
         Value::String(s) => {
             if let Some(ms) = parse_timestamp_millis(s) {
-                *value = Value::Number(serde_json::Number::from(ms));
+                *value = Value::Number(zeroship_data_query_builder::value::Number::from(ms));
             }
             Ok(())
         }
@@ -506,30 +487,36 @@ mod tests {
 
     #[test]
     fn normalize_row_on_read_coerces_sqlite_wire_shapes() {
-        let schema = serde_json::json!({
+        let schema = zeroship_data_query_builder::value!({
             "active": { "type": "boolean" },
             "prefs": { "type": "object" },
             "avatar": { "type": "bytes" },
             "published_at": { "type": "date" }
         });
-        let mut row = serde_json::json!({
+        let mut row = zeroship_data_query_builder::value!({
             "active": 1,
             "prefs": "{\"theme\":\"dark\"}",
-            "avatar": [104, 105],
+            "avatar": Value::Bytes(vec![104, 105]),
             "published_at": "2026-05-07T01:02:03.004Z"
         });
 
         normalize_row_on_read(&schema, &mut row).expect("normalize");
 
         assert_eq!(row["active"], Value::Bool(true));
-        assert_eq!(row["prefs"], serde_json::json!({"theme":"dark"}));
-        assert_eq!(row["avatar"], Value::String("aGk=".to_string()));
-        assert_eq!(row["published_at"], serde_json::json!(1_778_115_723_004i64));
+        assert_eq!(
+            row["prefs"],
+            zeroship_data_query_builder::value!({"theme":"dark"})
+        );
+        assert_eq!(row["avatar"], Value::Bytes(vec![104, 105]));
+        assert_eq!(
+            row["published_at"],
+            zeroship_data_query_builder::value!(1_778_115_723_004i64)
+        );
     }
 
     #[test]
     fn normalize_row_on_read_skips_encrypted_columns() {
-        let schema = serde_json::json!({
+        let schema = zeroship_data_query_builder::value!({
             "secret": {
                 "type": "bytes",
                 "encrypted": {
@@ -538,7 +525,7 @@ mod tests {
                 }
             }
         });
-        let mut row = serde_json::json!({
+        let mut row = zeroship_data_query_builder::value!({
             "secret": "AQID"
         });
 
@@ -557,7 +544,7 @@ mod tests {
     /// declared fields. The behaviour the test pins is unchanged.
     #[test]
     fn normalize_row_on_read_without_declared_fields_only_normalizes_system_timestamps() {
-        let mut row = serde_json::json!({
+        let mut row = zeroship_data_query_builder::value!({
             "created_at": "2026-05-07T01:02:03.004Z",
             "published_at": "2026-05-07T01:02:03.004Z",
             "active": 1,
@@ -566,12 +553,15 @@ mod tests {
 
         normalize_row_on_read(&crate::compile::empty_read_schema(), &mut row).expect("normalize");
 
-        assert_eq!(row["created_at"], serde_json::json!(1_778_115_723_004i64));
+        assert_eq!(
+            row["created_at"],
+            zeroship_data_query_builder::value!(1_778_115_723_004i64)
+        );
         assert_eq!(
             row["published_at"],
             Value::String("2026-05-07T01:02:03.004Z".to_string())
         );
-        assert_eq!(row["active"], serde_json::json!(1));
+        assert_eq!(row["active"], zeroship_data_query_builder::value!(1));
         assert_eq!(
             row["prefs"],
             Value::String("{\"theme\":\"dark\"}".to_string())
@@ -597,10 +587,10 @@ mod tests {
 
     #[test]
     fn normalize_row_on_read_rejects_out_of_domain_boolean_values() {
-        let schema = serde_json::json!({
+        let schema = zeroship_data_query_builder::value!({
             "active": { "type": "boolean" }
         });
-        let mut row = serde_json::json!({
+        let mut row = zeroship_data_query_builder::value!({
             "active": 2
         });
 
@@ -622,7 +612,7 @@ mod tests {
         crate::cache_schema_for_tests(
             "app_aggregate_scope",
             "users",
-            serde_json::json!({
+            zeroship_data_query_builder::value!({
                 "secret": {
                     "type": "string",
                     "encrypted": {
@@ -638,7 +628,7 @@ mod tests {
             }),
         );
 
-        let rows = vec![serde_json::json!({
+        let rows = vec![zeroship_data_query_builder::value!({
             "secret": 3
         })];
 
@@ -673,7 +663,10 @@ mod tests {
             ))
             .expect("aggregate aliases must bypass schema-driven transforms");
 
-        assert_eq!(result.rows, vec![serde_json::json!({ "secret": 3 })]);
+        assert_eq!(
+            result.rows,
+            vec![zeroship_data_query_builder::value!({ "secret": 3 })]
+        );
         assert!(!result.has_masked);
 
         // The control, and the reason `RowSurface` has no permissive arm: a
@@ -693,7 +686,10 @@ mod tests {
                 },
             ))
             .expect("apply");
-        assert_eq!(defaulted.rows, vec![serde_json::json!({})]);
+        assert_eq!(
+            defaulted.rows,
+            vec![zeroship_data_query_builder::value!({})]
+        );
 
         // Drop route-then-directory explicitly. `unit_route` returns
         // `(TxRoute, TempDir)` and the route owns the backend; scope exit drops
@@ -710,7 +706,7 @@ mod tests {
         crate::cache_schema_for_tests(
             "app_distinct_masked",
             "users",
-            serde_json::json!({
+            zeroship_data_query_builder::value!({
                 "email": {
                     "type": "string",
                     "mask": { "kind": "email", "classification": "pii" }
@@ -718,7 +714,7 @@ mod tests {
             }),
         );
 
-        let rows = vec![serde_json::json!({
+        let rows = vec![zeroship_data_query_builder::value!({
             "email": "a***@example.com"
         })];
 
@@ -747,7 +743,7 @@ mod tests {
 
         assert_eq!(
             result.rows,
-            vec![serde_json::json!({ "email": "a***@example.com" })]
+            vec![zeroship_data_query_builder::value!({ "email": "a***@example.com" })]
         );
         assert!(!result.has_masked);
 

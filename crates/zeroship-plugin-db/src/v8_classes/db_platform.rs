@@ -42,9 +42,9 @@ use zeroship_runtime_macros::v8_class;
 #[allow(unused_imports)]
 use zeroship_runtime_macros::{v8_constructor, v8_getter, v8_method};
 
-use zeroship_data_core::binding::DbBinding;
+use crate::v8_bridge::read_native_arg;
 use crate::v8_classes::dispatch::dispatch_set_mask_policy_field;
-use crate::v8_bridge::read_json_arg;
+use zeroship_data_core::binding::DbBinding;
 
 // ---------------------------------------------------------------------------
 // DbPlatform state
@@ -103,7 +103,7 @@ impl DbPlatform {
         scope: &mut v8::PinScope<'s, '_>,
         policy: v8::Local<v8::Value>,
     ) -> Result<v8::Local<'s, v8::Value>, OpError> {
-        let policy_v = match read_json_arg(scope, Some(policy)) {
+        let policy_v = match read_native_arg(scope, Some(policy)) {
             Ok(v) => v,
             Err(e) => return Ok(crate::v8_bridge::throw_decode_error(scope, &e)),
         };

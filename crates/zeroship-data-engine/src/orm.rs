@@ -4,10 +4,10 @@
 //! the request's identity, actor, read set and transaction route synchronously;
 //! execution can then yield without consulting another request's context.
 
-use serde_json::Value;
 use std::{cell::Cell, future::Future, marker::PhantomData, rc::Rc};
 use zeroship_core::change_event::ChangeOp;
 use zeroship_data_core::{binding::DbBinding, error::DbError};
+pub use zeroship_data_query_builder::value::Value;
 
 use crate::{backend::BackendHandle, compile::BuiltQuery, crud, tx_route::CapturedRoute};
 
@@ -219,12 +219,13 @@ impl Collection {
 
 /// A Rust row mapping. Insert data is separate from returned rows so callers
 /// need not manufacture the platform's generated identity and audit fields.
-pub trait Model: serde::de::DeserializeOwned {
+pub trait Model: Sized {
     const COLLECTION: &'static str;
-    type Insert: serde::Serialize;
+    type Insert: EncodeRecord;
+    fn from_row(row: Row) -> Result<Self, DbError>;
 }
 
-/// A collection whose rows deserialize into a model.
+/// A collection whose native rows map into a model.
 #[derive(Debug)]
 pub struct ModelCollection<M: Model> {
     collection: Collection,
@@ -234,41 +235,39 @@ pub struct ModelCollection<M: Model> {
 impl<M: Model> ModelCollection<M> {
     pub fn find(
         &self,
-        filter: Value,
-        options: Value,
+        filter: Filter<M>,
+        options: FindOptions,
     ) -> impl Future<Output = Result<Vec<M>, DbError>> + use<M> {
-        let future = self.collection.find(filter, options);
+        let future = self
+            .collection
+            .find(filter.into_value(), options.into_value());
         async move { decode_rows(future.await?) }
     }
-
-    pub fn insert(
-        &self,
-        document: &M::Insert,
-    ) -> impl Future<Output = Result<M, DbError>> + use<M> {
-        let document = serde_json::to_value(document)
-            .map_err(|e| DbError::validation("model_encode_failed", e.to_string()));
-        let future = document.map(|document| self.collection.insert(document));
+    pub fn insert(&self, document: M::Insert) -> impl Future<Output = Result<M, DbError>> + use<M> {
+        let future = self
+            .collection
+            .insert(Value::Object(document.into_record()));
         async move {
-            decode_rows(future?.await?)?
+            decode_rows(future.await?)?
                 .pop()
                 .ok_or_else(|| DbError::internal("insert returned no row"))
         }
     }
-
     pub fn update(
         &self,
-        filter: Value,
-        patch: Value,
+        filter: Filter<M>,
+        patch: Patch<M>,
     ) -> impl Future<Output = Result<Option<M>, DbError>> + use<M> {
-        let future = self.collection.update(filter, patch);
+        let future = self
+            .collection
+            .update(filter.into_value(), patch.into_value());
         async move { Ok(decode_rows(future.await?)?.pop()) }
     }
-
     pub fn delete(
         &self,
-        filter: Value,
+        filter: Filter<M>,
     ) -> impl Future<Output = Result<Option<M>, DbError>> + use<M> {
-        let future = self.collection.delete(filter);
+        let future = self.collection.delete(filter.into_value());
         async move { Ok(decode_rows(future.await?)?.pop()) }
     }
 }
@@ -278,12 +277,16 @@ fn decode_rows<M: Model>(output: Output) -> Result<Vec<M>, DbError> {
         return Err(DbError::internal("expected model rows"));
     };
     rows.into_iter()
-        .map(|row| {
-            serde_json::from_value(row)
-                .map_err(|e| DbError::validation("model_decode_failed", e.to_string()))
+        .map(|row| match row {
+            Value::Object(fields) => M::from_row(Row::new(fields)),
+            _ => Err(DbError::internal("database returned a non-record row")),
         })
         .collect()
 }
+
+mod model;
+pub use model::{DecodeValue, EncodeRecord, Field, Filter, FindOptions, Patch, Row};
+pub use zeroship_data_query_builder::value::Record;
 
 #[cfg(test)]
 mod tests;
