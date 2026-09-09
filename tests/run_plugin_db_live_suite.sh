@@ -212,7 +212,7 @@ PLUGIN_DB_MIN_PASSED=114
 echo "==> zeroship-plugin-db live-database suite"
 echo "    PG_TEST_URL=${PG_TEST_URL%%\?*}"
 
-# The live-Postgres targets this gate owns. `integration` and
+# The live-Postgres files this gate owns. `integration` and
 # `native_transaction` are the two
 # siblings ci.yml names together as belonging "with the other live-database
 # gates"; running only the first would leave the second in exactly the limbo
@@ -220,23 +220,44 @@ echo "    PG_TEST_URL=${PG_TEST_URL%%\?*}"
 # the same reason: it dials the same server, needs the same wal_level=logical,
 # and was reachable only by hand until it was listed here.
 #
+# FOUR OF THE FIVE ARE NO LONGER TARGETS. `zeroship-plugin-db` now links one
+# integration-test target per FEATURE RESOLUTION, not one per file, so
+# `integration`, `native_transaction`, `missing_role` and `column_grants` are
+# modules of the `test_helpers` target; `crates/zeroship-plugin-db/tests/main.rs`
+# says why. Selecting one is therefore a libtest FILTER on its module path
+# rather than `--test <name>`, and the composition below is unchanged by that:
+# the same files run, in the same five separate processes, so the floor above
+# still compares like with like.
+#
+# A libtest filter is a SUBSTRING match with no anchor, which is what the
+# `--skip` on the first leg is for: `integration::` also selects
+# `sqlite_integration::`, a module this gate does not own and whose tests need no
+# server. Leave it in; without it this leg silently grows.
+#
 # `--test-threads=1` is required, not tidiness: these tests share one database
 # and create identically-named schemas, which is the same hazard #78 fixed for
-# compio-postgres.
+# compio-postgres. It is also what keeps `support::sweep_prior_run_residue_once`
+# away from a live sibling now that the files share a process - see the
+# `test_helpers.rs` header.
 suite_rc=0
 : > "$SUITE_LOG"
 # `live-db-tests` NOT `test-helpers`: it is a superset
 # (live-db-tests = ["test-helpers"]), `distributed_live` declares
-# `required-features = ["live-db-tests"]`, and `missing_role` declares
+# `required-features = ["live-db-tests"]`, and `test_helpers` declares
 # `required-features = ["test-helpers"]`. Passing the narrower feature makes
 # cargo REFUSE the distributed target with "requires the features", while the
-# superset lets all five targets build.
-for target in integration native_transaction distributed_live missing_role column_grants; do
-  echo "--- cargo test --test ${target} ---" | tee -a "$SUITE_LOG"
-  cargo test -p zeroship-plugin-db --features live-db-tests --test "$target" \
-    -- --test-threads=1 2>&1 | tee -a "$SUITE_LOG"
+# superset lets both targets build.
+run_leg() {
+  echo "--- cargo test $* ---" | tee -a "$SUITE_LOG"
+  cargo test -p zeroship-plugin-db --features live-db-tests "$@" 2>&1 | tee -a "$SUITE_LOG"
   [ "${PIPESTATUS[0]}" -ne 0 ] && suite_rc=1
-done
+  return 0
+}
+run_leg --test test_helpers -- --test-threads=1 --skip sqlite_integration:: integration::
+run_leg --test test_helpers -- --test-threads=1 native_transaction::
+run_leg --test test_helpers -- --test-threads=1 missing_role::
+run_leg --test test_helpers -- --test-threads=1 column_grants::
+run_leg --test distributed_live -- --test-threads=1
 
 # Sum EVERY `test result:` line rather than reading the last one. One binary
 # emits one line today, but a tail would silently start lying the moment a
