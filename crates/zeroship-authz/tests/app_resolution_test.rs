@@ -392,7 +392,11 @@ impl Fixture {
     }
 }
 
+/// A canonical typed id, minted by the one minter.
+///
+/// Composing a body by hand pins BOTH the width and the alphabet, so it stops
+/// satisfying the schema's shape CHECK the moment either moves - and it fails at
+/// insert time, not at compile time.
 fn typed_id(prefix: &str) -> String {
-    let hex = Uuid::new_v4().simple().to_string();
-    format!("{prefix}_{}", &hex[..22])
+    zeroship_core::typed_id::generate(prefix)
 }
