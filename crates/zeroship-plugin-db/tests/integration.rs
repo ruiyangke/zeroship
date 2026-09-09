@@ -1,8 +1,3 @@
-// The parity Postgres fixture chains four awaits over compio-postgres futures in one
-// block; each layer is a large generated state machine, and the default 128 is not
-// enough to compute its layout. A compile-budget knob, not a behaviour change.
-#![recursion_limit = "256"]
-
 //! Integration tests for plugin-db query builders against real Postgres.
 //!
 //! Requires: the test PostgreSQL named by the overlay
@@ -12,11 +7,17 @@
 //! Run:
 //! ```text
 //! RUST_MIN_STACK=33554432 \
-//! cargo test -p zeroship-plugin-db --test integration
+//! cargo test -p zeroship-plugin-db --test test_helpers \
+//!   -- --skip sqlite_integration:: integration::
 //! ```
 //!
-//! Ordinary package tests include this target and require PostgreSQL.
-//! Test builds enable integration helpers through the self dev-dependency.
+//! This file is a module of the `test_helpers` target rather than a target of
+//! its own (`tests/main.rs` says why), so selecting it is a libtest FILTER on
+//! its module path. A filter is a substring match with no anchor, which is what
+//! the `--skip` is for: `integration::` also selects `sqlite_integration::`.
+//!
+//! Ordinary package tests include this module and require PostgreSQL.
+//! Integration helpers are enabled by the package self dev-dependency.
 //!
 //! # This suite runs at the default thread count, and that took three fixes
 //!
@@ -65,10 +66,12 @@
 //!    slot reaper's fleet-leader lock and all-apps enumeration are exclusive by
 //!    design. No naming scheme partitions those; see [`cdc_budget`].
 
-#[path = "support/schema.rs"]
-mod schema_fixture;
+// `support`, `schema_fixture` and `parity` are declared once by
+// `tests/test_helpers.rs`, the entry file this module hangs off; its header says
+// why a second declaration here would be a second copy of their statics.
 #[allow(unused_imports)]
-use schema_fixture::{fixture_table_sql, fixture_table_sql_for};
+use crate::schema_fixture::{fixture_table_sql, fixture_table_sql_for};
+use crate::{parity, schema_fixture, support};
 #[allow(unused_imports)]
 use zeroship_migrate::schema::query::FkEmission;
 
@@ -79,12 +82,6 @@ use zeroship_data_query_builder::value::{value, Value};
 use zeroship_plugin_db::backend::ChangeStream;
 
 const CDC_TEST_WORKER_ID: &str = "plugin-db-integration-worker";
-
-#[path = "support/mod.rs"]
-mod support;
-
-#[path = "parity/mod.rs"]
-mod parity;
 
 fn test_url() -> String {
     zeroship_core::config::test_database_url()

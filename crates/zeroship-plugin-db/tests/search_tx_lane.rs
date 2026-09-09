@@ -1,9 +1,3 @@
-// This test target is its own crate ROOT and overflows rustc's layout query
-// computing the layout of `support::grant_all_runtime_table_columns()`.
-// `recursion_limit` is per crate root, so the crate's lib and its sibling test
-// targets do not cover this one.
-#![recursion_limit = "256"]
-
 //! Which CONNECTION the SEARCH FAMILY uses, inside `db.transaction(fn)`.
 //!
 //! # The claim these tests exist to rule on
@@ -48,13 +42,15 @@
 //! ```text
 //! PG_TEST_URL=postgres://postgres:postgres@127.0.0.1:5478/postgres \
 //!   cargo test -p zeroship-plugin-db --features test-helpers \
-//!     --test search_tx_lane -- --test-threads=1
+//!     --test test_helpers -- --test-threads=1 search_tx_lane::
 //! ```
 
-#[path = "support/schema.rs"]
-mod schema_fixture;
+// `support` and `schema_fixture` are declared once by `tests/test_helpers.rs`,
+// the entry file this module hangs off; its header says why a second declaration
+// here would be a second copy of their statics.
 #[allow(unused_imports)]
-use schema_fixture::{fixture_table_sql, fixture_table_sql_for};
+use crate::schema_fixture::{fixture_table_sql, fixture_table_sql_for};
+use crate::support;
 #[allow(unused_imports)]
 use zeroship_migrate::schema::query::FkEmission;
 
@@ -66,9 +62,6 @@ use zeroship_data_core::error::DbError;
 use zeroship_data_query_builder::value::{value, Value};
 use zeroship_plugin_db::compile::{BuiltQuery, SqlDialect};
 use zeroship_plugin_db::tx_route::{CapturedRoute, TxRoute};
-
-#[path = "support/mod.rs"]
-mod support;
 
 fn test_url() -> String {
     zeroship_core::config::test_database_url()
