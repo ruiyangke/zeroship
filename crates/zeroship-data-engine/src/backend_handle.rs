@@ -31,7 +31,7 @@
 
 use std::rc::Rc;
 
-use serde_json::Value;
+use zeroship_data_query_builder::value::Value;
 
 use zeroship_data_core::binding::DbBinding;
 use zeroship_data_core::error::DbError;
@@ -159,9 +159,9 @@ pub async fn routed_vector_search(
     query: &[f32],
     k: usize,
     metric: VectorMetric,
-    filter: &serde_json::Value,
-    schema: &serde_json::Value,
-) -> Result<Vec<serde_json::Value>, DbError> {
+    filter: &zeroship_data_query_builder::value::Value,
+    schema: &zeroship_data_query_builder::value::Value,
+) -> Result<Vec<zeroship_data_query_builder::value::Value>, DbError> {
     match route.backend() {
         // The SQLite arm has to ATTACH the app's database file before it
         // can scan it. That prelude sat at the engine call site; it belongs
@@ -204,10 +204,10 @@ pub async fn routed_spatial_near(
     column: &str,
     point: GeoPoint,
     radius_m: f64,
-    filter: &serde_json::Value,
+    filter: &zeroship_data_query_builder::value::Value,
     limit: Option<usize>,
-    schema: &serde_json::Value,
-) -> Result<Vec<serde_json::Value>, DbError> {
+    schema: &zeroship_data_query_builder::value::Value,
+) -> Result<Vec<zeroship_data_query_builder::value::Value>, DbError> {
     match route.backend() {
         BackendHandle::Sqlite(sq) => {
             sq.attach_app_file(binding.app_id()).await?;
@@ -247,32 +247,27 @@ async fn read_on_route<T>(
 /// The transaction arm is the parked client, raw: it is already inside the
 /// creator's `BEGIN`, whose `SET LOCAL ROLE` and DB-1 timeouts
 /// `tx_session_setup_sql` installed when the transaction opened. The autocommit
-/// arm goes through `query_roled_json`, which mints that same session state for
+/// arm goes through `query_roled_values`, which mints that same session state for
 /// its own single-statement transaction. Both therefore run under the app's
 /// role; what differs is which connection, which is the whole question.
 async fn run_planned_postgres_read(
     route: &crate::tx_route::TxRoute,
     pg: &PostgresBackend,
     bq: &crate::compile::BuiltQuery,
-) -> Result<Vec<serde_json::Value>, DbError> {
+) -> Result<Vec<zeroship_data_query_builder::value::Value>, DbError> {
     read_on_route(route, async {
-        let params: Vec<&str> = bq.params.iter().map(String::as_str).collect();
+        let params = &bq.params;
         if route.in_tx() {
             let lane = crate::exec::take_tx_lane(route)?;
             let TxConnection::Postgres(client) = lane.client() else {
                 return Err(lane_vendor_mismatch());
             };
-            let rows = client
-                .query_text_params(&bq.sql, &params)
-                .await
-                .map_err(|e| crate::backend::pg_error::classify(&e))?;
-            return Ok(zeroship_data_postgres::pg_row_json::rows_to_json_value(
-                &rows,
-            ));
+            let rows = zeroship_data_postgres::params::query(client, &bq.sql, params).await?;
+            return Ok(zeroship_data_postgres::pg_row_json::rows_to_values(&rows));
         }
         // SCHEMA: the roled autocommit lane qualifies the table and derives the
         // per-app role, both from the physical schema.
-        pg.query_roled_json(route.schema(), &bq.sql, &params).await
+        pg.query_roled_values(route.schema(), &bq.sql, params).await
     })
     .await
 }
@@ -353,7 +348,7 @@ pub async fn read_raw_column_bytes(
                         .map_err(|e| crate::backend::pg_error::classify(&e))?;
                     return zeroship_data_postgres::pg_autocommit::scalar_bytes(&rows);
                 }
-                pg.read_roled_scalar_bytes(route.schema(), &sql, &[row_pk])
+                pg.read_roled_scalar_bytes(route.schema(), &sql, &[row_pk.into()])
                     .await
             }
             BackendHandle::Sqlite(sq) => {
@@ -362,7 +357,7 @@ pub async fn read_raw_column_bytes(
                 let q_col = sq.quote_ident(raw_column);
                 let sql = format!("SELECT {q_col} FROM {q_app}.{q_coll} WHERE id = ?1");
                 let (_lane_claim, lane) = sqlite_lane(route, sq)?;
-                let typed = lane.query_typed_internal(&sql, &[row_pk]).await?;
+                let typed = lane.query_typed_internal(&sql, &[row_pk.into()]).await?;
                 if typed.rows.is_empty() {
                     return Ok(ScalarRead::NoRow);
                 }
@@ -379,7 +374,7 @@ pub async fn read_raw_column_bytes(
     .await
 }
 
-/// Read the RAW sibling of a masked column as TEXT, on this dispatch's lane.
+/// Read the RAW sibling in its native type, on this dispatch's lane.
 ///
 /// The plaintext-storage half: the column carries `.mask({...})` WITHOUT
 /// `.encrypted(...)`, so the sibling holds the value in its own declared
@@ -388,14 +383,13 @@ pub async fn read_raw_column_bytes(
 ///
 /// # Errors
 ///
-/// As [`read_raw_column_bytes`], with the decode failure reported when the raw
-/// sibling is not text-typed.
-pub async fn read_raw_column_text(
+/// As [`read_raw_column_bytes`].
+pub async fn read_raw_column_value(
     route: &crate::tx_route::TxRoute,
     collection: &str,
     raw_column: &str,
     row_pk: &str,
-) -> Result<ScalarRead<String>, DbError> {
+) -> Result<ScalarRead<Value>, DbError> {
     read_on_route(route, async {
         // The same two identities as [`read_raw_column_bytes`], split for the same
         // reason: PG qualifies with the schema, SQLite with the tenant-keyed ATTACH
@@ -416,10 +410,16 @@ pub async fn read_raw_column_text(
                         .query_text_params(&sql, &[row_pk])
                         .await
                         .map_err(|e| crate::backend::pg_error::classify(&e))?;
-                    return zeroship_data_postgres::pg_autocommit::scalar_text(&rows);
+                    return Ok(native_scalar(
+                        zeroship_data_postgres::pg_row_json::rows_to_values(&rows),
+                        raw_column,
+                    ));
                 }
-                pg.read_roled_scalar_text(route.schema(), &sql, &[row_pk])
-                    .await
+                Ok(native_scalar(
+                    pg.query_roled_values(route.schema(), &sql, &[row_pk.into()])
+                        .await?,
+                    raw_column,
+                ))
             }
             BackendHandle::Sqlite(sq) => {
                 let q_app = sq.quote_ident(attach_alias);
@@ -427,14 +427,11 @@ pub async fn read_raw_column_text(
                 let q_col = sq.quote_ident(raw_column);
                 let sql = format!("SELECT {q_col} FROM {q_app}.{q_coll} WHERE id = ?1");
                 let (_lane_claim, lane) = sqlite_lane(route, sq)?;
-                let rows = lane.query_internal(&sql, &[row_pk]).await?;
-                if rows.is_empty() {
-                    return Ok(ScalarRead::NoRow);
-                }
-                match rows[0].first().and_then(|c| c.clone()) {
-                    Some(value) => Ok(ScalarRead::Value(value)),
-                    None => Ok(ScalarRead::Null),
-                }
+                let rows = lane.query_typed_internal(&sql, &[row_pk.into()]).await?;
+                Ok(native_scalar(
+                    sqlite::row_json::typed_rows_to_values(&rows),
+                    raw_column,
+                ))
             }
         }
     })
@@ -448,7 +445,7 @@ pub async fn read_raw_column_text(
 /// is load-bearing: `TxClientSlotGuard` is what keeps a second op on this
 /// thread from issuing on the same transaction connection while this read is
 /// awaiting, and restores the session to the SAME app's slot on drop (SEC-1).
-/// `crate::exec::exec_sqlite_json` holds it across its await for the same
+/// `crate::exec::exec_sqlite_values` holds it across its await for the same
 /// reason. The handle is cloned out because a borrow of the guard cannot be
 /// returned alongside it.
 fn sqlite_lane(
@@ -517,15 +514,15 @@ impl BackendHandle {
                     schema,
                     &sql,
                     &[
-                        row.actor_id,
-                        row.actor_role,
-                        row.claimed_actor,
-                        row.collection,
-                        row.row_pk,
-                        row.column,
-                        row.classification,
-                        row.reason,
-                        row.outcome,
+                        row.actor_id.into(),
+                        row.actor_role.into(),
+                        row.claimed_actor.into(),
+                        row.collection.into(),
+                        row.row_pk.into(),
+                        row.column.into(),
+                        row.classification.into(),
+                        row.reason.into(),
+                        row.outcome.into(),
                     ],
                 )
                 .await?;
@@ -657,7 +654,7 @@ impl BackendHandle {
     pub async fn persist_mask_policy(
         &self,
         app_id: &str,
-        policy_json: &serde_json::Value,
+        policy_json: &zeroship_data_query_builder::value::Value,
     ) -> Result<(), DbError> {
         match self {
             Self::Postgres(_) => Ok(()),
@@ -677,7 +674,7 @@ impl BackendHandle {
     pub async fn load_mask_policy(
         &self,
         app_id: &str,
-    ) -> Result<Option<serde_json::Value>, DbError> {
+    ) -> Result<Option<zeroship_data_query_builder::value::Value>, DbError> {
         match self {
             Self::Postgres(_) => Ok(None),
             Self::Sqlite(sq) => sqlite::mask_policy_store::load(sq, app_id).await,
@@ -853,6 +850,19 @@ impl BackendHandle {
     // an accessor is a line of code if a consumer ever appears.
 }
 
+fn native_scalar(rows: Vec<Value>, column: &str) -> ScalarRead<Value> {
+    match rows.into_iter().next() {
+        None => ScalarRead::NoRow,
+        Some(mut row) => match row
+            .as_object_mut()
+            .and_then(|fields| fields.shift_remove(column))
+        {
+            None | Some(Value::Null) => ScalarRead::Null,
+            Some(value) => ScalarRead::Value(value),
+        },
+    }
+}
+
 #[cfg(test)]
 mod routed_read_tests {
     //! The SQLite half of the routed raw-column read.
@@ -919,7 +929,7 @@ mod routed_read_tests {
                 .await.expect("INSERT on the transaction connection");
 
             // CONTROL: a pool-lane read cannot see the uncommitted row.
-            let outside = read_raw_column_text(
+            let outside = read_raw_column_value(
                 &CapturedRoute::pool_for_tests(app, crate::compile::SqlDialect::Sqlite)
                     .bind(handle.clone()),
                 "people",
@@ -935,7 +945,7 @@ mod routed_read_tests {
             );
 
             // SUBJECT: the same read, routed onto the transaction.
-            let inside = read_raw_column_text(
+            let inside = read_raw_column_value(
                 &CapturedRoute::tx_for_tests(app, crate::compile::SqlDialect::Sqlite)
                     .bind(handle.clone()),
                 "people",

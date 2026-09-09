@@ -11,8 +11,8 @@
 //!   set on `Db` under a V8 private symbol (`ZS_PLATFORM`). Holds the
 //!   platform-internal callables; unreachable from creator JS.
 //! - [`collection`] — per-collection CRUD. Each method walks its
-//!   `v8::Local<Value>` args directly into a `serde_json::Value` via
-//!   `v8_bridge::v8_value_to_serde_json` (no JSON.stringify/parse) and
+//!   `v8::Local<Value>` args directly into a `zeroship_data_query_builder::value::Value` via
+//!   `v8_bridge::decode_native` (no JSON.stringify/parse) and
 //!   calls a shared [`dispatch`] helper.
 //! - [`dispatch`] — the 17 `dispatch_*` helpers those methods call. They
 //!   lived in `crud/mod.rs` until 2026-09-02, which left `v8::` signature
@@ -32,13 +32,13 @@
 //!   entry so callers that drop the wrapper without `.close()` still release
 //!   the slot.
 
-pub mod collection;
 /// The cold-open witness for the five V8 sites that resolve a backend, plus
 /// the `find` dispatch that carries the per-query unmask hint. It is in the
 /// crate rather than in an integration target because it enters through the
 /// JS methods, and the three `mint_*` functions those need are `pub(crate)`.
 #[cfg(test)]
 mod cold_open;
+pub mod collection;
 pub mod db;
 pub mod db_platform;
 pub mod dispatch;

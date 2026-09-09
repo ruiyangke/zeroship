@@ -2939,17 +2939,15 @@ impl RuntimeInner {
                                 .unwrap_or_else(|| v8::null(scope).into());
                             r.resolve(scope, v);
                         }
-                        ResolveValue::JsonWithRehydration { json, transform } => {
-                            // **P9 PR 2** — `JSON.parse` first, then walk the
-                            // parsed value through plugin-supplied `transform`
-                            // to mint v8_class instances for any sentinel
-                            // sub-objects (MaskedValue for `__zsmask__`).
-                            let parsed = v8::String::new(scope, &json)
-                                .and_then(|js| v8::json::parse(scope, js))
-                                .unwrap_or_else(|| v8::null(scope).into());
-                            let final_v = transform(scope, parsed).unwrap_or(parsed);
-                            r.resolve(scope, final_v);
-                        }
+                        ResolveValue::Native(value) => match value.into_v8(scope) {
+                            Ok(value) => {
+                                r.resolve(scope, value);
+                            }
+                            Err(error) => {
+                                let exception = error.to_exception(scope);
+                                r.reject(scope, exception);
+                            }
+                        },
                         ResolveValue::Bool(b) => {
                             let v = v8::Boolean::new(scope, b);
                             r.resolve(scope, v.into());

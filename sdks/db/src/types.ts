@@ -41,7 +41,7 @@ export type InferFieldDef<T> =
     ? M extends MaskKind
       ? M extends "none"
         ? U
-        : U extends string | number | Uint8Array
+        : U extends string | number | bigint | Uint8Array
           ? MaskedValue<U>
           : U
       : U
@@ -299,10 +299,10 @@ export type Filter<S> = {
 // ---------------------------------------------------------------------------
 
 /** Numeric update operators. */
-type NumericUpdateOps = {
-  $inc?: number;
-  $dec?: number;
-  $mul?: number;
+type NumericUpdateOps<T extends number | bigint> = {
+  $inc?: T;
+  $dec?: T;
+  $mul?: T;
 };
 
 /** Array update operators. */
@@ -315,7 +315,7 @@ type ArrayUpdateOps<T> = {
 /** Update value for a single field — direct value or typed operator. */
 type UpdateFieldValue<T> =
   T |
-  (NonNullable<T> extends number ? NumericUpdateOps : never) |
+  (NonNullable<T> extends number | bigint ? NumericUpdateOps<NonNullable<T>> : never) |
   (NonNullable<T> extends readonly unknown[] ? ArrayUpdateOps<NonNullable<T>[number]> : never);
 
 /** Typed update expression — per-field operators. */
@@ -324,9 +324,9 @@ export type UpdateExpression<S> = {
 } & {
   // Mongoose top-level operators (SDK translates to per-field)
   $set?: Partial<InferSchema<S>>;
-  $inc?: { [K in keyof InferSchema<S>]?: NonNullable<InferSchema<S>[K]> extends number ? number : never };
-  $dec?: { [K in keyof InferSchema<S>]?: NonNullable<InferSchema<S>[K]> extends number ? number : never };
-  $mul?: { [K in keyof InferSchema<S>]?: NonNullable<InferSchema<S>[K]> extends number ? number : never };
+  $inc?: { [K in keyof InferSchema<S>]?: NonNullable<InferSchema<S>[K]> extends number | bigint ? NonNullable<InferSchema<S>[K]> : never };
+  $dec?: { [K in keyof InferSchema<S>]?: NonNullable<InferSchema<S>[K]> extends number | bigint ? NonNullable<InferSchema<S>[K]> : never };
+  $mul?: { [K in keyof InferSchema<S>]?: NonNullable<InferSchema<S>[K]> extends number | bigint ? NonNullable<InferSchema<S>[K]> : never };
   $push?: { [K in keyof InferSchema<S>]?: NonNullable<InferSchema<S>[K]> extends readonly unknown[] ? NonNullable<InferSchema<S>[K]>[number] : never };
   $pull?: { [K in keyof InferSchema<S>]?: NonNullable<InferSchema<S>[K]> extends readonly unknown[] ? NonNullable<InferSchema<S>[K]>[number] : never };
   $addToSet?: { [K in keyof InferSchema<S>]?: NonNullable<InferSchema<S>[K]> extends readonly unknown[] ? NonNullable<InferSchema<S>[K]>[number] : never };
@@ -628,7 +628,7 @@ export type Actor = Record<string, unknown>;
  * interpolation all yield the masked string, so `console.log(user)`
  * never leaks plaintext.
  */
-export declare class MaskedValue<T extends string | number | Uint8Array = string> {
+export declare class MaskedValue<T extends string | number | bigint | Uint8Array = string> {
   /** @internal Phantom for the plaintext type. Erased at runtime. */
   readonly _plaintext: T;
 
@@ -663,9 +663,7 @@ export declare class MaskedValue<T extends string | number | Uint8Array = string
    * authorization: one denied column rejects the whole fan-out with
    * `BULK_UNMASK_PARTIAL_UNAUTHORIZED`.
    *
-   * For `wraps = bytes` the plaintext arrives base64-encoded (caller
-   * decodes with `Uint8Array.from(atob(pt), c => c.charCodeAt(0))`); for
-   * `wraps = number` it arrives as a stringified f64.
+   * Binary plaintext arrives as Uint8Array; numeric plaintext arrives as a number.
    */
   unmask(opts?: { actor?: Actor; reason?: string }): Promise<T>;
   unmask(
@@ -1437,6 +1435,10 @@ export const t = {
   number(): TypeBuilder<number> {
     return new TypeBuilder<number>({ type: "number" });
   },
+  /** Creates an integer field with exact bigint input and output beyond the safe number range. */
+  bigInt(): TypeBuilder<number | bigint> {
+    return new TypeBuilder<number | bigint>({ type: "bigInt" });
+  },
   /** Creates a boolean field definition. */
   boolean(): TypeBuilder<boolean> {
     return new TypeBuilder<boolean>({ type: "boolean" });
@@ -1644,26 +1646,9 @@ export const t = {
   calendarDate(): TypeBuilder<string> {
     return new TypeBuilder<string>({ type: "calendarDate" });
   },
-  /**
-   * raw binary column, and the `wraps` argument of
-   * `t.encrypted({ wraps: t.bytes() })`.
-   *
-   * At the JS layer the field is exchanged as a base64-encoded string;
-   * at the DB layer it becomes a BYTEA (Postgres) / BLOB (SQLite)
-   * column holding the RAW BYTES that string encodes. One encode on
-   * the way in, one decode on the way out: `plugin-db`'s
-   * `crud::bytes_pass` decodes the wire string before the bind and
-   * `crud::read_pipeline` re-encodes what the column returns.
-   *
-   * A bare `t.bytes()` outside `t.encrypted({ wraps: ... })` is
-   * supported. This doc used to say bytes columns outside an encrypted wrap
-   * "aren't yet supported in plugin-db"; both were false by the time
-   * anyone read them - what was actually missing was the write-side
-   * decode, so the column accepted the value and stored the ASCII of
-   * the base64.
-   */
-  bytes(): TypeBuilder<string> {
-    return new TypeBuilder<string>({ type: "bytes" });
+  /** Native binary column, also usable as an encrypted field's wrap. */
+  bytes(): TypeBuilder<Uint8Array> {
+    return new TypeBuilder<Uint8Array>({ type: "bytes" });
   },
   /**
    * transparent column encryption. Wraps a string /
@@ -1712,10 +1697,10 @@ export const t = {
     // #267 surfaced this via `filter-encryption-types.test.ts`'s
     // `amountDet: t.encrypted({ mode: "deterministic", wraps: t.number()
     // })` filter assertion, which had never been typechecked.
-    W extends TypeBuilder<string | number | Uint8Array, any, any, any, any> | undefined = undefined,
+    W extends TypeBuilder<string | number | bigint | Uint8Array, any, any, any, any> | undefined = undefined,
     Mode extends EncryptionMode = "randomised",
-    T extends string | number | Uint8Array =
-      W extends TypeBuilder<infer WT extends string | number | Uint8Array, any, any, any, any>
+    T extends string | number | bigint | Uint8Array =
+      W extends TypeBuilder<infer WT extends string | number | bigint | Uint8Array, any, any, any, any>
         ? WT
         : string,
   >(

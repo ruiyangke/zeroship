@@ -57,8 +57,8 @@ use zeroship_migrate::schema::query::FkEmission;
 use std::collections::BTreeSet;
 
 use compio_postgres::{Client, NoTls};
-use serde_json::{json, Value};
 use zeroship_data_query_builder::render::postgres::{render_delete, render_update};
+use zeroship_data_query_builder::value::{value, Value};
 use zeroship_data_query_builder::{
     Assignment as PlanAssignment, ColumnAssignment as PlanColumnAssignment,
     CompareOp as PlanCompareOp, Delete as PlanDelete, Ident as PlanIdent,
@@ -86,7 +86,7 @@ const COLLECTION: &str = "people";
 /// `__zs_raw__ssn` - that is not a declared field and therefore not on the
 /// projection. That column is the whole point of the fixture.
 fn people_schema() -> Value {
-    json!({
+    value!({
         "ssn": {
             "type": "string",
             "mask": { "kind": "full", "classification": "pci" }
@@ -276,7 +276,7 @@ async fn begin_as_role(session: &Client, role: &str) {
     );
 }
 
-type Statement = (&'static str, String, Vec<String>);
+type Statement = (&'static str, String, Vec<Value>);
 
 fn autobump() -> SystemFieldAutoBump<'static> {
     SystemFieldAutoBump {
@@ -295,8 +295,8 @@ fn autobump() -> SystemFieldAutoBump<'static> {
 fn column_grant_ready_statements(app: &str, schema: &Value) -> Vec<Statement> {
     let ab = autobump();
     let d = SqlDialect::Postgres;
-    let filter = json!({ "id": "psn_seed" });
-    let update = json!({ "nickname": "updated" });
+    let filter = value!({ "id": "psn_seed" });
+    let update = value!({ "nickname": "updated" });
     let mk =
         |verb: &'static str, bq: zeroship_plugin_db::compile::BuiltQuery| (verb, bq.sql, bq.params);
     vec![
@@ -306,7 +306,7 @@ fn column_grant_ready_statements(app: &str, schema: &Value) -> Vec<Statement> {
                 &zeroship_data_query_builder::SchemaName::new(app).expect("fixture schema name"),
                 COLLECTION,
                 schema,
-                &json!({ "id": "psn_ins", "nickname": "a" }),
+                &value!({ "id": "psn_ins", "nickname": "a" }),
             )
             .unwrap(),
         ),
@@ -316,7 +316,7 @@ fn column_grant_ready_statements(app: &str, schema: &Value) -> Vec<Statement> {
                 &zeroship_data_query_builder::SchemaName::new(app).expect("fixture schema name"),
                 COLLECTION,
                 schema,
-                &json!([{ "id": "psn_m1", "nickname": "b" }, { "id": "psn_m2", "nickname": "c" }]),
+                &value!([{ "id": "psn_m1", "nickname": "b" }, { "id": "psn_m2", "nickname": "c" }]),
             )
             .unwrap(),
         ),
@@ -326,8 +326,8 @@ fn column_grant_ready_statements(app: &str, schema: &Value) -> Vec<Statement> {
                 &zeroship_data_query_builder::SchemaName::new(app).expect("fixture schema name"),
                 COLLECTION,
                 schema,
-                &json!({ "id": "psn_up", "nickname": "d" }),
-                &json!(["id"]),
+                &value!({ "id": "psn_up", "nickname": "d" }),
+                &value!(["id"]),
             )
             .unwrap(),
         ),
@@ -374,7 +374,7 @@ fn column_grant_ready_statements(app: &str, schema: &Value) -> Vec<Statement> {
                 &zeroship_data_query_builder::SchemaName::new(app).expect("fixture schema name"),
                 COLLECTION,
                 schema,
-                &json!({ "id": "psn_ins" }),
+                &value!({ "id": "psn_ins" }),
                 d,
             )
             .unwrap(),
@@ -387,8 +387,8 @@ fn column_grant_ready_statements(app: &str, schema: &Value) -> Vec<Statement> {
 fn single_row_statements(app: &str, schema: &Value) -> Vec<Statement> {
     let ab = autobump();
     let d = SqlDialect::Postgres;
-    let filter = json!({ "id": "psn_seed" });
-    let update = json!({ "nickname": "updated" });
+    let filter = value!({ "id": "psn_seed" });
+    let update = value!({ "nickname": "updated" });
     let mk =
         |verb: &'static str, bq: zeroship_plugin_db::compile::BuiltQuery| (verb, bq.sql, bq.params);
     vec![
@@ -511,7 +511,7 @@ fn bounded_data_plan_params(params: &[PlanLiteral]) -> Vec<String> {
         .iter()
         .map(|value| match value {
             PlanLiteral::Int(value) => value.to_string(),
-            PlanLiteral::Text(value) => value.clone(),
+            PlanLiteral::Text(value) | PlanLiteral::Json(value) => value.clone(),
             unexpected => panic!("unexpected bounded-write literal: {unexpected:?}"),
         })
         .collect()
@@ -568,12 +568,11 @@ async fn column_scoped_reads_complete_every_projected_write_verb() {
         &zeroship_data_query_builder::SchemaName::new(&app).expect("fixture schema name"),
         COLLECTION,
         &schema,
-        &json!({ "id": "psn_seed", "nickname": "seed", "ssn": "***", raw.clone(): "123-45-6789" }),
+        &value!({ "id": "psn_seed", "nickname": "seed", "ssn": "***", (raw.clone()): "123-45-6789" }),
     )
     .expect("seed insert builds");
-    let seed_params: Vec<&str> = seed.params.iter().map(String::as_str).collect();
-    session
-        .query_text_params(&seed.sql, &seed_params)
+    let seed_params = &seed.params;
+    zeroship_data_postgres::params::query(&session, &seed.sql, seed_params)
         .await
         .unwrap_or_else(|e| panic!("the role must be able to seed a row: {e}\n{}", seed.sql));
 
@@ -590,9 +589,8 @@ async fn column_scoped_reads_complete_every_projected_write_verb() {
             !sql.contains("RETURNING *"),
             "{verb} still stars; the arm below would not be measuring the projection: {sql}",
         );
-        let refs: Vec<&str> = params.iter().map(String::as_str).collect();
-        session
-            .query_text_params(sql, &refs)
+        let refs = &params;
+        zeroship_data_postgres::params::query(&session, sql, refs)
             .await
             .unwrap_or_else(|e| {
                 panic!("{verb} must be executable with column-scoped reads: {e}\n{sql}")
@@ -650,12 +648,11 @@ async fn the_same_verbs_are_refused_outright_when_the_returning_clause_stars() {
         &zeroship_data_query_builder::SchemaName::new(&app).expect("fixture schema name"),
         COLLECTION,
         &schema,
-        &json!({ "id": "psn_seed", "nickname": "s" }),
+        &value!({ "id": "psn_seed", "nickname": "s" }),
     )
     .expect("seed builds");
-    let seed_params: Vec<&str> = seed.params.iter().map(String::as_str).collect();
-    session
-        .query_text_params(&seed.sql, &seed_params)
+    let seed_params = &seed.params;
+    zeroship_data_postgres::params::query(&session, &seed.sql, seed_params)
         .await
         .expect("seed insert");
     session
@@ -671,16 +668,18 @@ async fn the_same_verbs_are_refused_outright_when_the_returning_clause_stars() {
             starred.contains("RETURNING *"),
             "{verb}: the mutation must have applied, or this control proves nothing: {sql}",
         );
-        let refs: Vec<&str> = params.iter().map(String::as_str).collect();
+        let parameters: Vec<_> = params
+            .iter()
+            .map(zeroship_data_postgres::params::Parameter)
+            .collect();
+        let refs: Vec<&(dyn compio_postgres::types::ToSql + Sync)> =
+            parameters.iter().map(|p| p as _).collect();
         begin_as_role(&session, &role).await;
-        let err = session
-            .query_text_params(&starred, &refs)
-            .await
-            .expect_err(&format!(
-                "{verb} with `RETURNING *` must be refused: {starred}"
-            ));
+        let err = session.query(&starred, &refs).await.expect_err(&format!(
+            "{verb} with `RETURNING *` must be refused: {starred}"
+        ));
         assert!(
-            format!("{err:?}").contains("42501"),
+            err.code() == Some(&compio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE),
             "{verb}: expected 42501 permission denied, got {err:?}",
         );
         session
@@ -744,12 +743,11 @@ async fn the_single_row_verbs_succeed_without_ctid_access() {
         &zeroship_data_query_builder::SchemaName::new(&app).expect("fixture schema name"),
         COLLECTION,
         &schema,
-        &json!({ "id": "psn_seed", "nickname": "seed", "ssn": "***", raw: "123-45-6789" }),
+        &value!({ "id": "psn_seed", "nickname": "seed", "ssn": "***", raw: "123-45-6789" }),
     )
     .expect("seed insert builds");
-    let seed_refs: Vec<&str> = seed.params.iter().map(String::as_str).collect();
-    session
-        .query_text_params(&seed.sql, &seed_refs)
+    let seed_refs = &seed.params;
+    zeroship_data_postgres::params::query(&session, &seed.sql, seed_refs)
         .await
         .unwrap_or_else(|e| panic!("the role must be able to seed a row: {e}\n{}", seed.sql));
 
@@ -761,9 +759,8 @@ async fn the_single_row_verbs_succeed_without_ctid_access() {
             !sql.contains("RETURNING *"),
             "{verb}: the behavioural arm must retain its column projection: {sql}",
         );
-        let refs: Vec<&str> = params.iter().map(String::as_str).collect();
-        let rows = session
-            .query_text_params(sql, &refs)
+        let refs = &params;
+        let rows = zeroship_data_postgres::params::query(&session, sql, refs)
             .await
             .unwrap_or_else(|e| panic!("{verb} must execute under column grants: {e}\n{sql}"));
         assert_eq!(rows.len(), 1, "{verb} must affect exactly the seeded row");
@@ -798,12 +795,11 @@ async fn bounded_data_plan_writes_succeed_with_column_scoped_reads() {
         &zeroship_data_query_builder::SchemaName::new(&app).expect("fixture schema name"),
         COLLECTION,
         &schema,
-        &json!({ "id": "psn_seed", "nickname": "seed", "ssn": "***", raw: "123-45-6789" }),
+        &value!({ "id": "psn_seed", "nickname": "seed", "ssn": "***", raw: "123-45-6789" }),
     )
     .expect("seed insert builds");
-    let seed_refs: Vec<&str> = seed.params.iter().map(String::as_str).collect();
-    session
-        .query_text_params(&seed.sql, &seed_refs)
+    let seed_refs = &seed.params;
+    zeroship_data_postgres::params::query(&session, &seed.sql, seed_refs)
         .await
         .unwrap_or_else(|e| panic!("the role must be able to seed a row: {e}\n{}", seed.sql));
 

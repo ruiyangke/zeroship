@@ -75,8 +75,8 @@
 
 use std::collections::HashMap;
 
-use serde_json::Value;
 use zeroize::Zeroizing;
+use zeroship_data_query_builder::value::Value;
 
 use crate::catalog::MaskKind;
 use zeroship_data_core::error::DbError;
@@ -85,15 +85,6 @@ use zeroship_data_core::error::DbError;
 // module. See `zeroship_data_core::masking` for why it could not stay here.
 use zeroship_data_core::masking::apply_mask_kind;
 
-/// Plaintext sidechannel populated by the encryption pass and consumed
-/// by the mask pass. Key = column name; value = the raw plaintext
-/// string (UTF-8 decode of the wrapped primitive's wire bytes),
-/// wrapped in [`Zeroizing`] so the transient plaintext is scrubbed on
-/// drop.
-///
-/// The encryption pass populates this BEFORE replacing the row value
-/// with the base64 ciphertext, so the mask pass can derive the sibling
-/// column's masked output without a redundant decrypt round-trip.
 pub type MaskPlaintextSidechannel = HashMap<String, Zeroizing<String>>;
 
 /// One masked field's derived mask, with the physical column its REAL value
@@ -183,11 +174,6 @@ pub fn apply_mask_on_write(
             continue;
         };
 
-        // Plaintext source: sidechannel first (encrypted column case),
-        // then the row's current value (non-encrypted case). The row
-        // value MAY already be the base64 ciphertext if the encryption
-        // pass ran first AND the sidechannel was not populated — that
-        // would be a contract violation, so we prefer the sidechannel.
         let plaintext: Option<Zeroizing<String>> = if let Some(pt) = plaintexts.get(col) {
             Some(pt.clone())
         } else if let Some(value) = obj.get(col) {
@@ -229,11 +215,8 @@ pub fn apply_mask_on_write(
 /// every `(field, mask)` in `masks`:
 ///
 /// 1. `row[__zs_raw__<field>] = row[<field>]` (the real value, whatever stage
-///    produced it - plaintext, ciphertext, or a base64 bytes envelope);
+///    produced it - plaintext or native ciphertext);
 /// 2. `row[<field>] = mask`;
-/// 3. the binary-bind marker moves with the value: `__zsbin__<field>` becomes
-///    `__zsbin__<__zs_raw__<field>>`, because it is the RAW column that wants
-///    `decode($N, 'base64')::bytea` and the masked column is plain `TEXT`.
 ///
 /// Step 1 MOVES rather than recomputes. That is what makes the
 /// documented contract violation in `apply_mask_on_write` - the encryption pass
@@ -260,11 +243,8 @@ pub fn relocate_masked_columns(masks: &DerivedMasks, row: &mut Value) -> Result<
         masked,
     } in masks
     {
-        if let Some(value) = obj.remove(field.as_str()) {
+        if let Some(value) = obj.shift_remove(field.as_str()) {
             obj.insert(raw_column.clone(), value);
-        }
-        if let Some(marker) = obj.remove(&format!("__zsbin__{field}")) {
-            obj.insert(format!("__zsbin__{raw_column}"), marker);
         }
         obj.insert(field.clone(), Value::String(masked.clone()));
     }
@@ -418,11 +398,11 @@ pub fn wrap_row_on_read(schema: &Value, collection: &str, row: &mut Value) -> Re
     }
 
     for stripped in to_strip {
-        obj.remove(&stripped);
+        obj.shift_remove(&stripped);
     }
 
     for (col, masked, classification) in to_wrap {
-        let repr = serde_json::json!({
+        let repr = zeroship_data_query_builder::value!({
             "sentinel": "__zsmask__",
             // DB-7: an unforgeable per-process signature. Only sentinels the
             // read pipeline itself produced carry it; the decoder refuses to
@@ -467,7 +447,7 @@ pub fn mask_sentinel_signature() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use zeroship_data_query_builder::value;
 
     #[test]
     fn plaintext_sidechannel_stores_zeroizing_strings() {
@@ -491,18 +471,16 @@ mod tests {
     #[test]
     fn a_masked_encrypted_write_puts_the_mask_in_the_logical_column_and_moves_the_ciphertext() {
         // Encrypted column: plaintext arrives via the sidechannel.
-        let schema = json!({
+        let schema = value!({
             "ssn": {
                 "type": "string",
                 "encrypted": { "mode": "randomised", "keyId": "default", "wraps": "string" },
                 "mask": { "kind": "last4", "classification": "spi" }
             }
         });
-        // Row's `ssn` is the base64 ciphertext (encryption pass ran first).
-        let mut row = json!({
+        let mut row = value!({
             "id": "usr_01",
             "ssn": "BASE64CIPHERTEXT",
-            "__zsbin__ssn": true,
         });
         let mut plaintexts = MaskPlaintextSidechannel::new();
         plaintexts.insert("ssn".to_string(), Zeroizing::new("123-45-6789".to_string()));
@@ -523,7 +501,7 @@ mod tests {
             obj.get("__zsbin__ssn").is_none(),
             "marker must not stay behind: {row}"
         );
-        assert_eq!(obj.get(&format!("__zsbin__{raw}")), Some(&json!(true)));
+        assert!(!obj.contains_key(&format!("__zsbin__{raw}")));
     }
 
     /// The documented contract violation: the encryption pass ran but the
@@ -535,14 +513,14 @@ mod tests {
     /// the sidechannel.
     #[test]
     fn a_missing_sidechannel_still_preserves_the_ciphertext() {
-        let schema = json!({
+        let schema = value!({
             "ssn": {
                 "type": "string",
                 "encrypted": { "mode": "randomised", "keyId": "default", "wraps": "string" },
                 "mask": { "kind": "last4", "classification": "spi" }
             }
         });
-        let mut row = json!({ "id": "usr_01", "ssn": "BASE64CIPHERTEXT" });
+        let mut row = value!({ "id": "usr_01", "ssn": "BASE64CIPHERTEXT" });
         let plaintexts = MaskPlaintextSidechannel::new();
 
         derive_and_relocate(&schema, &plaintexts, &mut row);
@@ -558,13 +536,13 @@ mod tests {
     fn a_mask_only_write_moves_the_plaintext_to_the_raw_column() {
         // Non-encrypted but masked column: plaintext stays in `row[col]`,
         // sidechannel has no entry.
-        let schema = json!({
+        let schema = value!({
             "email": {
                 "type": "string",
                 "mask": { "kind": "email", "classification": "pii" }
             }
         });
-        let mut row = json!({ "id": "usr_01", "email": "alice@example.com" });
+        let mut row = value!({ "id": "usr_01", "email": "alice@example.com" });
         let plaintexts = MaskPlaintextSidechannel::new();
 
         derive_and_relocate(&schema, &plaintexts, &mut row);
@@ -585,14 +563,14 @@ mod tests {
     #[test]
     fn apply_mask_on_write_skips_kind_none() {
         // Explicit opt-out: no sibling written.
-        let schema = json!({
+        let schema = value!({
             "ssn": {
                 "type": "string",
                 "encrypted": { "mode": "randomised", "keyId": "default", "wraps": "string" },
                 "mask": { "kind": "none", "classification": "spi" }
             }
         });
-        let mut row = json!({ "id": "usr_01", "ssn": "BASE64CT" });
+        let mut row = value!({ "id": "usr_01", "ssn": "BASE64CT" });
         let mut plaintexts = MaskPlaintextSidechannel::new();
         plaintexts.insert("ssn".to_string(), Zeroizing::new("123-45-6789".to_string()));
 
@@ -608,13 +586,13 @@ mod tests {
     #[test]
     fn apply_mask_on_write_skips_null_value() {
         // null passes through as null (Q-MASK-L); no sibling write.
-        let schema = json!({
+        let schema = value!({
             "email": {
                 "type": "string",
                 "mask": { "kind": "email", "classification": "pii" }
             }
         });
-        let mut row = json!({ "id": "usr_01", "email": null });
+        let mut row = value!({ "id": "usr_01", "email": null });
         let plaintexts = MaskPlaintextSidechannel::new();
 
         derive_and_relocate(&schema, &plaintexts, &mut row);
@@ -631,14 +609,14 @@ mod tests {
         // Partial UPDATE: parent column not on the row at all → no
         // sibling write (the existing row's masked value stays in sync
         // because the plaintext didn't change).
-        let schema = json!({
+        let schema = value!({
             "ssn": {
                 "type": "string",
                 "mask": { "kind": "last4", "classification": "spi" }
             },
             "name": { "type": "string" }
         });
-        let mut row = json!({ "name": "alice" });
+        let mut row = value!({ "name": "alice" });
         let plaintexts = MaskPlaintextSidechannel::new();
 
         derive_and_relocate(&schema, &plaintexts, &mut row);
@@ -649,7 +627,7 @@ mod tests {
 
     #[test]
     fn apply_mask_on_write_handles_multiple_columns() {
-        let schema = json!({
+        let schema = value!({
             "ssn": {
                 "type": "string",
                 "mask": { "kind": "last4", "classification": "spi" }
@@ -663,7 +641,7 @@ mod tests {
                 "mask": { "kind": "dateYear", "classification": "pii" }
             }
         });
-        let mut row = json!({
+        let mut row = value!({
             "id": "usr_01",
             "ssn": "123-45-6789",
             "email": "bob@example.com",
@@ -690,13 +668,13 @@ mod tests {
 
     #[test]
     fn apply_mask_on_write_rejects_unknown_kind() {
-        let schema = json!({
+        let schema = value!({
             "ssn": {
                 "type": "string",
                 "mask": { "kind": "absurdly-novel-kind", "classification": "spi" }
             }
         });
-        let mut row = json!({ "ssn": "abc" });
+        let mut row = value!({ "ssn": "abc" });
         let plaintexts = MaskPlaintextSidechannel::new();
 
         let err = apply_mask_on_write(&schema, &plaintexts, &row).unwrap_err();
@@ -709,11 +687,11 @@ mod tests {
     #[test]
     fn apply_mask_on_write_noop_when_no_masked_columns() {
         // Schema with only non-masked fields — pass is a no-op.
-        let schema = json!({
+        let schema = value!({
             "name": { "type": "string" },
             "age": { "type": "number" }
         });
-        let mut row = json!({ "name": "alice", "age": 30 });
+        let mut row = value!({ "name": "alice", "age": 30 });
         let plaintexts = MaskPlaintextSidechannel::new();
         let original = row.clone();
 
@@ -730,14 +708,14 @@ mod tests {
     fn wrap_row_on_read_aliased_select_shape() {
         // SELECT "ssn_masked" AS "ssn", ... — the parent slot already
         // contains the masked string; no sibling key is present.
-        let schema = json!({
+        let schema = value!({
             "ssn": {
                 "type": "string",
                 "mask": { "kind": "last4", "classification": "spi" }
             },
             "name": { "type": "string" }
         });
-        let mut row = json!({
+        let mut row = value!({
             "id": "usr_01",
             "ssn": "***-**-6789",
             "name": "alice"
@@ -782,18 +760,18 @@ mod tests {
         // consumer. The fixture is hand-built either way, so what the test
         // exercises never depended on which producer made the row - only the
         // name did.
-        let schema = json!({
+        let schema = value!({
             "ssn": {
                 "type": "string",
                 "mask": { "kind": "last4", "classification": "spi" }
             }
         });
         let raw = crate::compile::raw_column_name("ssn");
-        let mut row = json!({
+        let mut row = value!({
             "id": "usr_01",
             "ssn": "***-**-6789",
         });
-        row[raw.clone()] = json!("123-45-6789");
+        row[raw.clone()] = value!("123-45-6789");
 
         wrap_row_on_read(&schema, "users", &mut row).unwrap();
 
@@ -817,14 +795,14 @@ mod tests {
     fn wrap_row_on_read_skips_kind_none() {
         // Opt-out: `kind: "none"` retains plaintext-on-read (the
         // decrypt-on-read path); no wrapping happens.
-        let schema = json!({
+        let schema = value!({
             "ssn": {
                 "type": "string",
                 "encrypted": { "mode": "randomised", "keyId": "default", "wraps": "string" },
                 "mask": { "kind": "none", "classification": "spi" }
             }
         });
-        let mut row = json!({
+        let mut row = value!({
             "id": "usr_01",
             "ssn": "decrypted-plaintext"
         });
@@ -843,13 +821,13 @@ mod tests {
     fn wrap_row_on_read_uses_default_pii_classification() {
         // When the schema mask block omits `classification`, default is
         // `"pii"` (mirrors the SDK's default).
-        let schema = json!({
+        let schema = value!({
             "email": {
                 "type": "string",
                 "mask": { "kind": "email" }
             }
         });
-        let mut row = json!({
+        let mut row = value!({
             "id": "usr_01",
             "email": "a***@example.com"
         });
@@ -867,13 +845,13 @@ mod tests {
     fn wrap_row_on_read_handles_numeric_id() {
         // typed_id collections use string `id`, but legacy collections
         // can carry numeric PK — `row_pk` must stringify either.
-        let schema = json!({
+        let schema = value!({
             "ssn": {
                 "type": "string",
                 "mask": { "kind": "last4", "classification": "spi" }
             }
         });
-        let mut row = json!({
+        let mut row = value!({
             "id": 42,
             "ssn": "***-**-6789"
         });
@@ -890,13 +868,13 @@ mod tests {
         // Projection that excluded `id` — `row_pk` falls back to empty
         // string; the wrap still happens (`unmask()` will surface a typed
         // error when row_pk is empty).
-        let schema = json!({
+        let schema = value!({
             "ssn": {
                 "type": "string",
                 "mask": { "kind": "last4", "classification": "spi" }
             }
         });
-        let mut row = json!({ "ssn": "***-**-6789" });
+        let mut row = value!({ "ssn": "***-**-6789" });
 
         wrap_row_on_read(&schema, "users", &mut row).unwrap();
 
@@ -918,14 +896,14 @@ mod tests {
         // plaintext to JS as if it were the masked display string. The
         // wrap must NOT trust the parent slot as already-masked: it must
         // either re-mask or refuse, never emit the raw value.
-        let schema = json!({
+        let schema = value!({
             "ssn": {
                 "type": "string",
                 "mask": { "kind": "last4", "classification": "spi" }
             }
         });
         // Parent holds plaintext; no sibling — the dangerous shape.
-        let mut row = json!({ "id": "usr_01", "ssn": "123-45-6789" });
+        let mut row = value!({ "id": "usr_01", "ssn": "123-45-6789" });
 
         wrap_row_on_read(&schema, "users", &mut row).unwrap();
 
@@ -955,11 +933,11 @@ mod tests {
     fn wrap_row_on_read_noop_when_no_masked_columns() {
         // Schema with only non-masked fields — row passes through
         // unchanged.
-        let schema = json!({
+        let schema = value!({
             "name": { "type": "string" },
             "age": { "type": "number" }
         });
-        let mut row = json!({ "id": "usr_01", "name": "alice", "age": 30 });
+        let mut row = value!({ "id": "usr_01", "name": "alice", "age": 30 });
         let original = row.clone();
 
         wrap_row_on_read(&schema, "users", &mut row).unwrap();
@@ -970,7 +948,7 @@ mod tests {
     #[test]
     fn wrap_row_on_read_noop_when_row_not_object() {
         // Defensive: a `Value::Null` row passes through without error.
-        let schema = json!({
+        let schema = value!({
             "ssn": {
                 "type": "string",
                 "mask": { "kind": "last4", "classification": "spi" }
@@ -983,7 +961,7 @@ mod tests {
 
     #[test]
     fn wrap_row_on_read_handles_multiple_masked_columns() {
-        let schema = json!({
+        let schema = value!({
             "ssn": {
                 "type": "string",
                 "mask": { "kind": "last4", "classification": "spi" }
@@ -998,7 +976,7 @@ mod tests {
             }
         });
         // Aliased-SELECT shape: parent slots hold masked strings.
-        let mut row = json!({
+        let mut row = value!({
             "id": "usr_01",
             "ssn": "***-**-6789",
             "email": "b***@example.com",
@@ -1034,7 +1012,7 @@ mod tests {
     /// passes against a body that ignores the descriptor entirely, which is the
     /// state this pair of tests exists to move off.
     fn masked_def_with_raw(raw: &str) -> Value {
-        json!({
+        value!({
             "type": "string",
             "mask": { "kind": "last4", "classification": "spi" },
             "storage": { "valueColumn": "ssn", "rawColumn": raw },
@@ -1043,8 +1021,8 @@ mod tests {
 
     #[test]
     fn a_write_relocates_to_the_raw_column_the_descriptor_declares() {
-        let schema = json!({ "ssn": masked_def_with_raw("__zs_raw2__ssn") });
-        let mut row = json!({ "id": "usr_01", "ssn": "123-45-6789", "__zsbin__ssn": true });
+        let schema = value!({ "ssn": masked_def_with_raw("__zs_raw2__ssn") });
+        let mut row = value!({ "id": "usr_01", "ssn": "123-45-6789" });
 
         derive_and_relocate(&schema, &MaskPlaintextSidechannel::new(), &mut row);
 
@@ -1061,14 +1039,14 @@ mod tests {
         assert_eq!(obj.get("ssn").and_then(|v| v.as_str()), Some("***-**-6789"));
         // The binary-bind marker follows the value to whichever column holds
         // it, so it has to be renamed off the DECLARED name too.
-        assert_eq!(obj.get("__zsbin____zs_raw2__ssn"), Some(&json!(true)));
+        assert!(!obj.contains_key("__zsbin____zs_raw2__ssn"));
         assert!(obj.get("__zsbin__ssn").is_none());
     }
 
     #[test]
     fn wrap_row_on_read_strips_the_raw_column_the_descriptor_declares() {
-        let schema = json!({ "ssn": masked_def_with_raw("__zs_raw2__ssn") });
-        let mut row = json!({
+        let schema = value!({ "ssn": masked_def_with_raw("__zs_raw2__ssn") });
+        let mut row = value!({
             "id": "usr_01",
             "ssn": "***-**-6789",
             "__zs_raw2__ssn": "123-45-6789",
@@ -1092,9 +1070,9 @@ mod tests {
     /// satisfied.
     #[test]
     fn a_descriptor_naming_a_creator_reachable_raw_column_refuses_both_passes() {
-        let schema = json!({ "ssn": masked_def_with_raw("nickname") });
+        let schema = value!({ "ssn": masked_def_with_raw("nickname") });
 
-        let row = json!({ "id": "usr_01", "ssn": "123-45-6789" });
+        let row = value!({ "id": "usr_01", "ssn": "123-45-6789" });
         let err = apply_mask_on_write(&schema, &MaskPlaintextSidechannel::new(), &row)
             .expect_err("the write pass must refuse a reachable raw column");
         assert!(
@@ -1102,7 +1080,7 @@ mod tests {
             "the refusal must name the offending column; got {err:?}",
         );
 
-        let mut read_row = json!({ "id": "usr_01", "ssn": "***-**-6789" });
+        let mut read_row = value!({ "id": "usr_01", "ssn": "***-**-6789" });
         wrap_row_on_read(&schema, "users", &mut read_row)
             .expect_err("the read pass must refuse a reachable raw column");
     }
@@ -1113,11 +1091,11 @@ mod tests {
     /// green on a tree where masking no longer worked at all.
     #[test]
     fn a_descriptor_without_a_storage_block_still_uses_the_derived_name() {
-        let schema = json!({
+        let schema = value!({
             "ssn": { "type": "string", "mask": { "kind": "last4", "classification": "spi" } }
         });
         let raw = crate::compile::raw_column_name("ssn");
-        let mut row = json!({ "id": "usr_01", "ssn": "123-45-6789" });
+        let mut row = value!({ "id": "usr_01", "ssn": "123-45-6789" });
 
         derive_and_relocate(&schema, &MaskPlaintextSidechannel::new(), &mut row);
         assert_eq!(row[raw.as_str()].as_str(), Some("123-45-6789"));

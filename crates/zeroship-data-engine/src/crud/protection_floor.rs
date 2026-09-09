@@ -75,7 +75,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use serde_json::Value;
+use zeroship_data_query_builder::value::Value;
 
 use zeroship_data_core::binding::DbBinding;
 use zeroship_data_core::error::DbError;
@@ -285,12 +285,12 @@ pub fn reset_for_tests() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
     use zeroship_data_query_builder::catalog::WrappedType;
     use zeroship_data_query_builder::catalog::{
         Classification, ColumnInfo, EncryptionMeta, LiveSchema, MaskKind, MaskMeta,
     };
     use zeroship_data_query_builder::descriptors::EncryptionMode;
+    use zeroship_data_query_builder::value;
 
     fn masked_column() -> ColumnInfo {
         ColumnInfo {
@@ -379,32 +379,32 @@ mod tests {
     fn kind_none_is_not_a_mask_declaration() {
         // The one-word edit and the one-key deletion reach the same write
         // behaviour, so the fence must read them the same way.
-        assert!(!descriptor_declares_mask(&json!({ "type": "string" })));
+        assert!(!descriptor_declares_mask(&value!({ "type": "string" })));
         assert!(!descriptor_declares_mask(
-            &json!({ "type": "string", "mask": { "kind": "none" } })
+            &value!({ "type": "string", "mask": { "kind": "none" } })
         ));
         assert!(descriptor_declares_mask(
-            &json!({ "type": "string", "mask": { "kind": "last4" } })
+            &value!({ "type": "string", "mask": { "kind": "last4" } })
         ));
         // No `kind` at all defaults to `full` in the write pass, so it IS a
         // declaration.
         assert!(descriptor_declares_mask(
-            &json!({ "type": "string", "mask": { "classification": "pii" } })
+            &value!({ "type": "string", "mask": { "classification": "pii" } })
         ));
     }
 
     #[test]
     fn encryption_is_declared_by_the_block_alone() {
         assert!(!descriptor_declares_encryption(
-            &json!({ "type": "string" })
+            &value!({ "type": "string" })
         ));
         assert!(descriptor_declares_encryption(
-            &json!({ "type": "string", "encrypted": { "mode": "randomised" } })
+            &value!({ "type": "string", "encrypted": { "mode": "randomised" } })
         ));
         // A non-object `encrypted` is not a declaration; the encryption pass
         // reads it with `as_object()` and skips the column.
         assert!(!descriptor_declares_encryption(
-            &json!({ "type": "string", "encrypted": true })
+            &value!({ "type": "string", "encrypted": true })
         ));
     }
 
@@ -437,7 +437,7 @@ mod tests {
         let floor = floor_from_live(&live_with("ssn", masked_column()));
         // The descriptor still declares the field - it just dropped the `mask`
         // key. That one deletion is the whole defect this fence exists for.
-        let downgraded = json!({ "ssn": { "type": "string" } });
+        let downgraded = value!({ "ssn": { "type": "string" } });
         let err = refuse_offences(&floor, "people", &downgraded)
             .expect_err("a dropped mask must be refused, not written in the clear");
         let rendered = format!("{err:?}");
@@ -454,7 +454,7 @@ mod tests {
         let enc_err = refuse_offences(
             &enc_floor,
             "people",
-            &json!({ "secret": { "type": "string" } }),
+            &value!({ "secret": { "type": "string" } }),
         )
         .expect_err("a dropped encryption block must be refused too");
         assert!(
@@ -468,7 +468,7 @@ mod tests {
         refuse_offences(
             &floor,
             "people",
-            &json!({ "ssn": { "type": "string", "mask": { "kind": "last4" } } }),
+            &value!({ "ssn": { "type": "string", "mask": { "kind": "last4" } } }),
         )
         .expect("a descriptor that still declares the mask must be permitted");
     }

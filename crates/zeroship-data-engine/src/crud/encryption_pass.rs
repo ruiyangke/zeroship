@@ -1,66 +1,12 @@
-//! Transparent column encryption pass — encrypt-on-write /
-//! decrypt-on-read for `t.encrypted(...)`-declared columns.
-//!
-//! ## How it plugs into CRUD
-//!
-//! The pass runs around every `BuiltQuery` build site (`build_insert`,
-//! `build_update_*`) and every `exec_query` result. For each column on
-//! the row whose schema entry carries an `encrypted` metadata block:
-//!
-//! - **Write path** ([`encrypt_row_on_write`]): serialise the typed
-//!   plaintext (per `wraps`), build the canonical AAD (Camp A — row_pk
-//!   bound for Randomised, omitted for Deterministic; see
-//!   `docs/archive/p5-encryption-backup-implementation-plan.md` §13),
-//!   call `encryption::aead::encrypt`, swap the JSON Value to a base64
-//!   string of the ciphertext blob. The SQL build layer then recognises
-//!   the column and emits `decode($N, 'base64')::bytea` at the
-//!   parameter site so the BYTEA column receives raw bytes.
-//!
-//! - **Read path** ([`decrypt_row_on_read`]): receive the row already
-//!   decoded into `Value` (BYTEA columns are surfaced as `\xHHHH...`
-//!   hex strings by `compio-postgres`'s text protocol). Parse the hex
-//!   back to bytes, call `encryption::aead::decrypt` with the same AAD
-//!   the write path used, deserialise per `wraps`, swap back into the
-//!   row.
-//!
-//! ## Why row_pk-in-AAD is non-negotiable for Randomised
-//!
-//! Without binding the row PK, an attacker with UPDATE-only access
-//! could copy row A's ciphertext into row B's column slot and read
-//! row A's plaintext via row B's read API. With row_pk in AAD,
-//! moving the ciphertext breaks AAD reconstruction → tag verification
-//! fails → typed `encryption_aead_failed` error surfaces, the
-//! mismatch becomes loud. Per §13 (Camp A), plugin-db mints typed_id
-//! PKs SDK-side before INSERT, so `row_pk` is ALWAYS available when
-//! `encrypt()` is called — single-phase INSERT, no
-//! chicken-and-egg.
-//!
-//! ## Why Deterministic mode omits row_pk
-//!
-//! Deterministic mode's defining property is "same plaintext + same
-//! `(collection, column)` → same ciphertext", which is what makes the
-//! B-tree-on-ciphertext equality lookup work. Binding row_pk would
-//! produce a different ciphertext per row and break the equality
-//! lookup (the entire reason deterministic mode exists). The SDK's
-//! `validateEncryptedFieldsInFilter` enforces a strict equality-only
-//! filter contract on deterministic columns — range / regex / LIKE are
-//! refused before the call reaches Rust.
-//!
-//! ## Wire shape (JSON Value)
-//!
-//! `serde_json::Value` cannot carry raw bytes — the only "binary"
-//! variant is `Value::String`. We base64-encode the ciphertext blob
-//! into a `Value::String` and rely on the SQL build layer to wrap the
-//! parameter placeholder with `decode($N, 'base64')::bytea`. The
-//! ciphertext blob is the `wire::pack`-framed
-//! `[version_flag | nonce | ct+tag]` produced by
-//! `crate::encryption::aead`. The base64 step adds ~33% transient
-//! memory overhead on the JSON side; the on-disk BYTEA payload is the
-//! raw bytes.
+//! Encrypt and decrypt declared fields using native ciphertext buffers.
+//! Randomised encryption authenticates the row identity as well as collection
+//! and column, so moving ciphertext to another row fails authentication.
+//! Deterministic encryption omits row identity to support equality matching.
+//! Mask derivation receives protected plaintext before encryption replaces it.
 
 use base64::Engine as _;
-use serde_json::Value;
 use zeroize::Zeroizing;
+use zeroship_data_query_builder::value::Value;
 
 use crate::encryption::KeyStore;
 use zeroship_data_core::error::DbError;
@@ -71,15 +17,7 @@ use zeroship_data_core::error::DbError;
 /// available before INSERT). For UPDATE the caller passes the target
 /// row's PK pulled from the filter — `{ id: ... }`.
 ///
-/// On success, every encrypted column in `row` has its plaintext
-/// `Value` swapped for a `Value::String` carrying the base64-encoded
-/// ciphertext blob.
-///
-/// **Marker side-channel**: the function also inserts a sibling
-/// `__zsbin__<col>` marker key (also `Value::Bool(true)`) for each
-/// encrypted column it processed. The SQL builder uses this marker to
-/// know which placeholders need the `decode($N, 'base64')::bytea`
-/// cast. The marker is stripped before the row leaves the SQL builder.
+/// Each encrypted plaintext becomes a native byte buffer.
 ///
 /// This is the overload that captures plaintexts for the
 /// downstream mask pass. See [`encrypt_row_on_write_with_sidechannel`]
@@ -200,16 +138,9 @@ pub async fn encrypt_row_on_write_with_sidechannel(
             },
         );
         let ciphertext = crate::encryption::aead::encrypt(&key, mode, &plaintext, &aad)?;
-        let b64 = base64::engine::general_purpose::STANDARD.encode(&ciphertext);
-        // Stash the plaintext for the mask pass BEFORE replacing the
-        // row value with the base64 ciphertext.
         sidechannel.insert(col.clone(), sidechannel_str);
         let obj = row.as_object_mut().expect("checked above");
-        obj.insert(col.clone(), Value::String(b64));
-        // Sibling marker so the SQL builder knows to wrap the
-        // placeholder with `decode($N, 'base64')::bytea`. Stripped
-        // before the row leaves the build layer.
-        obj.insert(format!("__zsbin__{col}"), Value::Bool(true));
+        obj.insert(col.clone(), Value::Bytes(ciphertext));
     }
     Ok(())
 }
@@ -221,7 +152,10 @@ fn plaintext_to_sidechannel_string(value: &Value, wraps: &str) -> String {
     match wraps {
         "string" => value.as_str().unwrap_or("").to_string(),
         "number" => value.as_f64().map(|n| n.to_string()).unwrap_or_default(),
-        "bytes" => value.as_str().unwrap_or("").to_string(),
+        "bytes" => value
+            .as_bytes()
+            .map(|v| base64::engine::general_purpose::STANDARD.encode(v))
+            .unwrap_or_default(),
         _ => String::new(),
     }
 }
@@ -316,29 +250,12 @@ pub async fn decrypt_row_on_read(
         if value.is_null() {
             continue;
         }
-        // Read rows carry encrypted blobs as base64 on both backends.
-        // For back-compat with older PG callers we also accept the
-        // legacy `\x...` text-protocol BYTEA envelope.
-        let Some(wire_str) = value.as_str() else {
-            // The row carries something other than the expected BYTEA
-            // text shape — fail loud so a regression in the introspect /
-            // bind layer surfaces immediately rather than producing
-            // garbled plaintext.
-            return Err(DbError::internal(format!(
-                "decrypt_row_on_read: column '{col}' expected encrypted blob text, got {value:?}"
-            )));
-        };
-        let bytes = if wire_str.starts_with("\\x") {
-            hex_to_bytes(wire_str)?
-        } else {
-            base64::engine::general_purpose::STANDARD
-                .decode(wire_str)
-                .map_err(|e| {
-                    DbError::internal(format!(
-                        "decrypt_row_on_read: column '{col}' is not valid base64: {e}"
-                    ))
-                })?
-        };
+        let bytes = value
+            .as_bytes()
+            .ok_or_else(|| {
+                DbError::internal(format!("encrypted column '{col}' requires native bytes"))
+            })?
+            .to_vec();
         to_decrypt.push((col.clone(), mode, key_id, wraps, bytes));
     }
 
@@ -364,15 +281,6 @@ pub async fn decrypt_row_on_read(
     Ok(())
 }
 
-/// Serialise a plaintext `Value` into the canonical byte layout for its
-/// `wraps` type. Layouts:
-///
-/// - `"string"` → UTF-8 bytes (no terminator)
-/// - `"number"` → `f64` big-endian (8 bytes). We use f64 to match
-///   `t.number()`'s storage type (`DOUBLE PRECISION`); integers are
-///   stored as their f64 representation.
-/// - `"bytes"` → base64-decoded raw bytes (the SDK passes byte fields
-///   as base64-encoded `Value::String`).
 fn serialise_wrapped(value: &Value, wraps: &str) -> Result<Vec<u8>, DbError> {
     match wraps {
         "string" => match value.as_str() {
@@ -389,22 +297,12 @@ fn serialise_wrapped(value: &Value, wraps: &str) -> Result<Vec<u8>, DbError> {
                 format!("encrypted column declared wraps=number but value is {value:?}"),
             )),
         },
-        "bytes" => match value.as_str() {
-            Some(s) => base64::engine::general_purpose::STANDARD
-                .decode(s)
-                .map_err(|e| {
-                    DbError::validation(
-                        "encrypted_value_type_mismatch",
-                        format!(
-                            "encrypted column declared wraps=bytes but value is not base64: {e}"
-                        ),
-                    )
-                }),
-            None => Err(DbError::validation(
+        "bytes" => value.as_bytes().map(<[u8]>::to_vec).ok_or_else(|| {
+            DbError::validation(
                 "encrypted_value_type_mismatch",
-                format!("encrypted column declared wraps=bytes but value is {value:?}"),
-            )),
-        },
+                "encrypted bytes require native bytes",
+            )
+        }),
         other => Err(DbError::internal(format!(
             "encrypted wraps must be string/number/bytes, got '{other}'"
         ))),
@@ -430,15 +328,13 @@ fn deserialise_wrapped(bytes: &[u8], wraps: &str) -> Result<Value, DbError> {
             let mut arr = [0u8; 8];
             arr.copy_from_slice(bytes);
             let n = f64::from_be_bytes(arr);
-            // `serde_json::Number::from_f64` returns None for NaN /
+            // `zeroship_data_query_builder::value::Number::from_f64` returns None for NaN /
             // Infinity. Coerce to `null` for those — they're not
             // legitimate column values anyway.
-            Ok(serde_json::Number::from_f64(n).map_or(Value::Null, Value::Number))
+            Ok(zeroship_data_query_builder::value::Number::from_f64(n)
+                .map_or(Value::Null, Value::Number))
         }
-        "bytes" => {
-            let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
-            Ok(Value::String(b64))
-        }
+        "bytes" => Ok(Value::Bytes(bytes.to_vec())),
         other => Err(DbError::internal(format!(
             "encrypted wraps must be string/number/bytes, got '{other}'"
         ))),
@@ -448,7 +344,7 @@ fn deserialise_wrapped(bytes: &[u8], wraps: &str) -> Result<Value, DbError> {
 /// Parse the `mode` field from an `encrypted` metadata object. Returns
 /// a typed error if the mode is missing or unknown.
 fn parse_mode(
-    enc_meta: &serde_json::Map<String, Value>,
+    enc_meta: &zeroship_data_query_builder::value::Map<String, Value>,
 ) -> Result<crate::backend::EncryptionMode, DbError> {
     let mode_str = enc_meta
         .get("mode")
@@ -465,55 +361,12 @@ fn parse_mode(
 
 /// Pick the `wraps` field; default `"string"` for forward-compat with
 /// `t.encrypted()` calls that omit it.
-fn parse_wraps(enc_meta: &serde_json::Map<String, Value>) -> &'static str {
+fn parse_wraps(enc_meta: &zeroship_data_query_builder::value::Map<String, Value>) -> &'static str {
     match enc_meta.get("wraps").and_then(|v| v.as_str()) {
         Some("string") => "string",
         Some("number") => "number",
         Some("bytes") => "bytes",
         _ => "string",
-    }
-}
-
-/// Convert a Postgres `\x`-prefixed hex string into raw bytes. Used on
-/// the read path to recover the wire blob from the text-protocol BYTEA
-/// representation.
-fn hex_to_bytes(s: &str) -> Result<Vec<u8>, DbError> {
-    let hex = s.strip_prefix("\\x").unwrap_or(s);
-    if !hex.len().is_multiple_of(2) {
-        return Err(DbError::internal(format!(
-            "BYTEA text has odd hex length: {}",
-            hex.len()
-        )));
-    }
-    let mut out = Vec::with_capacity(hex.len() / 2);
-    let bytes = hex.as_bytes();
-    for i in (0..bytes.len()).step_by(2) {
-        let hi = nibble(bytes[i])?;
-        let lo = nibble(bytes[i + 1])?;
-        out.push((hi << 4) | lo);
-    }
-    Ok(out)
-}
-
-fn nibble(c: u8) -> Result<u8, DbError> {
-    match c {
-        b'0'..=b'9' => Ok(c - b'0'),
-        b'a'..=b'f' => Ok(c - b'a' + 10),
-        b'A'..=b'F' => Ok(c - b'A' + 10),
-        _ => Err(DbError::internal(format!(
-            "BYTEA text contains non-hex byte 0x{c:02x}"
-        ))),
-    }
-}
-
-/// Strip every `__zsbin__<col>` marker from `row` after the SQL builder
-/// has consumed them to position the BYTEA cast at the right
-/// placeholder. The markers must NOT survive to the parameter list (PG
-/// has no such column).
-#[cfg(any(test, feature = "test-helpers"))]
-pub fn strip_encryption_markers(row: &mut Value) {
-    if let Some(obj) = row.as_object_mut() {
-        obj.retain(|k, _| !k.starts_with("__zsbin__"));
     }
 }
 
@@ -566,15 +419,12 @@ mod tests {
 
     #[test]
     fn round_trip_bytes() {
-        // Original "bytes" field carries base64 on the JSON wire.
         let raw = [0xde, 0xad, 0xbe, 0xef];
-        let b64 = base64::engine::general_purpose::STANDARD.encode(raw);
-        let v = Value::String(b64.clone());
+        let v = Value::Bytes(raw.to_vec());
         let bytes = serialise_wrapped(&v, "bytes").unwrap();
         assert_eq!(bytes, raw);
         let back = deserialise_wrapped(&bytes, "bytes").unwrap();
-        // Round-trip preserves the base64 form.
-        assert_eq!(back.as_str(), Some(b64.as_str()));
+        assert_eq!(back.as_bytes(), Some(raw.as_slice()));
     }
 
     /// `serialise_wrapped` rejects a non-string value when wraps=string.
@@ -590,40 +440,9 @@ mod tests {
         }
     }
 
-    /// hex_to_bytes round-trips with and without the `\x` prefix.
-    #[test]
-    fn hex_to_bytes_round_trip() {
-        assert_eq!(
-            hex_to_bytes("\\xdeadbeef").unwrap(),
-            vec![0xde, 0xad, 0xbe, 0xef]
-        );
-        assert_eq!(
-            hex_to_bytes("deadbeef").unwrap(),
-            vec![0xde, 0xad, 0xbe, 0xef]
-        );
-        assert_eq!(hex_to_bytes("\\x").unwrap(), Vec::<u8>::new());
-    }
-
-    /// hex_to_bytes rejects odd-length and non-hex content with typed
-    /// errors (`Internal`, not user-facing).
-    #[test]
-    fn hex_to_bytes_rejects_odd_length() {
-        let err = hex_to_bytes("\\xabc").unwrap_err();
-        assert!(matches!(err, DbError::Internal { .. }));
-    }
-
-    #[test]
-    fn hex_to_bytes_rejects_garbage() {
-        let err = hex_to_bytes("zz").unwrap_err();
-        assert!(matches!(err, DbError::Internal { .. }));
-    }
-
-    /// `parse_mode` accepts both `randomised` and `randomized` and the
-    /// canonical `deterministic`, rejects anything else with a typed
-    /// internal error.
     #[test]
     fn parse_mode_variants() {
-        let mut m = serde_json::Map::new();
+        let mut m = zeroship_data_query_builder::value::Map::new();
         m.insert("mode".to_string(), Value::String("randomised".to_string()));
         assert!(matches!(
             parse_mode(&m).unwrap(),
@@ -646,24 +465,6 @@ mod tests {
         assert!(parse_mode(&m).is_err());
     }
 
-    /// `strip_encryption_markers` removes every `__zsbin__*` key,
-    /// preserves every other key.
-    #[test]
-    fn strip_markers_removes_only_marker_keys() {
-        let mut row = serde_json::json!({
-            "id": "usr_01",
-            "ssn": "ciphertext-b64",
-            "__zsbin__ssn": true,
-            "name": "alice",
-        });
-        strip_encryption_markers(&mut row);
-        let obj = row.as_object().unwrap();
-        assert!(obj.contains_key("id"));
-        assert!(obj.contains_key("ssn"));
-        assert!(obj.contains_key("name"));
-        assert!(!obj.contains_key("__zsbin__ssn"));
-    }
-
     /// `encrypt_row_on_write` + `decrypt_row_on_read` round-trip with a
     /// stub backend (`AeadKey` directly, no PG round-trip). Pins the
     /// AAD policy: Randomised binds row_pk; Deterministic omits it.
@@ -673,12 +474,11 @@ mod tests {
     fn write_then_read_round_trip_randomised() {
         let keys = test_key_store();
 
-        let schema = serde_json::json!({
+        let schema = zeroship_data_query_builder::value!({
             "ssn": { "type": "string", "encrypted": { "mode": "randomised", "keyId": "default", "wraps": "string" } },
             "name": { "type": "string" },
         });
-        let mut row =
-            serde_json::json!({ "id": "usr_01HX", "ssn": "123-45-6789", "name": "alice" });
+        let mut row = zeroship_data_query_builder::value!({ "id": "usr_01HX", "ssn": "123-45-6789", "name": "alice" });
 
         let rt = compio::runtime::Runtime::new().expect("compio runtime");
         rt.block_on(async {
@@ -687,28 +487,15 @@ mod tests {
                 .unwrap();
         });
 
-        // After encrypt: ssn should be a base64 string, name unchanged,
-        // marker present.
         let obj = row.as_object().unwrap();
-        assert!(obj.get("ssn").and_then(|v| v.as_str()).is_some());
-        assert_ne!(obj["ssn"].as_str().unwrap(), "123-45-6789");
-        assert_eq!(obj.get("name").and_then(|v| v.as_str()), Some("alice"));
-        assert_eq!(obj.get("__zsbin__ssn"), Some(&Value::Bool(true)));
-
-        // Simulate the read path: the SQL bind layer returned BYTEA as
-        // PG hex text, and stripped the marker. We mimic that by
-        // base64-decoding our ciphertext and re-encoding as PG hex
-        // text. (In production the BYTEA round-trip is handled by
-        // compio-postgres; here we do it by hand for the unit test.)
-        let b64 = obj["ssn"].as_str().unwrap().to_string();
-        let raw = base64::engine::general_purpose::STANDARD
-            .decode(b64)
-            .unwrap();
-        let hex_str = format!(
-            "\\x{}",
-            raw.iter().map(|b| format!("{b:02x}")).collect::<String>()
-        );
-        let mut read_row = serde_json::json!({ "id": "usr_01HX", "ssn": hex_str, "name": "alice" });
+        let raw = obj["ssn"]
+            .as_bytes()
+            .expect("ciphertext is native bytes")
+            .to_vec();
+        assert_ne!(raw, b"123-45-6789");
+        assert_eq!(obj["name"], "alice");
+        assert!(!obj.contains_key("__zsbin__ssn"));
+        let mut read_row = zeroship_data_query_builder::value!({ "id": "usr_01HX", "ssn": Value::Bytes(raw.clone()), "name": "alice" });
 
         rt.block_on(async {
             decrypt_row_on_read(&keys, "app1", "users", &schema, &mut read_row)
@@ -722,8 +509,7 @@ mod tests {
         // Same ciphertext under a DIFFERENT row_pk must fail tag check
         // (Camp A defence — the row-swap attack surfaces as
         // `encryption_aead_failed`).
-        let mut wrong_pk_row =
-            serde_json::json!({ "id": "usr_02HX", "ssn": hex_str, "name": "alice" });
+        let mut wrong_pk_row = zeroship_data_query_builder::value!({ "id": "usr_02HX", "ssn": Value::Bytes(raw.clone()), "name": "alice" });
         let err = rt.block_on(async {
             decrypt_row_on_read(&keys, "app1", "users", &schema, &mut wrong_pk_row).await
         });
@@ -739,14 +525,14 @@ mod tests {
     fn decrypt_row_on_read_skips_masked_default_aliases() {
         let keys = test_key_store();
 
-        let schema = serde_json::json!({
+        let schema = zeroship_data_query_builder::value!({
             "contactEmail": {
                 "type": "string",
                 "encrypted": { "mode": "deterministic", "keyId": "default", "wraps": "string" },
                 "mask": { "kind": "email", "classification": "pii" }
             }
         });
-        let mut read_row = serde_json::json!({
+        let mut read_row = zeroship_data_query_builder::value!({
             "id": "usr_01HX",
             "contactEmail": "a***@example.com"
         });
@@ -769,12 +555,12 @@ mod tests {
     fn deterministic_same_plaintext_yields_same_ciphertext() {
         let keys = test_key_store();
 
-        let schema = serde_json::json!({
+        let schema = zeroship_data_query_builder::value!({
             "ssn": { "type": "string", "encrypted": { "mode": "deterministic", "keyId": "default", "wraps": "string" } },
         });
 
-        let mut row_a = serde_json::json!({ "id": "usr_a", "ssn": "shared" });
-        let mut row_b = serde_json::json!({ "id": "usr_b", "ssn": "shared" });
+        let mut row_a = zeroship_data_query_builder::value!({ "id": "usr_a", "ssn": "shared" });
+        let mut row_b = zeroship_data_query_builder::value!({ "id": "usr_b", "ssn": "shared" });
 
         let rt = compio::runtime::Runtime::new().expect("compio runtime");
         rt.block_on(async {

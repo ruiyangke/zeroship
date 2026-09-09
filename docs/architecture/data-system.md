@@ -11,6 +11,32 @@ design in full.
 
 `zeroship-data-engine` exposes `Database`, `Collection`, and `ModelCollection` for
 Rust callers. The worker's V8 adapter uses the same `PreparedOperation` path.
+
+```text
+Rust model -- EncodeRecord / Row::take --+
+                                       |
+V8 values -- native capture ------------+--> PreparedOperation
+                                             |
+                                  protection passes + query compiler
+                                             |
+                                     native parameters / rows
+                                             |
+                                       PostgreSQL / SQLite
+                                             |
+                                  protected native result records
+                                             |
+                        +--------------------+--------------------+
+                        |                                         |
+                   Rust model                              V8 object / Uint8Array
+```
+
+The shared value layer preserves integers, booleans, text and binary buffers.
+Rust model mapping does not require Serde. The V8 adapter captures arguments
+before yielding and materializes results directly when the runtime re-enters
+V8. JSON encoding belongs to JSON columns, persisted metadata, and explicit
+wire contracts. The native path still allocates records and copies V8 inputs;
+it does not promise allocation-free queries.
+
 Preparation resolves the deployment's collection descriptor and captures the
 request's actor, read set, and transaction route before execution can yield.
 The ORM database handle is an execution context, separate from the persisted
@@ -23,8 +49,8 @@ code does not contain another schema emitter, and database fixtures use the
 migration engine's emitter.
 
 Writes and reads pass through the existing system-field, masking, encryption,
-and result-decoding stages. Binary interpretation belongs to the compiled SQL
-expression; a text value cannot select a binary binding by carrying a prefix.
+and result-decoding stages. Drivers bind binary values from their native type;
+a text value cannot select binary binding by carrying a prefix.
 Transaction statements report completion to the reducer, which rolls back a
 poisoned transaction. Rust callback transactions use the same protocol as the
 worker, including savepoints and cancellation cleanup. Handles returned from a

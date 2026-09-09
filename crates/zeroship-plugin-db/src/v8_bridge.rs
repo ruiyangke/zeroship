@@ -12,7 +12,7 @@
 //!   path (string-typed value), `setup_js_promise` for the
 //!   `OpResult::JsValue` path (real JS values via `ResolveValue::Json` /
 //!   `ResolveValue::F64` / `ResolveValue::JsGlobal`).
-//! - **Argument decoders**: `read_json_arg`, `v8_value_to_serde_json`
+//! - **Argument decoders**: `read_native_arg`, `decode_native`
 //!   (the hot-path walker that avoids a `JSON.stringify` round-trip).
 //! - **State accessors**: `runtime_state` (read the `SharedState` off
 //!   the isolate slot). `get_app_id` and its `get_app_id_pub` wrapper
@@ -22,8 +22,8 @@
 //!   the private half looks called right up until then.
 //! - **Capability gate**: `refuse_if_query_capability` — the B3 gate
 //!   that rejects writes from inside a `query()` handler.
-//! - **Row decoding**: `row_to_json`, `column_to_json`,
-//!   `rows_to_json_value` (the typed `Vec<Value>` intermediate the
+//! - **Row decoding**: `row_to_value`, `column_to_value`,
+//!   `rows_to_values` (the typed `Vec<Value>` intermediate the
 //!   CRUD chain threads end-to-end) — Postgres OID → JSON conversion,
 //!   used by every exec path. The `fmt_db_err` shim that used to sit
 //!   beside them is gone with its last caller (the deleted
@@ -31,7 +31,7 @@
 //!   [`crate::backend::pg_error::classify`] directly so the SQLSTATE
 //!   classification survives to the V8 boundary.
 
-use serde_json::Value;
+use zeroship_data_query_builder::value::Value;
 use zeroship_runtime::state::{ResolveValue, SharedState};
 
 // ---------------------------------------------------------------------------
@@ -116,9 +116,9 @@ pub(crate) fn ensure_read_set_capture() {
 // V8 value walker
 // ---------------------------------------------------------------------------
 
-/// Walk a `v8::Local<v8::Value>` directly into a `serde_json::Value`,
+/// Walk a `v8::Local<v8::Value>` directly into a `zeroship_data_query_builder::value::Value`,
 /// skipping the JSON.stringify / serde_json::from_str round trip used by
-/// `read_json_arg`. Used by the v8_class `Collection` methods on the
+/// `read_native_arg`. Used by the v8_class `Collection` methods on the
 /// hot path so we don't pay two parse costs per CRUD call.
 ///
 /// Mirrors the small walker in `runtime/src/rpc/superjson.rs`. We
@@ -221,15 +221,15 @@ impl DecodeBudget {
     }
 }
 
-pub(crate) fn v8_value_to_serde_json(
+pub(crate) fn decode_native(
     scope: &mut v8::PinScope<'_, '_>,
     v: v8::Local<v8::Value>,
 ) -> Result<Value, DecodeError> {
     let mut budget = DecodeBudget::new();
-    v8_value_to_serde_json_depth(scope, v, 0, &mut budget)
+    decode_native_depth(scope, v, 0, &mut budget)
 }
 
-fn v8_value_to_serde_json_depth(
+fn decode_native_depth(
     scope: &mut v8::PinScope<'_, '_>,
     v: v8::Local<v8::Value>,
     depth: usize,
@@ -253,10 +253,12 @@ fn v8_value_to_serde_json_depth(
         if n.fract() == 0.0 && n >= i64::MIN as f64 && n <= i64::MAX as f64 {
             let i = n as i64;
             if (i as f64) == n {
-                return Ok(Value::Number(serde_json::Number::from(i)));
+                return Ok(Value::Number(
+                    zeroship_data_query_builder::value::Number::from(i),
+                ));
             }
         }
-        if let Some(num) = serde_json::Number::from_f64(n) {
+        if let Some(num) = zeroship_data_query_builder::value::Number::from_f64(n) {
             return Ok(Value::Number(num));
         }
         // Non-finite. Coercing to null would change a filter's operator to
@@ -299,12 +301,38 @@ fn v8_value_to_serde_json_depth(
         if let Ok(date) = v8::Local::<v8::Date>::try_from(v) {
             let ms = date.value_of();
             if ms.is_finite() {
-                if let Some(n) = serde_json::Number::from_f64(ms) {
+                if let Some(n) = zeroship_data_query_builder::value::Number::from_f64(ms) {
                     return Ok(Value::Number(n));
                 }
             }
         }
         return Err(DecodeError::Unsupported("date with no representable value"));
+    }
+    if v.is_uint8_array() {
+        let view = v8::Local::<v8::Uint8Array>::try_from(v)
+            .map_err(|_| DecodeError::Unsupported("byte view"))?;
+        let length = view.byte_length();
+        budget.take_bytes(length)?;
+        let mut bytes = vec![0; length];
+        if view.copy_contents(&mut bytes) != length {
+            return Err(DecodeError::Unsupported("detached byte view"));
+        }
+        return Ok(Value::Bytes(bytes));
+    }
+    if v.is_big_int() {
+        let bigint =
+            v8::Local::<v8::BigInt>::try_from(v).map_err(|_| DecodeError::Unsupported("bigint"))?;
+        let (number, lossless) = bigint.i64_value();
+        if lossless {
+            return Ok(number.into());
+        }
+        let (number, lossless) = bigint.u64_value();
+        if lossless {
+            return Ok(number.into());
+        }
+        return Err(DecodeError::Unsupported(
+            "bigint outside database integer range",
+        ));
     }
     if v.is_array() {
         let arr: v8::Local<v8::Array> = v
@@ -322,12 +350,7 @@ fn v8_value_to_serde_json_depth(
             let elem = arr
                 .get_index(scope, i)
                 .ok_or(DecodeError::PendingException)?;
-            out.push(v8_value_to_serde_json_depth(
-                scope,
-                elem,
-                depth + 1,
-                budget,
-            )?);
+            out.push(decode_native_depth(scope, elem, depth + 1, budget)?);
         }
         return Ok(Value::Array(out));
     }
@@ -339,7 +362,7 @@ fn v8_value_to_serde_json_depth(
             .get_own_property_names(scope, v8::GetPropertyNamesArgs::default())
             .ok_or(DecodeError::PendingException)?;
         budget.take_nodes(names.length() as usize)?;
-        let mut map = serde_json::Map::new();
+        let mut map = zeroship_data_query_builder::value::Map::new();
         for i in 0..names.length() {
             let key_v = names
                 .get_index(scope, i)
@@ -352,10 +375,7 @@ fn v8_value_to_serde_json_depth(
             // decoded to one clause and the mutation ran against a strict
             // subset of the declared predicate. Read exactly once, and refuse.
             let val_v = obj.get(scope, key_v).ok_or(DecodeError::PendingException)?;
-            map.insert(
-                key,
-                v8_value_to_serde_json_depth(scope, val_v, depth + 1, budget)?,
-            );
+            map.insert(key, decode_native_depth(scope, val_v, depth + 1, budget)?);
         }
         return Ok(Value::Object(map));
     }
@@ -365,15 +385,15 @@ fn v8_value_to_serde_json_depth(
 }
 
 /// Read a CRUD method's object/array argument directly from V8 into a
-/// `serde_json::Value`. `undefined`/missing → empty object (matches
-/// `read_json_arg`'s default).
-pub(crate) fn read_json_arg(
+/// `zeroship_data_query_builder::value::Value`. `undefined`/missing → empty object (matches
+/// `read_native_arg`'s default).
+pub(crate) fn read_native_arg(
     scope: &mut v8::PinScope<'_, '_>,
     v: Option<v8::Local<v8::Value>>,
 ) -> Result<Value, DecodeError> {
     match v {
-        Some(val) if !val.is_null_or_undefined() => v8_value_to_serde_json(scope, val),
-        _ => Ok(Value::Object(serde_json::Map::new())),
+        Some(val) if !val.is_null_or_undefined() => decode_native(scope, val),
+        _ => Ok(Value::Object(zeroship_data_query_builder::value::Map::new())),
     }
 }
 
@@ -443,13 +463,9 @@ pub(crate) fn setup_js_promise<'s>(
 // every masked read routed through it. The adapter now picks its own callback,
 // and the engine says only whether the result carries masked columns.
 
-/// `first_row_or_null` variant that, when `has_masked` is
-/// set, resolves via [`ResolveValue::JsonWithRehydration`] so the pump
-/// walks the parsed value and replaces `__zsmask__` sentinels with
-/// native `MaskedValue` instances. When `has_masked` is `false` this is
-/// identical to `first_row_or_null` (plain `JSON.parse`, no walk).
+/// Materialize the first native row and rehydrate masked fields when present.
 pub(crate) fn first_row_or_null_masked(rows: Vec<Value>, has_masked: bool) -> ResolveValue {
-    let value = rows.into_iter().next().unwrap_or(Value::Null).to_string();
+    let value = rows.into_iter().next().unwrap_or(Value::Null);
     maybe_rehydrate(value, has_masked)
 }
 
@@ -466,27 +482,15 @@ pub(crate) fn usize_count_as_f64(count: usize) -> ResolveValue {
     ResolveValue::F64(count as f64)
 }
 
-/// `rows_as_json_array` variant that resolves via
-/// [`ResolveValue::JsonWithRehydration`] when `has_masked` is set. See
-/// [`first_row_or_null_masked`].
-pub(crate) fn rows_as_json_array_masked(rows: Vec<Value>, has_masked: bool) -> ResolveValue {
-    let value = Value::Array(rows).to_string();
+/// Materialize native rows and rehydrate masked fields when present.
+pub(crate) fn rows_as_array_masked(rows: Vec<Value>, has_masked: bool) -> ResolveValue {
+    let value = Value::Array(rows);
     maybe_rehydrate(value, has_masked)
 }
 
-/// Pick `ResolveValue::JsonWithRehydration` (walk the
-/// parsed value, mint `MaskedValue` for `__zsmask__` sentinels) when the
-/// result is known to carry masked columns; otherwise the plain
-/// `ResolveValue::Json` fast path (bulk `JSON.parse`, no walk).
-pub(crate) fn maybe_rehydrate(json: String, has_masked: bool) -> ResolveValue {
-    if has_masked {
-        ResolveValue::JsonWithRehydration {
-            json,
-            transform: crate::v8_classes::masked_value::rehydrate_masked_values,
-        }
-    } else {
-        ResolveValue::Json(json)
-    }
+/// Schedule direct V8 materialization of a protected result.
+pub(crate) fn maybe_rehydrate(value: Value, has_masked: bool) -> ResolveValue {
+    crate::v8_values::resolve(value, has_masked)
 }
 
 #[cfg(test)]
@@ -512,20 +516,20 @@ mod tests {
 
     #[test]
     fn capture_records_in_query_kind() {
-        use zeroship_runtime::rpc::{KindGuard, ProcedureKind};
         use crate::read_set::Predicate;
+        use zeroship_runtime::rpc::{KindGuard, ProcedureKind};
 
         let _kg = KindGuard::enter(ProcedureKind::Query);
         ensure_read_set_capture();
         crate::read_set::record_if_active(
             "messages",
-            &serde_json::json!({ "userId": 42 }),
-            &serde_json::json!({}),
+            &zeroship_data_query_builder::value!({ "userId": 42 }),
+            &zeroship_data_query_builder::value!({}),
         );
         crate::read_set::record_if_active(
             "messages",
-            &serde_json::json!({}),
-            &serde_json::json!({}),
+            &zeroship_data_query_builder::value!({}),
+            &zeroship_data_query_builder::value!({}),
         );
 
         let entries = crate::read_set::snapshot_for("messages");
@@ -543,8 +547,8 @@ mod tests {
         ensure_read_set_capture();
         crate::read_set::record_if_active(
             "messages",
-            &serde_json::json!({ "userId": 42 }),
-            &serde_json::json!({}),
+            &zeroship_data_query_builder::value!({ "userId": 42 }),
+            &zeroship_data_query_builder::value!({}),
         );
         assert!(
             crate::read_set::snapshot_for("messages").is_empty(),
@@ -560,8 +564,8 @@ mod tests {
         assert!(crate::read_set::is_active(), "the capture is still opened");
         crate::read_set::record_if_active(
             "messages",
-            &serde_json::json!({ "userId": 42 }),
-            &serde_json::json!({}),
+            &zeroship_data_query_builder::value!({ "userId": 42 }),
+            &zeroship_data_query_builder::value!({}),
         );
         assert!(crate::read_set::snapshot_for("messages").is_empty());
     }
@@ -589,7 +593,7 @@ mod tests {
         let script = v8::Script::compile(scope, code, None).unwrap();
         let val = script.run(scope).unwrap();
 
-        let decoded = v8_value_to_serde_json(scope, val);
+        let decoded = decode_native(scope, val);
 
         // The cap now REFUSES. v2 pinned `Value::Null` past the cap, which is
         // the same absence-means-safe shape the total decode removes: a
@@ -606,7 +610,7 @@ mod tests {
     /// This pins current behaviour rather than endorsing it. `Infinity`,
     /// `-Infinity` and `NaN` all reach the number arm as real V8 numbers, skip the
     /// lossless-integer branch (their `fract()` is NaN, so `fract() == 0.0` is
-    /// false), and then fail `serde_json::Number::from_f64`, which returns `None`
+    /// false), and then fail `zeroship_data_query_builder::value::Number::from_f64`, which returns `None`
     /// for anything non-finite. The arm falls through to `Value::Null`.
     ///
     /// So a creator value of `Infinity` is not rejected here and does not error -
@@ -631,7 +635,7 @@ mod tests {
                 let code = v8::String::new(scope, $src).unwrap();
                 let script = v8::Script::compile(scope, code, None).unwrap();
                 let val = script.run(scope).unwrap();
-                v8_value_to_serde_json(scope, val)
+                decode_native(scope, val)
             }};
         }
 
@@ -650,15 +654,21 @@ mod tests {
         // adjacent to the ones that do not.
         assert_eq!(
             decode!("1.5"),
-            Ok(Value::Number(serde_json::Number::from_f64(1.5).unwrap()))
+            Ok(Value::Number(
+                zeroship_data_query_builder::value::Number::from_f64(1.5).unwrap()
+            ))
         );
         assert_eq!(
             decode!("0"),
-            Ok(Value::Number(serde_json::Number::from(0i64)))
+            Ok(Value::Number(
+                zeroship_data_query_builder::value::Number::from(0i64)
+            ))
         );
         assert_eq!(
             decode!("-42"),
-            Ok(Value::Number(serde_json::Number::from(-42i64)))
+            Ok(Value::Number(
+                zeroship_data_query_builder::value::Number::from(-42i64)
+            ))
         );
         assert!(
             matches!(decode!("Number.MAX_VALUE"), Ok(Value::Number(_))),
@@ -707,7 +717,7 @@ mod tests {
         let script = v8::Script::compile(scope, code, None).unwrap();
         let val = script.run(scope).unwrap();
 
-        let decoded = v8_value_to_serde_json(scope, val);
+        let decoded = decode_native(scope, val);
 
         // Both clauses were declared. The decode must REFUSE rather than yield
         // a filter that silently lost one of them.
@@ -750,7 +760,7 @@ mod tests {
         let val = script.run(scope).unwrap();
 
         assert_eq!(
-            v8_value_to_serde_json(scope, val),
+            decode_native(scope, val),
             Err(DecodeError::PendingException),
             "an unreadable element must refuse, not become null"
         );
@@ -774,7 +784,7 @@ mod tests {
         let val = script.run(scope).unwrap();
 
         assert_eq!(
-            v8_value_to_serde_json(scope, val),
+            decode_native(scope, val),
             Err(DecodeError::Budget("node count")),
             "a sparse array past the node budget must refuse before allocating"
         );

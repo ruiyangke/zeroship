@@ -28,8 +28,8 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use serde_json::Value;
 use tempfile::TempDir;
+use zeroship_data_query_builder::value::Value;
 
 use zeroship_data_core::error::DbError;
 use zeroship_data_core::storage::SchemaIntrospect;
@@ -246,13 +246,13 @@ impl SqliteBackend {
             .insert((app_id.to_string(), collection.to_string()));
     }
 
-    pub async fn query_json(
+    pub async fn query_values(
         &self,
         sql: &str,
-        params: &[&str],
-    ) -> Result<Vec<serde_json::Value>, DbError> {
+        params: &[zeroship_data_query_builder::value::Value],
+    ) -> Result<Vec<zeroship_data_query_builder::value::Value>, DbError> {
         let typed = self.session.query_typed(sql, params).await?;
-        Ok(crate::row_json::typed_rows_to_json_value(&typed))
+        Ok(crate::row_json::typed_rows_to_values(&typed))
     }
 
     /// Production constructor used by the runtime URL-scheme
@@ -1151,9 +1151,9 @@ impl zeroship_data_core::storage::VectorIndex for SqliteBackend {
         query: &[f32],
         k: usize,
         metric: zeroship_data_query_builder::descriptors::VectorMetric,
-        filter: &serde_json::Value,
-        schema: &serde_json::Value,
-    ) -> Result<Vec<serde_json::Value>, DbError> {
+        filter: &zeroship_data_query_builder::value::Value,
+        schema: &zeroship_data_query_builder::value::Value,
+    ) -> Result<Vec<zeroship_data_query_builder::value::Value>, DbError> {
         self.vector_search_on(
             &self.autocommit_client(),
             binding,
@@ -1210,9 +1210,9 @@ impl SqliteBackend {
         query: &[f32],
         k: usize,
         metric: zeroship_data_query_builder::descriptors::VectorMetric,
-        filter: &serde_json::Value,
-        schema: &serde_json::Value,
-    ) -> Result<Vec<serde_json::Value>, DbError> {
+        filter: &zeroship_data_query_builder::value::Value,
+        schema: &zeroship_data_query_builder::value::Value,
+    ) -> Result<Vec<zeroship_data_query_builder::value::Value>, DbError> {
         let app_id = binding.app_id();
         // Reject inner-product before issuing any SQL — a vec0 vtable
         // cannot be declared with `distance_metric=ip`, so no shadow
@@ -1231,7 +1231,7 @@ impl SqliteBackend {
         // don't have to slice a SELECT prefix off — `build_where`
         // returns the WHERE expression text directly (or an empty
         // string if `filter` is non-object / `Null`).
-        let mut params: Vec<String> = Vec::new();
+        let mut params: Vec<zeroship_data_query_builder::value::Value> = Vec::new();
         let where_expr = zeroship_data_query_builder::compile::build_where_with_dialect(
             filter,
             &mut params,
@@ -1274,9 +1274,9 @@ impl SqliteBackend {
             &where_expr,
             schema_hint,
         )?;
-        let param_refs: Vec<&str> = params.iter().map(String::as_str).collect();
-        let typed = session.query_typed_internal(&sql, &param_refs).await?;
-        Ok(crate::row_json::typed_rows_to_json_value(&typed))
+        let param_refs = &params;
+        let typed = session.query_typed_internal(&sql, param_refs).await?;
+        Ok(crate::row_json::typed_rows_to_values(&typed))
     }
 }
 
@@ -1288,8 +1288,8 @@ impl SqliteBackend {
 fn build_spatial_near_base_query(
     schema_name: &zeroship_data_query_builder::SchemaName,
     collection: &str,
-    filter: &serde_json::Value,
-    schema_hint: &serde_json::Value,
+    filter: &zeroship_data_query_builder::value::Value,
+    schema_hint: &zeroship_data_query_builder::value::Value,
 ) -> Result<zeroship_data_query_builder::compile::BuiltQuery, DbError> {
     zeroship_data_query_builder::compile::build_find_with_schema_and_unmask_and_soft_delete_with_dialect(
         schema_name,
@@ -1339,10 +1339,10 @@ impl zeroship_data_core::storage::SpatialIndex for SqliteBackend {
         column: &str,
         point: zeroship_data_query_builder::descriptors::GeoPoint,
         radius_m: f64,
-        filter: &serde_json::Value,
+        filter: &zeroship_data_query_builder::value::Value,
         limit: Option<usize>,
-        schema: &serde_json::Value,
-    ) -> Result<Vec<serde_json::Value>, DbError> {
+        schema: &zeroship_data_query_builder::value::Value,
+    ) -> Result<Vec<zeroship_data_query_builder::value::Value>, DbError> {
         self.spatial_near_on(
             &self.autocommit_client(),
             binding,
@@ -1377,18 +1377,18 @@ impl SqliteBackend {
         column: &str,
         point: zeroship_data_query_builder::descriptors::GeoPoint,
         radius_m: f64,
-        filter: &serde_json::Value,
+        filter: &zeroship_data_query_builder::value::Value,
         limit: Option<usize>,
-        schema: &serde_json::Value,
-    ) -> Result<Vec<serde_json::Value>, DbError> {
+        schema: &zeroship_data_query_builder::value::Value,
+    ) -> Result<Vec<zeroship_data_query_builder::value::Value>, DbError> {
         // Build the WHERE clause via the same machinery `dispatch_find`
         // uses (the SQLite-on-PG-SQL path; `$N` placeholders bind
         // positionally on rusqlite). No ORDER BY at the SQL layer —
         // we sort in Rust by computed distance.
         let schema_hint = schema;
         let bq = build_spatial_near_base_query(binding.schema(), collection, filter, schema_hint)?;
-        let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
-        let typed = session.query_typed_internal(&bq.sql, &param_refs).await?;
+        let param_refs = &bq.params;
+        let typed = session.query_typed_internal(&bq.sql, param_refs).await?;
 
         // Locate the BLOB column. Cache the index outside the row
         // loop so we don't scan `columns` per row.
@@ -1453,16 +1453,19 @@ impl SqliteBackend {
 
         // Build the JSON rows through the shared typed-row decoder, then
         // append the synthetic `_distance_m` field.
-        let mut out: Vec<serde_json::Value> = Vec::with_capacity(scored.len());
+        let mut out: Vec<zeroship_data_query_builder::value::Value> =
+            Vec::with_capacity(scored.len());
         for (d, idx) in scored {
             let row = &typed.rows[idx];
-            let mut obj = crate::row_json::typed_row_to_json_object(&typed.columns, row);
+            let mut obj = crate::row_json::typed_row_to_record(&typed.columns, row);
             obj.insert(
                 "_distance_m".to_string(),
-                serde_json::Number::from_f64(d)
-                    .map_or(serde_json::Value::Null, serde_json::Value::Number),
+                zeroship_data_query_builder::value::Number::from_f64(d).map_or(
+                    zeroship_data_query_builder::value::Value::Null,
+                    zeroship_data_query_builder::value::Value::Number,
+                ),
             );
-            out.push(serde_json::Value::Object(obj));
+            out.push(zeroship_data_query_builder::value::Value::Object(obj));
         }
         Ok(out)
     }
@@ -2291,7 +2294,7 @@ mod tests {
 
     #[test]
     fn spatial_near_base_query_reads_masked_sibling_when_schema_cached() {
-        let schema = serde_json::json!({
+        let schema = zeroship_data_query_builder::value!({
             "ssn": {
                 "type": "string",
                 "mask": { "kind": "last4", "classification": "spi" }
@@ -2301,7 +2304,7 @@ mod tests {
         let bq = build_spatial_near_base_query(
             &zeroship_data_query_builder::SchemaName::new("app1").expect("fixture schema name"),
             "places",
-            &serde_json::json!({}),
+            &zeroship_data_query_builder::value!({}),
             &schema,
         )
         .expect("spatial base query");
@@ -3009,3 +3012,5 @@ mod tests {
         let _ = assert_sqlite_client_pinned_to_session_handle as fn();
     }
 }
+
+mod params;

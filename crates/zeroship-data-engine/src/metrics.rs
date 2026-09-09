@@ -12,7 +12,7 @@
 //! `exec::exec_mutation`". Three operation families do not:
 //!
 //! - `backend_handle::routed_vector_search` and `routed_spatial_near` reach the
-//!   database through `PostgresBackend::query_roled_json` or the app's parked
+//!   database through `PostgresBackend::query_roled_values` or the app's parked
 //!   transaction client, not through `exec`;
 //! - every unmask read and the unmask audit INSERT go through the roled scalar
 //!   and statement entry points.

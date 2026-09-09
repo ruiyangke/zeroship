@@ -8,9 +8,9 @@
 //!
 //! ## What this bench targets
 //!
-//! The highest-leverage candidate is `row_to_json` — it exercises the
+//! The highest-leverage candidate is `row_to_value` — it exercises the
 //! O(N²) column lookup that is the largest remaining structural cost.
-//! However `row_to_json` takes a
+//! However `row_to_value` takes a
 //! `&compio_postgres::Row`, and `Row::new` is `pub(crate)` inside
 //! `compio-postgres`, so a Row cannot be synthesised from outside the
 //! crate without (a) a live Postgres or (b) modifying production code
@@ -26,7 +26,7 @@
 //! 2. cover the realistic query-build cost the SDK pays on every CRUD
 //!    call (filter parsing, identifier quoting, parameter binding).
 //!
-//! That is no longer the state of things: `row_to_json` IS externally
+//! That is no longer the state of things: `row_to_value` IS externally
 //! benchable now, and `bench_row_to_json.rs` sits next to this file. The
 //! route taken was the first of the two this paragraph used to offer -
 //! `compio-postgres` exposes `Row` / `Statement` / `Column` constructors
@@ -49,7 +49,7 @@
 use std::time::Duration;
 
 use criterion::{black_box, criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
-use serde_json::json;
+use zeroship_data_query_builder::value;
 
 use zeroship_plugin_db::compile::{build_find_with_schema, build_insert};
 
@@ -61,8 +61,8 @@ use zeroship_plugin_db::compile::{build_find_with_schema, build_insert};
 /// does the same identifier validation and projection expansion it does at
 /// runtime — a benchmark against a `SELECT *` builder would be measuring work
 /// production no longer performs.
-fn users_schema() -> serde_json::Value {
-    json!({
+fn users_schema() -> zeroship_data_query_builder::value::Value {
+    value!({
         "status": { "type": "string" },
         "role": { "type": "string" },
         "score": { "type": "int" },
@@ -78,14 +78,14 @@ fn users_schema() -> serde_json::Value {
 // ---------------------------------------------------------------------------
 
 /// Trivial: `find()` with no filter. Smallest query the SDK can produce.
-fn empty_filter() -> serde_json::Value {
-    json!({})
+fn empty_filter() -> zeroship_data_query_builder::value::Value {
+    value!({})
 }
 
 /// Median: `find({ status: "active", role: "admin" })`. The most common
 /// shape in CRUD-style SDK use (1-3 top-level equalities).
-fn small_filter() -> serde_json::Value {
-    json!({
+fn small_filter() -> zeroship_data_query_builder::value::Value {
+    value!({
         "status": "active",
         "role": "admin",
     })
@@ -93,8 +93,8 @@ fn small_filter() -> serde_json::Value {
 
 /// Complex: `$and` + `$or` + `$in` + range. Mirrors the harder query
 /// shape an analytics page or admin filter would produce.
-fn complex_filter() -> serde_json::Value {
-    json!({
+fn complex_filter() -> zeroship_data_query_builder::value::Value {
+    value!({
         "$and": [
             { "status": { "$in": ["active", "pending", "trial"] } },
             { "$or": [
@@ -107,8 +107,8 @@ fn complex_filter() -> serde_json::Value {
 }
 
 /// Insert doc — typical user record shape.
-fn small_insert_doc() -> serde_json::Value {
-    json!({
+fn small_insert_doc() -> zeroship_data_query_builder::value::Value {
+    value!({
         "id": "usr_01HJQK2A8R000000000000000",
         "email": "alice@example.com",
         "name": "Alice Example",

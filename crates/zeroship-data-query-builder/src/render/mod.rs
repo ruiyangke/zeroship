@@ -45,8 +45,8 @@
 //!
 //! [`Literal::Bytes`] preserves binary parameters for a host with typed binds.
 //! [`ValueFormat`] defines the placeholder spelling for each parameter type;
-//! its methods are required for every dialect. The runtime compiler uses
-//! explicit decoding expressions when executing through its text-bind channel.
+//! its methods are required for every dialect. The runtime compiler hands
+//! native parameters to the database adapter.
 
 pub mod postgres;
 
@@ -199,7 +199,7 @@ pub(crate) fn placeholder_for(format: &dyn ValueFormat, slot: usize, value: &Lit
         Literal::Bool(_) => format.bool_placeholder(slot),
         Literal::Int(_) => format.int_placeholder(slot),
         Literal::Float(_) => format.float_placeholder(slot),
-        Literal::Text(_) => format.text_placeholder(slot),
+        Literal::Text(_) | Literal::Json(_) => format.text_placeholder(slot),
         Literal::Bytes(_) => format.bytes_placeholder(slot),
         Literal::Vector(_) => format.vector_placeholder(slot),
     }

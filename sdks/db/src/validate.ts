@@ -202,6 +202,14 @@ function checkField(
       };
       return;
     }
+  } else if (type === "bigInt" && typeof value === "bigint") {
+    if (value < -(1n << 63n) || value > (1n << 63n) - 1n) {
+      errors[key] = { path: key, message: key + " is outside the database integer range" };
+    } else if (min !== undefined && value < min) {
+      errors[key] = { path: key, message: key + " is below its minimum" };
+    } else if (max !== undefined && value > max) {
+      errors[key] = { path: key, message: key + " exceeds its maximum" };
+    }
   } else if (
     type === "number" ||
     type === "int" ||
@@ -431,6 +439,11 @@ function checkField(
           return;
         }
       }
+    }
+  } else if (type === "bytes") {
+    if (!(value instanceof Uint8Array)) {
+      errors[key] = { path: key, message: key + " must be a Uint8Array" };
+      return;
     }
   } else if (!KNOWN_FIELD_TYPES.has(type)) {
     // Fail closed on a type name this SDK does not know.

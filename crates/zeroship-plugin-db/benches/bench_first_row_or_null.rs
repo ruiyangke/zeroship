@@ -1,41 +1,5 @@
-//! `find().first()` lowering microbench — measures the full `&[Row] →
-//! JSON-string` path the SDK sees on a single-row read (`find` with
-//! `LIMIT 1`, the implementation of `Query.first()`).
-//!
-//! ## Why this bench exists
-//!
-//! The JSON-string + V8 `JSON.parse` tail in `crud::first_row_or_null`
-//! (`crates/zeroship-data-engine/src/crud/mod.rs`) is the next bottleneck after
-//! the index-lookup fix. With `bench_row_to_json` covering the row-decode
-//! half, this harness covers the composed path so a cross-crate redesign
-//! of the JSON tail can be justified if the wide-row number crosses the
-//! threshold.
-//!
-//! The measured path (via `first_row_or_null_for_bench`):
-//!
-//! 1. `v8_bridge::rows_to_json_value` — `Row → serde_json::Value` for
-//!    every row (the work `bench_row_to_json` already covers for one row).
-//! 2. `crud::first_row_or_null` — pluck the first element (or `Null`)
-//!    and `.to_string()` it for `ResolveValue::Json`.
-//!
-//! The downstream V8 `JSON.parse` cost lives in `zeroship-runtime` and
-//! is NOT part of this microbench — it is the structural piece [C3]
-//! would have to redesign away.
-//!
-//! ## Workloads
-//!
-//! Same three column-count shapes as `bench_row_to_json` (narrow / medium
-//! / wide), each wrapped in a single-row `Vec<Row>` — `Query.first()`
-//! is by definition a `LIMIT 1` query, so the bench mirrors that
-//! workload exactly. The OID mix (INT4 / INT8 / BOOL / TEXT / JSONB /
-//! TIMESTAMPTZ)
-//! is identical too, for direct comparability.
-//!
-//! ## Running
-//!
-//! ```text
-//! cargo bench -p zeroship-plugin-db --bench bench_first_row_or_null
-//! ```
+//! Compare native first-row decoding with its explicit JSON serialization tail.
+//! Run with `cargo bench -p zeroship-plugin-db --bench bench_first_row_or_null`.
 
 use std::time::Duration;
 
@@ -121,7 +85,7 @@ fn build_row(fixtures: Vec<ColFixture>) -> Row {
 }
 
 /// One "unit" of the realistic column mix — 6 OIDs covering every
-/// branch in `column_to_json` we exercise here.
+/// branch in `column_to_value` we exercise here.
 fn unit_fixtures(prefix: &str) -> Vec<ColFixture> {
     vec![
         fixture(format!("{prefix}_id"), Type::INT8, enc_int8(42)),
@@ -175,7 +139,9 @@ fn medium_row() -> Row {
 /// extras. The shape an analytics page or a row with many JSON
 /// expansions would produce.
 fn wide_row() -> Row {
-    let mut f: Vec<ColFixture> = (0..8).flat_map(|i| unit_fixtures(&format!("u{i}"))).collect();
+    let mut f: Vec<ColFixture> = (0..8)
+        .flat_map(|i| unit_fixtures(&format!("u{i}")))
+        .collect();
     f.push(fixture("tail_id", Type::INT8, enc_int8(7)));
     f.push(fixture("tail_flag", Type::BOOL, enc_bool(true)));
     assert_eq!(f.len(), 50, "wide_row should have 50 columns");
@@ -201,29 +167,21 @@ fn bench_first_row_or_null(c: &mut Criterion) {
     let medium: [Row; 1] = [medium_row()];
     let wide: [Row; 1] = [wide_row()];
 
-    // Sanity: every fixture lowers to a JSON string whose top-level
-    // object has the expected column count. Catches wire-format
-    // breakage in `enc_*` before the bench produces nonsense numbers.
+    // Verify fixture decoding before measuring it.
     {
-        let s = first_row_or_null_for_bench(&narrow);
-        let v: serde_json::Value =
-            serde_json::from_str(&s).expect("narrow output should parse as JSON");
+        let v = first_row_or_null_for_bench(&narrow);
         assert_eq!(
             v.as_object().expect("narrow → object").len(),
             3,
             "narrow row should serialise 3 columns",
         );
-        let s = first_row_or_null_for_bench(&medium);
-        let v: serde_json::Value =
-            serde_json::from_str(&s).expect("medium output should parse as JSON");
+        let v = first_row_or_null_for_bench(&medium);
         assert_eq!(
             v.as_object().expect("medium → object").len(),
             10,
             "medium row should serialise 10 columns",
         );
-        let s = first_row_or_null_for_bench(&wide);
-        let v: serde_json::Value =
-            serde_json::from_str(&s).expect("wide output should parse as JSON");
+        let v = first_row_or_null_for_bench(&wide);
         assert_eq!(
             v.as_object().expect("wide → object").len(),
             50,
@@ -231,22 +189,21 @@ fn bench_first_row_or_null(c: &mut Criterion) {
         );
     }
 
-    group.bench_function("narrow_3cols", |b| {
-        b.iter(|| {
-            black_box(first_row_or_null_for_bench(black_box(&narrow)));
+    for (name, rows) in [
+        ("narrow", narrow.as_slice()),
+        ("medium", medium.as_slice()),
+        ("wide", wide.as_slice()),
+    ] {
+        group.bench_function(format!("native/{name}"), |b| {
+            b.iter(|| black_box(first_row_or_null_for_bench(black_box(rows))));
         });
-    });
-    group.bench_function("medium_10cols", |b| {
-        b.iter(|| {
-            black_box(first_row_or_null_for_bench(black_box(&medium)));
+        group.bench_function(format!("json_boundary/{name}"), |b| {
+            b.iter(|| {
+                let value = first_row_or_null_for_bench(black_box(rows));
+                black_box(serde_json::to_string(&value).unwrap());
+            });
         });
-    });
-    group.bench_function("wide_50cols", |b| {
-        b.iter(|| {
-            black_box(first_row_or_null_for_bench(black_box(&wide)));
-        });
-    });
-
+    }
     group.finish();
 }
 
