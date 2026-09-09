@@ -10,14 +10,14 @@ use zeroship_cdc_wire::{
     WorkerId,
 };
 
-/// A canonical 22-character base62 body ending in `n`.
+/// A canonical body of the encoder's width, ending in `n`.
 ///
 /// `0` is a valid base62 digit and leading zeros are exactly how the fixed-width
 /// encoding pads, so this produces genuinely canonical ids without needing the
 /// platform encoder.
 #[must_use]
 pub fn body(n: u32) -> String {
-    format!("{n:0>22}")
+    format!("{n:0>25}")
 }
 
 #[must_use]

@@ -876,7 +876,7 @@ fn insert_publishes_logical_typed_id_not_sqlite_rowid() {
             .expect("CREATE TABLE typed_items");
 
         let sub = subscribe_local("app_cdc", "typed_items");
-        let typed_id = "usr_02HXSQLITECDCLOGICALPK";
+        let typed_id = "usr_02hxsqlitecdclogicalpk000";
 
         backend
             .pool_exec(

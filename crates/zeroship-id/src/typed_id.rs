@@ -389,21 +389,36 @@ pub const ORGANIZATION_BILLING_HISTORY_PREFIX: &str = "obh";
 /// Stripe-side dispute id (`du_…`/`dp_…`), which is a provider ref, not a typed_id.
 pub const DISPUTE_PREFIX: &str = "dsp";
 
-/// Mint the per-app OAuth `client_id` for an app: `oac_<base36-app-id>`.
-/// Deterministic and stable for the life of the app (spec §1.1).
+/// Mint the per-app OAuth `client_id` for an app: `oac_<body>`.
+///
+/// The client id carries the app id's OWN BODY, not a re-encoding of its bits.
+/// That is what lets [`app_id_from_oauth_client_id`] hand back an `AppId` whose
+/// printed form is byte-identical to the one the app was minted with - and a
+/// derived audience (`app:<printed id>`) therefore agrees with whoever built it
+/// from the app id directly. Deterministic and stable for the life of the app.
 #[must_use]
-pub fn app_oauth_client_id(app_id: &uuid::Uuid) -> String {
-    format!("{APP_OAUTH_CLIENT_PREFIX}_{}", uuid_to_base36(app_id))
+pub fn app_oauth_client_id(app_id: &crate::app_id::AppId) -> String {
+    let body = app_id.as_str().strip_prefix(APP_PREFIX).and_then(|s| s.strip_prefix('_'))
+        .expect("an AppId always prints as app_<body>");
+    format!("{APP_OAUTH_CLIENT_PREFIX}_{body}")
 }
 
-/// Decode a per-app OAuth `client_id` (`oac_<base36-app-id>`) back to its app
-/// UUID. Returns `None` for any client id that is not a per-app end-user client
-/// (a missing `oac_` prefix or a non-base36 tail), e.g. the builder/console
-/// clients. The exact inverse of [`app_oauth_client_id`].
+/// Decode a per-app OAuth `client_id` (`oac_<body>`) back to its [`AppId`].
+///
+/// Returns `None` for any client id that is not a per-app end-user client - a
+/// missing `oac_` prefix, or a body that is not a legal app-id body - e.g. the
+/// builder/console clients. The exact inverse of [`app_oauth_client_id`].
+///
+/// It returns the TYPED id rather than the bits, and that is the point: a caller
+/// deriving an audience renders `app:<printed id>`, which is what every other
+/// producer of that audience renders. Handing back a `Uuid` here is how the
+/// gateway came to expect `app:<hyphenated uuid>` while the OP emitted
+/// `app:app_<body>` - two spellings of one app, agreeing at compile time and
+/// disagreeing only against a live token.
 #[must_use]
-pub fn app_id_from_oauth_client_id(client_id: &str) -> Option<uuid::Uuid> {
-    let encoded = client_id.strip_prefix(APP_OAUTH_CLIENT_PREFIX)?.strip_prefix('_')?;
-    base36_to_uuid(encoded).ok()
+pub fn app_id_from_oauth_client_id(client_id: &str) -> Option<crate::app_id::AppId> {
+    let body = client_id.strip_prefix(APP_OAUTH_CLIENT_PREFIX)?.strip_prefix('_')?;
+    crate::app_id::AppId::parse(&format!("{APP_PREFIX}_{body}")).ok()
 }
 
 /// Generate a new user ID: `usr_{base36(uuidv7)}`
@@ -707,7 +722,7 @@ mod tests {
 
     #[test]
     fn app_oauth_client_id_round_trips() {
-        let app = uuid::Uuid::now_v7();
+        let app = crate::app_id::AppId::mint();
         let client_id = app_oauth_client_id(&app);
         assert!(client_id.starts_with("oac_"), "got {client_id}");
         // oac_ + 25 base36 chars.
@@ -716,7 +731,7 @@ mod tests {
         assert!(!client_id.starts_with("app_"));
         // The decode is the exact inverse of the mint — the single-source-of-
         // truth that keeps control (minter) and auth (decoder) from drifting.
-        assert_eq!(app_id_from_oauth_client_id(&client_id), Some(app));
+        assert_eq!(app_id_from_oauth_client_id(&client_id), Some(app.clone()));
         // Non-per-app clients (builder/console) and malformed tails → None.
         assert_eq!(app_id_from_oauth_client_id("zeroship-builder-abc"), None);
         assert_eq!(app_id_from_oauth_client_id("oac_not-base36"), None);

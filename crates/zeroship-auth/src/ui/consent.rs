@@ -1230,19 +1230,16 @@ mod tests {
     /// decoder must map the first onto the second.
     #[test]
     fn the_decoder_recovers_the_app_id_whose_body_the_client_id_carries() {
-        let embedded = Uuid::now_v7();
+        let embedded = AppId::mint();
         let client_id = zeroship_core::typed_id::app_oauth_client_id(&embedded);
         assert!(
             client_id.starts_with(&format!("{APP_OAUTH_CLIENT_PREFIX}_")),
             "got {client_id}"
         );
-        let expected = AppId::parse(&format!(
-            "{}_{}",
-            AppId::PREFIX,
-            zeroship_core::typed_id::uuid_to_base36(&embedded)
-        ))
-        .expect("the encoded body is a well-formed app id body");
-        assert_eq!(app_id_from_client_id(&client_id), Some(expected));
+        // The decoder must hand back the SAME app id the client id was minted
+        // from, byte for byte - that identity is what makes an audience derived
+        // from either side agree.
+        assert_eq!(app_id_from_client_id(&client_id), Some(embedded));
 
         // Non-per-app clients (builder/console) resolve to None.
         assert_eq!(app_id_from_client_id("zeroship-builder-abc"), None);

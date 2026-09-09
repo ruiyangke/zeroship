@@ -1059,7 +1059,7 @@ fn deploy_auto_create(args: &[String]) -> bool {
 /// of those four spellings, so every `--app=app_...` reproduced the same bug -
 /// measured, not predicted, by
 /// `tests::a_typed_app_id_deploys_to_that_app_and_creates_nothing` before this
-/// change: it recorded `Create("app_034KLb07Lrb9JGMA6imvmX")` followed by a
+/// change: it recorded `Create("app_034klb07lrb9jgma6imvmx000")` followed by a
 /// deploy to the freshly minted app.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum AppTarget {
@@ -1380,7 +1380,7 @@ mod tests {
     /// into now: an unrecognised value is refused.
     #[test]
     fn app_id_accepts_every_rendering_of_an_id() {
-        let canonical = "app_034KLb07Lrb9JGMA6imvmX";
+        let canonical = "app_034klb07lrb9jgma6imvmx000";
         let hyphenated = "0197f8a1-2b3c-7d4e-8f90-1a2b3c4d5e6f";
         let simple = "0197f8a12b3c7d4e8f901a2b3c4d5e6f";
         let braced = "{0197f8a1-2b3c-7d4e-8f90-1a2b3c4d5e6f}";
@@ -1889,12 +1889,12 @@ mod tests {
     /// measuring it. Whichever path `deploy_archive` takes, it gets served.
     #[test]
     fn a_typed_app_id_deploys_to_that_app_and_creates_nothing() {
-        let id = "app_034KLb07Lrb9JGMA6imvmX";
+        let id = "app_034klb07lrb9jgma6imvmx000";
         let mut client = FakeControlClient::default()
             .with_list(200, "[]")
             .with_create(
                 201,
-                r#"{"id":"55555555-5555-4555-8555-555555555555","name":"app_034KLb07Lrb9JGMA6imvmX"}"#,
+                r#"{"id":"55555555-5555-4555-8555-555555555555","name":"app_034klb07lrb9jgma6imvmx000"}"#,
             )
             .with_deploy(200, r#"{"deploy_hash":"sha256:typed"}"#);
 

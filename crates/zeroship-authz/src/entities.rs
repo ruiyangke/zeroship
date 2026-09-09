@@ -136,10 +136,10 @@ mod tests {
                 id: zeroship_core::app_id::AppId::mint(),
             },
             Resource::Project {
-                id: "prj_0123456789abcdefghijkl".to_owned(),
+                id: "prj_0000123456789abcdefghijkl".to_owned(),
             },
             Resource::Organization {
-                id: "org_0123456789abcdefghijkl".to_owned(),
+                id: "org_0000123456789abcdefghijkl".to_owned(),
             },
         ] {
             let entities = assemble_entities(&UserId::mint(), &authority(), &resource)

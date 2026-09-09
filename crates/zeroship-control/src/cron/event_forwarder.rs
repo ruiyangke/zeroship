@@ -889,7 +889,7 @@ mod tests {
             source: "worker-a".to_string(),
             subject: UsageSubject {
                 app: Some(AppId::mint()),
-                organization: Some("org_0000000000000000000001".to_string()),
+                organization: Some("org_0000000000000000000000001".to_string()),
             },
             meter: "compute_units".to_string(),
             value: 10,
@@ -935,7 +935,7 @@ mod tests {
     async fn run_cycle_attributes_unset_subject_and_deadletters_unresolvable_apps() {
         let app_owned = AppId::mint();
         let app_orphan = AppId::mint();
-        let owner = "org_0000000000000000000002".to_string();
+        let owner = "org_0000000000000000000000002".to_string();
         let stream = fake_stream_of(vec![
             unattributed_event("evt_owned", app_owned.clone()),
             unattributed_event("evt_orphan", app_orphan),

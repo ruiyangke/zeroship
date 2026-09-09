@@ -932,9 +932,9 @@ mod tests {
             .collect()
     }
 
-    const ORG: &str = "org_0123456789abcdefghijkl";
-    const PRJ: &str = "prj_0123456789abcdefghijkl";
-    const INVITE: &str = "ivt_0123456789abcdefghijkl";
+    const ORG: &str = "org_0000123456789abcdefghijkl";
+    const PRJ: &str = "prj_0000123456789abcdefghijkl";
+    const INVITE: &str = "ivt_0000123456789abcdefghijkl";
     const USER: &str = "11111111-2222-3333-4444-555555555555";
 
     /// The routing table, stated as data. Every remote subcommand appears, and
@@ -1605,7 +1605,7 @@ mod tests {
         let mut recorder = Recorder {
             calls: Vec::new(),
             status: 201,
-            body: r#"{"id":"prj_0123456789abcdefghijkl"}"#.to_string(),
+            body: r#"{"id":"prj_0000123456789abcdefghijkl"}"#.to_string(),
         };
         let call = plan(
             "projects",

@@ -785,7 +785,7 @@ mod tests {
         let parsed = MigrationId::parse(id.as_str()).expect("generated id must parse");
         assert_eq!(parsed, id);
         // Wrong prefix is rejected (not silently accepted).
-        let err = MigrationId::parse("app_0000000000000000000000").unwrap_err();
+        let err = MigrationId::parse("app_0000000000000000000000000").unwrap_err();
         assert!(matches!(err, IdError::WrongPrefix { .. }), "got {err:?}");
         // Malformed is rejected.
         assert!(matches!(

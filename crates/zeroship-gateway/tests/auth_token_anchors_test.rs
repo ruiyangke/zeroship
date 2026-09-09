@@ -500,13 +500,13 @@ const PAIRWISE_TEST_SALT_SEED: &str = "pairwise-test-salt";
 const BCL_REFRESH_APP_HOST: &str = "bcl-refresh.zeroship.ai";
 const BCL_REFRESH_APP_NAME: &str = "bcl-refresh";
 const BCL_REFRESH_CLIENT_ID: &str = "oac_bcl_refresh";
-const BCL_REFRESH_APP_ID: &str = "app_0000000000000000000002";
+const BCL_REFRESH_APP_ID: &str = "app_0000000000000000000000002";
 /// The app's STABLE typed id — the `RouteMap` key. Fixed (not random) so the
 /// live-dispatch regression test can assert that the `/token`-minted
 /// `gateway_sessions` row is keyed by THIS id (not the `myapp` slug), which
 /// is exactly what lets the cookie validate on the real SPA→app dispatch arm
 /// (the `app_id` column is `text`, holding `app_id.as_str()`).
-const APP_ID: &str = "app_0000000000000000000001";
+const APP_ID: &str = "app_0000000000000000000000001";
 
 fn test_pairwise_salt() -> [u8; 32] {
     zeroship_core::crypto::derive_key(PAIRWISE_TEST_SALT_SEED)

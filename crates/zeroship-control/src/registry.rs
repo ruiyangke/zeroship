@@ -1271,7 +1271,7 @@ mod name_validation_tests {
     /// `create_app`'s charset rule admits `_`, and `AppId::parse` wants the
     /// `app_` prefix plus a base62 body, so this passes both. A creator who
     /// claims it holds a name that every `--app=` reads as an identity.
-    const ID_SHAPED_NAME: &str = "app_0123456789ABCDEFGHIJKL";
+    const ID_SHAPED_NAME: &str = "app_0123456789abcdefghijkl000";
 
     /// The premise: this really is BOTH, so the collision is a fact rather
     /// than a worry about one. If `AppId::parse` ever stopped taking it, the

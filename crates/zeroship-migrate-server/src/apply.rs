@@ -1659,7 +1659,7 @@ mod tests {
     /// It is the base62 rendering of `0191e7a2-b3c4-4d5e-8f90-123456789abc`, the
     /// uuid these assertions carried before the id became text, so the fixture
     /// names the same tenant it always did.
-    const FIXTURE_APP_ID: &str = "app_02xfbOcLMnlN2aR6iBlNi0";
+    const FIXTURE_APP_ID: &str = "app_02xfboclmnln2ar6iblni0000";
 
     fn fixture_app_id() -> AppId {
         AppId::parse(FIXTURE_APP_ID).expect("the fixture app id must be canonical")

@@ -37,11 +37,12 @@ fn corpus() -> Vec<(String, &'static str)> {
         ));
     }
 
-    // 62^22 - 1 is above 2^128: 22 legal characters that no encoder produced.
-    cases.push(("app_ZZZZZZZZZZZZZZZZZZZZZZ".to_owned(), "app"));
-    cases.push(("app_ZZZZZZZZZZZZZZZZZZZZZY".to_owned(), "app"));
-    // Just below the overflow, and just above the max UUID.
-    cases.push(("app_7000000000000000000000".to_owned(), "app"));
+    // 36^25 - 1 is above 2^128: legal characters at the right width that no
+    // encoder ever produced, because the value they spell is not a UUID.
+    cases.push(("app_zzzzzzzzzzzzzzzzzzzzzzzzz".to_owned(), "app"));
+    cases.push(("app_zzzzzzzzzzzzzzzzzzzzzzzzy".to_owned(), "app"));
+    // One past the largest UUID - the tightest overflow the decode must refuse.
+    cases.push(("app_f5lxx1zz5pnorynqglhzmsp34".to_owned(), "app"));
 
     // Wrong prefix, right body.
     let good = typed_id::generate("app");

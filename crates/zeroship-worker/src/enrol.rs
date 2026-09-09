@@ -384,7 +384,7 @@ mod tests {
 
     #[test]
     fn the_instance_mints_under_its_own_name_and_is_addressed_by_the_role() {
-        let (auth, _gateway, _public) = identity_for("wkr_0000000000000000000001");
+        let (auth, _gateway, _public) = identity_for("wkr_0000000000000000000000001");
         let control = service_issuer(CONTROL_SERVICE_NAME).expect("control issuer");
         let header = auth
             .authorization_for(&control)
@@ -426,7 +426,7 @@ mod tests {
     async fn a_gateway_dispatch_addressed_to_the_role_is_still_accepted() {
         use zeroship_core::service_identity::endpoints;
 
-        let (auth, gateway, _public) = identity_for("wkr_0000000000000000000006");
+        let (auth, gateway, _public) = identity_for("wkr_0000000000000000000000006");
         let role = service_issuer(WORKER_SERVICE_NAME).expect("role issuer");
         let addressed_to_the_role = format!(
             "Bearer {}",
@@ -466,7 +466,7 @@ mod tests {
     #[test]
     fn instance_signer_cannot_forge_an_identity_the_worker_accepts() {
         const USER: &[u8] = br#"{"id":"pws_self","email":"a@b.test","name":"A","avatar":null,"email_verified":true,"scopes":[]}"#;
-        let (auth, _gateway, _public) = identity_for("wkr_0000000000000000000002");
+        let (auth, _gateway, _public) = identity_for("wkr_0000000000000000000000002");
         let request_id = uuid::Uuid::new_v4();
         let verifier = auth
             .user_envelope_verifier()
@@ -513,7 +513,7 @@ mod tests {
     /// up inside.
     #[test]
     fn no_formatter_on_the_boot_path_can_reach_the_private_half() {
-        let (auth, _gateway, public) = identity_for("wkr_0000000000000000000003");
+        let (auth, _gateway, public) = identity_for("wkr_0000000000000000000000003");
         let rendered = format!("{auth:?}");
         // The PUBLIC half's thumbprint is a legitimate thing to print; the
         // private half is not, and the two are distinguishable only if the
@@ -534,8 +534,8 @@ mod tests {
     #[test]
     fn an_enrolment_response_without_an_instance_id_is_refused() {
         assert_eq!(
-            instance_id_from(r#"{"instance_id":"wkr_0000000000000000000004"}"#),
-            Ok("wkr_0000000000000000000004".to_string())
+            instance_id_from(r#"{"instance_id":"wkr_0000000000000000000000004"}"#),
+            Ok("wkr_0000000000000000000000004".to_string())
         );
         for body in [
             r#"{"instance_id":""}"#,
@@ -569,7 +569,7 @@ mod tests {
         // about the shape rather than about the format string.
         let issuer = service_issuer(&format!("{WORKER_SERVICE_NAME}/wkr_0000000000000000000005"))
             .expect("a typed id parses");
-        assert_eq!(issuer.instance(), Some("wkr_0000000000000000000005"));
+        assert_eq!(issuer.instance(), Some("wkr_0000000000000000000000005"));
         // The principal an instance identifier yields is the ROLE's, which is
         // what control's endpoint allowlist is written against.
         assert_eq!(

@@ -12,9 +12,9 @@
 //!
 //! # Canonicality, precisely
 //!
-//! The platform form is `{prefix}_{base36(uuidv7)}`: 22 base36 characters over
-//! `0-9A-Za-z`, fixed width with leading zeros. 62^22 is slightly greater than
-//! 2^128, so 22 characters can spell a value no UUID can hold - and that is the
+//! The platform form is `{prefix}_{base36(uuidv7)}`: 25 base36 characters over
+//! `0-9a-z`, fixed width with leading zeros. 36^25 is greater than 2^128, so 25
+//! characters can spell a value no UUID can hold - and that is the
 //! whole of the noncanonical case. Rejecting it is one `checked_mul`/`checked_add`
 //! accumulation, and without it `id_a != id_b` while both name the same entity.
 //!
@@ -28,7 +28,7 @@
 //! minted by the platform encoder itself, wrong prefixes, wrong lengths,
 //! out-of-alphabet bytes, and both sides of the 2^128 boundary (the encoding of
 //! an all-ones UUID, which must be accepted, against `ZZZZZZZZZZZZZZZZZZZZZZ`,
-//! which is 62^22 - 1 and must not) - and requires them to agree on every input.
+//! which is 36^25 - 1 and must not) - and requires them to agree on every input.
 //! A drift is a test failure, not a production surprise.
 
 use core::fmt;
@@ -43,7 +43,7 @@ use crate::limits::MAX_TYPED_ID_BYTES;
 const BASE36: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
 
 /// Fixed width of the base36 body of every typed id.
-const BASE36_WIDTH: usize = 22;
+const BASE36_WIDTH: usize = 25;
 
 // `slice::get` is not usable in a const context, so this one function indexes.
 // Both indices are provably in range at compile time: `i` is bounded by the
@@ -63,7 +63,7 @@ const fn build_decode_table() -> [u8; 128] {
 
 const DECODE: [u8; 128] = build_decode_table();
 
-/// Accept exactly `{prefix}_{22 canonical base36 chars}`.
+/// Accept exactly `{prefix}_{25 canonical base36 chars}`.
 fn validate(text: &str, prefix: &'static str) -> Result<(), DecodeError> {
     let malformed = DecodeError::MalformedTypedId {
         expected_prefix: prefix,
