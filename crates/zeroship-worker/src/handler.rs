@@ -4118,7 +4118,9 @@ mod workflow_live_tests {
     use zeroship_migrate_server::provisioning::provision_workflow_journal_schema;
     use zeroship_plugin_workflow::store::pg::{PgStore, WorkflowTables};
 
-    use super::tests::{init_runtime, tmpdir, usage_value, worker_app_path};
+    use super::tests::{
+        gateway_authorization, init_runtime, test_service_auth, tmpdir, usage_value, worker_app_path,
+    };
     use super::*;
 
     const WORKFLOW_TEST_PLAN: &str = "pln_worker_workflow_test";

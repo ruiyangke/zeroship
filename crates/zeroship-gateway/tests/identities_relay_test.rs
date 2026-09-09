@@ -14,7 +14,7 @@
 //! the real function the arms call, not a stub.
 //!
 //! REFUSES without a test database, naming `tests/provision_test_backends.sh`
-//! - the same convention as every other live-PG target in this crate, and no
+//! following the convention for live-PG targets in this crate. No
 //! environment variable turns it back into a skip.
 
 mod common;

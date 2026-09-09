@@ -3,7 +3,7 @@
 //! An organization that still owes cannot be closed, and the last human who
 //! names it cannot be erased. That is one operator requirement with one
 //! predicate behind it - [`zeroship_control::billing_read::outstanding_billing`]
-//! - and more than one place that asks it. This file rules on the rule at the
+//! and more than one place that asks it. This file rules on the rule at the
 //! places that ask:
 //!
 //!   * `organizations::dissolve_organization`, the door,
@@ -767,11 +767,8 @@ async fn closed_period_usage_blocks_only_when_it_priced_to_money() {
         Err(OrganizationError::OrganizationOwesBilling(_)) => {}
         other => panic!("dissolve must cite the money rule: {other:?}"),
     }
-    match fx.dissolve(free_owner, &free).await {
-        Err(OrganizationError::OrganizationOwesBilling(o)) => {
-            panic!("a zero-priced period must not refuse the close: {o:?}")
-        }
-        _ => {}
+    if let Err(OrganizationError::OrganizationOwesBilling(o)) = fx.dissolve(free_owner, &free).await {
+        panic!("a zero-priced period must not refuse the close: {o:?}")
     }
 
     common::drain_pg().await;

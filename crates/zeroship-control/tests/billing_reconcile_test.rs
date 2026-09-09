@@ -1720,7 +1720,7 @@ async fn setup_session_creates_customer_once() {
         let customer = match existing {
             Some(c) => c,
             None => {
-                let cus = client.create_customer("c@example.test", &organization.to_string()).await.unwrap();
+                let cus = client.create_customer("c@example.test", organization).await.unwrap();
                 fx.state.stripe_store.set_customer(organization, &cus).await.unwrap();
                 cus
             }
@@ -1847,7 +1847,7 @@ async fn crashed_run_with_null_invoice_id_is_redriven() {
         .into_iter()
         .find(|r| r.path == "/v1/invoices")
         .expect("invoice create fired");
-    let expected_key = billing_reconcile::invoice_idempotency_key(&organization, period);
+    let expected_key = billing_reconcile::invoice_idempotency_key(organization, period);
     assert_eq!(
         invoice_create.idempotency_key.as_deref(),
         Some(expected_key.as_str()),

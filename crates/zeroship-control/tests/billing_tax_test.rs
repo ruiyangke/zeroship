@@ -986,7 +986,7 @@ async fn tax_computed_once_over_summed_multi_segment_subtotal() {
         .first()
         .map(|r| r.get::<_, String>("plan_id"));
     zeroship_control::proration::record_plan_change_tx(
-        &fx.state.registry, &app, &organization, from_plan.as_deref(), &plan_b, mid,
+        &fx.state.registry, &app, organization, from_plan.as_deref(), &plan_b, mid,
     )
     .await
     .expect("record plan change");
