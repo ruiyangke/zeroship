@@ -1,8 +1,3 @@
-// The parity Postgres fixture chains four awaits over compio-postgres futures in one
-// block; each layer is a large generated state machine, and the default 128 is not
-// enough to compute its layout. A compile-budget knob, not a behaviour change.
-#![recursion_limit = "256"]
-
 //! Integration tests for plugin-db query builders against real Postgres.
 //!
 //! Requires: the test PostgreSQL named by the overlay
@@ -12,16 +7,22 @@
 //! Run:
 //! ```text
 //! RUST_MIN_STACK=33554432 \
-//! cargo test -p zeroship-plugin-db --test integration --features test-helpers
+//! cargo test -p zeroship-plugin-db --features test-helpers --test test_helpers \
+//!   -- --skip sqlite_integration:: integration::
 //! ```
 //!
-//! `--features test-helpers` is this target's `required-features`. Without it
+//! This file is a module of the `test_helpers` target rather than a target of
+//! its own (`tests/main.rs` says why), so selecting it is a libtest FILTER on
+//! its module path. A filter is a substring match with no anchor, which is what
+//! the `--skip` is for: `integration::` also selects `sqlite_integration::`.
+//!
+//! `--features test-helpers` is that target's `required-features`. Without it
 //! cargo does not build the target at all - it FILTERS IT OUT, printing
-//! `error: target `integration` ... requires the features: `test-helpers``
+//! `error: target `test_helpers` ... requires the features: `test-helpers``
 //! only if you named the target explicitly. A plain `cargo test -p
-//! zeroship-plugin-db` names no target, so it silently runs the lib tests
-//! alone and reports a healthy green while none of the 99 tests in this file
-//! were compiled. This line omitted the flag until 2026-08-27, so the command
+//! zeroship-plugin-db` names no target, so it silently runs the lib tests and
+//! `tests/main.rs` alone and reports a healthy green while nothing in this file
+//! was compiled. This line omitted the flag until 2026-08-27, so the command
 //! documented here did not run.
 //!
 //! # This suite runs at the default thread count, and that took three fixes
@@ -71,10 +72,12 @@
 //!    slot reaper's fleet-leader lock and all-apps enumeration are exclusive by
 //!    design. No naming scheme partitions those; see [`cdc_budget`].
 
-#[path = "support/schema.rs"]
-mod schema_fixture;
+// `support`, `schema_fixture` and `parity` are declared once by
+// `tests/test_helpers.rs`, the entry file this module hangs off; its header says
+// why a second declaration here would be a second copy of their statics.
 #[allow(unused_imports)]
-use schema_fixture::{fixture_table_sql, fixture_table_sql_for};
+use crate::schema_fixture::{fixture_table_sql, fixture_table_sql_for};
+use crate::{parity, schema_fixture, support};
 #[allow(unused_imports)]
 use zeroship_migrate::schema::query::FkEmission;
 
@@ -85,12 +88,6 @@ use zeroship_data_core::binding::DbBinding;
 use zeroship_plugin_db::backend::ChangeStream;
 
 const CDC_TEST_WORKER_ID: &str = "plugin-db-integration-worker";
-
-#[path = "support/mod.rs"]
-mod support;
-
-#[path = "parity/mod.rs"]
-mod parity;
 
 fn test_url() -> String {
     zeroship_core::config::test_database_url()

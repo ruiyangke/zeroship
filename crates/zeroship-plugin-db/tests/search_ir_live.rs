@@ -16,7 +16,7 @@
 //! ```text
 //! PG_TEST_URL=postgres://postgres:postgres@127.0.0.1:5478/postgres \
 //! cargo test -p zeroship-plugin-db --features test-helpers \
-//!   --test search_ir_live -- --test-threads=1
+//!   --test test_helpers -- --test-threads=1 search_ir_live::
 //! ```
 //!
 //! The server needs **both** `vector` and `postgis`; the tests create the
@@ -41,11 +41,9 @@
 //! both statements are executed against the same rows, and the two orderings
 //! are compared. It rules on behaviour, not on a call graph.
 
-// Each async fn here chains several compio-postgres futures in one block; every
-// layer is a large generated state machine and the default 128 is not enough to
-// compute its layout. A compile-budget knob, not a behaviour change - the same
-// one `tests/integration.rs` carries for the same reason.
-#![recursion_limit = "256"]
+// The `recursion_limit` this file used to declare is now on `tests/test_helpers.rs`,
+// the entry file it hangs off: the attribute is per crate root, and every module
+// there needed it for the same reason.
 #![allow(clippy::items_after_statements)]
 
 use compio_postgres::Pool;

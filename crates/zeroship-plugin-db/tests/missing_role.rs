@@ -19,8 +19,8 @@
 //! compiled default: this file used to fall back to `localhost:5434`, a
 //! DIFFERENT server with different credentials, so a run with no overlay
 //! silently measured whatever happened to be listening there.
-//! Run: `cargo test -p zeroship-plugin-db --test missing_role \
-//!       --features test-helpers -- --test-threads=1`
+//! Run: `cargo test -p zeroship-plugin-db --features test-helpers \
+//!       --test test_helpers -- --test-threads=1 missing_role::`
 //!
 //! WHAT THIS TEST DOES NOT CATCH:
 //!   - The HTTP boundary. It asserts the classification and the message

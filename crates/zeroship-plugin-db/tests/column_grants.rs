@@ -44,13 +44,14 @@
 //!
 //! ```text
 //! cargo test -p zeroship-plugin-db --features test-helpers \
-//!   --test column_grants -- --test-threads=1
+//!   --test test_helpers -- --test-threads=1 column_grants::
 //! ```
 
-#[path = "support/schema.rs"]
-mod schema_fixture;
+// `schema_fixture` is declared once by `tests/test_helpers.rs`, the entry file
+// this module hangs off; its header says why a second declaration here would be
+// a second copy of the shared fixtures' statics.
 #[allow(unused_imports)]
-use schema_fixture::{fixture_table_sql, fixture_table_sql_for};
+use crate::schema_fixture::{fixture_table_sql, fixture_table_sql_for};
 #[allow(unused_imports)]
 use zeroship_migrate::schema::query::FkEmission;
 
