@@ -416,10 +416,27 @@ pub fn watchdog_to_json(slots: &[SlotHealth]) -> String {
 // Worker-owned slot teardown
 // ---------------------------------------------------------------------------
 
-/// Default grace before the drop sequence force-terminates the slot's
-/// replication backend. §17.7: "after a 5s grace, … `pg_terminate_backend`".
-#[cfg(any(test, feature = "test-helpers"))]
+/// Grace the drop sequence waits for a terminated replication backend to
+/// detach before it attempts the drop. §17.7: "after a 5s grace, …
+/// `pg_terminate_backend`".
+///
+/// Ungated and load-bearing: [`drop_slot`] derives its poll budget from this
+/// and [`DROP_TERMINATE_POLL_INTERVAL`], so editing either moves the behaviour.
+/// It was `test-helpers`-gated with no consumer but an equality assertion
+/// against its own literal, while the loop it describes hardcoded the same
+/// grace independently - two spellings of one number, free to drift.
 pub const DROP_TERMINATE_GRACE_SECS: u64 = 5;
+
+/// How often [`drop_slot`] re-probes `pg_replication_slots.active` while
+/// waiting out [`DROP_TERMINATE_GRACE_SECS`].
+pub const DROP_TERMINATE_POLL_INTERVAL: std::time::Duration =
+    std::time::Duration::from_millis(50);
+
+/// Number of probes that fit in the grace. Derived, never written twice.
+const fn drop_terminate_poll_attempts() -> u32 {
+    let grace_ms = DROP_TERMINATE_GRACE_SECS * 1_000;
+    (grace_ms / DROP_TERMINATE_POLL_INTERVAL.as_millis() as u64) as u32
+}
 
 /// Drop one worker's slot while retaining the app publication.
 ///
@@ -496,12 +513,12 @@ async fn drop_slot(pool: &Pool, slot: &str) -> Result<(), DbError> {
     // A missing slot is an idempotent success.
 
     // `pg_terminate_backend` acknowledges delivery of the termination
-    // signal, not completion of backend teardown. Wait up to the
-    // documented five-second grace for the slot to become inactive.
+    // signal, not completion of backend teardown. Wait out
+    // `DROP_TERMINATE_GRACE_SECS` for the slot to become inactive.
     // This closes the common race where an immediate DROP reports
     // object_in_use and leaves a slot behind after the last subscriber.
     if !active_rows.is_empty() {
-        for _ in 0..100 {
+        for _ in 0..drop_terminate_poll_attempts() {
             let rows = pool
                 .query_text_params(
                     "SELECT active FROM pg_replication_slots WHERE slot_name = $1",
@@ -520,7 +537,7 @@ async fn drop_slot(pool: &Pool, slot: &str) -> Result<(), DbError> {
             if !still_active {
                 break;
             }
-            compio::time::sleep(std::time::Duration::from_millis(50)).await;
+            compio::time::sleep(DROP_TERMINATE_POLL_INTERVAL).await;
         }
     }
 
@@ -647,9 +664,20 @@ mod tests {
 
     #[test]
     fn drop_terminate_grace_matches_spec() {
-        // §17.7: "after a 5s grace, … pg_terminate_backend". Pin the
+        // §17.7: "after a 5s grace, ... pg_terminate_backend". Pin the
         // constant so an edit that loosens the grace trips a test.
         assert_eq!(DROP_TERMINATE_GRACE_SECS, 5);
+
+        // And pin that `drop_slot`'s poll budget really spans that grace.
+        // Until 2026-09-09 the loop carried its own literals, so this
+        // assertion compared the constant with itself while the behaviour it
+        // named was free to move.
+        let spanned = DROP_TERMINATE_POLL_INTERVAL * drop_terminate_poll_attempts();
+        assert_eq!(
+            spanned,
+            std::time::Duration::from_secs(DROP_TERMINATE_GRACE_SECS),
+            "the drop poll loop must wait exactly the documented grace"
+        );
     }
 
     /// Regression guard: the publication SQL must reference the schema with
