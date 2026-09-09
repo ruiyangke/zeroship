@@ -142,7 +142,8 @@ pub mod protection_floor;
 //   * Its four `pool_handle()` calls were the ONLY remaining callers of
 //     `PgSqlExecutor` - the raw-pool escape hatch that skips the per-app role
 //     fence - which `docs/proposals/2026-08-28-app-database-decoupling.md`
-//     records as "Do not ungate it".
+//     records as "Do not ungate it". With this module gone the trait had no
+//     callers left, and it was deleted outright on 2026-09-09.
 //
 // And it did not catch the defect nearest to it. A masked column whose stored
 // mask has drifted is what a creator causes by deleting one descriptor `mask`

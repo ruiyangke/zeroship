@@ -361,11 +361,12 @@ pub trait LockManager: SqlExecutor {
 /// about the shape, and it is not a reason to gate a contract.
 ///
 /// What is genuinely test-only, and named as a code SPAN rather than an
-/// intra-doc link: `PgSqlExecutor`'s raw-pool escape hatch and the `Backend`
-/// conformance marker. Both are cfg-gated out of a default build, and
-/// `tests/run_doc_gate.sh` requires zero unresolved links in the default and
-/// `--all-features` doc builds alike, so a link to either is red in one of them
-/// whichever way it is written.
+/// intra-doc link: the `Backend` conformance marker, now plain `cfg(test)` in
+/// `zeroship-data-engine`. `tests/run_doc_gate.sh` requires zero unresolved
+/// links in the default and `--all-features` doc builds alike, so a link to a
+/// cfg-gated item is red in one of them whichever way it is written.
+/// `PgSqlExecutor`'s raw-pool escape hatch was the other example and was
+/// deleted on 2026-09-09.
 pub trait SchemaIntrospect: 'static {
     /// Concrete live-schema snapshot returned by
     /// [`Self::introspect_schema`]. The Postgres impl uses

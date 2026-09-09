@@ -47,13 +47,13 @@
 //!   Owns the `LiveSchema` associated type that used to live on
 //!   `Backend`.
 //!
-//! A PG-only extension trait, `zeroship_data_postgres::PgSqlExecutor`, exposes `pool_handle()`
-//! so free-function helpers can reach `&compio_postgres::Pool` without
-//! naming the concrete backend. **It has no callers as of 2026-09-03** - the
-//! last four were in `crud/mask_drift.rs`, deleted that day - and it is
-//! `test-helpers`-gated at its definition because a bare pool checkout skips
-//! the per-app role fence. Deleting it is the open follow-up; do not reach for
-//! it as a way around the fence.
+//! A PG-only extension trait, `PgSqlExecutor`, used to expose `pool_handle()`
+//! so free-function helpers could reach `&compio_postgres::Pool` without naming
+//! the concrete backend. It lost its last callers with `crud/mask_drift.rs` and
+//! was deleted on 2026-09-09: a bare pool checkout runs as the shared login
+//! role with no `SET LOCAL ROLE`, so the accessor was a standing way around the
+//! per-app role fence. Reaching a tenant schema goes through a roled entry
+//! point on `PostgresBackend`.
 //!
 //! **No capability on this surface emits DDL, and that is the point.**
 //! `IndexBuilder` (`CREATE INDEX CONCURRENTLY` with retry recovery),
@@ -126,7 +126,7 @@ pub use zeroship_data_postgres::{pg_error, pg_row_json, postgres, PostgresBacken
 #[cfg(any(test, feature = "test-helpers"))]
 pub use zeroship_data_postgres::lock_guard::LockGuard;
 #[cfg(any(test, feature = "test-helpers"))]
-pub use zeroship_data_postgres::{lock_guard, pg_introspect, PgLockManager, PgSqlExecutor};
+pub use zeroship_data_postgres::{lock_guard, pg_introspect, PgLockManager};
 #[cfg(any(test, feature = "test-helpers"))]
 pub use zeroship_data_postgres::{pg_autocommit, pg_session_sql};
 
@@ -281,8 +281,7 @@ pub use zeroship_data_query_builder::descriptors::EncryptionMode;
 ///   pin was dropped from this super-bound so a `SqliteBackend` whose
 ///   `SqlExecutor::Client = SqliteSessionHandle` can also satisfy
 ///   `Backend`. PG-only consumers that *need* the concrete client
-///   type continue to bound on
-///   [`PgSqlExecutor`] / [`PgLockManager`] (which still pin
+///   type continue to bound on [`PgLockManager`] (which still pins
 ///   `Client = compio_postgres::PoolConnection`).
 /// - [`LockManager`]
 /// - [`SchemaIntrospect`] with `LiveSchema = crate::catalog::LiveSchema`
@@ -430,15 +429,6 @@ mod tests {
     /// [`crate::catalog::LiveSchema`].
     fn assert_postgres_backend_impls_schema_introspect() {
         fn assert_impl<T: SchemaIntrospect<LiveSchema = crate::catalog::LiveSchema>>() {}
-        assert_impl::<PostgresBackend>();
-    }
-
-    /// Compile-time: [`PostgresBackend`] satisfies the PG-only
-    /// [`PgSqlExecutor`] extension trait. The free-function
-    /// helper path hinges on `pool_handle()` being reachable through
-    /// this trait without naming `PostgresBackend`.
-    fn assert_postgres_backend_impls_pg_sql_executor() {
-        fn assert_impl<T: PgSqlExecutor>() {}
         assert_impl::<PostgresBackend>();
     }
 
@@ -699,7 +689,6 @@ mod tests {
         let _ = assert_postgres_backend_impls_sql_executor as fn();
         let _ = assert_postgres_backend_impls_lock_manager as fn();
         let _ = assert_postgres_backend_impls_schema_introspect as fn();
-        let _ = assert_postgres_backend_impls_pg_sql_executor as fn();
         let _ = assert_postgres_backend_impls_pg_lock_manager as fn();
         let _ = assert_associated_types_pinned as fn();
         let _ = assert_backend_is_static as fn();
