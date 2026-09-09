@@ -224,7 +224,7 @@ async fn brokered_code_exchange_with_derived_secret_yields_global_sub_id_token_a
     .expect("verify access token");
     assert_eq!(
         access.sub,
-        fx.issuer.pairwise_subject(fx.user_id.as_str(), SECTOR)
+        fx.issuer.pairwise_subject(&fx.user_id, SECTOR)
     );
     assert_ne!(id.sub, access.sub);
 
@@ -274,7 +274,7 @@ async fn non_brokered_client_unchanged_pairwise_and_no_secret_required() {
     .expect("verify id token");
     assert_eq!(
         id.sub,
-        fx.issuer.pairwise_subject(fx.user_id.as_str(), SECTOR)
+        fx.issuer.pairwise_subject(&fx.user_id, SECTOR)
     );
 
     fx.cleanup().await;

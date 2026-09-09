@@ -382,7 +382,7 @@ async fn issuance_and_prune_never_return_a_token_without_its_published_key() {
     .await;
 
     let (proof, person_id) = common::validated_session(&db, "retention-race").await;
-    let user_id = person_id.as_str().to_string();
+    let user_id = person_id;
     let scopes = vec!["openid".to_string()];
     let mint = AccessTokenMint {
         user_id: &user_id,
@@ -445,7 +445,7 @@ async fn every_production_token_kind_advances_the_key_watermark() {
     clear_watermark(&db, &kid).await;
 
     let (proof, person_id) = common::validated_session(&db, "retention-kinds").await;
-    let user_id = person_id.as_str().to_string();
+    let user_id = person_id;
     let scopes = vec!["openid".to_string()];
     let access_token = issuer
         .issue_access_token(
@@ -538,7 +538,7 @@ async fn every_production_token_kind_advances_the_key_watermark() {
             &db,
             &LogoutTokenMint {
                 client_id: "oac_retention_kinds",
-                sub: Some(&user_id),
+                sub: Some(user_id.as_str()),
                 sid: None,
                 ttl_secs: Some(60),
             },
@@ -568,7 +568,7 @@ async fn every_production_token_kind_advances_the_key_watermark() {
             &db,
             &LogoutTokenMint {
                 client_id: "oac_retention_kinds",
-                sub: Some(&user_id),
+                sub: Some(user_id.as_str()),
                 sid: None,
                 ttl_secs: Some(60),
             },

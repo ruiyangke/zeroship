@@ -9,8 +9,8 @@ use ntex::web;
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 use std::sync::Arc;
-use uuid::Uuid;
 use zeroship_auth::config::AuthConfig;
+use zeroship_core::user_id::UserId;
 use zeroship_core::config::{Secret, SourceKind};
 use zeroship_auth::oidc::issuer::oidc_at_hash;
 use zeroship_auth::oidc::metadata::{discovery_metadata, jwks_document};
@@ -53,7 +53,7 @@ fn test_config(public_url: &str) -> AuthConfig {
     cfg
 }
 
-fn access_mint<'a>(user_id: &'a str, scopes: &'a [String]) -> AccessTokenMint<'a> {
+fn access_mint<'a>(user_id: &'a UserId, scopes: &'a [String]) -> AccessTokenMint<'a> {
     AccessTokenMint {
         user_id,
         sector: SECTOR_A,
@@ -175,7 +175,7 @@ async fn access_token_roundtrip_served_jwks_public_only_and_issuer_consistency()
     // with a live session rather than a fabricated uuid. That is the fence, not
     // fixture ceremony: the id below is the one the creating statement returned.
     let (proof, person_id) = common::validated_session(&db, "oidc-foundation").await;
-    let user_id = person_id.as_str().to_string();
+    let user_id = person_id;
     let scopes = scopes();
     let token = issuer
         .issue_access_token(&db, &access_mint(&user_id, &scopes), &proof)
@@ -316,7 +316,7 @@ async fn discovery_is_served_from_rfc8414_host_insertion_path() {
 #[test]
 fn id_token_has_nonce_and_correct_at_hash() {
     let issuer = test_issuer();
-    let user_id = Uuid::new_v4().to_string();
+    let user_id = UserId::mint();
     let scopes = scopes();
     let access_token = issuer
         .sign_unregistered_access_token_fixture(&access_mint(&user_id, &scopes))
@@ -355,7 +355,7 @@ fn id_token_has_nonce_and_correct_at_hash() {
 #[test]
 fn alg_pin_rejects_alg_none_and_wrong_alg_tokens() {
     let issuer = test_issuer();
-    let user_id = Uuid::new_v4().to_string();
+    let user_id = UserId::mint();
     let now = 1_900_000_000_i64;
     let claims = json!({
         "iss": issuer.issuer(),
@@ -385,7 +385,7 @@ fn alg_pin_rejects_alg_none_and_wrong_alg_tokens() {
 #[test]
 fn pairwise_subject_differs_across_sectors_for_same_user() {
     let issuer = test_issuer();
-    let user_id = Uuid::new_v4().to_string();
+    let user_id = UserId::mint();
     let a = issuer.pairwise_subject(&user_id, SECTOR_A);
     let b = issuer.pairwise_subject(&user_id, SECTOR_B);
     assert_ne!(a, b);

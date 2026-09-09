@@ -763,7 +763,7 @@ async fn reset_post_revokes_app_session_anchor_and_writes_family_marker() {
     // something about the real subject rather than about itself.
     let pairwise_sub = zeroship_core::auth::derive_pairwise(
         &zeroship_core::crypto::derive_key("password-reset-test-salt"),
-        user.id.as_str(),
+        &user.id,
         &format!("https://{client_id}.zeroship.localhost"),
     );
     client
@@ -1044,7 +1044,7 @@ async fn reset_still_applies_when_user_holds_a_refresh_token_for_the_same_app() 
     // collision is the production collision, not one this test invented.
     let pairwise_sub = zeroship_core::auth::derive_pairwise(
         &zeroship_core::crypto::derive_key("password-reset-test-salt"),
-        user.id.as_str(),
+        &user.id,
         &format!("https://{client_id}.zeroship.localhost"),
     );
     client

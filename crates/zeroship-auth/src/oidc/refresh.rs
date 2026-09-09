@@ -238,7 +238,7 @@ pub(super) struct EstablishedSession {
 /// The audience and the subject are today's, unchanged. The first-party CLI
 /// client is the PLATFORM audience and its subject is the person's own id,
 /// because the `zeroship.token_revocations` marker a kill writes is looked up
-/// by control under (`zeroship-cli`, principal UUID): a platform family storing
+/// by control under (`zeroship-cli`, the printed principal id): a platform family storing
 /// a pairwise subject would revoke a subject nothing ever presents. Every other
 /// client is an APP audience with the pairwise subject over its sector.
 /// The grant a token exchange is establishing a session for.
@@ -288,7 +288,7 @@ pub(super) async fn establish_session(
                 Audience::App {
                     client_id: client.client_id.clone(),
                 },
-                issuer.pairwise_subject(&user_id_string, &client.sector_identifier),
+                issuer.pairwise_subject(user_id, &client.sector_identifier),
             )
         };
 

@@ -79,7 +79,7 @@ async fn seed_active_alias(db: &Client) -> (UserId, String, String) {
     // hit the immutable-binding refusal as an opaque 500.
     let pairwise_sub = zeroship_core::auth::derive_pairwise(
         &zeroship_core::crypto::derive_key("relay-auto-revoke-test-salt"),
-        user_id.as_str(),
+        &user_id,
         &format!("https://{client_id}.zeroship.localhost"),
     );
     db.execute(
