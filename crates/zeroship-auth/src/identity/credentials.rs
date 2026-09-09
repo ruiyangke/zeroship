@@ -34,9 +34,9 @@ use crate::store::users;
 
 /// A successfully-verified local user. Carrying the whole row lets the caller
 /// mint a session (login.rs) without a second DB round-trip.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct VerifiedUser {
-    pub id: uuid::Uuid,
+    pub id: zeroship_core::user_id::UserId,
     pub credential_version: i64,
 }
 
@@ -267,8 +267,8 @@ pub async fn verify_password_credentials(
         // `locked_until` so the NEXT attempt is rejected as locked even with
         // the right password. Best-effort — a counter-store fault must not
         // change the credential decision (still `invalid_credentials`).
-        if let Err(e) = users::record_login_failure(db, u.id).await {
-            tracing::error!(error = %e, user_id = %u.id, "record_login_failure failed");
+        if let Err(e) = users::record_login_failure(db, &u.id).await {
+            tracing::error!(error = %e, user_id = u.id.as_str(), "record_login_failure failed");
         }
         audit::emit(
             db,
@@ -292,9 +292,9 @@ pub async fn verify_password_credentials(
     // folded into the opaque `InvalidCredentials` so an attacker-inducible lock
     // never leaks via a distinct status. This re-check is the TOCTOU backstop
     // for a lock set between arm 5 and here.
-    if let Err(e) = eligibility::check_user_eligible(db, u.id).await {
+    if let Err(e) = eligibility::check_user_eligible(db, &u.id).await {
         if !e.is_account_state() {
-            tracing::error!(error = %e, user_id = %u.id, "password login eligibility check failed");
+            tracing::error!(error = %e, user_id = u.id.as_str(), "password login eligibility check failed");
             return Err(CredentialError::Internal);
         }
         audit::emit(
@@ -320,8 +320,8 @@ pub async fn verify_password_credentials(
     // hand the verified user back. Best-effort reset: a failure here must not
     // block a legitimate login (the eligibility gate above already cleared a
     // live lock).
-    if let Err(e) = users::reset_login_failures(db, u.id).await {
-        tracing::error!(error = %e, user_id = %u.id, "reset_login_failures failed");
+    if let Err(e) = users::reset_login_failures(db, &u.id).await {
+        tracing::error!(error = %e, user_id = u.id.as_str(), "reset_login_failures failed");
     }
     audit::emit(
         db,
@@ -338,7 +338,7 @@ pub async fn verify_password_credentials(
     .await;
 
     Ok(VerifiedUser {
-        id: u.id,
+        id: u.id.clone(),
         credential_version: u.credential_version,
     })
 }

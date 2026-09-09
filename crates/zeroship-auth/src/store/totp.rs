@@ -18,14 +18,16 @@
 //!     recovery-code redeem at login.
 
 use compio_postgres::Client;
+use zeroship_core::user_id::UserId;
 
+use crate::entity_ids;
 use crate::error::{AuthError, Result};
 
 /// A stored TOTP credential row. The secret is the still-ENCRYPTED BYTEA blob;
 /// callers decrypt via [`crate::identity::totp::decrypt_secret`].
 #[derive(Debug, Clone)]
 pub struct TotpCredential {
-    pub user_id: uuid::Uuid,
+    pub user_id: UserId,
     pub encrypted_secret: Vec<u8>,
     pub confirmed_at: Option<chrono::DateTime<chrono::Utc>>,
 }
@@ -38,12 +40,12 @@ pub struct BackupCode {
     pub used_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
-fn row_to_credential(row: &compio_postgres::Row) -> TotpCredential {
-    TotpCredential {
-        user_id: row.get("user_id"),
+fn row_to_credential(row: &compio_postgres::Row) -> Result<TotpCredential> {
+    Ok(TotpCredential {
+        user_id: entity_ids::user_id(row, "user_id")?,
         encrypted_secret: row.get::<_, Vec<u8>>("encrypted_secret"),
         confirmed_at: row.try_get("confirmed_at").ok(),
-    }
+    })
 }
 
 /// Upsert a PENDING credential for `user_id` with the (already-encrypted)
@@ -68,7 +70,7 @@ fn row_to_credential(row: &compio_postgres::Row) -> TotpCredential {
 /// Returns [`AuthError::Db`] on PG failure.
 pub async fn enroll(
     conn: &Client,
-    user_id: uuid::Uuid,
+    user_id: &UserId,
     encrypted_secret: &[u8],
     replace_confirmed: bool,
 ) -> Result<bool> {
@@ -82,7 +84,7 @@ pub async fn enroll(
                     confirmed_at = NULL, \
                     created_at = NOW() \
               WHERE $3::bool OR totp_credentials.confirmed_at IS NULL",
-            &[&user_id, &blob, &replace_confirmed],
+            &[&user_id.as_str(), &blob, &replace_confirmed],
         )
         .await
         .map_err(|e| AuthError::Db(format!("totp enroll: {e}")))?;
@@ -94,16 +96,16 @@ pub async fn enroll(
 /// # Errors
 ///
 /// Returns [`AuthError::Db`] on PG failure.
-pub async fn find(conn: &Client, user_id: uuid::Uuid) -> Result<Option<TotpCredential>> {
+pub async fn find(conn: &Client, user_id: &UserId) -> Result<Option<TotpCredential>> {
     let rows = conn
         .query(
             "SELECT user_id, encrypted_secret, confirmed_at \
              FROM zeroship.totp_credentials WHERE user_id = $1",
-            &[&user_id],
+            &[&user_id.as_str()],
         )
         .await
         .map_err(|e| AuthError::Db(format!("totp find: {e}")))?;
-    Ok(rows.first().map(row_to_credential))
+    rows.first().map(row_to_credential).transpose()
 }
 
 /// Read the credential ONLY if it is CONFIRMED (active). The login challenge
@@ -112,7 +114,7 @@ pub async fn find(conn: &Client, user_id: uuid::Uuid) -> Result<Option<TotpCrede
 /// # Errors
 ///
 /// Returns [`AuthError::Db`] on PG failure.
-pub async fn find_confirmed(conn: &Client, user_id: uuid::Uuid) -> Result<Option<TotpCredential>> {
+pub async fn find_confirmed(conn: &Client, user_id: &UserId) -> Result<Option<TotpCredential>> {
     Ok(find(conn, user_id)
         .await?
         .filter(|c| c.confirmed_at.is_some()))
@@ -123,7 +125,7 @@ pub async fn find_confirmed(conn: &Client, user_id: uuid::Uuid) -> Result<Option
 /// # Errors
 ///
 /// Returns [`AuthError::Db`] on PG failure.
-pub async fn is_enabled(conn: &Client, user_id: uuid::Uuid) -> Result<bool> {
+pub async fn is_enabled(conn: &Client, user_id: &UserId) -> Result<bool> {
     Ok(find_confirmed(conn, user_id).await?.is_some())
 }
 
@@ -137,7 +139,7 @@ pub async fn is_enabled(conn: &Client, user_id: uuid::Uuid) -> Result<bool> {
 /// Returns [`AuthError::Db`] on PG failure (transaction rolled back).
 pub async fn confirm(
     conn: &Client,
-    user_id: uuid::Uuid,
+    user_id: &UserId,
     backup_code_hashes: &[String],
 ) -> Result<bool> {
     conn.execute("BEGIN", &[])
@@ -162,7 +164,7 @@ pub async fn confirm(
 
 async fn confirm_tx(
     conn: &Client,
-    user_id: uuid::Uuid,
+    user_id: &UserId,
     backup_code_hashes: &[String],
 ) -> Result<bool> {
     // Only confirm a row that exists AND is still pending OR re-confirming. We
@@ -172,7 +174,7 @@ async fn confirm_tx(
             "UPDATE zeroship.totp_credentials \
              SET confirmed_at = NOW() \
              WHERE user_id = $1",
-            &[&user_id],
+            &[&user_id.as_str()],
         )
         .await
         .map_err(|e| AuthError::Db(format!("totp confirm update: {e}")))?;
@@ -183,7 +185,7 @@ async fn confirm_tx(
     // Fresh code set: drop any prior codes, then insert the new hashes.
     conn.execute(
         "DELETE FROM zeroship.totp_backup_codes WHERE user_id = $1",
-        &[&user_id],
+        &[&user_id.as_str()],
     )
     .await
     .map_err(|e| AuthError::Db(format!("totp confirm clear codes: {e}")))?;
@@ -191,7 +193,7 @@ async fn confirm_tx(
     for hash in backup_code_hashes {
         conn.execute(
             "INSERT INTO zeroship.totp_backup_codes (user_id, code_hash) VALUES ($1, $2)",
-            &[&user_id, hash],
+            &[&user_id.as_str(), hash],
         )
         .await
         .map_err(|e| AuthError::Db(format!("totp confirm insert code: {e}")))?;
@@ -207,7 +209,7 @@ async fn confirm_tx(
 /// # Errors
 ///
 /// Returns [`AuthError::Db`] on PG failure (transaction rolled back).
-pub async fn disable(conn: &Client, user_id: uuid::Uuid) -> Result<bool> {
+pub async fn disable(conn: &Client, user_id: &UserId) -> Result<bool> {
     conn.execute("BEGIN", &[])
         .await
         .map_err(|e| AuthError::Db(format!("totp disable begin: {e}")))?;
@@ -228,17 +230,17 @@ pub async fn disable(conn: &Client, user_id: uuid::Uuid) -> Result<bool> {
     }
 }
 
-async fn disable_tx(conn: &Client, user_id: uuid::Uuid) -> Result<bool> {
+async fn disable_tx(conn: &Client, user_id: &UserId) -> Result<bool> {
     conn.execute(
         "DELETE FROM zeroship.totp_backup_codes WHERE user_id = $1",
-        &[&user_id],
+        &[&user_id.as_str()],
     )
     .await
     .map_err(|e| AuthError::Db(format!("totp disable codes: {e}")))?;
     let n = conn
         .execute(
             "DELETE FROM zeroship.totp_credentials WHERE user_id = $1",
-            &[&user_id],
+            &[&user_id.as_str()],
         )
         .await
         .map_err(|e| AuthError::Db(format!("totp disable credential: {e}")))?;
@@ -250,14 +252,14 @@ async fn disable_tx(conn: &Client, user_id: uuid::Uuid) -> Result<bool> {
 /// # Errors
 ///
 /// Returns [`AuthError::Db`] on PG failure.
-pub async fn unused_backup_codes(conn: &Client, user_id: uuid::Uuid) -> Result<Vec<BackupCode>> {
+pub async fn unused_backup_codes(conn: &Client, user_id: &UserId) -> Result<Vec<BackupCode>> {
     let rows = conn
         .query(
             "SELECT id, code_hash, used_at \
              FROM zeroship.totp_backup_codes \
              WHERE user_id = $1 AND used_at IS NULL \
              ORDER BY id",
-            &[&user_id],
+            &[&user_id.as_str()],
         )
         .await
         .map_err(|e| AuthError::Db(format!("totp unused codes: {e}")))?;

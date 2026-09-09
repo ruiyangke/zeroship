@@ -247,7 +247,8 @@ async fn google_federation_creates_new_user() {
         1,
         "exactly one zeroship.users row for the mock email"
     );
-    let user_id: uuid::Uuid = user_rows[0].get("id");
+    let user_id = zeroship_core::user_id::UserId::parse(user_rows[0].get::<_, &str>("id"))
+        .expect("the created user row carries a typed user id");
     let user_name: String = user_rows[0].get("name");
     let email_verified_at: Option<chrono::DateTime<chrono::Utc>> =
         user_rows[0].try_get("email_verified_at").ok();
@@ -269,23 +270,26 @@ async fn google_federation_creates_new_user() {
         1,
         "exactly one zeroship.federated_identities row for (google, sub)"
     );
-    let identity_user_id: uuid::Uuid = identity_rows[0].get("user_id");
+    let identity_user_id = zeroship_core::user_id::UserId::parse(
+        identity_rows[0].get::<_, &str>("user_id"),
+    )
+    .expect("the identity row carries a typed user id");
     assert_eq!(identity_user_id, user_id, "identity points at the new user");
 
     // 9. Cleanup.
     pg.execute(
         "DELETE FROM zeroship.federated_identities WHERE user_id = $1",
-        &[&user_id],
+        &[&user_id.as_str()],
     )
     .await
     .ok();
     pg.execute(
         "DELETE FROM zeroship.idp_sessions WHERE user_id = $1",
-        &[&user_id],
+        &[&user_id.as_str()],
     )
     .await
     .ok();
-    pg.execute("DELETE FROM zeroship.users WHERE id = $1", &[&user_id])
+    pg.execute("DELETE FROM zeroship.users WHERE id = $1", &[&user_id.as_str()])
         .await
         .ok();
     compio::time::sleep(Duration::from_millis(50)).await;

@@ -322,12 +322,12 @@ pub async fn callback(
     // the eligibility gate — otherwise a victim locked by password-guessing
     // could never recover via OAuth. Best-effort; the gate still enforces hard
     // `disabled_at`.
-    if let Err(e) = users::reset_login_failures(db.as_ref(), user_id).await {
-        tracing::warn!(error = %e, user_id = %user_id, "google clear lockout failed");
+    if let Err(e) = users::reset_login_failures(db.as_ref(), &user_id).await {
+        tracing::warn!(error = %e, user_id = user_id.as_str(), "google clear lockout failed");
     }
-    if let Err(e) = eligibility::check_user_eligible(db.as_ref(), user_id).await {
+    if let Err(e) = eligibility::check_user_eligible(db.as_ref(), &user_id).await {
         if !e.is_account_state() {
-            tracing::error!(error = %e, user_id = %user_id, "google callback eligibility check failed");
+            tracing::error!(error = %e, user_id = user_id.as_str(), "google callback eligibility check failed");
             return render_error_clearing(PublicErrorMessage::ContactSupport, &cfg);
         }
         audit::emit(
@@ -346,8 +346,8 @@ pub async fn callback(
     }
 
     // Best-effort: bump last_login_at on the user row.
-    if let Err(e) = users::touch_last_login(db.as_ref(), user_id).await {
-        tracing::warn!(error = %e, user_id = %user_id, "touch_last_login failed");
+    if let Err(e) = users::touch_last_login(db.as_ref(), &user_id).await {
+        tracing::warn!(error = %e, user_id = user_id.as_str(), "touch_last_login failed");
     }
 
     // IdP session row at auth.zeroship.ai. Same lifetime + amr/acr shape
@@ -355,7 +355,7 @@ pub async fn callback(
     let session = match sessions::create(
         db.as_ref(),
         &sessions::CreateSession {
-            user_id,
+            user_id: &user_id,
             auth_method: PROVIDER,
             amr: vec!["oauth".into()],
             acr: Some(ACR_GOOGLE),

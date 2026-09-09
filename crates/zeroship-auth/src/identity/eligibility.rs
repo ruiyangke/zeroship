@@ -39,10 +39,10 @@ impl LoginIneligible {
 /// locked. Call this immediately before minting or extending login authority.
 pub async fn check_user_eligible(
     conn: &Client,
-    user_id: uuid::Uuid,
+    user_id: &zeroship_core::user_id::UserId,
 ) -> std::result::Result<(), LoginIneligible> {
     let rows = conn
-        .query(ELIGIBILITY_SQL, &[&user_id])
+        .query(ELIGIBILITY_SQL, &[&user_id.as_str()])
         .await
         .map_err(|e| AuthError::Db(format!("eligibility check_user_eligible: {e}")))?;
     let Some(row) = rows.first() else {

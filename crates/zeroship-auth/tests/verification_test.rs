@@ -6,6 +6,7 @@
 
 use compio_postgres::{connect, Client, NoTls};
 use uuid::Uuid;
+use zeroship_core::user_id::UserId;
 
 use zeroship_auth::identity::verification;
 use zeroship_auth::store::{users};
@@ -42,7 +43,7 @@ async fn pg_connect(dsn: &str) -> Client {
 // still sleeps 0.2s inside the peer run's inserts into the same table.
 //
 // The full argument, and the model it follows, is in `magic_link_test.rs`.
-async fn install_verifications_insert_delay(client: &Client, user_id: Uuid) -> String {
+async fn install_verifications_insert_delay(client: &Client, user_id: &UserId) -> String {
     let name = format!(
         "test_sleep_before_verification_insert_{}",
         Uuid::new_v4().simple()
@@ -67,8 +68,9 @@ async fn install_verifications_insert_delay(client: &Client, user_id: Uuid) -> S
             &format!(
                 "CREATE TRIGGER {name} \
                  BEFORE INSERT ON zeroship.email_verifications \
-                 FOR EACH ROW WHEN (NEW.user_id = '{user_id}'::uuid) \
-                 EXECUTE FUNCTION zeroship.{name}()"
+                 FOR EACH ROW WHEN (NEW.user_id = '{}') \
+                 EXECUTE FUNCTION zeroship.{name}()",
+                user_id.as_str()
             ),
             &[],
         )
@@ -112,17 +114,18 @@ async fn concurrent_issue_leaves_one_active_verification_token() {
     let user = users::create(&client, &email, "Test", None)
         .await
         .expect("seed user");
-    let insert_delay = install_verifications_insert_delay(&client, user.id).await;
+    let insert_delay = install_verifications_insert_delay(&client, &user.id).await;
 
     let client_a = pg_connect(&dsn).await;
     let client_b = pg_connect(&dsn).await;
     let email_a = email.clone();
     let email_b = email.clone();
-    let user_id = user.id;
+    let user_id_a = user.id.clone();
+    let user_id_b = user.id.clone();
     let issue_a =
-        compio::runtime::spawn(async move { verification::issue(&client_a, user_id, &email_a).await });
+        compio::runtime::spawn(async move { verification::issue(&client_a, &user_id_a, &email_a).await });
     let issue_b =
-        compio::runtime::spawn(async move { verification::issue(&client_b, user_id, &email_b).await });
+        compio::runtime::spawn(async move { verification::issue(&client_b, &user_id_b, &email_b).await });
 
     issue_a.await.expect("join issue A").expect("issue A");
     issue_b.await.expect("join issue B").expect("issue B");
@@ -133,7 +136,7 @@ async fn concurrent_issue_leaves_one_active_verification_token() {
         .query_one(
             "SELECT COUNT(*) FROM zeroship.email_verifications \
              WHERE user_id = $1 AND consumed_at IS NULL",
-            &[&user.id],
+            &[&user.id.as_str()],
         )
         .await
         .expect("count active verification links")
@@ -146,12 +149,12 @@ async fn concurrent_issue_leaves_one_active_verification_token() {
     client
         .execute(
             "DELETE FROM zeroship.email_verifications WHERE user_id = $1",
-            &[&user.id],
+            &[&user.id.as_str()],
         )
         .await
         .ok();
     client
-        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id])
+        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id.as_str()])
         .await
         .ok();
 }
@@ -168,7 +171,7 @@ async fn issue_then_redeem_roundtrip() {
         .await
         .expect("seed user");
 
-    let issued = verification::issue(&client, user.id, &email)
+    let issued = verification::issue(&client, &user.id, &email)
         .await
         .expect("issue");
     assert!(!issued.raw.is_empty(), "raw token must be non-empty");
@@ -196,12 +199,12 @@ async fn issue_then_redeem_roundtrip() {
     client
         .execute(
             "DELETE FROM zeroship.email_verifications WHERE user_id = $1",
-            &[&user.id],
+            &[&user.id.as_str()],
         )
         .await
         .ok();
     client
-        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id])
+        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id.as_str()])
         .await
         .ok();
 }
@@ -220,7 +223,7 @@ async fn redeem_and_mark_verified_rolls_back_token_consume_with_transaction() {
     let user = users::create(&client, &email, "Test", None)
         .await
         .expect("seed user");
-    let issued = verification::issue(&client, user.id, &email)
+    let issued = verification::issue(&client, &user.id, &email)
         .await
         .expect("issue");
 
@@ -239,7 +242,7 @@ async fn redeem_and_mark_verified_rolls_back_token_consume_with_transaction() {
              FROM zeroship.email_verifications ev \
              JOIN zeroship.users u ON u.id = ev.user_id \
              WHERE ev.user_id = $1",
-            &[&user.id],
+            &[&user.id.as_str()],
         )
         .await
         .expect("load verification state");
@@ -257,12 +260,12 @@ async fn redeem_and_mark_verified_rolls_back_token_consume_with_transaction() {
     client
         .execute(
             "DELETE FROM zeroship.email_verifications WHERE user_id = $1",
-            &[&user.id],
+            &[&user.id.as_str()],
         )
         .await
         .ok();
     client
-        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id])
+        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id.as_str()])
         .await
         .ok();
 }
@@ -282,10 +285,10 @@ async fn new_issue_supersedes_previous() {
         .await
         .expect("seed user");
 
-    let first = verification::issue(&client, user.id, &email)
+    let first = verification::issue(&client, &user.id, &email)
         .await
         .expect("issue 1");
-    let second = verification::issue(&client, user.id, &email)
+    let second = verification::issue(&client, &user.id, &email)
         .await
         .expect("issue 2");
 
@@ -308,12 +311,12 @@ async fn new_issue_supersedes_previous() {
     client
         .execute(
             "DELETE FROM zeroship.email_verifications WHERE user_id = $1",
-            &[&user.id],
+            &[&user.id.as_str()],
         )
         .await
         .ok();
     client
-        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id])
+        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id.as_str()])
         .await
         .ok();
 }

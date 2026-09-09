@@ -12,6 +12,8 @@ use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
+use zeroship_core::app_id::AppId;
+use zeroship_core::user_id::UserId;
 use zeroship_auth::headers::SecurityHeaders;
 use zeroship_auth::oidc::issuer::oidc_at_hash;
 use zeroship_auth::oidc::metadata::jwks_document;
@@ -51,8 +53,8 @@ struct Fixture {
     db: Arc<Client>,
     issuer: Arc<Issuer>,
     client_id: String,
-    app_id: Uuid,
-    user_id: Uuid,
+    app_id: AppId,
+    user_id: UserId,
     user_email: String,
     user_name: String,
     user_avatar_url: String,
@@ -86,16 +88,16 @@ impl Fixture {
             .await
             .expect("publish active OP key");
 
-        let user_id = Uuid::new_v4();
-        let app_id = Uuid::new_v4();
+        let user_id = UserId::mint();
+        let app_id = AppId::mint();
         let client_id = format!("oac_p3_{}", Uuid::new_v4().simple());
         let app_name = format!("p3-auth-code-{}", Uuid::new_v4().simple());
         let user_profile =
-            seed_user_client(&db, user_id, app_id, &app_name, &client_id, email_verified).await;
+            seed_user_client(&db, &user_id, &app_id, &app_name, &client_id, email_verified).await;
         let session = session_store::create(
             &db,
             &session_store::CreateSession {
-                user_id,
+                user_id: &user_id,
                 auth_method: "pwd",
                 amr: vec!["pwd".to_string()],
                 acr: None,
@@ -152,7 +154,7 @@ impl Fixture {
     }
 
     async fn cleanup(self) {
-        cleanup_seeded_rows(&self.db, self.user_id, self.app_id, &self.client_id).await;
+        cleanup_seeded_rows(&self.db, &self.user_id, &self.app_id, &self.client_id).await;
         drop(self.srv);
     }
 }
@@ -194,14 +196,14 @@ async fn authorize_token_happy_path_mints_pairwise_access_and_nonce_at_hash_id_t
         &jwks,
         &token.access_token,
         fx.issuer.issuer(),
-        &format!("app:{}", fx.app_id),
+        &format!("app:{}", fx.app_id.as_str()),
         ACCESS_TOKEN_TYP,
     )
     .expect("verify access token");
     assert_eq!(access.client_id, fx.client_id);
     assert_eq!(
         access.sub,
-        fx.issuer.pairwise_subject(&fx.user_id.to_string(), SECTOR)
+        fx.issuer.pairwise_subject(fx.user_id.as_str(), SECTOR)
     );
 
     let id = verify_with_jwks::<IdTokenClaims>(
@@ -268,7 +270,7 @@ async fn id_token_includes_email_and_profile_claims_when_scopes_granted() {
         &jwks,
         &token.access_token,
         fx.issuer.issuer(),
-        &format!("app:{}", fx.app_id),
+        &format!("app:{}", fx.app_id.as_str()),
         ACCESS_TOKEN_TYP,
     )
     .expect("verify access token");
@@ -467,7 +469,7 @@ async fn credential_bump_rejects_code_after_deletion_is_cancelled() {
     let code = query_param(&location(&authorize), "code").expect("code");
 
     let mut deletion = dedicated_test_db(&db_url().expect("test database URL")).await;
-    let deletion_request = users::request_deletion(&mut deletion, fx.user_id, 30)
+    let deletion_request = users::request_deletion(&mut deletion, &fx.user_id, 30)
         .await
         .expect("request account deletion")
         .expect("authorization code owner exists");
@@ -507,19 +509,19 @@ fn test_issuer() -> Issuer {
 
 async fn seed_user_client(
     db: &Client,
-    user_id: Uuid,
-    app_id: Uuid,
+    user_id: &UserId,
+    app_id: &AppId,
     app_name: &str,
     client_id: &str,
     email_verified: bool,
 ) -> SeededUserProfile {
     let email = format!("p3-{}@zeroship.test", Uuid::new_v4().simple());
     let name = format!("P3 User {}", Uuid::new_v4().simple());
-    let avatar_url = format!("https://cdn.zeroship.test/avatars/{user_id}.png");
+    let avatar_url = format!("https://cdn.zeroship.test/avatars/{}.png", user_id.as_str());
     db.execute(
         "INSERT INTO zeroship.users (id, email, email_verified_at, name, avatar_url) \
          VALUES ($1, $2::citext, CASE WHEN $3 THEN NOW() ELSE NULL END, $4, $5)",
-        &[&user_id, &email, &email_verified, &name, &avatar_url],
+        &[&user_id.as_str(), &email, &email_verified, &name, &avatar_url],
     )
     .await
     .expect("seed user");
@@ -539,7 +541,7 @@ async fn seed_user_client(
         "INSERT INTO zeroship.apps (id, name, project_id, organization_id) \
          SELECT $1, $2, p.id, p.organization_id FROM zeroship.projects p WHERE p.id = $3",
         &[
-            &app_id,
+            &app_id.as_str(),
             &app_name,
             &project_id
         ],
@@ -565,7 +567,7 @@ async fn seed_user_client(
     db.execute(
         "INSERT INTO zeroship.app_oauth_clients (app_id, client_id, sector_identifier) \
          VALUES ($1, $2, $3)",
-        &[&app_id, &client_id, &SECTOR],
+        &[&app_id.as_str(), &client_id, &SECTOR],
     )
     .await
     .expect("seed app oauth client");
@@ -574,7 +576,7 @@ async fn seed_user_client(
              (user_id, client_id, granted_scopes, granted_at, updated_at) \
          VALUES ($1, $2, $3, NOW(), NOW())",
         &[
-            &user_id,
+            &user_id.as_str(),
             &client_id,
             &vec![
                 "openid".to_string(),
@@ -592,7 +594,7 @@ async fn seed_user_client(
     }
 }
 
-async fn cleanup_seeded_rows(db: &Client, user_id: Uuid, app_id: Uuid, client_id: &str) {
+async fn cleanup_seeded_rows(db: &Client, user_id: &UserId, app_id: &AppId, client_id: &str) {
     let _ = db
         .execute(
             "DELETE FROM zeroship.oauth_authorization_codes WHERE client_id = $1",
@@ -614,7 +616,7 @@ async fn cleanup_seeded_rows(db: &Client, user_id: Uuid, app_id: Uuid, client_id
     let _ = db
         .execute(
             "DELETE FROM zeroship.idp_sessions WHERE user_id = $1",
-            &[&user_id],
+            &[&user_id.as_str()],
         )
         .await;
     let _ = db
@@ -630,10 +632,10 @@ async fn cleanup_seeded_rows(db: &Client, user_id: Uuid, app_id: Uuid, client_id
         )
         .await;
     let _ = db
-        .execute("DELETE FROM zeroship.apps WHERE id = $1", &[&app_id])
+        .execute("DELETE FROM zeroship.apps WHERE id = $1", &[&app_id.as_str()])
         .await;
     let _ = db
-        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user_id])
+        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user_id.as_str()])
         .await;
 }
 

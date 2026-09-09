@@ -44,6 +44,7 @@ use std::sync::Arc;
 
 use ntex::web::{self, test};
 use uuid::Uuid;
+use zeroship_core::user_id::UserId;
 use zeroship_mailer::{Email, Mailer};
 
 use common::{test_auth_config, CapturingMailer};
@@ -65,7 +66,7 @@ struct Fixture {
     cfg: Arc<AuthConfig>,
     pg: Arc<compio_postgres::Client>,
     mailer: Arc<CapturingMailer>,
-    user_id: Uuid,
+    user_id: UserId,
     email: String,
     session_id: Uuid,
 }
@@ -98,7 +99,7 @@ impl Fixture {
         let session = sessions::create(
             &pg,
             &CreateSession {
-                user_id: user.id,
+                user_id: &user.id,
                 auth_method: "password",
                 amr: vec!["pwd".to_owned()],
                 acr: None,
@@ -128,15 +129,15 @@ impl Fixture {
     #[allow(clippy::future_not_send)]
     async fn seed_confirmed(&self) -> Vec<u8> {
         let secret = totp::generate_secret();
-        let ct = totp::encrypt_secret(&self.key(), self.user_id, &secret).expect("encrypt");
+        let ct = totp::encrypt_secret(&self.key(), &self.user_id, &secret).expect("encrypt");
         assert!(
-            totp_store::enroll(&self.pg, self.user_id, &ct, false)
+            totp_store::enroll(&self.pg, &self.user_id, &ct, false)
                 .await
                 .expect("seed enroll"),
             "seeding a pending credential must write"
         );
         let (_, hashes) = totp::generate_backup_codes().expect("backup codes");
-        totp_store::confirm(&self.pg, self.user_id, &hashes)
+        totp_store::confirm(&self.pg, &self.user_id, &hashes)
             .await
             .expect("seed confirm");
         secret
@@ -195,7 +196,7 @@ impl Fixture {
 
     #[allow(clippy::future_not_send)]
     async fn is_enabled(&self) -> bool {
-        totp_store::is_enabled(&self.pg, self.user_id)
+        totp_store::is_enabled(&self.pg, &self.user_id)
             .await
             .expect("is_enabled")
     }
@@ -222,7 +223,7 @@ impl Fixture {
         ] {
             let _ = self
                 .pg
-                .execute(sql, &[&format!("totp:verify:{}", self.user_id)])
+                .execute(sql, &[&format!("totp:verify:{}", self.user_id.as_str())])
                 .await;
         }
         for sql in [
@@ -232,7 +233,7 @@ impl Fixture {
             "DELETE FROM zeroship.idp_sessions WHERE user_id = $1",
             "DELETE FROM zeroship.users WHERE id = $1",
         ] {
-            let _ = self.pg.execute(sql, &[&self.user_id]).await;
+            let _ = self.pg.execute(sql, &[&self.user_id.as_str()]).await;
         }
     }
 }

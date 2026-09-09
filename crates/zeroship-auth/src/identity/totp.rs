@@ -26,6 +26,7 @@
 use base64::Engine as _;
 use rand::RngCore;
 use totp_rs::{Algorithm, Secret, TotpUrlError, TOTP};
+use zeroship_core::user_id::UserId;
 
 use crate::error::{AuthError, Result};
 use crate::identity::password;
@@ -44,7 +45,7 @@ pub const BACKUP_CODE_COUNT: usize = 10;
 pub const BACKUP_CODE_DIGITS: usize = 10;
 
 /// AAD domain tag binding a TOTP ciphertext to its owning user row. The full
-/// AAD is this tag plus the user UUID bytes, so a ciphertext copied onto a
+/// AAD is this tag plus the printed user id, so a ciphertext copied onto a
 /// different `user_id` fails authentication on decrypt.
 const AAD_DOMAIN: &[u8] = b"zeroship-totp-secret-v1:";
 
@@ -88,10 +89,17 @@ pub fn generate_secret() -> Vec<u8> {
 }
 
 /// Associated data for the at-rest encryption of `user_id`'s secret.
-fn aad_for(user_id: uuid::Uuid) -> Vec<u8> {
-    let mut aad = Vec::with_capacity(AAD_DOMAIN.len() + 16);
+///
+/// The bound identity is the PRINTED id (`usr_<base62>`), which is what
+/// `zeroship.totp_credentials.user_id` stores. This is the only function that
+/// composes the AAD, and both [`encrypt_secret`] and [`decrypt_secret`] go
+/// through it, so a secret sealed for one person cannot open for another and
+/// there is no second rendering to drift from this one.
+fn aad_for(user_id: &UserId) -> Vec<u8> {
+    let printed = user_id.as_str();
+    let mut aad = Vec::with_capacity(AAD_DOMAIN.len() + printed.len());
     aad.extend_from_slice(AAD_DOMAIN);
-    aad.extend_from_slice(user_id.as_bytes());
+    aad.extend_from_slice(printed.as_bytes());
     aad
 }
 
@@ -101,7 +109,7 @@ fn aad_for(user_id: uuid::Uuid) -> Vec<u8> {
 ///
 /// Returns [`AuthError::Internal`] if AES-GCM encryption fails (should not
 /// happen with a valid 32-byte key).
-pub fn encrypt_secret(key: &[u8; 32], user_id: uuid::Uuid, secret: &[u8]) -> Result<Vec<u8>> {
+pub fn encrypt_secret(key: &[u8; 32], user_id: &UserId, secret: &[u8]) -> Result<Vec<u8>> {
     zeroship_core::crypto::encrypt(key, &aad_for(user_id), secret)
         .map_err(|e| AuthError::Internal(format!("totp secret encrypt: {e}")))
 }
@@ -112,7 +120,7 @@ pub fn encrypt_secret(key: &[u8; 32], user_id: uuid::Uuid, secret: &[u8]) -> Res
 ///
 /// Returns [`AuthError::Internal`] if decryption/authentication fails (wrong
 /// key, tampered ciphertext, or a blob bound to a different user).
-pub fn decrypt_secret(key: &[u8; 32], user_id: uuid::Uuid, blob: &[u8]) -> Result<Vec<u8>> {
+pub fn decrypt_secret(key: &[u8; 32], user_id: &UserId, blob: &[u8]) -> Result<Vec<u8>> {
     zeroship_core::crypto::decrypt(key, &aad_for(user_id), blob)
         .map_err(|e| AuthError::Internal(format!("totp secret decrypt: {e}")))
 }
@@ -299,28 +307,29 @@ mod tests {
 
     #[test]
     fn encrypt_then_decrypt_roundtrips_bound_to_user() {
-        let user = uuid::Uuid::new_v4();
+        let user = UserId::mint();
         let secret = generate_secret();
-        let ct = encrypt_secret(&key(), user, &secret).expect("encrypt");
+        let ct = encrypt_secret(&key(), &user, &secret).expect("encrypt");
         // Ciphertext must NOT contain the plaintext secret.
         assert!(
             !ct.windows(secret.len()).any(|w| w == secret.as_slice()),
             "plaintext secret must not appear in the ciphertext"
         );
-        let pt = decrypt_secret(&key(), user, &ct).expect("decrypt");
+        let pt = decrypt_secret(&key(), &user, &ct).expect("decrypt");
         assert_eq!(pt, secret);
     }
 
     #[test]
     fn ciphertext_is_bound_to_user_id_via_aad() {
-        let user_a = uuid::Uuid::new_v4();
-        let user_b = uuid::Uuid::new_v4();
+        let user_a = UserId::mint();
+        let user_b = UserId::mint();
         let secret = generate_secret();
-        let ct = encrypt_secret(&key(), user_a, &secret).expect("encrypt");
+        let ct = encrypt_secret(&key(), &user_a, &secret).expect("encrypt");
+        assert_ne!(user_a, user_b, "the two ids must differ for this to measure the AAD");
         // The SAME key but a different user_id (AAD) must fail to decrypt — so a
         // ciphertext lifted onto another user's row is useless.
         assert!(
-            decrypt_secret(&key(), user_b, &ct).is_err(),
+            decrypt_secret(&key(), &user_b, &ct).is_err(),
             "decrypt under a different user_id must fail (AAD binding)"
         );
     }

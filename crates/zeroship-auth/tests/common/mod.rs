@@ -709,24 +709,32 @@ impl zeroship_mailer::Mailer for CapturingMailer {
 /// the point of the witness: a fixture cannot fabricate one, and a test that
 /// could would be testing nothing.
 ///
-/// The returned uuid is the person the proof names; a mint must use it as its
+/// The returned id is the person the proof names; a mint must use it as its
 /// subject, because `Issuer` refuses a mint whose subject is not the validated
 /// session's person.
 pub async fn validated_session(
     pg: &compio_postgres::Client,
     label: &str,
-) -> (zeroship_auth::session_store::ValidatedSession, uuid::Uuid) {
+) -> (
+    zeroship_auth::session_store::ValidatedSession,
+    zeroship_core::user_id::UserId,
+) {
     use std::io::Write as _;
 
     let tag = uuid::Uuid::new_v4().simple().to_string();
-    let person_id: uuid::Uuid = pg
-        .query_one(
-            "INSERT INTO zeroship.users (email, name) VALUES ($1::citext, $2) RETURNING id",
-            &[&format!("{label}-{tag}@zeroship.test"), &"Witness Fixture"],
-        )
-        .await
-        .expect("seed person")
-        .get("id");
+    // `zeroship.users.id` has no database default, so the fixture mints one
+    // exactly as `store::users::create` does.
+    let person_id = zeroship_core::user_id::UserId::mint();
+    pg.execute(
+        "INSERT INTO zeroship.users (id, email, name) VALUES ($1, $2::citext, $3)",
+        &[
+            &person_id.as_str(),
+            &format!("{label}-{tag}@zeroship.test"),
+            &"Witness Fixture",
+        ],
+    )
+    .await
+    .expect("seed person");
 
     let dir = std::env::temp_dir().join(format!("zs-witness-keys-{tag}"));
     std::fs::create_dir_all(&dir).expect("key dir");
@@ -753,10 +761,10 @@ pub async fn validated_session(
         .expect("load session keys");
 
     let scopes = vec!["openid".to_string()];
-    let subject = person_id.to_string();
+    let subject = person_id.as_str().to_string();
     let grant_id = zeroship_auth::session_store::upsert_grant(
         pg,
-        person_id,
+        &person_id,
         &zeroship_auth::session_store::Audience::Platform,
         &subject,
         &scopes,
@@ -768,7 +776,7 @@ pub async fn validated_session(
         pg,
         &keys,
         &zeroship_auth::session_store::NewSession {
-            person_id,
+            person_id: &person_id,
             grant_id: &grant_id,
             subject: &subject,
             grant_scopes: &scopes,

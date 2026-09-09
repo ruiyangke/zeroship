@@ -444,7 +444,7 @@ async fn device_post_rate_limits_failed_user_code_guesses_but_allows_correct_cod
     let session = session_store::create(
         &pg,
         &session_store::CreateSession {
-            user_id: user.id,
+            user_id: &user.id,
             auth_method: "password",
             amr: vec!["pwd".into()],
             acr: None,
@@ -457,7 +457,7 @@ async fn device_post_rate_limits_failed_user_code_guesses_but_allows_correct_cod
     .expect("create device rate-limit session");
 
     let xff_ip = unique_test_client_ip();
-    let user_ip_key = format!("device:user_ip:{}:{xff_ip}", user.id);
+    let user_ip_key = format!("device:user_ip:{}:{xff_ip}", user.id.as_str());
     let ip_key = format!("device:ip:{xff_ip}");
     cleanup_rate_limits_like(&pg, &[&user_ip_key, &ip_key]).await;
 
@@ -546,7 +546,7 @@ async fn device_post_rate_limits_failed_user_code_guesses_but_allows_correct_cod
         .execute("DELETE FROM zeroship.idp_sessions WHERE id = $1", &[&session.id])
         .await;
     let _ = pg
-        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id])
+        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id.as_str()])
         .await;
     let _ = pg
         .execute("DELETE FROM zeroship.oauth_clients WHERE client_id = $1", &[&client_id])
@@ -787,7 +787,7 @@ async fn native_device_confirmation_shows_client_scopes_and_requires_confirm() {
     let session = session_store::create(
         &pg,
         &session_store::CreateSession {
-            user_id: user.id,
+            user_id: &user.id,
             auth_method: "password",
             amr: vec!["pwd".into()],
             acr: None,
@@ -866,7 +866,7 @@ async fn native_device_confirmation_shows_client_scopes_and_requires_confirm() {
         .execute("DELETE FROM zeroship.idp_sessions WHERE id = $1", &[&session.id])
         .await;
     let _ = pg
-        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id])
+        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id.as_str()])
         .await;
     let _ = pg
         .execute("DELETE FROM zeroship.oauth_clients WHERE client_id = $1", &[&client_id])
@@ -944,7 +944,7 @@ async fn native_device_grant_approves_via_auth_session_and_polls_op_token() {
     let session = session_store::create(
         &pg,
         &session_store::CreateSession {
-            user_id: user.id,
+            user_id: &user.id,
             auth_method: "password",
             amr: vec!["pwd".into()],
             acr: None,
@@ -1036,7 +1036,7 @@ async fn native_device_grant_approves_via_auth_session_and_polls_op_token() {
     assert_eq!(claims.exp - claims.iat, ACCESS_TOKEN_TTL_SECS);
     assert_eq!(
         claims.sub,
-        issuer.pairwise_subject(&user.id.to_string(), &client_id)
+        issuer.pairwise_subject(user.id.as_str(), &client_id)
     );
     assert_eq!(jsonwebtoken::decode_header(&token.access_token).unwrap().typ.as_deref(), Some(ACCESS_TOKEN_TYP));
 
@@ -1055,7 +1055,7 @@ async fn native_device_grant_approves_via_auth_session_and_polls_op_token() {
         .execute("DELETE FROM zeroship.idp_sessions WHERE id = $1", &[&session.id])
         .await;
     let _ = pg
-        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id])
+        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id.as_str()])
         .await;
     let _ = pg
         .execute("DELETE FROM zeroship.oauth_clients WHERE client_id = $1", &[&client_id])
@@ -1090,7 +1090,7 @@ async fn credential_bump_rejects_approved_device_code_after_deletion_is_cancelle
          SET principal_id = $1, sid = $2, auth_credential_version = $3, status = 'approved' \
          WHERE device_code_hash = $4",
         &[
-            &user.id,
+            &user.id.as_str(),
             &sid,
             &user.credential_version,
             &device_code_hash,
@@ -1102,7 +1102,7 @@ async fn credential_bump_rejects_approved_device_code_after_deletion_is_cancelle
     let db_url = zeroship_core::config::test_database_url_opt()
     .expect("test database URL");
     let mut deletion = dedicated_test_db(&db_url).await;
-    let deletion_request = users::request_deletion(&mut deletion, user.id, 30)
+    let deletion_request = users::request_deletion(&mut deletion, &user.id, 30)
         .await
         .expect("request account deletion")
         .expect("device grant owner exists");
@@ -1149,7 +1149,7 @@ async fn credential_bump_rejects_approved_device_code_after_deletion_is_cancelle
         )
         .await;
     let _ = pg
-        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id])
+        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id.as_str()])
         .await;
     let _ = pg
         .execute(
@@ -1225,7 +1225,7 @@ async fn device_user_code_redirects_anonymous_browser_to_login() {
     let session = session_store::create(
         &pg,
         &session_store::CreateSession {
-            user_id: user.id,
+            user_id: &user.id,
             auth_method: "password",
             amr: vec!["pwd".into()],
             acr: None,
@@ -1272,7 +1272,7 @@ async fn device_user_code_redirects_anonymous_browser_to_login() {
             "SELECT COUNT(*)::BIGINT AS n \
              FROM zeroship.audit_events \
              WHERE actor_user_id = $1 AND event_type = 'device_grant'",
-            &[&user.id],
+            &[&user.id.as_str()],
         )
         .await
         .expect("count device grant audit rows");
@@ -1282,7 +1282,7 @@ async fn device_user_code_redirects_anonymous_browser_to_login() {
         .execute("DELETE FROM zeroship.idp_sessions WHERE id = $1", &[&session.id])
         .await;
     let _ = pg
-        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id])
+        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id.as_str()])
         .await;
     let _ = pg
         .execute("DELETE FROM zeroship.oauth_clients WHERE client_id = $1", &[&client_id])
@@ -1332,7 +1332,7 @@ async fn device_post_requires_csrf_token() {
     let session = session_store::create(
         &pg,
         &session_store::CreateSession {
-            user_id: user.id,
+            user_id: &user.id,
             auth_method: "password",
             amr: vec!["pwd".into()],
             acr: None,
@@ -1375,7 +1375,7 @@ async fn device_post_requires_csrf_token() {
             "SELECT COUNT(*)::BIGINT AS n \
              FROM zeroship.audit_events \
              WHERE actor_user_id = $1 AND event_type = 'device_grant'",
-            &[&user.id],
+            &[&user.id.as_str()],
         )
         .await
         .expect("count device grant audit rows after no-csrf attempt");
@@ -1422,7 +1422,7 @@ async fn device_post_requires_csrf_token() {
             "SELECT COUNT(*)::BIGINT AS n \
              FROM zeroship.audit_events \
              WHERE actor_user_id = $1 AND event_type = 'device_grant'",
-            &[&user.id],
+            &[&user.id.as_str()],
         )
         .await
         .expect("count device grant audit rows after csrf attempt");
@@ -1436,7 +1436,7 @@ async fn device_post_requires_csrf_token() {
         .execute("DELETE FROM zeroship.idp_sessions WHERE id = $1", &[&session.id])
         .await;
     let _ = pg
-        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id])
+        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id.as_str()])
         .await;
     let _ = pg
         .execute("DELETE FROM zeroship.oauth_clients WHERE client_id = $1", &[&client_id])

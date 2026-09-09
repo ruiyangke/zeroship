@@ -21,6 +21,7 @@ use std::sync::Arc;
 
 use ntex::web::{self, test};
 use uuid::Uuid;
+use zeroship_core::user_id::UserId;
 use zeroship_mailer::Mailer;
 
 use common::test_auth_config;
@@ -41,7 +42,7 @@ const CSRF_TOKEN: &str = "csrf-enroll-reauth";
 struct EnrollFixture {
     cfg: Arc<AuthConfig>,
     pg: Arc<compio_postgres::Client>,
-    user_id: Uuid,
+    user_id: UserId,
     session_id: Uuid,
 }
 
@@ -75,7 +76,7 @@ impl EnrollFixture {
         let session = sessions::create(
             &pg,
             &CreateSession {
-                user_id: user.id,
+                user_id: &user.id,
                 auth_method: "password",
                 amr: vec!["pwd".to_owned()],
                 acr: None,
@@ -105,11 +106,11 @@ impl EnrollFixture {
     #[allow(clippy::future_not_send)]
     async fn seed_pending(&self) -> Vec<u8> {
         let secret = totp::generate_secret();
-        let ct = totp::encrypt_secret(&self.key(), self.user_id, &secret).expect("encrypt");
+        let ct = totp::encrypt_secret(&self.key(), &self.user_id, &secret).expect("encrypt");
         // Seeding always starts from a user with no credential, so the store's
         // confirmed-clobber guard never applies here.
         assert!(
-            totp_store::enroll(&self.pg, self.user_id, &ct, false)
+            totp_store::enroll(&self.pg, &self.user_id, &ct, false)
                 .await
                 .expect("seed enroll"),
             "seeding a pending credential must write"
@@ -123,7 +124,7 @@ impl EnrollFixture {
     async fn seed_confirmed(&self) -> Vec<u8> {
         let secret = self.seed_pending().await;
         let (_, hashes) = totp::generate_backup_codes().expect("backup codes");
-        totp_store::confirm(&self.pg, self.user_id, &hashes)
+        totp_store::confirm(&self.pg, &self.user_id, &hashes)
             .await
             .expect("seed confirm");
         secret
@@ -186,23 +187,23 @@ impl EnrollFixture {
     /// was not) replaced by the request under test.
     #[allow(clippy::future_not_send)]
     async fn stored_secret(&self) -> Option<Vec<u8>> {
-        let cred = totp_store::find(&self.pg, self.user_id).await.expect("find")?;
+        let cred = totp_store::find(&self.pg, &self.user_id).await.expect("find")?;
         Some(
-            totp::decrypt_secret(&self.key(), self.user_id, &cred.encrypted_secret)
+            totp::decrypt_secret(&self.key(), &self.user_id, &cred.encrypted_secret)
                 .expect("decrypt stored secret"),
         )
     }
 
     #[allow(clippy::future_not_send)]
     async fn is_enabled(&self) -> bool {
-        totp_store::is_enabled(&self.pg, self.user_id)
+        totp_store::is_enabled(&self.pg, &self.user_id)
             .await
             .expect("is_enabled")
     }
 
     #[allow(clippy::future_not_send)]
     async fn confirmed_at(&self) -> Option<chrono::DateTime<chrono::Utc>> {
-        totp_store::find(&self.pg, self.user_id)
+        totp_store::find(&self.pg, &self.user_id)
             .await
             .expect("find")
             .and_then(|c| c.confirmed_at)
@@ -216,7 +217,7 @@ impl EnrollFixture {
             .query_one(
                 "SELECT COUNT(*) AS n FROM zeroship.audit_events \
                  WHERE actor_user_id = $1 AND event_type = $2",
-                &[&self.user_id, &event_type],
+                &[&self.user_id.as_str(), &event_type],
             )
             .await
             .expect("count audit rows")
@@ -229,40 +230,40 @@ impl EnrollFixture {
             .pg
             .execute(
                 "DELETE FROM zeroship.rate_limits WHERE bucket_key = $1",
-                &[&format!("totp:verify:{}", self.user_id)],
+                &[&format!("totp:verify:{}", self.user_id.as_str())],
             )
             .await;
         let _ = self
             .pg
             .execute(
                 "DELETE FROM zeroship.audit_events WHERE actor_user_id = $1",
-                &[&self.user_id],
+                &[&self.user_id.as_str()],
             )
             .await;
         let _ = self
             .pg
             .execute(
                 "DELETE FROM zeroship.totp_backup_codes WHERE user_id = $1",
-                &[&self.user_id],
+                &[&self.user_id.as_str()],
             )
             .await;
         let _ = self
             .pg
             .execute(
                 "DELETE FROM zeroship.totp_credentials WHERE user_id = $1",
-                &[&self.user_id],
+                &[&self.user_id.as_str()],
             )
             .await;
         let _ = self
             .pg
             .execute(
                 "DELETE FROM zeroship.idp_sessions WHERE user_id = $1",
-                &[&self.user_id],
+                &[&self.user_id.as_str()],
             )
             .await;
         let _ = self
             .pg
-            .execute("DELETE FROM zeroship.users WHERE id = $1", &[&self.user_id])
+            .execute("DELETE FROM zeroship.users WHERE id = $1", &[&self.user_id.as_str()])
             .await;
     }
 }
@@ -411,7 +412,7 @@ async fn enroll_with_wrong_password_is_refused() {
 async fn first_enrollment_needs_no_reauth() {
     let fx = EnrollFixture::boot("first").await;
     assert!(
-        totp_store::find(&fx.pg, fx.user_id).await.expect("find").is_none(),
+        totp_store::find(&fx.pg, &fx.user_id).await.expect("find").is_none(),
         "fixture starts with no credential"
     );
 
@@ -419,7 +420,7 @@ async fn first_enrollment_needs_no_reauth() {
 
     assert_eq!(status, 200, "first enrollment must be frictionless, got {status} {body}");
     assert_eq!(body["confirmed"], serde_json::Value::Bool(false));
-    let cred = totp_store::find(&fx.pg, fx.user_id)
+    let cred = totp_store::find(&fx.pg, &fx.user_id)
         .await
         .expect("find")
         .expect("first enroll writes a credential");

@@ -206,14 +206,14 @@ async fn reset_post_revokes_all_sessions_and_audits_counts() {
         .expect("seed user");
     let old_hash = password::hash("old reset password phrase")
         .expect("hash old password");
-    users::update_password_hash(&client, user.id, &old_hash)
+    users::update_password_hash(&client, &user.id, &old_hash)
         .await
         .expect("set old password");
 
     sessions::create(
         &client,
         &sessions::CreateSession {
-            user_id: user.id,
+            user_id: &user.id,
             auth_method: "password",
             amr: vec!["pwd".to_string()],
             acr: None,
@@ -226,7 +226,7 @@ async fn reset_post_revokes_all_sessions_and_audits_counts() {
     .expect("seed idp session");
 
     // gateway_sessions.app_id is UUID + FK → apps(id); seed a real app row.
-    let gw_app_id = Uuid::new_v4();
+    let gw_app_id = zeroship_core::app_id::AppId::mint();
     let plan_id = seed_test_plan(&client).await;
     // An app row needs a project, and a project needs an organization. Nothing
     // here asserts on authority, so the organization is left member-less.
@@ -236,8 +236,8 @@ async fn reset_post_revokes_all_sessions_and_audits_counts() {
             "INSERT INTO zeroship.apps (id, name, plan_id, project_id, organization_id) \
              SELECT $1, $2, $3, p.id, p.organization_id FROM zeroship.projects p WHERE p.id = $4",
             &[
-                &gw_app_id,
-                &format!("reset-revoke-app-{}", gw_app_id.simple()),
+                &gw_app_id.as_str(),
+                &format!("reset-revoke-app-{}", Uuid::new_v4().simple()),
                 &plan_id,
                 &project_id
             ],
@@ -249,7 +249,7 @@ async fn reset_post_revokes_all_sessions_and_audits_counts() {
             "INSERT INTO zeroship.gateway_sessions \
                 (user_id, app_id, email, name, email_verified, idle_expires_at, abs_expires_at) \
              VALUES ($1, $2, $3::citext, $4, true, NOW() + INTERVAL '30 minutes', NOW() + INTERVAL '12 hours')",
-            &[&user.id, &gw_app_id, &email, &"Test"],
+            &[&user.id.as_str(), &gw_app_id.as_str(), &email, &"Test"],
         )
         .await
         .expect("seed gateway session");
@@ -299,7 +299,7 @@ async fn reset_post_revokes_all_sessions_and_audits_counts() {
     let idp_count: i64 = pg
         .query_one(
             "SELECT COUNT(*) FROM zeroship.idp_sessions WHERE user_id = $1",
-            &[&user.id],
+            &[&user.id.as_str()],
         )
         .await
         .expect("count idp sessions")
@@ -307,7 +307,7 @@ async fn reset_post_revokes_all_sessions_and_audits_counts() {
     let gateway_count: i64 = pg
         .query_one(
             "SELECT COUNT(*) FROM zeroship.gateway_sessions WHERE user_id = $1",
-            &[&user.id],
+            &[&user.id.as_str()],
         )
         .await
         .expect("count gateway sessions")
@@ -319,7 +319,7 @@ async fn reset_post_revokes_all_sessions_and_audits_counts() {
         .query_one(
             "SELECT COUNT(*) FROM zeroship.audit_events \
              WHERE actor_user_id = $1 AND event_type = 'password_changed' AND outcome = 'success'",
-            &[&user.id],
+            &[&user.id.as_str()],
         )
         .await
         .expect("count password_changed audit")
@@ -329,7 +329,7 @@ async fn reset_post_revokes_all_sessions_and_audits_counts() {
             "SELECT COUNT(*) FROM zeroship.audit_events \
              WHERE actor_user_id = $1 AND event_type = 'sessions_revoked_after_password_reset' \
                AND outcome = 'success'",
-            &[&user.id],
+            &[&user.id.as_str()],
         )
         .await
         .expect("count sessions_revoked audit")
@@ -337,7 +337,7 @@ async fn reset_post_revokes_all_sessions_and_audits_counts() {
     assert_eq!(password_changed, 1);
     assert_eq!(sessions_revoked, 1);
 
-    pg.execute("DELETE FROM zeroship.audit_events WHERE actor_user_id = $1", &[&user.id])
+    pg.execute("DELETE FROM zeroship.audit_events WHERE actor_user_id = $1", &[&user.id.as_str()])
         .await
         .ok();
     pg.execute(
@@ -346,10 +346,10 @@ async fn reset_post_revokes_all_sessions_and_audits_counts() {
     )
     .await
     .ok();
-    pg.execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id])
+    pg.execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id.as_str()])
         .await
         .ok();
-    pg.execute("DELETE FROM zeroship.apps WHERE id = $1", &[&gw_app_id])
+    pg.execute("DELETE FROM zeroship.apps WHERE id = $1", &[&gw_app_id.as_str()])
         .await
         .ok();
 }
@@ -454,7 +454,7 @@ async fn reset_post_consumes_magic_login_state_for_same_email() {
         "password reset must clear cross-device magic completions for the email"
     );
 
-    pg.execute("DELETE FROM zeroship.audit_events WHERE actor_user_id = $1", &[&user.id])
+    pg.execute("DELETE FROM zeroship.audit_events WHERE actor_user_id = $1", &[&user.id.as_str()])
         .await
         .ok();
     pg.execute(
@@ -463,7 +463,7 @@ async fn reset_post_consumes_magic_login_state_for_same_email() {
     )
     .await
     .ok();
-    pg.execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id])
+    pg.execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id.as_str()])
         .await
         .ok();
 }
@@ -527,7 +527,7 @@ async fn concurrent_issue_leaves_one_active_reset_token() {
         .await
         .ok();
     client
-        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id])
+        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id.as_str()])
         .await
         .ok();
 }
@@ -576,7 +576,7 @@ async fn issue_then_redeem_roundtrip() {
         .await
         .ok();
     client
-        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id])
+        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id.as_str()])
         .await
         .ok();
 }
@@ -597,7 +597,7 @@ async fn complete_rolls_back_token_consume_with_transaction() {
         .expect("seed user");
     let old_hash = password::hash("old reset password phrase")
         .expect("hash old password");
-    users::update_password_hash(&client, user.id, &old_hash)
+    users::update_password_hash(&client, &user.id, &old_hash)
         .await
         .expect("set old password");
     let issued = password_reset::issue(&client, &email)
@@ -644,7 +644,7 @@ async fn complete_rolls_back_token_consume_with_transaction() {
         .await
         .ok();
     client
-        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id])
+        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id.as_str()])
         .await
         .ok();
 }
@@ -704,14 +704,14 @@ async fn reset_post_revokes_app_session_anchor_and_writes_family_marker() {
         .await
         .expect("seed user");
     let old_hash = password::hash("old reset password phrase").expect("hash old password");
-    users::update_password_hash(&client, user.id, &old_hash)
+    users::update_password_hash(&client, &user.id, &old_hash)
         .await
         .expect("set old password");
 
     let cred_version_before: i64 = client
         .query_one(
             "SELECT credential_version FROM zeroship.users WHERE id = $1",
-            &[&user.id],
+            &[&user.id.as_str()],
         )
         .await
         .expect("read credential_version")
@@ -734,7 +734,7 @@ async fn reset_post_revokes_app_session_anchor_and_writes_family_marker() {
         .await
         .expect("insert oauth client");
 
-    let app_id = Uuid::new_v4();
+    let app_id = zeroship_core::app_id::AppId::mint();
     let plan_id = seed_test_plan(&client).await;
     // An app row needs a project, and a project needs an organization. Nothing
     // here asserts on authority, so the organization is left member-less.
@@ -744,8 +744,8 @@ async fn reset_post_revokes_app_session_anchor_and_writes_family_marker() {
             "INSERT INTO zeroship.apps (id, name, plan_id, project_id, organization_id) \
              SELECT $1, $2, $3, p.id, p.organization_id FROM zeroship.projects p WHERE p.id = $4",
             &[
-                &app_id,
-                &format!("anchor-app-{}", app_id.simple()),
+                &app_id.as_str(),
+                &format!("anchor-app-{}", Uuid::new_v4().simple()),
                 &plan_id,
                 &project_id,
             ],
@@ -763,7 +763,7 @@ async fn reset_post_revokes_app_session_anchor_and_writes_family_marker() {
     // something about the real subject rather than about itself.
     let pairwise_sub = zeroship_core::auth::derive_pairwise(
         &zeroship_core::crypto::derive_key("password-reset-test-salt"),
-        &user.id.to_string(),
+        user.id.as_str(),
         &format!("https://{client_id}.zeroship.localhost"),
     );
     client
@@ -771,7 +771,7 @@ async fn reset_post_revokes_app_session_anchor_and_writes_family_marker() {
             "INSERT INTO zeroship.app_user_identities \
                 (app_client_id, global_user_id, pairwise_sub) \
              VALUES ($1, $2, $3)",
-            &[&client_id, &user.id, &pairwise_sub],
+            &[&client_id, &user.id.as_str(), &pairwise_sub],
         )
         .await
         .expect("insert app_user_identity");
@@ -787,9 +787,9 @@ async fn reset_post_revokes_app_session_anchor_and_writes_family_marker() {
              VALUES ($1, $2, $3, $4, $5, $6, NOW() + INTERVAL '30 days')",
             &[
                 &anchor_id,
-                &app_id,
+                &app_id.as_str(),
                 &client_id,
-                &user.id,
+                &user.id.as_str(),
                 &b"enc-refresh".to_vec(),
                 &format!("rfam_{}", Uuid::new_v4().simple()),
             ],
@@ -846,7 +846,7 @@ async fn reset_post_revokes_app_session_anchor_and_writes_family_marker() {
         .query_one(
             "SELECT COUNT(*) FROM zeroship.app_session_anchors \
              WHERE global_user_id = $1 AND revoked_at IS NULL",
-            &[&user.id],
+            &[&user.id.as_str()],
         )
         .await
         .expect("count live anchors")
@@ -887,7 +887,7 @@ async fn reset_post_revokes_app_session_anchor_and_writes_family_marker() {
     let cred_version_after: i64 = pg
         .query_one(
             "SELECT credential_version FROM zeroship.users WHERE id = $1",
-            &[&user.id],
+            &[&user.id.as_str()],
         )
         .await
         .expect("read credential_version after")
@@ -907,7 +907,7 @@ async fn reset_post_revokes_app_session_anchor_and_writes_family_marker() {
     .ok();
     pg.execute(
         "DELETE FROM zeroship.app_session_anchors WHERE global_user_id = $1",
-        &[&user.id],
+        &[&user.id.as_str()],
     )
     .await
     .ok();
@@ -917,7 +917,7 @@ async fn reset_post_revokes_app_session_anchor_and_writes_family_marker() {
     )
     .await
     .ok();
-    pg.execute("DELETE FROM zeroship.apps WHERE id = $1", &[&app_id])
+    pg.execute("DELETE FROM zeroship.apps WHERE id = $1", &[&app_id.as_str()])
         .await
         .ok();
     pg.execute(
@@ -926,7 +926,7 @@ async fn reset_post_revokes_app_session_anchor_and_writes_family_marker() {
     )
     .await
     .ok();
-    pg.execute("DELETE FROM zeroship.audit_events WHERE actor_user_id = $1", &[&user.id])
+    pg.execute("DELETE FROM zeroship.audit_events WHERE actor_user_id = $1", &[&user.id.as_str()])
         .await
         .ok();
     pg.execute(
@@ -935,7 +935,7 @@ async fn reset_post_revokes_app_session_anchor_and_writes_family_marker() {
     )
     .await
     .ok();
-    pg.execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id])
+    pg.execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id.as_str()])
         .await
         .ok();
 }
@@ -999,7 +999,7 @@ async fn reset_still_applies_when_user_holds_a_refresh_token_for_the_same_app() 
         .await
         .expect("seed user");
     let old_hash = password::hash(OLD_PASSWORD).expect("hash old password");
-    users::update_password_hash(&client, user.id, &old_hash)
+    users::update_password_hash(&client, &user.id, &old_hash)
         .await
         .expect("set old password");
 
@@ -1020,7 +1020,7 @@ async fn reset_still_applies_when_user_holds_a_refresh_token_for_the_same_app() 
         .await
         .expect("insert oauth client");
 
-    let app_id = Uuid::new_v4();
+    let app_id = zeroship_core::app_id::AppId::mint();
     let plan_id = seed_test_plan(&client).await;
     // An app row needs a project, and a project needs an organization. Nothing
     // here asserts on authority, so the organization is left member-less.
@@ -1030,8 +1030,8 @@ async fn reset_still_applies_when_user_holds_a_refresh_token_for_the_same_app() 
             "INSERT INTO zeroship.apps (id, name, plan_id, project_id, organization_id) \
              SELECT $1, $2, $3, p.id, p.organization_id FROM zeroship.projects p WHERE p.id = $4",
             &[
-                &app_id,
-                &format!("refresh-app-{}", app_id.simple()),
+                &app_id.as_str(),
+                &format!("refresh-app-{}", Uuid::new_v4().simple()),
                 &plan_id,
                 &project_id,
             ],
@@ -1044,7 +1044,7 @@ async fn reset_still_applies_when_user_holds_a_refresh_token_for_the_same_app() 
     // collision is the production collision, not one this test invented.
     let pairwise_sub = zeroship_core::auth::derive_pairwise(
         &zeroship_core::crypto::derive_key("password-reset-test-salt"),
-        &user.id.to_string(),
+        user.id.as_str(),
         &format!("https://{client_id}.zeroship.localhost"),
     );
     client
@@ -1052,7 +1052,7 @@ async fn reset_still_applies_when_user_holds_a_refresh_token_for_the_same_app() 
             "INSERT INTO zeroship.app_user_identities \
                 (app_client_id, global_user_id, pairwise_sub) \
              VALUES ($1, $2, $3)",
-            &[&client_id, &user.id, &pairwise_sub],
+            &[&client_id, &user.id.as_str(), &pairwise_sub],
         )
         .await
         .expect("insert app_user_identity");
@@ -1064,7 +1064,7 @@ async fn reset_still_applies_when_user_holds_a_refresh_token_for_the_same_app() 
     let scopes = vec!["openid".to_string(), "offline_access".to_string()];
     let grant_id = zeroship_auth::session_store::upsert_grant(
         &client,
-        user.id,
+        &user.id,
         &zeroship_auth::session_store::Audience::App {
             client_id: client_id.clone(),
         },
@@ -1084,7 +1084,7 @@ async fn reset_still_applies_when_user_holds_a_refresh_token_for_the_same_app() 
                      NOW() + INTERVAL '7 days', NOW() + INTERVAL '30 days')",
             &[
                 &zeroship_core::typed_id::new_session_id(),
-                &user.id,
+                &user.id.as_str(),
                 &client_id,
                 &grant_id,
                 &Uuid::new_v4().as_bytes().to_vec(),
@@ -1163,7 +1163,7 @@ async fn reset_still_applies_when_user_holds_a_refresh_token_for_the_same_app() 
             ("DELETE FROM zeroship.app_session_anchors WHERE global_user_id = $1", ()),
             ("DELETE FROM zeroship.audit_events WHERE actor_user_id = $1", ()),
         ] {
-            pg.execute(sql, &[&user.id]).await.ok();
+            pg.execute(sql, &[&user.id.as_str()]).await.ok();
         }
         pg.execute(
             "DELETE FROM zeroship.app_user_identities WHERE app_client_id = $1",
@@ -1177,7 +1177,7 @@ async fn reset_still_applies_when_user_holds_a_refresh_token_for_the_same_app() 
         )
         .await
         .ok();
-        pg.execute("DELETE FROM zeroship.apps WHERE id = $1", &[&app_id]).await.ok();
+        pg.execute("DELETE FROM zeroship.apps WHERE id = $1", &[&app_id.as_str()]).await.ok();
         pg.execute(
             "DELETE FROM zeroship.oauth_clients WHERE client_id = $1",
             &[&client_id],
@@ -1190,7 +1190,7 @@ async fn reset_still_applies_when_user_holds_a_refresh_token_for_the_same_app() 
         )
         .await
         .ok();
-        pg.execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id])
+        pg.execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id.as_str()])
             .await
             .ok();
     };
@@ -1251,7 +1251,7 @@ async fn complete_binds_issue_time_user_not_current_email_owner() {
         .expect("seed user A");
     let a_old_hash = password::hash("victim-a old password phrase")
         .expect("hash A old");
-    users::update_password_hash(&client, user_a.id, &a_old_hash)
+    users::update_password_hash(&client, &user_a.id, &a_old_hash)
         .await
         .expect("set A old password");
 
@@ -1262,7 +1262,7 @@ async fn complete_binds_issue_time_user_not_current_email_owner() {
         .expect("seed user B");
     let b_old_hash = password::hash("attacker-b old password phrase")
         .expect("hash B old");
-    users::update_password_hash(&client, user_b.id, &b_old_hash)
+    users::update_password_hash(&client, &user_b.id, &b_old_hash)
         .await
         .expect("set B old password");
 
@@ -1278,14 +1278,14 @@ async fn complete_binds_issue_time_user_not_current_email_owner() {
     client
         .execute(
             "UPDATE zeroship.users SET email = $1::citext WHERE id = $2",
-            &[&format!("reset-l4-victim-freed-{suffix}@zeroship.test"), &user_a.id],
+            &[&format!("reset-l4-victim-freed-{suffix}@zeroship.test"), &user_a.id.as_str()],
         )
         .await
         .expect("free A's email");
     client
         .execute(
             "UPDATE zeroship.users SET email = $1::citext WHERE id = $2",
-            &[&email_a, &user_b.id],
+            &[&email_a, &user_b.id.as_str()],
         )
         .await
         .expect("reassign A's email to B");
@@ -1310,7 +1310,7 @@ async fn complete_binds_issue_time_user_not_current_email_owner() {
     let b_hash_now: String = client
         .query_one(
             "SELECT password_hash FROM zeroship.users WHERE id = $1",
-            &[&user_b.id],
+            &[&user_b.id.as_str()],
         )
         .await
         .expect("load B hash")
@@ -1331,7 +1331,7 @@ async fn complete_binds_issue_time_user_not_current_email_owner() {
     client
         .execute(
             "DELETE FROM zeroship.users WHERE id = ANY($1)",
-            &[&vec![user_a.id, user_b.id]],
+            &[&vec![user_a.id.as_str().to_string(), user_b.id.as_str().to_string()]],
         )
         .await
         .ok();
@@ -1383,7 +1383,7 @@ async fn new_issue_supersedes_previous_reset_token() {
         .await
         .ok();
     client
-        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id])
+        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id.as_str()])
         .await
         .ok();
 }

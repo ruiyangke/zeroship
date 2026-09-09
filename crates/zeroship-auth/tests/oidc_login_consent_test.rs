@@ -10,6 +10,8 @@ use ntex::web;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
+use zeroship_core::app_id::AppId;
+use zeroship_core::user_id::UserId;
 use zeroship_auth::headers::SecurityHeaders;
 use zeroship_auth::identity::{password, totp};
 use zeroship_auth::oidc::Issuer;
@@ -40,8 +42,8 @@ struct Fixture {
     db: Arc<Client>,
     cfg: Arc<zeroship_auth::config::AuthConfig>,
     client_id: String,
-    app_id: Uuid,
-    user_id: Uuid,
+    app_id: AppId,
+    user_id: UserId,
     email: String,
     http: cyper::Client,
 }
@@ -66,11 +68,19 @@ impl Fixture {
             .await
             .expect("publish active OP key");
 
-        let user_id = Uuid::new_v4();
-        let app_id = Uuid::new_v4();
-        let client_id = format!("oac_{}", zeroship_core::typed_id::uuid_to_base62(&app_id));
+        let user_id = UserId::mint();
+        let app_id = AppId::mint();
+        let client_id = format!(
+            "{}_{}",
+            zeroship_core::typed_id::APP_OAUTH_CLIENT_PREFIX,
+            app_id
+                .as_str()
+                .strip_prefix(AppId::PREFIX)
+                .and_then(|rest| rest.strip_prefix('_'))
+                .expect("a printed app id is <PREFIX>_<body>")
+        );
         let email = format!("p4-{}@zeroship.test", Uuid::new_v4().simple());
-        seed_user_client(&db, user_id, app_id, &client_id, &email).await;
+        seed_user_client(&db, &user_id, &app_id, &client_id, &email).await;
 
         let cfg_inner = test_auth_config_with(
             &db_url,
@@ -113,7 +123,7 @@ impl Fixture {
     }
 
     async fn cleanup(self) {
-        cleanup_seeded_rows(&self.db, self.user_id, self.app_id, &self.client_id).await;
+        cleanup_seeded_rows(&self.db, &self.user_id, &self.app_id, &self.client_id).await;
         drop(self.srv);
     }
 
@@ -121,7 +131,7 @@ impl Fixture {
         let session = session_store::create(
             &self.db,
             &session_store::CreateSession {
-                user_id: self.user_id,
+                user_id: &self.user_id,
                 auth_method: "pwd",
                 amr: vec!["pwd".to_string()],
                 acr: None,
@@ -148,7 +158,7 @@ impl Fixture {
                  VALUES ($1, $2, $3, NOW(), NOW()) \
                  ON CONFLICT (user_id, client_id) DO UPDATE \
                  SET granted_scopes = EXCLUDED.granted_scopes, updated_at = NOW()",
-                &[&self.user_id, &self.client_id, &scopes],
+                &[&self.user_id.as_str(), &self.client_id, &scopes],
             )
             .await
             .expect("insert grant");
@@ -848,8 +858,8 @@ async fn totp_login_preserves_native_return_to() {
     let key = totp::key_from_config(fx.cfg.settings.totp_enc_key.expose_str()).expect("totp key");
     totp_store::enroll(
         &fx.db,
-        fx.user_id,
-        &totp::encrypt_secret(&key, fx.user_id, &secret).expect("encrypt totp"),
+        &fx.user_id,
+        &totp::encrypt_secret(&key, &fx.user_id, &secret).expect("encrypt totp"),
         // First enrollment for a freshly created fixture user: nothing confirmed
         // to replace.
         false,
@@ -857,7 +867,7 @@ async fn totp_login_preserves_native_return_to() {
     .await
     .expect("enroll totp");
     let (_, hashes) = totp::generate_backup_codes().expect("backup codes");
-    totp_store::confirm(&fx.db, fx.user_id, &hashes)
+    totp_store::confirm(&fx.db, &fx.user_id, &hashes)
         .await
         .expect("confirm totp");
 
@@ -911,12 +921,12 @@ fn test_issuer() -> Issuer {
     Issuer::from_signing_key(&signing, [9u8; 32], ISSUER.to_string()).expect("issuer")
 }
 
-async fn seed_user_client(db: &Client, user_id: Uuid, app_id: Uuid, client_id: &str, email: &str) {
+async fn seed_user_client(db: &Client, user_id: &UserId, app_id: &AppId, client_id: &str, email: &str) {
     let phc = password::hash(PASSWORD).expect("password hash");
     db.execute(
         "INSERT INTO zeroship.users (id, email, email_verified_at, name, password_hash) \
          VALUES ($1, $2::citext, NOW(), 'P4 User', $3)",
-        &[&user_id, &email, &phc],
+        &[&user_id.as_str(), &email, &phc],
     )
     .await
     .expect("seed user");
@@ -936,8 +946,8 @@ async fn seed_user_client(db: &Client, user_id: Uuid, app_id: Uuid, client_id: &
         "INSERT INTO zeroship.apps (id, name, project_id, organization_id) \
          SELECT $1, $2, p.id, p.organization_id FROM zeroship.projects p WHERE p.id = $3",
         &[
-            &app_id,
-            &format!("p4-native-app-{}", app_id.simple()),
+            &app_id.as_str(),
+            &format!("p4-native-app-{}", Uuid::new_v4().simple()),
             &project_id
         ],
     )
@@ -960,14 +970,14 @@ async fn seed_user_client(db: &Client, user_id: Uuid, app_id: Uuid, client_id: &
     db.execute(
         "INSERT INTO zeroship.app_oauth_clients (app_id, client_id, sector_identifier) \
          VALUES ($1, $2, $3)",
-        &[&app_id, &client_id, &SECTOR],
+        &[&app_id.as_str(), &client_id, &SECTOR],
     )
     .await
     .expect("seed app oauth client");
     db.execute(
         "INSERT INTO zeroship.app_scope_defs (app_id, scope_id, label, description) \
          VALUES ($1, 'read:notes', 'Read notes', 'Read your notes')",
-        &[&app_id],
+        &[&app_id.as_str()],
     )
     .await
     .expect("seed app scope def");
@@ -981,15 +991,15 @@ async fn seed_user_client(db: &Client, user_id: Uuid, app_id: Uuid, client_id: &
          VALUES ($1, $2, $3)",
         &[
             &client_id,
-            &user_id,
-            &test_issuer().pairwise_subject(&user_id.to_string(), SECTOR),
+            &user_id.as_str(),
+            &test_issuer().pairwise_subject(user_id.as_str(), SECTOR),
         ],
     )
     .await
     .expect("seed app identity");
 }
 
-async fn cleanup_seeded_rows(db: &Client, user_id: Uuid, app_id: Uuid, client_id: &str) {
+async fn cleanup_seeded_rows(db: &Client, user_id: &UserId, app_id: &AppId, client_id: &str) {
     let _ = db
         .execute("DELETE FROM zeroship.oauth_authorization_codes WHERE client_id = $1", &[&client_id])
         .await;
@@ -1000,7 +1010,7 @@ async fn cleanup_seeded_rows(db: &Client, user_id: Uuid, app_id: Uuid, client_id
         .execute("DELETE FROM zeroship.app_user_identities WHERE app_client_id = $1", &[&client_id])
         .await;
     let _ = db
-        .execute("DELETE FROM zeroship.idp_sessions WHERE user_id = $1", &[&user_id])
+        .execute("DELETE FROM zeroship.idp_sessions WHERE user_id = $1", &[&user_id.as_str()])
         .await;
     let _ = db
         .execute("DELETE FROM zeroship.app_oauth_clients WHERE client_id = $1", &[&client_id])
@@ -1009,10 +1019,10 @@ async fn cleanup_seeded_rows(db: &Client, user_id: Uuid, app_id: Uuid, client_id
         .execute("DELETE FROM zeroship.oauth_clients WHERE client_id = $1", &[&client_id])
         .await;
     let _ = db
-        .execute("DELETE FROM zeroship.apps WHERE id = $1", &[&app_id])
+        .execute("DELETE FROM zeroship.apps WHERE id = $1", &[&app_id.as_str()])
         .await;
     let _ = db
-        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user_id])
+        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user_id.as_str()])
         .await;
 }
 
@@ -1116,7 +1126,7 @@ async fn assert_grant_and_relay_alias(fx: &Fixture) {
         .query_one(
             "SELECT granted_scopes FROM zeroship.oauth_grants \
              WHERE user_id = $1 AND client_id = $2",
-            &[&fx.user_id, &fx.client_id],
+            &[&fx.user_id.as_str(), &fx.client_id],
         )
         .await
         .expect("grant row");
@@ -1128,7 +1138,7 @@ async fn assert_grant_and_relay_alias(fx: &Fixture) {
         .query_one(
             "SELECT relay_email FROM zeroship.app_user_identities \
              WHERE app_client_id = $1 AND global_user_id = $2",
-            &[&fx.client_id, &fx.user_id],
+            &[&fx.client_id, &fx.user_id.as_str()],
         )
         .await
         .expect("identity row")

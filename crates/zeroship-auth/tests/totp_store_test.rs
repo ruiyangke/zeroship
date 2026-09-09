@@ -9,6 +9,7 @@
 
 use compio_postgres::{connect, Client, NoTls};
 use uuid::Uuid;
+use zeroship_core::user_id::UserId;
 
 use zeroship_auth::identity::totp;
 use zeroship_auth::store::{totp as totp_store, users};
@@ -31,16 +32,16 @@ fn key() -> [u8; 32] {
 }
 
 #[allow(clippy::future_not_send)]
-async fn cleanup(db: &Client, ids: &[Uuid]) {
+async fn cleanup(db: &Client, ids: &[&UserId]) {
     for id in ids {
         let _ = db
-            .execute("DELETE FROM zeroship.totp_backup_codes WHERE user_id = $1", &[id])
+            .execute("DELETE FROM zeroship.totp_backup_codes WHERE user_id = $1", &[&id.as_str()])
             .await;
         let _ = db
-            .execute("DELETE FROM zeroship.totp_credentials WHERE user_id = $1", &[id])
+            .execute("DELETE FROM zeroship.totp_credentials WHERE user_id = $1", &[&id.as_str()])
             .await;
         let _ = db
-            .execute("DELETE FROM zeroship.users WHERE id = $1", &[id])
+            .execute("DELETE FROM zeroship.users WHERE id = $1", &[&id.as_str()])
             .await;
     }
 }
@@ -57,14 +58,14 @@ async fn enroll_stores_encrypted_and_unconfirmed() {
         .unwrap();
 
     let secret = totp::generate_secret();
-    let ct = totp::encrypt_secret(&key(), user.id, &secret).unwrap();
-    totp_store::enroll(&db, user.id, &ct, false).await.expect("enroll");
+    let ct = totp::encrypt_secret(&key(), &user.id, &secret).unwrap();
+    totp_store::enroll(&db, &user.id, &ct, false).await.expect("enroll");
 
     // Pending: row exists but confirmed_at is NULL, so it does NOT gate login.
-    let cred = totp_store::find(&db, user.id).await.unwrap().expect("row exists");
+    let cred = totp_store::find(&db, &user.id).await.unwrap().expect("row exists");
     assert!(cred.confirmed_at.is_none(), "fresh enrollment is unconfirmed");
     assert!(
-        !totp_store::is_enabled(&db, user.id).await.unwrap(),
+        !totp_store::is_enabled(&db, &user.id).await.unwrap(),
         "an unconfirmed credential must not be enabled"
     );
 
@@ -72,7 +73,7 @@ async fn enroll_stores_encrypted_and_unconfirmed() {
     let stored = db
         .query_one(
             "SELECT encrypted_secret FROM zeroship.totp_credentials WHERE user_id = $1",
-            &[&user.id],
+            &[&user.id.as_str()],
         )
         .await
         .unwrap();
@@ -82,9 +83,9 @@ async fn enroll_stores_encrypted_and_unconfirmed() {
         "plaintext secret must not be stored"
     );
     // ...but it decrypts back to the original secret (bound to this user).
-    assert_eq!(totp::decrypt_secret(&key(), user.id, &blob).unwrap(), secret);
+    assert_eq!(totp::decrypt_secret(&key(), &user.id, &blob).unwrap(), secret);
 
-    cleanup(&db, &[user.id]).await;
+    cleanup(&db, &[&user.id]).await;
 }
 
 #[compio::test]
@@ -98,27 +99,27 @@ async fn confirm_activates_and_issues_backup_codes() {
         .unwrap();
 
     let secret = totp::generate_secret();
-    let ct = totp::encrypt_secret(&key(), user.id, &secret).unwrap();
-    totp_store::enroll(&db, user.id, &ct, false).await.unwrap();
+    let ct = totp::encrypt_secret(&key(), &user.id, &secret).unwrap();
+    totp_store::enroll(&db, &user.id, &ct, false).await.unwrap();
 
     let (plain, hashes) = totp::generate_backup_codes().unwrap();
-    let confirmed = totp_store::confirm(&db, user.id, &hashes).await.expect("confirm");
+    let confirmed = totp_store::confirm(&db, &user.id, &hashes).await.expect("confirm");
     assert!(confirmed, "confirm must succeed for a pending credential");
 
     // Now active.
-    assert!(totp_store::is_enabled(&db, user.id).await.unwrap(), "confirmed → enabled");
-    let cred = totp_store::find_confirmed(&db, user.id).await.unwrap().expect("confirmed");
+    assert!(totp_store::is_enabled(&db, &user.id).await.unwrap(), "confirmed → enabled");
+    let cred = totp_store::find_confirmed(&db, &user.id).await.unwrap().expect("confirmed");
     assert!(cred.confirmed_at.is_some());
 
     // Backup codes landed (count, all unused, hashes not plaintext).
-    let unused = totp_store::unused_backup_codes(&db, user.id).await.unwrap();
+    let unused = totp_store::unused_backup_codes(&db, &user.id).await.unwrap();
     assert_eq!(unused.len(), totp::BACKUP_CODE_COUNT, "all codes minted, all unused");
     for (code, row) in plain.iter().zip(&unused) {
         assert!(row.code_hash.starts_with("$argon2"), "stored as PHC hash");
         assert!(!row.code_hash.contains(code), "hash must not be the plaintext code");
     }
 
-    cleanup(&db, &[user.id]).await;
+    cleanup(&db, &[&user.id]).await;
 }
 
 #[compio::test]
@@ -132,12 +133,12 @@ async fn confirm_without_enrollment_is_a_noop() {
         .unwrap();
 
     let (_, hashes) = totp::generate_backup_codes().unwrap();
-    let confirmed = totp_store::confirm(&db, user.id, &hashes).await.expect("confirm");
+    let confirmed = totp_store::confirm(&db, &user.id, &hashes).await.expect("confirm");
     assert!(!confirmed, "confirm with no pending credential writes nothing");
-    let unused = totp_store::unused_backup_codes(&db, user.id).await.unwrap();
+    let unused = totp_store::unused_backup_codes(&db, &user.id).await.unwrap();
     assert!(unused.is_empty(), "no codes inserted without a credential");
 
-    cleanup(&db, &[user.id]).await;
+    cleanup(&db, &[&user.id]).await;
 }
 
 #[compio::test]
@@ -151,12 +152,12 @@ async fn current_code_verifies_against_stored_secret() {
         .unwrap();
 
     let secret = totp::generate_secret();
-    let ct = totp::encrypt_secret(&key(), user.id, &secret).unwrap();
-    totp_store::enroll(&db, user.id, &ct, false).await.unwrap();
+    let ct = totp::encrypt_secret(&key(), &user.id, &secret).unwrap();
+    totp_store::enroll(&db, &user.id, &ct, false).await.unwrap();
 
     // Round-trip the stored ciphertext, then verify a fresh current code.
-    let cred = totp_store::find(&db, user.id).await.unwrap().unwrap();
-    let recovered = totp::decrypt_secret(&key(), user.id, &cred.encrypted_secret).unwrap();
+    let cred = totp_store::find(&db, &user.id).await.unwrap().unwrap();
+    let recovered = totp::decrypt_secret(&key(), &user.id, &cred.encrypted_secret).unwrap();
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -165,7 +166,7 @@ async fn current_code_verifies_against_stored_secret() {
     assert!(totp::verify_code(&recovered, &code), "current code verifies");
     assert!(!totp::verify_code(&recovered, "000001"), "an arbitrary wrong code is rejected");
 
-    cleanup(&db, &[user.id]).await;
+    cleanup(&db, &[&user.id]).await;
 }
 
 #[compio::test]
@@ -179,14 +180,14 @@ async fn backup_code_works_once_then_is_rejected() {
         .unwrap();
 
     let secret = totp::generate_secret();
-    let ct = totp::encrypt_secret(&key(), user.id, &secret).unwrap();
-    totp_store::enroll(&db, user.id, &ct, false).await.unwrap();
+    let ct = totp::encrypt_secret(&key(), &user.id, &secret).unwrap();
+    totp_store::enroll(&db, &user.id, &ct, false).await.unwrap();
     let (plain, hashes) = totp::generate_backup_codes().unwrap();
-    totp_store::confirm(&db, user.id, &hashes).await.unwrap();
+    totp_store::confirm(&db, &user.id, &hashes).await.unwrap();
 
     // Redeem the first code: find the matching unused row, verify, mark used.
     let target = &plain[0];
-    let unused = totp_store::unused_backup_codes(&db, user.id).await.unwrap();
+    let unused = totp_store::unused_backup_codes(&db, &user.id).await.unwrap();
     let mut matched_id = None;
     for row in &unused {
         if totp::verify_backup_code(target, &row.code_hash).unwrap() {
@@ -203,11 +204,11 @@ async fn backup_code_works_once_then_is_rejected() {
         "a used backup code can't be redeemed again"
     );
     // And it no longer appears in the unused set.
-    let after = totp_store::unused_backup_codes(&db, user.id).await.unwrap();
+    let after = totp_store::unused_backup_codes(&db, &user.id).await.unwrap();
     assert_eq!(after.len(), totp::BACKUP_CODE_COUNT - 1, "one code consumed");
     assert!(after.iter().all(|r| r.id != id), "the used code is gone from unused");
 
-    cleanup(&db, &[user.id]).await;
+    cleanup(&db, &[&user.id]).await;
 }
 
 #[compio::test]
@@ -221,23 +222,23 @@ async fn disable_removes_credential_and_codes() {
         .unwrap();
 
     let secret = totp::generate_secret();
-    let ct = totp::encrypt_secret(&key(), user.id, &secret).unwrap();
-    totp_store::enroll(&db, user.id, &ct, false).await.unwrap();
+    let ct = totp::encrypt_secret(&key(), &user.id, &secret).unwrap();
+    totp_store::enroll(&db, &user.id, &ct, false).await.unwrap();
     let (_, hashes) = totp::generate_backup_codes().unwrap();
-    totp_store::confirm(&db, user.id, &hashes).await.unwrap();
-    assert!(totp_store::is_enabled(&db, user.id).await.unwrap());
+    totp_store::confirm(&db, &user.id, &hashes).await.unwrap();
+    assert!(totp_store::is_enabled(&db, &user.id).await.unwrap());
 
-    let removed = totp_store::disable(&db, user.id).await.expect("disable");
+    let removed = totp_store::disable(&db, &user.id).await.expect("disable");
     assert!(removed, "disable removes an existing credential");
-    assert!(totp_store::find(&db, user.id).await.unwrap().is_none(), "credential gone");
+    assert!(totp_store::find(&db, &user.id).await.unwrap().is_none(), "credential gone");
     assert!(
-        totp_store::unused_backup_codes(&db, user.id).await.unwrap().is_empty(),
+        totp_store::unused_backup_codes(&db, &user.id).await.unwrap().is_empty(),
         "backup codes gone"
     );
     // Idempotent: disabling again is a clean no-op.
-    assert!(!totp_store::disable(&db, user.id).await.unwrap(), "second disable is a no-op");
+    assert!(!totp_store::disable(&db, &user.id).await.unwrap(), "second disable is a no-op");
 
-    cleanup(&db, &[user.id]).await;
+    cleanup(&db, &[&user.id]).await;
 }
 
 #[compio::test]
@@ -251,12 +252,12 @@ async fn re_enroll_resets_to_pending() {
         .unwrap();
 
     let s1 = totp::generate_secret();
-    totp_store::enroll(&db, user.id, &totp::encrypt_secret(&key(), user.id, &s1).unwrap(), false)
+    totp_store::enroll(&db, &user.id, &totp::encrypt_secret(&key(), &user.id, &s1).unwrap(), false)
         .await
         .unwrap();
     let (_, hashes) = totp::generate_backup_codes().unwrap();
-    totp_store::confirm(&db, user.id, &hashes).await.unwrap();
-    assert!(totp_store::is_enabled(&db, user.id).await.unwrap());
+    totp_store::confirm(&db, &user.id, &hashes).await.unwrap();
+    assert!(totp_store::is_enabled(&db, &user.id).await.unwrap());
 
     // An UNAUTHORISED re-enroll over the confirmed credential is refused: it
     // would reset confirmed_at to NULL, which is 2FA turned off. The store fails
@@ -264,17 +265,17 @@ async fn re_enroll_resets_to_pending() {
     // account by accident.
     let s2 = totp::generate_secret();
     assert_ne!(s1, s2);
-    let refused = totp_store::enroll(&db, user.id, &totp::encrypt_secret(&key(), user.id, &s2).unwrap(), false)
+    let refused = totp_store::enroll(&db, &user.id, &totp::encrypt_secret(&key(), &user.id, &s2).unwrap(), false)
         .await
         .unwrap();
     assert!(!refused, "re-enroll over a confirmed credential is refused without replace_confirmed");
     assert!(
-        totp_store::is_enabled(&db, user.id).await.unwrap(),
+        totp_store::is_enabled(&db, &user.id).await.unwrap(),
         "a refused re-enroll leaves the credential confirmed"
     );
-    let cred = totp_store::find(&db, user.id).await.unwrap().unwrap();
+    let cred = totp_store::find(&db, &user.id).await.unwrap().unwrap();
     assert_eq!(
-        totp::decrypt_secret(&key(), user.id, &cred.encrypted_secret).unwrap(),
+        totp::decrypt_secret(&key(), &user.id, &cred.encrypted_secret).unwrap(),
         s1,
         "a refused re-enroll leaves the original secret in place"
     );
@@ -282,18 +283,18 @@ async fn re_enroll_resets_to_pending() {
     // With replace_confirmed (the caller attesting it re-authenticated the user)
     // the re-enroll lands: new secret, reset to PENDING, login no longer gated
     // until a fresh confirm.
-    let written = totp_store::enroll(&db, user.id, &totp::encrypt_secret(&key(), user.id, &s2).unwrap(), true)
+    let written = totp_store::enroll(&db, &user.id, &totp::encrypt_secret(&key(), &user.id, &s2).unwrap(), true)
         .await
         .unwrap();
     assert!(written, "an authorised re-enroll is written");
     assert!(
-        !totp_store::is_enabled(&db, user.id).await.unwrap(),
+        !totp_store::is_enabled(&db, &user.id).await.unwrap(),
         "re-enroll resets to pending (unconfirmed)"
     );
-    let cred = totp_store::find(&db, user.id).await.unwrap().unwrap();
-    assert_eq!(totp::decrypt_secret(&key(), user.id, &cred.encrypted_secret).unwrap(), s2);
+    let cred = totp_store::find(&db, &user.id).await.unwrap().unwrap();
+    assert_eq!(totp::decrypt_secret(&key(), &user.id, &cred.encrypted_secret).unwrap(), s2);
 
-    cleanup(&db, &[user.id]).await;
+    cleanup(&db, &[&user.id]).await;
 }
 
 #[compio::test]
@@ -306,19 +307,19 @@ async fn credential_cascades_on_user_delete() {
         .await
         .unwrap();
     let secret = totp::generate_secret();
-    totp_store::enroll(&db, user.id, &totp::encrypt_secret(&key(), user.id, &secret).unwrap(), false)
+    totp_store::enroll(&db, &user.id, &totp::encrypt_secret(&key(), &user.id, &secret).unwrap(), false)
         .await
         .unwrap();
     let (_, hashes) = totp::generate_backup_codes().unwrap();
-    totp_store::confirm(&db, user.id, &hashes).await.unwrap();
+    totp_store::confirm(&db, &user.id, &hashes).await.unwrap();
 
     // Hard-delete the user → CASCADE tears down credential + codes (ISS-11/ISS-12).
-    db.execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id])
+    db.execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id.as_str()])
         .await
         .unwrap();
-    assert!(totp_store::find(&db, user.id).await.unwrap().is_none(), "credential cascaded");
+    assert!(totp_store::find(&db, &user.id).await.unwrap().is_none(), "credential cascaded");
     assert!(
-        totp_store::unused_backup_codes(&db, user.id).await.unwrap().is_empty(),
+        totp_store::unused_backup_codes(&db, &user.id).await.unwrap().is_empty(),
         "codes cascaded"
     );
 }

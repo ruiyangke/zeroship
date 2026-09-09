@@ -885,7 +885,7 @@ async fn request_alias_auto_revoke(
     target: &relay::AliasTarget,
 ) -> AutoRevokeOutcome {
     // (1) Disable our OWN forwarding immediately — the protection we can apply.
-    let outcome = match relay::revoke_local_alias(db, &target.app_client_id, target.global_user_id)
+    let outcome = match relay::revoke_local_alias(db, &target.app_client_id, &target.global_user_id)
         .await
     {
         Ok(n) if n > 0 => AutoRevokeOutcome::LocalRevokedCrossServicePending,
@@ -894,7 +894,7 @@ async fn request_alias_auto_revoke(
             tracing::error!(
                 error = %e,
                 app_client_id = %target.app_client_id,
-                global_user_id = %target.global_user_id,
+                global_user_id = target.global_user_id.as_str(),
                 "relay auto-revoke: LOCAL alias disable failed"
             );
             AutoRevokeOutcome::Failed
@@ -905,7 +905,7 @@ async fn request_alias_auto_revoke(
     // ran. Surface the gap at WARN so it is observable.
     tracing::warn!(
         app_client_id = %target.app_client_id,
-        global_user_id = %target.global_user_id,
+        global_user_id = target.global_user_id.as_str(),
         local_outcome = %outcome.audit_outcome(),
         "relay auto-revoke: local forwarding disabled; cross-service grant revoke \
          is PENDING (admin-authenticated control endpoint not implemented)"

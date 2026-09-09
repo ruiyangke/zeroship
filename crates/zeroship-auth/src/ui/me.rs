@@ -74,7 +74,7 @@ pub async fn get(
         return redirect_to_login();
     };
 
-    let idents = identities::list_for_user(db.as_ref(), user.id)
+    let idents = identities::list_for_user(db.as_ref(), &user.id)
         .await
         .unwrap_or_default();
 
@@ -132,7 +132,7 @@ pub async fn unlink(
     };
 
     // 3. Unlink with the orphan-guard enforced atomically in SQL.
-    let result = match identities::unlink_preserving_credential(db.as_ref(), user.id, &provider)
+    let result = match identities::unlink_preserving_credential(db.as_ref(), &user.id, &provider)
         .await
     {
         Ok(result) => result,
@@ -142,7 +142,7 @@ pub async fn unlink(
         }
     };
 
-    let idents = match identities::list_for_user(db.as_ref(), user.id).await {
+    let idents = match identities::list_for_user(db.as_ref(), &user.id).await {
         Ok(v) => v,
         Err(e) => {
             tracing::error!(error = %e, "identities::list_for_user failed");
@@ -229,7 +229,7 @@ async fn resolve_user(
     let session_id = session_cookie::parse_cookie(cookie_header)?;
 
     let session = sessions::validate(db, session_id).await.ok().flatten()?;
-    users::find_by_id(db, &session.user_id.to_string())
+    users::find_by_id(db, session.user_id.as_str())
         .await
         .ok()
         .flatten()

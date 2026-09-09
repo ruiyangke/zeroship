@@ -117,7 +117,7 @@ async fn token_sweep_deletes_expired_rows_after_grace_and_keeps_fresh_rows() {
                 ($4, $2, $3::citext, NOW() + INTERVAL '1 hour', NULL)",
             &[
                 &stale_verify_hash.as_slice(),
-                &user.id,
+                &user.id.as_str(),
                 &verify_email,
                 &fresh_verify_hash.as_slice(),
             ],
@@ -157,12 +157,12 @@ async fn token_sweep_deletes_expired_rows_after_grace_and_keeps_fresh_rows() {
         "the stale magic completion should go and the fresh one remain"
     );
     assert_eq!(
-        count_email_verifications(&client, user.id).await,
+        count_email_verifications(&client, &user.id).await,
         1,
         "the stale email verification should go and the fresh one remain"
     );
 
-    cleanup(&client, &login_email, &reset_email, &tag, user.id).await;
+    cleanup(&client, &login_email, &reset_email, &tag, &user.id).await;
 }
 
 fn token_hash(tag: &str, label: &str) -> Vec<u8> {
@@ -194,13 +194,13 @@ async fn count_magic_completions(client: &compio_postgres::Client, tag: &str) ->
         .get("count")
 }
 
-async fn count_email_verifications(client: &compio_postgres::Client, user_id: uuid::Uuid) -> i64 {
+async fn count_email_verifications(client: &compio_postgres::Client, user_id: &zeroship_core::user_id::UserId) -> i64 {
     client
         .query_one(
             "SELECT COUNT(*)::bigint AS count \
              FROM zeroship.email_verifications \
              WHERE user_id = $1",
-            &[&user_id],
+            &[&user_id.as_str()],
         )
         .await
         .expect("count email_verifications")
@@ -212,7 +212,7 @@ async fn cleanup(
     login_email: &str,
     reset_email: &str,
     tag: &str,
-    user_id: uuid::Uuid,
+    user_id: &zeroship_core::user_id::UserId,
 ) {
     client
         .execute(
@@ -231,12 +231,12 @@ async fn cleanup(
     client
         .execute(
             "DELETE FROM zeroship.email_verifications WHERE user_id = $1",
-            &[&user_id],
+            &[&user_id.as_str()],
         )
         .await
         .ok();
     client
-        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user_id])
+        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user_id.as_str()])
         .await
         .ok();
 }
