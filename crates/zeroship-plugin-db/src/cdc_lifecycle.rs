@@ -510,8 +510,8 @@ pub async fn shutdown_app(app_id: &str) {
     let _ = receiver.recv_async().await;
 }
 
-#[cfg(any(test, feature = "test-helpers"))]
-pub fn subscriber_count_for_tests(app_id: &str) -> usize {
+#[cfg(test)]
+fn subscriber_count_for_tests(app_id: &str) -> usize {
     manager().apps.get(app_id).map_or(0, |app| app.subscribers)
 }
 
