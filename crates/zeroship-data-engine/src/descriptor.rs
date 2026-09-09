@@ -61,7 +61,7 @@
 
 use std::sync::Arc;
 
-use serde_json::Value;
+use zeroship_data_query_builder::value::Value;
 
 use zeroship_data_core::binding::DbBinding;
 use zeroship_data_core::error::DbError;
@@ -86,7 +86,7 @@ pub fn declared_collections(binding: &DbBinding) -> Vec<(String, Arc<Value>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use zeroship_data_query_builder::value;
 
     #[test]
     fn an_undeclared_collection_is_a_typed_error_not_a_missing_schema() {
@@ -126,7 +126,7 @@ mod tests {
             c.insert_one(
                 &pinned,
                 "secrets",
-                json!({ "marker": { "type": "string" } }),
+                value!({ "marker": { "type": "string" } }),
             );
         });
         assert!(
@@ -137,12 +137,12 @@ mod tests {
             c.insert_one(
                 &current,
                 "secrets",
-                json!({ "other": { "type": "string" } }),
+                value!({ "other": { "type": "string" } }),
             );
         });
         assert_eq!(
             collection_schema(&pinned, "secrets").unwrap().as_ref(),
-            &json!({ "marker": { "type": "string" } }),
+            &value!({ "marker": { "type": "string" } }),
             "installing the current deploy redirected the pinned binding",
         );
     }

@@ -89,7 +89,8 @@
 
 use std::rc::Rc;
 
-use serde_json::{Map, Value};
+use zeroship_data_query_builder::value::Map;
+use zeroship_data_query_builder::value::Value;
 use zeroship_migrate_policy::{AssignmentEvent, AssignmentGenerator};
 
 use crate::system_shape_charter::AssignmentPlan;
@@ -303,7 +304,7 @@ fn inject_into_object(
             // still not the creator's to supply. Drop it and let the row be
             // born without it - `deleted_at` is the live instance, and a row
             // born soft-deleted is invisible to every read.
-            obj.remove(name);
+            obj.shift_remove(name);
             continue;
         }
 
@@ -338,7 +339,7 @@ fn inject_into_object(
             AssignmentGenerator::Now
             | AssignmentGenerator::Increment(_)
             | AssignmentGenerator::Identity => {
-                obj.remove(name);
+                obj.shift_remove(name);
             }
         }
     }
@@ -440,7 +441,7 @@ fn refuse_and_strip(
         }
     }
     for name in reassigned {
-        obj.remove(name);
+        obj.shift_remove(name);
     }
     Ok(())
 }
@@ -551,7 +552,7 @@ pub fn should_filter_soft_deleted(include_deleted: bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use zeroship_data_query_builder::value;
     use zeroship_migrate_policy::{PolicyRegistry, RootCharter};
 
     /// The fixture schema the INSERT builders take now that they refuse a `&str`.
@@ -590,7 +591,7 @@ mod tests {
             "  { name = \"id\", type = \"text\", nullable = false, assign = { by = \"typedId\", on = \"insert\" } },\n\
              \x20 { name = \"tenant_id\", type = \"text\", nullable = true, assign = { by = \"actor\", on = \"insert\" } },",
         );
-        let mut doc = json!({ "title": "hi" });
+        let mut doc = value!({ "title": "hi" });
         apply_system_fields_on_insert(
             &mut doc,
             &schema_without_id_prefix(),
@@ -620,7 +621,7 @@ mod tests {
         stamp_charter(
             "  { name = \"id\", type = \"integer\", nullable = false, assign = { by = \"identity\", on = \"insert\" } },",
         );
-        let mut doc = json!({ "title": "hi" });
+        let mut doc = value!({ "title": "hi" });
         apply_system_fields_on_insert(&mut doc, &schema_without_id_prefix(), "posts", None)
             .expect("an identity id must not be refused");
         assert!(
@@ -635,7 +636,7 @@ mod tests {
     #[test]
     fn insert_removes_a_supplied_created_at_and_version() {
         crate::reset_engine_for_tests();
-        let mut doc = json!({
+        let mut doc = value!({
             "title": "hi",
             "version": 5,
             "created_at": 1_700_000_000_000_i64,
@@ -661,7 +662,7 @@ mod tests {
     #[test]
     fn insert_removes_a_supplied_deleted_at() {
         crate::reset_engine_for_tests();
-        let mut doc = json!({ "title": "hi", "deleted_at": 1_700_000_000_000_i64 });
+        let mut doc = value!({ "title": "hi", "deleted_at": 1_700_000_000_000_i64 });
         apply_system_fields_on_insert(&mut doc, &schema_without_id_prefix(), "posts", None)
             .expect("derived prefix must be accepted");
         assert!(
@@ -675,7 +676,7 @@ mod tests {
     #[test]
     fn insert_overwrites_a_supplied_created_by_with_the_bound_actor() {
         crate::reset_engine_for_tests();
-        let mut doc = json!({ "title": "hi", "created_by": "usr_SOMEONE_ELSE" });
+        let mut doc = value!({ "title": "hi", "created_by": "usr_SOMEONE_ELSE" });
         apply_system_fields_on_insert(
             &mut doc,
             &schema_without_id_prefix(),
@@ -695,7 +696,7 @@ mod tests {
     #[test]
     fn insert_overwrites_a_supplied_created_by_on_an_anonymous_write() {
         crate::reset_engine_for_tests();
-        let mut doc = json!({ "title": "hi", "created_by": "usr_SOMEONE_ELSE" });
+        let mut doc = value!({ "title": "hi", "created_by": "usr_SOMEONE_ELSE" });
         apply_system_fields_on_insert(&mut doc, &schema_without_id_prefix(), "posts", None)
             .expect("derived prefix must be accepted");
         assert_eq!(
@@ -712,7 +713,7 @@ mod tests {
     #[test]
     fn insert_stamps_null_actor_columns_when_anonymous() {
         crate::reset_engine_for_tests();
-        let mut doc = json!({ "title": "hi" });
+        let mut doc = value!({ "title": "hi" });
         apply_system_fields_on_insert(&mut doc, &schema_without_id_prefix(), "posts", None)
             .expect("derived prefix must be accepted");
         assert_eq!(doc.get("created_by"), Some(&Value::Null), "doc: {doc}");
@@ -731,7 +732,7 @@ mod tests {
     #[test]
     fn insert_many_keeps_a_supplied_value_out_of_the_batch_union() {
         crate::reset_engine_for_tests();
-        let mut docs = json!([
+        let mut docs = value!([
             { "title": "a", "created_at": 1_700_000_000_000_i64 },
             { "title": "b" },
         ]);
@@ -809,7 +810,7 @@ mod tests {
     fn insert_refuses_reserved_derived_prefix() {
         // The same validator that fences creator-declared prefixes also
         // fences a collection name whose derived prefix is reserved.
-        let mut doc = json!({ "title": "hi" });
+        let mut doc = value!({ "title": "hi" });
         let result =
             apply_system_fields_on_insert(&mut doc, &schema_without_id_prefix(), "usrs", None);
 
@@ -838,7 +839,7 @@ mod tests {
                 so a check keyed on `id` being present cannot tell a creator's value from one an \
                 earlier call minted. Move the refusal to the caller boundary, then un-ignore."]
     fn insert_refuses_a_creator_supplied_id() {
-        let mut doc = json!({ "title": "hi", "id": "usr_034HQyaJ0C11GCzHMMrWwz" });
+        let mut doc = value!({ "title": "hi", "id": "usr_034HQyaJ0C11GCzHMMrWwz" });
         let result =
             apply_system_fields_on_insert(&mut doc, &schema_without_id_prefix(), "posts", None);
 
@@ -854,7 +855,7 @@ mod tests {
     /// so prove an ordinary insert still mints rather than erroring.
     #[test]
     fn insert_without_an_id_still_mints_one() {
-        let mut doc = json!({ "title": "hi" });
+        let mut doc = value!({ "title": "hi" });
         apply_system_fields_on_insert(&mut doc, &schema_without_id_prefix(), "posts", None)
             .expect("an insert that supplies no id must be accepted");
 
@@ -873,12 +874,12 @@ mod tests {
     /// about derivation states "no declared prefix" as data rather than by
     /// leaving a store empty.
     fn schema_without_id_prefix() -> Value {
-        json!({ "title": { "type": "string" } })
+        value!({ "title": { "type": "string" } })
     }
 
     /// A descriptor entry declaring `id: t.id("blog")`.
     fn schema_with_blog_id_prefix() -> Value {
-        json!({
+        value!({
             "id": { "type": "id", "idPrefix": "blog" },
             "title": { "type": "string" },
         })
@@ -907,11 +908,11 @@ mod tests {
         stamp_charter(
             "  { name = \"row_key\", type = \"text\", nullable = false, assign = { by = \"typedId\", on = \"insert\" } },",
         );
-        let schema = json!({
+        let schema = value!({
             "row_key": { "type": "id", "idPrefix": "blog" },
             "title": { "type": "string" },
         });
-        let mut doc = json!({ "title": "hi" });
+        let mut doc = value!({ "title": "hi" });
         apply_system_fields_on_insert(&mut doc, &schema, "posts", None)
             .expect("the charter's typed-id column must mint");
         let minted = doc
@@ -930,7 +931,7 @@ mod tests {
         // The auto-mint pass honours the declared `idPrefix`
         // from the descriptor entry: a `posts` collection declaring
         // `id: t.id("blog")` mints `blog_...` ids, not `post_...`.
-        let mut doc = json!({ "title": "hi" });
+        let mut doc = value!({ "title": "hi" });
         apply_system_fields_on_insert(&mut doc, &schema_with_blog_id_prefix(), "posts", None)
             .expect("ordinary declared prefix must be accepted");
         let id = doc
@@ -948,7 +949,7 @@ mod tests {
 
     #[test]
     fn insert_auto_mints_id_when_absent() {
-        let mut doc = json!({ "title": "hi" });
+        let mut doc = value!({ "title": "hi" });
         apply_system_fields_on_insert(&mut doc, &schema_without_id_prefix(), "posts", None)
             .expect("derived prefix must be accepted");
         let id = doc
@@ -965,7 +966,7 @@ mod tests {
 
     #[test]
     fn insert_respects_creator_supplied_id() {
-        let mut doc = json!({ "id": "post_abc123", "title": "hi" });
+        let mut doc = value!({ "id": "post_abc123", "title": "hi" });
         apply_system_fields_on_insert(&mut doc, &schema_without_id_prefix(), "posts", None)
             .expect("derived prefix must be accepted");
         assert_eq!(
@@ -977,7 +978,7 @@ mod tests {
 
     #[test]
     fn insert_minted_id_has_correct_prefix_for_collection_name() {
-        let mut doc = json!({});
+        let mut doc = value!({});
         apply_system_fields_on_insert(&mut doc, &schema_without_id_prefix(), "users", None)
             .expect("derived prefix must be accepted");
         assert!(doc
@@ -987,7 +988,7 @@ mod tests {
             .unwrap()
             .starts_with("user_"));
 
-        let mut doc2 = json!({});
+        let mut doc2 = value!({});
         apply_system_fields_on_insert(&mut doc2, &schema_without_id_prefix(), "tasks", None)
             .expect("derived prefix must be accepted");
         assert!(doc2
@@ -1000,7 +1001,7 @@ mod tests {
 
     #[test]
     fn insert_populates_created_by_from_actor() {
-        let mut doc = json!({ "title": "hi" });
+        let mut doc = value!({ "title": "hi" });
         apply_system_fields_on_insert(
             &mut doc,
             &schema_without_id_prefix(),
@@ -1021,7 +1022,7 @@ mod tests {
 
     #[test]
     fn insert_does_not_inject_created_at_or_updated_at_or_version() {
-        let mut doc = json!({ "title": "hi" });
+        let mut doc = value!({ "title": "hi" });
         apply_system_fields_on_insert(
             &mut doc,
             &schema_without_id_prefix(),
@@ -1050,7 +1051,7 @@ mod tests {
     #[test]
     fn insert_pass_is_idempotent() {
         crate::reset_engine_for_tests();
-        let mut doc = json!({ "title": "hi" });
+        let mut doc = value!({ "title": "hi" });
         apply_system_fields_on_insert(
             &mut doc,
             &schema_without_id_prefix(),
@@ -1077,7 +1078,7 @@ mod tests {
     #[test]
     fn insert_pass_is_idempotent_without_an_actor() {
         crate::reset_engine_for_tests();
-        let mut doc = json!({ "title": "hi" });
+        let mut doc = value!({ "title": "hi" });
         apply_system_fields_on_insert(&mut doc, &schema_without_id_prefix(), "posts", None)
             .expect("derived prefix must be accepted");
         let after_first = doc.clone();
@@ -1088,7 +1089,7 @@ mod tests {
 
     #[test]
     fn insert_pass_non_object_doc_is_no_op() {
-        let mut doc = json!("not an object");
+        let mut doc = value!("not an object");
         apply_system_fields_on_insert(
             &mut doc,
             &schema_without_id_prefix(),
@@ -1098,14 +1099,14 @@ mod tests {
         .expect("derived prefix must be accepted");
         // Non-object docs pass through unchanged — the downstream
         // build_insert will reject them with a typed error.
-        assert_eq!(doc, json!("not an object"));
+        assert_eq!(doc, value!("not an object"));
     }
 
     // ---- insertMany batch ------------------------------------------
 
     #[test]
     fn insert_many_pass_mints_id_per_row() {
-        let mut docs = json!([
+        let mut docs = value!([
             { "title": "a" },
             { "title": "b" },
         ]);
@@ -1135,7 +1136,7 @@ mod tests {
 
     #[test]
     fn insert_many_pass_respects_per_row_supplied_id() {
-        let mut docs = json!([
+        let mut docs = value!([
             { "id": "post_keepme", "title": "a" },
             { "title": "b" },
         ]);
@@ -1160,7 +1161,7 @@ mod tests {
     /// DB DEFAULTs handle the rest.
     #[test]
     fn insert_pass_emits_three_extra_columns_when_actor_present() {
-        let mut doc = json!({ "title": "hi" });
+        let mut doc = value!({ "title": "hi" });
         apply_system_fields_on_insert(
             &mut doc,
             &schema_without_id_prefix(),
@@ -1194,7 +1195,7 @@ mod tests {
     #[test]
     fn insert_pass_binds_null_actor_columns_when_no_actor() {
         crate::reset_engine_for_tests();
-        let mut doc = json!({ "title": "hi" });
+        let mut doc = value!({ "title": "hi" });
         apply_system_fields_on_insert(&mut doc, &schema_without_id_prefix(), "posts", None)
             .expect("derived prefix must be accepted");
         let obj = doc.as_object().unwrap();
@@ -1234,7 +1235,7 @@ mod tests {
     #[test]
     fn insert_pass_followed_by_build_insert_returns_every_system_field() {
         use crate::compile::{build_insert, SYSTEM_FIELD_NAMES};
-        let mut doc = json!({ "title": "hi" });
+        let mut doc = value!({ "title": "hi" });
         apply_system_fields_on_insert(
             &mut doc,
             &schema_without_id_prefix(),
@@ -1288,31 +1289,31 @@ mod tests {
 
     #[test]
     fn update_refuses_creator_supplied_id_change() {
-        expect_immutable_refusal(json!({ "id": "post_other", "title": "x" }), "posts_imid");
+        expect_immutable_refusal(value!({ "id": "post_other", "title": "x" }), "posts_imid");
     }
 
     #[test]
     fn update_refuses_creator_supplied_created_at_change() {
-        expect_immutable_refusal(json!({ "created_at": 1700000000000_i64 }), "posts_imca");
+        expect_immutable_refusal(value!({ "created_at": 1700000000000_i64 }), "posts_imca");
     }
 
     #[test]
     fn update_refuses_creator_supplied_created_by_change() {
-        expect_immutable_refusal(json!({ "created_by": "usr_other" }), "posts_imcb");
+        expect_immutable_refusal(value!({ "created_by": "usr_other" }), "posts_imcb");
     }
 
     #[test]
     fn update_refuses_immutable_fields_under_dollar_set() {
         // Nested $set form must be caught too - the SDK can produce
         // either shape.
-        expect_immutable_refusal(json!({ "$set": { "id": "post_other" } }), "posts_imset");
+        expect_immutable_refusal(value!({ "$set": { "id": "post_other" } }), "posts_imset");
     }
 
     #[test]
     fn update_refuses_immutable_field_under_dollar_inc() {
         // Defence-in-depth: $inc.id / $inc.created_at / $inc.created_by
         // are refused for the same reason as top-level overwrites.
-        expect_immutable_refusal(json!({ "$inc": { "created_by": 1 } }), "posts_immut_inc");
+        expect_immutable_refusal(value!({ "$inc": { "created_by": 1 } }), "posts_immut_inc");
     }
 
     /// Every column the charter fixes at insert is refused, whatever it is
@@ -1328,14 +1329,14 @@ mod tests {
             "the charter must fix at least one column at insert"
         );
         for name in fixed {
-            expect_immutable_refusal(json!({ name.clone(): "x" }), "posts_charter_immutable");
+            expect_immutable_refusal(value!({ (name.clone()): "x" }), "posts_charter_immutable");
         }
     }
 
     #[test]
     fn update_strips_a_supplied_version() {
         crate::reset_engine_for_tests();
-        let mut patch = json!({ "title": "x", "version": 42 });
+        let mut patch = value!({ "title": "x", "version": 42 });
         apply_system_fields_on_update(&mut patch, "app1", "posts_csv").expect("passes");
         assert!(
             !patch.as_object().expect("object").contains_key("version"),
@@ -1347,7 +1348,7 @@ mod tests {
     #[test]
     fn update_strips_a_supplied_updated_at_and_updated_by() {
         crate::reset_engine_for_tests();
-        let mut patch = json!({
+        let mut patch = value!({
             "title": "x",
             "updated_at": "2026-01-01T00:00:00Z",
             "updated_by": "usr_explicit",
@@ -1361,7 +1362,7 @@ mod tests {
     #[test]
     fn update_strips_write_assigned_columns_under_dollar_set() {
         crate::reset_engine_for_tests();
-        let mut patch = json!({ "$set": { "title": "x", "updated_by": "usr_explicit" } });
+        let mut patch = value!({ "$set": { "title": "x", "updated_by": "usr_explicit" } });
         apply_system_fields_on_update(&mut patch, "app1", "posts_setstrip").expect("passes");
         let set_obj = patch
             .get("$set")
@@ -1379,7 +1380,7 @@ mod tests {
     #[test]
     fn update_strips_the_legacy_dollar_inc_version() {
         crate::reset_engine_for_tests();
-        let mut patch = json!({ "$inc": { "version": 1, "views": 1 } });
+        let mut patch = value!({ "$inc": { "version": 1, "views": 1 } });
         apply_system_fields_on_update(&mut patch, "app1", "posts_legacyinc").expect("passes");
         let inc = patch
             .get("$inc")
@@ -1396,7 +1397,7 @@ mod tests {
     #[test]
     fn update_leaves_the_delete_assigned_column_alone() {
         crate::reset_engine_for_tests();
-        let mut patch = json!({ "deleted_at": 1_700_000_000_000_i64 });
+        let mut patch = value!({ "deleted_at": 1_700_000_000_000_i64 });
         apply_system_fields_on_update(&mut patch, "app1", "posts_softdelete")
             .expect("the platform's own soft delete must not be refused");
         assert_eq!(
@@ -1409,45 +1410,45 @@ mod tests {
     #[test]
     fn update_leaves_an_ordinary_patch_untouched() {
         crate::reset_engine_for_tests();
-        let mut patch = json!({ "title": "x" });
+        let mut patch = value!({ "title": "x" });
         apply_system_fields_on_update(&mut patch, "app1", "posts_defaults").expect("passes");
-        assert_eq!(patch, json!({ "title": "x" }));
+        assert_eq!(patch, value!({ "title": "x" }));
     }
 
     #[test]
     fn extract_cas_version_returns_plain_number() {
-        let f = json!({ "id": "post_x", "version": 7 });
+        let f = value!({ "id": "post_x", "version": 7 });
         assert_eq!(extract_cas_version(&f, "posts").unwrap(), Some(7));
     }
 
     #[test]
     fn extract_cas_version_returns_none_for_missing_version() {
-        let f = json!({ "id": "post_x" });
+        let f = value!({ "id": "post_x" });
         assert_eq!(extract_cas_version(&f, "posts").unwrap(), None);
     }
 
     #[test]
     fn extract_cas_version_returns_none_for_operator_object() {
         // `{ $gt: 5 }` is not a CAS predicate.
-        let f = json!({ "version": { "$gt": 5 } });
+        let f = value!({ "version": { "$gt": 5 } });
         assert_eq!(extract_cas_version(&f, "posts").unwrap(), None);
     }
 
     #[test]
     fn extract_cas_version_returns_none_for_string_value() {
-        let f = json!({ "version": "7" });
+        let f = value!({ "version": "7" });
         assert_eq!(extract_cas_version(&f, "posts").unwrap(), None);
     }
 
     #[test]
     fn extract_cas_version_returns_none_for_non_object_filter() {
-        let f = json!("scalar");
+        let f = value!("scalar");
         assert_eq!(extract_cas_version(&f, "posts").unwrap(), None);
     }
 
     #[test]
     fn extract_cas_version_rejects_nested_and_version() {
-        let f = json!({
+        let f = value!({
             "$and": [
                 { "id": "post_x" },
                 { "version": 7 }
@@ -1464,7 +1465,7 @@ mod tests {
 
     #[test]
     fn extract_cas_version_rejects_deeply_nested_or_version() {
-        let f = json!({
+        let f = value!({
             "$and": [
                 {
                     "$or": [
@@ -1486,22 +1487,22 @@ mod tests {
 
     #[test]
     fn filter_has_id_predicate_detects_scalar() {
-        assert!(filter_has_id_predicate(&json!({ "id": "post_x" })));
+        assert!(filter_has_id_predicate(&value!({ "id": "post_x" })));
     }
 
     #[test]
     fn filter_has_id_predicate_detects_operator() {
         // `id: { $in: [...] }` still narrows to id-keyed lookups.
         assert!(filter_has_id_predicate(
-            &json!({ "id": { "$in": ["a", "b"] } })
+            &value!({ "id": { "$in": ["a", "b"] } })
         ));
     }
 
     #[test]
     fn filter_has_id_predicate_false_when_absent() {
-        assert!(!filter_has_id_predicate(&json!({ "title": "x" })));
-        assert!(!filter_has_id_predicate(&json!({})));
-        assert!(!filter_has_id_predicate(&json!("scalar")));
+        assert!(!filter_has_id_predicate(&value!({ "title": "x" })));
+        assert!(!filter_has_id_predicate(&value!({})));
+        assert!(!filter_has_id_predicate(&value!("scalar")));
     }
 
     // ---- soft-delete filter gate -----

@@ -198,12 +198,12 @@ impl PostgresBackend {
     /// # Errors
     ///
     /// Propagates pool checkout, session setup, statement and COMMIT failures.
-    pub async fn query_roled_json(
+    pub async fn query_roled_values(
         &self,
         schema: &zeroship_data_query_builder::SchemaName,
         sql: &str,
-        params: &[&str],
-    ) -> Result<Vec<serde_json::Value>, DbError> {
+        params: &[zeroship_data_query_builder::value::Value],
+    ) -> Result<Vec<zeroship_data_query_builder::value::Value>, DbError> {
         pg_autocommit::roled_json(&self.pool, schema, sql, params).await
     }
 
@@ -211,13 +211,13 @@ impl PostgresBackend {
     ///
     /// # Errors
     ///
-    /// As [`Self::query_roled_json`], plus a decode failure if column 0 is not
+    /// As [`Self::query_roled_values`], plus a decode failure if column 0 is not
     /// byte-typed.
     pub async fn read_roled_scalar_bytes(
         &self,
         schema: &zeroship_data_query_builder::SchemaName,
         sql: &str,
-        params: &[&str],
+        params: &[zeroship_data_query_builder::value::Value],
     ) -> Result<pg_autocommit::ScalarRead<Vec<u8>>, DbError> {
         pg_autocommit::roled_scalar_bytes(&self.pool, schema, sql, params).await
     }
@@ -226,14 +226,14 @@ impl PostgresBackend {
     ///
     /// # Errors
     ///
-    /// As [`Self::query_roled_json`], plus a decode failure if column 0 is not
+    /// As [`Self::query_roled_values`], plus a decode failure if column 0 is not
     /// text-typed. A BYTEA column is refused rather than mis-parsed; use
     /// [`Self::read_roled_scalar_bytes`].
     pub async fn read_roled_scalar_text(
         &self,
         schema: &zeroship_data_query_builder::SchemaName,
         sql: &str,
-        params: &[&str],
+        params: &[zeroship_data_query_builder::value::Value],
     ) -> Result<pg_autocommit::ScalarRead<String>, DbError> {
         pg_autocommit::roled_scalar_text(&self.pool, schema, sql, params).await
     }
@@ -242,12 +242,12 @@ impl PostgresBackend {
     ///
     /// # Errors
     ///
-    /// As [`Self::query_roled_json`].
+    /// As [`Self::query_roled_values`].
     pub async fn execute_roled(
         &self,
         schema: &zeroship_data_query_builder::SchemaName,
         sql: &str,
-        params: &[&str],
+        params: &[zeroship_data_query_builder::value::Value],
     ) -> Result<(), DbError> {
         pg_autocommit::roled_statement(&self.pool, schema, sql, params).await
     }
@@ -263,20 +263,20 @@ impl PostgresBackend {
     /// already had.
     ///
     /// The JSON conversion happens HERE rather than at the caller for the same
-    /// reason: `row_to_json` is this tier's business, and the engine wants
+    /// reason: `row_to_value` is this tier's business, and the engine wants
     /// `Vec<Value>` either way - it is what the SQLite arm has always returned.
     ///
     /// # Errors
     ///
-    /// As [`Self::query_roled_json`].
+    /// As [`Self::query_roled_values`].
     pub async fn query_roled_rows_as_json(
         &self,
         schema: &zeroship_data_query_builder::SchemaName,
         sql: &str,
-        params: &[&str],
-    ) -> Result<Vec<serde_json::Value>, DbError> {
+        params: &[zeroship_data_query_builder::value::Value],
+    ) -> Result<Vec<zeroship_data_query_builder::value::Value>, DbError> {
         let rows = pg_autocommit::roled_rows(&self.pool, schema, sql, params).await?;
-        Ok(super::pg_row_json::rows_to_json_value(&rows))
+        Ok(super::pg_row_json::rows_to_values(&rows))
     }
 }
 
@@ -334,7 +334,11 @@ impl SqlExecutor for PostgresBackend {
         // into a prepared statement`. `batch_execute` issues a single
         // `Query` message and runs the `;`-separated statements in one
         // implicit transaction.
-        let client = self.pool.acquire().await.map_err(|e| pg_error::classify(&e))?;
+        let client = self
+            .pool
+            .acquire()
+            .await
+            .map_err(|e| pg_error::classify(&e))?;
         client
             .batch_execute(sql)
             .await
@@ -538,8 +542,8 @@ impl PostgresBackend {
         query: &[f32],
         k: usize,
         metric: VectorMetric,
-        filter: &serde_json::Value,
-        schema: &serde_json::Value,
+        filter: &zeroship_data_query_builder::value::Value,
+        schema: &zeroship_data_query_builder::value::Value,
     ) -> Result<zeroship_data_query_builder::compile::BuiltQuery, DbError> {
         // Probe so a missing extension surfaces with the same typed
         // error shape the capability probe produces — the SDK branches
@@ -573,16 +577,16 @@ impl VectorIndex for PostgresBackend {
         query: &[f32],
         k: usize,
         metric: VectorMetric,
-        filter: &serde_json::Value,
-        schema: &serde_json::Value,
-    ) -> Result<Vec<serde_json::Value>, DbError> {
+        filter: &zeroship_data_query_builder::value::Value,
+        schema: &zeroship_data_query_builder::value::Value,
+    ) -> Result<Vec<zeroship_data_query_builder::value::Value>, DbError> {
         let bq = self
             .plan_vector_search(
                 binding, collection, column, query, k, metric, filter, schema,
             )
             .await?;
-        let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
-        self.query_roled_json(binding.schema(), &bq.sql, &param_refs)
+        let param_refs = &bq.params;
+        self.query_roled_values(binding.schema(), &bq.sql, param_refs)
             .await
     }
 }
@@ -663,9 +667,9 @@ impl PostgresBackend {
         column: &str,
         point: GeoPoint,
         radius_m: f64,
-        filter: &serde_json::Value,
+        filter: &zeroship_data_query_builder::value::Value,
         limit: Option<usize>,
-        schema: &serde_json::Value,
+        schema: &zeroship_data_query_builder::value::Value,
     ) -> Result<zeroship_data_query_builder::compile::BuiltQuery, DbError> {
         self.ensure_postgis_available().await?;
 
@@ -691,17 +695,17 @@ impl SpatialIndex for PostgresBackend {
         column: &str,
         point: GeoPoint,
         radius_m: f64,
-        filter: &serde_json::Value,
+        filter: &zeroship_data_query_builder::value::Value,
         limit: Option<usize>,
-        schema: &serde_json::Value,
-    ) -> Result<Vec<serde_json::Value>, DbError> {
+        schema: &zeroship_data_query_builder::value::Value,
+    ) -> Result<Vec<zeroship_data_query_builder::value::Value>, DbError> {
         let bq = self
             .plan_spatial_near(
                 binding, collection, column, point, radius_m, filter, limit, schema,
             )
             .await?;
-        let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
-        self.query_roled_json(binding.schema(), &bq.sql, &param_refs)
+        let param_refs = &bq.params;
+        self.query_roled_values(binding.schema(), &bq.sql, param_refs)
             .await
     }
 }
@@ -761,7 +765,11 @@ impl DialectBuilder for PgDialect {
     /// PG mapping for the type vocabulary. Each branch is a single
     /// `&'static str` — matches the column-type names PG accepts in a
     /// `CREATE TABLE` DDL.
-    fn map_zs_type(&self, zs_type: &str, _opts: &serde_json::Value) -> String {
+    fn map_zs_type(
+        &self,
+        zs_type: &str,
+        _opts: &zeroship_data_query_builder::value::Value,
+    ) -> String {
         match zs_type {
             "text" => "TEXT",
             "bigint" | "int8" => "BIGINT",
@@ -809,7 +817,11 @@ impl DialectBuilder for PostgresBackend {
         PgDialect.quote_ident(name)
     }
 
-    fn map_zs_type(&self, zs_type: &str, opts: &serde_json::Value) -> String {
+    fn map_zs_type(
+        &self,
+        zs_type: &str,
+        opts: &zeroship_data_query_builder::value::Value,
+    ) -> String {
         PgDialect.map_zs_type(zs_type, opts)
     }
 
@@ -1562,7 +1574,7 @@ mod tests {
     #[test]
     fn pg_dialect_map_zs_type_covers_p1_vocabulary() {
         let d = PgDialect;
-        let no_opts = serde_json::json!({});
+        let no_opts = zeroship_data_query_builder::value!({});
         assert_eq!(d.map_zs_type("text", &no_opts), "TEXT");
         assert_eq!(d.map_zs_type("bigint", &no_opts), "BIGINT");
         assert_eq!(d.map_zs_type("int8", &no_opts), "BIGINT");

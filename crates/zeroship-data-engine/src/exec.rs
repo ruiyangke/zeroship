@@ -4,12 +4,11 @@
 //! Every CRUD dispatch helper (in `crate::crud`) lowers its
 //! `BuiltQuery` through one of:
 //!
-//! - `exec_query` — read path, returns rows as `Vec<serde_json::Value>`
-//!   (one `Value::Object` per row); the CRUD resolver serialises once
-//!   at the V8 boundary.
+//! - `exec_query` — read path, returns rows as `Vec<zeroship_data_query_builder::value::Value>`
+//!   (one `Value::Object` per row), consumed by the Rust or V8 adapter.
 //! - `exec_count` — read path that extracts a single `count` column.
 //! - `exec_mutation` — write path, returns RETURNING rows as
-//!   `Vec<serde_json::Value>`.
+//!   `Vec<zeroship_data_query_builder::value::Value>`.
 //! - `exec_mutation_with_emit` — write path + broker wakeup on backends
 //!   that still need SDK-local publication.
 //!
@@ -17,7 +16,7 @@
 //! `Postgres` arm is `run_sql`, which uses the per-isolate TX client
 //! (`ThreadDbContext::tx_conns`) when the DISPATCH THAT STARTED THIS OP was
 //! issued inside the app's own `db.transaction(fn)` callback, and the pool
-//! otherwise; the `Sqlite` arm is `exec_sqlite_json`.
+//! otherwise; the `Sqlite` arm is `exec_sqlite_values`.
 //!
 //! ## Why the entry points take `&TxRoute` and not `app_id: &str`
 //!
@@ -53,10 +52,9 @@
 
 use std::rc::Rc;
 
-use serde_json::Value;
+use zeroship_data_query_builder::value::Value;
 
-use crate::backend::pg_error;
-use crate::backend::pg_row_json::rows_to_json_value;
+use crate::backend::pg_row_json::rows_to_values;
 use crate::backend::BackendHandle;
 // THE ADAPTER IMPORT THAT USED TO SIT HERE IS GONE, and it had to be. It was
 // `#[cfg(any(test, feature = "test-helpers"))] use crate::context;`, read only
@@ -186,7 +184,7 @@ pub(crate) fn take_tx_lane(route: &TxRoute) -> Result<crate::tx_lanes::TxClientS
 
 /// Execute SQL with text params — uses the app's TX connection when this
 /// dispatch was issued inside that transaction, otherwise the pool.
-pub async fn run_sql(route: &TxRoute, sql: &str, params: &[&str]) -> Result<Vec<Value>, DbError> {
+pub async fn run_sql(route: &TxRoute, sql: &str, params: &[Value]) -> Result<Vec<Value>, DbError> {
     let app_id = route.app_id();
     // Structural, not temporal: `route.in_tx()` was frozen at the V8
     // dispatch frame from the continuation-preserved transaction scope,
@@ -199,11 +197,11 @@ pub async fn run_sql(route: &TxRoute, sql: &str, params: &[&str]) -> Result<Vec<
             let client = crate::tx_lanes::TxClientSlotGuard::take(app_id)
                 .map_err(|_| tx_slot_unavailable(app_id))?;
             match client.client() {
-                TxConnection::Postgres(client) => client
-                    .query_text_params(sql, params)
-                    .await
-                    .map(|rows| rows_to_json_value(&rows))
-                    .map_err(|e| pg_error::classify(&e)),
+                TxConnection::Postgres(client) => {
+                    zeroship_data_postgres::params::query(client, sql, params)
+                        .await
+                        .map(|rows| rows_to_values(&rows))
+                }
                 TxConnection::Sqlite(_) => Err(sqlite_shared_crud_unavailable()),
             }
         })
@@ -216,14 +214,8 @@ pub async fn run_sql(route: &TxRoute, sql: &str, params: &[&str]) -> Result<Vec<
     exec_postgres_autocommit_with_role(route, sql, params).await
 }
 
-/// Execute a built query via pool (or TX conn) and return the
-/// per-row JSON values.
-///
-/// Returning `Vec<Value>` (rather than a pre-serialised JSON array
-/// string) lets the CRUD resolver chain in `crate::crud` inspect or
-/// take a single row without paying for an intermediate serialise +
-/// reparse round-trip. The final JSON string is materialised once at
-/// the V8 boundary (`ResolveValue::Json`).
+/// Execute a built query on its routed connection and return native records.
+/// Protection passes and both adapters consume these records directly.
 ///
 /// # The backend dispatch below is an exhaustive `match`, and stays one
 ///
@@ -239,10 +231,10 @@ pub async fn run_sql(route: &TxRoute, sql: &str, params: &[&str]) -> Result<Vec<
 /// **Do not reopen any of the three as an `if let`.**
 pub async fn exec_query(route: &TxRoute, bq: BuiltQuery) -> Result<Vec<Value>, DbError> {
     let app_id = route.app_id();
-    let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
+    let param_refs = &bq.params;
     let rows = match route.backend() {
-        BackendHandle::Sqlite(sq) => exec_sqlite_json(route, sq, &bq.sql, &param_refs).await?,
-        BackendHandle::Postgres(_) => run_sql(route, &bq.sql, &param_refs).await?,
+        BackendHandle::Sqlite(sq) => exec_sqlite_values(route, sq, &bq.sql, param_refs).await?,
+        BackendHandle::Postgres(_) => run_sql(route, &bq.sql, param_refs).await?,
     };
     // Success arm only: one read op. Unforgeable (emitted by the primitive).
     emit_db_metric(app_id, DB_READS, 1);
@@ -258,19 +250,19 @@ pub async fn exec_query(route: &TxRoute, bq: BuiltQuery) -> Result<Vec<Value>, D
 /// Exhaustive backend dispatch, for the reason on [`exec_query`].
 pub async fn exec_count(route: &TxRoute, bq: BuiltQuery) -> Result<i64, DbError> {
     let app_id = route.app_id();
-    let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
+    let param_refs = &bq.params;
     let rows = match route.backend() {
-        BackendHandle::Sqlite(sq) => exec_sqlite_json(route, sq, &bq.sql, &param_refs).await?,
-        BackendHandle::Postgres(_) => run_sql(route, &bq.sql, &param_refs).await?,
+        BackendHandle::Sqlite(sq) => exec_sqlite_values(route, sq, &bq.sql, param_refs).await?,
+        BackendHandle::Postgres(_) => run_sql(route, &bq.sql, param_refs).await?,
     };
     // Success arm only: a count is a read op.
     emit_db_metric(app_id, DB_READS, 1);
 
     // ONE extraction for both dialects, which is the point: this was written
     // twice, byte-identically, once per arm, back when each arm returned on its
-    // own. Both arms hand back JSON rather than a `compio_postgres::Row`, so the
+    // own. Both arms hand back native values rather than a `compio_postgres::Row`, so the
     // two dialects agree on the shape a count comes back in. PostgreSQL renders
-    // `count(*)` as INT8 (OID 20), which `row_to_json` maps to an exact
+    // `count(*)` as INT8 (OID 20), which `row_to_value` maps to an exact
     // `Number::from(i64)` - so `as_i64` reads it back losslessly rather than
     // going via `f64` the way the FLOAT arms do.
     Ok(rows
@@ -281,21 +273,18 @@ pub async fn exec_count(route: &TxRoute, bq: BuiltQuery) -> Result<i64, DbError>
 }
 
 /// Execute an insert/update/delete query, returning the affected
-/// rows as `Vec<serde_json::Value>` (one `Value::Object` per row).
+/// rows as `Vec<zeroship_data_query_builder::value::Value>` (one `Value::Object` per row).
 ///
-/// Returning the typed intermediate (instead of a pre-serialised JSON
-/// string) lets [`exec_mutation_with_emit`] iterate the live `Value`s
-/// to build broker events without paying for a JSON parse of its own
-/// output; the CRUD resolver chain then serialises once at the V8
-/// boundary.
+/// Native records feed the protection passes and adapters. Broker events
+/// encode their explicit wire contract separately.
 ///
 /// Exhaustive backend dispatch, for the reason on [`exec_query`].
 pub async fn exec_mutation(route: &TxRoute, bq: BuiltQuery) -> Result<Vec<Value>, DbError> {
     let app_id = route.app_id();
-    let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
+    let param_refs = &bq.params;
     let rows = match route.backend() {
-        BackendHandle::Sqlite(sq) => exec_sqlite_json(route, sq, &bq.sql, &param_refs).await?,
-        BackendHandle::Postgres(_) => run_sql(route, &bq.sql, &param_refs).await?,
+        BackendHandle::Sqlite(sq) => exec_sqlite_values(route, sq, &bq.sql, param_refs).await?,
+        BackendHandle::Postgres(_) => run_sql(route, &bq.sql, param_refs).await?,
     };
     // Success arm only: one write op + the affected/RETURNING row count.
     emit_db_metric(app_id, DB_WRITES, 1);
@@ -311,11 +300,11 @@ pub async fn exec_mutation(route: &TxRoute, bq: BuiltQuery) -> Result<Vec<Value>
 /// that called into them - the upward half of the `PG <-> ENGINE` cycle. On
 /// 2026-09-02 the last half of that reach went too: this took the pool out of
 /// the backend and called `pg_autocommit` itself, so the `Row` type came back
-/// here to be converted. Now the backend does both and returns JSON.
+/// here to be converted. Now the backend does both and returns native values.
 async fn exec_postgres_autocommit_with_role(
     route: &TxRoute,
     sql: &str,
-    params: &[&str],
+    params: &[Value],
 ) -> Result<Vec<Value>, DbError> {
     // The Postgres narrowing happens here, against the backend the adapter
     // already bound onto the route, rather than in a wrapper that resolved one
@@ -331,11 +320,11 @@ async fn exec_postgres_autocommit_with_role(
     }
 }
 
-async fn exec_sqlite_json(
+async fn exec_sqlite_values(
     route: &TxRoute,
     backend: &crate::backend::sqlite::SqliteBackend,
     sql: &str,
-    params: &[&str],
+    params: &[Value],
 ) -> Result<Vec<Value>, DbError> {
     // Bind this app's file into the session before addressing it. The SQL
     // below qualifies its tables as `"<app_id>"."<table>"`, and that alias
@@ -359,7 +348,7 @@ async fn exec_sqlite_json(
     if !route.in_tx() {
         #[cfg(test)]
         tests::record_sqlite_shared_route();
-        return backend.query_json(sql, params).await;
+        return backend.query_values(sql, params).await;
     }
 
     // `take` has exactly one failure mode — an empty slot — which under a
@@ -374,7 +363,7 @@ async fn exec_sqlite_json(
                 #[cfg(test)]
                 tests::record_sqlite_tx_route();
                 let typed = client.query_typed_internal(sql, params).await?;
-                Ok(crate::backend::sqlite::row_json::typed_rows_to_json_value(
+                Ok(crate::backend::sqlite::row_json::typed_rows_to_values(
                     &typed,
                 ))
             }
@@ -887,7 +876,7 @@ mod tests {
                 ("title".to_string(), Value::from("hi")),
             ]
             .into_iter()
-            .collect::<serde_json::Map<_, _>>(),
+            .collect::<zeroship_data_query_builder::value::Map<_, _>>(),
         )
     }
 
@@ -898,7 +887,7 @@ mod tests {
                 ("title".to_string(), Value::from("hi")),
             ]
             .into_iter()
-            .collect::<serde_json::Map<_, _>>(),
+            .collect::<zeroship_data_query_builder::value::Map<_, _>>(),
         )
     }
 
@@ -1496,7 +1485,7 @@ mod tests {
     // app A's `env.db.transaction(async () => await fetch(slow))` parks
     // its tx client across the await, a co-resident app B's plain
     // `env.db.*` call lands on the same thread-local context. `run_sql`
-    // / `exec_sqlite_json` must route B onto B's OWN autocommit path —
+    // / `exec_sqlite_values` must route B onto B's OWN autocommit path —
     // never onto A's pinned transaction connection (A's snapshot, A's
     // open tx, and — on Postgres — A's per-app role).
 

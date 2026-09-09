@@ -329,7 +329,7 @@ mod tests {
     //! crate's, and the engine may not see `v8`, `zeroship_runtime` or the
     //! per-isolate context at all.
 
-    use serde_json::json;
+    use zeroship_data_query_builder::value;
     use zeroship_runtime::init_v8;
 
     macro_rules! in_scope {
@@ -480,7 +480,7 @@ mod tests {
             crate::crud::mask_policy::dispatch_set_mask_policy(
                 &backend,
                 "app_cold_policy",
-                json!({ "support": ["spi"] }),
+                value!({ "support": ["spi"] }),
             )
             .await
             .expect("policy install must succeed on the handed-down backend");

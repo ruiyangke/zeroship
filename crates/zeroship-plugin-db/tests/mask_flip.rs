@@ -48,9 +48,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use compio_postgres::{NoTls, Pool};
-use serde_json::{json, Value};
 use zeroship_data_core::binding::DbBinding;
 use zeroship_data_core::error::DbError;
+use zeroship_data_query_builder::value::{value, Value};
 use zeroship_plugin_db::compile::{
     build_aggregate, build_distinct, build_find_with_schema, build_insert, build_where,
     raw_column_name, read_surface_columns, validate_field_name,
@@ -127,7 +127,7 @@ async fn release_pg(pool: Rc<Pool>) {
 /// The schema both oracle fixtures use: one masked column and one unmasked
 /// control that differs in exactly one variable (the `mask` block).
 fn flip_schema() -> Value {
-    json!({
+    value!({
         "ssn": {
             "type": "string",
             "mask": { "kind": "full", "classification": "pci" }
@@ -146,7 +146,7 @@ fn flip_schema() -> Value {
 /// case convention, so no alias resolution happens and the canonical name and
 /// the caller's name are the same string whatever the code does.
 fn alias_schema() -> Value {
-    json!({
+    value!({
         "contact_email": {
             "type": "string",
             "mask": { "kind": "email", "classification": "pii" }
@@ -164,7 +164,7 @@ fn alias_schema() -> Value {
 /// every request over it is authorised entirely or refused entirely whatever
 /// the fence does.
 fn two_class_schema() -> Value {
-    json!({
+    value!({
         "ssn": {
             "type": "string",
             "mask": { "kind": "full", "classification": "pci" }
@@ -236,7 +236,7 @@ async fn insert_through_the_pipeline(
     schema: &Value,
     doc: Value,
 ) -> Inserted {
-    let mut docs = json!([doc]);
+    let mut docs = value!([doc]);
     zeroship_plugin_db::prepare_insert_many_docs_for_tests(&mut docs, app, collection, None)
         .await
         .expect("write pipeline");
@@ -256,20 +256,20 @@ async fn insert_through_the_pipeline(
         "the write path's shape is a named projection; this suite is written against it: {}",
         bq.sql,
     );
-    let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
-    let rows = pool
-        .query_text_params(&bq.sql, &param_refs)
-        .await
-        .unwrap_or_else(|e| panic!("insert must apply: {e}\n{}", bq.sql));
+    let param_refs = &bq.params;
+    let rows =
+        zeroship_data_postgres::params::query(&pool.acquire().await.unwrap(), &bq.sql, param_refs)
+            .await
+            .unwrap_or_else(|e| panic!("insert must apply: {e}\n{}", bq.sql));
     Inserted {
         id,
-        rows: rows.iter().map(row_to_json).collect(),
+        rows: rows.iter().map(row_to_value).collect(),
     }
 }
 
 /// Every column of a returned row as a JSON string value, keyed by column name.
-fn row_to_json(row: &compio_postgres::Row) -> Value {
-    let mut map = serde_json::Map::new();
+fn row_to_value(row: &compio_postgres::Row) -> Value {
+    let mut map = zeroship_data_query_builder::value::Map::new();
     for (i, column) in row.columns().iter().enumerate() {
         let value: Option<String> = row.try_get(i).unwrap_or(None);
         map.insert(
@@ -292,9 +292,12 @@ async fn run_find(pool: &Rc<Pool>, app: &str, filter: &Value, schema: &Value) ->
         schema,
     )
     .expect("find builder");
-    let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
-    let rows = pool.query_text_params(&bq.sql, &param_refs).await.unwrap();
-    rows.iter().map(row_to_json).collect()
+    let param_refs = &bq.params;
+    let rows =
+        zeroship_data_postgres::params::query(&pool.acquire().await.unwrap(), &bq.sql, param_refs)
+            .await
+            .unwrap();
+    rows.iter().map(row_to_value).collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -332,7 +335,7 @@ async fn a_range_filter_on_a_masked_column_cannot_narrow_the_plaintext() {
         app,
         "people",
         &schema,
-        json!({ "ssn": "111-11-1111", "nickname": "aaa" }),
+        value!({ "ssn": "111-11-1111", "nickname": "aaa" }),
     )
     .await
     .id;
@@ -341,7 +344,7 @@ async fn a_range_filter_on_a_masked_column_cannot_narrow_the_plaintext() {
         app,
         "people",
         &schema,
-        json!({ "ssn": "999-99-9999", "nickname": "zzz" }),
+        value!({ "ssn": "999-99-9999", "nickname": "zzz" }),
     )
     .await
     .id;
@@ -351,7 +354,7 @@ async fn a_range_filter_on_a_masked_column_cannot_narrow_the_plaintext() {
     // ids rather than counted, so this also pins that each write's identity
     // survived the round trip - a row read back under some other id would
     // satisfy a bare count.
-    let all = run_find(&pool, app, &json!({}), &schema).await;
+    let all = run_find(&pool, app, &value!({}), &schema).await;
     assert_eq!(all.len(), 2, "both rows must be present: {all:?}");
     let mut present: Vec<String> = all
         .iter()
@@ -376,7 +379,7 @@ async fn a_range_filter_on_a_masked_column_cannot_narrow_the_plaintext() {
 
     let mut sweep: Vec<Vec<String>> = Vec::new();
     for probe in probes {
-        let rows = run_find(&pool, app, &json!({ "ssn": { "$gt": probe } }), &schema).await;
+        let rows = run_find(&pool, app, &value!({ "ssn": { "$gt": probe } }), &schema).await;
         let mut ids: Vec<String> = rows
             .iter()
             .map(|r| r["id"].as_str().unwrap().to_string())
@@ -416,7 +419,7 @@ async fn a_range_filter_on_a_masked_column_cannot_narrow_the_plaintext() {
     // returns nothing". This arm differs in ONE: same column, same operator,
     // same masked path, a bound chosen to sit BELOW every mask rather than
     // above it. A correct implementation must return both rows.
-    let below_every_mask = run_find(&pool, app, &json!({ "ssn": { "$gt": "!" } }), &schema).await;
+    let below_every_mask = run_find(&pool, app, &value!({ "ssn": { "$gt": "!" } }), &schema).await;
     let mut reached: Vec<String> = below_every_mask
         .iter()
         .map(|r| r["id"].as_str().unwrap().to_string())
@@ -437,7 +440,7 @@ async fn a_range_filter_on_a_masked_column_cannot_narrow_the_plaintext() {
     let rows = run_find(
         &pool,
         app,
-        &json!({ "nickname": { "$gt": "mmm" } }),
+        &value!({ "nickname": { "$gt": "mmm" } }),
         &schema,
     )
     .await;
@@ -448,7 +451,7 @@ async fn a_range_filter_on_a_masked_column_cannot_narrow_the_plaintext() {
     );
     // And it selects the RIGHT one: the row inserted second, named by the id
     // the platform minted for it.
-    assert_eq!(rows[0]["id"], json!(high));
+    assert_eq!(rows[0]["id"], value!(high));
 
     // And the ordering channel is closed the same way: `orderBy` on a masked
     // column sorts by the mask, so a `limit 1` cannot name the largest SSN.
@@ -456,10 +459,10 @@ async fn a_range_filter_on_a_masked_column_cannot_narrow_the_plaintext() {
         let bq = build_find_with_schema(
             &zeroship_data_query_builder::SchemaName::new(app).expect("fixture schema name"),
             "people",
-            &json!({}),
+            &value!({}),
             Some(1),
             None,
-            Some(&json!({ "ssn": -1 })),
+            Some(&value!({ "ssn": -1 })),
             None,
             &schema,
         )
@@ -469,8 +472,10 @@ async fn a_range_filter_on_a_masked_column_cannot_narrow_the_plaintext() {
             "orderBy must never name the raw column: {}",
             bq.sql,
         );
-        let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
-        pool.query_text_params(&bq.sql, &param_refs).await.unwrap()
+        let param_refs = &bq.params;
+        zeroship_data_postgres::params::query(&pool.acquire().await.unwrap(), &bq.sql, param_refs)
+            .await
+            .unwrap()
     };
     assert_eq!(ordered.len(), 1, "the ordered query still returns a row");
 
@@ -500,7 +505,7 @@ async fn the_real_value_is_still_stored_and_still_reachable_by_the_audited_path(
         app,
         "people",
         &schema,
-        json!({ "ssn": "123-45-6789", "nickname": "ada" }),
+        value!({ "ssn": "123-45-6789", "nickname": "ada" }),
     )
     .await;
 
@@ -555,7 +560,7 @@ async fn the_real_value_is_still_stored_and_still_reachable_by_the_audited_path(
             collection: "people".to_string(),
             row_pk: person.id.clone(),
             column: "ssn".to_string(),
-            actor: Some(json!({ "kind": "auto", "id": null })),
+            actor: Some(value!({ "kind": "auto", "id": null })),
             reason: Some("mask_flip integration test".to_string()),
             rejected_claim: None,
         },
@@ -621,7 +626,7 @@ async fn audited_unmask_fixture(
         url,
         app,
         schema,
-        json!({ "ssn": ssn, "nickname": "ada" }),
+        value!({ "ssn": ssn, "nickname": "ada" }),
         &[("ssn", ssn)],
     )
     .await
@@ -706,7 +711,7 @@ async fn audit_rows(pool: &Rc<Pool>, app: &str) -> Vec<Value> {
         )
         .await
         .expect("read the audit table");
-    rows.iter().map(row_to_json).collect()
+    rows.iter().map(row_to_value).collect()
 }
 
 fn unmask_args(row_pk: &str, actor: Option<Value>) -> UnmaskFieldArgs {
@@ -763,7 +768,7 @@ async fn an_actor_the_policy_does_not_permit_is_refused_and_the_refusal_is_audit
         &DbBinding::cold_start(app),
         unmask_args(
             &person.id,
-            Some(json!({ "kind": "support", "id": "usr_support_1" })),
+            Some(value!({ "kind": "support", "id": "usr_support_1" })),
         ),
     )
     .await
@@ -789,28 +794,28 @@ async fn an_actor_the_policy_does_not_permit_is_refused_and_the_refusal_is_audit
     // The audit row the guarantee rests on, read back from the database.
     let audit = audit_rows(&pool, app).await;
     assert_eq!(audit.len(), 1, "the denied path writes exactly one row");
-    assert_eq!(audit[0]["outcome"], json!("denied"));
-    assert_eq!(audit[0]["actor_role"], json!("support"));
-    assert_eq!(audit[0]["actor_id"], json!("usr_support_1"));
+    assert_eq!(audit[0]["outcome"], value!("denied"));
+    assert_eq!(audit[0]["actor_role"], value!("support"));
+    assert_eq!(audit[0]["actor_id"], value!("usr_support_1"));
     assert_eq!(
         audit[0]["classification"],
-        json!("pci"),
+        value!("pci"),
         "the audit row records the classification that was refused",
     );
     assert_eq!(
         audit[0]["column"],
-        json!("ssn"),
+        value!("ssn"),
         "the audit row names the LOGICAL field, not the physical column",
     );
-    assert_eq!(audit[0]["collection"], json!("people"));
+    assert_eq!(audit[0]["collection"], value!("people"));
     assert_eq!(
         audit[0]["row_pk"],
-        json!(person.id),
+        value!(person.id),
         "and the row it names is the one the platform minted",
     );
 
     // ---- THE CONTROL, differing in one variable: the policy ----
-    dispatch_set_mask_policy(&unmask_backend().await, app, json!({ "support": ["pci"] }))
+    dispatch_set_mask_policy(&unmask_backend().await, app, value!({ "support": ["pci"] }))
         .await
         .expect("install the app's declared mask policy");
     let result = dispatch_unmask(
@@ -818,7 +823,7 @@ async fn an_actor_the_policy_does_not_permit_is_refused_and_the_refusal_is_audit
         &DbBinding::cold_start(app),
         unmask_args(
             &person.id,
-            Some(json!({ "kind": "support", "id": "usr_support_1" })),
+            Some(value!({ "kind": "support", "id": "usr_support_1" })),
         ),
     )
     .await
@@ -829,7 +834,7 @@ async fn an_actor_the_policy_does_not_permit_is_refused_and_the_refusal_is_audit
     );
     let audit = audit_rows(&pool, app).await;
     assert_eq!(audit.len(), 2, "the granted path appends its own row");
-    assert_eq!(audit[1]["outcome"], json!("granted"));
+    assert_eq!(audit[1]["outcome"], value!("granted"));
 
     // And the grant is scoped to the classification the policy named: the same
     // role is still refused a class the policy does not list. Without this the
@@ -837,7 +842,7 @@ async fn an_actor_the_policy_does_not_permit_is_refused_and_the_refusal_is_audit
     zeroship_plugin_db::cache_schema_for_tests(
         app,
         "vitals",
-        json!({ "hr": { "type": "string", "mask": { "kind": "full", "classification": "phi" } } }),
+        value!({ "hr": { "type": "string", "mask": { "kind": "full", "classification": "phi" } } }),
     );
     let err = dispatch_unmask(
         &unmask_route(app).await,
@@ -846,7 +851,7 @@ async fn an_actor_the_policy_does_not_permit_is_refused_and_the_refusal_is_audit
             collection: "vitals".to_string(),
             row_pk: person.id.clone(),
             column: "hr".to_string(),
-            actor: Some(json!({ "kind": "support", "id": "usr_support_1" })),
+            actor: Some(value!({ "kind": "support", "id": "usr_support_1" })),
             reason: None,
             rejected_claim: None,
         },
@@ -881,8 +886,8 @@ async fn an_unmask_with_no_usable_actor_is_refused_and_audited() {
     // hands the check.
     for (label, actor) in [
         ("absent", None),
-        ("not an object", Some(json!("support"))),
-        ("object with no kind", Some(json!({ "id": "usr_1" }))),
+        ("not an object", Some(value!("support"))),
+        ("object with no kind", Some(value!({ "id": "usr_1" }))),
     ] {
         let err = match dispatch_unmask(
             &unmask_route(app).await,
@@ -913,20 +918,20 @@ async fn an_unmask_with_no_usable_actor_is_refused_and_audited() {
     let audit = audit_rows(&pool, app).await;
     assert_eq!(audit.len(), 3, "every refusal is audited: {audit:?}");
     for row in &audit {
-        assert_eq!(row["outcome"], json!("denied"), "{row:?}");
-        assert_eq!(row["classification"], json!("pci"), "{row:?}");
+        assert_eq!(row["outcome"], value!("denied"), "{row:?}");
+        assert_eq!(row["classification"], value!("pci"), "{row:?}");
     }
-    assert_eq!(audit[0]["actor_role"], json!(""));
-    assert_eq!(audit[0]["actor_id"], json!(""));
-    assert_eq!(audit[2]["actor_id"], json!("usr_1"));
+    assert_eq!(audit[0]["actor_role"], value!(""));
+    assert_eq!(audit[0]["actor_id"], value!(""));
+    assert_eq!(audit[2]["actor_id"], value!("usr_1"));
     assert_eq!(
         audit[2]["actor_role"],
-        json!(""),
+        value!(""),
         "an actor with no kind is audited with an empty role, not a forged one",
     );
 
     // ---- THE CONTROL: the same fixture DOES hand out the plaintext ----
-    dispatch_set_mask_policy(&unmask_backend().await, app, json!({ "support": ["pci"] }))
+    dispatch_set_mask_policy(&unmask_backend().await, app, value!({ "support": ["pci"] }))
         .await
         .expect("install the app's declared mask policy");
     let result = dispatch_unmask(
@@ -934,7 +939,7 @@ async fn an_unmask_with_no_usable_actor_is_refused_and_audited() {
         &DbBinding::cold_start(app),
         unmask_args(
             &person.id,
-            Some(json!({ "kind": "support", "id": "usr_2" })),
+            Some(value!({ "kind": "support", "id": "usr_2" })),
         ),
     )
     .await
@@ -942,7 +947,7 @@ async fn an_unmask_with_no_usable_actor_is_refused_and_audited() {
     assert_eq!(result.plaintext, ssn);
     let audit = audit_rows(&pool, app).await;
     assert_eq!(audit.len(), 4);
-    assert_eq!(audit[3]["outcome"], json!("granted"));
+    assert_eq!(audit[3]["outcome"], value!("granted"));
 
     release_pg(pool).await;
 }
@@ -976,7 +981,7 @@ async fn an_unmask_with_no_usable_actor_is_refused_and_audited() {
 /// spelling is the JS method's positional parameter, and by the time the object
 /// reaches the parser it has been stamped in `snake_case`.
 fn unmask_args_json(row_pk: &str, actor: &Value) -> Value {
-    json!({
+    value!({
         "collection": "people",
         "row_pk": row_pk,
         "column": "ssn",
@@ -989,7 +994,7 @@ fn unmask_args_json(row_pk: &str, actor: &Value) -> Value {
 /// stamping, and here the per-item key really is `rowPk` - that is the shape
 /// the SDK documents and the parser reads.
 fn bulk_args_json(row_pk: &str, columns: &[&str], actor: &Value) -> Value {
-    json!({
+    value!({
         "collection": "people",
         "items": [{ "rowPk": row_pk, "columns": columns }],
         "actor": actor,
@@ -1023,14 +1028,14 @@ async fn app_js_claiming_the_auto_system_actor_is_refused_by_the_parser() {
     let ssn = "123-45-6789";
     let person = audited_unmask_fixture(&pool, &url, app, &schema, ssn).await;
 
-    dispatch_set_mask_policy(&unmask_backend().await, app, json!({ "support": ["pci"] }))
+    dispatch_set_mask_policy(&unmask_backend().await, app, value!({ "support": ["pci"] }))
         .await
         .expect("install the app's declared mask policy");
 
     // ---- the forged system actor, parsed from the JSON a handler sends ----
     let forged = parse_args(&unmask_args_json(
         &person.id,
-        &json!({ "kind": "auto", "id": "usr_support_1" }),
+        &value!({ "kind": "auto", "id": "usr_support_1" }),
     ))
     .expect(
         "the payload must PARSE: DB-3 is an authorization fence, not a shape \
@@ -1069,17 +1074,17 @@ async fn app_js_claiming_the_auto_system_actor_is_refused_by_the_parser() {
         1,
         "the denied path writes exactly one row: {audit:?}",
     );
-    assert_eq!(audit[0]["outcome"], json!("denied"));
-    assert_eq!(audit[0]["collection"], json!("people"));
-    assert_eq!(audit[0]["column"], json!("ssn"));
+    assert_eq!(audit[0]["outcome"], value!("denied"));
+    assert_eq!(audit[0]["collection"], value!("people"));
+    assert_eq!(audit[0]["column"], value!("ssn"));
     assert_eq!(
         audit[0]["classification"],
-        json!("pci"),
+        value!("pci"),
         "the audit row records the classification that was refused",
     );
     assert_eq!(
         audit[0]["row_pk"],
-        json!(person.id),
+        value!(person.id),
         "and the row it names is the one the platform minted",
     );
     // The sanitiser strips the WHOLE actor, not just its `kind`: the id the
@@ -1087,19 +1092,19 @@ async fn app_js_claiming_the_auto_system_actor_is_refused_by_the_parser() {
     // attempt is recorded exactly like a call with no actor at all.
     assert_eq!(
         audit[0]["actor_role"],
-        json!(""),
+        value!(""),
         "the forged `auto` claim must not be recorded as the actor's role: {audit:?}",
     );
     assert_eq!(
         audit[0]["actor_id"],
-        json!(""),
+        value!(""),
         "nor the id that travelled with it: {audit:?}",
     );
 
     // ---- THE CONTROL, differing in one token: `auto` -> `support` ----
     let permitted = parse_args(&unmask_args_json(
         &person.id,
-        &json!({ "kind": "support", "id": "usr_support_1" }),
+        &value!({ "kind": "support", "id": "usr_support_1" }),
     ))
     .expect("the same payload shape must parse");
     let result = dispatch_unmask(
@@ -1119,10 +1124,10 @@ async fn app_js_claiming_the_auto_system_actor_is_refused_by_the_parser() {
     );
     let audit = audit_rows(&pool, app).await;
     assert_eq!(audit.len(), 2, "the granted path appends its own row");
-    assert_eq!(audit[1]["outcome"], json!("granted"));
+    assert_eq!(audit[1]["outcome"], value!("granted"));
     assert_eq!(
         audit[1]["actor_role"],
-        json!("support"),
+        value!("support"),
         "and a NON-reserved kind does travel through to the audit row, so the \
          empty role above is the sanitiser and not an audit path that never \
          records one: {audit:?}",
@@ -1151,7 +1156,7 @@ async fn app_js_claiming_the_auto_system_actor_is_refused_by_the_bulk_parser() {
     let ssn = "987-65-4321";
     let person = audited_unmask_fixture(&pool, &url, app, &schema, ssn).await;
 
-    dispatch_set_mask_policy(&unmask_backend().await, app, json!({ "support": ["pci"] }))
+    dispatch_set_mask_policy(&unmask_backend().await, app, value!({ "support": ["pci"] }))
         .await
         .expect("install the app's declared mask policy");
 
@@ -1159,7 +1164,7 @@ async fn app_js_claiming_the_auto_system_actor_is_refused_by_the_bulk_parser() {
     let forged = parse_bulk_args(&bulk_args_json(
         &person.id,
         &["ssn"],
-        &json!({ "kind": "auto", "id": "usr_support_1" }),
+        &value!({ "kind": "auto", "id": "usr_support_1" }),
     ))
     .expect("the payload must PARSE; DB-3 is an authorization fence");
     let err = match dispatch_bulk_unmask(
@@ -1194,17 +1199,17 @@ async fn app_js_claiming_the_auto_system_actor_is_refused_by_the_bulk_parser() {
         1,
         "the refused batch writes exactly one row for the whole call: {audit:?}",
     );
-    assert_eq!(audit[0]["outcome"], json!("denied"));
-    assert_eq!(audit[0]["collection"], json!("people"));
-    assert_eq!(audit[0]["column"], json!("ssn"));
-    assert_eq!(audit[0]["classification"], json!("pci"));
-    assert_eq!(audit[0]["row_pk"], json!(person.id));
+    assert_eq!(audit[0]["outcome"], value!("denied"));
+    assert_eq!(audit[0]["collection"], value!("people"));
+    assert_eq!(audit[0]["column"], value!("ssn"));
+    assert_eq!(audit[0]["classification"], value!("pci"));
+    assert_eq!(audit[0]["row_pk"], value!(person.id));
     assert_eq!(
         audit[0]["actor_role"],
-        json!(""),
+        value!(""),
         "the forged `auto` claim must not be recorded as the actor's role: {audit:?}",
     );
-    assert_eq!(audit[0]["actor_id"], json!(""));
+    assert_eq!(audit[0]["actor_id"], value!(""));
     let reason = audit[0]["reason"]
         .as_str()
         .expect("the audit row carries a reason");
@@ -1217,7 +1222,7 @@ async fn app_js_claiming_the_auto_system_actor_is_refused_by_the_bulk_parser() {
     let permitted = parse_bulk_args(&bulk_args_json(
         &person.id,
         &["ssn"],
-        &json!({ "kind": "support", "id": "usr_support_1" }),
+        &value!({ "kind": "support", "id": "usr_support_1" }),
     ))
     .expect("the same payload shape must parse");
     let granted = dispatch_bulk_unmask(
@@ -1237,10 +1242,10 @@ async fn app_js_claiming_the_auto_system_actor_is_refused_by_the_bulk_parser() {
     );
     let audit = audit_rows(&pool, app).await;
     assert_eq!(audit.len(), 2, "the granted batch appends its own row");
-    assert_eq!(audit[1]["outcome"], json!("granted"));
+    assert_eq!(audit[1]["outcome"], value!("granted"));
     assert_eq!(
         audit[1]["actor_role"],
-        json!("support"),
+        value!("support"),
         "and a NON-reserved kind does travel through to the audit row: {audit:?}",
     );
 
@@ -1275,14 +1280,14 @@ async fn a_rejected_impersonation_is_distinguishable_from_an_absent_actor() {
     let schema = flip_schema();
     let person = audited_unmask_fixture(&pool, &url, app, &schema, "123-45-6789").await;
 
-    dispatch_set_mask_policy(&unmask_backend().await, app, json!({ "support": ["pci"] }))
+    dispatch_set_mask_policy(&unmask_backend().await, app, value!({ "support": ["pci"] }))
         .await
         .expect("install the app's declared mask policy");
 
     // ---- (1) a forged claim on the reserved system kind, naming a real user
     let forged = parse_args(&unmask_args_json(
         &person.id,
-        &json!({ "kind": "auto", "id": "usr_support_1" }),
+        &value!({ "kind": "auto", "id": "usr_support_1" }),
     ))
     .expect("the forged payload must parse; DB-3 is a fence, not a shape check");
     dispatch_unmask(
@@ -1311,8 +1316,8 @@ async fn a_rejected_impersonation_is_distinguishable_from_an_absent_actor() {
     // holds and must keep holding - the fix is a new column, never a relaxation
     // of these two.
     for row in &audit {
-        assert_eq!(row["actor_id"], json!(""), "{row:?}");
-        assert_eq!(row["actor_role"], json!(""), "{row:?}");
+        assert_eq!(row["actor_id"], value!(""), "{row:?}");
+        assert_eq!(row["actor_role"], value!(""), "{row:?}");
     }
 
     assert_ne!(
@@ -1397,17 +1402,17 @@ async fn a_bulk_unmask_batch_with_one_forbidden_column_is_refused_whole() {
         &url,
         app,
         &schema,
-        json!({ "ssn": ssn, "email": email, "nickname": "ada" }),
+        value!({ "ssn": ssn, "email": email, "nickname": "ada" }),
         &[("ssn", ssn), ("email", email)],
     )
     .await;
 
     // The policy grants `support` exactly ONE of the two classifications:
     // `email` is pii and permitted, `ssn` is pci and is not.
-    dispatch_set_mask_policy(&unmask_backend().await, app, json!({ "support": ["pii"] }))
+    dispatch_set_mask_policy(&unmask_backend().await, app, value!({ "support": ["pii"] }))
         .await
         .expect("install the app's declared mask policy");
-    let actor = json!({ "kind": "support", "id": "usr_support_1" });
+    let actor = value!({ "kind": "support", "id": "usr_support_1" });
 
     // ---- the half-authorised batch ----
     let err = dispatch_bulk_unmask(
@@ -1444,23 +1449,23 @@ async fn a_bulk_unmask_batch_with_one_forbidden_column_is_refused_whole() {
         1,
         "the refused batch writes exactly one row for the whole call: {audit:?}",
     );
-    assert_eq!(audit[0]["outcome"], json!("denied"));
-    assert_eq!(audit[0]["actor_role"], json!("support"));
-    assert_eq!(audit[0]["actor_id"], json!("usr_support_1"));
-    assert_eq!(audit[0]["collection"], json!("people"));
+    assert_eq!(audit[0]["outcome"], value!("denied"));
+    assert_eq!(audit[0]["actor_role"], value!("support"));
+    assert_eq!(audit[0]["actor_id"], value!("usr_support_1"));
+    assert_eq!(audit[0]["collection"], value!("people"));
     assert_eq!(
         audit[0]["row_pk"],
-        json!(person.id),
+        value!(person.id),
         "and the row it names is the one the platform minted",
     );
     assert_eq!(
         audit[0]["column"],
-        json!("email,ssn"),
+        value!("email,ssn"),
         "the row names every column the batch ASKED for, not only the refused one",
     );
     assert_eq!(
         audit[0]["classification"],
-        json!("pci,pii"),
+        value!("pci,pii"),
         "and the union of the classifications the batch spanned",
     );
     let reason = audit[0]["reason"]
@@ -1498,9 +1503,9 @@ async fn a_bulk_unmask_batch_with_one_forbidden_column_is_refused_whole() {
     );
     let audit = audit_rows(&pool, app).await;
     assert_eq!(audit.len(), 2, "the granted batch appends its own row");
-    assert_eq!(audit[1]["outcome"], json!("granted"));
-    assert_eq!(audit[1]["column"], json!("email"));
-    assert_eq!(audit[1]["classification"], json!("pii"));
+    assert_eq!(audit[1]["outcome"], value!("granted"));
+    assert_eq!(audit[1]["column"], value!("email"));
+    assert_eq!(audit[1]["classification"], value!("pii"));
 
     // ---- and the fence spans ROWS, not only columns ----
     //
@@ -1516,7 +1521,7 @@ async fn a_bulk_unmask_batch_with_one_forbidden_column_is_refused_whole() {
         app,
         "people",
         &schema,
-        json!({ "ssn": "555-55-5555", "email": "grace@example.com", "nickname": "grace" }),
+        value!({ "ssn": "555-55-5555", "email": "grace@example.com", "nickname": "grace" }),
     )
     .await;
     let two_rows = BulkUnmaskArgs {
@@ -1551,10 +1556,10 @@ async fn a_bulk_unmask_batch_with_one_forbidden_column_is_refused_whole() {
     assert!(!rendered.contains(ssn), "{err:?}");
     let audit = audit_rows(&pool, app).await;
     assert_eq!(audit.len(), 3, "the refused batch audits once: {audit:?}");
-    assert_eq!(audit[2]["outcome"], json!("denied"));
+    assert_eq!(audit[2]["outcome"], value!("denied"));
     assert_eq!(
         audit[2]["row_pk"],
-        json!(format!("{},{}", second.id, person.id)),
+        value!(format!("{},{}", second.id, person.id)),
         "the row names every row the batch spanned, in caller order",
     );
     let reason = audit[2]["reason"]
@@ -1592,7 +1597,7 @@ async fn a_bulk_unmask_batch_with_one_forbidden_column_is_refused_whole() {
                 columns: vec!["email".to_string(), "ssn".to_string()],
             },
         ],
-        actor: Some(json!({ "kind": "support", "id": "usr_support_1" })),
+        actor: Some(value!({ "kind": "support", "id": "usr_support_1" })),
         reason: Some("mask_flip integration test".to_string()),
         rejected_claim: None,
     };
@@ -1615,7 +1620,7 @@ async fn a_bulk_unmask_batch_with_one_forbidden_column_is_refused_whole() {
         4,
         "two denied pairs still audit ONCE, not once per denial: {audit:?}",
     );
-    assert_eq!(audit[3]["outcome"], json!("denied"));
+    assert_eq!(audit[3]["outcome"], value!("denied"));
     let reason = audit[3]["reason"]
         .as_str()
         .expect("the audit row carries a reason");
@@ -1639,7 +1644,7 @@ async fn a_bulk_unmask_batch_with_one_forbidden_column_is_refused_whole() {
     dispatch_set_mask_policy(
         &unmask_backend().await,
         app,
-        json!({ "support": ["pii", "pci"] }),
+        value!({ "support": ["pii", "pci"] }),
     )
     .await
     .expect("widen the app's declared mask policy");
@@ -1662,8 +1667,8 @@ async fn a_bulk_unmask_batch_with_one_forbidden_column_is_refused_whole() {
         5,
         "the granted batch appends one row: {audit:?}"
     );
-    assert_eq!(audit[4]["outcome"], json!("granted"));
-    assert_eq!(audit[4]["column"], json!("email,ssn"));
+    assert_eq!(audit[4]["outcome"], value!("granted"));
+    assert_eq!(audit[4]["column"], value!("email,ssn"));
 
     release_pg(pool).await;
 }
@@ -1699,15 +1704,15 @@ async fn a_query_hint_naming_one_forbidden_column_is_refused_whole() {
         &url,
         app,
         &schema,
-        json!({ "ssn": ssn, "email": email, "nickname": "grace" }),
+        value!({ "ssn": ssn, "email": email, "nickname": "grace" }),
         &[("ssn", ssn), ("email", email)],
     )
     .await;
 
-    dispatch_set_mask_policy(&unmask_backend().await, app, json!({ "support": ["pii"] }))
+    dispatch_set_mask_policy(&unmask_backend().await, app, value!({ "support": ["pii"] }))
         .await
         .expect("install the app's declared mask policy");
-    let actor = Some(json!({ "kind": "support", "id": "usr_support_2" }));
+    let actor = Some(value!({ "kind": "support", "id": "usr_support_2" }));
     let reason = Some("mask_flip integration test".to_string());
     let both = ["email".to_string(), "ssn".to_string()];
 
@@ -1747,15 +1752,15 @@ async fn a_query_hint_naming_one_forbidden_column_is_refused_whole() {
         1,
         "the refused hint writes exactly one row for the whole query: {audit:?}",
     );
-    assert_eq!(audit[0]["outcome"], json!("denied"));
-    assert_eq!(audit[0]["actor_role"], json!("support"));
-    assert_eq!(audit[0]["actor_id"], json!("usr_support_2"));
-    assert_eq!(audit[0]["collection"], json!("people"));
-    assert_eq!(audit[0]["column"], json!("email,ssn"));
-    assert_eq!(audit[0]["classification"], json!("pci,pii"));
+    assert_eq!(audit[0]["outcome"], value!("denied"));
+    assert_eq!(audit[0]["actor_role"], value!("support"));
+    assert_eq!(audit[0]["actor_id"], value!("usr_support_2"));
+    assert_eq!(audit[0]["collection"], value!("people"));
+    assert_eq!(audit[0]["column"], value!("email,ssn"));
+    assert_eq!(audit[0]["classification"], value!("pci,pii"));
     assert_eq!(
         audit[0]["row_pk"],
-        json!("[query_hint]"),
+        value!("[query_hint]"),
         "a hint is not a per-row dispatch, so the row_pk slot carries the \
          marker and an operator's `row_pk = '<id>'` query does not sweep it in",
     );
@@ -1775,12 +1780,12 @@ async fn a_query_hint_naming_one_forbidden_column_is_refused_whole() {
     // a caller falls back to still shows the MASK. Without this the arm above
     // would pass against a build that refused the hint and leaked through the
     // default projection anyway.
-    let rows = run_find(&pool, app, &json!({}), &schema).await;
+    let rows = run_find(&pool, app, &value!({}), &schema).await;
     assert_eq!(rows.len(), 1, "the fixture row is still there: {rows:?}");
-    assert_eq!(rows[0]["id"], json!(person.id));
-    assert_eq!(rows[0]["ssn"], json!("***"));
-    assert_eq!(rows[0]["email"], json!("g***@example.com"));
-    assert_eq!(rows[0]["nickname"], json!("grace"));
+    assert_eq!(rows[0]["id"], value!(person.id));
+    assert_eq!(rows[0]["ssn"], value!("***"));
+    assert_eq!(rows[0]["email"], value!("g***@example.com"));
+    assert_eq!(rows[0]["nickname"], value!("grace"));
 
     // ---- CONTROL 1, differing in one variable: the hint drops the forbidden
     // column. Same actor, same policy - and the fence passes. It writes no
@@ -1810,7 +1815,7 @@ async fn a_query_hint_naming_one_forbidden_column_is_refused_whole() {
     dispatch_set_mask_policy(
         &unmask_backend().await,
         app,
-        json!({ "support": ["pii", "pci"] }),
+        value!({ "support": ["pii", "pci"] }),
     )
     .await
     .expect("widen the app's declared mask policy");
@@ -1825,7 +1830,7 @@ async fn a_query_hint_naming_one_forbidden_column_is_refused_whole() {
     )
     .await
     .expect("the same hint must pass once the policy grants both classes");
-    let mut rows = run_find(&pool, app, &json!({}), &schema).await;
+    let mut rows = run_find(&pool, app, &value!({}), &schema).await;
     dispatch_unmask_for_query(
         &unmask_route(app).await,
         &DbBinding::cold_start(app),
@@ -1835,13 +1840,13 @@ async fn a_query_hint_naming_one_forbidden_column_is_refused_whole() {
     )
     .await
     .expect("the promotion the find dispatcher runs after the SELECT");
-    assert_eq!(rows[0]["id"], json!(person.id));
+    assert_eq!(rows[0]["id"], value!(person.id));
     assert_eq!(
         rows[0]["ssn"],
-        json!(ssn),
+        value!(ssn),
         "the hint promotes plaintext into the listed columns: {rows:?}",
     );
-    assert_eq!(rows[0]["email"], json!(email));
+    assert_eq!(rows[0]["email"], value!(email));
     audit_query_hint_granted(
         &unmask_backend().await,
         &DbBinding::cold_start(app),
@@ -1859,15 +1864,15 @@ async fn a_query_hint_naming_one_forbidden_column_is_refused_whole() {
         2,
         "the granted query appends exactly one row: {audit:?}",
     );
-    assert_eq!(audit[1]["outcome"], json!("granted"));
-    assert_eq!(audit[1]["column"], json!("email,ssn"));
-    assert_eq!(audit[1]["row_pk"], json!("[query_hint]"));
+    assert_eq!(audit[1]["outcome"], value!("granted"));
+    assert_eq!(audit[1]["column"], value!("email,ssn"));
+    assert_eq!(audit[1]["row_pk"], value!("[query_hint]"));
 
     // And the promotion was in-memory only: the fields' own columns still hold
     // the mask on disk, so the next default read leaks nothing.
-    let after = run_find(&pool, app, &json!({}), &schema).await;
-    assert_eq!(after[0]["ssn"], json!("***"));
-    assert_eq!(after[0]["email"], json!("g***@example.com"));
+    let after = run_find(&pool, app, &value!({}), &schema).await;
+    assert_eq!(after[0]["ssn"], value!("***"));
+    assert_eq!(after[0]["email"], value!("g***@example.com"));
 
     release_pg(pool).await;
 }
@@ -1904,15 +1909,15 @@ async fn a_query_hint_reads_the_column_its_alias_resolved_to() {
         &url,
         app,
         &schema,
-        json!({ "contact_email": email, "nickname": "ada" }),
+        value!({ "contact_email": email, "nickname": "ada" }),
         &[("contact_email", email)],
     )
     .await;
 
-    dispatch_set_mask_policy(&unmask_backend().await, app, json!({ "support": ["pii"] }))
+    dispatch_set_mask_policy(&unmask_backend().await, app, value!({ "support": ["pii"] }))
         .await
         .expect("install the app's declared mask policy");
-    let actor = Some(json!({ "kind": "support", "id": "usr_support_3" }));
+    let actor = Some(value!({ "kind": "support", "id": "usr_support_3" }));
     let reason = Some("mask_flip integration test".to_string());
     // The caller's spelling: camelCase, where the descriptor declares snake.
     let hinted = ["contactEmail".to_string()];
@@ -1933,7 +1938,7 @@ async fn a_query_hint_reads_the_column_its_alias_resolved_to() {
          defect being present",
     );
 
-    let mut rows = vec![json!({
+    let mut rows = vec![value!({
         "id": person.id.clone(),
         "contact_email": "a***@example.com",
         "nickname": "ada",
@@ -1955,7 +1960,7 @@ async fn a_query_hint_reads_the_column_its_alias_resolved_to() {
     );
     assert_eq!(
         rows[0]["contact_email"],
-        json!(email),
+        value!(email),
         "the promoted value lands under the DECLARED name: {rows:?}",
     );
 
@@ -1999,7 +2004,7 @@ async fn no_write_verb_hands_back_a_column_the_descriptor_does_not_declare() {
         app,
         "people",
         &schema,
-        json!({ "ssn": "123-45-6789", "nickname": "ada" }),
+        value!({ "ssn": "123-45-6789", "nickname": "ada" }),
     )
     .await;
     assert_eq!(returned.len(), 1);
@@ -2020,7 +2025,7 @@ async fn no_write_verb_hands_back_a_column_the_descriptor_does_not_declare() {
     // the one the pipeline minted BEFORE the statement ran, so this arm is also
     // the projection's round trip: `RETURNING "id"` hands back the identity the
     // write assigned.
-    assert_eq!(returned[0]["id"], json!(minted_id));
+    assert_eq!(returned[0]["id"], value!(minted_id));
     assert!(
         returned[0].get("ssn").is_some(),
         "the masked column must still come back: {:?}",
@@ -2060,9 +2065,9 @@ async fn no_write_verb_hands_back_a_column_the_descriptor_does_not_declare() {
     );
     // Paired with what must still come back, so this is not a green from
     // returning an empty row.
-    assert_eq!(finalized[0]["ssn"]["masked"], json!("***"));
-    assert_eq!(finalized[0]["nickname"], json!("ada"));
-    assert_eq!(finalized[0]["id"], json!(minted_id));
+    assert_eq!(finalized[0]["ssn"]["masked"], value!("***"));
+    assert_eq!(finalized[0]["nickname"], value!("ada"));
+    assert_eq!(finalized[0]["id"], value!(minted_id));
 
     // ---- and the arm that binds the SURFACE stage specifically ----
     //
@@ -2080,9 +2085,9 @@ async fn no_write_verb_hands_back_a_column_the_descriptor_does_not_declare() {
     // the only other key removal in the pipeline is the mask pass's, and it
     // removes exactly one name it derives itself.
     let mut smuggled = returned[0].clone();
-    smuggled[raw_column_name("ssn")] = json!("123-45-6789");
-    smuggled["__zs_shadow_key"] = json!("aux-42");
-    smuggled["totally_undeclared"] = json!("leak-me");
+    smuggled[raw_column_name("ssn")] = value!("123-45-6789");
+    smuggled["__zs_shadow_key"] = value!("aux-42");
+    smuggled["totally_undeclared"] = value!("leak-me");
     let finalized =
         zeroship_plugin_db::finalize_rows_on_read_for_tests(app, "people", vec![smuggled])
             .await
@@ -2124,7 +2129,7 @@ fn the_raw_column_is_refused_on_every_inbound_surface() {
     let refusals: Vec<(&str, bool)> = vec![
         (
             "filter key",
-            build_where(&json!({ raw.clone(): "x" }), &mut Vec::new(), &schema).is_err(),
+            build_where(&value!({ (raw.clone()): "x" }), &mut Vec::new(), &schema).is_err(),
         ),
         (
             // The aggregate matcher and `$group.by` below both validate
@@ -2133,7 +2138,7 @@ fn the_raw_column_is_refused_on_every_inbound_surface() {
             build_aggregate(
                 &zeroship_data_query_builder::SchemaName::new("app1").expect("fixture schema name"),
                 "people",
-                &json!([{ "$match": { raw.clone(): "x" } }]),
+                &value!([{ "$match": { (raw.clone()): "x" } }]),
                 &schema,
             )
             .is_err(),
@@ -2143,11 +2148,11 @@ fn the_raw_column_is_refused_on_every_inbound_surface() {
             build_find_with_schema(
                 &zeroship_data_query_builder::SchemaName::new("app1").expect("fixture schema name"),
                 "people",
-                &json!({}),
+                &value!({}),
                 Some(1),
                 None,
                 None,
-                Some(&json!([raw.clone()])),
+                Some(&value!([raw.clone()])),
                 &schema,
             )
             .is_err(),
@@ -2157,10 +2162,10 @@ fn the_raw_column_is_refused_on_every_inbound_surface() {
             build_find_with_schema(
                 &zeroship_data_query_builder::SchemaName::new("app1").expect("fixture schema name"),
                 "people",
-                &json!({}),
+                &value!({}),
                 Some(1),
                 None,
-                Some(&json!({ raw.clone(): 1 })),
+                Some(&value!({ (raw.clone()): 1 })),
                 None,
                 &schema,
             )
@@ -2171,7 +2176,7 @@ fn the_raw_column_is_refused_on_every_inbound_surface() {
             build_aggregate(
                 &zeroship_data_query_builder::SchemaName::new("app1").expect("fixture schema name"),
                 "people",
-                &json!([{ "$group": { "by": [raw.clone()] } }]),
+                &value!([{ "$group": { "by": [raw.clone()] } }]),
                 &schema,
             )
             .is_err(),
@@ -2182,7 +2187,7 @@ fn the_raw_column_is_refused_on_every_inbound_surface() {
                 &zeroship_data_query_builder::SchemaName::new("app1").expect("fixture schema name"),
                 "people",
                 &raw,
-                &json!({}),
+                &value!({}),
                 &schema,
             )
             .is_err(),
@@ -2202,12 +2207,12 @@ fn the_raw_column_is_refused_on_every_inbound_surface() {
 
     // The control: the LOGICAL name is ACCEPTED on those same surfaces. Without
     // it, a validator that refused everything would pass all seven above.
-    assert!(build_where(&json!({ "ssn": "x" }), &mut Vec::new(), &schema).is_ok());
+    assert!(build_where(&value!({ "ssn": "x" }), &mut Vec::new(), &schema).is_ok());
     assert!(build_distinct(
         &zeroship_data_query_builder::SchemaName::new("app1").expect("fixture schema name"),
         "people",
         "ssn",
-        &json!({}),
+        &value!({}),
         &schema
     )
     .is_ok());
@@ -2215,11 +2220,11 @@ fn the_raw_column_is_refused_on_every_inbound_surface() {
     assert!(build_find_with_schema(
         &zeroship_data_query_builder::SchemaName::new("app1").expect("fixture schema name"),
         "people",
-        &json!({}),
+        &value!({}),
         Some(1),
         None,
-        Some(&json!({ "ssn": 1 })),
-        Some(&json!(["ssn"])),
+        Some(&value!({ "ssn": 1 })),
+        Some(&value!(["ssn"])),
         &schema,
     )
     .is_ok());
@@ -2246,7 +2251,7 @@ fn a_masked_predicate_is_lowered_for_the_change_stream() {
     let schema = flip_schema();
 
     let Some(Predicate::All(conjuncts)) =
-        normalise_filter(&json!({ "ssn": "123-45-6789" }), &schema)
+        normalise_filter(&value!({ "ssn": "123-45-6789" }), &schema)
     else {
         panic!("an equality predicate on a masked column must stay fine-grained");
     };
@@ -2255,13 +2260,13 @@ fn a_masked_predicate_is_lowered_for_the_change_stream() {
     assert_eq!(conjuncts[0].op, PredicateOp::Eq);
     assert_eq!(
         conjuncts[0].value,
-        json!("***"),
+        value!("***"),
         "the operand must be masked the same way the stored value is, or the \
          predicate silently never matches",
     );
 
     assert!(
-        normalise_filter(&json!({ "ssn": { "$gt": "500-00-0000" } }), &schema).is_none(),
+        normalise_filter(&value!({ "ssn": { "$gt": "500-00-0000" } }), &schema).is_none(),
         "a range over a mask must fall back to coarse-grained rather than \
          comparing masks as if they were values",
     );
@@ -2269,12 +2274,12 @@ fn a_masked_predicate_is_lowered_for_the_change_stream() {
     // The control: the unmasked column keeps BOTH shapes fine-grained and its
     // operand untouched. Without this arm an implementation that returned
     // `None` for everything would pass the range assertion.
-    let Some(Predicate::All(conjuncts)) = normalise_filter(&json!({ "nickname": "ada" }), &schema)
+    let Some(Predicate::All(conjuncts)) = normalise_filter(&value!({ "nickname": "ada" }), &schema)
     else {
         panic!("an unmasked equality predicate must stay fine-grained");
     };
-    assert_eq!(conjuncts[0].value, json!("ada"));
-    assert!(normalise_filter(&json!({ "nickname": { "$gt": "m" } }), &schema).is_some());
+    assert_eq!(conjuncts[0].value, value!("ada"));
+    assert!(normalise_filter(&value!({ "nickname": { "$gt": "m" } }), &schema).is_some());
 }
 
 // ---------------------------------------------------------------------------
@@ -2300,7 +2305,7 @@ async fn the_declared_type_and_constraints_travel_to_the_raw_column() {
     let url = require_pg().await;
     let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
     let app = "flip_ddl";
-    let schema = json!({
+    let schema = value!({
         "score": {
             "type": "number",
             "required": true,
@@ -2358,7 +2363,7 @@ async fn the_declared_type_and_constraints_travel_to_the_raw_column() {
         app,
         "accounts",
         &schema,
-        json!({ "score": 42.5, "tier": "gold", "plain": 7.0 }),
+        value!({ "score": 42.5, "tier": "gold", "plain": 7.0 }),
     )
     .await;
 
@@ -2401,7 +2406,7 @@ async fn a_unique_masked_field_admits_rows_that_share_a_mask() {
     let url = require_pg().await;
     let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
     let app = "flip_unique";
-    let schema = json!({
+    let schema = value!({
         "ssn": {
             "type": "string",
             "unique": true,
@@ -2433,7 +2438,7 @@ async fn a_unique_masked_field_admits_rows_that_share_a_mask() {
         app,
         "people",
         &schema,
-        json!({ "ssn": "111-11-1234" }),
+        value!({ "ssn": "111-11-1234" }),
     )
     .await;
     let second = insert_through_the_pipeline(
@@ -2441,7 +2446,7 @@ async fn a_unique_masked_field_admits_rows_that_share_a_mask() {
         app,
         "people",
         &schema,
-        json!({ "ssn": "999-99-1234" }),
+        value!({ "ssn": "999-99-1234" }),
     )
     .await;
 
@@ -2480,7 +2485,7 @@ async fn a_unique_masked_field_admits_rows_that_share_a_mask() {
     // A third row whose REAL value collides with the first. Its id is minted
     // like every other, so the only thing that can be refused below is the
     // duplicate value on the raw column.
-    let mut docs = json!([{ "ssn": "111-11-1234" }]);
+    let mut docs = value!([{ "ssn": "111-11-1234" }]);
     zeroship_plugin_db::prepare_insert_many_docs_for_tests(&mut docs, app, "people", None)
         .await
         .expect("write pipeline");
@@ -2491,11 +2496,11 @@ async fn a_unique_masked_field_admits_rows_that_share_a_mask() {
         &docs[0],
     )
     .unwrap();
-    let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
-    let err = pool
-        .query_text_params(&bq.sql, &param_refs)
-        .await
-        .expect_err("a duplicate REAL value must still be refused");
+    let param_refs = &bq.params;
+    let err =
+        zeroship_data_postgres::params::query(&pool.acquire().await.unwrap(), &bq.sql, param_refs)
+            .await
+            .expect_err("a duplicate REAL value must still be refused");
     assert!(
         format!("{err:?}").contains("23505") || format!("{err:?}").contains("unique"),
         "expected a unique violation on the raw column, got {err:?}",
@@ -2512,14 +2517,14 @@ async fn a_unique_masked_field_admits_rows_that_share_a_mask() {
 /// changed. The control column stays, so a fixture that stopped storing
 /// anything at all cannot pass.
 fn flip_schema_without_the_mask_key() -> Value {
-    json!({
+    value!({
         "ssn": { "type": "string" },
         "nickname": { "type": "string" },
     })
 }
 
 fn encrypted_schema() -> Value {
-    json!({
+    value!({
         "secret": {
             "type": "string",
             "encrypted": { "mode": "randomised", "keyId": "k1", "wraps": "string" }
@@ -2530,7 +2535,7 @@ fn encrypted_schema() -> Value {
 
 /// [`encrypted_schema`] with the `encrypted` key DELETED from `secret`.
 fn encrypted_schema_without_the_encrypted_key() -> Value {
-    json!({
+    value!({
         "secret": { "type": "string" },
         "nickname": { "type": "string" },
     })
@@ -2554,7 +2559,7 @@ async fn physical_rows(
         .await
         .unwrap();
     rows.iter()
-        .map(row_to_json)
+        .map(row_to_value)
         .map(|r| (r["id"].as_str().unwrap_or_default().to_string(), r))
         .collect()
 }
@@ -2585,7 +2590,7 @@ async fn deleting_the_mask_key_from_the_descriptor_must_not_write_plaintext() {
         app,
         "people",
         &masked,
-        json!({ "ssn": "123-45-6789", "nickname": "alice" }),
+        value!({ "ssn": "123-45-6789", "nickname": "alice" }),
     )
     .await;
 
@@ -2621,7 +2626,7 @@ async fn deleting_the_mask_key_from_the_descriptor_must_not_write_plaintext() {
     // that reset it here would prove the fence works on a cold cache and say
     // nothing about the warm one production actually runs.
     zeroship_plugin_db::cache_schema_for_tests(app, "people", unmasked.clone());
-    let mut docs = json!([{ "ssn": "987-65-4321", "nickname": "bob" }]);
+    let mut docs = value!([{ "ssn": "987-65-4321", "nickname": "bob" }]);
     let err =
         zeroship_plugin_db::prepare_insert_many_docs_for_tests(&mut docs, app, "people", None)
             .await
@@ -2688,7 +2693,7 @@ async fn deleting_the_encrypted_key_from_the_descriptor_must_not_write_plaintext
         app,
         "people",
         &encrypted,
-        json!({ "secret": "hunter2-the-real-one", "nickname": "alice" }),
+        value!({ "secret": "hunter2-the-real-one", "nickname": "alice" }),
     )
     .await;
 
@@ -2709,7 +2714,7 @@ async fn deleting_the_encrypted_key_from_the_descriptor_must_not_write_plaintext
 
     let plain = encrypted_schema_without_the_encrypted_key();
     zeroship_plugin_db::cache_schema_for_tests(app, "people", plain.clone());
-    let mut docs = json!([{ "secret": "hunter3-also-real", "nickname": "bob" }]);
+    let mut docs = value!([{ "secret": "hunter3-also-real", "nickname": "bob" }]);
     let err =
         zeroship_plugin_db::prepare_insert_many_docs_for_tests(&mut docs, app, "people", None)
             .await
@@ -2804,7 +2809,7 @@ async fn fixture_via_the_migration_engine(
             zeroship_migrate::shipping_vendors(),
             &app,
             collection,
-            schema,
+            &serde_json::to_value(schema).unwrap(),
             &zeroship_migrate::schema::query::FkEmission::Inline,
             &zeroship_migrate_postgres::DIALECT,
             false,
@@ -2905,7 +2910,7 @@ async fn a_migration_engine_built_table_refuses_a_mask_downgrade() {
         &app,
         "people",
         &masked,
-        json!({ "ssn": "123-45-6789", "nickname": "alice" }),
+        value!({ "ssn": "123-45-6789", "nickname": "alice" }),
     )
     .await;
     let raw = raw_column_name("ssn");
@@ -2930,7 +2935,7 @@ async fn a_migration_engine_built_table_refuses_a_mask_downgrade() {
 
     // The one-key deletion, against the table the engine built.
     zeroship_plugin_db::cache_schema_for_tests(&app, "people", flip_schema_without_the_mask_key());
-    let mut docs = json!([{ "ssn": "987-65-4321", "nickname": "bob" }]);
+    let mut docs = value!([{ "ssn": "987-65-4321", "nickname": "bob" }]);
     // Not `expect_err`: the failure this test exists for is the pipeline PREPARING
     // the write, and the prepared document is the downgrade itself. Reporting it
     // is the difference between "returned Ok(())" and naming the plaintext that
@@ -3017,7 +3022,7 @@ async fn a_migration_engine_built_table_refuses_an_encryption_downgrade() {
         &app,
         "people",
         &encrypted,
-        json!({ "secret": "hunter2-the-real-one", "nickname": "alice" }),
+        value!({ "secret": "hunter2-the-real-one", "nickname": "alice" }),
     )
     .await;
     let before = physical_rows(
@@ -3038,7 +3043,7 @@ async fn a_migration_engine_built_table_refuses_an_encryption_downgrade() {
         "people",
         encrypted_schema_without_the_encrypted_key(),
     );
-    let mut docs = json!([{ "secret": "hunter3-also-real", "nickname": "bob" }]);
+    let mut docs = value!([{ "secret": "hunter3-also-real", "nickname": "bob" }]);
     let err = match zeroship_plugin_db::prepare_insert_many_docs_for_tests(
         &mut docs, &app, "people", None,
     )

@@ -357,54 +357,56 @@ mod tests {
         use probe_partial_eq_str::Fallback as _;
         use probe_to_string::Fallback as _;
 
-        assert!(
-            !probe_display::Probe::<AppId>::IMPLEMENTED,
-            "AppId must not implement Display: every app_id.to_string() must be \
-             a compile error, not a silently correct-looking rendering"
-        );
-        assert!(
-            !probe_to_string::Probe::<AppId>::IMPLEMENTED,
-            "AppId must not implement ToString either - it can be written \
-             directly on a type that has no Display"
-        );
-        assert!(
-            !probe_deref::Probe::<AppId>::IMPLEMENTED,
-            "AppId must not Deref: it is what would make str::as_bytes reachable \
-             by autoderef"
-        );
-        assert!(
-            !probe_as_ref_str::Probe::<AppId>::IMPLEMENTED,
-            "AppId must not implement AsRef<str>: a tenant id would reach a \
-             parameter that wanted a schema name"
-        );
-        assert!(
-            !probe_borrow_str::Probe::<AppId>::IMPLEMENTED,
-            "AppId must not implement Borrow<str>"
-        );
-        assert!(
-            !probe_from_str_ref::Probe::<AppId>::IMPLEMENTED,
-            "AppId must not implement From<&str>: construction is a mint or a \
-             fallible parse, and there is no third way in"
-        );
-        assert!(
-            !probe_from_string::Probe::<AppId>::IMPLEMENTED,
-            "AppId must not implement From<String>"
-        );
-        assert!(
-            !probe_partial_eq_str::Probe::<AppId>::IMPLEMENTED,
-            "AppId must not implement PartialEq<str>: comparing against a raw \
-             string is a decision, not a convenience"
-        );
+        const {
+            assert!(
+                !probe_display::Probe::<AppId>::IMPLEMENTED,
+                "AppId must not implement Display: every app_id.to_string() must be \
+                 a compile error, not a silently correct-looking rendering"
+            );
+            assert!(
+                !probe_to_string::Probe::<AppId>::IMPLEMENTED,
+                "AppId must not implement ToString either - it can be written \
+                 directly on a type that has no Display"
+            );
+            assert!(
+                !probe_deref::Probe::<AppId>::IMPLEMENTED,
+                "AppId must not Deref: it is what would make str::as_bytes reachable \
+                 by autoderef"
+            );
+            assert!(
+                !probe_as_ref_str::Probe::<AppId>::IMPLEMENTED,
+                "AppId must not implement AsRef<str>: a tenant id would reach a \
+                 parameter that wanted a schema name"
+            );
+            assert!(
+                !probe_borrow_str::Probe::<AppId>::IMPLEMENTED,
+                "AppId must not implement Borrow<str>"
+            );
+            assert!(
+                !probe_from_str_ref::Probe::<AppId>::IMPLEMENTED,
+                "AppId must not implement From<&str>: construction is a mint or a \
+                 fallible parse, and there is no third way in"
+            );
+            assert!(
+                !probe_from_string::Probe::<AppId>::IMPLEMENTED,
+                "AppId must not implement From<String>"
+            );
+            assert!(
+                !probe_partial_eq_str::Probe::<AppId>::IMPLEMENTED,
+                "AppId must not implement PartialEq<str>: comparing against a raw \
+                 string is a decision, not a convenience"
+            );
 
-        // The control. Every probe above must be capable of answering `true`.
-        assert!(probe_display::Probe::<String>::IMPLEMENTED);
-        assert!(probe_to_string::Probe::<String>::IMPLEMENTED);
-        assert!(probe_deref::Probe::<String>::IMPLEMENTED);
-        assert!(probe_as_ref_str::Probe::<String>::IMPLEMENTED);
-        assert!(probe_borrow_str::Probe::<String>::IMPLEMENTED);
-        assert!(probe_from_str_ref::Probe::<String>::IMPLEMENTED);
-        assert!(probe_from_string::Probe::<String>::IMPLEMENTED);
-        assert!(probe_partial_eq_str::Probe::<String>::IMPLEMENTED);
+            // The control. Every probe above must be capable of answering `true`.
+            assert!(probe_display::Probe::<String>::IMPLEMENTED);
+            assert!(probe_to_string::Probe::<String>::IMPLEMENTED);
+            assert!(probe_deref::Probe::<String>::IMPLEMENTED);
+            assert!(probe_as_ref_str::Probe::<String>::IMPLEMENTED);
+            assert!(probe_borrow_str::Probe::<String>::IMPLEMENTED);
+            assert!(probe_from_str_ref::Probe::<String>::IMPLEMENTED);
+            assert!(probe_from_string::Probe::<String>::IMPLEMENTED);
+            assert!(probe_partial_eq_str::Probe::<String>::IMPLEMENTED);
+        }
     }
 
     /// Sentinel returned by the blanket fallback below. A receiver that has its

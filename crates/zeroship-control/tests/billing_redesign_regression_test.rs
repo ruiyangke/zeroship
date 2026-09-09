@@ -106,7 +106,7 @@ async fn nonatomic_finalize_two_statement_subtotal_then_total_is_rejected() {
     let client = pg(&url).await;
     let (organization, _app) = seed_organization_app(&client).await;
     let organization = organization.as_str();
-    let inv = claim_draft(&client, &organization).await;
+    let inv = claim_draft(&client, organization).await;
 
     // A NON-atomic finalize: write the subtotal alone FIRST. The balance CHECK
     // `total = subtotal − credit + tax` is now violated (total=0, subtotal=500),
@@ -159,7 +159,7 @@ async fn finalized_line_snapshot_replays_amount_cents_bit_for_bit() {
     let client = pg(&url).await;
     let (organization, app) = seed_organization_app(&client).await;
     let organization = organization.as_str();
-    let inv = claim_draft(&client, &organization).await;
+    let inv = claim_draft(&client, organization).await;
 
     // Build a concrete charge: 750 requests @ weight 1 CU/op, fx = 2 cents/CU,
     // included 100 CU, base 50c ⇒ billable 650 CU × 2c + 50c = 1350c.
@@ -270,7 +270,7 @@ async fn native_invoice_lookup_resolves_finalized_id_via_provider_refs() {
     let (organization, _app) = seed_organization_app(&client).await;
     let organization = organization.as_str();
     let period = first_of_this_month();
-    let inv = claim_draft(&client, &organization).await;
+    let inv = claim_draft(&client, organization).await;
     client
         .execute(
             "UPDATE zeroship.invoices SET subtotal_cents = 100, total_cents = 100, \
@@ -519,7 +519,7 @@ async fn draft_invoice_lines_stay_mutable_until_finalize() {
     let client = pg(&url).await;
     let (organization, app) = seed_organization_app(&client).await;
     let organization = organization.as_str();
-    let inv = claim_draft(&client, &organization).await;
+    let inv = claim_draft(&client, organization).await;
     client
         .execute(
             "INSERT INTO zeroship.invoice_lines \

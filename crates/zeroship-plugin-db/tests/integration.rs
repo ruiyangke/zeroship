@@ -82,9 +82,9 @@ use crate::{parity, schema_fixture, support};
 use zeroship_migrate::schema::query::FkEmission;
 
 use compio_postgres::{NoTls, Pool};
-use serde_json::{json, Value};
 use uuid::Uuid;
 use zeroship_data_core::binding::DbBinding;
+use zeroship_data_query_builder::value::{value, Value};
 use zeroship_plugin_db::backend::ChangeStream;
 
 const CDC_TEST_WORKER_ID: &str = "plugin-db-integration-worker";
@@ -395,16 +395,22 @@ async fn setup(pool: &Pool, schema: &str) {
 
 /// Helper: build + execute a query, return parsed JSON array.
 async fn exec_query(pool: &Pool, bq: zeroship_plugin_db::compile::BuiltQuery) -> Vec<Value> {
-    let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
-    let rows = pool.query_text_params(&bq.sql, &param_refs).await.unwrap();
-    rows.iter().map(row_to_json).collect()
+    let param_refs = &bq.params;
+    let rows =
+        zeroship_data_postgres::params::query(&pool.acquire().await.unwrap(), &bq.sql, param_refs)
+            .await
+            .unwrap();
+    rows.iter().map(row_to_value).collect()
 }
 
 /// Helper: build + execute a mutation, return parsed JSON array.
 async fn exec_mutation(pool: &Pool, bq: zeroship_plugin_db::compile::BuiltQuery) -> Vec<Value> {
-    let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
-    let rows = pool.query_text_params(&bq.sql, &param_refs).await.unwrap();
-    rows.iter().map(row_to_json).collect()
+    let param_refs = &bq.params;
+    let rows =
+        zeroship_data_postgres::params::query(&pool.acquire().await.unwrap(), &bq.sql, param_refs)
+            .await
+            .unwrap();
+    rows.iter().map(row_to_value).collect()
 }
 
 /// Stamp a unique text `id` onto a seed insert document. The platform `id`
@@ -417,15 +423,15 @@ fn with_seed_id(mut doc: Value) -> Value {
     static N: AtomicU64 = AtomicU64::new(0);
     let n = N.fetch_add(1, Ordering::SeqCst);
     if let Some(obj) = doc.as_object_mut() {
-        obj.entry("id")
+        obj.entry("id".to_owned())
             .or_insert_with(|| Value::String(format!("seed_{n}")));
     }
     doc
 }
 
 /// Simplified row → JSON (just text columns for testing).
-fn row_to_json(row: &compio_postgres::Row) -> Value {
-    let mut obj = serde_json::Map::new();
+fn row_to_value(row: &compio_postgres::Row) -> Value {
+    let mut obj = zeroship_data_query_builder::value::Map::new();
     for col in row.columns() {
         let name = col.name();
         let val = match col.type_().oid() {
@@ -583,7 +589,7 @@ use zeroship_plugin_db::compile::*;
 /// it. The seven system fields are implicit — they are never declared here, and
 /// `setup()` above creates all seven on the table.
 fn notes_schema() -> Value {
-    json!({
+    value!({
         "title": { "type": "string" },
         "body": { "type": "string" },
         "category": { "type": "string" },
@@ -596,7 +602,7 @@ fn notes_schema() -> Value {
 /// docs HAVING example. Aggregate builds its own SELECT from `$group`, so this
 /// only has to declare the identifiers the pipeline names.
 fn weather_schema() -> Value {
-    json!({
+    value!({
         "city": { "type": "string" },
         "temp_lo": { "type": "int" },
         "temp_hi": { "type": "int" },
@@ -734,7 +740,7 @@ async fn bytes_column_stores_raw_bytes_on_postgres() {
     for row in ["source", "echo"] {
         assert_eq!(
             pg.typed[row]["payload_bytes"],
-            json!(parity::typed_bytes_b64()),
+            value!(parity::TYPED_BYTES_RAW),
             "env.db must hand back the base64 of the stored bytes on the `{row}` \
              row; got {:?} in {:?}",
             pg.typed[row]["payload_bytes"],
@@ -766,7 +772,7 @@ async fn insert_and_find() {
         &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
         &notes_schema(),
-        &json!({"title": "Hello", "body": "World", "category": "tech"}),
+        &value!({"title": "Hello", "body": "World", "category": "tech"}),
     )
     .unwrap();
     let inserted = exec_mutation(&pool, bq).await;
@@ -779,7 +785,7 @@ async fn insert_and_find() {
     let bq = build_find_with_schema(
         &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
-        &json!({}),
+        &value!({}),
         None,
         None,
         None,
@@ -805,7 +811,7 @@ async fn insert_many_round_trip() {
     let schema = schema.as_str();
     setup(&pool, schema).await;
 
-    let docs = json!([
+    let docs = value!([
         {"title": "A", "body": "one", "category": "tech"},
         {"title": "B", "body": "two", "category": "food"},
         {"title": "C", "body": "three", "category": "tech"}
@@ -825,11 +831,14 @@ async fn insert_many_round_trip() {
         &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
         &notes_schema(),
-        &json!({}),
+        &value!({}),
     )
     .unwrap();
-    let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
-    let rows = pool.query_text_params(&bq.sql, &param_refs).await.unwrap();
+    let param_refs = &bq.params;
+    let rows =
+        zeroship_data_postgres::params::query(&pool.acquire().await.unwrap(), &bq.sql, param_refs)
+            .await
+            .unwrap();
     let count: i64 = rows[0].get("count");
     assert_eq!(count, 3);
     release_pg(pool).await;
@@ -852,7 +861,7 @@ async fn update_one_inc() {
         &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
         &notes_schema(),
-        &json!({"title": "Counter", "category": "tech", "views": 0}),
+        &value!({"title": "Counter", "category": "tech", "views": 0}),
     )
     .unwrap();
     exec_mutation(&pool, bq).await;
@@ -862,8 +871,8 @@ async fn update_one_inc() {
         &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
         &notes_schema(),
-        &json!({"title": "Counter"}),
-        &json!({"views": {"$inc": 5}}),
+        &value!({"title": "Counter"}),
+        &value!({"views": {"$inc": 5}}),
     )
     .unwrap();
     let updated = exec_mutation(&pool, bq).await;
@@ -875,8 +884,8 @@ async fn update_one_inc() {
         &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
         &notes_schema(),
-        &json!({"title": "Counter"}),
-        &json!({"views": {"$inc": 3}}),
+        &value!({"title": "Counter"}),
+        &value!({"views": {"$inc": 3}}),
     )
     .unwrap();
     let updated = exec_mutation(&pool, bq).await;
@@ -900,7 +909,7 @@ async fn update_one_dec_mul() {
         &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
         &notes_schema(),
-        &json!({"title": "Math", "category": "tech", "views": 10}),
+        &value!({"title": "Math", "category": "tech", "views": 10}),
     )
     .unwrap();
     exec_mutation(&pool, bq).await;
@@ -910,8 +919,8 @@ async fn update_one_dec_mul() {
         &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
         &notes_schema(),
-        &json!({"title": "Math"}),
-        &json!({"views": {"$dec": 3}}),
+        &value!({"title": "Math"}),
+        &value!({"views": {"$dec": 3}}),
     )
     .unwrap();
     let updated = exec_mutation(&pool, bq).await;
@@ -922,8 +931,8 @@ async fn update_one_dec_mul() {
         &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
         &notes_schema(),
-        &json!({"title": "Math"}),
-        &json!({"views": {"$mul": 2}}),
+        &value!({"title": "Math"}),
+        &value!({"views": {"$mul": 2}}),
     )
     .unwrap();
     let updated = exec_mutation(&pool, bq).await;
@@ -947,7 +956,7 @@ async fn update_one_jsonb_array_ops() {
         &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
         &notes_schema(),
-        &json!({"title": "Tags", "category": "tech"}),
+        &value!({"title": "Tags", "category": "tech"}),
     )
     .unwrap();
     exec_mutation(&pool, bq).await;
@@ -957,36 +966,36 @@ async fn update_one_jsonb_array_ops() {
         &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
         &notes_schema(),
-        &json!({"title": "Tags"}),
-        &json!({"tags": {"$push": "rust"}}),
+        &value!({"title": "Tags"}),
+        &value!({"tags": {"$push": "rust"}}),
     )
     .unwrap();
     let updated = exec_mutation(&pool, bq).await;
     let tags = updated[0]["tags"].as_array().unwrap();
-    assert!(tags.contains(&json!("rust")));
+    assert!(tags.contains(&value!("rust")));
 
     // $push "go"
     let bq = build_update_one(
         &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
         &notes_schema(),
-        &json!({"title": "Tags"}),
-        &json!({"tags": {"$push": "go"}}),
+        &value!({"title": "Tags"}),
+        &value!({"tags": {"$push": "go"}}),
     )
     .unwrap();
     let updated = exec_mutation(&pool, bq).await;
     let tags = updated[0]["tags"].as_array().unwrap();
     assert_eq!(tags.len(), 2);
-    assert!(tags.contains(&json!("rust")));
-    assert!(tags.contains(&json!("go")));
+    assert!(tags.contains(&value!("rust")));
+    assert!(tags.contains(&value!("go")));
 
     // $addToSet "rust" (duplicate — should NOT add)
     let bq = build_update_one(
         &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
         &notes_schema(),
-        &json!({"title": "Tags"}),
-        &json!({"tags": {"$addToSet": "rust"}}),
+        &value!({"title": "Tags"}),
+        &value!({"tags": {"$addToSet": "rust"}}),
     )
     .unwrap();
     let updated = exec_mutation(&pool, bq).await;
@@ -998,8 +1007,8 @@ async fn update_one_jsonb_array_ops() {
         &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
         &notes_schema(),
-        &json!({"title": "Tags"}),
-        &json!({"tags": {"$addToSet": "python"}}),
+        &value!({"title": "Tags"}),
+        &value!({"tags": {"$addToSet": "python"}}),
     )
     .unwrap();
     let updated = exec_mutation(&pool, bq).await;
@@ -1011,14 +1020,14 @@ async fn update_one_jsonb_array_ops() {
         &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
         &notes_schema(),
-        &json!({"title": "Tags"}),
-        &json!({"tags": {"$pull": "go"}}),
+        &value!({"title": "Tags"}),
+        &value!({"tags": {"$pull": "go"}}),
     )
     .unwrap();
     let updated = exec_mutation(&pool, bq).await;
     let tags = updated[0]["tags"].as_array().unwrap();
     assert_eq!(tags.len(), 2);
-    assert!(!tags.contains(&json!("go")));
+    assert!(!tags.contains(&value!("go")));
     release_pg(pool).await;
 }
 
@@ -1035,7 +1044,7 @@ async fn update_many_round_trip() {
     setup(&pool, schema).await;
 
     // Insert 3 tech, 1 food
-    let docs = json!([
+    let docs = value!([
         {"title": "A", "category": "tech", "views": 0},
         {"title": "B", "category": "tech", "views": 0},
         {"title": "C", "category": "tech", "views": 0},
@@ -1055,8 +1064,8 @@ async fn update_many_round_trip() {
         &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
         &notes_schema(),
-        &json!({"category": "tech"}),
-        &json!({"views": {"$inc": 1}}),
+        &value!({"category": "tech"}),
+        &value!({"views": {"$inc": 1}}),
     )
     .unwrap();
     let updated = exec_mutation(&pool, bq).await;
@@ -1066,7 +1075,7 @@ async fn update_many_round_trip() {
     let bq = build_find_with_schema(
         &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
-        &json!({"category": "food"}),
+        &value!({"category": "food"}),
         None,
         None,
         None,
@@ -1081,7 +1090,7 @@ async fn update_many_round_trip() {
     let bq = build_find_with_schema(
         &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
-        &json!({"category": "tech"}),
+        &value!({"category": "tech"}),
         None,
         None,
         None,
@@ -1108,7 +1117,7 @@ async fn delete_operations() {
     let schema = schema.as_str();
     setup(&pool, schema).await;
 
-    let docs = json!([
+    let docs = value!([
         {"title": "Keep1", "category": "tech"},
         {"title": "Keep2", "category": "tech"},
         {"title": "Del1", "category": "food"},
@@ -1129,7 +1138,7 @@ async fn delete_operations() {
         &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
         &notes_schema(),
-        &json!({"category": "food"}),
+        &value!({"category": "food"}),
     )
     .unwrap();
     let deleted = exec_mutation(&pool, bq).await;
@@ -1140,11 +1149,14 @@ async fn delete_operations() {
         &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
         &notes_schema(),
-        &json!({}),
+        &value!({}),
     )
     .unwrap();
-    let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
-    let rows = pool.query_text_params(&bq.sql, &param_refs).await.unwrap();
+    let param_refs = &bq.params;
+    let rows =
+        zeroship_data_postgres::params::query(&pool.acquire().await.unwrap(), &bq.sql, param_refs)
+            .await
+            .unwrap();
     assert_eq!(rows[0].get::<_, i64>("count"), 4);
 
     // Delete many remaining food
@@ -1152,7 +1164,7 @@ async fn delete_operations() {
         &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
         &notes_schema(),
-        &json!({"category": "food"}),
+        &value!({"category": "food"}),
         SqlDialect::Postgres,
     )
     .unwrap();
@@ -1164,11 +1176,14 @@ async fn delete_operations() {
         &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
         &notes_schema(),
-        &json!({}),
+        &value!({}),
     )
     .unwrap();
-    let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
-    let rows = pool.query_text_params(&bq.sql, &param_refs).await.unwrap();
+    let param_refs = &bq.params;
+    let rows =
+        zeroship_data_postgres::params::query(&pool.acquire().await.unwrap(), &bq.sql, param_refs)
+            .await
+            .unwrap();
     assert_eq!(rows[0].get::<_, i64>("count"), 2);
     release_pg(pool).await;
 }
@@ -1185,7 +1200,7 @@ async fn filter_comparison_operators() {
     let schema = schema.as_str();
     setup(&pool, schema).await;
 
-    let docs = json!([
+    let docs = value!([
         {"title": "A", "category": "tech", "views": 10},
         {"title": "B", "category": "tech", "views": 20},
         {"title": "C", "category": "food", "views": 30},
@@ -1204,7 +1219,7 @@ async fn filter_comparison_operators() {
     let bq = build_find_with_schema(
         &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
-        &json!({"views": {"$gt": 25}}),
+        &value!({"views": {"$gt": 25}}),
         None,
         None,
         None,
@@ -1219,7 +1234,7 @@ async fn filter_comparison_operators() {
     let bq = build_find_with_schema(
         &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
-        &json!({"views": {"$lte": 20}}),
+        &value!({"views": {"$lte": 20}}),
         None,
         None,
         None,
@@ -1234,7 +1249,7 @@ async fn filter_comparison_operators() {
     let bq = build_find_with_schema(
         &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
-        &json!({"category": {"$in": ["tech", "food"]}}),
+        &value!({"category": {"$in": ["tech", "food"]}}),
         None,
         None,
         None,
@@ -1249,7 +1264,7 @@ async fn filter_comparison_operators() {
     let bq = build_find_with_schema(
         &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
-        &json!({"category": {"$nin": ["food"]}}),
+        &value!({"category": {"$nin": ["food"]}}),
         None,
         None,
         None,
@@ -1264,7 +1279,7 @@ async fn filter_comparison_operators() {
     let bq = build_find_with_schema(
         &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
-        &json!({"category": {"$ne": "food"}}),
+        &value!({"category": {"$ne": "food"}}),
         None,
         None,
         None,
@@ -1289,7 +1304,7 @@ async fn filter_logical_operators() {
     let schema = schema.as_str();
     setup(&pool, schema).await;
 
-    let docs = json!([
+    let docs = value!([
         {"title": "A", "category": "tech", "views": 10},
         {"title": "B", "category": "tech", "views": 50},
         {"title": "C", "category": "food", "views": 10}
@@ -1307,7 +1322,7 @@ async fn filter_logical_operators() {
     let bq = build_find_with_schema(
         &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
-        &json!({"$and": [{"category": "tech"}, {"views": {"$gt": 20}}]}),
+        &value!({"$and": [{"category": "tech"}, {"views": {"$gt": 20}}]}),
         None,
         None,
         None,
@@ -1323,7 +1338,7 @@ async fn filter_logical_operators() {
     let bq = build_find_with_schema(
         &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
-        &json!({"$or": [{"category": "tech"}, {"views": {"$gt": 20}}]}),
+        &value!({"$or": [{"category": "tech"}, {"views": {"$gt": 20}}]}),
         None,
         None,
         None,
@@ -1338,7 +1353,7 @@ async fn filter_logical_operators() {
     let bq = build_find_with_schema(
         &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
-        &json!({"$not": {"category": "food"}}),
+        &value!({"$not": {"category": "food"}}),
         None,
         None,
         None,
@@ -1363,7 +1378,7 @@ async fn filter_pattern_operators() {
     let schema = schema.as_str();
     setup(&pool, schema).await;
 
-    let docs = json!([
+    let docs = value!([
         {"title": "Hello World", "category": "tech"},
         {"title": "hello rust", "category": "tech"},
         {"title": "Goodbye", "category": "food"}
@@ -1381,7 +1396,7 @@ async fn filter_pattern_operators() {
     let bq = build_find_with_schema(
         &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
-        &json!({"title": {"$like": "Hello%"}}),
+        &value!({"title": {"$like": "Hello%"}}),
         None,
         None,
         None,
@@ -1396,7 +1411,7 @@ async fn filter_pattern_operators() {
     let bq = build_find_with_schema(
         &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
-        &json!({"title": {"$ilike": "%hello%"}}),
+        &value!({"title": {"$ilike": "%hello%"}}),
         None,
         None,
         None,
@@ -1421,7 +1436,7 @@ async fn find_with_options() {
     let schema = schema.as_str();
     setup(&pool, schema).await;
 
-    let docs = json!([
+    let docs = value!([
         {"title": "C", "category": "tech", "views": 30},
         {"title": "A", "category": "tech", "views": 10},
         {"title": "B", "category": "tech", "views": 20}
@@ -1439,10 +1454,10 @@ async fn find_with_options() {
     let bq = build_find_with_schema(
         &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
-        &json!({}),
+        &value!({}),
         Some(2),
         None,
-        Some(&json!({"views": 1})),
+        Some(&value!({"views": 1})),
         None,
         &notes_schema(),
     )
@@ -1456,10 +1471,10 @@ async fn find_with_options() {
     let bq = build_find_with_schema(
         &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
-        &json!({}),
+        &value!({}),
         Some(1),
         Some(1),
-        Some(&json!({"views": -1})),
+        Some(&value!({"views": -1})),
         None,
         &notes_schema(),
     )
@@ -1486,7 +1501,7 @@ async fn find_with_projection() {
         &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
         &notes_schema(),
-        &json!({"title": "Proj", "body": "secret", "category": "tech"}),
+        &value!({"title": "Proj", "body": "secret", "category": "tech"}),
     )
     .unwrap();
     exec_mutation(&pool, bq).await;
@@ -1494,11 +1509,11 @@ async fn find_with_projection() {
     let bq = build_find_with_schema(
         &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
-        &json!({}),
+        &value!({}),
         None,
         None,
         None,
-        Some(&json!(["title", "category"])),
+        Some(&value!(["title", "category"])),
         &notes_schema(),
     )
     .unwrap();
@@ -1524,7 +1539,7 @@ async fn distinct_values() {
     let schema = schema.as_str();
     setup(&pool, schema).await;
 
-    let docs = json!([
+    let docs = value!([
         {"title": "A", "category": "tech"},
         {"title": "B", "category": "tech"},
         {"title": "C", "category": "food"},
@@ -1543,7 +1558,7 @@ async fn distinct_values() {
         &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
         "category",
-        &json!({}),
+        &value!({}),
         &notes_schema(),
     )
     .unwrap();
@@ -1562,7 +1577,7 @@ async fn distinct_values() {
         &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
         "category",
-        &json!({"category": {"$ne": "science"}}),
+        &value!({"category": {"$ne": "science"}}),
         &notes_schema(),
     )
     .unwrap();
@@ -1583,7 +1598,7 @@ async fn count_with_filter() {
     let schema = schema.as_str();
     setup(&pool, schema).await;
 
-    let docs = json!([
+    let docs = value!([
         {"title": "A", "category": "tech"},
         {"title": "B", "category": "tech"},
         {"title": "C", "category": "food"}
@@ -1602,11 +1617,14 @@ async fn count_with_filter() {
         &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
         &notes_schema(),
-        &json!({}),
+        &value!({}),
     )
     .unwrap();
-    let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
-    let rows = pool.query_text_params(&bq.sql, &param_refs).await.unwrap();
+    let param_refs = &bq.params;
+    let rows =
+        zeroship_data_postgres::params::query(&pool.acquire().await.unwrap(), &bq.sql, param_refs)
+            .await
+            .unwrap();
     assert_eq!(rows[0].get::<_, i64>("count"), 3);
 
     // Count with filter
@@ -1614,11 +1632,14 @@ async fn count_with_filter() {
         &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
         &notes_schema(),
-        &json!({"category": "tech"}),
+        &value!({"category": "tech"}),
     )
     .unwrap();
-    let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
-    let rows = pool.query_text_params(&bq.sql, &param_refs).await.unwrap();
+    let param_refs = &bq.params;
+    let rows =
+        zeroship_data_postgres::params::query(&pool.acquire().await.unwrap(), &bq.sql, param_refs)
+            .await
+            .unwrap();
     assert_eq!(rows[0].get::<_, i64>("count"), 2);
     release_pg(pool).await;
 }
@@ -1635,7 +1656,7 @@ async fn aggregate_full() {
     let schema = schema.as_str();
     setup(&pool, schema).await;
 
-    let docs = json!([
+    let docs = value!([
         {"title": "A", "category": "tech", "views": 10},
         {"title": "B", "category": "tech", "views": 20},
         {"title": "C", "category": "tech", "views": 30},
@@ -1650,7 +1671,7 @@ async fn aggregate_full() {
     .unwrap();
     exec_mutation(&pool, bq).await;
 
-    let pipeline = json!([
+    let pipeline = value!([
         {"$match": {"category": "tech"}},
         {"$group": {
             "by": "category",
@@ -1691,7 +1712,7 @@ async fn aggregate_multi_group() {
     let schema = schema.as_str();
     setup(&pool, schema).await;
 
-    let docs = json!([
+    let docs = value!([
         {"title": "A", "category": "tech", "body": "rust", "views": 10},
         {"title": "B", "category": "tech", "body": "rust", "views": 20},
         {"title": "C", "category": "tech", "body": "go", "views": 5},
@@ -1706,7 +1727,7 @@ async fn aggregate_multi_group() {
     .unwrap();
     exec_mutation(&pool, bq).await;
 
-    let pipeline = json!([
+    let pipeline = value!([
         {"$group": {
             "by": ["category", "body"],
             "cnt": {"$count": true}
@@ -1739,7 +1760,7 @@ async fn aggregate_having() {
     let schema = schema.as_str();
     setup(&pool, schema).await;
 
-    let docs = json!([
+    let docs = value!([
         {"title": "A", "category": "tech", "views": 10},
         {"title": "B", "category": "tech", "views": 20},
         {"title": "C", "category": "tech", "views": 30},
@@ -1755,7 +1776,7 @@ async fn aggregate_having() {
     exec_mutation(&pool, bq).await;
 
     // HAVING with alias → resolved to aggregate expression
-    let pipeline = json!([
+    let pipeline = value!([
         {"$group": {
             "by": "category",
             "cnt": {"$count": true}
@@ -1795,7 +1816,7 @@ async fn null_handling() {
         &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
         &notes_schema(),
-        &json!({"title": "WithBody", "body": "has content", "category": "tech"}),
+        &value!({"title": "WithBody", "body": "has content", "category": "tech"}),
     )
     .unwrap();
     exec_mutation(&pool, bq).await;
@@ -1804,7 +1825,7 @@ async fn null_handling() {
         &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
         &notes_schema(),
-        &json!({"title": "NoBody", "category": "tech"}),
+        &value!({"title": "NoBody", "category": "tech"}),
     )
     .unwrap();
     exec_mutation(&pool, bq).await;
@@ -1813,7 +1834,7 @@ async fn null_handling() {
     let bq = build_find_with_schema(
         &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
-        &json!({"body": null}),
+        &value!({"body": null}),
         None,
         None,
         None,
@@ -1829,7 +1850,7 @@ async fn null_handling() {
     let bq = build_find_with_schema(
         &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
-        &json!({"body": {"$ne": null}}),
+        &value!({"body": {"$ne": null}}),
         None,
         None,
         None,
@@ -1845,7 +1866,7 @@ async fn null_handling() {
     let bq = build_find_with_schema(
         &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
-        &json!({"body": {"$exists": true}}),
+        &value!({"body": {"$exists": true}}),
         None,
         None,
         None,
@@ -1875,7 +1896,7 @@ async fn mixed_update() {
         &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
         &notes_schema(),
-        &json!({"title": "Mix", "category": "tech", "views": 10}),
+        &value!({"title": "Mix", "category": "tech", "views": 10}),
     )
     .unwrap();
     exec_mutation(&pool, bq).await;
@@ -1885,15 +1906,15 @@ async fn mixed_update() {
         &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
         &notes_schema(),
-        &json!({"title": "Mix"}),
-        &json!({"category": "science", "views": {"$inc": 5}, "tags": {"$push": "new"}}),
+        &value!({"title": "Mix"}),
+        &value!({"category": "science", "views": {"$inc": 5}, "tags": {"$push": "new"}}),
     )
     .unwrap();
     let updated = exec_mutation(&pool, bq).await;
     assert_eq!(updated[0]["category"], "science");
     assert_eq!(updated[0]["views"], 15);
     let tags = updated[0]["tags"].as_array().unwrap();
-    assert!(tags.contains(&json!("new")));
+    assert!(tags.contains(&value!("new")));
     release_pg(pool).await;
 }
 
@@ -1913,7 +1934,7 @@ async fn timestamps_as_numbers() {
         &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
         &notes_schema(),
-        &json!({"title": "Time", "category": "tech"}),
+        &value!({"title": "Time", "category": "tech"}),
     )
     .unwrap();
     let inserted = exec_mutation(&pool, bq).await;
@@ -1973,7 +1994,7 @@ async fn aggregate_having_postgres_docs_example() {
     .await
     .unwrap();
 
-    let docs = json!([
+    let docs = value!([
         {"city": "San Francisco", "temp_lo": 46, "temp_hi": 50},
         {"city": "San Francisco", "temp_lo": 43, "temp_hi": 57},
         {"city": "San Francisco", "temp_lo": 35, "temp_hi": 65},
@@ -1992,7 +2013,7 @@ async fn aggregate_having_postgres_docs_example() {
 
     // Equivalent of: SELECT city, count(*), max(temp_lo)
     //                FROM weather GROUP BY city HAVING max(temp_lo) < 42
-    let pipeline = json!([
+    let pipeline = value!([
         {"$group": {
             "by": "city",
             "cnt": {"$count": true},
@@ -2056,7 +2077,7 @@ async fn a1_unique_index_actually_enforces_uniqueness() {
     .await
     .unwrap();
 
-    let schema = json!({
+    let schema = value!({
         "email": {"type": "string", "required": true, "unique": true},
         "handle": {"type": "string", "index": true},
     });
@@ -2139,11 +2160,13 @@ async fn a1_unique_index_actually_enforces_uniqueness() {
         &zeroship_data_query_builder::SchemaName::new(app).expect("fixture schema name"),
         collection,
         &schema,
-        &with_seed_id(json!({"email": "a@x.com"})),
+        &with_seed_id(value!({"email": "a@x.com"})),
     )
     .unwrap();
-    let p1: Vec<&str> = ins1.params.iter().map(String::as_str).collect();
-    pool.query_text_params(&ins1.sql, &p1).await.unwrap();
+    let p1 = &ins1.params;
+    zeroship_data_postgres::params::query(&pool.acquire().await.unwrap(), &ins1.sql, p1)
+        .await
+        .unwrap();
 
     // Distinct `id` so the second insert is rejected for the DUPLICATE EMAIL
     // (the unique index under test), not an incidental duplicate PK.
@@ -2151,15 +2174,19 @@ async fn a1_unique_index_actually_enforces_uniqueness() {
         &zeroship_data_query_builder::SchemaName::new(app).expect("fixture schema name"),
         collection,
         &schema,
-        &with_seed_id(json!({"email": "a@x.com"})),
+        &with_seed_id(value!({"email": "a@x.com"})),
     )
     .unwrap();
-    let p2: Vec<&str> = ins2.params.iter().map(String::as_str).collect();
-    let err = pool.query_text_params(&ins2.sql, &p2).await.unwrap_err();
-    let code = err.code().map(|c| c.code().to_string()).unwrap_or_default();
-    assert_eq!(
-        code, "23505",
-        "second insert with duplicate email should fail with 23505 unique_violation, got: {err}"
+    let p2 = &ins2.params;
+    let err = zeroship_data_postgres::params::query(&pool.acquire().await.unwrap(), &ins2.sql, p2)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            zeroship_data_core::error::DbError::UniqueViolation { .. }
+        ),
+        "duplicate email must violate uniqueness: {err}"
     );
 
     // -----------------------------------------------------------------------
@@ -3587,8 +3614,8 @@ async fn gap_b_end_to_end_insert_inside_tx_defers_emit_until_commit() {
         &zeroship_data_query_builder::SchemaName::new(app).expect("fixture schema name"),
         "users",
         // The descriptor entry for the fixture table above: one declared field.
-        &serde_json::json!({ "name": { "type": "string", "required": true } }),
-        &serde_json::json!({ "name": "alice" }),
+        &zeroship_data_query_builder::value!({ "name": { "type": "string", "required": true } }),
+        &zeroship_data_query_builder::value!({ "name": "alice" }),
     )
     .expect("build_insert");
     let _ = zeroship_plugin_db::exec_mutation_with_emit_for_tests(
@@ -4362,7 +4389,7 @@ async fn vector_search_returns_k_nearest() {
     zeroship_plugin_db::cache_schema_for_tests(
         app,
         coll,
-        json!({ "embedding": { "type": "vector", "vectorDims": 8 } }),
+        value!({ "embedding": { "type": "vector", "vectorDims": 8 } }),
     );
     let rows = VectorIndex::vector_search(
         &backend,
@@ -4372,7 +4399,7 @@ async fn vector_search_returns_k_nearest() {
         &query,
         10,
         VectorMetric::Cosine,
-        &serde_json::Value::Null,
+        &zeroship_data_query_builder::value::Value::Null,
         &zeroship_plugin_db::collection_schema(&DbBinding::cold_start(app), coll)
             .expect("descriptor slice for the search fixture"),
     )
@@ -4384,7 +4411,10 @@ async fn vector_search_returns_k_nearest() {
     // matches the query exactly).
     let ids: Vec<i64> = rows
         .iter()
-        .filter_map(|r| r.get("id").and_then(serde_json::Value::as_i64))
+        .filter_map(|r| {
+            r.get("id")
+                .and_then(zeroship_data_query_builder::value::Value::as_i64)
+        })
         .collect();
     assert!(
         ids.contains(&1),
@@ -4489,8 +4519,8 @@ async fn pgvector_extension_missing_reports_typed_error() {
             &[0.0f32; 8],
             10,
             VectorMetric::Cosine,
-            &serde_json::Value::Null,
-            &serde_json::Value::Null,
+            &zeroship_data_query_builder::value::Value::Null,
+            &zeroship_data_query_builder::value::Value::Null,
         )
         .await
         .expect_err("missing extension must yield a typed error on search")
@@ -4619,7 +4649,6 @@ async fn vector_dimension_mismatch_rejected_at_insert() {
 // story the attribute told was already false for its own sibling.
 // ---------------------------------------------------------------------------
 
-
 /// Test gate for `near_returns_within_radius`.
 ///
 /// 10 points around London at varying distances from the centre
@@ -4670,8 +4699,13 @@ async fn near_returns_within_radius() {
     zeroship_plugin_db::cache_schema_for_tests(
         app,
         coll,
-        json!({ "location": { "type": "geoPoint" } }),
+        value!({ "location": { "type": "geoPoint" } }),
     );
+
+    zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, app)
+        .await
+        .unwrap();
+    support::grant_all_runtime_table_columns(&pool, app, coll).await;
 
     let london = GeoPoint {
         lat: 51.5074,
@@ -4720,16 +4754,19 @@ async fn near_returns_within_radius() {
         "location",
         london,
         1000.0,
-        &serde_json::Value::Null,
+        &zeroship_data_query_builder::value::Value::Null,
         None,
-        &serde_json::Value::Null,
+        &value!({ "location": { "type": "geoPoint" } }),
     )
     .await
     .unwrap_or_else(|e| panic!("spatial_near failed: {e:?}"));
 
     let returned_ids: std::collections::BTreeSet<i64> = rows
         .iter()
-        .filter_map(|r| r.get("id").and_then(serde_json::Value::as_i64))
+        .filter_map(|r| {
+            r.get("id")
+                .and_then(zeroship_data_query_builder::value::Value::as_i64)
+        })
         .collect();
     let expected: std::collections::BTreeSet<i64> = expected_within.into_iter().collect();
     assert_eq!(
@@ -4813,9 +4850,9 @@ async fn postgis_extension_missing_reports_typed_error() {
             "any",
             GeoPoint { lat: 0.0, lng: 0.0 },
             1000.0,
-            &serde_json::Value::Null,
+            &zeroship_data_query_builder::value::Value::Null,
             None,
-            &serde_json::Value::Null,
+            &zeroship_data_query_builder::value::Value::Null,
         )
         .await
         .expect_err("missing PostGIS must yield a typed error on near")
@@ -5246,7 +5283,7 @@ async fn p4_round_trip_encrypted_masked_vector_via_descriptor_metadata() {
         .unwrap();
 
     // Schema: encrypted `ssn`, masked `phone`, and a `vector` embedding.
-    let schema = json!({
+    let schema = value!({
         "name": {"type": "string", "required": true},
         "ssn": {
             "type": "string",
@@ -5326,7 +5363,7 @@ CREATE TABLE "{app}"."people" ({PG_SYSTEM_COLUMNS},
     // ciphertext-relocation attack, and the AEAD refuses it with
     // `encryption_aead_failed` - correctly. Hard-coding a literal here is what
     // broke the test.
-    let mut docs = json!([{
+    let mut docs = value!([{
         "name": "Ada",
         "ssn": "123-45-6789",
         "phone": "415-555-0142",
@@ -5336,7 +5373,7 @@ CREATE TABLE "{app}"."people" ({PG_SYSTEM_COLUMNS},
         .await
         .expect("write pipeline");
 
-    // The write pipeline encrypted `ssn` (base64 blob + `__zsbin__ssn` marker)
+    // The write pipeline encrypted `ssn` into native bytes
     // and RELOCATED `phone`: the mask moves into the field's OWN column and
     // the real value moves out to the raw sibling
     // (`mask_pass::relocate_masked_columns`).
@@ -5346,33 +5383,32 @@ CREATE TABLE "{app}"."people" ({PG_SYSTEM_COLUMNS},
         .expect("the write pipeline mints the row id, and the AAD binds it")
         .to_string();
     assert!(
-        doc["ssn"].as_str().is_some() && doc["ssn"] != json!("123-45-6789"),
+        doc["ssn"].as_bytes().is_some(),
         "ssn must be replaced by ciphertext on write, got {:?}",
         doc["ssn"]
     );
-    assert_eq!(doc["__zsbin__ssn"], json!(true), "encrypt marker set");
     assert_eq!(
         doc["phone"],
-        json!("***-***-0142"),
+        value!("***-***-0142"),
         "mask pass must move the last4 mask into phone's own column on write, got {:?}",
         doc["phone"]
     );
     assert_ne!(
         doc["phone"],
-        json!("415-555-0142"),
+        value!("415-555-0142"),
         "phone's own column must not carry the real value after relocation, got {:?}",
         doc["phone"]
     );
     assert_eq!(
         doc[phone_raw.as_str()],
-        json!("415-555-0142"),
+        value!("415-555-0142"),
         "the real phone value must be relocated to the raw sibling column, got {:?}",
         doc[phone_raw.as_str()]
     );
 
-    // Persist it the way the SQL builder would (decode the encrypted blob,
+    // Persist it the way the SQL builder would (bind the encrypted bytes,
     // store the mask under `phone` and the real value under its raw sibling).
-    let ssn_b64 = doc["ssn"].as_str().unwrap().to_string();
+    let ciphertext = doc["ssn"].as_bytes().unwrap();
     let phone_mask = doc["phone"].as_str().unwrap().to_string();
     let phone_real = doc[phone_raw.as_str()].as_str().unwrap().to_string();
     // The vector literal is a test-controlled constant — format it inline with a
@@ -5381,12 +5417,12 @@ CREATE TABLE "{app}"."people" ({PG_SYSTEM_COLUMNS},
     pool.execute(
         &format!(
             "INSERT INTO \"{app}\".\"people\" (id, name, ssn, phone, \"{phone_raw}\", embedding) \
-             VALUES ($1, $2, decode($3, 'base64')::bytea, $4, $5, '[0.1,0.2,0.3]'::vector)"
+             VALUES ($1, $2, $3::bytea, $4, $5, '[0.1,0.2,0.3]'::vector)"
         ),
         &[
             &row_id.as_str(),
             &"Ada",
-            &ssn_b64.as_str(),
+            &ciphertext,
             &phone_mask.as_str(),
             &phone_real.as_str(),
         ],
@@ -5396,12 +5432,12 @@ CREATE TABLE "{app}"."people" ({PG_SYSTEM_COLUMNS},
 
     // ----- READ (real pipeline, introspected metadata) -----
     // Fetch the raw row the way the SELECT builder would: the encrypted blob
-    // as base64, and `phone` read directly. Reads no longer alias anything
+    // as bytes, and `phone` read directly. Reads no longer alias anything
     // after the storage flip -- the field's own column already holds the mask.
     let raw = pool
         .query_text_params(
             &format!(
-                "SELECT id, name, encode(ssn, 'base64') AS ssn, phone \
+                "SELECT id, name, ssn, phone \
                  FROM \"{app}\".\"people\" WHERE id = $1"
             ),
             &[row_id.as_str()],
@@ -5409,12 +5445,7 @@ CREATE TABLE "{app}"."people" ({PG_SYSTEM_COLUMNS},
         .await
         .unwrap();
     assert_eq!(raw.len(), 1);
-    let row = json!({
-        "id": row_id,
-        "name": "Ada",
-        "ssn": raw[0].get::<_, String>("ssn"),
-        "phone": raw[0].get::<_, String>("phone"),
-    });
+    let row = zeroship_plugin_db::row_to_value_for_bench(&raw[0]);
 
     let finalized = zeroship_plugin_db::finalize_rows_on_read_for_tests(app, "people", vec![row])
         .await
@@ -5424,7 +5455,7 @@ CREATE TABLE "{app}"."people" ({PG_SYSTEM_COLUMNS},
     // Encrypted column decrypted back to plaintext (driven by introspected meta).
     assert_eq!(
         out["ssn"],
-        json!("123-45-6789"),
+        value!("123-45-6789"),
         "encrypted column must decrypt to plaintext on read, got {:?}",
         out["ssn"]
     );
@@ -5432,16 +5463,16 @@ CREATE TABLE "{app}"."people" ({PG_SYSTEM_COLUMNS},
     // last4-masked string + the introspected classification.
     assert_eq!(
         out["phone"]["sentinel"],
-        json!("__zsmask__"),
+        value!("__zsmask__"),
         "phone wrapped"
     );
     assert_eq!(
         out["phone"]["masked"],
-        json!("***-***-0142"),
+        value!("***-***-0142"),
         "masked phone surfaces last4 form, got {:?}",
         out["phone"]
     );
-    assert_eq!(out["phone"]["classification"], json!("pci"));
+    assert_eq!(out["phone"]["classification"], value!("pci"));
     assert!(
         !out.to_string().contains("415-555-0142"),
         "the real phone number must not appear anywhere in the finalized row, got {out:?}"
@@ -5511,7 +5542,7 @@ async fn p5_pg_crud_works_via_engine_created_schema_without_runtime_ddl() {
         .await
         .unwrap();
 
-    let schema = json!({
+    let schema = value!({
         "name": {"type": "string", "required": true},
         "ssn": {
             "type": "string",
@@ -5570,7 +5601,7 @@ CREATE TABLE "{app}"."people" ({PG_SYSTEM_COLUMNS},
     // AEAD's additional data on write and reconstructed from the row's `id` on
     // read. A literal id here relocates the ciphertext onto another row, and
     // the read correctly refuses it with `encryption_aead_failed`.
-    let mut docs = json!([{
+    let mut docs = value!([{
         "name": "Grace",
         "ssn": "987-65-4321",
         "phone": "650-555-0199",
@@ -5584,42 +5615,41 @@ CREATE TABLE "{app}"."people" ({PG_SYSTEM_COLUMNS},
         .expect("the write pipeline mints the row id, and the AAD binds it")
         .to_string();
     assert!(
-        doc["ssn"].as_str().is_some() && doc["ssn"] != json!("987-65-4321"),
+        doc["ssn"].as_bytes().is_some(),
         "ssn must be ciphertext on write, got {:?}",
         doc["ssn"]
     );
-    assert_eq!(doc["__zsbin__ssn"], json!(true), "encrypt marker set");
     assert_eq!(
         doc["phone"],
-        json!("***-***-0199"),
+        value!("***-***-0199"),
         "mask pass must move the last4 mask into phone's own column on write, got {:?}",
         doc["phone"]
     );
     assert_ne!(
         doc["phone"],
-        json!("650-555-0199"),
+        value!("650-555-0199"),
         "phone's own column must not carry the real value after relocation, got {:?}",
         doc["phone"]
     );
     assert_eq!(
         doc[phone_raw.as_str()],
-        json!("650-555-0199"),
+        value!("650-555-0199"),
         "the real phone value must be relocated to the raw sibling column, got {:?}",
         doc[phone_raw.as_str()]
     );
 
-    let ssn_b64 = doc["ssn"].as_str().unwrap().to_string();
+    let ciphertext = doc["ssn"].as_bytes().unwrap();
     let phone_mask = doc["phone"].as_str().unwrap().to_string();
     let phone_real = doc[phone_raw.as_str()].as_str().unwrap().to_string();
     pool.execute(
         &format!(
             "INSERT INTO \"{app}\".\"people\" (id, name, ssn, phone, \"{phone_raw}\") \
-             VALUES ($1, $2, decode($3, 'base64')::bytea, $4, $5)"
+             VALUES ($1, $2, $3::bytea, $4, $5)"
         ),
         &[
             &row_id.as_str(),
             &"Grace",
-            &ssn_b64.as_str(),
+            &ciphertext,
             &phone_mask.as_str(),
             &phone_real.as_str(),
         ],
@@ -5633,7 +5663,7 @@ CREATE TABLE "{app}"."people" ({PG_SYSTEM_COLUMNS},
     let raw = pool
         .query_text_params(
             &format!(
-                "SELECT id, name, encode(ssn, 'base64') AS ssn, phone \
+                "SELECT id, name, ssn, phone \
                  FROM \"{app}\".\"people\" WHERE id = $1"
             ),
             &[row_id.as_str()],
@@ -5641,29 +5671,24 @@ CREATE TABLE "{app}"."people" ({PG_SYSTEM_COLUMNS},
         .await
         .unwrap();
     assert_eq!(raw.len(), 1);
-    let row = json!({
-        "id": row_id,
-        "name": "Grace",
-        "ssn": raw[0].get::<_, String>("ssn"),
-        "phone": raw[0].get::<_, String>("phone"),
-    });
+    let row = zeroship_plugin_db::row_to_value_for_bench(&raw[0]);
     let finalized = zeroship_plugin_db::finalize_rows_on_read_for_tests(app, "people", vec![row])
         .await
         .expect("read pipeline");
     let out = &finalized[0];
     assert_eq!(
         out["ssn"],
-        json!("987-65-4321"),
+        value!("987-65-4321"),
         "encrypted column decrypts to plaintext on read, got {:?}",
         out["ssn"]
     );
     assert_eq!(
         out["phone"]["sentinel"],
-        json!("__zsmask__"),
+        value!("__zsmask__"),
         "phone wrapped"
     );
-    assert_eq!(out["phone"]["masked"], json!("***-***-0199"));
-    assert_eq!(out["phone"]["classification"], json!("pci"));
+    assert_eq!(out["phone"]["masked"], value!("***-***-0199"));
+    assert_eq!(out["phone"]["classification"], value!("pci"));
     assert!(
         !out.to_string().contains("650-555-0199"),
         "the real phone number must not appear anywhere in the finalized row, got {out:?}"
@@ -5721,8 +5746,6 @@ async fn encrypted_column_missing_key_typed_error() {
 
 #[compio::test]
 async fn pg_bytea_decoder_preserves_raw_binary_prefix_bytes() {
-    use base64::Engine as _;
-
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     let rows = pool
@@ -5732,13 +5755,13 @@ async fn pg_bytea_decoder_preserves_raw_binary_prefix_bytes() {
         )
         .await
         .unwrap();
-    let json = zeroship_plugin_db::row_to_json_for_bench(&rows[0]);
+    let json = zeroship_plugin_db::row_to_value_for_bench(&rows[0]);
     let payload = json
         .get("payload")
-        .and_then(Value::as_str)
-        .expect("payload base64 string");
-    let expected_raw = base64::engine::general_purpose::STANDARD.encode(br"\x41424344");
-    let wrong_hex_decoded = base64::engine::general_purpose::STANDARD.encode(b"ABCD");
+        .and_then(Value::as_bytes)
+        .expect("native payload bytes");
+    let expected_raw = br"\x41424344".as_slice();
+    let wrong_hex_decoded = b"ABCD".as_slice();
 
     assert_eq!(
         payload, expected_raw,
@@ -6819,7 +6842,7 @@ async fn vector_search_runs_under_per_app_role_via_rls() {
     zeroship_plugin_db::cache_schema_for_tests(
         app,
         coll,
-        json!({ "embedding": { "type": "vector", "vectorDims": 2 } }),
+        value!({ "embedding": { "type": "vector", "vectorDims": 2 } }),
     );
     admin_pool
         .execute(
@@ -6916,7 +6939,7 @@ async fn spatial_near_runs_under_per_app_role_via_rls() {
     zeroship_plugin_db::cache_schema_for_tests(
         app,
         coll,
-        json!({ "location": { "type": "geoPoint" } }),
+        value!({ "location": { "type": "geoPoint" } }),
     );
     admin_pool
         .execute(
@@ -7004,7 +7027,7 @@ async fn unmask_fetch_runs_under_per_app_role_via_rls() {
     zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&admin_pool, app)
         .await
         .unwrap();
-    let schema = json!({
+    let schema = value!({
         "ssn": {
             "type": "string",
             "mask": { "kind": "last4", "classification": "spi" }
@@ -7065,7 +7088,7 @@ async fn unmask_fetch_runs_under_per_app_role_via_rls() {
             collection: coll.to_string(),
             row_pk: "u1".to_string(),
             column: "ssn".to_string(),
-            actor: Some(json!({ "kind": "auto" })),
+            actor: Some(value!({ "kind": "auto" })),
             reason: Some("security regression".to_string()),
             rejected_claim: None,
         },
@@ -7135,7 +7158,7 @@ async fn unmask_encrypted_column_on_pg_reads_bytea_raw_sibling() {
     zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&admin_pool, app)
         .await
         .unwrap();
-    let schema = json!({
+    let schema = value!({
         "ssn": {
             "type": "string",
             "mask": { "kind": "last4", "classification": "spi" },
@@ -7204,7 +7227,7 @@ async fn unmask_encrypted_column_on_pg_reads_bytea_raw_sibling() {
             collection: coll.to_string(),
             row_pk: "u1".to_string(),
             column: "ssn".to_string(),
-            actor: Some(json!({ "kind": "auto" })),
+            actor: Some(value!({ "kind": "auto" })),
             reason: Some("encrypted unmask regression".to_string()),
             rejected_claim: None,
         },
@@ -7269,7 +7292,7 @@ async fn unmask_audit_insert_runs_under_the_per_app_role_not_the_login_role() {
     zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&admin_pool, app)
         .await
         .unwrap();
-    let schema = json!({
+    let schema = value!({
         "ssn": {
             "type": "string",
             "mask": { "kind": "last4", "classification": "phi" }
@@ -7351,7 +7374,7 @@ async fn unmask_audit_insert_runs_under_the_per_app_role_not_the_login_role() {
             collection: coll.to_string(),
             row_pk: "p1".to_string(),
             column: "ssn".to_string(),
-            actor: Some(json!({ "kind": "auto" })),
+            actor: Some(value!({ "kind": "auto" })),
             reason: Some("audit fence regression".to_string()),
             rejected_claim: None,
         },
@@ -7434,7 +7457,7 @@ async fn pg_declared_mask_policy_authorizes_unmask_without_durable_store() {
         .await
         .unwrap();
 
-    let schema = json!({
+    let schema = value!({
         "ssn": {
             "type": "string",
             "mask": { "kind": "last4", "classification": "spi" }
@@ -7474,7 +7497,7 @@ async fn pg_declared_mask_policy_authorizes_unmask_without_durable_store() {
         // The backend the V8 dispatcher resolves before calling the installer.
         &unmask_backend().await,
         app,
-        json!({ "support": ["spi"] }),
+        value!({ "support": ["spi"] }),
     )
     .await
     .expect("setMaskPolicy must install the declared policy on PG");
@@ -7487,7 +7510,7 @@ async fn pg_declared_mask_policy_authorizes_unmask_without_durable_store() {
             collection: coll.to_string(),
             row_pk: "u1".to_string(),
             column: "ssn".to_string(),
-            actor: Some(json!({ "kind": "support" })),
+            actor: Some(value!({ "kind": "support" })),
             reason: Some("declared policy grant".to_string()),
             rejected_claim: None,
         },
@@ -7506,7 +7529,7 @@ async fn pg_declared_mask_policy_authorizes_unmask_without_durable_store() {
             collection: coll.to_string(),
             row_pk: "u1".to_string(),
             column: "ssn".to_string(),
-            actor: Some(json!({ "kind": "intern" })),
+            actor: Some(value!({ "kind": "intern" })),
             reason: Some("declared policy deny".to_string()),
             rejected_claim: None,
         },
@@ -8309,7 +8332,7 @@ async fn concurrent_dedicated_clients_are_bounded_by_the_pool() {
     );
     let message = format!("{err:?}");
     assert!(
-        message.contains("timeout"),
+        message.contains("acquisition timed out"),
         "the refusal must name the acquire timeout so an operator can see the \
          ceiling was hit; got {message}"
     );

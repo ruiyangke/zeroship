@@ -47,8 +47,8 @@
 #![allow(clippy::items_after_statements)]
 
 use compio_postgres::Pool;
-use serde_json::json;
 use zeroship_data_query_builder::render::postgres::render_search;
+use zeroship_data_query_builder::value;
 use zeroship_data_query_builder::{
     CompareOp, GeoPoint, Ident, IdentRole, Literal, Operand, Predicate, ProjectedField, Projection,
     QueryVector, RadiusMetres, RowLimit, Search, SearchCriterion, VectorMetric,
@@ -199,7 +199,7 @@ fn bind_text(params: &[Literal]) -> Vec<String> {
             Literal::Bool(b) => b.to_string(),
             Literal::Int(i) => i.to_string(),
             Literal::Float(f) => f.get().to_string(),
-            Literal::Text(t) => t.clone(),
+            Literal::Text(t) | Literal::Json(t) => t.clone(),
             Literal::Bytes(b) => {
                 let mut out = String::from("\\x");
                 for byte in b {
@@ -391,7 +391,7 @@ fn the_ir_and_the_shipped_builder_rank_identically() {
 
         // The shipped builder's answer, for the same search. The schema hint is
         // what `PostgresBackend::vector_search` passes it.
-        let schema_hint = json!({
+        let schema_hint = value!({
             "title": { "type": "string" },
             "tenant_id": { "type": "number" },
             "embedding": { "type": "vector", "vectorDims": DIMS },
@@ -403,15 +403,18 @@ fn the_ir_and_the_shipped_builder_rank_identically() {
             &query,
             10,
             zeroship_data_query_builder::descriptors::VectorMetric::Cosine,
-            &json!({ "tenant_id": 1 }),
+            &value!({ "tenant_id": 1 }),
             &schema_hint,
         )
         .expect("the shipped builder accepts this search");
-        let shipped_params: Vec<&str> = shipped.params.iter().map(String::as_str).collect();
-        let shipped_rows = pool
-            .query_text_params(&shipped.sql, &shipped_params)
-            .await
-            .expect("the shipped builder's SQL runs");
+        let shipped_params = &shipped.params;
+        let shipped_rows = zeroship_data_postgres::params::query(
+            &pool.acquire().await.unwrap(),
+            &shipped.sql,
+            shipped_params,
+        )
+        .await
+        .expect("the shipped builder's SQL runs");
         let shipped_ids: Vec<String> = shipped_rows
             .iter()
             .map(|r| r.get::<_, String>("id"))
@@ -510,8 +513,8 @@ fn postgres_serves_the_inner_product_that_sqlite_refuses() {
                 &unit_vector(3),
                 5,
                 BackendMetric::InnerProduct,
-                &serde_json::Value::Null,
-                &serde_json::Value::Null,
+                &zeroship_data_query_builder::value::Value::Null,
+                &zeroship_data_query_builder::value::Value::Null,
             )
             .await
             .expect_err("vec0 has no inner-product metric");
@@ -533,8 +536,8 @@ fn postgres_serves_the_inner_product_that_sqlite_refuses() {
                 &unit_vector(3),
                 5,
                 BackendMetric::Cosine,
-                &serde_json::Value::Null,
-                &serde_json::Value::Null,
+                &zeroship_data_query_builder::value::Value::Null,
+                &zeroship_data_query_builder::value::Value::Null,
             )
             .await
             .expect_err("there is no table, so this fails too - but for another reason");

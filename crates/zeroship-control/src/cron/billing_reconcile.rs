@@ -1667,7 +1667,7 @@ pub(crate) async fn bill_organization_with_parts<S: StripeApi>(
         None => {
             let invoice_key = invoice_idempotency_key(organization_id, period_start);
             let id = stripe
-                .create_invoice(&customer, &organization_id.to_string(), &invoice_key)
+                .create_invoice(&customer, organization_id, &invoice_key)
                 .await
                 .map_err(|e| RegistryError::Database(format!("create_invoice: {e}")))?;
             // Persist the draft id BEFORE finalize. A crash here (post-create,

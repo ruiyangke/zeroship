@@ -350,7 +350,7 @@ async fn style() -> web::HttpResponse {
 // ntex's per-thread server future is intentionally `!Send` (it holds
 // per-worker state in `Rc`s). Marking `run` `!Send` is a structural
 // property of `ntex::web::server`, not an actionable defect.
-#[allow(clippy::future_not_send)]
+#[allow(clippy::future_not_send, clippy::too_many_arguments)]
 pub async fn run(
     cfg: Arc<AuthConfig>,
     db: Arc<compio_postgres::Client>,

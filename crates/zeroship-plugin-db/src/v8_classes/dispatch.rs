@@ -2,7 +2,7 @@
 
 use std::future::Future;
 
-use serde_json::Value;
+use zeroship_data_query_builder::value::Value;
 use zeroship_runtime::state::{OpResult, ResolveValue, SharedState};
 
 use zeroship_data_core::binding::DbBinding;
@@ -84,7 +84,7 @@ fn dispatch_operation<'s>(
                 crate::v8_bridge::first_row_or_null_masked(rows, has_masked)
             }
             Output::Rows { rows, has_masked } => {
-                crate::v8_bridge::rows_as_json_array_masked(rows, has_masked)
+                crate::v8_bridge::rows_as_array_masked(rows, has_masked)
             }
         },
     )));
@@ -535,7 +535,10 @@ pub(crate) fn dispatch_unmask_field<'s>(
                 // Wire shape: `{ plaintext: <string> }`. The SDK reads
                 // `result.plaintext` directly; for `wraps = bytes` the
                 // SDK base64-decodes on its side.
-                ResolveValue::Json(serde_json::json!({ "plaintext": result.plaintext }).to_string())
+                crate::v8_values::resolve(
+                    zeroship_data_query_builder::value!({ "plaintext": result.plaintext }),
+                    false,
+                )
             },
         )));
 
@@ -583,15 +586,18 @@ pub(crate) fn dispatch_bulk_unmask_field<'s>(
                 // `BTreeMap` serialises as a JSON object with sorted
                 // keys — deterministic for golden-snapshot tests. The reshaping is
                 // JS-wire lowering, so it belongs on this side of the boundary.
-                let mut obj = serde_json::Map::with_capacity(result.results.len());
+                let mut obj = zeroship_data_query_builder::value::Map::new();
                 for (row_pk, cols) in result.results {
-                    let mut col_obj = serde_json::Map::with_capacity(cols.len());
+                    let mut col_obj = zeroship_data_query_builder::value::Map::new();
                     for (c, pt) in cols {
-                        col_obj.insert(c, Value::String(pt));
+                        col_obj.insert(c, pt);
                     }
                     obj.insert(row_pk, Value::Object(col_obj));
                 }
-                ResolveValue::Json(serde_json::json!({ "results": Value::Object(obj) }).to_string())
+                crate::v8_values::resolve(
+                    zeroship_data_query_builder::value!({ "results": Value::Object(obj) }),
+                    false,
+                )
             },
         )));
 
@@ -634,7 +640,7 @@ pub(crate) fn dispatch_set_mask_policy_field<'s>(
                 let backend = crate::tx_scope::ensure_backend().await?;
                 dispatch_set_mask_policy(&backend, &app, policy_v).await
             },
-            |()| ResolveValue::Json("{}".to_string()),
+            |()| crate::v8_values::resolve(Value::Object(Default::default()), false),
         )));
 
     promise

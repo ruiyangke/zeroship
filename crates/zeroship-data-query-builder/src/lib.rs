@@ -18,6 +18,7 @@ pub mod predicate;
 pub mod projection;
 pub mod render;
 pub mod search;
+pub mod value;
 pub mod write;
 
 pub use ident::{Ident, IdentError, IdentRole, MAX_IDENT_BYTES};

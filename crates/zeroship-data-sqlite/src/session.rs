@@ -89,6 +89,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Once, Weak};
+use zeroship_data_query_builder::value::Value;
 
 use rusqlite::Connection;
 
@@ -249,21 +250,21 @@ pub(crate) enum Command {
     Exec {
         reservation: Arc<Reservation>,
         sql: String,
-        params: Vec<String>,
+        params: Vec<Value>,
         reply: flume::Sender<Result<u64, DbError>>,
     },
     /// Run a row-returning statement; reply with the materialised rows.
     Query {
         reservation: Arc<Reservation>,
         sql: String,
-        params: Vec<String>,
+        params: Vec<Value>,
         reply: flume::Sender<Result<Vec<Row>, DbError>>,
     },
     /// Run a row-returning statement; reply with typed rows + column names.
     QueryTyped {
         reservation: Arc<Reservation>,
         sql: String,
-        params: Vec<String>,
+        params: Vec<Value>,
         reply: flume::Sender<Result<TypedRows, DbError>>,
     },
     /// Run this transaction reservation's terminal statement and classify the
@@ -846,7 +847,7 @@ impl SqliteSession {
         self.send(Command::Exec {
             reservation: Arc::clone(reservation),
             sql: sql.to_string(),
-            params: params.iter().map(|s| (*s).to_string()).collect(),
+            params: params.iter().map(|s| Value::from(*s)).collect(),
             reply: reply_tx,
         })
         .await?;
@@ -869,7 +870,7 @@ impl SqliteSession {
         self.send(Command::Query {
             reservation: Arc::clone(reservation),
             sql: sql.to_string(),
-            params: params.iter().map(|s| (*s).to_string()).collect(),
+            params: params.iter().map(|s| Value::from(*s)).collect(),
             reply: reply_tx,
         })
         .await?;
@@ -880,7 +881,7 @@ impl SqliteSession {
     pub(crate) async fn query_typed(
         &self,
         sql: &str,
-        params: &[&str],
+        params: &[Value],
     ) -> Result<TypedRows, DbError> {
         self.query_typed_on(&self.autocommit_reservation(), sql, params)
             .await
@@ -890,13 +891,13 @@ impl SqliteSession {
         &self,
         reservation: &Arc<Reservation>,
         sql: &str,
-        params: &[&str],
+        params: &[Value],
     ) -> Result<TypedRows, DbError> {
         let (reply_tx, reply_rx) = flume::bounded::<Result<TypedRows, DbError>>(1);
         self.send(Command::QueryTyped {
             reservation: Arc::clone(reservation),
             sql: sql.to_string(),
-            params: params.iter().map(|s| (*s).to_string()).collect(),
+            params: params.to_vec(),
             reply: reply_tx,
         })
         .await?;
@@ -990,7 +991,7 @@ impl SqliteSession {
         let cmd = Command::Exec {
             reservation: Arc::clone(reservation),
             sql: sql.to_string(),
-            params: params.iter().map(|s| (*s).to_string()).collect(),
+            params: params.iter().map(|s| Value::from(*s)).collect(),
             reply: reply_tx,
         };
         self.tx.try_send(cmd).map_err(|e| {
@@ -1261,11 +1262,29 @@ impl SqliteSessionHandle {
             .await
     }
 
+    /// Execute native parameters and return the driver's text projection.
+    #[cfg(feature = "test-helpers")]
+    pub async fn query_values(&self, sql: &str, params: &[Value]) -> Result<Vec<Row>, DbError> {
+        let reservation = self.reservation();
+        let (tx, rx) = flume::bounded(1);
+        self.session
+            .send(Command::Query {
+                reservation,
+                sql: sql.to_owned(),
+                params: params.to_vec(),
+                reply: tx,
+            })
+            .await?;
+        rx.recv_async()
+            .await
+            .map_err(|_| DbError::internal("sqlite actor closed"))?
+    }
+
     /// Forward a `query_typed` through the underlying session. `pub` under
     /// `test-helpers` so the e2e encrypted-column round-trip can read BLOB
     /// columns as raw bytes rather than the `<N bytes blob>` stringification.
     #[cfg(feature = "test-helpers")]
-    pub async fn query_typed(&self, sql: &str, params: &[&str]) -> Result<TypedRows, DbError> {
+    pub async fn query_typed(&self, sql: &str, params: &[Value]) -> Result<TypedRows, DbError> {
         self.session
             .query_typed_on(&self.reservation(), sql, params)
             .await
@@ -1287,7 +1306,7 @@ impl SqliteSessionHandle {
     pub async fn query_typed_internal(
         &self,
         sql: &str,
-        params: &[&str],
+        params: &[Value],
     ) -> Result<TypedRows, DbError> {
         self.session
             .query_typed_on(&self.reservation(), sql, params)
@@ -2383,25 +2402,21 @@ fn run_attach(conn: &Connection, app_id: &str, db_path: &str) -> Result<(), DbEr
     conn.execute_batch(&sql).map_err(from_sqlite)
 }
 
-fn run_exec(conn: &Connection, sql: &str, params: &[String]) -> Result<u64, RunError> {
+fn run_exec(conn: &Connection, sql: &str, params: &[Value]) -> Result<u64, RunError> {
     // Text values stay text. Binary conversion is explicit in the SQL.
-    let refs: Vec<&dyn rusqlite::ToSql> = params
-        .iter()
-        .map(|value| value as &dyn rusqlite::ToSql)
-        .collect();
+    let bindings: Vec<_> = params.iter().map(crate::params::Parameter).collect();
+    let refs: Vec<&dyn rusqlite::ToSql> = bindings.iter().map(|value| value as _).collect();
     let n = conn
         .execute(sql, refs.as_slice())
         .map_err(RunError::Sqlite)?;
     Ok(n as u64)
 }
 
-fn run_query(conn: &Connection, sql: &str, params: &[String]) -> Result<Vec<Row>, RunError> {
+fn run_query(conn: &Connection, sql: &str, params: &[Value]) -> Result<Vec<Row>, RunError> {
     let mut stmt = conn.prepare(sql).map_err(RunError::Sqlite)?;
     let column_count = stmt.column_count();
-    let refs: Vec<&dyn rusqlite::ToSql> = params
-        .iter()
-        .map(|value| value as &dyn rusqlite::ToSql)
-        .collect();
+    let bindings: Vec<_> = params.iter().map(crate::params::Parameter).collect();
+    let refs: Vec<&dyn rusqlite::ToSql> = bindings.iter().map(|value| value as _).collect();
     let mut rows = stmt.query(refs.as_slice()).map_err(RunError::Sqlite)?;
     let mut out = Vec::<Row>::new();
     while let Some(row) = rows.next().map_err(RunError::Sqlite)? {
@@ -2450,7 +2465,7 @@ fn run_query(conn: &Connection, sql: &str, params: &[String]) -> Result<Vec<Row>
 /// Typed row materialisation - the vector path's row decoder. Preserves
 /// SQLite's storage-class discriminator so a BLOB column reaches the caller as
 /// `Vec<u8>` rather than a placeholder string.
-fn run_query_typed(conn: &Connection, sql: &str, params: &[String]) -> Result<TypedRows, RunError> {
+fn run_query_typed(conn: &Connection, sql: &str, params: &[Value]) -> Result<TypedRows, RunError> {
     let mut stmt = conn.prepare(sql).map_err(RunError::Sqlite)?;
     let column_count = stmt.column_count();
     // `column_names` borrows from the statement; copy to owned `String` BEFORE
@@ -2458,10 +2473,8 @@ fn run_query_typed(conn: &Connection, sql: &str, params: &[String]) -> Result<Ty
     let columns: Vec<String> = (0..column_count)
         .map(|i| stmt.column_name(i).unwrap_or("").to_string())
         .collect();
-    let refs: Vec<&dyn rusqlite::ToSql> = params
-        .iter()
-        .map(|value| value as &dyn rusqlite::ToSql)
-        .collect();
+    let bindings: Vec<_> = params.iter().map(crate::params::Parameter).collect();
+    let refs: Vec<&dyn rusqlite::ToSql> = bindings.iter().map(|value| value as _).collect();
     let mut rows = stmt.query(refs.as_slice()).map_err(RunError::Sqlite)?;
     let mut out = Vec::<Vec<TypedCell>>::new();
     while let Some(row) = rows.next().map_err(RunError::Sqlite)? {

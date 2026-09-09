@@ -212,7 +212,7 @@ fn init_dev_secrets(secrets_dir: &Path, env_file: &Path) -> Result<InitOutcome, 
         )?;
     }
     ensure_pairwise_file(&pairwise_path, pairwise.as_bytes(), &mut outcome)?;
-    write_service_peers(&secrets_dir)?;
+    write_service_peers(secrets_dir)?;
 
     let missing_env = env_keys()
         .filter(|name| !existing_env.contains_key(*name))
