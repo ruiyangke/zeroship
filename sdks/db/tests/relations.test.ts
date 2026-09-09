@@ -245,7 +245,7 @@ describe("with: { fk: true } — relation-aware reads", () => {
 
   test("more than 100 distinct FKs → the IN list is chunked, never over the cap", async () => {
     // The native builder REJECTS a membership list longer than
-    // MAX_MEMBERSHIP_LIST_LEN = 100 (`zeroship-data-query-builder/src/compile.rs:604`),
+    // MAX_MEMBERSHIP_LIST_LEN = 100 (`zeroship-data-sql/src/compile.rs:604`),
     // and the loader issues `{ id: { $in: ids } }` with the whole
     // deduplicated set (`src/collection/relations.ts:125`) - no chunking,
     // no length guard. So a page carrying >100 DISTINCT foreign keys is

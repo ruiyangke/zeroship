@@ -39,7 +39,7 @@ use zeroship_plugin_db::service::{DbService, DbServiceConfig};
 use zeroship_runtime::channel::{CancelFlag, StreamReader};
 use zeroship_runtime::plugin::NativePlugin;
 use zeroship_runtime::runtime::Runtime;
-use zeroship_runtime::{init_v8, EnvSnapshot, FetchOutcome, ModuleEntry, RequestCtx, SettledFetch};
+use zeroship_runtime::{EnvSnapshot, FetchOutcome, ModuleEntry, RequestCtx, SettledFetch, init_v8};
 
 const PROBE: &str = "distributed-live-cross-isolate-probe";
 
@@ -47,7 +47,7 @@ const PROBE: &str = "distributed-live-cross-isolate-probe";
 ///
 /// **Why the fixture carries one at all.** The data plane's sole schema
 /// authority is this document: `crate::descriptor::collection_schema`
-/// (`crates/zeroship-data-engine/src/descriptor.rs:66-80`) resolves a collection
+/// (`crates/zeroship-data-orm/src/descriptor.rs:66-80`) resolves a collection
 /// out of the thread-local, app-and-deploy-keyed store or refuses it with
 /// `collection_not_declared`.
 /// The runtime validates the deployed descriptor and asks `DbPlugin` to plant
@@ -77,7 +77,7 @@ const PROBE: &str = "distributed-live-cross-isolate-probe";
 /// descriptor against the catalog any more, so a field here that the table does
 /// not have surfaces as a Postgres `42703 column does not exist` at read time:
 /// `implicit_read_projection_parts`
-/// (`crates/zeroship-data-query-builder/src/compile.rs:3344-3365`) projects the seven system
+/// (`crates/zeroship-data-sql/src/compile.rs:3344-3365`) projects the seven system
 /// fields plus every non-system key of this map, by name.
 const RUNTIME_DESCRIPTOR: &str = r#"{
   "version": 2,
@@ -240,13 +240,15 @@ fn runtime_for(
 ) -> Runtime {
     let mut env_vars = HashMap::new();
     env_vars.insert("APP_ID".to_string(), app_id.to_string());
-    let plugins: Vec<Arc<dyn NativePlugin>> = vec![DbService::new(DbServiceConfig {
-        url: url.to_string(),
-        worker_id: worker_id.to_string(),
-        meter: None,
-    })
-    .expect("db service")
-    .plugin()];
+    let plugins: Vec<Arc<dyn NativePlugin>> = vec![
+        DbService::new(DbServiceConfig {
+            url: url.to_string(),
+            worker_id: worker_id.to_string(),
+            meter: None,
+        })
+        .expect("db service")
+        .plugin(),
+    ];
     Runtime::builder()
         .modules(modules)
         .env_vars(env_vars)
@@ -703,7 +705,7 @@ async fn slot_state(pool: &Pool, slot: &str) -> Result<Option<bool>, String> {
 ///
 /// This is not belt-and-braces. The data plane BELIEVES the descriptor: it
 /// projects `SELECT` lists straight out of the declared field map
-/// (`crates/zeroship-data-query-builder/src/compile.rs:3344-3365`) and reads no catalog at
+/// (`crates/zeroship-data-sql/src/compile.rs:3344-3365`) and reads no catalog at
 /// all, so a field the table lacks is a Postgres `42703` in the middle of the
 /// stream and a column the descriptor lacks is data silently never read. Either
 /// way the failure lands as a stalled or empty SSE frame, which is exactly what

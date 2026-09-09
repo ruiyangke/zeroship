@@ -37,7 +37,7 @@
 //!     Those paths deliberately stay on the generic classifier.
 
 use compio_postgres::NoTls;
-use zeroship_data_core::error::DbError;
+use zeroship_data_orm::error::DbError;
 use zeroship_plugin_db::backend::pg_error;
 // `DbError` is data-core's; lowering it to a V8 `OpError` is the ADAPTER's job,
 // so it arrives as a trait from plugin-db rather than an inherent method.
@@ -182,7 +182,7 @@ async fn classify_missing_role(app_id: &str) -> DbError {
 
     let classified = pg_error::classify_pg_per_app_session_setup_for_tests(
         &err,
-        &zeroship_data_query_builder::SchemaName::new(app_id).expect("fixture schema name"),
+        &zeroship_data_sql::SchemaName::new(app_id).expect("fixture schema name"),
     );
     drop(client);
     drain_pg().await;
@@ -224,7 +224,7 @@ async fn missing_per_app_role_is_creator_facing_not_internal() {
     // absence list can only rule out the leaks someone thought of.
     assert_eq!(
         op.message,
-        zeroship_data_core::error::MISSING_ROLE_MESSAGE,
+        zeroship_data_orm::error::MISSING_ROLE_MESSAGE,
         "the wire message must be the fixed platform constant"
     );
 

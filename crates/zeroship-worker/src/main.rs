@@ -48,7 +48,7 @@ const CONTROL_KEY_LABEL: &str = "ZEROSHIP_CONTROL_KEY / --control-key-file";
 /// same declaration moved to the one place that now needs it.
 const WORKER_LISTEN_BACKLOG: i32 = 1024;
 
-type SlotReaperTask = compio::runtime::JoinHandle<Result<(), zeroship_data_core::error::DbError>>;
+type SlotReaperTask = compio::runtime::JoinHandle<Result<(), zeroship_data_orm::error::DbError>>;
 
 async fn run_server_with_slot_reaper<S>(
     server: S,
@@ -1017,7 +1017,7 @@ mod tests {
     #[compio::test]
     async fn reaper_failure_stops_the_worker_server() {
         let task = compio::runtime::spawn(async {
-            Err(zeroship_data_core::error::DbError::Internal {
+            Err(zeroship_data_orm::error::DbError::Internal {
                 message: "lost maintenance lease".to_string(),
             })
         });

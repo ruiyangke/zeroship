@@ -7464,52 +7464,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "zeroship-data-core"
-version = "0.1.0"
-dependencies = [
- "aes-gcm",
- "compio",
- "hkdf",
- "hmac 0.12.1",
- "serde_json",
- "sha2 0.10.9",
- "tracing",
- "zeroize",
- "zeroship-core",
- "zeroship-data-query-builder",
-]
-
-[[package]]
-name = "zeroship-data-engine"
-version = "0.1.0"
-dependencies = [
- "aes-gcm",
- "base64",
- "compio",
- "compio-postgres",
- "serde",
- "serde_json",
- "tempfile",
- "tracing",
- "tracing-subscriber",
- "trybuild",
- "uuid",
- "zeroize",
- "zeroship-core",
- "zeroship-data-core",
- "zeroship-data-macros",
- "zeroship-data-postgres",
- "zeroship-data-query-builder",
- "zeroship-data-sqlite",
- "zeroship-metering",
- "zeroship-migrate",
- "zeroship-migrate-policy",
- "zeroship-migrate-postgres",
- "zeroship-migrate-server",
- "zeroship-migrate-sqlite",
-]
-
-[[package]]
 name = "zeroship-data-macros"
 version = "0.1.0"
 dependencies = [
@@ -7521,54 +7475,53 @@ dependencies = [
 ]
 
 [[package]]
-name = "zeroship-data-postgres"
+name = "zeroship-data-orm"
 version = "0.1.0"
 dependencies = [
+ "aes-gcm",
+ "async-trait",
  "base64",
  "compio",
  "compio-postgres",
- "serde_json",
- "sha2 0.10.9",
- "tracing",
- "uuid",
- "zeroship-core",
- "zeroship-data-core",
- "zeroship-data-query-builder",
- "zeroship-migrate-server",
-]
-
-[[package]]
-name = "zeroship-data-query-builder"
-version = "0.1.0"
-dependencies = [
- "base64",
- "indexmap 2.14.0",
- "serde",
- "serde_json",
- "zeroship-core",
- "zeroship-migrate",
- "zeroship-migrate-backend",
- "zeroship-migrate-core",
-]
-
-[[package]]
-name = "zeroship-data-sqlite"
-version = "0.1.0"
-dependencies = [
- "base64",
- "compio",
  "flume 0.11.1",
+ "hkdf",
+ "hmac 0.12.1",
  "rusqlite",
+ "serde",
  "serde_json",
  "sha2 0.10.9",
  "sqlite-vec",
  "tempfile",
  "tracing",
  "tracing-subscriber",
+ "trybuild",
  "uuid",
+ "zeroize",
  "zeroship-core",
- "zeroship-data-core",
- "zeroship-data-query-builder",
+ "zeroship-data-macros",
+ "zeroship-data-orm",
+ "zeroship-data-sql",
+ "zeroship-metering",
+ "zeroship-migrate",
+ "zeroship-migrate-policy",
+ "zeroship-migrate-postgres",
+ "zeroship-migrate-server",
+ "zeroship-migrate-sqlite",
+]
+
+[[package]]
+name = "zeroship-data-sql"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "indexmap 2.14.0",
+ "serde",
+ "serde_json",
+ "trybuild",
+ "zeroship-core",
+ "zeroship-migrate",
+ "zeroship-migrate-backend",
+ "zeroship-migrate-core",
 ]
 
 [[package]]
@@ -7838,7 +7791,7 @@ dependencies = [
  "zeroship-authn",
  "zeroship-authz",
  "zeroship-core",
- "zeroship-data-query-builder",
+ "zeroship-data-sql",
  "zeroship-migrate",
  "zeroship-migrate-backend",
  "zeroship-migrate-ir",
@@ -7889,11 +7842,8 @@ dependencies = [
  "v8",
  "zeroize",
  "zeroship-core",
- "zeroship-data-core",
- "zeroship-data-engine",
- "zeroship-data-postgres",
- "zeroship-data-query-builder",
- "zeroship-data-sqlite",
+ "zeroship-data-orm",
+ "zeroship-data-sql",
  "zeroship-metering",
  "zeroship-migrate",
  "zeroship-migrate-policy",
@@ -8074,7 +8024,7 @@ dependencies = [
  "uuid",
  "zeroship-bundle",
  "zeroship-core",
- "zeroship-data-core",
+ "zeroship-data-orm",
  "zeroship-metering",
  "zeroship-migrate-server",
  "zeroship-plugin-db",

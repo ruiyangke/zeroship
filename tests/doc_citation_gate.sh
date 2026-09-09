@@ -182,7 +182,7 @@ gate_arm agents_md_paths "$agents_examined" 40 || FAILED=1
 #
 # Extract the whole path-shaped token before selecting repository roots. A
 # regex that begins at `schema/` also finds that suffix inside the shorthand
-# `zeroship-data-query-builder/src/compile.rs`; that is not a repository-root citation.
+# `zeroship-data-sql/src/compile.rs`; that is not a repository-root citation.
 # How a file's text is fed to the extractor. Default: verbatim.
 #
 # `CITE_SOURCE` exists because the extractor is LINE-BASED and one class of
@@ -385,9 +385,9 @@ if [ "${1:-}" = "--self-test" ]; then
   # contains no dead citation of its own, and so two runs cannot collide.
   a_sh="tests/lib/gate_arms.sh"
   a_md="docs/reference/db.md"
-  a_rs="crates/zeroship-data-engine/src/lib.rs"
+  a_rs="crates/zeroship-data-orm/src/lib.rs"
   gone_md="docs/reference/absent-$$.md"
-  gone_rs_dir="crates/zeroship-data-engine/src/transaction/"
+  gone_rs_dir="crates/zeroship-data-orm/src/transaction/"
   gone_rs_tail="absent-$$.rs"
   for a in "$a_sh" "$a_md" "$a_rs"; do
     [ -f "$a" ] || { echo "self-test anchor is missing: $a" >&2; exit 1; }

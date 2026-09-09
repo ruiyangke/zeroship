@@ -19,7 +19,7 @@ use std::sync::{LazyLock, Mutex, MutexGuard};
 
 use crate::backend::{BackendHandle, ChangeStream};
 use crate::change_stream_pg::WalConsumerHandle;
-use zeroship_data_core::error::DbError;
+use zeroship_data_orm::error::DbError;
 
 #[derive(Debug)]
 enum RunningConsumer {
@@ -280,42 +280,35 @@ async fn start_on_current_isolate(
         )
     })?;
 
-    match backend {
-        BackendHandle::Postgres(pg) => {
-            // Constructed here rather than through a `BackendHandle` accessor.
-            // `as_change_stream_pg()` made the dispatch enum - a data-engine
-            // type - name `crate::change_stream_pg`, which is CDC, so
-            // backend_handle.rs could not move to data-engine without dragging
-            // the CDC module with it. CDC composing its own change stream from
-            // the arm it already matched is the right direction, and it drops
-            // an `.expect` that could only have fired if the accessor and this
-            // match disagreed about the same value.
-            let change_stream = crate::change_stream_pg::PgChangeStream::new(pg.clone());
-            // Suppress the local fast path before provisioning. The initial
-            // snapshot is emitted only after readiness, so writes in this
-            // startup window are represented by that snapshot. The consumer
-            // installs its own overlapping guard before it reports ready;
-            // the overlap prevents a local-plus-WAL duplicate-delivery gap.
-            let startup_suppression = crate::broker::SuppressGuard::activate(app_id);
-            let handle = change_stream.spawn_consumer(app_id, &worker_id).await;
-            drop(startup_suppression);
-            let handle = handle?;
-            Ok(RunningConsumer::Postgres(handle))
-        }
-        BackendHandle::Sqlite(_) => {
-            let change_stream = backend
-                .as_change_stream_sqlite()
-                .expect("SQLite backend must expose its change stream");
-            // Match the Postgres startup window above. Use the startup-only
-            // suppression guard, whose Drop merely re-enables delivery; the
-            // general pause guard emits a Resync on Drop and would add a
-            // synthetic first message to every SQLite subscription.
-            let startup_suppression = crate::broker::SuppressGuard::activate(app_id);
-            let handle = change_stream.spawn_consumer(app_id, &worker_id).await;
-            drop(startup_suppression);
-            let _handle = handle?;
-            Ok(RunningConsumer::Sqlite)
-        }
+    if let Some(pg) = backend.get_rc::<crate::backend::PostgresBackend>() {
+        // CDC composition belongs to the host adapter.
+        let change_stream = crate::change_stream_pg::PgChangeStream::new(pg.clone());
+        // Suppress the local fast path before provisioning. The initial
+        // snapshot is emitted only after readiness, so writes in this
+        // startup window are represented by that snapshot. The consumer
+        // installs its own overlapping guard before it reports ready;
+        // the overlap prevents a local-plus-WAL duplicate-delivery gap.
+        let startup_suppression = crate::broker::SuppressGuard::activate(app_id);
+        let handle = change_stream.spawn_consumer(app_id, &worker_id).await;
+        drop(startup_suppression);
+        let handle = handle?;
+        Ok(RunningConsumer::Postgres(handle))
+    } else if let Some(sqlite) = backend.get_rc::<crate::backend::SqliteBackend>() {
+        let change_stream = crate::backend::sqlite::cdc::SqliteChangeStream::new(sqlite);
+        // Match the Postgres startup window above. Use the startup-only
+        // suppression guard, whose Drop merely re-enables delivery; the
+        // general pause guard emits a Resync on Drop and would add a
+        // synthetic first message to every SQLite subscription.
+        let startup_suppression = crate::broker::SuppressGuard::activate(app_id);
+        let handle = change_stream.spawn_consumer(app_id, &worker_id).await;
+        drop(startup_suppression);
+        let _handle = handle?;
+        Ok(RunningConsumer::Sqlite)
+    } else {
+        Err(DbError::config(
+            "backend_unsupported",
+            "no CDC provider is registered for this backend",
+        ))
     }
 }
 

@@ -10,7 +10,7 @@
  *   mint required).
  *
  * Mirrors the Rust-side `dispatch_insert` auto-mint pass landed in this
- * PR (see `crates/zeroship-data-engine/src/crud/system_fields_pass.rs`).
+ * PR (see `crates/zeroship-data-orm/src/crud/system_fields_pass.rs`).
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";

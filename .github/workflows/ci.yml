@@ -1007,7 +1007,7 @@ jobs:
       - run: |
           set -o pipefail
           cargo test -p zeroship-plugin-db --test test_helpers sqlite_integration::
-          cargo test -p zeroship-data-engine
+          cargo test -p zeroship-data-orm
       # The migration service's suite: the service's own targets, the two live-PG
       # session proofs (`smoke_apply_pg`, `author_and_apply_pg`) and the
       # `CompioPgSession` unit test. Without a database the PG proofs skip
@@ -1137,7 +1137,7 @@ jobs:
       # crate build each.
       - name: No item is reachable at a visibility its signature cannot honour
         run: tests/private_interface_gate.sh
-      - name: The data-core contract is invariant across the feature split
+      - name: The ORM driver contract is invariant across the feature split
         run: tests/contract_feature_invariance_gate.sh
 
   # The live-database gate. zeroship-control and zeroship-migrate-server between them

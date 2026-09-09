@@ -1,20 +1,9 @@
 # The data-plane crate shape
 
-**Status.** PARTIAL. **All six target crates now exist, and the last sentence of this block said
-two of them did not until 2026-09-03.** Five are load-bearing:
-`crates/zeroship-data-query-builder`, `crates/zeroship-data-core`,
-`crates/zeroship-data-postgres`, `crates/zeroship-data-sqlite`, and
-`crates/zeroship-data-engine` (extracted at `92e7615be`). Both vendor cuts are done -
-`crates/zeroship-data-engine/src/backend/mod.rs` is now a re-export ladder plus the `Backend`
-conformance marker and `backend/cancel.rs`.
-
-The sixth is `crates/zeroship-data-cdc-server`, created at `545ceff1e`, and it is a CRATE rather
-than a SERVICE: a manifest, a config module and a `main` that answers `--check-config` and then
-refuses to start. **ZERO files moved into it**, which is the settled answer rather than a deferral -
-see `docs/proposals/2026-08-28-cdc-service.md`, which governs the four CDC modules. They still sit
-in `crates/zeroship-plugin-db`, and the relay stays blocked on entities that do not exist and on a
-PostgreSQL 18.4 move the deployment has not made. So "six of six crates" is a true statement about
-the crate graph and a misleading one about the work.
+**Status.** Superseded by `docs/architecture/data-orm.md` for the runtime ORM
+crate structure and backend interface. The design below records the earlier
+extraction; its crate inventory is historical. CDC service work remains governed
+by `docs/proposals/2026-08-28-cdc-service.md`.
 
 ---
 
@@ -44,7 +33,7 @@ inward?* If not, it is not the fix. It is also why the answer is a refactor rath
 ```
 libs/compio-postgres            driver, unchanged
 
-zeroship-data-query-builder     the typed query grammar (DbPlan IR). ZERO dependencies, LEAF,
+zeroship-data-sql     the typed query grammar (DbPlan IR). ZERO dependencies, LEAF,
                                 and that stays load-bearing.
 zeroship-data-core              the contract every backend implements, PLUS the backend-neutral
                                 layer both share: encryption, MaskKind, TypedCell/TypedRows.
@@ -54,7 +43,7 @@ zeroship-data-cdc-server        service tier: WAL stream, slot authority. A BINA
                                 zeroship-migrate-server. NOTHING DEPENDS ON IT.
                                 -> compio-postgres, zeroship-cdc-wire, zeroship-core, and MAY ->
                                 data-core. NOT data-postgres.
-zeroship-data-engine            the data plane's logic: crud pipeline, transactions, exec.
+zeroship-data-orm            the data plane's logic: crud pipeline, transactions, exec.
                                 -> data-core, AND -> data-postgres + data-sqlite, because it owns
                                 BackendHandle.
 zeroship-plugin-db              THIN. The worker/runtime plugin ADAPTER ONLY. -> data-engine.
@@ -109,11 +98,11 @@ invisible breach and nothing here catches it.
 
 | crate | holds |
 | --- | --- |
-| `zeroship-data-query-builder` | `plan.rs`, `predicate.rs`, `projection.rs`, `search.rs`, `write.rs`, `ident.rs`, `render/{mod,postgres}.rs`. Manifest declares no dependencies at all. |
+| `zeroship-data-sql` | `plan.rs`, `predicate.rs`, `projection.rs`, `search.rs`, `write.rs`, `ident.rs`, `render/{mod,postgres}.rs`. Manifest declares no dependencies at all. |
 | `zeroship-data-core` | `error.rs` (`DbError`), `binding.rs` (`DbBinding`), `budgets.rs`, `capability.rs`, `storage.rs` (the dispatch traits), `encryption/`, `lock_policy.rs`, `schema_cache.rs` |
 | `zeroship-data-postgres` | `postgres.rs`, `pg_error.rs`, `pg_introspect.rs`, `pg_session_sql.rs`, `pg_row_json.rs`, `pg_autocommit.rs`, `lock_guard.rs` |
 | `zeroship-data-sqlite` | the whole SQLite backend: `session.rs`, `cdc.rs`, `change_sink.rs`, `dialect.rs`, `lock.rs`, `reservation.rs`, `row_json.rs`, `spatial.rs`, `vector.rs`, `mask_policy_store.rs`, `error.rs` |
-| `zeroship-data-engine` | `crud/`, `transaction/`, `exec.rs`, `backend/`, `backend_handle.rs`, `backend_selection.rs`, `tx_route.rs`, `tx_lanes.rs`, `descriptor.rs`, `metrics.rs`, `system_shape_charter.rs`, `auth/`, `test_support/` |
+| `zeroship-data-orm` | `crud/`, `transaction/`, `exec.rs`, `backend/`, `backend_handle.rs`, `backend_selection.rs`, `tx_route.rs`, `tx_lanes.rs`, `descriptor.rs`, `metrics.rs`, `system_shape_charter.rs`, `auth/`, `test_support/` |
 | `zeroship-data-cdc-server` | `Cargo.toml`, `src/lib.rs`, `src/config.rs`, `src/main.rs`. No decode loop, no slot, no election, no listener, no frame |
 
 `zeroship-plugin-db` is no longer one crate holding three future ones. It holds the thin adapter
@@ -137,9 +126,9 @@ current list rather than trusting this sentence.
 
 `backend/mod.rs` splits into nothing new: what is left of it is the re-export ladder and `Backend`,
 the conformance marker the orphan rule pins beside its own `impl`. **That marker belongs to
-`zeroship-data-engine` and it is `pub`; this line called it "`plugin-db`'s own `pub(crate)`" marker
+`zeroship-data-orm` and it is `pub`; this line called it "`plugin-db`'s own `pub(crate)`" marker
 until 2026-09-04.** The sentence was true before the extraction at `92e7615be` and is wrong on both
-counts after it: `crates/zeroship-data-engine/src/backend/mod.rs` declares `pub trait Backend` under
+counts after it: `crates/zeroship-data-orm/src/backend/mod.rs` declares `pub trait Backend` under
 `#[cfg(any(test, feature = "test-helpers"))]`, and `crates/zeroship-plugin-db/src/lib.rs` reaches it
 only by re-exporting the whole `backend` module - which is how the claim kept resolving under a grep
 while being false about ownership. It is the ninth trait in the dispatch landscape and the only
@@ -155,7 +144,7 @@ files, and has been hardened against them twice - already gave the right ones:
 - `wal_consumer.rs`: **split and rewrite, do not move the file.** A verbatim move compiles, passes
   every gate in this tree, and silently splits the process-wide broker: the file's
   `broker::publish` / `has_subscribers` / `SuppressGuard` calls all target `LazyLock` statics in
-  `crates/zeroship-data-core/src/broker.rs`, so in a second process `publish` reaches zero
+  `crates/zeroship-data-orm/src/broker.rs`, so in a second process `publish` reaches zero
   subscribers while the worker keeps emitting locally. This document's own history section says
   exactly why that shape is dangerous: "the build goes GREEN having made the violation permanent".
 - `replication.rs`: **split**, with the watchdog half and the drop family STAYING. `watchdog_query`
@@ -165,13 +154,13 @@ files, and has been hardened against them twice - already gave the right ones:
   `REPLICATION`. Not moved and not split - its lease half is the INPUT to its sweep decision.
 - `change_stream_pg.rs`: **STAYS in `plugin-db`.** It implements `ChangeStream`, a `data-core`
   capability trait whose SQLite peer is in the vendor LIBRARY crate `zeroship-data-sqlite`
-  (`crates/zeroship-data-sqlite/src/cdc.rs:854`), and it holds an `Rc<PostgresBackend>` - not
+  (`crates/zeroship-data-orm/src/backend/sqlite/cdc.rs:854`), and it holds an `Rc<PostgresBackend>` - not
   `Send`, so pinned to the isolate thread, never mind the process. The CDC spec's verdict for it is
   "Deleted", which is an END-STATE verdict reachable only once `RunningConsumer::Postgres` is a
   relay subscription handle. **The one answer no document supports is "moves to data-cdc-server".**
 
 **The `data-engine` row listed `cdc_lifecycle.rs` until the same date, and the tree refutes it.**
-`zeroship-data-engine` was extracted at `92e7615be` and `cdc_lifecycle.rs` is still in
+`zeroship-data-orm` was extracted at `92e7615be` and `cdc_lifecycle.rs` is still in
 `crates/zeroship-plugin-db/src/`. It could not have gone: it constructs `PgChangeStream` and its
 lease is owned by a V8 wrapper (`crates/zeroship-plugin-db/src/v8_classes/subscription.rs`). It is
 ADAPTER. A THIRD answer is live in the tree - `tests/lib/tier_direction_census.sh:264` and `:355`
@@ -277,7 +266,7 @@ arm at every exhaustive site that destructures it, and in this crate those sites
 Enumerate them rather than trusting a figure written here:
 
 ```
-grep -rnE '(BackendHandle|TxConnection|TxCanceller|Self)::Sqlite\(' crates/zeroship-data-engine/src
+grep -rnE '(BackendHandle|TxConnection|TxCanceller|Self)::Sqlite\(' crates/zeroship-data-orm/src
 ```
 
 That is an upper bound - it also matches constructors and `#[cfg(test)]` modules - and it is still
@@ -288,22 +277,22 @@ none of them.** `exec_query`, `exec_count` and `exec_mutation` each open with
 three are caught downstream, because the fall-through reaches the exhaustive `match` in
 `exec_postgres_autocommit_with_role`, so the build breaks at a function whose name does not mention
 the branch you actually had to write. The fourth is caught nowhere:
-`backend_publishes_committed_changes` (`crates/zeroship-data-engine/src/exec.rs`) is a bare `matches!`
+`backend_publishes_committed_changes` (`crates/zeroship-data-orm/src/exec.rs`) is a bare `matches!`
 against the SQLite arm, so a third backend reads `false`, the engine emits change events locally on
 its behalf, and a backend that publishes its own commits delivers every change to every subscriber
 twice. Silent at compile time, silent in the test suite. Closing it into an exhaustive `match` is a
 correctness fix that does not wait on any wording decision.
 
 The remaining per-vendor statement text is three logical operations, each written twice because each
-carries its own dialect, in `crates/zeroship-data-engine/src/backend_handle.rs`: read an encrypted raw
+carries its own dialect, in `crates/zeroship-data-orm/src/backend_handle.rs`: read an encrypted raw
 column (`read_raw_column_bytes`), read a plaintext raw column (`read_raw_column_text`), append an
 unmask audit row (`append_unmask_audit`). **That was billed as "the remaining surface" until
 2026-09-04, and it was an undercount in two places.**
-`crates/zeroship-data-engine/src/transaction/driver.rs` issues `SAVEPOINT`, `ROLLBACK TO SAVEPOINT`
+`crates/zeroship-data-orm/src/transaction/driver.rs` issues `SAVEPOINT`, `ROLLBACK TO SAVEPOINT`
 and `RELEASE SAVEPOINT` from the reducer's `IssueSavepoint` family. That is statement text under this
 decision's literal wording, but it is ANSI, written once rather than per-vendor, and costs a new
 backend nothing - which is the distinction option (b) in Open 4 would make load-bearing.
-`crates/zeroship-data-engine/src/auth/bootstrap.rs` is the larger omission: eleven production
+`crates/zeroship-data-orm/src/auth/bootstrap.rs` is the larger omission: eleven production
 statements that are PostgreSQL-only by construction (`pg_roles`, `CREATE ROLE`, `SET LOCAL ROLE`,
 `GRANT ... ON ALL SEQUENCES`, `ALTER DEFAULT PRIVILEGES`, `REVOKE`), in an always-compiled module.
 It is the largest live violation of this decision's own heading and it is covered by the DELETE row in
@@ -327,7 +316,7 @@ gate for the current list; the whole job is to shrink it.
 
 ### The dispatch surface
 
-Eight capability traits live in `crates/zeroship-data-core/src/storage.rs`: `SqlExecutor`,
+Eight capability traits live in `crates/zeroship-data-orm/src/storage.rs`: `SqlExecutor`,
 `LockManager`, `SchemaIntrospect`, `DialectBuilder`, `ChangeStream`, `VectorIndex`, `SpatialIndex`,
 `Backup`. The shared value types are in `capability.rs`: `LockScope`, `ScalarRead`, `UnmaskAuditRow`,
 `SnapshotHandle`, `SnapshotOpts`, `PitrTarget`, `BusyPolicy`, `SNAPSHOT_RESTORE_LOCK_TAG`.
@@ -338,7 +327,7 @@ plane. The associated types cannot be erased without losing the concrete client 
 `LockManager::acquire_advisory_lock` takes by `&Self::Client`. The backend set is closed, and an enum
 is the canonical shape for a closed sum. Monomorphised dispatch is preserved, not replaced.
 
-`BackendHandle` (`crates/zeroship-data-engine/src/backend_handle.rs`) names both vendors in its
+`BackendHandle` (`crates/zeroship-data-orm/src/backend_handle.rs`) names both vendors in its
 definition, so it belongs to the tier ABOVE both, which is `data-engine`. Neither vendor crate names
 it - so the graph is a diamond, not a cycle.
 
@@ -364,7 +353,7 @@ Plus the gates, before each move rather than after: `tests/vendor_embedding_gate
 `compio_postgres::Error` in a crate that does not depend on it - that is `E0433`, at compile time,
 for everyone, forever. No lint, no reviewer, no census run. The technique is already load-bearing in
 this tree: `serialize_derive_is_structurally_impossible`
-(`crates/zeroship-data-query-builder/tests/no_sql_text_escape_hatch.rs`) reads the crate's own
+(`crates/zeroship-data-sql/tests/no_sql_text_escape_hatch.rs`) reads the crate's own
 manifest and asserts the declared dependency set is EMPTY, which is what makes "`DbPlan` must not
 derive `Serialize`" a structural fact rather than a review item.
 
@@ -381,7 +370,7 @@ privileged operations belong to a separate service that does not execute creator
 `data-engine` (its own entry point requires the caller "must not be the worker login"), and why
 `auth/` is deleted rather than moved - role creation already ships from
 `crates/zeroship-migrate-server/src/provisioning.rs` and `apply.rs`, and the live `SET LOCAL ROLE`
-batch is `crates/zeroship-data-postgres/src/pg_session_sql.rs`, not `auth/bootstrap.rs`.
+batch is `crates/zeroship-data-orm/src/backend/postgres/pg_session_sql.rs`, not `auth/bootstrap.rs`.
 
 **Nothing links the relay - not just the worker.** This paragraph said "`zeroship-plugin-db` may not
 depend on `zeroship-data-cdc-server`" until 2026-09-03, which is true and too narrow. The rule and
@@ -467,7 +456,7 @@ nobody runs is a census with a stricter name.
    broker, and `cdc_lifecycle.rs` also reaches `crate::context::with`. This item read "BUILDABLE
    once Open 2 is answered, 4-8 hours", as though breaking the edges would let the files travel.
    They must not travel: the broker's state is process-wide `LazyLock` statics in
-   `crates/zeroship-data-core/src/broker.rs`, so a `wal_consumer.rs` in a second process publishes
+   `crates/zeroship-data-orm/src/broker.rs`, so a `wal_consumer.rs` in a second process publishes
    into a broker with no subscribers and suppresses nothing in the worker - and it COMPILES.
    `cdc_lifecycle.rs` is ADAPTER and stays put. What is actually buildable here is the pgoutput
    decode algorithm being REWRITTEN in the relay with a `zeroship-cdc-wire` frame emit where
@@ -495,13 +484,13 @@ nobody runs is a census with a stricter name.
        moves no tier-census edge, and touches no crate.
    (b) **Weaken it to portability** - the engine may hold statement text so long as that text is
        dialect-neutral and a new backend has to write none of it. The `SAVEPOINT` family in
-       `crates/zeroship-data-engine/src/transaction/driver.rs` becomes compliant as written, and the
-       six statements in `crates/zeroship-data-engine/src/backend_handle.rs` still are not. This is
+       `crates/zeroship-data-orm/src/transaction/driver.rs` becomes compliant as written, and the
+       six statements in `crates/zeroship-data-orm/src/backend_handle.rs` still are not. This is
        recorded, not recommended: it permanently legitimises the surface the split exists to remove,
        and the pre-launch stance in `AGENTS.md` says to build the end state rather than an
        intermediate one.
    (c) **Mechanise whichever is ratified**, because nothing does today. A gate over
-       `crates/zeroship-data-engine/src` for production statement literals, baselined the way
+       `crates/zeroship-data-orm/src` for production statement literals, baselined the way
        `tests/vendor_embedding_gate.sh` baselines decision 5, with the `auth/bootstrap.rs` entry
        carrying Open 7 as the task that deletes it. Orthogonal to (a) vs (b) - the ratified wording is
        simply what the gate reads.
@@ -509,7 +498,7 @@ nobody runs is a census with a stricter name.
    Recommended: **(a) plus (c)**. The property is right and only its cost model was wrong, and an
    unmechanised decision in this document has now been re-derived by hand at least twice. Independent
    of all three, close `backend_publishes_committed_changes` in
-   `crates/zeroship-data-engine/src/exec.rs` into an exhaustive `match`: that is the single site where
+   `crates/zeroship-data-orm/src/exec.rs` into an exhaustive `match`: that is the single site where
    a third backend compiles clean and behaves wrong, and it is a correctness fix rather than a wording
    question. NEEDS-DECISION on (a) versus (b), and on paying for (c).
 
@@ -550,7 +539,7 @@ nobody runs is a census with a stricter name.
     its own test asserted as a clean `sampled: 0, drifted: 0`. A live-database enumeration cannot
     substitute - the kind exists nowhere else - so the check that does catch it is structural (a
     `__zs_raw__` sibling with no matching descriptor declaration) and shares nothing with these 1287
-    lines. Full reasoning in the epitaph at `crates/zeroship-data-engine/src/crud/mod.rs`.
+    lines. Full reasoning in the epitaph at `crates/zeroship-data-orm/src/crud/mod.rs`.
 
 11. **`zeroship-migrate-server`'s name.** It is a service HOST, not engine. Left in the `migrate-*`
     family; a `-service` suffix is arguable. NEEDS-DECISION.
@@ -583,7 +572,7 @@ follows are the mistakes that would otherwise be remade.
   an ungated arm after the adapter's own check reported zero errors and two dependents failed to
   build. Use the three commands under "How a move is verified".
 
-- **Do not fold `zeroship-schema` into `zeroship-data-query-builder`.** Moving a string builder into
+- **Do not fold `zeroship-schema` into `zeroship-data-sql`.** Moving a string builder into
   the crate written to obsolete it is the "two intermediate versions" the pre-launch stance forbids.
 
 - **Do not restore `ChangeStream::pause_broker` / `engage_schema_pending`.** All four impls were the
@@ -591,7 +580,7 @@ follows are the mistakes that would otherwise be remade.
   records a behaviour reason, not a preference: it needs the startup-only suppression guard, whose
   `Drop` merely re-enables delivery, while the general pause guard emits a Resync on `Drop` and would
   add a synthetic first message to every SQLite subscription. The guards themselves live in
-  `crates/zeroship-data-core/src/broker.rs`; deleting `broker::engage_schema_pending` /
+  `crates/zeroship-data-orm/src/broker.rs`; deleting `broker::engage_schema_pending` /
   `disengage_schema_pending` breaks them, because those are their implementation.
 
 - **Do not put an executor call in a `data-core` trait's default body.** `LockManager` carried a

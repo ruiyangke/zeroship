@@ -34,7 +34,7 @@ use sha2::{Digest, Sha256};
 use zeroship_core::replication_names::{self, ReplicationNameError};
 
 use crate::backend::pg_error;
-use zeroship_data_core::error::{first_row_or_internal, prefix_message, DbError};
+use zeroship_data_orm::error::{DbError, first_row_or_internal, prefix_message};
 
 /// Stable prefix used by every C1 Postgres object (publication, slot).
 /// Picked deliberately short (4 chars + `_`) so the watchdog query's
@@ -429,8 +429,7 @@ pub const DROP_TERMINATE_GRACE_SECS: u64 = 5;
 
 /// How often [`drop_slot`] re-probes `pg_replication_slots.active` while
 /// waiting out [`DROP_TERMINATE_GRACE_SECS`].
-pub const DROP_TERMINATE_POLL_INTERVAL: std::time::Duration =
-    std::time::Duration::from_millis(50);
+pub const DROP_TERMINATE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// Number of probes that fit in the grace. Derived, never written twice.
 const fn drop_terminate_poll_attempts() -> u32 {
@@ -880,7 +879,7 @@ mod tests {
 
     // The `prefix_message` helper's contract (variant preserved,
     // structured variants left alone) is now pinned in
-    // `zeroship_data_core::error::tests::prefix_message_preserves_variant_and_code`
+    // `zeroship_data_orm::error::tests::prefix_message_preserves_variant_and_code`
     // and `prefix_message_leaves_structured_variants_alone` — the
     // helper moved into `crate::error` when the per-file `coded_sql`
     // duplicates were collapsed onto a single shared variant-walker.

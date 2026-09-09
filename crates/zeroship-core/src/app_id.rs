@@ -20,7 +20,7 @@
 //!
 //! # What this type deliberately does NOT have
 //!
-//! Following `zeroship_data_query_builder::schema_name::SchemaName`, which was defined the
+//! Following `zeroship_data_sql::schema_name::SchemaName`, which was defined the
 //! same way and for the same reason, this type is characterised by its
 //! ABSENCES. Each one is a named failure it exists to prevent.
 //!

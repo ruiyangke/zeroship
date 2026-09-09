@@ -98,7 +98,7 @@ journal is refused by the engine's own gate - *"plan requires approval
 creator's behalf, the creator can drop their journal by name.** Both refusals
 are asserted by exact message in the live apply API regression.
 
-`crates/zeroship-data-query-builder/src/ident.rs` is a third copy because its
+`crates/zeroship-data-sql/src/ident.rs` is a third copy because its
 zero-dependency boundary forbids importing either validator. Its collection
 role now consumes the same platform-prefix slice, and the data-plane parity
 test compares all three copies. Its additional backend and runtime-plan

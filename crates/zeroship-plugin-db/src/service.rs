@@ -58,8 +58,8 @@ use std::sync::Arc;
 use compio_postgres::Pool;
 use sha2::{Digest, Sha256};
 
-use zeroship_data_core::error::DbError;
-use crate::{backend_for_url, BackendUrl, DbPlugin};
+use crate::{BackendUrl, DbPlugin, backend_for_url};
+use zeroship_data_orm::error::DbError;
 
 /// Connections the operator-lifecycle pool keeps for maintenance work.
 ///
@@ -421,16 +421,15 @@ impl DbLifecycle<'_> {
         // only the version poller deprovisions, sequentially - but the doc
         // above advertises the race as handled, so the handling is written to
         // be correct rather than to be unreached.
-        let (installed, lost_the_race) = OPERATOR_POOLS.with(|pools| {
-            match pools.borrow_mut().entry(key) {
+        let (installed, lost_the_race) =
+            OPERATOR_POOLS.with(|pools| match pools.borrow_mut().entry(key) {
                 std::collections::hash_map::Entry::Occupied(entry) => {
                     (entry.get().clone(), Some(opened))
                 }
                 std::collections::hash_map::Entry::Vacant(entry) => {
                     (Rc::clone(entry.insert(opened)), None)
                 }
-            }
-        });
+            });
         drop(lost_the_race);
 
         Ok(installed)

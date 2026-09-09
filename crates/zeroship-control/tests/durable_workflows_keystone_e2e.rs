@@ -558,8 +558,8 @@ fn assert_ack_run(response: &WorkflowAdvanceResponse, run_id: &str, label: &str)
 ///
 /// WHY THE ROLE AND THE GRANTS. Every autocommit `env.db` statement opens a
 /// transaction and runs `SET LOCAL ROLE "app_<app_id>_role"` first
-/// (crates/zeroship-data-engine/src/auth/bootstrap.rs:200-207,
-/// crates/zeroship-data-engine/src/exec.rs:522-542), so the effective privileges
+/// (crates/zeroship-data-orm/src/auth/bootstrap.rs:200-207,
+/// crates/zeroship-data-orm/src/exec.rs:522-542), so the effective privileges
 /// are that role's, not `zeroship_worker`'s. In production the role, the
 /// membership edge and the grants are all created by `migrated`'s apply
 /// (crates/zeroship-migrate-server/src/apply.rs:1669-1712, :1638-1649). THIS HARNESS
@@ -569,7 +569,7 @@ fn assert_ack_run(response: &WorkflowAdvanceResponse, run_id: &str, label: &str)
 /// with `provision_runtime_app_role` if it changes. Without them the first
 /// `env.db` call fails with `role "app_..._role" does not exist`, which
 /// plugin-db reports as `schema_not_provisioned`
-/// (crates/zeroship-data-core/src/error.rs:216-243).
+/// (crates/zeroship-data-orm/src/error.rs:216-243).
 ///
 /// The explicit column grants are re-issued on every call because this function
 /// drops and recreates the tables.
@@ -582,7 +582,7 @@ async fn prepare_side_effect_table(pg: &TestPg) {
     // itself emits for a creator table
     // (crates/zeroship-migrate-core/src/schema/query.rs). `id` is TEXT because
     // plugin-db mints a typed_id string into it when the document omits one
-    // (crates/zeroship-data-engine/src/crud/system_fields_pass.rs:244-249); a uuid
+    // (crates/zeroship-data-orm/src/crud/system_fields_pass.rs:244-249); a uuid
     // column would reject that. `deleted_at` is not optional either - `find` and
     // `count` add `AND deleted_at IS NULL` unless asked not to.
     //

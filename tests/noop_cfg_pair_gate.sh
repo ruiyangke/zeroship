@@ -3,7 +3,7 @@
 # REFUSE A #[cfg(feature = "F")] / #[cfg(not(feature = "F"))] PAIR WHOSE TWO
 # ARMS DECLARE THE IDENTICAL ITEM WITH THE IDENTICAL VISIBILITY.
 #
-# THE DEFECT. `crates/zeroship-data-engine/src/crud/mod.rs` declared six
+# THE DEFECT. `crates/zeroship-data-orm/src/crud/mod.rs` declared six
 # modules twice, gated in both directions on `test-helpers`:
 #
 #     #[cfg(not(feature = "test-helpers"))]

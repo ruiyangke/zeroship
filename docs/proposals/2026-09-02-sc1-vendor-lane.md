@@ -5,7 +5,7 @@ data-crate split.
 
 ## The question
 
-`crates/zeroship-data-engine/src/transaction/` must divide between two crates: the
+`crates/zeroship-data-orm/src/transaction/` must divide between two crates: the
 SC-1 protocol (vendor-neutral, engine tier) and the mechanics that talk to a
 database (vendor tier). #122 states the division as a slogan - "transaction
 mechanics go to the backend, the SC-1 protocol does not" - without saying where

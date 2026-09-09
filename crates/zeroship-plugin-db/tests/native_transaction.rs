@@ -47,7 +47,7 @@
 //! Each runtime receives the same descriptor shape that a deploy carries; the
 //! tables are applied ahead of boot by the fixture. The orchestrator logic is
 //! also covered without a DB by the Rust unit tests + tx-view shape
-//! tests in `crates/zeroship-data-engine/src/transaction/mod.rs` and
+//! tests in `crates/zeroship-data-orm/src/transaction/mod.rs` and
 //! `crates/zeroship-plugin-db/src/v8_classes/transaction.rs`,
 //! the `db_v8_class.rs` surface tests, the SQLite SAVEPOINT SQL tests in
 //! `sqlite_integration.rs`, and the SDK-side mock tests in
@@ -66,7 +66,7 @@ use zeroship_plugin_db::service::{DbService, DbServiceConfig};
 use zeroship_runtime::channel::CancelFlag;
 use zeroship_runtime::plugin::NativePlugin;
 use zeroship_runtime::runtime::Runtime;
-use zeroship_runtime::{init_v8, EnvSnapshot, FetchOutcome, ModuleEntry, RequestCtx, SettledFetch};
+use zeroship_runtime::{EnvSnapshot, FetchOutcome, ModuleEntry, RequestCtx, SettledFetch, init_v8};
 
 fn pg_url() -> String {
     zeroship_core::config::test_database_url()
@@ -471,13 +471,15 @@ fn dispatch_zs_for_app_with_descriptor(
         specifier: "index.js".into(),
         source: source.into(),
     }];
-    let plugins: Vec<Arc<dyn NativePlugin>> = vec![DbService::new(DbServiceConfig {
-        url: url.to_string(),
-        worker_id: "native-transaction-test-worker".to_string(),
-        meter: None,
-    })
-    .expect("db service")
-    .plugin()];
+    let plugins: Vec<Arc<dyn NativePlugin>> = vec![
+        DbService::new(DbServiceConfig {
+            url: url.to_string(),
+            worker_id: "native-transaction-test-worker".to_string(),
+            meter: None,
+        })
+        .expect("db service")
+        .plugin(),
+    ];
     let mut env_vars = std::collections::HashMap::new();
     if let Some(app_id) = app_id {
         env_vars.insert("APP_ID".to_string(), app_id.to_string());
@@ -1266,7 +1268,7 @@ const _procedures = { nestedBothCommit };
 }
 
 /// Savepoint depth cap: nesting `transaction()` past MAX_SAVEPOINT_DEPTH
-/// (`crates/zeroship-data-engine/src/transaction/mod.rs`, = 8) refuses the 9th
+/// (`crates/zeroship-data-orm/src/transaction/mod.rs`, = 8) refuses the 9th
 /// savepoint with `savepoint_depth_exceeded`.
 ///
 /// NAMED `..._is_refused`, not `..._throws`: the refusal arrives as
@@ -2043,7 +2045,7 @@ mod sc1_driver {
     /// It resolved its own through `tx_scope::ensure_backend` until 2026-09-03,
     /// which made an ENGINE file call the ADAPTER - the one direction the crate
     /// split forbids, and a hard cargo error once `transaction/` became
-    /// `zeroship-data-engine`. The lookup lives here now, in the caller that
+    /// `zeroship-data-orm`. The lookup lives here now, in the caller that
     /// owns the thread context, and it is the same call the V8 dispatcher makes
     /// on this test's behalf in production.
     /// The physical schema a probe opens its session against.
@@ -2051,8 +2053,8 @@ mod sc1_driver {
     /// Derived from the app id here because these fixtures still mint one
     /// string for both identities - the same thing production does today. The
     /// point of the parameter is that the CALL now states which it means.
-    fn app_schema(app_id: &str) -> zeroship_data_query_builder::SchemaName {
-        zeroship_data_query_builder::SchemaName::new(app_id).expect("fixture schema name")
+    fn app_schema(app_id: &str) -> zeroship_data_sql::SchemaName {
+        zeroship_data_sql::SchemaName::new(app_id).expect("fixture schema name")
     }
 
     async fn probe_backend() -> zeroship_plugin_db::backend::BackendHandle {

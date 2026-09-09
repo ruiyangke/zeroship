@@ -22,7 +22,7 @@
 #                 crates/zeroship-migrate-server/tests/smoke_apply_pg.rs
 #                 crates/zeroship-migrate-server/tests/author_and_apply_pg.rs
 #                 crates/zeroship-migrate/tests/column_shapes/injected_column_collation.rs
-#                 crates/zeroship-data-engine/src/system_shape_charter.rs
+#                 crates/zeroship-data-orm/src/system_shape_charter.rs
 #   TypeScript  policies/codegen.mjs emits TWO views, because the two consumers
 #               ask different questions of the same bytes:
 #                 sdks/vite-plugin/src/gen-types/confined-system-shape.generated.ts
@@ -151,7 +151,7 @@ SELF="tests/inject_policy_mirror_gate.sh"
 # The six Rust consumers are the deployed ceiling
 # (crates/zeroship-migrate-server/src/policy.rs), two adapter PG tests, the
 # production-charter collation integration test, the worker's own compiled-in
-# charter (crates/zeroship-data-engine/src/system_shape_charter.rs), and the napi
+# charter (crates/zeroship-data-orm/src/system_shape_charter.rs), and the napi
 # generation-path fence
 # (crates/zeroship-migrate-node/tests/gen_artifacts_reserved_identifiers.rs).
 # Four of those are tests, but consuming the shared fragment is the point: none
@@ -410,7 +410,7 @@ fi
 # better than the code it rejected - a missing file makes the extractor yield
 # nothing, which is already the floor's job to catch, so there is one path and
 # one declaration. Do not reintroduce an early gate_arm call here.
-RUST_NAMES_FILE="crates/zeroship-data-query-builder/src/compile.rs"
+RUST_NAMES_FILE="crates/zeroship-data-sql/src/compile.rs"
 
 # The fragment's side: every injected column carrying an `assign =` binding, in
 # declaration order. `assign` is the discriminator on purpose - it selects the

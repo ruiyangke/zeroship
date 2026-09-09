@@ -403,7 +403,7 @@ mod tests {
         // own workspace. Grafting it into the product workspace changed what that
         // sentence denotes without anyone editing it: `crates/` now holds 27 more
         // crates that were never this census's subject, and it duly went red on
-        // `zeroship-data-query-builder/src/compile.rs`, which spells MySQL backticks because
+        // `zeroship-data-sql/src/compile.rs`, which spells MySQL backticks because
         // spelling them is its job.
         //
         // The `-` is required rather than a bare `starts_with`, because

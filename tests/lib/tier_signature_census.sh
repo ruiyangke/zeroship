@@ -106,13 +106,13 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # TWO SOURCE ROOTS SINCE 2026-09-03, for the reason spelled out at the head of
 # tier_direction_census.sh: the ENGINE tier left `zeroship-plugin-db/src` for
-# `zeroship-data-engine/src`, and a census pinned to the first would rule on
+# `zeroship-data-orm/src`, and a census pinned to the first would rule on
 # what stayed while printing a clean verdict about what went. A tier is not a
 # crate; both trees are scanned as one region under one `tier()` map, so the
 # arms below rule on the same files they ruled on before.
 SRC_ROOTS=(
   "$ROOT/crates/zeroship-plugin-db/src"
-  "$ROOT/crates/zeroship-data-engine/src"
+  "$ROOT/crates/zeroship-data-orm/src"
 )
 SHOW_ALL=0
 TEST_REGION=0

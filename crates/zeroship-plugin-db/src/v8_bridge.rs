@@ -31,7 +31,7 @@
 //!   [`crate::backend::pg_error::classify`] directly so the SQLSTATE
 //!   classification survives to the V8 boundary.
 
-use zeroship_data_query_builder::value::Value;
+use zeroship_data_sql::value::Value;
 use zeroship_runtime::state::{ResolveValue, SharedState};
 
 // ---------------------------------------------------------------------------
@@ -116,7 +116,7 @@ pub(crate) fn ensure_read_set_capture() {
 // V8 value walker
 // ---------------------------------------------------------------------------
 
-/// Walk a `v8::Local<v8::Value>` directly into a `zeroship_data_query_builder::value::Value`,
+/// Walk a `v8::Local<v8::Value>` directly into a `zeroship_data_sql::value::Value`,
 /// skipping the JSON.stringify / serde_json::from_str round trip used by
 /// `read_native_arg`. Used by the v8_class `Collection` methods on the
 /// hot path so we don't pay two parse costs per CRUD call.
@@ -253,12 +253,10 @@ fn decode_native_depth(
         if n.fract() == 0.0 && n >= i64::MIN as f64 && n <= i64::MAX as f64 {
             let i = n as i64;
             if (i as f64) == n {
-                return Ok(Value::Number(
-                    zeroship_data_query_builder::value::Number::from(i),
-                ));
+                return Ok(Value::Number(zeroship_data_sql::value::Number::from(i)));
             }
         }
-        if let Some(num) = zeroship_data_query_builder::value::Number::from_f64(n) {
+        if let Some(num) = zeroship_data_sql::value::Number::from_f64(n) {
             return Ok(Value::Number(num));
         }
         // Non-finite. Coercing to null would change a filter's operator to
@@ -301,7 +299,7 @@ fn decode_native_depth(
         if let Ok(date) = v8::Local::<v8::Date>::try_from(v) {
             let ms = date.value_of();
             if ms.is_finite() {
-                if let Some(n) = zeroship_data_query_builder::value::Number::from_f64(ms) {
+                if let Some(n) = zeroship_data_sql::value::Number::from_f64(ms) {
                     return Ok(Value::Number(n));
                 }
             }
@@ -362,7 +360,7 @@ fn decode_native_depth(
             .get_own_property_names(scope, v8::GetPropertyNamesArgs::default())
             .ok_or(DecodeError::PendingException)?;
         budget.take_nodes(names.length() as usize)?;
-        let mut map = zeroship_data_query_builder::value::Map::new();
+        let mut map = zeroship_data_sql::value::Map::new();
         for i in 0..names.length() {
             let key_v = names
                 .get_index(scope, i)
@@ -385,7 +383,7 @@ fn decode_native_depth(
 }
 
 /// Read a CRUD method's object/array argument directly from V8 into a
-/// `zeroship_data_query_builder::value::Value`. `undefined`/missing → empty object (matches
+/// `zeroship_data_sql::value::Value`. `undefined`/missing → empty object (matches
 /// `read_native_arg`'s default).
 pub(crate) fn read_native_arg(
     scope: &mut v8::PinScope<'_, '_>,
@@ -393,7 +391,7 @@ pub(crate) fn read_native_arg(
 ) -> Result<Value, DecodeError> {
     match v {
         Some(val) if !val.is_null_or_undefined() => decode_native(scope, val),
-        _ => Ok(Value::Object(zeroship_data_query_builder::value::Map::new())),
+        _ => Ok(Value::Object(zeroship_data_sql::value::Map::new())),
     }
 }
 
@@ -523,13 +521,13 @@ mod tests {
         ensure_read_set_capture();
         crate::read_set::record_if_active(
             "messages",
-            &zeroship_data_query_builder::value!({ "userId": 42 }),
-            &zeroship_data_query_builder::value!({}),
+            &zeroship_data_sql::value!({ "userId": 42 }),
+            &zeroship_data_sql::value!({}),
         );
         crate::read_set::record_if_active(
             "messages",
-            &zeroship_data_query_builder::value!({}),
-            &zeroship_data_query_builder::value!({}),
+            &zeroship_data_sql::value!({}),
+            &zeroship_data_sql::value!({}),
         );
 
         let entries = crate::read_set::snapshot_for("messages");
@@ -547,8 +545,8 @@ mod tests {
         ensure_read_set_capture();
         crate::read_set::record_if_active(
             "messages",
-            &zeroship_data_query_builder::value!({ "userId": 42 }),
-            &zeroship_data_query_builder::value!({}),
+            &zeroship_data_sql::value!({ "userId": 42 }),
+            &zeroship_data_sql::value!({}),
         );
         assert!(
             crate::read_set::snapshot_for("messages").is_empty(),
@@ -564,8 +562,8 @@ mod tests {
         assert!(crate::read_set::is_active(), "the capture is still opened");
         crate::read_set::record_if_active(
             "messages",
-            &zeroship_data_query_builder::value!({ "userId": 42 }),
-            &zeroship_data_query_builder::value!({}),
+            &zeroship_data_sql::value!({ "userId": 42 }),
+            &zeroship_data_sql::value!({}),
         );
         assert!(crate::read_set::snapshot_for("messages").is_empty());
     }
@@ -610,7 +608,7 @@ mod tests {
     /// This pins current behaviour rather than endorsing it. `Infinity`,
     /// `-Infinity` and `NaN` all reach the number arm as real V8 numbers, skip the
     /// lossless-integer branch (their `fract()` is NaN, so `fract() == 0.0` is
-    /// false), and then fail `zeroship_data_query_builder::value::Number::from_f64`, which returns `None`
+    /// false), and then fail `zeroship_data_sql::value::Number::from_f64`, which returns `None`
     /// for anything non-finite. The arm falls through to `Value::Null`.
     ///
     /// So a creator value of `Infinity` is not rejected here and does not error -
@@ -655,20 +653,18 @@ mod tests {
         assert_eq!(
             decode!("1.5"),
             Ok(Value::Number(
-                zeroship_data_query_builder::value::Number::from_f64(1.5).unwrap()
+                zeroship_data_sql::value::Number::from_f64(1.5).unwrap()
             ))
         );
         assert_eq!(
             decode!("0"),
-            Ok(Value::Number(
-                zeroship_data_query_builder::value::Number::from(0i64)
-            ))
+            Ok(Value::Number(zeroship_data_sql::value::Number::from(0i64)))
         );
         assert_eq!(
             decode!("-42"),
-            Ok(Value::Number(
-                zeroship_data_query_builder::value::Number::from(-42i64)
-            ))
+            Ok(Value::Number(zeroship_data_sql::value::Number::from(
+                -42i64
+            )))
         );
         assert!(
             matches!(decode!("Number.MAX_VALUE"), Ok(Value::Number(_))),

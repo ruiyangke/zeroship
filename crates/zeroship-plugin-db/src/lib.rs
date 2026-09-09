@@ -40,12 +40,13 @@
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
+use zeroship_data_orm::connection::{backend_for_url, BackendUrl};
 
 use compio_postgres::Pool;
 use zeroship_runtime::plugin::{NativePlugin, NativeRegistrar};
 
 use crate::context::{with_mut as ctx_mut, BackendInitState};
-use zeroship_data_core::error::DbError;
+use zeroship_data_orm::error::DbError;
 
 // Module visibility note:
 //
@@ -87,7 +88,7 @@ zeroship_core::declare_env_consumer!(
 // Re-exported rather than repointed, the same mechanism `budgets`, `encryption`
 // and `lock_policy` used: every `crate::broker::*` call site resolves unchanged,
 // including the ~30 in `wal_consumer.rs`.
-pub use zeroship_data_core::broker;
+pub use zeroship_data_orm::broker;
 // `binding` mirrors `backend` below: crate-private in release builds, `pub`
 // under `test-helpers` so the integration targets can name the `DbBinding` that
 // the descriptor store, the CRUD dispatchers and the search backends are keyed
@@ -112,63 +113,42 @@ pub mod op_error;
 // cannot live above them. Re-exported rather than repointed, so
 // `crate::lock_policy::BoundedLockAcquire` and
 // `zeroship_plugin_db::lock_policy::...` both still resolve.
-pub use zeroship_data_core::lock_policy;
+pub use zeroship_data_orm::lock_policy;
 // The DDL builders + `QueryError` + `SqlDialect` +
 // the system-field / validation helpers were extracted into the leaf crate
-// `zeroship-data-query-builder`. plugin-db re-exports the module wholesale so every
+// `zeroship-data-sql`. plugin-db re-exports the module wholesale so every
 // existing `crate::compile::…` reference (and `use crate::compile;` then
 // `compile::…`) resolves unchanged — behaviour identical, no call-site churn.
-pub use zeroship_data_query_builder::compile;
+pub use zeroship_data_sql::compile;
 pub mod v8_classes;
 
-// ---------------------------------------------------------------------------
-// THE ENGINE TIER LEFT FOR `zeroship-data-engine` ON 2026-09-03.
-// ---------------------------------------------------------------------------
-//
-// `crud`, `transaction`, `exec`, `backend`, `backend_handle`,
-// `backend_selection`, `tx_route`, `tx_lanes`, `metrics`,
-// `system_shape_charter`, `descriptor` and `auth` are all re-exported below
-// rather than repointed, the mechanism `budgets`, `encryption`, `lock_policy`,
-// `broker` and `read_set` used before them: every `crate::crud::…` /
-// `crate::backend::…` call site in the modules that STAYED resolves unchanged,
-// and so does every `zeroship_plugin_db::…` path in the 12 integration targets.
-//
-// The two-arm `#[cfg(not(feature = "test-helpers"))] pub(crate) use` /
-// `#[cfg(feature = "test-helpers")] pub use` ladders describe THIS crate's
-// release surface and are kept for the modules that had one. They no longer
-// govern the ENGINE's own visibility - a re-export cannot widen what it
-// re-exports, so the items behind them are `pub` in `zeroship-data-engine`,
-// gated there on ITS `test-helpers` feature, which this crate's feature turns
-// on transitively.
-//
-// `backend` is crate-private by default; under `test-helpers` it becomes `pub`
-// so the integration-test targets (`tests/sqlite_integration.rs` in particular)
-// can name `backend::SqliteBackend` + the `SqlExecutor` trait directly.
+// The ORM supplies shared data behavior. These imports expose backend helpers
+// only to integration fixtures; production callers use the V8 adapter surface.
 #[cfg(not(feature = "test-helpers"))]
-pub(crate) use zeroship_data_engine::backend;
+pub(crate) use zeroship_data_orm::backend;
 #[cfg(feature = "test-helpers")]
-pub use zeroship_data_engine::backend;
+pub use zeroship_data_orm::backend;
 // The engine owns concrete backend composition because it supplies the
 // consumer-side ports implemented by the process broker. Integration targets
 // reach the same production composition under `test-helpers`.
 #[cfg(not(feature = "test-helpers"))]
-pub(crate) use zeroship_data_engine::backend_selection;
+pub(crate) use zeroship_data_orm::backend_selection;
 #[cfg(feature = "test-helpers")]
-pub use zeroship_data_engine::backend_selection;
-// The per-isolate dispatch enum and the transaction lane owner. Crate-private
+pub use zeroship_data_orm::backend_selection;
+// The backend registration and transaction lane owner. Crate-private
 // here: nothing outside names either, and the tx-route TYPE has to be nameable
 // wherever the `exec` entry points are, which is why only `tx_route` is `pub`.
-pub use zeroship_data_engine::tx_route;
-pub(crate) use zeroship_data_engine::{backend_handle, tx_lanes};
+pub use zeroship_data_orm::tx_route;
+pub(crate) use zeroship_data_orm::{backend_handle, tx_lanes};
 // The operator charter the worker parses once at construction. `pub(crate)`
 // because nothing outside the crate has business reading the assignment
 // authority - the descriptor mirror is what consumers verify against.
-pub(crate) use zeroship_data_engine::system_shape_charter;
+pub(crate) use zeroship_data_orm::system_shape_charter;
 // THE schema authority for the data plane: the runtime descriptor this isolate
 // was built from. One resolution function, no `Option`, no catalog read.
-pub(crate) use zeroship_data_engine::descriptor;
+pub(crate) use zeroship_data_orm::descriptor;
 // Raw usage metrics and the single emit point.
-pub(crate) use zeroship_data_engine::metrics;
+pub(crate) use zeroship_data_orm::metrics;
 pub(crate) mod context;
 /// This isolate's column-key source, for callers that construct a backend.
 ///
@@ -194,9 +174,9 @@ pub fn isolate_key_source() -> encryption::LocalKeySource {
 /// is how the integration suite caught the substitution.
 #[cfg(any(test, feature = "test-helpers"))]
 pub fn collection_schema(
-    binding: &zeroship_data_core::binding::DbBinding,
+    binding: &zeroship_data_orm::binding::DbBinding,
     collection: &str,
-) -> Result<std::sync::Arc<zeroship_data_query_builder::value::Value>, DbError> {
+) -> Result<std::sync::Arc<zeroship_data_sql::value::Value>, DbError> {
     descriptor::collection_schema(binding, collection)
 }
 // `cross_app_fk` WAS DECLARED HERE and is deleted (2026-09-02), under the
@@ -222,11 +202,11 @@ pub fn collection_schema(
 // for the end-to-end encrypted-column CRUD round-trip test. Same shape
 // as `encryption` below.
 #[cfg(not(feature = "test-helpers"))]
-pub(crate) use zeroship_data_engine::crud;
+pub(crate) use zeroship_data_orm::crud;
 #[cfg(feature = "test-helpers")]
-pub use zeroship_data_engine::crud;
+pub use zeroship_data_orm::crud;
 // Runtime catalog metadata consumed by the protection pipelines.
-pub use zeroship_data_query_builder::catalog;
+pub use zeroship_data_sql::catalog;
 // `read_set` MOVED to `zeroship-data-core` on 2026-09-03, ahead of `broker`,
 // which is the only in-crate item it had to shed before the broker could follow
 // it. The read-set is a domain value - a normalised predicate over a row - and
@@ -243,12 +223,12 @@ pub use zeroship_data_query_builder::catalog;
 // has to reach `normalise_filter`'s output. The production visibility is
 // unchanged.
 #[cfg(not(feature = "test-helpers"))]
-pub(crate) use zeroship_data_core::read_set;
+pub(crate) use zeroship_data_orm::read_set;
 #[cfg(feature = "test-helpers")]
-pub use zeroship_data_core::read_set;
+pub use zeroship_data_orm::read_set;
 pub(crate) mod v8_bridge;
 
-// DB-1 execution budgets MOVED to `zeroship_data_core::budgets` on 2026-09-02.
+// DB-1 execution budgets MOVED to `zeroship_data_orm::budgets` on 2026-09-02.
 // They are named by a vendor tier (`backend/pg_session_sql.rs`, which renders
 // them into PostgreSQL GUCs) AND by the engine (`transaction/driver.rs`, whose
 // cross-backend protocol deadline is derived from one of them). Two tiers
@@ -257,7 +237,7 @@ pub(crate) mod v8_bridge;
 // Re-exported here rather than left as a path change for callers to chase: the
 // live suites assert against these guards by name, and `zeroship-plugin-db`
 // remains their public surface until the tiers themselves are crates.
-pub use zeroship_data_core::budgets;
+pub use zeroship_data_orm::budgets;
 // Process-wide ownership of the `env.db` primitive: validated configuration,
 // the plugin prototype, the stable thread-resource key, and the neutral
 // operator-lifecycle handle.
@@ -284,9 +264,9 @@ pub mod service;
 // release surface: `pub(crate)` normally, `pub` under `test-helpers` so
 // `tests/integration.rs` can reach `canonical_aad` for the round-trip fences.
 #[cfg(not(feature = "test-helpers"))]
-pub(crate) use zeroship_data_core::encryption;
+pub(crate) use zeroship_data_orm::encryption;
 #[cfg(feature = "test-helpers")]
-pub use zeroship_data_core::encryption;
+pub use zeroship_data_orm::encryption;
 
 // `change_stream_pg` is the PG-arm adapter for the `ChangeStream`
 // capability declared in `crate::backend::mod`. The adapter borrows
@@ -329,14 +309,14 @@ mod cdc_lifecycle;
 // reused; that impl was deleted on 2026-09-02 and `util` followed it on
 // 2026-09-04, having had no consumer in any crate or cfg in between.
 #[cfg(not(feature = "test-helpers"))]
-pub(crate) use zeroship_data_engine::auth;
+pub(crate) use zeroship_data_orm::auth;
 #[cfg(feature = "test-helpers")]
-pub use zeroship_data_engine::auth;
+pub use zeroship_data_orm::auth;
 
 #[cfg(not(feature = "test-helpers"))]
-pub(crate) use zeroship_data_engine::exec;
+pub(crate) use zeroship_data_orm::exec;
 #[cfg(feature = "test-helpers")]
-pub use zeroship_data_engine::exec;
+pub use zeroship_data_orm::exec;
 
 // COMPILED ONLY INTO TEST BUILDS, and that is now structural rather than
 // documented. `drop_namespace` has no production caller anywhere in the
@@ -364,9 +344,9 @@ pub mod replication;
 pub mod slot_reaper;
 
 #[cfg(not(feature = "test-helpers"))]
-pub(crate) use zeroship_data_engine::transaction;
+pub(crate) use zeroship_data_orm::transaction;
 #[cfg(feature = "test-helpers")]
-pub use zeroship_data_engine::transaction;
+pub use zeroship_data_orm::transaction;
 
 // Async-scoped transaction marker. Read by `transaction` to tell a
 // genuinely NESTED `transaction()` call from one that merely overlaps
@@ -383,7 +363,7 @@ pub(crate) mod wal_consumer;
 pub mod wal_consumer;
 
 // `test_support` - the `tracing-subscriber` capture layer for warn/error-shape
-// contract tests - LEFT for `zeroship-data-engine` on 2026-09-03, and it left
+// contract tests - LEFT for `zeroship-data-orm` on 2026-09-03, and it left
 // because every one of its call sites did. Measured before the move: six, all
 // in `crud/{mask_drift,read_pipeline,unmask}.rs`, and zero anywhere else in this
 // crate. It is not re-exported: it is `cfg(test)` in the engine, so it is
@@ -516,7 +496,7 @@ impl NativePlugin for DbPlugin {
         // than key it under a schema that cannot be addressed.
         let binding = v8_classes::db::binding_for_isolate(scope, app_id)
             .ok_or_else(|| format!("app id {app_id:?} is not a legal database schema name"))?;
-        zeroship_data_core::schema_cache::with_mut(|c| c.replace_for_binding(&binding, schemas));
+        zeroship_data_orm::schema_cache::with_mut(|c| c.replace_for_binding(&binding, schemas));
         Ok(())
     }
 
@@ -565,7 +545,7 @@ impl NativePlugin for DbPlugin {
 
 fn descriptor_schemas(
     descriptor: Option<&serde_json::Value>,
-) -> Result<Vec<(String, zeroship_data_query_builder::value::Value)>, String> {
+) -> Result<Vec<(String, zeroship_data_sql::value::Value)>, String> {
     let Some(descriptor) = descriptor else {
         return Ok(Vec::new());
     };
@@ -585,7 +565,7 @@ fn descriptor_schemas(
                 })?;
             Ok((
                 name.clone(),
-                zeroship_data_query_builder::value::to_value(fields).map_err(|e| e.to_string())?,
+                zeroship_data_sql::value::to_value(fields).map_err(|e| e.to_string())?,
             ))
         })
         .collect()
@@ -597,7 +577,7 @@ mod runtime_descriptor_binding_tests {
     use std::collections::HashMap;
     use std::rc::Rc;
 
-    use zeroship_data_query_builder::value;
+    use zeroship_data_sql::value;
     use zeroship_runtime::{init_v8, RuntimeState, SharedState};
 
     use super::*;
@@ -658,10 +638,10 @@ mod runtime_descriptor_binding_tests {
             )
             .expect("bind descriptor");
 
-        let binding = zeroship_data_core::binding::DbBinding::new(
+        let binding = zeroship_data_orm::binding::DbBinding::new(
             APP,
             DEPLOY,
-            zeroship_data_query_builder::SchemaName::new(APP).unwrap(),
+            zeroship_data_sql::SchemaName::new(APP).unwrap(),
         );
         let schema = descriptor::collection_schema(&binding, "users")
             .expect("declared collection must resolve before any read");
@@ -704,10 +684,10 @@ mod runtime_descriptor_binding_tests {
             .bind_runtime_descriptor(scope, APP, None)
             .expect("bind schema-less runtime");
 
-        let binding = zeroship_data_core::binding::DbBinding::new(
+        let binding = zeroship_data_orm::binding::DbBinding::new(
             APP,
             DEPLOY,
-            zeroship_data_query_builder::SchemaName::new(APP).unwrap(),
+            zeroship_data_sql::SchemaName::new(APP).unwrap(),
         );
         let error = descriptor::collection_schema(&binding, "stale")
             .expect_err("schema-less binding must declare no collection");
@@ -817,7 +797,7 @@ pub fn reset_context_for_tests() {
     crud::mask_policy::reset_for_tests();
     metrics::reset_for_tests();
     system_shape_charter::reset_for_tests();
-    zeroship_data_core::schema_cache::reset_for_tests();
+    zeroship_data_orm::schema_cache::reset_for_tests();
 }
 
 /// Test helper: hand this isolate the column root keys its backends
@@ -894,12 +874,12 @@ pub fn set_sqlite_backend_for_tests(backend: Rc<crate::backend::sqlite::SqliteBa
     ctx_mut(|c| c.set_sqlite_backend(backend));
 }
 
-// The two descriptor-store fixtures MOVED to `zeroship-data-engine` with the
-// engine tier: they touch `zeroship_data_core::schema_cache` and nothing else,
+// The two descriptor-store fixtures MOVED to `zeroship-data-orm` with the
+// engine tier: they touch `zeroship_data_orm::schema_cache` and nothing else,
 // and the CRUD passes that call them are the engine's. Re-exported here so the
 // integration targets and this crate's own tests keep the same path.
 #[cfg(any(test, feature = "test-helpers"))]
-pub use zeroship_data_engine::{cache_schema_for_deploy_for_tests, cache_schema_for_tests};
+pub use zeroship_data_orm::{cache_schema_for_deploy_for_tests, cache_schema_for_tests};
 
 /// Test helper: clear the per-isolate mask-policy cache
 /// entry for `app_id`. Used by `tests/sqlite_integration.rs` to
@@ -929,12 +909,12 @@ pub fn clear_mask_policy_cache_for_tests(app_id: &str) {
 #[cfg(feature = "test-helpers")]
 #[doc(hidden)]
 pub async fn prepare_insert_many_docs_for_tests(
-    docs: &mut zeroship_data_query_builder::value::Value,
+    docs: &mut zeroship_data_sql::value::Value,
     app_id: &str,
     collection: &str,
     actor_id: Option<&str>,
 ) -> Result<(), DbError> {
-    let binding = zeroship_data_core::binding::DbBinding::cold_start(app_id);
+    let binding = zeroship_data_orm::binding::DbBinding::cold_start(app_id);
     let backend = tx_scope::ensure_backend().await?;
     let dialect = tx_scope::configured_dialect();
     // The route the V8 dispatcher would have captured. The protection-floor
@@ -968,9 +948,9 @@ pub async fn prepare_insert_many_docs_for_tests(
 pub async fn finalize_rows_on_read_for_tests(
     app_id: &str,
     collection: &str,
-    rows: Vec<zeroship_data_query_builder::value::Value>,
-) -> Result<Vec<zeroship_data_query_builder::value::Value>, DbError> {
-    let binding = zeroship_data_core::binding::DbBinding::cold_start(app_id);
+    rows: Vec<zeroship_data_sql::value::Value>,
+) -> Result<Vec<zeroship_data_sql::value::Value>, DbError> {
+    let binding = zeroship_data_orm::binding::DbBinding::cold_start(app_id);
     let backend = tx_scope::ensure_backend().await?;
     // The route comes from the ambient parked-tx slot rather than from a V8
     // scope, because there is no isolate here - the same trade
@@ -1013,7 +993,7 @@ pub async fn exec_mutation_with_emit_for_tests(
     app_id: &str,
     collection: &str,
     op: zeroship_core::change_event::ChangeOp,
-) -> Result<Vec<zeroship_data_query_builder::value::Value>, String> {
+) -> Result<Vec<zeroship_data_sql::value::Value>, String> {
     let backend = tx_scope::ensure_backend()
         .await
         .map_err(DbError::into_string)?;
@@ -1036,7 +1016,7 @@ pub async fn exec_mutation_with_emit_for_tests(
 pub async fn exec_query_for_tests(
     app_id: &str,
     bq: compile::BuiltQuery,
-) -> Result<Vec<zeroship_data_query_builder::value::Value>, String> {
+) -> Result<Vec<zeroship_data_sql::value::Value>, String> {
     let backend = tx_scope::ensure_backend()
         .await
         .map_err(DbError::into_string)?;
@@ -1065,18 +1045,18 @@ pub async fn begin_transaction_for_tests(app_id: &str, url: &str) {
     auth::bootstrap::ensure_per_app_role(&pool, app_id)
         .await
         .expect("fixture role");
-    let backend =
-        backend::BackendHandle::Postgres(Rc::new(backend::postgres::PostgresBackend::new(
-            pool,
-            url.to_owned(),
-            encryption::LocalKeySource::EnvVar,
-        )));
+    if context::with(|c| c.backend().is_none()) {
+        set_postgres_pool_for_tests(pool, url);
+    }
+    let backend = tx_scope::ensure_backend()
+        .await
+        .expect("registered fixture backend");
     let admission = transaction::TxAdmission::acquire(app_id.to_owned()).await;
     transaction::exec_begin_or_savepoint(
         false,
         None,
         app_id,
-        zeroship_data_query_builder::SchemaName::new(app_id).expect("fixture schema"),
+        zeroship_data_sql::SchemaName::new(app_id).expect("fixture schema"),
         backend,
     )
     .await
@@ -1131,12 +1111,6 @@ pub fn clear_pending_emits_for_tests(app_id: &str) {
 // `drop_with_released_true_does_not_warn` in data-postgres's `lock_guard.rs`,
 // against the flag rather than a live pool.
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum BackendUrl {
-    Postgres,
-    Sqlite { path: PathBuf },
-}
-
 /// `true` iff `url` resolves to the SQLite (dev-tier) backend under the SAME
 /// grammar [`backend_for_url`] uses (`sqlite:` / `sqlite://` / `file:` /
 /// `:memory:` / a bare filesystem path). PG (`postgres://`/`postgresql://`)
@@ -1156,73 +1130,6 @@ pub fn is_sqlite_url(url: &str) -> bool {
         "is_sqlite_url drifted from backend_for_url for {url:?}"
     );
     v
-}
-
-/// Classify a database URL.
-///
-/// **Call [`service::select_backend`] instead**, unless you are `is_sqlite_url`
-/// below (a pure grammar check that opens nothing). Every real backend
-/// selection goes through the service wrapper so the process's parse count is
-/// a complete measurement rather than a sample of the sites that remembered.
-pub(crate) fn backend_for_url(url: &str) -> Result<BackendUrl, DbError> {
-    let trimmed = url.trim();
-    if trimmed.is_empty() {
-        return Err(DbError::config_hinted(
-            "invalid_database_url",
-            "database URL is empty",
-            "expected postgres://, postgresql://, sqlite:, file:, :memory:, or a filesystem path",
-        ));
-    }
-
-    let lower = trimmed.to_ascii_lowercase();
-    if lower == ":memory:" {
-        return Ok(BackendUrl::Sqlite {
-            path: PathBuf::from(":memory:"),
-        });
-    }
-    if lower.starts_with("postgres://") || lower.starts_with("postgresql://") {
-        return Ok(BackendUrl::Postgres);
-    }
-    if lower.starts_with("sqlite://") {
-        // SQLite URLs are always local-file selectors here, so any URI
-        // authority is folded into the filesystem path (`sqlite://host/db`
-        // becomes `host/db`, not a remote host lookup).
-        return Ok(BackendUrl::Sqlite {
-            path: PathBuf::from(&trimmed["sqlite://".len()..]),
-        });
-    }
-    if lower.starts_with("sqlite:") {
-        return Ok(BackendUrl::Sqlite {
-            path: PathBuf::from(&trimmed["sqlite:".len()..]),
-        });
-    }
-    if lower.starts_with("file:") {
-        return Ok(BackendUrl::Sqlite {
-            path: PathBuf::from(&trimmed["file:".len()..]),
-        });
-    }
-
-    let has_scheme = trimmed
-        .split_once(':')
-        .map(|(scheme, _)| {
-            // Windows `C:\...` is rejected here as scheme `c`; that's
-            // acceptable because zeroship only targets Linux workers.
-            let mut chars = scheme.chars();
-            matches!(chars.next(), Some(c) if c.is_ascii_alphabetic())
-                && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '.' | '-'))
-        })
-        .unwrap_or(false);
-    if has_scheme {
-        return Err(DbError::config_hinted(
-            "unsupported_database_url_scheme",
-            format!("unsupported database URL scheme in `{trimmed}`"),
-            "expected postgres://, postgresql://, sqlite:, file:, :memory:, or a filesystem path",
-        ));
-    }
-
-    Ok(BackendUrl::Sqlite {
-        path: PathBuf::from(trimmed),
-    })
 }
 
 /// Initialize the connection pool asynchronously.
@@ -1471,7 +1378,7 @@ mod backend_url_tests {
         let err = backend_for_url("mysql://localhost/dev").unwrap_err();
         assert!(matches!(
             err,
-            zeroship_data_core::error::DbError::Configuration {
+            zeroship_data_orm::error::DbError::Configuration {
                 code: "unsupported_database_url_scheme",
                 ..
             }
@@ -1656,21 +1563,21 @@ mod reset_clears_every_thread_local {
     /// against the wrong descriptor is what drops the projection allowlist.
     #[test]
     fn a_mid_test_reset_drops_an_installed_descriptor() {
-        let binding = zeroship_data_core::binding::DbBinding::cold_start("app_reset_schema");
+        let binding = zeroship_data_orm::binding::DbBinding::cold_start("app_reset_schema");
 
-        zeroship_data_core::schema_cache::with_mut(|c| {
+        zeroship_data_orm::schema_cache::with_mut(|c| {
             c.insert_one(
                 &binding,
                 "users",
-                zeroship_data_query_builder::value!({ "email": { "type": "string" } }),
+                zeroship_data_sql::value!({ "email": { "type": "string" } }),
             );
         });
-        assert!(zeroship_data_core::schema_cache::with(|c| c.get(&binding, "users")).is_some());
+        assert!(zeroship_data_orm::schema_cache::with(|c| c.get(&binding, "users")).is_some());
 
         crate::reset_context_for_tests();
 
         assert!(
-            zeroship_data_core::schema_cache::with(|c| c.get(&binding, "users")).is_none(),
+            zeroship_data_orm::schema_cache::with(|c| c.get(&binding, "users")).is_none(),
             "reset_context_for_tests left a descriptor entry behind: the schema \
              thread-local in data-core was not reset"
         );

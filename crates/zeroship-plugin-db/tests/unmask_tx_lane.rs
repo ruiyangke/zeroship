@@ -50,9 +50,9 @@ use zeroship_migrate::schema::query::FkEmission;
 use std::rc::Rc;
 
 use compio_postgres::{NoTls, Pool};
-use zeroship_data_core::binding::DbBinding;
-use zeroship_data_core::error::DbError;
-use zeroship_data_query_builder::value::{value, Value};
+use zeroship_data_orm::binding::DbBinding;
+use zeroship_data_orm::error::DbError;
+use zeroship_data_sql::value::{Value, value};
 use zeroship_plugin_db::compile::SqlDialect;
 use zeroship_plugin_db::crud::mask_policy::dispatch_set_mask_policy;
 use zeroship_plugin_db::tx_route::{CapturedRoute, TxRoute};
@@ -117,7 +117,7 @@ async fn fixture_with_schema(pool: &Rc<Pool>, url: &str, app: &str, schema: Valu
         .await
         .unwrap();
     let ddl = fixture_table_sql(
-        &zeroship_data_query_builder::SchemaName::new(app).expect("fixture schema name"),
+        &zeroship_data_sql::SchemaName::new(app).expect("fixture schema name"),
         "people",
         &schema,
         &FkEmission::Inline,
@@ -534,7 +534,7 @@ async fn audit_rows(pool: &Rc<Pool>, app: &str) -> Vec<Value> {
         .unwrap();
     rows.iter()
         .map(|row| {
-            let mut map = zeroship_data_query_builder::value::Map::new();
+            let mut map = zeroship_data_sql::value::Map::new();
             for (i, column) in row.columns().iter().enumerate() {
                 let value: Option<String> = row.try_get(i).unwrap_or(None);
                 map.insert(

@@ -143,7 +143,7 @@ fail() { FAIL=$((FAIL + 1)); RAN=$((RAN + 1)); echo "  FAIL $1"; }
 # with `ZEROSHIP_SESSION_SECRET_PREV` and `ZEROSHIP_SESSION_NONCE_CAPACITY`
 # alongside it in docs/reference/env-vars.md, which listed all three as
 # surviving. One stale citation survives on purpose in
-# crates/zeroship-data-sqlite/src/lib.rs:1470, where a comment still calls the
+# crates/zeroship-data-orm/src/backend/sqlite/mod.rs:1470, where a comment still calls the
 # deleted minter a pattern to mirror; this gate cannot see a comment.
 INVENTORY="
 AUTH_TEST_SMTP_SINK

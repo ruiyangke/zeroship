@@ -34,7 +34,7 @@ The consumption path the relay replaces still lives in
 `crates/zeroship-plugin-db/` (`wal_consumer.rs`, `replication.rs`,
 `slot_reaper.rs`, `change_stream_pg.rs`) - `git diff --name-only 8672dd355..HEAD
 -- crates/zeroship-plugin-db` returns zero files - and the pieces that stay are
-`crates/zeroship-data-core/src/broker.rs`, `read_set.rs` and
+`crates/zeroship-data-orm/src/broker.rs`, `read_set.rs` and
 `cdc_lifecycle.rs`. It is still **blocked twice**, and creating the crate
 unblocked neither: on the Datastore/Database/Grant entities of
 `docs/proposals/2026-08-28-app-database-decoupling.md`, none of which exist, and
@@ -143,8 +143,8 @@ register a configuration surface rather than a judgement call
 moved the suppression sample point from drain time into SQLite's `commit_hook`,
 so the window a guard covers is the set of commits made inside its scope and the
 publisher never re-samples: the answer rides the packet as a per-event stamp
-(`crates/zeroship-data-sqlite/src/change_sink.rs`,
-`crates/zeroship-data-sqlite/src/cdc.rs`). The decisive argument was not that
+(`crates/zeroship-data-orm/src/backend/sqlite/change_sink.rs`,
+`crates/zeroship-data-orm/src/backend/sqlite/cdc.rs`). The decisive argument was not that
 dequeue-time sampling was racy but that it had **no defined answer for strictly
 sequential code** - the channel is `flume::unbounded`, so a guard engaged,
 written under, and dropped, with no concurrency anywhere, still produced a result
@@ -225,7 +225,7 @@ is planning against a tree that does not exist.
 
 ### The relay's error handling is internal, by construction
 
-`crates/zeroship-data-postgres/src/pg_error.rs` owns `classify`, the translation
+`crates/zeroship-data-orm/src/backend/postgres/pg_error.rs` owns `classify`, the translation
 from `compio_postgres::Error` into `DbError`. The relay does not share it and
 will not. **A binary that nothing links has no shared-vocabulary problem: there
 is no consumer to agree with.** That is the whole answer, and it dissolves a
@@ -282,11 +282,11 @@ wire_columns(collection) =
 
 `storage.valueColumn` is the descriptor's field-to-physical-column mapping, the
 same block `value_column_for_field` reads on the query side
-(`crates/zeroship-schema/src/query.rs:3603`). After the shipped storage flip the (DELETED; runtime compilation now lives in `crates/zeroship-data-query-builder/src/compile.rs`, and migration DDL in `crates/zeroship-migrate-core/src/schema/query.rs`.)
+(`crates/zeroship-schema/src/query.rs:3603`). After the shipped storage flip the (DELETED; runtime compilation now lives in `crates/zeroship-data-sql/src/compile.rs`, and migration DDL in `crates/zeroship-migrate-core/src/schema/query.rs`.)
 logical field column holds the creator-visible value including the mask, and
 `storage.rawColumn` names the `__zs_raw__<field>` column holding plaintext or
 ciphertext (`crates/zeroship-migrate-core/src/render/gen_types.rs`,
-`crates/zeroship-data-engine/src/crud/mask_pass.rs`). `rawColumn` is never in the
+`crates/zeroship-data-orm/src/crud/mask_pass.rs`). `rawColumn` is never in the
 wire set because the set is built from `valueColumn` and nothing else.
 
 `wire_exposure` is a closed renderer result, never a guess from a name:
@@ -309,7 +309,7 @@ newtype with exactly two constructors:
 - `ProjectedTuple::from_descriptor(&Value, raw)` for the SQLite arm, which
   filters against `storage.valueColumn` per declared field. SQLite has no
   publication and today sets `changed_columns: new_tuple.keys().cloned()`
-  (`crates/zeroship-data-sqlite/src/cdc.rs:635`).
+  (`crates/zeroship-data-orm/src/backend/sqlite/cdc.rs:635`).
 
 `changed_columns` is never constructed independently: both producers derive it
 from `ProjectedTuple::visible_keys()`. The target `ChangeEvent` **deletes
@@ -481,7 +481,7 @@ from the build.
 ### The epoch producer and the head row
 
 No epoch producer and no system schema exist today
-(`crates/zeroship-data-engine/src/auth/bootstrap.rs`). Datastore provisioning
+(`crates/zeroship-data-orm/src/auth/bootstrap.rs`). Datastore provisioning
 creates exactly one reserved table:
 
 ```text
@@ -600,17 +600,17 @@ production caller.
 | `wal_consumer.rs` | Split and rewrite; **do not move the file.** Extract the pgoutput decode algorithm, `RelationEntry` and its primary-key index, the replication parameter check, backoff policy and fatal classification behind relay and wire-owned types, with a `zeroship-cdc-wire` frame emit replacing `broker::publish`. | in `zeroship-plugin-db`, unchanged |
 | `replication.rs` | Split and rewrite. Extract exact-slot lifecycle and health-query algorithms behind relay errors. Replace app-keyed names with the two Datastore functions; delete `worker_slot_name` and per-worker drop entry points. `drop_datastore_slot` derives and verifies one exact name plus `database = current_database()` and is reachable only through the fenced reset handshake. Broad prefix enumeration stays forbidden. **The watchdog half and the drop family do NOT go**: `watchdog_query` has a live V8 caller (`crates/zeroship-plugin-db/src/v8_classes/replication.rs`, reached from JS as `env.db.__platform.replication`) and the drop family is called from `service.rs`'s `deprovision_app` as well as from CDC. | in `zeroship-plugin-db`, unchanged |
 | `slot_reaper.rs` | **Deleted.** With O(Datastores) service-owned slots and one owner per cluster there is no per-worker slot to abandon. Deleted WHOLE, not split - see "The reaper is a privilege change". | in `zeroship-plugin-db`, unchanged, and still the ONE CDC module that crate exports unconditionally (`crates/zeroship-plugin-db/src/lib.rs:375`) |
-| `change_stream_pg.rs` | **Deleted - and this is an END-STATE verdict that becomes reachable only after `RunningConsumer::Postgres` is a handle on a relay subscription.** `SharedExit` (`:31`) and `WalConsumerHandle` (`:72`) supervise a task that no longer exists in the worker; `spawn_consumer` (`:170`) and `deprovision` (`:162`) go with the per-worker slot. `pause_broker` / `engage_schema_pending` survive as the broker functions they already delegate to. | **STAYS in `zeroship-plugin-db`**, and it is not a relay candidate at any point: `impl ChangeStream for PgChangeStream` (`:145`) implements a data-core capability trait whose SQLite peer (`crates/zeroship-data-sqlite/src/cdc.rs:854`) lives in a vendor LIBRARY crate, and it holds `backend: Rc<PostgresBackend>` (`:123`) - an `Rc` is not `Send`, so the type is pinned to the isolate thread, never mind the process |
-| `broker.rs` | **Stays.** In-process routing table; consumers are V8 subscription wrappers on the same thread. Keep `message_to_json` (`:1020`) and `ws_frame` (`:1093`); both emit creator-visible names and no row values. | in `crates/zeroship-data-core/src/broker.rs`. **This row said "Stays in `zeroship-plugin-db`" until 2026-09-03**; the module sank into data-core with `read_set.rs` |
-| `read_set.rs` | **Stays.** Capture happens inside `ctx.db.find` in the isolate and cannot leave the process. | in `crates/zeroship-data-core/src/read_set.rs` |
+| `change_stream_pg.rs` | **Deleted - and this is an END-STATE verdict that becomes reachable only after `RunningConsumer::Postgres` is a handle on a relay subscription.** `SharedExit` (`:31`) and `WalConsumerHandle` (`:72`) supervise a task that no longer exists in the worker; `spawn_consumer` (`:170`) and `deprovision` (`:162`) go with the per-worker slot. `pause_broker` / `engage_schema_pending` survive as the broker functions they already delegate to. | **STAYS in `zeroship-plugin-db`**, and it is not a relay candidate at any point: `impl ChangeStream for PgChangeStream` (`:145`) implements a data-core capability trait whose SQLite peer (`crates/zeroship-data-orm/src/backend/sqlite/cdc.rs:854`) lives in a vendor LIBRARY crate, and it holds `backend: Rc<PostgresBackend>` (`:123`) - an `Rc` is not `Send`, so the type is pinned to the isolate thread, never mind the process |
+| `broker.rs` | **Stays.** In-process routing table; consumers are V8 subscription wrappers on the same thread. Keep `message_to_json` (`:1020`) and `ws_frame` (`:1093`); both emit creator-visible names and no row values. | in `crates/zeroship-data-orm/src/broker.rs`. **This row said "Stays in `zeroship-plugin-db`" until 2026-09-03**; the module sank into data-core with `read_set.rs` |
+| `read_set.rs` | **Stays.** Capture happens inside `ctx.db.find` in the isolate and cannot leave the process. | in `crates/zeroship-data-orm/src/read_set.rs` |
 | `cdc_lifecycle.rs` | **Stays**, reshaped. The refcounted per-app lease (`acquire` `:87`, `release` `:113`) still decides when this worker needs a stream. Add an atomic snapshot accessor returning `cluster_id`, `database_id`, `database_epoch` and `grant_generation` for every leased app; `acquire` currently mutates a private map one app at a time. `RunningConsumer::Postgres` (`:25`) becomes a handle on the relay subscription. | in `zeroship-plugin-db`, declared `mod cdc_lifecycle;` - plain private, so its external consumer count is structurally zero |
-| `exec.rs` emit path | **Deleted outright, and it is the POSTGRES path.** | live in `crates/zeroship-data-engine/src/exec.rs` |
+| `exec.rs` emit path | **Deleted outright, and it is the POSTGRES path.** | live in `crates/zeroship-data-orm/src/exec.rs` |
 
 **Why zero files moved, stated as the mechanism rather than as a preference.**
 `crates/zeroship-plugin-db/src/wal_consumer.rs` imports `SuppressGuard`,
 `has_subscribers` and `publish` from the broker, and all three target
 PROCESS-WIDE `LazyLock<Mutex<..>>` statics in
-`crates/zeroship-data-core/src/broker.rs`. Move that file into a binary that
+`crates/zeroship-data-orm/src/broker.rs`. Move that file into a binary that
 links data-core and every one of them resolves to a DIFFERENT process's static:
 `publish` reaches zero subscribers and the suppression guard suppresses nothing
 in the worker, so the worker's local-emit fast path keeps emitting while the
@@ -625,8 +625,8 @@ Treat it as near-certain and unproven, in that order.
 
 The local-emit path serves Postgres, not SQLite:
 `backend_publishes_committed_changes()` is true on SQLite and `emit_for_rows`
-returns early on it (`crates/zeroship-data-engine/src/exec.rs:445`), because SQLite
-builds its `ChangeEvent` in `crates/zeroship-data-sqlite/src/cdc.rs` and
+returns early on it (`crates/zeroship-data-orm/src/exec.rs:445`), because SQLite
+builds its `ChangeEvent` in `crates/zeroship-data-orm/src/backend/sqlite/cdc.rs` and
 publishes straight to the broker. So the delete is `emit_for_rows`,
 `queue_or_emit`, `drain_pending_emits_on_commit` and `clear_pending_emits`;
 `exec_mutation_with_emit` (`exec.rs:370`) collapses to `exec_mutation`;
@@ -640,7 +640,7 @@ Deleting it is not optional. It is a second producer of the same event with a
 running before the mask pass, against a stream the server has already projected.
 One producer per backend.
 
-`ChangeStream` (`crates/zeroship-data-core/src/storage.rs:409`) survives as a
+`ChangeStream` (`crates/zeroship-data-orm/src/storage.rs:409`) survives as a
 capability trait with a changed Postgres implementation: `spawn_consumer` becomes
 "subscribe to the relay"; `deprovision` removes only this worker's local lease
 and performs the make-before-break response replacement without the app. It
@@ -1038,7 +1038,7 @@ it: `Subscription::push` is not `async` and never awaits; on overflow it clears
 the queue and pushes ONE `Resync`, with a `resync_pending` flag collapsing
 successive overflows so a wedged subscriber cannot make the publisher do work
 proportional to how wedged it is (`DEFAULT_QUEUE_DEPTH = 1024` at
-`crates/zeroship-data-core/src/broker.rs:72`, `MAX_SUBSCRIPTIONS_PER_APP = 256`
+`crates/zeroship-data-orm/src/broker.rs:72`, `MAX_SUBSCRIPTIONS_PER_APP = 256`
 at `:79`).
 
 The honest cost: a merely-slow worker reconnects repeatedly and gets `Resync`
@@ -1788,7 +1788,7 @@ unrepresentable.
 **The whitelist does not repair a current creator-response leak.** The shipped
 serializers are safe: `message_to_json` and `ws_frame` filter platform names
 through `creator_visible_columns` and emit no row values
-(`crates/zeroship-data-core/src/broker.rs:1020`, `:1093`). What the whitelist
+(`crates/zeroship-data-orm/src/broker.rs:1020`, `:1093`). What the whitelist
 does is move the boundary one process earlier, so the raw name and value never
 reach pgoutput, the relay, or the broker. The accepted cost is that every schema
 migration must maintain that whitelist correctly.
@@ -2210,7 +2210,7 @@ DO-NOT notes, each recording a mistake that would otherwise be remade:
   symbols, so a rename or a sibling branch's refactor invalidates a citation
   silently. Measured examples at `a3706db6f`: `ChangeEvent` moved from
   `broker.rs` to `crates/zeroship-core/src/change_event.rs`; `ChangeStream` moved
-  to `crates/zeroship-data-core/src/storage.rs`; `SUPPRESSED_APPS` and
+  to `crates/zeroship-data-orm/src/storage.rs`; `SUPPRESSED_APPS` and
   `emit_local` moved from `wal_consumer.rs` to `broker.rs`; and
   `replication_ops.rs` no longer exists (the watchdog dispatch is
   `crates/zeroship-plugin-db/src/v8_classes/replication.rs`).

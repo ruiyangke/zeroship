@@ -17,9 +17,9 @@ use std::sync::{Arc, Mutex};
 
 use futures::FutureExt;
 
-use crate::backend::postgres::PostgresBackend;
 use crate::backend::ChangeStream;
-use zeroship_data_core::error::DbError;
+use crate::backend::postgres::PostgresBackend;
+use zeroship_data_orm::error::DbError;
 
 #[derive(Debug, Default)]
 struct ExitState {
@@ -33,7 +33,10 @@ struct SharedExit(Mutex<ExitState>);
 impl SharedExit {
     fn complete(&self, result: Result<(), DbError>) {
         let waiters = {
-            let mut state = self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut state = self
+                .0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             if state.result.is_some() {
                 return;
             }
@@ -47,7 +50,10 @@ impl SharedExit {
 
     async fn wait(&self) -> Result<(), DbError> {
         let receiver = {
-            let mut state = self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut state = self
+                .0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             if let Some(result) = &state.result {
                 return result.clone();
             }
@@ -113,7 +119,7 @@ impl WalConsumerHandle {
 /// [`crate::backend::BackendHandle::Postgres`] match arm. The
 /// `BackendHandle::as_change_stream_pg` accessor that used to mint it is
 /// deleted - it made the dispatch enum name this CDC module, which is what
-/// kept `backend_handle.rs` from moving into `zeroship-data-engine`.
+/// kept `backend_handle.rs` from moving into `zeroship-data-orm`.
 /// Owns an `Rc<PostgresBackend>` (Rc-cloned from the
 /// [`crate::backend::BackendHandle::Postgres`] arm) so the adapter
 /// satisfies the trait's `'static` bound — `async fn`-in-trait under
@@ -178,18 +184,11 @@ impl ChangeStream for PgChangeStream {
         app_id: &str,
         worker_id: &str,
     ) -> Result<Self::ConsumerHandle, DbError> {
-        let setup = crate::replication::ensure_worker_slot(
-            self.backend.pool(),
-            app_id,
-            worker_id,
-        )
-        .await?;
-        let consumer = crate::wal_consumer::WalConsumer::new(
-            app_id,
-            worker_id,
-            self.backend.url(),
-        )?
-        .with_start_lsn(setup.confirmed_flush_lsn);
+        let setup =
+            crate::replication::ensure_worker_slot(self.backend.pool(), app_id, worker_id).await?;
+        let consumer =
+            crate::wal_consumer::WalConsumer::new(app_id, worker_id, self.backend.url())?
+                .with_start_lsn(setup.confirmed_flush_lsn);
 
         let (startup_tx, startup_rx) = flume::bounded(1);
         let (shutdown_tx, shutdown_rx) = flume::bounded(1);
@@ -205,27 +204,17 @@ impl ChangeStream for PgChangeStream {
         let worker_for_task = worker_id.to_string();
         compio::runtime::spawn(async move {
             let consumer_result = std::panic::AssertUnwindSafe(
-                crate::wal_consumer::run_supervised_controlled(
-                    consumer,
-                    startup_tx,
-                    shutdown_rx,
-                ),
+                crate::wal_consumer::run_supervised_controlled(consumer, startup_tx, shutdown_rx),
             )
             .catch_unwind()
             .await
             .unwrap_or_else(|_| {
                 Err(DbError::Internal {
-                    message: format!(
-                        "wal consumer task panicked for app {app_for_task}"
-                    ),
+                    message: format!("wal consumer task panicked for app {app_for_task}"),
                 })
             });
-            let cleanup_result = crate::replication::drop_worker_slot(
-                &pool,
-                &app_for_task,
-                &worker_for_task,
-            )
-            .await;
+            let cleanup_result =
+                crate::replication::drop_worker_slot(&pool, &app_for_task, &worker_for_task).await;
             let result = match (consumer_result, cleanup_result) {
                 (Err(error), Err(cleanup)) => {
                     tracing::error!(
@@ -268,13 +257,12 @@ impl ChangeStream for PgChangeStream {
             }
         }
     }
-
 }
 
 // The compile-time trait-shape assertion for `impl ChangeStream for
 // PgChangeStream` lived in `crate::backend::tests` alongside the rest of the
 // `assert_postgres_backend_impls_*` family until 2026-09-03. It is HERE now,
-// below, because `backend/mod.rs` left for `zeroship-data-engine` and that
+// below, because `backend/mod.rs` left for `zeroship-data-orm` and that
 // assertion was the one CDC name in it - the reason the file was contested.
 
 #[cfg(test)]

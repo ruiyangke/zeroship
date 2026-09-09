@@ -51,7 +51,7 @@ use crate::broker::{self, Subscription as BrokerSubscription, SubscriptionMessag
 /// [`crate::tx_scope::ensure_backend`] is the same funnel every other V8 entry
 /// point opens its backend through, so a cold isolate is warmed here exactly as
 /// `dispatch.rs` and `masked_value.rs` warm one.
-async fn ensure_cdc_ready(app_id: &str) -> Result<(), zeroship_data_core::error::DbError> {
+async fn ensure_cdc_ready(app_id: &str) -> Result<(), zeroship_data_orm::error::DbError> {
     let backend = crate::tx_scope::ensure_backend().await?;
     crate::cdc_lifecycle::ensure_ready(app_id, backend, crate::tx_scope::cdc_worker_id()).await
 }
@@ -213,7 +213,7 @@ impl Subscription {
 /// scoped surface is the only path now. The wire `code` is
 /// `invalid_collection` — the same code
 /// `query::QueryError::InvalidCollection` flows through
-/// (`zeroship_data_core::error::From<QueryError> for DbError`), so SDK callers
+/// (`zeroship_data_orm::error::From<QueryError> for DbError`), so SDK callers
 /// branch on a single stable string.
 pub(crate) fn refuse_mv_subscription(collection: &str) -> Option<OpError> {
     if collection.starts_with("__zeroship_mv_") {
@@ -412,7 +412,7 @@ mod tests {
 
     use std::collections::HashMap;
 
-    use zeroship_data_query_builder::value::Value;
+    use zeroship_data_sql::value::Value;
     use zeroship_runtime::{Runtime, RuntimeState, SharedState};
 
     use crate::{broker, v8_classes::db::mint_db};

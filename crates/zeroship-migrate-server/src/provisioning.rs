@@ -332,7 +332,7 @@ pub async fn provision_workflow_journal_schema(
 /// The unqualified name of the per-app unmask audit table.
 ///
 /// The data plane's INSERT is the only writer, and its own spelling now lives
-/// in one place: `zeroship_data_engine::backend_handle::AUDIT_UNMASK_TABLE`.
+/// in one place: `zeroship_data_orm::backend_handle::AUDIT_UNMASK_TABLE`.
 /// (This doc said `zeroship-plugin-db`'s `crud/unmask.rs` until 2026-09-04. The
 /// engine tier left that crate on 2026-09-03, and the SQL itself had already
 /// moved out of `crud/unmask.rs` into `BackendHandle::append_unmask_audit`.)

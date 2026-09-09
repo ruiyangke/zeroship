@@ -36,7 +36,6 @@ use crate::backend::{BackendHandle, PostgresBackend};
 use crate::encryption::{LocalKeySource, SuppliedRootKeys};
 use crate::service::DbResourceKey;
 
-
 /// Result of trying to claim the per-thread backend initialisation slot.
 pub(crate) enum BackendInitState {
     /// A backend is already installed; no work needed.
@@ -177,7 +176,6 @@ impl ThreadDbContext {
         }
     }
 
-
     // ----- DB_POOL ----------------------------------------------------
 
     /// True iff a Postgres pool has been installed.
@@ -202,7 +200,9 @@ impl ThreadDbContext {
     /// writing an arm with exactly one possible value.
     #[cfg(test)]
     pub(crate) fn pool_initialised(&self) -> bool {
-        matches!(self.backend, Some(BackendHandle::Postgres(_)))
+        self.backend
+            .as_ref()
+            .is_some_and(|backend| backend.get::<crate::backend::PostgresBackend>().is_some())
     }
 
     /// Install an already-connected Postgres backend, wrapped in the
@@ -221,7 +221,7 @@ impl ThreadDbContext {
     /// `compio_postgres::Pool` - pushing the composer UP into the engine instead
     /// was tried the same day and refused by `tests/vendor_embedding_gate.sh`.
     pub(crate) fn set_postgres_backend(&mut self, backend: Rc<PostgresBackend>) {
-        self.backend = Some(BackendHandle::Postgres(backend));
+        self.backend = Some(BackendHandle::new(backend));
     }
 
     /// Drop the cached pool (e.g. when the URL changes on
@@ -246,15 +246,10 @@ impl ThreadDbContext {
     ) {
         // Replacing the backend IS dropping the Postgres pool: the pool has
         // no slot of its own, so switching arms cannot leave one behind.
-        self.backend = Some(BackendHandle::Sqlite(backend));
+        self.backend = Some(BackendHandle::new(backend));
     }
 
-    /// Snapshot the backend facade (cloned enum — Rc-clone of the
-    /// inner arm, see [`BackendHandle`]). The `Clone` derive on
-    /// [`BackendHandle`] makes this cheap: the `Postgres` arm clones
-    /// an `Rc<PostgresBackend>` (refcount bump, no allocation), and
-    /// the eventual `Sqlite` arm under `--features sqlite` will be
-    /// the same shape.
+    /// Clone the registered backend handle without reopening the database.
     pub(crate) fn backend(&self) -> Option<BackendHandle> {
         self.backend.clone()
     }
@@ -300,36 +295,12 @@ impl ThreadDbContext {
         self.backend_selection.clone()
     }
 
-    /// Which SQL dialect this thread's statements must be written in.
-    ///
-    /// **Answered here because the two things it is derived from both live
-    /// here.** An open backend is authoritative; before one exists the
-    /// service's selection is the best available answer, and PostgreSQL is the
-    /// default when neither is set - a dialect is needed to BUILD a statement,
-    /// which happens before any connection is opened.
-    ///
-    /// The engine used to compute this itself, matching `BackendHandle`'s
-    /// variants and then `BackendUrl`'s - naming an adapter type and a vendor
-    /// enum to answer a question about SQL text.
-    /// `tests/lib/tier_direction_census.sh` reported the `BackendUrl` half as
-    /// `ENGINE crud/mod.rs -> ADAPTER`. Neither enum is the answer; the dialect
-    /// is, and only this struct can produce it without reaching anywhere.
-    ///
-    /// **Both matches spell every variant out; the inner one did not until
-    /// 2026-09-04.** It read `_ => SqlDialect::Postgres`, which folded
-    /// `Some(BackendUrl::Postgres)` together with `None` and would have folded a
-    /// third backend's URL in with them - handing `Postgres` SQL text to a
-    /// backend that cannot parse it, before any connection exists to reject it.
-    /// The default for `None` is deliberate and unchanged, and it is still
-    /// spelled beside the arm it shares a body with rather than under a `_`: a
-    /// dialect is needed to BUILD a statement, so "no selection yet" has to
-    /// answer something. "Selected, and not one of the two I know about" does
-    /// not, and now cannot.
-    pub(crate) fn sql_dialect(&self) -> zeroship_data_query_builder::compile::SqlDialect {
-        use zeroship_data_query_builder::compile::SqlDialect;
+    /// The registered driver determines query syntax. Before initialization,
+    /// derive it from the built-in URL selection.
+    pub(crate) fn sql_dialect(&self) -> zeroship_data_sql::compile::SqlDialect {
+        use zeroship_data_sql::compile::SqlDialect;
         match &self.backend {
-            Some(BackendHandle::Sqlite(_)) => SqlDialect::Sqlite,
-            Some(BackendHandle::Postgres(_)) => SqlDialect::Postgres,
+            Some(backend) => backend.dialect(),
             None => match &self.backend_selection {
                 Some(crate::BackendUrl::Sqlite { .. }) => SqlDialect::Sqlite,
                 Some(crate::BackendUrl::Postgres) | None => SqlDialect::Postgres,
@@ -372,7 +343,6 @@ impl ThreadDbContext {
     pub(crate) fn set_cdc_worker_id(&mut self, worker_id: &str) {
         self.cdc_worker_id = Some(worker_id.to_string());
     }
-
 }
 
 impl Default for ThreadDbContext {
@@ -462,9 +432,10 @@ mod tests {
     // import would be unused in the lib build and warn - while `--all-targets`
     // reports that warning even though the test target needs the import, which
     // is how deleting it "to fix a warning" turned into nine compile errors.
-    use crate::tx_lanes::{TxConnection, TxLanes};
+    use crate::tx_lanes::TxLanes;
     use std::collections::HashMap;
     use zeroship_core::change_event::{ChangeEvent, ChangeOp};
+    use zeroship_data_orm::driver::Session;
 
     fn dummy_event(collection: &str) -> ChangeEvent {
         ChangeEvent {
@@ -501,7 +472,12 @@ mod tests {
         assert!(!lanes.tx_session_withdrawn("a"));
         // pending_emits starts empty (each app's queue is allocated lazily on
         // first push).
-        assert!(lanes.by_app().values().all(|lane| lane.pending_emits().is_empty()));
+        assert!(
+            lanes
+                .by_app()
+                .values()
+                .all(|lane| lane.pending_emits().is_empty())
+        );
     }
 
     #[test]
@@ -513,7 +489,6 @@ mod tests {
         assert_eq!(a.db_url(), b.db_url());
         // The two lane assertions that used to sit here moved out with the
         // lanes: `TxLanes` has its own `Default` and its own test.
-
     }
 
     // ----- installed DB resources ----------------------------------------
@@ -658,7 +633,10 @@ mod tests {
         lanes.push_pending_emit(dummy_event("c1"));
         lanes.discard_frame_effects("app_t");
         assert_eq!(
-            lanes.by_app().get("app_t").map(|lane| lane.pending_emits().len()),
+            lanes
+                .by_app()
+                .get("app_t")
+                .map(|lane| lane.pending_emits().len()),
             Some(1),
             "a missing watermark must not discard the enclosing frame's events"
         );
@@ -705,17 +683,30 @@ mod tests {
     #[test]
     fn pending_emits_start_empty() {
         let lanes = TxLanes::new();
-        assert!(lanes.by_app().values().all(|lane| lane.pending_emits().is_empty()));
+        assert!(
+            lanes
+                .by_app()
+                .values()
+                .all(|lane| lane.pending_emits().is_empty())
+        );
     }
 
     #[test]
     fn push_pending_emit_allocates_slot_lazily() {
         // dummy_event tags app_id "app_t"; the queue keys on that.
         let mut lanes = TxLanes::new();
-        assert!(lanes.by_app().values().all(|lane| lane.pending_emits().is_empty()));
+        assert!(
+            lanes
+                .by_app()
+                .values()
+                .all(|lane| lane.pending_emits().is_empty())
+        );
         lanes.push_pending_emit(dummy_event("c1"));
         assert!(lanes.by_app().contains_key("app_t"));
-        assert_eq!(lanes.by_app().get("app_t").unwrap().pending_emits().len(), 1);
+        assert_eq!(
+            lanes.by_app().get("app_t").unwrap().pending_emits().len(),
+            1
+        );
     }
 
     #[test]
@@ -740,7 +731,12 @@ mod tests {
         assert_eq!(drained.len(), 2);
         // After drain the app's queue is cleared — subsequent pushes
         // re-allocate.
-        assert!(lanes.by_app().get("app_t").is_none_or(|lane| lane.pending_emits().is_empty()));
+        assert!(
+            lanes
+                .by_app()
+                .get("app_t")
+                .is_none_or(|lane| lane.pending_emits().is_empty())
+        );
     }
 
     #[test]
@@ -748,7 +744,12 @@ mod tests {
         let mut lanes = TxLanes::new();
         let drained = lanes.drain_pending_emits_for("app_t");
         assert!(drained.is_empty());
-        assert!(lanes.by_app().values().all(|lane| lane.pending_emits().is_empty()));
+        assert!(
+            lanes
+                .by_app()
+                .values()
+                .all(|lane| lane.pending_emits().is_empty())
+        );
     }
 
     #[test]
@@ -768,7 +769,12 @@ mod tests {
         lanes.push_pending_emit(dummy_event("c1"));
         lanes.push_pending_emit(dummy_event("c2"));
         lanes.clear_pending_emits_for("app_t");
-        assert!(lanes.by_app().get("app_t").is_none_or(|lane| lane.pending_emits().is_empty()));
+        assert!(
+            lanes
+                .by_app()
+                .get("app_t")
+                .is_none_or(|lane| lane.pending_emits().is_empty())
+        );
         // A subsequent drain returns empty (queue is gone).
         assert!(lanes.drain_pending_emits_for("app_t").is_empty());
     }
@@ -778,7 +784,12 @@ mod tests {
         let mut lanes = TxLanes::new();
         lanes.clear_pending_emits_for("app_t");
         lanes.clear_pending_emits_for("app_t");
-        assert!(lanes.by_app().values().all(|lane| lane.pending_emits().is_empty()));
+        assert!(
+            lanes
+                .by_app()
+                .values()
+                .all(|lane| lane.pending_emits().is_empty())
+        );
     }
 
     // ----- SEC-1: per-app scoping of the tx / savepoint / emit slots
@@ -797,11 +808,11 @@ mod tests {
             .block_on(f)
     }
 
-    /// Build a parkable [`TxConnection`] without a live Postgres: the
+    /// Build a parkable [`Session`] without a live Postgres: the
     /// embedded SQLite backend hands out a real session handle from a
     /// tempdir-backed store. No SQL is executed on it — these tests
     /// exercise the slot state machine only.
-    async fn sqlite_tx_conn(dir: &tempfile::TempDir) -> TxConnection {
+    async fn sqlite_tx_conn(dir: &tempfile::TempDir) -> Session {
         use crate::backend::SqlExecutor as _;
         // The key source is a parameter now: the engine composer cannot read
         // this crate's per-isolate context, so the caller that owns it does the
@@ -815,7 +826,7 @@ mod tests {
             .acquire_dedicated_client("slot_state_probe")
             .await
             .expect("acquire sqlite client");
-        TxConnection::Sqlite(client)
+        Session::new(client)
     }
 
     #[test]

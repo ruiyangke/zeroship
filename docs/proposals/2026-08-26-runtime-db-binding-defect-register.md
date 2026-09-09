@@ -57,7 +57,7 @@ transitively bundled package, so any check it performs is a check on an input th
 attacker also controls the timing of. Rationale in the design document, section 11.
 
 **Evidence:** `sdks/db/src/policy.ts:87,93-94`;
-`crates/zeroship-data-engine/src/crud/mask_policy.rs`
+`crates/zeroship-data-orm/src/crud/mask_policy.rs`
 
 ### L2 (DECIDED) - mask policy suppressible via `_flushPendingMaskPolicy`
 
@@ -252,7 +252,7 @@ citations this entry does not have (`Client::new_with_statement_cache`,
 ### L17 - a partitioned creator table is invisible to introspection, and nothing yet proves the descriptor covers it
 
 `read_live_schema` filters `AND c.relkind = 'r'`
-(`crates/zeroship-schema/src/diff.rs:641`). That predicate **includes physical (DELETED; runtime compilation now lives in `crates/zeroship-data-query-builder/src/compile.rs`, and migration DDL in `crates/zeroship-migrate-core/src/schema/query.rs`.)
+(`crates/zeroship-schema/src/diff.rs:641`). That predicate **includes physical (DELETED; runtime compilation now lives in `crates/zeroship-data-sql/src/compile.rs`, and migration DDL in `crates/zeroship-migrate-core/src/schema/query.rs`.)
 partitions** (a partition is `relkind = 'r'` with `relispartition = true`) and
 **excludes the partitioned parent**, which is `relkind = 'p'`. So for a
 partitioned creator table the parent is invisible: `build_runtime_schema` returns
@@ -436,7 +436,7 @@ refuses the `CREATE` itself, so nothing is created and nothing is shadowed. The
 cost is a bad diagnostic and a fence that does not mean what it says.
 
 **Fix:** move `sqlite_` to `validate_collection` and decide deliberately whether it
-stays on columns as well. `zeroship-data-query-builder` fences it on **both** roles and
+stays on columns as well. `zeroship-data-sql` fences it on **both** roles and
 records the divergence in its own comments; when that port lands, one of the two
 behaviours has to win explicitly rather than by whichever file the reader opened.
 

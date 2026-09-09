@@ -5,7 +5,7 @@
 `crates/zeroship-migrate-server/src/apply.rs:284` still reads `let schema = app_id.to_string();`;
 `ls crates/ | grep -i cdc` returns nothing. Four prerequisites HAVE landed and are relied on
 below: the explicit write-verb projection and primary-key row narrowing
-(`crates/zeroship-schema/src/query.rs`, live arms in (DELETED; runtime compilation now lives in `crates/zeroship-data-query-builder/src/compile.rs`, and migration DDL in `crates/zeroship-migrate-core/src/schema/query.rs`.)
+(`crates/zeroship-schema/src/query.rs`, live arms in (DELETED; runtime compilation now lives in `crates/zeroship-data-sql/src/compile.rs`, and migration DDL in `crates/zeroship-migrate-core/src/schema/query.rs`.)
 `crates/zeroship-plugin-db/tests/column_grants.rs`), the deploy-time schema precondition
 (`crates/zeroship-control/src/api.rs:167`), and the edge split routing `/v1/*` to the
 migration service (`deploy/ops/Caddyfile`). The stale-binding classifier is built and
@@ -80,7 +80,7 @@ GRANT zs_bind_<gid>_e<E> TO zeroship_worker    WITH INHERIT FALSE; -- assumable,
 
 The data plane narrows per transaction with `SET LOCAL ROLE "zs_bind_<gid>_e<E>"` - the first
 statement of the setup batch that already exists
-(`crates/zeroship-data-postgres/src/pg_session_sql.rs:36` and `:63`), same statement, same
+(`crates/zeroship-data-orm/src/backend/postgres/pg_session_sql.rs:36` and `:63`), same statement, same
 batch position, no extra round trip. It replaces the current per-app role name
 (`crates/zeroship-core/src/database_role.rs`) in that builder and nowhere else.
 
@@ -114,14 +114,14 @@ DbBinding { db: "dbs_01J...", schema: "db_01J...",
 ```
 
 One binding, not a map. Nothing creator-supplied selects it. The vehicle is `DbServiceConfig`
-plus `DbBinding` (`crates/zeroship-data-core/src/binding.rs`), which already carries the DSN
+plus `DbBinding` (`crates/zeroship-data-orm/src/binding.rs`), which already carries the DSN
 to the plugin without passing through V8 and is already the per-isolate identity every `Db`
 and `Collection` wrapper travels with. App JS never needs these values: `env.db` methods are
 native ops, so the plugin reads the binding in Rust when the op runs.
 
 The worker does not compare `epoch` in Rust to authorize a transaction; it composes the role
 name the setup batch sends. An app whose binding is absent is a hard refusal with the same
-shape as `collection_not_declared` (`crates/zeroship-data-engine/src/descriptor.rs`).
+shape as `collection_not_declared` (`crates/zeroship-data-orm/src/descriptor.rs`).
 
 Per-thread resources become maps keyed by `DbResourceKey`. `ThreadDbContext`
 (`crates/zeroship-plugin-db/src/context.rs`) holds one pool, one url, one resource key and
@@ -134,7 +134,7 @@ already exists one module over as `OPERATOR_POOLS: HashMap<DbResourceKey, Rc<Poo
 The migration service emits column-level grants from the owner's own IR, withholding every
 column whose classification is not `none` and granting the column that holds the mask
 instead. It already writes classification and mask kind as `COMMENT ON COLUMN` sentinels
-(`crates/zeroship-schema/src/mask_codec.rs`, (DELETED; runtime compilation now lives in `crates/zeroship-data-query-builder/src/compile.rs`, and migration DDL in `crates/zeroship-migrate-core/src/schema/query.rs`.)
+(`crates/zeroship-schema/src/mask_codec.rs`, (DELETED; runtime compilation now lives in `crates/zeroship-data-sql/src/compile.rs`, and migration DDL in `crates/zeroship-migrate-core/src/schema/query.rs`.)
 `crates/zeroship-migrate-backend/src/mask_codec.rs`) and is the one process in the tree that
 does not execute creator code, so this satisfies the AGENTS.md privilege invariant with no
 `SECURITY DEFINER` wrapper and no system-schema state. A creator migration cannot widen the
@@ -269,9 +269,9 @@ is that an isolate at `E-1` loses its grace at the START of the apply and recove
 re-resolving to `E`, so the front reap is correct only once the binding producer lands.
 
 **Error taxonomy.** The classifier
-(`crates/zeroship-data-postgres/src/pg_error.rs`, `is_missing_per_app_session_role`) today
+(`crates/zeroship-data-orm/src/backend/postgres/pg_error.rs`, `is_missing_per_app_session_role`) today
 matches SQLSTATE 22023 plus the exact role name and collapses it into `SCHEMA_NOT_PROVISIONED`
-(`crates/zeroship-data-core/src/error.rs`). Under this design:
+(`crates/zeroship-data-orm/src/error.rs`). Under this design:
 
 - `42501 permission denied to set role` -> `GRANT_REVOKED`. Terminal, 403-shaped, never
   retried, never falls back to the pool.
@@ -299,9 +299,9 @@ from the injected binding whether a live grant exists.
 ### Encryption
 
 Today the key is `Hkdf::<Sha256>::new(Some(app_id.as_bytes()), root)`
-(`crates/zeroship-data-core/src/encryption/keys.rs:391`) and
+(`crates/zeroship-data-orm/src/encryption/keys.rs:391`) and
 `canonical_aad(collection, column, row_pk)` binds a hardcoded `WIRE_VERSION_V1`
-(`crates/zeroship-data-core/src/encryption/aad.rs:75`, `:93`) and nothing namespacing. That
+(`crates/zeroship-data-orm/src/encryption/aad.rs:75`, `:93`) and nothing namespacing. That
 fails in opposite directions on the two new axes: co-grant-holders derive different keys and
 get an AEAD failure on data they are entitled to read, and one app across two databases
 derives one key with no database in the AAD, so a ciphertext lifted from one database verifies
@@ -322,7 +322,7 @@ that makes database ids exist**, not after.
 
 - **Op counts stay keyed on the app.** `db_reads` / `db_writes` / `db_rows_written` are
   emitted against the server-injected app id at the op boundary
-  (`crates/zeroship-data-engine/src/exec.rs`), and the app that issued the op consumed the
+  (`crates/zeroship-data-orm/src/exec.rs`), and the app that issued the op consumed the
   compute.
 - **The billing principal for a database is the creator**, because no app owns one. Any metric
   measuring the *resource* attributes to the creator; any metric measuring an *op* attributes
@@ -385,7 +385,7 @@ sees exactly one. The multi-database transaction problem is closed by the entity
 than by a runtime check. `tx_conns`, `tx_claims`, `tx_waiters`, `savepoint_depths`,
 `savepoint_emit_marks` and `pending_emits` (`crates/zeroship-plugin-db/src/context.rs`) stay
 keyed on `app_id`, because `app_id` still determines the database. `TxRoute`
-(`crates/zeroship-data-engine/src/tx_route.rs`) is unchanged, and its continuation slot stays
+(`crates/zeroship-data-orm/src/tx_route.rs`) is unchanged, and its continuation slot stays
 keyed on the app id: SEC-1 is structural there, and the planted key must never become a
 creator-facing name, or two co-resident apps both calling their database `main` would compare
 equal.
@@ -418,7 +418,7 @@ state, not database state - and lives on the datastore holding that app's databa
 ### SQLite dev tier
 
 One file per database, `zs-db-<dbsid>.sqlite`, ATTACHed under alias `db_<dbsid>`.
-`attach_app_file` (`crates/zeroship-data-sqlite/src/lib.rs`) already is a per-database handle
+`attach_app_file` (`crates/zeroship-data-orm/src/backend/sqlite/mod.rs`) already is a per-database handle
 under a different name, with an `app_id_cache` dedup set because SQLite errors on a duplicate
 alias; the dedup key becomes the database id. Three fidelity gaps, all owed to
 `docs/reference/sqlite-divergences.md`:
@@ -481,11 +481,11 @@ every inheriting membership row rather than checking a pair
 
 **No CRUD code may reach a raw connection, and this must stay a compile-time property.** The
 role fence is applied by two functions
-(`crates/zeroship-data-postgres/src/pg_autocommit.rs` and
-`crates/zeroship-data-postgres/src/postgres.rs`, `apply_per_app_role`); anything issuing SQL
+(`crates/zeroship-data-orm/src/backend/postgres/pg_autocommit.rs` and
+`crates/zeroship-data-orm/src/backend/postgres/implementation.rs`, `apply_per_app_role`); anything issuing SQL
 outside them is unfenced. That hole is closed TODAY, and only because
 `PgSqlExecutor::pool_handle` is `#[cfg(any(test, feature = "test-helpers"))]`
-(`crates/zeroship-data-postgres/src/postgres.rs`, `impl PgSqlExecutor for PostgresBackend`).
+(`crates/zeroship-data-orm/src/backend/postgres/implementation.rs`, `impl PgSqlExecutor for PostgresBackend`).
 Its last four callers were in `crud/mask_drift.rs`, deleted 2026-09-03, so **it now has zero
 callers of any kind** - only the trait definition, the impl, and two `assert_impl` type-level
 witnesses remain. Do not ungate it; deleting the trait outright is now the cheaper option and is
@@ -572,7 +572,7 @@ session running as a role that *inherits* the schema privilege fails on the very
 statement; a session that has *assumed* a role holding it directly continues to the end of the
 transaction. This design assumes the grant role, so the bound is one transaction, capped only
 by `DB_IDLE_IN_TX_TIMEOUT_MS` and `DB_STATEMENT_TIMEOUT_MS`
-(`crates/zeroship-data-core/src/budgets.rs`), neither of which bounds total transaction
+(`crates/zeroship-data-orm/src/budgets.rs`), neither of which bounds total transaction
 duration. Re-granting restores service on the same warm connection - which a monotonic
 incarnation id with permanent tombstones cannot express, and revoke-then-regrant is a
 legitimate state while "same app id, different app" is not reachable at all, typed ids being
@@ -608,7 +608,7 @@ readable.
 **Cross-creator table sharing is refused permanently.** Three independent reasons:
 
 1. **The unmask policy is authored by the READING app.**
-   `crates/zeroship-data-engine/src/crud/mask_policy.rs` states it: the policy comes from the
+   `crates/zeroship-data-orm/src/crud/mask_policy.rs` states it: the policy comes from the
    creator's own source, at boot, and nowhere else on the PG arm; the app declares
    `defineMaskPolicy()`, `installSchema` flushes it into that isolate's cache, and there is no
    durable policy store. A co-grant-holder ships a permissive policy in its own bundle and
@@ -662,11 +662,11 @@ datastore from an app under its limit.
 
 2. **Supply the schema epoch producer.**
    BUILDABLE, 8h. The consumer ships and is tested: `SchemaEpoch`
-   (`crates/zeroship-data-engine/src/transaction/reducer/identity.rs:97`), the comparison at
+   (`crates/zeroship-data-orm/src/transaction/reducer/identity.rs:97`), the comparison at
    `:265` returning `Verdict::ReResolve`, and the adapter from a classified session-setup
    outcome into that verdict. **The machine is a tautology in production.** The single
    production construction site
-   (`crates/zeroship-data-engine/src/transaction/driver.rs:143-145`) mints incarnation 0, domain
+   (`crates/zeroship-data-orm/src/transaction/driver.rs:143-145`) mints incarnation 0, domain
    `(0,0)`, epoch 0, `Stable` and an empty ceiling, and echoes the expectation back as the
    observation, so `classify` can only return `Current` and the three typed denial codes are
    unreachable outside tests. The work is the record, the migration-service write and the
@@ -749,7 +749,7 @@ datastore from an app under its limit.
     statement fails, the split does not exist. One live test.
 
 13. **Re-prove the pooled-connection reset against a narrowed role.**
-    BUILDABLE, 3h. `crates/zeroship-data-engine/src/exec.rs` already runs the role and timeout
+    BUILDABLE, 3h. `crates/zeroship-data-orm/src/exec.rs` already runs the role and timeout
     guards via `SET LOCAL` inside an explicit transaction so they auto-revert at COMMIT and at
     the implicit ROLLBACK on drop, covering a setup error, a query error, or a cancellation
     between setup and the would-be reset. That reasoning does not change when the role names a

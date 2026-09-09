@@ -83,9 +83,9 @@
 
 use compio_postgres::Pool;
 
-use crate::backend::pg_error;
 use crate::backend::BackendHandle;
-use zeroship_data_core::error::{prefix_message, DbError};
+use crate::backend::pg_error;
+use zeroship_data_orm::error::{DbError, prefix_message};
 
 /// Options for [`drop_namespace`].
 #[derive(Debug, Clone)]
@@ -208,7 +208,7 @@ pub async fn drop_namespace(
 /// file-unlink teardown.
 ///
 /// **Exhaustive, and it was not until 2026-09-04.** The old shape was
-/// `if let BackendHandle::Postgres(..)`, then `if let Some(..) =
+/// `if let BackendHandle::new(..)`, then `if let Some(..) =
 /// backend.as_change_stream_sqlite()`, then a bare `Ok(())` described as
 /// "should not happen". With two variants that tail was unreachable, so it was
 /// dead code AND the landing pad a third backend would have fallen into: step 3
@@ -225,17 +225,19 @@ pub async fn drop_namespace(
 /// disagree about the same value.
 async fn deprovision_change_stream(backend: &BackendHandle, app_id: &str) -> Result<(), DbError> {
     use crate::backend::ChangeStream;
-    match backend {
-        BackendHandle::Postgres(pg) => {
-            crate::change_stream_pg::PgChangeStream::new(pg.clone())
-                .deprovision(app_id)
-                .await
-        }
-        BackendHandle::Sqlite(sq) => {
-            crate::backend::sqlite::cdc::SqliteChangeStream::new(sq.clone())
-                .deprovision(app_id)
-                .await
-        }
+    if let Some(pg) = backend.get_rc::<crate::backend::PostgresBackend>() {
+        crate::change_stream_pg::PgChangeStream::new(pg)
+            .deprovision(app_id)
+            .await
+    } else if let Some(sqlite) = backend.get_rc::<crate::backend::SqliteBackend>() {
+        crate::backend::sqlite::cdc::SqliteChangeStream::new(sqlite)
+            .deprovision(app_id)
+            .await
+    } else {
+        Err(DbError::config(
+            "backend_unsupported",
+            "no CDC provider is registered for this backend",
+        ))
     }
 }
 

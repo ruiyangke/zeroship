@@ -188,7 +188,7 @@ RECORDER="$ROOT/sdks/vite-plugin/dist/gen-types/recorder.js"
 # shellcheck source=lib/binary_freshness.sh
 source "$ROOT/tests/lib/binary_freshness.sh"
 zs_check_binary_freshness "$ROOT" "$BIN" \
-  "crates/zeroship-plugin-db/src crates/zeroship-schema/src crates/zeroship-runtime/src crates/zeroship-worker/src crates/zeroship-gateway/src crates/zeroship-control/src crates/zeroship-migrate-server/src sdks/db/src" \
+  "crates/zeroship-plugin-db/src crates/zeroship-data-orm/src crates/zeroship-data-sql/src crates/zeroship-runtime/src crates/zeroship-worker/src crates/zeroship-gateway/src crates/zeroship-control/src crates/zeroship-migrate-server/src sdks/db/src" \
   "zeroship zeroship-worker zeroship-gate zeroship-control zeroship-migrate-server dev-provision" \
   || { _zs_fresh_rc=$?; [ "$_zs_fresh_rc" -ne 0 ] && exit "$_zs_fresh_rc"; }
 
@@ -409,7 +409,7 @@ probe() {
   # THE DOCUMENTED DIVERGENCE. docs/reference/sqlite-divergences.md claims PG
   # emits `BEGIN ISOLATION LEVEL ...` while SQLite validates the string and
   # runs a plain `BEGIN`. Verified in the source
-  # (crates/zeroship-data-engine/src/transaction/mod.rs:356-391), never measured through
+  # (crates/zeroship-data-orm/src/transaction/mod.rs:356-391), never measured through
   # the creator surface. These four rows are that measurement: if the two tiers
   # answer the same for a valid level, the divergence is REAL IN THE SQL and
   # UNOBSERVABLE through env.db for a single uncontended transaction -- which
@@ -1169,7 +1169,7 @@ reject listAfter 'the deleted row is gone from the list' '"title":"buy milk"'
 want countA 'count sees the five todos created for alice' '{"json":5}'
 
 # --- transactions, absolute --------------------------------------------------
-# Expectations come from the CONTRACT (crates/zeroship-data-engine/src/transaction/mod.rs
+# Expectations come from the CONTRACT (crates/zeroship-data-orm/src/transaction/mod.rs
 # and examples/db-todos/src/index.ts), not from a previous run.
 #
 # COMMIT. Two inserts, both visible on the tx connection before COMMIT, both
@@ -1253,14 +1253,14 @@ want cxOvl "the overlapping transaction's committed row survived the other's rol
 # joined a stranger's transaction and died with its rollback (`bAfter:0`,
 # `cxTotal` 3). Same root cause as the `cxOvl` defect -- ambient state standing
 # in for call context -- in a different consumer. The fix captures the async
-# scope at each CRUD dispatch site (crates/zeroship-data-engine/src/tx_route.rs).
+# scope at each CRUD dispatch site (crates/zeroship-data-orm/src/tx_route.rs).
 # Do NOT relax these -- see docs/pilot/e2e-scenarios.md row 3.
 #
 # DEPLOYED ONLY, and that is the point of section 5: the dev tier still answers
 # `bAfter:0`. Routing is now correct on both tiers, but on SQLite there is
 # nowhere else to route TO -- `acquire_dedicated_client` returns a handle to
 # the SAME single writer connection the shared/autocommit path uses
-# (crates/zeroship-data-sqlite/src/lib.rs:514), so an ordinary write still
+# (crates/zeroship-data-orm/src/backend/sqlite/mod.rs:514), so an ordinary write still
 # physically executes inside whatever transaction that connection is holding.
 # Root-caused, NOT worked around: closing it needs a second SQLite connection
 # (or a claim-wait, which can deadlock when a transaction awaits a promise
@@ -1325,7 +1325,7 @@ want bxTotal 'exactly one transaction-scope row committed' '{"json":1}'
 # opens/releases savepoints rather than flattening nested transactions.
 # What it does NOT establish: that dev omits the clause. SQLite has no
 # statement log here, so that half is read from
-# crates/zeroship-data-engine/src/transaction/mod.rs:384-391 (`let _ =
+# crates/zeroship-data-orm/src/transaction/mod.rs:384-391 (`let _ =
 # build_begin_sql(...)` then a literal `"BEGIN"`), not measured.
 PGLOG="$WORK/pg-statements.log"
 docker logs "$PGC" > "$PGLOG" 2>&1

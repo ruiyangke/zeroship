@@ -80,7 +80,7 @@ mod native_transaction;
 // SQLSTATE it classifies can only be produced by PostgreSQL itself.
 mod missing_role;
 
-// The `DbPlan` search family, EXECUTED. `zeroship-data-query-builder` declares no
+// The `DbPlan` search family, EXECUTED. `zeroship-data-sql` declares no
 // dependencies, so its own tests can only compare rendered SQL against a string;
 // these run the same statements against a server carrying vector and postgis.
 mod search_ir_live;

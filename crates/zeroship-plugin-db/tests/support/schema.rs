@@ -1,7 +1,7 @@
 //! Database fixtures use the migration engine that creates creator tables.
 
-use zeroship_data_query_builder::value::Value;
-use zeroship_data_query_builder::{compile::SqlDialect, SchemaName};
+use zeroship_data_sql::value::Value;
+use zeroship_data_sql::{SchemaName, compile::SqlDialect};
 use zeroship_migrate::schema::query::{FkEmission, IndexSpec, QueryError};
 
 #[allow(dead_code)]

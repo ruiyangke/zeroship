@@ -34,11 +34,11 @@
 # exactly two files were wrongly skipped, and BOTH by prose written to explain a
 # visibility decision -
 #
-#   crates/zeroship-data-engine/src/backend/mod.rs
-#     via crates/zeroship-data-engine/src/lib.rs:96
+#   crates/zeroship-data-orm/src/backend/mod.rs
+#     via crates/zeroship-data-orm/src/lib.rs:96
 #     "// ... and one `#[cfg(test)]` conformance assertion. The"
-#   crates/zeroship-data-engine/src/crud/unmask.rs
-#     via crates/zeroship-data-engine/src/crud/mod.rs:80
+#   crates/zeroship-data-orm/src/crud/unmask.rs
+#     via crates/zeroship-data-orm/src/crud/mod.rs:80
 #     "// `#[cfg(test)]` in `v8_classes/mod.rs`. Narrowing this to `pub(crate)` in"
 #
 # The second was written the same day, by 7611d6213, recording a measurement of

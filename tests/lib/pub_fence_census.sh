@@ -106,7 +106,7 @@ cd "$(dirname "$0")/../.."
 # TWO CRATES SINCE 2026-09-03, AND THEY ANSWER THE SAME QUESTION AT TWO STAGES.
 # ---------------------------------------------------------------------------
 # `SRC` was `crates/zeroship-plugin-db/src` alone. The ENGINE tier left for
-# `crates/zeroship-data-engine/src` that day, taking ~22k lines and most of the
+# `crates/zeroship-data-orm/src` that day, taking ~22k lines and most of the
 # `pub(crate) mod` fences with it - so a census pinned to the first root would
 # have reported a small, healthy number about the modules that stayed and said
 # nothing at all about the ones whose fence had just BECOME a crate boundary.
@@ -120,7 +120,7 @@ cd "$(dirname "$0")/../.."
 #     This is surface the split has NOT yet published: it becomes public API the
 #     day the module becomes a crate root.
 #
-#   ENGINE (`zeroship-data-engine`) - items behind a `pub mod` at a crate root.
+#   ENGINE (`zeroship-data-orm`) - items behind a `pub mod` at a crate root.
 #     This is surface the split HAS published. The fence is the crate boundary
 #     now, and the 325 `pub(crate)` markers inside those modules were widened to
 #     `pub` in the same commit that moved them, because a `pub(crate)` item in
@@ -129,7 +129,7 @@ cd "$(dirname "$0")/../.."
 # The combined figure is what the split publishes in total, and it is the number
 # `tests/private_interface_gate.sh` rules on the health of.
 ADAPTER_SRC=crates/zeroship-plugin-db/src
-ENGINE_SRC=crates/zeroship-data-engine/src
+ENGINE_SRC=crates/zeroship-data-orm/src
 
 for _d in "$ADAPTER_SRC" "$ENGINE_SRC"; do
   [ -f "$_d/lib.rs" ] || {
@@ -304,14 +304,14 @@ report() { # name, file, pattern
 report sanitize_app_actor "$ENGINE_SRC/crud/unmask.rs" '^[[:space:]]*pub(\(crate\))? fn sanitize_app_actor'
 report "TxRoute::capture"  "$ENGINE_SRC/tx_route.rs"   '^[[:space:]]*pub(\(crate\))? fn capture'
 report "context::with_mut" "$ADAPTER_SRC/context.rs"   '^[[:space:]]*pub(\(crate\))? fn with_mut'
-report "DbBinding::cold_start" crates/zeroship-data-core/src/binding.rs \
+report "DbBinding::cold_start" crates/zeroship-data-orm/src/binding.rs \
        '^[[:space:]]*pub(\(crate\))? fn cold_start'
 
 echo
 echo "Measured 2026-09-02, and TWO OF THE FOUR PREDICTIONS WERE FALSIFIED BY THE"
 echo "ENGINE CUT ON 2026-09-03. Corrected here rather than quietly rewritten:"
 echo "  sanitize_app_actor  said 'pub(crate) on the ITEM - survives the split'."
-echo "    It is plain 'pub' now, at zeroship-data-engine's crate root. It could"
+echo "    It is plain 'pub' now, at zeroship-data-orm's crate root. It could"
 echo "    not have survived as pub(crate): three of its five call sites are in"
 echo "    the engine and two are the ADAPTER's masked_value.rs. The DB-3 fence"
 echo "    was never this visibility - it is that all five call sites invoke it -"
@@ -323,8 +323,8 @@ echo "  context::with_mut   pub fn, capped by 'pub(crate) mod context'"
 echo "                                               - DOES NOT survive"
 echo "  DbBinding::cold_start  #[cfg(feature=\"test-helpers\")], and the feature"
 echo "    resolves OFF for the shipped worker. Verified with"
-echo "      cargo tree -p zeroship-worker -e features -i zeroship-data-core"
-echo "    which shows data-core at feature \"default\" only. plugin-db enables"
-echo "    data-core/test-helpers in [dev-dependencies], NOT in [dependencies] -"
+echo "      cargo tree -p zeroship-worker -e features -i zeroship-data-orm"
+echo "    which shows data-orm at feature \"default\" only. plugin-db enables"
+echo "    data-orm/test-helpers in [dev-dependencies], NOT in [dependencies] -"
 echo "    a dependency grep alone cannot tell those apart and reads as a live"
 echo "    production exposure."

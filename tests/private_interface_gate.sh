@@ -58,7 +58,7 @@ gate_arms_init private_interface
 # TWO PACKAGES SINCE 2026-09-03.
 # ---------------------------------------------------------------------------
 # `PKG` was `zeroship-plugin-db` alone. The ENGINE tier left that crate for
-# `zeroship-data-engine` that day, and every `pub(crate)` marker inside it was
+# `zeroship-data-orm` that day, and every `pub(crate)` marker inside it was
 # widened to `pub` in the same commit - because a `pub(crate)` item in the engine
 # is unreachable from the adapter that calls it. That is EXACTLY the population
 # this lint fires in: 341 items whose fence stopped being a module and started
@@ -69,9 +69,9 @@ gate_arms_init private_interface
 # The engine is checked FIRST, because a private-in-public defect there is the
 # one that matters most: its `pub` items are now real cross-crate API, and a
 # `pub fn` returning a private type is an item the adapter cannot use at all.
-PKGS="zeroship-data-engine zeroship-plugin-db"
+PKGS="zeroship-data-orm zeroship-plugin-db"
 ADAPTER_SRC=crates/zeroship-plugin-db/src
-ENGINE_SRC=crates/zeroship-data-engine/src
+ENGINE_SRC=crates/zeroship-data-orm/src
 OUT=$(mktemp)
 trap 'rm -f "$OUT"' EXIT
 
@@ -240,7 +240,7 @@ gate_arm fenced_pub_items "$fenced" 300
 #
 # `package_id` is `path+file:///...<name>#<version>`, so the name is delimited
 # by `/` before and `#` after. The boundaries are load-bearing: an unanchored
-# match on `zeroship-data-engine` is fine today but `compio-postgres` would
+# match on `zeroship-data-orm` is fine today but `compio-postgres` would
 # match `compio-postgres-derive`, and this gate's whole subject is a crate
 # boundary.
 PKG_ALT="$(printf '%s' "$PKGS" | tr ' ' '\n' | grep -v '^$' | paste -sd'|' -)"

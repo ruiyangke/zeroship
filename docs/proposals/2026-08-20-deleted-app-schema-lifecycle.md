@@ -92,7 +92,7 @@ only by code with no production caller.
 | `"<uuid>"` - the creator's tables, holding END USERS' rows | **survives** | `crates/zeroship-plugin-db/src/drop_namespace.rs:161` is the only production-shaped `DROP SCHEMA`, and the module is `#![allow(dead_code)]` with test-only callers |
 | `"<uuid>_migrations"` - the migration engine journal | **survives** | named by nothing; created at `third_party/zero-migrate/crates/zeroship-migrate/src/conn.rs:188` |
 | `"app_<uuid>"` - the workflow journal's 5 `__zeroship_workflow_*` tables | **survives** | named by nothing; `crates/zeroship-control/src/cron/workflow_engine.rs:306-311` states it outright |
-| role `app_<uuid>_role`, its template membership, grants and default privileges | **survives** | `drop_per_app_role` (`crates/zeroship-data-engine/src/auth/bootstrap.rs:1671`) has exactly one caller, the dead `drop_namespace` |
+| role `app_<uuid>_role`, its template membership, grants and default privileges | **survives** | `drop_per_app_role` (`crates/zeroship-data-orm/src/auth/bootstrap.rs:1671`) has exactly one caller, the dead `drop_namespace` |
 | `env.kv` keys | **survives** | scoped `{<app_id>}:<key>` (`crates/zeroship-plugin-kv/src/backend/mod.rs:150`); the `KvBackend` trait has per-key ops only, no namespace drop |
 | `env.storage` objects | **survives** | prefix `<app_id>/<bucket>/<key>` (`crates/zeroship-plugin-storage/src/backend/s3.rs:143`, `local.rs:104`); `crates/zeroship-plugin-storage/src/limits.rs:145`: "there is no runtime teardown hook to sweep them" |
 | deploy blobs under `blobs/` | **survives permanently** | the `BlobStore` trait (`crates/zeroship-bundle/src/blob.rs:57-163`) has no `delete_blob` and no `list_blobs`. They are structurally unreclaimable, deleted app or not |

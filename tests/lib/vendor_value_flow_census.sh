@@ -76,7 +76,7 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # TWO SOURCE ROOTS SINCE 2026-09-03. The ENGINE tier - which is where nearly
 # every vendor-value holder this census reports lives - left
-# `zeroship-plugin-db/src` for `zeroship-data-engine/src`. Pinned to the first
+# `zeroship-plugin-db/src` for `zeroship-data-orm/src`. Pinned to the first
 # root the census would have scanned the adapter and CDC files that stayed and
 # printed a small clean number about the ~22k lines that went.
 #
@@ -85,7 +85,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # vendor value - is a question about tiers, not about cargo packages.
 SRC_ROOTS=(
   "$ROOT/crates/zeroship-plugin-db/src"
-  "$ROOT/crates/zeroship-data-engine/src"
+  "$ROOT/crates/zeroship-data-orm/src"
 )
 for _root in "${SRC_ROOTS[@]}"; do
   [ -d "$_root" ] || { echo "no such tree: $_root" >&2; exit 1; }

@@ -8,7 +8,7 @@
 //! `ThreadDbContext::has_tx_for` — "does this app currently have a
 //! transaction open on this isolate?". That accessor no longer exists on
 //! `ThreadDbContext`; the live reading of the same fact is
-//! `zeroship_data_engine::tx_lanes::TxLanes::has_tx_for`, and the point below
+//! `zeroship_data_orm::tx_lanes::TxLanes::has_tx_for`, and the point below
 //! is that neither one answers the question the decision needs answered.
 //!
 //! That is a *temporal* test standing in for a *structural* one, and the
@@ -61,7 +61,7 @@
 /// Global-registry key for the transaction-scope entry in the shared
 /// continuation-preserved `Map`. Namespaced so it cannot collide with a
 /// creator's own `Symbol.for(...)` key.
-use zeroship_data_core::error::DbError;
+use zeroship_data_orm::error::DbError;
 
 const SCOPE_SYMBOL_KEY: &str = "zeroship.plugin-db.txScope";
 
@@ -209,7 +209,7 @@ pub(crate) fn cdc_worker_id() -> Option<String> {
 /// is the one place both were resolved together.
 pub(crate) fn capture_route(
     scope: &mut v8::PinScope<'_, '_>,
-    binding: &zeroship_data_core::binding::DbBinding,
+    binding: &zeroship_data_orm::binding::DbBinding,
 ) -> crate::tx_route::CapturedRoute {
     crate::tx_route::CapturedRoute::capture(
         current_tx_app(scope).as_deref(),
@@ -319,7 +319,7 @@ mod tests {
     //!     and end to end by `tests/e2e_dev_vs_deployed_db.sh` (`cxPlain`).
     //!   - the OTHER direction of the #254 defect - an app with a transaction
     //!     genuinely PARKED in the per-isolate slot while an unrelated dispatch
-    //!     runs. Reaching that state needs a real `TxConnection` (a live
+    //!     runs. Reaching that state needs a real `Session` (a live
     //!     Postgres `Client` or SQLite session handle), which these tests
     //!     deliberately do not open. It is covered by `cxPlain` on both tiers.
     //!   - anything about which CONNECTION the exec path then picks.
@@ -329,7 +329,7 @@ mod tests {
     //! crate's, and the engine may not see `v8`, `zeroship_runtime` or the
     //! per-isolate context at all.
 
-    use zeroship_data_query_builder::value;
+    use zeroship_data_sql::value;
     use zeroship_runtime::init_v8;
 
     macro_rules! in_scope {
@@ -360,11 +360,11 @@ mod tests {
     /// The fixture binding: app id and schema are the same string here, which
     /// is what production still mints. Spelled once so the tests below read the
     /// route`s two identities off ONE source, as `mint_db` does.
-    fn app_a_binding() -> zeroship_data_core::binding::DbBinding {
-        zeroship_data_core::binding::DbBinding::new(
+    fn app_a_binding() -> zeroship_data_orm::binding::DbBinding {
+        zeroship_data_orm::binding::DbBinding::new(
             "app_a",
-            zeroship_data_core::binding::COLD_START_DEPLOY_TOKEN,
-            zeroship_data_query_builder::SchemaName::new("app_a").expect("fixture schema name"),
+            zeroship_data_orm::binding::COLD_START_DEPLOY_TOKEN,
+            zeroship_data_sql::SchemaName::new("app_a").expect("fixture schema name"),
         )
     }
 
@@ -412,10 +412,10 @@ mod tests {
             !super::capture_route(scope, &app_a_binding()).in_tx(),
             "SEC-1: app_a must not join app_other's transaction"
         );
-        let other = zeroship_data_core::binding::DbBinding::new(
+        let other = zeroship_data_orm::binding::DbBinding::new(
             "app_other",
-            zeroship_data_core::binding::COLD_START_DEPLOY_TOKEN,
-            zeroship_data_query_builder::SchemaName::new("app_other").expect("fixture schema name"),
+            zeroship_data_orm::binding::COLD_START_DEPLOY_TOKEN,
+            zeroship_data_sql::SchemaName::new("app_other").expect("fixture schema name"),
         );
         assert!(super::capture_route(scope, &other).in_tx());
         super::leave(scope, prev);
@@ -468,7 +468,9 @@ mod tests {
                 .await
                 .expect("the adapter funnel must open a cold backend");
             assert!(
-                backend.as_sqlite().is_some(),
+                backend
+                    .get::<zeroship_data_orm::backend::SqliteBackend>()
+                    .is_some(),
                 "the configured url is sqlite:, so the opened backend must be too"
             );
             assert!(

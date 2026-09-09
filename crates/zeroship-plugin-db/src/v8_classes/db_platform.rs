@@ -44,7 +44,7 @@ use zeroship_runtime_macros::{v8_constructor, v8_getter, v8_method};
 
 use crate::v8_bridge::read_native_arg;
 use crate::v8_classes::dispatch::dispatch_set_mask_policy_field;
-use zeroship_data_core::binding::DbBinding;
+use zeroship_data_orm::binding::DbBinding;
 
 // ---------------------------------------------------------------------------
 // DbPlatform state

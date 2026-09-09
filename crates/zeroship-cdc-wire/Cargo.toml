@@ -12,7 +12,7 @@ description = "The CDC relay/worker wire contract: framing, the eleven frame typ
 # calls for "a new leaf crate `zeroship-cdc-wire`, no I/O, no V8, to be depended
 # on by both `zeroship-data-cdc-server` and `zeroship-plugin-db`". LEAF is
 # enforced HERE, the same
-# way `crates/zeroship-data-core/Cargo.toml` enforces its vendor fence: the names
+# way `crates/zeroship-data-sql/Cargo.toml` enforces its vendor fence: the names
 # that would break it are absent below, so spelling one is E0433 at compile time.
 #
 # ABSENT ON PURPOSE, and each for its own reason:

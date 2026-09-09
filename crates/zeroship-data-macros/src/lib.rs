@@ -1,16 +1,16 @@
 //! Generate Rust ORM contracts from migration artifacts and native Rust structs.
 use proc_macro::TokenStream;
 use proc_macro2::{Span, TokenStream as Tokens};
-use syn::{parse_macro_input, DeriveInput};
+use syn::{DeriveInput, parse_macro_input};
 
 mod derive;
 mod schema;
 
 fn engine() -> syn::Result<syn::Path> {
-    use proc_macro_crate::{crate_name, FoundCrate};
-    let name = match crate_name("zeroship-data-engine") {
+    use proc_macro_crate::{FoundCrate, crate_name};
+    let name = match crate_name("zeroship-data-orm") {
         Ok(FoundCrate::Name(name)) => name,
-        Ok(FoundCrate::Itself) => "zeroship_data_engine".into(),
+        Ok(FoundCrate::Itself) => "zeroship_data_orm".into(),
         Err(error) => return Err(syn::Error::new(Span::call_site(), error)),
     };
     syn::parse_str(&format!("::{name}::orm"))

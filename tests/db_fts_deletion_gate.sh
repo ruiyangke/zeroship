@@ -47,7 +47,7 @@ scan_code_arm() {
   # because its crates hold the removal record; the split is not real, because
   # any crate may explain a deletion in prose. Measured 2026-09-04, once the
   # corpus above stopped exceeding ARG_MAX: 4 findings, all `//!` module docs in
-  # `zeroship-data-query-builder` (search.rs:7,9,10 and lib.rs:60) saying the
+  # `zeroship-data-sql` (search.rs:7,9,10 and lib.rs:60) saying the
   # feature WAS deleted. That crate was renamed in after this gate was written,
   # so the gate had never seen it.
   #

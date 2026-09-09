@@ -12,7 +12,7 @@
 
 #![allow(unsafe_code)]
 
-use zeroship_data_query_builder::value::Value;
+use zeroship_data_sql::value::Value;
 use zeroship_runtime::state::OpError;
 #[allow(unused_imports)]
 use zeroship_runtime_macros::{v8_class, v8_constructor, v8_method, v8_name};
@@ -58,16 +58,13 @@ fn replication_watchdog_dispatch<'s>(
             // ADAPTER to ADAPTER. This takes no route on purpose: it is a
             // diagnostic read of `pg_replication_slots`, never inside a
             // transaction, so an `in_tx` bit would be captured and discarded.
-            match crate::tx_scope::ensure_backend().await? {
-                crate::backend::BackendHandle::Postgres(pg) => {
-                    crate::replication::watchdog_query(pg.pool(), &app_id).await
-                }
-                crate::backend::BackendHandle::Sqlite(_) => {
-                    Err(zeroship_data_core::error::DbError::config(
-                        "backend_unsupported",
-                        "db: the replication watchdog requires the Postgres backend".to_string(),
-                    ))
-                }
+            let backend = crate::tx_scope::ensure_backend().await?;
+            match backend.get::<crate::backend::PostgresBackend>() {
+                Some(pg) => crate::replication::watchdog_query(pg.pool(), &app_id).await,
+                None => Err(zeroship_data_orm::error::DbError::config(
+                    "backend_unsupported",
+                    "db: the replication watchdog requires the Postgres backend".to_string(),
+                )),
             }
         },
         |rows| ResolveValue::String(crate::replication::watchdog_to_json(&rows)),
@@ -186,7 +183,7 @@ mod tests {
     //! Regression guards for app-scoped replication diagnostics.
 
     use super::resolve_watchdog_app_id;
-    use zeroship_data_query_builder::value;
+    use zeroship_data_sql::value;
 
     // -----------------------------------------------------------------
     // Sibling regression guards for the CRITICAL cross-tenant scoping

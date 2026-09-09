@@ -2,18 +2,18 @@
 //!
 //! A `Collection` instance is returned by `Db::collection`.
 //! Each CRUD method on it decodes its V8 arguments directly into a
-//! `zeroship_data_query_builder::value::Value` (via `decode_native`)
+//! `zeroship_data_sql::value::Value` (via `decode_native`)
 //! and calls the shared `dispatch_*` helper in [`crate::crud`] — no
 //! JSON.stringify / parse round-trip on the CRUD hot path.
 
 #![allow(unsafe_code)]
 
-use zeroship_data_query_builder::value::Value;
+use zeroship_data_sql::value::Value;
 use zeroship_runtime::state::OpError;
 #[allow(unused_imports)]
 use zeroship_runtime_macros::{v8_class, v8_constructor, v8_getter, v8_method, v8_name};
 
-use zeroship_data_core::binding::DbBinding;
+use zeroship_data_orm::binding::DbBinding;
 
 use super::dispatch::{
     dispatch_aggregate, dispatch_bulk_unmask_field, dispatch_count, dispatch_delete_many,
@@ -57,7 +57,7 @@ impl Collection {
     /// isolate at a DIFFERENT deploy must see for an entry it never installed.
     pub(crate) fn resolved_runtime_schema_for_tests(
         &self,
-    ) -> (String, Option<zeroship_data_query_builder::value::Value>) {
+    ) -> (String, Option<zeroship_data_sql::value::Value>) {
         let schema = crate::descriptor::collection_schema(&self.binding, &self.name)
             .ok()
             .map(|facts| (*facts).clone());
@@ -507,7 +507,7 @@ impl Collection {
         };
         let mut args = match opts_v {
             Value::Object(map) => map,
-            _ => zeroship_data_query_builder::value::Map::new(),
+            _ => zeroship_data_sql::value::Map::new(),
         };
         args.insert("collection".to_string(), Value::String(self.name.clone()));
         args.insert("row_pk".to_string(), row_pk_v);
@@ -549,7 +549,7 @@ impl Collection {
         };
         let mut args = match opts_v {
             Value::Object(map) => map,
-            _ => zeroship_data_query_builder::value::Map::new(),
+            _ => zeroship_data_sql::value::Map::new(),
         };
         args.insert("collection".to_string(), Value::String(self.name.clone()));
         args.insert("items".to_string(), items_v);

@@ -72,11 +72,9 @@ zeroship-config-macros
 zeroship-control
 zeroship-core
 zeroship-data-cdc-server
-zeroship-data-core
-zeroship-data-engine
-zeroship-data-postgres
-zeroship-data-query-builder
-zeroship-data-sqlite
+zeroship-data-macros
+zeroship-data-orm
+zeroship-data-sql
 zeroship-gateway
 zeroship-mailer
 zeroship-metering
@@ -96,7 +94,6 @@ zeroship-plugin-storage
 zeroship-plugin-workflow
 zeroship-runtime
 zeroship-runtime-macros
-zeroship-schema
 zeroship-stream
 zeroship-testkit
 zeroship-test-support

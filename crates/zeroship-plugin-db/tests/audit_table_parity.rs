@@ -11,7 +11,7 @@
 //!   creator, called by the SQLite apply host.
 //! * `zeroship_migrate_server::provisioning::AUDIT_UNMASK_TABLE` - the
 //!   PostgreSQL creator, called by the managed-policy apply service.
-//! * `zeroship_data_engine::backend_handle::AUDIT_UNMASK_TABLE` - the WRITER.
+//! * `zeroship_data_orm::backend_handle::AUDIT_UNMASK_TABLE` - the WRITER.
 //!
 //! If a creator and the writer part company the INSERT targets a relation
 //! nothing made. That is not a silent audit gap: `crud/unmask.rs` refuses to
@@ -27,18 +27,18 @@
 //! # Why a comparison and not one shared constant
 //!
 //! A shared constant would have to live somewhere all three can see, and there
-//! is no such crate. `zeroship-data-engine` runs creator code and must not link
+//! is no such crate. `zeroship-data-orm` runs creator code and must not link
 //! the migration engine: privilege follows the PROCESS, so the tier that
 //! executes app JS does not gain a dependency on the tier that changes schema.
-//! Pushing the name down into `zeroship-data-query-builder` (the one leaf both sides
+//! Pushing the name down into `zeroship-data-sql` (the one leaf both sides
 //! already share) would put a MIGRATION-OWNED relation name in the vendor-
 //! neutral schema authority, and the vendor crates do not depend on it - which
-//! is exactly why `zeroship-data-query-builder`'s own `cross_codec_parity` /
+//! is exactly why `zeroship-data-sql`'s own `cross_codec_parity` /
 //! `raw_column_parity` modules exist rather than a shared codec.
 //!
 //! So the answer is the same one those modules reached: compare, in the one
 //! place all three are nameable. `zeroship-plugin-db` already dev-depends on
-//! all three (`Cargo.toml`: `zeroship-data-engine`, `zeroship-migrate-server`,
+//! all three (`Cargo.toml`: `zeroship-data-orm`, `zeroship-migrate-server`,
 //! `zeroship-migrate-sqlite`), so this costs no new dependency edge at all.
 //!
 //! # No database
@@ -53,7 +53,7 @@
 //! grant, this one proves the NAME, and a name divergence would make that test
 //! fail for a reason it does not name.
 
-use zeroship_data_engine::backend_handle::AUDIT_UNMASK_TABLE as WRITER;
+use zeroship_data_orm::backend_handle::AUDIT_UNMASK_TABLE as WRITER;
 use zeroship_migrate_server::provisioning::AUDIT_UNMASK_TABLE as POSTGRES_CREATOR;
 use zeroship_migrate_sqlite::backend::AUDIT_UNMASK_TABLE as SQLITE_CREATOR;
 
@@ -140,7 +140,7 @@ fn the_audit_relation_sits_in_a_namespace_a_creator_cannot_declare() {
         "{AUDIT_TABLE} left the reserved platform namespace {RESERVED_PREFIX}",
     );
     assert!(
-        zeroship_data_query_builder::compile::validate_collection(AUDIT_TABLE).is_err(),
+        zeroship_data_sql::compile::validate_collection(AUDIT_TABLE).is_err(),
         "the schema authority now ACCEPTS {AUDIT_TABLE} as a creator collection; a \
          creator could declare the relation their own audit log is written into",
     );
@@ -154,7 +154,7 @@ fn the_audit_relation_sits_in_a_namespace_a_creator_cannot_declare() {
         "the control is the same string as the subject, so it varies nothing",
     );
     assert!(
-        zeroship_data_query_builder::compile::validate_collection(unreserved).is_ok(),
+        zeroship_data_sql::compile::validate_collection(unreserved).is_ok(),
         "the control name {unreserved} is refused too, so the arm above says \
          nothing about the reserved prefix",
     );

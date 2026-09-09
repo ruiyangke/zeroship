@@ -553,7 +553,7 @@ pub fn build_encryption_sentinel_comments(
 /// no validator accepts is what makes it unreachable from creator code on
 /// surfaces nobody has written yet.
 ///
-/// Byte-identical to `zeroship_data_query_builder::compile::RAW_COLUMN_PREFIX`; see
+/// Byte-identical to `zeroship_data_sql::compile::RAW_COLUMN_PREFIX`; see
 /// [`raw_column_name`] for what holds it there.
 pub const RAW_COLUMN_PREFIX: &str = "__zs_raw__";
 
@@ -574,20 +574,20 @@ pub const RAW_COLUMN_PREFIX: &str = "__zs_raw__";
 /// the same cap, but its only reader is an emitter with no `src` call site
 /// (measured 2026-09-04), so an accepted declaration is accepted HERE. The two
 /// are pinned to each other, and this literal `63` to the tightest identifier
-/// budget the shipping vendors declare, by `zeroship_data_query_builder::compile`'s
+/// budget the shipping vendors declare, by `zeroship_data_sql::compile`'s
 /// `raw_column_parity`.
 pub const MAX_MASKED_FIELD_NAME_BYTES: usize = 63 - RAW_COLUMN_PREFIX.len();
 
 /// The physical column that holds `field`'s REAL value.
 ///
 /// Total, and deliberately a plain concatenation: it is byte-identical to
-/// `zeroship_data_query_builder::compile::raw_column_name` - this one names the column the
+/// `zeroship_data_sql::compile::raw_column_name` - this one names the column the
 /// migration engine CREATES, that one names the column the data plane READS and
 /// WRITES.
 ///
 /// # What holds the two spellings together
 ///
-/// `zeroship_data_query_builder::compile`'s `raw_column_parity` module. It compares this
+/// `zeroship_data_sql::compile`'s `raw_column_parity` module. It compares this
 /// function, [`RAW_COLUMN_PREFIX`] and [`MAX_MASKED_FIELD_NAME_BYTES`] against
 /// the data plane's declarations over a corpus, and crosses both DECLARATION
 /// paths so a side that keeps an equal constant while no longer consulting it is
