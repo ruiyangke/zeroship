@@ -98,19 +98,18 @@ fn resource_cedar_uids_are_canonical() {
         Resource::App { id: app.clone() }.cedar_uid(),
         format!("App::\"{}\"", app.as_str())
     );
+    // Both halves come from ONE value. Spelling the id twice lets the input and
+    // the expectation drift apart, and the assertion then measures nothing but
+    // the two literals.
+    let project = zeroship_core::typed_id::generate("prj");
     assert_eq!(
-        Resource::Project {
-            id: "prj_0000123456789abcdefghijkl".to_owned()
-        }
-        .cedar_uid(),
-        "Project::\"prj_0123456789abcdefghijkl\""
+        Resource::Project { id: project.clone() }.cedar_uid(),
+        format!("Project::\"{project}\"")
     );
+    let organization = zeroship_core::typed_id::generate("org");
     assert_eq!(
-        Resource::Organization {
-            id: "org_0000123456789abcdefghijkl".to_owned()
-        }
-        .cedar_uid(),
-        "Organization::\"org_0123456789abcdefghijkl\""
+        Resource::Organization { id: organization.clone() }.cedar_uid(),
+        format!("Organization::\"{organization}\"")
     );
     assert_eq!(Resource::Any.cedar_uid(), "*");
 }
