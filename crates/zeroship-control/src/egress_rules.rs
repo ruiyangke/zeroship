@@ -835,7 +835,7 @@ pub async fn create(
         state.control_pg.as_ref(),
         &app_id,
         &body,
-        &authz.principal_id.to_string(),
+        authz.principal_id.as_str(),
     )
     .await
     {
@@ -925,7 +925,7 @@ async fn log_rule_audit(
         AuditEntry {
             app_id: Some(app_id),
             organization_id: None,
-            actor_user_id: Some(authz.principal_id),
+            actor_user_id: Some(&authz.principal_id),
             action,
             resource: Some(resource),
             source_ip: ip.as_deref(),

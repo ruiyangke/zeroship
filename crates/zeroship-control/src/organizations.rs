@@ -115,7 +115,6 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use uuid::Uuid;
 use zeroship_authz::{Action as AuthzAction, Resource};
 use zeroship_mailer::templates::OrganizationInvite;
 use zeroship_mailer::{Address, Email};
@@ -123,6 +122,7 @@ use zeroship_core::app_id::AppId;
 use zeroship_core::invite_id::InviteId;
 use zeroship_core::organization_id::OrganizationId;
 use zeroship_core::project_id::ProjectId;
+use zeroship_core::user_id::UserId;
 
 use crate::audit::{self, Action as AuditAction, AuditEntry};
 use crate::authz_guard::AuthzGuard;
@@ -340,7 +340,7 @@ pub struct UpdateOrganizationBody {
 
 #[derive(Debug, Deserialize)]
 pub struct AddMemberBody {
-    pub user_id: Uuid,
+    pub user_id: UserId,
     pub role: String,
 }
 
@@ -353,7 +353,7 @@ pub struct ChangeRoleBody {
 pub struct TransferOwnershipBody {
     /// The member who becomes owner. They must already hold a seat: transfer
     /// re-roles, it does not admit.
-    pub user_id: Uuid,
+    pub user_id: UserId,
 }
 
 #[derive(Debug, Deserialize)]
@@ -384,7 +384,7 @@ pub struct UpdateProjectBody {
 
 #[derive(Debug, Deserialize)]
 pub struct AddProjectMemberBody {
-    pub user_id: Uuid,
+    pub user_id: UserId,
     pub role: String,
 }
 
@@ -398,7 +398,7 @@ pub struct OrganizationRecord {
     /// reported so a console can label the row and so clearing it (by
     /// transferring ownership) is visible as the personal-to-shared conversion
     /// it is.
-    pub personal_owner_id: Option<Uuid>,
+    pub personal_owner_id: Option<UserId>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     /// When the organization was CLOSED, and `None` while it is live.
@@ -414,7 +414,7 @@ pub struct OrganizationRecord {
 #[derive(Debug, Clone, Serialize)]
 pub struct MemberRecord {
     pub organization_id: String,
-    pub user_id: Uuid,
+    pub user_id: UserId,
     pub email: String,
     pub name: String,
     pub role: String,
@@ -435,7 +435,7 @@ pub struct ProjectRecord {
 #[derive(Debug, Clone, Serialize)]
 pub struct ProjectMemberRecord {
     pub project_id: String,
-    pub user_id: Uuid,
+    pub user_id: UserId,
     pub email: String,
     pub role: String,
     pub added_at: DateTime<Utc>,
@@ -820,17 +820,27 @@ const ORGANIZATION_COLUMNS: &str =
     "o.id, o.slug::text AS slug, o.name, o.billing_email::text AS billing_email, \
      o.personal_owner_id, o.created_at, o.updated_at, o.dissolved_at";
 
-fn row_to_organization(row: &compio_postgres::Row) -> OrganizationRecord {
-    OrganizationRecord {
+fn row_to_organization(row: &compio_postgres::Row) -> Result<OrganizationRecord, OrganizationError> {
+    let personal_owner_id: Option<String> = row.get("personal_owner_id");
+    let personal_owner_id = personal_owner_id
+        .map(|raw| {
+            UserId::parse(&raw).map_err(|e| {
+                OrganizationError::Invalid(format!(
+                    "organizations.personal_owner_id {raw:?} is not a valid user id: {e}"
+                ))
+            })
+        })
+        .transpose()?;
+    Ok(OrganizationRecord {
         id: row.get("id"),
         slug: row.get("slug"),
         name: row.get("name"),
         billing_email: row.get("billing_email"),
-        personal_owner_id: row.get("personal_owner_id"),
+        personal_owner_id,
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
         dissolved_at: row.get("dissolved_at"),
-    }
+    })
 }
 
 /// Every organization the caller holds a seat in. This is the `Resource::Any`
@@ -839,7 +849,7 @@ fn row_to_organization(row: &compio_postgres::Row) -> OrganizationRecord {
 /// table.
 pub async fn list_organizations<C: GenericClient + Sync>(
     pg: &C,
-    principal: Uuid,
+    principal: &UserId,
 ) -> Result<Vec<OrganizationRecord>, OrganizationError> {
     let sql = format!(
         "SELECT {ORGANIZATION_COLUMNS} \
@@ -849,10 +859,10 @@ pub async fn list_organizations<C: GenericClient + Sync>(
           ORDER BY o.slug"
     );
     let rows = pg
-        .query(&sql, &[&principal])
+        .query(&sql, &[&principal.as_str()])
         .await
         .map_err(|err| db_error(&err, "list organizations"))?;
-    Ok(rows.iter().map(row_to_organization).collect())
+    rows.iter().map(row_to_organization).collect()
 }
 
 pub async fn get_organization<C: GenericClient + Sync>(
@@ -865,9 +875,10 @@ pub async fn get_organization<C: GenericClient + Sync>(
         .query(&sql, &[&organization_id])
         .await
         .map_err(|err| db_error(&err, "get organization"))?;
-    rows.first()
-        .map(row_to_organization)
-        .ok_or(OrganizationError::OrganizationNotFound)
+    match rows.first() {
+        Some(row) => row_to_organization(row),
+        None => Err(OrganizationError::OrganizationNotFound),
+    }
 }
 
 pub async fn list_members<C: GenericClient + Sync>(
@@ -887,19 +898,26 @@ pub async fn list_members<C: GenericClient + Sync>(
         )
         .await
         .map_err(|err| db_error(&err, "list members"))?;
-    Ok(rows
-        .iter()
-        .map(|row| MemberRecord {
-            organization_id: row.get("organization_id"),
-            user_id: row.get("user_id"),
-            email: row.get("email"),
-            name: row.get("name"),
-            role: row.get("role"),
-            rank: row.get("rank"),
-            billing_rank: row.get("billing_rank"),
-            added_at: row.get("added_at"),
+    rows.iter()
+        .map(|row| {
+            let raw_user_id: String = row.get("user_id");
+            let user_id = UserId::parse(&raw_user_id).map_err(|e| {
+                OrganizationError::Invalid(format!(
+                    "organization_members row has a malformed user id {raw_user_id:?}: {e}"
+                ))
+            })?;
+            Ok(MemberRecord {
+                organization_id: row.get("organization_id"),
+                user_id,
+                email: row.get("email"),
+                name: row.get("name"),
+                role: row.get("role"),
+                rank: row.get("rank"),
+                billing_rank: row.get("billing_rank"),
+                added_at: row.get("added_at"),
+            })
         })
-        .collect())
+        .collect()
 }
 
 /// The projects of one organization that `principal` can actually reach.
@@ -913,7 +931,7 @@ pub async fn list_members<C: GenericClient + Sync>(
 pub async fn list_projects<C: GenericClient + Sync>(
     pg: &C,
     organization_id: &str,
-    principal: Uuid,
+    principal: &UserId,
 ) -> Result<Vec<ProjectRecord>, OrganizationError> {
     let effective = effective_project_rank_sql("organization_role.rank", "project_role.rank", "$3");
     let sql = format!(
@@ -934,7 +952,7 @@ pub async fn list_projects<C: GenericClient + Sync>(
     let rows = pg
         .query(
             &sql,
-            &[&organization_id, &principal, &admin_rank, &ROLE_VIEWER],
+            &[&organization_id, &principal.as_str(), &admin_rank, &ROLE_VIEWER],
         )
         .await
         .map_err(|err| db_error(&err, "list projects"))?;
@@ -1010,16 +1028,23 @@ pub async fn list_project_members<C: GenericClient + Sync>(
         )
         .await
         .map_err(|err| db_error(&err, "list project members"))?;
-    Ok(rows
-        .iter()
-        .map(|row| ProjectMemberRecord {
-            project_id: row.get("project_id"),
-            user_id: row.get("user_id"),
-            email: row.get("email"),
-            role: row.get("role"),
-            added_at: row.get("added_at"),
+    rows.iter()
+        .map(|row| {
+            let raw_user_id: String = row.get("user_id");
+            let user_id = UserId::parse(&raw_user_id).map_err(|e| {
+                OrganizationError::Invalid(format!(
+                    "project_members row has a malformed user id {raw_user_id:?}: {e}"
+                ))
+            })?;
+            Ok(ProjectMemberRecord {
+                project_id: row.get("project_id"),
+                user_id,
+                email: row.get("email"),
+                role: row.get("role"),
+                added_at: row.get("added_at"),
+            })
         })
-        .collect())
+        .collect()
 }
 
 /// Pending and recently consumed invites. The token digest is never selected -
@@ -1124,7 +1149,7 @@ async fn lock_organization<C: GenericClient + Sync>(
 /// can reach it.
 pub async fn create_organization(
     registry: &Registry,
-    principal: Uuid,
+    principal: &UserId,
     body: &CreateOrganizationBody,
     source_ip: Option<&str>,
 ) -> Result<OrganizationRecord, OrganizationError> {
@@ -1169,7 +1194,7 @@ pub async fn create_organization(
                 &slug,
                 &body.name.trim(),
                 &billing_email,
-                &principal,
+                &principal.as_str(),
             ],
         )
         .await
@@ -1178,13 +1203,13 @@ pub async fn create_organization(
         // The INSERT ... SELECT matched no user row.
         return Err(OrganizationError::UserNotFound);
     };
-    let record = row_to_organization(row);
+    let record = row_to_organization(row)?;
 
     tx.execute(
         "INSERT INTO zeroship.organization_members \
              (organization_id, user_id, role, added_by, changed_by) \
          VALUES ($1, $2, $3, $2, $2)",
-        &[&organization_id.as_str(), &principal, &ROLE_OWNER],
+        &[&organization_id.as_str(), &principal.as_str(), &ROLE_OWNER],
     )
     .await
     .map_err(|err| db_error(&err, "seat first owner"))?;
@@ -1197,7 +1222,7 @@ pub async fn create_organization(
     tx.execute(
         "INSERT INTO zeroship.projects (id, organization_id, slug, name, created_by) \
          VALUES ($1, $2, 'default', 'Default', $3)",
-        &[&project_id.as_str(), &organization_id.as_str(), &principal],
+        &[&project_id.as_str(), &organization_id.as_str(), &principal.as_str()],
     )
     .await
     .map_err(|err| db_error(&err, "create default project"))?;
@@ -1241,7 +1266,7 @@ fn slug_conflict(err: &compio_postgres::Error, slug: &str, context: &str) -> Org
 /// only in the Cedar band above it.
 pub async fn update_organization(
     registry: &Registry,
-    principal: Uuid,
+    principal: &UserId,
     organization_id: &str,
     body: &UpdateOrganizationBody,
     source_ip: Option<&str>,
@@ -1292,7 +1317,7 @@ pub async fn update_organization(
                 &name,
                 &slug,
                 &email,
-                &principal,
+                &principal.as_str(),
                 &ROLE_OWNER,
             ],
         )
@@ -1307,7 +1332,7 @@ pub async fn update_organization(
                 .to_string(),
         ));
     };
-    let record = row_to_organization(row);
+    let record = row_to_organization(row)?;
 
     audit_authority_change(
         &tx,
@@ -1346,7 +1371,7 @@ pub async fn update_organization(
 /// number quoted here.
 pub async fn add_member(
     registry: &Registry,
-    principal: Uuid,
+    principal: &UserId,
     organization_id: &str,
     body: &AddMemberBody,
     source_ip: Option<&str>,
@@ -1376,9 +1401,9 @@ pub async fn add_member(
             &sql,
             &[
                 &organization_id,
-                &body.user_id,
+                &body.user_id.as_str(),
                 &body.role,
-                &principal,
+                &principal.as_str(),
                 &ROLE_ADMIN,
             ],
         )
@@ -1415,7 +1440,7 @@ pub async fn add_member(
     // Read back INSIDE the transaction. The row is visible to this snapshot and
     // to no other, which is exactly right: a read-back after commit would be a
     // second connection reporting a THIRD state of the world.
-    let record = read_member(&tx, organization_id, body.user_id, added_at).await?;
+    let record = read_member(&tx, organization_id, &body.user_id, added_at).await?;
 
     tx.commit()
         .await
@@ -1430,9 +1455,9 @@ pub async fn add_member(
 /// checking the old one would let them promote a viewer to owner.
 pub async fn change_member_role(
     registry: &Registry,
-    principal: Uuid,
+    principal: &UserId,
     organization_id: &str,
-    user_id: Uuid,
+    user_id: &UserId,
     body: &ChangeRoleBody,
     source_ip: Option<&str>,
 ) -> Result<MemberRecord, OrganizationError> {
@@ -1477,9 +1502,9 @@ pub async fn change_member_role(
             &sql,
             &[
                 &organization_id,
-                &user_id,
+                &user_id.as_str(),
                 &body.role,
-                &principal,
+                &principal.as_str(),
                 &ROLE_OWNER,
             ],
         )
@@ -1530,9 +1555,9 @@ pub async fn change_member_role(
 /// organization row lock - see the module header.
 pub async fn remove_member(
     registry: &Registry,
-    principal: Uuid,
+    principal: &UserId,
     organization_id: &str,
-    user_id: Uuid,
+    user_id: &UserId,
     source_ip: Option<&str>,
 ) -> Result<(), OrganizationError> {
     let mut conn = registry.conn().await?;
@@ -1558,7 +1583,7 @@ pub async fn remove_member(
         admin = ladder_rank_of(ROLE_ADMIN),
     );
     let rows = tx
-        .query(&sql, &[&organization_id, &user_id, &principal, &ROLE_OWNER])
+        .query(&sql, &[&organization_id, &user_id.as_str(), &principal.as_str(), &ROLE_OWNER])
         .await
         .map_err(|err| db_error(&err, "remove member"))?;
 
@@ -1611,7 +1636,7 @@ pub async fn remove_member(
 /// last one walk out would create exactly that.
 pub async fn leave_organization(
     registry: &Registry,
-    principal: Uuid,
+    principal: &UserId,
     organization_id: &str,
     source_ip: Option<&str>,
 ) -> Result<(), OrganizationError> {
@@ -1630,7 +1655,7 @@ pub async fn leave_organization(
                      OR (SELECT COUNT(*) FROM zeroship.organization_members owners \
                           WHERE owners.organization_id = $1 AND owners.role = $3) > 1) \
              RETURNING m.role",
-            &[&organization_id, &principal, &ROLE_OWNER],
+            &[&organization_id, &principal.as_str(), &ROLE_OWNER],
         )
         .await
         .map_err(|err| db_error(&err, "leave organization"))?;
@@ -1717,7 +1742,7 @@ pub async fn leave_organization(
 /// the fence; this one has the door.
 pub async fn dissolve_organization(
     registry: &Registry,
-    principal: Uuid,
+    principal: &UserId,
     organization_id: &str,
     invoicing: LocalInvoicing,
     source_ip: Option<&str>,
@@ -1752,14 +1777,14 @@ pub async fn dissolve_organization(
         owner = ladder_rank("$3"),
     );
     let rows = tx
-        .query(&sql, &[&organization_id, &principal, &ROLE_OWNER])
+        .query(&sql, &[&organization_id, &principal.as_str(), &ROLE_OWNER])
         .await
         .map_err(|err| db_error(&err, "dissolve organization"))?;
 
     let Some(row) = rows.first() else {
         return Err(classify_dissolve_refusal(&tx, organization_id, principal).await);
     };
-    let record = row_to_organization(row);
+    let record = row_to_organization(row)?;
 
     audit_authority_change(
         &tx,
@@ -1790,12 +1815,12 @@ pub async fn dissolve_organization(
 /// somebody else owns it that is no longer true.
 pub async fn transfer_ownership(
     registry: &Registry,
-    principal: Uuid,
+    principal: &UserId,
     organization_id: &str,
     body: &TransferOwnershipBody,
     source_ip: Option<&str>,
 ) -> Result<(), OrganizationError> {
-    if body.user_id == principal {
+    if &body.user_id == principal {
         return Err(OrganizationError::Invalid(
             "ownership transfer needs a different member as its target".to_string(),
         ));
@@ -1822,12 +1847,12 @@ pub async fn transfer_ownership(
     let promoted = tx
         .query(
             &promote,
-            &[&organization_id, &body.user_id, &principal, &ROLE_OWNER],
+            &[&organization_id, &body.user_id.as_str(), &principal.as_str(), &ROLE_OWNER],
         )
         .await
         .map_err(|err| db_error(&err, "promote new owner"))?;
     if promoted.is_empty() {
-        return Err(classify_transfer_refusal(&tx, organization_id, principal, body.user_id).await);
+        return Err(classify_transfer_refusal(&tx, organization_id, principal, &body.user_id).await);
     }
 
     // Step down. The organization now has at least two owners, so this cannot
@@ -1837,7 +1862,7 @@ pub async fn transfer_ownership(
         "UPDATE zeroship.organization_members \
             SET role = $3, changed_at = NOW(), changed_by = $2 \
           WHERE organization_id = $1 AND user_id = $2",
-        &[&organization_id, &principal, &ROLE_ADMIN],
+        &[&organization_id, &principal.as_str(), &ROLE_ADMIN],
     )
     .await
     .map_err(|err| db_error(&err, "step down"))?;
@@ -1847,7 +1872,7 @@ pub async fn transfer_ownership(
             "UPDATE zeroship.organizations \
                 SET personal_owner_id = NULL, updated_at = NOW() \
               WHERE id = $1 AND personal_owner_id = $2",
-            &[&organization_id, &principal],
+            &[&organization_id, &principal.as_str()],
         )
         .await
         .map_err(|err| db_error(&err, "clear personal owner"))?;
@@ -1891,7 +1916,7 @@ pub async fn transfer_ownership(
 /// refuse the same actors.
 pub async fn create_invite(
     registry: &Registry,
-    principal: Uuid,
+    principal: &UserId,
     organization_id: &str,
     body: &CreateInviteBody,
     source_ip: Option<&str>,
@@ -1941,7 +1966,7 @@ pub async fn create_invite(
                 &organization_id,
                 &body.email.trim(),
                 &body.role,
-                &principal,
+                &principal.as_str(),
                 &ttl,
                 &ROLE_ADMIN,
             ],
@@ -1997,7 +2022,7 @@ pub async fn create_and_deliver_invite(
     registry: &Registry,
     pg: &compio_postgres::Client,
     mailer: &dyn zeroship_mailer::Mailer,
-    principal: Uuid,
+    principal: &UserId,
     organization_id: &str,
     body: &CreateInviteBody,
     source_ip: Option<&str>,
@@ -2218,7 +2243,7 @@ fn member_conflict(err: &compio_postgres::Error, context: &str) -> OrganizationE
 /// so a revoked row that stayed would keep the slot occupied forever.
 pub async fn revoke_invite(
     registry: &Registry,
-    principal: Uuid,
+    principal: &UserId,
     organization_id: &str,
     invite_id: &str,
     source_ip: Option<&str>,
@@ -2242,7 +2267,7 @@ pub async fn revoke_invite(
         seat = actor_seat("$1", "$3"),
     );
     let rows = tx
-        .query(&sql, &[&organization_id, &invite_id, &principal])
+        .query(&sql, &[&organization_id, &invite_id, &principal.as_str()])
         .await
         .map_err(|err| db_error(&err, "revoke invite"))?;
 
@@ -2306,7 +2331,7 @@ pub async fn revoke_invite(
 /// oracle over other people's pending invitations.
 pub async fn redeem_invite(
     registry: &Registry,
-    principal: Uuid,
+    principal: &UserId,
     token: &str,
     source_ip: Option<&str>,
 ) -> Result<OrganizationRecord, OrganizationError> {
@@ -2353,7 +2378,7 @@ pub async fn redeem_invite(
                              WHERE u.id = $2 AND u.email = i.email \
                                AND u.email_verified_at IS NOT NULL) \
              RETURNING i.id, i.organization_id, i.role, i.invited_by",
-            &[&digest, &principal],
+            &[&digest, &principal.as_str()],
         )
         .await
         .map_err(|err| db_error(&err, "claim invite"))?;
@@ -2362,7 +2387,16 @@ pub async fn redeem_invite(
     };
     let invite_id: String = row.get("id");
     let role: String = row.get("role");
-    let invited_by: Option<Uuid> = row.get("invited_by");
+    let raw_invited_by: Option<String> = row.get("invited_by");
+    let invited_by = raw_invited_by
+        .map(|raw| {
+            UserId::parse(&raw).map_err(|e| {
+                OrganizationError::Invalid(format!(
+                    "organization_invites row has a malformed invited_by {raw:?}: {e}"
+                ))
+            })
+        })
+        .transpose()?;
 
     // The seat itself. No rank predicate: the claim above IS the authority, and
     // it re-derived the inviter's live rank against the frozen role rather than
@@ -2374,7 +2408,12 @@ pub async fn redeem_invite(
              (organization_id, user_id, role, added_by, changed_by) \
          VALUES ($1, $2, $3, $4, $4) \
          ON CONFLICT (organization_id, user_id) DO NOTHING",
-        &[&organization_id, &principal, &role, &invited_by],
+        &[
+            &organization_id,
+            &principal.as_str(),
+            &role,
+            &invited_by.as_ref().map(UserId::as_str),
+        ],
     )
     .await
     .map_err(|err| db_error(&err, "seat redeemed member"))?;
@@ -2414,7 +2453,7 @@ pub async fn redeem_invite(
 /// mint one would let them mint their own authority.
 pub async fn create_project(
     registry: &Registry,
-    principal: Uuid,
+    principal: &UserId,
     organization_id: &str,
     body: &CreateProjectBody,
     source_ip: Option<&str>,
@@ -2455,7 +2494,7 @@ pub async fn create_project(
                 &organization_id,
                 &slug,
                 &body.name.trim(),
-                &principal,
+                &principal.as_str(),
                 &ROLE_ADMIN,
             ],
         )
@@ -2496,7 +2535,7 @@ pub async fn create_project(
 /// that grants them reach.
 pub async fn update_project(
     registry: &Registry,
-    principal: Uuid,
+    principal: &UserId,
     project_id: &str,
     body: &UpdateProjectBody,
     source_ip: Option<&str>,
@@ -2541,7 +2580,7 @@ pub async fn update_project(
                 &organization_id,
                 &name,
                 &slug,
-                &principal,
+                &principal.as_str(),
                 &ROLE_ADMIN,
             ],
         )
@@ -2593,7 +2632,7 @@ pub async fn update_project(
 /// remedy.
 pub async fn delete_project(
     registry: &Registry,
-    principal: Uuid,
+    principal: &UserId,
     project_id: &str,
     source_ip: Option<&str>,
 ) -> Result<(), OrganizationError> {
@@ -2616,7 +2655,7 @@ pub async fn delete_project(
     let rows = tx
         .query(
             &sql,
-            &[&project_id, &organization_id, &principal, &ROLE_ADMIN],
+            &[&project_id, &organization_id, &principal.as_str(), &ROLE_ADMIN],
         )
         .await
         .map_err(|err| db_error(&err, "delete project"))?;
@@ -2703,7 +2742,7 @@ pub async fn delete_project(
 /// delete could not move the marker even if it were reached.
 pub async fn delete_app(
     registry: &Registry,
-    principal: Uuid,
+    principal: &UserId,
     app_id: &AppId,
     source_ip: Option<&str>,
 ) -> Result<(), OrganizationError> {
@@ -2743,7 +2782,7 @@ pub async fn delete_app(
         admin = ladder_rank("$4"),
     );
     let rows = tx
-        .query(&sql, &[&app_id.as_str(), &organization_id, &principal, &ROLE_ADMIN])
+        .query(&sql, &[&app_id.as_str(), &organization_id, &principal.as_str(), &ROLE_ADMIN])
         .await
         .map_err(|err| db_error(&err, "delete app"))?;
     let Some(row) = rows.first() else {
@@ -2849,7 +2888,7 @@ async fn lock_app_organization<C: GenericClient + Sync>(
 /// themselves.
 pub async fn add_project_member(
     registry: &Registry,
-    principal: Uuid,
+    principal: &UserId,
     project_id: &str,
     body: &AddProjectMemberBody,
     source_ip: Option<&str>,
@@ -2880,9 +2919,9 @@ pub async fn add_project_member(
             &sql,
             &[
                 &project_id,
-                &body.user_id,
+                &body.user_id.as_str(),
                 &body.role,
-                &principal,
+                &principal.as_str(),
                 &organization_id,
                 &ROLE_ADMIN,
             ],
@@ -2894,7 +2933,7 @@ pub async fn add_project_member(
             &tx,
             &organization_id,
             principal,
-            body.user_id,
+            &body.user_id,
             &body.role,
         )
         .await);
@@ -2919,8 +2958,8 @@ pub async fn add_project_member(
 
     let record = ProjectMemberRecord {
         project_id: project_id.to_string(),
-        user_id: body.user_id,
-        email: member_email(&tx, body.user_id).await?,
+        user_id: body.user_id.clone(),
+        email: member_email(&tx, &body.user_id).await?,
         role,
         added_at,
     };
@@ -2966,9 +3005,9 @@ fn project_member_conflict(err: &compio_postgres::Error, context: &str) -> Organ
 /// checking only the old one would let them widen a viewer's.
 pub async fn change_project_member_role(
     registry: &Registry,
-    principal: Uuid,
+    principal: &UserId,
     project_id: &str,
-    user_id: Uuid,
+    user_id: &UserId,
     body: &ChangeRoleBody,
     source_ip: Option<&str>,
 ) -> Result<ProjectMemberRecord, OrganizationError> {
@@ -3005,9 +3044,9 @@ pub async fn change_project_member_role(
             &sql,
             &[
                 &project_id,
-                &user_id,
+                &user_id.as_str(),
                 &body.role,
-                &principal,
+                &principal.as_str(),
                 &organization_id,
                 &ROLE_ADMIN,
             ],
@@ -3018,7 +3057,7 @@ pub async fn change_project_member_role(
         let seated = tx
             .query(
                 "SELECT 1 FROM zeroship.project_members WHERE project_id = $1 AND user_id = $2",
-                &[&project_id, &user_id],
+                &[&project_id, &user_id.as_str()],
             )
             .await
             .map_err(|err| db_error(&err, "classify project role change"))?;
@@ -3057,7 +3096,7 @@ pub async fn change_project_member_role(
 
     let record = ProjectMemberRecord {
         project_id: project_id.to_string(),
-        user_id,
+        user_id: user_id.clone(),
         email: member_email(&tx, user_id).await?,
         role,
         added_at,
@@ -3071,9 +3110,9 @@ pub async fn change_project_member_role(
 
 pub async fn remove_project_member(
     registry: &Registry,
-    principal: Uuid,
+    principal: &UserId,
     project_id: &str,
-    user_id: Uuid,
+    user_id: &UserId,
     source_ip: Option<&str>,
 ) -> Result<(), OrganizationError> {
     let mut conn = registry.conn().await?;
@@ -3100,8 +3139,8 @@ pub async fn remove_project_member(
             &sql,
             &[
                 &project_id,
-                &user_id,
-                &principal,
+                &user_id.as_str(),
+                &principal.as_str(),
                 &organization_id,
                 &ROLE_ADMIN,
             ],
@@ -3112,7 +3151,7 @@ pub async fn remove_project_member(
         let exists = tx
             .query(
                 "SELECT 1 FROM zeroship.project_members WHERE project_id = $1 AND user_id = $2",
-                &[&project_id, &user_id],
+                &[&project_id, &user_id.as_str()],
             )
             .await
             .map_err(|err| db_error(&err, "classify project removal"))?;
@@ -3211,7 +3250,7 @@ async fn lock_project_organization<C: GenericClient + Sync>(
 /// organization policy.
 pub async fn ensure_personal_project(
     registry: &Registry,
-    principal: Uuid,
+    principal: &UserId,
 ) -> Result<ProjectId, OrganizationError> {
     let mut conn = registry.conn().await?;
     let tx = conn
@@ -3233,7 +3272,7 @@ pub async fn ensure_personal_project(
              (organization_id, user_id, role, added_by, changed_by) \
          VALUES ($1, $2, $3, $2, $2) \
          ON CONFLICT (organization_id, user_id) DO NOTHING",
-        &[&organization_id, &principal, &ROLE_OWNER],
+        &[&organization_id, &principal.as_str(), &ROLE_OWNER],
     )
     .await
     .map_err(|err| db_error(&err, "seat personal owner"))?;
@@ -3248,17 +3287,23 @@ pub async fn ensure_personal_project(
 
 /// The slug of a personal organization.
 ///
-/// Derived from the owner's id rather than their name, so it is globally unique
-/// by construction and needs no retry loop. It is ugly on purpose and it is not
-/// permanent: `organization:write` renames it, and a creator who never looks at
-/// it never meets it.
-fn personal_slug(owner: Uuid) -> String {
-    format!("personal-{}", owner.simple())
+/// Derived from the owner's id rather than their name, so a collision needs
+/// two owners whose base62 bodies differ only by case (astronomically
+/// unlikely over the 22-char alphabet, and the `slug` UNIQUE constraint is
+/// still the backstop either way) and needs no retry loop. It is ugly on
+/// purpose and it is not permanent: `organization:write` renames it, and a
+/// creator who never looks at it never meets it.
+fn personal_slug(owner: &UserId) -> String {
+    // `validate_slug` admits only lowercase-or-digit-or-hyphen, so the id's
+    // base62 body (which is case-sensitive and hyphen-free) is lowercased
+    // rather than rendered as-is.
+    let body = owner.as_str().split_once('_').map_or(owner.as_str(), |(_, body)| body);
+    format!("personal-{}", body.to_lowercase())
 }
 
 async fn ensure_personal_organization<C: GenericClient + Sync>(
     tx: &C,
-    principal: Uuid,
+    principal: &UserId,
 ) -> Result<String, OrganizationError> {
     if let Some(existing) = personal_organization_of(tx, principal).await? {
         return Ok(existing);
@@ -3282,7 +3327,7 @@ async fn ensure_personal_organization<C: GenericClient + Sync>(
             &[
                 &organization_id.as_str(),
                 &personal_slug(principal),
-                &principal,
+                &principal.as_str(),
             ],
         )
         .await
@@ -3306,13 +3351,13 @@ async fn ensure_personal_organization<C: GenericClient + Sync>(
 /// the read and the uniqueness rule say the same thing.
 async fn personal_organization_of<C: GenericClient + Sync>(
     tx: &C,
-    principal: Uuid,
+    principal: &UserId,
 ) -> Result<Option<String>, OrganizationError> {
     let rows = tx
         .query(
             "SELECT id FROM zeroship.organizations \
               WHERE personal_owner_id = $1 AND dissolved_at IS NULL",
-            &[&principal],
+            &[&principal.as_str()],
         )
         .await
         .map_err(|err| db_error(&err, "read personal organization"))?;
@@ -3322,7 +3367,7 @@ async fn personal_organization_of<C: GenericClient + Sync>(
 async fn ensure_default_project<C: GenericClient + Sync>(
     tx: &C,
     organization_id: &str,
-    principal: Uuid,
+    principal: &UserId,
 ) -> Result<ProjectId, OrganizationError> {
     let existing = tx
         .query(
@@ -3342,7 +3387,7 @@ async fn ensure_default_project<C: GenericClient + Sync>(
              VALUES ($1, $2, 'default', 'Default', $3) \
              ON CONFLICT (organization_id, slug) DO NOTHING \
              RETURNING id",
-            &[&project_id.as_str(), &organization_id, &principal],
+            &[&project_id.as_str(), &organization_id, &principal.as_str()],
         )
         .await
         .map_err(|err| db_error(&err, "mint default project"))?;
@@ -3396,7 +3441,7 @@ fn parse_project_id(raw: &str) -> Result<ProjectId, OrganizationError> {
 async fn classify_seat_refusal<C: GenericClient + Sync>(
     tx: &C,
     organization_id: &str,
-    principal: Uuid,
+    principal: &UserId,
     role: &str,
     floor: Option<&str>,
 ) -> OrganizationError {
@@ -3411,7 +3456,7 @@ async fn classify_seat_refusal<C: GenericClient + Sync>(
         // `actor_seated` and the floor arm below cannot fire.
         floor = floor.map_or_else(|| "0".to_string(), ladder_rank_of),
     );
-    let rows = match tx.query(&sql, &[&organization_id, &principal, &role]).await {
+    let rows = match tx.query(&sql, &[&organization_id, &principal.as_str(), &role]).await {
         Ok(rows) => rows,
         Err(err) => return db_error(&err, "classify seat refusal"),
     };
@@ -3444,8 +3489,8 @@ async fn classify_seat_refusal<C: GenericClient + Sync>(
 async fn classify_member_refusal<C: GenericClient + Sync>(
     tx: &C,
     organization_id: &str,
-    principal: Uuid,
-    user_id: Uuid,
+    principal: &UserId,
+    user_id: &UserId,
     new_role: Option<&str>,
 ) -> OrganizationError {
     let rows = tx
@@ -3455,7 +3500,7 @@ async fn classify_member_refusal<C: GenericClient + Sync>(
                       WHERE owners.organization_id = $1 AND owners.role = $3)::bigint AS owners \
                FROM zeroship.organization_members m \
               WHERE m.organization_id = $1 AND m.user_id = $2",
-            &[&organization_id, &user_id, &ROLE_OWNER],
+            &[&organization_id, &user_id.as_str(), &ROLE_OWNER],
         )
         .await;
     let rows = match rows {
@@ -3499,13 +3544,13 @@ async fn classify_member_refusal<C: GenericClient + Sync>(
 async fn classify_departure_refusal<C: GenericClient + Sync>(
     tx: &C,
     organization_id: &str,
-    principal: Uuid,
+    principal: &UserId,
 ) -> OrganizationError {
     let rows = tx
         .query(
             "SELECT m.role FROM zeroship.organization_members m \
               WHERE m.organization_id = $1 AND m.user_id = $2",
-            &[&organization_id, &principal],
+            &[&organization_id, &principal.as_str()],
         )
         .await;
     match rows {
@@ -3527,7 +3572,7 @@ async fn classify_departure_refusal<C: GenericClient + Sync>(
 async fn classify_dissolve_refusal<C: GenericClient + Sync>(
     tx: &C,
     organization_id: &str,
-    principal: Uuid,
+    principal: &UserId,
 ) -> OrganizationError {
     let sql = format!(
         "SELECT (SELECT COUNT(*) FROM zeroship.projects p \
@@ -3537,7 +3582,7 @@ async fn classify_dissolve_refusal<C: GenericClient + Sync>(
         seat = actor_seat("$1", "$2"),
     );
     let rows = match tx
-        .query(&sql, &[&organization_id, &principal, &ROLE_OWNER])
+        .query(&sql, &[&organization_id, &principal.as_str(), &ROLE_OWNER])
         .await
     {
         Ok(rows) => rows,
@@ -3564,7 +3609,7 @@ async fn classify_dissolve_refusal<C: GenericClient + Sync>(
 async fn classify_project_deletion_refusal<C: GenericClient + Sync>(
     tx: &C,
     organization_id: &str,
-    principal: Uuid,
+    principal: &UserId,
     project_id: &str,
 ) -> OrganizationError {
     let sql = format!(
@@ -3578,7 +3623,7 @@ async fn classify_project_deletion_refusal<C: GenericClient + Sync>(
     let rows = match tx
         .query(
             &sql,
-            &[&organization_id, &principal, &project_id, &ROLE_ADMIN],
+            &[&organization_id, &principal.as_str(), &project_id, &ROLE_ADMIN],
         )
         .await
     {
@@ -3610,7 +3655,7 @@ async fn classify_project_deletion_refusal<C: GenericClient + Sync>(
 async fn classify_app_deletion_refusal<C: GenericClient + Sync>(
     tx: &C,
     organization_id: &str,
-    principal: Uuid,
+    principal: &UserId,
     app_id: &AppId,
 ) -> OrganizationError {
     let sql = format!(
@@ -3624,7 +3669,7 @@ async fn classify_app_deletion_refusal<C: GenericClient + Sync>(
         admin = ladder_rank("$4"),
     );
     let rows = match tx
-        .query(&sql, &[&organization_id, &principal, &app_id.as_str(), &ROLE_ADMIN])
+        .query(&sql, &[&organization_id, &principal.as_str(), &app_id.as_str(), &ROLE_ADMIN])
         .await
     {
         Ok(rows) => rows,
@@ -3650,8 +3695,8 @@ async fn classify_app_deletion_refusal<C: GenericClient + Sync>(
 async fn classify_transfer_refusal<C: GenericClient + Sync>(
     tx: &C,
     organization_id: &str,
-    principal: Uuid,
-    target: Uuid,
+    principal: &UserId,
+    target: &UserId,
 ) -> OrganizationError {
     let rows = tx
         .query(
@@ -3660,7 +3705,7 @@ async fn classify_transfer_refusal<C: GenericClient + Sync>(
                  WHERE organization_id = $1 AND user_id = $2 AND role = $4)::bigint AS actor_owns, \
                (SELECT COUNT(*) FROM zeroship.organization_members \
                  WHERE organization_id = $1 AND user_id = $3)::bigint AS target_seated",
-            &[&organization_id, &principal, &target, &ROLE_OWNER],
+            &[&organization_id, &principal.as_str(), &target.as_str(), &ROLE_OWNER],
         )
         .await;
     let rows = match rows {
@@ -3684,15 +3729,15 @@ async fn classify_transfer_refusal<C: GenericClient + Sync>(
 async fn classify_project_seat_refusal<C: GenericClient + Sync>(
     tx: &C,
     organization_id: &str,
-    principal: Uuid,
-    target: Uuid,
+    principal: &UserId,
+    target: &UserId,
     role: &str,
 ) -> OrganizationError {
     let rows = tx
         .query(
             "SELECT COUNT(*)::bigint AS seated FROM zeroship.organization_members \
               WHERE organization_id = $1 AND user_id = $2",
-            &[&organization_id, &target],
+            &[&organization_id, &target.as_str()],
         )
         .await;
     match rows {
@@ -3721,7 +3766,7 @@ async fn classify_project_seat_refusal<C: GenericClient + Sync>(
 async fn read_member<C: GenericClient + Sync>(
     pg: &C,
     organization_id: &str,
-    user_id: Uuid,
+    user_id: &UserId,
     added_at: DateTime<Utc>,
 ) -> Result<MemberRecord, OrganizationError> {
     let rows = pg
@@ -3732,14 +3777,17 @@ async fn read_member<C: GenericClient + Sync>(
                JOIN zeroship.users u ON u.id = m.user_id \
                JOIN zeroship.organization_roles r ON r.role = m.role \
               WHERE m.organization_id = $1 AND m.user_id = $2",
-            &[&organization_id, &user_id],
+            &[&organization_id, &user_id.as_str()],
         )
         .await
         .map_err(|err| db_error(&err, "read member"))?;
     let row = rows.first().ok_or(OrganizationError::MemberNotFound)?;
     Ok(MemberRecord {
         organization_id: row.get("organization_id"),
-        user_id: row.get("user_id"),
+        // The row was fetched by `m.user_id = $2` against this same id, so the
+        // parameter IS the value; no need to round-trip it through a read the
+        // driver has no `FromSql<UserId>` for.
+        user_id: user_id.clone(),
         email: row.get("email"),
         name: row.get("name"),
         role: row.get("role"),
@@ -3751,12 +3799,12 @@ async fn read_member<C: GenericClient + Sync>(
 
 async fn member_email<C: GenericClient + Sync>(
     pg: &C,
-    user_id: Uuid,
+    user_id: &UserId,
 ) -> Result<String, OrganizationError> {
     let rows = pg
         .query(
             "SELECT email::text AS email FROM zeroship.users WHERE id = $1",
-            &[&user_id],
+            &[&user_id.as_str()],
         )
         .await
         .map_err(|err| db_error(&err, "read member email"))?;
@@ -3773,7 +3821,7 @@ async fn member_email<C: GenericClient + Sync>(
 /// rolled back did not happen.
 async fn audit_authority_change<C: GenericClient + Sync>(
     tx: &C,
-    actor: Uuid,
+    actor: &UserId,
     action: AuditAction,
     organization_id: &str,
     source_ip: Option<&str>,
@@ -3846,7 +3894,7 @@ pub async fn create(
         return resp;
     }
     let ip = http_util::source_ip(&req, state.trust_proxy);
-    match create_organization(&state.registry, authz.principal_id, &body, ip.as_deref()).await {
+    match create_organization(&state.registry, &authz.principal_id, &body, ip.as_deref()).await {
         Ok(record) => web::HttpResponse::Created().json(&record),
         Err(e) => e.into_response(),
     }
@@ -3866,7 +3914,7 @@ pub async fn list(
     {
         return resp;
     }
-    match list_organizations(state.control_pg.as_ref(), authz.principal_id).await {
+    match list_organizations(state.control_pg.as_ref(), &authz.principal_id).await {
         Ok(records) => web::HttpResponse::Ok().json(&json!({ "organizations": records })),
         Err(e) => e.into_response(),
     }
@@ -3928,7 +3976,7 @@ pub async fn update(
     let ip = http_util::source_ip(&req, state.trust_proxy);
     match update_organization(
         &state.registry,
-        authz.principal_id,
+        &authz.principal_id,
         &id,
         &body,
         ip.as_deref(),
@@ -4024,7 +4072,7 @@ pub async fn add_member_handler(
     let ip = http_util::source_ip(&req, state.trust_proxy);
     match add_member(
         &state.registry,
-        authz.principal_id,
+        &authz.principal_id,
         &id,
         &body,
         ip.as_deref(),
@@ -4051,7 +4099,7 @@ pub async fn change_role_handler(
         Ok(id) => id,
         Err(resp) => return resp,
     };
-    let Ok(user_id) = raw_user.parse::<Uuid>() else {
+    let Ok(user_id) = UserId::parse(&raw_user) else {
         return bad_id("user_id");
     };
     if let Err(resp) = require_seat_authority(&authz, &state, &id, &body.role).await {
@@ -4060,9 +4108,9 @@ pub async fn change_role_handler(
     let ip = http_util::source_ip(&req, state.trust_proxy);
     match change_member_role(
         &state.registry,
-        authz.principal_id,
+        &authz.principal_id,
         &id,
-        user_id,
+        &user_id,
         &body,
         ip.as_deref(),
     )
@@ -4087,7 +4135,7 @@ pub async fn remove_member_handler(
         Ok(id) => id,
         Err(resp) => return resp,
     };
-    let Ok(user_id) = raw_user.parse::<Uuid>() else {
+    let Ok(user_id) = UserId::parse(&raw_user) else {
         return bad_id("user_id");
     };
     // Removal cannot be pre-narrowed by target role - the caller does not name
@@ -4107,9 +4155,9 @@ pub async fn remove_member_handler(
     let ip = http_util::source_ip(&req, state.trust_proxy);
     match remove_member(
         &state.registry,
-        authz.principal_id,
+        &authz.principal_id,
         &id,
-        user_id,
+        &user_id,
         ip.as_deref(),
     )
     .await
@@ -4155,7 +4203,7 @@ pub async fn leave_handler(
         return resp;
     }
     let ip = http_util::source_ip(&req, state.trust_proxy);
-    match leave_organization(&state.registry, authz.principal_id, &id, ip.as_deref()).await {
+    match leave_organization(&state.registry, &authz.principal_id, &id, ip.as_deref()).await {
         Ok(()) => web::HttpResponse::NoContent().finish(),
         Err(e) => e.into_response(),
     }
@@ -4196,7 +4244,7 @@ pub async fn dissolve_handler(
     let ip = http_util::source_ip(&req, state.trust_proxy);
     match dissolve_organization(
         &state.registry,
-        authz.principal_id,
+        &authz.principal_id,
         &id,
         LocalInvoicing::of(&state.billing_stack),
         ip.as_deref(),
@@ -4235,7 +4283,7 @@ pub async fn transfer_handler(
     let ip = http_util::source_ip(&req, state.trust_proxy);
     match transfer_ownership(
         &state.registry,
-        authz.principal_id,
+        &authz.principal_id,
         &id,
         &body,
         ip.as_deref(),
@@ -4298,7 +4346,7 @@ pub async fn create_invite_handler(
         &state.registry,
         state.control_pg.as_ref(),
         state.mailer.as_ref(),
-        authz.principal_id,
+        &authz.principal_id,
         &id,
         &body,
         ip.as_deref(),
@@ -4341,7 +4389,7 @@ pub async fn revoke_invite_handler(
     let ip = http_util::source_ip(&req, state.trust_proxy);
     match revoke_invite(
         &state.registry,
-        authz.principal_id,
+        &authz.principal_id,
         &id,
         &invite_id,
         ip.as_deref(),
@@ -4380,7 +4428,7 @@ pub async fn redeem_handler(
     let ip = http_util::source_ip(&req, state.trust_proxy);
     match redeem_invite(
         &state.registry,
-        authz.principal_id,
+        &authz.principal_id,
         &body.token,
         ip.as_deref(),
     )
@@ -4414,7 +4462,7 @@ pub async fn projects(
     {
         return resp;
     }
-    match list_projects(state.control_pg.as_ref(), &id, authz.principal_id).await {
+    match list_projects(state.control_pg.as_ref(), &id, &authz.principal_id).await {
         Ok(records) => web::HttpResponse::Ok().json(&json!({ "projects": records })),
         Err(e) => e.into_response(),
     }
@@ -4447,7 +4495,7 @@ pub async fn create_project_handler(
     let ip = http_util::source_ip(&req, state.trust_proxy);
     match create_project(
         &state.registry,
-        authz.principal_id,
+        &authz.principal_id,
         &id,
         &body,
         ip.as_deref(),
@@ -4515,7 +4563,7 @@ pub async fn update_project_handler(
     let ip = http_util::source_ip(&req, state.trust_proxy);
     match update_project(
         &state.registry,
-        authz.principal_id,
+        &authz.principal_id,
         &id,
         &body,
         ip.as_deref(),
@@ -4557,7 +4605,7 @@ pub async fn delete_project_handler(
         return resp;
     }
     let ip = http_util::source_ip(&req, state.trust_proxy);
-    match delete_project(&state.registry, authz.principal_id, &id, ip.as_deref()).await {
+    match delete_project(&state.registry, &authz.principal_id, &id, ip.as_deref()).await {
         Ok(()) => web::HttpResponse::NoContent().finish(),
         Err(e) => e.into_response(),
     }
@@ -4619,7 +4667,7 @@ pub async fn add_project_member_handler(
     let ip = http_util::source_ip(&req, state.trust_proxy);
     match add_project_member(
         &state.registry,
-        authz.principal_id,
+        &authz.principal_id,
         &id,
         &body,
         ip.as_deref(),
@@ -4646,7 +4694,7 @@ pub async fn change_project_role_handler(
         Ok(id) => id,
         Err(resp) => return resp,
     };
-    let Ok(user_id) = raw_user.parse::<Uuid>() else {
+    let Ok(user_id) = UserId::parse(&raw_user) else {
         return bad_id("user_id");
     };
     // No `require_seat_authority` here, and the asymmetry with the
@@ -4669,9 +4717,9 @@ pub async fn change_project_role_handler(
     let ip = http_util::source_ip(&req, state.trust_proxy);
     match change_project_member_role(
         &state.registry,
-        authz.principal_id,
+        &authz.principal_id,
         &id,
-        user_id,
+        &user_id,
         &body,
         ip.as_deref(),
     )
@@ -4696,7 +4744,7 @@ pub async fn remove_project_member_handler(
         Ok(id) => id,
         Err(resp) => return resp,
     };
-    let Ok(user_id) = raw_user.parse::<Uuid>() else {
+    let Ok(user_id) = UserId::parse(&raw_user) else {
         return bad_id("user_id");
     };
     if let Err(resp) = authz
@@ -4712,9 +4760,9 @@ pub async fn remove_project_member_handler(
     let ip = http_util::source_ip(&req, state.trust_proxy);
     match remove_project_member(
         &state.registry,
-        authz.principal_id,
+        &authz.principal_id,
         &id,
-        user_id,
+        &user_id,
         ip.as_deref(),
     )
     .await
@@ -4910,21 +4958,20 @@ mod tests {
     /// under the schema grammar, because nothing retries it.
     #[test]
     fn a_personal_slug_is_derived_from_the_owner_and_is_always_legal() {
-        let one = Uuid::new_v4();
-        let two = Uuid::new_v4();
-        assert_ne!(personal_slug(one), personal_slug(two));
-        validate_slug(&personal_slug(one)).expect("the personal slug must satisfy the grammar");
-        // The uuid must be rendered WITHOUT hyphens-as-separators problems: a
-        // hyphenated uuid is still legal, but the simple form is what the
-        // function promises and a change to `to_string()` would lengthen every
-        // slug silently.
+        let one = UserId::mint();
+        let two = UserId::mint();
+        assert_ne!(personal_slug(&one), personal_slug(&two));
+        validate_slug(&personal_slug(&one)).expect("the personal slug must satisfy the grammar");
+        // The id must be rendered WITHOUT hyphens-as-separators problems: the
+        // base62 body carries no hyphen, and lowercasing it does not
+        // introduce one.
         assert!(
-            personal_slug(one).starts_with("personal-"),
+            personal_slug(&one).starts_with("personal-"),
             "a personal slug is recognisable as one"
         );
         assert!(
-            !personal_slug(one)["personal-".len()..].contains('-'),
-            "the owner id is rendered in simple form"
+            !personal_slug(&one)["personal-".len()..].contains('-'),
+            "the owner id is rendered without its prefix separator"
         );
     }
 

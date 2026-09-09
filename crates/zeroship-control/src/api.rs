@@ -467,7 +467,7 @@ pub async fn create_app(
             }
             match crate::organizations::ensure_personal_project(
                 &state.registry,
-                authz.principal_id,
+                &authz.principal_id,
             )
             .await
             {
@@ -708,7 +708,7 @@ pub async fn delete_app(
         return resp;
     }
     let ip = crate::http_util::source_ip(&req, state.trust_proxy);
-    match crate::organizations::delete_app(&state.registry, authz.principal_id, &uid, ip.as_deref())
+    match crate::organizations::delete_app(&state.registry, &authz.principal_id, &uid, ip.as_deref())
         .await
     {
         Ok(()) => web::HttpResponse::NoContent().finish(),
@@ -1286,7 +1286,7 @@ pub async fn set_spend_limit(
                     organization_id: None,
                     // #7 — populate the actor from the AuthzGuard so a
                     // billing-write audit row records WHO changed the cap.
-                    actor_user_id: Some(authz.principal_id),
+                    actor_user_id: Some(&authz.principal_id),
                     action: crate::audit::Action::SetSpendLimit,
                     resource: Some("spend_limit"),
                     source_ip: None,

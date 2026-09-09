@@ -6,7 +6,6 @@ use std::path::{Path, PathBuf};
 
 use compio_postgres::Client;
 use rand::RngCore as _;
-use uuid::Uuid;
 use zeroship_core::auth::hash_client_secret;
 use zeroship_authz::Scope;
 
@@ -134,7 +133,7 @@ async fn insert_oauth_client(
         .iter()
         .map(|scope| scope.as_str())
         .collect::<Vec<_>>();
-    let created_by: Option<Uuid> = None;
+    let created_by: Option<&str> = None;
     let client_secret_hash = hash_client_secret(client_secret);
     pg.execute(
         "INSERT INTO zeroship.oauth_clients \
