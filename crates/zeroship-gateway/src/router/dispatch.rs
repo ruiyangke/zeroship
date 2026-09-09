@@ -6814,7 +6814,11 @@ mod tests {
     /// the global user id, so two different seeds are two different people
     /// with two different per-app `pws_…` subjects.
     fn session_cookie_for(issuer: &crate::session_token::Issuer, seed: u128) -> String {
-        let global = Uuid::from_u128(seed).to_string();
+        let global = zeroship_core::user_id::UserId::parse(&format!(
+            "usr_{}",
+            zeroship_core::typed_id::uuid_to_base62(&Uuid::from_u128(seed))
+        ))
+        .expect("seed produces a valid typed user id");
         let sub = zeroship_core::auth::derive_pairwise(
             &[0u8; 32],
             &global,

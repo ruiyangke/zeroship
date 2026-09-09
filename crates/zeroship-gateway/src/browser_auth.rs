@@ -391,7 +391,7 @@ pub async fn signout(req: HttpRequest, body: Bytes, state: State<Arc<GateState>>
         .map(|sector| {
             zeroship_core::auth::derive_pairwise(
                 &state.pairwise_salt,
-                anchor.global_user_id.as_str(),
+                &anchor.global_user_id,
                 sector,
             )
         });

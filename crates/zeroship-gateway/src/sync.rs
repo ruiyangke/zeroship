@@ -441,7 +441,7 @@ mod tests {
                          lifecycle: fn(UserId, Vec<String>) -> GatewayPrincipalLifecycle| {
             let pairwise = zeroship_core::auth::derive_pairwise(
                 &salt,
-                user_id.as_str(),
+                &user_id,
                 sector,
             );
             lifecycle(user_id, vec![pairwise])
@@ -466,7 +466,7 @@ mod tests {
         let budget = std::time::Duration::from_secs(60);
         for user_id in [disabled, anonymized, requested, scheduled] {
             let global = user_id.as_str();
-            let pairwise = zeroship_core::auth::derive_pairwise(&salt, global, sector);
+            let pairwise = zeroship_core::auth::derive_pairwise(&salt, &user_id, sector);
             assert!(!cache.principal_authentication_allowed(global, budget));
             assert!(!cache.principal_authentication_allowed(&pairwise, budget));
         }
@@ -504,7 +504,7 @@ mod tests {
         let sector = "https://retired-route.zeroship.test";
         let pairwise = zeroship_core::auth::derive_pairwise(
             &salt,
-            user_id.as_str(),
+            &user_id,
             sector,
         );
         let app_id = AppId::mint();

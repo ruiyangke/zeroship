@@ -614,7 +614,7 @@ async fn signout_local_revokes_family_marker_deletes_anchor_and_hits_op_revoke()
     // The pws_ subject the family marker should be keyed on.
     let pws_sub = zeroship_core::auth::derive_pairwise(
         &state.pairwise_salt,
-        global_user_id.as_str(),
+        &global_user_id,
         &format!("https://{APP_HOST}"),
     );
 

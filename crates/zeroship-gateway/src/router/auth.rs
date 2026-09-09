@@ -2067,12 +2067,12 @@ mod tests {
         let base = srv.url("").trim_end_matches('/').to_string();
         let state = build_state_for_op(gateway_signing, &base);
 
-        let global_sub = "0192f1aa-bbbb-7ccc-8ddd-eeeeffff0001";
+        let global_sub = zeroship_core::user_id::UserId::mint();
         let sector = "https://myapp.zeroship.ai";
         let host = "myapp.zeroship.ai";
         let (client_id, resource_aud) = op_app_binding(OP_APP_UUID);
         let expected_pws =
-            zeroship_core::auth::derive_pairwise(&state.pairwise_salt, global_sub, sector);
+            zeroship_core::auth::derive_pairwise(&state.pairwise_salt, &global_sub, sector);
         let token = sign_op_access_jwt(
             &jwks_signing,
             &expected_pws,
@@ -2111,10 +2111,10 @@ mod tests {
             expected_pws.starts_with("pws_"),
             "id must be a pws_, got {expected_pws}"
         );
-        // The global UUID must NOT appear anywhere in the worker header JSON.
+        // The global user id must NOT appear anywhere in the worker header JSON.
         assert!(
-            !json.contains(global_sub),
-            "global UUID leaked into ZeroShip-User: {json}"
+            !json.contains(global_sub.as_str()),
+            "global user id leaked into ZeroShip-User: {json}"
         );
         // Email-claim swap: the app NEVER sees the real email.
         // With no DB/alias source here (`build_state_for_op` db=None) the
@@ -2211,20 +2211,6 @@ mod tests {
         );
 
         drop(srv);
-    }
-
-    /// 48-bit pseudo-random suffix for a unique-per-run global sub: the
-    /// unique sub avoids cross-run assertion taint (a stale row from an
-    /// earlier run keys on a different sub). Stale rows are not cleaned up on
-    /// an unwound assert! panic — they accumulate until the 24h
-    /// `sweep_expired_families` reaps them. No `rand` dep needed — the nanos
-    /// clock is plenty.
-    fn rand_suffix() -> u64 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos() as u64
-            & 0xffff_ffff_ffff
     }
 
     #[ntex::test]
@@ -2370,7 +2356,7 @@ mod tests {
         // A fresh global sub per run: this test WRITES a revocation marker, and
         // a fixed sub would leave a row that makes the next run's "not revoked"
         // arm depend on the previous run.
-        let sub = Uuid::new_v4().to_string();
+        let sub = zeroship_core::user_id::UserId::mint();
 
         // Two genuinely distinct apps, built with the same `op_app_binding`
         // helper the sibling per-app tests use.
@@ -2497,12 +2483,12 @@ mod tests {
         let base = srv.url("").trim_end_matches('/').to_string();
         let state = build_state_for_op(gateway_signing, &base);
 
-        let global_sub = "0192f1aa-bbbb-7ccc-8ddd-eeeeffff0001";
+        let global_sub = zeroship_core::user_id::UserId::mint();
         let sector = "https://myapp.zeroship.ai";
         let host = "myapp.zeroship.ai";
         let (client_id, resource_aud) = op_app_binding(OP_APP_UUID);
         let pws_sub =
-            zeroship_core::auth::derive_pairwise(&state.pairwise_salt, global_sub, sector);
+            zeroship_core::auth::derive_pairwise(&state.pairwise_salt, &global_sub, sector);
         let token = sign_op_access_jwt(
             &jwks_signing,
             &pws_sub,
@@ -2541,9 +2527,9 @@ mod tests {
         // The OP-issued per-app pws_ survives resolve_auth unchanged; the
         // global UUID never reaches the worker header.
         let expected_pws =
-            zeroship_core::auth::derive_pairwise(&state.pairwise_salt, global_sub, sector);
+            zeroship_core::auth::derive_pairwise(&state.pairwise_salt, &global_sub, sector);
         assert_eq!(user["id"], expected_pws);
-        assert!(!json.contains(global_sub), "global UUID leaked: {json}");
+        assert!(!json.contains(global_sub.as_str()), "global user id leaked: {json}");
 
         drop(srv);
     }
@@ -2758,7 +2744,7 @@ mod tests {
         let base = srv.url("").trim_end_matches('/').to_string();
         let state = build_state_for_op(gateway_signing, &base);
 
-        let global_sub = "0192f1aa-bbbb-7ccc-8ddd-eeeeffff0042";
+        let global_sub = zeroship_core::user_id::UserId::mint();
 
         // Two genuinely distinct apps: distinct UUIDs, hence distinct client
         // ids and distinct resource audiences. Guarded, because the whole
@@ -2769,12 +2755,12 @@ mod tests {
         assert_ne!(resource_aud_a, resource_aud_b);
         let pws_a = zeroship_core::auth::derive_pairwise(
             &state.pairwise_salt,
-            global_sub,
+            &global_sub,
             "https://app-a.zeroship.ai",
         );
         let pws_b = zeroship_core::auth::derive_pairwise(
             &state.pairwise_salt,
-            global_sub,
+            &global_sub,
             "https://app-b.zeroship.ai",
         );
 
@@ -2834,7 +2820,7 @@ mod tests {
             "same user on two apps must get DIFFERENT pws_ (cross-app divergence)"
         );
         // The global UUID never appears in either outward header.
-        assert!(!id_a.contains(global_sub) && !id_b.contains(global_sub));
+        assert!(!id_a.contains(global_sub.as_str()) && !id_b.contains(global_sub.as_str()));
 
         drop(srv);
     }
@@ -2850,12 +2836,12 @@ mod tests {
         let base = srv.url("").trim_end_matches('/').to_string();
         let state = build_state_for_op(gateway_signing, &base);
 
-        let global_sub = "0192f1aa-bbbb-7ccc-8ddd-eeeeffff0077";
+        let global_sub = zeroship_core::user_id::UserId::mint();
         let sector = "https://myapp.zeroship.ai";
         let host = "myapp.zeroship.ai";
         let (client_id, resource_aud) = op_app_binding(OP_APP_UUID);
         let issued_pws =
-            zeroship_core::auth::derive_pairwise(&state.pairwise_salt, global_sub, sector);
+            zeroship_core::auth::derive_pairwise(&state.pairwise_salt, &global_sub, sector);
 
         // `Issuer::issue_access_token` performs this projection before signing.
         let token = sign_op_access_jwt(
@@ -2899,7 +2885,7 @@ mod tests {
         let (client_id, resource_aud) = op_app_binding(OP_APP_UUID);
         let issued_pws = zeroship_core::auth::derive_pairwise(
             &state.pairwise_salt,
-            user_id.as_str(),
+            &user_id,
             sector,
         );
         let mut routes = zeroship_core::types::RouteMap::new();
@@ -3076,7 +3062,7 @@ mod tests {
         );
         let pairwise = zeroship_core::auth::derive_pairwise(
             &state.pairwise_salt,
-            user_id.as_str(),
+            &user_id,
             sector,
         );
         let lifecycle = zeroship_core::types::GatewayPrincipalLifecycle::disabled(
@@ -3168,7 +3154,7 @@ mod tests {
         install_disabled_principal_snapshot(&state, user_id.clone(), client_id, sector, host);
         let pws = zeroship_core::auth::derive_pairwise(
             &state.pairwise_salt,
-            user_id.as_str(),
+            &user_id,
             sector,
         );
         let token = issue_signed_session_cookie(&state, client_id, &pws, "", &[]);
@@ -3213,7 +3199,7 @@ mod tests {
         );
         let pws = zeroship_core::auth::derive_pairwise(
             &state.pairwise_salt,
-            user_id.as_str(),
+            &user_id,
             sector,
         );
 
@@ -4011,7 +3997,7 @@ mod tests {
         let client_id = "oac_revparity";
         let host = "myapp.zeroship.ai";
         let sector = "https://myapp.zeroship.ai";
-        let global_sub = format!("0192f1aa-bbbb-7ccc-8ddd-{:012x}", rand_suffix());
+        let global_sub = zeroship_core::user_id::UserId::mint();
 
         // Build a state whose oidc_rp JWKS serves the OP key. Read the SAME
         // salt the Bearer arm will use off the built state and derive the

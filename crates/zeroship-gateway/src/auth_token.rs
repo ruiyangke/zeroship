@@ -140,7 +140,7 @@ pub(crate) fn resolve_route(req: &HttpRequest, state: &GateState) -> Result<Rout
 /// (§6.2/G4). Hard-fails (`None`) when the route has no `sector_identifier`
 /// yet — the caller answers `503 client_not_provisioned` rather than ever
 /// project the global UUID to the browser.
-fn pairwise_sub(state: &GateState, route: &RouteCtx, global_user_id: &str) -> Option<String> {
+fn pairwise_sub(state: &GateState, route: &RouteCtx, global_user_id: &UserId) -> Option<String> {
     let sector = route.sector_identifier.as_deref()?;
     Some(zeroship_core::auth::derive_pairwise(
         &state.pairwise_salt,
@@ -549,7 +549,7 @@ pub(crate) async fn mint_session_from_code(
     //    identity. Derive on the CANONICAL id string. Fail closed (503) when
     //    the route has no `sector_identifier` yet rather than ever project the
     //    global id to the browser.
-    let Some(pws_sub) = pairwise_sub(state, route, global_user_id.as_str()) else {
+    let Some(pws_sub) = pairwise_sub(state, route, &global_user_id) else {
         return error_response(
             HttpResponse::ServiceUnavailable(),
             "client_not_provisioned",
@@ -876,7 +876,7 @@ pub async fn session(req: HttpRequest, state: State<Arc<GateState>>) -> HttpResp
             // Project the per-app `pws_` (§6.3) + relay-swap the email. Fail
             // closed if the sector is missing (same posture as /token).
             let Some(pws_sub) =
-                pairwise_sub(&state, &route, rotated.global_user_id.as_str())
+                pairwise_sub(&state, &route, &rotated.global_user_id)
             else {
                 return error_response(
                     HttpResponse::ServiceUnavailable(),
@@ -1063,7 +1063,7 @@ async fn rotate_family(
     // then skips the marker re-check (it cannot project a `pws_` cookie at all,
     // and the handler already 503s `client_not_provisioned` afterwards) but the
     // anchor-revoked rows-affected gate still fails it closed.
-    let pws_sub = pairwise_sub(state, route, anchor.global_user_id.as_str());
+    let pws_sub = pairwise_sub(state, route, &anchor.global_user_id);
     let anchor = anchor.clone();
     let fut: anchors::SharedRotationFuture = (Box::pin(async move {
         let _guard = anchors::EntryGuard::new(anchor_id);
@@ -1478,7 +1478,7 @@ pub async fn issue_interactive_session_cookie(
     };
     let pws_sub = zeroship_core::auth::derive_pairwise(
         &state.pairwise_salt,
-        global_user_id.as_str(),
+        global_user_id,
         sector,
     );
 
