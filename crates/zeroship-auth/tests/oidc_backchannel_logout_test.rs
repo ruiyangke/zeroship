@@ -85,7 +85,8 @@ async fn logout_emission_posts_signed_logout_token_with_sid() {
     // The `sub` an RP participation row carries is the per-app pairwise subject
     // the OP minted for this (user, client) - so derive it through the issuer
     // rather than inventing one. `pws_` + a 32-char simple UUID is not even the
-    // minted shape (`is_pairwise_subject` requires exactly 20 base62 chars), so
+    // minted shape (`is_pairwise_subject` pins the body to `PAIRWISE_SUB_BODY_LEN`
+    // characters of the typed-id alphabet), so
     // the old value could never have come off a real token.
     let sub = issuer.pairwise_subject(
         &user_id,
