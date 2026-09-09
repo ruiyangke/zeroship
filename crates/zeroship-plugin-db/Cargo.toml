@@ -127,10 +127,13 @@ zeroship-data-core = { workspace = true, features = ["test-helpers"] }
 zeroship-data-postgres = { workspace = true, features = ["test-helpers"] }
 zeroship-data-sqlite = { workspace = true, features = ["test-helpers"] }
 # Same reason, one tier up: this crate's own `#[cfg(test)]` unit tests call
-# `zeroship_data_engine::reset_engine_for_tests`, `exec::ambient_route_for_tests`
-# and `backend_selection::new_sqlite_backend`, all gated
+# `zeroship_data_engine::backend_selection::new_sqlite_backend` (from
+# `context.rs`) and `exec::ambient_route_for_tests`, both gated
 # `cfg(any(test, feature = "test-helpers"))` in the engine - where `test` is the
 # ENGINE's test build, never this crate's. The feature is what carries.
+#
+# This also cited `reset_engine_for_tests`, which no file here has ever called.
+# That symbol is now plain `cfg(test)` in the engine, private to it.
 zeroship-data-engine = { workspace = true, features = ["test-helpers"] }
 # The DbPlan IR. A DEV dependency on purpose: nothing in this crate's `src/`
 # uses it yet, and declaring it a normal dependency would say otherwise. The

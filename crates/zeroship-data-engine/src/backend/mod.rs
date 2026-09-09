@@ -105,7 +105,7 @@ pub use zeroship_data_sqlite::SqliteBackend;
 
 // Same orphan-rule case as the PostgreSQL arm: `Backend` is this crate's own
 // `pub` marker, so its impl on a foreign type can only be written here.
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 impl Backend for SqliteBackend {}
 
 // The PostgreSQL vendor tier moved to `zeroship-data-postgres` on 2026-09-02.
@@ -359,7 +359,7 @@ pub use zeroship_data_query_builder::descriptors::EncryptionMode;
 /// `dyn Backend` (see the note above `BackendHandle`), dispatch goes through
 /// that enum, and this trait exists so tests can assert the concrete backends
 /// implement the whole sub-trait set.
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 pub trait Backend:
     SqlExecutor + LockManager + SchemaIntrospect<LiveSchema = crate::catalog::LiveSchema> + 'static
 {
@@ -370,7 +370,7 @@ pub trait Backend:
 // preference: `Backend` is this crate's own `pub` marker, so a local
 // trait on a foreign type is legal and the reverse is not. Every method it
 // composes is impl'd in the vendor crate; this line adds no behaviour.
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 impl Backend for PostgresBackend {}
 
 #[cfg(test)]

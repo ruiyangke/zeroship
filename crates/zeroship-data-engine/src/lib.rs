@@ -150,9 +150,8 @@ pub fn cache_schema_for_deploy_for_tests(
 #[cfg(test)]
 mod test_support;
 
-#[cfg(any(test, feature = "test-helpers"))]
-#[doc(hidden)]
-pub fn reset_engine_for_tests() {
+#[cfg(test)]
+pub(crate) fn reset_engine_for_tests() {
     tx_lanes::reset_for_tests();
     crud::mask_policy::reset_for_tests();
     crud::protection_floor::reset_for_tests();
