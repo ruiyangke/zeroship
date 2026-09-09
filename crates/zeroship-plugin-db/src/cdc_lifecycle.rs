@@ -465,7 +465,7 @@ fn consumer_exited(app_id: &str, generation: u64, result: Result<(), DbError>) {
         // Wake every pending native next() and turn the failure into a
         // stream-visible close. db.live maps an unexpected close to
         // LIVE_SUBSCRIPTION_CLOSED instead of hanging as a static snapshot.
-        crate::broker::drop_app(Some(app_id));
+        crate::broker::drop_app(app_id);
     }
 }
 

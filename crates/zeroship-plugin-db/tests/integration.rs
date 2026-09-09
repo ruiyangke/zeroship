@@ -3459,7 +3459,7 @@ async fn c1_broker_event_delivered_for_insert_via_emit() {
     // is in-process.
 
     // Clean slate.
-    zeroship_plugin_db::broker::drop_app(None);
+    zeroship_plugin_db::broker::drain_current_thread_subscriptions();
     let app = crate::test_app_id!();
     let app = app.as_str();
     let sub = zeroship_plugin_db::broker::subscribe(app, "messages");
@@ -3483,7 +3483,7 @@ async fn c1_broker_event_delivered_for_insert_via_emit() {
         other => panic!("unexpected: {other:?}"),
     }
     sub.close();
-    zeroship_plugin_db::broker::drop_app(None);
+    zeroship_plugin_db::broker::drain_current_thread_subscriptions();
 }
 
 // ---------------------------------------------------------------------------
@@ -3514,7 +3514,7 @@ fn gapb_ev(app: &str, collection: &str, pk: i64) -> zeroship_core::change_event:
 async fn gap_b_commit_drains_pending_emits_to_broker() {
     // Subscribe BEFORE pushing events, mid-"transaction" push two,
     // then drain — the broker should receive both.
-    zeroship_plugin_db::broker::drop_app(None);
+    zeroship_plugin_db::broker::drain_current_thread_subscriptions();
     let app = crate::test_app_id!();
     let app = app.as_str();
     let sub = zeroship_plugin_db::broker::subscribe(app, "users");
@@ -3533,14 +3533,14 @@ async fn gap_b_commit_drains_pending_emits_to_broker() {
     assert_eq!(pks, vec!["1".to_string(), "2".to_string()]);
 
     sub.close();
-    zeroship_plugin_db::broker::drop_app(None);
+    zeroship_plugin_db::broker::drain_current_thread_subscriptions();
 }
 
 #[compio::test]
 async fn gap_b_rollback_clears_pending_emits_silently() {
     // Push events, then `clear` (rollback path). The broker must
     // never see them.
-    zeroship_plugin_db::broker::drop_app(None);
+    zeroship_plugin_db::broker::drain_current_thread_subscriptions();
     let app = crate::test_app_id!();
     let app = app.as_str();
     let sub = zeroship_plugin_db::broker::subscribe(app, "users");
@@ -3555,7 +3555,7 @@ async fn gap_b_rollback_clears_pending_emits_silently() {
     );
 
     sub.close();
-    zeroship_plugin_db::broker::drop_app(None);
+    zeroship_plugin_db::broker::drain_current_thread_subscriptions();
 }
 
 #[compio::test]
@@ -3600,7 +3600,7 @@ async fn gap_b_end_to_end_insert_inside_tx_defers_emit_until_commit() {
     .await
     .unwrap();
 
-    zeroship_plugin_db::broker::drop_app(None);
+    zeroship_plugin_db::broker::drain_current_thread_subscriptions();
     let sub = zeroship_plugin_db::broker::subscribe(app, "users");
 
     // Open the production transaction protocol.
@@ -3648,7 +3648,7 @@ async fn gap_b_end_to_end_insert_inside_tx_defers_emit_until_commit() {
     }
 
     sub.close();
-    zeroship_plugin_db::broker::drop_app(None);
+    zeroship_plugin_db::broker::drain_current_thread_subscriptions();
     release_pg(pool).await;
 }
 
@@ -3701,7 +3701,7 @@ async fn p8a2_consumer_publishes_wal_event_to_broker() {
 
     // Clean broker; subscribe to the collection we're about to insert
     // into.
-    zeroship_plugin_db::broker::drop_app(None);
+    zeroship_plugin_db::broker::drain_current_thread_subscriptions();
     let sub = zeroship_plugin_db::broker::subscribe(app, "events");
 
     // The production adapter provisions, spawns, and returns only
@@ -3755,7 +3755,7 @@ async fn p8a2_consumer_publishes_wal_event_to_broker() {
 
     // Stop the consumer + clean up.
     consumer.shutdown().await.unwrap();
-    zeroship_plugin_db::broker::drop_app(None);
+    zeroship_plugin_db::broker::drain_current_thread_subscriptions();
     c1_cleanup(&pool, app).await;
     release_pg(pool).await;
 }
@@ -3948,7 +3948,7 @@ async fn p8a2_supervised_consumer_reconnects_after_kill() {
     .unwrap();
     c1_create_publication_for_tables(&pool, app, &["events"]).await;
 
-    zeroship_plugin_db::broker::drop_app(None);
+    zeroship_plugin_db::broker::drain_current_thread_subscriptions();
     let sub = zeroship_plugin_db::broker::subscribe(app, "events");
 
     let backend = zeroship_plugin_db::backend::BackendHandle::Postgres(std::rc::Rc::new(
@@ -4027,7 +4027,7 @@ async fn p8a2_supervised_consumer_reconnects_after_kill() {
     );
 
     consumer.shutdown().await.unwrap();
-    zeroship_plugin_db::broker::drop_app(None);
+    zeroship_plugin_db::broker::drain_current_thread_subscriptions();
     c1_cleanup(&pool, app).await;
     release_pg(pool).await;
 }
@@ -4042,7 +4042,7 @@ fn p8a2_per_app_emit_suppression_integration() {
         emit_local, is_app_suppressed, suppress_app, unsuppress_app, SubscriptionMessage,
     };
 
-    zeroship_plugin_db::broker::drop_app(None);
+    zeroship_plugin_db::broker::drain_current_thread_subscriptions();
     unsuppress_app("multi_a");
     unsuppress_app("multi_b");
 
@@ -4078,7 +4078,7 @@ fn p8a2_per_app_emit_suppression_integration() {
     }
 
     unsuppress_app("multi_a");
-    zeroship_plugin_db::broker::drop_app(None);
+    zeroship_plugin_db::broker::drain_current_thread_subscriptions();
 }
 
 /// Walk a compio-postgres Error's `source()` chain into one string —

@@ -573,8 +573,11 @@ impl Broker {
     /// the caller builds one extra tuple after a subscriber drop, which
     /// `publish` then discards harmlessly.
     /// Number of registered (not-yet-closed) subscriptions across all
-    /// keys. Used by this type's `Debug` impl and by
-    /// [`live_subscription_count`] outside a test build.
+    /// keys, process-wide. Used by this type's `Debug` impl.
+    ///
+    /// This is NOT what [`live_subscription_count`] reports: that helper
+    /// is thread-scoped, because the tests that read it share one
+    /// process-wide broker across parallel test threads.
     pub fn subscription_count(&self) -> usize {
         self.by_key
             .values()
@@ -614,14 +617,6 @@ impl Broker {
         self.by_key
             .remove(app_id)
             .into_iter()
-            .flat_map(|by_collection| by_collection.into_values().flatten())
-            .collect()
-    }
-
-    #[cfg(not(any(test, feature = "test-helpers")))]
-    fn take_all_subscriptions(&mut self) -> Vec<Subscription> {
-        std::mem::take(&mut self.by_key)
-            .into_values()
             .flat_map(|by_collection| by_collection.into_values().flatten())
             .collect()
     }
@@ -963,33 +958,59 @@ pub fn try_subscribe(app_id: &str, collection: &str) -> Result<Subscription, DbE
     lock_broker().try_subscribe(app_id, collection)
 }
 
-/// Total live (not-yet-closed) subscriptions in this process's broker, narrowed
-/// to the CALLING THREAD under test. Tests use this to verify the
+/// Live (not-yet-closed) subscriptions in this process's broker owned by the
+/// CALLING THREAD. Tests use this to verify the
 /// `zeroship_plugin_db::v8_classes::subscription` Weak finalizer reclaims
 /// broker slots when V8 GCs an orphaned wrapper.
 ///
-/// # The gate is `any(test, feature = "test-helpers")`, and it has to be
+/// # Test-only, with one body
 ///
-/// This was a bare `#[cfg(test)]` fork until the 2026-09-03 move out of
-/// `zeroship-plugin-db`, and the move broke it silently: across a crate
-/// boundary `cfg(test)` is the DEFINING crate's test build, so the instant the
-/// broker became a dependency every consumer fell to the process-wide arm.
-/// `cargo test -p zeroship-plugin-db --lib` went nondeterministic - two
-/// `v8_classes::subscription` tests assert an exact count while `exec`'s tests
-/// subscribe on other threads - failing 1 or 2 of 447 depending on scheduling.
-/// The `test` arm stays because this crate's own tests need it; the feature arm
-/// is what carries the same isolation to consumers, which declare
+/// There is no production caller, so there is no production arm. The gate
+/// compiles the symbol away entirely outside a test build rather than swapping
+/// in process-wide semantics: an observation helper that means something
+/// different in the artifact under test than in the artifact that ships is not
+/// an observation of the shipped artifact. It carried exactly that fork -
+/// thread-scoped under the gate, [`Broker::subscription_count`] outside it -
+/// until 2026-09-09.
+///
+/// # Why the gate is `any(test, feature = "test-helpers")`
+///
+/// A bare `#[cfg(test)]` cannot reach the consumers that need it. Across a
+/// crate boundary `cfg(test)` is the DEFINING crate's test build, so under a
+/// `test`-only gate this symbol does not exist for
+/// `crates/zeroship-plugin-db/tests/subscription_finalizer.rs`, which links
+/// this crate as an ordinary dependency. The `test` arm serves this crate's own
+/// tests; the feature arm carries the same helper to consumers, which declare
 /// `zeroship-data-core = { features = ["test-helpers"] }` in
-/// `[dev-dependencies]` (already present for `DbBinding::cold_start`, and under
-/// resolver 3 it does not leak into a non-test build).
+/// `[dev-dependencies]` (under resolver 3 that does not leak into a non-test
+/// build).
+///
+/// Thread scoping is the point, not an implementation detail. The broker is
+/// process-wide and cargo runs tests on parallel threads, so a process-wide
+/// count is a count of whatever else happened to be running. That fork is what
+/// made `cargo test -p zeroship-plugin-db --lib` nondeterministic before the
+/// gate was widened: `v8_classes::subscription` asserts an exact count while
+/// `exec`'s tests subscribe on other threads.
+#[cfg(any(test, feature = "test-helpers"))]
 pub fn live_subscription_count() -> usize {
-    #[cfg(any(test, feature = "test-helpers"))]
-    {
-        lock_broker().current_thread_subscription_count()
-    }
-    #[cfg(not(any(test, feature = "test-helpers")))]
-    {
-        lock_broker().subscription_count()
+    lock_broker().current_thread_subscription_count()
+}
+
+/// Close and remove every subscription owned by the CALLING THREAD, whatever
+/// app it belongs to. Test cleanup only: it is the "clean slate" a test takes
+/// before asserting on counts it owns.
+///
+/// Thread-scoped by construction, and that is the whole contract. The
+/// process-wide spelling of this used to exist as the `None` arm of
+/// [`drop_app`], where it tore down concurrently-running tests on other
+/// threads; `zeroship_data_engine::exec`'s `reset_world` records what that
+/// cost. Prefer [`drop_app`] when the test knows its app id - it is scoped
+/// tighter still, and it is the spelling production uses.
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn drain_current_thread_subscriptions() {
+    let subscriptions = lock_broker().take_current_thread_subscriptions();
+    for subscription in subscriptions {
+        subscription.close();
     }
 }
 
@@ -1012,25 +1033,19 @@ pub(crate) fn resume_app_with_resync(app_id: &str) {
     }
 }
 
-/// Drop ALL subscribers (for an app, or globally with `None`). Tests
-/// + worker shutdown use this.
-pub fn drop_app(app_id: Option<&str>) {
-    let subscriptions = {
-        let mut broker = lock_broker();
-        match app_id {
-            Some(id) => broker.take_app_subscriptions(id),
-            None => {
-                #[cfg(any(test, feature = "test-helpers"))]
-                {
-                    broker.take_current_thread_subscriptions()
-                }
-                #[cfg(not(any(test, feature = "test-helpers")))]
-                {
-                    broker.take_all_subscriptions()
-                }
-            }
-        }
-    };
+/// Close and remove every subscriber of `app_id`, on every thread. The
+/// per-app slot GC, the CDC lifecycle and the drop-namespace orchestrator call
+/// this when an app goes away.
+///
+/// Scoped to one app on purpose, and there is no unscoped spelling. This took
+/// an `Option` until 2026-09-09, where `None` meant "drop everything" - and
+/// what "everything" meant depended on the build: thread-scoped under
+/// `cfg(any(test, feature = "test-helpers"))`, process-wide otherwise. No
+/// production caller ever passed `None`; every caller that did was test
+/// cleanup, and it now says so by calling
+/// [`drain_current_thread_subscriptions`].
+pub fn drop_app(app_id: &str) {
+    let subscriptions = lock_broker().take_app_subscriptions(app_id);
     for subscription in subscriptions {
         subscription.close();
     }
@@ -1426,7 +1441,7 @@ mod tests {
         const APP: &str = "broker_cross_thread_regression_app";
         const COLLECTION: &str = "messages";
 
-        drop_app(Some(APP));
+        drop_app(APP);
         let (registered_tx, registered_rx) = std::sync::mpsc::channel();
         let (published_tx, published_rx) = std::sync::mpsc::channel();
 
@@ -1459,7 +1474,7 @@ mod tests {
         let (received, was_woken) = subscriber.join().expect("subscriber thread");
         assert_eq!(received.as_deref(), Some("cross-thread-probe"));
         assert!(was_woken, "publisher must wake the subscriber thread");
-        drop_app(Some(APP));
+        drop_app(APP);
     }
 
     #[test]
@@ -1920,6 +1935,61 @@ mod tests {
         assert!(s1.is_closed());
         assert!(s2.is_closed());
         assert!(!s3.is_closed());
+    }
+
+    /// Test cleanup must be thread-scoped, and `live_subscription_count` must
+    /// report the same scope the cleanup acts on.
+    ///
+    /// This pins the behaviour that used to fork on the build. `drop_app(None)`
+    /// took the calling thread's subscriptions under
+    /// `cfg(any(test, feature = "test-helpers"))` and EVERY subscription in the
+    /// process otherwise; `live_subscription_count` was thread-scoped under the
+    /// same gate and process-wide outside it. Both spellings now have one body,
+    /// so what a test observes is what the code does - and a reintroduced
+    /// process-wide arm fails here on the surviving-neighbour assertion rather
+    /// than by tearing down a concurrent test on another thread.
+    #[test]
+    fn draining_this_thread_leaves_another_threads_subscription_open() {
+        const MINE: &str = "broker_drain_scope_mine";
+        const THEIRS: &str = "broker_drain_scope_theirs";
+
+        drop_app(MINE);
+        drop_app(THEIRS);
+
+        // Stand in for a test running concurrently on another thread: it holds
+        // a live subscription for the whole of our cleanup.
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let neighbour = std::thread::spawn(move || {
+            let sub = subscribe(THEIRS, "messages");
+            // A neighbour's subscription is invisible to OUR count.
+            assert_eq!(live_subscription_count(), 1);
+            ready_tx.send(()).expect("signal neighbour ready");
+            release_rx.recv().expect("wait for our cleanup");
+            sub.is_closed()
+        });
+        ready_rx.recv().expect("wait for neighbour");
+
+        let mine = subscribe(MINE, "messages");
+        assert_eq!(
+            live_subscription_count(),
+            1,
+            "our count must see our subscription and only ours"
+        );
+
+        drain_current_thread_subscriptions();
+
+        assert!(mine.is_closed(), "our own subscription must be dropped");
+        assert_eq!(live_subscription_count(), 0);
+
+        release_tx.send(()).expect("release neighbour");
+        let neighbour_was_closed = neighbour.join().expect("neighbour thread");
+        assert!(
+            !neighbour_was_closed,
+            "draining this thread closed another thread's subscription"
+        );
+
+        drop_app(THEIRS);
     }
 
     // ---------- resume_app_with_resync ----------

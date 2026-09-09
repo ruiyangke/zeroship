@@ -741,7 +741,7 @@ mod tests {
     #[test]
     fn emit_local_reaches_process_broker() {
         // Clean the process-wide broker before observing.
-        crate::broker::drop_app(None);
+        crate::broker::drain_current_thread_subscriptions();
         let sub = crate::broker::subscribe("xapp_emit_local_reaches_process_broker", "messages");
         emit_local(
             "xapp_emit_local_reaches_process_broker",
@@ -761,7 +761,7 @@ mod tests {
             }
             other => panic!("expected Change variant, got {other:?}"),
         }
-        crate::broker::drop_app(None);
+        crate::broker::drain_current_thread_subscriptions();
     }
 
     #[test]
@@ -779,7 +779,7 @@ mod tests {
 
     #[test]
     fn emit_local_suppressed_when_consumer_active() {
-        crate::broker::drop_app(None);
+        crate::broker::drain_current_thread_subscriptions();
         let sub = crate::broker::subscribe(
             "xapp_emit_local_suppressed_when_consumer_active",
             "messages",
@@ -810,7 +810,7 @@ mod tests {
         );
         // Unsuppressed — event delivered.
         assert!(matches!(sub.pop(), Some(SubscriptionMessage::Change(_))));
-        crate::broker::drop_app(None);
+        crate::broker::drain_current_thread_subscriptions();
     }
 
     // -------- ensure_replication_param --------
@@ -981,7 +981,7 @@ mod tests {
 
     #[test]
     fn dispatch_caches_relation_and_emits_insert() {
-        crate::broker::drop_app(None);
+        crate::broker::drain_current_thread_subscriptions();
         let sub = crate::broker::subscribe(
             "myapp_dispatch_caches_relation_and_emits_insert",
             "messages",
@@ -1017,12 +1017,12 @@ mod tests {
             }
             other => panic!("expected Change, got {other:?}"),
         }
-        crate::broker::drop_app(None);
+        crate::broker::drain_current_thread_subscriptions();
     }
 
     #[test]
     fn dispatch_emits_typed_id_pk_for_text_primary_key() {
-        crate::broker::drop_app(None);
+        crate::broker::drain_current_thread_subscriptions();
         let sub = crate::broker::subscribe(
             "myapp_dispatch_emits_typed_id_pk_for_text_primary_key",
             "messages",
@@ -1054,12 +1054,12 @@ mod tests {
             }
             other => panic!("expected Change, got {other:?}"),
         }
-        crate::broker::drop_app(None);
+        crate::broker::drain_current_thread_subscriptions();
     }
 
     #[test]
     fn dispatch_filters_other_app_schemas() {
-        crate::broker::drop_app(None);
+        crate::broker::drain_current_thread_subscriptions();
         let sub = crate::broker::subscribe("myapp_dispatch_filters_other_app_schemas", "messages");
         let c = make_consumer("myapp_dispatch_filters_other_app_schemas");
         let mut rels = HashMap::new();
@@ -1076,12 +1076,12 @@ mod tests {
         );
 
         assert!(sub.pop().is_none());
-        crate::broker::drop_app(None);
+        crate::broker::drain_current_thread_subscriptions();
     }
 
     #[test]
     fn dispatch_handles_relation_cache_miss() {
-        crate::broker::drop_app(None);
+        crate::broker::drain_current_thread_subscriptions();
         let sub =
             crate::broker::subscribe("myapp_dispatch_handles_relation_cache_miss", "messages");
         let c = make_consumer("myapp_dispatch_handles_relation_cache_miss");
@@ -1093,12 +1093,12 @@ mod tests {
             &make_insert_msg(16384, &[Some("1"), Some("hello")]),
         );
         assert!(sub.pop().is_none());
-        crate::broker::drop_app(None);
+        crate::broker::drain_current_thread_subscriptions();
     }
 
     #[test]
     fn dispatch_emits_update_and_delete() {
-        crate::broker::drop_app(None);
+        crate::broker::drain_current_thread_subscriptions();
         let sub = crate::broker::subscribe("myapp_dispatch_emits_update_and_delete", "messages");
         let c = make_consumer("myapp_dispatch_emits_update_and_delete");
         let mut rels = HashMap::new();
@@ -1148,12 +1148,12 @@ mod tests {
             }
             other => panic!("expected two Change events, got {other:?}"),
         }
-        crate::broker::drop_app(None);
+        crate::broker::drain_current_thread_subscriptions();
     }
 
     #[test]
     fn dispatch_ignores_begin_commit() {
-        crate::broker::drop_app(None);
+        crate::broker::drain_current_thread_subscriptions();
         let sub = crate::broker::subscribe("myapp_dispatch_ignores_begin_commit", "messages");
         let c = make_consumer("myapp_dispatch_ignores_begin_commit");
         let mut rels = HashMap::new();
@@ -1176,7 +1176,7 @@ mod tests {
             },
         );
         assert!(sub.pop().is_none());
-        crate::broker::drop_app(None);
+        crate::broker::drain_current_thread_subscriptions();
     }
 
     // -------- Per-app emit suppression --------
@@ -1185,7 +1185,7 @@ mod tests {
     /// A different app on the same thread is unaffected.
     #[test]
     fn p8a2_per_app_emit_suppression_app_a_only() {
-        crate::broker::drop_app(None);
+        crate::broker::drain_current_thread_subscriptions();
         unsuppress_app("app_a_p8a2_per_app_emit_suppression_app_a_only");
         unsuppress_app("app_b_p8a2_per_app_emit_suppression_app_a_only");
 
@@ -1232,7 +1232,7 @@ mod tests {
         assert!(!is_app_suppressed(
             "app_a_p8a2_per_app_emit_suppression_app_a_only"
         ));
-        crate::broker::drop_app(None);
+        crate::broker::drain_current_thread_subscriptions();
     }
 
     /// The Drop guard restores suppression state on panic-unwind. We
