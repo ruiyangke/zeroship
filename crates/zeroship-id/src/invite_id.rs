@@ -21,7 +21,7 @@ use crate::entity_id::declare_entity_id;
 use crate::typed_id::INVITE_PREFIX;
 
 declare_entity_id! {
-    /// The typed id of one organization invite: `ivt_<base62(uuidv7)>`.
+    /// The typed id of one organization invite: `ivt_<base36(uuidv7)>`.
     InviteId,
     INVITE_PREFIX,
     invite_id_tests,

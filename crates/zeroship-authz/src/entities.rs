@@ -1,3 +1,4 @@
+use zeroship_core::user_id::UserId;
 use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 
@@ -37,7 +38,7 @@ use crate::{AuthzError, Resource};
 ///
 /// Returns [`AuthzError::CedarEntities`] when Cedar rejects a uid or the store.
 pub fn assemble_entities(
-    principal_id: uuid::Uuid,
+    principal_id: &UserId,
     authority: &Authority,
     resource: &Resource,
 ) -> Result<Entities, AuthzError> {
@@ -49,7 +50,7 @@ pub fn assemble_entities(
         .map_err(|err| AuthzError::CedarEntities(err.to_string()))
 }
 
-fn user_entity(principal_id: uuid::Uuid, authority: &Authority) -> Result<Entity, AuthzError> {
+fn user_entity(principal_id: &UserId, authority: &Authority) -> Result<Entity, AuthzError> {
     let attrs = HashMap::from([
         (
             "email_verified".to_owned(),
@@ -61,7 +62,7 @@ fn user_entity(principal_id: uuid::Uuid, authority: &Authority) -> Result<Entity
         ),
     ]);
     Entity::new(
-        uid("User", &principal_id.to_string())?,
+        uid("User", principal_id.as_str())?,
         attrs,
         HashSet::new(),
     )
@@ -141,7 +142,7 @@ mod tests {
                 id: "org_0123456789abcdefghijkl".to_owned(),
             },
         ] {
-            let entities = assemble_entities(Uuid::nil(), &authority(), &resource)
+            let entities = assemble_entities(&UserId::mint(), &authority(), &resource)
                 .expect("entities should assemble");
             assert_eq!(entities.iter().count(), 2, "{resource:?}");
         }
@@ -153,10 +154,13 @@ mod tests {
     /// comparison.
     #[test]
     fn the_user_entity_carries_no_rank_attribute() {
-        let entities = assemble_entities(Uuid::nil(), &authority(), &Resource::Any)
+        // The entity uid is the principal's printed form, so the lookup below
+        // must use the same value the entity was assembled from.
+        let principal = UserId::mint();
+        let entities = assemble_entities(&principal, &authority(), &Resource::Any)
             .expect("entities should assemble");
         let user = entities
-            .get(&uid("User", &Uuid::nil().to_string()).expect("uid"))
+            .get(&uid("User", principal.as_str()).expect("uid"))
             .expect("user entity present");
         let json = user.to_json_value().expect("entity json").to_string();
         assert!(json.contains("email_verified"), "{json}");

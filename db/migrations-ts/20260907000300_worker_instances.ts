@@ -106,7 +106,7 @@ export default {
     });
     table("worker_instances", { schema: "zeroship" })
       .check("worker_instances_id_shape")
-      .add({ expr: (col) => col("id").regex("^wkr_[0-9A-Za-z]{22}$") });
+      .add({ expr: (col) => col("id").regex("^wkr_[0-9a-z]{25}$") });
     // Ed25519 public keys are exactly 32 octets (RFC 8032 section 5.1.5), so
     // "raw Ed25519 bytes" is a shape the database can hold rather than a
     // sentence the verifier discovers is false at read time. `length(bytea)` is

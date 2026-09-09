@@ -32,7 +32,7 @@ use crate::entity_id::declare_entity_id;
 use crate::typed_id::ORGANIZATION_PREFIX;
 
 declare_entity_id! {
-    /// The typed id of one organization: `org_<base62(uuidv7)>`.
+    /// The typed id of one organization: `org_<base36(uuidv7)>`.
     OrganizationId,
     ORGANIZATION_PREFIX,
     organization_id_tests,

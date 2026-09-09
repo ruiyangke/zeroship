@@ -5,14 +5,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use compio_postgres::Client;
 use ntex::http::StatusCode;
-use uuid::Uuid;
 use zeroship_authn::BearerVerifier;
 use zeroship_authz::{self as authz, Action, AuthzContext, AuthzDecision, Resource, Scope};
 use zeroship_core::app_id::AppId;
+use zeroship_core::user_id::UserId;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedCaller {
-    pub principal_id: Uuid,
+    pub principal_id: UserId,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -88,7 +88,7 @@ impl ControlPlaneAuthenticator {
 
         let now = now_unix().map_err(AuthError::Infrastructure)?;
         let ctx = AuthzContext {
-            principal_id: seed.principal_id,
+            principal_id: seed.principal_id.clone(),
             token_policy: seed.token_policy,
             action: required_action,
             resource,
@@ -106,7 +106,7 @@ impl ControlPlaneAuthenticator {
         if requires_organization_owner(required_action)
             && !caller_holds_organization_ownership(
                 &self.control_pg,
-                seed.principal_id,
+                &seed.principal_id,
                 app_id,
             )
             .await?
@@ -138,7 +138,7 @@ impl Authenticator for ControlPlaneAuthenticator {
         if verified.seed_platform_cli_grants {
             let materialization = zeroship_authn::platform_cli::materialize_default_grants(
                 self.control_pg.as_ref(),
-                verified.principal_id,
+                &verified.principal_id,
             )
             .await
             .map_err(|error| {
@@ -172,7 +172,7 @@ impl Authenticator for ControlPlaneAuthenticator {
 
 #[derive(Debug)]
 struct VerifiedSeed {
-    principal_id: Uuid,
+    principal_id: UserId,
     token_policy: Option<authz::Policy>,
     request_id: String,
     request_ip: Option<IpAddr>,
@@ -208,7 +208,7 @@ struct VerifiedSeed {
 /// spells out the same requirement.
 async fn caller_holds_organization_ownership(
     pg: &Client,
-    principal_id: Uuid,
+    principal_id: &UserId,
     app_id: &AppId,
 ) -> Result<bool, AuthError> {
     let rows = pg
@@ -221,7 +221,7 @@ async fn caller_holds_organization_ownership(
                JOIN zeroship.organization_roles r ON r.role = m.role \
               WHERE a.id = $1::text \
                 AND r.rank >= (SELECT rank FROM zeroship.organization_roles WHERE role = 'owner')",
-            &[&app_id.as_str(), &principal_id],
+            &[&app_id.as_str(), &principal_id.as_str()],
         )
         .await
         .map_err(|err| {

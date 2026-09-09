@@ -1,7 +1,7 @@
 //! The typed ids this wire carries.
 //!
 //! "A typed id is its canonical ASCII rendering, bounded to 64 bytes and parsed
-//! by the expected concrete id type; a wrong prefix or noncanonical base62 form
+//! by the expected concrete id type; a wrong prefix or noncanonical base36 form
 //! is fatal."
 //!
 //! Two properties do the work. **Typed**, so a `DatabaseId` cannot be passed
@@ -12,13 +12,13 @@
 //!
 //! # Canonicality, precisely
 //!
-//! The platform form is `{prefix}_{base62(uuidv7)}`: 22 base62 characters over
+//! The platform form is `{prefix}_{base36(uuidv7)}`: 22 base36 characters over
 //! `0-9A-Za-z`, fixed width with leading zeros. 62^22 is slightly greater than
 //! 2^128, so 22 characters can spell a value no UUID can hold - and that is the
 //! whole of the noncanonical case. Rejecting it is one `checked_mul`/`checked_add`
 //! accumulation, and without it `id_a != id_b` while both name the same entity.
 //!
-//! # Why the base62 decode is duplicated here
+//! # Why the base36 decode is duplicated here
 //!
 //! `zeroship_core::typed_id` owns the platform's implementation and this crate
 //! deliberately does not depend on it - see `Cargo.toml` for the reason (that
@@ -38,24 +38,24 @@ use crate::error::{DecodeError, EncodeError};
 use crate::limits::MAX_TYPED_ID_BYTES;
 
 /// `0-9A-Za-z`, byte-ordered so lexicographic order matches numeric order.
-/// Identical to `zeroship_core::typed_id::BASE62`; the oracle test is what keeps
+/// Identical to `zeroship_core::typed_id::BASE36`; the oracle test is what keeps
 /// it that way.
-const BASE62: &[u8; 62] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+const BASE36: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
 
-/// Fixed width of the base62 body of every typed id.
-const BASE62_WIDTH: usize = 22;
+/// Fixed width of the base36 body of every typed id.
+const BASE36_WIDTH: usize = 22;
 
 // `slice::get` is not usable in a const context, so this one function indexes.
 // Both indices are provably in range at compile time: `i` is bounded by the
-// literal 62, and every byte of `BASE62` is ASCII, hence below the table's 128.
+// literal 62, and every byte of `BASE36` is ASCII, hence below the table's 128.
 // The alternative is a lazily-built table, which would move a compile-time fact
 // into a runtime one.
 #[allow(clippy::indexing_slicing)]
 const fn build_decode_table() -> [u8; 128] {
     let mut table = [255u8; 128];
     let mut i: u8 = 0;
-    while i < 62 {
-        table[BASE62[i as usize] as usize] = i;
+    while i < 36 {
+        table[BASE36[i as usize] as usize] = i;
         i += 1;
     }
     table
@@ -63,7 +63,7 @@ const fn build_decode_table() -> [u8; 128] {
 
 const DECODE: [u8; 128] = build_decode_table();
 
-/// Accept exactly `{prefix}_{22 canonical base62 chars}`.
+/// Accept exactly `{prefix}_{22 canonical base36 chars}`.
 fn validate(text: &str, prefix: &'static str) -> Result<(), DecodeError> {
     let malformed = DecodeError::MalformedTypedId {
         expected_prefix: prefix,
@@ -75,7 +75,7 @@ fn validate(text: &str, prefix: &'static str) -> Result<(), DecodeError> {
         .strip_prefix(prefix)
         .and_then(|rest| rest.strip_prefix('_'))
         .ok_or(malformed)?;
-    if body.len() != BASE62_WIDTH {
+    if body.len() != BASE36_WIDTH {
         return Err(malformed);
     }
     // Accumulate as a 128-bit integer. Overflow is the noncanonical case: the
@@ -89,7 +89,7 @@ fn validate(text: &str, prefix: &'static str) -> Result<(), DecodeError> {
             .filter(|d| *d != 255)
             .ok_or(malformed)?;
         value = value
-            .checked_mul(62)
+            .checked_mul(36)
             .and_then(|v| v.checked_add(u128::from(digit)))
             .ok_or(malformed)?;
     }
@@ -112,7 +112,7 @@ macro_rules! typed_id {
             ///
             /// # Errors
             /// [`DecodeError::MalformedTypedId`] for a wrong prefix, a wrong
-            /// length, a character outside base62, or a noncanonical value.
+            /// length, a character outside base36, or a noncanonical value.
             pub fn parse(text: &str) -> Result<Self, DecodeError> {
                 validate(text, Self::PREFIX)?;
                 Ok(Self(text.to_owned()))
@@ -181,7 +181,7 @@ typed_id! {
     ///
     /// **The prefix is the one open spelling on this wire.**
     /// `docs/proposals/2026-08-28-app-database-decoupling.md:25` writes
-    /// `ds_<base62 uuidv7>`, and its own line 45 says "the prefix is `dbs` for
+    /// `ds_<base36 uuidv7>`, and its own line 45 says "the prefix is `dbs` for
     /// uniformity with `crates/zeroship-core/src/typed_id.rs`, whose every prefix
     /// is three lowercase letters". `ds` is two. The literal table wins here
     /// because it is the entity authority's written spelling and because the same
@@ -206,7 +206,7 @@ typed_id! {
     /// This crate makes it a typed id rather than a free-form name for two
     /// reasons: the wire section names exactly one identifier form ("a typed id
     /// is its canonical ASCII rendering..."), so a second form would be an
-    /// invention either way; and a canonical base62 id cannot contain `/`, `.`
+    /// invention either way; and a canonical base36 id cannot contain `/`, `.`
     /// or `%`, which is the path-traversal rule
     /// `zeroship_core::typed_id::parse_with_prefix` exists to enforce. `clu` is
     /// chosen here, and an operator-assigned name would need this decision

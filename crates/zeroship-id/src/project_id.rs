@@ -38,7 +38,7 @@ use crate::entity_id::declare_entity_id;
 use crate::typed_id::PROJECT_PREFIX;
 
 declare_entity_id! {
-    /// The typed id of one project: `prj_<base62(uuidv7)>`.
+    /// The typed id of one project: `prj_<base36(uuidv7)>`.
     ProjectId,
     PROJECT_PREFIX,
     project_id_tests,

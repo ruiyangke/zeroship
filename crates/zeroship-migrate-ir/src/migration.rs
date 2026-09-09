@@ -83,7 +83,7 @@ impl MigrationId {
         bytes[0..6].copy_from_slice(&[0xFFu8; 6]);
         bytes[6..16].copy_from_slice(&digest[0..10]);
         let uuid = uuid::Uuid::from_bytes(bytes);
-        Self::parse(&format!("mig_{}", typed_id::uuid_to_base62(&uuid)))
+        Self::parse(&format!("mig_{}", typed_id::uuid_to_base36(&uuid)))
             .expect("derived migration id is a valid mig_ typed id")
     }
 
@@ -138,7 +138,7 @@ pub fn migration_id_for_version(version: u64) -> MigrationId {
     let mut bytes = [0u8; 16];
     bytes[0..6].copy_from_slice(&version.to_be_bytes()[2..8]);
     let uuid = uuid::Uuid::from_bytes(bytes);
-    MigrationId::parse(&format!("mig_{}", typed_id::uuid_to_base62(&uuid)))
+    MigrationId::parse(&format!("mig_{}", typed_id::uuid_to_base36(&uuid)))
         .expect("derived id is a valid mig_ typed id")
 }
 

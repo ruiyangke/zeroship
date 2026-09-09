@@ -258,7 +258,7 @@ fn default_owner_id() -> UserId {
     let id = format!(
         "{}_{}",
         zeroship_core::typed_id::USER_PREFIX,
-        zeroship_core::typed_id::uuid_to_base62(&uuid)
+        zeroship_core::typed_id::uuid_to_base36(&uuid)
     );
     UserId::parse(&id).expect("a freshly-encoded typed id always parses")
 }

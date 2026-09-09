@@ -398,6 +398,6 @@ export default {
     // characters is base62 of 128 bits.
     table("users", { schema: "zeroship" })
       .check("users_id_shape")
-      .add({ expr: (col) => col("id").regex("^usr_[0-9A-Za-z]{22}$") });
+      .add({ expr: (col) => col("id").regex("^usr_[0-9a-z]{25}$") });
   },
 };

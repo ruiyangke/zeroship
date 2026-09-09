@@ -48,8 +48,8 @@ use zeroship_gateway::{session_token, GateConfig, GateState};
 /// satisfy that external contract, not to route around the route table's own
 /// typing.
 fn typed_app_id(app_id: Uuid) -> AppId {
-    AppId::parse(&format!("app_{}", zeroship_core::typed_id::uuid_to_base62(&app_id)))
-        .expect("uuid_to_base62 always yields a valid app id body")
+    AppId::parse(&format!("app_{}", zeroship_core::typed_id::uuid_to_base36(&app_id)))
+        .expect("uuid_to_base36 always yields a valid app id body")
 }
 
 /// The test's own oracle for "is this audit row still live", replacing the
@@ -833,7 +833,7 @@ async fn gateway_bearer_rejects_real_op_id_token_but_accepts_access_token() {
 
     let user_id = UserId::mint();
     let app_id = Uuid::new_v4();
-    let client_id = format!("oac_{}", zeroship_core::typed_id::uuid_to_base62(&app_id));
+    let client_id = format!("oac_{}", zeroship_core::typed_id::uuid_to_base36(&app_id));
     let email = format!("gw-op-h2-{}@zeroship.test", Uuid::new_v4().simple());
     seed_user_client(
         &pg_client,
@@ -933,7 +933,7 @@ async fn gateway_bearer_rejects_access_token_for_different_resource_audience() {
     publish_op_key_once(&issuer, &pg_client).await;
 
     let app_id = Uuid::new_v4();
-    let client_id = format!("oac_{}", zeroship_core::typed_id::uuid_to_base62(&app_id));
+    let client_id = format!("oac_{}", zeroship_core::typed_id::uuid_to_base36(&app_id));
     let srv = start_platform_op(&db_url, pg_client, issuer.clone()).await;
     let auth_base = srv.url("").trim_end_matches('/').to_string();
     let state = build_gateway_state(&auth_base, app_id, &client_id, None, None);
@@ -1006,7 +1006,7 @@ async fn gateway_oidc_rp_full_dance_against_platform_op() {
 
     let user_id = UserId::mint();
     let app_id = Uuid::new_v4();
-    let client_id = format!("oac_{}", zeroship_core::typed_id::uuid_to_base62(&app_id));
+    let client_id = format!("oac_{}", zeroship_core::typed_id::uuid_to_base36(&app_id));
     let email = format!("gw-op-{}@zeroship.test", Uuid::new_v4().simple());
     seed_user_client(
         &pg_client,
@@ -1229,7 +1229,7 @@ async fn app_session_revoke_at_the_op_ends_the_gateway_session() {
 
     let user_id = UserId::mint();
     let app_id = Uuid::new_v4();
-    let client_id = format!("oac_{}", zeroship_core::typed_id::uuid_to_base62(&app_id));
+    let client_id = format!("oac_{}", zeroship_core::typed_id::uuid_to_base36(&app_id));
     let email = format!("gw-revoke-{}@zeroship.test", Uuid::new_v4().simple());
     // The gateway's BFF default: the SDK lands the code on the app origin.
     let popup_callback = format!("{SECTOR}/__zeroship/auth/popup-callback");
