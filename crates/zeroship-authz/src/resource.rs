@@ -171,10 +171,10 @@ mod tests {
         );
         for resource in [
             Resource::Organization {
-                id: "org_0123456789abcdefghijkl".to_owned(),
+                id: "org_0000123456789abcdefghijkl".to_owned(),
             },
             Resource::Project {
-                id: "prj_0123456789abcdefghijkl".to_owned(),
+                id: "prj_0000123456789abcdefghijkl".to_owned(),
             },
             Resource::App { id: app },
         ] {
@@ -219,7 +219,7 @@ mod tests {
             "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0",
             "blog",
             "not-a-uuid",
-            "prj_0123456789abcdefghijkl",
+            "prj_0000123456789abcdefghijkl",
             HOSTILE,
         ] {
             assert!(

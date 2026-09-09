@@ -838,7 +838,7 @@ mod tests {
                 so a check keyed on `id` being present cannot tell a creator's value from one an \
                 earlier call minted. Move the refusal to the caller boundary, then un-ignore."]
     fn insert_refuses_a_creator_supplied_id() {
-        let mut doc = json!({ "title": "hi", "id": "usr_034HQyaJ0C11GCzHMMrWwz" });
+        let mut doc = json!({ "title": "hi", "id": "usr_034hqyaj0c11gczhmmrwwz000" });
         let result =
             apply_system_fields_on_insert(&mut doc, &schema_without_id_prefix(), "posts", None);
 

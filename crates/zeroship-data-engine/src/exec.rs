@@ -897,7 +897,7 @@ mod tests {
     fn synthetic_typed_id_row() -> Value {
         Value::Object(
             [
-                ("id".to_string(), Value::from("usr_02HXTESTSUBSCRIPTIONID")),
+                ("id".to_string(), Value::from("usr_02hxtestsubscriptionid000")),
                 ("title".to_string(), Value::from("hi")),
             ]
             .into_iter()
@@ -1238,10 +1238,10 @@ mod tests {
 
         match sub.pop() {
             Some(crate::broker::SubscriptionMessage::Change(ev)) => {
-                assert_eq!(ev.pk.as_deref(), Some("usr_02HXTESTSUBSCRIPTIONID"));
+                assert_eq!(ev.pk.as_deref(), Some("usr_02hxtestsubscriptionid000"));
                 assert_eq!(
                     ev.new_tuple.get("id").map(String::as_str),
-                    Some("usr_02HXTESTSUBSCRIPTIONID")
+                    Some("usr_02hxtestsubscriptionid000")
                 );
             }
             other => panic!("expected Change variant, got {other:?}"),

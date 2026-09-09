@@ -144,10 +144,10 @@ fn an_unknown_principal_is_a_validation_error_not_rank_zero() {
             Resource::Any,
             Resource::App { id: AppId::mint() },
             Resource::Project {
-                id: "prj_0000000000000000000001".to_owned(),
+                id: "prj_0000000000000000000000001".to_owned(),
             },
             Resource::Organization {
-                id: "org_0000000000000000000001".to_owned(),
+                id: "org_0000000000000000000000001".to_owned(),
             },
         ] {
             let err = authority::resolve(&pg, &UserId::mint(), &resource)

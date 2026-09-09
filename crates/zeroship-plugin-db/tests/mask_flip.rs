@@ -2796,7 +2796,7 @@ async fn a_migration_engine_built_table_refuses_a_mask_downgrade() {
     // A FIXED app id rather than a fresh one: the app id IS the schema name, and a
     // random one per run leaves a schema behind on every failing run that the
     // rerun's `DROP SCHEMA IF EXISTS` can never reclaim.
-    let app_id = zeroship_core::app_id::AppId::parse("app_034LS698r9QdZwZcR0x8uD")
+    let app_id = zeroship_core::app_id::AppId::parse("app_034ls698r9qdzwzcr0x8ud000")
         .expect("fixed fixture app id is canonical");
     let masked = flip_schema();
     let app = fixture_via_the_migration_engine(&pool, &url, &app_id, "people", &masked).await;
@@ -2912,7 +2912,7 @@ async fn a_migration_engine_built_table_refuses_an_encryption_downgrade() {
     // A FIXED app id rather than a fresh one: the app id IS the schema name, and a
     // random one per run leaves a schema behind on every failing run that the
     // rerun's `DROP SCHEMA IF EXISTS` can never reclaim.
-    let app_id = zeroship_core::app_id::AppId::parse("app_034LS698r9QdZwZd7PkZP4")
+    let app_id = zeroship_core::app_id::AppId::parse("app_034ls698r9qdzwzd7pkzp4000")
         .expect("fixed fixture app id is canonical");
     let encrypted = encrypted_schema();
     let app = fixture_via_the_migration_engine(&pool, &url, &app_id, "people", &encrypted).await;

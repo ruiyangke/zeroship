@@ -65,7 +65,7 @@ const ADVERTISED_PORT: u16 = 8080;
 /// nothing else. An issuer naming an instance must be answered from the
 /// registry or refused - never answered from the file, which carries no status
 /// and so cannot be revoked.
-const PLANTED_INSTANCE_ID: &str = "wkr_PlantedInOperatorFileX";
+const PLANTED_INSTANCE_ID: &str = "wkr_plantedinoperatorfilex000";
 
 fn tmpdir(label: &str) -> PathBuf {
     let path = std::env::temp_dir().join(format!(

@@ -2312,7 +2312,7 @@ mod tests {
 
     #[test]
     fn idempotency_keys_are_deterministic_and_distinct() {
-        let organization = "org_0000000000000000000001";
+        let organization = "org_0000000000000000000000001";
         let app_a = AppId::mint();
         let app_b = AppId::mint();
         let p = 1_700_000_000i64;
@@ -2692,7 +2692,7 @@ mod tests {
         // The line logic the sweep applies: charge_cents → one invoice item per
         // app, then one finalized invoice. Drive it against a RECORDING fake
         // (no PG, no cyper) to pin the per-app amount + the deterministic keys.
-        let organization = "org_00000000000000000000AA";
+        let organization = "org_00000000000000000000aa000";
         let app = AppId::mint();
         let period = previous_period_start_unix(
             Utc.with_ymd_and_hms(2026, 6, 13, 0, 0, 0).unwrap().timestamp(),

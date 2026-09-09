@@ -116,7 +116,7 @@ mod tests {
     #[test]
     fn workflow_signal_token_codec_roundtrips_and_rejects_tamper() {
         let claims = WorkflowSignalTokenClaims {
-            app_id: "app_0123456789ABCDEFGHIJKL".to_string(),
+            app_id: "app_0123456789abcdefghijkl000".to_string(),
             run_id: Some("run_0123456789ABCDEFGHIJKL".to_string()),
             topic: None,
             types: vec!["approved".to_string(), "payment.succeeded".to_string()],

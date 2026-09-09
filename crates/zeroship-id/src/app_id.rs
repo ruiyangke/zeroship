@@ -67,7 +67,7 @@ mod tests {
     /// [`crate::entity_id::declare_entity_id`] and are not repeated here.
     #[test]
     fn parse_refuses_the_oauth_client_id_derived_from_the_same_app() {
-        let app = uuid::Uuid::now_v7();
+        let app = AppId::mint();
         let client_id = typed_id::app_oauth_client_id(&app);
         let err = AppId::parse(&client_id).expect_err("an oauth client id is not an app id");
         match err {
@@ -80,7 +80,7 @@ mod tests {
 
         // The control: the two ids differ ONLY by prefix, so the arm above is
         // measuring the boundary and not a body the parser would refuse anyway.
-        let canonical = format!("{APP_PREFIX}_{}", typed_id::uuid_to_base36(&app));
+        let canonical = app.as_str().to_string();
         assert_eq!(
             canonical.strip_prefix(APP_PREFIX),
             client_id.strip_prefix(typed_id::APP_OAUTH_CLIENT_PREFIX),

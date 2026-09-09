@@ -280,7 +280,7 @@ mod tests {
     use super::*;
 
     fn id() -> &'static str {
-        "wkr_0000000000000000000001"
+        "wkr_0000000000000000000000001"
     }
 
     /// `None` and `Unhealthy` are different facts, and a caller that collapsed
@@ -330,7 +330,7 @@ mod tests {
     fn readings_for_vanished_instances_are_forgotten() {
         let view = HealthView::new();
         view.record(id(), Liveness::Healthy, Instant::now());
-        view.retain_only(&["wkr_0000000000000000000002".to_string()]);
+        view.retain_only(&["wkr_0000000000000000000000002".to_string()]);
         assert_eq!(view.latest(id()), None);
     }
 }

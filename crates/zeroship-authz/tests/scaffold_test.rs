@@ -100,14 +100,14 @@ fn resource_cedar_uids_are_canonical() {
     );
     assert_eq!(
         Resource::Project {
-            id: "prj_0123456789abcdefghijkl".to_owned()
+            id: "prj_0000123456789abcdefghijkl".to_owned()
         }
         .cedar_uid(),
         "Project::\"prj_0123456789abcdefghijkl\""
     );
     assert_eq!(
         Resource::Organization {
-            id: "org_0123456789abcdefghijkl".to_owned()
+            id: "org_0000123456789abcdefghijkl".to_owned()
         }
         .cedar_uid(),
         "Organization::\"org_0123456789abcdefghijkl\""

@@ -393,7 +393,7 @@ async fn a_name_in_the_app_id_namespace_is_refused_by_the_route() {
     let creator = common::authz_fixture::seeded_principal(&fx.state).await;
     let control = init_control!(fx);
 
-    let id_shaped = "app_0123456789ABCDEFGHIJKL";
+    let id_shaped = "app_0123456789abcdefghijkl000";
     assert!(
         zeroship_core::app_id::AppId::parse(id_shaped).is_ok(),
         "the premise: this name really is a well-formed app id"

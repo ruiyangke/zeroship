@@ -733,7 +733,7 @@ mod tests {
     /// touching a generated file, by sending `id` on an ordinary insert.
     #[test]
     fn a_supplied_id_is_refused_at_the_document_boundary() {
-        let doc = serde_json::json!({ "title": "hi", "id": "usr_034HQyaJ0C11GCzHMMrWwz" });
+        let doc = serde_json::json!({ "title": "hi", "id": "usr_034hqyaj0c11gczhmmrwwz000" });
         match super::refuse_platform_assigned_id(&doc) {
             Err(zeroship_data_core::error::DbError::ValidationFailed { code, .. }) => {
                 assert_eq!(code, "platform_assigned_field");

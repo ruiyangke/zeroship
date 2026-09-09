@@ -668,8 +668,13 @@ mod tests {
         let b = client_id_for_app(&app);
         assert_eq!(a, b, "stable for app life");
         assert!(a.starts_with("oac_"), "got {a}");
-        // oac_ + 22 base62 chars.
-        assert_eq!(a.len(), 26, "got {a}");
+        // The width is derived, not spelled: a literal stops testing the width
+        // the moment the encoder moves and starts passing for another reason.
+        assert_eq!(
+            a.len(),
+            "oac".len() + 1 + zeroship_core::typed_id::BODY_LEN,
+            "got {a}"
+        );
         // Distinct from the app_ entity typed_id namespace.
         assert!(!a.starts_with("app_"));
     }

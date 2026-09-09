@@ -515,8 +515,8 @@ mod builtin_tier_tests {
     /// sense, only that they have not moved.
     #[test]
     fn builtin_plan_ids_are_frozen() {
-        assert_eq!(free_plan_id(), "pln_0MgUI3oStlZHqAUhhcPFQT");
-        assert_eq!(pro_plan_id(), "pln_3nxwAuzO7Wr5LYwwyIi5Ww");
-        assert_eq!(unlimited_plan_id(), "pln_2EchEFipZZLsHlnE6BkZXJ");
+        assert_eq!(free_plan_id(), "pln_0pmepeesn0v30md0sick7lo65");
+        assert_eq!(pro_plan_id(), "pln_7einr1yv1u9nabqjohrit3f7y");
+        assert_eq!(unlimited_plan_id(), "pln_4cklt6kbysmsugjft40bdetjx");
     }
 }

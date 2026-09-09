@@ -606,7 +606,11 @@ async fn resolve_bearer_user_header(
             );
             return BearerOutcome::Invalid;
         };
-        let expected_resource_audience = format!("app:{expected_app_id}");
+        // The audience is `app:` plus the app id's PRINTED form, which is what
+        // every other producer of this audience emits. Rendering the bits any
+        // other way builds a string that compiles, matches nothing, and shows
+        // up only against a live token.
+        let expected_resource_audience = format!("app:{}", expected_app_id.as_str());
         if !claims
             .aud
             .iter()
@@ -1292,30 +1296,33 @@ mod tests {
     /// dial URL from the `iss` the access JWT actually carries.
     const OP_ISS: &str = "https://auth.zeroship.ai/oauth2";
 
-    /// Fixed app UUIDs the raw-OP fixtures derive their `oac_` client ids and
-    /// resource audiences from. `OP_APP_UUID` is the single-app default;
-    /// `OP_APP_A_UUID`/`OP_APP_B_UUID` are the two genuinely distinct apps the
-    /// cross-app divergence test needs.
-    const OP_APP_UUID: &str = "0192f1aa-0000-7000-8000-0000000000a1";
-    const OP_APP_A_UUID: &str = "0192f1aa-0000-7000-8000-0000000000aa";
-    const OP_APP_B_UUID: &str = "0192f1aa-0000-7000-8000-0000000000bb";
+    /// Fixed app ids the raw-OP fixtures derive their `oac_` client ids and
+    /// resource audiences from. `OP_APP` is the single-app default; `OP_APP_A`
+    /// and `OP_APP_B` are the two genuinely distinct apps the cross-app
+    /// divergence test needs.
+    ///
+    /// Fixed rather than minted so a failure reproduces exactly. Each is a legal
+    /// app id body, because `op_app_binding` parses it - a hand-spelled label
+    /// would be refused there rather than by the arm under test.
+    const OP_APP: &str = "app_03crmczxba3ohg1cs4pvmt50h";
+    const OP_APP_A: &str = "app_03crmczxba3ohg1cs4pvmt50q";
+    const OP_APP_B: &str = "app_03crmczxba3ohg1cs4pvmt517";
 
     /// Mint the consistent `(client_id, resource_audience)` pair the raw-OP arm
     /// expects for one app, from a fixed app UUID.
     ///
-    /// The arm decodes the route's client id back to an app UUID via
-    /// `typed_id::app_id_from_oauth_client_id` (strip the `oac_` prefix, then
-    /// base62-decode the tail) and requires the token's `aud` to contain
-    /// `app:{app_uuid}`. A hand-written label such as `oac_myapp` has a tail
-    /// that does not base62-decode to a UUID, so the arm rejects it before any
-    /// binding or sector check is reached - fixtures on this path must derive
-    /// the client id from a real UUID rather than spell one out. The UUIDs are
-    /// fixed rather than random so a failure reproduces exactly.
-    fn op_app_binding(app_uuid: &str) -> (String, String) {
-        let app_id = Uuid::parse_str(app_uuid).expect("fixture app uuid parses");
+    /// The arm decodes the route's client id back to an `AppId` via
+    /// `typed_id::app_id_from_oauth_client_id` (strip the `oac_` prefix, parse
+    /// the tail as an app-id body) and requires the token's `aud` to contain
+    /// `app:<printed app id>`. A hand-written label such as `oac_myapp` has a
+    /// tail that is not a legal body, so the arm rejects it before any binding
+    /// or sector check is reached - fixtures on this path must derive the client
+    /// id from a real app id rather than spell one out.
+    fn op_app_binding(app: &str) -> (String, String) {
+        let app_id = zeroship_core::app_id::AppId::parse(app).expect("fixture app id parses");
         (
             zeroship_core::typed_id::app_oauth_client_id(&app_id),
-            format!("app:{app_id}"),
+            format!("app:{}", app_id.as_str()),
         )
     }
 
@@ -2070,7 +2077,7 @@ mod tests {
         let global_sub = zeroship_core::user_id::UserId::mint();
         let sector = "https://myapp.zeroship.ai";
         let host = "myapp.zeroship.ai";
-        let (client_id, resource_aud) = op_app_binding(OP_APP_UUID);
+        let (client_id, resource_aud) = op_app_binding(OP_APP);
         let expected_pws =
             zeroship_core::auth::derive_pairwise(&state.pairwise_salt, &global_sub, sector);
         let token = sign_op_access_jwt(
@@ -2145,7 +2152,7 @@ mod tests {
         let state = build_state_for_op(gateway_signing, &base);
 
         let host = "myapp.zeroship.ai";
-        let (client_id, resource_aud) = op_app_binding(OP_APP_UUID);
+        let (client_id, resource_aud) = op_app_binding(OP_APP);
         let token = sign_op_access_jwt(
             &jwks_signing,
             "0192f1aa-bbbb-7ccc-8ddd-eeeeffff0002",
@@ -2371,8 +2378,8 @@ mod tests {
         // failed the app B assertion outright AND made the app A assertion pass
         // for the wrong reason - the token was rejected as malformed, not as
         // revoked. The property this test claims to prove was never exercised.
-        let (client_a, resource_aud_a) = op_app_binding(OP_APP_A_UUID);
-        let (client_b, resource_aud_b) = op_app_binding(OP_APP_B_UUID);
+        let (client_a, resource_aud_a) = op_app_binding(OP_APP_A);
+        let (client_b, resource_aud_b) = op_app_binding(OP_APP_B);
         assert_ne!(client_a, client_b, "fixture must model two DIFFERENT apps");
         assert_ne!(resource_aud_a, resource_aud_b);
         let sector_a = "https://app-a.zeroship.ai";
@@ -2486,7 +2493,7 @@ mod tests {
         let global_sub = zeroship_core::user_id::UserId::mint();
         let sector = "https://myapp.zeroship.ai";
         let host = "myapp.zeroship.ai";
-        let (client_id, resource_aud) = op_app_binding(OP_APP_UUID);
+        let (client_id, resource_aud) = op_app_binding(OP_APP);
         let pws_sub =
             zeroship_core::auth::derive_pairwise(&state.pairwise_salt, &global_sub, sector);
         let token = sign_op_access_jwt(
@@ -2749,8 +2756,8 @@ mod tests {
         // Two genuinely distinct apps: distinct UUIDs, hence distinct client
         // ids and distinct resource audiences. Guarded, because the whole
         // property under test evaporates if both sides are the same app.
-        let (client_a, resource_aud_a) = op_app_binding(OP_APP_A_UUID);
-        let (client_b, resource_aud_b) = op_app_binding(OP_APP_B_UUID);
+        let (client_a, resource_aud_a) = op_app_binding(OP_APP_A);
+        let (client_b, resource_aud_b) = op_app_binding(OP_APP_B);
         assert_ne!(client_a, client_b, "fixture must model two DIFFERENT apps");
         assert_ne!(resource_aud_a, resource_aud_b);
         let pws_a = zeroship_core::auth::derive_pairwise(
@@ -2839,7 +2846,7 @@ mod tests {
         let global_sub = zeroship_core::user_id::UserId::mint();
         let sector = "https://myapp.zeroship.ai";
         let host = "myapp.zeroship.ai";
-        let (client_id, resource_aud) = op_app_binding(OP_APP_UUID);
+        let (client_id, resource_aud) = op_app_binding(OP_APP);
         let issued_pws =
             zeroship_core::auth::derive_pairwise(&state.pairwise_salt, &global_sub, sector);
 
@@ -2882,7 +2889,7 @@ mod tests {
         let user_id = zeroship_core::user_id::UserId::mint();
         let sector = "https://myapp.zeroship.ai";
         let host = "myapp.zeroship.ai";
-        let (client_id, resource_aud) = op_app_binding(OP_APP_UUID);
+        let (client_id, resource_aud) = op_app_binding(OP_APP);
         let issued_pws = zeroship_core::auth::derive_pairwise(
             &state.pairwise_salt,
             &user_id,
@@ -2956,7 +2963,7 @@ mod tests {
         // so the ONLY thing that can stop it is the missing sector - i.e. the
         // request really does reach the fail-closed check rather than being
         // turned away by an earlier binding rejection.
-        let (client_id, resource_aud) = op_app_binding(OP_APP_UUID);
+        let (client_id, resource_aud) = op_app_binding(OP_APP);
         let token = sign_op_access_jwt(
             &jwks_signing,
             "0192f1aa-bbbb-7ccc-8ddd-eeeeffff0099",
