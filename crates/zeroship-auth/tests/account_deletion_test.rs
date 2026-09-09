@@ -413,7 +413,7 @@ async fn cancellation_does_not_restore_pre_deletion_app_credentials() {
     // marker == X" holds for any X - including one no live token carries.
     let pairwise_sub = zeroship_core::auth::derive_pairwise(
         &zeroship_core::crypto::derive_key("account-deletion-test-salt"),
-        &user.id.as_str(),
+        &user.id,
         &format!("https://{client_id}.zeroship.localhost"),
     );
 

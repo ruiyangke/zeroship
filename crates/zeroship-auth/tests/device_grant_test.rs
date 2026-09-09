@@ -1036,7 +1036,7 @@ async fn native_device_grant_approves_via_auth_session_and_polls_op_token() {
     assert_eq!(claims.exp - claims.iat, ACCESS_TOKEN_TTL_SECS);
     assert_eq!(
         claims.sub,
-        issuer.pairwise_subject(user.id.as_str(), &client_id)
+        issuer.pairwise_subject(&user.id, &client_id)
     );
     assert_eq!(jsonwebtoken::decode_header(&token.access_token).unwrap().typ.as_deref(), Some(ACCESS_TOKEN_TYP));
 

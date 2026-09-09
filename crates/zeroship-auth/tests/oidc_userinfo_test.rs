@@ -420,7 +420,7 @@ async fn seed_user_client(
     .await
     .expect("seed oauth grant");
 
-    let pairwise_sub = issuer.pairwise_subject(user_id.as_str(), SECTOR);
+    let pairwise_sub = issuer.pairwise_subject(&user_id, SECTOR);
     db.execute(
         "INSERT INTO zeroship.app_user_identities \
             (app_client_id, global_user_id, pairwise_sub) \
@@ -679,7 +679,7 @@ fn access_claims(fx: &Fixture) -> Value {
     let now = unix_timestamp();
     json!({
         "iss": fx.issuer.issuer(),
-        "sub": fx.issuer.pairwise_subject(fx.user_id.as_str(), SECTOR),
+        "sub": fx.issuer.pairwise_subject(&fx.user_id, SECTOR),
         "aud": format!("app:{}", fx.app_id.as_str()),
         "exp": now + 600,
         "iat": now,
@@ -724,12 +724,11 @@ fn access_token_with_scopes(
     scopes: &[&str],
     ttl_secs: Option<i64>,
 ) -> String {
-    let user_id = fx.user_id.as_str().to_string();
     let audience = format!("app:{}", fx.app_id.as_str());
     let scopes: Vec<String> = scopes.iter().map(|s| (*s).to_string()).collect();
     issuer
         .sign_unregistered_access_token_fixture(&AccessTokenMint {
-            user_id: &user_id,
+            user_id: &fx.user_id,
             sector: SECTOR,
             audience: &audience,
             client_id: &fx.client_id,

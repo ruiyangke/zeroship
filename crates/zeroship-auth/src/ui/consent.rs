@@ -8,7 +8,6 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use uuid::Uuid;
 use zeroship_authz::{self as authz, AuthzContext, Resource, Scope};
 use zeroship_core::app_id::AppId;
 use zeroship_core::typed_id::APP_OAUTH_CLIENT_PREFIX;
@@ -94,7 +93,7 @@ async fn get_consent_native(
             return render_error(PublicErrorMessage::InvalidRequest);
         }
     };
-    let info = native_consent_request(&ctx, &session.user_id);
+    let info = native_consent_request(&ctx);
     let app_scope_defs = match load_app_scope_defs(db, &ctx.client.client_id).await {
         Ok(defs) => defs,
         Err(e) => {
@@ -102,7 +101,7 @@ async fn get_consent_native(
             return render_error(PublicErrorMessage::ContactSupport);
         }
     };
-    let classified = match classify_and_authorize(db, &info, &app_scope_defs).await {
+    let classified = match classify_and_authorize(db, &info, &session.user_id, &app_scope_defs).await {
         Ok(c) => c,
         Err(e) => {
             tracing::error!(error = %e, client_id = %ctx.client.client_id, "native consent grant authorization failed");
@@ -175,7 +174,7 @@ async fn post_consent_accept_native(
             return render_error(PublicErrorMessage::InvalidRequest);
         }
     };
-    let info = native_consent_request(&ctx, &session.user_id);
+    let info = native_consent_request(&ctx);
     let app_scope_defs = match load_app_scope_defs(db, &ctx.client.client_id).await {
         Ok(defs) => defs,
         Err(e) => {
@@ -183,7 +182,7 @@ async fn post_consent_accept_native(
             return render_error(PublicErrorMessage::ContactSupport);
         }
     };
-    match classify_and_authorize(db, &info, &app_scope_defs).await {
+    match classify_and_authorize(db, &info, &session.user_id, &app_scope_defs).await {
         Ok(c) if c.has_unknown => return oauth_error_redirect(&ctx, "invalid_scope", issuer.issuer()),
         Ok(c) if c.can_grant => {}
         Ok(_) => {
@@ -372,9 +371,14 @@ struct NativeConsentClient {
     client_name: Option<String>,
 }
 
+/// The consent challenge as the page and the classifier read it.
+///
+/// It carries no subject: the person is the caller's [`UserId`], which the
+/// handler passes to [`classify_and_authorize`] directly. A `String` copy here
+/// would be a second spelling of one identity, and the delegation gate keys
+/// `zeroship.principal_grants` on it.
 #[derive(Clone, Debug)]
 struct NativeConsentRequest {
-    subject: String,
     client: NativeConsentClient,
     requested_scope: Vec<String>,
 }
@@ -422,12 +426,8 @@ async fn load_native_oauth_client(
     })
 }
 
-fn native_consent_request(
-    ctx: &NativeConsentContext,
-    subject: &UserId,
-) -> NativeConsentRequest {
+fn native_consent_request(ctx: &NativeConsentContext) -> NativeConsentRequest {
     NativeConsentRequest {
-        subject: subject.as_str().to_string(),
         client: NativeConsentClient {
             client_id: ctx.client.client_id.clone(),
             client_name: Some(ctx.client.client_name.clone()),
@@ -726,6 +726,7 @@ fn partition_scopes(
 async fn classify_and_authorize(
     db: &compio_postgres::Client,
     info: &NativeConsentRequest,
+    principal_id: &UserId,
     app_scope_defs: &HashMap<String, ScopeDef>,
 ) -> Result<ClassifiedScopes, String> {
     let delegated = match partition_scopes(&info.requested_scope, app_scope_defs) {
@@ -742,24 +743,12 @@ async fn classify_and_authorize(
         return Ok(ClassifiedScopes { can_grant: true, has_unknown: false });
     }
 
-    // THE DELEGATION GATE IS BLOCKED AT THIS BOUNDARY, AND THE REFUSAL IS
-    // LOUD RATHER THAN SILENT. `zeroship_authz::AuthzContext::principal_id` is
-    // a `uuid::Uuid`, and `authz`'s own reads key `zeroship.principal_grants`
-    // and `zeroship.organization_members` on that value - both of which are
-    // `text` columns holding `usr_<base62>`. The consent subject IS the printed
-    // user id, so this parse fails and every delegated scope is refused with
-    // the message below. Feeding a uuid decoded from the id's body would only
-    // move the failure into authz's own binds. The gate opens when
-    // `AuthzContext` takes a `UserId`; nothing in this crate can open it.
-    let principal_id = Uuid::parse_str(&info.subject).map_err(|e| {
-        format!("the delegation gate takes a uuid principal and the consent subject is a typed user id: {e}")
-    })?;
     let policies = platform_policies()?;
     let now = now_unix()?;
 
     for scope in delegated {
         let ctx = AuthzContext {
-            principal_id,
+            principal_id: principal_id.clone(),
             token_policy: None,
             action: scope.action(),
             resource: Resource::Any,
@@ -978,6 +967,7 @@ fn render_error_forbidden(message: PublicErrorMessage) -> HttpResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use uuid::Uuid;
 
     /// The accept form must offer no control the OP cannot act on. A "remember
     /// this choice" toggle in particular cannot be honoured: the grant row this
@@ -1249,7 +1239,7 @@ mod tests {
         let expected = AppId::parse(&format!(
             "{}_{}",
             AppId::PREFIX,
-            zeroship_core::typed_id::uuid_to_base62(&embedded)
+            zeroship_core::typed_id::uuid_to_base36(&embedded)
         ))
         .expect("the encoded body is a well-formed app id body");
         assert_eq!(app_id_from_client_id(&client_id), Some(expected));

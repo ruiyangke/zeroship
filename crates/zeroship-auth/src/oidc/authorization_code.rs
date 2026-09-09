@@ -825,7 +825,7 @@ async fn exchange_authorization_code(
                 .issue_principal_id_token(
                     db,
                     &PrincipalIdTokenMint {
-                        principal_id: &user_id,
+                        principal_id: &consumed.user_id,
                         client_id: &client.client_id,
                         sid: &consumed.sid,
                         nonce,
@@ -855,7 +855,7 @@ async fn exchange_authorization_code(
                 .issue_id_token(
                     db,
                     &IdTokenMint {
-                        user_id: &user_id,
+                        user_id: &consumed.user_id,
                         sector: &client.sector_identifier,
                         client_id: &client.client_id,
                         sid: &consumed.sid,
@@ -899,7 +899,7 @@ async fn exchange_authorization_code(
         let subject = if client.brokered {
             user_id.clone()
         } else {
-            issuer.pairwise_subject(&user_id, &client.sector_identifier)
+            issuer.pairwise_subject(&consumed.user_id, &client.sector_identifier)
         };
         backchannel_logout::record_rp_participation(
             db,
@@ -960,7 +960,7 @@ async fn revoke_replayed_authorization_code_lineage(
         OAuthError::server_error("authorization code store unavailable")
     })?;
     let sector_identifier: String = row.get("sector_identifier");
-    let sub = issuer.pairwise_subject(user_id.as_str(), &sector_identifier);
+    let sub = issuer.pairwise_subject(&user_id, &sector_identifier);
     refresh::revoke_sessions_for_subject_in_transaction(db, &client_id, &sub).await?;
     Ok(true)
 }
@@ -1511,8 +1511,7 @@ pub(super) async fn mint_access_token(
         return Err(OAuthError::invalid_grant("authenticated user is inactive"));
     }
 
-    let user_id_string = user_id.as_str().to_string();
-    let pairwise_sub = issuer.pairwise_subject(&user_id_string, &client.sector_identifier);
+    let pairwise_sub = issuer.pairwise_subject(user_id, &client.sector_identifier);
     db.execute(
         "SELECT set_config('zeroship.tenant_client', $1, true)",
         &[&client.client_id],
@@ -1552,7 +1551,7 @@ pub(super) async fn mint_access_token(
         .issue_access_token(
             db,
             &AccessTokenMint {
-                user_id: &user_id_string,
+                user_id,
                 sector: &client.sector_identifier,
                 audience: &audience,
                 client_id: &client.client_id,
@@ -1634,7 +1633,7 @@ mod access_identity_tests {
             &test_keys(&tag),
             &refresh::Establish {
                 client,
-                user_id: &user_id,
+                user_id,
                 granted_scopes: &["openid".to_string()],
                 auth_credential_version: 0,
                 kind: SessionKind::Browser,
@@ -1949,7 +1948,7 @@ mod access_identity_tests {
         .await
         .expect("mint token while deletion waits");
         let iat = token_iat(&token);
-        let pairwise = issuer.pairwise_subject(user_id.as_str(), &client.sector_identifier);
+        let pairwise = issuer.pairwise_subject(&user_id, &client.sector_identifier);
         tx.commit().await.expect("commit mint");
         deletion_task
             .await

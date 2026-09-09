@@ -195,12 +195,11 @@ pub(super) async fn mint_grant_access_token(
     if !platform_cli_policy_selected(db, &client.client_id).await? {
         return mint_access_token(db, issuer, client, user_id, scopes, proof).await;
     }
-    let principal_id = user_id.as_str().to_string();
     issuer
         .issue_principal_access_token(
             db,
             &PrincipalAccessTokenMint {
-                principal_id: &principal_id,
+                principal_id: user_id,
                 audience: cfg.settings.oauth_audience.get().trim(),
                 client_id: PLATFORM_CLI_CLIENT_ID,
                 scopes,

@@ -88,7 +88,7 @@ async fn logout_emission_posts_signed_logout_token_with_sid() {
     // minted shape (`is_pairwise_subject` requires exactly 20 base62 chars), so
     // the old value could never have come off a real token.
     let sub = issuer.pairwise_subject(
-        user_id.as_str(),
+        &user_id,
         &format!("https://{client_id}.zeroship.localhost"),
     );
 

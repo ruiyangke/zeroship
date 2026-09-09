@@ -152,7 +152,7 @@ pub async fn emit_for_app_session(
             let sub = if brokered {
                 subject.clone()
             } else {
-                issuer.pairwise_subject(&subject, &sector)
+                issuer.pairwise_subject(user_id, &sector)
             };
             Some(RelyingPartySession {
                 client_id: row.get("client_id"),

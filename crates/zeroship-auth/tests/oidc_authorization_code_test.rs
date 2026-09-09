@@ -203,7 +203,7 @@ async fn authorize_token_happy_path_mints_pairwise_access_and_nonce_at_hash_id_t
     assert_eq!(access.client_id, fx.client_id);
     assert_eq!(
         access.sub,
-        fx.issuer.pairwise_subject(fx.user_id.as_str(), SECTOR)
+        fx.issuer.pairwise_subject(&fx.user_id, SECTOR)
     );
 
     let id = verify_with_jwks::<IdTokenClaims>(

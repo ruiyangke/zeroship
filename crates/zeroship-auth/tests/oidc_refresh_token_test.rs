@@ -184,7 +184,7 @@ async fn offline_access_authorization_code_returns_refresh_token_bound_to_family
     assert!(family_id.starts_with("ses_"));
     assert_eq!(
         sub,
-        test_issuer().pairwise_subject(fx.user_id.as_str(), SECTOR)
+        test_issuer().pairwise_subject(&fx.user_id, SECTOR)
     );
     assert!(family_scopes.iter().any(|s| s == "offline_access"));
     assert_eq!(hash_len, 32, "refresh token hash is HMAC-SHA256 bytes only");
@@ -263,7 +263,7 @@ async fn deletion_revokes_refresh_family_even_after_cancellation() {
         .json::<Value>()
         .await
         .expect("refresh rejection json");
-    let sub = test_issuer().pairwise_subject(fx.user_id.as_str(), SECTOR);
+    let sub = test_issuer().pairwise_subject(&fx.user_id, SECTOR);
     let marker = fx
         .db
         .query(
@@ -873,11 +873,10 @@ async fn introspect_expired_access_token_is_inactive() {
         return;
     };
     let scopes = vec!["openid".to_string(), "profile".to_string()];
-    let user_id = fx.user_id.as_str().to_string();
     let audience = format!("app:{}", fx.app_id.as_str());
     let expired = test_issuer()
         .sign_unregistered_access_token_fixture(&AccessTokenMint {
-            user_id: &user_id,
+            user_id: &fx.user_id,
             sector: SECTOR,
             audience: &audience,
             client_id: &fx.client_id,
@@ -928,7 +927,7 @@ async fn introspect_refresh_token_before_and_after_revoke() {
     assert_eq!(body["token_type"], "refresh_token");
     assert!(body["exp"].as_i64().is_some_and(|exp| exp > 0));
     assert!(body["iat"].as_i64().is_some_and(|iat| iat > 0));
-    let expected_sub = test_issuer().pairwise_subject(fx.user_id.as_str(), SECTOR);
+    let expected_sub = test_issuer().pairwise_subject(&fx.user_id, SECTOR);
     assert_eq!(body["sub"].as_str(), Some(expected_sub.as_str()));
     let expected_aud = format!("app:{}", fx.app_id.as_str());
     assert_eq!(body["aud"].as_str(), Some(expected_aud.as_str()));
@@ -1235,7 +1234,7 @@ async fn seed_user_client(
     )
     .await
     .expect("seed app oauth client");
-    let pairwise_sub = test_issuer().pairwise_subject(user_id.as_str(), SECTOR);
+    let pairwise_sub = test_issuer().pairwise_subject(&user_id, SECTOR);
     db.execute(
         "INSERT INTO zeroship.app_user_identities \
             (app_client_id, global_user_id, pairwise_sub) \

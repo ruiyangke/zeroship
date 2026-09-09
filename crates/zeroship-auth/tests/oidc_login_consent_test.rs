@@ -992,7 +992,7 @@ async fn seed_user_client(db: &Client, user_id: &UserId, app_id: &AppId, client_
         &[
             &client_id,
             &user_id.as_str(),
-            &test_issuer().pairwise_subject(user_id.as_str(), SECTOR),
+            &test_issuer().pairwise_subject(&user_id, SECTOR),
         ],
     )
     .await

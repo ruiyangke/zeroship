@@ -14,6 +14,7 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha512};
 use zeroship_core::device_grant::PLATFORM_TOKEN_MAX_TTL_SECS;
+use zeroship_core::user_id::UserId;
 
 use crate::advisory_lock::{with_advisory_lock, OP_SIGNING_KEY_BOOTSTRAP_LOCK};
 use crate::error::{AuthError, Result};
@@ -91,7 +92,7 @@ pub struct LogoutTokenClaims {
 /// Inputs for minting an access token.
 #[derive(Debug, Clone)]
 pub struct AccessTokenMint<'a> {
-    pub user_id: &'a str,
+    pub user_id: &'a UserId,
     pub sector: &'a str,
     pub audience: &'a str,
     pub client_id: &'a str,
@@ -103,7 +104,7 @@ pub struct AccessTokenMint<'a> {
 /// platform principal id instead of an app-sector pairwise subject.
 #[derive(Debug, Clone)]
 pub struct PrincipalAccessTokenMint<'a> {
-    pub principal_id: &'a str,
+    pub principal_id: &'a UserId,
     pub audience: &'a str,
     pub client_id: &'a str,
     pub scopes: &'a [String],
@@ -114,7 +115,7 @@ pub struct PrincipalAccessTokenMint<'a> {
 /// principal id instead of an app-sector pairwise subject.
 #[derive(Debug, Clone)]
 pub struct PrincipalIdTokenMint<'a> {
-    pub principal_id: &'a str,
+    pub principal_id: &'a UserId,
     pub client_id: &'a str,
     pub sid: &'a str,
     pub nonce: &'a str,
@@ -132,7 +133,7 @@ pub struct PrincipalIdTokenMint<'a> {
 /// Inputs for minting an ID token paired to an access token.
 #[derive(Debug, Clone)]
 pub struct IdTokenMint<'a> {
-    pub user_id: &'a str,
+    pub user_id: &'a UserId,
     pub sector: &'a str,
     pub client_id: &'a str,
     pub sid: &'a str,
@@ -462,7 +463,7 @@ impl Issuer {
 
     /// Issue an RFC 9068 access token for a platform principal. This is used by
     /// first-party resource servers such as control where `sub` is the global
-    /// principal UUID, not an end-user pairwise app subject.
+    /// principal id, not an end-user pairwise app subject.
     #[allow(clippy::future_not_send)]
     pub async fn issue_principal_access_token(
         &self,
@@ -476,7 +477,7 @@ impl Issuer {
             "principal access token",
         )?;
         let signed = self.build_access_token_with_subject(
-            mint.principal_id,
+            mint.principal_id.as_str(),
             mint.audience,
             mint.client_id,
             mint.scopes,
@@ -493,7 +494,7 @@ impl Issuer {
         mint: &PrincipalAccessTokenMint<'_>,
     ) -> Result<String> {
         self.build_access_token_with_subject(
-            mint.principal_id,
+            mint.principal_id.as_str(),
             mint.audience,
             mint.client_id,
             mint.scopes,
@@ -618,7 +619,7 @@ impl Issuer {
             "principal ID token",
         )?;
         let signed = self.build_id_token_with_subject(
-            mint.principal_id,
+            mint.principal_id.as_str(),
             mint.client_id,
             mint.sid,
             mint.nonce,
@@ -873,7 +874,7 @@ impl Issuer {
 
     /// Derive the app/sector pairwise subject with the issuer's loaded salt.
     #[must_use]
-    pub fn pairwise_subject(&self, user_id: &str, sector: &str) -> String {
+    pub fn pairwise_subject(&self, user_id: &UserId, sector: &str) -> String {
         zeroship_core::auth::derive_pairwise(&self.pairwise_salt, user_id, sector)
     }
 
@@ -915,15 +916,15 @@ pub fn oidc_at_hash(access_token: &str) -> String {
 /// The witness alone says "SOME session was validated". This makes it say "THIS
 /// person's session was validated", which is what MINT-READS-ROW means: a
 /// caller holding a proof for one session must not be able to mint a credential
-/// naming another person. It is a runtime check because the identifier crosses
-/// the boundary as a string - the type says a read happened, this says what the
-/// read was about, and both are needed.
+/// naming another person. It is a runtime check because a proof and a mint are
+/// two values of the same type - the type says a read happened, this says what
+/// the read was about, and both are needed.
 ///
 /// Every live call site passes the session's own person id, so a failure here
 /// is a programming error rather than a request-shaped one, and it is reported
 /// as an internal error without naming either identifier.
-fn bind_proof_to_person(proof: &ValidatedSession, minting_for: &str) -> Result<()> {
-    if proof.person_id().as_str() == minting_for {
+fn bind_proof_to_person(proof: &ValidatedSession, minting_for: &UserId) -> Result<()> {
+    if proof.person_id() == minting_for {
         return Ok(());
     }
     tracing::error!(
