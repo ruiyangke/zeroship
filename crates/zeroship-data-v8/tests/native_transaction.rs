@@ -1152,6 +1152,56 @@ const _procedures = {nestedTimestamps};
 }
 
 #[test]
+fn array_updates_preserve_worker_json_elements() {
+    let url = require_pg();
+    let app = crate::test_app_id!();
+    let app = app.as_str();
+    reset_schema(&url, app);
+    let role = zeroship_core::database_role::per_app_role_name(app).unwrap();
+    exec_owner_sql(&url, &format!(
+        "ALTER TABLE \"{app}\".notes ADD COLUMN items JSONB; \
+         GRANT SELECT, INSERT, UPDATE ON \"{app}\".notes TO \"{role}\""
+    ));
+    let mut descriptor: serde_json::Value =
+        serde_json::from_str(&notes_runtime_descriptor()).unwrap();
+    descriptor["collections"]["notes"]["fields"]["items"] =
+        serde_json::json!({"type":"array","items":"json"});
+    let source = build_src(
+        r#"
+async function arrays() {
+    const result = await env.db.transaction(async tx => {
+        const row = await tx.notes.insert({title:"arrays", items:[1,"1",true,{a:1,b:2}]});
+        const updates = [
+            [{$push:null}, [1,"1",true,{a:1,b:2},null]],
+            [{$push:[2,3]}, [1,"1",true,{a:1,b:2},null,[2,3]]],
+            [{$addToSet:{b:2,a:1}}, [1,"1",true,{a:1,b:2},null,[2,3]]],
+            [{$addToSet:{a:1}}, [1,"1",true,{a:1,b:2},null,[2,3],{a:1}]],
+            [{$pull:1}, ["1",true,{a:1,b:2},null,[2,3],{a:1}]],
+            [{$pull:null}, ["1",true,{a:1,b:2},[2,3],{a:1}]],
+            [{$pull:[2,3]}, ["1",true,{a:1,b:2},{a:1}]],
+        ];
+        for (const [items, expected] of updates) {
+            const updated = await tx.notes.update({id:row.id}, {items});
+            if (JSON.stringify(updated.items) !== JSON.stringify(expected)) {
+                throw new Error(`array update changed JSON elements: ${JSON.stringify(updated.items)}`);
+            }
+        }
+        return {preserved:true};
+    });
+    if (result.error) throw result.error;
+    return result.data;
+}
+arrays.config = {kind:"action"};
+const _procedures = {arrays};
+"#,
+    );
+    let (status, body) =
+        dispatch_zs_with_descriptor(&url, &source, "arrays", app, descriptor.to_string());
+    assert_eq!(status, 200, "worker array updates: {body}");
+    assert_eq!(body["json"], serde_json::json!({"preserved":true}));
+}
+
+#[test]
 fn calendar_dates_round_trip_through_worker_transactions() {
     let url = require_pg();
     let app = crate::test_app_id!();

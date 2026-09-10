@@ -814,14 +814,18 @@ fn push_array_value_bind(
     value: &Value,
     field: &str,
     schema: &Value,
-    operation: &str,
+    dialect: SqlDialect,
 ) -> Result<(), QueryError> {
     let mut operand = value.clone();
     if let Some(definition) = schema.get(field) {
-        crate::codecs::prepare_array_operand(field, definition, operation, &mut operand)
+        crate::codecs::prepare_array_operand(field, definition, &mut operand)
             .map_err(|error| QueryError::InvalidFilter(error.to_string()))?;
     }
-    params.push(operand);
+    params.push(if dialect == SqlDialect::Sqlite || operand.is_null() {
+        Value::Json(operand.to_string())
+    } else {
+        operand
+    });
     Ok(())
 }
 
@@ -1705,15 +1709,9 @@ pub fn collect_binary_bind_cols(obj: &crate::value::Record) -> std::collections:
 /// - `$inc`      — `"col" = "col" + $N::numeric`
 /// - `$dec`      — `"col" = "col" - $N::numeric`
 /// - `$mul`      — `"col" = "col" * $N::numeric`
-/// - `$push`     — `"col" = "col" || $N::jsonb` (operand is JSON-encoded,
-///   so `{"$push": 42}` appends the number 42, not the string
-///   "42" — preserves number/boolean/object/array types)
-/// - `$pull`     — `"col" = (SELECT COALESCE(jsonb_agg(elem), '[]'::jsonb)
-///                 FROM jsonb_array_elements("col") elem WHERE elem != $N::jsonb)`
-///   (removes array elements by value; `jsonb - text` would
-///   instead delete object keys, which is not what we want)
-/// - `$addToSet` — `"col" = CASE WHEN "col" @> $N::jsonb THEN "col"
-///                                ELSE "col" || $N::jsonb END`
+/// - `$push` — append one complete JSON element, including a nested array or null
+/// - `$pull` — remove every structurally equal JSON element
+/// - `$addToSet` — append only when no structurally equal element exists
 pub fn build_set_clauses(
     update: &Value,
     params: &mut Vec<Value>,
@@ -1879,25 +1877,20 @@ pub fn build_set_clauses_with_system_fields(
                         params.push(value_to_param(op_val));
                         format!("{col} = {col} * ${}::numeric", params.len())
                     }
-                    "$push" => {
-                        // Serialize as JSON so numbers stay numbers, strings stay strings
-                        push_array_value_bind(params, op_val, key, schema_hint, op)?;
-                        format!("{col} = {col} || ${}::jsonb", params.len())
-                    }
-                    "$pull" => {
-                        // Remove array element by value: filter out matching elements
-                        push_array_value_bind(params, op_val, key, schema_hint, op)?;
-                        let n = params.len();
-                        format!(
-                            "{col} = (SELECT COALESCE(jsonb_agg(elem), '[]'::jsonb) FROM jsonb_array_elements({col}) elem WHERE elem != ${n}::jsonb)"
-                        )
-                    }
-                    "$addToSet" => {
-                        push_array_value_bind(params, op_val, key, schema_hint, op)?;
-                        let n = params.len();
-                        format!(
-                            "{col} = CASE WHEN {col} @> ${n}::jsonb THEN {col} ELSE {col} || ${n}::jsonb END"
-                        )
+                    "$push" | "$pull" | "$addToSet" => {
+                        use crate::array_update::ArrayUpdate;
+                        push_array_value_bind(params, op_val, key, schema_hint, dialect)?;
+                        let operation = match op {
+                            "$push" => ArrayUpdate::Push,
+                            "$pull" => ArrayUpdate::Pull,
+                            _ => ArrayUpdate::AddToSet,
+                        };
+                        crate::array_update::render(
+                            dialect,
+                            operation,
+                            &col,
+                            &format!("${}", params.len()),
+                        )?
                     }
                     other => {
                         return Err(QueryError::InvalidFilter(format!(
@@ -4539,7 +4532,7 @@ mod tests {
         // cast (not `to_jsonb(::text)`) keeps numbers, booleans, and objects
         // as their real JSON types — the old shape stringified everything.
         assert!(
-            q.sql.contains(r#""tags" = "tags" || $1::jsonb"#),
+            q.sql.contains(r#"jsonb_insert("tags", ARRAY[jsonb_array_length("tags")::text], $1::jsonb)"#),
             "sql: {}",
             q.sql
         );
@@ -4557,7 +4550,7 @@ mod tests {
         // `"tags" - $1`, but that's the jsonb "remove key" operator and
         // would mutate objects, not filter array elements.
         assert!(
-            q.sql.contains(r#""tags" = (SELECT COALESCE(jsonb_agg(elem), '[]'::jsonb) FROM jsonb_array_elements("tags") elem WHERE elem != $1::jsonb)"#),
+            q.sql.contains(r#"FROM jsonb_array_elements("tags") WITH ORDINALITY AS __zs_array(element, position) WHERE __zs_array.element != $1::jsonb"#),
             "sql: {}",
             q.sql
         );
@@ -4569,12 +4562,10 @@ mod tests {
         let filter = value!({"id": 1});
         let update = value!({"tags": {"$addToSet": "unique"}});
         let q = build_update_one(&s("app1"), "posts", &tschema(), &filter, &update).unwrap();
-        // Appends only if the array doesn't already contain the value
-        // (jsonb @> containment check). Both sides use ::jsonb so type is
-        // preserved — same rationale as $push.
+        // Element equality must not mistake a partial object for a member.
         assert!(
             q.sql.contains(
-                r#""tags" = CASE WHEN "tags" @> $1::jsonb THEN "tags" ELSE "tags" || $1::jsonb END"#
+                r#"FROM jsonb_array_elements("tags") AS __zs_array(element) WHERE __zs_array.element = $1::jsonb"#
             ),
             "sql: {}",
             q.sql
@@ -6062,7 +6053,7 @@ mod tests {
         let update = value!({"scores": {"$push": 42}});
         let q = build_update_one(&s("app1"), "games", &tschema(), &filter, &update).unwrap();
         assert!(
-            q.sql.contains(r#""scores" = "scores" || $1::jsonb"#),
+            q.sql.contains(r#"jsonb_insert("scores", ARRAY[jsonb_array_length("scores")::text], $1::jsonb)"#),
             "sql: {}",
             q.sql
         );
@@ -6077,7 +6068,7 @@ mod tests {
         let update = value!({"flags": {"$push": true}});
         let q = build_update_one(&s("app1"), "games", &tschema(), &filter, &update).unwrap();
         assert!(
-            q.sql.contains(r#""flags" = "flags" || $1::jsonb"#),
+            q.sql.contains(r#"jsonb_insert("flags", ARRAY[jsonb_array_length("flags")::text], $1::jsonb)"#),
             "sql: {}",
             q.sql
         );
@@ -6090,7 +6081,7 @@ mod tests {
         let update = value!({"entries": {"$push": {"k": "v", "n": 3}}});
         let q = build_update_one(&s("app1"), "log", &tschema(), &filter, &update).unwrap();
         assert!(
-            q.sql.contains(r#""entries" = "entries" || $1::jsonb"#),
+            q.sql.contains(r#"jsonb_insert("entries", ARRAY[jsonb_array_length("entries")::text], $1::jsonb)"#),
             "sql: {}",
             q.sql
         );
@@ -6111,7 +6102,7 @@ mod tests {
         let q = build_update_one(&s("app1"), "games", &tschema(), &filter, &update).unwrap();
         assert!(
             q.sql
-                .contains(r#"FROM jsonb_array_elements("scores") elem WHERE elem != $1::jsonb"#),
+                .contains(r#"FROM jsonb_array_elements("scores") WITH ORDINALITY AS __zs_array(element, position) WHERE __zs_array.element != $1::jsonb"#),
             "sql: {}",
             q.sql
         );
@@ -6125,12 +6116,12 @@ mod tests {
         let q = build_update_one(&s("app1"), "games", &tschema(), &filter, &update).unwrap();
         assert!(
             q.sql.contains(
-                r#""ids" = CASE WHEN "ids" @> $1::jsonb THEN "ids" ELSE "ids" || $1::jsonb END"#
+                r#"FROM jsonb_array_elements("ids") AS __zs_array(element) WHERE __zs_array.element = $1::jsonb"#
             ),
             "sql: {}",
             q.sql
         );
-        // $addToSet reuses the same parameter index for the containment
+        // $addToSet reuses the same parameter index for the equality
         // check and the append — only one param is pushed.
         assert_eq!(q.params.len(), 2, "params: {:?}", q.params); // the op param + the filter param (id = 1)
         assert_eq!(q.params[0], value!(7));

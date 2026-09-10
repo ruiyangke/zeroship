@@ -61,16 +61,12 @@
 //! `String`. A [`crate::Literal::Int`] binds as an integer, so there is nothing
 //! left for the cast to repair.
 //!
-//! # What is deliberately absent, and what it costs
+//! # JSON array operations
 //!
-//! `$push`, `$pull` and `$addToSet` (`query.rs:3826-3845`) lower to `jsonb`
-//! expressions - `||`, `jsonb_agg` over `jsonb_array_elements`, `@>` inside a
-//! `CASE`. They are not here. Writing them would mean settling the same
-//! `PostgreSQL` JSON operator-resolution question [`crate::path`] refuses to
-//! settle without a server, and settling it inside three ad-hoc templates rather
-//! than as a grammar. The cost is stated rather than hidden: those three update
-//! operators cannot be ported until a JSON node exists, and a ledger row for
-//! `build_set_clauses_with_system_fields` must stay `unported` on their account.
+//! JSON array mutations currently belong to the runtime collection compiler
+//! and its dialect-specific renderer. The typed assignment grammar does not
+//! yet carry these nodes. A port must retain the existing single-element
+//! semantics, structural equality, and database conformance coverage.
 
 use crate::ident::Ident;
 use crate::literal::Literal;

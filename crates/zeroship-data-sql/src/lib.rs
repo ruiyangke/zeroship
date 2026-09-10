@@ -71,3 +71,5 @@ pub mod sqlite_search;
 
 pub mod codecs;
 pub mod temporal;
+pub mod json;
+mod array_update;

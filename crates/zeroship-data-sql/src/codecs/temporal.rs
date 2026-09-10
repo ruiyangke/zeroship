@@ -160,20 +160,11 @@ fn prepare_document_at(
 pub fn prepare_array_operand(
     field: &str,
     definition: &Value,
-    operation: &str,
     value: &mut Value,
 ) -> Result<(), CodecError> {
     let Some(item) = temporal_item(definition) else {
         return Ok(());
     };
-    if operation != "$pull" {
-        if let Some(values) = value.as_array_mut() {
-            for (index, value) in values.iter_mut().enumerate() {
-                scalar(item, &format!("{field}[{index}]"), value)?;
-            }
-            return Ok(());
-        }
-    }
     scalar(item, field, value)
 }
 
@@ -201,7 +192,7 @@ pub fn prepare_temporal_update(schema: &Value, patch: &mut Value) -> Result<(), 
                 match operation.as_str() {
                     "$set" => prepare_value(field, definition, operand)?,
                     "$push" | "$pull" | "$addToSet" if temporal_item(definition).is_some() => {
-                        prepare_array_operand(field, definition, operation, operand)?;
+                        prepare_array_operand(field, definition, operand)?;
                     }
                     _ if matches!(
                         definition["type"].as_str(),
@@ -239,6 +230,7 @@ mod tests {
         for mut patch in [
             value!({"instants":{"$inc":1}}),
             value!({"instants":{"$push":null}}),
+            value!({"instants":{"$push":[0]}}),
             value!({"instants":{"$addToSet":"private_not_a_timestamp"}}),
             value!({"instants":{"$pull":"2026-02-30"}}),
         ] {

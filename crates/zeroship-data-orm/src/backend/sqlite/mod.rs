@@ -45,6 +45,7 @@ impl change_sink::ChangeSink for NullChangeSink {
 // `as_postgres` / `as_sqlite` accessor shape).
 pub mod cdc;
 pub mod error;
+mod json;
 pub mod lock;
 /// SQLite typed-row -> JSON decoding, beside the `TypedCell`/`TypedRows` it
 /// reads. Peer of `backend::pg_row_json`; see that module for why the two are
