@@ -21,7 +21,7 @@
 //! The handler self-asserts a multi-chunk upload → download round-trip
 //! (byte-compare) and returns `{ok:true}`; the Rust side asserts 200+ok.
 //!
-//! Harness mirrors `crates/zeroship-plugin-kv/tests/e2e_runtime.rs`.
+//! Harness mirrors `crates/zeroship-kv-v8/tests/e2e_runtime.rs`.
 
 #![allow(clippy::future_not_send)]
 

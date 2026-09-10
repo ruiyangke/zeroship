@@ -247,22 +247,22 @@ typed TS SDK (`@zeroship/kv`) adding JSON serialization, Result wrapping, and co
 
 | Feature | Status | Surface | Code | Docs | Example | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
-| env.kv.get | 🟢 | `env.kv.get(key)` | `crates/zeroship-plugin-kv/src/v8_class.rs`, `dispatch.rs` | `docs/reference/kv.md` | `crates/zeroship-plugin-kv/tests/e2e_runtime.rs` | Raw string at native layer; SDK JSON.parses. |
-| env.kv.set | 🟢 | `env.kv.set(key, value, {ttlMs?})` | `crates/zeroship-plugin-kv/src/v8_class.rs`, `dispatch.rs` | `docs/reference/kv.md` | `crates/zeroship-plugin-kv/tests/e2e_runtime.rs` | Value must be string; TTL≤100yr. |
-| env.kv.delete | 🟢 | `env.kv.delete(key)` | `crates/zeroship-plugin-kv/src/v8_class.rs`, `dispatch.rs` | `docs/reference/kv.md` | `crates/zeroship-plugin-kv/tests/e2e_runtime.rs` | {deleted:bool}; no error on miss. |
-| env.kv.incr | 🟢 | `env.kv.incr(key, {by?, ttlMs?})` | `crates/zeroship-plugin-kv/src/v8_class.rs`, `backend/redis.rs` | `docs/reference/kv.md` | `crates/zeroship-plugin-kv/tests/e2e_runtime.rs` | Fixed-window TTL; Lua EVAL on Redis. |
-| env.kv.setIfAbsent | 🟢 | `env.kv.setIfAbsent(key, value, {ttlMs?})` | `crates/zeroship-plugin-kv/src/v8_class.rs`, `dispatch.rs` | `docs/reference/kv.md` | `crates/zeroship-plugin-kv/tests/e2e_runtime.rs` | Redis SET NX; redb MVCC. |
-| env.kv.expire | 🟢 | `env.kv.expire(key, ttlMs)` | `crates/zeroship-plugin-kv/src/v8_class.rs`, `dispatch.rs` | `docs/reference/kv.md` | `crates/zeroship-plugin-kv/tests/e2e_runtime.rs` | PEXPIRE; updated:false on miss. |
-| env.kv.ttl | 🟢 | `env.kv.ttl(key)` | `crates/zeroship-plugin-kv/src/v8_class.rs`, `backend/mod.rs` | `docs/reference/kv.md` | `crates/zeroship-plugin-kv/tests/e2e_runtime.rs` | 3-state TtlState. |
-| env.kv.persist | 🟢 | `env.kv.persist(key)` | `crates/zeroship-plugin-kv/src/v8_class.rs`, `dispatch.rs` | `docs/reference/kv.md` | `crates/zeroship-plugin-kv/tests/e2e_runtime.rs` | Redis PERSIST. |
-| env.kv.list | 🟢 | `env.kv.list(prefix?, {cursor?, limit?})` | `crates/zeroship-plugin-kv/src/v8_class.rs`, `backend/redb.rs`, `backend/redis.rs` | `docs/reference/kv.md` | `crates/zeroship-plugin-kv/tests/e2e_runtime.rs` | Literal prefix; opaque cursor; max 10000. |
-| redb backend | 🟢 | internal (ZEROSHIP_KV_URL unset) | `crates/zeroship-plugin-kv/src/backend/redb.rs` | `docs/reference/kv.md` | `crates/zeroship-plugin-kv/tests/e2e_runtime.rs` | Single-writer MVCC; Durability::Immediate. |
-| Redis/Dragonfly backend (single-node) | 🟢 | internal (redis:// URL) | `crates/zeroship-plugin-kv/src/backend/redis.rs` | `docs/reference/kv.md` | `crates/zeroship-plugin-kv/tests/redis_backend.rs` | Per-thread pool; Lua incr. |
-| Redis/Dragonfly backend (cluster) | 🟢 | internal (?cluster=true) | `crates/zeroship-plugin-kv/src/backend/redis.rs` | `docs/reference/kv.md` | `crates/zeroship-plugin-kv/tests/redis_backend.rs` | Hash-tag slot; single-shard ceiling per app. |
-| Per-app key namespacing / isolation | 🟢 | internal (Backend::scope) | `crates/zeroship-plugin-kv/src/backend/mod.rs` | — | `crates/zeroship-plugin-kv/tests/redis_backend.rs` | {app_id}:key; braces rejected in user keys. |
-| Input validation and limits | 🟢 | internal | `crates/zeroship-plugin-kv/src/limits.rs` | — | `crates/zeroship-plugin-kv/tests/e2e_runtime.rs` | key 512B, value 256KiB, list clamp 10000. |
-| Typed error classification | 🟢 | error.code on rejected Promises | `crates/zeroship-plugin-kv/src/error.rs` | `docs/reference/kv.md` | `crates/zeroship-plugin-kv/tests/e2e_runtime.rs` | Validation → TypeError; runtime → coded. |
-| KvPlugin / NativePlugin registration | 🟢 | internal | `crates/zeroship-plugin-kv/src/lib.rs`, `v8_class.rs` | — | `crates/zeroship-plugin-kv/tests/e2e_runtime.rs` | One Kv instance/isolate. |
+| env.kv.get | 🟢 | `env.kv.get(key)` | `crates/zeroship-kv-v8/src/v8_class.rs`, `dispatch.rs` | `docs/reference/kv.md` | `crates/zeroship-kv-v8/tests/e2e_runtime.rs` | Raw string at native layer; SDK JSON.parses. |
+| env.kv.set | 🟢 | `env.kv.set(key, value, {ttlMs?})` | `crates/zeroship-kv-v8/src/v8_class.rs`, `dispatch.rs` | `docs/reference/kv.md` | `crates/zeroship-kv-v8/tests/e2e_runtime.rs` | Value must be string; TTL≤100yr. |
+| env.kv.delete | 🟢 | `env.kv.delete(key)` | `crates/zeroship-kv-v8/src/v8_class.rs`, `dispatch.rs` | `docs/reference/kv.md` | `crates/zeroship-kv-v8/tests/e2e_runtime.rs` | {deleted:bool}; no error on miss. |
+| env.kv.incr | 🟢 | `env.kv.incr(key, {by?, ttlMs?})` | `crates/zeroship-kv-v8/src/v8_class.rs`, `crates/zeroship-kv/src/backend/redis.rs` | `docs/reference/kv.md` | `crates/zeroship-kv-v8/tests/e2e_runtime.rs` | Fixed-window TTL; Lua EVAL on Redis. |
+| env.kv.setIfAbsent | 🟢 | `env.kv.setIfAbsent(key, value, {ttlMs?})` | `crates/zeroship-kv-v8/src/v8_class.rs`, `dispatch.rs` | `docs/reference/kv.md` | `crates/zeroship-kv-v8/tests/e2e_runtime.rs` | Redis SET NX; redb MVCC. |
+| env.kv.expire | 🟢 | `env.kv.expire(key, ttlMs)` | `crates/zeroship-kv-v8/src/v8_class.rs`, `dispatch.rs` | `docs/reference/kv.md` | `crates/zeroship-kv-v8/tests/e2e_runtime.rs` | PEXPIRE; updated:false on miss. |
+| env.kv.ttl | 🟢 | `env.kv.ttl(key)` | `crates/zeroship-kv-v8/src/v8_class.rs`, `crates/zeroship-kv/src/backend/mod.rs` | `docs/reference/kv.md` | `crates/zeroship-kv-v8/tests/e2e_runtime.rs` | 3-state TtlState. |
+| env.kv.persist | 🟢 | `env.kv.persist(key)` | `crates/zeroship-kv-v8/src/v8_class.rs`, `dispatch.rs` | `docs/reference/kv.md` | `crates/zeroship-kv-v8/tests/e2e_runtime.rs` | Redis PERSIST. |
+| env.kv.list | 🟢 | `env.kv.list(prefix?, {cursor?, limit?})` | `crates/zeroship-kv-v8/src/v8_class.rs`, `crates/zeroship-kv/src/backend/redb.rs`, `crates/zeroship-kv/src/backend/redis.rs` | `docs/reference/kv.md` | `crates/zeroship-kv-v8/tests/e2e_runtime.rs` | Literal prefix; opaque cursor; max 10000. |
+| redb backend | 🟢 | internal (ZEROSHIP_KV_URL unset) | `crates/zeroship-kv/src/backend/redb.rs` | `docs/reference/kv.md` | `crates/zeroship-kv-v8/tests/e2e_runtime.rs` | Single-writer MVCC; Durability::Immediate. |
+| Redis/Dragonfly backend (single-node) | 🟢 | internal (redis:// URL) | `crates/zeroship-kv/src/backend/redis.rs` | `docs/reference/kv.md` | `crates/zeroship-kv/tests/redis_backend.rs` | Per-thread pool; Lua incr. |
+| Redis/Dragonfly backend (cluster) | 🟢 | internal (?cluster=true) | `crates/zeroship-kv/src/backend/redis.rs` | `docs/reference/kv.md` | `crates/zeroship-kv/tests/redis_backend.rs` | Hash-tag slot; single-shard ceiling per app. |
+| Per-app key namespacing / isolation | 🟢 | internal (Backend::scope) | `crates/zeroship-kv/src/backend/mod.rs` | — | `crates/zeroship-kv/tests/redis_backend.rs` | {app_id}:key; braces rejected in user keys. |
+| Input validation and limits | 🟢 | internal | `crates/zeroship-kv/src/limits.rs`, `crates/zeroship-kv-v8/src/limits.rs` | — | `crates/zeroship-kv-v8/tests/e2e_runtime.rs` | Shared key/value limits; binding converts JS numeric options. |
+| Typed error classification | 🟢 | error.code on rejected Promises | `crates/zeroship-kv-v8/src/error.rs` | `docs/reference/kv.md` | `crates/zeroship-kv-v8/tests/e2e_runtime.rs` | Validation → TypeError; runtime → coded. |
+| KvBinding / NativePlugin registration | 🟢 | internal | `crates/zeroship-kv-v8/src/lib.rs`, `v8_class.rs` | — | `crates/zeroship-kv-v8/tests/e2e_runtime.rs` | One Kv instance/isolate. |
 | @zeroship/kv kv.get<T> | 🟢 | `kv.get<T>(key)` | `sdks/kv/src/index.ts` | `docs/reference/kv.md` | `sdks/kv/tests/kv.test.ts` | ok(null) on miss. |
 | @zeroship/kv kv.getString | 🟢 | `kv.getString(key)` | `sdks/kv/src/index.ts` | `docs/reference/kv.md` | `sdks/kv/tests/kv.test.ts` | get<string> convenience. |
 | @zeroship/kv kv.set<T> | 🟢 | `kv.set<T>(key, value, {ttlMs?})` | `sdks/kv/src/index.ts` | `docs/reference/kv.md` | `sdks/kv/tests/kv.test.ts` | JSON-encodes. |
@@ -277,9 +277,9 @@ typed TS SDK (`@zeroship/kv`) adding JSON serialization, Result wrapping, and co
 | @zeroship/kv kv.getOrSet | 🟢 | `kv.getOrSet<T>(key, {ttlMs?}, factory)` | `sdks/kv/src/index.ts` | `docs/reference/kv.md` | `sdks/kv/tests/kv.test.ts` | NOT atomic (stampede possible). |
 | @zeroship/kv kv.namespace | 🟢 | `kv.namespace(prefix)` | `sdks/kv/src/index.ts` | `docs/reference/kv.md` | `sdks/kv/tests/kv.test.ts` | String-concat sugar; composes. |
 | createKv factory / NativeKv injection | 🟢 | `import { createKv } from "@zeroship/kv"` | `sdks/kv/src/index.ts` | — | `sdks/kv/tests/kv.test.ts` | Mock injection for tests. |
-| Backend unavailability / graceful rejection | 🟢 | error.code === 'kv_connection' | `crates/zeroship-plugin-kv/src/backend/redis.rs`, `error.rs` | — | `crates/zeroship-plugin-kv/tests/e2e_runtime.rs` | Rejects rather than hangs; retry hint. |
-| Redis cluster hash-tag slot targeting | 🟢 | internal | `crates/zeroship-plugin-kv/src/backend/mod.rs`, `backend/redis.rs` | — | `crates/zeroship-plugin-kv/tests/redis_backend.rs` | Single-shard ceiling per whale app. |
-| Redis list SCAN glob escaping | 🟢 | internal | `crates/zeroship-plugin-kv/src/limits.rs` | — | `crates/zeroship-plugin-kv/src/limits.rs` | Escapes glob metachars. |
+| Backend unavailability / graceful rejection | 🟢 | error.code === 'kv_connection' | `crates/zeroship-kv/src/backend/redis.rs`, `error.rs` | — | `crates/zeroship-kv-v8/tests/e2e_runtime.rs` | Rejects rather than hangs; retry hint. |
+| Redis cluster hash-tag slot targeting | 🟢 | internal | `crates/zeroship-kv/src/backend/mod.rs`, `backend/redis.rs` | — | `crates/zeroship-kv/tests/redis_backend.rs` | Single-shard ceiling per whale app. |
+| Redis list SCAN glob escaping | 🟢 | internal | `crates/zeroship-kv/src/limits.rs` | — | `crates/zeroship-kv/src/limits.rs` | Escapes glob metachars. |
 | Worker / CLI plugin wiring | 🟢 | `zeroship serve` / worker | `crates/zeroship-cli/src/main.rs`, `crates/zeroship-worker/src/main.rs` | `docs/reference/kv.md` | — | URL→Redis, else redb; absent → env.kv absent. |
 
 ---
@@ -912,10 +912,10 @@ observability, and OIDC/OAuth protocol primitives.
 | PG connection pool | &#x1F7E2; | internal | `libs/compio-postgres/src/pool.rs` | &mdash; | `libs/compio-postgres/tests/suite/integration.rs` | !Send; FIFO-fair; dirty barrier on checkout. |
 | PG test-utils feature | 🟢 | internal (feature=test-utils) | `libs/compio-postgres/src/test_utils.rs` | — | — | Excluded from prod builds. |
 | PG config — connection string parser | 🟢 | internal | `libs/compio-postgres/src/config.rs` | — | — | DSN parser; Unix socket support. |
-| Redis single-node client | 🟢 | internal (plugin-kv) | `libs/compio-redis/src/client.rs` | — | `libs/compio-redis/tests/integration.rs` | Literal IP only; no TLS; one cmd in flight. |
+| Redis single-node client | 🟢 | internal (zeroship-kv) | `libs/compio-redis/src/client.rs` | — | `libs/compio-redis/tests/integration.rs` | Literal IP only; no TLS; one cmd in flight. |
 | Redis reply size cap (64 MB) | 🟢 | internal | `libs/compio-redis/src/client.rs` | — | `libs/compio-redis/src/client.rs` | OOM guard; array-bomb rejected. |
 | Redis dirty-barrier for pool reuse | 🟢 | internal | `libs/compio-redis/src/client.rs`, `pool.rs` | — | `libs/compio-redis/src/pool.rs` | Cross-tenant desync prevention. |
-| Redis cluster client | 🟢 | internal (plugin-kv) | `libs/compio-redis/src/cluster.rs` | — | `libs/compio-redis/tests/cluster.rs` | CLUSTER SLOTS; MOVED/ASK; SSRF allowlist. |
+| Redis cluster client | 🟢 | internal (zeroship-kv) | `libs/compio-redis/src/cluster.rs` | — | `libs/compio-redis/tests/cluster.rs` | CLUSTER SLOTS; MOVED/ASK; SSRF allowlist. |
 | Redis connection pool | 🟢 | internal | `libs/compio-redis/src/pool.rs` | — | `libs/compio-redis/src/pool.rs` | LIFO; test-on-borrow; no wait queue. |
 | Redis — no TLS | 🔵 | internal | `libs/compio-redis/src/lib.rs` | — | — | rediss:// not implemented; MITM possible. |
 | typed_id — UUIDv7 base62 IDs | 🟢 | internal | `crates/zeroship-core/src/typed_id.rs` | — | `crates/zeroship-core/src/typed_id.rs` | usr/app/ses/wak/oac; parse_with_prefix. |

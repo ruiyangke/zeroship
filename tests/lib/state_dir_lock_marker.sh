@@ -19,7 +19,7 @@ set -uo pipefail
 
 REPO="${REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 
-RUST_FILE="crates/zeroship-plugin-kv/src/backend/redb.rs"
+RUST_FILE="crates/zeroship-kv/src/backend/redb.rs"
 TS_FILE="sdks/vite-plugin/src/dev-server.ts"
 
 # Pull the string literal out of each declaration.

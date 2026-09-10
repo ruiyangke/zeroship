@@ -1,6 +1,6 @@
 # Native Plugin System
 
-The runtime-native plugin interface is defined in [crates/zeroship-runtime/src/core/plugin.rs](../../crates/zeroship-runtime/src/core/plugin.rs). Built-in creator-facing namespaces currently come from [crates/zeroship-plugin-db/src/lib.rs](../../crates/zeroship-plugin-db/src/lib.rs), [crates/zeroship-plugin-kv/src/lib.rs](../../crates/zeroship-plugin-kv/src/lib.rs), and [crates/zeroship-plugin-storage/src/lib.rs](../../crates/zeroship-plugin-storage/src/lib.rs).
+The runtime-native plugin interface is defined in [crates/zeroship-runtime/src/core/plugin.rs](../../crates/zeroship-runtime/src/core/plugin.rs). Built-in creator-facing namespaces currently come from [crates/zeroship-plugin-db/src/lib.rs](../../crates/zeroship-plugin-db/src/lib.rs), [crates/zeroship-kv-v8/src/lib.rs](../../crates/zeroship-kv-v8/src/lib.rs), and [crates/zeroship-plugin-storage/src/lib.rs](../../crates/zeroship-plugin-storage/src/lib.rs).
 
 ## Core trait
 
@@ -22,10 +22,10 @@ The runtime builds `env` by merging user env vars and secrets with plugin namesp
 
 There are two active patterns in the tree:
 
-- Instance-backed namespaces: `plugin-db` and `plugin-kv` create V8 class instances through `build_instance(...)`.
+- Instance-backed namespaces: the DB and KV bindings create V8 class instances through `build_instance(...)`.
 - Flat callback namespaces: `plugin-storage` registers functions onto `env.storage`.
 
-See [crates/zeroship-plugin-db/src/lib.rs](../../crates/zeroship-plugin-db/src/lib.rs), [crates/zeroship-plugin-kv/src/lib.rs](../../crates/zeroship-plugin-kv/src/lib.rs), and [crates/zeroship-plugin-storage/src/lib.rs](../../crates/zeroship-plugin-storage/src/lib.rs).
+See [crates/zeroship-plugin-db/src/lib.rs](../../crates/zeroship-plugin-db/src/lib.rs), [crates/zeroship-kv-v8/src/lib.rs](../../crates/zeroship-kv-v8/src/lib.rs), and [crates/zeroship-plugin-storage/src/lib.rs](../../crates/zeroship-plugin-storage/src/lib.rs).
 
 ## `env.storage`: pluggable backend + streaming surface
 

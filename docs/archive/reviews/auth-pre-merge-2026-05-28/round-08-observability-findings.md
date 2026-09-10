@@ -688,7 +688,7 @@ chain forms the integrity proof, not the id.
 
 ## Subsystems NOT fully audited (out of scope or insufficient depth)
 
-- The plugin-db and plugin-kv layers — out of scope for an
+- The plugin-db and kv-v8 layers — out of scope for an
   auth/observability review. Per-app audit-table provisioning
   (`__zeroship_audit_*`) was noted via grep (`crates/zeroship-plugin-db/tests/
   sqlite_integration.rs:1536`) but not inspected.

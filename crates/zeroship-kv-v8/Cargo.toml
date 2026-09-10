@@ -1,0 +1,23 @@
+[package]
+name = "zeroship-kv-v8"
+version = "0.1.0"
+edition = "2021"
+description = "V8 binding for zeroship-kv: env.kv primitives and platform usage metering"
+
+[dependencies]
+zeroship-kv = { workspace = true }
+zeroship-runtime = { workspace = true }
+zeroship-runtime-macros = { workspace = true }
+zeroship-metering = { workspace = true }
+serde_json = { workspace = true }
+v8 = { workspace = true }
+
+[dev-dependencies]
+zeroship-kv = { workspace = true, features = ["redis", "redb"] }
+zeroship-core = { workspace = true }
+compio = { workspace = true }
+tempfile = { workspace = true }
+uuid = { workspace = true }
+
+[lints]
+workspace = true

@@ -22,7 +22,7 @@ use serde_json::json;
 use zeroship_metering::MeterHandle;
 use zeroship_runtime::state::{OpResult, ResolveValue, SharedState};
 
-use crate::backend::{Backend, TtlState};
+use zeroship_kv::{Backend, TtlState};
 
 /// Raw usage metric a kv op emits in its success arm. Reads (`get`,
 /// `list`) bill `kv_reads`; every mutating op (`set`, `delete`, `incr`,
@@ -101,9 +101,13 @@ macro_rules! spawn_kv_op {
                     }
                     ($resolve)(v)
                 }
-                Err(e) => ResolveValue::RejectError(e.to_op_error()),
+                Err(e) => ResolveValue::RejectError(crate::error::to_op_error(e)),
             };
-            OpResult::JsValue { resolver, value, request_id }
+            OpResult::JsValue {
+                resolver,
+                value,
+                request_id,
+            }
         }));
         promise
     }};
@@ -117,12 +121,19 @@ pub(crate) fn dispatch_get<'s>(
     meter: Option<MeterHandle>,
     key: String,
 ) -> v8::Local<'s, v8::Promise> {
-    spawn_kv_op!(scope, backend, meter, KV_READS, |b| b.get(&app_id, &key), |v: Option<String>| {
-        match v {
-            Some(s) => ResolveValue::String(s),
-            None => ResolveValue::Json("null".to_string()),
+    spawn_kv_op!(
+        scope,
+        backend,
+        meter,
+        KV_READS,
+        |b| b.get(&app_id, &key),
+        |v: Option<String>| {
+            match v {
+                Some(s) => ResolveValue::String(s),
+                None => ResolveValue::Json("null".to_string()),
+            }
         }
-    })
+    )
 }
 
 /// `kv.set(key, value, {ttlMs?})` → resolves `{ ok: true }`.
@@ -153,9 +164,14 @@ pub(crate) fn dispatch_delete<'s>(
     meter: Option<MeterHandle>,
     key: String,
 ) -> v8::Local<'s, v8::Promise> {
-    spawn_kv_op!(scope, backend, meter, KV_WRITES, |b| b.delete(&app_id, &key), |deleted: bool| {
-        ResolveValue::Json(json!({ "deleted": deleted }).to_string())
-    })
+    spawn_kv_op!(
+        scope,
+        backend,
+        meter,
+        KV_WRITES,
+        |b| b.delete(&app_id, &key),
+        |deleted: bool| { ResolveValue::Json(json!({ "deleted": deleted }).to_string()) }
+    )
 }
 
 /// `kv.incr(key, {by?, ttlMs?})` → resolves `number` (BigInt if large).
@@ -230,14 +246,21 @@ pub(crate) fn dispatch_ttl<'s>(
     meter: Option<MeterHandle>,
     key: String,
 ) -> v8::Local<'s, v8::Promise> {
-    spawn_kv_op!(scope, backend, meter, KV_READS, |b| b.ttl(&app_id, &key), |state: TtlState| {
-        let v = match state {
-            TtlState::Missing => serde_json::Value::Null,
-            TtlState::NoExpiry => json!({ "ttlMs": serde_json::Value::Null }),
-            TtlState::ExpiresInMs(ms) => json!({ "ttlMs": ms }),
-        };
-        ResolveValue::Json(v.to_string())
-    })
+    spawn_kv_op!(
+        scope,
+        backend,
+        meter,
+        KV_READS,
+        |b| b.ttl(&app_id, &key),
+        |state: TtlState| {
+            let v = match state {
+                TtlState::Missing => serde_json::Value::Null,
+                TtlState::NoExpiry => json!({ "ttlMs": serde_json::Value::Null }),
+                TtlState::ExpiresInMs(ms) => json!({ "ttlMs": ms }),
+            };
+            ResolveValue::Json(v.to_string())
+        }
+    )
 }
 
 /// `kv.persist(key)` → resolves `{ updated: boolean }`.

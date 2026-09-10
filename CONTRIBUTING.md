@@ -203,7 +203,7 @@ A single lowercase token (may contain `-`) naming the area touched. Reuse an exi
 scope before inventing one - grep `git log` for the current vocabulary. Common scopes:
 
 - Services & kernel: `gateway`, `runtime`, `control`, `worker`, `auth`, `authz`,
-  `plugin-db`, `plugin-kv`, `plugin-storage`, `metering`, `stream`, `bundle`, `core`,
+  `plugin-db`, `kv-v8`, `plugin-storage`, `metering`, `stream`, `bundle`, `core`,
   `cli`, `mailer`
 - Drivers (`libs/`): `compio-postgres`, `compio-redis`, `compio-s3`
 - SDKs: `db`, `kv`, `storage`, `rpc`, `ui`, `vite-plugin`, `bootstrap`, `payments`

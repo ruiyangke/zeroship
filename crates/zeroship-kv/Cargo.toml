@@ -1,0 +1,24 @@
+[package]
+name = "zeroship-kv"
+version = "0.1.0"
+edition = "2021"
+description = "App-scoped key-value storage with embedded redb and distributed Redis backends"
+
+[dependencies]
+async-trait = { workspace = true }
+compio-redis = { workspace = true, optional = true }
+redb = { version = "4.1", optional = true }
+url = { workspace = true }
+
+[features]
+default = ["redis", "redb"]
+redis = ["dep:compio-redis"]
+redb = ["dep:redb"]
+
+[dev-dependencies]
+compio = { workspace = true }
+tempfile = { workspace = true }
+zeroship-core = { workspace = true }
+
+[lints]
+workspace = true

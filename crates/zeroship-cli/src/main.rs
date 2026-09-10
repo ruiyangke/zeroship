@@ -280,8 +280,8 @@ fn cmd_serve(args: &[String]) {
     ) {
         Some(url) if !url.is_empty() => {
             eprintln!("[zeroship] kv plugin registered (redis)");
-            zeroship_plugin_kv::KvPlugin::with_backend_and_meter(
-                Arc::new(zeroship_plugin_kv::Redis::new(url)),
+            zeroship_kv_v8::KvBinding::with_backend_and_meter(
+                Arc::new(zeroship_kv::Redis::new(url)),
                 Some(Arc::clone(&dev_meter)),
             )
         }
@@ -304,7 +304,7 @@ fn cmd_serve(args: &[String]) {
                     std::process::exit(1);
                 }
             }
-            let backend = zeroship_plugin_kv::RedbBackend::open(&kv_path)
+            let backend = zeroship_kv::RedbBackend::open(&kv_path)
                 .unwrap_or_else(|e| {
                     eprintln!(
                         "[zeroship] kv: failed to open redb at '{}': {e}",
@@ -313,7 +313,7 @@ fn cmd_serve(args: &[String]) {
                     std::process::exit(1);
                 });
             eprintln!("[zeroship] kv plugin registered (redb; path={})", kv_path.display());
-            zeroship_plugin_kv::KvPlugin::with_backend_and_meter(
+            zeroship_kv_v8::KvBinding::with_backend_and_meter(
                 Arc::new(backend),
                 Some(Arc::clone(&dev_meter)),
             )

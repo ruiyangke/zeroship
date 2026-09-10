@@ -27,7 +27,7 @@
 # Usage:
 #   source "$ROOT/tests/lib/binary_freshness.sh"
 #   zs_check_binary_freshness "$ROOT" "$BIN" \
-#     "crates/plugin-kv/src crates/runtime/src sdks/kv/src" \
+#     "crates/zeroship-kv-v8/src crates/runtime/src sdks/kv/src" \
 #     "zeroship zeroship-worker zeroship-gate zeroship-control dev-provision"
 #
 # Returns 0 when everything is fresh (or only warnings are wanted), 1 when
@@ -99,7 +99,7 @@ zs_check_binary_freshness() {
   fi
 
   # Name the CRATE, not just the file. "worker is older than mod.rs" tells a
-  # reader nothing; "older than crates/plugin-kv" tells them what to rebuild.
+  # reader nothing; "older than crates/zeroship-kv-v8" tells them what to rebuild.
   local rel crate
   rel="${newest_src#"$root"/}"
   crate="$(printf '%s' "$rel" | cut -d/ -f1-2)"

@@ -305,9 +305,9 @@ impl Backend for RedbBackend {
             .begin_write()
             .map_err(|e| KvError::backend(format!("kv: redb setIfAbsent begin_write: {e}")))?;
         let stored = {
-            let mut table = txn.open_table(KV).map_err(|e| {
-                KvError::backend(format!("kv: redb setIfAbsent open_table: {e}"))
-            })?;
+            let mut table = txn
+                .open_table(KV)
+                .map_err(|e| KvError::backend(format!("kv: redb setIfAbsent open_table: {e}")))?;
             // An expired entry counts as absent.
             let occupied = match table
                 .get(scoped.as_str())
@@ -325,9 +325,7 @@ impl Backend for RedbBackend {
                 let expires_at = ttl_ms.map(|ms| now.saturating_add(ms));
                 table
                     .insert(scoped.as_str(), (value, expires_at))
-                    .map_err(|e| {
-                        KvError::backend(format!("kv: redb setIfAbsent insert: {e}"))
-                    })?;
+                    .map_err(|e| KvError::backend(format!("kv: redb setIfAbsent insert: {e}")))?;
                 true
             }
         };
@@ -365,10 +363,11 @@ impl Backend for RedbBackend {
             match payload {
                 Some(value) => {
                     table
-                        .insert(scoped.as_str(), (value.as_str(), Some(now.saturating_add(ttl_ms))))
-                        .map_err(|e| {
-                            KvError::backend(format!("kv: redb expire insert: {e}"))
-                        })?;
+                        .insert(
+                            scoped.as_str(),
+                            (value.as_str(), Some(now.saturating_add(ttl_ms))),
+                        )
+                        .map_err(|e| KvError::backend(format!("kv: redb expire insert: {e}")))?;
                     true
                 }
                 None => false,
@@ -437,9 +436,7 @@ impl Backend for RedbBackend {
                 Some(value) => {
                     table
                         .insert(scoped.as_str(), (value.as_str(), None))
-                        .map_err(|e| {
-                            KvError::backend(format!("kv: redb persist insert: {e}"))
-                        })?;
+                        .map_err(|e| KvError::backend(format!("kv: redb persist insert: {e}")))?;
                     true
                 }
                 None => false,
@@ -495,8 +492,8 @@ impl Backend for RedbBackend {
             .map_err(|e| KvError::backend(format!("kv: redb list range: {e}")))?;
 
         for entry in range {
-            let (key_guard, val_guard) = entry
-                .map_err(|e| KvError::backend(format!("kv: redb list iter: {e}")))?;
+            let (key_guard, val_guard) =
+                entry.map_err(|e| KvError::backend(format!("kv: redb list iter: {e}")))?;
             let scoped_key = key_guard.value();
             // Ordered iteration: the first key past the prefix ends it.
             if !scoped_key.starts_with(&scoped_prefix) {
@@ -714,7 +711,10 @@ mod tests {
         assert!(!b.expire(APP, "k", 1000).await.unwrap()); // missing
         b.set(APP, "k", "v", None).await.unwrap();
         assert!(b.expire(APP, "k", 100_000).await.unwrap());
-        assert!(matches!(b.ttl(APP, "k").await.unwrap(), TtlState::ExpiresInMs(_)));
+        assert!(matches!(
+            b.ttl(APP, "k").await.unwrap(),
+            TtlState::ExpiresInMs(_)
+        ));
     }
 
     #[compio::test]
@@ -724,7 +724,10 @@ mod tests {
         b.set(APP, "k", "v", None).await.unwrap();
         assert_eq!(b.ttl(APP, "k").await.unwrap(), TtlState::NoExpiry);
         b.set(APP, "k", "v", Some(100_000)).await.unwrap();
-        assert!(matches!(b.ttl(APP, "k").await.unwrap(), TtlState::ExpiresInMs(_)));
+        assert!(matches!(
+            b.ttl(APP, "k").await.unwrap(),
+            TtlState::ExpiresInMs(_)
+        ));
     }
 
     #[compio::test]
@@ -834,10 +837,7 @@ mod tests {
         loop {
             guard += 1;
             assert!(guard < 100, "pagination did not terminate");
-            let (page, next) = b
-                .list(APP, "k", cursor.as_deref(), 5)
-                .await
-                .unwrap();
+            let (page, next) = b.list(APP, "k", cursor.as_deref(), 5).await.unwrap();
             seen.extend(page);
             match next {
                 Some(c) => cursor = Some(c),

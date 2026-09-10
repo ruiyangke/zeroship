@@ -328,7 +328,7 @@ impl Client {
     /// EVAL a Lua script, returning the integer reply. `keys` are the
     /// `KEYS[1..]` arguments (slot-routed by Redis) and `args` are the
     /// `ARGV[1..]` arguments. Only the integer reply is decoded —
-    /// sufficient for the atomic incr-with-TTL script (see plugin-kv).
+    /// sufficient for the atomic incr-with-TTL script (see zeroship-kv).
     pub async fn eval(&mut self, script: &str, keys: &[&str], args: &[&str]) -> Result<i64> {
         let nkeys = keys.len().to_string();
         let mut parts: Vec<&[u8]> = Vec::with_capacity(3 + keys.len() + args.len());

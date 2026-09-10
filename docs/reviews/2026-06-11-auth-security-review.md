@@ -56,7 +56,7 @@ P2-B6/B7 downgraded).
 - **Suggested fix:** In the v6 arm, block `64:ff9b::/96` (`segments[0]==0x0064 && segments[1]==0xff9b`); for v4-compatible/v4-mapped embeddings (`segments[0..6]==0`), extract the trailing 32-bit v4 and recurse into the v4 blocklist. `::a.b.c.d` is deprecated/low-reach but cheap to cover.
 
 ### NEW-3 — LOW — `kv.list` prefix skips the brace/control-char validation every other KV op applies
-- **File:** `crates/zeroship-plugin-kv/src/v8_class.rs:324` (`list`); `crates/zeroship-plugin-kv/src/limits.rs:167` (`escape_glob`).
+- **File:** `crates/zeroship-kv-v8/src/v8_class.rs:324` (`list`); `crates/zeroship-kv-v8/src/limits.rs:167` (`escape_glob`).
 - **Description:** `list()` passes `prefix` to `dispatch_list` without the `validate_key` brace/NUL/control rejection that `get/set/delete/incr/.../persist` all apply. The Redis backend `escape_glob`s the prefix (`backend/redis.rs:335`) but `escape_glob` escapes only `* ? [ ] \ ^` — **not `{`/`}`** — so a brace-bearing prefix lands literally in the `SCAN {<app_id>}:<prefix>*` pattern.
 - **Not a cross-tenant bleed (adversarially checked):** the pattern is always anchored at the literal `{app_id}:` (the app's own id, from its own isolate), Redis Cluster hash-tags on the *first* `{…}` group, and routing passes `app_id` explicitly — a forged second brace group lands after `{app_id}:` and cannot escape the keyspace or redirect routing. Realized impact is a malformed/over-narrow MATCH within the caller's own keyspace (self-inflicted), plus a latent footgun if a future change moves prefix interpolation ahead of the hash-tag.
 - **Suggested fix:** Apply `validate_key`-style rejection (allowing empty) to `prefix` in `list()`, and add `{`/`}` to `escape_glob` for defense-in-depth.

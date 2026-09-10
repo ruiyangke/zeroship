@@ -49,7 +49,7 @@ mint an aud=control token. **LOCKED DECISIONS:** (1) SSE-over-fetch sufficient �
 blocker; (2) SHARED worker pool, NO dedicated trusted tier — safety rests on no-ambient-authority (control_key never JS,
 identity re-derived server-side); platform-privileged flag only permits declaring reserved scopes; (3) console on enterprise
 plan (no CPU/wall cap); (4) internal services reached via allowlisted PUBLIC hostnames, no SSRF carve-out. BLOCKER to clear (Phase 2):
-multi-node worker registers only DbPlugin — must wire KvPlugin+StoragePlugin into `crates/zeroship-worker/src/cache.rs create_plugins()`
+multi-node worker registers only DbPlugin — must wire KvBinding+StoragePlugin into `crates/zeroship-worker/src/cache.rs create_plugins()`
 (the console imports @zeroship/kv).
 
 ### Console build progress (R4→kernel→R5)
@@ -60,7 +60,7 @@ multi-node worker registers only DbPlugin — must wire KvPlugin+StoragePlugin i
   security booleans, RED-TEAM boundary_holds=true / no escalation across 7 vectors). Re-verified on live PG: power_token_test 10/10,
   control_key_is_never_js_reachable, full control + runtime 227 + worker 18 + gateway 27 + SDK 77. Step-up decision: env:write/apps:write
   NOT step-up (env:* config vs secrets:* split); deferred minors: split-DB doc note, bounded-60s header replay (v1-ok).
-- **Phase 2 / kernel convergence ✓** `a3de8399` KvPlugin(Redis, shared not redb) + StoragePlugin(LocalFs shared volume)
+- **Phase 2 / kernel convergence ✓** `a3de8399` KvBinding(Redis, shared not redb) + StoragePlugin(LocalFs shared volume)
   into multi-node worker create_plugins(); --kv-url/--storage-root config + compose redis service; faithful kernel test
   (real dispatch path, proven non-vacuous). Workflow `wpso8dogz` (critic 96, all 7 booleans). Re-verified: worker 21/21.
 - **R4 SIMPLIFIED** `d4898dd0` (owner directive: power-token mint too complex → ENV-var control key, defer env.auth). Forward-

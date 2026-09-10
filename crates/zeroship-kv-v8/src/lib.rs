@@ -1,19 +1,13 @@
-//! Key-value plugin — `env.kv.*` native primitives.
+//! V8 binding for key-value storage — `env.kv.*` native primitives.
 //!
 //! `env.kv` is a `#[v8_class]` instance (`Kv`) minted once per isolate by
-//! [`KvPlugin::build_instance`]. The instance carries the backend handle
+//! [`KvBinding::build_instance`]. The instance carries the backend handle
 //! and the app_id, so callbacks never read a thread-local for the
 //! backend and never re-derive the app_id per call (mirrors `env.db`).
 //!
-//! Pluggable `Backend` dispatches to either:
-//! - `RedbBackend` — single-process embedded persistent store (the
-//!   self-host tier and the test backend)
-//! - `Redis` — strongly consistent, atomic INCR / set-if-absent, TTL,
-//!   network-backed
-//!
-//! Contract: **strong consistency + atomic ops** forever (see
-//! `backend/mod.rs` for the canonical incr contract). If a future
-//! backend can't keep that promise, it ships under a different SDK name.
+//! Storage implementations, the backend contract, and typed errors live in
+//! zeroship-kv. This crate owns V8 conversion, promises, isolate state,
+//! and usage metering. Hosts construct a backend and pass it to [KvBinding].
 //!
 //! Native API surface (wrapped by the `@zeroship/kv` SDK):
 //! - `env.kv.get(key)` → Promise<string | null>
@@ -30,33 +24,19 @@ use std::sync::Arc;
 
 use zeroship_runtime::plugin::{NativePlugin, NativeRegistrar};
 
-pub mod backend;
-pub mod dispatch;
-pub mod error;
-pub mod holders;
-pub mod limits;
-pub mod v8_class;
+mod dispatch;
+mod error;
+mod limits;
+mod v8_class;
 
-pub use backend::{Backend, TtlState};
-#[cfg(feature = "redb")]
-pub use backend::RedbBackend;
-#[cfg(feature = "redis")]
-pub use backend::Redis;
-pub use error::KvError;
-// Gated with the module it comes from. `backend::redb` is `cfg(feature =
-// "redb")`, so an ungated re-export breaks `--no-default-features` while
-// `--all-features` stays green - which is exactly how it got committed the
-// first time.
-#[cfg(feature = "redb")]
-pub use backend::redb::STATE_DIR_LOCK_MARKER;
-pub use holders::{describe_holders, holders_of, Holder};
-pub use v8_class::mint_kv;
+use v8_class::mint_kv;
+use zeroship_kv::Backend;
 
 // ---------------------------------------------------------------------------
-// KvPlugin
+// KvBinding
 // ---------------------------------------------------------------------------
 
-pub struct KvPlugin {
+pub struct KvBinding {
     backend: Arc<dyn Backend>,
     /// The process-wide usage meter. `Some` on the production worker (and
     /// dev `zeroship serve`); each kv op emits `kv_reads`/`kv_writes` into
@@ -65,19 +45,24 @@ pub struct KvPlugin {
     meter: Option<Arc<zeroship_metering::Meter>>,
 }
 
-impl std::fmt::Debug for KvPlugin {
+impl std::fmt::Debug for KvBinding {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("KvPlugin").field("backend", &self.backend).finish()
+        f.debug_struct("KvBinding")
+            .field("backend", &self.backend)
+            .finish()
     }
 }
 
-impl KvPlugin {
+impl KvBinding {
     /// Construct with a backend and no meter — for test harnesses where
     /// metering is not under test. Production code uses
     /// [`Self::with_backend_and_meter`].
     #[must_use]
     pub fn with_backend(backend: Arc<dyn Backend>) -> Self {
-        Self { backend, meter: None }
+        Self {
+            backend,
+            meter: None,
+        }
     }
 
     /// Construct with a backend + the process-wide meter. There is no
@@ -96,9 +81,13 @@ impl KvPlugin {
     }
 }
 
-impl NativePlugin for KvPlugin {
-    fn namespace(&self) -> &str { "kv" }
-    fn name(&self) -> &str { "kv" }
+impl NativePlugin for KvBinding {
+    fn namespace(&self) -> &str {
+        "kv"
+    }
+    fn name(&self) -> &str {
+        "kv"
+    }
 
     /// No flat callbacks — the whole surface lives on the `Kv`
     /// v8_class minted by [`Self::build_instance`].

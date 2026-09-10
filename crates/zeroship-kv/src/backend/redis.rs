@@ -92,9 +92,11 @@ thread_local! {
 fn is_cluster_url(url: &str) -> bool {
     url::Url::parse(url)
         .ok()
-        .and_then(|u| u.query_pairs()
-            .find(|(k, _)| k == "cluster")
-            .map(|(_, v)| v.into_owned()))
+        .and_then(|u| {
+            u.query_pairs()
+                .find(|(k, _)| k == "cluster")
+                .map(|(_, v)| v.into_owned())
+        })
         .is_some_and(|v| matches!(v.as_str(), "true" | "1" | "yes"))
 }
 
@@ -109,7 +111,9 @@ fn seeds_from_url(url: &str) -> Vec<String> {
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect();
-            if !list.is_empty() { return list; }
+            if !list.is_empty() {
+                return list;
+            }
         }
     }
     // Fall back to the base URL with the query stripped, so the probe
@@ -130,11 +134,17 @@ fn strip_cluster_query(url: &str) -> String {
 
 impl Redis {
     pub fn new(url: impl Into<String>) -> Self {
-        Self { url: url.into(), max_size: 16 }
+        Self {
+            url: url.into(),
+            max_size: 16,
+        }
     }
 
     pub fn with_max_size(url: impl Into<String>, max_size: usize) -> Self {
-        Self { url: url.into(), max_size }
+        Self {
+            url: url.into(),
+            max_size,
+        }
     }
 
     async fn pool(&self) -> Result<Pool, KvError> {
@@ -144,12 +154,15 @@ impl Redis {
             return Ok(p);
         }
         // Slow path: open + cache. Connect failures redact credentials.
-        let pool = Pool::connect(&self.url, self.max_size)
-            .await
-            .map_err(|e| KvError::connection(format!(
-                "kv: redis connect '{}': {e}", redact_url(&self.url)
-            )))?;
-        POOLS.with(|p| { p.borrow_mut().insert(self.url.clone(), pool.clone()); });
+        let pool = Pool::connect(&self.url, self.max_size).await.map_err(|e| {
+            KvError::connection(format!(
+                "kv: redis connect '{}': {e}",
+                redact_url(&self.url)
+            ))
+        })?;
+        POOLS.with(|p| {
+            p.borrow_mut().insert(self.url.clone(), pool.clone());
+        });
         Ok(pool)
     }
 
@@ -167,10 +180,15 @@ impl Redis {
         let seed_refs: Vec<&str> = seeds.iter().map(String::as_str).collect();
         let client = ClusterClient::connect(&seed_refs, self.max_size)
             .await
-            .map_err(|e| KvError::connection(format!(
-                "kv: cluster connect '{}': {e}", redact_url(&self.url)
-            )))?;
-        CLUSTER_CLIENTS.with(|c| { c.borrow_mut().insert(cache_key, client.clone()); });
+            .map_err(|e| {
+                KvError::connection(format!(
+                    "kv: cluster connect '{}': {e}",
+                    redact_url(&self.url)
+                ))
+            })?;
+        CLUSTER_CLIENTS.with(|c| {
+            c.borrow_mut().insert(cache_key, client.clone());
+        });
         Ok(client)
     }
 
@@ -189,12 +207,16 @@ impl Backend for Redis {
     async fn get(&self, app_id: &str, key: &str) -> Result<Option<String>, KvError> {
         let scoped = scope(app_id, key);
         let bytes = if is_cluster_url(&self.url) {
-            self.cluster().await?
-                .get(&scoped).await
+            self.cluster()
+                .await?
+                .get(&scoped)
+                .await
                 .map_err(|e| map_redis_err("get", e, Some(&self.url)))?
         } else {
-            self.conn().await?
-                .get(&scoped).await
+            self.conn()
+                .await?
+                .get(&scoped)
+                .await
                 .map_err(|e| map_redis_err("get", e, Some(&self.url)))?
         };
         Ok(bytes.map(|b| String::from_utf8_lossy(&b).into_owned()))
@@ -209,12 +231,16 @@ impl Backend for Redis {
     ) -> Result<(), KvError> {
         let scoped = scope(app_id, key);
         if is_cluster_url(&self.url) {
-            self.cluster().await?
-                .set(&scoped, value.as_bytes(), ttl_ms).await
+            self.cluster()
+                .await?
+                .set(&scoped, value.as_bytes(), ttl_ms)
+                .await
                 .map_err(|e| map_redis_err("set", e, Some(&self.url)))
         } else {
-            self.conn().await?
-                .set(&scoped, value.as_bytes(), ttl_ms).await
+            self.conn()
+                .await?
+                .set(&scoped, value.as_bytes(), ttl_ms)
+                .await
                 .map_err(|e| map_redis_err("set", e, Some(&self.url)))
         }
     }
@@ -222,12 +248,16 @@ impl Backend for Redis {
     async fn delete(&self, app_id: &str, key: &str) -> Result<bool, KvError> {
         let scoped = scope(app_id, key);
         if is_cluster_url(&self.url) {
-            self.cluster().await?
-                .del(&scoped).await
+            self.cluster()
+                .await?
+                .del(&scoped)
+                .await
                 .map_err(|e| map_redis_err("del", e, Some(&self.url)))
         } else {
-            self.conn().await?
-                .del(&scoped).await
+            self.conn()
+                .await?
+                .del(&scoped)
+                .await
                 .map_err(|e| map_redis_err("del", e, Some(&self.url)))
         }
     }
@@ -247,12 +277,16 @@ impl Backend for Redis {
         let keys = [scoped.as_str()];
         let args = [delta_s.as_str(), ttl_s.as_str()];
         if is_cluster_url(&self.url) {
-            self.cluster().await?
-                .eval(INCR_TTL_SCRIPT, &keys, &args).await
+            self.cluster()
+                .await?
+                .eval(INCR_TTL_SCRIPT, &keys, &args)
+                .await
                 .map_err(map_incr_err)
         } else {
-            self.conn().await?
-                .eval(INCR_TTL_SCRIPT, &keys, &args).await
+            self.conn()
+                .await?
+                .eval(INCR_TTL_SCRIPT, &keys, &args)
+                .await
                 .map_err(map_incr_err)
         }
     }
@@ -266,12 +300,16 @@ impl Backend for Redis {
     ) -> Result<bool, KvError> {
         let scoped = scope(app_id, key);
         if is_cluster_url(&self.url) {
-            self.cluster().await?
-                .set_nx(&scoped, value.as_bytes(), ttl_ms).await
+            self.cluster()
+                .await?
+                .set_nx(&scoped, value.as_bytes(), ttl_ms)
+                .await
                 .map_err(|e| map_redis_err("setIfAbsent", e, Some(&self.url)))
         } else {
-            self.conn().await?
-                .set_nx(&scoped, value.as_bytes(), ttl_ms).await
+            self.conn()
+                .await?
+                .set_nx(&scoped, value.as_bytes(), ttl_ms)
+                .await
                 .map_err(|e| map_redis_err("setIfAbsent", e, Some(&self.url)))
         }
     }
@@ -279,12 +317,16 @@ impl Backend for Redis {
     async fn expire(&self, app_id: &str, key: &str, ttl_ms: u64) -> Result<bool, KvError> {
         let scoped = scope(app_id, key);
         if is_cluster_url(&self.url) {
-            self.cluster().await?
-                .pexpire(&scoped, ttl_ms).await
+            self.cluster()
+                .await?
+                .pexpire(&scoped, ttl_ms)
+                .await
                 .map_err(|e| map_redis_err("expire", e, Some(&self.url)))
         } else {
-            self.conn().await?
-                .pexpire(&scoped, ttl_ms).await
+            self.conn()
+                .await?
+                .pexpire(&scoped, ttl_ms)
+                .await
                 .map_err(|e| map_redis_err("expire", e, Some(&self.url)))
         }
     }
@@ -292,12 +334,16 @@ impl Backend for Redis {
     async fn ttl(&self, app_id: &str, key: &str) -> Result<TtlState, KvError> {
         let scoped = scope(app_id, key);
         let raw = if is_cluster_url(&self.url) {
-            self.cluster().await?
-                .pttl(&scoped).await
+            self.cluster()
+                .await?
+                .pttl(&scoped)
+                .await
                 .map_err(|e| map_redis_err("ttl", e, Some(&self.url)))?
         } else {
-            self.conn().await?
-                .pttl(&scoped).await
+            self.conn()
+                .await?
+                .pttl(&scoped)
+                .await
                 .map_err(|e| map_redis_err("ttl", e, Some(&self.url)))?
         };
         // PTTL wire semantics: -2 missing, -1 no expiry, n>=0 ms remaining.
@@ -311,12 +357,16 @@ impl Backend for Redis {
     async fn persist(&self, app_id: &str, key: &str) -> Result<bool, KvError> {
         let scoped = scope(app_id, key);
         if is_cluster_url(&self.url) {
-            self.cluster().await?
-                .persist(&scoped).await
+            self.cluster()
+                .await?
+                .persist(&scoped)
+                .await
                 .map_err(|e| map_redis_err("persist", e, Some(&self.url)))
         } else {
-            self.conn().await?
-                .persist(&scoped).await
+            self.conn()
+                .await?
+                .persist(&scoped)
+                .await
                 .map_err(|e| map_redis_err("persist", e, Some(&self.url)))
         }
     }
@@ -348,12 +398,16 @@ impl Backend for Redis {
         let count = limit.min(u32::MAX as usize) as u32;
 
         let (next, batch) = if is_cluster_url(&self.url) {
-            self.cluster().await?
-                .scan(app_id, scan_cursor, &pattern, count).await
+            self.cluster()
+                .await?
+                .scan(app_id, scan_cursor, &pattern, count)
+                .await
                 .map_err(|e| map_redis_err("scan", e, Some(&self.url)))?
         } else {
-            self.conn().await?
-                .scan(scan_cursor, &pattern, count).await
+            self.conn()
+                .await?
+                .scan(scan_cursor, &pattern, count)
+                .await
                 .map_err(|e| map_redis_err("scan", e, Some(&self.url)))?
         };
 

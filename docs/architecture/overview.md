@@ -35,7 +35,8 @@ Builder sandbox (NOT in this repo)
 | Bundle | `crates/bundle` | `.zship` manifest types, blob store trait, ingest path, legacy bundle store types |
 | Core | `crates/core` | Shared wire types, auth helpers, typed IDs, observability helpers |
 | DB plugin | `crates/plugin-db` | `env.db.*` |
-| KV plugin | `crates/plugin-kv` | `env.kv.*` |
+| KV storage | `crates/zeroship-kv` | Backend contract and Redis/redb implementations |
+| KV V8 binding | `crates/zeroship-kv-v8` | `env.kv.*` |
 | Storage plugin | `crates/plugin-storage` | `env.storage.*` |
 
 The sandbox/preview backend used to be a crate here. It is not: it was extracted

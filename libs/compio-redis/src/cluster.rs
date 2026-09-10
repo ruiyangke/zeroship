@@ -618,7 +618,7 @@ impl ClusterClient {
         // fail. Writing the slot map before that point is what turned a
         // single bad redirect into a permanent brick: every later command
         // for the slot resolved to the refused address with no redirect in
-        // play, and plugin-kv's thread-local ClusterClient cache never
+        // play, and zeroship-kv's thread-local ClusterClient cache never
         // evicts, so the poisoning outlived the request. We therefore hold
         // the update here and commit it only once the claimed owner has
         // replied on this attempt; otherwise it is dropped with the loop
@@ -1357,7 +1357,7 @@ mod moved_poisoning_tests {
     /// Pre-fix `send_to_slot` called `set_slot(s, &new_addr)` before
     /// anything validated `new_addr`, so the refused address became the
     /// cached owner of the slot for the life of the client (and, via
-    /// plugin-kv's thread-local `ClusterClient` cache, for the life of the
+    /// zeroship-kv's thread-local `ClusterClient` cache, for the life of the
     /// worker thread). The first command fails either way, and that alone
     /// proves nothing. The load-bearing assertion is the SECOND command:
     /// the mock redirects only once, so no redirect is in play, and the

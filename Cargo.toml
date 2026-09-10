@@ -256,7 +256,8 @@ zeroship-migrate-sqlite = { path = "crates/zeroship-migrate-sqlite" }
 zeroship-migrate-mysql = { path = "crates/zeroship-migrate-mysql" }
 zeroship-plugin-db = { path = "crates/zeroship-plugin-db" }
 zeroship-plugin-storage = { path = "crates/zeroship-plugin-storage" }
-zeroship-plugin-kv = { path = "crates/zeroship-plugin-kv" }
+zeroship-kv = { path = "crates/zeroship-kv", default-features = false }
+zeroship-kv-v8 = { path = "crates/zeroship-kv-v8" }
 zeroship-plugin-workflow = { path = "crates/zeroship-plugin-workflow" }
 zeroship-metering = { path = "crates/zeroship-metering" }
 zeroship-stream = { path = "crates/zeroship-stream" }

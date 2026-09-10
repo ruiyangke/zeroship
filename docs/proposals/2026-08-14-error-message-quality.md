@@ -264,7 +264,7 @@ none of it reaches an anonymous HTTP caller. Six redaction mechanisms exist
 | --- | --- | --- |
 | `build_error_body` 5xx rail | `crates/zeroship-runtime/src/core/dispatch.rs:148` | the main boundary |
 | `infrastructure_error_response` | `crates/zeroship-control/src/api.rs:140` | 15 sites in `api.rs`, 4 in `workflow_instance_api.rs` |
-| `redact_url` | `crates/zeroship-plugin-kv/src/error.rs:178-189` | 3 sites, all URL-bearing plugin-kv messages |
+| `redact_url` | `crates/zeroship-kv/src/error.rs` | 3 sites, all URL-bearing kv-v8 messages |
 | `scrub_constraint_detail` | `crates/zeroship-plugin-db/src/error.rs:713-718` | strips PG `DETAIL:` (the conflicting value) |
 | `PublicErrorMessage` | `crates/zeroship-auth/src/ui/mod.rs:83-113` | closed enum, 5 strings, end-user login UI |
 | `oidc_callback_public_error` | `crates/zeroship-gateway/src/router/dispatch.rs:2909` | returns `&'static str` -- leak-proof by type |
@@ -285,11 +285,11 @@ Specific leak sites worth fixing, all traced to OPERATOR-ONLY over HTTP:
   this reads as an oversight rather than intent. Routes only to
   `infrastructure_error_response`, so it is logged and blanked.
 - **Redis credentials bypassing the helper built to stop them.**
-  `crates/zeroship-plugin-kv/src/backend/redis.rs:170` applies `redact_url` to the outer
+  `crates/zeroship-kv/src/backend/redis.rs:170` applies `redact_url` to the outer
   URL but interpolates the inner error raw, and
   `libs/compio-redis/src/client.rs:94` builds `bad URL '{url_str}': {e}` with the
   password intact. Separately, `redact_url` passes unparseable input through
-  verbatim (`crates/zeroship-plugin-kv/src/error.rs:187`, `Err(_) => raw.to_string()`) --
+  verbatim (`crates/zeroship-kv/src/error.rs`, `Err(_) => raw.to_string()`) --
   and a malformed URL can still contain a password. Reaches app JS; requires
   operator misconfiguration.
 - **`crates/zeroship-data-orm/src/backend/postgres/implementation.rs`** -- pg_dump/pg_restore
@@ -601,7 +601,7 @@ Cost: under an hour. Risk: very low.
 **Option 1d. Fix the three concrete leak sites.** Change `{error:?}` to
 `{error}` at `crates/zeroship-control/src/cron/workflow_engine.rs:1084` to match its
 sibling at `:1080`; interpolate `redact_url(...)` rather than the raw inner error
-at `crates/zeroship-plugin-kv/src/backend/redis.rs:170`; and either bound or drop the
+at `crates/zeroship-kv/src/backend/redis.rs:170`; and either bound or drop the
 4096-byte raw-stderr arm at `crates/zeroship-data-orm/src/backend/postgres/implementation.rs`.
 Cost: an hour. Risk: very low. All three are currently contained by the 5xx rail,
 so this is defence in depth rather than an active exposure -- which is also the

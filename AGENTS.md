@@ -57,7 +57,7 @@ None of this is licence to measure less - measure more, and put the result in a 
 | **The DB SDK** (`@zeroship/db`) | `docs/reference/db.md` · `crates/zeroship-plugin-db/` (adapter: V8 classes, per-isolate context, CDC) · `crates/zeroship-data-orm/` (engine: CRUD, transactions, exec, lanes) |
 | **The migration DSL** (`@zeroship/migrate`, portable op DSL) | `docs/reference/migrate-op-dsl.md` · `packages/zero-migrate/` (the one authoring package and recorder) · `crates/zeroship-migrate-server/` · `crates/zeroship-migrate*/` (the engine crates, in-sourced) · `db/migrations-ts/` (JS DSL; sole platform migration source — no SQL/Flyway) |
 | **The PLATFORM's own schema** (`db/migrations-ts/`) | `deploy/ops/db-migrate.sh` (the sanctioned applier) · `tests/platform_migration_corpus_gate.sh` (proves it records and applies the corpus) · `policies/platform.policy.toml`. Platform and creator migrations both import the single **`@zeroship/migrate`** package in `packages/zero-migrate/`; the engine CLI and Vite plugin drain that package's one ambient recorder. This identity is load-bearing: importing a second implementation would record into another singleton and let the host drain empty. The 2026-08-28 outage was exactly that split; `docs/reviews/2026-08-28-migrate-dsl-fork-divergence.md` preserves the history. There is no alias and no second SDK package. |
-| **The KV SDK** (`@zeroship/kv`) | `docs/reference/kv.md` · `sdks/kv/` · `crates/zeroship-plugin-kv/` |
+| **KV storage and SDK** (`@zeroship/kv`) | `docs/reference/kv.md` · `crates/zeroship-kv/` (storage) · `crates/zeroship-kv-v8/` (V8 binding) · `sdks/kv/` |
 | **The RPC SDK / server functions** (`@zeroship/rpc`) | `docs/reference/rpc.md` · `sdks/rpc/` · `sdks/vite-plugin/src/{transform,rpc-registry,manifest}.ts` · `sdks/bootstrap/src/dispatcher.ts` |
 | **Durable workflows** (`@zeroship/workflows`, `env.workflows`) | `docs/reference/workflows.md` · `sdks/workflows/` · `crates/zeroship-plugin-workflow/` · `crates/zeroship-control/src/{workflow_instance_api.rs,cron/workflow_engine.rs}` · `crates/zeroship-worker/src/handler.rs` |
 | **Build a creator app + deploy** (the primary creator flow) | `docs/build-and-deploy-golden-path.md` · `examples/starter/` (scaffold + `CLAUDE.md`) · `tests/golden_path.sh` · `crates/zeroship-cli/` (`zeroship deploy`) |
@@ -162,7 +162,8 @@ crates/
 ├── zeroship-plugin-db/      env.db.* ADAPTER: V8 classes, per-isolate composition, service lifecycle and CDC. CRUD dispatch prepares and executes the engine's ORM operations, then encodes results for V8.
 ├── zeroship-data-orm/    ORM: bound Database and Collection handles, Rust model mapping, CRUD protection passes, transaction protocol, routed execution, transaction lanes and per-app role provisioning. The shared driver interface registers backend adapters. No V8 or adapter dependency.
 ├── zeroship-data-macros/    Migration-derived Rust collection metadata and FromRow, Insertable, Changeset derives. Re-exported through data-orm::orm; no runtime or driver dependency.
-├── zeroship-plugin-kv/      env.kv.* native ops
+├── zeroship-kv/         App-scoped KV contract, errors, and Redis/redb backends; no V8
+├── zeroship-kv-v8/      env.kv binding: V8 conversion, isolate state, dispatch, metering
 ├── zeroship-plugin-storage/ env.storage.* native ops
 ├── zeroship-metering/ Meter (atomic per-(app,metric) counters) + compio usage-event outbox task; NO V8. The data plugins emit usage metrics into it; there is no env.meter.
 ├── zeroship-stream/  Kafka-family durable event stream (StreamTransport trait + registry + Redpanda adapter)

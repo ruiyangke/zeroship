@@ -353,7 +353,7 @@ before.
    `format!` near env reads and found only URL and error-string construction -
    **VERIFIED for `crates/cli` only**, not for the plugin crates it links.
 2. **Link-time versus source-time.** `DECLARED_ENV_READS` is populated by whatever
-   the binary *links*. If `zeroship-runtime`, `plugin-db`, `plugin-kv`,
+   the binary *links*. If `zeroship-runtime`, `plugin-db`, `kv-v8`,
    `plugin-storage` or `plugin-workflow` read environment variables internally,
    those reads are in the shipped `zeroship` binary but are invisible to a grep of
    `crates/zeroship-cli/src/`. **NOT CHECKED.** The authoritative enumeration is to run a

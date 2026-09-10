@@ -599,7 +599,7 @@ pub struct RuntimeState {
     ///
     /// Carries hand-injected slots like `APP_ID` (set by
     /// `crates/zeroship-worker/src/cache.rs` so plugin-db / plugin-storage /
-    /// plugin-kv can resolve the per-tenant scope). Distinct from the
+    /// kv-v8 can resolve the per-tenant scope). Distinct from the
     /// per-app `env_app_vars` / `env_app_secrets` which are the
     /// user-controlled environment.
     pub env_vars: HashMap<String, String>,

@@ -12,7 +12,7 @@
 //! - [`ClusterClient`] — cluster-mode. Bootstraps `CLUSTER SLOTS` topology
 //!   from a trusted seed, hash-tag-routes keys to the owning node, and
 //!   **handles MOVED/ASK redirects** (retrying against the redirect target,
-//!   bounded by a redirect cap). `plugin-kv` selects this path for any
+//!   bounded by a redirect cap). `zeroship-kv` selects this path for any
 //!   cluster URL; it is a publicly exported, production type — not a stub.
 //!
 //! # Trust model

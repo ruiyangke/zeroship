@@ -49,7 +49,7 @@
 //!
 //! The seam is typed on [`AppId`], and much of the tree still carries an app id
 //! as `&str` - `zeroship_data_orm::encryption::keys::resolve`,
-//! `zeroship_plugin_db::replication`, `zeroship_plugin_kv::backend::scope`,
+//! `zeroship_plugin_db::replication`, `zeroship_kv::backend::scope`,
 //! `zeroship_plugin_storage::backend`. Those sites cannot construct an
 //! [`AppId`] without a fallible parse that would refuse the non-uuid app ids
 //! their own tests pass, so they keep their present composers until the string
@@ -267,7 +267,7 @@ pub fn bundle_path_segment(app: &AppId) -> String {
 
 /// The Redis cluster hash tag every one of this app's KV keys carries.
 ///
-/// `zeroship_plugin_kv::backend::scope` composes `<scope>:<user key>`. The
+/// `zeroship_kv::backend::scope` composes `<scope>:<user key>`. The
 /// braces are the tag, and they are load-bearing twice over: they keep one
 /// app's whole keyspace on one shard, and `validate_key` refuses a user key
 /// containing a brace precisely so a key cannot forge a second tag and escape
