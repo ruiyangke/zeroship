@@ -4,7 +4,7 @@
  * collecting all field errors before throwing a single ValidationError.
  */
 import { NormalizedSchema } from "./schema";
-import { FieldDef, PlainObject, TypeName } from "./types";
+import { FieldDef, PlainObject, TypeName, PrimitiveTypeName } from "./types";
 import { ValidationError, FieldError } from "./errors";
 
 type Doc = PlainObject;
@@ -141,6 +141,20 @@ export function isJsonSerializable(value: unknown, seen?: WeakSet<object>): bool
     if (!isJsonSerializable(v, visited)) return false;
   }
   return true;
+}
+
+const ARRAY_ITEM_VALIDATORS: Record<PrimitiveTypeName, (value: unknown) => boolean> = {
+  string: value => typeof value === "string",
+  number: value => typeof value === "number",
+  boolean: value => typeof value === "boolean",
+  date: isTimestampValue,
+  calendarDate: value => typeof value === "string" && isValidCalendarDate(value),
+  json: isJsonSerializable,
+};
+
+/** Shared by document and array-operation validation. */
+export function isArrayElement(itemType: PrimitiveTypeName, value: unknown): boolean {
+  return Object.hasOwn(ARRAY_ITEM_VALIDATORS, itemType) && ARRAY_ITEM_VALIDATORS[itemType](value);
 }
 
 /**
@@ -437,23 +451,12 @@ function checkField(
       errors[key] = { path: key, message: `${key} must have at most ${max} items` };
       return;
     }
-    // Validate each array element against the declared item type.
-    // R6 — keep this branch list in sync with `PRIMITIVE_ITEM_TYPES` in
-    // types.ts and `validateArrayPushOps` in collection.ts. Adding a new
-    // primitive item type means a case here, a case there, and a case in
-    // `t.array()`'s allow-list.
+    // Document writes and array operators use the same item contract.
     if (def.items !== undefined) {
       const itemType = def.items;
       for (let i = 0; i < value.length; i++) {
         const elem = value[i];
-        let ok = true;
-        if (itemType === "string") ok = typeof elem === "string";
-        else if (itemType === "number") ok = typeof elem === "number";
-        else if (itemType === "boolean") ok = typeof elem === "boolean";
-        else if (itemType === "date") ok = isTimestampValue(elem);
-        else if (itemType === "calendarDate") ok = typeof elem === "string" && isValidCalendarDate(elem);
-        else if (itemType === "json") ok = isJsonSerializable(elem);
-        if (!ok) {
+        if (!isArrayElement(itemType, elem)) {
           errors[key] = {
             path: key,
             message: `${key}[${i}] must be a ${itemType}`,

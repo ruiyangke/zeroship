@@ -21,6 +21,16 @@ import { normalizeSchema } from "@zeroship/bootstrap/install-schema";
 import { ValidationError } from "../src/errors.js";
 import { validateArrayPushOps } from "../src/collection.js";
 
+test("documents and array operators reject unknown item metadata", () => {
+  for (const kind of ["unknown", "constructor", "toString", "__proto__"]) {
+    const schema = normalizeSchema({ values: t.array(t.string()) });
+    (schema.values as { items: string }).items = kind;
+    assert.throws(() => validateDoc({ values: ["item"] }, schema), ValidationError);
+    assert.throws(() => validateArrayPushOps({ $push: { values: "item" } }, schema), ValidationError);
+    assert.throws(() => validateArrayPushOps({ $addToSet: { values: "item" } }, schema), ValidationError);
+  }
+});
+
 describe("R5 MINOR — t.array() rejects non-primitive item types", () => {
   test("rejects t.array(t.ref('users'))", () => {
     try {

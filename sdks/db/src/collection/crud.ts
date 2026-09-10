@@ -22,9 +22,7 @@ import {
 import {
   validateDoc,
   checkPartial,
-  isValidCalendarDate,
-  isJsonSerializable,
-  isTimestampValue,
+  isArrayElement,
 } from "../validate";
 import {
   type Actor,
@@ -119,19 +117,7 @@ export function validateArrayPushOps(
       if (!def || def.type !== "array" || !def.items) continue;
       const itemType = def.items;
 
-      let valid = true;
-      if (itemType === "string") valid = typeof val === "string";
-      else if (itemType === "number") valid = typeof val === "number";
-      else if (itemType === "boolean") valid = typeof val === "boolean";
-      else if (itemType === "date") {
-        valid = isTimestampValue(val);
-      } else if (itemType === "calendarDate") {
-        valid = typeof val === "string" && isValidCalendarDate(val);
-      } else if (itemType === "json") {
-        valid = isJsonSerializable(val);
-      }
-
-      if (!valid) {
+      if (!isArrayElement(itemType, val)) {
         throw new ValidationError({
           [field]: {
             path: field,
