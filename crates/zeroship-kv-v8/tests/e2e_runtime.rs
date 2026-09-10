@@ -31,6 +31,9 @@
 //! receiver. kv-v8's test crate can't import runtime's test-only
 //! `common` module, so the minimal pieces are replicated inline.
 
+#[path = "../../zeroship-kv/tests/support/mod.rs"]
+mod support;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -812,106 +815,33 @@ fn e2e_scenarios() {
     assert_ok(status, &body);
 }
 
-// ---------------------------------------------------------------------------
-// Dragonfly / Redis (live single-node) — the ONLY end-to-end coverage of the
-// KV-over-Redis path through the real runtime.
-//
-// It used to be gated on `ZEROSHIP_KV_URL`, which nothing in this repo ever
-// set, so the arm below had never run anywhere. Its sibling
-// `redis_backend.rs` was converted to the overlay on 2026-08-18 (4deef7bdc,
-// "test(kv): delete KV_REQUIRE_REDIS and require the redis these tests name")
-// and this file was missed. `test_kv_url()` resolves `REDIS_TEST_URL` then
-// the generated overlay and panics naming `tests/provision_test_backends.sh`,
-// so a missing Redis is loud rather than a silent pass.
-// ---------------------------------------------------------------------------
-
+// Run the same JavaScript contract against Docker-owned network backends.
 #[test]
-fn e2e_dragonfly() {
-    let url = zeroship_core::config::test_kv_url();
-    let backend = Redis::new(url);
+fn e2e_redis() {
+    let fixtures = support::fixtures();
+    let backend = Redis::new(fixtures.redis_url());
     let (status, body) = run_e2e(Arc::new(backend));
     assert_ok(status, &body);
 }
-
-// ---------------------------------------------------------------------------
-// Dragonfly CLUSTER (live 3-node) — REQUIRES DRAGONFLY_CLUSTER_SEEDS
-// (comma-joined seed URLs, e.g.
-// redis://127.0.0.1:7000,redis://127.0.0.1:7001,redis://127.0.0.1:7002).
-// FAILS when unset, naming the two commands that stand a cluster up. It used to
-// skip, so the only end-to-end cluster coverage in the tree reported green on
-// every machine that had no cluster.
-//
-// This is the ONLY end-to-end coverage of the cluster code path through the
-// real runtime: hash-tag scoping keeps an app's keys in one slot, the `incr`
-// Lua EVAL routes to the right node, SCAN-based `list` routes correctly, and
-// SET NX / pexpire / pttl / persist all work through the cluster client. The
-// JS app + assertions are reused verbatim from `run_e2e`.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn e2e_dragonfly_cluster() {
-    let seeds = zeroship_core::test_env!("DRAGONFLY_CLUSTER_SEEDS").unwrap_or_default();
-    // Build the kv-v8 cluster URL exactly like
-    // redis_backend.rs::cluster_url(): base URL = first seed, plus
-    // ?cluster=true&seeds=<comma-joined seeds>.
-    let first = seeds
-        .split(',')
-        .next()
-        .unwrap_or_default()
-        .trim()
-        .to_string();
-    assert!(
-        !first.is_empty(),
-        "A Dragonfly CLUSTER is unreachable, and this test requires it.\n\
-         \n\
-         \x20 backend: Dragonfly, cluster mode, three nodes\n\
-         \x20 missing: DRAGONFLY_CLUSTER_SEEDS names no seed\n\
-         \n\
-         This is the only end-to-end cluster coverage in the tree, so an absent\n\
-         cluster leaves the whole path unexercised.\n\
-         \n\
-         `tests/provision_test_backends.sh` does NOT stand this up - it\n\
-         provisions single-node postgres and redis only. Bring the cluster up\n\
-         yourself, in this order:\n\
-         \x20 docker compose -f deploy/compose/cluster.yml up -d\n\
-         \x20 deploy/scripts/bootstrap-dragonfly-cluster.sh\n\
-         \n\
-         The second command is not optional: a `cluster_mode=yes` node ships\n\
-         with no slot map and answers nothing until it is pushed one. Then\n\
-         export the seeds and re-run:\n\
-         \x20 DRAGONFLY_CLUSTER_SEEDS=redis://127.0.0.1:7000,redis://127.0.0.1:7001,redis://127.0.0.1:7002\n\
-         \n\
-         Tear it down with `docker compose -f deploy/compose/cluster.yml down -v`.\n\
-         \n\
-         There is no environment variable that makes this a skip. A cluster\n\
-         this test cannot reach is a failed run, not a green one."
-    );
-    let cluster_url = format!("{first}?cluster=true&seeds={seeds}");
-    let backend = Redis::new(cluster_url);
+    let fixtures = support::fixtures();
+    let backend = Redis::new(fixtures.cluster_url());
     let (status, body) = run_e2e(Arc::new(backend));
     assert_ok(status, &body);
 }
 
-// ---------------------------------------------------------------------------
-// Backend UNAVAILABLE (single-node Redis pointed at a dead port) — runs in
-// ANY environment because the point is that NO server is listening. This is
-// the resilience guarantee: when the backend is down, app code calling
-// `env.kv.*` rejects gracefully with a typed connection/backend error reaching
-// JS — it does NOT hang and does NOT panic the isolate.
-//
-// It also exercises `redis.rs`'s connect-error `.map_err` arms (the bulk of
-// its otherwise-uncovered lines): `pool()`→`Pool::connect` ECONNREFUSED, the
-// `conn()`/acquire path, and `map_redis_err`'s connection-class mapping — none
-// of which a healthy server ever triggers.
-//
-// 127.0.0.1:6398 is an unused high port (connection-refused on loopback is
-// immediate, so this settles sub-second). The shared `run_app` harness drives
-// the pump under a 30s `compio::time::timeout`: a failure to reject (a hang)
-// would blow that timeout and FAIL the test rather than hang forever.
+/// A stopped server must reject KV operations with typed errors instead of
+/// hanging the isolate. The fetch harness bounds completion with a timeout.
 #[test]
 fn e2e_backend_unavailable() {
-    // Single-node URL (NOT cluster) at a dead port — nothing listens here.
-    let backend = Redis::new("redis://127.0.0.1:6398");
+    let server = support::start_redis();
+    let url = support::endpoint(&server);
+    server
+        .stop()
+        .expect("stop Redis before calling the binding");
+    let backend = Redis::new(url);
     let (status, body) = run_app(Arc::new(backend), KV_BACKEND_DOWN_APP);
     assert_ok(status, &body);
 }

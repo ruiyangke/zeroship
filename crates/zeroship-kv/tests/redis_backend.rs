@@ -1,105 +1,17 @@
-//! Integration tests for the Redis backend — exercises the Backend
-//! trait impl against a live Redis AND a live 3-node Dragonfly cluster.
-//!
-//! Single-node: REQUIRED. `tests/provision_test_backends.sh` starts it and
-//!              writes its address into the test overlay, so nothing needs
-//!              exporting. `REDIS_TEST_URL` overrides that.
-//!
-//!              This line used to read `set REDIS_TEST_URL=redis://127.0.0.1:6379`,
-//!              and 6379 was the wrong port as well as the wrong instruction -
-//!              deploy/compose publishes this workspace's Redis on 6390
-//!              precisely because 6379 is the port some OTHER project's
-//!              container is already holding on a shared development machine.
-//! Cluster:     REQUIRED TOO, and nothing here skips any more.
-//!              `tests/provision_test_backends.sh` does not stand it up - see
-//!              its "WHAT IT DOES NOT PROVISION" list - so the two commands
-//!              that do are named in `cluster_seeds`'s refusal:
-//!                docker compose -f deploy/compose/cluster.yml up -d
-//!                deploy/scripts/bootstrap-dragonfly-cluster.sh
-//!              then set
-//!              `DRAGONFLY_CLUSTER_SEEDS='redis://127.0.0.1:7000,redis://127.0.0.1:7001,redis://127.0.0.1:7002'`
+//! Backend contracts against isolated Redis and Dragonfly containers.
+//! Run with Cargo and an available Docker daemon; fixtures are created and
+//! removed by the tests. Container startup failures fail the suite.
 
 #![cfg(feature = "redis")]
 
+mod support;
+
 use zeroship_kv::backend::{Backend, Redis, TtlState};
-
-/// The single-node Redis these tests dial.
-///
-/// NO `KV_REQUIRE_REDIS` FLAG, and its deletion is the change. This used to
-/// return `Option`, announce a skip when `REDIS_TEST_URL` was unset, and panic
-/// only when `KV_REQUIRE_REDIS=1` turned the skip into a failure. The doc
-/// comment said "CI sets the require flag". Nothing set it: a repository-wide
-/// search for the name found this file, one line of `crates/worker`, and two
-/// archived documents - no workflow, no script, no Makefile. So the panic arm
-/// was unreachable and every one of these tests had been skipping-as-passing
-/// for as long as the flag existed, protected by a comment claiming otherwise.
-///
-/// That is the same shape `ZEROSHIP_REQUIRE_LIVE_BACKENDS` had, and it is
-/// resolved the same way it was: the flag is deleted and the requirement is
-/// stated unconditionally. Redis is not optional for a Redis backend's tests.
-/// `tests/provision_test_backends.sh` stands one up and writes its address into
-/// the test overlay, so the address resolves with nothing exported at all.
-///
-/// # Panics
-///
-/// When neither `REDIS_TEST_URL` nor the overlay names a Redis, with the
-/// command that provisions one.
-fn redis_url() -> String {
-    zeroship_core::config::test_kv_url()
-}
-
-/// The seed list the live-cluster tests dial.
-///
-/// # Panics
-///
-/// When `DRAGONFLY_CLUSTER_SEEDS` names no seed, with the two commands that
-/// stand a cluster up. It used to announce a skip, which cargo counts as a
-/// pass: the cluster arms of this file reported green on every machine that had
-/// never heard of Dragonfly, which is every machine.
-fn cluster_seeds() -> String {
-    let seeds = zeroship_core::test_env!("DRAGONFLY_CLUSTER_SEEDS").unwrap_or_default();
-    assert!(
-        !seeds.split(',').next().unwrap_or_default().trim().is_empty(),
-        "A Dragonfly CLUSTER is unreachable, and this test requires it.\n\
-         \n\
-         \x20 backend: Dragonfly, cluster mode, three nodes\n\
-         \x20 missing: DRAGONFLY_CLUSTER_SEEDS names no seed\n\
-         \n\
-         `tests/provision_test_backends.sh` does NOT stand this up - it\n\
-         provisions single-node postgres and redis only. Bring the cluster up\n\
-         yourself, in this order:\n\
-         \x20 docker compose -f deploy/compose/cluster.yml up -d\n\
-         \x20 deploy/scripts/bootstrap-dragonfly-cluster.sh\n\
-         \n\
-         The second command is not optional: a `cluster_mode=yes` node ships\n\
-         with no slot map and answers nothing until it is pushed one. Then\n\
-         export the seeds and re-run:\n\
-         \x20 DRAGONFLY_CLUSTER_SEEDS=redis://127.0.0.1:7000,redis://127.0.0.1:7001,redis://127.0.0.1:7002\n\
-         \n\
-         Tear it down with `docker compose -f deploy/compose/cluster.yml down -v`.\n\
-         \n\
-         There is no environment variable that makes this a skip. A cluster\n\
-         this test cannot reach is a failed run, not a green one."
-    );
-    seeds
-}
-
-fn cluster_url() -> String {
-    let seeds = cluster_seeds();
-    let first = seeds
-        .split(',')
-        .next()
-        .unwrap_or_default()
-        .trim()
-        .to_string();
-    // Build the "zeroship-kv" cluster URL: cluster=true + seeds=... with
-    // the base URL pointing at the first seed.
-    format!("{first}?cluster=true&seeds={seeds}")
-}
 
 #[compio::test]
 async fn single_node_roundtrip() {
-    let url = redis_url();
+    let fixtures = support::fixtures();
+    let url = fixtures.redis_url();
     let b = Redis::new(url);
     let app = "kv-test-single";
 
@@ -140,7 +52,8 @@ async fn list_all(b: &Redis, app: &str, prefix: &str) -> Vec<String> {
 
 #[compio::test]
 async fn cluster_roundtrip_via_backend() {
-    let b = Redis::new(cluster_url());
+    let fixtures = support::fixtures();
+    let b = Redis::new(fixtures.cluster_url());
     let app = "kv-test-cluster";
 
     b.delete(app, "k1").await.ok();
@@ -176,7 +89,8 @@ async fn cluster_roundtrip_via_backend() {
 
 #[compio::test]
 async fn ttl_expires_in_cluster_mode() {
-    let url = cluster_url();
+    let fixtures = support::fixtures();
+    let url = fixtures.cluster_url();
     let b = Redis::new(url);
     let app = "kv-test-cluster-ttl";
 
@@ -187,26 +101,15 @@ async fn ttl_expires_in_cluster_mode() {
     assert!(b.get(app, "bye").await.unwrap().is_none());
 }
 
-// -----------------------------------------------------------------
-// Edge-case coverage. These apply to single-node and cluster modes
-// alike — we parameterize via a helper that runs the body against
-// whichever backend is available.
-// -----------------------------------------------------------------
-
-/// Run `body` against the single-node Redis AND the Dragonfly cluster.
-///
-/// BOTH BACKENDS ARE REQUIRED, and the cluster leg is no longer conditional.
-/// `redis_url` and `cluster_seeds` each panic when their backend is absent, so
-/// this cannot run one backend, or zero, and report the green a two-backend run
-/// reports. The `label` an assertion carries is the only thing that told the
-/// two apart in a failure, and it told a reader nothing about which legs ran.
+/// Run each contract against both network backends.
 async fn for_each_backend<F, Fut>(f: F)
 where
     F: Fn(Redis, &'static str) -> Fut,
     Fut: std::future::Future<Output = ()>,
 {
-    f(Redis::new(redis_url()), "single").await;
-    f(Redis::new(cluster_url()), "cluster").await;
+    let fixtures = support::fixtures();
+    f(Redis::new(fixtures.redis_url()), "single").await;
+    f(Redis::new(fixtures.cluster_url()), "cluster").await;
 }
 
 #[compio::test]
@@ -466,14 +369,10 @@ async fn incr_on_non_numeric_is_typed_error() {
 }
 
 #[compio::test]
-async fn same_sorted_seeds_share_cluster_handle() {
-    // Two Redis backends with the same seeds but written in different
-    // orders should end up cached under the same key and share a handle.
-    // This is observable by connecting both and checking that operations
-    // via one are visible to the other — which is inherent to any
-    // correctness-focused KV, but also shows the pool is re-used (no
-    // flakiness from duplicate bootstrap).
-    let seeds = cluster_seeds();
+async fn reordered_seeds_preserve_data_access() {
+    let fixtures = support::fixtures();
+    let url = url::Url::parse(fixtures.cluster_url()).unwrap();
+    let seeds = url.query_pairs().find(|(key, _)| key == "seeds").unwrap().1;
     let parts: Vec<&str> = seeds.split(',').map(str::trim).collect();
     assert!(parts.len() >= 2, "need >= 2 seeds for this test");
 
@@ -493,7 +392,7 @@ async fn same_sorted_seeds_share_cluster_handle() {
     assert_eq!(
         b.get(app, "shared").await.unwrap().as_deref(),
         Some("written-via-a"),
-        "write via a must be visible to b (correctness + shared-handle hint)"
+        "write via a must be visible to b regardless of seed order"
     );
 
     b.delete(app, "shared").await.ok();

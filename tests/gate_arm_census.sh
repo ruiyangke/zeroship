@@ -124,7 +124,7 @@ usage() {
 # The count itself is deliberately the ONLY magnitude here. The history of how
 # often it drifted was prose that had to be maintained by hand and rotted the
 # same way the pin did.
-GATE_FILE_COUNT=56
+GATE_FILE_COUNT=55
 
 DIR=""
 RUN=()
