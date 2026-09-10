@@ -1451,7 +1451,7 @@ export const t = {
   /**
    * Creates a timestamp field — `TIMESTAMPTZ` in Postgres, Unix-ms
    * `number` at the JS layer. Accepts `Date`, ISO string, or `number`
-   * on input (the SDK normalises in `validate`). Reads come back as
+   * on input (the shared ORM normalizes using the descriptor). Reads come back as
    * `number` (millisecond epoch). For wall-clock dates without a
    * time-of-day component, use {@link calendarDate} instead.
    */

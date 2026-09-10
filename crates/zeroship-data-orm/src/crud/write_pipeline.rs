@@ -223,17 +223,17 @@ pub async fn apply(
     }
     match &mode {
         ApplyMode::Insert { .. } | ApplyMode::Upsert { .. } => {
-            zeroship_data_sql::codecs::validate_temporal_document(&schema, payload)?;
+            zeroship_data_sql::codecs::prepare_temporal_document(&schema, payload)?;
         }
         ApplyMode::InsertMany { .. } => {
-            if let Some(documents) = payload.as_array() {
+            if let Some(documents) = payload.as_array_mut() {
                 for document in documents {
-                    zeroship_data_sql::codecs::validate_temporal_document(&schema, document)?;
+                    zeroship_data_sql::codecs::prepare_temporal_document(&schema, document)?;
                 }
             }
         }
         ApplyMode::Update { .. } => {
-            zeroship_data_sql::codecs::validate_temporal_update(&schema, payload)?;
+            zeroship_data_sql::codecs::prepare_temporal_update(&schema, payload)?;
         }
     }
     // Stage 0. The descriptor decides which protections the stages below APPLY;

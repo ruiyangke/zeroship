@@ -166,6 +166,14 @@ context. PostgreSQL receives native timestamp binds; SQLite receives canonical
 UTC text. Neither path converts caller timestamps through floating-point SQL.
 Filters use the same binding codec, keeping the indexed column bare.
 
+Temporal fields inside declared objects, union variants, and primitive arrays
+follow the same logical contract. The shared codec normalizes them before
+protection and JSON storage, and applies the descriptor when binding filters
+and decoding results. Array-operation operands use the same normalization.
+Ordinary JSON fields remain opaque: their strings and JSON-encoded Dates keep
+their JSON representation. Invalid nested temporal writes fail before mutation;
+invalid stored values report a column decoding error without exposing contents.
+
 Vector and geographic-point fields return numeric
 arrays and latitude/longitude objects on both backends. Their binary storage
 encoding stays inside the backend and SQL codecs.

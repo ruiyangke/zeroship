@@ -1,6 +1,10 @@
 //! Logical values and their database storage representations.
 use crate::{compile, descriptors::GeoPoint, value::Value};
 
+mod temporal;
+pub(crate) use temporal::{prepare_array_operand, prepare_value};
+pub use temporal::{prepare_temporal_document, prepare_temporal_update};
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum CodecError {
     Internal {
@@ -171,88 +175,6 @@ fn schema_field_type<'a>(schema: &'a Value, field: &str) -> Option<&'a str> {
 
 fn schema_field<'a>(schema: &'a Value, field: &str) -> Option<&'a Value> {
     schema.as_object()?.get(field)
-}
-
-fn validate_temporal_value(kind: &str, field: &str, value: &Value) -> Result<(), CodecError> {
-    if value.is_null() {
-        return Ok(());
-    }
-    let (valid, code, expected) = if kind == "calendarDate" {
-        (
-            value
-                .as_str()
-                .is_some_and(|value| crate::temporal::parse_calendar_date(value).is_some()),
-            "invalid_calendar_date",
-            "a valid YYYY-MM-DD calendar date",
-        )
-    } else {
-        (
-            crate::temporal::timestamp_millis(value).is_some(),
-            "invalid_timestamp",
-            "a portable timestamp or integral Unix milliseconds",
-        )
-    };
-    if valid {
-        return Ok(());
-    }
-    Err(CodecError::validation(
-        code,
-        format!("column '{field}' requires {expected}"),
-    ))
-}
-
-/// Validate temporal writes before protection changes their storage shape.
-pub fn validate_temporal_document(schema: &Value, document: &Value) -> Result<(), CodecError> {
-    if let Some(document) = document.as_object() {
-        for (field, value) in document {
-            if let Some(kind @ ("calendarDate" | "date" | "timestamp")) =
-                schema_field_type(schema, field)
-            {
-                validate_temporal_value(kind, field, value)?;
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Validate temporal assignments and refuse arithmetic or collection operations.
-pub fn validate_temporal_update(schema: &Value, patch: &Value) -> Result<(), CodecError> {
-    let Some(patch) = patch.as_object() else {
-        return Ok(());
-    };
-    for (field, value) in patch {
-        if field == "$set" {
-            validate_temporal_document(schema, value)?;
-        } else if let Some(kind @ ("calendarDate" | "date" | "timestamp")) =
-            schema_field_type(schema, field)
-        {
-            if let Some(operations) = value.as_object() {
-                if operations.is_empty() {
-                    validate_temporal_value(kind, field, value)?;
-                }
-                for (operation, operand) in operations {
-                    match operation.as_str() {
-                        "$set" => validate_temporal_value(kind, field, operand)?,
-                        _ => {
-                            return Err(CodecError::validation(
-                                if kind == "calendarDate" {
-                                    "invalid_calendar_date_operation"
-                                } else {
-                                    "invalid_timestamp_operation"
-                                },
-                                format!(
-                                    "operation '{operation}' is not supported for temporal column '{field}'"
-                                ),
-                            ));
-                        }
-                    }
-                }
-            } else {
-                validate_temporal_value(kind, field, value)?;
-            }
-        }
-    }
-    Ok(())
 }
 
 fn encode_sqlite_binary_scalar(
@@ -469,6 +391,12 @@ fn normalize_row_on_read(
             Some("boolean") => normalize_boolean_value(value)?,
             Some("json") | Some("object") | Some("array") | Some("union") => {
                 normalize_json_value(dialect, key, value)?;
+                prepare_value(key, &schema[key], value).map_err(|_| {
+                    CodecError::Decode {
+                        column: key.clone(),
+                        reason: "invalid typed temporal JSON storage",
+                    }
+                })?;
             }
             Some("bytes") => normalize_bytes_value(value)?,
             Some("date" | "timestamp") => normalize_timestamp_value(key, value)?,
