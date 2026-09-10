@@ -301,8 +301,10 @@ impl<E: Entity> EntityCollection<E> {
             .validate()
             .and_then(|()| changes.into_changes())
             .map(|fields| {
-                self.collection
-                    .update(filter.into_value(), Value::Object(fields))
+                self.collection.update(
+                    filter.into_value(),
+                    Value::Object([("$set".into(), Value::Object(fields))].into()),
+                )
             });
         async move { Ok(decode_rows::<E, R>(future?.await?)?.pop()) }
     }

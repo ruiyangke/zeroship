@@ -93,6 +93,11 @@ check that required fields without database defaults are supplied. System fields
 are generated as read-only columns. The runtime still validates every operation,
 including operations from handwritten trait implementations.
 
+Changeset records contain literal field assignments. `Change::Set(value)` and
+`Field::set(value)` preserve JSON objects as data, including objects with keys
+that look like update operators. `Field::eq(value)` compares the complete JSON
+value without interpreting its object keys as filter operators.
+
 Write states are explicit:
 
 - `Option::None` supplies SQL NULL to a nullable column.

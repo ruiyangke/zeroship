@@ -13,6 +13,7 @@ mod json;
 mod nested_temporal;
 mod update_operators;
 mod update_validation;
+mod typed_updates;
 
 #[derive(Debug, FromRow)]
 #[orm(entity = posts)]

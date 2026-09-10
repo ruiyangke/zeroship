@@ -27,6 +27,7 @@ pub trait FromRow<E: Entity>: Sized {
 pub trait Insertable<E: Entity> {
     fn into_record(self) -> Result<Record, DbError>;
 }
+/// Literal column assignments. The entity API supplies the update operation.
 pub trait Changeset<E: Entity> {
     fn into_changes(self) -> Result<Record, DbError>;
 }
@@ -156,6 +157,11 @@ impl<C: FilterableColumn> Field<C> {
         let value = value
             .encode_value()
             .map_err(|error| field_error::<C>("filter", error))?;
+        let value = if value.is_object() {
+            Value::Object([("$eq".into(), value)].into())
+        } else {
+            value
+        };
         Ok(Filter {
             value: Value::Object([(C::NAME.into(), value)].into()),
             entity: PhantomData,

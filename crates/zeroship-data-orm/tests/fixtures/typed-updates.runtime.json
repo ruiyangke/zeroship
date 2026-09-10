@@ -1,0 +1,11 @@
+{
+  "version": 2,
+  "collections": {
+    "documents": {
+      "fields": {
+        "label": {"type": "string", "required": true},
+        "payload": {"type": "json", "required": true}
+      }
+    }
+  }
+}
