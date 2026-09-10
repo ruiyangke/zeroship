@@ -267,31 +267,15 @@ pub fn prepare_update(schema: &Value, patch: &mut Value) -> Result<(), CodecErro
             .filter(|ops| ops.keys().any(|key| key.starts_with('$')))
         {
             for (operation, operand) in operations {
-                match operation.as_str() {
-                    "$set" => prepare_value(field, definition, operand)?,
-                    "$push" | "$pull" | "$addToSet"
-                        if definition["type"].as_str() == Some("array") =>
-                    {
+                use crate::update::Operator;
+                let operation = Operator::parse(operation)?;
+                operation.validate_type(field, definition)?;
+                match operation {
+                    Operator::Set => prepare_value(field, definition, operand)?,
+                    Operator::Push | Operator::Pull | Operator::AddToSet => {
                         prepare_array_operand(field, definition, operand)?;
                     }
-                    _ if matches!(
-                        definition["type"].as_str(),
-                        Some("calendarDate" | "date" | "timestamp")
-                    ) || temporal_item(definition).is_some() =>
-                    {
-                        let code = match definition["type"].as_str() {
-                            Some("calendarDate") => "invalid_calendar_date_operation",
-                            Some("array") => "invalid_temporal_operation",
-                            _ => "invalid_timestamp_operation",
-                        };
-                        return Err(CodecError::validation(
-                            code,
-                            format!(
-                                "operation '{operation}' is not supported for temporal column '{field}'"
-                            ),
-                        ));
-                    }
-                    _ => {}
+                    Operator::Increment | Operator::Decrement | Operator::Multiply => {}
                 }
             }
         } else {

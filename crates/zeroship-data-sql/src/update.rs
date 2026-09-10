@@ -17,7 +17,7 @@ pub enum Operator {
 }
 
 impl Operator {
-    fn parse(name: &str) -> Result<Self, CodecError> {
+    pub(crate) fn parse(name: &str) -> Result<Self, CodecError> {
         match name {
             "$set" => Ok(Self::Set),
             "$inc" => Ok(Self::Increment),
@@ -28,6 +28,48 @@ impl Operator {
             "$addToSet" => Ok(Self::AddToSet),
             _ => Err(invalid(&format!("unsupported update operator: {name}"))),
         }
+    }
+
+    /// Check the logical field type independently of storage protection.
+    ///
+    /// # Errors
+    /// Refuses an operator unsupported by the declared field type.
+    pub fn validate_type(self, field: &str, definition: &Value) -> Result<(), CodecError> {
+        use Operator::*;
+        let kind = definition["type"].as_str();
+        let supported = match self {
+            Set => true,
+            Increment | Decrement | Multiply => matches!(
+                kind,
+                Some("int" | "integer" | "bigInt" | "number" | "float" | "decimal" | "numeric")
+            ),
+            Push | Pull | AddToSet => kind == Some("array"),
+        };
+        if !supported {
+            let code = match kind {
+                Some("calendarDate") => "invalid_calendar_date_operation",
+                Some("date" | "timestamp") => "invalid_timestamp_operation",
+                Some("array")
+                    if matches!(
+                        definition["items"].as_str(),
+                        Some("calendarDate" | "date" | "timestamp")
+                    ) =>
+                {
+                    "invalid_temporal_operation"
+                }
+                _ => "invalid_update_operation",
+            };
+            return Err(CodecError::validation(
+                code,
+                format!(
+                    "operation '{}' is not supported for column '{}' with type '{}'",
+                    self.name(),
+                    field,
+                    kind.unwrap_or("undeclared")
+                ),
+            ));
+        }
+        Ok(())
     }
 
     pub const fn name(self) -> &'static str {
