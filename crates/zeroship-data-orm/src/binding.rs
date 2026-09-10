@@ -41,7 +41,7 @@ impl DbBinding {
     /// The schema is handed in rather than derived here on purpose: deriving it
     /// would put the app-id-is-the-schema assumption inside the type that is
     /// meant to separate them. The one production derivation lives in
-    /// `zeroship_plugin_db::v8_classes::db::binding_for_isolate`.
+    /// `zeroship_data_v8::v8_classes::db::binding_for_isolate`.
     pub fn new(
         app_id: impl Into<String>,
         deploy_token: impl Into<String>,

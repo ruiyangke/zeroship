@@ -180,7 +180,7 @@ pub fn with_mut<R>(f: impl FnOnce(&mut SchemaCache) -> R) -> R {
 /// Empty this isolate's descriptor store.
 ///
 /// The peer of the lane and context resets, called from the same helper. See
-/// `zeroship_plugin_db::reset_context_for_tests` for why a reset is needed
+/// `zeroship_data_v8::reset_context_for_tests` for why a reset is needed
 /// WITHIN one test even though libtest gives each test its own thread.
 #[cfg(any(test, feature = "test-helpers"))]
 pub fn reset_for_tests() {

@@ -46,7 +46,7 @@ zeroship-data-cdc-server        service tier: WAL stream, slot authority. A BINA
 zeroship-data-orm            the data plane's logic: crud pipeline, transactions, exec.
                                 -> data-core, AND -> data-postgres + data-sqlite, because it owns
                                 BackendHandle.
-zeroship-plugin-db              THIN. The worker/runtime plugin ADAPTER ONLY. -> data-engine.
+zeroship-data-v8              THIN. The worker/runtime plugin ADAPTER ONLY. -> data-engine.
                                 NOT -> data-cdc-server - but that is too narrow: nothing links it.
 
 zeroship-core::change_event     the cross-process event type, beside usage_event and
@@ -105,9 +105,9 @@ invisible breach and nothing here catches it.
 | `zeroship-data-orm` | `crud/`, `transaction/`, `exec.rs`, `backend/`, `backend_handle.rs`, `backend_selection.rs`, `tx_route.rs`, `tx_lanes.rs`, `descriptor.rs`, `metrics.rs`, `system_shape_charter.rs`, `auth/`, `test_support/` |
 | `zeroship-data-cdc-server` | `Cargo.toml`, `src/lib.rs`, `src/config.rs`, `src/main.rs`. No decode loop, no slot, no election, no listener, no frame |
 
-`zeroship-plugin-db` is no longer one crate holding three future ones. It holds the thin adapter
+`zeroship-data-v8` is no longer one crate holding three future ones. It holds the thin adapter
 (`v8_classes/`, `v8_bridge.rs`, `lib.rs`, `tx_scope.rs`, `op_error.rs`, `service.rs`, `context.rs`),
-the four CDC modules, and `drop_namespace.rs`. Run `ls crates/zeroship-plugin-db/src/` for the
+the four CDC modules, and `drop_namespace.rs`. Run `ls crates/zeroship-data-v8/src/` for the
 current list rather than trusting this sentence.
 
 ### Where every module lands
@@ -129,7 +129,7 @@ the conformance marker the orphan rule pins beside its own `impl`. **That marker
 `zeroship-data-orm` and it is `pub`; this line called it "`plugin-db`'s own `pub(crate)`" marker
 until 2026-09-04.** The sentence was true before the extraction at `92e7615be` and is wrong on both
 counts after it: `crates/zeroship-data-orm/src/backend/mod.rs` declares `pub trait Backend` under
-`#[cfg(any(test, feature = "test-helpers"))]`, and `crates/zeroship-plugin-db/src/lib.rs` reaches it
+`#[cfg(any(test, feature = "test-helpers"))]`, and `crates/zeroship-data-v8/src/lib.rs` reaches it
 only by re-exporting the whole `backend` module - which is how the claim kept resolving under a grep
 while being false about ownership. It is the ninth trait in the dispatch landscape and the only
 test-only one; the eight listed under "The dispatch surface" are the production contract.
@@ -148,7 +148,7 @@ files, and has been hardened against them twice - already gave the right ones:
   subscribers while the worker keeps emitting locally. This document's own history section says
   exactly why that shape is dangerous: "the build goes GREEN having made the violation permanent".
 - `replication.rs`: **split**, with the watchdog half and the drop family STAYING. `watchdog_query`
-  has a live V8 caller (`crates/zeroship-plugin-db/src/v8_classes/replication.rs`) and the drop
+  has a live V8 caller (`crates/zeroship-data-v8/src/v8_classes/replication.rs`) and the drop
   family is reached from `service.rs`'s `deprovision_app` as well as from CDC.
 - `slot_reaper.rs`: **deleted**, whole, in the privilege commit that drops the worker's
   `REPLICATION`. Not moved and not split - its lease half is the INPUT to its sweep decision.
@@ -161,8 +161,8 @@ files, and has been hardened against them twice - already gave the right ones:
 
 **The `data-engine` row listed `cdc_lifecycle.rs` until the same date, and the tree refutes it.**
 `zeroship-data-orm` was extracted at `92e7615be` and `cdc_lifecycle.rs` is still in
-`crates/zeroship-plugin-db/src/`. It could not have gone: it constructs `PgChangeStream` and its
-lease is owned by a V8 wrapper (`crates/zeroship-plugin-db/src/v8_classes/subscription.rs`). It is
+`crates/zeroship-data-v8/src/`. It could not have gone: it constructs `PgChangeStream` and its
+lease is owned by a V8 wrapper (`crates/zeroship-data-v8/src/v8_classes/subscription.rs`). It is
 ADAPTER. A THIRD answer is live in the tree - `tests/lib/tier_direction_census.sh:264` and `:355`
 tier it CDC, the same tier as the relay - so three sources gave three destinations for one file.
 Settle it as ADAPTER in all three.
@@ -240,8 +240,8 @@ is not a vendor and does not fold into `data-postgres`.
 
 **1. One query builder.** Wire the typed IR into the data plane and DELETE the string builder it was
 written to replace. Not "leave both and revisit". The IR is built and tested; it is a
-`[dev-dependencies]` entry of `zeroship-plugin-db` and `grep -rn data_query_builder
-crates/zeroship-plugin-db/src/` returns zero. No shipped binary links it.
+`[dev-dependencies]` entry of `zeroship-data-v8` and `grep -rn data_query_builder
+crates/zeroship-data-v8/src/` returns zero. No shipped binary links it.
 
 **2. CDC gets its own crate AND its own service** - a process that does not execute creator code.
 The crate landed at `545ceff1e` as `zeroship-data-cdc-server`, a BINARY nothing links; the SERVICE
@@ -310,7 +310,7 @@ constantly.
 
 **5. THE CORE AND EVERY OTHER NON-VENDOR CRATE NEVER EMBED A VENDOR DIRECTLY.** Not "should avoid" -
 never. Enforced by `tests/vendor_embedding_gate.sh` (source) and `tests/data_crate_closure_gate.sh`
-(dependency closure). The remaining decision-5 surface is six files, all inside `zeroship-plugin-db`:
+(dependency closure). The remaining decision-5 surface is six files, all inside `zeroship-data-v8`:
 `auth/bootstrap.rs`, `backend/cancel.rs`, `exec.rs`, `lib.rs`, `service.rs`, `tx_lanes.rs`. Run the
 gate for the current list; the whole job is to shrink it.
 
@@ -372,7 +372,7 @@ privileged operations belong to a separate service that does not execute creator
 `crates/zeroship-migrate-server/src/provisioning.rs` and `apply.rs`, and the live `SET LOCAL ROLE`
 batch is `crates/zeroship-data-orm/src/backend/postgres/pg_session_sql.rs`, not `auth/bootstrap.rs`.
 
-**Nothing links the relay - not just the worker.** This paragraph said "`zeroship-plugin-db` may not
+**Nothing links the relay - not just the worker.** This paragraph said "`zeroship-data-v8` may not
 depend on `zeroship-data-cdc-server`" until 2026-09-03, which is true and too narrow. The rule and
 its one named exception are stated above with the reason the literal wording is unenforceable;
 `tests/data_crate_closure_gate.sh` arm 3 checks it, and both directions were mutation-proved when
@@ -381,7 +381,7 @@ edge turns its control arm red.
 
 **Extracting the CDC modules is necessary and NOT sufficient, and the extraction that happened
 proves it.** `crates/zeroship-data-cdc-server` exists and the worker's privilege did not move:
-`crates/zeroship-worker/src/slot_reaper.rs:7` still imports `zeroship_plugin_db::slot_reaper`, and
+`crates/zeroship-worker/src/slot_reaper.rs:7` still imports `zeroship_data_v8::slot_reaper`, and
 `db/migrations-ts/20260818000200_worker_database_authority.ts` still grants `zeroship_worker`
 REPLICATION and BYPASSRLS. The four coordinated edits are in
 `docs/proposals/2026-08-28-cdc-service.md` under "The reaper is a privilege change"; they land in one
@@ -390,9 +390,9 @@ commit or not at all.
 **THIS PARAGRAPH ADDED "with nothing using it" TO THAT SENTENCE UNTIL 2026-09-04, AND IT IS THE ONE
 CLAIM HERE THAT MEASUREMENT REFUTES.** Deleting the import drops no privilege, because three other
 REPLICATION-gated statements ship in the same binary and one of them is reachable from creator JS:
-`crates/zeroship-plugin-db/src/replication.rs:212` mints a slot,
-`crates/zeroship-plugin-db/src/replication.rs:532` drops one, and
-`crates/zeroship-plugin-db/src/wal_consumer.rs:577` opens the `replication=database` connection.
+`crates/zeroship-data-v8/src/replication.rs:212` mints a slot,
+`crates/zeroship-data-v8/src/replication.rs:532` drops one, and
+`crates/zeroship-data-v8/src/wal_consumer.rs:577` opens the `replication=database` connection.
 The evidence, the two PostgreSQL versions it was taken on and the reachability chain are in the CDC
 document's privilege section. So the reaper is a COUPLING problem here and a privilege problem only
 once the relay owns the streaming path; `tests/worker_replication_privilege_gate.sh` refuses the
@@ -444,7 +444,7 @@ nobody runs is a census with a stricter name.
    question that no longer exists. (b) is explicitly REJECTED, not merely unchosen.
 
    **Do NOT record this as "the classifier went with the relay" - that arithmetic is wrong.**
-   Measured across `crates/zeroship-plugin-db/src`: 13 `pg_error::classify` sites, nine in
+   Measured across `crates/zeroship-data-v8/src`: 13 `pg_error::classify` sites, nine in
    `replication.rs`, splitting 3 / 1 / 5 by enclosing function - three in `ensure_worker_slot`
    (relay-only), one in `watchdog_query` (live V8 caller, stays), five in the drop family (called
    from both sides today). The adapter keeps `classify` either way at no cost, since
@@ -512,7 +512,7 @@ nobody runs is a census with a stricter name.
    which the builder's own decision 2 sanctions. BUILDABLE, 4-8 hours.
 
 6. **`zeroship-schema`'s deletion cost.** "No production caller" is not "safe to delete": the DDL
-   builders are pinned by live security tests in `crates/zeroship-plugin-db/tests/integration.rs` and
+   builders are pinned by live security tests in `crates/zeroship-data-v8/tests/integration.rs` and
    `sqlite_integration.rs`. The cost is deletion PLUS migrating those onto the migration engine's
    renderer. There is no ledger counting what is unported, so the condition cannot be measured
    today - build one, or state the exit differently. BUILDABLE, 8-16 hours.

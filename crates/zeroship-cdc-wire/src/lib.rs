@@ -1,7 +1,7 @@
 //! The CDC relay/worker wire contract.
 //!
 //! This crate is the types both `zeroship-data-cdc-server` (the relay) and
-//! `zeroship-plugin-db` (the worker) name, and nothing else (**this line said
+//! `zeroship-data-v8` (the worker) name, and nothing else (**this line said
 //! `zeroship-cdc`, a crate that has never existed, until 2026-09-04**; the
 //! relay's name was settled by operator decision and
 //! `docs/proposals/2026-08-28-cdc-service.md` records the same correction in

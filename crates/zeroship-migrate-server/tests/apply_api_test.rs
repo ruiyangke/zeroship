@@ -1410,7 +1410,7 @@ async fn table_privileges(conn: &Client, grantee: &str, schema: &str, table: &st
 /// connects as) then `SET ROLE app_<id>_role`. `runtime_dependents_sql` grants
 /// that membership `WITH INHERIT FALSE`, so the `SET ROLE` is load-bearing -
 /// without it the worker holds no reach into the app schema at all - and the
-/// two-step is exactly what `zeroship-plugin-db` does per request.
+/// two-step is exactly what `zeroship-data-v8` does per request.
 ///
 /// Needs a superuser DSN for `SET SESSION AUTHORIZATION`. The migrate service's
 /// own provisioning DSN is that principal (it creates roles and schemas), so a
@@ -1612,7 +1612,7 @@ async fn a_created_then_migrated_database_is_usable_by_the_runtime_role_pg() {
 /// not see it. The COLUMNS are the DDL's own NOT NULL set, not a copy of the data
 /// plane's INSERT list, so a column added on the plugin-db side cannot make this
 /// a false red - that pairing is held by
-/// `zeroship-plugin-db/tests/integration.rs`, which drives the real
+/// `zeroship-data-v8/tests/integration.rs`, which drives the real
 /// `write_audit_unmask_row` against this same production DDL.
 #[ntex::test]
 async fn a_real_apply_leaves_the_runtime_role_able_to_write_the_unmask_audit_row_pg() {

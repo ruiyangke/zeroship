@@ -49,7 +49,7 @@
 //!
 //! The seam is typed on [`AppId`], and much of the tree still carries an app id
 //! as `&str` - `zeroship_data_orm::encryption::keys::resolve`,
-//! `zeroship_plugin_db::replication`, `zeroship_kv::backend::scope`,
+//! `zeroship_data_v8::replication`, `zeroship_kv::backend::scope`,
 //! `zeroship_plugin_storage::backend`. Those sites cannot construct an
 //! [`AppId`] without a fallible parse that would refuse the non-uuid app ids
 //! their own tests pass, so they keep their present composers until the string
@@ -351,7 +351,7 @@ mod tests {
         assert_eq!(schema_name(&app), FIXTURE);
 
         // `replication::worker_slot_name`, which lives behind a `&str` API in
-        // `zeroship-plugin-db` that this crate must not depend on. The
+        // `zeroship-data-v8` that this crate must not depend on. The
         // differential against it is in that crate, next to the function.
         assert_eq!(
             worker_slot_name(&app, "worker-a").expect("the fixture slot name composes"),

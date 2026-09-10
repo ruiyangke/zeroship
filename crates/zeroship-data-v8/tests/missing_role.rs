@@ -19,7 +19,7 @@
 //! compiled default: this file used to fall back to `localhost:5434`, a
 //! DIFFERENT server with different credentials, so a run with no overlay
 //! silently measured whatever happened to be listening there.
-//! Run: `cargo test -p zeroship-plugin-db --features test-helpers \
+//! Run: `cargo test -p zeroship-data-v8 --features test-helpers \
 //!       --test test_helpers -- --test-threads=1 missing_role::`
 //!
 //! WHAT THIS TEST DOES NOT CATCH:
@@ -38,10 +38,10 @@
 
 use compio_postgres::NoTls;
 use zeroship_data_orm::error::DbError;
-use zeroship_plugin_db::backend::pg_error;
+use zeroship_data_v8::backend::pg_error;
 // `DbError` is data-core's; lowering it to a V8 `OpError` is the ADAPTER's job,
 // so it arrives as a trait from plugin-db rather than an inherent method.
-use zeroship_plugin_db::op_error::ToOpError;
+use zeroship_data_v8::op_error::ToOpError;
 
 fn test_url() -> String {
     zeroship_core::config::test_database_url()

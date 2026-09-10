@@ -69,7 +69,7 @@ zs_check_binary_freshness() {
   # printed exactly what a healthy run prints.
   #
   # That was live. The 2026-08-26 crate-directory rename (crates/plugin-db ->
-  # crates/zeroship-plugin-db, and seven siblings) left e2e_dev_vs_deployed_db.sh
+  # crates/zeroship-data-v8, and seven siblings) left e2e_dev_vs_deployed_db.sh
   # naming eight directories of which only TWO still existed. The guard whose
   # whole job is "did you rebuild after touching plugin-db" had stopped looking
   # at plugin-db, and reported fresh either way.
@@ -207,7 +207,7 @@ zs_check_artifact_freshness() {
   # printed exactly what a healthy run prints.
   #
   # That was live. The 2026-08-26 crate-directory rename (crates/plugin-db ->
-  # crates/zeroship-plugin-db, and seven siblings) left e2e_dev_vs_deployed_db.sh
+  # crates/zeroship-data-v8, and seven siblings) left e2e_dev_vs_deployed_db.sh
   # naming eight directories of which only TWO still existed. The guard whose
   # whole job is "did you rebuild after touching plugin-db" had stopped looking
   # at plugin-db, and reported fresh either way.

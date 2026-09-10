@@ -1376,7 +1376,7 @@ mod tests {
             // sentinel's spelling until 2026-09-04, and this test was green
             // throughout, which is exactly what a fixture sharing an emitter
             // with its reader can be. The oracle that rules on the pair is
-            // `zeroship-plugin-db`'s `mask_flip.rs`, which builds with the
+            // `zeroship-data-v8`'s `mask_flip.rs`, which builds with the
             // ENGINE's emitter; this case still earns its place as the SQLITE
             // arm of the fence, which that live-PostgreSQL suite cannot reach.
             let ddl = sqlite_fixture_sql(

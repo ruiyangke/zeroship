@@ -175,7 +175,7 @@ jobs:
       #
       # The SAME script a developer runs, not a `services:` block that would be a
       # second definition of the same servers. `services:` also cannot pass
-      # `-c wal_level=logical`, which is why plugin-db-live-gate below uses an
+      # `-c wal_level=logical`, which is why data-v8-live-gate below uses an
       # explicit `docker run`; going through compose keeps this job on the
       # definition the compose file already carries.
       - name: Provision the required test backends (postgres, redis, smtp sink)
@@ -829,7 +829,7 @@ jobs:
       # the one attribute the worker holds that creator code can reach:
       # PostgreSQL REPLICATION. The grant lives in db/migrations-ts, the boot
       # check that demands it lives in the worker, and the statements that need
-      # it live in plugin-db - three files that must agree, and did not have to.
+      # it live in data-v8 - three files that must agree, and did not have to.
       # The gate joins them and is self-inverting, so it refuses both a premature
       # deletion of the reaper and a grant left behind after the CDC relay takes
       # the streaming path. Runs cargo tree and greps; nothing is compiled.
@@ -1008,7 +1008,7 @@ jobs:
       # enable integration helpers without an opt-in feature.
       - run: |
           set -o pipefail
-          cargo test -p zeroship-plugin-db --test test_helpers sqlite_integration::
+          cargo test -p zeroship-data-v8 --test test_helpers sqlite_integration::
           cargo test -p zeroship-data-orm
       # The migration service's suite: the service's own targets, the two live-PG
       # session proofs (`smoke_apply_pg`, `author_and_apply_pg`) and the
@@ -1388,7 +1388,7 @@ jobs:
       #   error: couldn't read .../sdks/db/dist/internal.js
       #   error: couldn't read .../sdks/bootstrap/dist/runtime-entry.js
       #   error: could not compile `zeroship-runtime` (lib) due to 3 previous errors
-      # billing-gate and plugin-db-live-gate already carry this block for the
+      # billing-gate and data-v8-live-gate already carry this block for the
       # same reason; auth-gate reaches the same crate by a different route (the
       # migrate binary rather than the crate under test) and was missed.
       - uses: actions/setup-node@v4
@@ -1428,14 +1428,14 @@ jobs:
   # footnote to it: the figures here read 12/11 until 2026-08-18, having been
   # copied into three files and re-run in none, which is the same defect in the
   # instrument that the instrument existed to catch.
-  plugin-db-live-gate:
+  data-v8-live-gate:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # Same reason as the `rust` job: run_plugin_db_live_suite.sh builds
-      # zeroship-plugin-db, which depends on zeroship-runtime, which
+      # Same reason as the `rust` job: run_data_v8_live_suite.sh builds
+      # zeroship-data-v8, which depends on zeroship-runtime, which
       # `include_str!`s three gitignored SDK dist files a fresh checkout lacks.
       - uses: actions/setup-node@v4
         with:
@@ -1458,19 +1458,19 @@ jobs:
       # It became a REQUIREMENT rather than a nicety when the skip apparatus was
       # deleted: `spatial_near_runs_under_per_app_role_via_rls` announced a skip
       # on a server without the extension and was excused by name in a census in
-      # run_plugin_db_live_suite.sh. That census is gone and the test FAILS
+      # run_data_v8_live_suite.sh. That census is gone and the test FAILS
       # instead, so a server without postgis is a red job, not a quieter one.
       - name: Start Postgres (pgvector, postgis, logical WAL)
         run: |
-          docker run -d --name plugin-db-pg -p 5441:5432 \
+          docker run -d --name data-v8-pg -p 5441:5432 \
             -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=zeroship \
             -e POSTGRES_DB=zeroship \
             pgvector/pgvector:pg16 -c wal_level=logical
           for i in $(seq 1 40); do
-            if docker exec plugin-db-pg pg_isready -U postgres; then
-              docker exec plugin-db-pg bash -c \
+            if docker exec data-v8-pg pg_isready -U postgres; then
+              docker exec data-v8-pg bash -c \
                 'apt-get update && apt-get install -y --no-install-recommends postgresql-16-postgis-3'
-              docker exec plugin-db-pg psql -U postgres -d zeroship \
+              docker exec data-v8-pg psql -U postgres -d zeroship \
                 -v ON_ERROR_STOP=1 \
                 -c 'CREATE EXTENSION IF NOT EXISTS vector;' \
                 -c 'CREATE EXTENSION IF NOT EXISTS postgis;'
@@ -1478,14 +1478,14 @@ jobs:
             fi
             sleep 3
           done
-          echo "postgres failed to become ready" >&2; docker logs plugin-db-pg; exit 1
+          echo "postgres failed to become ready" >&2; docker logs data-v8-pg; exit 1
       - name: Install snapshot clients matching the test server
         run: |
           sudo apt-get update
           sudo apt-get install -y postgresql-client-16
           echo '/usr/lib/postgresql/16/bin' >> "$GITHUB_PATH"
-      - name: Run the plugin-db live-database gate
-        run: tests/run_plugin_db_live_suite.sh
+      - name: Run the data-v8 live-database gate
+        run: tests/run_data_v8_live_suite.sh
         env:
           PG_TEST_URL: postgres://postgres:zeroship@127.0.0.1:5441/zeroship
 
@@ -1564,7 +1564,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # Twice load-bearing, same as billing-gate / auth-gate / plugin-db-live-gate:
+      # Twice load-bearing, same as billing-gate / auth-gate / data-v8-live-gate:
       # zeroship-worker depends on zeroship-runtime, which `include_str!`s three
       # gitignored SDK dist files, AND deploy/ops/db-migrate.sh is a Node program
       # that the suite script shells out to.

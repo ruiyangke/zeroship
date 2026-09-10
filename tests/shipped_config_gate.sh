@@ -58,7 +58,7 @@
 #
 # THE MECHANISM, and it is not a quirk of one crate. `test-helpers` is declared
 # in zeroship-data-orm's `[dev-dependencies]` and NOT in `[dependencies]`
-# (the same shape zeroship-plugin-db uses). Under resolver v3 a dev-dependency's
+# (the same shape zeroship-data-v8 uses). Under resolver v3 a dev-dependency's
 # features are unified into the normal dependency edge WHENEVER A TEST TARGET IS
 # IN THE UNIT GRAPH. `--all-targets` puts one there. `--all-features` turns the
 # feature on outright. `cargo test` builds test targets by definition. Every one

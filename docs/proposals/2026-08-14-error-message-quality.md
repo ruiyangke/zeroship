@@ -32,9 +32,9 @@ cited line:
 | Fragment | Origin | Layer |
 | --- | --- | --- |
 | `db: autocommit session setup (per-app <U+00A7>17.5 + DB-1 guards): ` | `crates/zeroship-data-orm/src/exec.rs:326` (literal), applied at `exec.rs:322-329` | plugin-db call site |
-| inner `db: ` | `crates/zeroship-plugin-db/src/error.rs:721` -- `format!("db: {e}")` in `walk_pg_chain` | plugin-db classifier |
+| inner `db: ` | `crates/zeroship-data-v8/src/error.rs:721` -- `format!("db: {e}")` in `walk_pg_chain` | plugin-db classifier |
 | `db error` | `libs/compio-postgres/src/error/mod.rs:395` -- `Kind::Db => fmt.write_str("db error")` | driver Display |
-| ` <U+2014> caused by: ` | `crates/zeroship-plugin-db/src/error.rs:724` -- `msg.push_str(&format!(" <U+2014> caused by: {src}"))` | plugin-db source-chain walk |
+| ` <U+2014> caused by: ` | `crates/zeroship-data-v8/src/error.rs:724` -- `msg.push_str(&format!(" <U+2014> caused by: {src}"))` | plugin-db source-chain walk |
 | `ERROR: role "app_<uuid>_role" does not exist` | `libs/compio-postgres/src/error/mod.rs:313-315` -- `write!(fmt, "{}: {}", self.severity, self.message)` | PostgreSQL server text, verbatim |
 
 The user-facing body is built by `build_internal_error_body`
@@ -52,9 +52,9 @@ Two findings fall directly out of this decomposition and shape everything below.
 
 **Finding A: the worst leak is not a string in this repository.** The text
 `role "app_<uuid>_role" does not exist` appears in this tree only inside
-comments (`crates/zeroship-plugin-db/src/register_model/bootstrap.rs:201-202`,
+comments (`crates/zeroship-data-v8/src/register_model/bootstrap.rs:201-202`,
 `crates/zeroship-cli/src/migrate.rs:23`). The runtime value is PostgreSQL's own message,
-copied verbatim by `walk_pg_chain` (`crates/zeroship-plugin-db/src/error.rs:720-728`). No
+copied verbatim by `walk_pg_chain` (`crates/zeroship-data-v8/src/error.rs:720-728`). No
 scanner over our source literals can ever find this class of leak. Any proposal
 that consists of "grep for bad strings and fix them" is structurally incapable
 of preventing the failure that prompted it.
@@ -66,7 +66,7 @@ in-tree documentation already says so:
 running `zeroship migrate` makes the first DB call fail with
 `role "app_..._role" does not exist`, "which reaches the end user as
 `{"message":"internal error"}`". `DbError::from_pg`
-(`crates/zeroship-plugin-db/src/error.rs:189-230`) has no arm for this SQLSTATE, so it
+(`crates/zeroship-data-v8/src/error.rs:189-230`) has no arm for this SQLSTATE, so it
 falls through to the catch-all `DbError::Internal` at `error.rs:228`, which
 stamps the code `internal` (`error.rs:287-289`). `internal` is on neither
 allow-list, so the rail correctly blanks a message it has been told is internal.
@@ -98,7 +98,7 @@ trusted, and it failed the first time.** The first classifier used a guessed
 list of error constructors (`format!`, `anyhow!`, `panic!`, `.context(`, ...).
 It found the `exec.rs:326` literal but marked it `err=false`, because this
 codebase builds that error through its own helper, `prefix_message`
-(`crates/zeroship-plugin-db/src/error.rs:521-539`), which is in no such list. The
+(`crates/zeroship-data-v8/src/error.rs:521-539`), which is in no such list. The
 vocabulary was then **derived from the data** -- ranking the identifier
 preceding every literal in the tree -- rather than guessed, and re-run. After
 widening, the ground-truth literal classifies as `err=true` and the guard-token
@@ -170,7 +170,7 @@ Note the shape: `sdks/ui` leads on raw count but those are Storybook demo
 strings, not errors. `crates/control` is the real error-surface concentration.
 
 **The single highest-value non-ASCII site is one line:**
-`crates/zeroship-plugin-db/src/error.rs:724`. It is the em-dash in the anchor string, and
+`crates/zeroship-data-v8/src/error.rs:724`. It is the em-dash in the anchor string, and
 because it sits in the source-chain walk it stamps an em-dash into *every*
 multi-layer database error the platform produces.
 
@@ -184,7 +184,7 @@ multi-layer database error the platform produces.
 
 This is the finding most improved by classification. **The majority of guard
 tokens are legitimate.** `SEC-1` and `SEC-4` appear in `assert!` messages
-(`crates/zeroship-plugin-db/src/context.rs:1206-1275`,
+(`crates/zeroship-data-v8/src/context.rs:1206-1275`,
 `crates/zeroship-data-orm/src/crud/mask_pass.rs:1055-1065`) -- a DEVELOPER audience,
 where naming the guard being tested is exactly right. A blanket ban on guard
 tokens in strings would delete these correctly-written test assertions.
@@ -265,7 +265,7 @@ none of it reaches an anonymous HTTP caller. Six redaction mechanisms exist
 | `build_error_body` 5xx rail | `crates/zeroship-runtime/src/core/dispatch.rs:148` | the main boundary |
 | `infrastructure_error_response` | `crates/zeroship-control/src/api.rs:140` | 15 sites in `api.rs`, 4 in `workflow_instance_api.rs` |
 | `redact_url` | `crates/zeroship-kv/src/error.rs` | 3 sites, all URL-bearing kv-v8 messages |
-| `scrub_constraint_detail` | `crates/zeroship-plugin-db/src/error.rs:713-718` | strips PG `DETAIL:` (the conflicting value) |
+| `scrub_constraint_detail` | `crates/zeroship-data-v8/src/error.rs:713-718` | strips PG `DETAIL:` (the conflicting value) |
 | `PublicErrorMessage` | `crates/zeroship-auth/src/ui/mod.rs:83-113` | closed enum, 5 strings, end-user login UI |
 | `oidc_callback_public_error` | `crates/zeroship-gateway/src/router/dispatch.rs:2909` | returns `&'static str` -- leak-proof by type |
 
@@ -328,7 +328,7 @@ VERIFIED, the code has genuine audience awareness in four places:
    audience boundary it enforces.
 3. **`infrastructure_error_response`** (`crates/zeroship-control/src/api.rs:139-152`)
    logs detail, returns generic.
-4. **`scrub_constraint_detail`** (`crates/zeroship-plugin-db/src/error.rs:713-718`)
+4. **`scrub_constraint_detail`** (`crates/zeroship-data-v8/src/error.rs:713-718`)
    redacts a value while keeping a classification.
 
 The failure is not absence of the concept. It is that the boundary is
@@ -357,7 +357,7 @@ exposures (VERIFIED by the tracing agent, spot-checked by me):
 
 - **`hint` never reaches the wire.** `OpError::coded` carries a remediation hint
   set at `crates/zeroship-runtime/src/core/state.rs:230-234` and populated with genuinely
-  useful text (`crates/zeroship-plugin-db/src/error.rs:266,271,276`, e.g. "retry the
+  useful text (`crates/zeroship-data-v8/src/error.rs:266,271,276`, e.g. "retry the
   transaction"). I verified independently that `build_verbose_error_body`
   (`dispatch.rs:363-396`) emits `message`, `name`, `stack`, `code`, `details`,
   `retryable` -- and that the token `hint` appears nowhere in `dispatch.rs`
@@ -466,7 +466,7 @@ exist."** VERIFIED:
 | # | Namespace | Convention | Where |
 | --- | --- | --- | --- |
 | 1 | `ZsErrorCode` / `ErrorCode`, 14-15 gRPC codes | UPPER_SNAKE | `crates/zeroship-runtime/src/rpc/error.rs:63-153`, `sdks/rpc/src/error.ts:20-52` |
-| 2 | plugin-db codes | lower_snake, canonicalised to UPPER_SNAKE | `crates/zeroship-plugin-db/src/error.rs:236-291`, `sdks/db/src/errors.ts:27-36` |
+| 2 | plugin-db codes | lower_snake, canonicalised to UPPER_SNAKE | `crates/zeroship-data-v8/src/error.rs:236-291`, `sdks/db/src/errors.ts:27-36` |
 | 3 | `AuthErrorCode` | lower_snake | `sdks/auth/src/types.ts:72-100` |
 | 4 | `PublicErrorMessage` | lower_snake | `crates/zeroship-auth/src/ui/mod.rs:83-113` |
 | 5 | Workflow codes | UPPER_SNAKE, not in the enum | `sdks/bootstrap/src/dispatcher.ts:305,1331` |
@@ -579,7 +579,7 @@ not have one. That is the obvious extend-what-works move.
 
 **Option 1a. Strip non-ASCII from runtime error strings.**
 Scope: 196 literals in error/log positions in non-test files; the em-dash is 83%
-of them. The single highest-value edit is `crates/zeroship-plugin-db/src/error.rs:724`
+of them. The single highest-value edit is `crates/zeroship-data-v8/src/error.rs:724`
 (` <U+2014> caused by: ` becomes ` -- caused by: `), which fixes every
 multi-layer DB error at once.
 Cost: hours. Risk: low, but **not zero** -- any test asserting on an em-dash

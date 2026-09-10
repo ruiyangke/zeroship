@@ -58,7 +58,7 @@
 //! made the outcome a function of publisher scheduling, so even a strictly
 //! sequential caller — engage the guard, write, drop the guard — had no defined
 //! answer. The three integration fences in
-//! `zeroship-plugin-db/tests/sqlite_integration.rs` papered over it by sleeping
+//! `zeroship-data-v8/tests/sqlite_integration.rs` papered over it by sleeping
 //! 100 ms to drain the publisher BEFORE dropping the guard, which is exactly the
 //! order that cannot expose the bug; their assertions (`Resync` and zero
 //! `Change`) always described the commit-window contract this file now
@@ -819,9 +819,9 @@ pub struct SqliteConsumerHandle;
 
 /// SQLite arm of the [`ChangeStream`] capability.
 ///
-/// Constructed via `zeroship_plugin_db::backend::BackendHandle::as_change_stream_sqlite`.
+/// Constructed via `zeroship_data_v8::backend::BackendHandle::as_change_stream_sqlite`.
 /// Owns an `Rc<SqliteBackend>` (Rc-cloned from the
-/// `zeroship_plugin_db::backend::BackendHandle::Sqlite` arm) — same ownership
+/// `zeroship_data_v8::backend::BackendHandle::Sqlite` arm) — same ownership
 /// shape as the PG-arm adapter for the same `'static` reason
 /// (`async fn`-in-trait futures don't compose with borrowed-reference
 /// self).
@@ -844,7 +844,7 @@ pub struct SqliteChangeStream {
 impl SqliteChangeStream {
     /// Construct an adapter holding an Rc-clone of `backend`.
     /// Crate-private — the
-    /// `zeroship_plugin_db::backend::BackendHandle::as_change_stream_sqlite` accessor
+    /// `zeroship_data_v8::backend::BackendHandle::as_change_stream_sqlite` accessor
     /// is the public entry point.
     pub fn new(backend: Rc<SqliteBackend>) -> Self {
         Self { backend }
@@ -876,7 +876,7 @@ impl ChangeStream for SqliteChangeStream {
 mod tests {
     //! Unit-level checks for the static helpers, plus the delivery-window
     //! fences. End-to-end behaviour (hook → publisher → broker) is covered by
-    //! the `crates/zeroship-plugin-db/tests/sqlite_integration.rs` mirror; what lives here is the part
+    //! the `crates/zeroship-data-v8/tests/sqlite_integration.rs` mirror; what lives here is the part
     //! that mirror CANNOT state deterministically — the interleaving of a guard
     //! drop with an undrained channel.
 

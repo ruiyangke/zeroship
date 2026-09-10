@@ -2,7 +2,7 @@
 //!
 //! Every fallible internal helper returns `Result<_, DbError>`. At the
 //! V8 boundary the dispatcher calls `ToOpError::to_op_error` (the adapter
-//! tier's, in `zeroship-plugin-db`) to materialise a `zeroship_runtime`
+//! tier's, in `zeroship-data-v8`) to materialise a `zeroship_runtime`
 //! `OpError` whose `.code` is stamped from the variant
 //! — the SDK can then branch on `err.code` instead of substring-matching
 //! opaque messages.
@@ -309,7 +309,7 @@ impl fmt::Display for DenyReason {
 //
 // The attribute was here while `DbError` and its `to_op_error` lowering lived
 // in ONE crate, where it cost nothing: rustc only demands a wildcard arm across
-// a CRATE BOUNDARY. The split put the lowering in `zeroship-plugin-db` and the
+// a CRATE BOUNDARY. The split put the lowering in `zeroship-data-v8` and the
 // type here, so the attribute would have forced `_ => ...` into
 // `op_error.rs` - silently retiring the exhaustiveness check that is the only
 // guarantee every variant reaches the V8 boundary with a canonical `.code`
@@ -683,7 +683,7 @@ impl DbError {
 // deleted as dead: zero callers in any cfg. Its own rustdoc claimed "every call
 // site routes through this helper", and that was the reverse of the truth - the
 // two sites emitting that `code` today spell the struct literal out by hand
-// (`zeroship-data-orm`'s `exec.rs` and `zeroship-plugin-db`'s
+// (`zeroship-data-orm`'s `exec.rs` and `zeroship-data-v8`'s
 // `v8_classes/replication.rs`), with two different `hint` shapes.
 //
 // THE WARNING THE HELPER CARRIED IS WORTH MORE THAN THE HELPER WAS, so it is

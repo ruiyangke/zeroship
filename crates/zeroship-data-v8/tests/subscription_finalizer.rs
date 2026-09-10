@@ -21,8 +21,8 @@
 
 #![allow(unsafe_code)]
 
-use zeroship_plugin_db::broker;
-use zeroship_plugin_db::v8_classes::subscription::mint_subscription;
+use zeroship_data_v8::broker;
+use zeroship_data_v8::v8_classes::subscription::mint_subscription;
 use zeroship_runtime::init_v8;
 
 #[test]

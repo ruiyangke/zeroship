@@ -1,5 +1,5 @@
 //! Compare native first-row decoding with its explicit JSON serialization tail.
-//! Run with `cargo bench -p zeroship-plugin-db --bench bench_first_row_or_null`.
+//! Run with `cargo bench -p zeroship-data-v8 --bench bench_first_row_or_null`.
 
 use std::time::Duration;
 
@@ -8,7 +8,7 @@ use compio_postgres::types::Type;
 use compio_postgres::Row;
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 
-use zeroship_plugin_db::first_row_or_null_for_bench;
+use zeroship_data_v8::first_row_or_null_for_bench;
 
 // ---------------------------------------------------------------------------
 // Wire-format encoders for the OID branches we exercise

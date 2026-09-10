@@ -105,7 +105,7 @@ cd "$(dirname "$0")/../.."
 # ---------------------------------------------------------------------------
 # TWO CRATES SINCE 2026-09-03, AND THEY ANSWER THE SAME QUESTION AT TWO STAGES.
 # ---------------------------------------------------------------------------
-# `SRC` was `crates/zeroship-plugin-db/src` alone. The ENGINE tier left for
+# `SRC` was `crates/zeroship-data-v8/src` alone. The ENGINE tier left for
 # `crates/zeroship-data-orm/src` that day, taking ~22k lines and most of the
 # `pub(crate) mod` fences with it - so a census pinned to the first root would
 # have reported a small, healthy number about the modules that stayed and said
@@ -116,7 +116,7 @@ cd "$(dirname "$0")/../.."
 # The two roots are reported SEPARATELY, not merged, because the question means
 # something different on each side:
 #
-#   ADAPTER (`zeroship-plugin-db`)  - items still fenced by a `pub(crate) mod`.
+#   ADAPTER (`zeroship-data-v8`)  - items still fenced by a `pub(crate) mod`.
 #     This is surface the split has NOT yet published: it becomes public API the
 #     day the module becomes a crate root.
 #
@@ -128,7 +128,7 @@ cd "$(dirname "$0")/../.."
 #
 # The combined figure is what the split publishes in total, and it is the number
 # `tests/private_interface_gate.sh` rules on the health of.
-ADAPTER_SRC=crates/zeroship-plugin-db/src
+ADAPTER_SRC=crates/zeroship-data-v8/src
 ENGINE_SRC=crates/zeroship-data-orm/src
 
 for _d in "$ADAPTER_SRC" "$ENGINE_SRC"; do

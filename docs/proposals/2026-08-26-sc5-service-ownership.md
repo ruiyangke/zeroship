@@ -1,7 +1,7 @@
 # SC-5: service ownership
 
 **Status.** PARTIAL. The ownership half ships in
-`crates/zeroship-plugin-db/src/service.rs` (`DbService`, `DbLifecycle`) and
+`crates/zeroship-data-v8/src/service.rs` (`DbService`, `DbLifecycle`) and
 `crates/zeroship-worker/src/cache.rs` (the shared plugin prototype). The identity
 half - Fork C, the authority-domain reader, the ceiling and the master key as
 service fields - is unbuilt: `AppIncarnationId`, `DbThreadResources` and
@@ -37,7 +37,7 @@ Specified, not built:
 | To be owned | Why it needs this lifetime |
 | --- | --- |
 | The operator mask ceiling | Operator configuration, immutable per isolate, met by every binding against that deploy's creator draft - so it must exist before any binding does. `MaskCeiling` exists as a reducer type (`transaction/reducer/identity.rs:130`) but is not a service field |
-| The platform master key | Column keys are derived `HKDF(platform_master_key, app_id, key_version)`, which makes the key service-level configuration rather than a per-app lookup. No `master_key` or HKDF derivation exists in `crates/zeroship-plugin-db/` or the `zeroship-data-*` crates |
+| The platform master key | Column keys are derived `HKDF(platform_master_key, app_id, key_version)`, which makes the key service-level configuration rather than a per-app lookup. No `master_key` or HKDF derivation exists in `crates/zeroship-data-v8/` or the `zeroship-data-*` crates |
 | `DbThreadResources` | The per-thread resource bundle the parent's `AppDbBinding` holds under `Rc`. The type does not exist; today the thread's pool and backend live in `THREAD_DB_CTX` / `ThreadDbContext` (`context.rs:362`) |
 
 **The service owns no live-metadata cache.** The design's no-introspection rule
@@ -251,14 +251,14 @@ exactly the identity the fence exists to distinguish from, so an arm rewritten
 onto one passes on the hole it was written to close.
 
 **Invocations.** Worker-side arms run under `cargo test -p zeroship-worker --lib`
-and `cargo test -p zeroship-plugin-db --lib`. The database arms run under
+and `cargo test -p zeroship-data-v8 --lib`. The database arms run under
 
     RUST_MIN_STACK=33554432 \
-    cargo test -p zeroship-plugin-db --test integration --features test-helpers \
+    cargo test -p zeroship-data-v8 --test integration --features test-helpers \
       -- --test-threads=1
 
 Five of this crate's test targets declare `required-features`, so a plain
-`cargo test -p zeroship-plugin-db` filters them out unbuilt and prints a smaller
+`cargo test -p zeroship-data-v8` filters them out unbuilt and prints a smaller
 green. Group 2 needs a fixture that can create, crash, snapshot, promote and
 restore a cluster; no target in the tree does that, and the arm that introduces
 it owes its own invocation line.
@@ -299,7 +299,7 @@ selection or `Pool::connect`.
 
 **1.3 Operator deprovisioning: one pool per batch, no second parse, release
 proved.** SHIPPED: `operator_deprovisioning_reuses_one_pool_and_reparses_nothing`
-(`crates/zeroship-plugin-db/tests/integration.rs:3637`); the production release
+(`crates/zeroship-data-v8/tests/integration.rs:3637`); the production release
 call is `crates/zeroship-worker/src/sync.rs:205`. **Three** deletions, then
 `close_operator_pools`, then a fourth. The parse counter is unchanged from
 composition; the pool-open delta across the batch is exactly 1; the delta after
@@ -312,7 +312,7 @@ on the version-poller thread, which hosts no isolate and so has no data-plane po
 to reuse; "no pool" can only be met by not connecting at all. The clause protects
 against a pool **per deletion** - two connects, two authentications and two TLS
 handshakes per deprovisioned app. One memoised pool per reconcile batch delivers
-that (`OPERATOR_POOL_SIZE = 2`, `crates/zeroship-plugin-db/src/service.rs:77`).
+that (`OPERATOR_POOL_SIZE = 2`, `crates/zeroship-data-v8/src/service.rs:77`).
 The release must be called where a runtime can still drive shutdown: dropping a
 `Pool` asks its detached driver tasks to close, it does not wait for them.
 
@@ -344,8 +344,8 @@ key; the `Rc::ptr_eq` observable is axis-free.
 
 **1.5 The initialization singleflight.** SHIPPED. The mechanism is
 `ThreadDbContext::begin_backend_init` / `finish_backend_init`
-(`crates/zeroship-plugin-db/src/context.rs:253-268`), claimed at
-`crates/zeroship-plugin-db/src/lib.rs:1222`; the arm is
+(`crates/zeroship-data-v8/src/context.rs:253-268`), claimed at
+`crates/zeroship-data-v8/src/lib.rs:1222`; the arm is
 `concurrent_sqlite_lazy_init_shares_one_backend` (`lib.rs:1423`). Eight concurrent
 cold inits open exactly one backend; remove `begin_backend_init` and it reports 8.
 It is also the liveness proof for `service::backend_open_count`, which 1.2 asserts
@@ -725,4 +725,4 @@ protective or narrative: the operator-lifecycle handle exists because
 deprovisioning used to be a free function that took a `&str` URL, re-ran backend
 selection on it and built a fresh two-connection pool **per deleted app**. That
 shape is what arm 1.3's parse and pool assertions exist to keep out. The
-`crates/zeroship-plugin-db/src/lib.rs` comment that recorded it is gone.
+`crates/zeroship-data-v8/src/lib.rs` comment that recorded it is gone.

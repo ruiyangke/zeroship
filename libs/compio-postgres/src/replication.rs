@@ -3680,7 +3680,7 @@ mod tests {
         // for this command whatever it might mean for some other one.
         //
         // Nothing depended on the old shape: the sole caller in the workspace
-        // (`crates/zeroship-plugin-db/src/wal_consumer.rs`) uses `identify_system` as a
+        // (`crates/zeroship-data-v8/src/wal_consumer.rs`) uses `identify_system` as a
         // health check and discards the value, so this change only makes that
         // check harder to pass with a broken peer.
         let row = identify_row(&[]);
@@ -6423,7 +6423,7 @@ mod tests {
     /// the next `next()` resumed mid-frame - the framer would read a payload
     /// byte as a tag and either raise a nonsense "unexpected tag" or, worse,
     /// accept it. This is reachable from ordinary code: the WAL consumer in
-    /// `zeroship-plugin-db` drives `next()` inside a `futures::select!`, which
+    /// `zeroship-data-v8` drives `next()` inside a `futures::select!`, which
     /// drops the losing branch's future every iteration.
     ///
     /// The fix cannot un-lose the bytes. What it can do - and what this pins -

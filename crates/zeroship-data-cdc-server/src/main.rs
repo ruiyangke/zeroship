@@ -5,7 +5,7 @@
 //! that idled here would be a second process claiming an authority it does not
 //! hold - and the worker's local-emit suppression is keyed on the decode loop
 //! actually running, not on a relay existing. Failing closed is the only honest
-//! state until `crates/zeroship-plugin-db/src/wal_consumer.rs`'s loop is
+//! state until `crates/zeroship-data-v8/src/wal_consumer.rs`'s loop is
 //! rewritten against the wire, which `src/lib.rs` records as blocked on two
 //! things outside this crate.
 //!

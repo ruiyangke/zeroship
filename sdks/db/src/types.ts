@@ -604,7 +604,7 @@ export type Actor = Record<string, unknown>;
  * masked-value wrapper, now a NATIVE v8_class.
  *
  * `MaskedValue` instances are minted Rust-side by the row serializer's
- * rehydration pass (`crates/zeroship-plugin-db/src/v8_classes/masked_value.rs`)
+ * rehydration pass (`crates/zeroship-data-v8/src/v8_classes/masked_value.rs`)
  * when a masked column flows back across the V8 boundary. The SDK no
  * longer constructs them — this is a TYPE-ONLY `declare class` that
  * describes the native instance's shape. There is no JS runtime body;

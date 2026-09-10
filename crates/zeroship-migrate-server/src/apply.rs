@@ -1341,7 +1341,7 @@ impl RuntimeRoleProvisioningSql {
 /// The data plane never reads the journal. `zeroship-data-orm`'s
 /// `descriptor.rs` is its sole schema authority (the runtime descriptor rides in
 /// the `.zship`), and no CRUD, transaction or CDC path in `zeroship-data-orm`
-/// or `zeroship-plugin-db` names any journal table. Nothing is left to grant.
+/// or `zeroship-data-v8` names any journal table. Nothing is left to grant.
 ///
 /// # Why the sweep is by PREFIX and takes the audit table too
 ///

@@ -25,7 +25,7 @@
 //! "test-helpers"))]`, so no shipped binary ever ran them.
 //!
 //! BOUND, as of 2026-09-04, by the vector fixtures in
-//! `crates/zeroship-plugin-db/tests/sqlite_integration.rs`. They used to
+//! `crates/zeroship-data-v8/tests/sqlite_integration.rs`. They used to
 //! `format!` the shadow-relation name themselves - a THIRD spelling that
 //! agreed with this one by luck while claiming to come from the
 //! descriptor - and now render the descriptor through the migration

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Tier-signature census for the zeroship-plugin-db crate split.
+# Tier-signature census for the zeroship-data-v8 crate split.
 #
 # WHAT IT ANSWERS
 #   For each module, does any function SIGNATURE name a crate that the module's
@@ -8,7 +8,7 @@
 #
 # WHY IT EXISTS
 #   docs/proposals/2026-08-31-data-crate-shape.md assigns all 57,427 lines of
-#   zeroship-plugin-db to six crates. That assignment was produced by walking
+#   zeroship-data-v8 to six crates. That assignment was produced by walking
 #   MODULES and then by walking public TYPES. Neither instrument can see a
 #   foreign-tier type sitting in a function signature.
 #
@@ -105,13 +105,13 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # TWO SOURCE ROOTS SINCE 2026-09-03, for the reason spelled out at the head of
-# tier_direction_census.sh: the ENGINE tier left `zeroship-plugin-db/src` for
+# tier_direction_census.sh: the ENGINE tier left `zeroship-data-v8/src` for
 # `zeroship-data-orm/src`, and a census pinned to the first would rule on
 # what stayed while printing a clean verdict about what went. A tier is not a
 # crate; both trees are scanned as one region under one `tier()` map, so the
 # arms below rule on the same files they ruled on before.
 SRC_ROOTS=(
-  "$ROOT/crates/zeroship-plugin-db/src"
+  "$ROOT/crates/zeroship-data-v8/src"
   "$ROOT/crates/zeroship-data-orm/src"
 )
 SHOW_ALL=0
@@ -334,7 +334,7 @@ tier() {
     # for `zeroship-data-core` - the broker because the ENGINE and CDC both
     # publish into it, `read_set` because the broker names its `ReadSetEntry`.
     # Same treatment the CORE note below describes: this census scans only
-    # `zeroship-plugin-db/src`, so an arm for a file that moved out is a pattern
+    # `zeroship-data-v8/src`, so an arm for a file that moved out is a pattern
     # matching nothing, a map claiming coverage it does not have. Kept in step
     # with tier_direction_census.sh, where the two censuses judging one file
     # differently is defect 1.
@@ -347,7 +347,7 @@ tier() {
     # kept, exactly as the `broker`/`read_set` note above describes.
     ./wal_consumer.rs|./replication.rs|./slot_reaper.rs) echo "CDC" ;;
     # CORE is now HALF EXTRACTED. `error.rs` and `binding.rs` left for
-    # `zeroship-data-core`; this census scans only `zeroship-plugin-db/src`, so
+    # `zeroship-data-core`; this census scans only `zeroship-data-v8/src`, so
     # naming them here would be two patterns that match nothing - a map claiming
     # coverage it does not have. The extracted half needs no census row: Cargo
     # enforces its dependency direction, and its vendor-freedom is ruled on by

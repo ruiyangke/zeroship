@@ -52,7 +52,7 @@
 #   lose their system columns. No text comparison of the remaining copies would
 #   have seen that either. Arm 2 counts the consumers.
 #
-#   Arm 2 is not hypothetical. crates/zeroship-plugin-db/tests/parity/mod.rs was NEVER one
+#   Arm 2 is not hypothetical. crates/zeroship-data-v8/tests/parity/mod.rs was NEVER one
 #   of the six copies, correctly - it include_str!s plugin-db's ceiling instead of
 #   restating the rule, which is why the old gate had nothing to compare and said
 #   nothing about it. Moving the rule out of that ceiling would have silently left
@@ -164,7 +164,7 @@ SELF="tests/inject_policy_mirror_gate.sh"
 # The 2026-09-01 six was never real. `system_shape_charter.rs` landed in
 # 27f4d5f45 ("feat(db): compile the operator charter into the worker") and IS a
 # consumer, so the count went up correctly - but the file it displaced was never
-# checked, and `crates/zeroship-plugin-db/tests/distributed_live.rs` was only
+# checked, and `crates/zeroship-data-v8/tests/distributed_live.rs` was only
 # ever matched because the scan ANDed two unrelated file-level greps (see arm
 # 2). It names the policy in a doc comment and `include_str!`s something else
 # entirely. The count and the prose above it rotted together in the same
@@ -273,7 +273,7 @@ echo "  discovery: $found_n inject rule(s) in tracked files; 1 fragment," \
 # This was `grep -lF 'include_str!("'` piped into `grep -lF '<the path>'`, which
 # asks whether a file contains BOTH somewhere - a relation neither grep can see.
 # Measured 2026-09-04: that returned 6 files, the bound regex returns 5, and the
-# extra was `crates/zeroship-plugin-db/tests/distributed_live.rs`, whose two
+# extra was `crates/zeroship-data-v8/tests/distributed_live.rs`, whose two
 # qualifying lines are a DOC COMMENT naming the policy (`:66`) and an
 # `include_str!` of the db SDK's generated bundle (`:488`). Nothing in that file
 # takes the fragment.

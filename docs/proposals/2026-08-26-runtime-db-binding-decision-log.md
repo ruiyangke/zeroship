@@ -517,7 +517,7 @@ one changes a shape:
 | binding a 2nd app refuses its first deploy | `crates/zeroship-control/src/registry.rs:469` | #49 |
 | an apply with no deploy strands running isolates | same | #51 |
 | SQLite CDC + transaction lanes key on alias==app_id | `crates/zeroship-data-orm/src/backend/sqlite/cdc.rs:121` | #54 |
-| teardown is app-keyed end to end | `crates/zeroship-plugin-db/src/drop_namespace.rs:69` | #55 |
+| teardown is app-keyed end to end | `crates/zeroship-data-v8/src/drop_namespace.rs:69` | #55 |
 
 Every path above is a full repo path on purpose: `tests/doc_citation_gate.sh` only
 extracts citations it can resolve, so an abbreviated `meter.rs:1` would have been
@@ -743,7 +743,7 @@ named - `write_audit_unmask_row`. The design flagged this as OWED and said "the
 count is not invented here".
 
 **True, measured 2026-08-28.** There are **six** `CREATE TABLE IF NOT EXISTS`
-statements in `crates/zeroship-plugin-db/src/`, creating **three** tables, each
+statements in `crates/zeroship-data-v8/src/`, creating **three** tables, each
 with a PostgreSQL arm and a SQLite arm, and none of the six is `cfg`-gated:
 `"<app>"."__zeroship_migrations"` (`audit.rs:236`,
 `zeroship-data-sqlite/src/lib.rs:1292`), `"<app>"."__zeroship_audit_mask_drift"`
@@ -928,7 +928,7 @@ runs for an app "it owns the publish path for events this isolate writes", so
 build cost only to discard the result"
 (`crates/zeroship-data-orm/src/exec.rs:455-466` for the reasoning; the call at
 `:501`). The real producer is `wal_consumer::emit_for_tuple`
-(`crates/zeroship-plugin-db/src/wal_consumer.rs:589`) - which holds no lease, has
+(`crates/zeroship-data-v8/src/wal_consumer.rs:589`) - which holds no lease, has
 no operation context, and in which the string `epoch` does not appear once in
 the entire file. *(Class: a mechanism well-founded on the local path and
 unimplementable on the production one, because the local path is the one a test
@@ -1007,7 +1007,7 @@ framing and why it was locally sound are kept here, because "this was argued
 carefully and was answering the wrong question" is the part that transfers.)*
 
 **The tree already contained the proof.**
-`crates/zeroship-plugin-db/src/audit.rs:20-42` (DELETED in `ac38fac0e` by this
+`crates/zeroship-data-v8/src/audit.rs:20-42` (DELETED in `ac38fac0e` by this
 design's own implementation; read it there) records this exact ceremony as a
 proposal - "a tamper-evident `SECURITY DEFINER` write path mediated by an
 HMAC-signed `__zeroship_session_ctx` PID-keyed table living in a platform-wide
@@ -1132,7 +1132,7 @@ version.
 - **SC-6's whole read contract.** The apparatus it built to make an
   in-transaction authority read safe - a dedicated authority pool disjoint from
   the eight-connection data pool at
-  `crates/zeroship-plugin-db/src/lib.rs:862` - has no remaining client.
+  `crates/zeroship-data-v8/src/lib.rs:862` - has no remaining client.
 - **Fork B's second clause.** The ceiling was the sole value this design ever
   proposed to read *inside* an open creator transaction. The rule is kept
   because the next authority value someone wants mid-transaction faces the same
@@ -1166,7 +1166,7 @@ transaction was bricked.**
 
 It also recorded why "the same rules as the epoch" was not transferable by
 assertion: the epoch is affordable because it rides an existing round trip,
-while `zeroship-plugin-db` has no HTTP client at all and
+while `zeroship-data-v8` has no HTTP client at all and
 `check_unmask_authorization` is a synchronous `fn` (`crud/unmask.rs:305`). And
 that the authorization point would have had to move to after `prepare`, since
 today it runs before any SQL (`crud/unmask.rs:1235-1236`).
@@ -1223,7 +1223,7 @@ there is no latent route in either file.)*
 
 **A second defect it closes by construction, which nobody had counted.**
 `mask_policies: HashMap<String, MaskPolicy>` is keyed by **`app_id` alone**
-(`crates/zeroship-plugin-db/src/context.rs:368`, read at `:837-841`, written at
+(`crates/zeroship-data-v8/src/context.rs:368`, read at `:837-841`, written at
 `:847-857`) - **exactly L10's shape, in a map L10's fix did not touch.** L10
 moved runtime schema metadata to a `DbBinding { app_id, deploy_token }` key
 precisely because the worker keeps several isolates of the same app at different

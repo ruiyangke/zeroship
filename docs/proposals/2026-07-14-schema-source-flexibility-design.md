@@ -18,7 +18,7 @@
 Two facts about the *current* code bound the problem:
 
 - **Deploy already refuses to apply migrations.** `crates/zeroship-control/src/api.rs:416` returns `migration_approval_removed` — *"deploy no longer applies migrations; use the migration service `/v1/apps/{id}/migrations/apply`."* The out-of-band migration-service path (`zeroship-platform-migrate`) is **shipped** (Phase F), not future.
-- **`registerModel` on PG is already a DDL no-op.** `crates/zeroship-plugin-db/src/register_model/mod.rs:210` is `(Some(_pg), _) => Ok(())`. The four-phase convergence modules (`bootstrap` / `plan` / `validate`) are `#[cfg(any(test, feature = "test-helpers"))]`-gated (`mod.rs:56-63`) — they do **not** compile into the production worker. On PG, `registerModel` still *runs* at boot (via `installSchema` off `globalThis.__zsRuntimeDescriptor`, the fold's `RuntimeSchemaDescriptor`), but only to **populate the metadata cache** (idPrefix, encrypted/mask facets — `mod.rs:198-218`). No CREATE, no ALTER.
+- **`registerModel` on PG is already a DDL no-op.** `crates/zeroship-data-v8/src/register_model/mod.rs:210` is `(Some(_pg), _) => Ok(())`. The four-phase convergence modules (`bootstrap` / `plan` / `validate`) are `#[cfg(any(test, feature = "test-helpers"))]`-gated (`mod.rs:56-63`) — they do **not** compile into the production worker. On PG, `registerModel` still *runs* at boot (via `installSchema` off `globalThis.__zsRuntimeDescriptor`, the fold's `RuntimeSchemaDescriptor`), but only to **populate the metadata cache** (idPrefix, encrypted/mask facets — `mod.rs:198-218`). No CREATE, no ALTER.
 
 So the genuine, still-open problem is **schema sourcing**, in three parts:
 

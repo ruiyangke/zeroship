@@ -10,7 +10,7 @@
  *
  * The native dispatcher behaviour (atomic auth fence, audit row
  * emission, plaintext promotion) is covered end-to-end by
- * `crates/zeroship-plugin-db/tests/sqlite_integration.rs`. Here we only pin:
+ * `crates/zeroship-data-v8/tests/sqlite_integration.rs`. Here we only pin:
  *
  *   1. The shape the SDK sends ON THE WIRE matches the contract
  *      `ZeroshipDbFindOpts` declares.

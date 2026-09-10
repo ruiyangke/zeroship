@@ -192,7 +192,7 @@ pub enum TypedCell {
 /// **`pub`, and it must stay so even though NOTHING NAMES IT outside this
 /// module.** Phase 0.5's visibility audit narrowed it to `pub(crate)` on
 /// 2026-09-02 on exactly that evidence and the compiler refused with 39
-/// errors: `crates/zeroship-plugin-db/tests/sqlite_integration.rs` obtains one by INFERENCE from
+/// errors: `crates/zeroship-data-v8/tests/sqlite_integration.rs` obtains one by INFERENCE from
 /// `query_typed` and then reads `.rows`, so it never writes the type's name
 /// and a reference count cannot see it. Its siblings in this file -
 /// `Interrupts`, `SqliteSession`, `TxLease`, `NextCommandGate` (and
@@ -2616,7 +2616,7 @@ fn run_reattach_file(
 mod tests {
     //! Direct unit tests for the worker-side bodies and the wrap pre-check.
     //! The actor-level protocol (two connections, reservations, cancellation)
-    //! is exercised end to end in `crates/zeroship-plugin-db/tests/sqlite_integration.rs`, which is the
+    //! is exercised end to end in `crates/zeroship-data-v8/tests/sqlite_integration.rs`, which is the
     //! only place a real actor thread runs.
 
     use super::*;

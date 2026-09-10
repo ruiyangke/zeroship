@@ -21,7 +21,7 @@
 #   asserts the absolute property separately, against the RAW deployed bytes.
 #
 #   Symmetrically, a crate-local suite reads the envelope from ONE side only:
-#   `crates/zeroship-plugin-db/tests/capability.rs` can read a verbose `code`/`details`
+#   `crates/zeroship-data-v8/tests/capability.rs` can read a verbose `code`/`details`
 #   body because `CAPABILITY_VIOLATION` is on `is_public_error_code`'s
 #   allow-list, so it never exercises the blanking arm this harness measures.
 #

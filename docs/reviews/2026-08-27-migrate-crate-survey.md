@@ -195,7 +195,7 @@ coverage or how much generic engine test behavior moved elsewhere.
 | --- | --- | --- |
 | `zeroship-migrate-server` | Normal, shipped library dependency | `crates/zeroship-migrate-server/Cargo.toml:16-64`; production code imports `CompioPgSession` at `crates/zeroship-migrate-server/src/apply.rs:23`. |
 | `zeroship-config-contract` | Normal dependency of a non-shipped tool | The tool declares itself non-shipped at `crates/zeroship-config-contract/Cargo.toml:1-15`, declares the adapter at `crates/zeroship-config-contract/Cargo.toml:17-33`, and reads `PlatformMigrateSettings::SPECS` at `crates/zeroship-config-contract/src/registry.rs:43-53`. |
-| `zeroship-plugin-db` | Dev-dependency only | The entry is under `[dev-dependencies]` at `crates/zeroship-plugin-db/Cargo.toml:91-134`. There is no current `zeroship_migrate_adapter` reference in that crate's Rust source, so this is presently an unused test dependency, not a library consumer. |
+| `zeroship-data-v8` | Dev-dependency only | The entry is under `[dev-dependencies]` at `crates/zeroship-data-v8/Cargo.toml:91-134`. There is no current `zeroship_migrate_adapter` reference in that crate's Rust source, so this is presently an unused test dependency, not a library consumer. |
 
 The adapter's own binary and integration tests consume its library target but do
 not create separate Cargo dependency edges.
@@ -228,7 +228,7 @@ uses its own crate-relative session type at
 | --- | --- | --- |
 | `zeroship-config-contract` | Normal dependency of a non-shipped tool | `crates/zeroship-config-contract/Cargo.toml:17-27`; it reads `MigratedSettings::SPECS` at `crates/zeroship-config-contract/src/registry.rs:50`. |
 | `zeroship-control` | Dev-dependency only | `crates/zeroship-control/Cargo.toml:111-141`; its test helper calls the migrated provisioning function at `crates/zeroship-control/tests/common/mod.rs:278-283`. The production HTTP forward formerly lived in the now-DELETED `crates/zeroship-control/src/migrations_api.rs`; the edge's `/v1/*` handler sends migration applies directly to migrate-server. |
-| `zeroship-plugin-db` | Dev-dependency only | `crates/zeroship-plugin-db/Cargo.toml:91-143`; its test calls migrated's workflow-schema provisioning and constants at `crates/zeroship-plugin-db/tests/integration.rs:6295-6315` and `crates/zeroship-plugin-db/tests/integration.rs:6351-6359`. |
+| `zeroship-data-v8` | Dev-dependency only | `crates/zeroship-data-v8/Cargo.toml:91-143`; its test calls migrated's workflow-schema provisioning and constants at `crates/zeroship-data-v8/tests/integration.rs:6295-6315` and `crates/zeroship-data-v8/tests/integration.rs:6351-6359`. |
 
 The package's own binary is a shipped consumer of its library: the binary target
 is declared at `crates/zeroship-migrate-server/Cargo.toml:7-14`, and the image builds and
@@ -475,7 +475,7 @@ Git history shows both long-lived shipped paths and one removed test consumer:
 - `825d36ccb` (2026-08-20) added plugin-db's Compio adapter test consumer. The
   August 26 `c6910bac6`/`0ef16dbb9` change removed that source use when plugin-db
   tests began spelling their own table DDL. The dev-dependency entry remains at
-  `crates/zeroship-plugin-db/Cargo.toml:127-134`, but the current tree has no
+  `crates/zeroship-data-v8/Cargo.toml:127-134`, but the current tree has no
   adapter symbol use in plugin-db.
 - The August 26 in-sourcing sequence (`ccb5a7edc`, `b3a5c545c`, `e9dd97a8f`,
   `fe7aa0e45`, and `b044546c2`) changed repository/package paths. It retained the

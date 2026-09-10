@@ -531,19 +531,19 @@ happen when two things arrive at once.
 ### Acceptance shape
 
 **Every plugin-db test target declares `required-features`** (all eight in
-`crates/zeroship-plugin-db/Cargo.toml`), so a plain `cargo test -p
-zeroship-plugin-db` filters them all out and never builds them. Citing an arm
+`crates/zeroship-data-v8/Cargo.toml`), so a plain `cargo test -p
+zeroship-data-v8` filters them all out and never builds them. Citing an arm
 without naming its invocation is how "already covered" comes to mean "compiled by
 nobody's routine command". The transaction target runs as:
 
-    cargo test -p zeroship-plugin-db --test native_transaction \
+    cargo test -p zeroship-data-v8 --test native_transaction \
       --features test-helpers -- --test-threads=1
 
 The pure arms live in
 `crates/zeroship-data-orm/src/transaction/reducer/tests.rs` and
 `crates/zeroship-data-orm/src/transaction/reducer/frames.rs`, and run under
-`cargo test -p zeroship-plugin-db --lib`. The live arms live in
-`crates/zeroship-plugin-db/tests/native_transaction.rs` and need PostgreSQL.
+`cargo test -p zeroship-data-v8 --lib`. The live arms live in
+`crates/zeroship-data-v8/tests/native_transaction.rs` and need PostgreSQL.
 
 The required arms, and where each lives today:
 

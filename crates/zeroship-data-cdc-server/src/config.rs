@@ -23,7 +23,7 @@
 //! a surface that does not exist. The one non-boilerplate leaf is the DSN,
 //! because a change-data relay with no database to stream from is not a relay -
 //! every function the extraction will rewrite
-//! (`crates/zeroship-plugin-db/src/replication.rs`'s `ensure_worker_slot`, and
+//! (`crates/zeroship-data-v8/src/replication.rs`'s `ensure_worker_slot`, and
 //! `wal_consumer.rs`'s decode loop) already takes a `PostgreSQL` connection as its
 //! first input.
 //!

@@ -124,7 +124,7 @@ fi
 # The ORM may link drivers, but must remain independent of its V8 adapter.
 n_orm_pairs=0
 orm_tree=$(cargo tree -p zeroship-data-orm -e normal) || exit 1
-for forbidden in zeroship-runtime zeroship-plugin-db v8; do
+for forbidden in zeroship-runtime zeroship-data-v8 v8; do
   n_orm_pairs=$((n_orm_pairs + 1))
   if printf '%s\n' "$orm_tree" | grep -qE "(^|[^a-zA-Z0-9_-])${forbidden} v[0-9]"; then
     bad "zeroship-data-orm reaches $forbidden"

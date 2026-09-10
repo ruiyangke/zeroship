@@ -10,7 +10,7 @@
 #
 #   crates/zeroship-data-sql/src/mask_codec.rs  and its peer in
 #   zeroship-migrate-backend both cited a round-trip guard in
-#   crates/zeroship-plugin-db/tests/mask_flip.rs. That test needs
+#   crates/zeroship-data-v8/tests/mask_flip.rs. That test needs
 #   `--features test-helpers` PLUS a live PostgreSQL, builds and parses with ONE
 #   crate's codec, and covers one (kind, classification) pair. It could not have
 #   caught the divergence it was cited as preventing, and a real fail-open
@@ -91,7 +91,7 @@ fail() { FAIL=$((FAIL + 1)); echo "  FAIL $1"; }
 ROOTS="crates/zeroship-data-cdc-server/src
 crates/zeroship-data-orm/src
 crates/zeroship-data-sql/src
-crates/zeroship-plugin-db/src
+crates/zeroship-data-v8/src
 crates/zeroship-migrate/src
 crates/zeroship-migrate-backend/src
 crates/zeroship-migrate-core/src
@@ -203,7 +203,7 @@ LEDGER='
 crates/zeroship-data-orm/src/backend/postgres/pg_session_sql.rs	zeroship_migrate_server	unbound
 crates/zeroship-cdc-wire/src/ids.rs	zeroship_core	bound=crates/zeroship-cdc-wire/tests/typed_id_oracle.rs#zeroship_core::typed_id
 crates/zeroship-data-orm/src/exec.rs	compio_postgres	prose
-crates/zeroship-data-orm/src/backend/sqlite/vector.rs	zeroship_migrate_core	bound=crates/zeroship-plugin-db/tests/sqlite_integration.rs#fn engine_shadow_relation
+crates/zeroship-data-orm/src/backend/sqlite/vector.rs	zeroship_migrate_core	bound=crates/zeroship-data-v8/tests/sqlite_integration.rs#fn engine_shadow_relation
 crates/zeroship-migrate-backend/src/backend.rs	zeroship_migrate_postgres	prose
 crates/zeroship-migrate-backend/src/constraint_definition.rs	zeroship_migrate	prose
 crates/zeroship-migrate-backend/src/ddl.rs	zeroship_migrate	prose
@@ -225,11 +225,11 @@ crates/zeroship-migrate-postgres/src/backend/session.rs	zeroship_migrate_backend
 crates/zeroship-migrate-postgres/src/role.rs	zeroship_migrate_backend	prose
 crates/zeroship-migrate-postgres/src/role.rs	zeroship_migrate_ir	prose
 crates/zeroship-migrate-sqlite/src/backend/actor.rs	zeroship_migrate_backend	bound=crates/zeroship-migrate-sqlite/src/backend/actor.rs#step::BindValue::Bytes
-crates/zeroship-migrate-sqlite/src/backend/audit_unmask_sql.rs	zeroship_migrate_server	bound=crates/zeroship-plugin-db/tests/audit_table_parity.rs#POSTGRES_CREATOR
-crates/zeroship-migrate-sqlite/src/backend/audit_unmask_sql.rs	zeroship_plugin_db	bound=crates/zeroship-plugin-db/tests/audit_table_parity.rs#SQLITE_CREATOR
+crates/zeroship-migrate-sqlite/src/backend/audit_unmask_sql.rs	zeroship_migrate_server	bound=crates/zeroship-data-v8/tests/audit_table_parity.rs#POSTGRES_CREATOR
+crates/zeroship-migrate-sqlite/src/backend/audit_unmask_sql.rs	zeroship_data_v8	bound=crates/zeroship-data-v8/tests/audit_table_parity.rs#SQLITE_CREATOR
 crates/zeroship-migrate-sqlite/src/dml.rs	zeroship_migrate_backend	prose
 crates/zeroship-migrate-sqlite/src/schema.rs	zeroship_data_sql	bound=crates/zeroship-data-sql/src/compile.rs#mod sqlite_now_parity
-crates/zeroship-plugin-db/src/drop_namespace.rs	zeroship_migrate_server	prose
+crates/zeroship-data-v8/src/drop_namespace.rs	zeroship_migrate_server	prose
 crates/zeroship-data-sql/src/mask_codec.rs	zeroship_migrate_backend	bound=crates/zeroship-data-sql/src/mask_codec.rs#mod cross_codec_parity
 crates/zeroship-data-sql/src/compile.rs	zeroship_migrate_backend	bound=crates/zeroship-data-sql/src/compile.rs#mod raw_column_parity
 '

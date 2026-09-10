@@ -467,7 +467,7 @@ export const txIsolation = mutation(
         //                          to write "readCommitted" (default),
         //                          "repeatableRead" or "serializable".
         //   the runtime            normalize_isolation_level
-        //                          (crates/zeroship-plugin-db/src/v8_classes/db.rs:295)
+        //                          (crates/zeroship-data-v8/src/v8_classes/db.rs:295)
         //                          accepts camelCase, spaced and uppercase, all
         //                          four levels -- and its rejection message
         //                          recommends the camelCase spellings.
@@ -539,7 +539,7 @@ export const txDepth = mutation(
 // open at once. That is the whole point of `isolationLevel`, and
 // docs/reference/sqlite-divergences.md names it as unmeasured.
 //
-// The mechanism under test (crates/zeroship-plugin-db/src/context.rs:146 and
+// The mechanism under test (crates/zeroship-data-v8/src/context.rs:146 and
 // crates/zeroship-data-orm/src/transaction/mod.rs:227):
 //
 //   * the open tx connection lives in `tx_conns: HashMap<app_id, TxConnection>`

@@ -19,8 +19,8 @@
 
 use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
-use zeroship_plugin_db::v8_classes::collection::Collection;
-use zeroship_plugin_db::v8_classes::db::{Db, mint_db};
+use zeroship_data_v8::v8_classes::collection::Collection;
+use zeroship_data_v8::v8_classes::db::{Db, mint_db};
 use zeroship_runtime::{RuntimeState, SharedState, init_v8};
 
 fn install_runtime_state(scope: &mut v8::PinScope<'_, '_>) {

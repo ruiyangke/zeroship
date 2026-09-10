@@ -15,7 +15,7 @@
 //!
 //! ```text
 //! PG_TEST_URL=postgres://postgres:postgres@127.0.0.1:5478/postgres \
-//! cargo test -p zeroship-plugin-db --test test_helpers -- search_ir_live::
+//! cargo test -p zeroship-data-v8 --test test_helpers -- search_ir_live::
 //! ```
 //!
 //! The server needs **both** `vector` and `postgis`; the tests create the
@@ -502,11 +502,11 @@ fn postgres_serves_the_inner_product_that_sqlite_refuses() {
 
         // The SQLite half: the same metric, refused.
         use zeroship_data_orm::binding::DbBinding;
-        use zeroship_plugin_db::backend::{VectorIndex, VectorMetric as BackendMetric};
+        use zeroship_data_v8::backend::{VectorIndex, VectorMetric as BackendMetric};
         let dir = tempfile::tempdir().expect("tempdir");
-        let sqlite = zeroship_plugin_db::backend_selection::new_sqlite_backend(
+        let sqlite = zeroship_data_v8::backend_selection::new_sqlite_backend(
             std::path::PathBuf::from(dir.path()),
-            zeroship_plugin_db::isolate_key_source(),
+            zeroship_data_v8::isolate_key_source(),
         )
         .expect("open SqliteBackend");
 

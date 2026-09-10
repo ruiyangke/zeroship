@@ -4,7 +4,7 @@
 //!
 //! `apply_mask_kind` and its per-kind helpers are pure, total functions over
 //! `(MaskKind, &str)` - no schema, no row, no connection, no error type. They
-//! came out of `zeroship-plugin-db`'s `crud/mask_pass.rs` on 2026-09-03 because
+//! came out of `zeroship-data-v8`'s `crud/mask_pass.rs` on 2026-09-03 because
 //! TWO tiers call them:
 //!
 //! * the ENGINE write and read passes (`crud::mask_pass::apply_mask_on_write`

@@ -20,7 +20,7 @@ zeroship_core::declare_env_consumer!(
     /// The ORM's environment reads.
     ///
     /// A LIBRARY consumer, so `target` is the cargo package: this crate is
-    /// linked into `zeroship-plugin-db`, which is itself linked into the worker
+    /// linked into `zeroship-data-v8`, which is itself linked into the worker
     /// AND the CLI's `zeroship serve` vector.
     pub DataOrmConsumer,
     target = "zeroship-data-orm",

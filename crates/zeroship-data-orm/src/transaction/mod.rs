@@ -686,7 +686,7 @@ mod tests {
     // THE LAST V8-SHAPED NAME IN THIS FILE IS GONE. Two arms here drove the
     // ADAPTER's `build_settle_resolve_value` through
     // `zeroship_runtime::state::ResolveValue`, to prove the engine's outcome
-    // mapping survives lowering. They moved to `zeroship-plugin-db`'s
+    // mapping survives lowering. They moved to `zeroship-data-v8`'s
     // `v8_classes/transaction.rs` with the data-engine cut - the lowering is
     // that function's, and the engine crate declares neither `v8` nor
     // `zeroship-runtime`, so the arms could not follow the module they tested.
@@ -1045,7 +1045,7 @@ mod tests {
     ///
     /// The PostgreSQL arm of this property is
     /// `a_forced_cleanup_cancels_the_running_statement_and_keeps_the_connection`
-    /// in `crates/zeroship-plugin-db/tests/native_transaction.rs`; this is its dev-tier peer, and it is
+    /// in `crates/zeroship-data-v8/tests/native_transaction.rs`; this is its dev-tier peer, and it is
     /// here rather than there because it needs no server.
     ///
     /// The two backends differ in how much a cancellation accomplishes, and this

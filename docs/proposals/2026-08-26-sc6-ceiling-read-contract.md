@@ -137,7 +137,7 @@ not mention.
 `unmask.rs:1514` and `:1629` (arg parsing), `crud/mod.rs:669` (the query hint,
 on the eager half of `plan_find`), and `v8_classes/masked_value.rs:300` and
 `:423` (the creator-facing single and bulk unmask). Count them with
-`grep -rn 'sanitize_app_actor(' crates/zeroship-plugin-db/src` and do not
+`grep -rn 'sanitize_app_actor(' crates/zeroship-data-v8/src` and do not
 truncate the output. The stripped claim is preserved for audit in its own
 `claimed_actor` column, serialised whole rather than split into the trusted
 `actor_id` / `actor_role` fields (`unmask.rs:828-852`).
@@ -156,7 +156,7 @@ new trust standing.
 
 Not built. The shipped carrier is `defineMaskPolicy` (`sdks/db/src/policy.ts:120`),
 drained at boot through `__platform.setMaskPolicy`
-(`crates/zeroship-plugin-db/src/v8_classes/db_platform.rs:100`) into the
+(`crates/zeroship-data-v8/src/v8_classes/db_platform.rs:100`) into the
 per-isolate cache. The string `mask` appears **zero** times in
 `crates/zeroship-bundle/src/manifest.rs`. Defining `manifest_declared` as an
 artifact needs five pieces: the artifact field and its schema; the authoring
@@ -353,7 +353,7 @@ satisfy a deny-only arm **vacuously**, with every non-`auto` unmask bricked.
 - **A second connection taken while holding a first is a deadlock, not a latency
   cost.** The data pool holds **eight** connections
   (`PostgresBackend::connect(&url, 8, ...)`,
-  `crates/zeroship-plugin-db/src/lib.rs:1243-1247`); eight concurrent
+  `crates/zeroship-data-v8/src/lib.rs:1243-1247`); eight concurrent
   transactions each wanting a ninth is a cycle no single-transaction test can
   expose.
 - **The ceiling is the security boundary and the actor is not.** Any change that

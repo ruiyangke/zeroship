@@ -404,7 +404,7 @@ The floor a worker sits at is therefore `2 x (threads that have served an
 runtime feed. Nothing here
 is a ceiling an operator sets: there is no connection-budget flag, and the two
 sizes are compile-time constants (`Pool::connect(&url, 8)` in
-`zeroship-plugin-db`'s `init_pool_async`, `OPERATOR_POOL_SIZE` in its
+`zeroship-data-v8`'s `init_pool_async`, `OPERATOR_POOL_SIZE` in its
 `service.rs`).
 
 "All 2 are held" is not a rounding-up. `Pool::connect(url, 2)` sets `min_idle`

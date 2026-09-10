@@ -939,7 +939,7 @@ applied to platform primitives instead of user code).
   `DbPlugin::new(url, Arc<Meter>)`. `build_instance` (`lib.rs:272`) →
   `mint_db(scope, app_id, meter)`. The emit lives at the shared exec boundary
   (`exec.rs`, see A2), so the `MeterHandle` is most naturally placed in the
-  per-app `context` (`crates/zeroship-plugin-db/src/context.rs`, the thread-local the
+  per-app `context` (`crates/zeroship-data-v8/src/context.rs`, the thread-local the
   exec layer already uses for schema/tx-client lookups keyed by `app_id`) —
   registered once per app in `DbPlugin::register`/first-touch, read by
   `exec_query`/`exec_mutation`. This keeps the exec functions' signatures

@@ -12,7 +12,7 @@ commits; there are five.
 
 | measurement | how |
 | --- | --- |
-| `measure_cached_entry_size` output | `cargo test -p zeroship-plugin-db --lib measure_cached_entry_size -- --nocapture` |
+| `measure_cached_entry_size` output | `cargo test -p zeroship-data-v8 --lib measure_cached_entry_size -- --nocapture` |
 | `serde_json::Value` in-memory multiplier | standalone crate in `/tmp/jsonsize`, workspace's exact features (`raw_value`,`preserve_order`) |
 | `pg_class` / `pg_attribute` index set | `docker exec zs-dbbind-pg psql ... \di pg_catalog.pg_class*` |
 | `read_live_schema` plans at 2000 and 4000 tenants | throwaway `postgres:16.14` container `zs-catscale-probe`, 4000 schemas x 8 tables x 14 cols, `EXPLAIN (ANALYZE, BUFFERS)` on the three queries copied verbatim from `diff.rs` |
@@ -154,7 +154,7 @@ cross-tenant is learned.
   `__zeroship_audit_mask_drift` (`mask_drift.rs:785`) when used.
 - `__zs_` **cannot fire**. Every `__zs_` name in the tree is a replication slot
   or publication (`replication.rs:107-115`), which are not tables. Grep of
-  `crates/zeroship-plugin-db/src` and `crates/zeroship-schema/src` finds no
+  `crates/zeroship-data-v8/src` and `crates/zeroship-schema/src` finds no
   `__zs_`-prefixed table.
 - `__zeroship_mv_*` cannot appear either - `relkind = 'r'` excludes matviews.
 

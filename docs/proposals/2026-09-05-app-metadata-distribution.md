@@ -2288,7 +2288,7 @@ the estimate was wrong in both directions" does not teach better.
 An early draft repeated a claim from `docs/architecture/data-system.md`, which
 says: "This is the discipline `DbResourceKey` already applies to DSN passwords: a
 digest chosen so the secret 'cannot reach `Debug` or a log line'." MEASURED, the
-source (`crates/zeroship-plugin-db/src/service.rs`) says the opposite:
+source (`crates/zeroship-data-v8/src/service.rs`) says the opposite:
 
 ```
 //! # What a `DbResourceKey` is for

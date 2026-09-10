@@ -167,7 +167,7 @@ Ranked by what the crate actually depends on rather than by region count:
     transaction.rs  Transaction::query_text_params   0 test references
 
 `Pool::cancel_query` is the one that matters. It is not merely untested inside
-this crate: `crates/zeroship-plugin-db/src/transaction/cancel.rs:146` calls it
+this crate: `crates/zeroship-data-v8/src/transaction/cancel.rs:146` calls it
 to cancel a running transaction, so the platform's cancellation path runs
 through a wrapper no test in the owning crate executes.
 

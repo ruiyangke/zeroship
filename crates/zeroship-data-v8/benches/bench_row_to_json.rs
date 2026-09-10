@@ -28,7 +28,7 @@
 //! ## Running
 //!
 //! ```text
-//! cargo bench -p zeroship-plugin-db --bench bench_row_to_json
+//! cargo bench -p zeroship-data-v8 --bench bench_row_to_json
 //! ```
 
 use std::time::Duration;
@@ -38,7 +38,7 @@ use compio_postgres::types::Type;
 use compio_postgres::Row;
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 
-use zeroship_plugin_db::row_to_value_for_bench;
+use zeroship_data_v8::row_to_value_for_bench;
 
 // ---------------------------------------------------------------------------
 // Wire-format encoders for the OID branches we exercise
@@ -46,7 +46,7 @@ use zeroship_plugin_db::row_to_value_for_bench;
 //
 // All Postgres binary wire encodings; column_to_value's branches consume
 // them as-is. Sourced from postgres-types' ToSql impls (verified against
-// crates/zeroship-plugin-db/src/v8_bridge.rs::column_to_value:372-505).
+// crates/zeroship-data-v8/src/v8_bridge.rs::column_to_value:372-505).
 
 fn enc_int4(v: i32) -> Vec<u8> {
     v.to_be_bytes().to_vec()

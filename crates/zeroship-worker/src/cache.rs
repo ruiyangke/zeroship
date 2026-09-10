@@ -81,7 +81,7 @@ thread_local! {
     /// This slot used to be `DB_URL: Option<String>` plus
     /// `CDC_WORKER_ID: Option<String>`, and `create_plugins` built a fresh
     /// `DbPlugin` from them - per thread, and before that per `build_runtime`.
-    static DB_SERVICE: RefCell<Option<Arc<zeroship_plugin_db::service::DbService>>> =
+    static DB_SERVICE: RefCell<Option<Arc<zeroship_data_v8::service::DbService>>> =
         const { RefCell::new(None) };
     /// Redis connection URL for the multi-node KV backend. Held per-thread
     /// like `DB_URL`. When `Some`, `create_plugins` mints a `KvBinding`
@@ -126,7 +126,7 @@ pub struct KernelConfig {
     /// The ONE process-wide `env.db` service, built in `main` before any
     /// worker thread exists. `None` when no database is configured, in which
     /// case the `db` namespace is simply absent.
-    pub db_service: Option<Arc<zeroship_plugin_db::service::DbService>>,
+    pub db_service: Option<Arc<zeroship_data_v8::service::DbService>>,
     pub kv_url: Option<String>,
     pub storage_backend: Option<StorageBackendConfig>,
     /// The process-wide usage meter shared with the per-process outbox task
@@ -184,8 +184,8 @@ pub fn init_cache(max_size: usize, max_pinned_isolates_per_app: usize, kernel: K
 pub(crate) fn test_db_service(
     url: &str,
     worker_id: &str,
-) -> Arc<zeroship_plugin_db::service::DbService> {
-    zeroship_plugin_db::service::DbService::new(zeroship_plugin_db::service::DbServiceConfig {
+) -> Arc<zeroship_data_v8::service::DbService> {
+    zeroship_data_v8::service::DbService::new(zeroship_data_v8::service::DbServiceConfig {
         url: url.to_string(),
         worker_id: worker_id.to_string(),
         meter: None,
@@ -1145,7 +1145,7 @@ mod tests {
     /// the arm could see.
     #[test]
     fn building_the_plugin_set_selects_no_backend_and_opens_no_pool() {
-        use zeroship_plugin_db::service::{backend_open_count, url_parse_count};
+        use zeroship_data_v8::service::{backend_open_count, url_parse_count};
 
         std::thread::spawn(|| {
             // Composition happens first and is allowed exactly one parse; the
@@ -1260,7 +1260,7 @@ mod tests {
                 .clone()
         }
         let service = test_db_service("postgres://localhost/zs_unused_shared", "shared-worker");
-        let kernel = |service: Arc<zeroship_plugin_db::service::DbService>| KernelConfig {
+        let kernel = |service: Arc<zeroship_data_v8::service::DbService>| KernelConfig {
             control_url: "http://127.0.0.1:1".to_string(),
             control_key: "test-control-key".to_string(),
             db_service: Some(service),

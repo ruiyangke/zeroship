@@ -188,7 +188,7 @@ RECORDER="$ROOT/sdks/vite-plugin/dist/gen-types/recorder.js"
 # shellcheck source=lib/binary_freshness.sh
 source "$ROOT/tests/lib/binary_freshness.sh"
 zs_check_binary_freshness "$ROOT" "$BIN" \
-  "crates/zeroship-plugin-db/src crates/zeroship-data-orm/src crates/zeroship-data-sql/src crates/zeroship-runtime/src crates/zeroship-worker/src crates/zeroship-gateway/src crates/zeroship-control/src crates/zeroship-migrate-server/src sdks/db/src" \
+  "crates/zeroship-data-v8/src crates/zeroship-data-orm/src crates/zeroship-data-sql/src crates/zeroship-runtime/src crates/zeroship-worker/src crates/zeroship-gateway/src crates/zeroship-control/src crates/zeroship-migrate-server/src sdks/db/src" \
   "zeroship zeroship-worker zeroship-gate zeroship-control zeroship-migrate-server dev-provision" \
   || { _zs_fresh_rc=$?; [ "$_zs_fresh_rc" -ne 0 ] && exit "$_zs_fresh_rc"; }
 
@@ -423,7 +423,7 @@ probe() {
   row txIsoSer  todos.txIsolation "{\"userId\":\"$txid\",\"tag\":\"i1$RUN\",\"level\":\"serializable\"}"
   row txIsoRR   todos.txIsolation "{\"userId\":\"$txid\",\"tag\":\"i2$RUN\",\"level\":\"repeatableRead\"}"
   # Rejected BEFORE any SQL runs, by normalize_isolation_level() in
-  # crates/zeroship-plugin-db/src/v8_classes/db.rs:295 -- so it is backend-independent
+  # crates/zeroship-data-v8/src/v8_classes/db.rs:295 -- so it is backend-independent
   # by construction and MUST agree. Probed anyway: "must agree by
   # construction" is the kind of claim that turns out to be wrong.
   row txIsoBad  todos.txIsolation "{\"userId\":\"$txid\",\"tag\":\"i3$RUN\",\"level\":\"snapshot\"}"

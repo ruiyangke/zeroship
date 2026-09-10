@@ -37,7 +37,7 @@
 //! `raw_column_parity` modules exist rather than a shared codec.
 //!
 //! So the answer is the same one those modules reached: compare, in the one
-//! place all three are nameable. `zeroship-plugin-db` already dev-depends on
+//! place all three are nameable. `zeroship-data-v8` already dev-depends on
 //! all three (`Cargo.toml`: `zeroship-data-orm`, `zeroship-migrate-server`,
 //! `zeroship-migrate-sqlite`), so this costs no new dependency edge at all.
 //!
@@ -45,7 +45,7 @@
 //!
 //! Every arm here is a string comparison over constants and generated DDL, so
 //! this target carries no `required-features` and runs under a bare
-//! `cargo test -p zeroship-plugin-db`. The live half - that a real apply leaves
+//! `cargo test -p zeroship-data-v8`. The live half - that a real apply leaves
 //! the runtime role able to write the row - is
 //! `zeroship-migrate-server`'s `apply_api_test::
 //! a_real_apply_leaves_the_runtime_role_able_to_write_the_unmask_audit_row_pg`,

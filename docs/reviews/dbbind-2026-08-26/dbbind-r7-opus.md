@@ -14,10 +14,10 @@ one of them and two are off by enough to matter.
 | Claim | Status | What I found |
 | --- | --- | --- |
 | parent:333-336 promises stated signatures for CDC / keys / audit / operator lifecycle | **VERIFIED** | `docs/proposals/2026-08-26-runtime-db-binding-design.md:333-336`: "**Non-query capabilities**: CDC lifecycle (spawn, retained ownership, pause, schema-pending, shutdown), key provision, audit insertion, operator lifecycle. Each neutral, each with stated ownership and signatures in SC-3's ledger." |
-| sc3:104-134 is the ledger, and it structurally cannot carry them | **VERIFIED** | `2026-08-26-sc3-dbplan-ir-and-ledger.md:106-113`: the row shape is `source_symbol \| source_range \| destination \| status`, `source_range` is a `query.rs` line range, and :117-119 binds the source column to "the set of `pub`/`pub(crate)` functions **the crate** actually exposes" - the crate being `zeroship-schema`. None of the four capabilities lives in `zeroship-schema`; all four live in `zeroship-plugin-db`. A ledger whose source column is pinned to one crate's exports cannot hold a row for a symbol in another crate without failing its own gate arm. |
+| sc3:104-134 is the ledger, and it structurally cannot carry them | **VERIFIED** | `2026-08-26-sc3-dbplan-ir-and-ledger.md:106-113`: the row shape is `source_symbol \| source_range \| destination \| status`, `source_range` is a `query.rs` line range, and :117-119 binds the source column to "the set of `pub`/`pub(crate)` functions **the crate** actually exposes" - the crate being `zeroship-schema`. None of the four capabilities lives in `zeroship-schema`; all four live in `zeroship-data-v8`. A ledger whose source column is pinned to one crate's exports cannot hold a row for a symbol in another crate without failing its own gate arm. |
 | sc3:82-95 pins the expression sub-grammar | **VERIFIED** | Comparison operators, logical composition, field paths incl. nested access, literals with logical type, and `IS NULL` distinct from a null-valued comparison. |
 | `exec.rs:455-466` = `is_app_suppressed` | **CITATION DRIFT** | At 455-466 the file holds *doc-comment prose about* the gate (`exec.rs:459` names `wal_consumer::is_app_suppressed(app_id)`). The **code** is `exec.rs:501`. The parent quotes the comment text verbatim at :520-524, so the quote is right and the line number points at the comment, not the call. Anyone grepping :455-466 for a call site finds none. |
-| `wal_consumer.rs:589` = `emit_for_tuple` | **VERIFIED** | `fn emit_for_tuple(` begins at exactly `crates/zeroship-plugin-db/src/wal_consumer.rs:589`. |
+| `wal_consumer.rs:589` = `emit_for_tuple` | **VERIFIED** | `fn emit_for_tuple(` begins at exactly `crates/zeroship-data-v8/src/wal_consumer.rs:589`. |
 | the string `epoch` appears ZERO times in `wal_consumer.rs` | **VERIFIED BY ME** | `grep -c epoch` -> `0`; `grep -ic epoch` -> `0`; file is 1440 lines. Both directions checked, so this is not a case-folding artefact. |
 | `ISOLATE_CTX` doc calls it "the per-isolate DB context" but it is a `thread_local!` | **VERIFIED** | `context.rs:888-893`. |
 | Fork B: `check_unmask_authorization` is sync | **VERIFIED** | `crud/unmask.rs:305-323`, `fn` not `async fn`, reads `crate::context::with(|c| c.mask_policy_for(app_id))` at :314. |
@@ -54,10 +54,10 @@ Additional facts I established for this report, all first-hand:
 - `ChangeStream::pause_broker` and `::engage_schema_pending`
   (`backend/mod.rs:978`, `:988`) have **zero non-test callers**
   (grepped across `crates/`; every hit outside `backend/mod.rs` is in
-  `crates/zeroship-plugin-db/tests/sqlite_integration.rs`). The trait carries
+  `crates/zeroship-data-v8/tests/sqlite_integration.rs`). The trait carries
   `#[allow(dead_code)]` at `:945`.
-- **`crates/zeroship-plugin-db/src/backend/api.rs` does not exist.**
-  `find crates/zeroship-plugin-db -name api.rs` returns nothing. The directory
+- **`crates/zeroship-data-v8/src/backend/api.rs` does not exist.**
+  `find crates/zeroship-data-v8 -name api.rs` returns nothing. The directory
   is `lock_guard.rs`, `mod.rs`, `postgres.rs`, `sqlite/`. Three acceptance
   statements are bound to that path (sc3:161, parent:180, parent:1210).
 
@@ -65,7 +65,7 @@ Additional facts I established for this report, all first-hand:
 
 # PART 1 - the normative `DbPlan` type skeleton
 
-Destination: a new leaf module `crates/zeroship-plugin-db/src/plan/`, no
+Destination: a new leaf module `crates/zeroship-data-v8/src/plan/`, no
 `v8`, no `compio_postgres`, no `zeroship_schema` dependency. Every type below
 is `#[non_exhaustive]` omitted deliberately: pre-launch, we break shapes rather
 than reserve for them.
@@ -608,12 +608,12 @@ future reader can tell whether it is still measuring anything.
 
 In production the mutation-side producer is suppressed. `emit_for_rows`
 returns early when `wal_consumer::is_app_suppressed(app_id)` is true
-(`crates/zeroship-plugin-db/src/exec.rs:501-505`), and the doc block above it
+(`crates/zeroship-data-v8/src/exec.rs:501-505`), and the doc block above it
 at `:459-465` states why: "when the WAL consumer is running for this app, it
 owns the publish path for events this isolate writes."
 
 The real producer is
-`crates/zeroship-plugin-db/src/wal_consumer.rs:589 emit_for_tuple`. I verified
+`crates/zeroship-data-v8/src/wal_consumer.rs:589 emit_for_tuple`. I verified
 myself that the string `epoch` appears **zero** times in that file, in both
 case-sensitive and case-insensitive greps, across all 1440 lines.
 
@@ -900,7 +900,7 @@ is *not* readable by `emit_for_tuple` as written.
 sc3:117-119 binds the ledger's source column to "the set of `pub`/`pub(crate)`
 functions **the crate** actually exposes", where the crate is
 `zeroship-schema`. All four capabilities parent:333-336 names live in
-`zeroship-plugin-db`. Adding a row for `cdc_lifecycle::ensure_ready` to a
+`zeroship-data-v8`. Adding a row for `cdc_lifecycle::ensure_ready` to a
 ledger whose gate arm derives the expected set from `zeroship-schema`'s exports
 makes that arm fail in the "ledger has a row with no source" direction - the
 gate is explicitly two-directional (sc3:129-130). So the promise at
@@ -1395,8 +1395,8 @@ field becomes a variant and this paragraph is why.
 >
 > parent:1210 - "No driver types above `backend/api.rs`; one file names both"
 
-**`crates/zeroship-plugin-db/src/backend/api.rs` does not exist.**
-`find crates/zeroship-plugin-db -name api.rs` returns nothing; the directory
+**`crates/zeroship-data-v8/src/backend/api.rs` does not exist.**
+`find crates/zeroship-data-v8 -name api.rs` returns nothing; the directory
 holds `lock_guard.rs`, `mod.rs`, `postgres.rs`, `sqlite/`. There is no
 `frontend/` directory either.
 
@@ -1438,7 +1438,7 @@ production caller**."
 
 I verified the second half: `engage_schema_pending` and `pause_broker` have
 zero non-test callers across `crates/`; every hit outside `backend/mod.rs` is
-in `crates/zeroship-plugin-db/tests/sqlite_integration.rs` (`:1712`, `:1822`,
+in `crates/zeroship-data-v8/tests/sqlite_integration.rs` (`:1712`, `:1822`,
 `:2010`). The `ChangeStream` trait carries `#[allow(dead_code)]`
 (`backend/mod.rs:945`), and the trait's own docs say the guards' `Drop` bodies
 "start as a no-op (`tracing::trace!` only) until [they are] wired"

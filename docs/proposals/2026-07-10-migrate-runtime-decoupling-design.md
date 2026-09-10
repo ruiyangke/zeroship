@@ -103,7 +103,7 @@ Six notes are worth carrying forward, because each records a way this work went 
 
 3. Do not assert absence with `cargo tree -p <crate> | grep -c v8 == 0` for a crate that
    has its own direct edge to the thing. That criterion was written against
-   `zeroship-plugin-db`, which is itself a native V8 plugin, so it could never pass and
+   `zeroship-data-v8`, which is itself a native V8 plugin, so it could never pass and
    said nothing about the edge it was meant to measure. Attribute the edge with a reverse
    tree (`cargo tree -i v8`) instead.
 

@@ -8,7 +8,7 @@
 //!
 //! The capability gate fires inside the V8 callback (no async work
 //! spawned, no DB connection acquired), so these tests don't require a
-//! running PG. The check happens in `crates/zeroship-plugin-db/src/v8_bridge.rs`
+//! running PG. The check happens in `crates/zeroship-data-v8/src/v8_bridge.rs`
 //! via `refuse_if_query_capability`, reading
 //! `zeroship_runtime::rpc::current_kind()` which the synthetic SSR
 //! entry sets via `__zsEnterKind`.
@@ -16,7 +16,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use zeroship_plugin_db::service::{DbService, DbServiceConfig};
+use zeroship_data_v8::service::{DbService, DbServiceConfig};
 use zeroship_runtime::channel::CancelFlag;
 use zeroship_runtime::plugin::NativePlugin;
 use zeroship_runtime::runtime::Runtime;

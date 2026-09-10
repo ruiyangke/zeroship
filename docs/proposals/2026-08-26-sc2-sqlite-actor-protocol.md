@@ -134,7 +134,7 @@ about concurrency here:
   are unaffected.
 
 `an_app_files_write_upgrade_is_plain_busy_because_it_is_not_in_wal`
-(`crates/zeroship-plugin-db/tests/sqlite_integration.rs:10806`) pins the journal mode of both databases so
+(`crates/zeroship-data-v8/tests/sqlite_integration.rs:10806`) pins the journal mode of both databases so
 a change to that fact fails there rather than silently invalidating the
 reasoning above. `docs/reference/sqlite-divergences.md` carries the
 creator-facing form.
@@ -383,7 +383,7 @@ developer owns the bytes, and no scheme inside the file changes that.
 
 ## Acceptance shape
 
-Each arm below has a test, in `crates/zeroship-plugin-db/tests/sqlite_integration.rs`
+Each arm below has a test, in `crates/zeroship-data-v8/tests/sqlite_integration.rs`
 unless noted.
 
 | arm | test |

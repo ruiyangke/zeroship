@@ -186,7 +186,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # ---------------------------------------------------------------------------
 # THE TIERS SPAN TWO CRATES SINCE 2026-09-03, AND SO DOES THIS SCAN.
 # ---------------------------------------------------------------------------
-# `SRC` was a single path, `crates/zeroship-plugin-db/src`, and the ENGINE tier
+# `SRC` was a single path, `crates/zeroship-data-v8/src`, and the ENGINE tier
 # left that tree for `crates/zeroship-data-orm/src` the day this changed.
 # Left alone, the census would have scanned the ~15k lines that stayed and
 # printed exactly what a clean tree prints about the ~22k that went - the defect
@@ -203,12 +203,12 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 #
 # `crate::` still means "this tier's vocabulary" on both sides, because
 # `zeroship-data-orm/src/lib.rs` re-exports the same neutral modules
-# `zeroship-plugin-db/src/lib.rs` does (`query`, `diff`, `broker`, `read_set`,
+# `zeroship-data-v8/src/lib.rs` does (`query`, `diff`, `broker`, `read_set`,
 # `encryption`, `budgets`, `lock_policy`), and the adapter re-exports the engine's
 # back. A path spelled `crate::crud::…` resolves to the same item from either
 # crate, which is exactly what makes the union scan sound.
 SRC_ROOTS=(
-  "$ROOT/crates/zeroship-plugin-db/src"
+  "$ROOT/crates/zeroship-data-v8/src"
   "$ROOT/crates/zeroship-data-orm/src"
 )
 for _root in "${SRC_ROOTS[@]}"; do

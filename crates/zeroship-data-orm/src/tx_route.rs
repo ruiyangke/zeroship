@@ -355,7 +355,7 @@ impl TxRoute {
     }
 }
 
-// THE `#[cfg(test)] mod tests` THAT SAT HERE MOVED to `zeroship-plugin-db`'s
+// THE `#[cfg(test)] mod tests` THAT SAT HERE MOVED to `zeroship-data-v8`'s
 // `tx_scope.rs` with the data-engine cut, unchanged in substance.
 //
 // All five arms drive `tx_scope::capture_route` inside a live `v8::PinScope`,

@@ -11,7 +11,7 @@
 //! * A DEFAULT METHOD BODY that awaits. A default body travels with its trait,
 //!   so a backoff schedule built on `compio::time::sleep` would put an async
 //!   executor in a crate that declares no runtime. Bounded acquisition lives in
-//!   `zeroship-plugin-db`'s `lock_policy::BoundedLockAcquire` extension trait,
+//!   `zeroship-data-v8`'s `lock_policy::BoundedLockAcquire` extension trait,
 //!   blanket-implemented over every `LockManager`.
 //! * A method handing out `BrokerPauseGuard` or `SchemaPendingGuard`, whose
 //!   `Drop` impls drive the engine's broker registries. That is a
@@ -22,7 +22,7 @@
 //! # Implementations stay above
 //!
 //! Every `impl Trait for T` lives in the crate that owns `T` - nineteen of them
-//! across `zeroship-plugin-db` today, including two on its `BackendHandle`
+//! across `zeroship-data-v8` today, including two on its `BackendHandle`
 //! dispatch enum. The orphan rule permits exactly that shape: a local type may
 //! implement a foreign trait.
 //!
@@ -282,7 +282,7 @@ pub trait LockManager: SqlExecutor {
     /// backend may want to expose the indefinite-wait shape behind a
     /// feature gate, and (b) the integration test
     /// `b1_advisory_lock_prevents_concurrent_runs` at
-    /// `crates/zeroship-plugin-db/tests/integration.rs` still calls `pg_advisory_lock` SQL
+    /// `crates/zeroship-data-v8/tests/integration.rs` still calls `pg_advisory_lock` SQL
     /// directly to exercise the contended branch. No production
     /// caller invokes it.
     ///

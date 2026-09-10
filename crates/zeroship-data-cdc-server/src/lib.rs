@@ -56,7 +56,7 @@
 //!
 //! The arithmetic that made the sharing question look forced does not survive
 //! measurement either. Of the nine `pg_error::classify` sites in
-//! `crates/zeroship-plugin-db/src/replication.rs`, three are inside
+//! `crates/zeroship-data-v8/src/replication.rs`, three are inside
 //! `ensure_worker_slot` (relay-only), one is inside `watchdog_query` (which has
 //! a live V8 caller and stays), and five are in the drop family (called from
 //! both sides today). The adapter keeps `classify` regardless, at no cost -
@@ -73,7 +73,7 @@
 //! judgement call.
 //!
 //! **NO FILE WAS MOVED INTO THIS CRATE, AND THAT IS THE MEASURED ANSWER RATHER
-//! THAN A DEFERRAL.** `crates/zeroship-plugin-db/src/wal_consumer.rs` imports
+//! THAN A DEFERRAL.** `crates/zeroship-data-v8/src/wal_consumer.rs` imports
 //! `SuppressGuard`, `has_subscribers` and `publish` from
 //! `zeroship_data_orm::broker`, and all three target PROCESS-WIDE
 //! `LazyLock<Mutex<..>>` statics. Move that file here verbatim and it compiles,
@@ -104,4 +104,4 @@ pub mod config;
 ///
 /// One string, exported so `main` and any future test assert the same text
 /// rather than two spellings that can drift apart.
-pub const RELAY_UNAVAILABLE: &str = "the zeroship CDC relay is not yet wired: change decoding still runs inside the worker (zeroship-plugin-db's wal_consumer), and this process holds no replication slot. It refuses to start rather than idle while the worker believes authority has moved.";
+pub const RELAY_UNAVAILABLE: &str = "the zeroship CDC relay is not yet wired: change decoding still runs inside the worker (zeroship-data-v8's wal_consumer), and this process holds no replication slot. It refuses to start rather than idle while the worker believes authority has moved.";

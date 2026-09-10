@@ -106,7 +106,7 @@ pub fn start_version_poller(
     shared: SharedVersions,
     envs: SharedEnvs,
     readiness: Arc<WorkerReadiness>,
-    db_service: Option<Arc<zeroship_plugin_db::service::DbService>>,
+    db_service: Option<Arc<zeroship_data_v8::service::DbService>>,
 ) {
     compio::runtime::spawn(async move {
         version_poll_loop(config, shared, envs, readiness, db_service).await;
@@ -131,7 +131,7 @@ async fn version_poll_loop(
     shared: SharedVersions,
     envs: SharedEnvs,
     readiness: Arc<WorkerReadiness>,
-    db_service: Option<Arc<zeroship_plugin_db::service::DbService>>,
+    db_service: Option<Arc<zeroship_data_v8::service::DbService>>,
 ) {
     let interval = std::time::Duration::from_secs(config.poll_interval_secs);
     let mut pending_cdc_deprovision = std::collections::HashSet::new();
@@ -202,7 +202,7 @@ async fn version_poll_loop(
                     // dropping a pool only asks its driver tasks to shut down,
                     // so this has to run somewhere they can still be driven.
                     if pending_cdc_deprovision.is_empty() {
-                        zeroship_plugin_db::service::close_operator_pools();
+                        zeroship_data_v8::service::close_operator_pools();
                     }
                 }
                 // GC SharedEnvs against the latest known-app set BEFORE

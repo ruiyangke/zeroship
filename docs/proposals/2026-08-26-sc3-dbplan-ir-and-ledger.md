@@ -6,8 +6,8 @@ the shared normative core plus the read, write and search families and a
 PostgreSQL renderer
 (`crates/zeroship-data-sql/src/render/postgres.rs`).
 **No shipped binary links it.**
-`zeroship-plugin-db` declares it under `[dev-dependencies]` only, and
-`grep -rn data_query_builder crates/zeroship-plugin-db/src/` returns zero hits.
+`zeroship-data-v8` declares it under `[dev-dependencies]` only, and
+`grep -rn data_query_builder crates/zeroship-data-v8/src/` returns zero hits.
 The runtime still executes SQL built by string concatenation in
 `crates/zeroship-schema/src/query.rs`. The **source ledger does not exist**; (DELETED; runtime compilation now lives in `crates/zeroship-data-sql/src/compile.rs`, and migration DDL in `crates/zeroship-migrate-core/src/schema/query.rs`.)
 `grep -rn source_symbol tests/ crates/` is empty.
@@ -587,12 +587,12 @@ migration side, or `deleted-with-<feature>`. `status` is `ported` or `unported`.
 - An unsupported capability surfaces as a typed error from the concrete backend,
   with no dialect match above the neutral backend boundary. **That arm must first
   assert the boundary file exists.** `backend/api.rs` does not exist -
-  `crates/zeroship-plugin-db/src/backend/` holds `mod.rs` and `cancel.rs` only -
+  `crates/zeroship-data-v8/src/backend/` holds `mod.rs` and `cancel.rs` only -
   and neither does the `DbBackend` trait the parent document lists among the
   neutral types to introduce (`grep -rn "trait DbBackend" crates/` is empty). A
   negative grep scoped to a path that was never created matches nothing and
   reports success.
-- `zeroship-schema` is removed from `zeroship-plugin-db`'s manifest **only** when
+- `zeroship-schema` is removed from `zeroship-data-v8`'s manifest **only** when
   `unported` is zero and the identifier-fence pair has landed in the IR with its
   own arm.
 
@@ -655,9 +655,9 @@ migration side, or `deleted-with-<feature>`. `status` is `ported` or `unported`.
 
 1. **Wire the IR into the shipped path, or delete it.** BUILDABLE. Today
    `zeroship-data-sql` is a `[dev-dependencies]` entry of
-   `zeroship-plugin-db` and no shipped module references it, so the crate's
+   `zeroship-data-v8` and no shipped module references it, so the crate's
    6,282 lines are exercised only by its own tests and by
-   `crates/zeroship-plugin-db/tests/search_ir_live.rs`. Three register items are
+   `crates/zeroship-data-v8/tests/search_ir_live.rs`. Three register items are
    closed **on paper** by pointing at it and are not closed in the tree: L31
    (`updateMany`'s unbounded second branch, which `RowLimit` makes
    unrepresentable), L16's prepare-once half (a stable plan shape is the

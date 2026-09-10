@@ -338,7 +338,7 @@ A complete validator already exists: `validate_id_prefix`
 `RESERVED_ID_PREFIXES` at `:922`). It is called from four sites, and **every one
 of them is on the migration/DDL side** - `zeroship-schema/src/query.rs:1295`,
 `migrate-core/src/model/table_shape.rs:643`, `model/validate.rs:9112`,
-`render/declarative.rs:2173`. `zeroship-plugin-db` calls it **zero times**. The
+`render/declarative.rs:2173`. `zeroship-data-v8` calls it **zero times**. The
 *derived*-prefix path has its own duplicate one-element list
 (`RESERVED_AUTO_PREFIXES`, `system_fields_pass.rs:60`, applied `:97-111`); the
 descriptor-declared path reaches neither.
@@ -363,7 +363,7 @@ worker stops trusting descriptor bindings.
 `assign` in the charter is what lets the ERGONOMIC lists go: `IMMUTABLE_SYSTEM_FIELDS`
 in Rust, the SDK list in `install-schema.ts`, three copies in
 `sdks/db/src/types.ts`, two prose strings in
-`crates/zeroship-plugin-db/src/error.rs:728-745`, and the field-naming inside
+`crates/zeroship-data-v8/src/error.rs:728-745`, and the field-naming inside
 `system_fields_pass.rs`, which iterates the charter and invokes the named
 generator instead.
 

@@ -1,7 +1,7 @@
 //! Database-DSN classification shared across the stack.
 //!
 //! The canonical backend-selection grammar lives in
-//! `zeroship-plugin-db::backend_for_url` (it is the code that actually opens a
+//! `zeroship-data-v8::backend_for_url` (it is the code that actually opens a
 //! pool / SQLite backend). But two non-plugin-db call sites must classify a
 //! DSN *without* taking a dependency on plugin-db (which itself depends on
 //! `zeroship-runtime`, so the runtime cannot depend back on it):

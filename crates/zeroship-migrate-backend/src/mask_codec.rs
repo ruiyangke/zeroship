@@ -264,7 +264,7 @@ mod tests {
     /// `zeroship-data-sql` already carries the test-only `zeroship-migrate-core`
     /// dev-dependency; this crate has no edge back and must not grow one.
     ///
-    /// **This doc named `zeroship-plugin-db`'s `mask_flip.rs` until
+    /// **This doc named `zeroship-data-v8`'s `mask_flip.rs` until
     /// 2026-09-04.** That test does drive this emitter against a real catalog,
     /// but it needs a live `PostgreSQL` and `--features test-helpers`, so it never
     /// runs in `cargo test -p zeroship-migrate-backend` and could not have

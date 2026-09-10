@@ -7849,10 +7849,10 @@ dependencies = [
  "url",
  "uuid",
  "zeroship-core",
+ "zeroship-data-v8",
  "zeroship-kv",
  "zeroship-kv-v8",
  "zeroship-metering",
- "zeroship-plugin-db",
  "zeroship-plugin-storage",
  "zeroship-plugin-workflow",
  "zeroship-runtime",
@@ -8061,6 +8061,44 @@ dependencies = [
  "zeroship-migrate",
  "zeroship-migrate-backend",
  "zeroship-migrate-core",
+]
+
+[[package]]
+name = "zeroship-data-v8"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm",
+ "base64",
+ "compio",
+ "compio-postgres",
+ "criterion",
+ "flume 0.11.1",
+ "futures",
+ "hkdf",
+ "hmac 0.12.1",
+ "rusqlite",
+ "serde_json",
+ "sha2 0.10.9",
+ "sqlite-vec",
+ "tempfile",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+ "v8",
+ "zeroize",
+ "zeroship-core",
+ "zeroship-data-orm",
+ "zeroship-data-sql",
+ "zeroship-data-v8",
+ "zeroship-metering",
+ "zeroship-migrate",
+ "zeroship-migrate-policy",
+ "zeroship-migrate-postgres",
+ "zeroship-migrate-server",
+ "zeroship-migrate-sqlite",
+ "zeroship-plugin-workflow",
+ "zeroship-runtime",
+ "zeroship-runtime-macros",
 ]
 
 [[package]]
@@ -8389,44 +8427,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "zeroship-plugin-db"
-version = "0.1.0"
-dependencies = [
- "aes-gcm",
- "base64",
- "compio",
- "compio-postgres",
- "criterion",
- "flume 0.11.1",
- "futures",
- "hkdf",
- "hmac 0.12.1",
- "rusqlite",
- "serde_json",
- "sha2 0.10.9",
- "sqlite-vec",
- "tempfile",
- "tracing",
- "tracing-subscriber",
- "uuid",
- "v8",
- "zeroize",
- "zeroship-core",
- "zeroship-data-orm",
- "zeroship-data-sql",
- "zeroship-metering",
- "zeroship-migrate",
- "zeroship-migrate-policy",
- "zeroship-migrate-postgres",
- "zeroship-migrate-server",
- "zeroship-migrate-sqlite",
- "zeroship-plugin-db",
- "zeroship-plugin-workflow",
- "zeroship-runtime",
- "zeroship-runtime-macros",
-]
-
-[[package]]
 name = "zeroship-plugin-storage"
 version = "0.1.0"
 dependencies = [
@@ -8576,11 +8576,11 @@ dependencies = [
  "zeroship-bundle",
  "zeroship-core",
  "zeroship-data-orm",
+ "zeroship-data-v8",
  "zeroship-kv",
  "zeroship-kv-v8",
  "zeroship-metering",
  "zeroship-migrate-server",
- "zeroship-plugin-db",
  "zeroship-plugin-storage",
  "zeroship-plugin-workflow",
  "zeroship-runtime",

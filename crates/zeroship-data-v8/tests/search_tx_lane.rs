@@ -41,7 +41,7 @@
 //!
 //! ```text
 //! PG_TEST_URL=postgres://postgres:postgres@127.0.0.1:5478/postgres \
-//!   cargo test -p zeroship-plugin-db --features test-helpers \
+//!   cargo test -p zeroship-data-v8 --features test-helpers \
 //!     --test test_helpers -- --test-threads=1 search_tx_lane::
 //! ```
 
@@ -60,8 +60,8 @@ use compio_postgres::{NoTls, Pool};
 use zeroship_data_orm::binding::DbBinding;
 use zeroship_data_orm::error::DbError;
 use zeroship_data_sql::value::{Value, value};
-use zeroship_plugin_db::compile::{BuiltQuery, SqlDialect};
-use zeroship_plugin_db::tx_route::{CapturedRoute, TxRoute};
+use zeroship_data_v8::compile::{BuiltQuery, SqlDialect};
+use zeroship_data_v8::tx_route::{CapturedRoute, TxRoute};
 
 fn test_url() -> String {
     zeroship_core::config::test_database_url()
@@ -88,7 +88,7 @@ async fn require_pg() -> String {
 
 async fn release_pg(pool: Rc<Pool>) {
     drop(pool);
-    zeroship_plugin_db::reset_context_for_tests();
+    zeroship_data_v8::reset_context_for_tests();
     let _ = compio_postgres::drain_connections(std::time::Duration::from_secs(2)).await;
 }
 
@@ -129,18 +129,18 @@ async fn fixture(pool: &Rc<Pool>, url: &str, app: &str, collection: &str, schema
         .await
         .unwrap_or_else(|e| panic!("emitted DDL must apply: {e}\n{ddl}"));
 
-    zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(pool, app)
+    zeroship_data_v8::auth::bootstrap::ensure_per_app_role(pool, app)
         .await
         .expect("per-app role, as the deploy would provision it");
     support::grant_all_runtime_table_columns(pool, app, collection).await;
 
-    zeroship_plugin_db::set_postgres_pool_for_tests(Rc::clone(pool), url);
-    zeroship_plugin_db::cache_schema_for_tests(app, collection, schema);
+    zeroship_data_v8::set_postgres_pool_for_tests(Rc::clone(pool), url);
+    zeroship_data_v8::cache_schema_for_tests(app, collection, schema);
 }
 
 /// The backend handle the V8 dispatcher would have bound for this dispatch.
-async fn backend() -> zeroship_plugin_db::backend::BackendHandle {
-    zeroship_plugin_db::tx_scope::ensure_backend()
+async fn backend() -> zeroship_data_v8::backend::BackendHandle {
+    zeroship_data_v8::tx_scope::ensure_backend()
         .await
         .expect("the backend the V8 dispatcher would have opened")
 }
@@ -164,8 +164,8 @@ async fn find_on(
     filter: Value,
 ) -> Result<Vec<Value>, DbError> {
     let binding = DbBinding::cold_start(app);
-    let plan = zeroship_plugin_db::crud::plan_find(&binding, collection, &filter, &value!({}));
-    zeroship_plugin_db::crud::run_find(binding, collection.to_string(), route, filter, plan)
+    let plan = zeroship_data_v8::crud::plan_find(&binding, collection, &filter, &value!({}));
+    zeroship_data_v8::crud::run_find(binding, collection.to_string(), route, filter, plan)
         .await
         .map(|r| r.rows)
 }
@@ -179,8 +179,8 @@ async fn search_on(
 ) -> Result<Vec<Value>, DbError> {
     let binding = DbBinding::cold_start(app);
     let plan =
-        zeroship_plugin_db::crud::plan_search(&binding, SqlDialect::Postgres, collection, &args)?;
-    zeroship_plugin_db::crud::run_search(&route, binding, collection.to_string(), plan)
+        zeroship_data_v8::crud::plan_search(&binding, SqlDialect::Postgres, collection, &args)?;
+    zeroship_data_v8::crud::run_search(&route, binding, collection.to_string(), plan)
         .await
         .map(|r| r.rows)
 }
@@ -194,8 +194,8 @@ async fn near_on(
 ) -> Result<Vec<Value>, DbError> {
     let binding = DbBinding::cold_start(app);
     let plan =
-        zeroship_plugin_db::crud::plan_near(&binding, SqlDialect::Postgres, collection, &args)?;
-    zeroship_plugin_db::crud::run_near(&route, binding, collection.to_string(), plan)
+        zeroship_data_v8::crud::plan_near(&binding, SqlDialect::Postgres, collection, &args)?;
+    zeroship_data_v8::crud::run_near(&route, binding, collection.to_string(), plan)
         .await
         .map(|r| r.rows)
 }
@@ -239,9 +239,9 @@ async fn a_vector_search_inside_a_transaction_sees_the_row_that_transaction_inse
     )
     .await;
 
-    zeroship_plugin_db::begin_transaction_for_tests(app, &url).await;
+    zeroship_data_v8::begin_transaction_for_tests(app, &url).await;
 
-    let inserted = zeroship_plugin_db::crud::run_insert(
+    let inserted = zeroship_data_v8::crud::run_insert(
         DbBinding::cold_start(app),
         coll.to_string(),
         tx_route(app).await,
@@ -281,7 +281,7 @@ async fn a_vector_search_inside_a_transaction_sees_the_row_that_transaction_inse
     // ---- SUBJECT: the same search on the transaction's own lane.
     let inside = search_on(tx_route(app).await, app, coll, args).await;
 
-    zeroship_plugin_db::rollback_transaction_for_tests(app).await;
+    zeroship_data_v8::rollback_transaction_for_tests(app).await;
 
     let inside = inside.unwrap_or_else(|e| {
         panic!(
@@ -345,10 +345,10 @@ async fn a_spatial_near_inside_a_transaction_sees_the_row_that_transaction_inser
     )
     .await;
 
-    zeroship_plugin_db::begin_transaction_for_tests(app, &url).await;
+    zeroship_data_v8::begin_transaction_for_tests(app, &url).await;
 
     let id = "plc_in_the_transaction".to_string();
-    zeroship_plugin_db::exec_query_for_tests(
+    zeroship_data_v8::exec_query_for_tests(
         app,
         BuiltQuery {
             sql: format!(
@@ -396,7 +396,7 @@ async fn a_spatial_near_inside_a_transaction_sees_the_row_that_transaction_inser
     // ---- SUBJECT: the same near on the transaction's own lane.
     let inside = near_on(tx_route(app).await, app, coll, args).await;
 
-    zeroship_plugin_db::rollback_transaction_for_tests(app).await;
+    zeroship_data_v8::rollback_transaction_for_tests(app).await;
 
     let inside = inside.unwrap_or_else(|e| {
         panic!(

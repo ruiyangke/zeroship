@@ -6,7 +6,7 @@
 `ls crates/ | grep -i cdc` returns nothing. Four prerequisites HAVE landed and are relied on
 below: the explicit write-verb projection and primary-key row narrowing
 (`crates/zeroship-schema/src/query.rs`, live arms in (DELETED; runtime compilation now lives in `crates/zeroship-data-sql/src/compile.rs`, and migration DDL in `crates/zeroship-migrate-core/src/schema/query.rs`.)
-`crates/zeroship-plugin-db/tests/column_grants.rs`), the deploy-time schema precondition
+`crates/zeroship-data-v8/tests/column_grants.rs`), the deploy-time schema precondition
 (`crates/zeroship-control/src/api.rs:167`), and the edge split routing `/v1/*` to the
 migration service (`deploy/ops/Caddyfile`). The stale-binding classifier is built and
 reachable but tautological in production - see Open 2.
@@ -55,7 +55,7 @@ migrate N iff principal owns N", evaluated on the database itself.
 
 A DSN never leaves the control plane and the operator config. `Datastore.dsn_secret_ref`
 names a platform secret. The worker is configured with a *set* of DSNs indexed by
-`DbResourceKey` (`crates/zeroship-plugin-db/src/service.rs:193`), which already exists, is
+`DbResourceKey` (`crates/zeroship-data-v8/src/service.rs:193`), which already exists, is
 already a SHA-256 digest chosen so a DSN password cannot reach `Debug` or a log line, and
 needs no change - only its cardinality is wrong. Bring-your-own-datastore is out of scope:
 "which physical database may an app reach" is a privileged decision.
@@ -124,10 +124,10 @@ name the setup batch sends. An app whose binding is absent is a hard refusal wit
 shape as `collection_not_declared` (`crates/zeroship-data-orm/src/descriptor.rs`).
 
 Per-thread resources become maps keyed by `DbResourceKey`. `ThreadDbContext`
-(`crates/zeroship-plugin-db/src/context.rs`) holds one pool, one url, one resource key and
+(`crates/zeroship-data-v8/src/context.rs`) holds one pool, one url, one resource key and
 one backend today, and registering a second URL tears the first down. The target shape
 already exists one module over as `OPERATOR_POOLS: HashMap<DbResourceKey, Rc<Pool>>`
-(`crates/zeroship-plugin-db/src/service.rs:146`).
+(`crates/zeroship-data-v8/src/service.rs:146`).
 
 ### Column-level GRANT is the masking authority
 
@@ -383,7 +383,7 @@ meaning. No call-site sweep, no regenerated types, no edits to `docs/reference/d
 `env.db.transaction()` keeps its present shape and covers exactly one database, because an app
 sees exactly one. The multi-database transaction problem is closed by the entity model rather
 than by a runtime check. `tx_conns`, `tx_claims`, `tx_waiters`, `savepoint_depths`,
-`savepoint_emit_marks` and `pending_emits` (`crates/zeroship-plugin-db/src/context.rs`) stay
+`savepoint_emit_marks` and `pending_emits` (`crates/zeroship-data-v8/src/context.rs`) stay
 keyed on `app_id`, because `app_id` still determines the database. `TxRoute`
 (`crates/zeroship-data-orm/src/tx_route.rs`) is unchanged, and its continuation slot stays
 keyed on the app id: SEC-1 is structural there, and the planted key must never become a
@@ -398,7 +398,7 @@ access, and it is instant. No data is destroyed and no 409 is raised, because th
 database. A deleted app never destroys data another app can still read.
 
 **Delete a database** - only when its grant set is empty. The five-step order of
-`crates/zeroship-plugin-db/src/drop_namespace.rs` is right; each step is re-keyed:
+`crates/zeroship-data-v8/src/drop_namespace.rs` is right; each step is re-keyed:
 
 | step today | under the decoupling |
 | --- | --- |
@@ -511,7 +511,7 @@ the list.
 
 **Logical decoding consults no ACL and no RLS.** The same role refused `SELECT ssn` receives
 the plaintext in the decoded stream when the publication has no column list. The decode path
-runs on the worker's own login (`crates/zeroship-plugin-db/src/change_stream_pg.rs`), which
+runs on the worker's own login (`crates/zeroship-data-v8/src/change_stream_pg.rs`), which
 the boot posture requires to hold `REPLICATION` and `BYPASSRLS`. A publication column list
 *does* filter decoded output and is a genuine server-side fence - and PostgreSQL **refuses
 conflicting column lists for one table across the publications named on one decode stream**,
@@ -523,7 +523,7 @@ Measured on 17.11: adding `REPLICA IDENTITY FULL` to a table that already has a 
 accepted, and creating a column list on a table already `FULL` is accepted; then every `UPDATE`
 and `DELETE` fails with `cannot update table "t" ... Column list used by the publication does
 not cover the replica identity`. The symptom is not a CDC fault but a table that has silently
-become append-only on the creator's write path. `crates/zeroship-plugin-db/src/wal_consumer.rs`
+become append-only on the creator's write path. `crates/zeroship-data-v8/src/wal_consumer.rs`
 records that fixing delete-filtering on non-key columns *needs* `REPLICA IDENTITY FULL`, so the
 two features are mutually exclusive as designed and whichever is given up must be given up
 explicitly, with a refusal at the authoring boundary.
@@ -844,7 +844,7 @@ Do-not notes, each recording something that was tried or specified and broke:
   `metric` alone and metric names are cluster-global.
 - **Do not sweep `app_id -> database_id` mechanically over metering.** `db_reads`,
   `db_writes` and `db_rows_written` stay app-keyed and must be excluded by name.
-- **Do not reintroduce `crates/zeroship-plugin-db/src/cross_app_fk.rs` (DELETED).** It had no
+- **Do not reintroduce `crates/zeroship-data-v8/src/cross_app_fk.rs` (DELETED).** It had no
   production call site and its predicate was wrong in both directions: it blanket-refused
   cross-schema refs that a shared datastore makes legal, and permitted same-app refs that
   cross a database boundary. The live rule is `reject_cross_app_ref` in the engine plus

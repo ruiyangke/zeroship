@@ -254,7 +254,7 @@ pub(crate) fn capture_route(
 ///
 /// **The crate split does not remove that cap, and a reviewer's worry that it
 /// would is refuted by the proposal.** `docs/proposals/2026-08-31-data-crate-shape.md:50`
-/// keeps `zeroship-plugin-db` as "THIN. The worker/runtime plugin ADAPTER
+/// keeps `zeroship-data-v8` as "THIN. The worker/runtime plugin ADAPTER
 /// ONLY", and `tests/lib/tier_direction_census.sh` tiers `tx_scope.rs` ADAPTER.
 /// The engine is cut OUT to `data-engine`; this file does not move, so the
 /// two-arm declaration above moves with neither.

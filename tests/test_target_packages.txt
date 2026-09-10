@@ -90,7 +90,7 @@ zeroship-migrate-policy
 zeroship-migrate-postgres
 zeroship-migrate-server
 zeroship-migrate-sqlite
-zeroship-plugin-db
+zeroship-data-v8
 zeroship-plugin-storage
 zeroship-plugin-workflow
 zeroship-runtime

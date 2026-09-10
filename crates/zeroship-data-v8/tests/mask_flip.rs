@@ -30,7 +30,7 @@
 //! an unreachable server fails the run.
 //!
 //! ```text
-//! PG_TEST_URL=postgres://... cargo test -p zeroship-plugin-db \
+//! PG_TEST_URL=postgres://... cargo test -p zeroship-data-v8 \
 //!   --test test_helpers -- --test-threads=1 mask_flip::
 //! ```
 
@@ -50,12 +50,12 @@ use compio_postgres::{NoTls, Pool};
 use zeroship_data_orm::binding::DbBinding;
 use zeroship_data_orm::error::DbError;
 use zeroship_data_sql::value::{Value, value};
-use zeroship_plugin_db::compile::{
+use zeroship_data_v8::compile::{
     build_aggregate, build_distinct, build_find_with_schema, build_insert, build_where,
     raw_column_name, read_surface_columns, validate_field_name,
 };
-use zeroship_plugin_db::crud::mask_policy::dispatch_set_mask_policy;
-use zeroship_plugin_db::crud::unmask::{
+use zeroship_data_v8::crud::mask_policy::dispatch_set_mask_policy;
+use zeroship_data_v8::crud::unmask::{
     BulkUnmaskArgs, BulkUnmaskItem, UnmaskFieldArgs, audit_query_hint_granted,
     authorize_query_hint, dispatch_bulk_unmask, dispatch_unmask, dispatch_unmask_for_query,
     parse_args, parse_bulk_args,
@@ -80,8 +80,8 @@ fn test_url() -> String {
 /// different sense of cold, and not a context state.) The lazy open is bound in
 /// `tests/sqlite_integration.rs`, by the three
 /// `cold_*_open_comes_from_ensure_backend_not_the_fixture` gates.
-async fn unmask_backend() -> zeroship_plugin_db::backend::BackendHandle {
-    zeroship_plugin_db::tx_scope::ensure_backend()
+async fn unmask_backend() -> zeroship_data_v8::backend::BackendHandle {
+    zeroship_data_v8::tx_scope::ensure_backend()
         .await
         .expect("the backend the V8 dispatcher would have opened")
 }
@@ -95,8 +95,8 @@ async fn unmask_backend() -> zeroship_plugin_db::backend::BackendHandle {
 /// decision from the parked-tx slot; no fixture in this file parks one, so
 /// every call here binds `in_tx = false` and takes exactly the lane it took
 /// before. The transaction half is bound by `unmask_tx_lane.rs`.
-async fn unmask_route(app: &str) -> zeroship_plugin_db::tx_route::TxRoute {
-    zeroship_plugin_db::exec::ambient_route_for_tests(app, unmask_backend().await)
+async fn unmask_route(app: &str) -> zeroship_data_v8::tx_route::TxRoute {
+    zeroship_data_v8::exec::ambient_route_for_tests(app, unmask_backend().await)
 }
 
 /// Connect, or fail the test.
@@ -119,7 +119,7 @@ async fn require_pg() -> String {
 
 async fn release_pg(pool: Rc<Pool>) {
     drop(pool);
-    zeroship_plugin_db::reset_context_for_tests();
+    zeroship_data_v8::reset_context_for_tests();
     let _ = compio_postgres::drain_connections(std::time::Duration::from_secs(2)).await;
 }
 
@@ -195,8 +195,8 @@ async fn fixture(pool: &Rc<Pool>, url: &str, app: &str, collection: &str, schema
     pool.batch_execute(&ddl)
         .await
         .unwrap_or_else(|e| panic!("emitted DDL must apply: {e}\n{ddl}"));
-    zeroship_plugin_db::set_postgres_pool_for_tests(Rc::clone(pool), url);
-    zeroship_plugin_db::cache_schema_for_tests(app, collection, schema.clone());
+    zeroship_data_v8::set_postgres_pool_for_tests(Rc::clone(pool), url);
+    zeroship_data_v8::cache_schema_for_tests(app, collection, schema.clone());
 }
 
 /// What one write through the pipeline left behind.
@@ -236,7 +236,7 @@ async fn insert_through_the_pipeline(
     doc: Value,
 ) -> Inserted {
     let mut docs = value!([doc]);
-    zeroship_plugin_db::prepare_insert_many_docs_for_tests(&mut docs, app, collection, None)
+    zeroship_data_v8::prepare_insert_many_docs_for_tests(&mut docs, app, collection, None)
         .await
         .expect("write pipeline");
     let id = docs[0]["id"]
@@ -557,15 +557,15 @@ async fn the_real_value_is_still_stored_and_still_reachable_by_the_audited_path(
     // The unmask fetch runs `SET LOCAL ROLE app_<id>_role`, so the per-app role
     // and its grants have to exist - the deploy's `zeroship migrate` creates
     // them, and this stands in for it.
-    zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, app)
+    zeroship_data_v8::auth::bootstrap::ensure_per_app_role(&pool, app)
         .await
         .expect("per-app role, as the deploy would provision it");
     support::grant_runtime_select_columns(&pool, app, "people", &["id", &raw_col]).await;
 
-    let result = zeroship_plugin_db::crud::unmask::dispatch_unmask(
+    let result = zeroship_data_v8::crud::unmask::dispatch_unmask(
         &unmask_route(app).await,
         &zeroship_data_orm::binding::DbBinding::cold_start(app),
-        zeroship_plugin_db::crud::unmask::UnmaskFieldArgs {
+        zeroship_data_v8::crud::unmask::UnmaskFieldArgs {
             collection: "people".to_string(),
             row_pk: person.id.clone(),
             column: "ssn".to_string(),
@@ -669,7 +669,7 @@ async fn audited_unmask_fixture_with(
     // deploy's `zeroship migrate` creates them; this stands in for it. The
     // append privilege on the audit table comes from `ensure_per_app_role`
     // itself, which is why it runs AFTER the table is provisioned.
-    zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(pool, app)
+    zeroship_data_v8::auth::bootstrap::ensure_per_app_role(pool, app)
         .await
         .expect("per-app role, as the deploy would provision it");
     let raw_columns: Vec<String> = masked
@@ -848,7 +848,7 @@ async fn an_actor_the_policy_does_not_permit_is_refused_and_the_refusal_is_audit
     // And the grant is scoped to the classification the policy named: the same
     // role is still refused a class the policy does not list. Without this the
     // control could pass against an `allows` that ignores its arguments.
-    zeroship_plugin_db::cache_schema_for_tests(
+    zeroship_data_v8::cache_schema_for_tests(
         app,
         "vitals",
         value!({ "hr": { "type": "string", "mask": { "kind": "full", "classification": "phi" } } }),
@@ -1032,7 +1032,7 @@ async fn app_js_claiming_the_auto_system_actor_is_refused_by_the_parser() {
     let url = require_pg().await;
     let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
     let app = "flip_db3_single";
-    zeroship_plugin_db::clear_mask_policy_cache_for_tests(app);
+    zeroship_data_v8::clear_mask_policy_cache_for_tests(app);
     let schema = flip_schema();
     let ssn = "123-45-6789";
     let person = audited_unmask_fixture(&pool, &url, app, &schema, ssn).await;
@@ -1160,7 +1160,7 @@ async fn app_js_claiming_the_auto_system_actor_is_refused_by_the_bulk_parser() {
     let url = require_pg().await;
     let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
     let app = "flip_db3_bulk";
-    zeroship_plugin_db::clear_mask_policy_cache_for_tests(app);
+    zeroship_data_v8::clear_mask_policy_cache_for_tests(app);
     let schema = flip_schema();
     let ssn = "987-65-4321";
     let person = audited_unmask_fixture(&pool, &url, app, &schema, ssn).await;
@@ -1285,7 +1285,7 @@ async fn a_rejected_impersonation_is_distinguishable_from_an_absent_actor() {
     let url = require_pg().await;
     let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
     let app = "flip_db3_signal";
-    zeroship_plugin_db::clear_mask_policy_cache_for_tests(app);
+    zeroship_data_v8::clear_mask_policy_cache_for_tests(app);
     let schema = flip_schema();
     let person = audited_unmask_fixture(&pool, &url, app, &schema, "123-45-6789").await;
 
@@ -1403,7 +1403,7 @@ async fn a_bulk_unmask_batch_with_one_forbidden_column_is_refused_whole() {
     let url = require_pg().await;
     let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
     let app = "flip_bulk_denied";
-    zeroship_plugin_db::clear_mask_policy_cache_for_tests(app);
+    zeroship_data_v8::clear_mask_policy_cache_for_tests(app);
     let schema = two_class_schema();
     let (ssn, email) = ("123-45-6789", "ada@example.com");
     let person = audited_unmask_fixture_with(
@@ -1705,7 +1705,7 @@ async fn a_query_hint_naming_one_forbidden_column_is_refused_whole() {
     let url = require_pg().await;
     let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
     let app = "flip_hint_denied";
-    zeroship_plugin_db::clear_mask_policy_cache_for_tests(app);
+    zeroship_data_v8::clear_mask_policy_cache_for_tests(app);
     let schema = two_class_schema();
     let (ssn, email) = ("987-65-4321", "grace@example.com");
     let person = audited_unmask_fixture_with(
@@ -1910,7 +1910,7 @@ async fn a_query_hint_reads_the_column_its_alias_resolved_to() {
     let url = require_pg().await;
     let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
     let app = "flip_hint_alias";
-    zeroship_plugin_db::clear_mask_policy_cache_for_tests(app);
+    zeroship_data_v8::clear_mask_policy_cache_for_tests(app);
     let schema = alias_schema();
     let email = "ada@example.com";
     let person = audited_unmask_fixture_with(
@@ -2046,7 +2046,7 @@ async fn no_write_verb_hands_back_a_column_the_descriptor_does_not_declare() {
         .query_text_params(
             &format!(
                 r#"SELECT {} AS raw FROM "{app}"."people" WHERE "id" = $1"#,
-                zeroship_plugin_db::compile::quote_ident(&raw_column_name("ssn")),
+                zeroship_data_v8::compile::quote_ident(&raw_column_name("ssn")),
             ),
             &[minted_id.as_str()],
         )
@@ -2057,7 +2057,7 @@ async fn no_write_verb_hands_back_a_column_the_descriptor_does_not_declare() {
     // BOUNDARY 2, the runtime's.
     let allowed: BTreeSet<String> = read_surface_columns(&schema);
     let finalized =
-        zeroship_plugin_db::finalize_rows_on_read_for_tests(app, "people", returned.clone())
+        zeroship_data_v8::finalize_rows_on_read_for_tests(app, "people", returned.clone())
             .await
             .expect("read pipeline");
     let keys: BTreeSet<String> = finalized[0].as_object().unwrap().keys().cloned().collect();
@@ -2098,7 +2098,7 @@ async fn no_write_verb_hands_back_a_column_the_descriptor_does_not_declare() {
     smuggled["__zs_shadow_key"] = value!("aux-42");
     smuggled["totally_undeclared"] = value!("leak-me");
     let finalized =
-        zeroship_plugin_db::finalize_rows_on_read_for_tests(app, "people", vec![smuggled])
+        zeroship_data_v8::finalize_rows_on_read_for_tests(app, "people", vec![smuggled])
             .await
             .expect("read pipeline");
     let keys: BTreeSet<String> = finalized[0].as_object().unwrap().keys().cloned().collect();
@@ -2260,7 +2260,7 @@ fn the_raw_column_is_refused_on_every_inbound_surface() {
 /// over-delivers, which is the bias `read_set` already declares.
 #[test]
 fn a_masked_predicate_is_lowered_for_the_change_stream() {
-    use zeroship_plugin_db::read_set::{Predicate, PredicateOp, normalise_filter};
+    use zeroship_data_v8::read_set::{Predicate, PredicateOp, normalise_filter};
     let schema = flip_schema();
 
     let Some(Predicate::All(conjuncts)) =
@@ -2499,7 +2499,7 @@ async fn a_unique_masked_field_admits_rows_that_share_a_mask() {
     // like every other, so the only thing that can be refused below is the
     // duplicate value on the raw column.
     let mut docs = value!([{ "ssn": "111-11-1234" }]);
-    zeroship_plugin_db::prepare_insert_many_docs_for_tests(&mut docs, app, "people", None)
+    zeroship_data_v8::prepare_insert_many_docs_for_tests(&mut docs, app, "people", None)
         .await
         .expect("write pipeline");
     let bq = build_insert(
@@ -2641,10 +2641,10 @@ async fn deleting_the_mask_key_from_the_descriptor_must_not_write_plaintext() {
     // right, because the CATALOG did not change, only the descriptor did. A test
     // that reset it here would prove the fence works on a cold cache and say
     // nothing about the warm one production actually runs.
-    zeroship_plugin_db::cache_schema_for_tests(app, "people", unmasked.clone());
+    zeroship_data_v8::cache_schema_for_tests(app, "people", unmasked.clone());
     let mut docs = value!([{ "ssn": "987-65-4321", "nickname": "bob" }]);
     let err =
-        zeroship_plugin_db::prepare_insert_many_docs_for_tests(&mut docs, app, "people", None)
+        zeroship_data_v8::prepare_insert_many_docs_for_tests(&mut docs, app, "people", None)
             .await
             .expect_err(
                 "a descriptor that dropped the mask must not be able to write the \
@@ -2695,7 +2695,7 @@ async fn deleting_the_mask_key_from_the_descriptor_must_not_write_plaintext() {
 #[compio::test]
 async fn deleting_the_encrypted_key_from_the_descriptor_must_not_write_plaintext() {
     let url = require_pg().await;
-    let _keys = zeroship_plugin_db::supply_root_keys_for_tests(&[(
+    let _keys = zeroship_data_v8::supply_root_keys_for_tests(&[(
         "k1",
         "0101010101010101010101010101010101010101010101010101010101010101",
     )]);
@@ -2729,10 +2729,10 @@ async fn deleting_the_encrypted_key_from_the_descriptor_must_not_write_plaintext
     );
 
     let plain = encrypted_schema_without_the_encrypted_key();
-    zeroship_plugin_db::cache_schema_for_tests(app, "people", plain.clone());
+    zeroship_data_v8::cache_schema_for_tests(app, "people", plain.clone());
     let mut docs = value!([{ "secret": "hunter3-also-real", "nickname": "bob" }]);
     let err =
-        zeroship_plugin_db::prepare_insert_many_docs_for_tests(&mut docs, app, "people", None)
+        zeroship_data_v8::prepare_insert_many_docs_for_tests(&mut docs, app, "people", None)
             .await
             .expect_err(
                 "a descriptor that dropped the encryption block must not be able to \
@@ -2846,8 +2846,8 @@ async fn fixture_via_the_migration_engine(
             .await
             .unwrap_or_else(|e| panic!("engine-emitted DDL must apply: {e}\n{statement}"));
     }
-    zeroship_plugin_db::set_postgres_pool_for_tests(Rc::clone(pool), url);
-    zeroship_plugin_db::cache_schema_for_tests(&app, collection, schema.clone());
+    zeroship_data_v8::set_postgres_pool_for_tests(Rc::clone(pool), url);
+    zeroship_data_v8::cache_schema_for_tests(&app, collection, schema.clone());
     app
 }
 
@@ -2950,13 +2950,13 @@ async fn a_migration_engine_built_table_refuses_a_mask_downgrade() {
     );
 
     // The one-key deletion, against the table the engine built.
-    zeroship_plugin_db::cache_schema_for_tests(&app, "people", flip_schema_without_the_mask_key());
+    zeroship_data_v8::cache_schema_for_tests(&app, "people", flip_schema_without_the_mask_key());
     let mut docs = value!([{ "ssn": "987-65-4321", "nickname": "bob" }]);
     // Not `expect_err`: the failure this test exists for is the pipeline PREPARING
     // the write, and the prepared document is the downgrade itself. Reporting it
     // is the difference between "returned Ok(())" and naming the plaintext that
     // was about to be stored under the field's own name.
-    let err = match zeroship_plugin_db::prepare_insert_many_docs_for_tests(
+    let err = match zeroship_data_v8::prepare_insert_many_docs_for_tests(
         &mut docs, &app, "people", None,
     )
     .await
@@ -3004,7 +3004,7 @@ async fn a_migration_engine_built_table_refuses_a_mask_downgrade() {
 #[compio::test]
 async fn a_migration_engine_built_table_refuses_an_encryption_downgrade() {
     let url = require_pg().await;
-    let _keys = zeroship_plugin_db::supply_root_keys_for_tests(&[(
+    let _keys = zeroship_data_v8::supply_root_keys_for_tests(&[(
         "k1",
         "0101010101010101010101010101010101010101010101010101010101010101",
     )]);
@@ -3054,13 +3054,13 @@ async fn a_migration_engine_built_table_refuses_an_encryption_downgrade() {
         "control: the encrypting deploy must not store plaintext: {before:?}",
     );
 
-    zeroship_plugin_db::cache_schema_for_tests(
+    zeroship_data_v8::cache_schema_for_tests(
         &app,
         "people",
         encrypted_schema_without_the_encrypted_key(),
     );
     let mut docs = value!([{ "secret": "hunter3-also-real", "nickname": "bob" }]);
-    let err = match zeroship_plugin_db::prepare_insert_many_docs_for_tests(
+    let err = match zeroship_data_v8::prepare_insert_many_docs_for_tests(
         &mut docs, &app, "people", None,
     )
     .await

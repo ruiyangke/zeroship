@@ -31,12 +31,12 @@ inferred.
 ### 0.1 The mask policy and the authorization path
 
 - `MaskPolicy` is `role -> set of classifications`
-  (`crates/zeroship-plugin-db/src/crud/mask_policy.rs:83-87`).
+  (`crates/zeroship-data-v8/src/crud/mask_policy.rs:83-87`).
   `MaskPolicy::allows` is at `:117-125`; an absent key is TOP for `auto` and
   BOTTOM for every other role (`:118-124`).
 - `check_unmask_authorization` is synchronous, takes
   `(app_id, actor, classification)`, and reads a thread-local
-  (`crates/zeroship-plugin-db/src/crud/unmask.rs:290-308`). An absent actor
+  (`crates/zeroship-data-v8/src/crud/unmask.rs:290-308`). An absent actor
   denies (`:295-297`). No policy at all admits only `kind == "auto"`
   (`:302-306`).
 - `RESERVED_SYSTEM_ACTOR_KINDS` is exactly `["auto"]` (`unmask.rs:265`) and
@@ -44,7 +44,7 @@ inferred.
   numbers.** The brief cites `:282-303` and SC-6 cites `:280-303`; both are off
   against this tree. The behaviour they describe is unchanged.
 - `dispatch_find` applies `sanitize_app_actor` to the app-supplied actor before
-  it can reach authorization (`crates/zeroship-plugin-db/src/crud/mod.rs:617-619`).
+  it can reach authorization (`crates/zeroship-data-v8/src/crud/mod.rs:617-619`).
   That is the DB-3 patch, and any new verb taking an `actor` through V8 must
   route through the same helper or it reproduces DB-3 verbatim.
 - The actor is otherwise **self-asserted**: nothing binds it to `env.auth`, so
@@ -72,8 +72,8 @@ inferred.
   caller's transaction connection. So does the plaintext fetch
   (`query_postgres_pool_with_autocommit_role`, `unmask.rs:570-572`, which calls
   `pool.get()` and opens its own transaction,
-  `crates/zeroship-plugin-db/src/exec.rs:293-318`). Consequences in section 6.4.
-- The data pool is 8 connections (`crates/zeroship-plugin-db/src/lib.rs:998`,
+  `crates/zeroship-data-v8/src/exec.rs:293-318`). Consequences in section 6.4.
+- The data pool is 8 connections (`crates/zeroship-data-v8/src/lib.rs:998`,
   `Pool::connect(&url, 8)`). **SC-6 cites `lib.rs:862` for this**
   (`sc6:152-153`); the line has moved, the value has not.
 
@@ -124,7 +124,7 @@ than stated and the second half is true for a different reason than implied.
 - Deterministic encryption **is implemented at the crypto layer and does produce
   byte-identical ciphertext**. The nonce is synthetic:
   `HMAC-SHA256(k_siv, aad || plaintext)[..12]`
-  (`crates/zeroship-plugin-db/src/encryption/aead.rs:92-112`, key material
+  (`crates/zeroship-data-v8/src/encryption/aead.rs:92-112`, key material
   `AeadKey { k_enc, k_siv }` at `:39-53`). The randomised arm samples from
   `OsRng` (`aead.rs:62-75`). The AAD drops `row_pk` for deterministic mode
   (`crud/encryption_pass.rs:200-208`, `encryption/aad.rs:75-98`), so the whole
@@ -135,7 +135,7 @@ than stated and the second half is true for a different reason than implied.
   (`crud/encryption_pass.rs:788-826`).
 - What has no implementation is the **query** half. The filter path never
   encrypts the operand; `build_where_with_dialect_inner` has no key access and no
-  schema (`crates/zeroship-plugin-db/src/crud/bytes_pass.rs:47-57` states this
+  schema (`crates/zeroship-data-v8/src/crud/bytes_pass.rs:47-57` states this
   in the tree's own words).
 - **The mode also does not survive the artifact pipeline.** `ColType::Encrypted`
   carries only `of` (`crates/zeroship-migrate-ir/src/ir.rs:670`); the fold
@@ -257,7 +257,7 @@ Five properties, each load-bearing:
 
 1. **The key is a third HKDF leg, not a reuse of `k_siv`.** `derive_key` already
    expands two legs from one root with distinct info strings
-   (`crates/zeroship-plugin-db/src/encryption/keys.rs:373-382`); this adds a
+   (`crates/zeroship-data-v8/src/encryption/keys.rs:373-382`); this adds a
    third. `k_siv` derives AES-GCM nonces; publishing a 32-byte HMAC under the
    same key in an indexed column would publish values from a nonce-derivation
    function's output space. Separate key, separate purpose.
@@ -486,7 +486,7 @@ atomic inside a transaction.
 Two reasons, and the second is the decisive one:
 
 1. Read-set capture normalises a filter into a predicate the broker evaluates
-   per event (`crates/zeroship-plugin-db/src/read_set.rs:1-49`). A token
+   per event (`crates/zeroship-data-v8/src/read_set.rs:1-49`). A token
    predicate has no useful normalisation, so the module's documented safe default
    applies - `predicate == None` means "match every row" (`read_set.rs:28-31`) -
    and the subscription degrades to coarse delivery.
@@ -788,7 +788,7 @@ authorized and audited. Everything else on this list stays gone.
 ## 5. Naming and surface placement, briefly
 
 - Native op: `findByUnmasked` on the `Collection` v8 class, beside
-  `unmaskField` (`crates/zeroship-plugin-db/src/v8_classes/collection.rs:493-521`)
+  `unmaskField` (`crates/zeroship-data-v8/src/v8_classes/collection.rs:493-521`)
   and `bulkUnmask` (`:540-562`). It is app-JS-reachable, like both of those; it
   is not a `DbPlatform` capability, because the worker calling it is the point.
 - SDK: `Collection.findByUnmasked` and `TxCollection.findByUnmasked`. There is

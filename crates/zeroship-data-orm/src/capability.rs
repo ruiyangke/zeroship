@@ -7,7 +7,7 @@
 //! moving the vocabulary first means those traits arrive with nothing left to
 //! drag behind them.
 //!
-//! Moved from `zeroship-plugin-db`'s `backend/mod.rs` on 2026-09-02. Two things
+//! Moved from `zeroship-data-v8`'s `backend/mod.rs` on 2026-09-02. Two things
 //! were fixed in transit rather than carried:
 //!
 //! * `LockScope`'s 32-line rustdoc had been silently re-attached to
@@ -15,7 +15,7 @@
 //!   doc block and the enum it documents. `LockScope` carried no doc at all.
 //!   Both now own their own text.
 //! * `LockScope::app_id` and `::name` were `pub(crate)`. A crate boundary makes
-//!   that invisible to their only caller (`zeroship-plugin-db`'s lock policy),
+//!   that invisible to their only caller (`zeroship-data-v8`'s lock policy),
 //!   so both are `pub` here. This is the Phase 0.5 audit-1 promotion the split
 //!   requires, applied at the moment it becomes load-bearing rather than in a
 //!   sweep - the compiler is the oracle for it in this direction.

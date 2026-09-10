@@ -333,14 +333,14 @@ pub async fn provision_workflow_journal_schema(
 ///
 /// The data plane's INSERT is the only writer, and its own spelling now lives
 /// in one place: `zeroship_data_orm::backend_handle::AUDIT_UNMASK_TABLE`.
-/// (This doc said `zeroship-plugin-db`'s `crud/unmask.rs` until 2026-09-04. The
+/// (This doc said `zeroship-data-v8`'s `crud/unmask.rs` until 2026-09-04. The
 /// engine tier left that crate on 2026-09-03, and the SQL itself had already
 /// moved out of `crud/unmask.rs` into `BackendHandle::append_unmask_audit`.)
 /// The SQLite peer of this constant is
 /// `zeroship_migrate_sqlite::backend::AUDIT_UNMASK_TABLE`.
 ///
 /// BOUND, as of 2026-09-04, by
-/// `crates/zeroship-plugin-db/tests/audit_table_parity.rs`, which holds all
+/// `crates/zeroship-data-v8/tests/audit_table_parity.rs`, which holds all
 /// three against one stated literal and drives [`audit_unmask_table_sql`] to
 /// check the emitted CREATE TABLE names the relation the writer targets. Until
 /// then the citation above WAS the guard, which is to say there was none.
@@ -384,7 +384,7 @@ pub(crate) const RESERVED_SYSTEM_TABLE_PREFIX: &str = "__zeroship_";
 /// is for state a separate service WRITES and the worker only READS, and this
 /// table is the other way round. The worker is the sole writer, over ordinary
 /// parameterised SQL, with provenance enforced at the Rust call boundary rather
-/// than at the SQL boundary - the position `zeroship-plugin-db`'s `audit.rs`
+/// than at the SQL boundary - the position `zeroship-data-v8`'s `audit.rs`
 /// already argues for the sibling audit log, and the reason neither needs a
 /// `SECURITY DEFINER` wrapper. App-scoped audit data also stays queryable by an
 /// operator holding only the app's schema.

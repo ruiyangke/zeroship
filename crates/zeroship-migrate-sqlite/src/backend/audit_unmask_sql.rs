@@ -2,7 +2,7 @@
 //!
 //! # Why this is in the migration backend and not in the data plane
 //!
-//! Until this module existed, `zeroship-plugin-db`'s `crud/unmask.rs` issued
+//! Until this module existed, `zeroship-data-v8`'s `crud/unmask.rs` issued
 //! `CREATE TABLE IF NOT EXISTS` + three `CREATE INDEX IF NOT EXISTS` on EVERY
 //! `unmask()` call, on both dialects, from inside the worker. That is eight DDL
 //! statements on the privileged read path, executed by the process that runs
@@ -45,7 +45,7 @@
 //! spellings, decided entirely by who opened what.
 //!
 //! [`audit_unmask_ddl`] therefore takes the qualifier rather than baking one in.
-//! That is what lets `zeroship-plugin-db`'s SQLite fixtures - which reach the
+//! That is what lets `zeroship-data-v8`'s SQLite fixtures - which reach the
 //! file through the worker's backend, under the alias - execute the SAME
 //! generator the apply host does. A fixture with its own hardcoded copy of this
 //! DDL would stay green while production drifted away from it.
@@ -75,7 +75,7 @@ use super::authorizer::Mode;
 /// `zeroship-migrate-server` for the caveat on the FORKED copy of that check.
 ///
 /// BOUND, as of 2026-09-04, by
-/// `crates/zeroship-plugin-db/tests/audit_table_parity.rs`. It is the one place
+/// `crates/zeroship-data-v8/tests/audit_table_parity.rs`. It is the one place
 /// this constant, the PostgreSQL creator's and the writer's are all nameable;
 /// it holds the three against a literal stated once there, and drives THIS
 /// module's [`audit_unmask_ddl`] to check the emitted CREATE TABLE names the

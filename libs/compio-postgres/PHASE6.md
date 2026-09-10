@@ -3,7 +3,7 @@
 `cargo check --workspace` passes cleanly (only a pre-existing unsafe-op
 warning in `crates/runtime/src/runtime.rs:435` remains; unrelated to this
 port). `cargo test -p compio-postgres --no-run` is clean. `cargo test -p
-zeroship-plugin-db --test integration -- --test-threads=1` reaches parity
+zeroship-data-v8 --test integration -- --test-threads=1` reaches parity
 with pre-migration: 16/21 pass; the 5 failures (`update_one_inc`,
 `update_one_dec_mul`, `update_one_jsonb_array_ops`, `update_many_round_trip`,
 `mixed_update`) reproduce **bit-for-bit on the pre-migration HEAD** - they
@@ -134,7 +134,7 @@ $ cargo test -p compio-postgres --no-run
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.16s
 
 $ PG_TEST_URL='postgres://postgres:zeroship@localhost:5440/zeroship' \
-  cargo test -p zeroship-plugin-db --test integration -- --test-threads=1
+  cargo test -p zeroship-data-v8 --test integration -- --test-threads=1
     test result: FAILED. 16 passed; 5 failed; 0 ignored; 0 measured; 0 filtered out
     (same 5 pre-existing test-side failures as pre-migration HEAD)
 ```
