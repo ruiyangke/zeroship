@@ -32,6 +32,13 @@ cargo test -p zeroship-kv --no-default-features --features redb
 ```
 
 `cargo test -p zeroship-kv` also runs the live Redis and Dragonfly cluster suite.
-Its fixture requirements are documented in `tests/redis_backend.rs`; missing
-backends fail the run. `tests/kv_crate_closure_gate.sh` at the workspace root
-checks the dependency boundary with every storage feature enabled.
+Testcontainers starts isolated databases, configures cluster slots, and removes
+containers when their tests finish. Docker must be available; startup failures
+fail the run. No backend URLs, Compose setup, or bootstrap scripts are needed.
+Image tags and cluster setup live in `tests/support/mod.rs`, which is also used
+by the V8 binding tests. Testcontainers is a development-only dependency; its
+Docker orchestration runs independently of the compio database operations.
+
+`tests/architecture.rs` checks the dependency boundary with every storage
+feature enabled. `tests/state_dir_lock_marker.rs` checks the Vite diagnostic
+token against the compiled Rust constant. Both run through ordinary Cargo tests.

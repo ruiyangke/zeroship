@@ -18,5 +18,8 @@ storage features belong to the host's `zeroship-kv` dependency.
 
 The public Rust surface is `KvBinding`. Storage types are imported directly from
 `zeroship-kv`; this crate does not re-export them. Its tests enable both backend
-implementations through a development dependency and require live Redis and
-Dragonfly cluster fixtures.
+implementations through a development dependency. Run them with
+`cargo test -p zeroship-kv-v8` and an available Docker daemon: Testcontainers
+owns the Redis and Dragonfly cluster fixtures, using the shared test support
+in `zeroship-kv/tests/support/mod.rs`. No backend environment variables or
+manual provisioning are required.

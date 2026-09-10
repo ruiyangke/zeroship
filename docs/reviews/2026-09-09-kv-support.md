@@ -6,7 +6,7 @@ The binding owns JavaScript conversion, promise scheduling, per-isolate state,
 and successful-operation metering. `KvBinding` is the binding's public entry
 point; hosts construct storage backends directly. Backend tests moved with the
 storage implementation. The dependency boundary is enforced by
-`tests/kv_crate_closure_gate.sh`.
+`crates/zeroship-kv/tests/architecture.rs`.
 
 The review also found existing behavior defects that remain outside the crate
 extraction:
