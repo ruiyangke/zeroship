@@ -59,6 +59,7 @@ pub mod system_fields_pass;
 mod bytes_pass;
 pub mod read_pipeline;
 mod write_pipeline;
+mod update_validation;
 
 #[cfg(any(test, feature = "test-helpers"))]
 pub use write_pipeline::{
@@ -604,6 +605,7 @@ pub async fn run_update_one(
     // lowering, and the target-row probe's filter. An undeclared collection
     // rejects the op rather than silently skipping the per-row path.
     let schema = crate::descriptor::collection_schema(&binding, &coll)?;
+    update_validation::validate(&schema, &update)?;
     let per_row_encrypted_update =
         write_pipeline::update_requires_per_row_encryption(&schema, &update);
     let target_row = if per_row_encrypted_update {
@@ -751,6 +753,7 @@ pub async fn run_update_many(
     // randomised-encryption decision, the SQLite boolean lowering and the
     // target-row probe all read it. An undeclared collection rejects.
     let schema = crate::descriptor::collection_schema(&binding, &coll)?;
+    update_validation::validate(&schema, &update)?;
     let per_row_encrypted_update =
         write_pipeline::update_requires_per_row_encryption(&schema, &update);
     // No `skip_*` knob is set: the pass stripped every column the
