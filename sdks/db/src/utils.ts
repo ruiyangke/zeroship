@@ -5,6 +5,7 @@
  * Contains aggregate pipeline translation (MongoDB → native format).
  */
 import { PlainObject } from "./types";
+import { ValidationError } from "./errors";
 
 // ---------------------------------------------------------------------------
 // Document mapping (native → user)
@@ -107,20 +108,29 @@ export function mapFilterOutbound(filter: ZeroshipDbFilter, toColumn: (s: string
 // Update mapping (user → native)
 // ---------------------------------------------------------------------------
 
-/** @internal Translate Mongoose top-level operators to per-field native format. */
+/** @internal Map update field names while preserving the shared ORM grammar. */
 export function mapUpdateOutbound(update: PlainObject, toColumn: (s: string) => string): ZeroshipDbUpdate {
   const result: ZeroshipDbUpdate = {};
+  const assigned = new Set<string>();
+  const column = (field: string): string => {
+    const name = toColumn(field);
+    if (assigned.has(name) || name === "__proto__") {
+      throw new ValidationError({
+        [field]: { path: field, message: "update fields must map to distinct columns" },
+      });
+    }
+    assigned.add(name);
+    return name;
+  };
   for (const [key, val] of Object.entries(update)) {
-    if (key === "$set" && typeof val === "object" && val !== null) {
+    if (key.startsWith("$") && typeof val === "object" && val !== null && !Array.isArray(val)) {
+      const fields: PlainObject = {};
       for (const [field, fieldVal] of Object.entries(val as PlainObject)) {
-        result[toColumn(field)] = fieldVal as ZeroshipDbUpdateValue;
+        fields[column(field)] = fieldVal;
       }
-    } else if (key.startsWith("$") && typeof val === "object" && val !== null) {
-      for (const [field, fieldVal] of Object.entries(val as PlainObject)) {
-        result[toColumn(field)] = { [key]: fieldVal } as ZeroshipDbUpdateValue;
-      }
+      result[key] = fields as ZeroshipDbUpdateValue;
     } else {
-      result[toColumn(key)] = val as ZeroshipDbUpdateValue;
+      result[column(key)] = val as ZeroshipDbUpdateValue;
     }
   }
   return result;

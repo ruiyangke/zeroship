@@ -992,8 +992,15 @@ on `error.message`.
 
 Per-field (preferred): `$set`, `$inc`, `$dec`, `$mul`, `$push`, `$pull`,
 `$addToSet`. A bare value is treated as `$set`. MongoDB top-level shape
-(`{ $set: { ... } }`, `{ $inc: { ... } }`, etc.) is also accepted; the
-SDK translates before dispatch.
+(`{ $set: { ... } }`, `{ $inc: { ... } }`, etc.) is also accepted by the
+shared ORM. The SDK maps field names to columns while preserving this grammar.
+
+Each field may be assigned only once per update. Multiple operators on a field,
+mixed operator/data objects, and assignments that collide after column-name
+mapping are refused. Arithmetic operators require native numbers or Rust
+`Decimal` values; strings, booleans, and null are refused before SQL execution.
+Objects supplied through an explicit `$set` are literal data, even if their
+keys look like update operators.
 
 Array operators treat the operand as a complete element. `$push` appends it,
 `$pull` removes every structurally equal element, and `$addToSet` appends it

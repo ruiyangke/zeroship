@@ -1202,6 +1202,66 @@ const _procedures = {arrays};
 }
 
 #[test]
+fn update_validation_is_shared_by_native_and_sdk_worker_calls() {
+    let url = require_pg();
+    let app = crate::test_app_id!();
+    let app = app.as_str();
+    reset_schema(&url, app);
+    let role = zeroship_core::database_role::per_app_role_name(app).unwrap();
+    exec_owner_sql(
+        &url,
+        &format!(
+            "ALTER TABLE \"{app}\".notes ADD COLUMN balance DOUBLE PRECISION, ADD COLUMN payload JSONB; \
+         GRANT SELECT, INSERT, UPDATE ON \"{app}\".notes TO \"{role}\""
+        ),
+    );
+    let mut descriptor: serde_json::Value =
+        serde_json::from_str(&notes_runtime_descriptor()).unwrap();
+    descriptor["collections"]["notes"]["fields"]["balance"] = serde_json::json!({"type":"number"});
+    descriptor["collections"]["notes"]["fields"]["payload"] = serde_json::json!({"type":"json"});
+    let source = build_src(
+        r#"
+async function updates() {
+    const native = env.db.collection("notes");
+    const row = await native.insert({title:"validation", balance:10});
+    for (const [patch, code] of [
+        [{balance:{$inc:"2"}}, "invalid_arithmetic_operand"],
+        [{balance:{$mul:null}}, "invalid_arithmetic_operand"],
+        [{balance:{$inc:1,$mul:2}}, "invalid_update"],
+        [{$set:{balance:1},balance:2}, "invalid_update"],
+    ]) {
+        let refused = false;
+        try { await native.update({id:row.id}, patch); }
+        catch (error) { if (error.code !== code) throw error; refused = true; }
+        if (!refused) throw new Error("native invalid update succeeded");
+    }
+    const result = await env.db.transaction(async tx => {
+        let refused = false;
+        try { await tx.notes.update({id:row.id}, {$inc:{balance:1},$mul:{balance:2}}); }
+        catch { refused = true; }
+        if (!refused) throw new Error("SDK discarded a conflicting assignment");
+        const updated = await tx.notes.update({id:row.id}, {
+            $set:{payload:{$inc:2,description:"literal JSON"}}, $inc:{balance:1},
+        });
+        if (updated.balance !== 11 || updated.version !== 2 || updated.payload.$inc !== 2) {
+            throw new Error(`update changed semantics: ${JSON.stringify(updated)}`);
+        }
+        return {validated:true};
+    });
+    if (result.error) throw result.error;
+    return result.data;
+}
+updates.config = {kind:"action"};
+const _procedures = {updates};
+"#,
+    );
+    let (status, body) =
+        dispatch_zs_with_descriptor(&url, &source, "updates", app, descriptor.to_string());
+    assert_eq!(status, 200, "worker update validation: {body}");
+    assert_eq!(body["json"], serde_json::json!({"validated":true}));
+}
+
+#[test]
 fn calendar_dates_round_trip_through_worker_transactions() {
     let url = require_pg();
     let app = crate::test_app_id!();

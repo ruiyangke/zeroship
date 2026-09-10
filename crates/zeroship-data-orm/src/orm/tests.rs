@@ -12,6 +12,7 @@ mod identity;
 mod json;
 mod nested_temporal;
 mod update_operators;
+mod update_validation;
 
 #[derive(Debug, FromRow)]
 #[orm(entity = posts)]

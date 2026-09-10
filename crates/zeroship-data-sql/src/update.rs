@@ -1,0 +1,251 @@
+//! Shared update grammar. Assignments remain native values throughout parsing.
+use crate::{
+    codecs::CodecError,
+    value::{Record, Value},
+};
+use std::collections::HashSet;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Operator {
+    Set,
+    Increment,
+    Decrement,
+    Multiply,
+    Push,
+    Pull,
+    AddToSet,
+}
+
+impl Operator {
+    fn parse(name: &str) -> Result<Self, CodecError> {
+        match name {
+            "$set" => Ok(Self::Set),
+            "$inc" => Ok(Self::Increment),
+            "$dec" => Ok(Self::Decrement),
+            "$mul" => Ok(Self::Multiply),
+            "$push" => Ok(Self::Push),
+            "$pull" => Ok(Self::Pull),
+            "$addToSet" => Ok(Self::AddToSet),
+            _ => Err(invalid(&format!("unsupported update operator: {name}"))),
+        }
+    }
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Set => "$set",
+            Self::Increment => "$inc",
+            Self::Decrement => "$dec",
+            Self::Multiply => "$mul",
+            Self::Push => "$push",
+            Self::Pull => "$pull",
+            Self::AddToSet => "$addToSet",
+        }
+    }
+}
+
+pub struct Assignment<'a> {
+    pub field: &'a str,
+    pub operator: Operator,
+    pub operand: &'a Value,
+}
+
+fn invalid(message: &str) -> CodecError {
+    CodecError::validation("invalid_update", message)
+}
+
+fn field_operator(value: &Value) -> Result<Operator, CodecError> {
+    if let Some(fields) = value.as_object() {
+        if let Some(name) = fields.keys().find(|name| name.starts_with('$')) {
+            if fields.len() != 1 {
+                return Err(invalid("a field update must contain exactly one operator"));
+            }
+            return Operator::parse(name);
+        }
+    }
+    Ok(Operator::Set)
+}
+
+fn numeric_operand(value: &Value) -> bool {
+    match value {
+        Value::Number(_) => true,
+        Value::Decimal(text) => serde_json::from_str::<&serde_json::value::RawValue>(text)
+            .is_ok_and(|raw| {
+                raw.get()
+                    .starts_with(|c: char| c == '-' || c.is_ascii_digit())
+            }),
+        _ => false,
+    }
+}
+
+/// Parse both document operators and per-field operators without copying values.
+/// Explicit `$set` operands are literal data, including objects with `$` keys.
+///
+/// # Errors
+/// Refuses malformed patches, duplicate fields, and nonnumeric arithmetic operands.
+pub fn assignments(patch: &Value) -> Result<Vec<Assignment<'_>>, CodecError> {
+    let fields = patch
+        .as_object()
+        .ok_or_else(|| invalid("update must be an object"))?;
+    let mut seen = HashSet::new();
+    let mut result = Vec::new();
+    let mut add = |field, operator, operand| {
+        if !seen.insert(field) {
+            return Err(invalid("a field may be assigned only once per update"));
+        }
+        if matches!(
+            operator,
+            Operator::Increment | Operator::Decrement | Operator::Multiply
+        ) && !numeric_operand(operand)
+        {
+            return Err(CodecError::validation(
+                "invalid_arithmetic_operand",
+                format!("arithmetic update for '{field}' requires a native number or decimal"),
+            ));
+        }
+        result.push(Assignment {
+            field,
+            operator,
+            operand,
+        });
+        Ok(())
+    };
+    for (field, value) in fields {
+        if field.starts_with('$') {
+            let operator = Operator::parse(field)?;
+            let operands = value
+                .as_object()
+                .ok_or_else(|| invalid(&format!("{field} requires an object")))?;
+            for (field, operand) in operands {
+                if field.starts_with('$') {
+                    return Err(invalid("update field names cannot begin with '$'"));
+                }
+                add(field.as_str(), operator, operand)?;
+            }
+        } else {
+            let operator = field_operator(value)?;
+            let operand = value
+                .as_object()
+                .filter(|object| object.keys().any(|key| key.starts_with('$')))
+                .map_or(value, |object| &object[operator.name()]);
+            add(field.as_str(), operator, operand)?;
+        }
+    }
+    if result.is_empty() {
+        return Err(invalid("update fields cannot be empty"));
+    }
+    Ok(result)
+}
+
+/// Gather literal assignments under `$set` before protection transforms.
+/// Moves operands into the canonical patch without serializing or cloning them.
+///
+/// # Errors
+/// Refuses invalid updates without modifying the supplied patch.
+pub fn normalize(patch: &mut Value) -> Result<(), CodecError> {
+    assignments(patch)?;
+    let Value::Object(fields) = patch.take() else {
+        unreachable!()
+    };
+    let mut sets = Record::new();
+    let mut operations = Record::new();
+    let mut add = |field, operator: Operator, operand| {
+        if operator == Operator::Set {
+            sets.insert(field, operand);
+        } else {
+            operations.insert(
+                field,
+                Value::Object([(operator.name().into(), operand)].into()),
+            );
+        }
+    };
+    for (field, value) in fields {
+        if field.starts_with('$') {
+            let operator = Operator::parse(&field).expect("validated operator");
+            let Value::Object(operands) = value else {
+                unreachable!()
+            };
+            for (field, operand) in operands {
+                add(field, operator, operand);
+            }
+        } else if value
+            .as_object()
+            .is_some_and(|object| object.keys().any(|key| key.starts_with('$')))
+        {
+            let Value::Object(mut object) = value else {
+                unreachable!()
+            };
+            let (name, operand) = object.pop().expect("validated operator");
+            add(
+                field,
+                Operator::parse(&name).expect("validated operator"),
+                operand,
+            );
+        } else {
+            add(field, Operator::Set, value);
+        }
+    }
+    if !sets.is_empty() {
+        operations.insert("$set".into(), Value::Object(sets));
+    }
+    *patch = Value::Object(operations);
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::value;
+
+    #[test]
+    fn normalization_moves_buffers_and_keeps_explicit_set_data_literal() {
+        let bytes = vec![1, 2, 3];
+        let address = bytes.as_ptr();
+        let mut patch = value!({"payload":{"$set":{"$inc":2}},"$mul":{"balance":3}});
+        patch
+            .as_object_mut()
+            .unwrap()
+            .insert("bytes".into(), Value::Bytes(bytes));
+        normalize(&mut patch).unwrap();
+        assert_eq!(patch["$set"]["bytes"].as_bytes().unwrap().as_ptr(), address);
+        assert_eq!(patch["$set"]["payload"], value!({"$inc":2}));
+        assert_eq!(patch["balance"], value!({"$mul":3}));
+        let expected = patch.clone();
+        normalize(&mut patch).unwrap();
+        assert_eq!(patch, expected);
+        assert_eq!(patch["$set"]["bytes"].as_bytes().unwrap().as_ptr(), address);
+    }
+
+    #[test]
+    fn invalid_updates_do_not_change_the_supplied_patch() {
+        for mut patch in [
+            value!(null),
+            value!([]),
+            value!({}),
+            value!({"$set":{}}),
+            value!({"x":{"$inc":1,"$mul":2}}),
+            value!({"x":{"$inc":1,"data":2}}),
+            value!({"x":1,"$set":{"x":2}}),
+            value!({"$mul":{"x":1},"$inc":{"x":2}}),
+            value!({"$unknown":{"x":1}}),
+            value!({"$set":{"$inc":1}}),
+        ] {
+            let before = patch.clone();
+            assert!(normalize(&mut patch).is_err(), "{patch:?}");
+            assert_eq!(patch, before);
+            for dialect in [
+                crate::compile::SqlDialect::Postgres,
+                crate::compile::SqlDialect::Sqlite,
+            ] {
+                assert!(
+                    crate::compile::build_set_clauses_with_dialect(
+                        &patch,
+                        &mut vec![],
+                        &value!({}),
+                        dialect
+                    )
+                    .is_err()
+                );
+            }
+        }
+    }
+}
