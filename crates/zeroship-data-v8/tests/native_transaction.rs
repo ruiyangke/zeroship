@@ -169,29 +169,20 @@ fn require_pg() -> String {
 // isolates the schema, the per-app role and the broker key at once - and stops
 // the fixture depending on a fallback continuing to exist.
 
-/// Drop the app schema, then PROVISION the `notes` table the way the engine /
-/// deploy-apply does.
-///
-/// `zeroship-migrate` is the sole PostgreSQL schema authority and creates the
-/// schema at deploy time, before the app serves. The table must already exist
-/// when the handlers run, so this fixture stands in for deploy-time apply.
-/// Release this runtime's connections before it falls out of scope.
-///
-/// Every helper here builds its own runtime and drops it when the block ends.
-/// Closing a connection is asynchronous, so a runtime that stops first leaves
-/// the socket - and the server-side backend - alive for the life of the test
-/// process. Draining inside the block keeps the runtime alive long enough to
-/// finish the close.
+/// Release this thread's database connections while its compio runtime runs.
+/// Reset the adapter context; callers must release their local clients and
+/// pools before draining so those handles cannot keep connections alive.
 async fn drain_open_connections() {
     zeroship_data_v8::reset_context_for_tests();
-    if !compio_postgres::drain_connections(std::time::Duration::from_secs(2)).await {
-        eprintln!(
-            "DRAIN-TIMEOUT: {} connection(s) still live",
-            compio_postgres::live_connections()
-        );
-    }
+    assert!(
+        compio_postgres::drain_connections(std::time::Duration::from_secs(2)).await,
+        "fixture left database connections alive: {}",
+        compio_postgres::live_connections()
+    );
 }
 
+/// Recreate the app schema and provision `notes` before worker boot, standing
+/// in for the migration service's deploy-time apply.
 fn reset_schema(url: &str, app: &str) {
     let url = url.to_string();
     let app = app.to_string();
@@ -250,7 +241,8 @@ CREATE INDEX IF NOT EXISTS "notes_created_by_idx" ON "{app}"."notes" ("created_b
             .await
             .expect("per-app role must be re-established after the CASCADE");
         support::grant_all_runtime_table_columns(&pool, &app, "notes").await;
-
+        pool.close().await;
+        drop(pool);
         drain_open_connections().await;
     });
 }
