@@ -1082,6 +1082,76 @@ const _procedures = {timestamps};
 }
 
 #[test]
+fn nested_timestamps_follow_worker_descriptors() {
+    let url = require_pg();
+    let app = crate::test_app_id!();
+    let app = app.as_str();
+    reset_schema(&url, app);
+    let role = zeroship_core::database_role::per_app_role_name(app).unwrap();
+    exec_owner_sql(&url, &format!(
+        "ALTER TABLE \"{app}\".notes ADD COLUMN instants JSONB, ADD COLUMN profile JSONB, ADD COLUMN payload JSONB; \
+         GRANT SELECT, INSERT, UPDATE ON \"{app}\".notes TO \"{role}\""
+    ));
+    let mut descriptor: serde_json::Value =
+        serde_json::from_str(&notes_runtime_descriptor()).unwrap();
+    descriptor["collections"]["notes"]["fields"]["instants"] =
+        serde_json::json!({"type":"array","items":"date"});
+    descriptor["collections"]["notes"]["fields"]["profile"] =
+        serde_json::json!({"type":"object","shape":{"instant":{"type":"timestamp"}}});
+    descriptor["collections"]["notes"]["fields"]["payload"] = serde_json::json!({"type":"json"});
+    let source = build_src(
+        r#"
+async function runNestedTimestamps() {
+    const iso = "1969-12-31T23:59:59.999Z";
+    const result = await env.db.transaction(async tx => {
+        for (const instant of [iso, new Date(-1), -1]) {
+            const row = await tx.notes.insert({title:"nested", instants:[instant], profile:{instant}, payload:{instant:new Date(-1)}});
+            if (row.instants[0] !== -1 || row.profile.instant !== -1) throw new Error("nested timestamp changed type");
+            if (row.payload.instant !== iso) throw new Error("untyped JSON Date changed");
+            const found = await tx.notes.find({id:row.id, instants:{$eq:[new Date(-1)]}});
+            if (found.length !== 1) throw new Error("array equality did not normalize Date");
+            const updated = await tx.notes.update({id:row.id}, {instants:{$push:new Date(0)}});
+            if (JSON.stringify(updated.instants) !== "[-1,0]") throw new Error("timestamp push changed type");
+            await tx.notes.update({id:row.id}, {instants:{$pull:"1970-01-01T01:00:00+01:00"}});
+        }
+        return {preserved:true};
+    });
+    if (result.error) throw result.error;
+    for (const document of [
+        {instants:["private_not_a_timestamp"]},
+        {profile:{instant:"2026-02-30"}},
+    ]) {
+        let refused = false;
+        try { await env.db.collection("notes").insert({title:"invalid", ...document}); }
+        catch (error) {
+            if (error.code !== "invalid_timestamp") throw error;
+            if (error.message.includes("private_not_a_timestamp")) throw new Error("validation leaked input");
+            refused = true;
+        }
+        if (!refused) throw new Error("native nested timestamp validation was bypassed");
+    }
+    return result.data;
+}
+async function nestedTimestamps() {
+    try { return await runNestedTimestamps(); }
+    catch (error) { return {failure:error.message, code:error.code, stack:error.stack}; }
+}
+nestedTimestamps.config = {kind:"action"};
+const _procedures = {nestedTimestamps};
+"#,
+    );
+    let (status, body) = dispatch_zs_with_descriptor(
+        &url,
+        &source,
+        "nestedTimestamps",
+        app,
+        descriptor.to_string(),
+    );
+    assert_eq!(status, 200, "worker nested timestamps: {body}");
+    assert_eq!(body["json"], serde_json::json!({"preserved":true}));
+}
+
+#[test]
 fn calendar_dates_round_trip_through_worker_transactions() {
     let url = require_pg();
     let app = crate::test_app_id!();

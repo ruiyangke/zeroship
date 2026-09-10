@@ -10,6 +10,7 @@ mod timestamp;
 mod fixtures;
 mod identity;
 mod json;
+mod nested_temporal;
 
 #[derive(Debug, FromRow)]
 #[orm(entity = posts)]

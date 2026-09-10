@@ -794,15 +794,35 @@ fn push_field_value_bind(
             _ => format!("${}", params.len()),
         });
     }
-    let json_column = matches!(kind, Some("json" | "object" | "array"));
-    let parameter =
+    let json_column = matches!(kind, Some("json" | "object" | "array" | "union"));
+    let mut parameter =
         if json_column && !matches!(value, Value::Json(_) | Value::Array(_) | Value::Object(_)) {
             Value::Json(value.to_string())
         } else {
             value_to_param(value)
         };
+    if !protected && matches!(kind, Some("object" | "array" | "union")) {
+        crate::codecs::prepare_value(field, definition.unwrap(), &mut parameter)
+            .map_err(|error| QueryError::InvalidFilter(error.to_string()))?;
+    }
     params.push(parameter);
     Ok(format!("${}", params.len()))
+}
+
+fn push_array_value_bind(
+    params: &mut Vec<Value>,
+    value: &Value,
+    field: &str,
+    schema: &Value,
+    operation: &str,
+) -> Result<(), QueryError> {
+    let mut operand = value.clone();
+    if let Some(definition) = schema.get(field) {
+        crate::codecs::prepare_array_operand(field, definition, operation, &mut operand)
+            .map_err(|error| QueryError::InvalidFilter(error.to_string()))?;
+    }
+    params.push(operand);
+    Ok(())
 }
 
 /// Build the bounded id probe used before a write fans out per matching row.
@@ -1861,19 +1881,19 @@ pub fn build_set_clauses_with_system_fields(
                     }
                     "$push" => {
                         // Serialize as JSON so numbers stay numbers, strings stay strings
-                        params.push((op_val).into());
+                        push_array_value_bind(params, op_val, key, schema_hint, op)?;
                         format!("{col} = {col} || ${}::jsonb", params.len())
                     }
                     "$pull" => {
                         // Remove array element by value: filter out matching elements
-                        params.push((op_val).into());
+                        push_array_value_bind(params, op_val, key, schema_hint, op)?;
                         let n = params.len();
                         format!(
                             "{col} = (SELECT COALESCE(jsonb_agg(elem), '[]'::jsonb) FROM jsonb_array_elements({col}) elem WHERE elem != ${n}::jsonb)"
                         )
                     }
                     "$addToSet" => {
-                        params.push((op_val).into());
+                        push_array_value_bind(params, op_val, key, schema_hint, op)?;
                         let n = params.len();
                         format!(
                             "{col} = CASE WHEN {col} @> ${n}::jsonb THEN {col} ELSE {col} || ${n}::jsonb END"
