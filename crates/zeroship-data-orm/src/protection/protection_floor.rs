@@ -136,7 +136,7 @@ fn floor_from_live(live: &zeroship_data_sql::catalog::LiveSchema) -> ProtectionF
 /// as it skips an absent block, and both therefore store plaintext under the
 /// field's own name. A fence that accepted `kind: "none"` would refuse the
 /// one-key deletion and wave through the one-word edit that does the same thing.
-fn descriptor_declares_mask(def: &Value) -> bool {
+pub(crate) fn descriptor_declares_mask(def: &Value) -> bool {
     let Some(meta) = def.get("mask").and_then(Value::as_object) else {
         return false;
     };
@@ -149,7 +149,7 @@ fn descriptor_declares_mask(def: &Value) -> bool {
 /// [`crate::protection::encryption_pass::encrypt_row_on_write_with_sidechannel`],
 /// which encrypts whenever `def["encrypted"]` is an object. There is no
 /// `mode: "none"` opt-out to mirror.
-fn descriptor_declares_encryption(def: &Value) -> bool {
+pub(crate) fn descriptor_declares_encryption(def: &Value) -> bool {
     def.get("encrypted").is_some_and(Value::is_object)
 }
 
