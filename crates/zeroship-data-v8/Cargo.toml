@@ -3,183 +3,43 @@ name = "zeroship-data-v8"
 version = "0.1.0"
 edition = "2021"
 description = "V8 adapter for the zeroship data ORM"
-# One integration-test target per FEATURE RESOLUTION, not one per file. The
-# `[[test]]` blocks at the bottom of this file are the whole set; every other
-# `tests/*.rs` is a `mod` declaration inside one of them. `tests/main.rs` carries
-# the reasoning and the shape.
-#
-# `autotests = false` is what makes those module lists load-bearing: a new
-# `tests/<name>.rs` that neither entry file names is compiled by NOTHING and
-# reports no failure. Five of these files were auto-discovered before this line
-# existed, so the discovery it turns off was real.
+# Integration modules are registered by the explicit test entry points below.
 autotests = false
 
 [dependencies]
 zeroship-runtime = { workspace = true }
 zeroship-runtime-macros = { workspace = true }
-# **P7 PR 3** — typed_id minter for INSERT auto-populated `id` column.
-# The dispatch_insert path calls `zeroship_core::typed_id::generate(prefix)`
-# when the inbound doc omits `id`. Cargo dep is in-workspace path-only
-# (no external crate) — flagged in the PR 3 commit body per the
-# "new Cargo dep" disclosure rule.
 zeroship-core = { workspace = true }
-# Runtime SQL compilation, catalog metadata and protection sentinel decoding.
 zeroship-data-sql = { workspace = true }
-# The ORM owns data behavior and built-in drivers. The adapter owns V8 and
-# worker lifecycle; the ORM never depends on this crate.
 zeroship-data-orm = { workspace = true }
-# The operator charter is the worker's assignment authority, and it must not
-# arrive from the creator-authored descriptor. `zeroship-migrate-policy` is a
-# leaf (serde/toml/sha2/hmac/hex/thiserror/schemars and nothing of ours), so
-# taking the parser here adds no cycle.
+# Operator policy and metering are injected when the worker primitive is built.
 zeroship-migrate-policy = { workspace = true }
-# Metering infrastructure: exec.rs emits a raw usage metric
-# (db_reads / db_writes / db_rows_written) in the success arm of each
-# query / mutation / count via a MeterHandle. Platform-measured,
-# unforgeable by app code (replaces the deleted env.meter API).
 zeroship-metering = { workspace = true }
-# `with-uuid-1` is DECLARED here because this crate USES it:
-# `backend/pg_row_json.rs` decodes OID 2950 through `row.try_get::<_, uuid::Uuid>`.
-# It was previously absent and the crate still built, purely because
-# `zeroship-authz` and `zeroship-workflow-scheduler` enable the feature and
-# Cargo unifies features across whatever crates share a build graph. So
-# `cargo check -p zeroship-data-v8` ALONE failed with
-# `Uuid: FromSql is not satisfied` while any wider build passed - a latent
-# coupling that only becomes visible once a crate is asked to build by itself,
-# which is exactly what the data-crate split asks of every tier.
-compio-postgres = { workspace = true, features = ["with-uuid-1"] }
+# PostgreSQL is used for worker change delivery and resource composition.
+# Query execution and physical row codecs belong to the ORM.
+compio-postgres = { workspace = true }
 compio = { workspace = true }
 serde_json = { workspace = true }
-uuid = { workspace = true }
 v8 = { workspace = true }
-# `tracing` for INVALID-index recovery logging until A3 ships the
-# `__zeroship_migrations` audit table. `sha2` produces a deterministic
-# 8-char base32 suffix when the generated index name exceeds 60 bytes
-# (Postgres NAMEDATALEN=64 minus headroom).
 tracing = { workspace = true }
 sha2 = { workspace = true }
-# **P5 PR 1** — column-encryption AEAD + key derivation. Both the PG
-# arm and the SQLite arm consume `crate::encryption`, so these deps are
-# unconditional (the encryption module compiles in every plugin-db
-# build). `hmac` is promoted from optional/sqlite-only to unconditional
-# below — deterministic mode HMAC-derives the synthetic nonce on both
-# backends, and the env-var key sourcing in `encryption::keys` is
-# pure-Rust.
-aes-gcm = { workspace = true }
-hkdf = { workspace = true }
-hmac = { workspace = true }
-# **P5 PR 2** — the CRUD encryption pass exchanges ciphertext over JSON
-# values (which cannot carry raw bytes), so plaintext bytes are
-# base64-encoded into a `Value::String` and the SQL bind layer wraps
-# the placeholder with `decode($N, 'base64')::bytea` on insert/update
-# / `encode("col", 'base64')` on read. Both legs need a hot-path
-# base64 codec; `base64` v0.22 is already a workspace dep.
-base64 = { workspace = true }
-# **P5 PR 2 follow-up** — zeroize root-key material, derived AEAD keys,
-# and transient plaintext buffers on drop. The plugin-db encryption
-# paths hold key/plaintext bytes in Rust-owned memory; `zeroize`
-# hardens those drop paths without changing the wire contract.
-zeroize = { version = "1", features = ["alloc", "derive"] }
-# SQLite backend dependencies — unconditional now that both backends
-# ship in every build.
-#
-# - `rusqlite`: bundled SQLite amalgamation + `preupdate_hook` seam the
-#   P2 CDC pass will wire in.
-# - `flume`: bounded MPMC queue the `SqliteSession` actor uses to
-#   serialise calls onto the single rusqlite writer thread (compio is
-#   single-threaded; the actor runs under `spawn_blocking`).
-rusqlite = { workspace = true, features = ["bundled", "preupdate_hook"] }
 flume = { workspace = true }
 futures = { workspace = true }
-# **P4 PR 7** — `sqlite-vec` statically compiles the `vec0` C extension
-# into the binary and hooks every rusqlite Connection via
-# `sqlite3_auto_extension`. Unconditional now that the SQLite arm is
-# always compiled in. The PG arm still never touches this crate.
-sqlite-vec = { workspace = true }
-tempfile = { workspace = true }
-# **P3 PR 3** — SQLite SessionMinter uses HMAC-SHA256. `sha2` is
-# already an unconditional dep (used for the auto-generated index
-# name suffix). The previous `hmac = { ... optional = true }` line
-# was widened to unconditional in **P5 PR 1** (line ~27 above) —
-# deterministic-mode column encryption HMAC-derives the synthetic
-# nonce on both backends, so the dep is no longer sqlite-only. The
-# PG arm still signs sessions via `pgcrypto.hmac(...)` inside
-# SECURITY DEFINER (no Rust HMAC there); only `encryption::aead`
-# uses the Rust impl on the PG side.
 
 [dev-dependencies]
-# Integration helpers are automatic in test builds; database tests are required.
+# Database integration tests are required by ordinary cargo test.
 zeroship-data-v8 = { path = ".", features = ["test-helpers"] }
-# Integration fixtures need test bindings and low-level adapter access.
 zeroship-data-orm = { workspace = true, features = ["test-helpers"] }
-# The DbPlan IR. A DEV dependency on purpose: nothing in this crate's `src/`
-# uses it yet, and declaring it a normal dependency would say otherwise. The
-# search family's lowering is exercised by `tests/search_ir_live.rs`, which
-# executes the SQL it renders against a real server - the half its own crate
-# cannot reach, having no dependencies at all.
-compio = { workspace = true }
-serde_json = { workspace = true }
-# Test-only constructors (`row_for_test` / `column_for_test`) for the
-# `bench_row_to_json` harness — enables synthesising a `Row` without
-# hitting Postgres. Production builds of `compio-postgres` do not see
-# this feature. See `crates/zeroship-data-v8/benches/bench_row_to_json.rs`.
-compio-postgres = { workspace = true }
-# Performance r9 (cycle 09:30) forcing-function: a `cargo bench` harness
-# must exist under `crates/zeroship-data-v8/benches/` so future perf reviews can
-# quote real numbers instead of being blocked by the anti-fabrication rule.
-# Initial bench target is `build_find` / `build_insert` (see
-# `benches/bench_query_build.rs` for the rationale).
+uuid = { workspace = true }
+base64 = { workspace = true }
+rusqlite = { workspace = true, features = ["bundled", "preupdate_hook"] }
+tempfile = { workspace = true }
 criterion = { workspace = true }
-# Test-coverage r12 NEW-R11-1 + NEW-R12-1: the F1 warn-half (5d9acab8
-# / fcf7ce3c / 7c6bd2ec / 18aee490) and the [I6] release_advisory_lock
-# typed-error caller paths emit 9+ structured `tracing::warn!` /
-# `tracing::error!` events whose field shape is operator-grep-contract.
-# `tracing-subscriber`'s test layer captures emissions so unit tests
-# can pin the field set + transition discriminator. Caught my own
-# 7c6bd2ec drift in cycle 13:17 — a snapshot test would have caught
-# it pre-commit.
 tracing-subscriber = { workspace = true }
 zeroship-plugin-workflow = { workspace = true }
-# P3 PR 4: cross-backend session-payload equivalence test in
-# `tests/sqlite_integration.rs` needs to recompute HMAC-SHA256 over
-# the canonical payload independently of the production code path so
-# the assertion pins the SQLite-side byte format against a third
-# implementation (the canonical_payload + compute_signature helpers
-# are `pub(crate)` and unreachable from the integration target).
-# `sha2` is already declared as a non-optional `[dependencies]` entry
-# (line 20) so it's available to the test target without re-listing;
-# `hmac` is also unconditional now, but we keep the dev-dep pin so the
-# integration target still spells out its dependency explicitly.
-hmac = { workspace = true }
-# `workflow_journal_redeploy_grants_do_not_reopen_without_reprovision` needs an
-# app's `app_<uuid>` workflow journal schema to exist before the worker's
-# `PgStore::provision` can put tables in it, and since 2a44ea8ef that schema is
-# created by the deploy's migration apply, not by the worker. The test calls
-# `provisioning::provision_workflow_journal_schema` - the production statement -
-# rather than a CREATE SCHEMA of its own, which would leave the journal owned by
-# whoever the test connected as: a privilege shape production never has.
-# DEV-only, and `zeroship-migrate-server` does not depend on plugin-db, so no cycle.
+# Fixtures apply the migration engine's schema and privilege statements.
 zeroship-migrate-server = { workspace = true }
-# The SAME argument, one dialect over. `crud/unmask.rs` stopped creating
-# `__zeroship_audit_unmask` on 2026-08-28 - that was the last live DDL in the
-# data plane - and the two migration apply hosts create it instead. The SQLite
-# integration fixtures stand in for the dev-tier host, so they run
-# `backend::audit_unmask_ddl`, the PRODUCTION generator, rather than a hardcoded
-# copy: a fixture holding its own copy of the shape would keep reporting green
-# while production drifted away from it. DEV-only; `zeroship-migrate-sqlite`
-# does not depend on plugin-db, so no cycle.
 zeroship-migrate-sqlite = { workspace = true }
-# The SAME argument again, for the PROTECTION-FLOOR fixture. The floor's input is
-# the mask/encryption sentinel a creator table carries, and in production that
-# sentinel is written by the migration engine - never by
-# `zeroship_data_sql::compile::build_create_table_with_fks`, whose only callers are
-# tests (measured: zero `src` call sites outside its own module). A fixture that
-# builds its table with the data plane's emitter therefore cannot see a
-# disagreement between the two, which is exactly the defect that shipped. The
-# migration-engine fixture renders its CREATE TABLE through
-# `zeroship_migrate::schema::query` under `zeroship_migrate_postgres::DIALECT`,
-# the same pair `zeroship-migrate-server` drives. DEV-only; neither crate depends
-# on plugin-db, so no cycle.
 zeroship-migrate = { workspace = true }
 zeroship-migrate-postgres = { workspace = true }
 
@@ -187,40 +47,18 @@ zeroship-migrate-postgres = { workspace = true }
 name = "bench_query_build"
 harness = false
 
-# Row-decoding microbench. Synthesises `compio_postgres::Row` values via
-# `compio_postgres::test_utils` (doc-hidden, always compiled) and runs
-# `row_to_json_for_bench` against narrow / medium / wide column shapes.
 [[bench]]
 name = "bench_row_to_json"
 harness = false
 
-# `find().first()` lowering microbench. Measures the full
-# `&[Row] → JSON-string` path the SDK sees on a single-row read (`find`
-# with `LIMIT 1`): `v8_bridge::rows_to_json_value` composed with
-# `crud::first_row_or_null`.
-#
-# It exists as the forcing function for a redesign that is still open:
-# threading `Vec<Value>` straight through to V8 as a new `ResolveValue`
-# shape, so the read path stops paying a `.to_string()` here and a
-# matching `JSON.parse` on the other side. That boundary cost is
-# structural for `ResolveValue::Json` and cannot be measured from this
-# crate, because the parse half lives in `zeroship-runtime` - which is
-# why this microbench covers the Rust side only, and why the redesign
-# is a cross-crate change rather than a local one.
 [[bench]]
 name = "bench_first_row_or_null"
 harness = false
 
 [features]
-# `test-helpers` exposes the `*_for_tests` / `*_with_pool` symbols to
-# downstream test crates (integration tests in `tests/integration.rs`).
-# The same symbols are visible to the in-crate unit tests via
-# `#[cfg(test)]` so `cargo test --lib` does NOT need this feature.
-test-helpers = [
-    "zeroship-data-orm/test-helpers",
-]
-# Ordinary cargo test runs every integration target. The shared database
-# fixtures stay together; distributed CDC retains its own process.
+# Expose adapter fixture setup to downstream integration tests.
+test-helpers = ["zeroship-data-orm/test-helpers"]
+
 [[test]]
 name = "main"
 path = "tests/main.rs"
