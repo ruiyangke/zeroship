@@ -12,6 +12,7 @@ base64 = { workspace = true }
 time = { workspace = true }
 
 [dev-dependencies]
+criterion = { workspace = true }
 trybuild = "1.0"
 zeroship-core = { workspace = true }
 zeroship-migrate = { workspace = true }
@@ -20,3 +21,7 @@ zeroship-migrate-backend = { workspace = true }
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "bench_query_build"
+harness = false

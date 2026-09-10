@@ -8022,6 +8022,7 @@ dependencies = [
  "base64",
  "compio",
  "compio-postgres",
+ "criterion",
  "flume 0.11.1",
  "hkdf",
  "hmac 0.12.1",
@@ -8054,6 +8055,7 @@ name = "zeroship-data-sql"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "criterion",
  "indexmap 2.14.0",
  "serde",
  "serde_json",
@@ -8072,7 +8074,6 @@ dependencies = [
  "base64",
  "compio",
  "compio-postgres",
- "criterion",
  "flume 0.11.1",
  "futures",
  "rusqlite",

@@ -31,6 +31,7 @@ sha2 = { workspace = true }
 zeroize = { version = "1", features = ["alloc", "derive"] }
 
 [dev-dependencies]
+criterion = { workspace = true }
 zeroship-data-orm = { path = ".", features = ["test-helpers"] }
 trybuild = "1.0"
 zeroship-migrate-postgres = { workspace = true }
@@ -44,3 +45,11 @@ test-helpers = []
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "bench_row_decode"
+harness = false
+
+[[bench]]
+name = "bench_first_row_or_null"
+harness = false

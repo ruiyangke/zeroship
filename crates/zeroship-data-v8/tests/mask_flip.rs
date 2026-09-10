@@ -50,7 +50,7 @@ use compio_postgres::{NoTls, Pool};
 use zeroship_data_orm::binding::DbBinding;
 use zeroship_data_orm::error::DbError;
 use zeroship_data_sql::value::{Value, value};
-use zeroship_data_v8::compile::{
+use zeroship_data_sql::compile::{
     build_aggregate, build_distinct, build_find_with_schema, build_insert, build_where,
     raw_column_name, read_surface_columns, validate_field_name,
 };
@@ -80,7 +80,7 @@ fn test_url() -> String {
 /// different sense of cold, and not a context state.) The lazy open is bound in
 /// `tests/sqlite_integration.rs`, by the three
 /// `cold_*_open_comes_from_ensure_backend_not_the_fixture` gates.
-async fn unmask_backend() -> zeroship_data_v8::backend::BackendHandle {
+async fn unmask_backend() -> zeroship_data_orm::backend::BackendHandle {
     zeroship_data_v8::tx_scope::ensure_backend()
         .await
         .expect("the backend the V8 dispatcher would have opened")
@@ -95,8 +95,8 @@ async fn unmask_backend() -> zeroship_data_v8::backend::BackendHandle {
 /// decision from the parked-tx slot; no fixture in this file parks one, so
 /// every call here binds `in_tx = false` and takes exactly the lane it took
 /// before. The transaction half is bound by `unmask_tx_lane.rs`.
-async fn unmask_route(app: &str) -> zeroship_data_v8::tx_route::TxRoute {
-    zeroship_data_v8::exec::ambient_route_for_tests(app, unmask_backend().await)
+async fn unmask_route(app: &str) -> zeroship_data_orm::tx_route::TxRoute {
+    zeroship_data_orm::exec::ambient_route_for_tests(app, unmask_backend().await)
 }
 
 /// Connect, or fail the test.
@@ -196,7 +196,7 @@ async fn fixture(pool: &Rc<Pool>, url: &str, app: &str, collection: &str, schema
         .await
         .unwrap_or_else(|e| panic!("emitted DDL must apply: {e}\n{ddl}"));
     zeroship_data_v8::set_postgres_pool_for_tests(Rc::clone(pool), url);
-    zeroship_data_v8::cache_schema_for_tests(app, collection, schema.clone());
+    zeroship_data_orm::cache_schema_for_tests(app, collection, schema.clone());
 }
 
 /// What one write through the pipeline left behind.
@@ -557,7 +557,7 @@ async fn the_real_value_is_still_stored_and_still_reachable_by_the_audited_path(
     // The unmask fetch runs `SET LOCAL ROLE app_<id>_role`, so the per-app role
     // and its grants have to exist - the deploy's `zeroship migrate` creates
     // them, and this stands in for it.
-    zeroship_data_v8::auth::bootstrap::ensure_per_app_role(&pool, app)
+    zeroship_data_orm::auth::bootstrap::ensure_per_app_role(&pool, app)
         .await
         .expect("per-app role, as the deploy would provision it");
     support::grant_runtime_select_columns(&pool, app, "people", &["id", &raw_col]).await;
@@ -669,7 +669,7 @@ async fn audited_unmask_fixture_with(
     // deploy's `zeroship migrate` creates them; this stands in for it. The
     // append privilege on the audit table comes from `ensure_per_app_role`
     // itself, which is why it runs AFTER the table is provisioned.
-    zeroship_data_v8::auth::bootstrap::ensure_per_app_role(pool, app)
+    zeroship_data_orm::auth::bootstrap::ensure_per_app_role(pool, app)
         .await
         .expect("per-app role, as the deploy would provision it");
     let raw_columns: Vec<String> = masked
@@ -829,7 +829,7 @@ async fn an_actor_the_policy_does_not_permit_is_refused_and_the_refusal_is_audit
         "granted_policy",
         DbBinding::cold_start(app).schema().clone(),
     );
-    zeroship_data_v8::cache_schema_for_deploy_for_tests(&redeployed, "people", schema.clone());
+    zeroship_data_orm::cache_schema_for_deploy_for_tests(&redeployed, "people", schema.clone());
     install_mask_policy(&redeployed, value!({ "support": ["pci"] }))
         .expect("install the new deployment's policy");
     let result = dispatch_unmask(
@@ -853,7 +853,7 @@ async fn an_actor_the_policy_does_not_permit_is_refused_and_the_refusal_is_audit
     // And the grant is scoped to the classification the policy named: the same
     // role is still refused a class the policy does not list. Without this the
     // control could pass against an `allows` that ignores its arguments.
-    zeroship_data_v8::cache_schema_for_deploy_for_tests(
+    zeroship_data_orm::cache_schema_for_deploy_for_tests(
         &redeployed,
         "vitals",
         value!({ "hr": { "type": "string", "mask": { "kind": "full", "classification": "phi" } } }),
@@ -1654,7 +1654,7 @@ async fn a_bulk_unmask_batch_with_one_forbidden_column_is_refused_whole() {
         "wider_policy",
         DbBinding::cold_start(app).schema().clone(),
     );
-    zeroship_data_v8::cache_schema_for_deploy_for_tests(&redeployed, "people", schema.clone());
+    zeroship_data_orm::cache_schema_for_deploy_for_tests(&redeployed, "people", schema.clone());
     install_mask_policy(&redeployed, value!({ "support": ["pii", "pci"] }))
         .expect("install the new deployment's policy");
     let granted = dispatch_bulk_unmask(&unmask_route(app).await, &redeployed, two_rows)
@@ -1819,7 +1819,7 @@ async fn a_query_hint_naming_one_forbidden_column_is_refused_whole() {
         "wider_policy",
         DbBinding::cold_start(app).schema().clone(),
     );
-    zeroship_data_v8::cache_schema_for_deploy_for_tests(&redeployed, "people", schema.clone());
+    zeroship_data_orm::cache_schema_for_deploy_for_tests(&redeployed, "people", schema.clone());
     install_mask_policy(&redeployed, value!({ "support": ["pii", "pci"] }))
         .expect("install the new deployment's policy");
     authorize_query_hint(
@@ -2039,7 +2039,7 @@ async fn no_write_verb_hands_back_a_column_the_descriptor_does_not_declare() {
         .query_text_params(
             &format!(
                 r#"SELECT {} AS raw FROM "{app}"."people" WHERE "id" = $1"#,
-                zeroship_data_v8::compile::quote_ident(&raw_column_name("ssn")),
+                zeroship_data_sql::compile::quote_ident(&raw_column_name("ssn")),
             ),
             &[minted_id.as_str()],
         )
@@ -2253,7 +2253,7 @@ fn the_raw_column_is_refused_on_every_inbound_surface() {
 /// over-delivers, which is the bias `read_set` already declares.
 #[test]
 fn a_masked_predicate_is_lowered_for_the_change_stream() {
-    use zeroship_data_v8::read_set::{Predicate, PredicateOp, normalise_filter};
+    use zeroship_data_orm::read_set::{Predicate, PredicateOp, normalise_filter};
     let schema = flip_schema();
 
     let Some(Predicate::All(conjuncts)) =
@@ -2634,7 +2634,7 @@ async fn deleting_the_mask_key_from_the_descriptor_must_not_write_plaintext() {
     // right, because the CATALOG did not change, only the descriptor did. A test
     // that reset it here would prove the fence works on a cold cache and say
     // nothing about the warm one production actually runs.
-    zeroship_data_v8::cache_schema_for_tests(app, "people", unmasked.clone());
+    zeroship_data_orm::cache_schema_for_tests(app, "people", unmasked.clone());
     let mut docs = value!([{ "ssn": "987-65-4321", "nickname": "bob" }]);
     let err =
         zeroship_data_v8::prepare_insert_many_docs_for_tests(&mut docs, app, "people", None)
@@ -2722,7 +2722,7 @@ async fn deleting_the_encrypted_key_from_the_descriptor_must_not_write_plaintext
     );
 
     let plain = encrypted_schema_without_the_encrypted_key();
-    zeroship_data_v8::cache_schema_for_tests(app, "people", plain.clone());
+    zeroship_data_orm::cache_schema_for_tests(app, "people", plain.clone());
     let mut docs = value!([{ "secret": "hunter3-also-real", "nickname": "bob" }]);
     let err =
         zeroship_data_v8::prepare_insert_many_docs_for_tests(&mut docs, app, "people", None)
@@ -2840,7 +2840,7 @@ async fn fixture_via_the_migration_engine(
             .unwrap_or_else(|e| panic!("engine-emitted DDL must apply: {e}\n{statement}"));
     }
     zeroship_data_v8::set_postgres_pool_for_tests(Rc::clone(pool), url);
-    zeroship_data_v8::cache_schema_for_tests(&app, collection, schema.clone());
+    zeroship_data_orm::cache_schema_for_tests(&app, collection, schema.clone());
     app
 }
 
@@ -2943,7 +2943,7 @@ async fn a_migration_engine_built_table_refuses_a_mask_downgrade() {
     );
 
     // The one-key deletion, against the table the engine built.
-    zeroship_data_v8::cache_schema_for_tests(&app, "people", flip_schema_without_the_mask_key());
+    zeroship_data_orm::cache_schema_for_tests(&app, "people", flip_schema_without_the_mask_key());
     let mut docs = value!([{ "ssn": "987-65-4321", "nickname": "bob" }]);
     // Not `expect_err`: the failure this test exists for is the pipeline PREPARING
     // the write, and the prepared document is the downgrade itself. Reporting it
@@ -3047,7 +3047,7 @@ async fn a_migration_engine_built_table_refuses_an_encryption_downgrade() {
         "control: the encrypting deploy must not store plaintext: {before:?}",
     );
 
-    zeroship_data_v8::cache_schema_for_tests(
+    zeroship_data_orm::cache_schema_for_tests(
         &app,
         "people",
         encrypted_schema_without_the_encrypted_key(),

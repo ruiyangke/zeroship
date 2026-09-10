@@ -379,7 +379,7 @@ So this is **not** a PII leak. It is a feature that is entirely non-functional
 on the production backend: a creator calling `env.db.unmaskField` on PG gets a
 SQL error about a missing function, forever.
 
-**Evidence:** `auth/bootstrap.rs:94`; `crates/zeroship-data-v8/Cargo.toml:183`;
+**Evidence:** `auth/bootstrap.rs:94`; `crates/zeroship-data-v8/Cargo.toml`;
 `crates/zeroship-cli/Cargo.toml:20`; `crates/zeroship-worker/Cargo.toml:20`;
 `crud/mask_policy.rs:278-300`; `crud/unmask.rs:325-352`
 

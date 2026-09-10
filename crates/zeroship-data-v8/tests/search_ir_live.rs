@@ -502,9 +502,9 @@ fn postgres_serves_the_inner_product_that_sqlite_refuses() {
 
         // The SQLite half: the same metric, refused.
         use zeroship_data_orm::binding::DbBinding;
-        use zeroship_data_v8::backend::VectorMetric as BackendMetric;
+        use zeroship_data_orm::backend::VectorMetric as BackendMetric;
         let dir = tempfile::tempdir().expect("tempdir");
-        let sqlite = zeroship_data_v8::backend_selection::new_sqlite_backend(
+        let sqlite = zeroship_data_orm::backend_selection::new_sqlite_backend(
             std::path::PathBuf::from(dir.path()),
             zeroship_data_v8::isolate_key_source(),
         )
