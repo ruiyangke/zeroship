@@ -124,7 +124,7 @@ pub async fn apply(
         crate::descriptor::collection_schema(binding, collection)?,
         &opts.schema_field_scope,
     );
-    zeroship_data_sql::codecs::decode_rows(&schema, &mut rows)?;
+    zeroship_data_sql::codecs::decode_rows(route.dialect(), &schema, &mut rows)?;
 
     if opts.apply_decrypt && super::schema_has_encrypted_columns(&schema) {
         // The key store comes off the handle this read ran on, not off a

@@ -967,6 +967,55 @@ const _procedures = {nativeValues};
 }
 
 #[test]
+fn native_json_types_round_trip_through_worker_transactions() {
+    let url = require_pg();
+    let app = crate::test_app_id!();
+    let app = app.as_str();
+    reset_schema(&url, app);
+    let role = zeroship_core::database_role::per_app_role_name(app).unwrap();
+    exec_owner_sql(
+        &url,
+        &format!(
+            "ALTER TABLE \"{app}\".notes ADD COLUMN payload JSONB; \
+             GRANT SELECT, INSERT, UPDATE ON \"{app}\".notes TO \"{role}\""
+        ),
+    );
+    let mut descriptor: serde_json::Value =
+        serde_json::from_str(&notes_runtime_descriptor()).unwrap();
+    descriptor["collections"]["notes"]["fields"]["payload"] =
+        serde_json::json!({"type":"json", "nullable":true});
+    let source = build_src(
+        r#"
+async function jsonValues() {
+    const values = ["true", "null", "42", "[1]", '{"key":1}', '"nested"',
+                    "plain text", true, false, 42, 1.5, null, {key:"true"}, [false,"null"]];
+    const result = await env.db.transaction(async tx => {
+        for (const payload of values) {
+            const inserted = await tx.notes.insert({title:"json", payload});
+            if (JSON.stringify(inserted.payload) !== JSON.stringify(payload)) {
+                throw new Error("insert changed the JSON type");
+            }
+            const updated = await tx.notes.update({id:inserted.id}, {payload:{$set:payload}});
+            if (JSON.stringify(updated.payload) !== JSON.stringify(payload)) {
+                throw new Error("update changed the JSON type");
+            }
+        }
+        return {preserved:true};
+    });
+    if (result.error) throw result.error;
+    return result.data;
+}
+jsonValues.config = {kind:"action"};
+const _procedures = {jsonValues};
+"#,
+    );
+    let (status, body) =
+        dispatch_zs_with_descriptor(&url, &source, "jsonValues", app, descriptor.to_string());
+    assert_eq!(status, 200, "worker JSON values: {body}");
+    assert_eq!(body["json"], serde_json::json!({"preserved":true}));
+}
+
+#[test]
 fn transaction_commits_on_resolve() {
     let url = require_pg();
     let app = crate::test_app_id!();
