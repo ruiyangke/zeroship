@@ -55,6 +55,7 @@ import type {
   Result,
   Row,
   RowInput,
+  UpsertOptions,
   UpdateExpression,
   Filter,
   IsolationLevel,
@@ -122,7 +123,7 @@ export type TxCollection<S = PlainObject, AllSchemas extends Record<string, unkn
   exists(filter: Filter<S>): Promise<boolean>;
   find<W extends WithSpec>(filter: Filter<S>, opts: { with: W }): TxQuery<S, Omit<Row<S>, keyof W> & WithRelations<S, W, AllSchemas>, AllSchemas>;
   find(filter?: Filter<S>): TxQuery<S, Row<S>, AllSchemas>;
-  upsert(row: RowInput<S>, options: { conflictFields: (string & keyof Row<S>)[] }): Promise<Row<S>>;
+  upsert(row: RowInput<S>, options: UpsertOptions<S>): Promise<Row<S>>;
   update(idOrFilter: string | Filter<S>, patch: UpdateExpression<S>): Promise<Row<S> | null>;
   updateMany(filter: Filter<S>, patch: UpdateExpression<S>): Promise<{ count: number }>;
   delete(idOrFilter: string | Filter<S>): Promise<Row<S> | null>;

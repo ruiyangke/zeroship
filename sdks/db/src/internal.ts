@@ -44,6 +44,7 @@ export type {
   Result,
   Row,
   RowInput,
+  UpsertOptions,
   UpdateExpression,
   Filter,
   IsolationLevel,

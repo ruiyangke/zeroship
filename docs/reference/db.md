@@ -521,6 +521,12 @@ const { data: user } = await db.users.upsert(
 );
 ```
 
+Upsert matches a unique key owned by the application. Every `conflictFields`
+entry must name a declared field supplied in the document, without duplicates.
+Platform-assigned fields, including `id`, cannot be conflict keys. A new row gets
+a generated identity; a conflict preserves the existing identity. Use
+`db.users.update(userId, patch)` to change a row identified by its ID.
+
 ### Read
 
 ```ts
