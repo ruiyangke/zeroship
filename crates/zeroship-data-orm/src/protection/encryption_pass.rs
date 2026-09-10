@@ -21,7 +21,7 @@ use zeroship_data_orm::error::DbError;
 ///
 /// This is the overload that captures plaintexts for the
 /// downstream mask pass. See [`encrypt_row_on_write_with_sidechannel`]
-/// for the version that populates a [`crate::crud::mask_pass::MaskPlaintextSidechannel`]
+/// for the version that populates a [`crate::protection::mask_pass::MaskPlaintextSidechannel`]
 /// (`HashMap<String, Zeroizing<String>>`) BEFORE replacing the plaintext with
 /// ciphertext, so the mask pass can derive the sibling
 /// `<col>_masked` column without re-decrypting. The original
@@ -48,7 +48,7 @@ pub async fn encrypt_row_on_write(
     row_pk: &str,
     row: &mut Value,
 ) -> Result<(), DbError> {
-    let mut sidechannel = crate::crud::mask_pass::MaskPlaintextSidechannel::new();
+    let mut sidechannel = crate::protection::mask_pass::MaskPlaintextSidechannel::new();
     encrypt_row_on_write_with_sidechannel(
         keys,
         app_id,
@@ -81,7 +81,7 @@ pub async fn encrypt_row_on_write_with_sidechannel(
     schema: &Value,
     row_pk: &str,
     row: &mut Value,
-    sidechannel: &mut crate::crud::mask_pass::MaskPlaintextSidechannel,
+    sidechannel: &mut crate::protection::mask_pass::MaskPlaintextSidechannel,
 ) -> Result<(), DbError> {
     let Some(schema_obj) = schema.as_object() else {
         return Ok(()); // schema not present → no encrypted columns to find

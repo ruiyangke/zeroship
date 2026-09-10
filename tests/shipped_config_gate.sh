@@ -13,7 +13,7 @@
 # d6418b39b added `BackendHandle::introspect_schema` to
 # crates/zeroship-data-orm/src/backend_handle.rs as UNGATED production code,
 # called from the production write path by
-# `zeroship_data_orm::crud::protection_floor`. The trait it calls,
+# `zeroship_data_orm::protection::protection_floor`. The trait it calls,
 # `SchemaIntrospect`, and both vendor impls were `#[cfg(feature =
 # "test-helpers")]`. So:
 #

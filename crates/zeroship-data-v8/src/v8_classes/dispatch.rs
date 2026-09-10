@@ -9,8 +9,8 @@ use zeroship_data_orm::binding::DbBinding;
 use zeroship_data_orm::error::DbError;
 
 use crate::compile;
-use crate::crud::mask_policy::dispatch_set_mask_policy;
-use crate::crud::unmask::{dispatch_bulk_unmask, dispatch_unmask, parse_args, parse_bulk_args};
+use zeroship_data_orm::protection::mask_policy::install_mask_policy;
+use zeroship_data_orm::protection::unmask::{dispatch_bulk_unmask, dispatch_unmask, parse_args, parse_bulk_args};
 use crate::op_error::ToOpError;
 use crate::v8_bridge::{runtime_state, setup_js_promise};
 use zeroship_data_orm::orm::{Operation, Output, PreparedOperation};
@@ -477,7 +477,7 @@ pub(crate) fn reject_op(
 // name them. They are here for the same reason as everything above: the
 // signature returns a `v8::Local<v8::Promise>`, so the function is boundary.
 //
-// Their engine halves stay in `crud::unmask` and `crud::mask_policy`, which is
+// Their engine halves stay in `protection::unmask` and `protection::mask_policy`, which is
 // where the DB-3 fence lives - `sanitize_app_actor` runs inside `parse_args` /
 // `parse_bulk_args`, below this layer, precisely so no dispatch site can
 // forget it.
@@ -501,7 +501,7 @@ pub(crate) fn dispatch_unmask_field<'s>(
     let parsed = parse_args(&args_v);
     let binding = binding.clone();
     // The route is captured HERE, on the adapter side, while the V8 frame is
-    // live, and handed to the engine. `crud::unmask` used to open a backend
+    // live, and handed to the engine. `protection::unmask` used to open a backend
     // itself through `exec::ensure_backend_for_shared_sql`, which read
     // `crate::context` from an ENGINE file.
     //
@@ -603,45 +603,21 @@ pub(crate) fn dispatch_bulk_unmask_field<'s>(
 
     promise
 }
-/// V8-facing dispatch helper for `zeroship.db.setMaskPolicy`. Returns
-/// the unresolved Promise; the dispatcher body runs as a spawned op
-/// and resolves with `{}` on success or rejects with the typed
-/// `OpError`.
-///
-/// Called from `v8_classes::db::Db::set_mask_policy` (the `#[v8_method]`
-/// wrapping this entry point).
+/// Install the startup policy captured from the framework-private handle.
+/// No database connection or file I/O is needed.
 pub(crate) fn dispatch_set_mask_policy_field<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    app_id: &str,
+    binding: &DbBinding,
     policy_v: Value,
 ) -> v8::Local<'s, v8::Promise> {
     let state = crate::v8_bridge::runtime_state(scope);
     let (resolver, request_id, promise) = crate::v8_bridge::setup_js_promise(scope, &state);
-    let app = app_id.to_string();
-
-    // The engine half already existed as a separate `async fn`; what was here
-    // was a hand-rolled copy of `settle`'s two arms. Its error arm and
-    // `settle`'s are the same `reject_op` call.
-    //
-    // The backend is resolved HERE, not by the engine installer. This dispatch
-    // captures no route - a policy install routes no SQL of its own - so the
-    // handle comes from `tx_scope::ensure_backend()`, adapter to adapter, and is
-    // passed down. That call keeps the cold-init arm, and this is the site that
-    // needs it: `installSchema` fires `setMaskPolicy` at boot, typically before
-    // any other op has opened the backend, so a plain read of the context would
-    // return `not_configured` on every fresh isolate.
-    state
-        .borrow_mut()
-        .spawned_ops
-        .push(Box::pin(crate::v8_classes::dispatch::settle(
-            resolver,
-            request_id,
-            async move {
-                let backend = crate::tx_scope::ensure_backend().await?;
-                dispatch_set_mask_policy(&backend, &app, policy_v).await
-            },
-            |()| crate::v8_values::resolve(Value::Object(Default::default()), false),
-        )));
-
+    let result = install_mask_policy(binding, policy_v);
+    state.borrow_mut().spawned_ops.push(Box::pin(settle(
+        resolver,
+        request_id,
+        async move { result },
+        |()| crate::v8_values::resolve(Value::Object(Default::default()), false),
+    )));
     promise
 }

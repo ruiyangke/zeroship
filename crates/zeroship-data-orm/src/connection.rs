@@ -19,59 +19,32 @@ pub fn backend_for_url(url: &str) -> Result<BackendUrl, DbError> {
         return Err(DbError::config_hinted(
             "invalid_database_url",
             "database URL is empty",
-            "expected postgres://, postgresql://, sqlite:, file:, :memory:, or a filesystem path",
+            "expected postgres://, postgresql://, sqlite:, file:, or a filesystem path",
         ));
     }
 
     let lower = trimmed.to_ascii_lowercase();
-    if lower == ":memory:" {
-        return Ok(BackendUrl::Sqlite {
-            path: PathBuf::from(":memory:"),
-        });
-    }
     if lower.starts_with("postgres://") || lower.starts_with("postgresql://") {
         return Ok(BackendUrl::Postgres);
     }
-    if lower.starts_with("sqlite://") {
-        // SQLite URLs are always local-file selectors here, so any URI
-        // authority is folded into the filesystem path (`sqlite://host/db`
-        // becomes `host/db`, not a remote host lookup).
+    if let Some(path) = zeroship_core::db_url::sqlite_file_path(trimmed) {
         return Ok(BackendUrl::Sqlite {
-            path: PathBuf::from(&trimmed["sqlite://".len()..]),
+            path: PathBuf::from(path),
         });
     }
-    if lower.starts_with("sqlite:") {
-        return Ok(BackendUrl::Sqlite {
-            path: PathBuf::from(&trimmed["sqlite:".len()..]),
-        });
-    }
-    if lower.starts_with("file:") {
-        return Ok(BackendUrl::Sqlite {
-            path: PathBuf::from(&trimmed["file:".len()..]),
-        });
-    }
-
-    let has_scheme = trimmed
-        .split_once(':')
-        .map(|(scheme, _)| {
-            // Windows `C:\...` is rejected here as scheme `c`; that's
-            // acceptable because zeroship only targets Linux workers.
-            let mut chars = scheme.chars();
-            matches!(chars.next(), Some(c) if c.is_ascii_alphabetic())
-                && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '.' | '-'))
-        })
-        .unwrap_or(false);
-    if has_scheme {
-        return Err(DbError::config_hinted(
-            "unsupported_database_url_scheme",
-            format!("unsupported database URL scheme in `{trimmed}`"),
-            "expected postgres://, postgresql://, sqlite:, file:, :memory:, or a filesystem path",
-        ));
-    }
-
-    Ok(BackendUrl::Sqlite {
-        path: PathBuf::from(trimmed),
-    })
+    let sqlite_selector = lower.starts_with("sqlite:")
+        || lower.starts_with("file:")
+        || lower == ":memory:"
+        || !trimmed.contains(':');
+    Err(DbError::config_hinted(
+        if sqlite_selector {
+            "sqlite_file_required"
+        } else {
+            "unsupported_database_url_scheme"
+        },
+        "database configuration must select PostgreSQL or a SQLite file",
+        "use postgres://, postgresql://, sqlite:/path/to/database.sqlite, file:/path/to/database.sqlite, or a filesystem path; memory databases and SQLite URI options are unsupported",
+    ))
 }
 
 /// Connection configuration. Debug output never contains the database URL.

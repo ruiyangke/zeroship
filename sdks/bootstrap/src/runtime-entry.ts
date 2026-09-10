@@ -159,33 +159,22 @@ if (hasDescriptor && schema && typeof schema === "object") {
       // critical path. The shared dispatcher awaits it before the first
       // procedure runs.
       globalThis.__zsSchemaReady = (async () => {
-        // **P5.5 PR 5** — flush the pending mask policy (declared via
-        // `defineMaskPolicy()` at app top-level) through the native
-        // `setMaskPolicy` op. Single shot at boot — re-declares after
-        // this point do not propagate to the platform until the next
-        // worker cold start. A failure here rejects `__zsSchemaReady`, so
-        // a creator's typo in `defineMaskPolicy({...})` surfaces on the
-        // first dispatch (loud, not silent).
-        //
-        // **P9 §8** — `setMaskPolicy` moved off `env.db` to the
-        // `__platform` handle. Call it on `plat` (resolved above), not on
-        // `envDb`.
+        // Seal the app declaration before dispatch. Install an empty policy
+        // when none was declared so runtime code cannot add one later.
         const policyMod = await import("@zeroship/db/internal") as {
           _flushPendingMaskPolicy?: () => Record<string, readonly string[]> | null;
         };
         const pending = typeof policyMod._flushPendingMaskPolicy === "function"
           ? policyMod._flushPendingMaskPolicy()
           : null;
-        if (pending) {
-          const setMaskPolicy = (plat as { setMaskPolicy?: unknown } | undefined)?.setMaskPolicy;
-          if (typeof setMaskPolicy === "function") {
-            // Call via `.call(plat, ...)` so the v8_class brand check
-            // sees the right receiver.
-            await (setMaskPolicy as (
-              this: typeof plat,
-              p: Record<string, readonly string[]>,
-            ) => Promise<unknown>).call(plat, pending);
-          }
+        const setMaskPolicy = (plat as { setMaskPolicy?: unknown } | undefined)?.setMaskPolicy;
+        if (typeof setMaskPolicy === "function") {
+          // Call via `.call(plat, ...)` so the v8_class brand check
+          // sees the right receiver.
+          await (setMaskPolicy as (
+            this: typeof plat,
+            p: Record<string, readonly string[]>,
+          ) => Promise<unknown>).call(plat, pending ?? {});
         }
       })();
     }

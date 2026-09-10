@@ -434,7 +434,7 @@ impl Drop for OperationLease {
         let app_id = self.app_id.clone();
         let token = self.token;
         let generation = self.generation;
-        compio::runtime::spawn(async move {
+        crate::orm_context::spawn(async move {
             complete_operation(&app_id, generation, token, true).await;
         })
         .detach();
@@ -855,7 +855,11 @@ fn install(app_id: &str, client: Session) {
 /// Run one statement on the app's pinned transaction session.
 async fn exec_on_session(app_id: &str, sql: &str, params: &[&str]) -> Result<(), DbError> {
     let client = crate::tx_lanes::TxClientSlotGuard::take(app_id)?;
-    client.client().exec(sql, params).await.map(|_| ())
+    let params: Vec<_> = params
+        .iter()
+        .map(|value| zeroship_data_sql::value::Value::from(*value))
+        .collect();
+    client.client().exec(sql, &params).await.map(|_| ())
 }
 
 /// Send terminal SQL and classify what the backend actually did.
@@ -1267,7 +1271,7 @@ fn budgets() -> TxBudgets {
 /// this one.
 fn schedule_timer(app_id: &str, scheduled: super::reducer::deadline::ScheduleTimer) {
     let app_id = app_id.to_string();
-    compio::runtime::spawn(async move {
+    crate::orm_context::spawn(async move {
         let delay = scheduled.at.saturating_duration_since(Instant::now());
         compio::time::sleep(delay).await;
         let _ = deadline_fired(&app_id, scheduled.kind, scheduled.generation).await;

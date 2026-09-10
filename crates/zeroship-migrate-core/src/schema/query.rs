@@ -816,7 +816,7 @@ pub fn build_create_table_with_fks_for_dialect_scoped_statements(
             // `t.encrypted(...)` columns) AND the mask kind is NOT `"none"`,
             // the column with the field's OWN name holds the pre-computed
             // masked representation (e.g. `"***-**-6789"`) that
-            // `crud::mask_pass` derives at INSERT/UPDATE time, and the real
+            // `protection::mask_pass` derives at INSERT/UPDATE time, and the real
             // value has already been emitted above under `__zs_raw__<col>`.
             //
             // The masked column is `TEXT` for every mask kind (full / last4 /

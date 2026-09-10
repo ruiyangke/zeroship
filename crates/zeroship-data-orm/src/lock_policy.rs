@@ -156,7 +156,6 @@ impl<T: LockManager + ?Sized> BoundedLockAcquire for T {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::SqlExecutor;
     use std::cell::Cell;
 
     /// **Security [I43]**: exhaust the bounded-retry loop against a mock whose
@@ -182,31 +181,8 @@ mod tests {
             attempts: Cell<u32>,
         }
 
-        impl SqlExecutor for ContendingMock {
-            type Client = MockClient;
-
-            async fn acquire_dedicated_client(
-                &self,
-                _app_id: &str,
-            ) -> Result<Self::Client, DbError> {
-                unreachable!("not exercised by try_acquire_with_backoff")
-            }
-
-            async fn pool_exec(&self, _sql: &str, _params: &[&str]) -> Result<u64, DbError> {
-                unreachable!("not exercised by try_acquire_with_backoff")
-            }
-
-            async fn client_exec(
-                &self,
-                _client: &Self::Client,
-                _sql: &str,
-                _params: &[&str],
-            ) -> Result<u64, DbError> {
-                unreachable!("not exercised by try_acquire_with_backoff")
-            }
-        }
-
         impl LockManager for ContendingMock {
+            type Client = MockClient;
             async fn acquire_advisory_lock(
                 &self,
                 _client: &Self::Client,

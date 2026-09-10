@@ -11,12 +11,11 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use tempfile::TempDir;
 use zeroship_data_sql::value::Value;
 
 use zeroship_data_orm::error::DbError;
-use zeroship_data_orm::storage::SchemaIntrospect;
-use zeroship_data_orm::storage::{DialectBuilder, LockManager, SqlExecutor};
+use zeroship_data_orm::protection::Catalog;
+use zeroship_data_orm::storage::LockManager;
 
 use self::change_sink::ChangeSink;
 
@@ -45,13 +44,8 @@ impl change_sink::ChangeSink for NullChangeSink {
 // `BackendHandle::as_change_stream_sqlite()` (mirroring the
 // `as_postgres` / `as_sqlite` accessor shape).
 pub mod cdc;
-pub mod dialect;
 pub mod error;
 pub mod lock;
-/// Sidecar storage for an app's mask policy. Moved out of `crud/mask_policy.rs`
-/// on 2026-09-02: a file path, a lock registry and an atomic rename are SQLite
-/// implementation, not engine logic.
-pub mod mask_policy_store;
 /// SQLite typed-row -> JSON decoding, beside the `TypedCell`/`TypedRows` it
 /// reads. Peer of `backend::pg_row_json`; see that module for why the two are
 /// deliberately not shared.
@@ -99,17 +93,8 @@ pub mod vector;
 // there too.
 
 use cdc::CommitPacket;
-use dialect::SqliteDialect;
 use lock::InProcessLockRegistry;
 use session::{SqliteSession, SqliteSessionHandle};
-
-// The `SqliteDialect` ZST carries the canonical hook bodies; the
-// backend's `impl DialectBuilder` delegates to the ZST so the
-// trait-impl source-of-truth stays in one file (`dialect.rs`). No
-// `dialect: SqliteDialect` field on the backend — the ZST has no
-// state, so storing it would be a 0-byte field carrying no
-// information. The delegation pattern below constructs the ZST
-// inline (`SqliteDialect`) per call; rustc inlines the value away.
 
 /// SQLite backend handle. One instance per worker thread (mirrors
 /// `zeroship_data_orm::backend::postgres::PostgresBackend`'s lifecycle).
@@ -136,9 +121,6 @@ use session::{SqliteSession, SqliteSessionHandle};
 ///   connection drops the hooks drops the sender drops the channel.
 #[allow(dead_code)]
 pub struct SqliteBackend {
-    // Held before `session` so drop order closes SQLite (and any
-    // ATTACH-ed per-app files) before TempDir cleanup runs.
-    memory_db_dir: Option<TempDir>,
     session: Rc<SqliteSession>,
     lock_registry: Rc<InProcessLockRegistry>,
     cdc_name_cache_invalidations: Rc<RefCell<HashSet<(String, String)>>>,
@@ -159,6 +141,17 @@ pub struct SqliteBackend {
     key_store: zeroship_data_orm::encryption::KeyStore,
 }
 
+fn validate_database_path(path: &Path) -> Result<(), DbError> {
+    if zeroship_core::db_url::valid_sqlite_file_path(&path.to_string_lossy()) {
+        Ok(())
+    } else {
+        Err(DbError::config(
+            "sqlite_file_required",
+            "SQLite requires a filesystem path; memory databases and URI options are unsupported",
+        ))
+    }
+}
+
 impl std::fmt::Debug for SqliteBackend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Mirrors `PostgresBackend`'s opaque Debug impl — no field
@@ -169,43 +162,6 @@ impl std::fmt::Debug for SqliteBackend {
 }
 
 impl SqliteBackend {
-    /// Construct a backend rooted at `db_dir`.
-    ///
-    /// Opens the control session at `<db_dir>/zs-control.sqlite` and
-    /// spawns the worker->compio publisher task that
-    /// drains the CDC dispatcher's `CommitPacket` channel and
-    /// re-emits each event onto the thread-local broker.
-    ///
-    /// **CDC arming**: the control session installs the
-    /// `preupdate_hook`/`commit_hook`/`rollback_hook` triplet on its
-    /// `rusqlite::Connection`. Writes against ATTACH-ed per-app
-    /// aliases (the `attach_app_file` path) fire the same hooks with
-    /// the alias as `db_name`, so a single dispatcher serves all apps
-    /// the backend hosts - no per-app session needed. The
-    /// per-event `app_id` is derived from `db_name` inside the
-    /// publisher (see `cdc.rs::publisher_loop`).
-    ///
-    /// **Cross-thread wire**: the channel is `flume::unbounded()` per
-    /// plan §11 - lock-free, structurally bounded by COMMIT cadence.
-    /// Switching to a bounded + overflow-to-resync channel is a
-    /// possible future concern if production traffic surfaces the
-    /// need (plan §10 Q-P2-A). Because it is unbounded, a packet can sit in it
-    /// arbitrarily long, which is why the delivery decision is taken in the
-    /// commit hook and rides the packet rather than being sampled on drainage
-    /// (`cdc.rs`, "Delivery-window semantics").
-    /// Accessor for the backend's filesystem root.
-    /// The mask-policy sidecar file (`mask_policies.json`) lives at
-    /// `<db_dir>/mask_policies.json`; the file's path is constructed
-    /// from this accessor by `crate::backend::sqlite::crud::mask_policy::persist_sqlite`
-    /// + `load_sqlite`.
-    ///
-    /// Exposed `pub(crate)` (NOT `pub`) so only the mask-policy module
-    /// reaches into the backend's filesystem layout — production
-    /// consumers route through `BackendHandle::Sqlite`.
-    pub(crate) fn db_dir(&self) -> &std::path::Path {
-        &self.db_dir
-    }
-
     /// Mark one table's cached CDC column-name list stale. The
     /// publisher loop clears the entry before decoding the next event
     /// for the same `(app_id, collection)` pair.
@@ -235,9 +191,7 @@ impl SqliteBackend {
         params: &[zeroship_data_sql::value::Value],
     ) -> Result<Vec<zeroship_data_sql::value::Value>, DbError> {
         let typed = self.session.query_typed(sql, params).await?;
-        Ok(crate::backend::sqlite::row_json::typed_rows_to_values(
-            &typed,
-        ))
+        crate::backend::sqlite::row_json::typed_rows_to_values(&typed)
     }
 
     /// Production constructor used by the runtime URL-scheme
@@ -249,10 +203,8 @@ impl SqliteBackend {
     /// entry points call it lazily before addressing an app table.
     ///
     /// If `path` points at an existing directory we place the control
-    /// session at `<dir>/zs-control.sqlite`. `:memory:` opens the
-    /// control session in SQLite's in-memory mode and keeps a
-    /// `tempfile::TempDir` alive for the lifetime of the backend so
-    /// the per-app ATTACH files stay ephemeral too.
+    /// session at `<dir>/zs-control.sqlite`. SQLite requires a filesystem path;
+    /// no ephemeral database mode or implicit temporary directory is supported.
     ///
     /// `sink` is an `Arc<dyn ChangeSink>` rather than a generic because it is
     /// held on BOTH sides of the CDC channel: the commit hook on the writer
@@ -292,38 +244,17 @@ impl SqliteBackend {
     }
 
     fn open_blocking(path: PathBuf, sink: Arc<dyn ChangeSink>) -> Result<OpenedBackend, DbError> {
-        let (db_dir, session_path, memory_db_dir) = if path == Path::new(":memory:") {
-            let memory_db_dir = tempfile::tempdir().map_err(|e| {
-                DbError::internal(format!(
-                    "SqliteBackend::open: failed to create SQLite temp dir: {e}"
-                ))
-            })?;
-            // A `:memory:` control session becomes a FILE inside the temp dir
-            // that already exists for this case, not a true in-memory database.
-            //
-            // SC-2's split connections force this: `Connection::open(":memory:")`
-            // twice yields two PRIVATE, unrelated databases, so `op_conn` and a
-            // transaction connection would not share a single byte. The
-            // alternatives are
-            // worse - a shared-cache `file:...?mode=memory&cache=shared` URI
-            // cannot run WAL and changes locking to table granularity - and the
-            // file is just as ephemeral: the `TempDir` deletes it on drop.
-            let session_path = memory_db_dir.path().join("zs-control.sqlite");
-            (
-                memory_db_dir.path().to_path_buf(),
-                session_path,
-                Some(memory_db_dir),
-            )
-        } else if path.is_dir() {
+        validate_database_path(&path)?;
+        let (db_dir, session_path) = if path.is_dir() {
             let session_path = path.join("zs-control.sqlite");
-            (path, session_path, None)
+            (path, session_path)
         } else {
-            let session_path = path;
-            let db_dir = session_path
+            let db_dir = path
                 .parent()
-                .map(Path::to_path_buf)
-                .unwrap_or_else(|| PathBuf::from("."));
-            (db_dir, session_path, None)
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."))
+                .to_path_buf();
+            (db_dir, path)
         };
 
         std::fs::create_dir_all(&db_dir).map_err(|e| {
@@ -333,7 +264,7 @@ impl SqliteBackend {
             ))
         })?;
 
-        Self::open_session(db_dir, session_path, memory_db_dir, sink)
+        Self::open_session(db_dir, session_path, sink)
     }
 
     fn open_with_session_path(
@@ -342,14 +273,13 @@ impl SqliteBackend {
         sink: Arc<dyn ChangeSink>,
         key_source: zeroship_data_orm::encryption::LocalKeySource,
     ) -> Result<Self, DbError> {
-        let opened = Self::open_session(db_dir, session_path, None, Arc::clone(&sink))?;
+        let opened = Self::open_session(db_dir, session_path, Arc::clone(&sink))?;
         Ok(Self::finish_open(opened, sink, key_source))
     }
 
     fn open_session(
         db_dir: PathBuf,
         session_path: PathBuf,
-        memory_db_dir: Option<TempDir>,
         sink: Arc<dyn ChangeSink>,
     ) -> Result<OpenedBackend, DbError> {
         // CDC packet channel — worker thread (producer, via commit
@@ -374,7 +304,6 @@ impl SqliteBackend {
         Ok(OpenedBackend {
             session,
             db_dir,
-            memory_db_dir,
             packet_rx,
         })
     }
@@ -392,7 +321,6 @@ impl SqliteBackend {
         let OpenedBackend {
             session,
             db_dir,
-            memory_db_dir,
             packet_rx,
         } = opened;
         let session = Rc::new(session);
@@ -420,7 +348,6 @@ impl SqliteBackend {
         let key_store = zeroship_data_orm::encryption::KeyStore::new(key_source);
 
         Self {
-            memory_db_dir,
             session,
             lock_registry: Rc::new(InProcessLockRegistry::new()),
             cdc_name_cache_invalidations,
@@ -435,7 +362,6 @@ impl SqliteBackend {
 struct OpenedBackend {
     session: SqliteSession,
     db_dir: PathBuf,
-    memory_db_dir: Option<TempDir>,
     packet_rx: flume::Receiver<CommitPacket>,
 }
 
@@ -451,7 +377,7 @@ impl SqliteBackend {
     /// its own autocommit reservation and runs on `op_conn`.
     ///
     /// This is what a caller that just wants to *read* should hold.
-    /// [`SqlExecutor::acquire_dedicated_client`] is the transaction lane and is
+    /// [`DatabaseFixture::fixture_session`] is the transaction lane and is
     /// exclusive - taking it for a read would serialise that read behind any
     /// open creator transaction, which is exactly the coupling SC-2 Decision 1
     /// removes.
@@ -517,54 +443,31 @@ impl SqliteBackend {
     }
 }
 
-impl SqlExecutor for SqliteBackend {
+#[cfg(any(test, feature = "test-helpers"))]
+impl crate::fixtures::DatabaseFixture for SqliteBackend {
     type Client = SqliteSessionHandle;
 
-    async fn acquire_dedicated_client(&self, app_id: &str) -> Result<Self::Client, DbError> {
-        // SC-2 Decision 1: a dedicated client is a reservation on THIS APP's
-        // transaction connection, kept for at most one explicit creator
-        // transaction. Everything else - `pool_exec`, an unbound handle's
-        // `exec` - runs on the shared `op_conn` instead, which is what retires
-        // the divergence formerly recorded at `tx_route.rs:119-124`: an app's
-        // autocommit work no longer executes inside that app's open
-        // transaction.
-        //
-        // Per app, not per session: one shared transaction connection made the
-        // admission key `(runtime_instance_id, session)` and refused app B
-        // while app A held a transaction (defect L22b).
-        //
-        // The lease is RAII. Dropping every clone of the returned handle frees
-        // the lane and rolls back anything the transaction left open, so a
-        // caller that never settles cannot strand the next one.
+    async fn fixture_session(&self, app_id: &str) -> Result<Self::Client, DbError> {
         let lease = self.session.reserve_transaction(app_id).await?;
         Ok(SqliteSessionHandle::with_lease(self.session.clone(), lease))
     }
 
-    async fn pool_exec(&self, sql: &str, params: &[&str]) -> Result<u64, DbError> {
-        // "Pool" is a misnomer on the SQLite arm — there's only one
-        // writer. We route directly through the session actor. The
-        // PG side uses `pool.query_text_params`; the SQLite side
-        // serialises via `session.exec`, which lands on the same
-        // worker thread regardless of caller.
-        self.session.exec(sql, params).await
+    async fn execute_fixture(&self, sql: &str, params: &[Value]) -> Result<u64, DbError> {
+        self.autocommit_client().exec_values(sql, params).await
     }
 
-    async fn client_exec(
+    async fn execute_fixture_on(
         &self,
         client: &Self::Client,
         sql: &str,
-        params: &[&str],
+        params: &[Value],
     ) -> Result<u64, DbError> {
-        // `client` and `self.session` point at the same actor — the
-        // `Client` type is just an Rc handle. We route through the
-        // handle so a future where they diverge (e.g. per-app ATTACH
-        // scoping inside a transaction) can re-target without
-        // touching this method.
-        client.exec(sql, params).await
+        client.exec_values(sql, params).await
     }
 }
 
 impl LockManager for SqliteBackend {
+    type Client = SqliteSessionHandle;
     // The default-impl methods (`acquire`, `try_acquire`, `release`,
     // `try_acquire_with_backoff`) inherit through the trait. The three
     // legacy string-key primitives below route through
@@ -730,327 +633,9 @@ impl SqliteBackend {
     }
 }
 
-impl SchemaIntrospect for SqliteBackend {
-    // Same associated type as the PG impl — the diff engine consumes
-    // a uniform `LiveSchema` shape; the SQLite impl populates the
-    // PG-style `pg_type` strings with SQLite affinity names
-    // (`TEXT`/`INTEGER`/`REAL`/`BLOB`/`NUMERIC`). Classifier
-    // teaching about the new vocabulary follows in a later PR.
-    type LiveSchema = zeroship_data_sql::catalog::LiveSchema;
-
-    /// Walk the SQLite catalog for `app_id`'s attached database and
-    /// produce a [`zeroship_data_sql::catalog::LiveSchema`] in the same shape the PG
-    /// impl emits — populated via four PRAGMA round-trips per table:
-    ///
-    /// 1. `SELECT name FROM "<app_id>".sqlite_master WHERE type='table'`
-    ///    — table list, filtered to user tables (`sqlite_*` system
-    ///    tables and our `__zs_*` bookkeeping tables are excluded).
-    /// 2. `PRAGMA "<app_id>".table_info("<collection>")` — columns:
-    ///    name, type, notnull (0/1), dflt_value, pk.
-    /// 3. `PRAGMA "<app_id>".index_list("<collection>")` — indexes:
-    ///    seq, name, unique (0/1), origin, partial. The PG impl
-    ///    excludes the primary-key index (`indisprimary`); we mirror
-    ///    that by skipping indexes whose `origin = 'pk'`.
-    /// 4. For each non-PK index: `PRAGMA "<app_id>".index_info(...)` —
-    ///    the index's column list in seqno order.
-    /// 5. `PRAGMA "<app_id>".foreign_key_list("<collection>")` —
-    ///    FKs: id, seq, table (target), from, to, on_update,
-    ///    on_delete, match.
-    ///
-    /// Per plan §3.4 each PRAGMA flows through the session actor's
-    /// `Query` command (one round-trip per call); the totals stay
-    /// bounded at `1 + 4N` for N tables, which is fine at dev scale
-    /// where this code path runs. The PG impl achieves the same with
-    /// 3 SQL statements; folding the SQLite walk into a single SQL
-    /// statement isn't possible (PRAGMA is non-composable), but the
-    /// per-table count stays well below the orchestrator's budget for
-    /// a registration round-trip.
-    ///
-    /// **System-table filter** (plan §3.4): drop any name beginning
-    /// with `sqlite_` (engine-internal) or `__zs_` (our bookkeeping —
-    /// migrations / audit / replication). The diff classifier consumes
-    /// only user-declared tables; surfacing system tables would
-    /// trigger spurious "drop table" classifications.
-    async fn introspect_schema(&self, app_id: &str) -> Result<Self::LiveSchema, DbError> {
-        let mut out = zeroship_data_sql::catalog::LiveSchema::default();
-
-        // 1. Table list. The `app_id` is interpolated as a quoted
-        //    identifier — the dialect's `quote_ident` doubles embedded
-        //    `"`s; PRAGMA / sqlite_master both accept the dotted form
-        //    `"app_id".sqlite_master`.
-        let q_app = self.quote_ident(app_id);
-        let tables_sql =
-            format!("SELECT name FROM {q_app}.sqlite_master WHERE type = 'table' ORDER BY name");
-        let table_rows = self.session.query(&tables_sql, &[]).await?;
-        let mut user_tables: Vec<String> = Vec::with_capacity(table_rows.len());
-        for row in &table_rows {
-            let name = row.first().and_then(|c| c.clone()).unwrap_or_default();
-            // Filter out system + bookkeeping tables (plan §3.4).
-            if name.starts_with("sqlite_") || name.starts_with("__zs_") {
-                continue;
-            }
-            user_tables.push(name);
-        }
-
-        for collection in &user_tables {
-            let q_coll = self.quote_ident(collection);
-
-            // 2. Columns via `PRAGMA table_info`.
-            //
-            //    PRAGMA columns: 0=cid, 1=name, 2=type, 3=notnull,
-            //    4=dflt_value, 5=pk. The cell shape is `Option<String>`
-            //    uniformly (the session materialises every value as a
-            //    stringified `Option<String>`), so we read positionally
-            //    and parse the `notnull` "0"/"1" into a bool.
-            let table_info_sql = format!("PRAGMA {q_app}.table_info({q_coll})");
-            let col_rows = self.session.query(&table_info_sql, &[]).await?;
-
-            // Pull the original `CREATE TABLE` text from
-            // `sqlite_master.sql` so we can recover per-column
-            // encryption metadata from the `/* zero-migrate:enc:<mode>:<keyId>:
-            // <wraps> */` sentinel the DDL emitter writes for every
-            // `t.encrypted(...)`-declared column (see
-            // `zeroship_data_sql::compile::field_to_column`). PRAGMA `table_info`
-            // surfaces the declared type but strips comments; the
-            // sentinel only survives in `sqlite_master.sql`.
-            //
-            // Acknowledge: regex-on-DDL is fragile - a future SDK that
-            // emits column DDL with multiple comments or non-trivial
-            // line breaks could trip the per-column attachment. The
-            // sidecar `__zs_schema_meta` table is the upgrade path
-            // (Q-P5 deferred); same regex-on-DDL pattern as the
-            // vector-dims introspection.
-            let master_sql_query = format!(
-                "SELECT sql FROM {q_app}.sqlite_master \
-                 WHERE type = 'table' AND name = ?"
-            );
-            let master_rows = self
-                .session
-                .query(&master_sql_query, &[collection.as_str()])
-                .await?;
-            let create_table_text: String = master_rows
-                .first()
-                .and_then(|r| r.first())
-                .and_then(|c| c.clone())
-                .unwrap_or_default();
-            let encryption_by_col = parse_encryption_sentinels(&create_table_text);
-            // Mask sentinels (`/* zero-migrate:mask:kind=...,
-            // classification=... */`) attached to `<col>_masked` sibling
-            // column DDL. Same regex-on-DDL pattern used for
-            // encryption sentinels.
-            let mask_by_parent = parse_mask_sentinels(&create_table_text);
-
-            let mut col_map = std::collections::HashMap::new();
-            for row in &col_rows {
-                let name = row.get(1).and_then(|c| c.clone()).unwrap_or_default();
-                let pg_type = row.get(2).and_then(|c| c.clone()).unwrap_or_default();
-                let not_null = row
-                    .get(3)
-                    .and_then(|c| c.as_deref())
-                    .map(|s| s != "0")
-                    .unwrap_or(false);
-                let default_expr = row.get(4).and_then(|c| c.clone());
-                let encryption = encryption_by_col.get(&name).cloned();
-                let mask = mask_by_parent.get(&name).cloned();
-                col_map.insert(
-                    name,
-                    zeroship_data_sql::catalog::ColumnInfo {
-                        pg_type,
-                        not_null,
-                        default_expr,
-                        // SQLite expression defaults are stored as raw
-                        // text without a volatility tag (the engine has
-                        // no `pg_proc.provolatile` analogue). Leaving
-                        // this `None` matches what the PG side sets for
-                        // literal defaults; the diff classifier reads
-                        // `default_volatility` only when the default
-                        // looks like a function call. Future changes can
-                        // pattern-match on common volatile defaults
-                        // (`CURRENT_TIMESTAMP`, `(unixepoch())`, etc.).
-                        default_volatility: None,
-                        // New fields default; `vector_dims` /
-                        // `is_geopoint` are populated
-                        // from `sqlite_master.sql` introspection regexes.
-                        encryption,
-                        mask,
-                        ..Default::default()
-                    },
-                );
-            }
-            if !col_map.is_empty() {
-                out.tables.insert(collection.clone(), col_map);
-            }
-
-            // 3. Indexes via `PRAGMA index_list` + `PRAGMA index_info`.
-            //
-            //    `index_list` columns: 0=seq, 1=name, 2=unique,
-            //    3=origin, 4=partial. We exclude `origin='pk'` to match
-            //    the PG impl's `NOT i.indisprimary` filter.
-            let index_list_sql = format!("PRAGMA {q_app}.index_list({q_coll})");
-            let idx_rows = self.session.query(&index_list_sql, &[]).await?;
-            let mut idx_map = std::collections::HashMap::new();
-            for row in &idx_rows {
-                let idx_name = row.get(1).and_then(|c| c.clone()).unwrap_or_default();
-                let is_unique = row
-                    .get(2)
-                    .and_then(|c| c.as_deref())
-                    .map(|s| s != "0")
-                    .unwrap_or(false);
-                let origin = row.get(3).and_then(|c| c.clone()).unwrap_or_default();
-                if origin == "pk" {
-                    // PG impl skips primary-key indexes; we mirror.
-                    // The auto-generated `sqlite_autoindex_*` names
-                    // also appear here, and they all carry origin='pk'
-                    // or 'u' (unique constraint). We surface 'u'-origin
-                    // indexes because they correspond to declared
-                    // UNIQUE columns the diff engine cares about.
-                    continue;
-                }
-
-                // 4. Columns for this index via `PRAGMA index_info`.
-                //    Returns: 0=seqno, 1=cid, 2=name.
-                let q_idx = self.quote_ident(&idx_name);
-                let index_info_sql = format!("PRAGMA {q_app}.index_info({q_idx})");
-                let info_rows = self.session.query(&index_info_sql, &[]).await?;
-                let mut columns = Vec::with_capacity(info_rows.len());
-                for info_row in &info_rows {
-                    let col_name = info_row.get(2).and_then(|c| c.clone()).unwrap_or_default();
-                    columns.push(col_name);
-                }
-
-                idx_map.insert(
-                    idx_name,
-                    zeroship_data_sql::catalog::IndexInfo {
-                        is_unique,
-                        columns,
-                        // SQLite indexes are always considered valid
-                        // once `CREATE INDEX` returns — there is no
-                        // analogue to PG's `indisvalid` (which can be
-                        // false after a failed `CREATE INDEX
-                        // CONCURRENTLY`). Mark every observed index
-                        // valid; nothing downstream needs a tri-state.
-                        is_valid: true,
-                    },
-                );
-            }
-            if !idx_map.is_empty() {
-                out.indexes.insert(collection.clone(), idx_map);
-            }
-
-            // 5. Foreign keys via `PRAGMA foreign_key_list`.
-            //
-            //    Columns: 0=id, 1=seq, 2=table (target),
-            //    3=from (local column), 4=to (target column),
-            //    5=on_update, 6=on_delete, 7=match.
-            //
-            //    We synthesise a `constraint_name` from the FK id +
-            //    local column (SQLite doesn't expose user-given FK
-            //    names through PRAGMA — only the implicit auto-name).
-            //    The PG impl uses `pg_constraint.conname` directly.
-            let fk_sql = format!("PRAGMA {q_app}.foreign_key_list({q_coll})");
-            let fk_rows = self.session.query(&fk_sql, &[]).await?;
-            let mut fk_map = std::collections::HashMap::new();
-            for row in &fk_rows {
-                let fk_id = row.first().and_then(|c| c.clone()).unwrap_or_default();
-                let target_table = row.get(2).and_then(|c| c.clone()).unwrap_or_default();
-                let from_col = row.get(3).and_then(|c| c.clone()).unwrap_or_default();
-                let target_column = row.get(4).and_then(|c| c.clone()).unwrap_or_default();
-                let on_update = row.get(5).and_then(|c| c.clone()).unwrap_or_default();
-                let on_delete = row.get(6).and_then(|c| c.clone()).unwrap_or_default();
-                let constraint_name = format!("fk_{fk_id}_{from_col}");
-                fk_map.insert(
-                    from_col.clone(),
-                    zeroship_data_sql::catalog::ForeignKeyInfo {
-                        constraint_name,
-                        column: from_col,
-                        target_table,
-                        target_column,
-                        // SQLite's PRAGMA already emits the upper-case
-                        // SQL form ("CASCADE", "SET NULL", "NO
-                        // ACTION", …); no decode step needed (contrast
-                        // PG's single-char code).
-                        on_delete,
-                        on_update,
-                        // SQLite FKs do not surface a deferrable bit
-                        // through PRAGMA. The engine supports
-                        // `DEFERRABLE INITIALLY DEFERRED` syntax but
-                        // doesn't echo it back via foreign_key_list;
-                        // default to `false` to match the PG impl's
-                        // bool shape.
-                        deferrable: false,
-                    },
-                );
-            }
-            if !fk_map.is_empty() {
-                out.foreign_keys.insert(collection.clone(), fk_map);
-            }
-        }
-
-        Ok(out)
-    }
-
-    /// Cheap row-count probe for the NOT-NULL-on-empty-table
-    /// classifier branch.
-    ///
-    /// SQLite has no `pg_class.reltuples` analogue — every
-    /// `SELECT COUNT(*)` is a full scan. The only consumer
-    /// (`diff::classify_add_column`) needs the 0 / non-0
-    /// distinction, so the scan cost is acceptable at dev scale
-    /// (the orchestrator already holds the advisory lock — see plan
-    /// §3.4). Future PRs can plug a `MAX(rowid)`-based fast path
-    /// here if the dev-scale cost becomes an issue.
-    async fn estimate_row_count(&self, app_id: &str, collection: &str) -> Result<i64, DbError> {
-        let q_app = self.quote_ident(app_id);
-        let q_coll = self.quote_ident(collection);
-        let sql = format!("SELECT COUNT(*) FROM {q_app}.{q_coll}");
-        let rows = match self.session.query(&sql, &[]).await {
-            Ok(rows) => rows,
-            Err(DbError::Transient { message }) if message.contains("no such table") => {
-                return Ok(0);
-            }
-            Err(e) => return Err(e),
-        };
-        let n = rows
-            .first()
-            .and_then(|r| r.first())
-            .and_then(|c| c.as_deref())
-            .and_then(|s| s.parse::<i64>().ok())
-            .unwrap_or(0);
-        Ok(n)
-    }
-}
-
-impl DialectBuilder for SqliteBackend {
-    // The backend forwards every dialect call to the `SqliteDialect`
-    // ZST so consumers can hold an `&SqliteBackend` and reach the
-    // dialect without naming the inner type. The ZST is instantiated
-    // per call — rustc inlines the value away because every method on
-    // `SqliteDialect` is `&self` and side-effect-free.
-
-    fn sql_dialect(&self) -> zeroship_data_sql::compile::SqlDialect {
-        SqliteDialect.sql_dialect()
-    }
-
-    fn quote_ident(&self, name: &str) -> String {
-        SqliteDialect.quote_ident(name)
-    }
-
-    fn map_zs_type(&self, zs_type: &str, opts: &Value) -> String {
-        SqliteDialect.map_zs_type(zs_type, opts)
-    }
-
-    fn now_fn(&self) -> &'static str {
-        SqliteDialect.now_fn()
-    }
-
-    fn last_insert_rowid_sql(&self) -> Option<&'static str> {
-        SqliteDialect.last_insert_rowid_sql()
-    }
-}
-
 // `Backend` composition marker. Every sub-trait
-// (`SqlExecutor`, `LockManager`,
-// `SchemaIntrospect`) now carries a real (non-stub)
+// (`DatabaseFixture`, `LockManager`,
+// `Catalog`) now carries a real (non-stub)
 // impl above, and the super-trait relaxation that dropped the
 // `Client = compio_postgres::Client` pin from `Backend` cleared the
 // last obstacle. The marker is the one-liner the design names -
@@ -1115,311 +700,6 @@ impl DialectBuilder for SqliteBackend {
 // BEFORE the row mutation, AFTER triggers fire after, both run inside
 // the same transaction. The broker sees the base-row event with the
 // vec0 index already updated at COMMIT time.
-
-impl zeroship_data_orm::storage::VectorIndex for SqliteBackend {
-    /// vec0-powered top-k vector search, on the AUTOCOMMIT lane.
-    ///
-    /// The trait method carries nothing that says which connection this
-    /// dispatch belongs to, so it can only ever mean `op_conn`. Callers that
-    /// know - the engine's routed entry point does, from `route.in_tx()` - go
-    /// to [`SqliteBackend::vector_search_on`] instead and hand it the session.
-    async fn vector_search(
-        &self,
-        binding: &zeroship_data_orm::binding::DbBinding,
-        collection: &str,
-        column: &str,
-        query: &[f32],
-        k: usize,
-        metric: zeroship_data_sql::descriptors::VectorMetric,
-        filter: &zeroship_data_sql::value::Value,
-        schema: &zeroship_data_sql::value::Value,
-    ) -> Result<Vec<zeroship_data_sql::value::Value>, DbError> {
-        self.vector_search_on(
-            &self.autocommit_client(),
-            binding,
-            collection,
-            column,
-            query,
-            k,
-            metric,
-            filter,
-            schema,
-        )
-        .await
-    }
-}
-
-impl SqliteBackend {
-    /// vec0-powered top-k vector search **on `session`**. Composes a SQL of the
-    /// form
-    ///
-    /// ```sql
-    /// SELECT t.*, v.distance AS _distance
-    ///   FROM "<app>"."<coll>" t
-    ///   JOIN "<app>"."<coll>__vec_<col>" v ON t.rowid = v.rowid
-    ///  WHERE v."<col>" MATCH x'…' AND k = ?
-    ///    AND <filter>
-    ///  ORDER BY v.distance;
-    /// ```
-    ///
-    /// The query vector is bound as a hex BLOB literal (`x'…'`) so we
-    /// don't need a binary-bind channel through the session actor's
-    /// `&[&str]` parameter surface. The byte layout is native LE
-    /// `f32` — same as the `vec_f32` constructor's expected form.
-    /// `k` is bound positionally; the trailing filter params (if
-    /// any) follow.
-    ///
-    /// **`session` is a parameter because SC-2 split the lanes.** A handle
-    /// carrying a transaction lease routes onto `tx_conn`; one without mints an
-    /// autocommit reservation on `op_conn`. Those are two connections, so a
-    /// scan issued inside `db.transaction(fn)` that took the autocommit handle
-    /// could not see the transaction's own uncommitted rows. Bound by
-    /// `plugin-db/tests/search_tx_lane.rs`.
-    ///
-    /// # Errors
-    ///
-    /// `vector_unsupported` for an inner-product metric, the query builder's
-    /// own refusals, and any error the statement raises.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn vector_search_on(
-        &self,
-        session: &dyn crate::driver::DriverSession,
-        binding: &zeroship_data_orm::binding::DbBinding,
-        collection: &str,
-        column: &str,
-        query: &[f32],
-        k: usize,
-        metric: zeroship_data_sql::descriptors::VectorMetric,
-        filter: &zeroship_data_sql::value::Value,
-        schema: &zeroship_data_sql::value::Value,
-    ) -> Result<Vec<zeroship_data_sql::value::Value>, DbError> {
-        let app_id = binding.app_id();
-        // Reject inner-product before issuing any SQL — a vec0 vtable
-        // cannot be declared with `distance_metric=ip`, so no shadow
-        // relation this search could join to would ever answer an IP
-        // query. Refuse with the typed code rather than emitting SQL
-        // that fails on a missing operator.
-        vector::reject_inner_product(metric)?;
-
-        // Resolve the declared shape before lowering the filter: timestamp
-        // bind conversion is schema-driven, just like boolean lowering.
-        let schema_hint = schema;
-
-        // Build the filter WHERE clause via the shared lowering. The
-        // builder emits `$N` placeholders + a parallel params Vec.
-        // We use the raw `build_where` (not `build_find`) so we
-        // don't have to slice a SELECT prefix off — `build_where`
-        // returns the WHERE expression text directly (or an empty
-        // string if `filter` is non-object / `Null`).
-        let mut params: Vec<zeroship_data_sql::value::Value> = Vec::new();
-        let where_expr = zeroship_data_sql::compile::build_where_with_dialect(
-            filter,
-            &mut params,
-            schema_hint,
-            zeroship_data_sql::compile::SqlDialect::Sqlite,
-        )
-        .map_err(DbError::from)?;
-
-        // Inline the query vector as a hex BLOB literal. SQLite's
-        // x'…' syntax is the canonical form for binary literals and
-        // sidesteps the actor's text-only param channel.
-        let query_bytes = zeroship_data_sql::sqlite_values::vec_to_le_bytes(query);
-        let mut query_hex = String::with_capacity(query_bytes.len() * 2 + 4);
-        query_hex.push_str("x'");
-        for byte in &query_bytes {
-            query_hex.push_str(&format!("{byte:02x}"));
-        }
-        query_hex.push('\'');
-
-        // Compose the SQL. The MATCH operand uses the inline blob; k
-        // is bound positionally as $1 (the first param after the
-        // WHERE clause's existing params, which we'll re-number on a
-        // fresh `?` placeholder — SQLite accepts `?` anonymous binds
-        // alongside `$N` named ones; the params are appended in order
-        // and bound positionally by rusqlite).
-        //
-        // **Param order**: the `where_sql` carries `$1..$M` for the
-        // filter; we append the `k` literal directly into the SQL
-        // (it's a small integer, safe to format) so the param vec
-        // doesn't need re-numbering.
-        // The base-table projection is the descriptor's field list; a
-        // collection this deploy does not declare is refused rather than
-        // searched with `t.*`.
-        let sql = vector::build_vector_search_sql(
-            app_id,
-            collection,
-            column,
-            &query_hex,
-            k,
-            &where_expr,
-            schema_hint,
-        )?;
-        let param_refs = &params;
-        session.query(&sql, param_refs).await
-    }
-}
-
-/// SCHEMA, not tenant: this qualifies the table the query reads.
-///
-/// On SQLite the two are the same string today because the ATTACH alias IS
-/// the app id - see `attach_app_file`. The parameter states which of the two
-/// meanings the query builder is being handed.
-fn build_spatial_near_base_query(
-    schema_name: &zeroship_data_sql::SchemaName,
-    collection: &str,
-    filter: &zeroship_data_sql::value::Value,
-    schema_hint: &zeroship_data_sql::value::Value,
-) -> Result<zeroship_data_sql::compile::BuiltQuery, DbError> {
-    zeroship_data_sql::compile::build_find_with_schema_and_unmask_and_soft_delete_with_dialect(
-        schema_name,
-        collection,
-        filter,
-        /* limit  */ None,
-        /* offset */ None,
-        /* order_by */ None,
-        /* select   */ None,
-        schema_hint,
-        /* unmask_columns */ &[],
-        /* filter_soft_deleted */ false,
-        zeroship_data_sql::compile::SqlDialect::Sqlite,
-    )
-    .map_err(DbError::from)
-}
-
-// ---------------------------------------------------------------------------
-// `SpatialIndex` impl (pure-Rust haversine + flat scan)
-// ---------------------------------------------------------------------------
-//
-// Pure-Rust over an R-tree (Q-P4-C, plan §4.3): same rationale as the
-// vector path's pure-Rust-over-`sqlite-vec` decision — bundling the
-// R-tree extension would require either forking the SQLite
-// amalgamation per CI platform or runtime-loading a `.so`, both of
-// which defeat the "no system libsqlite3" invariant. The haversine
-// flat scan is acceptable at dev scale; production spatial workloads
-// run on PostGIS via the PG arm.
-//
-// One method (the flat scan needs no index at all, so there was never
-// anything for an `ensure_spatial_index` to do on this arm):
-//   * `spatial_near` — SELECT all rows matching `filter` via the
-//     session actor's `query_typed`, decode each row's `column` blob
-//     via `spatial::blob_to_point`, compute `haversine_m(point, row_point)`,
-//     filter rows with `distance <= radius_m`, sort ASC, take top-
-//     `limit`, and re-emit as JSON with a synthetic `_distance_m: f64`
-//     field.
-
-impl zeroship_data_orm::storage::SpatialIndex for SqliteBackend {
-    /// Haversine flat scan, on the AUTOCOMMIT lane. Same split as
-    /// [`zeroship_data_orm::storage::VectorIndex::vector_search`]: callers
-    /// that know their lane call [`SqliteBackend::spatial_near_on`].
-    async fn spatial_near(
-        &self,
-        binding: &zeroship_data_orm::binding::DbBinding,
-        collection: &str,
-        column: &str,
-        point: zeroship_data_sql::descriptors::GeoPoint,
-        radius_m: f64,
-        filter: &zeroship_data_sql::value::Value,
-        limit: Option<usize>,
-        schema: &zeroship_data_sql::value::Value,
-    ) -> Result<Vec<zeroship_data_sql::value::Value>, DbError> {
-        self.spatial_near_on(
-            &self.autocommit_client(),
-            binding,
-            collection,
-            column,
-            point,
-            radius_m,
-            filter,
-            limit,
-            schema,
-        )
-        .await
-    }
-}
-
-impl SqliteBackend {
-    /// Haversine flat scan **on `session`**, the spatial twin of
-    /// [`Self::vector_search_on`]; see there for why the session is a
-    /// parameter.
-    ///
-    /// # Errors
-    ///
-    /// `invalid_geo_arg` when the named column is absent from the result row or
-    /// is not a BLOB, the query builder's own refusals, and any error the
-    /// statement raises.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn spatial_near_on(
-        &self,
-        session: &dyn crate::driver::DriverSession,
-        binding: &zeroship_data_orm::binding::DbBinding,
-        collection: &str,
-        column: &str,
-        point: zeroship_data_sql::descriptors::GeoPoint,
-        radius_m: f64,
-        filter: &zeroship_data_sql::value::Value,
-        limit: Option<usize>,
-        schema: &zeroship_data_sql::value::Value,
-    ) -> Result<Vec<zeroship_data_sql::value::Value>, DbError> {
-        // Build the WHERE clause via the same machinery `dispatch_find`
-        // uses (the SQLite-on-PG-SQL path; `$N` placeholders bind
-        // positionally on rusqlite). No ORDER BY at the SQL layer —
-        // we sort in Rust by computed distance.
-        let schema_hint = schema;
-        let bq = build_spatial_near_base_query(binding.schema(), collection, filter, schema_hint)?;
-        let param_refs = &bq.params;
-        let rows = session.query(&bq.sql, param_refs).await?;
-        let mut scored = Vec::new();
-        for row in rows {
-            let blob = match row.get(column) {
-                Some(Value::Bytes(bytes)) => bytes,
-                Some(Value::Null) => continue,
-                _ => {
-                    return Err(DbError::validation(
-                        "invalid_geo_arg",
-                        format!("db: geoPoint column '{column}' is absent or not binary"),
-                    ));
-                }
-            };
-            let row_point = spatial::blob_to_point(blob)?;
-            let distance = spatial::haversine_m(point, row_point);
-            if distance <= radius_m {
-                scored.push((distance, row));
-            }
-        }
-        scored.sort_by(|a, b| a.0.total_cmp(&b.0));
-        if let Some(limit) = limit {
-            scored.truncate(limit);
-        }
-        let mut out = Vec::with_capacity(scored.len());
-        for (distance, mut row) in scored {
-            row.as_object_mut()
-                .ok_or_else(|| DbError::internal("spatial search returned a non-record"))?
-                .insert(
-                    "_distance_m".into(),
-                    zeroship_data_sql::value::Number::from_f64(distance)
-                        .map_or(Value::Null, Value::Number),
-                );
-            out.push(row);
-        }
-        Ok(out)
-    }
-}
-
-// ===========================================================================
-// Key-store accessor on SqliteBackend
-// ===========================================================================
-//
-// Symmetric to the PG-side impl in `backend/postgres.rs`. Crypto math
-// is shared with PG via `zeroship_data_orm::encryption::aead`, and key sourcing no
-// longer diverges at all: both backends take a `LocalKeySource`, so a
-// root comes either from the isolate's supplied keys or from
-// `ZEROSHIP_COLUMN_KEY_<KEYID>`. PG used to try a SECURITY DEFINER
-// `get_column_key` getter first; that arm was deleted on 2026-08-27 and
-// PG now resolves through this same path. Mirrors the session-minter
-// pattern where the secret comes from `ZEROSHIP_SESSION_SECRET`.
-//
-// The `sqlite` feature gate on this file already restricts the build to
-// SQLite-enabled targets.
 
 impl SqliteBackend {
     /// Borrow this isolate's column-encryption key store.
@@ -2191,34 +1471,32 @@ mod tests {
     //! the bound itself is the assertion.
 
     use super::*;
-    use zeroship_data_orm::storage::{DialectBuilder, LockManager, SqlExecutor};
+    use zeroship_data_orm::storage::LockManager;
     // A plain `use` is private, so the module-level import does not arrive via
     // `use super::*`. UNGATED since 2026-09-04 with the trait itself.
-    use zeroship_data_orm::storage::SchemaIntrospect;
+    use zeroship_data_orm::protection::Catalog;
 
-    #[test]
-    fn memory_backend_tempdir_is_removed_on_drop() {
-        let runtime = compio::runtime::Runtime::new().expect("compio runtime");
-        let temp_dir_path = runtime.block_on(async {
-            let backend = SqliteBackend::open(
-                ":memory:",
-                std::sync::Arc::new(crate::backend::sqlite::NullChangeSink),
+    #[compio::test]
+    async fn memory_and_empty_database_paths_are_rejected() {
+        for path in ["", ":memory:", "file:memory?mode=memory", "db?mode=memory"] {
+            let error = SqliteBackend::open(
+                path,
+                std::sync::Arc::new(NullChangeSink),
                 zeroship_data_orm::encryption::LocalKeySource::env_var(),
             )
             .await
-            .expect("open in-memory backend");
-            let temp_dir_path = backend.db_dir().to_path_buf();
+            .unwrap_err();
             assert!(
-                temp_dir_path.exists(),
-                "temp dir should exist while backend lives"
+                matches!(
+                    error,
+                    DbError::Configuration {
+                        code: "sqlite_file_required",
+                        ..
+                    }
+                ),
+                "{error:?}",
             );
-            drop(backend);
-            temp_dir_path
-        });
-        assert!(
-            !temp_dir_path.exists(),
-            "TempDir-backed SQLite scratch dir should be cleaned on drop"
-        );
+        }
     }
 
     #[test]
@@ -2230,7 +1508,7 @@ mod tests {
             },
             "location": { "type": "geoPoint" }
         });
-        let bq = build_spatial_near_base_query(
+        let bq = search::build_spatial_near_base_query(
             &zeroship_data_sql::SchemaName::new("app1").expect("fixture schema name"),
             "places",
             &zeroship_data_sql::value!({}),
@@ -2270,7 +1548,7 @@ mod tests {
     fn assert_sqlite_backend_impls_backend() {}
 
     fn assert_sqlite_backend_impls_sql_executor() {
-        fn assert_impl<T: SqlExecutor>() {}
+        fn assert_impl<T: DatabaseFixture>() {}
         assert_impl::<SqliteBackend>();
     }
 
@@ -2281,18 +1559,12 @@ mod tests {
 
     fn assert_sqlite_backend_impls_namespace_manager() {}
 
-    // Follows `SchemaIntrospect`'s own gate in data-core, which is now NONE:
+    // Follows `Catalog`'s own gate in data-core, which is now NONE:
     // the trait ships, because the protection floor on the write path reads
     // this catalog. The assertion is ungated with it - a witness that only
     // compiles under `test-helpers` says nothing about the build that ships.
     fn assert_sqlite_backend_impls_schema_introspect() {
-        fn assert_impl<T: SchemaIntrospect<LiveSchema = zeroship_data_sql::catalog::LiveSchema>>() {
-        }
-        assert_impl::<SqliteBackend>();
-    }
-
-    fn assert_sqlite_backend_impls_dialect_builder() {
-        fn assert_impl<T: DialectBuilder>() {}
+        fn assert_impl<T: Catalog>() {}
         assert_impl::<SqliteBackend>();
     }
 
@@ -2301,7 +1573,7 @@ mod tests {
     /// regresses at compile time if the impl block is detached or
     /// the method shape drifts from the trait surface.
     fn assert_sqlite_backend_impls_vector_index() {
-        fn assert_impl<T: zeroship_data_orm::storage::VectorIndex>() {}
+        fn assert_impl<T: crate::search::Search>() {}
         assert_impl::<SqliteBackend>();
     }
 
@@ -2309,7 +1581,7 @@ mod tests {
     /// wire so the haversine flat-scan path's trait composition
     /// regresses at compile time if the impl block is detached.
     fn assert_sqlite_backend_impls_spatial_index() {
-        fn assert_impl<T: zeroship_data_orm::storage::SpatialIndex>() {}
+        fn assert_impl<T: crate::search::Search>() {}
         assert_impl::<SqliteBackend>();
     }
 
@@ -2331,12 +1603,12 @@ mod tests {
         assert_static::<SqliteBackend>();
     }
 
-    /// Pin the `SqlExecutor::Client` associated type to the
+    /// Pin the `DatabaseFixture::Client` associated type to the
     /// session-handle shape. A regression that swaps the type (e.g.
     /// accidentally re-pointing it to `rusqlite::Connection` rather
     /// than the actor-handle wrapper) trips here.
     fn assert_sqlite_client_pinned_to_session_handle() {
-        fn assert_impl<T: SqlExecutor<Client = SqliteSessionHandle>>() {}
+        fn assert_impl<T: DatabaseFixture<Client = SqliteSessionHandle>>() {}
         assert_impl::<SqliteBackend>();
     }
 
@@ -2928,7 +2200,6 @@ mod tests {
         let _ = assert_sqlite_backend_impls_namespace_manager as fn();
         #[cfg(feature = "test-helpers")]
         let _ = assert_sqlite_backend_impls_schema_introspect as fn();
-        let _ = assert_sqlite_backend_impls_dialect_builder as fn();
         let _ = assert_sqlite_backend_impls_vector_index as fn();
         let _ = assert_sqlite_backend_impls_spatial_index as fn();
         let _ = assert_sqlite_change_stream_impls_change_stream as fn();
@@ -2939,4 +2210,16 @@ mod tests {
 
 mod params;
 
-mod driver;
+pub mod driver;
+mod executor;
+mod protection;
+mod search;
+
+impl crate::backend::Backend for SqliteBackend {
+    fn publishes_committed_changes(&self) -> bool {
+        true
+    }
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+use zeroship_data_orm::fixtures::DatabaseFixture;

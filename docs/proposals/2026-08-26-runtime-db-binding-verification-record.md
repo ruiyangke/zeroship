@@ -141,7 +141,7 @@ That has a direct consequence for the citations in this set. SC-1's invariant 14
 cites the L8 regression test as standing coverage of the poisoned-commit case.
 The test is real and it passes - it is
 `commit_that_postgres_rolled_back_must_not_report_success_l8`
-(`crates/zeroship-data-v8/tests/native_transaction.rs:1249`) - but
+(`crates/zeroship-data-v8/tests/native_transaction.rs`) - but
 `native_transaction` is one of the five, so **a default run never builds it**.
 **Any arm this design cites must name the exact invocation that runs it, features
 included.**
@@ -178,7 +178,7 @@ eleven days** (L27, fixed in `a0074e154`; the full attribution is in
 ### The skip that counts as a pass
 
 Ten tests guard on `pg_has_logical_wal(&pool)` and, when false, call `skip(...)`
-and `return` (`crates/zeroship-data-v8/tests/integration.rs:2045` and nine
+and `return` (`crates/zeroship-data-v8/tests/integration.rs` and nine
 siblings). A server with `wal_level=replica` produces a run whose totals are
 **identical** to one where all ten passed. Measured 2026-08-27: the canonical
 test port `127.0.0.1:5440` was held by an unrelated container running
@@ -334,7 +334,7 @@ Three instances, all found 2026-08-28, all in code that had been reviewed:
 
 | the claim | the fixture | what it could not reach |
 | --- | --- | --- |
-| `updateMany` refuses over `MAX_QUERY_LIMIT` | updates `{ ssn: ... }` on a randomised-**encrypted** schema (`crates/zeroship-data-v8/tests/sqlite_integration.rs:4191`) | the cap sits inside `if per_row_encrypted_update` (`crud/mod.rs:1233`). `ssn` being encrypted is exactly what routes onto the **guarded** branch. The unguarded branch has no cap and renders an unbounded whole-table `UPDATE` |
+| `updateMany` refuses over `MAX_QUERY_LIMIT` | updates `{ ssn: ... }` on a randomised-**encrypted** schema (`crates/zeroship-data-v8/tests/sqlite_integration.rs`) | the cap sits inside `if per_row_encrypted_update` (`crud/mod.rs:1233`). `ssn` being encrypted is exactly what routes onto the **guarded** branch. The unguarded branch has no cap and renders an unbounded whole-table `UPDATE` |
 | CDC events carry the masked value for masked columns (`broker.rs`, `cdc_event_carries_masked_value_for_masked_columns`) | parent column is `"\\x0123..."`, a BYTEA **ciphertext** literal | the leaking shape is a **mask-only** field, whose parent holds plaintext. The same assertion would fail on it; no fixture builds one |
 | SC-2 Decision 1: "WAL permits this concurrency" | unqualified `CREATE TABLE t` (`sqlite_integration.rs:9956`), and no `ATTACH` at all | the table lands in `main`, the WAL **control** database. Every app file is pinned to DELETE (`zeroship-migrate-sqlite/src/backend/actor.rs:719-729`). The mechanism was proved on the wrong database |
 

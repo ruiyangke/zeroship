@@ -265,7 +265,7 @@ struct WriteStages<'a> {
     schema: &'a Value,
     has_encrypted: bool,
     has_masked: bool,
-    has_sqlite_binary: bool,
+    has_storage_encoding: bool,
     has_plain_bytes: bool,
 }
 
@@ -274,7 +274,7 @@ impl<'a> WriteStages<'a> {
         Self {
             has_encrypted: super::schema_has_encrypted_columns(schema),
             has_masked: super::schema_has_masked_columns(schema),
-            has_sqlite_binary: super::schema_has_sqlite_binary_columns(schema),
+            has_storage_encoding: zeroship_data_sql::codecs::has_storage_encoding(schema),
             has_plain_bytes: super::bytes_pass::schema_has_plain_bytes_columns(schema),
             schema,
         }
@@ -283,7 +283,7 @@ impl<'a> WriteStages<'a> {
     /// Does any stage below have work to do for this collection? A schema with
     /// none of these facets skips the whole pipeline.
     fn any(&self) -> bool {
-        self.has_encrypted || self.has_masked || self.has_sqlite_binary || self.has_plain_bytes
+        self.has_encrypted || self.has_masked || self.has_storage_encoding || self.has_plain_bytes
     }
 
     /// `keys` and `dialect` ride down from [`apply`] rather than being resolved
@@ -324,8 +324,8 @@ impl<'a> WriteStages<'a> {
         } else {
             Vec::new()
         };
-        if self.has_sqlite_binary && dialect == compile::SqlDialect::Sqlite {
-            super::encode_sqlite_binary_doc_with_schema(schema, row)?;
+        if self.has_storage_encoding {
+            zeroship_data_sql::codecs::encode_document(dialect, schema, row)?;
         }
         // AFTER encryption: a `t.encrypted({ wraps: t.bytes() })` column is the
         // encryption pass's, and this pass skips it by construction, but the
@@ -378,8 +378,8 @@ impl<'a> WriteStages<'a> {
         } else {
             Vec::new()
         };
-        if self.has_sqlite_binary && dialect == compile::SqlDialect::Sqlite {
-            super::encode_sqlite_binary_update_with_schema(schema, patch)?;
+        if self.has_storage_encoding {
+            zeroship_data_sql::codecs::encode_update(dialect, schema, patch)?;
         }
         if self.has_plain_bytes {
             super::bytes_pass::validate_bytes_on_update(schema, patch)?;
@@ -438,7 +438,7 @@ pub async fn resolve_target_row_ids(
 ) -> Result<Vec<TargetRowId>, DbError> {
     note_target_row_resolution_for_tests();
     let mut sql_filter = filter.clone();
-    super::maybe_lower_sqlite_boolean_filter(dialect, schema, &mut sql_filter);
+    zeroship_data_sql::codecs::lower_filter(dialect, schema, &mut sql_filter);
     let built = compile::build_write_target_probe(
         route.schema(),
         collection,
@@ -610,7 +610,7 @@ async fn rewrite_upsert_doc_id_to_existing_row_id(
         .await?;
     }
     note_upsert_conflict_probe_for_tests();
-    super::maybe_lower_sqlite_boolean_filter(dialect, schema, &mut filter);
+    zeroship_data_sql::codecs::lower_filter(dialect, schema, &mut filter);
     let built = compile::build_conflict_probe_with_dialect(
         route.schema(),
         collection,
@@ -901,10 +901,10 @@ mod tests {
         });
     }
 
-    use crate::backend::SqlExecutor;
     use crate::cache_schema_for_tests;
     use crate::compile::{SqlDialect, build_insert_with_dialect};
     use crate::encryption;
+    use zeroship_data_orm::fixtures::DatabaseFixture;
     use zeroship_migrate::schema::query::FkEmission;
     fn sqlite_fixture_sql(
         schema: &zeroship_data_sql::SchemaName,
@@ -1113,7 +1113,10 @@ mod tests {
                 if trimmed.is_empty() {
                     continue;
                 }
-                backend.pool_exec(trimmed, &[]).await.expect("DDL exec");
+                backend
+                    .execute_fixture(trimmed, &[])
+                    .await
+                    .expect("DDL exec");
             }
 
             let mut insert_doc = zeroship_data_sql::value!({
@@ -1161,7 +1164,7 @@ mod tests {
             .expect("build insert");
             let insert_params = &insert_built.params;
             let client = backend
-                .acquire_dedicated_client(app_id)
+                .fixture_session(app_id)
                 .await
                 .expect("acquire client");
             client
@@ -1392,7 +1395,10 @@ mod tests {
                 if trimmed.is_empty() {
                     continue;
                 }
-                backend.pool_exec(trimmed, &[]).await.expect("DDL exec");
+                backend
+                    .execute_fixture(trimmed, &[])
+                    .await
+                    .expect("DDL exec");
             }
 
             // Control: under the mask-declaring descriptor the write prepares,

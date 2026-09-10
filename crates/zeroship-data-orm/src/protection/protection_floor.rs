@@ -67,11 +67,10 @@
 //! is the correct direction to be wrong in.
 //!
 //! The read takes a pooled checkout, which a caller inside `db.transaction(fn)`
-//! also does - `crate::crud::unmask` and the audit-row writer take one on the
-//! same path, and `PostgresBackend::acquire_dedicated_client`'s header records
+//! also does - `crate::protection::unmask` and the audit-row writer take one on the
+//! same path, and `PostgresBackend::fixture_session`'s header records
 //! that as the designed shape rather than a leak.
 
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -88,7 +87,7 @@ use crate::tx_route::TxRoute;
 /// backend's own introspector: `PostgreSQL` parses `pg_description`, `SQLite`
 /// parses `sqlite_master.sql`. Neither is derived from the descriptor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-struct StoredProtection {
+pub(crate) struct StoredProtection {
     masked: bool,
     encrypted: bool,
 }
@@ -104,20 +103,9 @@ impl StoredProtection {
 /// Only PROTECTED columns are held. A collection with none is absent, and the
 /// lookup treats absence as "nothing to enforce" - correct, because a column the
 /// catalog does not record as protected imposes no floor.
-type ProtectionFloor = HashMap<String, HashMap<String, StoredProtection>>;
+pub(crate) type ProtectionFloor = HashMap<String, HashMap<String, StoredProtection>>;
 
-thread_local! {
-    /// The isolate's resolved floors, keyed `<app_id>:<deploy_token>`.
-    ///
-    /// PER-THREAD like every other piece of isolate state, and keyed by the
-    /// binding rather than the app for the reason in the module header.
-    static FLOORS: RefCell<HashMap<String, Rc<ProtectionFloor>>> =
-        RefCell::new(HashMap::new());
-}
-
-fn floor_key(binding: &DbBinding) -> String {
-    format!("{}:{}", binding.app_id(), binding.deploy_token())
-}
+fn floor_key(binding: &DbBinding) -> DbBinding { binding.clone() }
 
 /// Reduce a `LiveSchema` to the protected columns alone.
 fn floor_from_live(live: &zeroship_data_sql::catalog::LiveSchema) -> ProtectionFloor {
@@ -144,7 +132,7 @@ fn floor_from_live(live: &zeroship_data_sql::catalog::LiveSchema) -> ProtectionF
 /// applied?
 ///
 /// `mask: { kind: "none" }` is the documented opt-out, so it is NOT a
-/// declaration: [`crate::crud::mask_pass::apply_mask_on_write`] skips it exactly
+/// declaration: [`crate::protection::mask_pass::apply_mask_on_write`] skips it exactly
 /// as it skips an absent block, and both therefore store plaintext under the
 /// field's own name. A fence that accepted `kind: "none"` would refuse the
 /// one-key deletion and wave through the one-word edit that does the same thing.
@@ -158,7 +146,7 @@ fn descriptor_declares_mask(def: &Value) -> bool {
 /// Does the descriptor's field definition declare encryption?
 ///
 /// Presence of the block is the whole test, matching
-/// [`crate::crud::encryption_pass::encrypt_row_on_write_with_sidechannel`],
+/// [`crate::protection::encryption_pass::encrypt_row_on_write_with_sidechannel`],
 /// which encrypts whenever `def["encrypted"]` is an object. There is no
 /// `mode: "none"` opt-out to mirror.
 fn descriptor_declares_encryption(def: &Value) -> bool {
@@ -171,7 +159,7 @@ async fn resolve_floor(
     binding: &DbBinding,
 ) -> Result<Rc<ProtectionFloor>, DbError> {
     let key = floor_key(binding);
-    if let Some(hit) = FLOORS.with_borrow(|f| f.get(&key).cloned()) {
+    if let Some(hit) = crate::orm_context::current().floors(|f| f.get(&key).cloned()) {
         return Ok(hit);
     }
     // Boxed: an inline `LiveSchema` future makes the whole write path's future
@@ -180,7 +168,7 @@ async fn resolve_floor(
     // stack saving is on the hot one.
     let live = Box::pin(route.backend().introspect_schema(binding.app_id())).await?;
     let floor = Rc::new(floor_from_live(&live));
-    FLOORS.with_borrow_mut(|f| f.insert(key, Rc::clone(&floor)));
+    crate::orm_context::current().floors_mut(|f| f.insert(key, Rc::clone(&floor)));
     Ok(floor)
 }
 
@@ -216,7 +204,7 @@ pub async fn refuse_protection_downgrade(
 /// `test-helpers` - so the durable proof that a
 /// protection downgrade is refused came from a build configuration that DOES
 /// NOT SHIP. On the same day, the capability this fence reads
-/// (`SchemaIntrospect`) turned out to be gated on that same feature while the
+/// (`Catalog`) turned out to be gated on that same feature while the
 /// caller was not, and the shipped binaries had not compiled for a day. A fence
 /// whose only witness needs the feature is one flag away from being a fence
 /// that only exists in test builds.
@@ -279,7 +267,7 @@ fn refuse_offences(
 /// see the floor the first one resolved.
 #[cfg(any(test, feature = "test-helpers"))]
 pub fn reset_for_tests() {
-    FLOORS.with_borrow_mut(HashMap::clear);
+    crate::orm_context::current().floors_mut(HashMap::clear);
 }
 
 #[cfg(test)]

@@ -60,7 +60,7 @@ use compio_postgres::{NoTls, Pool};
 use zeroship_data_orm::binding::DbBinding;
 use zeroship_data_orm::error::DbError;
 use zeroship_data_sql::value::{Value, value};
-use zeroship_data_v8::compile::{BuiltQuery, SqlDialect};
+use zeroship_data_v8::compile::SqlDialect;
 use zeroship_data_v8::tx_route::{CapturedRoute, TxRoute};
 
 fn test_url() -> String {
@@ -266,6 +266,9 @@ async fn a_vector_search_inside_a_transaction_sees_the_row_that_transaction_inse
          subject arm below rules on nothing: {inside_plain:?}",
     );
 
+    assert_eq!(inserted.rows[0]["embedding"], value!([1.0, 0.0, 0.0, 0.0]));
+    assert_eq!(inside_plain[0]["embedding"], value!([1.0, 0.0, 0.0, 0.0]));
+
     let args = value!({ "vector": [1.0, 0.0, 0.0, 0.0], "k": 10 });
 
     // ---- CONTROL 2: the same search, POOLED. Differs in one token: `in_tx`.
@@ -298,6 +301,7 @@ async fn a_vector_search_inside_a_transaction_sees_the_row_that_transaction_inse
          scan took the autocommit lane: {inside:?}",
     );
     assert_eq!(inside[0]["id"], value!(id));
+    assert_eq!(inside[0]["embedding"], value!([1.0, 0.0, 0.0, 0.0]));
     assert!(
         inside[0].get("_distance").is_some(),
         "the row must carry pgvector's synthetic distance column: {inside:?}",
@@ -317,14 +321,6 @@ async fn a_vector_search_inside_a_transaction_sees_the_row_that_transaction_inse
 /// independent: `run_search` and `run_near` are separate functions calling
 /// separate trait impls, and each reached the pool on its own.
 ///
-/// **The write is a hand-built `INSERT` rather than `run_insert`, and that is
-/// the one deliberate divergence from the arm above.** The write pipeline has
-/// no PostgreSQL encoding for a `geoPoint` value - `encode_sqlite_binary_scalar`
-/// packs `{lat,lng}` into a blob for SQLite only - so a `run_insert` of a geo
-/// document would fail on the DDL emitter's `geography(POINT, 4326)` column
-/// before the lane question could be asked. The statement still goes through
-/// `exec_query`, which is the SAME `route.in_tx()` funnel the production insert
-/// takes, so the row lands on the transaction connection exactly as it would.
 #[compio::test]
 async fn a_spatial_near_inside_a_transaction_sees_the_row_that_transaction_inserted() {
     let url = require_pg().await;
@@ -347,23 +343,18 @@ async fn a_spatial_near_inside_a_transaction_sees_the_row_that_transaction_inser
 
     zeroship_data_v8::begin_transaction_for_tests(app, &url).await;
 
-    let id = "plc_in_the_transaction".to_string();
-    zeroship_data_v8::exec_query_for_tests(
-        app,
-        BuiltQuery {
-            sql: format!(
-                "INSERT INTO \"{app}\".\"{coll}\" (id, location, title) \
-                 VALUES ($1, ST_GeogFromText($2), $3) RETURNING id"
-            ),
-            params: vec![
-                id.clone().into(),
-                "SRID=4326;POINT(-0.1278 51.5074)".into(),
-                "in the transaction".into(),
-            ],
-        },
+    let point = value!({"lat": 51.5074, "lng": -0.1278});
+    let inserted = zeroship_data_v8::crud::run_insert(
+        DbBinding::cold_start(app),
+        coll.to_string(),
+        tx_route(app).await,
+        value!({"location": point.clone(), "title": "in the transaction"}),
+        None,
     )
     .await
-    .expect("the geo insert must apply on the transaction lane");
+    .expect("native geographic values must insert through the shared ORM");
+    let id = inserted.rows[0]["id"].as_str().unwrap().to_owned();
+    assert_eq!(inserted.rows[0]["location"], point);
 
     // ---- CONTROL 1: the transaction lane sees its own uncommitted row.
     let inside_plain = find_on(tx_route(app).await, app, coll, value!({ "id": &id }))
@@ -376,6 +367,7 @@ async fn a_spatial_near_inside_a_transaction_sees_the_row_that_transaction_inser
          subject arm below rules on nothing: {inside_plain:?}",
     );
 
+    assert_eq!(inside_plain[0]["location"], point);
     let args = value!({
         "field": "location",
         "point": { "lat": 51.5074, "lng": -0.1278 },
@@ -413,6 +405,7 @@ async fn a_spatial_near_inside_a_transaction_sees_the_row_that_transaction_inser
          took the autocommit lane: {inside:?}",
     );
     assert_eq!(inside[0]["id"], value!(id));
+    assert_eq!(inside[0]["location"], point);
     assert!(
         inside[0].get("_distance_m").is_some(),
         "the row must carry PostGIS's synthetic distance column: {inside:?}",

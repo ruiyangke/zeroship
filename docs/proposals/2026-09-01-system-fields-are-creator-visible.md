@@ -72,7 +72,7 @@ argument.** Measured 2026-09-01 across the whole tree.
 `Display`-round-tripped at `:190`, and folded into the policy seal at
 `crates/zeroship-migrate-policy/src/seal.rs:517`. That is the complete set of
 readers. The write pass matches it as `Increment(_)` and DISCARDS the amount
-(`crates/zeroship-data-orm/src/crud/system_fields_pass.rs:383`); the actual
+(`crates/zeroship-data-orm/src/crud/system_fields_pass.rs`); the actual
 step is a literal `+ 1` emitted from three places in `zeroship-schema`
 (`query.rs:4279` update, `:4780` soft delete, `:4825` restore) plus the PG
 upsert's `COALESCE(..., 0) + 1` at `:6476`.
@@ -363,7 +363,7 @@ worker stops trusting descriptor bindings.
 `assign` in the charter is what lets the ERGONOMIC lists go: `IMMUTABLE_SYSTEM_FIELDS`
 in Rust, the SDK list in `install-schema.ts`, three copies in
 `sdks/db/src/types.ts`, two prose strings in
-`crates/zeroship-data-v8/src/error.rs:728-745`, and the field-naming inside
+`crates/zeroship-data-v8/src/error.rs`, and the field-naming inside
 `system_fields_pass.rs`, which iterates the charter and invokes the named
 generator instead.
 

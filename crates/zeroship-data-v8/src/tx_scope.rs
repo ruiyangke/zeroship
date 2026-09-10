@@ -228,12 +228,8 @@ pub(crate) fn capture_route(
 /// changed; only its address did, so the engine now receives a backend instead
 /// of fetching one.
 ///
-/// **The cold-init half is load-bearing, not incidental.** Mask-policy
-/// installation runs at boot, before any creator code, and is the call that
-/// warms a cold isolate; deleting the `init_pool_async` arm and keeping only
-/// the read would make `installSchema`'s `setMaskPolicy` fail
-/// `not_configured` on every fresh isolate, which on the SQLite dev tier is
-/// every boot.
+/// Database operations open the backend lazily. Startup mask-policy installation
+/// is independent of the database and leaves this context cold.
 ///
 /// **`pub`, not `pub(crate)`, and the shipped surface is unchanged ONLY
 /// BECAUSE OF A CONDITION THIS DOC USED TO LEAVE UNSTATED.** The condition is
@@ -329,7 +325,6 @@ mod tests {
     //! crate's, and the engine may not see `v8`, `zeroship_runtime` or the
     //! per-isolate context at all.
 
-    use zeroship_data_sql::value;
     use zeroship_runtime::init_v8;
 
     macro_rules! in_scope {
@@ -372,7 +367,7 @@ mod tests {
     fn a_configured_sqlite_dialect_is_captured_without_an_open_backend() {
         in_scope!(let scope);
         crate::reset_context_for_tests();
-        crate::set_db_url_for_tests("sqlite::memory:");
+        crate::set_db_url_for_tests("sqlite:route-test.sqlite");
         assert!(
             crate::context::with(|context| context.backend()).is_none(),
             "precondition: nothing has opened a backend on this thread"
@@ -441,56 +436,25 @@ mod tests {
         );
     }
 
-    /// The cold-isolate path, driven in the order production drives it.
-    ///
-    /// **This arm lived in the engine's `crud/mask_policy.rs` and moved here
-    /// with the data-engine cut**, because three of the four things it names
-    /// belong to this crate: `set_db_url_for_tests`, `context::with` and
-    /// [`ensure_backend`]. Only its last line is the engine's. That split is the
-    /// point - it witnesses the boot sequence at the seam between the two tiers.
-    ///
-    /// The assertion that matters is unchanged in substance: if the resolve step
-    /// ever loses its `init_pool_async` arm, `ensure_backend` returns
-    /// `not_configured` here and the install never happens - the failure
-    /// `installSchema` would hit on every boot of the SQLite dev tier.
+    /// The first database operation must still initialize a cold backend.
     #[test]
-    fn set_mask_policy_installs_through_an_adapter_opened_cold_backend() {
+    fn ensure_backend_opens_a_cold_sqlite_context() {
         crate::reset_context_for_tests();
         let dir = tempfile::tempdir().expect("create tempdir");
-        let url = format!("sqlite:{}", dir.path().join("cold.sqlite").display());
-        crate::set_db_url_for_tests(&url);
+        crate::set_db_url_for_tests(&format!(
+            "sqlite:{}",
+            dir.path().join("cold.sqlite").display()
+        ));
         assert!(crate::context::with(|context| context.backend()).is_none());
-
         run(async {
-            // The adapter half of the dispatcher: resolve, warming the cold
-            // isolate on the way.
-            let backend = super::ensure_backend()
-                .await
-                .expect("the adapter funnel must open a cold backend");
+            let backend = super::ensure_backend().await.expect("open cold backend");
             assert!(
                 backend
                     .get::<zeroship_data_orm::backend::SqliteBackend>()
-                    .is_some(),
-                "the configured url is sqlite:, so the opened backend must be too"
+                    .is_some()
             );
-            assert!(
-                crate::context::with(|context| context.backend()).is_some(),
-                "resolving must leave the backend installed on this isolate"
-            );
-
-            // The engine half: it receives the handle rather than fetching one.
-            crate::crud::mask_policy::dispatch_set_mask_policy(
-                &backend,
-                "app_cold_policy",
-                value!({ "support": ["spi"] }),
-            )
-            .await
-            .expect("policy install must succeed on the handed-down backend");
+            assert!(crate::context::with(|context| context.backend()).is_some());
         });
-
-        let policy = crate::crud::mask_policy::cache_get("app_cold_policy")
-            .expect("policy must be cached after the cold install");
-        assert!(policy.allows("support", "spi"));
         crate::reset_context_for_tests();
     }
 }

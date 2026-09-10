@@ -19,11 +19,7 @@ import { resolve } from "node:path";
 /** Which layer supplied the effective `DATABASE_URL`. */
 export type DatabaseUrlSource = "shell" | "dotenv" | "default";
 
-/** The dev tier's one recognized form. Mirrors `devSqliteDir`'s own check
- * (`gen-types/dev-apply.ts`) — that function silently falls back to the
- * default state dir for anything it does not recognize as this exact
- * prefix, so this guard has to agree with it byte-for-byte or a value that
- * slips past here could still be misrouted there. */
+/** Both the runtime configuration and migration path use this file selector. */
 const SQLITE_URL_PREFIX = "sqlite:";
 
 /** Source, described in words, for the error message below. */
@@ -79,10 +75,20 @@ export class DevDatabaseUrlSchemeError extends Error {
   }
 }
 
-/** Reject anything that is not the dev tier's `sqlite:` form. */
-function assertSqliteDevUrl(databaseUrl: string, source: DatabaseUrlSource): void {
-  if (databaseUrl.startsWith(SQLITE_URL_PREFIX)) return;
-  throw new DevDatabaseUrlSchemeError(schemeOf(databaseUrl), source);
+/** Resolve the dev database file, refusing ephemeral modes and URI options. */
+export function sqliteDevFilePath(databaseUrl: string, source: DatabaseUrlSource = "default"): string {
+  if (!databaseUrl.startsWith(SQLITE_URL_PREFIX)) {
+    throw new DevDatabaseUrlSchemeError(schemeOf(databaseUrl), source);
+  }
+  const prefix = databaseUrl.startsWith("sqlite://") ? "sqlite://" : SQLITE_URL_PREFIX;
+  const path = databaseUrl.slice(prefix.length);
+  if (!path.trim() || path.toLowerCase() === ":memory:" || /[?#]/.test(path) || /^[a-z][a-z0-9+.-]*:/i.test(path)) {
+    throw new Error(
+      `DATABASE_URL from ${sourceLabel(source)} must name a SQLite file, such as sqlite:.zeroship/dev.sqlite. ` +
+      "Memory databases and SQLite URI options are unsupported.",
+    );
+  }
+  return path;
 }
 
 /**
@@ -139,7 +145,7 @@ export function resolveDatabaseUrl(
     source = "default";
   }
 
-  assertSqliteDevUrl(databaseUrl, source);
+  sqliteDevFilePath(databaseUrl, source);
   return { databaseUrl, source };
 }
 

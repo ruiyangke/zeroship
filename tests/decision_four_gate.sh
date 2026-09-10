@@ -437,7 +437,7 @@ shared_bad=""
 while IFS= read -r f; do
   rel="${f#"$ROOT"/}"
   case "$rel" in
-    orm.rs|orm/*|crud/*|transaction/*|exec.rs|backend_handle.rs|tx_lanes.rs|driver.rs)
+    orm.rs|orm/*|crud/*|protection.rs|protection/*|search.rs|executor.rs|transaction/*|exec.rs|backend_handle.rs|tx_lanes.rs|driver.rs)
       shared_files=$((shared_files + 1))
       hits="$(driver_sites "$f")"
       [ -z "$hits" ] || shared_bad="$shared_bad

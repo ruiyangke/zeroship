@@ -83,7 +83,5 @@ pub use aad::canonical_aad;
 // rather than an oversight: it is the return type of `keys::KeyStore::resolve`,
 // so callers obtain one by inference without ever writing the name. A
 // reader-count alone would have narrowed it and broken the public signature.
-#[allow(unused_imports)]
 pub use aead::{AeadKey, decrypt, encrypt};
-#[allow(unused_imports)]
 pub use keys::{KeyStore, LocalKeySource, SuppliedRootKeys};

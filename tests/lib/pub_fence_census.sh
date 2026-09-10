@@ -301,7 +301,7 @@ report() { # name, file, pattern
   printf '  %-24s %s:%s\n' "$name" "$file" "${hit%%:*}"
   printf '           %s\n' "$(printf '%s' "$hit" | cut -d: -f2- | sed 's/^[[:space:]]*//')"
 }
-report sanitize_app_actor "$ENGINE_SRC/crud/unmask.rs" '^[[:space:]]*pub(\(crate\))? fn sanitize_app_actor'
+report sanitize_app_actor "$ENGINE_SRC/protection/unmask.rs" '^[[:space:]]*pub(\(crate\))? fn sanitize_app_actor'
 report "TxRoute::capture"  "$ENGINE_SRC/tx_route.rs"   '^[[:space:]]*pub(\(crate\))? fn capture'
 report "context::with_mut" "$ADAPTER_SRC/context.rs"   '^[[:space:]]*pub(\(crate\))? fn with_mut'
 report "DbBinding::cold_start" crates/zeroship-data-orm/src/binding.rs \

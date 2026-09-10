@@ -42,147 +42,9 @@ use crate::exec::{exec_mutation_with_emit, exec_query};
 use crate::tx_route::TxRoute;
 use zeroship_data_orm::binding::DbBinding;
 use zeroship_data_orm::error::DbError;
+use zeroship_data_sql::codecs::{lower_document, lower_documents, lower_filter, lower_update};
 
-// Transparent column-encryption pass. The helpers in
-// this module (`encrypt_row_on_write` / `decrypt_row_on_read`) sit
-// around `compile::build_*` and `exec_query` respectively.
-//
-// Visibility: crate-private in release builds; `pub` under
-// `test-helpers` so `crates/zeroship-data-v8/tests/sqlite_integration.rs` can drive the
-// helpers directly for the end-to-end encrypted-column
-// CRUD round-trip test (the orchestrator's CRUD entry today is PG-only,
-// so the SQLite e2e gate composes the helpers itself).
-#[cfg(not(feature = "test-helpers"))]
-pub(crate) mod encryption_pass;
-#[cfg(feature = "test-helpers")]
-pub mod encryption_pass;
-
-// Sibling-column-based mask transforms + dual-write CRUD pass.
-//
-// Unconditionally `pub`, unlike the sibling passes below: measured
-// 2026-09-04, `zeroship-data-v8`'s `v8_classes/masked_value.rs` calls
-// `mask_pass::mask_sentinel_signature()` from the DB-7 fence that refuses an
-// app-JS-fabricated `{sentinel: "__zsmask__"}` object, and that call is in
-// production code (`v8_classes/mod.rs` declares `masked_value` `pub mod`
-// with no cfg), not behind `test-helpers`. Narrowing this to `pub(crate)` in
-// the default-feature arm makes `cargo check -p zeroship-data-v8 --lib`
-// fail with E0603 - confirmed by applying it and reading the error.
-pub mod mask_pass;
-
-// `unmask()` RPC dispatch + audit row writer.
-//
-// Unconditionally `pub`: measured 2026-09-04, `zeroship-data-v8`'s
-// `v8_classes/dispatch.rs` (`dispatch_unmask_field` / `dispatch_bulk_unmask_field`,
-// the shipped `collection.unmaskField` / `.bulkUnmask` bridge) and
-// `v8_classes/masked_value.rs` (`MaskedValue::unmask`, the DB-3
-// `sanitize_app_actor` fence) both import from `crud::unmask` in
-// production code, not behind `test-helpers` - neither file is
-// `#[cfg(test)]` in `v8_classes/mod.rs`. Narrowing this to `pub(crate)` in
-// the default-feature arm makes `cargo check -p zeroship-data-v8 --lib`
-// fail with E0603 (five sites) - confirmed by applying it and reading the
-// error.
-pub mod unmask;
-
-// `defineMaskPolicy()` storage + dispatcher + cache.
-//
-// Unconditionally `pub`: measured 2026-09-04, `zeroship-data-v8`'s
-// `v8_classes/dispatch.rs` imports `mask_policy::dispatch_set_mask_policy`
-// for `dispatch_set_mask_policy_field` (the shipped `__platform.setMaskPolicy`
-// bridge), and that file is unconditional production code - not behind
-// `test-helpers`. Narrowing this to `pub(crate)` in the default-feature arm
-// makes `cargo check -p zeroship-data-v8 --lib` fail with E0603 -
-// confirmed by applying it and reading the error.
-pub mod mask_policy;
-
-// `mask_backfill` WAS DECLARED HERE and is deleted (2026-09-02), under the
-// split's Phase 0.5 dead-code decision. Its header called it "mask backfill /
-// rewrite / removal jobs driven by the migration service", and #30 wired that
-// transition onto THE ENGINE'S OWN BACKFILL - so this was the superseded copy,
-// kept alive only by its own tests.
-//
-// Measured before deleting: all six entry points were either one-line
-// delegations to a live function elsewhere (`parse_mask_sentinel` ->
-// `zeroship_data_sql::mask_codec`, which `pg_introspect.rs` and `sqlite/mod.rs`
-// already call directly; `compute_masked_for_plaintext` -> `apply_mask_kind`
-// in `mask_pass.rs`) or helpers with zero callers anywhere
-// (`apply_mask_to_one_row`, `backfill_audit_name`, `rewrite_audit_name`,
-// `compute_masked_pairs_for_row`). Its sentinel tests duplicated
-// `zeroship-data-sql/src/mask_codec.rs`'s under the same names; the rest
-// exercised the zero-caller helpers.
-//
-// The module itself had already named the hazard, about its own column-name
-// derivation: leaving it would keep "a second, wrong derivation ... alive in a
-// module nothing calls, which is exactly how one gets copied back into a live
-// path". Deleting is that reasoning carried to the module.
-
-// The live catalog as a FLOOR on a column's protections: the fence that refuses
-// a write whose descriptor dropped a mask or an encryption block the database
-// still records. Same visibility pattern as the sibling passes.
-#[cfg(not(feature = "test-helpers"))]
-pub(crate) mod protection_floor;
-#[cfg(feature = "test-helpers")]
-pub mod protection_floor;
-
-// `mask_drift` WAS DECLARED HERE and is deleted (2026-09-03), by the same
-// reasoning as `mask_backfill` above. It sampled masked-column siblings against
-// the recomputed mask of decrypt(parent). 1287 lines, every caller a test.
-//
-// It was not merely unwired - it could not be wired as written. Three measured
-// blockers, any one of which alone is fatal:
-//
-//   * Its first act was `DbBinding::cold_start(app_id)`, itself
-//     `#[cfg(feature = "test-helpers")]`, whose own doc says "Nothing in a
-//     shipped binary should be constructing a deploy identity from an app id
-//     alone, and this gate is what makes that checkable". It did not compile
-//     into a release worker even in principle.
-//   * It resolved the schema through `zeroship_data_orm::schema_cache`, a
-//     `thread_local!` keyed `<app>:<deploy_token>:<collection>` and published
-//     per-isolate at descriptor bind. A `cold_start` binding matches no
-//     production entry, so an operator sweep would miss every collection.
-//   * Its four `pool_handle()` calls were the ONLY remaining callers of
-//     `PgSqlExecutor` - the raw-pool escape hatch that skips the per-app role
-//     fence - which `docs/proposals/2026-08-28-app-database-decoupling.md`
-//     records as "Do not ungate it". With this module gone the trait had no
-//     callers left, and it was deleted outright on 2026-09-09.
-//
-// And it did not catch the defect nearest to it. A masked column whose stored
-// mask has drifted is what a creator causes by deleting one descriptor `mask`
-// key, but the check resolved `MaskKind` FROM that descriptor: its own test
-// `run_drift_check_for_column_returns_empty_when_column_not_masked` asserted
-// `sampled: 0, drifted: 0` for exactly that shape. The sibling test refused an
-// undeclared COLLECTION as a typed error because "an undeclared collection must
-// not report a clean sweep"; the same reasoning was never applied one level
-// down, at the column, which is where the defect lives.
-//
-// A live-database enumeration cannot rescue it: the mask KIND exists only in
-// the creator descriptor (there is no durable policy store on PG - see
-// `mask_policy`'s header), so `expected` is uncomputable without the artifact
-// whose deletion is the bug. The check that DOES catch it is structural, not
-// statistical - a `__zs_raw__<col>` sibling present in the physical table while
-// the descriptor no longer declares `<col>` masked - and it needs no sampling,
-// no decryption, no key store and no `MaskKind`. That is a different tool; it
-// would have shared only the word "drift".
-//
-// THAT TOOL IS NOW `protection_floor`, declared above, and building it corrected
-// one of the two facts recorded here. The mask KIND does NOT exist only in the
-// descriptor: PostgreSQL carries `zero-migrate:mask:kind=…,classification=…` in
-// `pg_description` and SQLite carries it in `sqlite_master.sql`, and both
-// introspectors already parse it back into a `MaskMeta` (measured 2026-09-04 on
-// a live table built by the platform's own DDL emitter). `expected` was
-// therefore computable all along. The check built here still does not use it -
-// PRESENCE is what a downgrade changes - but the reason is that presence is
-// sufficient, not that the kind is unavailable.
-//
-// Deleted rather than kept as scaffolding because the module carried three
-// re-derivations of live logic (`parse_mask_kind_str`, documented as a
-// duplicate of the schema-wire parser; `decrypt_parent_value`, a hand-rolled
-// second AAD/decrypt path; `decode_plaintext_per_wraps`, already
-// `#[allow(dead_code)]`), and its tests exercised THOSE, not the production
-// pass. That is the `mask_backfill` hazard verbatim: "a second, wrong
-// derivation ... alive in a module nothing calls".
-//
-// `docs/reference/db.md` promised creators a weekly cron for this in the
-// present tense. That section is deleted with the code.
+use crate::protection::{mask_pass, protection_floor, unmask};
 
 // INSERT-time auto-population of platform system fields
 // (`id`, `created_by`, `updated_by`). Same visibility pattern as the
@@ -199,7 +61,6 @@ pub mod read_pipeline;
 mod write_pipeline;
 
 #[cfg(any(test, feature = "test-helpers"))]
-#[allow(unused_imports)]
 pub use write_pipeline::{
     WritePathCounters, reset_write_path_counters_for_tests, write_path_counters_for_tests,
 };
@@ -342,284 +203,6 @@ fn record_read_set(binding: &DbBinding, collection: &str, filter: &Value) {
 // where it does not - which is why the plan and the connection can no longer
 // disagree about which SQL was written.
 //
-// The four `maybe_lower_sqlite_boolean_*` helpers take the ALREADY-RESOLVED
-// descriptor entry rather than resolving one of their own. Each dispatch site
-// needs the schema anyway - the read builders take it, and the write pipeline
-// keys its encrypt/mask stages off it - so resolving once per operation both
-// removes a second store lookup and puts the `collection_not_declared` refusal
-// at ONE place per dispatch instead of silently returning here. `dialect` rides
-// alongside it for the same reason: resolved once by the caller, not re-asked
-// four times per write.
-
-fn maybe_lower_sqlite_boolean_doc(dialect: compile::SqlDialect, schema: &Value, doc: &mut Value) {
-    if dialect != compile::SqlDialect::Sqlite {
-        return;
-    }
-    lower_boolean_doc_with_schema(schema, doc);
-}
-
-fn maybe_lower_sqlite_boolean_docs(dialect: compile::SqlDialect, schema: &Value, docs: &mut Value) {
-    if dialect != compile::SqlDialect::Sqlite {
-        return;
-    }
-    let Some(arr) = docs.as_array_mut() else {
-        return;
-    };
-    for doc in arr {
-        lower_boolean_doc_with_schema(schema, doc);
-    }
-}
-
-fn maybe_lower_sqlite_boolean_update(
-    dialect: compile::SqlDialect,
-    schema: &Value,
-    patch: &mut Value,
-) {
-    if dialect != compile::SqlDialect::Sqlite {
-        return;
-    }
-    lower_boolean_update_with_schema(schema, patch);
-}
-
-fn maybe_lower_sqlite_boolean_filter(
-    dialect: compile::SqlDialect,
-    schema: &Value,
-    filter: &mut Value,
-) {
-    if dialect != compile::SqlDialect::Sqlite {
-        return;
-    }
-    lower_boolean_filter_with_schema(schema, filter);
-}
-
-fn lower_boolean_doc_with_schema(schema: &Value, doc: &mut Value) {
-    let Some(obj) = doc.as_object_mut() else {
-        return;
-    };
-    for (field, value) in obj.iter_mut() {
-        if schema_field_type(schema, field) == Some("boolean") {
-            lower_boolean_scalar(value);
-        }
-    }
-}
-
-fn lower_boolean_update_with_schema(schema: &Value, patch: &mut Value) {
-    let Some(obj) = patch.as_object_mut() else {
-        return;
-    };
-    if let Some(set_doc) = obj.get_mut("$set") {
-        lower_boolean_doc_with_schema(schema, set_doc);
-    }
-    for (field, value) in obj {
-        if field.starts_with('$') {
-            continue;
-        }
-        if schema_field_type(schema, field) != Some("boolean") {
-            continue;
-        }
-        match value {
-            Value::Bool(_) => lower_boolean_scalar(value),
-            Value::Object(ops) => {
-                if let Some(set_val) = ops.get_mut("$set") {
-                    lower_boolean_scalar(set_val);
-                }
-            }
-            _ => {}
-        }
-    }
-}
-
-fn lower_boolean_filter_with_schema(schema: &Value, filter: &mut Value) {
-    let Some(obj) = filter.as_object_mut() else {
-        return;
-    };
-    for (key, value) in obj {
-        if key.starts_with('$') {
-            match key.as_str() {
-                "$and" | "$or" => {
-                    if let Some(arr) = value.as_array_mut() {
-                        for clause in arr {
-                            lower_boolean_filter_with_schema(schema, clause);
-                        }
-                    }
-                }
-                "$not" => lower_boolean_filter_with_schema(schema, value),
-                _ => {}
-            }
-            continue;
-        }
-        if schema_field_type(schema, key) == Some("boolean") {
-            lower_boolean_filter_value(value);
-        }
-    }
-}
-
-fn lower_boolean_filter_value(value: &mut Value) {
-    match value {
-        Value::Bool(_) => lower_boolean_scalar(value),
-        Value::Object(ops) => {
-            for (op, operand) in ops {
-                match op.as_str() {
-                    "$eq" | "$ne" | "$gt" | "$gte" | "$lt" | "$lte" => {
-                        lower_boolean_scalar(operand);
-                    }
-                    "$in" | "$nin" => {
-                        if let Some(arr) = operand.as_array_mut() {
-                            for item in arr {
-                                lower_boolean_scalar(item);
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-        _ => {}
-    }
-}
-
-fn lower_boolean_scalar(value: &mut Value) {
-    if let Value::Bool(b) = value {
-        *value = Value::Number(zeroship_data_sql::value::Number::from(i64::from(u8::from(
-            *b,
-        ))));
-    }
-}
-
-fn schema_field_type<'a>(schema: &'a Value, field: &str) -> Option<&'a str> {
-    schema.as_object()?.get(field)?.get("type")?.as_str()
-}
-
-fn schema_field<'a>(schema: &'a Value, field: &str) -> Option<&'a Value> {
-    schema.as_object()?.get(field)
-}
-
-fn encode_sqlite_binary_scalar(
-    field: &str,
-    field_def: &Value,
-    value: &mut Value,
-) -> Result<(), DbError> {
-    if value.is_null() {
-        return Ok(());
-    }
-
-    match field_def.get("type").and_then(Value::as_str) {
-        Some("vector") => {
-            let dims = field_def
-                .get("vectorDims")
-                .and_then(Value::as_u64)
-                .ok_or_else(|| {
-                    DbError::internal(format!(
-                        "sqlite vector write encoding: schema for '{field}' is missing vectorDims"
-                    ))
-                })? as usize;
-            let arr = value.as_array().ok_or_else(|| {
-                DbError::validation(
-                    "invalid_vector_arg",
-                    format!("db: vector column '{field}' must be a number[]"),
-                )
-            })?;
-            if arr.len() != dims {
-                return Err(DbError::validation(
-                    "vector_dimension_mismatch",
-                    format!(
-                        "db: vector column '{field}' expected {dims} dimensions, got {}",
-                        arr.len()
-                    ),
-                ));
-            }
-            let mut vector = Vec::with_capacity(dims);
-            for item in arr {
-                let n = item.as_f64().ok_or_else(|| {
-                    DbError::validation(
-                        "invalid_vector_arg",
-                        format!("db: vector column '{field}' must contain only numbers"),
-                    )
-                })?;
-                vector.push(n as f32);
-            }
-            *value = Value::Bytes(zeroship_data_sql::sqlite_values::vec_to_le_bytes(&vector));
-            Ok(())
-        }
-        Some("geoPoint") => {
-            let obj = value.as_object().ok_or_else(|| {
-                DbError::validation(
-                    "invalid_geo_arg",
-                    format!("db: geoPoint column '{field}' must be an object with lat/lng"),
-                )
-            })?;
-            let lat = obj.get("lat").and_then(Value::as_f64).ok_or_else(|| {
-                DbError::validation(
-                    "invalid_geo_arg",
-                    format!("db: geoPoint column '{field}' is missing numeric lat"),
-                )
-            })?;
-            let lng = obj.get("lng").and_then(Value::as_f64).ok_or_else(|| {
-                DbError::validation(
-                    "invalid_geo_arg",
-                    format!("db: geoPoint column '{field}' is missing numeric lng"),
-                )
-            })?;
-            *value = Value::Bytes(
-                zeroship_data_sql::sqlite_values::point_to_blob(crate::backend::GeoPoint {
-                    lat,
-                    lng,
-                })
-                .to_vec(),
-            );
-            Ok(())
-        }
-        _ => Ok(()),
-    }
-}
-
-fn encode_sqlite_binary_doc_with_schema(schema: &Value, doc: &mut Value) -> Result<(), DbError> {
-    let Some(obj) = doc.as_object_mut() else {
-        return Ok(());
-    };
-    let Some(schema_obj) = schema.as_object() else {
-        return Ok(());
-    };
-    for (field, field_def) in schema_obj {
-        let Some(value) = obj.get_mut(field) else {
-            continue;
-        };
-        encode_sqlite_binary_scalar(field, field_def, value)?;
-    }
-    Ok(())
-}
-
-fn encode_sqlite_binary_update_with_schema(
-    schema: &Value,
-    patch: &mut Value,
-) -> Result<(), DbError> {
-    let Some(obj) = patch.as_object_mut() else {
-        return Ok(());
-    };
-    if let Some(set_doc) = obj.get_mut("$set") {
-        encode_sqlite_binary_doc_with_schema(schema, set_doc)?;
-    }
-    for (field, value) in obj.iter_mut() {
-        if field.starts_with('$') {
-            continue;
-        }
-        let Some(field_def) = schema_field(schema, field) else {
-            continue;
-        };
-        match value {
-            Value::Array(_) | Value::String(_) | Value::Object(_) | Value::Null => {
-                if let Some(set_val) = value.as_object_mut().and_then(|ops| ops.get_mut("$set")) {
-                    encode_sqlite_binary_scalar(field, field_def, set_val)?;
-                } else {
-                    encode_sqlite_binary_scalar(field, field_def, value)?;
-                }
-            }
-            _ => {}
-        }
-    }
-    Ok(())
-}
-
 pub fn aggregate_group_fields(pipeline: &Value) -> Vec<String> {
     let Some(stages) = pipeline.as_array() else {
         return Vec::new();
@@ -741,7 +324,7 @@ pub fn plan_find(binding: &DbBinding, collection: &str, filter: &Value, opts: &V
     ));
     // DB-3: strip an app-supplied reserved `auto` system actor — a find with
     // `{unmask, actor:{kind:"auto"}}` must not impersonate the platform.
-    let unmask_sanitized = crate::crud::unmask::sanitize_app_actor(
+    let unmask_sanitized = crate::protection::unmask::sanitize_app_actor(
         opts.get("actor").cloned().filter(|v| !v.is_null()),
     );
 
@@ -800,11 +383,11 @@ pub async fn run_find(
     //   deliberate: the audit table is append-only evidence, and an attempt
     //   must not be erasable by rolling back the transaction it was made in.
     //   The reasoning, and how it interacts with the DB-3 actor strip, is on
-    //   `crud::unmask::write_audit_unmask_row`.
+    //   `protection::unmask::write_audit_unmask_row`.
     //
     // Both halves are bound by `plugin-db/tests/unmask_tx_lane.rs`.
     if !plan.unmask_columns.is_empty() {
-        crate::crud::unmask::authorize_query_hint(
+        crate::protection::unmask::authorize_query_hint(
             route.backend(),
             &binding,
             &coll,
@@ -826,7 +409,7 @@ pub async fn run_find(
     // Soft-delete auto-filter gate.
     let filter_soft_deleted = system_fields_pass::should_filter_soft_deleted(plan.include_deleted);
     let mut sql_filter = filter;
-    maybe_lower_sqlite_boolean_filter(route.dialect(), &schema_hint, &mut sql_filter);
+    lower_filter(route.dialect(), &schema_hint, &mut sql_filter);
     let bq = compile::build_find_with_schema_and_unmask_and_soft_delete_with_dialect(
         binding.schema(),
         &coll,
@@ -858,7 +441,7 @@ pub async fn run_find(
     // lowered: a failure here must refuse the read, not log it and
     // return the plaintext anyway.
     if !plan.unmask_columns.is_empty() {
-        crate::crud::unmask::audit_query_hint_granted(
+        crate::protection::unmask::audit_query_hint_granted(
             route.backend(),
             &binding,
             &coll,
@@ -916,7 +499,7 @@ pub async fn run_insert(
     // this resolution cannot fail here; it re-reads the same store entry
     // rather than threading the schema back out through `apply`'s result.
     let schema = crate::descriptor::collection_schema(&binding, &coll)?;
-    maybe_lower_sqlite_boolean_doc(route.dialect(), &schema, &mut doc);
+    lower_document(route.dialect(), &schema, &mut doc);
     let bq =
         compile::build_insert_with_dialect(binding.schema(), &coll, &schema, &doc, route.dialect())
             .map_err(DbError::from)?;
@@ -961,7 +544,7 @@ pub async fn run_insert_many(
     )
     .await?;
     let schema = crate::descriptor::collection_schema(&binding, &coll)?;
-    maybe_lower_sqlite_boolean_docs(route.dialect(), &schema, &mut docs);
+    lower_documents(route.dialect(), &schema, &mut docs);
 
     let bq = compile::build_insert_many_with_dialect(
         binding.schema(),
@@ -1062,7 +645,7 @@ pub async fn run_update_one(
         write_pipeline::ApplyMode::Update { row_pk },
     )
     .await?;
-    maybe_lower_sqlite_boolean_update(route.dialect(), &schema, &mut update);
+    lower_update(route.dialect(), &schema, &mut update);
     let sql_filter = if let Some(target_row) = target_row {
         let mut sql_filter = zeroship_data_sql::value!({ "id": target_row.id_value });
         if let Some(expected_version) = cas_version {
@@ -1071,7 +654,7 @@ pub async fn run_update_one(
         sql_filter
     } else {
         let mut sql_filter = filter.clone();
-        maybe_lower_sqlite_boolean_filter(route.dialect(), &schema, &mut sql_filter);
+        lower_filter(route.dialect(), &schema, &mut sql_filter);
         sql_filter
     };
     // Auto-bump via the system-fields-aware builder.
@@ -1236,7 +819,7 @@ pub async fn run_update_many(
                     write_pipeline::ApplyMode::Update { row_pk: &row_pk },
                 )
                 .await?;
-                maybe_lower_sqlite_boolean_update(dialect, &schema, &mut row_update);
+                lower_update(dialect, &schema, &mut row_update);
                 let mut row_filter = zeroship_data_sql::value!({ "id": row_id });
                 if let Some(expected_version) = cas_version {
                     row_filter["version"] = Value::from(expected_version);
@@ -1304,9 +887,9 @@ pub async fn run_update_many(
         write_pipeline::ApplyMode::Update { row_pk: "" },
     )
     .await?;
-    maybe_lower_sqlite_boolean_update(dialect, &schema, &mut update);
+    lower_update(dialect, &schema, &mut update);
     let mut sql_filter = filter.clone();
-    maybe_lower_sqlite_boolean_filter(dialect, &schema, &mut sql_filter);
+    lower_filter(dialect, &schema, &mut sql_filter);
     let bq = compile::build_update_many_with_system_fields(
         binding.schema(),
         &coll,
@@ -1377,7 +960,7 @@ pub fn plan_delete_one(
     // filter this deploy has no schema to lower.
     crate::descriptor::collection_schema(binding, collection).and_then(|schema| {
         let mut filter = filter;
-        maybe_lower_sqlite_boolean_filter(route.dialect(), &schema, &mut filter);
+        lower_filter(route.dialect(), &schema, &mut filter);
         compile::build_soft_delete_one_with_system_fields(
             binding.schema(),
             collection,
@@ -1407,7 +990,7 @@ pub fn plan_delete_many(
     };
     crate::descriptor::collection_schema(binding, collection).and_then(|schema| {
         let mut filter = filter;
-        maybe_lower_sqlite_boolean_filter(route.dialect(), &schema, &mut filter);
+        lower_filter(route.dialect(), &schema, &mut filter);
         compile::build_soft_delete_many_with_system_fields(
             binding.schema(),
             collection,
@@ -1441,7 +1024,7 @@ pub fn plan_purge_one(
 ) -> Result<compile::BuiltQuery, DbError> {
     crate::descriptor::collection_schema(binding, collection).and_then(|schema| {
         let mut filter = filter;
-        maybe_lower_sqlite_boolean_filter(route.dialect(), &schema, &mut filter);
+        lower_filter(route.dialect(), &schema, &mut filter);
         compile::build_delete_one_with_dialect(
             binding.schema(),
             collection,
@@ -1464,7 +1047,7 @@ pub fn plan_purge_many(
 ) -> Result<compile::BuiltQuery, DbError> {
     crate::descriptor::collection_schema(binding, collection).and_then(|schema| {
         let mut filter = filter;
-        maybe_lower_sqlite_boolean_filter(route.dialect(), &schema, &mut filter);
+        lower_filter(route.dialect(), &schema, &mut filter);
         compile::build_delete_many(
             binding.schema(),
             collection,
@@ -1496,7 +1079,7 @@ pub fn plan_restore_one(
     };
     crate::descriptor::collection_schema(binding, collection).and_then(|schema| {
         let mut filter = filter;
-        maybe_lower_sqlite_boolean_filter(route.dialect(), &schema, &mut filter);
+        lower_filter(route.dialect(), &schema, &mut filter);
         compile::build_restore_one_with_system_fields(
             binding.schema(),
             collection,
@@ -1526,7 +1109,7 @@ pub fn plan_restore_many(
     };
     crate::descriptor::collection_schema(binding, collection).and_then(|schema| {
         let mut filter = filter;
-        maybe_lower_sqlite_boolean_filter(route.dialect(), &schema, &mut filter);
+        lower_filter(route.dialect(), &schema, &mut filter);
         compile::build_restore_many_with_system_fields(
             binding.schema(),
             collection,
@@ -1643,7 +1226,7 @@ pub fn plan_distinct(
     let distinct_reads_masked_sibling = compile::column_is_masked(field, &schema_hint);
 
     let mut filter = filter;
-    maybe_lower_sqlite_boolean_filter(route.dialect(), &schema_hint, &mut filter);
+    lower_filter(route.dialect(), &schema_hint, &mut filter);
 
     let built = compile::build_distinct_with_soft_delete_with_dialect(
         binding.schema(),
@@ -1701,7 +1284,7 @@ pub fn plan_count(
 
     crate::descriptor::collection_schema(binding, collection).and_then(|schema| {
         let mut filter = filter;
-        maybe_lower_sqlite_boolean_filter(route.dialect(), &schema, &mut filter);
+        lower_filter(route.dialect(), &schema, &mut filter);
         compile::build_count_with_soft_delete(
             binding.schema(),
             collection,
@@ -1739,7 +1322,7 @@ pub async fn run_upsert(
     )
     .await?;
     let schema = crate::descriptor::collection_schema(&binding, &coll)?;
-    maybe_lower_sqlite_boolean_doc(route.dialect(), &schema, &mut doc);
+    lower_document(route.dialect(), &schema, &mut doc);
     let bq = compile::build_upsert_with_dialect(
         binding.schema(),
         &coll,
@@ -1885,7 +1468,7 @@ pub fn plan_search(
     // The adapter reads the dialect for it, from the same
     // `crate::tx_scope::configured_dialect` a capture would have stamped.
     let schema = crate::descriptor::collection_schema(binding, collection)?;
-    maybe_lower_sqlite_boolean_filter(dialect, &schema, &mut filter);
+    lower_filter(dialect, &schema, &mut filter);
 
     Ok(SearchPlan {
         vector,
@@ -2055,7 +1638,7 @@ pub fn plan_near(
     // own projection; this one lowers the caller's filter, and `dialect` is a
     // bare parameter for the reason given there.
     let schema = crate::descriptor::collection_schema(binding, collection)?;
-    maybe_lower_sqlite_boolean_filter(dialect, &schema, &mut filter);
+    lower_filter(dialect, &schema, &mut filter);
 
     Ok(NearPlan {
         field,
@@ -2273,7 +1856,7 @@ async fn encryption_pass_dispatch(
     // replaced: `keys` is a required borrow, so a caller with no key store
     // cannot reach this function at all - a compile error where the funnel
     // gave a runtime one.
-    crate::crud::encryption_pass::encrypt_row_on_write_with_sidechannel(
+    crate::protection::encryption_pass::encrypt_row_on_write_with_sidechannel(
         keys,
         app_id,
         collection,
@@ -2316,20 +1899,6 @@ fn schema_has_masked_columns(schema: &Value) -> bool {
         .unwrap_or(false)
 }
 
-fn schema_has_sqlite_binary_columns(schema: &Value) -> bool {
-    schema
-        .as_object()
-        .map(|o| {
-            o.values().any(|def| {
-                matches!(
-                    def.get("type").and_then(Value::as_str),
-                    Some("vector") | Some("geoPoint")
-                )
-            })
-        })
-        .unwrap_or(false)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2340,28 +1909,6 @@ mod tests {
     // pinned `current_sql_dialect()`, which is deleted; the property it pins -
     // the dialect is knowable before any backend is opened - is what permits
     // the stamp that replaced it, so it rules on the captured route instead.
-
-    #[test]
-    fn lower_boolean_filter_with_schema_keeps_json_booleans_untouched() {
-        let schema = zeroship_data_sql::value!({
-            "active": { "type": "boolean" },
-            "payload": { "type": "json" }
-        });
-        let mut filter = zeroship_data_sql::value!({
-            "$and": [
-                { "active": { "$in": [true, false] } },
-                { "payload": true }
-            ]
-        });
-
-        lower_boolean_filter_with_schema(&schema, &mut filter);
-
-        assert_eq!(
-            filter["$and"][0]["active"]["$in"],
-            zeroship_data_sql::value!([1, 0])
-        );
-        assert_eq!(filter["$and"][1]["payload"], Value::Bool(true));
-    }
 
     #[test]
     fn validate_unmask_projection_rejects_explicit_select_without_id() {
@@ -2391,38 +1938,5 @@ mod tests {
             &["ssn".to_string()],
         )
         .expect("id-inclusive projection ok");
-    }
-
-    #[test]
-    fn encode_sqlite_binary_doc_with_schema_packs_vector_and_geopoint() {
-        let schema = zeroship_data_sql::value!({
-            "embedding": { "type": "vector", "vectorDims": 4 },
-            "loc": { "type": "geoPoint" },
-            "name": { "type": "string" }
-        });
-        let mut doc = zeroship_data_sql::value!({
-            "embedding": [1.0, 0.0, 0.5, -1.25],
-            "loc": { "lat": 37.7749, "lng": -122.4194 },
-            "name": "Alpha HQ"
-        });
-
-        encode_sqlite_binary_doc_with_schema(&schema, &mut doc).expect("encode sqlite blobs");
-
-        let embedding_bytes = doc["embedding"].as_bytes().expect("native vector buffer");
-        let loc_bytes = doc["loc"].as_bytes().expect("native geography buffer");
-        assert!(doc.get("__zsbin__embedding").is_none());
-        assert!(doc.get("__zsbin__loc").is_none());
-
-        assert_eq!(
-            embedding_bytes,
-            zeroship_data_sql::sqlite_values::vec_to_le_bytes(&[1.0, 0.0, 0.5, -1.25]),
-        );
-        assert_eq!(
-            loc_bytes,
-            zeroship_data_sql::sqlite_values::point_to_blob(crate::backend::GeoPoint {
-                lat: 37.7749,
-                lng: -122.4194,
-            }),
-        );
     }
 }

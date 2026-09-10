@@ -1,230 +1,188 @@
-//! PostgreSQL row decoding into native values.
+//! Decode PostgreSQL binary rows into native ORM values.
 //!
-//! Driver logic: it reads `compio_postgres::Row` and its column OIDs, and it
-//! belongs to the Postgres adapter.
-//!
-//! This lived in `v8_bridge.rs` until 2026-08-31, which made the Postgres
-//! backend call UP into the V8 adapter to decode its own rows - one adapter
-//! depending on a different adapter, and the reason a crate advertised as a
-//! thin Rust/V8 seam linked the Postgres driver.
-//!
-//! Nothing here knows about V8, and nothing here may.
+//! SQL NULL remains distinct from a malformed or unsupported value. Decode
+//! failures propagate to Rust and V8 callers with column context.
 
-use zeroship_data_sql::value::Value;
+use crate::error::DbError;
+use compio_postgres::{
+    Row,
+    types::{FromSql, Kind, Type},
+};
+use zeroship_data_sql::value::{Map, Value};
 
-/// Decode PostgreSQL rows into native records.
-pub fn rows_to_values(rows: &[compio_postgres::Row]) -> Vec<Value> {
+pub fn rows_to_values(rows: &[Row]) -> Result<Vec<Value>, DbError> {
     rows.iter().map(row_to_value).collect()
 }
 
-/// Convert a single row to a native record.
-///
-/// Uses column OIDs to determine the native type:
-/// - INT2/INT4/INT8 → number
-/// - FLOAT4/FLOAT8 → number
-/// - BOOL → boolean
-/// - TEXT/VARCHAR → string
-/// - UUID → string
-/// - JSONB/JSON → parsed JSON value
-/// - BYTEA → byte buffer
-/// - TIMESTAMP/TIMESTAMPTZ/DATE → timestamp
-/// - NUMERIC → exact decimal
-/// - Other decodable text → string
-pub(crate) fn row_to_value(row: &compio_postgres::Row) -> Value {
-    let mut obj = zeroship_data_sql::value::Map::new();
-    // Enumerate by index — compio_postgres's `Row::try_get(&str)` and
-    // `Row::raw_value(&str)` resolve the name via a linear scan of
-    // `row.columns()`, which makes `row_to_value` O(N²) in the column
-    // count. Threading the index directly drops the per-column lookup
-    // to O(1).
-    for (idx, col) in row.columns().iter().enumerate() {
-        let key = col.name().to_string();
-        let value = column_to_value(row, idx, col.type_().oid());
-        obj.insert(key, value);
+pub(crate) fn row_to_value(row: &Row) -> Result<Value, DbError> {
+    let mut object = Map::with_capacity(row.columns().len());
+    for (index, column) in row.columns().iter().enumerate() {
+        let error = |reason: &str| DbError::row_decode(column.name(), reason);
+        let value = match row
+            .raw_value(index)
+            .map_err(|_| error("invalid row layout"))?
+        {
+            None => Value::Null,
+            Some(bytes) => decode_value(column.type_(), bytes).map_err(|reason| error(&reason))?,
+        };
+        object.insert(column.name().to_owned(), value);
     }
-    Value::Object(obj)
+    Ok(Value::Object(object))
 }
 
-/// Decode a single column into its native type based on its OID. Uses a
-/// numeric column index (not the name) so `Row::try_get` /
-/// `Row::raw_value` skip the linear name lookup — see the rationale
-/// on `row_to_value` above.
-///
-/// `raw_value` refuses an index the row does not carry, and the arms below
-/// fold that refusal into `Value::Null` alongside SQL NULL. That is safe
-/// HERE and nowhere else: the only caller is `row_to_value`, which obtains
-/// `idx` by enumerating `row.columns()`, so every index is in range by
-/// construction and the refusal is unreachable. A caller resolving a column
-/// BY NAME has no such guarantee and must propagate the error instead — see
-/// `audit::read_processed_from_audit_row`.
-fn column_to_value(row: &compio_postgres::Row, idx: usize, oid: u32) -> Value {
-    // Try to get the value — if it's NULL, return null
-    // OIDs from postgres_types::Type constants
-    match oid {
-        // BYTEA retains its native bytes.
-        17 => match row.raw_value(idx) {
-            Ok(Some(bytes)) => Value::Bytes(bytes.to_vec()),
-            Ok(None) | Err(_) => Value::Null,
+fn from_sql<'a, T: FromSql<'a>>(ty: &Type, bytes: &'a [u8]) -> Result<T, String> {
+    T::from_sql(ty, bytes).map_err(|_| format!("invalid {} binary value", ty.name()))
+}
+
+fn finite_number(value: f64) -> Result<Value, String> {
+    Value::try_from(value).map_err(|_| "non-finite numbers are unsupported".into())
+}
+
+fn decode_value(ty: &Type, bytes: &[u8]) -> Result<Value, String> {
+    match ty.kind() {
+        Kind::Domain(base) => return decode_value(base, bytes),
+        Kind::Enum(_) => {
+            return std::str::from_utf8(bytes)
+                .map(Value::from)
+                .map_err(|_| "invalid enum text".into());
+        }
+        _ => {}
+    }
+    match *ty {
+        Type::BYTEA => Ok(Value::Bytes(bytes.to_vec())),
+        Type::BOOL => match bytes {
+            [0] => Ok(Value::Bool(false)),
+            [1] => Ok(Value::Bool(true)),
+            _ => Err("invalid boolean binary value".into()),
         },
-        // BOOL = 16
-        16 => match row.try_get::<_, bool>(idx) {
-            Ok(v) => Value::Bool(v),
-            Err(_) => Value::Null,
-        },
-        // INT2 = 21
-        21 => match row.try_get::<_, i16>(idx) {
-            Ok(v) => Value::Number(zeroship_data_sql::value::Number::from(v)),
-            Err(_) => Value::Null,
-        },
-        // INT4 = 23
-        23 => match row.try_get::<_, i32>(idx) {
-            Ok(v) => Value::Number(zeroship_data_sql::value::Number::from(v)),
-            Err(_) => Value::Null,
-        },
-        // INT8 = 20
-        20 => match row.try_get::<_, i64>(idx) {
-            Ok(v) => Value::Number(zeroship_data_sql::value::Number::from(v)),
-            Err(_) => Value::Null,
-        },
-        // FLOAT4 = 700
-        700 => match row.try_get::<_, f32>(idx) {
-            Ok(v) => zeroship_data_sql::value::Number::from_f64(f64::from(v))
-                .map_or(Value::Null, Value::Number),
-            Err(_) => Value::Null,
-        },
-        // FLOAT8 = 701
-        701 => match row.try_get::<_, f64>(idx) {
-            Ok(v) => {
-                zeroship_data_sql::value::Number::from_f64(v).map_or(Value::Null, Value::Number)
+        Type::INT2 => from_sql::<i16>(ty, bytes).map(Value::from),
+        Type::INT4 => from_sql::<i32>(ty, bytes).map(Value::from),
+        Type::INT8 => from_sql::<i64>(ty, bytes).map(Value::from),
+        Type::OID => from_sql::<u32>(ty, bytes).map(Value::from),
+        Type::CHAR => from_sql::<i8>(ty, bytes).map(Value::from),
+        Type::FLOAT4 => finite_number(f64::from(from_sql::<f32>(ty, bytes)?)),
+        Type::FLOAT8 => finite_number(from_sql::<f64>(ty, bytes)?),
+        Type::UUID => from_sql::<uuid::Uuid>(ty, bytes).map(|value| Value::from(value.to_string())),
+        Type::TIMESTAMP | Type::TIMESTAMPTZ => {
+            let micros = i64::from_be_bytes(
+                bytes
+                    .try_into()
+                    .map_err(|_| "invalid timestamp binary value")?,
+            );
+            if matches!(micros, i64::MIN | i64::MAX) {
+                return Err("infinite timestamps are unsupported".into());
             }
-            Err(_) => Value::Null,
-        },
-        // UUID = 2950
-        2950 => match row.try_get::<_, uuid::Uuid>(idx) {
-            Ok(v) => Value::String(v.to_string()),
-            Err(_) => Value::Null,
-        },
-        // TIMESTAMP = 1114, TIMESTAMPTZ = 1184
-        // Postgres sends as i64 microseconds since 2000-01-01 00:00:00 UTC.
-        // Return as Unix milliseconds (number) — matches JS Date.now() / new Date(ts).
-        // Postgres `infinity`/`-infinity` arrive as `i64::MAX`/`i64::MIN`;
-        // wrap arithmetic in `checked_*` so an overflowing sentinel becomes
-        // `null` (the conceptual `DbError::Internal`) instead of panicking
-        // the worker thread.
-        1114 | 1184 => match row.raw_value(idx) {
-            Ok(Some(bytes)) if bytes.len() == 8 => {
-                let pg_usec = i64::from_be_bytes(bytes.try_into().unwrap());
-                // 2000-01-01 = 946684800 seconds since Unix epoch
-                match (pg_usec / 1_000).checked_add(946_684_800_000) {
-                    Some(unix_ms) => Value::Timestamp(unix_ms),
-                    None => {
-                        tracing::warn!(
-                            oid = oid,
-                            pg_usec = pg_usec,
-                            "db: TIMESTAMP arithmetic overflow (likely Postgres ±infinity); returning null"
-                        );
-                        Value::Null
-                    }
-                }
+            // Floor to the containing millisecond on both sides of the epoch.
+            Ok(Value::Timestamp(micros.div_euclid(1000) + 946_684_800_000))
+        }
+        Type::DATE => {
+            let days =
+                i32::from_be_bytes(bytes.try_into().map_err(|_| "invalid date binary value")?);
+            if matches!(days, i32::MIN | i32::MAX) {
+                return Err("infinite dates are unsupported".into());
             }
-            _ => Value::Null,
-        },
-        // DATE = 1082 — i32 days since 2000-01-01
-        // Return as Unix milliseconds at midnight UTC.
-        // Same overflow concern as TIMESTAMP: `infinity` arrives as
-        // `i32::MAX`, which multiplies past `i64::MAX`. Checked math
-        // turns the overflow into `null` rather than a panic.
-        1082 => match row.raw_value(idx) {
-            Ok(Some(bytes)) if bytes.len() == 4 => {
-                let pg_days = i32::from_be_bytes(bytes.try_into().unwrap());
-                let unix_ms = i64::from(pg_days)
-                    .checked_add(10957)
-                    .and_then(|d| d.checked_mul(86_400_000));
-                match unix_ms {
-                    Some(ms) => Value::Timestamp(ms),
-                    None => {
-                        tracing::warn!(
-                            oid = oid,
-                            pg_days = pg_days,
-                            "db: DATE arithmetic overflow (likely Postgres ±infinity); returning null"
-                        );
-                        Value::Null
-                    }
-                }
-            }
-            _ => Value::Null,
-        },
-        // JSONB = 3802 — binary format has 1-byte version prefix, strip it
-        3802 => match row.raw_value(idx) {
-            Ok(Some(bytes)) if bytes.len() > 1 => {
-                let json_str = std::str::from_utf8(&bytes[1..]).unwrap_or("null");
-                serde_json::from_str(json_str).unwrap_or(Value::Null)
-            }
-            _ => Value::Null,
-        },
-        // JSON = 114 — text format, no prefix
-        114 => row
-            .raw_value(idx)
-            .ok()
-            .flatten()
-            .and_then(|bytes| serde_json::from_slice(bytes).ok())
-            .unwrap_or(Value::Null),
-        // NUMERIC is sent in PostgreSQL binary format, not UTF-8 text.
-        1700 => row
-            .raw_value(idx)
-            .ok()
-            .flatten()
-            .and_then(decode_numeric)
+            Ok(Value::Timestamp((i64::from(days) + 10957) * 86_400_000))
+        }
+        Type::JSONB => {
+            let Some((&1, json)) = bytes.split_first() else {
+                return Err("unsupported JSONB binary version".into());
+            };
+            serde_json::from_slice(json).map_err(|_| "invalid JSONB value".into())
+        }
+        Type::JSON => serde_json::from_slice(bytes).map_err(|_| "invalid JSON value".into()),
+        Type::NUMERIC => decode_numeric(bytes)
             .map(Value::Decimal)
-            .unwrap_or(Value::Null),
-        // TEXT = 25, VARCHAR = 1043, CHAR = 18, BPCHAR = 1042, NAME = 19
-        // and everything else: treat as text
-        _ => match row.try_get::<_, String>(idx) {
-            Ok(v) => Value::String(v),
-            Err(_) => Value::Null,
-        },
+            .ok_or_else(|| "invalid or non-finite numeric value".into()),
+        _ if ty.name() == "vector" => decode_vector(bytes),
+        _ if ty.name() == "geography" => decode_geography(bytes),
+        _ if <String as FromSql>::accepts(ty) => from_sql::<String>(ty, bytes).map(Value::from),
+        _ => Err(format!("unsupported PostgreSQL type '{}'", ty.name())),
     }
 }
 
-// ---------------------------------------------------------------------------
-// Bench entry points
-// ---------------------------------------------------------------------------
-//
-// These two lived in `lib.rs` until 2026-09-01, which put
-// `&compio_postgres::Row` into the signature of the crate advertised as a thin
-// Rust/V8 seam - two always-compiled `pub fn`s, no `cfg`, so a build could not
-// opt out of them. That is the same defect as the row decoders themselves being
-// in `v8_bridge.rs`, one level up: the wrapper moved without the driver type
-// moving with it.
-//
-// They are `pub` rather than `pub(crate)` because Criterion benches and the
-// integration test link this crate as an EXTERNAL dependency and cannot reach
-// `pub(crate)`. `lib.rs` re-exports both, so `zeroship_data_v8::…_for_bench`
-// still resolves; a `pub use` names no type, so the adapter's signature surface
-// stays vendor-free. When this module becomes `data-postgres`, the benches move
-// with it and the re-export goes away.
+/// pgvector's binary send format: dimensions, reserved word, then components.
+fn decode_vector(bytes: &[u8]) -> Result<Value, String> {
+    let Some(header) = bytes.get(..4) else {
+        return Err("invalid vector header".into());
+    };
+    let dimensions = i16::from_be_bytes([header[0], header[1]]);
+    if dimensions <= 0 || header[2..] != [0, 0] || bytes.len() != 4 + dimensions as usize * 4 {
+        return Err("invalid vector dimensions or binary layout".into());
+    }
+    bytes[4..]
+        .chunks_exact(4)
+        .map(|chunk| finite_number(f64::from(f32::from_be_bytes(chunk.try_into().unwrap()))))
+        .collect::<Result<Vec<_>, _>>()
+        .map(Value::Array)
+}
 
-/// **Bench-only**: thin wrapper around [`row_to_value`] so the `bench_row_to_json`
-/// Criterion harness can measure native row decoding.
-///
-/// `#[doc(hidden)]` keeps it off the public docs surface.
-/// `compio_postgres::test_utils::row_for_test` (doc-hidden there, and always
-/// compiled) is the matching `Row` synthesiser - see
-/// `crates/zeroship-data-v8/benches/bench_row_to_json.rs` for the wiring.
+/// PostGIS geography sends EWKB. The ORM's geographic type is a WGS84 point.
+fn decode_geography(bytes: &[u8]) -> Result<Value, String> {
+    let Some(header) = bytes.get(..5) else {
+        return Err("invalid geography header".into());
+    };
+    let little_endian = match header[0] {
+        0 => false,
+        1 => true,
+        _ => return Err("invalid geography byte order".into()),
+    };
+    let word = |bytes: &[u8]| {
+        let word = bytes.try_into().unwrap();
+        if little_endian {
+            u32::from_le_bytes(word)
+        } else {
+            u32::from_be_bytes(word)
+        }
+    };
+    let coordinate_offset = match word(&header[1..]) {
+        1 => 5,
+        0x2000_0001 => {
+            let srid = bytes.get(5..9).ok_or("missing geography SRID")?;
+            if word(srid) != 4326 {
+                return Err("geographic points require WGS84 coordinates".into());
+            }
+            9
+        }
+        _ => return Err("only geographic points are supported".into()),
+    };
+    if bytes.len() != coordinate_offset + 16 {
+        return Err("invalid geographic point binary layout".into());
+    }
+    let coordinate = |bytes: &[u8]| {
+        let value = bytes.try_into().unwrap();
+        if little_endian {
+            f64::from_le_bytes(value)
+        } else {
+            f64::from_be_bytes(value)
+        }
+    };
+    let lng = coordinate(&bytes[coordinate_offset..coordinate_offset + 8]);
+    let lat = coordinate(&bytes[coordinate_offset + 8..]);
+    if !(-90.0..=90.0).contains(&lat) || !(-180.0..=180.0).contains(&lng) {
+        return Err("invalid geographic point coordinates".into());
+    }
+    Ok(Value::Object(
+        [
+            ("lat".into(), finite_number(lat)?),
+            ("lng".into(), finite_number(lng)?),
+        ]
+        .into(),
+    ))
+}
+
+/// Benchmark entry point for native row decoding.
 #[doc(hidden)]
-#[must_use]
-pub fn row_to_value_for_bench(row: &compio_postgres::Row) -> Value {
+pub fn row_to_value_for_bench(row: &Row) -> Result<Value, DbError> {
     row_to_value(row)
 }
 
 /// Benchmark the native first-row projection used before V8 materialization.
 #[doc(hidden)]
-#[must_use]
-pub fn first_row_or_null_for_bench(rows: &[compio_postgres::Row]) -> Value {
-    rows_to_values(rows)
-        .into_iter()
-        .next()
-        .unwrap_or(Value::Null)
+pub fn first_row_or_null_for_bench(rows: &[Row]) -> Result<Value, DbError> {
+    rows.first()
+        .map(row_to_value)
+        .transpose()
+        .map(|row| row.unwrap_or(Value::Null))
 }
 
 /// Decode finite PostgreSQL base-group numeric storage without floating point.
@@ -273,4 +231,120 @@ fn decode_numeric(bytes: &[u8]) -> Option<String> {
         result.truncate(start + scale);
     }
     Some(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use compio_postgres::test_utils::{column_for_test, row_for_test};
+
+    #[test]
+    fn malformed_cells_fail_with_column_context_without_echoing_values() {
+        let payloads = [
+            (Type::INT4, vec![0]),
+            (Type::BOOL, vec![2]),
+            (Type::FLOAT8, vec![]),
+            (Type::UUID, vec![0]),
+            (Type::TIMESTAMP, vec![0]),
+            (Type::DATE, vec![0]),
+            (Type::JSONB, b"\x02null".to_vec()),
+            (Type::JSONB, b"\x01secret_not_json".to_vec()),
+            (Type::JSON, b"secret_not_json".to_vec()),
+            (Type::TEXT, vec![255]),
+            (Type::NUMERIC, vec![0]),
+        ];
+        for (ty, bytes) in payloads {
+            let row = row_for_test(
+                vec![column_for_test("invalid_result", ty)],
+                vec![Some(bytes)],
+            )
+            .unwrap();
+            let error = row_to_value(&row).unwrap_err();
+            let DbError::Coded { code, message, .. } = error else {
+                panic!("{error}")
+            };
+            assert_eq!(code, "row_decode_failed");
+            assert!(message.contains("invalid_result"));
+            assert!(!message.contains("secret_not_json"));
+        }
+        let valid = row_for_test(
+            vec![column_for_test("item", Type::TEXT)],
+            vec![Some(b"visible".to_vec())],
+        )
+        .unwrap();
+        let broken = row_for_test(
+            vec![column_for_test("item", Type::INT4)],
+            vec![Some(vec![0])],
+        )
+        .unwrap();
+        assert!(
+            rows_to_values(&[valid, broken]).is_err(),
+            "a failed row cannot become a partial successful batch"
+        );
+    }
+
+    #[test]
+    fn extension_binary_values_validate_their_entire_layout() {
+        let vector = [0, 2, 0, 0]
+            .into_iter()
+            .chain(1.0f32.to_be_bytes())
+            .chain((-0.5f32).to_be_bytes())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            decode_vector(&vector).unwrap(),
+            zeroship_data_sql::value!([1.0, -0.5])
+        );
+        for length in 0..vector.len() {
+            assert!(decode_vector(&vector[..length]).is_err());
+        }
+        let mut nonfinite = vector.clone();
+        nonfinite[4..8].copy_from_slice(&f32::INFINITY.to_be_bytes());
+        assert!(decode_vector(&nonfinite).is_err());
+        let mut reserved = vector.clone();
+        reserved[3] = 1;
+        assert!(decode_vector(&reserved).is_err());
+
+        for little_endian in [false, true] {
+            let word = |value: u32| {
+                if little_endian {
+                    value.to_le_bytes()
+                } else {
+                    value.to_be_bytes()
+                }
+            };
+            let coordinate = |value: f64| {
+                if little_endian {
+                    value.to_le_bytes()
+                } else {
+                    value.to_be_bytes()
+                }
+            };
+            let point = [u8::from(little_endian)]
+                .into_iter()
+                .chain(word(0x2000_0001))
+                .chain(word(4326))
+                .chain(coordinate(-122.0))
+                .chain(coordinate(37.0))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                decode_geography(&point).unwrap(),
+                zeroship_data_sql::value!({"lat":37.0, "lng":-122.0})
+            );
+            for length in 0..point.len() {
+                assert!(decode_geography(&point[..length]).is_err());
+            }
+            let mut invalid = point.clone();
+            invalid[9..17].copy_from_slice(&coordinate(f64::NAN));
+            assert!(decode_geography(&invalid).is_err());
+            let mut wrong_srid = point.clone();
+            wrong_srid[5..9].copy_from_slice(&word(3857));
+            assert!(decode_geography(&wrong_srid).is_err());
+            let mut wrong_type = point.clone();
+            wrong_type[1..5].copy_from_slice(&word(0x2000_0002));
+            assert!(decode_geography(&wrong_type).is_err());
+            let mut trailing = point;
+            trailing.push(0);
+            assert!(decode_geography(&trailing).is_err());
+        }
+    }
 }

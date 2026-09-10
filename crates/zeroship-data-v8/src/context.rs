@@ -29,6 +29,10 @@
 //! co-resident isolates therefore needs an explicit binding key; thread-local
 //! storage alone does not provide isolate identity.
 
+#[cfg(any(test, feature = "test-helpers"))]
+#[allow(unused_imports)]
+use zeroship_data_orm::fixtures::DatabaseFixture;
+
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -813,7 +817,7 @@ mod tests {
     /// tempdir-backed store. No SQL is executed on it — these tests
     /// exercise the slot state machine only.
     async fn sqlite_tx_conn(dir: &tempfile::TempDir) -> Session {
-        use crate::backend::SqlExecutor as _;
+        use zeroship_data_orm::fixtures::DatabaseFixture;
         // The key source is a parameter now: the engine composer cannot read
         // this crate's per-isolate context, so the caller that owns it does the
         // lookup. This is the one adapter-side caller.
@@ -823,7 +827,7 @@ mod tests {
         )
         .expect("open sqlite backend");
         let client = backend
-            .acquire_dedicated_client("slot_state_probe")
+            .fixture_session("slot_state_probe")
             .await
             .expect("acquire sqlite client");
         Session::new(client)

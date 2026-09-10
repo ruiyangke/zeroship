@@ -1584,10 +1584,10 @@ const _procedures = { seed, failBulk };
 /// `TerminalResult::RolledBack`.
 ///
 /// **The two paragraphs above replaced a description of the pre-fix world.**
-/// The old text said the settle path sends its COMMIT through `client_exec`,
+/// The old text said the settle path sends its COMMIT through `execute_fixture_on`,
 /// which throws the tag away. It does not, and
 /// `transaction/mod.rs`'s own header says so in as many words: terminal
-/// statements deliberately bypass `client_exec`. The classifier landed and this
+/// statements deliberately bypass `execute_fixture_on`. The classifier landed and this
 /// comment did not move.
 ///
 /// SCOPE: this drives an EXPLICIT creator transaction on purpose. The autocommit

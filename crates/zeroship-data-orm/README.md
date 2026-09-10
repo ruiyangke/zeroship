@@ -2,16 +2,19 @@
 
 The Rust and worker JavaScript entry points share collection operations,
 protection passes, transaction scopes, backend routing, and change publication.
-PostgreSQL and SQLite adapters are modules in this crate. The shared driver
-interface accepts host-defined implementations and has no V8 dependency.
+PostgreSQL and SQLite adapters are modules in this crate. The physical driver contract covers connection acquisition and SQL sessions.
+Host services supply tenant routing, protection, search, and change publication;
+none of these are requirements on a driver. The crate has no V8 dependency.
 Architecture and ownership: `docs/architecture/data-orm.md`.
 
 The host supplies a `DbBinding`, a `BackendHandle`, and the deployment's runtime
-collection descriptors. `Database::new` uses an installed descriptor;
-`Database::from_schema` validates and installs field maps. `Database::connect`
+collection descriptors. `Database::new` takes an explicit `OrmContext` with installed descriptors;
+`Database::from_schema` creates an independent context, validates and installs field maps. `Database::connect`
 opens the configured backend through `ConnectOptions`, using the same URL grammar
 as the worker. Application functions take a backend-independent `&Database`. Schema changes and
 physical table creation belong to the migration engine and its service.
+SQLite requires filesystem storage. Memory selectors and URI options are
+rejected; tests create and own their temporary database files explicitly.
 
 Rust collection metadata comes from the same migration-generated
 `schema.runtime.json` used by the worker. The `schema!` macro reads the artifact
@@ -120,7 +123,7 @@ restoration, aggregation, distinct values, and search. Typed operations use the
 same `PreparedOperation` path as those operations and the V8 adapter.
 
 Implementation: `src/orm.rs`, `src/orm/`, `src/crud/`, `src/transaction/`, and
-`src/exec.rs`. Macro implementations live in `crates/zeroship-data-macros/`.
+`src/exec.rs`, `src/executor.rs`, `src/protection/`, and `src/search.rs`. Macro implementations live in `crates/zeroship-data-macros/`.
 
 Run the engine tests and compiler contracts with:
 
@@ -139,3 +142,15 @@ cargo test -p zeroship-data-orm --lib orm::tests::postgres_native_models_round_t
 
 The fixtures render the migration IR into physical tables and check its generated
 runtime descriptor against the artifact used by `schema!`.
+
+`OrmContext` owns descriptors, immutable startup policies, catalog protection
+floors, and transaction lanes. Cloned database handles share that owner;
+independently constructed databases do not. Prepared operations and transaction
+cleanup retain their originating context across asynchronous work and drop.
+The V8 host shares a thread context across its dispatches. Schema and policy
+entries are keyed by the complete app/deploy/schema binding.
+
+Physical value codecs live with SQL compilation in `zeroship-data-sql`.
+`Catalog` and `Search` are the runtime service contracts. Raw fixture setup uses
+`fixtures::DatabaseFixture`, available only to test-helper builds; it is not a
+backend requirement. Application code uses the native driver/session contract.

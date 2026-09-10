@@ -25,6 +25,7 @@
  */
 import { mkdir } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
+import { sqliteDevFilePath } from "../dev-database-url.js";
 
 import { loadMigrateAddon, type ApplyReply } from "./addon.js";
 import { CONFINED_SYSTEM_SHAPE_INJECT_TOML } from "./confined-system-shape.generated.js";
@@ -94,17 +95,8 @@ scope = "all"
  * which is the dev server's cwd and therefore the runtime's.
  */
 export function devSqliteDir(root: string, databaseUrl?: string): string {
-  const url = databaseUrl ?? "";
-  if (url.startsWith("sqlite:")) {
-    const path = url.slice("sqlite:".length);
-    // `:memory:` (and the `sqlite::memory:` spelling) name no file on disk, so
-    // there is nothing to apply into; fall back rather than compute a
-    // nonsensical parent directory.
-    if (path.length > 0 && !path.startsWith(":memory:")) {
-      return dirname(resolve(root, path));
-    }
-  }
-  return join(root, DEV_STATE_DIR);
+  if (databaseUrl === undefined) return join(root, DEV_STATE_DIR);
+  return dirname(resolve(root, sqliteDevFilePath(databaseUrl)));
 }
 
 /** The app file + journal the worker's SQLite backend derives for dev. */

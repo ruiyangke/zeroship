@@ -1,24 +1,9 @@
-//! Database-DSN classification shared across the stack.
-//!
-//! The canonical backend-selection grammar lives in
-//! `zeroship-data-v8::backend_for_url` (it is the code that actually opens a
-//! pool / SQLite backend). But two non-plugin-db call sites must classify a
-//! DSN *without* taking a dependency on plugin-db (which itself depends on
-//! `zeroship-runtime`, so the runtime cannot depend back on it):
-//!
-//! - `zeroship-runtime`'s `serve::start_server` — the SQLite dev-tier
-//!   single-isolate clamp (SQLite-engine wiring design R3.4 fix 1): a
-//!   `sqlite:`/`file:` DSN forces `num_workers → 1`.
-//! - `zeroship-worker`'s startup — the hard-abort guard (fix 2): a worker is
-//!   multi-replica by identity, so a SQLite DSN there is always a misconfig.
-//!
-//! Both crates depend on `zeroship-core`, so this is the shared home for the
-//! classifier. plugin-db's `backend_for_url` / `is_sqlite_url` delegate here so
-//! the grammar has exactly one source of truth (no drift between the opener and
-//! the classifiers).
+//! Database URL classification shared by the runtime, worker, and ORM.
+//! SQLite selectors resolve to filesystem paths. The ORM opener and runtime
+//! guards use this parser so invalid or ephemeral selectors cannot disagree.
 
 /// `true` iff `url` selects the SQLite (dev-tier) backend under the canonical
-/// grammar: `sqlite:` / `sqlite://` / `file:` / `:memory:` / a bare filesystem
+/// grammar: `sqlite:` / `sqlite://` / `file:` / a bare filesystem
 /// path. Postgres (`postgres://` / `postgresql://`) is `false`; an empty URL is
 /// `false` (no backend); an unknown explicit scheme (`scheme://…`) is `false`
 /// (it is neither SQLite nor a bare path).
@@ -29,38 +14,43 @@
 /// `false` before the bare-path fallthrough.
 #[must_use]
 pub fn is_sqlite_url(url: &str) -> bool {
+    sqlite_file_path(url).is_some()
+}
+
+/// A SQLite path must name persistent storage, without SQLite URI options.
+#[must_use]
+pub fn valid_sqlite_file_path(path: &str) -> bool {
+    !path.trim().is_empty()
+        && !path.eq_ignore_ascii_case(":memory:")
+        && !path.contains(['?', '#'])
+        && !has_scheme(path)
+}
+
+fn has_scheme(path: &str) -> bool {
+    path.split_once(':').is_some_and(|(scheme, _)| {
+        let mut chars = scheme.chars();
+        matches!(chars.next(), Some(c) if c.is_ascii_alphabetic())
+            && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '.' | '-'))
+    })
+}
+
+/// Resolve a SQLite selector to a filesystem path without opening it.
+#[must_use]
+pub fn sqlite_file_path(url: &str) -> Option<&str> {
     let trimmed = url.trim();
     if trimmed.is_empty() {
-        return false;
+        return None;
     }
 
     let lower = trimmed.to_ascii_lowercase();
-    if lower == ":memory:" {
-        return true;
-    }
     if lower.starts_with("postgres://") || lower.starts_with("postgresql://") {
-        return false;
+        return None;
     }
-    if lower.starts_with("sqlite://")
-        || lower.starts_with("sqlite:")
-        || lower.starts_with("file:")
-    {
-        return true;
-    }
-
-    // An explicit but unrecognised scheme (`scheme://…` / `scheme:…`, where the
-    // scheme is `[a-z][a-z0-9+.-]*`) is NOT a bare path and is NOT SQLite —
-    // `backend_for_url` rejects it as unsupported. Anything else is a bare
-    // filesystem path, which selects SQLite.
-    let has_unknown_scheme = trimmed
-        .split_once(':')
-        .map(|(scheme, _)| {
-            let mut chars = scheme.chars();
-            matches!(chars.next(), Some(c) if c.is_ascii_alphabetic())
-                && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '.' | '-'))
-        })
-        .unwrap_or(false);
-    !has_unknown_scheme
+    let path = ["sqlite://", "sqlite:", "file:"]
+        .iter()
+        .find(|prefix| lower.starts_with(**prefix))
+        .map_or(trimmed, |prefix| &trimmed[prefix.len()..]);
+    valid_sqlite_file_path(path).then_some(path)
 }
 
 #[cfg(test)]
@@ -79,7 +69,6 @@ mod tests {
         assert!(is_sqlite_url("sqlite:.zeroship/dev.sqlite"));
         assert!(is_sqlite_url("sqlite://./data/app.sqlite"));
         assert!(is_sqlite_url("file:./local.db"));
-        assert!(is_sqlite_url(":memory:"));
         assert!(is_sqlite_url("/var/lib/zeroship/dev.sqlite"));
         assert!(is_sqlite_url("./relative/path.sqlite"));
     }
@@ -91,5 +80,22 @@ mod tests {
         // mysql:// is an explicit unknown scheme — not a bare path, not sqlite.
         assert!(!is_sqlite_url("mysql://localhost/db"));
         assert!(!is_sqlite_url("redis://localhost:6379"));
+    }
+
+    #[test]
+    fn sqlite_requires_a_file() {
+        for url in [
+            ":memory:",
+            "sqlite::memory:",
+            "SQLITE://:MEMORY:",
+            "file::memory:",
+            "file:db?mode=memory&cache=shared",
+            "sqlite:file:db?mode=memory",
+            "sqlite:",
+            "sqlite://",
+            "file:",
+        ] {
+            assert!(!is_sqlite_url(url), "{url}");
+        }
     }
 }

@@ -124,7 +124,7 @@ pub async fn apply(
         crate::descriptor::collection_schema(binding, collection)?,
         &opts.schema_field_scope,
     );
-    normalize_rows_on_read(&schema, &mut rows)?;
+    zeroship_data_sql::codecs::decode_rows(&schema, &mut rows)?;
 
     if opts.apply_decrypt && super::schema_has_encrypted_columns(&schema) {
         // The key store comes off the handle this read ran on, not off a
@@ -184,239 +184,6 @@ fn scope_schema(schema: Arc<Value>, scope: &SchemaFieldScope<'_>) -> Arc<Value> 
     }
 }
 
-fn normalize_rows_on_read(schema: &Value, rows: &mut [Value]) -> Result<(), DbError> {
-    for row in rows.iter_mut() {
-        normalize_row_on_read(schema, row)?;
-    }
-    Ok(())
-}
-
-fn normalize_row_on_read(schema: &Value, row: &mut Value) -> Result<(), DbError> {
-    let Some(obj) = row.as_object_mut() else {
-        return Ok(());
-    };
-    for (key, value) in obj.iter_mut() {
-        if matches!(key.as_str(), "created_at" | "updated_at" | "deleted_at") {
-            normalize_timestamp_value(value)?;
-            continue;
-        }
-
-        let Some(def) = schema
-            .as_object()
-            .and_then(|schema_obj| schema_obj.get(key))
-            .and_then(Value::as_object)
-        else {
-            continue;
-        };
-
-        if def.get("encrypted").is_some() {
-            continue;
-        }
-
-        match def.get("type").and_then(Value::as_str) {
-            Some("boolean") => normalize_boolean_value(value)?,
-            Some("json") | Some("object") | Some("array") | Some("union") => {
-                normalize_json_value(value)
-            }
-            Some("bytes") => normalize_bytes_value(value)?,
-            Some("date") | Some("calendarDate") => normalize_timestamp_value(value)?,
-            _ => {}
-        }
-    }
-    Ok(())
-}
-
-fn normalize_boolean_value(value: &mut Value) -> Result<(), DbError> {
-    match value {
-        Value::Bool(_) | Value::Null => Ok(()),
-        Value::Number(n) => {
-            if n.as_i64() == Some(0) {
-                *value = Value::Bool(false);
-                Ok(())
-            } else if n.as_i64() == Some(1) {
-                *value = Value::Bool(true);
-                Ok(())
-            } else {
-                Err(DbError::internal(format!(
-                    "normalize_row_on_read: boolean field expected 0/1, got {n}"
-                )))
-            }
-        }
-        Value::String(s) => match s.as_str() {
-            "0" | "false" => {
-                *value = Value::Bool(false);
-                Ok(())
-            }
-            "1" | "true" => {
-                *value = Value::Bool(true);
-                Ok(())
-            }
-            other => Err(DbError::internal(format!(
-                "normalize_row_on_read: boolean field expected 0/1/true/false, got {other:?}"
-            ))),
-        },
-        other => Err(DbError::internal(format!(
-            "normalize_row_on_read: boolean field expected bool/string/number/null, got {other:?}"
-        ))),
-    }
-}
-
-fn normalize_json_value(value: &mut Value) {
-    if let Value::String(s) = value {
-        if let Ok(parsed) = serde_json::from_str::<Value>(s) {
-            *value = parsed;
-        }
-    }
-}
-
-fn normalize_bytes_value(value: &mut Value) -> Result<(), DbError> {
-    match value {
-        Value::Null | Value::Bytes(_) => Ok(()),
-        _ => Err(DbError::internal(
-            "bytes column did not return native bytes",
-        )),
-    }
-}
-
-fn normalize_timestamp_value(value: &mut Value) -> Result<(), DbError> {
-    match value {
-        Value::Null | Value::Number(_) | Value::Timestamp(_) => Ok(()),
-        Value::String(s) => {
-            if let Some(ms) = parse_timestamp_millis(s) {
-                *value = Value::Number(zeroship_data_sql::value::Number::from(ms));
-            }
-            Ok(())
-        }
-        other => Err(DbError::internal(format!(
-            "normalize_row_on_read: timestamp field expected string/number/null, got {other:?}"
-        ))),
-    }
-}
-
-// This used to try `session_minter::parse_iso_to_millis` first and fall back to
-// the parser below. That fast path was deleted with the session minter on
-// 2026-09-02, and nothing was lost: the parser below accepts a strict superset
-// of the same `YYYY-MM-DDTHH:MM:SS.mmm` shape and computes it identically. It
-// is also stricter where it matters - the deleted one range-checked no field,
-// so `...T99:00:00.000` short-circuited to a nonsense instant instead of `None`.
-fn parse_timestamp_millis(s: &str) -> Option<i64> {
-    let b = s.as_bytes();
-    if b.len() < 19 {
-        return None;
-    }
-    if b[4] != b'-'
-        || b[7] != b'-'
-        || !matches!(b[10], b' ' | b'T')
-        || b[13] != b':'
-        || b[16] != b':'
-    {
-        return None;
-    }
-
-    let year: i32 = std::str::from_utf8(&b[0..4]).ok()?.parse().ok()?;
-    let month: u32 = std::str::from_utf8(&b[5..7]).ok()?.parse().ok()?;
-    let day: u32 = std::str::from_utf8(&b[8..10]).ok()?.parse().ok()?;
-    let hour: i64 = std::str::from_utf8(&b[11..13]).ok()?.parse().ok()?;
-    let minute: i64 = std::str::from_utf8(&b[14..16]).ok()?.parse().ok()?;
-    let second: i64 = std::str::from_utf8(&b[17..19]).ok()?.parse().ok()?;
-    if !(0..=23).contains(&hour) || !(0..=59).contains(&minute) || !(0..=59).contains(&second) {
-        return None;
-    }
-
-    let mut millis = 0i64;
-    let mut idx = 19usize;
-
-    if idx < b.len() && b[idx] == b'.' {
-        idx += 1;
-        let frac_start = idx;
-        while idx < b.len() && b[idx].is_ascii_digit() {
-            idx += 1;
-        }
-        if idx == frac_start {
-            return None;
-        }
-        let frac = &b[frac_start..idx];
-        let frac_digits = std::str::from_utf8(frac).ok()?;
-        let mut milli_digits = frac_digits.chars().take(3).collect::<String>();
-        while milli_digits.len() < 3 {
-            milli_digits.push('0');
-        }
-        millis = milli_digits.parse::<i64>().ok()?;
-    }
-
-    let tz_offset_minutes = if idx < b.len() {
-        parse_timestamp_offset_minutes(&b[idx..])?
-    } else {
-        0
-    };
-
-    let days = days_from_civil(year, month, day)?;
-    let total_secs = days * 86_400 + hour * 3600 + minute * 60 + second;
-    Some(total_secs * 1000 + millis - tz_offset_minutes * 60 * 1000)
-}
-
-fn parse_timestamp_offset_minutes(rest: &[u8]) -> Option<i64> {
-    match rest {
-        b"Z" | b"z" => Some(0),
-        [sign @ (b'+' | b'-'), h1, h2] => {
-            let hours: i64 = std::str::from_utf8(&[*h1, *h2]).ok()?.parse().ok()?;
-            if hours > 23 {
-                return None;
-            }
-            let sign = if *sign == b'-' { -1 } else { 1 };
-            Some(sign * hours * 60)
-        }
-        [sign @ (b'+' | b'-'), h1, h2, b':', m1, m2] => {
-            let hours: i64 = std::str::from_utf8(&[*h1, *h2]).ok()?.parse().ok()?;
-            let minutes: i64 = std::str::from_utf8(&[*m1, *m2]).ok()?.parse().ok()?;
-            if hours > 23 || minutes > 59 {
-                return None;
-            }
-            let sign = if *sign == b'-' { -1 } else { 1 };
-            Some(sign * (hours * 60 + minutes))
-        }
-        [sign @ (b'+' | b'-'), h1, h2, m1, m2] => {
-            let hours: i64 = std::str::from_utf8(&[*h1, *h2]).ok()?.parse().ok()?;
-            let minutes: i64 = std::str::from_utf8(&[*m1, *m2]).ok()?.parse().ok()?;
-            if hours > 23 || minutes > 59 {
-                return None;
-            }
-            let sign = if *sign == b'-' { -1 } else { 1 };
-            Some(sign * (hours * 60 + minutes))
-        }
-        _ => None,
-    }
-}
-
-fn days_from_civil(y: i32, m: u32, d: u32) -> Option<i64> {
-    if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
-        return None;
-    }
-    let y = if m <= 2 {
-        i64::from(y) - 1
-    } else {
-        i64::from(y)
-    };
-    let era = y.div_euclid(400);
-    let yoe = (y - era * 400) as u64;
-    let m = m as i64;
-    let d = d as i64;
-    let doy = ((153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1) as u64;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    Some(era * 146_097 + doe as i64 - 719_468)
-}
-
-/// Decrypt every encrypted column on `rows`.
-///
-/// `keys` is a PARAMETER, and it is a [`crate::encryption::KeyStore`] rather
-/// than a backend because a key store is the whole of what this stage needs -
-/// it issues no SQL, so it has no routing decision to make and must not be
-/// handed one. It resolved its own backend through the engine funnel until
-/// 2026-09-03, which read ADAPTER state (`crate::context`, `init_pool_async`)
-/// from an ENGINE file. [`apply`] already holds the handle the read ran on, so
-/// the store travels down from there and no key can come from a backend other
-/// than the one that produced the ciphertext.
-///
 /// One arm, not two. This was a PG branch and a SQLite branch calling the SAME
 /// function with the SAME arguments, differing only in the concrete type they
 /// passed - a monomorphisation artifact of the `EncryptedColumn` trait, deleted
@@ -430,8 +197,10 @@ async fn decrypt_rows_on_read(
     rows: &mut [Value],
 ) -> Result<(), DbError> {
     for row in rows.iter_mut() {
-        crate::crud::encryption_pass::decrypt_row_on_read(keys, app_id, collection, schema, row)
-            .await?;
+        crate::protection::encryption_pass::decrypt_row_on_read(
+            keys, app_id, collection, schema, row,
+        )
+        .await?;
     }
     Ok(())
 }
@@ -476,7 +245,7 @@ fn wrap_masked_rows_on_read(
     rows: &mut [Value],
 ) -> Result<(), DbError> {
     for row in rows.iter_mut() {
-        crate::crud::mask_pass::wrap_row_on_read(schema, collection, row)?;
+        crate::protection::mask_pass::wrap_row_on_read(schema, collection, row)?;
     }
     Ok(())
 }
@@ -484,52 +253,6 @@ fn wrap_masked_rows_on_read(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn normalize_row_on_read_coerces_sqlite_wire_shapes() {
-        let schema = zeroship_data_sql::value!({
-            "active": { "type": "boolean" },
-            "prefs": { "type": "object" },
-            "avatar": { "type": "bytes" },
-            "published_at": { "type": "date" }
-        });
-        let mut row = zeroship_data_sql::value!({
-            "active": 1,
-            "prefs": "{\"theme\":\"dark\"}",
-            "avatar": Value::Bytes(vec![104, 105]),
-            "published_at": "2026-05-07T01:02:03.004Z"
-        });
-
-        normalize_row_on_read(&schema, &mut row).expect("normalize");
-
-        assert_eq!(row["active"], Value::Bool(true));
-        assert_eq!(row["prefs"], zeroship_data_sql::value!({"theme":"dark"}));
-        assert_eq!(row["avatar"], Value::Bytes(vec![104, 105]));
-        assert_eq!(
-            row["published_at"],
-            zeroship_data_sql::value!(1_778_115_723_004i64)
-        );
-    }
-
-    #[test]
-    fn normalize_row_on_read_skips_encrypted_columns() {
-        let schema = zeroship_data_sql::value!({
-            "secret": {
-                "type": "bytes",
-                "encrypted": {
-                    "mode": "randomized",
-                    "wraps": "bytes"
-                }
-            }
-        });
-        let mut row = zeroship_data_sql::value!({
-            "secret": "AQID"
-        });
-
-        normalize_row_on_read(&schema, &mut row).expect("normalize");
-
-        assert_eq!(row["secret"], Value::String("AQID".to_string()));
-    }
 
     /// A descriptor entry that declares NO creator field still normalizes the
     /// platform system timestamps, and coerces nothing else.
@@ -539,70 +262,6 @@ mod tests {
     /// refused by `apply` before a row is touched, and the empty field map
     /// (`query::empty_read_schema()`) is the only remaining way to have zero
     /// declared fields. The behaviour the test pins is unchanged.
-    #[test]
-    fn normalize_row_on_read_without_declared_fields_only_normalizes_system_timestamps() {
-        let mut row = zeroship_data_sql::value!({
-            "created_at": "2026-05-07T01:02:03.004Z",
-            "published_at": "2026-05-07T01:02:03.004Z",
-            "active": 1,
-            "prefs": "{\"theme\":\"dark\"}"
-        });
-
-        normalize_row_on_read(&crate::compile::empty_read_schema(), &mut row).expect("normalize");
-
-        assert_eq!(
-            row["created_at"],
-            zeroship_data_sql::value!(1_778_115_723_004i64)
-        );
-        assert_eq!(
-            row["published_at"],
-            Value::String("2026-05-07T01:02:03.004Z".to_string())
-        );
-        assert_eq!(row["active"], zeroship_data_sql::value!(1));
-        assert_eq!(
-            row["prefs"],
-            Value::String("{\"theme\":\"dark\"}".to_string())
-        );
-    }
-
-    #[test]
-    fn parse_timestamp_millis_accepts_iso_z_and_variable_fraction() {
-        let expected = 1_746_579_723_004i64;
-        assert_eq!(
-            parse_timestamp_millis("2025-05-07T01:02:03.004Z"),
-            Some(expected)
-        );
-        assert_eq!(
-            parse_timestamp_millis("2025-05-07T01:02:03.004999Z"),
-            Some(expected)
-        );
-        assert_eq!(
-            parse_timestamp_millis("2025-05-07T03:02:03.004+02:00"),
-            Some(expected)
-        );
-    }
-
-    #[test]
-    fn normalize_row_on_read_rejects_out_of_domain_boolean_values() {
-        let schema = zeroship_data_sql::value!({
-            "active": { "type": "boolean" }
-        });
-        let mut row = zeroship_data_sql::value!({
-            "active": 2
-        });
-
-        let err = normalize_row_on_read(&schema, &mut row)
-            .expect_err("declared boolean field must reject out-of-domain values");
-        match err {
-            DbError::Internal { message } => {
-                assert!(
-                    message.contains("boolean field expected 0/1"),
-                    "error should explain the boolean domain violation: {message}"
-                );
-            }
-            other => panic!("expected Internal error, got {other:?}"),
-        }
-    }
 
     #[test]
     fn scoped_schema_excludes_aggregate_alias_collisions() {

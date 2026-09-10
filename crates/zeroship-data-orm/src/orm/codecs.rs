@@ -272,7 +272,7 @@ impl<S, T: DecodeValue<S>> DecodeValue<S> for Protected<T> {
     fn decode_value(value: Value) -> Result<Self, DbError> {
         if value.get("sentinel").and_then(Value::as_str) == Some("__zsmask__")
             && value.get("_sig").and_then(Value::as_str)
-                == Some(crate::crud::mask_pass::mask_sentinel_signature())
+                == Some(crate::protection::mask_pass::mask_sentinel_signature())
         {
             return Ok(Self::Masked {
                 display: value

@@ -15,6 +15,7 @@ use crate::{backend::BackendHandle, compile::BuiltQuery, crud, tx_route::Capture
 /// A database connection bound to an app deployment.
 #[derive(Clone, Debug)]
 pub struct Database {
+    context: crate::OrmContext,
     binding: DbBinding,
     backend: BackendHandle,
     actor_id: Option<String>,
@@ -32,8 +33,9 @@ impl Database {
     }
 
     /// Bind an already installed runtime descriptor to a backend.
-    pub fn new(binding: DbBinding, backend: BackendHandle) -> Self {
+    pub fn new(context: crate::OrmContext, binding: DbBinding, backend: BackendHandle) -> Self {
         Self {
+            context,
             binding,
             backend,
             actor_id: None,
@@ -49,31 +51,22 @@ impl Database {
         backend: BackendHandle,
         collections: Vec<(String, Value)>,
     ) -> Result<Self, DbError> {
-        let mut names = std::collections::HashSet::new();
-        for (name, schema) in &collections {
-            crate::compile::validate_collection(name)?;
-            if !names.insert(name) {
-                return Err(DbError::internal(
-                    "duplicate collection in the runtime descriptor",
-                ));
-            }
-            let fields = schema
-                .as_object()
-                .ok_or_else(|| DbError::internal("collection descriptor must be an object"))?;
-            for (name, definition) in fields {
-                if crate::compile::is_schema_metadata_key(name) {
-                    continue;
-                }
-                crate::compile::validate_field_name(name)?;
-                if !definition.is_object() {
-                    return Err(DbError::internal("field descriptor must be an object"));
-                }
-            }
-        }
-        zeroship_data_orm::schema_cache::with_mut(|cache| {
-            cache.replace_for_binding(&binding, collections)
-        });
-        Ok(Self::new(binding, backend))
+        let context = crate::OrmContext::new();
+        context.with(|| {
+            crate::descriptor::install_collections(&binding, collections)?;
+            Ok(Self::new(context.clone(), binding, backend))
+        })
+    }
+
+    /// The owner of this database's schemas, policies and transaction lanes.
+    pub fn context(&self) -> &crate::OrmContext {
+        &self.context
+    }
+
+    /// Install the app's immutable startup policy in this database context.
+    pub fn install_mask_policy(&self, policy: Value) -> Result<(), DbError> {
+        self.context
+            .with(|| crate::protection::mask_policy::install_mask_policy(&self.binding, policy))
     }
 
     /// Attribute subsequent writes to an actor resolved by the host.
@@ -84,11 +77,13 @@ impl Database {
     }
 
     pub fn collection(&self, name: &str) -> Result<Collection, DbError> {
-        crate::compile::validate_collection(name)?;
-        crate::descriptor::collection_schema(&self.binding, name)?;
-        Ok(Collection {
-            database: self.clone(),
-            name: name.to_owned(),
+        self.context.with(|| {
+            crate::compile::validate_collection(name)?;
+            crate::descriptor::collection_schema(&self.binding, name)?;
+            Ok(Collection {
+                database: self.clone(),
+                name: name.to_owned(),
+            })
         })
     }
 
@@ -98,15 +93,17 @@ impl Database {
 
     /// Bind generated collection metadata to this deployment's descriptor.
     pub fn entity<E: Entity>(&self) -> Result<EntityCollection<E>, DbError> {
-        let collection = self.collection(E::COLLECTION)?;
-        let schema = crate::descriptor::collection_schema(&self.binding, E::COLLECTION)?;
-        if schema.as_ref() != E::schema() {
-            return Err(schema_mismatch::<E>());
-        }
-        Ok(EntityCollection {
-            collection,
-            schema,
-            entity: PhantomData,
+        self.context.with(|| {
+            let collection = self.collection(E::COLLECTION)?;
+            let schema = crate::descriptor::collection_schema(&self.binding, E::COLLECTION)?;
+            if schema.as_ref() != E::schema() {
+                return Err(schema_mismatch::<E>());
+            }
+            Ok(EntityCollection {
+                collection,
+                schema,
+                entity: PhantomData,
+            })
         })
     }
 
@@ -118,16 +115,20 @@ impl Database {
         F: FnOnce(Database) -> Fut,
         Fut: Future<Output = Result<T, DbError>>,
     {
-        self.check_scope()?;
-        let route = self.capture_route().bind(self.backend.clone());
-        let frame = crate::transaction::AtomicWriteFrame::begin(route).await?;
-        let active = Rc::new(Cell::new(true));
-        let _guard = ScopeGuard(active.clone());
-        let mut transaction = self.clone();
-        transaction.scope = Some(active.clone());
-        let result = body(transaction).await;
-        active.set(false);
-        frame.finish(result).await
+        self.context
+            .scope(async {
+                self.check_scope()?;
+                let route = self.capture_route().bind(self.backend.clone());
+                let frame = crate::transaction::AtomicWriteFrame::begin(route).await?;
+                let active = Rc::new(Cell::new(true));
+                let _guard = ScopeGuard(active.clone());
+                let mut transaction = self.clone();
+                transaction.scope = Some(active.clone());
+                let result = body(transaction).await;
+                active.set(false);
+                frame.finish(result).await
+            })
+            .await
     }
 
     fn check_scope(&self) -> Result<(), DbError> {
@@ -175,21 +176,23 @@ impl Collection {
         operation: Operation,
     ) -> impl Future<Output = Result<Output, DbError>> + use<> {
         let db = &self.database;
-        let prepared = db.check_scope().and_then(|()| {
-            PreparedOperation::new(
-                db.binding.clone(),
-                &self.name,
-                db.capture_route(),
-                db.actor_id.clone(),
-                operation,
-            )
-        });
-        let backend = db.backend.clone();
-        let scope = db.scope.clone();
-        async move {
-            check_scope(scope.as_ref())?;
-            prepared?.execute(backend).await
-        }
+        db.context.with(|| {
+            let prepared = db.check_scope().and_then(|()| {
+                PreparedOperation::new(
+                    db.binding.clone(),
+                    &self.name,
+                    db.capture_route(),
+                    db.actor_id.clone(),
+                    operation,
+                )
+            });
+            let backend = db.backend.clone();
+            let scope = db.scope.clone();
+            async move {
+                check_scope(scope.as_ref())?;
+                prepared?.execute(backend).await
+            }
+        })
     }
 
     pub fn find(
@@ -250,15 +253,19 @@ fn schema_mismatch<E: Entity>() -> DbError {
 }
 impl<E: Entity> EntityCollection<E> {
     fn validate(&self) -> Result<(), DbError> {
-        let current =
-            crate::descriptor::collection_schema(&self.collection.database.binding, E::COLLECTION)?;
-        if std::sync::Arc::ptr_eq(&current, &self.schema)
-            || current.as_ref() == self.schema.as_ref()
-        {
-            Ok(())
-        } else {
-            Err(schema_mismatch::<E>())
-        }
+        self.collection.database.context.with(|| {
+            let current = crate::descriptor::collection_schema(
+                &self.collection.database.binding,
+                E::COLLECTION,
+            )?;
+            if std::sync::Arc::ptr_eq(&current, &self.schema)
+                || current.as_ref() == self.schema.as_ref()
+            {
+                Ok(())
+            } else {
+                Err(schema_mismatch::<E>())
+            }
+        })
     }
     pub fn find<R: FromRow<E>>(
         &self,
@@ -447,6 +454,7 @@ enum Plan {
 
 /// A single-use operation with its dispatch context frozen.
 pub struct PreparedOperation {
+    context: crate::OrmContext,
     binding: DbBinding,
     collection: String,
     route: CapturedRoute,
@@ -569,6 +577,7 @@ impl PreparedOperation {
             )?),
         };
         Ok(Self {
+            context: crate::orm_context::current(),
             binding,
             collection: collection.to_owned(),
             route,
@@ -578,7 +587,14 @@ impl PreparedOperation {
     }
 
     pub async fn execute(self, backend: BackendHandle) -> Result<Output, DbError> {
+        self.context
+            .clone()
+            .scope(self.execute_in_context(backend))
+            .await
+    }
+    async fn execute_in_context(self, backend: BackendHandle) -> Result<Output, DbError> {
         let Self {
+            context: _,
             binding,
             collection,
             route,

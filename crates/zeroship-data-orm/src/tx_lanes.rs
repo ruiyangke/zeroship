@@ -1,7 +1,6 @@
 //! Per-thread transaction lanes retain owned sessions, cancellation handles,
 //! queued effects, and withdrawal tombstones under the app's identity.
 
-use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
 use crate::driver::Session;
@@ -108,6 +107,7 @@ pub fn destroy_tx_connection(client: Session) {
 /// typed place.
 #[must_use = "TxClientSlotGuard restores the tx slot on Drop unless consumed via into_inner()"]
 pub struct TxClientSlotGuard {
+    context: crate::OrmContext,
     app_id: String,
     client: Option<Session>,
 }
@@ -121,6 +121,7 @@ impl TxClientSlotGuard {
         let client = crate::tx_lanes::with_mut(|l| l.take_tx_client_for(app_id))
             .ok_or_else(|| DbError::internal("db: transaction connection lost"))?;
         Ok(Self {
+            context: crate::orm_context::current(),
             app_id: app_id.to_string(),
             client: Some(client),
         })
@@ -138,7 +139,8 @@ impl Drop for TxClientSlotGuard {
     fn drop(&mut self) {
         if let Some(client) = self.client.take() {
             let app_id = std::mem::take(&mut self.app_id);
-            crate::tx_lanes::with_mut(|l| l.put_tx_client_for(&app_id, client));
+            self.context
+                .lanes_mut(|l| l.put_tx_client_for(&app_id, client));
         }
     }
 }
@@ -635,46 +637,14 @@ impl TxLanes {
     }
 }
 
-thread_local! {
-    /// This worker thread's transaction lanes.
-    ///
-    /// # Why this is a SECOND thread-local, when `context.rs` exists to have one
-    ///
-    /// `context.rs`'s module doc says its purpose was folding several scattered
-    /// `thread_local!`s into a single [`crate::context::ThreadDbContext`] with
-    /// typed accessors. This is not a return to that scattered state and the
-    /// reason is different in kind: the lanes and the backend slot are separate
-    /// OWNERS bound for separate CRATES. `data-engine` cannot reach
-    /// `plugin-db`'s thread-local without a Cargo cycle, because plugin-db
-    /// already depends on data-engine.
-    ///
-    /// What made the old arrangement bad was untyped slots with per-site
-    /// borrow rituals. Each owner here keeps its typed accessors; there are
-    /// simply two owners.
-    ///
-    /// # Two RefCells are safer than one, not riskier
-    ///
-    /// A nested borrow of the SAME `RefCell` panics, and `context.rs:296`
-    /// records one place that hazard already shapes the code: `set_pool`
-    /// constructs a backend while holding `&mut self`, so backends take their
-    /// key source as an argument rather than reaching for the thread-local.
-    /// Splitting owners removes the possibility of a lane operation and a
-    /// backend operation nesting into one another at all.
-    ///
-    /// Measured before splitting (#165): of 55 `crate::context::with*` closures
-    /// in the engine, ZERO touch both an engine owner and an adapter owner. No
-    /// closure's atomicity changes here, because none spanned the boundary.
-    static TX_LANES: RefCell<TxLanes> = RefCell::new(TxLanes::new());
-}
-
 /// Read this thread's lanes.
 pub fn with<R>(f: impl FnOnce(&TxLanes) -> R) -> R {
-    TX_LANES.with(|l| f(&l.borrow()))
+    crate::orm_context::current().lanes(f)
 }
 
 /// Mutate this thread's lanes.
 pub fn with_mut<R>(f: impl FnOnce(&mut TxLanes) -> R) -> R {
-    TX_LANES.with(|l| f(&mut l.borrow_mut()))
+    crate::orm_context::current().lanes_mut(f)
 }
 
 /// Drop every lane on this thread.

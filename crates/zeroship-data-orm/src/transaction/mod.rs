@@ -110,7 +110,7 @@
 //! for `transaction()`.
 //!
 //! The top-level `BEGIN` path acquires a backend-specific dedicated
-//! client via [`crate::backend::SqlExecutor::acquire_dedicated_client`]
+//! client via [`crate::backend::DatabaseFixture::fixture_session`]
 //! and parks it in the per-isolate `tx_conn` slot. Postgres stores a
 //! dedicated libpq connection; SQLite stores a handle to the shared
 //! session actor and drives the same `BEGIN` / `SAVEPOINT` /
@@ -644,6 +644,11 @@ fn savepoint_release_failed_indeterminate(error: DbError) -> DbError {
     }
 }
 
+/// Whether this app still has an active transaction frame in the host context.
+pub fn is_active(app_id: &str) -> bool {
+    crate::tx_lanes::with(|lanes| lanes.has_tx_for(app_id))
+}
+
 #[cfg(test)]
 thread_local! {
     /// The backend `install_sqlite_backend_for_test` opened, for [`test_backend`].
@@ -693,8 +698,8 @@ mod tests {
     use std::path::PathBuf;
     use std::rc::Rc;
 
-    use crate::backend::SqlExecutor;
     use crate::backend::sqlite::SqliteBackend;
+    use zeroship_data_orm::fixtures::DatabaseFixture;
 
     fn run<F: std::future::Future>(f: F) -> F::Output {
         compio::runtime::Runtime::new()
@@ -762,7 +767,7 @@ mod tests {
             let (backend, _dir, _reset) = install_sqlite_backend_for_test();
             let probe = backend.autocommit_client();
             backend
-                .client_exec(&probe, "CREATE TABLE notes (id INTEGER PRIMARY KEY)", &[])
+                .execute_fixture_on(&probe, "CREATE TABLE notes (id INTEGER PRIMARY KEY)", &[])
                 .await
                 .expect("create table");
 
@@ -888,7 +893,7 @@ mod tests {
     /// transaction go through [`run_on_tx_conn`], which is the only path onto
     /// `tx_conn`.
     ///
-    /// Before SC-2 these tests used `acquire_dedicated_client()` for the probe
+    /// Before SC-2 these tests used `fixture_session()` for the probe
     /// AND drove the transaction's writes through it, which worked only
     /// because both were the same single connection. That coupling is the
     /// divergence SC-2 retires, so the probe now names the lane it wants.
@@ -898,7 +903,7 @@ mod tests {
             let (backend, _dir, _reset) = install_sqlite_backend_for_test();
             let probe = backend.autocommit_client();
             backend
-                .client_exec(
+                .execute_fixture_on(
                     &probe,
                     "CREATE TABLE notes (id INTEGER PRIMARY KEY, title TEXT)",
                     &[],
@@ -946,7 +951,7 @@ mod tests {
     ///
     /// The session is the authority on how to talk to itself.
     /// [`crate::driver::Session`]'s two variants ARE the two
-    /// `SqlExecutor::Client` associated types, so the variant already names the
+    /// `DatabaseFixture::Client` associated types, so the variant already names the
     /// vendor and no second handle is consulted.
     ///
     /// Restoring either read reddens this: re-add the `not_configured` guard to
@@ -961,7 +966,7 @@ mod tests {
             // usable as an oracle after the context's handle is dropped.
             let probe = backend.autocommit_client();
             backend
-                .client_exec(
+                .execute_fixture_on(
                     &probe,
                     "CREATE TABLE notes (id INTEGER PRIMARY KEY, title TEXT)",
                     &[],
@@ -1008,7 +1013,7 @@ mod tests {
             let (backend, _dir, _reset) = install_sqlite_backend_for_test();
             let probe = backend.autocommit_client();
             backend
-                .client_exec(
+                .execute_fixture_on(
                     &probe,
                     "CREATE TABLE notes (id INTEGER PRIMARY KEY, title TEXT)",
                     &[],
@@ -1077,7 +1082,7 @@ mod tests {
             let (backend, _dir, _reset) = install_sqlite_backend_for_test();
             let probe = backend.autocommit_client();
             backend
-                .client_exec(
+                .execute_fixture_on(
                     &probe,
                     "CREATE TABLE notes (id INTEGER PRIMARY KEY, title TEXT)",
                     &[],
@@ -1151,7 +1156,7 @@ mod tests {
             let (backend, _dir, _reset) = install_sqlite_backend_for_test();
             let probe = backend.autocommit_client();
             backend
-                .client_exec(
+                .execute_fixture_on(
                     &probe,
                     "CREATE TABLE notes (id INTEGER PRIMARY KEY, title TEXT)",
                     &[],
@@ -1165,7 +1170,7 @@ mod tests {
 
             // No transaction anywhere in this call's async scope.
             backend
-                .client_exec(
+                .execute_fixture_on(
                     &probe,
                     "INSERT INTO notes (title) VALUES ('autocommit')",
                     &[],
@@ -1202,7 +1207,7 @@ mod tests {
             let (backend, _dir, _reset) = install_sqlite_backend_for_test();
             let probe = backend.autocommit_client();
             backend
-                .client_exec(
+                .execute_fixture_on(
                     &probe,
                     "CREATE TABLE notes (id INTEGER PRIMARY KEY, title TEXT)",
                     &[],

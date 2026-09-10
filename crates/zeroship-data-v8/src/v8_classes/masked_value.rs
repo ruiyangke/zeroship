@@ -46,7 +46,7 @@ use zeroship_runtime_macros::v8_class;
 #[allow(unused_imports)]
 use zeroship_runtime_macros::{v8_async_method, v8_constructor, v8_getter, v8_method};
 
-use crate::crud::unmask::{
+use zeroship_data_orm::protection::unmask::{
     BulkUnmaskArgs, BulkUnmaskItem, UnmaskFieldArgs, dispatch_bulk_unmask, dispatch_unmask,
 };
 use crate::v8_bridge::{decode_native, runtime_state, setup_js_promise};
@@ -179,7 +179,7 @@ impl MaskedValue {
     /// shape-confusion.
     ///
     /// Authorization, audit-row emission, and decrypt are all handled
-    /// by the shared `crud::unmask` module — same code path the old
+    /// by the shared `protection::unmask` module — same code path the old
     /// `Db.unmaskField` / `Db.bulkUnmaskFields` v8_methods went through.
     ///
     /// Returns `Promise<string>` on the single-column path
@@ -277,7 +277,7 @@ impl MaskedValue {
 
 impl MaskedValue {
     /// Single-column unmask dispatch. Mirrors
-    /// `crate::crud::unmask::dispatch_unmask_field` but binds the
+    /// `zeroship_data_orm::protection::unmask::dispatch_unmask_field` but binds the
     /// `(collection, row_pk, column)` from `self` instead of parsing
     /// them out of a `{args}` object — the v8_class promotion removes
     /// the args-shape dependency entirely.
@@ -297,7 +297,7 @@ impl MaskedValue {
 
         // DB-3: app JS must not be able to claim the reserved `auto` system
         // actor — strip it so an app handler cannot impersonate the platform.
-        let sanitized = crate::crud::unmask::sanitize_app_actor(
+        let sanitized = zeroship_data_orm::protection::unmask::sanitize_app_actor(
             opts_v.get("actor").cloned().filter(|v| !v.is_null()),
         );
         let reason = opts_v
@@ -315,7 +315,7 @@ impl MaskedValue {
         };
         let binding = self.binding.clone();
         // The route is captured HERE, on the adapter side, while the V8 frame
-        // is live, and handed to the engine. `crud::unmask` resolved its own
+        // is live, and handed to the engine. `protection::unmask` resolved its own
         // backend through `exec::ensure_backend_for_shared_sql` until
         // 2026-09-03, which put an ENGINE file's hands on `crate::context`.
         //
@@ -418,7 +418,7 @@ impl MaskedValue {
 
         // DB-3: app JS must not be able to claim the reserved `auto` system
         // actor — strip it so an app handler cannot impersonate the platform.
-        let sanitized = crate::crud::unmask::sanitize_app_actor(
+        let sanitized = zeroship_data_orm::protection::unmask::sanitize_app_actor(
             opts_v.get("actor").cloned().filter(|v| !v.is_null()),
         );
         let reason = opts_v
@@ -664,7 +664,7 @@ impl RehydrateWalker {
                     .and_then(|k| obj.get(scope, k))
                     .filter(|v| v.is_string())
                     .map(|v| v.to_rust_string_lossy(scope))
-                    .is_some_and(|sig| sig == crate::crud::mask_pass::mask_sentinel_signature());
+                    .is_some_and(|sig| sig == zeroship_data_orm::protection::mask_pass::mask_sentinel_signature());
                 if signed {
                     return self.mint_replacement(scope, obj);
                 }
@@ -937,7 +937,7 @@ mod tests {
 
         let signed = build_sentinel(
             scope,
-            Some(crate::crud::mask_pass::mask_sentinel_signature()),
+            Some(zeroship_data_orm::protection::mask_pass::mask_sentinel_signature()),
         );
         let out = new_walker().walk(scope, signed.into());
         assert!(out.is_some(), "a correctly-signed sentinel must be minted");

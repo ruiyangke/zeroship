@@ -1,13 +1,9 @@
 //! PostgreSQL implementation of the ORM execution contracts.
-use super::PostgresBackend;
-use crate::{
-    driver::*,
-    error::*,
-    storage::{SchemaIntrospect, SqlExecutor},
-};
+use crate::{driver::*, error::*};
 use async_trait::async_trait;
 use compio_postgres::{CancelToken, Pool, PoolConnection};
-use zeroship_data_sql::{SchemaName, catalog::LiveSchema, compile::SqlDialect, value::Value};
+use std::rc::Rc;
+use zeroship_data_sql::{compile::SqlDialect, value::Value};
 
 #[derive(Debug)]
 struct PgCancellation {
@@ -34,13 +30,10 @@ impl DriverSession for PoolConnection {
     async fn query(&self, sql: &str, params: &[Value]) -> Result<Vec<Value>, DbError> {
         super::params::query(self, sql, params)
             .await
-            .map(|rows| super::pg_row_json::rows_to_values(&rows))
+            .and_then(|rows| super::pg_row_json::rows_to_values(&rows))
     }
-    async fn exec(&self, sql: &str, params: &[&str]) -> Result<u64, DbError> {
-        self.query_text_params(sql, params)
-            .await
-            .map(|rows| rows.len() as u64)
-            .map_err(|e| super::pg_error::classify(&e))
+    async fn exec(&self, sql: &str, params: &[Value]) -> Result<u64, DbError> {
+        super::params::execute(self, sql, params).await
     }
     async fn settle(&self, intent: SettleIntent) -> (TerminalResult, Option<DbError>) {
         match self.batch_execute_reporting_tag(intent.verb()).await {
@@ -65,125 +58,106 @@ impl DriverSession for PoolConnection {
     }
 }
 
+/// PostgreSQL connection source. It owns no application services.
+#[derive(Clone, Debug)]
+pub struct PostgresDriver {
+    pool: Rc<Pool>,
+}
+impl PostgresDriver {
+    pub fn new(pool: Rc<Pool>) -> Self {
+        Self { pool }
+    }
+}
 #[async_trait(?Send)]
-impl Driver for PostgresBackend {
+impl Driver for PostgresDriver {
     fn dialect(&self) -> SqlDialect {
         SqlDialect::Postgres
     }
-    fn publishes_committed_changes(&self) -> bool {
-        false
-    }
     fn pool_counts(&self) -> Option<(usize, usize, usize)> {
-        let pool = self.pool();
-        Some((pool.idle_count(), pool.active_count(), pool.total_count()))
+        Some((
+            self.pool.idle_count(),
+            self.pool.active_count(),
+            self.pool.total_count(),
+        ))
     }
-    async fn prepare_for_app(&self, _app_id: &str) -> Result<(), DbError> {
-        Ok(())
-    }
-    async fn query(
-        &self,
-        _app_id: &str,
-        schema: &SchemaName,
-        sql: &str,
-        params: &[Value],
-    ) -> Result<Vec<Value>, DbError> {
-        self.query_roled_values(schema, sql, params).await
-    }
-    async fn open_tx_session(
-        &self,
-        app_id: &str,
-        schema: &SchemaName,
-        begin: BeginIntent,
-    ) -> Result<Session, OpenSessionError> {
-        let client = self.acquire_dedicated_client(app_id).await?;
-        self.client_exec(&client, &super::render_begin(begin), &[])
-            .await?;
-        super::apply_per_app_role(&client, schema).await?;
-        Ok(Session::new(client))
+    async fn acquire(&self, _kind: LeaseKind) -> Result<Session, DbError> {
+        let connection = self
+            .pool
+            .acquire()
+            .await
+            .map_err(|e| super::pg_error::classify(&e))?;
+        Ok(Session::new(connection))
     }
 }
-#[async_trait(?Send)]
-impl Catalog for PostgresBackend {
-    async fn introspect_schema(&self, app_id: &str) -> Result<LiveSchema, DbError> {
-        SchemaIntrospect::introspect_schema(self, app_id).await
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[compio::test]
+    async fn native_exec_reports_command_counts() {
+        let pool = Pool::connect(&zeroship_core::config::test_database_url(), 2)
+            .await
+            .unwrap();
+        crate::driver::tests::native_commands(PostgresDriver::new(Rc::new(pool))).await;
     }
-}
-#[async_trait(?Send)]
-impl PolicyStore for PostgresBackend {
-    async fn persist_mask_policy(&self, _app_id: &str, _policy: &Value) -> Result<(), DbError> {
-        Ok(())
-    }
-    async fn load_mask_policy(&self, _app_id: &str) -> Result<Option<Value>, DbError> {
-        Ok(None)
-    }
-}
-#[async_trait(?Send)]
-impl Search for PostgresBackend {
-    async fn vector_search(
-        &self,
-        session: Option<&Session>,
-        r: VectorSearch<'_>,
-    ) -> Result<Vec<Value>, DbError> {
-        let q = self
-            .plan_vector_search(
-                r.binding,
-                r.collection,
-                r.column,
-                r.query,
-                r.k,
-                r.metric,
-                r.filter,
-                r.schema,
-            )
-            .await?;
-        match session {
-            Some(session) => session.query(&q.sql, &q.params).await,
-            None => {
-                Driver::query(
-                    self,
-                    r.binding.app_id(),
-                    r.binding.schema(),
-                    &q.sql,
-                    &q.params,
-                )
-                .await
-            }
+
+    #[compio::test]
+    async fn invalid_native_results_are_errors_and_the_session_remains_usable() {
+        let pool = Pool::connect(&zeroship_core::config::test_database_url(), 1)
+            .await
+            .unwrap();
+        let driver = PostgresDriver::new(Rc::new(pool));
+        let session = driver.acquire(LeaseKind::Autocommit).await.unwrap();
+        for expression in [
+            "'infinity'::timestamp",
+            "'-infinity'::timestamptz",
+            "'infinity'::date",
+            "'-infinity'::date",
+            "'NaN'::float4",
+            "'Infinity'::float8",
+            "'-Infinity'::float8",
+            "'NaN'::numeric",
+            "'Infinity'::numeric",
+            "INTERVAL '1 day'",
+        ] {
+            let sql = format!("SELECT {expression} AS invalid_result");
+            let error = session.query(&sql, &[]).await.expect_err(&sql);
+            assert!(error.to_string().contains("invalid_result"), "{error}");
+            let rows = session.query("SELECT 1 AS healthy", &[]).await.unwrap();
+            assert_eq!(rows[0]["healthy"], Value::from(1));
+        }
+        let rows = session
+            .query("SELECT NULL::timestamp AS stamp, NULL::float8 AS number, NULL::numeric AS decimal, 'null'::jsonb AS document", &[])
+            .await
+            .unwrap();
+        for field in ["stamp", "number", "decimal", "document"] {
+            assert_eq!(rows[0][field], Value::Null);
         }
     }
-    async fn spatial_near(
-        &self,
-        session: Option<&Session>,
-        r: SpatialSearch<'_>,
-    ) -> Result<Vec<Value>, DbError> {
-        let q = self
-            .plan_spatial_near(
-                r.binding,
-                r.collection,
-                r.column,
-                r.point,
-                r.radius_m,
-                r.filter,
-                r.limit,
-                r.schema,
-            )
-            .await?;
-        match session {
-            Some(session) => session.query(&q.sql, &q.params).await,
-            None => {
-                Driver::query(
-                    self,
-                    r.binding.app_id(),
-                    r.binding.schema(),
-                    &q.sql,
-                    &q.params,
-                )
+
+    #[compio::test]
+    async fn timestamp_rounding_is_consistent_across_epochs() {
+        let pool = Pool::connect(&zeroship_core::config::test_database_url(), 1)
+            .await
+            .unwrap();
+        let driver = PostgresDriver::new(Rc::new(pool));
+        let session = driver.acquire(LeaseKind::Autocommit).await.unwrap();
+        for timestamp in [
+            "1969-12-31 23:59:59.999999+00",
+            "1970-01-01 00:00:00.000001+00",
+            "1999-12-31 23:59:59.999999+00",
+            "2000-01-01 00:00:00.000001+00",
+        ] {
+            let rows = session
+                .query("SELECT $1::timestamptz AS stamp, floor(extract(epoch FROM $1::timestamptz) * 1000)::bigint AS expected", &[timestamp.into()])
                 .await
-            }
+                .unwrap();
+            assert_eq!(
+                rows[0]["stamp"].as_i64(),
+                rows[0]["expected"].as_i64(),
+                "{timestamp}"
+            );
         }
-    }
-}
-impl Backend for PostgresBackend {
-    fn key_store(&self) -> &crate::encryption::KeyStore {
-        self.key_store()
     }
 }

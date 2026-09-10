@@ -154,7 +154,7 @@ files, and has been hardened against them twice - already gave the right ones:
   `REPLICATION`. Not moved and not split - its lease half is the INPUT to its sweep decision.
 - `change_stream_pg.rs`: **STAYS in `plugin-db`.** It implements `ChangeStream`, a `data-core`
   capability trait whose SQLite peer is in the vendor LIBRARY crate `zeroship-data-sqlite`
-  (`crates/zeroship-data-orm/src/backend/sqlite/cdc.rs:854`), and it holds an `Rc<PostgresBackend>` - not
+  (`crates/zeroship-data-orm/src/backend/sqlite/cdc.rs`), and it holds an `Rc<PostgresBackend>` - not
   `Send`, so pinned to the isolate thread, never mind the process. The CDC spec's verdict for it is
   "Deleted", which is an END-STATE verdict reachable only once `RunningConsumer::Postgres` is a
   relay subscription handle. **The one answer no document supports is "moves to data-cdc-server".**
@@ -390,9 +390,9 @@ commit or not at all.
 **THIS PARAGRAPH ADDED "with nothing using it" TO THAT SENTENCE UNTIL 2026-09-04, AND IT IS THE ONE
 CLAIM HERE THAT MEASUREMENT REFUTES.** Deleting the import drops no privilege, because three other
 REPLICATION-gated statements ship in the same binary and one of them is reachable from creator JS:
-`crates/zeroship-data-v8/src/replication.rs:212` mints a slot,
-`crates/zeroship-data-v8/src/replication.rs:532` drops one, and
-`crates/zeroship-data-v8/src/wal_consumer.rs:577` opens the `replication=database` connection.
+`crates/zeroship-data-v8/src/replication.rs` mints a slot,
+`crates/zeroship-data-v8/src/replication.rs` drops one, and
+`crates/zeroship-data-v8/src/wal_consumer.rs` opens the `replication=database` connection.
 The evidence, the two PostgreSQL versions it was taken on and the reachability chain are in the CDC
 document's privilege section. So the reaper is a COUPLING problem here and a privilege problem only
 once the relay owns the streaming path; `tests/worker_replication_privilege_gate.sh` refuses the

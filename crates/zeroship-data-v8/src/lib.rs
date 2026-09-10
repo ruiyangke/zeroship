@@ -40,12 +40,12 @@
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
-use zeroship_data_orm::connection::{backend_for_url, BackendUrl};
+use zeroship_data_orm::connection::{BackendUrl, backend_for_url};
 
 use compio_postgres::Pool;
 use zeroship_runtime::plugin::{NativePlugin, NativeRegistrar};
 
-use crate::context::{with_mut as ctx_mut, BackendInitState};
+use crate::context::{BackendInitState, with_mut as ctx_mut};
 use zeroship_data_orm::error::DbError;
 
 // Module visibility note:
@@ -138,8 +138,10 @@ pub use zeroship_data_orm::backend_selection;
 // The backend registration and transaction lane owner. Crate-private
 // here: nothing outside names either, and the tx-route TYPE has to be nameable
 // wherever the `exec` entry points are, which is why only `tx_route` is `pub`.
+pub(crate) use zeroship_data_orm::backend_handle;
+#[cfg(any(test, feature = "test-helpers"))]
+pub(crate) use zeroship_data_orm::tx_lanes;
 pub use zeroship_data_orm::tx_route;
-pub(crate) use zeroship_data_orm::{backend_handle, tx_lanes};
 // The operator charter the worker parses once at construction. `pub(crate)`
 // because nothing outside the crate has business reading the assignment
 // authority - the descriptor mirror is what consumers verify against.
@@ -196,11 +198,8 @@ pub fn collection_schema(
 // Do NOT read the engine's `validate_cross_app_fk_targets` as the replacement.
 // That is a dangling-target check and explicitly PERMITS a target owned by
 // another member app - the opposite policy, under a confusingly similar name.
-// `crud` is crate-private in release builds; `pub`
-// under `test-helpers` so `tests/sqlite_integration.rs` can reach
-// `crud::encryption_pass::{encrypt_row_on_write, decrypt_row_on_read}`
-// for the end-to-end encrypted-column CRUD round-trip test. Same shape
-// as `encryption` below.
+// CRUD orchestration is exposed to integration fixtures with test helpers.
+// Protection passes are imported directly from the ORM's protection module.
 #[cfg(not(feature = "test-helpers"))]
 pub(crate) use zeroship_data_orm::crud;
 #[cfg(feature = "test-helpers")]
@@ -496,7 +495,8 @@ impl NativePlugin for DbPlugin {
         // than key it under a schema that cannot be addressed.
         let binding = v8_classes::db::binding_for_isolate(scope, app_id)
             .ok_or_else(|| format!("app id {app_id:?} is not a legal database schema name"))?;
-        zeroship_data_orm::schema_cache::with_mut(|c| c.replace_for_binding(&binding, schemas));
+        zeroship_data_orm::descriptor::install_collections(&binding, schemas)
+            .map_err(|error| error.to_string())?;
         Ok(())
     }
 
@@ -578,7 +578,7 @@ mod runtime_descriptor_binding_tests {
     use std::rc::Rc;
 
     use zeroship_data_sql::value;
-    use zeroship_runtime::{init_v8, RuntimeState, SharedState};
+    use zeroship_runtime::{RuntimeState, SharedState, init_v8};
 
     use super::*;
 
@@ -595,7 +595,7 @@ mod runtime_descriptor_binding_tests {
 
     fn plugin() -> std::sync::Arc<DbPlugin> {
         service::DbService::new(service::DbServiceConfig {
-            url: "sqlite::memory:".to_string(),
+            url: "sqlite:descriptor-test.sqlite".to_string(),
             worker_id: "worker_descriptor_test".to_string(),
             meter: None,
         })
@@ -794,7 +794,7 @@ pub fn reset_context_for_tests() {
     // would hand the next phase a stale transaction claim and a parked session,
     // inside one test.
     tx_lanes::reset_for_tests();
-    crud::mask_policy::reset_for_tests();
+    zeroship_data_orm::protection::mask_policy::reset_for_tests();
     metrics::reset_for_tests();
     system_shape_charter::reset_for_tests();
     zeroship_data_orm::schema_cache::reset_for_tests();
@@ -862,7 +862,7 @@ impl Drop for SuppliedRootKeysGuard {
 
 /// Test helper: install a `SqliteBackend` into the per-
 /// isolate context so the unmask integration suite can drive
-/// `crud::unmask::dispatch_unmask` against a freshly-constructed
+/// `protection::unmask::dispatch_unmask` against a freshly-constructed
 /// backend without the full V8 runtime + plugin wiring.
 ///
 /// Production code reaches the SQLite arm through the
@@ -881,16 +881,14 @@ pub fn set_sqlite_backend_for_tests(backend: Rc<crate::backend::sqlite::SqliteBa
 #[cfg(any(test, feature = "test-helpers"))]
 pub use zeroship_data_orm::{cache_schema_for_deploy_for_tests, cache_schema_for_tests};
 
-/// Test helper: clear the per-isolate mask-policy cache
-/// entry for `app_id`. Used by `tests/sqlite_integration.rs` to
-/// guarantee a clean slate between policy-driven unmask tests — the
-/// per-isolate thread-local cache is process-wide and would otherwise
-/// bleed state across test functions running on the same OS thread
-/// (the `--test-threads=1` scenario, and also single-runtime tests).
+/// Clear the cold-start binding's policy for an integration fixture.
 #[cfg(any(test, feature = "test-helpers"))]
 #[doc(hidden)]
 pub fn clear_mask_policy_cache_for_tests(app_id: &str) {
-    crud::mask_policy::cache_put(app_id, None);
+    zeroship_data_orm::protection::mask_policy::cache_put(
+        &zeroship_data_orm::binding::DbBinding::cold_start(app_id),
+        None,
+    );
 }
 
 /// **Test-only**: run the write-side prep an insert dispatch performs before the
@@ -1113,7 +1111,7 @@ pub fn clear_pending_emits_for_tests(app_id: &str) {
 
 /// `true` iff `url` resolves to the SQLite (dev-tier) backend under the SAME
 /// grammar [`backend_for_url`] uses (`sqlite:` / `sqlite://` / `file:` /
-/// `:memory:` / a bare filesystem path). PG (`postgres://`/`postgresql://`)
+/// a bare filesystem path). PG (`postgres://`/`postgresql://`)
 /// and an empty / unknown-scheme URL are `false`.
 ///
 /// Delegates to [`zeroship_core::db_url::is_sqlite_url`] so the grammar has ONE
@@ -1262,7 +1260,7 @@ pub async fn init_pool_async() -> Result<(), String> {
 
 #[cfg(test)]
 mod backend_init_input_tests {
-    use super::{backend_init_inputs, BackendUrl};
+    use super::{BackendUrl, backend_init_inputs};
 
     /// Nothing installed is the DISABLED state and stays a success.
     ///
@@ -1318,7 +1316,7 @@ mod backend_init_input_tests {
 
 #[cfg(test)]
 mod backend_url_tests {
-    use super::{backend_for_url, BackendUrl};
+    use super::{BackendUrl, backend_for_url};
     use std::path::PathBuf;
 
     #[test]
@@ -1353,12 +1351,7 @@ mod backend_url_tests {
                 path: PathBuf::from("./dev.sqlite"),
             }
         );
-        assert_eq!(
-            backend_for_url(":memory:").unwrap(),
-            BackendUrl::Sqlite {
-                path: PathBuf::from(":memory:"),
-            }
-        );
+
         assert_eq!(
             backend_for_url("./dev.sqlite").unwrap(),
             BackendUrl::Sqlite {
@@ -1371,6 +1364,31 @@ mod backend_url_tests {
                 path: PathBuf::from("host/db"),
             }
         );
+    }
+
+    #[test]
+    fn memory_urls_cannot_select_a_backend() {
+        for url in [
+            ":memory:",
+            "sqlite::memory:",
+            "file::memory:",
+            "sqlite:",
+            "sqlite://",
+            "file:",
+            "sqlite:db?mode=memory&cache=shared",
+        ] {
+            assert!(!super::is_sqlite_url(url), "{url}");
+            assert!(
+                matches!(
+                    backend_for_url(url),
+                    Err(zeroship_data_orm::error::DbError::Configuration {
+                        code: "sqlite_file_required",
+                        ..
+                    })
+                ),
+                "{url}",
+            );
+        }
     }
 
     #[test]

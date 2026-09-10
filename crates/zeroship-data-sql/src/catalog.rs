@@ -284,7 +284,7 @@ impl MaskKind {
     /// default kind.
     ///
     /// Accepts both the canonical camelCase form the SDK emits and the
-    /// kebab-case form `crud::mask_pass::parse_mask_kind` historically
+    /// kebab-case form `protection::mask_pass::parse_mask_kind` historically
     /// accepted (`date-year`/`date-decade`).
     #[must_use]
     pub fn from_sql(s: &str) -> Option<Self> {
@@ -334,7 +334,7 @@ pub enum Classification {
 
 impl Classification {
     /// Canonical SDK-wire string. Lower-snake to match
-    /// `VALID_CLASSIFICATIONS` in `crate::crud::mask_policy`.
+    /// `VALID_CLASSIFICATIONS` in `crate::protection::mask_policy`.
     #[must_use]
     pub fn as_sql(self) -> &'static str {
         match self {

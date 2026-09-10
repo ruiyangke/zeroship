@@ -662,7 +662,7 @@ pub fn raw_column_for_field(field: &str, def: &crate::value::Value) -> Option<St
 ///
 /// The obvious objection to trusting a creator-authored artifact is
 /// `crate::compile`'s neighbour in the data plane,
-/// `zeroship_data_orm::crud::protection_floor`: the live database is the
+/// `zeroship_data_orm::protection::protection_floor`: the live database is the
 /// authority on a column's protections and the descriptor may not lower them.
 /// That argument does not transfer to the column's NAME, because **the catalog
 /// does not record the pairing at all**. The mask sentinel rides the MASKED
@@ -975,7 +975,7 @@ pub fn build_find_with_schema(
 ///
 /// `unmask_columns` items not present on the schema are silently
 /// ignored at the build layer — the auth fence
-/// (`crud::unmask::authorize_query_hint`) already refused that case
+/// (`protection::unmask::authorize_query_hint`) already refused that case
 /// with a typed `unmask_column_not_masked` error. Columns named in
 /// `unmask_columns` AND on the schema but NOT carrying a `.mask({...})`
 /// declaration are also passed through verbatim.
@@ -1319,7 +1319,7 @@ fn value_column_for_field(field: &str, schema_hint: &Value) -> String {
 /// the column with the field's own name is the one a read may serve, for masked
 /// and unmasked fields alike. Neither a SELECT nor a RETURNING names the raw
 /// column - not for an unmask hint either, because the unmask path re-fetches
-/// the value under its own authorization check and audit row (`crud::unmask`),
+/// the value under its own authorization check and audit row (`protection::unmask`),
 /// which is the whole point of having one reader.
 fn project_read_field(field: &str, schema_hint: &Value, table_alias: Option<&str>) -> String {
     let logical = quote_ident(field);
@@ -7629,7 +7629,7 @@ mod tests {
     /// inbound surface refuses. Without this, a descriptor could redirect a
     /// masked field's PLAINTEXT into an ordinary, filterable column and read it
     /// back through a `where` oracle with no audit row, while
-    /// `crud::protection_floor` waved the deploy through: that fence compares
+    /// `protection::protection_floor` waved the deploy through: that fence compares
     /// the PRESENCE of a mask declaration, never its placement.
     #[test]
     fn a_descriptor_naming_a_creator_reachable_raw_column_is_refused() {
@@ -7691,7 +7691,7 @@ mod tests {
 
     /// A field with no mask has no raw column, and a `rawColumn` on one is
     /// IGNORED rather than refused - there is nothing to place, so there is no
-    /// placement to get wrong. `crud::protection_floor` is what refuses a
+    /// placement to get wrong. `protection::protection_floor` is what refuses a
     /// descriptor that dropped the mask from a column the database still
     /// records as masked; duplicating that verdict here would report the wrong
     /// defect.

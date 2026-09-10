@@ -93,9 +93,8 @@ impl DbPlatform {
         Err(OpError::type_error("Illegal constructor"))
     }
 
-    /// `__platform.setMaskPolicy(policy)` — persist the
-    /// per-app mask policy and refresh the in-process cache. Moved off
-    /// `Db`; [`dispatch_set_mask_policy_field`] is unchanged.
+    /// Install the app-at-deploy startup policy in memory.
+    /// A different policy for the same deployment is rejected.
     #[v8_method]
     #[v8_name = "setMaskPolicy"]
     fn set_mask_policy<'s>(
@@ -107,7 +106,7 @@ impl DbPlatform {
             Ok(v) => v,
             Err(e) => return Ok(crate::v8_bridge::throw_decode_error(scope, &e)),
         };
-        Ok(dispatch_set_mask_policy_field(scope, self.binding.app_id(), policy_v).into())
+        Ok(dispatch_set_mask_policy_field(scope, &self.binding, policy_v).into())
     }
 
     /// `__platform.replication` — the [`super::replication::Replication`]

@@ -3,9 +3,9 @@
 //! Ordinary package tests exercise the `SqliteSession` actor end-to-end:
 //!
 //! - bootstrap PRAGMAs land (`journal_mode = wal`, `busy_timeout = 5000`)
-//! - `SqlExecutor::pool_exec` round-trips DDL + DML
-//! - `SqlExecutor::client_exec` round-trips DDL + DML through a
-//!   handle returned by `acquire_dedicated_client`
+//! - `DatabaseFixture::execute_fixture` round-trips DDL + DML
+//! - `DatabaseFixture::execute_fixture_on` round-trips DDL + DML through a
+//!   handle returned by `fixture_session`
 //!
 //! Each test spins up a per-test `tempfile::TempDir` and constructs a
 //! `new_sqlite_backend(db_dir)` directly - this deliberately bypasses
@@ -32,9 +32,7 @@ use zeroship_data_orm::error::DbError;
 use zeroship_data_v8::backend::sqlite::SqliteBackend;
 use zeroship_data_v8::backend::sqlite::reservation::{CancelCleanup, TerminalOutcome};
 use zeroship_data_v8::backend::sqlite::session::TerminalIntent;
-use zeroship_data_v8::backend::{
-    BackendHandle, LockManager, LockScope, SchemaIntrospect, SqlExecutor,
-};
+use zeroship_data_v8::backend::{BackendHandle, LockManager, LockScope};
 use zeroship_data_v8::backend_selection::new_sqlite_backend;
 // The bounded-retry surface is the policy extension trait, not `LockManager`.
 use zeroship_data_v8::broker::{Subscription, SubscriptionMessage, subscribe};
@@ -60,7 +58,7 @@ fn fresh_backend() -> (SqliteBackend, tempfile::TempDir) {
 /// The backend handle the unmask entry points now take as a parameter.
 ///
 /// They resolved one themselves, from the isolate's context, until 2026-09-03.
-/// That read is the ADAPTER's and `crud::unmask` is ENGINE, so the resolution
+/// That read is the ADAPTER's and `protection::unmask` is ENGINE, so the resolution
 /// moved to the V8 dispatcher and the value is passed down. These tests drive
 /// the engine directly, so they make the same call the dispatcher makes on
 /// their behalf.
@@ -155,7 +153,7 @@ fn bytes_column_stores_a_raw_blob_on_sqlite() {
             .await
             .expect("attach the matrix app database");
         let client = backend
-            .acquire_dedicated_client("default")
+            .fixture_session("default")
             .await
             .expect("acquire client");
         // `query` materialises every cell as `Option<String>` and renders a BLOB
@@ -194,12 +192,12 @@ fn bytes_column_stores_a_raw_blob_on_sqlite() {
 /// the column name is the pragma's name (e.g. `journal_mode`,
 /// `timeout`). The session's `query` helper materialises each cell
 /// as `Option<String>` already, which is the right shape for PRAGMA
-/// inspection at this layer. The `SchemaIntrospect` impl provides a
+/// inspection at this layer. The `Catalog` impl provides a
 /// proper typed surface; these tests use the session directly via the
 /// `test-helpers`-gated handle accessor.
 async fn pragma_value(backend: &SqliteBackend, pragma: &str) -> String {
     let client = backend
-        .acquire_dedicated_client("default")
+        .fixture_session("default")
         .await
         .expect("acquire client");
     let sql = format!("PRAGMA {pragma}");
@@ -235,17 +233,17 @@ fn pragma_busy_timeout_set() {
 }
 
 #[test]
-fn pool_exec_round_trip() {
+fn execute_fixture_round_trip() {
     run(async {
         let (backend, _dir) = fresh_backend();
         // DDL — execute returns 0 rows affected for CREATE TABLE.
         backend
-            .pool_exec("CREATE TABLE t (x INTEGER)", &[])
+            .execute_fixture("CREATE TABLE t (x INTEGER)", &[])
             .await
             .expect("CREATE TABLE");
         // DML — INSERT one row, expect affected = 1.
         let n = backend
-            .pool_exec("INSERT INTO t VALUES (1)", &[])
+            .execute_fixture("INSERT INTO t VALUES (1)", &[])
             .await
             .expect("INSERT");
         assert_eq!(n, 1, "INSERT INTO t VALUES (1) should affect 1 row");
@@ -253,31 +251,31 @@ fn pool_exec_round_trip() {
 }
 
 #[test]
-fn client_exec_round_trip() {
+fn execute_fixture_on_round_trip() {
     run(async {
         let (backend, _dir) = fresh_backend();
         let client = backend
-            .acquire_dedicated_client("default")
+            .fixture_session("default")
             .await
-            .expect("acquire_dedicated_client");
+            .expect("fixture_session");
         // DDL via the handle — both paths route through the same
         // actor, so DDL on the client must be visible to subsequent
-        // pool_exec calls (and vice-versa).
+        // execute_fixture calls (and vice-versa).
         backend
-            .client_exec(&client, "CREATE TABLE t2 (y INTEGER)", &[])
+            .execute_fixture_on(&client, "CREATE TABLE t2 (y INTEGER)", &[])
             .await
             .expect("CREATE TABLE via client");
         let n = backend
-            .client_exec(&client, "INSERT INTO t2 VALUES (42)", &[])
+            .execute_fixture_on(&client, "INSERT INTO t2 VALUES (42)", &[])
             .await
             .expect("INSERT via client");
         assert_eq!(n, 1, "INSERT via client should affect 1 row");
 
-        // Cross-check: pool_exec on the same backend sees the same
+        // Cross-check: execute_fixture on the same backend sees the same
         // table (single-writer actor — there is no isolation
         // between client and pool surfaces).
         let n2 = backend
-            .pool_exec("INSERT INTO t2 VALUES (43)", &[])
+            .execute_fixture("INSERT INTO t2 VALUES (43)", &[])
             .await
             .expect("INSERT via pool sees client-DDL'd table");
         assert_eq!(n2, 1);
@@ -323,7 +321,7 @@ fn ensure_app_schema_attaches_file() {
         // succeeding is the assertion (a missing alias surfaces as
         // `no such database: app_demo`).
         let client = backend
-            .acquire_dedicated_client("app_demo")
+            .fixture_session("app_demo")
             .await
             .expect("acquire client");
         let rows = client
@@ -372,7 +370,7 @@ fn ensure_app_schema_isolates_per_app() {
 
         // Create a table inside the `app_a` namespace.
         backend
-            .pool_exec("CREATE TABLE \"app_a\".\"t\" (x INTEGER)", &[])
+            .execute_fixture("CREATE TABLE \"app_a\".\"t\" (x INTEGER)", &[])
             .await
             .expect("CREATE TABLE in app_a");
 
@@ -430,7 +428,7 @@ fn estimate_row_count_missing_table_returns_zero() {
 }
 
 // ---------------------------------------------------------------------------
-// LockManager (in-process registry) + SchemaIntrospect
+// LockManager (in-process registry) + Catalog
 // (PRAGMA-walk) integration tests.
 //
 // The lock-side tests exercise the three legacy primitive routes
@@ -448,7 +446,7 @@ fn lock_try_acquire_blocks_second() {
     run(async {
         let (backend, _dir) = fresh_backend();
         let client = backend
-            .acquire_dedicated_client("default")
+            .fixture_session("default")
             .await
             .expect("acquire client");
         // First acquire on a fresh registry must succeed — the legacy
@@ -462,7 +460,7 @@ fn lock_try_acquire_blocks_second() {
         // A try_acquire with the same `(key1, key2)` must observe the
         // slot as held — `Ok(false)` is the contended return. The second
         // handle comes from `autocommit_client()`, which is a handle on the
-        // OTHER connection: `acquire_dedicated_client` is now the exclusive
+        // OTHER connection: `fixture_session` is now the exclusive
         // `tx_conn` reservation and a second one is refused, so asking for it
         // here would measure lane admission rather than lock contention.
         let other_client = backend.autocommit_client();
@@ -482,7 +480,7 @@ fn lock_release_unblocks() {
     run(async {
         let (backend, _dir) = fresh_backend();
         let client = backend
-            .acquire_dedicated_client("default")
+            .fixture_session("default")
             .await
             .expect("acquire client");
         backend
@@ -520,7 +518,7 @@ fn lock_acquire_with_backoff_exhausts_into_contention_error() {
     run(async {
         let (backend, _dir) = fresh_backend();
         let client = backend
-            .acquire_dedicated_client("default")
+            .fixture_session("default")
             .await
             .expect("acquire client");
         let scope = LockScope::GlobalApp {
@@ -615,11 +613,11 @@ fn introspect_after_create_table_round_trip() {
         // columns, plus a non-PK index, so the introspect output
         // exercises every PRAGMA branch.
         let client = backend
-            .acquire_dedicated_client("app_demo")
+            .fixture_session("app_demo")
             .await
             .expect("acquire client");
         backend
-            .client_exec(
+            .execute_fixture_on(
                 &client,
                 "CREATE TABLE \"app_demo\".\"items\" (\
                      id INTEGER PRIMARY KEY, \
@@ -631,7 +629,7 @@ fn introspect_after_create_table_round_trip() {
             .await
             .expect("CREATE TABLE items");
         backend
-            .client_exec(
+            .execute_fixture_on(
                 &client,
                 "CREATE INDEX \"app_demo\".\"items_name_idx\" ON \"items\"(name)",
                 &[],
@@ -787,7 +785,7 @@ fn insert_publishes_via_preupdate_hook() {
 
         // Create a user table the CDC hook will fire against.
         backend
-            .pool_exec(
+            .execute_fixture(
                 "CREATE TABLE \"cdc_insert\".\"items\" (\
                      id INTEGER PRIMARY KEY, \
                      name TEXT NOT NULL\
@@ -805,7 +803,7 @@ fn insert_publishes_via_preupdate_hook() {
         // INSERT a row — the preupdate hook fires, commit hook ships
         // the packet, publisher resolves column names + publishes.
         backend
-            .pool_exec(
+            .execute_fixture(
                 "INSERT INTO \"cdc_insert\".\"items\" (name) VALUES ('alice')",
                 &[],
             )
@@ -859,7 +857,7 @@ fn insert_publishes_logical_typed_id_not_sqlite_rowid() {
             .expect("ensure_app_schema");
 
         backend
-            .pool_exec(
+            .execute_fixture(
                 "CREATE TABLE \"cdc_typed_id\".\"typed_items\" (\
                      id TEXT PRIMARY KEY, \
                      name TEXT NOT NULL\
@@ -873,7 +871,7 @@ fn insert_publishes_logical_typed_id_not_sqlite_rowid() {
         let typed_id = "usr_02HXSQLITECDCLOGICALPK";
 
         backend
-            .pool_exec(
+            .execute_fixture(
                 &format!(
                     "INSERT INTO \"cdc_typed_id\".\"typed_items\" (id, name) \
                      VALUES ('{typed_id}', 'alice')"
@@ -907,7 +905,7 @@ fn update_publishes_change_event_with_pre_image() {
             .await
             .expect("ensure_app_schema");
         backend
-            .pool_exec(
+            .execute_fixture(
                 "CREATE TABLE \"cdc_update\".\"items\" (\
                      id INTEGER PRIMARY KEY, \
                      name TEXT NOT NULL\
@@ -920,7 +918,7 @@ fn update_publishes_change_event_with_pre_image() {
         // Seed one row. We subscribe AFTER the seed so the INSERT
         // event is not part of what `drain` sees.
         backend
-            .pool_exec(
+            .execute_fixture(
                 "INSERT INTO \"cdc_update\".\"items\" (id, name) VALUES (1, 'alice')",
                 &[],
             )
@@ -938,7 +936,7 @@ fn update_publishes_change_event_with_pre_image() {
         // UPDATE the row — the preupdate hook should capture both
         // OLD ('alice') and NEW ('bob') tuples.
         backend
-            .pool_exec(
+            .execute_fixture(
                 "UPDATE \"cdc_update\".\"items\" SET name = 'bob' WHERE id = 1",
                 &[],
             )
@@ -991,7 +989,7 @@ fn rollback_does_not_publish() {
             .await
             .expect("ensure_app_schema");
         backend
-            .pool_exec(
+            .execute_fixture(
                 "CREATE TABLE \"cdc_rollback\".\"items\" (\
                      id INTEGER PRIMARY KEY, \
                      name TEXT NOT NULL\
@@ -1007,15 +1005,18 @@ fn rollback_does_not_publish() {
         // the session actor (same worker thread; serialised by the
         // mpsc queue). The rollback_hook clears the buffer; no packet
         // ships.
-        backend.pool_exec("BEGIN", &[]).await.expect("BEGIN");
+        backend.execute_fixture("BEGIN", &[]).await.expect("BEGIN");
         backend
-            .pool_exec(
+            .execute_fixture(
                 "INSERT INTO \"cdc_rollback\".\"items\" (name) VALUES ('alice')",
                 &[],
             )
             .await
             .expect("INSERT inside tx");
-        backend.pool_exec("ROLLBACK", &[]).await.expect("ROLLBACK");
+        backend
+            .execute_fixture("ROLLBACK", &[])
+            .await
+            .expect("ROLLBACK");
 
         drain_publisher().await;
 
@@ -1036,7 +1037,7 @@ fn mixed_ops_in_one_tx_ordered_by_buffer_index() {
             .await
             .expect("ensure_app_schema");
         backend
-            .pool_exec(
+            .execute_fixture(
                 "CREATE TABLE \"cdc_mixed\".\"items\" (\
                      id INTEGER PRIMARY KEY, \
                      name TEXT NOT NULL\
@@ -1049,7 +1050,7 @@ fn mixed_ops_in_one_tx_ordered_by_buffer_index() {
         // below. Done BEFORE subscription so the seed events don't
         // pollute the assertions.
         backend
-            .pool_exec(
+            .execute_fixture(
                 "INSERT INTO \"cdc_mixed\".\"items\" (id, name) VALUES (10, 'b_pre'), (20, 'c_pre')",
                 &[],
             )
@@ -1063,33 +1064,36 @@ fn mixed_ops_in_one_tx_ordered_by_buffer_index() {
         // Each statement fires the preupdate hook once; the commit
         // hook ships a single CommitPacket with all 4 events in
         // buffer order.
-        backend.pool_exec("BEGIN", &[]).await.expect("BEGIN");
+        backend.execute_fixture("BEGIN", &[]).await.expect("BEGIN");
         backend
-            .pool_exec(
+            .execute_fixture(
                 "INSERT INTO \"cdc_mixed\".\"items\" (id, name) VALUES (1, 'a')",
                 &[],
             )
             .await
             .expect("INSERT a");
         backend
-            .pool_exec(
+            .execute_fixture(
                 "UPDATE \"cdc_mixed\".\"items\" SET name = 'b_post' WHERE id = 10",
                 &[],
             )
             .await
             .expect("UPDATE b");
         backend
-            .pool_exec("DELETE FROM \"cdc_mixed\".\"items\" WHERE id = 20", &[])
+            .execute_fixture("DELETE FROM \"cdc_mixed\".\"items\" WHERE id = 20", &[])
             .await
             .expect("DELETE c");
         backend
-            .pool_exec(
+            .execute_fixture(
                 "INSERT INTO \"cdc_mixed\".\"items\" (id, name) VALUES (2, 'd')",
                 &[],
             )
             .await
             .expect("INSERT d");
-        backend.pool_exec("COMMIT", &[]).await.expect("COMMIT");
+        backend
+            .execute_fixture("COMMIT", &[])
+            .await
+            .expect("COMMIT");
 
         drain_publisher().await;
 
@@ -1151,7 +1155,7 @@ fn subscription_fanout_under_load() {
             .await
             .expect("ensure_app_schema");
         backend
-            .pool_exec(
+            .execute_fixture(
                 "CREATE TABLE \"app_fanout\".\"items\" (\
                      id INTEGER PRIMARY KEY, \
                      name TEXT NOT NULL\
@@ -1172,16 +1176,19 @@ fn subscription_fanout_under_load() {
         // session actor in order, so the buffer accumulates events in
         // INSERT order. The commit_hook then ships one CommitPacket
         // with all 100 events; the publisher iterates and fans out.
-        backend.pool_exec("BEGIN", &[]).await.expect("BEGIN");
+        backend.execute_fixture("BEGIN", &[]).await.expect("BEGIN");
         for i in 0..100 {
             let sql =
                 format!("INSERT INTO \"app_fanout\".\"items\" (id, name) VALUES ({i}, 'r{i}')");
             backend
-                .pool_exec(&sql, &[])
+                .execute_fixture(&sql, &[])
                 .await
                 .expect("INSERT inside tx");
         }
-        backend.pool_exec("COMMIT", &[]).await.expect("COMMIT");
+        backend
+            .execute_fixture("COMMIT", &[])
+            .await
+            .expect("COMMIT");
 
         // Generous drain — 100 publishes × 10 subscribers under the
         // single-threaded compio runtime + one PRAGMA round-trip on
@@ -1252,7 +1259,7 @@ fn mv_refresh_does_not_emit_change_events() {
         // emit. The CREATE itself only touches sqlite_master (already
         // filtered); the INSERT below is the gate.
         backend
-            .pool_exec(
+            .execute_fixture(
                 "CREATE TABLE \"app_mv\".\"__zeroship_mv_demo\" (\
                      id INTEGER PRIMARY KEY, \
                      v TEXT NOT NULL\
@@ -1272,7 +1279,7 @@ fn mv_refresh_does_not_emit_change_events() {
         // drop. The preupdate hook fires, `is_filtered_relation`
         // returns `true`, no event is buffered, no packet ships.
         backend
-            .pool_exec(
+            .execute_fixture(
                 "INSERT INTO \"app_mv\".\"__zeroship_mv_demo\" (id, v) VALUES (1, 'a')",
                 &[],
             )
@@ -1304,7 +1311,7 @@ fn mv_refresh_emits_no_change_events_on_base_or_shadow() {
             .expect("ensure_app_schema");
         // Regular collection.
         backend
-            .pool_exec(
+            .execute_fixture(
                 "CREATE TABLE \"app_mv_mixed\".\"items\" (\
                      id INTEGER PRIMARY KEY, \
                      name TEXT NOT NULL\
@@ -1315,7 +1322,7 @@ fn mv_refresh_emits_no_change_events_on_base_or_shadow() {
             .expect("CREATE TABLE items");
         // Shadow table.
         backend
-            .pool_exec(
+            .execute_fixture(
                 "CREATE TABLE \"app_mv_mixed\".\"__zeroship_mv_items\" (\
                      id INTEGER PRIMARY KEY, \
                      v TEXT NOT NULL\
@@ -1330,22 +1337,25 @@ fn mv_refresh_emits_no_change_events_on_base_or_shadow() {
 
         // Single transaction touching both tables. The shadow write
         // is filtered at the hook; the regular write reaches the broker.
-        backend.pool_exec("BEGIN", &[]).await.expect("BEGIN");
+        backend.execute_fixture("BEGIN", &[]).await.expect("BEGIN");
         backend
-            .pool_exec(
+            .execute_fixture(
                 "INSERT INTO \"app_mv_mixed\".\"items\" (id, name) VALUES (1, 'alice')",
                 &[],
             )
             .await
             .expect("INSERT items");
         backend
-            .pool_exec(
+            .execute_fixture(
                 "INSERT INTO \"app_mv_mixed\".\"__zeroship_mv_items\" (id, v) VALUES (1, 'a')",
                 &[],
             )
             .await
             .expect("INSERT shadow");
-        backend.pool_exec("COMMIT", &[]).await.expect("COMMIT");
+        backend
+            .execute_fixture("COMMIT", &[])
+            .await
+            .expect("COMMIT");
 
         drain_publisher().await;
 
@@ -1392,7 +1402,7 @@ fn audit_table_writes_do_not_emit_events() {
             .await
             .expect("ensure_app_schema");
         backend
-            .pool_exec(
+            .execute_fixture(
                 "CREATE TABLE \"app_audit\".\"__zeroship_audit_users\" (\
                      id INTEGER PRIMARY KEY, \
                      event TEXT NOT NULL\
@@ -1405,7 +1415,7 @@ fn audit_table_writes_do_not_emit_events() {
         let sub = subscribe_local("app_audit", "__zeroship_audit_users");
 
         backend
-            .pool_exec(
+            .execute_fixture(
                 "INSERT INTO \"app_audit\".\"__zeroship_audit_users\" \
                  (id, event) VALUES (1, 'delete')",
                 &[],
@@ -1446,7 +1456,7 @@ fn audit_table_writes_do_not_emit_events() {
 // WHAT THESE THREE DO NOT BIND. They drop the guard before draining, which is
 // the order that COULD expose a delivery-window regression - but they cannot
 // force it. The publisher is a compio task on this same thread, so it wakes
-// during each `pool_exec().await` and in practice drains the queue as the
+// during each `execute_fixture().await` and in practice drains the queue as the
 // writes land; by `drop(guard)` there is usually nothing left in flight.
 // Measured 2026-09-03: reverting the commit-time stamp in
 // `zeroship-data-sqlite/src/cdc.rs` (publisher re-samples `sink.disposition`)
@@ -1496,7 +1506,7 @@ fn backfill_run_pauses_broker_and_emits_one_resync() {
             .await
             .expect("ensure_app_schema");
         backend
-            .pool_exec(
+            .execute_fixture(
                 "CREATE TABLE \"app_backfill\".\"items\" (\
                      id INTEGER PRIMARY KEY, \
                      name TEXT NOT NULL\
@@ -1523,7 +1533,7 @@ fn backfill_run_pauses_broker_and_emits_one_resync() {
             let sql =
                 format!("INSERT INTO \"app_backfill\".\"items\" (id, name) VALUES ({i}, 'r{i}')");
             backend
-                .pool_exec(&sql, &[])
+                .execute_fixture(&sql, &[])
                 .await
                 .expect("INSERT under backfill pause");
         }
@@ -1543,7 +1553,7 @@ fn backfill_run_pauses_broker_and_emits_one_resync() {
         // packets — without it, "no Change events" would also be satisfied by
         // a publisher that never woke at all.
         backend
-            .pool_exec(
+            .execute_fixture(
                 "INSERT INTO \"app_backfill\".\"items\" (id, name) VALUES (1000, 'after')",
                 &[],
             )
@@ -1624,7 +1634,7 @@ fn schema_pending_decoder_drops_then_resyncs() {
             .await
             .expect("ensure_app_schema");
         backend
-            .pool_exec(
+            .execute_fixture(
                 "CREATE TABLE \"app_pending\".\"items\" (\
                      id INTEGER PRIMARY KEY, \
                      name TEXT NOT NULL\
@@ -1648,7 +1658,7 @@ fn schema_pending_decoder_drops_then_resyncs() {
             let sql =
                 format!("INSERT INTO \"app_pending\".\"items\" (id, name) VALUES ({i}, 'r{i}')");
             backend
-                .pool_exec(&sql, &[])
+                .execute_fixture(&sql, &[])
                 .await
                 .expect("INSERT under schema-pending");
         }
@@ -1683,7 +1693,7 @@ fn schema_pending_decoder_drops_then_resyncs() {
 
         // Post-disengage: a fresh INSERT must publish normally.
         backend
-            .pool_exec(
+            .execute_fixture(
                 "INSERT INTO \"app_pending\".\"items\" (id, name) VALUES (999, 'after')",
                 &[],
             )
@@ -1796,7 +1806,7 @@ fn backfill_pauses_broker_via_orchestrator_api_and_emits_one_resync() {
             .await
             .expect("ensure_app_schema");
         backend
-            .pool_exec(
+            .execute_fixture(
                 "CREATE TABLE \"app_orch\".\"items\" (\
                      id INTEGER PRIMARY KEY, \
                      name TEXT NOT NULL\
@@ -1817,7 +1827,7 @@ fn backfill_pauses_broker_via_orchestrator_api_and_emits_one_resync() {
 
         // Engage backfill pause through the trait-method API. The
         // adapter holds an Rc-clone of the backend so subsequent
-        // `pool_exec` calls below route through the same dispatcher.
+        // `execute_fixture` calls below route through the same dispatcher.
         let cs = zeroship_data_orm::backend::sqlite::cdc::SqliteChangeStream::new(
             handle
                 .get_rc::<zeroship_data_orm::backend::SqliteBackend>()
@@ -1838,7 +1848,7 @@ fn backfill_pauses_broker_via_orchestrator_api_and_emits_one_resync() {
         for i in 0..100 {
             let sql = format!("INSERT INTO \"app_orch\".\"items\" (id, name) VALUES ({i}, 'r{i}')");
             backend_ref
-                .pool_exec(&sql, &[])
+                .execute_fixture(&sql, &[])
                 .await
                 .expect("INSERT under orchestrator-driven backfill pause");
         }
@@ -1853,7 +1863,7 @@ fn backfill_pauses_broker_via_orchestrator_api_and_emits_one_resync() {
         // FIFO sentinel: observing this Change proves the publisher ran past
         // the 100 queued packets rather than never waking.
         backend_ref
-            .pool_exec(
+            .execute_fixture(
                 "INSERT INTO \"app_orch\".\"items\" (id, name) VALUES (1000, 'after')",
                 &[],
             )
@@ -1934,7 +1944,6 @@ fn backfill_pauses_broker_via_orchestrator_api_and_emits_one_resync() {
 // `backend/sqlite/mod.rs`'s `VectorIndex` block.
 // ---------------------------------------------------------------------------
 
-use zeroship_data_v8::backend::VectorIndex;
 use zeroship_data_v8::backend::VectorMetric;
 
 /// Encode a `Vec<f32>` as a SQLite `x'<hex>'` blob literal.
@@ -2035,7 +2044,7 @@ async fn create_vec0_shadow_relation(
         ),
     ] {
         backend
-            .pool_exec(&sql, &[])
+            .execute_fixture(&sql, &[])
             .await
             .unwrap_or_else(|e| panic!("vec0 shadow-relation fixture failed: {sql}: {e:?}"));
     }
@@ -2157,7 +2166,7 @@ fn the_search_really_depends_on_the_name_the_engine_records() {
 
         let dims = 8usize;
         backend
-            .pool_exec(
+            .execute_fixture(
                 &format!(
                     "CREATE TABLE \"vector_wrongname\".\"docs\" (\
                        id INTEGER PRIMARY KEY AUTOINCREMENT, \
@@ -2194,14 +2203,14 @@ fn the_search_really_depends_on_the_name_the_engine_records() {
             ),
         ] {
             backend
-                .pool_exec(&sql, &[])
+                .execute_fixture(&sql, &[])
                 .await
                 .expect("misnamed fixture");
         }
         for i in 0..4usize {
             let hex = vec_to_hex_lit(&mk_unit_vec(i, dims));
             backend
-                .pool_exec(
+                .execute_fixture(
                     &format!(
                         "INSERT INTO \"vector_wrongname\".\"docs\" (embedding) VALUES ({hex})"
                     ),
@@ -2213,18 +2222,21 @@ fn the_search_really_depends_on_the_name_the_engine_records() {
 
         let err = backend
             .vector_search(
-                &DbBinding::cold_start("vector_wrongname"),
-                "docs",
-                "embedding",
-                &mk_unit_vec(0, dims),
-                4,
-                VectorMetric::Cosine,
-                &zeroship_data_sql::value::Value::Null,
-                &zeroship_data_v8::collection_schema(
-                    &DbBinding::cold_start("vector_wrongname"),
-                    "docs",
-                )
-                .expect("descriptor slice for the control fixture"),
+                None,
+                zeroship_data_orm::search::VectorSearch {
+                    binding: &DbBinding::cold_start("vector_wrongname"),
+                    collection: "docs",
+                    column: "embedding",
+                    query: &mk_unit_vec(0, dims),
+                    k: 4,
+                    metric: VectorMetric::Cosine,
+                    filter: &zeroship_data_sql::value::Value::Null,
+                    schema: &zeroship_data_v8::collection_schema(
+                        &DbBinding::cold_start("vector_wrongname"),
+                        "docs",
+                    )
+                    .expect("descriptor slice for the control fixture"),
+                },
             )
             .await
             .expect_err(
@@ -2255,7 +2267,7 @@ fn vector_search_returns_k_nearest_sqlite() {
         // second line of defence (trigger-time).
         let dims = 8usize;
         backend
-            .pool_exec(
+            .execute_fixture(
                 &format!(
                     "CREATE TABLE \"vector_topk\".\"docs\" (\
                        id INTEGER PRIMARY KEY AUTOINCREMENT, \
@@ -2287,7 +2299,7 @@ fn vector_search_returns_k_nearest_sqlite() {
             let v = mk_unit_vec(i, dims);
             let hex = vec_to_hex_lit(&v);
             let sql = format!("INSERT INTO \"vector_topk\".\"docs\" (embedding) VALUES ({hex})");
-            backend.pool_exec(&sql, &[]).await.expect("INSERT");
+            backend.execute_fixture(&sql, &[]).await.expect("INSERT");
         }
 
         // Query with row #0's exact vector — its own row must be in
@@ -2296,18 +2308,21 @@ fn vector_search_returns_k_nearest_sqlite() {
         let query = mk_unit_vec(0, dims);
         let rows = backend
             .vector_search(
-                &DbBinding::cold_start("vector_topk"),
-                "docs",
-                "embedding",
-                &query,
-                10,
-                VectorMetric::Cosine,
-                &zeroship_data_sql::value::Value::Null,
-                &zeroship_data_v8::collection_schema(
-                    &DbBinding::cold_start("vector_topk"),
-                    "docs",
-                )
-                .expect("descriptor slice for the search fixture"),
+                None,
+                zeroship_data_orm::search::VectorSearch {
+                    binding: &DbBinding::cold_start("vector_topk"),
+                    collection: "docs",
+                    column: "embedding",
+                    query: &query,
+                    k: 10,
+                    metric: VectorMetric::Cosine,
+                    filter: &zeroship_data_sql::value::Value::Null,
+                    schema: &zeroship_data_v8::collection_schema(
+                        &DbBinding::cold_start("vector_topk"),
+                        "docs",
+                    )
+                    .expect("descriptor slice for the search fixture"),
+                },
             )
             .await
             .expect("vector_search");
@@ -2366,7 +2381,7 @@ fn vector_dimension_mismatch_rejected_at_insert_sqlite() {
 
         // 128-d column = 512-byte CHECK.
         backend
-            .pool_exec(
+            .execute_fixture(
                 "CREATE TABLE \"vector_dim\".\"docs\" (\
                    id INTEGER PRIMARY KEY AUTOINCREMENT, \
                    embedding BLOB CHECK(length(embedding) = 512) NOT NULL\
@@ -2377,13 +2392,13 @@ fn vector_dimension_mismatch_rejected_at_insert_sqlite() {
             .expect("CREATE TABLE docs");
 
         // Insert a 256-d vector into a 128-d column. The CHECK
-        // constraint must reject — the SqlExecutor surface should
+        // constraint must reject — the DatabaseFixture surface should
         // surface a SchemaRefused {check_violation} typed error.
         let oversized = mk_unit_vec(0, 256);
         let hex = vec_to_hex_lit(&oversized);
         let sql = format!("INSERT INTO \"vector_dim\".\"docs\" (embedding) VALUES ({hex})");
         let err = backend
-            .pool_exec(&sql, &[])
+            .execute_fixture(&sql, &[])
             .await
             .expect_err("256-d into 128-d column must fail");
         match err {
@@ -2409,7 +2424,7 @@ fn vector_search_respects_filter_sqlite() {
 
         // 4-d column = 16-byte CHECK.
         backend
-            .pool_exec(
+            .execute_fixture(
                 &format!(
                     "CREATE TABLE \"vector_filter\".\"docs\" (\
                        id INTEGER PRIMARY KEY AUTOINCREMENT, \
@@ -2444,7 +2459,7 @@ fn vector_search_respects_filter_sqlite() {
             let v = mk_unit_vec(i, 4);
             let hex = vec_to_hex_lit(&v);
             backend
-                .pool_exec(
+                .execute_fixture(
                     &format!(
                         "INSERT INTO \"vector_filter\".\"docs\" \
                            (tenant, embedding) VALUES ('a', {hex})"
@@ -2454,7 +2469,7 @@ fn vector_search_respects_filter_sqlite() {
                 .await
                 .expect("INSERT a");
             backend
-                .pool_exec(
+                .execute_fixture(
                     &format!(
                         "INSERT INTO \"vector_filter\".\"docs\" \
                            (tenant, embedding) VALUES ('b', {hex})"
@@ -2472,18 +2487,21 @@ fn vector_search_respects_filter_sqlite() {
         let filter = zeroship_data_sql::value!({ "tenant": { "$eq": "a" } });
         let rows = backend
             .vector_search(
-                &DbBinding::cold_start("vector_filter"),
-                "docs",
-                "embedding",
-                &query,
-                10,
-                VectorMetric::Cosine,
-                &filter,
-                &zeroship_data_v8::collection_schema(
-                    &DbBinding::cold_start("vector_filter"),
-                    "docs",
-                )
-                .expect("descriptor slice for the search fixture"),
+                None,
+                zeroship_data_orm::search::VectorSearch {
+                    binding: &DbBinding::cold_start("vector_filter"),
+                    collection: "docs",
+                    column: "embedding",
+                    query: &query,
+                    k: 10,
+                    metric: VectorMetric::Cosine,
+                    filter: &filter,
+                    schema: &zeroship_data_v8::collection_schema(
+                        &DbBinding::cold_start("vector_filter"),
+                        "docs",
+                    )
+                    .expect("descriptor slice for the search fixture"),
+                },
             )
             .await
             .expect("vector_search with filter");
@@ -2523,7 +2541,7 @@ fn vector_l2_distance_matches_cosine_for_unit_vectors_sqlite() {
             .expect("ensure_app_schema");
 
         backend
-            .pool_exec(
+            .execute_fixture(
                 &format!(
                     "CREATE TABLE \"vector_math\".\"docs\" (\
                        id INTEGER PRIMARY KEY AUTOINCREMENT, \
@@ -2553,7 +2571,7 @@ fn vector_l2_distance_matches_cosine_for_unit_vectors_sqlite() {
         let hex1 = vec_to_hex_lit(&v1);
         let hex2 = vec_to_hex_lit(&v2);
         backend
-            .pool_exec(
+            .execute_fixture(
                 &format!(
                     "INSERT INTO \"vector_math\".\"docs\" (emb_cos, emb_l2) \
                      VALUES ({hex1}, {hex1})"
@@ -2563,7 +2581,7 @@ fn vector_l2_distance_matches_cosine_for_unit_vectors_sqlite() {
             .await
             .expect("INSERT v1");
         backend
-            .pool_exec(
+            .execute_fixture(
                 &format!(
                     "INSERT INTO \"vector_math\".\"docs\" (emb_cos, emb_l2) \
                      VALUES ({hex2}, {hex2})"
@@ -2576,35 +2594,41 @@ fn vector_l2_distance_matches_cosine_for_unit_vectors_sqlite() {
         // Query the cosine distance from row 1 (v1) to v2.
         let cos_rows = backend
             .vector_search(
-                &DbBinding::cold_start("vector_math"),
-                "docs",
-                "emb_cos",
-                &v1,
-                2,
-                VectorMetric::Cosine,
-                &zeroship_data_sql::value::Value::Null,
-                &zeroship_data_v8::collection_schema(
-                    &DbBinding::cold_start("vector_math"),
-                    "docs",
-                )
-                .expect("descriptor slice for the search fixture"),
+                None,
+                zeroship_data_orm::search::VectorSearch {
+                    binding: &DbBinding::cold_start("vector_math"),
+                    collection: "docs",
+                    column: "emb_cos",
+                    query: &v1,
+                    k: 2,
+                    metric: VectorMetric::Cosine,
+                    filter: &zeroship_data_sql::value::Value::Null,
+                    schema: &zeroship_data_v8::collection_schema(
+                        &DbBinding::cold_start("vector_math"),
+                        "docs",
+                    )
+                    .expect("descriptor slice for the search fixture"),
+                },
             )
             .await
             .expect("cosine search");
         let l2_rows = backend
             .vector_search(
-                &DbBinding::cold_start("vector_math"),
-                "docs",
-                "emb_l2",
-                &v1,
-                2,
-                VectorMetric::L2,
-                &zeroship_data_sql::value::Value::Null,
-                &zeroship_data_v8::collection_schema(
-                    &DbBinding::cold_start("vector_math"),
-                    "docs",
-                )
-                .expect("descriptor slice for the search fixture"),
+                None,
+                zeroship_data_orm::search::VectorSearch {
+                    binding: &DbBinding::cold_start("vector_math"),
+                    collection: "docs",
+                    column: "emb_l2",
+                    query: &v1,
+                    k: 2,
+                    metric: VectorMetric::L2,
+                    filter: &zeroship_data_sql::value::Value::Null,
+                    schema: &zeroship_data_v8::collection_schema(
+                        &DbBinding::cold_start("vector_math"),
+                        "docs",
+                    )
+                    .expect("descriptor slice for the search fixture"),
+                },
             )
             .await
             .expect("l2 search");
@@ -2648,7 +2672,6 @@ fn vector_l2_distance_matches_cosine_for_unit_vectors_sqlite() {
 // SQLite geopoint encoding directly.
 
 use zeroship_data_v8::backend::GeoPoint;
-use zeroship_data_v8::backend::SpatialIndex;
 
 /// Encode a `GeoPoint` as a SQLite `x'<hex>'` blob literal — 2× LE
 /// f64 = 16 bytes. Mirrors `vec_to_hex_lit` for vectors. We use this
@@ -2688,7 +2711,7 @@ fn near_returns_within_radius() {
         // test self-contained against the orchestrator's PG-flavoured
         // emitter.
         backend
-            .pool_exec(
+            .execute_fixture(
                 &format!(
                     "CREATE TABLE \"near_radius\".\"places\" (\
                        id INTEGER PRIMARY KEY AUTOINCREMENT, \
@@ -2733,7 +2756,10 @@ fn near_returns_within_radius() {
             };
             let hex = point_to_hex_lit(p);
             let sql = format!("INSERT INTO \"near_radius\".\"places\" (location) VALUES ({hex})");
-            backend.pool_exec(&sql, &[]).await.expect("INSERT location");
+            backend
+                .execute_fixture(&sql, &[])
+                .await
+                .expect("INSERT location");
             if *within_1km {
                 expected_within.push((i + 1) as i64);
             }
@@ -2741,18 +2767,21 @@ fn near_returns_within_radius() {
 
         let rows = backend
             .spatial_near(
-                &DbBinding::cold_start("near_radius"),
-                "places",
-                "location",
-                london,
-                1000.0,
-                &zeroship_data_sql::value::Value::Null,
                 None,
-                &zeroship_data_v8::collection_schema(
-                    &DbBinding::cold_start("near_radius"),
-                    "places",
-                )
-                .expect("descriptor slice for the search fixture"),
+                zeroship_data_orm::search::SpatialSearch {
+                    binding: &DbBinding::cold_start("near_radius"),
+                    collection: "places",
+                    column: "location",
+                    point: london,
+                    radius_m: 1000.0,
+                    filter: &zeroship_data_sql::value::Value::Null,
+                    limit: None,
+                    schema: &zeroship_data_v8::collection_schema(
+                        &DbBinding::cold_start("near_radius"),
+                        "places",
+                    )
+                    .expect("descriptor slice for the search fixture"),
+                },
             )
             .await
             .expect("spatial_near");
@@ -2827,7 +2856,7 @@ fn a_near_inside_a_transaction_sees_the_row_that_transaction_inserted() {
             .await
             .expect("attach the app database");
         backend
-            .pool_exec(
+            .execute_fixture(
                 &format!(
                     "CREATE TABLE \"{app}\".\"places\" (\
                        id INTEGER PRIMARY KEY AUTOINCREMENT, \
@@ -2925,6 +2954,7 @@ fn a_near_inside_a_transaction_sees_the_row_that_transaction_inserted() {
             "a near inside a transaction must reach the row that transaction \
              inserted; an empty result means the scan took `op_conn`: {inside:?}",
         );
+        assert_eq!(inside[0]["location"], zeroship_data_sql::value!({"lat":london.lat, "lng":london.lng}));
         assert!(
             inside[0]
                 .get("_distance_m")
@@ -3297,7 +3327,10 @@ fn insert_many_encrypts_ciphertext_before_sqlite_storage() {
             if trimmed.is_empty() {
                 continue;
             }
-            backend.pool_exec(trimmed, &[]).await.expect("DDL exec");
+            backend
+                .execute_fixture(trimmed, &[])
+                .await
+                .expect("DDL exec");
         }
 
         let mut docs = zeroship_data_sql::value!([
@@ -3348,7 +3381,7 @@ fn insert_many_encrypts_ciphertext_before_sqlite_storage() {
         .expect("build insertMany");
         let params = &built.params;
         let client = backend
-            .acquire_dedicated_client(app_id)
+            .fixture_session(app_id)
             .await
             .expect("acquire client");
         client
@@ -3484,7 +3517,7 @@ const _procedures = { upsertInsert };
             .await
             .expect("ensure default schema");
         let client = backend
-            .acquire_dedicated_client("default")
+            .fixture_session("default")
             .await
             .expect("acquire client");
         let rows = client
@@ -3616,7 +3649,7 @@ const _procedures = { upsertConflict };
             .await
             .expect("ensure default schema");
         let client = backend
-            .acquire_dedicated_client("default")
+            .fixture_session("default")
             .await
             .expect("acquire client");
         let raw_ssn = raw_column_name("ssn");
@@ -3762,7 +3795,7 @@ const _procedures = { upsertConflict };
             .await
             .expect("ensure default schema");
         let client = backend
-            .acquire_dedicated_client("default")
+            .fixture_session("default")
             .await
             .expect("acquire client");
         let raw_ssn = raw_column_name("ssn");
@@ -3894,7 +3927,7 @@ const _procedures = { seed, updateByEmail };
             .await
             .expect("ensure default schema");
         let client = backend
-            .acquire_dedicated_client("default")
+            .fixture_session("default")
             .await
             .expect("acquire client");
         let raw_ssn = raw_column_name("ssn");
@@ -4030,10 +4063,7 @@ const _procedures = { seed, updateManyByName };
             !counters.target_row_resolution_sql.is_empty(),
             "the target-resolution SQL set must be non-empty: {counters:?}"
         );
-        let expected_limit = format!(
-            " LIMIT {}",
-            zeroship_data_v8::compile::MAX_QUERY_LIMIT + 1
-        );
+        let expected_limit = format!(" LIMIT {}", zeroship_data_v8::compile::MAX_QUERY_LIMIT + 1);
         for sql in &counters.target_row_resolution_sql {
             assert!(
                 sql.ends_with(&expected_limit),
@@ -4051,7 +4081,7 @@ const _procedures = { seed, updateManyByName };
             .await
             .expect("ensure default schema");
         let client = backend
-            .acquire_dedicated_client("default")
+            .fixture_session("default")
             .await
             .expect("acquire client");
         let raw_ssn = raw_column_name("ssn");
@@ -4193,7 +4223,7 @@ const _procedures = { overflow };
             .await
             .expect("ensure default schema");
         let client = backend
-            .acquire_dedicated_client("default")
+            .fixture_session("default")
             .await
             .expect("acquire client");
         let state = client
@@ -4367,7 +4397,7 @@ const _procedures = { seed, failBulk, failBulkInsideTransaction };
             .await
             .expect("ensure default schema");
         let client = backend
-            .acquire_dedicated_client("default")
+            .fixture_session("default")
             .await
             .expect("acquire client");
         let typed = client
@@ -4698,7 +4728,7 @@ const _procedures = { seed, nestedCasUpdate };
             .await
             .expect("ensure default schema");
         let client = backend
-            .acquire_dedicated_client("default")
+            .fixture_session("default")
             .await
             .expect("acquire client");
         let rows = client
@@ -4791,7 +4821,7 @@ const _procedures = { seed, nestedCasUpdateMany };
             .await
             .expect("ensure default schema");
         let client = backend
-            .acquire_dedicated_client("default")
+            .fixture_session("default")
             .await
             .expect("acquire client");
         let rows = client
@@ -4838,7 +4868,7 @@ fn encrypted_column_round_trip_sqlite_randomised() {
             .await
             .expect("ensure_app_schema");
         backend
-            .pool_exec(
+            .execute_fixture(
                 "CREATE TABLE \"app_demo\".\"enc_notes\" (\
                      id  TEXT PRIMARY KEY, \
                      ssn BLOB\
@@ -4871,11 +4901,11 @@ fn encrypted_column_round_trip_sqlite_randomised() {
         let insert_sql =
             format!("INSERT INTO \"app_demo\".\"enc_notes\" (id, ssn) VALUES (?, {blob_lit})");
         backend
-            .pool_exec(&insert_sql, &["row_a"])
+            .execute_fixture(&insert_sql, &[("row_a").into()])
             .await
             .expect("INSERT");
 
-        // Pull the ciphertext back as a typed BLOB. `client_exec`
+        // Pull the ciphertext back as a typed BLOB. `execute_fixture_on`
         // routes through `query`, which stringifies BLOBs as
         // `<N bytes blob>` — that's not what we want here. Reach into
         // the session's typed-row path via the dedicated client; the
@@ -4883,7 +4913,7 @@ fn encrypted_column_round_trip_sqlite_randomised() {
         // simplest cross-test path: re-encode the BLOB as hex via SQL
         // (`hex(ssn)`) and parse back to bytes here.
         let client = backend
-            .acquire_dedicated_client("app_demo")
+            .fixture_session("app_demo")
             .await
             .expect("acquire client");
         let rows = client
@@ -4919,7 +4949,7 @@ fn encrypted_column_round_trip_sqlite_deterministic() {
             .await
             .expect("ensure_app_schema");
         backend
-            .pool_exec(
+            .execute_fixture(
                 "CREATE TABLE \"app_demo\".\"enc_notes\" (\
                      id  TEXT PRIMARY KEY, \
                      ssn BLOB\
@@ -4949,12 +4979,12 @@ fn encrypted_column_round_trip_sqlite_deterministic() {
         let insert_sql =
             format!("INSERT INTO \"app_demo\".\"enc_notes\" (id, ssn) VALUES (?, {blob_lit})");
         backend
-            .pool_exec(&insert_sql, &["row_a"])
+            .execute_fixture(&insert_sql, &[("row_a").into()])
             .await
             .expect("INSERT");
 
         let client = backend
-            .acquire_dedicated_client("app_demo")
+            .fixture_session("app_demo")
             .await
             .expect("acquire client");
         let rows = client
@@ -5003,7 +5033,7 @@ fn deterministic_encrypted_equality_via_index_sqlite() {
             .await
             .expect("ensure_app_schema");
         backend
-            .pool_exec(
+            .execute_fixture(
                 "CREATE TABLE \"app_demo\".\"enc_notes\" (\
                      id  TEXT PRIMARY KEY, \
                      ssn BLOB\
@@ -5013,7 +5043,7 @@ fn deterministic_encrypted_equality_via_index_sqlite() {
             .await
             .expect("CREATE TABLE enc_notes");
         backend
-            .pool_exec(
+            .execute_fixture(
                 "CREATE INDEX \"app_demo\".\"enc_notes_ssn_idx\" \
                  ON \"enc_notes\"(ssn)",
                 &[],
@@ -5071,7 +5101,7 @@ fn deterministic_encrypted_equality_via_index_sqlite() {
             let sql =
                 format!("INSERT INTO \"app_demo\".\"enc_notes\" (id, ssn) VALUES (?, {blob_lit})");
             backend
-                .pool_exec(&sql, &[id.as_str()])
+                .execute_fixture(&sql, &[(id.as_str()).into()])
                 .await
                 .expect("INSERT");
         }
@@ -5079,7 +5109,7 @@ fn deterministic_encrypted_equality_via_index_sqlite() {
         // Equality lookup on P0's ciphertext should match exactly 20
         // rows (0, 5, 10, ..., 95).
         let client = backend
-            .acquire_dedicated_client("app_demo")
+            .fixture_session("app_demo")
             .await
             .expect("acquire client");
         let p0_lit = sqlite_blob_literal(&ciphertexts[0]);
@@ -5123,7 +5153,7 @@ fn randomised_ciphertext_row_swap_rejected_sqlite() {
             .await
             .expect("ensure_app_schema");
         backend
-            .pool_exec(
+            .execute_fixture(
                 "CREATE TABLE \"app_demo\".\"enc_notes\" (\
                      id  TEXT PRIMARY KEY, \
                      ssn BLOB\
@@ -5153,17 +5183,20 @@ fn randomised_ciphertext_row_swap_rejected_sqlite() {
             let blob_lit = sqlite_blob_literal(ct);
             let sql =
                 format!("INSERT INTO \"app_demo\".\"enc_notes\" (id, ssn) VALUES (?, {blob_lit})");
-            backend.pool_exec(&sql, &[id]).await.unwrap();
+            backend.execute_fixture(&sql, &[(id).into()]).await.unwrap();
         }
 
         // Attacker move: UPDATE row_b's ssn slot with row_a's ciphertext.
         let blob_a = sqlite_blob_literal(&ct_a);
         let sql = format!("UPDATE \"app_demo\".\"enc_notes\" SET ssn = {blob_a} WHERE id = ?");
-        backend.pool_exec(&sql, &["row_b"]).await.unwrap();
+        backend
+            .execute_fixture(&sql, &[("row_b").into()])
+            .await
+            .unwrap();
 
         // Read row B's ssn back and try to decrypt with row B's AAD.
         let client = backend
-            .acquire_dedicated_client("app_demo")
+            .fixture_session("app_demo")
             .await
             .expect("acquire client");
         let rows = client
@@ -5246,10 +5279,12 @@ fn cross_backend_ciphertext_decrypt_via_shared_key() {
 /// columns.
 #[test]
 fn encrypted_column_e2e_crud_round_trip_sqlite() {
-    use zeroship_data_v8::backend::SqlExecutor as _;
+    use zeroship_data_orm::fixtures::DatabaseFixture;
+    use zeroship_data_orm::protection::encryption_pass::{
+        decrypt_row_on_read, encrypt_row_on_write,
+    };
     use zeroship_data_v8::backend::sqlite::session::TypedCell;
     use zeroship_data_v8::compile::{SqlDialect, build_insert_with_dialect};
-    use zeroship_data_v8::crud::encryption_pass::{decrypt_row_on_read, encrypt_row_on_write};
 
     let _keys = with_root_key("p5_e2e_crud", &"c".repeat(64));
     run(async {
@@ -5264,7 +5299,7 @@ fn encrypted_column_e2e_crud_round_trip_sqlite() {
         // sentinel-comment metadata because the introspector isn't on
         // the e2e read path here.
         backend
-            .pool_exec(
+            .execute_fixture(
                 "CREATE TABLE \"app_demo\".\"users\" (\
                      id  TEXT PRIMARY KEY, \
                      ssn BLOB\
@@ -5332,7 +5367,7 @@ fn encrypted_column_e2e_crud_round_trip_sqlite() {
         // Execute the compiled INSERT through the typed RETURNING surface.
         let param_refs = &bq.params;
         let client = backend
-            .acquire_dedicated_client("app_demo")
+            .fixture_session("app_demo")
             .await
             .expect("acquire client");
         let _affected = client
@@ -5481,7 +5516,7 @@ fn dual_write_insert_persists_parent_and_sibling_sqlite() {
         // elsewhere. The sibling-column CLAUSE emission is standard
         // SQL; we exercise it inside a SQLite-valid table here.
         backend
-            .pool_exec(
+            .execute_fixture(
                 "CREATE TABLE \"app_demo\".\"users\" (\
                      id    INTEGER PRIMARY KEY, \
                      ssn   TEXT, \
@@ -5521,7 +5556,7 @@ fn dual_write_insert_persists_parent_and_sibling_sqlite() {
 
         let param_refs = &bq.params;
         let client = backend
-            .acquire_dedicated_client("app_demo")
+            .fixture_session("app_demo")
             .await
             .expect("acquire client");
         let _ = client
@@ -5566,7 +5601,7 @@ fn a_select_serves_the_masked_column_sqlite() {
             .expect("ensure_app_schema");
         let raw_ssn = raw_column_name("ssn");
         backend
-            .pool_exec(
+            .execute_fixture(
                 &format!(
                     "CREATE TABLE \"app_demo\".\"users\" (\
                          id    TEXT PRIMARY KEY, \
@@ -5610,7 +5645,7 @@ fn a_select_serves_the_masked_column_sqlite() {
         .expect("build_insert_with_dialect");
         let param_refs = &bq.params;
         let client = backend
-            .acquire_dedicated_client("app_demo")
+            .fixture_session("app_demo")
             .await
             .expect("acquire client");
         client
@@ -5649,7 +5684,7 @@ fn a_select_serves_the_masked_column_sqlite() {
         );
         // The raw column (real value) must NEVER appear in a default
         // read's SELECT clause - it is unqueryable outside the audited
-        // unmask path (`crud::unmask`).
+        // unmask path (`protection::unmask`).
         assert!(
             !select_clause.contains(raw_ssn.as_str()),
             "SELECT must never reference the raw column: {select_clause}"
@@ -5745,7 +5780,7 @@ fn missing_sibling_fails_not_null_constraint_sqlite() {
             .await
             .expect("ensure_app_schema");
         backend
-            .pool_exec(
+            .execute_fixture(
                 "CREATE TABLE \"app_demo\".\"users\" (\
                      id  INTEGER PRIMARY KEY, \
                      ssn TEXT, \
@@ -5757,9 +5792,9 @@ fn missing_sibling_fails_not_null_constraint_sqlite() {
             .expect("CREATE TABLE ok");
         // Insert WITHOUT the sibling. The engine must refuse.
         let res = backend
-            .pool_exec(
+            .execute_fixture(
                 "INSERT INTO \"app_demo\".\"users\" (\"ssn\") VALUES (?)",
-                &["plaintext-no-mask"],
+                &[("plaintext-no-mask").into()],
             )
             .await;
         assert!(
@@ -5810,7 +5845,7 @@ fn snapshot_restore_round_trip_sqlite() {
 
         // Seed deterministic rows.
         backend
-            .pool_exec(
+            .execute_fixture(
                 "CREATE TABLE \"app_demo\".\"notes\" (id INTEGER PRIMARY KEY, body TEXT)",
                 &[],
             )
@@ -5819,11 +5854,14 @@ fn snapshot_restore_round_trip_sqlite() {
         const ROW_COUNT: i64 = 10;
         for i in 0..ROW_COUNT {
             let sql = format!("INSERT INTO \"app_demo\".\"notes\" VALUES ({i}, 'row-{i}')");
-            backend.pool_exec(&sql, &[]).await.expect("INSERT row");
+            backend
+                .execute_fixture(&sql, &[])
+                .await
+                .expect("INSERT row");
         }
         // Sanity: row count is N.
         let client = backend
-            .acquire_dedicated_client("app_demo")
+            .fixture_session("app_demo")
             .await
             .expect("acquire client");
         let rows = client
@@ -5863,7 +5901,7 @@ fn snapshot_restore_round_trip_sqlite() {
 
         // Clear the live rows so the restore is a meaningful recovery.
         backend
-            .pool_exec("DELETE FROM \"app_demo\".\"notes\"", &[])
+            .execute_fixture("DELETE FROM \"app_demo\".\"notes\"", &[])
             .await
             .expect("DELETE rows");
         let rows_after_delete = client
@@ -5920,7 +5958,7 @@ fn vacuum_into_snapshot_consistent_under_concurrent_writer() {
             .await
             .expect("ensure_app_schema");
         backend
-            .pool_exec(
+            .execute_fixture(
                 "CREATE TABLE \"app_demo\".\"notes\" (id INTEGER PRIMARY KEY, body TEXT)",
                 &[],
             )
@@ -5930,7 +5968,10 @@ fn vacuum_into_snapshot_consistent_under_concurrent_writer() {
         const INITIAL_ROWS: usize = 50;
         for i in 0..INITIAL_ROWS {
             let sql = format!("INSERT INTO \"app_demo\".\"notes\" VALUES ({i}, 'initial-{i}')");
-            backend.pool_exec(&sql, &[]).await.expect("INSERT initial");
+            backend
+                .execute_fixture(&sql, &[])
+                .await
+                .expect("INSERT initial");
         }
 
         // Concurrent writer thread. Opens its own rusqlite Connection
@@ -6025,7 +6066,7 @@ fn vacuum_into_snapshot_consistent_under_concurrent_writer() {
         // (b) — live > snap (the concurrent writer's commits past the
         // snapshot's read mark are visible in live but NOT in snap).
         let client = backend
-            .acquire_dedicated_client("app_demo")
+            .fixture_session("app_demo")
             .await
             .expect("acquire client");
         let live_rows = client
@@ -6074,7 +6115,7 @@ fn snapshot_during_migration_returns_typed_error_sqlite() {
         // acquire. The `to_keys` derivation is identical to what the
         // snapshot impl computes.
         let client = backend
-            .acquire_dedicated_client("default")
+            .fixture_session("default")
             .await
             .expect("acquire client");
         let scope = LockScope::GlobalApp {
@@ -6145,14 +6186,14 @@ fn restore_hash_mismatch_rejected_sqlite() {
             .await
             .expect("ensure_app_schema");
         backend
-            .pool_exec(
+            .execute_fixture(
                 "CREATE TABLE \"app_demo\".\"notes\" (id INTEGER PRIMARY KEY, body TEXT)",
                 &[],
             )
             .await
             .expect("CREATE TABLE notes");
         backend
-            .pool_exec(
+            .execute_fixture(
                 "INSERT INTO \"app_demo\".\"notes\" VALUES (1, 'sentinel')",
                 &[],
             )
@@ -6207,7 +6248,7 @@ fn restore_hash_mismatch_rejected_sqlite() {
         // only fires after the hash verify; an early-refuse contract
         // means the live file is bit-for-bit unchanged.)
         let client = backend
-            .acquire_dedicated_client("app_demo")
+            .fixture_session("app_demo")
             .await
             .expect("acquire client");
         let rows = client
@@ -6273,7 +6314,7 @@ fn p55_pr1_build_create_table_refuses_classification_name_field_sqlite() {
 // Unmask RPC + audit table (SQLite arm)
 // ===========================================================================
 //
-// These tests exercise `crud::unmask::dispatch_unmask` end-to-end on the
+// These tests exercise `protection::unmask::dispatch_unmask` end-to-end on the
 // SQLite arm:
 //   - the audit table is created idempotently on first call;
 //   - the default-deny stub grants `kind: "auto"` and denies everyone else;
@@ -6286,7 +6327,7 @@ fn p55_pr1_build_create_table_refuses_classification_name_field_sqlite() {
 // helpers in `lib.rs`. Each test uses a fresh tempdir so the audit
 // table is observed from a clean slate.
 
-use zeroship_data_v8::crud::unmask;
+use zeroship_data_orm::protection::unmask;
 
 /// Helper — install backend + schema for an unmask test. Returns the
 /// backend (kept alive for the test duration via Rc) + the TempDir
@@ -6327,7 +6368,7 @@ async fn unmask_setup_with_schema(
     // `bridge.rs::apply_ir_sqlite` is covered by no test in this file.
     for stmt in zeroship_migrate_sqlite::backend::audit_unmask_ddl(app_id) {
         backend
-            .pool_exec(&stmt, &[])
+            .execute_fixture(&stmt, &[])
             .await
             .expect("apply-ahead: unmask audit table");
     }
@@ -6339,50 +6380,31 @@ async fn unmask_setup_with_schema(
 }
 
 /// Drop the fixture-installed backend while preserving its on-disk databases,
-/// then leave only the production SQLite URL and descriptor inputs that a cold
-/// first operation receives.
+/// then reinstall the app descriptor and policy as a fresh startup would.
+/// The database remains cold until its first operation.
 fn configure_cold_sqlite_unmask_fixture(
     dir: &tempfile::TempDir,
     app_id: &str,
     collection: &str,
     schema: zeroship_data_sql::value::Value,
+    policy: zeroship_data_sql::value::Value,
 ) {
     zeroship_data_v8::reset_context_for_tests();
     let url = format!("sqlite:{}", dir.path().join("zs-control.sqlite").display());
     zeroship_data_v8::set_db_url_for_tests(&url);
     zeroship_data_v8::cache_schema_for_tests(app_id, collection, schema);
+    mask_policy::install_mask_policy(&DbBinding::cold_start(app_id), policy)
+        .expect("reinstall the app declaration during startup");
 }
 
 /// The cold-open gate: prove the isolate left by
 /// [`configure_cold_sqlite_unmask_fixture`] has NO backend, and that
 /// `tx_scope::ensure_backend` is what opens and installs one.
 ///
-/// # The guard this binds
-///
-/// Backend resolution for the unmask family lives in five production V8 lines
-/// (`v8_classes::dispatch::{dispatch_unmask_field, dispatch_bulk_unmask_field,
-/// dispatch_set_mask_policy_field}` and the two `v8_classes::masked_value`
-/// sites). Each one calls `tx_scope::ensure_backend`, whose `init_pool_async`
-/// arm is the lazy open; degrading it to a plain
-/// `context::with(|c| c.backend())` read would break every fresh isolate -
-/// `installSchema`'s `setMaskPolicy` loudest, which is the case
-/// `tx_scope::ensure_backend`'s own rustdoc calls load-bearing.
-///
-/// **What is bound HERE is the function all five call, and not their CHOICE of
-/// it.** Swap those five lines for a plain `context::with(|c| c.backend())` read
-/// and this gate stays green, because it calls `ensure_backend` itself and goes
-/// through no dispatcher - measured 2026-09-03, along with its two siblings and
-/// the `tx_scope::tests` unit of the same shape: all four green under exactly
-/// that mutation.
-///
-/// The choice is bound by `v8_classes::cold_open`, an in-crate module that
-/// enters at `collection.unmaskField(..)` / `__platform.setMaskPolicy(..)` /
-/// `mv.unmask(..)`, drains the queued op and asserts the isolate came out of the
-/// dispatch WITH a backend. Its six arms all fail under the same mutation. That
-/// module is in the crate and not here because the three `mint_*` functions its
-/// entry points need are `pub(crate)`; the sentence this paragraph replaced said
-/// no test could drive those five lines at all, which was true of an integration
-/// target and false of the crate.
+/// Native unmask operations open their backend lazily. Policy installation
+/// has already run at startup without touching the database. The V8 dispatch
+/// wiring is covered by `v8_classes::cold_open`; this helper verifies that the
+/// resolver opens a fresh backend and keeps using that instance.
 ///
 /// # Why identity, and not a context read
 ///
@@ -6424,12 +6446,11 @@ async fn assert_cold_open_installs_a_fresh_backend(fixture: &SqliteBackend) {
 /// Read every row from `__zeroship_audit_unmask` for a given app.
 /// Returns `Vec<(outcome, actor_role, classification)>`.
 async fn read_audit_rows(backend: &SqliteBackend, app_id: &str) -> Vec<(String, String, String)> {
-    use zeroship_data_v8::backend::DialectBuilder as _;
     // A read: it belongs on `op_conn`, not on the exclusive `tx_conn`
     // reservation. Asking for the transaction lane here contends with whatever
     // the unmask dispatch itself is holding.
     let client = backend.autocommit_client();
-    let q_app = backend.quote_ident(app_id);
+    let q_app = zeroship_data_sql::compile::quote_ident(app_id);
     let sql = format!(
         r#"SELECT outcome, actor_role, classification
            FROM {q_app}."__zeroship_audit_unmask"
@@ -6471,7 +6492,13 @@ fn cold_unmask_open_comes_from_ensure_backend_not_the_fixture() {
         // `fixture` stays bound for the whole block: the assertion is an
         // address comparison against it.
         let (fixture, dir) = unmask_setup_with_schema(app_id, collection, schema.clone()).await;
-        configure_cold_sqlite_unmask_fixture(&dir, app_id, collection, schema);
+        configure_cold_sqlite_unmask_fixture(
+            &dir,
+            app_id,
+            collection,
+            schema,
+            zeroship_data_sql::value!({}),
+        );
         assert_cold_open_installs_a_fresh_backend(fixture.as_ref()).await;
     });
 }
@@ -6507,11 +6534,11 @@ fn cold_unmask_with_auto_actor_attaches_before_read() {
         // `id TEXT PRIMARY KEY, "<raw ssn>" BLOB, ssn TEXT`. Mirrors the
         // e2e CRUD test. Post-storage-flip layout: the raw column (named
         // via `raw_column_name`, never spelled out here) holds the
-        // ciphertext `crud::unmask` reads; the field's own column (`ssn`)
+        // ciphertext `protection::unmask` reads; the field's own column (`ssn`)
         // holds the mask, exactly as a default read pipeline would leave it.
         let raw_ssn = raw_column_name("ssn");
         backend
-            .pool_exec(
+            .execute_fixture(
                 &format!(
                     "CREATE TABLE \"app_unmask_auto\".\"users\" (\
                          id  TEXT PRIMARY KEY, \
@@ -6525,8 +6552,8 @@ fn cold_unmask_with_auto_actor_attaches_before_read() {
             .expect("CREATE TABLE");
 
         // Encrypt + insert one row inline.
+        use zeroship_data_orm::protection::encryption_pass::encrypt_row_on_write;
         use zeroship_data_v8::compile::{SqlDialect, build_insert_with_dialect};
-        use zeroship_data_v8::crud::encryption_pass::encrypt_row_on_write;
         let row_pk = "usr_auto_01";
         let plaintext = "123-45-6789";
         let mut doc = zeroship_data_sql::value!({
@@ -6564,7 +6591,7 @@ fn cold_unmask_with_auto_actor_attaches_before_read() {
         )
         .expect("build_insert_with_dialect");
         let client = backend
-            .acquire_dedicated_client(app_id)
+            .fixture_session(app_id)
             .await
             .expect("acquire client");
         let param_refs = &bq.params;
@@ -6578,7 +6605,13 @@ fn cold_unmask_with_auto_actor_attaches_before_read() {
         // cold-open gate above is where that open is ruled on); what THIS test
         // rules on is the next step - `dispatch_unmask` ATTACHing the existing
         // app file to that freshly opened connection before its direct SELECT.
-        configure_cold_sqlite_unmask_fixture(&dir, app_id, collection, schema.clone());
+        configure_cold_sqlite_unmask_fixture(
+            &dir,
+            app_id,
+            collection,
+            schema.clone(),
+            zeroship_data_sql::value!({}),
+        );
         let _cold_keys = with_root_key("p55_pr4_auto", &"a".repeat(64));
 
         // Dispatch unmask with `kind: "auto"` actor — must succeed.
@@ -6660,7 +6693,7 @@ fn unmask_with_user_actor_returns_forbidden_audit_logged() {
     run(async {
         let (backend, _dir) = unmask_setup_with_schema(app_id, collection, schema.clone()).await;
         backend
-            .pool_exec(
+            .execute_fixture(
                 "CREATE TABLE \"app_unmask_user\".\"users\" (\
                      id  TEXT PRIMARY KEY, \
                      ssn BLOB, \
@@ -6800,7 +6833,7 @@ fn unmask_writes_audit_row_with_correct_classification() {
 /// The unmask SELECT names the raw column the DESCRIPTOR declares.
 ///
 /// The end-to-end half of the change `zeroship_data_sql::compile::declared_raw_column`
-/// carries. The unit tests in `zeroship-data-orm`'s `crud::mask_pass` bind the
+/// carries. The unit tests in `zeroship-data-orm`'s `protection::mask_pass` bind the
 /// WRITE side - which column the plaintext is relocated INTO - in the engine's
 /// default-feature build. Nothing there rules on the READ, because the read is a
 /// SELECT against a real database and the fetch helpers are private.
@@ -6837,7 +6870,7 @@ fn unmask_reads_the_raw_column_the_descriptor_declares() {
              passes against a dispatch that ignores the descriptor",
         );
         backend
-            .pool_exec(
+            .execute_fixture(
                 &format!(
                     "CREATE TABLE \"{app_id}\".\"{collection}\" (\
                          id TEXT PRIMARY KEY, \"{declared_raw}\" TEXT, ssn TEXT)"
@@ -6847,7 +6880,7 @@ fn unmask_reads_the_raw_column_the_descriptor_declares() {
             .await
             .expect("CREATE TABLE");
         backend
-            .pool_exec(
+            .execute_fixture(
                 &format!(
                     "INSERT INTO \"{app_id}\".\"{collection}\" (id, \"{declared_raw}\", ssn) \
                      VALUES ('per_01', '123-45-6789', '***-**-6789')"
@@ -6877,26 +6910,11 @@ fn unmask_reads_the_raw_column_the_descriptor_declares() {
 }
 
 // ===========================================================================
-// defineMaskPolicy + per-app policy storage + real authorization
-// ===========================================================================
-//
-// These tests exercise the policy-driven authorization path that replaces
-// the default-deny stub:
-//
-//   - `setMaskPolicy` persists to `<db_dir>/mask_policies.json` (atomic
-//     write through `mask_policies.json.tmp + rename`).
-//   - The per-isolate cache picks the policy up write-through.
-//   - A subsequent `unmask` honours the policy: listed roles get their
-//     listed classifications; unlisted roles are denied.
-//   - When no policy is declared, the default-deny stub still applies
-//     (`auto` allowed; everyone else denied) - regression guard.
-//   - Invalid classifications surface as
-//     `invalid_mask_classification` at the Rust validator (belt-and-
-//     braces with the SDK validator).
-//   - A live `setMaskPolicy` mid-test propagates to the in-process cache,
-//     and a subsequent unmask honours the new policy.
+// App-declared policy and unmask authorization on SQLite.
+// Startup installs the declaration in memory. Runtime replacement is refused,
+// and filesystem content cannot supply or change the policy.
 
-use zeroship_data_v8::crud::mask_policy;
+use zeroship_data_orm::protection::mask_policy;
 
 /// Helper — install backend + schema + clean any pre-existing cached
 /// policy for the app. Returns the backend (kept alive via Rc) and the
@@ -6939,17 +6957,16 @@ fn unmask_with_user_role_in_policy_returns_plaintext() {
         let policy_v = zeroship_data_sql::value!({
             "user": ["public", "pii"],
         });
-        mask_policy::dispatch_set_mask_policy(&unmask_backend().await, app_id, policy_v)
-            .await
+        mask_policy::install_mask_policy(&DbBinding::cold_start(app_id), policy_v)
             .expect("set_mask_policy must succeed");
 
         // Post-storage-flip layout: the raw column (named via
         // `raw_column_name`, never spelled out here) holds the ciphertext
-        // `crud::unmask` reads; the field's own column (`email`) holds the
+        // `protection::unmask` reads; the field's own column (`email`) holds the
         // mask, exactly as a default read pipeline would leave it.
         let raw_email = raw_column_name("email");
         backend
-            .pool_exec(
+            .execute_fixture(
                 &format!(
                     "CREATE TABLE \"app_unmask_policy_grant\".\"users\" (\
                          id    TEXT PRIMARY KEY, \
@@ -6963,8 +6980,8 @@ fn unmask_with_user_role_in_policy_returns_plaintext() {
             .expect("CREATE TABLE");
 
         // Encrypt + insert one row.
+        use zeroship_data_orm::protection::encryption_pass::encrypt_row_on_write;
         use zeroship_data_v8::compile::{SqlDialect, build_insert_with_dialect};
-        use zeroship_data_v8::crud::encryption_pass::encrypt_row_on_write;
         let row_pk = "usr_grant_01";
         let plaintext = "alice@example.com";
         let mut doc = zeroship_data_sql::value!({
@@ -7005,7 +7022,7 @@ fn unmask_with_user_role_in_policy_returns_plaintext() {
         )
         .expect("build_insert_with_dialect");
         let client = backend
-            .acquire_dedicated_client(app_id)
+            .fixture_session(app_id)
             .await
             .expect("acquire client");
         let param_refs = &bq.params;
@@ -7083,8 +7100,7 @@ fn unmask_with_user_role_not_in_policy_denied() {
         let policy_v = zeroship_data_sql::value!({
             "user": ["public"],
         });
-        mask_policy::dispatch_set_mask_policy(&unmask_backend().await, app_id, policy_v)
-            .await
+        mask_policy::install_mask_policy(&DbBinding::cold_start(app_id), policy_v)
             .expect("set_mask_policy must succeed");
 
         let args = unmask::UnmaskFieldArgs {
@@ -7182,10 +7198,8 @@ fn unmask_invalid_classification_rejected_at_dispatch_time() {
         let bad_policy = zeroship_data_sql::value!({
             "admin": ["public", "badclass"],
         });
-        let err =
-            mask_policy::dispatch_set_mask_policy(&unmask_backend().await, app_id, bad_policy)
-                .await
-                .expect_err("rust validator must refuse unknown classification");
+        let err = mask_policy::install_mask_policy(&DbBinding::cold_start(app_id), bad_policy)
+            .expect_err("rust validator must refuse unknown classification");
         match err {
             zeroship_data_orm::error::DbError::ValidationFailed { code, .. } => {
                 assert_eq!(code, "invalid_mask_classification");
@@ -7197,41 +7211,23 @@ fn unmask_invalid_classification_rejected_at_dispatch_time() {
     });
 }
 
-/// **Gate #5**: a `setMaskPolicy` at runtime propagates to
-/// the in-process cache; a subsequent `unmask` honours the new policy.
-/// Pins the write-through semantics.
+/// The app's startup declaration stays fixed while the database is in use.
 #[test]
-fn policy_refresh_after_set_mask_policy_op_takes_effect() {
-    let schema = zeroship_data_sql::value!({
-        "id": { "type": "string" },
-        "data": {
-            "type": "string",
-            "mask": { "kind": "full", "classification": "internal" },
-        },
-    });
-    let app_id = "app_unmask_policy_refresh";
+fn policy_cannot_change_after_startup() {
+    let app_id = "app_unmask_policy_fixed";
     let collection = "items";
-
     run(async {
-        let (backend, _dir) = policy_setup(app_id, collection, schema).await;
-
-        // The table must exist so the post-policy attempt reaches the
-        // SELECT path. Empty table → `unmask_not_found` (auth passes;
-        // no row matches) is the assertion we want.
-        backend
-            .pool_exec(
-                "CREATE TABLE \"app_unmask_policy_refresh\".\"items\" (\
-                     id   TEXT PRIMARY KEY, \
-                     data TEXT, \
-                     data_masked TEXT NOT NULL DEFAULT '***'\
-                 )",
-                &[],
-            )
-            .await
-            .expect("CREATE TABLE");
-
-        // Step 1 — without a policy, a `support` actor is denied.
-        let args1 = unmask::UnmaskFieldArgs {
+        let (backend, dir) = policy_setup(app_id, collection, zeroship_data_sql::value!({
+            "id": { "type": "string" },
+            "data": { "type": "string", "mask": { "kind": "full", "classification": "internal" } },
+        })).await;
+        let binding = DbBinding::cold_start(app_id);
+        mask_policy::install_mask_policy(
+            &binding,
+            zeroship_data_sql::value!({ "support": ["public"] }),
+        )
+        .unwrap();
+        let args = unmask::UnmaskFieldArgs {
             collection: collection.to_string(),
             row_pk: "any".to_string(),
             column: "data".to_string(),
@@ -7239,58 +7235,81 @@ fn policy_refresh_after_set_mask_policy_op_takes_effect() {
             reason: None,
             rejected_claim: None,
         };
-        let err = unmask::dispatch_unmask(
-            &unmask_route(app_id).await,
-            &DbBinding::cold_start(app_id),
-            args1.clone(),
-        )
-        .await
-        .expect_err("no policy → default deny for support");
-        match err {
-            zeroship_data_orm::error::DbError::Coded { code, .. } => {
-                assert_eq!(code, "unmask_not_permitted");
+        for attempt in 0..2 {
+            if attempt > 0 {
+                let error = mask_policy::install_mask_policy(
+                    &binding,
+                    zeroship_data_sql::value!({ "support": ["internal"] }),
+                )
+                .unwrap_err();
+                assert!(matches!(
+                    error,
+                    zeroship_data_orm::error::DbError::ValidationFailed {
+                        code: "mask_policy_immutable",
+                        ..
+                    }
+                ));
             }
-            other => panic!("expected Coded::unmask_not_permitted, got {other:?}"),
+            let error =
+                unmask::dispatch_unmask(&unmask_route(app_id).await, &binding, args.clone())
+                    .await
+                    .unwrap_err();
+            assert!(matches!(
+                error,
+                zeroship_data_orm::error::DbError::Coded {
+                    code, ..
+                } if code == "unmask_not_permitted"
+            ));
         }
-
-        // Step 2 — install a policy granting support → internal.
-        let policy_v = zeroship_data_sql::value!({
-            "support": ["internal"],
-        });
-        mask_policy::dispatch_set_mask_policy(&unmask_backend().await, app_id, policy_v)
-            .await
-            .expect("set_mask_policy");
-
-        // Step 3 — now the same support actor passes authorization.
-        // We still get `unmask_not_found` because no row exists, but
-        // that's the path AFTER the auth check — the absence of
-        // `unmask_not_permitted` is the pin.
-        let err = unmask::dispatch_unmask(
-            &unmask_route(app_id).await,
-            &DbBinding::cold_start(app_id),
-            args1,
-        )
-        .await
-        .expect_err("auth passes; SELECT misses");
-        match err {
-            zeroship_data_orm::error::DbError::ValidationFailed { code, .. } => {
-                assert_eq!(
-                    code, "unmask_not_found",
-                    "support → internal must pass authz; failure is now the SELECT miss"
-                );
-            }
-            other => panic!("expected ValidationFailed::unmask_not_found, got {other:?}"),
-        }
-
-        // Audit table observes both attempts — the first denied, the
-        // second granted-then-not-found never made it to the audit
-        // write (the audit row only fires on successful + denied
-        // outcomes; SELECT misses fall through the typed error rail).
         let audit = read_audit_rows(backend.as_ref(), app_id).await;
-        assert!(
-            audit.iter().any(|r| r.0 == "denied"),
-            "first attempt must have audited as denied: {audit:?}"
-        );
+        assert_eq!(audit.len(), 2);
+        assert!(audit.iter().all(|row| row.0 == "denied"));
+        assert!(!dir.path().join("mask_policies.json").exists());
+    });
+}
+
+/// Existing sidecar contents cannot grant access or break authorization.
+#[test]
+fn unmask_ignores_policy_sidecar_files() {
+    run(async {
+        for (app_id, contents) in [
+            (
+                "app_sidecar_grant",
+                r#"{"app_sidecar_grant":{"support":["internal"]}}"#,
+            ),
+            ("app_sidecar_corrupt", "invalid JSON"),
+        ] {
+            let (backend, dir) = policy_setup(app_id, "items", zeroship_data_sql::value!({
+                "id": { "type": "string" },
+                "data": { "type": "string", "mask": { "kind": "full", "classification": "internal" } },
+            })).await;
+            let path = dir.path().join("mask_policies.json");
+            std::fs::write(&path, contents).unwrap();
+            let error = unmask::dispatch_unmask(
+                &unmask_route(app_id).await,
+                &DbBinding::cold_start(app_id),
+                unmask::UnmaskFieldArgs {
+                    collection: "items".into(),
+                    row_pk: "any".into(),
+                    column: "data".into(),
+                    actor: Some(zeroship_data_sql::value!({ "kind": "support", "id": "sup_1" })),
+                    reason: None,
+                    rejected_claim: None,
+                },
+            )
+            .await
+            .unwrap_err();
+            assert!(matches!(
+                error,
+                zeroship_data_orm::error::DbError::Coded {
+                    code, ..
+                } if code == "unmask_not_permitted"
+            ));
+            assert_eq!(std::fs::read_to_string(path).unwrap(), contents);
+            let audit = read_audit_rows(backend.as_ref(), app_id).await;
+            assert_eq!(audit.len(), 1);
+            assert_eq!(audit[0].0, "denied");
+        }
     });
 }
 
@@ -7322,7 +7341,7 @@ fn malformed_mask_sentinel_skipped_on_sqlite() {
             .await
             .expect("ensure_app_schema");
         backend
-            .pool_exec(
+            .execute_fixture(
                 "CREATE TABLE \"app_demo\".\"users\" (\
                      \"id\" INTEGER PRIMARY KEY, \
                      \"ssn\" TEXT, \
@@ -7374,12 +7393,11 @@ fn malformed_mask_sentinel_skipped_on_sqlite() {
 // Bulk unmask end-to-end (SQLite)
 // ---------------------------------------------------------------------------
 
-use zeroship_data_v8::crud::unmask::{BulkUnmaskArgs, BulkUnmaskItem, dispatch_bulk_unmask};
+use zeroship_data_orm::protection::unmask::{BulkUnmaskArgs, BulkUnmaskItem, dispatch_bulk_unmask};
 
 /// **cold-open gate, bulk unmask**: the same guard as the single-unmask
-/// cold-open gate, over the fixture shape THIS family uses - a mask policy
-/// written to the sidecar BEFORE the isolate goes cold, so the open has to find
-/// the sidecar database again from the URL alone.
+/// cold-open gate, after a fresh startup reinstalls the app policy in memory.
+/// The database must open from the configured URL.
 ///
 /// The production line is `v8_classes::dispatch::dispatch_bulk_unmask_field`
 /// (and `v8_classes::masked_value`'s bulk site), which resolves through
@@ -7401,14 +7419,18 @@ fn cold_bulk_unmask_open_comes_from_ensure_backend_not_the_fixture() {
         // address comparison against it.
         let (fixture, dir) = unmask_setup_with_schema(app_id, collection, schema.clone()).await;
         zeroship_data_v8::clear_mask_policy_cache_for_tests(app_id);
-        mask_policy::dispatch_set_mask_policy(
-            &unmask_backend().await,
-            app_id,
+        mask_policy::install_mask_policy(
+            &DbBinding::cold_start(app_id),
             zeroship_data_sql::value!({ "user": ["pii"] }),
         )
-        .await
         .expect("set_mask_policy");
-        configure_cold_sqlite_unmask_fixture(&dir, app_id, collection, schema);
+        configure_cold_sqlite_unmask_fixture(
+            &dir,
+            app_id,
+            collection,
+            schema,
+            zeroship_data_sql::value!({ "user": ["pii"] }),
+        );
         assert_cold_open_installs_a_fresh_backend(fixture.as_ref()).await;
     });
 }
@@ -7445,7 +7467,7 @@ fn cold_bulk_unmask_attaches_before_read() {
         let raw_email = raw_column_name("email");
         let raw_ssn = raw_column_name("ssn");
         backend
-            .pool_exec(
+            .execute_fixture(
                 &format!(
                     "CREATE TABLE \"app_bulk_unmask_e2e\".\"users\" (\
                          id             TEXT PRIMARY KEY, \
@@ -7468,20 +7490,18 @@ fn cold_bulk_unmask_attaches_before_read() {
                  (id, \"{raw_email}\", email, \"{raw_ssn}\", ssn) VALUES \
                  ('{id}', '{email}', 'masked', '{ssn}', 'masked')"
             );
-            backend.pool_exec(&sql, &[]).await.expect("INSERT");
+            backend.execute_fixture(&sql, &[]).await.expect("INSERT");
         }
 
         // Policy: `user` can unmask pii AND spi.
         let policy_v = zeroship_data_sql::value!({ "user": ["pii", "spi"] });
-        mask_policy::dispatch_set_mask_policy(&unmask_backend().await, app_id, policy_v)
-            .await
+        mask_policy::install_mask_policy(&DbBinding::cold_start(app_id), policy_v.clone())
             .expect("set_mask_policy");
 
-        // The policy sidecar and app database now exist, but no backend remains
-        // in the isolate. The `unmask_backend()` below opens one, as the V8
-        // dispatch would (ruled on by the cold-open gate above); bulk dispatch
-        // must then RELOAD the policy and ATTACH the app file on it.
-        configure_cold_sqlite_unmask_fixture(&dir, app_id, collection, schema);
+        // A fresh startup reinstalls the app declaration without a sidecar.
+        // Bulk dispatch then opens the backend and attaches the app database.
+        assert!(!dir.path().join("mask_policies.json").exists());
+        configure_cold_sqlite_unmask_fixture(&dir, app_id, collection, schema, policy_v);
 
         let args = BulkUnmaskArgs {
             collection: collection.to_string(),
@@ -7535,7 +7555,7 @@ fn cold_bulk_unmask_attaches_before_read() {
         // pipeline would see) must still be the mask placeholder, never
         // the plaintext bulk_unmask returned above.
         let client = backend
-            .acquire_dedicated_client(app_id)
+            .fixture_session(app_id)
             .await
             .expect("acquire client");
         let direct = client
@@ -7575,7 +7595,7 @@ fn bulk_unmask_authorization_atomic_one_unauthorized_fails_all() {
         let (backend, _dir) = unmask_setup_with_schema(app_id, collection, schema).await;
         zeroship_data_v8::clear_mask_policy_cache_for_tests(app_id);
         backend
-            .pool_exec(
+            .execute_fixture(
                 "CREATE TABLE \"app_bulk_atomic_refuse\".\"users\" (\
                      id              TEXT PRIMARY KEY, \
                      __zs_raw__email TEXT, \
@@ -7590,8 +7610,7 @@ fn bulk_unmask_authorization_atomic_one_unauthorized_fails_all() {
 
         // Policy: `user` can ONLY unmask pii; spi is forbidden.
         let policy_v = zeroship_data_sql::value!({ "user": ["pii"] });
-        mask_policy::dispatch_set_mask_policy(&unmask_backend().await, app_id, policy_v)
-            .await
+        mask_policy::install_mask_policy(&DbBinding::cold_start(app_id), policy_v)
             .expect("set_mask_policy");
 
         let args = BulkUnmaskArgs {
@@ -7678,7 +7697,7 @@ fn bulk_unmask_unknown_column_returns_typed_error_e2e() {
 // Per-query unmask hint end-to-end (SQLite)
 // ---------------------------------------------------------------------------
 
-use zeroship_data_v8::crud::unmask::{
+use zeroship_data_orm::protection::unmask::{
     audit_query_hint_granted, authorize_query_hint, dispatch_unmask_for_query,
 };
 
@@ -7706,14 +7725,18 @@ fn cold_query_unmask_hint_open_comes_from_ensure_backend_not_the_fixture() {
         // address comparison against it.
         let (fixture, dir) = unmask_setup_with_schema(app_id, collection, schema.clone()).await;
         zeroship_data_v8::clear_mask_policy_cache_for_tests(app_id);
-        mask_policy::dispatch_set_mask_policy(
-            &unmask_backend().await,
-            app_id,
+        mask_policy::install_mask_policy(
+            &DbBinding::cold_start(app_id),
             zeroship_data_sql::value!({ "user": ["spi"] }),
         )
-        .await
         .expect("set_mask_policy");
-        configure_cold_sqlite_unmask_fixture(&dir, app_id, collection, schema);
+        configure_cold_sqlite_unmask_fixture(
+            &dir,
+            app_id,
+            collection,
+            schema,
+            zeroship_data_sql::value!({ "user": ["spi"] }),
+        );
         assert_cold_open_installs_a_fresh_backend(fixture.as_ref()).await;
     });
 }
@@ -7750,7 +7773,7 @@ fn cold_query_unmask_hint_attaches_before_read() {
         let raw_email = raw_column_name("email");
         let raw_ssn = raw_column_name("ssn");
         backend
-            .pool_exec(
+            .execute_fixture(
                 &format!(
                     "CREATE TABLE \"app_qhint_e2e\".\"users\" (\
                          id             TEXT PRIMARY KEY, \
@@ -7765,7 +7788,7 @@ fn cold_query_unmask_hint_attaches_before_read() {
             .await
             .expect("CREATE TABLE");
         backend
-            .pool_exec(
+            .execute_fixture(
                 &format!(
                     "INSERT INTO \"app_qhint_e2e\".\"users\" \
                      (id, \"{raw_email}\", email, \"{raw_ssn}\", ssn) VALUES \
@@ -7778,16 +7801,13 @@ fn cold_query_unmask_hint_attaches_before_read() {
 
         // Policy: `user` can unmask both pii and spi.
         let policy_v = zeroship_data_sql::value!({ "user": ["pii", "spi"] });
-        mask_policy::dispatch_set_mask_policy(&unmask_backend().await, app_id, policy_v)
-            .await
+        mask_policy::install_mask_policy(&DbBinding::cold_start(app_id), policy_v.clone())
             .expect("set_mask_policy");
 
-        // Authorization is the first operation after a cold boot. The
-        // `unmask_backend()` calls below make the open the V8 dispatch makes
-        // (ruled on by the cold-open gate above); what this test rules on is
-        // that authorization then ATTACHes before loading policy or writing a
-        // denied audit row.
-        configure_cold_sqlite_unmask_fixture(&dir, app_id, collection, schema);
+        // A fresh startup reinstalls the declaration before the first query.
+        // Query authorization must attach the app database before reading it.
+        assert!(!dir.path().join("mask_policies.json").exists());
+        configure_cold_sqlite_unmask_fixture(&dir, app_id, collection, schema, policy_v);
 
         // Simulate the row shape `dispatch_find` would produce
         // AFTER `apply_mask_wrap_on_read` has wrapped the masked
@@ -7875,7 +7895,7 @@ fn cold_query_unmask_hint_attaches_before_read() {
         // passed above - a direct read of the fields' own columns must
         // still show the mask, never the plaintext it just returned.
         let client = backend
-            .acquire_dedicated_client(app_id)
+            .fixture_session(app_id)
             .await
             .expect("acquire client");
         let direct = client
@@ -7911,8 +7931,7 @@ fn per_query_unmask_hint_rejects_unauthorized_actor() {
         zeroship_data_v8::clear_mask_policy_cache_for_tests(app_id);
         // Policy: `user` can only unmask `pii`, NOT `spi`.
         let policy_v = zeroship_data_sql::value!({ "user": ["pii"] });
-        mask_policy::dispatch_set_mask_policy(&unmask_backend().await, app_id, policy_v)
-            .await
+        mask_policy::install_mask_policy(&DbBinding::cold_start(app_id), policy_v)
             .expect("set_mask_policy");
 
         let actor = Some(zeroship_data_sql::value!({ "kind": "user", "id": "actor_x" }));
@@ -7988,7 +8007,7 @@ fn per_query_unmask_hint_unknown_column_returns_typed_error() {
 // and `PRAGMA table_info` / `sqlite_master` confirm the seven columns
 // and three indexes are present.
 //
-// These tests drive the dialect emitter directly and `pool_exec` the result,
+// These tests drive the dialect emitter directly and `execute_fixture` the result,
 // the same pattern the introspection tests use for SQLite elsewhere in this
 // file.
 // ---------------------------------------------------------------------------
@@ -8020,7 +8039,7 @@ fn sqlite_ddl_has_seven_system_field_columns_end_to_end() {
         .expect("build sqlite DDL");
 
         // Execute the multi-statement payload through the session
-        // actor — `pool_exec` routes through `sqlite3_exec` which
+        // actor — `execute_fixture` routes through `sqlite3_exec` which
         // accepts multi-statement SQL.
         // SQLite's `Connection::execute` runs ONE statement per call
         // (unlike PG's libpq simple-query), so this test splits the
@@ -8031,7 +8050,7 @@ fn sqlite_ddl_has_seven_system_field_columns_end_to_end() {
                 continue;
             }
             backend
-                .pool_exec(trimmed, &[])
+                .execute_fixture(trimmed, &[])
                 .await
                 .unwrap_or_else(|e| panic!("engine must accept statement: {trimmed}\n{e:?}"));
         }
@@ -8075,8 +8094,8 @@ fn sqlite_ddl_has_seven_system_field_columns_end_to_end() {
 /// intentionally unindexed (see `create_table_does_not_emit_index_for_version`).
 #[test]
 fn freshly_created_table_has_three_indexes_end_to_end() {
-    use zeroship_migrate::schema::query::index_name;
     use zeroship_data_v8::compile::SqlDialect;
+    use zeroship_migrate::schema::query::index_name;
 
     run(async {
         let (backend, _dir) = fresh_backend();
@@ -8102,7 +8121,7 @@ fn freshly_created_table_has_three_indexes_end_to_end() {
                 continue;
             }
             backend
-                .pool_exec(trimmed, &[])
+                .execute_fixture(trimmed, &[])
                 .await
                 .unwrap_or_else(|e| panic!("engine must accept statement: {trimmed}\n{e:?}"));
         }
@@ -8160,7 +8179,7 @@ fn inserting_a_row_without_user_fields_succeeds_via_system_fields_only() {
                 continue;
             }
             backend
-                .pool_exec(trimmed, &[])
+                .execute_fixture(trimmed, &[])
                 .await
                 .unwrap_or_else(|e| panic!("engine must accept statement: {trimmed}\n{e:?}"));
         }
@@ -8169,7 +8188,7 @@ fn inserting_a_row_without_user_fields_succeeds_via_system_fields_only() {
         // The 3 NULL-able columns + 3 DEFAULT'd columns fill in from
         // the engine.
         backend
-            .pool_exec(
+            .execute_fixture(
                 "INSERT INTO \"app_demo\".\"posts\" (id) VALUES ('post_01')",
                 &[],
             )
@@ -8180,7 +8199,7 @@ fn inserting_a_row_without_user_fields_succeeds_via_system_fields_only() {
         // `created_at IS NOT NULL`. Pin the canonical shape the DDL
         // promises.
         let client = backend
-            .acquire_dedicated_client("app_demo")
+            .fixture_session("app_demo")
             .await
             .expect("acquire client");
         let rows = client
@@ -8244,7 +8263,7 @@ fn insert_end_to_end_populates_system_fields_sqlite() {
                 continue;
             }
             backend
-                .pool_exec(trimmed, &[])
+                .execute_fixture(trimmed, &[])
                 .await
                 .unwrap_or_else(|e| panic!("DDL: {trimmed}\n{e:?}"));
         }
@@ -8279,7 +8298,7 @@ fn insert_end_to_end_populates_system_fields_sqlite() {
 
         // 3. Build + execute the INSERT. `RETURNING *` returns rows,
         // so route through the dedicated client's `query` path (the
-        // pool's `pool_exec` rejects result-bearing statements).
+        // pool's `execute_fixture` rejects result-bearing statements).
         let built = build_insert_with_dialect(
             &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
             "posts",
@@ -8290,7 +8309,7 @@ fn insert_end_to_end_populates_system_fields_sqlite() {
         .expect("build_insert");
         let params = &built.params;
         let client = backend
-            .acquire_dedicated_client("app_demo")
+            .fixture_session("app_demo")
             .await
             .expect("acquire client (insert)");
         let returning_rows = client
@@ -8389,7 +8408,7 @@ fn insert_with_fk_uses_text_keys_end_to_end_sqlite() {
                 continue;
             }
             backend
-                .pool_exec(trimmed, &[])
+                .execute_fixture(trimmed, &[])
                 .await
                 .unwrap_or_else(|e| panic!("posts DDL: {trimmed}\n{e:?}"));
         }
@@ -8424,10 +8443,7 @@ fn insert_with_fk_uses_text_keys_end_to_end_sqlite() {
         )
         .expect("build posts insert");
         let params = &built.params;
-        let client = backend
-            .acquire_dedicated_client("app_demo")
-            .await
-            .expect("client");
+        let client = backend.fixture_session("app_demo").await.expect("client");
         client
             .query_values(&built.sql, params)
             .await
@@ -8491,7 +8507,10 @@ fn update_end_to_end_bumps_version_by_one_sqlite() {
             if trimmed.is_empty() {
                 continue;
             }
-            backend.pool_exec(trimmed, &[]).await.expect("DDL exec");
+            backend
+                .execute_fixture(trimmed, &[])
+                .await
+                .expect("DDL exec");
         }
 
         // INSERT row at version 1 (DDL default).
@@ -8508,7 +8527,7 @@ fn update_end_to_end_bumps_version_by_one_sqlite() {
         )
         .unwrap();
         let ins_params = &ins.params;
-        let client = backend.acquire_dedicated_client("app_demo").await.unwrap();
+        let client = backend.fixture_session("app_demo").await.unwrap();
         client
             .query_values(&ins.sql, ins_params)
             .await
@@ -8589,7 +8608,7 @@ fn update_end_to_end_with_correct_version_succeeds_and_bumps_sqlite() {
             if t.is_empty() {
                 continue;
             }
-            backend.pool_exec(t, &[]).await.unwrap();
+            backend.execute_fixture(t, &[]).await.unwrap();
         }
 
         let doc = zeroship_data_sql::value!({ "id": "post_cas_ok", "title": "v1" });
@@ -8602,7 +8621,7 @@ fn update_end_to_end_with_correct_version_succeeds_and_bumps_sqlite() {
         )
         .unwrap();
         let ins_params = &ins.params;
-        let client = backend.acquire_dedicated_client("app_demo").await.unwrap();
+        let client = backend.fixture_session("app_demo").await.unwrap();
         client.query_values(&ins.sql, ins_params).await.unwrap();
 
         // CAS at the correct version (1).
@@ -8671,7 +8690,7 @@ fn update_end_to_end_with_stale_version_affects_zero_rows_sqlite() {
             if t.is_empty() {
                 continue;
             }
-            backend.pool_exec(t, &[]).await.unwrap();
+            backend.execute_fixture(t, &[]).await.unwrap();
         }
 
         let doc = zeroship_data_sql::value!({ "id": "post_cas_stale", "title": "v1" });
@@ -8684,7 +8703,7 @@ fn update_end_to_end_with_stale_version_affects_zero_rows_sqlite() {
         )
         .unwrap();
         let ins_params = &ins.params;
-        let client = backend.acquire_dedicated_client("app_demo").await.unwrap();
+        let client = backend.fixture_session("app_demo").await.unwrap();
         client.query_values(&ins.sql, ins_params).await.unwrap();
 
         // CAS at the wrong version (row is at 1; we expect 99).
@@ -8750,7 +8769,7 @@ fn update_end_to_end_concurrent_two_updates_one_wins_one_loses_sqlite() {
             if t.is_empty() {
                 continue;
             }
-            backend.pool_exec(t, &[]).await.unwrap();
+            backend.execute_fixture(t, &[]).await.unwrap();
         }
 
         let doc = zeroship_data_sql::value!({ "id": "post_race", "title": "v0" });
@@ -8763,7 +8782,7 @@ fn update_end_to_end_concurrent_two_updates_one_wins_one_loses_sqlite() {
         )
         .unwrap();
         let ins_params = &ins.params;
-        let client = backend.acquire_dedicated_client("app_demo").await.unwrap();
+        let client = backend.fixture_session("app_demo").await.unwrap();
         client.query_values(&ins.sql, ins_params).await.unwrap();
 
         // First UPDATE at version=1 wins.
@@ -8845,7 +8864,7 @@ fn update_end_to_end_without_version_filter_succeeds_blindly_sqlite() {
             if t.is_empty() {
                 continue;
             }
-            backend.pool_exec(t, &[]).await.unwrap();
+            backend.execute_fixture(t, &[]).await.unwrap();
         }
 
         let doc = zeroship_data_sql::value!({ "id": "post_blind", "title": "v0" });
@@ -8858,7 +8877,7 @@ fn update_end_to_end_without_version_filter_succeeds_blindly_sqlite() {
         )
         .unwrap();
         let ins_params = &ins.params;
-        let client = backend.acquire_dedicated_client("app_demo").await.unwrap();
+        let client = backend.fixture_session("app_demo").await.unwrap();
         client.query_values(&ins.sql, ins_params).await.unwrap();
 
         // No version in filter — last-writer-wins. Three consecutive
@@ -8935,7 +8954,7 @@ fn soft_delete_end_to_end_sets_deleted_at_and_bumps_version_sqlite() {
             if t.is_empty() {
                 continue;
             }
-            backend.pool_exec(t, &[]).await.unwrap();
+            backend.execute_fixture(t, &[]).await.unwrap();
         }
 
         let doc = zeroship_data_sql::value!({ "id": "post_sd1", "title": "to be deleted" });
@@ -8948,7 +8967,7 @@ fn soft_delete_end_to_end_sets_deleted_at_and_bumps_version_sqlite() {
         )
         .unwrap();
         let p = &ins.params;
-        let client = backend.acquire_dedicated_client("app_demo").await.unwrap();
+        let client = backend.fixture_session("app_demo").await.unwrap();
         client.query_values(&ins.sql, p).await.unwrap();
 
         let filter = zeroship_data_sql::value!({ "id": "post_sd1" });
@@ -9011,7 +9030,7 @@ fn soft_delete_on_already_soft_deleted_row_affects_zero_rows_sqlite() {
             if t.is_empty() {
                 continue;
             }
-            backend.pool_exec(t, &[]).await.unwrap();
+            backend.execute_fixture(t, &[]).await.unwrap();
         }
 
         let doc = zeroship_data_sql::value!({ "id": "post_idem", "title": "x" });
@@ -9024,7 +9043,7 @@ fn soft_delete_on_already_soft_deleted_row_affects_zero_rows_sqlite() {
         )
         .unwrap();
         let p = &ins.params;
-        let client = backend.acquire_dedicated_client("app_demo").await.unwrap();
+        let client = backend.fixture_session("app_demo").await.unwrap();
         client.query_values(&ins.sql, p).await.unwrap();
 
         let filter = zeroship_data_sql::value!({ "id": "post_idem" });
@@ -9073,7 +9092,7 @@ fn find_with_soft_delete_filter_hides_soft_deleted_rows_sqlite() {
             if t.is_empty() {
                 continue;
             }
-            backend.pool_exec(t, &[]).await.unwrap();
+            backend.execute_fixture(t, &[]).await.unwrap();
         }
 
         for id in &["post_alive_a", "post_alive_b", "post_dead"] {
@@ -9087,7 +9106,7 @@ fn find_with_soft_delete_filter_hides_soft_deleted_rows_sqlite() {
             )
             .unwrap();
             let p = &ins.params;
-            let client = backend.acquire_dedicated_client("app_demo").await.unwrap();
+            let client = backend.fixture_session("app_demo").await.unwrap();
             client.query_values(&ins.sql, p).await.unwrap();
         }
         let ab = SystemFieldAutoBump {
@@ -9104,7 +9123,7 @@ fn find_with_soft_delete_filter_hides_soft_deleted_rows_sqlite() {
         )
         .unwrap();
         let p = &sd.params;
-        let client = backend.acquire_dedicated_client("app_demo").await.unwrap();
+        let client = backend.fixture_session("app_demo").await.unwrap();
         client.query_values(&sd.sql, p).await.unwrap();
 
         let q = build_find_with_schema_and_unmask_and_soft_delete(
@@ -9165,7 +9184,7 @@ fn restore_clears_deleted_at_and_bumps_version_sqlite() {
             if t.is_empty() {
                 continue;
             }
-            backend.pool_exec(t, &[]).await.unwrap();
+            backend.execute_fixture(t, &[]).await.unwrap();
         }
 
         let doc = zeroship_data_sql::value!({ "id": "post_rs", "title": "x" });
@@ -9178,7 +9197,7 @@ fn restore_clears_deleted_at_and_bumps_version_sqlite() {
         )
         .unwrap();
         let p = &ins.params;
-        let client = backend.acquire_dedicated_client("app_demo").await.unwrap();
+        let client = backend.fixture_session("app_demo").await.unwrap();
         client.query_values(&ins.sql, p).await.unwrap();
 
         let ab = SystemFieldAutoBump {
@@ -9246,7 +9265,7 @@ fn restore_on_already_live_row_affects_zero_rows_sqlite() {
             if t.is_empty() {
                 continue;
             }
-            backend.pool_exec(t, &[]).await.unwrap();
+            backend.execute_fixture(t, &[]).await.unwrap();
         }
 
         let doc = zeroship_data_sql::value!({ "id": "post_live", "title": "x" });
@@ -9259,7 +9278,7 @@ fn restore_on_already_live_row_affects_zero_rows_sqlite() {
         )
         .unwrap();
         let p = &ins.params;
-        let client = backend.acquire_dedicated_client("app_demo").await.unwrap();
+        let client = backend.fixture_session("app_demo").await.unwrap();
         client.query_values(&ins.sql, p).await.unwrap();
 
         let ab = SystemFieldAutoBump {
@@ -9314,7 +9333,7 @@ fn soft_delete_then_restore_full_lifecycle_sqlite() {
             if t.is_empty() {
                 continue;
             }
-            backend.pool_exec(t, &[]).await.unwrap();
+            backend.execute_fixture(t, &[]).await.unwrap();
         }
 
         let doc = zeroship_data_sql::value!({ "id": "post_lc", "title": "lifecycle" });
@@ -9327,7 +9346,7 @@ fn soft_delete_then_restore_full_lifecycle_sqlite() {
         )
         .unwrap();
         let p = &ins.params;
-        let client = backend.acquire_dedicated_client("app_demo").await.unwrap();
+        let client = backend.fixture_session("app_demo").await.unwrap();
         client.query_values(&ins.sql, p).await.unwrap();
 
         let find_default = build_find_with_schema_and_unmask_and_soft_delete(
@@ -9431,7 +9450,7 @@ fn soft_delete_many_sets_deleted_at_on_all_matching_live_rows_sqlite() {
             if t.is_empty() {
                 continue;
             }
-            backend.pool_exec(t, &[]).await.unwrap();
+            backend.execute_fixture(t, &[]).await.unwrap();
         }
 
         for (id, author) in &[
@@ -9451,11 +9470,11 @@ fn soft_delete_many_sets_deleted_at_on_all_matching_live_rows_sqlite() {
             )
             .unwrap();
             let p = &ins.params;
-            let client = backend.acquire_dedicated_client("app_demo").await.unwrap();
+            let client = backend.fixture_session("app_demo").await.unwrap();
             client.query_values(&ins.sql, p).await.unwrap();
         }
         backend
-            .pool_exec(
+            .execute_fixture(
                 "UPDATE \"app_demo\".\"posts\" SET deleted_at = CURRENT_TIMESTAMP WHERE id = 'post_a3_dead'",
                 &[],
             )
@@ -9476,7 +9495,7 @@ fn soft_delete_many_sets_deleted_at_on_all_matching_live_rows_sqlite() {
         )
         .unwrap();
         let p = &sd.params;
-        let client = backend.acquire_dedicated_client("app_demo").await.unwrap();
+        let client = backend.fixture_session("app_demo").await.unwrap();
         let returning = client.query_values(&sd.sql, p).await.unwrap();
         assert_eq!(
             returning.len(),
@@ -9551,12 +9570,12 @@ fn nested_savepoint_rollback_to_keeps_outer_sqlite() {
     run(async {
         let (backend, _dir) = fresh_backend();
         let client = backend
-            .acquire_dedicated_client("default")
+            .fixture_session("default")
             .await
             .expect("acquire client");
 
         backend
-            .client_exec(
+            .execute_fixture_on(
                 &client,
                 "CREATE TABLE notes (id INTEGER PRIMARY KEY, title TEXT)",
                 &[],
@@ -9566,11 +9585,11 @@ fn nested_savepoint_rollback_to_keeps_outer_sqlite() {
 
         // Top-level BEGIN (what the orchestrator emits for a non-nested tx).
         backend
-            .client_exec(&client, "BEGIN", &[])
+            .execute_fixture_on(&client, "BEGIN", &[])
             .await
             .expect("BEGIN");
         backend
-            .client_exec(&client, "INSERT INTO notes (title) VALUES ('outer')", &[])
+            .execute_fixture_on(&client, "INSERT INTO notes (title) VALUES ('outer')", &[])
             .await
             .expect("outer insert");
 
@@ -9580,11 +9599,11 @@ fn nested_savepoint_rollback_to_keeps_outer_sqlite() {
         // from the depth and never reuses one. What this arm rules on is the
         // SQLite engine's savepoint semantics, which are name-agnostic.
         backend
-            .client_exec(&client, "SAVEPOINT zs_sp_1", &[])
+            .execute_fixture_on(&client, "SAVEPOINT zs_sp_1", &[])
             .await
             .expect("SAVEPOINT");
         backend
-            .client_exec(
+            .execute_fixture_on(
                 &client,
                 "INSERT INTO notes (title) VALUES ('inner-doomed')",
                 &[],
@@ -9594,17 +9613,17 @@ fn nested_savepoint_rollback_to_keeps_outer_sqlite() {
         // Inner callback rejected → ROLLBACK TO SAVEPOINT (inner reverts,
         // outer tx continues — not poisoned).
         backend
-            .client_exec(&client, "ROLLBACK TO SAVEPOINT zs_sp_1", &[])
+            .execute_fixture_on(&client, "ROLLBACK TO SAVEPOINT zs_sp_1", &[])
             .await
             .expect("ROLLBACK TO SAVEPOINT");
 
         // Outer continues + COMMITs.
         backend
-            .client_exec(&client, "INSERT INTO notes (title) VALUES ('outer-2')", &[])
+            .execute_fixture_on(&client, "INSERT INTO notes (title) VALUES ('outer-2')", &[])
             .await
             .expect("outer insert 2 after savepoint rollback");
         backend
-            .client_exec(&client, "COMMIT", &[])
+            .execute_fixture_on(&client, "COMMIT", &[])
             .await
             .expect("COMMIT");
 
@@ -9635,12 +9654,12 @@ fn nested_savepoint_release_keeps_both_sqlite() {
     run(async {
         let (backend, _dir) = fresh_backend();
         let client = backend
-            .acquire_dedicated_client("default")
+            .fixture_session("default")
             .await
             .expect("acquire client");
 
         backend
-            .client_exec(
+            .execute_fixture_on(
                 &client,
                 "CREATE TABLE notes (id INTEGER PRIMARY KEY, title TEXT)",
                 &[],
@@ -9649,15 +9668,15 @@ fn nested_savepoint_release_keeps_both_sqlite() {
             .expect("create table");
 
         backend
-            .client_exec(&client, "BEGIN", &[])
+            .execute_fixture_on(&client, "BEGIN", &[])
             .await
             .expect("BEGIN");
         backend
-            .client_exec(&client, "SAVEPOINT zs_sp_1", &[])
+            .execute_fixture_on(&client, "SAVEPOINT zs_sp_1", &[])
             .await
             .expect("SAVEPOINT");
         backend
-            .client_exec(
+            .execute_fixture_on(
                 &client,
                 "INSERT INTO notes (title) VALUES ('inner-kept')",
                 &[],
@@ -9666,11 +9685,11 @@ fn nested_savepoint_release_keeps_both_sqlite() {
             .expect("inner insert");
         // Inner callback resolved → RELEASE SAVEPOINT.
         backend
-            .client_exec(&client, "RELEASE SAVEPOINT zs_sp_1", &[])
+            .execute_fixture_on(&client, "RELEASE SAVEPOINT zs_sp_1", &[])
             .await
             .expect("RELEASE SAVEPOINT");
         backend
-            .client_exec(
+            .execute_fixture_on(
                 &client,
                 "INSERT INTO notes (title) VALUES ('outer-kept')",
                 &[],
@@ -9678,7 +9697,7 @@ fn nested_savepoint_release_keeps_both_sqlite() {
             .await
             .expect("outer insert");
         backend
-            .client_exec(&client, "COMMIT", &[])
+            .execute_fixture_on(&client, "COMMIT", &[])
             .await
             .expect("COMMIT");
 
@@ -9729,7 +9748,7 @@ fn p6c_data_plane_reaches_the_app_file_on_demand() {
 
         // Both statements go through `exec::exec_*_for_tests`, which is the
         // PRODUCTION data-plane entry - the same `TxRoute` -> `exec_sqlite_values`
-        // path a CRUD op takes. Calling `backend.pool_exec` directly would test
+        // path a CRUD op takes. Calling `backend.execute_fixture` directly would test
         // a layer BELOW the one that knows the app_id, and so could not observe
         // whether the data plane binds the file for itself.
         zeroship_data_v8::exec_mutation_with_emit_for_tests(
@@ -9850,21 +9869,24 @@ fn an_autocommit_read_proceeds_while_the_app_holds_an_open_transaction() {
         let (backend, _dir) = fresh_backend();
         let probe = backend.autocommit_client();
         backend
-            .pool_exec("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)", &[])
+            .execute_fixture("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)", &[])
             .await
             .expect("create table");
         backend
-            .pool_exec("INSERT INTO t (v) VALUES ('committed')", &[])
+            .execute_fixture("INSERT INTO t (v) VALUES ('committed')", &[])
             .await
             .expect("seed");
 
         let tx = backend
-            .acquire_dedicated_client("default")
+            .fixture_session("default")
             .await
             .expect("acquire tx client");
-        backend.client_exec(&tx, "BEGIN", &[]).await.expect("BEGIN");
         backend
-            .client_exec(&tx, "INSERT INTO t (v) VALUES ('uncommitted')", &[])
+            .execute_fixture_on(&tx, "BEGIN", &[])
+            .await
+            .expect("BEGIN");
+        backend
+            .execute_fixture_on(&tx, "INSERT INTO t (v) VALUES ('uncommitted')", &[])
             .await
             .expect("write inside the transaction (takes the write lock)");
 
@@ -9884,7 +9906,7 @@ fn an_autocommit_read_proceeds_while_the_app_holds_an_open_transaction() {
         assert_eq!(rows[0][0].as_deref(), Some("committed"));
 
         backend
-            .client_exec(&tx, "ROLLBACK", &[])
+            .execute_fixture_on(&tx, "ROLLBACK", &[])
             .await
             .expect("ROLLBACK");
     });
@@ -9897,13 +9919,13 @@ fn a_command_bearing_a_foreign_reservation_is_refused() {
     run(async {
         let (backend, _dir) = fresh_backend();
         backend
-            .pool_exec("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)", &[])
+            .execute_fixture("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)", &[])
             .await
             .expect("create table");
 
         let foreign = backend.unregistered_transaction_client_for_tests();
         let err = backend
-            .client_exec(&foreign, "INSERT INTO t (v) VALUES ('leaked')", &[])
+            .execute_fixture_on(&foreign, "INSERT INTO t (v) VALUES ('leaked')", &[])
             .await
             .expect_err("a foreign reservation must be refused");
         match &err {
@@ -9956,7 +9978,7 @@ fn a_cancellation_interrupts_a_statement_that_is_already_running() {
 
         let (backend, _dir) = fresh_backend();
         let tx = backend
-            .acquire_dedicated_client("default")
+            .fixture_session("default")
             .await
             .expect("acquire tx client");
         let cancel = tx
@@ -10022,18 +10044,21 @@ fn a_cancellation_after_commit_does_not_roll_the_commit_back() {
     run(async {
         let (backend, _dir) = fresh_backend();
         backend
-            .pool_exec("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)", &[])
+            .execute_fixture("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)", &[])
             .await
             .expect("create table");
 
         let tx = backend
-            .acquire_dedicated_client("default")
+            .fixture_session("default")
             .await
             .expect("acquire tx client");
         let cancel = tx.cancel_handle().expect("cancel handle");
-        backend.client_exec(&tx, "BEGIN", &[]).await.expect("BEGIN");
         backend
-            .client_exec(&tx, "INSERT INTO t (v) VALUES ('durable')", &[])
+            .execute_fixture_on(&tx, "BEGIN", &[])
+            .await
+            .expect("BEGIN");
+        backend
+            .execute_fixture_on(&tx, "INSERT INTO t (v) VALUES ('durable')", &[])
             .await
             .expect("insert");
         let committed = backend
@@ -10087,7 +10112,7 @@ fn a_cancel_for_a_retired_reservation_does_not_roll_back_the_next_transaction() 
     run(async {
         let (backend, _dir) = fresh_backend();
         backend
-            .pool_exec("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)", &[])
+            .execute_fixture("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)", &[])
             .await
             .expect("create table");
 
@@ -10096,16 +10121,16 @@ fn a_cancel_for_a_retired_reservation_does_not_roll_back_the_next_transaction() 
         // by a dropped future is exactly how SC-1 step 9 will arm this.
         let stale_cancel = {
             let first = backend
-                .acquire_dedicated_client("default")
+                .fixture_session("default")
                 .await
                 .expect("acquire the first transaction");
             let cancel = first.cancel_handle().expect("cancel handle for R1");
             backend
-                .client_exec(&first, "BEGIN", &[])
+                .execute_fixture_on(&first, "BEGIN", &[])
                 .await
                 .expect("BEGIN on R1");
             backend
-                .client_exec(&first, "INSERT INTO t (v) VALUES ('r1')", &[])
+                .execute_fixture_on(&first, "INSERT INTO t (v) VALUES ('r1')", &[])
                 .await
                 .expect("write inside R1");
             cancel
@@ -10113,15 +10138,15 @@ fn a_cancel_for_a_retired_reservation_does_not_roll_back_the_next_transaction() 
 
         // R2 takes the lane R1 gave up, and opens its own transaction.
         let second = backend
-            .acquire_dedicated_client("default")
+            .fixture_session("default")
             .await
             .expect("acquire the second transaction");
         backend
-            .client_exec(&second, "BEGIN", &[])
+            .execute_fixture_on(&second, "BEGIN", &[])
             .await
             .expect("BEGIN on R2");
         backend
-            .client_exec(&second, "INSERT INTO t (v) VALUES ('r2')", &[])
+            .execute_fixture_on(&second, "INSERT INTO t (v) VALUES ('r2')", &[])
             .await
             .expect("write inside R2");
 
@@ -10183,18 +10208,21 @@ fn a_second_cancellation_is_answered_not_re_executed() {
     run(async {
         let (backend, _dir) = fresh_backend();
         backend
-            .pool_exec("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)", &[])
+            .execute_fixture("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)", &[])
             .await
             .expect("create table");
 
         let tx = backend
-            .acquire_dedicated_client("default")
+            .fixture_session("default")
             .await
             .expect("acquire tx client");
         let cancel = tx.cancel_handle().expect("cancel handle");
-        backend.client_exec(&tx, "BEGIN", &[]).await.expect("BEGIN");
         backend
-            .client_exec(&tx, "INSERT INTO t (v) VALUES ('doomed')", &[])
+            .execute_fixture_on(&tx, "BEGIN", &[])
+            .await
+            .expect("BEGIN");
+        backend
+            .execute_fixture_on(&tx, "INSERT INTO t (v) VALUES ('doomed')", &[])
             .await
             .expect("write inside the transaction");
 
@@ -10231,7 +10259,7 @@ fn a_spent_autocommit_reservation_is_refused_as_a_non_owner() {
     run(async {
         let (backend, _dir) = fresh_backend();
         backend
-            .pool_exec("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)", &[])
+            .execute_fixture("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)", &[])
             .await
             .expect("create table");
 
@@ -10279,7 +10307,7 @@ fn writes_on_both_connections_reach_the_broker() {
             .await
             .expect("ensure_app_schema");
         backend
-            .pool_exec(
+            .execute_fixture(
                 "CREATE TABLE \"cdc_connections\".\"items\" (\
                      id INTEGER PRIMARY KEY, \
                      name TEXT NOT NULL\
@@ -10293,7 +10321,7 @@ fn writes_on_both_connections_reach_the_broker() {
 
         // op_conn: an ordinary autocommit write.
         backend
-            .pool_exec(
+            .execute_fixture(
                 "INSERT INTO \"cdc_connections\".\"items\" (name) VALUES ('from_op_conn')",
                 &[],
             )
@@ -10302,12 +10330,15 @@ fn writes_on_both_connections_reach_the_broker() {
 
         // tx_conn: a write inside an explicit creator transaction, committed.
         let tx = backend
-            .acquire_dedicated_client("cdc_connections")
+            .fixture_session("cdc_connections")
             .await
             .expect("acquire tx client");
-        backend.client_exec(&tx, "BEGIN", &[]).await.expect("BEGIN");
         backend
-            .client_exec(
+            .execute_fixture_on(&tx, "BEGIN", &[])
+            .await
+            .expect("BEGIN");
+        backend
+            .execute_fixture_on(
                 &tx,
                 "INSERT INTO \"cdc_connections\".\"items\" (name) VALUES ('from_tx_conn')",
                 &[],
@@ -10372,7 +10403,7 @@ fn two_apps_hold_transactions_at_the_same_time() {
             .expect("attach app_b");
         for app in ["app_a", "app_b"] {
             backend
-                .pool_exec(
+                .execute_fixture(
                     &format!("CREATE TABLE \"{app}\".\"t\" (id INTEGER PRIMARY KEY, v TEXT)"),
                     &[],
                 )
@@ -10381,30 +10412,30 @@ fn two_apps_hold_transactions_at_the_same_time() {
         }
 
         let a = backend
-            .acquire_dedicated_client("app_a")
+            .fixture_session("app_a")
             .await
             .expect("app_a acquires its transaction connection");
         backend
-            .client_exec(&a, "BEGIN", &[])
+            .execute_fixture_on(&a, "BEGIN", &[])
             .await
             .expect("BEGIN a");
         backend
-            .client_exec(&a, "INSERT INTO \"app_a\".\"t\" (v) VALUES ('a')", &[])
+            .execute_fixture_on(&a, "INSERT INTO \"app_a\".\"t\" (v) VALUES ('a')", &[])
             .await
             .expect("app_a writes inside its transaction");
 
         // The whole defect: this used to be refused because app A - a
         // DIFFERENT tenant - was holding the one transaction connection.
         let b = backend
-            .acquire_dedicated_client("app_b")
+            .fixture_session("app_b")
             .await
             .expect("app_b must get its own transaction connection while app_a holds one");
         backend
-            .client_exec(&b, "BEGIN", &[])
+            .execute_fixture_on(&b, "BEGIN", &[])
             .await
             .expect("BEGIN b");
         backend
-            .client_exec(&b, "INSERT INTO \"app_b\".\"t\" (v) VALUES ('b')", &[])
+            .execute_fixture_on(&b, "INSERT INTO \"app_b\".\"t\" (v) VALUES ('b')", &[])
             .await
             .expect("app_b writes inside its transaction");
 
@@ -10462,14 +10493,14 @@ fn a_transaction_lane_cannot_address_another_apps_tables() {
             .await
             .expect("attach app_b");
         backend
-            .pool_exec(
+            .execute_fixture(
                 "CREATE TABLE \"app_a\".\"secret\" (id INTEGER PRIMARY KEY, v TEXT)",
                 &[],
             )
             .await
             .expect("create app_a.secret");
         backend
-            .pool_exec(
+            .execute_fixture(
                 "INSERT INTO \"app_a\".\"secret\" (v) VALUES ('tenant-a')",
                 &[],
             )
@@ -10477,15 +10508,15 @@ fn a_transaction_lane_cannot_address_another_apps_tables() {
             .expect("seed app_a.secret");
 
         let b = backend
-            .acquire_dedicated_client("app_b")
+            .fixture_session("app_b")
             .await
             .expect("acquire app_b's transaction connection");
         backend
-            .client_exec(&b, "BEGIN", &[])
+            .execute_fixture_on(&b, "BEGIN", &[])
             .await
             .expect("BEGIN b");
         let leaked = backend
-            .client_exec(&b, "DELETE FROM \"app_a\".\"secret\"", &[])
+            .execute_fixture_on(&b, "DELETE FROM \"app_a\".\"secret\"", &[])
             .await
             .expect_err("app_b's transaction must not reach app_a's tables");
         assert!(
@@ -10522,16 +10553,16 @@ fn a_second_transaction_for_the_same_app_is_still_refused_and_names_it() {
             .await
             .expect("attach app_a");
         let first = backend
-            .acquire_dedicated_client("app_a")
+            .fixture_session("app_a")
             .await
             .expect("first acquire");
         backend
-            .client_exec(&first, "BEGIN", &[])
+            .execute_fixture_on(&first, "BEGIN", &[])
             .await
             .expect("BEGIN");
 
         let err = backend
-            .acquire_dedicated_client("app_a")
+            .fixture_session("app_a")
             .await
             .expect_err("a second transaction for the same app must be refused");
         match &err {
@@ -10554,7 +10585,7 @@ fn a_second_transaction_for_the_same_app_is_still_refused_and_names_it() {
         // round trip - so the next acquire succeeds.
         drop(first);
         backend
-            .acquire_dedicated_client("app_a")
+            .fixture_session("app_a")
             .await
             .expect("the app's lane is free once its lease drops");
     });
@@ -10581,7 +10612,7 @@ fn transaction_lanes_are_capped_and_the_refusal_has_its_own_code() {
             let app = format!("cap_a{i}");
             backend.attach_app_file(&app).await.expect("attach");
             let client = backend
-                .acquire_dedicated_client(&app)
+                .fixture_session(&app)
                 .await
                 .expect("acquire under the cap");
             drop(client);
@@ -10589,7 +10620,7 @@ fn transaction_lanes_are_capped_and_the_refusal_has_its_own_code() {
         let app = format!("cap_a{cap}");
         backend.attach_app_file(&app).await.expect("attach");
         backend
-            .acquire_dedicated_client(&app)
+            .fixture_session(&app)
             .await
             .expect("an idle lane must be evicted rather than refusing");
 
@@ -10601,11 +10632,11 @@ fn transaction_lanes_are_capped_and_the_refusal_has_its_own_code() {
             let app = format!("cap_b{i}");
             backend.attach_app_file(&app).await.expect("attach");
             let client = backend
-                .acquire_dedicated_client(&app)
+                .fixture_session(&app)
                 .await
                 .expect("acquire under the cap");
             backend
-                .client_exec(&client, "BEGIN", &[])
+                .execute_fixture_on(&client, "BEGIN", &[])
                 .await
                 .expect("BEGIN");
             held.push(client);
@@ -10613,7 +10644,7 @@ fn transaction_lanes_are_capped_and_the_refusal_has_its_own_code() {
         let app = format!("cap_b{cap}");
         backend.attach_app_file(&app).await.expect("attach");
         let err = backend
-            .acquire_dedicated_client(&app)
+            .fixture_session(&app)
             .await
             .expect_err("every lane is mid-transaction, so this must be refused");
         match &err {
@@ -10649,19 +10680,22 @@ fn a_write_upgrade_on_a_stale_wal_snapshot_is_refused() {
     run(async {
         let (backend, _dir) = fresh_backend();
         backend
-            .pool_exec("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)", &[])
+            .execute_fixture("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)", &[])
             .await
             .expect("create table");
         backend
-            .pool_exec("INSERT INTO t (v) VALUES ('seed')", &[])
+            .execute_fixture("INSERT INTO t (v) VALUES ('seed')", &[])
             .await
             .expect("seed");
 
         let tx = backend
-            .acquire_dedicated_client("snapshot_app")
+            .fixture_session("snapshot_app")
             .await
             .expect("acquire tx client");
-        backend.client_exec(&tx, "BEGIN", &[]).await.expect("BEGIN");
+        backend
+            .execute_fixture_on(&tx, "BEGIN", &[])
+            .await
+            .expect("BEGIN");
         // The read is what takes the deferred snapshot. Without it `BEGIN`
         // alone has taken no snapshot and the write below simply succeeds -
         // which is the arm's whole difficulty and why it stayed owed.
@@ -10675,13 +10709,13 @@ fn a_write_upgrade_on_a_stale_wal_snapshot_is_refused() {
         // connection to the same WAL database, so this moves the WAL past the
         // snapshot the transaction is pinned to.
         backend
-            .pool_exec("INSERT INTO t (v) VALUES ('from-op-conn')", &[])
+            .execute_fixture("INSERT INTO t (v) VALUES ('from-op-conn')", &[])
             .await
             .expect("op_conn write commits");
 
         let started = std::time::Instant::now();
         let err = backend
-            .client_exec(&tx, "INSERT INTO t (v) VALUES ('upgrade')", &[])
+            .execute_fixture_on(&tx, "INSERT INTO t (v) VALUES ('upgrade')", &[])
             .await
             .expect_err("a write on a stale WAL snapshot must be refused");
         let elapsed = started.elapsed();
@@ -10823,7 +10857,10 @@ fn dbbind134_sqlite_timestamp_spellings_invert_same_day_ordering() {
             if trimmed.is_empty() {
                 continue;
             }
-            backend.pool_exec(trimmed, &[]).await.expect("DDL exec");
+            backend
+                .execute_fixture(trimmed, &[])
+                .await
+                .expect("DDL exec");
         }
 
         // The DDL default itself must already carry the ISO-T spelling. This
@@ -10835,17 +10872,14 @@ fn dbbind134_sqlite_timestamp_spellings_invert_same_day_ordering() {
 
         // Row A: id only, so `created_at` is written BY THE EMITTED DEFAULT.
         backend
-            .pool_exec(
+            .execute_fixture(
                 &format!("INSERT INTO \"{app}\".\"{coll}\" (id) VALUES ('a_default')"),
                 &[],
             )
             .await
             .expect("insert row A via the emitted column default");
 
-        let client = backend
-            .acquire_dedicated_client(app)
-            .await
-            .expect("acquire client");
+        let client = backend.fixture_session(app).await.expect("acquire client");
 
         // Row B: through the RUNTIME's builder, which converts a Unix-ms bind
         // for a declared timestamp column.
@@ -10867,7 +10901,7 @@ fn dbbind134_sqlite_timestamp_spellings_invert_same_day_ordering() {
             bq.sql
         );
         // `build_insert` emits a RETURNING clause, so this goes through `query`
-        // rather than `pool_exec` - the latter refuses a statement that yields
+        // rather than `execute_fixture` - the latter refuses a statement that yields
         // rows ("Execute returned results - did you mean to call query?").
         let params = &bq.params;
         client
@@ -10912,3 +10946,13 @@ fn dbbind134_sqlite_timestamp_spellings_invert_same_day_ordering() {
         );
     });
 }
+
+#[allow(unused_imports)]
+use zeroship_data_orm::protection::Catalog;
+
+#[cfg(any(test, feature = "test-helpers"))]
+#[allow(unused_imports)]
+use zeroship_data_orm::fixtures::DatabaseFixture;
+
+#[allow(unused_imports)]
+use zeroship_data_orm::search::Search;

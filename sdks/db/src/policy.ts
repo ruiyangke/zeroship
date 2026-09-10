@@ -47,7 +47,7 @@
  * the `Classification` taxonomy. Anything else throws
  * `INVALID_MASK_CLASSIFICATION` at declare-time (and again at
  * Rust-time, belt-and-braces — see
- * `crates/zeroship-data-orm/src/crud/mask_policy.rs::dispatch_set_mask_policy`).
+ * `crates/zeroship-data-orm/src/protection/mask_policy.rs::install_mask_policy`).
  */
 import type { Classification } from "./types";
 
@@ -88,11 +88,12 @@ const MASK_POLICY_STATE = Symbol.for("@zeroship/db/MaskPolicyState");
 
 type MaskPolicyState = {
   pendingPolicy: MaskPolicy | null;
+  sealed: boolean;
 };
 
 function policyState(): MaskPolicyState {
   const global = globalThis as unknown as Record<PropertyKey, MaskPolicyState | undefined>;
-  return (global[MASK_POLICY_STATE] ??= { pendingPolicy: null });
+  return (global[MASK_POLICY_STATE] ??= { pendingPolicy: null, sealed: false });
 }
 
 /**
@@ -103,21 +104,26 @@ function policyState(): MaskPolicyState {
  * The slot is keyed on `globalThis` so the public `@zeroship/db` entry
  * and framework-internal `@zeroship/db/internal` entry share policy
  * state even when they are published as separate bundled ESM files.
- * Re-declaring policy in the same process overwrites: the platform's
- * mask policy is single-shot at boot. A second call after
- * `_flushPendingMaskPolicy()` returned the previous one is honored on
- * the next flush; calls after the first request reaches the dispatcher
- * have no effect (no second flush).
+ * Declarations may be replaced during startup. The first flush seals the
+ * declaration, including the absence of a policy. Later declarations fail.
  */
 
 /**
  * **P5.5 PR 5** — declare the per-app mask policy. See module-level
  * doc-comment for usage examples.
  *
+ * @throws `MASK_POLICY_IMMUTABLE` after the startup flush.
  * @throws `INVALID_MASK_CLASSIFICATION` when any classification value
  *   is not one of the six built-ins.
  */
 export function defineMaskPolicy(policy: MaskPolicy): void {
+  const state = policyState();
+  if (state.sealed) {
+    throw Object.assign(
+      new Error("defineMaskPolicy: policy is fixed after startup; edit the app and redeploy"),
+      { code: "MASK_POLICY_IMMUTABLE" as const },
+    );
+  }
   if (policy === null || typeof policy !== "object") {
     throw Object.assign(
       new Error(
@@ -149,14 +155,12 @@ export function defineMaskPolicy(policy: MaskPolicy): void {
       }
     }
   }
-  // Shallow-clone so a later mutation of the caller's object doesn't
-  // bleed into our stored copy (the policy is meant to be effectively
-  // immutable from the platform's perspective once flushed).
-  const cloned: { [role: string]: readonly Classification[] } = {};
+  // Snapshot and freeze the declaration, including each classification array.
+  const cloned: { [role: string]: readonly Classification[] } = Object.create(null);
   for (const [role, classifications] of Object.entries(policy)) {
-    cloned[role] = [...classifications];
+    cloned[role] = Object.freeze([...classifications]);
   }
-  policyState().pendingPolicy = cloned;
+  state.pendingPolicy = Object.freeze(cloned);
 }
 
 /**
@@ -165,8 +169,8 @@ export function defineMaskPolicy(policy: MaskPolicy): void {
  * init; the returned policy (when non-null) is flushed through the
  * `__platform.setMaskPolicy` native op, which installs it in the Rust
  * side's per-isolate cache. That boot-time flush is the ONLY way a
- * policy reaches the runtime: there is no durable policy store on
- * Postgres, and redeploying is the only way to change one.
+ * policy reaches the runtime. No backend persists it; changes require a
+ * new deployment.
  *
  * Returns `null` when no policy has been declared — the platform
  * then keeps PR 4's default-deny stub.
@@ -179,6 +183,7 @@ export function _flushPendingMaskPolicy(): MaskPolicy | null {
   const state = policyState();
   const p = state.pendingPolicy;
   state.pendingPolicy = null;
+  state.sealed = true;
   return p;
 }
 
