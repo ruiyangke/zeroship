@@ -35,6 +35,7 @@ import {
   type Result,
   type Row,
   type RowInput,
+  type UpsertOptions,
   type UpdateExpression,
   type WithRelations,
   type WithSpec,
@@ -43,6 +44,7 @@ import {
 } from "../types";
 import { validateEncryptedFieldsInFilter } from "./encryption-fence";
 import { _maybeWarnUnindexedFilter } from "./index-warnings";
+import { CONFINED_SYSTEM_SHAPE_ASSIGNMENTS } from "../generated/confined-system-shape.generated";
 
 export interface CrudCollectionInternals<
   S = PlainObject,
@@ -410,12 +412,33 @@ export function findCollection<
 export function upsertCollection<S, N extends string, AllSchemas extends Record<string, unknown>>(
   self: CrudCollectionInternals<S, N, AllSchemas>,
   row: RowInput<S>,
-  options: { conflictFields: (string & keyof Row<S>)[] },
+  options: UpsertOptions<S>,
 ): Promise<Result<Row<S>>> {
   return self._run(async () => {
+    const invalid = (message: string): never => {
+      throw new ValidationError({ conflictFields: { path: "conflictFields", message } });
+    };
+    const fields = options?.conflictFields;
+    if (!Array.isArray(fields) || fields.length === 0) {
+      invalid("conflictFields must be a non-empty array of application-owned fields");
+    }
+    const seen = new Set<string>();
+    const conflictCols = fields.map((field) => {
+      if (typeof field !== "string") invalid("every conflict field must be a string");
+      const column = self._toColumn(field);
+      if (Object.hasOwn(CONFINED_SYSTEM_SHAPE_ASSIGNMENTS, column) || self._schema[field]?.assign !== undefined) {
+        invalid(`upsert conflict field '${field}' is platform-assigned; use an application-owned unique key`);
+      }
+      if (!Object.hasOwn(self._schema, field)) invalid(`unknown upsert conflict field '${field}'`);
+      if (seen.has(column)) invalid(`duplicate upsert conflict field '${field}'`);
+      seen.add(column);
+      return column;
+    });
     const validated = validateDoc(row as PlainObject, self._schema);
     const outbound = mapDocOutbound(validated, self._toColumn);
-    const conflictCols = options.conflictFields.map((f) => self._toColumn(f));
+    for (const column of conflictCols) {
+      if (!Object.hasOwn(outbound, column)) invalid(`upsert conflict field '${column}' must be supplied in the document`);
+    }
     const result = await self._nativeCollection().upsert(
       outbound as Record<string, ZeroshipScalar | ZeroshipScalar[]>,
       { conflictFields: conflictCols },

@@ -83,6 +83,38 @@ fn refuse_platform_assigned_id(doc: &Value) -> Result<(), DbError> {
     Ok(())
 }
 
+fn validate_upsert_conflict_fields(
+    schema: &Value,
+    doc: &Value,
+    conflict_fields: &Value,
+) -> Result<(), DbError> {
+    let fields = compile::parse_conflict_fields(conflict_fields)?;
+    let assignments = crate::system_shape_charter::plan()?;
+    for field in fields {
+        if assignments
+            .columns()
+            .iter()
+            .any(|column| column.name == field)
+        {
+            return Err(DbError::validation(
+                "platform_assigned_conflict_field",
+                format!(
+                    "upsert conflict field '{field}' is platform-assigned; use an application-owned unique key"
+                ),
+            ));
+        }
+        if schema.get(field).is_none() || doc.get(field).is_none() {
+            return Err(DbError::validation(
+                "invalid_upsert_conflict_field",
+                format!(
+                    "upsert conflict field '{field}' must be declared and supplied in the document"
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// DB-8 (update patch): an update patch's top-level keys are either field names
 /// (`{ name: "x", views: { $inc: 1 } }`) or the document-level `$set`/`$setOnInsert`
 /// operators whose nested keys are field names. Validate the field-name keys
@@ -165,7 +197,7 @@ pub async fn apply(
     // truncation collision), or a reserved name (e.g. `ssn_masked`) straight into
     // a column. Run the same fence here, on the raw user keys, once.
     match &mode {
-        ApplyMode::Insert { .. } => {
+        ApplyMode::Insert { .. } | ApplyMode::Upsert { .. } => {
             validate_user_doc_keys(payload)?;
             refuse_platform_assigned_id(payload)?;
         }
@@ -177,14 +209,6 @@ pub async fn apply(
                 }
             }
         }
-        // UPSERT DELIBERATELY DOES NOT REFUSE A SUPPLIED `id`, and this is an
-        // open question rather than a settled exemption. Upsert targets by
-        // `conflict_fields`, not by the document's id - so an id here is as
-        // unearned as it is on an insert. But `upsert(doc, { on: ["id"] })`
-        // needs the id present to match on, and whether that flow survives
-        // platform-assigned ids is a creator-facing semantics call. Refusing it
-        // here would decide that silently, so it is left and recorded.
-        ApplyMode::Upsert { .. } => validate_user_doc_keys(payload)?,
         ApplyMode::Update { .. } => validate_update_patch_keys(payload)?,
     }
 
@@ -194,6 +218,9 @@ pub async fn apply(
     // encryption and mask stages silently skipped - which is what an absent
     // schema used to mean, on a write.
     let schema = crate::descriptor::collection_schema(binding, collection)?;
+    if let ApplyMode::Upsert { conflict_fields, .. } = &mode {
+        validate_upsert_conflict_fields(&schema, payload, conflict_fields)?;
+    }
     match &mode {
         ApplyMode::Insert { .. } | ApplyMode::Upsert { .. } => {
             zeroship_data_sql::codecs::validate_calendar_date_document(&schema, payload)?;
@@ -1300,7 +1327,6 @@ mod tests {
 
             let conflict_fields = zeroship_data_sql::value!(["email"]);
             let mut upsert_doc = zeroship_data_sql::value!({
-                "id": "user_new",
                 "email": "seed@example.com",
                 "name": "Seed Updated",
                 "ssn": "222-33-4444"

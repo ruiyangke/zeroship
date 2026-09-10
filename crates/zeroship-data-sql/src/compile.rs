@@ -3724,6 +3724,34 @@ pub fn build_upsert(
     )
 }
 
+/// Parse an explicit conflict target without dropping or duplicating columns.
+pub fn parse_conflict_fields(value: &Value) -> Result<Vec<&str>, QueryError> {
+    let fields = value
+        .as_array()
+        .ok_or_else(|| QueryError::InvalidFilter("conflict_fields must be an array".to_string()))?;
+    if fields.is_empty() {
+        return Err(QueryError::InvalidFilter(
+            "conflict_fields cannot be empty".to_string(),
+        ));
+    }
+    let mut seen = std::collections::HashSet::new();
+    fields
+        .iter()
+        .map(|value| {
+            let field = value.as_str().ok_or_else(|| {
+                QueryError::InvalidFilter("every conflict field must be a string".to_string())
+            })?;
+            validate_field_name(field)?;
+            if !seen.insert(field) {
+                return Err(QueryError::InvalidFilter(format!(
+                    "duplicate conflict field '{field}'"
+                )));
+            }
+            Ok(field)
+        })
+        .collect()
+}
+
 /// Dialect-aware UPSERT builder.
 pub fn build_upsert_with_dialect(
     schema_name: &SchemaName,
@@ -3746,24 +3774,9 @@ pub fn build_upsert_with_dialect(
         ));
     }
 
-    let conflict_arr = conflict_fields
-        .as_array()
-        .ok_or_else(|| QueryError::InvalidFilter("conflict_fields must be an array".to_string()))?;
-
-    if conflict_arr.is_empty() {
-        return Err(QueryError::InvalidFilter(
-            "conflict_fields cannot be empty".to_string(),
-        ));
-    }
-
+    let conflict_arr = parse_conflict_fields(conflict_fields)?;
     let conflict_set: std::collections::HashSet<&str> =
-        conflict_arr.iter().filter_map(|v| v.as_str()).collect();
-
-    if conflict_set.is_empty() {
-        return Err(QueryError::InvalidFilter(
-            "conflict_fields must contain string values".to_string(),
-        ));
-    }
+        conflict_arr.iter().copied().collect();
 
     let schema = schema_name.quoted();
     let table = quote_ident(collection);
@@ -3817,8 +3830,7 @@ pub fn build_upsert_with_dialect(
 
     let conflict_cols: Vec<String> = conflict_arr
         .iter()
-        .filter_map(|v| v.as_str())
-        .map(quote_ident)
+        .map(|field| quote_ident(field))
         .collect();
 
     if !doc_has_version {
@@ -3847,7 +3859,7 @@ pub fn build_upsert_with_dialect(
     // to make it a true upsert (otherwise Postgres treats it as DO NOTHING).
     if update_clauses.is_empty() {
         // All columns are conflict columns — set the first one to itself
-        if let Some(first) = conflict_arr.first().and_then(|v| v.as_str()) {
+        if let Some(first) = conflict_arr.first() {
             update_clauses.push(format!(
                 "{} = EXCLUDED.{}",
                 quote_ident(first),
@@ -3892,23 +3904,8 @@ pub fn build_find_or_create(
         ));
     }
 
-    let conflict_arr = conflict_fields
-        .as_array()
-        .ok_or_else(|| QueryError::InvalidFilter("conflict_fields must be an array".to_string()))?;
-
-    if conflict_arr.is_empty() {
-        return Err(QueryError::InvalidFilter(
-            "conflict_fields cannot be empty".to_string(),
-        ));
-    }
-
-    let first_conflict = conflict_arr
-        .iter()
-        .filter_map(|v| v.as_str())
-        .next()
-        .ok_or_else(|| {
-            QueryError::InvalidFilter("conflict_fields must contain string values".to_string())
-        })?;
+    let conflict_arr = parse_conflict_fields(conflict_fields)?;
+    let first_conflict = conflict_arr[0];
 
     let schema = schema_name.quoted();
     let table = quote_ident(collection);
@@ -3934,8 +3931,7 @@ pub fn build_find_or_create(
 
     let conflict_cols: Vec<String> = conflict_arr
         .iter()
-        .filter_map(|v| v.as_str())
-        .map(quote_ident)
+        .map(|field| quote_ident(field))
         .collect();
 
     // The DO UPDATE branch is a self-assignment so RETURNING fires for
@@ -5952,6 +5948,42 @@ mod tests {
         let conflict = value!([]);
         let result = build_upsert(&s("app1"), "users", &tschema(), &doc, &conflict);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn conflict_targets_reject_malformed_or_repeated_fields() {
+        let doc = value!({"email":"a@example.com", "name":"Alice"});
+        for conflict in [
+            value!(["email", 1]),
+            value!(["email", null]),
+            value!(["email", "email"]),
+            value!([""]),
+            value!(["__zeroship_internal"]),
+            value!(["email", "bad\0field"]),
+        ] {
+            for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite] {
+                assert!(
+                    build_upsert_with_dialect(
+                        &s("app1"),
+                        "users",
+                        &tschema(),
+                        &doc,
+                        &conflict,
+                        dialect
+                    )
+                    .is_err(),
+                    "{conflict}"
+                );
+            }
+            assert!(
+                build_find_or_create(&s("app1"), "users", &tschema(), &doc, &conflict).is_err(),
+                "{conflict}"
+            );
+        }
+        assert_eq!(
+            parse_conflict_fields(&value!(["email", "name"])).unwrap(),
+            ["email", "name"]
+        );
     }
 
     #[test]

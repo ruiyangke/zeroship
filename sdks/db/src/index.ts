@@ -30,5 +30,5 @@ export type { LiveQuery, LiveOptions } from "./live";
 // @zeroship/db.
 export type { Db, Collections, DbExtensions, TxCollection, TxQuery, TransactionOptions, SchemaInput, SchemaShape, RowOf, RowInputOf } from "./db-types";
 export type { PaginationResult } from "./query";
-export type { FieldDef, FieldStorage, AuxiliaryObject, FieldDefaultValue, PlainObject, Result, Row, RowInput, SystemFields, UpdateExpression, Filter, NamingStrategy, SchemaOptions, InferSchema, InferUnion, InferFieldDef, IsolationLevel, Id, FkAction, RefOptions, InferRow, InferRowInput, InferId, MaskKind, Classification, MaskOpts, MaskedValueRepr, MaskedValue, Actor, NamedIndexSpec, WithRelations, WithSpec } from "./types";
+export type { FieldDef, FieldStorage, AuxiliaryObject, FieldDefaultValue, PlainObject, Result, Row, RowInput, UpsertOptions, SystemFields, UpdateExpression, Filter, NamingStrategy, SchemaOptions, InferSchema, InferUnion, InferFieldDef, IsolationLevel, Id, FkAction, RefOptions, InferRow, InferRowInput, InferId, MaskKind, Classification, MaskOpts, MaskedValueRepr, MaskedValue, Actor, NamedIndexSpec, WithRelations, WithSpec } from "./types";
 export type { NormalizedSchema } from "./schema";

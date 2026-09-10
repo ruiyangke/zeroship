@@ -211,6 +211,11 @@ export type RowInput<S> = InferInsertSchema<S> & {
   deleted_at?: never;
 };
 
+/** Upsert matches an application-owned unique key supplied in the document. */
+export type UpsertOptions<S> = {
+  conflictFields: Exclude<string & keyof Row<S>, keyof SystemFields>[];
+};
+
 // ---------------------------------------------------------------------------
 // Filter types — typed query operators per field type
 // ---------------------------------------------------------------------------

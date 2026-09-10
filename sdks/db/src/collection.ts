@@ -26,6 +26,7 @@ import type {
   Result,
   Row,
   RowInput,
+  UpsertOptions,
   UpdateExpression,
   WithRelations,
   WithSpec,
@@ -355,7 +356,7 @@ export class Collection<
 
   async upsert(
     row: RowInput<S>,
-    options: { conflictFields: (string & keyof Row<S>)[] },
+    options: UpsertOptions<S>,
   ): Promise<Result<Row<S>>> {
     return upsertCollection(this._crud(), row, options);
   }

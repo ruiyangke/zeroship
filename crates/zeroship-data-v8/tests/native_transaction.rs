@@ -1073,6 +1073,55 @@ const _procedures = {calendarDates};
 }
 
 #[test]
+fn worker_upserts_preserve_platform_identity_and_reject_invalid_conflict_keys() {
+    let url = require_pg();
+    let app = crate::test_app_id!();
+    let app = app.as_str();
+    reset_schema(&url, app);
+    exec_owner_sql(
+        &url,
+        &format!("CREATE UNIQUE INDEX notes_identity_title ON \"{app}\".notes (title)"),
+    );
+    let source = build_src(
+        r#"
+async function identities() {
+    const raw = env.db.collection("notes");
+    const refused = async (operation, code) => {
+        try { await operation(); }
+        catch (error) {
+            if (error.code !== code) throw error;
+            return;
+        }
+        throw new Error("invalid identity write was accepted");
+    };
+    await refused(() => raw.insert({id:"usr_caller_chosen",title:"blocked"}), "platform_assigned_field");
+    await refused(() => raw.insertMany([{title:"valid"},{id:"usr_caller_chosen",title:"blocked"}]), "platform_assigned_field");
+    await refused(() => raw.upsert({id:"usr_caller_chosen",title:"blocked"},{conflictFields:["title"]}), "platform_assigned_field");
+    await refused(() => raw.upsert({title:"blocked"},{conflictFields:["id"]}), "platform_assigned_conflict_field");
+    const result = await env.db.transaction(async tx => {
+        const first = await tx.notes.upsert({title:"key"},{conflictFields:["title"]});
+        const second = await tx.notes.upsert({title:"key"},{conflictFields:["title"]});
+        if (first.id !== second.id || !first.id.startsWith("note_")) throw new Error("upsert changed identity");
+        const updated = await tx.notes.update(first.id,{title:"renamed"});
+        if (updated.id !== first.id) throw new Error("update changed identity");
+        return {preserved:true};
+    });
+    if (result.error) throw result.error;
+    const invalid = await env.db.transaction(tx => tx.notes.upsert({title:"blocked"},{conflictFields:["id"]}));
+    if (!invalid.error) throw new Error("SDK accepted an assigned conflict key");
+    return result.data;
+}
+identities.config = {kind:"action"};
+const _procedures = {identities};
+"#,
+    );
+    let (status, body) = dispatch_zs(&url, &source, "identities", app);
+    assert_eq!(status, 200, "worker identities: {body}");
+    assert_eq!(body["json"], serde_json::json!({"preserved":true}));
+    assert_eq!(count_notes(&url, app), 1);
+}
+
+#[test]
 fn transaction_commits_on_resolve() {
     let url = require_pg();
     let app = crate::test_app_id!();
@@ -1088,6 +1137,7 @@ async function commitOne(_input, _ctx) {
     });
     return { txResult: r };
 }
+
 commitOne.config = { kind: "action" };
 const _procedures = { commitOne };
 "#,

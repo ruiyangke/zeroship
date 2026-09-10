@@ -7,6 +7,7 @@ use test_schema::posts;
 
 mod calendar_date;
 mod fixtures;
+mod identity;
 mod json;
 
 #[derive(Debug, FromRow)]

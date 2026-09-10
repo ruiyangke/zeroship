@@ -3562,7 +3562,6 @@ async function upsertConflict(_input, _ctx) {
     const coll = env.db.collection(COLLECTION);
     const first = await coll.upsert(
         {
-            id: "user_seed",
             email: "alice@example.com",
             name: "Alice",
             created_by: "usr_seed",
@@ -3572,7 +3571,6 @@ async function upsertConflict(_input, _ctx) {
     );
     const second = await coll.upsert(
         {
-            id: "user_new",
             email: "alice@example.com",
             name: "Alice Updated",
             created_by: "usr_new",
@@ -3593,18 +3591,13 @@ const _procedures = { upsertConflict };
         let payload = parity::extract_json(&result);
         let first = payload.get("first").expect("first response row");
         let second = payload.get("second").expect("second response row");
-        assert_eq!(
-            first.get("id").and_then(|v| v.as_str()),
-            Some("user_seed"),
-            "first upsert should return the inserted row"
-        );
-        // The insert-only property, and it is the sharpest assertion here
-        // because the two documents supply DIFFERENT ids: the conflict arm
-        // keeps the seeded row's id rather than taking `user_new` from
-        // `EXCLUDED`.
+        let first_id = first.get("id").and_then(|v| v.as_str()).expect("generated id");
+        assert!(first_id.starts_with("user_"));
+        // The conflicting insert mints a candidate identity; the update must
+        // preserve the stored identity and use it for encryption's AAD.
         assert_eq!(
             second.get("id").and_then(|v| v.as_str()),
-            Some("user_seed"),
+            Some(first_id),
             "conflict update must keep the original id"
         );
         // The two documents supply DIFFERENT actor ids, and neither lands.
@@ -3668,7 +3661,7 @@ const _procedures = { upsertConflict };
         let row = &typed.rows[0];
 
         match &row[0] {
-            TypedCell::Text(id) => assert_eq!(id, "user_seed"),
+            TypedCell::Text(id) => assert_eq!(id, first_id),
             other => panic!("id must be TEXT, got {other:?}"),
         }
         // Read back from the DATABASE, not from the returned row, that neither
@@ -3720,7 +3713,7 @@ const _procedures = { upsertConflict };
         let plaintext = zeroship_data_v8::encryption::aead::decrypt(
             &key,
             &stored_blob,
-            &encryption::canonical_aad("users", "ssn", Some(b"user_seed")),
+            &encryption::canonical_aad("users", "ssn", Some(first_id.as_bytes())),
         )
         .expect("decrypt stored conflict ciphertext");
         assert_eq!(
@@ -3752,7 +3745,6 @@ async function upsertConflict(_input, _ctx) {
     const coll = env.db.collection(COLLECTION);
     const first = await coll.upsert(
         {
-            id: "user_seed",
             email: "alice@example.com",
             name: "Alice",
             ssn: "123-45-6789"
@@ -3761,7 +3753,6 @@ async function upsertConflict(_input, _ctx) {
     );
     const second = await coll.upsert(
         {
-            id: "user_new",
             email: "alice@example.com",
             name: "Alice Updated",
             ssn: "987-65-4321"
@@ -3778,10 +3769,11 @@ const _procedures = { upsertConflict };
 
         let result = dispatch_sqlite_runtime(&dir, &source, "upsertConflict");
         let payload = parity::extract_json(&result);
+        let first_id = payload["first"]["id"].as_str().expect("generated id");
         let second = payload.get("second").expect("second response row");
         assert_eq!(
             second.get("id").and_then(|v| v.as_str()),
-            Some("user_seed"),
+            Some(first_id),
             "deterministic conflict probe must rewrite to the existing row id"
         );
 
@@ -3886,7 +3878,6 @@ fn update_non_id_filter_keeps_randomised_ciphertext_readable_sqlite_runtime() {
 async function seed(_input, _ctx) {
     return await env.db.collection(COLLECTION).upsert(
         {
-            id: "user_seed",
             email: "alice@example.com",
             name: "Alice",
             ssn: "123-45-6789"
@@ -3908,12 +3899,14 @@ const _procedures = { seed, updateByEmail };
 "#,
         );
 
-        dispatch_sqlite_runtime(&dir, &source, "seed");
+        let seeded = dispatch_sqlite_runtime(&dir, &source, "seed");
+        let seed_row = parity::extract_json(&seeded);
+        let seed_id = seed_row["id"].as_str().expect("generated id");
         let updated = dispatch_sqlite_runtime(&dir, &source, "updateByEmail");
         let row = parity::extract_json(&updated);
         assert_eq!(
             row.get("id").and_then(|v| v.as_str()),
-            Some("user_seed"),
+            Some(seed_id),
             "update by non-id filter should still target the seeded row"
         );
 
@@ -4004,7 +3997,6 @@ async function seed(_input, _ctx) {
     const coll = env.db.collection(COLLECTION);
     await coll.upsert(
         {
-            id: "user_a",
             email: "alice@example.com",
             name: "Red Team",
             ssn: "123-45-6789"
@@ -4013,7 +4005,6 @@ async function seed(_input, _ctx) {
     );
     await coll.upsert(
         {
-            id: "user_b",
             email: "bob@example.com",
             name: "Red Team",
             ssn: "222-33-4444"
@@ -4022,7 +4013,6 @@ async function seed(_input, _ctx) {
     );
     await coll.upsert(
         {
-            id: "user_c",
             email: "carol@example.com",
             name: "Blue Team",
             ssn: "555-66-7777"
@@ -4526,7 +4516,6 @@ async function seed(_input, _ctx) {
     const coll = env.db.collection(COLLECTION);
     await coll.upsert(
         {
-            id: "user_a",
             email: "alice@example.com",
             name: "Red Team",
             ssn: "123-45-6789"
@@ -4535,7 +4524,6 @@ async function seed(_input, _ctx) {
     );
     await coll.upsert(
         {
-            id: "user_b",
             email: "bob@example.com",
             name: "Red Team",
             ssn: "222-33-4444"
@@ -4605,7 +4593,6 @@ fn plain_upsert_on_encrypted_collection_skips_conflict_probe_sqlite_runtime() {
 async function seed(_input, _ctx) {
     return await env.db.collection(COLLECTION).upsert(
         {
-            id: "user_seed",
             email: "alice@example.com",
             name: "Alice",
             secret: "alpha-secret"
@@ -4618,7 +4605,6 @@ seed.config = { kind: "action" };
 async function upsertPlainConflict(_input, _ctx) {
     return await env.db.collection(COLLECTION).upsert(
         {
-            id: "user_new",
             email: "alice@example.com",
             name: "Alice Updated"
         },
@@ -4631,7 +4617,9 @@ const _procedures = { seed, upsertPlainConflict };
 "#,
         );
 
-        dispatch_sqlite_runtime(&dir, &source, "seed");
+        let seeded = dispatch_sqlite_runtime(&dir, &source, "seed");
+        let seed_row = parity::extract_json(&seeded);
+        let seed_id = seed_row["id"].as_str().expect("generated id");
 
         zeroship_data_v8::crud::reset_write_path_counters_for_tests();
         let updated = parity::extract_json(&dispatch_sqlite_runtime(
@@ -4641,7 +4629,7 @@ const _procedures = { seed, upsertPlainConflict };
         ));
         assert_eq!(
             updated.get("id").and_then(|v| v.as_str()),
-            Some("user_seed"),
+            Some(seed_id),
             "plain conflict upsert should still target the existing row",
         );
         assert_eq!(
@@ -4669,7 +4657,6 @@ fn update_rejects_nested_version_filter_without_mutating_sqlite_row() {
 async function seed(_input, _ctx) {
     return await env.db.collection(COLLECTION).upsert(
         {
-            id: "user_seed",
             email: "alice@example.com",
             name: "Alice",
             ssn: "123-45-6789"
@@ -4683,7 +4670,7 @@ async function nestedCasUpdate(_input, _ctx) {
     return await env.db.collection(COLLECTION).update(
         {
             "$and": [
-                { id: "user_seed" },
+                { email: "alice@example.com" },
                 { version: 1 }
             ]
         },
@@ -4733,7 +4720,7 @@ const _procedures = { seed, nestedCasUpdate };
             .expect("acquire client");
         let rows = client
             .query(
-                r#"SELECT name, version FROM "default"."users" WHERE id = 'user_seed'"#,
+                r#"SELECT name, version FROM "default"."users" WHERE email = 'alice@example.com'"#,
                 &[],
             )
             .await
@@ -4768,7 +4755,6 @@ fn update_many_rejects_nested_version_filter_without_mutating_sqlite_row() {
 async function seed(_input, _ctx) {
     return await env.db.collection(COLLECTION).upsert(
         {
-            id: "user_seed",
             email: "alice@example.com",
             name: "Alice",
             ssn: "123-45-6789"
@@ -4782,7 +4768,7 @@ async function nestedCasUpdateMany(_input, _ctx) {
     return await env.db.collection(COLLECTION).updateMany(
         {
             "$and": [
-                { id: "user_seed" },
+                { email: "alice@example.com" },
                 { version: 1 }
             ]
         },
@@ -4826,7 +4812,7 @@ const _procedures = { seed, nestedCasUpdateMany };
             .expect("acquire client");
         let rows = client
             .query(
-                r#"SELECT name, version FROM "default"."users" WHERE id = 'user_seed'"#,
+                r#"SELECT name, version FROM "default"."users" WHERE email = 'alice@example.com'"#,
                 &[],
             )
             .await
