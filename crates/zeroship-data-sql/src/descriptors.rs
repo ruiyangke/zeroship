@@ -1,5 +1,28 @@
 //! Value descriptors shared by runtime catalog readers and storage backends.
 
+/// Effective masking metadata from an installed field descriptor.
+#[derive(Debug, Clone, Copy)]
+pub struct EffectiveMask<'a> {
+    pub kind: &'a str,
+    pub classification: &'a str,
+}
+
+/// An absent mask or explicit `kind: "none"` leaves the field unmasked.
+pub fn effective_mask(field: &crate::value::Value) -> Option<EffectiveMask<'_>> {
+    let metadata = field.get("mask")?.as_object()?;
+    let kind = metadata
+        .get("kind")
+        .and_then(crate::value::Value::as_str)
+        .unwrap_or("full");
+    (kind != "none").then(|| EffectiveMask {
+        kind,
+        classification: metadata
+            .get("classification")
+            .and_then(crate::value::Value::as_str)
+            .unwrap_or("pii"),
+    })
+}
+
 /// Distance metric for a vector index. The three metrics map 1:1 to
 /// pgvector's operator class set (`vector_cosine_ops`,
 /// `vector_l2_ops`, `vector_ip_ops`) and the SQLite Rust-side distance

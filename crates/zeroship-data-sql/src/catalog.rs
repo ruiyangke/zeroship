@@ -284,8 +284,7 @@ impl MaskKind {
     /// default kind.
     ///
     /// Accepts both the canonical camelCase form the SDK emits and the
-    /// kebab-case form `protection::mask_pass::parse_mask_kind` historically
-    /// accepted (`date-year`/`date-decade`).
+    /// kebab-case spellings `date-year` and `date-decade`.
     #[must_use]
     pub fn from_sql(s: &str) -> Option<Self> {
         Some(match s {

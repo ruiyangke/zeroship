@@ -361,27 +361,9 @@ pub fn normalise_filter(filter: &Value, schema: &Value) -> Option<Predicate> {
 /// The mask kind declared for `column`, or `None` when it is unmasked or opted
 /// out with `kind: "none"`.
 fn mask_kind_for_column(schema: &Value, column: &str) -> Option<MaskKind> {
-    let kind = schema
-        .as_object()?
-        .get(column)?
-        .get("mask")?
-        .as_object()?
-        .get("kind")
-        .and_then(Value::as_str)
-        .unwrap_or("full");
-    match kind {
-        "full" => Some(MaskKind::Full),
-        "last4" => Some(MaskKind::Last4),
-        "first4" => Some(MaskKind::First4),
-        "email" => Some(MaskKind::Email),
-        "name" => Some(MaskKind::Name),
-        "dateYear" | "date-year" => Some(MaskKind::DateYear),
-        "dateDecade" | "date-decade" => Some(MaskKind::DateDecade),
-        // "none", and anything the parser does not know: treat as unmasked so
-        // an unrecognised kind widens the fanout rather than silently
-        // rewriting the operand with the wrong transform.
-        _ => None,
-    }
+    let mask = zeroship_data_sql::descriptors::effective_mask(schema.get(column)?)?;
+    // Unknown kinds widen fanout instead of applying the wrong transform.
+    MaskKind::from_sql(mask.kind)
 }
 
 /// Mask the operand when the column is masked, so the comparison runs
