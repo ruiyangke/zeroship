@@ -109,7 +109,7 @@ pub fn upload_concurrency() -> usize {
 
 /// Default `list` page size when the caller doesn't specify `limit`.
 ///
-/// Mirrors `zeroship_plugin_kv::limits::LIST_DEFAULT_LIMIT` — the same
+/// Mirrors `zeroship_kv::limits::LIST_DEFAULT_LIMIT` — the same
 /// question (how many keys does one `list` call return) answered the same way,
 /// so a creator moving between `env.kv.list` and `env.storage.list` does not
 /// meet two different defaults.
@@ -118,7 +118,7 @@ pub const LIST_DEFAULT_LIMIT: usize = 1000;
 /// Hard ceiling on a `list` page. A caller-supplied `limit` above this is
 /// **clamped**, not rejected — and the clamp is never silent, because a
 /// clamped page that does not exhaust the listing still reports a
-/// [`crate::backend::ListPage::cursor`]. Also mirrors plugin-kv.
+/// [`crate::backend::ListPage::cursor`]. Also mirrors kv-v8.
 pub const LIST_MAX_LIMIT: usize = 10_000;
 
 /// Normalise a caller-supplied `list` limit into the effective page size.

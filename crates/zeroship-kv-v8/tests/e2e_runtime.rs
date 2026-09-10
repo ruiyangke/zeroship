@@ -25,10 +25,10 @@
 //! ## Harness
 //!
 //! Mirrors `crates/zeroship-runtime/tests/call_fetch_handler.rs::async_response`:
-//! build a `Runtime` with the JS app + `KvPlugin::with_backend(...)` + an
+//! build a `Runtime` with the JS app + `KvBinding::with_backend(...)` + an
 //! `APP_ID` env var, `start_pump()`, `call_fetch_handler(...)`, then drive
 //! the (likely Pending) outcome to a `SettledFetch::Response` via the
-//! receiver. plugin-kv's test crate can't import runtime's test-only
+//! receiver. kv-v8's test crate can't import runtime's test-only
 //! `common` module, so the minimal pieces are replicated inline.
 
 use std::collections::HashMap;
@@ -41,12 +41,11 @@ use zeroship_runtime::{
     init_v8, EnvSnapshot, FetchOutcome, ModuleEntry, RequestCtx, Runtime, SettledFetch,
 };
 
-use zeroship_plugin_kv::{Backend, KvPlugin};
+use zeroship_kv::Backend;
+use zeroship_kv_v8::KvBinding;
 
-#[cfg(feature = "redb")]
-use zeroship_plugin_kv::RedbBackend;
-#[cfg(feature = "redis")]
-use zeroship_plugin_kv::Redis;
+use zeroship_kv::RedbBackend;
+use zeroship_kv::Redis;
 
 // ---------------------------------------------------------------------------
 // The JS app — exercises the full `env.kv` surface and self-asserts.
@@ -192,19 +191,17 @@ export default {
                 }
                 const collected = new Set();
                 let cursor = undefined;
-                let iters = 0;
-                let terminated = false;
-                while (iters < 10) {
-                    iters++;
+                // SCAN can return empty pages while walking unrelated keys.
+                // The harness timeout bounds a broken cursor loop.
+                while (true) {
                     const opts = { limit: 2 };
                     if (cursor != null) opts.cursor = cursor;
                     const res = await kv.list(k("page:"), opts);
                     truthy("10.list.res", res && Array.isArray(res.keys));
                     for (const key of res.keys) collected.add(key);
                     cursor = res.cursor;
-                    if (cursor == null) { terminated = true; break; }
+                    if (cursor === null) break;
                 }
-                truthy("10.list.terminated", terminated);
                 eq("10.list.count", collected.size, 5);
                 for (let i = 0; i < 5; i++) {
                     truthy("10.list.has." + i, collected.has(k("page:" + i)));
@@ -696,57 +693,59 @@ fn run_e2e(backend: Arc<dyn Backend>) -> (u16, String) {
 /// happy-path specialisation; the validation / edge / scenario tests pass
 /// their own app source.
 fn run_app(backend: Arc<dyn Backend>, app: &'static str) -> (u16, String) {
-    compio::runtime::Runtime::new().unwrap().block_on(async move {
-        init_v8();
+    compio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(async move {
+            init_v8();
 
-        // APP_ID flows through env_vars → build_instance reads it to scope
-        // the per-app key namespace (see crates/zeroship-runtime/src/core/plugin.rs).
-        let mut env_vars = HashMap::new();
-        env_vars.insert("APP_ID".to_string(), "e2e_app".to_string());
+            // APP_ID flows through env_vars → build_instance reads it to scope
+            // the per-app key namespace (see crates/zeroship-runtime/src/core/plugin.rs).
+            let mut env_vars = HashMap::new();
+            env_vars.insert("APP_ID".to_string(), "e2e_app".to_string());
 
-        let plugin: Arc<dyn NativePlugin> = Arc::new(KvPlugin::with_backend(backend));
+            let plugin: Arc<dyn NativePlugin> = Arc::new(KvBinding::with_backend(backend));
 
-        let runtime = Runtime::builder()
-            .modules(module(app))
-            .env_vars(env_vars)
-            .plugins(vec![plugin])
-            .build();
-        runtime.start_pump();
+            let runtime = Runtime::builder()
+                .modules(module(app))
+                .env_vars(env_vars)
+                .plugins(vec![plugin])
+                .build();
+            runtime.start_pump();
 
-        let env = EnvSnapshot::empty();
-        let ctx = RequestCtx::new(CancelFlag::new());
-        let outcome =
-            runtime.call_fetch_handler("GET", "http://localhost/", &[], "", &env, ctx);
+            let env = EnvSnapshot::empty();
+            let ctx = RequestCtx::new(CancelFlag::new());
+            let outcome =
+                runtime.call_fetch_handler("GET", "http://localhost/", &[], "", &env, ctx);
 
-        match outcome {
-            FetchOutcome::Response { status, body, .. } => {
-                (status, String::from_utf8_lossy(&body).into_owned())
-            }
-            FetchOutcome::Pending { rx, cancel: _ } => {
-                let settled = compio::time::timeout(Duration::from_secs(30), rx.recv())
-                    .await
-                    .expect("kv e2e: fetch pending timed out")
-                    .expect("kv e2e: pending delivered DispatchError");
-                match settled {
-                    SettledFetch::Response { status, body, .. } => {
-                        (status, String::from_utf8_lossy(&body).into_owned())
-                    }
-                    other => {
-                        let name = match other {
-                            SettledFetch::Stream { .. } => "Stream",
-                            SettledFetch::WebSocketUpgrade { .. } => "WebSocketUpgrade",
-                            SettledFetch::Response { .. } => unreachable!(),
-                        };
-                        panic!("kv e2e: expected SettledFetch::Response, got {name}");
+            match outcome {
+                FetchOutcome::Response { status, body, .. } => {
+                    (status, String::from_utf8_lossy(&body).into_owned())
+                }
+                FetchOutcome::Pending { rx, cancel: _ } => {
+                    let settled = compio::time::timeout(Duration::from_secs(30), rx.recv())
+                        .await
+                        .expect("kv e2e: fetch pending timed out")
+                        .expect("kv e2e: pending delivered DispatchError");
+                    match settled {
+                        SettledFetch::Response { status, body, .. } => {
+                            (status, String::from_utf8_lossy(&body).into_owned())
+                        }
+                        other => {
+                            let name = match other {
+                                SettledFetch::Stream { .. } => "Stream",
+                                SettledFetch::WebSocketUpgrade { .. } => "WebSocketUpgrade",
+                                SettledFetch::Response { .. } => unreachable!(),
+                            };
+                            panic!("kv e2e: expected SettledFetch::Response, got {name}");
+                        }
                     }
                 }
+                FetchOutcome::Stream { .. } => panic!("kv e2e: unexpected Stream outcome"),
+                FetchOutcome::WebSocketUpgrade { .. } => {
+                    panic!("kv e2e: unexpected WebSocketUpgrade outcome")
+                }
             }
-            FetchOutcome::Stream { .. } => panic!("kv e2e: unexpected Stream outcome"),
-            FetchOutcome::WebSocketUpgrade { .. } => {
-                panic!("kv e2e: unexpected WebSocketUpgrade outcome")
-            }
-        }
-    })
+        })
 }
 
 /// Assert a successful end-to-end run: status 200 and `ok:true`. On
@@ -764,7 +763,6 @@ fn assert_ok(status: u16, body: &str) {
 // redb (embedded) — always runs.
 // ---------------------------------------------------------------------------
 
-#[cfg(feature = "redb")]
 #[test]
 fn e2e_redb() {
     let dir = tempfile::tempdir().expect("create tempdir");
@@ -776,7 +774,6 @@ fn e2e_redb() {
 
 /// Open a fresh redb-backed backend in a tempdir. The `_dir` guard must
 /// stay alive for the duration of the test (dropping it removes the file).
-#[cfg(feature = "redb")]
 fn redb_backend() -> (tempfile::TempDir, Arc<dyn Backend>) {
     let dir = tempfile::tempdir().expect("create tempdir");
     let path = dir.path().join("kv.redb");
@@ -788,7 +785,6 @@ fn redb_backend() -> (tempfile::TempDir, Arc<dyn Backend>) {
 /// option ranges). These fire in the v8_class method body before any
 /// dispatch, so they're backend-agnostic — redb runs them. Pins each
 /// throw's message substring (and `.code` where applicable).
-#[cfg(feature = "redb")]
 #[test]
 fn e2e_validation_errors() {
     let (_dir, backend) = redb_backend();
@@ -800,7 +796,6 @@ fn e2e_validation_errors() {
 /// key, persist of a no-TTL key, setIfAbsent when present, ttl of a
 /// missing key, list of an empty prefix, and a single-page list whose
 /// cursor stays null.
-#[cfg(feature = "redb")]
 #[test]
 fn e2e_backend_edges() {
     let (_dir, backend) = redb_backend();
@@ -810,7 +805,6 @@ fn e2e_backend_edges() {
 
 /// Realistic compositions over the public surface: a fixed-window rate
 /// limiter (incr + ttlMs) and an ephemeral lock (setIfAbsent + delete).
-#[cfg(feature = "redb")]
 #[test]
 fn e2e_scenarios() {
     let (_dir, backend) = redb_backend();
@@ -831,7 +825,6 @@ fn e2e_scenarios() {
 // so a missing Redis is loud rather than a silent pass.
 // ---------------------------------------------------------------------------
 
-#[cfg(feature = "redis")]
 #[test]
 fn e2e_dragonfly() {
     let url = zeroship_core::config::test_kv_url();
@@ -855,14 +848,18 @@ fn e2e_dragonfly() {
 // JS app + assertions are reused verbatim from `run_e2e`.
 // ---------------------------------------------------------------------------
 
-#[cfg(feature = "redis")]
 #[test]
 fn e2e_dragonfly_cluster() {
     let seeds = zeroship_core::test_env!("DRAGONFLY_CLUSTER_SEEDS").unwrap_or_default();
-    // Build the plugin-kv cluster URL exactly like
+    // Build the kv-v8 cluster URL exactly like
     // redis_backend.rs::cluster_url(): base URL = first seed, plus
     // ?cluster=true&seeds=<comma-joined seeds>.
-    let first = seeds.split(',').next().unwrap_or_default().trim().to_string();
+    let first = seeds
+        .split(',')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_string();
     assert!(
         !first.is_empty(),
         "A Dragonfly CLUSTER is unreachable, and this test requires it.\n\
@@ -911,7 +908,6 @@ fn e2e_dragonfly_cluster() {
 // immediate, so this settles sub-second). The shared `run_app` harness drives
 // the pump under a 30s `compio::time::timeout`: a failure to reject (a hang)
 // would blow that timeout and FAIL the test rather than hang forever.
-#[cfg(feature = "redis")]
 #[test]
 fn e2e_backend_unavailable() {
     // Single-node URL (NOT cluster) at a dead port — nothing listens here.
@@ -930,7 +926,6 @@ fn e2e_backend_unavailable() {
 /// kernel) and assert from inside the isolate that `env.meter` is undefined
 /// and not callable. RED before Refactor A (when `MeterPlugin` registered
 /// the `meter` namespace), GREEN after the deletion.
-#[cfg(feature = "redb")]
 #[test]
 fn env_meter_namespace_is_absent_from_app_code() {
     const APP: &str = r#"
@@ -945,9 +940,7 @@ export default {
 };
 "#;
     let dir = tempfile::tempdir().expect("tempdir");
-    let backend = Arc::new(
-        RedbBackend::open(dir.path().join("kv.redb")).expect("open redb"),
-    );
+    let backend = Arc::new(RedbBackend::open(dir.path().join("kv.redb")).expect("open redb"));
     // Use the production-shaped constructor (with a meter) to prove that even
     // when the worker HAS a meter, no `env.meter` surface is exposed.
     let (status, body, _meter) =
@@ -970,7 +963,7 @@ export default {
 /// Build a Runtime around `app` + `backend` + a real Meter bound to
 /// `app_id`, pump it, run the fetch handler, and return
 /// `(status, body, meter)` so the test can drain what the kv ops recorded.
-/// Faithful: drives the REAL `KvPlugin::with_backend_and_meter` →
+/// Faithful: drives the REAL `KvBinding::with_backend_and_meter` →
 /// `build_instance` → `mint_kv` → `dispatch_*` path an app sees.
 fn run_app_metered(
     backend: Arc<dyn Backend>,
@@ -980,53 +973,56 @@ fn run_app_metered(
     let meter = Arc::new(zeroship_metering::Meter::new());
     let meter_for_run = Arc::clone(&meter);
     let app_id = app_id.to_string();
-    let (status, body) = compio::runtime::Runtime::new().unwrap().block_on(async move {
-        init_v8();
+    let (status, body) = compio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(async move {
+            init_v8();
 
-        let mut env_vars = HashMap::new();
-        env_vars.insert("APP_ID".to_string(), app_id.clone());
+            let mut env_vars = HashMap::new();
+            env_vars.insert("APP_ID".to_string(), app_id.clone());
 
-        let plugin: Arc<dyn NativePlugin> =
-            Arc::new(KvPlugin::with_backend_and_meter(backend, Some(meter_for_run)));
+            let plugin: Arc<dyn NativePlugin> = Arc::new(KvBinding::with_backend_and_meter(
+                backend,
+                Some(meter_for_run),
+            ));
 
-        let runtime = Runtime::builder()
-            .modules(module(app))
-            .env_vars(env_vars)
-            .plugins(vec![plugin])
-            .build();
-        runtime.start_pump();
+            let runtime = Runtime::builder()
+                .modules(module(app))
+                .env_vars(env_vars)
+                .plugins(vec![plugin])
+                .build();
+            runtime.start_pump();
 
-        let env = EnvSnapshot::empty();
-        let ctx = RequestCtx::new(CancelFlag::new());
-        let outcome =
-            runtime.call_fetch_handler("GET", "http://localhost/", &[], "", &env, ctx);
+            let env = EnvSnapshot::empty();
+            let ctx = RequestCtx::new(CancelFlag::new());
+            let outcome =
+                runtime.call_fetch_handler("GET", "http://localhost/", &[], "", &env, ctx);
 
-        match outcome {
-            FetchOutcome::Response { status, body, .. } => {
-                (status, String::from_utf8_lossy(&body).into_owned())
-            }
-            FetchOutcome::Pending { rx, cancel: _ } => {
-                let settled = compio::time::timeout(Duration::from_secs(30), rx.recv())
-                    .await
-                    .expect("kv metering: fetch pending timed out")
-                    .expect("kv metering: pending delivered DispatchError");
-                match settled {
-                    SettledFetch::Response { status, body, .. } => {
-                        (status, String::from_utf8_lossy(&body).into_owned())
-                    }
-                    _ => panic!("kv metering: expected SettledFetch::Response"),
+            match outcome {
+                FetchOutcome::Response { status, body, .. } => {
+                    (status, String::from_utf8_lossy(&body).into_owned())
                 }
+                FetchOutcome::Pending { rx, cancel: _ } => {
+                    let settled = compio::time::timeout(Duration::from_secs(30), rx.recv())
+                        .await
+                        .expect("kv metering: fetch pending timed out")
+                        .expect("kv metering: pending delivered DispatchError");
+                    match settled {
+                        SettledFetch::Response { status, body, .. } => {
+                            (status, String::from_utf8_lossy(&body).into_owned())
+                        }
+                        _ => panic!("kv metering: expected SettledFetch::Response"),
+                    }
+                }
+                _ => panic!("kv metering: unexpected outcome"),
             }
-            _ => panic!("kv metering: unexpected outcome"),
-        }
-    });
+        });
     (status, body, meter)
 }
 
 /// 3 writes (set, set, incr) + 2 reads (get, get-miss) — the handler returns
 /// ok:true. APP_ID is a real UUID so `Meter::drain` (which keys by parsed
 /// UUID) surfaces the exact per-app counts.
-#[cfg(feature = "redb")]
 const KV_METER_APP: &str = r#"
 export default {
     async fetch(request, env, ctx) {
@@ -1042,13 +1038,10 @@ export default {
 };
 "#;
 
-#[cfg(feature = "redb")]
 #[test]
 fn metering_kv_ops_counts_are_exact_and_per_app() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let backend = Arc::new(
-        RedbBackend::open(dir.path().join("kv.redb")).expect("open redb"),
-    );
+    let backend = Arc::new(RedbBackend::open(dir.path().join("kv.redb")).expect("open redb"));
     let app_id = "00000000-0000-7000-8000-0000000000a1";
     let (status, body, meter) = run_app_metered(backend, KV_METER_APP, app_id);
     assert_ok(status, &body);
@@ -1071,7 +1064,6 @@ fn metering_kv_ops_counts_are_exact_and_per_app() {
 /// ops against a DOWN backend (dead Redis port): every op rejects, so the
 /// Meter stays empty for this app. Faithful: same dispatch path, real failure
 /// arm.
-#[cfg(feature = "redis")]
 #[test]
 fn metering_failed_kv_op_emits_nothing() {
     const APP: &str = r#"

@@ -45,7 +45,7 @@ src/storage.rs                app-storage abstraction
 Plugins register namespaces on `env` through `NativePlugin`:
 
 - `env.db.*` -> `crates/plugin-db`
-- `env.kv.*` -> `crates/plugin-kv`
+- `env.kv.*` -> `crates/zeroship-kv-v8`
 - `env.storage.*` -> `crates/plugin-storage`
 
 The `#[v8_class]` macro support lives in `crates/runtime-macros`.

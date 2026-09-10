@@ -35,7 +35,7 @@ The current meter is **per-worker, per-request**:
   the final `wall_us` are deferred into the drain task and landed once at
   stream finalize via `metering_on_complete` (`handler.rs:355-365`). A
   **WebSocket upgrade over HTTP dispatch is rejected 500** (`handler.rs:296`).
-- **Data-primitive producers** (`plugin-db`/`plugin-kv`/`plugin-storage`):
+- **Data-primitive producers** (`plugin-db`/`kv-v8`/`plugin-storage`):
   emit raw metrics (`db_reads`, `db_writes`, `kv_reads`, …, `storage_ops`,
   `storage_bytes`, `storage_egress_bytes`) at the op boundary, success-arm
   only, via a per-app `MeterHandle` (`crates/zeroship-metering/src/lib.rs`).
@@ -427,7 +427,7 @@ workloads dominate a plan's cost — a *measured* trigger, not a speculative one
 
 ### 4.2 db/kv byte metrics — DEFER (weight-ready)
 
-`plugin-db`/`plugin-kv` emit op-count metrics (`db_reads`/`db_writes`/
+`plugin-db`/`kv-v8` emit op-count metrics (`db_reads`/`db_writes`/
 `kv_reads`/`kv_writes`) and row counts (`db_rows_written`), but **not byte
 volume**. `storage` already emits `storage_bytes`/`storage_egress_bytes`, so the
 *pattern* exists. Adding `db_bytes`/`kv_bytes` is a small per-primitive change

@@ -20,7 +20,8 @@ zeroship-runtime = { workspace = true }
 zeroship-plugin-db = { workspace = true }
 # The worker handles the ORM's typed errors directly in its slot reaper.
 zeroship-data-orm = { workspace = true }
-zeroship-plugin-kv = { workspace = true }
+zeroship-kv = { workspace = true, features = ["redis"] }
+zeroship-kv-v8 = { workspace = true }
 zeroship-metering = { workspace = true }
 zeroship-stream = { workspace = true }
 zeroship-plugin-storage = { workspace = true, features = ["s3"] }

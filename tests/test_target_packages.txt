@@ -76,6 +76,8 @@ zeroship-data-macros
 zeroship-data-orm
 zeroship-data-sql
 zeroship-gateway
+zeroship-kv
+zeroship-kv-v8
 zeroship-mailer
 zeroship-metering
 zeroship-migrate
@@ -89,7 +91,6 @@ zeroship-migrate-postgres
 zeroship-migrate-server
 zeroship-migrate-sqlite
 zeroship-plugin-db
-zeroship-plugin-kv
 zeroship-plugin-storage
 zeroship-plugin-workflow
 zeroship-runtime

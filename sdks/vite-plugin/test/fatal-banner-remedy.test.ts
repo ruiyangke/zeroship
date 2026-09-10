@@ -5,7 +5,7 @@ import { formatFatalBanner } from "../src/dev-server.js";
 
 /**
  * The banner used to print the `devServerPort` remedy for EVERY boot failure.
- * After the plugin-kv change that names the process holding `.zeroship/kv.redb`,
+ * After the kv-v8 change that names the process holding `.zeroship/kv.redb`,
  * that made the two halves of one screen contradict each other: the runtime said
  * changing the port would not help, and the banner underneath said to change the
  * port. Task #221.

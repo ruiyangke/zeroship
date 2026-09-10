@@ -23,7 +23,7 @@
 //! Storage backend is the `IdempotencyStore` trait. Production wires it
 //! to a Redis-backed (or compio-redis) implementation; tests use the
 //! in-memory `InMemoryIdempotencyStore` directly. The gateway does NOT
-//! reach into `plugin-kv`'s in-isolate API — that runs inside the V8
+//! reach into `kv-v8`'s in-isolate API — that runs inside the V8
 //! worker, not the gateway. Both backends share the same wire format
 //! (the JSON value below), so swapping is a configuration concern.
 //!

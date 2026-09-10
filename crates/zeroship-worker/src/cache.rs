@@ -84,7 +84,7 @@ thread_local! {
     static DB_SERVICE: RefCell<Option<Arc<zeroship_plugin_db::service::DbService>>> =
         const { RefCell::new(None) };
     /// Redis connection URL for the multi-node KV backend. Held per-thread
-    /// like `DB_URL`. When `Some`, `create_plugins` mints a `KvPlugin`
+    /// like `DB_URL`. When `Some`, `create_plugins` mints a `KvBinding`
     /// backed by `Redis` (shared across every worker node — see the
     /// backend-choice rationale on `init_cache`). When `None`, the `kv`
     /// namespace is simply absent (degrade, don't panic).
@@ -274,8 +274,8 @@ fn create_plugins() -> Vec<Arc<dyn NativePlugin>> {
         plugins.push(service.plugin());
     }
     if let Some(url) = KV_URL.with(|u| u.borrow().clone()) {
-        plugins.push(Arc::new(zeroship_plugin_kv::KvPlugin::with_backend_and_meter(
-            Arc::new(zeroship_plugin_kv::Redis::new(url)),
+        plugins.push(Arc::new(zeroship_kv_v8::KvBinding::with_backend_and_meter(
+            Arc::new(zeroship_kv::Redis::new(url)),
             meter.clone(),
         )));
     }

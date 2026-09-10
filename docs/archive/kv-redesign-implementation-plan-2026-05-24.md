@@ -1,9 +1,9 @@
-> Archived 2026-05-25: shipped. Live reference: docs/reference/kv.md. Code: crates/zeroship-plugin-kv/ + sdks/kv/.
-# plugin-kv redesign — implementation plan (2026-05-24)
+> Archived 2026-05-25: shipped. Live reference: docs/reference/kv.md. Code: crates/zeroship-kv-v8/ + sdks/kv/.
+# kv-v8 redesign — implementation plan (2026-05-24)
 
 Status: pre-ship proposal, drafted in worktree `kv-v8class`. Do NOT commit until the implementing PR. Pre-launch → no back-compat (rename/break freely).
 
-> **Amended 2026-05-24 (commit 4): InMemory removed.** The shipped design is **two backends, not three**: `RedbBackend` (embedded persistent — also the test backend, a default feature) + `Redis` (distributed). The `InMemory` backend and `KvPlugin::in_memory()` / `Default` are gone; redb's test suite carries the canonical-semantics coverage that lived in `memory.rs`. `serve` defaults to redb at `./.zeroship/kv.redb` (override with `ZEROSHIP_KV_PATH`); `ZEROSHIP_KV_URL` still selects Redis. The text below is left as originally drafted; read it through this amendment.
+> **Amended 2026-05-24 (commit 4): InMemory removed.** The shipped design is **two backends, not three**: `RedbBackend` (embedded persistent — also the test backend, a default feature) + `Redis` (distributed). The `InMemory` backend and `KvBinding::in_memory()` / `Default` are gone; redb's test suite carries the canonical-semantics coverage that lived in `memory.rs`. `serve` defaults to redb at `./.zeroship/kv.redb` (override with `ZEROSHIP_KV_PATH`); `ZEROSHIP_KV_URL` still selects Redis. The text below is left as originally drafted; read it through this amendment.
 
 ## Goal
 
@@ -79,11 +79,11 @@ async fn list(&self, app_id, prefix, cursor: Option<&str>, limit: usize) -> Resu
 
 Per the confirmed macro mechanics (Shape A — sync `#[v8_method] -> v8::Local<Value>` + a `dispatch_*` helper, because `incr` returns `i64` which the macro's async-return allowlist can't express):
 
-- **`crates/zeroship-plugin-kv/src/v8_class.rs`** (new): `Kv { backend: Arc<dyn Backend>, app_id: String }`; `#[v8_class] impl Kv` with illegal-`#[v8_constructor]` + the 9 `#[v8_method]`s; `mint_kv(scope, backend, app_id)` (mirrors `mint_db`).
-- **`crates/zeroship-plugin-kv/src/dispatch.rs`** (new): `spawn_kv_op` (promise/resolver/op-id boilerplate) + per-op resolve mappers. Replaces `callbacks.rs` (deleted).
-- **`crates/zeroship-plugin-kv/src/error.rs`** (new): `KvError`.
-- **`crates/zeroship-plugin-kv/src/limits.rs`** (new): constants + `validate_key`/`validate_value`/`validate_delta` + `#[cfg(test)]` unit tests.
-- **`lib.rs`**: drop `KV_BACKEND` thread-local + `KvPlugin::new()` (back-compat); `build_instance` → `mint_kv`; `register` → no-op.
+- **`crates/zeroship-kv-v8/src/v8_class.rs`** (new): `Kv { backend: Arc<dyn Backend>, app_id: String }`; `#[v8_class] impl Kv` with illegal-`#[v8_constructor]` + the 9 `#[v8_method]`s; `mint_kv(scope, backend, app_id)` (mirrors `mint_db`).
+- **`crates/zeroship-kv-v8/src/dispatch.rs`** (new): `spawn_kv_op` (promise/resolver/op-id boilerplate) + per-op resolve mappers. Replaces `callbacks.rs` (deleted).
+- **`crates/zeroship-kv-v8/src/error.rs`** (new): `KvError`.
+- **`crates/zeroship-kv-v8/src/limits.rs`** (new): constants + `validate_key`/`validate_value`/`validate_delta` + `#[cfg(test)]` unit tests.
+- **`lib.rs`**: drop `KV_BACKEND` thread-local + `KvBinding::new()` (back-compat); `build_instance` → `mint_kv`; `register` → no-op.
 
 ### Arg marshalling notes
 - options objects (`{ttlMs}`, `{by,ttlMs}`, `{cursor,limit}`) read via `v8_value_to_serde_json`/`read_json_arg` then field-extracted + validated in-body (macro has no `u64`/options extractor).
@@ -122,7 +122,7 @@ Map to compio-redis: `get`/`set`(ttl)/`del`; `set_if_absent`→`set_nx(.., ttl_m
 ## 6. Commit staging (DO NOT push)
 
 1. **`KvError` + Backend trait redesign + InMemory** — final trait shape & canonical semantics; InMemory conforms + gets its test suite. (Backend-core, no V8.)
-2. **`Kv` v8_class binding + validation/limits + dispatch** — delete `callbacks.rs`; wire `build_instance`; drop thread-local + `KvPlugin::new()`. (env.kv now exposes final surface over InMemory.)
+2. **`Kv` v8_class binding + validation/limits + dispatch** — delete `callbacks.rs`; wire `build_instance`; drop thread-local + `KvBinding::new()`. (env.kv now exposes final surface over InMemory.)
 3. **Redis backend** to new trait — incl. compio-redis `persist`+`eval` additions, glob escaping, error classification, cursor `scan`.
 4. **redb backend** (`feature="redb"`) + selection wiring (`InMemory` ephemeral → redb path → Redis url).
 5. **SDK + `kv.md`** — new surface, conveniences, guidance doc.

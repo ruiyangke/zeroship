@@ -269,7 +269,7 @@ if [ "$V1C" = "200" ] && echo "$V1B" | grep -q '"json"'; then
     fail "env.kv incr did not advance: $VISITS1 → $VISITS2 (body=$V2)"
   fi
 else
-  ERR="$(grep -iE 'env.kv|KvPlugin|Cannot find module|redis' "$WORK/worker.log" | tail -1)"
+  ERR="$(grep -iE 'env.kv|KvBinding|Cannot find module|redis' "$WORK/worker.log" | tail -1)"
   fail "env.kv kv.visit failed over /dispatch. HTTP $V1C; err: ${ERR:-$V1B}"
 fi
 

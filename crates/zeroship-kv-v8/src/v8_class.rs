@@ -1,6 +1,6 @@
 //! `Kv` — the `#[v8_class]` instance backing `env.kv`.
 //!
-//! `KvPlugin::build_instance` mints a `Kv` via [`mint_kv`] once per V8
+//! `KvBinding::build_instance` mints a `Kv` via [`mint_kv`] once per V8
 //! isolate during `build_env_object`; the returned object becomes the
 //! `env.kv` namespace value. Mirrors `plugin-db`'s `Db` v8_class.
 //!
@@ -26,14 +26,13 @@ use zeroship_runtime_macros::v8_class;
 #[allow(unused_imports)]
 use zeroship_runtime_macros::{v8_constructor, v8_method, v8_name};
 
-use crate::backend::Backend;
 use crate::dispatch::{
-    dispatch_delete, dispatch_expire, dispatch_get, dispatch_incr, dispatch_list,
-    dispatch_persist, dispatch_set, dispatch_set_if_absent, dispatch_ttl,
+    dispatch_delete, dispatch_expire, dispatch_get, dispatch_incr, dispatch_list, dispatch_persist,
+    dispatch_set, dispatch_set_if_absent, dispatch_ttl,
 };
-use crate::limits::{
-    resolve_list_limit, validate_delta, validate_key, validate_ttl_ms, validate_value,
-};
+use crate::limits::{resolve_list_limit, validate_delta, validate_ttl_ms};
+use zeroship_kv::limits::{validate_key, validate_value};
+use zeroship_kv::Backend;
 
 // ---------------------------------------------------------------------------
 // Kv state
@@ -70,14 +69,23 @@ impl std::fmt::Debug for Kv {
 
 /// Cheap JS-side type label for error messages.
 fn js_type_name(v: v8::Local<v8::Value>) -> &'static str {
-    if v.is_string() { "string" }
-    else if v.is_number() { "number" }
-    else if v.is_boolean() { "boolean" }
-    else if v.is_function() { "function" }
-    else if v.is_array() { "array" }
-    else if v.is_null() { "null" }
-    else if v.is_undefined() { "undefined" }
-    else { "object" }
+    if v.is_string() {
+        "string"
+    } else if v.is_number() {
+        "number"
+    } else if v.is_boolean() {
+        "boolean"
+    } else if v.is_function() {
+        "function"
+    } else if v.is_array() {
+        "array"
+    } else if v.is_null() {
+        "null"
+    } else if v.is_undefined() {
+        "undefined"
+    } else {
+        "object"
+    }
 }
 
 /// Extract the `value` argument as a string. The value MUST be a JS
@@ -119,7 +127,10 @@ fn opt_number(
         return Ok(None);
     }
     let obj = v8::Local::<v8::Object>::try_from(opts).map_err(|_| {
-        OpError::type_error(format!("kv: options must be an object, got {}", js_type_name(opts)))
+        OpError::type_error(format!(
+            "kv: options must be an object, got {}",
+            js_type_name(opts)
+        ))
     })?;
     let key = v8::String::new(scope, field).unwrap();
     let Some(v) = obj.get(scope, key.into()) else {
@@ -149,7 +160,10 @@ fn opt_string(
         return Ok(None);
     }
     let obj = v8::Local::<v8::Object>::try_from(opts).map_err(|_| {
-        OpError::type_error(format!("kv: options must be an object, got {}", js_type_name(opts)))
+        OpError::type_error(format!(
+            "kv: options must be an object, got {}",
+            js_type_name(opts)
+        ))
     })?;
     let key = v8::String::new(scope, field).unwrap();
     let Some(v) = obj.get(scope, key.into()) else {
@@ -173,7 +187,7 @@ fn read_ttl_ms(
     opts: v8::Local<v8::Value>,
 ) -> Result<Option<u64>, OpError> {
     match opt_number(scope, opts, "ttlMs")? {
-        Some(n) => Ok(Some(validate_ttl_ms(n).map_err(crate::error::KvError::to_op_error)?)),
+        Some(n) => Ok(Some(validate_ttl_ms(n).map_err(crate::error::to_op_error)?)),
         None => Ok(None),
     }
 }
@@ -186,7 +200,7 @@ fn read_ttl_ms(
 #[allow(dead_code)]
 impl Kv {
     /// `new Kv()` from JS rejects — real instances are minted via
-    /// [`mint_kv`] from `KvPlugin::build_instance`, which stamps the
+    /// [`mint_kv`] from `KvBinding::build_instance`, which stamps the
     /// live backend + app_id onto the wrapper. A user-constructed Kv
     /// would have no backend and every method would panic.
     #[v8_constructor]
@@ -201,8 +215,15 @@ impl Kv {
         scope: &mut v8::PinScope<'s, '_>,
         key: String,
     ) -> Result<v8::Local<'s, v8::Value>, OpError> {
-        validate_key(&key).map_err(crate::error::KvError::to_op_error)?;
-        Ok(dispatch_get(scope, Arc::clone(&self.backend), self.app_id.clone(), self.meter.clone(), key).into())
+        validate_key(&key).map_err(crate::error::to_op_error)?;
+        Ok(dispatch_get(
+            scope,
+            Arc::clone(&self.backend),
+            self.app_id.clone(),
+            self.meter.clone(),
+            key,
+        )
+        .into())
     }
 
     /// `kv.set(key, value, {ttlMs?})` → Promise<{ ok: true }>.
@@ -214,12 +235,20 @@ impl Kv {
         value: v8::Local<v8::Value>,
         opts: v8::Local<v8::Value>,
     ) -> Result<v8::Local<'s, v8::Value>, OpError> {
-        validate_key(&key).map_err(crate::error::KvError::to_op_error)?;
+        validate_key(&key).map_err(crate::error::to_op_error)?;
         let value = extract_value(scope, value)?;
-        validate_value(&value).map_err(crate::error::KvError::to_op_error)?;
+        validate_value(&value).map_err(crate::error::to_op_error)?;
         let ttl_ms = read_ttl_ms(scope, opts)?;
-        Ok(dispatch_set(scope, Arc::clone(&self.backend), self.app_id.clone(), self.meter.clone(), key, value, ttl_ms)
-            .into())
+        Ok(dispatch_set(
+            scope,
+            Arc::clone(&self.backend),
+            self.app_id.clone(),
+            self.meter.clone(),
+            key,
+            value,
+            ttl_ms,
+        )
+        .into())
     }
 
     /// `kv.delete(key)` → Promise<{ deleted: boolean }>.
@@ -229,8 +258,15 @@ impl Kv {
         scope: &mut v8::PinScope<'s, '_>,
         key: String,
     ) -> Result<v8::Local<'s, v8::Value>, OpError> {
-        validate_key(&key).map_err(crate::error::KvError::to_op_error)?;
-        Ok(dispatch_delete(scope, Arc::clone(&self.backend), self.app_id.clone(), self.meter.clone(), key).into())
+        validate_key(&key).map_err(crate::error::to_op_error)?;
+        Ok(dispatch_delete(
+            scope,
+            Arc::clone(&self.backend),
+            self.app_id.clone(),
+            self.meter.clone(),
+            key,
+        )
+        .into())
     }
 
     /// `kv.incr(key, {by?=1, ttlMs?})` → Promise<number> (BigInt if
@@ -243,14 +279,22 @@ impl Kv {
         key: String,
         opts: v8::Local<v8::Value>,
     ) -> Result<v8::Local<'s, v8::Value>, OpError> {
-        validate_key(&key).map_err(crate::error::KvError::to_op_error)?;
+        validate_key(&key).map_err(crate::error::to_op_error)?;
         let delta = match opt_number(scope, opts, "by")? {
-            Some(n) => validate_delta(n).map_err(crate::error::KvError::to_op_error)?,
+            Some(n) => validate_delta(n).map_err(crate::error::to_op_error)?,
             None => 1,
         };
         let ttl_ms = read_ttl_ms(scope, opts)?;
-        Ok(dispatch_incr(scope, Arc::clone(&self.backend), self.app_id.clone(), self.meter.clone(), key, delta, ttl_ms)
-            .into())
+        Ok(dispatch_incr(
+            scope,
+            Arc::clone(&self.backend),
+            self.app_id.clone(),
+            self.meter.clone(),
+            key,
+            delta,
+            ttl_ms,
+        )
+        .into())
     }
 
     /// `kv.setIfAbsent(key, value, {ttlMs?})` → Promise<{ stored: boolean }>.
@@ -263,9 +307,9 @@ impl Kv {
         value: v8::Local<v8::Value>,
         opts: v8::Local<v8::Value>,
     ) -> Result<v8::Local<'s, v8::Value>, OpError> {
-        validate_key(&key).map_err(crate::error::KvError::to_op_error)?;
+        validate_key(&key).map_err(crate::error::to_op_error)?;
         let value = extract_value(scope, value)?;
-        validate_value(&value).map_err(crate::error::KvError::to_op_error)?;
+        validate_value(&value).map_err(crate::error::to_op_error)?;
         let ttl_ms = read_ttl_ms(scope, opts)?;
         Ok(dispatch_set_if_absent(
             scope,
@@ -287,7 +331,7 @@ impl Kv {
         key: String,
         ttl_ms: v8::Local<v8::Value>,
     ) -> Result<v8::Local<'s, v8::Value>, OpError> {
-        validate_key(&key).map_err(crate::error::KvError::to_op_error)?;
+        validate_key(&key).map_err(crate::error::to_op_error)?;
         if !ttl_ms.is_number() {
             return Err(OpError::type_error(format!(
                 "kv.expire: ttlMs must be a number, got {}",
@@ -297,8 +341,16 @@ impl Kv {
         let ms = ttl_ms
             .number_value(scope)
             .ok_or_else(|| OpError::type_error("kv.expire: ttlMs must be a number"))?;
-        let ms = validate_ttl_ms(ms).map_err(crate::error::KvError::to_op_error)?;
-        Ok(dispatch_expire(scope, Arc::clone(&self.backend), self.app_id.clone(), self.meter.clone(), key, ms).into())
+        let ms = validate_ttl_ms(ms).map_err(crate::error::to_op_error)?;
+        Ok(dispatch_expire(
+            scope,
+            Arc::clone(&self.backend),
+            self.app_id.clone(),
+            self.meter.clone(),
+            key,
+            ms,
+        )
+        .into())
     }
 
     /// `kv.ttl(key)` → Promise<{ ttlMs: number | null }> for an existing
@@ -309,8 +361,15 @@ impl Kv {
         scope: &mut v8::PinScope<'s, '_>,
         key: String,
     ) -> Result<v8::Local<'s, v8::Value>, OpError> {
-        validate_key(&key).map_err(crate::error::KvError::to_op_error)?;
-        Ok(dispatch_ttl(scope, Arc::clone(&self.backend), self.app_id.clone(), self.meter.clone(), key).into())
+        validate_key(&key).map_err(crate::error::to_op_error)?;
+        Ok(dispatch_ttl(
+            scope,
+            Arc::clone(&self.backend),
+            self.app_id.clone(),
+            self.meter.clone(),
+            key,
+        )
+        .into())
     }
 
     /// `kv.persist(key)` → Promise<{ updated: boolean }> (removes TTL).
@@ -320,8 +379,15 @@ impl Kv {
         scope: &mut v8::PinScope<'s, '_>,
         key: String,
     ) -> Result<v8::Local<'s, v8::Value>, OpError> {
-        validate_key(&key).map_err(crate::error::KvError::to_op_error)?;
-        Ok(dispatch_persist(scope, Arc::clone(&self.backend), self.app_id.clone(), self.meter.clone(), key).into())
+        validate_key(&key).map_err(crate::error::to_op_error)?;
+        Ok(dispatch_persist(
+            scope,
+            Arc::clone(&self.backend),
+            self.app_id.clone(),
+            self.meter.clone(),
+            key,
+        )
+        .into())
     }
 
     /// `kv.list(prefix?, {cursor?, limit?})` → Promise<{ keys: string[],
@@ -366,7 +432,7 @@ impl Kv {
 // ---------------------------------------------------------------------------
 
 /// Mint a `Kv` v8_class instance with state stamped from `backend` +
-/// `app_id`. Called from `KvPlugin::build_instance` once per V8 isolate
+/// `app_id`. Called from `KvBinding::build_instance` once per V8 isolate
 /// during `build_env_object`. The returned object becomes the `env.kv`
 /// namespace value. Mirrors `plugin-db`'s `mint_db`.
 pub fn mint_kv<'s>(
@@ -384,7 +450,11 @@ pub fn mint_kv<'s>(
     let proto_v = class_fn.get(scope, proto_key.into())?;
     obj.set_prototype(scope, proto_v);
 
-    let state = Kv { backend, app_id: app_id.to_string(), meter };
+    let state = Kv {
+        backend,
+        app_id: app_id.to_string(),
+        meter,
+    };
     let boxed: Box<Kv> = Box::new(state);
     let raw = Box::into_raw(boxed);
     let raw_addr = raw as usize;

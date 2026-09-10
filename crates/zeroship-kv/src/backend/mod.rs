@@ -1,4 +1,4 @@
-//! Backend abstraction for `env.kv.*`.
+//! App-scoped storage operations for Rust hosts and language bindings.
 //!
 //! Two impls ship today:
 //! - `RedbBackend` — single-process embedded persistent store (`redb`),
@@ -112,7 +112,8 @@ pub trait Backend: Send + Sync + std::fmt::Debug {
     /// Paginated key listing. Returns the keys under `<app_id>:<prefix>`
     /// (the `<app_id>:` scope stripped) plus an opaque `next_cursor`.
     /// `cursor` of `None` starts iteration; a `next_cursor` of `None`
-    /// means the listing is complete. `limit` bounds the page size.
+    /// means the listing is complete. `limit` requests a page size; Redis
+    /// treats it as a scan hint and may return a shorter or longer page.
     ///
     /// Backends may return eventually-evicted keys (lazy TTL), but must
     /// not return keys belonging to other apps. The cursor is

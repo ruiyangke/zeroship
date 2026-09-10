@@ -21,7 +21,7 @@
 
 #![cfg(feature = "redis")]
 
-use zeroship_plugin_kv::backend::{Backend, Redis, TtlState};
+use zeroship_kv::backend::{Backend, Redis, TtlState};
 
 /// The single-node Redis these tests dial.
 ///
@@ -86,8 +86,13 @@ fn cluster_seeds() -> String {
 
 fn cluster_url() -> String {
     let seeds = cluster_seeds();
-    let first = seeds.split(',').next().unwrap_or_default().trim().to_string();
-    // Build the "plugin-kv" cluster URL: cluster=true + seeds=... with
+    let first = seeds
+        .split(',')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    // Build the "zeroship-kv" cluster URL: cluster=true + seeds=... with
     // the base URL pointing at the first seed.
     format!("{first}?cluster=true&seeds={seeds}")
 }
@@ -142,7 +147,10 @@ async fn cluster_roundtrip_via_backend() {
     b.delete(app, "counter").await.ok();
 
     b.set(app, "k1", "cluster-hello", None).await.unwrap();
-    assert_eq!(b.get(app, "k1").await.unwrap().as_deref(), Some("cluster-hello"));
+    assert_eq!(
+        b.get(app, "k1").await.unwrap().as_deref(),
+        Some("cluster-hello")
+    );
 
     // Atomic INCR across routed calls.
     for expected in 1..=10 {
@@ -161,7 +169,9 @@ async fn cluster_roundtrip_via_backend() {
     // Cleanup.
     b.delete(app, "k1").await.ok();
     b.delete(app, "counter").await.ok();
-    for i in 0..3 { b.delete(app, &format!("item:{i}")).await.ok(); }
+    for i in 0..3 {
+        b.delete(app, &format!("item:{i}")).await.ok();
+    }
 }
 
 #[compio::test]
@@ -205,7 +215,8 @@ async fn list_empty_app_returns_empty_vec() {
         let app = "kv-test-empty-app-abc123xyz";
         let got = list_all(&b, app, "").await;
         assert!(got.is_empty(), "[{label}] unexpected keys: {got:?}");
-    }).await;
+    })
+    .await;
 }
 
 #[compio::test]
@@ -215,7 +226,8 @@ async fn delete_missing_returns_false() {
         b.delete(app, "ghost").await.ok();
         let deleted = b.delete(app, "ghost").await.expect(label);
         assert!(!deleted, "[{label}] deleting missing should return false");
-    }).await;
+    })
+    .await;
 }
 
 #[compio::test]
@@ -225,13 +237,20 @@ async fn set_overwrites_existing_value() {
         b.delete(app, "k").await.ok();
 
         b.set(app, "k", "first", None).await.expect(label);
-        assert_eq!(b.get(app, "k").await.expect(label).as_deref(), Some("first"));
+        assert_eq!(
+            b.get(app, "k").await.expect(label).as_deref(),
+            Some("first")
+        );
 
         b.set(app, "k", "second", None).await.expect(label);
-        assert_eq!(b.get(app, "k").await.expect(label).as_deref(), Some("second"));
+        assert_eq!(
+            b.get(app, "k").await.expect(label).as_deref(),
+            Some("second")
+        );
 
         b.delete(app, "k").await.ok();
-    }).await;
+    })
+    .await;
 }
 
 #[compio::test]
@@ -243,17 +262,33 @@ async fn app_isolation_prevents_cross_reads() {
         b.delete(app_a, "shared-name").await.ok();
         b.delete(app_b, "shared-name").await.ok();
 
-        b.set(app_a, "shared-name", "in-a", None).await.expect(label);
-        b.set(app_b, "shared-name", "in-b", None).await.expect(label);
+        b.set(app_a, "shared-name", "in-a", None)
+            .await
+            .expect(label);
+        b.set(app_b, "shared-name", "in-b", None)
+            .await
+            .expect(label);
 
-        assert_eq!(b.get(app_a, "shared-name").await.expect(label).as_deref(), Some("in-a"));
-        assert_eq!(b.get(app_b, "shared-name").await.expect(label).as_deref(), Some("in-b"));
+        assert_eq!(
+            b.get(app_a, "shared-name").await.expect(label).as_deref(),
+            Some("in-a")
+        );
+        assert_eq!(
+            b.get(app_b, "shared-name").await.expect(label).as_deref(),
+            Some("in-b")
+        );
 
         // list() must not leak across apps.
         let a_keys = list_all(&b, app_a, "").await;
         let b_keys = list_all(&b, app_b, "").await;
-        assert!(a_keys.contains(&"shared-name".to_string()), "[{label}] a missing key");
-        assert!(b_keys.contains(&"shared-name".to_string()), "[{label}] b missing key");
+        assert!(
+            a_keys.contains(&"shared-name".to_string()),
+            "[{label}] a missing key"
+        );
+        assert!(
+            b_keys.contains(&"shared-name".to_string()),
+            "[{label}] b missing key"
+        );
         // Neither list includes the other app's entries — and `list` strips
         // the `{app_id}:` prefix, so the key name is just "shared-name".
         assert_eq!(a_keys.len(), 1, "[{label}] a has extras: {a_keys:?}");
@@ -261,7 +296,8 @@ async fn app_isolation_prevents_cross_reads() {
 
         b.delete(app_a, "shared-name").await.ok();
         b.delete(app_b, "shared-name").await.ok();
-    }).await;
+    })
+    .await;
 }
 
 #[compio::test]
@@ -286,7 +322,8 @@ async fn list_with_prefix_filter() {
         for k in ["user:1", "user:2", "user:3", "post:1", "post:2"] {
             b.delete(app, k).await.ok();
         }
-    }).await;
+    })
+    .await;
 }
 
 #[compio::test]
@@ -303,7 +340,8 @@ async fn incr_on_existing_numeric_value() {
         assert_eq!(n, 90, "[{label}]");
 
         b.delete(app, "counter").await.ok();
-    }).await;
+    })
+    .await;
 }
 
 #[compio::test]
@@ -315,10 +353,14 @@ async fn set_ttl_of_zero_errors_cleanly() {
         b.delete(app, "k").await.ok();
 
         let result = b.set(app, "k", "v", Some(0)).await;
-        assert!(result.is_err(), "[{label}] PX 0 should be rejected by server");
+        assert!(
+            result.is_err(),
+            "[{label}] PX 0 should be rejected by server"
+        );
 
         b.delete(app, "k").await.ok();
-    }).await;
+    })
+    .await;
 }
 
 #[compio::test]
@@ -326,11 +368,18 @@ async fn set_if_absent_is_atomic_lock() {
     for_each_backend(|b, label| async move {
         let app = "kv-test-sia";
         b.delete(app, "lock").await.ok();
-        assert!(b.set_if_absent(app, "lock", "1", None).await.expect(label), "[{label}]");
-        assert!(!b.set_if_absent(app, "lock", "2", None).await.expect(label), "[{label}]");
+        assert!(
+            b.set_if_absent(app, "lock", "1", None).await.expect(label),
+            "[{label}]"
+        );
+        assert!(
+            !b.set_if_absent(app, "lock", "2", None).await.expect(label),
+            "[{label}]"
+        );
         assert_eq!(b.get(app, "lock").await.expect(label).as_deref(), Some("1"));
         b.delete(app, "lock").await.ok();
-    }).await;
+    })
+    .await;
 }
 
 #[compio::test]
@@ -341,23 +390,39 @@ async fn expire_ttl_persist_lifecycle() {
 
         // Missing key.
         assert_eq!(b.ttl(app, "k").await.expect(label), TtlState::Missing);
-        assert!(!b.expire(app, "k", 1000).await.expect(label), "[{label}] expire missing");
+        assert!(
+            !b.expire(app, "k", 1000).await.expect(label),
+            "[{label}] expire missing"
+        );
 
         // Set without TTL → NoExpiry.
         b.set(app, "k", "v", None).await.expect(label);
         assert_eq!(b.ttl(app, "k").await.expect(label), TtlState::NoExpiry);
 
         // expire → ExpiresInMs.
-        assert!(b.expire(app, "k", 100_000).await.expect(label), "[{label}] expire set");
-        assert!(matches!(b.ttl(app, "k").await.expect(label), TtlState::ExpiresInMs(_)));
+        assert!(
+            b.expire(app, "k", 100_000).await.expect(label),
+            "[{label}] expire set"
+        );
+        assert!(matches!(
+            b.ttl(app, "k").await.expect(label),
+            TtlState::ExpiresInMs(_)
+        ));
 
         // persist → back to NoExpiry; second persist is a no-op false.
-        assert!(b.persist(app, "k").await.expect(label), "[{label}] persist removed TTL");
+        assert!(
+            b.persist(app, "k").await.expect(label),
+            "[{label}] persist removed TTL"
+        );
         assert_eq!(b.ttl(app, "k").await.expect(label), TtlState::NoExpiry);
-        assert!(!b.persist(app, "k").await.expect(label), "[{label}] persist no-op");
+        assert!(
+            !b.persist(app, "k").await.expect(label),
+            "[{label}] persist no-op"
+        );
 
         b.delete(app, "k").await.ok();
-    }).await;
+    })
+    .await;
 }
 
 #[compio::test]
@@ -368,7 +433,10 @@ async fn incr_preserves_existing_ttl_via_redis() {
 
         // Create with TTL via incr (key created this call).
         assert_eq!(b.incr(app, "c", 1, Some(100_000)).await.expect(label), 1);
-        assert!(matches!(b.ttl(app, "c").await.expect(label), TtlState::ExpiresInMs(_)));
+        assert!(matches!(
+            b.ttl(app, "c").await.expect(label),
+            TtlState::ExpiresInMs(_)
+        ));
 
         // Subsequent incr must NOT reset the TTL (fixed-window).
         b.incr(app, "c", 1, Some(50)).await.expect(label);
@@ -378,7 +446,8 @@ async fn incr_preserves_existing_ttl_via_redis() {
         }
 
         b.delete(app, "c").await.ok();
-    }).await;
+    })
+    .await;
 }
 
 #[compio::test]
@@ -388,11 +457,12 @@ async fn incr_on_non_numeric_is_typed_error() {
         b.delete(app, "s").await.ok();
         b.set(app, "s", "hello", None).await.expect(label);
         match b.incr(app, "s", 1, None).await {
-            Err(zeroship_plugin_kv::KvError::NonNumeric { .. }) => {}
+            Err(zeroship_kv::KvError::NonNumeric { .. }) => {}
             other => panic!("[{label}] expected NonNumeric, got {other:?}"),
         }
         b.delete(app, "s").await.ok();
-    }).await;
+    })
+    .await;
 }
 
 #[compio::test]

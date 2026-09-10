@@ -229,7 +229,7 @@ without reshaping the SDK. Embedded components = later Phase-2 spec.
   register") and the round-2 wiring instruction ("same `register_plugins` path as Kv/Storage") were
   **wrong for the multi-tenant worker**, which is the path every real end-user app runs on: <!-- Added in round 3: addressing BLOCKER — worker registers ONLY DbPlugin; pin AuthPlugin to BOTH sites; AuthPlugin is stateless -->
   - **Worker** (`crates/zeroship-worker/src/cache.rs:40-46`, `create_plugins()`): registers
-    **`vec![DbPlugin::new(url)]`** (and an empty vec if `DB_URL` is unset). **No KvPlugin, no
+    **`vec![DbPlugin::new(url)]`** (and an empty vec if `DB_URL` is unset). **No KvBinding, no
     StoragePlugin, no AuthPlugin.** This is the runtime every app served through the gateway uses.
   - **CLI / `zeroship serve`** (`crates/zeroship-cli/src/main.rs:108-165`): registers db (conditional on
     `DATABASE_URL`) + storage (always) + kv (redis or redb). This is the single-tenant dev path only.

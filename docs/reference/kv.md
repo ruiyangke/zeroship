@@ -6,8 +6,18 @@ counters, short-lived leases, cache-aside values, session-like scratch data,
 and prefix scans. Use `@zeroship/db` for relational source-of-truth data,
 audited workflows, durable idempotency, and exact large-number accounting.
 
-The native class is registered by `crates/zeroship-plugin-kv/`; the TypeScript wrapper
-lives in `sdks/kv/src/index.ts`.
+The TypeScript wrapper lives in `sdks/kv/src/index.ts`. Rust support is split by
+responsibility:
+
+- `crates/zeroship-kv/` owns the backend contract, Redis/redb implementations,
+  tenant key scoping, shared limits, and storage errors. It is independent of V8.
+- `crates/zeroship-kv-v8/` provides `KvBinding`, which registers the native class
+  and owns JavaScript conversion, promises, isolate state, and usage metering.
+
+The worker and CLI construct storage backends directly and pass them to the
+binding. Storage features are selected on `zeroship-kv`; the binding depends
+only on its backend interface. Backend tests run in the storage crate, while
+the binding's integration suite drives the real runtime against those backends.
 
 ## Authoring surface
 

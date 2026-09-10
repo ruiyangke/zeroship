@@ -3514,7 +3514,7 @@ pub(crate) mod tests {
     /// `KV_REQUIRE_REDIS=1` turned the skip into a failure, "in CI". Nothing in
     /// this repository ever set `KV_REQUIRE_REDIS` - not a workflow, not a
     /// script - so the panic was unreachable and the skip was the only
-    /// behaviour, matching `crates/zeroship-plugin-kv/tests/redis_backend.rs`, which had
+    /// behaviour, matching `crates/zeroship-kv/tests/redis_backend.rs`, which had
     /// the same dead flag and the same untrue comment. Both are resolved the
     /// way `ZEROSHIP_REQUIRE_LIVE_BACKENDS` was: the flag is deleted and Redis
     /// is simply required, because the provisioner now supplies it.

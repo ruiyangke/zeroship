@@ -631,6 +631,8 @@ jobs:
         run: tests/cargo_package_spec_gate.sh
       - name: The data crates cannot reach a driver or the V8 runtime
         run: tests/data_crate_closure_gate.sh
+      - name: KV storage remains independent of the V8 binding
+        run: tests/kv_crate_closure_gate.sh
       - name: No feature routes onto a dev-only dependency
         run: tests/dev_dep_feature_route_gate.sh
       # TWO STEPS, and the split is the point. The bare run passes at zero bad

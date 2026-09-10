@@ -139,7 +139,7 @@ schemars = { workspace = true }
 # `std::env::var`, which is exactly the un-enumerable read Section 4.5 of
 # docs/proposals/2026-08-11-config-name-alignment.md exists to remove. `test_env!` is
 # the one sanctioned way for first-party test code to read a literal env name (13+
-# other crates' test suites already use it, e.g. `zeroship-plugin-kv`'s
+# other crates' test suites already use it, e.g. `zeroship-kv-v8`'s
 # `DRAGONFLY_CLUSTER_SEEDS`); both names are registered in
 # `tests/test_only_env_gate.sh`'s closed INVENTORY in the same commit that adds them.
 #

@@ -758,7 +758,7 @@ fi
 echo
 echo "== 5. no runtime-side parser =="
 RUNTIME_DIRS=(crates/zeroship-runtime crates/zeroship-worker crates/zeroship-gateway)
-for d in crates/zeroship-plugin-*; do RUNTIME_DIRS+=("$d"); done
+for d in crates/zeroship-plugin-* crates/zeroship-*-v8 crates/zeroship-kv; do RUNTIME_DIRS+=("$d"); done
 hits=""
 n_named=0
 for d in "${RUNTIME_DIRS[@]}"; do
@@ -775,7 +775,7 @@ done
 # pattern itself in the array, so the pre-filter length stays 4 while nothing is
 # read.
 # MEASURED 2026-08-20: 7 directories (runtime, worker, gateway, plugin-db,
-# plugin-kv, plugin-storage, plugin-workflow). The floor is 4: it clears the
+# kv-v8, plugin-storage, plugin-workflow). The floor is 4: it clears the
 # three literal paths, so a glob that stopped matching cannot pass it.
 #
 # AND IT DID EXACTLY THAT, 2026-08-28. The crate reorg renamed all seven
