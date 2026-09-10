@@ -1,28 +1,5 @@
-//! The mask transforms: one `MaskKind` applied to one plaintext string.
-//!
-//! # Why this is the domain tier and not the engine
-//!
-//! `apply_mask_kind` and its per-kind helpers are pure, total functions over
-//! `(MaskKind, &str)` - no schema, no row, no connection, no error type. They
-//! came out of `zeroship-data-v8`'s `crud/mask_pass.rs` on 2026-09-03 because
-//! TWO tiers call them:
-//!
-//! * the ENGINE write and read passes (`protection::mask_pass::apply_mask_on_write`
-//!   derives the stored mask and `protection::mask_pass::wrap_row_on_read`
-//!   re-applies it), and
-//! * [`crate::read_set`], which lowers a filter operand on a masked column to
-//!   its masked form so the broker compares mask against mask.
-//!
-//! `read_set` is a domain module, so leaving the transform in the engine would
-//! have made this crate depend on the crate that depends on it - a Cargo cycle,
-//! unbuildable. The rule is the crate's standing one: a primitive two tiers
-//! both use belongs BELOW both.
-//!
-//! # What did NOT come with it
-//!
-//! `parse_mask_kind` stayed in the engine. It returns `DbError` on an unknown
-//! wire spelling, which makes it a schema-payload parser rather than a
-//! transform; its one caller is `apply_mask_on_write`.
+//! Pure mask transforms shared by protection passes and subscription predicates.
+//! Descriptor interpretation and mask-kind parsing belong to `zeroship-data-sql`.
 
 use zeroship_data_sql::catalog::MaskKind;
 

@@ -639,14 +639,7 @@ pub fn raw_column_name(field: &str) -> String {
 /// until 2026-09-04; they ask the DESCRIPTOR now, and this is the fallback
 /// underneath that question rather than their answer.
 pub fn raw_column_for_field(field: &str, def: &crate::value::Value) -> Option<String> {
-    let mask_meta = def.get("mask").and_then(|v| v.as_object())?;
-    let kind = mask_meta
-        .get("kind")
-        .and_then(|v| v.as_str())
-        .unwrap_or("full");
-    if kind == "none" {
-        return None;
-    }
+    crate::descriptors::effective_mask(def)?;
     Some(raw_column_name(field))
 }
 
@@ -1501,17 +1494,7 @@ pub fn read_surface_columns(schema_hint: &Value) -> std::collections::BTreeSet<S
 /// schema is missing, the column is absent from it, or the mask is the
 /// explicit opt-out (`kind: "none"`).
 pub fn column_is_masked(name: &str, schema_hint: &Value) -> bool {
-    let Some(schema_obj) = schema_hint.as_object() else {
-        return false;
-    };
-    let Some(def) = schema_obj.get(name) else {
-        return false;
-    };
-    let Some(mask) = def.get("mask").and_then(|v| v.as_object()) else {
-        return false;
-    };
-    let kind = mask.get("kind").and_then(|v| v.as_str()).unwrap_or("full");
-    kind != "none"
+    schema_hint.get(name).and_then(crate::descriptors::effective_mask).is_some()
 }
 
 // There is deliberately NO `read_column_for` here any more, and no

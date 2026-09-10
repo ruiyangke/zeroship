@@ -137,10 +137,7 @@ fn floor_from_live(live: &zeroship_data_sql::catalog::LiveSchema) -> ProtectionF
 /// field's own name. A fence that accepted `kind: "none"` would refuse the
 /// one-key deletion and wave through the one-word edit that does the same thing.
 pub(crate) fn descriptor_declares_mask(def: &Value) -> bool {
-    let Some(meta) = def.get("mask").and_then(Value::as_object) else {
-        return false;
-    };
-    meta.get("kind").and_then(Value::as_str).unwrap_or("full") != "none"
+    zeroship_data_sql::descriptors::effective_mask(def).is_some()
 }
 
 /// Does the descriptor's field definition declare encryption?

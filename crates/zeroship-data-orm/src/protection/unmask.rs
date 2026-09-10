@@ -185,24 +185,8 @@ fn lookup_mask_meta(schema: &Value, column: &str) -> Option<ColumnMaskMeta> {
     let canonical_column = resolve_schema_column(schema, column)?;
     let obj = schema.as_object()?;
     let def = obj.get(&canonical_column)?;
-    let mask_meta = def.get("mask").and_then(|v| v.as_object())?;
-    let kind = mask_meta
-        .get("kind")
-        .and_then(|v| v.as_str())
-        .unwrap_or("full");
-    if kind == "none" {
-        // Explicit opt-out — the parent column stays plaintext on read,
-        // so unmask has nothing to do (and there's no `MaskedValue` for
-        // the SDK to construct an `.unmask()` call from). Surface as
-        // "not masked" so the caller sees the same error code they
-        // would for a non-masked column.
-        return None;
-    }
-    let classification = mask_meta
-        .get("classification")
-        .and_then(|v| v.as_str())
-        .unwrap_or("pii")
-        .to_string();
+    let mask = zeroship_data_sql::descriptors::effective_mask(def)?;
+    let classification = mask.classification.to_string();
     Some(ColumnMaskMeta {
         canonical_column,
         classification,

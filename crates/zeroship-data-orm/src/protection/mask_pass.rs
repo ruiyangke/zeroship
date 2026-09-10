@@ -147,17 +147,12 @@ pub fn apply_mask_on_write(
     let mut derived: DerivedMasks = Vec::new();
 
     for (col, def) in schema_obj.iter() {
-        let Some(mask_meta) = def.get("mask").and_then(|v| v.as_object()) else {
+        let Some(mask) = zeroship_data_sql::descriptors::effective_mask(def) else {
             continue;
         };
-        let kind_str = mask_meta
-            .get("kind")
-            .and_then(|v| v.as_str())
-            .unwrap_or("full");
-        if kind_str == "none" {
-            continue;
-        }
-        let kind = parse_mask_kind(kind_str)?;
+        let kind = MaskKind::from_sql(mask.kind).ok_or_else(|| {
+            DbError::internal(format!("apply_mask_on_write: unknown mask kind '{}'", mask.kind))
+        })?;
 
         // Resolved BEFORE the plaintext branch, so a descriptor that names a
         // creator-reachable raw column refuses every write to the collection
@@ -168,9 +163,8 @@ pub fn apply_mask_on_write(
         // does mention it.
         let Some(raw_column) = crate::compile::declared_raw_column(col, def)? else {
             // Unreachable: `declared_raw_column` returns `None` only for a
-            // field with no effective mask, and both of those arms already
-            // `continue`d above. Handled rather than unwrapped because the two
-            // mask tests are separate reads of the same JSON.
+            // field with no effective mask. Both callers use the shared
+            // descriptor predicate; keep this branch fallible at the boundary.
             continue;
         };
 
@@ -251,26 +245,6 @@ pub fn relocate_masked_columns(masks: &DerivedMasks, row: &mut Value) -> Result<
     Ok(())
 }
 
-/// Parse a mask kind string from the schema-wire format. Mirrors the
-/// `MaskKind` discriminator the SDK emits in `def.mask.kind`.
-fn parse_mask_kind(s: &str) -> Result<MaskKind, DbError> {
-    Ok(match s {
-        "full" => MaskKind::Full,
-        "last4" => MaskKind::Last4,
-        "first4" => MaskKind::First4,
-        "email" => MaskKind::Email,
-        "name" => MaskKind::Name,
-        "dateYear" | "date-year" => MaskKind::DateYear,
-        "dateDecade" | "date-decade" => MaskKind::DateDecade,
-        "none" => MaskKind::None,
-        other => {
-            return Err(DbError::internal(format!(
-                "apply_mask_on_write: unknown mask kind '{other}'"
-            )));
-        }
-    })
-}
-
 // =====================================================================
 // Read-side flip: wrap masked columns in MaskedValueRepr
 // =====================================================================
@@ -345,22 +319,11 @@ pub fn wrap_row_on_read(schema: &Value, collection: &str, row: &mut Value) -> Re
     let mut to_strip: Vec<String> = Vec::new();
 
     for (col, def) in schema_obj.iter() {
-        let Some(mask_meta) = def.get("mask").and_then(|v| v.as_object()) else {
+        let Some(mask) = zeroship_data_sql::descriptors::effective_mask(def) else {
             continue;
         };
-        let kind = mask_meta
-            .get("kind")
-            .and_then(|v| v.as_str())
-            .unwrap_or("full");
-        if kind == "none" {
-            continue;
-        }
-        let classification = mask_meta
-            .get("classification")
-            .and_then(|v| v.as_str())
-            .unwrap_or("pii")
-            .to_string();
-        let kind = parse_mask_kind(kind).unwrap_or(MaskKind::Full);
+        let classification = mask.classification.to_string();
+        let kind = MaskKind::from_sql(mask.kind).unwrap_or(MaskKind::Full);
 
         // The field's own slot holds the mask. Re-apply the transform rather
         // than trusting it: we cannot distinguish "already masked" from "a

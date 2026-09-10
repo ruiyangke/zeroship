@@ -235,11 +235,7 @@ pub async fn decrypt_row_on_read(
         // row happened to carry the sibling key, which is how a write's
         // `RETURNING *` used to hand plaintext to the mask pass. That producer
         // is gone; this gate is not, because the WAL consumer is not.
-        let masked = def
-            .get("mask")
-            .and_then(|v| v.as_object())
-            .and_then(|mask| mask.get("kind").and_then(|v| v.as_str()))
-            .is_some_and(|kind| kind != "none");
+        let masked = zeroship_data_sql::descriptors::effective_mask(def).is_some();
         if masked {
             continue;
         }
@@ -545,6 +541,21 @@ mod tests {
         });
 
         assert_eq!(read_row["contactEmail"].as_str(), Some("a***@example.com"));
+    }
+
+    #[compio::test]
+    async fn decrypt_row_on_read_respects_implicit_full_mask() {
+        let keys = KeyStore::new(crate::encryption::LocalKeySource::supplied(
+            std::rc::Rc::new(crate::encryption::SuppliedRootKeys::new()),
+        ));
+        let schema = zeroship_data_sql::value!({
+            "secret": {"type":"string", "encrypted":{"mode":"randomised","keyId":"unused"}, "mask":{"classification":"pii"}}
+        });
+        let mut row = zeroship_data_sql::value!({"id":"row", "secret":"***"});
+        decrypt_row_on_read(&keys, "app", "records", &schema, &mut row)
+            .await
+            .unwrap();
+        assert_eq!(row["secret"].as_str(), Some("***"));
     }
 
     /// Deterministic mode: same plaintext under same `(collection,
