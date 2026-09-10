@@ -161,6 +161,12 @@ JSON strings even when their contents resemble booleans, numbers, or objects.
 Malformed stored JSON reports `row_decode_failed` with column context and without
 including the stored contents.
 
+Calendar dates stay `YYYY-MM-DD` strings through driver reads, Rust model codecs,
+and V8. They use positive Gregorian years in that fixed-width form and do not
+acquire a time or timezone. The shared calendar codec validates date writes
+before protection transforms and rejects malformed stored dates with column
+context. The SDK applies the same date rules, including early years and leap days.
+
 Concrete driver access is available for host diagnostics and backend-specific
 lifecycle extensions. Shared CRUD, transaction policy, and protection reads do
 not downcast to concrete drivers. Registering another execution implementation

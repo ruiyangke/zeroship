@@ -10,11 +10,13 @@ help: the following other types implement trait `DecodeValue<S>`
   |         impl DecodeValue<$sql> for String {
   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
   |         |
-  |         `std::string::String` implements `DecodeValue<CalendarDate>`
   |         `std::string::String` implements `DecodeValue<Time>`
   |         `std::string::String` implements `DecodeValue<zeroship_data_orm::orm::sql_types::Text>`
 ...
-  | text_codec!(Text, CalendarDate, Time);
-  | ------------------------------------- in this macro invocation
+  | text_codec!(Text, Time);
+  | ----------------------- in this macro invocation
+...
+  | impl DecodeValue<CalendarDate> for String {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `std::string::String` implements `DecodeValue<CalendarDate>`
   = help: see issue #48214
   = note: this error originates in the derive macro `FromRow` which comes from the expansion of the macro `text_codec` (in Nightly builds, run with -Z macro-backtrace for more info)

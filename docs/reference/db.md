@@ -209,6 +209,10 @@ Use the `t.*` factories. Every builder is chainable.
 (Unix-ms numbers at the JS layer) or `t.calendarDate()` for a Postgres DATE
 (`YYYY-MM-DD` strings).
 
+Calendar dates use positive Gregorian years in the fixed-width `YYYY-MM-DD`
+form. Reads preserve that string, including early years; invalid dates and
+datetime strings are rejected. Calendar dates carry no timezone.
+
 Wide integers accept safe integer numbers or bigint values within the database
 integer range. Reads return numbers within the safe integer range and bigint
 values beyond it. Convert bigint explicitly when returning a JSON response.

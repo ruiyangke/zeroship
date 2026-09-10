@@ -132,10 +132,13 @@ export function isJsonSerializable(value: unknown, seen?: WeakSet<object>): bool
 export function isValidCalendarDate(s: string): boolean {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
   const [y, m, d] = s.split("-").map(Number);
+  if (y === 0) return false;
   if (m < 1 || m > 12) return false;
   if (d < 1 || d > 31) return false;
   // Round-trip through Date to catch overflow (e.g. 2026-02-31 → Mar 3).
-  const dt = new Date(Date.UTC(y, m - 1, d));
+  // setUTCFullYear preserves early years; Date.UTC maps them to another century.
+  const dt = new Date(0);
+  dt.setUTCFullYear(y, m - 1, d);
   return (
     dt.getUTCFullYear() === y &&
     dt.getUTCMonth() === m - 1 &&

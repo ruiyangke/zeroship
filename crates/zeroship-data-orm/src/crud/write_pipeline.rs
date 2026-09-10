@@ -194,6 +194,21 @@ pub async fn apply(
     // encryption and mask stages silently skipped - which is what an absent
     // schema used to mean, on a write.
     let schema = crate::descriptor::collection_schema(binding, collection)?;
+    match &mode {
+        ApplyMode::Insert { .. } | ApplyMode::Upsert { .. } => {
+            zeroship_data_sql::codecs::validate_calendar_date_document(&schema, payload)?;
+        }
+        ApplyMode::InsertMany { .. } => {
+            if let Some(documents) = payload.as_array() {
+                for document in documents {
+                    zeroship_data_sql::codecs::validate_calendar_date_document(&schema, document)?;
+                }
+            }
+        }
+        ApplyMode::Update { .. } => {
+            zeroship_data_sql::codecs::validate_calendar_date_update(&schema, payload)?;
+        }
+    }
     // Stage 0. The descriptor decides which protections the stages below APPLY;
     // the live catalog decides which ones this collection is ALLOWED to have
     // lost. Deleting a `mask` or `encrypted` key from a field is otherwise a

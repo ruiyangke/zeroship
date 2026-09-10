@@ -45,7 +45,62 @@ macro_rules! text_codec {
         }
     )* };
 }
-text_codec!(Text, CalendarDate, Time);
+text_codec!(Text, Time);
+
+impl EncodeValue<CalendarDate> for String {
+    fn encode_value(self) -> Result<Value, DbError> {
+        if zeroship_data_sql::temporal::parse_calendar_date(&self).is_none() {
+            return Err(invalid("a valid YYYY-MM-DD calendar date"));
+        }
+        Ok(Value::String(self))
+    }
+}
+impl EncodeValue<CalendarDate> for &str {
+    fn encode_value(self) -> Result<Value, DbError> {
+        if zeroship_data_sql::temporal::parse_calendar_date(self).is_none() {
+            return Err(invalid("a valid YYYY-MM-DD calendar date"));
+        }
+        Ok(Value::String(self.into()))
+    }
+}
+impl DecodeValue<CalendarDate> for String {
+    fn decode_value(value: Value) -> Result<Self, DbError> {
+        match value {
+            Value::String(value)
+                if zeroship_data_sql::temporal::parse_calendar_date(&value).is_some() =>
+            {
+                Ok(value)
+            }
+            _ => Err(invalid("a valid YYYY-MM-DD calendar date")),
+        }
+    }
+}
+
+#[cfg(test)]
+mod calendar_date_tests {
+    use super::*;
+
+    #[test]
+    fn calendar_date_models_reject_invalid_dates() {
+        for date in [
+            "2026-02-30",
+            "1900-02-29",
+            "0000-01-01",
+            "2026-01-01T00:00:00Z",
+            "private_not_a_date",
+        ] {
+            assert!(
+                <String as EncodeValue<CalendarDate>>::encode_value(date.into()).is_err(),
+                "{date}"
+            );
+            assert!(
+                <String as DecodeValue<CalendarDate>>::decode_value(Value::String(date.into()))
+                    .is_err(),
+                "{date}"
+            );
+        }
+    }
+}
 
 impl EncodeValue<Bytes> for Vec<u8> {
     fn encode_value(self) -> Result<Value, DbError> {

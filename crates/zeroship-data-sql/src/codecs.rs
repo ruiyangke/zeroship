@@ -173,6 +173,66 @@ fn schema_field<'a>(schema: &'a Value, field: &str) -> Option<&'a Value> {
     schema.as_object()?.get(field)
 }
 
+fn validate_calendar_date_value(field: &str, value: &Value) -> Result<(), CodecError> {
+    if value.is_null()
+        || value
+            .as_str()
+            .is_some_and(|value| crate::temporal::parse_calendar_date(value).is_some())
+    {
+        return Ok(());
+    }
+    Err(CodecError::validation(
+        "invalid_calendar_date",
+        format!("column '{field}' requires a valid YYYY-MM-DD calendar date"),
+    ))
+}
+
+/// Validate calendar-date writes before protection changes their storage shape.
+pub fn validate_calendar_date_document(schema: &Value, document: &Value) -> Result<(), CodecError> {
+    if let Some(document) = document.as_object() {
+        for (field, value) in document {
+            if schema_field_type(schema, field) == Some("calendarDate") {
+                validate_calendar_date_value(field, value)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Validate assignments and refuse non-date operations on calendar-date fields.
+pub fn validate_calendar_date_update(schema: &Value, patch: &Value) -> Result<(), CodecError> {
+    let Some(patch) = patch.as_object() else {
+        return Ok(());
+    };
+    for (field, value) in patch {
+        if field == "$set" {
+            validate_calendar_date_document(schema, value)?;
+        } else if schema_field_type(schema, field) == Some("calendarDate") {
+            if let Some(operations) = value.as_object() {
+                if operations.is_empty() {
+                    validate_calendar_date_value(field, value)?;
+                }
+                for (operation, operand) in operations {
+                    match operation.as_str() {
+                        "$set" => validate_calendar_date_value(field, operand)?,
+                        _ => {
+                            return Err(CodecError::validation(
+                                "invalid_calendar_date_operation",
+                                format!(
+                                    "operation '{operation}' is not supported for calendar date column '{field}'"
+                                ),
+                            ));
+                        }
+                    }
+                }
+            } else {
+                validate_calendar_date_value(field, value)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn encode_sqlite_binary_scalar(
     field: &str,
     field_def: &Value,
@@ -389,7 +449,19 @@ fn normalize_row_on_read(
                 normalize_json_value(dialect, key, value)?;
             }
             Some("bytes") => normalize_bytes_value(value)?,
-            Some("date") | Some("calendarDate") => normalize_timestamp_value(value)?,
+            Some("date") => normalize_timestamp_value(value)?,
+            Some("calendarDate") => {
+                if !value.is_null()
+                    && value
+                        .as_str()
+                        .is_none_or(|date| crate::temporal::parse_calendar_date(date).is_none())
+                {
+                    return Err(CodecError::Decode {
+                        column: key.clone(),
+                        reason: "invalid calendar date storage",
+                    });
+                }
+            }
             Some("vector") => normalize_vector_value(key, def, value)?,
             Some("geoPoint") => normalize_geopoint_value(key, value)?,
             _ => {}
@@ -824,6 +896,30 @@ mod tests {
 }
 
 #[cfg(test)]
+mod calendar_date_tests {
+    use super::*;
+    use crate::value;
+
+    #[test]
+    fn calendar_date_reads_reject_invalid_storage_without_echoing_it() {
+        let schema = value!({"birthday":{"type":"calendarDate"}});
+        for stored in [
+            value!("2026-02-30"),
+            value!("1900-02-29"),
+            value!("0000-01-01"),
+            value!("2026-01-01T00:00:00Z"),
+            value!("private_not_a_date"),
+            value!(0),
+        ] {
+            let mut rows = [value!({"birthday":stored})];
+            let error = decode_rows(compile::SqlDialect::Sqlite, &schema, &mut rows).unwrap_err();
+            assert!(error.to_string().contains("birthday"));
+            assert!(!error.to_string().contains("private_not_a_date"));
+        }
+    }
+}
+
+#[cfg(test)]
 mod json_read_tests {
     use super::*;
     use crate::value;
@@ -885,7 +981,9 @@ mod binary_read_tests {
 
     #[test]
     fn masked_storage_remains_opaque_to_logical_codecs() {
-        for logical_type in ["boolean", "bytes", "vector", "geoPoint", "json", "date"] {
+        for logical_type in [
+            "boolean", "bytes", "vector", "geoPoint", "json", "date", "calendarDate",
+        ] {
             let schema = value!({"classified":{"type":logical_type, "mask":{"kind":"full"}}});
             let mut row = value!({"classified":"***"});
             decode_rows(
