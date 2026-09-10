@@ -1,9 +1,9 @@
 //! Logical values and their database storage representations.
 use crate::{compile, descriptors::GeoPoint, value::Value};
 
-mod temporal;
-pub(crate) use temporal::{prepare_array_operand, prepare_value};
-pub use temporal::{prepare_temporal_document, prepare_temporal_update};
+mod typed;
+pub(crate) use typed::{prepare_array_operand, prepare_value};
+pub use typed::{prepare_document, prepare_update};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum CodecError {
@@ -394,7 +394,7 @@ fn normalize_row_on_read(
                 prepare_value(key, &schema[key], value).map_err(|_| {
                     CodecError::Decode {
                         column: key.clone(),
-                        reason: "invalid typed temporal JSON storage",
+                        reason: "invalid typed JSON storage",
                     }
                 })?;
             }

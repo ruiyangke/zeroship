@@ -606,6 +606,7 @@ pub async fn run_update_one(
     // rejects the op rather than silently skipping the per-row path.
     let schema = crate::descriptor::collection_schema(&binding, &coll)?;
     update_validation::validate(&schema, &update)?;
+    zeroship_data_sql::codecs::prepare_update(&schema, &mut update)?;
     let per_row_encrypted_update =
         write_pipeline::update_requires_per_row_encryption(&schema, &update);
     let target_row = if per_row_encrypted_update {
@@ -754,6 +755,7 @@ pub async fn run_update_many(
     // target-row probe all read it. An undeclared collection rejects.
     let schema = crate::descriptor::collection_schema(&binding, &coll)?;
     update_validation::validate(&schema, &update)?;
+    zeroship_data_sql::codecs::prepare_update(&schema, &mut update)?;
     let per_row_encrypted_update =
         write_pipeline::update_requires_per_row_encryption(&schema, &update);
     // No `skip_*` knob is set: the pass stripped every column the

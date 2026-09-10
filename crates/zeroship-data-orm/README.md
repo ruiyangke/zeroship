@@ -104,6 +104,12 @@ require an array field. An invalid operation is refused even when no row matches
 Encrypted and masked fields accept literal assignments only; their stored
 representation cannot be mutated with arithmetic or array operators.
 
+The shared codec checks array element types on inserts, replacements, and array
+operators, including arrays nested in typed objects and unions. Native primitive
+arrays are inspected in place. Non-temporal encoded arrays are checked without
+rewriting their numeric spellings. Invalid stored array types fail decoding without
+including the stored values in the error.
+
 Combine field-builder patches with `first.and(second)?`. The result is fallible:
 assigning the same column in both patches returns `invalid_update`. Assignments
 to distinct columns move into the combined patch without copying their values.

@@ -16,6 +16,7 @@ mod update_validation;
 mod schema_updates;
 mod protected_updates;
 mod typed_updates;
+mod typed_arrays;
 
 #[derive(Debug, FromRow)]
 #[orm(entity = posts)]

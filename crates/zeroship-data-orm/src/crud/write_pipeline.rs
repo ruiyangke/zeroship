@@ -224,18 +224,18 @@ pub async fn apply(
     }
     match &mode {
         ApplyMode::Insert { .. } | ApplyMode::Upsert { .. } => {
-            zeroship_data_sql::codecs::prepare_temporal_document(&schema, payload)?;
+            zeroship_data_sql::codecs::prepare_document(&schema, payload)?;
         }
         ApplyMode::InsertMany { .. } => {
             if let Some(documents) = payload.as_array_mut() {
                 for document in documents {
-                    zeroship_data_sql::codecs::prepare_temporal_document(&schema, document)?;
+                    zeroship_data_sql::codecs::prepare_document(&schema, document)?;
                 }
             }
         }
-        ApplyMode::Update { .. } => {
-            zeroship_data_sql::codecs::prepare_temporal_update(&schema, payload)?;
-        }
+        // Updates are prepared before encrypted target lookup, even when no
+        // row matches. Per-row protection must not repeat that traversal.
+        ApplyMode::Update { .. } => {}
     }
     // Stage 0. The descriptor decides which protections the stages below APPLY;
     // the live catalog decides which ones this collection is ALLOWED to have
