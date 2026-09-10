@@ -101,6 +101,8 @@ value without interpreting its object keys as filter operators.
 Native update operators are checked against the installed field descriptor
 before row lookup: arithmetic requires a numeric field, and array operations
 require an array field. An invalid operation is refused even when no row matches.
+Encrypted and masked fields accept literal assignments only; their stored
+representation cannot be mutated with arithmetic or array operators.
 
 Combine field-builder patches with `first.and(second)?`. The result is fallible:
 assigning the same column in both patches returns `invalid_update`. Assignments

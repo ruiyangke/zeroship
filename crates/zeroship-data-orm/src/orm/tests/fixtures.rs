@@ -14,7 +14,15 @@ pub(super) struct CollectionFixture {
 
 impl CollectionFixture {
     pub async fn sqlite(collection: &str, fields: Value) -> Self {
-        let (original, directory) = database().await;
+        Self::sqlite_with_keys(collection, fields, LocalKeySource::EnvVar).await
+    }
+
+    pub async fn sqlite_with_keys(
+        collection: &str,
+        fields: Value,
+        key_source: LocalKeySource,
+    ) -> Self {
+        let (original, directory) = database_with_keys(key_source).await;
         let file = directory
             .path()
             .join(format!("zs-{}.sqlite", original.binding.app_id()));
@@ -43,12 +51,20 @@ impl CollectionFixture {
     }
 
     pub async fn postgres(collection: &str, fields: Value) -> Self {
+        Self::postgres_with_keys(collection, fields, LocalKeySource::EnvVar).await
+    }
+
+    pub async fn postgres_with_keys(
+        collection: &str,
+        fields: Value,
+        key_source: LocalKeySource,
+    ) -> Self {
         crate::reset_engine_for_tests();
         let backend = Rc::new(
             crate::backend::postgres::PostgresBackend::connect(
                 &zeroship_core::config::test_database_url(),
                 4,
-                LocalKeySource::EnvVar,
+                key_source,
             )
             .await
             .unwrap(),

@@ -14,6 +14,7 @@ mod nested_temporal;
 mod update_operators;
 mod update_validation;
 mod schema_updates;
+mod protected_updates;
 mod typed_updates;
 
 #[derive(Debug, FromRow)]
@@ -460,6 +461,10 @@ async fn typed_handles_refuse_descriptor_drift() {
 }
 
 async fn database() -> (Database, tempfile::TempDir) {
+    database_with_keys(LocalKeySource::EnvVar).await
+}
+
+async fn database_with_keys(key_source: LocalKeySource) -> (Database, tempfile::TempDir) {
     crate::reset_engine_for_tests();
     let directory = tempfile::tempdir().unwrap();
     let binding = DbBinding::cold_start("orm_fixture");
@@ -489,7 +494,7 @@ async fn database() -> (Database, tempfile::TempDir) {
         binding,
         crate::ConnectOptions::new(
             directory.path().join("control.sqlite").to_string_lossy(),
-            LocalKeySource::EnvVar,
+            key_source,
         ),
         vec![("posts".into(), schema)],
     )
