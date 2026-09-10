@@ -5,6 +5,8 @@ use zeroship_data_sql::value;
 schema!(pub test_schema = "../../tests/fixtures/schema.runtime.json");
 use test_schema::posts;
 
+mod json;
+
 #[derive(Debug, FromRow)]
 #[orm(entity = posts)]
 struct Post {

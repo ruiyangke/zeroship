@@ -155,6 +155,12 @@ instants before the epoch. Vector and geographic-point fields return numeric
 arrays and latitude/longitude objects on both backends. Their binary storage
 encoding stays inside the backend and SQL codecs.
 
+JSON read conversion is dialect-aware. PostgreSQL supplies decoded JSON values;
+SQLite supplies encoded JSON text. The SQL codec parses that text once, preserving
+JSON strings even when their contents resemble booleans, numbers, or objects.
+Malformed stored JSON reports `row_decode_failed` with column context and without
+including the stored contents.
+
 Concrete driver access is available for host diagnostics and backend-specific
 lifecycle extensions. Shared CRUD, transaction policy, and protection reads do
 not downcast to concrete drivers. Registering another execution implementation

@@ -3,8 +3,17 @@ use crate::{compile, descriptors::GeoPoint, value::Value};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum CodecError {
-    Internal { message: String },
-    Validation { code: &'static str, message: String },
+    Internal {
+        message: String,
+    },
+    Validation {
+        code: &'static str,
+        message: String,
+    },
+    Decode {
+        column: String,
+        reason: &'static str,
+    },
 }
 impl CodecError {
     fn internal(message: impl Into<String>) -> Self {
@@ -23,6 +32,9 @@ impl std::fmt::Display for CodecError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Internal { message } | Self::Validation { message, .. } => f.write_str(message),
+            Self::Decode { column, reason } => {
+                write!(f, "cannot decode column '{column}': {reason}")
+            }
         }
     }
 }
@@ -330,14 +342,24 @@ fn schema_has_sqlite_binary_columns(schema: &Value) -> bool {
         })
         .unwrap_or(false)
 }
-pub fn decode_rows(schema: &Value, rows: &mut [Value]) -> Result<(), CodecError> {
+/// Convert driver results to logical values. SQLite JSON text is still encoded;
+/// PostgreSQL JSON values have already been decoded by the wire protocol codec.
+pub fn decode_rows(
+    dialect: compile::SqlDialect,
+    schema: &Value,
+    rows: &mut [Value],
+) -> Result<(), CodecError> {
     for row in rows.iter_mut() {
-        normalize_row_on_read(schema, row)?;
+        normalize_row_on_read(dialect, schema, row)?;
     }
     Ok(())
 }
 
-fn normalize_row_on_read(schema: &Value, row: &mut Value) -> Result<(), CodecError> {
+fn normalize_row_on_read(
+    dialect: compile::SqlDialect,
+    schema: &Value,
+    row: &mut Value,
+) -> Result<(), CodecError> {
     let Some(obj) = row.as_object_mut() else {
         return Ok(());
     };
@@ -364,7 +386,7 @@ fn normalize_row_on_read(schema: &Value, row: &mut Value) -> Result<(), CodecErr
         match def.get("type").and_then(Value::as_str) {
             Some("boolean") => normalize_boolean_value(value)?,
             Some("json") | Some("object") | Some("array") | Some("union") => {
-                normalize_json_value(value)
+                normalize_json_value(dialect, key, value)?;
             }
             Some("bytes") => normalize_bytes_value(value)?,
             Some("date") | Some("calendarDate") => normalize_timestamp_value(value)?,
@@ -485,12 +507,21 @@ fn normalize_boolean_value(value: &mut Value) -> Result<(), CodecError> {
     }
 }
 
-fn normalize_json_value(value: &mut Value) {
-    if let Value::String(s) = value {
-        if let Ok(parsed) = serde_json::from_str::<Value>(s) {
-            *value = parsed;
-        }
-    }
+fn normalize_json_value(
+    dialect: compile::SqlDialect,
+    field: &str,
+    value: &mut Value,
+) -> Result<(), CodecError> {
+    let encoded = match value {
+        Value::Json(encoded) => encoded,
+        Value::String(encoded) if dialect == compile::SqlDialect::Sqlite => encoded,
+        _ => return Ok(()),
+    };
+    *value = serde_json::from_str(encoded).map_err(|_| CodecError::Decode {
+        column: field.to_owned(),
+        reason: "invalid JSON storage",
+    })?;
+    Ok(())
 }
 
 fn normalize_bytes_value(value: &mut Value) -> Result<(), CodecError> {
@@ -700,7 +731,7 @@ mod tests {
             "published_at": "2026-05-07T01:02:03.004Z"
         });
 
-        normalize_row_on_read(&schema, &mut row).expect("normalize");
+        normalize_row_on_read(compile::SqlDialect::Sqlite, &schema, &mut row).expect("normalize");
 
         assert_eq!(row["active"], Value::Bool(true));
         assert_eq!(row["prefs"], crate::value!({"theme":"dark"}));
@@ -722,7 +753,7 @@ mod tests {
             "secret": "AQID"
         });
 
-        normalize_row_on_read(&schema, &mut row).expect("normalize");
+        normalize_row_on_read(compile::SqlDialect::Sqlite, &schema, &mut row).expect("normalize");
 
         assert_eq!(row["secret"], Value::String("AQID".to_string()));
     }
@@ -735,7 +766,12 @@ mod tests {
             "prefs": "{\"theme\":\"dark\"}"
         });
 
-        normalize_row_on_read(&crate::compile::empty_read_schema(), &mut row).expect("normalize");
+        normalize_row_on_read(
+            compile::SqlDialect::Sqlite,
+            &crate::compile::empty_read_schema(),
+            &mut row,
+        )
+        .expect("normalize");
 
         assert_eq!(row["created_at"], crate::value!(1_778_115_723_004i64));
         assert_eq!(
@@ -773,7 +809,7 @@ mod tests {
             "active": 2
         });
 
-        let err = normalize_row_on_read(&schema, &mut row)
+        let err = normalize_row_on_read(compile::SqlDialect::Sqlite, &schema, &mut row)
             .expect_err("declared boolean field must reject out-of-domain values");
         match err {
             CodecError::Internal { message } => {
@@ -783,6 +819,57 @@ mod tests {
                 );
             }
             other => panic!("expected Internal error, got {other:?}"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod json_read_tests {
+    use super::*;
+    use crate::value;
+
+    #[test]
+    fn native_json_strings_remain_strings() {
+        let schema = value!({"payload":{"type":"json"}});
+        for text in ["true", "null", "42", "[1]", "{\"key\":1}", "\"nested\""] {
+            let mut rows = [value!({"payload":text})];
+            decode_rows(compile::SqlDialect::Postgres, &schema, &mut rows).unwrap();
+            assert_eq!(rows[0]["payload"], Value::String(text.into()));
+        }
+    }
+
+    #[test]
+    fn sqlite_json_text_requires_valid_json() {
+        let schema = value!({"payload":{"type":"json"}});
+        let mut rows = [value!({"payload":"secret_invalid_json"})];
+        let error = decode_rows(compile::SqlDialect::Sqlite, &schema, &mut rows).unwrap_err();
+        assert!(error.to_string().contains("payload"));
+        assert!(!error.to_string().contains("secret_invalid_json"));
+    }
+
+    #[test]
+    fn encoded_json_is_parsed_once_and_native_json_is_preserved() {
+        let schema = value!({"payload":{"type":"json"}, "label":{"type":"string"}});
+        let values = value!([
+            "true", "null", "42", "[1]", "{\"key\":1}", "\"nested\"", "plain text",
+            true, false, 42, 1.5, null, {"key":"true"}, [false,"null"],
+        ]);
+        for value in values.as_array().unwrap() {
+            for dialect in [compile::SqlDialect::Postgres, compile::SqlDialect::Sqlite] {
+                let stored = if dialect == compile::SqlDialect::Sqlite {
+                    Value::String(serde_json::to_string(value).unwrap())
+                } else {
+                    value.clone()
+                };
+                let mut rows = [value!({"payload":stored, "label":"true"})];
+                decode_rows(dialect, &schema, &mut rows).unwrap();
+                assert_eq!(&rows[0]["payload"], value);
+                assert_eq!(rows[0]["label"], Value::String("true".into()));
+
+                rows[0]["payload"] = Value::Json(serde_json::to_string(value).unwrap());
+                decode_rows(dialect, &schema, &mut rows).unwrap();
+                assert_eq!(&rows[0]["payload"], value);
+            }
         }
     }
 }
@@ -801,12 +888,24 @@ mod binary_read_tests {
         for logical_type in ["boolean", "bytes", "vector", "geoPoint", "json", "date"] {
             let schema = value!({"classified":{"type":logical_type, "mask":{"kind":"full"}}});
             let mut row = value!({"classified":"***"});
-            decode_rows(&schema, std::slice::from_mut(&mut row)).unwrap();
+            decode_rows(
+                compile::SqlDialect::Sqlite,
+                &schema,
+                std::slice::from_mut(&mut row),
+            )
+            .unwrap();
             assert_eq!(row, value!({"classified":"***"}));
         }
         let unmasked = value!({"classified":{"type":"bytes", "mask":{"kind":"none"}}});
         let mut row = value!({"classified":"***"});
-        assert!(decode_rows(&unmasked, std::slice::from_mut(&mut row)).is_err());
+        assert!(
+            decode_rows(
+                compile::SqlDialect::Sqlite,
+                &unmasked,
+                std::slice::from_mut(&mut row)
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -816,15 +915,30 @@ mod binary_read_tests {
         encode_document(compile::SqlDialect::Sqlite, &schema(), &mut stored).unwrap();
         assert!(stored["embedding"].as_bytes().is_some());
         assert!(stored["location"].as_bytes().is_some());
-        decode_rows(&schema(), std::slice::from_mut(&mut stored)).unwrap();
+        decode_rows(
+            compile::SqlDialect::Sqlite,
+            &schema(),
+            std::slice::from_mut(&mut stored),
+        )
+        .unwrap();
         assert_eq!(stored, expected);
-        decode_rows(&schema(), std::slice::from_mut(&mut stored)).unwrap();
+        decode_rows(
+            compile::SqlDialect::Sqlite,
+            &schema(),
+            std::slice::from_mut(&mut stored),
+        )
+        .unwrap();
         assert_eq!(
             stored, expected,
             "normalization also accepts native PostgreSQL values"
         );
         let mut absent = value!({"embedding":null, "location":null});
-        decode_rows(&schema(), std::slice::from_mut(&mut absent)).unwrap();
+        decode_rows(
+            compile::SqlDialect::Sqlite,
+            &schema(),
+            std::slice::from_mut(&mut absent),
+        )
+        .unwrap();
         assert_eq!(absent, value!({"embedding":null, "location":null}));
     }
 
@@ -855,7 +969,12 @@ mod binary_read_tests {
             ),
         ] {
             let mut row = Value::Object([(field.to_owned(), Value::Bytes(bytes))].into());
-            let error = decode_rows(&schema(), std::slice::from_mut(&mut row)).unwrap_err();
+            let error = decode_rows(
+                compile::SqlDialect::Sqlite,
+                &schema(),
+                std::slice::from_mut(&mut row),
+            )
+            .unwrap_err();
             assert!(error.to_string().contains(field));
         }
         let mut row = value!({"embedding":[f64::MAX, 0.0]});

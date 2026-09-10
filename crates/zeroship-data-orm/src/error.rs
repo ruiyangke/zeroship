@@ -867,6 +867,9 @@ impl From<zeroship_data_sql::codecs::CodecError> for DbError {
             zeroship_data_sql::codecs::CodecError::Validation { code, message } => {
                 Self::validation(code, message)
             }
+            zeroship_data_sql::codecs::CodecError::Decode { column, reason } => {
+                Self::row_decode(&column, reason)
+            }
         }
     }
 }
