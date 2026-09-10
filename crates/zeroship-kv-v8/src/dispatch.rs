@@ -16,13 +16,11 @@
 //! (`kv_non_numeric`, `kv_overflow`, …) reaches JS — the SDK branches
 //! on `err.code` instead of substring-matching.
 
-use std::sync::Arc;
-
 use serde_json::json;
 use zeroship_metering::MeterHandle;
 use zeroship_runtime::state::{OpResult, ResolveValue, SharedState};
 
-use zeroship_kv::{Backend, TtlState};
+use zeroship_kv::{Kv, TtlState};
 
 /// Raw usage metric a kv op emits in its success arm. Reads (`get`,
 /// `list`) bill `kv_reads`; every mutating op (`set`, `delete`, `incr`,
@@ -116,31 +114,24 @@ macro_rules! spawn_kv_op {
 /// `kv.get(key)` → resolves `string | null`.
 pub(crate) fn dispatch_get<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    backend: Arc<dyn Backend>,
-    app_id: String,
+    kv: Kv,
     meter: Option<MeterHandle>,
     key: String,
 ) -> v8::Local<'s, v8::Promise> {
-    spawn_kv_op!(
-        scope,
-        backend,
-        meter,
-        KV_READS,
-        |b| b.get(&app_id, &key),
-        |v: Option<String>| {
-            match v {
-                Some(s) => ResolveValue::String(s),
-                None => ResolveValue::Json("null".to_string()),
-            }
+    spawn_kv_op!(scope, kv, meter, KV_READS, |b| b.get(&key), |v: Option<
+        String,
+    >| {
+        match v {
+            Some(s) => ResolveValue::String(s),
+            None => ResolveValue::Json("null".to_string()),
         }
-    )
+    })
 }
 
 /// `kv.set(key, value, {ttlMs?})` → resolves `{ ok: true }`.
 pub(crate) fn dispatch_set<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    backend: Arc<dyn Backend>,
-    app_id: String,
+    kv: Kv,
     meter: Option<MeterHandle>,
     key: String,
     value: String,
@@ -148,10 +139,10 @@ pub(crate) fn dispatch_set<'s>(
 ) -> v8::Local<'s, v8::Promise> {
     spawn_kv_op!(
         scope,
-        backend,
+        kv,
         meter,
         KV_WRITES,
-        |b| b.set(&app_id, &key, &value, ttl_ms),
+        |b| b.set(&key, &value, ttl_ms),
         |_: ()| ResolveValue::Json(json!({ "ok": true }).to_string())
     )
 }
@@ -159,17 +150,16 @@ pub(crate) fn dispatch_set<'s>(
 /// `kv.delete(key)` → resolves `{ deleted: boolean }`.
 pub(crate) fn dispatch_delete<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    backend: Arc<dyn Backend>,
-    app_id: String,
+    kv: Kv,
     meter: Option<MeterHandle>,
     key: String,
 ) -> v8::Local<'s, v8::Promise> {
     spawn_kv_op!(
         scope,
-        backend,
+        kv,
         meter,
         KV_WRITES,
-        |b| b.delete(&app_id, &key),
+        |b| b.delete(&key),
         |deleted: bool| { ResolveValue::Json(json!({ "deleted": deleted }).to_string()) }
     )
 }
@@ -177,8 +167,7 @@ pub(crate) fn dispatch_delete<'s>(
 /// `kv.incr(key, {by?, ttlMs?})` → resolves `number` (BigInt if large).
 pub(crate) fn dispatch_incr<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    backend: Arc<dyn Backend>,
-    app_id: String,
+    kv: Kv,
     meter: Option<MeterHandle>,
     key: String,
     delta: i64,
@@ -186,10 +175,10 @@ pub(crate) fn dispatch_incr<'s>(
 ) -> v8::Local<'s, v8::Promise> {
     spawn_kv_op!(
         scope,
-        backend,
+        kv,
         meter,
         KV_WRITES,
-        |b| b.incr(&app_id, &key, delta, ttl_ms),
+        |b| b.incr(&key, delta, ttl_ms),
         incr_resolve
     )
 }
@@ -197,8 +186,7 @@ pub(crate) fn dispatch_incr<'s>(
 /// `kv.setIfAbsent(key, value, {ttlMs?})` → resolves `{ stored: boolean }`.
 pub(crate) fn dispatch_set_if_absent<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    backend: Arc<dyn Backend>,
-    app_id: String,
+    kv: Kv,
     meter: Option<MeterHandle>,
     key: String,
     value: String,
@@ -206,10 +194,10 @@ pub(crate) fn dispatch_set_if_absent<'s>(
 ) -> v8::Local<'s, v8::Promise> {
     spawn_kv_op!(
         scope,
-        backend,
+        kv,
         meter,
         KV_WRITES,
-        |b| b.set_if_absent(&app_id, &key, &value, ttl_ms),
+        |b| b.set_if_absent(&key, &value, ttl_ms),
         |stored: bool| ResolveValue::Json(json!({ "stored": stored }).to_string())
     )
 }
@@ -217,18 +205,17 @@ pub(crate) fn dispatch_set_if_absent<'s>(
 /// `kv.expire(key, ttlMs)` → resolves `{ updated: boolean }`.
 pub(crate) fn dispatch_expire<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    backend: Arc<dyn Backend>,
-    app_id: String,
+    kv: Kv,
     meter: Option<MeterHandle>,
     key: String,
     ttl_ms: u64,
 ) -> v8::Local<'s, v8::Promise> {
     spawn_kv_op!(
         scope,
-        backend,
+        kv,
         meter,
         KV_WRITES,
-        |b| b.expire(&app_id, &key, ttl_ms),
+        |b| b.expire(&key, ttl_ms),
         |updated: bool| ResolveValue::Json(json!({ "updated": updated }).to_string())
     )
 }
@@ -241,17 +228,16 @@ pub(crate) fn dispatch_expire<'s>(
 /// - exists, expiring  → `{ ttlMs: <ms> }`
 pub(crate) fn dispatch_ttl<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    backend: Arc<dyn Backend>,
-    app_id: String,
+    kv: Kv,
     meter: Option<MeterHandle>,
     key: String,
 ) -> v8::Local<'s, v8::Promise> {
     spawn_kv_op!(
         scope,
-        backend,
+        kv,
         meter,
         KV_READS,
-        |b| b.ttl(&app_id, &key),
+        |b| b.ttl(&key),
         |state: TtlState| {
             let v = match state {
                 TtlState::Missing => serde_json::Value::Null,
@@ -266,17 +252,16 @@ pub(crate) fn dispatch_ttl<'s>(
 /// `kv.persist(key)` → resolves `{ updated: boolean }`.
 pub(crate) fn dispatch_persist<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    backend: Arc<dyn Backend>,
-    app_id: String,
+    kv: Kv,
     meter: Option<MeterHandle>,
     key: String,
 ) -> v8::Local<'s, v8::Promise> {
     spawn_kv_op!(
         scope,
-        backend,
+        kv,
         meter,
         KV_WRITES,
-        |b| b.persist(&app_id, &key),
+        |b| b.persist(&key),
         |updated: bool| ResolveValue::Json(json!({ "updated": updated }).to_string())
     )
 }
@@ -285,8 +270,7 @@ pub(crate) fn dispatch_persist<'s>(
 /// `{ keys: string[], cursor: string | null }`.
 pub(crate) fn dispatch_list<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    backend: Arc<dyn Backend>,
-    app_id: String,
+    kv: Kv,
     meter: Option<MeterHandle>,
     prefix: String,
     cursor: Option<String>,
@@ -294,10 +278,10 @@ pub(crate) fn dispatch_list<'s>(
 ) -> v8::Local<'s, v8::Promise> {
     spawn_kv_op!(
         scope,
-        backend,
+        kv,
         meter,
         KV_READS,
-        |b| b.list(&app_id, &prefix, cursor.as_deref(), limit),
+        |b| b.list(&prefix, cursor.as_deref(), limit),
         |(keys, next): (Vec<String>, Option<String>)| {
             let next_v = match next {
                 Some(c) => serde_json::Value::String(c),

@@ -203,9 +203,9 @@ pub struct WorkerConfig {
     pub control_url: String,
     pub control_key: String,
     pub db_url: Option<String>,
-    /// Redis URL for the app `env.kv` namespace. `None` ⇒ namespace absent.
-    /// Shared across worker nodes - see `WorkerSettings::kv_url`.
-    pub kv_url: Option<String>,
+    /// Process-owned KV store selected from runtime configuration.
+    /// `None` leaves the app KV namespace absent.
+    pub kv_store: Option<zeroship_kv::KvStore>,
     /// Object-store backend for the app `env.storage` namespace. `None` ⇒
     /// namespace absent. `LocalFs` (a shared volume across nodes) or `S3`
     /// (inherently shared) - see `WorkerSettings::storage_url`.
@@ -590,7 +590,15 @@ fn main() -> std::io::Result<()> {
         "worker blob store configured"
     );
 
-    let kv_url_opt = if kv_url.is_empty() { None } else { Some(kv_url) };
+    let kv_store = if kv_url.is_empty() {
+        None
+    } else {
+        Some(zeroship_kv::KvStore::open(&zeroship_kv::KvConfig::Redis { url: kv_url })
+            .unwrap_or_else(|error| {
+                eprintln!("worker: KV backend init failed: {error}");
+                std::process::exit(1);
+            }))
+    };
     // Resolve S3 credentials NOW (fail fast) for a remote storage backend, so
     // a misconfigured worker refuses to start rather than degrading the
     // namespace silently per thread.
@@ -608,7 +616,7 @@ fn main() -> std::io::Result<()> {
     // creator app). `auth` is always on; `db`/`kv`/`storage` track config.
     tracing::info!(
         db = !db_url.is_empty(),
-        kv = kv_url_opt.is_some(),
+        kv = kv_store.is_some(),
         storage = storage_backend.is_some(),
         storage_kind = storage_backend.as_ref().map_or("absent", StorageBackendConfig::kind),
         auth = true,
@@ -820,7 +828,7 @@ fn main() -> std::io::Result<()> {
         control_url,
         control_key,
         db_url: db_url_opt,
-        kv_url: kv_url_opt,
+        kv_store,
         storage_backend,
         max_isolates,
         max_pinned_isolates_per_app,
@@ -882,7 +890,7 @@ fn main() -> std::io::Result<()> {
                 control_url: config.control_url.clone(),
                 control_key: config.control_key.clone(),
                 db_service: db_service.clone(),
-                kv_url: config.kv_url.clone(),
+                kv_store: config.kv_store.clone(),
                 storage_backend: config.storage_backend.clone(),
                 // The ONE process-wide meter the usage-event outbox drains.
                 meter: Arc::clone(&meter),

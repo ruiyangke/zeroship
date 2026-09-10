@@ -1,6 +1,7 @@
 //! Shared key/value guardrails and backend-independent limits.
 //!
-//! Bindings validate caller input before dispatch; backends accept typed arguments.
+//! Scoped Rust handles validate input; V8 also rejects malformed arguments
+//! synchronously before dispatch. Low-level backends accept typed arguments.
 
 use crate::error::KvError;
 
@@ -56,6 +57,32 @@ pub fn validate_value(value: &str) -> Result<(), KvError> {
         )));
     }
     Ok(())
+}
+
+/// Validate a typed TTL before backend deadline arithmetic or Redis commands.
+///
+/// # Errors
+/// Returns `InvalidArgument` for zero or values above [`MAX_TTL_MS`].
+pub fn validate_ttl_ms(ttl_ms: u64) -> Result<(), KvError> {
+    if ttl_ms == 0 {
+        return Err(KvError::invalid_argument(
+            "kv: ttlMs must be greater than 0",
+        ));
+    }
+    if ttl_ms > MAX_TTL_MS {
+        return Err(KvError::invalid_argument("kv: ttlMs exceeds the maximum"));
+    }
+    Ok(())
+}
+
+/// Normalize a typed page-size hint, using the default when unspecified as zero.
+#[must_use]
+pub fn normalize_list_limit(limit: usize) -> usize {
+    if limit == 0 {
+        LIST_DEFAULT_LIMIT
+    } else {
+        limit.min(LIST_MAX_LIMIT)
+    }
 }
 
 /// Escape Redis glob metacharacters in a literal prefix so a SCAN

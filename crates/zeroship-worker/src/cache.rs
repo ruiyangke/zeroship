@@ -83,12 +83,9 @@ thread_local! {
     /// `DbPlugin` from them - per thread, and before that per `build_runtime`.
     static DB_SERVICE: RefCell<Option<Arc<zeroship_data_v8::service::DbService>>> =
         const { RefCell::new(None) };
-    /// Redis connection URL for the multi-node KV backend. Held per-thread
-    /// like `DB_URL`. When `Some`, `create_plugins` mints a `KvBinding`
-    /// backed by `Redis` (shared across every worker node — see the
-    /// backend-choice rationale on `init_cache`). When `None`, the `kv`
-    /// namespace is simply absent (degrade, don't panic).
-    static KV_URL: RefCell<Option<String>> = const { RefCell::new(None) };
+    /// The process-owned store is configured before worker threads start.
+    /// Isolates receive scoped handles from it through the V8 binding.
+    static KV_STORE: RefCell<Option<zeroship_kv::KvStore>> = const { RefCell::new(None) };
     /// Parsed object-storage backend config for the `env.storage` namespace.
     /// Held per-thread like `DB_URL`. When `Some`, `create_plugins` mints a
     /// `StoragePlugin` over the selected backend: `LocalFs` (a SHARED volume
@@ -115,8 +112,8 @@ thread_local! {
 
 /// Per-thread runtime-kernel config the worker threads each install.
 ///
-/// All four backend handles degrade independently: an absent `db_url` /
-/// `kv_url` / `storage_backend` means that `env.*` namespace is simply not
+/// An absent `db_service`, `kv_store`, or `storage_backend` means that
+/// the corresponding `env.*` namespace is not
 /// registered (matching the long-standing DB behaviour), never a panic.
 /// The real multi-node stack SHOULD set all of them so deployed apps get
 /// the complete `env.{db,kv,storage,auth}` kernel.
@@ -127,7 +124,7 @@ pub struct KernelConfig {
     /// worker thread exists. `None` when no database is configured, in which
     /// case the `db` namespace is simply absent.
     pub db_service: Option<Arc<zeroship_data_v8::service::DbService>>,
-    pub kv_url: Option<String>,
+    pub kv_store: Option<zeroship_kv::KvStore>,
     pub storage_backend: Option<StorageBackendConfig>,
     /// The process-wide usage meter shared with the per-process outbox task
     /// (see `main`). Always set in the real worker; an `Arc<Meter>` is
@@ -138,15 +135,9 @@ pub struct KernelConfig {
 
 /// Install this thread's isolate cache and runtime kernel.
 ///
-/// **`db_service` is assigned unconditionally, and the other handles are not.
-/// That is a behaviour change from the pre-service code, disclosed here because
-/// the step that made it was declared behaviour-neutral.** `DB_URL` used to be
-/// written only inside `if let Some(url) = kernel.db_url`, so a second
-/// `init_cache` carrying no database left the previous one's URL installed - a
-/// kernel that says "no db" could not turn the namespace off. `DB_SERVICE` is
-/// now written on both arms, so `db_service: None` clears the binding and the
-/// `db` namespace really is absent. `kv_url` and `storage_backend` keep the
-/// sticky shape; they are not this contract's to change.
+/// Replacing the kernel also replaces its DB and KV stores. Passing no KV
+/// store removes the previous binding and invalidates cached plugin prototypes.
+/// Storage retains its existing installation behavior.
 pub fn init_cache(max_size: usize, max_pinned_isolates_per_app: usize, kernel: KernelConfig) {
     CACHE.with(|c| {
         *c.borrow_mut() = Some(AppCache {
@@ -157,9 +148,7 @@ pub fn init_cache(max_size: usize, max_pinned_isolates_per_app: usize, kernel: K
         });
     });
     DB_SERVICE.with(|s| *s.borrow_mut() = kernel.db_service);
-    if let Some(url) = kernel.kv_url {
-        KV_URL.with(|u| *u.borrow_mut() = Some(url));
-    }
+    KV_STORE.with(|store| *store.borrow_mut() = kernel.kv_store);
     if let Some(backend) = kernel.storage_backend {
         STORAGE_BACKEND.with(|s| *s.borrow_mut() = Some(backend));
     }
@@ -208,14 +197,10 @@ pub fn db_url() -> Option<String> {
 ///   `env.auth.getUser()` / `env.auth.requireUser()`.
 /// - `db` — pushed when a DB URL is configured. Postgres is inherently
 ///   shared across nodes.
-/// - `kv` — pushed when a KV (Redis) URL is configured, backed by the
-///   `Redis` backend. **Redis is chosen, NOT the single-tenant embedded
-///   `redb` backend**: redb is a per-process file lock, so on an N-node
-///   worker pool each node would hold its own divergent KV (a `set` on
-///   node A invisible on node B). Redis is a shared network store — one
-///   logical keyspace across every node — so KV stays consistent. The
-///   `Redis` backend's URL transparently selects single-node
-///   (`redis://host`) or cluster (`?cluster=true`) mode.
+/// - `kv` — pushed when startup supplied a configured `KvStore`. The
+///   distributed worker selects Redis so nodes share storage; its URL selects
+///   standalone or cluster mode. Isolate construction clones the configured
+///   store and performs no backend selection.
 /// - `storage` — pushed when a storage backend is configured (`--storage-url`).
 ///   `LocalFs` gets multi-node consistency from rooting its path on a SHARED
 ///   volume — the exact pattern the deploy blob store already uses
@@ -273,9 +258,9 @@ fn create_plugins() -> Vec<Arc<dyn NativePlugin>> {
     if let Some(service) = DB_SERVICE.with(|s| s.borrow().clone()) {
         plugins.push(service.plugin());
     }
-    if let Some(url) = KV_URL.with(|u| u.borrow().clone()) {
-        plugins.push(Arc::new(zeroship_kv_v8::KvBinding::with_backend_and_meter(
-            Arc::new(zeroship_kv::Redis::new(url)),
+    if let Some(store) = KV_STORE.with(|s| s.borrow().clone()) {
+        plugins.push(Arc::new(zeroship_kv_v8::KvBinding::new(
+            store,
             meter.clone(),
         )));
     }
@@ -1161,7 +1146,7 @@ mod tests {
                     control_url: "http://127.0.0.1:1".to_string(),
                     control_key: "test-control-key".to_string(),
                     db_service: Some(service),
-                    kv_url: None,
+                    kv_store: None,
                     storage_backend: None,
                     meter: Arc::new(zeroship_metering::Meter::new()),
                 },
@@ -1264,7 +1249,7 @@ mod tests {
             control_url: "http://127.0.0.1:1".to_string(),
             control_key: "test-control-key".to_string(),
             db_service: Some(service),
-            kv_url: None,
+            kv_store: None,
             storage_backend: None,
             meter: Arc::new(zeroship_metering::Meter::new()),
         };
@@ -1324,7 +1309,7 @@ mod tests {
                     "postgres://localhost/zs_unused",
                     "share-test-worker",
                 )),
-                kv_url: None,
+                kv_store: None,
                 storage_backend: None,
                 meter: Arc::new(zeroship_metering::Meter::new()),
             };
@@ -1379,7 +1364,7 @@ mod tests {
                     "postgres://localhost/zs_unused_sticky",
                     "sticky-test-worker",
                 )),
-                kv_url: None,
+                kv_store: None,
                 storage_backend: None,
                 meter: Arc::new(zeroship_metering::Meter::new()),
             };
@@ -1442,7 +1427,12 @@ mod tests {
                         "postgres://localhost/zs_unused",
                         "kernel-test-worker",
                     )),
-                    kv_url: Some("redis://127.0.0.1:6379".to_string()),
+                    kv_store: Some(
+                        zeroship_kv::KvStore::open(&zeroship_kv::KvConfig::Redis {
+                            url: "redis://127.0.0.1:6379".to_string(),
+                        })
+                        .unwrap(),
+                    ),
                     storage_backend: Some(StorageBackendConfig::Local(PathBuf::from(
                         "/tmp/zs-cache-test-storage",
                     ))),
@@ -1470,6 +1460,30 @@ mod tests {
         .expect("kernel-config plugin guard thread panicked");
     }
 
+    #[test]
+    fn replacing_kernel_without_kv_removes_its_cached_binding() {
+        std::thread::spawn(|| {
+            let kernel = |kv_store| KernelConfig {
+                control_url: "http://127.0.0.1:1".to_string(),
+                control_key: String::new(),
+                db_service: None,
+                kv_store,
+                storage_backend: None,
+                meter: Arc::new(zeroship_metering::Meter::new()),
+            };
+            let store = zeroship_kv::KvStore::open(&zeroship_kv::KvConfig::Redis {
+                url: "redis://127.0.0.1:6379".into(),
+            })
+            .unwrap();
+            init_cache(4, 4, kernel(Some(store)));
+            assert!(plugin_set().iter().any(|plugin| plugin.namespace() == "kv"));
+            init_cache(4, 4, kernel(None));
+            assert!(!plugin_set().iter().any(|plugin| plugin.namespace() == "kv"));
+        })
+        .join()
+        .unwrap();
+    }
+
     /// Degrade-don't-panic: with no kv/storage configured (only db), the
     /// kv + storage namespaces are simply absent — `create_plugins()`
     /// never panics. Mirrors the long-standing DB behaviour. Fresh thread
@@ -1484,7 +1498,7 @@ mod tests {
                     control_url: "http://127.0.0.1:1".to_string(),
                     control_key: String::new(),
                     db_service: None,
-                    kv_url: None,
+                    kv_store: None,
                     storage_backend: None,
                     // The meter is always provided (an `Arc<Meter>` is cheap;
                     // there is no degraded "no meter" tier). It is bound into
@@ -1745,7 +1759,7 @@ mod tests {
                         control_url: "http://127.0.0.1:1".to_string(),
                         control_key: String::new(),
                         db_service: None,
-                        kv_url: None,
+                        kv_store: None,
                         storage_backend: None,
                         meter: Arc::new(zeroship_metering::Meter::new()),
                     },
@@ -1807,7 +1821,7 @@ mod tests {
                         control_url: "http://127.0.0.1:1".to_string(),
                         control_key: String::new(),
                         db_service: None,
-                        kv_url: None,
+                        kv_store: None,
                         storage_backend: None,
                         meter: Arc::new(zeroship_metering::Meter::new()),
                     },
@@ -1879,7 +1893,7 @@ mod tests {
                         control_url: "http://127.0.0.1:1".to_string(),
                         control_key: String::new(),
                         db_service: None,
-                        kv_url: None,
+                        kv_store: None,
                         storage_backend: None,
                         meter: Arc::new(zeroship_metering::Meter::new()),
                     },
@@ -1931,7 +1945,7 @@ mod tests {
                         control_url: "http://127.0.0.1:1".to_string(),
                         control_key: String::new(),
                         db_service: None,
-                        kv_url: None,
+                        kv_store: None,
                         storage_backend: None,
                         meter: Arc::new(zeroship_metering::Meter::new()),
                     },

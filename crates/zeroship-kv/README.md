@@ -1,29 +1,62 @@
 # zeroship-kv
 
-App-scoped key-value storage with an async Rust interface. This crate owns the
-`Backend` contract, `KvError`, `TtlState`, key scoping, shared limits, and storage
-implementations. It has no V8, runtime, or metering dependency.
+Key-value storage for Rust platform services and creator apps. `KvStore` opens
+the backend selected by host runtime configuration. It issues cloneable `Kv`
+handles bound to a validated app or platform `Namespace`. Operations validate
+input and return `KvError` and `TtlState` without a V8 or metering dependency.
 
 The `redb` feature enables embedded persistence and file-lock diagnostics. The
 `redis` feature enables the compio Redis driver, including cluster routing.
-Standalone defaults enable both; workspace consumers select their backends
-explicitly. Disable default features to implement the trait without either
-built-in backend.
+Standalone defaults enable both; workspace hosts enable the implementations
+their configuration permits. `KvConfig` selects the active implementation at
+startup. Selecting an implementation absent from the binary is an error, not a
+fallback. Disable default features to supply a custom `Backend` through
+`KvStore::from_backend`.
+
+Hosts translate their settings into `KvConfig::Redis { url }` or
+`KvConfig::Redb { path }`; this crate does not read environment variables.
+Open the store at startup and inject scoped handles into application state:
+
+```rust
+use zeroship_kv::{Kv, KvConfig, KvError, KvStore, Namespace};
+
+fn platform_kv(config: &KvConfig) -> Result<Kv, KvError> {
+    let store = KvStore::open(config)?;
+    Ok(store.namespace(Namespace::platform("control")?))
+}
+
+async fn refresh(kv: &Kv) -> Result<(), KvError> {
+    kv.set("refresh-status", "ready", None).await
+}
+```
+
+Store and handle clones share the backend. Embedded storage opens its file at
+startup, creating missing parent directories. Redis connects lazily on each
+compio thread. Rust values are strings; callers own serialization. Direct Rust
+calls do not emit creator usage metrics.
+
+`Namespace::app` accepts a trusted app identity; `Namespace::platform` reserves
+a separate keyspace for an internal subsystem. A namespace separates keys,
+not credentials: platform-private stores must use credentials unavailable to
+creator workers. Give application code a `Kv`, keeping store ownership and
+namespace selection at the host boundary.
 
 `Backend` is a low-level interface for trusted Rust hosts. Its `app_id` argument
 must come from the host's tenant identity, never from caller-controlled options.
-Hosts validate creator input before calling it: `limits` provides key/value
-validation and the creator-facing limit constants. Values are strings; JSON
-encoding belongs to the caller. Futures are thread-local to support compio.
+Ordinary callers use `Kv`, which enforces shared key/value and TTL validation.
+Direct backend implementors and trusted hosts can use `limits` themselves.
+Futures are thread-local to support compio.
 
 `backend/mod.rs` defines the operation and atomicity contracts.
+`config.rs`, `store.rs`, and `namespace.rs` define runtime selection and the
+scoped Rust interface.
 `backend/redb.rs` owns persistent embedded storage; `backend/redis.rs` owns
 Redis command selection and connection caching. `error.rs` classifies failures
 without deciding how a language binding presents them.
 
 The V8 adapter lives in [zeroship-kv-v8](../zeroship-kv-v8/README.md).
 It supplies JavaScript argument conversion, per-isolate scope, promise handling,
-and platform usage metering. Direct Rust calls are not metered by this crate.
+and platform usage metering over the same scoped Rust operations.
 
 Run the embedded suite with:
 
