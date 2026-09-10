@@ -38,7 +38,7 @@
 
 use compio_postgres::NoTls;
 use zeroship_data_orm::error::DbError;
-use zeroship_data_v8::backend::pg_error;
+use zeroship_data_orm::backend::pg_error;
 // `DbError` is data-core's; lowering it to a V8 `OpError` is the ADAPTER's job,
 // so it arrives as a trait from plugin-db rather than an inherent method.
 use zeroship_data_v8::op_error::ToOpError;

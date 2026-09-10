@@ -1,57 +1,12 @@
-//! Query-build microbench — initial `cargo bench` scaffold for plugin-db.
-//!
-//! ## Why this bench exists
-//!
-//! A `cargo bench` harness is needed under `crates/zeroship-data-v8/benches/`
-//! before further performance work proceeds. This file is the seed of
-//! that harness; future benches can extend it with more paths.
-//!
-//! ## What this bench targets
-//!
-//! The highest-leverage candidate is `row_to_value` — it exercises the
-//! O(N²) column lookup that is the largest remaining structural cost.
-//! However `row_to_value` takes a
-//! `&compio_postgres::Row`, and `Row::new` is `pub(crate)` inside
-//! `compio-postgres`, so a Row cannot be synthesised from outside the
-//! crate without (a) a live Postgres or (b) modifying production code
-//! to expose a constructor.
-//!
-//! Neither option fit this scaffold's scope guards (no production-code
-//! edits, no live Postgres). We instead bench `build_find_with_schema` and
-//! `build_insert` — both `pub` — which:
-//!
-//! 1. exercise `validate_collection` (the byte-prefix check) transitively
-//!    on the hot path, so a future regression in
-//!    `validate_collection` will show up here as a slowdown;
-//! 2. cover the realistic query-build cost the SDK pays on every CRUD
-//!    call (filter parsing, identifier quoting, parameter binding).
-//!
-//! That is no longer the state of things: `row_to_value` IS externally
-//! benchable now, and `bench_row_to_json.rs` sits next to this file. The
-//! route taken was the first of the two this paragraph used to offer -
-//! `compio-postgres` exposes `Row` / `Statement` / `Column` constructors
-//! from `test_utils`, a doc-hidden module there that is always compiled. It
-//! used to sit behind a `test-utils` feature; that flag stopped
-//! `serialized_loop.rs` from building under the plain test command, so it was
-//! removed.
-//!
-//! An earlier version of this paragraph named `test-helpers`, which is THIS
-//! crate's feature and never existed in `compio-postgres` at all - so a reader
-//! following it would look for a feature that is not there and conclude
-//! the work was still undone.
-//!
-//! ## Running
-//!
-//! ```
-//! cargo bench -p zeroship-data-v8 --bench bench_query_build
-//! ```
+//! Benchmark descriptor-aware SQL compilation and native parameter binding.
+//! Run with `cargo bench -p zeroship-data-sql --bench bench_query_build`.
 
 use std::time::Duration;
 
 use criterion::{BatchSize, BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use zeroship_data_sql::value;
 
-use zeroship_data_v8::compile::{build_find_with_schema, build_insert};
+use zeroship_data_sql::compile::{build_find_with_schema, build_insert};
 
 /// The descriptor entry the benchmarked read is projected through.
 ///

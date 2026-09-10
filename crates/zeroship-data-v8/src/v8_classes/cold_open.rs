@@ -288,7 +288,7 @@ fn a_masked_value_multi_column_unmask_opens_the_cold_isolates_backend() {
 fn a_query_hint_carrying_find_opens_the_cold_isolates_backend() {
     let _dir = cold_sqlite_isolate();
     let app_id = "app_cold_qhint";
-    crate::cache_schema_for_tests(
+    zeroship_data_orm::cache_schema_for_tests(
         app_id,
         "users",
         zeroship_data_sql::value!({

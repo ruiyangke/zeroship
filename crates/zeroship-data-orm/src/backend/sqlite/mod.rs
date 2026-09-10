@@ -1462,7 +1462,7 @@ mod backup_sqlite {
 #[cfg(test)]
 mod tests {
     //! Compile-time trait-shape assertions, mirroring the PR-0 set
-    //! at `zeroship_data_v8::backend`'s conformance tests (which target `PostgresBackend`).
+    //! at `zeroship_data_orm::backend`'s conformance tests (which target `PostgresBackend`).
     //! These pin the SQLite-side surface so any future drift in the
     //! capability-trait composition trips compilation here rather
     //! than at a distant orchestrator / context call site.

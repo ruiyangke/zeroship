@@ -220,7 +220,7 @@ fn apply_matrix_schema_ahead_of_postgres(url: &str, app_id: &str, collection: &s
         // Provisioning that role is part of the deploy-time apply, not an
         // afterthought. The role recipe supplies schema and sequence reach; the
         // binding supplies explicit column grants.
-        zeroship_data_v8::auth::bootstrap::ensure_per_app_role(&pool, app_id)
+        zeroship_data_orm::auth::bootstrap::ensure_per_app_role(&pool, app_id)
             .await
             .expect("provision the matrix app's runtime role");
         super::support::grant_all_runtime_table_columns(&pool, app_id, collection).await;

@@ -246,7 +246,7 @@ CREATE INDEX IF NOT EXISTS "notes_created_by_idx" ON "{app}"."notes" ("created_b
         // `DROP SCHEMA CASCADE` there destroys the per-app grants AND the
         // schema's `ALTER DEFAULT PRIVILEGES` entries, and `pg_restore
         // --no-privileges` puts none back.
-        zeroship_data_v8::auth::bootstrap::ensure_per_app_role(&pool, &app)
+        zeroship_data_orm::auth::bootstrap::ensure_per_app_role(&pool, &app)
             .await
             .expect("per-app role must be re-established after the CASCADE");
         support::grant_all_runtime_table_columns(&pool, &app, "notes").await;
@@ -330,7 +330,7 @@ CREATE INDEX "users_created_by_idx" ON "{app}"."users" (created_by);"#
         ))
         .await
         .expect("deploy stand-in must create encrypted users");
-        zeroship_data_v8::auth::bootstrap::ensure_per_app_role(&pool, &app)
+        zeroship_data_orm::auth::bootstrap::ensure_per_app_role(&pool, &app)
             .await
             .expect("per-app role must exist for encrypted users");
         support::grant_all_runtime_table_columns(&pool, &app, "users").await;
@@ -741,7 +741,7 @@ fn revoked_grant_transaction_surfaces_grant_revoked() {
             let _ = worker_connection.run().await;
         })
         .detach();
-        let set_local_role_sql = zeroship_data_v8::auth::bootstrap::set_local_role_sql(&app_id)
+        let set_local_role_sql = zeroship_data_orm::auth::bootstrap::set_local_role_sql(&app_id)
             .expect("grant-revocation app id must produce valid SET LOCAL ROLE SQL");
         worker.batch_execute("BEGIN").await.expect("control BEGIN");
         worker
@@ -1394,7 +1394,7 @@ fn savepoint_rollback_must_not_publish_its_change_event_at_outer_commit() {
 
     // Same thread as `block_on`'s runtime (`RT.with`), so this shares the
     // thread-local broker the dispatch path publishes into.
-    let sub = zeroship_data_v8::broker::subscribe(app, "notes");
+    let sub = zeroship_data_orm::broker::subscribe(app, "notes");
 
     let src = build_src(
         r#"
@@ -1430,7 +1430,7 @@ const _procedures = { savepointEmitLeak };
 
     let mut published: Vec<String> = Vec::new();
     while let Some(msg) = sub.pop() {
-        if let zeroship_data_v8::broker::SubscriptionMessage::Change(ev) = msg {
+        if let zeroship_data_orm::broker::SubscriptionMessage::Change(ev) = msg {
             if let Some(title) = ev.new_tuple.get("title") {
                 published.push(title.clone());
             }
@@ -1722,7 +1722,7 @@ const _procedures = { seed, failBulk };
     assert_eq!(status, 200, "seed failed: {body}");
     assert!(body["json"]["failure"].is_null(), "seed failed: {body}");
 
-    zeroship_data_v8::crud::reset_write_path_counters_for_tests();
+    zeroship_data_orm::crud::reset_write_path_counters_for_tests();
     let (status, body) = dispatch_zs_with_descriptor(
         &url,
         &src,
@@ -1744,7 +1744,7 @@ const _procedures = { seed, failBulk };
         2,
         "the exercised target set must be non-empty: {body}"
     );
-    let counters = zeroship_data_v8::crud::write_path_counters_for_tests();
+    let counters = zeroship_data_orm::crud::write_path_counters_for_tests();
     assert_eq!(
         counters.target_row_resolution_calls, 1,
         "the PG failure must occur on the per-row fan-out path: {counters:?}"
@@ -1756,7 +1756,7 @@ const _procedures = { seed, failBulk };
     );
     let expected_probe_suffix = format!(
         " LIMIT {} FOR UPDATE",
-        zeroship_data_v8::compile::MAX_QUERY_LIMIT + 1
+        zeroship_data_sql::compile::MAX_QUERY_LIMIT + 1
     );
     assert!(
         counters.target_row_resolution_sql[0].ends_with(&expected_probe_suffix),
@@ -1912,7 +1912,7 @@ const _procedures = { poisonThenCommit };
 
 /// Live arms binding the SC-1 reducer's model to a real server.
 ///
-/// The reducer (`zeroship_data_v8::transaction::reducer`) is **pure** - it
+/// The reducer (`zeroship_data_orm::transaction::reducer`) is **pure** - it
 /// owns no session and issues no SQL - so a "live reducer test" would be a
 /// contradiction. What a live arm can and must prove is narrower: that the
 /// three **server behaviours the reducer models** are real on the server we
@@ -1934,7 +1934,7 @@ const _procedures = { poisonThenCommit };
 /// connection: nothing is left in the shared database to drop.
 mod sc1_live {
     use compio_postgres::{Client, NoTls, TransactionStatus};
-    use zeroship_data_v8::transaction::reducer::{
+    use zeroship_data_orm::transaction::reducer::{
         CleanupAck, CleanupGoal, SettleIntent, TerminalOutcome, TerminalResult,
     };
 
@@ -2255,8 +2255,8 @@ mod sc1_live {
 /// ```
 mod sc1_driver {
     use compio_postgres::{Client, NoTls, Pool};
-    use zeroship_data_v8::transaction::probe;
-    use zeroship_data_v8::transaction::reducer::{
+    use zeroship_data_orm::transaction::probe;
+    use zeroship_data_orm::transaction::reducer::{
         CleanupCause, SessionOwnership, TerminalOutcome, TxState,
     };
 
@@ -2279,7 +2279,7 @@ mod sc1_driver {
         zeroship_data_sql::SchemaName::new(app_id).expect("fixture schema name")
     }
 
-    async fn probe_backend() -> zeroship_data_v8::backend::BackendHandle {
+    async fn probe_backend() -> zeroship_data_orm::backend::BackendHandle {
         zeroship_data_v8::tx_scope::ensure_backend()
             .await
             .expect("the adapter funnel must open a backend before BEGIN")
@@ -2970,7 +2970,7 @@ mod sc1_driver {
             assert_eq!(
                 fired.outcome,
                 Some(TerminalOutcome::Cancelled(CleanupCause::DeadlineExpired(
-                    zeroship_data_v8::transaction::reducer::deadline::DeadlineKind::Execution
+                    zeroship_data_orm::transaction::reducer::deadline::DeadlineKind::Execution
                 ))),
                 "the goal NoTransaction is proved by construction - BEGIN was \
                  never sent, so nothing can be open"

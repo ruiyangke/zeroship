@@ -427,7 +427,7 @@ impl Broker {
     /// MUST be refused loudly so the SDK can surface a typed error
     /// rather than open a subscription whose collection may not exist
     /// after the deploy stabilises. The mirror "soft" path is backfill
-    /// pause (see `zeroship_data_v8::backend::BrokerPauseGuard`) which silently
+    /// pause (see `zeroship_data_orm::backend::BrokerPauseGuard`) which silently
     /// drops events at the publisher and emits one `Resync` per active
     /// subscription on disengage — there is no `subscribe()` rejection
     /// there because backfill is internally driven.
@@ -669,9 +669,9 @@ impl Broker {
     /// Push a `Resync` to every active subscription registered for
     /// `app_id`.
     ///
-    /// Invoked from `zeroship_data_v8::backend::BrokerPauseGuard::drop` (after a
+    /// Invoked from `zeroship_data_orm::backend::BrokerPauseGuard::drop` (after a
     /// backfill window) and
-    /// `zeroship_data_v8::backend::SchemaPendingGuard::drop` (after the
+    /// `zeroship_data_orm::backend::SchemaPendingGuard::drop` (after the
     /// schema-pending decoder window ends) per design §16.7.
     ///
     /// **Idempotent on a per-call basis.** Calling
@@ -908,7 +908,7 @@ fn lock_schema_pending() -> MutexGuard<'static, HashSet<String>> {
 /// schema-pending, which the publisher then drops.
 ///
 /// Internal — called from
-/// `zeroship_data_v8::backend::SchemaPendingGuard::new`; production code should
+/// `zeroship_data_orm::backend::SchemaPendingGuard::new`; production code should
 /// reach the guard through `BackendHandle::as_change_stream_*().engage_schema_pending(app_id)`.
 pub fn engage_schema_pending(app_id: &str) {
     lock_schema_pending().insert(app_id.to_string());
@@ -916,7 +916,7 @@ pub fn engage_schema_pending(app_id: &str) {
 
 /// Inverse of [`engage_schema_pending`]. Idempotent — calling on an
 /// app that is not engaged is a no-op. Called from
-/// `zeroship_data_v8::backend::SchemaPendingGuard::drop` before
+/// `zeroship_data_orm::backend::SchemaPendingGuard::drop` before
 /// `resume_app_with_resync` pushes the per-subscription `Resync`.
 pub fn disengage_schema_pending(app_id: &str) {
     lock_schema_pending().remove(app_id);

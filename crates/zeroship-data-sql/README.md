@@ -14,3 +14,6 @@ metadata records database evidence without performing I/O. Migration engines
 own DDL and schema changes.
 
 Architecture: `docs/architecture/data-orm.md`.
+
+Run the query-compilation benchmark with
+`cargo bench -p zeroship-data-sql --bench bench_query_build`.

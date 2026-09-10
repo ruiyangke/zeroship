@@ -67,7 +67,7 @@ use zeroship_data_sql::{
     Predicate as PlanPredicate, ProjectedField as PlanProjectedField, Projection as PlanProjection,
     Returning as PlanReturning, RowLimit as PlanRowLimit, Update as PlanUpdate,
 };
-use zeroship_data_v8::compile::{
+use zeroship_data_sql::compile::{
     SYSTEM_FIELD_NAMES, SqlDialect, SystemFieldAutoBump, build_delete_many, build_delete_one,
     build_insert, build_insert_many, build_restore_many_with_system_fields,
     build_restore_one_with_system_fields, build_returning_expr,
@@ -299,7 +299,7 @@ fn column_grant_ready_statements(app: &str, schema: &Value) -> Vec<Statement> {
     let filter = value!({ "id": "psn_seed" });
     let update = value!({ "nickname": "updated" });
     let mk =
-        |verb: &'static str, bq: zeroship_data_v8::compile::BuiltQuery| (verb, bq.sql, bq.params);
+        |verb: &'static str, bq: zeroship_data_sql::compile::BuiltQuery| (verb, bq.sql, bq.params);
     vec![
         mk(
             "insert",
@@ -391,7 +391,7 @@ fn single_row_statements(app: &str, schema: &Value) -> Vec<Statement> {
     let filter = value!({ "id": "psn_seed" });
     let update = value!({ "nickname": "updated" });
     let mk =
-        |verb: &'static str, bq: zeroship_data_v8::compile::BuiltQuery| (verb, bq.sql, bq.params);
+        |verb: &'static str, bq: zeroship_data_sql::compile::BuiltQuery| (verb, bq.sql, bq.params);
     vec![
         mk(
             "updateOne",

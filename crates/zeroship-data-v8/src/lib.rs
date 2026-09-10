@@ -37,7 +37,6 @@
 // compile time and nothing else.
 #![recursion_limit = "256"]
 
-use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
 use zeroship_data_orm::connection::{BackendUrl, backend_for_url};
@@ -48,23 +47,8 @@ use zeroship_runtime::plugin::{NativePlugin, NativeRegistrar};
 use crate::context::{BackendInitState, with_mut as ctx_mut};
 use zeroship_data_orm::error::DbError;
 
-// Module visibility note:
-//
-// Most modules are `pub(crate)` in normal builds. Several are also
-// consumed by external test crates under `tests/`, which are compiled
-// as separate crate targets. Those need `pub` visibility when the
-// `test-helpers` Cargo feature is enabled automatically by the package
-// self dev-dependency. Ordinary test builds include every integration target.
-// The cfg-fork below keeps the release surface tight while exposing
-// the modules for tests.
-//
-// The unconditionally-`pub` modules (`broker`, `error`, `query`,
-// `v8_classes`) are reached even without the feature — see
-// tests/subscription_finalizer.rs and tests/db_v8_class.rs.
-//
-// The `auth` module is always compiled; the two-arm ladder below only
-// switches its visibility on `test-helpers` so the integration suite
-// can probe the auth surface.
+// The test-helpers feature exposes adapter lifecycle fixtures. Database
+// internals are accessed directly through the ORM and SQL crates.
 
 zeroship_core::declare_env_consumer!(
     /// The database plugin's own environment reads.
@@ -76,212 +60,28 @@ zeroship_core::declare_env_consumer!(
     target = "zeroship-data-v8",
     scope = "plugin_db");
 
-// `broker` MOVED to `zeroship-data-core` on 2026-09-03, and it is the move the
-// CDC extraction was waiting on. Two tiers publish into the broker - the ENGINE
-// on local mutation (`exec::emit_local`) and CDC from the WAL
-// (`wal_consumer`) - and the ADAPTER subscribes. While it lived here it was
-// ENGINE-tier, so `cdc_lifecycle.rs` and `wal_consumer.rs` naming
-// `crate::broker` were CDC-to-ENGINE up-edges; extracting data-engine WITH the
-// broker inside it would have turned them into a CDC/data-engine cycle. A
-// primitive two tiers both use belongs BELOW both.
-//
-// Re-exported rather than repointed, the same mechanism `budgets`, `encryption`
-// and `lock_policy` used: every `crate::broker::*` call site resolves unchanged,
-// including the ~30 in `wal_consumer.rs`.
-pub use zeroship_data_orm::broker;
-// `binding` mirrors `backend` below: crate-private in release builds, `pub`
-// under `test-helpers` so the integration targets can name the `DbBinding` that
-// the descriptor store, the CRUD dispatchers and the search backends are keyed
-// by. It carries no behaviour beyond two owned strings.
-// `binding` and `error` moved to `zeroship-data-core`, the domain tier. Their
-// visibility used to be a cfg-split pair here - `pub(crate)` in a release build,
-// `pub` under `test-helpers` - which does not survive a crate boundary: across
-// crates `cfg(test)` is the DEFINING crate's test build and never fires for a
-// consumer. The domain tier gates the one test-only constructor on the feature
-// alone; see `zeroship-data-core/Cargo.toml`.
-//
-// What stayed is the ADAPTER's half: `op_error` lowers `DbError` into the
-// runtime's `OpError`, because `OpError` is a delivery mechanism and a domain
-// type may not name one.
-pub mod op_error;
-// The advisory-lock RETRY POLICY, split out of `backend::LockManager` on
-// 2026-09-02 for the same reason `op_error` stayed here: the trait is rank-0
-// vocabulary bound for `zeroship-data-core`, and the policy names an executor.
-// A default method body travels with its trait, so the split had to happen
-// before the trait can move, not after.
-// Moved to `zeroship-data-core` on 2026-09-02: both vendor crates call it, so it
-// cannot live above them. Re-exported rather than repointed, so
-// `crate::lock_policy::BoundedLockAcquire` and
-// `zeroship_data_v8::lock_policy::...` both still resolve.
-pub use zeroship_data_orm::lock_policy;
-// The DDL builders + `QueryError` + `SqlDialect` +
-// the system-field / validation helpers were extracted into the leaf crate
-// `zeroship-data-sql`. plugin-db re-exports the module wholesale so every
-// existing `crate::compile::…` reference (and `use crate::compile;` then
-// `compile::…`) resolves unchanged — behaviour identical, no call-site churn.
-pub use zeroship_data_sql::compile;
-pub mod v8_classes;
-
-// The ORM supplies shared data behavior. These imports expose backend helpers
-// only to integration fixtures; production callers use the V8 adapter surface.
-#[cfg(not(feature = "test-helpers"))]
-pub(crate) use zeroship_data_orm::backend;
-#[cfg(feature = "test-helpers")]
-pub use zeroship_data_orm::backend;
-// The engine owns concrete backend composition because it supplies the
-// consumer-side ports implemented by the process broker. Integration targets
-// reach the same production composition under `test-helpers`.
-#[cfg(not(feature = "test-helpers"))]
-pub(crate) use zeroship_data_orm::backend_selection;
-#[cfg(feature = "test-helpers")]
-pub use zeroship_data_orm::backend_selection;
-// The backend registration and transaction lane owner. Crate-private
-// here: nothing outside names either, and the tx-route TYPE has to be nameable
-// wherever the `exec` entry points are, which is why only `tx_route` is `pub`.
-pub(crate) use zeroship_data_orm::backend_handle;
+// Private imports used to compose ORM operations with isolate state.
 #[cfg(any(test, feature = "test-helpers"))]
-pub(crate) use zeroship_data_orm::tx_lanes;
-pub use zeroship_data_orm::tx_route;
-// The operator charter the worker parses once at construction. `pub(crate)`
-// because nothing outside the crate has business reading the assignment
-// authority - the descriptor mirror is what consumers verify against.
-pub(crate) use zeroship_data_orm::system_shape_charter;
-// THE schema authority for the data plane: the runtime descriptor this isolate
-// was built from. One resolution function, no `Option`, no catalog read.
-pub(crate) use zeroship_data_orm::descriptor;
-// Raw usage metrics and the single emit point.
-pub(crate) use zeroship_data_orm::metrics;
+use zeroship_data_orm::tx_lanes;
+use zeroship_data_orm::{
+    auth, backend, backend_selection, broker, crud, descriptor, encryption, exec, metrics,
+    read_set, system_shape_charter, transaction, tx_route,
+};
+use zeroship_data_sql::compile;
+
+pub mod op_error;
+pub mod v8_classes;
 pub(crate) mod context;
-/// This isolate's column-key source, for callers that construct a backend.
-///
-/// A backend constructor takes its key source as a PARAMETER - the per-isolate
-/// context is ENGINE state, and once the backends are their own crates they
-/// cannot name the crate that depends on them. This is the one function that
-/// reads it, exported so a caller holding a pool can pass it in. The engine
-/// composer cannot do the passing for the Postgres arm: taking the pool would
-/// put `compio_postgres::Pool` in an engine signature, which
-/// `tests/vendor_embedding_gate.sh` refuses.
+/// This isolate's column-key source for adapter integration fixtures.
 #[cfg(any(test, feature = "test-helpers"))]
 pub fn isolate_key_source() -> encryption::LocalKeySource {
     context::isolate_key_source()
 }
-/// This isolate's descriptor slice for one collection, for callers that drive a
-/// search backend directly.
-///
-/// Exported for the same reason as [`isolate_key_source`] directly above: the
-/// search traits take the schema as a PARAMETER now, and a caller outside this
-/// crate has to be able to resolve the value the engine would have passed.
-/// Passing `Value::Null` instead is NOT equivalent - the read pipeline refuses
-/// it with `invalid_filter` / "read schema must be a field-map object", which
-/// is how the integration suite caught the substitution.
-#[cfg(any(test, feature = "test-helpers"))]
-pub fn collection_schema(
-    binding: &zeroship_data_orm::binding::DbBinding,
-    collection: &str,
-) -> Result<std::sync::Arc<zeroship_data_sql::value::Value>, DbError> {
-    descriptor::collection_schema(binding, collection)
-}
-// `cross_app_fk` WAS DECLARED HERE and is deleted (2026-09-02), under the
-// split's Phase 0.5 dead-code decision: "giving dead code a crate is how the
-// existing clusters got there". 235 lines and eleven tests, exported `pub` and
-// UNGATED - so it shipped in every binary - with zero production callers; its
-// own rustdoc said "in a default build, nobody".
-//
-// It could not be wired where it lived. Decision 10 removed all DDL from this
-// crate, so no path here sees a `refTarget` before DDL any more. What refuses
-// `other_app.users` today is the charset rule in the engine's `validate_ident`
-// (`zeroship-migrate-core/src/render/declarative.rs`), which `validate_desired`
-// runs over every desired table name; a dot is neither alphanumeric nor `_`.
-// Its two surviving tests moved there as `bare_identifier_tests`, because
-// nothing had ever asserted that refusal.
-//
-// Do NOT read the engine's `validate_cross_app_fk_targets` as the replacement.
-// That is a dangling-target check and explicitly PERMITS a target owned by
-// another member app - the opposite policy, under a confusingly similar name.
-// CRUD orchestration is exposed to integration fixtures with test helpers.
-// Protection passes are imported directly from the ORM's protection module.
-#[cfg(not(feature = "test-helpers"))]
-pub(crate) use zeroship_data_orm::crud;
-#[cfg(feature = "test-helpers")]
-pub use zeroship_data_orm::crud;
-// Runtime catalog metadata consumed by the protection pipelines.
-pub use zeroship_data_sql::catalog;
-// `read_set` MOVED to `zeroship-data-core` on 2026-09-03, ahead of `broker`,
-// which is the only in-crate item it had to shed before the broker could follow
-// it. The read-set is a domain value - a normalised predicate over a row - and
-// it had to go below the ENGINE because the BROKER evaluates it and the broker
-// is named by two tiers at once.
-//
-// Re-exported rather than repointed, the same mechanism `budgets`, `encryption`
-// and `lock_policy` used, so every `crate::read_set::*` call site resolves
-// unchanged.
-//
-// The two-arm ladder is kept because it describes THIS crate's release surface,
-// matching `diff` above: the mask-flip suite asserts that a predicate on a
-// masked column is LOWERED rather than compared as written, and that assertion
-// has to reach `normalise_filter`'s output. The production visibility is
-// unchanged.
-#[cfg(not(feature = "test-helpers"))]
-pub(crate) use zeroship_data_orm::read_set;
-#[cfg(feature = "test-helpers")]
-pub use zeroship_data_orm::read_set;
 pub(crate) mod v8_bridge;
 
-// DB-1 execution budgets MOVED to `zeroship_data_orm::budgets` on 2026-09-02.
-// They are named by a vendor tier (`backend/pg_session_sql.rs`, which renders
-// them into PostgreSQL GUCs) AND by the engine (`transaction/driver.rs`, whose
-// cross-backend protocol deadline is derived from one of them). Two tiers
-// naming one module is what puts it at rank 0, below both.
-//
-// Re-exported here rather than left as a path change for callers to chase: the
-// live suites assert against these guards by name, and `zeroship-data-v8`
-// remains their public surface until the tiers themselves are crates.
-pub use zeroship_data_orm::budgets;
-// Process-wide ownership of the `env.db` primitive: validated configuration,
-// the plugin prototype, the stable thread-resource key, and the neutral
-// operator-lifecycle handle.
 pub mod service;
 
-// Cross-backend column-encryption surface. Always
-// compiled (not gated to `pg` / `sqlite`) because both backends
-// consume it. The pure-Rust crypto module + trait surface underpin
-// the backend impls and CRUD call sites for both PG and SQLite. See
-// `docs/archive/p5-encryption-backup-implementation-plan.md` §9.
-//
-// Visibility: crate-private in release builds; `pub` under
-// `test-helpers` so `tests/integration.rs` can reach
-// `encryption::canonical_aad` etc. for the round-trip + row-swap
-// fences.
-// `encryption` MOVED to `zeroship-data-core` on 2026-09-02, and had to: both
-// backends name `KeyStore` and `LocalKeySource`, so extracting either vendor
-// while this module lived here would have made the vendor crate depend on the
-// adapter that depends on it.
-//
-// Re-exported rather than repointed, so every `crate::encryption::…` call site
-// resolves unchanged - the mechanism `budgets`, `capability` and `storage` used
-// before it. The two-arm ladder is kept because it describes THIS crate's
-// release surface: `pub(crate)` normally, `pub` under `test-helpers` so
-// `tests/integration.rs` can reach `canonical_aad` for the round-trip fences.
-#[cfg(not(feature = "test-helpers"))]
-pub(crate) use zeroship_data_orm::encryption;
-#[cfg(feature = "test-helpers")]
-pub use zeroship_data_orm::encryption;
-
-// `change_stream_pg` is the PG-arm adapter for the `ChangeStream`
-// capability declared in `crate::backend::mod`. The adapter borrows
-// `PostgresBackend` and the underlying replication helpers
-// (`replication.rs` / `wal_consumer.rs`) are PG-only.
-//
-// **The consumer surface used to be `BackendHandle::as_change_stream_pg`, and
-// that accessor is deleted.** It made the dispatch enum - a data-engine type -
-// name this CDC module, so `backend_handle.rs` could not move to data-engine
-// without dragging CDC along (#163). Callers now construct
-// `PgChangeStream::new` directly from the `Rc<PostgresBackend>` they already
-// hold, which is the direction that works: CDC composing over the vendor arm.
-//
-// Test visibility follows the `encryption` idiom directly above: crate-private
-// in a shipped build, `pub` under `test-helpers` so `tests/integration.rs` can
-// build a consumer without the enum growing an accessor for its benefit.
+// PostgreSQL change delivery composes the ORM backend with replication.
 #[cfg(not(feature = "test-helpers"))]
 pub(crate) mod change_stream_pg;
 #[cfg(feature = "test-helpers")]
@@ -290,32 +90,6 @@ pub mod change_stream_pg;
 // Process-wide owner for per-app CDC consumers. Native Subscription wrappers
 // acquire leases here so all isolates in one worker share one logical slot.
 mod cdc_lifecycle;
-
-// `mod audit` is DELETED, name included. It owned the per-app
-// `__zeroship_migrations` table, which despite the name was never a
-// migration record: it was the provenance log for the DDL the data plane
-// itself issued (`create_index_with_recovery_audited`, the two
-// `ensure_*_index` hooks). With that DDL gone the log has nothing to
-// record, and it went in the same change rather than before it -
-// dropping the log first would have kept the writer while losing the
-// provenance the log existed to give it.
-
-// The `auth` module is always compiled: `auth::bootstrap` carries the
-// per-app PG role machinery the data plane runs on every transaction.
-// The `keys` / `session` submodules and the platform-owned system schema they
-// spoke to are deleted -- see `auth/mod.rs` for why they are not coming back.
-// `auth::util` was the shared-helper subtree the SQLite `SessionMinter` impl
-// reused; that impl was deleted on 2026-09-02 and `util` followed it on
-// 2026-09-04, having had no consumer in any crate or cfg in between.
-#[cfg(not(feature = "test-helpers"))]
-pub(crate) use zeroship_data_orm::auth;
-#[cfg(feature = "test-helpers")]
-pub use zeroship_data_orm::auth;
-
-#[cfg(not(feature = "test-helpers"))]
-pub(crate) use zeroship_data_orm::exec;
-#[cfg(feature = "test-helpers")]
-pub use zeroship_data_orm::exec;
 
 // COMPILED ONLY INTO TEST BUILDS, and that is now structural rather than
 // documented. `drop_namespace` has no production caller anywhere in the
@@ -341,11 +115,6 @@ pub mod replication;
 
 /// Operator-owned cleanup for abandoned worker replication slots.
 pub mod slot_reaper;
-
-#[cfg(not(feature = "test-helpers"))]
-pub(crate) use zeroship_data_orm::transaction;
-#[cfg(feature = "test-helpers")]
-pub use zeroship_data_orm::transaction;
 
 // Async-scoped transaction marker. Read by `transaction` to tell a
 // genuinely NESTED `transaction()` call from one that merely overlaps
@@ -702,19 +471,6 @@ mod runtime_descriptor_binding_tests {
     }
 }
 
-// The two bench entry points live in `backend::pg_row_json`, beside the decoders
-// they measure, and are re-exported here so `zeroship_data_v8::…_for_bench`
-// keeps resolving for the Criterion targets and the integration test.
-//
-// They were DEFINED here until 2026-09-01, which put `&compio_postgres::Row`
-// into two always-compiled `pub fn` signatures in the crate whose whole claim is
-// that it is a thin Rust/V8 seam - a seam cannot link a database driver. A
-// `pub use` names no type, so the re-export costs the adapter nothing. When
-// `pg_row_json` becomes `data-postgres`, the benches move with it and this line
-// is deleted rather than rewritten.
-#[doc(hidden)]
-pub use backend::pg_row_json::{first_row_or_null_for_bench, row_to_value_for_bench};
-
 /// **Test-only**: install this thread's DB resources directly, bypassing the
 /// usual `DbService` → `DbPlugin::register()` path. Used by integration tests
 /// that drive DB ops directly without spinning up a full runtime.
@@ -873,13 +629,6 @@ impl Drop for SuppliedRootKeysGuard {
 pub fn set_sqlite_backend_for_tests(backend: Rc<crate::backend::sqlite::SqliteBackend>) {
     ctx_mut(|c| c.set_sqlite_backend(backend));
 }
-
-// The two descriptor-store fixtures MOVED to `zeroship-data-orm` with the
-// engine tier: they touch `zeroship_data_orm::schema_cache` and nothing else,
-// and the CRUD passes that call them are the engine's. Re-exported here so the
-// integration targets and this crate's own tests keep the same path.
-#[cfg(any(test, feature = "test-helpers"))]
-pub use zeroship_data_orm::{cache_schema_for_deploy_for_tests, cache_schema_for_tests};
 
 /// Clear the cold-start binding's policy for an integration fixture.
 #[cfg(any(test, feature = "test-helpers"))]

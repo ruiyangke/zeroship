@@ -174,12 +174,14 @@ fn decode_geography(bytes: &[u8]) -> Result<Value, String> {
 }
 
 /// Benchmark entry point for native row decoding.
+#[cfg(feature = "test-helpers")]
 #[doc(hidden)]
 pub fn row_to_value_for_bench(row: &Row) -> Result<Value, DbError> {
     row_to_value(row)
 }
 
 /// Benchmark the native first-row projection used before V8 materialization.
+#[cfg(feature = "test-helpers")]
 #[doc(hidden)]
 pub fn first_row_or_null_for_bench(rows: &[Row]) -> Result<Value, DbError> {
     rows.first()

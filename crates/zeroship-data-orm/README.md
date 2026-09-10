@@ -7,6 +7,10 @@ Host services supply tenant routing, protection, search, and change publication;
 none of these are requirements on a driver. The crate has no V8 dependency.
 Architecture and ownership: `docs/architecture/data-orm.md`.
 
+Use the `bench_row_decode` and `bench_first_row_or_null` targets with
+`cargo bench -p zeroship-data-orm`. They exercise the row codec without
+constructing a V8 runtime.
+
 The host supplies a `DbBinding`, a `BackendHandle`, and the deployment's runtime
 collection descriptors. `Database::new` takes an explicit `OrmContext` with installed descriptors;
 `Database::from_schema` creates an independent context, validates and installs field maps. `Database::connect`

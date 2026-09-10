@@ -76,7 +76,7 @@ impl PostgresBackend {
     ///
     /// The lookup did not disappear; it moved up to the composer that always
     /// owned the context,
-    /// `zeroship_data_v8::backend_selection`. The old `new()`
+    /// `zeroship_data_orm::backend_selection`. The old `new()`
     /// even documented the hazard it created - "do not call this from inside a
     /// `context::with` closure, it takes a context borrow of its own" - which
     /// is what a fetch buried in a constructor costs.

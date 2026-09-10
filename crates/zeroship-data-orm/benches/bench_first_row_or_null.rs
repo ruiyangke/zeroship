@@ -1,35 +1,5 @@
-//! Row-decoding microbench — measures `row_to_value` against synthesised
-//! `compio_postgres::Row` values of varying width.
-//!
-//! ## Why this bench exists
-//!
-//! This harness measures the index-lookup fix that dropped
-//! `row_to_value`'s per-column resolution from O(N²) (linear `position`
-//! over `row.columns()` keyed on column NAME) to O(N) (direct `usize`
-//! index). The pre-existing `bench_query_build` harness covers SQL
-//! construction only — it never enters `v8_bridge::row_to_value` at all,
-//! so that win was otherwise invisible to benchmarking.
-//!
-//! This file unblocks measurement by synthesising rows from outside the
-//! crate. The blocker was that `compio_postgres::Row::new` is
-//! `pub(crate)`; this is worked around with
-//! `compio_postgres::test_utils::row_for_test` (doc-hidden there, and always
-//! compiled).
-//!
-//! ## Workloads
-//!
-//! Three column-count points (narrow / medium / wide) mixing the OID
-//! branches `column_to_value` actually decodes in production:
-//! `INT4` (23), `INT8` (20), `BOOL` (16), `TEXT` (25), `JSONB` (3802),
-//! `TIMESTAMPTZ` (1184). The exact wire-format encoding for each is
-//! built once outside the bench loop; the timed work is purely the
-//! `Row::columns() → column_to_value` traversal.
-//!
-//! ## Running
-//!
-//! ```text
-//! cargo bench -p zeroship-data-v8 --bench bench_row_to_json
-//! ```
+//! Compare native first-row decoding with its explicit JSON serialization tail.
+//! Run with `cargo bench -p zeroship-data-orm --bench bench_first_row_or_null`.
 
 use std::time::Duration;
 
@@ -38,15 +8,13 @@ use compio_postgres::test_utils::{column_for_test, row_for_test};
 use compio_postgres::types::Type;
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 
-use zeroship_data_v8::row_to_value_for_bench;
+use zeroship_data_orm::backend::postgres::pg_row_json::first_row_or_null_for_bench;
 
 // ---------------------------------------------------------------------------
 // Wire-format encoders for the OID branches we exercise
 // ---------------------------------------------------------------------------
 //
-// All Postgres binary wire encodings; column_to_value's branches consume
-// them as-is. Sourced from postgres-types' ToSql impls (verified against
-// crates/zeroship-data-v8/src/v8_bridge.rs::column_to_value:372-505).
+// PostgreSQL binary wire encodings consumed by the ORM row codec.
 
 fn enc_int4(v: i32) -> Vec<u8> {
     v.to_be_bytes().to_vec()
@@ -138,8 +106,7 @@ fn unit_fixtures(prefix: &str) -> Vec<ColFixture> {
 }
 
 /// Narrow row: 3 columns (INT4 + TEXT + INT8). Mirrors a primary-key
-/// and name lookup. Sized so the linear-scan / index-scan cost is roughly
-/// equal — useful as a baseline.
+/// + name lookup.
 fn narrow_row() -> Row {
     build_row(vec![
         fixture("id", Type::INT8, enc_int8(1)),
@@ -180,57 +147,60 @@ fn wide_row() -> Row {
 // Bench groups
 // ---------------------------------------------------------------------------
 
-fn bench_row_to_json(c: &mut Criterion) {
-    let mut group = c.benchmark_group("row_to_value");
+fn bench_first_row_or_null(c: &mut Criterion) {
+    let mut group = c.benchmark_group("first_row_or_null");
     group.measurement_time(Duration::from_secs(3));
     group.warm_up_time(Duration::from_secs(1));
 
-    let narrow = narrow_row();
-    let medium = medium_row();
-    let wide = wide_row();
+    // `Query.first()` always materialises exactly one row at the SDK
+    // boundary (the SQL builder appends `LIMIT 1`), so each input is a
+    // 1-element slice. Keeping the slice constructed once outside the
+    // loop holds
+    // allocation out of the timed work — only the decode + serialise
+    // path is measured.
+    let narrow: [Row; 1] = [narrow_row()];
+    let medium: [Row; 1] = [medium_row()];
+    let wide: [Row; 1] = [wide_row()];
 
-    // Sanity: every fixture decodes to a JSON object with the expected
-    // column count. Catches wire-format breakage in `enc_*` before the
-    // bench produces nonsense numbers.
+    // Verify fixture decoding before measuring it.
     {
-        let v = row_to_value_for_bench(&narrow).unwrap();
+        let v = first_row_or_null_for_bench(&narrow).unwrap();
         assert_eq!(
             v.as_object().expect("narrow → object").len(),
             3,
-            "narrow row should decode 3 columns",
+            "narrow row should serialise 3 columns",
         );
-        let v = row_to_value_for_bench(&medium).unwrap();
+        let v = first_row_or_null_for_bench(&medium).unwrap();
         assert_eq!(
             v.as_object().expect("medium → object").len(),
             10,
-            "medium row should decode 10 columns",
+            "medium row should serialise 10 columns",
         );
-        let v = row_to_value_for_bench(&wide).unwrap();
+        let v = first_row_or_null_for_bench(&wide).unwrap();
         assert_eq!(
             v.as_object().expect("wide → object").len(),
             50,
-            "wide row should decode 50 columns",
+            "wide row should serialise 50 columns",
         );
     }
 
-    group.bench_function("narrow_3cols", |b| {
-        b.iter(|| {
-            black_box(row_to_value_for_bench(black_box(&narrow)).unwrap());
+    for (name, rows) in [
+        ("narrow", narrow.as_slice()),
+        ("medium", medium.as_slice()),
+        ("wide", wide.as_slice()),
+    ] {
+        group.bench_function(format!("native/{name}"), |b| {
+            b.iter(|| black_box(first_row_or_null_for_bench(black_box(rows)).unwrap()));
         });
-    });
-    group.bench_function("medium_10cols", |b| {
-        b.iter(|| {
-            black_box(row_to_value_for_bench(black_box(&medium)).unwrap());
+        group.bench_function(format!("json_boundary/{name}"), |b| {
+            b.iter(|| {
+                let value = first_row_or_null_for_bench(black_box(rows)).unwrap();
+                black_box(serde_json::to_string(&value).unwrap());
+            });
         });
-    });
-    group.bench_function("wide_50cols", |b| {
-        b.iter(|| {
-            black_box(row_to_value_for_bench(black_box(&wide)).unwrap());
-        });
-    });
-
+    }
     group.finish();
 }
 
-criterion_group!(benches, bench_row_to_json);
+criterion_group!(benches, bench_first_row_or_null);
 criterion_main!(benches);

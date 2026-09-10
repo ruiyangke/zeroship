@@ -29,15 +29,15 @@ use std::rc::Rc;
 use zeroship_core::change_event::ChangeOp;
 use zeroship_data_orm::binding::DbBinding;
 use zeroship_data_orm::error::DbError;
-use zeroship_data_v8::backend::sqlite::SqliteBackend;
-use zeroship_data_v8::backend::sqlite::reservation::{CancelCleanup, TerminalOutcome};
-use zeroship_data_v8::backend::sqlite::session::TerminalIntent;
-use zeroship_data_v8::backend::{BackendHandle, LockManager, LockScope};
-use zeroship_data_v8::backend_selection::new_sqlite_backend;
+use zeroship_data_orm::backend::sqlite::SqliteBackend;
+use zeroship_data_orm::backend::sqlite::reservation::{CancelCleanup, TerminalOutcome};
+use zeroship_data_orm::backend::sqlite::session::TerminalIntent;
+use zeroship_data_orm::backend::{BackendHandle, LockManager, LockScope};
+use zeroship_data_orm::backend_selection::new_sqlite_backend;
 // The bounded-retry surface is the policy extension trait, not `LockManager`.
-use zeroship_data_v8::broker::{Subscription, SubscriptionMessage, subscribe};
-use zeroship_data_v8::compile::raw_column_name;
-use zeroship_data_v8::lock_policy::BoundedLockAcquire;
+use zeroship_data_orm::broker::{Subscription, SubscriptionMessage, subscribe};
+use zeroship_data_sql::compile::raw_column_name;
+use zeroship_data_orm::lock_policy::BoundedLockAcquire;
 
 /// Spin up a fresh `SqliteBackend` rooted at a per-test temp dir.
 ///
@@ -71,7 +71,7 @@ fn fresh_backend() -> (SqliteBackend, tempfile::TempDir) {
 /// (`prepare_unmask_backend` -> `backend.prepare_for_app`); the OPEN half is
 /// bound separately and by name, by the three
 /// `cold_*_open_comes_from_ensure_backend_not_the_fixture` tests below.
-async fn unmask_backend() -> zeroship_data_v8::backend::BackendHandle {
+async fn unmask_backend() -> zeroship_data_orm::backend::BackendHandle {
     zeroship_data_v8::tx_scope::ensure_backend()
         .await
         .expect("the backend the V8 dispatcher would have opened")
@@ -82,8 +82,8 @@ async fn unmask_backend() -> zeroship_data_v8::backend::BackendHandle {
 /// See the twin in `mask_flip.rs` for why. No fixture that reaches it here
 /// parks a transaction, so every call binds `in_tx = false` and takes the lane
 /// it took before - `op_conn`, on this tier.
-async fn unmask_route(app: &str) -> zeroship_data_v8::tx_route::TxRoute {
-    zeroship_data_v8::exec::ambient_route_for_tests(app, unmask_backend().await)
+async fn unmask_route(app: &str) -> zeroship_data_orm::tx_route::TxRoute {
+    zeroship_data_orm::exec::ambient_route_for_tests(app, unmask_backend().await)
 }
 
 /// Drive a future to completion on a fresh compio runtime. The
@@ -1522,7 +1522,7 @@ fn backfill_run_pauses_broker_and_emits_one_resync() {
         // `wal_consumer::suppress_app(app_id)`; the publisher's
         // per-event check drops every packet for this app until the
         // guard drops.
-        let guard = zeroship_data_v8::broker::BrokerPauseGuard::new("app_backfill".to_string());
+        let guard = zeroship_data_orm::broker::BrokerPauseGuard::new("app_backfill".to_string());
 
         // INSERT 100 rows under the suppression window. Each statement
         // routes through the session actor, the preupdate hook fires,
@@ -1650,7 +1650,7 @@ fn schema_pending_decoder_drops_then_resyncs() {
         // `broker::engage_schema_pending(app_id)`; both the publisher
         // suppression check AND the `Broker::try_subscribe` rejection
         // branch activate.
-        let guard = zeroship_data_v8::broker::SchemaPendingGuard::new("app_pending".to_string());
+        let guard = zeroship_data_orm::broker::SchemaPendingGuard::new("app_pending".to_string());
 
         // INSERT 50 rows under the schema-pending window. Same shape
         // as the backfill test above — packets ship, publisher drops.
@@ -1670,7 +1670,7 @@ fn schema_pending_decoder_drops_then_resyncs() {
         // callers); the SDK boundary that lands later wires
         // `try_subscribe` so the JS layer can branch on
         // `e.code === "schema_pending"`.
-        let attempt = zeroship_data_v8::broker::try_subscribe("app_pending", "other_collection");
+        let attempt = zeroship_data_orm::broker::try_subscribe("app_pending", "other_collection");
         match &attempt {
             Err(DbError::Coded { code, .. }) => {
                 assert_eq!(
@@ -1833,7 +1833,7 @@ fn backfill_pauses_broker_via_orchestrator_api_and_emits_one_resync() {
                 .get_rc::<zeroship_data_orm::backend::SqliteBackend>()
                 .expect("SQLite fixture"),
         );
-        let guard = zeroship_data_v8::broker::BrokerPauseGuard::new("app_orch".to_string());
+        let guard = zeroship_data_orm::broker::BrokerPauseGuard::new("app_orch".to_string());
 
         // Pull a Rc-clone of the inner backend so we can issue the
         // 100 INSERTs against it. (The `BackendHandle::Sqlite` arm owns
@@ -1944,7 +1944,7 @@ fn backfill_pauses_broker_via_orchestrator_api_and_emits_one_resync() {
 // `backend/sqlite/mod.rs`'s `VectorIndex` block.
 // ---------------------------------------------------------------------------
 
-use zeroship_data_v8::backend::VectorMetric;
+use zeroship_data_orm::backend::VectorMetric;
 
 /// Encode a `Vec<f32>` as a SQLite `x'<hex>'` blob literal.
 ///
@@ -2178,7 +2178,7 @@ fn the_search_really_depends_on_the_name_the_engine_records() {
             )
             .await
             .expect("CREATE TABLE docs");
-        zeroship_data_v8::cache_schema_for_tests(
+        zeroship_data_orm::cache_schema_for_tests(
             "vector_wrongname",
             "docs",
             zeroship_data_sql::value!({ "embedding": { "type": "vector", "vectorDims": 8 } }),
@@ -2231,7 +2231,7 @@ fn the_search_really_depends_on_the_name_the_engine_records() {
                     k: 4,
                     metric: VectorMetric::Cosine,
                     filter: &zeroship_data_sql::value::Value::Null,
-                    schema: &zeroship_data_v8::collection_schema(
+                    schema: &zeroship_data_orm::descriptor::collection_schema(
                         &DbBinding::cold_start("vector_wrongname"),
                         "docs",
                     )
@@ -2279,7 +2279,7 @@ fn vector_search_returns_k_nearest_sqlite() {
             )
             .await
             .expect("CREATE TABLE docs");
-        zeroship_data_v8::cache_schema_for_tests(
+        zeroship_data_orm::cache_schema_for_tests(
             "vector_topk",
             "docs",
             zeroship_data_sql::value!({ "embedding": { "type": "vector", "vectorDims": 8 } }),
@@ -2317,7 +2317,7 @@ fn vector_search_returns_k_nearest_sqlite() {
                     k: 10,
                     metric: VectorMetric::Cosine,
                     filter: &zeroship_data_sql::value::Value::Null,
-                    schema: &zeroship_data_v8::collection_schema(
+                    schema: &zeroship_data_orm::descriptor::collection_schema(
                         &DbBinding::cold_start("vector_topk"),
                         "docs",
                     )
@@ -2437,7 +2437,7 @@ fn vector_search_respects_filter_sqlite() {
             )
             .await
             .expect("CREATE TABLE docs");
-        zeroship_data_v8::cache_schema_for_tests(
+        zeroship_data_orm::cache_schema_for_tests(
             "vector_filter",
             "docs",
             zeroship_data_sql::value!({
@@ -2496,7 +2496,7 @@ fn vector_search_respects_filter_sqlite() {
                     k: 10,
                     metric: VectorMetric::Cosine,
                     filter: &filter,
-                    schema: &zeroship_data_v8::collection_schema(
+                    schema: &zeroship_data_orm::descriptor::collection_schema(
                         &DbBinding::cold_start("vector_filter"),
                         "docs",
                     )
@@ -2554,7 +2554,7 @@ fn vector_l2_distance_matches_cosine_for_unit_vectors_sqlite() {
             )
             .await
             .expect("CREATE TABLE docs");
-        zeroship_data_v8::cache_schema_for_tests(
+        zeroship_data_orm::cache_schema_for_tests(
             "vector_math",
             "docs",
             zeroship_data_sql::value!({
@@ -2603,7 +2603,7 @@ fn vector_l2_distance_matches_cosine_for_unit_vectors_sqlite() {
                     k: 2,
                     metric: VectorMetric::Cosine,
                     filter: &zeroship_data_sql::value::Value::Null,
-                    schema: &zeroship_data_v8::collection_schema(
+                    schema: &zeroship_data_orm::descriptor::collection_schema(
                         &DbBinding::cold_start("vector_math"),
                         "docs",
                     )
@@ -2623,7 +2623,7 @@ fn vector_l2_distance_matches_cosine_for_unit_vectors_sqlite() {
                     k: 2,
                     metric: VectorMetric::L2,
                     filter: &zeroship_data_sql::value::Value::Null,
-                    schema: &zeroship_data_v8::collection_schema(
+                    schema: &zeroship_data_orm::descriptor::collection_schema(
                         &DbBinding::cold_start("vector_math"),
                         "docs",
                     )
@@ -2671,7 +2671,7 @@ fn vector_l2_distance_matches_cosine_for_unit_vectors_sqlite() {
 // Like the vector tests, we construct table DDL inline and exercise the
 // SQLite geopoint encoding directly.
 
-use zeroship_data_v8::backend::GeoPoint;
+use zeroship_data_orm::backend::GeoPoint;
 
 /// Encode a `GeoPoint` as a SQLite `x'<hex>'` blob literal — 2× LE
 /// f64 = 16 bytes. Mirrors `vec_to_hex_lit` for vectors. We use this
@@ -2723,7 +2723,7 @@ fn near_returns_within_radius() {
             )
             .await
             .expect("CREATE TABLE places");
-        zeroship_data_v8::cache_schema_for_tests(
+        zeroship_data_orm::cache_schema_for_tests(
             "near_radius",
             "places",
             zeroship_data_sql::value!({ "location": { "type": "geoPoint" } }),
@@ -2776,7 +2776,7 @@ fn near_returns_within_radius() {
                     radius_m: 1000.0,
                     filter: &zeroship_data_sql::value::Value::Null,
                     limit: None,
-                    schema: &zeroship_data_v8::collection_schema(
+                    schema: &zeroship_data_orm::descriptor::collection_schema(
                         &DbBinding::cold_start("near_radius"),
                         "places",
                     )
@@ -2868,7 +2868,7 @@ fn a_near_inside_a_transaction_sees_the_row_that_transaction_inserted() {
             )
             .await
             .expect("CREATE TABLE places");
-        zeroship_data_v8::cache_schema_for_tests(
+        zeroship_data_orm::cache_schema_for_tests(
             app,
             "places",
             zeroship_data_sql::value!({ "location": { "type": "geoPoint" } }),
@@ -2909,14 +2909,14 @@ fn a_near_inside_a_transaction_sees_the_row_that_transaction_inserted() {
             "radius": 1000.0,
         });
         let near_on = async |route| {
-            let plan = zeroship_data_v8::crud::plan_near(
+            let plan = zeroship_data_orm::crud::plan_near(
                 &binding,
-                zeroship_data_v8::compile::SqlDialect::Sqlite,
+                zeroship_data_sql::compile::SqlDialect::Sqlite,
                 "places",
                 &args,
             )
             .expect("plan_near");
-            zeroship_data_v8::crud::run_near(&route, binding.clone(), "places".to_string(), plan)
+            zeroship_data_orm::crud::run_near(&route, binding.clone(), "places".to_string(), plan)
                 .await
                 .expect("run_near")
                 .rows
@@ -2926,9 +2926,9 @@ fn a_near_inside_a_transaction_sees_the_row_that_transaction_inserted() {
         // cannot see the row, so an empty result here is what proves the
         // subject arm below is about the lane.
         let outside = near_on(
-            zeroship_data_v8::tx_route::CapturedRoute::pool_for_tests(
+            zeroship_data_orm::tx_route::CapturedRoute::pool_for_tests(
                 app,
-                zeroship_data_v8::compile::SqlDialect::Sqlite,
+                zeroship_data_sql::compile::SqlDialect::Sqlite,
             )
             .bind(handle.clone()),
         )
@@ -2941,9 +2941,9 @@ fn a_near_inside_a_transaction_sees_the_row_that_transaction_inserted() {
 
         // ---- SUBJECT: the same near on the transaction's own lane.
         let inside = near_on(
-            zeroship_data_v8::tx_route::CapturedRoute::tx_for_tests(
+            zeroship_data_orm::tx_route::CapturedRoute::tx_for_tests(
                 app,
-                zeroship_data_v8::compile::SqlDialect::Sqlite,
+                zeroship_data_sql::compile::SqlDialect::Sqlite,
             )
             .bind(handle.clone()),
         )
@@ -3279,7 +3279,7 @@ fn dispatch_sqlite_runtime(
 }
 
 fn assert_write_path_fast_path(label: &str) {
-    let counters = zeroship_data_v8::crud::write_path_counters_for_tests();
+    let counters = zeroship_data_orm::crud::write_path_counters_for_tests();
     assert_eq!(
         counters.target_row_resolution_calls, 0,
         "{label}: plain write must not resolve row ids: {counters:?}",
@@ -3296,10 +3296,10 @@ fn insert_many_encrypts_ciphertext_before_sqlite_storage() {
         use std::collections::HashMap;
 
         use base64::Engine as _;
-        use zeroship_data_v8::backend::EncryptionMode;
-        use zeroship_data_v8::backend::sqlite::session::TypedCell;
-        use zeroship_data_v8::compile::{SqlDialect, build_insert_many_with_dialect};
-        use zeroship_data_v8::encryption;
+        use zeroship_data_orm::backend::EncryptionMode;
+        use zeroship_data_orm::backend::sqlite::session::TypedCell;
+        use zeroship_data_sql::compile::{SqlDialect, build_insert_many_with_dialect};
+        use zeroship_data_orm::encryption;
 
         let key_id = "c1_insert_many";
         let _keys = with_root_key("c1_insert_many", &"d".repeat(64));
@@ -3448,7 +3448,7 @@ fn insert_many_encrypts_ciphertext_before_sqlite_storage() {
                 stored_blob, expected_ciphertext,
                 "raw stored bytes must match the write-side ciphertext",
             );
-            let plaintext = zeroship_data_v8::encryption::aead::decrypt(
+            let plaintext = zeroship_data_orm::encryption::aead::decrypt(
                 &key,
                 &stored_blob,
                 &encryption::canonical_aad(collection, "ssn", Some(id.as_bytes())),
@@ -3547,9 +3547,9 @@ fn upsert_conflict_update_preserves_insert_only_fields_and_encrypts_sqlite_runti
     let _keys = with_root_key("c2_upsert_runtime_conflict", &"f".repeat(64));
 
     run(async {
-        use zeroship_data_v8::backend::EncryptionMode;
-        use zeroship_data_v8::backend::sqlite::session::TypedCell;
-        use zeroship_data_v8::encryption;
+        use zeroship_data_orm::backend::EncryptionMode;
+        use zeroship_data_orm::backend::sqlite::session::TypedCell;
+        use zeroship_data_orm::encryption;
 
         let dir = tempfile::tempdir().expect("tempdir");
         let schema = users_encrypted_ssn_schema(key_id);
@@ -3710,7 +3710,7 @@ const _procedures = { upsertConflict };
             .resolve("default", key_id)
             .await
             .expect("resolve key");
-        let plaintext = zeroship_data_v8::encryption::aead::decrypt(
+        let plaintext = zeroship_data_orm::encryption::aead::decrypt(
             &key,
             &stored_blob,
             &encryption::canonical_aad("users", "ssn", Some(first_id.as_bytes())),
@@ -3730,9 +3730,9 @@ fn upsert_conflict_with_deterministic_key_keeps_randomised_ciphertext_readable_s
     let _keys = with_root_key("c2_upsert_det_conflict_runtime", &"6".repeat(64));
 
     run(async {
-        use zeroship_data_v8::backend::EncryptionMode;
-        use zeroship_data_v8::backend::sqlite::session::TypedCell;
-        use zeroship_data_v8::encryption;
+        use zeroship_data_orm::backend::EncryptionMode;
+        use zeroship_data_orm::backend::sqlite::session::TypedCell;
+        use zeroship_data_orm::encryption;
 
         let dir = tempfile::tempdir().expect("tempdir");
         let schema = users_deterministic_email_schema(key_id);
@@ -3836,7 +3836,7 @@ const _procedures = { upsertConflict };
             .resolve("default", key_id)
             .await
             .expect("resolve key");
-        let email_plaintext = zeroship_data_v8::encryption::aead::decrypt(
+        let email_plaintext = zeroship_data_orm::encryption::aead::decrypt(
             &key,
             &email_blob,
             &encryption::canonical_aad("users", "email", None),
@@ -3844,7 +3844,7 @@ const _procedures = { upsertConflict };
         .expect("decrypt deterministic conflict key");
         assert_eq!(email_plaintext, b"alice@example.com".to_vec());
 
-        let ssn_plaintext = zeroship_data_v8::encryption::aead::decrypt(
+        let ssn_plaintext = zeroship_data_orm::encryption::aead::decrypt(
             &key,
             &ssn_blob,
             &encryption::canonical_aad("users", "ssn", Some(row_id.as_bytes())),
@@ -3864,9 +3864,9 @@ fn update_non_id_filter_keeps_randomised_ciphertext_readable_sqlite_runtime() {
     let _keys = with_root_key("c1_update_non_id_runtime", &"7".repeat(64));
 
     run(async {
-        use zeroship_data_v8::backend::EncryptionMode;
-        use zeroship_data_v8::backend::sqlite::session::TypedCell;
-        use zeroship_data_v8::encryption;
+        use zeroship_data_orm::backend::EncryptionMode;
+        use zeroship_data_orm::backend::sqlite::session::TypedCell;
+        use zeroship_data_orm::encryption;
 
         let dir = tempfile::tempdir().expect("tempdir");
         let schema = users_encrypted_ssn_schema(key_id);
@@ -3962,7 +3962,7 @@ const _procedures = { seed, updateByEmail };
             .resolve("default", key_id)
             .await
             .expect("resolve key");
-        let plaintext = zeroship_data_v8::encryption::aead::decrypt(
+        let plaintext = zeroship_data_orm::encryption::aead::decrypt(
             &key,
             &stored_blob,
             &encryption::canonical_aad("users", "ssn", Some(row_id.as_bytes())),
@@ -3982,9 +3982,9 @@ fn update_many_non_id_filter_encrypts_per_row_sqlite_runtime() {
     let _keys = with_root_key("c1_update_many_non_id_runtime", &"8".repeat(64));
 
     run(async {
-        use zeroship_data_v8::backend::EncryptionMode;
-        use zeroship_data_v8::backend::sqlite::session::TypedCell;
-        use zeroship_data_v8::encryption;
+        use zeroship_data_orm::backend::EncryptionMode;
+        use zeroship_data_orm::backend::sqlite::session::TypedCell;
+        use zeroship_data_orm::encryption;
 
         let dir = tempfile::tempdir().expect("tempdir");
         let schema = users_encrypted_ssn_schema(key_id);
@@ -4036,7 +4036,7 @@ const _procedures = { seed, updateManyByName };
         );
 
         dispatch_sqlite_runtime(&dir, &source, "seed");
-        zeroship_data_v8::crud::reset_write_path_counters_for_tests();
+        zeroship_data_orm::crud::reset_write_path_counters_for_tests();
         let updated =
             parity::extract_json(&dispatch_sqlite_runtime(&dir, &source, "updateManyByName"));
         assert_eq!(
@@ -4044,7 +4044,7 @@ const _procedures = { seed, updateManyByName };
             Some(2.0),
             "two rows should match the non-id updateMany filter: {updated}"
         );
-        let counters = zeroship_data_v8::crud::write_path_counters_for_tests();
+        let counters = zeroship_data_orm::crud::write_path_counters_for_tests();
         assert_eq!(
             counters.target_row_resolution_calls, 1,
             "encrypted updateMany must resolve one non-empty target set: {counters:?}"
@@ -4053,7 +4053,7 @@ const _procedures = { seed, updateManyByName };
             !counters.target_row_resolution_sql.is_empty(),
             "the target-resolution SQL set must be non-empty: {counters:?}"
         );
-        let expected_limit = format!(" LIMIT {}", zeroship_data_v8::compile::MAX_QUERY_LIMIT + 1);
+        let expected_limit = format!(" LIMIT {}", zeroship_data_sql::compile::MAX_QUERY_LIMIT + 1);
         for sql in &counters.target_row_resolution_sql {
             assert!(
                 sql.ends_with(&expected_limit),
@@ -4117,7 +4117,7 @@ const _procedures = { seed, updateManyByName };
                 }
                 other => panic!("ssn (the masked column) must be TEXT, got {other:?}"),
             }
-            let plaintext = zeroship_data_v8::encryption::aead::decrypt(
+            let plaintext = zeroship_data_orm::encryption::aead::decrypt(
                 &key,
                 &stored_blob,
                 &encryption::canonical_aad("users", "ssn", Some(row_id.as_bytes())),
@@ -4138,10 +4138,10 @@ fn update_many_randomised_target_cap_rejects_without_writes_sqlite_runtime() {
     let _keys = with_root_key("c1_update_many_target_cap_runtime", &"c".repeat(64));
 
     run(async {
-        use zeroship_data_v8::backend::sqlite::session::TypedCell;
+        use zeroship_data_orm::backend::sqlite::session::TypedCell;
 
         let dir = tempfile::tempdir().expect("tempdir");
-        let target_cap = usize::try_from(zeroship_data_v8::compile::MAX_QUERY_LIMIT)
+        let target_cap = usize::try_from(zeroship_data_sql::compile::MAX_QUERY_LIMIT)
             .expect("MAX_QUERY_LIMIT must fit usize");
         let seeded = target_cap + 1;
         let values = (0..seeded)
@@ -4181,13 +4181,13 @@ const _procedures = { overflow };
 "#,
         );
 
-        zeroship_data_v8::crud::reset_write_path_counters_for_tests();
+        zeroship_data_orm::crud::reset_write_path_counters_for_tests();
         let result = parity::extract_json(&dispatch_sqlite_runtime(&dir, &source, "overflow"));
         assert_eq!(
             result["failure"]["code"], "update_many_target_limit_exceeded",
             "the bounded probe must reject an overflowing target set: {result}"
         );
-        let counters = zeroship_data_v8::crud::write_path_counters_for_tests();
+        let counters = zeroship_data_orm::crud::write_path_counters_for_tests();
         assert_eq!(
             counters.target_row_resolution_calls, 1,
             "overflow detection must use one bounded target probe: {counters:?}"
@@ -4253,7 +4253,7 @@ fn update_many_randomised_failure_rolls_back_committed_prefix_sqlite_runtime() {
     let _keys = with_root_key("c1_update_many_atomic_failure_runtime", &"a".repeat(64));
 
     run(async {
-        use zeroship_data_v8::backend::sqlite::session::TypedCell;
+        use zeroship_data_orm::backend::sqlite::session::TypedCell;
 
         let dir = tempfile::tempdir().expect("tempdir");
         let schema = users_encrypted_ssn_schema(key_id);
@@ -4330,7 +4330,7 @@ const _procedures = { seed, failBulk, failBulkInsideTransaction };
         );
 
         dispatch_sqlite_runtime(&dir, &source, "seed");
-        zeroship_data_v8::crud::reset_write_path_counters_for_tests();
+        zeroship_data_orm::crud::reset_write_path_counters_for_tests();
         let result = parity::extract_json(&dispatch_sqlite_runtime(&dir, &source, "failBulk"));
         let after = result["after"]
             .as_array()
@@ -4340,7 +4340,7 @@ const _procedures = { seed, failBulk, failBulkInsideTransaction };
             2,
             "the exercised target set must be non-empty: {result}"
         );
-        let counters = zeroship_data_v8::crud::write_path_counters_for_tests();
+        let counters = zeroship_data_orm::crud::write_path_counters_for_tests();
         assert_eq!(
             counters.target_row_resolution_calls, 1,
             "the failing call must exercise one per-row fan-out target query: {counters:?}"
@@ -4556,7 +4556,7 @@ const _procedures = { seed, updatePlain, updateManyPlain };
 
         dispatch_sqlite_runtime(&dir, &source, "seed");
 
-        zeroship_data_v8::crud::reset_write_path_counters_for_tests();
+        zeroship_data_orm::crud::reset_write_path_counters_for_tests();
         let updated = parity::extract_json(&dispatch_sqlite_runtime(&dir, &source, "updatePlain"));
         assert_eq!(
             updated.get("name").and_then(|v| v.as_str()),
@@ -4565,7 +4565,7 @@ const _procedures = { seed, updatePlain, updateManyPlain };
         );
         assert_write_path_fast_path("updateOne plain field");
 
-        zeroship_data_v8::crud::reset_write_path_counters_for_tests();
+        zeroship_data_orm::crud::reset_write_path_counters_for_tests();
         let updated_many =
             parity::extract_json(&dispatch_sqlite_runtime(&dir, &source, "updateManyPlain"));
         assert_eq!(
@@ -4621,7 +4621,7 @@ const _procedures = { seed, upsertPlainConflict };
         let seed_row = parity::extract_json(&seeded);
         let seed_id = seed_row["id"].as_str().expect("generated id");
 
-        zeroship_data_v8::crud::reset_write_path_counters_for_tests();
+        zeroship_data_orm::crud::reset_write_path_counters_for_tests();
         let updated = parity::extract_json(&dispatch_sqlite_runtime(
             &dir,
             &source,
@@ -4843,8 +4843,8 @@ const _procedures = { seed, nestedCasUpdateMany };
 /// in-crate `encryption::keys::tests` use.
 #[test]
 fn encrypted_column_round_trip_sqlite_randomised() {
-    use zeroship_data_v8::backend::EncryptionMode;
-    use zeroship_data_v8::encryption;
+    use zeroship_data_orm::backend::EncryptionMode;
+    use zeroship_data_orm::encryption;
     let key_id = "p5_sqlite_rt_rand";
     let _keys = with_root_key("p5_sqlite_rt_rand", &"a".repeat(64));
     run(async {
@@ -4871,7 +4871,7 @@ fn encrypted_column_round_trip_sqlite_randomised() {
             .expect("resolve_key");
         let plaintext = b"123-45-6789";
         let aad = encryption::canonical_aad("enc_notes", "ssn", Some(b"row_a"));
-        let ct = zeroship_data_v8::encryption::aead::encrypt(
+        let ct = zeroship_data_orm::encryption::aead::encrypt(
             &key,
             EncryptionMode::Randomised,
             plaintext,
@@ -4916,7 +4916,7 @@ fn encrypted_column_round_trip_sqlite_randomised() {
             .collect();
 
         let recovered =
-            zeroship_data_v8::encryption::aead::decrypt(&key, &raw, &aad).expect("decrypt");
+            zeroship_data_orm::encryption::aead::decrypt(&key, &raw, &aad).expect("decrypt");
         assert_eq!(recovered, plaintext);
     });
 }
@@ -4924,8 +4924,8 @@ fn encrypted_column_round_trip_sqlite_randomised() {
 /// **Gate #1 (SQLite half), deterministic variant**.
 #[test]
 fn encrypted_column_round_trip_sqlite_deterministic() {
-    use zeroship_data_v8::backend::EncryptionMode;
-    use zeroship_data_v8::encryption;
+    use zeroship_data_orm::backend::EncryptionMode;
+    use zeroship_data_orm::encryption;
     let key_id = "p5_sqlite_rt_det";
     let _keys = with_root_key("p5_sqlite_rt_det", &"b".repeat(64));
     run(async {
@@ -4953,7 +4953,7 @@ fn encrypted_column_round_trip_sqlite_deterministic() {
         let plaintext = b"DETERMINISTIC-PLAINTEXT";
         // Deterministic AAD: row_pk omitted (Camp A).
         let aad = encryption::canonical_aad("enc_notes", "ssn", None);
-        let ct = zeroship_data_v8::encryption::aead::encrypt(
+        let ct = zeroship_data_orm::encryption::aead::encrypt(
             &key,
             EncryptionMode::Deterministic,
             plaintext,
@@ -4987,7 +4987,7 @@ fn encrypted_column_round_trip_sqlite_deterministic() {
             .collect();
 
         let recovered =
-            zeroship_data_v8::encryption::aead::decrypt(&key, &raw, &aad).expect("decrypt");
+            zeroship_data_orm::encryption::aead::decrypt(&key, &raw, &aad).expect("decrypt");
         assert_eq!(recovered, plaintext);
     });
 }
@@ -5008,8 +5008,8 @@ fn encrypted_column_round_trip_sqlite_deterministic() {
 /// alone exercises the equality-lookup contract.
 #[test]
 fn deterministic_encrypted_equality_via_index_sqlite() {
-    use zeroship_data_v8::backend::EncryptionMode;
-    use zeroship_data_v8::encryption;
+    use zeroship_data_orm::backend::EncryptionMode;
+    use zeroship_data_orm::encryption;
     let key_id = "p5_sqlite_det_eq";
     let _keys = with_root_key("p5_sqlite_det_eq", &"c".repeat(64));
     run(async {
@@ -5056,7 +5056,7 @@ fn deterministic_encrypted_equality_via_index_sqlite() {
         let ciphertexts: Vec<Vec<u8>> = plaintexts
             .iter()
             .map(|p| {
-                zeroship_data_v8::encryption::aead::encrypt(
+                zeroship_data_orm::encryption::aead::encrypt(
                     &key,
                     EncryptionMode::Deterministic,
                     p,
@@ -5067,7 +5067,7 @@ fn deterministic_encrypted_equality_via_index_sqlite() {
             .collect();
 
         // Defining deterministic property: re-encrypt P0 → same bytes.
-        let p0_again = zeroship_data_v8::encryption::aead::encrypt(
+        let p0_again = zeroship_data_orm::encryption::aead::encrypt(
             &key,
             EncryptionMode::Deterministic,
             plaintexts[0],
@@ -5128,8 +5128,8 @@ fn deterministic_encrypted_equality_via_index_sqlite() {
 /// assertion for the row-PK-in-AAD policy.
 #[test]
 fn randomised_ciphertext_row_swap_rejected_sqlite() {
-    use zeroship_data_v8::backend::EncryptionMode;
-    use zeroship_data_v8::encryption;
+    use zeroship_data_orm::backend::EncryptionMode;
+    use zeroship_data_orm::encryption;
     let key_id = "p5_sqlite_row_swap";
     let _keys = with_root_key("p5_sqlite_row_swap", &"d".repeat(64));
     run(async {
@@ -5151,14 +5151,14 @@ fn randomised_ciphertext_row_swap_rejected_sqlite() {
 
         let key = backend.key_store().resolve("app1", key_id).await.unwrap();
         // Insert row A and row B, each with its OWN AAD (binds row_pk).
-        let ct_a = zeroship_data_v8::encryption::aead::encrypt(
+        let ct_a = zeroship_data_orm::encryption::aead::encrypt(
             &key,
             EncryptionMode::Randomised,
             b"sensitive-A",
             &encryption::canonical_aad("enc_notes", "ssn", Some(b"row_a")),
         )
         .unwrap();
-        let ct_b = zeroship_data_v8::encryption::aead::encrypt(
+        let ct_b = zeroship_data_orm::encryption::aead::encrypt(
             &key,
             EncryptionMode::Randomised,
             b"sensitive-B",
@@ -5198,7 +5198,7 @@ fn randomised_ciphertext_row_swap_rejected_sqlite() {
             .map(|i| u8::from_str_radix(&hex_str[i..i + 2], 16).unwrap())
             .collect();
         let aad_b = encryption::canonical_aad("enc_notes", "ssn", Some(b"row_b"));
-        let err = zeroship_data_v8::encryption::aead::decrypt(&key, &raw, &aad_b)
+        let err = zeroship_data_orm::encryption::aead::decrypt(&key, &raw, &aad_b)
             .expect_err("row-swap must fail AAD verification");
         match err {
             DbError::ValidationFailed { code, .. } => {
@@ -5219,8 +5219,8 @@ fn randomised_ciphertext_row_swap_rejected_sqlite() {
 /// decryption result).
 #[test]
 fn cross_backend_ciphertext_decrypt_via_shared_key() {
-    use zeroship_data_v8::backend::EncryptionMode;
-    use zeroship_data_v8::encryption;
+    use zeroship_data_orm::backend::EncryptionMode;
+    use zeroship_data_orm::encryption;
     let key_id = "p5_sqlite_cross";
     let _keys = with_root_key("p5_sqlite_cross", &"e".repeat(64));
     run(async {
@@ -5239,7 +5239,7 @@ fn cross_backend_ciphertext_decrypt_via_shared_key() {
 
         let plaintext = b"cross-instance-payload";
         let aad = encryption::canonical_aad("enc_notes", "ssn", Some(b"row_a"));
-        let ct = zeroship_data_v8::encryption::aead::encrypt(
+        let ct = zeroship_data_orm::encryption::aead::encrypt(
             &key_a,
             EncryptionMode::Randomised,
             plaintext,
@@ -5250,7 +5250,7 @@ fn cross_backend_ciphertext_decrypt_via_shared_key() {
         // Decrypt the SAME ciphertext on backend_b with backend_b's
         // resolved key. Must round-trip.
         let recovered =
-            zeroship_data_v8::encryption::aead::decrypt(&key_b, &ct, &aad).expect("decrypt on B");
+            zeroship_data_orm::encryption::aead::decrypt(&key_b, &ct, &aad).expect("decrypt on B");
         assert_eq!(recovered, plaintext);
     });
 }
@@ -5269,8 +5269,8 @@ fn encrypted_column_e2e_crud_round_trip_sqlite() {
     use zeroship_data_orm::protection::encryption_pass::{
         decrypt_row_on_read, encrypt_row_on_write,
     };
-    use zeroship_data_v8::backend::sqlite::session::TypedCell;
-    use zeroship_data_v8::compile::{SqlDialect, build_insert_with_dialect};
+    use zeroship_data_orm::backend::sqlite::session::TypedCell;
+    use zeroship_data_sql::compile::{SqlDialect, build_insert_with_dialect};
 
     let _keys = with_root_key("p5_e2e_crud", &"c".repeat(64));
     run(async {
@@ -5488,7 +5488,7 @@ fn a_raw_column_is_emitted_for_a_masked_field_sqlite() {
 /// alongside the plaintext.
 #[test]
 fn dual_write_insert_persists_parent_and_sibling_sqlite() {
-    use zeroship_data_v8::compile::{SqlDialect, build_insert_with_dialect};
+    use zeroship_data_sql::compile::{SqlDialect, build_insert_with_dialect};
 
     run(async {
         let (backend, _dir) = fresh_backend();
@@ -5575,7 +5575,7 @@ fn dual_write_insert_persists_parent_and_sibling_sqlite() {
 /// that the real value is nowhere in the row.
 #[test]
 fn a_select_serves_the_masked_column_sqlite() {
-    use zeroship_data_v8::compile::{
+    use zeroship_data_sql::compile::{
         SqlDialect, build_find_with_schema, build_insert_with_dialect,
     };
 
@@ -5709,7 +5709,7 @@ fn a_select_serves_the_masked_column_sqlite() {
 /// the parent column).
 #[test]
 fn aliased_select_skips_kind_none_sqlite() {
-    use zeroship_data_v8::compile::build_find_with_schema;
+    use zeroship_data_sql::compile::build_find_with_schema;
 
     let schema = zeroship_data_sql::value!({
         "ssn": {
@@ -5810,7 +5810,7 @@ fn missing_sibling_fails_not_null_constraint_sqlite() {
 //      restore must refuse with `snapshot_hash_mismatch` BEFORE touching
 //      the live DB.
 
-use zeroship_data_v8::backend::{Backup as _, BusyPolicy as BackupBusyPolicy, SnapshotOpts};
+use zeroship_data_orm::backend::{Backup as _, BusyPolicy as BackupBusyPolicy, SnapshotOpts};
 
 /// **Gate #4**: round-trip snapshot+restore on SQLite.
 /// Insert N rows into a per-app collection; snapshot to a temp dir;
@@ -6361,7 +6361,7 @@ async fn unmask_setup_with_schema(
     // Install into the per-isolate context so dispatch_unmask's
     // backend() lookup succeeds.
     zeroship_data_v8::set_sqlite_backend_for_tests(backend.clone());
-    zeroship_data_v8::cache_schema_for_tests(app_id, collection, schema);
+    zeroship_data_orm::cache_schema_for_tests(app_id, collection, schema);
     (backend, dir)
 }
 
@@ -6378,7 +6378,7 @@ fn configure_cold_sqlite_unmask_fixture(
     zeroship_data_v8::reset_context_for_tests();
     let url = format!("sqlite:{}", dir.path().join("zs-control.sqlite").display());
     zeroship_data_v8::set_db_url_for_tests(&url);
-    zeroship_data_v8::cache_schema_for_tests(app_id, collection, schema);
+    zeroship_data_orm::cache_schema_for_tests(app_id, collection, schema);
     mask_policy::install_mask_policy(&DbBinding::cold_start(app_id), policy)
         .expect("reinstall the app declaration during startup");
 }
@@ -6539,7 +6539,7 @@ fn cold_unmask_with_auto_actor_attaches_before_read() {
 
         // Encrypt + insert one row inline.
         use zeroship_data_orm::protection::encryption_pass::encrypt_row_on_write;
-        use zeroship_data_v8::compile::{SqlDialect, build_insert_with_dialect};
+        use zeroship_data_sql::compile::{SqlDialect, build_insert_with_dialect};
         let row_pk = "usr_auto_01";
         let plaintext = "123-45-6789";
         let mut doc = zeroship_data_sql::value!({
@@ -6967,7 +6967,7 @@ fn unmask_with_user_role_in_policy_returns_plaintext() {
 
         // Encrypt + insert one row.
         use zeroship_data_orm::protection::encryption_pass::encrypt_row_on_write;
-        use zeroship_data_v8::compile::{SqlDialect, build_insert_with_dialect};
+        use zeroship_data_sql::compile::{SqlDialect, build_insert_with_dialect};
         let row_pk = "usr_grant_01";
         let plaintext = "alice@example.com";
         let mut doc = zeroship_data_sql::value!({
@@ -8003,7 +8003,7 @@ fn per_query_unmask_hint_unknown_column_returns_typed_error() {
 /// fields after execution.
 #[test]
 fn sqlite_ddl_has_seven_system_field_columns_end_to_end() {
-    use zeroship_data_v8::compile::SqlDialect;
+    use zeroship_data_sql::compile::SqlDialect;
 
     run(async {
         let (backend, _dir) = fresh_backend();
@@ -8080,7 +8080,7 @@ fn sqlite_ddl_has_seven_system_field_columns_end_to_end() {
 /// intentionally unindexed (see `create_table_does_not_emit_index_for_version`).
 #[test]
 fn freshly_created_table_has_three_indexes_end_to_end() {
-    use zeroship_data_v8::compile::SqlDialect;
+    use zeroship_data_sql::compile::SqlDialect;
     use zeroship_migrate::schema::query::index_name;
 
     run(async {
@@ -8140,7 +8140,7 @@ fn freshly_created_table_has_three_indexes_end_to_end() {
 /// CURRENT_TIMESTAMP defaults firing on omitted columns).
 #[test]
 fn inserting_a_row_without_user_fields_succeeds_via_system_fields_only() {
-    use zeroship_data_v8::compile::SqlDialect;
+    use zeroship_data_sql::compile::SqlDialect;
 
     run(async {
         let (backend, _dir) = fresh_backend();
@@ -8221,8 +8221,8 @@ fn inserting_a_row_without_user_fields_succeeds_via_system_fields_only() {
 /// up V8 — exercises the SQL builder + SQLite engine round-trip.
 #[test]
 fn insert_end_to_end_populates_system_fields_sqlite() {
-    use zeroship_data_v8::compile::{SqlDialect, build_insert_with_dialect};
-    use zeroship_data_v8::crud::system_fields_pass::apply_system_fields_on_insert;
+    use zeroship_data_sql::compile::{SqlDialect, build_insert_with_dialect};
+    use zeroship_data_orm::crud::system_fields_pass::apply_system_fields_on_insert;
 
     run(async {
         let (backend, _dir) = fresh_backend();
@@ -8352,8 +8352,8 @@ fn insert_end_to_end_populates_system_fields_sqlite() {
 /// PG-only path until the cross-app FK rework lands.
 #[test]
 fn insert_with_fk_uses_text_keys_end_to_end_sqlite() {
-    use zeroship_data_v8::compile::{SqlDialect, build_insert_with_dialect};
-    use zeroship_data_v8::crud::system_fields_pass::apply_system_fields_on_insert;
+    use zeroship_data_sql::compile::{SqlDialect, build_insert_with_dialect};
+    use zeroship_data_orm::crud::system_fields_pass::apply_system_fields_on_insert;
 
     run(async {
         let (backend, _dir) = fresh_backend();
@@ -8465,7 +8465,7 @@ fn insert_with_fk_uses_text_keys_end_to_end_sqlite() {
 /// directly).
 #[test]
 fn update_end_to_end_bumps_version_by_one_sqlite() {
-    use zeroship_data_v8::compile::{
+    use zeroship_data_sql::compile::{
         SqlDialect, SystemFieldAutoBump, build_insert_with_dialect,
         build_update_many_with_system_fields,
     };
@@ -8571,7 +8571,7 @@ fn update_end_to_end_bumps_version_by_one_sqlite() {
 /// `version` bumps the row.
 #[test]
 fn update_end_to_end_with_correct_version_succeeds_and_bumps_sqlite() {
-    use zeroship_data_v8::compile::{
+    use zeroship_data_sql::compile::{
         SqlDialect, SystemFieldAutoBump, build_insert_with_dialect,
         build_update_many_with_system_fields,
     };
@@ -8653,7 +8653,7 @@ fn update_end_to_end_with_correct_version_succeeds_and_bumps_sqlite() {
 /// layer we just confirm the affected-rows = 0 contract.
 #[test]
 fn update_end_to_end_with_stale_version_affects_zero_rows_sqlite() {
-    use zeroship_data_v8::compile::{
+    use zeroship_data_sql::compile::{
         SqlDialect, SystemFieldAutoBump, build_insert_with_dialect,
         build_update_many_with_system_fields,
     };
@@ -8732,7 +8732,7 @@ fn update_end_to_end_with_stale_version_affects_zero_rows_sqlite() {
 /// the SET.
 #[test]
 fn update_end_to_end_concurrent_two_updates_one_wins_one_loses_sqlite() {
-    use zeroship_data_v8::compile::{
+    use zeroship_data_sql::compile::{
         SqlDialect, SystemFieldAutoBump, build_insert_with_dialect,
         build_update_many_with_system_fields,
     };
@@ -8827,7 +8827,7 @@ fn update_end_to_end_concurrent_two_updates_one_wins_one_loses_sqlite() {
 /// bumps version. Confirms the non-CAS path stays last-writer-wins.
 #[test]
 fn update_end_to_end_without_version_filter_succeeds_blindly_sqlite() {
-    use zeroship_data_v8::compile::{
+    use zeroship_data_sql::compile::{
         SqlDialect, SystemFieldAutoBump, build_insert_with_dialect,
         build_update_many_with_system_fields,
     };
@@ -8918,7 +8918,7 @@ fn update_end_to_end_without_version_filter_succeeds_blindly_sqlite() {
 
 #[test]
 fn soft_delete_end_to_end_sets_deleted_at_and_bumps_version_sqlite() {
-    use zeroship_data_v8::compile::{
+    use zeroship_data_sql::compile::{
         SqlDialect, SystemFieldAutoBump, build_insert_with_dialect,
         build_soft_delete_many_with_system_fields,
     };
@@ -8994,7 +8994,7 @@ fn soft_delete_end_to_end_sets_deleted_at_and_bumps_version_sqlite() {
 
 #[test]
 fn soft_delete_on_already_soft_deleted_row_affects_zero_rows_sqlite() {
-    use zeroship_data_v8::compile::{
+    use zeroship_data_sql::compile::{
         SqlDialect, SystemFieldAutoBump, build_insert_with_dialect,
         build_soft_delete_many_with_system_fields,
     };
@@ -9056,7 +9056,7 @@ fn soft_delete_on_already_soft_deleted_row_affects_zero_rows_sqlite() {
 
 #[test]
 fn find_with_soft_delete_filter_hides_soft_deleted_rows_sqlite() {
-    use zeroship_data_v8::compile::{
+    use zeroship_data_sql::compile::{
         SqlDialect, SystemFieldAutoBump, build_find_with_schema_and_unmask_and_soft_delete,
         build_insert_with_dialect, build_soft_delete_many_with_system_fields,
     };
@@ -9148,7 +9148,7 @@ fn find_with_soft_delete_filter_hides_soft_deleted_rows_sqlite() {
 
 #[test]
 fn restore_clears_deleted_at_and_bumps_version_sqlite() {
-    use zeroship_data_v8::compile::{
+    use zeroship_data_sql::compile::{
         SqlDialect, SystemFieldAutoBump, build_insert_with_dialect,
         build_restore_many_with_system_fields, build_soft_delete_many_with_system_fields,
     };
@@ -9229,7 +9229,7 @@ fn restore_clears_deleted_at_and_bumps_version_sqlite() {
 
 #[test]
 fn restore_on_already_live_row_affects_zero_rows_sqlite() {
-    use zeroship_data_v8::compile::{
+    use zeroship_data_sql::compile::{
         SqlDialect, SystemFieldAutoBump, build_insert_with_dialect,
         build_restore_many_with_system_fields,
     };
@@ -9296,7 +9296,7 @@ fn restore_on_already_live_row_affects_zero_rows_sqlite() {
 
 #[test]
 fn soft_delete_then_restore_full_lifecycle_sqlite() {
-    use zeroship_data_v8::compile::{
+    use zeroship_data_sql::compile::{
         SqlDialect, SystemFieldAutoBump, build_find_with_schema_and_unmask_and_soft_delete,
         build_insert_with_dialect, build_restore_many_with_system_fields,
         build_soft_delete_many_with_system_fields,
@@ -9414,7 +9414,7 @@ fn soft_delete_then_restore_full_lifecycle_sqlite() {
 
 #[test]
 fn soft_delete_many_sets_deleted_at_on_all_matching_live_rows_sqlite() {
-    use zeroship_data_v8::compile::{
+    use zeroship_data_sql::compile::{
         SqlDialect, SystemFieldAutoBump, build_insert_with_dialect,
         build_soft_delete_many_with_system_fields,
     };
@@ -9510,7 +9510,7 @@ fn soft_delete_many_sets_deleted_at_on_all_matching_live_rows_sqlite() {
 
 #[test]
 fn purge_path_uses_hard_delete_sql_unchanged_sqlite() {
-    use zeroship_data_v8::compile::build_delete_one;
+    use zeroship_data_sql::compile::build_delete_one;
 
     let schema = zeroship_data_sql::value!({ "title": { "type": "string" } });
     let q = build_delete_one(
@@ -9738,7 +9738,7 @@ fn p6c_data_plane_reaches_the_app_file_on_demand() {
         // a layer BELOW the one that knows the app_id, and so could not observe
         // whether the data plane binds the file for itself.
         zeroship_data_v8::exec_mutation_with_emit_for_tests(
-            zeroship_data_v8::compile::BuiltQuery {
+            zeroship_data_sql::compile::BuiltQuery {
                 sql: format!(
                     r#"INSERT INTO "{app}"."{collection}" (id, body)
                        VALUES ('note_1', 'hello')"#
@@ -9754,7 +9754,7 @@ fn p6c_data_plane_reaches_the_app_file_on_demand() {
 
         let rows = zeroship_data_v8::exec_query_for_tests(
             app,
-            zeroship_data_v8::compile::BuiltQuery {
+            zeroship_data_sql::compile::BuiltQuery {
                 sql: format!(r#"SELECT body FROM "{app}"."{collection}" WHERE id = 'note_1'"#),
                 params: Vec::new(),
             },
@@ -10590,7 +10590,7 @@ fn a_second_transaction_for_the_same_app_is_still_refused_and_names_it() {
 fn transaction_lanes_are_capped_and_the_refusal_has_its_own_code() {
     run(async {
         let (backend, _dir) = fresh_backend();
-        let cap = zeroship_data_v8::backend::sqlite::session::MAX_TX_LANES_FOR_TESTS;
+        let cap = zeroship_data_orm::backend::sqlite::session::MAX_TX_LANES_FOR_TESTS;
 
         // Half one: `cap` apps that each settle. Every lane is idle, so the
         // next app evicts one and is admitted.
@@ -10791,7 +10791,7 @@ fn an_app_files_write_upgrade_is_plain_busy_because_it_is_not_in_wal() {
 /// caller-provided instant, then inspects what each actually stored.
 #[test]
 fn dbbind134_sqlite_timestamp_spellings_invert_same_day_ordering() {
-    use zeroship_data_v8::compile::{SqlDialect, build_insert_with_dialect};
+    use zeroship_data_sql::compile::{SqlDialect, build_insert_with_dialect};
 
     run(async {
         let app = "t134_spelling";

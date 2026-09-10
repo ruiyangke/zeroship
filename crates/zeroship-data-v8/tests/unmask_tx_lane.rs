@@ -53,9 +53,9 @@ use compio_postgres::{NoTls, Pool};
 use zeroship_data_orm::binding::DbBinding;
 use zeroship_data_orm::error::DbError;
 use zeroship_data_sql::value::{Value, value};
-use zeroship_data_v8::compile::SqlDialect;
+use zeroship_data_sql::compile::SqlDialect;
 use zeroship_data_orm::protection::mask_policy::install_mask_policy;
-use zeroship_data_v8::tx_route::{CapturedRoute, TxRoute};
+use zeroship_data_orm::tx_route::{CapturedRoute, TxRoute};
 
 fn test_url() -> String {
     zeroship_core::config::test_database_url()
@@ -133,18 +133,18 @@ async fn fixture_with_schema(pool: &Rc<Pool>, url: &str, app: &str, schema: Valu
     pool.batch_execute(&zeroship_migrate_server::provisioning::audit_unmask_table_sql(app))
         .await
         .expect("the audit table the deploy provisions");
-    zeroship_data_v8::auth::bootstrap::ensure_per_app_role(pool, app)
+    zeroship_data_orm::auth::bootstrap::ensure_per_app_role(pool, app)
         .await
         .expect("per-app role, as the deploy would provision it");
     support::grant_all_runtime_table_columns(pool, app, "people").await;
 
     zeroship_data_v8::set_postgres_pool_for_tests(Rc::clone(pool), url);
-    zeroship_data_v8::cache_schema_for_tests(app, "people", schema);
+    zeroship_data_orm::cache_schema_for_tests(app, "people", schema);
     zeroship_data_v8::clear_mask_policy_cache_for_tests(app);
 }
 
 /// The backend handle the V8 dispatcher would have bound for this dispatch.
-async fn backend() -> zeroship_data_v8::backend::BackendHandle {
+async fn backend() -> zeroship_data_orm::backend::BackendHandle {
     zeroship_data_v8::tx_scope::ensure_backend()
         .await
         .expect("the backend the V8 dispatcher would have opened")
@@ -169,7 +169,7 @@ async fn pool_route(app: &str) -> TxRoute {
 /// Insert one document through the real `run_insert` on `route`, returning the
 /// id the platform minted.
 async fn insert_on(route: TxRoute, app: &str, doc: Value) -> String {
-    let result = zeroship_data_v8::crud::run_insert(
+    let result = zeroship_data_orm::crud::run_insert(
         DbBinding::cold_start(app),
         "people".to_string(),
         route,
@@ -192,8 +192,8 @@ async fn find_on(
     opts: Value,
 ) -> Result<Vec<Value>, DbError> {
     let binding = DbBinding::cold_start(app);
-    let plan = zeroship_data_v8::crud::plan_find(&binding, "people", &filter, &opts);
-    zeroship_data_v8::crud::run_find(binding, "people".to_string(), route, filter, plan)
+    let plan = zeroship_data_orm::crud::plan_find(&binding, "people", &filter, &opts);
+    zeroship_data_orm::crud::run_find(binding, "people".to_string(), route, filter, plan)
         .await
         .map(|r| r.rows)
 }
