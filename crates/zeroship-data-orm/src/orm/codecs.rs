@@ -217,17 +217,22 @@ impl DecodeValue<Number> for Decimal {
 
 impl EncodeValue<Timestamp> for i64 {
     fn encode_value(self) -> Result<Value, DbError> {
-        Ok(Value::Timestamp(self))
+        if zeroship_data_sql::temporal::is_timestamp_millis(self) {
+            Ok(Value::Timestamp(self))
+        } else {
+            Err(invalid("portable timestamp in Unix milliseconds"))
+        }
     }
 }
 impl DecodeValue<Timestamp> for i64 {
     fn decode_value(value: Value) -> Result<Self, DbError> {
-        match value {
-            Value::Timestamp(value) => Ok(value),
-            value => value.as_i64().ok_or_else(|| invalid("timestamp")),
-        }
+        value
+            .as_i64()
+            .filter(|value| zeroship_data_sql::temporal::is_timestamp_millis(*value))
+            .ok_or_else(|| invalid("portable timestamp in Unix milliseconds"))
     }
 }
+
 impl<S, T: EncodeValue<S>> EncodeValue<Nullable<S>> for Option<T> {
     fn encode_value(self) -> Result<Value, DbError> {
         self.map(EncodeValue::encode_value)

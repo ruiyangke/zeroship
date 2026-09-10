@@ -753,43 +753,48 @@ pub fn declared_raw_column(
 // Query builders
 // ---------------------------------------------------------------------------
 
-/// Whether a creator-declared field stores an instant and therefore accepts
-/// the Unix-millisecond numbers emitted by the read pipeline.
-///
-/// This is deliberately both schema- and value-driven. JavaScript `Date`
-/// values reach this layer as ISO strings and are already accepted by the
-/// database; only numeric values need lowering at the SQL boundary. Platform
-/// timestamps are assigned by the system-field pass and are not declared in
-/// this schema, so they cannot enter this arm.
-fn is_creator_timestamp_number(schema_hint: &Value, field: &str, value: &Value) -> bool {
-    (value.is_number() || matches!(value, Value::Timestamp(_)))
-        && schema_hint
-            .get(field)
-            .and_then(|def| def.get("type"))
-            .and_then(Value::as_str)
-            == Some("date")
-}
-
-/// Bind a creator value and return its dialect-specific SQL expression.
-///
-/// PostgreSQL and SQLite cannot consume the Unix-millisecond number returned
-/// by reads as a timestamp value directly. Convert the *placeholder* in SQL so
-/// the parameter protocol stays unchanged and the indexed column remains bare
-/// in comparisons. MySQL is render-only and keeps its existing bare bind.
-fn push_creator_value_bind(
+/// Bind a logical value using its field descriptor. Timestamp conversion stays
+/// on the parameter, so indexed columns remain bare in comparisons.
+fn push_field_value_bind(
     params: &mut Vec<Value>,
     value: &Value,
     field: &str,
     schema_hint: &Value,
     dialect: SqlDialect,
-) -> String {
-    let json_column = matches!(
-        schema_hint
-            .get(field)
-            .and_then(|field| field.get("type"))
-            .and_then(Value::as_str),
-        Some("json" | "object" | "array")
-    );
+) -> Result<String, QueryError> {
+    let definition = schema_hint.get(field);
+    let kind = definition
+        .and_then(|field| field.get("type"))
+        .and_then(Value::as_str);
+    let protected = definition.is_some_and(|field| field.get("encrypted").is_some())
+        || column_is_masked(field, schema_hint);
+    let timestamp = !protected
+        && (matches!(kind, Some("date" | "timestamp"))
+            || matches!(field, "created_at" | "updated_at" | "deleted_at"));
+    if timestamp && !value.is_null() {
+        let millis = crate::temporal::timestamp_millis(value).ok_or_else(|| {
+            QueryError::InvalidFilter(format!(
+                "column '{field}' requires a portable timestamp or integral Unix milliseconds"
+            ))
+        })?;
+        params.push(match dialect {
+            SqlDialect::Postgres => Value::Timestamp(millis),
+            SqlDialect::Sqlite => Value::String(
+                crate::temporal::format_timestamp_millis(millis)
+                    .expect("validated portable timestamp"),
+            ),
+            SqlDialect::Mysql => {
+                let canonical = crate::temporal::format_timestamp_millis(millis)
+                    .expect("validated portable timestamp");
+                Value::String(canonical.trim_end_matches('Z').replace('T', " "))
+            }
+        });
+        return Ok(match dialect {
+            SqlDialect::Postgres => format!("${}::timestamptz", params.len()),
+            _ => format!("${}", params.len()),
+        });
+    }
+    let json_column = matches!(kind, Some("json" | "object" | "array"));
     let parameter =
         if json_column && !matches!(value, Value::Json(_) | Value::Array(_) | Value::Object(_)) {
             Value::Json(value.to_string())
@@ -797,15 +802,7 @@ fn push_creator_value_bind(
             value_to_param(value)
         };
     params.push(parameter);
-    let n = params.len();
-    if !is_creator_timestamp_number(schema_hint, field, value) {
-        return format!("${n}");
-    }
-    match dialect {
-        SqlDialect::Postgres => format!("to_timestamp(${n}/1000.0)"),
-        SqlDialect::Sqlite => format!("strftime('%Y-%m-%dT%H:%M:%fZ', ${n}/1000.0, 'unixepoch')"),
-        SqlDialect::Mysql => format!("${n}"),
-    }
+    Ok(format!("${}", params.len()))
 }
 
 /// Build the bounded id probe used before a write fans out per matching row.
@@ -889,7 +886,7 @@ pub fn build_conflict_probe_with_dialect(
         } else {
             conditions.push(format!(
                 "{col} = {}",
-                push_creator_value_bind(&mut params, value, field, schema_hint, dialect)
+                push_field_value_bind(&mut params, value, field, schema_hint, dialect)?
             ));
         }
     }
@@ -1650,13 +1647,13 @@ pub fn build_insert_with_dialect(
                 params.push(dialect.encode_binary_param(value_to_param(value))?);
                 placeholders.push(dialect.binary_bind_placeholder(params.len()));
             } else {
-                placeholders.push(push_creator_value_bind(
+                placeholders.push(push_field_value_bind(
                     &mut params,
                     value,
                     key,
                     schema_hint,
                     dialect,
-                ));
+                )?);
             }
         }
     }
@@ -1846,7 +1843,7 @@ pub fn build_set_clauses_with_system_fields(
                         } else {
                             format!(
                                 "{col} = {}",
-                                push_creator_value_bind(params, op_val, key, schema_hint, dialect,)
+                                push_field_value_bind(params, op_val, key, schema_hint, dialect,)?
                             )
                         }
                     }
@@ -1904,7 +1901,7 @@ pub fn build_set_clauses_with_system_fields(
         } else {
             set_clauses.push(format!(
                 "{col} = {}",
-                push_creator_value_bind(params, value, key, schema_hint, dialect)
+                push_field_value_bind(params, value, key, schema_hint, dialect)?
             ));
         }
     }
@@ -2191,13 +2188,13 @@ pub fn build_insert_many_with_dialect(
                     params.push(dialect.encode_binary_param(value_to_param(val))?);
                     placeholders.push(dialect.binary_bind_placeholder(params.len()));
                 } else {
-                    placeholders.push(push_creator_value_bind(
+                    placeholders.push(push_field_value_bind(
                         &mut params,
                         val,
                         key,
                         schema_hint,
                         dialect,
-                    ));
+                    )?);
                 }
             }
         }
@@ -3337,12 +3334,12 @@ fn push_having_value_bind(
     creator_field: Option<&str>,
     schema_hint: &Value,
     dialect: SqlDialect,
-) -> String {
+) -> Result<String, QueryError> {
     if let Some(field) = creator_field {
-        push_creator_value_bind(params, value, field, schema_hint, dialect)
+        push_field_value_bind(params, value, field, schema_hint, dialect)
     } else {
         params.push(value_to_param(value));
-        format!("${}", params.len())
+        Ok(format!("${}", params.len()))
     }
 }
 
@@ -3374,13 +3371,13 @@ fn build_having_condition(
                         )));
                     }
                 };
-                let bind = push_having_value_bind(params, val, creator_field, schema_hint, dialect);
+                let bind = push_having_value_bind(params, val, creator_field, schema_hint, dialect)?;
                 parts.push(format!("{col_expr} {sql_op} {bind}"));
             }
             Ok(parts.join(" AND "))
         }
         _ => {
-            let bind = push_having_value_bind(params, value, creator_field, schema_hint, dialect);
+            let bind = push_having_value_bind(params, value, creator_field, schema_hint, dialect)?;
             Ok(format!("{col_expr} = {bind}"))
         }
     }
@@ -3806,13 +3803,13 @@ pub fn build_upsert_with_dialect(
                 params.push(dialect.encode_binary_param(value_to_param(value))?);
                 placeholders.push(dialect.binary_bind_placeholder(params.len()));
             } else {
-                placeholders.push(push_creator_value_bind(
+                placeholders.push(push_field_value_bind(
                     &mut params,
                     value,
                     key,
                     schema_hint,
                     dialect,
-                ));
+                )?);
             }
         }
 
@@ -3919,13 +3916,13 @@ pub fn build_find_or_create(
         if value.is_null() {
             placeholders.push("NULL".to_string());
         } else {
-            placeholders.push(push_creator_value_bind(
+            placeholders.push(push_field_value_bind(
                 &mut params,
                 value,
                 key,
                 schema_hint,
                 SqlDialect::Postgres,
-            ));
+            )?);
         }
     }
 
@@ -4293,27 +4290,19 @@ mod tests {
         let schema = timestamp_test_schema();
         let doc = value!({"occurred_at": -1});
 
-        let pg =
-            build_insert_with_dialect(&s("app1"), "events", &schema, &doc, SqlDialect::Postgres)
-                .unwrap();
+        let pg = build_insert_with_dialect(&s("app1"), "events", &schema, &doc, SqlDialect::Postgres)
+            .unwrap();
         assert!(
-            pg.sql.contains("VALUES (to_timestamp($1/1000.0))"),
+            pg.sql.contains("VALUES ($1::timestamptz)"),
             "sql: {}",
             pg.sql
         );
-        assert_eq!(pg.params, value!([-1]).as_array().unwrap().clone());
+        assert_eq!(pg.params, vec![Value::Timestamp(-1)]);
 
         let sqlite =
-            build_insert_with_dialect(&s("app1"), "events", &schema, &doc, SqlDialect::Sqlite)
-                .unwrap();
-        assert!(
-            sqlite
-                .sql
-                .contains("VALUES (strftime('%Y-%m-%dT%H:%M:%fZ', $1/1000.0, 'unixepoch'))"),
-            "sql: {}",
-            sqlite.sql
-        );
-        assert_eq!(sqlite.params, value!([-1]).as_array().unwrap().clone());
+            build_insert_with_dialect(&s("app1"), "events", &schema, &doc, SqlDialect::Sqlite).unwrap();
+        assert!(sqlite.sql.contains("VALUES ($1)"), "sql: {}", sqlite.sql);
+        assert_eq!(sqlite.params, vec![Value::from("1969-12-31T23:59:59.999Z")]);
     }
 
     #[test]
@@ -4327,34 +4316,33 @@ mod tests {
         });
 
         let mut pg_params = Vec::new();
-        let pg = build_where_with_dialect(&filter, &mut pg_params, &schema, SqlDialect::Postgres)
-            .unwrap();
-        assert!(pg.contains(r#""occurred_at" > to_timestamp($1/1000.0)"#));
-        assert!(
-            pg.contains(r#""occurred_at" IN (to_timestamp($2/1000.0), to_timestamp($3/1000.0))"#)
-        );
+        let pg =
+            build_where_with_dialect(&filter, &mut pg_params, &schema, SqlDialect::Postgres).unwrap();
+        assert!(pg.contains(r#""occurred_at" > $1::timestamptz"#));
+        assert!(pg.contains(r#""occurred_at" IN ($2::timestamptz, $3::timestamptz)"#));
         assert!(pg.contains(r#"OR "occurred_at" IS NULL"#));
         assert_eq!(
             pg_params,
-            vec![Value::from(-1), Value::from(-1), Value::from(0)]
+            vec![
+                Value::Timestamp(-1),
+                Value::Timestamp(-1),
+                Value::Timestamp(0)
+            ]
         );
 
         let mut sqlite_params = Vec::new();
         let sqlite =
-            build_where_with_dialect(&filter, &mut sqlite_params, &schema, SqlDialect::Sqlite)
-                .unwrap();
-        assert!(
-            sqlite.contains(
-                r#""occurred_at" > strftime('%Y-%m-%dT%H:%M:%fZ', $1/1000.0, 'unixepoch')"#
-            )
-        );
-        assert!(sqlite.contains(
-            r#""occurred_at" IN (strftime('%Y-%m-%dT%H:%M:%fZ', $2/1000.0, 'unixepoch'), strftime('%Y-%m-%dT%H:%M:%fZ', $3/1000.0, 'unixepoch'))"#
-        ));
+            build_where_with_dialect(&filter, &mut sqlite_params, &schema, SqlDialect::Sqlite).unwrap();
+        assert!(sqlite.contains(r#""occurred_at" > $1"#));
+        assert!(sqlite.contains(r#""occurred_at" IN ($2, $3)"#));
         assert!(sqlite.contains(r#"OR "occurred_at" IS NULL"#));
         assert_eq!(
             sqlite_params,
-            vec![Value::from(-1), Value::from(-1), Value::from(0)]
+            vec![
+                Value::from("1969-12-31T23:59:59.999Z"),
+                Value::from("1969-12-31T23:59:59.999Z"),
+                Value::from("1970-01-01T00:00:00.000Z")
+            ]
         );
     }
 
@@ -4367,14 +4355,20 @@ mod tests {
             "optional": null,
         });
         for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite] {
-            let q =
-                build_insert_with_dialect(&s("app1"), "events", &schema, &doc, dialect).unwrap();
+            let q = build_insert_with_dialect(&s("app1"), "events", &schema, &doc, dialect).unwrap();
             assert!(!q.sql.contains("to_timestamp"), "sql: {}", q.sql);
             assert!(!q.sql.contains("strftime"), "sql: {}", q.sql);
             assert!(q.sql.contains("NULL"), "sql: {}", q.sql);
             assert_eq!(
                 q.params,
-                vec![Value::from("1969-12-31T23:59:59.999Z"), Value::from(-1)],
+                vec![
+                    if dialect == SqlDialect::Postgres {
+                        Value::Timestamp(-1)
+                    } else {
+                        Value::from("1969-12-31T23:59:59.999Z")
+                    },
+                    Value::from(-1)
+                ],
                 "dialect: {dialect:?}"
             );
         }
@@ -4385,8 +4379,7 @@ mod tests {
             "optional": null,
         });
         let mut params = Vec::new();
-        let sql =
-            build_where_with_dialect(&filter, &mut params, &schema, SqlDialect::Sqlite).unwrap();
+        let sql = build_where_with_dialect(&filter, &mut params, &schema, SqlDialect::Sqlite).unwrap();
         assert!(!sql.contains("strftime"), "sql: {sql}");
         assert!(sql.contains(r#""optional" IS NULL"#), "sql: {sql}");
         assert_eq!(
@@ -5006,11 +4999,11 @@ mod tests {
         .unwrap();
         assert!(
             pg.sql
-                .contains(r#"HAVING ("occurred_at" > to_timestamp($1/1000.0) AND COUNT(*) >= $2)"#),
+                .contains(r#"HAVING ("occurred_at" > $1::timestamptz AND COUNT(*) >= $2)"#),
             "sql: {}",
             pg.sql
         );
-        assert_eq!(pg.params, value!([-1, 10]).as_array().unwrap().clone());
+        assert_eq!(pg.params, vec![Value::Timestamp(-1), Value::from(10)]);
 
         let sqlite = build_aggregate_with_soft_delete_with_dialect(
             &s("app1"),
@@ -5022,13 +5015,16 @@ mod tests {
         )
         .unwrap();
         assert!(
-            sqlite.sql.contains(
-                r#"HAVING ("occurred_at" > strftime('%Y-%m-%dT%H:%M:%fZ', $1/1000.0, 'unixepoch') AND COUNT(*) >= $2)"#
-            ),
+            sqlite
+                .sql
+                .contains(r#"HAVING ("occurred_at" > $1 AND COUNT(*) >= $2)"#),
             "sql: {}",
             sqlite.sql
         );
-        assert_eq!(sqlite.params, value!([-1, 10]).as_array().unwrap().clone());
+        assert_eq!(
+            sqlite.params,
+            vec![Value::from("1969-12-31T23:59:59.999Z"), Value::from(10)]
+        );
     }
 
     #[test]
@@ -6144,7 +6140,9 @@ mod tests {
             q.sql
         );
         assert!(
-            q.params.contains(&Value::from(explicit_ts)),
+            q.params.contains(&Value::Timestamp(
+                crate::temporal::parse_timestamp_millis(explicit_ts).unwrap()
+            )),
             "params: {:?}",
             q.params
         );
@@ -6537,7 +6535,9 @@ mod tests {
             q.sql,
         );
         assert!(
-            q.params.contains(&Value::from(explicit)),
+            q.params.contains(&Value::Timestamp(
+                crate::temporal::parse_timestamp_millis(explicit).unwrap()
+            )),
             "params: {:?}",
             q.params
         );
@@ -7465,7 +7465,14 @@ mod tests {
     fn build_where_accepts_system_field_names_in_filter() {
         for name in SYSTEM_FIELD_NAMES {
             let mut filter_obj = crate::value::Map::new();
-            filter_obj.insert((*name).to_string(), crate::value!("any-value"));
+            filter_obj.insert(
+                (*name).to_string(),
+                if matches!(*name, "created_at" | "updated_at" | "deleted_at") {
+                    crate::value!(0)
+                } else {
+                    crate::value!("any-value")
+                },
+            );
             let filter = crate::value::Value::Object(filter_obj);
             let mut params: Vec<Value> = Vec::new();
             let clause = build_where(&filter, &mut params, &tschema())
@@ -9840,7 +9847,7 @@ fn render_filter(
                 ));
             };
             let bind =
-                push_creator_value_bind(params, &filter_literal(value)?, field, schema, dialect);
+                push_field_value_bind(params, &filter_literal(value)?, field, schema, dialect)?;
             let op = match op {
                 CompareOp::Eq => "=",
                 CompareOp::Ne => "!=",
@@ -9857,13 +9864,13 @@ fn render_filter(
                 .values()
                 .iter()
                 .map(|value| {
-                    Ok(push_creator_value_bind(
+                    push_field_value_bind(
                         params,
                         &filter_literal(value)?,
                         field,
                         schema,
                         dialect,
-                    ))
+                    )
                 })
                 .collect::<Result<Vec<_>, QueryError>>()?;
             format!(

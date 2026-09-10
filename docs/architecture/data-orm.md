@@ -158,7 +158,15 @@ with column context when they reject a result; they never substitute SQL NULL
 for a decoding failure. PostgreSQL infinite dates and timestamps are
 refused because the native timestamp contract represents finite instants.
 Timestamp precision is reduced to the containing Unix millisecond, including
-instants before the epoch. Vector and geographic-point fields return numeric
+instants before the epoch. Scalar timestamps accept integral Unix milliseconds
+or real ISO calendar timestamps; an omitted timezone means UTC. Their UTC date
+must fit the positive `YYYY-MM-DD` calendar. The shared temporal codec validates
+writes before protection transforms and rejects malformed storage with column
+context. PostgreSQL receives native timestamp binds; SQLite receives canonical
+UTC text. Neither path converts caller timestamps through floating-point SQL.
+Filters use the same binding codec, keeping the indexed column bare.
+
+Vector and geographic-point fields return numeric
 arrays and latitude/longitude objects on both backends. Their binary storage
 encoding stays inside the backend and SQL codecs.
 

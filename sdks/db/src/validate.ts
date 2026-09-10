@@ -48,18 +48,37 @@ const KNOWN_FIELD_TYPES: ReadonlySet<string> = new Set<TypeName>([
   "actor",
 ]);
 
-/**
- * Strict ISO 8601 date-or-datetime check. `Date.parse("2026")` returns
- * a real timestamp (year-only), which is almost never what the schema
- * meant; require at least a `YYYY-MM-DD` prefix before delegating to
- * `Date.parse` so values like `"2026"`, `"abc"`, or empty strings are
- * rejected. The optional time component (`T...`) is accepted because
- * `t.date()` is used for full timestamps; calendar-date-only fields
- * use `t.calendarDate()` which enforces the stricter shape above.
- */
+const MIN_TIMESTAMP_MILLIS = -62_135_596_800_000;
+const MAX_TIMESTAMP_MILLIS = 253_402_300_799_999;
+
+function isTimestampMillis(value: number): boolean {
+  return Number.isInteger(value) && value >= MIN_TIMESTAMP_MILLIS && value <= MAX_TIMESTAMP_MILLIS;
+}
+
+/** Real calendar timestamps with an optional time and UTC as the default zone. */
 export function isParseableDateString(s: string): boolean {
-  if (!/^\d{4}-\d{2}-\d{2}(?:[T ].*)?$/.test(s)) return false;
-  return !isNaN(Date.parse(s));
+  const match = /^(\d{4}-\d{2}-\d{2})(?:[T ](\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?(?:[Zz]|([+-])(\d{2})(?::?(\d{2}))?)?)?$/.exec(s);
+  if (!match || match[0] !== s || !isValidCalendarDate(match[1])) return false;
+  const hour = Number(match[2] ?? 0);
+  const minute = Number(match[3] ?? 0);
+  const second = Number(match[4] ?? 0);
+  const offsetHour = Number(match[7] ?? 0);
+  const offsetMinute = Number(match[8] ?? 0);
+  if (hour > 23 || minute > 59 || second > 59 || offsetHour > 23 || offsetMinute > 59) return false;
+  const fraction = Number((match[5] ?? "").slice(0, 3).padEnd(3, "0"));
+  const day = new Date(0);
+  const [year, month, date] = match[1].split("-").map(Number);
+  day.setUTCFullYear(year, month - 1, date);
+  day.setUTCHours(hour, minute, second, fraction);
+  const offset = (offsetHour * 60 + offsetMinute) * (match[6] === "-" ? -1 : 1);
+  return isTimestampMillis(day.getTime() - offset * 60_000);
+}
+
+/** Inputs accepted by the ORM's portable timestamp codec. */
+export function isTimestampValue(value: unknown): boolean {
+  if (typeof value === "number") return isTimestampMillis(value);
+  if (value instanceof Date) return isTimestampMillis(Date.prototype.getTime.call(value));
+  return typeof value === "string" && isParseableDateString(value);
 }
 
 /**
@@ -286,10 +305,10 @@ function checkField(
     // generator's renderer treats `date` and `timestamp` as one case. Leaving it
     // out would send every timestamp column into the unknown-type guard below.
   } else if (type === "date" || type === "timestamp") {
-    if (!(value instanceof Date) && (typeof value !== "string" || !isParseableDateString(value))) {
+    if (!isTimestampValue(value)) {
       errors[key] = {
         path: key,
-        message: `${key} must be a Date or ISO 8601 date string`,
+        message: `${key} must be a valid Date, ISO timestamp, or integral Unix milliseconds`,
       };
       return;
     }
@@ -431,7 +450,7 @@ function checkField(
         if (itemType === "string") ok = typeof elem === "string";
         else if (itemType === "number") ok = typeof elem === "number";
         else if (itemType === "boolean") ok = typeof elem === "boolean";
-        else if (itemType === "date") ok = elem instanceof Date || (typeof elem === "string" && isParseableDateString(elem));
+        else if (itemType === "date") ok = isTimestampValue(elem);
         else if (itemType === "calendarDate") ok = typeof elem === "string" && isValidCalendarDate(elem);
         else if (itemType === "json") ok = isJsonSerializable(elem);
         if (!ok) {

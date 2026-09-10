@@ -10785,36 +10785,10 @@ fn an_app_files_write_upgrade_is_plain_busy_because_it_is_not_in_wal() {
     });
 }
 
-/// #134: the dev tier writes TWO timestamp spellings into one TEXT column, and
-/// bytewise collation then inverts same-day ordering.
-///
-/// Both values here come from the product's own emitters, not from hand-written
-/// literals:
-///   row A - the column DEFAULT, which the migration engine renders through
-///           `synth_now()` (`zeroship-migrate-sqlite/src/dml.rs:839-841`) as bare
-///           `CURRENT_TIMESTAMP` -> "YYYY-MM-DD HH:MM:SS", SPACE-separated.
-///   row B - the runtime's own INSERT builder, which since `bcd639b23` converts a
-///           Unix-ms bind via `strftime('%Y-%m-%dT%H:%M:%fZ', ...)`
-///           (`zeroship-data-sql/src/compile.rs:3085`) -> "YYYY-MM-DDTHH:MM:SS.sssZ",
-///           with a T.
-///
-/// Row B is stamped one hour EARLIER than row A, so ascending order must return B
-/// first. It does not: ' ' is 0x20 and 'T' is 0x54, the three timestamp columns
-/// carry no COLLATE (`query.rs:322-331`, unlike their COLLATE BINARY siblings), so
-/// the comparison is bytewise and the later row sorts first.
-///
-/// This asserts the CORRECT behaviour and is RED until both emitters agree on one
-/// spelling. Fixing only the runtime side leaves this red.
-///
-/// It WAS red, and the measurement is kept because it is what the fix had to
-/// move:
-///   A = "2026-09-02 07:32:37"        (engine default, space)
-///   B = "2026-09-02T06:32:37.000Z"   (runtime bind, T, one hour EARLIER)
-///   `ORDER BY occurred_at ASC` returned `a_default` first.
-/// Both emitters now spell it one way - `synth_now()`
-/// (`zeroship-migrate-sqlite/src/dml.rs`) and `SQLITE_NOW_EXPR`
-/// (`zeroship-data-sql/src/compile.rs`). Reverting either one alone turns this red
-/// again, which is why the test drives both.
+/// SQLite defaults and runtime timestamp binds must use the same UTC text form
+/// so lexical ordering agrees with instant ordering. The fixture drives the
+/// migration emitter for a system default and the runtime compiler for a
+/// caller-provided instant, then inspects what each actually stored.
 #[test]
 fn dbbind134_sqlite_timestamp_spellings_invert_same_day_ordering() {
     use zeroship_data_v8::compile::{SqlDialect, build_insert_with_dialect};
@@ -10881,10 +10855,10 @@ fn dbbind134_sqlite_timestamp_spellings_invert_same_day_ordering() {
             SqlDialect::Sqlite,
         )
         .expect("build_insert_with_dialect");
-        assert!(
-            bq.sql.contains("strftime("),
-            "precondition: the builder must convert the Unix-ms bind, got {}",
-            bq.sql
+        assert_eq!(
+            bq.params[1],
+            zeroship_data_sql::value!("2025-09-01T04:13:20.000Z"),
+            "the builder must bind canonical UTC text",
         );
         // `build_insert` emits a RETURNING clause, so this goes through `query`
         // rather than `execute_fixture` - the latter refuses a statement that yields
@@ -10914,10 +10888,8 @@ fn dbbind134_sqlite_timestamp_spellings_invert_same_day_ordering() {
             .clone()
             .expect("occurred_at was written");
 
-        // The whole bug in one comparison: the DDL default and the runtime bind
-        // must agree on the date/time separator. They are compared BYTEWISE, and
-        // ' ' is 0x20 while 'T' is 0x54, so a disagreement inverts same-day
-        // ordering wherever both spellings reach one column.
+        // Defaults and bound values must have the same separator; SQLite
+        // compares this storage as text.
         let a_sep = a_stamp.as_bytes()[10] as char;
         let b_sep = b_stamp.as_bytes()[10] as char;
         assert_eq!(
