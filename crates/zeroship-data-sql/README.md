@@ -13,6 +13,10 @@ query grammar and rendering; `internal` builds protection statements. Catalog
 metadata records database evidence without performing I/O. Migration engines
 own DDL and schema changes.
 
+`codecs` prepares temporal values and typed JSON containers before binding and
+checks their logical shape after decoding. Native arrays are validated without
+serialization; non-temporal encoded arrays retain their JSON text during validation.
+
 Architecture: `docs/architecture/data-orm.md`.
 
 Run the query-compilation benchmark with

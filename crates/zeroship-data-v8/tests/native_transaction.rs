@@ -1251,6 +1251,7 @@ async function updates() {
     if (result.error) throw result.error;
     return result.data;
 }
+
 updates.config = {kind:"action"};
 const _procedures = {updates};
 "#,
@@ -1258,6 +1259,64 @@ const _procedures = {updates};
     let (status, body) =
         dispatch_zs_with_descriptor(&url, &source, "updates", app, descriptor.to_string());
     assert_eq!(status, 200, "worker update validation: {body}");
+    assert_eq!(body["json"], serde_json::json!({"validated":true}));
+}
+
+#[test]
+fn native_worker_calls_validate_array_item_types() {
+    let url = require_pg();
+    let app = crate::test_app_id!();
+    let app = app.as_str();
+    reset_schema(&url, app);
+    let role = zeroship_core::database_role::per_app_role_name(app).unwrap();
+    exec_owner_sql(
+        &url,
+        &format!(
+            "ALTER TABLE \"{app}\".notes ADD COLUMN names JSONB; \
+         GRANT SELECT, INSERT, UPDATE ON \"{app}\".notes TO \"{role}\""
+        ),
+    );
+    let mut descriptor: serde_json::Value =
+        serde_json::from_str(&notes_runtime_descriptor()).unwrap();
+    descriptor["collections"]["notes"]["fields"]["names"] =
+        serde_json::json!({"type":"array","items":"string"});
+    let source = build_src(
+        r#"
+async function arrayTypes() {
+    const native = env.db.collection("notes");
+    const row = await native.insert({title:"arrays", names:["original"]});
+    const mutations = [
+        () => native.insert({title:"invalid", names:[true]}),
+        () => native.insertMany([{title:"valid", names:[]}, {title:"invalid", names:[true]}]),
+        () => native.update({id:row.id}, {names:{$set:[true]}}),
+        () => native.update({id:row.id}, {names:{$push:1}}),
+        () => native.updateMany({}, {names:{$addToSet:false}}),
+        () => native.updateMany({title:"missing"}, {names:{$pull:1}}),
+    ];
+    for (const mutate of mutations) {
+        let refused = false;
+        try { await mutate(); }
+        catch (error) {
+            if (error.code !== "invalid_array_element") throw error;
+            refused = true;
+        }
+        if (!refused) throw new Error("invalid native array mutation succeeded");
+    }
+    const updated = await native.update({id:row.id}, {names:{$push:"next"}});
+    if (updated.version !== 2 || JSON.stringify(updated.names) !== '["original","next"]') {
+        throw new Error("invalid mutations changed the row");
+    }
+    const rows = await native.find({});
+    if (rows.length !== 1) throw new Error("invalid insert left rows behind");
+    return {validated:true};
+}
+arrayTypes.config = {kind:"action"};
+const _procedures = {arrayTypes};
+"#,
+    );
+    let (status, body) =
+        dispatch_zs_with_descriptor(&url, &source, "arrayTypes", app, descriptor.to_string());
+    assert_eq!(status, 200, "native worker array validation: {body}");
     assert_eq!(body["json"], serde_json::json!({"validated":true}));
 }
 
