@@ -81,7 +81,10 @@ fn decode_value(ty: &Type, bytes: &[u8]) -> Result<Value, String> {
             if matches!(days, i32::MIN | i32::MAX) {
                 return Err("infinite dates are unsupported".into());
             }
-            Ok(Value::Timestamp((i64::from(days) + 10957) * 86_400_000))
+            days.checked_add(10957)
+                .and_then(zeroship_data_sql::temporal::format_calendar_date)
+                .map(Value::String)
+                .ok_or_else(|| "calendar date is outside the supported range".into())
         }
         Type::JSONB => {
             let Some((&1, json)) = bytes.split_first() else {
@@ -237,6 +240,19 @@ fn decode_numeric(bytes: &[u8]) -> Option<String> {
 mod tests {
     use super::*;
     use compio_postgres::test_utils::{column_for_test, row_for_test};
+
+    #[test]
+    fn calendar_dates_decode_as_dates_without_a_time_component() {
+        let row = row_for_test(
+            vec![column_for_test("birthday", Type::DATE)],
+            vec![Some(0i32.to_be_bytes().to_vec())],
+        )
+        .unwrap();
+        assert_eq!(
+            row_to_value(&row).unwrap()["birthday"],
+            Value::String("2000-01-01".into())
+        );
+    }
 
     #[test]
     fn malformed_cells_fail_with_column_context_without_echoing_values() {

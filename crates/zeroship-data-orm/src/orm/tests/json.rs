@@ -4,51 +4,14 @@ fn fields() -> Value {
     value!({"payload":{"type":"json", "nullable":true}})
 }
 
-fn table_sql(schema: &str, dialect: &zeroship_migrate::DialectId) -> String {
-    let policy = zeroship_migrate::effective_policy_from_charter_toml(
-        zeroship_migrate_server::policy::CONFINED_CEILING_TOML,
-    )
-    .unwrap();
-    zeroship_migrate::schema::query::build_create_table_with_fks_for_dialect(
-        zeroship_migrate::shipping_vendors(),
-        schema,
-        "documents",
-        &serde_json::to_value(fields()).unwrap(),
-        &zeroship_migrate::schema::query::FkEmission::Inline,
-        dialect,
-        &policy,
-    )
-    .unwrap()
-}
-
 #[compio::test]
 async fn sqlite_json_values_round_trip_through_the_orm() {
-    let (original, directory) = database().await;
-    let fixture = rusqlite::Connection::open(
-        directory
-            .path()
-            .join(format!("zs-{}.sqlite", original.binding.app_id())),
-    )
-    .unwrap();
-    fixture
-        .execute_batch(&table_sql("main", &zeroship_migrate_sqlite::DIALECT))
-        .unwrap();
-    drop(fixture);
-    let db = Database::from_schema(
-        original.binding.clone(),
-        original.backend.clone(),
-        vec![("documents".into(), fields())],
-    )
-    .unwrap();
-    exercise_json_values(&db).await;
+    let owner = super::fixtures::CollectionFixture::sqlite("documents", fields()).await;
+    let db = &owner.database;
+    exercise_json_values(db).await;
 
     // Model a file whose JSON constraint was bypassed by an external writer.
-    let fixture = rusqlite::Connection::open(
-        directory
-            .path()
-            .join(format!("zs-{}.sqlite", db.binding.app_id())),
-    )
-    .unwrap();
+    let fixture = rusqlite::Connection::open(owner.sqlite_file.as_ref().unwrap()).unwrap();
     fixture.execute_batch("PRAGMA ignore_check_constraints = ON; UPDATE documents SET payload = 'secret_invalid_json'").unwrap();
     let error = db
         .collection("documents")
@@ -81,64 +44,14 @@ async fn sqlite_json_values_round_trip_through_the_orm() {
         rows.iter()
             .all(|row| row["payload"] == Value::String("true".into()))
     );
+    owner.close().await;
 }
 
 #[compio::test]
 async fn postgres_json_values_round_trip_through_the_orm() {
-    crate::reset_engine_for_tests();
-    let backend = Rc::new(
-        crate::backend::postgres::PostgresBackend::connect(
-            &zeroship_core::config::test_database_url(),
-            4,
-            LocalKeySource::EnvVar,
-        )
-        .await
-        .unwrap(),
-    );
-    let app = format!("zsjson_{}", uuid::Uuid::new_v4().simple());
-    let schema = crate::compile::quote_ident(&app);
-    backend
-        .execute_fixture(&format!("CREATE SCHEMA {schema}"), &[])
-        .await
-        .unwrap();
-    backend
-        .pool()
-        .batch_execute(&table_sql(&app, &zeroship_migrate_postgres::DIALECT))
-        .await
-        .unwrap();
-    crate::auth::bootstrap::ensure_per_app_role(backend.pool(), &app)
-        .await
-        .unwrap();
-    let role = crate::compile::quote_ident(
-        &zeroship_core::database_role::per_app_role_name(&app).unwrap(),
-    );
-    backend
-        .execute_fixture(
-            &format!("GRANT SELECT, INSERT, UPDATE, DELETE ON {schema}.documents TO {role}"),
-            &[],
-        )
-        .await
-        .unwrap();
-    let db = Database::from_schema(
-        DbBinding::cold_start(&app),
-        crate::backend_handle::BackendHandle::new(backend.clone()),
-        vec![("documents".into(), fields())],
-    )
-    .unwrap();
-    exercise_json_values(&db).await;
-    drop(db);
-    backend
-        .execute_fixture(&format!("DROP SCHEMA {schema} CASCADE"), &[])
-        .await
-        .unwrap();
-    backend
-        .execute_fixture(&format!("DROP OWNED BY {role}"), &[])
-        .await
-        .unwrap();
-    backend
-        .execute_fixture(&format!("DROP ROLE {role}"), &[])
-        .await
-        .unwrap();
+    let owner = super::fixtures::CollectionFixture::postgres("documents", fields()).await;
+    exercise_json_values(&owner.database).await;
+    owner.close().await;
 }
 
 async fn exercise_json_values(db: &Database) {

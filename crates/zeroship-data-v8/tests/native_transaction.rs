@@ -1016,6 +1016,63 @@ const _procedures = {jsonValues};
 }
 
 #[test]
+fn calendar_dates_round_trip_through_worker_transactions() {
+    let url = require_pg();
+    let app = crate::test_app_id!();
+    let app = app.as_str();
+    reset_schema(&url, app);
+    let role = zeroship_core::database_role::per_app_role_name(app).unwrap();
+    exec_owner_sql(
+        &url,
+        &format!(
+            "ALTER TABLE \"{app}\".notes ADD COLUMN birthday DATE; \
+         GRANT SELECT, INSERT, UPDATE ON \"{app}\".notes TO \"{role}\""
+        ),
+    );
+    let mut descriptor: serde_json::Value =
+        serde_json::from_str(&notes_runtime_descriptor()).unwrap();
+    descriptor["collections"]["notes"]["fields"]["birthday"] =
+        serde_json::json!({"type":"calendarDate", "nullable":true});
+    let source = build_src(
+        r#"
+async function calendarDates() {
+    const dates = ["0001-01-01", "0004-02-29", "0099-12-31", "0100-03-01", "1969-12-31", "2000-02-29", "9999-12-31"];
+    const result = await env.db.transaction(async tx => {
+        for (const birthday of dates) {
+            const inserted = await tx.notes.insert({title:"calendar date", birthday});
+            if (inserted.birthday !== birthday) throw new Error("insert changed the calendar date");
+            const updated = await tx.notes.update({id:inserted.id}, {birthday:{$set:birthday}});
+            if (updated.birthday !== birthday) throw new Error("update changed the calendar date");
+        }
+        return {preserved:true};
+    });
+    if (result.error) throw result.error;
+    let refused = false;
+    try {
+        // Exercise the native boundary directly, without the SDK validator.
+        await env.db.collection("notes").insert({title:"invalid", birthday:"2026-02-30"});
+    } catch (error) {
+        if (error.code !== "invalid_calendar_date") throw error;
+        refused = true;
+    }
+    if (!refused) throw new Error("native calendar date validation was bypassed");
+    return {...result.data, refused};
+}
+calendarDates.config = {kind:"action"};
+const _procedures = {calendarDates};
+"#,
+    );
+    let (status, body) =
+        dispatch_zs_with_descriptor(&url, &source, "calendarDates", app, descriptor.to_string());
+    assert_eq!(status, 200, "worker calendar dates: {body}");
+    assert_eq!(
+        body["json"],
+        serde_json::json!({"preserved":true, "refused":true})
+    );
+    assert_eq!(count_notes(&url, app), 7);
+}
+
+#[test]
 fn transaction_commits_on_resolve() {
     let url = require_pg();
     let app = crate::test_app_id!();
