@@ -209,6 +209,14 @@ Use the `t.*` factories. Every builder is chainable.
 (Unix-ms numbers at the JS layer) or `t.calendarDate()` for a Postgres DATE
 (`YYYY-MM-DD` strings).
 
+Scalar timestamps accept integral Unix milliseconds, valid `Date` objects, or
+ISO timestamp strings and return Unix milliseconds. Strings must name a real
+calendar date; an omitted time means midnight and an omitted timezone means
+UTC. Fractional seconds are floored to the containing millisecond. The resulting
+UTC date must fit the positive `YYYY-MM-DD` calendar, including early years.
+Invalid dates, fractional millisecond numbers, and out-of-range instants are
+rejected before writes.
+
 Calendar dates use positive Gregorian years in the fixed-width `YYYY-MM-DD`
 form. Reads preserve that string, including early years; invalid dates and
 datetime strings are rejected. Calendar dates carry no timezone.

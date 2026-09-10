@@ -173,60 +173,82 @@ fn schema_field<'a>(schema: &'a Value, field: &str) -> Option<&'a Value> {
     schema.as_object()?.get(field)
 }
 
-fn validate_calendar_date_value(field: &str, value: &Value) -> Result<(), CodecError> {
-    if value.is_null()
-        || value
-            .as_str()
-            .is_some_and(|value| crate::temporal::parse_calendar_date(value).is_some())
-    {
+fn validate_temporal_value(kind: &str, field: &str, value: &Value) -> Result<(), CodecError> {
+    if value.is_null() {
+        return Ok(());
+    }
+    let (valid, code, expected) = if kind == "calendarDate" {
+        (
+            value
+                .as_str()
+                .is_some_and(|value| crate::temporal::parse_calendar_date(value).is_some()),
+            "invalid_calendar_date",
+            "a valid YYYY-MM-DD calendar date",
+        )
+    } else {
+        (
+            crate::temporal::timestamp_millis(value).is_some(),
+            "invalid_timestamp",
+            "a portable timestamp or integral Unix milliseconds",
+        )
+    };
+    if valid {
         return Ok(());
     }
     Err(CodecError::validation(
-        "invalid_calendar_date",
-        format!("column '{field}' requires a valid YYYY-MM-DD calendar date"),
+        code,
+        format!("column '{field}' requires {expected}"),
     ))
 }
 
-/// Validate calendar-date writes before protection changes their storage shape.
-pub fn validate_calendar_date_document(schema: &Value, document: &Value) -> Result<(), CodecError> {
+/// Validate temporal writes before protection changes their storage shape.
+pub fn validate_temporal_document(schema: &Value, document: &Value) -> Result<(), CodecError> {
     if let Some(document) = document.as_object() {
         for (field, value) in document {
-            if schema_field_type(schema, field) == Some("calendarDate") {
-                validate_calendar_date_value(field, value)?;
+            if let Some(kind @ ("calendarDate" | "date" | "timestamp")) =
+                schema_field_type(schema, field)
+            {
+                validate_temporal_value(kind, field, value)?;
             }
         }
     }
     Ok(())
 }
 
-/// Validate assignments and refuse non-date operations on calendar-date fields.
-pub fn validate_calendar_date_update(schema: &Value, patch: &Value) -> Result<(), CodecError> {
+/// Validate temporal assignments and refuse arithmetic or collection operations.
+pub fn validate_temporal_update(schema: &Value, patch: &Value) -> Result<(), CodecError> {
     let Some(patch) = patch.as_object() else {
         return Ok(());
     };
     for (field, value) in patch {
         if field == "$set" {
-            validate_calendar_date_document(schema, value)?;
-        } else if schema_field_type(schema, field) == Some("calendarDate") {
+            validate_temporal_document(schema, value)?;
+        } else if let Some(kind @ ("calendarDate" | "date" | "timestamp")) =
+            schema_field_type(schema, field)
+        {
             if let Some(operations) = value.as_object() {
                 if operations.is_empty() {
-                    validate_calendar_date_value(field, value)?;
+                    validate_temporal_value(kind, field, value)?;
                 }
                 for (operation, operand) in operations {
                     match operation.as_str() {
-                        "$set" => validate_calendar_date_value(field, operand)?,
+                        "$set" => validate_temporal_value(kind, field, operand)?,
                         _ => {
                             return Err(CodecError::validation(
-                                "invalid_calendar_date_operation",
+                                if kind == "calendarDate" {
+                                    "invalid_calendar_date_operation"
+                                } else {
+                                    "invalid_timestamp_operation"
+                                },
                                 format!(
-                                    "operation '{operation}' is not supported for calendar date column '{field}'"
+                                    "operation '{operation}' is not supported for temporal column '{field}'"
                                 ),
                             ));
                         }
                     }
                 }
             } else {
-                validate_calendar_date_value(field, value)?;
+                validate_temporal_value(kind, field, value)?;
             }
         }
     }
@@ -425,7 +447,7 @@ fn normalize_row_on_read(
     };
     for (key, value) in obj.iter_mut() {
         if matches!(key.as_str(), "created_at" | "updated_at" | "deleted_at") {
-            normalize_timestamp_value(value)?;
+            normalize_timestamp_value(key, value)?;
             continue;
         }
 
@@ -449,7 +471,7 @@ fn normalize_row_on_read(
                 normalize_json_value(dialect, key, value)?;
             }
             Some("bytes") => normalize_bytes_value(value)?,
-            Some("date") => normalize_timestamp_value(value)?,
+            Some("date" | "timestamp") => normalize_timestamp_value(key, value)?,
             Some("calendarDate") => {
                 if !value.is_null()
                     && value
@@ -605,136 +627,18 @@ fn normalize_bytes_value(value: &mut Value) -> Result<(), CodecError> {
     }
 }
 
-fn normalize_timestamp_value(value: &mut Value) -> Result<(), CodecError> {
-    match value {
-        Value::Null | Value::Number(_) | Value::Timestamp(_) => Ok(()),
-        Value::String(s) => {
-            if let Some(ms) = parse_timestamp_millis(s) {
-                *value = Value::Number(crate::value::Number::from(ms));
-            }
-            Ok(())
-        }
-        other => Err(CodecError::internal(format!(
-            "normalize_row_on_read: timestamp field expected string/number/null, got {other:?}"
-        ))),
+fn normalize_timestamp_value(field: &str, value: &mut Value) -> Result<(), CodecError> {
+    if value.is_null() {
+        return Ok(());
     }
+    let millis = crate::temporal::timestamp_millis(value).ok_or_else(|| CodecError::Decode {
+        column: field.to_string(),
+        reason: "invalid timestamp storage",
+    })?;
+    *value = Value::Timestamp(millis);
+    Ok(())
 }
 
-// This used to try `session_minter::parse_iso_to_millis` first and fall back to
-// the parser below. That fast path was deleted with the session minter on
-// 2026-09-02, and nothing was lost: the parser below accepts a strict superset
-// of the same `YYYY-MM-DDTHH:MM:SS.mmm` shape and computes it identically. It
-// is also stricter where it matters - the deleted one range-checked no field,
-// so `...T99:00:00.000` short-circuited to a nonsense instant instead of `None`.
-fn parse_timestamp_millis(s: &str) -> Option<i64> {
-    let b = s.as_bytes();
-    if b.len() < 19 {
-        return None;
-    }
-    if b[4] != b'-'
-        || b[7] != b'-'
-        || !matches!(b[10], b' ' | b'T')
-        || b[13] != b':'
-        || b[16] != b':'
-    {
-        return None;
-    }
-
-    let year: i32 = std::str::from_utf8(&b[0..4]).ok()?.parse().ok()?;
-    let month: u32 = std::str::from_utf8(&b[5..7]).ok()?.parse().ok()?;
-    let day: u32 = std::str::from_utf8(&b[8..10]).ok()?.parse().ok()?;
-    let hour: i64 = std::str::from_utf8(&b[11..13]).ok()?.parse().ok()?;
-    let minute: i64 = std::str::from_utf8(&b[14..16]).ok()?.parse().ok()?;
-    let second: i64 = std::str::from_utf8(&b[17..19]).ok()?.parse().ok()?;
-    if !(0..=23).contains(&hour) || !(0..=59).contains(&minute) || !(0..=59).contains(&second) {
-        return None;
-    }
-
-    let mut millis = 0i64;
-    let mut idx = 19usize;
-
-    if idx < b.len() && b[idx] == b'.' {
-        idx += 1;
-        let frac_start = idx;
-        while idx < b.len() && b[idx].is_ascii_digit() {
-            idx += 1;
-        }
-        if idx == frac_start {
-            return None;
-        }
-        let frac = &b[frac_start..idx];
-        let frac_digits = std::str::from_utf8(frac).ok()?;
-        let mut milli_digits = frac_digits.chars().take(3).collect::<String>();
-        while milli_digits.len() < 3 {
-            milli_digits.push('0');
-        }
-        millis = milli_digits.parse::<i64>().ok()?;
-    }
-
-    let tz_offset_minutes = if idx < b.len() {
-        parse_timestamp_offset_minutes(&b[idx..])?
-    } else {
-        0
-    };
-
-    let days = days_from_civil(year, month, day)?;
-    let total_secs = days * 86_400 + hour * 3600 + minute * 60 + second;
-    Some(total_secs * 1000 + millis - tz_offset_minutes * 60 * 1000)
-}
-
-fn parse_timestamp_offset_minutes(rest: &[u8]) -> Option<i64> {
-    match rest {
-        b"Z" | b"z" => Some(0),
-        [sign @ (b'+' | b'-'), h1, h2] => {
-            let hours: i64 = std::str::from_utf8(&[*h1, *h2]).ok()?.parse().ok()?;
-            if hours > 23 {
-                return None;
-            }
-            let sign = if *sign == b'-' { -1 } else { 1 };
-            Some(sign * hours * 60)
-        }
-        [sign @ (b'+' | b'-'), h1, h2, b':', m1, m2] => {
-            let hours: i64 = std::str::from_utf8(&[*h1, *h2]).ok()?.parse().ok()?;
-            let minutes: i64 = std::str::from_utf8(&[*m1, *m2]).ok()?.parse().ok()?;
-            if hours > 23 || minutes > 59 {
-                return None;
-            }
-            let sign = if *sign == b'-' { -1 } else { 1 };
-            Some(sign * (hours * 60 + minutes))
-        }
-        [sign @ (b'+' | b'-'), h1, h2, m1, m2] => {
-            let hours: i64 = std::str::from_utf8(&[*h1, *h2]).ok()?.parse().ok()?;
-            let minutes: i64 = std::str::from_utf8(&[*m1, *m2]).ok()?.parse().ok()?;
-            if hours > 23 || minutes > 59 {
-                return None;
-            }
-            let sign = if *sign == b'-' { -1 } else { 1 };
-            Some(sign * (hours * 60 + minutes))
-        }
-        _ => None,
-    }
-}
-
-fn days_from_civil(y: i32, m: u32, d: u32) -> Option<i64> {
-    if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
-        return None;
-    }
-    let y = if m <= 2 {
-        i64::from(y) - 1
-    } else {
-        i64::from(y)
-    };
-    let era = y.div_euclid(400);
-    let yoe = (y - era * 400) as u64;
-    let m = m as i64;
-    let d = d as i64;
-    let doy = ((153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1) as u64;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    Some(era * 146_097 + doe as i64 - 719_468)
-}
-
-/// Decrypt every encrypted column on `rows`.
-///
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -808,7 +712,7 @@ mod tests {
         assert_eq!(row["active"], Value::Bool(true));
         assert_eq!(row["prefs"], crate::value!({"theme":"dark"}));
         assert_eq!(row["avatar"], Value::Bytes(vec![104, 105]));
-        assert_eq!(row["published_at"], crate::value!(1_778_115_723_004i64));
+        assert_eq!(row["published_at"], Value::Timestamp(1_778_115_723_004));
     }
     #[test]
     fn normalize_row_on_read_skips_encrypted_columns() {
@@ -845,7 +749,7 @@ mod tests {
         )
         .expect("normalize");
 
-        assert_eq!(row["created_at"], crate::value!(1_778_115_723_004i64));
+        assert_eq!(row["created_at"], Value::Timestamp(1_778_115_723_004));
         assert_eq!(
             row["published_at"],
             Value::String("2026-05-07T01:02:03.004Z".to_string())
@@ -860,15 +764,15 @@ mod tests {
     fn parse_timestamp_millis_accepts_iso_z_and_variable_fraction() {
         let expected = 1_746_579_723_004i64;
         assert_eq!(
-            parse_timestamp_millis("2025-05-07T01:02:03.004Z"),
+            crate::temporal::parse_timestamp_millis("2025-05-07T01:02:03.004Z"),
             Some(expected)
         );
         assert_eq!(
-            parse_timestamp_millis("2025-05-07T01:02:03.004999Z"),
+            crate::temporal::parse_timestamp_millis("2025-05-07T01:02:03.004999Z"),
             Some(expected)
         );
         assert_eq!(
-            parse_timestamp_millis("2025-05-07T03:02:03.004+02:00"),
+            crate::temporal::parse_timestamp_millis("2025-05-07T03:02:03.004+02:00"),
             Some(expected)
         );
     }
@@ -892,6 +796,62 @@ mod tests {
             }
             other => panic!("expected Internal error, got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod timestamp_tests {
+    use super::*;
+    use crate::value;
+
+    #[test]
+    fn timestamp_aliases_validate_storage_without_echoing_values() {
+        for kind in ["date", "timestamp"] {
+            let schema = value!({"instant":{"type":kind}});
+            for dialect in [compile::SqlDialect::Postgres, compile::SqlDialect::Sqlite] {
+                for value in [
+                    value!(-1),
+                    value!(-1.0),
+                    Value::Timestamp(-1),
+                    value!("1969-12-31T23:59:59.999999Z"),
+                ] {
+                    let mut rows = [value!({"instant":value})];
+                    decode_rows(dialect, &schema, &mut rows).unwrap();
+                    assert_eq!(rows[0]["instant"], Value::Timestamp(-1));
+                }
+                for value in [
+                    value!("private_invalid_instant"),
+                    value!("2026-02-30"),
+                    value!(0.5),
+                    value!(true),
+                    value!({"secret":"private_invalid_instant"}),
+                    Value::Timestamp(i64::MAX),
+                ] {
+                    let mut rows = [value!({"instant":value})];
+                    let error = decode_rows(dialect, &schema, &mut rows).unwrap_err();
+                    assert_eq!(
+                        error,
+                        CodecError::Decode {
+                            column: "instant".into(),
+                            reason: "invalid timestamp storage"
+                        }
+                    );
+                    assert!(!error.to_string().contains("private_invalid_instant"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn protected_timestamps_keep_their_storage_shape_until_protection_decodes_them() {
+        let schema = value!({
+            "masked":{"type":"date", "mask":{"kind":"full"}},
+            "encrypted":{"type":"timestamp", "encrypted":{"mode":"randomized","wraps":"string"}},
+        });
+        let original = value!({"masked":"***", "encrypted":Value::Bytes(vec![1, 2, 3])});
+        let mut rows = [original.clone()];
+        decode_rows(compile::SqlDialect::Sqlite, &schema, &mut rows).unwrap();
+        assert_eq!(rows[0], original);
     }
 }
 

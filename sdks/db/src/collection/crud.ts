@@ -24,7 +24,7 @@ import {
   checkPartial,
   isValidCalendarDate,
   isJsonSerializable,
-  isParseableDateString,
+  isTimestampValue,
 } from "../validate";
 import {
   type Actor,
@@ -124,9 +124,7 @@ export function validateArrayPushOps(
       else if (itemType === "number") valid = typeof val === "number";
       else if (itemType === "boolean") valid = typeof val === "boolean";
       else if (itemType === "date") {
-        valid =
-          val instanceof Date ||
-          (typeof val === "string" && isParseableDateString(val));
+        valid = isTimestampValue(val);
       } else if (itemType === "calendarDate") {
         valid = typeof val === "string" && isValidCalendarDate(val);
       } else if (itemType === "json") {

@@ -6,6 +6,7 @@ schema!(pub test_schema = "../../tests/fixtures/schema.runtime.json");
 use test_schema::posts;
 
 mod calendar_date;
+mod timestamp;
 mod fixtures;
 mod identity;
 mod json;

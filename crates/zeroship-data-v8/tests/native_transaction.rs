@@ -1016,6 +1016,72 @@ const _procedures = {jsonValues};
 }
 
 #[test]
+fn timestamps_round_trip_through_worker_transactions() {
+    let url = require_pg();
+    let app = crate::test_app_id!();
+    let app = app.as_str();
+    reset_schema(&url, app);
+    let role = zeroship_core::database_role::per_app_role_name(app).unwrap();
+    exec_owner_sql(
+        &url,
+        &format!(
+            "ALTER TABLE \"{app}\".notes ADD COLUMN instant TIMESTAMPTZ; \
+             GRANT SELECT, INSERT, UPDATE ON \"{app}\".notes TO \"{role}\""
+        ),
+    );
+    let mut descriptor: serde_json::Value =
+        serde_json::from_str(&notes_runtime_descriptor()).unwrap();
+    descriptor["collections"]["notes"]["fields"]["instant"] =
+        serde_json::json!({"type":"timestamp", "nullable":true});
+    let source = build_src(
+        r#"
+async function timestamps() {
+    const instants = [
+        [253402300790001, "9999-12-31T23:59:50.001Z"],
+        [-62135596800000, "0001-01-01"],
+        [-1, "1969-12-31T23:59:59.999999Z"],
+        [0, "1970-01-01T02:00:00+02:00"],
+        [253402300799999, "9999-12-31T23:59:59.999Z"],
+    ];
+    const result = await env.db.transaction(async tx => {
+        for (const [millis, text] of instants) {
+            for (const instant of [millis, text, new Date(millis)]) {
+                const inserted = await tx.notes.insert({title:"timestamp", instant});
+                if (inserted.instant !== millis) throw new Error("insert changed the instant");
+                const updated = await tx.notes.update({id:inserted.id}, {instant:{$set:instant}});
+                if (updated.instant !== millis) throw new Error("update changed the instant");
+                const found = await tx.notes.find({id:inserted.id, instant:millis});
+                if (found.length !== 1 || found[0].instant !== millis) throw new Error("timestamp filter failed");
+            }
+        }
+        return {preserved:true};
+    });
+    if (result.error) throw result.error;
+    for (const instant of ["private_not_a_timestamp", "2026-02-30T00:00:00Z", 0.5, 253402300800000]) {
+        let refused = false;
+        try {
+            await env.db.collection("notes").insert({title:"invalid", instant});
+        } catch (error) {
+            if (error.code !== "invalid_timestamp") throw error;
+            if (error.message.includes("private_not_a_timestamp")) throw new Error("validation leaked input");
+            refused = true;
+        }
+        if (!refused) throw new Error("native timestamp validation was bypassed");
+    }
+    return result.data;
+}
+timestamps.config = {kind:"action"};
+const _procedures = {timestamps};
+"#,
+    );
+    let (status, body) =
+        dispatch_zs_with_descriptor(&url, &source, "timestamps", app, descriptor.to_string());
+    assert_eq!(status, 200, "worker timestamps: {body}");
+    assert_eq!(body["json"], serde_json::json!({"preserved":true}));
+    assert_eq!(count_notes(&url, app), 15);
+}
+
+#[test]
 fn calendar_dates_round_trip_through_worker_transactions() {
     let url = require_pg();
     let app = crate::test_app_id!();
