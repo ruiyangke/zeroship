@@ -73,3 +73,4 @@ pub mod codecs;
 pub mod temporal;
 pub mod json;
 mod array_update;
+pub mod update;

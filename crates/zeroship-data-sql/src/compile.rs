@@ -1811,112 +1811,63 @@ pub fn build_set_clauses_with_system_fields(
     dialect: SqlDialect,
     autobump: &SystemFieldAutoBump<'_>,
 ) -> Result<Vec<String>, QueryError> {
-    let update_obj = update
-        .as_object()
-        .ok_or_else(|| QueryError::InvalidFilter("update must be an object".to_string()))?;
-
+    use crate::update::Operator;
+    let fields = crate::update::assignments(update)
+        .map_err(|error| QueryError::InvalidFilter(error.to_string()))?;
+    let update_obj = update.as_object().expect("validated update");
     let mut binary_bind_cols = collect_binary_bind_cols(update_obj);
-    if let Some(set_obj) = update_obj.get("$set").and_then(|v| v.as_object()) {
+    if let Some(set_obj) = update_obj.get("$set").and_then(Value::as_object) {
         binary_bind_cols.extend(collect_binary_bind_cols(set_obj));
     }
-
-    let mut fields: Vec<(&String, &Value)> = Vec::new();
-    for (key, value) in update_obj.iter() {
-        if key == "$set" {
-            // Flatten $set fields into the top level
-            let obj = value
-                .as_object()
-                .ok_or_else(|| QueryError::InvalidFilter("$set must be an object".to_string()))?;
-            for (k, v) in obj.iter() {
-                fields.push((k, v));
-            }
-        } else {
-            fields.push((key, value));
-        }
-    }
-
-    if fields.is_empty() {
-        return Err(QueryError::InvalidFilter(
-            "update fields cannot be empty".to_string(),
-        ));
-    }
-
     let mut set_clauses = Vec::new();
-
-    for (key, value) in fields {
+    for assignment in fields {
+        let key = assignment.field;
+        let value = assignment.operand;
         let col = quote_ident(key);
-
-        // Check if the value is an operator object: { "$op": val }
-        if let Some(ops) = value.as_object() {
-            if let Some(op_key) = ops.keys().find(|k| k.starts_with('$')) {
-                let op = op_key.as_str();
-                let op_val = &ops[op_key];
-
-                let clause = match op {
-                    "$set" => {
-                        let is_binary_bind = binary_bind_cols.contains(key.as_str());
-                        if is_binary_bind {
-                            params.push(dialect.encode_binary_param(value_to_param(op_val))?);
-                            format!("{col} = {}", dialect.binary_bind_placeholder(params.len()))
-                        } else {
-                            format!(
-                                "{col} = {}",
-                                push_field_value_bind(params, op_val, key, schema_hint, dialect,)?
-                            )
-                        }
-                    }
-                    "$inc" => {
-                        params.push(value_to_param(op_val));
-                        format!("{col} = {col} + ${}::numeric", params.len())
-                    }
-                    "$dec" => {
-                        params.push(value_to_param(op_val));
-                        format!("{col} = {col} - ${}::numeric", params.len())
-                    }
-                    "$mul" => {
-                        params.push(value_to_param(op_val));
-                        format!("{col} = {col} * ${}::numeric", params.len())
-                    }
-                    "$push" | "$pull" | "$addToSet" => {
-                        use crate::array_update::ArrayUpdate;
-                        push_array_value_bind(params, op_val, key, schema_hint, dialect)?;
-                        let operation = match op {
-                            "$push" => ArrayUpdate::Push,
-                            "$pull" => ArrayUpdate::Pull,
-                            _ => ArrayUpdate::AddToSet,
-                        };
-                        crate::array_update::render(
-                            dialect,
-                            operation,
-                            &col,
-                            &format!("${}", params.len()),
-                        )?
-                    }
-                    other => {
-                        return Err(QueryError::InvalidFilter(format!(
-                            "unsupported update operator: {other}"
-                        )));
-                    }
-                };
-                set_clauses.push(clause);
-                continue;
+        let clause = match assignment.operator {
+            Operator::Set => {
+                if binary_bind_cols.contains(key) {
+                    params.push(dialect.encode_binary_param(value_to_param(value))?);
+                    format!("{col} = {}", dialect.binary_bind_placeholder(params.len()))
+                } else {
+                    format!(
+                        "{col} = {}",
+                        push_field_value_bind(params, value, key, schema_hint, dialect)?
+                    )
+                }
             }
-        }
-
-        // Plain field: value — treat as $set
-        let is_binary_bind = binary_bind_cols.contains(key.as_str());
-        if is_binary_bind {
-            params.push(dialect.encode_binary_param(value_to_param(value))?);
-            set_clauses.push(format!(
-                "{col} = {}",
-                dialect.binary_bind_placeholder(params.len())
-            ));
-        } else {
-            set_clauses.push(format!(
-                "{col} = {}",
-                push_field_value_bind(params, value, key, schema_hint, dialect)?
-            ));
-        }
+            Operator::Increment | Operator::Decrement | Operator::Multiply => {
+                let operator = match assignment.operator {
+                    Operator::Increment => '+',
+                    Operator::Decrement => '-',
+                    _ => '*',
+                };
+                params.push(value_to_param(value));
+                let bind = format!("${}", params.len());
+                let bind = if dialect == SqlDialect::Postgres {
+                    format!("{bind}::numeric")
+                } else {
+                    bind
+                };
+                format!("{col} = {col} {operator} {bind}")
+            }
+            Operator::Push | Operator::Pull | Operator::AddToSet => {
+                use crate::array_update::ArrayUpdate;
+                push_array_value_bind(params, value, key, schema_hint, dialect)?;
+                let operation = match assignment.operator {
+                    Operator::Push => ArrayUpdate::Push,
+                    Operator::Pull => ArrayUpdate::Pull,
+                    _ => ArrayUpdate::AddToSet,
+                };
+                crate::array_update::render(
+                    dialect,
+                    operation,
+                    &col,
+                    &format!("${}", params.len()),
+                )?
+            }
+        };
+        set_clauses.push(clause);
     }
 
     // System-field auto-bump SET clauses. Appended AFTER

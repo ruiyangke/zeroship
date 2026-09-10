@@ -327,7 +327,7 @@ type UpdateFieldValue<T> =
 export type UpdateExpression<S> = {
   [K in keyof InferSchema<S>]?: UpdateFieldValue<InferSchema<S>[K]>
 } & {
-  // Mongoose top-level operators (SDK translates to per-field)
+  // Document operators share the ORM's assignment grammar.
   $set?: Partial<InferSchema<S>>;
   $inc?: { [K in keyof InferSchema<S>]?: NonNullable<InferSchema<S>[K]> extends number | bigint ? NonNullable<InferSchema<S>[K]> : never };
   $dec?: { [K in keyof InferSchema<S>]?: NonNullable<InferSchema<S>[K]> extends number | bigint ? NonNullable<InferSchema<S>[K]> : never };

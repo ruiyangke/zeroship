@@ -43,6 +43,7 @@ pub enum ApplyMode<'a> {
 /// bump" hints; under `assign` there is no such thing as a creator-supplied
 /// value for an assigned column.
 pub fn inspect_update(app_id: &str, collection: &str, patch: &mut Value) -> Result<(), DbError> {
+    zeroship_data_sql::update::normalize(patch)?;
     super::system_fields_pass::apply_system_fields_on_update(patch, app_id, collection)
 }
 
@@ -1269,9 +1270,10 @@ mod tests {
 
             let mut update_patch = zeroship_data_sql::value!({
                 "$set": {
-                    "ssn": "555-55-5555",
+                    "name": "Canonical update",
                     "updated_by": "usr_override"
-                }
+                },
+                "ssn": { "$set": "555-55-5555" }
             });
             inspect_update(app_id, collection, &mut update_patch).expect("inspect update patch");
             assert_eq!(

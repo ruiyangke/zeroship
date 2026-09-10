@@ -191,6 +191,15 @@ key order, arrays retain order, and numbers compare by exact decimal value.
 JSON null is an element when used as an operand; null columns remain null.
 The dialect renderer lives in `zeroship-data-sql`.
 
+The SQL crate also owns the shared update grammar. It validates assignments
+before system-field and protection transforms, rejecting conflicting writes and
+nonnumeric arithmetic operands. Normalization moves literal values under `$set`
+so every assigned field passes through the same encryption and masking path.
+Explicit `$set` values remain literal JSON even when they contain operator keys.
+The compiler consumes parsed assignments instead of selecting an arbitrary
+operator from an object. The SDK maps column names without flattening away
+document operators or overwriting colliding assignments.
+
 PostgreSQL uses native JSONB equality. SQLite connection setup registers the
 deterministic `zeroship_json_equal` SQL function on ordinary and transaction
 connections, including replacements after recovery. It uses the SQL crate's

@@ -25,7 +25,7 @@ impl CodecError {
             message: message.into(),
         }
     }
-    fn validation(code: &'static str, message: impl Into<String>) -> Self {
+    pub(crate) fn validation(code: &'static str, message: impl Into<String>) -> Self {
         Self::Validation {
             code,
             message: message.into(),
