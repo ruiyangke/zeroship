@@ -1,13 +1,12 @@
 //! V8 binding for key-value storage — `env.kv.*` native primitives.
 //!
 //! `env.kv` is a `#[v8_class]` instance (`Kv`) minted once per isolate by
-//! [`KvBinding::build_instance`]. The instance carries the backend handle
-//! and the app_id, so callbacks never read a thread-local for the
-//! backend and never re-derive the app_id per call (mirrors `env.db`).
+//! [`KvBinding::build_instance`]. The instance carries a scoped Rust handle
+//! issued from the host's configured KV store.
 //!
 //! Storage implementations, the backend contract, and typed errors live in
 //! zeroship-kv. This crate owns V8 conversion, promises, isolate state,
-//! and usage metering. Hosts construct a backend and pass it to [KvBinding].
+//! and usage metering. Hosts pass a configured store to [`KvBinding`].
 //!
 //! Native API surface (wrapped by the `@zeroship/kv` SDK):
 //! - `env.kv.get(key)` → Promise<string | null>
@@ -30,14 +29,14 @@ mod limits;
 mod v8_class;
 
 use v8_class::mint_kv;
-use zeroship_kv::Backend;
+use zeroship_kv::{KvStore, Namespace};
 
 // ---------------------------------------------------------------------------
 // KvBinding
 // ---------------------------------------------------------------------------
 
 pub struct KvBinding {
-    backend: Arc<dyn Backend>,
+    store: KvStore,
     /// The process-wide usage meter. `Some` on the production worker (and
     /// dev `zeroship serve`); each kv op emits `kv_reads`/`kv_writes` into
     /// it in its success arm via a [`zeroship_metering::MeterHandle`].
@@ -48,36 +47,18 @@ pub struct KvBinding {
 impl std::fmt::Debug for KvBinding {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("KvBinding")
-            .field("backend", &self.backend)
+            .field("store", &self.store)
             .finish()
     }
 }
 
 impl KvBinding {
-    /// Construct with a backend and no meter — for test harnesses where
-    /// metering is not under test. Production code uses
-    /// [`Self::with_backend_and_meter`].
+    /// Bind a configured store to V8. The host owns backend selection and
+    /// startup; each isolate receives an app-scoped Rust handle. The optional
+    /// process meter records successful creator operations at dispatch.
     #[must_use]
-    pub fn with_backend(backend: Arc<dyn Backend>) -> Self {
-        Self {
-            backend,
-            meter: None,
-        }
-    }
-
-    /// Construct with a backend + the process-wide meter. There is no
-    /// infallible default backend: `RedbBackend::open` is fallible (it
-    /// takes an exclusive file lock), so callers open the backend and pass
-    /// it here. Use `RedbBackend` for the embedded/self-host tier or
-    /// `Redis` for distributed fleets. The meter binds to the isolate's
-    /// `app_id` at mint time so each op emits a per-app `kv_reads` /
-    /// `kv_writes` metric — platform-measured, unforgeable by app code.
-    #[must_use]
-    pub fn with_backend_and_meter(
-        backend: Arc<dyn Backend>,
-        meter: Option<Arc<zeroship_metering::Meter>>,
-    ) -> Self {
-        Self { backend, meter }
+    pub fn new(store: KvStore, meter: Option<Arc<zeroship_metering::Meter>>) -> Self {
+        Self { store, meter }
     }
 }
 
@@ -105,6 +86,15 @@ impl NativePlugin for KvBinding {
             .meter
             .as_ref()
             .map(|m| zeroship_metering::MeterHandle::new(Arc::clone(m), app_id));
-        mint_kv(scope, Arc::clone(&self.backend), app_id, handle)
+        let namespace = match Namespace::app(app_id) {
+            Ok(namespace) => namespace,
+            Err(error) => {
+                let message = v8::String::new(scope, &error.to_string())?;
+                let exception = v8::Exception::type_error(scope, message);
+                scope.throw_exception(exception);
+                return None;
+            }
+        };
+        mint_kv(scope, self.store.namespace(namespace), handle)
     }
 }

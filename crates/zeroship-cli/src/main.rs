@@ -266,60 +266,32 @@ fn cmd_serve(args: &[String]) {
     plugins.push(Arc::new(zeroship_runtime::auth::AuthPlugin));
     eprintln!("[zeroship] auth plugin registered");
 
-    // KV plugin backend selection, in priority order:
-    //   1. ZEROSHIP_KV_URL set → Redis (distributed-correctness: shared
-    //                            across workers/regions).
-    //   2. otherwise           → redb (single-process persistent embedded
-    //                            store; self-host / dev tier). Path is
-    //                            ZEROSHIP_KV_PATH if set, else the default
-    //                            `./.zeroship/kv.redb`.
-    let kv_plugin = match zeroship_core::declared_env!(
-        cli,
-        "ZEROSHIP_KV_URL",
-        crate::ZeroshipCliConsumer
-    ) {
-        Some(url) if !url.is_empty() => {
-            eprintln!("[zeroship] kv plugin registered (redis)");
-            zeroship_kv_v8::KvBinding::with_backend_and_meter(
-                Arc::new(zeroship_kv::Redis::new(url)),
-                Some(Arc::clone(&dev_meter)),
-            )
-        }
-        _ => {
-            let kv_path: PathBuf = zeroship_core::declared_env_os!(
-                cli,
-                "ZEROSHIP_KV_PATH",
-                crate::ZeroshipCliConsumer
-            )
+    // Resolve the host's runtime configuration before constructing storage.
+    let kv_config =
+        match zeroship_core::declared_env!(cli, "ZEROSHIP_KV_URL", crate::ZeroshipCliConsumer) {
+            Some(url) if !url.is_empty() => zeroship_kv::KvConfig::Redis { url },
+            _ => zeroship_kv::KvConfig::Redb {
+                path: zeroship_core::declared_env_os!(
+                    cli,
+                    "ZEROSHIP_KV_PATH",
+                    crate::ZeroshipCliConsumer
+                )
                 .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from(".zeroship/kv.redb"));
-            // Create the parent dir so a default `./.zeroship/kv.redb`
-            // opens cleanly on a fresh checkout.
-            if let Some(parent) = kv_path.parent() {
-                if let Err(e) = std::fs::create_dir_all(parent) {
-                    eprintln!(
-                        "[zeroship] kv: failed to create dir '{}': {e}",
-                        parent.display()
-                    );
-                    std::process::exit(1);
-                }
-            }
-            let backend = zeroship_kv::RedbBackend::open(&kv_path)
-                .unwrap_or_else(|e| {
-                    eprintln!(
-                        "[zeroship] kv: failed to open redb at '{}': {e}",
-                        kv_path.display()
-                    );
-                    std::process::exit(1);
-                });
-            eprintln!("[zeroship] kv plugin registered (redb; path={})", kv_path.display());
-            zeroship_kv_v8::KvBinding::with_backend_and_meter(
-                Arc::new(backend),
-                Some(Arc::clone(&dev_meter)),
-            )
-        }
-    };
-    plugins.push(Arc::new(kv_plugin));
+                .unwrap_or_else(|| PathBuf::from(".zeroship/kv.redb")),
+            },
+        };
+    let kv_store = zeroship_kv::KvStore::open(&kv_config).unwrap_or_else(|error| {
+        eprintln!("[zeroship] kv backend init failed: {error}");
+        std::process::exit(1);
+    });
+    eprintln!(
+        "[zeroship] kv binding registered (backend={})",
+        kv_config.kind()
+    );
+    plugins.push(Arc::new(zeroship_kv_v8::KvBinding::new(
+        kv_store,
+        Some(Arc::clone(&dev_meter)),
+    )));
 
     // Forward process env to the V8 runtime so `process.env.FOO` works in JS.
     // Important for dev: the vite-plugin sets ZEROSHIP_ENTRY / ZEROSHIP_VITE_WS

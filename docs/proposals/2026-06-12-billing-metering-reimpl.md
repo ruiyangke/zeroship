@@ -929,12 +929,10 @@ applied to platform primitives instead of user code).
 
 **Per-plugin wiring (matching each plugin's existing shape):**
 
-- **kv-v8** (`v8_class`-backed): `KvBinding::with_backend(backend)` →
-  `KvBinding::with_backend_and_meter(backend, Arc<Meter>)`. `build_instance`
-  (`lib.rs:78`) calls `mint_kv(scope, backend, meter, app_id)`; `mint_kv`
-  (`v8_class.rs:364`) stamps a `MeterHandle` field onto the `Kv` struct
-  (`v8_class.rs:46`, alongside `backend`/`app_id`). Each `dispatch_*` resolve
-  arm emits (see A2).
+- **kv-v8** (`v8_class`-backed): `KvBinding::new(store, Some(meter))` receives
+  the configured `KvStore` and process meter. `build_instance` issues an
+  app-scoped Rust handle and a `MeterHandle`; `mint_kv` places them on the V8
+  wrapper. Each successful `dispatch_*` operation emits usage (see A2).
 - **plugin-db** (`v8_class` + 27 flat callbacks): `DbPlugin::new(url)` →
   `DbPlugin::new(url, Arc<Meter>)`. `build_instance` (`lib.rs:272`) →
   `mint_db(scope, app_id, meter)`. The emit lives at the shared exec boundary

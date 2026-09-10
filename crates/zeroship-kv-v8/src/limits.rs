@@ -1,6 +1,8 @@
 //! Convert JavaScript numeric options into typed KV arguments.
 
-use zeroship_kv::limits::{LIST_DEFAULT_LIMIT, LIST_MAX_LIMIT, MAX_TTL_MS};
+use zeroship_kv::limits::LIST_DEFAULT_LIMIT;
+#[cfg(test)]
+use zeroship_kv::limits::{LIST_MAX_LIMIT, MAX_TTL_MS};
 use zeroship_kv::KvError;
 
 /// Validate an `incr` delta read off a JS number. The SDK hands deltas
@@ -33,7 +35,7 @@ pub fn validate_delta(by: f64) -> Result<i64, KvError> {
 }
 
 /// Validate a `ttlMs` option read off a JS number. Rejects non-finite,
-/// fractional, negative, zero, and out-of-range values (> [`MAX_TTL_MS`]);
+/// fractional, negative, zero, and out-of-range values (> [`zeroship_kv::limits::MAX_TTL_MS`]);
 /// returns the integral milliseconds.
 ///
 /// `ttlMs == 0` is rejected because the backends diverge on it: Dragonfly
@@ -53,27 +55,21 @@ pub fn validate_ttl_ms(ttl_ms: f64) -> Result<u64, KvError> {
     if ttl_ms < 0.0 {
         return Err(KvError::invalid_argument("kv: ttlMs must not be negative"));
     }
-    if ttl_ms == 0.0 {
-        return Err(KvError::invalid_argument(
-            "kv: ttlMs must be greater than 0",
-        ));
-    }
-    if ttl_ms > MAX_TTL_MS as f64 {
-        return Err(KvError::invalid_argument(
-            "kv: ttlMs exceeds the maximum (100 years)",
-        ));
-    }
-    Ok(ttl_ms as u64)
+    let ttl_ms = ttl_ms as u64;
+    zeroship_kv::limits::validate_ttl_ms(ttl_ms)?;
+    Ok(ttl_ms)
 }
 
 /// Normalise a caller-supplied `list` limit into the effective page
 /// size. `None` → [`LIST_DEFAULT_LIMIT`]; anything above
-/// [`LIST_MAX_LIMIT`] is clamped (not rejected); a non-positive value
+/// [`zeroship_kv::limits::LIST_MAX_LIMIT`] is clamped (not rejected); a non-positive value
 /// falls back to the default.
 #[must_use]
 pub fn resolve_list_limit(limit: Option<f64>) -> usize {
     match limit {
-        Some(l) if l.is_finite() && l >= 1.0 => (l as usize).min(LIST_MAX_LIMIT),
+        Some(l) if l.is_finite() && l >= 1.0 => {
+            zeroship_kv::limits::normalize_list_limit(l as usize)
+        }
         _ => LIST_DEFAULT_LIMIT,
     }
 }

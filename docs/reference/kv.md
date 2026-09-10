@@ -10,14 +10,22 @@ The TypeScript wrapper lives in `sdks/kv/src/index.ts`. Rust support is split by
 responsibility:
 
 - `crates/zeroship-kv/` owns the backend contract, Redis/redb implementations,
-  tenant key scoping, shared limits, and storage errors. It is independent of V8.
+  runtime configuration, scoped Rust handles, shared limits, and storage errors.
+  It is independent of V8.
 - `crates/zeroship-kv-v8/` provides `KvBinding`, which registers the native class
   and owns JavaScript conversion, promises, isolate state, and usage metering.
 
-The worker and CLI construct storage backends directly and pass them to the
-binding. Storage features are selected on `zeroship-kv`; the binding depends
-only on its backend interface. Backend tests run in the storage crate, while
-the binding's integration suite drives the real runtime against those backends.
+Hosts open a `KvStore` from `KvConfig` at startup and pass it to the binding.
+Cargo features determine which backend implementations are available; runtime
+configuration selects the active implementation. Rust platform code receives
+`Kv` handles bound to `Namespace::platform`, while the V8 binding uses
+`Namespace::app` and the same scoped operations. The CLI selects Redis from
+`ZEROSHIP_KV_URL`, otherwise redb from `ZEROSHIP_KV_PATH` or its local default.
+The distributed worker uses its configured Redis store and shares it across
+worker threads. See `crates/zeroship-kv/README.md` for Rust usage.
+
+Backend and scoped-handle tests run in the storage crate. The binding's suite
+drives the real runtime against those backends and verifies Rust/V8 data sharing.
 
 ## Authoring surface
 

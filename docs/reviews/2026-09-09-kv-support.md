@@ -4,7 +4,8 @@ The crate split is implemented as `zeroship-kv` and `zeroship-kv-v8`.
 The storage crate owns backends, scoping, shared guardrails, and typed errors.
 The binding owns JavaScript conversion, promise scheduling, per-isolate state,
 and successful-operation metering. `KvBinding` is the binding's public entry
-point; hosts construct storage backends directly. Backend tests moved with the
+point; hosts open a configured `KvStore` and pass it to the binding. Rust callers
+and V8 use scoped `Kv` handles from that store. Backend tests moved with the
 storage implementation. The dependency boundary is enforced by
 `crates/zeroship-kv/tests/architecture.rs`.
 

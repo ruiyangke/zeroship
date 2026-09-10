@@ -25,7 +25,7 @@
 //! ## Harness
 //!
 //! Mirrors `crates/zeroship-runtime/tests/call_fetch_handler.rs::async_response`:
-//! build a `Runtime` with the JS app + `KvBinding::with_backend(...)` + an
+//! build a `Runtime` with the JS app + `KvBinding::new(...)` + an
 //! `APP_ID` env var, `start_pump()`, `call_fetch_handler(...)`, then drive
 //! the (likely Pending) outcome to a `SettledFetch::Response` via the
 //! receiver. kv-v8's test crate can't import runtime's test-only
@@ -44,11 +44,8 @@ use zeroship_runtime::{
     init_v8, EnvSnapshot, FetchOutcome, ModuleEntry, RequestCtx, Runtime, SettledFetch,
 };
 
-use zeroship_kv::Backend;
+use zeroship_kv::{KvConfig, KvStore, Namespace};
 use zeroship_kv_v8::KvBinding;
-
-use zeroship_kv::RedbBackend;
-use zeroship_kv::Redis;
 
 // ---------------------------------------------------------------------------
 // The JS app — exercises the full `env.kv` surface and self-asserts.
@@ -687,15 +684,15 @@ fn module(source: &str) -> Vec<ModuleEntry> {
 /// async (every assertion awaits a KV op), so `call_fetch_handler` returns
 /// `Pending` and the pump delivers the final `SettledFetch` via the
 /// receiver — same idiom as `call_fetch_handler.rs::async_response`.
-fn run_e2e(backend: Arc<dyn Backend>) -> (u16, String) {
-    run_app(backend, KV_E2E_APP)
+fn run_e2e(store: KvStore) -> (u16, String) {
+    run_app(store, KV_E2E_APP)
 }
 
 /// Generalised harness: build a Runtime around `app` JS + `backend`, pump it,
 /// call the fetch handler, and return `(status, body)`. `run_e2e` is the
 /// happy-path specialisation; the validation / edge / scenario tests pass
 /// their own app source.
-fn run_app(backend: Arc<dyn Backend>, app: &'static str) -> (u16, String) {
+fn run_app(store: KvStore, app: &'static str) -> (u16, String) {
     compio::runtime::Runtime::new()
         .unwrap()
         .block_on(async move {
@@ -706,7 +703,7 @@ fn run_app(backend: Arc<dyn Backend>, app: &'static str) -> (u16, String) {
             let mut env_vars = HashMap::new();
             env_vars.insert("APP_ID".to_string(), "e2e_app".to_string());
 
-            let plugin: Arc<dyn NativePlugin> = Arc::new(KvBinding::with_backend(backend));
+            let plugin: Arc<dyn NativePlugin> = Arc::new(KvBinding::new(store, None));
 
             let runtime = Runtime::builder()
                 .modules(module(app))
@@ -770,18 +767,57 @@ fn assert_ok(status: u16, body: &str) {
 fn e2e_redb() {
     let dir = tempfile::tempdir().expect("create tempdir");
     let path = dir.path().join("kv.redb");
-    let backend = RedbBackend::open(&path).expect("open redb backend");
-    let (status, body) = run_e2e(Arc::new(backend));
+    let store = KvStore::open(&KvConfig::Redb { path }).expect("open redb store");
+    let (status, body) = run_e2e(store);
     assert_ok(status, &body);
 }
 
 /// Open a fresh redb-backed backend in a tempdir. The `_dir` guard must
 /// stay alive for the duration of the test (dropping it removes the file).
-fn redb_backend() -> (tempfile::TempDir, Arc<dyn Backend>) {
+fn redb_backend() -> (tempfile::TempDir, KvStore) {
     let dir = tempfile::tempdir().expect("create tempdir");
     let path = dir.path().join("kv.redb");
-    let backend = RedbBackend::open(&path).expect("open redb backend");
-    (dir, Arc::new(backend))
+    let store = KvStore::open(&KvConfig::Redb { path }).expect("open redb store");
+    (dir, store)
+}
+
+#[test]
+fn rust_and_v8_share_app_data_without_exposing_platform_data() {
+    let (_dir, store) = redb_backend();
+    let app = store.namespace(Namespace::app("e2e_app").unwrap());
+    let platform = store.namespace(Namespace::platform("e2e_app").unwrap());
+    let runtime = compio::runtime::Runtime::new().unwrap();
+    runtime.block_on(async {
+        app.set("shared", "from Rust", None).await.unwrap();
+        platform
+            .set("private", "platform state", None)
+            .await
+            .unwrap();
+    });
+    let (status, body) = run_app(
+        store,
+        r#"
+export default {
+    async fetch(request, env) {
+        const shared = await env.kv.get("shared");
+        const privateValue = await env.kv.get("private");
+        await env.kv.set("shared", "from JavaScript");
+        return Response.json({ ok: shared === "from Rust" && privateValue === null });
+    }
+};
+"#,
+    );
+    assert_ok(status, &body);
+    runtime.block_on(async {
+        assert_eq!(
+            app.get("shared").await.unwrap().as_deref(),
+            Some("from JavaScript")
+        );
+        assert_eq!(
+            platform.get("private").await.unwrap().as_deref(),
+            Some("platform state")
+        );
+    });
 }
 
 /// Synchronous argument-validation throws (key shape, value type + size,
@@ -819,16 +855,22 @@ fn e2e_scenarios() {
 #[test]
 fn e2e_redis() {
     let fixtures = support::fixtures();
-    let backend = Redis::new(fixtures.redis_url());
-    let (status, body) = run_e2e(Arc::new(backend));
+    let store = KvStore::open(&KvConfig::Redis {
+        url: fixtures.redis_url().into(),
+    })
+    .unwrap();
+    let (status, body) = run_e2e(store);
     assert_ok(status, &body);
 }
 
 #[test]
 fn e2e_dragonfly_cluster() {
     let fixtures = support::fixtures();
-    let backend = Redis::new(fixtures.cluster_url());
-    let (status, body) = run_e2e(Arc::new(backend));
+    let store = KvStore::open(&KvConfig::Redis {
+        url: fixtures.cluster_url().into(),
+    })
+    .unwrap();
+    let (status, body) = run_e2e(store);
     assert_ok(status, &body);
 }
 
@@ -841,8 +883,8 @@ fn e2e_backend_unavailable() {
     server
         .stop()
         .expect("stop Redis before calling the binding");
-    let backend = Redis::new(url);
-    let (status, body) = run_app(Arc::new(backend), KV_BACKEND_DOWN_APP);
+    let store = KvStore::open(&KvConfig::Redis { url }).unwrap();
+    let (status, body) = run_app(store, KV_BACKEND_DOWN_APP);
     assert_ok(status, &body);
 }
 
@@ -869,8 +911,7 @@ export default {
     },
 };
 "#;
-    let dir = tempfile::tempdir().expect("tempdir");
-    let backend = Arc::new(RedbBackend::open(dir.path().join("kv.redb")).expect("open redb"));
+    let (_dir, backend) = redb_backend();
     // Use the production-shaped constructor (with a meter) to prove that even
     // when the worker HAS a meter, no `env.meter` surface is exposed.
     let (status, body, _meter) =
@@ -893,10 +934,10 @@ export default {
 /// Build a Runtime around `app` + `backend` + a real Meter bound to
 /// `app_id`, pump it, run the fetch handler, and return
 /// `(status, body, meter)` so the test can drain what the kv ops recorded.
-/// Faithful: drives the REAL `KvBinding::with_backend_and_meter` →
+/// Faithful: drives the REAL `KvBinding::new` →
 /// `build_instance` → `mint_kv` → `dispatch_*` path an app sees.
 fn run_app_metered(
-    backend: Arc<dyn Backend>,
+    store: KvStore,
     app: &'static str,
     app_id: &str,
 ) -> (u16, String, Arc<zeroship_metering::Meter>) {
@@ -911,10 +952,8 @@ fn run_app_metered(
             let mut env_vars = HashMap::new();
             env_vars.insert("APP_ID".to_string(), app_id.clone());
 
-            let plugin: Arc<dyn NativePlugin> = Arc::new(KvBinding::with_backend_and_meter(
-                backend,
-                Some(meter_for_run),
-            ));
+            let plugin: Arc<dyn NativePlugin> =
+                Arc::new(KvBinding::new(store, Some(meter_for_run)));
 
             let runtime = Runtime::builder()
                 .modules(module(app))
@@ -970,8 +1009,7 @@ export default {
 
 #[test]
 fn metering_kv_ops_counts_are_exact_and_per_app() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let backend = Arc::new(RedbBackend::open(dir.path().join("kv.redb")).expect("open redb"));
+    let (_dir, backend) = redb_backend();
     let app_id = "00000000-0000-7000-8000-0000000000a1";
     let (status, body, meter) = run_app_metered(backend, KV_METER_APP, app_id);
     assert_ok(status, &body);
@@ -1005,8 +1043,10 @@ export default {
     },
 };
 "#;
-    // Dead port → every op rejects.
-    let backend: Arc<dyn Backend> = Arc::new(Redis::new("redis://127.0.0.1:6398"));
+    let server = support::start_redis();
+    let url = support::endpoint(&server);
+    server.stop().unwrap();
+    let backend = KvStore::open(&KvConfig::Redis { url }).unwrap();
     let app_id = "00000000-0000-7000-8000-0000000000b2";
     let (status, body, meter) = run_app_metered(backend, APP, app_id);
     assert_ok(status, &body);

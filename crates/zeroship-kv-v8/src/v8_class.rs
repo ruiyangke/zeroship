@@ -12,14 +12,10 @@
 //!
 //! ## Why a v8_class
 //!
-//! The instance carries per-isolate state — the `Arc<dyn Backend>` and
-//! the `app_id` stamped at mint time — so callbacks never read the
-//! runtime slot for the backend (the legacy `thread_local! KV_BACKEND`
-//! is gone) and never re-derive the app_id per call.
+//! The instance owns a scoped Rust handle minted from the configured store.
+//! Dispatch clones that handle without selecting a backend or namespace again.
 
 #![allow(unsafe_code)]
-
-use std::sync::Arc;
 
 use zeroship_runtime::state::OpError;
 use zeroship_runtime_macros::v8_class;
@@ -32,7 +28,7 @@ use crate::dispatch::{
 };
 use crate::limits::{resolve_list_limit, validate_delta, validate_ttl_ms};
 use zeroship_kv::limits::{validate_key, validate_value};
-use zeroship_kv::Backend;
+use zeroship_kv::Kv as RustKv;
 
 // ---------------------------------------------------------------------------
 // Kv state
@@ -40,15 +36,10 @@ use zeroship_kv::Backend;
 
 /// Owned state for the `env.kv` v8_class instance. Field 0 of the
 /// wrapper holds a `Box<Kv>`; the Weak finalizer registered by
-/// [`mint_kv`] drops the Box on GC. The `Arc<dyn Backend>` clone is
-/// released with the Box (no other native resource to free).
+/// [`mint_kv`] drops the Box on GC, releasing its scoped Rust handle.
 pub struct Kv {
-    /// The active backend (redb / Redis). Cloned per dispatch
-    /// into the spawned op future.
-    pub(crate) backend: Arc<dyn Backend>,
-    /// The app_id this Kv belongs to, stamped at mint time from
-    /// `SharedState.env_vars["APP_ID"]`. Never mutated.
-    pub(crate) app_id: String,
+    /// Scoped Rust handle, cloned into each dispatched future.
+    pub(crate) kv: RustKv,
     /// Per-app metering handle (bound to `app_id` at mint time). `Some` on
     /// the worker / dev-serve vectors; each successful kv op emits
     /// `kv_reads` / `kv_writes` through it. `None` in meter-less test
@@ -59,7 +50,7 @@ pub struct Kv {
 
 impl std::fmt::Debug for Kv {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Kv").field("app_id", &self.app_id).finish()
+        f.debug_struct("Kv").field("kv", &self.kv).finish()
     }
 }
 
@@ -200,9 +191,8 @@ fn read_ttl_ms(
 #[allow(dead_code)]
 impl Kv {
     /// `new Kv()` from JS rejects — real instances are minted via
-    /// [`mint_kv`] from `KvBinding::build_instance`, which stamps the
-    /// live backend + app_id onto the wrapper. A user-constructed Kv
-    /// would have no backend and every method would panic.
+    /// [`mint_kv`] from `KvBinding::build_instance`, which supplies the
+    /// app-scoped Rust handle and its usage meter.
     #[v8_constructor]
     fn new() -> Result<Kv, OpError> {
         Err(OpError::type_error("Illegal constructor"))
@@ -216,14 +206,7 @@ impl Kv {
         key: String,
     ) -> Result<v8::Local<'s, v8::Value>, OpError> {
         validate_key(&key).map_err(crate::error::to_op_error)?;
-        Ok(dispatch_get(
-            scope,
-            Arc::clone(&self.backend),
-            self.app_id.clone(),
-            self.meter.clone(),
-            key,
-        )
-        .into())
+        Ok(dispatch_get(scope, self.kv.clone(), self.meter.clone(), key).into())
     }
 
     /// `kv.set(key, value, {ttlMs?})` → Promise<{ ok: true }>.
@@ -241,8 +224,7 @@ impl Kv {
         let ttl_ms = read_ttl_ms(scope, opts)?;
         Ok(dispatch_set(
             scope,
-            Arc::clone(&self.backend),
-            self.app_id.clone(),
+            self.kv.clone(),
             self.meter.clone(),
             key,
             value,
@@ -259,14 +241,7 @@ impl Kv {
         key: String,
     ) -> Result<v8::Local<'s, v8::Value>, OpError> {
         validate_key(&key).map_err(crate::error::to_op_error)?;
-        Ok(dispatch_delete(
-            scope,
-            Arc::clone(&self.backend),
-            self.app_id.clone(),
-            self.meter.clone(),
-            key,
-        )
-        .into())
+        Ok(dispatch_delete(scope, self.kv.clone(), self.meter.clone(), key).into())
     }
 
     /// `kv.incr(key, {by?=1, ttlMs?})` → Promise<number> (BigInt if
@@ -287,8 +262,7 @@ impl Kv {
         let ttl_ms = read_ttl_ms(scope, opts)?;
         Ok(dispatch_incr(
             scope,
-            Arc::clone(&self.backend),
-            self.app_id.clone(),
+            self.kv.clone(),
             self.meter.clone(),
             key,
             delta,
@@ -313,8 +287,7 @@ impl Kv {
         let ttl_ms = read_ttl_ms(scope, opts)?;
         Ok(dispatch_set_if_absent(
             scope,
-            Arc::clone(&self.backend),
-            self.app_id.clone(),
+            self.kv.clone(),
             self.meter.clone(),
             key,
             value,
@@ -342,15 +315,7 @@ impl Kv {
             .number_value(scope)
             .ok_or_else(|| OpError::type_error("kv.expire: ttlMs must be a number"))?;
         let ms = validate_ttl_ms(ms).map_err(crate::error::to_op_error)?;
-        Ok(dispatch_expire(
-            scope,
-            Arc::clone(&self.backend),
-            self.app_id.clone(),
-            self.meter.clone(),
-            key,
-            ms,
-        )
-        .into())
+        Ok(dispatch_expire(scope, self.kv.clone(), self.meter.clone(), key, ms).into())
     }
 
     /// `kv.ttl(key)` → Promise<{ ttlMs: number | null }> for an existing
@@ -362,14 +327,7 @@ impl Kv {
         key: String,
     ) -> Result<v8::Local<'s, v8::Value>, OpError> {
         validate_key(&key).map_err(crate::error::to_op_error)?;
-        Ok(dispatch_ttl(
-            scope,
-            Arc::clone(&self.backend),
-            self.app_id.clone(),
-            self.meter.clone(),
-            key,
-        )
-        .into())
+        Ok(dispatch_ttl(scope, self.kv.clone(), self.meter.clone(), key).into())
     }
 
     /// `kv.persist(key)` → Promise<{ updated: boolean }> (removes TTL).
@@ -380,14 +338,7 @@ impl Kv {
         key: String,
     ) -> Result<v8::Local<'s, v8::Value>, OpError> {
         validate_key(&key).map_err(crate::error::to_op_error)?;
-        Ok(dispatch_persist(
-            scope,
-            Arc::clone(&self.backend),
-            self.app_id.clone(),
-            self.meter.clone(),
-            key,
-        )
-        .into())
+        Ok(dispatch_persist(scope, self.kv.clone(), self.meter.clone(), key).into())
     }
 
     /// `kv.list(prefix?, {cursor?, limit?})` → Promise<{ keys: string[],
@@ -416,8 +367,7 @@ impl Kv {
         let limit = resolve_list_limit(opt_number(scope, opts, "limit")?);
         Ok(dispatch_list(
             scope,
-            Arc::clone(&self.backend),
-            self.app_id.clone(),
+            self.kv.clone(),
             self.meter.clone(),
             prefix,
             cursor,
@@ -428,17 +378,16 @@ impl Kv {
 }
 
 // ---------------------------------------------------------------------------
-// mint_kv — build a `Kv` wrapper for a given backend + app_id
+// mint_kv — wrap a scoped Rust handle
 // ---------------------------------------------------------------------------
 
-/// Mint a `Kv` v8_class instance with state stamped from `backend` +
-/// `app_id`. Called from `KvBinding::build_instance` once per V8 isolate
+/// Mint a `Kv` v8_class instance over the scoped Rust handle.
+/// Called from `KvBinding::build_instance` once per V8 isolate
 /// during `build_env_object`. The returned object becomes the `env.kv`
 /// namespace value. Mirrors `plugin-db`'s `mint_db`.
 pub fn mint_kv<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    backend: Arc<dyn Backend>,
-    app_id: &str,
+    kv: RustKv,
     meter: Option<zeroship_metering::MeterHandle>,
 ) -> Option<v8::Local<'s, v8::Object>> {
     let class_tmpl = Kv::install(scope);
@@ -450,11 +399,7 @@ pub fn mint_kv<'s>(
     let proto_v = class_fn.get(scope, proto_key.into())?;
     obj.set_prototype(scope, proto_v);
 
-    let state = Kv {
-        backend,
-        app_id: app_id.to_string(),
-        meter,
-    };
+    let state = Kv { kv, meter };
     let boxed: Box<Kv> = Box::new(state);
     let raw = Box::into_raw(boxed);
     let raw_addr = raw as usize;
@@ -463,8 +408,7 @@ pub fn mint_kv<'s>(
 
     // SAFETY: `raw_addr` was Box::into_raw'd from `Box<Kv>`; the
     // finalizer casts back to the same type and drops the Box exactly
-    // once when V8 reclaims the wrapper. The only native resource is the
-    // `Arc<dyn Backend>` clone, released with the Box.
+    // once when V8 reclaims the wrapper, releasing the scoped Rust handle.
     let weak = v8::Weak::with_guaranteed_finalizer(
         scope,
         obj,
