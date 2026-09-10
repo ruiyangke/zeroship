@@ -66,7 +66,11 @@ async fn exercise_literal_sets(db: &Database) {
             .unwrap();
         assert_eq!(updated.payload, payload);
         assert_eq!(updated.label, "original");
-        let patch = documents::payload.set(payload.clone()).unwrap();
+        let patch = documents::payload
+            .set(payload.clone())
+            .unwrap()
+            .and(documents::label.set("original".to_owned()).unwrap())
+            .unwrap();
         let updated: Document = documents
             .update(documents::label.eq(row.label.clone()).unwrap(), patch)
             .await
@@ -113,5 +117,21 @@ async fn exercise_literal_filters(db: &Database) {
             .unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].payload, payload);
+    }
+}
+
+#[test]
+fn composing_patches_refuses_duplicate_columns() {
+    for value in ["first", "second"] {
+        let first = documents::label.set("first".to_owned()).unwrap();
+        let second = documents::label.set(value.to_owned()).unwrap();
+        let error = first.and(second).unwrap_err();
+        assert!(matches!(
+            error,
+            DbError::ValidationFailed {
+                code: "invalid_update",
+                ..
+            }
+        ));
     }
 }

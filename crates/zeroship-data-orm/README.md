@@ -98,6 +98,10 @@ Changeset records contain literal field assignments. `Change::Set(value)` and
 that look like update operators. `Field::eq(value)` compares the complete JSON
 value without interpreting its object keys as filter operators.
 
+Combine field-builder patches with `first.and(second)?`. The result is fallible:
+assigning the same column in both patches returns `invalid_update`. Assignments
+to distinct columns move into the combined patch without copying their values.
+
 Write states are explicit:
 
 - `Option::None` supplies SQL NULL to a nullable column.

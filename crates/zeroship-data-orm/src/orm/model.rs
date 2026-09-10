@@ -220,9 +220,23 @@ pub struct Patch<E> {
     entity: PhantomData<fn() -> E>,
 }
 impl<E> Patch<E> {
-    pub fn and(mut self, other: Self) -> Self {
+    /// Combine assignments to distinct columns.
+    ///
+    /// # Errors
+    /// Refuses duplicate columns before either patch can be executed.
+    pub fn and(mut self, other: Self) -> Result<Self, DbError> {
+        if other
+            .fields
+            .keys()
+            .any(|field| self.fields.contains_key(field))
+        {
+            return Err(DbError::validation(
+                "invalid_update",
+                "a field may be assigned only once per update",
+            ));
+        }
         self.fields.extend(other.fields);
-        self
+        Ok(self)
     }
 }
 impl<E: Entity> Changeset<E> for Patch<E> {
