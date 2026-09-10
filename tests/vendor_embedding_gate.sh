@@ -458,6 +458,7 @@ if [ "${1:-}" = "--self-test" ]; then
   else
     bad "module-gating controls FAILED - arm 1's skip set is wrong, so its verdict says nothing"
   fi
+  gate_arm module_gating_controls "$MODULE_GATING_CHECKED" 1 || FAIL=$((FAIL + 1))
 fi
 
 echo
