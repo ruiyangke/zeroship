@@ -54,8 +54,8 @@ use zeroship_data_v8::compile::{
     build_aggregate, build_distinct, build_find_with_schema, build_insert, build_where,
     raw_column_name, read_surface_columns, validate_field_name,
 };
-use zeroship_data_v8::crud::mask_policy::dispatch_set_mask_policy;
-use zeroship_data_v8::crud::unmask::{
+use zeroship_data_orm::protection::mask_policy::install_mask_policy;
+use zeroship_data_orm::protection::unmask::{
     BulkUnmaskArgs, BulkUnmaskItem, UnmaskFieldArgs, audit_query_hint_granted,
     authorize_query_hint, dispatch_bulk_unmask, dispatch_unmask, dispatch_unmask_for_query,
     parse_args, parse_bulk_args,
@@ -68,7 +68,7 @@ fn test_url() -> String {
 /// The backend handle the unmask entry points now take as a parameter.
 ///
 /// They resolved one themselves, from the isolate's context, until 2026-09-03.
-/// That read is the ADAPTER's, and `crud::unmask` is ENGINE, so the resolution
+/// That read is the ADAPTER's, and `protection::unmask` is ENGINE, so the resolution
 /// moved to the V8 dispatcher and the value is passed down. These tests drive
 /// the engine directly, with no V8 frame above them, so they make the same call
 /// the dispatcher makes on their behalf in production.
@@ -547,7 +547,7 @@ async fn the_real_value_is_still_stored_and_still_reachable_by_the_audited_path(
 
     // ---- and the audited path really does recover it, on Postgres ----
     //
-    // Without this arm nothing binds `crud::unmask`'s PG SQL to the raw
+    // Without this arm nothing binds `protection::unmask`'s PG SQL to the raw
     // column: pointing it back at the field's own column reddens no other test
     // in this file, because every other assertion here is about what a query
     // CANNOT reach. The unmask path is the one reader that must reach it.
@@ -562,10 +562,10 @@ async fn the_real_value_is_still_stored_and_still_reachable_by_the_audited_path(
         .expect("per-app role, as the deploy would provision it");
     support::grant_runtime_select_columns(&pool, app, "people", &["id", &raw_col]).await;
 
-    let result = zeroship_data_v8::crud::unmask::dispatch_unmask(
+    let result = zeroship_data_orm::protection::unmask::dispatch_unmask(
         &unmask_route(app).await,
         &zeroship_data_orm::binding::DbBinding::cold_start(app),
-        zeroship_data_v8::crud::unmask::UnmaskFieldArgs {
+        zeroship_data_orm::protection::unmask::UnmaskFieldArgs {
             collection: "people".to_string(),
             row_pk: person.id.clone(),
             column: "ssn".to_string(),
@@ -753,7 +753,7 @@ fn refusal_code(err: &DbError) -> String {
 /// role the column's classification. It succeeds. So the refusal above is a
 /// property of the AUTHORIZATION DECISION and not of a fixture that could not
 /// have produced the plaintext anyway - and it puts the policy path itself
-/// (`MaskPolicy::allows`, via `dispatch_set_mask_policy`) on Postgres for the
+/// (`MaskPolicy::allows`, via `install_mask_policy`) on Postgres for the
 /// first time, rather than only the no-policy fallback.
 ///
 /// It belongs in this file rather than beside the SQLite policy tests because
@@ -823,13 +823,18 @@ async fn an_actor_the_policy_does_not_permit_is_refused_and_the_refusal_is_audit
         "and the row it names is the one the platform minted",
     );
 
-    // ---- THE CONTROL, differing in one variable: the policy ----
-    dispatch_set_mask_policy(&unmask_backend().await, app, value!({ "support": ["pci"] }))
-        .await
-        .expect("install the app's declared mask policy");
+    // A new deployment declares the grant; the same actor can now unmask.
+    let redeployed = DbBinding::new(
+        app,
+        "granted_policy",
+        DbBinding::cold_start(app).schema().clone(),
+    );
+    zeroship_data_v8::cache_schema_for_deploy_for_tests(&redeployed, "people", schema.clone());
+    install_mask_policy(&redeployed, value!({ "support": ["pci"] }))
+        .expect("install the new deployment's policy");
     let result = dispatch_unmask(
         &unmask_route(app).await,
-        &DbBinding::cold_start(app),
+        &redeployed,
         unmask_args(
             &person.id,
             Some(value!({ "kind": "support", "id": "usr_support_1" })),
@@ -848,14 +853,14 @@ async fn an_actor_the_policy_does_not_permit_is_refused_and_the_refusal_is_audit
     // And the grant is scoped to the classification the policy named: the same
     // role is still refused a class the policy does not list. Without this the
     // control could pass against an `allows` that ignores its arguments.
-    zeroship_data_v8::cache_schema_for_tests(
-        app,
+    zeroship_data_v8::cache_schema_for_deploy_for_tests(
+        &redeployed,
         "vitals",
         value!({ "hr": { "type": "string", "mask": { "kind": "full", "classification": "phi" } } }),
     );
     let err = dispatch_unmask(
         &unmask_route(app).await,
-        &DbBinding::cold_start(app),
+        &redeployed,
         UnmaskFieldArgs {
             collection: "vitals".to_string(),
             row_pk: person.id.clone(),
@@ -889,6 +894,9 @@ async fn an_unmask_with_no_usable_actor_is_refused_and_audited() {
     let schema = flip_schema();
     let ssn = "987-65-4321";
     let person = audited_unmask_fixture(&pool, &url, app, &schema, ssn).await;
+
+    install_mask_policy(&DbBinding::cold_start(app), value!({ "support": ["pci"] }))
+        .expect("install the app's declared mask policy");
 
     // `None` is exactly what `sanitize_app_actor` produces from an app-JS
     // actor claiming `kind: "auto"`, so this is also the shape DB-3's patch
@@ -940,9 +948,6 @@ async fn an_unmask_with_no_usable_actor_is_refused_and_audited() {
     );
 
     // ---- THE CONTROL: the same fixture DOES hand out the plaintext ----
-    dispatch_set_mask_policy(&unmask_backend().await, app, value!({ "support": ["pci"] }))
-        .await
-        .expect("install the app's declared mask policy");
     let result = dispatch_unmask(
         &unmask_route(app).await,
         &DbBinding::cold_start(app),
@@ -1037,8 +1042,7 @@ async fn app_js_claiming_the_auto_system_actor_is_refused_by_the_parser() {
     let ssn = "123-45-6789";
     let person = audited_unmask_fixture(&pool, &url, app, &schema, ssn).await;
 
-    dispatch_set_mask_policy(&unmask_backend().await, app, value!({ "support": ["pci"] }))
-        .await
+    install_mask_policy(&DbBinding::cold_start(app), value!({ "support": ["pci"] }))
         .expect("install the app's declared mask policy");
 
     // ---- the forged system actor, parsed from the JSON a handler sends ----
@@ -1165,8 +1169,7 @@ async fn app_js_claiming_the_auto_system_actor_is_refused_by_the_bulk_parser() {
     let ssn = "987-65-4321";
     let person = audited_unmask_fixture(&pool, &url, app, &schema, ssn).await;
 
-    dispatch_set_mask_policy(&unmask_backend().await, app, value!({ "support": ["pci"] }))
-        .await
+    install_mask_policy(&DbBinding::cold_start(app), value!({ "support": ["pci"] }))
         .expect("install the app's declared mask policy");
 
     // ---- the forged system actor, parsed from the JSON a handler sends ----
@@ -1289,8 +1292,7 @@ async fn a_rejected_impersonation_is_distinguishable_from_an_absent_actor() {
     let schema = flip_schema();
     let person = audited_unmask_fixture(&pool, &url, app, &schema, "123-45-6789").await;
 
-    dispatch_set_mask_policy(&unmask_backend().await, app, value!({ "support": ["pci"] }))
-        .await
+    install_mask_policy(&DbBinding::cold_start(app), value!({ "support": ["pci"] }))
         .expect("install the app's declared mask policy");
 
     // ---- (1) a forged claim on the reserved system kind, naming a real user
@@ -1382,7 +1384,7 @@ fn bulk_args(row_pk: &str, columns: &[&str], actor: Option<Value>) -> BulkUnmask
 ///
 /// That second half is the property worth binding. The all-or-nothing decision
 /// is `if !unauthorized.is_empty()` at
-/// `crates/zeroship-data-orm/src/crud/unmask.rs:1093`, which returns before
+/// `crates/zeroship-data-orm/src/protection/unmask.rs`, which returns before
 /// the decrypt loop at `:1119` runs at all, and the reason is in that
 /// function's own doc: a partial grant leaks the authorisation verdict through
 /// which columns came back populated, which is a read oracle over the policy
@@ -1418,8 +1420,7 @@ async fn a_bulk_unmask_batch_with_one_forbidden_column_is_refused_whole() {
 
     // The policy grants `support` exactly ONE of the two classifications:
     // `email` is pii and permitted, `ssn` is pci and is not.
-    dispatch_set_mask_policy(&unmask_backend().await, app, value!({ "support": ["pii"] }))
-        .await
+    install_mask_policy(&DbBinding::cold_start(app), value!({ "support": ["pii"] }))
         .expect("install the app's declared mask policy");
     let actor = value!({ "kind": "support", "id": "usr_support_1" });
 
@@ -1588,7 +1589,7 @@ async fn a_bulk_unmask_batch_with_one_forbidden_column_is_refused_whole() {
     // Every arm above carries exactly ONE unauthorized pair, and a fence that
     // broke out of the loop on the first denial would satisfy all of them: one
     // audit row, one refusal, same code. The loop at
-    // `crates/zeroship-data-orm/src/crud/unmask.rs:1080-1089` has no `break`
+    // `crates/zeroship-data-orm/src/protection/unmask.rs` has no `break`
     // and no early return - it pushes every denied pair and refuses once at
     // `:1093` - and TWO observable things follow that a short-circuit would get
     // wrong. The refusal counts the pairs (`unauthorized.len()` at `:1107`), so
@@ -1647,23 +1648,18 @@ async fn a_bulk_unmask_batch_with_one_forbidden_column_is_refused_whole() {
         "and still not the permitted pair: {reason:?}",
     );
 
-    // ---- CONTROL 2, differing in one variable: the policy. The SAME two-row
-    // batch now passes whole, and BOTH rows hand over their values - so the
-    // refusal above withheld two real values, and the arm can pass.
-    dispatch_set_mask_policy(
-        &unmask_backend().await,
+    // A new deployment grants both classifications. The same batch now passes.
+    let redeployed = DbBinding::new(
         app,
-        value!({ "support": ["pii", "pci"] }),
-    )
-    .await
-    .expect("widen the app's declared mask policy");
-    let granted = dispatch_bulk_unmask(
-        &unmask_route(app).await,
-        &DbBinding::cold_start(app),
-        two_rows,
-    )
-    .await
-    .expect("the same batch must pass once the policy grants both classes");
+        "wider_policy",
+        DbBinding::cold_start(app).schema().clone(),
+    );
+    zeroship_data_v8::cache_schema_for_deploy_for_tests(&redeployed, "people", schema.clone());
+    install_mask_policy(&redeployed, value!({ "support": ["pii", "pci"] }))
+        .expect("install the new deployment's policy");
+    let granted = dispatch_bulk_unmask(&unmask_route(app).await, &redeployed, two_rows)
+        .await
+        .expect("the same batch must pass once the policy grants both classes");
     assert_eq!(granted.results[&person.id]["ssn"], ssn);
     assert_eq!(
         granted.results[&second.id]["email"], "grace@example.com",
@@ -1688,7 +1684,7 @@ async fn a_bulk_unmask_batch_with_one_forbidden_column_is_refused_whole() {
 /// see - which would conceal the authorisation failure from the caller.
 ///
 /// The all-or-nothing decision is the same `if !unauthorized.is_empty()` shape
-/// as the batch, at `crates/zeroship-data-orm/src/crud/unmask.rs:1289`.
+/// as the batch, at `crates/zeroship-data-orm/src/protection/unmask.rs`.
 /// `dispatch_find` calls this at
 /// `crates/zeroship-data-orm/src/crud/mod.rs:686`, before
 /// `build_find_with_schema_and_unmask_and_soft_delete_with_dialect`, so a
@@ -1718,8 +1714,7 @@ async fn a_query_hint_naming_one_forbidden_column_is_refused_whole() {
     )
     .await;
 
-    dispatch_set_mask_policy(&unmask_backend().await, app, value!({ "support": ["pii"] }))
-        .await
+    install_mask_policy(&DbBinding::cold_start(app), value!({ "support": ["pii"] }))
         .expect("install the app's declared mask policy");
     let actor = Some(value!({ "kind": "support", "id": "usr_support_2" }));
     let reason = Some("mask_flip integration test".to_string());
@@ -1818,19 +1813,18 @@ async fn a_query_hint_naming_one_forbidden_column_is_refused_whole() {
         "the granted fence defers its audit row until after the SELECT lands",
     );
 
-    // ---- CONTROL 2, differing in one variable: the policy. The same hint now
-    // passes, and the promotion the dispatcher runs after the SELECT hands back
-    // both plaintexts.
-    dispatch_set_mask_policy(
-        &unmask_backend().await,
+    // A new deployment grants both classifications, allowing the same hint.
+    let redeployed = DbBinding::new(
         app,
-        value!({ "support": ["pii", "pci"] }),
-    )
-    .await
-    .expect("widen the app's declared mask policy");
+        "wider_policy",
+        DbBinding::cold_start(app).schema().clone(),
+    );
+    zeroship_data_v8::cache_schema_for_deploy_for_tests(&redeployed, "people", schema.clone());
+    install_mask_policy(&redeployed, value!({ "support": ["pii", "pci"] }))
+        .expect("install the new deployment's policy");
     authorize_query_hint(
         &unmask_backend().await,
-        &DbBinding::cold_start(app),
+        &redeployed,
         "people",
         &both,
         &actor,
@@ -1842,7 +1836,7 @@ async fn a_query_hint_naming_one_forbidden_column_is_refused_whole() {
     let mut rows = run_find(&pool, app, &value!({}), &schema).await;
     dispatch_unmask_for_query(
         &unmask_route(app).await,
-        &DbBinding::cold_start(app),
+        &redeployed,
         "people",
         &both,
         &mut rows,
@@ -1858,7 +1852,7 @@ async fn a_query_hint_naming_one_forbidden_column_is_refused_whole() {
     assert_eq!(rows[0]["email"], value!(email));
     audit_query_hint_granted(
         &unmask_backend().await,
-        &DbBinding::cold_start(app),
+        &redeployed,
         "people",
         &both,
         &actor,
@@ -1923,8 +1917,7 @@ async fn a_query_hint_reads_the_column_its_alias_resolved_to() {
     )
     .await;
 
-    dispatch_set_mask_policy(&unmask_backend().await, app, value!({ "support": ["pii"] }))
-        .await
+    install_mask_policy(&DbBinding::cold_start(app), value!({ "support": ["pii"] }))
         .expect("install the app's declared mask policy");
     let actor = Some(value!({ "kind": "support", "id": "usr_support_3" }));
     let reason = Some("mask_flip integration test".to_string());

@@ -66,3 +66,7 @@ pub mod filter;
 pub mod internal;
 
 pub mod sqlite_values;
+
+pub mod sqlite_search;
+
+pub mod codecs;

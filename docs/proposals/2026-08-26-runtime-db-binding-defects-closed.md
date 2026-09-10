@@ -329,7 +329,7 @@ from "read the secret" to "recover the secret", not to "safe".
 
 **Evidence:** `zeroship-schema/src/query.rs:5477-5484` (the read-path order
 builder), `:5487-5528` (the emitter using the raw key), `:5500`, `:5521`;
-`crates/zeroship-data-orm/src/crud/mask_pass.rs:150-152`
+`crates/zeroship-data-orm/src/protection/mask_pass.rs`
 
 **It compounds with L24.** The only gate on the order-by key is
 `validate_read_identifier` (`:5483`), which L24 establishes **fails open when
@@ -498,7 +498,7 @@ PRE-EXISTING: attributed by control run, not by argument.**
 ```
 distributed live exercise failed: anchor readiness failed:
   status=500 body={"message":"internal error","name":"Error","request_id":"1"}
-panicked at crates/zeroship-data-v8/tests/distributed_live.rs:796:41
+panicked at crates/zeroship-data-v8/tests/distributed_live.rs:41
 ```
 
 **Attribution, by control differing in ONE variable.** Suspected of being caused
@@ -843,7 +843,7 @@ The shipped design is stronger than "call the reaper from the operator side":
   serving with cleanup silently stopped.
 
 **Evidence:** `worker/src/main.rs:15,48-66,639-641,714`;
-`crates/zeroship-worker/src/slot_reaper.rs:1-40`; `crates/zeroship-data-v8/src/slot_reaper.rs:278-452`;
+`crates/zeroship-worker/src/slot_reaper.rs:1-40`; `crates/zeroship-data-v8/src/slot_reaper.rs`;
 `grep -rn "dropAbandoned\|drop_abandoned" crates/ sdks/` returns nothing
 
 **How this entry went stale, which is the reusable part.** It asserted "verified

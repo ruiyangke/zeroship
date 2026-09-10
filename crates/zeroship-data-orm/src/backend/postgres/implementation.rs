@@ -1,25 +1,18 @@
 //! PostgreSQL adapter state and database operations.
 //!
-//! Owns the compio pool, native parameter binding, authority setup, catalog
-//! access, and search planning. The driver contract implementation lives in
-//! the sibling `driver` module. Schema creation belongs to the migration engine.
+//! Composes the pool with catalog, key and extension state. The sibling
+//! `driver` module owns physical leases, `executor` applies authority, and
+//! `search` plans search operations. Schema creation belongs to migrations.
 
 use std::cell::RefCell;
 use std::rc::Rc;
 
-// Feeds only the `SchemaIntrospect` impl, which is ungated since 2026-09-04.
 use zeroship_data_orm::error::{BeginIntent, CleanupAck, DbError, SettleIntent, TerminalResult};
-use zeroship_data_sql::catalog::LiveSchema;
 
 #[cfg(any(test, feature = "test-helpers"))]
 use super::PgLockManager;
-use super::pg_introspect;
 use super::{pg_autocommit, pg_error};
-use zeroship_data_orm::storage::SchemaIntrospect;
-use zeroship_data_orm::storage::{
-    DialectBuilder, LockManager, SpatialIndex, SqlExecutor, VectorIndex,
-};
-use zeroship_data_sql::descriptors::{GeoPoint, VectorMetric};
+use zeroship_data_orm::storage::LockManager;
 
 /// PostgreSQL adapter backed by an owned compio pool.
 ///
@@ -41,7 +34,7 @@ pub struct PostgresBackend {
     key_store: zeroship_data_orm::encryption::KeyStore,
     /// Cached pgvector extension presence probe.
     ///
-    /// `None` before the first [`VectorIndex::vector_search`] call;
+    /// `None` before the first [`crate::search::Search::vector_search`] call;
     /// `Some(true)` / `Some(false)`
     /// after the first `SELECT 1 FROM pg_extension WHERE extname='vector'`
     /// round-trip. The probe is per-backend (so per-isolate, since each
@@ -50,7 +43,7 @@ pub struct PostgresBackend {
     /// time and never disappears mid-process. `RefCell` (not `Mutex`)
     /// because every `PostgresBackend` is owned by a single
     /// compio thread.
-    pgvector_available: RefCell<Option<bool>>,
+    pub(super) pgvector_available: RefCell<Option<bool>>,
     /// Cached PostGIS extension presence probe.
     ///
     /// Same shape and lifetime semantics as [`Self::pgvector_available`]:
@@ -61,7 +54,7 @@ pub struct PostgresBackend {
     /// time and stays present). Absence surfaces as
     /// `DbError::Configuration { code: "postgis_extension_missing", … }`
     /// from both entry points so the SDK can branch on `.code`.
-    postgis_available: RefCell<Option<bool>>,
+    pub(super) postgis_available: RefCell<Option<bool>>,
 }
 
 impl std::fmt::Debug for PostgresBackend {
@@ -259,18 +252,18 @@ impl PostgresBackend {
         params: &[zeroship_data_sql::value::Value],
     ) -> Result<Vec<zeroship_data_sql::value::Value>, DbError> {
         let rows = pg_autocommit::roled_rows(&self.pool, schema, sql, params).await?;
-        Ok(super::pg_row_json::rows_to_values(&rows))
+        super::pg_row_json::rows_to_values(&rows)
     }
 }
 
 // Capability impls -- one block per sub-trait:
 //
-//   1. `impl SqlExecutor for PostgresBackend`      -- 3 methods.
+//   1. `impl DatabaseFixture for PostgresBackend`      -- 3 methods.
 //   2. `impl LockManager for PostgresBackend`      -- 3 methods.
-//   3. `impl SchemaIntrospect for PostgresBackend` -- 2 methods +
+//   3. `impl Catalog for PostgresBackend` -- 2 methods +
 //      `type LiveSchema`.
 //
-// A fourth, `impl PgSqlExecutor`, carried a `pool_handle()` accessor handing
+// A fourth, `impl PgDatabaseFixture`, carried a `pool_handle()` accessor handing
 // out the raw pool. A bare checkout off that pool runs as the shared
 // `zeroship_worker` login role with no `SET LOCAL ROLE`, so it was a standing
 // way around the per-app role fence. Its last caller went with
@@ -281,72 +274,48 @@ impl PostgresBackend {
 // marker -- every operation lives on the sub-trait impls above.
 // ---------------------------------------------------------------------------
 
-impl SqlExecutor for PostgresBackend {
+#[cfg(any(test, feature = "test-helpers"))]
+impl crate::fixtures::DatabaseFixture for PostgresBackend {
     type Client = compio_postgres::PoolConnection;
 
-    /// Reserve an owned lease from the same pool used by ordinary operations.
-    ///
-    /// Pool capacity and acquisition deadlines apply to both paths. The lease
-    /// remains checked out until transaction settlement or explicit disposal;
-    /// tenant role setup belongs to the transaction protocol.
-    async fn acquire_dedicated_client(&self, _app_id: &str) -> Result<Self::Client, DbError> {
+    async fn fixture_session(&self, _app_id: &str) -> Result<Self::Client, DbError> {
         self.pool
             .acquire()
             .await
             .map_err(|error| pg_error::classify(&error))
     }
 
-    async fn pool_exec(&self, sql: &str, params: &[&str]) -> Result<u64, DbError> {
-        let rows = self
-            .pool
-            .query_text_params(sql, params)
-            .await
-            .map_err(|e| pg_error::classify(&e))?;
-        Ok(rows.len() as u64)
-    }
-
-    // UNGATED since 2026-09-04, with the trait member in data-core. The gate
-    // that was here read "matches `SqlExecutor::pool_exec_ddl` in data-core",
-    // and matching it was the whole problem: the member has a DEFAULT, so a
-    // configuration where the trait side is on and this side is off compiles
-    // clean and silently sends multi-statement DDL down the extended protocol
-    // this override exists to avoid. Feature unification reaches that
-    // configuration from one dependent's manifest. An override of a defaulted
-    // member must never be more conditional than the member.
-    async fn pool_exec_ddl(&self, sql: &str) -> Result<(), DbError> {
-        // Multi-statement DDL (CREATE TABLE + implicit system-field
-        // CREATE INDEXes + `COMMENT ON COLUMN` mask sentinels) must use
-        // the simple query protocol — `query_text_params` (extended
-        // protocol) rejects it with `cannot insert multiple commands
-        // into a prepared statement`. `batch_execute` issues a single
-        // `Query` message and runs the `;`-separated statements in one
-        // implicit transaction.
+    async fn execute_fixture(&self, sql: &str, params: &[Value]) -> Result<u64, DbError> {
         let client = self
             .pool
             .acquire()
             .await
             .map_err(|e| pg_error::classify(&e))?;
-        client
-            .batch_execute(sql)
-            .await
-            .map_err(|e| pg_error::classify(&e))
+        if params.is_empty() {
+            let tag = client
+                .batch_execute_reporting_tag(sql)
+                .await
+                .map_err(|e| pg_error::classify(&e))?;
+            Ok(tag
+                .and_then(|tag| tag.split_whitespace().last()?.parse().ok())
+                .unwrap_or(0))
+        } else {
+            super::params::execute(&client, sql, params).await
+        }
     }
 
-    async fn client_exec(
+    async fn execute_fixture_on(
         &self,
         client: &Self::Client,
         sql: &str,
-        params: &[&str],
+        params: &[Value],
     ) -> Result<u64, DbError> {
-        let rows = client
-            .query_text_params(sql, params)
-            .await
-            .map_err(|e| pg_error::classify(&e))?;
-        Ok(rows.len() as u64)
+        super::params::execute(client, sql, params).await
     }
 }
 
 impl LockManager for PostgresBackend {
+    type Client = compio_postgres::PoolConnection;
     async fn acquire_advisory_lock(
         &self,
         client: &Self::Client,
@@ -409,26 +378,6 @@ impl LockManager for PostgresBackend {
     }
 }
 
-impl SchemaIntrospect for PostgresBackend {
-    type LiveSchema = LiveSchema;
-
-    async fn introspect_schema(&self, app_id: &str) -> Result<Self::LiveSchema, DbError> {
-        // The PG-tier reader returns its local `SchemaError`; the sibling
-        // translator re-creates the exact `coded_sql("diff: …", e)` shape, so
-        // SQLSTATE classification and the operator-facing message stay
-        // unchanged while the schema snapshot remains vendor-neutral.
-        pg_introspect::read_live_schema(&self.pool, app_id)
-            .await
-            .map_err(pg_error::classify_schema_error)
-    }
-
-    async fn estimate_row_count(&self, app_id: &str, collection: &str) -> Result<i64, DbError> {
-        pg_introspect::estimate_row_count(&self.pool, app_id, collection)
-            .await
-            .map_err(pg_error::classify_schema_error)
-    }
-}
-
 // ---------------------------------------------------------------------------
 // VectorIndex — pgvector adapter
 // ---------------------------------------------------------------------------
@@ -450,246 +399,6 @@ impl SchemaIntrospect for PostgresBackend {
 // `DbError::Configuration { code: "vector_extension_missing", ... }`.
 // ---------------------------------------------------------------------------
 
-impl PostgresBackend {
-    /// Check (and cache) whether the `vector` extension is installed on
-    /// the connected database. The probe runs at most once per backend
-    /// instance — pgvector is provisioned at admin time and stays present
-    /// for the life of the process.
-    ///
-    /// Returns `Ok(())` when present; `Err(DbError::Configuration)` with
-    /// code `vector_extension_missing` otherwise. Connection failures
-    /// during the probe surface as `DbError::Transient` so callers can
-    /// distinguish "extension missing" from "database unreachable".
-    async fn ensure_pgvector_available(&self) -> Result<(), DbError> {
-        // Fast path: cached result.
-        if let Some(present) = *self.pgvector_available.borrow() {
-            if present {
-                return Ok(());
-            }
-            return Err(DbError::config_hinted(
-                "vector_extension_missing",
-                "pgvector is not installed on this database",
-                "run `CREATE EXTENSION vector;` (Postgres superuser) or \
-                 swap the database image to `pgvector/pgvector:pg16` \
-                 (see docs/runbooks/docker-compose.md)",
-            ));
-        }
-
-        let empty: Vec<&str> = Vec::new();
-        let rows = self
-            .pool
-            .query_text_params("SELECT 1 FROM pg_extension WHERE extname='vector'", &empty)
-            .await
-            .map_err(|e| pg_error::classify(&e))?;
-        let present = !rows.is_empty();
-        *self.pgvector_available.borrow_mut() = Some(present);
-        if present {
-            Ok(())
-        } else {
-            Err(DbError::config_hinted(
-                "vector_extension_missing",
-                "pgvector is not installed on this database",
-                "run `CREATE EXTENSION vector;` (Postgres superuser) or \
-                 swap the database image to `pgvector/pgvector:pg16` \
-                 (see docs/runbooks/docker-compose.md)",
-            ))
-        }
-    }
-}
-
-impl PostgresBackend {
-    /// Probe the extension and render the statement, WITHOUT running it.
-    ///
-    /// Split out of [`VectorIndex::vector_search`] on 2026-09-03 so the caller
-    /// chooses the CONNECTION. The trait method can only reach the pool: it
-    /// takes `&self` and nothing that says which lane this dispatch belongs to,
-    /// so a `search` issued inside `db.transaction(fn)` scanned a pooled
-    /// checkout and could not see the transaction's own uncommitted rows. The
-    /// engine's routed entry point plans here and then executes on the lane
-    /// `route.in_tx()` names. Bound by `plugin-db/tests/search_tx_lane.rs`.
-    ///
-    /// # Errors
-    ///
-    /// `vector_extension_missing` when pgvector is absent; a query-builder
-    /// error when the collection, column or filter is not one the descriptor
-    /// declares.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn plan_vector_search(
-        &self,
-        binding: &zeroship_data_orm::binding::DbBinding,
-        collection: &str,
-        column: &str,
-        query: &[f32],
-        k: usize,
-        metric: VectorMetric,
-        filter: &zeroship_data_sql::value::Value,
-        schema: &zeroship_data_sql::value::Value,
-    ) -> Result<zeroship_data_sql::compile::BuiltQuery, DbError> {
-        // Probe so a missing extension surfaces with the same typed
-        // error shape the capability probe produces — the SDK branches
-        // on `e.code === "vector_extension_missing"` regardless of
-        // which entry point fired.
-        self.ensure_pgvector_available().await?;
-
-        // The projection allowlist and the `column` identifier check both come
-        // off the descriptor. A collection this deploy does not declare is
-        // refused here rather than searched with an unbounded projection.
-        zeroship_data_sql::compile::build_vector_search(
-            binding.schema(),
-            collection,
-            column,
-            query,
-            k,
-            metric,
-            filter,
-            schema,
-        )
-        .map_err(DbError::from)
-    }
-}
-
-impl VectorIndex for PostgresBackend {
-    async fn vector_search(
-        &self,
-        binding: &zeroship_data_orm::binding::DbBinding,
-        collection: &str,
-        column: &str,
-        query: &[f32],
-        k: usize,
-        metric: VectorMetric,
-        filter: &zeroship_data_sql::value::Value,
-        schema: &zeroship_data_sql::value::Value,
-    ) -> Result<Vec<zeroship_data_sql::value::Value>, DbError> {
-        let bq = self
-            .plan_vector_search(
-                binding, collection, column, query, k, metric, filter, schema,
-            )
-            .await?;
-        let param_refs = &bq.params;
-        self.query_roled_values(binding.schema(), &bq.sql, param_refs)
-            .await
-    }
-}
-
-// ---------------------------------------------------------------------------
-// SpatialIndex — PostGIS adapter
-// ---------------------------------------------------------------------------
-//
-// One method: `spatial_near` — `WHERE ST_DWithin(col, ST_MakePoint(lng, lat)::
-// geography, radius) ORDER BY ST_Distance(...) LIMIT $4`.
-//
-// The GiST index it reads is NOT created here. `zeroship-migrate` authors it
-// from the declared `t.geoPoint()` field
-// (`zeroship-migrate-core/src/render/declarative.rs::geo_index_snapshot`,
-// emitted as `USING gist ("col")`).
-//
-// Both probe `pg_extension WHERE extname='postgis'` on first call and
-// cache on `postgis_available`. Absence surfaces as
-// `DbError::Configuration { code: "postgis_extension_missing", ... }`.
-// ---------------------------------------------------------------------------
-
-impl PostgresBackend {
-    /// Check (and cache) whether the `postgis` extension is installed on
-    /// the connected database. Mirrors [`Self::ensure_pgvector_available`]
-    /// — the probe runs at most once per backend; PostGIS is
-    /// provisioned at admin time and stays present.
-    async fn ensure_postgis_available(&self) -> Result<(), DbError> {
-        if let Some(present) = *self.postgis_available.borrow() {
-            if present {
-                return Ok(());
-            }
-            return Err(DbError::config_hinted(
-                "postgis_extension_missing",
-                "PostGIS is not installed on this database",
-                "run `CREATE EXTENSION postgis;` (Postgres superuser) or \
-                 swap the database image to a PostGIS-bundled variant \
-                 (see docs/runbooks/docker-compose.md)",
-            ));
-        }
-
-        let empty: Vec<&str> = Vec::new();
-        let rows = self
-            .pool
-            .query_text_params("SELECT 1 FROM pg_extension WHERE extname='postgis'", &empty)
-            .await
-            .map_err(|e| pg_error::classify(&e))?;
-        let present = !rows.is_empty();
-        *self.postgis_available.borrow_mut() = Some(present);
-        if present {
-            Ok(())
-        } else {
-            Err(DbError::config_hinted(
-                "postgis_extension_missing",
-                "PostGIS is not installed on this database",
-                "run `CREATE EXTENSION postgis;` (Postgres superuser) or \
-                 swap the database image to a PostGIS-bundled variant \
-                 (see docs/runbooks/docker-compose.md)",
-            ))
-        }
-    }
-}
-
-impl PostgresBackend {
-    /// Probe PostGIS and render the statement, WITHOUT running it. The spatial
-    /// twin of [`Self::plan_vector_search`]; see there for why the execution
-    /// is the caller's decision.
-    ///
-    /// # Errors
-    ///
-    /// `postgis_extension_missing` when PostGIS is absent; a query-builder
-    /// error when the collection, column or filter is not one the descriptor
-    /// declares.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn plan_spatial_near(
-        &self,
-        binding: &zeroship_data_orm::binding::DbBinding,
-        collection: &str,
-        column: &str,
-        point: GeoPoint,
-        radius_m: f64,
-        filter: &zeroship_data_sql::value::Value,
-        limit: Option<usize>,
-        schema: &zeroship_data_sql::value::Value,
-    ) -> Result<zeroship_data_sql::compile::BuiltQuery, DbError> {
-        self.ensure_postgis_available().await?;
-
-        zeroship_data_sql::compile::build_spatial_near(
-            binding.schema(),
-            collection,
-            column,
-            point,
-            radius_m,
-            filter,
-            limit,
-            schema,
-        )
-        .map_err(DbError::from)
-    }
-}
-
-impl SpatialIndex for PostgresBackend {
-    async fn spatial_near(
-        &self,
-        binding: &zeroship_data_orm::binding::DbBinding,
-        collection: &str,
-        column: &str,
-        point: GeoPoint,
-        radius_m: f64,
-        filter: &zeroship_data_sql::value::Value,
-        limit: Option<usize>,
-        schema: &zeroship_data_sql::value::Value,
-    ) -> Result<Vec<zeroship_data_sql::value::Value>, DbError> {
-        let bq = self
-            .plan_spatial_near(
-                binding, collection, column, point, radius_m, filter, limit, schema,
-            )
-            .await?;
-        let param_refs = &bq.params;
-        self.query_roled_values(binding.schema(), &bq.sql, param_refs)
-            .await
-    }
-}
-
 #[cfg(any(test, feature = "test-helpers"))]
 impl PgLockManager for PostgresBackend {
     async fn acquire_pooled_client_for_lock(
@@ -702,130 +411,6 @@ impl PgLockManager for PostgresBackend {
         })
     }
 }
-
-// ---------------------------------------------------------------------------
-// PgDialect — the Postgres flavour of `DialectBuilder`. The trait impl
-// lands on both backends so `query.rs`'s free-function string
-// builders can be retargeted onto a dialect-typed entry point
-// without re-shaping their call sites.
-//
-// The hooks are pure functions of their inputs (ZST has no state). We
-// `impl DialectBuilder for PostgresBackend` directly — there is no
-// reason to carry a `PgDialect` field on the backend struct because
-// the ZST has nothing to store. The `PgDialect` type is kept around
-// only as the documentation anchor; consumers reach the impl through
-// `&PostgresBackend`.
-// ---------------------------------------------------------------------------
-
-/// Postgres-flavoured dialect. Zero-sized — every method is pure.
-///
-/// Not instantiated by production code today; the matching trait
-/// behaviour lives on `impl DialectBuilder for PostgresBackend` below.
-/// Kept as a documentation anchor + so the test module can name the
-/// ZST when asserting per-hook output without holding a `Pool`.
-#[derive(Debug, Default, Clone, Copy)]
-pub(crate) struct PgDialect;
-
-impl DialectBuilder for PgDialect {
-    // UNGATED since 2026-09-04, with the trait member. This impl block and the
-    // one on `PostgresBackend` below are the two sites that reported
-    // `error[E0046]: not all trait items implemented, missing: sql_dialect`
-    // under `--features zeroship-data-core/test-helpers`, which is one
-    // manifest line away in any dependent.
-    fn sql_dialect(&self) -> zeroship_data_sql::compile::SqlDialect {
-        zeroship_data_sql::compile::SqlDialect::Postgres
-    }
-
-    /// Double-quote with embedded-quote escape. Matches the existing
-    /// `zeroship_data_sql::compile::quote_ident` helper byte-for-byte.
-    fn quote_ident(&self, name: &str) -> String {
-        format!("\"{}\"", name.replace('"', "\"\""))
-    }
-
-    /// PG mapping for the type vocabulary. Each branch is a single
-    /// `&'static str` — matches the column-type names PG accepts in a
-    /// `CREATE TABLE` DDL.
-    fn map_zs_type(&self, zs_type: &str, _opts: &zeroship_data_sql::value::Value) -> String {
-        match zs_type {
-            "text" => "TEXT",
-            "bigint" | "int8" => "BIGINT",
-            "integer" | "int4" | "int" => "INTEGER",
-            "double" => "DOUBLE PRECISION",
-            "real" => "REAL",
-            "bytes" | "blob" => "BYTEA",
-            "numeric" | "decimal" => "NUMERIC",
-            "boolean" | "bool" => "BOOLEAN",
-            "timestamp" => "TIMESTAMP",
-            "timestamptz" => "TIMESTAMPTZ",
-            "json" => "JSON",
-            "jsonb" => "JSONB",
-            other => {
-                tracing::debug!(
-                    zs_type = other,
-                    "PgDialect::map_zs_type: unknown type — defaulting to TEXT"
-                );
-                "TEXT"
-            }
-        }
-        .to_string()
-    }
-
-    /// PG's "now" function. PG also accepts `CURRENT_TIMESTAMP`, but
-    /// `NOW()` is the idiomatic form used elsewhere in the codebase.
-    fn now_fn(&self) -> &'static str {
-        "NOW()"
-    }
-
-    // `last_insert_rowid_sql` defaults to `None` on the trait — PG
-    // routes through `RETURNING id` instead. No override needed.
-}
-
-/// Direct `DialectBuilder` impl on `PostgresBackend` so consumers can
-/// hold an `&PostgresBackend` and reach the dialect without naming a
-/// separate field. The bodies delegate to the `PgDialect` ZST; rustc
-/// inlines the value away because every method is `&self`.
-impl DialectBuilder for PostgresBackend {
-    fn sql_dialect(&self) -> zeroship_data_sql::compile::SqlDialect {
-        PgDialect.sql_dialect()
-    }
-
-    fn quote_ident(&self, name: &str) -> String {
-        PgDialect.quote_ident(name)
-    }
-
-    fn map_zs_type(&self, zs_type: &str, opts: &zeroship_data_sql::value::Value) -> String {
-        PgDialect.map_zs_type(zs_type, opts)
-    }
-
-    fn now_fn(&self) -> &'static str {
-        PgDialect.now_fn()
-    }
-
-    fn last_insert_rowid_sql(&self) -> Option<&'static str> {
-        PgDialect.last_insert_rowid_sql()
-    }
-}
-
-// `impl Backend for PostgresBackend` is NOT here. `Backend` is
-// `zeroship-data-v8`'s own `pub(crate)` composition marker, and the orphan
-// rule puts the impl in the crate that owns the trait even though the type is
-// this crate's. It lives in `zeroship-data-v8/src/backend/mod.rs` with the
-// compile-time assertion that pins it.
-
-// ===========================================================================
-// Key-store accessor + Backup impl on PostgresBackend
-// ===========================================================================
-//
-// Both impls are unconditional on the PG arm:
-//   * key sourcing -- PG is in-process only, the same
-//     `LocalKeySource` the SQLite arm uses. The database-backed variant
-//     was deleted on 2026-08-27 with the admin schema it read.
-//   * `Backup` -- snapshot and restore only. The PITR placeholder that
-//     sat beside them was deleted on 2026-09-07 along with the trait
-//     method it implemented; `zeroship_data_orm::storage::Backup`'s
-//     rustdoc records why PITR is an operator capability with a
-//     database-server contract rather than a data-store method. This
-//     crate now issues no statement naming a platform system schema.
 
 impl PostgresBackend {
     /// Borrow this isolate's column-encryption key store.
@@ -1456,8 +1041,8 @@ mod tests {
     //! ## What this layer can — and cannot — test in isolation
     //!
     //! `PostgresBackend` is, by design, a thin facade: every method in
-    //! its per-capability impls (`SqlExecutor` / `LockManager` /
-    //! `SchemaIntrospect`) either calls the `Rc<Pool>` directly or
+    //! its per-capability impls (`DatabaseFixture` / `LockManager` /
+    //! `Catalog`) either calls the `Rc<Pool>` directly or
     //! forwards into [`crate::backend::postgres::diff`] / [`crate::backend::postgres::query`] free functions.
     //! `impl Backend for PostgresBackend` is a one-line composition
     //! marker -- every method body lives on a sub-trait impl. The only
@@ -1492,13 +1077,13 @@ mod tests {
 
     use super::*;
     use crate::backend::postgres::PgLockManager;
-    use zeroship_data_orm::storage::{DialectBuilder, LockManager, SqlExecutor};
+    use zeroship_data_orm::storage::LockManager;
     // A plain `use` is private, so `use super::*` above does not re-export the
     // module-level import; the assertion below needs its own. UNGATED since
     // 2026-09-04 along with the trait - a conformance assertion that only
     // compiles under `test-helpers` cannot witness the shipped configuration,
     // which is the whole defect it now guards against.
-    use zeroship_data_orm::storage::SchemaIntrospect;
+    use zeroship_data_orm::protection::Catalog;
 
     // The `Backend` conformance assertion is NOT here: that trait is the
     // adapter's own marker, so both `impl Backend for PostgresBackend` and the
@@ -1510,24 +1095,14 @@ mod tests {
     /// the omnibus trait or detaches the impl block fails here at
     /// build time.
     fn assert_postgres_backend_impls_sub_traits() {
-        fn impls_sql_executor<T: SqlExecutor<Client = compio_postgres::PoolConnection>>() {}
+        fn impls_sql_executor<T: DatabaseFixture<Client = compio_postgres::PoolConnection>>() {}
         fn impls_lock_manager<T: LockManager<Client = compio_postgres::PoolConnection>>() {}
-        fn impls_schema_introspect<
-            T: SchemaIntrospect<LiveSchema = zeroship_data_sql::catalog::LiveSchema>,
-        >() {
-        }
+        fn impls_schema_introspect<T: Catalog>() {}
         fn impls_pg_lock_manager<T: PgLockManager>() {}
         impls_sql_executor::<PostgresBackend>();
         impls_lock_manager::<PostgresBackend>();
         impls_schema_introspect::<PostgresBackend>();
         impls_pg_lock_manager::<PostgresBackend>();
-
-        // `DialectBuilder` impl lands directly on the backend
-        // (not on the `Backend` super-trait -- the trait composition
-        // stays unchanged). The bound here pins the impl so a future
-        // refactor that detaches the impl block fails at type-check.
-        fn impls_dialect_builder<T: DialectBuilder>() {}
-        impls_dialect_builder::<PostgresBackend>();
     }
 
     // ---------------------------------------------------------------------
@@ -1535,52 +1110,12 @@ mod tests {
     // is a string-compare against the expected SQL fragment.
     // ---------------------------------------------------------------------
 
-    #[test]
-    fn pg_dialect_quote_ident_doubles_embedded_quote() {
-        let d = PgDialect;
-        assert_eq!(d.quote_ident("plain"), "\"plain\"");
-        assert_eq!(d.quote_ident("with\"quote"), "\"with\"\"quote\"");
-    }
-
-    #[test]
-    fn pg_dialect_map_zs_type_covers_p1_vocabulary() {
-        let d = PgDialect;
-        let no_opts = zeroship_data_sql::value!({});
-        assert_eq!(d.map_zs_type("text", &no_opts), "TEXT");
-        assert_eq!(d.map_zs_type("bigint", &no_opts), "BIGINT");
-        assert_eq!(d.map_zs_type("int8", &no_opts), "BIGINT");
-        assert_eq!(d.map_zs_type("integer", &no_opts), "INTEGER");
-        assert_eq!(d.map_zs_type("int4", &no_opts), "INTEGER");
-        assert_eq!(d.map_zs_type("double", &no_opts), "DOUBLE PRECISION");
-        assert_eq!(d.map_zs_type("real", &no_opts), "REAL");
-        assert_eq!(d.map_zs_type("bytes", &no_opts), "BYTEA");
-        assert_eq!(d.map_zs_type("blob", &no_opts), "BYTEA");
-        assert_eq!(d.map_zs_type("numeric", &no_opts), "NUMERIC");
-        assert_eq!(d.map_zs_type("decimal", &no_opts), "NUMERIC");
-        assert_eq!(d.map_zs_type("boolean", &no_opts), "BOOLEAN");
-        assert_eq!(d.map_zs_type("timestamp", &no_opts), "TIMESTAMP");
-        assert_eq!(d.map_zs_type("timestamptz", &no_opts), "TIMESTAMPTZ");
-        assert_eq!(d.map_zs_type("json", &no_opts), "JSON");
-        assert_eq!(d.map_zs_type("jsonb", &no_opts), "JSONB");
-        // Unknown types fall through to TEXT.
-        assert_eq!(d.map_zs_type("nonsense_type", &no_opts), "TEXT");
-    }
-
-    #[test]
-    fn pg_dialect_now_fn_and_last_insert_rowid() {
-        let d = PgDialect;
-        assert_eq!(d.now_fn(), "NOW()");
-        // PG routes through `RETURNING id` for last-inserted rowid —
-        // the trait default of `None` is the correct PG shape.
-        assert_eq!(d.last_insert_rowid_sql(), None);
-    }
-
     /// Compile-time: the associated types must remain wired to the
     /// concrete `compio_postgres` / `crate::backend::postgres::diff` types. Swapping
     /// either accidentally would silently change the `B::Client` /
     /// `B::LiveSchema` shape every consumer sees. `LiveSchema` is owned
-    /// by [`SchemaIntrospect`] -- the `Backend` super-bound
-    /// `SchemaIntrospect<LiveSchema = LiveSchema>` re-anchors it so
+    /// by [`Catalog`] -- the `Backend` super-bound
+    /// `Catalog<LiveSchema = LiveSchema>` re-anchors it so
     /// `Backend<LiveSchema = …>` still resolves here.
     // `assert_postgres_backend_assoc_types` is not here: it is stated in terms
     // of `Backend`, which this crate cannot name. `zeroship-data-v8`'s
@@ -1767,3 +1302,9 @@ mod terminal_projection_tests {
         assert_eq!(terminal_from_status(None), TerminalResult::Indeterminate);
     }
 }
+
+#[cfg(any(test, feature = "test-helpers"))]
+use zeroship_data_orm::fixtures::DatabaseFixture;
+
+#[cfg(any(test, feature = "test-helpers"))]
+use zeroship_data_sql::value::Value;

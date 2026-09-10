@@ -9,7 +9,7 @@
 //!    cached schema. A column with no mask declaration cannot be
 //!    unmasked — surface `unmask_column_not_masked`.
 //! 2. Authorise via [`check_unmask_authorization`]: consult the app's
-//!    per-app [`crate::crud::mask_policy::MaskPolicy`] (configured via `defineMaskPolicy()`) when
+//!    per-app [`crate::protection::mask_policy::MaskPolicy`] (configured via `defineMaskPolicy()`) when
 //!    one is cached; otherwise fall back to a strict default-deny rule
 //!    where only the `auto` actor kind (system / migrations /
 //!    background jobs) can unmask any classification. Denied attempts
@@ -214,7 +214,7 @@ fn lookup_mask_meta(schema: &Value, column: &str) -> Option<ColumnMaskMeta> {
 ///
 /// The two fetch helpers below are the only readers of that column in the tree.
 /// They formatted the name themselves until this existed, which was coherent
-/// only while the write side did too: `crud::mask_pass` now places the value
+/// only while the write side did too: `protection::mask_pass` now places the value
 /// under the name `zeroship_data_sql::compile::declared_raw_column` resolves, so a
 /// SELECT that kept its own `format!` would miss every row a renamed column
 /// stored - and on SQLite it would MISS QUIETLY, because a double-quoted
@@ -313,24 +313,6 @@ fn lookup_encryption_meta(
 // Authorization (per-app policy lookup)
 // ---------------------------------------------------------------------------
 
-/// Authorization for the unmask path. Resolution rules:
-///
-/// 1. **Unauthenticated** (`actor = None` or `actor.kind` missing) →
-///    deny. The denied path still writes an audit row.
-///
-/// 2. **Cached per-app policy present** → consult
-///    [`crate::crud::mask_policy::MaskPolicy::allows`]. That helper
-///    enforces the `auto`-actor fallback rule (system actor allowed
-///    by default unless the policy explicitly restricts it).
-///
-/// 3. **No cached policy** → fall back to a strict default-deny rule
-///    (`auto` allowed; everyone else denied). The real first-use load
-///    happens inside [`dispatch_unmask`] before this helper runs —
-///    that load is async, so cannot live here.
-///
-/// **Sync entry point**: this function does not perform I/O. The
-/// per-app policy MUST be cached (via [`ensure_mask_policy_cached`])
-/// before [`dispatch_unmask`] reaches the auth check.
 /// Actor `kind`s reserved for genuine platform/system callers (migration,
 /// backfill, drift). The default-deny stub and the `auto`-fallback rule grant
 /// these broad access; app JS must never be able to claim one.
@@ -384,8 +366,9 @@ pub struct SanitizedActor {
     pub rejected_claim: Option<Value>,
 }
 
+/// Check the app-at-deploy startup policy without database or filesystem I/O.
 pub fn check_unmask_authorization(
-    app_id: &str,
+    binding: &DbBinding,
     actor: &Option<Value>,
     classification: &str,
 ) -> Result<bool, DbError> {
@@ -393,58 +376,7 @@ pub fn check_unmask_authorization(
         return Ok(false); // unauthenticated → denied
     };
     let kind = actor_obj.get("kind").and_then(|v| v.as_str()).unwrap_or("");
-    let policy = super::mask_policy::cache_get(app_id);
-    match policy {
-        Some(p) => Ok(p.allows(kind, classification)),
-        None => {
-            // Default-deny fallback: only `auto` allowed when the app
-            // has not declared a policy.
-            Ok(kind == "auto")
-        }
-    }
-}
-
-/// Make sure the per-isolate policy cache has been consulted for
-/// `app_id` before the auth check in [`dispatch_unmask`].
-///
-/// **On PG this is a no-op beyond the cache read.** The policy is
-/// declared in the creator's source and installed at boot by
-/// `crate::crud::mask_policy::dispatch_set_mask_policy`; there is no
-/// durable store to fall back to, and an app that declared no policy
-/// correctly lands on the default-deny rule below (`auto` only). The
-/// PG arm used to `SELECT get_mask_policy($1)` here against the
-/// platform-owned system schema, which meant every unmask on an app with no
-/// cached policy failed with an undefined-schema error rather than
-/// default-denying. The routine and its store were deleted on 2026-08-27; see
-/// `crate::crud::mask_policy`. The regression fence for the default-deny
-/// behaviour is
-/// `pg_declared_mask_policy_authorizes_unmask_without_durable_store`.
-///
-/// SQLite still keeps a sidecar file and is still re-read here. That
-/// asymmetry is deliberate and flagged in the module header of
-/// `crate::crud::mask_policy` - the sidecar is the arm that is out of
-/// step, not this one.
-///
-/// A storage miss is a no-op (cache stays empty, the default-deny
-/// fallback applies); a hit installs the loaded policy via
-/// [`crate::crud::mask_policy::cache_put`]. A
-/// corrupt sidecar propagates as `DbError` so operators see the real
-/// fault instead of a silent default-deny.
-async fn ensure_mask_policy_cached(backend: &BackendHandle, app_id: &str) -> Result<(), DbError> {
-    if super::mask_policy::cache_has(app_id) {
-        return Ok(());
-    }
-
-    // Ask the backend for whatever it durably stored. `None` covers both "this
-    // backend stores nothing" (PostgreSQL, which reinstalls on boot) and "this
-    // app has no stored entry", and the caller wants the same thing in either
-    // case: leave the cache alone. Asking rather than downcasting is what keeps
-    // SQLite's sidecar out of this file.
-    if let Some(stored) = backend.load_mask_policy(app_id).await? {
-        let policy = crate::crud::mask_policy::MaskPolicy::from_json(&stored)?;
-        super::mask_policy::cache_put(app_id, Some(policy));
-    }
-    Ok(())
+    Ok(super::mask_policy::allows(binding, kind, classification))
 }
 
 /// Bind the app file on SQLite before an unmask path reaches its direct SQL
@@ -532,12 +464,8 @@ pub async fn dispatch_unmask(
     args.column = mask_meta.canonical_column.clone();
     prepare_unmask_backend(backend, app_id).await?;
 
-    // Step 2 — authorization: load the per-app policy into the cache
-    // (best-effort) THEN consult `check_unmask_authorization`, which
-    // honours the cached policy or falls back to the default-deny
-    // rule on a miss.
-    ensure_mask_policy_cached(backend, app_id).await?;
-    let allowed = check_unmask_authorization(app_id, &args.actor, &mask_meta.classification)?;
+    // Authorize against the immutable declaration for this app and deploy.
+    let allowed = check_unmask_authorization(binding, &args.actor, &mask_meta.classification)?;
     if !allowed {
         // Audit-then-refuse. The audit row carries `outcome = "denied"`
         // so operators see every attempted access — including the
@@ -561,7 +489,8 @@ pub async fn dispatch_unmask(
                 mask_meta.classification
             ),
             hint: Some(
-                "Configure mask policy via defineMaskPolicy() in your app's bootstrap.".into(),
+                "Edit defineMaskPolicy() in the app source and redeploy to change permissions."
+                    .into(),
             ),
         });
     }
@@ -1085,7 +1014,7 @@ pub async fn dispatch_bulk_unmask(
     };
 
     // ---- Step 1: only after every column is validated, prepare the
-    // backend, load policy, and check authorization. Invalid descriptor input
+    // backend and check the startup policy. Invalid descriptor input
     // keeps its typed validation error rather than being reported as a
     // database fault.
     //
@@ -1097,14 +1026,13 @@ pub async fn dispatch_bulk_unmask(
     // the alternative is handing the engine an `Option` it would have to
     // unwrap at a statement.
     prepare_unmask_backend(backend, app_id).await?;
-    ensure_mask_policy_cached(backend, app_id).await?;
     let mut unauthorized: Vec<(String, String)> = Vec::new(); // (row_pk, column)
     for (row_pk, columns) in &normalized_items {
         for (_, canonical_column) in columns {
             let classification = classifications
                 .get(canonical_column)
                 .expect("normalized columns always have a classification");
-            if !check_unmask_authorization(app_id, &args.actor, classification)? {
+            if !check_unmask_authorization(binding, &args.actor, classification)? {
                 unauthorized.push((row_pk.clone(), canonical_column.clone()));
             }
         }
@@ -1131,8 +1059,7 @@ pub async fn dispatch_bulk_unmask(
                 unauthorized.len()
             ),
             hint: Some(
-                "Drop the unauthorized columns or expand the mask policy via defineMaskPolicy()."
-                    .into(),
+                "Drop the unauthorized columns or edit defineMaskPolicy() and redeploy.".into(),
             ),
         });
     }
@@ -1333,10 +1260,9 @@ pub async fn authorize_query_hint(
     }
 
     prepare_unmask_backend(backend, app_id).await?;
-    ensure_mask_policy_cached(backend, app_id).await?;
     let mut unauthorized: Vec<String> = Vec::new();
     for (column, classification) in unmask_columns.iter().zip(&classifications) {
-        if !check_unmask_authorization(app_id, actor, classification)? {
+        if !check_unmask_authorization(binding, actor, classification)? {
             unauthorized.push(column.clone());
         }
     }
@@ -1364,7 +1290,7 @@ pub async fn authorize_query_hint(
                 unauthorized.len()
             ),
             hint: Some(
-                "Drop the unauthorized columns from `opts.unmask` or expand the mask policy."
+                "Drop the unauthorized columns from `opts.unmask` or edit defineMaskPolicy() and redeploy."
                     .into(),
             ),
         });
@@ -1829,7 +1755,8 @@ mod tests {
         let sanitized = sanitize_app_actor(Some(value!({ "kind": "auto" })));
         assert_eq!(sanitized.actor, None);
         assert!(
-            !check_unmask_authorization("app_x", &sanitized.actor, "pii").unwrap(),
+            !check_unmask_authorization(&DbBinding::cold_start("app_x"), &sanitized.actor, "pii")
+                .unwrap(),
             "sanitized (stripped-auto) app actor must be denied"
         );
         // And the retained claim must not reach the authorization decision:
@@ -1851,17 +1778,45 @@ mod tests {
     #[test]
     fn authz_stub_grants_auto_actor() {
         let actor = Some(value!({ "kind": "auto", "id": null }));
-        assert!(check_unmask_authorization("authz_stub_grants_auto_1", &actor, "spi").unwrap());
+        assert!(
+            check_unmask_authorization(
+                &DbBinding::cold_start("authz_stub_grants_auto_1"),
+                &actor,
+                "spi"
+            )
+            .unwrap()
+        );
         let actor = Some(value!({ "kind": "auto", "id": "system" }));
-        assert!(check_unmask_authorization("authz_stub_grants_auto_2", &actor, "pii").unwrap());
+        assert!(
+            check_unmask_authorization(
+                &DbBinding::cold_start("authz_stub_grants_auto_2"),
+                &actor,
+                "pii"
+            )
+            .unwrap()
+        );
     }
 
     #[test]
     fn authz_stub_denies_user_actor() {
         let actor = Some(value!({ "kind": "user", "id": "usr_xyz" }));
-        assert!(!check_unmask_authorization("authz_stub_denies_user_1", &actor, "spi").unwrap());
+        assert!(
+            !check_unmask_authorization(
+                &DbBinding::cold_start("authz_stub_denies_user_1"),
+                &actor,
+                "spi"
+            )
+            .unwrap()
+        );
         let actor = Some(value!({ "kind": "user", "id": "usr_xyz" }));
-        assert!(!check_unmask_authorization("authz_stub_denies_user_2", &actor, "pii").unwrap());
+        assert!(
+            !check_unmask_authorization(
+                &DbBinding::cold_start("authz_stub_denies_user_2"),
+                &actor,
+                "pii"
+            )
+            .unwrap()
+        );
     }
 
     #[test]
@@ -1870,7 +1825,8 @@ mod tests {
             let actor = Some(value!({ "kind": kind }));
             let app_id = format!("authz_stub_denies_other_{kind}");
             assert!(
-                !check_unmask_authorization(&app_id, &actor, "pii").unwrap(),
+                !check_unmask_authorization(&DbBinding::cold_start(&app_id), &actor, "pii")
+                    .unwrap(),
                 "kind={kind} must be denied by the PR 4 stub"
             );
         }
@@ -1878,38 +1834,59 @@ mod tests {
 
     #[test]
     fn authz_stub_denies_unauthenticated() {
-        assert!(!check_unmask_authorization("authz_stub_unauth_1", &None, "pii").unwrap());
+        assert!(
+            !check_unmask_authorization(
+                &DbBinding::cold_start("authz_stub_unauth_1"),
+                &None,
+                "pii"
+            )
+            .unwrap()
+        );
         // Empty object — no `kind` field — also denied.
         let actor = Some(value!({}));
-        assert!(!check_unmask_authorization("authz_stub_unauth_2", &actor, "pii").unwrap());
+        assert!(
+            !check_unmask_authorization(
+                &DbBinding::cold_start("authz_stub_unauth_2"),
+                &actor,
+                "pii"
+            )
+            .unwrap()
+        );
         // Actor that isn't an object (e.g. JS passed a string) — denied.
         let actor = Some(value!("auto"));
-        assert!(!check_unmask_authorization("authz_stub_unauth_3", &actor, "pii").unwrap());
+        assert!(
+            !check_unmask_authorization(
+                &DbBinding::cold_start("authz_stub_unauth_3"),
+                &actor,
+                "pii"
+            )
+            .unwrap()
+        );
     }
 
     // ---------------------------------------------------------------
     // Per-app policy lookup
     // ---------------------------------------------------------------
 
-    /// Helper: install a [`crate::crud::mask_policy::MaskPolicy`] for `app_id` on the current
+    /// Helper: install a [`crate::protection::mask_policy::MaskPolicy`] for `app_id` on the current
     /// isolate's context cache, then immediately remove it on drop.
     /// Keeps the thread-local cache hygiene clean across tests.
     struct PolicyGuard(String);
     impl PolicyGuard {
-        fn install(app_id: &str, policy: crate::crud::mask_policy::MaskPolicy) -> Self {
-            crate::crud::mask_policy::cache_put(app_id, Some(policy));
+        fn install(app_id: &str, policy: crate::protection::mask_policy::MaskPolicy) -> Self {
+            crate::protection::mask_policy::cache_put(&DbBinding::cold_start(app_id), Some(policy));
             Self(app_id.to_string())
         }
     }
     impl Drop for PolicyGuard {
         fn drop(&mut self) {
-            crate::crud::mask_policy::cache_put(&self.0, None);
+            crate::protection::mask_policy::cache_put(&DbBinding::cold_start(&self.0), None);
         }
     }
 
     #[test]
     fn pr5_policy_grants_role_with_classification() {
-        use crate::crud::mask_policy::MaskPolicy;
+        use crate::protection::mask_policy::MaskPolicy;
         let app_id = "pr5_grants_role_classification";
         let policy = MaskPolicy::from_json(&value!({
             "user": ["public", "pii"],
@@ -1918,14 +1895,18 @@ mod tests {
         let _g = PolicyGuard::install(app_id, policy);
 
         let actor = Some(value!({ "kind": "user", "id": "usr_x" }));
-        assert!(check_unmask_authorization(app_id, &actor, "pii").unwrap());
-        assert!(check_unmask_authorization(app_id, &actor, "public").unwrap());
-        assert!(!check_unmask_authorization(app_id, &actor, "spi").unwrap());
+        assert!(check_unmask_authorization(&DbBinding::cold_start(app_id), &actor, "pii").unwrap());
+        assert!(
+            check_unmask_authorization(&DbBinding::cold_start(app_id), &actor, "public").unwrap()
+        );
+        assert!(
+            !check_unmask_authorization(&DbBinding::cold_start(app_id), &actor, "spi").unwrap()
+        );
     }
 
     #[test]
     fn pr5_policy_unknown_role_denied() {
-        use crate::crud::mask_policy::MaskPolicy;
+        use crate::protection::mask_policy::MaskPolicy;
         let app_id = "pr5_unknown_role_denied";
         let policy = MaskPolicy::from_json(&value!({
             "user": ["public"],
@@ -1934,12 +1915,14 @@ mod tests {
         let _g = PolicyGuard::install(app_id, policy);
 
         let actor = Some(value!({ "kind": "operator", "id": "op_1" }));
-        assert!(!check_unmask_authorization(app_id, &actor, "public").unwrap());
+        assert!(
+            !check_unmask_authorization(&DbBinding::cold_start(app_id), &actor, "public").unwrap()
+        );
     }
 
     #[test]
     fn pr5_auto_fallback_when_not_in_policy() {
-        use crate::crud::mask_policy::MaskPolicy;
+        use crate::protection::mask_policy::MaskPolicy;
         let app_id = "pr5_auto_fallback";
         // Policy DOES list `user`, but NOT `auto` — the system actor
         // retains its uniform access via the fallback rule.
@@ -1950,14 +1933,16 @@ mod tests {
         let _g = PolicyGuard::install(app_id, policy);
 
         let actor = Some(value!({ "kind": "auto" }));
-        assert!(check_unmask_authorization(app_id, &actor, "pii").unwrap());
-        assert!(check_unmask_authorization(app_id, &actor, "spi").unwrap());
-        assert!(check_unmask_authorization(app_id, &actor, "internal").unwrap());
+        assert!(check_unmask_authorization(&DbBinding::cold_start(app_id), &actor, "pii").unwrap());
+        assert!(check_unmask_authorization(&DbBinding::cold_start(app_id), &actor, "spi").unwrap());
+        assert!(
+            check_unmask_authorization(&DbBinding::cold_start(app_id), &actor, "internal").unwrap()
+        );
     }
 
     #[test]
     fn pr5_auto_explicit_restriction_honoured() {
-        use crate::crud::mask_policy::MaskPolicy;
+        use crate::protection::mask_policy::MaskPolicy;
         let app_id = "pr5_auto_explicit_restriction";
         let policy = MaskPolicy::from_json(&value!({
             "auto": ["public"],
@@ -1966,9 +1951,15 @@ mod tests {
         let _g = PolicyGuard::install(app_id, policy);
 
         let actor = Some(value!({ "kind": "auto" }));
-        assert!(check_unmask_authorization(app_id, &actor, "public").unwrap());
-        assert!(!check_unmask_authorization(app_id, &actor, "pii").unwrap());
-        assert!(!check_unmask_authorization(app_id, &actor, "spi").unwrap());
+        assert!(
+            check_unmask_authorization(&DbBinding::cold_start(app_id), &actor, "public").unwrap()
+        );
+        assert!(
+            !check_unmask_authorization(&DbBinding::cold_start(app_id), &actor, "pii").unwrap()
+        );
+        assert!(
+            !check_unmask_authorization(&DbBinding::cold_start(app_id), &actor, "spi").unwrap()
+        );
     }
 
     #[test]

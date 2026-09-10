@@ -228,7 +228,7 @@ uses its own crate-relative session type at
 | --- | --- | --- |
 | `zeroship-config-contract` | Normal dependency of a non-shipped tool | `crates/zeroship-config-contract/Cargo.toml:17-27`; it reads `MigratedSettings::SPECS` at `crates/zeroship-config-contract/src/registry.rs:50`. |
 | `zeroship-control` | Dev-dependency only | `crates/zeroship-control/Cargo.toml:111-141`; its test helper calls the migrated provisioning function at `crates/zeroship-control/tests/common/mod.rs:278-283`. The production HTTP forward formerly lived in the now-DELETED `crates/zeroship-control/src/migrations_api.rs`; the edge's `/v1/*` handler sends migration applies directly to migrate-server. |
-| `zeroship-data-v8` | Dev-dependency only | `crates/zeroship-data-v8/Cargo.toml:91-143`; its test calls migrated's workflow-schema provisioning and constants at `crates/zeroship-data-v8/tests/integration.rs:6295-6315` and `crates/zeroship-data-v8/tests/integration.rs:6351-6359`. |
+| `zeroship-data-v8` | Dev-dependency only | `crates/zeroship-data-v8/Cargo.toml:91-143`; its test calls migrated's workflow-schema provisioning and constants at `crates/zeroship-data-v8/tests/integration.rs` and `crates/zeroship-data-v8/tests/integration.rs`. |
 
 The package's own binary is a shipped consumer of its library: the binary target
 is declared at `crates/zeroship-migrate-server/Cargo.toml:7-14`, and the image builds and

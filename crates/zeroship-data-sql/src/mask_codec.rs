@@ -420,7 +420,7 @@ mod tests {
 /// `zeroship-migrate-backend::mask_codec` and this module are two independent
 /// implementations of one wire. Their prefixes diverged before 2026-09-04, and
 /// the failure was silent and fail-open:
-/// `zeroship_data_orm::crud::protection_floor` refuses a write whose
+/// `zeroship_data_orm::protection::protection_floor` refuses a write whose
 /// descriptor drops a protection the live catalog records, and on every
 /// migration-engine-built table it introspected it matched no sentinel,
 /// concluded nothing was protected, and permitted the downgrade. Both files then

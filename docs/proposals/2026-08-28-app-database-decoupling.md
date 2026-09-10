@@ -55,7 +55,7 @@ migrate N iff principal owns N", evaluated on the database itself.
 
 A DSN never leaves the control plane and the operator config. `Datastore.dsn_secret_ref`
 names a platform secret. The worker is configured with a *set* of DSNs indexed by
-`DbResourceKey` (`crates/zeroship-data-v8/src/service.rs:193`), which already exists, is
+`DbResourceKey` (`crates/zeroship-data-v8/src/service.rs`), which already exists, is
 already a SHA-256 digest chosen so a DSN password cannot reach `Debug` or a log line, and
 needs no change - only its cardinality is wrong. Bring-your-own-datastore is out of scope:
 "which physical database may an app reach" is a privileged decision.
@@ -80,7 +80,7 @@ GRANT zs_bind_<gid>_e<E> TO zeroship_worker    WITH INHERIT FALSE; -- assumable,
 
 The data plane narrows per transaction with `SET LOCAL ROLE "zs_bind_<gid>_e<E>"` - the first
 statement of the setup batch that already exists
-(`crates/zeroship-data-orm/src/backend/postgres/pg_session_sql.rs:36` and `:63`), same statement, same
+(`crates/zeroship-data-orm/src/backend/postgres/pg_session_sql.rs` and `:63`), same statement, same
 batch position, no extra round trip. It replaces the current per-app role name
 (`crates/zeroship-core/src/database_role.rs`) in that builder and nowhere else.
 
@@ -127,7 +127,7 @@ Per-thread resources become maps keyed by `DbResourceKey`. `ThreadDbContext`
 (`crates/zeroship-data-v8/src/context.rs`) holds one pool, one url, one resource key and
 one backend today, and registering a second URL tears the first down. The target shape
 already exists one module over as `OPERATOR_POOLS: HashMap<DbResourceKey, Rc<Pool>>`
-(`crates/zeroship-data-v8/src/service.rs:146`).
+(`crates/zeroship-data-v8/src/service.rs`).
 
 ### Column-level GRANT is the masking authority
 
@@ -299,9 +299,9 @@ from the injected binding whether a live grant exists.
 ### Encryption
 
 Today the key is `Hkdf::<Sha256>::new(Some(app_id.as_bytes()), root)`
-(`crates/zeroship-data-orm/src/encryption/keys.rs:391`) and
+(`crates/zeroship-data-orm/src/encryption/keys.rs`) and
 `canonical_aad(collection, column, row_pk)` binds a hardcoded `WIRE_VERSION_V1`
-(`crates/zeroship-data-orm/src/encryption/aad.rs:75`, `:93`) and nothing namespacing. That
+(`crates/zeroship-data-orm/src/encryption/aad.rs`, `:93`) and nothing namespacing. That
 fails in opposite directions on the two new axes: co-grant-holders derive different keys and
 get an AEAD failure on data they are entitled to read, and one app across two databases
 derives one key with no database in the AAD, so a ciphertext lifted from one database verifies
@@ -608,7 +608,7 @@ readable.
 **Cross-creator table sharing is refused permanently.** Three independent reasons:
 
 1. **The unmask policy is authored by the READING app.**
-   `crates/zeroship-data-orm/src/crud/mask_policy.rs` states it: the policy comes from the
+   `crates/zeroship-data-orm/src/protection/mask_policy.rs` states it: the policy comes from the
    creator's own source, at boot, and nowhere else on the PG arm; the app declares
    `defineMaskPolicy()`, `installSchema` flushes it into that isolate's cache, and there is no
    durable policy store. A co-grant-holder ships a permissive policy in its own bundle and
@@ -662,11 +662,11 @@ datastore from an app under its limit.
 
 2. **Supply the schema epoch producer.**
    BUILDABLE, 8h. The consumer ships and is tested: `SchemaEpoch`
-   (`crates/zeroship-data-orm/src/transaction/reducer/identity.rs:97`), the comparison at
+   (`crates/zeroship-data-orm/src/transaction/reducer/identity.rs`), the comparison at
    `:265` returning `Verdict::ReResolve`, and the adapter from a classified session-setup
    outcome into that verdict. **The machine is a tautology in production.** The single
    production construction site
-   (`crates/zeroship-data-orm/src/transaction/driver.rs:143-145`) mints incarnation 0, domain
+   (`crates/zeroship-data-orm/src/transaction/driver.rs`) mints incarnation 0, domain
    `(0,0)`, epoch 0, `Stable` and an empty ceiling, and echoes the expectation back as the
    observation, so `classify` can only return `Current` and the three typed denial codes are
    unreachable outside tests. The work is the record, the migration-service write and the

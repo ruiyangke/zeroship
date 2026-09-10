@@ -441,13 +441,13 @@ pub fn ambient_route_for_tests(app_id: &str, backend: crate::backend::BackendHan
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::SqlExecutor as _;
     use crate::driver::Session;
     use std::cell::Cell;
     use std::collections::HashMap;
     use std::path::PathBuf;
     use std::rc::Rc;
     use zeroship_core::change_event::ChangeOp;
+    use zeroship_data_orm::fixtures::DatabaseFixture;
 
     thread_local! {
         /// Counter incremented every time the production code path
@@ -1005,7 +1005,7 @@ mod tests {
                 .await
                 .expect("ensure app schema");
             backend
-                .pool_exec(
+                .execute_fixture(
                     r#"CREATE TABLE "app_exec"."notes" (
                            id INTEGER PRIMARY KEY,
                            title TEXT NOT NULL
@@ -1125,7 +1125,7 @@ mod tests {
                 .await
                 .expect("ensure app schema");
             backend
-                .pool_exec(
+                .execute_fixture(
                     &format!(
                         r#"CREATE TABLE "{app_id}"."notes" (
                                id INTEGER PRIMARY KEY,
@@ -1261,11 +1261,11 @@ mod tests {
             // is parked in the per-isolate slot — exactly the state a
             // creator callback leaves behind across an `await`.
             let client = backend
-                .acquire_dedicated_client("app_a")
+                .fixture_session("app_a")
                 .await
                 .expect("acquire tx client");
             backend
-                .client_exec(&client, "BEGIN", &[])
+                .execute_fixture_on(&client, "BEGIN", &[])
                 .await
                 .expect("BEGIN");
             crate::tx_lanes::with_mut(|l| {
@@ -1330,7 +1330,7 @@ mod tests {
                 .await
                 .expect("ensure app schema");
             backend
-                .pool_exec(
+                .execute_fixture(
                     r#"CREATE TABLE "app_exec_cancel"."notes" (
                            id INTEGER PRIMARY KEY,
                            title TEXT NOT NULL
@@ -1340,7 +1340,7 @@ mod tests {
                 .await
                 .expect("CREATE TABLE notes");
             backend
-                .pool_exec(
+                .execute_fixture(
                     r#"INSERT INTO "app_exec_cancel"."notes" (id, title)
                         VALUES (1, 'persisted')"#,
                     &[],
@@ -1369,7 +1369,7 @@ mod tests {
 
             let gate = backend.arm_next_command_gate_for_tests();
             let spawned_handle = handle.clone();
-            let task = compio::runtime::spawn(async move {
+            let task = crate::orm_context::spawn(async move {
                 exec_query(
                     &ambient_route_for_tests("app_exec_cancel", spawned_handle),
                     BuiltQuery {
@@ -1450,7 +1450,7 @@ mod tests {
 
             let ran = compio::time::timeout(
                 Duration::from_secs(5),
-                backend_b.pool_exec("CREATE TABLE probe (id INTEGER PRIMARY KEY)", &[]),
+                backend_b.execute_fixture("CREATE TABLE probe (id INTEGER PRIMARY KEY)", &[]),
             )
             .await;
 
@@ -1504,7 +1504,7 @@ mod tests {
             let url = pg_test_url();
             match compio_postgres::connect(&url, NoTls).await {
                 Ok((client, connection)) => {
-                    compio::runtime::spawn(async move {
+                    crate::orm_context::spawn(async move {
                         let _ = connection.run().await;
                     })
                     .detach();

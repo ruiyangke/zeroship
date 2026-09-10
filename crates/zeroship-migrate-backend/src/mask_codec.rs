@@ -33,7 +33,7 @@ use crate::schema_error::MaskSentinelError;
 /// read the live catalog) simply spelled the sentinel differently and never
 /// learned this one.
 ///
-/// That is what the knob cost. `zeroship_data_orm::crud::protection_floor`
+/// That is what the knob cost. `zeroship_data_orm::protection::protection_floor`
 /// refuses a write whose descriptor dropped a protection the catalog still
 /// records; on every table THIS engine created it introspected, matched no
 /// sentinel, concluded nothing was protected, and permitted the downgrade. The

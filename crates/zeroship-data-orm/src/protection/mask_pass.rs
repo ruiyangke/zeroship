@@ -40,7 +40,7 @@
 //! ## Wiring into the CRUD dispatch
 //!
 //! Called from `crud::dispatch_insert` / `dispatch_update_one`
-//! **AFTER** `crud::encryption_pass::encrypt_row_on_write`
+//! **AFTER** `protection::encryption_pass::encrypt_row_on_write`
 //! and **BEFORE** the `query::build_*` call. The encryption pass
 //! populates a [`MaskPlaintextSidechannel`] (a
 //! `HashMap<String, Zeroizing<String>>`)
@@ -162,7 +162,7 @@ pub fn apply_mask_on_write(
         // Resolved BEFORE the plaintext branch, so a descriptor that names a
         // creator-reachable raw column refuses every write to the collection
         // rather than only the ones that mention the column. Same reasoning as
-        // `crud::protection_floor::refuse_protection_downgrade`: a write that
+        // `protection::protection_floor::refuse_protection_downgrade`: a write that
         // happens to omit `ssn` is harmless in itself, but letting it through
         // means the broken deploy appears to work until the first write that
         // does mention it.
@@ -1065,7 +1065,7 @@ mod tests {
     /// `zeroship_data_sql::compile::declared_raw_column` owns the verdict; these two
     /// arms prove each pass PROPAGATES it rather than falling back to the
     /// derivation, which would place plaintext in a filterable column while
-    /// reporting success. `crud::protection_floor` does not catch this shape -
+    /// reporting success. `protection::protection_floor` does not catch this shape -
     /// the descriptor still declares the mask, so its presence comparison is
     /// satisfied.
     #[test]

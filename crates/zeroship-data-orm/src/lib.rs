@@ -42,15 +42,24 @@ pub mod driver;
 pub mod encryption;
 pub mod error;
 pub mod exec;
+pub mod executor;
 pub mod lock_policy;
 pub mod masking;
 pub mod metrics;
 pub mod orm;
+pub mod protection;
 pub mod read_set;
+#[cfg(not(feature = "test-helpers"))]
+pub(crate) mod schema_cache;
+#[cfg(feature = "test-helpers")]
 pub mod schema_cache;
+pub mod search;
 pub mod storage;
 pub mod system_shape_charter;
 pub mod transaction;
+#[cfg(not(feature = "test-helpers"))]
+pub(crate) mod tx_lanes;
+#[cfg(feature = "test-helpers")]
 pub mod tx_lanes;
 pub mod tx_route;
 pub use connection::ConnectOptions;
@@ -92,9 +101,15 @@ mod test_support;
 #[cfg(test)]
 pub(crate) fn reset_engine_for_tests() {
     tx_lanes::reset_for_tests();
-    crud::mask_policy::reset_for_tests();
-    crud::protection_floor::reset_for_tests();
+    protection::mask_policy::reset_for_tests();
+    protection::protection_floor::reset_for_tests();
     metrics::reset_for_tests();
     system_shape_charter::reset_for_tests();
     zeroship_data_orm::schema_cache::reset_for_tests();
 }
+
+#[cfg(any(test, feature = "test-helpers"))]
+pub mod fixtures;
+
+pub mod orm_context;
+pub use orm_context::OrmContext;

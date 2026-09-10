@@ -502,7 +502,7 @@ fn postgres_serves_the_inner_product_that_sqlite_refuses() {
 
         // The SQLite half: the same metric, refused.
         use zeroship_data_orm::binding::DbBinding;
-        use zeroship_data_v8::backend::{VectorIndex, VectorMetric as BackendMetric};
+        use zeroship_data_v8::backend::VectorMetric as BackendMetric;
         let dir = tempfile::tempdir().expect("tempdir");
         let sqlite = zeroship_data_v8::backend_selection::new_sqlite_backend(
             std::path::PathBuf::from(dir.path()),
@@ -512,14 +512,17 @@ fn postgres_serves_the_inner_product_that_sqlite_refuses() {
 
         let refused = sqlite
             .vector_search(
-                &DbBinding::cold_start("search_ir_live"),
-                "docs",
-                "embedding",
-                &unit_vector(3),
-                5,
-                BackendMetric::InnerProduct,
-                &zeroship_data_sql::value::Value::Null,
-                &zeroship_data_sql::value::Value::Null,
+                None,
+                zeroship_data_orm::search::VectorSearch {
+                    binding: &DbBinding::cold_start("search_ir_live"),
+                    collection: "docs",
+                    column: "embedding",
+                    query: &unit_vector(3),
+                    k: 5,
+                    metric: BackendMetric::InnerProduct,
+                    filter: &zeroship_data_sql::value::Value::Null,
+                    schema: &zeroship_data_sql::value::Value::Null,
+                },
             )
             .await
             .expect_err("vec0 has no inner-product metric");
@@ -535,14 +538,17 @@ fn postgres_serves_the_inner_product_that_sqlite_refuses() {
         // missing relation.
         let other = sqlite
             .vector_search(
-                &DbBinding::cold_start("search_ir_live"),
-                "docs",
-                "embedding",
-                &unit_vector(3),
-                5,
-                BackendMetric::Cosine,
-                &zeroship_data_sql::value::Value::Null,
-                &zeroship_data_sql::value::Value::Null,
+                None,
+                zeroship_data_orm::search::VectorSearch {
+                    binding: &DbBinding::cold_start("search_ir_live"),
+                    collection: "docs",
+                    column: "embedding",
+                    query: &unit_vector(3),
+                    k: 5,
+                    metric: BackendMetric::Cosine,
+                    filter: &zeroship_data_sql::value::Value::Null,
+                    schema: &zeroship_data_sql::value::Value::Null,
+                },
             )
             .await
             .expect_err("there is no table, so this fails too - but for another reason");
@@ -698,3 +704,6 @@ fn one_statement_serves_every_k() {
         println!("ruled on 2 executions of 1 statement text");
     });
 }
+
+#[allow(unused_imports)]
+use zeroship_data_orm::search::Search as _;

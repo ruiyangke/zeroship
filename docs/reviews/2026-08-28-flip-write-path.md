@@ -30,7 +30,7 @@ Stated first, so nothing below reads as more settled than it is.
   and I cannot tell which is current. Section 4.6 below assumes the struct is
   authoritative because it is the thing that compiles.
 - **Whether the `*Many` verbs are permanently count-only.** `dispatch_update_many`
-  (`crates/zeroship-data-v8/src/crud/mod.rs:1166`), `dispatch_delete_many`
+  (`crates/zeroship-data-v8/src/crud/mod.rs`), `dispatch_delete_many`
   (`:1491`), `dispatch_purge_many` (`:1586`) and `dispatch_restore_many` (`:1675`)
   all funnel their `RETURNING *` rows into `row_count_as_f64` and return a number.
   My outbound design leans on that. If a future verb returns those rows, the
@@ -67,7 +67,7 @@ is the number my design pays; see section 5.
 ### 1.2 "`strip_encryption_markers` retains it (`encryption_pass.rs:502-505`)"
 
 `strip_encryption_markers` is `#[cfg(any(test, feature = "test-helpers"))]`
-(`crates/zeroship-data-v8/src/crud/encryption_pass.rs:501`). It is not on the
+(`crates/zeroship-data-v8/src/protection/encryption_pass.rs`). It is not on the
 production path, and it strips `__zsbin__` markers from a **write** document
 before binding, not from a returned row. The note cites it as an outbound
 retainer; it is neither outbound nor live.
@@ -75,7 +75,7 @@ retainer; it is neither outbound nor live.
 **The conclusion survives anyway, through a different and worse route.** Nothing
 on the production read path removes an unknown key from a returned row. The only
 key removal is `mask_pass::wrap_row_on_read`, which removes exactly
-`format!("{col}_masked")` (`crates/zeroship-data-v8/src/crud/mask_pass.rs:469`,
+`format!("{col}_masked")` (`crates/zeroship-data-v8/src/protection/mask_pass.rs`,
 `:480-482`). So `<col>_raw` survives to `mapResultDoc`
 (`sdks/db/src/utils.ts:28-33`) for the reason the note gives, just not via the
 function it names.
@@ -90,7 +90,7 @@ let should_decrypt = masked_kind == "none"
     || obj.contains_key(&sibling_key);
 if !should_decrypt { continue; }
 ```
-`crates/zeroship-data-v8/src/crud/encryption_pass.rs:295-301`
+`crates/zeroship-data-v8/src/protection/encryption_pass.rs`
 
 Post-flip that key is absent, so for an encrypted+masked field the decrypt stage
 is skipped entirely and `<col>_raw` reaches JS as **base64 ciphertext**. For a
@@ -100,10 +100,10 @@ missing string.
 ### 1.3 "The SQLite introspector drops all mask metadata with no `else`"
 
 True as written, and irrelevant on the production path: `parse_mask_sentinels`
-(`crates/zeroship-data-v8/src/backend/sqlite/mod.rs:2201-2202`) and its only
+(`crates/zeroship-data-v8/src/backend/sqlite/mod.rs`) and its only
 caller, the `SchemaIntrospect for SqliteBackend` impl (`:804-806`, call at
 `:917`), are both `#[cfg(any(test, feature = "test-helpers"))]`. The dev tier does
-not run it. `crates/zeroship-data-v8/src/descriptor.rs:30-32` states this in the
+not run it. `crates/zeroship-data-v8/src/descriptor.rs` states this in the
 tree's own words: "On SQLite it was never live at all".
 
 **The same defect IS production on Postgres, and the note does not mention it.**
@@ -154,7 +154,7 @@ function every read uses:
 | restoreOne | `:1619` | `:1658` |
 | upsert | `:1955` | `:2010` |
 
-`read_pipeline::apply` (`crates/zeroship-data-v8/src/crud/read_pipeline.rs:54-100`)
+`read_pipeline::apply` (`crates/zeroship-data-v8/src/crud/read_pipeline.rs`)
 resolves the descriptor itself at `:72-75` and runs normalize / decrypt / mask-wrap
 / unmask in a fixed order. **The write path is already inside the read pipeline.**
 A stage added there covers all seven verbs at one site.
@@ -269,7 +269,7 @@ forgetting to means the column is dropped - a visible failure, not a leak.
 #### Where it is applied
 
 As the **final** stage of `read_pipeline::apply`
-(`crates/zeroship-data-v8/src/crud/read_pipeline.rs:54-100`), after the unmask
+(`crates/zeroship-data-v8/src/crud/read_pipeline.rs`), after the unmask
 overrides at `:89-97`:
 
 ```
@@ -315,7 +315,7 @@ already on the `Declared` surface.
 Three reasons, in order of weight.
 
 1. **It does not close the hole it appears to close.** The rows also feed
-   `emit_for_rows` (`crates/zeroship-data-v8/src/exec.rs:481-550`), which builds
+   `emit_for_rows` (`crates/zeroship-data-v8/src/exec.rs`), which builds
    the broker tuple from `m.keys()` at `:520-524`. On a deployed Postgres app the
    authoritative event source is not that function at all - it is the WAL consumer
    (`emit_for_rows` returns early when the consumer is running, `:501-505`), and
@@ -344,7 +344,7 @@ Three reasons, in order of weight.
 The five `*Many` verbs never hand rows to JS, so stage 5 does not reach them and
 does not need to. What does reach a creator from those verbs is the broker's
 `changed_columns` list, which `message_to_json` serialises verbatim
-(`crates/zeroship-data-v8/src/broker.rs:939-946`). Post-flip that list names
+(`crates/zeroship-data-v8/src/broker.rs`). Post-flip that list names
 `ssn_raw` to the subscriber. The values do not escape: `message_to_json` does not
 include `new_tuple`.
 
@@ -473,7 +473,7 @@ The three candidate answers and their failure modes:
 **Decision: none of the three. Lower the predicate's column, and downgrade to
 coarse-grained when the lowering is not sound.**
 
-`normalise_filter` (`crates/zeroship-data-v8/src/read_set.rs:220`) gains
+`normalise_filter` (`crates/zeroship-data-v8/src/read_set.rs`) gains
 `schema_hint: &Value` and, per conjunct:
 
 - if `read_column_for(key, schema_hint) != key` - the field is masked - and the
@@ -522,7 +522,7 @@ Specification, per storage shape:
 | field shape | `.index()` | `.unique()` |
 | --- | --- | --- |
 | mask-only (`.mask()`, no `.encrypted()`) | raw column | **raw column** - plaintext, equality is real |
-| deterministic-encrypted + masked | raw column | raw column - ciphertext equality holds (`crates/zeroship-data-v8/src/encryption/aead.rs:92-112`, synthetic nonce `HMAC-SHA256(k_siv, aad \|\| plaintext)[..12]`) |
+| deterministic-encrypted + masked | raw column | raw column - ciphertext equality holds (`crates/zeroship-data-v8/src/encryption/aead.rs`, synthetic nonce `HMAC-SHA256(k_siv, aad \|\| plaintext)[..12]`) |
 | randomised-encrypted + masked | raw column (useless but harmless) | **refused at declare time**, as today (`types.ts:1153-1160`). It becomes supportable only when a keyed lookup column exists; that is item 1's design (`docs/reviews/2026-08-27-query-by-plaintext.md:666-688`), not this one. |
 | `.mask({kind:"none"})` | own column | own column - no sibling exists (`mask_sibling_column_for_field:2155-2158` returns `None`) |
 
@@ -554,7 +554,7 @@ blocking note conflates.
 - **SQLite.** The function and its caller are both `#[cfg(any(test, feature =
   "test-helpers"))]` (`backend/sqlite/mod.rs:2201`, `:804`). The descriptor is the
   data plane's sole schema authority
-  (`crates/zeroship-data-v8/src/descriptor.rs:1-32`), and that module records
+  (`crates/zeroship-data-v8/src/descriptor.rs`), and that module records
   that on SQLite it always has been. So the code is a test-only reimplementation
   of a fact the descriptor states. Fixing its missing `else` would preserve a
   second source of truth for the mask sibling's name, which is exactly the
@@ -574,7 +574,7 @@ blocking note conflates.
 ### 4.6 The AAD, and what the flip actually costs in encrypted data
 
 `canonical_aad(collection, column, row_pk_bytes)`
-(`crates/zeroship-data-v8/src/encryption/aad.rs:75-99`) length-prefixes the
+(`crates/zeroship-data-v8/src/encryption/aad.rs`) length-prefixes the
 column name into the AEAD tag at `:97`. The encryption pass passes the **logical
 field name** (`crud/encryption_pass.rs:200`, `:337`; pinned by
 `crud/write_pipeline.rs:734`, `canonical_aad(collection, "ssn", Some(id))`).
@@ -614,22 +614,22 @@ argument the query-by-plaintext review makes about `lookupColumn`
 | # | site | what |
 | --- | --- | --- |
 | 1 | `crates/zeroship-schema/src/query.rs` (new fn) | `read_surface_columns` |
-| 2 | `crates/zeroship-data-v8/src/crud/read_pipeline.rs:14-100` | `RowSurface`, stage 5 |
-| 3 | `crates/zeroship-data-v8/src/crud/mod.rs:1790-1798` | aggregate passes `Projected` |
+| 2 | `crates/zeroship-data-v8/src/crud/read_pipeline.rs` | `RowSurface`, stage 5 |
+| 3 | `crates/zeroship-data-v8/src/crud/mod.rs` | aggregate passes `Projected` |
 | 4 | `crates/zeroship-schema/src/query.rs:4610` (+2 wrappers `:4578`, `:4592`) | aggregate builder returns its aliases |
-| 5 | `crates/zeroship-data-v8/src/exec.rs:425-440` | `RawRows` newtype minted here |
+| 5 | `crates/zeroship-data-v8/src/exec.rs` | `RawRows` newtype minted here |
 | 6 | `crates/zeroship-data-v8/src/crud/mod.rs` x5 | `row_count_as_f64` takes `RawRows` (`:1409, 1529, 1612, 1714` + CAS at `:1313`) |
-| 7 | `crates/zeroship-data-v8/src/broker.rs:944` | `changed_columns` mapped to logical names |
-| 8 | `crates/zeroship-data-v8/src/broker.rs:986-999` | delete `ws_frame_for_change` |
-| 9 | `crates/zeroship-data-v8/src/read_set.rs:220` + 3 callers (`crud/mod.rs:603, 1751, 1916`) | predicate lowering |
+| 7 | `crates/zeroship-data-v8/src/broker.rs` | `changed_columns` mapped to logical names |
+| 8 | `crates/zeroship-data-v8/src/broker.rs` | delete `ws_frame_for_change` |
+| 9 | `crates/zeroship-data-v8/src/read_set.rs` + 3 callers (`crud/mod.rs:603, 1751, 1916`) | predicate lowering |
 | 10 | `crates/zeroship-migrate-core/src/render/gen_types.rs:284-318` | raw column named `__zs_raw__<field>`, capped |
 | 11 | `crates/zeroship-schema/src/query.rs:2151-2161` + its 5 emitter callers (`:1282, 1708, 1994, 2217, 2253`) | emit both physical names, capped |
 | 12 | `crates/zeroship-schema/src/query.rs:1949-1967` | indexes on the raw column |
 | 13 | `crates/zeroship-schema/src/query.rs:766` | `Suffix("_raw")`, anti-collision only |
 | 14 | `crates/zeroship-schema/src/diff.rs:671, 716` | PG introspector reads `storage`, warns on fall-through |
-| 15 | `crates/zeroship-data-v8/src/backend/sqlite/mod.rs:804-846, 2201-2248` | deleted |
-| 16 | `crates/zeroship-data-v8/src/crud/mask_pass.rs:150, 469`; `encryption_pass.rs:295` | read `storage`, not `format!("{col}_masked")` |
-| 17 | `crates/zeroship-data-v8/src/crud/unmask.rs:466, 509, 567, 604` | read the raw column, not the logical name (see section 6.3) |
+| 15 | `crates/zeroship-data-v8/src/backend/sqlite/mod.rs, 2201-2248` | deleted |
+| 16 | `crates/zeroship-data-v8/src/protection/mask_pass.rs, 469`; `encryption_pass.rs:295` | read `storage`, not `format!("{col}_masked")` |
+| 17 | `crates/zeroship-data-v8/src/protection/unmask.rs, 509, 567, 604` | read the raw column, not the logical name (see section 6.3) |
 | 18 | `crates/zeroship-migrate-core/src/render/gen_types.rs:157-169` | comment corrected per section 4.6 |
 
 **About 40 edits across 9 files, of which 6 are one-line and 15 are deletions or

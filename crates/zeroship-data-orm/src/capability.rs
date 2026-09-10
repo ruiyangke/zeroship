@@ -3,7 +3,7 @@
 //! Rank 0: every item here is a value type or a constant. None names a database
 //! driver, a runtime, or V8, and none carries behaviour that does - which is
 //! what makes them movable at all. The traits that consume them
-//! (`SqlExecutor`, `LockManager`, `ChangeStream`, ...) follow in a later batch;
+//! (`DatabaseFixture`, `LockManager`, `ChangeStream`, ...) follow in a later batch;
 //! moving the vocabulary first means those traits arrive with nothing left to
 //! drag behind them.
 //!
@@ -46,7 +46,7 @@
 //! [`crate::storage`] and is not
 //! imported into this module - but a DEFAULT `cargo doc` never rendered items
 //! that were `cfg`-gated out of it, so `tests/run_doc_gate.sh` never saw them.
-//! They are qualified paths now. The same thing happened to `SchemaIntrospect`'s
+//! They are qualified paths now. The same thing happened to `Catalog`'s
 //! two `crate::catalog::` links in `storage.rs` the day before, for the same
 //! reason. Measured over `cargo doc -p zeroship-data-core --no-deps`: 20
 //! unresolved links under `--all-features` before, 16 after; 16 either way on

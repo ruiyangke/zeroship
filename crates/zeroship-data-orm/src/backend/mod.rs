@@ -1,4 +1,8 @@
 //! Built-in ORM adapters and their low-level capability vocabulary.
+pub use crate::protection::Catalog;
+#[cfg(any(test, feature = "test-helpers"))]
+use zeroship_data_orm::fixtures::DatabaseFixture;
+
 pub mod cancel;
 pub mod postgres;
 pub mod sqlite;
@@ -6,11 +10,18 @@ pub use crate::backend_handle::BackendHandle;
 pub use crate::capability::{BusyPolicy, ScalarRead, SnapshotHandle, SnapshotOpts, UnmaskAuditRow};
 #[cfg(any(test, feature = "test-helpers"))]
 pub use crate::capability::{LockScope, SNAPSHOT_RESTORE_LOCK_TAG};
-pub use crate::driver::Backend;
-pub use crate::storage::{
-    Backup, ChangeStream, DialectBuilder, LockManager, SchemaIntrospect, SpatialIndex, SqlExecutor,
-    VectorIndex,
-};
+/// Host registration combining execution and ORM services. A connection driver
+/// implements only `driver::Driver`; application services are composed here.
+pub trait Backend:
+    crate::executor::ScopedExecutor
+    + crate::protection::Catalog
+    + crate::protection::Protection
+    + crate::search::Search
+{
+    /// Whether the host publishes changes from the database commit stream.
+    fn publishes_committed_changes(&self) -> bool;
+}
+pub use crate::storage::{Backup, ChangeStream, LockManager};
 #[cfg(any(test, feature = "test-helpers"))]
 pub use postgres::lock_guard::LockGuard;
 #[cfg(any(test, feature = "test-helpers"))]
@@ -28,7 +39,7 @@ mod tests {
         assert_impl::<PostgresBackend>();
     }
     fn assert_postgres_backend_impls_sql_executor() {
-        fn assert_impl<T: SqlExecutor<Client = compio_postgres::PoolConnection>>() {}
+        fn assert_impl<T: DatabaseFixture<Client = compio_postgres::PoolConnection>>() {}
         assert_impl::<PostgresBackend>();
     }
     fn assert_postgres_backend_impls_lock_manager() {
@@ -36,17 +47,13 @@ mod tests {
         assert_impl::<PostgresBackend>();
     }
     fn assert_postgres_backend_impls_schema_introspect() {
-        fn assert_impl<T: SchemaIntrospect<LiveSchema = crate::catalog::LiveSchema>>() {}
+        fn assert_impl<T: Catalog>() {}
         assert_impl::<PostgresBackend>();
     }
     fn assert_postgres_backend_impls_pg_lock_manager() {
         fn assert_impl<T: PgLockManager>() {}
         assert_impl::<PostgresBackend>();
     }
-    #[allow(dead_code)]
-    fn _assert_vector_index<T: VectorIndex>() {}
-    #[allow(dead_code)]
-    fn _assert_spatial_index<T: SpatialIndex>() {}
     #[cfg(feature = "test-helpers")]
     #[allow(dead_code)]
     fn _assert_backup<T: Backup>() {}
@@ -68,8 +75,8 @@ mod tests {
         assert_impl::<SqliteBackend>();
     }
     fn assert_associated_types_pinned() {
-        fn pinned_client<T: SqlExecutor<Client = compio_postgres::PoolConnection>>() {}
-        fn pinned_live_schema<T: SchemaIntrospect<LiveSchema = crate::catalog::LiveSchema>>() {}
+        fn pinned_client<T: DatabaseFixture<Client = compio_postgres::PoolConnection>>() {}
+        fn pinned_live_schema<T: Catalog>() {}
         pinned_client::<PostgresBackend>();
         pinned_live_schema::<PostgresBackend>();
     }

@@ -119,10 +119,10 @@ thread_local! {
     /// for. Read a zero as "no backend was installed", never as "no socket was
     /// opened".
     ///
-    /// It said `acquire_dedicated_client` "calls `compio_postgres::connect`
+    /// It said `fixture_session` "calls `compio_postgres::connect`
     /// straight through for each explicit transaction" and named moving it onto
     /// a pooled checkout as a later step. That move has landed:
-    /// `PostgresBackend::acquire_dedicated_client` is `self.pool.acquire()`,
+    /// `PostgresBackend::fixture_session` is `self.pool.acquire()`,
     /// so an explicit transaction borrows from the data-plane pool and opens no
     /// socket of its own.
     static BACKENDS_OPENED: Cell<u64> = const { Cell::new(0) };
@@ -476,7 +476,7 @@ mod tests {
     #[test]
     fn the_service_parses_its_url_once_and_never_again() {
         let before = url_parse_count();
-        let service = DbService::new(config("sqlite::memory:")).expect("service");
+        let service = DbService::new(config("sqlite:service-test.sqlite")).expect("service");
         let after_construction = url_parse_count();
         assert_eq!(
             after_construction - before,
@@ -523,7 +523,7 @@ mod tests {
     /// which is the arm that fails on the pre-service code.
     #[test]
     fn the_plugin_prototype_is_one_object() {
-        let service = DbService::new(config("sqlite::memory:")).expect("service");
+        let service = DbService::new(config("sqlite:service-test.sqlite")).expect("service");
         assert!(
             Arc::ptr_eq(&service.plugin(), &service.plugin()),
             "the prototype must be cloned, not minted per call",
@@ -586,7 +586,7 @@ mod tests {
     /// `select_backend(&self.service.url)` turns this assertion red.
     #[compio::test]
     async fn deprovisioning_on_sqlite_re_parses_nothing() {
-        let service = DbService::new(config("sqlite::memory:")).expect("service");
+        let service = DbService::new(config("sqlite:service-test.sqlite")).expect("service");
         let parses_before = url_parse_count();
         let pools_before = operator_pool_open_count();
 

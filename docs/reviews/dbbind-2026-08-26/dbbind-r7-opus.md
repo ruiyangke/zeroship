@@ -17,7 +17,7 @@ one of them and two are off by enough to matter.
 | sc3:104-134 is the ledger, and it structurally cannot carry them | **VERIFIED** | `2026-08-26-sc3-dbplan-ir-and-ledger.md:106-113`: the row shape is `source_symbol \| source_range \| destination \| status`, `source_range` is a `query.rs` line range, and :117-119 binds the source column to "the set of `pub`/`pub(crate)` functions **the crate** actually exposes" - the crate being `zeroship-schema`. None of the four capabilities lives in `zeroship-schema`; all four live in `zeroship-data-v8`. A ledger whose source column is pinned to one crate's exports cannot hold a row for a symbol in another crate without failing its own gate arm. |
 | sc3:82-95 pins the expression sub-grammar | **VERIFIED** | Comparison operators, logical composition, field paths incl. nested access, literals with logical type, and `IS NULL` distinct from a null-valued comparison. |
 | `exec.rs:455-466` = `is_app_suppressed` | **CITATION DRIFT** | At 455-466 the file holds *doc-comment prose about* the gate (`exec.rs:459` names `wal_consumer::is_app_suppressed(app_id)`). The **code** is `exec.rs:501`. The parent quotes the comment text verbatim at :520-524, so the quote is right and the line number points at the comment, not the call. Anyone grepping :455-466 for a call site finds none. |
-| `wal_consumer.rs:589` = `emit_for_tuple` | **VERIFIED** | `fn emit_for_tuple(` begins at exactly `crates/zeroship-data-v8/src/wal_consumer.rs:589`. |
+| `wal_consumer.rs:589` = `emit_for_tuple` | **VERIFIED** | `fn emit_for_tuple(` begins at exactly `crates/zeroship-data-v8/src/wal_consumer.rs`. |
 | the string `epoch` appears ZERO times in `wal_consumer.rs` | **VERIFIED BY ME** | `grep -c epoch` -> `0`; `grep -ic epoch` -> `0`; file is 1440 lines. Both directions checked, so this is not a case-folding artefact. |
 | `ISOLATE_CTX` doc calls it "the per-isolate DB context" but it is a `thread_local!` | **VERIFIED** | `context.rs:888-893`. |
 | Fork B: `check_unmask_authorization` is sync | **VERIFIED** | `crud/unmask.rs:305-323`, `fn` not `async fn`, reads `crate::context::with(|c| c.mask_policy_for(app_id))` at :314. |
@@ -608,12 +608,12 @@ future reader can tell whether it is still measuring anything.
 
 In production the mutation-side producer is suppressed. `emit_for_rows`
 returns early when `wal_consumer::is_app_suppressed(app_id)` is true
-(`crates/zeroship-data-v8/src/exec.rs:501-505`), and the doc block above it
+(`crates/zeroship-data-v8/src/exec.rs`), and the doc block above it
 at `:459-465` states why: "when the WAL consumer is running for this app, it
 owns the publish path for events this isolate writes."
 
 The real producer is
-`crates/zeroship-data-v8/src/wal_consumer.rs:589 emit_for_tuple`. I verified
+`crates/zeroship-data-v8/src/wal_consumer.rs emit_for_tuple`. I verified
 myself that the string `epoch` appears **zero** times in that file, in both
 case-sensitive and case-insensitive greps, across all 1440 lines.
 

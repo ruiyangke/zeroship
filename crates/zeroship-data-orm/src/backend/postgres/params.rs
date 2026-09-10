@@ -11,6 +11,9 @@ impl ToSql for Parameter<'_> {
         true
     }
     fn encode_format(&self, ty: &Type) -> Format {
+        if matches!(self.0, Value::Object(_)) && ty.name() == "geography" {
+            return Format::Binary;
+        }
         match (self.0, ty) {
             (Value::Null, _) | (Value::Bytes(_), &Type::BYTEA) | (Value::Bool(_), &Type::BOOL) => {
                 Format::Binary
@@ -24,6 +27,28 @@ impl ToSql for Parameter<'_> {
         }
     }
     fn to_sql(&self, ty: &Type, out: &mut BytesMut) -> Result<IsNull, EncodeError> {
+        if let Value::Object(point) = self.0 {
+            if ty.name() == "geography" {
+                let lat = point
+                    .get("lat")
+                    .and_then(Value::as_f64)
+                    .ok_or("geographic point requires numeric latitude")?;
+                let lng = point
+                    .get("lng")
+                    .and_then(Value::as_f64)
+                    .ok_or("geographic point requires numeric longitude")?;
+                if !(-90.0..=90.0).contains(&lat) || !(-180.0..=180.0).contains(&lng) {
+                    return Err("geographic point coordinates are out of range".into());
+                }
+                // EWKB point with an explicit WGS84 SRID, longitude then latitude.
+                out.extend_from_slice(&[1]);
+                out.extend_from_slice(&0x2000_0001u32.to_le_bytes());
+                out.extend_from_slice(&4326u32.to_le_bytes());
+                out.extend_from_slice(&lng.to_le_bytes());
+                out.extend_from_slice(&lat.to_le_bytes());
+                return Ok(IsNull::No);
+            }
+        }
         if let Value::Array(values) = self.0 {
             if ty.name() == "vector" {
                 out.extend_from_slice(b"[");
@@ -115,6 +140,20 @@ pub async fn query(
         .map_err(|e| crate::backend::postgres::pg_error::classify(&e))
 }
 
+/// Execute a parameterized command and return its command-completion row count.
+pub async fn execute(
+    client: &compio_postgres::Client,
+    sql: &str,
+    values: &[Value],
+) -> Result<u64, crate::error::DbError> {
+    let parameters: Vec<_> = values.iter().map(Parameter).collect();
+    let refs: Vec<&(dyn ToSql + Sync)> = parameters.iter().map(|value| value as _).collect();
+    client
+        .execute(sql, &refs)
+        .await
+        .map_err(|e| super::pg_error::classify(&e))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -195,7 +234,7 @@ mod tests {
             Value::Timestamp(-1),
         ];
         let rows = query(&client, "SELECT $1::bigint AS integer, $2::bytea AS bytes, $3::boolean AS flag, $4::text AS absent, $5::text AS text, $6::jsonb AS document, $7::numeric AS decimal, $8::double precision AS number, $9::timestamptz AS stamp", &values).await.unwrap();
-        let native = crate::backend::postgres::pg_row_json::rows_to_values(&rows);
+        let native = crate::backend::postgres::pg_row_json::rows_to_values(&rows).unwrap();
         for (field, value) in [
             "integer", "bytes", "flag", "absent", "text", "document", "decimal", "number", "stamp",
         ]
@@ -231,7 +270,7 @@ mod tests {
         let rows = query(&client, &sql, &params).await.unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(
-            crate::backend::postgres::pg_row_json::rows_to_values(&rows)[0]["payload"],
+            crate::backend::postgres::pg_row_json::rows_to_values(&rows).unwrap()[0]["payload"],
             value!({"key":"value"})
         );
     }

@@ -78,7 +78,7 @@ use zeroship_migrate::schema::query::FkEmission;
 use compio_postgres::{NoTls, Pool};
 use uuid::Uuid;
 use zeroship_data_orm::binding::DbBinding;
-use zeroship_data_sql::value::{value, Value};
+use zeroship_data_sql::value::{Value, value};
 use zeroship_data_v8::backend::ChangeStream;
 
 const CDC_TEST_WORKER_ID: &str = "plugin-db-integration-worker";
@@ -90,7 +90,7 @@ fn test_url() -> String {
 /// The backend handle the unmask entry points now take as a parameter.
 ///
 /// They resolved one themselves, from the isolate's context, until 2026-09-03.
-/// That read is the ADAPTER's and `crud::unmask` is ENGINE, so the resolution
+/// That read is the ADAPTER's and `protection::unmask` is ENGINE, so the resolution
 /// moved to the V8 dispatcher and the value is passed down. These tests drive
 /// the engine directly, with no V8 frame above them, so they make the same call
 /// the dispatcher makes on their behalf in production.
@@ -126,7 +126,7 @@ async fn require_pg() -> String {
             support::sweep_prior_run_residue_once(&url);
             // The transaction orchestrator opens a
             // dedicated client via the Backend trait's
-            // `acquire_dedicated_client`, which reads the URL from the
+            // `fixture_session`, which reads the URL from the
             // per-thread context. Tests that drive the orchestrator directly
             // need the URL installed in the context before the call.
             zeroship_data_v8::set_db_url_for_tests(&url);
@@ -2969,10 +2969,9 @@ async fn c1_setup_requires_publication_and_creates_slot_idempotently() {
     );
 
     // Second call must observe the existing slot and return created=false.
-    let second =
-        zeroship_data_v8::replication::ensure_worker_slot(&pool, app, CDC_TEST_WORKER_ID)
-            .await
-            .unwrap();
+    let second = zeroship_data_v8::replication::ensure_worker_slot(&pool, app, CDC_TEST_WORKER_ID)
+        .await
+        .unwrap();
     assert!(!second.created);
     assert_eq!(second.slot, first.slot);
 
@@ -4071,7 +4070,7 @@ async fn p8a2_supervised_consumer_reconnects_after_kill() {
 fn p8a2_per_app_emit_suppression_integration() {
     use zeroship_core::change_event::ChangeOp;
     use zeroship_data_v8::broker::{
-        emit_local, is_app_suppressed, suppress_app, unsuppress_app, SubscriptionMessage,
+        SubscriptionMessage, emit_local, is_app_suppressed, suppress_app, unsuppress_app,
     };
 
     zeroship_data_v8::broker::drain_current_thread_subscriptions();
@@ -4160,7 +4159,7 @@ fn err_chain(e: &dyn std::error::Error) -> String {
 #[test]
 fn operator_deprovisioning_reuses_one_pool_and_reparses_nothing() {
     use zeroship_data_v8::service::{
-        close_operator_pools, operator_pool_open_count, url_parse_count, DbService, DbServiceConfig,
+        DbService, DbServiceConfig, close_operator_pools, operator_pool_open_count, url_parse_count,
     };
 
     const DELETED_APPS: [&str; 3] = [
@@ -4322,7 +4321,7 @@ async fn require_pgvector(pool: &Pool) {
 /// the absence into a pass.
 #[compio::test]
 async fn vector_search_returns_k_nearest() {
-    use zeroship_data_v8::backend::{PostgresBackend, VectorIndex, VectorMetric};
+    use zeroship_data_v8::backend::{PostgresBackend, VectorMetric};
 
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
@@ -4423,17 +4422,20 @@ async fn vector_search_returns_k_nearest() {
         coll,
         value!({ "embedding": { "type": "vector", "vectorDims": 8 } }),
     );
-    let rows = VectorIndex::vector_search(
+    let rows = zeroship_data_orm::search::Search::vector_search(
         &backend,
-        &DbBinding::cold_start(app),
-        coll,
-        "embedding",
-        &query,
-        10,
-        VectorMetric::Cosine,
-        &zeroship_data_sql::value::Value::Null,
-        &zeroship_data_v8::collection_schema(&DbBinding::cold_start(app), coll)
-            .expect("descriptor slice for the search fixture"),
+        None,
+        zeroship_data_orm::search::VectorSearch {
+            binding: &DbBinding::cold_start(app),
+            collection: coll,
+            column: "embedding",
+            query: &query,
+            k: 10,
+            metric: VectorMetric::Cosine,
+            filter: &zeroship_data_sql::value::Value::Null,
+            schema: &zeroship_data_v8::collection_schema(&DbBinding::cold_start(app), coll)
+                .expect("descriptor slice for the search fixture"),
+        },
     )
     .await
     .unwrap_or_else(|e| panic!("vector_search failed: {e:?}"));
@@ -4491,7 +4493,7 @@ async fn vector_search_returns_k_nearest() {
 #[compio::test]
 async fn pgvector_extension_missing_reports_typed_error() {
     use zeroship_data_orm::error::DbError;
-    use zeroship_data_v8::backend::{PostgresBackend, VectorIndex, VectorMetric};
+    use zeroship_data_v8::backend::{PostgresBackend, VectorMetric};
 
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
@@ -4543,16 +4545,19 @@ async fn pgvector_extension_missing_reports_typed_error() {
     // so the extension error must still be the one that surfaces. If the order
     // ever flipped, this would fail with `collection_not_declared` instead.
     async fn search(backend: &PostgresBackend) -> DbError {
-        VectorIndex::vector_search(
+        zeroship_data_orm::search::Search::vector_search(
             backend,
-            &DbBinding::cold_start("vector_missing"),
-            "any",
-            "any",
-            &[0.0f32; 8],
-            10,
-            VectorMetric::Cosine,
-            &zeroship_data_sql::value::Value::Null,
-            &zeroship_data_sql::value::Value::Null,
+            None,
+            zeroship_data_orm::search::VectorSearch {
+                binding: &DbBinding::cold_start("vector_missing"),
+                collection: "any",
+                column: "any",
+                query: &[0.0f32; 8],
+                k: 10,
+                metric: VectorMetric::Cosine,
+                filter: &zeroship_data_sql::value::Value::Null,
+                schema: &zeroship_data_sql::value::Value::Null,
+            },
         )
         .await
         .expect_err("missing extension must yield a typed error on search")
@@ -4693,7 +4698,7 @@ async fn vector_dimension_mismatch_rejected_at_insert() {
 /// rather than skipping, and no attribute removes this test from the run.
 #[compio::test]
 async fn near_returns_within_radius() {
-    use zeroship_data_v8::backend::{GeoPoint, PostgresBackend, SpatialIndex};
+    use zeroship_data_v8::backend::{GeoPoint, PostgresBackend};
 
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
@@ -4779,16 +4784,19 @@ async fn near_returns_within_radius() {
         url.clone(),
         zeroship_data_v8::isolate_key_source(),
     );
-    let rows = SpatialIndex::spatial_near(
+    let rows = zeroship_data_orm::search::Search::spatial_near(
         &backend,
-        &DbBinding::cold_start(app),
-        coll,
-        "location",
-        london,
-        1000.0,
-        &zeroship_data_sql::value::Value::Null,
         None,
-        &value!({ "location": { "type": "geoPoint" } }),
+        zeroship_data_orm::search::SpatialSearch {
+            binding: &DbBinding::cold_start(app),
+            collection: coll,
+            column: "location",
+            point: london,
+            radius_m: 1000.0,
+            filter: &zeroship_data_sql::value::Value::Null,
+            limit: None,
+            schema: &value!({ "location": { "type": "geoPoint" } }),
+        },
     )
     .await
     .unwrap_or_else(|e| panic!("spatial_near failed: {e:?}"));
@@ -4825,7 +4833,7 @@ async fn near_returns_within_radius() {
 #[compio::test]
 async fn postgis_extension_missing_reports_typed_error() {
     use zeroship_data_orm::error::DbError;
-    use zeroship_data_v8::backend::{GeoPoint, PostgresBackend, SpatialIndex};
+    use zeroship_data_v8::backend::{GeoPoint, PostgresBackend};
 
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
@@ -4875,16 +4883,19 @@ async fn postgis_extension_missing_reports_typed_error() {
     // No descriptor entry, deliberately: the extension probe runs BEFORE the
     // schema resolve, so this must still surface `postgis_extension_missing`.
     async fn near(backend: &PostgresBackend) -> DbError {
-        SpatialIndex::spatial_near(
+        zeroship_data_orm::search::Search::spatial_near(
             backend,
-            &DbBinding::cold_start("postgis_missing"),
-            "any",
-            "any",
-            GeoPoint { lat: 0.0, lng: 0.0 },
-            1000.0,
-            &zeroship_data_sql::value::Value::Null,
             None,
-            &zeroship_data_sql::value::Value::Null,
+            zeroship_data_orm::search::SpatialSearch {
+                binding: &DbBinding::cold_start("postgis_missing"),
+                collection: "any",
+                column: "any",
+                point: GeoPoint { lat: 0.0, lng: 0.0 },
+                radius_m: 1000.0,
+                filter: &zeroship_data_sql::value::Value::Null,
+                limit: None,
+                schema: &zeroship_data_sql::value::Value::Null,
+            },
         )
         .await
         .expect_err("missing PostGIS must yield a typed error on near")
@@ -5052,8 +5063,7 @@ async fn encrypted_column_round_trip_randomised() {
         }
         out
     };
-    let recovered =
-        zeroship_data_v8::encryption::aead::decrypt(&key, &raw, &aad).expect("decrypt");
+    let recovered = zeroship_data_v8::encryption::aead::decrypt(&key, &raw, &aad).expect("decrypt");
     assert_eq!(recovered, plaintext);
     drop(backend);
     release_pg(pool).await;
@@ -5390,7 +5400,7 @@ CREATE TABLE "{app}"."people" ({PG_SYSTEM_COLUMNS},
     // column, and randomised mode binds the row primary key into the AEAD's
     // additional data (`canonical_aad(collection, column, row_pk_bytes)` in
     // zeroship-data-core's `encryption::aad`, stamped on write by
-    // `crud::encryption_pass` and reconstructed on read from the row's `id`).
+    // `protection::encryption_pass` and reconstructed on read from the row's `id`).
     // Storing this ciphertext under a DIFFERENT id and reading it back is a
     // ciphertext-relocation attack, and the AEAD refuses it with
     // `encryption_aead_failed` - correctly. Hard-coding a literal here is what
@@ -5477,7 +5487,7 @@ CREATE TABLE "{app}"."people" ({PG_SYSTEM_COLUMNS},
         .await
         .unwrap();
     assert_eq!(raw.len(), 1);
-    let row = zeroship_data_v8::row_to_value_for_bench(&raw[0]);
+    let row = zeroship_data_v8::row_to_value_for_bench(&raw[0]).unwrap();
 
     let finalized = zeroship_data_v8::finalize_rows_on_read_for_tests(app, "people", vec![row])
         .await
@@ -5703,7 +5713,7 @@ CREATE TABLE "{app}"."people" ({PG_SYSTEM_COLUMNS},
         .await
         .unwrap();
     assert_eq!(raw.len(), 1);
-    let row = zeroship_data_v8::row_to_value_for_bench(&raw[0]);
+    let row = zeroship_data_v8::row_to_value_for_bench(&raw[0]).unwrap();
     let finalized = zeroship_data_v8::finalize_rows_on_read_for_tests(app, "people", vec![row])
         .await
         .expect("read pipeline");
@@ -5787,7 +5797,7 @@ async fn pg_bytea_decoder_preserves_raw_binary_prefix_bytes() {
         )
         .await
         .unwrap();
-    let json = zeroship_data_v8::row_to_value_for_bench(&rows[0]);
+    let json = zeroship_data_v8::row_to_value_for_bench(&rows[0]).unwrap();
     let payload = json
         .get("payload")
         .and_then(Value::as_bytes)
@@ -6839,7 +6849,7 @@ async fn exec_autocommit_query_runs_under_per_app_role() {
 
 #[compio::test]
 async fn vector_search_runs_under_per_app_role_via_rls() {
-    use zeroship_data_v8::backend::{PostgresBackend, VectorIndex, VectorMetric};
+    use zeroship_data_v8::backend::{PostgresBackend, VectorMetric};
 
     let url = require_pg().await;
     let admin_pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
@@ -6903,17 +6913,20 @@ async fn vector_search_runs_under_per_app_role_via_rls() {
         login_url,
         zeroship_data_v8::isolate_key_source(),
     );
-    let rows = VectorIndex::vector_search(
+    let rows = zeroship_data_orm::search::Search::vector_search(
         &backend,
-        &DbBinding::cold_start(app),
-        coll,
-        "embedding",
-        &[1.0, 0.0],
-        1,
-        VectorMetric::Cosine,
-        &Value::Null,
-        &zeroship_data_v8::collection_schema(&DbBinding::cold_start(app), coll)
-            .expect("descriptor slice for the search fixture"),
+        None,
+        zeroship_data_orm::search::VectorSearch {
+            binding: &DbBinding::cold_start(app),
+            collection: coll,
+            column: "embedding",
+            query: &[1.0, 0.0],
+            k: 1,
+            metric: VectorMetric::Cosine,
+            filter: &Value::Null,
+            schema: &zeroship_data_v8::collection_schema(&DbBinding::cold_start(app), coll)
+                .expect("descriptor slice for the search fixture"),
+        },
     )
     .await
     .unwrap_or_else(|e| panic!("vector_search failed: {e:?}"));
@@ -6936,7 +6949,7 @@ async fn vector_search_runs_under_per_app_role_via_rls() {
 
 #[compio::test]
 async fn spatial_near_runs_under_per_app_role_via_rls() {
-    use zeroship_data_v8::backend::{GeoPoint, PostgresBackend, SpatialIndex};
+    use zeroship_data_v8::backend::{GeoPoint, PostgresBackend};
 
     let url = require_pg().await;
     let admin_pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
@@ -7003,27 +7016,23 @@ async fn spatial_near_runs_under_per_app_role_via_rls() {
         login_url,
         zeroship_data_v8::isolate_key_source(),
     );
-    let rows = SpatialIndex::spatial_near(
+    let rows = zeroship_data_orm::search::Search::spatial_near(
         &backend,
-        &DbBinding::cold_start(app),
-        coll,
-        "location",
-        GeoPoint {
-            lat: 51.5074,
-            lng: -0.1278,
+        None,
+        zeroship_data_orm::search::SpatialSearch {
+            binding: &DbBinding::cold_start(app),
+            collection: coll,
+            column: "location",
+            point: GeoPoint {
+                lat: 51.5074,
+                lng: -0.1278,
+            },
+            radius_m: 1000.0,
+            filter: &Value::Null,
+            limit: Some(1),
+            schema: &zeroship_data_v8::collection_schema(&DbBinding::cold_start(app), coll)
+                .unwrap(),
         },
-        1000.0,
-        &Value::Null,
-        Some(1),
-        // The DESCRIPTOR slice, not `Value::Null`. `build_spatial_near` checks
-        // the column against it, so a null hint refuses `location` outright
-        // with `invalid_identifier` and the role fence below is never reached.
-        // This argument was `Value::Null` from the day the test was written
-        // until 2026-09-03; it never showed because the usual test container
-        // carries no PostGIS, and back then the arm skipped rather than
-        // failing. Its vector twin above always passed the descriptor.
-        &zeroship_data_v8::collection_schema(&DbBinding::cold_start(app), coll)
-            .expect("descriptor slice for the spatial fixture"),
     )
     .await
     .unwrap_or_else(|e| panic!("spatial_near failed: {e:?}"));
@@ -7046,7 +7055,7 @@ async fn spatial_near_runs_under_per_app_role_via_rls() {
 
 #[compio::test]
 async fn unmask_fetch_runs_under_per_app_role_via_rls() {
-    use zeroship_data_v8::crud::unmask::{self, UnmaskFieldArgs};
+    use zeroship_data_orm::protection::unmask::{self, UnmaskFieldArgs};
 
     let url = require_pg().await;
     let admin_pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
@@ -7175,7 +7184,7 @@ async fn unmask_fetch_runs_under_per_app_role_via_rls() {
 /// too. The only new thing is the BYTEA raw column.
 #[compio::test]
 async fn unmask_encrypted_column_on_pg_reads_bytea_raw_sibling() {
-    use zeroship_data_v8::crud::unmask::{self, UnmaskFieldArgs};
+    use zeroship_data_orm::protection::unmask::{self, UnmaskFieldArgs};
 
     let url = require_pg().await;
     let admin_pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
@@ -7311,7 +7320,7 @@ async fn unmask_encrypted_column_on_pg_reads_bytea_raw_sibling() {
 /// `pg.pool_handle()` and issued the INSERT on a bare checkout.
 #[compio::test]
 async fn unmask_audit_insert_runs_under_the_per_app_role_not_the_login_role() {
-    use zeroship_data_v8::crud::unmask::{self, UnmaskFieldArgs};
+    use zeroship_data_orm::protection::unmask::{self, UnmaskFieldArgs};
 
     let url = require_pg().await;
     let admin_pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
@@ -7452,27 +7461,12 @@ async fn unmask_audit_insert_runs_under_the_per_app_role_not_the_login_role() {
     release_pg(admin_pool).await;
 }
 
-/// Regression fence for the PG mask-policy arm.
-///
-/// Until 2026-08-27 `dispatch_set_mask_policy` wrote through
-/// `set_mask_policy` and `dispatch_unmask` re-read through
-/// `get_mask_policy`, both definer-rights routines in the platform-owned
-/// system schema. Neither had an installer, so on PG the write failed
-/// outright and every unmask on an app with no cached policy died with an
-/// undefined-schema error instead of default-denying. The durable PG store was
-/// deleted rather than rehomed: the policy the creator declares in
-/// source is installed straight into the per-isolate cache at boot, and
-/// that cache is the only reader.
-///
-/// This test FAILS BEFORE THAT CHANGE at the
-/// `dispatch_set_mask_policy` call, and it is the only live-PG coverage
-/// of the declared-policy authorization path -- the sibling
-/// `unmask_fetch_runs_under_per_app_role_via_rls` exercises the
-/// no-policy `auto` fallback, not a declared policy.
+/// The startup declaration authorizes unmasking on PostgreSQL without a
+/// database policy store. An undeclared role remains denied.
 #[compio::test]
 async fn pg_declared_mask_policy_authorizes_unmask_without_durable_store() {
-    use zeroship_data_v8::crud::mask_policy;
-    use zeroship_data_v8::crud::unmask::{self, UnmaskFieldArgs};
+    use zeroship_data_orm::protection::mask_policy;
+    use zeroship_data_orm::protection::unmask::{self, UnmaskFieldArgs};
 
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
@@ -7525,14 +7519,8 @@ async fn pg_declared_mask_policy_authorizes_unmask_without_durable_store() {
     // The boot-time install `installSchema` performs. Before the fix
     // this issued `SELECT set_mask_policy(...)` against the platform-owned
     // system schema and failed here on every database.
-    mask_policy::dispatch_set_mask_policy(
-        // The backend the V8 dispatcher resolves before calling the installer.
-        &unmask_backend().await,
-        app,
-        value!({ "support": ["spi"] }),
-    )
-    .await
-    .expect("setMaskPolicy must install the declared policy on PG");
+    mask_policy::install_mask_policy(&DbBinding::cold_start(app), value!({ "support": ["spi"] }))
+        .expect("setMaskPolicy must install the declared policy on PG");
 
     // A role the declared policy grants reads through.
     let granted = unmask::dispatch_unmask(
@@ -7653,7 +7641,7 @@ async fn wal_connection_stays_platform_role() {
 // ---------------------------------------------------------------------------
 
 use zeroship_data_v8::backend::BackendHandle;
-use zeroship_data_v8::drop_namespace::{drop_namespace, DropNamespaceOpts, DropNamespaceOutcome};
+use zeroship_data_v8::drop_namespace::{DropNamespaceOpts, DropNamespaceOutcome, drop_namespace};
 
 /// Build a `BackendHandle::Postgres` over a fresh `PostgresBackend` for
 /// the drop-namespace tests. (`PostgresBackend` is already imported at
@@ -8267,7 +8255,7 @@ fn direct_connection_sites_do_not_grow() {
 // ---------------------------------------------------------------------------
 // `PoolConnection`: the transaction connection is a pool checkout
 //
-// Until 2026-08-27 `acquire_dedicated_client` called
+// Until 2026-08-27 `fixture_session` called
 // `compio_postgres::connect` directly and spawned a detached task per
 // connection. It never touched the pool, so the concurrent-transaction ceiling
 // was UNBOUNDED - a worker multiplexing ~200 apps that each open a transaction
@@ -8292,9 +8280,9 @@ async fn a_dedicated_client_is_a_pool_checkout_and_returns_on_drop() {
     let created_before = pool.metrics().connections_created.get();
 
     let client = {
-        use zeroship_data_v8::backend::SqlExecutor as _;
+        use zeroship_data_orm::fixtures::DatabaseFixture;
         backend
-            .acquire_dedicated_client("app_pool_probe")
+            .fixture_session("app_pool_probe")
             .await
             .expect("dedicated client")
     };
@@ -8346,9 +8334,9 @@ async fn concurrent_dedicated_clients_are_bounded_by_the_pool() {
         zeroship_data_v8::isolate_key_source(),
     );
 
-    use zeroship_data_v8::backend::SqlExecutor as _;
+    use zeroship_data_orm::fixtures::DatabaseFixture;
     let first = backend
-        .acquire_dedicated_client("app_pool_probe")
+        .fixture_session("app_pool_probe")
         .await
         .expect("first dedicated client");
 
@@ -8357,7 +8345,7 @@ async fn concurrent_dedicated_clients_are_bounded_by_the_pool() {
     // Conservative policy, and OWED a real decision: queue on the pool's
     // acquire timeout rather than refuse immediately, no per-app fairness, and
     // the ceiling is whatever the shared data pool is sized to.
-    let second = backend.acquire_dedicated_client("app_pool_probe").await;
+    let second = backend.fixture_session("app_pool_probe").await;
     let err = second.expect_err(
         "a second dedicated client must be bounded by the pool, not opened \
          directly - an unbounded model is how one worker exhausts max_connections",
@@ -8374,8 +8362,15 @@ async fn concurrent_dedicated_clients_are_bounded_by_the_pool() {
     // And the ceiling is a queue, not a wall: once the lease returns, the next
     // checkout succeeds.
     let third = backend
-        .acquire_dedicated_client("app_pool_probe")
+        .fixture_session("app_pool_probe")
         .await
         .expect("checkout after the first lease returned");
     drop(third);
 }
+
+#[cfg(any(test, feature = "test-helpers"))]
+#[allow(unused_imports)]
+use zeroship_data_orm::fixtures::DatabaseFixture;
+
+#[allow(unused_imports)]
+use zeroship_data_orm::search::Search;

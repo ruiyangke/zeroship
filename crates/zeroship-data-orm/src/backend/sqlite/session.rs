@@ -186,7 +186,7 @@ pub enum TypedCell {
 }
 
 /// A typed row + column names, returned by the `QueryTyped` command
-/// variant. Consumers: [`zeroship_data_orm::storage::VectorIndex::vector_search`]
+/// variant. Consumers: [`crate::search::Search::vector_search`]
 /// (vec0 JOIN result) and `spatial_near`.
 ///
 /// **`pub`, and it must stay so even though NOTHING NAMES IT outside this
@@ -617,6 +617,7 @@ impl SqliteSession {
         app_id: Option<&str>,
         packet_tx: Option<CommitSender>,
     ) -> Result<Self, DbError> {
+        super::validate_database_path(db_path)?;
         // Bound the queue at 64 in-flight commands. The single actor loop
         // means there is no parallelism downstream; a bigger queue just delays
         // backpressure without buying throughput, so the depth is picked to
@@ -721,7 +722,7 @@ impl SqliteSession {
     /// below, so they are stated here rather than discovered - the Postgres
     /// half writes its equivalents into
     /// `zeroship_data_orm::backend::postgres::PostgresBackend`'s
-    /// `acquire_dedicated_client`, and these are this half's.
+    /// `fixture_session`, and these are this half's.
     ///
     /// 1. **Exhaustion: refuse immediately, do not queue.** A second
     ///    `db.transaction()` *for the same app* gets
@@ -843,11 +844,21 @@ impl SqliteSession {
         sql: &str,
         params: &[&str],
     ) -> Result<u64, DbError> {
+        let params: Vec<_> = params.iter().map(|value| Value::from(*value)).collect();
+        self.exec_values_on(reservation, sql, params).await
+    }
+
+    async fn exec_values_on(
+        &self,
+        reservation: &Arc<Reservation>,
+        sql: &str,
+        params: Vec<Value>,
+    ) -> Result<u64, DbError> {
         let (reply_tx, reply_rx) = flume::bounded::<Result<u64, DbError>>(1);
         self.send(Command::Exec {
             reservation: Arc::clone(reservation),
             sql: sql.to_string(),
-            params: params.iter().map(|s| Value::from(*s)).collect(),
+            params,
             reply: reply_tx,
         })
         .await?;
@@ -1169,7 +1180,7 @@ async fn recv_reply<T>(rx: flume::Receiver<T>) -> Result<T, DbError> {
 /// Clone-cheap handle to a [`SqliteSession`], optionally bound to a
 /// transaction reservation.
 ///
-/// **`SqlExecutor::Client` association**: `SqliteBackend` reports this type as
+/// **`DatabaseFixture::Client` association**: `SqliteBackend` reports this type as
 /// its `Client`. A handle carrying a [`TxLease`] routes every command onto
 /// `tx_conn` under that reservation; a handle without one mints a fresh
 /// autocommit reservation per command and routes onto `op_conn`. That is the
@@ -1236,6 +1247,13 @@ impl SqliteSessionHandle {
         self.session.exec_on(&self.reservation(), sql, params).await
     }
 
+    /// Execute a command without converting native parameters through text.
+    pub async fn exec_values(&self, sql: &str, params: &[Value]) -> Result<u64, DbError> {
+        self.session
+            .exec_values_on(&self.reservation(), sql, params.to_vec())
+            .await
+    }
+
     pub fn try_exec_detached(&self, sql: &str, params: &[&str]) -> Result<(), DbError> {
         self.session
             .try_exec_detached(&self.reservation(), sql, params)
@@ -1271,9 +1289,8 @@ impl SqliteSessionHandle {
 
     /// Forward a `query` through the underlying session.
     ///
-    /// Public and ungated. `crate::backend::sqlite::crud::unmask::dispatch_unmask` runs through
-    /// here on the production path; the integration target uses the same method
-    /// to read PRAGMA values back without reaching into the actor surface.
+    /// Diagnostics can read text results without reaching into the actor.
+    /// ORM operations use `query_typed` to preserve native cell types.
     pub async fn query(&self, sql: &str, params: &[&str]) -> Result<Vec<Row>, DbError> {
         self.session
             .query_on(&self.reservation(), sql, params)
@@ -2416,7 +2433,7 @@ fn run_query(conn: &Connection, sql: &str, params: &[Value]) -> Result<Vec<Row>,
             // NULL -> None; everything else -> Some(...).
             //
             // The Query path is consumed by PRAGMA inspection and by the
-            // SchemaIntrospect PRAGMA walk; both produce INTEGER + TEXT, never
+            // Catalog PRAGMA walk; both produce INTEGER + TEXT, never
             // BLOB. Refuse accidental binary reads loudly so callers route them
             // through `query_typed` instead of silently receiving a placeholder
             // string that cannot round-trip.
@@ -2665,7 +2682,9 @@ mod tests {
                 .unwrap();
         }
 
-        let conn = Connection::open_in_memory().unwrap();
+        let conn_file = tempfile::NamedTempFile::new().unwrap();
+
+        let conn = Connection::open(conn_file.path()).unwrap();
         run_attach(&conn, "a", app_a_path.to_str().unwrap()).unwrap();
         run_attach(&conn, "b", app_b_path.to_str().unwrap()).unwrap();
 
@@ -2684,7 +2703,8 @@ mod tests {
         // rusqlite's prepare. The path below does not exist, so a correctly
         // escaped statement fails at open-time instead - a different error
         // class, which is what we assert on.
-        let conn = Connection::open_in_memory().unwrap();
+        let conn_file = tempfile::NamedTempFile::new().unwrap();
+        let conn = Connection::open(conn_file.path()).unwrap();
         conn.execute_batch("CREATE TABLE t (x);").unwrap();
 
         let bad_path = "/nonexistent/dir/x'y.sqlite";
@@ -2718,8 +2738,11 @@ mod tests {
                 .unwrap();
         }
 
-        let op = Connection::open_in_memory().unwrap();
-        let tx = Connection::open_in_memory().unwrap();
+        let op_file = tempfile::NamedTempFile::new().unwrap();
+
+        let op = Connection::open(op_file.path()).unwrap();
+        let tx_file = tempfile::NamedTempFile::new().unwrap();
+        let tx = Connection::open(tx_file.path()).unwrap();
         run_attach(&op, "app_demo", live_path.to_str().unwrap()).unwrap();
         run_attach(&tx, "app_demo", live_path.to_str().unwrap()).unwrap();
         assert_eq!(count_rows(&op, "\"app_demo\"", "t"), 1);
@@ -2757,8 +2780,11 @@ mod tests {
                 .unwrap();
         }
 
-        let op = Connection::open_in_memory().unwrap();
-        let tx = Connection::open_in_memory().unwrap();
+        let op_file = tempfile::NamedTempFile::new().unwrap();
+
+        let op = Connection::open(op_file.path()).unwrap();
+        let tx_file = tempfile::NamedTempFile::new().unwrap();
+        let tx = Connection::open(tx_file.path()).unwrap();
 
         let result = run_reattach_file(
             &op,
@@ -2777,7 +2803,8 @@ mod tests {
 
     #[test]
     fn run_query_rejects_blob_cells_on_untyped_path() {
-        let conn = Connection::open_in_memory().unwrap();
+        let conn_file = tempfile::NamedTempFile::new().unwrap();
+        let conn = Connection::open(conn_file.path()).unwrap();
         conn.execute_batch("CREATE TABLE t (payload BLOB);")
             .unwrap();
         conn.execute("INSERT INTO t (payload) VALUES (X'0102')", [])

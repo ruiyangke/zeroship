@@ -118,20 +118,20 @@ protection switch whose false arm fails open:
 
 - `runtime_schema_for` returns `Ok(None)` before consulting either cache or the
   live catalog when the app/collection mark is absent
-  (`526b19e37:crates/zeroship-data-v8/src/crud/introspect_schema.rs:64-78`).
+  (`526b19e37:crates/zeroship-data-v8/src/crud/introspect_schema.rs`).
 - Creator code can mint a native collection for any non-empty name; there is no
-  registration or descriptor check (`526b19e37:crates/zeroship-data-v8/src/v8_classes/db.rs:110-139`).
+  registration or descriptor check (`526b19e37:crates/zeroship-data-v8/src/v8_classes/db.rs`).
 - The find path gets its SQL projection from the separate declared-schema cache
-  (`526b19e37:crates/zeroship-data-v8/src/crud/mod.rs:676-697`). With `schema=None`, the
+  (`526b19e37:crates/zeroship-data-v8/src/crud/mod.rs`). With `schema=None`, the
   query contract emits `SELECT *`; only a present mask schema substitutes
   `"<col>_masked" AS "<col>"` (`526b19e37:crates/zeroship-schema/src/query.rs:2911-2928`,
   `526b19e37:crates/zeroship-schema/src/query.rs:3000-3012`). For a mask-only column, that
   exposes the plaintext parent instead of the masked sibling.
 - The post-read path performs decryption/mask wrapping only inside the
-  `Some(schema)` arms (`526b19e37:crates/zeroship-data-v8/src/crud/read_pipeline.rs:62-100`).
+  `Some(schema)` arms (`526b19e37:crates/zeroship-data-v8/src/crud/read_pipeline.rs`).
   The write pipeline likewise turns absent metadata into a no-op
-  (`526b19e37:crates/zeroship-data-v8/src/crud/write_pipeline.rs:111-115`,
-  `526b19e37:crates/zeroship-data-v8/src/crud/write_pipeline.rs:204-221`).
+  (`526b19e37:crates/zeroship-data-v8/src/crud/write_pipeline.rs`,
+  `526b19e37:crates/zeroship-data-v8/src/crud/write_pipeline.rs`).
 
 Consequently a raw/schema-less app that knows the name of an already migrated
 masked table can bypass the protected projection, and an unregistered write can
@@ -164,12 +164,12 @@ are supported by the public migration authoring path
 relation shape.
 
 The new helper blindly caches every key in `LiveSchema.tables`
-(`526b19e37:crates/zeroship-data-v8/src/crud/introspect_schema.rs:133-151`), while
+(`526b19e37:crates/zeroship-data-v8/src/crud/introspect_schema.rs`), while
 `LiveSchema` carries no relkind/partition-child field with which to correct the
 enumeration (`526b19e37:crates/zeroship-schema/src/diff.rs:201-218`). A logical table with P
 partitions therefore consumes P cache entries for physical tables no creator
 registers, omits the creator-visible parent, and returns no runtime metadata for
-the parent (`526b19e37:crates/zeroship-data-v8/src/crud/introspect_schema.rs:178-195`).
+the parent (`526b19e37:crates/zeroship-data-v8/src/crud/introspect_schema.rs`).
 For an encrypted partitioned parent this returns no decryption/type metadata; for
 an unregistered parent the fail-open path in finding 3 still applies. It also
 causes the repeated catalog path in finding 5.
@@ -182,19 +182,19 @@ an expected registered/declared relation cannot be enumerated.
 ## 5. P1: absent and concurrent misses still repeat the whole schema walk
 
 The patch removes the requested-key negative cache. It computes the requested
-`schema` (`526b19e37:crates/zeroship-data-v8/src/crud/introspect_schema.rs:100-104`) but
+`schema` (`526b19e37:crates/zeroship-data-v8/src/crud/introspect_schema.rs`) but
 only inserts names that exist in `live.tables`
-(`526b19e37:crates/zeroship-data-v8/src/crud/introspect_schema.rs:133-151`). The cache API
+(`526b19e37:crates/zeroship-data-v8/src/crud/introspect_schema.rs`). The cache API
 explicitly represents `Some(None)` as a current negative result
-(`526b19e37:crates/zeroship-data-v8/src/context.rs:621-659`). Before `e8218c4c3`, the miss
+(`526b19e37:crates/zeroship-data-v8/src/context.rs`). Before `e8218c4c3`, the miss
 path inserted `schema.clone()` for the requested key even when it was `None`
-(`e8218c4c3^:crates/zeroship-data-v8/src/crud/introspect_schema.rs:104-110`).
+(`e8218c4c3^:crates/zeroship-data-v8/src/crud/introspect_schema.rs`).
 A registered but absent table, partial restore, drift, or partitioned parent now
 pays the full walk on every operation. An unregistered name exits at the earlier
 gate instead.
 
 There is also no singleflight. Cache lookup precedes the await and publication
-follows it (`526b19e37:crates/zeroship-data-v8/src/crud/introspect_schema.rs:86-122`), so
+follows it (`526b19e37:crates/zeroship-data-v8/src/crud/introspect_schema.rs`), so
 all simultaneous cold operations can observe the same miss. Native operations
 are concurrently polled in `FuturesUnordered`
 (`526b19e37:crates/zeroship-runtime/src/core/runtime.rs:174-191`,
@@ -206,7 +206,7 @@ Finally, one `read_live_schema` is three namespace-wide database calls, not one
 read: columns (`526b19e37:crates/zeroship-schema/src/diff.rs:620-649`), foreign keys
 (`526b19e37:crates/zeroship-schema/src/diff.rs:763-788`), and indexes
 (`526b19e37:crates/zeroship-schema/src/diff.rs:816-837`). Runtime conversion consults only
-`live.tables` (`526b19e37:crates/zeroship-data-v8/src/crud/introspect_schema.rs:178-195`),
+`live.tables` (`526b19e37:crates/zeroship-data-v8/src/crud/introspect_schema.rs`),
 so both FK/index result sets and most column-diff metadata are discarded. The
 column query still pays the per-column correlated volatility subquery
 (`526b19e37:crates/zeroship-schema/src/diff.rs:620-631`). A runtime-specific typed facts
@@ -216,25 +216,25 @@ the migration diff result.
 ## 6. P0/correctness: deploy and registration identity are thread-global, so current and pinned runtimes contaminate each other
 
 Names in this code call the state “per-isolate,” but its sole owner is one
-`thread_local!` `IsolateDbContext` (`526b19e37:crates/zeroship-data-v8/src/context.rs:952-957`).
+`thread_local!` `IsolateDbContext` (`526b19e37:crates/zeroship-data-v8/src/context.rs`).
 Current and deploy-pinned runtimes intentionally coexist on one thread under
 different hashes (`526b19e37:crates/zeroship-worker/src/cache.rs:21-39`,
 `526b19e37:crates/zeroship-worker/src/cache.rs:524-573`). Yet:
 
 - `deploy_tokens` is only `app_id -> token`
-  (`526b19e37:crates/zeroship-data-v8/src/context.rs:281-296`). Every runtime mints its DB
-  wrapper by overwriting that one entry (`526b19e37:crates/zeroship-data-v8/src/v8_classes/db.rs:313-330`,
-  `526b19e37:crates/zeroship-data-v8/src/context.rs:664-684`).
+  (`526b19e37:crates/zeroship-data-v8/src/context.rs`). Every runtime mints its DB
+  wrapper by overwriting that one entry (`526b19e37:crates/zeroship-data-v8/src/v8_classes/db.rs`,
+  `526b19e37:crates/zeroship-data-v8/src/context.rs`).
 - `runtime_schema_for` reads that shared last-writer-wins token, not the active
-  runtime's identity (`526b19e37:crates/zeroship-data-v8/src/crud/introspect_schema.rs:80-90`).
+  runtime's identity (`526b19e37:crates/zeroship-data-v8/src/crud/introspect_schema.rs`).
 - `registered_models` is keyed only by app and collection
-  (`526b19e37:crates/zeroship-data-v8/src/context.rs:134-136`,
-  `526b19e37:crates/zeroship-data-v8/src/context.rs:556-568`); its only remover is
-  test/helper-gated (`526b19e37:crates/zeroship-data-v8/src/context.rs:570-578`).
+  (`526b19e37:crates/zeroship-data-v8/src/context.rs`,
+  `526b19e37:crates/zeroship-data-v8/src/context.rs`); its only remover is
+  test/helper-gated (`526b19e37:crates/zeroship-data-v8/src/context.rs`).
 - Registration fast-returns on that stale mark before refreshing the declared
-  schema (`526b19e37:crates/zeroship-data-v8/src/register_model/mod.rs:71-104`), even
+  schema (`526b19e37:crates/zeroship-data-v8/src/register_model/mod.rs`), even
   though the declared cache holds information live introspection cannot recover,
-  including typed-id prefixes (`526b19e37:crates/zeroship-data-v8/src/register_model/mod.rs:152-166`).
+  including typed-id prefixes (`526b19e37:crates/zeroship-data-v8/src/register_model/mod.rs`).
 
 If an old pinned runtime is minted last, current-runtime operations use the old
 token and can consume or repopulate old-token metadata; if the current runtime is
@@ -246,13 +246,13 @@ be recovered from thread-global app state.
 
 The SQLite branch does not execute the new populate-all helper: absence of a PG
 pool returns the declared `schema_for` directly
-(`526b19e37:crates/zeroship-data-v8/src/crud/introspect_schema.rs:93-98`,
-`526b19e37:crates/zeroship-data-v8/src/crud/introspect_schema.rs:154-161`). Thus
+(`526b19e37:crates/zeroship-data-v8/src/crud/introspect_schema.rs`,
+`526b19e37:crates/zeroship-data-v8/src/crud/introspect_schema.rs`). Thus
 `e8218c4c3` does not directly regress its catalog behavior. It leaves SQLite on
 the same thread-global stale registration/schema maps; the early registration
 return also skips the SQLite attach path that otherwise runs later in that
-dispatch (`526b19e37:crates/zeroship-data-v8/src/register_model/mod.rs:79-104`,
-`526b19e37:crates/zeroship-data-v8/src/register_model/mod.rs:173-185`). A changed
+dispatch (`526b19e37:crates/zeroship-data-v8/src/register_model/mod.rs`,
+`526b19e37:crates/zeroship-data-v8/src/register_model/mod.rs`). A changed
 SQLite/HMR schema can therefore keep the prior deploy's metadata.
 
 The plugin-sharing commit does not supply the missing ownership boundary. Its
@@ -260,10 +260,10 @@ prototype cache is itself per-thread (`526b19e37:crates/zeroship-worker/src/cach
 whereas SC-5 specifies one process-wide `Arc<DbService>`
 (`docs/proposals/2026-08-26-sc5-service-ownership.md:31-47`).
 The object it now reuses owns only URL, worker-id, and meter configuration
-(`526b19e37:crates/zeroship-data-v8/src/lib.rs:310-321`); registration merely stamps the
-already shared TLS context (`526b19e37:crates/zeroship-data-v8/src/lib.rs:360-395`), and
+(`526b19e37:crates/zeroship-data-v8/src/lib.rs`); registration merely stamps the
+already shared TLS context (`526b19e37:crates/zeroship-data-v8/src/lib.rs`), and
 that context still opens its one lazy backend/pool
-(`526b19e37:crates/zeroship-data-v8/src/lib.rs:845-897`). Thus this commit reduces
+(`526b19e37:crates/zeroship-data-v8/src/lib.rs`). Thus this commit reduces
 per-runtime plugin/vector/config allocation, but it does not change backend or
 metadata-cache cardinality and cannot be counted as the SC-5 ownership cutover.
 
@@ -309,16 +309,16 @@ The current “four maps” census also omits `registered_models`: the proposal 
 only schemas, introspected schemas, deploy tokens, and mask policies
 (`docs/proposals/2026-08-26-runtime-db-binding-design.md:1109-1124`), while the
 fifth app/collection history set is declared at
-`526b19e37:crates/zeroship-data-v8/src/context.rs:134-136` and has no production removal
-(`526b19e37:crates/zeroship-data-v8/src/context.rs:564-578`).
+`526b19e37:crates/zeroship-data-v8/src/context.rs` and has no production removal
+(`526b19e37:crates/zeroship-data-v8/src/context.rs`).
 
 ## 8. P1: the 34-byte serialization figure is not a memory measurement; a local allocator probe was 17–19x
 
 `measure_cached_entry_size` serializes an `Option<Value>` and prints its length;
 it asserts nothing and measures no live allocation
-(`526b19e37:crates/zeroship-data-v8/src/crud/introspect_schema.rs:417-444`). The fixture is
+(`526b19e37:crates/zeroship-data-v8/src/crud/introspect_schema.rs`). The fixture is
 one collection of text-only fields with no encryption or mask facets
-(`526b19e37:crates/zeroship-data-v8/src/crud/introspect_schema.rs:424-438`). The workspace
+(`526b19e37:crates/zeroship-data-v8/src/crud/introspect_schema.rs`). The workspace
 enables serde_json `preserve_order` (`526b19e37:Cargo.toml:53`), so object maps carry
 `IndexMap` storage, not a compact serialized-object representation.
 
@@ -346,8 +346,8 @@ still floors. They exclude the outer `introspected_schemas` bucket, owned
 app/collection key, deploy-token `String`, `HashMap` spare capacity, `Arc`/binding
 overhead in the proposed shape, allocator-arena fragmentation, the transient
 `LiveSchema`, and peak memory while values are cloned. Those omitted fields are
-visible in the actual cache layout (`526b19e37:crates/zeroship-data-v8/src/context.rs:257-312`)
-and the hit path deep-clones the payload (`526b19e37:crates/zeroship-data-v8/src/context.rs:632-643`).
+visible in the actual cache layout (`526b19e37:crates/zeroship-data-v8/src/context.rs`)
+and the hit path deep-clones the payload (`526b19e37:crates/zeroship-data-v8/src/context.rs`).
 
 I would not set any bound from 34 B/column or from the isolated numbers above.
 Measure the final typed `LiveAppSchemaFacts` in the
@@ -362,9 +362,9 @@ maximum. Then enforce both an entry ceiling and a byte ceiling.
 
 `cached_schemas_for_app` formats an app prefix, scans every entry of the global
 per-thread `schemas` map, and deep-clones every matching `serde_json::Value`
-(`526b19e37:crates/zeroship-data-v8/src/context.rs:687-707`). Every transaction calls it,
+(`526b19e37:crates/zeroship-data-v8/src/context.rs`). Every transaction calls it,
 then immediately discards the cloned schemas and retains only collection names
-(`526b19e37:crates/zeroship-data-v8/src/v8_classes/transaction.rs:66-88`). Because that
+(`526b19e37:crates/zeroship-data-v8/src/v8_classes/transaction.rs`). Because that
 map has no eviction and spans all isolates on the thread, transaction-start time
 is O(total collections ever seen on the thread), not O(collections in the active
 app), with avoidable deep clones. At million-app history it adds a million-entry
@@ -407,9 +407,9 @@ while holding it (`526b19e37:crates/zeroship-metering/src/meter.rs:170-189`). DB
 then acquire a per-app `Mutex<HashMap<...>>` and allocate the metric-name String
 on every increment (`526b19e37:crates/zeroship-metering/src/meter.rs:69-92`). Plugin-db also
 constructs an owned-app-id `MeterHandle` for each emission
-(`526b19e37:crates/zeroship-data-v8/src/context.rs:433-440`,
+(`526b19e37:crates/zeroship-data-v8/src/context.rs`,
 `526b19e37:crates/zeroship-metering/src/lib.rs:55-81`,
-`526b19e37:crates/zeroship-data-v8/src/exec.rs:75-85`).
+`526b19e37:crates/zeroship-data-v8/src/exec.rs`).
 
 Every drain takes the global write lock, walks every ever-touched app, and removes
 none (`526b19e37:crates/zeroship-metering/src/meter.rs:205-254`). It runs on the default
@@ -426,23 +426,23 @@ and reclaim inactive zero counter sets after a race-safe drain.
 ## 12. P0/security: the encryption key cache is another unbounded app cache and resolves per cell
 
 `KeyStore` states that each `(app_id, key_id)` remains for its entire lifetime
-(`526b19e37:crates/zeroship-data-v8/src/encryption/keys.rs:48-55`) and implements that as
+(`526b19e37:crates/zeroship-data-v8/src/encryption/keys.rs`) and implements that as
 an unbounded owned-string `HashMap`
-(`526b19e37:crates/zeroship-data-v8/src/encryption/keys.rs:253-272`). Even a hit allocates
-two temporary Strings and clones the key (`526b19e37:crates/zeroship-data-v8/src/encryption/keys.rs:316-329`);
-misses insert permanently (`526b19e37:crates/zeroship-data-v8/src/encryption/keys.rs:350-355`).
+(`526b19e37:crates/zeroship-data-v8/src/encryption/keys.rs`). Even a hit allocates
+two temporary Strings and clones the key (`526b19e37:crates/zeroship-data-v8/src/encryption/keys.rs`);
+misses insert permanently (`526b19e37:crates/zeroship-data-v8/src/encryption/keys.rs`).
 Each `AeadKey` retains 64 bytes of key material before strings/map overhead and is
-zeroized only on drop (`526b19e37:crates/zeroship-data-v8/src/encryption/aead.rs:39-53`).
-The store belongs to the backend (`526b19e37:crates/zeroship-data-v8/src/backend/postgres.rs:35-49`,
-`526b19e37:crates/zeroship-data-v8/src/backend/postgres.rs:110-121`), which lives in the
+zeroized only on drop (`526b19e37:crates/zeroship-data-v8/src/encryption/aead.rs`).
+The store belongs to the backend (`526b19e37:crates/zeroship-data-v8/src/backend/postgres.rs`,
+`526b19e37:crates/zeroship-data-v8/src/backend/postgres.rs`), which lives in the
 thread-local DB context until backend reset/thread exit, not isolate eviction
-(`526b19e37:crates/zeroship-data-v8/src/context.rs:445-480`,
-`526b19e37:crates/zeroship-data-v8/src/context.rs:952-957`).
+(`526b19e37:crates/zeroship-data-v8/src/context.rs`,
+`526b19e37:crates/zeroship-data-v8/src/context.rs`).
 
 Reads invoke key resolution per encrypted column per returned row
-(`526b19e37:crates/zeroship-data-v8/src/crud/read_pipeline.rs:352-387`,
-`526b19e37:crates/zeroship-data-v8/src/crud/encryption_pass.rs:275-346`); writes resolve
-per encrypted field (`526b19e37:crates/zeroship-data-v8/src/crud/encryption_pass.rs:174-214`).
+(`526b19e37:crates/zeroship-data-v8/src/crud/read_pipeline.rs`,
+`526b19e37:crates/zeroship-data-v8/src/protection/encryption_pass.rs`); writes resolve
+per encrypted field (`526b19e37:crates/zeroship-data-v8/src/protection/encryption_pass.rs`).
 That is at least two key-lookup String allocations and one 64-byte key clone per
 encrypted cell, plus permanent tenant-key retention for every encrypted app ever
 seen on the thread.
@@ -456,17 +456,17 @@ the independent byte/entry bound remains the backstop.
 
 On every registered DB operation, the warm path formats an app/collection key,
 clones the deploy-token `String`, and deep-clones the cached `serde_json::Value`
-(`526b19e37:crates/zeroship-data-v8/src/context.rs:558-561`,
-`526b19e37:crates/zeroship-data-v8/src/context.rs:632-643`,
-`526b19e37:crates/zeroship-data-v8/src/context.rs:675-684`). Reads and writes call this
-resolver per operation (`526b19e37:crates/zeroship-data-v8/src/crud/read_pipeline.rs:62-70`,
-`526b19e37:crates/zeroship-data-v8/src/crud/write_pipeline.rs:111-115`). A projected read
+(`526b19e37:crates/zeroship-data-v8/src/context.rs`,
+`526b19e37:crates/zeroship-data-v8/src/context.rs`,
+`526b19e37:crates/zeroship-data-v8/src/context.rs`). Reads and writes call this
+resolver per operation (`526b19e37:crates/zeroship-data-v8/src/crud/read_pipeline.rs`,
+`526b19e37:crates/zeroship-data-v8/src/crud/write_pipeline.rs`). A projected read
 then retains schema fields with `fields.iter().any(...)`, which is O(schema width
-x projection width) (`526b19e37:crates/zeroship-data-v8/src/crud/read_pipeline.rs:110-118`).
+x projection width) (`526b19e37:crates/zeroship-data-v8/src/crud/read_pipeline.rs`).
 Write-stage construction independently scans the same schema four times
-(`526b19e37:crates/zeroship-data-v8/src/crud/write_pipeline.rs:184-201`). Update/upsert
+(`526b19e37:crates/zeroship-data-v8/src/crud/write_pipeline.rs`). Update/upsert
 route decisions can resolve it once before the main write pipeline resolves it
-again (`526b19e37:crates/zeroship-data-v8/src/crud/write_pipeline.rs:359-383`).
+again (`526b19e37:crates/zeroship-data-v8/src/crud/write_pipeline.rs`).
 
 Store immutable typed metadata behind `Rc`/`Arc`, use structured/nested keys that
 support borrowed lookup, precompute facet flags and field indexes, and pass one
@@ -511,8 +511,8 @@ the same app.
 
 1. **`one_read_populates_every_collection` bypasses the production path.** It
    constructs a `LiveSchema` and directly calls `cache_every_collection`
-   (`526b19e37:crates/zeroship-data-v8/src/crud/introspect_schema.rs:339-363`). Replacing
-   the production call at `526b19e37:crates/zeroship-data-v8/src/crud/introspect_schema.rs:120-122`
+   (`526b19e37:crates/zeroship-data-v8/src/crud/introspect_schema.rs`). Replacing
+   the production call at `526b19e37:crates/zeroship-data-v8/src/crud/introspect_schema.rs`
    with requested-only caching—or deleting the call while leaving the helper
    dead—keeps the test green. Its outer `.is_some()` also passes if every table is
    incorrectly cached as `None`. It needs a counting introspection seam that
@@ -521,27 +521,27 @@ the same app.
 
 2. **`one_read_stamps_one_token` cannot exercise the race it describes.** It
    passes a constant token into a fresh local context
-   (`526b19e37:crates/zeroship-data-v8/src/crud/introspect_schema.rs:385-414`); there is no
+   (`526b19e37:crates/zeroship-data-v8/src/crud/introspect_schema.rs`); there is no
    `mint_db`, shared TLS context, await, concurrent current/pinned runtime, or
    deploy transition. It stays green when the last-writer-wins token bug in
    finding 6 exists.
 
 3. **The internal-table arm covers only one of the two production prefixes.**
    Production skips `__zeroship` and `__zs_`
-   (`526b19e37:crates/zeroship-data-v8/src/crud/introspect_schema.rs:139-145`), but
+   (`526b19e37:crates/zeroship-data-v8/src/crud/introspect_schema.rs`), but
    `internal_tables_are_not_cached_as_collections` supplies only a
    `__zeroship_...` fixture
-   (`526b19e37:crates/zeroship-data-v8/src/crud/introspect_schema.rs:365-382`). Deleting
+   (`526b19e37:crates/zeroship-data-v8/src/crud/introspect_schema.rs`). Deleting
    the `__zs_` exclusion leaves it green.
 
 4. **`missing_collection_is_none` cannot detect the lost negative cache.** It
    only calls `build_runtime_schema`
-   (`526b19e37:crates/zeroship-data-v8/src/crud/introspect_schema.rs:446-450`); it never
+   (`526b19e37:crates/zeroship-data-v8/src/crud/introspect_schema.rs`); it never
    looks up the cache twice or counts catalog reads.
 
 5. **`measure_cached_entry_size` cannot fail on growth.** It is explicitly a
    print-only test with no assertion
-   (`526b19e37:crates/zeroship-data-v8/src/crud/introspect_schema.rs:417-444`). A
+   (`526b19e37:crates/zeroship-data-v8/src/crud/introspect_schema.rs`). A
    print-only harness is not an acceptance gate for a bound or a footprint
    regression.
 
@@ -559,8 +559,8 @@ the same app.
    only byte-identical rendering
    (`docs/proposals/2026-08-26-sc3-dbplan-ir-and-ledger.md:640-642`). Current CRUD
    executes through `query_text_params`
-   (`526b19e37:crates/zeroship-data-v8/src/exec.rs:174-207`,
-   `526b19e37:crates/zeroship-data-v8/src/exec.rs:293-334`), which unconditionally sends
+   (`526b19e37:crates/zeroship-data-v8/src/exec.rs`,
+   `526b19e37:crates/zeroship-data-v8/src/exec.rs`), which unconditionally sends
    unnamed Parse/Bind/Describe/Execute/Sync
    (`526b19e37:libs/compio-postgres/src/query.rs:146-232`). The driver's statement cache is
    entered only through the `ToStatement::Query` path

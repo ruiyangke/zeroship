@@ -1,84 +1,32 @@
-//! Per-app mask policy storage + `setMaskPolicy`
-//! dispatcher + in-process cache.
+//! App-declared mask policy, installed at startup and fixed for a deployment.
 //!
-//! The unmask authorization path (`crate::crud::unmask::check_unmask_authorization`)
-//! reads a per-app [`MaskPolicy`] from this module's own per-thread cache
-//! ([`cache_get`]); the slot left `ThreadDbContext` on 2026-09-02.
+//! `defineMaskPolicy()` supplies the policy through the framework-private
+//! `__platform.setMaskPolicy` startup operation. Installation and authorization
+//! use memory only; database drivers never store or load policies.
 //!
-//! ## Where the policy comes from
+//! Policies are keyed by the app-at-deploy binding so a new deployment cannot
+//! change a policy used by an older isolate on the same worker thread.
+//! Reinstallation of an identical declaration is allowed when an isolate is
+//! recreated. A different declaration for the same binding is rejected.
 //!
-//! **The creator's own source, at boot, and nowhere else on the PG
-//! arm.** The app declares `defineMaskPolicy()`; `installSchema` flushes
-//! it through the `__platform.setMaskPolicy` native op once per isolate
-//! during startup; [`dispatch_set_mask_policy`] validates it and installs
-//! it in the per-isolate cache. Redeploy is the only way to change it,
-//! which is what "managed in the codebase, immutable at runtime" means.
-//! App JS cannot reach the op: it hangs off the `ZS_PLATFORM` V8 private
-//! symbol (see `crate::v8_classes::db_platform`).
-//!
-//! There is no durable policy store on PG. There used to be:
-//! `get_mask_policy(app_id)` / `set_mask_policy(app_id, policy)`, a pair of
-//! `SECURITY DEFINER` routines over a `mask_policies` table, all three in the
-//! platform-owned system schema deleted on 2026-08-27. Installed
-//! only by `auth::bootstrap::ensure_admin_schema`, which was `cfg(test,
-//! feature = "test-helpers")` - so they never existed in a shipped
-//! worker even before that function was deleted on 2026-08-27. They were
-//! removed, not rehomed, by operator decision the same day: the worker
-//! both read and wrote this state, so it was never privileged (AGENTS.md,
-//! "Privilege follows the PROCESS, not the function"), and a policy
-//! re-declared from the bundle on every boot has nothing for a durable
-//! store to add.
-//!
-//! **SQLite still carries one** (selected at runtime by a `sqlite://`
-//! url): a sidecar JSON file at `<db_dir>/mask_policies.json`, written
-//! and re-read through `persist_sqlite` / `load_sqlite` off-thread
-//! via `compio::runtime::spawn_blocking`, with a per-file process-local
-//! mutex serialising writers. By the decision above that store is also
-//! surplus - the boot-time declaration already seeds the cache, so the
-//! sidecar is a write plus a redundant read - but removing it was
-//! explicitly out of scope for the change that deleted the PG arm. The
-//! two backends therefore DISAGREE on durability today, and only SQLite
-//! is out of step.
-//!
-//! ### The `auto` actor fallback rule
-//!
-//! Even when an app declares a policy, the `auto` actor kind retains
-//! its "everything by default" grant UNLESS the policy explicitly
-//! lists `auto` with a restricted classification set. Reason: system
-//! writes (migrations, background jobs) need uniform access regardless
-//! of app policy. The rule is enforced inside
-//! [`MaskPolicy::allows`] — callers don't need to special-case `auto`.
-//!
-//! ### Validation
-//!
-//! Both `defineMaskPolicy()` (SDK side) and [`dispatch_set_mask_policy`]
-//! (Rust side) validate the classification set against the six built-ins
-//! (`public`, `pii`, `spi`, `phi`, `pci`, `internal`). Belt-and-braces:
-//! a misbehaving SDK can't poison the storage, and an arbitrary RPC
-//! call can't bypass the SDK-side check.
+//! The reserved `auto` actor retains its fallback grant unless the declaration
+//! explicitly restricts it. App-supplied reserved actors are sanitized before
+//! authorization by `crate::protection::unmask::sanitize_app_actor`.
 
-use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
 use zeroship_data_sql::value::Value;
 
 use zeroship_data_orm::error::DbError;
 
-use crate::backend::BackendHandle;
+use crate::binding::DbBinding;
 
 /// The six canonical classification values. Mirrors the SDK's
 /// `Classification` type (`sdks/db/src/types.ts`) and `crate::catalog::Classification`.
 pub const VALID_CLASSIFICATIONS: &[&str] = &["public", "pii", "spi", "phi", "pci", "internal"];
 
-/// Per-app mask policy. Maps actor-role string → set
-/// of classifications the role is permitted to unmask.
-///
-/// Held in this module's [`MASK_POLICIES`] thread-local for the
-/// life of the isolate; refreshed write-through when `setMaskPolicy`
-/// fires. A `None` cache slot means "no policy declared for this app
-/// on this isolate" — [`crate::crud::unmask::check_unmask_authorization`]
-/// then falls back to the default-deny rule (only `auto` allowed).
-#[derive(Debug, Clone, Default)]
+/// Actor roles and the classifications they may explicitly unmask.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MaskPolicy {
     /// `role -> set of classifications`. Roles missing from the map
     /// have no privileges (every classification request is denied).
@@ -123,8 +71,7 @@ impl MaskPolicy {
         }
     }
 
-    /// Parse a JSON value (the wire shape the SDK + the SECURITY
-    /// DEFINER getter both produce) into a [`MaskPolicy`].
+    /// Parse the app declaration captured from the SDK into a [`MaskPolicy`].
     ///
     /// Expected shape:
     /// ```json
@@ -193,138 +140,63 @@ impl MaskPolicy {
         }
         Ok(Self { roles })
     }
-
-    /// Serialise the policy back to the canonical wire JSON shape.
-    /// Sorted by role and classification so the wire bytes are
-    /// deterministic — operators reading the storage column see a
-    /// stable form regardless of HashMap iteration order.
-    pub fn to_json(&self) -> Value {
-        let mut role_names: Vec<&String> = self.roles.keys().collect();
-        role_names.sort();
-        let mut obj = zeroship_data_sql::value::Map::new();
-        for role in role_names {
-            let set = &self.roles[role];
-            let mut cls: Vec<&String> = set.iter().collect();
-            cls.sort();
-            let arr: Vec<Value> = cls.into_iter().map(|c| Value::String(c.clone())).collect();
-            obj.insert(role.clone(), Value::Array(arr));
-        }
-        Value::Object(obj)
-    }
 }
 
-// ---------------------------------------------------------------------------
-// `setMaskPolicy` dispatcher — write through storage + refresh cache.
-// ---------------------------------------------------------------------------
-
-/// Boot-time installer for `__platform.setMaskPolicy`.
-///
-/// 1. Validate the policy JSON via [`MaskPolicy::from_json`] (both shape
-///    + classification taxonomy).
-/// 2. Install it in this module's per-thread cache via [`cache_put`], so
-///    the next unmask on this isolate sees it.
-/// 3. On SQLite only, additionally write the sidecar JSON file. PG
-///    persists nothing - see the module header for why the durable PG
-///    store was deleted rather than rehomed.
-///
-/// Idempotent: re-running with the same policy overwrites the cache with
-/// the same bytes and rewrites the same sidecar.
-///
-/// Not reachable from app JS. The op lives on the `DbPlatform` handle
-/// behind a V8 private symbol, and `installSchema` is its only caller.
-///
-/// **`backend` is a parameter because this is an INITIALISER, not a reader.**
-/// Policy installation runs during boot, before creator code can trigger a
-/// data-plane op, so it is normally the call that warms a COLD isolate - and it
-/// used to warm the isolate itself, through `exec::ensure_backend_for_shared_sql`,
-/// which put this ENGINE path's hands on the ADAPTER's thread context and its
-/// lazy `init_pool_async`. The cold-init arm did not go away; it moved up one
-/// frame. The only production caller,
-/// `crate::v8_classes::dispatch::dispatch_set_mask_policy_field`, now resolves it
-/// with `crate::tx_scope::ensure_backend()` - adapter to adapter - and hands the
-/// opened handle down. Dropping that arm instead of relocating it would make
-/// `installSchema`'s `setMaskPolicy` fail `not_configured` on every fresh
-/// isolate, which on the SQLite dev tier is every boot.
-pub async fn dispatch_set_mask_policy(
-    backend: &BackendHandle,
-    app_id: &str,
-    policy_v: Value,
-) -> Result<(), DbError> {
+/// Install the app's startup declaration without opening a database.
+/// Recreated isolates may reinstall the same policy; runtime changes fail.
+pub fn install_mask_policy(binding: &DbBinding, policy_v: Value) -> Result<(), DbError> {
     let policy = MaskPolicy::from_json(&policy_v)?;
-
-    // Persist first, cache second. **The order is the point:** a cache that
-    // outlived a failed write would answer reads with a policy the next restart
-    // cannot recover, and a mask policy that silently narrows on restart is the
-    // failure this whole module exists to prevent.
-    //
-    // WHERE it persists, and whether it persists at all, is the backend's
-    // business - PostgreSQL stores nothing because `installSchema` reinstalls
-    // on every boot. This used to be an `as_postgres()` / `as_sqlite()` pair
-    // here, which put both backend names and SQLite's sidecar strategy into the
-    // engine.
-    backend
-        .persist_mask_policy(app_id, &policy.to_json())
-        .await?;
-    cache_put(app_id, Some(policy));
-    Ok(())
+    crate::orm_context::current().policies_mut(|policies| {
+        if let Some(installed) = policies.get(binding) {
+            if installed != &policy {
+                return Err(DbError::validation(
+                    "mask_policy_immutable",
+                    "mask policy is fixed for this deployment; change the app declaration and redeploy",
+                ));
+            }
+        } else {
+            policies.insert(binding.clone(), policy);
+        }
+        Ok(())
+    })
 }
 
-// ----- THE PER-THREAD POLICY CACHE ----------------------------------------
-
-thread_local! {
-    /// This worker thread's per-app mask-policy cache.
-    ///
-    /// It lives HERE rather than as a field on the adapter's `ThreadDbContext`
-    /// because `docs/proposals/2026-09-02-thread-context-ownership.md` assigns
-    /// `mask_policies` to data-engine, and `MaskPolicy` is this module's own
-    /// type. Parking an engine type's cache on the adapter made every read of
-    /// it - all of them in `crud/` - an engine-reaching-up edge.
-    ///
-    /// Seeded on first unmask attempt from durable storage, refreshed
-    /// write-through by `setMaskPolicy`. A missing entry is NOT "no policy": it
-    /// means this thread has not loaded one yet, and the caller must consult
-    /// durable storage before falling through to the default-deny rule. That
-    /// distinction is why [`cache_has`] exists separately from [`cache_get`].
-    ///
-    /// Entries are never proactively evicted, so one lives for the thread's
-    /// lifetime unless replaced.
-    static MASK_POLICIES: RefCell<HashMap<String, MaskPolicy>> =
-        RefCell::new(HashMap::new());
+/// Read the startup policy, fixing the default when none was declared.
+/// An authorization attempt cannot be followed by a new runtime declaration.
+pub(crate) fn allows(binding: &DbBinding, role: &str, classification: &str) -> bool {
+    crate::orm_context::current().policies_mut(|policies| match policies.get(binding) {
+        Some(policy) => policy.allows(role, classification),
+        None => {
+            let policy = MaskPolicy::default();
+            let allowed = policy.allows(role, classification);
+            policies.insert(binding.clone(), policy);
+            allowed
+        }
+    })
 }
 
-/// The cached policy for `app_id`, if this thread has loaded one.
-pub fn cache_get(app_id: &str) -> Option<MaskPolicy> {
-    MASK_POLICIES.with_borrow(|m| m.get(app_id).cloned())
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn cache_get(binding: &DbBinding) -> Option<MaskPolicy> {
+    crate::orm_context::current().policies(|m| m.get(binding).cloned())
 }
 
-/// Write-through install. `Some` upserts; `None` clears the entry.
-pub fn cache_put(app_id: &str, policy: Option<MaskPolicy>) {
-    MASK_POLICIES.with_borrow_mut(|m| match policy {
+/// Test-only fixture seeding and removal. Production installs immutable policy.
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn cache_put(binding: &DbBinding, policy: Option<MaskPolicy>) {
+    crate::orm_context::current().policies_mut(|m| match policy {
         Some(p) => {
-            m.insert(app_id.to_string(), p);
+            m.insert(binding.clone(), p);
         }
         None => {
-            m.remove(app_id);
+            m.remove(binding);
         }
     });
 }
 
-/// Whether an entry is cached for `app_id`.
-///
-/// Cheaper than [`cache_get`] when the caller only needs to gate the durable
-/// load, and distinct from `cache_get(..).is_some()` in intent: see the
-/// thread-local's own note on why absent does not mean "no policy".
-pub fn cache_has(app_id: &str) -> bool {
-    MASK_POLICIES.with_borrow(|m| m.contains_key(app_id))
-}
-
-/// Empty this thread's cache.
 #[cfg(any(test, feature = "test-helpers"))]
 pub fn reset_for_tests() {
-    MASK_POLICIES.with_borrow_mut(HashMap::clear);
+    crate::orm_context::current().policies_mut(HashMap::clear);
 }
-
-// ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -333,14 +205,54 @@ pub fn reset_for_tests() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     use zeroship_data_sql::value;
 
-    fn run<F: std::future::Future>(f: F) -> F::Output {
-        compio::runtime::Runtime::new()
-            .expect("compio runtime build")
-            .block_on(f)
+    #[test]
+    fn installed_policy_is_immutable() {
+        let binding = DbBinding::cold_start("app_fixed_policy");
+        install_mask_policy(&binding, value!({ "support": ["public"] })).unwrap();
+        install_mask_policy(&binding, value!({ "support": ["public"] })).unwrap();
+        let error = install_mask_policy(&binding, value!({ "support": ["pii"] })).unwrap_err();
+        assert!(matches!(
+            error,
+            DbError::ValidationFailed {
+                code: "mask_policy_immutable",
+                ..
+            }
+        ));
+        assert!(allows(&binding, "support", "public"));
+        assert!(!allows(&binding, "support", "pii"));
+    }
+
+    #[test]
+    fn redeploy_does_not_change_an_older_isolates_policy() {
+        let schema = zeroship_data_sql::SchemaName::new("app_policy_deploys").unwrap();
+        let old = DbBinding::new("app_policy_deploys", "old", schema.clone());
+        let new = DbBinding::new("app_policy_deploys", "new", schema);
+        install_mask_policy(&old, value!({ "support": ["public"] })).unwrap();
+        install_mask_policy(&new, value!({ "support": ["pii"] })).unwrap();
+        assert!(!allows(&old, "support", "pii"));
+        assert!(allows(&new, "support", "pii"));
+        assert!(allows(&old, "support", "public"));
+        assert!(!allows(&new, "support", "public"));
+    }
+
+    #[test]
+    fn default_policy_cannot_be_replaced_after_authorization() {
+        let binding = DbBinding::cold_start("app_default_policy");
+        assert!(!allows(&binding, "support", "pii"));
+        assert!(install_mask_policy(&binding, value!({ "support": ["pii"] })).is_err());
+        assert!(!allows(&binding, "support", "pii"));
+    }
+
+    #[test]
+    fn invalid_declaration_does_not_install_a_partial_policy() {
+        let binding = DbBinding::cold_start("app_invalid_policy");
+        assert!(install_mask_policy(&binding, value!({ "support": ["unknown"] })).is_err());
+        assert!(cache_get(&binding).is_none());
+        install_mask_policy(&binding, value!({ "support": ["pii"] })).unwrap();
+        assert!(allows(&binding, "support", "pii"));
     }
 
     #[test]
@@ -510,41 +422,6 @@ mod tests {
     }
 
     #[test]
-    fn to_json_round_trips() {
-        let original = value!({
-            "admin":   ["pii", "public"],
-            "support": ["public"],
-        });
-        let p = MaskPolicy::from_json(&original).expect("parse");
-        let serialised = p.to_json();
-        // Round-trip through parse again so we don't depend on
-        // key ordering (to_json sorts; from_json doesn't care).
-        let p2 = MaskPolicy::from_json(&serialised).expect("re-parse");
-        assert!(p2.allows("admin", "pii"));
-        assert!(p2.allows("admin", "public"));
-        assert!(p2.allows("support", "public"));
-        assert!(!p2.allows("support", "pii"));
-    }
-
-    #[test]
-    fn to_json_is_deterministic() {
-        let mut roles: HashMap<String, HashSet<String>> = HashMap::new();
-        roles.insert(
-            "admin".to_string(),
-            HashSet::from(["pii".to_string(), "spi".to_string(), "public".to_string()]),
-        );
-        roles.insert("user".to_string(), HashSet::from(["public".to_string()]));
-        let p = MaskPolicy { roles };
-        let s1 = p.to_json().to_string();
-        let s2 = p.to_json().to_string();
-        assert_eq!(s1, s2, "to_json must produce identical bytes per call");
-        // Also: roles are sorted alphabetically.
-        let idx_admin = s1.find("admin").expect("admin present");
-        let idx_user = s1.find("user").expect("user present");
-        assert!(idx_admin < idx_user, "roles must serialise sorted: {s1}");
-    }
-
-    #[test]
     fn valid_classifications_constant_matches_taxonomy() {
         // Pinning the canonical six against the SDK list. A drift
         // (e.g. a 7th value added on one side without the other)
@@ -564,7 +441,7 @@ mod tests {
     //
     // The proposal asserts that a `defineMaskPolicy()` write under
     // app A's isolate-context entry must NOT be visible from app B's
-    // entry. The cache is keyed by app_id in [`MASK_POLICIES`]; this test pins that
+    // entry. The cache is keyed by binding in [`MASK_POLICIES`]; this test pins that
     // invariant directly through the public surface so a future
     // refactor that accidentally widens the key (e.g. to a shared
     // singleton) trips the gate.
@@ -595,12 +472,12 @@ mod tests {
         // implied: libtest gives every `#[test]` its own OS thread even under
         // `--test-threads=1` (measured 2026-09-01), so no other test can
         // observe or disturb these entries.
-        cache_put("app_a", Some(policy_a.clone()));
-        cache_put("app_b", Some(policy_b.clone()));
+        cache_put(&DbBinding::cold_start("app_a"), Some(policy_a.clone()));
+        cache_put(&DbBinding::cold_start("app_b"), Some(policy_b.clone()));
 
         // App A sees policy A only — admin grants are visible; the
         // app-B `support` role is not in the cache for app A.
-        let a = cache_get("app_a").expect("app_a cached");
+        let a = cache_get(&DbBinding::cold_start("app_a")).expect("app_a cached");
         assert!(a.allows("admin", "pii"));
         assert!(a.allows("admin", "spi"));
         assert!(
@@ -610,7 +487,7 @@ mod tests {
 
         // App B sees policy B only — support grants are visible; the
         // app-A `admin` role is not in the cache for app B.
-        let b = cache_get("app_b").expect("app_b cached");
+        let b = cache_get(&DbBinding::cold_start("app_b")).expect("app_b cached");
         assert!(b.allows("support", "public"));
         assert!(
             !b.allows("admin", "pii"),
@@ -622,20 +499,12 @@ mod tests {
         );
 
         // App C — never seeded — sees nothing.
-        assert!(cache_get("app_c").is_none());
+        assert!(cache_get(&DbBinding::cold_start("app_c")).is_none());
 
         // Clearing app A leaves app B intact (fence against a clear-
         // implementation that walks the whole map).
-        cache_put("app_a", None);
-        assert!(cache_get("app_a").is_none());
-        assert!(cache_get("app_b").is_some());
+        cache_put(&DbBinding::cold_start("app_a"), None);
+        assert!(cache_get(&DbBinding::cold_start("app_a")).is_none());
+        assert!(cache_get(&DbBinding::cold_start("app_b")).is_some());
     }
-
-    // `set_mask_policy_installs_through_an_adapter_opened_cold_backend` MOVED to
-    // `zeroship-data-v8`'s `tx_scope.rs` with the engine cut. What it witnesses
-    // is the ADAPTER half of the boot sequence - a cold isolate, a configured
-    // SQLite url, `tx_scope::ensure_backend()` warming it - and only its last
-    // line is the engine's. It could not stay: it named `crate::context`,
-    // `crate::tx_scope` and `crate::set_db_url_for_tests`, none of which this
-    // crate may see.
 }

@@ -45,7 +45,8 @@ mod tests {
 
     #[test]
     fn json_scalars_keep_their_json_type_and_text_remains_text() {
-        let db = rusqlite::Connection::open_in_memory().unwrap();
+        let db_file = tempfile::NamedTempFile::new().unwrap();
+        let db = rusqlite::Connection::open(db_file.path()).unwrap();
         db.execute_batch("CREATE TABLE documents (id TEXT, created_at TEXT, updated_at TEXT, created_by TEXT, updated_by TEXT, version INTEGER, deleted_at TEXT, payload TEXT, label TEXT)")
             .unwrap();
         let schema = value!({"payload":{"type":"json"}, "label":{"type":"string"}});

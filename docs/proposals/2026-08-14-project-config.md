@@ -730,7 +730,7 @@ adding one for the runtime would not be, and is not needed.
 **VERIFIED: zeroship has no per-app runtime version pin.** A repo-wide grep for
 `compatibility_date|compat_date|runtime_version|api_version` finds only Stripe's
 `api_version` in the billing tests, and `schema_version` in `plugin-db`, which is
-a per-app DDL counter (`crates/zeroship-data-v8/src/register_model/bootstrap.rs:39-42`),
+a per-app DDL counter (`crates/zeroship-data-v8/src/register_model/bootstrap.rs`),
 not a runtime behaviour pin. `Manifest.version` (`crates/zeroship-bundle/src/manifest.rs:33-39`)
 is a **wire-format** version - "Schema version. Reject unknown values" - not a
 behaviour selector. Nothing in the tree lets a deployed app say "give me the V8

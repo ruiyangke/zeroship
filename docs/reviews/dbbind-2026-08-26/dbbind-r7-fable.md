@@ -140,7 +140,7 @@ omitting it is **EXPLOITABLE** (cross-incarnation data or action reachable) or
 
 ### G. CDC slot naming/ownership and the drop prefix
 
-- **Today:** `crates/zeroship-data-v8/src/replication.rs:108-116`
+- **Today:** `crates/zeroship-data-v8/src/replication.rs`
   `worker_slot_name = "{OBJECT_PREFIX}slot_{stable_token(app_id,14)}__
   {stable_token(worker_id,10)}"` (`OBJECT_PREFIX = "__zs_"`,
   `zeroship-core/src/replication_names.rs:6`); prefix for bulk drop is
@@ -252,7 +252,7 @@ then confirm the authors' own flags so the count is auditable.
 - **Arm:** parent :1172-1173 - "Lowering the operator ceiling denies the next
   `unmask` in an already-built pinned isolate, with no rebuild and no deploy."
   **Unqualified by actor.**
-- **Decider:** `crates/zeroship-data-v8/src/crud/mask_policy.rs:101-110` -
+- **Decider:** `crates/zeroship-data-v8/src/protection/mask_policy.rs` -
   `MaskPolicy::allows` returns `role == "auto"` for any role absent from the
   map; `sanitize_app_actor` (SC-6 :244-245) strips app-supplied `auto`, but the
   platform's own `auto` actor unmasks everything a policy does not explicitly

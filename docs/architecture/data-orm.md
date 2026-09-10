@@ -8,27 +8,31 @@ type parameter. The host chooses the database during setup.
 Rust models                         Worker TypeScript
      |                                     |
      |                              zeroship-data-v8
-     |                                native V8 capture
+     |                              V8 arguments/results
      +------------------+------------------+
                         |
                 zeroship-data-orm
                 Database / Collection
-                PreparedOperation
-                protection and transaction policy
+                        |
+             CRUD + protection + search
                         |
                 zeroship-data-sql
-                query compilation + dialect
-                        |
                 SQL + native parameters
                         |
-                registered BackendHandle
-                  Driver / owned Session
-                   /                \
-          PostgreSQL adapter      SQLite adapter
-                   |                |
-            compio-postgres    rusqlite + session actor
-                   |                |
-              PostgreSQL          SQLite
+                ScopedExecutor
+                select database + apply authority
+                        |
+                Driver.acquire()
+                owned Session
+                 /          \
+          PostgresDriver   SqliteDriver
+                 |          |
+          compio-postgres   SQLite actor
+                 |          |
+            PostgreSQL    SQLite
+
+Host Backend = scoped executor + catalog + protection + search
+               + committed-change source
 ```
 
 ## Crate responsibilities
@@ -44,10 +48,13 @@ Rust models                         Worker TypeScript
 crates/
   zeroship-data-orm/
     src/orm/                 Rust models and codecs
-    src/driver.rs            shared driver and session contracts
+    src/driver.rs            physical acquisition and session contracts
+    src/executor.rs          scoped execution contract
+    src/protection/          policy, encryption, masking, unmask authorization
+    src/search.rs            ORM search extension contract
     src/backend/postgres/    PostgreSQL adapter
     src/backend/sqlite/      SQLite adapter
-    src/crud/                shared protection and CRUD passes
+    src/crud/                CRUD orchestration and read/write pipelines
     src/transaction/         shared transaction protocol
   zeroship-data-sql/          plans, native values, SQL dialects
   zeroship-data-macros/       schema and mapping derives
@@ -85,22 +92,50 @@ wrapper. Rust models continue using `schema!`, `FromRow`, `Insertable`, and
 `Changeset`. TypeScript continues using `env.db`.
 
 Connection configuration contains credentials and is excluded from Debug output.
-A connection opens an existing database; it does not create application tables.
+Connection setup does not create application tables.
 Migration artifacts supply the descriptor and the physical schema.
+
+SQLite opens or creates a filesystem database, for example
+`sqlite:.zeroship/dev.sqlite`. Memory selectors, empty paths, and SQLite URI
+options are rejected. Tests provide explicit temporary files; the ORM owns no
+temporary directory and never removes database files when a backend closes.
 
 ## Driver contract
 
-`driver::Backend` combines focused interfaces:
+`driver::Driver` exposes a configured physical connection source: SQL dialect,
+acquisition, and pool diagnostics. It accepts no application binding or keys and
+requires no search, catalog, masking, or change-publication implementation.
+`DriverSession` executes SQL with native parameters, returns rows or affected-row
+counts, and handles settlement, cancellation, cleanup, and discard.
 
-- `Driver` selects the SQL dialect, prepares access, executes autocommit queries,
-  opens transaction sessions, and explicitly declares its change-event source.
-- `Catalog` supplies live protection metadata. Catalog failures remain failures;
-  an unavailable catalog cannot be treated as an empty protection floor.
-- `PolicyStore` stores host-installed policy where the deployment requires it.
-- `Search` supplies optional vector and spatial operations. An unsupported
-  operation returns an explicit error.
+`executor::ScopedExecutor` resolves the app's physical SQL namespace and applies its authority
+on the connection that executes its statements. PostgreSQL uses a transaction
+with local role and timeout settings. SQLite attaches the database and selects
+its transaction lane before exposing a physical connection source.
 
-`BackendHandle` owns an `Rc<dyn Backend>`. `driver::Session` owns a
+`backend::Backend` is the host registration contract above the driver:
+
+- `ScopedExecutor` supplies routed, authorized statement execution.
+- `protection::Catalog` supplies live protection evidence. Catalog failures
+  remain failures; they cannot become an empty protection floor.
+- `protection::Protection` supplies column keys.
+- `search::Search` supplies optional ORM search strategies. Default methods
+  reject unsupported operations explicitly.
+- The host declares its committed-change source so database hooks and ORM
+  publication do not emit the same mutation twice.
+
+A driver author implements connection mechanics. A host integrating that driver
+with the multi-tenant ORM supplies the corresponding authority and metadata
+services. Neither task changes Rust models or worker TypeScript.
+
+Mask policy comes from the app's `defineMaskPolicy()` declaration. Bootstrap
+installs it in memory for the app-at-deploy binding, including the empty default.
+The declaration is fixed after startup; changing it requires a new deployment.
+Neither PostgreSQL nor SQLite persists policy, and unmask authorization never
+loads policy from a database or sidecar. Policy installation opens no connection.
+
+`BackendHandle` owns the host registration as an `Rc<dyn Backend>`.
+`driver::Session` owns a
 `Box<dyn DriverSession>`. Erasure happens at the execution boundary; application
 models remain independent of the backend. Async trait futures are local and
 boxed at that boundary. This preserves compio's thread-local execution model
@@ -110,6 +145,15 @@ Parameters and result records use native `Value` types. Dynamic dispatch does
 not require JSON serialization. Strings and binary buffers remain native;
 JSON encoding is reserved for JSON columns and explicit wire contracts. The
 implementation still allocates records and futures and copies some inputs.
+
+Native row decoding is fallible. Driver row adapters report `row_decode_failed`
+with column context when they reject a result; they never substitute SQL NULL
+for a decoding failure. PostgreSQL infinite dates and timestamps are
+refused because the native timestamp contract represents finite instants.
+Timestamp precision is reduced to the containing Unix millisecond, including
+instants before the epoch. Vector and geographic-point fields return numeric
+arrays and latitude/longitude objects on both backends. Their binary storage
+encoding stays inside the backend and SQL codecs.
 
 Concrete driver access is available for host diagnostics and backend-specific
 lifecycle extensions. Shared CRUD, transaction policy, and protection reads do
@@ -121,10 +165,10 @@ requires no new backend enum variant in those paths.
 ```text
 ordinary operation                 explicit transaction
        |                                   |
-Driver::query                      Driver::open_tx_session
+ScopedExecutor::query              ScopedExecutor::open_tx_session
        |                                   |
-backend acquires access             owned Session
-and applies authority                parked in transaction lane
+driver acquires access              owned Session
+executor applies authority          parked in transaction lane
        |                                   |
 execute and settle                  operation claims session
        |                            executes and returns it
@@ -136,8 +180,13 @@ release safely                              |
                                     safe reuse or discard
 ```
 
-PostgreSQL sessions retain owned pool leases. SQLite sessions retain actor
-reservations. The ORM routes by the dispatch's captured transaction context;
+PostgreSQL sessions retain owned pool leases. SQLite transaction sessions retain
+actor reservations; its ordinary handle obtains a reservation per command.
+`LeaseKind::Transaction` requests connection affinity across commands and is
+required before issuing transaction SQL. Acquisition itself does not issue BEGIN.
+Owned drivers and sessions can outlive the host that opened them. Database file
+lifetime is controlled by the host's storage, independently of connection lifetime.
+The ORM routes by the dispatch's captured transaction context;
 an overlapping ordinary request cannot borrow another callback's session.
 Search and raw-column protection reads use the same pinned session as CRUD.
 Each opened session is bound to its backend registration; replacing a backend
@@ -164,7 +213,8 @@ Adding another SQL language extends the SQL compiler; it does not require
 rewriting application models or shared transaction policy.
 
 Portable behavior is established by tests, including native types, null/default
-handling, projections, commits, rollback, and nested callbacks. Search extensions
+handling, projections, commits, rollback, and nested callbacks. SQLite vector SQL is compiled in `zeroship-data-sql` with a native byte
+parameter. Search strategies
 retain their documented differences in `docs/reference/sqlite-divergences.md`.
 Database versions and installed extensions can make a requested feature
 unavailable; the backend must report that explicitly.
@@ -180,8 +230,49 @@ engines. Integration tests exercise V8 behavior, isolation, search and unmask
 transaction routing, cancellation, poisoned transactions, and session cleanup.
 Compiler tests validate generated schema and Rust model contracts.
 
-`tests/data_crate_closure_gate.sh` checks dependency boundaries;
+`tests/data_crate_closure_gate.sh` checks dependency and plain-driver boundaries;
 `tests/vendor_embedding_gate.sh` checks concrete driver references;
 `tests/decision_four_gate.sh` fences shared execution and SQL placement;
 `tests/run_data_v8_live_suite.sh` runs the required database tests; and
 `tests/clippy_gate.sh` validates the workspace and its declared feature surface.
+
+## Context ownership
+
+`OrmContext` owns runtime descriptors, immutable mask policies, catalog
+protection floors, and transaction lanes. A standalone `Database::from_schema`
+or `Database::connect` creates its own context. Cloning a `Database` shares its
+context; `Database::new` requires an explicit context when composing a handle
+from installed metadata.
+
+The V8 host shares a context across dispatches on its worker thread. Metadata
+and policy keys include the complete app/deployment/schema binding. Preparing
+an operation captures its owner synchronously. Its future enters that context
+on each poll and restores the prior context afterwards; cancellation drops its
+work under the same owner. Detached transaction timers and recovery tasks
+inherit their originating context. This prevents a concurrent database from
+redirecting schema lookups, admission, or transaction cleanup.
+
+The thread-local slot selects the currently executing context. It does not own
+independent schema, policy, or transaction registries. The registry modules are
+internal in shipped builds; the host installs descriptors through
+`descriptor::install_collections` and checks transaction state through the
+transaction API.
+
+## Physical representations
+
+`zeroship-data-sql::codecs` owns schema-aware boolean lowering, SQLite vector
+and geography encoding, and normalization of native result values. The shared
+CRUD pipeline invokes these conversions at the appropriate points around
+protection transforms without choosing a concrete backend. Namespace selection
+belongs to the host executor.
+
+The runtime has one catalog contract (`Catalog`) and one search contract
+(`Search`). `Driver` and `DriverSession` own physical execution. Conformance
+fixtures use a separate test-only `DatabaseFixture` helper with native values.
+There is no production text-parameter execution trait or backend DDL type mapper;
+the migration engine remains the authority for schema creation.
+
+`tests/data_boundary_gate.sh` checks these source boundaries and validates its
+rejection predicates with negative controls. `tests/data_crate_closure_gate.sh`
+checks the dependency closures; `tests/run_data_v8_live_suite.sh` exercises the
+Rust and V8 paths against the required databases.

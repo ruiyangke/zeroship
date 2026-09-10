@@ -33,10 +33,10 @@
 
 use std::time::Duration;
 
+use compio_postgres::Row;
 use compio_postgres::test_utils::{column_for_test, row_for_test};
 use compio_postgres::types::Type;
-use compio_postgres::Row;
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 
 use zeroship_data_v8::row_to_value_for_bench;
 
@@ -193,19 +193,19 @@ fn bench_row_to_json(c: &mut Criterion) {
     // column count. Catches wire-format breakage in `enc_*` before the
     // bench produces nonsense numbers.
     {
-        let v = row_to_value_for_bench(&narrow);
+        let v = row_to_value_for_bench(&narrow).unwrap();
         assert_eq!(
             v.as_object().expect("narrow → object").len(),
             3,
             "narrow row should decode 3 columns",
         );
-        let v = row_to_value_for_bench(&medium);
+        let v = row_to_value_for_bench(&medium).unwrap();
         assert_eq!(
             v.as_object().expect("medium → object").len(),
             10,
             "medium row should decode 10 columns",
         );
-        let v = row_to_value_for_bench(&wide);
+        let v = row_to_value_for_bench(&wide).unwrap();
         assert_eq!(
             v.as_object().expect("wide → object").len(),
             50,
@@ -215,17 +215,17 @@ fn bench_row_to_json(c: &mut Criterion) {
 
     group.bench_function("narrow_3cols", |b| {
         b.iter(|| {
-            black_box(row_to_value_for_bench(black_box(&narrow)));
+            black_box(row_to_value_for_bench(black_box(&narrow)).unwrap());
         });
     });
     group.bench_function("medium_10cols", |b| {
         b.iter(|| {
-            black_box(row_to_value_for_bench(black_box(&medium)));
+            black_box(row_to_value_for_bench(black_box(&medium)).unwrap());
         });
     });
     group.bench_function("wide_50cols", |b| {
         b.iter(|| {
-            black_box(row_to_value_for_bench(black_box(&wide)));
+            black_box(row_to_value_for_bench(black_box(&wide)).unwrap());
         });
     });
 

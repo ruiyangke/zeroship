@@ -54,7 +54,7 @@ use zeroship_data_orm::binding::DbBinding;
 use zeroship_data_orm::error::DbError;
 use zeroship_data_sql::value::{Value, value};
 use zeroship_data_v8::compile::SqlDialect;
-use zeroship_data_v8::crud::mask_policy::dispatch_set_mask_policy;
+use zeroship_data_orm::protection::mask_policy::install_mask_policy;
 use zeroship_data_v8::tx_route::{CapturedRoute, TxRoute};
 
 fn test_url() -> String {
@@ -231,8 +231,7 @@ async fn a_find_unmask_inside_a_transaction_reaches_the_row_that_transaction_ins
     fixture(&pool, &url, app).await;
     // A policy the request's actor satisfies, so the fence GRANTS and the
     // failure below cannot be an authorization refusal wearing another code.
-    dispatch_set_mask_policy(&backend().await, app, value!({ "support": ["pci"] }))
-        .await
+    install_mask_policy(&DbBinding::cold_start(app), value!({ "support": ["pci"] }))
         .expect("install the app's declared mask policy");
 
     zeroship_data_v8::begin_transaction_for_tests(app, &url).await;
@@ -335,8 +334,7 @@ async fn a_denied_unmask_audit_row_survives_the_rollback_of_its_transaction() {
     fixture(&pool, &url, app).await;
     // The policy grants `support` and nothing else, so `intern` below is
     // refused by the policy path rather than by the no-policy fallback.
-    dispatch_set_mask_policy(&backend().await, app, value!({ "support": ["pci"] }))
-        .await
+    install_mask_policy(&DbBinding::cold_start(app), value!({ "support": ["pci"] }))
         .expect("install the app's declared mask policy");
 
     // A committed row for the denied attempt to name. Committed so the arm
@@ -446,8 +444,7 @@ async fn an_encrypted_unmask_inside_a_transaction_reaches_the_row_that_transacti
     // encrypts with it and the unmask fetch decrypts with it.
     let _keys = zeroship_data_v8::supply_root_keys_for_tests(&[("default", &"c".repeat(64))]);
     fixture_with_schema(&pool, &url, app, encrypted_schema()).await;
-    dispatch_set_mask_policy(&backend().await, app, value!({ "support": ["pci"] }))
-        .await
+    install_mask_policy(&DbBinding::cold_start(app), value!({ "support": ["pci"] }))
         .expect("install the app's declared mask policy");
 
     zeroship_data_v8::begin_transaction_for_tests(app, &url).await;
@@ -459,7 +456,7 @@ async fn an_encrypted_unmask_inside_a_transaction_reaches_the_row_that_transacti
     )
     .await;
 
-    let args = || zeroship_data_v8::crud::unmask::UnmaskFieldArgs {
+    let args = || zeroship_data_orm::protection::unmask::UnmaskFieldArgs {
         collection: "people".to_string(),
         row_pk: id.clone(),
         column: "ssn".to_string(),
@@ -469,7 +466,7 @@ async fn an_encrypted_unmask_inside_a_transaction_reaches_the_row_that_transacti
     };
 
     // ---- CONTROL: outside the transaction the row is genuinely unreachable.
-    let outside = zeroship_data_v8::crud::unmask::dispatch_unmask(
+    let outside = zeroship_data_orm::protection::unmask::dispatch_unmask(
         &pool_route(app).await,
         &DbBinding::cold_start(app),
         args(),
@@ -483,7 +480,7 @@ async fn an_encrypted_unmask_inside_a_transaction_reaches_the_row_that_transacti
     );
 
     // ---- SUBJECT: the same call on the transaction's own lane.
-    let inside = zeroship_data_v8::crud::unmask::dispatch_unmask(
+    let inside = zeroship_data_orm::protection::unmask::dispatch_unmask(
         &tx_route(app).await,
         &DbBinding::cold_start(app),
         args(),

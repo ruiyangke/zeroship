@@ -6,6 +6,7 @@ license.workspace = true
 description = "Backend-independent ORM with native Rust models, protected execution, and database driver adapters."
 
 [dependencies]
+scoped-tls = "1"
 async-trait = { workspace = true }
 zeroship-data-sql = { workspace = true }
 zeroship-data-macros = { workspace = true }

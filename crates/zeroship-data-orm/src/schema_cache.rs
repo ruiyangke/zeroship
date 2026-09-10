@@ -1,28 +1,6 @@
-//! The isolate's slice of THE schema authority: the runtime descriptor.
-//!
-//! # Why this is its own type, in this crate
-//!
-//! It was four methods and a `HashMap` field on `ThreadDbContext`, which
-//! `docs/proposals/2026-09-02-thread-context-ownership.md` identifies as FOUR
-//! OWNERS wearing one struct. That proposal assigns this one to
-//! `zeroship-data-core`, and the assignment is not a preference: the whole owner
-//! names `DbBinding`, `zeroship_data_sql::value::Value` and `Arc` and NOTHING else - no
-//! driver, no V8, no runtime, no engine type. It was rank-0 vocabulary sitting
-//! in the adapter.
-//!
-//! Separating it is what lets the lane owner move to `data-engine` later without
-//! dragging the descriptor store along, since the two shared only a struct.
-//!
-//! # The key shape is load-bearing
-//!
-//! Entries are keyed `<app_id>:<deploy_token>:<collection>`. The deploy token is
-//! in the key, not just the app id, because one isolate can outlive a deploy:
-//! a stale entry from the previous descriptor must be unreachable rather than
-//! merely unlikely. [`SchemaCache::replace_for_binding`] therefore retains by
-//! prefix and re-inserts, which is one synchronous publication point - no caller
-//! can observe a half-replaced descriptor.
+//! Runtime descriptors owned by an ORM context and keyed by the complete binding.
+//! Installation validates before replacing a binding's collection set.
 
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -32,10 +10,10 @@ use crate::error::DbError;
 
 use crate::binding::DbBinding;
 
-/// One isolate's descriptor entries, keyed by `(app, deploy, collection)`.
+/// Collection descriptors keyed by the complete app, deploy and schema binding.
 #[derive(Debug, Default)]
 pub struct SchemaCache {
-    entries: HashMap<String, Arc<Value>>,
+    entries: HashMap<(DbBinding, String), Arc<Value>>,
 }
 
 impl SchemaCache {
@@ -46,13 +24,8 @@ impl SchemaCache {
     }
 
     /// The store key for one collection under one binding.
-    fn key(binding: &DbBinding, collection: &str) -> String {
-        format!(
-            "{}:{}:{}",
-            binding.app_id(),
-            binding.deploy_token(),
-            collection
-        )
+    fn key(binding: &DbBinding, collection: &str) -> (DbBinding, String) {
+        (binding.clone(), collection.to_owned())
     }
 
     /// Replace the complete descriptor for one app-at-deploy binding.
@@ -63,8 +36,7 @@ impl SchemaCache {
     /// survive a dev isolate restart, and an empty input leaves a schema-less
     /// binding empty.
     pub fn replace_for_binding(&mut self, binding: &DbBinding, schemas: Vec<(String, Value)>) {
-        let prefix = format!("{}:{}:", binding.app_id(), binding.deploy_token());
-        self.entries.retain(|key, _| !key.starts_with(&prefix));
+        self.entries.retain(|(owner, _), _| owner != binding);
         for (collection, schema) in schemas {
             self.entries
                 .insert(Self::key(binding, &collection), Arc::new(schema));
@@ -88,13 +60,10 @@ impl SchemaCache {
     /// installed no schema.
     #[must_use]
     pub fn entries_for_binding(&self, binding: &DbBinding) -> Vec<(String, Arc<Value>)> {
-        let prefix = format!("{}:{}:", binding.app_id(), binding.deploy_token());
         self.entries
             .iter()
-            .filter_map(|(k, v)| {
-                k.strip_prefix(&prefix)
-                    .map(|coll| (coll.to_string(), v.clone()))
-            })
+            .filter(|(key, _)| key.0 == *binding)
+            .map(|(key, value)| (key.1.clone(), value.clone()))
             .collect()
     }
 
@@ -146,35 +115,19 @@ impl SchemaCache {
     }
 }
 
-// ----- THE ISOLATE'S CACHE ---------------------------------------------
+// Accessors for the currently scoped ORM owner.
 
-thread_local! {
-    /// This isolate's descriptor store.
-    ///
-    /// It lives HERE rather than as a field on the adapter's `ThreadDbContext`
-    /// because `docs/proposals/2026-09-02-thread-context-ownership.md` assigns
-    /// `schemas` to `zeroship-data-core`, and a field on a struct in the adapter
-    /// cannot be read from a crate the adapter depends on. `descriptor.rs` is
-    /// core-destined and is the store's only production reader, so leaving the
-    /// cache on the context would have made the core tier reach UP into the
-    /// adapter - the one edge direction the split forbids outright.
-    ///
-    /// PER-THREAD, like every other piece of isolate state: a worker thread runs
-    /// one isolate, and two threads must not see each other's descriptors.
-    static SCHEMAS: RefCell<SchemaCache> = RefCell::new(SchemaCache::new());
-}
-
-/// Read this isolate's descriptor store.
+/// Read the current ORM context's descriptor store.
 pub fn with<R>(f: impl FnOnce(&SchemaCache) -> R) -> R {
-    SCHEMAS.with_borrow(f)
+    crate::orm_context::current().schemas(f)
 }
 
-/// Mutate this isolate's descriptor store.
+/// Mutate the current ORM context's descriptor store.
 ///
 /// Callers must not re-enter [`with`] from inside `f`: the borrow is held for
 /// the closure's whole body and a nested read panics rather than deadlocks.
 pub fn with_mut<R>(f: impl FnOnce(&mut SchemaCache) -> R) -> R {
-    SCHEMAS.with_borrow_mut(f)
+    crate::orm_context::current().schemas_mut(f)
 }
 
 /// Empty this isolate's descriptor store.

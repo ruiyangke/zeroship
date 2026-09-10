@@ -221,8 +221,7 @@ fn ready_action(app_id: &str) -> Result<ReadyAction, DbError> {
 /// ADAPTER/CDC cycle on `tests/lib/tier_direction_census.sh`. The cold-init
 /// half of that read is `tx_scope::ensure_backend()` verbatim, so the caller
 /// already has the funnel; the worker identity is adapter configuration stamped
-/// by `DbPlugin::register`. This is the same inversion `bind_route` and
-/// `dispatch_set_mask_policy` took: the tier that owns the state resolves it,
+/// by `DbPlugin::register`. This is the same inversion `bind_route` took: the tier that owns the state resolves it,
 /// and the tier that consumes it receives it.
 ///
 /// `worker_id` arrives as an `Option` rather than pre-validated because the

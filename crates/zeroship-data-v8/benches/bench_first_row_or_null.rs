@@ -3,10 +3,10 @@
 
 use std::time::Duration;
 
+use compio_postgres::Row;
 use compio_postgres::test_utils::{column_for_test, row_for_test};
 use compio_postgres::types::Type;
-use compio_postgres::Row;
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 
 use zeroship_data_v8::first_row_or_null_for_bench;
 
@@ -169,19 +169,19 @@ fn bench_first_row_or_null(c: &mut Criterion) {
 
     // Verify fixture decoding before measuring it.
     {
-        let v = first_row_or_null_for_bench(&narrow);
+        let v = first_row_or_null_for_bench(&narrow).unwrap();
         assert_eq!(
             v.as_object().expect("narrow → object").len(),
             3,
             "narrow row should serialise 3 columns",
         );
-        let v = first_row_or_null_for_bench(&medium);
+        let v = first_row_or_null_for_bench(&medium).unwrap();
         assert_eq!(
             v.as_object().expect("medium → object").len(),
             10,
             "medium row should serialise 10 columns",
         );
-        let v = first_row_or_null_for_bench(&wide);
+        let v = first_row_or_null_for_bench(&wide).unwrap();
         assert_eq!(
             v.as_object().expect("wide → object").len(),
             50,
@@ -195,11 +195,11 @@ fn bench_first_row_or_null(c: &mut Criterion) {
         ("wide", wide.as_slice()),
     ] {
         group.bench_function(format!("native/{name}"), |b| {
-            b.iter(|| black_box(first_row_or_null_for_bench(black_box(rows))));
+            b.iter(|| black_box(first_row_or_null_for_bench(black_box(rows)).unwrap()));
         });
         group.bench_function(format!("json_boundary/{name}"), |b| {
             b.iter(|| {
-                let value = first_row_or_null_for_bench(black_box(rows));
+                let value = first_row_or_null_for_bench(black_box(rows)).unwrap();
                 black_box(serde_json::to_string(&value).unwrap());
             });
         });

@@ -134,7 +134,7 @@ about concurrency here:
   are unaffected.
 
 `an_app_files_write_upgrade_is_plain_busy_because_it_is_not_in_wal`
-(`crates/zeroship-data-v8/tests/sqlite_integration.rs:10806`) pins the journal mode of both databases so
+(`crates/zeroship-data-v8/tests/sqlite_integration.rs`) pins the journal mode of both databases so
 a change to that fact fails there rather than silently invalidating the
 reasoning above. `docs/reference/sqlite-divergences.md` carries the
 creator-facing form.

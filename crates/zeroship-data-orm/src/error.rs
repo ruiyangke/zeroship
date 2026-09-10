@@ -604,6 +604,16 @@ impl DbError {
         }
     }
 
+    /// A database value cannot be represented by the native row contract.
+    /// Name the column and cause, without copying stored values into errors.
+    pub fn row_decode(column: &str, reason: &str) -> Self {
+        Self::Coded {
+            code: "row_decode_failed".into(),
+            message: format!("db: cannot decode column '{column}': {reason}"),
+            hint: None,
+        }
+    }
+
     /// Convenience: catch-all internal error.
     pub fn internal(message: impl Into<String>) -> Self {
         DbError::Internal {
@@ -847,6 +857,17 @@ impl From<zeroship_data_sql::compile::QueryError> for DbError {
 impl From<zeroship_data_sql::schema_error::MaskSentinelError> for DbError {
     fn from(e: zeroship_data_sql::schema_error::MaskSentinelError) -> Self {
         DbError::internal(e.message)
+    }
+}
+
+impl From<zeroship_data_sql::codecs::CodecError> for DbError {
+    fn from(error: zeroship_data_sql::codecs::CodecError) -> Self {
+        match error {
+            zeroship_data_sql::codecs::CodecError::Internal { message } => Self::internal(message),
+            zeroship_data_sql::codecs::CodecError::Validation { code, message } => {
+                Self::validation(code, message)
+            }
+        }
     }
 }
 

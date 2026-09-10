@@ -1,60 +1,8 @@
-//! The cold-open witness for the five V8 sites that resolve a backend.
+//! V8 database operations open a cold backend through the adapter resolver.
+//! Startup mask-policy installation is independent of database configuration.
 //!
-//! # What was unbound, and what already was not
-//!
-//! `tx_scope::ensure_backend`'s own cold arm has had a witness since the engine
-//! cut: [`crate::tx_scope::tests::set_mask_policy_installs_through_an_adapter_opened_cold_backend`]
-//! asserts an empty isolate, calls `ensure_backend` and asserts one is
-//! installed. Deleting the `init_pool_async` arm fails it. Three more of the
-//! same shape live in `tests/sqlite_integration.rs`
-//! (`cold_*_open_comes_from_ensure_backend_not_the_fixture`).
-//!
-//! Every one of those calls the resolver ITSELF. None of them rules on the
-//! question this module exists for: **do the five production V8 sites still
-//! CHOOSE the resolver?** Swap
-//! `crate::tx_scope::{ensure_backend, bind_route}` at those five lines for a
-//! plain `crate::context::with(|c| c.backend())` read and all four of the
-//! witnesses above stay green, because none of them is downstream of a
-//! dispatcher. `installSchema` would fail `not_configured` on every fresh
-//! isolate and nothing in the tree would say so.
-//!
-//! # The five sites
-//!
-//! | site | reached here through |
-//! | --- | --- |
-//! | `dispatch::dispatch_unmask_field` | `collection.unmaskField(pk, col)` |
-//! | `dispatch::dispatch_bulk_unmask_field` | `collection.bulkUnmask(items)` |
-//! | `dispatch::dispatch_set_mask_policy_field` | `__platform.setMaskPolicy(p)` |
-//! | `masked_value::MaskedValue::dispatch_unmask_single` | `mv.unmask()` |
-//! | `masked_value::MaskedValue::dispatch_unmask_multi` | `mv.unmask([col])` |
-//!
-//! A sixth arm drives `collection.find()`, the carrier of the per-query unmask
-//! hint - the third family the masking tests name, whose backend is resolved by
-//! `dispatch::dispatch_find` rather than by any of the five.
-//!
-//! Each arm enters through the JS method a creator or the bootstrap actually
-//! calls, not through the `pub(crate)` dispatcher, so the `#[v8_class]` glue is
-//! on the path too. That is the only reason this module is IN the crate rather
-//! than an integration target: `mint_collection`, `mint_db_platform` and
-//! `mint_masked_value` are `pub(crate)`, and promoting them to `pub` to let a
-//! test reach them would widen the shipped surface to buy a test seam.
-//!
-//! # What each arm asserts, and why it is not the settled value
-//!
-//! The isolate starts with a configured SQLite url and NO backend. The dispatch
-//! is driven, its spawned op is drained and awaited off the V8 stack, and then:
-//!
-//!   1. the isolate must now HAVE a backend - the dispatch opened one; and
-//!   2. if the op rejected, the code must not be `not_configured` /
-//!      `lazy_init_failed`, the two answers a plain context read produces on a
-//!      cold isolate.
-//!
-//! What the op ultimately resolves to is deliberately NOT asserted. These
-//! fixtures cache no descriptor and create no table, so most arms reject with a
-//! schema or SQL error - which is fine, because that rejection is downstream of
-//! the open and therefore proves it. Seeding a full row fixture would bind the
-//! same property through more moving parts, and the engine-level behaviour it
-//! would re-check is already covered by `tests/sqlite_integration.rs`.
+//! Each test calls the native JS method and settles its queued operation, so
+//! the V8 wrapper and dispatcher are both exercised.
 
 use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
@@ -229,31 +177,55 @@ fn a_bulk_unmask_dispatch_opens_the_cold_isolates_backend() {
     crate::reset_context_for_tests();
 }
 
-/// `dispatch_set_mask_policy_field`, entered at `__platform.setMaskPolicy(p)`.
-///
-/// This is the site `tx_scope::ensure_backend`'s rustdoc calls load-bearing:
-/// `installSchema` fires it at boot, typically before any other op has opened
-/// the backend, so it is the one that would fail on EVERY fresh isolate.
+/// Startup policy installation neither opens a backend nor touches its files.
 #[test]
-fn a_set_mask_policy_dispatch_opens_the_cold_isolates_backend() {
-    let _dir = cold_sqlite_isolate();
+fn mask_policy_install_does_not_open_a_database() {
+    let dir = cold_sqlite_isolate();
     cold_isolate!(let scope, let state);
-
-    let platform =
-        super::db_platform::mint_db_platform(scope, DbBinding::cold_start("app_cold_policy"))
-            .expect("mint_db_platform");
+    let binding = DbBinding::cold_start("app_cold_policy");
+    let platform = super::db_platform::mint_db_platform(scope, binding.clone()).unwrap();
     let policy = js_json(scope, r#"{ "support": ["spi"] }"#);
     call_js_method(scope, platform, "setMaskPolicy", &[policy]);
-
-    assert_the_dispatch_opened_the_backend("dispatch_set_mask_policy_field", &state);
-
-    // This arm CAN rule on the outcome, and does: a policy install needs
-    // nothing but a backend, so the cold dispatch has to succeed outright.
+    let settled = settle_pushed_ops(&state);
+    assert_eq!(settled.len(), 1);
+    assert!(rejection_code(&settled[0]).is_none());
+    assert!(crate::context::with(|context| context.backend()).is_none());
+    assert!(std::fs::read_dir(dir.path()).unwrap().next().is_none());
     assert!(
-        crate::crud::mask_policy::cache_get("app_cold_policy")
-            .is_some_and(|policy| policy.allows("support", "spi")),
-        "the cold setMaskPolicy must have installed and cached the policy"
+        zeroship_data_orm::protection::mask_policy::cache_get(&binding)
+            .unwrap()
+            .allows("support", "spi")
     );
+
+    let changed = js_json(scope, r#"{ "support": ["pii"] }"#);
+    call_js_method(scope, platform, "setMaskPolicy", &[changed]);
+    let settled = settle_pushed_ops(&state);
+    assert_eq!(
+        rejection_code(&settled[0]).as_deref(),
+        Some("mask_policy_immutable")
+    );
+    let next = DbBinding::new(binding.app_id(), "next_deploy", binding.schema().clone());
+    let next_platform = super::db_platform::mint_db_platform(scope, next.clone()).unwrap();
+    call_js_method(scope, next_platform, "setMaskPolicy", &[changed]);
+    let settled = settle_pushed_ops(&state);
+    assert!(rejection_code(&settled[0]).is_none());
+    assert!(
+        zeroship_data_orm::protection::mask_policy::cache_get(&next)
+            .unwrap()
+            .allows("support", "pii")
+    );
+    assert!(
+        zeroship_data_orm::protection::mask_policy::cache_get(&binding)
+            .unwrap()
+            .allows("support", "spi")
+    );
+    assert!(
+        !zeroship_data_orm::protection::mask_policy::cache_get(&binding)
+            .unwrap()
+            .allows("support", "pii")
+    );
+    assert!(crate::context::with(|context| context.backend()).is_none());
+    assert!(std::fs::read_dir(dir.path()).unwrap().next().is_none());
     crate::reset_context_for_tests();
 }
 

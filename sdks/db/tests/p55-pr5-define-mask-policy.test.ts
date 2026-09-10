@@ -24,9 +24,8 @@ import { _flushPendingMaskPolicy, _peekPendingMaskPolicy } from "@zeroship/db/in
 
 describe("P5.5 PR 5 — defineMaskPolicy() validation", () => {
   beforeEach(() => {
-    // Drain any pending policy left by a previous test — the
-    // module-local slot is process-global.
-    _flushPendingMaskPolicy();
+    // Each case represents a fresh app isolate.
+    Reflect.deleteProperty(globalThis, Symbol.for("@zeroship/db/MaskPolicyState"));
   });
 
   test("well-formed policy parks in the pending slot", () => {
@@ -59,7 +58,30 @@ describe("P5.5 PR 5 — defineMaskPolicy() validation", () => {
     assert.equal(second, null, "second flush returns null");
   });
 
-  test("re-declaring overwrites the pending slot", () => {
+
+  test("policy cannot change after the startup flush", () => {
+    defineMaskPolicy({ support: ["public"] });
+    const installed = _flushPendingMaskPolicy();
+    assert.throws(
+      () => defineMaskPolicy({ support: ["pii"] }),
+      { code: "MASK_POLICY_IMMUTABLE" },
+    );
+    assert.deepEqual(installed!.support, ["public"]);
+    assert.equal(_flushPendingMaskPolicy(), null);
+    assert.ok(Object.isFrozen(installed));
+    assert.ok(Object.isFrozen(installed!.support));
+  });
+
+  test("startup without a declaration also prevents runtime changes", () => {
+    assert.equal(_flushPendingMaskPolicy(), null);
+    assert.throws(
+      () => defineMaskPolicy({ support: ["pii"] }),
+      { code: "MASK_POLICY_IMMUTABLE" },
+    );
+    assert.equal(_flushPendingMaskPolicy(), null);
+  });
+
+  test("re-declaring during startup overwrites the pending slot", () => {
     defineMaskPolicy({ user: ["public"] });
     defineMaskPolicy({ admin: ["pii"] });
     const parked = _peekPendingMaskPolicy();

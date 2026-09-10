@@ -700,7 +700,8 @@ mod tests {
     /// Row 1: `COMMIT` Ok + autocommit true. The only confirmed-commit arm.
     #[test]
     fn commit_ok_with_autocommit_true_is_the_only_committed_arm() {
-        let conn = Connection::open_in_memory().unwrap();
+        let conn_file = tempfile::NamedTempFile::new().unwrap();
+        let conn = Connection::open(conn_file.path()).unwrap();
         conn.execute_batch("CREATE TABLE t (x); BEGIN; INSERT INTO t VALUES (1);")
             .unwrap();
         let raw = conn.execute_batch("COMMIT");
@@ -711,7 +712,8 @@ mod tests {
     /// contradiction, and must NOT publish success.
     #[test]
     fn commit_ok_with_autocommit_false_is_indeterminate_not_success() {
-        let conn = Connection::open_in_memory().unwrap();
+        let conn_file = tempfile::NamedTempFile::new().unwrap();
+        let conn = Connection::open(conn_file.path()).unwrap();
         conn.execute_batch("CREATE TABLE t (x); BEGIN;").unwrap();
         // Feed a synthetic Ok while the connection is provably in a
         // transaction: this is the contradiction the row describes.
@@ -729,7 +731,8 @@ mod tests {
     /// autocommit true -> `CommitFailed`.
     #[test]
     fn commit_err_inside_a_transaction_rolls_back_and_reports_commit_failed() {
-        let conn = Connection::open_in_memory().unwrap();
+        let conn_file = tempfile::NamedTempFile::new().unwrap();
+        let conn = Connection::open(conn_file.path()).unwrap();
         conn.execute_batch("CREATE TABLE t (x); BEGIN; INSERT INTO t VALUES (1);")
             .unwrap();
         assert!(!conn.is_autocommit());
@@ -751,7 +754,8 @@ mod tests {
     /// `CommitIndeterminate` - never `CommitFailed`.
     #[test]
     fn commit_err_with_the_transaction_already_ended_is_indeterminate() {
-        let conn = Connection::open_in_memory().unwrap();
+        let conn_file = tempfile::NamedTempFile::new().unwrap();
+        let conn = Connection::open(conn_file.path()).unwrap();
         conn.execute_batch("CREATE TABLE t (x);").unwrap();
         assert!(conn.is_autocommit());
         let outcome = classify_commit(&conn, Err(synth(9)));
@@ -766,7 +770,8 @@ mod tests {
     #[test]
     fn rollback_ok_reports_rolled_back_or_cancelled_by_intent() {
         for cancellation in [false, true] {
-            let conn = Connection::open_in_memory().unwrap();
+            let conn_file = tempfile::NamedTempFile::new().unwrap();
+            let conn = Connection::open(conn_file.path()).unwrap();
             conn.execute_batch("CREATE TABLE t (x); BEGIN; INSERT INTO t VALUES (1);")
                 .unwrap();
             let raw = conn.execute_batch("ROLLBACK");
@@ -790,7 +795,8 @@ mod tests {
     /// failure.
     #[test]
     fn rollback_err_on_an_already_ended_transaction_is_not_a_failure() {
-        let conn = Connection::open_in_memory().unwrap();
+        let conn_file = tempfile::NamedTempFile::new().unwrap();
+        let conn = Connection::open(conn_file.path()).unwrap();
         conn.execute_batch("CREATE TABLE t (x);").unwrap();
         // A real "cannot rollback - no transaction is active" error.
         let raw = conn.execute_batch("ROLLBACK");
@@ -814,7 +820,8 @@ mod tests {
     /// Row 8: `ROLLBACK` leaving the connection inside a transaction.
     #[test]
     fn rollback_that_leaves_a_transaction_open_quarantines() {
-        let conn = Connection::open_in_memory().unwrap();
+        let conn_file = tempfile::NamedTempFile::new().unwrap();
+        let conn = Connection::open(conn_file.path()).unwrap();
         conn.execute_batch("CREATE TABLE t (x); BEGIN;").unwrap();
         assert!(!conn.is_autocommit());
         // Synthetic: the statement is claimed to have run but the connection

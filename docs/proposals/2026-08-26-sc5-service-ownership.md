@@ -115,7 +115,7 @@ handle") and defines by pointing here.
 (`crates/zeroship-data-orm/src/transaction/reducer/identity.rs`). The single
 production construction site mints incarnation 0, domain `(0, 0)`, epoch 0,
 `Stable` and an empty ceiling, and `observation_for` echoes the expectation back
-(`crates/zeroship-data-orm/src/transaction/driver.rs:141-165`, which says so in
+(`crates/zeroship-data-orm/src/transaction/driver.rs`, which says so in
 its own doc comment), so `classify` can only return `Current` in production and
 the three typed denial codes are unreachable outside tests. Fork C is the input
 that machine is waiting for; `driver.rs`'s two functions are the ones that change.
@@ -232,7 +232,7 @@ truth about the tier and is worth stating rather than simulating.
 The attach generation fences a *file*. What ships is app-keyed exactly like
 production: `SqliteBackend::attach_app_file` takes an `app_id`, derives
 `zs-{app_id}.sqlite`, aliases the attachment by app id and dedups on
-`app_id_cache` (`crates/zeroship-data-orm/src/backend/sqlite/mod.rs:680-704`, field at
+`app_id_cache` (`crates/zeroship-data-orm/src/backend/sqlite/mod.rs`, field at
 `:167`). One file per app, one app per file. If an app may hold several
 databases, the file name, the alias and the cache key can no longer all be the
 app id.
@@ -299,7 +299,7 @@ selection or `Pool::connect`.
 
 **1.3 Operator deprovisioning: one pool per batch, no second parse, release
 proved.** SHIPPED: `operator_deprovisioning_reuses_one_pool_and_reparses_nothing`
-(`crates/zeroship-data-v8/tests/integration.rs:3637`); the production release
+(`crates/zeroship-data-v8/tests/integration.rs`); the production release
 call is `crates/zeroship-worker/src/sync.rs:205`. **Three** deletions, then
 `close_operator_pools`, then a fourth. The parse counter is unchanged from
 composition; the pool-open delta across the batch is exactly 1; the delta after
@@ -312,7 +312,7 @@ on the version-poller thread, which hosts no isolate and so has no data-plane po
 to reuse; "no pool" can only be met by not connecting at all. The clause protects
 against a pool **per deletion** - two connects, two authentications and two TLS
 handshakes per deprovisioned app. One memoised pool per reconcile batch delivers
-that (`OPERATOR_POOL_SIZE = 2`, `crates/zeroship-data-v8/src/service.rs:77`).
+that (`OPERATOR_POOL_SIZE = 2`, `crates/zeroship-data-v8/src/service.rs`).
 The release must be called where a runtime can still drive shutdown: dropping a
 `Pool` asks its detached driver tasks to close, it does not wait for them.
 
@@ -344,8 +344,8 @@ key; the `Rc::ptr_eq` observable is axis-free.
 
 **1.5 The initialization singleflight.** SHIPPED. The mechanism is
 `ThreadDbContext::begin_backend_init` / `finish_backend_init`
-(`crates/zeroship-data-v8/src/context.rs:253-268`), claimed at
-`crates/zeroship-data-v8/src/lib.rs:1222`; the arm is
+(`crates/zeroship-data-v8/src/context.rs`), claimed at
+`crates/zeroship-data-v8/src/lib.rs`; the arm is
 `concurrent_sqlite_lazy_init_shares_one_backend` (`lib.rs:1423`). Eight concurrent
 cold inits open exactly one backend; remove `begin_backend_init` and it reports 8.
 It is also the liveness proof for `service::backend_open_count`, which 1.2 asserts
@@ -447,7 +447,7 @@ the in-flight operation returns its own result unaffected (it uses the operator
 pool and touches no data-plane pool); the next operation for the same app is denied
 at its authority read. Red when deprovision yanks the backend from under live `Rc`
 holders. **Scoped to PostgreSQL deliberately:** SC-2's `Command::ReattachFile`
-(`crates/zeroship-data-orm/src/backend/sqlite/session.rs:306`) **must** settle or abort
+(`crates/zeroship-data-orm/src/backend/sqlite/session.rs`) **must** settle or abort
 outstanding reservations and detach both connections before restore's file swap, so
 an unscoped no-abort rule and SC-2 are jointly unsatisfiable on SQLite. Graceful
 deprovision and forced file detach are different events.

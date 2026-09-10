@@ -1,15 +1,15 @@
 //! Runtime registration and routed backend extensions for the shared ORM.
 use crate::{
+    backend::Backend,
     binding::DbBinding,
     capability::{ScalarRead, UnmaskAuditRow},
-    driver::{Backend, SpatialSearch, VectorSearch},
     error::DbError,
+    search::{SpatialSearch, VectorSearch},
     tx_route::TxRoute,
 };
 use std::{any::Any, ops::Deref, rc::Rc};
 use zeroship_data_sql::{
     SchemaName,
-    compile::SqlDialect,
     descriptors::{GeoPoint, VectorMetric},
     value::Value,
 };
@@ -51,10 +51,7 @@ impl BackendHandle {
         attach_alias: &str,
         row: &UnmaskAuditRow<'_>,
     ) -> Result<(), DbError> {
-        let namespace = match self.dialect() {
-            SqlDialect::Sqlite => attach_alias,
-            _ => schema.as_str(),
-        };
+        let namespace = self.namespace(attach_alias, schema);
         let params = vec![
             row.actor_id.into(),
             row.actor_role.into(),
@@ -176,10 +173,7 @@ pub async fn read_raw_column_value(
     raw_column: &str,
     row_pk: &str,
 ) -> Result<ScalarRead<Value>, DbError> {
-    let namespace = match route.dialect() {
-        SqlDialect::Sqlite => route.app_id(),
-        _ => route.schema().as_str(),
-    };
+    let namespace = route.backend().namespace(route.app_id(), route.schema());
     let query = zeroship_data_sql::internal::raw_column(
         namespace,
         collection,
@@ -235,8 +229,8 @@ mod routed_read_tests {
     use std::rc::Rc;
 
     use super::*;
-    use crate::storage::SqlExecutor;
     use crate::tx_route::CapturedRoute;
+    use zeroship_data_orm::fixtures::DatabaseFixture;
 
     /// A raw-sibling read inside a transaction must see that transaction's own
     /// write; the same read outside it must not.
@@ -261,7 +255,7 @@ mod routed_read_tests {
                 .await
                 .expect("attach the app file");
             backend
-                .pool_exec(
+                .execute_fixture(
                     &format!(
                         r#"CREATE TABLE "{app}"."people" (
                                id TEXT PRIMARY KEY,

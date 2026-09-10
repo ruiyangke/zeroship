@@ -246,6 +246,37 @@ if ! gate_arm relay_is_unlinked "$n_bins" 7; then
 fi
 
 echo
+# The physical driver contract must remain independent of host services.
+# Test fixtures may compose a host; inspect the production prefix only.
+driver_forbidden='DbBinding|KeyStore|LocalKeySource|VectorSearch|SpatialSearch|Search|Catalog|Protection|Backend|prepare_for_app|app_id|publishes_committed_changes|::broker|::cdc|::binding|::encryption|::protection|::search|use super::\*'
+n_drivers=0
+for source in crates/zeroship-data-orm/src/driver.rs \
+              crates/zeroship-data-orm/src/backend/postgres/driver.rs \
+              crates/zeroship-data-orm/src/backend/sqlite/driver.rs; do
+  if [ ! -s "$source" ]; then
+    bad "missing physical driver source: $source"
+    continue
+  fi
+  n_drivers=$((n_drivers + 1))
+  if sed '/^#\[cfg(test)\]/,$d' "$source" | sed '/^[[:space:]]*\/\//d' | rg "$driver_forbidden"; then
+    bad "physical driver names an application service: $source"
+  else
+    good "plain driver contract: $source"
+  fi
+done
+gate_arm plain_driver_sources "$n_drivers" 3 || FAIL=$((FAIL + 1))
+
+n_controls=0
+for sample in 'fn search(binding: DbBinding)' 'fn key_store() -> KeyStore'; do
+  n_controls=$((n_controls + 1))
+  if printf '%s\n' "$sample" | rg -q "$driver_forbidden"; then
+    good "driver boundary detector rejected host-service control"
+  else
+    bad "driver boundary detector missed host-service control"
+  fi
+done
+gate_arm plain_driver_controls "$n_controls" 2 || FAIL=$((FAIL + 1))
+
 gate_arms_finish || FAIL=$((FAIL + 1))
 
 echo

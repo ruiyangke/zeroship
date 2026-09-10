@@ -68,7 +68,13 @@ pub async fn roled_rows(
     sql: &str,
     params: &[Value],
 ) -> Result<Vec<compio_postgres::Row>, DbError> {
-    let mut client = pool.acquire().await.map_err(|e| pg_error::classify(&e))?;
+    use crate::driver::{Driver, LeaseKind};
+    let mut lease = super::driver::PostgresDriver::new(pool.clone())
+        .acquire(LeaseKind::Transaction)
+        .await?;
+    let client = lease
+        .get_mut::<compio_postgres::PoolConnection>()
+        .expect("PostgresDriver returns a PostgreSQL lease");
 
     // P2-C1: run the per-app role + DB-1 timeout guards via `SET LOCAL`
     // inside an explicit transaction, exactly like the explicit-tx path
@@ -139,7 +145,7 @@ pub(crate) async fn roled_json(
     params: &[Value],
 ) -> Result<Vec<Value>, DbError> {
     let rows = roled_rows(pool, schema, sql, params).await?;
-    Ok(crate::backend::postgres::pg_row_json::rows_to_values(&rows))
+    crate::backend::postgres::pg_row_json::rows_to_values(&rows)
 }
 
 /// Read column 0 of the first row as raw bytes, under the per-app role.

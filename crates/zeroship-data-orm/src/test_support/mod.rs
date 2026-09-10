@@ -244,7 +244,7 @@ where
 /// A real backend for units that must PASS one but never reach a statement.
 ///
 /// The engine's row-facing entry points - `crud::read_pipeline::apply` and the
-/// four `crud::unmask` dispatchers - take `&BackendHandle` as a parameter
+/// four `protection::unmask` dispatchers - take `&BackendHandle` as a parameter
 /// rather than resolving one from the thread's context, because resolving it
 /// reads ADAPTER state and those files are ENGINE. Their unit tests refuse or
 /// return in a prologue that runs before the first statement, so any real
@@ -292,7 +292,7 @@ where
 /// [`unit_backend`], wrapped in the pool-lane route the row-facing entry points
 /// now take.
 ///
-/// `crud::read_pipeline::apply` and the three `crud::unmask` dispatchers took a
+/// `crud::read_pipeline::apply` and the three `protection::unmask` dispatchers took a
 /// `&BackendHandle` until 2026-09-03 and take a `&TxRoute` now, because a
 /// handle names a BACKEND and their raw-column SELECT also has to name a
 /// CONNECTION. `ambient_route_for_tests` reads the parked-tx slot, which is

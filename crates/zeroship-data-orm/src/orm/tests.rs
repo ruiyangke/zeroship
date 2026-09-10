@@ -1,5 +1,5 @@
 use super::*;
-use zeroship_data_orm::{encryption::LocalKeySource, storage::SqlExecutor};
+use zeroship_data_orm::encryption::LocalKeySource;
 use zeroship_data_sql::value;
 
 schema!(pub test_schema = "../../tests/fixtures/schema.runtime.json");
@@ -86,6 +86,82 @@ async fn defaults_null_changes_projections_and_native_buffers() {
 }
 
 #[compio::test]
+async fn sqlite_search_values_round_trip_through_the_rust_orm() {
+    let (db, directory) = database().await;
+    let fields = value!({
+        "embedding": {"type":"vector", "vectorDims":2},
+        "location": {"type":"geoPoint"},
+    });
+    let policy = zeroship_migrate::effective_policy_from_charter_toml(
+        zeroship_migrate_server::policy::CONFINED_CEILING_TOML,
+    )
+    .unwrap();
+    let sql = zeroship_migrate::schema::query::build_create_table_with_fks_for_dialect(
+        zeroship_migrate::shipping_vendors(),
+        "main",
+        "places",
+        &serde_json::to_value(&fields).unwrap(),
+        &zeroship_migrate::schema::query::FkEmission::Inline,
+        &zeroship_migrate_sqlite::DIALECT,
+        &policy,
+    )
+    .unwrap();
+    let fixture = rusqlite::Connection::open(
+        directory
+            .path()
+            .join(format!("zs-{}.sqlite", db.binding.app_id())),
+    )
+    .unwrap();
+    fixture.execute_batch(&sql).unwrap();
+    drop(fixture);
+    let db = Database::from_schema(
+        db.binding.clone(),
+        db.backend.clone(),
+        vec![("places".into(), fields)],
+    )
+    .unwrap();
+    let expected = value!({"embedding":[1.0, -0.5], "location":{"lat":37.0, "lng":-122.0}});
+    let document = expected.clone();
+    let id = db
+        .transaction(|tx| async move {
+            let Output::Rows { rows, .. } =
+                tx.collection("places")?.insert(document.clone()).await?
+            else {
+                panic!("insert must return a row")
+            };
+            assert_eq!(rows[0]["embedding"], document["embedding"]);
+            assert_eq!(rows[0]["location"], document["location"]);
+            Ok(rows[0]["id"].clone())
+        })
+        .await
+        .unwrap();
+    let Output::Rows { rows, .. } = db
+        .collection("places")
+        .unwrap()
+        .find(value!({"id":id}), value!({}))
+        .await
+        .unwrap()
+    else {
+        panic!("find must return rows")
+    };
+    assert_eq!(rows.len(), 1);
+    let embedding =
+        <Vec<f32> as DecodeValue<sql_types::Vector>>::decode_value(rows[0]["embedding"].clone())
+            .unwrap();
+    let point =
+        <Point as DecodeValue<sql_types::GeoPoint>>::decode_value(rows[0]["location"].clone())
+            .unwrap();
+    assert_eq!(embedding, vec![1.0, -0.5]);
+    assert_eq!(
+        point,
+        Point {
+            lat: 37.0,
+            lng: -122.0
+        }
+    );
+}
+
+#[compio::test]
 async fn postgres_native_models_round_trip() {
     crate::reset_engine_for_tests();
     let backend = Rc::new(
@@ -101,11 +177,11 @@ async fn postgres_native_models_round_trip() {
     let binding = DbBinding::cold_start(&app);
     let quoted_schema = crate::compile::quote_ident(&app);
     backend
-        .pool_exec(&format!("CREATE SCHEMA {quoted_schema}"), &[])
+        .execute_fixture(&format!("CREATE SCHEMA {quoted_schema}"), &[])
         .await
         .unwrap();
     for sql in table_statements(&app, &zeroship_migrate_postgres::DIALECT) {
-        backend.pool_exec(&sql, &[]).await.unwrap();
+        backend.execute_fixture(&sql, &[]).await.unwrap();
     }
     crate::auth::bootstrap::ensure_per_app_role(backend.pool(), &app)
         .await
@@ -113,7 +189,7 @@ async fn postgres_native_models_round_trip() {
     let role = zeroship_core::database_role::per_app_role_name(&app).unwrap();
     let quoted_role = crate::compile::quote_ident(&role);
     backend
-        .pool_exec(
+        .execute_fixture(
             &format!(
                 "GRANT SELECT, INSERT, UPDATE, DELETE ON {quoted_schema}.posts TO {quoted_role}"
             ),
@@ -134,15 +210,15 @@ async fn postgres_native_models_round_trip() {
     exercise_registered_backend(db.clone()).await;
     drop(db);
     backend
-        .pool_exec(&format!("DROP SCHEMA {quoted_schema} CASCADE"), &[])
+        .execute_fixture(&format!("DROP SCHEMA {quoted_schema} CASCADE"), &[])
         .await
         .unwrap();
     backend
-        .pool_exec(&format!("DROP OWNED BY {quoted_role}"), &[])
+        .execute_fixture(&format!("DROP OWNED BY {quoted_role}"), &[])
         .await
         .unwrap();
     backend
-        .pool_exec(&format!("DROP ROLE {quoted_role}"), &[])
+        .execute_fixture(&format!("DROP ROLE {quoted_role}"), &[])
         .await
         .unwrap();
 }
@@ -329,7 +405,7 @@ fn native_codecs_check_ranges_and_protected_values() {
         "_sig": "forged"
     });
     assert!(<Protected<String> as DecodeValue<Text>>::decode_value(sentinel.clone()).is_err());
-    sentinel["_sig"] = Value::from(crate::crud::mask_pass::mask_sentinel_signature());
+    sentinel["_sig"] = Value::from(crate::protection::mask_pass::mask_sentinel_signature());
     assert_eq!(
         <Protected<String> as DecodeValue<Text>>::decode_value(sentinel).unwrap(),
         Protected::Masked {
@@ -350,8 +426,10 @@ async fn typed_handles_refuse_descriptor_drift() {
     let records = db.entity::<posts::Entity>().unwrap();
     let mut changed = <posts::Entity as Entity>::schema().clone();
     changed["title"]["type"] = Value::from("boolean");
-    zeroship_data_orm::schema_cache::with_mut(|cache| {
-        cache.insert_one(db.binding(), "posts", changed);
+    db.context().with(|| {
+        zeroship_data_orm::schema_cache::with_mut(|cache| {
+            cache.insert_one(db.binding(), "posts", changed);
+        })
     });
     assert!(matches!(
         db.entity::<posts::Entity>(),
@@ -663,12 +741,9 @@ struct RegisteredBackend {
     transactions: Rc<Cell<usize>>,
 }
 #[async_trait::async_trait(?Send)]
-impl crate::driver::Driver for RegisteredBackend {
+impl crate::executor::ScopedExecutor for RegisteredBackend {
     fn dialect(&self) -> crate::compile::SqlDialect {
         self.inner.dialect()
-    }
-    fn publishes_committed_changes(&self) -> bool {
-        self.inner.publishes_committed_changes()
     }
     async fn prepare_for_app(&self, app_id: &str) -> Result<(), DbError> {
         self.inner.prepare_for_app(app_id).await
@@ -694,40 +769,37 @@ impl crate::driver::Driver for RegisteredBackend {
     }
 }
 #[async_trait::async_trait(?Send)]
-impl crate::driver::Catalog for RegisteredBackend {
+impl crate::protection::Catalog for RegisteredBackend {
     async fn introspect_schema(&self, app_id: &str) -> Result<crate::catalog::LiveSchema, DbError> {
         self.inner.introspect_schema(app_id).await
     }
 }
 #[async_trait::async_trait(?Send)]
-impl crate::driver::PolicyStore for RegisteredBackend {
-    async fn persist_mask_policy(&self, app_id: &str, policy: &Value) -> Result<(), DbError> {
-        self.inner.persist_mask_policy(app_id, policy).await
-    }
-    async fn load_mask_policy(&self, app_id: &str) -> Result<Option<Value>, DbError> {
-        self.inner.load_mask_policy(app_id).await
-    }
-}
-#[async_trait::async_trait(?Send)]
-impl crate::driver::Search for RegisteredBackend {
+impl crate::search::Search for RegisteredBackend {
     async fn vector_search(
         &self,
         session: Option<&crate::driver::Session>,
-        request: crate::driver::VectorSearch<'_>,
+        request: crate::search::VectorSearch<'_>,
     ) -> Result<Vec<Value>, DbError> {
         self.inner.vector_search(session, request).await
     }
     async fn spatial_near(
         &self,
         session: Option<&crate::driver::Session>,
-        request: crate::driver::SpatialSearch<'_>,
+        request: crate::search::SpatialSearch<'_>,
     ) -> Result<Vec<Value>, DbError> {
         self.inner.spatial_near(session, request).await
     }
 }
-impl crate::driver::Backend for RegisteredBackend {
+impl crate::protection::Protection for RegisteredBackend {
     fn key_store(&self) -> &crate::encryption::KeyStore {
         self.inner.key_store()
+    }
+}
+
+impl crate::backend::Backend for RegisteredBackend {
+    fn publishes_committed_changes(&self) -> bool {
+        self.inner.publishes_committed_changes()
     }
 }
 
@@ -846,5 +918,146 @@ async fn changing_backend_registration_refuses_an_open_transaction() {
             .await
             .unwrap()
             .is_empty()
+    );
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+use zeroship_data_orm::fixtures::DatabaseFixture;
+
+#[compio::test]
+async fn independent_databases_keep_schema_policy_and_transactions_isolated() {
+    let (first, _first_files) = database().await;
+    let (second, _second_files) = database().await;
+    assert_eq!(first.binding(), second.binding());
+    first.install_mask_policy(value!({})).unwrap();
+    second
+        .install_mask_policy(value!({ "reader": ["pii"] }))
+        .unwrap();
+    let read_first = first
+        .entity::<posts::Entity>()
+        .unwrap()
+        .find::<Post>(Filter::all(), Default::default());
+    second.context().with(|| {
+        crate::schema_cache::with_mut(|cache| {
+            cache.insert_one(
+                second.binding(),
+                "only_second",
+                value!({ "flag": { "type": "boolean" } }),
+            );
+        })
+    });
+    assert!(first.collection("only_second").is_err());
+    assert!(second.collection("only_second").is_ok());
+    assert!(read_first.await.unwrap().is_empty());
+
+    let other = second.clone();
+    let result: Result<(), DbError> = compio::time::timeout(
+        std::time::Duration::from_secs(10),
+        first.transaction(|first_tx| async move {
+            let _: Post = first_tx
+                .entity::<posts::Entity>()?
+                .insert(NewPost {
+                    title: "rolled back".into(),
+                })
+                .await?;
+            other
+                .transaction(|second_tx| async move {
+                    let _: Post = second_tx
+                        .entity::<posts::Entity>()?
+                        .insert(NewPost {
+                            title: "committed".into(),
+                        })
+                        .await?;
+                    Ok(())
+                })
+                .await?;
+            Err(DbError::internal("roll back the first database"))
+        }),
+    )
+    .await
+    .expect("independent transaction admission must not block");
+    assert!(result.is_err());
+    assert!(
+        first
+            .entity::<posts::Entity>()
+            .unwrap()
+            .find::<Post>(Filter::all(), Default::default())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let rows = second
+        .entity::<posts::Entity>()
+        .unwrap()
+        .find::<Post>(Filter::all(), Default::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.iter()
+            .map(|row| row.title.as_str())
+            .collect::<Vec<_>>(),
+        ["committed"]
+    );
+}
+
+#[compio::test]
+async fn cancelled_transaction_cleans_up_its_own_context() {
+    let (first, _first_files) = database().await;
+    let (second, _second_files) = database().await;
+    let (ready_tx, ready_rx) = flume::bounded(1);
+    let mut cancelled = Box::pin(first.transaction(|tx| async move {
+        let _: Post = tx
+            .entity::<posts::Entity>()?
+            .insert(NewPost {
+                title: "cancelled".into(),
+            })
+            .await?;
+        ready_tx.send_async(()).await.unwrap();
+        std::future::pending::<()>().await;
+        Ok(())
+    }));
+    std::future::poll_fn(|cx| {
+        assert!(cancelled.as_mut().poll(cx).is_pending());
+        if ready_rx.try_recv().is_ok() {
+            std::task::Poll::Ready(())
+        } else {
+            std::task::Poll::Pending
+        }
+    })
+    .await;
+    // Drop from another database's context: recovery must retain its origin.
+    second.context().with(|| drop(cancelled));
+    let _: Post = second
+        .entity::<posts::Entity>()
+        .unwrap()
+        .insert(NewPost {
+            title: "survives".into(),
+        })
+        .await
+        .unwrap();
+    compio::time::timeout(
+        std::time::Duration::from_secs(10),
+        first.transaction(|tx| async move {
+            assert!(
+                tx.entity::<posts::Entity>()?
+                    .find::<Post>(Filter::all(), Default::default())
+                    .await?
+                    .is_empty()
+            );
+            Ok(())
+        }),
+    )
+    .await
+    .expect("cancelled transaction must release its admission")
+    .unwrap();
+    assert_eq!(
+        second
+            .entity::<posts::Entity>()
+            .unwrap()
+            .find::<Post>(Filter::all(), Default::default())
+            .await
+            .unwrap()[0]
+            .title,
+        "survives"
     );
 }

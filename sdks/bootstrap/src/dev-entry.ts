@@ -291,14 +291,12 @@ export function devEntry(options: DevEntryOptions): DevEntry {
       const pending = typeof policyMod._flushPendingMaskPolicy === "function"
         ? policyMod._flushPendingMaskPolicy()
         : null;
-      if (pending) {
-        const setMaskPolicy = (platform as { setMaskPolicy?: unknown } | undefined)?.setMaskPolicy;
-        if (typeof setMaskPolicy === "function") {
-          await (setMaskPolicy as (
-            this: typeof platform,
-            p: Record<string, readonly string[]>,
-          ) => Promise<unknown>).call(platform, pending);
-        }
+      const setMaskPolicy = (platform as { setMaskPolicy?: unknown } | undefined)?.setMaskPolicy;
+      if (typeof setMaskPolicy === "function") {
+        await (setMaskPolicy as (
+          this: typeof platform,
+          p: Record<string, readonly string[]>,
+        ) => Promise<unknown>).call(platform, pending ?? {});
       }
     })();
     log(`[zeroship:dev] installed schema from runtime descriptor`);

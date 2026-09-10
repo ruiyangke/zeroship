@@ -71,7 +71,9 @@ pub fn create_sqlite_table(db_dir: &Path, app_id: &str, ddl: &str) {
         .expect("the fixture db_dir path is UTF-8")
         .replace('\'', "''");
 
-    let conn = Connection::open_in_memory().expect("open the fixture connection");
+    let conn_file = tempfile::NamedTempFile::new().unwrap();
+
+    let conn = Connection::open(conn_file.path()).expect("open the fixture connection");
     conn.execute_batch(&format!("ATTACH DATABASE '{path}' AS \"{app_id}\";"))
         .expect("attach the app file under the alias the data plane addresses");
     conn.execute_batch(ddl)

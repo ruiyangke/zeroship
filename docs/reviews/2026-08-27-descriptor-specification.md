@@ -55,13 +55,13 @@ conclusion, and each is stronger than "the code could be rewritten":
    read/write *pipelines* read the INTROSPECTED cache (`runtime_schema_for`, 4
    production sites, section 1.2). The introspected source is strictly poorer: its
    builder emits only `{ type, encrypted?, mask? }`
-   (`crates/zeroship-data-v8/src/crud/introspect_schema.rs:303-323`) and its
+   (`crates/zeroship-data-v8/src/crud/introspect_schema.rs`) and its
    type mapper cannot produce the `vector` or `geoPoint` tokens at all
    (`introspect_schema.rs:329-353`), which two live consumers require
-   (`crates/zeroship-data-v8/src/crud/mod.rs:366-405`,
+   (`crates/zeroship-data-v8/src/crud/mod.rs`,
    `crud/mod.rs:2609-2621`). The declared source is the richer one, and it is
    already fed from the descriptor on the `.zship` path
-   (`crates/zeroship-data-v8/src/register_model/mod.rs:176-182`).
+   (`crates/zeroship-data-v8/src/register_model/mod.rs`).
 
 2. **On SQLite, "descriptor is the sole authority" is already the shipped
    behaviour.** `runtime_schema_for` has no SQLite introspector; it falls back
@@ -73,7 +73,7 @@ conclusion, and each is stronger than "the code could be rewritten":
    doc admits the logical-type collapse (`introspect_schema.rs:29-43`), and the
    SQLite arm's `ColumnInfo.vector_dims` / `is_geopoint` are documented as
    populated but are left at `Default` with no regex in the tree
-   (`crates/zeroship-data-v8/src/backend/sqlite/mod.rs:953-958`)
+   (`crates/zeroship-data-v8/src/backend/sqlite/mod.rs`)
    `[delegated]`. Introspection is the lossy path, not the authoritative one.
 
 The only live-database reads that survive in the data plane after the descriptor
@@ -114,7 +114,7 @@ and should be re-keyed.
 
 ### 1.1 The DECLARED-schema cache (`ThreadDbContext::schema_for`) - 17 readers
 
-Definition: `crates/zeroship-data-v8/src/context.rs:698-705`. A
+Definition: `crates/zeroship-data-v8/src/context.rs`. A
 `HashMap<"{app_id}:{collection}", serde_json::Value>` holding the raw JSON the
 SDK declared. Written only by `cache_schema` (`context.rs:672-680`), called only
 from `register_model_dispatch` (`register_model/mod.rs:102-104`).
@@ -182,7 +182,7 @@ Non-production: `crud/mod.rs:2486-2496` (`runtime_schema_for_tests`, gated
 
 These are not separate cache reads; they are what the `schema_hint` is used FOR.
 `crate::query` in plugin-db is a re-export of `zeroship_schema::query`
-(`crates/zeroship-data-v8/src/lib.rs:88`).
+(`crates/zeroship-data-v8/src/lib.rs`).
 
 | # | file:line | Function | Fact | What it does |
 |---|---|---|---|---|
@@ -290,7 +290,7 @@ reads and are not:
 - `backend/sqlite/mod.rs:1936-1949` resolves the geoPoint column by scanning the
   RESULT SET's column names (`typed.columns.iter().position(..)`), not the
   catalog `[delegated]`.
-- `crates/zeroship-data-v8/src/v8_bridge.rs:462-464` picks a JSON decode by
+- `crates/zeroship-data-v8/src/v8_bridge.rs` picks a JSON decode by
   the wire `RowDescription` type OID, i.e. protocol metadata `[delegated]`.
 
 ### 1.8 What `read_live_schema` actually recovers, and what the data plane keeps
@@ -695,7 +695,7 @@ declare a column with a platform-reserved suffix - but nothing *derives* from it
 ### 3.5 `aadColumn` and why it is a separate field
 
 `canonical_aad(collection, column, row_pk)`
-(`crates/zeroship-data-v8/src/encryption/aad.rs:75-98`) length-prefixes the
+(`crates/zeroship-data-v8/src/encryption/aad.rs`) length-prefixes the
 column name into the AEAD tag. Consequences the specification must respect:
 
 1. **The physical column name is part of the authentication.** Change which
@@ -862,14 +862,14 @@ Counts are from a delegated static enumeration `[delegated]`; nothing was run.
 | `crud/introspect_schema.rs:988` | `encrypted_column_maps_to_declared_shape` | retarget to descriptor -> runtime shape |
 | `crud/introspect_schema.rs:1008` | `masked_parent_maps_and_sibling_is_dropped` | **the assertion INVERTS.** Today: `phone_masked` must NOT be a schema field. Under the flip the physical raw column must be recorded in `storage`, not dropped |
 | `crud/introspect_schema.rs:1030` | `jsonb_and_date_families_collapse_to_representative_tokens` | pure `pg_type` -> DSL-token mapping; **DELETE** unless the descriptor keeps a physical-type projection |
-| `crates/zeroship-data-v8/tests/integration.rs:5098` | `p4_round_trip_encrypted_masked_vector_via_introspected_metadata` | plants `COMMENT ON COLUMN ... 'zsenc:...'` / `'__zsmask:...'` (`:5146-5147`), asserts `runtime_schema_for_tests` recovered them (`:5162-5167`), then does a real round trip. **Keep the round trip; invert the assertion**: the metadata must come from the descriptor and no catalog read may occur |
-| `crates/zeroship-data-v8/tests/integration.rs:5385` | `p5_pg_crud_works_via_engine_created_schema_no_runtime_ddl` | same shape: sentinel plant at `:5425-5426`, assertions at `:5477-5482` |
-| `crates/zeroship-data-v8/tests/native_transaction.rs:1071` | `update_many_randomised_failure_is_atomic_postgres` | the test body is fine; its FIXTURE `create_encrypted_users_table` (`:247`) writes the `zsenc:` comment at `:270`, which is the only channel telling the data plane `ssn` is encrypted. **Fixture-only rewrite** |
+| `crates/zeroship-data-v8/tests/integration.rs` | `p4_round_trip_encrypted_masked_vector_via_introspected_metadata` | plants `COMMENT ON COLUMN ... 'zsenc:...'` / `'__zsmask:...'` (`:5146-5147`), asserts `runtime_schema_for_tests` recovered them (`:5162-5167`), then does a real round trip. **Keep the round trip; invert the assertion**: the metadata must come from the descriptor and no catalog read may occur |
+| `crates/zeroship-data-v8/tests/integration.rs` | `p5_pg_crud_works_via_engine_created_schema_no_runtime_ddl` | same shape: sentinel plant at `:5425-5426`, assertions at `:5477-5482` |
+| `crates/zeroship-data-v8/tests/native_transaction.rs` | `update_many_randomised_failure_is_atomic_postgres` | the test body is fine; its FIXTURE `create_encrypted_users_table` (`:247`) writes the `zsenc:` comment at `:270`, which is the only channel telling the data plane `ssn` is encrypted. **Fixture-only rewrite** |
 
 **REWRITE-or-DELETE, gate-dependent - 2.** `context.rs:1378`
 (`registered_models_round_trip`) and `:1389` (`mark_model_registered_is_idempotent`)
 die only if the `is_model_registered` gate goes. Note also
-`crates/zeroship-data-v8/tests/sqlite_integration.rs:9748`
+`crates/zeroship-data-v8/tests/sqlite_integration.rs`
 (`p6c_data_plane_reaches_the_app_file_without_a_register`), which pins the exact
 cold-schema `None` path the descriptor removes; it currently passes for a reason
 that will no longer exist.
@@ -920,8 +920,8 @@ that is the regression the flip can introduce with every existing test green
 (section 3.5).
 
 **UNAFFECTED - 12.** Class-(v) end-to-end arms that route through introspection
-without asserting on it (`crates/zeroship-data-v8/tests/integration.rs:1161`, `:5328`;
-`crates/zeroship-data-v8/tests/sqlite_integration.rs:9574`, `:9670`; `context.rs:1176`) and the three
+without asserting on it (`crates/zeroship-data-v8/tests/integration.rs`, `:5328`;
+`crates/zeroship-data-v8/tests/sqlite_integration.rs`, `:9670`; `context.rs:1176`) and the three
 compile-time trait assertions (`backend/postgres.rs:1798`,
 `backend/mod.rs:1931`, `backend/sqlite/mod.rs:2875`), which survive because
 `SchemaIntrospect` itself survives for the migrate plane.
