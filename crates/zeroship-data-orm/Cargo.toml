@@ -15,7 +15,7 @@ zeroship-metering = { workspace = true }
 zeroship-migrate-policy = { workspace = true }
 compio = { workspace = true }
 compio-postgres = { workspace = true, features = ["with-uuid-1"] }
-rusqlite = { workspace = true, features = ["bundled", "preupdate_hook"] }
+rusqlite = { workspace = true, features = ["bundled", "preupdate_hook", "functions"] }
 flume = { workspace = true }
 sqlite-vec = { workspace = true }
 tempfile = { workspace = true }

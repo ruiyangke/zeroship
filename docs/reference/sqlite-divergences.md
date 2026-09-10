@@ -1,6 +1,6 @@
 # SQLite divergences
 
-`plugin-db` keeps the creator-facing CRUD surface aligned across Postgres and SQLite. The remaining differences are in engine-specific search, transaction isolation, locking, scoring, ordering, and system-column timestamp resolution.
+`zeroship-data-orm` keeps the creator-facing CRUD surface aligned across Postgres and SQLite. Array updates share complete-element and structural-equality semantics; SQLite's connection setup installs the SQL comparison helper described in [the ORM architecture](../architecture/data-orm.md). The remaining differences are in engine-specific search, transaction isolation, locking, scoring, ordering, and system-column timestamp resolution.
 
 Most rows below are deliberate. System timestamp resolution is a consequence of
 the storage each backend uses for a shared column, not a choice. Typed-id ordering

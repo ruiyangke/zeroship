@@ -184,6 +184,22 @@ JSON strings even when their contents resemble booleans, numbers, or objects.
 Malformed stored JSON reports `row_decode_failed` with column context and without
 including the stored contents.
 
+Array mutations compile into an atomic SQL update. `$push` appends the operand
+as a complete element; `$pull` removes every structurally equal element;
+`$addToSet` appends only when no equal element exists. Objects compare without
+key order, arrays retain order, and numbers compare by exact decimal value.
+JSON null is an element when used as an operand; null columns remain null.
+The dialect renderer lives in `zeroship-data-sql`.
+
+PostgreSQL uses native JSONB equality. SQLite connection setup registers the
+deterministic `zeroship_json_equal` SQL function on ordinary and transaction
+connections, including replacements after recovery. It uses the SQL crate's
+`json::comparison_key` and caches the bound operand during an element scan.
+This helper receives only JSON text and knows no schema, policy, or application.
+A custom SQLite backend using this renderer must install the same function;
+the built-in backend handles that setup. Driver session contracts remain SQL
+and native parameters.
+
 Calendar dates stay `YYYY-MM-DD` strings through driver reads, Rust model codecs,
 and V8. They use positive Gregorian years in that fixed-width form and do not
 acquire a time or timezone. The shared calendar codec validates date writes

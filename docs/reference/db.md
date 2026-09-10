@@ -995,6 +995,25 @@ Per-field (preferred): `$set`, `$inc`, `$dec`, `$mul`, `$push`, `$pull`,
 (`{ $set: { ... } }`, `{ $inc: { ... } }`, etc.) is also accepted; the
 SDK translates before dispatch.
 
+Array operators treat the operand as a complete element. `$push` appends it,
+`$pull` removes every structurally equal element, and `$addToSet` appends it
+only if no equal element exists. Object key order does not affect equality;
+array order and JSON types do. Numeric values compare by value, so `1` equals
+`1.0`, while `true` and `"1"` are distinct. A nested array is kept as an element
+and is never flattened into the destination array. The element must satisfy
+the declared array item type.
+
+```ts
+// For a t.array(t.json()) field:
+await tx.notes.update({ id }, { items: { $push: ["a", "b"] } });
+await tx.notes.update({ id }, { items: { $addToSet: { active: true } } });
+await tx.notes.update({ id }, { items: { $pull: null } });
+```
+
+These updates are atomic on PostgreSQL and SQLite and preserve the order and
+types of the remaining elements. JSON null is a valid JSON-array element.
+A null array field stays null; initialize it with `$set: []` before appending.
+
 ## Transactions
 
 ```ts
