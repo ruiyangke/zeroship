@@ -416,7 +416,7 @@ pub fn list(
 // it is keyed by the owning `app_id` and every accessor takes that app_id as
 // its first parameter — see that module's docs for why an unkeyed registry
 // was a cross-tenant read/cancel channel, and for the SEC-1 precedent in
-// `crates/zeroship-plugin-db/src/context.rs:127-140`.
+// `crates/zeroship-data-v8/src/context.rs:127-140`.
 
 /// A [`ChunkSource`] over a runtime [`StreamReader`] — the consumer side of
 /// the `response_forwarder` pump used by `putStream`. Yields buffered chunks,

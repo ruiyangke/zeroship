@@ -388,7 +388,7 @@ revealed the next layer. Remaining deny-level errors, none in this crate's area:
     crates/zeroship-migrate-postgres  121
     crates/zeroship-migrate-sqlite     84
     crates/zeroship-migrate-mysql      84
-    crates/zeroship-plugin-db           1
+    crates/zeroship-data-v8           1
 
 Mostly `doc_lazy_continuation`, plus `result_large_err` and
 `too_many_arguments`. `result_large_err` wants error types boxed, which is an

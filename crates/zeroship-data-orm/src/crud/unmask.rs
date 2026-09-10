@@ -82,7 +82,7 @@ use zeroship_data_orm::error::DbError;
 /// argument is the bare `Actor = Record<string, unknown>` shape; only
 /// `actor.kind` and `actor.id` are inspected.
 ///
-/// `pub` under `test-helpers` so `crates/zeroship-plugin-db/tests/sqlite_integration.rs` can drive
+/// `pub` under `test-helpers` so `crates/zeroship-data-v8/tests/sqlite_integration.rs` can drive
 /// `dispatch_unmask` directly; production callers reach this through
 /// the V8 dispatcher's `parse_args`.
 #[derive(Debug, Clone, Default)]
@@ -1615,13 +1615,13 @@ async fn write_audit_query_hint_row(
 // `parse_args` and `parse_bulk_args` are the two places where an `actor`
 // supplied by APP JS meets `sanitize_app_actor`. That call IS the DB-3 fix, and
 // while both parsers were private `fn` no integration target could drive them:
-// every live-PG test in `crates/zeroship-plugin-db/tests/mask_flip.rs` built
+// every live-PG test in `crates/zeroship-data-v8/tests/mask_flip.rs` built
 // `UnmaskFieldArgs` / `BulkUnmaskArgs` in Rust and so entered BELOW the fence,
 // leaving the fence itself covered only by in-module units that call
 // `sanitize_app_actor` directly with no database behind it. A fence no
 // integration test can reach is a fence nobody re-checks.
 //
-// Both are plainly `pub`: `zeroship_plugin_db::v8_classes::dispatch` calls them
+// Both are plainly `pub`: `zeroship_data_v8::v8_classes::dispatch` calls them
 // on the production path, so this is the shipped surface, not a test affordance.
 
 /// Decode the JSON args coming from V8 into [`UnmaskFieldArgs`]. The

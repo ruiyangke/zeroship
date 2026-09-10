@@ -41,7 +41,7 @@ only v2; a non-v2 descriptor is refused outright
 (`sdks/bootstrap/src/install-schema.ts:106`, `:183`).
 
 **The end state replaces the last two hops.** The descriptor arrives through a
-generic artifact bag, `zeroship-plugin-db` parses and semantically validates it,
+generic artifact bag, `zeroship-data-v8` parses and semantically validates it,
 and a private pre-user bootstrap module synchronously creates the JS collection
 wrappers. Neither the global nor a public bootstrap module survives. (Not built:
 Open 3.)
@@ -152,7 +152,7 @@ could pass `actor: { kind: "auto" }` to read its own PII/PHI/PCI. It is fenced b
 `sanitize_app_actor` (`crates/zeroship-data-orm/src/crud/unmask.rs:321`), called
 at **five** sites - `v8_classes/masked_value.rs:300` and `:423`, `crud/mod.rs:669`,
 `unmask.rs:1514` and `:1629`. Count them with
-`grep -rn 'sanitize_app_actor(' crates/zeroship-plugin-db/src`, un-truncated.
+`grep -rn 'sanitize_app_actor(' crates/zeroship-data-v8/src`, un-truncated.
 
 ### 4. Trust roots
 
@@ -321,7 +321,7 @@ changes the operator to `IS NULL`.
 This is tenant isolation, not robustness: a throwing getter on a filter key that
 is silently dropped turns `updateMany({tenantId: <throwing getter>, status})`
 into `WHERE status = ...` across every tenant's rows. Shipped, with `DecodeError`
-in `crates/zeroship-plugin-db/src/v8_bridge.rs`.
+in `crates/zeroship-data-v8/src/v8_bridge.rs`.
 
 Pipeline: validate descriptor membership; singleflight lazy backend
 initialization; `backend.prepare(request)` returning an `OpSession` (route plus
@@ -414,7 +414,7 @@ Deleted concretely: `defineMaskPolicy()` and the policy slot
 (`sdks/db/src/policy.ts:120`), the `_flushPendingMaskPolicy` /
 `_peekPendingMaskPolicy` drain (`policy.ts:178`); the
 `zeroship.db.setMaskPolicy` native op
-(`crates/zeroship-plugin-db/src/v8_classes/db_platform.rs:100`) and its
+(`crates/zeroship-data-v8/src/v8_classes/db_platform.rs:100`) and its
 `dispatch_set_mask_policy_field` dispatch; the SQLite JSON sidecar
 (`<db_dir>/mask_policies.json`,
 `crates/zeroship-data-orm/src/backend/sqlite/mask_policy_store.rs:35`); and the broad
@@ -789,7 +789,7 @@ These constraints bind any future change to this design.
   must also be bound into the AAD, or downgrade is not tag-detectable.
 - **Table-name secrecy is not a security boundary.** `db.collection(name)` mints
   a collection for any non-empty string
-  (`crates/zeroship-plugin-db/src/v8_classes/db.rs:123`, `:130`).
+  (`crates/zeroship-data-v8/src/v8_classes/db.rs:123`, `:130`).
   *Addressability* must be what authority decides.
 - **Module-specifier secrecy is not a security boundary either.** A per-runtime
   nonce leaks through `new Error().stack`. The private map is the boundary.
@@ -838,7 +838,7 @@ These constraints bind any future change to this design.
    ceiling reaching the service at composition. Basis for the estimate: the three
    host files (`modules.rs`, `dynamic_import.rs`, `bootstrap_modules.rs`), the
    worker's `cache.rs` construction path, and 112 `BackendHandle` references in
-   `crates/zeroship-plugin-db/src`.
+   `crates/zeroship-data-v8/src`.
 
 4. **The mask-policy artifact wire.** BUILDABLE, 8-12 hours. The carrier is
    decided (the artifact channel that already carries the descriptor). Owed: the
@@ -858,7 +858,7 @@ These constraints bind any future change to this design.
 6. **Wire the `DbPlan` IR.** BUILDABLE, 12-20 hours.
    `zeroship-data-sql` exists and its shared core, read and search
    families are built, but it is a `[dev-dependencies]` entry of
-   `zeroship-plugin-db` and `grep -rn data_query_builder crates/zeroship-plugin-db/src/`
+   `zeroship-data-v8` and `grep -rn data_query_builder crates/zeroship-data-v8/src/`
    returns 0. No shipped binary links it. Three items are closed on paper by
    pointing at it and are not actually closed: prepare-once, the role-divergence
    fix, and the plan-family port. The relation and effects families additionally
@@ -934,8 +934,8 @@ These constraints bind any future change to this design.
     unmeasurable and cannot be asserted by any gate. Current size: 17,275 lines
     over 7 modules, `query.rs` alone 14,309. Current consumers: five manifests -
     `zeroship-data-core`, `zeroship-data-postgres`, `zeroship-data-sqlite`,
-    `zeroship-data-sql` and `zeroship-plugin-db` - with 18
-    `zeroship_schema` references in `crates/zeroship-plugin-db/src`. One surface
+    `zeroship-data-sql` and `zeroship-data-v8` - with 18
+    `zeroship_schema` references in `crates/zeroship-data-v8/src`. One surface
     is security-critical: `validate_collection`'s reserved-`__zeroship` prefix
     check is the sole guardian of that namespace, and it now has a twin in
     `crates/zeroship-data-sql/src/ident.rs`.
@@ -1008,7 +1008,7 @@ record.
 - **Do not use `<field>_masked` or `mask_sibling_column_for_field`.** The storage
   flip shipped: the sibling is `__zs_raw__<field>`
   (`crates/zeroship-schema/src/query.rs:2207`, `raw_column_name` at `:2232`), (DELETED; runtime compilation now lives in `crates/zeroship-data-sql/src/compile.rs`, and migration DDL in `crates/zeroship-migrate-core/src/schema/query.rs`.)
-  covered by `crates/zeroship-plugin-db/tests/mask_flip.rs` and documented at
+  covered by `crates/zeroship-data-v8/tests/mask_flip.rs` and documented at
   `docs/reference/db.md:1602`. `mask_sibling_column_for_field` occurs zero times
   in `crates/`.
 - **Do not write a source gate scoped to a path that does not exist.** It matches

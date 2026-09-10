@@ -7,7 +7,7 @@
 //! Run:
 //! ```text
 //! RUST_MIN_STACK=33554432 \
-//! cargo test -p zeroship-plugin-db --test test_helpers \
+//! cargo test -p zeroship-data-v8 --test test_helpers \
 //!   -- --skip sqlite_integration:: integration::
 //! ```
 //!
@@ -79,7 +79,7 @@ use compio_postgres::{NoTls, Pool};
 use uuid::Uuid;
 use zeroship_data_orm::binding::DbBinding;
 use zeroship_data_sql::value::{value, Value};
-use zeroship_plugin_db::backend::ChangeStream;
+use zeroship_data_v8::backend::ChangeStream;
 
 const CDC_TEST_WORKER_ID: &str = "plugin-db-integration-worker";
 
@@ -94,8 +94,8 @@ fn test_url() -> String {
 /// moved to the V8 dispatcher and the value is passed down. These tests drive
 /// the engine directly, with no V8 frame above them, so they make the same call
 /// the dispatcher makes on their behalf in production.
-async fn unmask_backend() -> zeroship_plugin_db::backend::BackendHandle {
-    zeroship_plugin_db::tx_scope::ensure_backend()
+async fn unmask_backend() -> zeroship_data_v8::backend::BackendHandle {
+    zeroship_data_v8::tx_scope::ensure_backend()
         .await
         .expect("the backend the V8 dispatcher would have opened")
 }
@@ -105,8 +105,8 @@ async fn unmask_backend() -> zeroship_plugin_db::backend::BackendHandle {
 /// See the twin in `mask_flip.rs` for why. No fixture that reaches it here
 /// parks a transaction, so every call binds `in_tx = false` and takes the lane
 /// it took before.
-async fn unmask_route(app: &str) -> zeroship_plugin_db::tx_route::TxRoute {
-    zeroship_plugin_db::exec::ambient_route_for_tests(app, unmask_backend().await)
+async fn unmask_route(app: &str) -> zeroship_data_v8::tx_route::TxRoute {
+    zeroship_data_v8::exec::ambient_route_for_tests(app, unmask_backend().await)
 }
 
 async fn require_pg() -> String {
@@ -129,7 +129,7 @@ async fn require_pg() -> String {
             // `acquire_dedicated_client`, which reads the URL from the
             // per-thread context. Tests that drive the orchestrator directly
             // need the URL installed in the context before the call.
-            zeroship_plugin_db::set_db_url_for_tests(&url);
+            zeroship_data_v8::set_db_url_for_tests(&url);
             url
         }
         Err(e) => {
@@ -386,7 +386,7 @@ async fn setup(pool: &Pool, schema: &str) {
 }
 
 /// Helper: build + execute a query, return parsed JSON array.
-async fn exec_query(pool: &Pool, bq: zeroship_plugin_db::compile::BuiltQuery) -> Vec<Value> {
+async fn exec_query(pool: &Pool, bq: zeroship_data_v8::compile::BuiltQuery) -> Vec<Value> {
     let param_refs = &bq.params;
     let rows = zeroship_data_orm::backend::postgres::params::query(
         &pool.acquire().await.unwrap(),
@@ -399,7 +399,7 @@ async fn exec_query(pool: &Pool, bq: zeroship_plugin_db::compile::BuiltQuery) ->
 }
 
 /// Helper: build + execute a mutation, return parsed JSON array.
-async fn exec_mutation(pool: &Pool, bq: zeroship_plugin_db::compile::BuiltQuery) -> Vec<Value> {
+async fn exec_mutation(pool: &Pool, bq: zeroship_data_v8::compile::BuiltQuery) -> Vec<Value> {
     let param_refs = &bq.params;
     let rows = zeroship_data_orm::backend::postgres::params::query(
         &pool.acquire().await.unwrap(),
@@ -509,7 +509,7 @@ async fn release_pg(pool: std::rc::Rc<Pool>) {
 async fn drain_pg() {
     // The context can hold its own pool handle and a parked transaction
     // client; those keep connections counted, so clear it before waiting.
-    zeroship_plugin_db::reset_context_for_tests();
+    zeroship_data_v8::reset_context_for_tests();
     if !compio_postgres::drain_connections(std::time::Duration::from_secs(2)).await {
         eprintln!(
             "DRAIN-TIMEOUT: {} connection(s) still live",
@@ -597,7 +597,7 @@ fn connections_do_not_outlive_the_runtime_that_opened_them() {
     );
 }
 
-use zeroship_plugin_db::compile::*;
+use zeroship_data_v8::compile::*;
 
 /// The descriptor entry for the `notes` fixture table, in the same
 /// `{ <column>: FieldDef }` shape the runtime descriptor hook plants and
@@ -636,7 +636,7 @@ fn weather_schema() -> Value {
 /// `#[ignore = "requires live postgres; default gate runs the sqlite leg only"]`
 /// until 2026-08-21, which was false in both halves: every one of its 108
 /// siblings in this file requires live Postgres and none of them is ignored, and
-/// the default gate for this target is `tests/run_plugin_db_live_suite.sh`, which
+/// the default gate for this target is `tests/run_data_v8_live_suite.sh`, which
 /// runs it WITHOUT `--ignored`. So the attribute did not describe a prerequisite -
 /// it removed the test from the only job that could have run it, and that is how
 /// the 2026-08-10 schema-authority cutover left it broken for eleven days with
@@ -2766,8 +2766,8 @@ async fn require_logical_wal(pool: &Pool) {
 /// `max_replication_slots`), and that reason is served instead by
 /// `support::sweep_prior_run_residue_once`, which runs before any test starts.
 async fn c1_cleanup(pool: &Pool, app: &str) {
-    let pub_name = zeroship_plugin_db::replication::publication_name(app).unwrap();
-    let slot = zeroship_plugin_db::replication::worker_slot_name(app, CDC_TEST_WORKER_ID).unwrap();
+    let pub_name = zeroship_data_v8::replication::publication_name(app).unwrap();
+    let slot = zeroship_data_v8::replication::worker_slot_name(app, CDC_TEST_WORKER_ID).unwrap();
     let _ = pool
         .execute(&format!(r#"DROP PUBLICATION IF EXISTS "{pub_name}""#), &[])
         .await;
@@ -2922,7 +2922,7 @@ async fn c1_create_publication(pool: &Pool, app: &str) {
 }
 
 async fn c1_create_publication_for_tables(pool: &Pool, app: &str, tables: &[&str]) {
-    let pub_name = zeroship_plugin_db::replication::publication_name(app).unwrap();
+    let pub_name = zeroship_data_v8::replication::publication_name(app).unwrap();
     let membership = tables
         .iter()
         .map(|table| format!(r#""{app}"."{table}""#))
@@ -2955,22 +2955,22 @@ async fn c1_setup_requires_publication_and_creates_slot_idempotently() {
     c1_create_publication(&pool, app).await;
 
     // The migration service created the publication; the worker creates its slot.
-    let first = zeroship_plugin_db::replication::ensure_worker_slot(&pool, app, CDC_TEST_WORKER_ID)
+    let first = zeroship_data_v8::replication::ensure_worker_slot(&pool, app, CDC_TEST_WORKER_ID)
         .await
         .unwrap();
     assert!(first.created);
     assert_eq!(
         first.slot,
-        zeroship_plugin_db::replication::worker_slot_name(app, CDC_TEST_WORKER_ID).unwrap()
+        zeroship_data_v8::replication::worker_slot_name(app, CDC_TEST_WORKER_ID).unwrap()
     );
     assert_eq!(
         first.publication,
-        zeroship_plugin_db::replication::publication_name(app).unwrap()
+        zeroship_data_v8::replication::publication_name(app).unwrap()
     );
 
     // Second call must observe the existing slot and return created=false.
     let second =
-        zeroship_plugin_db::replication::ensure_worker_slot(&pool, app, CDC_TEST_WORKER_ID)
+        zeroship_data_v8::replication::ensure_worker_slot(&pool, app, CDC_TEST_WORKER_ID)
             .await
             .unwrap();
     assert!(!second.created);
@@ -2992,7 +2992,7 @@ async fn c1_setup_refuses_to_create_a_missing_publication() {
         .await
         .unwrap();
 
-    let err = zeroship_plugin_db::replication::ensure_worker_slot(&pool, app, CDC_TEST_WORKER_ID)
+    let err = zeroship_data_v8::replication::ensure_worker_slot(&pool, app, CDC_TEST_WORKER_ID)
         .await
         .expect_err("worker must not create a missing publication");
     assert!(matches!(
@@ -3022,16 +3022,16 @@ async fn c1_watchdog_reports_new_slot() {
         .await
         .unwrap();
     c1_create_publication(&pool, app).await;
-    zeroship_plugin_db::replication::ensure_worker_slot(&pool, app, CDC_TEST_WORKER_ID)
+    zeroship_data_v8::replication::ensure_worker_slot(&pool, app, CDC_TEST_WORKER_ID)
         .await
         .unwrap();
 
-    let slots = zeroship_plugin_db::replication::watchdog_query(&pool, app)
+    let slots = zeroship_data_v8::replication::watchdog_query(&pool, app)
         .await
         .unwrap();
     let me = slots.iter().find(|s| {
         s.slot_name
-            == zeroship_plugin_db::replication::worker_slot_name(app, CDC_TEST_WORKER_ID).unwrap()
+            == zeroship_data_v8::replication::worker_slot_name(app, CDC_TEST_WORKER_ID).unwrap()
     });
     assert!(me.is_some(), "watchdog must report our slot");
     let me = me.unwrap();
@@ -3063,12 +3063,12 @@ async fn c1_abandoned_reaper_measures_elapsed_inactivity_not_wal_bytes() {
         .await
         .unwrap();
     c1_create_publication(&pool, app).await;
-    let setup = zeroship_plugin_db::replication::ensure_worker_slot(&pool, app, CDC_TEST_WORKER_ID)
+    let setup = zeroship_data_v8::replication::ensure_worker_slot(&pool, app, CDC_TEST_WORKER_ID)
         .await
         .unwrap();
     assert!(setup.created);
 
-    let slot = zeroship_plugin_db::replication::worker_slot_name(app, CDC_TEST_WORKER_ID).unwrap();
+    let slot = zeroship_data_v8::replication::worker_slot_name(app, CDC_TEST_WORKER_ID).unwrap();
     let candidates = pool
         .query_text_params(
             "SELECT slot_name FROM pg_replication_slots WHERE slot_name = $1 AND active = false",
@@ -3089,7 +3089,7 @@ async fn c1_abandoned_reaper_measures_elapsed_inactivity_not_wal_bytes() {
     .unwrap();
     let threshold = std::time::Duration::from_secs(3600);
     let start = std::time::Instant::now();
-    let mut reaper = zeroship_plugin_db::slot_reaper::OperatorSlotReaper::connect_for_tests(
+    let mut reaper = zeroship_data_v8::slot_reaper::OperatorSlotReaper::connect_for_tests(
         &url,
         "elapsed-time-reaper",
         threshold,
@@ -3158,18 +3158,18 @@ async fn c1_abandoned_reaper_preserves_inactive_slot_owned_by_live_worker() {
         .await
         .unwrap();
     c1_create_publication(&pool, app).await;
-    zeroship_plugin_db::replication::ensure_worker_slot(&pool, app, worker_id)
+    zeroship_data_v8::replication::ensure_worker_slot(&pool, app, worker_id)
         .await
         .unwrap();
-    let slot = zeroship_plugin_db::replication::worker_slot_name(app, worker_id).unwrap();
+    let slot = zeroship_data_v8::replication::worker_slot_name(app, worker_id).unwrap();
 
     let threshold = std::time::Duration::from_secs(3600);
-    let owner = zeroship_plugin_db::slot_reaper::OperatorSlotReaper::connect_for_tests(
+    let owner = zeroship_data_v8::slot_reaper::OperatorSlotReaper::connect_for_tests(
         &url, worker_id, threshold,
     )
     .await
     .unwrap();
-    let conflict = zeroship_plugin_db::slot_reaper::OperatorSlotReaper::connect_for_tests(
+    let conflict = zeroship_data_v8::slot_reaper::OperatorSlotReaper::connect_for_tests(
         &url, worker_id, threshold,
     )
     .await
@@ -3185,7 +3185,7 @@ async fn c1_abandoned_reaper_preserves_inactive_slot_owned_by_live_worker() {
         "duplicate live worker identity must be refused: {conflict:?}"
     );
 
-    let mut observer = zeroship_plugin_db::slot_reaper::OperatorSlotReaper::connect_for_tests(
+    let mut observer = zeroship_data_v8::slot_reaper::OperatorSlotReaper::connect_for_tests(
         &url,
         "live-worker-lease-observer",
         threshold,
@@ -3256,22 +3256,22 @@ async fn c1_abandoned_reaper_preserves_a_connected_idle_consumer() {
     c1_create_publication_for_tables(&pool, app, &["events"]).await;
 
     let threshold = std::time::Duration::from_secs(3600);
-    let backend = zeroship_plugin_db::backend::BackendHandle::new(std::rc::Rc::new(
-        zeroship_plugin_db::backend::PostgresBackend::new(
+    let backend = zeroship_data_v8::backend::BackendHandle::new(std::rc::Rc::new(
+        zeroship_data_v8::backend::PostgresBackend::new(
             pool.clone(),
             url.clone(),
-            zeroship_plugin_db::isolate_key_source(),
+            zeroship_data_v8::isolate_key_source(),
         ),
     ));
-    let consumer = zeroship_plugin_db::change_stream_pg::PgChangeStream::new(
+    let consumer = zeroship_data_v8::change_stream_pg::PgChangeStream::new(
         backend
-            .get_rc::<zeroship_plugin_db::backend::PostgresBackend>()
+            .get_rc::<zeroship_data_v8::backend::PostgresBackend>()
             .expect("Postgres fixture"),
     )
     .spawn_consumer(app, worker_id)
     .await
     .expect("idle consumer must reach START_REPLICATION");
-    let slot = zeroship_plugin_db::replication::worker_slot_name(app, worker_id).unwrap();
+    let slot = zeroship_data_v8::replication::worker_slot_name(app, worker_id).unwrap();
     let active = pool
         .query_text_params(
             "SELECT active FROM pg_replication_slots WHERE slot_name = $1",
@@ -3282,7 +3282,7 @@ async fn c1_abandoned_reaper_preserves_a_connected_idle_consumer() {
     assert_eq!(active.len(), 1, "test must exercise one live consumer slot");
     assert!(active[0].get::<_, bool>("active"));
 
-    let mut observer = zeroship_plugin_db::slot_reaper::OperatorSlotReaper::connect_for_tests(
+    let mut observer = zeroship_data_v8::slot_reaper::OperatorSlotReaper::connect_for_tests(
         &url,
         "idle-consumer-observer",
         threshold,
@@ -3348,21 +3348,21 @@ async fn c1_abandoned_reaper_elects_one_leader_across_concurrent_workers() {
         .await
         .unwrap();
     c1_create_publication(&pool, app).await;
-    zeroship_plugin_db::replication::ensure_worker_slot(&pool, app, worker_id)
+    zeroship_data_v8::replication::ensure_worker_slot(&pool, app, worker_id)
         .await
         .unwrap();
-    let slot = zeroship_plugin_db::replication::worker_slot_name(app, worker_id).unwrap();
+    let slot = zeroship_data_v8::replication::worker_slot_name(app, worker_id).unwrap();
 
     let threshold = std::time::Duration::from_secs(3600);
     let start = std::time::Instant::now();
-    let mut first = zeroship_plugin_db::slot_reaper::OperatorSlotReaper::connect_for_tests(
+    let mut first = zeroship_data_v8::slot_reaper::OperatorSlotReaper::connect_for_tests(
         &url,
         "concurrent-reaper-a",
         threshold,
     )
     .await
     .unwrap();
-    let mut second = zeroship_plugin_db::slot_reaper::OperatorSlotReaper::connect_for_tests(
+    let mut second = zeroship_data_v8::slot_reaper::OperatorSlotReaper::connect_for_tests(
         &url,
         "concurrent-reaper-b",
         threshold,
@@ -3450,7 +3450,7 @@ async fn c1_setup_resumes_at_existing_lsn_across_restart() {
         .unwrap();
     c1_create_publication(&pool, app).await;
 
-    let first = zeroship_plugin_db::replication::ensure_worker_slot(&pool, app, CDC_TEST_WORKER_ID)
+    let first = zeroship_data_v8::replication::ensure_worker_slot(&pool, app, CDC_TEST_WORKER_ID)
         .await
         .unwrap();
     assert!(first.created);
@@ -3460,7 +3460,7 @@ async fn c1_setup_resumes_at_existing_lsn_across_restart() {
     drop(pool);
     let pool2 = Pool::connect(&url, 2).await.unwrap();
     let resumed =
-        zeroship_plugin_db::replication::ensure_worker_slot(&pool2, app, CDC_TEST_WORKER_ID)
+        zeroship_data_v8::replication::ensure_worker_slot(&pool2, app, CDC_TEST_WORKER_ID)
             .await
             .unwrap();
     assert!(
@@ -3493,12 +3493,12 @@ async fn c1_broker_event_delivered_for_insert_via_emit() {
     // is in-process.
 
     // Clean slate.
-    zeroship_plugin_db::broker::drain_current_thread_subscriptions();
+    zeroship_data_v8::broker::drain_current_thread_subscriptions();
     let app = crate::test_app_id!();
     let app = app.as_str();
-    let sub = zeroship_plugin_db::broker::subscribe(app, "messages");
+    let sub = zeroship_data_v8::broker::subscribe(app, "messages");
 
-    zeroship_plugin_db::broker::emit_local(
+    zeroship_data_v8::broker::emit_local(
         app,
         "messages",
         zeroship_core::change_event::ChangeOp::Insert,
@@ -3509,7 +3509,7 @@ async fn c1_broker_event_delivered_for_insert_via_emit() {
 
     let msg = sub.pop().expect("expected an event");
     match msg {
-        zeroship_plugin_db::broker::SubscriptionMessage::Change(ev) => {
+        zeroship_data_v8::broker::SubscriptionMessage::Change(ev) => {
             assert_eq!(ev.collection, "messages");
             assert_eq!(ev.pk.as_deref(), Some("usr_02HXINTEGRATIONSUBPK"));
             assert_eq!(ev.op, zeroship_core::change_event::ChangeOp::Insert);
@@ -3517,7 +3517,7 @@ async fn c1_broker_event_delivered_for_insert_via_emit() {
         other => panic!("unexpected: {other:?}"),
     }
     sub.close();
-    zeroship_plugin_db::broker::drain_current_thread_subscriptions();
+    zeroship_data_v8::broker::drain_current_thread_subscriptions();
 }
 
 // ---------------------------------------------------------------------------
@@ -3548,40 +3548,40 @@ fn gapb_ev(app: &str, collection: &str, pk: i64) -> zeroship_core::change_event:
 async fn gap_b_commit_drains_pending_emits_to_broker() {
     // Subscribe BEFORE pushing events, mid-"transaction" push two,
     // then drain — the broker should receive both.
-    zeroship_plugin_db::broker::drain_current_thread_subscriptions();
+    zeroship_data_v8::broker::drain_current_thread_subscriptions();
     let app = crate::test_app_id!();
     let app = app.as_str();
-    let sub = zeroship_plugin_db::broker::subscribe(app, "users");
+    let sub = zeroship_data_v8::broker::subscribe(app, "users");
 
-    zeroship_plugin_db::push_pending_emit_for_tests(gapb_ev(app, "users", 1));
-    zeroship_plugin_db::push_pending_emit_for_tests(gapb_ev(app, "users", 2));
+    zeroship_data_v8::push_pending_emit_for_tests(gapb_ev(app, "users", 1));
+    zeroship_data_v8::push_pending_emit_for_tests(gapb_ev(app, "users", 2));
     // Pre-drain: subscriber must observe nothing (events still queued).
     assert!(sub.pop().is_none(), "events must not leak before commit");
 
-    zeroship_plugin_db::drain_pending_emits_for_tests(app);
+    zeroship_data_v8::drain_pending_emits_for_tests(app);
 
     let mut pks: Vec<String> = Vec::new();
-    while let Some(zeroship_plugin_db::broker::SubscriptionMessage::Change(ev)) = sub.pop() {
+    while let Some(zeroship_data_v8::broker::SubscriptionMessage::Change(ev)) = sub.pop() {
         pks.push(ev.pk.as_deref().unwrap().to_string());
     }
     assert_eq!(pks, vec!["1".to_string(), "2".to_string()]);
 
     sub.close();
-    zeroship_plugin_db::broker::drain_current_thread_subscriptions();
+    zeroship_data_v8::broker::drain_current_thread_subscriptions();
 }
 
 #[compio::test]
 async fn gap_b_rollback_clears_pending_emits_silently() {
     // Push events, then `clear` (rollback path). The broker must
     // never see them.
-    zeroship_plugin_db::broker::drain_current_thread_subscriptions();
+    zeroship_data_v8::broker::drain_current_thread_subscriptions();
     let app = crate::test_app_id!();
     let app = app.as_str();
-    let sub = zeroship_plugin_db::broker::subscribe(app, "users");
+    let sub = zeroship_data_v8::broker::subscribe(app, "users");
 
-    zeroship_plugin_db::push_pending_emit_for_tests(gapb_ev(app, "users", 42));
-    zeroship_plugin_db::push_pending_emit_for_tests(gapb_ev(app, "users", 43));
-    zeroship_plugin_db::clear_pending_emits_for_tests(app);
+    zeroship_data_v8::push_pending_emit_for_tests(gapb_ev(app, "users", 42));
+    zeroship_data_v8::push_pending_emit_for_tests(gapb_ev(app, "users", 43));
+    zeroship_data_v8::clear_pending_emits_for_tests(app);
 
     assert!(
         sub.pop().is_none(),
@@ -3589,7 +3589,7 @@ async fn gap_b_rollback_clears_pending_emits_silently() {
     );
 
     sub.close();
-    zeroship_plugin_db::broker::drain_current_thread_subscriptions();
+    zeroship_data_v8::broker::drain_current_thread_subscriptions();
 }
 
 #[compio::test]
@@ -3598,7 +3598,7 @@ async fn gap_b_end_to_end_insert_inside_tx_defers_emit_until_commit() {
     // call. Pre-commit the broker stays empty; post-drain it sees
     // the insert.
     let url = require_pg().await;
-    zeroship_plugin_db::set_db_url_for_tests(&url);
+    zeroship_data_v8::set_db_url_for_tests(&url);
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
 
     let app = crate::test_app_id!();
@@ -3634,17 +3634,17 @@ async fn gap_b_end_to_end_insert_inside_tx_defers_emit_until_commit() {
     .await
     .unwrap();
 
-    zeroship_plugin_db::broker::drain_current_thread_subscriptions();
-    let sub = zeroship_plugin_db::broker::subscribe(app, "users");
+    zeroship_data_v8::broker::drain_current_thread_subscriptions();
+    let sub = zeroship_data_v8::broker::subscribe(app, "users");
 
     // Open the production transaction protocol.
-    zeroship_plugin_db::begin_transaction_for_tests(app, &url).await;
+    zeroship_data_v8::begin_transaction_for_tests(app, &url).await;
 
     let role = zeroship_core::database_role::per_app_role_name(app).unwrap();
     pool.batch_execute(&format!(r#"GRANT SELECT, INSERT ON "{app}"."users" TO "{role}"; GRANT USAGE ON ALL SEQUENCES IN SCHEMA "{app}" TO "{role}""#)).await.unwrap();
 
     // Insert via the production helper.
-    let bq = zeroship_plugin_db::compile::build_insert(
+    let bq = zeroship_data_v8::compile::build_insert(
         &zeroship_data_sql::SchemaName::new(app).expect("fixture schema name"),
         "users",
         // The descriptor entry for the fixture table above: one declared field.
@@ -3652,7 +3652,7 @@ async fn gap_b_end_to_end_insert_inside_tx_defers_emit_until_commit() {
         &zeroship_data_sql::value!({ "name": "alice" }),
     )
     .expect("build_insert");
-    let _ = zeroship_plugin_db::exec_mutation_with_emit_for_tests(
+    let _ = zeroship_data_v8::exec_mutation_with_emit_for_tests(
         bq,
         app,
         "users",
@@ -3669,20 +3669,20 @@ async fn gap_b_end_to_end_insert_inside_tx_defers_emit_until_commit() {
 
     // Settlement commits the row before publishing its buffered event.
     assert!(matches!(
-        zeroship_plugin_db::transaction::exec_settle(app, true, None).await,
-        zeroship_plugin_db::transaction::SettleOutcome::Ok
+        zeroship_data_v8::transaction::exec_settle(app, true, None).await,
+        zeroship_data_v8::transaction::SettleOutcome::Ok
     ));
 
     let got = sub.pop();
     match got {
-        Some(zeroship_plugin_db::broker::SubscriptionMessage::Change(ev)) => {
+        Some(zeroship_data_v8::broker::SubscriptionMessage::Change(ev)) => {
             assert_eq!(ev.collection, "users");
         }
         other => panic!("expected Change event after commit, got: {other:?}"),
     }
 
     sub.close();
-    zeroship_plugin_db::broker::drain_current_thread_subscriptions();
+    zeroship_data_v8::broker::drain_current_thread_subscriptions();
     release_pg(pool).await;
 }
 
@@ -3735,21 +3735,21 @@ async fn p8a2_consumer_publishes_wal_event_to_broker() {
 
     // Clean broker; subscribe to the collection we're about to insert
     // into.
-    zeroship_plugin_db::broker::drain_current_thread_subscriptions();
-    let sub = zeroship_plugin_db::broker::subscribe(app, "events");
+    zeroship_data_v8::broker::drain_current_thread_subscriptions();
+    let sub = zeroship_data_v8::broker::subscribe(app, "events");
 
     // The production adapter provisions, spawns, and returns only
     // after Postgres accepts START_REPLICATION.
-    let backend = zeroship_plugin_db::backend::BackendHandle::new(std::rc::Rc::new(
-        zeroship_plugin_db::backend::PostgresBackend::new(
+    let backend = zeroship_data_v8::backend::BackendHandle::new(std::rc::Rc::new(
+        zeroship_data_v8::backend::PostgresBackend::new(
             pool.clone(),
             url.clone(),
-            zeroship_plugin_db::isolate_key_source(),
+            zeroship_data_v8::isolate_key_source(),
         ),
     ));
-    let consumer = zeroship_plugin_db::change_stream_pg::PgChangeStream::new(
+    let consumer = zeroship_data_v8::change_stream_pg::PgChangeStream::new(
         backend
-            .get_rc::<zeroship_plugin_db::backend::PostgresBackend>()
+            .get_rc::<zeroship_data_v8::backend::PostgresBackend>()
             .expect("Postgres fixture"),
     )
     .spawn_consumer(app, CDC_TEST_WORKER_ID)
@@ -3765,7 +3765,7 @@ async fn p8a2_consumer_publishes_wal_event_to_broker() {
     .unwrap();
 
     // Wait for the event to propagate via WAL.
-    let mut got: Option<zeroship_plugin_db::broker::SubscriptionMessage> = None;
+    let mut got: Option<zeroship_data_v8::broker::SubscriptionMessage> = None;
     for _ in 0..40 {
         if let Some(msg) = sub.pop() {
             got = Some(msg);
@@ -3776,7 +3776,7 @@ async fn p8a2_consumer_publishes_wal_event_to_broker() {
 
     let msg = got.expect("expected a WAL event within the polling window");
     match msg {
-        zeroship_plugin_db::broker::SubscriptionMessage::Change(ev) => {
+        zeroship_data_v8::broker::SubscriptionMessage::Change(ev) => {
             assert_eq!(ev.app_id, app);
             assert_eq!(ev.collection, "events");
             assert_eq!(ev.op, zeroship_core::change_event::ChangeOp::Insert);
@@ -3788,7 +3788,7 @@ async fn p8a2_consumer_publishes_wal_event_to_broker() {
 
     // Stop the consumer + clean up.
     consumer.shutdown().await.unwrap();
-    zeroship_plugin_db::broker::drain_current_thread_subscriptions();
+    zeroship_data_v8::broker::drain_current_thread_subscriptions();
     c1_cleanup(&pool, app).await;
     release_pg(pool).await;
 }
@@ -3981,25 +3981,25 @@ async fn p8a2_supervised_consumer_reconnects_after_kill() {
     .unwrap();
     c1_create_publication_for_tables(&pool, app, &["events"]).await;
 
-    zeroship_plugin_db::broker::drain_current_thread_subscriptions();
-    let sub = zeroship_plugin_db::broker::subscribe(app, "events");
+    zeroship_data_v8::broker::drain_current_thread_subscriptions();
+    let sub = zeroship_data_v8::broker::subscribe(app, "events");
 
-    let backend = zeroship_plugin_db::backend::BackendHandle::new(std::rc::Rc::new(
-        zeroship_plugin_db::backend::PostgresBackend::new(
+    let backend = zeroship_data_v8::backend::BackendHandle::new(std::rc::Rc::new(
+        zeroship_data_v8::backend::PostgresBackend::new(
             pool.clone(),
             url.clone(),
-            zeroship_plugin_db::isolate_key_source(),
+            zeroship_data_v8::isolate_key_source(),
         ),
     ));
-    let consumer = zeroship_plugin_db::change_stream_pg::PgChangeStream::new(
+    let consumer = zeroship_data_v8::change_stream_pg::PgChangeStream::new(
         backend
-            .get_rc::<zeroship_plugin_db::backend::PostgresBackend>()
+            .get_rc::<zeroship_data_v8::backend::PostgresBackend>()
             .expect("Postgres fixture"),
     )
     .spawn_consumer(app, CDC_TEST_WORKER_ID)
     .await
     .expect("CDC must reach START_REPLICATION");
-    let slot = zeroship_plugin_db::replication::worker_slot_name(app, CDC_TEST_WORKER_ID).unwrap();
+    let slot = zeroship_data_v8::replication::worker_slot_name(app, CDC_TEST_WORKER_ID).unwrap();
 
     // First insert reaches the broker.
     pool.execute(
@@ -4059,7 +4059,7 @@ async fn p8a2_supervised_consumer_reconnects_after_kill() {
     );
 
     consumer.shutdown().await.unwrap();
-    zeroship_plugin_db::broker::drain_current_thread_subscriptions();
+    zeroship_data_v8::broker::drain_current_thread_subscriptions();
     c1_cleanup(&pool, app).await;
     release_pg(pool).await;
 }
@@ -4070,16 +4070,16 @@ async fn p8a2_supervised_consumer_reconnects_after_kill() {
 #[test]
 fn p8a2_per_app_emit_suppression_integration() {
     use zeroship_core::change_event::ChangeOp;
-    use zeroship_plugin_db::broker::{
+    use zeroship_data_v8::broker::{
         emit_local, is_app_suppressed, suppress_app, unsuppress_app, SubscriptionMessage,
     };
 
-    zeroship_plugin_db::broker::drain_current_thread_subscriptions();
+    zeroship_data_v8::broker::drain_current_thread_subscriptions();
     unsuppress_app("multi_a");
     unsuppress_app("multi_b");
 
-    let sub_a = zeroship_plugin_db::broker::subscribe("multi_a", "messages");
-    let sub_b = zeroship_plugin_db::broker::subscribe("multi_b", "messages");
+    let sub_a = zeroship_data_v8::broker::subscribe("multi_a", "messages");
+    let sub_b = zeroship_data_v8::broker::subscribe("multi_b", "messages");
 
     // Activate suppression for A only — mimics A's consumer running.
     suppress_app("multi_a");
@@ -4110,7 +4110,7 @@ fn p8a2_per_app_emit_suppression_integration() {
     }
 
     unsuppress_app("multi_a");
-    zeroship_plugin_db::broker::drain_current_thread_subscriptions();
+    zeroship_data_v8::broker::drain_current_thread_subscriptions();
 }
 
 /// Walk a compio-postgres Error's `source()` chain into one string —
@@ -4159,7 +4159,7 @@ fn err_chain(e: &dyn std::error::Error) -> String {
 /// or "shared across deletions" would mean "held until the process exits".
 #[test]
 fn operator_deprovisioning_reuses_one_pool_and_reparses_nothing() {
-    use zeroship_plugin_db::service::{
+    use zeroship_data_v8::service::{
         close_operator_pools, operator_pool_open_count, url_parse_count, DbService, DbServiceConfig,
     };
 
@@ -4322,7 +4322,7 @@ async fn require_pgvector(pool: &Pool) {
 /// the absence into a pass.
 #[compio::test]
 async fn vector_search_returns_k_nearest() {
-    use zeroship_plugin_db::backend::{PostgresBackend, VectorIndex, VectorMetric};
+    use zeroship_data_v8::backend::{PostgresBackend, VectorIndex, VectorMetric};
 
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
@@ -4338,7 +4338,7 @@ async fn vector_search_returns_k_nearest() {
     // it was written until 2026-09-01. It never surfaced because the test was
     // statically `#[ignore]`d, so a setup gap looked like a missing extension.
     let _role = provision_app_with_role(&pool, app).await;
-    zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, app)
+    zeroship_data_v8::auth::bootstrap::ensure_per_app_role(&pool, app)
         .await
         .unwrap();
     // The six non-`id` platform system columns are part of every real creator
@@ -4411,14 +4411,14 @@ async fn vector_search_returns_k_nearest() {
     // top-10. We assert MEMBERSHIP (not strict order) because pgvector
     // distance ties between FP-close vectors can re-order across builds.
     let query = mk_unit(0, dims);
-    let backend = zeroship_plugin_db::backend::PostgresBackend::new(
+    let backend = zeroship_data_v8::backend::PostgresBackend::new(
         pool.clone(),
         url.clone(),
-        zeroship_plugin_db::isolate_key_source(),
+        zeroship_data_v8::isolate_key_source(),
     );
     // The search's projection is the descriptor's field list; install the entry
     // this deploy's runtime descriptor would have planted at boot.
-    zeroship_plugin_db::cache_schema_for_tests(
+    zeroship_data_v8::cache_schema_for_tests(
         app,
         coll,
         value!({ "embedding": { "type": "vector", "vectorDims": 8 } }),
@@ -4432,7 +4432,7 @@ async fn vector_search_returns_k_nearest() {
         10,
         VectorMetric::Cosine,
         &zeroship_data_sql::value::Value::Null,
-        &zeroship_plugin_db::collection_schema(&DbBinding::cold_start(app), coll)
+        &zeroship_data_v8::collection_schema(&DbBinding::cold_start(app), coll)
             .expect("descriptor slice for the search fixture"),
     )
     .await
@@ -4491,7 +4491,7 @@ async fn vector_search_returns_k_nearest() {
 #[compio::test]
 async fn pgvector_extension_missing_reports_typed_error() {
     use zeroship_data_orm::error::DbError;
-    use zeroship_plugin_db::backend::{PostgresBackend, VectorIndex, VectorMetric};
+    use zeroship_data_v8::backend::{PostgresBackend, VectorIndex, VectorMetric};
 
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
@@ -4532,10 +4532,10 @@ async fn pgvector_extension_missing_reports_typed_error() {
          There is no environment variable that makes this a skip."
     );
 
-    let backend = zeroship_plugin_db::backend::PostgresBackend::new(
+    let backend = zeroship_data_v8::backend::PostgresBackend::new(
         pool.clone(),
         url.clone(),
-        zeroship_plugin_db::isolate_key_source(),
+        zeroship_data_v8::isolate_key_source(),
     );
 
     // No descriptor entry is installed for `vector_missing`, and that is
@@ -4621,7 +4621,7 @@ async fn vector_dimension_mismatch_rejected_at_insert() {
     // Same provisioning gap as `vector_search_returns_k_nearest`: a schema
     // without its per-app role fails closed before the insert is ever attempted.
     let _role = provision_app_with_role(&pool, app).await;
-    zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, app)
+    zeroship_data_v8::auth::bootstrap::ensure_per_app_role(&pool, app)
         .await
         .unwrap();
     pool.execute(
@@ -4693,7 +4693,7 @@ async fn vector_dimension_mismatch_rejected_at_insert() {
 /// rather than skipping, and no attribute removes this test from the run.
 #[compio::test]
 async fn near_returns_within_radius() {
-    use zeroship_plugin_db::backend::{GeoPoint, PostgresBackend, SpatialIndex};
+    use zeroship_data_v8::backend::{GeoPoint, PostgresBackend, SpatialIndex};
 
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
@@ -4728,13 +4728,13 @@ async fn near_returns_within_radius() {
     )
     .await
     .unwrap();
-    zeroship_plugin_db::cache_schema_for_tests(
+    zeroship_data_v8::cache_schema_for_tests(
         app,
         coll,
         value!({ "location": { "type": "geoPoint" } }),
     );
 
-    zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, app)
+    zeroship_data_v8::auth::bootstrap::ensure_per_app_role(&pool, app)
         .await
         .unwrap();
     support::grant_all_runtime_table_columns(&pool, app, coll).await;
@@ -4774,10 +4774,10 @@ async fn near_returns_within_radius() {
         }
     }
 
-    let backend = zeroship_plugin_db::backend::PostgresBackend::new(
+    let backend = zeroship_data_v8::backend::PostgresBackend::new(
         pool.clone(),
         url.clone(),
-        zeroship_plugin_db::isolate_key_source(),
+        zeroship_data_v8::isolate_key_source(),
     );
     let rows = SpatialIndex::spatial_near(
         &backend,
@@ -4825,7 +4825,7 @@ async fn near_returns_within_radius() {
 #[compio::test]
 async fn postgis_extension_missing_reports_typed_error() {
     use zeroship_data_orm::error::DbError;
-    use zeroship_plugin_db::backend::{GeoPoint, PostgresBackend, SpatialIndex};
+    use zeroship_data_v8::backend::{GeoPoint, PostgresBackend, SpatialIndex};
 
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
@@ -4866,10 +4866,10 @@ async fn postgis_extension_missing_reports_typed_error() {
          There is no environment variable that makes this a skip."
     );
 
-    let backend = zeroship_plugin_db::backend::PostgresBackend::new(
+    let backend = zeroship_data_v8::backend::PostgresBackend::new(
         pool.clone(),
         url.clone(),
-        zeroship_plugin_db::isolate_key_source(),
+        zeroship_data_v8::isolate_key_source(),
     );
 
     // No descriptor entry, deliberately: the extension probe runs BEFORE the
@@ -4940,8 +4940,8 @@ async fn postgis_extension_missing_reports_typed_error() {
 // 2026-09-02 and these tests now call `encryption::aead` directly with a key
 // from `backend.key_store()` - the same path production takes.
 use zeroship_data_orm::error::DbError;
-use zeroship_plugin_db::backend::{EncryptionMode, PostgresBackend};
-use zeroship_plugin_db::encryption;
+use zeroship_data_v8::backend::{EncryptionMode, PostgresBackend};
+use zeroship_data_v8::encryption;
 
 /// Helper: hand this isolate a synthetic root key for `key_id`, so the
 /// `PostgresBackend` the test (or the CRUD path behind it) constructs
@@ -4963,8 +4963,8 @@ use zeroship_plugin_db::encryption;
 ///
 /// The returned guard withdraws the keys on drop; keep it alive for the
 /// test body.
-fn with_root_key(key_id: &str, root_hex: &str) -> zeroship_plugin_db::SuppliedRootKeysGuard {
-    zeroship_plugin_db::supply_root_keys_for_tests(&[(key_id, root_hex)])
+fn with_root_key(key_id: &str, root_hex: &str) -> zeroship_data_v8::SuppliedRootKeysGuard {
+    zeroship_data_v8::supply_root_keys_for_tests(&[(key_id, root_hex)])
 }
 
 /// Gate #1: round-trip an encrypted string column. Insert a
@@ -4999,10 +4999,10 @@ async fn encrypted_column_round_trip_randomised() {
     .await
     .unwrap();
 
-    let backend = zeroship_plugin_db::backend::PostgresBackend::new(
+    let backend = zeroship_data_v8::backend::PostgresBackend::new(
         pool.clone(),
         url.clone(),
-        zeroship_plugin_db::isolate_key_source(),
+        zeroship_data_v8::isolate_key_source(),
     );
     let key = backend
         .key_store()
@@ -5011,7 +5011,7 @@ async fn encrypted_column_round_trip_randomised() {
         .expect("resolve_key");
     let plaintext = b"123-45-6789";
     let aad = encryption::canonical_aad("enc_notes", "ssn", Some(b"row_a"));
-    let ct = zeroship_plugin_db::encryption::aead::encrypt(
+    let ct = zeroship_data_v8::encryption::aead::encrypt(
         &key,
         EncryptionMode::Randomised,
         plaintext,
@@ -5053,7 +5053,7 @@ async fn encrypted_column_round_trip_randomised() {
         out
     };
     let recovered =
-        zeroship_plugin_db::encryption::aead::decrypt(&key, &raw, &aad).expect("decrypt");
+        zeroship_data_v8::encryption::aead::decrypt(&key, &raw, &aad).expect("decrypt");
     assert_eq!(recovered, plaintext);
     drop(backend);
     release_pg(pool).await;
@@ -5088,10 +5088,10 @@ async fn encrypted_randomised_row_swap_rejected() {
     .await
     .unwrap();
 
-    let backend = zeroship_plugin_db::backend::PostgresBackend::new(
+    let backend = zeroship_data_v8::backend::PostgresBackend::new(
         pool.clone(),
         url.clone(),
-        zeroship_plugin_db::isolate_key_source(),
+        zeroship_data_v8::isolate_key_source(),
     );
     let key = backend
         .key_store()
@@ -5099,14 +5099,14 @@ async fn encrypted_randomised_row_swap_rejected() {
         .await
         .unwrap();
     // Insert row A with its OWN AAD (binds row_pk = "row_a").
-    let ct_a = zeroship_plugin_db::encryption::aead::encrypt(
+    let ct_a = zeroship_data_v8::encryption::aead::encrypt(
         &key,
         EncryptionMode::Randomised,
         b"sensitive-A",
         &encryption::canonical_aad("enc_notes", "ssn", Some(b"row_a")),
     )
     .unwrap();
-    let ct_b = zeroship_plugin_db::encryption::aead::encrypt(
+    let ct_b = zeroship_data_v8::encryption::aead::encrypt(
         &key,
         EncryptionMode::Randomised,
         b"sensitive-B",
@@ -5157,7 +5157,7 @@ async fn encrypted_randomised_row_swap_rejected() {
         out
     };
     let aad_b = encryption::canonical_aad("enc_notes", "ssn", Some(b"row_b"));
-    let err = zeroship_plugin_db::encryption::aead::decrypt(&key, &raw, &aad_b)
+    let err = zeroship_data_v8::encryption::aead::decrypt(&key, &raw, &aad_b)
         .expect_err("row-swap must fail AAD verification");
     match err {
         DbError::ValidationFailed { code, .. } => {
@@ -5206,10 +5206,10 @@ async fn encrypted_deterministic_equality_lookup() {
     .await
     .unwrap();
 
-    let backend = zeroship_plugin_db::backend::PostgresBackend::new(
+    let backend = zeroship_data_v8::backend::PostgresBackend::new(
         pool.clone(),
         url.clone(),
-        zeroship_plugin_db::isolate_key_source(),
+        zeroship_data_v8::isolate_key_source(),
     );
     let key = backend
         .key_store()
@@ -5221,7 +5221,7 @@ async fn encrypted_deterministic_equality_lookup() {
     // produces identical ciphertext (we then query by exact ciphertext
     // and expect all 5 to come back).
     let aad = encryption::canonical_aad("enc_notes", "ssn", None);
-    let ct_shared = zeroship_plugin_db::encryption::aead::encrypt(
+    let ct_shared = zeroship_data_v8::encryption::aead::encrypt(
         &key,
         EncryptionMode::Deterministic,
         b"shared-ssn",
@@ -5241,7 +5241,7 @@ async fn encrypted_deterministic_equality_lookup() {
         .unwrap();
     }
     // Plus a distinct row.
-    let ct_other = zeroship_plugin_db::encryption::aead::encrypt(
+    let ct_other = zeroship_data_v8::encryption::aead::encrypt(
         &key,
         EncryptionMode::Deterministic,
         b"other-ssn",
@@ -5374,11 +5374,11 @@ CREATE TABLE "{app}"."people" ({PG_SYSTEM_COLUMNS},
     // Install the pool into the per-isolate context so the pipelines' own SQL
     // lands on this database, and install the DESCRIPTOR ENTRY the deploy would
     // have installed — exactly what the production register path does.
-    zeroship_plugin_db::set_postgres_pool_for_tests(std::rc::Rc::clone(&pool), &url);
-    zeroship_plugin_db::cache_schema_for_tests(app, "people", schema.clone());
+    zeroship_data_v8::set_postgres_pool_for_tests(std::rc::Rc::clone(&pool), &url);
+    zeroship_data_v8::cache_schema_for_tests(app, "people", schema.clone());
 
     // Sanity: the resolution the CRUD passes will perform returns BOTH goodies.
-    let resolved = zeroship_plugin_db::crud::runtime_schema_for_tests(app, "people")
+    let resolved = zeroship_data_v8::crud::runtime_schema_for_tests(app, "people")
         .expect("the descriptor entry this deploy installed must resolve");
     assert_eq!(resolved["ssn"]["encrypted"]["mode"], "randomised");
     assert_eq!(resolved["phone"]["mask"]["kind"], "last4");
@@ -5401,7 +5401,7 @@ CREATE TABLE "{app}"."people" ({PG_SYSTEM_COLUMNS},
         "phone": "415-555-0142",
         "embedding": [0.1, 0.2, 0.3],
     }]);
-    zeroship_plugin_db::prepare_insert_many_docs_for_tests(&mut docs, app, "people", None)
+    zeroship_data_v8::prepare_insert_many_docs_for_tests(&mut docs, app, "people", None)
         .await
         .expect("write pipeline");
 
@@ -5477,9 +5477,9 @@ CREATE TABLE "{app}"."people" ({PG_SYSTEM_COLUMNS},
         .await
         .unwrap();
     assert_eq!(raw.len(), 1);
-    let row = zeroship_plugin_db::row_to_value_for_bench(&raw[0]);
+    let row = zeroship_data_v8::row_to_value_for_bench(&raw[0]);
 
-    let finalized = zeroship_plugin_db::finalize_rows_on_read_for_tests(app, "people", vec![row])
+    let finalized = zeroship_data_v8::finalize_rows_on_read_for_tests(app, "people", vec![row])
         .await
         .expect("read pipeline");
     let out = &finalized[0];
@@ -5617,11 +5617,11 @@ CREATE TABLE "{app}"."people" ({PG_SYSTEM_COLUMNS},
 
     // Install the runtime backend and the descriptor entry the runtime plants
     // natively at boot.
-    zeroship_plugin_db::set_postgres_pool_for_tests(std::rc::Rc::clone(&pool), &url);
-    zeroship_plugin_db::cache_schema_for_tests(app, "people", schema.clone());
+    zeroship_data_v8::set_postgres_pool_for_tests(std::rc::Rc::clone(&pool), &url);
+    zeroship_data_v8::cache_schema_for_tests(app, "people", schema.clone());
 
     // The resolution the CRUD passes will perform returns BOTH goodies.
-    let resolved = zeroship_plugin_db::crud::runtime_schema_for_tests(app, "people")
+    let resolved = zeroship_data_v8::crud::runtime_schema_for_tests(app, "people")
         .expect("the descriptor entry this deploy installed must resolve");
     assert_eq!(resolved["ssn"]["encrypted"]["mode"], "randomised");
     assert_eq!(resolved["phone"]["mask"]["kind"], "last4");
@@ -5638,7 +5638,7 @@ CREATE TABLE "{app}"."people" ({PG_SYSTEM_COLUMNS},
         "ssn": "987-65-4321",
         "phone": "650-555-0199",
     }]);
-    zeroship_plugin_db::prepare_insert_many_docs_for_tests(&mut docs, app, "people", None)
+    zeroship_data_v8::prepare_insert_many_docs_for_tests(&mut docs, app, "people", None)
         .await
         .expect("write pipeline");
     let doc = &docs[0];
@@ -5703,8 +5703,8 @@ CREATE TABLE "{app}"."people" ({PG_SYSTEM_COLUMNS},
         .await
         .unwrap();
     assert_eq!(raw.len(), 1);
-    let row = zeroship_plugin_db::row_to_value_for_bench(&raw[0]);
-    let finalized = zeroship_plugin_db::finalize_rows_on_read_for_tests(app, "people", vec![row])
+    let row = zeroship_data_v8::row_to_value_for_bench(&raw[0]);
+    let finalized = zeroship_data_v8::finalize_rows_on_read_for_tests(app, "people", vec![row])
         .await
         .expect("read pipeline");
     let out = &finalized[0];
@@ -5754,12 +5754,12 @@ async fn encrypted_column_missing_key_typed_error() {
     // `ZEROSHIP_COLUMN_KEY_MISSING_TEST` exported outside the test would
     // have turned this assertion green-for-the-wrong-reason. An empty
     // set cannot.
-    let _keys = zeroship_plugin_db::supply_root_keys_for_tests(&[]);
+    let _keys = zeroship_data_v8::supply_root_keys_for_tests(&[]);
 
-    let backend = zeroship_plugin_db::backend::PostgresBackend::new(
+    let backend = zeroship_data_v8::backend::PostgresBackend::new(
         pool.clone(),
         url.clone(),
-        zeroship_plugin_db::isolate_key_source(),
+        zeroship_data_v8::isolate_key_source(),
     );
     let err = backend
         .key_store()
@@ -5787,7 +5787,7 @@ async fn pg_bytea_decoder_preserves_raw_binary_prefix_bytes() {
         )
         .await
         .unwrap();
-    let json = zeroship_plugin_db::row_to_value_for_bench(&rows[0]);
+    let json = zeroship_data_v8::row_to_value_for_bench(&rows[0]);
     let payload = json
         .get("payload")
         .and_then(Value::as_bytes)
@@ -5832,7 +5832,7 @@ async fn pg_bytea_decoder_preserves_raw_binary_prefix_bytes() {
 //      `SnapshotHandle.content_hash` matches SHA-256 of the on-disk
 //      dump file. Needs `pg_dump` for the same reason as #1.
 
-use zeroship_plugin_db::backend::{
+use zeroship_data_v8::backend::{
     Backup as _, BusyPolicy as BackupBusyPolicy, LockScope, SnapshotOpts,
 };
 
@@ -5893,10 +5893,10 @@ fn require_pg_client_tool(tool: &str) {
 async fn snapshot_during_migration_returns_typed_error() {
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
-    let backend = zeroship_plugin_db::backend::PostgresBackend::new(
+    let backend = zeroship_data_v8::backend::PostgresBackend::new(
         pool.clone(),
         url.clone(),
-        zeroship_plugin_db::isolate_key_source(),
+        zeroship_data_v8::isolate_key_source(),
     );
     let app_id = crate::test_app_id!();
     let app_id = app_id.as_str();
@@ -6017,10 +6017,10 @@ async fn snapshot_restore_round_trip_pg() {
         .unwrap();
     }
 
-    let backend = zeroship_plugin_db::backend::PostgresBackend::new(
+    let backend = zeroship_data_v8::backend::PostgresBackend::new(
         pool.clone(),
         url.clone(),
-        zeroship_plugin_db::isolate_key_source(),
+        zeroship_data_v8::isolate_key_source(),
     );
 
     // Snapshot to a tempdir-backed file:// URI.
@@ -6124,10 +6124,10 @@ async fn snapshot_uri_content_hash_round_trip() {
     .await
     .unwrap();
 
-    let backend = zeroship_plugin_db::backend::PostgresBackend::new(
+    let backend = zeroship_data_v8::backend::PostgresBackend::new(
         pool.clone(),
         url.clone(),
-        zeroship_plugin_db::isolate_key_source(),
+        zeroship_data_v8::isolate_key_source(),
     );
     let dir = tempfile::tempdir().unwrap();
     let dest_path = dir.path().join("hash_check.dump");
@@ -6344,7 +6344,7 @@ async fn per_app_role_created_at_provision() {
     let role = provision_app_with_role(&pool, app).await;
 
     // First provision creates the role.
-    let first = zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, app)
+    let first = zeroship_data_v8::auth::bootstrap::ensure_per_app_role(&pool, app)
         .await
         .expect("provision per-app role");
     assert!(first.created_role, "first provision must create the role");
@@ -6361,7 +6361,7 @@ async fn per_app_role_created_at_provision() {
 
     // Idempotent: a second provision is a no-op create (GRANTs re-run
     // harmlessly).
-    let second = zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, app)
+    let second = zeroship_data_v8::auth::bootstrap::ensure_per_app_role(&pool, app)
         .await
         .expect("re-provision per-app role");
     assert!(
@@ -6446,7 +6446,7 @@ async fn workflow_journal_redeploy_grants_do_not_reopen_without_reprovision() {
     zeroship_plugin_workflow::store::pg::PgStore::provision(&client, &app_id)
         .await
         .expect("provision app-local workflow journal");
-    zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, &app_schema)
+    zeroship_data_v8::auth::bootstrap::ensure_per_app_role(&pool, &app_schema)
         .await
         .expect("redeploy plugin-db per-app role grants");
 
@@ -6536,7 +6536,7 @@ async fn per_app_role_has_no_replication_attr() {
     let app = crate::test_app_id!();
     let app = app.as_str();
     let role = provision_app_with_role(&pool, app).await;
-    zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, app)
+    zeroship_data_v8::auth::bootstrap::ensure_per_app_role(&pool, app)
         .await
         .unwrap();
 
@@ -6571,7 +6571,7 @@ async fn per_app_role_grant_scoped_to_schema() {
     let app = crate::test_app_id!();
     let app = app.as_str();
     let role = provision_app_with_role(&pool, app).await;
-    zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, app)
+    zeroship_data_v8::auth::bootstrap::ensure_per_app_role(&pool, app)
         .await
         .unwrap();
 
@@ -6644,10 +6644,10 @@ async fn per_app_role_cannot_read_sibling_schema_or_touch_slots() {
         .await
         .unwrap();
 
-    zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, app_a)
+    zeroship_data_v8::auth::bootstrap::ensure_per_app_role(&pool, app_a)
         .await
         .unwrap();
-    zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, app_b)
+    zeroship_data_v8::auth::bootstrap::ensure_per_app_role(&pool, app_b)
         .await
         .unwrap();
     pool.execute(
@@ -6736,7 +6736,7 @@ async fn client_sql_runs_under_per_app_role() {
     let app = crate::test_app_id!();
     let app = app.as_str();
     let role = provision_app_with_role(&pool, app).await;
-    zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, app)
+    zeroship_data_v8::auth::bootstrap::ensure_per_app_role(&pool, app)
         .await
         .unwrap();
 
@@ -6749,7 +6749,7 @@ async fn client_sql_runs_under_per_app_role() {
     .detach();
 
     client.execute("BEGIN", &[]).await.unwrap();
-    let set_sql = zeroship_plugin_db::auth::bootstrap::set_local_role_sql(app)
+    let set_sql = zeroship_data_v8::auth::bootstrap::set_local_role_sql(app)
         .expect("integration app id must produce valid SET LOCAL ROLE SQL");
     client.execute(&set_sql, &[]).await.unwrap();
 
@@ -6795,14 +6795,14 @@ async fn exec_autocommit_query_runs_under_per_app_role() {
     let app = crate::test_app_id!();
     let app = app.as_str();
     let role = provision_app_with_role(&pool, app).await;
-    zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, app)
+    zeroship_data_v8::auth::bootstrap::ensure_per_app_role(&pool, app)
         .await
         .unwrap();
-    zeroship_plugin_db::set_db_url_for_tests(&url);
+    zeroship_data_v8::set_db_url_for_tests(&url);
 
-    let rows = zeroship_plugin_db::exec_query_for_tests(
+    let rows = zeroship_data_v8::exec_query_for_tests(
         app,
-        zeroship_plugin_db::compile::BuiltQuery {
+        zeroship_data_v8::compile::BuiltQuery {
             sql: "SELECT current_user AS u".to_string(),
             params: vec![],
         },
@@ -6839,7 +6839,7 @@ async fn exec_autocommit_query_runs_under_per_app_role() {
 
 #[compio::test]
 async fn vector_search_runs_under_per_app_role_via_rls() {
-    use zeroship_plugin_db::backend::{PostgresBackend, VectorIndex, VectorMetric};
+    use zeroship_data_v8::backend::{PostgresBackend, VectorIndex, VectorMetric};
 
     let url = require_pg().await;
     let admin_pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
@@ -6850,7 +6850,7 @@ async fn vector_search_runs_under_per_app_role_via_rls() {
     let app = app.as_str();
     let coll = "docs";
     let role = provision_app_with_role(&admin_pool, app).await;
-    zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&admin_pool, app)
+    zeroship_data_v8::auth::bootstrap::ensure_per_app_role(&admin_pool, app)
         .await
         .unwrap();
     admin_pool
@@ -6871,7 +6871,7 @@ async fn vector_search_runs_under_per_app_role_via_rls() {
         )
         .await
         .unwrap();
-    zeroship_plugin_db::cache_schema_for_tests(
+    zeroship_data_v8::cache_schema_for_tests(
         app,
         coll,
         value!({ "embedding": { "type": "vector", "vectorDims": 2 } }),
@@ -6898,10 +6898,10 @@ async fn vector_search_runs_under_per_app_role_via_rls() {
         "login role must be blocked by FORCE RLS before vector_search proves the role fence"
     );
 
-    let backend = zeroship_plugin_db::backend::PostgresBackend::new(
+    let backend = zeroship_data_v8::backend::PostgresBackend::new(
         login_pool.clone(),
         login_url,
-        zeroship_plugin_db::isolate_key_source(),
+        zeroship_data_v8::isolate_key_source(),
     );
     let rows = VectorIndex::vector_search(
         &backend,
@@ -6912,7 +6912,7 @@ async fn vector_search_runs_under_per_app_role_via_rls() {
         1,
         VectorMetric::Cosine,
         &Value::Null,
-        &zeroship_plugin_db::collection_schema(&DbBinding::cold_start(app), coll)
+        &zeroship_data_v8::collection_schema(&DbBinding::cold_start(app), coll)
             .expect("descriptor slice for the search fixture"),
     )
     .await
@@ -6936,7 +6936,7 @@ async fn vector_search_runs_under_per_app_role_via_rls() {
 
 #[compio::test]
 async fn spatial_near_runs_under_per_app_role_via_rls() {
-    use zeroship_plugin_db::backend::{GeoPoint, PostgresBackend, SpatialIndex};
+    use zeroship_data_v8::backend::{GeoPoint, PostgresBackend, SpatialIndex};
 
     let url = require_pg().await;
     let admin_pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
@@ -6947,7 +6947,7 @@ async fn spatial_near_runs_under_per_app_role_via_rls() {
     let app = app.as_str();
     let coll = "places";
     let role = provision_app_with_role(&admin_pool, app).await;
-    zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&admin_pool, app)
+    zeroship_data_v8::auth::bootstrap::ensure_per_app_role(&admin_pool, app)
         .await
         .unwrap();
     admin_pool
@@ -6968,7 +6968,7 @@ async fn spatial_near_runs_under_per_app_role_via_rls() {
         )
         .await
         .unwrap();
-    zeroship_plugin_db::cache_schema_for_tests(
+    zeroship_data_v8::cache_schema_for_tests(
         app,
         coll,
         value!({ "location": { "type": "geoPoint" } }),
@@ -6998,10 +6998,10 @@ async fn spatial_near_runs_under_per_app_role_via_rls() {
         "login role must be blocked by FORCE RLS before spatial_near proves the role fence"
     );
 
-    let backend = zeroship_plugin_db::backend::PostgresBackend::new(
+    let backend = zeroship_data_v8::backend::PostgresBackend::new(
         login_pool.clone(),
         login_url,
-        zeroship_plugin_db::isolate_key_source(),
+        zeroship_data_v8::isolate_key_source(),
     );
     let rows = SpatialIndex::spatial_near(
         &backend,
@@ -7022,7 +7022,7 @@ async fn spatial_near_runs_under_per_app_role_via_rls() {
         // until 2026-09-03; it never showed because the usual test container
         // carries no PostGIS, and back then the arm skipped rather than
         // failing. Its vector twin above always passed the descriptor.
-        &zeroship_plugin_db::collection_schema(&DbBinding::cold_start(app), coll)
+        &zeroship_data_v8::collection_schema(&DbBinding::cold_start(app), coll)
             .expect("descriptor slice for the spatial fixture"),
     )
     .await
@@ -7046,7 +7046,7 @@ async fn spatial_near_runs_under_per_app_role_via_rls() {
 
 #[compio::test]
 async fn unmask_fetch_runs_under_per_app_role_via_rls() {
-    use zeroship_plugin_db::crud::unmask::{self, UnmaskFieldArgs};
+    use zeroship_data_v8::crud::unmask::{self, UnmaskFieldArgs};
 
     let url = require_pg().await;
     let admin_pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
@@ -7056,7 +7056,7 @@ async fn unmask_fetch_runs_under_per_app_role_via_rls() {
     let app = app.as_str();
     let coll = "users";
     let role = provision_app_with_role(&admin_pool, app).await;
-    zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&admin_pool, app)
+    zeroship_data_v8::auth::bootstrap::ensure_per_app_role(&admin_pool, app)
         .await
         .unwrap();
     let schema = value!({
@@ -7109,9 +7109,9 @@ async fn unmask_fetch_runs_under_per_app_role_via_rls() {
          the role fence"
     );
 
-    zeroship_plugin_db::set_postgres_pool_for_tests(login_pool.clone(), &login_url);
-    zeroship_plugin_db::cache_schema_for_tests(app, coll, schema);
-    zeroship_plugin_db::clear_mask_policy_cache_for_tests(app);
+    zeroship_data_v8::set_postgres_pool_for_tests(login_pool.clone(), &login_url);
+    zeroship_data_v8::cache_schema_for_tests(app, coll, schema);
+    zeroship_data_v8::clear_mask_policy_cache_for_tests(app);
 
     let result = unmask::dispatch_unmask(
         &unmask_route(app).await,
@@ -7175,7 +7175,7 @@ async fn unmask_fetch_runs_under_per_app_role_via_rls() {
 /// too. The only new thing is the BYTEA raw column.
 #[compio::test]
 async fn unmask_encrypted_column_on_pg_reads_bytea_raw_sibling() {
-    use zeroship_plugin_db::crud::unmask::{self, UnmaskFieldArgs};
+    use zeroship_data_v8::crud::unmask::{self, UnmaskFieldArgs};
 
     let url = require_pg().await;
     let admin_pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
@@ -7187,7 +7187,7 @@ async fn unmask_encrypted_column_on_pg_reads_bytea_raw_sibling() {
     let app = app.as_str();
     let coll = "users";
     let role = provision_app_with_role(&admin_pool, app).await;
-    zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&admin_pool, app)
+    zeroship_data_v8::auth::bootstrap::ensure_per_app_role(&admin_pool, app)
         .await
         .unwrap();
     let schema = value!({
@@ -7213,10 +7213,10 @@ async fn unmask_encrypted_column_on_pg_reads_bytea_raw_sibling() {
     // Real ciphertext from the platform's own encryptor, under the AAD the read
     // path recomputes: canonical_aad(collection, column, Some(row_pk)) for the
     // randomised mode (crud/unmask.rs:503-510).
-    let backend = zeroship_plugin_db::backend::PostgresBackend::new(
+    let backend = zeroship_data_v8::backend::PostgresBackend::new(
         admin_pool.clone(),
         url.clone(),
-        zeroship_plugin_db::isolate_key_source(),
+        zeroship_data_v8::isolate_key_source(),
     );
     let key = backend
         .key_store()
@@ -7224,7 +7224,7 @@ async fn unmask_encrypted_column_on_pg_reads_bytea_raw_sibling() {
         .await
         .expect("resolve_key");
     let aad = encryption::canonical_aad(coll, "ssn", Some(b"u1"));
-    let ct = zeroship_plugin_db::encryption::aead::encrypt(
+    let ct = zeroship_data_v8::encryption::aead::encrypt(
         &key,
         EncryptionMode::Randomised,
         b"123-45-6789",
@@ -7248,9 +7248,9 @@ async fn unmask_encrypted_column_on_pg_reads_bytea_raw_sibling() {
     let (login_url, login_pool) =
         provision_platform_login_pool(&admin_pool, &url, login_role, "test", &role, app).await;
 
-    zeroship_plugin_db::set_postgres_pool_for_tests(login_pool.clone(), &login_url);
-    zeroship_plugin_db::cache_schema_for_tests(app, coll, schema);
-    zeroship_plugin_db::clear_mask_policy_cache_for_tests(app);
+    zeroship_data_v8::set_postgres_pool_for_tests(login_pool.clone(), &login_url);
+    zeroship_data_v8::cache_schema_for_tests(app, coll, schema);
+    zeroship_data_v8::clear_mask_policy_cache_for_tests(app);
 
     let result = unmask::dispatch_unmask(
         &unmask_route(app).await,
@@ -7311,7 +7311,7 @@ async fn unmask_encrypted_column_on_pg_reads_bytea_raw_sibling() {
 /// `pg.pool_handle()` and issued the INSERT on a bare checkout.
 #[compio::test]
 async fn unmask_audit_insert_runs_under_the_per_app_role_not_the_login_role() {
-    use zeroship_plugin_db::crud::unmask::{self, UnmaskFieldArgs};
+    use zeroship_data_v8::crud::unmask::{self, UnmaskFieldArgs};
 
     let url = require_pg().await;
     let admin_pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
@@ -7321,7 +7321,7 @@ async fn unmask_audit_insert_runs_under_the_per_app_role_not_the_login_role() {
     let app = app.as_str();
     let coll = "patients";
     let role = provision_app_with_role(&admin_pool, app).await;
-    zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&admin_pool, app)
+    zeroship_data_v8::auth::bootstrap::ensure_per_app_role(&admin_pool, app)
         .await
         .unwrap();
     let schema = value!({
@@ -7395,9 +7395,9 @@ async fn unmask_audit_insert_runs_under_the_per_app_role_not_the_login_role() {
         "the login role must reach nothing ambiently under WITH INHERIT FALSE"
     );
 
-    zeroship_plugin_db::set_postgres_pool_for_tests(login_pool.clone(), &login_url);
-    zeroship_plugin_db::cache_schema_for_tests(app, coll, schema);
-    zeroship_plugin_db::clear_mask_policy_cache_for_tests(app);
+    zeroship_data_v8::set_postgres_pool_for_tests(login_pool.clone(), &login_url);
+    zeroship_data_v8::cache_schema_for_tests(app, coll, schema);
+    zeroship_data_v8::clear_mask_policy_cache_for_tests(app);
 
     let result = unmask::dispatch_unmask(
         &unmask_route(app).await,
@@ -7471,8 +7471,8 @@ async fn unmask_audit_insert_runs_under_the_per_app_role_not_the_login_role() {
 /// no-policy `auto` fallback, not a declared policy.
 #[compio::test]
 async fn pg_declared_mask_policy_authorizes_unmask_without_durable_store() {
-    use zeroship_plugin_db::crud::mask_policy;
-    use zeroship_plugin_db::crud::unmask::{self, UnmaskFieldArgs};
+    use zeroship_data_v8::crud::mask_policy;
+    use zeroship_data_v8::crud::unmask::{self, UnmaskFieldArgs};
 
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
@@ -7485,7 +7485,7 @@ async fn pg_declared_mask_policy_authorizes_unmask_without_durable_store() {
     // the read path checks for -- without it the unmask SELECT refuses
     // with `schema_not_provisioned` before authorization is ever reached.
     let role = provision_app_with_role(&pool, app).await;
-    zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, app)
+    zeroship_data_v8::auth::bootstrap::ensure_per_app_role(&pool, app)
         .await
         .unwrap();
 
@@ -7518,9 +7518,9 @@ async fn pg_declared_mask_policy_authorizes_unmask_without_durable_store() {
     .unwrap();
     support::grant_runtime_select_columns(&pool, app, coll, &["id", &ssn_raw]).await;
 
-    zeroship_plugin_db::set_postgres_pool_for_tests(pool.clone(), &url);
-    zeroship_plugin_db::cache_schema_for_tests(app, coll, schema);
-    zeroship_plugin_db::clear_mask_policy_cache_for_tests(app);
+    zeroship_data_v8::set_postgres_pool_for_tests(pool.clone(), &url);
+    zeroship_data_v8::cache_schema_for_tests(app, coll, schema);
+    zeroship_data_v8::clear_mask_policy_cache_for_tests(app);
 
     // The boot-time install `installSchema` performs. Before the fix
     // this issued `SELECT set_mask_policy(...)` against the platform-owned
@@ -7613,7 +7613,7 @@ async fn wal_connection_stays_platform_role() {
     let app = crate::test_app_id!();
     let app = app.as_str();
     let role = provision_app_with_role(&pool, app).await;
-    zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, app)
+    zeroship_data_v8::auth::bootstrap::ensure_per_app_role(&pool, app)
         .await
         .unwrap();
 
@@ -7652,24 +7652,24 @@ async fn wal_connection_stays_platform_role() {
 // with -c wal_level=logical).
 // ---------------------------------------------------------------------------
 
-use zeroship_plugin_db::backend::BackendHandle;
-use zeroship_plugin_db::drop_namespace::{drop_namespace, DropNamespaceOpts, DropNamespaceOutcome};
+use zeroship_data_v8::backend::BackendHandle;
+use zeroship_data_v8::drop_namespace::{drop_namespace, DropNamespaceOpts, DropNamespaceOutcome};
 
 /// Build a `BackendHandle::Postgres` over a fresh `PostgresBackend` for
 /// the drop-namespace tests. (`PostgresBackend` is already imported at
 /// module scope earlier in this file — referenced unqualified here.)
 fn pg_backend_handle(pool: &std::rc::Rc<Pool>, url: &str) -> BackendHandle {
     BackendHandle::new(std::rc::Rc::new(
-        zeroship_plugin_db::backend::PostgresBackend::new(
+        zeroship_data_v8::backend::PostgresBackend::new(
             std::rc::Rc::clone(pool),
             url.to_string(),
-            zeroship_plugin_db::isolate_key_source(),
+            zeroship_data_v8::isolate_key_source(),
         ),
     ))
 }
 
 async fn slot_exists(pool: &Pool, app: &str) -> bool {
-    let slot = zeroship_plugin_db::replication::worker_slot_name(app, CDC_TEST_WORKER_ID).unwrap();
+    let slot = zeroship_data_v8::replication::worker_slot_name(app, CDC_TEST_WORKER_ID).unwrap();
     let rows = pool
         .query_text_params(
             "SELECT 1 FROM pg_replication_slots WHERE slot_name = $1",
@@ -7681,7 +7681,7 @@ async fn slot_exists(pool: &Pool, app: &str) -> bool {
 }
 
 async fn publication_exists(pool: &Pool, app: &str) -> bool {
-    let pubn = zeroship_plugin_db::replication::publication_name(app).unwrap();
+    let pubn = zeroship_data_v8::replication::publication_name(app).unwrap();
     let rows = pool
         .query_text_params(
             "SELECT 1 FROM pg_publication WHERE pubname = $1",
@@ -7769,9 +7769,9 @@ async fn drop_namespace_force_fires_subscription_app_dropped() {
 
     // Register a live subscription on this thread's broker so the
     // force-drain has something to close.
-    let sub = zeroship_plugin_db::broker::subscribe(app, "widgets");
+    let sub = zeroship_data_v8::broker::subscribe(app, "widgets");
     assert_eq!(
-        zeroship_plugin_db::broker::app_subscription_count(app),
+        zeroship_data_v8::broker::app_subscription_count(app),
         1,
         "subscription should be live before drop"
     );
@@ -7802,7 +7802,7 @@ async fn drop_namespace_force_fires_subscription_app_dropped() {
         "active subscriber must be closed under --force"
     );
     assert_eq!(
-        zeroship_plugin_db::broker::app_subscription_count(app),
+        zeroship_data_v8::broker::app_subscription_count(app),
         0,
         "broker must be drained for the app after --force drop"
     );
@@ -7831,7 +7831,7 @@ async fn drop_namespace_pg_drops_slots_but_retains_migration_publication() {
         .unwrap();
     c1_create_publication(&pool, app).await;
     // Provision the worker slot against the migration-owned publication.
-    zeroship_plugin_db::replication::ensure_worker_slot(&pool, app, CDC_TEST_WORKER_ID)
+    zeroship_data_v8::replication::ensure_worker_slot(&pool, app, CDC_TEST_WORKER_ID)
         .await
         .expect("provision worker slot");
     assert!(slot_exists(&pool, app).await, "slot provisioned");
@@ -7888,7 +7888,7 @@ async fn drop_namespace_drops_per_app_role_last() {
     // Provision the per-app role + give it an object in the schema so the
     // "role still owns objects" path is exercised (the CASCADE must clear
     // it before DROP ROLE).
-    zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, app)
+    zeroship_data_v8::auth::bootstrap::ensure_per_app_role(&pool, app)
         .await
         .unwrap();
     pool.execute(
@@ -7940,10 +7940,10 @@ async fn drop_namespace_idempotent_steps_3_to_5() {
         .await
         .unwrap();
     c1_create_publication(&pool, app).await;
-    zeroship_plugin_db::replication::ensure_worker_slot(&pool, app, CDC_TEST_WORKER_ID)
+    zeroship_data_v8::replication::ensure_worker_slot(&pool, app, CDC_TEST_WORKER_ID)
         .await
         .unwrap();
-    zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, app)
+    zeroship_data_v8::auth::bootstrap::ensure_per_app_role(&pool, app)
         .await
         .unwrap();
 
@@ -8003,16 +8003,16 @@ async fn drop_namespace_retries_from_step_3_on_partial_failure() {
         .await
         .unwrap();
     c1_create_publication(&pool, app).await;
-    zeroship_plugin_db::replication::ensure_worker_slot(&pool, app, CDC_TEST_WORKER_ID)
+    zeroship_data_v8::replication::ensure_worker_slot(&pool, app, CDC_TEST_WORKER_ID)
         .await
         .unwrap();
-    zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, app)
+    zeroship_data_v8::auth::bootstrap::ensure_per_app_role(&pool, app)
         .await
         .unwrap();
 
     // Simulate a crash AFTER step 3 (slots dropped) but BEFORE
     // steps 4-5 (schema + role still present).
-    zeroship_plugin_db::replication::drop_worker_slots(&pool, app)
+    zeroship_data_v8::replication::drop_worker_slots(&pool, app)
         .await
         .expect("partial: drop worker slots");
     assert!(!slot_exists(&pool, app).await, "slot gone after partial");
@@ -8282,17 +8282,17 @@ fn direct_connection_sites_do_not_grow() {
 async fn a_dedicated_client_is_a_pool_checkout_and_returns_on_drop() {
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
-    let backend = zeroship_plugin_db::backend::PostgresBackend::new(
+    let backend = zeroship_data_v8::backend::PostgresBackend::new(
         std::rc::Rc::clone(&pool),
         url.clone(),
-        zeroship_plugin_db::isolate_key_source(),
+        zeroship_data_v8::isolate_key_source(),
     );
 
     let active_before = pool.active_count();
     let created_before = pool.metrics().connections_created.get();
 
     let client = {
-        use zeroship_plugin_db::backend::SqlExecutor as _;
+        use zeroship_data_v8::backend::SqlExecutor as _;
         backend
             .acquire_dedicated_client("app_pool_probe")
             .await
@@ -8340,13 +8340,13 @@ async fn concurrent_dedicated_clients_are_bounded_by_the_pool() {
             .await
             .expect("pool"),
     );
-    let backend = zeroship_plugin_db::backend::PostgresBackend::new(
+    let backend = zeroship_data_v8::backend::PostgresBackend::new(
         std::rc::Rc::clone(&pool),
         url.clone(),
-        zeroship_plugin_db::isolate_key_source(),
+        zeroship_data_v8::isolate_key_source(),
     );
 
-    use zeroship_plugin_db::backend::SqlExecutor as _;
+    use zeroship_data_v8::backend::SqlExecutor as _;
     let first = backend
         .acquire_dedicated_client("app_pool_probe")
         .await

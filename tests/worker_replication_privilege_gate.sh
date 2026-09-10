@@ -5,7 +5,7 @@
 # `db/migrations-ts/20260818000200_worker_database_authority.ts` GRANTS
 # `zeroship_worker` the PostgreSQL `REPLICATION` attribute.
 # `crates/zeroship-worker/src/db_posture.rs` REFUSES TO BOOT without it.
-# `crates/zeroship-plugin-db/src/{replication,wal_consumer,slot_reaper}.rs` USE
+# `crates/zeroship-data-v8/src/{replication,wal_consumer,slot_reaper}.rs` USE
 # it. AGENTS.md's "Privilege follows the PROCESS, not the function" says the
 # process that executes creator code must not hold a privilege it does not
 # need, so those three must agree in both directions - and nothing checked that

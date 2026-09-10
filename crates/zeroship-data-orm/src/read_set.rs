@@ -757,7 +757,7 @@ mod tests {
     // `v8_bridge::ensure_read_set_capture` reads `zeroship_runtime::rpc`'s
     // procedure kind and passes the boolean down. Three arms used to live in
     // this module driving `KindGuard` directly; they moved to
-    // `zeroship_plugin_db::v8_bridge`'s tests on 2026-09-03, with this module,
+    // `zeroship_data_v8::v8_bridge`'s tests on 2026-09-03, with this module,
     // because naming the runtime crate here is exactly what
     // `tests/data_crate_closure_gate.sh` refuses. They got stronger in the
     // move: they now drive `ensure_read_set_capture` itself rather than a

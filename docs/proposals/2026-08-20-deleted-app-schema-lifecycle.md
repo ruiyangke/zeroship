@@ -89,7 +89,7 @@ only by code with no production caller.
 
 | Object | Verdict | Deciding code |
 | --- | --- | --- |
-| `"<uuid>"` - the creator's tables, holding END USERS' rows | **survives** | `crates/zeroship-plugin-db/src/drop_namespace.rs:161` is the only production-shaped `DROP SCHEMA`, and the module is `#![allow(dead_code)]` with test-only callers |
+| `"<uuid>"` - the creator's tables, holding END USERS' rows | **survives** | `crates/zeroship-data-v8/src/drop_namespace.rs:161` is the only production-shaped `DROP SCHEMA`, and the module is `#![allow(dead_code)]` with test-only callers |
 | `"<uuid>_migrations"` - the migration engine journal | **survives** | named by nothing; created at `third_party/zero-migrate/crates/zeroship-migrate/src/conn.rs:188` |
 | `"app_<uuid>"` - the workflow journal's 5 `__zeroship_workflow_*` tables | **survives** | named by nothing; `crates/zeroship-control/src/cron/workflow_engine.rs:306-311` states it outright |
 | role `app_<uuid>_role`, its template membership, grants and default privileges | **survives** | `drop_per_app_role` (`crates/zeroship-data-orm/src/auth/bootstrap.rs:1671`) has exactly one caller, the dead `drop_namespace` |
@@ -121,11 +121,11 @@ them stay forever.
 Note the second row of the dead-code column. `drop_namespace` is the only
 teardown that exists, and **it drops one of the three schemas**: step 4 is
 `DROP SCHEMA IF EXISTS {schema} CASCADE` where `schema = quote_ident(app_id)`
-(`crates/zeroship-plugin-db/src/drop_namespace.rs:160-161`), the bare uuid. Wiring it as
+(`crates/zeroship-data-v8/src/drop_namespace.rs:160-161`), the bare uuid. Wiring it as
 written would still leave `"<uuid>_migrations"` and `"app_<uuid>"` behind. This
 matters for section 7: "just call the existing teardown" is not a fix.
 
-`crates/zeroship-plugin-db/src/drop_namespace.rs:44-55` says so itself:
+`crates/zeroship-data-v8/src/drop_namespace.rs:44-55` says so itself:
 
 > Until the control plane wires the call (cross-worker fan-out + lock), the
 > orchestrator surface is unused in a default build

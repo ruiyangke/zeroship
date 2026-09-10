@@ -57,7 +57,7 @@ pub async fn open_sqlite_backend(
 // SQLite composer above is fine because its parameter is `impl AsRef<Path>`.
 //
 // So the Postgres arm injects at the CALL SITE instead: a caller that already
-// holds a pool also passes `zeroship_plugin_db::isolate_key_source`. The vendor
+// holds a pool also passes `zeroship_data_v8::isolate_key_source`. The vendor
 // constructor takes what it needs, the engine never names the pool type, and
 // the lookup still lives in exactly one function.
 

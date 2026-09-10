@@ -78,7 +78,7 @@ pub const DEFAULT_QUEUE_DEPTH: usize = 1024;
 /// 256 is far above any legitimate app's working set.
 ///
 /// `pub` rather than `pub(crate)` since the 2026-09-03 move out of
-/// `zeroship-plugin-db`: the cap is enforced in the ADAPTER, at
+/// `zeroship-data-v8`: the cap is enforced in the ADAPTER, at
 /// `v8_classes::subscription`'s `try_subscribe` refusal, and quoted back in its
 /// error message.
 pub const MAX_SUBSCRIPTIONS_PER_APP: usize = 256;
@@ -427,7 +427,7 @@ impl Broker {
     /// MUST be refused loudly so the SDK can surface a typed error
     /// rather than open a subscription whose collection may not exist
     /// after the deploy stabilises. The mirror "soft" path is backfill
-    /// pause (see `zeroship_plugin_db::backend::BrokerPauseGuard`) which silently
+    /// pause (see `zeroship_data_v8::backend::BrokerPauseGuard`) which silently
     /// drops events at the publisher and emits one `Resync` per active
     /// subscription on disengage — there is no `subscribe()` rejection
     /// there because backfill is internally driven.
@@ -669,9 +669,9 @@ impl Broker {
     /// Push a `Resync` to every active subscription registered for
     /// `app_id`.
     ///
-    /// Invoked from `zeroship_plugin_db::backend::BrokerPauseGuard::drop` (after a
+    /// Invoked from `zeroship_data_v8::backend::BrokerPauseGuard::drop` (after a
     /// backfill window) and
-    /// `zeroship_plugin_db::backend::SchemaPendingGuard::drop` (after the
+    /// `zeroship_data_v8::backend::SchemaPendingGuard::drop` (after the
     /// schema-pending decoder window ends) per design §16.7.
     ///
     /// **Idempotent on a per-call basis.** Calling
@@ -804,7 +804,7 @@ pub fn unsuppress_app(app_id: &str) {
 }
 
 /// True when the given app's local-emit path is suppressed anywhere in this
-/// PROCESS (i.e. a `WalConsumer` - the adapter tier's, in `zeroship-plugin-db` -
+/// PROCESS (i.e. a `WalConsumer` - the adapter tier's, in `zeroship-data-v8` -
 /// or a backfill guard is running for it).
 ///
 /// Not "on this thread": `SUPPRESSED_APPS` is a `LazyLock<Mutex<..>>`, and it
@@ -908,7 +908,7 @@ fn lock_schema_pending() -> MutexGuard<'static, HashSet<String>> {
 /// schema-pending, which the publisher then drops.
 ///
 /// Internal — called from
-/// `zeroship_plugin_db::backend::SchemaPendingGuard::new`; production code should
+/// `zeroship_data_v8::backend::SchemaPendingGuard::new`; production code should
 /// reach the guard through `BackendHandle::as_change_stream_*().engage_schema_pending(app_id)`.
 pub fn engage_schema_pending(app_id: &str) {
     lock_schema_pending().insert(app_id.to_string());
@@ -916,7 +916,7 @@ pub fn engage_schema_pending(app_id: &str) {
 
 /// Inverse of [`engage_schema_pending`]. Idempotent — calling on an
 /// app that is not engaged is a no-op. Called from
-/// `zeroship_plugin_db::backend::SchemaPendingGuard::drop` before
+/// `zeroship_data_v8::backend::SchemaPendingGuard::drop` before
 /// `resume_app_with_resync` pushes the per-subscription `Resync`.
 pub fn disengage_schema_pending(app_id: &str) {
     lock_schema_pending().remove(app_id);
@@ -940,7 +940,7 @@ pub fn publish(event: &ChangeEvent) {
 /// [`Broker::has_subscribers`] for the conservative-true semantics.
 ///
 /// `pub` rather than `pub(crate)` since the 2026-09-03 move out of
-/// `zeroship-plugin-db`: both callers are above this crate - `exec`'s
+/// `zeroship-data-v8`: both callers are above this crate - `exec`'s
 /// local-emit gate (ENGINE) and `wal_consumer`'s per-relation filter (CDC).
 pub fn has_subscribers(app_id: &str, collection: &str) -> bool {
     lock_broker().has_subscribers(app_id, collection)
@@ -960,7 +960,7 @@ pub fn try_subscribe(app_id: &str, collection: &str) -> Result<Subscription, DbE
 
 /// Live (not-yet-closed) subscriptions in this process's broker owned by the
 /// CALLING THREAD. Tests use this to verify the
-/// `zeroship_plugin_db::v8_classes::subscription` Weak finalizer reclaims
+/// `zeroship_data_v8::v8_classes::subscription` Weak finalizer reclaims
 /// broker slots when V8 GCs an orphaned wrapper.
 ///
 /// # Test-only, with one body
@@ -978,7 +978,7 @@ pub fn try_subscribe(app_id: &str, collection: &str) -> Result<Subscription, DbE
 /// A bare `#[cfg(test)]` cannot reach the consumers that need it. Across a
 /// crate boundary `cfg(test)` is the DEFINING crate's test build, so under a
 /// `test`-only gate this symbol does not exist for
-/// `crates/zeroship-plugin-db/tests/subscription_finalizer.rs`, which links
+/// `crates/zeroship-data-v8/tests/subscription_finalizer.rs`, which links
 /// this crate as an ordinary dependency. The `test` arm serves this crate's own
 /// tests; the feature arm carries the same helper to consumers, which declare
 /// `zeroship-data-core = { features = ["test-helpers"] }` in
@@ -988,7 +988,7 @@ pub fn try_subscribe(app_id: &str, collection: &str) -> Result<Subscription, DbE
 /// Thread scoping is the point, not an implementation detail. The broker is
 /// process-wide and cargo runs tests on parallel threads, so a process-wide
 /// count is a count of whatever else happened to be running. That fork is what
-/// made `cargo test -p zeroship-plugin-db --lib` nondeterministic before the
+/// made `cargo test -p zeroship-data-v8 --lib` nondeterministic before the
 /// gate was widened: `v8_classes::subscription` asserts an exact count while
 /// `exec`'s tests subscribe on other threads.
 #[cfg(any(test, feature = "test-helpers"))]

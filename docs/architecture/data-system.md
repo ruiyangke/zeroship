@@ -73,7 +73,7 @@ held by callers. The pool contract is documented in `libs/compio-postgres/README
 
 Implementation: `crates/zeroship-data-orm/src/orm.rs`,
 `crates/zeroship-data-sql/src/filter.rs`, and
-`crates/zeroship-plugin-db/src/v8_classes/dispatch.rs`.
+`crates/zeroship-data-v8/src/v8_classes/dispatch.rs`.
 
 **What is DESIGNED AND NOT BUILT is marked *(designed)* throughout**: the Datastore/Database/Grant
 entities, datastore placement, the per-grant role graph, the schema epoch's producer, and the
@@ -152,7 +152,7 @@ Two leak paths are easy to miss and both are real:
 
 This is the discipline `DbResourceKey` already applies to DSN passwords: a digest chosen so the
 secret "cannot reach `Debug` or a log line"
-(`crates/zeroship-plugin-db/src/service.rs:46`).
+(`crates/zeroship-data-v8/src/service.rs:46`).
 
 ---
 
@@ -164,9 +164,9 @@ has is a database.
 **Do not sweep the word out of the code.** It is still the right word in two places, and a
 half-applied rename would be worse than none:
 
-- **Where it names PostgreSQL's own object.** `crates/zeroship-plugin-db/src/drop_namespace.rs`
+- **Where it names PostgreSQL's own object.** `crates/zeroship-data-v8/src/drop_namespace.rs`
   sequences "the PG teardown order for deleting an app";
-  `crates/zeroship-plugin-db/src/replication.rs:877-878` scopes a cluster-wide scan to "the calling
+  `crates/zeroship-data-v8/src/replication.rs:877-878` scopes a cluster-wide scan to "the calling
   app's namespace". Both mean the PostgreSQL schema, and PostgreSQL calls it a namespace
   (`pg_namespace`). Renaming those to "database" would make them say the wrong thing, because at
   that layer a database is the Datastore.

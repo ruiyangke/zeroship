@@ -109,7 +109,7 @@ ALLOW=(
   # confined to one database cannot see the bug it guards. It creates the
   # neighbour, drops it first with `DROP DATABASE IF EXISTS`, and holds
   # `cdc_budget::exclusive()` while it runs.
-  "crates/zeroship-plugin-db/tests/integration.rs|the subject is a sweep crossing database boundaries, which one database cannot show"
+  "crates/zeroship-data-v8/tests/integration.rs|the subject is a sweep crossing database boundaries, which one database cannot show"
 
   # NOT an exemption on the merits - a TRACKED VIOLATION, listed so the gate
   # reports the rest of the tree rather than staying unwritten until this is

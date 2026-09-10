@@ -632,7 +632,7 @@ mod tests {
     }
 
     // `set_mask_policy_installs_through_an_adapter_opened_cold_backend` MOVED to
-    // `zeroship-plugin-db`'s `tx_scope.rs` with the engine cut. What it witnesses
+    // `zeroship-data-v8`'s `tx_scope.rs` with the engine cut. What it witnesses
     // is the ADAPTER half of the boot sequence - a cold isolate, a configured
     // SQLite url, `tx_scope::ensure_backend()` warming it - and only its last
     // line is the engine's. It could not stay: it named `crate::context`,

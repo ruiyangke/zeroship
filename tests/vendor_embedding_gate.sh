@@ -54,7 +54,7 @@
 # `\"` inside a literal are all beyond it. Those need a lexer. Measured under
 # ROOTS on 2026-09-04: 208 raw-string lines, 0 of them naming a vendor; 0 lines
 # naming a vendor and carrying `\"`; and exactly ONE vendor-naming line with an
-# odd quote count, `zeroship-plugin-db/service.rs:122`, which is a `///` doc
+# odd quote count, `zeroship-data-v8/service.rs:122`, which is a `///` doc
 # comment and is dropped by the comment arm before the blanking is reached. So
 # none of the three is live. If one lands this UNDERCOUNTS, which is the
 # direction arm 1 must not have, so open the lines before trusting a zero.
@@ -120,7 +120,7 @@ vendor_hit_lines() {
 #
 # `zeroship-data-orm/src` JOINED THE ROOTS ON 2026-09-03, in the commit that
 # created it. It had to: four of the six baseline entries below were files that
-# left `zeroship-plugin-db/src` that day, and a root list pinned to the old tree
+# left `zeroship-data-v8/src` that day, and a root list pinned to the old tree
 # would have left every one of them unscanned while their baseline keys went
 # dead - arm 2 refuses a key it cannot resolve, so the gate would have failed
 # loudly rather than quietly, but only after the four files had stopped being
@@ -128,7 +128,7 @@ vendor_hit_lines() {
 # design (`BackendHandle` is a closed sum over them), which is exactly why its
 # entries are baselined rather than absent.
 ROOTS="
-crates/zeroship-plugin-db/src
+crates/zeroship-data-v8/src
 crates/zeroship-data-orm/src
 crates/zeroship-data-sql/src
 "
@@ -139,7 +139,7 @@ crates/zeroship-data-sql/src
 # layer). Everything else in the crate is non-vendor and is ruled on.
 #
 # The KEY for a file is `<crate>/<path after src/>` - e.g.
-# `zeroship-plugin-db/error.rs`. Qualifying by crate is not decoration: with two
+# `zeroship-data-v8/error.rs`. Qualifying by crate is not decoration: with two
 # roots, `error.rs` names a file in BOTH, and an unqualified key would let one
 # crate's baseline entry silently excuse the other's violation.
 file_key() {
@@ -150,10 +150,10 @@ file_key() {
 is_vendor_tier() {
   case "$(file_key "$1")" in
     zeroship-data-orm/backend/postgres/*|zeroship-data-orm/backend/sqlite/*) return 0 ;;
-    zeroship-plugin-db/backend/postgres.rs) return 0 ;;
-    zeroship-plugin-db/backend/pg_*.rs|zeroship-plugin-db/backend/sqlite/*) return 0 ;;
-    zeroship-plugin-db/replication.rs|zeroship-plugin-db/slot_reaper.rs) return 0 ;;
-    zeroship-plugin-db/wal_consumer.rs|zeroship-plugin-db/change_stream_pg.rs) return 0 ;;
+    zeroship-data-v8/backend/postgres.rs) return 0 ;;
+    zeroship-data-v8/backend/pg_*.rs|zeroship-data-v8/backend/sqlite/*) return 0 ;;
+    zeroship-data-v8/replication.rs|zeroship-data-v8/slot_reaper.rs) return 0 ;;
+    zeroship-data-v8/wal_consumer.rs|zeroship-data-v8/change_stream_pg.rs) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -195,8 +195,8 @@ key_to_path() {
 # `service.rs` are the adapter's and stayed.
 BASELINE_FILES="
 zeroship-data-orm/auth/bootstrap.rs
-zeroship-plugin-db/lib.rs
-zeroship-plugin-db/service.rs
+zeroship-data-v8/lib.rs
+zeroship-data-v8/service.rs
 "
 # exec.rs                 ENTRY RETIRED 2026-09-04, and it had already been dead
 #                         for a day. It read "Pool + Vec<Row> - the unsettled row

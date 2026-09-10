@@ -34,7 +34,7 @@
 //! server is unreachable, like its `mask_flip` sibling.
 //!
 //! ```text
-//! PG_TEST_URL=postgres://... cargo test -p zeroship-plugin-db \
+//! PG_TEST_URL=postgres://... cargo test -p zeroship-data-v8 \
 //!   --features test-helpers --test test_helpers -- --test-threads=1 unmask_tx_lane::
 //! ```
 
@@ -53,9 +53,9 @@ use compio_postgres::{NoTls, Pool};
 use zeroship_data_orm::binding::DbBinding;
 use zeroship_data_orm::error::DbError;
 use zeroship_data_sql::value::{Value, value};
-use zeroship_plugin_db::compile::SqlDialect;
-use zeroship_plugin_db::crud::mask_policy::dispatch_set_mask_policy;
-use zeroship_plugin_db::tx_route::{CapturedRoute, TxRoute};
+use zeroship_data_v8::compile::SqlDialect;
+use zeroship_data_v8::crud::mask_policy::dispatch_set_mask_policy;
+use zeroship_data_v8::tx_route::{CapturedRoute, TxRoute};
 
 fn test_url() -> String {
     zeroship_core::config::test_database_url()
@@ -82,7 +82,7 @@ async fn require_pg() -> String {
 
 async fn release_pg(pool: Rc<Pool>) {
     drop(pool);
-    zeroship_plugin_db::reset_context_for_tests();
+    zeroship_data_v8::reset_context_for_tests();
     let _ = compio_postgres::drain_connections(std::time::Duration::from_secs(2)).await;
 }
 
@@ -133,19 +133,19 @@ async fn fixture_with_schema(pool: &Rc<Pool>, url: &str, app: &str, schema: Valu
     pool.batch_execute(&zeroship_migrate_server::provisioning::audit_unmask_table_sql(app))
         .await
         .expect("the audit table the deploy provisions");
-    zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(pool, app)
+    zeroship_data_v8::auth::bootstrap::ensure_per_app_role(pool, app)
         .await
         .expect("per-app role, as the deploy would provision it");
     support::grant_all_runtime_table_columns(pool, app, "people").await;
 
-    zeroship_plugin_db::set_postgres_pool_for_tests(Rc::clone(pool), url);
-    zeroship_plugin_db::cache_schema_for_tests(app, "people", schema);
-    zeroship_plugin_db::clear_mask_policy_cache_for_tests(app);
+    zeroship_data_v8::set_postgres_pool_for_tests(Rc::clone(pool), url);
+    zeroship_data_v8::cache_schema_for_tests(app, "people", schema);
+    zeroship_data_v8::clear_mask_policy_cache_for_tests(app);
 }
 
 /// The backend handle the V8 dispatcher would have bound for this dispatch.
-async fn backend() -> zeroship_plugin_db::backend::BackendHandle {
-    zeroship_plugin_db::tx_scope::ensure_backend()
+async fn backend() -> zeroship_data_v8::backend::BackendHandle {
+    zeroship_data_v8::tx_scope::ensure_backend()
         .await
         .expect("the backend the V8 dispatcher would have opened")
 }
@@ -169,7 +169,7 @@ async fn pool_route(app: &str) -> TxRoute {
 /// Insert one document through the real `run_insert` on `route`, returning the
 /// id the platform minted.
 async fn insert_on(route: TxRoute, app: &str, doc: Value) -> String {
-    let result = zeroship_plugin_db::crud::run_insert(
+    let result = zeroship_data_v8::crud::run_insert(
         DbBinding::cold_start(app),
         "people".to_string(),
         route,
@@ -192,8 +192,8 @@ async fn find_on(
     opts: Value,
 ) -> Result<Vec<Value>, DbError> {
     let binding = DbBinding::cold_start(app);
-    let plan = zeroship_plugin_db::crud::plan_find(&binding, "people", &filter, &opts);
-    zeroship_plugin_db::crud::run_find(binding, "people".to_string(), route, filter, plan)
+    let plan = zeroship_data_v8::crud::plan_find(&binding, "people", &filter, &opts);
+    zeroship_data_v8::crud::run_find(binding, "people".to_string(), route, filter, plan)
         .await
         .map(|r| r.rows)
 }
@@ -235,7 +235,7 @@ async fn a_find_unmask_inside_a_transaction_reaches_the_row_that_transaction_ins
         .await
         .expect("install the app's declared mask policy");
 
-    zeroship_plugin_db::begin_transaction_for_tests(app, &url).await;
+    zeroship_data_v8::begin_transaction_for_tests(app, &url).await;
 
     let id = insert_on(
         tx_route(app).await,
@@ -288,7 +288,7 @@ async fn a_find_unmask_inside_a_transaction_reaches_the_row_that_transaction_ins
     )
     .await;
 
-    zeroship_plugin_db::rollback_transaction_for_tests(app).await;
+    zeroship_data_v8::rollback_transaction_for_tests(app).await;
 
     let unmasked = unmasked.unwrap_or_else(|e| {
         panic!(
@@ -353,7 +353,7 @@ async fn a_denied_unmask_audit_row_survives_the_rollback_of_its_transaction() {
         "no unmask has been attempted yet",
     );
 
-    zeroship_plugin_db::begin_transaction_for_tests(app, &url).await;
+    zeroship_data_v8::begin_transaction_for_tests(app, &url).await;
 
     // The control write: an ordinary insert that shares the transaction the
     // denied attempt is made inside.
@@ -383,7 +383,7 @@ async fn a_denied_unmask_audit_row_survives_the_rollback_of_its_transaction() {
     );
 
     // ROLLBACK the transaction both writes were made inside.
-    zeroship_plugin_db::rollback_transaction_for_tests(app).await;
+    zeroship_data_v8::rollback_transaction_for_tests(app).await;
 
     // ---- CONTROL: the ordinary write inside that transaction is gone.
     let surviving = pool
@@ -444,13 +444,13 @@ async fn an_encrypted_unmask_inside_a_transaction_reaches_the_row_that_transacti
     let app = "unmask_lane_encrypted";
     // A synthetic 32-byte root, supplied to THIS isolate. The write pipeline
     // encrypts with it and the unmask fetch decrypts with it.
-    let _keys = zeroship_plugin_db::supply_root_keys_for_tests(&[("default", &"c".repeat(64))]);
+    let _keys = zeroship_data_v8::supply_root_keys_for_tests(&[("default", &"c".repeat(64))]);
     fixture_with_schema(&pool, &url, app, encrypted_schema()).await;
     dispatch_set_mask_policy(&backend().await, app, value!({ "support": ["pci"] }))
         .await
         .expect("install the app's declared mask policy");
 
-    zeroship_plugin_db::begin_transaction_for_tests(app, &url).await;
+    zeroship_data_v8::begin_transaction_for_tests(app, &url).await;
 
     let id = insert_on(
         tx_route(app).await,
@@ -459,7 +459,7 @@ async fn an_encrypted_unmask_inside_a_transaction_reaches_the_row_that_transacti
     )
     .await;
 
-    let args = || zeroship_plugin_db::crud::unmask::UnmaskFieldArgs {
+    let args = || zeroship_data_v8::crud::unmask::UnmaskFieldArgs {
         collection: "people".to_string(),
         row_pk: id.clone(),
         column: "ssn".to_string(),
@@ -469,7 +469,7 @@ async fn an_encrypted_unmask_inside_a_transaction_reaches_the_row_that_transacti
     };
 
     // ---- CONTROL: outside the transaction the row is genuinely unreachable.
-    let outside = zeroship_plugin_db::crud::unmask::dispatch_unmask(
+    let outside = zeroship_data_v8::crud::unmask::dispatch_unmask(
         &pool_route(app).await,
         &DbBinding::cold_start(app),
         args(),
@@ -483,14 +483,14 @@ async fn an_encrypted_unmask_inside_a_transaction_reaches_the_row_that_transacti
     );
 
     // ---- SUBJECT: the same call on the transaction's own lane.
-    let inside = zeroship_plugin_db::crud::unmask::dispatch_unmask(
+    let inside = zeroship_data_v8::crud::unmask::dispatch_unmask(
         &tx_route(app).await,
         &DbBinding::cold_start(app),
         args(),
     )
     .await;
 
-    zeroship_plugin_db::rollback_transaction_for_tests(app).await;
+    zeroship_data_v8::rollback_transaction_for_tests(app).await;
 
     let inside = inside.unwrap_or_else(|e| {
         panic!(

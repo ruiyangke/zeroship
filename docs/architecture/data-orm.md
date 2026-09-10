@@ -7,7 +7,7 @@ type parameter. The host chooses the database during setup.
 ```text
 Rust models                         Worker TypeScript
      |                                     |
-     |                              zeroship-plugin-db
+     |                              zeroship-data-v8
      |                                native V8 capture
      +------------------+------------------+
                         |
@@ -38,7 +38,7 @@ Rust models                         Worker TypeScript
 | `zeroship-data-orm` | Public database API, model codecs, protection, transaction protocol, runtime state, driver contracts, and built-in backend adapters. |
 | `zeroship-data-sql` | Native values and records, identifiers, runtime schema metadata, query plans, predicates, and SQL compilation. Its normal dependencies contain no database driver or runtime. |
 | `zeroship-data-macros` | Migration-derived collection metadata and Rust model derives. It performs no database I/O. |
-| `zeroship-plugin-db` | V8 capture and result encoding, isolate composition, and worker lifecycle integration. |
+| `zeroship-data-v8` | V8 capture and result encoding, isolate composition, and worker lifecycle integration. |
 
 ```text
 crates/
@@ -51,7 +51,7 @@ crates/
     src/transaction/         shared transaction protocol
   zeroship-data-sql/          plans, native values, SQL dialects
   zeroship-data-macros/       schema and mapping derives
-  zeroship-plugin-db/         V8 adapter
+  zeroship-data-v8/         V8 adapter
 libs/
   compio-postgres/            standalone transport and pool
 ```
@@ -183,5 +183,5 @@ Compiler tests validate generated schema and Rust model contracts.
 `tests/data_crate_closure_gate.sh` checks dependency boundaries;
 `tests/vendor_embedding_gate.sh` checks concrete driver references;
 `tests/decision_four_gate.sh` fences shared execution and SQL placement;
-`tests/run_plugin_db_live_suite.sh` runs the required database tests; and
+`tests/run_data_v8_live_suite.sh` runs the required database tests; and
 `tests/clippy_gate.sh` validates the workspace and its declared feature surface.

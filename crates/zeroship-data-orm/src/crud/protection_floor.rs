@@ -212,7 +212,7 @@ pub async fn refuse_protection_downgrade(
 ///
 /// Split on 2026-09-04, and the reason is a measurement rather than a taste.
 /// The only place this fence's REFUSAL was bound was
-/// `zeroship-plugin-db/tests/mask_flip.rs`, whose test build enables
+/// `zeroship-data-v8/tests/mask_flip.rs`, whose test build enables
 /// `test-helpers` - so the durable proof that a
 /// protection downgrade is refused came from a build configuration that DOES
 /// NOT SHIP. On the same day, the capability this fence reads
@@ -416,7 +416,7 @@ mod tests {
     /// turns it on (the `[dev-dependencies]` entries enable it on the three
     /// crates BELOW, never on this one). That is the configuration the
     /// pre-existing witness could not reach:
-    /// `zeroship-plugin-db/tests/mask_flip.rs` enables `test-helpers` in its
+    /// `zeroship-data-v8/tests/mask_flip.rs` enables `test-helpers` in its
     /// test build, so the original proof that a downgrade is refused came from
     /// a build that does not ship.
     ///

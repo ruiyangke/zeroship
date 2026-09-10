@@ -199,7 +199,7 @@ fn column_to_value(row: &compio_postgres::Row, idx: usize, oid: u32) -> Value {
 //
 // They are `pub` rather than `pub(crate)` because Criterion benches and the
 // integration test link this crate as an EXTERNAL dependency and cannot reach
-// `pub(crate)`. `lib.rs` re-exports both, so `zeroship_plugin_db::…_for_bench`
+// `pub(crate)`. `lib.rs` re-exports both, so `zeroship_data_v8::…_for_bench`
 // still resolves; a `pub use` names no type, so the adapter's signature surface
 // stays vendor-free. When this module becomes `data-postgres`, the benches move
 // with it and the re-export goes away.
@@ -210,7 +210,7 @@ fn column_to_value(row: &compio_postgres::Row, idx: usize, oid: u32) -> Value {
 /// `#[doc(hidden)]` keeps it off the public docs surface.
 /// `compio_postgres::test_utils::row_for_test` (doc-hidden there, and always
 /// compiled) is the matching `Row` synthesiser - see
-/// `crates/zeroship-plugin-db/benches/bench_row_to_json.rs` for the wiring.
+/// `crates/zeroship-data-v8/benches/bench_row_to_json.rs` for the wiring.
 #[doc(hidden)]
 #[must_use]
 pub fn row_to_value_for_bench(row: &compio_postgres::Row) -> Value {

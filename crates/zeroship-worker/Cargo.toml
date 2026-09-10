@@ -17,7 +17,7 @@ path = "src/main.rs"
 zeroship-core = { workspace = true }
 zeroship-bundle = { workspace = true }
 zeroship-runtime = { workspace = true }
-zeroship-plugin-db = { workspace = true }
+zeroship-data-v8 = { workspace = true }
 # The worker handles the ORM's typed errors directly in its slot reaper.
 zeroship-data-orm = { workspace = true }
 zeroship-kv = { workspace = true, features = ["redis"] }
@@ -82,7 +82,7 @@ live-db-tests = []
 
 [dev-dependencies]
 # DEV-only, and zeroship-migrate-server does not depend on zeroship-worker, so
-# no cycle (same pattern as zeroship-plugin-db's and zeroship-control's
+# no cycle (same pattern as zeroship-data-v8's and zeroship-control's
 # dev-dependency on it). The workflow-advance handler tests seed an app by
 # INSERTing into zeroship.apps directly, which - like every such seed in this
 # workspace - skips the migration apply that creates the app's app_<uuid>

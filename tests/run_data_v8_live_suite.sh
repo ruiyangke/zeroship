@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
-# The live-Postgres gate for zeroship-plugin-db.
+# The live-Postgres gate for zeroship-data-v8.
 #
-# WHY THIS EXISTS. `crates/zeroship-plugin-db/tests/integration.rs` holds 111 tests that
+# WHY THIS EXISTS. `crates/zeroship-data-v8/tests/integration.rs` holds 111 tests that
 # dial a real Postgres, and until 2026-08-12 NOT ONE OF THEM RAN ANYWHERE.
 # Measured, three independent greps, all empty: no workflow sets PG_TEST_URL, no
 # workflow invokes `--test integration`, and no `pg-test` image exists in the
@@ -67,7 +67,7 @@
 #      Its `#[ignore]`d twin `near_returns_within_radius` is not in that count -
 #      cargo never builds it into a default run - so the extension being
 #      missing costs exactly one failure, not two.
-#      ci.yml's `plugin-db-live-gate` installs the postgis package into the
+#      ci.yml's `data-v8-live-gate` installs the postgis package into the
 #      pgvector container for exactly this reason; the two images are disjoint
 #      and no published one carries both.
 #
@@ -96,7 +96,7 @@ while IFS=$'\t' read -r package gated; do
     exit 1
   fi
 done < <(printf '%s' "$metadata" | jq -r '
-  .packages[] | select(.name == "zeroship-data-orm" or .name == "zeroship-plugin-db") |
+  .packages[] | select(.name == "zeroship-data-orm" or .name == "zeroship-data-v8") |
   [.name, ((.features | has("live-db-tests")) or
     any(.targets[]; ((.["required-features"] // []) | length) > 0))] | @tsv')
 gate_arm ordinary_database_targets "$checked" 2 || exit 1
@@ -119,7 +119,7 @@ fi
 # zeroship_core::config::test_database_url_opt like every other, so there is
 # nothing left to bridge.
 
-SUITE_LOG="${SUITE_LOG:-${TMPDIR:-/tmp}/plugin-db-live.log}"
+SUITE_LOG="${SUITE_LOG:-${TMPDIR:-/tmp}/data-v8-live.log}"
 
 # MEASURED on a fresh database provisioned per the requirements above:
 #   integration         103 passed / 0 failed / 8 ignored / 0 skips
@@ -135,7 +135,7 @@ SUITE_LOG="${SUITE_LOG:-${TMPDIR:-/tmp}/plugin-db-live.log}"
 # point rather than the number: it named a pgvector group among the ignored, and
 # no pgvector test in that file carries the attribute. Count them where they are
 # declared instead of reading a tally here -
-#   grep -c '^#\[ignore' crates/zeroship-plugin-db/tests/integration.rs
+#   grep -c '^#\[ignore' crates/zeroship-data-v8/tests/integration.rs
 # - and read the reasons on the attributes for which prerequisite each wants. A
 # test whose prerequisite is NOT statically ignored fails when the server lacks
 # it; that is the postgis case in requirement 3 above.
@@ -226,14 +226,14 @@ SUITE_LOG="${SUITE_LOG:-${TMPDIR:-/tmp}/plugin-db-live.log}"
 # Re-measure on a dedicated cluster or this number will not reproduce.
 PLUGIN_DB_MIN_PASSED=114
 
-echo "==> zeroship-plugin-db live-database suite"
+echo "==> zeroship-data-v8 live-database suite"
 echo "    PG_TEST_URL=${PG_TEST_URL%%\?*}"
 
 # Run all targets; database fixtures within each target run serially.
 suite_rc=0
 : > "$SUITE_LOG"
 # Ordinary package tests include every database target and enable their helpers.
-cargo test -p zeroship-data-orm -p zeroship-plugin-db --no-fail-fast \
+cargo test -p zeroship-data-orm -p zeroship-data-v8 --no-fail-fast \
   -- --nocapture --test-threads=1 2>&1 | tee -a "$SUITE_LOG"
 suite_rc=${PIPESTATUS[0]}
 
@@ -242,7 +242,7 @@ passed=$(grep -a '^test result:' "$SUITE_LOG" | sed 's/.*ok\. \([0-9]*\) passed.
 failed=$(grep -a '^test result:' "$SUITE_LOG" | sed 's/.*; \([0-9]*\) failed.*/\1/;t;d' \
   | awk '{s+=$1} END {print s+0}')
 
-echo "==> plugin-db live suite: ${passed} passed, ${failed} failed (floor ${PLUGIN_DB_MIN_PASSED})"
+echo "==> data-v8 live suite: ${passed} passed, ${failed} failed (floor ${PLUGIN_DB_MIN_PASSED})"
 
 rc=0
 [ "$suite_rc" -ne 0 ] && rc=1

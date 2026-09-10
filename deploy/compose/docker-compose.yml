@@ -129,7 +129,7 @@ services:
     # only the elapsed time differed. They refuse now, naming this setting and
     # that it needs a RESTART rather than a reload, so a stack brought up
     # without it is loud instead of hollow. Pin it anyway: a red suite is not a
-    # working development stack. crates/zeroship-plugin-db/tests/integration.rs
+    # working development stack. crates/zeroship-data-v8/tests/integration.rs
     # anticipated this, saying CI's pg-test image gets `-c wal_level=logical`
     # "once the rollout lands". This is that rollout for the compose stack.
     #

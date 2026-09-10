@@ -223,7 +223,7 @@ mod routed_read_tests {
     //! The SQLite half of the routed raw-column read.
     //!
     //! The PostgreSQL half is bound live by
-    //! `zeroship-plugin-db/tests/unmask_tx_lane.rs`, which needs a server.
+    //! `zeroship-data-v8/tests/unmask_tx_lane.rs`, which needs a server.
     //! SQLite needs none, and it is the tier `pnpm dev` runs on - so the arm
     //! that would otherwise ship unbound is this one. It is a REAL divergence
     //! there and not a formality: SC-2 Decision 1 gave the session actor a

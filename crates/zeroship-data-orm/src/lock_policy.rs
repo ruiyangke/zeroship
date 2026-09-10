@@ -19,13 +19,13 @@
 //!
 //! # This module moved, and its first address was wrong
 //!
-//! It lived in `zeroship-plugin-db` until 2026-09-02, on the argument that a
+//! It lived in `zeroship-data-v8` until 2026-09-02, on the argument that a
 //! crate whose manifest says it "names no database driver, no V8, and no
 //! runtime" may not host a `compio::time::sleep`. Extracting
 //! `zeroship-data-postgres` supplied the fact that argument was missing: BOTH
 //! vendors call this. `LockGuard::acquire` needs it and `LockGuard` travels
 //! with the PostgreSQL backend by the orphan rule; and
-//! `crates/zeroship-plugin-db/tests/sqlite_integration.rs` needs it on the
+//! `crates/zeroship-data-v8/tests/sqlite_integration.rs` needs it on the
 //! other side. A policy both vendors need cannot live in the crate ABOVE them
 //! without making each vendor depend on the adapter that depends on it.
 //!
@@ -290,7 +290,7 @@ mod tests {
         // `zeroship_runtime` in data-core's test build.
         //
         // The lowering is covered where the lowering lives:
-        // `zeroship-plugin-db/src/op_error.rs` table-tests
+        // `zeroship-data-v8/src/op_error.rs` table-tests
         // `DbError::LockContention` -> `"lock_not_available"` directly.
     }
 

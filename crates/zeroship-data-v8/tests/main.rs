@@ -9,7 +9,7 @@
 //! With `autotests = false`, add each new test file to the appropriate entry
 //! file's module list. Select a subset using its module path, for example:
 //!
-//! `cargo test -p zeroship-plugin-db --test main capability::`
+//! `cargo test -p zeroship-data-v8 --test main capability::`
 
 mod audit_table_parity;
 mod capability;

@@ -45,12 +45,12 @@
 //! touches only namespaces carrying `support::TEST_APP_PREFIX` and the per-app
 //! roles wrapping them, and those two modules are the only ones here that mint
 //! an app id with that prefix; count them with
-//! `grep -rln test_app_id crates/zeroship-plugin-db/tests` rather than trusting
+//! `grep -rln test_app_id crates/zeroship-data-v8/tests` rather than trusting
 //! this sentence. Its replication half touches only the platform's own slot and
 //! publication prefix, and no other module here opens a logical-decoding
 //! consumer.
 //!
-//! `tests/run_plugin_db_live_suite.sh` runs this target with `--test-threads=1`,
+//! `tests/run_data_v8_live_suite.sh` runs this target with `--test-threads=1`,
 //! and has always had to for the older reason that these tests share one
 //! database. Under that flag the window above does not exist.
 

@@ -2,7 +2,7 @@
 //!
 //! ## Why this bench exists
 //!
-//! A `cargo bench` harness is needed under `crates/zeroship-plugin-db/benches/`
+//! A `cargo bench` harness is needed under `crates/zeroship-data-v8/benches/`
 //! before further performance work proceeds. This file is the seed of
 //! that harness; future benches can extend it with more paths.
 //!
@@ -43,7 +43,7 @@
 //! ## Running
 //!
 //! ```
-//! cargo bench -p zeroship-plugin-db --bench bench_query_build
+//! cargo bench -p zeroship-data-v8 --bench bench_query_build
 //! ```
 
 use std::time::Duration;
@@ -51,7 +51,7 @@ use std::time::Duration;
 use criterion::{BatchSize, BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use zeroship_data_sql::value;
 
-use zeroship_plugin_db::compile::{build_find_with_schema, build_insert};
+use zeroship_data_v8::compile::{build_find_with_schema, build_insert};
 
 /// The descriptor entry the benchmarked read is projected through.
 ///

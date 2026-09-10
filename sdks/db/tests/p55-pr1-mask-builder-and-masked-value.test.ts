@@ -36,7 +36,7 @@ import { t } from "@zeroship/db";
 // is a type-only `declare class`. It can only be imported as a type
 // (no runtime constructor). Its runtime behaviour (coercion, unmask,
 // brand check) is covered by the Rust unit tests in
-// `crates/zeroship-plugin-db/src/v8_classes/masked_value.rs` and the
+// `crates/zeroship-data-v8/src/v8_classes/masked_value.rs` and the
 // `p9-pr2-masked-value-v8-class` suite.
 import type { Row, MaskedValueRepr, MaskedValue } from "@zeroship/db";
 

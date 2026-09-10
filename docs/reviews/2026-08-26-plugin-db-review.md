@@ -4,7 +4,7 @@
 
 **Review date:** 2026-08-26
 
-**Scope:** `crates/zeroship-plugin-db`, the runtime/bootstrap integration,
+**Scope:** `crates/zeroship-data-v8`, the runtime/bootstrap integration,
 `@zeroship/db`, and the shared SQL builders in `zeroship-schema`
 
 **Branch inspected:** `main` at `f72a4b30b`
@@ -75,7 +75,7 @@ Relevant code:
 
 Relevant code:
 
-- `crates/zeroship-plugin-db/src/v8_classes/db.rs:294`
+- `crates/zeroship-data-v8/src/v8_classes/db.rs:294`
 - `sdks/bootstrap/src/runtime-entry.ts:73`
 - `sdks/bootstrap/src/install-schema.ts:1152`
 - `sdks/bootstrap/src/install-schema.ts:1286`
@@ -104,10 +104,10 @@ operation on the runtime pump.
 
 Relevant code:
 
-- `crates/zeroship-plugin-db/src/v8_classes/collection.rs:29`
-- `crates/zeroship-plugin-db/src/v8_classes/collection.rs:63`
-- `crates/zeroship-plugin-db/src/crud/mod.rs:606`
-- `crates/zeroship-plugin-db/src/crud/mod.rs:772`
+- `crates/zeroship-data-v8/src/v8_classes/collection.rs:29`
+- `crates/zeroship-data-v8/src/v8_classes/collection.rs:63`
+- `crates/zeroship-data-v8/src/crud/mod.rs:606`
+- `crates/zeroship-data-v8/src/crud/mod.rs:772`
 
 ### 5. Transform and query construction
 
@@ -128,8 +128,8 @@ parameters.
 
 Relevant code:
 
-- `crates/zeroship-plugin-db/src/crud/write_pipeline.rs:72`
-- `crates/zeroship-plugin-db/src/crud/read_pipeline.rs:34`
+- `crates/zeroship-data-v8/src/crud/write_pipeline.rs:72`
+- `crates/zeroship-data-v8/src/crud/read_pipeline.rs:34`
 - `crates/zeroship-schema/src/query.rs`
 
 ### 6. Backend execution and return path
@@ -145,11 +145,11 @@ Relevant code:
 
 Relevant code:
 
-- `crates/zeroship-plugin-db/src/exec.rs:174`
-- `crates/zeroship-plugin-db/src/exec.rs:210`
-- `crates/zeroship-plugin-db/src/exec.rs:293`
-- `crates/zeroship-plugin-db/src/exec.rs:409`
-- `crates/zeroship-plugin-db/src/v8_bridge.rs:315`
+- `crates/zeroship-data-v8/src/exec.rs:174`
+- `crates/zeroship-data-v8/src/exec.rs:210`
+- `crates/zeroship-data-v8/src/exec.rs:293`
+- `crates/zeroship-data-v8/src/exec.rs:409`
+- `crates/zeroship-data-v8/src/v8_bridge.rs:315`
 
 ## Findings
 
@@ -189,9 +189,9 @@ Evidence:
 - `crates/zeroship-runtime/src/core/init.rs:3407`
 - `sdks/bootstrap/src/runtime-entry.ts:73`
 - `sdks/bootstrap/src/runtime-entry.ts:215`
-- `crates/zeroship-plugin-db/tests/native_transaction.rs:368`
-- `crates/zeroship-plugin-db/tests/platform_fence.rs:108`
-- `crates/zeroship-plugin-db/src/crud/introspect_schema.rs:68`
+- `crates/zeroship-data-v8/tests/native_transaction.rs:368`
+- `crates/zeroship-data-v8/tests/platform_fence.rs:108`
+- `crates/zeroship-data-v8/src/crud/introspect_schema.rs:68`
 
 Recommended end state:
 
@@ -238,17 +238,17 @@ JavaScript.
 
 Evidence:
 
-- `crates/zeroship-plugin-db/src/context.rs:112`
-- `crates/zeroship-plugin-db/src/context.rs:134`
-- `crates/zeroship-plugin-db/src/context.rs:233`
-- `crates/zeroship-plugin-db/src/context.rs:542`
-- `crates/zeroship-plugin-db/src/context.rs:648`
-- `crates/zeroship-plugin-db/src/context.rs:888`
-- `crates/zeroship-plugin-db/src/v8_classes/db.rs:313`
+- `crates/zeroship-data-v8/src/context.rs:112`
+- `crates/zeroship-data-v8/src/context.rs:134`
+- `crates/zeroship-data-v8/src/context.rs:233`
+- `crates/zeroship-data-v8/src/context.rs:542`
+- `crates/zeroship-data-v8/src/context.rs:648`
+- `crates/zeroship-data-v8/src/context.rs:888`
+- `crates/zeroship-data-v8/src/v8_classes/db.rs:313`
 - `crates/zeroship-worker/src/cache.rs:21`
 - `crates/zeroship-worker/src/cache.rs:485`
-- `crates/zeroship-plugin-db/src/register_model/mod.rs:79`
-- `crates/zeroship-plugin-db/src/crud/mod.rs:1846`
+- `crates/zeroship-data-v8/src/register_model/mod.rs:79`
+- `crates/zeroship-data-v8/src/crud/mod.rs:1846`
 
 Recommended end state:
 
@@ -288,10 +288,10 @@ settlement.
 
 Evidence:
 
-- `crates/zeroship-plugin-db/src/exec.rs:174`
-- `crates/zeroship-plugin-db/src/exec.rs:352`
-- `crates/zeroship-plugin-db/src/transaction/mod.rs:824`
-- `crates/zeroship-plugin-db/src/transaction/mod.rs:974`
+- `crates/zeroship-data-v8/src/exec.rs:174`
+- `crates/zeroship-data-v8/src/exec.rs:352`
+- `crates/zeroship-data-v8/src/transaction/mod.rs:824`
+- `crates/zeroship-data-v8/src/transaction/mod.rs:974`
 - `crates/zeroship-runtime/src/core/runtime.rs:177`
 - `crates/zeroship-runtime/src/core/runtime.rs:2645`
 - `docs/reference/db.md:975`
@@ -325,12 +325,12 @@ verification fails permanently.
 
 Evidence:
 
-- `crates/zeroship-plugin-db/src/crud/write_pipeline.rs:151`
-- `crates/zeroship-plugin-db/src/crud/write_pipeline.rs:456`
-- `crates/zeroship-plugin-db/src/crud/mod.rs:1965`
+- `crates/zeroship-data-v8/src/crud/write_pipeline.rs:151`
+- `crates/zeroship-data-v8/src/crud/write_pipeline.rs:456`
+- `crates/zeroship-data-v8/src/crud/mod.rs:1965`
 - `crates/zeroship-schema/src/query.rs:5889`
 - `crates/zeroship-schema/src/query.rs:5919`
-- `crates/zeroship-plugin-db/src/crud/encryption_pass.rs:335`
+- `crates/zeroship-data-v8/src/crud/encryption_pass.rs:335`
 
 Recommended end state:
 
@@ -360,12 +360,12 @@ Two correctness problems follow:
 
 Evidence:
 
-- `crates/zeroship-plugin-db/src/crud/write_pipeline.rs:318`
-- `crates/zeroship-plugin-db/src/crud/mod.rs:1002`
-- `crates/zeroship-plugin-db/src/crud/mod.rs:1077`
-- `crates/zeroship-plugin-db/src/crud/mod.rs:1251`
-- `crates/zeroship-plugin-db/src/crud/mod.rs:1305`
-- `crates/zeroship-plugin-db/src/exec.rs:284`
+- `crates/zeroship-data-v8/src/crud/write_pipeline.rs:318`
+- `crates/zeroship-data-v8/src/crud/mod.rs:1002`
+- `crates/zeroship-data-v8/src/crud/mod.rs:1077`
+- `crates/zeroship-data-v8/src/crud/mod.rs:1251`
+- `crates/zeroship-data-v8/src/crud/mod.rs:1305`
+- `crates/zeroship-data-v8/src/exec.rs:284`
 
 Recommended end state:
 
@@ -394,11 +394,11 @@ can change the operation to `IS NULL`; for writes it can silently store null.
 
 Evidence:
 
-- `crates/zeroship-plugin-db/src/v8_bridge.rs:140`
-- `crates/zeroship-plugin-db/src/v8_bridge.rs:162`
-- `crates/zeroship-plugin-db/src/v8_bridge.rs:174`
-- `crates/zeroship-plugin-db/src/v8_bridge.rs:221`
-- `crates/zeroship-plugin-db/src/v8_classes/collection.rs:90`
+- `crates/zeroship-data-v8/src/v8_bridge.rs:140`
+- `crates/zeroship-data-v8/src/v8_bridge.rs:162`
+- `crates/zeroship-data-v8/src/v8_bridge.rs:174`
+- `crates/zeroship-data-v8/src/v8_bridge.rs:221`
+- `crates/zeroship-data-v8/src/v8_classes/collection.rs:90`
 - `crates/zeroship-schema/src/query.rs:601`
 - `crates/zeroship-schema/src/query.rs:4035`
 
@@ -431,7 +431,7 @@ Evidence:
 - `sdks/bootstrap/src/install-schema.ts:1145`
 - `sdks/bootstrap/src/install-schema.ts:1308`
 - `sdks/bootstrap/src/install-schema.ts:1530`
-- `crates/zeroship-plugin-db/src/register_model/mod.rs:79`
+- `crates/zeroship-data-v8/src/register_model/mod.rs:79`
 
 Recommended end state:
 
@@ -453,8 +453,8 @@ The warm path resolves JavaScript `undefined`. The cold success path emits
 
 Evidence:
 
-- `crates/zeroship-plugin-db/src/register_model/mod.rs:79`
-- `crates/zeroship-plugin-db/src/register_model/mod.rs:107`
+- `crates/zeroship-data-v8/src/register_model/mod.rs:79`
+- `crates/zeroship-data-v8/src/register_model/mod.rs:107`
 - `crates/zeroship-runtime/src/core/state.rs:939`
 - `crates/zeroship-runtime/src/core/state.rs:947`
 
@@ -479,9 +479,9 @@ longer exists.
 
 Evidence:
 
-- `crates/zeroship-plugin-db/src/v8_classes/db_platform.rs:100`
-- `crates/zeroship-plugin-db/src/v8_classes/db_platform.rs:108`
-- `crates/zeroship-plugin-db/src/register_model/mod.rs:220`
+- `crates/zeroship-data-v8/src/v8_classes/db_platform.rs:100`
+- `crates/zeroship-data-v8/src/v8_classes/db_platform.rs:108`
+- `crates/zeroship-data-v8/src/register_model/mod.rs:220`
 - `AGENTS.md:13`
 - `AGENTS.md:23`
 
@@ -505,11 +505,11 @@ never run.
 
 Evidence:
 
-- `crates/zeroship-plugin-db/src/register_model/mod.rs:22`
-- `crates/zeroship-plugin-db/src/register_model/mod.rs:129`
-- `crates/zeroship-plugin-db/src/exec.rs:360`
-- `crates/zeroship-plugin-db/src/backend/sqlite/mod.rs:669`
-- `crates/zeroship-plugin-db/src/backend/sqlite/session.rs:1070`
+- `crates/zeroship-data-v8/src/register_model/mod.rs:22`
+- `crates/zeroship-data-v8/src/register_model/mod.rs:129`
+- `crates/zeroship-data-v8/src/exec.rs:360`
+- `crates/zeroship-data-v8/src/backend/sqlite/mod.rs:669`
+- `crates/zeroship-data-v8/src/backend/sqlite/session.rs:1070`
 
 Recommended end state:
 
@@ -534,11 +534,11 @@ finalizer for the life of the isolate.
 
 Evidence:
 
-- `crates/zeroship-plugin-db/src/transaction/mod.rs:305`
-- `crates/zeroship-plugin-db/src/transaction/mod.rs:324`
-- `crates/zeroship-plugin-db/src/transaction/mod.rs:399`
-- `crates/zeroship-plugin-db/src/transaction/mod.rs:762`
-- `crates/zeroship-plugin-db/src/context.rs:888`
+- `crates/zeroship-data-v8/src/transaction/mod.rs:305`
+- `crates/zeroship-data-v8/src/transaction/mod.rs:324`
+- `crates/zeroship-data-v8/src/transaction/mod.rs:399`
+- `crates/zeroship-data-v8/src/transaction/mod.rs:762`
+- `crates/zeroship-data-v8/src/context.rs:888`
 
 Recommended end state:
 
@@ -579,7 +579,7 @@ The clean pre-launch end state is:
 6. remove the dead index/declaration arguments, topological registration work,
    and remaining DDL/advisory-lock language from bootstrap docs and tests; and
 7. move the neutral descriptor, planning, and sentinel logic that remains
-   necessary into `zeroship-plugin-db`, without depending on
+   necessary into `zeroship-data-v8`, without depending on
    `zeroship-schema` or adding a new contract crate.
 
 The full replacement design is in
@@ -590,8 +590,8 @@ The full replacement design is in
 The following checks passed against the inspected branch state:
 
 ```text
-cargo check -p zeroship-plugin-db --all-targets
-cargo test -p zeroship-plugin-db --test platform_fence
+cargo check -p zeroship-data-v8 --all-targets
+cargo test -p zeroship-data-v8 --test platform_fence
 ```
 
 The platform-fence test reported two passing tests. That result does not close

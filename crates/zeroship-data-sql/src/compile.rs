@@ -1710,7 +1710,7 @@ pub fn build_set_clauses(
 ///
 /// Three independent bumps, each suppressed when the creator's patch
 /// already provided an explicit value for that column (per
-/// `zeroship_plugin_db::crud::system_fields_pass::apply_system_fields_on_update`
+/// `zeroship_data_v8::crud::system_fields_pass::apply_system_fields_on_update`
 /// which inspects the patch and surfaces these flags via
 /// `UpdateAutoBumpHints`):
 ///
@@ -3981,8 +3981,8 @@ mod tests {
     ///
     /// `build_find` used to exist in the production API as a shim that passed
     /// `None` for the schema; it had no production caller (measured: only this
-    /// module, `crates/zeroship-plugin-db/tests/integration.rs` and
-    /// `crates/zeroship-plugin-db/benches/bench_query_build.rs`) and it was the
+    /// module, `crates/zeroship-data-v8/tests/integration.rs` and
+    /// `crates/zeroship-data-v8/benches/bench_query_build.rs`) and it was the
     /// only way to reach the `SELECT *` arm L24 is about. It is gone. These
     /// tests are about WHERE / ORDER BY / LIMIT shape, so they declare the
     /// columns they name and let the projection be the ordinary allowlist.

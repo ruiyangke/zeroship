@@ -122,7 +122,7 @@ fn load_opt() -> Option<FileConfig> {
 ///
 /// WHAT THE CALLERS ACTUALLY DECIDED, and why the answer is no longer "some of
 /// them substitute a default". This doc used to say that most announce a skip,
-/// a few panic, and `crates/zeroship-plugin-db/tests/distributed_live.rs` substitutes a
+/// a few panic, and `crates/zeroship-data-v8/tests/distributed_live.rs` substitutes a
 /// default. The census on 2026-08-21 found 26 substituting a default, not one:
 /// eighteen in `crates/control` alone, all naming `zeroship_billing_test`
 /// regardless of what the file was about, and four in `crates/plugin-db`

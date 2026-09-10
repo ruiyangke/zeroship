@@ -23,7 +23,7 @@
 //!
 //! ```text
 //! docker compose -f deploy/compose/docker-compose.yml up -d postgres
-//! cargo test -p zeroship-plugin-db \
+//! cargo test -p zeroship-data-v8 \
 //!   --test distributed_live -- --test-threads=1
 //! ```
 
@@ -35,7 +35,7 @@ use std::thread::{self, JoinHandle, ThreadId};
 use std::time::{Duration, Instant};
 
 use compio_postgres::{NoTls, Pool};
-use zeroship_plugin_db::service::{DbService, DbServiceConfig};
+use zeroship_data_v8::service::{DbService, DbServiceConfig};
 use zeroship_runtime::channel::{CancelFlag, StreamReader};
 use zeroship_runtime::plugin::NativePlugin;
 use zeroship_runtime::runtime::Runtime;
@@ -856,10 +856,10 @@ fn db_live_stream_crosses_v8_isolates_and_releases_worker_slot() {
     let app_uuid = uuid::Uuid::new_v4();
     let app_id = app_uuid.to_string();
     let worker_id = format!("distributed-live-worker-{app_uuid}");
-    let slot = zeroship_plugin_db::replication::worker_slot_name(&app_id, &worker_id)
+    let slot = zeroship_data_v8::replication::worker_slot_name(&app_id, &worker_id)
         .expect("valid worker slot name");
     let publication =
-        zeroship_plugin_db::replication::publication_name(&app_id).expect("valid publication name");
+        zeroship_data_v8::replication::publication_name(&app_id).expect("valid publication name");
 
     let io = compio::runtime::Runtime::new().expect("control compio runtime");
     let pool = io.block_on(async {

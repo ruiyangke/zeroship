@@ -4344,7 +4344,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
         // exist first; call the migration service's own provisioning
         // statement rather than a hand-rolled `CREATE SCHEMA`, so the journal
         // below ends up owned exactly the way a deployed app's is. Same
-        // sequencing as `zeroship-plugin-db`'s and `zeroship-control`'s
+        // sequencing as `zeroship-data-v8`'s and `zeroship-control`'s
         // workflow-journal test fixtures.
         provision_workflow_journal_schema(&conn, app_id)
             .await

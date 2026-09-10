@@ -62,7 +62,7 @@ zeroship_core::declare_env_consumer!(
     /// every read, and two components sharing one scope makes the record unable
     /// to say which of them read the key.
     pub EncryptionConsumer,
-    target = "zeroship-plugin-db",
+    target = "zeroship-data-v8",
     scope = "plugin_db_encryption");
 
 pub mod aad;

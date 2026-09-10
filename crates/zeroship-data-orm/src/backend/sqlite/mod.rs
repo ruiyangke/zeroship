@@ -64,7 +64,7 @@ pub mod reservation;
 // Unconditionally `pub` since the crate split: this module is now a crate
 // boundary rather than a private child, so `pub(crate)` would hide it from the
 // adapter that dispatches into it. The `test-helpers` arm existed to let
-// `crates/zeroship-plugin-db/tests/sqlite_integration.rs` name `session::TypedCell`; that need is now met
+// `crates/zeroship-data-v8/tests/sqlite_integration.rs` name `session::TypedCell`; that need is now met
 // by the boundary itself.
 pub mod session;
 // Pure-Rust haversine + `(lat, lng)` BLOB round-trip. The
@@ -1057,10 +1057,10 @@ impl DialectBuilder for SqliteBackend {
 // orchestrator paths that migrate onto a backend-agnostic
 // bound (`<B: Backend>`) will pick up `SqliteBackend` via this impl
 // without any further per-trait wiring.
-// The marker impl is NOT here: `Backend` is `zeroship-plugin-db`'s own
+// The marker impl is NOT here: `Backend` is `zeroship-data-v8`'s own
 // `pub(crate)` composition trait, so the orphan rule puts the impl in the crate
 // that owns the trait even though the type is this one's. See
-// `zeroship-plugin-db/src/backend/mod.rs`, beside the PostgreSQL arm's.
+// `zeroship-data-v8/src/backend/mod.rs`, beside the PostgreSQL arm's.
 
 // ---------------------------------------------------------------------------
 // `VectorIndex` impl (sqlite-vec `vec0` virtual table)
@@ -2182,7 +2182,7 @@ mod backup_sqlite {
 #[cfg(test)]
 mod tests {
     //! Compile-time trait-shape assertions, mirroring the PR-0 set
-    //! at `zeroship_plugin_db::backend`'s conformance tests (which target `PostgresBackend`).
+    //! at `zeroship_data_v8::backend`'s conformance tests (which target `PostgresBackend`).
     //! These pin the SQLite-side surface so any future drift in the
     //! capability-trait composition trips compilation here rather
     //! than at a distant orchestrator / context call site.
@@ -2265,7 +2265,7 @@ mod tests {
     /// module rather than at a distant orchestrator call site.
     // `assert_sqlite_backend_impls_backend` is NOT here: `Backend` is the
     // adapter's own `pub(crate)` marker, so the impl and the assertion pinning
-    // it both live in `zeroship-plugin-db/src/backend/mod.rs`. The sub-trait
+    // it both live in `zeroship-data-v8/src/backend/mod.rs`. The sub-trait
     // assertions below stay, because their traits are data-core's and visible.
     fn assert_sqlite_backend_impls_backend() {}
 

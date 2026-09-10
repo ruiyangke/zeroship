@@ -2,7 +2,7 @@
 # Refuse a type narrowed below the signature that carries it.
 #
 # THE DEFECT THIS EXISTS FOR, introduced by the very audit it now protects.
-# Phase 0.5 audit 1 walks every `pub` item in zeroship-plugin-db asking whether
+# Phase 0.5 audit 1 walks every `pub` item in zeroship-data-v8 asking whether
 # its `pub` is real API or an accident of `pub(crate) mod` capping it. The
 # method is to narrow a candidate and let the compiler adjudicate. That method
 # has a blind spot: narrowing a TYPE while the STRUCT, ENUM or METHOD naming it
@@ -57,7 +57,7 @@ gate_arms_init private_interface
 # ---------------------------------------------------------------------------
 # TWO PACKAGES SINCE 2026-09-03.
 # ---------------------------------------------------------------------------
-# `PKG` was `zeroship-plugin-db` alone. The ENGINE tier left that crate for
+# `PKG` was `zeroship-data-v8` alone. The ENGINE tier left that crate for
 # `zeroship-data-orm` that day, and every `pub(crate)` marker inside it was
 # widened to `pub` in the same commit - because a `pub(crate)` item in the engine
 # is unreachable from the adapter that calls it. That is EXACTLY the population
@@ -69,8 +69,8 @@ gate_arms_init private_interface
 # The engine is checked FIRST, because a private-in-public defect there is the
 # one that matters most: its `pub` items are now real cross-crate API, and a
 # `pub fn` returning a private type is an item the adapter cannot use at all.
-PKGS="zeroship-data-orm zeroship-plugin-db"
-ADAPTER_SRC=crates/zeroship-plugin-db/src
+PKGS="zeroship-data-orm zeroship-data-v8"
+ADAPTER_SRC=crates/zeroship-data-v8/src
 ENGINE_SRC=crates/zeroship-data-orm/src
 OUT=$(mktemp)
 trap 'rm -f "$OUT"' EXIT

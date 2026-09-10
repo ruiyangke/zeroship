@@ -1,4 +1,4 @@
-//! Database plugin — backs `env.db` with a typed `#[v8_class]` surface.
+//! V8 adapter for the data ORM, exposed through the typed `env.db` surface.
 //!
 //! `env.db` is the `Db` v8_class instance (see [`v8_classes::db`]).
 //! The creator-facing surface on that wrapper is:
@@ -73,7 +73,7 @@ zeroship_core::declare_env_consumer!(
     /// linked into `zeroship-worker` AND into the CLI's `zeroship serve`
     /// vector, and naming one binary would be a claim the other falsifies.
     pub PluginDbConsumer,
-    target = "zeroship-plugin-db",
+    target = "zeroship-data-v8",
     scope = "plugin_db");
 
 // `broker` MOVED to `zeroship-data-core` on 2026-09-03, and it is the move the
@@ -112,7 +112,7 @@ pub mod op_error;
 // Moved to `zeroship-data-core` on 2026-09-02: both vendor crates call it, so it
 // cannot live above them. Re-exported rather than repointed, so
 // `crate::lock_policy::BoundedLockAcquire` and
-// `zeroship_plugin_db::lock_policy::...` both still resolve.
+// `zeroship_data_v8::lock_policy::...` both still resolve.
 pub use zeroship_data_orm::lock_policy;
 // The DDL builders + `QueryError` + `SqlDialect` +
 // the system-field / validation helpers were extracted into the leaf crate
@@ -235,7 +235,7 @@ pub(crate) mod v8_bridge;
 // naming one module is what puts it at rank 0, below both.
 //
 // Re-exported here rather than left as a path change for callers to chase: the
-// live suites assert against these guards by name, and `zeroship-plugin-db`
+// live suites assert against these guards by name, and `zeroship-data-v8`
 // remains their public surface until the tiers themselves are crates.
 pub use zeroship_data_orm::budgets;
 // Process-wide ownership of the `env.db` primitive: validated configuration,
@@ -703,7 +703,7 @@ mod runtime_descriptor_binding_tests {
 }
 
 // The two bench entry points live in `backend::pg_row_json`, beside the decoders
-// they measure, and are re-exported here so `zeroship_plugin_db::…_for_bench`
+// they measure, and are re-exported here so `zeroship_data_v8::…_for_bench`
 // keeps resolving for the Criterion targets and the integration test.
 //
 // They were DEFINED here until 2026-09-01, which put `&compio_postgres::Row`
@@ -1147,7 +1147,7 @@ pub fn is_sqlite_url(url: &str) -> bool {
 /// })?;
 /// // Inside a compio runtime, per isolate:
 /// let runtime = Runtime::builder().plugin(service.plugin()).build();
-/// zeroship_plugin_db::init_pool_async().await?;
+/// zeroship_data_v8::init_pool_async().await?;
 /// // Now safe to run JS that calls zeroship.db.*
 /// ```
 struct BackendInitGuard;

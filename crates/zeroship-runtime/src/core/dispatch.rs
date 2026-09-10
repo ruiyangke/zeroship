@@ -795,7 +795,7 @@ mod tests {
     ///
     /// WHAT THIS TEST DOES NOT CATCH: that plugin-db actually produces this
     /// code for a missing role (that is
-    /// `crates/zeroship-plugin-db/tests/missing_role.rs`), and that the message it pairs with
+    /// `crates/zeroship-data-v8/tests/missing_role.rs`), and that the message it pairs with
     /// it names `zeroship migrate` (that is `error.rs`'s own unit test).
     /// This test would pass if the code were stamped on an empty string.
     #[test]

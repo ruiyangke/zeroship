@@ -41,14 +41,14 @@
 //! (`deploy/ops/zeroship.test.toml`, written by
 //! `tests/provision_test_backends.sh`) or by `PG_TEST_URL`. There is no
 //! compiled default; see `crates/zeroship-core/src/config/test_overlay.rs`.
-//! Run: `cargo test -p zeroship-plugin-db --features test-helpers --test test_helpers \
+//! Run: `cargo test -p zeroship-data-v8 --features test-helpers --test test_helpers \
 //!        -- --test-threads=1 native_transaction::`
 //!
 //! Each runtime receives the same descriptor shape that a deploy carries; the
 //! tables are applied ahead of boot by the fixture. The orchestrator logic is
 //! also covered without a DB by the Rust unit tests + tx-view shape
 //! tests in `crates/zeroship-data-orm/src/transaction/mod.rs` and
-//! `crates/zeroship-plugin-db/src/v8_classes/transaction.rs`,
+//! `crates/zeroship-data-v8/src/v8_classes/transaction.rs`,
 //! the `db_v8_class.rs` surface tests, the SQLite SAVEPOINT SQL tests in
 //! `sqlite_integration.rs`, and the SDK-side mock tests in
 //! `sdks/db/tests/p9-pr3-native-transaction.test.ts`.
@@ -62,7 +62,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use compio_postgres::NoTls;
-use zeroship_plugin_db::service::{DbService, DbServiceConfig};
+use zeroship_data_v8::service::{DbService, DbServiceConfig};
 use zeroship_runtime::channel::CancelFlag;
 use zeroship_runtime::plugin::NativePlugin;
 use zeroship_runtime::runtime::Runtime;
@@ -183,7 +183,7 @@ fn require_pg() -> String {
 /// process. Draining inside the block keeps the runtime alive long enough to
 /// finish the close.
 async fn drain_open_connections() {
-    zeroship_plugin_db::reset_context_for_tests();
+    zeroship_data_v8::reset_context_for_tests();
     if !compio_postgres::drain_connections(std::time::Duration::from_secs(2)).await {
         eprintln!(
             "DRAIN-TIMEOUT: {} connection(s) still live",
@@ -211,7 +211,7 @@ fn reset_schema(url: &str, app: &str) {
         // authority, so a test that needs the `notes` table creates it. The
         // per-thread context still needs the URL
         // for the transaction orchestrator under test.
-        zeroship_plugin_db::set_db_url_for_tests(&url);
+        zeroship_data_v8::set_db_url_for_tests(&url);
         let pool = std::rc::Rc::new(compio_postgres::Pool::connect(&url, 2).await.unwrap());
         pool.batch_execute(&format!(
             r#"CREATE SCHEMA IF NOT EXISTS "{app}";
@@ -246,7 +246,7 @@ CREATE INDEX IF NOT EXISTS "notes_created_by_idx" ON "{app}"."notes" ("created_b
         // `DROP SCHEMA CASCADE` there destroys the per-app grants AND the
         // schema's `ALTER DEFAULT PRIVILEGES` entries, and `pg_restore
         // --no-privileges` puts none back.
-        zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, &app)
+        zeroship_data_v8::auth::bootstrap::ensure_per_app_role(&pool, &app)
             .await
             .expect("per-app role must be re-established after the CASCADE");
         support::grant_all_runtime_table_columns(&pool, &app, "notes").await;
@@ -308,7 +308,7 @@ fn create_encrypted_users_table(url: &str, app: &str, key_id: &str) {
     let app = app.to_string();
     let _ = key_id;
     block_on(async move {
-        zeroship_plugin_db::set_db_url_for_tests(&url);
+        zeroship_data_v8::set_db_url_for_tests(&url);
         let pool = std::rc::Rc::new(compio_postgres::Pool::connect(&url, 2).await.unwrap());
         pool.batch_execute(&format!(
             r#"CREATE TABLE "{app}"."users" (
@@ -330,7 +330,7 @@ CREATE INDEX "users_created_by_idx" ON "{app}"."users" (created_by);"#
         ))
         .await
         .expect("deploy stand-in must create encrypted users");
-        zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, &app)
+        zeroship_data_v8::auth::bootstrap::ensure_per_app_role(&pool, &app)
             .await
             .expect("per-app role must exist for encrypted users");
         support::grant_all_runtime_table_columns(&pool, &app, "users").await;
@@ -741,7 +741,7 @@ fn revoked_grant_transaction_surfaces_grant_revoked() {
             let _ = worker_connection.run().await;
         })
         .detach();
-        let set_local_role_sql = zeroship_plugin_db::auth::bootstrap::set_local_role_sql(&app_id)
+        let set_local_role_sql = zeroship_data_v8::auth::bootstrap::set_local_role_sql(&app_id)
             .expect("grant-revocation app id must produce valid SET LOCAL ROLE SQL");
         worker.batch_execute("BEGIN").await.expect("control BEGIN");
         worker
@@ -1172,7 +1172,7 @@ fn savepoint_rollback_must_not_publish_its_change_event_at_outer_commit() {
 
     // Same thread as `block_on`'s runtime (`RT.with`), so this shares the
     // thread-local broker the dispatch path publishes into.
-    let sub = zeroship_plugin_db::broker::subscribe(app, "notes");
+    let sub = zeroship_data_v8::broker::subscribe(app, "notes");
 
     let src = build_src(
         r#"
@@ -1208,7 +1208,7 @@ const _procedures = { savepointEmitLeak };
 
     let mut published: Vec<String> = Vec::new();
     while let Some(msg) = sub.pop() {
-        if let zeroship_plugin_db::broker::SubscriptionMessage::Change(ev) = msg {
+        if let zeroship_data_v8::broker::SubscriptionMessage::Change(ev) = msg {
             if let Some(title) = ev.new_tuple.get("title") {
                 published.push(title.clone());
             }
@@ -1442,7 +1442,7 @@ fn update_many_randomised_failure_is_atomic_postgres() {
     reset_schema(&url, app);
     let key_id = "update_many_atomic_pg";
     create_encrypted_users_table(&url, app, key_id);
-    let _keys = zeroship_plugin_db::supply_root_keys_for_tests(&[(key_id, &"b".repeat(64))]);
+    let _keys = zeroship_data_v8::supply_root_keys_for_tests(&[(key_id, &"b".repeat(64))]);
 
     let src = build_encrypted_users_src(
         r#"
@@ -1500,7 +1500,7 @@ const _procedures = { seed, failBulk };
     assert_eq!(status, 200, "seed failed: {body}");
     assert!(body["json"]["failure"].is_null(), "seed failed: {body}");
 
-    zeroship_plugin_db::crud::reset_write_path_counters_for_tests();
+    zeroship_data_v8::crud::reset_write_path_counters_for_tests();
     let (status, body) = dispatch_zs_with_descriptor(
         &url,
         &src,
@@ -1522,7 +1522,7 @@ const _procedures = { seed, failBulk };
         2,
         "the exercised target set must be non-empty: {body}"
     );
-    let counters = zeroship_plugin_db::crud::write_path_counters_for_tests();
+    let counters = zeroship_data_v8::crud::write_path_counters_for_tests();
     assert_eq!(
         counters.target_row_resolution_calls, 1,
         "the PG failure must occur on the per-row fan-out path: {counters:?}"
@@ -1534,7 +1534,7 @@ const _procedures = { seed, failBulk };
     );
     let expected_probe_suffix = format!(
         " LIMIT {} FOR UPDATE",
-        zeroship_plugin_db::compile::MAX_QUERY_LIMIT + 1
+        zeroship_data_v8::compile::MAX_QUERY_LIMIT + 1
     );
     assert!(
         counters.target_row_resolution_sql[0].ends_with(&expected_probe_suffix),
@@ -1690,7 +1690,7 @@ const _procedures = { poisonThenCommit };
 
 /// Live arms binding the SC-1 reducer's model to a real server.
 ///
-/// The reducer (`zeroship_plugin_db::transaction::reducer`) is **pure** - it
+/// The reducer (`zeroship_data_v8::transaction::reducer`) is **pure** - it
 /// owns no session and issues no SQL - so a "live reducer test" would be a
 /// contradiction. What a live arm can and must prove is narrower: that the
 /// three **server behaviours the reducer models** are real on the server we
@@ -1704,7 +1704,7 @@ const _procedures = { poisonThenCommit };
 /// Run with:
 ///
 /// ```text
-/// cargo test -p zeroship-plugin-db --features test-helpers --test test_helpers \
+/// cargo test -p zeroship-data-v8 --features test-helpers --test test_helpers \
 ///   -- --test-threads=1 native_transaction::sc1_live
 /// ```
 ///
@@ -1712,7 +1712,7 @@ const _procedures = { poisonThenCommit };
 /// connection: nothing is left in the shared database to drop.
 mod sc1_live {
     use compio_postgres::{Client, NoTls, TransactionStatus};
-    use zeroship_plugin_db::transaction::reducer::{
+    use zeroship_data_v8::transaction::reducer::{
         CleanupAck, CleanupGoal, SettleIntent, TerminalOutcome, TerminalResult,
     };
 
@@ -2028,13 +2028,13 @@ mod sc1_live {
 /// Run with:
 ///
 /// ```text
-/// cargo test -p zeroship-plugin-db --features test-helpers --test test_helpers \
+/// cargo test -p zeroship-data-v8 --features test-helpers --test test_helpers \
 ///   -- --test-threads=1 native_transaction::sc1_driver
 /// ```
 mod sc1_driver {
     use compio_postgres::{Client, NoTls, Pool};
-    use zeroship_plugin_db::transaction::probe;
-    use zeroship_plugin_db::transaction::reducer::{
+    use zeroship_data_v8::transaction::probe;
+    use zeroship_data_v8::transaction::reducer::{
         CleanupCause, SessionOwnership, TerminalOutcome, TxState,
     };
 
@@ -2057,8 +2057,8 @@ mod sc1_driver {
         zeroship_data_sql::SchemaName::new(app_id).expect("fixture schema name")
     }
 
-    async fn probe_backend() -> zeroship_plugin_db::backend::BackendHandle {
-        zeroship_plugin_db::tx_scope::ensure_backend()
+    async fn probe_backend() -> zeroship_data_v8::backend::BackendHandle {
+        zeroship_data_v8::tx_scope::ensure_backend()
             .await
             .expect("the adapter funnel must open a backend before BEGIN")
     }
@@ -2115,14 +2115,14 @@ mod sc1_driver {
         let pool = Pool::connect(&pg_url(), 1)
             .await
             .expect("a one-connection pool for the driver to check out from");
-        zeroship_plugin_db::set_postgres_pool_for_tests(std::rc::Rc::new(pool), &pg_url());
+        zeroship_data_v8::set_postgres_pool_for_tests(std::rc::Rc::new(pool), &pg_url());
         client
     }
 
     /// Drop everything the arm created, and clear this thread's driver state.
     async fn teardown(admin: &Client, app_id: &str) {
         probe::reset(app_id);
-        zeroship_plugin_db::reset_context_for_tests();
+        zeroship_data_v8::reset_context_for_tests();
         let role = zeroship_core::database_role::per_app_role_name(app_id)
             .expect("transaction fixture app id must produce a valid PostgreSQL role name");
         let _ = admin
@@ -2148,7 +2148,7 @@ mod sc1_driver {
     impl Drop for SessionGuard {
         fn drop(&mut self) {
             probe::reset(self.0);
-            zeroship_plugin_db::reset_context_for_tests();
+            zeroship_data_v8::reset_context_for_tests();
         }
     }
 
@@ -2223,7 +2223,7 @@ mod sc1_driver {
             // is the SAME backend. With max_size = 1 there is nothing else it
             // could be handed.
             let (idle, active, total) =
-                zeroship_plugin_db::pool_counts_for_tests().expect("a pool is installed");
+                zeroship_data_v8::pool_counts_for_tests().expect("a pool is installed");
             assert_eq!(
                 (idle, active, total),
                 (1, 0, 1),
@@ -2292,7 +2292,7 @@ mod sc1_driver {
                 .await
                 .expect("BEGIN");
             let (_, _, total_before) =
-                zeroship_plugin_db::pool_counts_for_tests().expect("a pool is installed");
+                zeroship_data_v8::pool_counts_for_tests().expect("a pool is installed");
             assert_eq!(total_before, 1, "one connection, checked out");
 
             // Another future owns the session, and NOTHING IS RUNNING ON IT.
@@ -2327,7 +2327,7 @@ mod sc1_driver {
             held.restore();
 
             let (idle, _, total_after) =
-                zeroship_plugin_db::pool_counts_for_tests().expect("a pool is installed");
+                zeroship_data_v8::pool_counts_for_tests().expect("a pool is installed");
             assert_eq!(
                 idle, 0,
                 "a withdrawn session must not be published as idle - a plain \
@@ -2489,7 +2489,7 @@ mod sc1_driver {
             );
 
             let (idle, active, total) =
-                zeroship_plugin_db::pool_counts_for_tests().expect("a pool is installed");
+                zeroship_data_v8::pool_counts_for_tests().expect("a pool is installed");
             assert_eq!(
                 (idle, active, total),
                 (1, 0, 1),
@@ -2741,14 +2741,14 @@ mod sc1_driver {
                 "Preparing holds no session: the client is acquired by IssueBegin"
             );
             let (idle_before, _, _) =
-                zeroship_plugin_db::pool_counts_for_tests().expect("a pool is installed");
+                zeroship_data_v8::pool_counts_for_tests().expect("a pool is installed");
 
             let fired = probe::fire_execution_deadline(APP).await;
 
             assert_eq!(
                 fired.outcome,
                 Some(TerminalOutcome::Cancelled(CleanupCause::DeadlineExpired(
-                    zeroship_plugin_db::transaction::reducer::deadline::DeadlineKind::Execution
+                    zeroship_data_v8::transaction::reducer::deadline::DeadlineKind::Execution
                 ))),
                 "the goal NoTransaction is proved by construction - BEGIN was \
                  never sent, so nothing can be open"
@@ -2764,7 +2764,7 @@ mod sc1_driver {
             );
 
             let (idle_after, active_after, _) =
-                zeroship_plugin_db::pool_counts_for_tests().expect("a pool is installed");
+                zeroship_data_v8::pool_counts_for_tests().expect("a pool is installed");
             assert_eq!(
                 (idle_after, active_after),
                 (idle_before, 0),

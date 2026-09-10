@@ -8968,7 +8968,7 @@ mod bare_identifier_tests {
     //! **Why it is worth pinning here specifically.** A creator's FK target is
     //! meant to stay inside the calling app, and the platform used to carry a
     //! dedicated 235-line validator for exactly that
-    //! (`zeroship-plugin-db/src/cross_app_fk.rs`, error code
+    //! (`zeroship-data-v8/src/cross_app_fk.rs`, error code
     //! `cross_app_fk_forbidden`). That module had ZERO production callers - its
     //! own rustdoc said "in a default build, nobody" - because decision 10
     //! removed all DDL from plugin-db, so no plugin-db path sees a `refTarget`

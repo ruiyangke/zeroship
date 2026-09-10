@@ -350,7 +350,7 @@ mod tests {
         // [I42] would have been silently unguarded.
         //
         // Same technique as `direct_connection_sites_do_not_grow` in
-        // `zeroship-plugin-db/tests/integration.rs`, for the same reason.
+        // `zeroship-data-v8/tests/integration.rs`, for the same reason.
         let release_start = src
             .find(concat!("pub async", " fn release("))
             .expect("release fn signature should exist");

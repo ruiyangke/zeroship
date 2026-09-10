@@ -1,8 +1,8 @@
 [package]
-name = "zeroship-plugin-db"
+name = "zeroship-data-v8"
 version = "0.1.0"
 edition = "2021"
-description = "Database plugin — zeroship.db.* native primitives"
+description = "V8 adapter for the zeroship data ORM"
 # One integration-test target per FEATURE RESOLUTION, not one per file. The
 # `[[test]]` blocks at the bottom of this file are the whole set; every other
 # `tests/*.rs` is a `mod` declaration inside one of them. `tests/main.rs` carries
@@ -43,7 +43,7 @@ zeroship-metering = { workspace = true }
 # It was previously absent and the crate still built, purely because
 # `zeroship-authz` and `zeroship-workflow-scheduler` enable the feature and
 # Cargo unifies features across whatever crates share a build graph. So
-# `cargo check -p zeroship-plugin-db` ALONE failed with
+# `cargo check -p zeroship-data-v8` ALONE failed with
 # `Uuid: FromSql is not satisfied` while any wider build passed - a latent
 # coupling that only becomes visible once a crate is asked to build by itself,
 # which is exactly what the data-crate split asks of every tier.
@@ -109,7 +109,7 @@ tempfile = { workspace = true }
 
 [dev-dependencies]
 # Integration helpers are automatic in test builds; database tests are required.
-zeroship-plugin-db = { path = ".", features = ["test-helpers"] }
+zeroship-data-v8 = { path = ".", features = ["test-helpers"] }
 # Integration fixtures need test bindings and low-level adapter access.
 zeroship-data-orm = { workspace = true, features = ["test-helpers"] }
 # The DbPlan IR. A DEV dependency on purpose: nothing in this crate's `src/`
@@ -122,10 +122,10 @@ serde_json = { workspace = true }
 # Test-only constructors (`row_for_test` / `column_for_test`) for the
 # `bench_row_to_json` harness — enables synthesising a `Row` without
 # hitting Postgres. Production builds of `compio-postgres` do not see
-# this feature. See `crates/zeroship-plugin-db/benches/bench_row_to_json.rs`.
+# this feature. See `crates/zeroship-data-v8/benches/bench_row_to_json.rs`.
 compio-postgres = { workspace = true }
 # Performance r9 (cycle 09:30) forcing-function: a `cargo bench` harness
-# must exist under `crates/zeroship-plugin-db/benches/` so future perf reviews can
+# must exist under `crates/zeroship-data-v8/benches/` so future perf reviews can
 # quote real numbers instead of being blocked by the anti-fabrication rule.
 # Initial bench target is `build_find` / `build_insert` (see
 # `benches/bench_query_build.rs` for the rationale).

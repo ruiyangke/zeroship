@@ -1,7 +1,7 @@
 /**
  * Task #245 - the `isolationLevel` vocabulary was recorded in multiple
  * places and no two agreed. The runtime (`normalize_isolation_level`,
- * `crates/zeroship-plugin-db/src/v8_classes/db.rs`) accepts three spellings per
+ * `crates/zeroship-data-v8/src/v8_classes/db.rs`) accepts three spellings per
  * level (camelCase, SQL-spaced, uppercase SQL) for all four levels, but
  * the only *published* TypeScript union is `ZeroshipIsolationLevel`
  * (`sdks/types/shared.d.ts`) - the SQL-spaced lowercase form. That is the

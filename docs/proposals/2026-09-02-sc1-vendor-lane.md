@@ -250,9 +250,9 @@ census violations; 4-6 remove the coupling the census cannot see.
 
 ## Verification
 
-Per step: `cargo check -p zeroship-plugin-db --all-targets` **and**
+Per step: `cargo check -p zeroship-data-v8 --all-targets` **and**
 `--all-targets --features test-helpers` (they are different builds since
-`b589cabe9`), `cargo test -p zeroship-plugin-db --lib`, and
+`b589cabe9`), `cargo test -p zeroship-data-v8 --lib`, and
 `cargo check -p zeroship-worker -p zeroship-runtime --all-targets` for
 dependents - `cargo check -p` alone is blind to both test cfg and dependents
 (#145).

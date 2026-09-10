@@ -671,8 +671,8 @@ fn main() -> std::io::Result<()> {
     // the database is unusable.
     let db_service = match db_url_opt.as_deref() {
         Some(url) => Some(
-            zeroship_plugin_db::service::DbService::new(
-                zeroship_plugin_db::service::DbServiceConfig {
+            zeroship_data_v8::service::DbService::new(
+                zeroship_data_v8::service::DbServiceConfig {
                     url: url.to_string(),
                     worker_id: meter_source.clone(),
                     meter: Some(Arc::clone(&meter)),

@@ -9,10 +9,10 @@ addition.
 > is the convention `tests/doc_citation_gate.sh` enforces - a citation may name a
 > file that no longer exists only if it states that outright.
 >
-> - `crates/zeroship-plugin-db/src/audit.rs` - DELETED with the data plane's DDL.
-> - `crates/zeroship-plugin-db/src/crud/introspect_schema.rs` - DELETED when the
+> - `crates/zeroship-data-v8/src/audit.rs` - DELETED with the data plane's DDL.
+> - `crates/zeroship-data-v8/src/crud/introspect_schema.rs` - DELETED when the
 >   descriptor became the sole schema authority.
-> - `crates/zeroship-plugin-db/src/live_metadata.rs` - DELETED with the above.
+> - `crates/zeroship-data-v8/src/live_metadata.rs` - DELETED with the above.
 > - `crates/zeroship-migrate-adapter/src/platform.rs` - DELETED with that whole
 >   crate.
 >
@@ -22,7 +22,7 @@ addition.
 > data plane read on its own date.
 >
 > **Citation convention:** an unqualified path such as `backend/sqlite/vector.rs`
-> or `v8_classes/transaction.rs` is relative to `crates/zeroship-plugin-db/src/`,
+> or `v8_classes/transaction.rs` is relative to `crates/zeroship-data-v8/src/`,
 > which is the crate this document enumerates. Anything outside that crate is
 > written repo-relative from the first segment.
 
@@ -55,13 +55,13 @@ conclusion, and each is stronger than "the code could be rewritten":
    read/write *pipelines* read the INTROSPECTED cache (`runtime_schema_for`, 4
    production sites, section 1.2). The introspected source is strictly poorer: its
    builder emits only `{ type, encrypted?, mask? }`
-   (`crates/zeroship-plugin-db/src/crud/introspect_schema.rs:303-323`) and its
+   (`crates/zeroship-data-v8/src/crud/introspect_schema.rs:303-323`) and its
    type mapper cannot produce the `vector` or `geoPoint` tokens at all
    (`introspect_schema.rs:329-353`), which two live consumers require
-   (`crates/zeroship-plugin-db/src/crud/mod.rs:366-405`,
+   (`crates/zeroship-data-v8/src/crud/mod.rs:366-405`,
    `crud/mod.rs:2609-2621`). The declared source is the richer one, and it is
    already fed from the descriptor on the `.zship` path
-   (`crates/zeroship-plugin-db/src/register_model/mod.rs:176-182`).
+   (`crates/zeroship-data-v8/src/register_model/mod.rs:176-182`).
 
 2. **On SQLite, "descriptor is the sole authority" is already the shipped
    behaviour.** `runtime_schema_for` has no SQLite introspector; it falls back
@@ -73,7 +73,7 @@ conclusion, and each is stronger than "the code could be rewritten":
    doc admits the logical-type collapse (`introspect_schema.rs:29-43`), and the
    SQLite arm's `ColumnInfo.vector_dims` / `is_geopoint` are documented as
    populated but are left at `Default` with no regex in the tree
-   (`crates/zeroship-plugin-db/src/backend/sqlite/mod.rs:953-958`)
+   (`crates/zeroship-data-v8/src/backend/sqlite/mod.rs:953-958`)
    `[delegated]`. Introspection is the lossy path, not the authoritative one.
 
 The only live-database reads that survive in the data plane after the descriptor
@@ -96,7 +96,7 @@ search paths."
 Measured at HEAD:
 
 ```
-grep -rn "\.schema_for(" crates/zeroship-plugin-db/src --include="*.rs" | wc -l
+grep -rn "\.schema_for(" crates/zeroship-data-v8/src --include="*.rs" | wc -l
 17
 ```
 
@@ -114,7 +114,7 @@ and should be re-keyed.
 
 ### 1.1 The DECLARED-schema cache (`ThreadDbContext::schema_for`) - 17 readers
 
-Definition: `crates/zeroship-plugin-db/src/context.rs:698-705`. A
+Definition: `crates/zeroship-data-v8/src/context.rs:698-705`. A
 `HashMap<"{app_id}:{collection}", serde_json::Value>` holding the raw JSON the
 SDK declared. Written only by `cache_schema` (`context.rs:672-680`), called only
 from `register_model_dispatch` (`register_model/mod.rs:102-104`).
@@ -182,7 +182,7 @@ Non-production: `crud/mod.rs:2486-2496` (`runtime_schema_for_tests`, gated
 
 These are not separate cache reads; they are what the `schema_hint` is used FOR.
 `crate::query` in plugin-db is a re-export of `zeroship_schema::query`
-(`crates/zeroship-plugin-db/src/lib.rs:88`).
+(`crates/zeroship-data-v8/src/lib.rs:88`).
 
 | # | file:line | Function | Fact | What it does |
 |---|---|---|---|---|
@@ -290,7 +290,7 @@ reads and are not:
 - `backend/sqlite/mod.rs:1936-1949` resolves the geoPoint column by scanning the
   RESULT SET's column names (`typed.columns.iter().position(..)`), not the
   catalog `[delegated]`.
-- `crates/zeroship-plugin-db/src/v8_bridge.rs:462-464` picks a JSON decode by
+- `crates/zeroship-data-v8/src/v8_bridge.rs:462-464` picks a JSON decode by
   the wire `RowDescription` type OID, i.e. protocol metadata `[delegated]`.
 
 ### 1.8 What `read_live_schema` actually recovers, and what the data plane keeps
@@ -340,7 +340,7 @@ Two further measurements sharpen that `[delegated]`:
 Also `[delegated]`: **`compute_diff` (`diff.rs:900`) has no production call site
 in plugin-db at all** - grep finds only doc-comment mentions
 (`backend/mod.rs:565`, `lib.rs:127`, `cross_app_fk.rs:70`, `:94`, `:232`) and
-four calls in `crates/zeroship-plugin-db/tests/sqlite_integration.rs` (`:6999`, `:7087`, `:7156`, `:7224`).
+four calls in `crates/zeroship-data-v8/tests/sqlite_integration.rs` (`:6999`, `:7087`, `:7156`, `:7224`).
 The diff classifier is a migration-engine facility that the data plane links but
 never runs.
 
@@ -695,7 +695,7 @@ declare a column with a platform-reserved suffix - but nothing *derives* from it
 ### 3.5 `aadColumn` and why it is a separate field
 
 `canonical_aad(collection, column, row_pk)`
-(`crates/zeroship-plugin-db/src/encryption/aad.rs:75-98`) length-prefixes the
+(`crates/zeroship-data-v8/src/encryption/aad.rs:75-98`) length-prefixes the
 column name into the AEAD tag. Consequences the specification must respect:
 
 1. **The physical column name is part of the authentication.** Change which
@@ -862,14 +862,14 @@ Counts are from a delegated static enumeration `[delegated]`; nothing was run.
 | `crud/introspect_schema.rs:988` | `encrypted_column_maps_to_declared_shape` | retarget to descriptor -> runtime shape |
 | `crud/introspect_schema.rs:1008` | `masked_parent_maps_and_sibling_is_dropped` | **the assertion INVERTS.** Today: `phone_masked` must NOT be a schema field. Under the flip the physical raw column must be recorded in `storage`, not dropped |
 | `crud/introspect_schema.rs:1030` | `jsonb_and_date_families_collapse_to_representative_tokens` | pure `pg_type` -> DSL-token mapping; **DELETE** unless the descriptor keeps a physical-type projection |
-| `crates/zeroship-plugin-db/tests/integration.rs:5098` | `p4_round_trip_encrypted_masked_vector_via_introspected_metadata` | plants `COMMENT ON COLUMN ... 'zsenc:...'` / `'__zsmask:...'` (`:5146-5147`), asserts `runtime_schema_for_tests` recovered them (`:5162-5167`), then does a real round trip. **Keep the round trip; invert the assertion**: the metadata must come from the descriptor and no catalog read may occur |
-| `crates/zeroship-plugin-db/tests/integration.rs:5385` | `p5_pg_crud_works_via_engine_created_schema_no_runtime_ddl` | same shape: sentinel plant at `:5425-5426`, assertions at `:5477-5482` |
-| `crates/zeroship-plugin-db/tests/native_transaction.rs:1071` | `update_many_randomised_failure_is_atomic_postgres` | the test body is fine; its FIXTURE `create_encrypted_users_table` (`:247`) writes the `zsenc:` comment at `:270`, which is the only channel telling the data plane `ssn` is encrypted. **Fixture-only rewrite** |
+| `crates/zeroship-data-v8/tests/integration.rs:5098` | `p4_round_trip_encrypted_masked_vector_via_introspected_metadata` | plants `COMMENT ON COLUMN ... 'zsenc:...'` / `'__zsmask:...'` (`:5146-5147`), asserts `runtime_schema_for_tests` recovered them (`:5162-5167`), then does a real round trip. **Keep the round trip; invert the assertion**: the metadata must come from the descriptor and no catalog read may occur |
+| `crates/zeroship-data-v8/tests/integration.rs:5385` | `p5_pg_crud_works_via_engine_created_schema_no_runtime_ddl` | same shape: sentinel plant at `:5425-5426`, assertions at `:5477-5482` |
+| `crates/zeroship-data-v8/tests/native_transaction.rs:1071` | `update_many_randomised_failure_is_atomic_postgres` | the test body is fine; its FIXTURE `create_encrypted_users_table` (`:247`) writes the `zsenc:` comment at `:270`, which is the only channel telling the data plane `ssn` is encrypted. **Fixture-only rewrite** |
 
 **REWRITE-or-DELETE, gate-dependent - 2.** `context.rs:1378`
 (`registered_models_round_trip`) and `:1389` (`mark_model_registered_is_idempotent`)
 die only if the `is_model_registered` gate goes. Note also
-`crates/zeroship-plugin-db/tests/sqlite_integration.rs:9748`
+`crates/zeroship-data-v8/tests/sqlite_integration.rs:9748`
 (`p6c_data_plane_reaches_the_app_file_without_a_register`), which pins the exact
 cold-schema `None` path the descriptor removes; it currently passes for a reason
 that will no longer exist.
@@ -880,7 +880,7 @@ stays for drift and diff, which it should:
 `zeroship-schema/src/mask_codec.rs` 15 arms (`:231`-`:379`);
 `crud/mask_backfill.rs` 3 (`:390`, `:399`, `:425`);
 `backend/sqlite/mod.rs` 17 (`:2958`-`:3152`);
-`crates/zeroship-plugin-db/tests/sqlite_integration.rs` 4 (`:6949`, `:7111`, `:7196`, `:7250`) plus 2 pure
+`crates/zeroship-data-v8/tests/sqlite_integration.rs` 4 (`:6949`, `:7111`, `:7196`, `:7250`) plus 2 pure
 introspection arms (`:542`, `:572`);
 `zeroship-migrate-backend/src/mask_codec.rs:298`;
 `zeroship-migrate/tests/column_shapes/encrypted_domain_catalog_sentinel.rs` 8
@@ -897,7 +897,7 @@ They are: `crud/read_pipeline.rs` 7 (`:417`, `:440`, `:460`, `:477`, `:494`,
 `crud/mask_backfill.rs` 5 (`:466`-`:531`); `crud/mask_drift.rs` 7 (`:988`-`:1162`);
 `crud/encryption_pass.rs` 3 (`:629`, `:710`, `:788`); `crud/bytes_pass.rs` 1
 (`:275`); `crud/write_pipeline.rs:754`; `backend/sqlite/mod.rs:2823`;
-`backend/sqlite/vector.rs:376`; `crates/zeroship-plugin-db/tests/sqlite_integration.rs` 6
+`backend/sqlite/vector.rs:376`; `crates/zeroship-data-v8/tests/sqlite_integration.rs` 6
 (`:5246`, `:5432`, `:5465`, `:5539`, `:5667`, `:5716`).
 
 **But two of those flip on the MASKING FLIP, independently of the shape
@@ -920,13 +920,13 @@ that is the regression the flip can introduce with every existing test green
 (section 3.5).
 
 **UNAFFECTED - 12.** Class-(v) end-to-end arms that route through introspection
-without asserting on it (`crates/zeroship-plugin-db/tests/integration.rs:1161`, `:5328`;
-`crates/zeroship-plugin-db/tests/sqlite_integration.rs:9574`, `:9670`; `context.rs:1176`) and the three
+without asserting on it (`crates/zeroship-data-v8/tests/integration.rs:1161`, `:5328`;
+`crates/zeroship-data-v8/tests/sqlite_integration.rs:9574`, `:9670`; `context.rs:1176`) and the three
 compile-time trait assertions (`backend/postgres.rs:1798`,
 `backend/mod.rs:1931`, `backend/sqlite/mod.rs:2875`), which survive because
 `SchemaIntrospect` itself survives for the migrate plane.
 
-**Shell gates - 3 arms in one file, `tests/run_plugin_db_live_suite.sh`:**
+**Shell gates - 3 arms in one file, `tests/run_data_v8_live_suite.sh`:**
 
 - `:143` `PLUGIN_DB_MIN_PASSED=118` - a hard pass-count floor summed across four
   live-PG binaries (loop `:171`, sum `:180-183`, comparison `:191-199`).
@@ -1091,10 +1091,10 @@ not, the dev tier would be visibly broken.
 6. **B-1**: delete the `pg_extension` probes in favour of SQLSTATE mapping, or
    carve capability probes out of the "no live introspection" rule explicitly?
 7. **section 4.4**: does the descriptor store reuse `LiveMetadataCache`
-   (`crates/zeroship-plugin-db/src/live_metadata.rs`)? If yes, one of its seven
+   (`crates/zeroship-data-v8/src/live_metadata.rs`)? If yes, one of its seven
    tests becomes a rewrite instead of a deletion; if no, the whole 517-line
    module goes.
-8. **section 4.4 shell gate**: `tests/run_plugin_db_live_suite.sh:143`'s
+8. **section 4.4 shell gate**: `tests/run_data_v8_live_suite.sh:143`'s
    `PLUGIN_DB_MIN_PASSED=118` floor must be decremented deliberately, with the
    provenance ledger at `:92-142` updated in the same change. Who signs that
    off, and to what number?
@@ -1130,19 +1130,19 @@ column-name lookup.
 
 **NOT reached, and it should be:**
 
-- `crates/zeroship-plugin-db/src/wal_consumer.rs` (1440 lines). The pgoutput
+- `crates/zeroship-data-v8/src/wal_consumer.rs` (1440 lines). The pgoutput
   relation cache (`:236`, `:417`, `:502-580`) maps `rel_id -> (namespace, table,
   columns)` from the replication protocol's `Relation` messages. I did not
   establish whether it ever consults the catalog, nor how it interacts with the
   `_masked` sibling. It is the PG twin of the SQLite CDC path (C-1) and may add a
   bucket-C entry.
-- `crates/zeroship-plugin-db/src/read_set.rs` (586 lines). `:121` handles a
+- `crates/zeroship-data-v8/src/read_set.rs` (586 lines). `:121` handles a
   column absent from an event tuple; the surrounding logic was not read.
-- `crates/zeroship-plugin-db/src/audit.rs` (772 lines) and
+- `crates/zeroship-data-v8/src/audit.rs` (772 lines) and
   `crud/mask_policy.rs` (879). Both read and write platform-internal tables whose
   shape is hardcoded; I confirmed they are not creator-schema consumers but did
   not enumerate them.
-- `crates/zeroship-plugin-db/src/exec.rs` (1646 lines) beyond confirming its
+- `crates/zeroship-data-v8/src/exec.rs` (1646 lines) beyond confirming its
   three `schema` mentions (`:1112`, `:1223`, `:1411`) are "ensure app schema"
   namespace calls, not field-map reads.
 - `crates/zeroship-schema/src/query.rs` beyond the regions listed. The file is
@@ -1153,8 +1153,8 @@ column-name lookup.
   `pub` item and every plugin-db call site (roughly 180, all pure computation or
   types, none touching a connection) but likewise did not characterise each
   builder's emitted SQL.
-- The ~200 test-only `use zeroship_plugin_db::query::{...}` import blocks in
-  `crates/zeroship-plugin-db/tests/sqlite_integration.rs` and `crates/zeroship-plugin-db/tests/integration.rs` were not expanded
+- The ~200 test-only `use zeroship_data_v8::query::{...}` import blocks in
+  `crates/zeroship-data-v8/tests/sqlite_integration.rs` and `crates/zeroship-data-v8/tests/integration.rs` were not expanded
   name by name `[delegated]`.
 - Non-Rust consumers beyond `sdks/db/src/types.ts`,
   `sdks/bootstrap/src/install-schema.ts` and the confined-shape mirror. In

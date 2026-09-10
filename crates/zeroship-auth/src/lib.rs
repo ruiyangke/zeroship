@@ -5,7 +5,7 @@
 // crate past rustc's default layout-query depth of 128. Structural fixes were
 // tried first and do not help: the depth is cumulative across the whole
 // pool -> connect -> handshake chain, so boxing any single future removes one
-// level, not the ~130 reported. `crates/zeroship-plugin-db/src/lib.rs` and
+// level, not the ~130 reported. `crates/zeroship-data-v8/src/lib.rs` and
 // `crates/zeroship-gateway/src/main.rs` already carry this for the same reason. It is a
 // compiler resource limit, not a correctness guard.
 #![recursion_limit = "256"]

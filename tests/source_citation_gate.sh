@@ -217,8 +217,8 @@ docs/runbooks/deploy-server.md:tests/compose_port_exposure_gate.sh
 tests/service_credential_boot_gate.sh:tests/compose_secret_strength_gate.sh
 tests/lib/scratch_db.sh:crates/zeroship-migrate-adapter/src/platform/cluster_lock.rs
 tests/run_doc_gate.sh:crates/plugin-db/src/cross_app_fk.rs
-docs/feature-map.md:crates/zeroship-plugin-db/src/cross_app_fk.rs
-docs/reference/db.md:crates/zeroship-plugin-db/src/cross_app_fk.rs
+docs/feature-map.md:crates/zeroship-data-v8/src/cross_app_fk.rs
+docs/reference/db.md:crates/zeroship-data-v8/src/cross_app_fk.rs
 crates/zeroship-testkit/src/fingerprint.rs:crates/zeroship-migrate-adapter/src/platform.rs
 db/migrations-ts/20260811000400_rate_limits_write_grants.ts:crates/auth/src/store/ratelimit.rs
 db/migrations-ts/20260816000100_service_assertion_replay.ts:crates/zeroship-migrate-adapter/tests/platform_migrate.rs

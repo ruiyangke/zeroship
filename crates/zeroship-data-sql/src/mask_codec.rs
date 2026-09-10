@@ -425,7 +425,7 @@ mod tests {
 /// migration-engine-built table it introspected it matched no sentinel,
 /// concluded nothing was protected, and permitted the downgrade. Both files then
 /// carried a doc block claiming the re-divergence guard lived in
-/// `zeroship-plugin-db`'s `mask_flip.rs`. That test does bind them - it renders
+/// `zeroship-data-v8`'s `mask_flip.rs`. That test does bind them - it renders
 /// DDL through `zeroship_migrate::schema::query`, executes it, and compares the
 /// stored comment against this crate's builder - but it needs a live
 /// `PostgreSQL` and `--features test-helpers`, so it runs in no ordinary

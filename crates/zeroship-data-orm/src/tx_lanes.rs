@@ -69,7 +69,7 @@ pub struct TxLane {
 /// "destroy" costs and why a drop does not achieve it.
 impl TxLane {
     /// The queued pre-commit events, for the SEC-1 scoping tests in
-    /// `zeroship-plugin-db`'s `context.rs`. A slice rather than the field, so
+    /// `zeroship-data-v8`'s `context.rs`. A slice rather than the field, so
     /// the tests can read the queue without production code gaining the ability
     /// to mutate a lane's internals from another module.
     ///
@@ -204,7 +204,7 @@ impl TxLanes {
         Self::default()
     }
 
-    /// The lane map, for the SEC-1 scoping tests in `zeroship-plugin-db`'s
+    /// The lane map, for the SEC-1 scoping tests in `zeroship-data-v8`'s
     /// `context.rs`.
     ///
     /// Named `by_app` rather than exposing the field so the call reads

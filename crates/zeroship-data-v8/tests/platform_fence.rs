@@ -16,7 +16,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use zeroship_plugin_db::service::{DbService, DbServiceConfig};
+use zeroship_data_v8::service::{DbService, DbServiceConfig};
 use zeroship_runtime::channel::CancelFlag;
 use zeroship_runtime::plugin::NativePlugin;
 use zeroship_runtime::runtime::Runtime;

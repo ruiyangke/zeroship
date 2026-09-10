@@ -9,7 +9,7 @@
 //! checked rather than trusted - `to_tsquery`, `tsvector`, `ts_rank`,
 //! `plainto_tsquery`, `websearch_to_tsquery`, `fts5` and `bm25` appear nowhere
 //! in `crates/zeroship-data-sql/src/compile.rs`,
-//! `crates/zeroship-plugin-db/src/` or `sdks/db/src/` (swept 2026-08-28); the
+//! `crates/zeroship-data-v8/src/` or `sdks/db/src/` (swept 2026-08-28); the
 //! only occurrences in the tree are in `docs/archive/` and in the removal notes
 //! at `crates/zeroship-migrate-core/src/render/declarative.rs:1824-1831`.
 //!
@@ -291,7 +291,7 @@ impl SearchCriterion {
 /// tie exactly - and the existing `PostgreSQL` test says so in its own comment,
 /// asserting set membership rather than order because "pgvector distance ties
 /// between FP-close vectors can re-order across builds"
-/// (`crates/zeroship-plugin-db/tests/integration.rs:3397`).
+/// (`crates/zeroship-data-v8/tests/integration.rs:3397`).
 ///
 /// A tiebreak carries its own [`crate::NullOrder`], for the reason
 /// [`crate::OrderKey`] does: the two backends' defaults differ.

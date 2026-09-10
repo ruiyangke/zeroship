@@ -376,7 +376,7 @@ interface ZeroshipDb {
    * disagreed with `ZeroshipIsolationLevel` on both spelling and count - it
    * dropped `readUncommitted` entirely even though the runtime accepts it
    * (measured 2026-08-10, task #245). The runtime's `normalize_isolation_level`
-   * (`crates/zeroship-plugin-db/src/v8_classes/db.rs`) also accepts the camelCase and
+   * (`crates/zeroship-data-v8/src/v8_classes/db.rs`) also accepts the camelCase and
    * uppercase SQL forms, but `ZeroshipIsolationLevel` is the one published
    * type - see its doc comment in `shared.d.ts` - so this signature matches
    * that rather than inventing a second accepted-but-undocumented union.

@@ -38,7 +38,7 @@ pub struct ProbeOutcome {
 /// `crate::tx_scope::ensure_backend()` until 2026-09-03 - an ENGINE file calling
 /// the ADAPTER, which cargo refuses once the two are separate crates. The caller
 /// that owns the thread context does the lookup, which for every arm in
-/// `crates/zeroship-plugin-db/tests/native_transaction.rs` is one `zeroship_plugin_db::tx_scope::ensure_backend()`.
+/// `crates/zeroship-data-v8/tests/native_transaction.rs` is one `zeroship_data_v8::tx_scope::ensure_backend()`.
 ///
 /// # Errors
 ///

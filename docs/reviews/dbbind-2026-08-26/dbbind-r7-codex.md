@@ -10,25 +10,25 @@ illegal matrix supplies the typed error for every other state/event pair.
 The present transaction implementation deliberately serializes same-app
 top-level begins, but admits that cancellation between claim acquisition and
 BEGIN completion leaks the claim
-(crates/zeroship-plugin-db/src/transaction/mod.rs:347-378). The present settle
+(crates/zeroship-data-v8/src/transaction/mod.rs:347-378). The present settle
 path can also remove no client, declare success, release the claim, and send no
-terminal SQL (crates/zeroship-plugin-db/src/transaction/mod.rs:1059-1069).
+terminal SQL (crates/zeroship-data-v8/src/transaction/mod.rs:1059-1069).
 Temporary client removal is real ownership today and needs an RAII restore guard
-(crates/zeroship-plugin-db/src/context.rs:66-109;
-crates/zeroship-plugin-db/src/exec.rs:188-201).
+(crates/zeroship-data-v8/src/context.rs:66-109;
+crates/zeroship-data-v8/src/exec.rs:188-201).
 
 Savepoint rollback is incomplete today: the native orchestrator pops its depth
 and sends only ROLLBACK TO
-(crates/zeroship-plugin-db/src/transaction/mod.rs:995-1010), while the driver
+(crates/zeroship-data-v8/src/transaction/mod.rs:995-1010), while the driver
 correctly documents that ROLLBACK TO leaves the savepoint defined and uses
 ROLLBACK TO followed by RELEASE
 (libs/compio-postgres/src/transaction.rs:63-82). Effects are physically stored
 in one per-app vector, with current savepoint watermarks already implementing
 release inheritance and rollback truncation
-(crates/zeroship-plugin-db/src/context.rs:213-231;
-crates/zeroship-plugin-db/src/context.rs:852-877), and a
+(crates/zeroship-data-v8/src/context.rs:213-231;
+crates/zeroship-data-v8/src/context.rs:852-877), and a
 confirmed root commit drains all of it
-(crates/zeroship-plugin-db/src/transaction/mod.rs:1084-1088). Those facts require
+(crates/zeroship-data-v8/src/transaction/mod.rs:1084-1088). Those facts require
 the equivalent explicit frame/effect ownership below, so state transitions can
 assert conservation rather than relying on an implicit watermark side table.
 
@@ -43,8 +43,8 @@ session and can only tighten its BEGIN ceiling
 (docs/proposals/2026-08-26-sc6-ceiling-read-contract.md:81-125). This is not
 optional isolation polish: the current BEGIN path installs SET LOCAL ROLE for
 the transaction lifetime
-(crates/zeroship-plugin-db/src/transaction/mod.rs:189-217;
-crates/zeroship-plugin-db/src/transaction/mod.rs:523-540).
+(crates/zeroship-data-v8/src/transaction/mod.rs:189-217;
+crates/zeroship-data-v8/src/transaction/mod.rs:523-540).
 
 # Artifact 1: SC-1 executable transaction protocol
 
@@ -874,8 +874,8 @@ identity with another admission identity. The admission rules are:
   (docs/proposals/2026-08-26-sc5-service-ownership.md:101-119).
 
 The backend divergence above preserves the existing intentional wait
-(crates/zeroship-plugin-db/src/context.rs:165-193;
-crates/zeroship-plugin-db/src/transaction/mod.rs:354-378), while correcting the
+(crates/zeroship-data-v8/src/context.rs:165-193;
+crates/zeroship-data-v8/src/transaction/mod.rs:354-378), while correcting the
 documents’ old unqualified identities
 (docs/proposals/2026-08-26-sc1-transaction-protocol.md:41-53).
 
@@ -1080,7 +1080,7 @@ fn finish_after_rollback_to(
 
 Frame names use next_frame_sequence, not current depth. The simultaneous open
 depth remains capped at eight, matching the present public limit
-(crates/zeroship-plugin-db/src/transaction/mod.rs:103-111,325-343). Monotonic
+(crates/zeroship-data-v8/src/transaction/mod.rs:103-111,325-343). Monotonic
 names prevent a failed cleanup from leaving a server savepoint that shadows a
 later depth-reused name, the exact server behavior documented by the driver
 (libs/compio-postgres/src/transaction.rs:66-74).
@@ -1281,7 +1281,7 @@ PostgreSQL exposes failed transaction health through ReadyForQuery and refuses
 ordinary statements until rollback
 (libs/compio-postgres/src/client.rs:507-533). A poisoned COMMIT remains legal
 because PostgreSQL can answer COMMIT with the ROLLBACK tag
-(crates/zeroship-plugin-db/src/transaction/mod.rs:123-159).
+(crates/zeroship-data-v8/src/transaction/mod.rs:123-159).
 
 ## 4. Closed event and completion enums
 
@@ -2347,7 +2347,7 @@ impl TxProtocolError {
 
 TransactionConnectionBusy and TransactionScopeExpired already have distinct
 creator-visible meanings in the current implementation
-(crates/zeroship-plugin-db/src/exec.rs:124-171). The new reducer preserves those
+(crates/zeroship-data-v8/src/exec.rs:124-171). The new reducer preserves those
 meanings; it does not collapse protocol errors into an internal string.
 
 Every table row whose next state is `Cancelling(...,Awaiting)` invokes this one
@@ -3548,7 +3548,7 @@ The command tag is durability evidence, not decoration. The existing driver
 explicitly distinguishes a COMMIT answered as ROLLBACK
 (libs/compio-postgres/src/transaction.rs:54-59,165-189), and the native raw
 terminal path now performs the same check
-(crates/zeroship-plugin-db/src/transaction/mod.rs:123-159).
+(crates/zeroship-data-v8/src/transaction/mod.rs:123-159).
 
 ## 10. Property-test invariants
 
@@ -3610,7 +3610,7 @@ claim or an armed timer at the end of a finite prefix from failing the suite.
 14. Poisoned commit: COMMIT answered ROLLBACK never yields a resolved creator
     promise or a published effect. The reachable regression case is covered in
     the current live suite
-    (crates/zeroship-plugin-db/tests/native_transaction.rs:977-1048).
+    (crates/zeroship-data-v8/tests/native_transaction.rs:977-1048).
 15. Quiescing: settlement while another command owns logical execution issues
     zero frame/terminal SQL until that command returns, then starts at most one
     logical settlement attempt and never more than one SQL statement
@@ -3738,12 +3738,12 @@ claim or an armed timer at the end of a finite prefix from failing the suite.
 
 Today Command contains SQL/parameters and a reply sender but no reservation,
 owner, incarnation, or cancellation identity
-(crates/zeroship-plugin-db/src/backend/sqlite/session.rs:155-246). One blocking
+(crates/zeroship-data-v8/src/backend/sqlite/session.rs:155-246). One blocking
 actor loop completes run_* and sends the reply before receiving another command
-(crates/zeroship-plugin-db/src/backend/sqlite/session.rs:403-445). Both the
+(crates/zeroship-data-v8/src/backend/sqlite/session.rs:403-445). Both the
 command documentation and session Drop state that a dropped caller does not
 cancel the SQL
-(crates/zeroship-plugin-db/src/backend/sqlite/session.rs:155-161,641-657).
+(crates/zeroship-data-v8/src/backend/sqlite/session.rs:155-161,641-657).
 
 Cargo.lock resolves rusqlite 0.39.0 and libsqlite3-sys 0.37.0
 (Cargo.lock:3104-3114; Cargo.lock:4859-4871). That rusqlite exposes a Send + Sync
@@ -3762,7 +3762,7 @@ rg -n --fixed-strings SQLITE_INTERRUPT crates libs
 
 returns exit 1 with zero matches. The mapper names BUSY variants and four
 constraint variants, then maps every other SQLite failure to Transient
-(crates/zeroship-plugin-db/src/backend/sqlite/error.rs:35-43,52-140). Therefore
+(crates/zeroship-data-v8/src/backend/sqlite/error.rs:35-43,52-140). Therefore
 intentional SQLITE_INTERRUPT has no typed arm today.
 
 ## 12. Incarnation-qualified reservations and commands
@@ -4167,7 +4167,7 @@ cannot be accepted as a cleanup proof.
 These are concrete Coded errors, not undeclared enum variants. The current
 DbError contract explicitly provides Coded { code, message, hint } for a code
 chosen by another subsystem
-(crates/zeroship-plugin-db/src/error.rs:145-160).
+(crates/zeroship-data-v8/src/error.rs:145-160).
 
 The actor-to-SC-1 adapters are closed and run before either explicit cutoff is
 published:
@@ -5760,7 +5760,7 @@ lane before starting queued data and between statements. A synchronous SQLite
 call can still block the actor thread, so the shared intent and the exact
 ActiveSqlTarget are the in-statement path; putting Cancel behind Execute on the
 ordinary FIFO would reproduce today’s run-to-completion loop
-(crates/zeroship-plugin-db/src/backend/sqlite/session.rs:403-445).
+(crates/zeroship-data-v8/src/backend/sqlite/session.rs:403-445).
 
 Dropping an armed CommandFuture or calling cancel().await executes this exact
 publication sequence. The route is part of the validated handle shape; an
@@ -10197,7 +10197,7 @@ safe reservation outcome.
 
 The reply channel has no bearing on durability today either: the source says SQL
 has already committed or rolled back before a send to a dropped receiver
-(crates/zeroship-plugin-db/src/backend/sqlite/session.rs:155-161). The new
+(crates/zeroship-data-v8/src/backend/sqlite/session.rs:155-161). The new
 protocol makes that fact typed instead of silent.
 
 ### Cancel arrives after the reply is polled
@@ -10271,8 +10271,8 @@ The actor MUST retain the raw rusqlite error until it knows ReservationId,
 terminal owner, cancellation intent, and the exact ActiveSqlTarget lane/
 generation/command sequence. Mapping inside run_exec/run_query as today would
 erase that context before the actor decides
-(crates/zeroship-plugin-db/src/backend/sqlite/session.rs:415-430;
-crates/zeroship-plugin-db/src/backend/sqlite/error.rs:52-140).
+(crates/zeroship-data-v8/src/backend/sqlite/session.rs:415-430;
+crates/zeroship-data-v8/src/backend/sqlite/error.rs:52-140).
 
 Raw codes never decide a terminal COMMIT/ROLLBACK by themselves. After dropping
 the statement and proving !is_busy(), the actor samples is_autocommit and runs
@@ -11934,9 +11934,9 @@ With that stateful classifier fixed, primary/extended codes map as follows:
 | SQLITE_ABORT_ROLLBACK (516) | same reservation has an earlier winning cancellation intent | Same cause-specific public cancellation. Cleanup is SQLiteAlreadyRolledBack only if is_autocommit is true; code 516 alone proves nothing. |
 | SQLITE_ABORT_ROLLBACK (516) | no matching winning cancellation | If is_autocommit is false, quarantine: 516 alone proves nothing. If true, explicit Execute publishes TransactionAborted; autocommit preserves the original operation error as Autocommit(Err(original)) after the same end proof. Crossing reservation/generation boundaries is a protocol fault. |
 | SQLITE_BUSY_SNAPSHOT (517) | WAL snapshot write upgrade fails; Complete wins the CAS | Run the terminal snapshot-abort algorithm above. Fresh `classify_authority` Deny is terminal denial; ReResolve (Changing or epoch mismatch) is retryable schema_snapshot_stale; Current alone is retryable serialization_conflict. Publish explicit DataAbortCompleted or autocommit terminal outcome only after rollback proof. Code 517 alone proves no schema movement. SC-2 requires the distinct arm (docs/proposals/2026-08-26-sc2-sqlite-actor-protocol.md:234-242). |
-| SQLITE_BUSY (5), BUSY_RECOVERY (261), BUSY_TIMEOUT (773) | ordinary operation, cancellation did not own | LockContention/lock_not_available. The present mapper already groups these (crates/zeroship-plugin-db/src/backend/sqlite/error.rs:35-38,58-70). If emitted by terminal SQL, use the terminal classifier above instead. |
+| SQLITE_BUSY (5), BUSY_RECOVERY (261), BUSY_TIMEOUT (773) | ordinary operation, cancellation did not own | LockContention/lock_not_available. The present mapper already groups these (crates/zeroship-data-v8/src/backend/sqlite/error.rs:35-38,58-70). If emitted by terminal SQL, use the terminal classifier above instead. |
 | SQLITE_LOCKED (6), LOCKED_SHAREDCACHE (262), LOCKED_VTAB (518) | ordinary operation, cancellation did not own | LockContention/lock_not_available; add all three instead of falling through to Transient. The bundled header defines both extended LOCKED codes (/home/ruiyang/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/libsqlite3-sys-0.37.0/sqlite3/sqlite3.h:542-543). If emitted by terminal SQL, use the terminal classifier. |
-| SQLITE_CONSTRAINT_CHECK (275), FOREIGNKEY (787), NOTNULL (1299), UNIQUE (2067), PRIMARYKEY (1555), ROWID (2579) | ordinary operation, no matching cancel | Preserve check_violation, fk_violation, or not_null_violation; map UNIQUE, PRIMARYKEY, and ROWID to unique_violation. The current mapper names only the first four constraint subcodes (crates/zeroship-plugin-db/src/backend/sqlite/error.rs:40-43,72-115), while the bundled header defines PRIMARYKEY, UNIQUE, and ROWID separately (/home/ruiyang/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/libsqlite3-sys-0.37.0/sqlite3/sqlite3.h:563-572). Autocommit cleanup then stores Autocommit(Err(original)); explicit Execute remains nonterminal unless SQLite ended the transaction. |
+| SQLITE_CONSTRAINT_CHECK (275), FOREIGNKEY (787), NOTNULL (1299), UNIQUE (2067), PRIMARYKEY (1555), ROWID (2579) | ordinary operation, no matching cancel | Preserve check_violation, fk_violation, or not_null_violation; map UNIQUE, PRIMARYKEY, and ROWID to unique_violation. The current mapper names only the first four constraint subcodes (crates/zeroship-data-v8/src/backend/sqlite/error.rs:40-43,72-115), while the bundled header defines PRIMARYKEY, UNIQUE, and ROWID separately (/home/ruiyang/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/libsqlite3-sys-0.37.0/sqlite3/sqlite3.h:563-572). Autocommit cleanup then stores Autocommit(Err(original)); explicit Execute remains nonterminal unless SQLite ended the transaction. |
 | Any other operation failure | CANCEL_INTENT linearized first while owner remained Open | Cancellation wins publicly; retain the engine error as diagnostic metadata, clean/quarantine, and never claim the error caused cancellation. |
 | Any other autocommit failure | Complete CAS won first | Never COMMIT. Apply the autocommit-error algorithm and replay Autocommit(Err(original)) or CleanupIndeterminate. |
 | Any other nonterminal explicit-Execute failure | per-command completion gate won first | Return the mapped operation error and health impact; if is_autocommit says SQLite ended the transaction, store TransactionAborted, otherwise a later Cancel still rolls back the open reservation. |
@@ -12077,8 +12077,8 @@ succeeds, with both writes durable
 (docs/proposals/2026-08-26-sc1-transaction-protocol.md:296-310). That arm cannot
 fail as a discriminator for the missing registry/state-machine work: it already
 passes on today’s code. The current implementation explicitly waits on AwaitTxClaim
-(crates/zeroship-plugin-db/src/transaction/mod.rs:354-378;
-crates/zeroship-plugin-db/src/transaction/mod.rs:441-473), and the
+(crates/zeroship-data-v8/src/transaction/mod.rs:354-378;
+crates/zeroship-data-v8/src/transaction/mod.rs:441-473), and the
 existing probe starts the pair in one Promise.all
 (examples/db-todos/src/index.ts:569-599); the dev-vs-deployed gate invokes it and
 asserts both legs and both durable rows
@@ -12097,7 +12097,7 @@ local, not because a thread resource owns a real singleflight
 (docs/proposals/2026-08-26-sc5-service-ownership.md:140-158,239-242).
 I verified that `ISOLATE_CTX` is declared with `thread_local!` while its doc calls
 it the per-isolate context
-(crates/zeroship-plugin-db/src/context.rs:953-957). A passing two-isolate/
+(crates/zeroship-data-v8/src/context.rs:953-957). A passing two-isolate/
 one-thread sharing arm therefore cannot fail on today’s code. Its discriminating
 companion must use two OS threads and assert exactly one service/cache per
 thread-resource key, or mutation-delete the proposed owner/singleflight and

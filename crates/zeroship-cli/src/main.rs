@@ -206,8 +206,8 @@ fn cmd_serve(args: &[String]) {
             // A URL naming no supported backend fails HERE, with the same
             // exit(2) the invalid-`ZEROSHIP_STORAGE_URL` arm below already
             // uses, rather than surfacing inside the creator's first query.
-            let service = match zeroship_plugin_db::service::DbService::new(
-                zeroship_plugin_db::service::DbServiceConfig {
+            let service = match zeroship_data_v8::service::DbService::new(
+                zeroship_data_v8::service::DbServiceConfig {
                     url,
                     worker_id: format!("serve-{}", uuid::Uuid::new_v4()),
                     meter: Some(Arc::clone(&dev_meter)),

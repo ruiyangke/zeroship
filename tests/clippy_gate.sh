@@ -632,8 +632,8 @@ fi
 #   compio-postgres/tls                  "                    "
 #   zeroship-migrate-adapter/platform-cli  platform_migrate   (test)
 #                                          zeroship-platform-migrate (bin)
-#   zeroship-plugin-db/live-db-tests     distributed_live     (test)
-#   zeroship-plugin-db/test-helpers      integration          (test)
+#   zeroship-data-v8/live-db-tests     distributed_live     (test)
+#   zeroship-data-v8/test-helpers      integration          (test)
 #                                        missing_role         (test)
 #                                        native_transaction   (test)
 #                                        sqlite_integration   (test)

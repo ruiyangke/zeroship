@@ -24,7 +24,7 @@ use zeroship_data_sql::descriptors::{GeoPoint, VectorMetric};
 /// PostgreSQL adapter backed by an owned compio pool.
 ///
 /// Holds the `Rc<Pool>` for the configured URL. The pool itself is
-/// created by `zeroship_plugin_db::init_pool_async` (the adapter tier, which
+/// created by `zeroship_data_v8::init_pool_async` (the adapter tier, which
 /// this crate must not name as a dependency) and stashed in the per-isolate
 /// context; this wrapper just provides the trait facade.
 pub struct PostgresBackend {
@@ -83,7 +83,7 @@ impl PostgresBackend {
     ///
     /// The lookup did not disappear; it moved up to the composer that always
     /// owned the context,
-    /// `zeroship_plugin_db::backend_selection`. The old `new()`
+    /// `zeroship_data_v8::backend_selection`. The old `new()`
     /// even documented the hazard it created - "do not call this from inside a
     /// `context::with` closure, it takes a context borrow of its own" - which
     /// is what a fetch buried in a constructor costs.
@@ -807,9 +807,9 @@ impl DialectBuilder for PostgresBackend {
 }
 
 // `impl Backend for PostgresBackend` is NOT here. `Backend` is
-// `zeroship-plugin-db`'s own `pub(crate)` composition marker, and the orphan
+// `zeroship-data-v8`'s own `pub(crate)` composition marker, and the orphan
 // rule puts the impl in the crate that owns the trait even though the type is
-// this crate's. It lives in `zeroship-plugin-db/src/backend/mod.rs` with the
+// this crate's. It lives in `zeroship-data-v8/src/backend/mod.rs` with the
 // compile-time assertion that pins it.
 
 // ===========================================================================
@@ -1471,7 +1471,7 @@ mod tests {
     //! Even those need an `Rc<compio_postgres::Pool>` to construct, and
     //! `Pool::connect` requires a live Postgres listener. There is no
     //! stub / no-IO constructor. The async methods need both a Pool
-    //! AND a real `Client`; they're exercised by `crates/zeroship-plugin-db/tests/integration.rs`.
+    //! AND a real `Client`; they're exercised by `crates/zeroship-data-v8/tests/integration.rs`.
     //!
     //! That leaves *compile-time* tests as the highest-signal coverage
     //! we can add in `--lib`:
@@ -1487,7 +1487,7 @@ mod tests {
     //!    the impl site.
     //!
     //! These are runtime no-ops (the bodies never execute) — they exist
-    //! so `cargo build -p zeroship-plugin-db --tests` fails fast on a
+    //! so `cargo build -p zeroship-data-v8 --tests` fails fast on a
     //! seam break.
 
     use super::*;
@@ -1502,7 +1502,7 @@ mod tests {
 
     // The `Backend` conformance assertion is NOT here: that trait is the
     // adapter's own marker, so both `impl Backend for PostgresBackend` and the
-    // assertion pinning it live in `zeroship-plugin-db`.
+    // assertion pinning it live in `zeroship-data-v8`.
 
     /// Compile-time: each carved capability trait is impl'd directly on
     /// `PostgresBackend` (not just visible through the
@@ -1583,7 +1583,7 @@ mod tests {
     /// `SchemaIntrospect<LiveSchema = LiveSchema>` re-anchors it so
     /// `Backend<LiveSchema = …>` still resolves here.
     // `assert_postgres_backend_assoc_types` is not here: it is stated in terms
-    // of `Backend`, which this crate cannot name. `zeroship-plugin-db`'s
+    // of `Backend`, which this crate cannot name. `zeroship-data-v8`'s
     // `assert_associated_types_pinned` pins the same two associated types.
     fn assert_postgres_backend_assoc_types() {}
 
@@ -1694,7 +1694,7 @@ mod terminal_projection_tests {
     /// This rule was only reachable through a live server until 2026-09-02,
     /// when the projection was split out of `terminal`. The live arm that
     /// covered it - `commit_that_postgres_rolled_back_must_not_report_success_l8`
-    /// in `crates/zeroship-plugin-db/tests/native_transaction.rs` - had ALSO been failing for an unrelated
+    /// in `crates/zeroship-data-v8/tests/native_transaction.rs` - had ALSO been failing for an unrelated
     /// reason (it duplicated a platform-assigned `id`, so it never poisoned the
     /// transaction at all), which means this rule went unbound in practice for
     /// as long as that test was red. A pure arm cannot rot that way.
