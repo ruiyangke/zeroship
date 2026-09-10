@@ -90,8 +90,8 @@
 # module_is_test_gated <file.rs> <root>...
 #
 # True when every matching declaration carries a test-ish cfg or inherits one
-# through its ordinary parent-file layout. Same-named declarations remain
-# conservative: an unrelated shipped declaration prevents exemption.
+# through its ordinary parent-file layout. Resolvable declarations of unrelated
+# files do not participate; unresolved declarations remain conservative.
 #
 # EVERY declaration must be gated, not merely one. The data-plane crates declare
 # most modules through a two-arm visibility ladder -
@@ -137,7 +137,7 @@ module_is_test_gated() {
   local file="$1"
   shift
   local name decls gated hit decl_file decl_line prev trimmed code i before
-  local canonical stack="${_module_gating_stack:-}"
+  local canonical resolved stack="${_module_gating_stack:-}"
   [ -f "$file" ] || return 1
   canonical=$(realpath "$file") || return 1
   case "$stack" in *$'\n'"$canonical"$'\n'*) return 1 ;; esac
@@ -156,6 +156,10 @@ module_is_test_gated() {
     decl_file="${hit%%:*}"
     decl_line="${hit#*:}"
     decl_line="${decl_line%%:*}"
+    resolved=""
+    if resolved=$(_module_gating_ordinary_child "$decl_file" "$decl_line" "$name"); then
+      [ "$resolved" = "$canonical" ] || continue
+    fi
     decls=$((decls + 1))
     before=$gated
     i=$((decl_line - 1))
@@ -192,7 +196,7 @@ module_is_test_gated() {
       esac
     done
     if [ "$gated" -eq "$before" ] &&
-       _module_gating_is_ordinary_parent "$decl_file" "$decl_line" "$file" &&
+       [ "$resolved" = "$canonical" ] &&
        module_is_test_gated "$decl_file" "$@"; then
       gated=$((gated + 1))
     fi
@@ -204,8 +208,8 @@ module_is_test_gated() {
 # Recognize ordinary file modules before following an inherited gate. Inline
 # declarations and files containing path overrides stay conservative; this
 # helper does not attempt to resolve their Rust module paths.
-_module_gating_is_ordinary_parent() {
-  local parent="$1" line="$2" child="$3" parent_dir child_dir name declaration
+_module_gating_ordinary_child() {
+  local parent="$1" line="$2" child_name="$3" parent_dir name declaration child
   declaration=$(sed -n "${line}p" "$parent")
   case "$declaration" in [[:space:]]*) return 1 ;; esac
   if rg -q '^[[:space:]]*#\[path[[:space:]]*=' "$parent"; then return 1; fi
@@ -215,9 +219,14 @@ _module_gating_is_ordinary_parent() {
     lib|main|mod) ;;
     *) parent_dir="$parent_dir/$name" ;;
   esac
-  child_dir=$(dirname "$child")
-  if [ "$(basename "$child")" = mod.rs ]; then child_dir=$(dirname "$child_dir"); fi
-  [ "$(realpath -m "$parent_dir")" = "$(realpath -m "$child_dir")" ]
+  child="$parent_dir/$child_name.rs"
+  if [ -f "$child" ]; then
+    [ ! -f "$parent_dir/$child_name/mod.rs" ] || return 1
+  else
+    child="$parent_dir/$child_name/mod.rs"
+    [ -f "$child" ] || return 1
+  fi
+  realpath "$child"
 }
 
 # module_gating_self_test
@@ -363,7 +372,8 @@ RS
   _mg_case "a mod.rs child inherits its parent's gate" yes "$tmp/src/test_parent/dir_child/mod.rs"
   _mg_case "a shipped parent's child remains shipped" no "$tmp/src/shipped_parent/shipped_child.rs"
   _mg_case "an unrelated same-named file does not inherit a gate" no "$tmp/src/unrelated/inherited.rs"
-  _mg_case "ambiguous same-named declarations stay conservative" no "$tmp/src/test_parent/collision.rs"
+  _mg_case "an unrelated shipped module does not cancel an inherited gate" yes "$tmp/src/test_parent/collision.rs"
+  _mg_case "an unrelated test module does not exempt shipped code" no "$tmp/src/shipped_parent/collision.rs"
   _mg_case "a recursive declaration cannot exempt itself" no "$tmp/src/recursive/lib.rs"
   _mg_case "a path override does not imply an ordinary parent" no "$tmp/src/path_parent/path_child.rs"
   _mg_case "an inline declaration does not imply an ordinary parent" no "$tmp/src/inline_parent/inline_child.rs"
