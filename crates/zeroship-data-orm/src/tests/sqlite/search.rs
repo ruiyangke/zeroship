@@ -3,8 +3,6 @@ use super::fixtures::*;
 
 use crate::tests::fixtures::Host;
 
-use zeroship_data_orm::backend::sqlite::SqliteBackend;
-
 use zeroship_data_orm::backend::BackendHandle;
 
 use zeroship_data_orm::binding::DbBinding;
