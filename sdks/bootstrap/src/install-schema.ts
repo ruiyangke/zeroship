@@ -24,6 +24,9 @@ import {
   exitTransactionScope,
   captureNativeTransaction,
   Collection,
+  readFrom,
+  type ReadFrom,
+  type AliasedCollection,
   type NativeDb,
   type NativeTransactionFn,
   Query,
@@ -684,6 +687,7 @@ type TxPaginationResult<P> = {
  * shape S.
  */
 export type TxCollection<S = PlainObject, AllSchemas extends Record<string, unknown> = Record<string, unknown>> = {
+  as<const A extends string>(alias: A): AliasedCollection<Row<S>, A>;
   insert(row: RowInput<S>): Promise<Row<S>>;
   insertMany(rows: RowInput<S>[]): Promise<Row<S>[]>;
   get<K extends string & keyof Row<S>>(
@@ -785,7 +789,8 @@ export type Collections<T extends Record<string, SchemaInput>> = {
 };
 
 export type DbExtensions<T extends Record<string, SchemaInput>> = {
-  transaction: <R>(fn: (tx: { [K in keyof T]: TxCollection<UnwrapSchema<T[K]>, T> }) => Promise<R>, options?: TransactionOptions) => Promise<Result<R>>;
+  from: ReadFrom;
+  transaction: <R>(fn: (tx: { [K in keyof T]: TxCollection<UnwrapSchema<T[K]>, T> } & { from: ReadFrom<true> }) => Promise<R>, options?: TransactionOptions) => Promise<Result<R>>;
   live: <R>(queryFn: () => Promise<R[]> | { then(onFulfilled: (value: unknown) => unknown, onRejected?: (reason: unknown) => unknown): unknown }, options?: LiveOptions) => LiveQuery<R>;
 };
 
@@ -815,6 +820,7 @@ function createTxCollection<S>(collection: Collection<S>): TxCollection<S> {
   }
 
   const tx: TxCollection<S> = {
+    as: alias => collection.as(alias),
     async insert(row: RowInput<S>) {
       return unwrap(await collection.insert(row));
     },
@@ -992,6 +998,7 @@ const RESERVED_ENV_DB_NAMES = new Set<string>([
   "openSubscription",
   "transaction",
   "live",
+  "from",
 ]);
 
 let _installInFlight = false;
@@ -1173,7 +1180,7 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
   // wrappers add the field-mapping + throwing contract the callback
   // expects).
   async function transactionImpl<R>(
-    fn: (tx: { [K in keyof T]: TxCollection<UnwrapSchema<T[K]>, T> }) => Promise<R>,
+    fn: (tx: { [K in keyof T]: TxCollection<UnwrapSchema<T[K]>, T> } & { from: ReadFrom<true> }) => Promise<R>,
     txOptions?: TransactionOptions,
   ): Promise<Result<R>> {
     if (nativeTransaction === undefined) {
@@ -1224,7 +1231,12 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
         // The native view's collections share the tx connection, so we
         // hand the creator our SDK-wrapped `txCollections` (Result→throw
         // + field mapping). `rawTxView` is intentionally unused.
-        (_rawTxView: unknown) => fn(txCollections),
+        async (_rawTxView: unknown) => {
+          let active = true;
+          const from: ReadFrom<true> = source => readFrom(native, source, true, () => active);
+          try { return await fn({ ...txCollections, from }); }
+          finally { active = false; }
+        },
         opts,
       )) as R;
       return ok(bodyResult);
@@ -1276,6 +1288,12 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
     }
     Object.defineProperty(target, "transaction", {
       value: transactionImpl,
+      configurable: true,
+      enumerable: true,
+      writable: false,
+    });
+    Object.defineProperty(target, "from", {
+      value: (source: AliasedCollection<unknown>) => readFrom(native, source),
       configurable: true,
       enumerable: true,
       writable: false,

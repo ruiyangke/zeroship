@@ -147,6 +147,38 @@ SQLite opens or creates a filesystem database, for example
 options are rejected. Tests provide explicit temporary files; the ORM owns no
 temporary directory and never removes database files when a backend closes.
 
+## Explicit joins
+
+`Database::from` builds source-qualified reads from generated entity aliases.
+Model projections reuse `FromRow`; a left-joined model uses `Option`:
+
+```rust,ignore
+let o = db.entity::<schema::orders::Entity>()?.alias("o")?;
+let c = db.entity::<schema::customers::Entity>()?.alias("c")?;
+let rows: Vec<(OrderSummary, Option<CustomerSummary>)> = db
+    .from(&o)
+    .left_join(&c, o.column(schema::orders::customerId)
+        .eq_column(c.column(schema::customers::id))?)?
+    .select((o.row::<OrderSummary>(), c.optional_row::<CustomerSummary>()))?
+    .order_by(o.column(schema::orders::id).asc())
+    .limit(page_size)?
+    .all().await?;
+```
+
+`orm::ReadQuery` is the structured operation beneath the Rust builder and the
+TypeScript adapter. It supports explicit inner and left joins, named scalar
+projections, grouping and aggregates. The ORM resolves every source descriptor,
+captures the transaction route and records collection read dependencies before
+execution yields. Field types and access flags come from the descriptor;
+column names do not select a codec.
+
+The SQL crate renders qualified expressions and native parameters for PostgreSQL
+and SQLite. The ORM restores each projected row's source identity before the
+protection and codec passes. An unmatched optional row becomes `None` in Rust
+and `null` in TypeScript, including when the selected fields are nullable.
+Explicit joins preserve row multiplication and paginate joined rows. The SDK's
+existing `with` relation loader remains a separate operation.
+
 ## Driver contract
 
 `driver::Driver` exposes a configured physical connection source: SQL dialect,

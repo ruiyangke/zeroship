@@ -37,6 +37,8 @@ export {
 } from "./tx-state";
 export type { TransactionStateCarrier } from "./tx-state";
 export { naming, SchemaBuilder, TypeBuilder, ok, err } from "./types";
+export { readFrom } from "./read";
+export type { ReadFrom, AliasedCollection } from "./read";
 export type {
   NamingStrategy,
   NamedIndexSpec,

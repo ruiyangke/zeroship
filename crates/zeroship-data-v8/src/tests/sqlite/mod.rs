@@ -4,3 +4,4 @@ mod fixtures;
 mod parity;
 mod updates;
 mod upsert;
+mod joins;

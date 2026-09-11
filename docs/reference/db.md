@@ -765,6 +765,47 @@ const { data } = await db.orders.aggregate([
 
 Supported accumulators: `$count`, `$sum`, `$avg`, `$min`, `$max`, `$first`.
 
+## Explicit joins
+
+Alias collections and construct a structured query with `env.db.from`:
+
+```ts
+import { eq } from "@zeroship/db";
+
+const o = env.db.orders.as("o");
+const c = env.db.customers.as("c");
+const { data, error } = await env.db.from(o)
+  .leftJoin(c, eq(o.columns.customerId, c.columns.id))
+  .where(eq(o.columns.status, "paid"))
+  .select({ order: o.row(), customer: c.optionalRow() })
+  .orderBy(o.columns.id.asc())
+  .limit(pageSize)
+  .all();
+```
+
+Each result contains an order and either a customer or `null`. A matched row
+whose selected fields are null still produces an object. Use `innerJoin` when
+only matching combinations should be returned. Joins can be chained and can
+refer to the same collection through distinct aliases. Every source must use
+the same database handle, and each join requires a connecting column equality.
+
+The query preserves matching row combinations, including repeated parents.
+Sorting and pagination apply to those combinations. `with` remains the separate
+relation-loading API. Column names and types come from the generated descriptor;
+the native adapter accepts structured expressions and bound values.
+
+Named scalar projections can select columns or `count`, `sum`, `avg`, `min`,
+and `max` expressions. Use `groupBy` for grouping keys and `having` for aggregate
+predicates. `count(column, true)` counts distinct values; `count()` counts rows.
+`sum` and `avg` accept integer and number columns. `min` and `max` accept ordered
+scalar columns except decimal, bytes, and boolean. Protected columns cannot be
+join keys or aggregate operands.
+
+Inside a transaction use `tx.from(...)`; `.all()` returns the rows directly and
+throws on failure. The query retains the transaction scope and cannot execute
+after the callback has settled. Live queries record every participating
+collection, including those with no matching rows.
+
 ## Vector / Geo
 
 Two search modalities ride on top of the schema DSL. Each has the

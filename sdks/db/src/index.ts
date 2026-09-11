@@ -4,6 +4,8 @@
 export { t, naming, schema, SchemaBuilder, TypeBuilder } from "./types";
 export { Collection } from "./collection";
 export { Query } from "./query";
+export { eq, ne, gt, gte, lt, lte, and, or, not, isNull, count, sum, avg, min, max } from "./read";
+export type { AliasedCollection, ReadBuilder, ReadColumn, ReadCondition, ReadAggregate, ReadRow } from "./read";
 export {
   ValidationError,
   OptimisticLockError,

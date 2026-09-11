@@ -22,6 +22,7 @@ use super::dispatch::{
     dispatch_restore_one, dispatch_search, dispatch_unmask_field, dispatch_update_many,
     dispatch_update_one, dispatch_upsert,
 };
+use crate::op_error::ToOpError;
 use crate::v8_bridge::{read_native_arg, refuse_if_query_capability};
 
 // ---------------------------------------------------------------------------
@@ -77,6 +78,28 @@ impl Collection {
     #[v8_constructor]
     fn new() -> Result<Collection, OpError> {
         Err(OpError::type_error("Illegal constructor"))
+    }
+
+    #[v8_method]
+    fn read<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        query: v8::Local<v8::Value>,
+    ) -> Result<v8::Local<'s, v8::Value>, OpError> {
+        let input = match read_native_arg(scope, Some(query)) {
+            Ok(value) => value,
+            Err(error) => return Ok(crate::v8_bridge::throw_decode_error(scope, &error)),
+        };
+        let query =
+            zeroship_data_orm::orm::ReadQuery::decode(input).map_err(|e| e.to_op_error())?;
+        Ok(super::dispatch::dispatch_operation(
+            scope,
+            self.binding.clone(),
+            &self.name,
+            zeroship_data_orm::orm::Operation::Read(Box::new(query)),
+            false,
+        )
+        .into())
     }
 
     #[v8_method]
