@@ -4,6 +4,8 @@ mod app;
 pub mod capability;
 mod control;
 mod deploys;
+mod deploy_notifications;
+pub use deploy_notifications::{DeployReconcileCursor, DeployReconciliation};
 mod frontier;
 mod ingress;
 pub use ingress::{IngressReceipt, RevokedSignals, SignalAuthority, SignalTokenRequest};

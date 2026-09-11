@@ -22,7 +22,7 @@ use zeroship_workflow::{
     operations::{RunState, StartOptions},
     service::{
         capability::{mint_app_capability, AppGrant, AppOperation, WORKFLOW_AUDIENCE},
-        DeployRegistration, RequestId, WorkflowEndpoint,
+        RequestId, WorkflowEndpoint,
     },
     WorkflowExecution,
 };
@@ -86,6 +86,34 @@ impl ServerProcess {
             std::fs::read_to_string(&self.log).unwrap()
         );
     }
+}
+
+async fn record_deploy(admin: &compio_postgres::Client, app: &AppId, hash: String) -> String {
+    let id = typed_id::generate("dep");
+    let manifest = serde_json::to_string(&json!({"workflows":["Example"]})).unwrap();
+    admin.batch_execute("BEGIN").await.unwrap();
+    admin
+        .execute(
+            "UPDATE zeroship.apps SET deploy_hash=$2,manifest_json=$3 WHERE id=$1",
+            &[&app.uuid(), &hash, &manifest],
+        )
+        .await
+        .unwrap();
+    admin.execute("INSERT INTO zeroship.app_deploys (id,app_id,deploy_hash,manifest_json,activated_at) VALUES ($1,$2,$3,$4,now())", &[&id,&app.uuid(),&hash,&manifest]).await.unwrap();
+    admin.batch_execute("COMMIT").await.unwrap();
+    id
+}
+
+async fn active_deploy(admin: &compio_postgres::Client, app: &AppId) -> Option<String> {
+    admin
+        .query(
+            "SELECT id FROM workflow.deploys WHERE app_id=$1 AND active=1",
+            &[&app.as_str()],
+        )
+        .await
+        .unwrap()
+        .first()
+        .map(|row| row.get(0))
 }
 
 pub async fn contract(admin: &compio_postgres::Client, runtime_url: &str, dir: &Path) {
@@ -152,23 +180,7 @@ pub async fn contract(admin: &compio_postgres::Client, runtime_url: &str, dir: &
         &control_key,
     )
     .unwrap();
-    let deployment = DeployRegistration {
-        id: typed_id::generate("dep"),
-        hash: "b".repeat(64),
-        workflows: ["Example".into()].into(),
-        schedules: Vec::new(),
-    };
-    let manifest = serde_json::to_string(&json!({"workflows":deployment.workflows})).unwrap();
-    admin.batch_execute("BEGIN").await.unwrap();
-    admin
-        .execute(
-            "UPDATE zeroship.apps SET deploy_hash=$2,manifest_json=$3 WHERE id=$1",
-            &[&app.uuid(), &deployment.hash, &manifest],
-        )
-        .await
-        .unwrap();
-    admin.execute("INSERT INTO zeroship.app_deploys (id,app_id,deploy_hash,manifest_json,activated_at) VALUES ($1,$2,$3,$4,now())", &[&deployment.id,&app.uuid(),&deployment.hash,&manifest]).await.unwrap();
-    admin.batch_execute("COMMIT").await.unwrap();
+    record_deploy(admin, &app, "b".repeat(64)).await;
     let response = client
         .post(format!(
             "{}/v1/apps/{}/workflow-deploy",
@@ -260,8 +272,27 @@ pub async fn contract(admin: &compio_postgres::Client, runtime_url: &str, dir: &
     let first = servers.remove(0);
     let (config, log, url) = (first.config.clone(), first.log.clone(), first.url.clone());
     drop(first);
+    servers.clear();
+    // Activation commits while every workflow process is down. Recovery must
+    // come from the durable outbox, with no HTTP notification or app request.
+    let offline_deploy = record_deploy(admin, &app, "c".repeat(64)).await;
     let mut restarted = ServerProcess::spawn(config, log, url);
     restarted.ready(&client).await;
+    assert_eq!(
+        active_deploy(admin, &app).await.as_deref(),
+        Some(offline_deploy.as_str())
+    );
+    let online_deploy = record_deploy(admin, &app, "d".repeat(64)).await;
+    compio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if active_deploy(admin, &app).await.as_deref() == Some(online_deploy.as_str()) {
+                break;
+            }
+            compio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("maintenance must deliver deployment notifications");
     assert_eq!(
         scoped.status(&run.id).await.unwrap().output,
         Some(json!({"done":true}))

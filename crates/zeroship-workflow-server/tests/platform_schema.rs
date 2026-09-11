@@ -79,6 +79,7 @@ async fn platform_migration_provisions_workflow_authority_without_worker_access(
         "SELECT organization_id,state FROM zeroship.organization_billing_status",
         "SELECT id,status,public_key FROM zeroship.worker_instances",
         "SELECT id,dispatch_paused,ingress_disabled FROM zeroship.workflow_rollout_config",
+        "SELECT app_id,revision FROM zeroship.workflow_deploy_notifications",
         "SELECT * FROM workflow.schema_version",
         "SELECT * FROM service_authn.service_assertion_replay",
         "BEGIN; SELECT zeroship.workflow_policy_lock('app','test',false); ROLLBACK",
@@ -86,6 +87,7 @@ async fn platform_migration_provisions_workflow_authority_without_worker_access(
     for sql in [
         "UPDATE zeroship.apps SET workflows_enabled=true",
         "UPDATE zeroship.plans SET workflows_allowed=true",
+        "UPDATE zeroship.workflow_deploy_notifications SET revision=0",
         "SELECT * FROM zeroship.app_secrets",
         "SELECT * FROM zeroship.apps",
         "UPDATE workflow.schema_version SET fingerprint='forged'",
@@ -118,6 +120,7 @@ async fn platform_migration_provisions_workflow_authority_without_worker_access(
             for sql in [
                 "UPDATE zeroship.apps SET deploy_hash='forged'",
                 "UPDATE zeroship.app_deploys SET manifest_json='{}'",
+                "UPDATE zeroship.workflow_deploy_notifications SET revision=0",
             ] {
                 assert!(peer.batch_execute(sql).await.is_err(), "{role}: {sql}");
             }
@@ -145,6 +148,10 @@ async fn platform_migration_provisions_workflow_authority_without_worker_access(
         );
     }
     for (break_policy, restore_policy) in [
+        (
+            "ALTER TABLE zeroship.apps DISABLE TRIGGER workflow_deploy_notify",
+            "ALTER TABLE zeroship.apps ENABLE TRIGGER workflow_deploy_notify",
+        ),
         (
             "ALTER TABLE zeroship.app_deploys DISABLE TRIGGER workflow_policy_fence_deploy",
             "ALTER TABLE zeroship.app_deploys ENABLE TRIGGER workflow_policy_fence_deploy",

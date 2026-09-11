@@ -14,8 +14,10 @@ reuse the durable upload receipt and cancel an unused source.
 
 The executable loads an immutable signing and verification snapshot, verifies
 the migrated database authority and uses PostgreSQL for assertion replay
-protection across replicas. Maintenance drives schedules, topic delivery and
-payload collection. JSON handlers authenticate before buffering request bodies.
+protection across replicas. Maintenance delivers Control's durable deploy
+notifications and drives schedules, topic delivery and payload collection.
+Reconciliation acknowledges the notification in its journal transaction.
+JSON handlers authenticate before buffering request bodies.
 The deployed worker and Control cutover remain in progress.
 
 - `src/api.rs` maps typed app and task requests onto the shared service.

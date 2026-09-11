@@ -378,7 +378,7 @@ pub struct WorkflowSection {
     pub max_request_bytes: Option<usize>,
     /// Interval between durable maintenance sweeps.
     pub tick_interval_ms: Option<u64>,
-    /// Payload objects inspected per maintenance sweep.
+    /// Maximum items in each deployment or payload maintenance sweep.
     pub maintenance_batch: Option<usize>,
     /// Maximum live runs per app.
     pub max_live_runs: Option<i64>,
