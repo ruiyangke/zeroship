@@ -1,6 +1,8 @@
 #[allow(dead_code)]
 #[path = "architecture/repo.rs"]
 mod repo;
+#[path = "repository/tokio_boundary.rs"]
+mod tokio_boundary;
 
 use serde_json::Value;
 use std::collections::BTreeSet;

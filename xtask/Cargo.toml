@@ -32,3 +32,4 @@ regex = "1"
 syn = { version = "2", features = ["full", "visit", "extra-traits"] }
 tempfile = "3"
 serde_yaml = "0.9"
+toml_edit = { version = "0.25", default-features = false, features = ["parse"] }
