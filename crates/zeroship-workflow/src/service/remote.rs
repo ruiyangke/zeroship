@@ -21,7 +21,9 @@ thread_local! {
     static CLIENT: cyper::Client = cyper::Client::new();
 }
 
+mod credentials;
 mod payloads;
+use credentials::AppCredentials;
 
 #[derive(Debug, Clone)]
 pub struct WorkflowEndpoint {
@@ -68,8 +70,25 @@ impl WorkflowEndpoint {
         RemoteAppWorkflows {
             endpoint: self.clone(),
             app,
-            token,
+            credentials: AppCredentials::Fixed(token),
         }
+    }
+    /// Bind the app in trusted Rust composition. Only an enrolled worker
+    /// identity can acquire and refresh this handle's Control capabilities.
+    ///
+    /// # Errors
+    /// Rejects an invalid Control URL or a non-instance worker identity.
+    pub fn for_worker_app(
+        &self,
+        app: AppId,
+        control: &str,
+        identity: Arc<ServiceAuth>,
+    ) -> Result<RemoteAppWorkflows, WorkflowServiceError> {
+        Ok(RemoteAppWorkflows {
+            endpoint: self.clone(),
+            app,
+            credentials: AppCredentials::worker(control, identity, self.timeout)?,
+        })
     }
     #[must_use]
     pub fn tasks(&self, identity: Arc<ServiceAuth>) -> RemoteTasks {
@@ -83,6 +102,9 @@ impl WorkflowEndpoint {
         mut response: cyper::Response,
     ) -> Result<T, WorkflowServiceError> {
         let status = response.status();
+        if status.as_u16() == 401 {
+            return Err(WorkflowServiceError::Unauthenticated);
+        }
         let mut bytes = Vec::new();
         while let Some(chunk) = response.next().await {
             let chunk = chunk.map_err(|_| {
@@ -154,7 +176,7 @@ impl WorkflowEndpoint {
 pub struct RemoteAppWorkflows {
     endpoint: WorkflowEndpoint,
     app: AppId,
-    token: CapabilityToken,
+    credentials: AppCredentials,
 }
 impl RemoteAppWorkflows {
     #[must_use]
@@ -175,12 +197,7 @@ impl RemoteAppWorkflows {
         .await
     }
     pub async fn status(&self, run_id: &str) -> Result<RunStatus, WorkflowServiceError> {
-        self.endpoint
-            .request(
-                &self.path(&format!("workflow-runs/{}", segment(run_id))),
-                &self.authorization(),
-                None,
-            )
+        self.request(&format!("workflow-runs/{}", segment(run_id)), None)
             .await
     }
     pub async fn signal(
@@ -261,16 +278,38 @@ impl RemoteAppWorkflows {
             request_id: request.clone(),
             options,
         })?;
-        self.endpoint
-            .request(&self.path(suffix), &self.authorization(), Some(body))
-            .await
+        self.request(suffix, Some(body)).await
     }
     fn path(&self, suffix: &str) -> String {
         format!("/v1/apps/{}/{suffix}", self.app.as_str())
     }
-    fn authorization(&self) -> String {
-        format!("Bearer {}", self.token.as_str())
+    async fn request<T: DeserializeOwned>(
+        &self,
+        suffix: &str,
+        body: Option<serde_json::Value>,
+    ) -> Result<T, WorkflowServiceError> {
+        let path = self.path(suffix);
+        let token = self.credentials.token(&self.app).await?;
+        let result = self
+            .endpoint
+            .request(&path, &authorization(&token), body.clone())
+            .await;
+        if matches!(result, Err(WorkflowServiceError::Unauthenticated))
+            && self.credentials.reject(&token)?
+        {
+            let refreshed = self.credentials.token(&self.app).await?;
+            // Retain the original mutation identity and body across refresh.
+            return self
+                .endpoint
+                .request(&path, &authorization(&refreshed), body)
+                .await;
+        }
+        result
     }
+}
+
+fn authorization(token: &CapabilityToken) -> String {
+    format!("Bearer {}", token.as_str())
 }
 
 #[derive(Clone)]

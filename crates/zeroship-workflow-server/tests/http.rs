@@ -35,6 +35,9 @@ use zeroship_workflow_server::{
     WorkflowHttpState,
 };
 
+#[path = "http/capability_refresh.rs"]
+mod capability_refresh;
+
 fn peer(issuer: &str, key: ServiceSigningKey, keys: ServiceTrustBundle) -> ServiceAuth {
     let issuer = ServiceIssuer::parse(issuer).unwrap();
     let mut keyring = ServiceKeyring::from_parts(issuer, key, keys).unwrap();
@@ -460,6 +463,7 @@ async fn remote_clients_obey_app_capabilities_and_registered_task_ownership() {
         tasks.read_payload(&task.id, &task.token, &reference).await,
         Err(WorkflowServiceError::Conflict(_))
     ));
+    capability_refresh::check(&endpoint, &a, &control_key, worker_auth, &task, &data).await;
     // A Content-Length response may finish before the server can report a
     // trailing stream error. The client independently checks the digest.
     let objects = storage.namespace(zeroship_storage::Namespace::platform("workflow").unwrap());
