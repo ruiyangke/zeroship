@@ -826,7 +826,7 @@ mod tests {
             .run(scope)
             .unwrap();
         let mut walker = RehydrateWalker {
-            binding: crate::testing::binding("app_a"),
+            binding: crate::tests::fixtures::binding("app_a"),
             depth: 0,
             cap: 16,
         };
@@ -855,7 +855,7 @@ mod tests {
 
         let obj = mint_masked_value(
             scope,
-            crate::testing::binding("app_a"),
+            crate::tests::fixtures::binding("app_a"),
             "users".into(),
             "usr_01".into(),
             "ssn".into(),
@@ -915,7 +915,7 @@ mod tests {
         // carries the binding itself and is the unit under test).
         fn new_walker() -> RehydrateWalker {
             RehydrateWalker {
-                binding: crate::testing::binding("app_a"),
+                binding: crate::tests::fixtures::binding("app_a"),
                 depth: 0,
                 cap: 16,
             }
@@ -959,7 +959,7 @@ mod tests {
 
         let obj = mint_masked_value(
             scope,
-            crate::testing::binding("app_a"),
+            crate::tests::fixtures::binding("app_a"),
             "users".into(),
             "usr_01".into(),
             "ssn".into(),
@@ -988,7 +988,7 @@ mod tests {
 
         let obj = mint_masked_value(
             scope,
-            crate::testing::binding("app_a"),
+            crate::tests::fixtures::binding("app_a"),
             "users".into(),
             "usr_01".into(),
             "ssn".into(),
@@ -1025,7 +1025,7 @@ mod tests {
 
         let obj = mint_masked_value(
             scope,
-            crate::testing::binding("app_a"),
+            crate::tests::fixtures::binding("app_a"),
             "users".into(),
             "usr_01".into(),
             "ssn".into(),
@@ -1056,7 +1056,7 @@ mod tests {
 
         let obj = mint_masked_value(
             scope,
-            crate::testing::binding("app_a"),
+            crate::tests::fixtures::binding("app_a"),
             "users".into(),
             "usr_01".into(),
             "ssn".into(),
@@ -1136,7 +1136,7 @@ mod tests {
         // We just need to make sure the walker doesn't panic on a plain
         // object.
         let mut walker = RehydrateWalker {
-            binding: crate::testing::binding("app_a"),
+            binding: crate::tests::fixtures::binding("app_a"),
             depth: 0,
             cap: 16,
         };

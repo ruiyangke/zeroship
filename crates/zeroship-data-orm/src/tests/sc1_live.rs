@@ -1,4 +1,4 @@
-use crate::tests::host::Host;
+use crate::tests::fixtures::Host;
 use compio_postgres::{Client, NoTls, TransactionStatus};
 use zeroship_data_orm::transaction::reducer::{
     CleanupAck, CleanupGoal, SettleIntent, TerminalOutcome, TerminalResult,
@@ -10,8 +10,8 @@ use zeroship_data_orm::transaction::reducer::{
 /// claim published off the variable rather than the server is a recorded
 /// failure in this repository; the number below comes from the session
 /// that ran the assertions.
-async fn connect() -> (crate::support::postgres::Postgres, Client) {
-    let postgres = crate::support::postgres::Postgres::start();
+async fn connect() -> (crate::tests::fixtures::postgres::Postgres, Client) {
+    let postgres = crate::tests::fixtures::postgres::Postgres::start();
     let url = postgres.url();
     let (client, connection) = compio_postgres::connect(&url, NoTls)
         .await

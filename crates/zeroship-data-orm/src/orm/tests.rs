@@ -176,8 +176,8 @@ async fn sqlite_search_values_round_trip_through_the_rust_orm() {
 
 #[compio::test]
 async fn postgres_native_models_round_trip() {
-    let postgres = crate::postgres_fixture::Postgres::start();
-    crate::reset_engine_for_tests();
+    let postgres = crate::tests::fixtures::postgres::Postgres::start();
+    crate::tests::fixtures::reset_engine();
     let backend = Rc::new(
         zeroship_data_orm::backend::postgres::PostgresBackend::connect(
             &postgres.url(),
@@ -197,7 +197,7 @@ async fn postgres_native_models_round_trip() {
     for sql in table_statements(&app, &zeroship_migrate_postgres::DIALECT) {
         backend.execute_fixture(&sql, &[]).await.unwrap();
     }
-    crate::support::roles::ensure_per_app_role(backend.pool(), &app)
+    crate::tests::fixtures::roles::ensure_per_app_role(backend.pool(), &app)
         .await
         .unwrap();
     let role = zeroship_core::database_role::per_app_role_name(&app).unwrap();
@@ -468,7 +468,7 @@ async fn database() -> (Database, tempfile::TempDir) {
 }
 
 async fn database_with_keys(key_source: ProjectKeySource) -> (Database, tempfile::TempDir) {
-    crate::reset_engine_for_tests();
+    crate::tests::fixtures::reset_engine();
     let directory = tempfile::tempdir().unwrap();
     let binding = DbBinding::cold_start("orm_fixture");
     let migration_backend = zeroship_migrate_sqlite::SqliteBackend::open(
@@ -941,7 +941,7 @@ async fn changing_backend_registration_refuses_an_open_transaction() {
 }
 
 #[cfg(test)]
-use zeroship_data_orm::fixtures::DatabaseFixture;
+use crate::tests::fixtures::DatabaseFixture;
 
 #[compio::test]
 async fn independent_databases_keep_schema_policy_and_transactions_isolated() {

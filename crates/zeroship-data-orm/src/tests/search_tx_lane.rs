@@ -38,9 +38,9 @@
 //! Run: `cargo xtask test data --filter 'test(search_tx_lane::)'`
 
 #[allow(unused_imports)]
-use crate::schema_fixture::{fixture_table_sql, fixture_table_sql_for};
-use crate::support;
-use crate::tests::host::Host;
+use crate::tests::fixtures::schema::{fixture_table_sql, fixture_table_sql_for};
+use crate::tests::fixtures;
+use crate::tests::fixtures::Host;
 #[allow(unused_imports)]
 use zeroship_migrate::schema::query::FkEmission;
 
@@ -55,8 +55,8 @@ use zeroship_data_sql::value::{Value, value};
 
 /// Connect, or fail the test. Deliberately NOT a skip, for the reason in the
 /// module header.
-async fn require_pg() -> (crate::support::postgres::Postgres, String) {
-    let postgres = crate::support::postgres::Postgres::start();
+async fn require_pg() -> (crate::tests::fixtures::postgres::Postgres, String) {
+    let postgres = crate::tests::fixtures::postgres::Postgres::start();
     let url = postgres.url();
     match compio_postgres::connect(&url, NoTls).await {
         Ok((client, connection)) => {
@@ -124,13 +124,13 @@ async fn fixture(
         .await
         .unwrap_or_else(|e| panic!("emitted DDL must apply: {e}\n{ddl}"));
 
-    crate::support::roles::ensure_per_app_role(pool, app)
+    crate::tests::fixtures::roles::ensure_per_app_role(pool, app)
         .await
         .expect("per-app role, as the deploy would provision it");
-    support::grant_all_runtime_table_columns(pool, app, collection).await;
+    fixtures::grant_all_runtime_table_columns(pool, app, collection).await;
 
     host.install_postgres_pool(Rc::clone(pool), url);
-    zeroship_data_orm::cache_schema_for_tests(app, collection, schema);
+    crate::tests::fixtures::cache_schema(app, collection, schema);
 }
 
 /// The backend handle the V8 dispatcher would have bound for this dispatch.

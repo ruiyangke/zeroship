@@ -269,7 +269,7 @@ mod tests {
 
     #[test]
     fn scoped_schema_excludes_aggregate_alias_collisions() {
-        crate::cache_schema_for_tests(
+        crate::tests::fixtures::cache_schema(
             "app_aggregate_scope",
             "users",
             zeroship_data_sql::value!({
@@ -295,7 +295,7 @@ mod tests {
         // three cases in this module reaches a statement through it (empty
         // `unmask_columns`, no encrypted column in scope), so any real route
         // does. Opened INSIDE the runtime, which its CDC publisher's `spawn`
-        // requires - see `crate::test_support::unit_route`.
+        // requires - see `crate::tests::fixtures::unit_route`.
         //
         // ORACLE NOTE: installing a real handle COST this test its second,
         // free oracle. With no backend installed, a regression in the
@@ -303,7 +303,7 @@ mod tests {
         // failed loudly on `not_configured`. It now reaches a working backend
         // instead, so the `assert_eq!` on `result.rows` below is the ONLY thing
         // that rules on the narrowing. Do not weaken it.
-        let (route, dir) = rt.block_on(async { crate::test_support::unit_route(binding.app_id()) });
+        let (route, dir) = rt.block_on(async { crate::tests::fixtures::unit_route(binding.app_id()) });
         let result = rt
             .block_on(apply(
                 &route,
@@ -349,14 +349,14 @@ mod tests {
         // a tuple pattern's bindings in reverse declaration order - `dir`
         // first, which would delete the directory out from under a still-open
         // backend. See the ordering note on
-        // `crate::test_support::unit_backend`.
+        // `crate::tests::fixtures::unit_backend`.
         drop(route);
         drop(dir);
     }
 
     #[test]
     fn apply_can_skip_mask_wrapping_for_distinct_scalars() {
-        crate::cache_schema_for_tests(
+        crate::tests::fixtures::cache_schema(
             "app_distinct_masked",
             "users",
             zeroship_data_sql::value!({
@@ -380,7 +380,7 @@ mod tests {
         // `wrap_masked: false` narrowing used to trip, so the `assert_eq!` on
         // `result.rows` and the `has_masked` assertion below are the ONLY
         // things ruling on it.
-        let (route, dir) = rt.block_on(async { crate::test_support::unit_route(binding.app_id()) });
+        let (route, dir) = rt.block_on(async { crate::tests::fixtures::unit_route(binding.app_id()) });
         let result = rt
             .block_on(apply(
                 &route,

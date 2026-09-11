@@ -127,7 +127,7 @@ mod tests {
                 })
             }
         }
-        crate::testing::reset_context_for_tests();
+        crate::tests::fixtures::reset_context();
         let directory = tempfile::tempdir().unwrap();
         let old = ConnectionFactory::for_url(&format!(
             "sqlite:{}",
@@ -159,6 +159,6 @@ mod tests {
         assert_eq!(zeroship_data_orm::connection::backend_open_count(), opened);
         assert!(directory.path().join("old.sqlite").exists());
         assert!(directory.path().join("new.sqlite").exists());
-        crate::testing::reset_context_for_tests();
+        crate::tests::fixtures::reset_context();
     }
 }

@@ -418,7 +418,7 @@ mod tests {
     use std::path::PathBuf;
     use std::rc::Rc;
     use zeroship_data_orm::cdc::ChangeOp;
-    use zeroship_data_orm::fixtures::DatabaseFixture;
+    use crate::tests::fixtures::DatabaseFixture;
 
     thread_local! {
         /// Counter incremented every time the production code path
@@ -1462,7 +1462,7 @@ mod tests {
 
         reset_world("app_autocommit_cancelled_query_does_not_leak_role_or_timeout_to_pool");
         run(async {
-            let postgres = crate::postgres_fixture::Postgres::start();
+            let postgres = crate::tests::fixtures::postgres::Postgres::start();
             let url = postgres.url();
             match compio_postgres::connect(&url, NoTls).await {
                 Ok((client, connection)) => {

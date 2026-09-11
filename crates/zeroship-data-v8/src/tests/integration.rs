@@ -1,9 +1,9 @@
 //! Adapter contracts exercised through JavaScript dispatch.
 
 #[allow(unused_imports)]
-use crate::schema_fixture::{fixture_table_sql, fixture_table_sql_for};
+use crate::tests::fixtures::schema::{fixture_table_sql, fixture_table_sql_for};
 
-use crate::parity;
+use crate::tests::parity;
 
 #[allow(unused_imports)]
 use zeroship_migrate::schema::query::FkEmission;
@@ -14,8 +14,8 @@ use uuid::Uuid;
 
 use zeroship_data_sql::value::value;
 
-async fn require_pg() -> (crate::support::postgres::Postgres, String) {
-    let postgres = crate::support::postgres::Postgres::start();
+async fn require_pg() -> (crate::tests::fixtures::postgres::Postgres, String) {
+    let postgres = crate::tests::fixtures::postgres::Postgres::start();
     let url = postgres.url();
     match compio_postgres::connect(&url, NoTls).await {
         Ok((client, connection)) => {
@@ -30,7 +30,7 @@ async fn require_pg() -> (crate::support::postgres::Postgres, String) {
             // `fixture_session`, which reads the URL from the
             // per-thread context. Tests that drive the orchestrator directly
             // need the URL installed in the context before the call.
-            zeroship_data_v8::testing::set_db_url_for_tests(&url);
+            crate::tests::fixtures::set_database_url(&url);
             (postgres, url)
         }
         Err(e) => {
@@ -57,7 +57,7 @@ async fn require_pg() -> (crate::support::postgres::Postgres, String) {
 async fn drain_pg() {
     // The context can hold its own pool handle and a parked transaction
     // client; those keep connections counted, so clear it before waiting.
-    zeroship_data_v8::testing::reset_context_for_tests();
+    crate::tests::fixtures::reset_context();
     if !compio_postgres::drain_connections(std::time::Duration::from_secs(2)).await {
         eprintln!(
             "DRAIN-TIMEOUT: {} connection(s) still live",
@@ -75,7 +75,7 @@ async fn parity_matrix_pg_matches_sqlite_projection() {
     let (_postgres, pg_url) = require_pg().await;
     let sqlite_dir = tempfile::tempdir().expect("create sqlite parity dir");
 
-    let app = crate::test_app_id!();
+    let app = crate::tests::fixtures::test_app_id!();
 
     // The SQLite leg keeps the dev app id on purpose - its tempdir isolates it,
     // and the matrix is meant to write the file a `pnpm dev` app writes. The
@@ -128,7 +128,7 @@ async fn parity_matrix_pg_matches_sqlite_projection() {
 #[compio::test]
 async fn bytes_column_stores_raw_bytes_on_postgres() {
     let (_postgres, pg_url) = require_pg().await;
-    let app = crate::test_app_id!();
+    let app = crate::tests::fixtures::test_app_id!();
     let pg = parity::run_matrix(&pg_url, &app);
 
     // The expectation is DERIVED, not copied from a run: `TYPED_BYTES_RAW` is
@@ -294,7 +294,7 @@ async fn workflow_journal_redeploy_grants_do_not_reopen_without_reprovision() {
     zeroship_workflow::store::pg::PgStore::provision(&client, &app_id)
         .await
         .expect("provision app-local workflow journal");
-    crate::support::roles::ensure_per_app_role(&pool, &app_schema)
+    crate::tests::fixtures::roles::ensure_per_app_role(&pool, &app_schema)
         .await
         .expect("redeploy plugin-db per-app role grants");
 

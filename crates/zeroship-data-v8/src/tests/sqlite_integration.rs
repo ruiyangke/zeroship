@@ -1,9 +1,9 @@
 //! Adapter contracts exercised through JavaScript dispatch.
 
-use crate::parity;
+use crate::tests::parity;
 
 #[allow(unused_imports)]
-use crate::schema_fixture::{fixture_table_sql, fixture_table_sql_for};
+use crate::tests::fixtures::schema::{fixture_table_sql, fixture_table_sql_for};
 
 #[allow(unused_imports)]
 use zeroship_migrate::schema::query::FkEmission;
@@ -67,7 +67,7 @@ fn bytes_column_stores_a_raw_blob_on_sqlite() {
         // A fresh backend has attached nothing: the matrix's app database is a
         // separate file (`<dir>/zs-default.sqlite`) reached through an ATTACH
         // alias, so re-attach it before the schema-qualified name resolves.
-        let client = crate::tests::sqlite::Inspector::open(dir.path());
+        let client = crate::tests::fixtures::sqlite::Inspector::open(dir.path());
         // `query` materialises every cell as `Option<String>` and renders a BLOB
         // as `<N bytes blob>`, so ask SQLite itself for the discriminant and the
         // hex - the same route `p5_*` uses for ciphertext.
@@ -101,8 +101,8 @@ fn bytes_column_stores_a_raw_blob_on_sqlite() {
 fn with_project_key(
     app_ids: &[&str],
     hex: &str,
-) -> zeroship_data_v8::testing::SuppliedProjectKeysGuard {
-    zeroship_data_v8::testing::supply_project_key_for_tests(app_ids, hex)
+) -> crate::tests::fixtures::SuppliedProjectKeysGuard {
+    crate::tests::fixtures::supply_project_key(app_ids, hex)
 }
 
 const SQLITE_RUNTIME_RPC_SHIM: &str = r#"
@@ -226,7 +226,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS "default"."users_email_key" ON "users" ("email
 /// ATTACH. `default` is the app id the runtime derives with no `APP_ID` in the
 /// env snapshot.
 fn apply_schema_ahead_of_runtime(dir: &tempfile::TempDir, ddl: &str) {
-    crate::support::tables::create_sqlite_table(dir.path(), "default", ddl);
+    crate::tests::fixtures::tables::create_sqlite_table(dir.path(), "default", ddl);
 }
 
 struct SqliteRuntimeSource {
@@ -272,7 +272,7 @@ fn dispatch_sqlite_runtime(
 }
 
 fn assert_write_path_fast_path(label: &str) {
-    let counters = crate::tests::recording::id_probes();
+    let counters = crate::tests::fixtures::recording::id_probes();
     assert_eq!(
         counters.len(),
         0,
@@ -329,7 +329,7 @@ const _procedures = { upsertInsert };
             "freshly inserted upsert row should start at version 1: {row}"
         );
 
-        let client = crate::tests::sqlite::Inspector::open(dir.path());
+        let client = crate::tests::fixtures::sqlite::Inspector::open(dir.path());
         let rows = client
             .query(
                 r#"SELECT id, version FROM "default"."users" WHERE email = 'mint@example.com'"#,
@@ -443,7 +443,7 @@ const _procedures = { upsertConflict };
             "conflict update must auto-bump version"
         );
 
-        let client = crate::tests::sqlite::Inspector::open(dir.path());
+        let client = crate::tests::fixtures::sqlite::Inspector::open(dir.path());
         let raw_ssn = raw_column_name("ssn");
         let typed = client
             .query_typed(
@@ -505,7 +505,7 @@ const _procedures = { upsertConflict };
         }
 
         let keys =
-            zeroship_data_orm::encryption::KeyStore::new(crate::testing::isolate_key_source());
+            zeroship_data_orm::encryption::KeyStore::new(crate::tests::fixtures::key_source());
         let key = keys.resolve("default").await.expect("resolve key");
         let plaintext = zeroship_data_orm::encryption::aead::decrypt(
             &key,
@@ -571,7 +571,7 @@ const _procedures = { seed, updateByEmail };
             "update by non-id filter should still target the seeded row"
         );
 
-        let client = crate::tests::sqlite::Inspector::open(dir.path());
+        let client = crate::tests::fixtures::sqlite::Inspector::open(dir.path());
         let raw_ssn = raw_column_name("ssn");
         let typed = client
             .query_typed(
@@ -607,7 +607,7 @@ const _procedures = { seed, updateByEmail };
         }
 
         let keys =
-            zeroship_data_orm::encryption::KeyStore::new(crate::testing::isolate_key_source());
+            zeroship_data_orm::encryption::KeyStore::new(crate::tests::fixtures::key_source());
         let key = keys.resolve("default").await.expect("resolve key");
         let plaintext = zeroship_data_orm::encryption::aead::decrypt(
             &key,
@@ -681,7 +681,7 @@ const _procedures = { seed, updateManyByName };
         );
 
         dispatch_sqlite_runtime(&dir, &source, "seed");
-        crate::tests::recording::clear();
+        crate::tests::fixtures::recording::clear();
         let updated =
             parity::extract_json(&dispatch_sqlite_runtime(&dir, &source, "updateManyByName"));
         assert_eq!(
@@ -689,7 +689,7 @@ const _procedures = { seed, updateManyByName };
             Some(2.0),
             "two rows should match the non-id updateMany filter: {updated}"
         );
-        let counters = crate::tests::recording::id_probes();
+        let counters = crate::tests::fixtures::recording::id_probes();
         assert_eq!(
             counters.len(),
             1,
@@ -707,7 +707,7 @@ const _procedures = { seed, updateManyByName };
             );
         }
 
-        let client = crate::tests::sqlite::Inspector::open(dir.path());
+        let client = crate::tests::fixtures::sqlite::Inspector::open(dir.path());
         let raw_ssn = raw_column_name("ssn");
         let typed = client
             .query_typed(
@@ -724,7 +724,7 @@ const _procedures = { seed, updateManyByName };
         assert_eq!(typed.rows.len(), 2, "exactly two rows should be updated");
 
         let keys =
-            zeroship_data_orm::encryption::KeyStore::new(crate::testing::isolate_key_source());
+            zeroship_data_orm::encryption::KeyStore::new(crate::tests::fixtures::key_source());
         let key = keys.resolve("default").await.expect("resolve key");
         for row in &typed.rows {
             let row_id = match &row[0] {
@@ -812,13 +812,13 @@ const _procedures = { overflow };
 "#,
         );
 
-        crate::tests::recording::clear();
+        crate::tests::fixtures::recording::clear();
         let result = parity::extract_json(&dispatch_sqlite_runtime(&dir, &source, "overflow"));
         assert_eq!(
             result["failure"]["code"], "update_many_target_limit_exceeded",
             "the bounded probe must reject an overflowing target set: {result}"
         );
-        let counters = crate::tests::recording::id_probes();
+        let counters = crate::tests::fixtures::recording::id_probes();
         assert_eq!(
             counters.len(),
             1,
@@ -835,7 +835,7 @@ const _procedures = { overflow };
             "the overflow probe must fetch at most one row beyond the write cap: {counters:?}"
         );
 
-        let client = crate::tests::sqlite::Inspector::open(dir.path());
+        let client = crate::tests::fixtures::sqlite::Inspector::open(dir.path());
         let state = client
             .query_typed(
                 r#"SELECT COUNT(*), SUM(version), COUNT(ssn)
@@ -949,7 +949,7 @@ const _procedures = { seed, failBulk, failBulkInsideTransaction };
         );
 
         dispatch_sqlite_runtime(&dir, &source, "seed");
-        crate::tests::recording::clear();
+        crate::tests::fixtures::recording::clear();
         let result = parity::extract_json(&dispatch_sqlite_runtime(&dir, &source, "failBulk"));
         let after = result["after"]
             .as_array()
@@ -959,7 +959,7 @@ const _procedures = { seed, failBulk, failBulkInsideTransaction };
             2,
             "the exercised target set must be non-empty: {result}"
         );
-        let counters = crate::tests::recording::id_probes();
+        let counters = crate::tests::fixtures::recording::id_probes();
         assert_eq!(
             counters.len(),
             1,
@@ -997,7 +997,7 @@ const _procedures = { seed, failBulk, failBulkInsideTransaction };
             "after rejection, the caller must observe that no prefix committed"
         );
 
-        let client = crate::tests::sqlite::Inspector::open(dir.path());
+        let client = crate::tests::fixtures::sqlite::Inspector::open(dir.path());
         let typed = client
             .query_typed(
                 r#"SELECT email, version
@@ -1163,7 +1163,7 @@ const _procedures = { seed, updatePlain, updateManyPlain };
 
         dispatch_sqlite_runtime(&dir, &source, "seed");
 
-        crate::tests::recording::clear();
+        crate::tests::fixtures::recording::clear();
         let updated = parity::extract_json(&dispatch_sqlite_runtime(&dir, &source, "updatePlain"));
         assert_eq!(
             updated.get("name").and_then(|v| v.as_str()),
@@ -1172,7 +1172,7 @@ const _procedures = { seed, updatePlain, updateManyPlain };
         );
         assert_write_path_fast_path("updateOne plain field");
 
-        crate::tests::recording::clear();
+        crate::tests::fixtures::recording::clear();
         let updated_many =
             parity::extract_json(&dispatch_sqlite_runtime(&dir, &source, "updateManyPlain"));
         assert_eq!(
@@ -1227,7 +1227,7 @@ const _procedures = { seed, upsertPlainConflict };
         let seed_row = parity::extract_json(&seeded);
         let seed_id = seed_row["id"].as_str().expect("generated id");
 
-        crate::tests::recording::clear();
+        crate::tests::fixtures::recording::clear();
         let updated = parity::extract_json(&dispatch_sqlite_runtime(
             &dir,
             &source,
@@ -1310,7 +1310,7 @@ const _procedures = { seed, nestedCasUpdate };
             "nested CAS rejection must carry the canonical code: {body}"
         );
 
-        let client = crate::tests::sqlite::Inspector::open(dir.path());
+        let client = crate::tests::fixtures::sqlite::Inspector::open(dir.path());
         let rows = client
             .query(
                 r#"SELECT name, version FROM "default"."users" WHERE email = 'alice@example.com'"#,
@@ -1389,7 +1389,7 @@ const _procedures = { seed, nestedCasUpdateMany };
             "nested CAS rejection must carry the canonical code: {body}"
         );
 
-        let client = crate::tests::sqlite::Inspector::open(dir.path());
+        let client = crate::tests::fixtures::sqlite::Inspector::open(dir.path());
         let rows = client
             .query(
                 r#"SELECT name, version FROM "default"."users" WHERE email = 'alice@example.com'"#,

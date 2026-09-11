@@ -100,7 +100,7 @@ fn apply_matrix_schema_ahead_of_runtime(url: &str, app_id: &str, collection: &st
         .parent()
         .expect("the sqlite parity url names a file inside a directory")
         .to_path_buf();
-    crate::support::tables::create_sqlite_table(
+    crate::tests::fixtures::tables::create_sqlite_table(
         &db_dir,
         app_id,
         &matrix_ddl_sqlite(app_id, collection),
@@ -111,7 +111,7 @@ fn apply_matrix_schema_ahead_of_runtime(url: &str, app_id: &str, collection: &st
 ///
 /// Hand-written, not rendered: plugin-db does not own DDL, and a matrix whose
 /// fixture came out of the layer under test could not detect that layer being
-/// wrong (see `support::tables`). The PostgreSQL twin is
+/// wrong (see `fixtures::tables`). The PostgreSQL twin is
 /// [`matrix_ddl_postgres`]; the two must describe the SAME declared shape in
 /// each dialect's spelling, because that equivalence IS what this matrix
 /// asserts.
@@ -220,10 +220,10 @@ fn apply_matrix_schema_ahead_of_postgres(url: &str, app_id: &str, collection: &s
         // Provisioning that role is part of the deploy-time apply, not an
         // afterthought. The role recipe supplies schema and sequence reach; the
         // binding supplies explicit column grants.
-        crate::support::roles::ensure_per_app_role(&pool, app_id)
+        crate::tests::fixtures::roles::ensure_per_app_role(&pool, app_id)
             .await
             .expect("provision the matrix app's runtime role");
-        super::support::grant_all_runtime_table_columns(&pool, app_id, collection).await;
+        crate::tests::fixtures::grant_all_runtime_table_columns(&pool, app_id, collection).await;
     });
 }
 
@@ -497,7 +497,7 @@ pub fn dispatch_zs_with_descriptor(
     }];
     let plugins: Vec<Arc<dyn NativePlugin>> = vec![
         DbService::new(DbServiceConfig {
-            connection: crate::tests::recording::connection(url),
+            connection: crate::tests::fixtures::recording::connection(url),
             cdc_relay: None,
             meter: None,
         })

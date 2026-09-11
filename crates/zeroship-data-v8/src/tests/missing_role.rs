@@ -37,8 +37,8 @@ use zeroship_data_orm::error::DbError;
 // so it arrives as a trait from plugin-db rather than an inherent method.
 use zeroship_data_v8::op_error::ToOpError;
 
-async fn connect_test_client() -> (crate::support::postgres::Postgres, compio_postgres::Client) {
-    let postgres = crate::support::postgres::Postgres::start();
+async fn connect_test_client() -> (crate::tests::fixtures::postgres::Postgres, compio_postgres::Client) {
+    let postgres = crate::tests::fixtures::postgres::Postgres::start();
     let url = postgres.url();
     let (client, connection) = compio_postgres::connect(&url, NoTls)
         .await
@@ -273,7 +273,7 @@ async fn a_real_internal_pg_failure_is_still_internal() {
     // reports. The only thing separating the two is the server's primary
     // message, so this proves the discriminator narrows rather than
     // rubber-stamping the SQLSTATE.
-    let postgres = crate::support::postgres::Postgres::start();
+    let postgres = crate::tests::fixtures::postgres::Postgres::start();
     let url = postgres.url();
     let (client, connection) = compio_postgres::connect(&url, NoTls)
         .await

@@ -664,7 +664,7 @@ mod tests {
         let context = v8::Context::new(handle_scope, Default::default());
         let scope = &mut v8::ContextScope::new(handle_scope, context);
 
-        let binding = crate::testing::binding("test_app");
+        let binding = crate::tests::fixtures::binding("test_app");
         let view = super::mint_tx_view(scope, &binding).expect("mint_tx_view");
 
         // None of the legacy `Transaction` methods, nor `transaction` /
@@ -703,7 +703,7 @@ mod tests {
         let context = v8::Context::new(handle_scope, Default::default());
         let scope = &mut v8::ContextScope::new(handle_scope, context);
 
-        let binding = crate::testing::binding("test_app");
+        let binding = crate::tests::fixtures::binding("test_app");
         let view = super::mint_tx_view(scope, &binding).expect("mint_tx_view");
         let names = view
             .get_own_property_names(scope, v8::GetPropertyNamesArgs::default())

@@ -1458,7 +1458,7 @@ mod tests {
     #[test]
     fn a_context_reset_does_not_restart_the_generation_sequence() {
         let before = next_backend_generation();
-        crate::reset_engine_for_tests();
+        crate::tests::fixtures::reset_engine();
         assert!(
             next_backend_generation() > before,
             "a context reset must not rewind the backend generation: a stale \
@@ -1470,7 +1470,7 @@ mod tests {
         use super::*;
         use crate::transaction::reducer::TxState;
         fn install_in_flight(app: &str, generation: BackendGeneration) -> CommandToken {
-            crate::reset_engine_for_tests();
+            crate::tests::fixtures::reset_engine();
             crate::tx_lanes::with_mut(|lanes| assert!(lanes.try_claim_tx(app)));
             admit_in_preparing(app);
             let expected = expected_authority(app);
@@ -1530,6 +1530,6 @@ mod tests {
             crate::tx_lanes::with(|l| l.transaction_reducer(app).unwrap().state()),
             TxState::Idle
         );
-        crate::reset_engine_for_tests();
+        crate::tests::fixtures::reset_engine();
     }
 }

@@ -1,16 +1,13 @@
 //! Live engine verification lives with the internals it exercises.
 mod column_grants;
-pub(crate) mod host;
+pub(crate) mod fixtures;
 mod integration;
 mod mask_flip;
 mod sc1_driver;
 mod sc1_live;
-#[path = "../../../../tests/fixtures/data/schema.rs"]
-pub(crate) mod schema_fixture;
 mod search_ir_live;
 mod search_tx_lane;
 mod sqlite_integration;
-pub(crate) mod support;
 mod unmask_tx_lane;
 
 mod roles;
@@ -59,7 +56,7 @@ mod reset_clears_every_thread_local {
         crate::tx_lanes::with_mut(|l| l.withdraw_tx_session(app));
         assert!(crate::tx_lanes::with(|l| l.tx_session_withdrawn(app)));
 
-        crate::reset_engine_for_tests();
+        crate::tests::fixtures::reset_engine();
 
         assert!(
             !crate::tx_lanes::with(|l| l.tx_claimed_by(app)),
@@ -98,7 +95,7 @@ mod reset_clears_every_thread_local {
         });
         assert!(zeroship_data_orm::schema_cache::with(|c| c.get(&binding, "users")).is_some());
 
-        crate::reset_engine_for_tests();
+        crate::tests::fixtures::reset_engine();
 
         assert!(
             zeroship_data_orm::schema_cache::with(|c| c.get(&binding, "users")).is_none(),

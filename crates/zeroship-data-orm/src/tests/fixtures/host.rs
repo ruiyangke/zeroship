@@ -14,7 +14,7 @@ pub(crate) struct Host {
 
 impl Host {
     pub(crate) fn test<T>(action: impl FnOnce(&Self) -> T) -> T {
-        super::support::init_test_tracing();
+        super::init_test_tracing();
         let host = Self {
             runtime: compio::runtime::Runtime::new().expect("fixture runtime"),
             orm: crate::OrmContext::new(),
@@ -81,7 +81,7 @@ impl Host {
 
     pub(crate) fn reset(&self) {
         self.connection.borrow_mut().take();
-        self.orm.with(crate::reset_engine_for_tests);
+        self.orm.with(crate::tests::fixtures::reset_engine);
     }
 
     pub(crate) fn supply_project_key(
@@ -114,7 +114,7 @@ impl Host {
                 .await
                 .expect("fixture pool"),
         );
-        crate::support::roles::ensure_per_app_role(&pool, app_id)
+        crate::tests::fixtures::roles::ensure_per_app_role(&pool, app_id)
             .await
             .expect("fixture role");
         if self.current_backend().is_none() {
@@ -250,7 +250,7 @@ impl Drop for Host {
     fn drop(&mut self) {
         self.connection.get_mut().take();
         self.keys.borrow_mut().take();
-        self.orm.with(crate::reset_engine_for_tests);
+        self.orm.with(crate::tests::fixtures::reset_engine);
         let drained = self.runtime.block_on(compio_postgres::drain_connections(
             std::time::Duration::from_secs(2),
         ));

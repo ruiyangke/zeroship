@@ -1,4 +1,4 @@
-use crate::support::roles::*;
+use crate::tests::fixtures::roles::*;
 use zeroship_core::database_role::per_app_role_name;
 #[cfg(test)]
 mod reserved_table_revoke_tests {
@@ -124,8 +124,8 @@ mod live_reserved_sweep_tests {
     // notice, because that command skips a target whose feature is off.
     use crate::backend::pg_session_sql::tx_session_setup_sql;
 
-    async fn admin_client() -> (crate::postgres_fixture::Postgres, Client) {
-        let postgres = crate::postgres_fixture::Postgres::start();
+    async fn admin_client() -> (crate::tests::fixtures::postgres::Postgres, Client) {
+        let postgres = crate::tests::fixtures::postgres::Postgres::start();
         let (client, conn) = compio_postgres::connect(&postgres.url(), NoTls)
             .await
             .expect("connect to the plugin-db test database");

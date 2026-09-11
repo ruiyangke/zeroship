@@ -73,17 +73,16 @@ pub fn test_app_id_from(name: &str, discriminator: &str) -> String {
 /// but only on the test's own thread; several fixtures here read their app id
 /// from helpers running elsewhere, where a thread-name read would be silently
 /// wrong rather than absent.
-#[macro_export]
 macro_rules! test_app_id {
     () => {
-        $crate::test_app_id!("")
+        $crate::tests::fixtures::test_app_id!("")
     };
     ($discriminator:expr) => {{
         fn f() {}
         fn type_name_of<T>(_: T) -> &'static str {
             std::any::type_name::<T>()
         }
-        $crate::support::test_app_id_from(type_name_of(f), $discriminator)
+        $crate::tests::fixtures::test_app_id_from(type_name_of(f), $discriminator)
     }};
 }
 
@@ -159,3 +158,5 @@ mod tracing;
 pub use tracing::init_test_tracing;
 
 pub(crate) mod roles;
+
+pub(crate) use test_app_id;

@@ -1585,7 +1585,7 @@ mod tests {
     // and before any SQL - but the entry points take the backend as a
     // parameter now, so each still has to hand one over. See the helper's own
     // doc for why that is the right trade.
-    use crate::test_support::{unit_backend, unit_route};
+    use crate::tests::fixtures::{unit_backend, unit_route};
 
     #[test]
     fn sanitize_app_actor_strips_reserved_auto_db3() {
@@ -2061,7 +2061,7 @@ mod tests {
         // descriptor now refuses outright; asserting it that way would have
         // stopped measuring the column check the moment the refusal landed.
         let app_id = "bulk_unit_unknown_column_app";
-        crate::cache_schema_for_tests(
+        crate::tests::fixtures::cache_schema(
             app_id,
             "users",
             value!({ "ssn": { "type": "string", "mask": { "kind": "last4" } } }),
@@ -2098,7 +2098,7 @@ mod tests {
         // DIFFERENT refusal, and conflating the two would let a bulk unmask
         // against a collection this deploy cannot serve read as "no such
         // masked column".
-        crate::reset_engine_for_tests();
+        crate::tests::fixtures::reset_engine();
         let binding = DbBinding::cold_start("bulk_unit_undeclared_app");
         let runtime = compio::runtime::Runtime::new().unwrap();
         let args = BulkUnmaskArgs {
@@ -2153,7 +2153,7 @@ mod tests {
         // `bulk_unmask_unknown_column_returns_typed_error` for why this now
         // installs a schema instead of relying on an empty store.
         let app_id = "qhint_unit_unknown_app";
-        crate::cache_schema_for_tests(
+        crate::tests::fixtures::cache_schema(
             app_id,
             "users",
             value!({ "ssn": { "type": "string", "mask": { "kind": "last4" } } }),

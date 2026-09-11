@@ -34,9 +34,9 @@
 //! Run: `cargo xtask test data --filter 'test(unmask_tx_lane::)'`
 
 #[allow(unused_imports)]
-use crate::schema_fixture::{fixture_table_sql, fixture_table_sql_for};
-use crate::support;
-use crate::tests::host::Host;
+use crate::tests::fixtures::schema::{fixture_table_sql, fixture_table_sql_for};
+use crate::tests::fixtures;
+use crate::tests::fixtures::Host;
 #[allow(unused_imports)]
 use zeroship_migrate::schema::query::FkEmission;
 
@@ -52,8 +52,8 @@ use zeroship_data_sql::value::{Value, value};
 
 /// Connect, or fail the test. Deliberately NOT a skip: a skipping run of a
 /// masking suite is indistinguishable from a passing one.
-async fn require_pg() -> (crate::support::postgres::Postgres, String) {
-    let postgres = crate::support::postgres::Postgres::start();
+async fn require_pg() -> (crate::tests::fixtures::postgres::Postgres, String) {
+    let postgres = crate::tests::fixtures::postgres::Postgres::start();
     let url = postgres.url();
     match compio_postgres::connect(&url, NoTls).await {
         Ok((client, connection)) => {
@@ -125,13 +125,13 @@ async fn fixture_with_schema(host: &Host, pool: &Rc<Pool>, url: &str, app: &str,
     pool.batch_execute(&zeroship_migrate_server::provisioning::audit_unmask_table_sql(app))
         .await
         .expect("the audit table the deploy provisions");
-    crate::support::roles::ensure_per_app_role(pool, app)
+    crate::tests::fixtures::roles::ensure_per_app_role(pool, app)
         .await
         .expect("per-app role, as the deploy would provision it");
-    support::grant_all_runtime_table_columns(pool, app, "people").await;
+    fixtures::grant_all_runtime_table_columns(pool, app, "people").await;
 
     host.install_postgres_pool(Rc::clone(pool), url);
-    zeroship_data_orm::cache_schema_for_tests(app, "people", schema);
+    crate::tests::fixtures::cache_schema(app, "people", schema);
     host.clear_mask_policy_cache(app);
 }
 

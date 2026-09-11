@@ -57,52 +57,6 @@ pub mod tx_route;
 pub use connection::ConnectOptions;
 pub use orm::{Collection, Database, Value};
 
-/// Install a descriptor for an isolated test binding.
-#[cfg(test)]
-#[doc(hidden)]
-pub fn cache_schema_for_tests(
-    app_id: &str,
-    collection: &str,
-    schema: zeroship_data_sql::value::Value,
-) {
-    cache_schema_for_deploy_for_tests(
-        &zeroship_data_orm::binding::DbBinding::cold_start(app_id),
-        collection,
-        schema,
-    );
-}
-
-/// Test helper: [`cache_schema_for_tests`] for an explicit binding, so a
-/// fixture can install two deploys of one app and assert they do not see each
-/// other's descriptor entries.
-#[cfg(test)]
-#[doc(hidden)]
-pub fn cache_schema_for_deploy_for_tests(
-    binding: &zeroship_data_orm::binding::DbBinding,
-    collection: &str,
-    schema: zeroship_data_sql::value::Value,
-) {
-    zeroship_data_orm::schema_cache::with_mut(|c| c.insert_one(binding, collection, schema));
-}
-
-// Test capture uses tracing-subscriber from dev-dependencies. Keep the module
-// test-only so enabling test helpers in a dependent crate does not require it.
-#[cfg(test)]
-mod test_support;
-
-#[cfg(test)]
-pub(crate) fn reset_engine_for_tests() {
-    tx_lanes::reset_for_tests();
-    protection::mask_policy::reset_for_tests();
-    protection::protection_floor::reset_for_tests();
-    metrics::reset_for_tests();
-    system_shape_charter::reset_for_tests();
-    zeroship_data_orm::schema_cache::reset_for_tests();
-}
-
-#[cfg(test)]
-pub mod fixtures;
-
 pub mod orm_context;
 pub use orm_context::OrmContext;
 
@@ -110,9 +64,4 @@ pub use orm_context::OrmContext;
 mod tx_lane_state_tests;
 
 #[cfg(test)]
-use tests::support::postgres as postgres_fixture;
-
-#[cfg(test)]
 mod tests;
-#[cfg(test)]
-use tests::{schema_fixture, support};

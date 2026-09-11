@@ -530,7 +530,7 @@ mod tests {
     /// names `tenant_id`, and the pass assigns it anyway.
     #[test]
     fn an_eighth_charter_column_is_assigned_without_a_code_change() {
-        crate::reset_engine_for_tests();
+        crate::tests::fixtures::reset_engine();
         stamp_charter(
             "  { name = \"id\", type = \"text\", nullable = false, assign = { by = \"typedId\", on = \"insert\" } },\n\
              \x20 { name = \"tenant_id\", type = \"text\", nullable = true, assign = { by = \"actor\", on = \"insert\" } },",
@@ -548,7 +548,7 @@ mod tests {
             Some("usr_tenant"),
             "a column only the charter names must still be assigned: {doc}",
         );
-        crate::reset_engine_for_tests();
+        crate::tests::fixtures::reset_engine();
     }
 
     /// `by = "identity"` means the column's own DDL identity supplies the
@@ -561,7 +561,7 @@ mod tests {
     /// `id`, and the pass must already be correct on the day that arrives.
     #[test]
     fn an_identity_id_is_left_to_the_database() {
-        crate::reset_engine_for_tests();
+        crate::tests::fixtures::reset_engine();
         stamp_charter(
             "  { name = \"id\", type = \"integer\", nullable = false, assign = { by = \"identity\", on = \"insert\" } },",
         );
@@ -572,14 +572,14 @@ mod tests {
             doc.get("id").is_none(),
             "an identity-assigned id must not be minted by the runtime: {doc}",
         );
-        crate::reset_engine_for_tests();
+        crate::tests::fixtures::reset_engine();
     }
 
     // ---- a supplied value for an assigned column is removed ---------
 
     #[test]
     fn insert_removes_a_supplied_created_at_and_version() {
-        crate::reset_engine_for_tests();
+        crate::tests::fixtures::reset_engine();
         let mut doc = value!({
             "title": "hi",
             "version": 5,
@@ -605,7 +605,7 @@ mod tests {
 
     #[test]
     fn insert_removes_a_supplied_deleted_at() {
-        crate::reset_engine_for_tests();
+        crate::tests::fixtures::reset_engine();
         let mut doc = value!({ "title": "hi", "deleted_at": 1_700_000_000_000_i64 });
         apply_system_fields_on_insert(&mut doc, &schema_without_id_prefix(), "posts", None)
             .expect("derived prefix must be accepted");
@@ -619,7 +619,7 @@ mod tests {
     /// actor is what lands.
     #[test]
     fn insert_overwrites_a_supplied_created_by_with_the_bound_actor() {
-        crate::reset_engine_for_tests();
+        crate::tests::fixtures::reset_engine();
         let mut doc = value!({ "title": "hi", "created_by": "usr_SOMEONE_ELSE" });
         apply_system_fields_on_insert(
             &mut doc,
@@ -639,7 +639,7 @@ mod tests {
     /// passthrough because it flips the guards inside `if let Some(actor)`.
     #[test]
     fn insert_overwrites_a_supplied_created_by_on_an_anonymous_write() {
-        crate::reset_engine_for_tests();
+        crate::tests::fixtures::reset_engine();
         let mut doc = value!({ "title": "hi", "created_by": "usr_SOMEONE_ELSE" });
         apply_system_fields_on_insert(&mut doc, &schema_without_id_prefix(), "posts", None)
             .expect("derived prefix must be accepted");
@@ -656,7 +656,7 @@ mod tests {
     /// staleness fix the same rule rather than a special case.
     #[test]
     fn insert_stamps_null_actor_columns_when_anonymous() {
-        crate::reset_engine_for_tests();
+        crate::tests::fixtures::reset_engine();
         let mut doc = value!({ "title": "hi" });
         apply_system_fields_on_insert(&mut doc, &schema_without_id_prefix(), "posts", None)
             .expect("derived prefix must be accepted");
@@ -675,7 +675,7 @@ mod tests {
     /// pass's.
     #[test]
     fn insert_many_keeps_a_supplied_value_out_of_the_batch_union() {
-        crate::reset_engine_for_tests();
+        crate::tests::fixtures::reset_engine();
         let mut docs = value!([
             { "title": "a", "created_at": 1_700_000_000_000_i64 },
             { "title": "b" },
@@ -822,7 +822,7 @@ mod tests {
     /// prefix while the descriptor plainly declared one.
     #[test]
     fn prefix_is_read_under_the_charter_column_not_the_literal_id() {
-        crate::reset_engine_for_tests();
+        crate::tests::fixtures::reset_engine();
         stamp_charter(
             "  { name = \"row_key\", type = \"text\", nullable = false, assign = { by = \"typedId\", on = \"insert\" } },",
         );
@@ -841,7 +841,7 @@ mod tests {
             minted.starts_with("blog_"),
             "the declared prefix must be read under the charter's column name, got {minted}",
         );
-        crate::reset_engine_for_tests();
+        crate::tests::fixtures::reset_engine();
     }
 
     #[test]
@@ -970,7 +970,7 @@ mod tests {
     /// refusal of a creator-supplied id lives at the document boundary.
     #[test]
     fn insert_pass_is_idempotent() {
-        crate::reset_engine_for_tests();
+        crate::tests::fixtures::reset_engine();
         let mut doc = value!({ "title": "hi" });
         apply_system_fields_on_insert(
             &mut doc,
@@ -997,7 +997,7 @@ mod tests {
     /// `actor` generator writes rather than skips.
     #[test]
     fn insert_pass_is_idempotent_without_an_actor() {
-        crate::reset_engine_for_tests();
+        crate::tests::fixtures::reset_engine();
         let mut doc = value!({ "title": "hi" });
         apply_system_fields_on_insert(&mut doc, &schema_without_id_prefix(), "posts", None)
             .expect("derived prefix must be accepted");
@@ -1116,7 +1116,7 @@ mod tests {
     /// behaviour rather than two.
     #[test]
     fn insert_pass_binds_null_actor_columns_when_no_actor() {
-        crate::reset_engine_for_tests();
+        crate::tests::fixtures::reset_engine();
         let mut doc = value!({ "title": "hi" });
         apply_system_fields_on_insert(&mut doc, &schema_without_id_prefix(), "posts", None)
             .expect("derived prefix must be accepted");
@@ -1243,7 +1243,7 @@ mod tests {
     /// an eighth `on = "insert"` column, and it does not name one.
     #[test]
     fn update_refuses_every_column_the_charter_fixes_at_insert() {
-        crate::reset_engine_for_tests();
+        crate::tests::fixtures::reset_engine();
         let plan = crate::system_shape_charter::plan().expect("the compiled charter must project");
         let fixed: Vec<String> = plan.immutable_after_insert().map(str::to_string).collect();
         assert!(
@@ -1257,7 +1257,7 @@ mod tests {
 
     #[test]
     fn update_strips_a_supplied_version() {
-        crate::reset_engine_for_tests();
+        crate::tests::fixtures::reset_engine();
         let mut patch = value!({ "title": "x", "version": 42 });
         apply_system_fields_on_update(&mut patch, "app1", "posts_csv").expect("passes");
         assert!(
@@ -1269,7 +1269,7 @@ mod tests {
 
     #[test]
     fn update_strips_a_supplied_updated_at_and_updated_by() {
-        crate::reset_engine_for_tests();
+        crate::tests::fixtures::reset_engine();
         let mut patch = value!({
             "title": "x",
             "updated_at": "2026-01-01T00:00:00Z",
@@ -1283,7 +1283,7 @@ mod tests {
 
     #[test]
     fn update_strips_write_assigned_columns_under_dollar_set() {
-        crate::reset_engine_for_tests();
+        crate::tests::fixtures::reset_engine();
         let mut patch = value!({ "$set": { "title": "x", "updated_by": "usr_explicit" } });
         apply_system_fields_on_update(&mut patch, "app1", "posts_setstrip").expect("passes");
         let set_obj = patch
@@ -1301,7 +1301,7 @@ mod tests {
     /// double bump impossible rather than merely unlikely.
     #[test]
     fn update_strips_the_legacy_dollar_inc_version() {
-        crate::reset_engine_for_tests();
+        crate::tests::fixtures::reset_engine();
         let mut patch = value!({ "$inc": { "version": 1, "views": 1 } });
         apply_system_fields_on_update(&mut patch, "app1", "posts_legacyinc").expect("passes");
         let inc = patch
@@ -1318,7 +1318,7 @@ mod tests {
     /// refuse it here and the platform's own `delete()` stops working.
     #[test]
     fn update_leaves_the_delete_assigned_column_alone() {
-        crate::reset_engine_for_tests();
+        crate::tests::fixtures::reset_engine();
         let mut patch = value!({ "deleted_at": 1_700_000_000_000_i64 });
         apply_system_fields_on_update(&mut patch, "app1", "posts_softdelete")
             .expect("the platform's own soft delete must not be refused");
@@ -1331,7 +1331,7 @@ mod tests {
 
     #[test]
     fn update_leaves_an_ordinary_patch_untouched() {
-        crate::reset_engine_for_tests();
+        crate::tests::fixtures::reset_engine();
         let mut patch = value!({ "title": "x" });
         apply_system_fields_on_update(&mut patch, "app1", "posts_defaults").expect("passes");
         assert_eq!(patch, value!({ "title": "x" }));

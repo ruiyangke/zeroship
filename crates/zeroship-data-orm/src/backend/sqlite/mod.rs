@@ -416,7 +416,7 @@ impl SqliteBackend {
 }
 
 #[cfg(test)]
-impl crate::fixtures::DatabaseFixture for SqliteBackend {
+impl crate::tests::fixtures::DatabaseFixture for SqliteBackend {
     type Client = SqliteSessionHandle;
 
     async fn fixture_session(&self, app_id: &str) -> Result<Self::Client, DbError> {
@@ -976,7 +976,7 @@ mod tests {
     //! the bound itself is the assertion.
 
     use super::*;
-    use crate::fixtures::DatabaseFixture;
+    use crate::tests::fixtures::DatabaseFixture;
     use zeroship_data_orm::storage::LockManager;
     // A plain `use` is private, so the module-level import does not arrive via
     // `use super::*`. UNGATED since 2026-09-04 with the trait itself.

@@ -36,8 +36,8 @@
 //! Run: `cargo xtask test data --filter 'test(column_grants::)'`
 
 #[allow(unused_imports)]
-use crate::schema_fixture::{fixture_table_sql, fixture_table_sql_for};
-use crate::tests::host::Host;
+use crate::tests::fixtures::schema::{fixture_table_sql, fixture_table_sql_for};
+use crate::tests::fixtures::Host;
 #[allow(unused_imports)]
 use zeroship_migrate::schema::query::FkEmission;
 
@@ -515,7 +515,7 @@ const SINGLE_ROW_VERBS: usize = 4;
 fn column_scoped_reads_complete_every_projected_write_verb() {
     Host::test(|host| {
         host.run(async {
-            let postgres = crate::support::postgres::Postgres::start();
+            let postgres = crate::tests::fixtures::postgres::Postgres::start();
             let url = postgres.url();
             let admin = connect(&url).await;
             println!(
@@ -626,7 +626,7 @@ fn column_scoped_reads_complete_every_projected_write_verb() {
 fn the_same_verbs_are_refused_outright_when_the_returning_clause_stars() {
     Host::test(|host| {
         host.run(async {
-            let postgres = crate::support::postgres::Postgres::start();
+            let postgres = crate::tests::fixtures::postgres::Postgres::start();
             let url = postgres.url();
             let admin = connect(&url).await;
             let suffix = unique_suffix();
@@ -702,7 +702,7 @@ fn the_same_verbs_are_refused_outright_when_the_returning_clause_stars() {
 fn the_single_row_verbs_succeed_without_ctid_access() {
     Host::test(|host| {
         host.run(async {
-            let postgres = crate::support::postgres::Postgres::start();
+            let postgres = crate::tests::fixtures::postgres::Postgres::start();
             let url = postgres.url();
             let admin = connect(&url).await;
             let suffix = unique_suffix();
@@ -786,7 +786,7 @@ fn the_single_row_verbs_succeed_without_ctid_access() {
 fn bounded_data_plan_writes_succeed_with_column_scoped_reads() {
     Host::test(|host| {
         host.run(async {
-            let postgres = crate::support::postgres::Postgres::start();
+            let postgres = crate::tests::fixtures::postgres::Postgres::start();
             let url = postgres.url();
             let admin = connect(&url).await;
             let suffix = unique_suffix();

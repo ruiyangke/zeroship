@@ -30,9 +30,9 @@ macro_rules! cold_isolate {
 /// is unlinked while the backend still has it open.
 fn cold_sqlite_isolate() -> tempfile::TempDir {
     let dir = tempfile::tempdir().expect("create tempdir");
-    crate::testing::reset_context_for_tests();
+    crate::tests::fixtures::reset_context();
     let url = format!("sqlite:{}", dir.path().join("cold.sqlite").display());
-    crate::testing::set_db_url_for_tests(&url);
+    crate::tests::fixtures::set_database_url(&url);
     assert!(
         crate::context::with(|c| c.backend()).is_none(),
         "precondition: the fixture must leave the isolate with no backend, or \
@@ -142,7 +142,7 @@ fn cold_collection<'s>(
     app_id: &str,
     name: &str,
 ) -> v8::Local<'s, v8::Object> {
-    super::collection::mint_collection(scope, name.to_string(), crate::testing::binding(app_id))
+    super::collection::mint_collection(scope, name.to_string(), crate::tests::fixtures::binding(app_id))
         .expect("mint_collection")
 }
 
@@ -159,7 +159,7 @@ fn a_single_unmask_dispatch_opens_the_cold_isolates_backend() {
     call_js_method(scope, collection, "unmaskField", &[row_pk, column, opts]);
 
     assert_the_dispatch_opened_the_backend("dispatch_unmask_field", &state);
-    crate::testing::reset_context_for_tests();
+    crate::tests::fixtures::reset_context();
 }
 
 /// `dispatch_bulk_unmask_field`, entered at `collection.bulkUnmask(items)`.
@@ -174,7 +174,7 @@ fn a_bulk_unmask_dispatch_opens_the_cold_isolates_backend() {
     call_js_method(scope, collection, "bulkUnmask", &[items, opts]);
 
     assert_the_dispatch_opened_the_backend("dispatch_bulk_unmask_field", &state);
-    crate::testing::reset_context_for_tests();
+    crate::tests::fixtures::reset_context();
 }
 
 /// Startup policy installation neither opens a backend nor touches its files.
@@ -182,7 +182,7 @@ fn a_bulk_unmask_dispatch_opens_the_cold_isolates_backend() {
 fn mask_policy_install_does_not_open_a_database() {
     let dir = cold_sqlite_isolate();
     cold_isolate!(let scope, let state);
-    let binding = crate::testing::binding("app_cold_policy");
+    let binding = crate::tests::fixtures::binding("app_cold_policy");
     let platform = super::db_platform::mint_db_platform(scope, binding.clone()).unwrap();
     let policy = js_json(scope, r#"{ "support": ["spi"] }"#);
     call_js_method(scope, platform, "setMaskPolicy", &[policy]);
@@ -229,7 +229,7 @@ fn mask_policy_install_does_not_open_a_database() {
     );
     assert!(crate::context::with(|context| context.backend()).is_none());
     assert!(std::fs::read_dir(dir.path()).unwrap().next().is_none());
-    crate::testing::reset_context_for_tests();
+    crate::tests::fixtures::reset_context();
 }
 
 /// `MaskedValue::dispatch_unmask_single`, entered at `mv.unmask()`.
@@ -240,7 +240,7 @@ fn a_masked_value_unmask_opens_the_cold_isolates_backend() {
 
     let masked = super::masked_value::mint_masked_value(
         scope,
-        crate::testing::binding("app_cold_mv"),
+        crate::tests::fixtures::binding("app_cold_mv"),
         "users".to_string(),
         "usr_01".to_string(),
         "ssn".to_string(),
@@ -252,7 +252,7 @@ fn a_masked_value_unmask_opens_the_cold_isolates_backend() {
     call_js_method(scope, masked, "unmask", &[opts]);
 
     assert_the_dispatch_opened_the_backend("MaskedValue::dispatch_unmask_single", &state);
-    crate::testing::reset_context_for_tests();
+    crate::tests::fixtures::reset_context();
 }
 
 /// `MaskedValue::dispatch_unmask_multi`, entered at `mv.unmask([column])`.
@@ -266,7 +266,7 @@ fn a_masked_value_multi_column_unmask_opens_the_cold_isolates_backend() {
 
     let masked = super::masked_value::mint_masked_value(
         scope,
-        crate::testing::binding("app_cold_mv_multi"),
+        crate::tests::fixtures::binding("app_cold_mv_multi"),
         "users".to_string(),
         "usr_01".to_string(),
         "ssn".to_string(),
@@ -279,7 +279,7 @@ fn a_masked_value_multi_column_unmask_opens_the_cold_isolates_backend() {
     call_js_method(scope, masked, "unmask", &[columns, opts]);
 
     assert_the_dispatch_opened_the_backend("MaskedValue::dispatch_unmask_multi", &state);
-    crate::testing::reset_context_for_tests();
+    crate::tests::fixtures::reset_context();
 }
 
 /// `dispatch_find`, the carrier of the per-query unmask hint.
@@ -291,7 +291,7 @@ fn a_masked_value_multi_column_unmask_opens_the_cold_isolates_backend() {
 fn a_query_hint_carrying_find_opens_the_cold_isolates_backend() {
     let _dir = cold_sqlite_isolate();
     let app_id = "app_cold_qhint";
-    crate::testing::install_cold_schema(
+    crate::tests::fixtures::install_cold_schema(
         app_id,
         "users",
         zeroship_data_sql::value!({
@@ -310,7 +310,7 @@ fn a_query_hint_carrying_find_opens_the_cold_isolates_backend() {
     call_js_method(scope, collection, "find", &[filter, opts]);
 
     assert_the_dispatch_opened_the_backend("dispatch_find", &state);
-    crate::testing::reset_context_for_tests();
+    crate::tests::fixtures::reset_context();
 }
 
 #[test]
@@ -343,7 +343,7 @@ fn collection_dispatch_uses_the_injected_orm_factory() {
             })
         }
     }
-    crate::testing::reset_context_for_tests();
+    crate::tests::fixtures::reset_context();
     let calls = Arc::new(AtomicUsize::new(0));
     let factory = ConnectionFactory::new("adapter_injection", HostFactory(calls.clone()));
     let service = crate::service::DbService::new(crate::service::DbServiceConfig {
@@ -355,7 +355,7 @@ fn collection_dispatch_uses_the_injected_orm_factory() {
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     crate::context::with_mut(|context| context.install_connection(service.connection().clone()));
     cold_isolate!(let scope, let state);
-    crate::testing::install_cold_schema(
+    crate::tests::fixtures::install_cold_schema(
         "app_injected",
         "items",
         zeroship_data_sql::value!({
@@ -372,5 +372,5 @@ fn collection_dispatch_uses_the_injected_orm_factory() {
         Some("host_factory_called")
     );
     assert_eq!(calls.load(Ordering::SeqCst), 1);
-    crate::testing::reset_context_for_tests();
+    crate::tests::fixtures::reset_context();
 }
