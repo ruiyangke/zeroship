@@ -23,7 +23,7 @@
 //! set on this `Db` object under the `ZS_PLATFORM` private symbol in
 //! [`mint_db`] and reached only via `@zeroship/bootstrap`'s
 //! runtime-entry (§8). The string `env.db.__platform` is actively
-//! refused by the [`Db::platform_trap`] getter
+//! refused by the `Db::platform_trap` getter
 //! (`platform_internal_only`).
 //!
 //! ## Why a v8_class
@@ -305,7 +305,7 @@ fn normalize_isolation_level(raw: &str) -> Result<IsolationLevel, OpError> {
 ///
 /// Returns `None` when the identity cannot be resolved - including when
 /// `app_id` is not a legal physical schema name, which
-/// [`binding_for_isolate`] refuses.
+/// `binding_for_isolate` refuses.
 ///
 /// Before returning, this also mints a [`crate::v8_classes::db_platform::DbPlatform`]
 /// capability handle scoped to the same `app_id` and stashes it on the

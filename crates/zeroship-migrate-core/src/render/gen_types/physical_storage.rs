@@ -1,39 +1,15 @@
-//! **The descriptor CARRIES the physical storage facts, it does not imply them.**
+//! Check physical storage metadata in serialized runtime descriptors.
 //!
-//! One declared field can occupy more than one physical database object. When this
-//! module was written, the only consumer that needed those names re-derived them by
-//! string formatting - `format!("{col}_masked")` appeared at eight independent sites
-//! listed in `docs/reviews/2026-08-27-descriptor-specification.md` section 1.4 - and
-//! a name derived at eight sites is eight chances to disagree with the one emitter
-//! that actually created the column.
-//!
-//! **The raw column's half of that is closed as of 2026-09-04.** The data plane's
-//! three CRUD consumers (the write relocation, the read strip and the unmask SELECT)
-//! read `storage.rawColumn` through `zeroship_data_sql::compile::declared_raw_column`
-//! instead of formatting it. What still derives is the pair of backend
-//! introspectors, and no descriptor can serve them: introspection reports what a
-//! database contains, and the catalog records no mask-to-raw pairing to report.
-//!
-//! These arms pin the emitter side of that fix: every field of every rendered
-//! descriptor names the column a default projection reads, the column holding the
-//! authoritative value when the two differ, the raw column's read-surface
-//! capabilities, and any auxiliary physical object the field owns.
-//!
-//! The arms deliberately assert on the SERIALIZED `schema.runtime.json` rather than
-//! on the typed struct behind it. A capability flag that a reader supplies as a
-//! `Default` looks identical to one the producer emitted, from inside Rust; only the
-//! bytes can tell them apart, and the bytes are what the TypeScript consumer sees.
+//! Assertions use emitted JSON so omitted fields cannot be hidden by Rust defaults.
+//! The descriptor names visible and raw storage and restricts raw-column access.
+//! The DDL comparison checks those names against the migration emitter.
 
 use super::*;
 use crate::render::declarative::{CollectionDescriptor, FieldDescriptor};
 use crate::test_fixtures::{POSTGRES, SQLITE};
 use serde_json::json;
 
-/// Render one collection to the runtime descriptor and hand back the parsed JSON.
-///
-/// `no_inject` rather than the confined charter: the platform charter injects seven
-/// system columns into every table, and an assertion about "the fields of this
-/// collection" reads far better over the two the test declared.
+/// Render declared fields without injected system columns.
 fn descriptor_for(
     fields: Vec<FieldDescriptor>,
     dialect: &zeroship_migrate_ir::dialect::DialectId,
@@ -80,18 +56,7 @@ fn encrypted_and_masked(name: &str) -> FieldDescriptor {
     }
 }
 
-/// A masked field occupies TWO columns, and the descriptor names both.
-///
-/// The three raw capability flags declare a policy, not just an observation: they
-/// say the raw column is not reachable through the creator-facing read surface.
-/// Before the 2026-08-28 storage flip the field's own column held plaintext and
-/// `build_where` (which takes no schema hint) could reach it directly through an
-/// ordinary `find({ ssn: x })` - an unaudited binary search over a value the caller
-/// could not read (specification section 4.3). After the flip the field's own
-/// column holds the mask and the raw column's `__zs_raw__` name is refused by
-/// every inbound identifier surface, so an ordinary filter can no longer name it at
-/// all; the flags remain the declared contract a consumer reads instead of
-/// re-deriving the naming rule.
+/// The descriptor separates visible mask storage from the protected raw value.
 #[test]
 fn a_masked_field_records_both_of_its_physical_columns() {
     let value = descriptor_for(vec![masked("ssn")], &POSTGRES);
@@ -169,20 +134,7 @@ fn an_encrypted_and_masked_field_puts_the_ciphertext_column_in_raw_column() {
     );
 }
 
-/// An encrypted field that opts out of masking with `kind: "none"` has ONE column,
-/// and the ciphertext lives in it.
-///
-/// Pinned because it is the case that makes the AAD rule total: with no `rawColumn`
-/// the consumer must fall back to the field's own column, and if this arm emitted a
-/// `rawColumn` anyway the fallback would be dead code that never got exercised.
-///
-/// The `classification` is not decoration. The descriptor producer reads it with
-/// `.get("classification").and_then(as_str)?` (`render/fold.rs:5819-5821`), so a mask
-/// facet without one is dropped WHOLE - and on an encrypted column the fail-safe
-/// `{ full, pii }` auto-mask then reapplies (`render/lower.rs:9591`). The first draft of
-/// this arm authored a bare `{ kind: "none" }` and measured a `token_masked` sibling it
-/// had just asked not to exist. The direction is safe (more masking, never less), but
-/// the fixture has to say what the pipeline actually reads.
+/// An explicit mask opt-out leaves encrypted data in the field's value column.
 #[test]
 fn an_encrypted_field_that_opts_out_of_masking_keeps_one_column() {
     let field = FieldDescriptor {
@@ -249,18 +201,7 @@ fn the_capability_flags_are_present_in_the_bytes_not_supplied_by_the_reader() {
     assert!(storage.get("rawColumn").is_some(), "{reparsed}");
 }
 
-/// The descriptor's `valueColumn` / `rawColumn` are the DDL emitter's OWN names,
-/// not a second spelling of the same convention.
-///
-/// This is the arm that outlives the current physical layout: it reads both names
-/// from `raw_column_for_field` rather than hardcoding either, so a storage change
-/// only has to move the projection here to keep this arm green. The 2026-08-28
-/// storage flip already exercised that promise once - `valueColumn` was the
-/// emitted `<col>_masked` sibling before the flip and is the field's own column
-/// now, while `rawColumn` moved the other way, from the field's own column to
-/// `raw_column_name(field)` - and this arm needed no shape change, only the
-/// renamed source function, which is exactly the coupling the eight `format!`
-/// sites never had.
+/// Compare descriptor storage names directly with the DDL emitter's names.
 #[test]
 fn the_recorded_columns_are_the_ddl_emitters_own_names() {
     let value = descriptor_for(vec![masked("ssn"), plain("nickname")], &POSTGRES);

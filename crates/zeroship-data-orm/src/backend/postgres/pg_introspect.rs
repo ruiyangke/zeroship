@@ -107,12 +107,7 @@ SELECT c.relname AS table_name,
         .query_text_params(col_sql, &params)
         .await
         .map_err(|e| coded_sql("read columns failed", e))?;
-    // Collect siblings + their sentinel strings here, then in a
-    // second pass attach `MaskMeta` to the parent column entries.
-    // Two passes because the parent column may appear before or
-    // after the sibling in the `ORDER BY a.attnum` walk depending on
-    // whether the column was added at create-time or via an
-    // `ALTER ADD COLUMN` after the parent.
+    // Collect mask sentinels, then attach their metadata to the completed column map.
     let mut sibling_sentinels: std::collections::HashMap<(String, String), String> =
         std::collections::HashMap::new();
     for row in &rows {
@@ -126,38 +121,18 @@ SELECT c.relname AS table_name,
             .ok()
             .and_then(|s| s.chars().next());
         let pg_comment: Option<String> = row.try_get::<_, String>("pg_comment").ok();
-        // Column comments carry TWO sentinel families:
-        //   - `zero-migrate:mask:…` on a `<col>_masked` sibling → deferred to the second
-        //     pass (stamps `MaskMeta` on the PARENT);
-        //   - `zero-migrate:enc:…` on the encrypted column itself → parsed inline here into
-        //     `EncryptionMeta`. On PG the inline `/* zero-migrate:enc */` DDL comment is
-        //     parse-discarded, so the migration emitter also writes a
-        //     `COMMENT ON COLUMN` carrying the `zero-migrate:enc:` body; this is where the
-        //     data plane (and the diff) recover it.
+        // Recover protection markers from persisted column comments.
+        // Mask metadata is attached after all columns have been collected.
         let mut encryption: Option<EncryptionMeta> = None;
         if let Some(comment) = &pg_comment {
-            // The mask sentinel rides the MASKED column, which after the
-            // storage flip is the field's OWN column - so there is no suffix
-            // to test and no parent to resolve.
-            //
-            // The `&& column.ends_with("_masked")` conjunct that used to be
-            // here had no `else`: a `zero-migrate:mask:` comment on a column that did
-            // not match fell through both arms and was discarded in silence,
-            // while the malformed-sentinel arm below warns loudly. After the
-            // flip that arm would have matched EVERY sentinel.
+            // The mask sentinel belongs to the visible field column.
             if comment.starts_with(zeroship_data_sql::mask_codec::MASK_SENTINEL_PREFIX) {
                 sibling_sentinels.insert((table.clone(), column.clone()), comment.clone());
             } else if comment.starts_with(zeroship_data_sql::mask_codec::ENC_SENTINEL_PREFIX) {
                 match zeroship_data_sql::mask_codec::parse_encryption_sentinel(comment) {
                     Ok(meta) => encryption = Some(meta),
                     Err(e) => {
-                        // A malformed encryption sentinel is treated like a
-                        // malformed mask sentinel: warn loudly and treat the
-                        // column as unencrypted rather than failing the whole
-                        // introspection. The data plane then fails closed at the
-                        // codec boundary (plaintext expected on a column the
-                        // schema declared encrypted) rather than silently
-                        // decrypting with a guessed mode.
+                        // Malformed sentinels are logged and omitted from the recovered metadata.
                         tracing::warn!(
                             table = %table,
                             column = %column,

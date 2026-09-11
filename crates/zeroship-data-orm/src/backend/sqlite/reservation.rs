@@ -10,10 +10,10 @@
 //!    current owner of the connection it would run on, instead of running it
 //!    on whatever connection is free.
 //! 2. **Whether a cancellation won.** A caller and the actor race for one
-//!    word, [`Reservation::terminal`], and exactly one of them claims it. The
+//!    word, `Reservation::terminal`, and exactly one of them claims it. The
 //!    loser is told what the winner decided; it never acts on its own guess.
-//! 3. **What a terminal statement actually did.** [`classify_commit`] and
-//!    [`classify_rollback`] sample `is_autocommit` and let it - not the result
+//! 3. **What a terminal statement actually did.** `classify_commit` and
+//!    `classify_rollback` sample `is_autocommit` and let it - not the result
 //!    code - decide. A `COMMIT` that returned `Err` is not proof of rollback.
 //!
 //! ## The definition that makes cancellation decidable
@@ -23,7 +23,7 @@
 //!
 //! > **Execution start is the actor's transition to `Running`.**
 //!
-//! `Running` is [`Reservation::running_seq`] holding a non-zero command
+//! `Running` is `Reservation::running_seq` holding a non-zero command
 //! sequence. The handshake between a cancelling caller and the executing actor
 //! is Dekker's, on `SeqCst`:
 //!

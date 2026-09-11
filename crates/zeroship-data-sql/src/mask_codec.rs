@@ -34,7 +34,7 @@ fn wrapped_type_as_sql(w: WrappedType) -> &'static str {
     }
 }
 
-/// Parse a `zero-migrate:enc:` wraps token. `None` for an unknown token.
+/// Parse a plaintext-type token, returning `None` for an unknown type.
 #[must_use]
 fn wrapped_type_from_sql(s: &str) -> Option<WrappedType> {
     match s {
@@ -45,20 +45,8 @@ fn wrapped_type_from_sql(s: &str) -> Option<WrappedType> {
     }
 }
 
-/// Build the canonical encryption-sentinel BODY for an
-/// [`EncryptionMeta`]: `zero-migrate:enc:<wraps>`.
-///
-/// This is the COMMENT-body form (no surrounding `/* */`): on PG it is stored
-/// via `COMMENT ON COLUMN "<schema>"."<table>"."<col>" IS '<body>'` on the
-/// ENCRYPTED column itself, so PG (which discards the inline `/* zero-migrate:enc */`
-/// comment at parse time) can still recover the metadata from `pg_description`.
-/// On SQLite the inline form (`query::encryption_sentinel_for_field`, which
-/// wraps this same `zero-migrate:enc:…` body in `/* */`) survives in `sqlite_master.sql`.
-///
-/// The two emitters share the SAME `zero-migrate:enc:<wraps>` body, so the
-/// metadata generated for either dialect is byte-identical - the
-/// verify-bricking guard. The parser side is
-/// [`parse_encryption_sentinel`].
+/// Encode the plaintext-type marker for an encrypted column.
+/// PostgreSQL persists the body in a column comment; SQLite stores it inline in DDL.
 #[must_use]
 pub fn build_encryption_sentinel(meta: &EncryptionMeta) -> String {
     format!(
@@ -67,20 +55,8 @@ pub fn build_encryption_sentinel(meta: &EncryptionMeta) -> String {
     )
 }
 
-/// Parse a `zero-migrate:enc:<wraps>` sentinel body back
-/// into an [`EncryptionMeta`].
-///
-/// Accepts either the bare comment body (`zero-migrate:enc:string`, the
-/// PG `pg_description` form) or the inline-comment form wrapping it
-/// (`/* zero-migrate:enc:string */`, the SQLite `sqlite_master.sql`
-/// form) — the leading/trailing `/* */` and whitespace are stripped first, so
-/// both introspectors feed the SAME parser.
-///
-/// Returns `Err(MaskSentinelError)` (the shared sentinel-error type) carrying an
-/// `enc_sentinel_malformed` discriminator for any parse failure — wrong prefix,
-/// unknown wraps or extra metadata — so a hand-edited or
-/// future-version sentinel produces a typed error rather than silently routing
-/// through a default codec (the fail-closed contract).
+/// Parse an encryption sentinel, accepting either its bare body or SQL comment form.
+/// Unknown plaintext types and malformed payloads return a sentinel error.
 pub fn parse_encryption_sentinel(s: &str) -> Result<EncryptionMeta, MaskSentinelError> {
     // Strip an optional inline `/* … */` wrapper (the SQLite form) so both
     // the PG comment body and the SQLite inline comment parse identically.
@@ -121,15 +97,8 @@ pub fn build_mask_sentinel(kind: MaskKind, classification: Classification) -> St
     )
 }
 
-/// Parse a `zero-migrate:mask:kind=…,classification=…`
-/// sentinel string back into a `(MaskKind, Classification)` pair.
-///
-/// Returns `Err(MaskSentinelError)` whose `.message` carries the
-/// `mask_sentinel_malformed` code-discriminator for any parse failure —
-/// unknown kind, unknown classification, missing field, extra trailing
-/// junk. plugin-db's `From<MaskSentinelError> for DbError` lifts it back
-/// into `DbError::Internal { message }` verbatim, so the typed error the
-/// introspector surfaces (with the column name appended) is unchanged.
+/// Parse a mask sentinel. Malformed or unknown fields return a
+/// `mask_sentinel_malformed` error for the caller to contextualize.
 pub fn parse_mask_sentinel(s: &str) -> Result<(MaskKind, Classification), MaskSentinelError> {
     let body = s.strip_prefix(MASK_SENTINEL_PREFIX).ok_or_else(|| {
         MaskSentinelError::new(format!(

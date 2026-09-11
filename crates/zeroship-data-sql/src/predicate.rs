@@ -1,100 +1,20 @@
-//! The expression sub-grammar.
+//! Comparison and logical predicates shared by query plans.
 //!
-//! SC-3 pins this level rather than leaving it to the first family that ports,
-//! and the argument is worth restating because it is the reason this module is
-//! the largest one here: filters, projections, ordering keys and search
-//! predicates all compose the same comparison, logical, path and literal nodes,
-//! so a shared node fixed wrongly by whoever ports first costs every family
-//! after it, whereas a family that gets its own node shape wrong costs that
-//! family a revision.
+//! Null checks are distinct nodes. Canonicalization reduces empty conjunctions to
+//! true, empty disjunctions to false, and empty membership to a constant. Ranges
+//! become comparisons so equivalent predicates share a representation.
 //!
-//! # The three shapes that encode defects rather than preferences
-//!
-//! * **[`Predicate::IsNull`] is a distinct node, and no [`Operand`] can be
-//!   null.** Nullness is not an operator here. That is what makes the
-//!   `$in: [null]`-binds-the-empty-string defect unrepresentable rather than
-//!   merely absent - see [`crate::literal`].
-//! * **`And([])` is `TRUE` and `Or([])` is `FALSE`**, deliberately not the same
-//!   constant, so a renderer does not get to invent a convention. Both are
-//!   normalised to [`Predicate::Const`] by [`Predicate::canonical`], so the two
-//!   spellings render identically.
-//! * **Empty membership is not a `Membership`.** [`Predicate::membership`]
-//!   simplifies it to a constant before a [`crate::LiteralSet`] exists, so
-//!   `IN ()` - a `PostgreSQL` syntax error, which failed the entire query rather
-//!   than returning nothing - has no representation.
-//!
-//! # Depth is the bound that matters, and size is not
-//!
-//! [`Predicate`] is the **only** recursive type in this crate, and until
-//! [`MAX_PREDICATE_DEPTH`] existed it was the only one with no bound at all.
-//! [`crate::MAX_MEMBERSHIP_LIST_LEN`] bounds a list's *width*; nothing bounded
-//! its *height*.
-//!
-//! That was the wrong half. A wide input is linear work on the heap; a deep one
-//! is stack frames, and in Rust a stack overflow is an **abort**, not a catchable
-//! error. The worker runs many apps per thread under LRU isolate eviction, so an
-//! abort is not one failed request - it takes the process and every co-tenanted
-//! app on it.
-//!
-//! **The IR was dropping a guard the code it replaces already carries.**
-//! `MAX_FILTER_NESTING_DEPTH = 16` (`query.rs:604`) is enforced by
-//! `count_clause_budget` (`query.rs:5666`, entered from `validate_clause_budget`
-//! at `:5655` with an initial depth of 1). Leaving it behind is precisely the
-//! failure [`crate::ident`]'s module note calls "the dangerous half of the move":
-//! a bound that stays at the old call site, so every future caller has to
-//! re-implement it and the one that forgets aborts the worker.
-//!
-//! **Why the bound has to be at CONSTRUCTION rather than in the traversals.**
-//! Making [`Predicate::canonical`] iterative would not be enough, because it is
-//! not the only recursive surface. `Predicate` derives `PartialOrd`, `Ord`,
-//! `PartialEq` and `Hash` (the derive is at the enum below), and those recurse
-//! structurally - and `canonical_connective`'s own `flat.sort()` calls the
-//! derived `Ord`, so the sort recurses even if the walk does not.
-//! [`Predicate::render`]'s lowering and [`Predicate::mentions_aggregate`] recurse
-//! too. One bound checked before any of them run covers all four; four
-//! rewritten traversals cover three of them and leave the derive.
-//!
-//! [`Predicate::depth`] is therefore **iterative** - it is the one function that
-//! must be able to measure a hostile tree without becoming the overflow it is
-//! looking for.
-//!
-//! [`Predicate::render`]: crate::render::postgres::render_select
-//!
-//! # What is deliberately NOT a node
-//!
-//! SC-3 lists a `Range { lhs, low, high, inclusive }` variant. It is a
-//! constructor here ([`Predicate::range`]) that desugars to a conjunction of
-//! two comparisons, because a separate node would give one logical plan two
-//! spellings - `range(x, 1, 10)` and `and([x >= 1, x <= 10])` are the same
-//! query - and the canonical-form property in [`crate::render`] rests on there
-//! being exactly one. A node that a canonicaliser has to desugar anyway is a
-//! node whose render arm is unreachable.
+//! Recursive consumers require a bounded tree. `depth` measures it iteratively,
+//! and plan validation enforces `MAX_PREDICATE_DEPTH` before canonicalization or
+//! rendering.
 
 use crate::ident::Ident;
 use crate::literal::{Literal, LiteralError, LiteralSet};
 use crate::path::FieldPath;
 use core::fmt;
 
-/// The deepest a predicate tree may be.
-///
-/// Mirrors `MAX_FILTER_NESTING_DEPTH` (`query.rs:604`), the bound the translator
-/// this IR replaces already applies. Sixteen is kept rather than re-derived,
-/// for one reason and against one temptation:
-///
-/// * **Kept**, because a replacement that is looser than the thing it replaces
-///   is a regression however well argued the new number is. Every filter the
-///   current system accepts must still be expressible.
-/// * **Not raised**, even though the real overflow threshold is orders of
-///   magnitude higher. The bound is not calibrated to where the stack breaks -
-///   that number is a property of the build profile, the platform's thread stack
-///   size and the deepest of four recursive surfaces, so a limit tuned to it
-///   would be tuned to whichever of those was measured. It is calibrated to what
-///   a creator's filter plausibly needs, which sixteen already exceeds.
-///
-/// Depth is counted with a leaf at 1: `Compare`, `Membership`, `Pattern`,
-/// `IsNull` and `Const` are depth 1, and `And` / `Or` / `Not` are one more than
-/// their deepest child. `query.rs` counts JSON object nesting from 1, so the two
-/// agree on shape without being the same walk.
+/// Maximum predicate-tree depth accepted by plan validation.
+/// Leaves have depth one; a connective adds to its deepest child's depth.
 pub const MAX_PREDICATE_DEPTH: usize = 16;
 
 /// A comparison operator. Null is not among them; see [`Predicate::IsNull`].

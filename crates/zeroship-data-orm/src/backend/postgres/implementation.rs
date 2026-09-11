@@ -56,22 +56,7 @@ impl std::fmt::Debug for PostgresBackend {
 }
 
 impl PostgresBackend {
-    /// Build a backend handle around an already-initialised pool, with the
-    /// column-key source supplied by the caller.
-    ///
-    /// **The key source is a parameter, not a lookup, and that is a tier
-    /// boundary rather than a style preference.** This constructor used to have
-    /// a sibling `new()` that called `crate::backend::postgres::context::isolate_key_source()` -
-    /// the vendor reaching up into the ENGINE's per-isolate thread-local. Once
-    /// this file is `zeroship-data-postgres`, that call cannot compile: the
-    /// engine depends on the vendor, so the vendor may not name the engine.
-    ///
-    /// The lookup did not disappear; it moved up to the composer that always
-    /// owned the context,
-    /// `zeroship_data_orm::backend_selection`. The old `new()`
-    /// even documented the hazard it created - "do not call this from inside a
-    /// `context::with` closure, it takes a context borrow of its own" - which
-    /// is what a fetch buried in a constructor costs.
+    /// Construct a backend from an initialized pool and host-supplied project keys.
     pub fn new(
         pool: Rc<compio_postgres::Pool>,
         url: String,
@@ -248,23 +233,8 @@ impl PostgresBackend {
     }
 }
 
-// Capability impls -- one block per sub-trait:
-//
-//   1. `impl DatabaseFixture for PostgresBackend`      -- 3 methods.
-//   2. `impl LockManager for PostgresBackend`      -- 3 methods.
-//   3. `impl Catalog for PostgresBackend` -- 2 methods +
-//      `type LiveSchema`.
-//
-// A fourth, `impl PgDatabaseFixture`, carried a `pool_handle()` accessor handing
-// out the raw pool. A bare checkout off that pool runs as the shared
-// `zeroship_worker` login role with no `SET LOCAL ROLE`, so it was a standing
-// way around the per-app role fence. Its last caller went with
-// `crud/mask_drift.rs`; trait, impl and witnesses were deleted 2026-09-09.
-// Reaching a tenant schema needs a roled entry point, not a pool handle.
-//
-// `impl Backend for PostgresBackend {}` below is a one-line composition
-// marker -- every operation lives on the sub-trait impls above.
-// ---------------------------------------------------------------------------
+// Runtime access to tenant data must use a roled session. Unrestricted fixture
+// access is available only to test hosts.
 
 #[cfg(test)]
 impl crate::tests::fixtures::DatabaseFixture for PostgresBackend {

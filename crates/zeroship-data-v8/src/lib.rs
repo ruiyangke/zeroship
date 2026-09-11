@@ -355,28 +355,8 @@ mod backend_init_tests {
     }
 }
 
-/// The workflow journal schema name is derived TWICE, in two crates that
-/// deliberately do not depend on each other, and until this module existed the
-/// only thing holding them in agreement was a comment.
-///
-/// `zeroship-migrate-server` WRITES the schema
-/// (`provisioning::workflow_journal_schema_name`, called at
-/// `provisioning.rs:327` and `apply.rs:1526`); `zeroship-workflow` READS
-/// it (`store::pg::app_schema_for`, called at `store/pg.rs:81`). The writer's
-/// own doc says why they are separate: "this crate does not depend on that one,
-/// so the derivation is duplicated rather than shared."
-///
-/// THIS LIVES IN plugin-db, WHICH IS NEITHER OF THEM, and that is not an
-/// accident: plugin-db is the only crate that already dev-depends on both
-/// (`Cargo.toml` :121 and :141, the latter noting "DEV-only ... so no cycle"),
-/// so the check costs no new edge in the dependency graph.
-///
-/// WHY AN EQUALITY TEST AND NOT AN INTEGRATION TEST. The obvious alternative -
-/// provision through the writer, then read through the reader - is what
-/// `src/tests/postgres/workflow.rs` looks like it does and does NOT: it computes the name
-/// with the READER, then creates and drops that schema as its own fixture, so a
-/// drift in the writer alone leaves it green. A test that builds its own
-/// precondition cannot detect a disagreement between two producers.
+/// Compare the workflow journal names used by migration provisioning and reads.
+/// This test links both consumers so a fixture cannot conceal a naming mismatch.
 #[cfg(test)]
 mod journal_schema_derivations_agree {
     use uuid::Uuid;

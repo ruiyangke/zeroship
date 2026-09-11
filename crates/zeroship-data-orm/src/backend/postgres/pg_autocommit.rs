@@ -170,7 +170,7 @@ pub(crate) async fn roled_scalar_bytes(
 
 /// Decode column 0 of the first row as raw bytes.
 ///
-/// Split out of [`roled_scalar_bytes`] because the AUTOCOMMIT lane is not the
+/// Split out of `roled_scalar_bytes` because the AUTOCOMMIT lane is not the
 /// only lane a scalar read can run on. An unmask issued inside
 /// `db.transaction(fn)` has to read the ciphertext on the app's parked
 /// transaction connection - a pooled checkout cannot see a row that
@@ -204,7 +204,7 @@ pub fn scalar_bytes(rows: &[compio_postgres::Row]) -> Result<ScalarRead<Vec<u8>>
 /// VARCHAR/TEXT/BPCHAR/NAME/UNKNOWN plus citext and ltree and nothing else, and
 /// `Row::get_inner` consults it BEFORE decoding, even for NULL - so pointing
 /// this at a BYTEA column is refused outright rather than mis-parsed. Use
-/// [`roled_scalar_bytes`] there.
+/// `roled_scalar_bytes` there.
 pub(crate) async fn roled_scalar_text(
     pool: &Rc<compio_postgres::Pool>,
     schema: &SchemaName,

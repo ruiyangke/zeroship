@@ -1,93 +1,9 @@
-//! **Step 4, consumer 2: the authoring tables come from the single fold.**
+//! Check generated authoring schemas against the recorded corpus.
 //!
-//! `docs/proposals/single-fold-and-effects.md` section G step 4 moves the artifact
-//! consumers off their private walkers one at a time.
-//! The authoring-table walker is the second, and it has the SMALLEST blast radius of
-//! the four: measured, it is produced in exactly one place in `render_artifacts` and
-//! read in exactly one place, `render_env_db_ts`. So this move can move bytes in
-//! `env.db.ts` and in no other artifact, where consumer 1 could move two.
-//!
-//! # What the move can actually change, measured rather than assumed
-//!
-//! [`zeroship_migrate::render_artifacts`] emits two files. `schema.runtime.json` is
-//! rendered from the `FieldDef` map plus the runtime-metadata projection, and consumer 2
-//! touches neither - so its content hash is a CONTROL here, pinned in the corpus golden
-//! beside `env.db.ts`'s and expected not to move for THIS consumer's reasons.
-//!
-//! STEP 4 CONSUMER 3 MOVED SIX OF THOSE CONTROL LINES, and the control working is the
-//! reason they are worth reading rather than a reason to loosen it. That consumer
-//! replaced the walker that produced the `fields` block, and its own golden records
-//! five families in which that walker described a database the catalog
-//! does not have. Two of those families are reachable from carriers in THIS file:
-//! `carrier:attached_partition_dropped` (a dropped partition stayed in the map) and
-//! `carrier:unique_constraint_lifecycle` (a dropped `UNIQUE` outlived its constraint).
-//! Six `sha|runtime.json` lines moved, on those two carriers, on three dialects each.
-//!
-//! What did NOT move is the claim this file is actually about: ZERO `sha|env.db.ts`
-//! lines and ZERO per-field lines changed, so consumer 3 is confined to the artifact it
-//! owns. The two goldens agree on the new hashes independently, having been reduced by
-//! different code from the same `render_artifacts` call.
-//!
-//! `env.db.ts` is rendered from `AuthoringTable`, whose six fields reach it like this:
-//!
-//! | field | where it lands in `env.db.ts` |
-//! |---|---|
-//! | `columns` | the `columns: { … }` block, one rendered expression per column |
-//! | `primary_key` | `.primaryKey()` on the column when the key is single, the table-level `primaryKey: [ … ]` clause when it is composite, and `primaryKey: null` when there is none |
-//! | `constraints` | `uniques:`, `checks:`, `foreignKeys:`, `exclusions:`, plus the `.references(…)` lift onto a column |
-//! | `indexes` | the `indexes: [ … ]` block |
-//! | `partition_by` | `partitionBy: …` |
-//! | `schema` | `schema: …` |
-//!
-//! The `options: { … }` line is the ONE thing in a table block that does not come
-//! from this map - it is the runtime-metadata projection consumer 1 moved - and it is
-//! carried in the golden as a second control.
-//!
-//! Every one of those six is probed by field below, and
-//! [`the_recorded_corpus_renders_the_same_artifacts_through_the_fold`] pins the whole
-//! of both artifacts by content hash so a byte moving anywhere else cannot pass
-//! unnoticed either.
-//!
-//! # The defect this move FIXES, and why it is a fix rather than a change
-//!
-//! The authoring-table walker had no `Op::AlterPrimaryKey` arm at all - measured,
-//! zero occurrences of `AlterPrimaryKey` in `render/gen_types.rs` against 29 in
-//! `render/fold.rs` - so the op fell through its `_ => {}` and `env.db.ts` kept
-//! declaring the primary key the migration replaced, dropped or added. The step 3
-//! gate recorded it as one authoring-table defect on one stream and one action;
-//! measured through the artifact, it is FIVE distinct wrong artifacts, one per
-//! `AlterPrimaryKeyAction` shape plus the identity facet the same op clears:
-//!
-//! * `replace` to a single column - the key stays on the old column,
-//! * `replace` to a composite - the table-level `primaryKey:` clause never appears,
-//! * `drop` - `primaryKey: null` never appears,
-//! * `add` - `primaryKey: null` survives an op that installed a key,
-//! * `replace` with `dropIdentityFrom` - `.autoIncrement()` outlives the identity the
-//!   same op removed.
-//!
-//! Which side is right is NOT decided here by preference. It is decided by a live
-//! PostgreSQL server in `crates/zeroship-migrate/tests/fold_live/env_db_ts_matches_the_server_pg.rs`, which
-//! applies the migration for real, reads the key out of `pg_catalog`, and asserts
-//! `env.db.ts` declares THAT key. This file's offline arms pin the same answers so
-//! a DB-free run still fails when the artifact regresses.
-//!
-//! # The second divergence, which is a CHOICE and is adjudicated as one
-//!
-//! `AuthoredState::advance` removes a table on `Op::DropPartition`; the walker has no
-//! arm for it. The pair is only reachable when a table is created by `createTable`
-//! and then made a partition by `attachPartition`, which is the case
-//! `single_fold.rs` recorded as UNMEASURED by the step 1 corpus. It stops being
-//! unmeasured here: [`dropping_an_attached_partition_removes_it_from_env_db_ts`]
-//! measures it, and `attachPartition is PostgreSQL-only` at lowering
-//! (`render/lower.rs`), so PostgreSQL is the only dialect on which the stream is
-//! applicable at all - and there `dropPartition` lowers to `DROP TABLE`, already
-//! live-anchored by `crates/zeroship-migrate/tests/pg_engine/pg_scenarios.rs` scenario 12 and by
-//! `crates/zeroship-migrate/tests/namespaces/partition_claims_the_relation_namespace_pg.rs::dropping_a_partition_frees_its_name`.
-//! `detachPartition`, whose child survives as a standalone table under the same name,
-//! is the control that stops "remove it" from being applied to the wrong op.
-//!
-//! Offline throughout, except where a test name says `_pg`: the oracle here is the
-//! emitted artifact, so there is no skip that could read as a pass.
+//! Lifecycle carriers exercise key, constraint and partition changes beyond the
+//! recorded fixtures. Artifact hashes detect other byte changes; per-table rows
+//! identify the affected shape. Live catalog tests adjudicate schema behavior.
+//! The golden comparison has no automatic update mode.
 
 use crate::support;
 

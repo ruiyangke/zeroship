@@ -1,71 +1,13 @@
-//! `unmask()` RPC + authorization + audit trail.
+//! Authorize, read and audit access to a masked field's real value.
 //!
-//! The MaskedValue surface (`sdks/db/src/types.ts`) calls into this
-//! module via the `zeroship.db.unmaskField` native op (registered as a
-//! `#[v8_method]` on `Db`). The flow follows §6 of
-//! `docs/archive/sensitive-field-masking.md`:
+//! Authorization uses the app's fixed mask policy. Without a policy, only a trusted
+//! system actor is allowed; adapter boundaries sanitize creator-supplied actors.
+//! Reads use the descriptor's raw column and the captured transaction route,
+//! decrypting with the supplied project key when the field is encrypted.
 //!
-//! 1. Look up the column's mask metadata (classification) from the
-//!    cached schema. A column with no mask declaration cannot be
-//!    unmasked — surface `unmask_column_not_masked`.
-//! 2. Authorise via [`check_unmask_authorization`]: consult the app's
-//!    per-app [`crate::protection::mask_policy::MaskPolicy`] (configured via `defineMaskPolicy()`) when
-//!    one is cached; otherwise fall back to a strict default-deny rule
-//!    where only the `auto` actor kind (system / migrations /
-//!    background jobs) can unmask any classification. Denied attempts
-//!    emit an audit row with `outcome = "denied"`.
-//! 3. Look up the column's encryption metadata. If encrypted, SELECT
-//!    the BYTEA / BLOB ciphertext, reconstruct the canonical AAD
-//!    including the row primary key,
-//!    and decrypt through [`crate::encryption::aead`] with a key from the
-//!    backend handle's [`crate::encryption::KeyStore`]. If plaintext
-//!    (mask-only, no encryption), read the descriptor's raw storage column.
-//! 4. Emit a `granted`-outcome audit row to `__zeroship_audit_unmask`
-//!    in the app's own schema.
-//! 5. Return the plaintext.
-//!
-//! ## Audit-table location, and who creates it
-//!
-//! `__zeroship_audit_unmask` lives in the **per-app schema** (alongside
-//! `__zeroship_schema_migrations`). App-scoped audit data should not
-//! require platform-role access to query — operators query via the
-//! per-app schema. A platform-wide system schema was proposed for it
-//! and refused; that schema is now deleted outright (see
-//! `crate::auth`).
-//!
-//! **This module does not create it.** It did until 2026-08-28, from
-//! `write_audit_unmask_row`, which meant eight DDL statements — one
-//! `CREATE TABLE IF NOT EXISTS` and three `CREATE INDEX IF NOT EXISTS`
-//! per dialect arm — on every `unmask()` dispatch, granted and denied
-//! alike, on the privileged read path, issued by the process that runs
-//! creator code. Schema change belongs to `zeroship-migrate`; the data
-//! plane emits no DDL, and this was the last live site.
-//!
-//! The table now has the same lifecycle as the app's schema itself,
-//! established by whichever migration apply host owns that dialect:
-//!
-//! | Dialect | Creator |
-//! |---|---|
-//! | Postgres | `zeroship_migrate_server::provisioning::provision_audit_unmask_table`, from the apply path |
-//! | SQLite | `zeroship_migrate_sqlite::backend::audit_unmask_sql`, from the dev-tier `applyIrSqlite` host |
-//!
-//! Both are idempotent and run on every apply, so a redeploy is what
-//! gives an app provisioned before the table existed its copy. Neither
-//! runs in the worker.
-//!
-//! The two definitions are deliberately NOT shared. They cannot be: the
-//! shapes differ by dialect (`BIGSERIAL` vs `INTEGER PRIMARY KEY`,
-//! `TIMESTAMPTZ DEFAULT NOW()` vs `TEXT DEFAULT CURRENT_TIMESTAMP`), which
-//! is the same split the engine's own journal tables already take —
-//! `zeroship-migrate-postgres` and `zeroship-migrate-sqlite` each hold
-//! their own `journal_sql.rs`.
-//!
-//! ## Default-deny authorization fallback
-//!
-//! [`check_unmask_authorization`] is deliberately strict when no policy
-//! is configured: most real apps need `defineMaskPolicy()` to grant
-//! access to non-system callers. Without a configured policy, only the
-//! `auto` system actor can unmask.
+//! Granted and denied attempts append to the app's unmask audit table outside the
+//! creator transaction, so its rollback cannot erase the audit. Migration hosts
+//! create the table; this module performs no DDL.
 
 use crate::encryption::plaintext::PlaintextType;
 use zeroship_data_sql::value::Value;
@@ -329,6 +271,8 @@ async fn prepare_unmask_backend(backend: &BackendHandle, app_id: &str) -> Result
 // Public dispatch entry
 // ---------------------------------------------------------------------------
 
+/// Authorize and read plaintext through the caller's transaction route.
+/// Audit writes use an independent connection so creator rollback cannot erase them.
 pub async fn dispatch_unmask(
     route: &crate::tx_route::TxRoute,
     binding: &DbBinding,

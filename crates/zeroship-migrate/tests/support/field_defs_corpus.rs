@@ -1,31 +1,8 @@
-//! **The corpus behind step 4 consumer 3, and the reduction both halves share.**
+//! Shared corpus and artifact reduction for field-descriptor tests.
 //!
-//! `docs/proposals/single-fold-and-effects.md` section G step 4 moves
-//! the wire `FieldDef` map off a standalone walker and onto
-//! `FoldedSchema::project_field_defs`. The map that walker produced is not an artifact
-//! a human reads: it is
-//! `schema.runtime.json`'s `fields` block AND, on SQLite, `LiveSchema::sdk_schemas`,
-//! which is what the 12-step table rebuild renders its new `CREATE TABLE` from
-//! (`render/lower.rs`'s SQLite `renameColumn` leg -> `lower_ir_rename` ->
-//! `render/declarative.rs`'s `desired.sdk_schemas.get(table)`). So this reduction
-//! carries the DDL, not just the JSON.
-//!
-//! # Why this lives in `support` rather than in the gate that reads it
-//!
-//! The golden this produces was captured from the OLD path, by a SEPARATE test binary,
-//! BEFORE the consumer was switched. A capture harness living in the same binary as the
-//! comparison is how a golden blesses itself: the harness rewrites the file from the new
-//! path and the comparison then passes against it. Keeping the REDUCTION here and the
-//! two drivers in two binaries means the capture and the gate cannot disagree about what
-//! a line is, and the capture binary can be deleted afterwards without the gate losing
-//! its definition.
-//!
-//! # Everything is read out of the ARTIFACT
-//!
-//! Nothing here names the retired walker or `project_field_defs`. Every line is
-//! derived from one [`zeroship_migrate::render_artifacts`] call, which is the real entry
-//! point on both sides of the move, so this file is byte-identical before and after the
-//! switch and the capture measures the walker purely by having been run first.
+//! Recorded migrations and lifecycle carriers are rendered through the public
+//! artifact entry point. The reduction includes whole-artifact hashes, field
+//! metadata and SQLite rebuild DDL so each consumer remains observable.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;

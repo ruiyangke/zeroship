@@ -1,145 +1,27 @@
-//! Native `Db.transaction(asyncFn, opts?)` orchestrator.
+//! Transaction orchestration shared by Rust callers and the V8 adapter.
 //!
-//! Transaction orchestration lives **entirely in Rust**.
-//! The creator API is unchanged — `await env.db.transaction(async tx =>
-//! {...})` commits on resolve, rolls back on throw — but the begin /
-//! commit / rollback / nested-savepoint state machine moved out of the
-//! bootstrap's JS `transactionImpl` and into `transaction_dispatch`.
-//! `db.beginTransaction()` and the `Transaction` v8_class methods
-//! (`commit`/`rollback`/`collection`) no longer exist on the JS surface.
+//! The reducer owns admission, savepoint frames, settlement and cleanup decisions.
+//! The driver executes its actions; host adapters invoke callbacks and report their
+//! outcomes without owning SQL sessions.
 //!
-//! ## The orchestrator runs on the SC-1 reducer
+//! Top-level transactions serialize through an app's transaction lane. Nested
+//! callbacks reuse its session and open distinct savepoints. Captured transaction
+//! scopes bind operations to their generation and frame; unrelated callbacks keep
+//! using autocommit execution.
 //!
-//! **This module owns the protocol and NOT the V8 shape, which is the reverse
-//! of what this paragraph said until 2026-09-02.** The promises, continuations
-//! and `.then` handlers moved to the adapter tier's `v8_classes::transaction`; eleven
-//! items went, picked by whether their signature names a `v8::` type. What
-//! stays here is the state machine and the I/O it drives: every transition is
-//! an event applied to [`reducer::TxReducer`], and every statement reaching the
-//! wire is an [`reducer::Action`] [`driver`] was told to issue. There is no
-//! second copy of the rules: the depth cap, the savepoint names, the effect
-//! fate, the session disposition and the admission release all live in the
-//! state machine.
-//!
-//! The eight-step flow below therefore spans two files. Steps 1, 4, 5, 6 and
-//! the two handlers are over in the adapter; steps 2, 3, 7 and 8 resolve here,
-//! through `exec_begin_or_savepoint` and `exec_settle`. The data crossing
-//! between them is an app id, a [`reducer::frames::FrameId`] and a
-//! [`SettleOutcome`] - never a scope, never a resolver.
-//!
-//! 1. `transaction_dispatch` (a sync v8_method body) mints the outer
-//!    `v8::PromiseResolver` and returns its promise to JS immediately.
-//! 2. It reads the calling frame's **async context**
-//!    (the adapter tier's `tx_scope`) to decide whether this is a **top-level**
-//!    transaction (not inside any transaction callback → admit a reducer and
-//!    emit `BEGIN`) or a **nested** one (inside this app's enclosing callback →
-//!    open a frame and emit `SAVEPOINT`). It is deliberately NOT "does this app
-//!    have a transaction open right now" — that test cannot tell a nested call
-//!    from an unrelated concurrent one, and reading it that way silently folded
-//!    one request's transaction into another's (see that module for the
-//!    measurement).
-//! 3. A spawned op takes the admission claim as an RAII [`TxAdmission`] guard
-//!    and runs the `BEGIN` / `SAVEPOINT` through the reducer. On success it
-//!    hands back a `zeroship_runtime::state::ResolveValue::Continuation`; on
-//!    failure the guard's drop releases the claim, retires the reducer and
-//!    withdraws any session that was installed.
-//! 4. The continuation runs inside the pump's V8 scope:
-//!    `v8_classes::transaction::mint_tx_view`
-//!    builds the tx-view object (collections-as-props, no
-//!    commit/rollback methods), then the creator callback is invoked
-//!    inside a `v8::TryCatch` to capture a synchronous throw.
-//! 5. The callback's return is coerced to a Promise
-//!    (`coerce_to_promise`): an already-Promise is used as-is; a plain
-//!    value is wrapped resolved; a synchronous throw skips straight to
-//!    the rollback path.
-//! 6. `.then(resolve_handler, reject_handler)` is attached to that
-//!    Promise. The handlers are native `v8::Function`s whose `.data()`
-//!    carries a heap `TxFinalizer` (the outer resolver + the FRAME ID + the
-//!    request id — never a savepoint name).
-//! 7. On the creator promise **resolving**, `tx_resolve_handler` settles:
-//!    `COMMIT` at the root, `RELEASE` for a frame.
-//! 8. On the creator promise **rejecting**, `tx_reject_handler` settles:
-//!    `ROLLBACK` at the root, `ROLLBACK TO` + `RELEASE` for a frame.
-//!
-//! ## Two defects this shape removes, by name
-//!
-//! - **DBR-03**, "an absent client is proof terminal SQL ran". The settle path
-//!   used to read an empty transaction slot as "already settled", release the
-//!   claim and return success **without sending anything**. Only `Settled` ends
-//!   a settle early now; a settle that arrives while an operation owns the
-//!   session waits in `Quiescing`, and a session that is genuinely unreachable
-//!   when terminal SQL is due settles as indeterminate and withdraws.
-//! - **DBR-11**, the leaked admission claim. Cancellation between taking the
-//!   claim and `BEGIN` returning left it held forever. [`TxAdmission`] covers
-//!   exactly that window, and from `Idle` onward the reducer emits
-//!   `ReleaseAdmission` on every path to `Settled`.
-//!
-//! Savepoint names are the frame stack's monotonic sequence, never
-//! `zs_sp_<depth>`: `ROLLBACK TO SAVEPOINT` leaves the savepoint defined and
-//! PostgreSQL resolves a name to the most recently established one, so a reused
-//! name shadows an enclosing frame and sends its rollback to the wrong scope.
-//!
-//! ## Single-connection model & backend scope
-//!
-//! There is exactly one transaction connection slot per (app, isolate).
-//! It lives in `ThreadDbContext::tx_conns` and a second top-level
-//! transaction for the same app **waits** for it
-//! ([`AwaitTxClaim`]) rather than racing for it.
-//!
-//! An earlier version of this paragraph said "V8 is single-threaded per
-//! isolate, so only one transaction connection is active at a time",
-//! which is why the slot was treated as safe to read ambiently. It does
-//! not follow. Single-threaded means one *executing frame* at a time, not
-//! one *in-flight operation*: a worker thread multiplexes many requests
-//! over one isolate and hands the thread to another dispatch at every
-//! `.await`, so two `transaction()` calls overlap routinely. The
-//! serialisation above is what actually makes the one-slot model hold.
-//!
-//! Nested savepoints reuse the **same** connection (that is the whole
-//! point of `SAVEPOINT`), so no new connection is acquired for a nested
-//! `transaction()`.
-//!
-//! **Known gap.** Ordinary (non-transactional) CRUD still routes through
-//! that slot ambiently: [`crate::exec::run_sql`] asks
-//! `has_tx_for(app_id)` with no notion of *whose* transaction it is, so a
-//! plain `env.db.x.insert()` issued while some unrelated unit of work
-//! holds a transaction open executes inside it and is undone by its
-//! rollback. Measured on both tiers (`cxPlain` in
-//! `examples/db-todos/tests/database.test.ts`). Closing it means capturing the
-//! async scope at each CRUD dispatch site the way this module now does
-//! for `transaction()`.
-//!
-//! The top-level `BEGIN` path acquires a backend-specific dedicated
-//! client via [`crate::backend::DatabaseFixture::fixture_session`]
-//! and parks it in the per-isolate `tx_conn` slot. Postgres stores a
-//! dedicated libpq connection; SQLite stores a handle to the shared
-//! session actor and drives the same `BEGIN` / `SAVEPOINT` /
-//! `COMMIT` / `ROLLBACK` verbs over that one connection. SQLite ignores
-//! the SDK isolation-level hint (it has no `ISOLATION LEVEL` clause);
-//! the successful-path semantics remain Tier-1 parity, while
-//! concurrency/isolation nuance stays documented as a divergence.
+//! PostgreSQL transactions hold an owned pool lease. SQLite reserves a transaction
+//! connection on its actor, separate from autocommit work. An uncertain session is
+//! discarded rather than reused. Admission guards release abandoned claims.
 
 #![allow(unsafe_code)]
 
-/// The SC-1 transaction protocol reducer.
-///
-/// A pure state machine - nine states, one gate for every forcing publisher,
-/// one deadline slot, one lifecycle classifier. It performs no I/O and owns no
-/// session, which is what makes SC-1's invariants checkable without a database.
-///
-/// The adapter tier's `transaction_dispatch` runs on it: every begin, frame open, frame close
-/// and settlement below is an event applied to this machine, and the SQL that
-/// results is whatever [`driver`] was told to issue.
+/// Pure transaction state machine. It owns lifecycle decisions without performing I/O.
 pub mod reducer;
 pub mod scope;
 
 /// The driver: the only place a reducer action becomes I/O.
 pub mod driver;
 
-// The canceller's doc comment used to sit here, above a `pub mod cancel;` that
-// #122 moved to `backend/cancel.rs` - the declaration went, the documentation
-// stayed, and rustdoc then attached it to whatever came next. Deleted rather
-// than re-pointed: `backend/mod.rs:80` declares the module and carries its own.
 
 #[cfg(test)]
 pub mod probe;
@@ -148,23 +30,11 @@ use crate::exec::clear_pending_emits;
 use crate::tx_route::TxRoute;
 use zeroship_data_orm::error::DbError;
 
-/// Maximum nesting depth for `env.db.transaction(...)` calls — the
-/// outermost `BEGIN` plus this many `SAVEPOINT` levels. A `transaction()`
-/// call that would open the `(MAX_SAVEPOINT_DEPTH + 1)`-th savepoint
-/// rejects with `savepoint_depth_exceeded`.
-///
-/// 8 matches the proposal's depth cap (Q-P9-D). Real code rarely nests
-/// transactions beyond two or three levels; the cap is a runaway-recursion
-/// guard, not a workload limit.
+/// Maximum savepoint nesting beneath the top-level transaction.
+/// Deeper callback nesting is refused with `savepoint_depth_exceeded`.
 pub const MAX_SAVEPOINT_DEPTH: u32 = 8;
 
-// ---------------------------------------------------------------------------
-// TxFinalizer — heap state shared by the resolve / reject handlers
-// ---------------------------------------------------------------------------
 
-// ---------------------------------------------------------------------------
-// transaction_dispatch — the v8_method entry point
-// ---------------------------------------------------------------------------
 
 /// Future that resolves once this app owns the top-level-transaction
 /// claim (see [`crate::context::ThreadDbContext::try_claim_tx`]).

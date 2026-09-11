@@ -1,28 +1,8 @@
-//! The type that makes SQL text unrepresentable.
+//! Validated SQL identifiers with role-specific reservations.
 //!
-//! # The problem this replaces
-//!
-//! `crates/zeroship-data-sql/src/compile.rs` builds SQL by string concatenation.
-//! A caller-supplied name reaches a `format!` and correctness rests on a
-//! validator having been called first, on a path that is not the one doing the
-//! formatting. The validators are good ones - `validate_collection` and
-//! `validate_field_name` both refuse NUL bytes, over-long names, non-ASCII, and
-//! a table of reserved shapes - but they are *functions someone remembered to
-//! call*, and the type that reaches the renderer afterwards is `&str`, which is
-//! also the type of everything they refused.
-//!
-//! [`Ident`] closes that gap by construction. It has exactly one constructor,
-//! [`Ident::parse_as`]. Its field is private, so it cannot be built by struct
-//! literal; there is no `From<String>`, no `FromStr`, no `Deserialize` (this
-//! crate has no `serde` dependency at all - see `Cargo.toml`), and no
-//! `into_string`. A renderer that holds an `Ident` holds something that passed
-//! the fence, and nothing else in this crate accepts a bare string in a
-//! position where SQL text would land.
-//!
-//! The control for the three `compile_fail` blocks below. A `compile_fail`
-//! doctest passes on ANY compile error, including a typo in a path, so without
-//! a companion block that does compile over the same names they would all be
-//! satisfied by `zeroship_data_sqln` and prove nothing.
+//! `Ident::parse_as` is the public construction boundary. Collection, column and
+//! alias roles have different reserved-name rules; system-field declaration rules
+//! belong to migration validation so queries can still address those fields.
 //!
 //! ```
 //! use zeroship_data_sql::{Ident, IdentRole};
@@ -30,63 +10,25 @@
 //! assert_eq!(id.as_str(), "users");
 //! assert!(Ident::parse_as("users\"; DROP TABLE users; --", IdentRole::Collection).is_err());
 //! ```
-//!
 //! ```compile_fail
 //! // The private field means the newtype cannot be forged.
 //! let forged = zeroship_data_sql::Ident("users\"; DROP TABLE users; --".to_string());
 //! ```
-//!
 //! ```compile_fail
 //! // ... and it cannot be opened up either.
 //! let id = zeroship_data_sql::Ident::parse_as("users", zeroship_data_sql::IdentRole::Collection).unwrap();
 //! let raw: String = id.0;
 //! ```
-//!
 //! ```compile_fail
 //! // There is no blanket conversion from text.
 //! let id: zeroship_data_sql::Ident = "users".to_string().into();
 //! ```
-//!
-//! # Why the role is a parameter and not decoration
-//!
-//! The fences genuinely differ, and SC-3 is emphatic that they are **a pair,
-//! not a single guardian**: a *table* name is fenced by `validate_collection`'s
-//! prefix list, a *column* name by a second list in `RESERVED_NAMES` (`_`,
-//! `__zs_`, `__zeroship_`, the `_masked` sibling suffix, and the six
-//! classification names).
-//!
-//! **`validate_collection` is FORKED.** The data plane and migration engine
-//! once reserved different platform prefixes. They now execute matching
-//! `PLATFORM_RESERVED_COLLECTION_PREFIXES` slices, and the data-plane suite
-//! compares every copy. This crate is the third copy because its zero-dependency
-//! boundary forbids importing either validator.
-//!
-//! Normal declarative migration loading now calls the migration engine's
-//! `validate_collection`, so a creator `createTable` is fenced before lowering.
-//! Code paths that do not load migration IR must still invoke their own copy;
-//! matching slices do nothing by themselves.
-//!
-//! Two role-specific decisions are deliberate departures from the shapes in
-//! `query.rs`, and each is called out on the table that carries it:
-//!
-//! * [`IdentRole::Alias`] permits a single leading `_`, which
-//!   `validate_field_name` does not. See [`ALIAS_RESERVATIONS`].
-//! * No role fences the seven platform system-field names. That reservation
-//!   fires only at schema-declaration time
-//!   (`validate_field_name_for_declaration`), and this crate plans no DDL -
-//!   `db.users.find({ id: "..." })` is the canonical query shape and must keep
-//!   working.
 
 use core::fmt;
 
-/// The `PostgreSQL` identifier length limit (`NAMEDATALEN - 1`), in bytes.
-///
-/// `PostgreSQL` does not error on a longer identifier; it silently truncates and
-/// emits a NOTICE, so two distinct names can collapse onto one. Refusing here
-/// is right for names a creator *chose* - they can shorten them, and the
-/// refusal says so. It would be wrong for names the platform *derives*, which
-/// is why `zeroship_data_sql::derived_ident::cap_ident_name` caps rather than refuses;
-/// this crate never derives a name.
+/// Maximum accepted identifier length.
+/// Rejecting overlong names prevents PostgreSQL truncation from merging distinct
+/// creator-selected identifiers. Migration code separately caps generated names.
 pub const MAX_IDENT_BYTES: usize = 63;
 
 /// Platform-owned collection prefixes mirrored by both query validators.
@@ -119,7 +61,7 @@ pub enum IdentRole {
     /// physical side of a [`crate::ProjectionSource::Stored`].
     ///
     /// It exists for the same reason [`Self::Alias`] does. The platform's stored
-    /// forms are spelled with the very prefixes [`COLUMN_RESERVATIONS`] refuses,
+    /// forms are spelled with the very prefixes `COLUMN_RESERVATIONS` refuses,
     /// because refusing them is what stops a creator declaring one; the platform
     /// still has to name them. Splitting the role is how that is expressed
     /// without weakening the creator-facing fence.
@@ -269,7 +211,7 @@ const COLUMN_RESERVATIONS: &[Reservation] = &[
 /// Fences for a column the platform references rather than one a creator
 /// declared.
 ///
-/// This is [`COLUMN_RESERVATIONS`] with the four platform-shape rows removed -
+/// This is `COLUMN_RESERVATIONS` with the four platform-shape rows removed -
 /// `Prefix("_")`, `Prefix("__zs_")`, `Prefix("__zeroship_")` and
 /// `Suffix("_masked")` - because those rows exist to stop a CREATOR naming a
 /// platform column, and this role is the platform doing exactly that. The
@@ -293,7 +235,7 @@ const STORED_COLUMN_RESERVATIONS: &[Reservation] = &[
 /// asymmetry is the reason the role exists. The platform's own synthetic result
 /// columns are spelled that way - `_distance` on a vector search - and they are
 /// emitted as aliases, never declared as columns. The `_` fence on
-/// [`COLUMN_RESERVATIONS`] is what stops a creator column shadowing one; the
+/// `COLUMN_RESERVATIONS` is what stops a creator column shadowing one; the
 /// alias side is the platform's to spell.
 ///
 /// The `_masked` suffix is likewise allowed here, because an internal-exposure

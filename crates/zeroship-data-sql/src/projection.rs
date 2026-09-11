@@ -13,14 +13,7 @@ use crate::path::FieldPath;
 use crate::predicate::AggregateRef;
 use core::fmt;
 
-/// Why a field is in the list.
-///
-/// This answers a question the union rule states but does not resolve: whether
-/// the platform fields are visible to the creator. `Platform` fields are added
-/// by the planner and stripped before the row reaches user code **unless** the
-/// declared schema names them too, in which case they arrive as `Declared` and
-/// stay. Without the distinction the rule is ambiguous in a way that shows up
-/// as either a leaked `deleted_at` or a missing one.
+/// Visibility of a selected field in the caller’s result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Exposure {
     /// The creator's schema names this field; it reaches user code.
@@ -32,26 +25,8 @@ pub enum Exposure {
     Internal,
 }
 
-/// The synthetic scalar a search ranks by.
-///
-/// # This is a KIND, not an expression, and the distinction is load-bearing
-///
-/// The variant says only *which* scalar the row carries. Everything needed to
-/// compute it (the column, the query vector, the metric, the point, the radius)
-/// lives on the [`crate::SearchCriterion`] the plan already holds, and the
-/// lowering reads it from there.
-///
-/// Carrying the operands here instead would put them in the plan **twice**, and
-/// two copies of one fact is two spellings of one query: a projection whose
-/// scalar disagreed with the criterion would render a statement that ranks by
-/// one vector and filters by another. The canonical-form property rests on
-/// there being exactly one place each fact lives.
-///
-/// The consequence is that a scalar is only meaningful inside a search, which
-/// is enforced rather than documented: [`Projection::rows`] and
-/// [`Projection::aggregate`] refuse one, so the only way a
-/// [`ProjectionSource::SearchScalar`] exists is
-/// [`crate::SearchBuilder::build`] installing it.
+/// The scalar a search ranks by. Its operands live on [`crate::SearchCriterion`]
+/// so the projection cannot disagree with the search. Only search builders may add it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum SearchScalarKind {
     /// Distance from the row's vector to the query vector, under the
@@ -62,16 +37,8 @@ pub enum SearchScalarKind {
 }
 
 impl SearchScalarKind {
-    /// The output name this scalar is projected under.
-    ///
-    /// These are the names the shipped builders emit - `_distance`
-    /// (`crates/zeroship-data-sql/src/compile.rs:5007`) and `_distance_m`
-    /// (`:5075`) - and they are spelled at **exactly one site**, here, for the
-    /// same reason the reservation tables split by role: a leading `_` is
-    /// refused for a column ([`crate::IdentRole::Column`]) and permitted for an
-    /// alias ([`crate::IdentRole::Alias`]), so the platform can name these and
-    /// a creator cannot shadow them. A second site that spelled the name would
-    /// be a second place that fence could be argued around.
+    /// Output alias for the search scalar. These names are valid aliases but reserved
+    /// against creator column names.
     #[must_use]
     pub const fn alias_str(self) -> &'static str {
         match self {
@@ -221,23 +188,8 @@ impl ProjectedField {
         })
     }
 
-    /// A column whose PHYSICAL name differs from the LOGICAL name it is
-    /// returned under: `"<physical>" AS "<logical>"`.
-    ///
-    /// This is the only expressible form of physical/logical divergence, and it
-    /// is why [`Self::column`] is not enough on its own: that constructor
-    /// derives the alias from the name, so it can never express a divergence.
-    ///
-    /// The caller supplies both names. Nothing here derives one from the other,
-    /// which is deliberate: the previous constructor derived a `<col>_masked`
-    /// sibling at exactly one site, and the storage flip stopped creating that
-    /// column, so the derivation outlived the shape it described. A rule about
-    /// where a value is physically stored belongs to whoever owns the storage
-    /// layout, not to the grammar that renders a name.
-    ///
-    /// `physical` must have been parsed under [`crate::IdentRole::StoredColumn`],
-    /// which is the role that permits the platform's own column prefixes while
-    /// still refusing the backend catalogs and the classification names.
+    /// Select a physical column under a logical alias. The caller supplies the storage
+    /// mapping and must parse `physical` as [`crate::IdentRole::StoredColumn`].
     ///
     /// # Errors
     ///

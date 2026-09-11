@@ -1,83 +1,11 @@
-//! The search family: nearest-neighbour over a vector column, and
-//! within-radius over a geographic point.
+//! Backend-neutral vector and geographic search criteria.
 //!
-//! # Two kinds, and only two
+//! A search names the field, metric, predicates and result limit. Backend lowering
+//! chooses operators or distance functions; unsupported metrics return a typed
+//! error rather than silently changing the ranking.
 //!
-//! SC-3 names the family as "vector and spatial - **and only those two**", and
-//! records why the third is absent: full-text search was deleted, and "the IR
-//! must not carry a family for a feature that no longer exists". That is
-//! checked rather than trusted - `to_tsquery`, `tsvector`, `ts_rank`,
-//! `plainto_tsquery`, `websearch_to_tsquery`, `fts5` and `bm25` appear nowhere
-//! in `crates/zeroship-data-sql/src/compile.rs`,
-//! `crates/zeroship-data-v8/src/` or `sdks/db/src/` (swept 2026-08-28); the
-//! only occurrences in the tree are in `docs/archive/` and in the removal notes
-//! at `crates/zeroship-migrate-core/src/render/declarative.rs:1824-1831`.
-//!
-//! The one surviving trace is a reservation: `_score` is fenced as a synthetic
-//! result column and **nothing emits it**. This module does not resurrect it.
-//!
-//! # What the shared grammar must NOT learn
-//!
-//! The two backends do not merely spell this family differently - they compute
-//! it differently, and the difference is not a dialect's punctuation:
-//!
-//! | | `PostgreSQL` | `SQLite` |
-//! | --- | --- | --- |
-//! | vector | `"col" <=> $1::vector`, an operator on the base table | a scalar distance function on the base BLOB column |
-//! | geo | `ST_Distance(col, ST_MakePoint($1,$2)::geography)` | a haversine computed in Rust over a BLOB, sorted in the worker |
-//!
-//! Neither shape is expressible as the other with a different operator string,
-//! so **no operator, function name or join shape appears in this module.** A
-//! [`SearchCriterion`] says *what is being ranked and by what measure*; how a
-//! backend computes that is entirely inside that backend's lowering
-//! ([`crate::render::postgres::render_search`] is the only one written).
-//!
-//! This is the answer to the question SC-3's decision 2 poses for this family.
-//! A shared node carrying `<=>` would make the `SQLite` arm either a lie or a
-//! refusal of a query it can serve; a shared node carrying "cosine distance"
-//! leaves both backends free and neither privileged.
-//!
-//! # How a one-backend capability is represented
-//!
-//! [`VectorMetric::InnerProduct`] exists on `pgvector` (`vector_ip_ops`) and
-//! does not exist in `vec0`, which offers cosine and L2 only.
-//!
-//! The IR represents that absence by **representing the metric and letting the
-//! backend refuse it**, not by omitting the variant and not by rendering it to
-//! nothing. The distinction is the whole point:
-//!
-//! * a variant `SQLite` **refuses** is a typed error naming the metric, from
-//!   `SQLite`'s own module - which is what
-//!   `crates/zeroship-data-orm/src/backend/sqlite/vector.rs:61`
-//!   (`reject_inner_product`) already does, returning
-//!   `vector_unsupported_metric`;
-//! * a variant that **renders to nothing** would return the rows a cosine
-//!   search would have returned, ranked by the wrong measure, with no error -
-//!   the silent-emulation failure decision 2 rejects by name.
-//!
-//! So the metric is not narrowed to the intersection of the two backends. A
-//! plan that `PostgreSQL` can serve stays expressible, and the dev tier says so
-//! instead of guessing.
-//!
-//! # The bound that three layers currently disagree about
-//!
-//! `k` is capped in three places today and the three numbers differ:
-//!
-//! * the SDK validates `1..=1000` (`sdks/db/src/collection/vector-geo.ts:22-35`,
-//!   error `INVALID_K`);
-//! * the `PostgreSQL` builder refuses over `MAX_SEARCH_LIMIT = 500`
-//!   (`crates/zeroship-data-sql/src/compile.rs:597`, enforced at `:4964`);
-//! * the `SQLite` arm has **no cap at all** - `build_vector_search_sql` never
-//!   calls the validator and formats `k` straight into the statement
-//!   (`crates/zeroship-data-orm/src/backend/sqlite/vector.rs:117`).
-//!
-//! A `k` of 750 is therefore refused in production and served in dev. Here
-//! there is one bound, it is [`crate::RowLimit`] - the same type and the same
-//! ceiling of 500 the read family already carries, because `MAX_SEARCH_LIMIT`
-//! and `MAX_QUERY_LIMIT` are the same number - and it has **no absent value**,
-//! so the two different caller-side defaults (`k` defaults to 10 at
-//! `crates/zeroship-data-orm/src/crud/mod.rs:2138`, `near.limit` defaults to
-//! 100 at `crates/zeroship-data-sql/src/compile.rs:5058`) have nowhere to live.
+//! `RowLimit` bounds results. Vector dimensions and geographic inputs are validated
+//! by their value types before rendering.
 
 use crate::ident::Ident;
 use crate::literal::{Finite, LiteralError, QueryVector};

@@ -17,7 +17,7 @@
 //! preserves the extended-code detail for operator logs.
 //!
 //! Sources: SQLite extended result codes:
-//! https://www.sqlite.org/rescode.html#extrc — the integer constants
+//! <https://www.sqlite.org/rescode.html#extrc> — the integer constants
 //! used in the match arms below are the canonical values, NOT pulled
 //! from `libsqlite3_sys` constants (which would force a `use` for
 //! each — the integers are part of the SQLite stable ABI).
