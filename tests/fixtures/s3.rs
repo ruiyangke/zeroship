@@ -29,17 +29,32 @@ impl Minio {
             .start()
             .expect("S3 tests require Docker and MinIO");
         for command in [
-            vec!["mc", "alias", "set", "fixture", "http://127.0.0.1:9000", ACCESS, SECRET],
+            vec![
+                "mc",
+                "alias",
+                "set",
+                "fixture",
+                "http://127.0.0.1:9000",
+                ACCESS,
+                SECRET,
+            ],
             vec!["mc", "mb", "fixture/storage-fixture"],
         ] {
-            container.exec(ExecCommand::new(command).with_cmd_ready_condition(CmdWaitFor::exit_code(0)))
+            container
+                .exec(ExecCommand::new(command).with_cmd_ready_condition(CmdWaitFor::exit_code(0)))
                 .expect("initialize S3 fixture bucket");
         }
-        let endpoint = format!("http://{}:{}",
+        let endpoint = format!(
+            "http://{}:{}",
             container.get_host().expect("MinIO host"),
-            container.get_host_port_ipv4(9000).expect("MinIO mapped port"),
+            container
+                .get_host_port_ipv4(9000)
+                .expect("MinIO mapped port"),
         );
-        Self { _container: container, endpoint }
+        Self {
+            _container: container,
+            endpoint,
+        }
     }
 
     pub fn config(&self, prefix: &str) -> compio_s3::S3Config {

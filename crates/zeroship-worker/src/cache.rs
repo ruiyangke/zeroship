@@ -9,7 +9,7 @@ use uuid::Uuid;
 use zeroship_bundle::compiled::CompiledManifest;
 use zeroship_bundle::Manifest;
 use zeroship_core::types::{AppNetPolicy, AppRuntimeLimits};
-use zeroship_plugin_storage::StorageBackendConfig;
+use zeroship_storage::StorageBackendConfig;
 use zeroship_core::net_policy::{EgressRule, Verdict};
 use zeroship_runtime::{EnvSnapshot, ModuleEntry, NetPolicy};
 use zeroship_runtime::plugin::NativePlugin;
@@ -88,7 +88,7 @@ thread_local! {
     static KV_STORE: RefCell<Option<zeroship_kv::KvStore>> = const { RefCell::new(None) };
     /// Parsed object-storage backend config for the `env.storage` namespace.
     /// Held per-thread like `DB_URL`. When `Some`, `create_plugins` mints a
-    /// `StoragePlugin` over the selected backend: `LocalFs` (a SHARED volume
+    /// `StorageBinding` over the selected backend: `LocalFs` (a SHARED volume
     /// across nodes — the same multi-node pattern the deploy blob store uses)
     /// or `S3` (S3/R2/MinIO — inherently shared). When `None`, the `storage`
     /// namespace is absent.
@@ -279,9 +279,9 @@ fn create_plugins() -> Vec<Arc<dyn NativePlugin>> {
         )));
     }
     if let Some(cfg) = STORAGE_BACKEND.with(|s| s.borrow().clone()) {
-        match zeroship_plugin_storage::build_backend(&cfg) {
+        match zeroship_storage::StorageStore::open(&cfg) {
             Ok(backend) => plugins.push(Arc::new(
-                zeroship_plugin_storage::StoragePlugin::with_backend_and_meter(
+                zeroship_storage_v8::StorageBinding::new(
                     backend,
                     meter.clone(),
                 ),

@@ -26,7 +26,7 @@ use zeroship_core::config::{
 use zeroship_bundle::{
     build_blob_store, build_workflow_blob_store, BlobStore, StoreUrl, WorkflowBlobStore,
 };
-use zeroship_plugin_storage::StorageBackendConfig;
+use zeroship_storage::StorageBackendConfig;
 use zeroship_runtime::init::init_v8;
 
 use crate::sync::{SharedEnvs, SharedVersions};
@@ -343,10 +343,7 @@ fn main() -> std::io::Result<()> {
     let storage_backend = if storage_raw.is_empty() {
         None
     } else {
-        // `file://` is config ergonomics for a local path; strip it so the
-        // parser sees a bare path. `s3://` falls through to the S3 leg.
-        let arg = storage_raw.strip_prefix("file://").unwrap_or(&storage_raw);
-        match StorageBackendConfig::parse(arg) {
+        match StorageBackendConfig::parse(&storage_raw) {
             Ok(c) => Some(c),
             Err(e) => {
                 eprintln!("worker: invalid --storage-url: {e}");
@@ -552,7 +549,7 @@ fn main() -> std::io::Result<()> {
     // namespace silently per thread.
     if let Some(cfg) = &storage_backend {
         if cfg.is_remote() {
-            if let Err(e) = zeroship_plugin_storage::build_backend(cfg) {
+            if let Err(e) = zeroship_storage::StorageStore::open(cfg) {
                 eprintln!("worker: --storage-url s3 backend init failed: {e}");
                 std::process::exit(1);
             }

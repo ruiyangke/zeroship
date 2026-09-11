@@ -304,7 +304,7 @@ note "putLarge HTTP $PUT_CODE in ${PUT_ELAPSED}s; worker peak RSS over $SAMPLES 
 
 # How much actually reached MinIO. The on-disk S3 key is NOT `storage/$SKEY`:
 # the S3 backend stores under `<config-prefix>/<app_id>/<bucket>/<key>` (see
-# crates/zeroship-plugin-storage/src/backend/s3.rs::object_key + compio-s3 config
+# crates/zeroship-storage/src/backend/s3.rs::object_key + compio-s3 config
 # prefix), i.e. `storage/$ST_APP/gallery/$SKEY` here — the app-level bucket is
 # `gallery` (the BUCKET const in examples/storage-gallery/src/server.ts). A
 # bare `mc stat storage/$SKEY` therefore ALWAYS reports "object does not

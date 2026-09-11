@@ -4,12 +4,8 @@
 //! - `LocalFs` — filesystem-backed, always available (the dev default)
 //! - `S3` — S3/R2/MinIO/Spaces/B2 via S3-API (behind the `s3` feature)
 //!
-//! The trait methods are async + `Send + Sync` so they can live behind
-//! `Arc<dyn Backend>` and survive the compio executor's work-stealing.
-//!
-//! Error type is `String` — every op ultimately surfaces to JS via the
-//! callback layer's `OpResult::Failed { error: String }`, so anything
-//! richer would get flattened there anyway.
+//! Backends are shareable across threads; operation futures stay on the caller's
+//! compio runtime. Rust callers and language bindings receive typed errors.
 //!
 //! ## Streaming is the kernel; buffered is a convenience
 //!
@@ -19,6 +15,8 @@
 //! on upload and by the consumer's pull rate on download). The S3 backend
 //! turns `put_stream` into an S3 multipart upload (bounded `PART_SIZE`
 //! parts), so an arbitrarily large object never lands fully in RAM.
+
+use crate::StorageError;
 
 use std::time::SystemTime;
 
@@ -31,15 +29,6 @@ pub use local::LocalFs;
 pub mod s3;
 #[cfg(feature = "s3")]
 pub use s3::{S3UploadTuning, S3};
-
-/// Buffer cap for an `env.storage.putStream` upload stream — 2× the S3
-/// `PART_SIZE` (8 MiB) so the V8 producer can generate a full *next* part while
-/// the current part is mid-PUT (overlapping CPU with upload I/O), and so an app
-/// `ReadableStream` chunk up to this size is accepted rather than rejected at
-/// the 4 MiB default `DEFAULT_STREAM_BUFFER_CAP`. Backend-agnostic (the
-/// `LocalFs` upload path uses the same buffer) so it is not behind the `s3`
-/// feature. Keep in sync with `s3::PART_SIZE`.
-pub const UPLOAD_STREAM_BUFFER_CAP: usize = 16 * 1024 * 1024;
 
 /// The content type an object is advertised with when the writer supplied
 /// none. Every backend applies it at its own `put_stream` boundary, so a
@@ -113,7 +102,7 @@ pub struct ListPage {
 
 /// One chunk of a streamed object, or a terminal error. `None` from
 /// [`ChunkSource::next_chunk`] means clean EOF.
-pub type ChunkResult = Result<Bytes, String>;
+pub type ChunkResult = Result<Bytes, StorageError>;
 
 /// A single-pass, single-threaded async source of object bytes.
 ///
@@ -162,24 +151,13 @@ pub type BoxByteStream = Box<dyn ChunkSource>;
 // The trait
 // ---------------------------------------------------------------------------
 
-/// Pluggable object-storage backend. All implementations see the same
-/// namespacing contract — the kernel enforces `<app_id>/<bucket>/<key>`
-/// separation before the backend sees anything, so implementations only
-/// worry about their own I/O, not multi-tenancy.
+/// Low-level object storage for trusted hosts and backend implementers.
+/// Application callers receive a namespace-bound [`crate::Storage`] handle,
+/// which validates coordinates and limits before invoking this trait.
 ///
-/// Path-traversal rejection lives in `validate_object_coords` below, not
-/// per-backend — every implementation gets it for free by calling the
-/// helper at the top of each op.
-///
-/// **Streaming is the kernel.** `put_stream` / `get_stream` are the
-/// required ops; `put` / `get` have default impls that drive the streaming
-/// path (so adding a backend means implementing exactly two streaming
-/// methods plus `delete` / `list`).
-// Trait is `Send + Sync` so it can live behind `Arc<dyn Backend>` on a
-// `NativePlugin` (which requires Send+Sync). Methods return `!Send`
-// futures via `(?Send)` because compio's async fs ops hold thread-local
-// state. That's fine — storage ops are always awaited on the same thread
-// that owns the worker's V8 isolate.
+/// Implementations own streaming upload/download, deletion and pagination.
+/// Buffered methods drain the streaming path. The backend is shareable across
+/// threads, while each operation's future runs on its calling compio runtime.
 #[async_trait::async_trait(?Send)]
 pub trait Backend: Send + Sync + std::fmt::Debug {
     /// Stream an object in. The backend pulls `body` chunk-by-chunk; nothing
@@ -191,7 +169,7 @@ pub trait Backend: Send + Sync + std::fmt::Debug {
         key: &str,
         body: BoxChunkSource,
         content_type: Option<&str>,
-    ) -> Result<u64, String>;
+    ) -> Result<u64, StorageError>;
 
     /// Stream an object out. `Ok(None)` if the key is absent; otherwise the
     /// metadata plus a [`ChunkSource`] the caller pulls to EOF.
@@ -200,14 +178,14 @@ pub trait Backend: Send + Sync + std::fmt::Debug {
         app_id: &str,
         bucket: &str,
         key: &str,
-    ) -> Result<Option<(ObjectMeta, BoxByteStream)>, String>;
+    ) -> Result<Option<(ObjectMeta, BoxByteStream)>, StorageError>;
 
     async fn delete(
         &self,
         app_id: &str,
         bucket: &str,
         key: &str,
-    ) -> Result<bool, String>;
+    ) -> Result<bool, StorageError>;
 
     /// List one page of keys. Entries come back in ascending key order, and
     /// never more than `req.limit` of them; [`ListPage::cursor`] tells the
@@ -218,7 +196,7 @@ pub trait Backend: Send + Sync + std::fmt::Debug {
         app_id: &str,
         bucket: &str,
         req: ListRequest<'_>,
-    ) -> Result<ListPage, String>;
+    ) -> Result<ListPage, StorageError>;
 
     // -- Buffered conveniences, built on the streaming path ----------------
 
@@ -232,7 +210,7 @@ pub trait Backend: Send + Sync + std::fmt::Debug {
         key: &str,
         bytes: &[u8],
         content_type: Option<&str>,
-    ) -> Result<u64, String> {
+    ) -> Result<u64, StorageError> {
         let src: BoxChunkSource = Box::new(OnceChunk::new(Bytes::copy_from_slice(bytes)));
         self.put_stream(app_id, bucket, key, src, content_type).await
     }
@@ -255,16 +233,16 @@ pub trait Backend: Send + Sync + std::fmt::Debug {
         bucket: &str,
         key: &str,
         max_bytes: u64,
-    ) -> Result<Option<(Vec<u8>, ObjectMeta)>, String> {
+    ) -> Result<Option<(Vec<u8>, ObjectMeta)>, StorageError> {
         let Some((meta, mut stream)) = self.get_stream(app_id, bucket, key).await? else {
             return Ok(None);
         };
         if meta.size > max_bytes {
-            return Err(format!(
+            return Err(StorageError::LimitExceeded(format!(
                 "storage: object size {} exceeds buffered-get cap {max_bytes} \
                  (use streaming getStream for large objects)",
                 meta.size
-            ));
+            )));
         }
         // Clamp the capacity hint to the cap — never trust the advertised size
         // to pre-allocate beyond what we are willing to buffer.
@@ -273,10 +251,10 @@ pub trait Backend: Send + Sync + std::fmt::Debug {
         while let Some(chunk) = stream.next_chunk().await {
             let chunk = chunk?;
             if buf.len() as u64 + chunk.len() as u64 > max_bytes {
-                return Err(format!(
+                return Err(StorageError::LimitExceeded(format!(
                     "storage: object body exceeds buffered-get cap {max_bytes} \
                      (use streaming getStream for large objects)"
-                ));
+                )));
             }
             buf.extend_from_slice(&chunk);
         }
@@ -291,19 +269,18 @@ pub trait Backend: Send + Sync + std::fmt::Debug {
 /// Reject inputs that would escape an app's keyspace. Used by every
 /// `Backend` impl; shipping it centrally means adding a new backend
 /// can't accidentally forget the check.
-pub fn validate_object_coords(app_id: &str, bucket: &str, key: &str) -> Result<(), String> {
-    if app_id.is_empty() || bucket.is_empty() || key.is_empty() {
-        return Err("storage: app_id/bucket/key must all be non-empty".into());
-    }
-    if app_id.contains('/') || app_id.contains("..") {
-        return Err(format!("storage: invalid app_id '{app_id}'"));
-    }
-    if bucket.contains('/') || bucket == "." || bucket == ".." {
-        return Err(format!("storage: invalid bucket name '{bucket}'"));
+pub fn validate_object_coords(app_id: &str, bucket: &str, key: &str) -> Result<(), StorageError> {
+    validate_list_coords(app_id, bucket)?;
+    validate_key(key)
+}
+
+fn validate_key(key: &str) -> Result<(), StorageError> {
+    if key.contains(['\\', '\0']) {
+        return Err(StorageError::InvalidArgument("storage: invalid key".into()));
     }
     for segment in key.split('/') {
         if segment.is_empty() || segment == "." || segment == ".." {
-            return Err(format!("storage: invalid key '{key}'"));
+            return Err(StorageError::InvalidArgument(format!("storage: invalid key '{key}'")));
         }
     }
     Ok(())
@@ -312,12 +289,24 @@ pub fn validate_object_coords(app_id: &str, bucket: &str, key: &str) -> Result<(
 /// The slimmer app_id/bucket check used by `list` (which allows an empty
 /// key — that's what "list all" means). Shared so `LocalFs` and `S3`
 /// reject the same inputs.
-pub fn validate_list_coords(app_id: &str, bucket: &str) -> Result<(), String> {
-    if app_id.contains('/') || app_id.contains("..") || app_id.is_empty() {
-        return Err(format!("storage: invalid app_id '{app_id}'"));
+pub fn validate_list_coords(app_id: &str, bucket: &str) -> Result<(), StorageError> {
+    if app_id.contains(['/', '\\', '\0']) || app_id == "." || app_id.contains("..") || app_id.is_empty() {
+        return Err(StorageError::InvalidArgument(format!("storage: invalid app_id '{app_id}'")));
     }
-    if bucket.contains('/') || bucket == "." || bucket == ".." || bucket.is_empty() {
-        return Err(format!("storage: invalid bucket name '{bucket}'"));
+    if bucket.contains(['/', '\\', '\0']) || bucket == "." || bucket == ".." || bucket.is_empty() {
+        return Err(StorageError::InvalidArgument(format!("storage: invalid bucket name '{bucket}'")));
+    }
+    Ok(())
+}
+
+/// Validate list selectors without treating their contents as a filesystem path.
+/// A prefix may be empty or end at a directory separator.
+pub fn validate_list_request(request: &ListRequest<'_>) -> Result<(), StorageError> {
+    if !request.prefix.is_empty() {
+        validate_key(request.prefix.strip_suffix('/').unwrap_or(request.prefix))?;
+    }
+    if let Some(cursor) = request.cursor {
+        validate_key(cursor)?;
     }
     Ok(())
 }

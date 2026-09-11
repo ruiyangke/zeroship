@@ -173,7 +173,7 @@ echo "  deployed backend: $DEPLOYED_STORAGE   mutation: $MUTATE"
 # shellcheck source=lib/binary_freshness.sh
 source "$ROOT/tests/lib/binary_freshness.sh"
 zs_check_binary_freshness "$ROOT" "$BIN" \
-  "crates/zeroship-plugin-storage/src crates/zeroship-runtime/src crates/zeroship-worker/src crates/zeroship-gateway/src crates/zeroship-control/src libs/compio-s3/src sdks/storage/src" \
+  "crates/zeroship-storage/src crates/zeroship-storage-v8/src crates/zeroship-runtime/src crates/zeroship-worker/src crates/zeroship-gateway/src crates/zeroship-control/src libs/compio-s3/src sdks/storage/src" \
   "zeroship zeroship-worker zeroship-gate zeroship-control dev-provision" \
   || { _zs_fresh_rc=$?; [ "$_zs_fresh_rc" -ne 0 ] && exit "$_zs_fresh_rc"; }
 

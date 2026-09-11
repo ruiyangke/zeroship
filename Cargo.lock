@@ -7889,9 +7889,10 @@ dependencies = [
  "zeroship-kv",
  "zeroship-kv-v8",
  "zeroship-metering",
- "zeroship-plugin-storage",
  "zeroship-plugin-workflow",
  "zeroship-runtime",
+ "zeroship-storage",
+ "zeroship-storage-v8",
 ]
 
 [[package]]
@@ -8492,26 +8493,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "zeroship-plugin-storage"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "base64",
- "bytes",
- "compio",
- "compio-s3",
- "futures",
- "serde_json",
- "thiserror 2.0.18",
- "tracing",
- "uuid",
- "v8",
- "zeroship-core",
- "zeroship-metering",
- "zeroship-runtime",
-]
-
-[[package]]
 name = "zeroship-plugin-workflow"
 version = "0.1.0"
 dependencies = [
@@ -8588,6 +8569,41 @@ dependencies = [
 ]
 
 [[package]]
+name = "zeroship-storage"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "compio",
+ "compio-s3",
+ "futures",
+ "serde_json",
+ "tempfile",
+ "testcontainers",
+ "thiserror 2.0.18",
+ "tracing",
+ "zeroship-core",
+]
+
+[[package]]
+name = "zeroship-storage-v8"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64",
+ "bytes",
+ "compio",
+ "serde_json",
+ "tempfile",
+ "uuid",
+ "v8",
+ "zeroship-core",
+ "zeroship-metering",
+ "zeroship-runtime",
+ "zeroship-storage",
+]
+
+[[package]]
 name = "zeroship-stream"
 version = "0.1.0"
 dependencies = [
@@ -8647,9 +8663,10 @@ dependencies = [
  "zeroship-kv-v8",
  "zeroship-metering",
  "zeroship-migrate-server",
- "zeroship-plugin-storage",
  "zeroship-plugin-workflow",
  "zeroship-runtime",
+ "zeroship-storage",
+ "zeroship-storage-v8",
  "zeroship-stream",
  "zstd",
 ]

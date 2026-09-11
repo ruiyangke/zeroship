@@ -1,27 +1,5 @@
-//! Cross-tenant isolation for the `env.storage` download-stream registry.
-//!
-//! The registry backing `getStream` / `readChunk` / `cancelStream` is a
-//! `thread_local!`, and the worker runs MANY apps' isolates on ONE OS thread
-//! (`crates/zeroship-worker/src/cache.rs`; the invariant is stated in AGENTS.md under
-//! "V8 per thread"). So the registry — and the monotonic id counter that
-//! makes its ids enumerable from 1 — is shared by every app on that thread.
-//!
-//! These tests reproduce the real shape: TWO `Runtime`s carrying two
-//! different `APP_ID`s, built and driven on ONE thread inside a single compio
-//! runtime, over a SHARED `LocalFs` root. Nothing is stubbed — the JS calls
-//! the registered native callbacks through V8 exactly as a deployed app does.
-//!
-//! What is asserted:
-//!
-//! 1. `readChunk` under app B cannot reach a stream opened by app A
-//!    (`cross_tenant_read_chunk_cannot_reach_another_apps_stream`).
-//! 2. `cancelStream` under app B cannot destroy a stream opened by app A
-//!    (same test — A drains successfully AFTER B has cancelled every id).
-//! 3. Undrained streams are bounded per app, so one app cannot pin
-//!    unbounded fds / HTTP bodies
-//!    (`undrained_get_streams_are_capped_per_app`), and the cap is charged
-//!    per app rather than per thread
-//!    (`the_live_stream_cap_is_per_app_not_per_thread`).
+//! Isolation and resource lifetime through real V8 storage callbacks.
+//! Runtimes share a compio thread while retaining their own storage handles.
 
 #![allow(clippy::future_not_send)]
 
@@ -36,7 +14,8 @@ use zeroship_runtime::{
     init_v8, EnvSnapshot, FetchOutcome, ModuleEntry, RequestCtx, Runtime, SettledFetch,
 };
 
-use zeroship_plugin_storage::StoragePlugin;
+use zeroship_storage::{LocalFs, StorageStore};
+use zeroship_storage_v8::StorageBinding;
 
 // ---------------------------------------------------------------------------
 // Harness — two isolates, one thread, one shared LocalFs root
@@ -47,7 +26,7 @@ fn module(source: &str) -> Vec<ModuleEntry> {
 }
 
 /// Build a real `Runtime` for `app_id` over `dir`, with the REAL
-/// `StoragePlugin` registered (same path the worker takes).
+/// `StorageBinding` registered (same path the worker takes).
 ///
 /// The trailing `exit_isolate()` mirrors `crates/zeroship-worker/src/cache.rs:405`
 /// ("Exit isolate so other isolates can be created/entered on this thread") —
@@ -57,7 +36,7 @@ fn build_runtime(app_id: &str, dir: &Path, source: &str) -> Runtime {
     let mut env_vars = HashMap::new();
     env_vars.insert("APP_ID".to_string(), app_id.to_string());
 
-    let plugin: Arc<dyn NativePlugin> = Arc::new(StoragePlugin::local(dir));
+    let plugin: Arc<dyn NativePlugin> = Arc::new(StorageBinding::new(StorageStore::from_backend(Arc::new(LocalFs::new(dir))), None));
 
     let runtime = Runtime::builder()
         .modules(module(source))
@@ -131,21 +110,7 @@ const APP_A_OPEN: &str = r#"
 export default {
     async fetch(request, env, ctx) {
         const s = env.storage;
-        // 12 bytes: "APPLE-SECRET" — recognisable in a leak.
-        await s.put("uploads", "secret.bin", "QVBQTEUtU0VDUkVU");
-        const handle = JSON.parse(await s.getStream("uploads", "secret.bin"));
-        return Response.json({ ok: true, streamId: handle.streamId, size: handle.size });
-    },
-};
-"#;
-
-/// App A, phase 3: drain the stream opened in phase 1 and report the bytes.
-/// If app B's `cancelStream` reached across the tenancy boundary, this reads
-/// zero bytes instead of the object.
-const APP_A_DRAIN: &str = r#"
-export default {
-    async fetch(request, env, ctx) {
-        const s = env.storage;
+        if (request.headers.has("x-stream-id")) {
         const id = Number(request.headers.get("x-stream-id"));
         let text = "";
         let n = 0;
@@ -156,6 +121,11 @@ export default {
             text += new TextDecoder().decode(chunk);
         }
         return Response.json({ ok: true, read: n, text });
+        }
+        // 12 bytes: "APPLE-SECRET" — recognisable in a leak.
+        await s.put("uploads", "secret.bin", "QVBQTEUtU0VDUkVU");
+        const handle = JSON.parse(await s.getStream("uploads", "secret.bin"));
+        return Response.json({ ok: true, streamId: handle.streamId, size: handle.size });
     },
 };
 "#;
@@ -203,7 +173,6 @@ fn cross_tenant_read_chunk_cannot_reach_another_apps_stream() {
         // the worker's documented steady state.
         let rt_a_open = build_runtime("app_alpha", &dir, APP_A_OPEN);
         let rt_b = build_runtime("app_beta", &dir, APP_B_PROBE);
-        let rt_a_drain = build_runtime("app_alpha", &dir, APP_A_DRAIN);
 
         // -- phase 1: A opens a stream and leaves it live -------------------
         let (status, body) = fetch(&rt_a_open, &[]).await;
@@ -237,7 +206,7 @@ fn cross_tenant_read_chunk_cannot_reach_another_apps_stream() {
         );
 
         // -- phase 3: A's stream must have survived B's cancel sweep --------
-        let (status, body_a) = fetch(&rt_a_drain, &hdr).await;
+        let (status, body_a) = fetch(&rt_a_open, &hdr).await;
         assert_eq!(status, 200, "app A drain failed; body: {body_a}");
         assert_eq!(
             json_field(&body_a, "read"),
@@ -291,7 +260,7 @@ fn undrained_get_streams_are_capped_per_app() {
     compio::runtime::Runtime::new().unwrap().block_on(async move {
         init_v8();
         let dir = scratch_dir("leak");
-        let cap = zeroship_plugin_storage::limits::max_live_get_streams_per_app();
+        let cap = zeroship_storage_v8::limits::max_live_get_streams_per_app();
 
         let rt = build_runtime("app_leaky", &dir, APP_LEAK);
         // Ask for well past the cap in ONE request; every handle is left
@@ -330,7 +299,7 @@ fn the_live_stream_cap_is_per_app_not_per_thread() {
     compio::runtime::Runtime::new().unwrap().block_on(async move {
         init_v8();
         let dir = scratch_dir("percap");
-        let cap = zeroship_plugin_storage::limits::max_live_get_streams_per_app();
+        let cap = zeroship_storage_v8::limits::max_live_get_streams_per_app();
 
         // App one exhausts its own budget on this thread...
         let rt_one = build_runtime("app_one", &dir, APP_LEAK);
@@ -357,5 +326,100 @@ fn the_live_stream_cap_is_per_app_not_per_thread() {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    });
+}
+
+#[test]
+fn another_isolate_cannot_replace_the_bound_store_or_identity() {
+    compio::runtime::Runtime::new().unwrap().block_on(async {
+        init_v8();
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let read = r#"
+export default { async fetch(request, env) {
+    const raw = await env.storage.get("uploads", "value");
+    return Response.json(raw === "null" ? null : JSON.parse(raw));
+} };
+"#;
+        let store_a = StorageStore::from_backend(Arc::new(LocalFs::new(first.path())));
+        let store_b = StorageStore::from_backend(Arc::new(LocalFs::new(second.path())));
+        store_a.namespace(zeroship_storage::Namespace::app("app_a").unwrap())
+            .put("uploads", "value", b"alpha", None).await.unwrap();
+        store_b.namespace(zeroship_storage::Namespace::app("app_a").unwrap())
+            .put("uploads", "value", b"wrong backend", None).await.unwrap();
+        store_a.namespace(zeroship_storage::Namespace::app("app_b").unwrap())
+            .put("uploads", "value", b"wrong namespace", None).await.unwrap();
+        let a = build_runtime("app_a", first.path(), read);
+        let (status, expected) = fetch(&a, &[]).await;
+        assert_eq!(status, 200);
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&expected).unwrap()["bytesBase64"], "YWxwaGE=");
+        let b = build_runtime("app_b", second.path(), read);
+        assert_eq!(fetch(&b, &[]).await.0, 200);
+        assert_eq!(fetch(&a, &[]).await, (200, expected.clone()));
+
+        // A host-side metadata change cannot rebind an existing storage handle.
+        a.state().borrow_mut().env_vars.insert("APP_ID".into(), "app_b".into());
+        assert_eq!(fetch(&a, &[]).await, (200, expected));
+    });
+}
+
+#[test]
+fn a_new_isolate_cannot_inherit_downloads_and_teardown_releases_the_budget() {
+    compio::runtime::Runtime::new().unwrap().block_on(async {
+        init_v8();
+        let dir = tempfile::tempdir().unwrap();
+        let cap = zeroship_storage_v8::limits::max_live_get_streams_per_app();
+        let owner = build_runtime("app_lifetime", dir.path(), APP_LEAK);
+        let hdr = [("x-open-count".to_owned(), cap.to_string())];
+        let (status, body) = fetch(&owner, &hdr).await;
+        assert_eq!(status, 200);
+        assert_eq!(json_field(&body, "opened"), Some(cap.to_string().as_str()));
+
+        let sibling = build_runtime("app_lifetime", dir.path(), APP_B_PROBE);
+        let (status, body) = fetch(&sibling, &[("x-stream-id".into(), "1".into())]).await;
+        assert_eq!(status, 200);
+        assert_eq!(json_field(&body, "leakedBytes"), Some("0"));
+        drop(sibling);
+        drop(owner);
+
+        let replacement = build_runtime("app_lifetime", dir.path(), APP_LEAK);
+        let (status, body) = fetch(&replacement, &hdr).await;
+        assert_eq!(status, 200);
+        assert_eq!(json_field(&body, "opened"), Some(cap.to_string().as_str()));
+    });
+}
+
+#[test]
+fn storage_requires_a_host_identity() {
+    compio::runtime::Runtime::new().unwrap().block_on(async {
+        init_v8();
+        let root = tempfile::tempdir().unwrap();
+        let store = StorageStore::from_backend(Arc::new(LocalFs::new(root.path())));
+        let runtime = Runtime::builder()
+            .modules(module("export default { fetch() { return new Response('ready'); } };"))
+            .plugins(vec![Arc::new(StorageBinding::new(store, None))])
+            .build();
+        let error = runtime.initialize(&EnvSnapshot::empty()).unwrap_err();
+        assert!(error.contains("host must supply APP_ID"), "{error}");
+    });
+}
+
+#[test]
+fn empty_objects_round_trip_through_the_buffered_binding() {
+    compio::runtime::Runtime::new().unwrap().block_on(async {
+        init_v8();
+        let root = tempfile::tempdir().unwrap();
+        let runtime = build_runtime("app_empty", root.path(), r#"
+export default { async fetch(request, env) {
+    await env.storage.put("uploads", "empty", "", "text/plain");
+    return Response.json(JSON.parse(await env.storage.get("uploads", "empty")));
+} };
+"#);
+        let (status, body) = fetch(&runtime, &[]).await;
+        assert_eq!(status, 200, "{body}");
+        let object: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(object["bytesBase64"], "");
+        assert_eq!(object["size"], 0);
+        assert_eq!(object["contentType"], "text/plain");
     });
 }
