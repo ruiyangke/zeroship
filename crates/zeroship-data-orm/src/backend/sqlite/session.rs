@@ -1,87 +1,17 @@
-//! `SqliteSession` - the reservation-qualified SQLite actor.
+//! SQLite actor with separate autocommit and per-app transaction connections.
 //!
-//! One OS thread owns one shared autocommit connection plus one transaction
-//! connection **per app that has opened a transaction**, and drains a bounded
-//! [`flume`] mpsc queue of [`Command`]s.
+//! A bounded command queue feeds an actor thread that owns all connections.
+//! Transaction lanes retain reservations across commands; autocommit reservations
+//! settle with their commands. Idle lanes can be evicted to respect `MAX_TX_LANES`.
+//! Separate connections prevent unrelated work from joining a creator transaction,
+//! but SQLite writes still contend for the database's writer lock.
 //!
-//! ## SC-2 Decision 1: split connections, one loop
+//! Journal settings apply per database, including attached app files. Runtime
+//! connection setup and migration requirements must agree on those settings.
 //!
-//! `docs/proposals/2026-08-26-sc2-sqlite-actor-protocol.md`:
-//!
-//! - **a transaction connection per app** - each reserved to at most one
-//!   explicit creator transaction, opened lazily on that app's first
-//!   `db.transaction()` and ATTACHing only that app's file;
-//! - **`op_conn`** - autocommit operations for every app, each wrapped in
-//!   `BEGIN DEFERRED ... COMMIT` where the statement permits it.
-//!
-//! One connection cannot express that separation at all. This **retires** the
-//! divergence formerly recorded at `tx_route.rs:119-124`: an app's autocommit
-//! reads no longer execute inside that app's open creator transaction, and an
-//! autocommit write is no longer destroyed by that transaction's `ROLLBACK`.
-//!
-//! **Why the transaction half is per app and the autocommit half is not.** The
-//! transaction connection carries state across commands - an open `BEGIN` -
-//! so a shared one made the admission key `(runtime_instance_id, session)`
-//! and refused app B's `db.transaction()` while app A held one (defect L22b).
-//! An autocommit reservation is minted per command and settles at that
-//! command's completion, so `op_conn` has no cross-command state for two apps
-//! to share; splitting it would buy scheduling parallelism, which a single
-//! actor thread cannot deliver anyway. The count is bounded by
-//! [`MAX_TX_LANES`], and an idle lane is closed to make room.
-//!
-//! **One loop owns every connection.** Per-connection loops would need their
-//! own coordination to keep a reservation's commands ordered, which is the
-//! problem the reservation exists to solve. So "unblocked" is precise: commands
-//! for the *other* reservation are dispatched **between** commands of the
-//! first, not concurrently with a single command - including across apps. An
-//! autocommit *write* still contends for SQLite's single writer lock and waits
-//! up to `busy_timeout`; no number of connections changes that.
-//!
-//! **What WAL does and does not buy here.** The session's own database is in
-//! WAL, so concurrent readers there are genuine. An app's `zs-<app>.sqlite` is
-//! **not**: `PRAGMA journal_mode` is per database and does not propagate across
-//! `ATTACH`, and the migration engine pins app files to DELETE and refuses to
-//! run otherwise
-//! (`crates/zeroship-migrate-sqlite/src/backend/actor.rs:719-729`). Rollback
-//! journalling still lets a reader hold `SHARED` while a writer holds
-//! `RESERVED`, which is what the concurrency arm needs, but there is no
-//! per-connection snapshot on app data and no `SQLITE_BUSY_SNAPSHOT` there.
-//! `docs/reference/sqlite-divergences.md` carries the creator-facing form.
-//!
-//! ## SC-2 Decision 2: cancellation interrupts in-flight statements
-//!
-//! The caller-side [`reservation::Reservation`] carries a terminal word, a
-//! running-command sequence and a cancel sequence; the actor and the caller
-//! race for the word with a `SeqCst` handshake and exactly one wins. See
-//! [`reservation`] for the four interleavings and why a completion that has
-//! already been claimed is never un-committed by a later cancellation.
-//!
-//! ## Bootstrap PRAGMAs
-//!
-//! Every connection runs, in this order:
-//!
-//! ```sql
-//! PRAGMA journal_mode = WAL;
-//! PRAGMA synchronous = NORMAL;
-//! PRAGMA busy_timeout = 5000;
-//! PRAGMA foreign_keys = ON;
-//! ```
-//!
-//! `journal_mode=WAL` MUST come first: `synchronous=NORMAL` is crash-safe in
-//! WAL and is not in rollback-journal mode. `busy_timeout=5000` is the retry
-//! budget before `SQLITE_BUSY` surfaces - and with the connections split it is
-//! now load-bearing rather than incidental, because an autocommit write really
-//! can meet a write lock held by a transaction connection.
-//!
-//! ## Cancellation safety of a dropped caller future
-//!
-//! Dropping the awaiting future drops the reply receiver. That alone still
-//! cancels **nothing** - it is not observable by the actor, which is why the
-//! protocol has an explicit [`Command::Cancel`] rather than treating a drop as
-//! one. Nothing makes a drop cancel today: `SqliteCancelGuard`, which would
-//! have, was deleted on 2026-09-04 with no constructor anywhere. The rules it
-//! carried are kept beside `SqliteCancelHandle` for whoever builds SC-2's
-//! drop-cancel path.
+//! Cancellation uses an explicit reservation protocol; dropping a reply receiver
+//! alone does not cancel its command. The reservation's terminal handshake decides
+//! whether completion or cancellation wins.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -219,7 +149,7 @@ pub enum TerminalIntent {
 // Commands
 // ---------------------------------------------------------------------------
 
-/// Commands queued onto the [`SqliteSession`] actor.
+/// Commands queued onto the `SqliteSession` actor.
 ///
 /// Every data command names its reservation, and the actor refuses one whose
 /// reservation does not own the connection it would run on. That mismatch is
@@ -313,7 +243,7 @@ pub(crate) enum Command {
         reply: flume::Sender<Result<(), DbError>>,
     },
     /// Drain the queue and exit the worker thread. Sent best-effort from
-    /// [`SqliteSession`]'s `Drop` impl.
+    /// `SqliteSession`'s `Drop` impl.
     Shutdown,
 }
 
@@ -1172,11 +1102,11 @@ async fn recv_reply<T>(rx: flume::Receiver<T>) -> Result<T, DbError> {
 // Clone-cheap handle
 // ---------------------------------------------------------------------------
 
-/// Clone-cheap handle to a [`SqliteSession`], optionally bound to a
+/// Clone-cheap handle to a `SqliteSession`, optionally bound to a
 /// transaction reservation.
 ///
 /// **`DatabaseFixture::Client` association**: `SqliteBackend` reports this type as
-/// its `Client`. A handle carrying a [`TxLease`] routes every command onto
+/// its `Client`. A handle carrying a `TxLease` routes every command onto
 /// `tx_conn` under that reservation; a handle without one mints a fresh
 /// autocommit reservation per command and routes onto `op_conn`. That is the
 /// whole of Decision 1 at the call site.

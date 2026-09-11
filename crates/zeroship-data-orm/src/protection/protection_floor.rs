@@ -1,75 +1,12 @@
-//! The live catalog is a FLOOR on a column's protections. The descriptor may
-//! raise it; it may never lower it.
+//! Enforce catalog protections as a minimum for the runtime descriptor.
 //!
-//! # The defect this exists for
+//! Migration-written sentinels record whether a column is masked or encrypted.
+//! A creator-authored descriptor may add protection but cannot remove protection
+//! recorded by the catalog. A disagreement refuses the operation.
 //!
-//! Encryption and masking were decided from the creator-authored runtime
-//! descriptor alone: `crud::write_pipeline`'s private `WriteStages` reads
-//! `def["mask"]` and `def["encrypted"]` off the descriptor's field map, and a
-//! field carrying neither is written verbatim. So DELETING ONE JSON KEY from a
-//! field turned a protected column into a plaintext one, with no refusal and no
-//! signal - and the next write stored the real value under the field's own
-//! name while the `__zs_raw__<col>` sibling the platform built for it sat NULL.
-//!
-//! Measured on live `PostgreSQL` before this module existed, one masked column and
-//! one encrypted column, each written twice through the real pipeline with only
-//! the descriptor changing between the two writes:
-//!
-//! ```text
-//! ssn    = "***"               __zs_raw__ssn = "123-45-6789"   <- mask declared
-//! ssn    = "987-65-4321"       __zs_raw__ssn = NULL            <- `mask` key deleted
-//! secret = <ciphertext bytes>                                  <- encryption declared
-//! secret = "hunter3-also-real"                                 <- `encrypted` key deleted
-//! ```
-//!
-//! # Why the catalog is the authority for this and the descriptor is not
-//!
-//! `crate::descriptor`'s header argues that the catalog "could only ever agree
-//! with the descriptor or be stale", because both are folded from the same
-//! migration DSL. That is right about SHAPE and wrong about PROTECTION, and the
-//! difference is who writes each one:
-//!
-//! * The descriptor travels inside the `.zship` the worker executes. It is
-//!   creator-authored, and the worker is the process that runs creator code.
-//! * The sentinels (`zero-migrate:mask:kind=…`, `zero-migrate:enc:<wraps>`) and the
-//!   `__zs_raw__<col>` sibling are written by the MIGRATION SERVICE, which does
-//!   not execute creator code, under a migration the diff classifier already
-//!   grades `ChangeKind::MaskRemove` / `ChangeClass::Destructive`.
-//!
-//! AGENTS.md's standing invariant is that privilege follows the PROCESS: state a
-//! separate service writes and the worker only reads is the one thing the worker
-//! must not be able to forge. A protection record is exactly that shape. So the
-//! two are not two derivations of one fact - one is a claim by the untrusted
-//! side, the other is a record by the trusted one, and when they disagree the
-//! untrusted one does not win.
-//!
-//! The stale case the descriptor header worries about is real and is why this
-//! fails CLOSED: a catalog that still declares a protection the descriptor has
-//! dropped means either the creator deployed without applying the migration, or
-//! the migration was refused. Both are broken deploys, and refusing the write is
-//! how a creator finds out.
-//!
-//! # What it does NOT do
-//!
-//! It does not read the mask KIND to decide anything, does not sample rows, does
-//! not decrypt, and needs no key material. It compares PRESENCE: a column the
-//! catalog records as protected must be declared protected by the descriptor
-//! too. Raising a protection (declaring a mask the catalog does not have) is a
-//! `MaskBackfill` migration's business and is not refused here.
-//!
-//! # Cost
-//!
-//! One catalog read per `(app, deploy)` per isolate, cached for the isolate's
-//! life. The key carries the DEPLOY TOKEN for the same reason
-//! `zeroship_data_orm::schema_cache`'s does: a migration that legitimately
-//! removes a protection arrives with a new deploy, so the new binding misses the
-//! cache and re-reads. An isolate that outlives the deploy keeps refusing, which
-//! is the correct direction to be wrong in.
-//!
-//! The read takes a pooled checkout, which a caller inside `db.transaction(fn)`
-//! also does - `crate::protection::unmask` and the audit-row writer take one on the
-//! same path, and `PostgresBackend::fixture_session`'s header records
-//! that as the designed shape rather than a leak.
+//! This check compares protection presence, not mask strategy or physical column
+//! placement, and needs no encryption key. Catalog results are cached by app and
+//! deploy so a new deployment refreshes the protection floor.
 
 use std::collections::HashMap;
 use std::rc::Rc;

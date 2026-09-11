@@ -275,11 +275,7 @@ impl SqliteBackend {
         })
     }
 
-    /// `key_source` is a parameter rather than a
-    /// `crate::backend::sqlite::context::isolate_key_source()` lookup, for the same tier reason
-    /// the Postgres constructor takes one: the context is ENGINE state, and
-    /// once this subtree is `zeroship-data-sqlite` the vendor cannot name the
-    /// crate that depends on it. `crate::backend::sqlite::backend_selection` does the lookup.
+    /// Attach the host's change sink and project keys to the opened backend.
     fn finish_open(
         opened: OpenedBackend,
         sink: Arc<dyn ChangeSink>,
@@ -337,18 +333,8 @@ struct OpenedBackend {
 // ---------------------------------------------------------------------------
 
 impl SqliteBackend {
-    /// A session handle bound to no reservation: every command it issues mints
-    /// its own autocommit reservation and runs on `op_conn`.
-    ///
-    /// This is what a caller that just wants to *read* should hold.
-    /// [`DatabaseFixture::fixture_session`] is the transaction lane and is
-    /// exclusive - taking it for a read would serialise that read behind any
-    /// open creator transaction, which is exactly the coupling SC-2 Decision 1
-    /// removes.
-    ///
-    /// The integration target also holds one of these as a probe on `op_conn`
-    /// while a transaction owns `tx_conn` - the state Decision 1 exists to make
-    /// representable. That needs no gate: this is `pub` for everyone.
+    /// Return an unreserved session handle for autocommit commands.
+    /// Each command receives its own reservation on the actor's autocommit connection.
     pub fn autocommit_client(&self) -> SqliteSessionHandle {
         SqliteSessionHandle::new(self.session.clone())
     }
@@ -432,33 +418,8 @@ impl crate::tests::fixtures::DatabaseFixture for SqliteBackend {
 
 impl LockManager for SqliteBackend {
     type Client = SqliteSessionHandle;
-    // The default-impl methods (`acquire`, `try_acquire`, `release`,
-    // `try_acquire_with_backoff`) inherit through the trait. The three
-    // legacy string-key primitives below route through
-    // `InProcessLockRegistry`:
-    //
-    // - `acquire_advisory_lock`: per plan §3.3, this method is
-    //   essentially unused in production - every typed `acquire` call
-    //   site routes through `try_acquire_with_backoff`.
-    //   We implement it for completeness with a bounded
-    //   try-then-sleep loop (20ms tick) that mirrors the PG arm's
-    //   "indefinite wait" surface without the PG arm's server-side
-    //   `pg_advisory_lock`. The loop has no cap — it polls forever
-    //   until acquisition succeeds, matching the legacy contract.
-    //
-    // - `try_acquire_advisory_lock`: synchronous registry call —
-    //   borrow-and-return inside one expression so the `RefCell`
-    //   borrow never crosses an `.await`.
-    //
-    // - `release_advisory_lock`: same shape; the registry handles
-    //   "release-on-unheld" as a `tracing::warn` no-op so we always
-    //   return `Ok(())`.
-    //
-    // The `_client` argument is ignored on every primitive — design
-    // §7.2: "SQLite ignores the argument". The single-writer actor
-    // serialises every lock-state read/write through the same Rust
-    // process, so the client identity carries no information at the
-    // lock layer.
+    // SQLite locks share this backend instance’s registry; they do not use the SQL
+    // connection or coordinate other backend instances.
 
     async fn acquire_advisory_lock(
         &self,
@@ -466,12 +427,7 @@ impl LockManager for SqliteBackend {
         key1: &str,
         key2: &str,
     ) -> Result<(), DbError> {
-        // 20ms poll cadence — same magnitude as the typed
-        // `try_acquire_with_backoff`'s first non-zero retry step. The
-        // loop is uncapped to match the legacy `pg_advisory_lock`
-        // contract; typed call sites should be using
-        // `try_acquire_with_backoff` (bounded at 5 attempts / ~1.75s)
-        // instead. No production caller invokes this method.
+        // This primitive waits indefinitely. Use the typed lock API for bounded retries.
         let k = (key1.to_string(), key2.to_string());
         loop {
             // Borrow scope confined to a single statement — the
@@ -516,40 +472,8 @@ impl LockManager for SqliteBackend {
 }
 
 impl SqliteBackend {
-    /// Bind the app's file into THIS session, under the `<app_id>` alias.
-    ///
-    /// RENAMED from a capability-trait method, and the rename is the point:
-    /// nothing here provisions a namespace. On PostgreSQL that trait method was
-    /// `CREATE SCHEMA IF NOT EXISTS`; here it is an `ATTACH DATABASE`, which is
-    /// session-scoped wiring, not schema management. plugin-db does not manage
-    /// schema on either dialect - a migration process does - so the trait that
-    /// made these two look like one operation is deleted, and the PostgreSQL
-    /// half went with it (it had no production caller at all).
-    ///
-    /// Still idempotent, still cached by `app_id_cache`, and still tolerant of
-    /// a concurrent attacher's "already attached".
-    ///
-    /// Constructs the per-app file path
-    /// `<db_dir>/zs-<app_id>.sqlite` and routes an `ATTACH DATABASE
-    /// 'file:<path>' AS "<app_id>"` through the session actor. The
-    /// `app_id_cache` guards re-entry — SQLite errors on a second
-    /// `ATTACH` of the same alias, so we filter the duplicate call
-    /// in Rust before reaching the engine.
-    ///
-    /// **Lossy `PathBuf::to_string_lossy` rationale**: the per-app file
-    /// path is built from `db_dir` (operator-controlled, typically a
-    /// UTF-8 absolute path) joined with `zs-<app_id>.sqlite`. The
-    /// `app_id` is constrained to ASCII alphanumeric + `_` + `-` by
-    /// `audit::validate_app_id` before any consumer reaches
-    /// `attach_app_file`, so the suffix is always UTF-8 safe. If
-    /// `db_dir` itself contains non-UTF-8 bytes (rare on the Linux
-    /// targets we ship to), `to_string_lossy` substitutes U+FFFD —
-    /// SQLite then fails to open the resulting path and surfaces a
-    /// typed `DbError` on the next call. The lossy conversion is
-    /// load-bearing for the actor's `String`-typed `db_path`
-    /// parameter; round-tripping through OsStr would mean carrying
-    /// raw bytes across an `async` boundary the actor's reply channel
-    /// already serialises as `String`.
+    /// Attach the app’s database file under its schema alias, caching successful attaches.
+    /// Schema changes are owned by the migration engine.
     pub async fn attach_app_file(&self, app_id: &str) -> Result<(), DbError> {
         // Idempotent guard. The cache must be checked before the
         // ATTACH because SQLite hard-errors on a duplicate ATTACH of
@@ -628,36 +552,9 @@ impl SqliteBackend {
     }
 }
 
-/// Recover per-column encryption metadata from the
-/// `/* zero-migrate:enc:<wraps> */` sentinel comments the DDL
-/// emitter writes into the `CREATE TABLE` text (see
-/// `zeroship_data_sql::compile::field_to_column`).
-///
-/// Returns a map from column name → [`zeroship_data_sql::catalog::EncryptionMeta`].
-/// Columns without an attached sentinel are absent from the map (which
-/// is the same shape `EncryptionMeta` round-trips through —
-/// `ColumnInfo::encryption = None` for plain columns).
-///
-/// **Implementation note**: this walker is hand-rolled instead of a `regex`
-/// dep — the workspace doesn't carry `regex` for plugin-db, and finding the
-/// comment markers is a couple of `.find` calls. It walks the CREATE TABLE
-/// body for `/* zero-migrate:enc:...` markers and rewinds to the preceding
-/// double-quoted identifier, because every column DDL the emitter writes for
-/// an encrypted field is of the shape
-/// `"<col>" BYTEA /* zero-migrate:enc:<wraps> */ <constraints>`.
-///
-/// **The SENTINEL BODY is not parsed here.** Locating the comment is this
-/// function's job; interpreting it belongs to
-/// [`zeroship_data_sql::mask_codec::parse_encryption_sentinel`], the one
-/// authority on the wire shape (shared with the PG introspector and the
-/// migration backend).
-///
-/// **Sidecar upgrade path**: recovering metadata from DDL TEXT is fragile — a
-/// future SDK that emits column DDL with non-trivial line breaks or stacked
-/// comments could trip per-column attachment. The plan §11 Q-P5 calls
-/// out a sidecar `__zs_schema_meta` table as the eventual upgrade;
-/// the text walk ships per the implementation plan's §5
-/// trade-off acknowledgement.
+/// Recover encrypted-column metadata from stored DDL comments.
+/// The scanner attaches each sentinel to the preceding quoted column identifier.
+/// Malformed or unattachable sentinels are logged and skipped.
 fn parse_encryption_sentinels(
     create_table_text: &str,
 ) -> std::collections::HashMap<String, zeroship_data_sql::catalog::EncryptionMeta> {
@@ -749,27 +646,9 @@ fn parse_encryption_sentinels(
     out
 }
 
-/// Recover per-parent-column mask metadata from the
-/// `/* zero-migrate:mask:kind=…,classification=… */` sentinel comments the DDL
-/// emitter writes alongside every `<col>_masked` sibling column (see
-/// `zeroship_data_sql::compile::build_create_table_with_fks`).
-///
-/// Returns a map keyed on the **PARENT** column name (the sibling's
-/// existence is the discoverability hook, but the mask metadata
-/// belongs on the parent — the diff classifier compares
-/// `live.parent.mask` against `declared.parent.mask`). Parents
-/// without a sibling are absent from the map; the sibling's
-/// existence is implicit in the sentinel attachment.
-///
-/// **Parse fence**: a sentinel that doesn't parse cleanly (unknown
-/// kind, unknown classification, malformed body) is logged via
-/// `tracing::warn!` and skipped — the parent column then reads as
-/// unmasked, and a re-deploy regenerates the sentinel. This mirrors
-/// the PG arm's treatment in `zeroship-data-postgres's pg_introspect::read_live_schema` so both
-/// arms surface the same "loud-but-recoverable" failure shape.
-///
-/// Same hand-rolled walker pattern as
-/// [`parse_encryption_sentinels`] — no `regex` dep required.
+/// Recover mask metadata from sentinels on visible field columns.
+/// The result is keyed by logical field name. Malformed or unattachable sentinels
+/// are logged and skipped, matching PostgreSQL catalog recovery.
 fn parse_mask_sentinels(
     create_table_text: &str,
 ) -> std::collections::HashMap<String, zeroship_data_sql::catalog::MaskMeta> {
@@ -806,17 +685,7 @@ fn parse_mask_sentinels(
         match zeroship_data_sql::mask_codec::parse_mask_sentinel(body) {
             Ok((kind, classification)) => {
                 let before = &create_table_text[..abs_marker];
-                // The sentinel rides the MASKED column, which after the
-                // storage flip is the field's OWN column - so the identifier
-                // preceding the comment IS the logical field name and there is
-                // no suffix to strip.
-                //
-                // The strip that used to be here had no `else`: an identifier
-                // that did not end `_masked` was discarded in silence. After
-                // the flip that arm would have matched EVERY sentinel, so this
-                // function would have reported every masked column as
-                // unmasked, with no warning - unlike the malformed-sentinel
-                // arm below, which is loud.
+                // The identifier before the sentinel is the visible field column.
                 match recover_preceding_quoted_ident(before) {
                     Some(column) => {
                         out.insert(

@@ -1,18 +1,13 @@
 //! Live catalog metadata used by the ORM protection and decoding passes.
 
-/// Snapshot of the live schema as introspected from `pg_catalog`. Only
-/// the fields we currently consult are populated; this is a small struct
-/// because the diff classifier is fundamentally a join between declared
-/// fields and the live column / index sets.
+/// Catalog facts recovered by the backend for runtime protection and decoding.
 #[derive(Debug, Default)]
 pub struct LiveSchema {
     /// Per-table live column set: `tables[<table>][<column>] = ColumnInfo`.
     pub tables: std::collections::HashMap<String, std::collections::HashMap<String, ColumnInfo>>,
     /// Per-table live index set: `indexes[<table>][<index_name>] = IndexInfo`.
     pub indexes: std::collections::HashMap<String, std::collections::HashMap<String, IndexInfo>>,
-    /// Per-table row count (used by the validation budget to decide
-    /// fast-path additive vs. compatible paths). 0 means empty, which
-    /// is sound for the "ADD NOT NULL on empty table is safe" rule.
+    /// Per-table row counts reported by introspection.
     pub row_counts: std::collections::HashMap<String, i64>,
     /// Design doc section B2 - per-table foreign-key set, keyed by the
     /// local column name. `foreign_keys[<table>][<column>] = ForeignKeyInfo`.
@@ -45,61 +40,25 @@ pub struct ColumnInfo {
         reason = "This metadata is exported for test-helper diff assertions and future live-schema consumers beyond the current release path."
     )]
     pub default_volatility: Option<char>,
-    /// Vector dimensionality observed from the live
-    /// column. `Some(N)` when the column is a `vector(N)` (PG) or a
-    /// BLOB column with a `length("col") = 4 * N` CHECK constraint
-    /// (SQLite); `None` otherwise (the default -- every existing
-    /// non-vector column, and every column live-schema introspection
-    /// hasn't populated yet from `information_schema` /
-    /// `sqlite_master.sql` (Q-P4-A -- regex on DDL today, a sidecar
-    /// `__zs_schema_meta` table is the upgrade path).
+    /// Vector dimensions recovered from the column type or stored constraints.
     #[allow(
         dead_code,
         reason = "This metadata is exported for test-helper diff assertions and future live-schema consumers beyond the current release path."
     )]
     pub vector_dims: Option<i32>,
-    /// Whether this column is a `geography(POINT,
-    /// 4326)` (PG) or a BLOB column with a `length("col") = 16`
-    /// CHECK constraint (SQLite). `false` for every existing column
-    /// until live-schema introspection populates it.
+    /// Whether catalog type or constraint metadata identifies a geographic point.
     #[allow(
         dead_code,
         reason = "This metadata is exported for test-helper diff assertions and future live-schema consumers beyond the current release path."
     )]
     pub is_geopoint: bool,
-    /// Column-encryption metadata when the SDK
-    /// declared the column with `t.encrypted(...)`. `None` for every
-    /// existing column (the default at HEAD); the PG side populates
-    /// from `__zeroship_meta.encrypted_columns`, and the SQLite side
-    /// populates via regex on `sqlite_master.sql` for the
-    /// sentinel CHECK comment. Stays `None` in the default-feature
-    /// build because no consumer wires the field yet.
+    /// Encryption metadata recovered from the stored column sentinel.
     #[allow(
         dead_code,
         reason = "This metadata is exported for test-helper diff assertions and future live-schema consumers beyond the current release path."
     )]
     pub encryption: Option<EncryptionMeta>,
-    /// Column-mask metadata when the SDK declared the
-    /// column with `t.string().mask(...)` or `t.encrypted(...)` (the
-    /// latter auto-populating `mask = { kind: "full", classification:
-    /// "pii" }` at schema-normalisation time when no explicit `.mask()`
-    /// is chained). `None` for every existing column at HEAD.
-    ///
-    /// Sibling-column-based: when
-    /// `mask` is `Some(_)`, the platform emits a hidden
-    /// `<col>_masked` sibling column at CREATE TABLE time,
-    /// reads route through `<col>_masked AS <col>` aliasing,
-    /// and writes dual-bind both columns atomically. The
-    /// sibling column is NEVER part of the creator-visible SDK
-    /// surface -- `Row<S>` only contains the parent column wrapped
-    /// in `MaskedValue<T>`.
-    ///
-    /// Live-schema introspection on PG/SQLite does NOT yet populate
-    /// this from existing tables; the sibling-column-existence
-    /// check + sentinel-comment parse is still outstanding. For now `mask`
-    /// always reads as `None` from live introspection -- the diff
-    /// classifier treats schema-mask vs live-no-mask as Recoverable
-    /// Additive (a `MaskBackfill` is safe to apply).
+    /// Mask strategy, classification and raw-column metadata recovered from the catalog.
     pub mask: Option<MaskMeta>,
 }
 

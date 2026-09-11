@@ -1,57 +1,12 @@
-//! In-memory subscription broker — foundation for C1 reactive queries.
+//! Route committed changes to process-wide subscriptions by app and collection.
 //!
-//! The broker is the routing table between change events (local
-//! mutations within any isolate in this process, and pgoutput WAL
-//! frames decoded by the streaming consumer) and the subscribers who
-//! care about them.
+//! SQLite capture and PostgreSQL relay notifications feed the same broker.
+//! Read sets narrow events when row data is available; collection invalidations
+//! remain coarse. Bounded subscription queues request resynchronization on overflow.
+//! Publishing prunes closed subscriptions and handles no longer held by callers.
 //!
-//! ## Scope
-//!
-//! - **Granularity:** a subscription with no read-set attached matches
-//!   coarsely on the collection - `(collection="messages")` fires on
-//!   EVERY change to `messages`. When a read-set IS attached, events
-//!   are narrowed against its predicates - see `ReadSet` /
-//!   `NormalisedPredicate` in the proposal §C1.
-//! - **Backpressure:** a bounded per-subscriber queue (default 1024
-//!   events) — overflow yields a `kind: "resync"` event and the queue
-//!   is cleared. Same semantics as the proposal's "subscriber falls
-//!   behind" path.
-//! - **Lifecycle:** a subscription is a [`Subscription`] held by the
-//!   V8 callback that opened it. Drop = unsubscribe.
-//! - **Threading:** one process-wide broker connects every isolate thread
-//!   in a worker process. The routing table and each subscription queue
-//!   use separate mutexes. Broker operations never await while holding a
-//!   lock, and the lock order is always broker then subscription.
-//!
-//! ## How an event reaches a subscriber
-//!
-//! ```text
-//!   JS calls db.insert("messages", {...})
-//!         └→ Rust mutation callback
-//!               └→ exec_mutation runs the INSERT
-//!                     └→ on success, BROKER.publish(event)
-//!                           └→ event pushed onto every matching
-//!                              Subscription's bounded queue
-//!                                 └→ next subscribe-iterator poll
-//!                                    drains the queue → resolves the
-//!                                    JS Promise for the AsyncIterable
-//! ```
-//!
-//! ## Why two layers (`Broker` + `Subscription`)
-//!
-//! The `Broker` is the routing table — keyed by (app_id, collection).
-//! A `Subscription` is one consumer's view. Decoupling them lets the
-//! same broker serve multiple subscribers without each subscriber
-//! holding a lock on the routing table.
-//!
-//! ## Narrowing hooks
-//!
-//! - `Subscription::read_set` (Option) - `None` until the read-set
-//!   capture writes one; `Broker::publish` checks each subscription's
-//!   `ReadSet` against the event before pushing.
-//! - `ChangeEvent::changed_columns` - populated by the WAL consumer,
-//!   and by the local-emit path from the mutation handler's `SET`
-//!   clause for INSERT/UPDATE; DELETE reports an empty set.
+//! Broker operations do not await while holding locks. Lock acquisition proceeds
+//! from the broker to a subscription, never in the reverse order.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError};
@@ -156,6 +111,7 @@ struct SubscriptionInner {
     /// against the event tuple and delivers only if at least one entry
     /// for the matching collection matches.
     read_set: Option<Vec<ReadSetEntry>>,
+    /// Track test ownership so process-wide broker cleanup cannot affect other test threads.
     #[cfg(test)]
     owner_thread: std::thread::ThreadId,
 }
@@ -218,7 +174,7 @@ impl Subscription {
     /// **NO PRODUCTION CALLER, measured 2026-09-02.** All ten call sites are in
     /// this file's own `#[cfg(test)]` module (it begins at line 1106; the calls
     /// run 1374-1612), so `read_set` is `None` on every real subscription and
-    /// [`Subscription::accepts`] below returns `true` for every event -
+    /// `Subscription::accepts` below returns `true` for every event -
     /// delivery is coarse-grained. The producer half is disconnected too:
     /// `read_set::Active::begin` has no caller outside its module, so nothing
     /// is ever recorded to pass here. See the header of
@@ -574,26 +530,7 @@ impl Broker {
         matching
     }
 
-    /// Cheap predicate: is there at least one (possibly-still-closed)
-    /// subscriber bucket entry for `(app_id, collection)`?
-    ///
-    /// Used by hot publish callers (notably the WAL consumer, which
-    /// otherwise allocates two `HashMap<String, String>` per pgoutput
-    /// frame BEFORE the broker would discard the event for lack of
-    /// subscribers) to short-circuit tuple construction.
-    ///
-    /// Conservative-true: an entry whose subscribers have all been
-    /// closed but not yet pruned counts as "has subscribers" — the
-    /// next `publish` will GC them and the following call will return
-    /// `false`. This is the cheaper of the two failure modes: at worst
-    /// the caller builds one extra tuple after a subscriber drop, which
-    /// `publish` then discards harmlessly.
-    /// Number of registered (not-yet-closed) subscriptions across all
-    /// keys, process-wide. Used by this type's `Debug` impl.
-    ///
-    /// This is NOT what [`live_subscription_count`] reports: that helper
-    /// is thread-scoped, because the tests that read it share one
-    /// process-wide broker across parallel test threads.
+    /// Count registered, open subscriptions across the process broker.
     pub fn subscription_count(&self) -> usize {
         self.by_key
             .values()
@@ -682,25 +619,7 @@ impl Broker {
             .collect()
     }
 
-    /// Push a `Resync` to every active subscription registered for
-    /// `app_id`.
-    ///
-    /// Invoked from `zeroship_data_orm::backend::BrokerPauseGuard::drop` (after a
-    /// backfill window) and
-    /// `zeroship_data_orm::backend::SchemaPendingGuard::drop` (after the
-    /// schema-pending decoder window ends) per design §16.7.
-    ///
-    /// **Idempotent on a per-call basis.** Calling
-    /// `resume_app_with_resync` N times pushes N `Resync` messages onto
-    /// every active subscription's queue. Subscribers dedup: when
-    /// [`Subscription::pop`] yields a `Resync` the iterator refetches
-    /// and resets its state, so back-to-back `Resync` messages collapse
-    /// at the consumer. Closed subscriptions are skipped; the routing
-    /// table is not GC'd here (that happens lazily in
-    /// [`Self::publish`]).
-    ///
-    /// Apps with no active subscriptions are a fast no-op — the
-    /// two-level map lookup misses and the function returns immediately.
+    /// Push a resync marker to every active subscription for the app.
     pub fn resume_app_with_resync(&mut self, app_id: &str) {
         for subscription in self.app_subscriptions(app_id) {
             subscription.push(SubscriptionMessage::Resync);
@@ -808,7 +727,7 @@ pub fn suppress_app(app_id: &str) {
     *suppressed_apps().entry(app_id.to_string()).or_default() += 1;
 }
 
-/// Inverse of [`suppress_app`]. Idempotent.
+/// Release a suppression reference. Delivery remains suppressed while references remain.
 pub fn unsuppress_app(app_id: &str) {
     let mut apps = suppressed_apps();
     if let Some(count) = apps.get_mut(app_id) {
@@ -819,30 +738,19 @@ pub fn unsuppress_app(app_id: &str) {
     }
 }
 
-/// True when the given app's local-emit path is suppressed anywhere in this
-/// PROCESS (i.e. a `WalConsumer` - the adapter tier's, in `zeroship-data-v8` -
-/// or a backfill guard is running for it).
-///
-/// Not "on this thread": `SUPPRESSED_APPS` is a `LazyLock<Mutex<..>>`, and it
-/// has to be process-wide because a worker runs many single-threaded compio
-/// runtimes and a backfill on one must suppress delivery on all of them. This
-/// said "on this thread" until 2026-09-01.
+/// Whether local delivery is suppressed for the app anywhere in this process.
 pub fn is_app_suppressed(app_id: &str) -> bool {
     suppressed_apps().contains_key(app_id)
 }
 
-/// RAII guard: suppresses local-emit for one app on construction,
-/// unsuppresses on drop (including panic-unwind). The consumer's run
-/// loop holds one of these for the duration of its decode loop.
+/// Hold a process-wide local-delivery suppression reference until drop.
 #[derive(Debug)]
 pub struct SuppressGuard {
     app_id: String,
 }
 
 impl SuppressGuard {
-    /// Activate suppression for `app_id`. The guard's `Drop` impl
-    /// removes the app from the suppressed set, so even a panic inside
-    /// the consumer leaves local-emit re-enabled for that app.
+    /// Acquire a suppression reference for the app and release it on drop.
     pub fn activate(app_id: &str) -> Self {
         suppress_app(app_id);
         Self {
@@ -857,20 +765,8 @@ impl Drop for SuppressGuard {
     }
 }
 
-/// Emit a local change event into the in-process broker.
-///
-/// Called from the mutation callbacks (`insert`, `update_one`,
-/// `delete_one`, ...) after a successful SQL run.
-///
-/// When this app is suppressed, this is a no-op. The WAL consumer is
-/// publishing the same event on the cross-worker path and emitting
-/// locally too would double-deliver.
-///
-/// The `new_tuple` is the row's post-image (or pre-image for
-/// DELETE) — used by the broker's read-set narrowing to test each
-/// subscriber's predicate. May be empty when the caller doesn't have a
-/// tuple snapshot to hand; predicate evaluation treats missing columns
-/// as non-matching (the conservative direction).
+/// Emit a local row change unless delivery is suppressed. Missing row images
+/// leave read-set matching coarse; available images can narrow delivery.
 pub fn emit_local(
     app_id: &str,
     collection: &str,
@@ -917,23 +813,13 @@ fn lock_schema_pending() -> MutexGuard<'static, HashSet<String>> {
         .unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Mark `app_id` as schema-pending in this process. While engaged,
-/// [`Broker::try_subscribe`] returns `DbError::Coded { code:
-/// "schema_pending" }` for the app, and the SQLite CDC dispatcher's
-/// `commit_hook` stamps every event it enqueues for that app as
-/// schema-pending, which the publisher then drops.
-///
-/// Internal — called from
-/// `zeroship_data_orm::backend::SchemaPendingGuard::new`; production code should
-/// reach the guard through `BackendHandle::as_change_stream_*().engage_schema_pending(app_id)`.
+/// Mark an app’s schema pending process-wide. Use [`SchemaPendingGuard`] to
+/// clear the state and request resynchronization when the operation ends.
 pub fn engage_schema_pending(app_id: &str) {
     lock_schema_pending().insert(app_id.to_string());
 }
 
-/// Inverse of [`engage_schema_pending`]. Idempotent — calling on an
-/// app that is not engaged is a no-op. Called from
-/// `zeroship_data_orm::backend::SchemaPendingGuard::drop` before
-/// `resume_app_with_resync` pushes the per-subscription `Resync`.
+/// Clear schema-pending state. An app already absent from the set is unchanged.
 pub fn disengage_schema_pending(app_id: &str) {
     lock_schema_pending().remove(app_id);
 }
@@ -974,6 +860,8 @@ pub fn try_subscribe(app_id: &str, collection: &str) -> Result<Subscription, DbE
     lock_broker().try_subscribe(app_id, collection)
 }
 
+/// Count live subscriptions owned by the calling test thread.
+/// Thread scoping isolates assertions from concurrent users of the process broker.
 #[cfg(test)]
 pub fn live_subscription_count() -> usize {
     lock_broker().current_thread_subscription_count()
@@ -1016,6 +904,7 @@ pub(crate) fn resume_app_with_resync(app_id: &str) {
     }
 }
 
+/// Close and remove every subscription for the app across worker threads.
 pub fn drop_app(app_id: &str) {
     let subscriptions = lock_broker().take_app_subscriptions(app_id);
     for subscription in subscriptions {
@@ -1129,101 +1018,19 @@ pub fn ws_frame(handle: &str, msg: &SubscriptionMessage) -> String {
     .to_string()
 }
 
-// ---------------------------------------------------------------------------
-// RAII guards over the two suppression registries above
-// ---------------------------------------------------------------------------
-//
-// These lived in `backend/mod.rs` and were handed out by two `ChangeStream`
-// methods until 2026-09-02. That was a misplacement, not a design: all four
-// impls - PG and SQLite - were the same two lines, ignored `self`, and touched
-// no backend state. Pausing the broker does not depend on which database you
-// are talking to.
-//
-// Leaving them there would also have made the crate split unbuildable. The
-// trait is bound for `zeroship-data-core`, so a method RETURNING these types
-// forces them to rank 0 too - while their `Drop` impls drive the registries in
-// THIS file, which is engine. That is `data-core -> data-engine` against the
-// dependency that already runs the other way: a Cargo cycle, the same one
-// `data-core`'s own `lib.rs` refuses for `descriptor.rs`.
-//
-// Construct them directly. There is no dispatch to do.
 
-/// RAII guard returned by [`BrokerPauseGuard::new`]. Resuming the
-/// broker for `app_id` (and emitting one `Resync` per active
-/// subscription) happens on `Drop`.
-///
-/// Wired body (plan §7 backfill pause):
-///
-/// 1. `::new(app_id)` — calls [`self::suppress_app`], which
-///    INCREMENTS this app's entry in `SUPPRESSED_APPS`. While the count is
-///    non-zero, the SQLite CDC dispatcher's `commit_hook`
-///    (`zeroship-data-sqlite/src/cdc.rs::commit_callback`) stamps every event
-///    it enqueues as suppressed, and the publisher honours that stamp before
-///    the broker fan-out; AND the legacy local-emit shim
-///    (`self::emit_local`) short-circuits to a no-op so the PG arm sees the
-///    same contract.
-///
-/// **The window is the set of commits made inside the guard's scope**, not the
-/// set of CDC packets that happen to be undrained when it drops. The SQLite
-/// publisher sampled this flag at DEQUEUE time until 2026-09-03, which made the
-/// answer depend on publisher scheduling rather than on the guard's scope; the
-/// sample point moved to the commit hook. `zeroship-data-sqlite/src/cdc.rs`
-/// carries the full argument under "Delivery-window semantics".
-/// 2. `::drop` — calls [`self::unsuppress_app`], which DECREMENTS
-///    that count and removes the entry only at zero, then
-///    [`self::Broker::resume_app_with_resync`] which pushes
-///    one `Resync` message onto every active subscription registered
-///    on `app_id`. Subscribers refetch and continue catching up.
-///
-/// The matching `subscribe()` rejection branch lives on the
-/// [`SchemaPendingGuard`] (the louder rail); backfill is silent on the
-/// `subscribe` path by design (a backfill window is internally driven and SDK
-/// callers have no way to observe it directly).
-///
-/// **`SUPPRESSED_APPS` is a process-wide REFCOUNT, not a thread-local flag,
-/// and the difference is the whole safety property.** It is
-/// `LazyLock<Mutex<HashMap<String, usize>>>` (`broker.rs:761`) - a count behind
-/// a process-wide mutex, because a worker process runs many single-threaded
-/// compio runtimes and a backfill on one must suppress delivery on all of them.
-///
-/// This doc called it a "thread-local flag" until 2026-09-01, and that reading
-/// makes overlapping guards look BROKEN when they are in fact the case the
-/// refcount exists for: with a boolean, an inner guard's drop would clear the
-/// outer guard's suppression and resume delivery mid-backfill. With the count,
-/// the inner drop takes it 2 -> 1 and nothing resumes until the outer one
-/// releases. Anyone "simplifying" this to a `HashSet` or a `bool` reintroduces
-/// exactly that bug, and it would surface as change events escaping during a
-/// backfill window rather than as a test failure.
-///
-/// The `#[must_use]` annotation prevents accidental inline drop at
-/// the call site — the pause/resume contract is the *duration* of the
-/// guard's binding, not its construction.
+/// Suppress local delivery for an app until the last overlapping pause is released.
+/// The process-wide reference count coordinates pauses across worker threads.
+/// SQLite stamps suppression at commit, so publisher scheduling cannot move the window.
+/// Dropping a guard requests resynchronization for active subscribers.
 #[must_use = "BrokerPauseGuard releases the pause on Drop — bind it to a name to keep the broker paused for the surrounding scope"]
-// Constructed via the `ChangeStream` adapters' `pause_broker(app_id)`
-// — the general "suppress CDC for a known DDL/bulk-write window, emit
-// one closing `Resync`" primitive (§16.7). The `pub(crate)`
-// constructor stays internal.
 #[derive(Debug)]
 pub struct BrokerPauseGuard {
     app_id: String,
 }
 
 impl BrokerPauseGuard {
-    /// Construct a guard for `app_id` AND engage the suppression flag
-    /// on the current thread. The `Drop` impl unsuppresses + emits the
-    /// per-subscription `Resync`.
-    ///
-    /// Idempotent in the sense that calling `new` twice for the same
-    /// `app_id` is harmless: the second call's `suppress_app` is a
-    /// `HashSet::insert` of an existing key (no-op), and both guards'
-    /// `Drop`s call `unsuppress_app` (also a no-op-on-second). Each
-    /// guard still emits its own `resume_app_with_resync` on drop —
-    /// subscribers dedup Resync messages at the consumer level (see
-    /// `SubscriptionMessage::Resync` rustdoc in `broker.rs`).
-    ///
-    /// Internal to the `ChangeStream` impls (PG adapter + SQLite
-    /// method that used to hand these out is deleted, so this constructor is
-    /// now the same public surface `ChangeStream::pause_broker` was.
+    /// Increment the app’s process-wide suppression count; release it on drop.
     pub fn new(app_id: String) -> Self {
         self::suppress_app(&app_id);
         Self { app_id }
@@ -1232,8 +1039,7 @@ impl BrokerPauseGuard {
 
 impl Drop for BrokerPauseGuard {
     fn drop(&mut self) {
-        // 1. Clear the suppression flag so subsequent CDC packets
-        //    publish normally + the legacy local-emit shim re-enables.
+        // Release this pause; overlapping guards keep delivery suppressed.
         self::unsuppress_app(&self.app_id);
         // 2. Push one `Resync` per active subscription on `app_id`.
         //    Subscribers refetch + continue catching up. The broker
@@ -1246,42 +1052,9 @@ impl Drop for BrokerPauseGuard {
         );
     }
 }
-/// RAII guard returned by [`SchemaPendingGuard::new`].
-/// Disengaging the schema-pending decoder (and emitting one `Resync`
-/// per active subscription) happens on `Drop`.
-///
-/// Wired body (plan §7 + design §16.7):
-///
-/// 1. `::new(app_id)` — calls
-///    [`self::engage_schema_pending`] which inserts the app
-///    id into the process-wide `SCHEMA_PENDING_APPS` set (it said
-///    "thread-local" until 2026-09-03; it is a `LazyLock<Mutex<HashSet<_>>>`,
-///    and has to be, for the reason that static's own doc gives). While
-///    engaged: (a) [`self::Broker::try_subscribe`] returns
-///    `DbError::Coded { code: "schema_pending" }`; (b) the SQLite CDC
-///    dispatcher's `commit_hook` stamps every event it enqueues for that app
-///    as schema-pending, and the publisher drops it.
-///
-/// The window is the set of commits made inside the guard's scope — see
-/// [`BrokerPauseGuard`] and `zeroship-data-sqlite/src/cdc.rs`. That matters
-/// more here than on the backfill rail: an event's positional values were
-/// captured against the schema in force at COMMIT, and the publisher
-/// re-resolves column names after the guard's cache invalidation lands, so
-/// delivering a deferred in-window event would decode an old tuple against a
-/// new column order.
-/// 2. `::drop` — calls [`self::disengage_schema_pending`] to
-///    clear the flag, then
-///    [`self::Broker::resume_app_with_resync`] which pushes
-///    one `Resync` message onto every active subscription on the app.
-///
-/// **Joint-window precedence with [`BrokerPauseGuard`]** (plan §7):
-/// `schema_pending` takes precedence on the `subscribe()` path —
-/// `try_subscribe` returns the loud `Conflict` envelope. Backfill
-/// pause is silent on `subscribe()` by design.
-///
-/// The `#[must_use]` annotation prevents accidental inline drop at
-/// the call site — the engage/disengage contract is the *duration*
-/// of the guard's binding, not its construction.
+/// Reject subscriptions while the app’s schema is pending. SQLite stamps this state
+/// at commit so queued tuples cannot be decoded against a later column layout.
+/// Dropping the guard clears the state and requests subscriber resynchronization.
 #[must_use = "SchemaPendingGuard disengages the decoder on Drop — bind it to a name to keep the schema-pending state engaged for the surrounding scope"]
 #[allow(
     dead_code,
@@ -1293,13 +1066,7 @@ pub struct SchemaPendingGuard {
 }
 
 impl SchemaPendingGuard {
-    /// Construct a guard for `app_id` AND engage the schema-pending
-    /// flag on the current thread. The `Drop` impl disengages + emits
-    /// the per-subscription `Resync`.
-    ///
-    /// Internal to the `ChangeStream` impls (PG adapter + SQLite
-    /// method that used to hand these out is deleted, so this constructor is
-    /// now the same public surface `ChangeStream::engage_schema_pending` was.
+    /// Mark the app’s schema pending process-wide until this guard drops.
     pub fn new(app_id: String) -> Self {
         self::engage_schema_pending(&app_id);
         Self { app_id }

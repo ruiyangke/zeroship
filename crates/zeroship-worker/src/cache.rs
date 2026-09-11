@@ -489,11 +489,8 @@ pub fn get_workflow_runtime(app_id: &Uuid, deploy_hash: &str) -> Option<Runtime>
 fn app_visible_env_vars(app_id: &str, deploy_hash: Option<&str>) -> HashMap<String, String> {
     let mut env_vars = HashMap::new();
     env_vars.insert("APP_ID".to_string(), app_id.to_string());
-    // **T6** - inject the per-app deploy/schema-version token so plugin-db's
-    // deploy-keyed DESCRIPTOR STORE keys off the real deploy hash: a worker
-    // thread holding a pinned and a current isolate of one app must not serve
-    // one deploy's schema to the other. Workflow replay also uses this slot,
-    // but with the run's pinned deploy hash.
+    // Bind descriptors to the actual deployment, including pinned workflow
+    // isolates, so different deployments cannot share schema entries.
     if let Some(dh) = deploy_hash {
         env_vars.insert("ZEROSHIP_DEPLOY_ID".to_string(), dh.to_string());
     }
@@ -1116,36 +1113,7 @@ mod tests {
         );
     }
 
-    /// SC-5's arm: building a runtime's plugin set performs NO backend
-    /// selection and opens NO pool.
-    ///
-    /// **Two thirds of this arm already passed before SC-5's work began, and
-    /// recording that is the point of writing it down rather than citing it.**
-    /// `create_plugins` never parsed a URL and never opened a pool: the pool
-    /// has always been created lazily on the first `env.db` call, in plugin-db's
-    /// thread context, and `DbPlugin` has never carried one. So this arm cannot
-    /// discriminate the service work and must not be offered as evidence for
-    /// it. It is kept because it is a real guard against a plausible future
-    /// mistake - eagerly connecting at plugin construction, which is exactly
-    /// what "the service owns the configuration" invites - and because SC-5
-    /// lists it.
-    ///
-    /// The third of the arm that DOES discriminate is "it clones an `Arc` from
-    /// the service", and that is
-    /// [`db_plugin_prototype_is_one_object_across_worker_threads`] below, which
-    /// fails on the pre-change code with two different addresses.
-    ///
-    /// Both instruments are counters. "Opened no pool" is a claim about a call
-    /// that must not happen; a passing build proves nothing about it, and
-    /// inferring it from an unreachable fixture DSN measures the fixture.
-    ///
-    /// **It drives `build_runtime`, not only `plugin_set`.** The contract names
-    /// `build_runtime`, and the step that touches this thread's DB state is
-    /// `DbPlugin::register`, which `Runtime::initialize` calls and
-    /// `plugin_set()` does not reach at all. Stopping at the plugin set left
-    /// the one place an eager connect would plausibly be added - "the plugin
-    /// knows the URL, so open the pool when it registers" - outside everything
-    /// the arm could see.
+    /// Runtime construction must not open a database or select a backend.
     #[test]
     fn building_the_plugin_set_selects_no_backend_and_opens_no_pool() {
         use zeroship_data_orm::connection::{

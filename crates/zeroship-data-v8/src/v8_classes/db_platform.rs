@@ -24,7 +24,7 @@ use zeroship_data_orm::binding::DbBinding;
 /// Owned state for the platform-internal capability handle.
 ///
 /// Field 0 of the wrapper holds a `Box<DbPlatform>`. The Weak finalizer
-/// registered by [`mint_db_platform`] drops the Box on GC. There are no
+/// registered by `mint_db_platform` drops the Box on GC. There are no
 /// native resources to release; `binding` is owned.
 pub struct DbPlatform {
     /// The app-at-deploy identity this handle is scoped to. Stamped at mint
@@ -51,7 +51,7 @@ impl std::fmt::Debug for DbPlatform {
 impl DbPlatform {
     /// `new DbPlatform()` from JS rejects with `TypeError("illegal
     /// constructor")`. Real instances are minted only by
-    /// [`mint_db_platform`] (invoked from `db.rs::mint_db`) and stamped
+    /// `mint_db_platform` (invoked from `db.rs::mint_db`) and stamped
     /// with the live `app_id`; a user-constructed handle would carry an
     /// empty app_id and target a non-existent schema.
     #[v8_constructor]

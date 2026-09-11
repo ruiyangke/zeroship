@@ -1,52 +1,9 @@
-//! Lowering a plan to SQL.
+//! Render typed plans as SQL plus native bind parameters.
 //!
-//! # The output carries its parameters, always
-//!
-//! [`RenderedSql`] is a statement plus a parameter list. A value never appears
-//! in the statement text, so two reads differing only in their arguments
-//! produce **identical SQL** - which is the property the driver's
-//! prepared-statement cache keys on.
-//!
-//! That cache is worth being precise about, because SC-3 corrects an earlier
-//! draft of its own on this point. The machinery exists in the driver
-//! (`Client::new_with_statement_cache`, `statement_cache_execution_threshold`;
-//! `libs/compio-postgres/src/bind.rs`, `libs/compio-postgres/src/prepare.rs`),
-//! and **it is switched off**: `statement_cache_capacity` defaults to 0 and
-//! `plugin-db` never calls `prepare_cached`, so every operation today sends an
-//! unnamed statement that `PostgreSQL` parses and plans from scratch. Those are
-//! carried-forward citations from SC-3 rather than measurements taken here.
-//! Nothing in this crate turns the cache on; what it does is make the cache
-//! worth turning on.
-//!
-//! # Determinism, and which specification of it this implements
-//!
-//! Rendering a given plan shape must be **byte-stable**. If a lowering iterated
-//! a hash map to emit a projection list or an `AND` chain, column order would
-//! vary between runs, the SQL text with it, and every call would be a cache
-//! miss - a silent performance regression no correctness test would notice.
-//!
-//! SC-3 carries two specifications of the arm that checks this. The one
-//! implemented here is the **current** one: *two semantically identical plans
-//! built by opposite insertion permutations, asserted against one canonical
-//! SQL/parameter fixture, plus a mutation that deletes the canonical sort and
-//! proves the arm turns red.* The **superseded** one - render the same plan
-//! twice and assert the SQL matches - is not implemented, and SC-3 records why
-//! in its own words: rendering one in-memory unordered map twice can preserve
-//! that instance's iteration order, so a non-canonical implementation passes.
-//! It is a probabilistic arm, not a discriminating one.
-//!
-//! The mutation half is `permuted_conjuncts_diverge_without_the_canonical_sort`
-//! in [`postgres`], which renders raw, un-canonicalised predicates through the
-//! same private writer the real path uses and asserts the two permutations come
-//! out **different**. Without it, "the two permutations agree" would also be
-//! true of a renderer that had never been given two different inputs.
-//!
-//! # Parameters are TYPED, so a binary value is not a tagged string
-//!
-//! [`Literal::Bytes`] preserves binary parameters for a host with typed binds.
-//! [`ValueFormat`] defines the placeholder spelling for each parameter type;
-//! its methods are required for every dialect. The runtime compiler hands
-//! native parameters to the database adapter.
+//! Canonical plan ordering keeps equivalent queries stable across input insertion
+//! orders. Values remain parameters so they do not change statement text.
+//! `ValueFormat` requires each dialect to supply its own placeholder and expression
+//! spellings.
 
 pub mod postgres;
 

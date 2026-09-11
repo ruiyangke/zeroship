@@ -1,41 +1,9 @@
-//! SQLite live-schema introspection for drift.
+//! Read SQLite catalog state into a dialect-neutral schema snapshot.
 //!
-//! Produces the SAME dialect-agnostic [`SchemaSnapshot`]
-//! the Postgres path returns, so [`check_checksum_drift`](zeroship_migrate_backend::backend::MigrationBackend::check_checksum_drift)
-//! and the engine's `diff_snapshots` (named in prose, not linked: it is
-//! `zeroship_migrate::apply::drift`'s, and the engine depends on this crate) work
-//! unchanged across both dialects. The PG path reads `information_schema` + `pg_catalog`; this reads
-//! `sqlite_master` + `PRAGMA table_info` / `PRAGMA index_list` / `PRAGMA index_info`
-//! / `PRAGMA foreign_key_list` of the connection's `main` database (the app file).
-//!
-//! # Confinement
-//!
-//! Every read here runs under **`EngineJournal`** mode: the engine's OWN
-//! introspection touches `sqlite_master` and issues `PRAGMA table_info(...)` etc.,
-//! both of which the **CreatorUp** authorizer denies a creator from doing (PRAGMA
-//! is denied outright in CreatorUp;). The introspection is read-only - it
-//! emits no DDL and mutates nothing - but it MUST run in engine mode for the PRAGMA
-//! reads to compile. A creator can never reach this code path (it is engine-private,
-//! behind the `SqliteBackend`), so allowing these reads under engine mode does not
-//! widen the creator surface.
-//!
-//! # What is excluded from the app-schema snapshot
-//!
-//! - SQLite internal tables (`sqlite_*`, incl. `sqlite_sequence` / `sqlite_stat*`).
-//! - The `_mig` journal objects - they live in the ATTACHed `_mig` database, not
-//!   `main`, so a `main`-scoped `sqlite_master` read never sees them anyway; we
-//!   additionally scope every PRAGMA to `main`.
-//!
-//! # Sentinel recovery
-//!
-//! The SQLite emitter bakes the `/* zero-migrate:mask:... */` (and `/* zero-migrate:enc:... */`) sentinels
-//! INLINE in the `CREATE` text, which `sqlite_master.sql` preserves verbatim (SQLite
-//! keeps comments in the stored schema text, unlike PG which discards them at
-//! parse). [`recover_inline_sentinel`] pulls the `zero-migrate:mask:` / `zero-migrate:enc:` body for a
-//! given column out of that stored text into the snapshot's
-//! [`comment_sentinel`](zeroship_migrate_backend::snapshot::ColumnSnapshot::comment_sentinel), so a
-//! masked/encrypted column round-trips faithfully rather than being silently
-//! dropped to a plain column.
+//! Introspection runs in engine mode so it can inspect `main.sqlite_master` and
+//! schema PRAGMAs. It excludes SQLite internals and the separately attached journal.
+//! Protection sentinels are recovered from stored CREATE TABLE text, which retains
+//! column comments that PRAGMA table_info omits.
 
 use std::collections::BTreeMap;
 

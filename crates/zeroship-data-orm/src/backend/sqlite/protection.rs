@@ -82,21 +82,8 @@ impl crate::protection::Catalog for SqliteBackend {
             let table_info_sql = format!("PRAGMA {q_app}.table_info({q_coll})");
             let col_rows = self.session.query(&table_info_sql, &[]).await?;
 
-            // Pull the original `CREATE TABLE` text from
-            // `sqlite_master.sql` so we can recover per-column
-            // encryption metadata from the `/* zero-migrate:enc:
-            // <wraps> */` sentinel the DDL emitter writes for every
-            // `t.encrypted(...)`-declared column (see
-            // `zeroship_data_sql::compile::field_to_column`). PRAGMA `table_info`
-            // surfaces the declared type but strips comments; the
-            // sentinel only survives in `sqlite_master.sql`.
-            //
-            // Acknowledge: regex-on-DDL is fragile - a future SDK that
-            // emits column DDL with multiple comments or non-trivial
-            // line breaks could trip the per-column attachment. The
-            // sidecar `__zs_schema_meta` table is the upgrade path
-            // (Q-P5 deferred); same regex-on-DDL pattern as the
-            // vector-dims introspection.
+            // Read protection sentinels from stored CREATE TABLE text because
+            // PRAGMA table_info does not retain column comments.
             let master_sql_query = format!(
                 "SELECT sql FROM {q_app}.sqlite_master \
                  WHERE type = 'table' AND name = ?"
@@ -111,10 +98,7 @@ impl crate::protection::Catalog for SqliteBackend {
                 .and_then(|c| c.clone())
                 .unwrap_or_default();
             let encryption_by_col = parse_encryption_sentinels(&create_table_text);
-            // Mask sentinels (`/* zero-migrate:mask:kind=...,
-            // classification=... */`) attached to `<col>_masked` sibling
-            // column DDL. Same regex-on-DDL pattern used for
-            // encryption sentinels.
+            // Recover mask sentinels from the visible columns in the stored DDL.
             let mask_by_parent = parse_mask_sentinels(&create_table_text);
 
             let mut col_map = std::collections::HashMap::new();

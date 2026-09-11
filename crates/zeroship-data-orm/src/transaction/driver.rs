@@ -1,76 +1,13 @@
-//! The SC-1 driver: the only place a reducer
-//! [`Action`](crate::transaction::reducer::Action) becomes I/O.
+//! Execute reducer actions and report database outcomes as transaction events.
 //!
-//! [`crate::transaction::reducer`] is pure - it owns no session, no client, no timer and no
-//! future. This module is its counterpart: it holds the session, executes every
-//! action the reducer emits, and feeds the outcome straight back in as the next
-//! event. Nothing here decides a transition; every branch below is either
-//! "perform this action" or "report what the backend did".
+//! Sessions, cancellers and completion state live in the ORM's transaction lanes.
+//! Cleanup cancels in-flight work, waits for the session to return, then asks the
+//! backend to roll back and establish its health. Indeterminate cleanup discards
+//! the session.
 //!
-//! ## The constraint that decides this file: WHEN the health oracle is sampled
-//!
-//! SC-1 (`docs/proposals/2026-08-26-sc1-transaction-protocol.md`, the
-//! health-oracle paragraph under the cleanup-goal table) pins it:
-//!
-//! > On PostgreSQL `transaction_status()` returns `None` while a request is in
-//! > flight, and a *failed* statement's trailing `ReadyForQuery` is not consumed
-//! > when its `await` returns. Inside a poisoned block - where every data
-//! > statement fails with `25P02` - **no retry makes the oracle answer**. Since
-//! > `None` is indeterminate and indeterminate withdraws the session, a driver
-//! > that samples on entry to `Cancelling` would withdraw a perfectly healthy
-//! > connection on *every* forced cleanup.
-//!
-//! [`crate::backend::postgres::cleanup`] therefore issues the cleanup
-//! `ROLLBACK` **first** and samples **after** it. The `ROLLBACK` succeeds from a
-//! poisoned block, and answering it resolves the status byte.
-//! `a_forced_cleanup_on_a_poisoned_block_keeps_a_healthy_connection` in
-//! `crates/zeroship-data-v8/src/tests/postgres/transactions.rs` is the arm that fails if the two are ever
-//! reordered.
-//!
-//! **That rule is now enforced where the evidence is.** Both cleanup arms live
-//! in their own backend and only [`CleanupAck`](zeroship_data_orm::error::CleanupAck) crosses back, so this file
-//! states the constraint but no longer implements it for either vendor.
-//!
-//! ## Forced cleanup CANCELS; it withdraws only when it cannot prove a rollback
-//!
-//! The second constraint on this file is that a force must not answer a slow
-//! statement by destroying the connection. It used to: this module's private `cleanup` can only roll
-//! a transaction back if it can reach the session, the session is out of the
-//! slot for the whole of any statement, and the execution deadline fires
-//! **because a statement is slow** - so the mechanism that exists to bound one
-//! responded, in its own common case, by killing the backend.
-//!
-//! `cancel_and_reclaim` is the answer, and it does not need the session:
-//! PostgreSQL's `CancelRequest` travels on a second connection and names the
-//! backend by process id, and SQLite's is a message to the session actor. The
-//! canceller is captured at `install` - the one moment we still own the client
-//! - and lives in the adapter tier's `ThreadDbContext::tx_cancellers`.
-//!
-//! Withdrawal remains the fallback and is still reached, by every route that
-//! leaves the cleanup unproved: a cancellation that cannot be delivered, one the
-//! server discards because nothing was running, a statement that does not
-//! release the session within [`CANCEL_RECLAIM_GRACE`](crate::transaction::driver::CANCEL_RECLAIM_GRACE), and a `ROLLBACK` whose
-//! oracle does not read `Idle`. It is no longer the FIRST answer.
-//!
-//! ## What a withdrawal has to defeat here, specifically
-//!
-//! [`Action::WithdrawSession`](crate::transaction::reducer::Action::WithdrawSession) says "destroy the physical connection rather than
-//! returning it". On PostgreSQL the transaction session is a
-//! [`compio_postgres::PoolConnection`], whose `Drop` calls
-//! `pool.return_client(entry)` - so **dropping a withdrawn session hands it to
-//! the next borrower**, which is the exact opposite of the action. Withdrawal is
-//! therefore this module's private `destroy_session`, which closes the client's request channel
-//! first: `Pool::return_client` checks `PoolEntry::is_pool_eligible`, that checks
-//! `!client.is_closed()`, and a closed client is evicted and its capacity slot
-//! released instead of being published as idle.
-//!
-//! The same closure has to survive a *race*: a withdrawal can land while some
-//! other future holds the session out of the slot behind a
-//! [`crate::tx_lanes::TxClientSlotGuard`], whose `Drop` puts it back. So
-//! withdrawal also sets a per-app tombstone
-//! (the adapter tier's `ThreadDbContext::withdraw_tx_session`) and
-//! `put_tx_client_for` destroys anything that returns under it. Without that,
-//! "withdrawn" would hold only for the sessions that happened to be in the slot.
+//! Withdrawal also marks the lane so a session held by another future is discarded
+//! when it returns. Successful release drops the cancellation handle before
+//! returning the lease to the pool.
 
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
@@ -1243,38 +1180,19 @@ async fn cancel_and_reclaim(app_id: &str, token: CommandToken) -> CleanupAck {
 /// pool. This is the ONLY disposition that may do that.
 fn release_session(app_id: &str) {
     let client = crate::tx_lanes::with_mut(|l| {
-        // BEFORE the drop, and load-bearing. `PoolConnection::drop` returns
-        // the lease, and `Pool::return_client` RETIRES any session whose cancel
-        // lease has escaped (`Arc::strong_count(lease) > 1`). A canceller still
-        // parked here holds exactly such a reference, so leaving it would
-        // destroy the connection on the ordinary success path - the opposite of
-        // what capturing it is for. See
-        // `ThreadDbContext::remove_tx_canceller`.
+        // Drop the canceller before releasing the lease; an escaped cancellation
+        // handle makes the pool retire the connection instead of reusing it.
         l.remove_tx_canceller(app_id);
         l.take_tx_client_for(app_id)
     });
     drop(client);
 }
 
-/// [`Action::WithdrawSession`]: destroy the physical connection.
-///
-/// **A drop is not a withdrawal.** `PoolConnection::drop` calls
-/// `pool.return_client(entry)`, which republishes the lease as idle - so the
-/// next borrower inherits precisely the session SC-1 withdrew. Closing the
-/// client's request channel first makes `PoolEntry::is_pool_eligible` false
-/// (it checks `!client.is_closed()`), and `return_client` then evicts the entry
-/// and releases its capacity slot instead of publishing it.
-///
-/// [`crate::context::ThreadDbContext::withdraw_tx_session`] also sets a
-/// per-app tombstone, so a session another future is holding out of the slot is
-/// destroyed when that future returns it rather than quietly parked.
+/// Discard the physical session and mark its lane as withdrawn.
+/// A session held by another future is discarded when that future returns it.
 fn destroy_session(app_id: &str) {
     let client = crate::tx_lanes::with_mut(|l| {
-        // Symmetric with `release_session`, for a different reason: this
-        // connection is being destroyed either way, so the escaped-lease rule
-        // cannot bite - but a canceller for a session that no longer exists is
-        // a handle to nothing, and leaving it would make the map's contents a
-        // weaker statement than "these sessions are live and cancellable".
+        // Remove the canceller together with the session it targets.
         l.remove_tx_canceller(app_id);
         l.withdraw_tx_session(app_id)
     });

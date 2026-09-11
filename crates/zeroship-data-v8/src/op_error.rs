@@ -1,17 +1,7 @@
-//! The adapter's own error translator: `DbError` -> `OpError`.
+//! Translate ORM errors to the runtime's operation error contract.
 //!
-//! This is the OUTBOUND half of the data plane's error hierarchy and it lives
-//! here rather than in `zeroship-data-core` on purpose. `OpError` is
-//! `zeroship-runtime`'s type - a DELIVERY MECHANISM - and a domain type that
-//! names one is a dependency pointing outward. The core owns `DbError`; each
-//! vendor crate translates its driver's error INTO it; and this file, in the
-//! only crate that is allowed to link V8 and the runtime, lowers it back out to
-//! the op boundary.
-//!
-//! It is an extension trait rather than a free function so that the call sites
-//! keep reading `err.to_op_error()`. Rust requires the trait in scope, which is
-//! the point: every file that lowers a domain error to the runtime says so in
-//! its imports.
+//! Backend errors become `DbError` within the ORM. This adapter preserves their
+//! public codes while converting them to errors the V8 runtime can deliver.
 
 use zeroship_data_orm::error::DbError;
 use zeroship_runtime::state::OpError;

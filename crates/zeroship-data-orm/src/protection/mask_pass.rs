@@ -1,71 +1,13 @@
-//! Mask transforms + the write-side physical placement of a masked column.
+//! Derive masks and place protected values using runtime descriptor storage.
 //!
-//! The masked representation is computed at write time and stored beside the
-//! real value, so a default read touches no key material ("Path B" in
-//! `docs/archive/sensitive-field-masking.md`, resolved 2026-05-24; Path A -
-//! computing the mask on read - was rejected there for key-scope reasons, and
-//! the name is worth keeping because the trade-off analysis is recorded under
-//! it).
+//! Encryption retains mask inputs in a zeroizing sidechannel. Mask-only fields
+//! read their input from the logical row value. Mask derivation does not mutate the
+//! row; relocation runs after encryption and byte conversion, moving the completed
+//! value to `storage.rawColumn` and leaving the mask in the visible value column.
 //!
-//! # Physical storage
-//!
-//! The runtime descriptor pairs the visible value with `storage.rawColumn`,
-//! which holds the real value. The mask is derived under the logical field's
-//! key; relocation moves the finished plaintext or ciphertext to that declared
-//! raw column. Ordinary reads project the configured value column and cannot
-//! request raw storage.
-//!
-//! # The stage order this depends on
-//!
-//! [`apply_mask_on_write`] COMPUTES the masks and returns them; it does not
-//! touch the row. [`relocate_masked_columns`] performs the physical placement
-//! and runs LAST, after the encryption, SQLite-binary and plain-bytes passes.
-//!
-//! The split is load-bearing. The flip makes two passes want to write the same
-//! key: the encryption pass replaces `row["ssn"]` with ciphertext and the mask
-//! wants `row["ssn"]` to be the mask, so the authoritative value has to move.
-//! For an encrypted field the value the relocation moves is ciphertext; for a
-//! mask-only field it is plaintext; for `t.bytes().mask()` the bytes pass has
-//! to see the real value under the logical key before anything moves. One
-//! stage that runs after all of them, MOVES whatever it finds rather than
-//! recomputing it, and never conditions the move on the sidechannel, is the
-//! only shape where none of those combinations loses data.
-//!
-//! ## Wiring into the CRUD dispatch
-//!
-//! Called from `crud::dispatch_insert` / `dispatch_update_one`
-//! **AFTER** `protection::encryption_pass::encrypt_row_on_write`
-//! and **BEFORE** the `query::build_*` call. The encryption pass
-//! populates a [`MaskPlaintextSidechannel`] (a
-//! `HashMap<String, Zeroizing<String>>`)
-//! before swapping the plaintext for ciphertext so the mask pass can
-//! read the plaintext without re-decrypting.
-//!
-//! For non-encrypted-but-masked columns (`t.string().mask({...})` with
-//! no `.encrypted()`), the sidechannel is empty for that column; the
-//! mask pass reads the plaintext directly from `row[col]`.
-//!
-//! ## Mask transforms (all 8 named built-ins)
-//!
-//! | Kind        | Sample input         | Sample output           |
-//! |-------------|----------------------|-------------------------|
-//! | `Full`      | `"123-45-6789"`      | `"***"`                 |
-//! | `Last4`     | `"123-45-6789"`      | `"***-**-6789"`         |
-//! | `First4`    | `"4111-1111-1111-1234"` | `"4111-****-****-****"` |
-//! | `Email`     | `"alice@example.com"` | `"a***@example.com"`    |
-//! | `Name`      | `"Alice Anderson"`   | `"A. A***"`             |
-//! | `DateYear`  | `"1985-04-12"`       | `"1985-**-**"`          |
-//! | `DateDecade`| `"1985-04-12"`       | `"198?-**-**"`          |
-//! | `None`      | (skipped — no sibling) |                       |
-//!
-//! Per design Q-MASK-L: `null` passes through as `null` (no mask
-//! written); empty string `""` → `""`.
-//!
-//! ## Why no creator-supplied JS mask functions
-//!
-//! An AI-generated `mask: v => v` would silently return plaintext,
-//! defeating the entire fence. Only named built-in strategies — adding
-//! a new strategy is a platform PR, not creator config.
+//! This ordering preserves ciphertext and binary values without recomputing them.
+//! Only named mask strategies are accepted; creator callbacks cannot define a
+//! transform that exposes plaintext.
 
 use std::collections::HashMap;
 

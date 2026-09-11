@@ -144,7 +144,7 @@ pub(crate) const PLATFORM_RESERVED_COLLECTION_PREFIXES: &[&str] = &["__zeroship"
 
 /// Catalog prefixes owned by the backends the runtime can address.
 ///
-/// Keep these outside [`RESERVED_NAMES`]: they are backend conventions, not
+/// Keep these outside `RESERVED_NAMES`: they are backend conventions, not
 /// neutral platform reservations. They are a defense-in-depth copy after the
 /// migration declaration gate. The behavioral parity suite derives the real
 /// shipping set and fails when a backend is added without updating this list.
@@ -255,10 +255,10 @@ pub(crate) enum ReservedName {
 /// names. Filter-time use is unrestricted — `db.users.find({ id: "..." })`
 /// is the canonical query shape.
 ///
-/// This list is intentionally separate from [`RESERVED_NAMES`] because
+/// This list is intentionally separate from `RESERVED_NAMES` because
 /// the two categories enforce at different call sites:
 ///
-/// - [`RESERVED_NAMES`] fires at BOTH schema-declaration time AND
+/// - `RESERVED_NAMES` fires at BOTH schema-declaration time AND
 ///   filter time (e.g. `_masked` suffix, `_*` prefix). Synthetic /
 ///   sibling columns must never appear in user input at all.
 /// - `SYSTEM_FIELD_NAMES` fires ONLY at schema-declaration time. The
@@ -292,12 +292,7 @@ pub(crate) const RESERVED_NAMES: &[ReservedName] = &[
     // `validate_collection` reservations for table-name shape.
     ReservedName::Prefix("__zs_"),
     ReservedName::Prefix("__zeroship_"),
-    // Masked-column sibling suffix. The platform
-    // emits `<col>_masked` siblings (Path B); creators must not
-    // declare a column ending in `_masked` themselves. Refused at
-    // both schema-registration time (in `field_to_column`) and
-    // filter-time (so `db.users.find({ ssn_masked: ... })` is
-    // refused with the same code path).
+    // Platform-reserved suffix.
     ReservedName::Suffix("_masked"),
     // Six default-classification names. Reserved at
     // the column-name level so creator schemas can't accidentally
@@ -324,7 +319,7 @@ pub(crate) const RESERVED_NAMES: &[ReservedName] = &[
 /// that whole class.
 ///
 /// Also refuses any field name matching the
-/// [`RESERVED_NAMES`] table (platform suffixes / prefixes / exact
+/// `RESERVED_NAMES` table (platform suffixes / prefixes / exact
 /// names). The `_masked` suffix is reserved for Path B sibling
 /// columns; the six default-classification names (`public`, `pii`,
 /// `spi`, `phi`, `pci`, `internal`) are reserved at the column-name
@@ -587,138 +582,37 @@ pub const RAW_COLUMN_PREFIX: &str = "__zs_raw__";
 
 pub const MAX_MASKED_FIELD_NAME_BYTES: usize = 63 - RAW_COLUMN_PREFIX.len();
 
-/// The physical column that holds `field`'s REAL value.
-///
-/// Total, and deliberately a plain concatenation rather than a hashing cap.
-/// This name is byte-identical to
-/// `zeroship_migrate_backend::schema::raw_column_name` - that one names the
-/// column the migration engine CREATES, this one names the column the data plane
-/// READS and WRITES. Refusing an overlong masked field name at declaration time
-/// is what removes the need for a hashing cap; see
-/// [`MAX_MASKED_FIELD_NAME_BYTES`].
-///
-/// **The data plane's CRUD passes no longer call this directly.** They resolve
-/// the name through [`declared_raw_column`], which reads what the migration fold
-/// recorded and falls back to this spelling only for a field map that carries no
-/// `storage` block. This function is still what the two backend introspectors
-/// call, because the catalog records no pairing for them to read - see
-/// [`declared_raw_column`] for why that is not a gap the descriptor closes.
-///
-/// # What holds the two spellings together
-///
-/// The `raw_column_parity` module at the bottom of this file. It compares this
-/// function, [`RAW_COLUMN_PREFIX`] and [`MAX_MASKED_FIELD_NAME_BYTES`] against
-/// the engine's declarations over a corpus, and crosses both DECLARATION paths
-/// so a side that keeps an equal constant while no longer consulting it is still
-/// caught.
-///
-/// These three doc blocks said instead that the pair "could not be checked to
-/// agree by any compiler", which was true and was not a guard - it was a note
-/// that nothing checked them. A plain concatenation is a deliberate choice
-/// BECAUSE it is checkable, so the checking is the half that had to exist.
+/// Derive the conventional reserved column for a masked field's real value.
+/// Runtime operations use `declared_raw_column`; catalog introspection uses this
+/// convention when the catalog supplies no explicit pairing. Parity tests bind
+/// the spelling to the migration emitter.
 #[must_use]
 pub fn raw_column_name(field: &str) -> String {
     format!("{RAW_COLUMN_PREFIX}{field}")
 }
 
-/// Return the RAW-value column name for `field` IFF the field's schema entry
-/// carries a `.mask({...})` declaration with `kind != "none"`. Returns `None`
-/// for non-masked columns and for columns that explicitly opt out via
-/// `.mask({ kind: "none" })`.
-///
-/// # The storage flip
-///
-/// The field's OWN column (`ssn`) holds the **masked** string; this sibling
-/// (`__zs_raw__ssn`) holds the real value and is unqueryable - not in a filter,
-/// not in a projection, not in a sort, and not a field of the generated type.
-///
-/// It used to be the other way round: `ssn` held plaintext and `ssn_masked`
-/// held the mask. The projection substituted `"ssn_masked" AS "ssn"`, but the
-/// WHERE builder could not - it takes no schema hint - so
-/// `find({ ssn: { $gt: "500-00-0000" } })` compared against **plaintext**. The
-/// caller never saw a value and did not need to: the set of matching rows is
-/// the answer, and repeated probes binary-search it with no authorization check
-/// on the path and no audit row written.
-///
-/// After the flip the ignorant path is the safe path. A builder that knows
-/// nothing about masking selects and filters the column with the natural name,
-/// which is the mask, and leaks nothing. Plaintext has exactly one reader - the
-/// explicit unmask API, where the authorization check and the audit row already
-/// live.
-///
-/// Called by [`declared_raw_column`], which is how the runtime's write relocation, read
-/// strip and unmask fetch reach it. Those three named this function directly
-/// until 2026-09-04; they ask the DESCRIPTOR now, and this is the fallback
-/// underneath that question rather than their answer.
+/// Derive raw storage for an effectively masked field.
+/// Returns `None` when the field has no effective mask.
 pub fn raw_column_for_field(field: &str, def: &crate::value::Value) -> Option<String> {
     crate::descriptors::effective_mask(def)?;
     Some(raw_column_name(field))
 }
 
-/// The raw-value column the RUNTIME DESCRIPTOR names for `field`.
+/// Resolve a masked field's `storage.rawColumn`, falling back to the conventional
+/// reserved name when the descriptor omits it.
 ///
-/// The data-plane reader of a masked field's real value. Where
-/// [`raw_column_for_field`] SPELLS the name - it is the DDL emitter's own
-/// function, and the migration engine's byte-identical twin is what creates the
-/// column - this one READS the name the emitter recorded, and falls back to the
-/// spelling only when the field map carries none.
-///
-/// # Why the descriptor and not the catalog
-///
-/// The obvious objection to trusting a creator-authored artifact is
-/// `crate::compile`'s neighbour in the data plane,
-/// `zeroship_data_orm::protection::protection_floor`: the live database is the
-/// authority on a column's protections and the descriptor may not lower them.
-/// That argument does not transfer to the column's NAME, because **the catalog
-/// does not record the pairing at all**. The mask sentinel rides the MASKED
-/// column - `COMMENT ON COLUMN` on PostgreSQL, an inline `/* zero-migrate:mask: */`
-/// comment on SQLite - and nothing marks the raw column. Both introspectors
-/// therefore DERIVE the sibling name rather than reading it
-/// (`zeroship_data_orm::backend::postgres::pg_introspect`, `zeroship_data_orm::backend::sqlite`, each
-/// calling [`raw_column_name`]), so `crate::catalog::MaskMeta::sibling_column` is a
-/// re-spelling of the convention and not an independent record. There is no
-/// catalog answer to prefer.
-///
-/// So the two INDEPENDENT statements of this name are the DDL the migration
-/// engine applied and the `storage.rawColumn` the same fold emitted beside it -
-/// one function, one build. Reading the second is what removes the data plane's
-/// third, separately-maintained spelling from the hot paths; the
-/// `raw_column_parity` module at the bottom of this file still binds the
-/// spelling itself, because the two introspection sites above cannot be told.
-///
-/// # The fence
-///
-/// A descriptor rides in the `.zship` the worker executes, so a name it supplies
-/// is creator-authored. Accepting one unchecked would let a descriptor that
-/// declares a mask - and so satisfies `protection_floor`, which compares the
-/// PRESENCE of a protection and never its placement - redirect the field's
-/// PLAINTEXT into an ordinary column, where a `where` filter reads it back
-/// byte by byte with no unmask audit row.
-///
-/// The invariant that closes it is the one the storage flip already rests on
-/// (see [`RAW_COLUMN_PREFIX`]): the raw column is named something
-/// [`validate_field_name`] REFUSES, so no inbound surface can reach it. This
-/// asserts exactly that, rather than pinning the prefix - which is what keeps a
-/// future physical rename a producer-side change.
-///
-/// Well-formedness is checked separately and first. `validate_field_name`
-/// refuses `""` and `a"b` too, so "the validator refuses it" is satisfied by
-/// garbage; a declared raw column has to be a real identifier AND a reserved
-/// one.
+/// Raw storage must be a valid identifier that creator filters, sorts and
+/// projections cannot address. Otherwise those surfaces could probe plaintext
+/// without unmask authorization.
 ///
 /// # Errors
 ///
-/// [`QueryError::InvalidIdent`], naming the offending column, when the
-/// descriptor declares a raw column that is malformed or that creator code
-/// could name.
+/// Returns `QueryError::InvalidIdent` for malformed or creator-accessible names.
 pub fn declared_raw_column(
     field: &str,
     def: &crate::value::Value,
 ) -> Result<Option<String>, QueryError> {
-    // A field with no effective mask has no raw column, and a `rawColumn` on
-    // one is ignored rather than refused: there is nothing to place, so there
-    // is no placement to get wrong. Refusing here would report the wrong
-    // defect for the descriptor `protection_floor` exists to catch.
+    // Only effectively masked fields require raw storage.
     let derived = match raw_column_for_field(field, def) {
         Some(raw) => raw,
         None => return Ok(None),
@@ -728,10 +622,7 @@ pub fn declared_raw_column(
         .and_then(|storage| storage.get("rawColumn"))
         .and_then(crate::value::Value::as_str)
     else {
-        // Absent means the derivation, not a refusal. Every hand-written test
-        // schema in the tree and any field map that did not go through the
-        // migration fold carries no `storage` block; the same reasoning as
-        // `field_is_readable`'s absent-flag arm.
+        // Field maps without an explicit storage mapping use the reserved convention.
         return Ok(Some(derived));
     };
     if declared.is_empty()
@@ -1420,25 +1311,7 @@ pub fn column_is_masked(name: &str, schema_hint: &Value) -> bool {
     schema_hint.get(name).and_then(crate::descriptors::effective_mask).is_some()
 }
 
-// There is deliberately NO `read_column_for` here any more, and no
-// `aggregate_read_ident`.
-//
-// They existed to substitute `"<col>_masked" AS "<col>"` on every read surface
-// while `<col>` held plaintext, and the substitution is what the storage flip
-// deleted. Every read surface - the implicit projection, an explicit `select`,
-// `$group.by`, the aggregate accumulators, `$having`, `distinct`, `orderBy`,
-// the vector and spatial builders - now names the field's own column, which
-// holds the mask, so there is nothing to derive and nothing to keep in
-// agreement.
-//
-// This is the point of the flip rather than a side effect of it. The old shape
-// needed EVERY builder to ask "is this masked?"; the ones that asked were
-// correct and the one that could not - `build_where`, which takes no schema at
-// all - compared against plaintext, so `find({ ssn: { $gt: v } })` plus
-// `orderBy` plus `limit` binary-searched a value the caller could not read,
-// with no authorization check on the path and no audit row written. A function
-// that maps a logical field to some other physical column is exactly the
-// asymmetry that produced it, so it is gone rather than corrected.
+// Read surfaces use descriptor-selected visible columns for masked fields.
 
 /// Push one `$group.by` field's SELECT projection and GROUP BY term.
 ///
@@ -4922,22 +4795,7 @@ mod tests {
         assert!(!q.sql.contains("GROUP BY"), "sql: {}", q.sql);
     }
 
-    // -----------------------------------------------------------------------
-    // SEC-4: the aggregation pipeline must NOT leak the raw (real) value of a
-    // masked column.
-    //
-    // Originally: for a mask-only column (`.mask({...})` without
-    // `.encrypted()`), plaintext lived in `<col>` and the masked string in
-    // `<col>_masked`. The aggregate builder used a bare `quote_ident(field)`
-    // against the base plaintext column, so `$group.by:"ssn"` / `$max:"ssn"`
-    // returned PLAINTEXT.
-    //
-    // After the storage flip, `<col>` itself holds the masked value and the
-    // real value lives in the unqueryable `__zs_raw__<col>` sibling
-    // (`raw_column_name`). The same bare `quote_ident(field)` the builder
-    // always used now reads the masked column by construction - these pin
-    // that the raw sibling is never named anywhere in the built SQL.
-    // -----------------------------------------------------------------------
+    // Aggregates over masked fields must read the visible masked column, never raw storage.
 
     fn mask_only_ssn_schema() -> Value {
         value!({
@@ -6656,12 +6514,7 @@ mod tests {
 
     #[test]
     fn update_auto_bump_columns_bypass_mask_pass() {
-        // Mask-pass markers (sibling `<col>_masked` columns) only fire
-        // for columns the schema declares as `t.mask(...)`. System
-        // fields are never declared with a mask; the mask pass's
-        // schema-iteration loop naturally skips them. We confirm the
-        // SQL doesn't accidentally emit a sibling for any auto-bump
-        // column.
+        // Automatic system-field updates must not add mask storage columns.
         let filter = crate::value!({ "id": "post_x" });
         let update = crate::value!({ "title": "new" });
         let autobump = SystemFieldAutoBump {
@@ -6769,40 +6622,7 @@ mod tests {
     // B2 — typed cross-table relations
     // -----------------------------------------------------------------
 
-    // -----------------------------------------------------------------
-    // Where an FK target's SCHEMA comes from.
-    //
-    // Two properties of this renderer:
-    //
-    //   1. `build_fk_clause` runs `validate_collection(target)`, whose
-    //      charset is `[A-Za-z0-9_]`, so a dot-qualified target is not a
-    //      legal collection name at all; and
-    //   2. `PostgresSchemaRenderer::foreign_key_target` qualifies with
-    //      `schema_name` -- the CALLER's app -- and never reads a schema out
-    //      of the author's target string.
-    //
-    // Property 2 is the load-bearing one: 1 alone would be defeated by
-    // any future target syntax that encodes a qualifier without a dot.
-    //
-    // WHAT THESE DO NOT PROVE, AND IT MATTERS. They are NOT evidence
-    // about a deployed app. The ORM's callers of these DDL builders sit in
-    // private test fixtures under `#[cfg(test)]`. The migration engine,
-    // which applies schema at deploy, carries its OWN copy of this renderer.
-    //
-    // THAT COPY IS IN-TREE AND LIVE. This comment cited `third_party/zero-migrate`
-    // until 2026-09-04; no such directory exists - the engine was in-sourced as
-    // `crates/zeroship-migrate*`, and the duplicate of this very file is
-    // `crates/zeroship-migrate-core/src/schema/query.rs`, with the PG type map
-    // in `crates/zeroship-migrate-postgres/src/schema.rs`. The pair HAS drifted:
-    // the engine's `index_name` cuts at 60 bytes with an 8-char base32 tail
-    // where this file's cuts at 63 with a 10-hex tail through
-    // `ident::cap_ident_name` (documented and absorbed engine-side via
-    // `AcceptedIndexAlias`), and the two PG type maps dispatch on the same
-    // `"bigInt"` key while their comments spelled the DSL method differently
-    // until this commit. Read the deployed behaviour off the
-    // foreign keys section of `docs/reference/db.md`, which names the
-    // engine's checks; these tests pin only what this crate renders.
-    // -----------------------------------------------------------------
+    // Schema-emission regression coverage uses the migration-owned DDL helpers.
 
     // -----------------------------------------------------------------
     // FK column type cascade (TEXT, was INTEGER previously)
@@ -7338,15 +7158,7 @@ mod tests {
         );
     }
 
-    // NOTE: `system_field_reservation_error_carries_correct_code` — which
-    // asserted the `From<QueryError> for DbError` lift carries
-    // `code = "reserved_system_field_name"` — was relocated to plugin-db's
-    // `error.rs` test module as part of the schema-authority extraction.
-    // `DbError` lives in plugin-db (it is built on `zeroship_runtime::OpError`)
-    // and cannot be named from this leaf crate. The validator
-    // (`validate_field_name_for_declaration`) and the `QueryError`
-    // variant it produces are tested here; the *mapping* to `DbError` is
-    // tested where `DbError` lives.
+    // Database error conversion is tested in the ORM; this crate tests query errors.
 
     // -----------------------------------------------------------------
     // CREATE TABLE prepends 7 system fields + 3 auto-indexes

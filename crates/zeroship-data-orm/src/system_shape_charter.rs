@@ -146,6 +146,8 @@ impl AssignmentPlan {
     }
 }
 
+/// Return this thread's assignment plan, deriving it from the operator charter
+/// when a host has not installed it during composition.
 pub fn plan() -> Result<Rc<AssignmentPlan>, DbError> {
     if let Some(plan) = PLAN.with_borrow(Clone::clone) {
         return Ok(plan);

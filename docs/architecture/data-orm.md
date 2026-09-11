@@ -94,7 +94,7 @@ access controls. SQLite retains its local row-image matching.
 
 ## Setup and application code
 
-The host supplies a validated `DbBinding`, database configuration, a column-key
+The host supplies a validated `DbBinding`, database configuration, a project-key
 source, and the deployment's runtime collection descriptors:
 
 ```rust,ignore
@@ -122,6 +122,7 @@ use zeroship_data_v8::service::{DbService, DbServiceConfig};
 
 let service = DbService::new(DbServiceConfig {
     connection: ConnectionFactory::for_url(database_url)?,
+    project_keys,
     cdc_relay,
     meter,
 })?;
