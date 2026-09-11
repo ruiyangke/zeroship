@@ -34,8 +34,9 @@
 
 use crate::ident::Ident;
 use crate::path::FieldPath;
-use crate::predicate::{MAX_PREDICATE_DEPTH, Predicate};
+use crate::predicate::{Predicate, MAX_PREDICATE_DEPTH};
 use crate::projection::{Projection, ProjectionKind, ProjectionSource};
+use crate::Join;
 use core::fmt;
 
 /// The largest page a single read may return.
@@ -141,6 +142,8 @@ pub struct OrderKey {
 pub struct Select {
     namespace: Option<Ident>,
     collection: Ident,
+    alias: Option<Ident>,
+    joins: Vec<Join>,
     projection: Projection,
     distinct: bool,
     filter: Predicate,
@@ -158,6 +161,8 @@ impl Select {
         SelectBuilder {
             namespace: None,
             collection,
+            alias: None,
+            joins: Vec::new(),
             projection,
             distinct: false,
             filter: Predicate::always(),
@@ -177,6 +182,14 @@ impl Select {
     #[must_use]
     pub const fn collection(&self) -> &Ident {
         &self.collection
+    }
+
+    pub fn alias(&self) -> Option<&Ident> {
+        self.alias.as_ref()
+    }
+
+    pub fn joins(&self) -> &[Join] {
+        &self.joins
     }
 
     #[must_use]
@@ -227,6 +240,8 @@ impl Select {
 pub struct SelectBuilder {
     namespace: Option<Ident>,
     collection: Ident,
+    alias: Option<Ident>,
+    joins: Vec<Join>,
     projection: Projection,
     distinct: bool,
     filter: Predicate,
@@ -238,6 +253,18 @@ pub struct SelectBuilder {
 }
 
 impl SelectBuilder {
+    #[must_use]
+    pub fn alias(mut self, alias: Ident) -> Self {
+        self.alias = Some(alias);
+        self
+    }
+
+    #[must_use]
+    pub fn join(mut self, join: Join) -> Self {
+        self.joins.push(join);
+        self
+    }
+
     #[must_use]
     pub fn namespace(mut self, namespace: Ident) -> Self {
         self.namespace = Some(namespace);
@@ -318,6 +345,16 @@ impl SelectBuilder {
             }
         }
 
+        super::joins::validate(
+            &self.collection,
+            self.alias.as_ref(),
+            &self.joins,
+            &self.projection,
+            &self.filter,
+            &self.having,
+            &self.group_by,
+            &self.order_by,
+        )?;
         let filter = self.filter.canonical();
         let having = self.having.canonical();
 
@@ -389,6 +426,8 @@ impl SelectBuilder {
         Ok(Select {
             namespace: self.namespace,
             collection: self.collection,
+            alias: self.alias,
+            joins: self.joins,
             projection: self.projection,
             distinct: self.distinct,
             filter,
@@ -434,6 +473,7 @@ pub enum DbPlan {
 /// Why a plan was refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PlanError {
+    InvalidSource(String),
     LimitOutOfRange {
         requested: i64,
     },
@@ -466,6 +506,7 @@ pub enum PlanError {
 impl fmt::Display for PlanError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::InvalidSource(message) => f.write_str(message),
             Self::LimitOutOfRange { requested } => write!(
                 f,
                 "a row limit of {requested} is outside 1..={MAX_ROW_LIMIT}"

@@ -11,6 +11,8 @@
 //! a runtime. Plans are local values and do not derive serialization traits.
 
 pub mod ident;
+pub mod joins;
+pub use joins::{Join, JoinKind, MAX_READ_SOURCES};
 pub mod literal;
 pub mod path;
 pub mod plan;

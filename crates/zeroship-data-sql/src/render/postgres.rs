@@ -101,6 +101,21 @@ pub fn render_select(plan: &Select) -> Result<RenderedSql, RenderError> {
 
     out.sql.push_str(" FROM ");
     write_qualified_table(&mut out, plan.namespace(), plan.collection());
+    if let Some(alias) = plan.alias() {
+        out.sql.push_str(" AS ");
+        out.sql.push_str(&quote(alias));
+    }
+    for join in plan.joins() {
+        out.sql.push_str(match join.kind {
+            crate::JoinKind::Inner => " INNER JOIN ",
+            crate::JoinKind::Left => " LEFT JOIN ",
+        });
+        write_qualified_table(&mut out, plan.namespace(), &join.collection);
+        out.sql.push_str(" AS ");
+        out.sql.push_str(&quote(&join.alias));
+        out.sql.push_str(" ON ");
+        write_predicate(&mut out, &join.on)?;
+    }
 
     // `Const(true)` is the canonical form of "no filter", so the clause is
     // omitted rather than emitted as `WHERE TRUE`. Two plans that differ only
@@ -795,7 +810,7 @@ fn write_projected_field(
         // selected and aliased back to it, so `row[col]` holds the stored form
         // and there is no second key for a caller to find.
         ProjectionSource::Stored { physical } => out.sql.push_str(&quote(physical)),
-        ProjectionSource::Aggregate(aggregate) => write_aggregate(out, aggregate),
+        ProjectionSource::Aggregate(aggregate) => write_aggregate(out, aggregate)?,
         ProjectionSource::SearchScalar(kind) => {
             let Some(slots) = slots else {
                 return Err(RenderError::Unsupported {
@@ -816,17 +831,18 @@ fn write_projected_field(
     Ok(())
 }
 
-fn write_aggregate(out: &mut Writer, aggregate: &AggregateRef) {
+fn write_aggregate(out: &mut Writer, aggregate: &AggregateRef) -> Result<(), RenderError> {
     out.sql.push_str(aggregate.func().as_sql());
     out.sql.push('(');
     if aggregate.is_distinct() {
         out.sql.push_str("DISTINCT ");
     }
     match aggregate.argument() {
-        Some(column) => out.sql.push_str(&quote(column)),
+        Some(column) => write_path(out, column)?,
         None => out.sql.push('*'),
     }
     out.sql.push(')');
+    Ok(())
 }
 
 fn write_path(out: &mut Writer, path: &FieldPath) -> Result<(), RenderError> {
@@ -840,6 +856,10 @@ fn write_path(out: &mut Writer, path: &FieldPath) -> Result<(), RenderError> {
             reason: "no lowering is written for nested access; the shape is reserved, \
                      not served",
         });
+    }
+    if let Some(alias) = path.source() {
+        out.sql.push_str(&quote(alias));
+        out.sql.push('.');
     }
     out.sql.push_str(&quote(path.root()));
     Ok(())
@@ -870,7 +890,7 @@ fn write_operand(out: &mut Writer, operand: &Operand) -> Result<(), RenderError>
             Ok(())
         }
         Operand::Aggregate(aggregate) => {
-            write_aggregate(out, aggregate);
+            write_aggregate(out, aggregate)?;
             Ok(())
         }
     }

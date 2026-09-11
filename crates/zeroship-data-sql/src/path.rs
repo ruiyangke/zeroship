@@ -82,6 +82,7 @@ impl JsonKey {
 /// A column, optionally with nested JSON access below it.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FieldPath {
+    source: Option<Ident>,
     root: Ident,
     segments: Vec<JsonKey>,
 }
@@ -91,6 +92,7 @@ impl FieldPath {
     #[must_use]
     pub const fn column(root: Ident) -> Self {
         Self {
+            source: None,
             root,
             segments: Vec::new(),
         }
@@ -113,7 +115,23 @@ impl FieldPath {
                 depth: segments.len(),
             });
         }
-        Ok(Self { root, segments })
+        Ok(Self {
+            source: None,
+            root,
+            segments,
+        })
+    }
+
+    /// Qualify the column independently of its JSON path.
+    #[must_use]
+    pub fn in_source(mut self, source: Ident) -> Self {
+        self.source = Some(source);
+        self
+    }
+
+    #[must_use]
+    pub fn source(&self) -> Option<&Ident> {
+        self.source.as_ref()
     }
 
     /// The column the path starts at.

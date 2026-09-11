@@ -171,7 +171,7 @@ impl AggregateFunc {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct AggregateRef {
     func: AggregateFunc,
-    argument: Option<Ident>,
+    argument: Option<FieldPath>,
     distinct: bool,
 }
 
@@ -199,6 +199,14 @@ impl AggregateRef {
         column: Ident,
         distinct: bool,
     ) -> Result<Self, PredicateError> {
+        Self::over_path(func, FieldPath::column(column), distinct)
+    }
+
+    pub fn over_path(
+        func: AggregateFunc,
+        column: FieldPath,
+        distinct: bool,
+    ) -> Result<Self, PredicateError> {
         if distinct && func != AggregateFunc::Count {
             return Err(PredicateError::DistinctCountOnly { func });
         }
@@ -215,7 +223,7 @@ impl AggregateRef {
     }
 
     #[must_use]
-    pub const fn argument(&self) -> Option<&Ident> {
+    pub const fn argument(&self) -> Option<&FieldPath> {
         self.argument.as_ref()
     }
 
