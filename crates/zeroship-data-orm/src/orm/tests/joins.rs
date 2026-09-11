@@ -101,10 +101,30 @@ pub(super) async fn exercise(db: &Database) {
         CompareOp::Eq,
         Operand::Lit(zeroship_data_sql::Literal::Int(0)),
     );
-    let Output::Rows { rows, .. } = db.read(grouped).await.unwrap() else {
+    let Output::Rows { rows, .. } = db.read(grouped.clone()).await.unwrap() else {
         panic!("expected rows")
     };
     assert_eq!(rows, vec![value!({"matches":0})]);
+
+    grouped.projection = [
+        ("average", AggregateFunc::Avg, "counter"),
+        ("total", AggregateFunc::Sum, "counter"),
+        ("earliest", AggregateFunc::Min, "created_at"),
+    ]
+    .into_iter()
+    .map(|(output, function, field)| ReadProjection::Scalar {
+        output: output.into(),
+        expression: Operand::Aggregate(
+            AggregateRef::over_path(function, source.column(field).unwrap(), false).unwrap(),
+        ),
+    })
+    .collect();
+    let Output::Rows { rows, .. } = db.read(grouped).await.unwrap() else {
+        panic!("expected aggregate rows")
+    };
+    assert_eq!(rows[0]["average"].as_f64(), Some(7.0));
+    assert_eq!(rows[0]["total"], value!(7));
+    assert!(matches!(rows[0]["earliest"], Value::Timestamp(_)));
 
     let tx_result = db
         .transaction(|tx| async move {
