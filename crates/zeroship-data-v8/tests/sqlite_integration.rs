@@ -3247,8 +3247,6 @@ fn insert_many_encrypts_ciphertext_before_sqlite_storage() {
     run(async {
         use std::collections::HashMap;
 
-        use base64::Engine as _;
-        use zeroship_data_orm::backend::EncryptionMode;
         use zeroship_data_orm::backend::sqlite::session::TypedCell;
         use zeroship_data_sql::compile::{SqlDialect, build_insert_many_with_dialect};
         use zeroship_data_orm::encryption;
@@ -3499,7 +3497,6 @@ fn upsert_conflict_update_preserves_insert_only_fields_and_encrypts_sqlite_runti
     let _keys = with_root_key("c2_upsert_runtime_conflict", &"f".repeat(64));
 
     run(async {
-        use zeroship_data_orm::backend::EncryptionMode;
         use zeroship_data_orm::backend::sqlite::session::TypedCell;
         use zeroship_data_orm::encryption;
 
@@ -3682,7 +3679,6 @@ fn upsert_conflict_with_deterministic_key_keeps_randomised_ciphertext_readable_s
     let _keys = with_root_key("c2_upsert_det_conflict_runtime", &"6".repeat(64));
 
     run(async {
-        use zeroship_data_orm::backend::EncryptionMode;
         use zeroship_data_orm::backend::sqlite::session::TypedCell;
         use zeroship_data_orm::encryption;
 
@@ -3816,7 +3812,6 @@ fn update_non_id_filter_keeps_randomised_ciphertext_readable_sqlite_runtime() {
     let _keys = with_root_key("c1_update_non_id_runtime", &"7".repeat(64));
 
     run(async {
-        use zeroship_data_orm::backend::EncryptionMode;
         use zeroship_data_orm::backend::sqlite::session::TypedCell;
         use zeroship_data_orm::encryption;
 
@@ -3934,7 +3929,6 @@ fn update_many_non_id_filter_encrypts_per_row_sqlite_runtime() {
     let _keys = with_root_key("c1_update_many_non_id_runtime", &"8".repeat(64));
 
     run(async {
-        use zeroship_data_orm::backend::EncryptionMode;
         use zeroship_data_orm::backend::sqlite::session::TypedCell;
         use zeroship_data_orm::encryption;
 

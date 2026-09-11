@@ -274,25 +274,8 @@ export default { fetch: _zsFetch, rpc: _shimRpc };
 const TYPED_DATE_ISO: &str = "2026-05-24T12:34:56.789Z";
 const TYPED_DATE_MS: i64 = 1_779_626_096_789;
 
-/// The bytes the `t.bytes()` round trip must preserve, stated AS BYTES.
-///
-/// This is the only pinned fact about the byte column, and everything else is
-/// derived from it: the base64 the matrix writes is `typed_bytes_b64()`, the
-/// base64 it must read back is the same string, and the cell psql must show on
-/// disk is these four bytes. It is deliberately not a copied output - the
-/// constant that used to sit here was the literal `"3q2+7w=="` and its sibling
-/// in `integration.rs` was `"M3EyKzd3PT0="`, the base64 OF that base64, pinned
-/// because that is what the code returned. A pin taken from the code under test
-/// cannot fail when the code is wrong.
+/// Raw bytes passed through the native bytes column and checked on disk.
 pub const TYPED_BYTES_RAW: [u8; 4] = [0xDE, 0xAD, 0xBE, 0xEF];
-
-/// The wire form of [`TYPED_BYTES_RAW`]: `t.bytes()` is exchanged with JS as a
-/// base64 string (`sdks/db/src/types.ts`), so this is what a caller passes in
-/// and what a correct round trip hands back.
-pub fn typed_bytes_b64() -> String {
-    use base64::Engine as _;
-    base64::engine::general_purpose::STANDARD.encode(TYPED_BYTES_RAW)
-}
 
 pub fn matrix_source(collection: &str) -> String {
     r#"
