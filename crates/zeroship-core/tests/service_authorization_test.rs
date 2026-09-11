@@ -7,12 +7,20 @@ use zeroship_core::service_identity::{
 };
 
 /// Every operation the catalog names, in one place for the table-wide guards.
-const CATALOG: [ServiceEndpoint; 16] = [
+const CATALOG: &[ServiceEndpoint] = &[
     endpoints::GATEWAY_BACKCHANNEL_LOGOUT,
     endpoints::GATEWAY_WORKFLOW_ADVANCE,
     endpoints::CONTROL_ROUTES,
     endpoints::CONTROL_WORKFLOW_SIGNAL_INGRESS,
     endpoints::CONTROL_VERSIONS,
+    endpoints::CONTROL_WORKFLOW_CAPABILITY,
+    endpoints::WORKFLOW_DEPLOY,
+    endpoints::WORKFLOW_TASK_POLL,
+    endpoints::WORKFLOW_TASK_HEARTBEAT,
+    endpoints::WORKFLOW_TASK_COMPLETE,
+    endpoints::WORKFLOW_TASK_RELEASE,
+    endpoints::WORKFLOW_TASK_UPLOAD,
+    endpoints::WORKFLOW_TASK_READ,
     endpoints::CONTROL_APP,
     endpoints::CONTROL_APP_ENV,
     endpoints::CONTROL_APP_DATA_KEY,
@@ -105,6 +113,54 @@ fn endpoint_catalog_records_exact_measured_operations() {
             "/internal/versions",
         ),
         (
+            endpoints::CONTROL_WORKFLOW_CAPABILITY,
+            "control",
+            "POST",
+            "/v1/runtime/apps/{app_id}/workflow-capability",
+        ),
+        (
+            endpoints::WORKFLOW_DEPLOY,
+            "workflow",
+            "POST",
+            "/v1/apps/{app_id}/workflow-deploy",
+        ),
+        (
+            endpoints::WORKFLOW_TASK_POLL,
+            "workflow",
+            "POST",
+            "/v1/tasks/poll",
+        ),
+        (
+            endpoints::WORKFLOW_TASK_HEARTBEAT,
+            "workflow",
+            "POST",
+            "/v1/tasks/{task_id}/heartbeat",
+        ),
+        (
+            endpoints::WORKFLOW_TASK_COMPLETE,
+            "workflow",
+            "POST",
+            "/v1/tasks/{task_id}/complete",
+        ),
+        (
+            endpoints::WORKFLOW_TASK_RELEASE,
+            "workflow",
+            "POST",
+            "/v1/tasks/{task_id}/release",
+        ),
+        (
+            endpoints::WORKFLOW_TASK_UPLOAD,
+            "workflow",
+            "POST",
+            "/v1/tasks/{task_id}/payloads",
+        ),
+        (
+            endpoints::WORKFLOW_TASK_READ,
+            "workflow",
+            "POST",
+            "/v1/tasks/{task_id}/payloads/read",
+        ),
+        (
             endpoints::CONTROL_APP,
             "control",
             "GET",
@@ -178,9 +234,10 @@ fn measured_allowlist_is_encoded_and_enforced_row_by_row() {
         "svc/control",
         &[
             endpoints::GATEWAY_WORKFLOW_ADVANCE,
+            endpoints::WORKFLOW_DEPLOY,
             endpoints::WORKER_APP_LOGS,
         ],
-        &all,
+        all,
     );
     assert_allowlist_row(
         "svc/auth",
@@ -188,9 +245,9 @@ fn measured_allowlist_is_encoded_and_enforced_row_by_row() {
             endpoints::GATEWAY_BACKCHANNEL_LOGOUT,
             endpoints::CONTROL_ERASURE_PREFLIGHT,
         ],
-        &all,
+        all,
     );
-    assert_allowlist_row("svc/migrate-server", &[], &all);
+    assert_allowlist_row("svc/migrate-server", &[], all);
     assert_allowlist_row(
         "svc/gateway",
         &[
@@ -199,12 +256,19 @@ fn measured_allowlist_is_encoded_and_enforced_row_by_row() {
             endpoints::WORKER_DISPATCH,
             endpoints::WORKER_WORKFLOW_ADVANCE,
         ],
-        &all,
+        all,
     );
     assert_allowlist_row(
         "svc/worker",
         &[
             endpoints::CONTROL_VERSIONS,
+            endpoints::CONTROL_WORKFLOW_CAPABILITY,
+            endpoints::WORKFLOW_TASK_POLL,
+            endpoints::WORKFLOW_TASK_HEARTBEAT,
+            endpoints::WORKFLOW_TASK_COMPLETE,
+            endpoints::WORKFLOW_TASK_RELEASE,
+            endpoints::WORKFLOW_TASK_UPLOAD,
+            endpoints::WORKFLOW_TASK_READ,
             endpoints::CDC_SUBSCRIBE,
             endpoints::CONTROL_APP,
             endpoints::CONTROL_APP_ENV,
@@ -215,7 +279,7 @@ fn measured_allowlist_is_encoded_and_enforced_row_by_row() {
             // narrowing the two app reads above writable at all.
             endpoints::CONTROL_WORKER_ENROL,
         ],
-        &all,
+        all,
     );
 }
 

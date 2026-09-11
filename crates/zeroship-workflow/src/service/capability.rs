@@ -34,6 +34,13 @@ impl std::fmt::Debug for CapabilityToken {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct IssuedAppCapability {
+    pub token: CapabilityToken,
+    pub expires_at: i64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum AppOperation {

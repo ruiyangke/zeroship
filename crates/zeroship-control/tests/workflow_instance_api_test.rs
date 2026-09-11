@@ -1256,3 +1256,149 @@ async fn failed_timer_registration_leaves_no_run_so_a_retry_starts_exactly_one()
     drop(fx);
     common::drain_pg().await;
 }
+
+#[compio::test]
+async fn workflow_capabilities_require_active_instances_and_preserve_app_scope() {
+    use zeroship_core::{
+        app_id::AppId,
+        service_assertion::{
+            InMemoryReplayStore, ServiceAssertionMinter, ServiceAssertionVerifier, ServiceIssuer,
+            ServiceSigningKey, ServiceTrustBundle,
+        },
+        service_peers::{ServiceAuth, ServiceKeyring},
+        typed_id,
+    };
+    use zeroship_workflow::service::capability::{
+        verify_app_capability, AppOperation, IssuedAppCapability,
+    };
+    let mut fx = build_fixture(crate::workflow_postgres::Database::new(), "capabilities").await;
+    let (uuid, _) = seed_app(&fx, "capabilities", &["Example"]).await;
+    let app_id = AppId::parse(&format!("app_{}", typed_id::uuid_to_base62(&uuid))).unwrap();
+    let control = ServiceIssuer::parse("spiffe://zeroship.ai/svc/control").unwrap();
+    let key = ServiceSigningKey::generate();
+    let mut keys = ServiceTrustBundle::new();
+    keys.trust_signing_key(&control, key.key_id(), &key)
+        .unwrap();
+    let mut ring = ServiceKeyring::from_parts(control.clone(), key, keys.clone()).unwrap();
+    let verifier = ServiceAssertionVerifier::new(
+        ring.take_bundle().unwrap(),
+        Arc::new(InMemoryReplayStore::new()),
+    );
+    Arc::get_mut(&mut fx.state).unwrap().service_auth =
+        Arc::new(ServiceAuth::new(ring, Arc::new(verifier)));
+    let server = test::init_service(
+        web::App::new()
+            .state(fx.state.clone())
+            .configure(zeroship_control::workflow_capabilities::configure),
+    )
+    .await;
+    let path = format!("/v1/runtime/apps/{}/workflow-capability", app_id.as_str());
+    let anonymous =
+        test::call_service(&server, test::TestRequest::post().uri(&path).to_request()).await;
+    assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED);
+    let worker_key = ServiceSigningKey::generate();
+    let role = ServiceAssertionMinter::new(
+        ServiceIssuer::parse("spiffe://zeroship.ai/svc/worker").unwrap(),
+        worker_key.key_id(),
+        &worker_key,
+    )
+    .unwrap();
+    let bootstrap = test::call_service(
+        &server,
+        test::TestRequest::post()
+            .uri(&path)
+            .header(
+                "authorization",
+                format!("Bearer {}", role.mint(&control).unwrap()),
+            )
+            .to_request(),
+    )
+    .await;
+    assert_eq!(bootstrap.status(), StatusCode::UNAUTHORIZED);
+    let instance = typed_id::generate("wkr");
+    let minter = ServiceAssertionMinter::new(
+        ServiceIssuer::parse(&format!("spiffe://zeroship.ai/svc/worker/{instance}")).unwrap(),
+        worker_key.key_id(),
+        &worker_key,
+    )
+    .unwrap();
+    let unenrolled = test::call_service(
+        &server,
+        test::TestRequest::post()
+            .uri(&path)
+            .header(
+                "authorization",
+                format!("Bearer {}", minter.mint(&control).unwrap()),
+            )
+            .to_request(),
+    )
+    .await;
+    assert_eq!(unenrolled.status(), StatusCode::UNAUTHORIZED);
+    fx.pg.execute("INSERT INTO zeroship.worker_instances (id,ring_key,public_key,advertise_host,advertise_port,status) VALUES ($1,$2,$3,'127.0.0.1',8080,'active')", &[&instance,&vec![7u8],&worker_key.verifying_key_bytes().to_vec()]).await.unwrap();
+    let assertion = format!("Bearer {}", minter.mint(&control).unwrap());
+    let response = test::call_service(
+        &server,
+        test::TestRequest::post()
+            .uri(&path)
+            .header("authorization", assertion.clone())
+            .header("ZeroShip-App-Id", AppId::mint().as_str())
+            .to_request(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers().get("cache-control").unwrap(), "no-store");
+    let issued: IssuedAppCapability =
+        serde_json::from_slice(&test::read_body(response).await).unwrap();
+    let now = Utc::now().timestamp();
+    assert!(issued.expires_at > now);
+    let grant = verify_app_capability(issued.token.as_str(), &keys, now).unwrap();
+    grant.authorize(&app_id, AppOperation::Start).unwrap();
+    assert!(grant
+        .authorize(&AppId::mint(), AppOperation::Start)
+        .is_err());
+    assert!(verify_app_capability(issued.token.as_str(), &keys, issued.expires_at).is_err());
+    let replay = test::call_service(
+        &server,
+        test::TestRequest::post()
+            .uri(&path)
+            .header("authorization", assertion)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(replay.status(), StatusCode::UNAUTHORIZED);
+    let missing = format!(
+        "/v1/runtime/apps/{}/workflow-capability",
+        AppId::mint().as_str()
+    );
+    let response = test::call_service(
+        &server,
+        test::TestRequest::post()
+            .uri(&missing)
+            .header(
+                "authorization",
+                format!("Bearer {}", minter.mint(&control).unwrap()),
+            )
+            .to_request(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    fx.pg
+        .execute(
+            "UPDATE zeroship.worker_instances SET status='draining' WHERE id=$1",
+            &[&instance],
+        )
+        .await
+        .unwrap();
+    let denied = test::call_service(
+        &server,
+        test::TestRequest::post()
+            .uri(&path)
+            .header(
+                "authorization",
+                format!("Bearer {}", minter.mint(&control).unwrap()),
+            )
+            .to_request(),
+    )
+    .await;
+    assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+}

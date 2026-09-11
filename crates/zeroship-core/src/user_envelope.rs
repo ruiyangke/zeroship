@@ -95,7 +95,7 @@ pub enum EnvelopeKeyError {
 /// cannot accidentally emit an unsigned envelope, it emits none.
 pub struct UserEnvelopeSigner {
     key_id: String,
-    key: ServiceSigningKey,
+    key: std::sync::Arc<ServiceSigningKey>,
     /// The verifier for this signer's OWN public half.
     ///
     /// The gateway reads back the envelope it just built (to recover scopes and
@@ -122,7 +122,10 @@ impl UserEnvelopeSigner {
     /// Returns [`EnvelopeKeyError::MalformedKey`] when the key's own public
     /// half does not decompress - which would mean the process could sign
     /// envelopes nothing could check, including itself.
-    pub fn new(key: ServiceSigningKey) -> Result<Self, EnvelopeKeyError> {
+    pub fn new(
+        key: impl Into<std::sync::Arc<ServiceSigningKey>>,
+    ) -> Result<Self, EnvelopeKeyError> {
+        let key = key.into();
         let key_id = key.key_id();
         let public = key.verifying_key_bytes();
         let own = UserEnvelopeVerifier::from_keys(

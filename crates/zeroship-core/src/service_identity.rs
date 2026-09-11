@@ -467,6 +467,11 @@ pub mod endpoints {
         "POST",
         "/v1/apps/{app_id}/workflow-deploy",
     );
+    pub const CONTROL_WORKFLOW_CAPABILITY: ServiceEndpoint = ServiceEndpoint::new(
+        "control",
+        "POST",
+        "/v1/runtime/apps/{app_id}/workflow-capability",
+    );
     pub const WORKFLOW_TASK_POLL: ServiceEndpoint = ServiceEndpoint::new(
         "workflow",
         "POST",
@@ -588,6 +593,7 @@ pub fn service_allowlist() -> &'static [ServiceAuthorization] {
                 principal("svc/worker"),
                 &[
                     endpoints::CONTROL_VERSIONS,
+                    endpoints::CONTROL_WORKFLOW_CAPABILITY,
                     endpoints::WORKFLOW_TASK_POLL,
                     endpoints::WORKFLOW_TASK_HEARTBEAT,
                     endpoints::WORKFLOW_TASK_COMPLETE,
