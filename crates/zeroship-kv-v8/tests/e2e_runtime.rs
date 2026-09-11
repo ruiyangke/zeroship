@@ -878,8 +878,8 @@ fn e2e_dragonfly_cluster() {
 /// hanging the isolate. The fetch harness bounds completion with a timeout.
 #[test]
 fn e2e_backend_unavailable() {
-    let server = support::start_redis();
-    let redis = support::standalone(&server);
+    let server = support::containers::start_redis();
+    let redis = support::containers::standalone(&server);
     server
         .stop()
         .expect("stop Redis before calling the binding");
@@ -1043,8 +1043,8 @@ export default {
     },
 };
 "#;
-    let server = support::start_redis();
-    let redis = support::standalone(&server);
+    let server = support::containers::start_redis();
+    let redis = support::containers::standalone(&server);
     server.stop().unwrap();
     let backend = KvStore::open(&KvConfig::Redis { redis }).unwrap();
     let app_id = "00000000-0000-7000-8000-0000000000b2";
