@@ -163,6 +163,7 @@ type InflightMap =
 /// Guard returned to a refill LEADER. Holds the sender open for the duration
 /// of the refill; dropping it (on success, error, or panic) wakes every
 /// follower and removes the inflight entry.
+#[derive(Debug)]
 pub struct RefillLeader {
     inflight: InflightMap,
     hash: String,
@@ -183,6 +184,7 @@ impl Drop for RefillLeader {
 
 /// Outcome of `begin_refill`: either this caller is the LEADER (and must do
 /// the download), or a FOLLOWER that should await the leader then re-check.
+#[derive(Debug)]
 pub enum RefillRole {
     /// This caller owns the refill; drop the guard when done.
     Leader(RefillLeader),
@@ -198,6 +200,7 @@ pub enum RefillRole {
 /// Unlinks its temp file on drop UNLESS it was published (`publish_temp`
 /// takes ownership and clears `path`). This is what guarantees a dropped /
 /// failed refill never leaves an orphan in the cache root.
+#[derive(Debug)]
 pub struct DiskBlobTemp {
     /// Unique temp path under the cache root. `None` once published/disarmed.
     path: Option<PathBuf>,
