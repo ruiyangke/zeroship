@@ -667,9 +667,7 @@ fn push_field_value_bind(
         .and_then(Value::as_str);
     let protected = definition.is_some_and(crate::descriptors::is_encrypted)
         || column_is_masked(field, schema_hint);
-    let timestamp = !protected
-        && (matches!(kind, Some("date" | "timestamp"))
-            || matches!(field, "created_at" | "updated_at" | "deleted_at"));
+    let timestamp = !protected && matches!(kind, Some("date" | "timestamp"));
     if timestamp && !value.is_null() {
         let millis = crate::temporal::timestamp_millis(value).ok_or_else(|| {
             QueryError::InvalidFilter(format!(
@@ -1311,7 +1309,10 @@ pub fn read_surface_columns(schema_hint: &Value) -> std::collections::BTreeSet<S
 /// schema is missing, the column is absent from it, or the mask is the
 /// explicit opt-out (`kind: "none"`).
 pub fn column_is_masked(name: &str, schema_hint: &Value) -> bool {
-    schema_hint.get(name).and_then(crate::descriptors::effective_mask).is_some()
+    schema_hint
+        .get(name)
+        .and_then(crate::descriptors::effective_mask)
+        .is_some()
 }
 
 // Read surfaces use descriptor-selected visible columns for masked fields.
@@ -3125,7 +3126,8 @@ fn build_having_condition(
                         )));
                     }
                 };
-                let bind = push_having_value_bind(params, val, creator_field, schema_hint, dialect)?;
+                let bind =
+                    push_having_value_bind(params, val, creator_field, schema_hint, dialect)?;
                 parts.push(format!("{col_expr} {sql_op} {bind}"));
             }
             Ok(parts.join(" AND "))
@@ -3744,6 +3746,7 @@ mod tests {
     /// columns they name and let the projection be the ordinary allowlist.
     fn tschema() -> Value {
         value!({
+            "updated_at": { "type": "date" },
             "age":        { "type": "number" },
             "amount":     { "type": "number" },
             "bio":        { "type": "string" },
@@ -4053,8 +4056,9 @@ mod tests {
         let schema = timestamp_test_schema();
         let doc = value!({"occurred_at": -1});
 
-        let pg = build_insert_with_dialect(&s("app1"), "events", &schema, &doc, SqlDialect::Postgres)
-            .unwrap();
+        let pg =
+            build_insert_with_dialect(&s("app1"), "events", &schema, &doc, SqlDialect::Postgres)
+                .unwrap();
         assert!(
             pg.sql.contains("VALUES ($1::timestamptz)"),
             "sql: {}",
@@ -4063,7 +4067,8 @@ mod tests {
         assert_eq!(pg.params, vec![Value::Timestamp(-1)]);
 
         let sqlite =
-            build_insert_with_dialect(&s("app1"), "events", &schema, &doc, SqlDialect::Sqlite).unwrap();
+            build_insert_with_dialect(&s("app1"), "events", &schema, &doc, SqlDialect::Sqlite)
+                .unwrap();
         assert!(sqlite.sql.contains("VALUES ($1)"), "sql: {}", sqlite.sql);
         assert_eq!(sqlite.params, vec![Value::from("1969-12-31T23:59:59.999Z")]);
     }
@@ -4079,8 +4084,8 @@ mod tests {
         });
 
         let mut pg_params = Vec::new();
-        let pg =
-            build_where_with_dialect(&filter, &mut pg_params, &schema, SqlDialect::Postgres).unwrap();
+        let pg = build_where_with_dialect(&filter, &mut pg_params, &schema, SqlDialect::Postgres)
+            .unwrap();
         assert!(pg.contains(r#""occurred_at" > $1::timestamptz"#));
         assert!(pg.contains(r#""occurred_at" IN ($2::timestamptz, $3::timestamptz)"#));
         assert!(pg.contains(r#"OR "occurred_at" IS NULL"#));
@@ -4095,7 +4100,8 @@ mod tests {
 
         let mut sqlite_params = Vec::new();
         let sqlite =
-            build_where_with_dialect(&filter, &mut sqlite_params, &schema, SqlDialect::Sqlite).unwrap();
+            build_where_with_dialect(&filter, &mut sqlite_params, &schema, SqlDialect::Sqlite)
+                .unwrap();
         assert!(sqlite.contains(r#""occurred_at" > $1"#));
         assert!(sqlite.contains(r#""occurred_at" IN ($2, $3)"#));
         assert!(sqlite.contains(r#"OR "occurred_at" IS NULL"#));
@@ -4118,7 +4124,8 @@ mod tests {
             "optional": null,
         });
         for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite] {
-            let q = build_insert_with_dialect(&s("app1"), "events", &schema, &doc, dialect).unwrap();
+            let q =
+                build_insert_with_dialect(&s("app1"), "events", &schema, &doc, dialect).unwrap();
             assert!(!q.sql.contains("to_timestamp"), "sql: {}", q.sql);
             assert!(!q.sql.contains("strftime"), "sql: {}", q.sql);
             assert!(q.sql.contains("NULL"), "sql: {}", q.sql);
@@ -4142,7 +4149,8 @@ mod tests {
             "optional": null,
         });
         let mut params = Vec::new();
-        let sql = build_where_with_dialect(&filter, &mut params, &schema, SqlDialect::Sqlite).unwrap();
+        let sql =
+            build_where_with_dialect(&filter, &mut params, &schema, SqlDialect::Sqlite).unwrap();
         assert!(!sql.contains("strftime"), "sql: {sql}");
         assert!(sql.contains(r#""optional" IS NULL"#), "sql: {sql}");
         assert_eq!(
@@ -4282,7 +4290,9 @@ mod tests {
         // cast (not `to_jsonb(::text)`) keeps numbers, booleans, and objects
         // as their real JSON types — the old shape stringified everything.
         assert!(
-            q.sql.contains(r#"jsonb_insert("tags", ARRAY[jsonb_array_length("tags")::text], $1::jsonb)"#),
+            q.sql.contains(
+                r#"jsonb_insert("tags", ARRAY[jsonb_array_length("tags")::text], $1::jsonb)"#
+            ),
             "sql: {}",
             q.sql
         );
@@ -5788,7 +5798,9 @@ mod tests {
         let update = value!({"scores": {"$push": 42}});
         let q = build_update_one(&s("app1"), "games", &tschema(), &filter, &update).unwrap();
         assert!(
-            q.sql.contains(r#"jsonb_insert("scores", ARRAY[jsonb_array_length("scores")::text], $1::jsonb)"#),
+            q.sql.contains(
+                r#"jsonb_insert("scores", ARRAY[jsonb_array_length("scores")::text], $1::jsonb)"#
+            ),
             "sql: {}",
             q.sql
         );
@@ -5803,7 +5815,9 @@ mod tests {
         let update = value!({"flags": {"$push": true}});
         let q = build_update_one(&s("app1"), "games", &tschema(), &filter, &update).unwrap();
         assert!(
-            q.sql.contains(r#"jsonb_insert("flags", ARRAY[jsonb_array_length("flags")::text], $1::jsonb)"#),
+            q.sql.contains(
+                r#"jsonb_insert("flags", ARRAY[jsonb_array_length("flags")::text], $1::jsonb)"#
+            ),
             "sql: {}",
             q.sql
         );
@@ -5816,7 +5830,9 @@ mod tests {
         let update = value!({"entries": {"$push": {"k": "v", "n": 3}}});
         let q = build_update_one(&s("app1"), "log", &tschema(), &filter, &update).unwrap();
         assert!(
-            q.sql.contains(r#"jsonb_insert("entries", ARRAY[jsonb_array_length("entries")::text], $1::jsonb)"#),
+            q.sql.contains(
+                r#"jsonb_insert("entries", ARRAY[jsonb_array_length("entries")::text], $1::jsonb)"#
+            ),
             "sql: {}",
             q.sql
         );
@@ -9294,7 +9310,10 @@ mod sqlite_now_parity {
                 if matches!(dialect, SqlDialect::Sqlite) {
                     assert_eq!(runtime, migrated);
                 } else {
-                    assert!(runtime.eq_ignore_ascii_case(&migrated), "{dialect:?}: {runtime} != {migrated}");
+                    assert!(
+                        runtime.eq_ignore_ascii_case(&migrated),
+                        "{dialect:?}: {runtime} != {migrated}"
+                    );
                 }
             }
         }
@@ -9326,7 +9345,16 @@ pub fn build_where_plan(
     if matches!(predicate, crate::Predicate::Const(true)) {
         return Ok(String::new());
     }
-    let sql = render_filter(predicate, params, &[ReadSource { alias: None, schema }], dialect, true)?;
+    let sql = render_filter(
+        predicate,
+        params,
+        &[ReadSource {
+            alias: None,
+            schema,
+        }],
+        dialect,
+        true,
+    )?;
     Ok(if sql == "TRUE" { String::new() } else { sql })
 }
 
@@ -9412,9 +9440,7 @@ fn render_filter(
             let binds = set
                 .values()
                 .iter()
-                .map(|value| {
-                    read::bind_operand(params, value, lhs, sources, dialect)
-                })
+                .map(|value| read::bind_operand(params, value, lhs, sources, dialect))
                 .collect::<Result<Vec<_>, QueryError>>()?;
             format!(
                 "{} {}IN ({})",
@@ -9577,11 +9603,41 @@ mod encrypted_query_tests {
                     }
                 }
                 let namespace = SchemaName::new("encrypted_fixture").unwrap();
-                for pipeline in [value!([{"$group":{"by":"secret"}}]), value!([{"$group":{"by":["secret"]}}]), value!([{"$group":{"total":{"$min":"secret"}}}]), value!([{"$sort":{"secret":1}}])] {
-                    assert!(build_aggregate_with_soft_delete_with_dialect(&namespace, "records", &pipeline, false, &schema, dialect).is_err());
+                for pipeline in [
+                    value!([{"$group":{"by":"secret"}}]),
+                    value!([{"$group":{"by":["secret"]}}]),
+                    value!([{"$group":{"total":{"$min":"secret"}}}]),
+                    value!([{"$sort":{"secret":1}}]),
+                ] {
+                    assert!(
+                        build_aggregate_with_soft_delete_with_dialect(
+                            &namespace, "records", &pipeline, false, &schema, dialect
+                        )
+                        .is_err()
+                    );
                 }
-                assert!(build_conflict_probe_with_dialect(&namespace, "records", &schema, &value!({"secret":"x"}), dialect).is_err());
-                assert!(build_distinct_with_soft_delete_with_dialect(&namespace, "records", "secret", &value!({}), false, &schema, dialect).is_err());
+                assert!(
+                    build_conflict_probe_with_dialect(
+                        &namespace,
+                        "records",
+                        &schema,
+                        &value!({"secret":"x"}),
+                        dialect
+                    )
+                    .is_err()
+                );
+                assert!(
+                    build_distinct_with_soft_delete_with_dialect(
+                        &namespace,
+                        "records",
+                        "secret",
+                        &value!({}),
+                        false,
+                        &schema,
+                        dialect
+                    )
+                    .is_err()
+                );
                 assert!(
                     build_order_by_read_with_dialect(&value!({"secret":1}), dialect, &schema)
                         .is_err()
