@@ -166,6 +166,7 @@ fn pg_guard(cfg: &ExecutorConfig) -> Box<dyn zeroship_migrate::MigrationGuard> {
         &GuardConfig::from_policy(
             support::no_inject(&cfg.project_schema),
             zeroship_migrate_postgres::DIALECT,
+            &cfg.project_schema,
         ),
     )
 }

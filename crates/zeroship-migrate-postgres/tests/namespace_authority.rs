@@ -19,6 +19,7 @@ fn guard_with(charter_toml: &str) -> SqlGuard {
     SqlGuard::new(GuardConfig::from_policy(
         support::effective_policy_from_charter_toml(charter_toml),
         POSTGRES,
+        "app",
     ))
 }
 
@@ -182,6 +183,7 @@ columns = [ { name = "id", type = "text", nullable = false } ]
     let g = SqlGuard::new(GuardConfig::from_policy(
         support::effective_policy_from_charter_toml(charter),
         POSTGRES,
+        "app",
     ));
     assert_namespace_denied(
         &g,
@@ -498,6 +500,7 @@ scope = { include = ["app"] }
     let g = SqlGuard::new(GuardConfig::from_policy(
         support::effective_policy_from_charter_toml(charter),
         POSTGRES,
+        "app",
     ));
     assert_namespace_denied(
         &g,
@@ -630,6 +633,7 @@ scope = { include = ["app.keep_*"] }
     let g = SqlGuard::new(GuardConfig::from_policy(
         support::effective_policy_from_charter_toml(charter),
         POSTGRES,
+        "app",
     ));
     assert_namespace_denied(
         &g,
@@ -669,6 +673,7 @@ columns = [ { name = "id", type = "text", nullable = false } ]
     let g = SqlGuard::new(GuardConfig::from_policy(
         support::effective_policy_from_charter_toml(charter),
         POSTGRES,
+        "app",
     ));
     assert_namespace_denied(
         &g,
@@ -697,6 +702,7 @@ scope = { include = ["app"] }
     let g = SqlGuard::new(GuardConfig::from_policy(
         support::effective_policy_from_charter_toml(charter),
         POSTGRES,
+        "app",
     ));
     g.check("CREATE TABLE app.plain (id text)")
         .expect("a granted create outside any inject scope is allowed");
@@ -725,6 +731,7 @@ columns = [ { name = "id", type = "text", nullable = false } ]
     let g = SqlGuard::new(GuardConfig::from_policy(
         support::effective_policy_from_charter_toml(charter),
         POSTGRES,
+        "app",
     ));
     // `app.t` is granted + no inject covers `app.*` (the inject is scoped to `other`).
     g.check("CREATE TABLE app.t (id text)")
@@ -753,6 +760,7 @@ scope = "all"
     let g = SqlGuard::new(GuardConfig::from_policy(
         support::effective_policy_from_charter_toml(charter),
         POSTGRES,
+        "app",
     ));
     // SET search_path is NOT refused under a Top grant.
     match g.check("SET search_path TO app, public") {

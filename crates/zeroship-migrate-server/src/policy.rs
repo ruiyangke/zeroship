@@ -459,10 +459,7 @@ fn bind_confined_charter_to_schema(source: &str, schema: &str) -> Result<String,
                 }
             }
             KEY_SCHEMA_CROSS_SCHEMA => {
-                return Err(
-                    "confined charter must not carry schema.cross_schema before app binding"
-                        .to_string(),
-                );
+                return Err("confined charter must not grant foreign-schema access".to_string());
             }
             // Any OTHER schema-scoped grant is refused rather than passed through.
             // This arm used to be `_ => {}`, which let a grant this function does not
@@ -494,15 +491,6 @@ fn bind_confined_charter_to_schema(source: &str, schema: &str) -> Result<String,
              found {create_table_rules} and {rename_rules}"
         ));
     }
-
-    let mut cross_schema = toml::map::Map::new();
-    cross_schema.insert(
-        "key".to_string(),
-        toml::Value::String(KEY_SCHEMA_CROSS_SCHEMA.to_string()),
-    );
-    cross_schema.insert("value".to_string(), toml::Value::Boolean(true));
-    cross_schema.insert("scope".to_string(), schema_scope_value(schema));
-    grants.push(toml::Value::Table(cross_schema));
 
     toml::to_string(&doc).map_err(|error| format!("serialize app-bound charter: {error}"))
 }
@@ -744,16 +732,24 @@ scope = {{ include = ["{schema}"], exclude = ["{schema}.secret"] }}
         // system shape.
         assert_eq!(effective.managed.destructive_ops, DestructiveOps::Allow);
         // No `safety.require_approval` obligation on the default confined ceiling.
-        assert_eq!(effective.approval_level(&app_id.to_string()), ApprovalLevel::Never);
+        assert_eq!(
+            effective.approval_level(&app_id.to_string()),
+            ApprovalLevel::Never
+        );
         let app_schema = app_id.to_string();
-        // `from_policy`, not the removed `confined_with_effective(schema, policy)`:
-        // the schema is no longer passed alongside the policy because
-        // `schema_scope()` derives it from the policy itself
-        // (`owned_schemas_from_effective`). The assertion below is what proves the
-        // derivation still yields this app's schema.
         let guard = zeroship_migrate::guard::GuardConfig::from_policy(
             effective.policy.clone(),
             zeroship_migrate_postgres::DIALECT,
+            &app_schema,
+        );
+        assert!(guard.permits_schema(&app_schema));
+        assert_ne!(
+            guard.effective().grants(
+                &key(KEY_SCHEMA_CROSS_SCHEMA),
+                &ObjectName::schema(app_schema.as_bytes().to_vec())
+            ),
+            Some(KnobValue::Bool(true)),
+            "the confined host must not synthesize a foreign-schema grant for its own target"
         );
         assert_eq!(
             guard.schema_scope(),
@@ -849,6 +845,7 @@ scope = {{ include = ["{schema}"], exclude = ["{schema}.secret"] }}
         let guard = zeroship_migrate::guard::GuardConfig::from_policy(
             guard_policy,
             zeroship_migrate_postgres::DIALECT,
+            &app_schema,
         );
         assert_eq!(
             guard.schema_scope(),

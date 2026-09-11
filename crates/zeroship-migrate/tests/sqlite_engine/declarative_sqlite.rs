@@ -384,6 +384,7 @@ fn confined_sqlite_guard_rejects_raw_sql() {
     let guard = SqlGuard::new(GuardConfig::from_policy(
         support::no_inject(PROJECT),
         zeroship_migrate_sqlite::DIALECT,
+        PROJECT,
     ));
     // A perfectly benign-looking raw string is still refused — the SQLite Confined
     // path is descriptor-diff-only (no untrusted raw SQL).
@@ -407,6 +408,7 @@ fn confined_pg_guard_still_checks_raw_sql() {
     let guard = SqlGuard::new(GuardConfig::from_policy(
         support::no_inject(PROJECT),
         zeroship_migrate_postgres::DIALECT,
+        PROJECT,
     ));
     let report = guard
         .check(r#"CREATE TABLE "prj_demo"."users" (id text primary key)"#)
@@ -422,8 +424,12 @@ fn platform_fails_closed_to_confined_on_sqlite() {
     // SQLite. (The Platform constructor is operator-gated; `for_dialect` is the
     // dialect-selection seam any caller uses, and Confined→Sqlite is the same
     // fail-closed mapping Platform→Sqlite takes.)
-    let cfg = GuardConfig::from_policy(support::no_inject(PROJECT), zeroship_migrate_postgres::DIALECT)
-        .for_dialect(zeroship_migrate_sqlite::DIALECT);
+    let cfg = GuardConfig::from_policy(
+        support::no_inject(PROJECT),
+        zeroship_migrate_postgres::DIALECT,
+        PROJECT,
+    )
+    .for_dialect(zeroship_migrate_sqlite::DIALECT);
     let guard = SqlGuard::new(cfg);
     let err = guard
         .check("SELECT 1")
@@ -439,8 +445,12 @@ fn platform_fails_closed_to_confined_on_sqlite() {
 
     // And `for_dialect(Postgres)` is identity — the PG guard still checks raw SQL.
     let pg = SqlGuard::new(
-        GuardConfig::from_policy(support::no_inject(PROJECT), zeroship_migrate_postgres::DIALECT)
-            .for_dialect(zeroship_migrate_postgres::DIALECT),
+        GuardConfig::from_policy(
+            support::no_inject(PROJECT),
+            zeroship_migrate_postgres::DIALECT,
+            PROJECT,
+        )
+        .for_dialect(zeroship_migrate_postgres::DIALECT),
     );
     assert!(pg
         .check(r#"CREATE TABLE "prj_demo"."t" (id text primary key)"#)
@@ -1002,7 +1012,11 @@ async fn plan_declarative_carries_sqlite_rebuild_into_the_plan() {
 
     // plan_declarative now CARRIES the rebuild (no error) — the fail-close is gone.
     let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
-    let cfg = GuardConfig::from_policy(support::no_inject(PROJECT), zeroship_migrate_sqlite::DIALECT);
+    let cfg = GuardConfig::from_policy(
+        support::no_inject(PROJECT),
+        zeroship_migrate_sqlite::DIALECT,
+        PROJECT,
+    );
     let plan = engine
         .plan_declarative(
             &desired2,

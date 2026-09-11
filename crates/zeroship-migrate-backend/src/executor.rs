@@ -557,18 +557,9 @@ pub enum ApplyError {
     /// effective policy scope. Refused before the privileged catalog snapshot,
     /// so a directly constructed probe cannot turn the executor into a
     /// cross-schema reader.
-    // The wording carries the REMEDY because the common cause is not an exclusion.
-    // The scope is built only from `schema.cross_schema` grant includes
-    // (`owned_schemas_from_effective`), so a policy that never grants that key
-    // yields `SchemaScope::Single("")` and permits NO schema - including the
-    // project's own. "Does not permit" alone sends an operator hunting for an
-    // exclusion that was never authored.
     #[error(
-        "existence-guard probe on migration {version} names schema {probe_schema:?}, \
-         which the effective policy schema scope does not permit. That scope is built \
-         only from `schema.cross_schema` grant includes, so a policy that never grants \
-         that key permits no schema at all, the project's own included. Grant \
-         `schema.cross_schema` with a scope that includes {probe_schema:?}"
+        "existence-guard probe on migration {version} names foreign schema {probe_schema:?}, \
+         outside the host-selected project schema and its granted `schema.cross_schema` scope"
     )]
     ExistenceGuardSchemaOutOfScope {
         /// The guarded migration's version.
@@ -991,19 +982,15 @@ impl From<crate::driver::DbError> for RollbackError {
 ///
 /// # Errors
 /// [`ApplyError::ExistenceGuardSchemaOutOfScope`] when the composed policy's schema
-/// scope does not permit `probe_schema`. Fails CLOSED: a policy with no resolvable
-/// schema scope authorizes nothing.
+/// scope does not permit the foreign `probe_schema`. The configured project schema
+/// needs no cross-schema grant.
 pub fn authorize_existence_guard_schema(
     cfg: &crate::conn::ExecutorConfig,
     version: &str,
     probe_schema: &str,
     dialect: &zeroship_migrate_ir::dialect::DialectId,
 ) -> Result<(), ApplyError> {
-    if cfg
-        .guard_config_for(dialect)
-        .schema_scope()
-        .is_some_and(|scope| scope.permits(probe_schema))
-    {
+    if cfg.guard_config_for(dialect).permits_schema(probe_schema) {
         return Ok(());
     }
     Err(ApplyError::ExistenceGuardSchemaOutOfScope {

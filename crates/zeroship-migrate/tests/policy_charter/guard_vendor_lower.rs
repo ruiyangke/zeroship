@@ -72,11 +72,16 @@ fn platform_guard_config_with_data(
             destructive_ops,
         ),
         POSTGRES,
+        "zero_migrate",
     )
 }
 
 fn confined_guard_config() -> GuardConfig {
-    GuardConfig::from_policy(crate::support::no_inject("zero_migrate"), POSTGRES)
+    GuardConfig::from_policy(
+        crate::support::no_inject("zero_migrate"),
+        POSTGRES,
+        "zero_migrate",
+    )
 }
 
 fn confined_guard() -> SqlGuard {
@@ -137,6 +142,7 @@ fn destructive_ops_forbid_denies_structured_destructive_sql_classes() {
     let confined = SqlGuard::new(GuardConfig::from_policy(
         crate::support::no_inject_with_data_security("public", false, DestructiveOps::Forbid),
         POSTGRES,
+        "public",
     ));
     for sql in [
         "DROP TABLE users",
@@ -186,6 +192,7 @@ fn destructive_ops_forbid_denies_dml_holes_and_unknowns_fail_closed() {
     let guard = SqlGuard::new(GuardConfig::from_policy(
         crate::support::no_inject_with_data_security("public", false, DestructiveOps::Forbid),
         POSTGRES,
+        "public",
     ));
 
     for sql in [
@@ -230,6 +237,7 @@ fn destructive_ops_warn_allows_and_records_structured_warning() {
     let guard = SqlGuard::new(GuardConfig::from_policy(
         crate::support::no_inject_with_data_security("public", false, DestructiveOps::Warn),
         POSTGRES,
+        "public",
     ));
 
     for sql in [
@@ -266,6 +274,7 @@ fn destructive_ops_warn_allows_and_records_unknown_warning() {
     let guard = SqlGuard::new(GuardConfig::from_policy(
         crate::support::no_inject_with_data_security("public", false, DestructiveOps::Warn),
         POSTGRES,
+        "public",
     ));
 
     let report = guard
@@ -286,6 +295,7 @@ fn destructive_ops_allow_is_silent_for_policy_warning() {
     let guard = SqlGuard::new(GuardConfig::from_policy(
         crate::support::no_inject("public"),
         POSTGRES,
+        "public",
     ));
 
     let report = guard
@@ -302,6 +312,7 @@ fn destructive_ops_forbid_allows_clearly_non_destructive_sql() {
     let guard = SqlGuard::new(GuardConfig::from_policy(
         crate::support::no_inject_with_data_security("public", false, DestructiveOps::Forbid),
         POSTGRES,
+        "public",
     ));
 
     guard
@@ -786,17 +797,20 @@ fn m2_stage2_superuser_belt_sites_stay_hard_denied() {
 /// `compile_fail` doctests in `zeroship_migrate_backend::guard`.
 #[test]
 fn t11_platform_posture_is_carried_by_the_composed_policy() {
-    // The Platform posture is identified by its PDP shape: a schema allowlist scope.
+    // The operator keeps an explicit target alongside its capability grants.
     //
     // Each assertion below had a partner reading "Platform runs the full static
     // belt", which distinguished Platform from the one posture
     // that did not. That posture is gone and every config runs the belt, so the
     // question no longer separates anything and both partners came off.
-    let gcfg =
-        GuardConfig::from_policy(crate::support::operator_no_inject("zero_migrate"), POSTGRES);
+    let gcfg = GuardConfig::from_policy(
+        crate::support::operator_no_inject("zero_migrate"),
+        POSTGRES,
+        "zero_migrate",
+    );
     assert_eq!(
         gcfg.schema_scope(),
-        Some(SchemaScope::Allowlist(vec!["zero_migrate".into()]))
+        Some(SchemaScope::Single("zero_migrate".into()))
     );
     let ecfg = zeroship_migrate::conn::ExecutorConfig::new(
         "platform",
@@ -805,7 +819,7 @@ fn t11_platform_posture_is_carried_by_the_composed_policy() {
     );
     assert_eq!(
         ecfg.guard_config_for(&POSTGRES).schema_scope(),
-        Some(SchemaScope::Allowlist(vec!["zero_migrate".into()]))
+        Some(SchemaScope::Single("zero_migrate".into()))
     );
 }
 
@@ -1335,6 +1349,7 @@ fn unconfined_operator_guard_config() -> GuardConfig {
     GuardConfig::from_policy(
         crate::support::operator_with_data_security(&[], &[], false, DestructiveOps::Allow),
         POSTGRES,
+        "public",
     )
 }
 
@@ -1642,7 +1657,7 @@ fn destructive_ops_forbid_is_enforced_over_the_ir_for_every_non_postgres_id() {
         || crate::support::no_inject_with_data_security("public", false, DestructiveOps::Forbid);
 
     for dialect in [SQLITE, MYSQL, DialectId::new("duckdb")] {
-        let cfg = GuardConfig::from_policy(policy(), dialect.clone());
+        let cfg = GuardConfig::from_policy(policy(), dialect.clone(), "public");
         // `duckdb` is not a REGISTERED backend — that is the point of including it. It
         // stands for a fourth backend that has not been written yet, and it proves the
         // gate below asks the GUARD rather than matching a closed set of ids. The
@@ -1672,7 +1687,7 @@ fn destructive_ops_forbid_is_enforced_over_the_ir_for_every_non_postgres_id() {
         );
     }
 
-    let pg = GuardConfig::from_policy(policy(), POSTGRES);
+    let pg = GuardConfig::from_policy(policy(), POSTGRES, "public");
     assert!(
         check_ir_data_security_policy(
             &pg,

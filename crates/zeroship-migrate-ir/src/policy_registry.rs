@@ -484,9 +484,9 @@ pub fn builtin_registry() -> PolicyRegistry {
             },
             bool_grant(KEY_SCHEMA_PARTITION, ObjectModel::Global, false, "ALTER TABLE ATTACH/DETACH PARTITION."),
             // `schema.cross_schema` is PerSchema (the grant names exactly the permitted
-            // schemas); a reference to a schema it does not grant is a CrossSchema
+            // foreign schemas); a reference outside the target that it does not grant is a CrossSchema
             // violation.
-            bool_grant(KEY_SCHEMA_CROSS_SCHEMA, ObjectModel::PerSchema, false, "Which schemas this migration may reference (default-deny)."),
+            bool_grant(KEY_SCHEMA_CROSS_SCHEMA, ObjectModel::PerSchema, false, "Which foreign schemas this migration may reference beyond its host-selected target (default-deny)."),
             // -- code - programmable / installed objects -------------------------
             bool_grant(KEY_CODE_FUNCTION, ObjectModel::Global, true, "CREATE/DROP FUNCTION."),
             bool_grant(KEY_CODE_TRIGGER, ObjectModel::PerTable, true, "CREATE/DROP TRIGGER on this table."),

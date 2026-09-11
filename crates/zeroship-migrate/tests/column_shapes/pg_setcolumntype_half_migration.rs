@@ -196,7 +196,11 @@ async fn apply_envelope(
         &zeroship_migrate_postgres::DIALECT,
         policy,
     );
-    let guard = GuardConfig::from_policy(policy.clone(), zeroship_migrate_postgres::DIALECT);
+    let guard = GuardConfig::from_policy(
+        policy.clone(),
+        zeroship_migrate_postgres::DIALECT,
+        &cfg.project_schema,
+    );
     // The AUTHORING gate. Every arm below reaches a plan through it, which is what
     // makes "cleared validate, the guard and the lower" a measurement rather than a
     // claim: a defect caught here would never have been the half-migration.

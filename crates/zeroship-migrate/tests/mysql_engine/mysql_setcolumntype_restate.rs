@@ -413,7 +413,11 @@ async fn an_authored_set_column_type_applies_on_mysql_and_keeps_every_facet() {
             &zeroship_migrate_mysql::DIALECT,
             &policy,
         );
-        let guard = GuardConfig::from_policy(policy.clone(), zeroship_migrate_mysql::DIALECT);
+        let guard = GuardConfig::from_policy(
+            policy.clone(),
+            zeroship_migrate_mysql::DIALECT,
+            &cfg.project_schema,
+        );
         let registry: BTreeMap<String, String> = [("facets".to_string(), OWNER.to_string())]
             .into_iter()
             .collect();

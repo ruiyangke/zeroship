@@ -143,6 +143,7 @@ pub fn sqlite_line1_guard() -> Box<dyn zeroship_migrate::guard::MigrationGuard> 
         &zeroship_migrate::guard::GuardConfig::from_policy(
             no_inject("main"),
             zeroship_migrate_sqlite::DIALECT,
+            "main",
         ),
     )
 }

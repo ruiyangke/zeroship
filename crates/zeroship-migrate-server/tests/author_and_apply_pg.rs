@@ -357,8 +357,7 @@ async fn authored_v1_envelope_lowers_and_applies_over_native_compio_seam() {
 
     // (5) PostgresBackend over the compio adapter + MigrationEngine.
     let engine = MigrationEngine::new(VENDORS);
-    let guard_cfg =
-        GuardConfig::from_policy(effective.clone(), POSTGRES);
+    let guard_cfg = GuardConfig::from_policy(effective.clone(), POSTGRES, &cfg.project_schema);
     let plan = engine.plan(&migrations, &guard_cfg);
     assert!(
         plan.denied.is_empty(),

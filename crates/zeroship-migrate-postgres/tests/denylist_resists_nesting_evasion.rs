@@ -40,6 +40,7 @@ fn confined() -> SqlGuard {
     SqlGuard::new(GuardConfig::from_policy(
         support::no_inject("app1"),
         POSTGRES,
+        "app1",
     ))
 }
 

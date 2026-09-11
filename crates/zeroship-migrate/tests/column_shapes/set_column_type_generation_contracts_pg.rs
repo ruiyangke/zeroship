@@ -226,7 +226,11 @@ impl<'a> Deployment<'a> {
             &zeroship_migrate_postgres::DIALECT,
             &self.policy,
         );
-        let guard = GuardConfig::from_policy(self.policy.clone(), zeroship_migrate_postgres::DIALECT);
+        let guard = GuardConfig::from_policy(
+            self.policy.clone(),
+            zeroship_migrate_postgres::DIALECT,
+            &self.cfg.project_schema,
+        );
         let artifact = author
             .load_and_lower_guarded(&resolved_source, OWNER, registry, &live, &guard)
             .map_err(|error| format!("AUTHORING REFUSED: {error}"))?;

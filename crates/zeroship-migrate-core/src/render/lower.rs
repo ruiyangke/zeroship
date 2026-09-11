@@ -6661,6 +6661,43 @@ impl IrAuthor {
         *plan_index += 1;
         let step_start = steps.len();
         let op_kind = op_kind_tag(op);
+        // Schema admission and permission to create or rename within it are
+        // independent. Descriptor-only SQL guards cannot enforce these IR grants.
+        let namespace = match op {
+            Op::CreateTable { name, .. } => Some((
+                zeroship_migrate_ir::policy_registry::KEY_SCHEMA_CREATE_TABLE,
+                crate::guard::namespace_rule::CREATE_TABLE_NOT_GRANTED,
+                name,
+            )),
+            Op::RenameTable { table, to, .. } if table != to => Some((
+                zeroship_migrate_ir::policy_registry::KEY_SCHEMA_RENAME,
+                crate::guard::namespace_rule::RENAME_INTO_NOT_GRANTED,
+                to,
+            )),
+            _ => None,
+        };
+        if let Some((key, rule, table)) = namespace {
+            let object = zeroship_migrate_policy::ObjectName::table(
+                self.effective_schema(op).as_bytes().to_vec(),
+                table.as_bytes().to_vec(),
+            );
+            let key = zeroship_migrate_policy::KnobKey::parse(key)
+                .expect("the builtin namespace grant key is valid");
+            if !matches!(
+                self.effective.grants(&key, &object),
+                Some(zeroship_migrate_policy::KnobValue::Bool(true))
+            ) {
+                return Err(FragmentGuardDenied {
+                    op_index,
+                    op_kind,
+                    source: GuardError::NamespacePolicy {
+                        rule,
+                        statement: format!("{op_kind} on {}.{table}", self.effective_schema(op)),
+                    },
+                }
+                .into());
+            }
+        }
         enforce_vendor_capability_at_lower(op, &self.effective, self.effective_schema(op))?;
         // Lower this op (advancing `live_tables` for intra-IR FK inlining). A
         // lower failure aborts before any guarding - nothing applied. Each unit
@@ -11476,7 +11513,7 @@ mod tests {
     }
 
     fn platform_guard() -> GuardConfig {
-        GuardConfig::from_policy(platform_policy(), POSTGRES)
+        GuardConfig::from_policy(platform_policy(), POSTGRES, "zero_migrate")
     }
 
     /// The author composes the SAME charter the Platform guard does: a vendor op's
@@ -13218,8 +13255,11 @@ mod tests {
     fn guarded_forward_fk_keeps_fragment_and_noncontiguous_span_on_child_op() {
         let ir = child_before_parent_composite_ir(true);
         for dialect in [POSTGRES, MYSQL] {
-            let guard =
-                GuardConfig::from_policy(crate::test_fixtures::no_inject("app"), dialect.clone());
+            let guard = GuardConfig::from_policy(
+                crate::test_fixtures::no_inject("app"),
+                dialect.clone(),
+                "app",
+            );
             let (steps, fragments, spans) = test_ir_author("app", "app_a", dialect.clone())
                 .lower_guarded_with_op_spans(&ir, &guard, &LiveSchema::default())
                 .unwrap_or_else(|error| panic!("{dialect:?} guarded forward FK lowers: {error}"));
@@ -13343,7 +13383,8 @@ mod tests {
             }],
         );
         let author = test_ir_author("app", "app_a", POSTGRES);
-        let guard_cfg = GuardConfig::from_policy(crate::test_fixtures::no_inject("app"), POSTGRES);
+        let guard_cfg =
+            GuardConfig::from_policy(crate::test_fixtures::no_inject("app"), POSTGRES, "app");
         let (steps, frags) = author
             .lower_guarded(&ir, &guard_cfg, &LiveSchema::default())
             .expect("guarded lower of a clean createTable passes");
@@ -13409,7 +13450,7 @@ mod tests {
         // Guard confined to "other" - the rendered `CREATE TABLE "app"....` is then a
         // cross-schema reference the Confined guard denies.
         let guard_cfg =
-            GuardConfig::from_policy(crate::test_fixtures::no_inject("other"), POSTGRES);
+            GuardConfig::from_policy(crate::test_fixtures::no_inject("other"), POSTGRES, "other");
         let err = author
             .lower_guarded(&ir, &guard_cfg, &LiveSchema::default())
             .expect_err("a fragment outside the confined schema must be denied");
@@ -13447,7 +13488,8 @@ mod tests {
             }],
         );
         let author = test_ir_author("app", "app_a", SQLITE);
-        let guard_cfg = GuardConfig::from_policy(crate::test_fixtures::no_inject("app"), SQLITE);
+        let guard_cfg =
+            GuardConfig::from_policy(crate::test_fixtures::no_inject("app"), SQLITE, "app");
         let (steps, frags) = author
             .lower_guarded(&ir, &guard_cfg, &LiveSchema::default())
             .expect("SQLite guarded lower passes (descriptor guard trusts IR DDL)");
@@ -13502,7 +13544,8 @@ mod tests {
             }],
         );
         let author = test_ir_author("app", "app_a", POSTGRES);
-        let guard_cfg = GuardConfig::from_policy(crate::test_fixtures::no_inject("app"), POSTGRES);
+        let guard_cfg =
+            GuardConfig::from_policy(crate::test_fixtures::no_inject("app"), POSTGRES, "app");
 
         // The whole-up `lower` is the canonical reference (the parity leg).
         let whole = author
@@ -14635,7 +14678,7 @@ columns = [
         // Guard confined to "other" - the rendered `"app"....` DDL is a cross-schema
         // reference the Confined guard denies, attributed to op #0.
         let guard_cfg =
-            GuardConfig::from_policy(crate::test_fixtures::no_inject("other"), POSTGRES);
+            GuardConfig::from_policy(crate::test_fixtures::no_inject("other"), POSTGRES, "other");
         let err = author
             .load_and_lower_guarded(
                 bytes,
@@ -14667,7 +14710,8 @@ columns = [
             {"op":"createTable","name":"__zeroship_probe","columns":[{"name":"title","type":"text"}]}
         ]}"#;
         let author = test_ir_author("app", "app_a", POSTGRES);
-        let guard_cfg = GuardConfig::from_policy(crate::test_fixtures::no_inject("app"), POSTGRES);
+        let guard_cfg =
+            GuardConfig::from_policy(crate::test_fixtures::no_inject("app"), POSTGRES, "app");
         let err = author
             .load_and_lower_guarded(
                 bytes,
@@ -14696,7 +14740,8 @@ columns = [
             {"op":"createTable","name":"fresh","columns":[{"name":"title","type":"text"}]}
         ]}"#;
         let author = test_ir_author("app", "app_a", POSTGRES);
-        let guard_cfg = GuardConfig::from_policy(crate::test_fixtures::no_inject("app"), POSTGRES);
+        let guard_cfg =
+            GuardConfig::from_policy(crate::test_fixtures::no_inject("app"), POSTGRES, "app");
         let out = author
             .load_and_lower_guarded(
                 bytes,

@@ -135,7 +135,11 @@ async fn deploy_mysql(
         &zeroship_migrate_mysql::DIALECT,
         &policy,
     );
-    let guard = GuardConfig::from_policy(policy.clone(), zeroship_migrate_mysql::DIALECT);
+    let guard = GuardConfig::from_policy(
+        policy.clone(),
+        zeroship_migrate_mysql::DIALECT,
+        &cfg.project_schema,
+    );
     let registry: BTreeMap<String, String> = BTreeMap::new();
     let artifact = author
         .load_and_lower_guarded(
@@ -580,7 +584,7 @@ fn an_ir_enum_column_cannot_declare_case_insensitivity() {
         &zeroship_migrate_mysql::DIALECT,
         &policy,
     );
-    let guard = GuardConfig::from_policy(policy, zeroship_migrate_mysql::DIALECT);
+    let guard = GuardConfig::from_policy(policy, zeroship_migrate_mysql::DIALECT, "app");
     let registry: BTreeMap<String, String> = BTreeMap::new();
     let refusal = author
         .load_and_lower_guarded(&src, OWNER, &registry, &LiveSchema::default(), &guard)

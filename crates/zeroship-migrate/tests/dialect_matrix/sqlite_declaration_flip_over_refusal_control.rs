@@ -177,7 +177,11 @@ fn load_and_lower(ir: &MigrationIr, live: &LiveSchema) -> Vec<PlanStep> {
         &zeroship_migrate_sqlite::DIALECT,
         &policy,
     );
-    let guard = GuardConfig::from_policy(effective_policy(), zeroship_migrate_sqlite::DIALECT);
+    let guard = GuardConfig::from_policy(
+        effective_policy(),
+        zeroship_migrate_sqlite::DIALECT,
+        PROJECT,
+    );
     author
         .load_and_lower_guarded(&source, APP, &registry(), live, &guard)
         .expect(

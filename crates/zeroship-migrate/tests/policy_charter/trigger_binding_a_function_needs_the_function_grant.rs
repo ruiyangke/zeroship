@@ -232,7 +232,7 @@ fn lower(
     let resolved =
         resolve_create_table_policy(&authored, policy, SCHEMA).expect("table shape resolves");
     let resolved_json = serde_json::to_string(&resolved).expect("resolved IR serializes");
-    let guard = GuardConfig::from_policy(policy.clone(), dialect.clone());
+    let guard = GuardConfig::from_policy(policy.clone(), dialect.clone(), SCHEMA);
     let author = IrAuthor::new(
         zeroship_migrate::shipping_vendors(),
         SCHEMA,

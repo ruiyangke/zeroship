@@ -241,7 +241,7 @@ async fn apply_envelope<B: MigrationBackend>(
         OWNER,
         &registry(),
         live,
-        &GuardConfig::from_policy(policy.clone(), dialect.clone()),
+        &GuardConfig::from_policy(policy.clone(), dialect.clone(), &cfg.project_schema),
     )
     .map_err(|error| format!("{tag}: guarded lower: {error:?}"))?;
     MigrationEngine::new(zeroship_migrate::shipping_vendors())

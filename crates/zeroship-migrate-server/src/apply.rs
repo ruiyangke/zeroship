@@ -944,7 +944,7 @@ async fn attest_complete_history(
 /// Build the rendered-DDL guard from the authored no-inject confined charter, bound
 /// to the same exact app schema as the inject-bearing policy used during lower.
 fn guard_config_for_managed(schema: &str) -> GuardConfig {
-    GuardConfig::from_policy(guard_policy_for_managed(schema), POSTGRES)
+    GuardConfig::from_policy(guard_policy_for_managed(schema), POSTGRES, schema)
 }
 
 fn guard_policy_for_managed(schema: &str) -> PdpPolicy {

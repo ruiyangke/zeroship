@@ -90,6 +90,7 @@ async fn round_trip(
     let guard_cfg = GuardConfig::from_policy(
         support::no_inject(&cfg.project_schema),
         zeroship_migrate_postgres::DIALECT,
+        &cfg.project_schema,
     );
     let registry: BTreeMap<String, String> =
         [("t".to_string(), OWNER.to_string())].into_iter().collect();

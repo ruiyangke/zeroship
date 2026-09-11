@@ -44,6 +44,12 @@ pub enum SchemaScope {
     /// confinement. This is deliberately distinct from `None` at public load /
     /// validate APIs so an omitted capability defaults to least privilege.
     Unconfined,
+    /// The host target plus a foreign-schema policy whose globs, exclusions, or
+    /// layering cannot be represented by a finite allowlist.
+    Policy {
+        project_schema: String,
+        effective: Box<zeroship_migrate_policy::EffectivePolicy>,
+    },
 }
 
 impl SchemaScope {
@@ -66,6 +72,26 @@ impl SchemaScope {
             Self::Single(s) => schema.eq_ignore_ascii_case(s),
             Self::Allowlist(v) => v.iter().any(|s| s.eq_ignore_ascii_case(schema)),
             Self::Unconfined => true,
+            Self::Policy {
+                project_schema,
+                effective,
+            } => {
+                if schema.eq_ignore_ascii_case(project_schema) && !schema.is_empty() {
+                    return true;
+                }
+                let Ok(key) = zeroship_migrate_policy::KnobKey::parse(
+                    crate::policy_registry::KEY_SCHEMA_CROSS_SCHEMA,
+                ) else {
+                    return false;
+                };
+                let Some(object) = zeroship_migrate_policy::normalize_object_name(schema) else {
+                    return false;
+                };
+                matches!(
+                    effective.grants(&key, &object),
+                    Some(zeroship_migrate_policy::KnobValue::Bool(true))
+                )
+            }
         }
     }
 }

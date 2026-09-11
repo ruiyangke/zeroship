@@ -60,54 +60,7 @@ use zeroship_migrate_backend::guard::{
 
 use crate::DIALECT;
 
-/// Stable NAMESPACE-authority policy rule ids (II.2.5 / II.2.6). These are the
-/// conservative-deny rules the policy redesign introduces on top of the deny-list:
-/// raw-SQL create/DDL classification, per-op creation-gating, and injected-shape
-/// immutability. Each fails closed with the design's named error code.
-pub mod namespace_rule {
-    /// II.2.5 - a raw create (`CREATE TABLE` / CTAS / `SELECT INTO` / `LIKE` /
-    /// `PARTITION OF` / `CREATE TABLE AS EXECUTE` / `INHERITS`) targets an object an
-    /// `inject` rule covers and its own text does not carry the injected shape.
-    /// Injection cannot rewrite raw text, so a create that does not already declare
-    /// every injected column and exactly the pinned primary key would land a table
-    /// the inject rule was supposed to shape.
-    pub const RAW_CREATE_IN_INJECT_SCOPE: &str = "RawCreateInInjectScope";
-    /// II.2.6a - a create (`CREATE TABLE`, structured or classified-raw) is not
-    /// covered by a `schema.create_table` grant (default-deny namespace anchor).
-    pub const CREATE_TABLE_NOT_GRANTED: &str = "CreateTableNotGranted";
-    /// II.2.6a - a `CREATE SCHEMA` (structured or classified-raw) is not covered by
-    /// a `schema.create_schema` grant.
-    pub const CREATE_SCHEMA_NOT_GRANTED: &str = "CreateSchemaNotGranted";
-    /// II.2.5 - a raw rename / `SET SCHEMA` moves a table INTO an inject scope; the
-    /// engine cannot re-inject over raw text, so the move is denied.
-    pub const RAW_RENAME_INTO_INJECT_SCOPE: &str = "RawRenameIntoInjectScope";
-    /// II.2.6a - a rename/move into a scope is not covered by a `schema.rename`
-    /// grant at the target.
-    pub const RENAME_INTO_NOT_GRANTED: &str = "RenameIntoNotGranted";
-    /// II.2.5 - an unqualified object reference under a non-Top `sql.raw` grant is
-    /// unattributable (no live search_path to resolve it) -> Top-only -> deny.
-    pub const UNQUALIFIED_NAME_UNDER_SCOPED_RAW_SQL: &str = "UnqualifiedNameUnderScopedRawSql";
-    /// II.2.5 - `SET search_path` (or equivalent) under a non-Top `sql.raw` grant
-    /// mutates the very name-resolution context attribution depends on -> refused.
-    pub const SEARCH_PATH_UNDER_SCOPED_RAW_SQL: &str = "SearchPathUnderScopedRawSql";
-    /// II.2.5 - an opaque-body construct (`CREATE FUNCTION`/`PROCEDURE`/`TRIGGER`/
-    /// `DO`) under a non-Top `sql.raw` grant defeats statement-level attribution.
-    pub const OPAQUE_BODY_UNDER_SCOPED_RAW_SQL: &str = "OpaqueBodyUnderScopedRawSql";
-    /// II.2.5 - a raw statement the parser cannot classify into exactly one shape,
-    /// or whose target is dynamic/unqualified, is unattributable under a non-Top grant.
-    pub const UNATTRIBUTABLE_RAW_UNDER_SCOPED_RAW_SQL: &str = "UnattributableRawUnderScopedRawSql";
-    /// II.2.6b - an `ALTER`/`DROP COLUMN`/`RENAME` touching a column the covering
-    /// inject rule contributes, without an explicit `schema.alter_injected` grant.
-    pub const INJECTED_SHAPE_IMMUTABLE: &str = "InjectedShapeImmutable";
-    /// II.2.6b - an index-mutating op on an injected index.
-    pub const INJECTED_INDEX_IMMUTABLE: &str = "InjectedIndexImmutable";
-    /// II.2.6b - a PK-replacing/dropping op on a table whose PK a covering inject
-    /// rule pins.
-    pub const INJECTED_PRIMARY_KEY_IMMUTABLE: &str = "InjectedPrimaryKeyImmutable";
-    /// II.2.6b (H3) - a rename-into where a name-matching element diverges
-    /// structurally from the injected shape (type/nullability/default/key/PK-columns).
-    pub const INJECTED_SHAPE_CONFORMANCE_MISMATCH: &str = "InjectedShapeConformanceMismatch";
-}
+pub use zeroship_migrate_backend::guard::namespace_rule;
 
 /// Whether the effective policy admits a DROP object class beyond
 /// [`is_safe_drop_object`] (the `.down.sql`-only reverses: schema/extension/policy -
@@ -444,7 +397,7 @@ trait GuardDecisions {
     fn grants_object_bool(&self, key: &str, object: Option<&ObjectName>) -> bool;
     fn grants_drop_object(&self, remove_type: i32, object: Option<&ObjectName>) -> bool;
     fn granted_extension_allowlist(&self) -> Vec<String>;
-    fn grants_cross_schema(&self, schema: &str) -> bool;
+    fn permits_schema(&self, schema: &str) -> bool;
     fn is_injected_shape(&self, object: &ObjectName, element: &ShapeElement) -> bool;
 }
 
@@ -485,8 +438,8 @@ impl GuardDecisions for GuardConfig {
         Self::granted_extension_allowlist(self)
     }
 
-    fn grants_cross_schema(&self, schema: &str) -> bool {
-        Self::grants_cross_schema(self, schema)
+    fn permits_schema(&self, schema: &str) -> bool {
+        Self::permits_schema(self, schema)
     }
 
     fn is_injected_shape(&self, object: &ObjectName, element: &ShapeElement) -> bool {
@@ -525,6 +478,9 @@ impl GuardDecisions for BodyScopeDecisions<'_> {
         match self.scope {
             Some(SchemaScope::Single(schema)) if !schema.is_empty() => Some(schema.clone()),
             Some(SchemaScope::Allowlist(schemas)) if schemas.len() == 1 => schemas.first().cloned(),
+            Some(SchemaScope::Policy { project_schema, .. }) if !project_schema.is_empty() => {
+                Some(project_schema.clone())
+            }
             _ => None,
         }
     }
@@ -565,7 +521,7 @@ impl GuardDecisions for BodyScopeDecisions<'_> {
         Vec::new()
     }
 
-    fn grants_cross_schema(&self, schema: &str) -> bool {
+    fn permits_schema(&self, schema: &str) -> bool {
         self.permits(schema)
     }
 
@@ -1094,7 +1050,7 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
                 // Both ends matter: renaming a schema you do not own takes it away,
                 // and renaming your own onto another name claims that one.
                 for schema in [r.subname.trim(), r.newname.trim()] {
-                    if !schema.is_empty() && !self.cfg.grants_cross_schema(schema) {
+                    if !schema.is_empty() && !self.cfg.permits_schema(schema) {
                         return Err(GuardError::CrossSchema {
                             schema: schema.to_string(),
                             statement: raw.to_string(),
@@ -1612,7 +1568,7 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
                     for item in &d.objects {
                         if let Some(NodeEnum::String(s)) = item.node.as_ref() {
                             let schema = s.sval.trim();
-                            if !schema.is_empty() && !self.cfg.grants_cross_schema(schema) {
+                            if !schema.is_empty() && !self.cfg.permits_schema(schema) {
                                 return Err(GuardError::CrossSchema {
                                     schema: schema.to_string(),
                                     statement: raw.to_string(),
@@ -1721,7 +1677,7 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
                 }
                 if r.kind == protobuf::ReindexObjectType::ReindexObjectSchema as i32 {
                     let schema = r.name.trim();
-                    if !schema.is_empty() && !self.cfg.grants_cross_schema(schema) {
+                    if !schema.is_empty() && !self.cfg.permits_schema(schema) {
                         return Err(GuardError::CrossSchema {
                             schema: schema.to_string(),
                             statement: raw.to_string(),
@@ -1740,7 +1696,7 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
                         c.object.as_ref().and_then(|o| o.node.as_ref())
                     {
                         let schema = s.sval.trim();
-                        if !schema.is_empty() && !self.cfg.grants_cross_schema(schema) {
+                        if !schema.is_empty() && !self.cfg.permits_schema(schema) {
                             return Err(GuardError::CrossSchema {
                                 schema: schema.to_string(),
                                 statement: raw.to_string(),
@@ -1799,7 +1755,7 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
     /// found ANYWHERE in the full parse tree, not only in the slots
     /// `pg_query::nodes()` enumerates.
     fn check_cross_schema(&self, json: &Value, raw: &str) -> Result<(), GuardError> {
-        if let Some(schema) = foreign_schema_in_tree(json, &|s| self.cfg.grants_cross_schema(s)) {
+        if let Some(schema) = foreign_schema_in_tree(json, &|s| self.cfg.permits_schema(s)) {
             return Err(GuardError::CrossSchema {
                 schema,
                 statement: raw.to_string(),
@@ -1826,7 +1782,7 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
             .collect();
         if parts.len() >= 2 {
             let schema = parts[0];
-            if !self.cfg.grants_cross_schema(schema) {
+            if !self.cfg.permits_schema(schema) {
                 return Err(GuardError::CrossSchema {
                     schema: schema.to_string(),
                     statement: raw.to_string(),
@@ -1958,7 +1914,7 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
                     None => return false,
                 }
             };
-            if self.cfg.grants_cross_schema(&schema) {
+            if self.cfg.permits_schema(&schema) {
                 return false;
             }
             // Concrete object target - Object-slot policy: no shared-schema
@@ -2169,7 +2125,7 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
         //     project schema is a cross-tenant reference the body re-parse
         //     could not surface (PL/pgSQL BEGIN/END wrappers don't parse as
         //     plain SQL). Deny-by-default.
-        if let Some(schema) = foreign_schema_in_body(body, &|s| self.cfg.grants_cross_schema(s)) {
+        if let Some(schema) = foreign_schema_in_body(body, &|s| self.cfg.permits_schema(s)) {
             return Err(GuardError::CrossSchema {
                 schema,
                 statement: raw.to_string(),
@@ -2183,8 +2139,7 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
         //     uses an `%I` identifier template - any bare-identifier literal
         //     that is not the project schema (reaching ANOTHER project's
         //     schema). Deny-by-default for the dynamic-SQL class.
-        if let Some(schema) =
-            foreign_schema_literal_in_body(body, &|s| self.cfg.grants_cross_schema(s))
+        if let Some(schema) = foreign_schema_literal_in_body(body, &|s| self.cfg.permits_schema(s))
         {
             return Err(GuardError::CrossSchema {
                 schema,

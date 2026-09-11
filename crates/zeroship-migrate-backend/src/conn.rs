@@ -255,15 +255,19 @@ impl ExecutorConfig {
     /// Build the [`GuardConfig`](crate::guard::GuardConfig) every executor-path
     /// guard site uses for an explicitly selected backend.
     ///
-    /// The caller-authored policy is preserved exactly, and it is the whole of what
-    /// distinguishes one config's guard from another's.
+    /// The host-selected project schema and caller-authored policy are preserved
+    /// independently. A foreign-schema grant never selects the project target.
     ///
     /// Public because the engine's `rollback_with_lock` takes its
     /// guard as an argument, so an out-of-crate driver has to be able to build the
     /// one this config implies.
     #[must_use]
     pub fn guard_config_for(&self, dialect: &DialectId) -> crate::guard::GuardConfig {
-        crate::guard::GuardConfig::from_policy(self.effective.clone(), dialect.clone())
+        crate::guard::GuardConfig::from_policy(
+            self.effective.clone(),
+            dialect.clone(),
+            &self.project_schema,
+        )
     }
 
     // A Platform-trust constructor stood here. It took a capability token and
