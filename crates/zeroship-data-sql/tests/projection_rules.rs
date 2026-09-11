@@ -1,17 +1,6 @@
-//! Narrowing, the platform-field union, and the masked substitution.
+//! Explicit projection shape, field visibility and physical-column aliases.
 //!
-//! Two of SC-3's acceptance arms live here, and both are written the way the
-//! document insists rather than the way that is easier:
-//!
-//! * *a narrowed projection still contains every required platform field*,
-//!   asserted against a projection that asks for ONE declared column - which is
-//!   the case that catches narrowing implemented as a filter over the caller's
-//!   list;
-//! * *a narrowed projection over a MASKED column still renders
-//!   `"<col>_masked" AS "<col>"`*, asserted **on the rendered SQL**, not on the
-//!   shape of the returned row. A row-shape assertion passes while the value is
-//!   plaintext, because the column arrives under the name the caller asked for
-//!   either way - which is the whole failure.
+//! SQL assertions verify the selected storage column as well as its output name.
 
 use zeroship_data_sql::render::postgres;
 use zeroship_data_sql::{
@@ -31,14 +20,7 @@ fn field(name: &str) -> ProjectedField {
     ProjectedField::column(column(name)).expect("projectable")
 }
 
-/// A row projection carries exactly what it was given, and a platform field is
-/// carried but not visible.
-///
-/// This asserted the opposite until 2026-09-07: the constructor appended seven
-/// system fields of its own, so narrowing to one column produced eight. That
-/// made `distinct("role")` unrepresentable and silently widened every explicit
-/// `select`. Which fields a platform manages is not a fact a SQL grammar can
-/// hold, so the caller supplies them and marks them.
+/// A projection preserves the supplied fields and their visibility.
 #[test]
 fn a_row_projection_carries_exactly_what_it_was_given() {
     let projection = Projection::rows(vec![
@@ -55,29 +37,16 @@ fn a_row_projection_carries_exactly_what_it_was_given() {
     assert_eq!(aliases.len(), 2, "the projection widened: {aliases:?}");
     assert!(aliases.contains(&"name") && aliases.contains(&"id"));
 
-    // The exposure split survives the union's removal: `id` is selected and is
-    // not part of what the caller asked to see.
+    // Platform fields are selected without being exposed to the caller.
     assert_eq!(projection.visible_aliases(), vec!["name"]);
 
-    // A single-column narrowing is now expressible at all, which is the defect
-    // this replaced. `distinct` needs exactly this.
+    // A distinct query must be able to select a single field.
     let narrowed = Projection::rows(vec![field("role")]).expect("row projection");
     assert_eq!(narrowed.fields().len(), 1);
     println!("ruled on 2 projections");
 }
 
-/// An empty projection is refused rather than rendered.
-///
-/// The non-empty invariant used to be a side effect of the platform-field
-/// union, which could not produce an empty list. Removing the union removed the
-/// invariant, so it is now stated. Without this, `SELECT  FROM "t"` is
-/// constructible.
-///
-/// The obligation this test used to carry - that `id` survives the narrowest
-/// projection, because it is load-bearing for the relation stitch, the unmask
-/// handle's `row_pk`, the AEAD tag via `canonical_aad` and change-event
-/// correlation - has MOVED to the caller, and that is the real cost of this
-/// change. A grammar cannot keep a column it has no way to be told about.
+/// Reject empty projections before they can render invalid SQL.
 #[test]
 fn an_empty_row_projection_is_refused() {
     assert!(matches!(
@@ -106,13 +75,7 @@ fn a_declared_platform_field_stays_declared() {
     println!("ruled on 1 declared platform field");
 }
 
-/// A platform-marked field is projected and then stripped, so the SQL is
-/// correct and the creator sees what they asked for.
-///
-/// The exposure split is the half of the old union rule that SURVIVES it. The
-/// list moved to the caller; the distinction between "selected" and "visible"
-/// did not, because it is a property of the projection rather than of the
-/// platform.
+/// Planner-added fields remain selected but are omitted from visible aliases.
 #[test]
 fn planner_added_fields_are_not_visible_to_user_code() {
     let projection = Projection::rows(vec![
@@ -130,12 +93,7 @@ fn planner_added_fields_are_not_visible_to_user_code() {
     println!("ruled on 1 projection");
 }
 
-/// THE ARM THAT MATTERS, asserted on rendered SQL.
-///
-/// The obvious implementation of narrowing - filter the final column list down
-/// to what the caller asked for - emits a bare `"ssn"` and returns plaintext:
-/// not fewer columns than intended but the wrong value, silently, on precisely
-/// the columns marked as needing protection.
+/// A stored projection selects the physical column under the requested logical name.
 #[test]
 fn a_narrowed_projection_over_a_stored_column_renders_the_physical_name() {
     let projection = Projection::rows(vec![
@@ -161,8 +119,7 @@ fn a_narrowed_projection_over_a_stored_column_renders_the_physical_name() {
         sql.contains(r#""__zs_raw__ssn" AS "ssn""#),
         "the storage substitution did not reach the SQL: {sql}"
     );
-    // The logical name is NOT read. Checking for the exact projected form is
-    // what distinguishes "the physical column was selected" from "both were".
+    // The logical alias must not also be selected as a source column.
     assert!(
         !sql.contains(r#""ssn" AS "ssn""#),
         "the plaintext column was projected alongside the stored one: {sql}"

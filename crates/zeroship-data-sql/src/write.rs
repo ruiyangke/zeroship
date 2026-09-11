@@ -1,72 +1,11 @@
-//! The write family: insert, insert-many, update, delete.
+//! Typed insert, update and delete plans.
 //!
-//! # Writing a NULL without a null literal
+//! `WriteValue::Null` represents SQL NULL separately from bound literals, keeping
+//! null writes out of ordinary comparison operands. Arithmetic assignments operate
+//! on the assigned column and do not admit arbitrary SQL expressions.
 //!
-//! [`crate::Literal`] has no `Null` variant and this module does not add one.
-//! That is a decision rather than an omission, and the write family is where it
-//! has to be argued, because writing a NULL is something creators legitimately
-//! do.
-//!
-//! The resolution is that **the assigned value is a node**, exactly as nullness
-//! on the read side is a node ([`crate::Predicate::IsNull`]) rather than an
-//! operator over a null operand. [`WriteValue`] has two variants: a bound
-//! parameter, and [`WriteValue::Null`], which renders the `NULL` keyword and
-//! binds nothing.
-//!
-//! Three reasons this is the right shape and `Literal::Null` is the wrong one:
-//!
-//! * **A `Literal` is by definition a bind parameter.** Every one of them is
-//!   pushed onto the parameter list and referred to by a `$n`. A NULL is not
-//!   bound - `query.rs:3558-3564` inlines the `NULL` keyword and says why in its
-//!   own comment: *"Postgres' text-format param protocol (`query_text_params`,
-//!   `&[&str]`) cannot represent NULL - an empty string would be encoded as
-//!   `""`"*. A `Literal::Null` would therefore be a parameter that is never a
-//!   parameter, which is the same category error as the shipped defect where a
-//!   JSON null became `String::new()`.
-//! * **It would re-open the defect the read family closed.** `Literal` is
-//!   reachable from [`crate::Operand::Lit`], so a null literal would immediately
-//!   be constructible on both sides of every comparison and inside every
-//!   membership set - which is precisely the `{ f: { $in: [null] } }` shape that
-//!   compiled to `f IN ($1)` with `$1 = ''`. [`WriteValue`] is not an `Operand`
-//!   and cannot appear in a predicate, so the blast radius of the new variant is
-//!   the SET/VALUES position and nothing else.
-//! * **The conversion boundary keeps working.** A caller translating a nullable
-//!   wire value crosses [`WriteValue::from_optional`], whose `Option<Literal>`
-//!   argument makes them handle the `None` arm. They cannot get a "value" out of
-//!   it that is secretly a null.
-//!
-//! # `col = col + 1` is NOT a later problem
-//!
-//! The read family has no function-call node and no arithmetic, and it does not
-//! need one. The write family does, immediately: `query.rs:3907` emits
-//! `"version" = "version" + 1` on **every** update that arrives through the CRUD
-//! dispatch path, and `query.rs:3814-3825` lowers `$inc` / `$dec` / `$mul` to
-//! `{col} = {col} <op> ${n}::numeric`. A write family that cannot express those
-//! cannot render a single production `UPDATE`, and the first person who needs
-//! one adds a string escape hatch.
-//!
-//! So [`Assignment`] carries [`Arithmetic`] - and it is deliberately **not** a
-//! general expression node. The left operand is implicitly the column being
-//! assigned, the operator set is three, and the right operand is one numeric
-//! literal. `a = b + 1` (cross-column), `a = (a + 1) * 2` (nested) and
-//! `a = f(a)` (function call) are all unrepresentable. That closure is the whole
-//! point: SC-3 leaves per-family node spelling to each family's port precisely
-//! so a shared expression grammar is not fixed by whoever ports first, and a
-//! general `Expr` node introduced here would fix it for search, unmask and
-//! effects as well.
-//!
-//! The `::numeric` cast in the shipped lowering is **deleted**, not relocated,
-//! for the same reason [`crate::render::postgres::PostgresValueFormat`] deletes
-//! `decode($N, 'base64')::bytea`: the cast is there because the parameter is a
-//! `String`. A [`crate::Literal::Int`] binds as an integer, so there is nothing
-//! left for the cast to repair.
-//!
-//! # JSON array operations
-//!
-//! JSON array mutations currently belong to the runtime collection compiler
-//! and its dialect-specific renderer. The typed assignment grammar does not
-//! yet carry these nodes. A port must retain the existing single-element
-//! semantics, structural equality, and database conformance coverage.
+//! Row limits and backend bind budgets bound different resources and are checked
+//! separately. JSON array mutations live in the runtime collection compiler.
 
 use crate::ident::Ident;
 use crate::literal::Literal;
@@ -75,15 +14,7 @@ use crate::predicate::{MAX_PREDICATE_DEPTH, Predicate};
 use crate::projection::{Projection, ProjectionKind};
 use core::fmt;
 
-/// The largest number of rows one insert may carry.
-///
-/// Mirrors `MAX_INSERT_MANY_BATCH` (`query.rs:601`), and it is a **separate**
-/// bound from [`BindBudget`] rather than a proxy for it. `query.rs:598-600`
-/// says why in its own words: the document count "bounds the multi-row SQL
-/// string and row bookkeeping materialized in the worker" and "says nothing
-/// about row width". A batch of 1,000 one-column rows and a batch of 20
-/// five-thousand-column rows stress different resources, and a single cap can
-/// only see one of them.
+/// Maximum rows in an insert plan, separate from the backend's bind budget.
 pub const MAX_INSERT_ROWS: usize = 1_000;
 
 /// The bind-parameter ceiling of one backend's wire protocol.

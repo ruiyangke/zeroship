@@ -1,39 +1,11 @@
-//! `mint_tx_view` — the collections-only object handed to a
-//! `Db.transaction(fn)` callback.
+//! V8 callback integration for ORM transactions.
 //!
-//! ## Design
+//! The adapter captures async scope, invokes creator callbacks with collection
+//! handles, and reports callback completion to the ORM orchestrator. Transaction
+//! generation and savepoint identity travel with the callback's scope.
 //!
-//! The `Transaction` `#[v8_class]` (with its `commit`/`rollback`/
-//! `collection` methods and GC-driven auto-rollback finalizer) is
-//! **gone**. Transaction orchestration moved entirely into Rust
-//! ([`crate::transaction`]): begin/commit/rollback/
-//! savepoint are driven by the native `Db.transaction(fn)` orchestrator,
-//! never by JS-reachable methods. There is no `env.db.beginTransaction`
-//! and no `tx.commit()` / `tx.rollback()` anywhere in the object graph —
-//! creators abort by throwing inside the callback and commit by resolving.
-//!
-//! What remains here is [`mint_tx_view`]: the object the orchestrator
-//! passes to the creator callback. It is a plain `v8::Object` whose
-//! properties are one [`Collection`](super::collection::Collection) per
-//! cached-schema collection — **collections as props, no methods**
-//! (Q-P9-C). `tx.posts.find(...)` works because each property is a real
-//! `Collection`; every CRUD method on it routes through the open
-//! transaction connection automatically, since
-//! the ORM executor consults
-//! `ThreadDbContext::tx_conns` whenever it is set (the
-//! orchestrator sets it for the duration of the transaction).
-//!
-//! ## Why collections-as-props (not a `Transaction` instance)
-//!
-//! A `tx` object that exposed `commit` / `rollback` / `collection` would
-//! re-introduce a JS-reachable transaction primitive — exactly the
-//! capability surface this redesign set out to remove. By minting a bare object with
-//! only collection properties, there is no method for creator (or
-//! escaped) code to call: the transaction lifecycle is owned by Rust end
-//! to end. The bootstrap layer wraps each native collection prop in a
-//! `Result`→throw shim before the creator sees it (so the callback sees
-//! the throwing contract), but the *shape* — collections only — is fixed
-//! here.
+//! Creator callbacks resolve to commit or throw to roll back. The ORM owns session
+//! acquisition, SQL settlement and cancellation cleanup.
 
 #![allow(unsafe_code)]
 

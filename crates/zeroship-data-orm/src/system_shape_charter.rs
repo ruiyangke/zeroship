@@ -154,7 +154,7 @@ impl AssignmentPlan {
 /// drive the pass directly - derives it here on first use.
 ///
 /// **That fallback is not a second authority.** Both paths parse
-/// [`SYSTEM_SHAPE_CHARTER_TOML`], which is `include_str!`-ed from the operator's
+/// `SYSTEM_SHAPE_CHARTER_TOML`, which is `include_str!`-ed from the operator's
 /// one file; there is no configuration, no descriptor and no environment in
 /// either path, so the two cannot disagree. What the stamp buys is that a
 /// production worker fails at composition rather than inside its first write.

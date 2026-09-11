@@ -1,26 +1,8 @@
-//! Idempotent provisioning of the per-app PostgreSQL role.
+//! Test-host helpers for provisioning per-app PostgreSQL roles.
 //!
-//! Part of the always-compiled `auth/*` subtree - see the `lib.rs` mod
-//! declarations.
-//!
-//! Privilege here is carried by the CONNECTION'S ROLE, never by a
-//! function the worker calls. `SET [LOCAL] ROLE "app_<id>_role"` narrows
-//! what the backend can reach for the life of a statement or
-//! transaction; there is no definer-rights wrapper, no signed
-//! session token, and no platform-owned system schema. That is the
-//! AGENTS.md invariant "privilege follows the PROCESS, not the
-//! function": anything the worker can invoke is, by construction, not
-//! privileged, so a capability it invokes cannot be a boundary.
-//!
-//! That schema, its six tables and its 32 definer-rights routines were
-//! deleted on 2026-08-27 under that invariant. Nothing replaced them; the
-//! runtime descriptor is the schema authority and per-app roles are the
-//! privilege boundary. See `crate::auth`'s module header for what it held
-//! and why the name it used is reserved rather than retired.
-//!
-//! Every `CREATE ROLE` here is wrapped in an existence probe, so
-//! re-running `ensure_per_app_role` on a provisioned cluster is a
-//! cheap no-op.
+//! Roles receive app-scoped grants without replication privileges. Reserved tables
+//! have separate grant rules; the unmask audit table permits append-only access.
+//! Production schema provisioning belongs to the migration service.
 
 #[cfg(any(test, feature = "test-helpers"))]
 use compio_postgres::Pool;
@@ -37,34 +19,8 @@ use zeroship_data_orm::error::DbError;
 #[cfg(any(test, feature = "test-helpers"))]
 const RESERVED_SYSTEM_TABLE_PREFIX: &str = "__zeroship_";
 
-/// The ONE `__zeroship_`-prefixed table in an app schema the runtime role must
-/// keep privileges on.
-///
-/// Every other reserved table in the app's schema is state a separate service
-/// WRITES and the worker only reads — above all the migration journal
-/// (`__zeroship_schema_migrations` and its siblings), which the worker must not
-/// be able to forge. Stripping the worker's grants on those is the whole point
-/// of [`revoke_reserved_system_table_privileges`].
-///
-/// The unmask audit table is the exception, and it is the exact inverse: the
-/// worker is its ONLY writer. Every `unmask()` — granted and denied — appends a
-/// row recording who read plaintext, from `crud/unmask.rs`.
-///
-/// This exemption did not matter while the worker CREATED the table itself,
-/// which it did until 2026-08-28: the creator of a Postgres table is its owner,
-/// and an owner's rights are implicit and survive `REVOKE ... FROM <owner>`, so
-/// the loop below swept the name and changed nothing. Now that the migration
-/// service creates it, the worker is an ordinary grantee. The reserved sweep
-/// leaves this exact name for its dedicated recipe, which clears every additive
-/// privilege before adding only INSERT and serial-sequence USAGE.
-///
-/// Losing ownership is a GAIN, not a regression: a process that owns its own
-/// audit log can `TRUNCATE` or `DROP` it, and privilege follows the process.
-/// The worker should hold exactly the reach it needs to append and no more.
-///
-/// Read from [`crate::backend_handle::AUDIT_UNMASK_TABLE`] rather than restated:
-/// the grant recipe and the INSERT that uses the grant must name one relation,
-/// and until 2026-09-04 they were two independent literals in two files.
+/// Reserved table whose grants permit the runtime to append unmask audit rows.
+/// The dedicated grant recipe excludes mutation and deletion of existing evidence.
 #[cfg(any(test, feature = "test-helpers"))]
 const WORKER_WRITABLE_RESERVED_TABLE: &str = crate::backend_handle::AUDIT_UNMASK_TABLE;
 
