@@ -402,14 +402,19 @@ function addUser(input: UserInsert): Promise<UserId | undefined> { ... }
 
 The accessors are type-only — at runtime they return `null`.
 
-`t.ref("users")` is also the foreign-key builder. By default it emits a
-same-app FK with NO `ON DELETE`, `ON UPDATE`, or `DEFERRABLE` clause at all,
+For a manual schema, declare the foreign-key target column explicitly:
+`t.ref("users", { column: "account_key" })`. Migration-generated builders carry
+the target column from `schema.runtime.json`. Relation loading without an
+explicit column resolves the target collection's declared primary key.
+
+By default, the builder emits a same-app FK without `ON DELETE`, `ON UPDATE`,
+or `DEFERRABLE` clauses,
 so the database's own defaults apply: `NO ACTION` for both actions, and
 immediate (non-deferred) checking. On Postgres `NO ACTION` rejects a delete
 that would orphan a row, the same as `RESTRICT`, but defers the check to the
 end of the statement rather than firing per row.
 
-Override with `t.ref("users", { onDelete: "cascade" })` for physical cascade,
+Add `onDelete: "cascade"` to the reference options for physical cascade,
 or `{ deferrable: true }` if you need cyclic refs insertable within one
 transaction — that is opt-in, not the default. Cross-app targets are refused;
 FKs stay inside the calling app. See `sdks/db/src/types.ts` for the builder,

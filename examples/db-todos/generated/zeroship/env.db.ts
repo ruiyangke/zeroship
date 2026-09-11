@@ -30,7 +30,7 @@ const schema = {
     updated_by: t.string().assigned({"by":"actor","on":"write"}),
     version: t.number().required().default(1).assigned({"by":"increment(1)","on":"write"}),
     deleted_at: t.timestamp().assigned({"by":"now","on":"delete"}),
-    userId: t.ref("users").required(),
+    userId: t.ref("users", { column: "id" }).required(),
     title: t.string().required(),
     priority: t.string().required().default("medium"),
     tags: t.json(),

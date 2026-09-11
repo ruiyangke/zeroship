@@ -29,6 +29,7 @@ export interface RuntimeFieldDef {
   encrypted?: boolean;
   idPrefix?: string;
   refTarget?: string;
+  refColumn?: string;
   onDelete?: string;
   onUpdate?: string;
   deferrable?: boolean;
@@ -291,10 +292,11 @@ function renderIdBase(def: RuntimeFieldDef): string {
   return typeof def.idPrefix === "string" ? `t.id(${jsStr(def.idPrefix)})` : "t.id()";
 }
 
-/** `t.ref(target, { onDelete?, onUpdate?, deferrable? })` - the FK base. */
+/** Preserve the reference target and its constraint options. */
 function renderRefBase(def: RuntimeFieldDef): string {
   const target = typeof def.refTarget === "string" ? def.refTarget : "";
   const opts: string[] = [];
+  if (typeof def.refColumn === "string") opts.push(`column: ${jsStr(def.refColumn)}`);
   if (typeof def.onDelete === "string") opts.push(`onDelete: ${jsStr(def.onDelete)}`);
   if (typeof def.onUpdate === "string") opts.push(`onUpdate: ${jsStr(def.onUpdate)}`);
   if (typeof def.deferrable === "boolean") opts.push(`deferrable: ${def.deferrable}`);
