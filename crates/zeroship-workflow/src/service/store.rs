@@ -130,6 +130,9 @@ pub trait WorkflowStore: Send + Sync {
         if row.len() != 1 || row[0].text("fingerprint")? != schema::fingerprint(tx.dialect())? {
             return Err(schema::incompatible());
         }
+        if tx.platform_policy.is_some() {
+            super::PlatformPolicy::verify(&mut tx).await?;
+        }
         tx.commit().await
     }
 }

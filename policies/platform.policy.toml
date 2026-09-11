@@ -19,12 +19,11 @@
 # the charter to any other value produces a guard that refuses every file in the corpus,
 # so the substitution could only ever reproduce the literal below.
 #
-# Two cross-schema peers, and they are peers for different reasons. `public` holds
-# the extensions. `service_authn` holds the state of the service-to-service
-# authentication MECHANISM -- today exactly `service_assertion_replay` -- and it is
-# a separate namespace because every service that VERIFIES an assertion writes
-# there, including the worker, while `zeroship` holds platform state no worker may
-# write at all. See db/migrations-ts/20260816000100_service_assertion_replay.ts.
+# The cross-schema peers have distinct authorities. `public` holds extensions.
+# `service_authn` holds assertion replay state shared by verifying services.
+# `workflow` holds the workflow server's journal under a migration-only owner;
+# workers, Gateway and app roles cannot access it. `zeroship` holds platform
+# policy, which the workflow server reads through narrow column grants.
 #
 # Widening this list widens what a platform migration may create. THE COUNTERWEIGHT
 # THAT SAT BESIDE IT IS GONE: `crates/zeroship-migrate-adapter/tests/platform_migrate.rs`
@@ -105,17 +104,17 @@ scope = "all"
 [[grant]]
 key = "schema.cross_schema"
 value = true
-scope = { include = ["zeroship", "public", "service_authn"] }
+scope = { include = ["zeroship", "public", "service_authn", "workflow"] }
 
 [[grant]]
 key = "schema.create_table"
 value = true
-scope = { include = ["zeroship", "public", "service_authn"] }
+scope = { include = ["zeroship", "public", "service_authn", "workflow"] }
 
 [[grant]]
 key = "schema.rename"
 value = true
-scope = { include = ["zeroship", "public", "service_authn"] }
+scope = { include = ["zeroship", "public", "service_authn", "workflow"] }
 
 [[grant]]
 key = "safety.destructive_ops"

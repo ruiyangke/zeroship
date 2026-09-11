@@ -149,11 +149,11 @@ impl PostgresFixture {
         let admin = connect(&admin_url).await;
         admin
             .batch_execute(
-                "CREATE ROLE zeroship_workflow_owner NOLOGIN; \
+                "CREATE ROLE zeroship_workflow_migrator NOLOGIN; \
              CREATE ROLE zeroship_workflow LOGIN; CREATE ROLE zeroship_worker LOGIN; \
              CREATE ROLE zeroship_gateway LOGIN; CREATE ROLE zeroship_app LOGIN; \
-             CREATE SCHEMA workflow AUTHORIZATION zeroship_workflow_owner; \
-             SET ROLE zeroship_workflow_owner;",
+             CREATE SCHEMA workflow AUTHORIZATION zeroship_workflow_migrator; \
+             SET ROLE zeroship_workflow_migrator;",
             )
             .await
             .unwrap();
@@ -214,7 +214,7 @@ async fn postgres_schema_constraints_and_transaction_rollback() {
 async fn storage_contract(store: &dyn WorkflowStore) {
     store.verify().await.unwrap();
     let mut tx = store.begin().await.unwrap();
-    let apps = tx.table("apps");
+    let apps = tx.table("app_state");
     tx.execute(&format!("INSERT INTO {apps} (app_id, revision, policy, signal_epoch) VALUES ('app_rollback',0,'{{}}',0)"), &[]).await.unwrap();
     drop(tx);
     let mut tx = store.begin().await.unwrap();
@@ -294,12 +294,12 @@ async fn workflow_runtime_has_dml_without_ddl_and_app_processes_have_no_access()
             .await
             .is_err());
         assert!(client
-            .batch_execute("SET ROLE zeroship_workflow_owner")
+            .batch_execute("SET ROLE zeroship_workflow_migrator")
             .await
             .is_err());
         let member: bool = admin
             .query_one(
-                "SELECT pg_has_role($1, 'zeroship_workflow_owner', 'MEMBER')",
+                "SELECT pg_has_role($1, 'zeroship_workflow_migrator', 'MEMBER')",
                 &[&role],
             )
             .await
@@ -322,7 +322,7 @@ async fn workflow_runtime_has_dml_without_ddl_and_app_processes_have_no_access()
         .await
         .is_err());
     assert!(runtime
-        .batch_execute("SET ROLE zeroship_workflow_owner")
+        .batch_execute("SET ROLE zeroship_workflow_migrator")
         .await
         .is_err());
 }

@@ -17,6 +17,78 @@ impl PlatformPolicy {
         Ok(Self { ceiling })
     }
 
+    pub(crate) async fn verify(tx: &mut Transaction) -> Result<(), WorkflowServiceError> {
+        let rows = tx
+            .query(
+                "SELECT fingerprint FROM workflow.schema_version WHERE id='platform_policy'",
+                &[],
+            )
+            .await?;
+        if rows.len() != 1
+            || rows[0].text("fingerprint")? != super::schema::fingerprint("platform_policy")?
+        {
+            return Err(super::schema::incompatible());
+        }
+        let rows = tx.query(
+            "SELECT CASE WHEN NOT (rolsuper OR rolcreaterole OR rolcreatedb OR rolreplication OR rolbypassrls) \
+             AND NOT pg_has_role(current_user,'zeroship_workflow_migrator','MEMBER') \
+             AND NOT has_schema_privilege(current_user,'workflow','CREATE') \
+             AND NOT has_any_column_privilege(current_user,'workflow.schema_version','UPDATE') \
+             AND NOT has_table_privilege(current_user,'workflow.schema_version','INSERT,DELETE,TRUNCATE') \
+             THEN 1 ELSE 0 END::bigint AS safe FROM pg_roles WHERE rolname=current_user",
+            &[],
+        ).await?;
+        if rows.len() != 1 || rows[0].integer("safe")? != 1 {
+            return Err(WorkflowServiceError::Unavailable(
+                "workflow database role holds owner or administrative privileges".into(),
+            ));
+        }
+        let rows = tx.query(
+            "WITH expected(kind,relation) AS (VALUES ('app','apps'),('plan','plans'), \
+             ('organization','organization_billing_status'),('spend','app_spend_state'),('rollout','workflow_rollout_config')) \
+             SELECT CASE WHEN EXISTS (SELECT 1 FROM pg_trigger t JOIN pg_proc p ON p.oid=t.tgfoid \
+             WHERE t.tgrelid=to_regclass('zeroship.' || e.relation) AND t.tgname='workflow_policy_fence_' || e.kind \
+             AND t.tgenabled IN ('O','A') AND NOT p.prosecdef \
+             AND t.tgtype=31 AND t.tgqual IS NULL AND t.tgnargs=0 AND cardinality(t.tgattr::smallint[])=0 \
+             AND p.oid=to_regprocedure('zeroship.workflow_policy_fence_' || e.kind || '()')) \
+             THEN 1 ELSE 0 END::bigint AS safe FROM expected e",
+            &[],
+        ).await?;
+        if rows.is_empty() || rows.iter().any(|row| row.integer("safe").ok() != Some(1)) {
+            return Err(WorkflowServiceError::Unavailable(
+                "workflow policy writer fences are missing or disabled".into(),
+            ));
+        }
+        let rows = tx
+            .query(
+                "SELECT CASE WHEN NOT prosecdef THEN 1 ELSE 0 END::bigint AS safe FROM pg_proc \
+             WHERE oid=to_regprocedure('zeroship.workflow_policy_lock(text,text,boolean)')",
+                &[],
+            )
+            .await?;
+        if rows.len() != 1 || rows[0].integer("safe")? != 1 {
+            return Err(unavailable());
+        }
+        for sql in [
+            "SELECT id,plan_id,organization_id,workflows_enabled,archived_at,deleted_at FROM zeroship.apps LIMIT 0",
+            "SELECT id,workflows_allowed,archived,runtime_limits_json FROM zeroship.plans LIMIT 0",
+            "SELECT app_id,state FROM zeroship.app_spend_state LIMIT 0",
+            "SELECT organization_id,state FROM zeroship.organization_billing_status LIMIT 0",
+            "SELECT id,status,public_key FROM zeroship.worker_instances LIMIT 0",
+            "SELECT zeroship.workflow_policy_lock('rollout','global',false)",
+        ] { tx.execute(sql, &[]).await?; }
+        let rows = tx
+            .query(
+                "SELECT id FROM zeroship.workflow_rollout_config WHERE id='global'",
+                &[],
+            )
+            .await?;
+        if rows.len() != 1 {
+            return Err(unavailable());
+        }
+        Ok(())
+    }
+
     pub(crate) async fn lock(
         &self,
         tx: &mut Transaction,

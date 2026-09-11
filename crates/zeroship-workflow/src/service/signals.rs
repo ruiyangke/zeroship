@@ -110,7 +110,7 @@ pub(crate) async fn subscribe(
         return Ok(());
     };
     validate_topic(topic)?;
-    let apps = tx.table("apps");
+    let apps = tx.table("app_state");
     let rows = tx
         .query(
             &format!("SELECT subscription_sequence FROM {apps} WHERE app_id=$1"),
@@ -216,7 +216,7 @@ pub(crate) async fn publish(
     origin: &str,
     now: i64,
 ) -> Result<AcceptedBroadcast, WorkflowServiceError> {
-    let apps = tx.table("apps");
+    let apps = tx.table("app_state");
     let rows = tx
         .query(
             &format!("SELECT subscription_sequence FROM {apps} WHERE app_id=$1"),
