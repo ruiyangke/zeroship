@@ -102,6 +102,27 @@ pub async fn run_sql(route: &TxRoute, sql: &str, params: &[Value]) -> Result<Vec
         .await
 }
 
+/// Execute without fetching rows on the captured transaction route.
+pub async fn run_statement(route: &TxRoute, sql: &str, params: &[Value]) -> Result<u64, DbError> {
+    if route.in_tx() {
+        route.check_scope()?;
+        return crate::transaction::driver::execute_operation(route.app_id(), async {
+            let lane = take_tx_lane(route)?;
+            route.backend().validate_session(lane.client())?;
+            #[cfg(test)]
+            tests::record_sqlite_tx_route();
+            lane.client().exec(sql, params).await
+        })
+        .await;
+    }
+    #[cfg(test)]
+    tests::record_sqlite_shared_route();
+    route
+        .backend()
+        .exec(route.app_id(), route.schema(), sql, params)
+        .await
+}
+
 /// Execute a compiled read and meter a successful operation.
 pub async fn exec_query(route: &TxRoute, bq: BuiltQuery) -> Result<Vec<Value>, DbError> {
     let app_id = route.app_id();
@@ -200,6 +221,35 @@ pub async fn exec_mutation_with_emit(
         key,
     );
     Ok(rows)
+}
+
+/// Execute a count-only mutation and queue a collection invalidation on success.
+pub async fn exec_mutation_count_with_emit(
+    bq: BuiltQuery,
+    route: &TxRoute,
+    collection: &str,
+    op: zeroship_data_orm::cdc::ChangeOp,
+) -> Result<u64, DbError> {
+    let affected = run_statement(route, &bq.sql, &bq.params).await?;
+    let app_id = route.app_id();
+    emit_db_metric(app_id, DB_WRITES, 1);
+    emit_db_metric(app_id, DB_ROWS_WRITTEN, affected);
+    if affected != 0
+        && !backend_publishes_committed_changes(route.backend())
+        && !crate::cdc::broker::is_app_suppressed(app_id)
+        && crate::cdc::broker::has_subscribers(app_id, collection)
+    {
+        queue_or_emit(
+            app_id,
+            route.in_tx(),
+            collection,
+            op,
+            None,
+            Vec::new(),
+            std::collections::HashMap::new(),
+        );
+    }
+    Ok(affected)
 }
 
 /// Does the backend publish committed changes on its own?
@@ -1159,17 +1209,45 @@ mod tests {
             .await;
             assert!(bad.is_err(), "the bad query must fail");
 
+            for (filter, expected) in [("id = 1", 1), ("id = 2", 0)] {
+                let affected = exec_mutation_count_with_emit(
+                    BuiltQuery {
+                        sql: format!(r#"UPDATE "{app_id}"."notes" SET title = 'changed' WHERE {filter}"#),
+                        params: vec![],
+                    },
+                    &ambient_route_for_tests(app_id, handle.clone()),
+                    "notes",
+                    ChangeOp::Update,
+                )
+                .await
+                .expect("count-only update");
+                assert_eq!(affected, expected);
+            }
+            assert!(
+                exec_mutation_count_with_emit(
+                    BuiltQuery {
+                        sql: format!(r#"DELETE FROM "{app_id}"."missing""#),
+                        params: vec![],
+                    },
+                    &ambient_route_for_tests(app_id, handle.clone()),
+                    "missing",
+                    ChangeOp::Delete,
+                )
+                .await
+                .is_err()
+            );
+
             let events = meter.drain();
             let id = uuid::Uuid::parse_str(app_id).unwrap();
             assert_eq!(
                 usage_value(&events, id, "db_writes"),
-                Some(1),
-                "one mutation = 1 db_writes; got {events:?}"
+                Some(3),
+                "successful mutation statements are metered: {events:?}"
             );
             assert_eq!(
                 usage_value(&events, id, "db_rows_written"),
-                Some(1),
-                "the insert returned 1 row; got {events:?}"
+                Some(2),
+                "returned and affected rows are metered: {events:?}"
             );
             assert_eq!(
                 usage_value(&events, id, "db_reads"),

@@ -28,6 +28,15 @@ impl ScopedExecutor for PostgresBackend {
     ) -> Result<Vec<Value>, DbError> {
         self.query_roled_values(schema, sql, params).await
     }
+    async fn exec(
+        &self,
+        _app_id: &str,
+        schema: &SchemaName,
+        sql: &str,
+        params: &[Value],
+    ) -> Result<u64, DbError> {
+        super::pg_autocommit::roled_execute(self.pool(), schema, sql, params).await
+    }
     async fn open_tx_session(
         &self,
         _app_id: &str,
