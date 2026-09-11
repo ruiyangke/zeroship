@@ -46,6 +46,13 @@ pub const DEV_APP_ID: &str = "default";
 fn matrix_schema() -> Value {
     value!({
         "_meta": {"strictness": "lenient"},
+        "id": {"type": "string", "readOnly": true},
+        "created_at": {"type": "date", "readOnly": true},
+        "updated_at": {"type": "date", "readOnly": true},
+        "created_by": {"type": "string", "readOnly": true},
+        "updated_by": {"type": "string", "readOnly": true},
+        "version": {"type": "int", "readOnly": true},
+        "deleted_at": {"type": "date", "readOnly": true},
         "title": {"type": "string", "required": true},
         "flag": {"type": "boolean", "required": true},
         "meta": {"type": "object", "required": true},

@@ -368,11 +368,6 @@ fn normalize_row_on_read(
         return Ok(());
     };
     for (key, value) in obj.iter_mut() {
-        if matches!(key.as_str(), "created_at" | "updated_at" | "deleted_at") {
-            normalize_timestamp_value(key, value)?;
-            continue;
-        }
-
         let Some(def) = schema
             .as_object()
             .and_then(|schema_obj| schema_obj.get(key))
@@ -383,7 +378,9 @@ fn normalize_row_on_read(
 
         // Protected storage is decoded by the protection pipeline. A mask is
         // stored as text even when its logical field is numeric or binary.
-        if def.get("encrypted").and_then(Value::as_bool) == Some(true) || compile::column_is_masked(key, schema) {
+        if def.get("encrypted").and_then(Value::as_bool) == Some(true)
+            || compile::column_is_masked(key, schema)
+        {
             continue;
         }
 
@@ -657,7 +654,7 @@ mod tests {
         assert_eq!(row["secret"], Value::String("AQID".to_string()));
     }
     #[test]
-    fn normalize_row_on_read_without_declared_fields_only_normalizes_system_timestamps() {
+    fn undeclared_names_do_not_select_a_codec() {
         let mut row = crate::value!({
             "created_at": "2026-05-07T01:02:03.004Z",
             "published_at": "2026-05-07T01:02:03.004Z",
@@ -672,7 +669,10 @@ mod tests {
         )
         .expect("normalize");
 
-        assert_eq!(row["created_at"], Value::Timestamp(1_778_115_723_004));
+        assert_eq!(
+            row["created_at"],
+            Value::String("2026-05-07T01:02:03.004Z".to_string())
+        );
         assert_eq!(
             row["published_at"],
             Value::String("2026-05-07T01:02:03.004Z".to_string())
@@ -682,6 +682,31 @@ mod tests {
             row["prefs"],
             Value::String("{\"theme\":\"dark\"}".to_string())
         );
+    }
+    #[test]
+    fn declared_types_override_familiar_column_names() {
+        let schema = crate::value!({
+            "created_at":{"type":"string"},
+            "updated_at":{"type":"int"},
+            "occurred_at":{"type":"date"}
+        });
+        let mut rows = vec![
+            crate::value!({"created_at":"ordinary text", "updated_at":9, "occurred_at":"2026-05-07T01:02:03.004Z"}),
+        ];
+        decode_rows(compile::SqlDialect::Sqlite, &schema, &mut rows).unwrap();
+        assert_eq!(rows[0]["created_at"], crate::value!("ordinary text"));
+        assert_eq!(rows[0]["updated_at"], crate::value!(9));
+        assert_eq!(rows[0]["occurred_at"], Value::Timestamp(1_778_115_723_004));
+        let mut parameters = Vec::new();
+        let sql = compile::build_where_with_dialect(
+            &crate::value!({"created_at":"ordinary text"}),
+            &mut parameters,
+            &schema,
+            compile::SqlDialect::Postgres,
+        )
+        .unwrap();
+        assert!(!sql.contains("timestamptz"));
+        assert_eq!(parameters, vec![crate::value!("ordinary text")]);
     }
     #[test]
     fn parse_timestamp_millis_accepts_iso_z_and_variable_fraction() {
@@ -865,7 +890,13 @@ mod binary_read_tests {
     #[test]
     fn masked_storage_remains_opaque_to_logical_codecs() {
         for logical_type in [
-            "boolean", "bytes", "vector", "geoPoint", "json", "date", "calendarDate",
+            "boolean",
+            "bytes",
+            "vector",
+            "geoPoint",
+            "json",
+            "date",
+            "calendarDate",
         ] {
             let schema = value!({"classified":{"type":logical_type, "mask":{"kind":"full"}}});
             let mut row = value!({"classified":"***"});

@@ -1,5 +1,57 @@
 use zeroship_data_sql::*;
 
+#[test]
+fn runtime_rendering_uses_each_sources_declared_value_type() {
+    let root_schema = value!({"id":{"type":"string"}, "customer_id":{"type":"string"}, "created_at":{"type":"string"}});
+    let child_schema = value!({"id":{"type":"string"}, "event_time":{"type":"date"}});
+    let o = ident("o");
+    let c = ident("c");
+    let sources = [
+        compile::ReadSource {
+            alias: Some(&o),
+            schema: &root_schema,
+        },
+        compile::ReadSource {
+            alias: Some(&c),
+            schema: &child_schema,
+        },
+    ];
+    let query = Select::builder(ident("orders"), projection())
+        .alias(o.clone())
+        .join(join())
+        .filter(Predicate::And(vec![
+            Predicate::Compare {
+                lhs: Operand::Path(path("o", "created_at")),
+                op: CompareOp::Eq,
+                rhs: Operand::Lit(Literal::Text("ordinary text".into())),
+            },
+            Predicate::Compare {
+                lhs: Operand::Path(path("c", "event_time")),
+                op: CompareOp::Eq,
+                rhs: Operand::Lit(Literal::Int(0)),
+            },
+        ]))
+        .build()
+        .unwrap();
+    for dialect in [compile::SqlDialect::Postgres, compile::SqlDialect::Sqlite] {
+        let query =
+            compile::build_select(&query, &SchemaName::new("app").unwrap(), &sources, dialect)
+                .unwrap();
+        assert!(query.params.contains(&value!("ordinary text")));
+        assert!(!query.sql.contains("ordinary text"));
+        assert!(query.sql.contains("\"c\".\"event_time\""));
+        match dialect {
+            compile::SqlDialect::Postgres => {
+                assert!(query.params.contains(&value::Value::Timestamp(0)))
+            }
+            compile::SqlDialect::Sqlite => {
+                assert!(query.params.contains(&value!("1970-01-01T00:00:00.000Z")))
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
 fn ident(value: &str) -> Ident {
     Ident::parse_as(value, IdentRole::Alias).unwrap()
 }
@@ -48,9 +100,11 @@ fn qualified_left_join_keeps_on_filters_and_bound_values() {
         .build()
         .unwrap();
     let rendered = render::postgres::render_select(&plan).unwrap();
-    assert!(rendered
-        .sql()
-        .contains("LEFT JOIN \"app\".\"customers\" AS \"c\" ON"));
+    assert!(
+        rendered
+            .sql()
+            .contains("LEFT JOIN \"app\".\"customers\" AS \"c\" ON")
+    );
     let (on, filter) = rendered.sql().split_once(" WHERE ").unwrap();
     assert!(on.contains("\"c\".\"deleted_at\" IS NULL"));
     assert!(filter.contains("\"o\".\"status\""));
@@ -70,23 +124,29 @@ fn ambiguous_and_forward_sources_are_refused() {
     ] {
         let mut j = join();
         j.on = on;
-        assert!(Select::builder(ident("orders"), projection())
-            .alias(ident("o"))
-            .join(j)
-            .build()
-            .is_err());
+        assert!(
+            Select::builder(ident("orders"), projection())
+                .alias(ident("o"))
+                .join(j)
+                .build()
+                .is_err()
+        );
     }
-    assert!(Select::builder(ident("orders"), projection())
-        .alias(ident("c"))
-        .join(join())
-        .build()
-        .is_err());
+    assert!(
+        Select::builder(ident("orders"), projection())
+            .alias(ident("c"))
+            .join(join())
+            .build()
+            .is_err()
+    );
     let unqualified = Projection::rows(vec![ProjectedField::column(ident("id")).unwrap()]).unwrap();
-    assert!(Select::builder(ident("orders"), unqualified)
-        .alias(ident("o"))
-        .join(join())
-        .build()
-        .is_err());
+    assert!(
+        Select::builder(ident("orders"), unqualified)
+            .alias(ident("o"))
+            .join(join())
+            .build()
+            .is_err()
+    );
 }
 
 #[test]
