@@ -387,7 +387,10 @@ fn wpt_text_encoding_utf8_compliance() {
         for r in results {
             match &r.outcome {
                 Outcome::Pass => t.pass += 1,
-                Outcome::Skip(_) => t.skip += 1,
+                Outcome::Skip(reason) => {
+                    t.skip += 1;
+                    eprintln!("SKIP {name} / {}: {reason}", r.name);
+                }
                 Outcome::Fail(_) => {
                     t.fail += 1;
                     failures.push((name, r));

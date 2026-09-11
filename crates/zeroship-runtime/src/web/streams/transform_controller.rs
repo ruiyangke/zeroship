@@ -37,15 +37,12 @@
 //! - `TransformStreamDefaultSourceCancelAlgorithm`          → `transform_stream_default_source_cancel`
 
 use std::cell::{Cell, RefCell};
-use std::future::Future;
-use std::pin::Pin;
-use std::rc::Rc;
 
 use crate::streams::algorithms;
 use crate::streams::promise_resolve;
 use crate::streams::readable_default_controller::{AlgorithmFn, SizeAlgorithm};
 use crate::streams::slots;
-use crate::streams::transform::{NativeTransformer, NativeTransformController};
+use crate::streams::transform::NativeTransformer;
 
 const TS_CTRL_BRAND: &str = "[[ts.ctrl.brand]]";
 
@@ -888,68 +885,6 @@ enum AlgorithmSnapshot {
         function: v8::Global<v8::Function>,
         this_obj: v8::Global<v8::Value>,
     },
-    /// Native variant — for `from_native_transformer`. Wraps an Rc<RefCell<…>>
-    /// onto the trait object so we can re-borrow per call. Returns a Promise
-    /// driven by the runtime loop driver (lands with native pull/push wiring;
-    /// the trait shape is in place).
-    #[allow(dead_code)]
-    Native(NativeAlgoArc),
-}
-
-#[allow(missing_debug_implementations)]
-pub(crate) struct NativeAlgoArc {
-    #[allow(dead_code)]
-    pub(crate) inner: Rc<RefCell<dyn NativeTransformerErased>>,
-    #[allow(dead_code)]
-    pub(crate) kind: NativeAlgoKind,
-}
-
-#[derive(Clone, Copy)]
-pub(crate) enum NativeAlgoKind {
-    Transform,
-    Flush,
-    Cancel,
-}
-
-/// Erased trait so we can store a single trait object (Rc<RefCell<dyn …>>)
-/// across the Native variants of AlgorithmFn. The methods take a chunk
-/// or reason value as Global to avoid scope plumbing through the trait.
-pub(crate) trait NativeTransformerErased: 'static {
-    fn transform_erased(
-        &mut self,
-        chunk: v8::Global<v8::Value>,
-        controller: &mut NativeTransformController,
-    ) -> Pin<Box<dyn Future<Output = Result<(), v8::Global<v8::Value>>> + 'static>>;
-    fn flush_erased(
-        &mut self,
-        controller: &mut NativeTransformController,
-    ) -> Pin<Box<dyn Future<Output = Result<(), v8::Global<v8::Value>>> + 'static>>;
-    fn cancel_erased(
-        &mut self,
-        reason: Option<v8::Global<v8::Value>>,
-    ) -> Pin<Box<dyn Future<Output = Result<(), v8::Global<v8::Value>>> + 'static>>;
-}
-
-impl<T: NativeTransformer + 'static> NativeTransformerErased for T {
-    fn transform_erased(
-        &mut self,
-        chunk: v8::Global<v8::Value>,
-        controller: &mut NativeTransformController,
-    ) -> Pin<Box<dyn Future<Output = Result<(), v8::Global<v8::Value>>> + 'static>> {
-        T::transform(self, chunk, controller)
-    }
-    fn flush_erased(
-        &mut self,
-        controller: &mut NativeTransformController,
-    ) -> Pin<Box<dyn Future<Output = Result<(), v8::Global<v8::Value>>> + 'static>> {
-        T::flush(self, controller)
-    }
-    fn cancel_erased(
-        &mut self,
-        reason: Option<v8::Global<v8::Value>>,
-    ) -> Pin<Box<dyn Future<Output = Result<(), v8::Global<v8::Value>>> + 'static>> {
-        T::cancel(self, reason)
-    }
 }
 
 impl AlgorithmSnapshot {
@@ -966,12 +901,6 @@ impl AlgorithmSnapshot {
                 let this = v8::Local::new(scope, &this_obj);
                 invoke_js(scope, f, this, &[chunk, controller_obj.into()])
             }
-            AlgorithmSnapshot::Native(_) => {
-                // Native transform driver lands with the runtime loop wiring;
-                // for this dispatch the type surface exists but we resolve
-                // immediately.
-                algorithms::resolved_undefined_promise(scope)
-            }
         }
     }
 
@@ -987,7 +916,6 @@ impl AlgorithmSnapshot {
                 let this = v8::Local::new(scope, &this_obj);
                 invoke_js(scope, f, this, &[controller_obj.into()])
             }
-            AlgorithmSnapshot::Native(_) => algorithms::resolved_undefined_promise(scope),
         }
     }
 
@@ -1003,7 +931,6 @@ impl AlgorithmSnapshot {
                 let this = v8::Local::new(scope, &this_obj);
                 invoke_js(scope, f, this, &[reason])
             }
-            AlgorithmSnapshot::Native(_) => algorithms::resolved_undefined_promise(scope),
         }
     }
 }
@@ -1346,22 +1273,15 @@ enum StartOutcome {
 
 /// Native variant of `set_up_…_from_transformer`, used by `from_native_transformer`.
 ///
-/// In v1 the native trait methods aren't driven by the runtime loop yet
-/// (same gap as NativeSource/NativeSink). The shape is in place; we mirror
-/// the trait into AlgorithmFn::Native variants so a future wiring can drive
-/// them without churning the TS surface.
+/// Native callbacks are not yet driven by the runtime loop. This entry point
+/// currently initializes the stream with no-op algorithms.
 pub fn set_up_transform_stream_default_controller_native<T: NativeTransformer + 'static>(
     scope: &mut v8::PinScope,
     stream: v8::Local<v8::Object>,
-    transformer: T,
+    _transformer: T,
     writable_hwm: f64,
     readable_hwm: f64,
 ) {
-    // Wrap the trait so we can share it across the three algorithm variants.
-    let _erased: Rc<RefCell<dyn NativeTransformerErased>> = Rc::new(RefCell::new(transformer));
-    // For this dispatch we install Noop algorithms; the next dispatch (or
-    // compression-streams wiring) replaces these with real driver hooks.
-    // The trait object is stored so the runtime loop can find it later.
     let controller = set_up_transform_stream_default_controller(
         scope,
         stream,
@@ -1381,9 +1301,6 @@ pub fn set_up_transform_stream_default_controller_native<T: NativeTransformer + 
         readable_hwm,
         SizeAlgorithm::DefaultCount,
     );
-    // Suppress "field never read"-style warnings on the erased holder until
-    // the driver lands.
-    let _ = _erased;
 }
 
 // ---------------------------------------------------------------------------

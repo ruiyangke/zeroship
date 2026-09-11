@@ -163,8 +163,6 @@ pub fn read_clamp_i64(scope: &mut v8::PinScope, val: v8::Local<v8::Value>) -> i6
 mod tests {
     // Unit tests for the clamping math; the smoke test in
     // `tests/v8_clamp_smoke.rs` covers the macro wiring end-to-end.
-    use super::*;
-
     #[test]
     fn round_half_even_is_bankers() {
         // 0.5 → 0, 1.5 → 2, 2.5 → 2, 3.5 → 4. Standard banker's

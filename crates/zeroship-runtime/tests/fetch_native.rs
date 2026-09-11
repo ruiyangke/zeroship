@@ -271,6 +271,7 @@ fn basic_get_round_trip() {
     assert_eq!(r.status, 200);
     assert_eq!(r.body, b"hello");
     assert!(!r.redirected);
+    assert_eq!(server.requests()[0].target, "/");
 }
 
 // 6. 301 + POST → GET, body dropped

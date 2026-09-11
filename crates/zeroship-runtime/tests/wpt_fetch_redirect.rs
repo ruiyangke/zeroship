@@ -708,6 +708,7 @@ fn wpt_fetch_redirect_origin() {
                 let reqs = final_server.requests.lock().unwrap();
                 match reqs.first() {
                     Some(captured) => {
+                        assert_eq!(captured.method, "GET");
                         let auth = captured
                             .headers
                             .iter()
