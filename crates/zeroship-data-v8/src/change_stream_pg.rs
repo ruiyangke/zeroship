@@ -1,4 +1,4 @@
-//! Postgres implementation of [`crate::backend::ChangeStream`].
+//! Postgres implementation of [`zeroship_data_orm::cdc::ChangeStream`].
 //!
 //! This is the single ownership path for provisioning, starting,
 //! stopping, and cleaning up a worker's logical-decoding consumer.
@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 
 use futures::FutureExt;
 
-use crate::backend::ChangeStream;
+use zeroship_data_orm::cdc::ChangeStream;
 use crate::backend::postgres::PostgresBackend;
 use zeroship_data_orm::error::DbError;
 
@@ -307,7 +307,7 @@ mod tests {
     /// it belongs beside `PgChangeStream`.
     #[test]
     fn pg_change_stream_impls_change_stream() {
-        fn assert_impl<T: crate::backend::ChangeStream<ConsumerHandle = WalConsumerHandle>>() {}
+        fn assert_impl<T: zeroship_data_orm::cdc::ChangeStream<ConsumerHandle = WalConsumerHandle>>() {}
         assert_impl::<PgChangeStream>();
     }
 }

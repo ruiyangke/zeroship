@@ -55,7 +55,7 @@
 //! }
 //! ```
 //!
-//! That entry attaches to the [`Subscription`](crate::broker::Subscription)
+//! That entry attaches to the [`Subscription`](crate::cdc::broker::Subscription)
 //! the handler opens. On the next WAL event the broker evaluates the
 //! event's row against every subscriber's predicate; non-matching
 //! subscribers are skipped.

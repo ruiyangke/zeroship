@@ -5,7 +5,7 @@
 //! execution can then yield without consulting another request's context.
 
 use std::{cell::Cell, future::Future, marker::PhantomData, rc::Rc};
-use zeroship_core::change_event::ChangeOp;
+use zeroship_data_orm::cdc::ChangeOp;
 use zeroship_data_orm::binding::DbBinding;
 pub use zeroship_data_orm::error::DbError;
 pub use zeroship_data_sql::value::Value;

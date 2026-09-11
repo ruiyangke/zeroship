@@ -45,7 +45,7 @@ use compio_postgres::replication::{
     self as repl, ReplicationMessage, ReplicationStream, StartReplicationOptions,
     pgoutput::{self, OldTuple, PgOutputMessage, TupleColumn, TupleData},
 };
-use zeroship_core::change_event::{ChangeEvent, ChangeOp};
+use zeroship_data_orm::cdc::{ChangeEvent, ChangeOp};
 
 use crate::broker::{
     // Per-app emit suppression lives in the broker, not here: none of it

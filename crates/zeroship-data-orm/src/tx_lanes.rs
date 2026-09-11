@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::driver::Session;
 
-use zeroship_core::change_event::ChangeEvent;
+use zeroship_data_orm::cdc::ChangeEvent;
 use zeroship_data_orm::error::DbError;
 
 /// Everything true of one app's open transaction.

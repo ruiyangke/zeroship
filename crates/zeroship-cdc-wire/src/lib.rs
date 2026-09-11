@@ -30,7 +30,7 @@
 //!   `Datastore { engine, cluster_id, dsn_secret_ref, resource_key }` does not
 //!   exist yet.
 //! - **`ChangeEvent`.** That is the in-process broker's shape
-//!   (`zeroship_core::change_event`), and the proposal changes it separately.
+//!   (`zeroship_data_orm::cdc`), and the proposal changes it separately.
 //!   Fusing the two would make the wire format move whenever the local event
 //!   does.
 //!

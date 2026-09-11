@@ -2253,7 +2253,7 @@ fn the_raw_column_is_refused_on_every_inbound_surface() {
 /// over-delivers, which is the bias `read_set` already declares.
 #[test]
 fn a_masked_predicate_is_lowered_for_the_change_stream() {
-    use zeroship_data_orm::read_set::{Predicate, PredicateOp, normalise_filter};
+    use zeroship_data_orm::cdc::read_set::{Predicate, PredicateOp, normalise_filter};
     let schema = flip_schema();
 
     let Some(Predicate::All(conjuncts)) =

@@ -64,9 +64,10 @@ zeroship_core::declare_env_consumer!(
 #[cfg(any(test, feature = "test-helpers"))]
 use zeroship_data_orm::tx_lanes;
 use zeroship_data_orm::{
-    auth, backend, backend_selection, broker, crud, descriptor, encryption, exec, metrics,
-    read_set, system_shape_charter, transaction, tx_route,
+    auth, backend, backend_selection, crud, descriptor, encryption, exec, metrics,
+    system_shape_charter, transaction, tx_route,
 };
+use zeroship_data_orm::cdc::{broker, read_set};
 use zeroship_data_sql::compile;
 
 pub mod op_error;
@@ -739,7 +740,7 @@ pub async fn exec_mutation_with_emit_for_tests(
     bq: compile::BuiltQuery,
     app_id: &str,
     collection: &str,
-    op: zeroship_core::change_event::ChangeOp,
+    op: zeroship_data_orm::cdc::ChangeOp,
 ) -> Result<Vec<zeroship_data_sql::value::Value>, String> {
     let backend = tx_scope::ensure_backend()
         .await
@@ -827,7 +828,7 @@ pub async fn rollback_transaction_for_tests(app_id: &str) {
 /// running real SQL.
 #[cfg(any(test, feature = "test-helpers"))]
 #[doc(hidden)]
-pub fn push_pending_emit_for_tests(ev: zeroship_core::change_event::ChangeEvent) {
+pub fn push_pending_emit_for_tests(ev: zeroship_data_orm::cdc::ChangeEvent) {
     crate::tx_lanes::with_mut(|l| l.push_pending_emit(ev));
 }
 

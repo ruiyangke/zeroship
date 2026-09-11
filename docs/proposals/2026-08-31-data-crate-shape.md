@@ -144,7 +144,7 @@ files, and has been hardened against them twice - already gave the right ones:
 - `wal_consumer.rs`: **split and rewrite, do not move the file.** A verbatim move compiles, passes
   every gate in this tree, and silently splits the process-wide broker: the file's
   `broker::publish` / `has_subscribers` / `SuppressGuard` calls all target `LazyLock` statics in
-  `crates/zeroship-data-orm/src/broker.rs`, so in a second process `publish` reaches zero
+  `crates/zeroship-data-orm/src/cdc/broker.rs`, so in a second process `publish` reaches zero
   subscribers while the worker keeps emitting locally. This document's own history section says
   exactly why that shape is dangerous: "the build goes GREEN having made the violation permanent".
 - `replication.rs`: **split**, with the watchdog half and the drop family STAYING. `watchdog_query`
@@ -456,7 +456,7 @@ nobody runs is a census with a stricter name.
    broker, and `cdc_lifecycle.rs` also reaches `crate::context::with`. This item read "BUILDABLE
    once Open 2 is answered, 4-8 hours", as though breaking the edges would let the files travel.
    They must not travel: the broker's state is process-wide `LazyLock` statics in
-   `crates/zeroship-data-orm/src/broker.rs`, so a `wal_consumer.rs` in a second process publishes
+   `crates/zeroship-data-orm/src/cdc/broker.rs`, so a `wal_consumer.rs` in a second process publishes
    into a broker with no subscribers and suppresses nothing in the worker - and it COMPILES.
    `cdc_lifecycle.rs` is ADAPTER and stays put. What is actually buildable here is the pgoutput
    decode algorithm being REWRITTEN in the relay with a `zeroship-cdc-wire` frame emit where
@@ -580,7 +580,7 @@ follows are the mistakes that would otherwise be remade.
   records a behaviour reason, not a preference: it needs the startup-only suppression guard, whose
   `Drop` merely re-enables delivery, while the general pause guard emits a Resync on `Drop` and would
   add a synthetic first message to every SQLite subscription. The guards themselves live in
-  `crates/zeroship-data-orm/src/broker.rs`; deleting `broker::engage_schema_pending` /
+  `crates/zeroship-data-orm/src/cdc/broker.rs`; deleting `broker::engage_schema_pending` /
   `disengage_schema_pending` breaks them, because those are their implementation.
 
 - **Do not put an executor call in a `data-core` trait's default body.** `LockManager` carried a

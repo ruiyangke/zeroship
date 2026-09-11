@@ -21,7 +21,7 @@ pub trait Backend:
     /// Whether the host publishes changes from the database commit stream.
     fn publishes_committed_changes(&self) -> bool;
 }
-pub use crate::storage::{Backup, ChangeStream, LockManager};
+pub use crate::storage::{Backup, LockManager};
 #[cfg(any(test, feature = "test-helpers"))]
 pub use postgres::lock_guard::LockGuard;
 #[cfg(any(test, feature = "test-helpers"))]

@@ -108,40 +108,6 @@ pub trait LockManager: 'static {
     ) -> Result<(), DbError>;
 }
 
-pub trait ChangeStream: 'static {
-    /// Concrete handle representing a spawned-but-still-running
-    /// consumer. PG: a task handle / supervisor handle; SQLite: a
-    /// session marker the actor uses to track that hooks are armed.
-    /// Type erased per-impl (associated type) so we don't pay the
-    /// `Box<dyn Future>` price the dyn-safe shape would force.
-    type ConsumerHandle: 'static;
-
-    /// Idempotently tear down the CDC infrastructure for `app_id`.
-    /// Used during app deletion; PG drops the publication and every worker
-    /// slot, while SQLite disarms hooks.
-    #[allow(async_fn_in_trait)]
-    async fn deprovision(&self, app_id: &str) -> Result<(), DbError>;
-
-    /// Provision and spawn the long-running consumer for `(app_id,
-    /// worker_id)`. This is the sole provisioning path so a slot cannot be
-    /// created without an owned task. The returned handle controls explicit
-    /// shutdown and completion.
-    #[allow(async_fn_in_trait)]
-    async fn spawn_consumer(
-        &self,
-        app_id: &str,
-        worker_id: &str,
-    ) -> Result<Self::ConsumerHandle, DbError>;
-
-    // Broker pause and schema-pending engagement do NOT belong on this trait.
-    // They are not vendor behaviour - the PG and SQLite bodies would be the same
-    // two lines, ignoring `self` and touching no backend state - and they live
-    // as `broker::BrokerPauseGuard::new` / `SchemaPendingGuard::new`, in the
-    // module owning the registries they mutate. Returning those guards from here
-    // would also force them to rank 0 while their `Drop` drives the engine,
-    // which is a Cargo cycle that cannot build.
-}
-
 pub trait Backup: 'static {
     /// Take a snapshot of the per-app data store and stream it to
     /// `dest_uri`. Returns a handle with the content hash for

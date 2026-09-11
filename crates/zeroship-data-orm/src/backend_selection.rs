@@ -5,32 +5,10 @@ use std::path::Path;
 #[cfg(any(test, feature = "test-helpers"))]
 use std::path::PathBuf;
 
-use zeroship_core::change_event::ChangeEvent;
-
 use crate::backend::sqlite::SqliteBackend;
-use crate::backend::sqlite::change_sink::{ChangeSink, DeliveryDisposition};
+use crate::cdc::broker::BrokerChangeSink;
 use zeroship_data_orm::encryption::LocalKeySource;
 use zeroship_data_orm::error::DbError;
-
-/// Engine adapter from the SQLite-owned delivery port to the process broker.
-#[derive(Debug, Clone, Copy)]
-struct BrokerChangeSink;
-
-impl ChangeSink for BrokerChangeSink {
-    fn disposition(&self, app_id: &str) -> DeliveryDisposition {
-        if crate::broker::is_app_suppressed(app_id) {
-            DeliveryDisposition::Suppressed
-        } else if crate::broker::is_schema_pending(app_id) {
-            DeliveryDisposition::SchemaPending
-        } else {
-            DeliveryDisposition::Deliver
-        }
-    }
-
-    fn publish(&self, event: &ChangeEvent) {
-        crate::broker::publish(event);
-    }
-}
 
 /// Open the selected SQLite backend with the production broker sink.
 ///

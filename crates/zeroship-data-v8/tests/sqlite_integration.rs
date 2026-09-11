@@ -26,7 +26,7 @@ use std::path::PathBuf;
 
 use std::rc::Rc;
 
-use zeroship_core::change_event::ChangeOp;
+use zeroship_data_orm::cdc::ChangeOp;
 use zeroship_data_orm::binding::DbBinding;
 use zeroship_data_orm::error::DbError;
 use zeroship_data_orm::backend::sqlite::SqliteBackend;
@@ -35,7 +35,7 @@ use zeroship_data_orm::backend::sqlite::session::TerminalIntent;
 use zeroship_data_orm::backend::{BackendHandle, LockManager, LockScope};
 use zeroship_data_orm::backend_selection::new_sqlite_backend;
 // The bounded-retry surface is the policy extension trait, not `LockManager`.
-use zeroship_data_orm::broker::{Subscription, SubscriptionMessage, subscribe};
+use zeroship_data_orm::cdc::broker::{Subscription, SubscriptionMessage, subscribe};
 use zeroship_data_sql::compile::raw_column_name;
 use zeroship_data_orm::lock_policy::BoundedLockAcquire;
 
@@ -1522,7 +1522,7 @@ fn backfill_run_pauses_broker_and_emits_one_resync() {
         // `wal_consumer::suppress_app(app_id)`; the publisher's
         // per-event check drops every packet for this app until the
         // guard drops.
-        let guard = zeroship_data_orm::broker::BrokerPauseGuard::new("app_backfill".to_string());
+        let guard = zeroship_data_orm::cdc::broker::BrokerPauseGuard::new("app_backfill".to_string());
 
         // INSERT 100 rows under the suppression window. Each statement
         // routes through the session actor, the preupdate hook fires,
@@ -1650,7 +1650,7 @@ fn schema_pending_decoder_drops_then_resyncs() {
         // `broker::engage_schema_pending(app_id)`; both the publisher
         // suppression check AND the `Broker::try_subscribe` rejection
         // branch activate.
-        let guard = zeroship_data_orm::broker::SchemaPendingGuard::new("app_pending".to_string());
+        let guard = zeroship_data_orm::cdc::broker::SchemaPendingGuard::new("app_pending".to_string());
 
         // INSERT 50 rows under the schema-pending window. Same shape
         // as the backfill test above — packets ship, publisher drops.
@@ -1670,7 +1670,7 @@ fn schema_pending_decoder_drops_then_resyncs() {
         // callers); the SDK boundary that lands later wires
         // `try_subscribe` so the JS layer can branch on
         // `e.code === "schema_pending"`.
-        let attempt = zeroship_data_orm::broker::try_subscribe("app_pending", "other_collection");
+        let attempt = zeroship_data_orm::cdc::broker::try_subscribe("app_pending", "other_collection");
         match &attempt {
             Err(DbError::Coded { code, .. }) => {
                 assert_eq!(
@@ -1833,7 +1833,7 @@ fn backfill_pauses_broker_via_orchestrator_api_and_emits_one_resync() {
                 .get_rc::<zeroship_data_orm::backend::SqliteBackend>()
                 .expect("SQLite fixture"),
         );
-        let guard = zeroship_data_orm::broker::BrokerPauseGuard::new("app_orch".to_string());
+        let guard = zeroship_data_orm::cdc::broker::BrokerPauseGuard::new("app_orch".to_string());
 
         // Pull a Rc-clone of the inner backend so we can issue the
         // 100 INSERTs against it. (The `BackendHandle::Sqlite` arm owns

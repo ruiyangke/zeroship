@@ -21,7 +21,7 @@
 
 #![allow(unsafe_code)]
 
-use zeroship_data_orm::broker;
+use zeroship_data_orm::cdc::broker;
 use zeroship_data_v8::v8_classes::subscription::mint_subscription;
 use zeroship_runtime::init_v8;
 

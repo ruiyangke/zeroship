@@ -154,7 +154,7 @@ pub fn resolve_list_limit(limit: Option<f64>) -> usize {
 /// and a runaway loop should hit a clean error rather than an OOM. The same
 /// holds here — a handler streams one or a few objects at a time, and the
 /// legitimate working set is far below 64. Compare
-/// `MAX_SUBSCRIPTIONS_PER_APP` (`crates/zeroship-data-orm/src/broker.rs:153`), the
+/// `MAX_SUBSCRIPTIONS_PER_APP` (`crates/zeroship-data-orm/src/cdc/broker.rs`), the
 /// house pattern for capping a per-app registry at acquisition.
 pub const DEFAULT_MAX_LIVE_GET_STREAMS_PER_APP: usize = 64;
 

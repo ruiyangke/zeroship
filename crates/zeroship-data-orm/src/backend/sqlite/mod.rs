@@ -17,9 +17,8 @@ use zeroship_data_orm::error::DbError;
 use zeroship_data_orm::protection::Catalog;
 use zeroship_data_orm::storage::LockManager;
 
-use self::change_sink::ChangeSink;
+use crate::cdc::ChangeSink;
 
-pub mod change_sink;
 
 /// A `ChangeSink` that drops every event, for this crate's own tests.
 ///
@@ -32,11 +31,11 @@ pub mod change_sink;
 struct NullChangeSink;
 
 #[cfg(test)]
-impl change_sink::ChangeSink for NullChangeSink {
-    fn disposition(&self, _app_id: &str) -> change_sink::DeliveryDisposition {
-        change_sink::DeliveryDisposition::Deliver
+impl ChangeSink for NullChangeSink {
+    fn disposition(&self, _app_id: &str) -> crate::cdc::DeliveryDisposition {
+        crate::cdc::DeliveryDisposition::Deliver
     }
-    fn publish(&self, _event: &zeroship_core::change_event::ChangeEvent) {}
+    fn publish(&self, _event: &zeroship_data_orm::cdc::ChangeEvent) {}
 }
 // `cdc` is the home for the SQLite-side `ChangeStream` adapter (the
 // `preupdate_hook` install + worker->compio publisher integration).
@@ -1594,7 +1593,7 @@ mod tests {
     /// `BackendHandle::as_change_stream_sqlite()` accessor.
     fn assert_sqlite_change_stream_impls_change_stream() {
         use crate::backend::sqlite::cdc::{SqliteChangeStream, SqliteConsumerHandle};
-        use zeroship_data_orm::storage::ChangeStream;
+        use zeroship_data_orm::cdc::ChangeStream;
         fn assert_impl<T: ChangeStream<ConsumerHandle = SqliteConsumerHandle>>() {}
         assert_impl::<SqliteChangeStream>();
     }

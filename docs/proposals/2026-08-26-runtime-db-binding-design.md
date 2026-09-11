@@ -357,7 +357,7 @@ columns are never creator-visible keys on any path.
 
 **The mutation-side producer is suppressed in production, so delivery must be
 designed against the WAL consumer.** `broker::is_app_suppressed`
-(`crates/zeroship-data-orm/src/broker.rs`, called at `:858` and from
+(`crates/zeroship-data-orm/src/cdc/broker.rs`, called at `:858` and from
 `exec.rs:466`) gates the mutation-side publish: when the WAL consumer runs for an
 app it owns the publish path for events that isolate writes. The real producer is
 `wal_consumer::emit_for_tuple`, which holds no operation context, and `publish` /

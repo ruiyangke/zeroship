@@ -17,7 +17,8 @@
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex, MutexGuard};
 
-use crate::backend::{BackendHandle, ChangeStream};
+use crate::backend::BackendHandle;
+use zeroship_data_orm::cdc::ChangeStream;
 use crate::change_stream_pg::WalConsumerHandle;
 use zeroship_data_orm::error::DbError;
 

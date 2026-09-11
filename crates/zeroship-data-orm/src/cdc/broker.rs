@@ -58,10 +58,30 @@ use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError};
 use std::task::Waker;
 
 use serde_json::Value;
-use zeroship_core::change_event::{ChangeEvent, ChangeOp};
 
+use super::{ChangeEvent, ChangeOp, ChangeSink, DeliveryDisposition};
+use crate::cdc::read_set::ReadSetEntry;
 use crate::error::DbError;
-use crate::read_set::ReadSetEntry;
+
+/// Delivers captured database changes into the process broker.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct BrokerChangeSink;
+
+impl ChangeSink for BrokerChangeSink {
+    fn disposition(&self, app_id: &str) -> DeliveryDisposition {
+        if is_app_suppressed(app_id) {
+            DeliveryDisposition::Suppressed
+        } else if is_schema_pending(app_id) {
+            DeliveryDisposition::SchemaPending
+        } else {
+            DeliveryDisposition::Deliver
+        }
+    }
+
+    fn publish(&self, event: &ChangeEvent) {
+        publish(event);
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Subscription
@@ -211,7 +231,7 @@ impl Subscription {
     /// delivery is coarse-grained. The producer half is disconnected too:
     /// `read_set::Active::begin` has no caller outside its module, so nothing
     /// is ever recorded to pass here. See the header of
-    /// `crates/zeroship-data-orm/src/read_set.rs` for the full measurement and
+    /// `crates/zeroship-data-orm/src/cdc/read_set.rs` for the full measurement and
     /// what wiring it would take.
     pub fn set_read_set(&self, entries: Vec<ReadSetEntry>) {
         self.lock_inner().read_set = Some(entries);
@@ -1608,7 +1628,7 @@ mod tests {
 
     // ---------- read-set narrowing ----------
 
-    use crate::read_set::{self, ReadSetEntry};
+    use crate::cdc::read_set::{self, ReadSetEntry};
 
     fn rs_entry(collection: &str, filter: serde_json::Value) -> ReadSetEntry {
         ReadSetEntry {
