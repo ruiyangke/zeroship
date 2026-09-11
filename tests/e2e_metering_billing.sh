@@ -890,7 +890,7 @@ MOCK_REQS="$(curl -s "$MOCK_URL/__mock/requests")"
 # which is why .billed and .period_start were never affected.
 #
 # THIS COMMENT SAID "a NUMBER" UNTIL 2026-08-12, and that wording cost a whole
-# extra round. Booleans colourise identically: e2e_app_primitives_kv_storage.sh
+# extra round. Booleans colourise identically: e2e_app_primitives_storage.sh
 # compared `.deleted` and `.found` and got ESC[33mtrueESC[39m /
 # ESC[33mfalseESC[39m, so the storage-delete assertion reported a failure over
 # correct behaviour. I had swept for the class the day before and declared it

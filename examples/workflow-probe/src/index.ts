@@ -50,7 +50,7 @@ const kv = (env as unknown as { kv: ProbeKv }).kv;
 // nothing about whether a compensator fired. Writing the trail to kv gives the
 // harness a side channel that exists on both sides (redb in dev, Redis
 // deployed) and is already proven identical across them by
-// crates/zeroship-cli/tests/kv_deployment.rs, so a difference here is a workflow
+// examples/kv-dashboard/tests/rpc.test.ts, so a difference here is a workflow
 // difference and not a kv one.
 const TRAIL_KEY = "wfprobe:trail";
 

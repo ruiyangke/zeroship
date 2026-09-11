@@ -47,18 +47,48 @@ pnpm install
 pnpm --dir examples/kv-dashboard dev
 ```
 
-To run the native Rust acceptance test, with Docker running:
+## Tests
+
+All test code, configuration, and dependencies belong to this example.
+Vitest checks the public RPC contract; Playwright opens the real dashboard
+from Vitest to check UI actions and recovery from request failures.
+
+Against an existing dev server:
+
+```bash
+pnpm --dir examples/kv-dashboard smoke
+pnpm --dir examples/kv-dashboard test:browser
+```
+
+`ZEROSHIP_URL` selects the API endpoint; `KV_DASHBOARD_UI_URL` selects the UI
+endpoint for browser tests. Both suites reset the demo's `kv-demo:` data.
+For a deployed app, set both URLs to its app origin, such as
+`http://kvdash.localhost:<gateway-port>`.
+
+The complete acceptance test provisions its own platform:
 
 ```bash
 pnpm build
-pnpm --dir examples/kv-dashboard smoke
+pnpm --dir examples/kv-dashboard exec playwright install chromium
+pnpm --dir examples/kv-dashboard test
 ```
 
-This builds the app and platform, starts PostgreSQL and Redis through
-Testcontainers, and checks the same SDK operations through an owned Vite
-process and the deployed gateway. It manages its own runtime processes and
-temporary state; an existing dev server is unnecessary. The test also works
-with `cargo nextest run -p zeroship-cli --test kv_deployment` from the repo root.
+On NixOS, use Chromium from Nix on `PATH`, or set
+`PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` to its executable. The tests otherwise
+use Playwright's browser installation. Missing browsers or Docker fail the run.
+
+`tests/platform/` owns the Rust Testcontainers harness and its Cargo test
+dependencies. It builds the demo and platform binaries, starts PostgreSQL,
+Redis, and an issuer JWKS fixture, applies platform migrations, and creates
+and deploys the app through authenticated control APIs and the CLI. It then
+runs the example's Vitest suites against local redb and deployed Redis.
+The harness cleans up its processes and containers and retains failure logs.
+Browser failure screenshots live in `tests/.artifacts/`.
+
+`pnpm test:acceptance` runs the same acceptance command. From the repository
+root, `cargo nextest run -p kv-dashboard-tests --test acceptance` also works.
+For the HTTP helper's isolated validation tests, run
+`pnpm --dir examples/kv-dashboard exec vitest run tests/rpc-client.test.ts`.
 
 The dev runtime uses redb by default at `examples/kv-dashboard/.zeroship/kv.redb`.
 Set `ZEROSHIP_KV_CONFIG_FILE` to a Redis TOML configuration to select Redis;

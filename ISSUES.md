@@ -427,8 +427,8 @@ Issues surfaced while exercising the framework end-to-end. Detail + ledger:
 
 ### ISS-53 · `tests/e2e_platform.sh` is broken against current code
 **Status:** superseded (2026-06-11) · **Effort:** S–M · **Tier:** T2 (test infra)
-> Superseded by the new `tests/e2e_app_primitives.sh` + `e2e_app_primitives_kv_storage.sh`, which start
-> the current stack correctly (`--dev-insecure`, real flags, clean ephemeral PG/Redis). The stale
+> Coverage moved to `tests/e2e_app_primitives.sh`, `tests/e2e_app_primitives_storage.sh`,
+> and `examples/kv-dashboard/tests/`. The stale
 > `e2e_platform.sh` can be deleted or rewritten to match; not blocking now.
 
 The platform's own multi-node E2E harness has rotted and silently can't start the stack:
@@ -459,10 +459,10 @@ example** (G2), **`env.auth` has zero example** so the gateway `ZeroShip-User`�
 **Fix:** a gateway-E2E harness (`e2e_app_primitives.sh`) deploying a real built example through
 control→gateway→worker + asserting the primitives over the edge, plus `storage-gallery` /
 `auth-notes` examples + a kv runner.
-**Update (2026-06-11) — largely CLOSED.** `tests/e2e_app_primitives.sh` (+ `e2e_app_primitives_kv_storage.sh`)
-now drive real apps over the multi-node edge. After ISS-63 + ISS-66, **env.db, env.kv, and env.storage
-all work end-to-end over the worker `/dispatch`** (db-todos / kv-dashboard / the new storage-gallery —
-20/20 + Stage-5c GREEN). Created the missing storage example (G2) + kv runner (G4). Remaining: env.auth
+**Update (2026-06-11) — largely CLOSED.** The primitive suites proved **env.db, env.kv, and env.storage
+end-to-end over worker dispatch**. Current coverage lives in `tests/e2e_app_primitives.sh`,
+`tests/e2e_app_primitives_storage.sh`, and `examples/kv-dashboard/tests/`.
+Created the missing storage example and KV runner. Remaining: env.auth
 E2E (G3) and the gateway-auth path (ISS-64, by decision uses Hydra not a bypass).
 
 ### ISS-55 · `"use server"` named exports don't dispatch under `zeroship serve`

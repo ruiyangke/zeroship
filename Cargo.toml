@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/*", "libs/*"]
+members = ["crates/*", "libs/*", "examples/kv-dashboard/tests/platform"]
 resolver = "3"
 exclude = [
     "crates/zeroship-runtime/benches/ntex-bench",

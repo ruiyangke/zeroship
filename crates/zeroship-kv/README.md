@@ -87,16 +87,16 @@ The driver, store, and binding suites also run with nextest:
 cargo nextest run -p compio-redis -p zeroship-kv -p zeroship-kv-v8 --test-threads 2
 ```
 
-For the public SDK through local Vite and a deployed worker behind the gateway:
+The dashboard owns its public SDK and browser acceptance tests:
 
 ```sh
 pnpm install
 pnpm build
-cargo test -p zeroship-cli --test kv_deployment
+pnpm --dir examples/kv-dashboard test
 ```
 
-That test builds the dashboard and platform binaries, starts PostgreSQL and
-Redis with Testcontainers, applies the platform migrations, and compares the
-app's behavior on redb and Redis. It validates the raw responses before
-normalizing clocks and key order. Child processes and containers are owned by
-the fixture; failure logs remain in its reported temporary directory.
+The example's Rust harness provisions its platform with Testcontainers, then
+Vitest checks RPC behavior and Playwright checks the UI against redb and Redis.
+Use `pnpm --dir examples/kv-dashboard smoke` for an already-running dashboard.
+See the [example README](../../examples/kv-dashboard/README.md) for browser setup,
+URL selection, nextest, and failure artifacts.

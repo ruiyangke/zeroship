@@ -196,8 +196,12 @@ runtime state that should survive restarts, like the SQLite dev database.
 TTL, counters, leases, cache-aside, namespacing, prefix list pagination, and
 cleanup.
 
-`cargo test -p zeroship-cli --test kv_deployment` builds this demo and checks its
-SDK contract through both local Vite and the deployed gateway. Testcontainers
-owns PostgreSQL and Redis; no shared Compose stack or backend URLs are needed.
+`pnpm --dir examples/kv-dashboard smoke` probes an existing dashboard, using
+`ZEROSHIP_URL` when supplied. It resets the demo namespace.
+
+`pnpm --dir examples/kv-dashboard test` builds this demo and checks its SDK
+contract and browser UI through local Vite and the deployed gateway. The
+example owns its Vitest/Playwright suites and Rust Testcontainers harness.
+No shared Compose stack or backend URLs are needed.
 See the [KV test commands](../../crates/zeroship-kv/README.md) for the native
 driver, storage, and V8 suites and nextest usage.
