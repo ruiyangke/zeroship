@@ -342,6 +342,7 @@ zs_platform_migrate "$DB_URL" --migrations-dir "$ROOT/db/migrations-ts" \
 ZEROSHIP_GATEWAY_BROKER_SECRET_FILE="$WORK/gate-secret"
 e2e_export_runtime_secrets "$WORK" || exit 1
 e2e_export_database_urls "$DB_URL"
+e2e_start_cdc_relay "$BIN/zeroship-data-cdc-server" || exit 1
 "$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" --blob-store "$WORK/bundles" \
   > "$WORK/control.log" 2>&1 & PIDS+=($!)
 sleep 4

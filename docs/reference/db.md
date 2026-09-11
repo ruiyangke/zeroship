@@ -1139,36 +1139,26 @@ break` or an early `throw`) also calls `close()` automatically.
 
 ### Distributed delivery and lifecycle
 
-Postgres live queries use logical decoding. Each app has one shared
-publication and one logical slot for each worker process that currently has
-local subscribers. A process-wide broker routes the decoded event to matching
-subscriptions in every isolate thread in that worker. Separate worker
-containers each consume their own slot, so a write handled by any isolate or
-container reaches every subscribing container.
+PostgreSQL live queries receive committed invalidations from the separately
+deployed CDC relay. The relay owns a slot for each subscribed app and shares
+capture across worker connections. Each worker's ORM broker distributes those
+invalidations to its local Rust and V8 subscriptions. Row values stay out of the
+transport; live queries re-read through the usual ORM access controls.
 
-The first local subscription starts CDC lazily. `Subscription.ready()` does
-not resolve until publication and worker-slot provisioning succeeds and
-Postgres accepts `START_REPLICATION`. `db.live` waits for that handshake before
-it emits its initial result. A missing logical-WAL configuration, connection
-failure, or invalid replication object therefore rejects the live query; it
-cannot silently degrade to a static one-shot result. If a running consumer
-later exits, the worker logs one app-scoped error and closes that app's local
-subscriptions.
+The first local subscriber connects lazily. `Subscription.ready()` resolves
+after the relay authenticates the worker and PostgreSQL accepts capture for the
+app's migration-owned publication. `db.live` waits before taking its initial
+snapshot. Missing relay configuration or failed startup rejects the live query.
+Connection loss, queue overflow and reconnect request a fresh snapshot.
 
-Lazy startup is deliberate. Deploy-time provisioning would reserve a logical
-slot and a replication connection in every worker for every deployed app,
-including apps that never call `db.live`. With lazy startup, apps without live
-queries pay no CDC connection, slot, WAL-retention, or decode cost. The tradeoff
-is that the first live query pays the provisioning and startup latency.
+Closing the final local subscription disconnects that worker. The relay releases
+the app's slot after its final connected subscriber leaves. Apps without live
+queries retain no relay capture. File-backed SQLite captures commits locally and
+uses the same ORM broker without a relay service.
 
-Closing the last subscription in a worker stops its consumer and drops that
-worker's slot. Other workers keep their independent slots and the shared
-publication. Archiving an app does not remove it from the worker version feed,
-because feed removal currently means database and CDC teardown. The gateway
-route and new workflow admission stop, but existing local subscriptions and
-their CDC resources are retained until they close normally. Archive also keeps
-the publication, app schema, and per-app role. Privileged database teardown is
-a separate migrate-server lifecycle and is not implemented by archive.
+Archiving an app retains its worker version-feed entry and existing live
+subscriptions. Gateway routing and new workflow admission stop. Publication,
+schema and role deletion remain separate privileged lifecycle operations.
 
 ## Errors
 
@@ -1208,11 +1198,10 @@ Rust DbPlugin. App code rarely needs it; SDK packages use it directly.
 
 **Platform-internal — NOT on `env.db` (P9 §8 `__platform` capability gate):**
 
-`setMaskPolicy` and the `replication` namespace are **not** properties of
-`env.db`. They live on a `DbPlatform` capability handle the runtime sets
+`setMaskPolicy` lives on a `DbPlatform` capability handle the runtime sets
 on `env.db` under a **V8 private symbol** and hands only to
-`@zeroship/bootstrap`'s runtime-entry. They are unreachable from app
-code:
+`@zeroship/bootstrap`'s runtime-entry. The handle is unreachable from app
+code. Replication operations exist only in the relay service:
 
 - `env.db.__platform` (string access) throws `PLATFORM_INTERNAL_ONLY`.
 - The handle is invisible to `Object.keys` / `getOwnPropertyNames` /

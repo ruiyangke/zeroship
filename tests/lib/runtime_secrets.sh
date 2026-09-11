@@ -28,6 +28,7 @@ if [ -z "${E2E_ROOT:-}" ]; then
   E2E_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 fi
 E2E_JOSE_JS="${E2E_JOSE_JS:-$E2E_ROOT/node_modules/.pnpm/jose@6.2.3/node_modules/jose/dist/webapi/index.js}"
+source "$E2E_ROOT/tests/lib/cdc_relay.sh"
 
 _e2e_strong_value() {
   local value="${1:-}"

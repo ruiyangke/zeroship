@@ -421,6 +421,7 @@ for _ in $(seq 1 30); do curl -sf "$CONTROL_URL/readyz" >/dev/null 2>&1 && break
 curl -sf "$CONTROL_URL/readyz" >/dev/null 2>&1 \
   && pass "control healthy (lite provider, stream=redpanda, stripe→mock :$MOCK_PORT)" || { fail "control unhealthy"; tail -30 "$WORK/control.log"; exit 1; }
 
+e2e_start_cdc_relay "$BIN/zeroship-data-cdc-server" || exit 1
 # worker - publishes drained usage events to redpanda. It takes NO `--config`
 # (9b205f6ed removed its TOML overlay source as a credential boundary), so its
 # stream settings arrive as flags. The WAL path is per process: redb is

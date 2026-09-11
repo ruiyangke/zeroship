@@ -21,10 +21,9 @@ ORM subscription broker <--- SQLite commit capture (local development)
     +--- zeroship-data-v8 ---> TypeScript live queries
 ```
 
-The extraction is in progress. The relay source, transport, and native ORM client are implemented.
-V8 integration, worker privilege removal, and deployment provisioning must land
-with the worker cutover. An executable relay does not establish the privilege boundary
-while a worker can still replicate WAL itself.
+The worker uses the ORM relay client. Its startup check refuses replication
+and RLS-bypass privileges; the platform role migration removes those attributes.
+See `docs/runbooks/cdc-relay.md` for deployment and coordinated cutover.
 
 ## Contracts
 
@@ -84,10 +83,8 @@ and ordinary catalog access. It refuses superuser, `BYPASSRLS`, `CREATEROLE`, an
 `CREATEDB`. Publication membership remains migration-owned. The relay does not
 provision publications, app tables, policies, or database roles at startup.
 
-The worker login must lose `REPLICATION` and `BYPASSRLS` when deployment switches
-to the relay. Platform role provisioning belongs in the sanctioned migration
-corpus. Platform role provisioning remains pending; migration files have not been
-edited for this extraction.
+The platform migration provisions `zeroship_cdc` and removes `REPLICATION` and
+`BYPASSRLS` from `zeroship_worker`. The migration engine is unchanged.
 
 ## Authentication
 
@@ -109,5 +106,5 @@ Ordinary relay tests require a real PostgreSQL database. They cover the commit
 boundary, rollback, shared delivery, value-free frames, truncate, and slot cleanup.
 Wire and queue tests cover malformed messages, capacity exhaustion, slow-client
 isolation, and generation fencing. The public ORM client is tested against a separate relay process, including
-authentication, revocation, and shared capture. Worker-cutover coverage remains
-required before the extraction is complete.
+authentication, revocation, and shared capture. The V8 distributed test drives
+TypeScript live queries through a real relay using an ordinary worker login.

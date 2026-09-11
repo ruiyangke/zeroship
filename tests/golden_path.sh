@@ -941,6 +941,7 @@ e2e_export_database_urls "$DB_URL"
 # ZEROSHIP_CONTROL_SPEND_RECOMPUTE_INTERVAL). Covering those needs the per-tick differential
 # in #327, not another flag.
 
+e2e_start_cdc_relay "$BIN/zeroship-data-cdc-server" || exit 1
 # `--workers` is NOT optional decoration, and its absence was invisible for as
 # long as this harness existed. crates/zeroship-control/src/main.rs:81 declares it with
 # `default_value = "http://localhost:8080"`, and this harness runs its worker on

@@ -313,6 +313,7 @@ gate_arm refused_without_declaration "$b_facts" 2 || true
 echo ""
 echo "=== D: a real worker whose enrolment is refused does not start ==="
 
+e2e_start_cdc_relay "$E2E_BIN/zeroship-data-cdc-server" || exit 1
 # THE TWO LAUNCHES DIFFER IN `--control-url` AND IN NOTHING ELSE. D1 points at
 # the control plane arm B left running with its network declaration cleared, so
 # its enrolment comes back `envelope_unset`; D2 points at the stack's declared

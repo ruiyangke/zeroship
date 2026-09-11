@@ -476,104 +476,40 @@ things in. It is reinstated for exactly one row shape and nothing else.
 
 ## Change streams
 
-One shared publication per DATASTORE, membership excluding the reserved `__zeroship_` namespace so
-platform journals never enter the worker-visible WAL feed.
+The deployed runtime still uses app schemas in a shared PostgreSQL database.
+Each app has a migration-owned publication excluding platform journals. The
+database-decoupling design above does not supply runtime identities yet; the CDC
+protocol uses the actual app schema rather than inventing grants or epochs.
 
-**This sentence said "per database" until 2026-09-04, contradicting the bullet nineteen lines below
-that states the opposite in bold.** The detail was corrected and the topic sentence was not, so the
-first line a reader met under this heading was the wrong cardinality and the correction was reachable
-only by reading on. That is the same failure this section already documents one bullet down, where a
-wrong catalog name supporting a right conclusion reached the decision log and two agent briefs. A
-heading sentence is what gets quoted; correct it in the same edit as the reasoning under it.
+`zeroship-data-cdc-server` owns logical decoding in a separate process. Workers
+connect through the authenticated TLS client in `zeroship-data-orm::cdc::relay`.
+The relay shares an app capture across worker connections, buffers changes until
+commit, and sends collection invalidations without row values. Workers re-read
+through the ORM's ordinary access controls. The worker login has neither
+`REPLICATION` nor `BYPASSRLS`; the relay uses its own constrained login.
 
-**Publications and slots sit at different scopes, and the difference decides what has to be
-rationed.** Measured on PostgreSQL 18.4:
+`zeroship-data-orm::cdc` owns subscription matching, readiness, cancellation and
+the process broker. `zeroship-data-v8` supplies JavaScript subscription wrappers
+and isolate cleanup. The driver supplies SQL sessions and wire decoding without
+owning application subscriptions. SQLite captures committed changes in its
+file-backed session and publishes into the same broker locally.
 
-- **A publication is DATASTORE-scoped.** `relisshared` is a column of **`pg_class`**, not of
-  `pg_publication`, and it says whether a CATALOG is shared across the cluster. Measured on 18.4:
-  `pg_class.relisshared` is `f` for both `pg_publication` and `pg_publication_rel`, so those catalogs
-  are per-database - against `pg_authid` and `pg_database`, which are `t`. That asymmetry is the whole
-  design: roles are cluster-shared, publications are not. The same publication name created in two
-  databases of one cluster therefore coexists, each seeing only its own.
+```text
+PG WAL --> relay service -- TLS --> ORM broker --> Rust / V8 subscriptions
+SQLite commit capture -----------> ORM broker
+```
 
-  **This bullet named `pg_publication.relisshared` until 2026-08-30 and the column does not exist
-  there** (`information_schema.columns` returns 0 rows for it, and 1 for `pg_class`). The conclusion
-  was right and the catalog was wrong, which is the harder error to notice: a false claim that
-  supports a true one gets repeated by everyone who trusts the conclusion. It reached the decision
-  log and two agent briefs before a reviewer caught it.
+Relay admission and delivery queues are bounded. Overflow, truncate and
+reconnection request a fresh snapshot rather than pretending to replay a durable
+event log. The final connected subscriber stops capture and releases the app's
+slot. A database advisory lock fences the relay singleton, while PostgreSQL's
+finite `max_slot_wal_keep_size` bounds retention after a process crash.
 
-  **CARDINALITY IS ONE SHARED PUBLICATION PER DATASTORE, NOT ONE PER DATABASE.** Locality makes a
-  per-Database publication *cheap*, which is why this bullet used to conclude one per Database - but
-  cheapness is not the constraint. `publication_names` is fixed at `START_REPLICATION`, so a
-  publication created after a stream starts is invisible to it, and the relay owns one stream per
-  Datastore. See the decoupling proposal and `2026-08-28-cdc-service.md`, which settle this.
-- **A replication slot's NAMESPACE and BUDGET are cluster-scoped; its DECODE is not.**
-  `max_replication_slots` defaults to 10 and is `context = postmaster`, so raising it is a restart.
-  Ten slots created in one database are all visible from another database of the same cluster, and
-  the eleventh - created **from that other database** - fails `SQLSTATE 53400`, "all replication
-  slots are in use". Slot cardinality is therefore a cluster budget shared by every datastore tenant.
-
-  **BUT A LOGICAL SLOT DECODES EXACTLY ONE DATABASE, AND CONFLATING THOSE TWO SCOPES IS HOW THE
-  DECISION BELOW WAS FIRST WRITTEN WRONG.** Measured 2026-08-30 on PostgreSQL 18.4, two databases in
-  one cluster, one slot created from A, rows written to both:
-  `pg_replication_slots.database` reads `slotprobe_a`; draining from A returns A's two INSERTs and
-  **not one row written in B**; draining that same slot while connected to B fails outright -
-  `ERROR: replication slot "probe_a" was not created in this database`. The namespace is still
-  cluster-wide: creating the same NAME from B fails `already exists`.
-
-  So a slot is cheap to name across the cluster and impossible to share across databases. The
-  consequence is a capacity ceiling nobody had stated: at one slot minimum per datastore against a
-  stock budget of 10, **a cluster holds at most 10 datastores**, fewer once anything else takes a
-  slot. That is a hard architectural bound, not a tuning knob - `context = postmaster` means raising
-  it restarts the cluster every tenant on it shares.
-- **`max_slot_wal_keep_size` measures as `-1`** - unbounded retention - on a stock server, so one
-  abandoned slot can grow `pg_wal` until the cluster dies. It is `context = sighup`, so bounding it
-  is a reload rather than a restart. The worker now refuses to boot against a cluster where it is
-  unlimited (`crates/zeroship-worker/src/db_posture.rs`, landed 2026-08-29). The finite VALUE is not
-  chosen here: too small and a legitimately slow consumer loses its slot and must resynchronise, too
-  large and the protection is theoretical. It belongs with the CDC relay, whose lag characteristics
-  set the floor.
-
-**SLOT CARDINALITY IS ONE PER DATASTORE, OWNED BY THE RELAY, AND THE DECOUPLING SEQUENCES BEHIND
-IT.** Settled 2026-08-29, and **corrected 2026-08-30 after this heading read "ONE PER CLUSTER" for a
-day.** Three cardinalities were live across the document set - per (app, worker) in code today, per
-(datastore, worker) in this design, and one per cluster in the CDC relay design - against a hard
-ceiling of 10 that only a restart moves. What settled it is that the binding term in the first two is
-the WORKER count: the documented deployment scales workers to 10, so one datastore times ten workers
-already exhausts the cluster. Moving ownership to the relay removes the worker from the term. That
-part was right and still is.
-
-**The number attached to it was not.** "One per cluster" was read off the cluster-scoped BUDGET and
-NAMESPACE without checking whether one slot can decode more than one database. It cannot - measured
-above - so one-per-cluster is not a target the relay can hit at all once a second datastore exists.
-The floor is one slot per datastore, which the relay owns rather than the worker. Today's deployment
-has a single datastore, so the two numbers coincide and nothing in the tree distinguishes them; the
-error was invisible for exactly that reason and will stay invisible until the second datastore.
-
-This is the second time a decision on this page has been settled from a real measurement of the wrong
-property. Ask what a scope claim is a claim ABOUT - a name, a quota, or the data - before building on
-it.
-
-Two consequences follow, and both are load-bearing:
-
-- **No creator-reachable operation may mint a cluster-scoped object.** Opening a subscription
-  attaches to the datastore's existing stream; creating a database creates a SCHEMA, and its tables
-  join the Datastore's ALREADY-EXISTING shared publication. Nothing a creator does may create a slot,
-  a publication, a WAL sender, or WAL retention. Roles are the one deliberate exception - the
-  enforcement model IS cluster-global rows - so they are quota'd rather than multiplexed.
-
-  **This bullet said "creating a database creates schema and publication" until 2026-08-30.** That
-  was the per-Database cardinality this page has now abandoned, and it survived the first correction
-  because that pass fixed the SLOT conclusion and left the publication one standing. A half-applied
-  correction reads as a whole one; the publication and the slot moved for the same reason and had to
-  move together.
-- **A publication is not decoded unless the running stream NAMES it.** Measured: one slot, one data
-  set, two decodes differing only in `publication_names` - 4 change records vs 8. PostgreSQL's own
-  warning explains the mechanism: "The publication does not exist at this point in the WAL." The name
-  list is fixed when the stream starts (`libs/compio-postgres/src/replication.rs` interpolates it into
-  START_REPLICATION once), so a per-database publication under one shared slot strands every database
-  created after the stream began, silently. That is why the relay must own the slot: adding a database
-  is then a fan-out change in one process, not a stream restart every co-tenant feels.
+Slots consume cluster resources even though each logical slot decodes only its
+own database. Size slot, WAL-sender and connection budgets across relay captures
+and other replication users. Worker scaling adds transport connections instead
+of duplicate slots for the same app. See `docs/runbooks/cdc-relay.md` for
+configuration and the coordinated role cutover.
 
 ## The reserved-column collision the database will not refuse
 

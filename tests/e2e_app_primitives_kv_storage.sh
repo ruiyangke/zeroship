@@ -189,6 +189,7 @@ PIDS+=($!)
 for i in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done
 curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/readyz" >/dev/null 2>&1 && pass "control healthy" || { fail "control unhealthy"; tail -20 "$WORK/control.log"; exit 1; }
 
+e2e_start_cdc_relay "$BIN/zeroship-data-cdc-server" || exit 1
 # worker: env.kv <- ZEROSHIP_WORKER_KV_CONFIG (Redis), env.storage <- --storage-url (LocalFs path),
 # env.db comes from --db; direct /dispatch uses the generated worker bearer.
 ZEROSHIP_WORKER_KV_CONFIG="backend = \"redis\"

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Guard the database posture required by the shipped worker topology.
 #
-# The worker refuses max_slot_wal_keep_size=-1 before V8 initialization. The
+# The CDC relay refuses unbounded replication slot WAL retention. The
 # live worker suite proves that refusal direction. This gate proves the other
 # half: the PostgreSQL command shipped in Compose supplies a finite value, so
 # the topology can pass that boot check.

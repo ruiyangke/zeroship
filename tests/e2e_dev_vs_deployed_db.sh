@@ -841,6 +841,7 @@ for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_MIGRATE_SERVER_POR
 curl -sf "http://localhost:$ZEROSHIP_MIGRATE_SERVER_PORT/readyz" >/dev/null 2>&1 \
   && pass "zeroship-migrate-server healthy" || { fail "migrated did not come up"; tail -30 "$WORK/migrated.log"; exit 1; }
 
+e2e_start_cdc_relay "$BIN/zeroship-data-cdc-server" || exit 1
 # The worker needs --db: without it the env.db namespace is absent BY DESIGN
 # and every handler fails loudly, which would read as an app bug.
 "$BIN/zeroship-worker" --port "$ZEROSHIP_WORKER_PORT" --threads 2 \

@@ -151,7 +151,7 @@ require_cmd lsof
 
 echo "=== DW-07 build ==="
 pnpm build
-cargo build --release -p zeroship-control -p zeroship-gateway -p zeroship-worker
+cargo build --release -p zeroship-control -p zeroship-gateway -p zeroship-worker -p zeroship-data-cdc-server
 pnpm --filter zero-migrate-cli build
 for b in zeroship-control zeroship-gate zeroship-worker dev-provision; do
   [ -x "$BIN/$b" ] || { fail "missing $BIN/$b"; exit 2; }
@@ -692,6 +692,7 @@ e2e_export_database_urls "$DBURL"
 echo $! >> "$PIDFILE"
 wait_health control "http://localhost:$ZEROSHIP_CONTROL_PORT/readyz" "$WORK/control.log"
 
+e2e_start_cdc_relay "$BIN/zeroship-data-cdc-server" || exit 1
 # NO `ZEROSHIP_DEV=1`, AND THERE IS NO REPLACEMENT FOR IT. This line carried one
 # until 2026-08-27, purely so the workflow's step bodies could `fetch` a harness
 # HTTP server on 127.0.0.1: the SSRF gate read `ZEROSHIP_DEV` out of the process

@@ -206,7 +206,7 @@ OUTSIDE these two markers is hand-maintained and is never rewritten
 by the generator.
 -->
 
-**164 canonical settings**: 126 operational, 31 secret, 5 bootstrap controls, 2 command controls. Every environment name below is `ZEROSHIP_<CANONICAL>` and every overlay path is the canonical name itself, because both are computed from the one declaration rather than spelled twice.
+Every environment name below is `ZEROSHIP_<CANONICAL>` and every overlay path is the canonical name itself, because both are computed from the one declaration rather than spelled twice.
 
 ### shared (no scope prefix: read by more than one binary)
 
@@ -336,7 +336,17 @@ by the generator.
 
 | Canonical | Class | Environment | Overlay path | Flag by binary | Default |
 | --- | --- | --- | --- | --- | --- |
+| `data_cdc_server.clients_per_app` | operational | `ZEROSHIP_DATA_CDC_SERVER_CLIENTS_PER_APP` | `data_cdc_server.clients_per_app` | zeroship-data-cdc-server `--clients-per-app` | `128` |
 | `data_cdc_server.database_url` | secret | `ZEROSHIP_DATA_CDC_SERVER_DATABASE_URL` | `data_cdc_server.database_url` | zeroship-data-cdc-server `--database-url-file` | - |
+| `data_cdc_server.listen` | operational | `ZEROSHIP_DATA_CDC_SERVER_LISTEN` | `data_cdc_server.listen` | zeroship-data-cdc-server `--listen` | `127.0.0.1:9094` |
+| `data_cdc_server.max_apps` | operational | `ZEROSHIP_DATA_CDC_SERVER_MAX_APPS` | `data_cdc_server.max_apps` | zeroship-data-cdc-server `--max-apps` | `64` |
+| `data_cdc_server.max_connections` | operational | `ZEROSHIP_DATA_CDC_SERVER_MAX_CONNECTIONS` | `data_cdc_server.max_connections` | zeroship-data-cdc-server `--max-connections` | `1024` |
+| `data_cdc_server.max_relations` | operational | `ZEROSHIP_DATA_CDC_SERVER_MAX_RELATIONS` | `data_cdc_server.max_relations` | zeroship-data-cdc-server `--max-relations` | `4096` |
+| `data_cdc_server.queue_capacity` | operational | `ZEROSHIP_DATA_CDC_SERVER_QUEUE_CAPACITY` | `data_cdc_server.queue_capacity` | zeroship-data-cdc-server `--queue-capacity` | `128` |
+| `data_cdc_server.tls_cert_file` | operational | `ZEROSHIP_DATA_CDC_SERVER_TLS_CERT_FILE` | `data_cdc_server.tls_cert_file` | zeroship-data-cdc-server `--tls-cert-file` | empty |
+| `data_cdc_server.tls_key_file` | operational | `ZEROSHIP_DATA_CDC_SERVER_TLS_KEY_FILE` | `data_cdc_server.tls_key_file` | zeroship-data-cdc-server `--tls-key-file` | empty |
+| `data_cdc_server.transaction_bytes` | operational | `ZEROSHIP_DATA_CDC_SERVER_TRANSACTION_BYTES` | `data_cdc_server.transaction_bytes` | zeroship-data-cdc-server `--transaction-bytes` | `8 * 1024 * 1024` |
+| `data_cdc_server.transaction_changes` | operational | `ZEROSHIP_DATA_CDC_SERVER_TRANSACTION_CHANGES` | `data_cdc_server.transaction_changes` | zeroship-data-cdc-server `--transaction-changes` | `10000` |
 
 ### gateway
 
@@ -393,6 +403,8 @@ by the generator.
 | Canonical | Class | Environment | Overlay path | Flag by binary | Default |
 | --- | --- | --- | --- | --- | --- |
 | `worker.bind` | operational | `ZEROSHIP_WORKER_BIND` | `worker.bind` | zeroship-worker `--bind` | `127.0.0.1` |
+| `worker.cdc_relay_ca_file` | operational | `ZEROSHIP_WORKER_CDC_RELAY_CA_FILE` | `worker.cdc_relay_ca_file` | zeroship-worker `--cdc-relay-ca-file` | empty |
+| `worker.cdc_relay_url` | operational | `ZEROSHIP_WORKER_CDC_RELAY_URL` | `worker.cdc_relay_url` | zeroship-worker `--cdc-relay-url` | empty |
 | `worker.database_url` | secret | `ZEROSHIP_WORKER_DATABASE_URL` | `worker.database_url` | zeroship-worker `--database-url-file` | - |
 | `worker.kv_config` | secret | `ZEROSHIP_WORKER_KV_CONFIG` | `worker.kv_config` | zeroship-worker `--kv-config-file` | - |
 | `worker.max_isolates` | operational | `ZEROSHIP_WORKER_MAX_ISOLATES` | `worker.max_isolates` | zeroship-worker `--max-isolates` | `200` |
