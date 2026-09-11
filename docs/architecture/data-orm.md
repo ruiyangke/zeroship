@@ -225,12 +225,18 @@ not require JSON serialization. Strings and binary buffers remain native;
 JSON encoding is reserved for JSON columns and explicit wire contracts. The
 implementation still allocates records and futures and copies some inputs.
 
-The ORM refuses caller-supplied identities before insert, batch insert, or
+The ORM refuses caller-supplied typed-ID assignments before insert, batch insert, or
 upsert can mutate rows. Upsert conflict keys must be declared, supplied,
 application-owned fields. The SQL compiler rejects malformed or repeated
 conflict columns. A conflicting row keeps its identity; a new row gets a
 platform-generated identity. The assignment pass remains idempotent because
 input validation runs before it.
+
+Collection descriptors carry assignment generators and explicit primary-key,
+concurrency and soft-delete roles. The ORM resolves assignments per collection;
+SQL compiles supplied expressions, and V8 forwards operations. Field names alone
+never select a generator or lifecycle behavior. Both Rust macros and generated
+TypeScript bindings expose declared fields and omit assigned fields from writes.
 
 Native row decoding is fallible. Driver row adapters report `row_decode_failed`
 with column context when they reject a result; they never substitute SQL NULL

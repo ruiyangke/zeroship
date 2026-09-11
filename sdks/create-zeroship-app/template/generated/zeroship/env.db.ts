@@ -23,10 +23,24 @@ import { t, schema as defineSchema, type Db } from "@zeroship/db";
 
 const schema = {
   notes: defineSchema({
+    id: t.string().required().primaryKey().assigned({"by":"typedId","on":"insert"}),
+    created_at: t.timestamp().required().assigned({"by":"now","on":"insert"}),
+    updated_at: t.timestamp().required().assigned({"by":"now","on":"write"}),
+    created_by: t.string().assigned({"by":"actor","on":"insert"}),
+    updated_by: t.string().assigned({"by":"actor","on":"write"}),
+    version: t.number().required().default(1).assigned({"by":"increment(1)","on":"write"}),
+    deleted_at: t.timestamp().assigned({"by":"now","on":"delete"}),
     title: t.string().required(),
     body: t.string(),
   }).index("notes_deleted_at_idx", ["deleted_at"]).index("notes_updated_at_idx", ["updated_at"]).index("notes_created_by_idx", ["created_by"]),
   users: defineSchema({
+    id: t.string().required().primaryKey().assigned({"by":"typedId","on":"insert"}),
+    created_at: t.timestamp().required().assigned({"by":"now","on":"insert"}),
+    updated_at: t.timestamp().required().assigned({"by":"now","on":"write"}),
+    created_by: t.string().assigned({"by":"actor","on":"insert"}),
+    updated_by: t.string().assigned({"by":"actor","on":"write"}),
+    version: t.number().required().default(1).assigned({"by":"increment(1)","on":"write"}),
+    deleted_at: t.timestamp().assigned({"by":"now","on":"delete"}),
     email: t.string().required().unique(),
     name: t.string().required(),
   }).uniqueIndex("users_email_key", ["email"]).index("users_deleted_at_idx", ["deleted_at"]).index("users_updated_at_idx", ["updated_at"]).index("users_created_by_idx", ["created_by"]),

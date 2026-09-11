@@ -23,6 +23,13 @@ import { t, schema as defineSchema, type Db } from "@zeroship/db";
 
 const schema = {
   notes: defineSchema({
+    id: t.string().required().primaryKey().assigned({"by":"typedId","on":"insert"}),
+    created_at: t.timestamp().required().assigned({"by":"now","on":"insert"}),
+    updated_at: t.timestamp().required().assigned({"by":"now","on":"write"}),
+    created_by: t.string().assigned({"by":"actor","on":"insert"}),
+    updated_by: t.string().assigned({"by":"actor","on":"write"}),
+    version: t.number().required().default(1).assigned({"by":"increment(1)","on":"write"}),
+    deleted_at: t.timestamp().assigned({"by":"now","on":"delete"}),
     owner_id: t.string().required(),
     title: t.string().required(),
     body: t.string().required(),
