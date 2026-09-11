@@ -35,7 +35,7 @@ thread_local! {
     /// Measured on this matrix, not inferred: `seed` died on the 15s `pending
     /// timeout` with `pg_stat_activity` showing two
     /// connections sitting `idle`/`ClientRead` for the whole window - the runtime
-    /// never issued the INSERT. `crates/zeroship-data-v8/tests/native_transaction.rs`
+    /// never issued the INSERT. `crates/zeroship-data-v8/src/live_tests/native_transaction.rs`
     /// hit the identical wall and carries the same thread-local; its header is
     /// the long-form account.
     ///

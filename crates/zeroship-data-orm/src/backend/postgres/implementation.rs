@@ -581,7 +581,7 @@ mod tests {
     //! Even those need an `Rc<compio_postgres::Pool>` to construct, and
     //! `Pool::connect` requires a live Postgres listener. There is no
     //! stub / no-IO constructor. The async methods need both a Pool
-    //! AND a real `Client`; they're exercised by `crates/zeroship-data-v8/tests/integration.rs`.
+    //! AND a real `Client`; they're exercised by `crates/zeroship-data-orm/src/live_tests/integration.rs`.
     //!
     //! That leaves *compile-time* tests as the highest-signal coverage
     //! we can add in `--lib`:
@@ -750,7 +750,7 @@ mod terminal_projection_tests {
     /// This rule was only reachable through a live server until 2026-09-02,
     /// when the projection was split out of `terminal`. The live arm that
     /// covered it - `commit_that_postgres_rolled_back_must_not_report_success_l8`
-    /// in `crates/zeroship-data-v8/tests/native_transaction.rs` - had ALSO been failing for an unrelated
+    /// in `crates/zeroship-data-v8/src/live_tests/native_transaction.rs` - had ALSO been failing for an unrelated
     /// reason (it duplicated a platform-assigned `id`, so it never poisoned the
     /// transaction at all), which means this rule went unbound in practice for
     /// as long as that test was red. A pure arm cannot rot that way.

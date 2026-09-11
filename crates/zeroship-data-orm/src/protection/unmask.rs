@@ -1408,7 +1408,7 @@ async fn write_audit_query_hint_row(
 // `parse_args` and `parse_bulk_args` are the two places where an `actor`
 // supplied by APP JS meets `sanitize_app_actor`. That call IS the DB-3 fix, and
 // while both parsers were private `fn` no integration target could drive them:
-// every live-PG test in `crates/zeroship-data-v8/tests/mask_flip.rs` built
+// every live-PG test in `crates/zeroship-data-orm/src/live_tests/mask_flip.rs` built
 // `UnmaskFieldArgs` / `BulkUnmaskArgs` in Rust and so entered BELOW the fence,
 // leaving the fence itself covered only by in-module units that call
 // `sanitize_app_actor` directly with no database behind it. A fence no

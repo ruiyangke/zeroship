@@ -348,7 +348,7 @@ tests/run_billing_suite.sh (commit 344c9db12)
 
     A  no DSN, no REQUIRE   6 x ZEROSHIP-TEST-SKIPPED
                             test result: ok. 6 passed ... in 0.00s
-    B  no DSN, REQUIRE=1    6 panics at crates/zeroship-test-support/src/lib.rs:102
+    B  no DSN, REQUIRE=1    6 panics at tests/fixtures/session_keys.rs:102
     C  inside the gate      test result: ok. 6 passed ... in 1.12s, no skip line
 
 A and C differ ONLY in the clock and the announcement; B is what tells them

@@ -66,7 +66,7 @@ use zeroship_data_sql::value::{Value, value};
 /// before any dispatch, so the isolate already holds a backend and this is a
 /// plain read. (`DbBinding::cold_start` below is a BINDING constructor - a
 /// different sense of cold, and not a context state.) The lazy open is bound in
-/// `tests/sqlite_integration.rs`, by the three
+/// `src/live_tests/sqlite_integration.rs`, by the three
 /// `cold_*_open_comes_from_ensure_backend_not_the_fixture` gates.
 async fn unmask_backend() -> zeroship_data_orm::backend::BackendHandle {
     crate::live_tests::host::ensure_backend()

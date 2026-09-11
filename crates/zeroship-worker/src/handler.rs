@@ -4200,7 +4200,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
     }
 
     // Postgres is not optional for this workspace's tests (see
-    // crates/zeroship-test-support/src/lib.rs); the workflow-apply tests below cannot
+    // tests/fixtures/session_keys.rs); the workflow-apply tests below cannot
     // do without it, so this panics with the provisioning command rather than
     // let them report a pass for a check they never ran.
     fn workflow_test_db_url() -> String {

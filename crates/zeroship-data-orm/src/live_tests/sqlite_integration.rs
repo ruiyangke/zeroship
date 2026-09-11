@@ -2584,7 +2584,7 @@ fn near_returns_within_radius() {
 /// A `near()` inside `db.transaction(fn)` must scan the transaction's own
 /// connection.
 ///
-/// The SQLite half of what `tests/search_tx_lane.rs` rules on for PostgreSQL,
+/// The SQLite half of what `src/live_tests/search_tx_lane.rs` rules on for PostgreSQL,
 /// and it is a separate question rather than the same one twice: SC-2 Decision 1
 /// gave this backend TWO connections, `op_conn` for autocommit reads and
 /// `tx_conn` for the creator's transaction, and `SpatialIndex::spatial_near`
@@ -3940,7 +3940,7 @@ fn vacuum_into_snapshot_consistent_under_concurrent_writer() {
 /// already held in this process, `snapshot()` surfaces the typed
 /// `Coded { code: "migration_in_progress" }` rather than blocking
 /// indefinitely. Mirrors the PG arm's `snapshot_during_migration_returns_typed_error`
-/// test (`tests/integration.rs`).
+/// test (`src/live_tests/integration.rs`).
 ///
 /// SQLite's lock state lives in `InProcessLockRegistry` (one map per
 /// `SqliteBackend`), so we acquire the slot through the public

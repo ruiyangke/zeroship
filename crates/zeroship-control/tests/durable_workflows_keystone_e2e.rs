@@ -558,7 +558,7 @@ fn assert_ack_run(response: &WorkflowAdvanceResponse, run_id: &str, label: &str)
 ///
 /// WHY THE ROLE AND THE GRANTS. Every autocommit `env.db` statement opens a
 /// transaction and runs `SET LOCAL ROLE "app_<app_id>_role"` first
-/// (crates/zeroship-data-orm/src/auth/bootstrap.rs:200-207,
+/// (tests/fixtures/data/roles.rs:200-207,
 /// crates/zeroship-data-orm/src/exec.rs:522-542), so the effective privileges
 /// are that role's, not `zeroship_worker`'s. In production the role, the
 /// membership edge and the grants are all created by `migrated`'s apply
