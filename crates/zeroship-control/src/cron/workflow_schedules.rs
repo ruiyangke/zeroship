@@ -5,21 +5,17 @@
 //! lands between those two transactions still prevents a new run. Unarchive
 //! resumes from the retained frontier under the schedule's catch-up policy.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::HashSet;
 use std::sync::OnceLock;
 use std::time::Duration as StdDuration;
 
-use chrono::{
-    DateTime, Datelike, Duration as ChronoDuration, LocalResult, NaiveDate, NaiveDateTime,
-    TimeZone, Utc,
-};
-use chrono_tz::Tz;
+use chrono::{DateTime, Duration as ChronoDuration, TimeZone, Utc};
 use compio_postgres::GenericClient;
 use serde::Deserialize;
 use serde_json::Value;
 use uuid::Uuid;
 use zeroship_core::typed_id;
-use zeroship_workflow::store::pg::WorkflowTables;
+use zeroship_workflow::{calendar::Calendar, store::pg::WorkflowTables};
 
 use crate::registry::RegistryError;
 use crate::workflow_instance_api;
@@ -95,12 +91,8 @@ struct CatchUpWire {
 enum ScheduleDescriptor {
     Cron {
         cron_expr: String,
-        tz: Tz,
         tz_name: String,
-        // Boxed: `ParsedCron` is ~160 bytes (5 `CronField`s), which would
-        // otherwise make every `ScheduleDescriptor` (including the much
-        // smaller `Interval` variant) pay the largest-variant size.
-        cron: Box<ParsedCron>,
+        calendar: Calendar,
     },
     Interval {
         interval_ms: i64,
@@ -146,21 +138,6 @@ struct ScheduleRow {
     deploy_anchor: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone)]
-struct ParsedCron {
-    minutes: CronField,
-    hours: CronField,
-    days_of_month: CronField,
-    months: CronField,
-    days_of_week: CronField,
-}
-
-#[derive(Debug, Clone)]
-struct CronField {
-    values: BTreeSet<u32>,
-    wildcard: bool,
-}
-
 pub async fn run(state: std::sync::Arc<AppState>, tick_secs: u64) {
     tracing::info!(tick_secs, "control workflow_schedules cron starting");
     loop {
@@ -186,7 +163,9 @@ pub async fn tick_with_config(
     for claim in claims {
         match fire_claimed_schedule(state, &config, &claim).await {
             Ok(n) => fired = fired.saturating_add(n),
-            Err(e) => tracing::warn!(schedule_id = %claim.id, error = %e, "workflow_schedules fire failed"),
+            Err(e) => {
+                tracing::warn!(schedule_id = %claim.id, error = %e, "workflow_schedules fire failed")
+            }
         }
     }
     Ok(fired)
@@ -263,9 +242,7 @@ where
 {
     let (kind, cron_expr, tz, interval_ms, anchor) = match &schedule.descriptor {
         ScheduleDescriptor::Cron {
-            cron_expr,
-            tz_name,
-            ..
+            cron_expr, tz_name, ..
         } => (
             "cron",
             Some(cron_expr.clone()),
@@ -690,15 +667,12 @@ fn normalize_catch_up(
 fn descriptor_from_wire(wire: ScheduleDescriptorWire) -> Result<ScheduleDescriptor, RegistryError> {
     match wire {
         ScheduleDescriptorWire::Cron { cron_expr, tz } => {
-            let parsed_tz: Tz = tz.parse().map_err(|_| {
-                RegistryError::InvalidInput(format!("unknown workflow schedule timezone {tz:?}"))
-            })?;
-            let cron = parse_cron_expr(&cron_expr)?;
+            let calendar = Calendar::parse(&cron_expr, &tz)
+                .map_err(|error| RegistryError::InvalidInput(error.to_string()))?;
             Ok(ScheduleDescriptor::Cron {
-                cron_expr: normalize_cron_expr(&cron_expr)?,
-                tz: parsed_tz,
-                tz_name: tz,
-                cron: Box::new(cron),
+                cron_expr: calendar.expression().to_owned(),
+                tz_name: calendar.timezone().to_owned(),
+                calendar,
             })
         }
         ScheduleDescriptorWire::Interval {
@@ -745,7 +719,9 @@ fn descriptor_from_columns(
         }),
         "interval" => descriptor_from_wire(ScheduleDescriptorWire::Interval {
             interval_ms: interval_ms.ok_or_else(|| {
-                RegistryError::InvalidInput("interval schedule row is missing interval_ms".to_string())
+                RegistryError::InvalidInput(
+                    "interval schedule row is missing interval_ms".to_string(),
+                )
             })?,
             anchor: anchor.ok_or_else(|| {
                 RegistryError::InvalidInput("interval schedule row is missing anchor".to_string())
@@ -802,7 +778,9 @@ fn first_fire_at_strictly_after(
             interval_ms,
             anchor,
         } => first_interval_fire_after(*interval_ms, *anchor, after, deploy_anchor),
-        ScheduleDescriptor::Cron { tz, cron, .. } => first_cron_fire_after(cron, *tz, after),
+        ScheduleDescriptor::Cron { calendar, .. } => calendar
+            .next_after(after)
+            .map_err(|error| RegistryError::InvalidInput(error.to_string())),
     }
 }
 
@@ -829,261 +807,14 @@ fn first_interval_fire_after(
     let periods = elapsed.div_euclid(interval_ms).saturating_add(1);
     let next_ms = anchor_ms
         .checked_add(periods.saturating_mul(interval_ms))
-        .ok_or_else(|| RegistryError::InvalidInput("workflow schedule interval overflow".to_string()))?;
+        .ok_or_else(|| {
+            RegistryError::InvalidInput("workflow schedule interval overflow".to_string())
+        })?;
     Utc.timestamp_millis_opt(next_ms).single().ok_or_else(|| {
-        RegistryError::InvalidInput("workflow schedule interval produced invalid timestamp".to_string())
+        RegistryError::InvalidInput(
+            "workflow schedule interval produced invalid timestamp".to_string(),
+        )
     })
-}
-
-fn first_cron_fire_after(
-    cron: &ParsedCron,
-    tz: Tz,
-    after: DateTime<Utc>,
-) -> Result<DateTime<Utc>, RegistryError> {
-    let local_after = after.with_timezone(&tz);
-    let start = local_after.date_naive();
-    for day_offset in 0..=(366 * 8) {
-        let Some(date) = start.checked_add_signed(ChronoDuration::days(day_offset)) else {
-            break;
-        };
-        if !cron.date_matches(date) {
-            continue;
-        }
-        for hour in &cron.hours.values {
-            for minute in &cron.minutes.values {
-                let Some(nominal) = date.and_hms_opt(*hour, *minute, 0) else {
-                    continue;
-                };
-                let Some(candidate) = resolve_local_nominal(tz, nominal) else {
-                    continue;
-                };
-                if candidate > after {
-                    return Ok(candidate);
-                }
-            }
-        }
-    }
-    Err(RegistryError::InvalidInput(
-        "workflow schedule has no next cron fire within the search horizon".to_string(),
-    ))
-}
-
-fn resolve_local_nominal(tz: Tz, nominal: NaiveDateTime) -> Option<DateTime<Utc>> {
-    match tz.from_local_datetime(&nominal) {
-        LocalResult::Single(dt) => Some(dt.with_timezone(&Utc)),
-        LocalResult::Ambiguous(a, b) => {
-            let a = a.with_timezone(&Utc);
-            let b = b.with_timezone(&Utc);
-            Some(a.min(b))
-        }
-        LocalResult::None => {
-            let mut probe = nominal;
-            for _ in 0..(48 * 60) {
-                probe = probe.checked_add_signed(ChronoDuration::minutes(1))?;
-                match tz.from_local_datetime(&probe) {
-                    LocalResult::Single(dt) => return Some(dt.with_timezone(&Utc)),
-                    LocalResult::Ambiguous(a, b) => {
-                        let a = a.with_timezone(&Utc);
-                        let b = b.with_timezone(&Utc);
-                        return Some(a.min(b));
-                    }
-                    LocalResult::None => {}
-                }
-            }
-            None
-        }
-    }
-}
-
-fn normalize_cron_expr(expr: &str) -> Result<String, RegistryError> {
-    let compact = expr.split_whitespace().collect::<Vec<_>>().join(" ");
-    if compact.is_empty() {
-        return Err(RegistryError::InvalidInput(
-            "workflow schedule cron expression is empty".to_string(),
-        ));
-    }
-    let normalized = match compact.as_str() {
-        "@hourly" => "0 * * * *".to_string(),
-        "@daily" => "0 0 * * *".to_string(),
-        "@weekly" => "0 0 * * 0".to_string(),
-        "@monthly" => "0 0 1 * *".to_string(),
-        "@yearly" => "0 0 1 1 *".to_string(),
-        value if value.starts_with('@') => {
-            return Err(RegistryError::InvalidInput(format!(
-                "unsupported workflow schedule cron macro {value:?}"
-            )))
-        }
-        _ => compact,
-    };
-    let field_count = normalized.split_whitespace().count();
-    if field_count == 6 {
-        return Err(RegistryError::InvalidInput(
-            "sub-minute workflow schedule cron expressions are unsupported".to_string(),
-        ));
-    }
-    if field_count != 5 {
-        return Err(RegistryError::InvalidInput(
-            "workflow schedule cron expression must have exactly 5 fields".to_string(),
-        ));
-    }
-    Ok(normalized)
-}
-
-fn parse_cron_expr(expr: &str) -> Result<ParsedCron, RegistryError> {
-    let normalized = normalize_cron_expr(expr)?;
-    let fields = normalized.split_whitespace().collect::<Vec<_>>();
-    Ok(ParsedCron {
-        minutes: parse_cron_field(fields[0], "minute", 0, 59, None)?,
-        hours: parse_cron_field(fields[1], "hour", 0, 23, None)?,
-        days_of_month: parse_cron_field(fields[2], "day-of-month", 1, 31, Some(28))?,
-        months: parse_cron_field(fields[3], "month", 1, 12, None)?,
-        days_of_week: parse_cron_field(fields[4], "day-of-week", 0, 7, None)?,
-    })
-}
-
-fn parse_cron_field(
-    field: &str,
-    label: &str,
-    min: u32,
-    max: u32,
-    explicit_max: Option<u32>,
-) -> Result<CronField, RegistryError> {
-    if field.is_empty() {
-        return Err(RegistryError::InvalidInput(format!(
-            "workflow schedule cron {label} field is empty"
-        )));
-    }
-    if field
-        .chars()
-        .any(|c| c.is_ascii_alphabetic() || matches!(c, '?' | '#' | 'L' | 'W'))
-    {
-        return Err(RegistryError::InvalidInput(format!(
-            "workflow schedule cron {label} field contains an unsupported token"
-        )));
-    }
-    let wildcard = field == "*";
-    let mut values = BTreeSet::new();
-    for part in field.split(',') {
-        parse_cron_part(part, label, min, max, explicit_max, &mut values)?;
-    }
-    if label == "day-of-week" && values.remove(&7) {
-        values.insert(0);
-    }
-    Ok(CronField { values, wildcard })
-}
-
-fn parse_cron_part(
-    part: &str,
-    label: &str,
-    min: u32,
-    max: u32,
-    explicit_max: Option<u32>,
-    values: &mut BTreeSet<u32>,
-) -> Result<(), RegistryError> {
-    if part.is_empty() {
-        return Err(RegistryError::InvalidInput(format!(
-            "workflow schedule cron {label} field contains an empty list item"
-        )));
-    }
-    let pieces = part.split('/').collect::<Vec<_>>();
-    if pieces.len() > 2 || pieces[0].is_empty() || pieces.get(1).is_some_and(|s| s.is_empty()) {
-        return Err(RegistryError::InvalidInput(format!(
-            "workflow schedule cron {label} field has a malformed step"
-        )));
-    }
-    let step = if pieces.len() == 2 {
-        let step = parse_u32(pieces[1], label)?;
-        if step == 0 {
-            return Err(RegistryError::InvalidInput(format!(
-                "workflow schedule cron {label} step must be positive"
-            )));
-        }
-        step
-    } else {
-        1
-    };
-    let base = pieces[0];
-    if label == "day-of-month" && base == "*" && pieces.len() == 2 {
-        return Err(RegistryError::InvalidInput(
-            "day-of-month stepped wildcard is unsupported".to_string(),
-        ));
-    }
-    let (start, end) = if base == "*" {
-        (min, max)
-    } else {
-        let range = base.split('-').collect::<Vec<_>>();
-        if range.len() > 2 || range[0].is_empty() || range.get(1).is_some_and(|s| s.is_empty()) {
-            return Err(RegistryError::InvalidInput(format!(
-                "workflow schedule cron {label} field has a malformed range"
-            )));
-        }
-        let start = parse_u32(range[0], label)?;
-        let end = if range.len() == 2 {
-            parse_u32(range[1], label)?
-        } else {
-            start
-        };
-        (start, end)
-    };
-    if start < min || start > max || end < min || end > max || start > end {
-        return Err(RegistryError::InvalidInput(format!(
-            "workflow schedule cron {label} field is out of range"
-        )));
-    }
-    if explicit_max.is_some_and(|limit| end > limit) && base != "*" {
-        return Err(RegistryError::InvalidInput(
-            "day-of-month values above 28 are unsupported".to_string(),
-        ));
-    }
-    let mut value = start;
-    while value <= end {
-        values.insert(value);
-        match value.checked_add(step) {
-            Some(next) => value = next,
-            None => break,
-        }
-    }
-    Ok(())
-}
-
-fn parse_u32(value: &str, label: &str) -> Result<u32, RegistryError> {
-    if value.is_empty() || !value.chars().all(|c| c.is_ascii_digit()) {
-        return Err(RegistryError::InvalidInput(format!(
-            "workflow schedule cron {label} field must use integers"
-        )));
-    }
-    value.parse::<u32>().map_err(|e| {
-        RegistryError::InvalidInput(format!(
-            "workflow schedule cron {label} field integer is invalid: {e}"
-        ))
-    })
-}
-
-impl ParsedCron {
-    fn date_matches(&self, date: NaiveDate) -> bool {
-        if !self.months.matches(date.month()) {
-            return false;
-        }
-        let dom = self.days_of_month.matches(date.day());
-        let dow = self
-            .days_of_week
-            .matches(date.weekday().num_days_from_sunday());
-        match (
-            self.days_of_month.wildcard,
-            self.days_of_week.wildcard,
-        ) {
-            (true, true) => true,
-            (true, false) => dow,
-            (false, true) => dom,
-            (false, false) => dom || dow,
-        }
-    }
-}
-
-impl CronField {
-    fn matches(&self, value: u32) -> bool {
-        self.values.contains(&value)
-    }
 }
 
 async fn db_now<C>(conn: &C) -> Result<DateTime<Utc>, RegistryError>
@@ -1137,24 +868,18 @@ mod tests {
     #[test]
     fn spring_forward_nonexistent_local_time_fires_at_first_valid_instant() {
         let schedule = cron("30 2 * * *", "America/New_York");
-        let next = first_fire_at_strictly_after(
-            &schedule,
-            utc(2026, 3, 8, 6, 0),
-            utc(2026, 3, 8, 6, 0),
-        )
-        .expect("next fire");
+        let next =
+            first_fire_at_strictly_after(&schedule, utc(2026, 3, 8, 6, 0), utc(2026, 3, 8, 6, 0))
+                .expect("next fire");
         assert_eq!(next, utc(2026, 3, 8, 7, 0));
     }
 
     #[test]
     fn fall_back_ambiguous_local_time_fires_once_at_first_occurrence() {
         let schedule = cron("30 1 * * *", "America/New_York");
-        let first = first_fire_at_strictly_after(
-            &schedule,
-            utc(2026, 11, 1, 4, 0),
-            utc(2026, 11, 1, 4, 0),
-        )
-        .expect("first fire");
+        let first =
+            first_fire_at_strictly_after(&schedule, utc(2026, 11, 1, 4, 0), utc(2026, 11, 1, 4, 0))
+                .expect("first fire");
         assert_eq!(first, utc(2026, 11, 1, 5, 30));
 
         let next = first_fire_at_strictly_after(&schedule, first, first).expect("next fire");

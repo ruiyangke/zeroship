@@ -9,6 +9,7 @@ bytes = { workspace = true }
 zeroship-core = { workspace = true }
 async-trait = { workspace = true }
 chrono = { version = "0.4", default-features = false, features = ["std", "serde", "clock"] }
+chrono-tz = "0.10"
 compio = { workspace = true }
 compio-postgres = { workspace = true, features = ["with-chrono-0_4", "with-serde_json-1", "with-uuid-1"] }
 cyper = { workspace = true }

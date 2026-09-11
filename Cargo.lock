@@ -8637,6 +8637,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "chrono",
+ "chrono-tz",
  "compio",
  "compio-postgres",
  "cyper",
