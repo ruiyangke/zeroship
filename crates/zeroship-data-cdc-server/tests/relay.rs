@@ -36,6 +36,22 @@ async fn receive<S: compio::io::AsyncRead + compio::io::AsyncWrite>(
     }
 }
 
+async fn native_event(
+    subscription: &zeroship_data_orm::cdc::Subscription,
+) -> zeroship_data_orm::cdc::SubscriptionMessage {
+    compio::time::timeout(
+        Duration::from_secs(15),
+        futures::future::poll_fn(|cx| {
+            subscription.register_waker(cx.waker().clone());
+            subscription
+                .pop()
+                .map_or(std::task::Poll::Pending, std::task::Poll::Ready)
+        }),
+    )
+    .await
+    .expect("ORM event timed out")
+}
+
 fn assertion(instance: &str, key: &ServiceSigningKey) -> String {
     let issuer =
         ServiceIssuer::parse(&format!("spiffe://zeroship.ai/svc/worker/{instance}")).unwrap();
@@ -48,24 +64,19 @@ fn assertion(instance: &str, key: &ServiceSigningKey) -> String {
 
 #[compio::test]
 async fn relay_process_authenticates_workers_and_streams_commits_without_worker_replication() {
-    let mut admin_url = url::Url::parse(&zeroship_core::config::test_database_url()).unwrap();
+    let admin_url = url::Url::parse(&zeroship_core::config::test_database_url()).unwrap();
     let admin = Pool::connect(admin_url.as_str(), 2)
         .await
         .expect("required PostgreSQL");
     let suffix = zeroship_core::typed_id::generate("tst");
-    let database = format!("cdc_{suffix}");
     let relay_role = format!("relay_{suffix}");
     let worker_role = format!("worker_{suffix}");
-    admin
-        .batch_execute(&format!("CREATE DATABASE \"{database}\""))
-        .await
-        .unwrap();
     admin.batch_execute(&format!("CREATE ROLE \"{relay_role}\" LOGIN REPLICATION NOSUPERUSER NOBYPASSRLS PASSWORD 'fixture'; CREATE ROLE \"{worker_role}\" LOGIN NOREPLICATION NOSUPERUSER NOBYPASSRLS PASSWORD 'fixture'")).await.unwrap();
-    admin_url.set_path(&format!("/{database}"));
     let db = Pool::connect(admin_url.as_str(), 2).await.unwrap();
     let app = zeroship_core::typed_id::generate(zeroship_core::typed_id::APP_PREFIX);
     let publication = zeroship_core::replication_names::publication_name(&app).unwrap();
-    db.batch_execute(&format!("CREATE SCHEMA zeroship; CREATE TABLE zeroship.worker_instances (id text PRIMARY KEY, status text NOT NULL, public_key bytea NOT NULL); GRANT USAGE ON SCHEMA zeroship TO \"{relay_role}\"; GRANT SELECT ON zeroship.worker_instances TO \"{relay_role}\"; CREATE SCHEMA \"{app}\"; CREATE TABLE \"{app}\".orders (id int PRIMARY KEY, secret text); GRANT USAGE ON SCHEMA \"{app}\" TO \"{worker_role}\"; GRANT SELECT, INSERT, UPDATE, DELETE ON \"{app}\".orders TO \"{worker_role}\"; CREATE PUBLICATION \"{publication}\" FOR TABLE \"{app}\".orders")).await.unwrap();
+    let slot = publication.replacen("__zs_pub_", "__zs_relay_", 1);
+    db.batch_execute(&format!("CREATE SCHEMA IF NOT EXISTS zeroship; CREATE TABLE IF NOT EXISTS zeroship.worker_instances (id text PRIMARY KEY, ring_key bytea NOT NULL, public_key bytea NOT NULL, advertise_host inet NOT NULL, advertise_port int NOT NULL, registered_at timestamptz NOT NULL DEFAULT now(), status text NOT NULL CHECK (status IN ('active', 'draining', 'gone'))); GRANT USAGE ON SCHEMA zeroship TO \"{relay_role}\"; GRANT SELECT (id, status, public_key) ON zeroship.worker_instances TO \"{relay_role}\"; CREATE SCHEMA \"{app}\"; CREATE TABLE \"{app}\".orders (id int PRIMARY KEY, secret text); GRANT USAGE ON SCHEMA \"{app}\" TO \"{worker_role}\"; GRANT SELECT, INSERT, UPDATE, DELETE ON \"{app}\".orders TO \"{worker_role}\"; CREATE PUBLICATION \"{publication}\" FOR TABLE \"{app}\".orders")).await.unwrap();
     let first_id = zeroship_core::typed_id::generate("wkr");
     let second_id = zeroship_core::typed_id::generate("wkr");
     let first_key = ServiceSigningKey::generate();
@@ -73,7 +84,7 @@ async fn relay_process_authenticates_workers_and_streams_commits_without_worker_
     for (id, key) in [(&first_id, &first_key), (&second_id, &second_key)] {
         let public = key.verifying_key_bytes().to_vec();
         db.execute(
-            "INSERT INTO zeroship.worker_instances VALUES ($1, 'active', $2)",
+            "INSERT INTO zeroship.worker_instances (id, ring_key, public_key, advertise_host, advertise_port, status) VALUES ($1, $2, $2, '127.0.0.1'::inet, 8080, 'active')",
             &[id, &public],
         )
         .await
@@ -203,10 +214,31 @@ async fn relay_process_authenticates_workers_and_streams_commits_without_worker_
         .await
         .unwrap();
     assert_eq!(receive(&mut second).await.unwrap(), Event::Ready);
+    let identity =
+        ServiceIssuer::parse(&format!("spiffe://zeroship.ai/svc/worker/{second_id}")).unwrap();
+    let keyring = zeroship_core::service_peers::ServiceKeyring::from_parts(
+        identity,
+        second_key,
+        zeroship_core::service_assertion::ServiceTrustBundle::new(),
+    )
+    .unwrap();
+    let verifier = zeroship_core::service_assertion::ServiceAssertionVerifier::new(
+        zeroship_core::service_assertion::ServiceTrustBundle::new(),
+        Arc::new(zeroship_core::service_assertion::InMemoryReplayStore::new()),
+    );
+    let auth = Arc::new(zeroship_core::service_peers::ServiceAuth::new(
+        keyring,
+        Arc::new(verifier),
+    ));
+    let client = zeroship_data_orm::cdc::relay::RelayConfig::new(endpoint.clone(), auth)
+        .unwrap()
+        .with_tls_connector(connector.clone());
+    let native = zeroship_data_orm::cdc::broker::subscribe(&app, "orders");
+    let native_handle = client.spawn(&app).await.unwrap();
     let slots: i64 = db
         .query(
-            "SELECT count(*) FROM pg_replication_slots WHERE database = current_database()",
-            &[],
+            "SELECT count(*) FROM pg_replication_slots WHERE slot_name = $1",
+            &[&slot],
         )
         .await
         .unwrap()[0]
@@ -230,6 +262,13 @@ async fn relay_process_authenticates_workers_and_streams_commits_without_worker_
     };
     assert_eq!(receive(&mut first).await.unwrap(), expected);
     assert_eq!(receive(&mut second).await.unwrap(), expected);
+    let zeroship_data_orm::cdc::SubscriptionMessage::Change(change) = native_event(&native).await
+    else {
+        panic!("ORM change expected");
+    };
+    assert_eq!(change.collection, "orders");
+    assert!(change.pk.is_none() && change.new_tuple.is_empty() && change.old_tuple.is_none());
+
     worker
         .batch_execute(&format!(
             "INSERT INTO \"{app}\".orders VALUES (3, 'private'), (4, 'private'), (5, 'private')"
@@ -238,8 +277,13 @@ async fn relay_process_authenticates_workers_and_streams_commits_without_worker_
         .unwrap();
     assert_eq!(receive(&mut first).await.unwrap(), Event::Resync);
     assert_eq!(receive(&mut second).await.unwrap(), Event::Resync);
+    assert!(matches!(
+        native_event(&native).await,
+        zeroship_data_orm::cdc::SubscriptionMessage::Resync
+    ));
+
     db.execute(
-        "UPDATE zeroship.worker_instances SET status = 'revoked' WHERE id = $1",
+        "UPDATE zeroship.worker_instances SET status = 'gone' WHERE id = $1",
         &[&first_id],
     )
     .await
@@ -255,24 +299,40 @@ async fn relay_process_authenticates_workers_and_streams_commits_without_worker_
         .await
         .unwrap();
     assert_eq!(receive(&mut second).await.unwrap(), expected);
+    native_handle.shutdown().await.unwrap();
+    native.close();
     drop(first);
     drop(second);
     drop(forged);
     drop(replay);
     let cleanup_deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        let slots = db.query("SELECT 1 FROM pg_replication_slots WHERE database = current_database()", &[]).await.unwrap();
-        if slots.is_empty() { break; }
-        assert!(Instant::now() < cleanup_deadline, "relay did not release its final subscription slot");
+        let slots = db
+            .query(
+                "SELECT 1 FROM pg_replication_slots WHERE slot_name = $1",
+                &[&slot],
+            )
+            .await
+            .unwrap();
+        if slots.is_empty() {
+            break;
+        }
+        assert!(
+            Instant::now() < cleanup_deadline,
+            "relay did not release its final subscription slot"
+        );
         compio::time::sleep(Duration::from_millis(50)).await;
     }
     drop(process);
     worker.close().await;
+    db.execute(
+        "DELETE FROM zeroship.worker_instances WHERE id = $1 OR id = $2",
+        &[&first_id, &second_id],
+    )
+    .await
+    .unwrap();
+    db.batch_execute(&format!("DROP PUBLICATION \"{publication}\"; DROP SCHEMA \"{app}\" CASCADE; DROP OWNED BY \"{relay_role}\"; DROP OWNED BY \"{worker_role}\"")).await.unwrap();
     db.close().await;
-    admin
-        .batch_execute(&format!("DROP DATABASE \"{database}\""))
-        .await
-        .unwrap();
     admin
         .batch_execute(&format!(
             "DROP ROLE \"{relay_role}\"; DROP ROLE \"{worker_role}\""

@@ -65,13 +65,13 @@ zeroship-auth
 zeroship-authn
 zeroship-authz
 zeroship-bundle
-zeroship-data-cdc-wire
 zeroship-cli
 zeroship-config-contract
 zeroship-config-macros
 zeroship-control
 zeroship-core
 zeroship-data-cdc-server
+zeroship-data-cdc-wire
 zeroship-data-macros
 zeroship-data-orm
 zeroship-data-sql

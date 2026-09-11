@@ -256,6 +256,11 @@ impl Subscription {
             if entry.collection != event.collection {
                 continue;
             }
+            // Value-free relay invalidations cannot evaluate row predicates.
+            // Re-read this collection through the ORM's access controls.
+            if event.new_tuple.is_empty() && event.old_tuple.is_none() {
+                return true;
+            }
             if entry.matches(&event.new_tuple) {
                 return true;
             }
@@ -1635,6 +1640,17 @@ mod tests {
             collection: collection.to_string(),
             predicate: read_set::normalise_filter(&filter.into(), &zeroship_data_sql::value!({})),
         }
+    }
+
+    #[test]
+    fn value_free_invalidations_reach_filtered_subscriptions_in_their_collection() {
+        let mut broker = Broker::new();
+        let matching = broker.subscribe("app", "orders");
+        matching.set_read_set(vec![rs_entry("orders", serde_json::json!({"owner": "alice"}))]);
+        let other = broker.subscribe("app", "messages");
+        broker.publish(&ev_with_tuple("app", "orders", ChangeOp::Update, None, &[]));
+        assert!(matches!(matching.pop(), Some(SubscriptionMessage::Change(_))));
+        assert!(other.pop().is_none());
     }
 
     #[test]

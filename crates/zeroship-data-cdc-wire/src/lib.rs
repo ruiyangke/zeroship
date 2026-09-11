@@ -53,6 +53,10 @@ fn text(bytes: &[u8]) -> Result<&str, ProtocolError> {
 }
 
 impl Subscribe {
+    /// Encode a bounded protocol message.
+    ///
+    /// # Errors
+    /// Returns `ProtocolError` when a field exceeds its limit or is invalid.
     pub fn encode(&self) -> Result<Vec<u8>, ProtocolError> {
         if !valid_name(&self.app_id)
             || self.authorization.is_empty()
@@ -60,12 +64,17 @@ impl Subscribe {
         {
             return Err(ProtocolError);
         }
-        let mut bytes = vec![VERSION, self.app_id.len() as u8];
+        let name_len = u8::try_from(self.app_id.len()).map_err(|_| ProtocolError)?;
+        let mut bytes = vec![VERSION, name_len];
         bytes.extend_from_slice(self.app_id.as_bytes());
         bytes.extend_from_slice(self.authorization.as_bytes());
         Ok(bytes)
     }
 
+    /// Decode one complete protocol message.
+    ///
+    /// # Errors
+    /// Returns `ProtocolError` for malformed, unknown, or oversized messages.
     pub fn decode(bytes: &[u8]) -> Result<Self, ProtocolError> {
         if bytes.len() > MAX_MESSAGE_BYTES {
             return Err(ProtocolError);
@@ -89,6 +98,10 @@ impl Subscribe {
 }
 
 impl Event {
+    /// Encode a bounded protocol message.
+    ///
+    /// # Errors
+    /// Returns `ProtocolError` when a field exceeds its limit or is invalid.
     pub fn encode(&self) -> Result<Vec<u8>, ProtocolError> {
         Ok(match self {
             Self::Ready => vec![1],
@@ -113,6 +126,10 @@ impl Event {
         })
     }
 
+    /// Decode one complete protocol message.
+    ///
+    /// # Errors
+    /// Returns `ProtocolError` for malformed, unknown, or oversized messages.
     pub fn decode(bytes: &[u8]) -> Result<Self, ProtocolError> {
         match bytes {
             [1] => Ok(Self::Ready),

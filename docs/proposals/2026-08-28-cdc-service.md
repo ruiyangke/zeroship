@@ -21,8 +21,8 @@ ORM subscription broker <--- SQLite commit capture (local development)
     +--- zeroship-data-v8 ---> TypeScript live queries
 ```
 
-The extraction is in progress. The relay source and transport are implemented.
-ORM integration, worker privilege removal, and deployment provisioning must land
+The extraction is in progress. The relay source, transport, and native ORM client are implemented.
+V8 integration, worker privilege removal, and deployment provisioning must land
 with the worker cutover. An executable relay does not establish the privilege boundary
 while a worker can still replicate WAL itself.
 
@@ -108,5 +108,6 @@ to have implemented.
 Ordinary relay tests require a real PostgreSQL database. They cover the commit
 boundary, rollback, shared delivery, value-free frames, truncate, and slot cleanup.
 Wire and queue tests cover malformed messages, capacity exhaustion, slow-client
-isolation, and generation fencing. Separate-process transport and worker-cutover
-coverage must pass before the extraction is complete.
+isolation, and generation fencing. The public ORM client is tested against a separate relay process, including
+authentication, revocation, and shared capture. Worker-cutover coverage remains
+required before the extraction is complete.

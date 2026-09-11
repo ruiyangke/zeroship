@@ -14,6 +14,11 @@ zeroship-core = { workspace = true }
 zeroship-metering = { workspace = true }
 zeroship-migrate-policy = { workspace = true }
 compio = { workspace = true }
+compio-ws = { workspace = true }
+compio-tls = { workspace = true }
+futures = { workspace = true }
+url = { workspace = true }
+zeroship-data-cdc-wire = { workspace = true }
 compio-postgres = { workspace = true, features = ["with-uuid-1"] }
 rusqlite = { workspace = true, features = ["bundled", "preupdate_hook", "functions"] }
 flume = { workspace = true }
