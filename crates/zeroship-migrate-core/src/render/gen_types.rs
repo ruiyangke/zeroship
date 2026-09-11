@@ -230,12 +230,10 @@ pub enum AuxiliaryObject {
     /// data plane needs from the descriptor is the NAME it joins by and the trigger
     /// names, both of which it currently derives by string formatting.
     ///
-    /// **This records a NAME, not a creation.** The engine emits no DDL for it - the
-    /// data plane's own `ensure_vector_index` does, and that is
-    /// `#[cfg(any(test, feature = "test-helpers"))]`-gated today. The name is
-    /// nevertheless load-bearing on an ungated path, because the vector SEARCH builder
-    /// joins by it. So the descriptor is the right authority for what the object is
-    /// CALLED and the wrong authority for whether it EXISTS.
+    /// This descriptor records the object's name. It does not create the object
+    /// or establish that it exists. Provisioning must create the relation before
+    /// the vector search builder can join it; the runtime owns no index-creation
+    /// helper.
     #[serde(rename_all = "camelCase")]
     ShadowTable {
         /// The shadow relation's name.

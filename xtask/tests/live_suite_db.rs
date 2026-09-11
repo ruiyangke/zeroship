@@ -29,7 +29,7 @@ fn scratch_name(tag: &str) -> String {
 /// moments ago; the only sessions on it are this test's own, which the driver
 /// may not have torn down yet, and a plain DROP would fail on them and leak the
 /// database. The sweeper drops databases OTHER runs created, where a live
-/// session is a peer agent mid-suite -- so `crates/zeroship-testkit/src/sweep.rs`
+/// session is a peer agent mid-suite -- so `xtask/src/platform_db/sweep.rs`
 /// has no drop at all and `tests/sweep_test_databases.sh` must never add FORCE.
 fn drop_scratch(server: &admin::Server, name: &str) {
     let mut config = compio_postgres::Config::new();

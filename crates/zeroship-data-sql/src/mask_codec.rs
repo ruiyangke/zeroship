@@ -350,15 +350,13 @@ mod tests {
 /// migration-engine-built table it introspected it matched no sentinel,
 /// concluded nothing was protected, and permitted the downgrade. Both files then
 /// carried a doc block claiming the re-divergence guard lived in
-/// `zeroship-data-v8`'s `mask_flip.rs`. That test does bind them - it renders
-/// DDL through `zeroship_migrate::schema::query`, executes it, and compares the
-/// stored comment against this crate's builder - but it needs a live
-/// `PostgreSQL` and `--features test-helpers`, so it runs in no ordinary
-/// `cargo test`, it compares two BUILDERS rather than crossing a builder into
-/// the other parser, and it covers one `(kind, classification)` pair, one
-/// `EncryptionMeta` and neither `SQLite` form.
+/// `zeroship-data-v8`'s former `mask_flip.rs`. Those database tests now live in
+/// `crates/zeroship-data-orm/src/tests/postgres/protection.rs` and run in ordinary
+/// `cargo test`. They render DDL through `zeroship_migrate::schema::query`, execute
+/// it, and compare the stored comment against this crate's builder. Codec parity
+/// also needs to cross each builder into the other parser and cover SQLite forms.
 ///
-/// This suite is the always-run half. It reaches the engine codec through the
+/// This suite checks that codec parity. It reaches the engine codec through the
 /// existing test-only `zeroship-migrate-core` dev-dependency (which re-exports
 /// `zeroship_migrate_backend::mask_codec` at `schema::mask_codec`), so it adds
 /// no production dependency edge; the crates stay separated by the migration

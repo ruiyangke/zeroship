@@ -198,7 +198,7 @@ pub fn test_auth_config_with(db_url: &str, extra: &[&str]) -> AuthConfig {
     // (it never asked for `offline_access`), and the exchange answered 500.
     // The fixture was simply less configured than any real deployment.
     //
-    // The pair comes from `zeroship-test-support` rather than from a local
+    // The pair comes from `tests/fixtures/session_keys.rs` rather than from a local
     // helper, because the control plane's `PlatformOp` fixture builds its own
     // `AuthConfig` the same way and MISSED this when it was added here. One
     // function is what stops the two drifting again, and the fixtures that
