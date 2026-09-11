@@ -22,8 +22,16 @@ export async function call(base: string, name: string, input: Row = {}): Promise
   });
   const text = await response.text();
   const value = object(JSON.parse(text));
-  assert("json" in value || "error" in value, `${name}: invalid response ${response.status}: ${text}`);
-  return value;
+  const invalid = `${name}: invalid response ${response.status}: ${text}`;
+  if (response.ok) {
+    assert(Object.hasOwn(value, "json") && !Object.hasOwn(value, "error"), invalid);
+    return value;
+  }
+  assert(typeof value.message === "string" && !Object.hasOwn(value, "json") && !Object.hasOwn(value, "error"), invalid);
+  for (const key of ["name", "code", "request_id"]) {
+    assert(!Object.hasOwn(value, key) || typeof value[key] === "string", invalid);
+  }
+  return { error: value };
 }
 
 export async function capture(base: string, run: string): Promise<Capture> {
