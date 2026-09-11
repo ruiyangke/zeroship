@@ -198,6 +198,7 @@ claim_pairs() {
 # also the one a rewrite could quietly turn into a real claim.
 # ---------------------------------------------------------------------------
 LEDGER='
+crates/zeroship-data-v8/src/tests/postgres/workflow.rs	zeroship_migrate_server	bound=crates/zeroship-data-v8/src/tests/postgres/workflow.rs#async fn workflow_journal_redeploy_grants_do_not_reopen_without_reprovision
 crates/zeroship-data-orm/src/backend/postgres/pg_session_sql.rs	zeroship_migrate_server	unbound
 crates/zeroship-data-orm/src/exec.rs	compio_postgres	prose
 crates/zeroship-data-orm/src/backend/sqlite/vector.rs	zeroship_migrate_core	bound=crates/zeroship-data-orm/src/tests/sqlite/search.rs#fn engine_shadow_relation
