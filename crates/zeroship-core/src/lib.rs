@@ -16,7 +16,6 @@ pub mod worker_ring;
 pub mod app_id;
 pub mod auth;
 pub mod auth_provider;
-pub mod change_event;
 pub mod client_ip;
 pub mod config;
 pub mod crypto;

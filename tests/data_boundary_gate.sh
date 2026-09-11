@@ -6,7 +6,7 @@ cd "$(dirname "$0")/.."
 gate_arms_init data_boundary
 
 failed=0
-contract_files=(crates/zeroship-data-orm/src/{driver,executor,protection,search,storage}.rs)
+contract_files=(crates/zeroship-data-orm/src/{driver,executor,protection,search,storage,cdc/source}.rs)
 checked=0
 for file in "${contract_files[@]}"; do
   checked=$((checked + 1))
@@ -85,11 +85,11 @@ for dependency in zeroship-data-orm zeroship-data-sql zeroship-runtime compio-po
   checked=$((checked + 1))
   if adapter_dependency_is_forbidden "$dependency"; then failed=1; fi
 done
-for declaration in 'pub use zeroship_data_orm::broker;' 'pub use zeroship_data_sql as sql;' $'pub\nuse\nbackend::pg_row_json;'; do
+for declaration in 'pub use zeroship_data_orm::cdc::broker;' 'pub use zeroship_data_sql as sql;' $'pub\nuse\nbackend::pg_row_json;'; do
   checked=$((checked + 1))
   adapter_exports_owner <<<"$declaration" >/dev/null || failed=1
 done
-for declaration in 'use zeroship_data_orm::broker;' 'pub(crate) use zeroship_data_sql::compile;'; do
+for declaration in 'use zeroship_data_orm::cdc::broker;' 'pub(crate) use zeroship_data_sql::compile;'; do
   checked=$((checked + 1))
   if adapter_exports_owner <<<"$declaration" >/dev/null; then failed=1; fi
 done

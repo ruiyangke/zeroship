@@ -158,7 +158,7 @@ pub async fn exec_mutation(route: &TxRoute, bq: BuiltQuery) -> Result<Vec<Value>
     Ok(rows)
 }
 
-/// Execute a mutation, then emit a [`crate::broker::emit_local`]
+/// Execute a mutation, then emit a [`crate::cdc::broker::emit_local`]
 /// event into the in-process broker on success.
 ///
 /// This is the coarse-grained reactive-query bridge: every
@@ -169,7 +169,7 @@ pub async fn exec_mutation(route: &TxRoute, bq: BuiltQuery) -> Result<Vec<Value>
 /// On error the broker is untouched — partial writes produce no
 /// events. The error message is forwarded verbatim.
 ///
-/// `op` selects the [`zeroship_core::change_event::ChangeOp`] tagged on the event;
+/// `op` selects the [`zeroship_data_orm::cdc::ChangeOp`] tagged on the event;
 /// the caller knows whether it called `build_insert`, `build_update_one`,
 /// `build_delete_one`, etc. so we don't try to infer it from the SQL.
 ///
@@ -181,7 +181,7 @@ pub async fn exec_mutation_with_emit(
     bq: BuiltQuery,
     route: &TxRoute,
     collection: &str,
-    op: zeroship_core::change_event::ChangeOp,
+    op: zeroship_data_orm::cdc::ChangeOp,
 ) -> Result<Vec<Value>, DbError> {
     // `exec_mutation` returns the typed `Vec<Value>` already decoded
     // from `compio_postgres::Row`. Pre-fix we re-parsed our own JSON
@@ -260,7 +260,7 @@ fn emit_for_rows(
     in_tx: bool,
     backend_publishes: bool,
     collection: &str,
-    op: zeroship_core::change_event::ChangeOp,
+    op: zeroship_data_orm::cdc::ChangeOp,
 ) {
     if rows.is_empty() {
         // No rows affected — no broker event. UPDATE with a non-
@@ -275,8 +275,8 @@ fn emit_for_rows(
         // publisher and produces duplicate identical live snapshots.
         return;
     }
-    if crate::broker::is_app_suppressed(app_id)
-        || !crate::broker::has_subscribers(app_id, collection)
+    if crate::cdc::broker::is_app_suppressed(app_id)
+        || !crate::cdc::broker::has_subscribers(app_id, collection)
     {
         return;
     }
@@ -334,7 +334,7 @@ fn queue_or_emit(
     app_id: &str,
     in_tx: bool,
     collection: &str,
-    op: zeroship_core::change_event::ChangeOp,
+    op: zeroship_data_orm::cdc::ChangeOp,
     pk: Option<String>,
     changed_columns: Vec<String>,
     new_tuple: std::collections::HashMap<String, String>,
@@ -347,10 +347,10 @@ fn queue_or_emit(
     // belongs to a different unit of work (previously it was both routed
     // onto and queued behind a stranger's transaction).
     if !in_tx {
-        crate::broker::emit_local(app_id, collection, op, pk, changed_columns, new_tuple);
+        crate::cdc::broker::emit_local(app_id, collection, op, pk, changed_columns, new_tuple);
         return;
     }
-    let ev = zeroship_core::change_event::ChangeEvent {
+    let ev = zeroship_data_orm::cdc::ChangeEvent {
         app_id: app_id.to_string(),
         collection: collection.to_string(),
         op,
@@ -375,10 +375,10 @@ fn value_to_logical_id(value: &Value) -> Option<String> {
 /// SEC-1: scoped to the committing app so one app's COMMIT can never
 /// fire a co-resident app's pre-commit events.
 pub fn drain_pending_emits_on_commit(app_id: &str) {
-    let queued: Vec<zeroship_core::change_event::ChangeEvent> =
+    let queued: Vec<zeroship_data_orm::cdc::ChangeEvent> =
         crate::tx_lanes::with_mut(|l| l.drain_pending_emits_for(app_id));
     for ev in queued {
-        crate::broker::emit_local(
+        crate::cdc::broker::emit_local(
             &ev.app_id,
             &ev.collection,
             ev.op,
@@ -446,7 +446,7 @@ mod tests {
     use std::collections::HashMap;
     use std::path::PathBuf;
     use std::rc::Rc;
-    use zeroship_core::change_event::ChangeOp;
+    use zeroship_data_orm::cdc::ChangeOp;
     use zeroship_data_orm::fixtures::DatabaseFixture;
 
     thread_local! {
@@ -510,8 +510,8 @@ mod tests {
     /// hiding it - a global reset erases the evidence of exactly the bug the
     /// suppression refcount exists to prevent.
     fn reset_world(app_id: &str) {
-        crate::broker::drop_app(app_id);
-        crate::broker::unsuppress_app(app_id);
+        crate::cdc::broker::drop_app(app_id);
+        crate::cdc::broker::unsuppress_app(app_id);
         reset_counter();
         reset_sqlite_route();
     }
@@ -533,22 +533,22 @@ mod tests {
         reset_world(mine);
 
         // Stand in for a test running concurrently on another thread.
-        let their_sub = crate::broker::subscribe(theirs, "messages");
-        crate::broker::suppress_app(theirs);
+        let their_sub = crate::cdc::broker::subscribe(theirs, "messages");
+        crate::cdc::broker::suppress_app(theirs);
 
         // Our cleanup fires while they are mid-test.
         reset_world(mine);
 
         assert!(
-            crate::broker::is_app_suppressed(theirs),
+            crate::cdc::broker::is_app_suppressed(theirs),
             "reset_world cleared another app's suppression",
         );
         assert!(
-            crate::broker::has_subscribers(theirs, "messages"),
+            crate::cdc::broker::has_subscribers(theirs, "messages"),
             "reset_world dropped another app's broker subscription",
         );
 
-        crate::broker::unsuppress_app(theirs);
+        crate::cdc::broker::unsuppress_app(theirs);
         drop(their_sub);
         reset_world(theirs);
         reset_world(mine);
@@ -645,8 +645,8 @@ mod tests {
         reset_world("app_suppressed");
         // Register a subscriber so the only thing keeping us out of
         // the build is the suppression flag.
-        let sub = crate::broker::subscribe("app_suppressed", "messages");
-        crate::broker::suppress_app("app_suppressed");
+        let sub = crate::cdc::broker::subscribe("app_suppressed", "messages");
+        crate::cdc::broker::suppress_app("app_suppressed");
 
         let rows = vec![synthetic_row()];
         emit_for_rows(
@@ -695,7 +695,7 @@ mod tests {
         // would have published to the empty broker bucket. Verify the
         // broker really has no bucket for this key.
         assert!(
-            !crate::broker::has_subscribers("app_no_subs", "ghosts"),
+            !crate::cdc::broker::has_subscribers("app_no_subs", "ghosts"),
             "sanity: precondition for the gate",
         );
         reset_world("app_no_subs");
@@ -736,7 +736,7 @@ mod tests {
             )
         });
 
-        let sub = crate::broker::subscribe(
+        let sub = crate::cdc::broker::subscribe(
             "app_active_queue_or_emit_no_tx_emits_immediately",
             "messages",
         );
@@ -754,7 +754,7 @@ mod tests {
         );
 
         match sub.pop() {
-            Some(crate::broker::SubscriptionMessage::Change(ev)) => {
+            Some(crate::cdc::broker::SubscriptionMessage::Change(ev)) => {
                 assert_eq!(ev.pk.as_deref(), Some("9"));
                 assert_eq!(ev.op, ChangeOp::Insert);
             }
@@ -771,12 +771,12 @@ mod tests {
     #[test]
     fn drain_pending_emits_on_commit_fires_every_queued_event() {
         reset_world("app_active_drain_pending_emits_on_commit_fires_every_queued_event");
-        let sub = crate::broker::subscribe(
+        let sub = crate::cdc::broker::subscribe(
             "app_active_drain_pending_emits_on_commit_fires_every_queued_event",
             "messages",
         );
 
-        let mk_event = |pk: i64| zeroship_core::change_event::ChangeEvent {
+        let mk_event = |pk: i64| zeroship_data_orm::cdc::ChangeEvent {
             app_id: "app_active_drain_pending_emits_on_commit_fires_every_queued_event".to_string(),
             collection: "messages".to_string(),
             op: ChangeOp::Insert,
@@ -803,7 +803,7 @@ mod tests {
 
         let mut pks = Vec::new();
         while let Some(msg) = sub.pop() {
-            if let crate::broker::SubscriptionMessage::Change(ev) = msg {
+            if let crate::cdc::broker::SubscriptionMessage::Change(ev) = msg {
                 pks.push(ev.pk.as_deref().unwrap().to_string());
             }
         }
@@ -829,12 +829,12 @@ mod tests {
     #[test]
     fn clear_pending_emits_drops_without_firing() {
         reset_world("app_active_clear_pending_emits_drops_without_firing");
-        let sub = crate::broker::subscribe(
+        let sub = crate::cdc::broker::subscribe(
             "app_active_clear_pending_emits_drops_without_firing",
             "messages",
         );
 
-        let ev = zeroship_core::change_event::ChangeEvent {
+        let ev = zeroship_data_orm::cdc::ChangeEvent {
             app_id: "app_active_clear_pending_emits_drops_without_firing".to_string(),
             collection: "messages".to_string(),
             op: ChangeOp::Insert,
@@ -860,7 +860,7 @@ mod tests {
     #[test]
     fn exec_mutation_with_emit_builds_when_active_subscriber() {
         reset_world("app_active_exec_mutation_with_emit_builds_when_active_subscriber");
-        let sub = crate::broker::subscribe(
+        let sub = crate::cdc::broker::subscribe(
             "app_active_exec_mutation_with_emit_builds_when_active_subscriber",
             "messages",
         );
@@ -883,7 +883,7 @@ mod tests {
         // And the event must actually have been delivered: prove the
         // subscriber's queue holds the change.
         match sub.pop() {
-            Some(crate::broker::SubscriptionMessage::Change(ev)) => {
+            Some(crate::cdc::broker::SubscriptionMessage::Change(ev)) => {
                 assert_eq!(
                     ev.app_id,
                     "app_active_exec_mutation_with_emit_builds_when_active_subscriber"
@@ -924,7 +924,7 @@ mod tests {
                 .expect("open sqlite backend"),
             );
             let handle = BackendHandle::new(Rc::clone(&backend));
-            let sub = crate::broker::subscribe(
+            let sub = crate::cdc::broker::subscribe(
                 "app_active_exec_mutation_with_emit_skips_local_emit_when_sqlite_cdc_publishes",
                 "messages",
             );
@@ -960,7 +960,7 @@ mod tests {
     #[test]
     fn exec_mutation_with_emit_uses_logical_typed_id_for_pk() {
         reset_world("app_active_exec_mutation_with_emit_uses_logical_typed_id_for_pk");
-        let sub = crate::broker::subscribe(
+        let sub = crate::cdc::broker::subscribe(
             "app_active_exec_mutation_with_emit_uses_logical_typed_id_for_pk",
             "messages",
         );
@@ -976,7 +976,7 @@ mod tests {
         );
 
         match sub.pop() {
-            Some(crate::broker::SubscriptionMessage::Change(ev)) => {
+            Some(crate::cdc::broker::SubscriptionMessage::Change(ev)) => {
                 assert_eq!(ev.pk.as_deref(), Some("usr_02HXTESTSUBSCRIPTIONID"));
                 assert_eq!(
                     ev.new_tuple.get("id").map(String::as_str),

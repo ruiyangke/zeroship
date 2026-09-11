@@ -75,7 +75,7 @@
 //! **NO FILE WAS MOVED INTO THIS CRATE, AND THAT IS THE MEASURED ANSWER RATHER
 //! THAN A DEFERRAL.** `crates/zeroship-data-v8/src/wal_consumer.rs` imports
 //! `SuppressGuard`, `has_subscribers` and `publish` from
-//! `zeroship_data_orm::broker`, and all three target PROCESS-WIDE
+//! `zeroship_data_orm::cdc::broker`, and all three target PROCESS-WIDE
 //! `LazyLock<Mutex<..>>` statics. Move that file here verbatim and it compiles,
 //! every gate stays green, and `publish` reaches a different process's broker
 //! with zero subscribers while `SuppressGuard::activate` suppresses nothing in

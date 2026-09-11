@@ -32,9 +32,9 @@ pub mod backend;
 pub mod backend_handle;
 pub mod backend_selection;
 pub mod binding;
-pub mod broker;
 pub mod budgets;
 pub mod capability;
+pub mod cdc;
 pub mod connection;
 pub mod crud;
 pub mod descriptor;
@@ -48,7 +48,6 @@ pub mod masking;
 pub mod metrics;
 pub mod orm;
 pub mod protection;
-pub mod read_set;
 #[cfg(not(feature = "test-helpers"))]
 pub(crate) mod schema_cache;
 #[cfg(feature = "test-helpers")]

@@ -52,6 +52,7 @@ crates/
     src/executor.rs          scoped execution contract
     src/protection/          policy, encryption, masking, unmask authorization
     src/search.rs            ORM search extension contract
+    src/cdc/                 change events, capture contracts, broker, query matching
     src/backend/postgres/    PostgreSQL adapter
     src/backend/sqlite/      SQLite adapter
     src/crud/                CRUD orchestration and read/write pipelines
@@ -72,6 +73,15 @@ Migration services and the CDC relay retain their process boundaries. The ORM
 registration contract grants no DDL, backup, replication, or provisioning power.
 Existing worker CDC integration remains adapter-owned; this reorganization does
 not implement the deferred relay transport or datastore placement system.
+
+Shared CDC contracts live in `zeroship_data_orm::cdc`: `ChangeEvent`, `ChangeOp`,
+`ChangeSink`, `ChangeStream`, and subscription messages. The broker and read-set
+matching live under that module. SQLite capture feeds these contracts beside its
+file-backed writer; worker PostgreSQL capture feeds the same broker today.
+The relay protocol remains in `zeroship-cdc-wire`, independent of the ORM.
+V8 owns JavaScript subscription wrappers and isolate cleanup. Its existing
+PostgreSQL consumer, slot management, and consumer leases still await the relay
+transport; moving the shared contracts does not relocate replication authority.
 
 ## Setup and application code
 

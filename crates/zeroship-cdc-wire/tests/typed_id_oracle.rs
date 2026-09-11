@@ -150,7 +150,7 @@ fn the_prefixes_this_crate_pins_are_the_ones_the_proposals_write() {
 #[test]
 fn the_wire_change_op_is_one_to_one_with_the_broker_change_op() {
     use zeroship_cdc_wire::ChangeOp as WireOp;
-    use zeroship_core::change_event::ChangeOp as BrokerOp;
+    use zeroship_data_orm::cdc::ChangeOp as BrokerOp;
 
     // This match is the pin: it is exhaustive over the BROKER's enum, so adding
     // a variant there fails to compile here rather than silently producing a

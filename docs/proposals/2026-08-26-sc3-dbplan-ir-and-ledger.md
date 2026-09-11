@@ -422,7 +422,7 @@ not portable to the other.
 A relation plan cannot be handed to the live-query path as it stands, and the
 failure is silent rather than loud - the subscription simply never fires.
 
-`crates/zeroship-data-orm/src/read_set.rs` contains the string `relation`
+`crates/zeroship-data-orm/src/cdc/read_set.rs` contains the string `relation`
 **once**, in a comment, and is otherwise entirely relation-unaware. Two
 consequences:
 

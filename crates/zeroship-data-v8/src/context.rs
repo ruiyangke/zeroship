@@ -438,7 +438,7 @@ mod tests {
     // is how deleting it "to fix a warning" turned into nine compile errors.
     use crate::tx_lanes::TxLanes;
     use std::collections::HashMap;
-    use zeroship_core::change_event::{ChangeEvent, ChangeOp};
+    use zeroship_data_orm::cdc::{ChangeEvent, ChangeOp};
     use zeroship_data_orm::driver::Session;
 
     fn dummy_event(collection: &str) -> ChangeEvent {

@@ -224,7 +224,7 @@ pub async fn drop_namespace(
 /// costs an `.expect` that can fire only if the accessor and this match
 /// disagree about the same value.
 async fn deprovision_change_stream(backend: &BackendHandle, app_id: &str) -> Result<(), DbError> {
-    use crate::backend::ChangeStream;
+    use zeroship_data_orm::cdc::ChangeStream;
     if let Some(pg) = backend.get_rc::<crate::backend::PostgresBackend>() {
         crate::change_stream_pg::PgChangeStream::new(pg)
             .deprovision(app_id)

@@ -1,4 +1,4 @@
-//! SQLite-side [`zeroship_data_orm::storage::ChangeStream`] adapter — the
+//! SQLite-side [`zeroship_data_orm::cdc::ChangeStream`] adapter — the
 //! `preupdate_hook` / `commit_hook` / `rollback_hook` integration.
 //!
 //! This file installs the three hooks on the writer-actor's
@@ -121,13 +121,13 @@ use base64::Engine;
 use rusqlite::Connection;
 use rusqlite::hooks::{Action, PreUpdateCase};
 use rusqlite::types::ValueRef;
-use zeroship_core::change_event::{ChangeEvent, ChangeOp};
+use zeroship_data_orm::cdc::{ChangeEvent, ChangeOp};
 
 use crate::backend::sqlite::SqliteBackend;
-use crate::backend::sqlite::change_sink::{ChangeSink, DeliveryDisposition};
+use crate::cdc::{ChangeSink, DeliveryDisposition};
 use crate::backend::sqlite::session::SqliteSession;
 use zeroship_data_orm::error::DbError;
-use zeroship_data_orm::storage::ChangeStream;
+use zeroship_data_orm::cdc::ChangeStream;
 
 // ---------------------------------------------------------------------------
 // Dispatcher state — captured by the hook closures
@@ -191,7 +191,7 @@ pub(crate) struct PendingEvent {
 /// commit sequence. (It said "the monotonic per-dispatcher sequence number"
 /// while the actor had one connection; the second one made that reading wrong.)
 ///
-/// The `ChangeEvent` shape (`zeroship_core::change_event::ChangeEvent`) does NOT carry
+/// The `ChangeEvent` shape (`zeroship_data_orm::cdc::ChangeEvent`) does NOT carry
 /// `commit_id` today — surfacing it requires a broker-schema change
 /// (plan §10 Q-P2-E) deferred until a subscriber consumes it. Any such change
 /// has to pair it with the connection identity first, or subscribers inherit

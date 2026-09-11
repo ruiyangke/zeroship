@@ -108,7 +108,7 @@ Three ideas, and the whole design is the consequence of separating them:
 ### What it replaces
 
 Today an app id **is** the schema name, the role name, the encryption salt and the publication key -
-one string playing five parts. `crates/zeroship-data-orm/src/broker.rs` says so plainly:
+one string playing five parts. `crates/zeroship-data-orm/src/cdc/broker.rs` says so plainly:
 "`schema` is conflated with `app_id` (every app has its own schema named after `app_id`)."
 
 That conflation is why an app cannot have a database that outlives it, and why two apps cannot

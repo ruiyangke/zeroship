@@ -5,7 +5,7 @@
 //!
 //! * `plan_*` is the **eager** half. It runs synchronously, before any
 //!   `await`, because what it does cannot be moved past one: recording into
-//!   the active read-set ([`crate::read_set`]) for subscription narrowing,
+//!   the active read-set ([`crate::cdc::read_set`]) for subscription narrowing,
 //!   and applying the DB-3 actor fence. It returns a plan - a `BuiltQuery`, a
 //!   [`FindPlan`], a [`SearchPlan`] - and touches no connection.
 //!
@@ -90,7 +90,7 @@ pub async fn exec_mutation_then_read(
     coll: String,
     route: crate::tx_route::TxRoute,
     bq: compile::BuiltQuery,
-    op: zeroship_core::change_event::ChangeOp,
+    op: zeroship_data_orm::cdc::ChangeOp,
 ) -> Result<read_pipeline::ApplyResult, DbError> {
     let rows = exec_mutation_with_emit(bq, &route, &coll, op).await?;
     read_pipeline::apply(
@@ -181,13 +181,13 @@ pub async fn exec_distinct_read(
 /// predicate built without a schema is exactly the silent false negative
 /// `read_set` refuses to produce.
 fn record_read_set(binding: &DbBinding, collection: &str, filter: &Value) {
-    if !crate::read_set::is_active() {
+    if !crate::cdc::read_set::is_active() {
         return;
     }
     let Ok(schema) = crate::descriptor::collection_schema(binding, collection) else {
         return;
     };
-    crate::read_set::record_if_active(collection, filter, &schema);
+    crate::cdc::read_set::record_if_active(collection, filter, &schema);
 }
 
 // `current_sql_dialect()` WAS HERE and is deleted (2026-09-03). It was
@@ -508,7 +508,7 @@ pub async fn run_insert(
         bq,
         &route,
         &coll,
-        zeroship_core::change_event::ChangeOp::Insert,
+        zeroship_data_orm::cdc::ChangeOp::Insert,
     )
     .await?;
     read_pipeline::apply(
@@ -559,7 +559,7 @@ pub async fn run_insert_many(
         bq,
         &route,
         &coll,
-        zeroship_core::change_event::ChangeOp::Insert,
+        zeroship_data_orm::cdc::ChangeOp::Insert,
     )
     .await?;
     read_pipeline::apply(
@@ -685,7 +685,7 @@ pub async fn run_update_one(
         bq,
         &route,
         &coll,
-        zeroship_core::change_event::ChangeOp::Update,
+        zeroship_data_orm::cdc::ChangeOp::Update,
     )
     .await?;
     let result = read_pipeline::apply(
@@ -854,7 +854,7 @@ pub async fn run_update_many(
                     built,
                     frame.route(),
                     &coll,
-                    zeroship_core::change_event::ChangeOp::Update,
+                    zeroship_data_orm::cdc::ChangeOp::Update,
                 )
                 .await?
                 .len();
@@ -909,7 +909,7 @@ pub async fn run_update_many(
         bq,
         &route,
         &coll,
-        zeroship_core::change_event::ChangeOp::Update,
+        zeroship_data_orm::cdc::ChangeOp::Update,
     )
     .await?;
     // CAS path on updateMany: with `{ id, version: N }` the
@@ -1346,7 +1346,7 @@ pub async fn run_upsert(
         bq,
         &route,
         &coll,
-        zeroship_core::change_event::ChangeOp::Update,
+        zeroship_data_orm::cdc::ChangeOp::Update,
     )
     .await?;
     read_pipeline::apply(

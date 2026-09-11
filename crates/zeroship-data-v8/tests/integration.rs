@@ -79,7 +79,7 @@ use compio_postgres::{NoTls, Pool};
 use uuid::Uuid;
 use zeroship_data_orm::binding::DbBinding;
 use zeroship_data_sql::value::{Value, value};
-use zeroship_data_orm::backend::ChangeStream;
+use zeroship_data_orm::cdc::ChangeStream;
 
 const CDC_TEST_WORKER_ID: &str = "plugin-db-integration-worker";
 
@@ -3492,15 +3492,15 @@ async fn c1_broker_event_delivered_for_insert_via_emit() {
     // is in-process.
 
     // Clean slate.
-    zeroship_data_orm::broker::drain_current_thread_subscriptions();
+    zeroship_data_orm::cdc::broker::drain_current_thread_subscriptions();
     let app = crate::test_app_id!();
     let app = app.as_str();
-    let sub = zeroship_data_orm::broker::subscribe(app, "messages");
+    let sub = zeroship_data_orm::cdc::broker::subscribe(app, "messages");
 
-    zeroship_data_orm::broker::emit_local(
+    zeroship_data_orm::cdc::broker::emit_local(
         app,
         "messages",
-        zeroship_core::change_event::ChangeOp::Insert,
+        zeroship_data_orm::cdc::ChangeOp::Insert,
         Some("usr_02HXINTEGRATIONSUBPK".to_string()),
         vec!["title".into()],
         std::collections::HashMap::new(),
@@ -3508,15 +3508,15 @@ async fn c1_broker_event_delivered_for_insert_via_emit() {
 
     let msg = sub.pop().expect("expected an event");
     match msg {
-        zeroship_data_orm::broker::SubscriptionMessage::Change(ev) => {
+        zeroship_data_orm::cdc::broker::SubscriptionMessage::Change(ev) => {
             assert_eq!(ev.collection, "messages");
             assert_eq!(ev.pk.as_deref(), Some("usr_02HXINTEGRATIONSUBPK"));
-            assert_eq!(ev.op, zeroship_core::change_event::ChangeOp::Insert);
+            assert_eq!(ev.op, zeroship_data_orm::cdc::ChangeOp::Insert);
         }
         other => panic!("unexpected: {other:?}"),
     }
     sub.close();
-    zeroship_data_orm::broker::drain_current_thread_subscriptions();
+    zeroship_data_orm::cdc::broker::drain_current_thread_subscriptions();
 }
 
 // ---------------------------------------------------------------------------
@@ -3531,11 +3531,11 @@ async fn c1_broker_event_delivered_for_insert_via_emit() {
 // ---------------------------------------------------------------------------
 
 /// Helper: build a minimal ChangeEvent for the queue-mechanics tests.
-fn gapb_ev(app: &str, collection: &str, pk: i64) -> zeroship_core::change_event::ChangeEvent {
-    zeroship_core::change_event::ChangeEvent {
+fn gapb_ev(app: &str, collection: &str, pk: i64) -> zeroship_data_orm::cdc::ChangeEvent {
+    zeroship_data_orm::cdc::ChangeEvent {
         app_id: app.to_string(),
         collection: collection.to_string(),
-        op: zeroship_core::change_event::ChangeOp::Insert,
+        op: zeroship_data_orm::cdc::ChangeOp::Insert,
         pk: Some(pk.to_string()),
         changed_columns: vec![],
         new_tuple: std::collections::HashMap::new(),
@@ -3547,10 +3547,10 @@ fn gapb_ev(app: &str, collection: &str, pk: i64) -> zeroship_core::change_event:
 async fn gap_b_commit_drains_pending_emits_to_broker() {
     // Subscribe BEFORE pushing events, mid-"transaction" push two,
     // then drain — the broker should receive both.
-    zeroship_data_orm::broker::drain_current_thread_subscriptions();
+    zeroship_data_orm::cdc::broker::drain_current_thread_subscriptions();
     let app = crate::test_app_id!();
     let app = app.as_str();
-    let sub = zeroship_data_orm::broker::subscribe(app, "users");
+    let sub = zeroship_data_orm::cdc::broker::subscribe(app, "users");
 
     zeroship_data_v8::push_pending_emit_for_tests(gapb_ev(app, "users", 1));
     zeroship_data_v8::push_pending_emit_for_tests(gapb_ev(app, "users", 2));
@@ -3560,23 +3560,23 @@ async fn gap_b_commit_drains_pending_emits_to_broker() {
     zeroship_data_v8::drain_pending_emits_for_tests(app);
 
     let mut pks: Vec<String> = Vec::new();
-    while let Some(zeroship_data_orm::broker::SubscriptionMessage::Change(ev)) = sub.pop() {
+    while let Some(zeroship_data_orm::cdc::broker::SubscriptionMessage::Change(ev)) = sub.pop() {
         pks.push(ev.pk.as_deref().unwrap().to_string());
     }
     assert_eq!(pks, vec!["1".to_string(), "2".to_string()]);
 
     sub.close();
-    zeroship_data_orm::broker::drain_current_thread_subscriptions();
+    zeroship_data_orm::cdc::broker::drain_current_thread_subscriptions();
 }
 
 #[compio::test]
 async fn gap_b_rollback_clears_pending_emits_silently() {
     // Push events, then `clear` (rollback path). The broker must
     // never see them.
-    zeroship_data_orm::broker::drain_current_thread_subscriptions();
+    zeroship_data_orm::cdc::broker::drain_current_thread_subscriptions();
     let app = crate::test_app_id!();
     let app = app.as_str();
-    let sub = zeroship_data_orm::broker::subscribe(app, "users");
+    let sub = zeroship_data_orm::cdc::broker::subscribe(app, "users");
 
     zeroship_data_v8::push_pending_emit_for_tests(gapb_ev(app, "users", 42));
     zeroship_data_v8::push_pending_emit_for_tests(gapb_ev(app, "users", 43));
@@ -3588,7 +3588,7 @@ async fn gap_b_rollback_clears_pending_emits_silently() {
     );
 
     sub.close();
-    zeroship_data_orm::broker::drain_current_thread_subscriptions();
+    zeroship_data_orm::cdc::broker::drain_current_thread_subscriptions();
 }
 
 #[compio::test]
@@ -3633,8 +3633,8 @@ async fn gap_b_end_to_end_insert_inside_tx_defers_emit_until_commit() {
     .await
     .unwrap();
 
-    zeroship_data_orm::broker::drain_current_thread_subscriptions();
-    let sub = zeroship_data_orm::broker::subscribe(app, "users");
+    zeroship_data_orm::cdc::broker::drain_current_thread_subscriptions();
+    let sub = zeroship_data_orm::cdc::broker::subscribe(app, "users");
 
     // Open the production transaction protocol.
     zeroship_data_v8::begin_transaction_for_tests(app, &url).await;
@@ -3655,7 +3655,7 @@ async fn gap_b_end_to_end_insert_inside_tx_defers_emit_until_commit() {
         bq,
         app,
         "users",
-        zeroship_core::change_event::ChangeOp::Insert,
+        zeroship_data_orm::cdc::ChangeOp::Insert,
     )
     .await
     .expect("insert");
@@ -3674,14 +3674,14 @@ async fn gap_b_end_to_end_insert_inside_tx_defers_emit_until_commit() {
 
     let got = sub.pop();
     match got {
-        Some(zeroship_data_orm::broker::SubscriptionMessage::Change(ev)) => {
+        Some(zeroship_data_orm::cdc::broker::SubscriptionMessage::Change(ev)) => {
             assert_eq!(ev.collection, "users");
         }
         other => panic!("expected Change event after commit, got: {other:?}"),
     }
 
     sub.close();
-    zeroship_data_orm::broker::drain_current_thread_subscriptions();
+    zeroship_data_orm::cdc::broker::drain_current_thread_subscriptions();
     release_pg(pool).await;
 }
 
@@ -3734,8 +3734,8 @@ async fn p8a2_consumer_publishes_wal_event_to_broker() {
 
     // Clean broker; subscribe to the collection we're about to insert
     // into.
-    zeroship_data_orm::broker::drain_current_thread_subscriptions();
-    let sub = zeroship_data_orm::broker::subscribe(app, "events");
+    zeroship_data_orm::cdc::broker::drain_current_thread_subscriptions();
+    let sub = zeroship_data_orm::cdc::broker::subscribe(app, "events");
 
     // The production adapter provisions, spawns, and returns only
     // after Postgres accepts START_REPLICATION.
@@ -3764,7 +3764,7 @@ async fn p8a2_consumer_publishes_wal_event_to_broker() {
     .unwrap();
 
     // Wait for the event to propagate via WAL.
-    let mut got: Option<zeroship_data_orm::broker::SubscriptionMessage> = None;
+    let mut got: Option<zeroship_data_orm::cdc::broker::SubscriptionMessage> = None;
     for _ in 0..40 {
         if let Some(msg) = sub.pop() {
             got = Some(msg);
@@ -3775,10 +3775,10 @@ async fn p8a2_consumer_publishes_wal_event_to_broker() {
 
     let msg = got.expect("expected a WAL event within the polling window");
     match msg {
-        zeroship_data_orm::broker::SubscriptionMessage::Change(ev) => {
+        zeroship_data_orm::cdc::broker::SubscriptionMessage::Change(ev) => {
             assert_eq!(ev.app_id, app);
             assert_eq!(ev.collection, "events");
-            assert_eq!(ev.op, zeroship_core::change_event::ChangeOp::Insert);
+            assert_eq!(ev.op, zeroship_data_orm::cdc::ChangeOp::Insert);
             // pk should resolve to the autogenerated BIGSERIAL value.
             assert!(ev.pk.is_some(), "pk should be set, got {ev:?}");
         }
@@ -3787,7 +3787,7 @@ async fn p8a2_consumer_publishes_wal_event_to_broker() {
 
     // Stop the consumer + clean up.
     consumer.shutdown().await.unwrap();
-    zeroship_data_orm::broker::drain_current_thread_subscriptions();
+    zeroship_data_orm::cdc::broker::drain_current_thread_subscriptions();
     c1_cleanup(&pool, app).await;
     release_pg(pool).await;
 }
@@ -3980,8 +3980,8 @@ async fn p8a2_supervised_consumer_reconnects_after_kill() {
     .unwrap();
     c1_create_publication_for_tables(&pool, app, &["events"]).await;
 
-    zeroship_data_orm::broker::drain_current_thread_subscriptions();
-    let sub = zeroship_data_orm::broker::subscribe(app, "events");
+    zeroship_data_orm::cdc::broker::drain_current_thread_subscriptions();
+    let sub = zeroship_data_orm::cdc::broker::subscribe(app, "events");
 
     let backend = zeroship_data_orm::backend::BackendHandle::new(std::rc::Rc::new(
         zeroship_data_orm::backend::PostgresBackend::new(
@@ -4058,7 +4058,7 @@ async fn p8a2_supervised_consumer_reconnects_after_kill() {
     );
 
     consumer.shutdown().await.unwrap();
-    zeroship_data_orm::broker::drain_current_thread_subscriptions();
+    zeroship_data_orm::cdc::broker::drain_current_thread_subscriptions();
     c1_cleanup(&pool, app).await;
     release_pg(pool).await;
 }
@@ -4068,17 +4068,17 @@ async fn p8a2_supervised_consumer_reconnects_after_kill() {
 /// still produce a local-emit broker event.
 #[test]
 fn p8a2_per_app_emit_suppression_integration() {
-    use zeroship_core::change_event::ChangeOp;
-    use zeroship_data_orm::broker::{
+    use zeroship_data_orm::cdc::ChangeOp;
+    use zeroship_data_orm::cdc::broker::{
         SubscriptionMessage, emit_local, is_app_suppressed, suppress_app, unsuppress_app,
     };
 
-    zeroship_data_orm::broker::drain_current_thread_subscriptions();
+    zeroship_data_orm::cdc::broker::drain_current_thread_subscriptions();
     unsuppress_app("multi_a");
     unsuppress_app("multi_b");
 
-    let sub_a = zeroship_data_orm::broker::subscribe("multi_a", "messages");
-    let sub_b = zeroship_data_orm::broker::subscribe("multi_b", "messages");
+    let sub_a = zeroship_data_orm::cdc::broker::subscribe("multi_a", "messages");
+    let sub_b = zeroship_data_orm::cdc::broker::subscribe("multi_b", "messages");
 
     // Activate suppression for A only — mimics A's consumer running.
     suppress_app("multi_a");
@@ -4109,7 +4109,7 @@ fn p8a2_per_app_emit_suppression_integration() {
     }
 
     unsuppress_app("multi_a");
-    zeroship_data_orm::broker::drain_current_thread_subscriptions();
+    zeroship_data_orm::cdc::broker::drain_current_thread_subscriptions();
 }
 
 /// Walk a compio-postgres Error's `source()` chain into one string —
@@ -7757,9 +7757,9 @@ async fn drop_namespace_force_fires_subscription_app_dropped() {
 
     // Register a live subscription on this thread's broker so the
     // force-drain has something to close.
-    let sub = zeroship_data_orm::broker::subscribe(app, "widgets");
+    let sub = zeroship_data_orm::cdc::broker::subscribe(app, "widgets");
     assert_eq!(
-        zeroship_data_orm::broker::app_subscription_count(app),
+        zeroship_data_orm::cdc::broker::app_subscription_count(app),
         1,
         "subscription should be live before drop"
     );
@@ -7790,7 +7790,7 @@ async fn drop_namespace_force_fires_subscription_app_dropped() {
         "active subscriber must be closed under --force"
     );
     assert_eq!(
-        zeroship_data_orm::broker::app_subscription_count(app),
+        zeroship_data_orm::cdc::broker::app_subscription_count(app),
         0,
         "broker must be drained for the app after --force drop"
     );

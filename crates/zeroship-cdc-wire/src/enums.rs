@@ -77,7 +77,7 @@ macro_rules! wire_enum {
 wire_enum! {
     /// The kind of row change a [`crate::Change`] carries.
     ///
-    /// One-to-one with `zeroship_core::change_event::ChangeOp`, which is the
+    /// One-to-one with `zeroship_data_orm::cdc::ChangeOp`, which is the
     /// in-process broker's vocabulary, and pinned to it by
     /// `tests/typed_id_oracle.rs`. They are separate types because the wire may
     /// not depend on that crate and because a wire discriminant is a contract

@@ -65,15 +65,14 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]
-# The typed-id oracle. `tests/typed_id_oracle.rs` runs this crate's parser and
-# `zeroship_core::typed_id::parse_with_prefix` over the same corpus and requires
-# them to agree on every input, so the duplicated base62 decode cannot drift from
-# the platform's. It is also what pins the ChangeOp vocabulary to
-# `zeroship_core::change_event::ChangeOp`, which the broker event uses.
+# The typed-id oracle compares this crate's parser with the platform parser.
+# The operation oracle compares the wire vocabulary with the ORM's ChangeOp.
 #
 # DEV ONLY. See the block above: this edge exists so the shipped closure does not
 # need it.
 zeroship-core = { workspace = true }
+# The broker operation vocabulary belongs to the ORM; this is a test oracle.
+zeroship-data-orm = { workspace = true }
 
 [lints]
 workspace = true

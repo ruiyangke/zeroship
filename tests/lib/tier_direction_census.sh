@@ -327,13 +327,9 @@ tier_of_target() {
     v8_classes*|v8_bridge*|tx_scope*)                    echo ADAPTER ;;
     crud*|transaction*|exec*|backend_selection*|tx_route*|drop_namespace*) echo ENGINE ;;
     auth::bootstrap)                                     echo ENGINE ;;
-    # Same file-existence resolution as `backend::*` and `encryption*` above,
-    # and for the same reason: both left for `zeroship-data-core` on 2026-09-03
-    # and lib.rs now re-exports them (`pub use zeroship_data_orm::broker;`,
-    # `pub use zeroship_data_orm::read_set;`). Asserting ENGINE here would keep
-    # reporting `wal_consumer.rs -> crate::broker` as a CDC-to-ENGINE up-edge
-    # after cargo had already made it a plain dependency edge - which is the
-    # whole point of the move.
+    # The broker and read-set modules are private imports from the ORM's cdc
+    # module. Resolve their ownership by file existence so a dependency import
+    # is not mistaken for an internal edge back into the engine.
     broker*)
       if src_path_exists broker.rs; then echo ENGINE; else echo EXTERNAL; fi ;;
     read_set*)

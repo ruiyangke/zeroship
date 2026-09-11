@@ -53,7 +53,7 @@
 //! request end would break the primary streaming-download path.
 //!
 //! So the bound is a cap at acquisition — the mechanism plugin-db uses for
-//! `MAX_SUBSCRIPTIONS_PER_APP` (`crates/zeroship-data-orm/src/broker.rs:153`) and the
+//! `MAX_SUBSCRIPTIONS_PER_APP` (`crates/zeroship-data-orm/src/cdc/broker.rs`) and the
 //! runtime uses for `MAX_PENDING_FETCHES` (`crates/zeroship-runtime/src/core/state.rs:284`).
 
 use std::cell::RefCell;

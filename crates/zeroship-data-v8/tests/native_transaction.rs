@@ -1625,7 +1625,7 @@ fn savepoint_rollback_must_not_publish_its_change_event_at_outer_commit() {
 
     // Same thread as `block_on`'s runtime (`RT.with`), so this shares the
     // thread-local broker the dispatch path publishes into.
-    let sub = zeroship_data_orm::broker::subscribe(app, "notes");
+    let sub = zeroship_data_orm::cdc::broker::subscribe(app, "notes");
 
     let src = build_src(
         r#"
@@ -1661,7 +1661,7 @@ const _procedures = { savepointEmitLeak };
 
     let mut published: Vec<String> = Vec::new();
     while let Some(msg) = sub.pop() {
-        if let zeroship_data_orm::broker::SubscriptionMessage::Change(ev) = msg {
+        if let zeroship_data_orm::cdc::broker::SubscriptionMessage::Change(ev) = msg {
             if let Some(title) = ev.new_tuple.get("title") {
                 published.push(title.clone());
             }
