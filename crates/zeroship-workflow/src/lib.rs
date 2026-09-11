@@ -5,6 +5,7 @@
 
 pub mod advance;
 pub mod apply;
+pub mod calendar;
 pub mod backend;
 pub mod claim;
 pub mod client;
