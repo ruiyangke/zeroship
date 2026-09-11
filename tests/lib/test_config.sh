@@ -60,7 +60,6 @@ zs_test_config_get() {
 #   ZS_TEST_OVERLAY  path to the overlay that was read
 #   PG_HOST PG_PORT PG_USER PG_PASS PG_DB   parsed back out of the DSN
 #   ZS_TEST_PG_DSN   the server DSN as written (database = PG_DB)
-#   ZS_TEST_REDIS_URL
 #
 # The PG_* names are set for the harnesses' own database calls. They are also
 # still honoured as INPUTS by the provisioner, which is the override tier: set
@@ -89,7 +88,7 @@ zs_test_config_load() {
 
   eval "$assignments"
   export ZS_TEST_OVERLAY PG_HOST PG_PORT PG_USER PG_PASS PG_DB \
-    ZS_TEST_PG_DSN ZS_TEST_REDIS_URL
+    ZS_TEST_PG_DSN
 }
 
 # Refuse when the caller asked for one server and the overlay names another.

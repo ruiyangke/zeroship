@@ -10,10 +10,9 @@
 //! `zeroship_core::config::test_overlay`, which parses it with `FileConfig`
 //! under `deny_unknown_fields`.
 //!
-//! The scalar reader serves the harness's existing database settings. KV
-//! configuration is a TOML document inside the worker secret setting, so that
-//! field is decoded with the TOML parser. Platform code validates the complete
-//! overlay through its generated configuration contract.
+//! The scalar reader serves the harness's database settings. KV tests own
+//! their backend configuration and containers. Platform code validates the
+//! complete overlay through its generated configuration contract.
 //!
 //! WHAT IT DOES NOT DO. It does not invent a DSN when the file is missing. A
 //! suite that silently falls back to a compiled default when its configuration
@@ -73,8 +72,6 @@ pub struct Loaded {
     pub overlay: PathBuf,
     /// `ZS_TEST_PG_DSN` -- the server DSN exactly as written.
     pub dsn: String,
-    /// `ZS_TEST_REDIS_URL`, empty when the overlay names no `[worker] kv_config`.
-    pub redis_url: String,
     pub host: String,
     pub port: String,
     pub user: String,
@@ -87,18 +84,6 @@ pub fn overlay_path(root: &Path) -> PathBuf {
     root.join("deploy/ops/zeroship.test.toml")
 }
 
-fn redis_url(document: &str) -> Option<String> {
-    let document: toml::Value = toml::from_str(document).ok()?;
-    let config = document.get("worker")?.get("kv_config")?.as_str()?;
-    let config: toml::Value = toml::from_str(config).ok()?;
-    let endpoint = config
-        .get("redis")?
-        .get("topology")?
-        .get("endpoint")?
-        .as_str()?;
-    Some(format!("redis://{endpoint}"))
-}
-
 /// Read the overlay under `root` and split its `[control] database_url`.
 ///
 /// The error is the exact multi-line refusal the shell printed, so a caller
@@ -108,7 +93,7 @@ pub fn load(root: &Path) -> Result<Loaded, String> {
     let Ok(document) = std::fs::read_to_string(&overlay) else {
         return Err(format!(
             "FATAL: no test overlay at {}\n\
-             \x20      It names the PostgreSQL and Redis the suites dial, and is\n\
+             \x20      It names the PostgreSQL the suites dial, and is\n\
              \x20      written alongside them by:\n\
              \x20        tests/provision_test_backends.sh\n",
             overlay.display()
@@ -116,7 +101,6 @@ pub fn load(root: &Path) -> Result<Loaded, String> {
     };
 
     let dsn = get(&document, "control", "database_url").unwrap_or_default();
-    let redis_url = redis_url(&document).unwrap_or_default();
 
     if dsn.is_empty() {
         return Err(format!(
@@ -130,7 +114,6 @@ pub fn load(root: &Path) -> Result<Loaded, String> {
     Ok(Loaded {
         overlay,
         dsn,
-        redis_url,
         host: split.host,
         port: split.port,
         user: split.user,
@@ -365,36 +348,19 @@ fn same_host(a: &str, b: &str) -> bool {
 mod tests {
     use super::*;
 
-    const DOC: &str = "[control]\ndatabase_url = \"postgres://postgres:zeroship@127.0.0.1:5440/zeroship\"\n[worker]\nkv_url = \"redis://127.0.0.1:6390\"\n";
-
-    #[test]
-    fn reads_the_kv_deployment_document() {
-        let document = r#"[worker]
-kv_config = '''backend = "redis"
-[redis.topology]
-mode = "standalone"
-endpoint = "localhost:6379"
-'''
-"#;
-        assert_eq!(
-            redis_url(document).as_deref(),
-            Some("redis://localhost:6379")
-        );
-    }
+    const DOC: &str = "[control]\ndatabase_url = \"postgres://postgres:zeroship@127.0.0.1:5440/zeroship\"\n";
 
     #[test]
     fn reads_a_key_from_the_named_section() {
         assert_eq!(
-            get(DOC, "worker", "kv_url").as_deref(),
-            Some("redis://127.0.0.1:6390")
+            get(DOC, "control", "database_url").as_deref(),
+            Some("postgres://postgres:zeroship@127.0.0.1:5440/zeroship")
         );
     }
 
     #[test]
     fn a_key_in_another_section_is_not_found() {
-        // The control section also has no `kv_url`; without the section test a
-        // reader would happily return the worker's.
-        assert_eq!(get(DOC, "control", "kv_url"), None);
+        assert_eq!(get(DOC, "worker", "database_url"), None);
     }
 
     #[test]

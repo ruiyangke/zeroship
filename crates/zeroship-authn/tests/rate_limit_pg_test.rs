@@ -40,7 +40,7 @@ async fn connect_pg() -> Client {
                  has ruled on. Provision the server and re-run:\n\
                  \x20 {command}\n\
                  \n\
-                 That brings up deploy/compose's `postgres` and `redis` services,\n\
+                 That brings up deploy/compose's `postgres` service and the SMTP sink,\n\
                  waits for both to be healthy, and writes the overlay naming them.\n\
                  Point this somewhere else with PG_TEST_URL.\n\
                  \n\

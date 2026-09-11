@@ -214,18 +214,17 @@ Then open `http://localhost:8000/apps/db-todos/`.
 
 ## Tests
 
-Provision the backends first. PostgreSQL, Redis and a plaintext SMTP sink are
-required, not optional: the suites that need them fail when nothing answers, and
-they name the address they tried and this command.
+The shared PostgreSQL and SMTP suites use the provisioner:
 
 ```bash
-tests/provision_test_backends.sh   # deploy/compose's postgres (:5440) + redis (:6390)
-                                   # + a mailpit sink (:1025, inbox on :8025)
+tests/provision_test_backends.sh
 ```
 
-That is the whole setup. `PG_TEST_URL`, `REDIS_TEST_URL` and
-`AUTH_TEST_SMTP_SINK` default to exactly those addresses, so nothing needs
-exporting; set them only to point a run somewhere else.
+It writes the PostgreSQL test overlay and starts the mailer test's SMTP sink.
+Use `PG_TEST_URL` or `AUTH_TEST_SMTP_SINK` to target your own servers.
+KV and Redis driver tests provision their required servers with Testcontainers;
+they need Docker and do not read shared Redis URLs. See the
+[KV test commands](../../crates/zeroship-kv/README.md).
 
 ```bash
 cargo test -p zeroship-core

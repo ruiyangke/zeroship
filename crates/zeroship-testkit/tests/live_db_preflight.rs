@@ -155,7 +155,7 @@ fn server() -> admin::Server {
              Write the overlay and bring the server up:\n\
              \x20 tests/provision_test_backends.sh\n\
              \n\
-             That starts deploy/compose's `postgres` and `redis` services, waits\n\
+             That starts deploy/compose's `postgres` service and the SMTP sink, waits\n\
              for both to be healthy, and writes the overlay naming them. Use\n\
              `--check` instead if the servers are already running and you only\n\
              need them described.\n\

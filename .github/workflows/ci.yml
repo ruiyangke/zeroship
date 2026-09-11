@@ -1205,14 +1205,6 @@ jobs:
   # "PostgreSQL never came up on localhost:<port>". Loud, but from a different
   # mechanism than the one the harness advertises.
   #
-  # `redis:` is a real service and not a stub because the overlay names Redis
-  # too (`worker.kv_config`), and the provisioner probes it. Neither of these two
-  # suites reads `ZS_TEST_REDIS_URL` or `test_kv_url()` today - the sole call
-  # site is crates/worker/src/handler.rs:3497, in a crate neither gate builds -
-  # so this is here to keep the generated topology TRUE rather than to serve a
-  # test. An overlay naming a Redis that does not exist is a false statement in
-  # the one document the whole workspace reads for its test coordinates.
-  #
   # POSTGRES_DB: zeroship for the same reason, and it is the same kind of
   # claim - truth in the overlay, not a test that needs it. compose sets it, so
   # the overlay's DSN names `zeroship`; without it the DSN names a database that
@@ -1235,15 +1227,6 @@ jobs:
           - 5440:5432
         options: >-
           --health-cmd "pg_isready -U postgres"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 20
-      redis:
-        image: redis:7-alpine
-        ports:
-          - 6390:6379
-        options: >-
-          --health-cmd "redis-cli ping"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 20
@@ -1333,15 +1316,6 @@ jobs:
           - 5440:5432
         options: >-
           --health-cmd "pg_isready -U postgres"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 20
-      redis:
-        image: redis:7-alpine
-        ports:
-          - 6390:6379
-        options: >-
-          --health-cmd "redis-cli ping"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 20
@@ -1472,25 +1446,7 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 20
-      # NOT used by any test here - the worker's live tests build their kernel
-      # with `kv_url: None`. It is here because the overlay writer below waits
-      # on EVERY backend before describing any of them (`--check` skips the
-      # `docker compose up`, and nothing else), so a job missing one cannot get
-      # a file written and the suite then refuses for want of it.
-      redis:
-        image: redis:7-alpine
-        ports:
-          - 6390:6379
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 20
-      # And the SMTP sink, for exactly the reason stated above rather than for a
-      # worker test: the provisioner describes the workspace's test backends as
-      # a SET, and a job that adopts the set adopts all of it. Splitting it into
-      # per-job subsets would be a second, hand-maintained statement of which
-      # tests need what.
+      # The shared provisioner also checks the SMTP sink used by mailer tests.
       smtp:
         image: axllent/mailpit:latest
         ports:
