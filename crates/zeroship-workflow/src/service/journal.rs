@@ -111,8 +111,10 @@ pub(crate) async fn append(
                 tx,
                 app,
                 run,
-                &id,
-                generation,
+                super::payloads::RunGeneration {
+                    id: &id,
+                    generation,
+                },
                 super::PayloadSlot::Step {
                     ordinal: step.ordinal,
                 },
@@ -309,12 +311,16 @@ pub(crate) async fn resolve(
                         super::payloads::inherit_child_output(
                             tx,
                             app,
-                            step.child_run_id.as_deref().ok_or_else(|| {
-                                WorkflowServiceError::Internal("missing workflow child".into())
-                            })?,
-                            child.integer("generation")?,
-                            &id,
-                            generation,
+                            super::payloads::RunGeneration {
+                                id: step.child_run_id.as_deref().ok_or_else(|| {
+                                    WorkflowServiceError::Internal("missing workflow child".into())
+                                })?,
+                                generation: child.integer("generation")?,
+                            },
+                            super::payloads::RunGeneration {
+                                id: &id,
+                                generation,
+                            },
                             step.ordinal,
                             now,
                         )
