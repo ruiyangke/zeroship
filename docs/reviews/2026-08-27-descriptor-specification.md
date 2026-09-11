@@ -1,8 +1,10 @@
 # The runtime descriptor specification: every schema fact the data plane reads
 
 Date: 2026-08-27. Tree: `.worktrees/dbbind-impl`, HEAD `cca4e3553`.
-Status: enumeration + specification. No code changed; this file is the only
-addition.
+Status: historical survey with current assignment and column-role corrections.
+The remaining sketches describe the reviewed tree, not the current wire format.
+Use [Column assignments](../reference/db.md#column-assignments) and the
+[ORM architecture](../architecture/data-orm.md) for the implemented contract.
 
 > **Four cited files have since been removed, by the very work this document
 > specified (checked 2026-08-29).** Each line below names one and says so, which
@@ -83,9 +85,9 @@ provisioning facts rather than schema facts. They are handled in section 2.B.
 Two facts are **bucket C** (unclear, with a named question): SQLite physical
 column ORDER (needed by CDC), and the naming-alias resolution in `unmask`.
 
-Two descriptor fields that exist today have **no Rust consumer at all** -
-`options.softDelete` and `options.versioning` (section 1.6). The spec must decide
-whether they become live or are deleted.
+The historical gaps in soft deletion and versioning are resolved through declared
+column roles; section 1.6 records the current behavior and the separate
+`strictness` limitation.
 
 ### One measured correction to the design document
 
@@ -138,7 +140,7 @@ descriptor-derived data; what changes is the plumbing, not the content.
 | 9 | `crud/unmask.rs:157` | `lookup_mask_meta` | `def.mask.kind`, `def.mask.classification` | `kind == "none"` -> refuse with `unmask_column_not_masked`; otherwise the classification drives the authorization check (`unmask.rs:166-187`, `:305-323`) |
 | 10 | `crud/unmask.rs:216` | `lookup_encryption_meta` | `def.encrypted.{mode,keyId,wraps}` | selects AAD shape, key, and the deserialisation of the recovered plaintext (`unmask.rs:228-252`) |
 | 11 | `crud/mask_drift.rs:127` | `run_drift_check_for_column` | `def.mask.kind` + `def.encrypted` | recomputes the expected mask from the parent and diffs it against the stored sibling (`mask_drift.rs:130-216`) |
-| 12 | `crud/system_fields_pass.rs:126` | `prefix_for_collection` | `schema["id"]["idPrefix"]` | the typed_id prefix for minted PKs; falls back to a name-derivation heuristic (`system_fields_pass.rs:82-113`) |
+| 12 | `crates/zeroship-data-orm/src/crud/assignment_pass.rs` | `prefix_for_collection` | the assigned field's `idPrefix` | uses the declared prefix or derives one from the collection; validates either result |
 | 13 | `crud/introspect_schema.rs:263` | `sqlite_fallback_schema` | whole field map | **this is the SQLite arm's entire schema source** - the "introspected" schema on SQLite *is* the declared one |
 | 14 | `backend/postgres.rs:571` | `PostgresBackend::vector_search` | whole field map | `schema_hint` into `build_vector_search`; drives `validate_read_identifier` and the masked-aware projection `[delegated]` |
 | 15 | `backend/postgres.rs:703` | `PostgresBackend::spatial_near` | whole field map | same, into `build_spatial_near` `[delegated]` |
@@ -187,14 +189,14 @@ These are not separate cache reads; they are what the `schema_hint` is used FOR.
 | # | file:line | Function | Fact | What it does |
 |---|---|---|---|---|
 | 23 | `zeroship-schema/src/query.rs:921-926` | `schema_declares_readable_field` | is `name` a declared key that is not `_meta`/`_indexes` | membership test |
-| 24 | `query.rs:928-939` | `validate_read_identifier` | 23 OR `SYSTEM_FIELD_NAMES` membership | refuses `select`/`orderBy` on an undeclared field. **When the hint is `None` the check silently passes** (`:933`) |
+| 24 | `crates/zeroship-data-sql/src/compile.rs` | `validate_read_identifier` | declared readable fields | validates identifiers against the required descriptor; no implicit field-name allowance |
 | 25 | `query.rs:3368-3380` | `column_is_masked` | `def.mask.kind != "none"` (missing kind defaults `"full"`) | the single predicate behind every sibling substitution |
 | 26 | `query.rs:3326-3343` | `project_read_field` | 25 | emits `"<col>_masked" AS "<col>"` when masked, bare column otherwise. **The sibling name is derived by `format!("{field}_masked")` at `:3336`** |
-| 27 | `query.rs:3345-3362` | `implicit_read_projection_parts` | the declared key SET | replaces `SELECT *` with an explicit allowlist: all 7 `SYSTEM_FIELD_NAMES` (`:3352`) then every non-metadata declared key. **`None` hint -> bare `*`** (`:3312-3316`) |
+| 27 | `crates/zeroship-data-sql/src/compile.rs` | `implicit_read_projection_parts` | declared readable fields | builds an explicit projection from descriptor fields and storage metadata |
 | 28 | `query.rs:3394-3400` | `aggregate_read_ident` | 25 | sibling name again, `format!("{field}_masked")` at `:3396` |
 | 29 | `query.rs:3407-3422` | `push_group_by_field` | 25 | sibling name again, `format!("{field}_masked")` at `:3415` |
 | 30 | `query.rs:3258-3269` | `build_masked_aware_select_expr_for_table_alias` | 27 | the search-path (`t` alias) form; `None` -> `"t".*` |
-| 31 | `query.rs:723-731` | `SYSTEM_FIELD_NAMES` const | the 7 platform system fields | hardcoded, not read from the schema |
+| 31 | `crates/zeroship-data-orm/src/assignments.rs` | `AssignmentPlan::from_schema` | per-field assignment metadata | replaces the implicit field list; operation roles resolve through `crates/zeroship-data-sql/src/lifecycle.rs` |
 | 32 | `query.rs:738-762` | `RESERVED_NAMES` const | `_masked` suffix, `_` prefix, `__zs_`/`__zeroship_`/`sqlite_` prefixes, 6 classification names | field-name reservation at declaration AND filter time |
 
 ### 1.4 Facts derived inside the CRUD passes
@@ -240,36 +242,27 @@ The one place the name should be MINTED rather than read is the DDL emitter:
 `:2167` (`mask_sentinel_for_field`) `[delegated]`. Under v2 that function stays,
 and its output is what the fold writes into `storage`.
 
-### 1.6 Descriptor fields with NO Rust consumer
+### 1.6 Collection options and declared column roles
 
-`RuntimeSchemaDescriptorV1` carries `options: { soft_delete, versioning,
-strictness }` (`crates/zeroship-migrate-core/src/render/gen_types.rs:136-140`).
+The migration renderer resolves enabled lifecycle options against the declared
+generators. It emits `softDelete` and `concurrency` on the selected fields and
+rejects ambiguous or missing generators. See
+[per-collection options](../reference/db.md#per-collection-options).
 
-- **`softDelete`**: read by `installSchema`
-  (`sdks/bootstrap/src/install-schema.ts:1275`, `:1298`). The Rust data plane
-  never sees it. `should_filter_soft_deleted`
-  (`crud/system_fields_pass.rs:547-551`) takes ONE argument, `include_deleted`,
-  and returns `!include_deleted` - so the `deleted_at IS NULL` predicate is
-  appended to **every** find/count/aggregate/distinct
-  (`zeroship-schema/src/query.rs:3129` via `compose_where_with_soft_delete`
-  `:3215-3224`) regardless of the collection's declared option.
-- **`versioning`**: same. `"version" = "version" + 1` is emitted
-  unconditionally by the UPDATE builder (`query.rs:3618`, `:3690`) and
-  `"version" = COALESCE("version", 0) + 1` by the upsert builder (`:5867`),
-  suppressed only when the caller's own doc supplies a `version` (`:5828`,
-  `:7924-7941`).
-- **`strictness`**: no Rust consumer. It reaches the native register path as
-  `schema._meta.strictness` (`install-schema.ts:1263`, `:1328-1329`) and
-  `is_schema_metadata_key` then *skips* `_meta` everywhere the schema is walked
-  (`query.rs:676-678`). The only mention in plugin-db is a comment
-  (`crud/mask_backfill.rs:24`).
-
-This is safe today only because the confined charter injects **all seven** system
-columns into **every** creator table, mandatorily
-(`sdks/vite-plugin/src/gen-types/confined-system-shape.generated.ts:25-29`,
-`:127-140`). `deleted_at` and `version` always exist, so an unconditional
-predicate never references a missing column. The options are behavioural knobs
-the runtime ignores, not column-presence flags.
+- **Soft deletion:** `soft_delete_column` in
+  [SQL lifecycle resolution](../../crates/zeroship-data-sql/src/lifecycle.rs)
+  locates the marker. `should_filter_soft_deleted` in
+  [assignment preparation](../../crates/zeroship-data-orm/src/crud/assignment_pass.rs)
+  still returns `!include_deleted`: it expresses caller intent, while the SQL
+  compiler separately resolves whether the collection has a deletion marker.
+  No field named `deleted_at` is assumed.
+- **Versioning:** revision predicates use the declared concurrency column.
+  [Assignment resolution](../../crates/zeroship-data-orm/src/assignments.rs)
+  supplies write expressions from the generator, preserving the declared
+  increment step. No field named `version` is assumed.
+- **Strictness:** the descriptor preserves the deploy-time validation policy;
+  deployment enforcement is not wired yet. This is separate from the ORM's
+  write-input and identifier validation.
 
 ### 1.7 Live-database reads in the data plane that are NOT the schema cache
 
@@ -369,15 +362,12 @@ which I read directly.
    metres to degrees. The string `geometry` does not appear in
    `backend/postgres.rs` at all.
 
-3. **No primary-key discovery exists on either backend.** `id` is assumed:
-   `backend/mod.rs:848-850` and `backend/postgres.rs:855-857` ("PG routes through
-   `RETURNING id`"), `query.rs:3252` / `:3352` (`id` first in the projection),
-   `backend/sqlite/dialect.rs:186-188` (`SELECT last_insert_rowid()`),
-   `backend/sqlite/cdc.rs:627-631` (`new_tuple.get("id")` with a rowid fallback).
-   The confined charter pins `["id"]` as the primary key for every creator table
-   (`confined-system-shape.generated.ts:25-29`), so the assumption is currently
-   sound - but it is an assumption held in five places rather than a fact read
-   from one.
+3. **Primary-key identity now comes from the descriptor.**
+   `primary_key` in
+   [SQL lifecycle resolution](../../crates/zeroship-data-sql/src/lifecycle.rs)
+   selects the field marked `primaryKey`. Row operations requiring a scalar key
+   reject missing or ambiguous declarations. The former assumption that the key
+   must be named `id` no longer describes the ORM.
 
 4. **No column-existence probe precedes any emitted SQL.**
    `ensure_vector_index` (`backend/postgres.rs:493`) and `ensure_spatial_index`
@@ -424,13 +414,13 @@ in the proposed shape (section 3) are given in parentheses.
 | 38 (geoPoint) | `fields[c].type == "geoPoint"` |
 | 20d (plain bytes) | `fields[c].type == "bytes"` + absence of `encrypted` |
 | 23, 24, 27, 39 (the declared key set / read allowlist) | `fields` keys + **new** `fields[c].readable` (section 3.3) |
-| 31 (system fields) | **new** `collections[n].systemFields` (section 3.4) - today a hardcoded const at `query.rs:723-731` |
+| 31 (generated columns) | per-field `assign` metadata and declared operation roles; no separate field list |
 | 18 (collection name set) | `collections` keys (already present) |
 | 40 (AAD physical column) | **new** `fields[c].storage.aadColumn` (section 3.5) |
 | 41, 42 (vec0 vtable + rowid join) | **new** `fields[c].storage.auxiliary` |
 | 43 (index names) | `indexes[].name` (already present) |
 | 44 (SQLite file/alias) | not a schema fact; stays a runtime convention |
-| section 1.6 (`softDelete`, `versioning`, `strictness`) | already present; section 4 says what to do about the missing consumers |
+| section 1.6 (`softDelete`, `versioning`, `strictness`) | lifecycle options resolve to column roles; deployment strictness enforcement remains unwired |
 
 Two facts in bucket A deserve a note because they are *currently* unrecoverable
 from introspection and therefore prove the descriptor is the richer source, not
@@ -444,10 +434,10 @@ merely an equivalent one:
   (`crud/write_pipeline.rs:242`) and on SQLite `runtime_schema_for` returns the
   DECLARED cache. The seam is one dialect check away from a hard
   `DbError::internal`.
-- **`idPrefix`** (fact 12). Read only from the declared cache
-  (`system_fields_pass.rs:126-132`); introspection never emits it.
-  `register_model/mod.rs:162-166` names this explicitly as one of "the
-  declared-ONLY hints that introspection cannot recover".
+- **`idPrefix`** (fact 12). This is a declaration on the field assigned by
+  `typedId`, consumed by `prefix_for_collection` in
+  [assignment preparation](../../crates/zeroship-data-orm/src/crud/assignment_pass.rs).
+  A database catalog cannot infer the intended prefix.
 
 ### Bucket B - genuinely requires reading the live database
 
@@ -581,15 +571,8 @@ TypeScript mirror at `sdks/bootstrap/src/install-schema.ts:139-152`):
   // SDK surface uses; each entry says where it physically lives.
   "fields": { "<logical>": { /* 3.3 */ } },
 
-  // NEW. The 7 platform system columns, as INJECTED for this collection,
-  // rather than the hardcoded const at query.rs:723-731. They are
-  // mandatory today (confined-system-shape.generated.ts:128-139), so this
-  // is a fixed list today - but reading it from the descriptor is what
-  // lets the charter ever change without a Rust edit, and it is what makes
-  // `implicit_read_projection_parts` (query.rs:3345-3362) stop emitting a
-  // column name it has not checked exists.
-  "systemFields": ["id", "created_at", "updated_at", "created_by",
-                   "updated_by", "version", "deleted_at"],
+  // Generated columns belong in fields with their assignments and roles.
+  // There is no separate list of implicitly privileged column names.
 
   // NEW. Every PHYSICAL column of the table, in physical (cid / attnum)
   // order, including mask siblings and any other platform-emitted column.
@@ -762,15 +745,15 @@ column name into the AEAD tag. Consequences the specification must respect:
 | `context.rs:642-664` | `is_model_registered` / `mark_model_registered` / `registered_models` go away - the gate they serve (`introspect_schema.rs:118-120`) no longer exists |
 | `register_model/mod.rs` (238 lines) | the PG arm becomes a no-op with nothing to cache; the SQLite arm's `attach_app_file` must move into the data plane (the module already names this as a known defect at `:22-35`) |
 | `zeroship-schema/src/query.rs:3326-3343`, `:3394-3400`, `:3407-3422` | `format!("{field}_masked")` -> `storage.valueColumn` / `storage.rawColumn` |
-| `zeroship-schema/src/query.rs:3345-3362` | `SYSTEM_FIELD_NAMES` const -> `collections[n].systemFields`; the `None`-hint fallback to `*` (`:3312-3316`) is DELETED - with a mandatory descriptor there is no cold-cache state |
+| `crates/zeroship-data-sql/src/compile.rs` | implemented: `implicit_read_projection_parts` and `build_returning_expr` project declared readable fields from the required descriptor |
 | `zeroship-schema/src/query.rs:928-939` | the `if schema_hint.is_some()` guard (`:933`) disappears; a missing collection becomes an error, not a pass |
 | `crud/mask_pass.rs:150`, `:469`; `crud/encryption_pass.rs:295`; `crud/mask_drift.rs:135` | same sibling-name replacement |
 | `zeroship-schema/src/diff.rs:670`, `:714-718` | the `ends_with("_masked")` / `strip_suffix("_masked")` sentinel round-trip: the SENTINEL SIDE stays (the migration engine still needs it for drift), but the data plane stops consuming it |
 | `backend/postgres.rs:454-490`, `:609-650` | both `ensure_*_available` probes deleted; `vector_search`/`spatial_near` map SQLSTATE instead |
 | `backend/sqlite/cdc.rs:652-675` | `fetch_column_names` reads `physicalColumns` - CONDITIONAL on C-1 |
-| `crud/system_fields_pass.rs:547-551` | `should_filter_soft_deleted` must take the collection and consult `options.softDelete`, or the field must be deleted from the descriptor. It cannot stay as-is: shipping a descriptor field the runtime ignores is how the two-sources problem started |
-| `zeroship-schema/src/query.rs:3618`, `:5867` | same decision for `options.versioning` |
-| `sdks/bootstrap/src/install-schema.ts:139-152`, `:1263-1340` | the v1 validator becomes a v2 validator; `assertRuntimeDescriptorV1` (`:154-215`) grows arms for `dialect`, `schemaEpoch`, `systemFields`, `physicalColumns`, `storage` |
+| `crates/zeroship-data-sql/src/lifecycle.rs` | implemented: `soft_delete_column` selects the declared marker; the caller's `includeDeleted` flag only controls visibility |
+| `crates/zeroship-data-orm/src/assignments.rs` | implemented: write generators supply counter expressions, and the declared concurrency column selects revision checks |
+| `sdks/bootstrap/src/install-schema.ts` | historical proposal: extend descriptor validation to cover dialect, epoch, physical columns and storage metadata |
 | `crates/zeroship-migrate-core/src/render/gen_types.rs:121-243` | `RuntimeSchemaDescriptorV1` -> `V2`; `render_runtime_descriptor_v1` gains the storage/order/dialect/epoch projections |
 
 ### 4.2 A flagged hole in the emitter that the spec makes worse
@@ -780,10 +763,11 @@ falls back to `unwrap_or_default()` for a collection missing from the runtime
 metadata map, "so a table created only inside an `Op::Dialectal` leg emits its
 FIELDS but loses its runtime options and plain indexes."
 
-Under v1 that silently loses two booleans the runtime ignores anyway (section 1.6).
-Under v2 the same fallback would lose `systemFields`, `physicalColumns` and
-`requiresExtensions` - facts the runtime would then be REQUIRED to have. The hole
-must be closed (refuse, rather than default) in the same change.
+The historical fallback would also discard metadata needed by the proposed
+runtime. The durable requirement is that dialectal tables retain assignments,
+column roles and storage metadata when folded into a descriptor. Section 1.6
+records the current lifecycle consumers; this historical example does not
+establish a current emitter defect.
 
 ### 4.3 Semantic changes the flip forces
 
@@ -960,11 +944,12 @@ I found none that are load-bearing, and two that are worth naming as residual:
   walk, which means anything the SDK stuffs there (today: `strictness`) is
   invisible to Rust by construction. If v2 wants `strictness` live, it must not
   arrive via `_meta`.
-- **The typed-id prefix FALLBACK** (`system_fields_pass.rs:82-113`,
-  `derive_prefix_from_collection_name`). With a mandatory descriptor, `idPrefix`
-  is always present and the heuristic is dead code. It should be deleted, not
-  left as an unreachable fallback - `register_model/mod.rs:37-51` documents what
-  happens when unreachable schema code is left in the tree.
+- **Typed-id prefix derivation remains intentional.** A required descriptor does
+  not make `idPrefix` mandatory. `prefix_for_collection` in
+  [assignment preparation](../../crates/zeroship-data-orm/src/crud/assignment_pass.rs)
+  reads the assigned field's prefix or derives one from the collection name.
+  Both results pass the same validation. The earlier recommendation to remove
+  this fallback was based on an incorrect assumption.
 
 ---
 
@@ -1086,8 +1071,8 @@ not, the dev tier would be visibly broken.
 4. **section 4.3**: does deterministic-mode equality filtering get built (route to
    `storage.rawColumn`, encrypt the operand) or does the mode get deleted? It is
    currently a type-level brand with no runtime.
-5. **section 1.6**: do `options.softDelete` / `options.versioning` / `options.strictness`
-   acquire Rust consumers, or leave the descriptor?
+5. **section 1.6 — lifecycle behavior resolved:** soft deletion and versioning
+   use declared column roles. Deployment strictness enforcement remains unwired.
 6. **B-1**: delete the `pg_extension` probes in favour of SQLSTATE mapping, or
    carve capability probes out of the "no live introspection" rule explicitly?
 7. **section 4.4**: does the descriptor store reuse `LiveMetadataCache`
@@ -1107,16 +1092,10 @@ not, the dev tier would be visibly broken.
 `crud/read_pipeline.rs` (601), `encryption/aad.rs` (202),
 `register_model/mod.rs` (238), `crates/zeroship-migrate-core/src/render/gen_types.rs:1-460`.
 
-**Read in the relevant regions:** `context.rs:640-840`; `crud/mod.rs:180-500`,
-`:670-760`, `:1790-1920`, `:2578-2727`; `crud/write_pipeline.rs:80-420`;
-`crud/unmask.rs:100-400`; `crud/mask_drift.rs:80-220`;
-`crud/system_fields_pass.rs:80-200`; `zeroship-schema/src/query.rs:640-780`,
-`:3220-3440`, `:5477-5520`; `zeroship-schema/src/diff.rs:206-270`, `:597-750`;
-`backend/postgres.rs:490-740`, `:930-990`; `backend/sqlite/mod.rs:1838-1950`;
-`backend/sqlite/vector.rs:95-210`; `v8_classes/transaction.rs:40-95`;
-`v8_classes/db.rs:430-520`; `broker.rs:1855-1915`;
-`sdks/db/src/types.ts:768-1100`; `sdks/bootstrap/src/install-schema.ts:1-220`;
-`sdks/vite-plugin/src/gen-types/confined-system-shape.generated.ts`.
+**Read in the relevant regions:** the original review covered CRUD preparation,
+generated assignments, SQL compilation, schema introspection, backend search,
+V8 transaction handling, CDC delivery and SDK schema installation. These are
+historical coverage boundaries, not a list of current source locations.
 
 **Covered by delegated exhaustive reads** (marked `[delegated]` above):
 `backend/postgres.rs` (1948 lines, read in full) and `backend/mod.rs` (2422

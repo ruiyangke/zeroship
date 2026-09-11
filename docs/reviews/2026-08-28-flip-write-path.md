@@ -1,7 +1,9 @@
 # The masking flip's WRITE path: a specification
 
-Status: design only. No code changed. Written against the tree at
-`.worktrees/dbbind-impl`, HEAD `0e785d5fc`.
+Status: historical design review, written against `.worktrees/dbbind-impl`,
+HEAD `0e785d5fc`. The projection and descriptor notes below have been corrected
+for the implemented ORM. Other design sketches retain their original context;
+use the [DB reference](../reference/db.md) for the current contract.
 
 Input: the BLOCKING note in
 `docs/proposals/2026-08-26-sc6-ceiling-read-contract.md:336-406`, which records
@@ -240,31 +242,16 @@ the decoded row, as the last stage of `read_pipeline::apply`.**
 
 New in `crates/zeroship-schema/src/query.rs`, beside `read_column_for`:
 
-```rust
-/// Every column name a decoded row may carry across the JS boundary.
-///
-/// The seven system fields, every declared field's LOGICAL name, and the
-/// closed set of synthetic result columns the read builders emit. A
-/// physical column that is not one of those - a mask sibling, a raw
-/// column, an auxiliary shadow-table key - is not on this surface and is
-/// removed before the row is serialised.
-pub fn read_surface_columns(schema_hint: &Value) -> BTreeSet<String>
-```
+`read_surface_columns` in the
+[SQL compiler](../../crates/zeroship-data-sql/src/compile.rs) admits declared
+readable fields and the known synthetic result columns in
+`SYNTHETIC_RESULT_COLUMNS`. Generated columns enter through their field
+declarations, just like other columns. Internal storage columns do not gain
+visibility from their names.
 
-Membership, exactly:
-
-1. the seven names in `SYSTEM_FIELD_NAMES` (`query.rs:723-731`);
-2. every key of `schema_hint` that is not `is_schema_metadata_key`
-   (`query.rs:676-678`, i.e. not `_meta` / `_indexes`);
-3. a **closed literal set** of synthetic result columns: `_distance`
-   (`query.rs:5007`), `_distance_m` (`:5074`), `__created` (`:6020`).
-
-Point 3 is a closed list, **not** "anything starting with `_`". That is
-deliberate: `scope_schema`'s `Only` arm currently retains `key.starts_with('_')`
-(`read_pipeline.rs:116`), and section 4.2 gives the raw column a `_`-prefixed
-name, so a blanket underscore allowance would re-admit exactly the column this
-whole exercise removes. If a new synthetic column is added, it is added here, and
-forgetting to means the column is dropped - a visible failure, not a leak.
+The synthetic set is explicit: accepting every underscore-prefixed result would
+also admit internal storage names. A new computed result must declare its alias
+in that set.
 
 #### Where it is applied
 
@@ -310,34 +297,24 @@ already aliases the physical column back to the logical name
 (`query.rs:4901-4906`, `format!("{read} AS {col}")`), so its single result key is
 already on the `Declared` surface.
 
-#### Why not an explicit `RETURNING` column list
+#### Returning declared fields
 
-Three reasons, in order of weight.
+The earlier argument against an explicit `RETURNING` list assumed generated
+columns could be absent from the descriptor. That premise no longer holds.
+Assigned columns are declared fields, and there is no extra field-name set to
+union into a projection.
 
-1. **It does not close the hole it appears to close.** The rows also feed
-   `emit_for_rows` (`crates/zeroship-data-v8/src/exec.rs`), which builds
-   the broker tuple from `m.keys()` at `:520-524`. On a deployed Postgres app the
-   authoritative event source is not that function at all - it is the WAL consumer
-   (`emit_for_rows` returns early when the consumer is running, `:501-505`), and
-   `wal_consumer::tuple_to_map` (`:635`) zips **every physical column** out of
-   pgoutput with no schema in sight. An explicit `RETURNING` list makes the SQL
-   narrower and leaves the replication stream exactly as wide. A row-surface
-   predicate can be applied to both.
-2. **The write path must return system columns the descriptor also declares, and
-   "project only declared fields" is therefore ambiguous.** The brief flags this
-   and it is real: `id` is minted SDK-side and read back out of the `RETURNING`
-   row (`crud/system_fields_pass.rs:32`), `version` and `updated_at` are
-   auto-bumped in SQL (`query.rs:5920-5925`), and `deleted_at` is what
-   soft-delete writes. All seven are in `SYSTEM_FIELD_NAMES` and none is
-   necessarily a descriptor key. The surface therefore unions the two sets rather
-   than choosing between them - which a projection list would also have to do, at
-   twelve sites, with twelve chances to disagree.
-3. **`BuiltQuery` cannot carry the answer.** It is `{ sql, params }`
-   (`query.rs:76-80`) and there is no constructor - all 19 sites hand-roll the
-   struct literal (`:2942, 3150, 3495, 3589, 4009, 4162, 4230, 4256, 4298, 4449,
-   4487, 4529, 4561, 4845, 4920, 5015, 5084, 5944, 6027`). A projection list
-   threaded through it is 19 edits and a permanent obligation on every future
-   builder.
+`build_returning_expr` in the
+[SQL compiler](../../crates/zeroship-data-sql/src/compile.rs) uses
+`implicit_read_projection_parts` to return declared readable fields through
+their storage mappings.
+[Assignment preparation](../../crates/zeroship-data-orm/src/crud/assignment_pass.rs)
+and [SQL column roles](../../crates/zeroship-data-sql/src/lifecycle.rs) determine
+write behavior from metadata, independently of the column's name.
+
+A SQL projection alone does not constrain a replication stream. CDC event
+projection remains a separate responsibility; narrowing `RETURNING` is not
+proof that a subscriber sees only permitted fields.
 
 #### The count-only verbs and the broker
 
@@ -420,30 +397,12 @@ What this buys, at zero call sites:
 Every one of those already calls `validate_field_name`, today, before the flip.
 The inbound half needs **no new parameter, no new check, and no new call site.**
 
-**On the `&Value` versus `Option<&Value>` question the brief asks.** The read path
-made absence unrepresentable by taking `&Value`
-(`validate_read_identifier:936`, rationale at `:928-935`). The same move on the
-write side means threading `schema_hint` into `build_where` (`:5240`),
-`build_where_with_dialect` (`:5244`), `build_where_with_dialect_inner` (`:5253`)
-and `build_field_condition_with_dialect` (`:5323`), whose 15 production call sites
-are `query.rs:3117, 3486, 3992, 4221, 4247, 4282, 4426, 4475, 4512, 4549, 4646,
-4909, 5003, 5070` plus `backend/sqlite/mod.rs:1822`. Reaching those requires
-adding `schema_hint` to about twelve write-builder signatures that do not take one
-(`build_update_one_with_system_fields:3974`, `build_update_many_with_system_fields:4203`,
-`build_delete_many:4235`, `build_delete_one_with_dialect:4269`, the four
-soft-delete/restore builders at `:4410 :4459 :4496 :4533`,
-`build_conflict_probe_with_dialect:2882`, `build_count_with_soft_delete:3473`,
-`build_upsert_with_dialect:5823`) plus their delegating wrappers.
-
-I verified that every plugin-db caller of those builders already holds the
-descriptor entry - each is inside a `collection_schema(...).and_then(|schema| ...)`
-closure or has resolved it earlier (`crud/mod.rs:785, 1220, 1456, 1510, 1551,
-1596, 1639, 1695, 1768, 1838, 1927`). **So the change is mechanical and would
-work.** It is roughly 16 signatures and 18 call sites, and it is not materially
-smaller than the naive fix. I am not specifying it, because naming the column
-`__zs_raw__ssn` achieves a strictly stronger property for zero edits: a fence can
-be added to a surface someone forgets to fence, whereas a name no validator
-accepts is refused by surfaces nobody has written yet.
+**The descriptor is now required by the write compiler.** Mutation builders and
+filter compilation in the
+[SQL compiler](../../crates/zeroship-data-sql/src/compile.rs) take
+`schema_hint: &Value`. They resolve fields and storage through that descriptor.
+Missing schema metadata does not permit an unrestricted projection. The earlier
+signature-change proposal is implemented, rather than an outstanding task.
 
 **`ReservedName::Suffix("_raw")` is still added** (`query.rs:766`), for exactly the
 reason the query-by-plaintext review gives for `_lookup`
@@ -943,9 +902,9 @@ this specification is not flip work. It is work the flip made visible.
 Each of these fails before the change and passes after. None is a mutation of a
 test's own fixture.
 
-1. `insert` on a mask-only field returns a document whose key set is exactly
-   `SYSTEM_FIELD_NAMES` union the declared fields. Asserted on the key set, not on
-   the absence of one name, so a differently-named raw column cannot pass it.
+1. `insert` on a mask-only field returns exactly the declared readable fields.
+   Assert the complete key set so an internal column cannot escape under an
+   unexpected name.
 2. The same, for all seven row-returning write verbs, table-driven from the list
    in section 2.1, with an arm count that fails if a verb is added and not listed.
 3. A filter, `select`, `orderBy`, `$group.by`, `$match`, conflict-probe key and
