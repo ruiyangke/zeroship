@@ -26,7 +26,7 @@ export function validateEncryptedFieldsInFilter(
       continue;
     }
     const def = schema[key];
-    if (!def || def.encrypted === undefined) {
+    if (!def || def.encrypted !== true) {
       continue;
     }
     throw Object.assign(

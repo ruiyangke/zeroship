@@ -2733,27 +2733,12 @@ fn a_near_inside_a_transaction_sees_the_row_that_transaction_inserted() {
     })
 }
 
-/// Helper: hand this isolate a synthetic root key for `key_id`, for the
-/// duration of a test. Same shape as the PG-side `with_root_key` in
-/// `tests/integration.rs`.
-///
-/// This REPLACES a `set_var("ZEROSHIP_COLUMN_KEY_<KEYID>", ...)` guard.
-/// The env var was the only channel that reached the `SqliteBackend`
-/// these tests never construct themselves - the one `initialize_backend`
-/// builds behind a `dispatch_zs` V8 call - and mutating it is
-/// process-global, racy with any concurrent `getenv`, and `unsafe`. The
-/// isolate context is per-thread and typed, so none of the three apply,
-/// and `SqliteBackend::{new, open}` read it wherever they are called
-/// from.
-///
-/// Install it BEFORE the backend is constructed: a backend captures the
-/// source at construction, so a key supplied afterwards will not reach
-/// it.
-///
-/// The returned guard withdraws the key on drop; keep it alive for the
-/// test body.
-fn with_root_key(key_id: &str, root_hex: &str) -> crate::live_tests::host::SuppliedRootKeysGuard {
-    crate::live_tests::host::supply_root_keys_for_tests(&[(key_id, root_hex)])
+/// Supply a project key for the apps explicitly named by this fixture.
+fn with_project_key(
+    app_ids: &[&str],
+    hex: &str,
+) -> crate::live_tests::host::SuppliedProjectKeysGuard {
+    crate::live_tests::host::supply_project_key_for_tests(app_ids, hex)
 }
 
 /// Bind a raw byte slice as a SQLite BLOB literal using the `X'...'`
@@ -2793,15 +2778,14 @@ fn insert_many_encrypts_ciphertext_before_sqlite_storage() {
             use zeroship_data_orm::encryption;
             use zeroship_data_sql::compile::{SqlDialect, build_insert_many_with_dialect};
 
-            let key_id = "c1_insert_many";
-            let _keys = with_root_key("c1_insert_many", &"d".repeat(64));
+            let _keys = with_project_key(&["app_demo"], &"d".repeat(64));
             let app_id = "app_demo";
             let collection = "bulk_people";
             let schema = zeroship_data_sql::value!({
                 "name": { "type": "string" },
                 "ssn": {
                     "type": "string",
-                    "encrypted": { "keyId": key_id, "wraps": "string" },
+                    "encrypted": true,
                     "mask": { "kind": "last4", "classification": "spi" }
                 }
             });
@@ -2896,7 +2880,7 @@ fn insert_many_encrypts_ciphertext_before_sqlite_storage() {
 
             let key = backend
                 .key_store()
-                .resolve(app_id, key_id)
+                .resolve(app_id)
                 .await
                 .expect("resolve key");
             for row in &typed.rows {
@@ -2944,7 +2928,7 @@ fn insert_many_encrypts_ciphertext_before_sqlite_storage() {
                 let plaintext = zeroship_data_orm::encryption::aead::decrypt(
                     &key,
                     &stored_blob,
-                    &encryption::canonical_aad(collection, "ssn", id.as_bytes()),
+                    &encryption::canonical_aad(app_id, collection, "ssn", id.as_bytes()),
                 )
                 .expect("decrypt stored blob");
                 assert!(
@@ -2962,8 +2946,8 @@ fn insert_many_encrypts_ciphertext_before_sqlite_storage() {
 fn encrypted_column_round_trip_sqlite_randomised() {
     crate::live_tests::host::in_test(|| {
         use zeroship_data_orm::encryption;
-        let key_id = "p5_sqlite_rt_rand";
-        let _keys = with_root_key("p5_sqlite_rt_rand", &"a".repeat(64));
+
+        let _keys = with_project_key(&["app1"], &"a".repeat(64));
         run(async {
             let (backend, _dir) = fresh_backend();
             backend
@@ -2983,11 +2967,11 @@ fn encrypted_column_round_trip_sqlite_randomised() {
 
             let key = backend
                 .key_store()
-                .resolve("app1", key_id)
+                .resolve("app1")
                 .await
                 .expect("resolve_key");
             let plaintext = b"123-45-6789";
-            let aad = encryption::canonical_aad("enc_notes", "ssn", b"row_a");
+            let aad = encryption::canonical_aad("app1", "enc_notes", "ssn", b"row_a");
             let ct = zeroship_data_orm::encryption::aead::encrypt(&key, plaintext, &aad)
                 .expect("encrypt");
 
@@ -3043,8 +3027,8 @@ fn encrypted_column_round_trip_sqlite_randomised() {
 fn randomised_ciphertext_row_swap_rejected_sqlite() {
     crate::live_tests::host::in_test(|| {
         use zeroship_data_orm::encryption;
-        let key_id = "p5_sqlite_row_swap";
-        let _keys = with_root_key("p5_sqlite_row_swap", &"d".repeat(64));
+
+        let _keys = with_project_key(&["app1"], &"d".repeat(64));
         run(async {
             let (backend, _dir) = fresh_backend();
             backend
@@ -3062,18 +3046,18 @@ fn randomised_ciphertext_row_swap_rejected_sqlite() {
                 .await
                 .expect("CREATE TABLE enc_notes");
 
-            let key = backend.key_store().resolve("app1", key_id).await.unwrap();
+            let key = backend.key_store().resolve("app1").await.unwrap();
             // Insert row A and row B, each with its OWN AAD (binds row_pk).
             let ct_a = zeroship_data_orm::encryption::aead::encrypt(
                 &key,
                 b"sensitive-A",
-                &encryption::canonical_aad("enc_notes", "ssn", b"row_a"),
+                &encryption::canonical_aad("app1", "enc_notes", "ssn", b"row_a"),
             )
             .unwrap();
             let ct_b = zeroship_data_orm::encryption::aead::encrypt(
                 &key,
                 b"sensitive-B",
-                &encryption::canonical_aad("enc_notes", "ssn", b"row_b"),
+                &encryption::canonical_aad("app1", "enc_notes", "ssn", b"row_b"),
             )
             .unwrap();
             for (id, ct) in [("row_a", &ct_a), ("row_b", &ct_b)] {
@@ -3109,7 +3093,7 @@ fn randomised_ciphertext_row_swap_rejected_sqlite() {
                 .step_by(2)
                 .map(|i| u8::from_str_radix(&hex_str[i..i + 2], 16).unwrap())
                 .collect();
-            let aad_b = encryption::canonical_aad("enc_notes", "ssn", b"row_b");
+            let aad_b = encryption::canonical_aad("app1", "enc_notes", "ssn", b"row_b");
             let err = zeroship_data_orm::encryption::aead::decrypt(&key, &raw, &aad_b)
                 .expect_err("row-swap must fail AAD verification");
             match err {
@@ -3125,32 +3109,27 @@ fn randomised_ciphertext_row_swap_rejected_sqlite() {
 /// **Cross-backend equivalence (SQLite <-> SQLite via shared
 /// env-var key).** Encrypt plaintext on backend_a; copy the ciphertext
 /// bytes; decrypt on backend_b (different temp file) configured with
-/// the same `ZEROSHIP_COLUMN_KEY_DEFAULT`. Proves HKDF derivation is
-/// deterministic across instances — the encryption module is the
-/// shared cross-backend surface, so two SQLite backends with the same
-/// root key produce the same derived AEAD key (and thus the same
-/// decryption result).
+/// the same host-supplied project key.
 #[test]
 fn cross_backend_ciphertext_decrypt_via_shared_key() {
     crate::live_tests::host::in_test(|| {
         use zeroship_data_orm::encryption;
-        let key_id = "p5_sqlite_cross";
-        let _keys = with_root_key("p5_sqlite_cross", &"e".repeat(64));
+
+        let _keys = with_project_key(&["app_shared"], &"e".repeat(64));
         run(async {
             // Two separate backends rooted at separate temp dirs.
             let (backend_a, _dir_a) = fresh_backend();
             let (backend_b, _dir_b) = fresh_backend();
 
-            // Use the SAME app_id so HKDF salt matches; the env-var key
-            // sourcing is process-global, so the root key is identical.
+            // Both backends receive the same explicit app-to-project binding.
             let app_id = "app_shared";
-            let key_a = backend_a.key_store().resolve(app_id, key_id).await.unwrap();
-            let key_b = backend_b.key_store().resolve(app_id, key_id).await.unwrap();
-            // The derived halves must match — same root + same app_id.
+            let key_a = backend_a.key_store().resolve(app_id).await.unwrap();
+            let key_b = backend_b.key_store().resolve(app_id).await.unwrap();
+            // Both handles must resolve the supplied project key.
             assert_eq!(key_a.k_enc, key_b.k_enc);
 
             let plaintext = b"cross-instance-payload";
-            let aad = encryption::canonical_aad("enc_notes", "ssn", b"row_a");
+            let aad = encryption::canonical_aad(app_id, "enc_notes", "ssn", b"row_a");
             let ct = zeroship_data_orm::encryption::aead::encrypt(&key_a, plaintext, &aad)
                 .expect("encrypt on A");
 
@@ -3178,7 +3157,7 @@ fn encrypted_column_e2e_crud_round_trip_sqlite() {
         };
         use zeroship_data_sql::compile::{SqlDialect, build_insert_with_dialect};
 
-        let _keys = with_root_key("p5_e2e_crud", &"c".repeat(64));
+        let _keys = with_project_key(&["app_demo"], &"c".repeat(64));
         run(async {
             let (backend, _dir) = fresh_backend();
             backend
@@ -3187,7 +3166,7 @@ fn encrypted_column_e2e_crud_round_trip_sqlite() {
                 .expect("ensure_app_schema");
             // PRIMARY KEY `id TEXT` + encrypted `ssn BLOB` — same shape the
             // CRUD path's `build_create_table_with_fks` emits for an
-            // `t.encrypted({ wraps: "string" })` field, except we skip the
+            // `t.encrypted()` field, except we skip the
             // sentinel-comment metadata because the introspector isn't on
             // the e2e read path here.
             backend
@@ -3207,10 +3186,7 @@ fn encrypted_column_e2e_crud_round_trip_sqlite() {
             let schema = zeroship_data_sql::value!({
                 "ssn": {
                     "type": "string",
-                    "encrypted": {
-                        "keyId": "p5_e2e_crud",
-                        "wraps": "string",
-                    },
+                    "encrypted": true,
                 },
             });
 
@@ -3615,7 +3591,7 @@ fn aliased_select_skips_kind_none_sqlite() {
         let schema = zeroship_data_sql::value!({
             "ssn": {
                 "type": "string",
-                "encrypted": { "keyId": "default", "wraps": "string" },
+                "encrypted": true,
                 "mask": { "kind": "none", "classification": "spi" }
             },
             "name": { "type": "string" }
@@ -4370,15 +4346,12 @@ fn cold_unmask_open_comes_from_ensure_backend_not_the_fixture() {
 #[test]
 fn cold_unmask_with_auto_actor_attaches_before_read() {
     crate::live_tests::host::in_test(|| {
-        let _keys = with_root_key("p55_pr4_auto", &"a".repeat(64));
+        let _keys = with_project_key(&["app_unmask_auto"], &"a".repeat(64));
         let schema = zeroship_data_sql::value!({
             "id": { "type": "string" },
             "ssn": {
                 "type": "string",
-                "encrypted": {
-                    "keyId": "p55_pr4_auto",
-                    "wraps": "string",
-                },
+                "encrypted": true,
                 "mask": { "kind": "last4", "classification": "spi" },
             },
         });
@@ -4470,7 +4443,7 @@ fn cold_unmask_with_auto_actor_attaches_before_read() {
                 schema.clone(),
                 zeroship_data_sql::value!({}),
             );
-            let _cold_keys = with_root_key("p55_pr4_auto", &"a".repeat(64));
+            let _cold_keys = with_project_key(&["app_unmask_auto"], &"a".repeat(64));
 
             // Dispatch unmask with `kind: "auto"` actor — must succeed.
             let args = unmask::UnmaskFieldArgs {
@@ -4534,15 +4507,12 @@ fn cold_unmask_with_auto_actor_attaches_before_read() {
 #[test]
 fn unmask_with_user_actor_returns_forbidden_audit_logged() {
     crate::live_tests::host::in_test(|| {
-        let _keys = with_root_key("p55_pr4_user", &"b".repeat(64));
+        let _keys = with_project_key(&["app_unmask_user"], &"b".repeat(64));
         let schema = zeroship_data_sql::value!({
             "id": { "type": "string" },
             "ssn": {
                 "type": "string",
-                "encrypted": {
-                    "keyId": "p55_pr4_user",
-                    "wraps": "string",
-                },
+                "encrypted": true,
                 "mask": { "kind": "last4", "classification": "spi" },
             },
         });
@@ -4799,15 +4769,12 @@ async fn policy_setup(
 #[test]
 fn unmask_with_user_role_in_policy_returns_plaintext() {
     crate::live_tests::host::in_test(|| {
-        let _keys = with_root_key("p55_pr5_grant", &"c".repeat(64));
+        let _keys = with_project_key(&["app_unmask_policy_grant"], &"c".repeat(64));
         let schema = zeroship_data_sql::value!({
             "id": { "type": "string" },
             "email": {
                 "type": "string",
-                "encrypted": {
-                    "keyId": "p55_pr5_grant",
-                    "wraps": "string",
-                },
+                "encrypted": true,
                 "mask": { "kind": "email", "classification": "pii" },
             },
         });

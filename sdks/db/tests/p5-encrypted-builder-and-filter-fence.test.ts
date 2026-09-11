@@ -31,24 +31,20 @@ function makeMockNative() {
 }
 
 
-test("encrypted metadata has no mode and preserves the wrapped type", () => {
-  assert.deepEqual(t.encrypted().toFieldDef().encrypted, { keyId: "default", wraps: "string" });
-  assert.equal(t.encrypted({ wraps: t.number() }).toFieldDef().encrypted?.wraps, "number");
-  assert.equal(t.encrypted({ wraps: t.bytes() }).toFieldDef().encrypted?.wraps, "bytes");
-});
-
-test("removed mode options are refused", () => {
-  for (const mode of ["randomised", "deterministic", "asymmetric"]) {
-    assert.throws(() => t.encrypted({ mode } as never), { code: "ENCRYPTED_INVALID_OPTIONS" });
+test("encrypted metadata uses the logical field type", () => {
+  for (const [of, type] of [[t.string(), "string"], [t.number(), "number"], [t.bytes(), "bytes"]] as const) {
+    assert.deepEqual(t.encrypted({ of }).toFieldDef(), {
+      type, encrypted: true, mask: { kind: "full", classification: "pii" },
+    });
   }
+  assert.deepEqual(t.encrypted().toFieldDef(), t.encrypted({ of: t.string() }).toFieldDef());
 });
 
-test("encrypted fields reject unique constraints and unsupported wrapped types", () => {
+test("encrypted fields reject unique constraints and unsupported plaintext types", () => {
   assert.throws(() => t.encrypted().unique(), { code: "UNIQUE_ENCRYPTED_UNSUPPORTED" });
-  for (const wraps of [t.boolean(), t.object({ a: t.string() }), t.ref("users")]) {
-    assert.throws(() => t.encrypted({ wraps } as never), { code: "ENCRYPTED_WRAPS_UNSUPPORTED" });
+  for (const inner of [t.boolean(), t.object({ a: t.string() }), t.ref("users")]) {
+    assert.throws(() => t.encrypted({ of: inner } as never), { code: "ENCRYPTED_TYPE_UNSUPPORTED" });
   }
-  assert.throws(() => t.encrypted({ keyId: "has spaces" }), { code: "ENCRYPTED_INVALID_KEY_ID" });
 });
 
 function dbWithEncrypted() {

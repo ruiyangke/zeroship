@@ -506,7 +506,7 @@ pub fn string_enum_values(def: &serde_json::Value) -> Option<Vec<String>> {
     }
 }
 
-/// Render the `COMMENT ON COLUMN ... 'zero-migrate:enc:<keyId>:<wraps>'`
+/// Render the `COMMENT ON COLUMN ... 'zero-migrate:enc:<wraps>'`
 /// statements for every `t.encrypted(...)` column in `schema` (PG only). The
 /// comment BODY is built by the shared codec
 /// ([`crate::mask_codec::build_encryption_sentinel`]) so it is byte-identical to
@@ -711,7 +711,7 @@ pub fn build_mask_sentinel_comments(
     out
 }
 
-/// The bare `zero-migrate:enc:<keyId>:<wraps>` sentinel BODY for a field's
+/// The bare `zero-migrate:enc:<wraps>` sentinel BODY for a field's
 /// `t.encrypted({...})` declaration (no `/* */` wrapper, no comment statement),
 /// or `None` for a plain column. The SINGLE source of truth for the `zero-migrate:enc` wire
 /// grammar: `encryption_sentinel_for_field` wraps it in `/* */` for the inline
@@ -720,19 +720,16 @@ pub fn build_mask_sentinel_comments(
 /// parser is [`crate::mask_codec::parse_encryption_sentinel`].
 #[must_use]
 pub fn encryption_sentinel_body_for_field(def: &serde_json::Value) -> Option<String> {
-    let enc = def.get("encrypted").and_then(|v| v.as_object())?;
-    let key_id = enc
-        .get("keyId")
-        .and_then(|v| v.as_str())
-        .unwrap_or("default");
-    let wraps = match enc.get("wraps").and_then(serde_json::Value::as_str).unwrap_or("string") {
+    if def.get("encrypted").and_then(serde_json::Value::as_bool) != Some(true) {
+        return None;
+    }
+    let wraps = match def.get("type").and_then(serde_json::Value::as_str)? {
         "string" => crate::mask_meta::WrappedType::String,
         "number" => crate::mask_meta::WrappedType::Number,
         "bytes" => crate::mask_meta::WrappedType::Bytes,
         _ => return None,
     };
     Some(crate::mask_codec::build_encryption_sentinel(&crate::mask_meta::EncryptionMeta {
-        key_id: key_id.to_string(),
         wraps,
     }))
 }

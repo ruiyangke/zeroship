@@ -180,6 +180,7 @@ The V8 host shares a thread context across its dispatches. Schema and policy
 entries are keyed by the complete app/deploy/schema binding.
 
 Physical value codecs live with SQL compilation in `zeroship-data-sql`.
-`Catalog` and `Search` are the runtime service contracts. Raw fixture setup uses
-`fixtures::DatabaseFixture`, available only to test-helper builds; it is not a
-backend requirement. Application code uses the native driver/session contract.
+`Catalog` and `Search` are the runtime service contracts. Database contracts
+live in `src/live_tests/`; their host owns the runtime, connections and ORM
+context through teardown. Raw setup and snapshot fixtures compile under
+`#[cfg(test)]`. Application code uses the native driver/session contract.

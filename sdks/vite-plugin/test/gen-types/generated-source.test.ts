@@ -101,6 +101,40 @@ export default {
 };
 `;
 
+test("encrypted migration fields carry their logical type into generated SDK builders", async () => {
+  const migration = `
+import { table, t } from "@zeroship/migrate";
+export default {
+  name: "create_secrets",
+  schema() {
+    table("secrets").create({ columns: {
+      message: t.encrypted({ of: t.text() }),
+      amount: t.encrypted({ of: t.int() }),
+      payload: t.encrypted({ of: t.bytes() }),
+    }});
+  },
+};`;
+  const fx = await makeFixture({ "migrations/20260711000000_create_secrets.ts": migration });
+  const outDir = join(fx.root, "generated/zeroship");
+  try {
+    await genTypesFromMigrations(join(fx.root, "migrations"), outDir, {});
+    const descriptor = JSON.parse(await fs.readFile(join(outDir, RUNTIME_DESCRIPTOR_FILE), "utf8"));
+    for (const [field, type] of [["message", "string"], ["amount", "number"], ["payload", "bytes"]]) {
+      const def = descriptor.collections.secrets.fields[field];
+      assert.equal(def.type, type);
+      assert.equal(def.encrypted, true);
+      assert.equal(def.filterable, false);
+      assert.equal(def.sortable, false);
+    }
+    const source = await fs.readFile(join(outDir, ENV_DB_FILE), "utf8");
+    assert.match(source, /message: t\.encrypted\(\)/);
+    assert.match(source, /amount: t\.encrypted\(\{ of: t\.number\(\) \}\)/);
+    assert.match(source, /payload: t\.encrypted\(\{ of: t\.bytes\(\) \}\)/);
+  } finally {
+    await fx.cleanup();
+  }
+});
+
 describe("generated schema source (record -> genArtifacts)", () => {
   test("records a migration → valid v2 descriptor + all 7 system fields, no subprocess", async () => {
     const fx = await makeFixture({ "migrations/20260711000000_create_hits.ts": CREATE_HITS });

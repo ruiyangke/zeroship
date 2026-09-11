@@ -31,7 +31,7 @@
 //!
 //! * The descriptor travels inside the `.zship` the worker executes. It is
 //!   creator-authored, and the worker is the process that runs creator code.
-//! * The sentinels (`zero-migrate:mask:kind=…`, `zero-migrate:enc:<keyId>:<wraps>`) and the
+//! * The sentinels (`zero-migrate:mask:kind=…`, `zero-migrate:enc:<wraps>`) and the
 //!   `__zs_raw__<col>` sibling are written by the MIGRATION SERVICE, which does
 //!   not execute creator code, under a migration the diff classifier already
 //!   grades `ChangeKind::MaskRemove` / `ChangeClass::Destructive`.
@@ -142,14 +142,9 @@ pub(crate) fn descriptor_declares_mask(def: &Value) -> bool {
     zeroship_data_sql::descriptors::effective_mask(def).is_some()
 }
 
-/// Does the descriptor's field definition declare encryption?
-///
-/// Presence of the block is the whole test, matching
-/// [`crate::protection::encryption_pass::encrypt_row_on_write_with_sidechannel`],
-/// which encrypts whenever `def["encrypted"]` is an object. There is no
-/// `mode: "none"` opt-out to mirror.
+/// Whether the descriptor enables encryption, matching the write pipeline.
 pub(crate) fn descriptor_declares_encryption(def: &Value) -> bool {
-    def.get("encrypted").is_some_and(Value::is_object)
+    zeroship_data_sql::descriptors::is_encrypted(def)
 }
 
 /// Resolve (and memoise) this binding's protection floor.
@@ -277,7 +272,6 @@ mod tests {
     fn encrypted_column() -> ColumnInfo {
         ColumnInfo {
             encryption: Some(EncryptionMeta {
-                key_id: "k1".to_string(),
                 wraps: WrappedType::String,
             }),
             ..Default::default()
@@ -364,17 +358,15 @@ mod tests {
     }
 
     #[test]
-    fn encryption_is_declared_by_the_block_alone() {
+    fn encryption_is_declared_by_the_boolean_flag() {
         assert!(!descriptor_declares_encryption(
             &value!({ "type": "string" })
         ));
         assert!(descriptor_declares_encryption(
-            &value!({ "type": "string", "encrypted": {  } })
-        ));
-        // A non-object `encrypted` is not a declaration; the encryption pass
-        // reads it with `as_object()` and skips the column.
-        assert!(!descriptor_declares_encryption(
             &value!({ "type": "string", "encrypted": true })
+        ));
+        assert!(!descriptor_declares_encryption(
+            &value!({ "type": "string", "encrypted": false })
         ));
     }
 

@@ -94,7 +94,7 @@ fn goodies_desc() -> CollectionDescriptor {
             FieldDescriptor {
                 name: "secret".into(),
                 ty: "bytes".into(),
-                encrypted: Some(serde_json::json!({ "keyId": "k1" })),
+                encrypted: Some(true),
                 ..Default::default()
             },
         ],
@@ -768,7 +768,7 @@ fn spelling_gap_desc() -> CollectionDescriptor {
             FieldDescriptor {
                 name: "secret".into(),
                 ty: "bytes".into(),
-                encrypted: Some(serde_json::json!({ "keyId": "k1" })),
+                encrypted: Some(true),
                 ..Default::default()
             },
             // `double precision` (desired) vs `real` (live SQLite).
@@ -1116,7 +1116,7 @@ async fn golden_sqlite_create_table_and_index() {
             FieldDescriptor {
                 name: "secret".into(),
                 ty: "bytes".into(),
-                encrypted: Some(serde_json::json!({ "keyId": "k1" })),
+                encrypted: Some(true),
                 ..Default::default()
             },
             FieldDescriptor {
@@ -1161,7 +1161,7 @@ async fn golden_sqlite_create_table_and_index() {
     let accounts_mig = golden_find(&migs, "create_table_accounts");
     assert_eq!(
         accounts_mig.up,
-        "CREATE TABLE \"accounts\" (\"__zs_raw__secret\" BLOB /* zero-migrate:enc:k1:string */, \"__zs_raw__ssn\" TEXT, \"created_at\" TEXT NOT NULL, \"created_by\" TEXT, \"deleted_at\" TEXT, \"id\" TEXT PRIMARY KEY NOT NULL, \"owner\" TEXT, \"secret\" TEXT /* zero-migrate:mask:kind=full,classification=pii */, \"ssn\" TEXT /* zero-migrate:mask:kind=last4,classification=pii */, \"title\" TEXT NOT NULL, \"updated_at\" TEXT NOT NULL, \"updated_by\" TEXT, \"version\" INTEGER NOT NULL, CONSTRAINT \"accounts_owner_fkey\" FOREIGN KEY (owner) REFERENCES users(id));\nCREATE INDEX IF NOT EXISTS \"accounts_created_by_idx\" ON \"accounts\" (\"created_by\");\nCREATE INDEX IF NOT EXISTS \"accounts_deleted_at_idx\" ON \"accounts\" (\"deleted_at\");\nCREATE INDEX IF NOT EXISTS \"accounts_updated_at_idx\" ON \"accounts\" (\"updated_at\")",
+        "CREATE TABLE \"accounts\" (\"__zs_raw__secret\" BLOB /* zero-migrate:enc:string */, \"__zs_raw__ssn\" TEXT, \"created_at\" TEXT NOT NULL, \"created_by\" TEXT, \"deleted_at\" TEXT, \"id\" TEXT PRIMARY KEY NOT NULL, \"owner\" TEXT, \"secret\" TEXT /* zero-migrate:mask:kind=full,classification=pii */, \"ssn\" TEXT /* zero-migrate:mask:kind=last4,classification=pii */, \"title\" TEXT NOT NULL, \"updated_at\" TEXT NOT NULL, \"updated_by\" TEXT, \"version\" INTEGER NOT NULL, CONSTRAINT \"accounts_owner_fkey\" FOREIGN KEY (owner) REFERENCES users(id));\nCREATE INDEX IF NOT EXISTS \"accounts_created_by_idx\" ON \"accounts\" (\"created_by\");\nCREATE INDEX IF NOT EXISTS \"accounts_deleted_at_idx\" ON \"accounts\" (\"deleted_at\");\nCREATE INDEX IF NOT EXISTS \"accounts_updated_at_idx\" ON \"accounts\" (\"updated_at\")",
     );
     assert_eq!(
         accounts_mig.down.as_deref(),
@@ -1209,7 +1209,7 @@ async fn golden_sqlite_add_column() {
     v2.fields.push(FieldDescriptor {
         name: "secret".into(),
         ty: "bytes".into(),
-        encrypted: Some(serde_json::json!({ "keyId": "k1" })),
+        encrypted: Some(true),
         ..Default::default()
     });
     let (live, ownership) = golden_live(std::slice::from_ref(&v1));
@@ -1241,7 +1241,7 @@ async fn golden_sqlite_add_column() {
     assert_eq!(
         secret_raw.up,
         format!(
-            r#"ALTER TABLE "accounts" ADD COLUMN "{}" BLOB /* zero-migrate:enc:k1:string */"#,
+            r#"ALTER TABLE "accounts" ADD COLUMN "{}" BLOB /* zero-migrate:enc:string */"#,
             zeroship_migrate::schema::query::raw_column_name("secret")
         ),
     );

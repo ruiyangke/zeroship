@@ -229,14 +229,4 @@ impl SqliteBackend {
 // Key-store accessor on SqliteBackend
 // ===========================================================================
 //
-// Symmetric to the PG-side impl in `backend/postgres.rs`. Crypto math
-// is shared with PG via `zeroship_data_orm::encryption::aead`, and key sourcing no
-// longer diverges at all: both backends take a `LocalKeySource`, so a
-// root comes either from the isolate's supplied keys or from
-// `ZEROSHIP_COLUMN_KEY_<KEYID>`. PG used to try a SECURITY DEFINER
-// `get_column_key` getter first; that arm was deleted on 2026-08-27 and
-// PG now resolves through this same path. Mirrors the session-minter
-// pattern where the secret comes from `ZEROSHIP_SESSION_SECRET`.
-//
-// The `sqlite` feature gate on this file already restricts the build to
-// SQLite-enabled targets.
+// Both backends resolve host-supplied project keys through the same key store.

@@ -667,22 +667,15 @@ export declare class MaskedValue<T extends string | number | bigint | Uint8Array
 /**
  * options accepted by `t.encrypted(opts?)`.
  *
- * - `keyId` — selects the per-platform root key (env var
- *   `ZEROSHIP_COLUMN_KEY_<KEYID>`). Defaults to `"default"`.
- * - `wraps` — the inner primitive type, ONE OF `t.string()` /
- *   `t.number()` / `t.bytes()` (the `bytes` wrap accepts base64-encoded
- *   string at the JS layer). Defaults to `t.string()`. Other types
- *   throw synchronously with `ENCRYPTED_WRAPS_UNSUPPORTED`.
+ * The host supplies the project encryption key; schemas contain no key selector.
  */
 export interface EncryptedFieldOpts {
-  /** Key id selecting the per-platform root. Defaults to `"default"`. */
-  keyId?: string;
   /**
    * Inner type the encrypted value wraps. Only string / number / bytes
    * are supported. Passing any other `TypeBuilder` throws with code
-   * `ENCRYPTED_WRAPS_UNSUPPORTED` at schema-definition time.
+   * `ENCRYPTED_TYPE_UNSUPPORTED` at schema-definition time.
    */
-  wraps?: TypeBuilder<any, any, any, any, any>;
+  of?: TypeBuilder<any, any, any, any, any>;
 }
 /** Definition for an array field with a declared item type. */
 export type ArrayTypeDef = { type: "array"; items: PrimitiveTypeName };
@@ -976,11 +969,8 @@ export interface FieldDef {
    * ivfflat index and the operator for ORDER BY at search time.
    */
   vectorMetric?: VectorMetric;
-  /** Column encryption metadata. The wrapped type describes the plaintext. */
-  encrypted?: {
-    keyId: string;
-    wraps: "string" | "number" | "bytes";
-  };
+  /** Whether the field uses encrypted storage; `type` describes its plaintext. */
+  encrypted?: boolean;
   /**
    * column-mask metadata. Present iff the SDK declared
    * the column with `.mask({ kind, classification? })`, OR the column
@@ -1135,7 +1125,7 @@ export class TypeBuilder<
 
   /** Adds a unique index constraint to the field. */
   unique(): this {
-    if (this._def.encrypted !== undefined) {
+    if (this._def.encrypted === true) {
       throw Object.assign(
         new Error(
           "t.encrypted().unique(): encrypted fields cannot enforce uniqueness.",
@@ -1608,8 +1598,8 @@ export const t = {
    * ```ts
    * const fields = {
    *   ssn: t.encrypted().required(),
-   *   payload: t.encrypted({ wraps: t.bytes() }),
-   *   amount: t.encrypted({ wraps: t.number() }),
+   *   payload: t.encrypted({ of: t.bytes() }),
+   *   amount: t.encrypted({ of: t.number() }),
    * };
    * ```
    */
@@ -1621,48 +1611,31 @@ export const t = {
         ? WT
         : string,
   >(
-    opts?: Omit<EncryptedFieldOpts, "wraps"> & { wraps?: W },
+    opts?: Omit<EncryptedFieldOpts, "of"> & { of?: W },
   ): TypeBuilder<T, false, "full", true, false> {
-    const wrapsBuilder = opts?.wraps;
-    let wrapsKind: "string" | "number" | "bytes" = "string";
-    if (wrapsBuilder !== undefined) {
-      if (!(wrapsBuilder instanceof TypeBuilder)) {
+    const innerBuilder = opts?.of;
+    let plaintextType: "string" | "number" | "bytes" = "string";
+    if (innerBuilder !== undefined) {
+      if (!(innerBuilder instanceof TypeBuilder)) {
         throw Object.assign(
-          new Error("t.encrypted({ wraps }): wraps must be a TypeBuilder (t.string() / t.number() / t.bytes())"),
-          { code: "ENCRYPTED_WRAPS_UNSUPPORTED" as const },
+          new Error("t.encrypted({ of }): of must be a TypeBuilder (t.string() / t.number() / t.bytes())"),
+          { code: "ENCRYPTED_TYPE_UNSUPPORTED" as const },
         );
       }
-      const def = wrapsBuilder.toFieldDef();
-      if (def.type === "string") wrapsKind = "string";
-      else if (def.type === "number") wrapsKind = "number";
-      else if (def.type === "bytes") wrapsKind = "bytes";
+      const def = innerBuilder.toFieldDef();
+      if (def.type === "string") plaintextType = "string";
+      else if (def.type === "number") plaintextType = "number";
+      else if (def.type === "bytes") plaintextType = "bytes";
       else {
         throw Object.assign(
           new Error(
-            `t.encrypted({ wraps }): only string / number / bytes are supported, got "${def.type}"`,
+            `t.encrypted({ of }): only string / number / bytes are supported, got "${def.type}"`,
           ),
-          { code: "ENCRYPTED_WRAPS_UNSUPPORTED" as const },
+          { code: "ENCRYPTED_TYPE_UNSUPPORTED" as const },
         );
       }
     }
-    if (opts && "mode" in opts) {
-      throw Object.assign(new Error("t.encrypted(): mode is unsupported; encryption is always randomised"), { code: "ENCRYPTED_INVALID_OPTIONS" as const });
-    }
-    const keyId = opts?.keyId ?? "default";
-    if (typeof keyId !== "string" || keyId.length === 0 || !/^[A-Za-z0-9_]+$/.test(keyId)) {
-      throw Object.assign(
-        new Error(
-          `t.encrypted({ keyId }): keyId must be a [A-Za-z0-9_]+ token, got "${String(keyId)}"`,
-        ),
-        { code: "ENCRYPTED_INVALID_KEY_ID" as const },
-      );
-    }
-    // The DB column TYPE is BYTEA — the encryption pass + DDL emitter
-    // (`field_to_column` in plugin-db) ignore the `type` field when
-    // `encrypted` is present. We still carry the wrapped primitive's
-    // type so validators see the right user-facing shape (e.g.
-    // `validate.ts` rejects `123` for a wraps=string column).
-    //
+    // `type` describes the plaintext; `encrypted` selects binary storage.
     // fail-safe default-mask rule (§3 of the
     // sensitive-field-masking proposal): every `t.encrypted()` column
     // gets `mask: { kind: "full", classification: "pii" }` at
@@ -1672,8 +1645,8 @@ export const t = {
     // after `t.encrypted()` overwrites this default via the
     // builder's `.mask` method (assigns `_def.mask` unconditionally).
     return new TypeBuilder<T, false, "full", true>({
-      type: wrapsKind === "bytes" ? "bytes" : wrapsKind === "number" ? "number" : "string",
-      encrypted: { keyId, wraps: wrapsKind },
+      type: plaintextType,
+      encrypted: true,
       mask: { kind: "full", classification: "pii" },
     });
   },

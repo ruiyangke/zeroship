@@ -39,3 +39,8 @@ Nextest owns reporting, timeouts and process isolation. Its `data` profile write
 JUnit results under the Cargo target directory. The database group bounds
 concurrent container startup and V8 memory use. Pure SQL and wire tests can run
 concurrently. Retries are disabled so a failing first attempt remains a failure.
+
+Platform database orchestration lives in this package. The `zs-testkit` binary
+serves `tests/lib/` scripts; service tests include preflight source from
+`tests/fixtures/platform_db/`. Its integration tests own PostgreSQL containers
+and generated overlays. No helper package or optional test feature is required.

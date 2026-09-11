@@ -31,12 +31,10 @@ const dbSchema = {
     fullName: t.string().required(),
     email: t.string().required().unique(),
     contactEmail: t.encrypted({
-      keyId: "db_e2e",
-      wraps: t.string(),
+      of: t.string(),
     }).mask({ kind: "email", classification: "pii" }),
     ssn: t.encrypted({
-      keyId: "db_e2e",
-      wraps: t.string(),
+      of: t.string(),
     }).mask({ kind: "last4", classification: "spi" }),
     city: t.string().required(),
   }).index("by_workspace", ["workspaceId"]),

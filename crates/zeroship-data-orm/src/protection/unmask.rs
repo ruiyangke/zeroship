@@ -19,7 +19,7 @@
 //!    including the row primary key,
 //!    and decrypt through [`crate::encryption::aead`] with a key from the
 //!    backend handle's [`crate::encryption::KeyStore`]. If plaintext
-//!    (mask-only, no encryption), SELECT the parent column directly.
+//!    (mask-only, no encryption), read the descriptor's raw storage column.
 //! 4. Emit a `granted`-outcome audit row to `__zeroship_audit_unmask`
 //!    in the app's own schema.
 //! 5. Return the plaintext.
@@ -67,6 +67,7 @@
 //! access to non-system callers. Without a configured policy, only the
 //! `auto` system actor can unmask.
 
+use crate::encryption::plaintext::PlaintextType;
 use zeroship_data_sql::value::Value;
 
 use crate::backend::{BackendHandle, ScalarRead};
@@ -219,40 +220,13 @@ fn resolve_raw_column(schema: &Value, canonical_column: &str) -> Result<String, 
     })
 }
 
-/// Key lookup and plaintext decoding metadata for an encrypted column.
-struct ColumnEncryptionMeta {
-    key_id: String,
-    wraps: &'static str,
-}
-
-/// Walk the descriptor entry and return the encryption metadata for `column`,
-/// or `None` if the column has no `encrypted` block (mask-only /
-/// plaintext-storage case).
-fn lookup_encryption_meta(
-    schema: &Value,
-    column: &str,
-) -> Result<Option<ColumnEncryptionMeta>, DbError> {
-    let Some(obj) = schema.as_object() else {
-        return Ok(None);
-    };
-    let Some(def) = obj.get(column) else {
-        return Ok(None);
-    };
-    let Some(enc_meta) = def.get("encrypted").and_then(|v| v.as_object()) else {
-        return Ok(None);
-    };
-    let key_id = enc_meta
-        .get("keyId")
-        .and_then(|v| v.as_str())
-        .unwrap_or("default")
-        .to_string();
-    let wraps = match enc_meta.get("wraps").and_then(|v| v.as_str()) {
-        Some("string") => "string",
-        Some("number") => "number",
-        Some("bytes") => "bytes",
-        _ => "string",
-    };
-    Ok(Some(ColumnEncryptionMeta { key_id, wraps }))
+/// Select the field's plaintext decoder, or leave mask-only storage alone.
+fn lookup_encryption_meta(schema: &Value, column: &str) -> Result<Option<PlaintextType>, DbError> {
+    schema
+        .get(column)
+        .map(PlaintextType::from_field)
+        .transpose()
+        .map(Option::flatten)
 }
 
 // ---------------------------------------------------------------------------
@@ -425,7 +399,7 @@ pub async fn dispatch_unmask(
     let raw_column = resolve_raw_column(&schema, &args.column)?;
     let plaintext = match lookup_encryption_meta(&schema, &args.column)? {
         Some(enc_meta) => fetch_and_decrypt(&raw_column, route, &args, &enc_meta).await?,
-        None => fetch_plaintext_parent(&raw_column, route, &args).await?,
+        None => fetch_plaintext_raw(&raw_column, route, &args).await?,
     };
     // Both arms ran exactly one SELECT and both `?`, so reaching here means it
     // succeeded. Neither goes through `exec::run_sql`, so neither was billed
@@ -477,7 +451,7 @@ async fn fetch_and_decrypt(
     raw_column: &str,
     route: &crate::tx_route::TxRoute,
     args: &UnmaskFieldArgs,
-    enc_meta: &ColumnEncryptionMeta,
+    enc_meta: &PlaintextType,
 ) -> Result<Value, DbError> {
     // The prepared route arrives as an argument. This re-resolved a BACKEND
     // through the funnel until 2026-09-03, which was idempotent but pointless:
@@ -491,6 +465,7 @@ async fn fetch_and_decrypt(
     let app_id = route.app_id();
 
     let aad = crate::encryption::aad::canonical_aad(
+        app_id,
         &args.collection,
         &args.column,
         args.row_pk.as_bytes(),
@@ -500,7 +475,7 @@ async fn fetch_and_decrypt(
     //
     // The vendor split moved into `BackendHandle::read_raw_column_bytes` on
     // 2026-09-02 (#119). Everything below the read - key resolution, AEAD,
-    // the `wraps` unwrap - was already vendor-neutral and was duplicated
+    // plaintext decoding - was already vendor-neutral and was duplicated
     // VERBATIM in the two arms this replaces.
     {
         // The real value lives in the RAW column - the field's own column
@@ -562,18 +537,16 @@ async fn fetch_and_decrypt(
         let key = route
             .backend()
             .key_store()
-            .resolve(app_id, &enc_meta.key_id)
+            .resolve(app_id)
             .await?;
-        let plaintext_bytes = crate::encryption::aead::decrypt(&key, &bytes, &aad)?;
-        wrap_plaintext_per_wraps(&plaintext_bytes, enc_meta.wraps)
+        let plaintext_bytes =
+            zeroize::Zeroizing::new(crate::encryption::aead::decrypt(&key, &bytes, &aad)?);
+        enc_meta.decode(&plaintext_bytes)
     }
 }
 
-/// Plaintext-storage path: SELECT the parent column directly. Used
-/// when the column carries `.mask({...})` WITHOUT `.encrypted(...)` —
-/// the parent slot holds the plaintext on disk; the sibling
-/// `<col>_masked` carries the safe display form.
-async fn fetch_plaintext_parent(
+/// Read mask-only plaintext from the runtime descriptor's `storage.rawColumn`.
+async fn fetch_plaintext_raw(
     raw_column: &str,
     route: &crate::tx_route::TxRoute,
     args: &UnmaskFieldArgs,
@@ -619,33 +592,6 @@ async fn fetch_plaintext_parent(
             hint: None,
         }),
         ScalarRead::Value(text) => Ok(text),
-    }
-}
-
-/// Recover the declared native plaintext type after decryption.` keeps a no-backend build clean (no arm in
-/// `fetch_and_decrypt` calls it under `--no-default-features`).
-#[allow(dead_code)]
-fn wrap_plaintext_per_wraps(bytes: &[u8], wraps: &str) -> Result<Value, DbError> {
-    match wraps {
-        "string" => Ok(std::str::from_utf8(bytes)
-            .map_err(|e| DbError::internal(format!("unmask: plaintext not UTF-8: {e}")))?
-            .to_string()
-            .into()),
-        "number" => {
-            if bytes.len() != 8 {
-                return Err(DbError::internal(format!(
-                    "unmask: number plaintext must be 8 bytes, got {}",
-                    bytes.len()
-                )));
-            }
-            let mut arr = [0u8; 8];
-            arr.copy_from_slice(bytes);
-            Value::try_from(f64::from_be_bytes(arr)).map_err(DbError::internal)
-        }
-        "bytes" => Ok(Value::Bytes(bytes.to_vec())),
-        other => Err(DbError::internal(format!(
-            "unmask: unknown wraps '{other}'"
-        ))),
     }
 }
 
@@ -1013,7 +959,7 @@ pub async fn dispatch_bulk_unmask(
                 Some(enc_meta) => {
                     fetch_and_decrypt(&raw_column, route, &single_args, &enc_meta).await?
                 }
-                None => fetch_plaintext_parent(&raw_column, route, &single_args).await?,
+                None => fetch_plaintext_raw(&raw_column, route, &single_args).await?,
             };
             // One SELECT per (row, column) pair. The bulk call writes a single
             // audit row for the whole request, but it reads once per cell, and
@@ -1382,7 +1328,7 @@ pub async fn dispatch_unmask_for_query(
                 Some(enc_meta) => {
                     fetch_and_decrypt(&raw_column, route, &single_args, &enc_meta).await?
                 }
-                None => fetch_plaintext_parent(&raw_column, route, &single_args).await?,
+                None => fetch_plaintext_raw(&raw_column, route, &single_args).await?,
             };
             // One SELECT per (row, column) pair. The bulk call writes a single
             // audit row for the whole request, but it reads once per cell, and
@@ -1960,29 +1906,6 @@ mod tests {
         });
         let args = parse_args(&v).unwrap();
         assert!(args.actor.is_none(), "JSON null actor must become None");
-    }
-
-    #[test]
-    fn wrap_plaintext_string() {
-        let s = wrap_plaintext_per_wraps(b"hello", "string").unwrap();
-        assert_eq!(s, "hello");
-    }
-
-    #[test]
-    fn wrap_plaintext_number() {
-        // 3.14 is test input data asserted against the literal string
-        // "3.14" below — not a stand-in for pi, so it must stay exactly
-        // this value rather than become `std::f64::consts::PI`.
-        #[allow(clippy::approx_constant)]
-        let bytes = 3.14f64.to_be_bytes();
-        let s = wrap_plaintext_per_wraps(&bytes, "number").unwrap();
-        assert_eq!(s.as_f64(), Some(f64::from_be_bytes(bytes)));
-    }
-
-    #[test]
-    fn wrap_plaintext_bytes_preserves_buffer() {
-        let s = wrap_plaintext_per_wraps(&[0xde, 0xad, 0xbe, 0xef], "bytes").unwrap();
-        assert_eq!(s.as_bytes(), Some([0xde, 0xad, 0xbe, 0xef].as_slice()));
     }
 
     // ---------------------------------------------------------------

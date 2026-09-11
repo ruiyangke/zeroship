@@ -550,10 +550,7 @@
         },
         "contactEmail": {
           "type": "string",
-          "encrypted": {
-            "keyId": "default",
-            "wraps": "string"
-          },
+          "encrypted": true,
           "mask": {
             "kind": "full",
             "classification": "pii"
@@ -572,10 +569,7 @@
         },
         "ssn": {
           "type": "string",
-          "encrypted": {
-            "keyId": "default",
-            "wraps": "string"
-          },
+          "encrypted": true,
           "mask": {
             "kind": "full",
             "classification": "pii"

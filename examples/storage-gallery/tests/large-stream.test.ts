@@ -1,8 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { AwsClient } from "aws4fetch";
 import { expect, inject, test } from "vitest";
-import { rpc } from "./rpc";
-import { targets } from "./targets";
+import { workerRpc } from "./worker";
 
 const U32_BOUNDARY = 2 ** 32;
 const SIZE = U32_BOUNDARY + 1024 * 1024;
@@ -16,7 +15,6 @@ async function residentBytes(pid: number): Promise<number> {
 }
 
 test("large streams preserve wide lengths and checksums with bounded worker memory", async () => {
-  const target = targets().find((target) => target.name === "s3")!;
   const storage = inject("storageS3");
   const key = "large/wide-length.bin";
   let peak = await residentBytes(storage.workerPid);
@@ -30,7 +28,8 @@ test("large streams preserve wide lengths and checksums with bounded worker memo
     }).catch((error) => { samplingError = error; });
   }, 100);
   try {
-    const uploaded = await rpc(target.apiUrl, "gallery.putLarge", { key, sizeBytes: SIZE, seed: 7, chunkBytes: 1024 * 1024 }, TIMEOUT);
+    console.info("Gallery: uploading the wide-length stream");
+    const uploaded = await workerRpc("gallery.putLarge", { key, sizeBytes: SIZE, seed: 7, chunkBytes: 1024 * 1024 }, TIMEOUT);
     expect(uploaded.size).toBe(SIZE);
     expect(uploaded.checksum).toMatch(/^[0-9a-f]+$/);
     const aws = new AwsClient({ accessKeyId: "minioadmin", secretAccessKey: "minioadmin", service: "s3", region: "us-east-1", retries: 0 });
@@ -38,9 +37,10 @@ test("large streams preserve wide lengths and checksums with bounded worker memo
     const object = await aws.fetch(objectUrl, { method: "HEAD", signal: AbortSignal.timeout(10_000) });
     expect(object.status).toBe(200);
     expect(Number(object.headers.get("content-length"))).toBe(SIZE);
-    const downloaded = await rpc(target.apiUrl, "gallery.getLargeHash", { key }, TIMEOUT);
+    console.info("Gallery: stored length verified; streaming download for checksum comparison");
+    const downloaded = await workerRpc("gallery.getLargeHash", { key }, TIMEOUT);
     expect(downloaded).toEqual({ key, found: true, size: SIZE, checksum: uploaded.checksum });
-    expect(await rpc(target.apiUrl, "gallery.delete", { key })).toEqual({ key, deleted: true });
+    expect(await workerRpc("gallery.delete", { key }, TIMEOUT)).toEqual({ key, deleted: true });
   } finally {
     clearInterval(sampler);
     await pending;

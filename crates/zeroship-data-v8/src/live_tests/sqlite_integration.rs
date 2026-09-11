@@ -97,27 +97,12 @@ fn bytes_column_stores_a_raw_blob_on_sqlite() {
     });
 }
 
-/// Helper: hand this isolate a synthetic root key for `key_id`, for the
-/// duration of a test. Same shape as the PG-side `with_root_key` in
-/// `tests/integration.rs`.
-///
-/// This REPLACES a `set_var("ZEROSHIP_COLUMN_KEY_<KEYID>", ...)` guard.
-/// The env var was the only channel that reached the `SqliteBackend`
-/// these tests never construct themselves - the one `initialize_backend`
-/// builds behind a `dispatch_zs` V8 call - and mutating it is
-/// process-global, racy with any concurrent `getenv`, and `unsafe`. The
-/// isolate context is per-thread and typed, so none of the three apply,
-/// and `SqliteBackend::{new, open}` read it wherever they are called
-/// from.
-///
-/// Install it BEFORE the backend is constructed: a backend captures the
-/// source at construction, so a key supplied afterwards will not reach
-/// it.
-///
-/// The returned guard withdraws the key on drop; keep it alive for the
-/// test body.
-fn with_root_key(key_id: &str, root_hex: &str) -> zeroship_data_v8::testing::SuppliedRootKeysGuard {
-    zeroship_data_v8::testing::supply_root_keys_for_tests(&[(key_id, root_hex)])
+/// Supply a project key for the apps explicitly named by this fixture.
+fn with_project_key(
+    app_ids: &[&str],
+    hex: &str,
+) -> zeroship_data_v8::testing::SuppliedProjectKeysGuard {
+    zeroship_data_v8::testing::supply_project_key_for_tests(app_ids, hex)
 }
 
 const SQLITE_RUNTIME_RPC_SHIM: &str = r#"
@@ -160,13 +145,13 @@ export default { fetch: _zsFetch, rpc: _shimRpc };
 "#;
 
 /// `email` unique + plaintext, `ssn` randomised-encrypted with a `last4` mask.
-fn users_encrypted_ssn_schema(key_id: &str) -> zeroship_data_sql::value::Value {
+fn users_encrypted_ssn_schema() -> zeroship_data_sql::value::Value {
     zeroship_data_sql::value!({
         "email": {"type": "string", "required": true, "unique": true},
         "name": {"type": "string", "required": true},
         "ssn": {
             "type": "string",
-            "encrypted": {"keyId": key_id, "wraps": "string"},
+            "encrypted": true,
             "mask": {"kind": "last4", "classification": "spi"}
         }
     })
@@ -175,13 +160,13 @@ fn users_encrypted_ssn_schema(key_id: &str) -> zeroship_data_sql::value::Value {
 /// One randomised-encrypted column and no mask - the fast-path fixtures assert
 /// a PLAIN write skips row resolution, so the encrypted column must exist but
 /// stay untouched by the write under test.
-fn users_encrypted_secret_schema(key_id: &str) -> zeroship_data_sql::value::Value {
+fn users_encrypted_secret_schema() -> zeroship_data_sql::value::Value {
     zeroship_data_sql::value!({
         "email": {"type": "string", "required": true, "unique": true},
         "name": {"type": "string", "required": true},
         "secret": {
             "type": "string",
-            "encrypted": {"keyId": key_id, "wraps": "string"}
+            "encrypted": true
         }
     })
 }
@@ -203,13 +188,13 @@ CREATE INDEX IF NOT EXISTS "{app_id}"."{collection}_created_by_idx" ON "{collect
 /// masked representation as bare `TEXT`; the sibling raw column (named via
 /// [`raw_column_name`], NOT spelled out here) carries the declared type,
 /// the encryption sentinel, and any constraints.
-fn users_encrypted_ssn_ddl(key_id: &str) -> String {
+fn users_encrypted_ssn_ddl() -> String {
     let raw_ssn = raw_column_name("ssn");
     format!(
         r#"CREATE TABLE IF NOT EXISTS "default"."users" ({SYSTEM_COLUMNS_SQLITE},
   "email" TEXT NOT NULL,
   "name" TEXT NOT NULL,
-  "{raw_ssn}" BLOB /* zero-migrate:enc:{key_id}:string */,
+  "{raw_ssn}" BLOB /* zero-migrate:enc:string */,
   "ssn" TEXT /* zero-migrate:mask:kind=last4,classification=spi */
 );
 {}
@@ -220,12 +205,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS "default"."users_email_key" ON "users" ("email
 }
 
 /// Raw DDL matching [`users_encrypted_secret_schema`].
-fn users_encrypted_secret_ddl(key_id: &str) -> String {
+fn users_encrypted_secret_ddl() -> String {
     format!(
         r#"CREATE TABLE IF NOT EXISTS "default"."users" ({SYSTEM_COLUMNS_SQLITE},
   "email" TEXT NOT NULL,
   "name" TEXT NOT NULL,
-  "secret" BLOB /* zero-migrate:enc:{key_id}:string */
+  "secret" BLOB /* zero-migrate:enc:string */
 );
 {}
 CREATE UNIQUE INDEX IF NOT EXISTS "default"."users_email_key" ON "users" ("email");
@@ -302,13 +287,12 @@ fn assert_write_path_fast_path(label: &str) {
 
 #[test]
 fn upsert_insert_branch_auto_mints_id_sqlite_runtime() {
-    let key_id = "c2_upsert_runtime_insert";
-    let _keys = with_root_key("c2_upsert_runtime_insert", &"e".repeat(64));
+    let _keys = with_project_key(&["default"], &"e".repeat(64));
 
     run(async {
         let dir = tempfile::tempdir().expect("tempdir");
-        let schema = users_encrypted_ssn_schema(key_id);
-        apply_schema_ahead_of_runtime(&dir, &users_encrypted_ssn_ddl(key_id));
+        let schema = users_encrypted_ssn_schema();
+        apply_schema_ahead_of_runtime(&dir, &users_encrypted_ssn_ddl());
         let source = sqlite_runtime_source(
             "users",
             &schema,
@@ -369,16 +353,15 @@ const _procedures = { upsertInsert };
 
 #[test]
 fn upsert_conflict_update_preserves_insert_only_fields_and_encrypts_sqlite_runtime() {
-    let key_id = "c2_upsert_runtime_conflict";
-    let _keys = with_root_key("c2_upsert_runtime_conflict", &"f".repeat(64));
+    let _keys = with_project_key(&["default"], &"f".repeat(64));
 
     run(async {
         use rusqlite::types::Value as TypedCell;
         use zeroship_data_orm::encryption;
 
         let dir = tempfile::tempdir().expect("tempdir");
-        let schema = users_encrypted_ssn_schema(key_id);
-        apply_schema_ahead_of_runtime(&dir, &users_encrypted_ssn_ddl(key_id));
+        let schema = users_encrypted_ssn_schema();
+        apply_schema_ahead_of_runtime(&dir, &users_encrypted_ssn_ddl());
         let source = sqlite_runtime_source(
             "users",
             &schema,
@@ -523,11 +506,11 @@ const _procedures = { upsertConflict };
 
         let keys =
             zeroship_data_orm::encryption::KeyStore::new(crate::testing::isolate_key_source());
-        let key = keys.resolve("default", key_id).await.expect("resolve key");
+        let key = keys.resolve("default").await.expect("resolve key");
         let plaintext = zeroship_data_orm::encryption::aead::decrypt(
             &key,
             &stored_blob,
-            &encryption::canonical_aad("users", "ssn", first_id.as_bytes()),
+            &encryption::canonical_aad("default", "users", "ssn", first_id.as_bytes()),
         )
         .expect("decrypt stored conflict ciphertext");
         assert_eq!(
@@ -540,16 +523,15 @@ const _procedures = { upsertConflict };
 
 #[test]
 fn update_non_id_filter_keeps_randomised_ciphertext_readable_sqlite_runtime() {
-    let key_id = "c1_update_non_id_runtime";
-    let _keys = with_root_key("c1_update_non_id_runtime", &"7".repeat(64));
+    let _keys = with_project_key(&["default"], &"7".repeat(64));
 
     run(async {
         use rusqlite::types::Value as TypedCell;
         use zeroship_data_orm::encryption;
 
         let dir = tempfile::tempdir().expect("tempdir");
-        let schema = users_encrypted_ssn_schema(key_id);
-        apply_schema_ahead_of_runtime(&dir, &users_encrypted_ssn_ddl(key_id));
+        let schema = users_encrypted_ssn_schema();
+        apply_schema_ahead_of_runtime(&dir, &users_encrypted_ssn_ddl());
         let source = sqlite_runtime_source(
             "users",
             &schema,
@@ -626,11 +608,11 @@ const _procedures = { seed, updateByEmail };
 
         let keys =
             zeroship_data_orm::encryption::KeyStore::new(crate::testing::isolate_key_source());
-        let key = keys.resolve("default", key_id).await.expect("resolve key");
+        let key = keys.resolve("default").await.expect("resolve key");
         let plaintext = zeroship_data_orm::encryption::aead::decrypt(
             &key,
             &stored_blob,
-            &encryption::canonical_aad("users", "ssn", row_id.as_bytes()),
+            &encryption::canonical_aad("default", "users", "ssn", row_id.as_bytes()),
         )
         .expect("decrypt updated ciphertext");
         assert_eq!(
@@ -643,16 +625,15 @@ const _procedures = { seed, updateByEmail };
 
 #[test]
 fn update_many_non_id_filter_encrypts_per_row_sqlite_runtime() {
-    let key_id = "c1_update_many_non_id_runtime";
-    let _keys = with_root_key("c1_update_many_non_id_runtime", &"8".repeat(64));
+    let _keys = with_project_key(&["default"], &"8".repeat(64));
 
     run(async {
         use rusqlite::types::Value as TypedCell;
         use zeroship_data_orm::encryption;
 
         let dir = tempfile::tempdir().expect("tempdir");
-        let schema = users_encrypted_ssn_schema(key_id);
-        apply_schema_ahead_of_runtime(&dir, &users_encrypted_ssn_ddl(key_id));
+        let schema = users_encrypted_ssn_schema();
+        apply_schema_ahead_of_runtime(&dir, &users_encrypted_ssn_ddl());
         let source = sqlite_runtime_source(
             "users",
             &schema,
@@ -744,7 +725,7 @@ const _procedures = { seed, updateManyByName };
 
         let keys =
             zeroship_data_orm::encryption::KeyStore::new(crate::testing::isolate_key_source());
-        let key = keys.resolve("default", key_id).await.expect("resolve key");
+        let key = keys.resolve("default").await.expect("resolve key");
         for row in &typed.rows {
             let row_id = match &row[0] {
                 TypedCell::Text(id) => id.clone(),
@@ -771,7 +752,7 @@ const _procedures = { seed, updateManyByName };
             let plaintext = zeroship_data_orm::encryption::aead::decrypt(
                 &key,
                 &stored_blob,
-                &encryption::canonical_aad("users", "ssn", row_id.as_bytes()),
+                &encryption::canonical_aad("default", "users", "ssn", row_id.as_bytes()),
             )
             .expect("decrypt updated ciphertext");
             assert_eq!(
@@ -785,8 +766,7 @@ const _procedures = { seed, updateManyByName };
 
 #[test]
 fn update_many_randomised_target_cap_rejects_without_writes_sqlite_runtime() {
-    let key_id = "c1_update_many_target_cap_runtime";
-    let _keys = with_root_key("c1_update_many_target_cap_runtime", &"c".repeat(64));
+    let _keys = with_project_key(&["default"], &"c".repeat(64));
 
     run(async {
         use rusqlite::types::Value as TypedCell;
@@ -799,14 +779,14 @@ fn update_many_randomised_target_cap_rejects_without_writes_sqlite_runtime() {
             .map(|index| format!("('user_{index:04}', 'user_{index:04}@example.com', 'Red Team')"))
             .collect::<Vec<_>>();
         assert!(!values.is_empty(), "overflow fixture must seed target rows");
-        let mut ddl = users_encrypted_ssn_ddl(key_id);
+        let mut ddl = users_encrypted_ssn_ddl();
         ddl.push_str(&format!(
             "INSERT INTO \"default\".\"users\" (id, email, name) VALUES {};",
             values.join(",")
         ));
         apply_schema_ahead_of_runtime(&dir, &ddl);
 
-        let schema = users_encrypted_ssn_schema(key_id);
+        let schema = users_encrypted_ssn_schema();
         let source = sqlite_runtime_source(
             "users",
             &schema,
@@ -889,15 +869,14 @@ const _procedures = { overflow };
 
 #[test]
 fn update_many_randomised_failure_rolls_back_committed_prefix_sqlite_runtime() {
-    let key_id = "c1_update_many_atomic_failure_runtime";
-    let _keys = with_root_key("c1_update_many_atomic_failure_runtime", &"a".repeat(64));
+    let _keys = with_project_key(&["default"], &"a".repeat(64));
 
     run(async {
         use rusqlite::types::Value as TypedCell;
 
         let dir = tempfile::tempdir().expect("tempdir");
-        let schema = users_encrypted_ssn_schema(key_id);
-        apply_schema_ahead_of_runtime(&dir, &users_encrypted_ssn_ddl(key_id));
+        let schema = users_encrypted_ssn_schema();
+        apply_schema_ahead_of_runtime(&dir, &users_encrypted_ssn_ddl());
         let source = sqlite_runtime_source(
             "users",
             &schema,
@@ -1130,13 +1109,12 @@ const _procedures = { seed, failBulk, failBulkInsideTransaction };
 
 #[test]
 fn plain_updates_on_encrypted_collection_stay_on_fast_path_sqlite_runtime() {
-    let key_id = "perf_plain_update_fast_path_runtime";
-    let _keys = with_root_key("perf_plain_update_fast_path_runtime", &"9".repeat(64));
+    let _keys = with_project_key(&["default"], &"9".repeat(64));
 
     run(async {
         let dir = tempfile::tempdir().expect("tempdir");
-        let schema = users_encrypted_ssn_schema(key_id);
-        apply_schema_ahead_of_runtime(&dir, &users_encrypted_ssn_ddl(key_id));
+        let schema = users_encrypted_ssn_schema();
+        apply_schema_ahead_of_runtime(&dir, &users_encrypted_ssn_ddl());
         let source = sqlite_runtime_source(
             "users",
             &schema,
@@ -1208,13 +1186,12 @@ const _procedures = { seed, updatePlain, updateManyPlain };
 
 #[test]
 fn plain_upsert_on_encrypted_collection_skips_conflict_probe_sqlite_runtime() {
-    let key_id = "perf_plain_upsert_fast_path_runtime";
-    let _keys = with_root_key("perf_plain_upsert_fast_path_runtime", &"a".repeat(64));
+    let _keys = with_project_key(&["default"], &"a".repeat(64));
 
     run(async {
         let dir = tempfile::tempdir().expect("tempdir");
-        let schema = users_encrypted_secret_schema(key_id);
-        apply_schema_ahead_of_runtime(&dir, &users_encrypted_secret_ddl(key_id));
+        let schema = users_encrypted_secret_schema();
+        apply_schema_ahead_of_runtime(&dir, &users_encrypted_secret_ddl());
         let source = sqlite_runtime_source(
             "users",
             &schema,
@@ -1272,13 +1249,12 @@ const _procedures = { seed, upsertPlainConflict };
 
 #[test]
 fn update_rejects_nested_version_filter_without_mutating_sqlite_row() {
-    let key_id = "i5_update_nested_version";
-    let _keys = with_root_key("i5_update_nested_version", &"1".repeat(64));
+    let _keys = with_project_key(&["default"], &"1".repeat(64));
 
     run(async {
         let dir = tempfile::tempdir().expect("tempdir");
-        let schema = users_encrypted_ssn_schema(key_id);
-        apply_schema_ahead_of_runtime(&dir, &users_encrypted_ssn_ddl(key_id));
+        let schema = users_encrypted_ssn_schema();
+        apply_schema_ahead_of_runtime(&dir, &users_encrypted_ssn_ddl());
         let source = sqlite_runtime_source(
             "users",
             &schema,
@@ -1358,13 +1334,12 @@ const _procedures = { seed, nestedCasUpdate };
 
 #[test]
 fn update_many_rejects_nested_version_filter_without_mutating_sqlite_row() {
-    let key_id = "i5_update_many_nested_version";
-    let _keys = with_root_key("i5_update_many_nested_version", &"2".repeat(64));
+    let _keys = with_project_key(&["default"], &"2".repeat(64));
 
     run(async {
         let dir = tempfile::tempdir().expect("tempdir");
-        let schema = users_encrypted_ssn_schema(key_id);
-        apply_schema_ahead_of_runtime(&dir, &users_encrypted_ssn_ddl(key_id));
+        let schema = users_encrypted_ssn_schema();
+        apply_schema_ahead_of_runtime(&dir, &users_encrypted_ssn_ddl());
         let source = sqlite_runtime_source(
             "users",
             &schema,
@@ -1447,8 +1422,8 @@ use zeroship_data_orm::search::Search;
 #[test]
 fn encrypted_conflict_target_is_refused_sqlite_runtime() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let schema = users_encrypted_ssn_schema("unused");
-    apply_schema_ahead_of_runtime(&dir, &users_encrypted_ssn_ddl("unused"));
+    let schema = users_encrypted_ssn_schema();
+    apply_schema_ahead_of_runtime(&dir, &users_encrypted_ssn_ddl());
     let source = sqlite_runtime_source(
         "users",
         &schema,

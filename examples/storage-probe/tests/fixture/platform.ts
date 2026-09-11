@@ -108,8 +108,9 @@ export class Platform {
 
   private async httpReady(url: string, init?: RequestInit) {
     const response = await fetch(url, { ...init, signal: AbortSignal.any([this.processes.signal, AbortSignal.timeout(5_000)]) });
-    await response.arrayBuffer();
-    return response.ok;
+    const body = await response.text();
+    if (!response.ok) throw new Error(`${url}: HTTP ${response.status}: ${body}`);
+    return true;
   }
 
   async start(): Promise<Target[]> {

@@ -97,7 +97,7 @@ export function colTypeFromDbField(field: DbSchemaField): ColType {
   // facet alongside. Reduce to the neutral `encrypted` ColType whose `of` recurses
   // on the inner token — the same shape the engine's `ColType::Encrypted { of }`
   // carries. Checked before the type switch so the facet drives the arm.
-  if (def.encrypted !== undefined) {
+  if (def.encrypted === true) {
     const inner = colTypeFromDbField({ type: def.type } as FieldDef);
     return { encrypted: { of: inner } };
   }

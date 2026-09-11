@@ -97,6 +97,8 @@ export const schema = {
   users: defineSchema({
     email: t.string().required().mask({ kind: "email", classification: "pii" }),
     secret: t.encrypted(),
+    secretAmount: t.encrypted({ of: t.number() }),
+    secretBytes: t.encrypted({ of: t.bytes() }),
     age: t.number(),
   })
     .softDelete()
@@ -171,7 +173,10 @@ describe("manual schema source", () => {
 
       // Author facets survived: mask, encrypted, id-prefix, ref.
       assert.ok(json.collections.users.fields.email.mask, "email carries mask facet");
-      assert.ok(json.collections.users.fields.secret.encrypted, "secret carries encrypted facet");
+      for (const [name, type] of [["secret", "string"], ["secretAmount", "number"], ["secretBytes", "bytes"]]) {
+        assert.equal(json.collections.users.fields[name].encrypted, true);
+        assert.equal(json.collections.users.fields[name].type, type);
+      }
       assert.equal(json.collections.posts.fields.id.idPrefix, "post", "post id carries prefix");
       assert.equal(json.collections.posts.fields.authorId.refTarget, "users", "ref target");
 

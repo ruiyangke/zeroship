@@ -12,10 +12,16 @@ use crate::error::DbError;
 const NONCE_LEN: usize = 12;
 
 /// AEAD key material, erased when dropped.
-#[derive(Debug, Clone, Zeroize, ZeroizeOnDrop)]
+#[derive(Clone, Zeroize, ZeroizeOnDrop)]
 #[repr(C)]
 pub struct AeadKey {
     pub k_enc: [u8; 32],
+}
+
+impl std::fmt::Debug for AeadKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AeadKey").finish_non_exhaustive()
+    }
 }
 
 /// Encrypt with a fresh random nonce and authenticate the supplied context.
@@ -95,10 +101,7 @@ mod tests {
 
         let ct1 = encrypt(&key, pt, aad).expect("encrypt 1");
         let ct2 = encrypt(&key, pt, aad).expect("encrypt 2");
-        assert_ne!(
-            ct1, ct2,
-            "each write must produce a fresh nonce"
-        );
+        assert_ne!(ct1, ct2, "each write must produce a fresh nonce");
 
         let recovered1 = decrypt(&key, &ct1, aad).expect("decrypt 1");
         let recovered2 = decrypt(&key, &ct2, aad).expect("decrypt 2");
@@ -144,7 +147,7 @@ mod tests {
     }
 
     /// Ciphertext from key A doesn't decrypt under key B. Pins the
-    /// "per-app HKDF isolation" property (cross-tenant ciphertext
+    /// "project-key isolation" property (cross-tenant ciphertext
     /// replay is blocked at the key layer; AAD is the second line).
     #[test]
     fn different_keys_dont_decrypt() {

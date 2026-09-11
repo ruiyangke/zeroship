@@ -17,10 +17,11 @@ URL validation, backend selection, pool configuration, and concurrent lazy
 opening all stay in the ORM. Hosts can inject a custom `BackendFactory` without
 changing V8 bindings or application code.
 
-The adapter does not re-export ORM or SQL modules. Integration fixtures import
-those crates directly and use the feature-gated `testing` module for isolate
-and worker setup. Concrete drivers and migration policy are dev dependencies
-only; the boundary gate refuses them in adapter implementation code.
+Adapter tests live in `src/live_tests/` and use private setup modules. Query
+recording wraps the public backend interface; persisted SQLite values are
+inspected independently with the SQLite driver. Engine contracts live in the
+ORM crate. Concrete drivers and migration policy are dev dependencies only;
+the boundary gate refuses them in adapter implementation code.
 SQL compilation benchmarks live in `zeroship-data-sql`; native row-decoding
 benchmarks live in `zeroship-data-orm`.
 

@@ -256,13 +256,13 @@ Provider-specific URL parameters:
 non-loopback host). R2 must use `region=auto` and `checksum=none` (it rejects
 the AWS checksum headers); the parser enforces these.
 
-A self-contained MinIO smoke is available at `tests/e2e_s3_storage.sh`: it
-brings up a MinIO container, creates a bucket, boots control/worker/gateway
-with `--blob-store s3://...` and the worker with `--storage-url s3://...`, deploys
-a real app whose blobs now live in S3, asserts gateway->worker dispatch reading
-the bundle from S3, and byte-compares a large (> 8 MiB part size) multipart
-`env.storage` streaming round-trip. It skips cleanly when Docker is
-unavailable.
+The example-owned suites in `examples/storage-gallery/tests/` and
+`examples/storage-probe/tests/` provision MinIO, Postgres and their test issuer
+through Testcontainers. They boot control, gateway and worker with S3-backed
+deploy blobs and object storage, deploy the built examples, and check browser
+loading, RPC operations, multipart transfers and LocalFs/S3 parity. Docker is
+required; unavailable dependencies fail setup. Run `cargo xtask test storage`
+for the Rust suites and the examples' Vitest/Playwright tests.
 
 ### Console / AI builder
 

@@ -1656,9 +1656,17 @@ as text and holds no foreign key into them.
 
 This section resolves `docs/archive/sensitive-field-masking.md` against the shipped implementation in `sdks/db/src/types.ts`, `crates/zeroship-data-sql/src/compile.rs`, `crates/zeroship-data-orm/src/protection/mask_pass.rs`, `crates/zeroship-data-v8/src/v8_classes/masked_value.rs`, `crates/zeroship-data-orm/src/protection/unmask.rs`, `sdks/db/src/collection/masking.ts`, `sdks/db/src/policy.ts`.
 
-Every masked field owns TWO physical columns. The field's OWN column holds the MASK, as bare `TEXT` carrying none of the declared constraints; a hidden sibling holds the REAL value, and carries the declared type and every constraint. Both are written atomically, and a default read serves the field's own column, so it serves the mask (`crates/zeroship-data-sql/src/compile.rs`, `crates/zeroship-data-orm/src/protection/mask_pass.rs`).
+The migration engine records physical placement in each field's runtime
+`storage` mapping. Default reads use `storage.valueColumn`; authorized unmasking
+and protected writes use `storage.rawColumn`. The raw column holds the real
+value and its constraints; the visible column holds the mask. The ORM validates
+that the raw column is inaccessible to ordinary creator queries.
 
-The layout used to be the other way round - plaintext under the field's name, the mask in a `<field>_masked` sibling that the SELECT aliased back. That made the SELECT the only mask-aware surface: the WHERE builder takes no schema and could not substitute, so `find({ ssn: { $gt: v } })` compared against plaintext and repeated probes binary-searched a value the caller could not read, unauthorized and unaudited. The flip makes the ignorant path the safe path - a builder that has never heard of masking names the column with the natural name, and that column is the mask. The sibling's name is `__zs_raw__<field>`, which `validate_field_name` refuses, so no filter, projection, sort, conflict probe or write-document key can name it either. `t.encrypted(...)` applies the fail-safe default mask at builder time, so an encrypted field without an explicit `.mask(...)` behaves as if it were declared with `.mask({ kind: "full", classification: "pii" })`; `.mask({ kind: "none" })` is the explicit opt-out that suppresses the sibling column and the masked read wrapper (`sdks/db/src/types.ts`, `crates/zeroship-data-sql/src/compile.rs`).
+`t.encrypted(...)` applies a full mask with `pii` classification by default.
+`.mask({ kind: "none" })` opts into plaintext reads and suppresses masked
+storage. Both operations follow the runtime descriptor rather than naming a
+mask column from a suffix (`crates/zeroship-data-sql/src/compile.rs`,
+`crates/zeroship-data-orm/src/protection/mask_pass.rs`).
 
 On writes, `apply_mask_on_write` computes the mask from plaintext, not from a later read-path decrypt, and a separate relocation stage - the ONE stage that owns physical placement, running after the encryption and bytes passes - moves the finished value to the raw column and writes the mask into the field's own. Encrypted columns use the encryption pass sidechannel, plain masked columns read directly from `row[col]`, `null` and absent values relocate nothing and write no mask, and `kind: "none"` skips the field entirely (`crates/zeroship-data-orm/src/protection/mask_pass.rs`). The shipped built-ins are `full`, `last4`, `first4`, `email`, `name`, `date-year`, `date-decade`, and `none` (`sdks/db/src/types.ts`, `crates/zeroship-data-orm/src/protection/mask_pass.rs`).
 
@@ -1668,12 +1676,29 @@ Plaintext reveal is always explicit. `await row.ssn.unmask({ actor?, reason? })`
 
 `defineMaskPolicy()` is the app-scoped authorization declaration for unmasking. It validates the classifications (`public`, `pii`, `spi`, `phi`, `pci`, `internal`) and snapshots a pending role-to-classification map for bootstrap to install. Declarations may be replaced during startup; after the startup flush, further calls fail with `MASK_POLICY_IMMUTABLE`. The policy is held in memory for the app and deployment. No database backend persists it, and changes require redeployment (`sdks/db/src/policy.ts`). If an app never calls `defineMaskPolicy()`, the fallback is strict: only the `auto` actor can unmask. If the app does declare a policy, `auto` still keeps full access unless the policy explicitly lists `auto` with a narrower set (`sdks/db/src/policy.ts`).
 
-Two sentinel formats are shipped, and they are unrelated to each other. `__zsmask__` is the read-side wire sentinel for a masked value payload (`sdks/db/src/types.ts`, `crates/zeroship-data-orm/src/protection/mask_pass.rs`, `crates/zeroship-data-v8/src/v8_classes/masked_value.rs`). `zero-migrate:mask:kind=<kind>,classification=<class>` is the schema/introspection sentinel the migration engine attaches to the field's own (masked) column as a database COMMENT, so the diff, the protection floor and the backfill paths can recover mask metadata from the live database definition (`crates/zeroship-migrate-backend/src/mask_codec.rs` writes it, `crates/zeroship-data-sql/src/mask_codec.rs` reads it). Its encryption peer is `zero-migrate:enc:<keyId>:<wraps>`, attached to the encrypted column itself. The schema sentinels were spelled `__zsmask:` / `zsenc:` on the reader side until 2026-09-04, which is one character from the payload sentinel above and was never what the engine wrote.
+Two sentinel formats are shipped, and they are unrelated to each other. `__zsmask__` is the read-side wire sentinel for a masked value payload (`sdks/db/src/types.ts`, `crates/zeroship-data-orm/src/protection/mask_pass.rs`, `crates/zeroship-data-v8/src/v8_classes/masked_value.rs`). `zero-migrate:mask:kind=<kind>,classification=<class>` is the schema/introspection sentinel the migration engine attaches to the field's own (masked) column as a database COMMENT, so the diff, the protection floor and the backfill paths can recover mask metadata from the live database definition (`crates/zeroship-migrate-backend/src/mask_codec.rs` writes it, `crates/zeroship-data-sql/src/mask_codec.rs` reads it). Its encryption peer is `zero-migrate:enc:<wraps>`, attached to the encrypted column itself. The schema sentinels were spelled `__zsmask:` / `zsenc:` on the reader side until 2026-09-04, which is one character from the payload sentinel above and was never what the engine wrote.
 
 Column encryption is always randomised. Each write uses a fresh nonce and
-binds authentication to the collection, column and row identity. The schema
-has no encryption `mode` option. Encrypted fields cannot be filtered (including
+binds authentication to the app, collection, column and row identity.
+Encrypted fields cannot be filtered (including
 equality and `IN`), sorted, grouped, or declared unique. Masking remains a
 separate read policy; disabling the mask does not enable encrypted queries.
 Use an ordinary field to locate a row before reading or updating its encrypted
 values. These rules apply to Rust callers and worker TypeScript alike.
+
+Runtime descriptors carry the logical plaintext type and an encryption flag:
+
+```json
+{ "type": "number", "encrypted": true, "mask": { "kind": "full", "classification": "pii" } }
+```
+
+The SDK declaration is `t.encrypted({ of: t.number() })`; `t.encrypted()`
+selects string plaintext. Rust writes, reads and unmasking share a native
+plaintext codec selected by `type`. Binary values remain native buffers.
+The physical catalog sentinel also records the plaintext type, since the
+stored SQL type describes ciphertext.
+
+The host supplies a project encryption key and explicit app-to-project bindings
+to the ORM. Every encrypted column in that project uses the same key. The ORM
+reads no column keys from environment variables or tenant tables. Control-plane
+key provisioning and delivery are not wired into the worker yet.

@@ -2,7 +2,7 @@
 # ============================================================================
 # e2e_app_primitives_auth.sh — close G3/ISS-54: exercise env.auth through the
 # REAL multi-node edge (worker → V8 → AuthPlugin), the last untested primitive.
-# Sibling of e2e_app_primitives_storage.sh (env.storage) and
+# Related suites: examples/storage-gallery/tests/ (env.storage) and
 # e2e_app_primitives.sh (env.db GREEN, Stage 5c).
 #
 # The identity injection (the crux):
