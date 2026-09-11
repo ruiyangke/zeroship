@@ -72,6 +72,11 @@ declare const globalThis: {
 // v2 carries per-collection fields/options/indexes, each field additionally naming
 // the physical columns it occupies (`storage`) and its read-surface capabilities.
 const descriptor = globalThis.__zsRuntimeDescriptor;
+// Vite's dev entry captured the private platform resolver during evaluation
+// and owns installation after importing the creator module. Sealing here would
+// freeze the default policy before the app could declare its startup policy.
+const deferredInstall = globalThis.__zsDeferSchemaInstall === true;
+delete globalThis.__zsDeferSchemaInstall;
 const hasDescriptor =
   descriptor != null &&
   typeof descriptor === "object" &&
@@ -118,7 +123,7 @@ function runtimeDescriptorFields(value: Record<string, unknown> | undefined): Re
 // map. If the descriptor is present but not v2-shaped, throw: corrupt
 // descriptors must never degrade to schema-less boots.
 const schema = hasDescriptor ? runtimeDescriptorFields(descriptor) : undefined;
-if (hasDescriptor && schema && typeof schema === "object") {
+if (!deferredInstall && hasDescriptor && schema && typeof schema === "object") {
   // Resolve the live env.db handle off the runtime's composite env
   // object. `__zs_env()` is the bootstrap-visible helper
   // (`crates/zeroship-runtime/src/core/init.rs::zs_env_callback`) that returns
