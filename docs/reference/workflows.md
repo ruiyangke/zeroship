@@ -3,11 +3,17 @@
 `@zeroship/workflows` is the creator-facing SDK for durable workflows. A
 workflow is a named TypeScript class whose `run(trigger, step)` body can pause,
 wait for signals, call child workflows, and survive process restarts because all
-durable progress is recorded in the control-plane journal.
+durable progress is recorded in an app-scoped workflow journal.
 
 The SDK types live in `sdks/workflows/`. The native `env.workflows` binding
 starts and controls runs from app code, and the control client exposes the
 token and topic broadcast helpers used by systems outside the app.
+
+This reference describes the current implementation. The finalized
+[workflow server design](../proposals/2026-09-11-workflow-server.md) replaces
+Control/Gateway workflow dispatch with a dedicated server and polling workers,
+and embeds the shared engine in local development. That refactor is pending;
+the local limitations and provisioning instructions below still apply today.
 
 ## Rust integration
 
