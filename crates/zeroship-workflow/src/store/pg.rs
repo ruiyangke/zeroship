@@ -63,8 +63,9 @@ impl PgStore {
         let lock = sql_string_literal(&format!("zeroship:workflow:provision:{app_id}"));
         platform_client
             .batch_execute(&format!(
-                "SELECT pg_advisory_xact_lock(hashtextextended({lock}, 0));\n{owner};\n{tables}\nRESET ROLE;\n{reconcile}\n{revoke}",
+                "SELECT pg_advisory_xact_lock(hashtextextended({lock}, 0));\n{owner};\n{table_locks}\n{tables}\nRESET ROLE;\n{reconcile}\n{revoke}",
                 owner = set_workflow_journal_owner_role_sql(),
+                table_locks = lock_existing_tables_sql(&tables),
                 tables = provision_sql(&tables),
                 reconcile = reconcile_owner_sql(&tables),
                 revoke = reassert_table_revokes_sql(&tables)?,
@@ -151,6 +152,17 @@ async fn open_conn(url: &str) -> Result<Client, WorkflowError> {
     })
     .detach();
     Ok(client)
+}
+
+fn lock_existing_tables_sql(tables: &WorkflowTables) -> String {
+    // Take the strongest locks before DDL can acquire weaker ones. Otherwise
+    // ALTER's lock upgrade can deadlock with an active journal transaction.
+    let locks = tables.all().into_iter().map(|table| {
+        let relation = sql_string_literal(table);
+        let statement = sql_string_literal(&format!("LOCK TABLE {table} IN ACCESS EXCLUSIVE MODE"));
+        format!("IF to_regclass({relation}) IS NOT NULL THEN EXECUTE {statement}; END IF;")
+    }).collect::<Vec<_>>().join("\n");
+    format!("DO $workflow_locks$ BEGIN {locks} END; $workflow_locks$;")
 }
 
 fn provision_sql(tables: &WorkflowTables) -> String {

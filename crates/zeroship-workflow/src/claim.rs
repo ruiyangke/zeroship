@@ -17,7 +17,7 @@ use crate::errors::WorkflowError;
 use crate::store::pg::{
     cascade_cancel_children_on_conn, compensation_progress_on_conn,
     collect_related_run_lock_ids_on_conn, emit_child_terminal_hook_on_conn,
-    insert_resolved_step_on_conn, lock_run_set_for_apply_on_conn, PgStore, WorkflowTables,
+    insert_resolved_step_on_conn, lock_run_set_for_apply_on_conn, WorkflowTables,
 };
 use crate::store::{ChildTerminalPayload, CompensationProgress, StepWriteOutcome};
 
@@ -52,6 +52,7 @@ struct CandidateRun {
     lease_expires: Option<DateTime<Utc>>,
 }
 
+/// Claim from an initialized app journal. Hosts provision it before dispatch.
 pub async fn claim_workflow_run(
     db_url: &str,
     request: &WorkflowRunDispatchRequest,
@@ -65,7 +66,6 @@ pub async fn claim_workflow_run(
     })
     .detach();
 
-    PgStore::provision(&client, &request.app_id).await?;
     let tx = client.transaction().await?;
     let outcome = claim_workflow_run_on_conn(&tx, request, config).await?;
     tx.commit().await?;

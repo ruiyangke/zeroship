@@ -61,3 +61,62 @@ async fn concurrent_control_and_worker_provisioning_preserves_the_journal() {
     drop(admin);
     driver.await.unwrap().unwrap();
 }
+
+#[compio::test]
+async fn provisioning_waits_without_blocking_an_active_journal_transaction() {
+    let database = Database::new();
+    let app = Uuid::new_v4();
+    let (admin, connection) = connect(&database.url(), NoTls).await.unwrap();
+    let admin_driver = compio::runtime::spawn(connection.run());
+    zeroship_migrate_server::provisioning::provision_workflow_journal_schema(&admin, &app)
+        .await
+        .unwrap();
+    let tables = PgStore::provision(&admin, &app).await.unwrap();
+    let (mut active, connection) = connect(&database.url(), NoTls).await.unwrap();
+    let active_driver = compio::runtime::spawn(connection.run());
+    let tx = active.transaction().await.unwrap();
+    tx.query(&format!("SELECT id FROM {} FOR UPDATE", tables.runs), &[])
+        .await
+        .unwrap();
+
+    let (provisioner, connection) = connect(&database.url(), NoTls).await.unwrap();
+    let provision_driver = compio::runtime::spawn(connection.run());
+    let pid: i32 = provisioner
+        .query_one("SELECT pg_backend_pid()", &[])
+        .await
+        .unwrap()
+        .get(0);
+    let provision = compio::runtime::spawn(async move {
+        let result = PgStore::provision(&provisioner, &app).await;
+        drop(provisioner);
+        provision_driver.await.unwrap().unwrap();
+        result
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let waiting: bool = admin.query_one(
+            "SELECT EXISTS(SELECT 1 FROM pg_locks WHERE pid = $1 AND relation = $2::text::regclass AND NOT granted)",
+            &[&pid, &tables.runs],
+        ).await.unwrap().get(0);
+        if waiting {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "provisioning must wait for the active journal transaction"
+        );
+        compio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    tx.execute(&format!("UPDATE {} SET state = state", tables.runs), &[])
+        .await
+        .expect("an active transaction must finish its update while provisioning waits");
+    tx.commit().await.unwrap();
+    provision
+        .await
+        .unwrap()
+        .expect("provision after the active transaction releases its locks");
+    drop(active);
+    drop(admin);
+    active_driver.await.unwrap().unwrap();
+    admin_driver.await.unwrap().unwrap();
+}
