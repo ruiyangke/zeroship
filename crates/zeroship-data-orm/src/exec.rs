@@ -1467,11 +1467,8 @@ mod tests {
     // cancelled query.
     // -------------------------------------------------------------------
     //
-    // PG-REQUIRED. Connects to the database the overlay names (or
-    // `PG_TEST_URL`) and PANICS, naming the provisioning command, when there
-    // is none. It used to fall back to `postgres://postgres:test@localhost:
-    // 5434/postgres` - a different server with different credentials - so a
-    // run with no overlay measured whatever was listening there.
+    // The test owns a PostgreSQL container. Docker or startup failure is a
+    // failed test; the live cancellation assertion always runs.
     //
     // The leak window this
     // test guards can only be observed against a real backend, so a run
@@ -1490,9 +1487,6 @@ mod tests {
     // reverts both, so the next checkout sees the clean login role and
     // default timeout.
 
-    fn pg_test_url() -> String {
-        zeroship_core::config::test_database_url()
-    }
 
     #[test]
     fn autocommit_cancelled_query_does_not_leak_role_or_timeout_to_pool() {
@@ -1501,7 +1495,8 @@ mod tests {
 
         reset_world("app_autocommit_cancelled_query_does_not_leak_role_or_timeout_to_pool");
         run(async {
-            let url = pg_test_url();
+            let postgres = crate::postgres_fixture::Postgres::start();
+            let url = postgres.url();
             match compio_postgres::connect(&url, NoTls).await {
                 Ok((client, connection)) => {
                     crate::orm_context::spawn(async move {

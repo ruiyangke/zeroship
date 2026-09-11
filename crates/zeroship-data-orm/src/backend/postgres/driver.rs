@@ -96,7 +96,8 @@ mod tests {
 
     #[compio::test]
     async fn native_exec_reports_command_counts() {
-        let pool = Pool::connect(&zeroship_core::config::test_database_url(), 2)
+        let postgres = crate::postgres_fixture::Postgres::start();
+        let pool = Pool::connect(&postgres.url(), 2)
             .await
             .unwrap();
         crate::driver::tests::native_commands(PostgresDriver::new(Rc::new(pool))).await;
@@ -104,7 +105,8 @@ mod tests {
 
     #[compio::test]
     async fn invalid_native_results_are_errors_and_the_session_remains_usable() {
-        let pool = Pool::connect(&zeroship_core::config::test_database_url(), 1)
+        let postgres = crate::postgres_fixture::Postgres::start();
+        let pool = Pool::connect(&postgres.url(), 1)
             .await
             .unwrap();
         let driver = PostgresDriver::new(Rc::new(pool));
@@ -138,7 +140,8 @@ mod tests {
 
     #[compio::test]
     async fn timestamp_rounding_is_consistent_across_epochs() {
-        let pool = Pool::connect(&zeroship_core::config::test_database_url(), 1)
+        let postgres = crate::postgres_fixture::Postgres::start();
+        let pool = Pool::connect(&postgres.url(), 1)
             .await
             .unwrap();
         let driver = PostgresDriver::new(Rc::new(pool));

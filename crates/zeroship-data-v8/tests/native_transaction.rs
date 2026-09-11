@@ -37,12 +37,8 @@
 //! continuously since it was installed; the false sentence above is why they
 //! were repeatedly waved through as "pre-existing".
 //!
-//! Requires: the test PostgreSQL named by the overlay
-//! (`deploy/ops/zeroship.test.toml`, written by
-//! `tests/provision_test_backends.sh`) or by `PG_TEST_URL`. There is no
-//! compiled default; see `crates/zeroship-core/src/config/test_overlay.rs`.
-//! Run: `cargo test -p zeroship-data-v8 --features test-helpers --test test_helpers \
-//!        -- --test-threads=1 native_transaction::`
+//! PostgreSQL comes from an owned testcontainer; Docker is required.
+//! Run: `cargo xtask test data --filter 'test(native_transaction::)'`
 //!
 //! Each runtime receives the same descriptor shape that a deploy carries; the
 //! tables are applied ahead of boot by the fixture. The orchestrator logic is
@@ -53,9 +49,7 @@
 //! `sqlite_integration.rs`, and the SDK-side mock tests in
 //! `sdks/db/tests/p9-pr3-native-transaction.test.ts`.
 
-// `support` is declared once by `tests/test_helpers.rs`, the entry file this
-// module hangs off; its header says why a second declaration here would be a
-// second copy of the `Once` guarding the residue sweep.
+// Shared fixture helpers are declared by `tests/test_helpers.rs`.
 use crate::support;
 
 use std::sync::Arc;
@@ -68,9 +62,7 @@ use zeroship_runtime::plugin::NativePlugin;
 use zeroship_runtime::runtime::Runtime;
 use zeroship_runtime::{EnvSnapshot, FetchOutcome, ModuleEntry, RequestCtx, SettledFetch, init_v8};
 
-fn pg_url() -> String {
-    zeroship_core::config::test_database_url()
-}
+
 
 thread_local! {
     /// ONE compio runtime per test thread, alive for the whole thread.
@@ -109,14 +101,15 @@ fn block_on<F: std::future::Future>(fut: F) -> F::Output {
 ///
 /// PostgreSQL is required by ordinary package tests. An unavailable server
 /// fails the test instead of reporting success without exercising a transaction.
-fn require_pg() -> String {
+fn require_pg() -> (crate::support::postgres::Postgres, String) {
     // Every test in this binary funnels through here, so this is the one place
     // that has to install the subscriber. Without it the runtime's sanitization
     // rail leaves a failure as a bare `{"message":"internal error"}` and the
     // real cause goes to a discarded tracing stream. No-op unless RUST_LOG is
     // set. See `support::init_test_tracing`.
     support::init_test_tracing();
-    let url = pg_url();
+    let postgres = crate::support::postgres::Postgres::start();
+    let url = postgres.url();
     let url_clone = url.clone();
     let ok = block_on(async move {
         match compio_postgres::connect(&url_clone, NoTls).await {
@@ -134,15 +127,9 @@ fn require_pg() -> String {
     });
     assert!(
         ok,
-        "native_transaction needs a live Postgres at {url}. Set PG_TEST_URL to \
-         override. This suite is opt-in, so it fails rather than skipping: a \
-         skipped run reports the same \"ok\" as a passing one."
+        "native_transaction could not connect to its PostgreSQL testcontainer at {url}"
     );
-    // Every test enters here before it touches the database, and
-    // `Once::call_once` blocks the rest until the first returns, so this is the
-    // barrier that makes an unbounded residue sweep safe.
-    support::sweep_prior_run_residue_once(&url);
-    url
+    (postgres, url)
 }
 
 // `APP_SCHEMA = "default"` lived here and is DELETED. Eleven of the fifteen
@@ -602,7 +589,7 @@ import {{ env }} from "zeroship";
 
 #[test]
 fn unmigrated_app_autocommit_response_names_migrate() {
-    let url = require_pg();
+    let (_postgres, url) = require_pg();
     let app_id = uuid::Uuid::new_v4().simple().to_string();
     let src = build_src(
         r#"
@@ -645,7 +632,7 @@ const _procedures = { autocommitBeforeMigrate };
 /// explicitly and reads `status` off the error object.
 #[test]
 fn unmigrated_app_transaction_response_names_migrate() {
-    let url = require_pg();
+    let (_postgres, url) = require_pg();
     let app_id = uuid::Uuid::new_v4().simple().to_string();
     let src = build_src(
         r#"
@@ -690,7 +677,7 @@ const _procedures = { transactionBeforeMigrate };
 /// the first arm's `try/catch` shape panicked the test first.
 #[test]
 fn revoked_grant_transaction_surfaces_grant_revoked() {
-    let admin_url = require_pg();
+    let (_postgres, admin_url) = require_pg();
     let suffix = uuid::Uuid::new_v4().simple().to_string();
     let app_id = format!("zs_txgrant_{suffix}");
     let login = format!("zs_txlogin_{}", &suffix[..16]);
@@ -700,7 +687,7 @@ fn revoked_grant_transaction_surfaces_grant_revoked() {
     let (scheme, address) = admin_url
         .split_once("://")
         .and_then(|(scheme, rest)| rest.rsplit_once('@').map(|(_, address)| (scheme, address)))
-        .expect("PG_TEST_URL must contain scheme and login credentials");
+        .expect("fixture URL must contain scheme and login credentials");
     let worker_url = format!("{scheme}://{login}:{password}@{address}");
 
     block_on(async {
@@ -866,7 +853,7 @@ const _procedures = {
 
 #[test]
 fn unmigrated_app_streaming_response_names_migrate() {
-    let url = require_pg();
+    let (_postgres, url) = require_pg();
     let app_id = uuid::Uuid::new_v4().simple().to_string();
     let src = [
         r#"import { env } from "zeroship";"#,
@@ -913,7 +900,7 @@ export default { fetch: _fetch, rpc: _procedures };
 /// Worker arguments and results preserve binary slices and wide integers.
 #[test]
 fn native_bytes_and_bigints_round_trip_through_worker_transactions() {
-    let url = require_pg();
+    let (_postgres, url) = require_pg();
     let app = crate::test_app_id!();
     let app = app.as_str();
     reset_schema(&url, app);
@@ -961,7 +948,7 @@ const _procedures = {nativeValues};
 
 #[test]
 fn native_json_types_round_trip_through_worker_transactions() {
-    let url = require_pg();
+    let (_postgres, url) = require_pg();
     let app = crate::test_app_id!();
     let app = app.as_str();
     reset_schema(&url, app);
@@ -1010,7 +997,7 @@ const _procedures = {jsonValues};
 
 #[test]
 fn timestamps_round_trip_through_worker_transactions() {
-    let url = require_pg();
+    let (_postgres, url) = require_pg();
     let app = crate::test_app_id!();
     let app = app.as_str();
     reset_schema(&url, app);
@@ -1076,7 +1063,7 @@ const _procedures = {timestamps};
 
 #[test]
 fn nested_timestamps_follow_worker_descriptors() {
-    let url = require_pg();
+    let (_postgres, url) = require_pg();
     let app = crate::test_app_id!();
     let app = app.as_str();
     reset_schema(&url, app);
@@ -1146,7 +1133,7 @@ const _procedures = {nestedTimestamps};
 
 #[test]
 fn array_updates_preserve_worker_json_elements() {
-    let url = require_pg();
+    let (_postgres, url) = require_pg();
     let app = crate::test_app_id!();
     let app = app.as_str();
     reset_schema(&url, app);
@@ -1196,7 +1183,7 @@ const _procedures = {arrays};
 
 #[test]
 fn update_validation_is_shared_by_native_and_sdk_worker_calls() {
-    let url = require_pg();
+    let (_postgres, url) = require_pg();
     let app = crate::test_app_id!();
     let app = app.as_str();
     reset_schema(&url, app);
@@ -1257,7 +1244,7 @@ const _procedures = {updates};
 
 #[test]
 fn native_worker_calls_validate_array_item_types() {
-    let url = require_pg();
+    let (_postgres, url) = require_pg();
     let app = crate::test_app_id!();
     let app = app.as_str();
     reset_schema(&url, app);
@@ -1315,7 +1302,7 @@ const _procedures = {arrayTypes};
 
 #[test]
 fn calendar_dates_round_trip_through_worker_transactions() {
-    let url = require_pg();
+    let (_postgres, url) = require_pg();
     let app = crate::test_app_id!();
     let app = app.as_str();
     reset_schema(&url, app);
@@ -1372,7 +1359,7 @@ const _procedures = {calendarDates};
 
 #[test]
 fn worker_upserts_preserve_platform_identity_and_reject_invalid_conflict_keys() {
-    let url = require_pg();
+    let (_postgres, url) = require_pg();
     let app = crate::test_app_id!();
     let app = app.as_str();
     reset_schema(&url, app);
@@ -1421,7 +1408,7 @@ const _procedures = {identities};
 
 #[test]
 fn transaction_commits_on_resolve() {
-    let url = require_pg();
+    let (_postgres, url) = require_pg();
     let app = crate::test_app_id!();
     let app = app.as_str();
     reset_schema(&url, app);
@@ -1459,7 +1446,7 @@ const _procedures = { commitOne };
 /// persists, and `transaction(fn)` rejects with the thrown error.
 #[test]
 fn transaction_rolls_back_on_async_reject() {
-    let url = require_pg();
+    let (_postgres, url) = require_pg();
     let app = crate::test_app_id!();
     let app = app.as_str();
     reset_schema(&url, app);
@@ -1514,7 +1501,7 @@ const _procedures = { insertThenThrow };
 /// orchestrator's TryCatch).
 #[test]
 fn transaction_sync_throw_in_callback_rolls_back() {
-    let url = require_pg();
+    let (_postgres, url) = require_pg();
     let app = crate::test_app_id!();
     let app = app.as_str();
     reset_schema(&url, app);
@@ -1551,7 +1538,7 @@ const _procedures = { syncThrow };
 /// without poisoning the whole tx.
 #[test]
 fn nested_inner_reject_rolls_back_to_savepoint_outer_continues() {
-    let url = require_pg();
+    let (_postgres, url) = require_pg();
     let app = crate::test_app_id!();
     let app = app.as_str();
     reset_schema(&url, app);
@@ -1619,7 +1606,7 @@ const _procedures = { nestedPartialFailure };
 /// would pass vacuously against the very defect it exists to catch.
 #[test]
 fn savepoint_rollback_must_not_publish_its_change_event_at_outer_commit() {
-    let url = require_pg();
+    let (_postgres, url) = require_pg();
     let app = crate::test_app_id!();
     let app = app.as_str();
     reset_schema(&url, app);
@@ -1681,7 +1668,7 @@ const _procedures = { savepointEmitLeak };
 /// COMMIT).
 #[test]
 fn nested_inner_resolve_releases_savepoint() {
-    let url = require_pg();
+    let (_postgres, url) = require_pg();
     let app = crate::test_app_id!();
     let app = app.as_str();
     reset_schema(&url, app);
@@ -1733,7 +1720,7 @@ const _procedures = { nestedBothCommit };
 /// `reachedLevel: 10`, which is the cap doing exactly its job.
 #[test]
 fn savepoint_depth_cap_8_exceeded_is_refused() {
-    let url = require_pg();
+    let (_postgres, url) = require_pg();
     let app = crate::test_app_id!();
     let app = app.as_str();
     reset_schema(&url, app);
@@ -1806,7 +1793,7 @@ const _procedures = { deepNest };
 /// `commit` / `rollback` / `collection` method.
 #[test]
 fn tx_view_has_no_lifecycle_methods() {
-    let url = require_pg();
+    let (_postgres, url) = require_pg();
     let app = crate::test_app_id!();
     let app = app.as_str();
     reset_schema(&url, app);
@@ -1863,7 +1850,7 @@ const _procedures = { probeTxView };
 /// reading it sees `undefined`.
 #[test]
 fn begin_transaction_not_on_env_db() {
-    let url = require_pg();
+    let (_postgres, url) = require_pg();
     let app = crate::test_app_id!();
     let app = app.as_str();
     reset_schema(&url, app);
@@ -1890,7 +1877,7 @@ const _procedures = { probeBegin };
 
 #[test]
 fn update_many_randomised_failure_is_atomic_postgres() {
-    let url = require_pg();
+    let (_postgres, url) = require_pg();
     let app = crate::test_app_id!();
     let app = app.as_str();
     reset_schema(&url, app);
@@ -2072,7 +2059,7 @@ const _procedures = { seed, failBulk };
 /// titles freely.
 #[test]
 fn commit_that_postgres_rolled_back_must_not_report_success_l8() {
-    let url = require_pg();
+    let (_postgres, url) = require_pg();
     let app = crate::test_app_id!();
     let app = app.as_str();
     reset_schema(&url, app);
@@ -2151,9 +2138,7 @@ const _procedures = { poisonThenCommit };
 /// ship against. Each arm below, if PostgreSQL behaved otherwise, would
 /// invalidate one specific modelling decision, and each names which.
 ///
-/// This module reuses the target's existing `pg_url()` - which is
-/// `zeroship_core::config::test_database_url()`, the typed accessor - so it
-/// introduces no environment variable of its own and calls no `set_var`.
+/// Each test owns the PostgreSQL server used by its sessions.
 ///
 /// Run with:
 ///
@@ -2170,7 +2155,7 @@ mod sc1_live {
         CleanupAck, CleanupGoal, SettleIntent, TerminalOutcome, TerminalResult,
     };
 
-    use super::{block_on, pg_url};
+    use super::block_on;
 
     /// Connect, and report the server actually reached.
     ///
@@ -2178,8 +2163,9 @@ mod sc1_live {
     /// claim published off the variable rather than the server is a recorded
     /// failure in this repository; the number below comes from the session
     /// that ran the assertions.
-    async fn connect() -> Client {
-        let url = pg_url();
+    async fn connect() -> (crate::support::postgres::Postgres, Client) {
+        let postgres = crate::support::postgres::Postgres::start();
+        let url = postgres.url();
         let (client, connection) = compio_postgres::connect(&url, NoTls)
             .await
             .unwrap_or_else(|e| panic!("sc1_live needs a live PostgreSQL at {url}: {e}"));
@@ -2193,7 +2179,7 @@ mod sc1_live {
             .expect("read server_version_num")
             .get(0);
         println!("sc1_live oracle: server_version_num={version}");
-        client
+        (postgres, client)
     }
 
     /// Project PostgreSQL's health oracle onto SC-1's acknowledgement.
@@ -2226,7 +2212,7 @@ mod sc1_live {
     #[test]
     fn a_commit_in_a_failed_transaction_is_answered_with_the_rollback_tag() {
         block_on(async {
-            let client = connect().await;
+            let (_postgres, client) = connect().await;
             client.batch_execute("BEGIN").await.expect("BEGIN");
             client
                 .batch_execute("CREATE TEMP TABLE sc1_live_probe (id int)")
@@ -2281,7 +2267,7 @@ mod sc1_live {
     #[test]
     fn a_rolled_back_savepoint_stays_defined_and_a_reused_name_shadows_it() {
         block_on(async {
-            let client = connect().await;
+            let (_postgres, client) = connect().await;
             client.batch_execute("BEGIN").await.expect("BEGIN");
             client
                 .batch_execute("CREATE TEMP TABLE sc1_live_probe (tag text)")
@@ -2362,7 +2348,7 @@ mod sc1_live {
     #[test]
     fn transaction_status_is_the_oracle_the_cleanup_goals_read() {
         block_on(async {
-            let client = connect().await;
+            let (_postgres, client) = connect().await;
 
             assert_eq!(
                 client.transaction_status(),
@@ -2472,9 +2458,7 @@ mod sc1_live {
 /// disposition, the pool, and the savepoint names that actually reached the
 /// wire.
 ///
-/// It reuses this target's `pg_url()` - `zeroship_core::config::test_database_url()`,
-/// the typed accessor - so it introduces no environment variable of its own and
-/// calls no `set_var`.
+/// Each test owns the PostgreSQL server used by its sessions.
 ///
 /// Every arm uses a unique `zs_sc1drv_*` app id and drops the role and schema it
 /// created, so a shared server is left as it was found.
@@ -2492,7 +2476,7 @@ mod sc1_driver {
         CleanupCause, SessionOwnership, TerminalOutcome, TxState,
     };
 
-    use super::{block_on, pg_url};
+    use super::block_on;
 
     /// The backend `probe::begin` takes as a parameter.
     ///
@@ -2523,8 +2507,7 @@ mod sc1_driver {
     /// claim published off the variable rather than the server is a recorded
     /// failure in this repository; the number below comes from the session that
     /// ran the assertions.
-    async fn admin() -> Client {
-        let url = pg_url();
+    async fn admin(url: &str) -> Client {
         let (client, connection) = compio_postgres::connect(&url, NoTls)
             .await
             .unwrap_or_else(|e| panic!("sc1_driver needs a live PostgreSQL at {url}: {e}"));
@@ -2548,8 +2531,10 @@ mod sc1_driver {
     /// "did the session come back" is answerable by taking the next checkout and
     /// comparing its backend PID, with no chance of being handed a different
     /// idle entry.
-    async fn provision(app_id: &str) -> Client {
-        let client = admin().await;
+    async fn provision(app_id: &str) -> (crate::support::postgres::Postgres, Client) {
+        let postgres = crate::support::postgres::Postgres::start();
+        let url = postgres.url();
+        let client = admin(&url).await;
         let role = zeroship_core::database_role::per_app_role_name(app_id)
             .expect("transaction fixture app id must produce a valid PostgreSQL role name");
         client
@@ -2566,11 +2551,11 @@ mod sc1_driver {
             .await
             .unwrap_or_else(|e| panic!("provision {app_id}: {e}"));
 
-        let pool = Pool::connect(&pg_url(), 1)
+        let pool = Pool::connect(&url, 1)
             .await
             .expect("a one-connection pool for the driver to check out from");
-        crate::support::install_postgres_pool(std::rc::Rc::new(pool), &pg_url());
-        client
+        crate::support::install_postgres_pool(std::rc::Rc::new(pool), &url);
+        (postgres, client)
     }
 
     /// Drop everything the arm created, and clear this thread's driver state.
@@ -2628,7 +2613,7 @@ mod sc1_driver {
     fn a_forced_cleanup_on_a_poisoned_block_keeps_a_healthy_connection() {
         const APP: &str = "zs_sc1drv_poisoned";
         block_on(async {
-            let admin = provision(APP).await;
+            let (_postgres, admin) = provision(APP).await;
             let _session_guard = SessionGuard(APP);
 
             probe::begin(APP, app_schema(APP), None, probe_backend().await)
@@ -2739,7 +2724,7 @@ mod sc1_driver {
     fn a_withdrawn_session_never_comes_back_from_the_pool() {
         const APP: &str = "zs_sc1drv_withdraw";
         block_on(async {
-            let admin = provision(APP).await;
+            let (_postgres, admin) = provision(APP).await;
             let _session_guard = SessionGuard(APP);
 
             probe::begin(APP, app_schema(APP), None, probe_backend().await)
@@ -2888,7 +2873,7 @@ mod sc1_driver {
     fn a_forced_cleanup_cancels_the_running_statement_and_keeps_the_connection() {
         const APP: &str = "zs_sc1drv_cancelrun";
         block_on(async {
-            let admin = provision(APP).await;
+            let (_postgres, admin) = provision(APP).await;
             let _session_guard = SessionGuard(APP);
 
             probe::begin(APP, app_schema(APP), None, probe_backend().await)
@@ -3012,7 +2997,7 @@ mod sc1_driver {
     fn a_cleanup_that_outlived_its_transaction_leaves_the_slot_alone() {
         const APP: &str = "zs_sc1drv_stalecleanup";
         block_on(async {
-            let admin = provision(APP).await;
+            let (_postgres, admin) = provision(APP).await;
             let _session_guard = SessionGuard(APP);
 
             probe::begin(APP, app_schema(APP), None, probe_backend().await)
@@ -3079,7 +3064,7 @@ mod sc1_driver {
     fn dispatch_emits_the_reducers_monotonic_savepoint_names() {
         const APP: &str = "zs_sc1drv_names";
         block_on(async {
-            let admin = provision(APP).await;
+            let (_postgres, admin) = provision(APP).await;
             let _session_guard = SessionGuard(APP);
 
             probe::begin(APP, app_schema(APP), None, probe_backend().await)
@@ -3177,7 +3162,7 @@ mod sc1_driver {
     fn a_deadline_that_fires_in_preparing_settles_without_a_begin() {
         const APP: &str = "zs_sc1drv_preparing";
         block_on(async {
-            let admin = provision(APP).await;
+            let (_postgres, admin) = provision(APP).await;
             let _session_guard = SessionGuard(APP);
 
             // Admit, and stop there. `admit_in_preparing_for_tests` performs the

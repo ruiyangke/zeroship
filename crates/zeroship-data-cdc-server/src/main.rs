@@ -12,6 +12,10 @@ mod server;
 mod source;
 mod transaction;
 
+#[cfg(test)]
+#[path = "../../../tests/fixtures/postgres/mod.rs"]
+mod postgres_fixture;
+
 #[compio::main]
 async fn main() {
     let (settings, boot) = bootstrap_or_exit::<CdcServerSettings>(

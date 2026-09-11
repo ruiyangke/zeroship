@@ -193,7 +193,8 @@ mod tests {
 
     #[compio::test]
     async fn committed_changes_fan_out_without_values_and_rollback_stays_silent() {
-        let url = zeroship_core::config::test_database_url();
+        let postgres = crate::postgres_fixture::Postgres::start();
+        let url = postgres.url();
         let pool = Pool::connect(&url, 4).await.expect("required PostgreSQL");
         let app = zeroship_core::typed_id::generate(zeroship_core::typed_id::APP_PREFIX);
         let publication = zeroship_core::replication_names::publication_name(&app).unwrap();

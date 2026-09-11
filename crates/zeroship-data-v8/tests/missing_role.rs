@@ -13,14 +13,8 @@
 //! the measured failure. That also makes this the test that fails if the
 //! contextual session-setup arm is deleted.
 //!
-//! Requires: the test PostgreSQL named by the overlay
-//! (`deploy/ops/zeroship.test.toml`, written by
-//! `tests/provision_test_backends.sh`) or by `PG_TEST_URL`. There is no
-//! compiled default: this file used to fall back to `localhost:5434`, a
-//! DIFFERENT server with different credentials, so a run with no overlay
-//! silently measured whatever happened to be listening there.
-//! Run: `cargo test -p zeroship-data-v8 --features test-helpers \
-//!       --test test_helpers -- --test-threads=1 missing_role::`
+//! PostgreSQL comes from an owned testcontainer; Docker is required.
+//! Run: `cargo xtask test data --filter 'test(missing_role::)'`
 //!
 //! WHAT THIS TEST DOES NOT CATCH:
 //!   - The HTTP boundary. It asserts the classification and the message
@@ -43,20 +37,19 @@ use zeroship_data_orm::backend::pg_error;
 // so it arrives as a trait from plugin-db rather than an inherent method.
 use zeroship_data_v8::op_error::ToOpError;
 
-fn test_url() -> String {
-    zeroship_core::config::test_database_url()
-}
 
-async fn connect_test_client() -> compio_postgres::Client {
-    let url = test_url();
+
+async fn connect_test_client() -> (crate::support::postgres::Postgres, compio_postgres::Client) {
+    let postgres = crate::support::postgres::Postgres::start();
+    let url = postgres.url();
     let (client, connection) = compio_postgres::connect(&url, NoTls)
         .await
-        .unwrap_or_else(|e| panic!("live-Postgres test requires a server at PG_TEST_URL: {e}"));
+        .unwrap_or_else(|e| panic!("live-Postgres test could not connect to its PostgreSQL testcontainer: {e}"));
     compio::runtime::spawn(async move {
         let _ = connection.run().await;
     })
     .detach();
-    client
+    (postgres, client)
 }
 
 fn read_startup_packet(stream: &mut std::net::TcpStream) {
@@ -162,7 +155,7 @@ async fn drain_pg() {
 /// Drive a real `SET LOCAL ROLE` against a role that does not exist and
 /// hand the resulting server error to the classifier.
 async fn classify_missing_role(app_id: &str) -> DbError {
-    let client = connect_test_client().await;
+    let (_postgres, client) = connect_test_client().await;
     let role = zeroship_core::database_role::per_app_role_name(app_id)
         .expect("missing-role fixture app id must produce a valid PostgreSQL role name");
 
@@ -264,10 +257,11 @@ async fn a_real_internal_pg_failure_is_still_internal() {
     // reports. The only thing separating the two is the server's primary
     // message, so this proves the discriminator narrows rather than
     // rubber-stamping the SQLSTATE.
-    let url = test_url();
+    let postgres = crate::support::postgres::Postgres::start();
+    let url = postgres.url();
     let (client, connection) = compio_postgres::connect(&url, NoTls)
         .await
-        .unwrap_or_else(|e| panic!("live-Postgres test requires a server at PG_TEST_URL: {e}"));
+        .unwrap_or_else(|e| panic!("live-Postgres test could not connect to its PostgreSQL testcontainer: {e}"));
     compio::runtime::spawn(async move {
         let _ = connection.run().await;
     })

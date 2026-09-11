@@ -1,15 +1,7 @@
 //! Integration tests for plugin-db query builders against real Postgres.
 //!
-//! Requires: the test PostgreSQL named by the overlay
-//! (`deploy/ops/zeroship.test.toml`, written by
-//! `tests/provision_test_backends.sh`) or by `PG_TEST_URL`. There is no
-//! compiled default; see `crates/zeroship-core/src/config/test_overlay.rs`.
-//! Run:
-//! ```text
-//! RUST_MIN_STACK=33554432 \
-//! cargo test -p zeroship-data-v8 --test test_helpers \
-//!   -- --skip sqlite_integration:: integration::
-//! ```
+//! PostgreSQL comes from an owned testcontainer; Docker is required.
+//! Run: `cargo xtask test data --filter 'test(integration::)'`
 //!
 //! This file is a module of the `test_helpers` target rather than a target of
 //! its own (`tests/main.rs` says why), so selecting it is a libtest FILTER on
@@ -34,9 +26,7 @@ use zeroship_data_orm::binding::DbBinding;
 use zeroship_data_sql::value::{Value, value};
 
 
-fn test_url() -> String {
-    zeroship_core::config::test_database_url()
-}
+
 
 /// The backend handle the unmask entry points now take as a parameter.
 ///
@@ -60,8 +50,9 @@ async fn unmask_route(app: &str) -> zeroship_data_orm::tx_route::TxRoute {
     zeroship_data_orm::exec::ambient_route_for_tests(app, unmask_backend().await)
 }
 
-async fn require_pg() -> String {
-    let url = test_url();
+async fn require_pg() -> (crate::support::postgres::Postgres, String) {
+    let postgres = crate::support::postgres::Postgres::start();
+    let url = postgres.url();
     match compio_postgres::connect(&url, NoTls).await {
         Ok((client, connection)) => {
             // Drive the connection just long enough to drop both halves.
@@ -70,18 +61,13 @@ async fn require_pg() -> String {
             })
             .detach();
             drop(client);
-            // Every test enters here before it touches the database, and
-            // `Once::call_once` blocks the rest until the first returns, so this
-            // is the barrier that makes an unbounded residue sweep safe. See
-            // `support::sweep_prior_run_residue_once`.
-            support::sweep_prior_run_residue_once(&url);
             // The transaction orchestrator opens a
             // dedicated client via the Backend trait's
             // `fixture_session`, which reads the URL from the
             // per-thread context. Tests that drive the orchestrator directly
             // need the URL installed in the context before the call.
             zeroship_data_v8::testing::set_db_url_for_tests(&url);
-            url
+            (postgres, url)
         }
         Err(e) => {
             // Fail this test rather than exiting the process.
@@ -96,7 +82,7 @@ async fn require_pg() -> String {
             // A panic costs the honest thing instead: this test fails, its
             // siblings keep running, and the summary says what happened. The
             // database is required by the ordinary test suite.
-            panic!("live-Postgres suite requires a reachable server at PG_TEST_URL: {e}");
+            panic!("live-Postgres suite could not connect to its PostgreSQL testcontainer: {e}");
         }
     }
 }
@@ -349,13 +335,14 @@ fn connections_do_not_outlive_the_runtime_that_opened_them() {
     }
     const ITERATIONS: usize = 40;
 
+    let postgres = crate::support::postgres::Postgres::start();
     let baseline = open_sockets();
     for _ in 0..ITERATIONS {
-        std::thread::spawn(|| {
+        let url = postgres.url();
+        std::thread::spawn(move || {
             compio::runtime::Runtime::new()
                 .expect("cannot create runtime")
                 .block_on(async {
-                    let url = test_url();
                     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
                     pool.execute("SELECT 1", &[]).await.unwrap();
                     release_pg(pool).await;
@@ -408,20 +395,11 @@ fn weather_schema() -> Value {
 
 /// Postgres and the dev SQLite tier must hand `env.db` callers the same JSON.
 ///
-/// NOT `#[ignore]`, and that is the point of this test's history. It carried
-/// `#[ignore = "requires live postgres; default gate runs the sqlite leg only"]`
-/// until 2026-08-21, which was false in both halves: every one of its 108
-/// siblings in this file requires live Postgres and none of them is ignored, and
-/// the default gate for this target is `tests/run_data_v8_live_suite.sh`, which
-/// runs it WITHOUT `--ignored`. So the attribute did not describe a prerequisite -
-/// it removed the test from the only job that could have run it, and that is how
-/// the 2026-08-10 schema-authority cutover left it broken for eleven days with
-/// every gate green. It now fails the way its siblings do: `require_pg`
-/// panics rather than skipping, because a run that reports "ok" against no
-/// database says the opposite of the truth.
+/// Included in the native data suite. Missing PostgreSQL prerequisites fail
+/// through `require_pg`; they never turn this comparison into a skipped leg.
 #[compio::test]
 async fn parity_matrix_pg_matches_sqlite_projection() {
-    let pg_url = require_pg().await;
+    let (_postgres, pg_url) = require_pg().await;
     let sqlite_dir = tempfile::tempdir().expect("create sqlite parity dir");
 
     let app = crate::test_app_id!();
@@ -476,7 +454,7 @@ async fn parity_matrix_pg_matches_sqlite_projection() {
 /// `crud::bytes_pass` it is `\xdeadbeef`.
 #[compio::test]
 async fn bytes_column_stores_raw_bytes_on_postgres() {
-    let pg_url = require_pg().await;
+    let (_postgres, pg_url) = require_pg().await;
     let app = crate::test_app_id!();
     let pg = parity::run_matrix(&pg_url, &app);
 
@@ -558,7 +536,7 @@ fn hex_of(bytes: &[u8]) -> String {
 
 #[compio::test]
 async fn insert_and_find() {
-    let url = require_pg().await;
+    let (_postgres, url) = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     let schema = crate::test_app_id!();
     let schema = schema.as_str();
@@ -602,7 +580,7 @@ async fn insert_and_find() {
 
 #[compio::test]
 async fn insert_many_round_trip() {
-    let url = require_pg().await;
+    let (_postgres, url) = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     let schema = crate::test_app_id!();
     let schema = schema.as_str();
@@ -650,7 +628,7 @@ async fn insert_many_round_trip() {
 
 #[compio::test]
 async fn update_one_inc() {
-    let url = require_pg().await;
+    let (_postgres, url) = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     let schema = crate::test_app_id!();
     let schema = schema.as_str();
@@ -699,7 +677,7 @@ async fn update_one_inc() {
 
 #[compio::test]
 async fn update_one_dec_mul() {
-    let url = require_pg().await;
+    let (_postgres, url) = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     let schema = crate::test_app_id!();
     let schema = schema.as_str();
@@ -746,7 +724,7 @@ async fn update_one_dec_mul() {
 
 #[compio::test]
 async fn update_one_jsonb_array_ops() {
-    let url = require_pg().await;
+    let (_postgres, url) = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     let schema = crate::test_app_id!();
     let schema = schema.as_str();
@@ -837,7 +815,7 @@ async fn update_one_jsonb_array_ops() {
 
 #[compio::test]
 async fn update_many_round_trip() {
-    let url = require_pg().await;
+    let (_postgres, url) = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     let schema = crate::test_app_id!();
     let schema = schema.as_str();
@@ -911,7 +889,7 @@ async fn update_many_round_trip() {
 
 #[compio::test]
 async fn delete_operations() {
-    let url = require_pg().await;
+    let (_postgres, url) = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     let schema = crate::test_app_id!();
     let schema = schema.as_str();
@@ -1000,7 +978,7 @@ async fn delete_operations() {
 
 #[compio::test]
 async fn filter_comparison_operators() {
-    let url = require_pg().await;
+    let (_postgres, url) = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     let schema = crate::test_app_id!();
     let schema = schema.as_str();
@@ -1104,7 +1082,7 @@ async fn filter_comparison_operators() {
 
 #[compio::test]
 async fn filter_logical_operators() {
-    let url = require_pg().await;
+    let (_postgres, url) = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     let schema = crate::test_app_id!();
     let schema = schema.as_str();
@@ -1178,7 +1156,7 @@ async fn filter_logical_operators() {
 
 #[compio::test]
 async fn filter_pattern_operators() {
-    let url = require_pg().await;
+    let (_postgres, url) = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     let schema = crate::test_app_id!();
     let schema = schema.as_str();
@@ -1236,7 +1214,7 @@ async fn filter_pattern_operators() {
 
 #[compio::test]
 async fn find_with_options() {
-    let url = require_pg().await;
+    let (_postgres, url) = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     let schema = crate::test_app_id!();
     let schema = schema.as_str();
@@ -1297,7 +1275,7 @@ async fn find_with_options() {
 
 #[compio::test]
 async fn find_with_projection() {
-    let url = require_pg().await;
+    let (_postgres, url) = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     let schema = crate::test_app_id!();
     let schema = schema.as_str();
@@ -1339,7 +1317,7 @@ async fn find_with_projection() {
 
 #[compio::test]
 async fn distinct_values() {
-    let url = require_pg().await;
+    let (_postgres, url) = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     let schema = crate::test_app_id!();
     let schema = schema.as_str();
@@ -1398,7 +1376,7 @@ async fn distinct_values() {
 
 #[compio::test]
 async fn count_with_filter() {
-    let url = require_pg().await;
+    let (_postgres, url) = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     let schema = crate::test_app_id!();
     let schema = schema.as_str();
@@ -1462,7 +1440,7 @@ async fn count_with_filter() {
 
 #[compio::test]
 async fn aggregate_full() {
-    let url = require_pg().await;
+    let (_postgres, url) = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     let schema = crate::test_app_id!();
     let schema = schema.as_str();
@@ -1518,7 +1496,7 @@ async fn aggregate_full() {
 
 #[compio::test]
 async fn aggregate_multi_group() {
-    let url = require_pg().await;
+    let (_postgres, url) = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     let schema = crate::test_app_id!();
     let schema = schema.as_str();
@@ -1566,7 +1544,7 @@ async fn aggregate_multi_group() {
 
 #[compio::test]
 async fn aggregate_having() {
-    let url = require_pg().await;
+    let (_postgres, url) = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     let schema = crate::test_app_id!();
     let schema = schema.as_str();
@@ -1617,7 +1595,7 @@ async fn aggregate_having() {
 
 #[compio::test]
 async fn null_handling() {
-    let url = require_pg().await;
+    let (_postgres, url) = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     let schema = crate::test_app_id!();
     let schema = schema.as_str();
@@ -1698,7 +1676,7 @@ async fn null_handling() {
 
 #[compio::test]
 async fn mixed_update() {
-    let url = require_pg().await;
+    let (_postgres, url) = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     let schema = crate::test_app_id!();
     let schema = schema.as_str();
@@ -1736,7 +1714,7 @@ async fn mixed_update() {
 
 #[compio::test]
 async fn timestamps_as_numbers() {
-    let url = require_pg().await;
+    let (_postgres, url) = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     let schema = crate::test_app_id!();
     let schema = schema.as_str();
@@ -1764,7 +1742,7 @@ async fn timestamps_as_numbers() {
 
 #[compio::test]
 async fn aggregate_having_postgres_docs_example() {
-    let url = require_pg().await;
+    let (_postgres, url) = require_pg().await;
     let schema = crate::test_app_id!();
     let schema = schema.as_str();
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
@@ -1870,7 +1848,7 @@ async fn aggregate_having_postgres_docs_example() {
 
 #[compio::test]
 async fn a1_unique_index_actually_enforces_uniqueness() {
-    let url = require_pg().await;
+    let (_postgres, url) = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
 
     // Fresh schema + table — `build_create_table` is the production path.
@@ -2115,7 +2093,7 @@ CREATE TABLE "{app}"."posts" ({PG_SYSTEM_COLUMNS},
 
 #[compio::test]
 async fn b2_ref_creates_foreign_key() {
-    let url = require_pg().await;
+    let (_postgres, url) = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
 
     let app = crate::test_app_id!();
@@ -2173,7 +2151,7 @@ SELECT con.conname AS name,
 
 #[compio::test]
 async fn b2_ref_blocks_orphan_insert() {
-    let url = require_pg().await;
+    let (_postgres, url) = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
 
     let app = crate::test_app_id!();
@@ -2204,7 +2182,7 @@ async fn b2_ref_blocks_orphan_insert() {
 
 #[compio::test]
 async fn b2_ref_on_delete_restrict_blocks_parent_delete() {
-    let url = require_pg().await;
+    let (_postgres, url) = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
 
     let app = crate::test_app_id!();
@@ -2254,7 +2232,7 @@ async fn b2_ref_on_delete_restrict_blocks_parent_delete() {
 
 #[compio::test]
 async fn b2_ref_on_delete_cascade_deletes_children() {
-    let url = require_pg().await;
+    let (_postgres, url) = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
 
     let app = crate::test_app_id!();
@@ -2332,7 +2310,7 @@ CREATE TABLE "{app}"."posts" ({PG_SYSTEM_COLUMNS},
 
 #[compio::test]
 async fn b2_circular_refs_via_deferrable() {
-    let url = require_pg().await;
+    let (_postgres, url) = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
 
     let app = crate::test_app_id!();
@@ -2595,7 +2573,7 @@ async fn gap_b_end_to_end_insert_inside_tx_defers_emit_until_commit() {
     // End-to-end: real Postgres tx, real `exec_mutation_with_emit`
     // call. Pre-commit the broker stays empty; post-drain it sees
     // the insert.
-    let url = require_pg().await;
+    let (_postgres, url) = require_pg().await;
     zeroship_data_v8::testing::set_db_url_for_tests(&url);
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
 
@@ -2746,23 +2724,7 @@ async fn require_pgvector(pool: &Pool) {
         .is_empty();
     assert!(
         installed,
-        "The `vector` extension is not installed, and this test requires it.\n\
-         \n\
-         \x20 backend:   PostgreSQL\n\
-         \x20 extension: vector (pgvector)\n\
-         \n\
-         `CREATE EXTENSION IF NOT EXISTS vector` did not leave a row in\n\
-         pg_extension. Check what the server has to offer:\n\
-         \x20 SELECT * FROM pg_available_extensions WHERE name = 'vector';\n\
-         \n\
-         NO SERVER THIS REPOSITORY PROVISIONS CARRIES IT. deploy/compose's\n\
-         `postgres` service - the one tests/provision_test_backends.sh starts -\n\
-         runs the stock `postgres:16` image, which does not bundle pgvector.\n\
-         Point the tests at a server that does, or swap that image for\n\
-         `pgvector/pgvector:pg16` (docs/runbooks/docker-compose.md) and re-create\n\
-         the container.\n\
-         \n\
-         There is no environment variable that makes this a skip."
+        "The PostgreSQL testcontainer must provide the `vector` extension; check tests/fixtures/postgres/Dockerfile and extensions.sql."
     );
 }
 
@@ -2781,7 +2743,7 @@ async fn require_pgvector(pool: &Pool) {
 async fn vector_search_returns_k_nearest() {
     use zeroship_data_orm::backend::{PostgresBackend, VectorMetric};
 
-    let url = require_pg().await;
+    let (_postgres, url) = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
     require_pgvector(&pool).await;
 
@@ -2953,7 +2915,7 @@ async fn pgvector_extension_missing_reports_typed_error() {
     use zeroship_data_orm::error::DbError;
     use zeroship_data_orm::backend::{PostgresBackend, VectorMetric};
 
-    let url = require_pg().await;
+    let (_postgres, url) = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
 
     // This test needs the extension ABSENT - it asserts the shape of the error
@@ -3073,7 +3035,7 @@ async fn pgvector_extension_missing_reports_typed_error() {
 /// expected vs. actual dim count.
 #[compio::test]
 async fn vector_dimension_mismatch_rejected_at_insert() {
-    let url = require_pg().await;
+    let (_postgres, url) = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
     require_pgvector(&pool).await;
 
@@ -3158,7 +3120,7 @@ async fn vector_dimension_mismatch_rejected_at_insert() {
 async fn near_returns_within_radius() {
     use zeroship_data_orm::backend::{GeoPoint, PostgresBackend};
 
-    let url = require_pg().await;
+    let (_postgres, url) = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
     require_postgis(&pool).await;
 
@@ -3293,7 +3255,7 @@ async fn postgis_extension_missing_reports_typed_error() {
     use zeroship_data_orm::error::DbError;
     use zeroship_data_orm::backend::{GeoPoint, PostgresBackend};
 
-    let url = require_pg().await;
+    let (_postgres, url) = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
 
     // This test needs the extension ABSENT - it asserts the shape of the error
@@ -3441,7 +3403,7 @@ fn with_root_key(key_id: &str, root_hex: &str) -> zeroship_data_v8::testing::Sup
 /// read it back via the PG path, expect the plaintext to recover.
 #[compio::test]
 async fn encrypted_column_round_trip_randomised() {
-    let url = require_pg().await;
+    let (_postgres, url) = require_pg().await;
     let schema = crate::test_app_id!();
     let schema = schema.as_str();
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
@@ -3532,7 +3494,7 @@ async fn encrypted_column_round_trip_randomised() {
 /// defeats the ciphertext-oracle attack on randomised columns).
 #[compio::test]
 async fn encrypted_randomised_row_swap_rejected() {
-    let url = require_pg().await;
+    let (_postgres, url) = require_pg().await;
     let schema = crate::test_app_id!();
     let schema = schema.as_str();
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
@@ -3644,7 +3606,7 @@ async fn encrypted_randomised_row_swap_rejected() {
 /// automatic B-tree index from `build_create_indexes`.
 #[compio::test]
 async fn encrypted_deterministic_equality_lookup() {
-    let url = require_pg().await;
+    let (_postgres, url) = require_pg().await;
     let schema = crate::test_app_id!();
     let schema = schema.as_str();
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
@@ -3771,7 +3733,7 @@ async fn encrypted_deterministic_equality_lookup() {
 /// Postgres table, end to end.
 #[compio::test]
 async fn p4_round_trip_encrypted_masked_vector_via_descriptor_metadata() {
-    let url = require_pg().await;
+    let (_postgres, url) = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
     let _keys = with_root_key("default", &"d".repeat(64));
 
@@ -4031,7 +3993,7 @@ async fn schema_relation_count(pool: &std::rc::Rc<Pool>, app: &str) -> Option<i6
 /// reasoning. The round trip below is unchanged.
 #[compio::test]
 async fn p5_pg_crud_works_via_engine_created_schema_without_runtime_ddl() {
-    let url = require_pg().await;
+    let (_postgres, url) = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
     let _keys = with_root_key("default", &"e".repeat(64));
 
@@ -4214,7 +4176,7 @@ CREATE TABLE "{app}"."people" ({PG_SYSTEM_COLUMNS},
 /// or returning Internal.
 #[compio::test]
 async fn encrypted_column_missing_key_typed_error() {
-    let url = require_pg().await;
+    let (_postgres, url) = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     // Resolve against a source that provably has NO key: an empty
     // supplied set. The previous form deleted one env var name and
@@ -4246,7 +4208,7 @@ async fn encrypted_column_missing_key_typed_error() {
 
 #[compio::test]
 async fn pg_bytea_decoder_preserves_raw_binary_prefix_bytes() {
-    let url = require_pg().await;
+    let (_postgres, url) = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     let rows = pool
         .query_text_params(
@@ -4359,7 +4321,7 @@ fn require_pg_client_tool(tool: &str) {
 /// `pg_dump`.
 #[compio::test]
 async fn snapshot_during_migration_returns_typed_error() {
-    let url = require_pg().await;
+    let (_postgres, url) = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     let backend = zeroship_data_orm::backend::PostgresBackend::new(
         pool.clone(),
@@ -4445,7 +4407,7 @@ async fn snapshot_during_migration_returns_typed_error() {
 /// never performed.
 #[compio::test]
 async fn snapshot_restore_round_trip_pg() {
-    let url = require_pg().await;
+    let (_postgres, url) = require_pg().await;
     require_pg_client_tool("pg_dump");
     require_pg_client_tool("pg_restore");
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
@@ -4568,7 +4530,7 @@ async fn snapshot_restore_round_trip_pg() {
 /// from the run.
 #[compio::test]
 async fn snapshot_uri_content_hash_round_trip() {
-    let url = require_pg().await;
+    let (_postgres, url) = require_pg().await;
     require_pg_client_tool("pg_dump");
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     let app_id = crate::test_app_id!();
@@ -4783,29 +4745,13 @@ async fn require_postgis(pool: &Pool) {
         .is_empty();
     assert!(
         installed,
-        "The `postgis` extension is not installed, and this test requires it.\n\
-         \n\
-         \x20 backend:   PostgreSQL\n\
-         \x20 extension: postgis\n\
-         \n\
-         `CREATE EXTENSION IF NOT EXISTS postgis` did not leave a row in\n\
-         pg_extension. Check what the server has to offer:\n\
-         \x20 SELECT * FROM pg_available_extensions WHERE name = 'postgis';\n\
-         \n\
-         NO SERVER THIS REPOSITORY PROVISIONS CARRIES IT. deploy/compose's\n\
-         `postgres` service - the one tests/provision_test_backends.sh starts -\n\
-         runs the stock `postgres:16` image, which does not bundle PostGIS.\n\
-         Point the tests at a server that does, or swap that image for a\n\
-         PostGIS-bundled variant such as `postgis/postgis:16-3.4` and re-create\n\
-         the container.\n\
-         \n\
-         There is no environment variable that makes this a skip."
+        "The PostgreSQL testcontainer must provide the `postgis` extension; check tests/fixtures/postgres/Dockerfile and extensions.sql."
     );
 }
 
 #[compio::test]
 async fn per_app_role_created_at_provision() {
-    let url = require_pg().await;
+    let (_postgres, url) = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     let app = crate::test_app_id!();
     let app = app.as_str();
@@ -4848,7 +4794,7 @@ async fn per_app_role_created_at_provision() {
 
 #[compio::test]
 async fn workflow_journal_redeploy_grants_do_not_reopen_without_reprovision() {
-    let url = require_pg().await;
+    let (_postgres, url) = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     let (client, connection) = compio_postgres::connect(&url, NoTls)
         .await
@@ -4999,7 +4945,7 @@ async fn workflow_journal_redeploy_grants_do_not_reopen_without_reprovision() {
 
 #[compio::test]
 async fn per_app_role_has_no_replication_attr() {
-    let url = require_pg().await;
+    let (_postgres, url) = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     let app = crate::test_app_id!();
     let app = app.as_str();
@@ -5034,7 +4980,7 @@ async fn per_app_role_has_no_replication_attr() {
 
 #[compio::test]
 async fn per_app_role_grant_scoped_to_schema() {
-    let url = require_pg().await;
+    let (_postgres, url) = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     let app = crate::test_app_id!();
     let app = app.as_str();
@@ -5092,7 +5038,7 @@ async fn per_app_role_grant_scoped_to_schema() {
 
 #[compio::test]
 async fn per_app_role_cannot_read_sibling_schema_or_touch_slots() {
-    let url = require_pg().await;
+    let (_postgres, url) = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     let app_a = crate::test_app_id!("a");
     let app_a = app_a.as_str();
@@ -5199,7 +5145,7 @@ async fn client_sql_runs_under_per_app_role() {
     // Proves the `SET LOCAL ROLE` shape `exec_begin`
     // issue actually switches the effective role for the rest of the tx,
     // and reverts at COMMIT/ROLLBACK.
-    let url = require_pg().await;
+    let (_postgres, url) = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     let app = crate::test_app_id!();
     let app = app.as_str();
@@ -5258,7 +5204,7 @@ async fn client_sql_runs_under_per_app_role() {
 async fn exec_autocommit_query_runs_under_per_app_role() {
     // I2 regression: the shared autocommit exec path must switch to the
     // per-app role before running the statement, not just explicit/auto tx.
-    let url = require_pg().await;
+    let (_postgres, url) = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     let app = crate::test_app_id!();
     let app = app.as_str();
@@ -5309,7 +5255,7 @@ async fn exec_autocommit_query_runs_under_per_app_role() {
 async fn vector_search_runs_under_per_app_role_via_rls() {
     use zeroship_data_orm::backend::{PostgresBackend, VectorMetric};
 
-    let url = require_pg().await;
+    let (_postgres, url) = require_pg().await;
     let admin_pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
     require_pgvector(&admin_pool).await;
 
@@ -5409,7 +5355,7 @@ async fn vector_search_runs_under_per_app_role_via_rls() {
 async fn spatial_near_runs_under_per_app_role_via_rls() {
     use zeroship_data_orm::backend::{GeoPoint, PostgresBackend};
 
-    let url = require_pg().await;
+    let (_postgres, url) = require_pg().await;
     let admin_pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
     require_postgis(&admin_pool).await;
 
@@ -5515,7 +5461,7 @@ async fn spatial_near_runs_under_per_app_role_via_rls() {
 async fn unmask_fetch_runs_under_per_app_role_via_rls() {
     use zeroship_data_orm::protection::unmask::{self, UnmaskFieldArgs};
 
-    let url = require_pg().await;
+    let (_postgres, url) = require_pg().await;
     let admin_pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
 
     let app = crate::test_app_id!();
@@ -5644,7 +5590,7 @@ async fn unmask_fetch_runs_under_per_app_role_via_rls() {
 async fn unmask_encrypted_column_on_pg_reads_bytea_raw_sibling() {
     use zeroship_data_orm::protection::unmask::{self, UnmaskFieldArgs};
 
-    let url = require_pg().await;
+    let (_postgres, url) = require_pg().await;
     let admin_pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
     // Synthetic 32-byte root key, same shape as the encrypted round-trip gate.
     let _keys = with_root_key("default", &"b".repeat(64));
@@ -5780,7 +5726,7 @@ async fn unmask_encrypted_column_on_pg_reads_bytea_raw_sibling() {
 async fn unmask_audit_insert_runs_under_the_per_app_role_not_the_login_role() {
     use zeroship_data_orm::protection::unmask::{self, UnmaskFieldArgs};
 
-    let url = require_pg().await;
+    let (_postgres, url) = require_pg().await;
     let admin_pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
 
     let app = crate::test_app_id!();
@@ -5926,7 +5872,7 @@ async fn pg_declared_mask_policy_authorizes_unmask_without_durable_store() {
     use zeroship_data_orm::protection::mask_policy;
     use zeroship_data_orm::protection::unmask::{self, UnmaskFieldArgs};
 
-    let url = require_pg().await;
+    let (_postgres, url) = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     let app = crate::test_app_id!();
     let app = app.as_str();
@@ -6127,100 +6073,10 @@ fn direct_connection_sites_do_not_grow() {
         }
     }
 
-    // 121 = 120 at the top level + 1 in tests/parity/mod.rs, which the flat scan
-    // this replaced never read. Raised from 119 for two reasons, both named
-    // because a pin moved without one is a rubber stamp:
-    //   +1  c1_setup_refuses_to_create_a_missing_publication, added 2026-08-16 in
-    //       2a44ea8ef. It opens its own pool and DOES pair it with `release_pg`,
-    //       which is the property this pin exists to keep, so it is an accepted
-    //       site and not a leak. The gate has been red since that commit landed.
-    //   +1  parity::maybe_pg_url, unchanged since 2026-05-24 and older than this
-    //       test. Not a new connection - a newly VISIBLE one, in scope only
-    //       because the walk now descends.
-    // Raised to 122 for one more:
-    //   +1  bytes_column_stores_raw_bytes_on_postgres. It has to dial the server
-    //       itself - the whole point of the test is that it reads the stored
-    //       cell WITHOUT going through `env.db`, and the SDK path is the thing
-    //       under suspicion. It drops the client and calls `drain_pg` before its
-    //       first assertion, so the socket is returned even on the failing path.
-    // Raised to 123 on 2026-09-01. The arithmetic, because a pin moved without
-    // one is a rubber stamp - and here the two numbers do not match, which is
-    // exactly the case that needs writing down:
-    //   +2  `tests/mask_flip.rs` went from 11 connect sites to 13
-    //       (measured at d245ee35c vs HEAD). The two are
-    //       `a_rejected_impersonation_is_distinguishable_from_an_absent_actor`
-    //       and `a_query_hint_reads_the_column_its_alias_resolved_to`. Each
-    //       opens its own pool because each needs a distinct app schema, and
-    //       each ends in `release_pg(pool).await` - that file is 13 connects to
-    //       13 releases, which is the property this pin exists to keep.
-    //   -1  the previous pin carried one slot of headroom: the measured total
-    //       moved 122 -> 123, not 122 -> 124. Recorded rather than smoothed
-    //       over, because "+2 sites, +1 pin" reads like an arithmetic error
-    //       otherwise, and the next person should not have to re-derive it.
-    //
-    // DO NOT SPELL THE NEEDLE OUT IN THIS FILE. The scan reads every `.rs`
-    // under `tests/`, this file included, which is why the needles above are
-    // assembled with `concat!`. The first draft of the comment you are reading
-    // wrote one of them in full to explain the arithmetic, and the count went
-    // 123 -> 124: the pin was raised, the test stayed red, and the extra site
-    // was the prose describing the sites. Say "connect sites", never the
-    // literal.
-    // Raised to 128 on 2026-09-03. The arithmetic, again, because a pin moved
-    // without one is a rubber stamp - and again the two numbers disagree, this
-    // time because the pin was ALREADY one behind:
-    //   +1  `tests/mask_flip.rs` went 13 -> 14 connect sites before this change
-    //       (measured at HEAD, bdc3be963). The pin above says 13 and was never
-    //       raised, so the gate was red on a clean tree.
-    //   +4  `tests/unmask_tx_lane.rs`, added the same day: one `require_pg`
-    //       probe plus one pool per test. Each test ends in
-    //       `release_pg(pool).await` and the probe drops its client and detaches
-    //       the connection task, which is the property this pin exists to keep.
-    //       They cannot share one pool: each fixture drops and recreates its own
-    //       app schema, and a shared pool would let one test's DROP SCHEMA run
-    //       against another's live rows.
-    // Raised to 131 on 2026-09-03, and this time the arithmetic closes exactly:
-    //   +3  `tests/search_tx_lane.rs`, added the same day: one `require_pg`
-    //       probe plus one pool per test, and there are two tests (the vector
-    //       arm and the spatial arm). Measured by needle, not inferred - the
-    //       file holds 2 pool sites, 1 probe site and 2 `release_pg(pool)`
-    //       calls, so every pool it opens is released, which is the property
-    //       this pin exists to keep. They cannot share one pool for the same
-    //       reason `unmask_tx_lane.rs`'s cannot: each fixture drops and
-    //       recreates its own app schema.
-    // Raised to 132 on 2026-09-04, and the arithmetic closes exactly:
-    //   +1  `tests/support/mod.rs::sweep_prior_run_residue_once`, added the same
-    //       day. It is the once-per-binary residue sweep, and it opens its own
-    //       pool because it runs BEFORE any test has one - it is the barrier
-    //       every `require_pg` passes through. It drops the pool and awaits
-    //       `drain_connections` inside the runtime that opened it, which is the
-    //       pairing this pin exists to keep.
-    //   0   nothing else moved: the parallel-isolation change that landed with
-    //       it rewrote app ids and added permits, neither of which is a
-    //       constructor spelling. Measured at 132 against 131 before it.
-    // Raised to 134 on 2026-09-04, and the arithmetic closes exactly:
-    //   +2  `tests/mask_flip.rs`, one `Pool::connect` per test for the two
-    //       protection-downgrade gates. They cannot share one pool: each calls
-    //       `fixture`, which DROPs and recreates its own app schema, and one of
-    //       them supplies a root key the other must not see. Both end in
-    //       `release_pg(pool)`, which is the pairing this pin exists to keep.
-    //       They add no `require_pg` site - that helper already existed in the
-    //       file and is one site however many tests call it.
-    // Raised to 136 on 2026-09-04, and the arithmetic closes exactly:
-    //   +2  `tests/mask_flip.rs`, one connect site per test for the two
-    //       migration-engine protection gates. Measured by needle: that file
-    //       held 16 sites at bc7b05be4 and holds 18 now, and the directory
-    //       total moved 134 -> 136. They cannot share a pool with their
-    //       data-plane-emitter peers: each calls a fixture that DROPs and
-    //       recreates its own app schema, and the encryption one supplies a
-    //       root key the mask one must not see. Both end in `release_pg(pool)`,
-    //       which is the pairing this pin exists to keep. They add no
-    //       `require_pg` site - that helper already existed in the file and is
-    //       one site however many tests call it.
+    // Existing direct connection constructors need explicit driver teardown.
+    // The runtime lifecycle test above checks the resource behavior itself.
     const PINNED: usize = 136;
-    // 10 files today, one of them nested. This floor alone does NOT catch a walk
-    // that stops descending - measured: flattening it reads 9 and clears 9. That
-    // is what the second assertion is for. This one catches the scan being
-    // pointed at the wrong directory or reading nothing, which `>= 2` could not.
+    // Reject an empty or non-recursive scan.
     assert!(
         files >= 9,
         "expected to scan the whole tests directory, saw {files} file(s) - if this \
@@ -6260,7 +6116,7 @@ fn direct_connection_sites_do_not_grow() {
 
 #[compio::test]
 async fn a_dedicated_client_is_a_pool_checkout_and_returns_on_drop() {
-    let url = require_pg().await;
+    let (_postgres, url) = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
     let backend = zeroship_data_orm::backend::PostgresBackend::new(
         std::rc::Rc::clone(&pool),
@@ -6306,7 +6162,7 @@ async fn a_dedicated_client_is_a_pool_checkout_and_returns_on_drop() {
 async fn concurrent_dedicated_clients_are_bounded_by_the_pool() {
     use std::time::Duration;
 
-    let url = require_pg().await;
+    let (_postgres, url) = require_pg().await;
     // `max_size: 1` makes the ceiling observable in one checkout; a short
     // acquire timeout keeps the queued caller's wait bounded so the test is
     // measuring the ceiling rather than sitting on the 30 s default.
