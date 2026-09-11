@@ -7823,17 +7823,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "zeroship-cdc-wire"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "zeroship-core",
- "zeroship-data-orm",
-]
-
-[[package]]
 name = "zeroship-cli"
 version = "0.1.0"
 dependencies = [
@@ -7998,10 +7987,24 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "compio",
+ "compio-postgres",
+ "compio-tls",
+ "compio-ws",
+ "flume 0.11.1",
+ "futures",
+ "rcgen",
+ "rustls",
+ "tempfile",
  "toml 0.8.23",
  "tracing",
+ "url",
  "zeroship-core",
+ "zeroship-data-cdc-wire",
 ]
+
+[[package]]
+name = "zeroship-data-cdc-wire"
+version = "0.1.0"
 
 [[package]]
 name = "zeroship-data-macros"

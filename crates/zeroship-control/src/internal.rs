@@ -157,20 +157,8 @@ async fn verify_service_caller(
 /// issuer naming a role". Every one of those takes the role path, which refuses
 /// the malformed ones itself; there is no arm here that admits anything.
 fn presented_instance_issuer(authorization: Option<&str>) -> Option<ServiceIssuer> {
-    use base64::Engine as _;
-
-    let assertion = zeroship_core::auth::extract_bearer(authorization?)?;
-    let mut parts = assertion.split('.');
-    let (_header, payload, signature) = (parts.next()?, parts.next()?, parts.next()?);
-    if signature.is_empty() || parts.next().is_some() {
-        return None;
-    }
-    let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(payload)
-        .ok()?;
-    let claims: serde_json::Value = serde_json::from_slice(&decoded).ok()?;
-    let issuer = ServiceIssuer::parse(claims.get("iss")?.as_str()?).ok()?;
-    issuer.instance().is_some().then_some(issuer)
+    zeroship_core::service_assertion::presented_issuer(authorization)
+        .filter(|issuer| issuer.instance().is_some())
 }
 
 /// Verify an assertion minted by an enrolled worker INSTANCE.

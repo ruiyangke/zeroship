@@ -79,14 +79,6 @@
 //! `db/migrations-ts/20260831000001_sortable_entity_id_collations.ts` or its
 //! ordering silently breaks. This module adds no column.
 //!
-//! # Scope
-//!
-//! `zeroship-cdc-wire` declares its own `AppId` over the same `app_` prefix. The
-//! two are deliberately separate types in separate crates: that crate refuses a
-//! normal dependency on this one because this crate's closure carries an HTTP
-//! client, and `crates/zeroship-cdc-wire/tests/typed_id_oracle.rs` is the
-//! differential test that keeps the duplicated parse from drifting from
-//! [`crate::typed_id::parse_with_prefix`], which is the parse this type uses.
 
 use core::fmt;
 

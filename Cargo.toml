@@ -229,6 +229,7 @@ zeroship-data-sql = { path = "crates/zeroship-data-sql" }
 # that by inverting `cargo tree`. A DEV-dependency would be invisible to that
 # check, so do not add one.
 zeroship-data-cdc-server = { path = "crates/zeroship-data-cdc-server" }
+zeroship-data-cdc-wire = { path = "crates/zeroship-data-cdc-wire" }
 # The `zeroship-migrate` engine, a full member of this workspace. It was a git submodule
 # pinned to a commit recorded here; its history was grafted in so the engine and its
 # consumers move together and a wire-format change is one commit, not two repos in

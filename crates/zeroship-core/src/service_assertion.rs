@@ -1227,3 +1227,16 @@ impl IdentityVerifier for ServiceAssertionVerifier {
         })
     }
 }
+
+/// Read an unverified issuer solely to select a verification key.
+/// This result never authenticates a caller; verify the complete assertion next.
+pub fn presented_issuer(authorization: Option<&str>) -> Option<ServiceIssuer> {
+    use base64::Engine as _;
+    let assertion = crate::auth::extract_bearer(authorization?)?;
+    let mut parts = assertion.split('.');
+    let (_header, payload, signature) = (parts.next()?, parts.next()?, parts.next()?);
+    if signature.is_empty() || parts.next().is_some() { return None; }
+    let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(payload).ok()?;
+    let claims: serde_json::Value = serde_json::from_slice(&decoded).ok()?;
+    ServiceIssuer::parse(claims.get("iss")?.as_str()?).ok()
+}

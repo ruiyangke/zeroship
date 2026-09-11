@@ -102,7 +102,7 @@ crates/zeroship-migrate-policy/src
 crates/zeroship-migrate-postgres/src
 crates/zeroship-migrate-server/src
 crates/zeroship-migrate-sqlite/src
-crates/zeroship-cdc-wire/src
+crates/zeroship-data-cdc-wire/src
 libs/compio-postgres/src"
 
 # ---------------------------------------------------------------------------
@@ -201,7 +201,6 @@ claim_pairs() {
 # ---------------------------------------------------------------------------
 LEDGER='
 crates/zeroship-data-orm/src/backend/postgres/pg_session_sql.rs	zeroship_migrate_server	unbound
-crates/zeroship-cdc-wire/src/ids.rs	zeroship_core	bound=crates/zeroship-cdc-wire/tests/typed_id_oracle.rs#zeroship_core::typed_id
 crates/zeroship-data-orm/src/exec.rs	compio_postgres	prose
 crates/zeroship-data-orm/src/backend/sqlite/vector.rs	zeroship_migrate_core	bound=crates/zeroship-data-v8/tests/sqlite_integration.rs#fn engine_shadow_relation
 crates/zeroship-migrate-backend/src/backend.rs	zeroship_migrate_postgres	prose

@@ -12,7 +12,7 @@ description = "Separate CDC relay service with its own configuration and process
 [[package.metadata.zeroship-config.targets]]
 target = "zeroship-data-cdc-server"
 class = "platform"
-reason = "Deployed long-running CDC relay in the server configuration scope, in scope while its current binary fails closed."
+reason = "Deployed long-running CDC relay in the server configuration scope, with a dedicated database login and TLS listener."
 
 [[bin]]
 name = "zeroship-data-cdc-server"
@@ -24,12 +24,22 @@ path = "src/main.rs"
 clap = { workspace = true, features = ["derive", "env"] }
 # The runtime `main` runs on. Zero tokio: `#[compio::main]`, io_uring.
 compio = { workspace = true }
+compio-postgres = { workspace = true, features = ["tls"] }
+zeroship-data-cdc-wire = { workspace = true }
+flume = { workspace = true }
+futures = { workspace = true }
+compio-ws = { workspace = true }
+compio-tls = { workspace = true }
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std"] }
 # `zeroship_config`, the bootstrap/overlay resolver, `CheckConfigReport`, and the
 # tracing subscriber every platform service installs the same way.
 zeroship-core = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+rcgen = "0.14"
+tempfile = { workspace = true }
+url = { workspace = true }
 # The overlay-precedence test in `src/config.rs` builds a `toml::Value` by hand
 # so the flag-over-overlay order is asserted without a file on disk. DEV only -
 # the resolver itself takes an already-parsed value, so the shipped closure does
