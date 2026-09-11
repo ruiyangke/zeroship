@@ -1,3 +1,4 @@
+import { generatedSchema } from "./_install-helper.js";
 /**
  * DataLoader / per-collection batch tests.
  *
@@ -120,7 +121,7 @@ describe("IdLoader — DataLoader batching for get(id)", () => {
     });
     const Users = model(
       "users",
-      {
+      { ...generatedSchema,
         email: t.string().required().unique(),
         name: t.string().required(),
       },
@@ -161,7 +162,7 @@ describe("IdLoader — DataLoader batching for get(id)", () => {
     const { native, calls } = makeMockNative(rows);
     const Users = model(
       "users",
-      {
+      { ...generatedSchema,
         email: t.string().required().unique(),
         name: t.string().required(),
       },
@@ -202,7 +203,7 @@ describe("IdLoader — DataLoader batching for get(id)", () => {
     });
     const Users = model(
       "users",
-      {
+      { ...generatedSchema,
         email: t.string().required().unique(),
         name: t.string().required(),
       },
@@ -229,7 +230,7 @@ describe("IdLoader — DataLoader batching for get(id)", () => {
     });
     const Users = model(
       "users",
-      {
+      { ...generatedSchema,
         email: t.string().required().unique(),
         name: t.string().required(),
       },
@@ -248,7 +249,7 @@ describe("IdLoader — DataLoader batching for get(id)", () => {
     });
     const Users = model(
       "users",
-      {
+      { ...generatedSchema,
         email: t.string().required().unique(),
         name: t.string().required(),
       },
@@ -267,7 +268,7 @@ describe("IdLoader — DataLoader batching for get(id)", () => {
     const { native, calls } = makeMockNative({}, { findThrows: boom });
     const Users = model(
       "users",
-      {
+      { ...generatedSchema,
         email: t.string().required().unique(),
         name: t.string().required(),
       },
@@ -500,7 +501,7 @@ describe("IdLoader — DataLoader batching for get(id)", () => {
     });
     const Users = model(
       "users",
-      {
+      { ...generatedSchema,
         email: t.string().required().unique(),
         name: t.string().required(),
       },

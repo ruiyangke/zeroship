@@ -30,10 +30,11 @@ import assert from "node:assert/strict";
 import { validateDoc } from "../src/validate.js";
 import { ValidationError } from "../src/errors.js";
 import type { NormalizedSchema } from "../src/schema.js";
-import {
-  CONFINED_SYSTEM_SHAPE_ASSIGNMENTS,
-  CONFINED_SYSTEM_SHAPE_COLUMN_NAMES,
-} from "../src/generated/confined-system-shape.generated.js";
+import { generatedSchema } from "./_install-helper.js";
+const CONFINED_SYSTEM_SHAPE_COLUMN_NAMES = Object.keys(generatedSchema);
+const CONFINED_SYSTEM_SHAPE_ASSIGNMENTS = Object.fromEntries(
+  Object.entries(generatedSchema).map(([name, builder]) => [name, builder.toFieldDef().assign!]),
+);
 
 /**
  * A collection shaped like a real descriptor: the platform's columns marked

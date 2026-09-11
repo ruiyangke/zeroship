@@ -16,7 +16,7 @@ type Doc = PlainObject;
  * Typed as `ReadonlySet<TypeName>` and built from a `TypeName[]` literal on
  * purpose: adding a member to the union without adding it here is then a
  * compile error rather than a silent hole, which is the failure this set exists
- * to close. `vector`, `geoPoint`, `bytes` and `actor` are listed and are
+ * to close. `vector`, `geoPoint` and `bytes` are listed and are
  * deliberately not field-validated — they belong to the union, so they must not
  * trip the unknown-type guard.
  */
@@ -45,7 +45,6 @@ const KNOWN_FIELD_TYPES: ReadonlySet<string> = new Set<TypeName>([
   "geoPoint",
   "bytes",
   "id",
-  "actor",
 ]);
 
 const MIN_TIMESTAMP_MILLIS = -62_135_596_800_000;
@@ -487,7 +486,7 @@ function checkField(
     // is unknown, and answering "yes" is the one option that loses data.
     //
     // Names that ARE in `TypeName` but have no branch above (vector, geoPoint,
-    // bytes, actor) keep passing: they are deliberately not field-validated at
+    // bytes) keep passing: they are deliberately not field-validated at
     // this layer, and this guard is about unknown names, not missing branches.
     throw new Error(
       `unknown field type ${JSON.stringify(type)} for field ${JSON.stringify(key)}: ` +

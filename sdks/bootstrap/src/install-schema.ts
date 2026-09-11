@@ -51,8 +51,6 @@ import {
   type WithRelations,
   type PlainObject,
   type FieldDef,
-  CONFINED_SYSTEM_SHAPE_COLUMN_NAMES,
-  CONFINED_SYSTEM_SHAPE_ASSIGNMENTS,
 } from "@zeroship/db/internal";
 
 // ---------------------------------------------------------------------------
@@ -228,61 +226,7 @@ function isFieldDef(value: unknown): value is FieldDef {
   return isPlainRecord(value) && typeof value.type === "string";
 }
 
-/**
- * The platform-managed column names, taken from the operator charter
- * (`policies/confined-system-shape.inject.toml`) via its generated projection.
- * Creator schemas cannot declare fields with these names; fencing at
- * schema-declaration time surfaces the failure in `pnpm dev` rather than after
- * a worker round-trip.
- *
- * **This used to be seven string literals restating the charter**, with a
- * doc-comment asking the reader to keep them in step with the Rust side by
- * hand. It is now derived, so an eighth platform column is a charter line and
- * `tests/inject_policy_mirror_gate.sh` fails if the projection goes stale
- * against the fragment. The hand-sync instruction is gone because there is
- * nothing left to sync.
- */
-const SYSTEM_FIELD_NAMES: readonly string[] = CONFINED_SYSTEM_SHAPE_COLUMN_NAMES;
-
-/**
- * Copy a descriptor-supplied `FieldDef`, stamping the charter's assignment onto
- * it when the field IS one of the platform's columns.
- *
- * **The authority is the charter, not the descriptor, and that is the point.**
- * `crates/zeroship-migrate-server/src/apply.rs` says outright that the
- * descriptor is client-declared - a creator who hand-edits the generated files
- * can make them agree about a lie - so a binding read out of the descriptor
- * would be a binding the creator controls. Reading it from the operator charter
- * instead means a hand-edited `.zship` cannot re-point who computes `id`.
- *
- * Matching is by COLUMN NAME because that is what a v2 descriptor is keyed by:
- * its fields are already-resolved wire `FieldDef`s under snake_case column
- * names (see `RuntimeCollectionDescriptorV2`). A creator's own field never
- * reaches this branch under a platform name - `normalizeSchema` refuses those
- * below - so a match here is a platform column, not a collision.
- *
- * An `assign` already present on the def is left alone rather than overwritten,
- * so that when the descriptor starts carrying bindings itself (the mirror the
- * worker verifies) this function does not silently mask a disagreement between
- * the two. Today no descriptor carries one.
- */
-function withPlatformAssignment(name: string, def: FieldDef): FieldDef {
-  const assign = CONFINED_SYSTEM_SHAPE_ASSIGNMENTS[name];
-  if (assign === undefined || def.assign !== undefined) return { ...def };
-  return { ...def, assign };
-}
-
-/**
- * Converts a SchemaInput into a NormalizedSchema. Every field value
- * must be a `TypeBuilder` produced by the `t.*` API (or the whole
- * input may be a single top-level `t.union(...)` — proposal §C2).
- * Any other shape throws.
- *
- * **P7 PR 1** — refuses any field whose name collides with a
- * platform system field. The Rust-side `field_to_column` would also
- * refuse such schemas at descriptor-install time; throwing here lets
- * `pnpm dev` surface the error immediately on first build.
- */
+/** Normalize builders and generated field descriptors without injecting fields. */
 export function normalizeSchema(input: SchemaInputOrUnion): NormalizedSchema {
   // C2 — top-level discriminated union.
   if (isTypeBuilder(input)) {
@@ -301,50 +245,9 @@ export function normalizeSchema(input: SchemaInputOrUnion): NormalizedSchema {
 
   const fields = input as SchemaFieldRecord;
   for (const [key, rawVal] of Object.entries(fields)) {
-    // **Migration-first cutover (P4b)** — the bundled RuntimeSchemaDescriptor
-    // supplies platform-generated wire `FieldDef`s (not t.* builders). They
-    // legitimately carry system fields (id/created_at/version/…) the migration
-    // fold materialised, so they bypass the creator-facing system-field fence
-    // below (which guards only user-authored t.* schemas) AND the
-    // "must be a t.* builder" check. Pass them through verbatim. A TypeBuilder
-    // is never an `isFieldDef` candidate here (the `!isTypeBuilder` guard keeps
-    // user schemas on the strict path even if a builder exposed a string
-    // `type`).
     if (!isTypeBuilder(rawVal) && isFieldDef(rawVal)) {
-      result[key] = withPlatformAssignment(key, rawVal as FieldDef);
+      result[key] = { ...(rawVal as FieldDef) };
       continue;
-    }
-    // **P7 PR 1** — refuse creator-declared fields whose names collide
-    // with the seven platform system fields. The Rust-side validator
-    // (`validate_field_name_for_declaration`) enforces the same fence
-    // while installing the descriptor; the SDK-side check surfaces the error at
-    // `pnpm dev` build time so creators don't wait for a worker
-    // round-trip. Error code mirrors the Rust-side
-    // `RESERVED_SYSTEM_FIELD_NAME`.
-    if (SYSTEM_FIELD_NAMES.includes(key)) {
-      // Sanctioned exception: `id: t.id("prefix")` is a PREFIX
-      // DECLARATION for the always-present system `id` PK column — not
-      // an attempt to override the column. Allow it through ONLY when
-      // the value is a `type:"id"` builder; the `{type:"id", idPrefix}`
-      // def then reaches the runtime descriptor so the auto-mint pass can
-      // read the declared prefix. Any other type
-      // declared under `id`, and all six other system names, stay
-      // rejected. The Rust column emitter skips this field (no duplicate
-      // `id` column) and its validator mirrors the `usr` fence.
-      const isIdPrefixDecl =
-        key === "id" &&
-        isTypeBuilder(rawVal) &&
-        rawVal.toFieldDef().type === "id";
-      if (!isIdPrefixDecl) {
-        throw Object.assign(
-          new Error(
-            `Field name "${key}" is reserved for platform system fields. ` +
-              `System fields (${SYSTEM_FIELD_NAMES.join(", ")}) are managed by ` +
-              `the platform and cannot be overridden.`,
-          ),
-          { code: "RESERVED_SYSTEM_FIELD_NAME" as const },
-        );
-      }
     }
     if (!isTypeBuilder(rawVal)) {
       throw Object.assign(
@@ -593,37 +496,6 @@ export function model<S extends Record<string, unknown>>(
   // detects the TypeBuilder branch and expands the union; works for
   // both record-of-fields and a top-level `t.union(...)` input.
   const normalized = normalizeSchema(schema as Parameters<typeof normalizeSchema>[0]);
-
-  // Both injections below run AFTER `normalizeSchema`, which is where
-  // `withPlatformAssignment` stamps the charter's `assign` onto a platform
-  // column. So each must take the stamp explicitly, or it arrives with no
-  // `assign` and `validateDoc` falls through to the `default` arm - which
-  // MATERIALISES the value into the caller's document.
-  //
-  // That is harmless for `deletedAt`, which declares no default, and is not for
-  // `version`: its `default: 1` is the DDL seed, and the design forbids that key
-  // reaching `build_upsert`, where the generic loop emits
-  // `"version" = EXCLUDED."version"` while the auto-bump emits a second
-  // assignment to the same column - two assignments to one column in one
-  // `DO UPDATE SET`, which PostgreSQL refuses. Measured before this fix: an
-  // insert reached the native op as `{"title":"hello","version":1}`.
-
-  // When soft delete is enabled, inject the deletedAt field into the schema
-  if (softDelete && !normalized.deletedAt) {
-    normalized.deletedAt = withPlatformAssignment("deletedAt", {
-      type: "date",
-      required: false,
-    });
-  }
-
-  // D4 — when versioning is enabled, inject a `version` column.
-  if (versioning && !normalized.version) {
-    normalized.version = withPlatformAssignment("version", {
-      type: "number",
-      required: false,
-      default: 1,
-    });
-  }
 
   return new Collection<S>(name, normalized, native, {
     naming: namingStrategy,

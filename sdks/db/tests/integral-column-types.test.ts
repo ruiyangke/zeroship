@@ -119,14 +119,13 @@ describe("unknown field types fail closed", () => {
   });
 
   it("still passes TypeName members that have no validation branch", () => {
-    // vector / geoPoint / bytes / actor are deliberately not field-validated
+    // vector / geoPoint / bytes are deliberately not field-validated
     // here. They belong to the union, so the unknown-type guard must not catch
     // them - otherwise this fix trades one outage for another.
     assert.equal(validate("bytes", new Uint8Array([1, 2, 3])).ok, true);
     assert.equal(validate("bytes", "blob").ok, false);
     assert.equal(validate("vector", [1, 2]).ok, true);
     assert.equal(validate("geoPoint", { lat: 1, lon: 2 }).ok, true);
-    assert.equal(validate("actor", "usr_1").ok, true);
   });
 });
 

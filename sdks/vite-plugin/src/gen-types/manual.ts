@@ -288,7 +288,7 @@ export function fieldDefToDto(
   // Facets that DO NOT round-trip through the descriptor producer. `index`
   // (single-field `.index()` flag) is subsumed by named indexes on this path;
   // `pattern`, `shape`, `items`, `literalValue`, `variants`, `discriminator`,
-  // `actorNullable`, `timestampAuto` have no descriptor home. Reject rather than
+  // Assignment generators have no manual descriptor home. Reject rather than
   // silently drop when the author actually used one.
   rejectUnmappableFacet(where, def, "pattern");
   rejectUnmappableFacet(where, def, "shape");
@@ -296,7 +296,7 @@ export function fieldDefToDto(
   rejectUnmappableFacet(where, def, "literalValue");
   rejectUnmappableFacet(where, def, "variants");
   rejectUnmappableFacet(where, def, "discriminator");
-  rejectUnmappableFacet(where, def, "timestampAuto");
+  rejectUnmappableFacet(where, def, "assign");
 
   return dto;
 }

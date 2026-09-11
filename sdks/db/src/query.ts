@@ -1,3 +1,5 @@
+import { primaryKey } from "./column-roles";
+import type { FieldDef } from "./types";
 /**
  * Lazy query builder for @zeroship/db.
  * A Query is a thenable that collects sort/limit/skip/select options and
@@ -159,6 +161,7 @@ export class Query<
       actor?: Actor;
       unmaskReason?: string;
     },
+    private readonly _schema: Record<string, FieldDef> = {},
   ) {
     this._collection = collection;
     this._filter = filter;
@@ -169,6 +172,10 @@ export class Query<
     this._unmask = readHints?.unmask;
     this._actor = readHints?.actor;
     this._unmaskReason = readHints?.unmaskReason;
+  }
+
+  private _primaryKey(): string {
+    return primaryKey(this._schema);
   }
 
   /**
@@ -305,10 +312,15 @@ export class Query<
       );
     }
 
+    let key: string;
+    try { key = this._primaryKey(); } catch (e) {
+      return err(e instanceof Error ? e : new Error(String(e)));
+    }
+
     const orderBy: Record<string, 1 | -1> =
       this._sort !== undefined && Object.keys(this._sort).length > 0
         ? (this._sort as Record<string, 1 | -1>)
-        : { id: 1 };
+        : { [key]: 1 };
 
     let cursorState: CursorState | null = null;
     if (cursor !== null && cursor !== undefined) {
@@ -336,7 +348,7 @@ export class Query<
     // makes `_buildSeekFilter`'s final disjunct meaningful rather than
     // aspirational.
     const seekOrder: Record<string, 1 | -1> = { ...orderBy };
-    if (!("id" in seekOrder)) seekOrder.id = 1;
+    if (!(key in seekOrder)) seekOrder[key] = 1;
 
     const opts2: ZeroshipDbFindOpts = {
       orderBy: this._mapOrderByToColumns(seekOrder),
@@ -383,11 +395,11 @@ export class Query<
       let continueCursor = "";
       if (!isDone && kept.length > 0) {
         const last = page[page.length - 1] as PlainObject;
-        const lastId = last.id;
+        const lastId = last[key];
         if (typeof lastId !== "string" || lastId.length === 0) {
           return err(
             Object.assign(
-              new TypeError(`paginate: row id must be a non-empty string (got ${typeof last.id})`),
+              new TypeError(`paginate: row id must be a non-empty string (got ${typeof last[key]})`),
               { code: "PAGINATE_INVALID_ID" as const },
             ),
           );
@@ -425,7 +437,7 @@ export class Query<
     state: CursorState,
   ): ZeroshipDbFilter {
     const keys = Object.keys(orderBy);
-    const lastIdCol = this._toColumn("id");
+    const lastIdCol = this._toColumn(this._primaryKey());
 
     // Lexicographic seek over (k1, .., kn, id) - the SAME tuple the emitted
     // ORDER BY uses, which is what makes it sound. For each key i, one
@@ -456,7 +468,7 @@ export class Query<
     // The id tiebreak, unless `id` is already one of the ordering keys - in
     // which case the loop above has already compared it and appending another
     // term would add an unsatisfiable disjunct (id = X AND id > X).
-    if (!keys.includes("id")) {
+    if (!keys.includes(this._primaryKey())) {
       const idCmp = { $gt: state.lastId } as ZeroshipDbFilterValue;
       terms.push({ $and: [...eqPrefix, { [lastIdCol]: idCmp } as ZeroshipDbFilter] } as ZeroshipDbFilter);
     }
@@ -588,7 +600,7 @@ export class Query<
     // Merge cursor condition into filter
     let filter: ZeroshipDbFilter = this._filter;
     if (this._afterId !== undefined) {
-      const cursorCondition: ZeroshipDbFilter = { id: { $gt: this._afterId } };
+      const cursorCondition: ZeroshipDbFilter = { [this._toColumn(this._primaryKey())]: { $gt: this._afterId } };
       const hasKeys = Object.keys(filter).length > 0;
       filter = hasKeys
         ? { $and: [filter, cursorCondition] } as ZeroshipDbFilter

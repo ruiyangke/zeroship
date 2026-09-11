@@ -1,3 +1,4 @@
+import { generatedSchema } from "./_install-helper.js";
 /**
  * InferRow / InferRowInput / InferId — type-level helper checks.
  * These are compile-time assertions in disguise: the test bodies are
@@ -18,7 +19,7 @@ const native = {
 
 const Users = model(
   "users",
-  {
+  { ...generatedSchema,
     email: t.string().required().unique(),
     name: t.string().required(),
   },
@@ -27,7 +28,7 @@ const Users = model(
 
 const UsersWithDefault = model(
   "users_with_default",
-  {
+  { ...generatedSchema,
     email: t.string().required().unique(),
     role: t.string().required().default("user"),
   },
