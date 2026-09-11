@@ -22,15 +22,6 @@ struct MockServer {
 }
 
 impl MockServer {
-    fn start(responses: Vec<(u16, &'static str)>) -> Self {
-        Self::start_owned(
-            responses
-                .into_iter()
-                .map(|(status, body)| (status, body.to_string()))
-                .collect(),
-        )
-    }
-
     fn start_owned(responses: Vec<(u16, String)>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock server");
         listener

@@ -57,8 +57,6 @@ use crate::common;
 const DRAFT: &str = "draft";
 /// A finalized invoice: the claim exists and only a void releases it.
 const FINALIZED: &str = "finalized";
-/// The one transition `invoices_immutable` permits on a finalized row.
-const VOID: &str = "void";
 
 /// Cash collected against an invoice.
 const CHARGE: &str = "charge";

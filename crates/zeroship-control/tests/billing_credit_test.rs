@@ -31,8 +31,6 @@ use crate::common;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use ntex::http::StatusCode;
-use ntex::web::{self, test};
 use uuid::Uuid;
 
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
@@ -334,19 +332,6 @@ async fn make_organization(state: &AppState, label: &str) -> String {
         .await
         .expect("insert organization");
     organization_id
-}
-
-async fn make_user(state: &AppState, label: &str) -> Uuid {
-    let email = format!("{label}-{}@example.test", Uuid::new_v4().simple());
-    let rows = state
-        .control_pg
-        .query(
-            "INSERT INTO zeroship.users (email, name) VALUES ($1, $2) RETURNING id",
-            &[&email, &"Credit Creator".to_string()],
-        )
-        .await
-        .expect("insert user");
-    rows[0].get("id")
 }
 
 async fn ensure_organization_billing(state: &AppState, organization: &str) {
@@ -931,29 +916,6 @@ async fn grant_helper_idempotency_key_and_fingerprint() {
 //     a different body (no double grant). Drives the REAL `api::grant_credit`
 //     handler through an ntex test app + the REAL authz guard.
 // ===========================================================================
-
-struct Caller {
-    token: String,
-}
-
-impl Caller {
-    fn bearer(&self) -> String {
-        format!("Bearer {}", self.token)
-    }
-}
-
-/// Issue a real platform OAuth bearer scoped to `scope` (faithful AuthzGuard path).
-/// Issue a platform OAuth bearer for `user_id` carrying `scope`.
-///
-/// It used to take an optional platform role and seed a `platform_admin_roles`
-/// row for the operator paths. That table and those roles are deleted, so every
-/// principal this mints is an ordinary organization.
-async fn issue_bearer(state: &AppState, user_id: Uuid, scope: &str) -> Caller {
-    let _ = state;
-    Caller {
-        token: common::platform_token_for_client(user_id, scope, common::CONSOLE_CLIENT_ID),
-    }
-}
 
 // The scope vocabulary is resource-blind: a scope always lowers to
 // `Resource::Any`, so per-app narrowing now comes from Cedar app membership

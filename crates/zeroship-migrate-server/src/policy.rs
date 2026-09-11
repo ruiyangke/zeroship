@@ -31,8 +31,11 @@ use zeroship_migrate::{effective_policy_from_charter_toml, seal, DestructiveOps,
 use zeroship_migrate_ir::policy_approval::{require_approval_level, ApprovalLevel};
 use zeroship_migrate_ir::policy_registry::{
     builtin_registry, KEY_CODE_EXTENSION, KEY_SAFETY_DESTRUCTIVE_OPS, KEY_SAFETY_REQUIRE_RLS,
-    KEY_SCHEMA_CREATE_SCHEMA, KEY_SCHEMA_CREATE_TABLE, KEY_SCHEMA_CROSS_SCHEMA, KEY_SCHEMA_RENAME,
+    KEY_SCHEMA_CREATE_TABLE, KEY_SCHEMA_CROSS_SCHEMA, KEY_SCHEMA_RENAME,
 };
+#[cfg(test)]
+use zeroship_migrate_ir::policy_registry::KEY_SCHEMA_CREATE_SCHEMA;
+
 use zeroship_migrate_policy::{
     admit, ComposeError, EffectivePolicy as PdpPolicy, KnobKey, KnobValue, LoadContext,
     LoadError, ObjectName, PolicyDoc, RootCharter,
