@@ -387,8 +387,8 @@ where
     // the race guard is the `FOR UPDATE SKIP LOCKED` above, not this count: a
     // second sweep is skipped past the locked row and returns above, and THIS
     // app taking a fresh reference is an `INSERT ... ON CONFLICT DO UPDATE SET
-    // refcount = refcount + 1` on the very row we hold (plugin-workflow
-    // store/pg.rs), so it blocks until we commit.
+    // refcount = refcount + 1` on the very row we hold (zeroship-workflow
+    // src/store/pg.rs), so it blocks until we commit.
     //
     // What that lock does NOT cover, and did not cover before this reordering
     // either: a DIFFERENT app taking its first reference to the same hash
