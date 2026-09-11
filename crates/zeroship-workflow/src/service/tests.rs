@@ -15,6 +15,8 @@ use testcontainers::{
 };
 use zeroship_core::{app_id::AppId, typed_id};
 
+mod payloads;
+
 #[compio::test]
 async fn sqlite_app_operations_are_scoped_and_retryable() {
     let dir = tempfile::tempdir().unwrap();

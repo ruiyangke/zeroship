@@ -8641,6 +8641,7 @@ dependencies = [
  "chrono-tz",
  "compio",
  "compio-postgres",
+ "compio-s3",
  "cyper",
  "ed25519-dalek",
  "percent-encoding",
@@ -8653,6 +8654,7 @@ dependencies = [
  "tracing",
  "uuid",
  "zeroship-core",
+ "zeroship-storage",
 ]
 
 [[package]]

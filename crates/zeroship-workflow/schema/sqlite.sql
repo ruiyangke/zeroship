@@ -33,7 +33,7 @@ CREATE INDEX IF NOT EXISTS "runs_due_idx" ON "runs" ("due_at", "app_id", "id");
 
 CREATE INDEX IF NOT EXISTS "runs_parent_idx" ON "runs" ("app_id", "parent_id", "parent_generation");
 
-CREATE TABLE "generations" ("app_id" TEXT NOT NULL, "run_id" TEXT NOT NULL, "generation" INTEGER NOT NULL, "deploy_id" TEXT NOT NULL, "input" TEXT NOT NULL, "output" TEXT, "error" TEXT, "state" TEXT NOT NULL, "started_at" INTEGER NOT NULL, "terminal_at" INTEGER, CONSTRAINT "generation_deploy" FOREIGN KEY (app_id, deploy_id) REFERENCES deploys(app_id, id) ON DELETE RESTRICT, CONSTRAINT "generations_pkey" PRIMARY KEY (app_id, run_id, generation), CONSTRAINT "generations_run" FOREIGN KEY (app_id, run_id) REFERENCES runs(app_id, id) ON DELETE RESTRICT);
+CREATE TABLE "generations" ("app_id" TEXT NOT NULL, "run_id" TEXT NOT NULL, "generation" INTEGER NOT NULL, "deploy_id" TEXT NOT NULL, "input" TEXT NOT NULL, "input_ref" TEXT, "output" TEXT, "output_ref" TEXT, "error" TEXT, "state" TEXT NOT NULL, "started_at" INTEGER NOT NULL, "terminal_at" INTEGER, CONSTRAINT "generation_deploy" FOREIGN KEY (app_id, deploy_id) REFERENCES deploys(app_id, id) ON DELETE RESTRICT, CONSTRAINT "generations_pkey" PRIMARY KEY (app_id, run_id, generation), CONSTRAINT "generations_run" FOREIGN KEY (app_id, run_id) REFERENCES runs(app_id, id) ON DELETE RESTRICT);
 
 CREATE INDEX IF NOT EXISTS "generation_deploy_idx" ON "generations" ("app_id", "deploy_id");
 
@@ -89,19 +89,21 @@ CREATE TABLE "occurrences" ("app_id" TEXT NOT NULL, "schedule_id" TEXT NOT NULL,
 
 CREATE INDEX IF NOT EXISTS "occurrence_run_idx" ON "occurrences" ("app_id", "run_id");
 
-CREATE TABLE "payloads" ("app_id" TEXT NOT NULL, "run_id" TEXT NOT NULL, "generation" INTEGER NOT NULL, "id" TEXT NOT NULL, "task_id" TEXT NOT NULL, "hash" TEXT NOT NULL, "size" INTEGER NOT NULL, "content_type" TEXT, "state" TEXT NOT NULL, "created_at" INTEGER NOT NULL, "expires_at" INTEGER NOT NULL, CONSTRAINT "payload_task" FOREIGN KEY (app_id, run_id, generation, task_id) REFERENCES tasks(app_id, run_id, generation, id) ON DELETE RESTRICT, CONSTRAINT "payloads_generation" FOREIGN KEY (app_id, run_id, generation) REFERENCES generations(app_id, run_id, generation) ON DELETE RESTRICT, CONSTRAINT "payloads_pkey" PRIMARY KEY (app_id, id));
+CREATE TABLE "payloads" ("app_id" TEXT NOT NULL, "run_id" TEXT NOT NULL, "generation" INTEGER NOT NULL, "id" TEXT NOT NULL, "task_id" TEXT NOT NULL, "request_id" TEXT NOT NULL, "hash" TEXT NOT NULL, "size" INTEGER NOT NULL, "content_type" TEXT, "state" TEXT NOT NULL, "created_at" INTEGER NOT NULL, "expires_at" INTEGER NOT NULL, CONSTRAINT "payload_task" FOREIGN KEY (app_id, run_id, generation, task_id) REFERENCES tasks(app_id, run_id, generation, id) ON DELETE RESTRICT, CONSTRAINT "payloads_generation" FOREIGN KEY (app_id, run_id, generation) REFERENCES generations(app_id, run_id, generation) ON DELETE RESTRICT, CONSTRAINT "payloads_pkey" PRIMARY KEY (app_id, id));
 
 CREATE INDEX IF NOT EXISTS "payload_task_idx" ON "payloads" ("app_id", "run_id", "generation", "task_id");
 
 CREATE INDEX IF NOT EXISTS "payloads_generation_idx" ON "payloads" ("app_id", "run_id", "generation");
 
+CREATE UNIQUE INDEX IF NOT EXISTS "payload_upload_request" ON "payloads" ("app_id", "task_id", "request_id");
+
 CREATE INDEX IF NOT EXISTS "payloads_expiry_idx" ON "payloads" ("state", "expires_at");
 
-CREATE TABLE "payload_refs" ("app_id" TEXT NOT NULL, "run_id" TEXT NOT NULL, "generation" INTEGER NOT NULL, "ordinal" INTEGER NOT NULL, "payload_id" TEXT NOT NULL, CONSTRAINT "payload_ref" FOREIGN KEY (app_id, payload_id) REFERENCES payloads(app_id, id) ON DELETE RESTRICT, CONSTRAINT "payload_refs_generation" FOREIGN KEY (app_id, run_id, generation) REFERENCES generations(app_id, run_id, generation) ON DELETE RESTRICT, CONSTRAINT "payload_refs_pkey" PRIMARY KEY (app_id, run_id, generation, ordinal));
+CREATE TABLE "payload_refs" ("app_id" TEXT NOT NULL, "run_id" TEXT NOT NULL, "generation" INTEGER NOT NULL, "slot" TEXT NOT NULL, "ordinal" INTEGER NOT NULL, "payload_id" TEXT NOT NULL, CONSTRAINT "payload_ref" FOREIGN KEY (app_id, payload_id) REFERENCES payloads(app_id, id) ON DELETE RESTRICT, CONSTRAINT "payload_refs_generation" FOREIGN KEY (app_id, run_id, generation) REFERENCES generations(app_id, run_id, generation) ON DELETE RESTRICT, CONSTRAINT "payload_refs_pkey" PRIMARY KEY (app_id, run_id, generation, slot, ordinal));
 
 CREATE INDEX IF NOT EXISTS "payload_ref_idx" ON "payload_refs" ("app_id", "payload_id");
 
 CREATE TABLE "outbox" ("app_id" TEXT NOT NULL, "id" TEXT NOT NULL, "kind" TEXT NOT NULL, "payload" TEXT NOT NULL, "created_at" INTEGER NOT NULL, "delivered_at" INTEGER, CONSTRAINT "outbox_app" FOREIGN KEY (app_id) REFERENCES apps(app_id) ON DELETE RESTRICT, CONSTRAINT "outbox_pkey" PRIMARY KEY (app_id, id));
 
 CREATE INDEX IF NOT EXISTS "outbox_delivery_idx" ON "outbox" ("delivered_at", "created_at");
-INSERT INTO main.schema_version (id, fingerprint) VALUES ('workflow', 'a864d74f04ed2d14643a8307c19e715d7fadd37e7ea1d37d64e69e79c6aabc0f');
+INSERT INTO main.schema_version (id, fingerprint) VALUES ('workflow', 'aed35140fe9f60087af35667a11590763e1f6cc97731302b7a9a6a4520c9a421');
