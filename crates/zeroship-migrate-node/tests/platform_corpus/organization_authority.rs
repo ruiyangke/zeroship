@@ -24,14 +24,14 @@ fn project_membership_requires_matching_organization_membership() {
                     &[&OTHER_PROJECT, &ORGANIZATION, &MEMBER, &"developer"],
                 )
                 .await,
-            SqlState::FOREIGN_KEY_VIOLATION,
+            &SqlState::FOREIGN_KEY_VIOLATION,
             Some("project_members_project_ownership_fkey"),
         );
         refuses(
             client
                 .execute(insert, &[&PROJECT, &ORGANIZATION, &STRANGER, &"developer"])
                 .await,
-            SqlState::FOREIGN_KEY_VIOLATION,
+            &SqlState::FOREIGN_KEY_VIOLATION,
             Some("project_members_organization_member_fkey"),
         );
         accepts(
@@ -54,7 +54,7 @@ fn project_membership_requires_matching_organization_membership() {
             client
                 .execute(member_insert, &[&ORGANIZATION, &STRANGER, &"superuser"])
                 .await,
-            SqlState::FOREIGN_KEY_VIOLATION,
+            &SqlState::FOREIGN_KEY_VIOLATION,
             Some("organization_members_role_fkey"),
         );
         accepts(
@@ -103,21 +103,21 @@ fn apps_keep_matching_ownership_until_deleted() {
             client
                 .execute(insert, &[&"prj_0000000000000000000009", &ORGANIZATION])
                 .await,
-            SqlState::FOREIGN_KEY_VIOLATION,
+            &SqlState::FOREIGN_KEY_VIOLATION,
             Some("apps_project_ownership_fkey"),
         );
         refuses(
             client
                 .execute(insert, &[&OTHER_PROJECT, &ORGANIZATION])
                 .await,
-            SqlState::FOREIGN_KEY_VIOLATION,
+            &SqlState::FOREIGN_KEY_VIOLATION,
             Some("apps_project_ownership_fkey"),
         );
         refuses(
             client
                 .execute(insert, &[&Option::<&str>::None, &ORGANIZATION])
                 .await,
-            SqlState::CHECK_VIOLATION,
+            &SqlState::CHECK_VIOLATION,
             Some("apps_live_app_has_project"),
         );
         accepts(client.execute(insert, &[&PROJECT, &ORGANIZATION]).await);
@@ -126,12 +126,12 @@ fn apps_keep_matching_ownership_until_deleted() {
         let delete_organization = "DELETE FROM zeroship.organizations WHERE id = $1";
         refuses(
             client.execute(delete_project, &[&PROJECT]).await,
-            SqlState::FOREIGN_KEY_VIOLATION,
+            &SqlState::FOREIGN_KEY_VIOLATION,
             Some("apps_project_ownership_fkey"),
         );
         refuses(
             client.execute(delete_organization, &[&ORGANIZATION]).await,
-            SqlState::FOREIGN_KEY_VIOLATION,
+            &SqlState::FOREIGN_KEY_VIOLATION,
             Some("projects_organization_id_fkey"),
         );
         accepts(client.execute(delete_project, &[&OTHER_PROJECT]).await);
@@ -166,17 +166,12 @@ fn invitations_obey_migrated_role_ranks_and_address_uniqueness() {
         let developer = roles["developer"];
         let owner = roles["owner"];
         let billing = roles["billing"];
-        assert!(admin.0 > developer.0 && admin.1 >= developer.1);
-        assert!(owner.0 > admin.0);
-        assert!(admin.0 > billing.0 && admin.1 < billing.1);
+        assert!(admin.authority > developer.authority && admin.billing >= developer.billing);
+        assert!(owner.authority > admin.authority);
+        assert!(admin.authority > billing.authority && admin.billing < billing.billing);
 
         // The same invitation is retried with each invalid grant. Failed
         // inserts must leave its identity available to the accepted control.
-        let insert = "INSERT INTO zeroship.organization_invites
-            (id, token_hash, organization_id, email, role, role_rank, role_billing_rank,
-             invited_by, invited_by_rank, invited_by_billing_rank, purpose, expires_at)
-            VALUES ($1, decode($1, 'escape'), $2, $3, $4, $5, $6,
-                    $7::text::uuid, $8, $9, 'organization_invite', now() + interval '1 day')";
         let id = "ivt_0000000000000000000001";
         let email = "invitee@authority.test";
         for (role, ranks, constraint, code) in [
@@ -184,98 +179,55 @@ fn invitations_obey_migrated_role_ranks_and_address_uniqueness() {
                 "owner",
                 owner,
                 "organization_invites_no_escalation",
-                SqlState::CHECK_VIOLATION,
+                &SqlState::CHECK_VIOLATION,
             ),
             (
                 "billing",
                 billing,
                 "organization_invites_no_escalation",
-                SqlState::CHECK_VIOLATION,
+                &SqlState::CHECK_VIOLATION,
             ),
             (
                 "developer",
-                (developer.0 - 1, developer.1),
+                RoleRanks {
+                    authority: developer.authority - 1,
+                    ..developer
+                },
                 "organization_invites_role_fkey",
-                SqlState::FOREIGN_KEY_VIOLATION,
+                &SqlState::FOREIGN_KEY_VIOLATION,
             ),
         ] {
             refuses(
-                client
-                    .execute(
-                        insert,
-                        &[
-                            &id,
-                            &ORGANIZATION,
-                            &email,
-                            &role,
-                            &ranks.0,
-                            &ranks.1,
-                            &MEMBER,
-                            &admin.0,
-                            &admin.1,
-                        ],
-                    )
-                    .await,
+                invite(client, id, email, role, ranks, admin).await,
                 code,
                 Some(constraint),
             );
         }
-        accepts(
-            client
-                .execute(
-                    insert,
-                    &[
-                        &id,
-                        &ORGANIZATION,
-                        &email,
-                        &"developer",
-                        &developer.0,
-                        &developer.1,
-                        &MEMBER,
-                        &admin.0,
-                        &admin.1,
-                    ],
-                )
-                .await,
-        );
+        accepts(invite(client, id, email, "developer", developer, admin).await);
         let second = "ivt_0000000000000000000002";
         refuses(
-            client
-                .execute(
-                    insert,
-                    &[
-                        &second,
-                        &ORGANIZATION,
-                        &email.to_uppercase(),
-                        &"developer",
-                        &developer.0,
-                        &developer.1,
-                        &MEMBER,
-                        &admin.0,
-                        &admin.1,
-                    ],
-                )
-                .await,
-            SqlState::UNIQUE_VIOLATION,
+            invite(
+                client,
+                second,
+                &email.to_uppercase(),
+                "developer",
+                developer,
+                admin,
+            )
+            .await,
+            &SqlState::UNIQUE_VIOLATION,
             Some("organization_invites_one_active"),
         );
         accepts(
-            client
-                .execute(
-                    insert,
-                    &[
-                        &second,
-                        &ORGANIZATION,
-                        &"another@authority.test",
-                        &"developer",
-                        &developer.0,
-                        &developer.1,
-                        &MEMBER,
-                        &admin.0,
-                        &admin.1,
-                    ],
-                )
-                .await,
+            invite(
+                client,
+                second,
+                "another@authority.test",
+                "developer",
+                developer,
+                admin,
+            )
+            .await,
         );
         let invitations = client
             .query(
@@ -320,7 +272,7 @@ fn control_can_manage_membership_but_cannot_redefine_roles() {
         ] {
             refuses(
                 client.execute(statement, &[]).await,
-                SqlState::INSUFFICIENT_PRIVILEGE,
+                &SqlState::INSUFFICIENT_PRIVILEGE,
                 None,
             );
         }
@@ -353,7 +305,7 @@ fn organization_identifiers_and_case_insensitive_columns_keep_their_contract() {
             VALUES ($1, 'acme', 'Acme', 'billing@authority.test')";
         refuses(
             client.execute(insert, &[&"org_short"]).await,
-            SqlState::CHECK_VIOLATION,
+            &SqlState::CHECK_VIOLATION,
             Some("organizations_id_shape"),
         );
         accepts(client.execute(insert, &[&ORGANIZATION]).await);
@@ -450,7 +402,13 @@ async fn seed_graph(client: &Client) {
     );
 }
 
-async fn roles(client: &Client) -> BTreeMap<String, (i32, i32)> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RoleRanks {
+    authority: i32,
+    billing: i32,
+}
+
+async fn roles(client: &Client) -> BTreeMap<String, RoleRanks> {
     let rows = client
         .query(
             "SELECT role, rank, billing_rank FROM zeroship.organization_roles",
@@ -463,8 +421,46 @@ async fn roles(client: &Client) -> BTreeMap<String, (i32, i32)> {
         "the migrated role ladder must be populated"
     );
     rows.iter()
-        .map(|row| (row.get(0), (row.get(1), row.get(2))))
+        .map(|row| {
+            (
+                row.get(0),
+                RoleRanks {
+                    authority: row.get(1),
+                    billing: row.get(2),
+                },
+            )
+        })
         .collect()
+}
+
+async fn invite(
+    client: &Client,
+    id: &str,
+    email: &str,
+    role: &str,
+    ranks: RoleRanks,
+    issuer: RoleRanks,
+) -> Result<u64, Error> {
+    client
+        .execute(
+            "INSERT INTO zeroship.organization_invites
+         (id, token_hash, organization_id, email, role, role_rank, role_billing_rank,
+          invited_by, invited_by_rank, invited_by_billing_rank, purpose, expires_at)
+         VALUES ($1, decode($1, 'escape'), $2, $3, $4, $5, $6,
+                 $7::text::uuid, $8, $9, 'organization_invite', now() + interval '1 day')",
+            &[
+                &id,
+                &ORGANIZATION,
+                &email,
+                &role,
+                &ranks.authority,
+                &ranks.billing,
+                &MEMBER,
+                &issuer.authority,
+                &issuer.billing,
+            ],
+        )
+        .await
 }
 
 #[track_caller]
@@ -473,11 +469,11 @@ fn accepts(result: Result<u64, Error>) {
 }
 
 #[track_caller]
-fn refuses(result: Result<u64, Error>, code: SqlState, constraint: Option<&str>) {
+fn refuses(result: Result<u64, Error>, code: &SqlState, constraint: Option<&str>) {
     let error = result.expect_err("the database accepted a forbidden write");
     let diagnostic = error
         .as_db_error()
         .expect("refusal must come from PostgreSQL");
-    assert_eq!(diagnostic.code(), &code, "{error:?}");
+    assert_eq!(diagnostic.code(), code, "{error:?}");
     assert_eq!(diagnostic.constraint(), constraint, "{error:?}");
 }

@@ -574,12 +574,6 @@ fi
 # the copy is what the key consumes to keep the two from disagreeing, so it is
 # not derivable and cannot be defaulted.
 #
-# GATES ARE EXCLUDED, and not as a convenience: `organization_authority_gate.sh`
-# writes an app row with NO project ON PURPOSE, to prove the column refuses it.
-# A rule that could not tell a fixture from a proof would either fail forever or
-# be relaxed until it saw nothing - the same distinction arm 3 draws between a
-# live query and an absence assertion.
-#
 # The INSERT's column list can wrap, and in one harness it does, so the window
 # read below is the opening line and the two after it rather than the one line
 # grep matched.
