@@ -335,7 +335,7 @@ impl ThreadDbContext {
         different
     }
 
-    /// Read the worker-process identity used in CDC slot names.
+    /// Clone the authenticated relay configuration installed for this isolate.
     pub(crate) fn cdc_relay(&self) -> Option<zeroship_data_orm::cdc::relay::RelayConfig> {
         self.cdc_relay.clone()
     }

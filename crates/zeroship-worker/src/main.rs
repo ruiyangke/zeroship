@@ -743,15 +743,20 @@ fn main() -> std::io::Result<()> {
             zeroship_data_v8::service::DbService::new(
                 zeroship_data_v8::service::DbServiceConfig {
                     url: url.to_string(),
-                    cdc_relay: if url.starts_with("postgres:") || url.starts_with("postgresql:") {
+                    cdc_relay: Some({
                         let relay = zeroship_data_orm::cdc::relay::RelayConfig::new(
-                            settings.cdc_relay_url.get().clone(), Arc::clone(&service_auth),
-                        ).map_err(|error| std::io::Error::other(error.to_string()))?;
+                            settings.cdc_relay_url.get().clone(),
+                            Arc::clone(&service_auth),
+                        )
+                        .map_err(|error| std::io::Error::other(error.to_string()))?;
                         let ca = settings.cdc_relay_ca_file.get();
-                        Some(if ca.as_os_str().is_empty() { relay } else {
-                            relay.with_ca_file(ca).map_err(|error| std::io::Error::other(error.to_string()))?
-                        })
-                    } else { None },
+                        if ca.as_os_str().is_empty() {
+                            relay
+                        } else {
+                            relay.with_ca_file(ca)
+                                .map_err(|error| std::io::Error::other(error.to_string()))?
+                        }
+                    }),
                     meter: Some(Arc::clone(&meter)),
                 },
             )

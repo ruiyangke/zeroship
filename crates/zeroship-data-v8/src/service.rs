@@ -339,7 +339,7 @@ mod tests {
 
     /// Equal configuration is the same resource; different configuration is
     /// not. The control matters: a key that collapsed distinct databases would
-    /// let them share a metadata cache and an operator pool.
+    /// let them share metadata belonging to different databases.
     #[test]
     fn the_resource_key_follows_the_validated_configuration() {
         let one = DbService::new(config("postgres://host-a/db")).expect("service");

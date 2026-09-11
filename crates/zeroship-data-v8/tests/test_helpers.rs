@@ -21,7 +21,7 @@
 //! statics only work as singletons:
 //!
 //!   `support::sweep_prior_run_residue_once`  a `Once` guarding a sweep that
-//!       DROPS this suite's schemas, roles, replication slots and publications.
+//!       drops this suite's schemas and roles.
 //!       A second copy is a second sweep, and a sweep is only correct when no
 //!       sibling is holding anything.
 //!   `support::init_test_tracing`             a `Once` around the global
@@ -41,14 +41,12 @@
 //! other modules never reach the `Once` - so under `--test-threads` greater than
 //! one they can now be running while it sweeps.
 //!
-//! What bounds that is the sweep's own scoping, not the merge. Its tenancy half
+//! What bounds that is the sweep's own scoping, not the merge. The sweep
 //! touches only namespaces carrying `support::TEST_APP_PREFIX` and the per-app
 //! roles wrapping them, and those two modules are the only ones here that mint
 //! an app id with that prefix; count them with
 //! `grep -rln test_app_id crates/zeroship-data-v8/tests` rather than trusting
-//! this sentence. Its replication half touches only the platform's own slot and
-//! publication prefix, and no other module here opens a logical-decoding
-//! consumer.
+//! this sentence. Replication fixtures belong to the separate relay target.
 //!
 //! `tests/run_data_v8_live_suite.sh` runs this target with `--test-threads=1`,
 //! and has always had to for the older reason that these tests share one
@@ -63,9 +61,7 @@ mod parity;
 mod schema_fixture;
 mod support;
 
-// The PostgreSQL query-builder, CRUD, encryption and CDC suite. One of the two
-// modules that mint `zst_`-prefixed app ids, and the only one that drives
-// logical decoding.
+// PostgreSQL query-builder, CRUD and encryption tests use suite-prefixed app ids.
 mod integration;
 
 // The same ground on SQLite, plus the `SqliteSession` actor in isolation.

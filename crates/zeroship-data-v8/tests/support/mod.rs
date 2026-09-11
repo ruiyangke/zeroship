@@ -29,34 +29,12 @@ fn like_escape(literal: &str) -> String {
 /// goes stale the moment someone adds a test; a prefix does not.
 pub const TEST_APP_PREFIX: &str = "zst_";
 
-/// Compose a per-test app id from the calling test's own name.
+/// Compose a stable app id from the test name and discriminator.
 ///
-/// # Why the app id and not the schema name
-///
-/// The app id is the single root of four namespaces at once: the schema is
-/// `"<app_id>"`, the runtime role is `app_<app_id>_role`
-/// (`zeroship_core::database_role::per_app_role_name`), the publication is
-/// `__zs_pub_<sha256(app_id)>` and the worker slot is
-/// `__zs_slot_<sha256(app_id)>__<worker>`
-/// (`zeroship_core::replication_names`). Two of those - the role and the slot -
-/// live in CLUSTER-wide catalogs, so giving each test its own DATABASE would not
-/// have separated them. Giving each test its own app id does.
-///
-/// # Why it is derived and not a counter
-///
-/// A counter is not stable across reruns, so a crashed run's residue would never
-/// be reclaimed by the test that produced it and a rerun would mint fresh names
-/// beside it forever. Deriving from the test name makes a rerun idempotent: the
-/// same test always reaches for the same objects and drops them first.
-///
-/// # Why it hashes
-///
-/// PostgreSQL truncates an identifier past 63 bytes with a notice rather than an
-/// error, and `per_app_role_name` appends 9 bytes (`app_` + `_role`), so an app
-/// id must fit in 54. Test names in this suite already exceed that on their own -
-/// `c1_abandoned_reaper_preserves_inactive_slot_owned_by_live_worker` is 64
-/// characters - so the readable head is truncated and a digest of the FULL name
-/// plus discriminator is appended. 4 (prefix) + 36 (head) + 1 + 12 (digest) = 53.
+/// The id scopes the schema and runtime role together. The readable head is
+/// bounded so the role wrapper fits PostgreSQL's identifier limit; a digest of
+/// the full input keeps long test names distinct. Stable ids let a rerun reclaim
+/// its own namespace after a crash.
 pub fn test_app_id_from(name: &str, discriminator: &str) -> String {
     use sha2::{Digest, Sha256};
 
@@ -125,93 +103,11 @@ macro_rules! test_app_id {
     }};
 }
 
-/// Drop everything a PREVIOUS run of this suite left in the current database.
+/// Drop prior test schemas and their runtime roles in the current database.
 ///
-/// # Why this is a startup sweep and not a mid-test one
-///
-/// `c1_cleanup` used to end with two unbounded `LIKE '__zs_%'` sweeps, and its
-/// own comment said they were safe because "integration tests run with
-/// `--test-threads=1`". They were the reason the suite could not run in
-/// parallel: nineteen tests each destroyed every sibling's CDC fixture, so
-/// per-test naming alone could not have fixed the suite. A sweep is only safe
-/// when no sibling exists, which is true exactly once - before any test starts.
-/// [`sweep_prior_run_residue_once`] is what enforces that.
-///
-/// # Why `AND database = current_database()` is load-bearing
-///
-/// `pg_replication_slots` is a CLUSTER-WIDE view and PostgreSQL does NOT confine
-/// `pg_drop_replication_slot` to the slot's own database when the slot is
-/// inactive. Measured 2026-08-27 on PG 16.14 and confirmed on 18.4: a session on
-/// database `probe_b` ran this statement without the predicate and dropped an
-/// inactive `__zs_%` slot belonging to `probe_a` - the count went 1 to 0, no
-/// error. Every suite sharing the server lost its CDC slots to whichever one
-/// swept first, which is what made two of these tests fail only when another
-/// suite ran beside them. Giving each suite its own DATABASE bought nothing
-/// against it; only a separate server did.
-///
-/// The `active = false` guard is not a substitute: a slot is inactive in the
-/// window between `ensure_worker_slot` creating it and the consumer attaching,
-/// and again across a consumer reconnect.
-///
-/// The publication half needs no such predicate - `pg_publication` is
-/// per-database and a session sees only its own (probe_b saw 0 of probe_a's in
-/// the same measurement).
-///
-/// `integration.rs::c1_cleanup_sweep_does_not_cross_database_boundaries` is the
-/// regression guard for the predicate and calls
-/// [`sweep_prior_run_replication_objects`] directly.
+/// Only [`sweep_prior_run_residue_once`] may call this before tests using the
+/// suite prefix begin. Relay fixtures own and clean their replication objects.
 pub async fn sweep_prior_run_residue(pool: &compio_postgres::Pool) {
-    sweep_prior_run_replication_objects(pool).await;
-    sweep_prior_run_namespaces(pool).await;
-}
-
-/// The CDC half of [`sweep_prior_run_residue`]: slots and publications.
-///
-/// Split out because `c1_cleanup_sweep_does_not_cross_database_boundaries` calls
-/// the sweep MID-RUN, as its subject, and only holds
-/// `cdc_budget::exclusive()` - which fences the CDC family and nothing else.
-/// Calling the whole sweep there dropped live siblings' schemas and roles, and
-/// it did so INTERMITTENTLY: measured 2026-09-04 over five parallel runs, two
-/// went red, once at `vector_search_returns_k_nearest`
-/// ("permission denied for schema zst_vector_search...") and once at
-/// `exec_autocommit_query_runs_under_per_app_role` ("its per-app Postgres role
-/// does not exist"), with the other three green. Two different victims, one
-/// cause, and the error text named the victim's own object each time.
-pub async fn sweep_prior_run_replication_objects(pool: &compio_postgres::Pool) {
-    let _ = pool
-        .query_text_params(
-            "SELECT pg_drop_replication_slot(slot_name) \
-             FROM pg_replication_slots \
-             WHERE slot_name LIKE '__zs\\_%' \
-               AND active = false \
-               AND database = current_database()",
-            &[],
-        )
-        .await;
-    if let Ok(rows) = pool
-        .query_text_params(
-            "SELECT pubname FROM pg_publication WHERE pubname LIKE '__zs\\_%'",
-            &[],
-        )
-        .await
-    {
-        for row in rows {
-            let name: String = row.get(0);
-            let _ = pool
-                .execute(
-                    &format!("DROP PUBLICATION IF EXISTS {}", quote_ident(&name)),
-                    &[],
-                )
-                .await;
-        }
-    }
-}
-
-/// The tenancy half of [`sweep_prior_run_residue`]: schemas and their roles.
-///
-/// Only [`sweep_prior_run_residue_once`] may call this. It is unbounded over the
-/// suite's own prefix, so a mid-run call destroys whatever siblings are holding.
-async fn sweep_prior_run_namespaces(pool: &compio_postgres::Pool) {
     // Schemas first, then the roles that own them: a role with dependent
     // objects cannot be dropped, and CASCADE on the schema is what removes them.
     let schema_pattern = format!("{}%", like_escape(TEST_APP_PREFIX));
