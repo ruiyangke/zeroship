@@ -37,6 +37,7 @@ src/storage.rs                app-storage abstraction
 - `RuntimeInner` tracks `enter_depth`; isolates are entered for a V8 turn and exited afterwards so multiple isolates can live on one worker thread.
 - `build()` leaves a new isolate entered, and the worker exits it after caching so later requests can re-enter it just in time for dispatch.
 - Async native work resolves through the per-isolate pump started by `Runtime::start_pump()`.
+- Trusted hosts can permanently quarantine an isolate and await `Runtime::shutdown()` before reusing execution capacity. The native task scope cancels the pump and socket roots, joins their child tasks, and keeps V8 alive until native futures have been destroyed.
 - The pump batches ready timer and op completions into a single V8 re-entry so one burst of settled work does not pay one enter/exit cycle per completion.
 - Initialization failures are stored on `RuntimeInner::init_error`; `call_fetch_handler` surfaces them as a 500 instead of pretending no handler exists.
 

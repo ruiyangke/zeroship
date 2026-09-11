@@ -91,6 +91,7 @@ async fn run_plain_driver(
     tcp: TcpStream,
     rx: mpsc::Receiver<WriteCmd>,
 ) {
+    let tasks = state.borrow().tasks.clone();
     let tcp = Rc::new(tcp);
     let (writer_tx, writer_rx) = mpsc::channel::<WriteCmd>(128);
     let (control_tx, control_rx) = mpsc::unbounded::<PlainControl>();
@@ -98,18 +99,18 @@ async fn run_plain_driver(
     let writer_handle = {
         let state = state.clone();
         let tcp = tcp.clone();
-        compio::runtime::spawn(crate::panic_util::guard(
+        compio::runtime::spawn(tasks.track(crate::panic_util::guard(
             "node-net-plain-writer",
             async move {
                 run_plain_writer_loop(&state, socket_id, tcp, writer_rx).await;
             },
-        ))
+        )))
     };
 
-    let command_handle = compio::runtime::spawn(crate::panic_util::guard(
+    let command_handle = compio::runtime::spawn(tasks.track(crate::panic_util::guard(
         "node-net-plain-command-router",
         run_plain_command_router(rx, writer_tx, control_tx),
-    ));
+    )));
 
     let read_exit = run_plain_reader_loop(&state, socket_id, tcp.clone(), control_rx).await;
     match read_exit {

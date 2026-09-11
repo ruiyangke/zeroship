@@ -58,7 +58,10 @@ to fall back to stale authority when Control is unavailable.
 The shared runner now drives embedded and remote task transports, renews leases
 and retries completion receipts without re-executing callbacks. Execution slots
 hold capacity until the host confirms shutdown or quarantine, including after
-caller cancellation. The V8 host and worker polling loop, public HTTP ingress, retention of
+caller cancellation. Runtime quarantine now provides the shutdown barrier for
+the V8 host, cancelling native roots and joining their children while retaining
+the isolate through native teardown.
+The V8 host and worker polling loop, public HTTP ingress, retention of
 completed run graphs and interpreter cutover remain in progress. The
 current runtime still uses Control and the local mini-engine.
 

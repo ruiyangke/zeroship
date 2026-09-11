@@ -498,7 +498,9 @@ pub fn spawn_connect_task(
         }
     };
 
-    compio::runtime::spawn(crate::panic_util::guard("websocket-connect", task)).detach();
+    state.borrow().tasks.spawn(async move {
+        crate::panic_util::guard("websocket-connect", task).await;
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -591,8 +593,9 @@ async fn run_plain_driver(
         }
     };
 
-    let reader_handle = compio::runtime::spawn(crate::panic_util::guard("ws-reader", reader_task));
-    let writer_handle = compio::runtime::spawn(crate::panic_util::guard("ws-writer", writer_task));
+    let tasks = state.borrow().tasks.clone();
+    let reader_handle = compio::runtime::spawn(tasks.track(crate::panic_util::guard("ws-reader", reader_task)));
+    let writer_handle = compio::runtime::spawn(tasks.track(crate::panic_util::guard("ws-writer", writer_task)));
 
     drop(tx);
     let _ = reader_handle.await;

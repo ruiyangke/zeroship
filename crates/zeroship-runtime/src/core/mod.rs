@@ -19,6 +19,7 @@ pub mod plugin;
 pub mod runtime;
 pub mod serve;
 pub mod state;
+pub(crate) mod tasks;
 
 #[cfg(target_os = "linux")]
 pub mod cpu_timer;
