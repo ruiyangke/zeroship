@@ -10,6 +10,10 @@ and the local SQLite engine. It does not depend on V8 or the worker runtime.
 - `store/`: journal storage and its PostgreSQL implementation.
 - `backend.rs`, `client.rs`: app-scoped control-plane operations for Rust hosts.
 - `dev.rs`: SQLite persistence and scheduling through a host-owned `WorkflowExecutor`.
+- `service/`: replacement shared service, app handles, transactional lifecycle and
+  worker task protocol over PostgreSQL or SQLite.
+- `schema/`: owned service schema recorded through the canonical migration DSL
+  and generated through its PostgreSQL and SQLite compilers.
 
 Rust hosts can construct `HttpWorkflowBackend` with `WorkflowClientConfig` and
 call `WorkflowBackend::{start,status,signal,transition,restart,read_step_output}`. The host binds
@@ -27,4 +31,12 @@ Local and deployed hosts share journal types and outcome decoding. The host
 keeps lease credentials outside the invocation and binds returned outcomes to
 its claim before applying them.
 
-Run `cargo test -p zeroship-workflow` for the engine and SQLite journal tests.
+The replacement service is under construction and is not yet composed into the
+worker, Control or CLI. Its native contracts exercise app isolation, retry
+receipts, expired leases, lifecycle changes, child execution and retained restart
+history against both database adapters. PostgreSQL fixtures use Testcontainers.
+The schema check uses the built `@zeroship/migrate` and `zero-migrate-cli`
+packages and their native migration addon; regenerate with
+`node crates/zeroship-workflow/schema/generate.mjs` from the repository root.
+
+Run `cargo test -p zeroship-workflow` for the engine and shared service tests.

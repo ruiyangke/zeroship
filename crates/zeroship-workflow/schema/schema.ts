@@ -1,0 +1,134 @@
+import { table, t } from "../../../packages/zero-migrate/dist/index.js";
+
+// The workflow service owns this schema. Platform migrations and local schema
+// generation call the same definition through the migration compiler.
+export function workflowSchema(namespace) {
+  const text = () => t.text().notNull();
+  const integer = () => t.bigInt().notNull();
+  const identity = () => ({ app_id: text() });
+  const runIdentity = () => ({ ...identity(), run_id: text() });
+  const generation = () => ({ ...runIdentity(), generation: integer() });
+  const fk = (name, columns, target, targetColumns, onDelete = "restrict") => ({
+    name, columns, references: { table: target, schema: namespace, columns: targetColumns }, onDelete,
+  });
+  const appFk = (name) => fk(`${name}_app`, ["app_id"], "apps", ["app_id"]);
+  const runFk = (name) => fk(`${name}_run`, ["app_id", "run_id"], "runs", ["app_id", "id"]);
+  const generationFk = (name) => fk(`${name}_generation`, ["app_id", "run_id", "generation"], "generations", ["app_id", "run_id", "generation"]);
+  const create = (name, columns, primaryKey, foreignKeys = [], uniques = []) => {
+    table(name, { schema: namespace }).create({ columns, primaryKey, foreignKeys });
+    for (const unique of uniques) {
+      table(name, { schema: namespace }).index(unique.name).add({ on: unique.columns, unique: true });
+    }
+  };
+  const index = (name, purpose, columns) => table(name, { schema: namespace }).index(`${name}_${purpose}_idx`).add({ on: columns });
+
+  create("schema_version", { id: text(), fingerprint: text() }, ["id"]);
+  create("apps", {
+    ...identity(), revision: integer(), policy: text(), signal_epoch: integer(),
+  }, ["app_id"]);
+  create("deploys", {
+    ...identity(), id: text(), hash: text(), manifest: text(), created_at: integer(),
+    active: integer(), state: text(),
+  }, ["app_id", "id"], [appFk("deploys")], [
+    { name: "deploy_hash_identity", columns: ["app_id", "hash"] },
+  ]);
+  create("runs", {
+    ...identity(), id: text(), workflow_name: text(), deploy_id: text(),
+    generation: integer(), state: text(), control: text(), due_at: t.bigInt(),
+    task_id: t.text(), lease_epoch: integer(), key: t.text(),
+    parent_id: t.text(), parent_generation: t.bigInt(), parent_ordinal: t.bigInt(),
+    cascade: integer(), depth: integer(), created_at: integer(), terminal_at: t.bigInt(),
+    signal_epoch: integer(), compensation_target: t.text(),
+  }, ["app_id", "id"], [
+    appFk("runs"),
+    fk("run_deploy", ["app_id", "deploy_id"], "deploys", ["app_id", "id"]),
+    fk("run_parent", ["app_id", "parent_id"], "runs", ["app_id", "id"]),
+  ], [{ name: "live_workflow_key", columns: ["app_id", "workflow_name", "key"] }]);
+  index("runs", "due", ["due_at", "app_id", "id"]);
+  index("runs", "parent", ["app_id", "parent_id", "parent_generation"]);
+  create("generations", {
+    ...generation(), deploy_id: text(), input: text(), output: t.text(), error: t.text(),
+    state: text(), started_at: integer(), terminal_at: t.bigInt(),
+  }, ["app_id", "run_id", "generation"], [
+    runFk("generations"),
+    fk("generation_deploy", ["app_id", "deploy_id"], "deploys", ["app_id", "id"]),
+  ]);
+  create("steps", {
+    ...generation(), ordinal: integer(), name: text(), occurrence: integer(),
+    origin_generation: integer(), kind: text(), state: text(), record: text(),
+  }, ["app_id", "run_id", "generation", "ordinal"], [generationFk("steps")], [
+    { name: "step_name_occurrence", columns: ["app_id", "run_id", "generation", "name", "occurrence"] },
+  ]);
+  create("tasks", {
+    ...generation(), id: text(), worker: text(), epoch: integer(), token_hash: text(),
+    deadline: integer(), state: text(), completion_digest: t.text(), receipt: t.text(),
+    created_at: integer(), finished_at: t.bigInt(),
+  }, ["id"], [generationFk("tasks")], [
+    { name: "task_scope_identity", columns: ["app_id", "run_id", "generation", "id"] },
+    { name: "task_fence_identity", columns: ["app_id", "run_id", "generation", "epoch"] },
+  ]);
+  index("tasks", "admission", ["app_id", "state", "deadline"]);
+  create("waits", {
+    ...generation(), ordinal: integer(), kind: text(), signal_type: t.text(),
+    topic: t.text(), max_signal_age: t.bigInt(), due_at: t.bigInt(), child_id: t.text(),
+  }, ["app_id", "run_id", "generation", "ordinal"], [
+    fk("wait_step", ["app_id", "run_id", "generation", "ordinal"], "steps", ["app_id", "run_id", "generation", "ordinal"]),
+    fk("wait_child", ["app_id", "child_id"], "runs", ["app_id", "id"]),
+  ]);
+  create("broadcasts", {
+    ...identity(), id: text(), topic: text(), signal_type: text(), payload: text(),
+    created_at: integer(), cursor: t.text(), finished: integer(),
+  }, ["app_id", "id"], [appFk("broadcasts")]);
+  create("signals", {
+    ...runIdentity(), id: text(), signal_type: text(), payload: text(),
+    created_at: integer(), consumed_generation: t.bigInt(), consumed_ordinal: t.bigInt(),
+    broadcast_id: t.text(),
+  }, ["app_id", "id"], [
+    runFk("signals"),
+    fk("signal_consumption", ["app_id", "run_id", "consumed_generation", "consumed_ordinal"], "steps", ["app_id", "run_id", "generation", "ordinal"]),
+    fk("signal_broadcast", ["app_id", "broadcast_id"], "broadcasts", ["app_id", "id"]),
+  ], [{ name: "broadcast_delivery", columns: ["app_id", "broadcast_id", "run_id"] }]);
+  index("signals", "mailbox", ["app_id", "run_id", "signal_type", "consumed_generation", "created_at"]);
+  create("subscriptions", {
+    ...generation(), ordinal: integer(), id: text(), topic: text(), created_at: integer(),
+  }, ["app_id", "run_id", "generation", "ordinal"], [
+    fk("subscription_step", ["app_id", "run_id", "generation", "ordinal"], "steps", ["app_id", "run_id", "generation", "ordinal"]),
+  ], [{ name: "subscription_identity", columns: ["app_id", "id"] }]);
+  index("subscriptions", "topic", ["app_id", "topic", "id"]);
+  create("requests", {
+    ...identity(), id: text(), operation: text(), digest: text(), result: text(), expires_at: integer(),
+  }, ["app_id", "id"], [appFk("requests")]);
+  index("requests", "expiry", ["expires_at"]);
+  create("schedules", {
+    ...identity(), id: text(), workflow_name: text(), deploy_id: text(), definition: text(),
+    next_at: t.bigInt(), revision: integer(),
+  }, ["app_id", "id"], [
+    appFk("schedules"),
+    fk("schedule_deploy", ["app_id", "deploy_id"], "deploys", ["app_id", "id"]),
+  ]);
+  index("schedules", "due", ["next_at", "app_id", "id"]);
+  create("occurrences", {
+    ...identity(), schedule_id: text(), at: integer(), run_id: t.text(),
+  }, ["app_id", "schedule_id", "at"], [
+    fk("occurrence_schedule", ["app_id", "schedule_id"], "schedules", ["app_id", "id"]),
+    fk("occurrence_run", ["app_id", "run_id"], "runs", ["app_id", "id"]),
+  ]);
+  create("payloads", {
+    ...generation(), id: text(), task_id: text(), hash: text(), size: integer(),
+    content_type: t.text(), state: text(), created_at: integer(), expires_at: integer(),
+  }, ["app_id", "id"], [
+    generationFk("payloads"),
+    fk("payload_task", ["app_id", "run_id", "generation", "task_id"], "tasks", ["app_id", "run_id", "generation", "id"]),
+  ]);
+  index("payloads", "expiry", ["state", "expires_at"]);
+  create("payload_refs", {
+    ...generation(), ordinal: integer(), payload_id: text(),
+  }, ["app_id", "run_id", "generation", "ordinal"], [
+    generationFk("payload_refs"),
+    fk("payload_ref", ["app_id", "payload_id"], "payloads", ["app_id", "id"]),
+  ]);
+  create("outbox", {
+    ...identity(), id: text(), kind: text(), payload: text(), created_at: integer(), delivered_at: t.bigInt(),
+  }, ["app_id", "id"], [appFk("outbox")]);
+  index("outbox", "delivery", ["delivered_at", "created_at"]);
+}

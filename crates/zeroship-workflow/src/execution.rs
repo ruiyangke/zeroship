@@ -12,7 +12,7 @@ use crate::engine::{JournalStep, StepOutcome, StepRequest, StepResult};
 use crate::WorkflowServiceError;
 
 /// Replay input without journal mutation authority.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkflowInvocation {
     pub app_id: String,
@@ -25,7 +25,7 @@ pub struct WorkflowInvocation {
     pub journal: Vec<JournalStep>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkflowTrigger {
     pub input: Option<Value>,

@@ -14,6 +14,7 @@ pub mod errors;
 pub mod execution;
 pub mod lifecycle;
 pub mod operations;
+pub mod service;
 pub mod store;
 pub mod validation;
 

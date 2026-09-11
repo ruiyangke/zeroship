@@ -1,0 +1,766 @@
+use super::{
+    schema,
+    store::{PostgresStore, SqliteStore, Transaction, WorkflowStore},
+};
+use super::{AppPolicy, DeployRegistration, RequestId, WorkflowService};
+use crate::operations::{ConflictPolicy, SignalOptions, StartOptions};
+use crate::WorkflowServiceError;
+use compio_postgres::NoTls;
+use serde_json::json;
+use std::{path::Path, process::Command, sync::Arc};
+use testcontainers::{
+    core::{IntoContainerPort, WaitFor},
+    runners::SyncRunner,
+    Container, GenericImage, ImageExt,
+};
+use zeroship_core::{app_id::AppId, typed_id};
+
+#[compio::test]
+async fn sqlite_app_operations_are_scoped_and_retryable() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("workflow.sqlite");
+    schema::initialize_sqlite(&path).unwrap();
+    app_contract(Arc::new(SqliteStore::new(path))).await;
+}
+
+#[compio::test]
+async fn postgres_app_operations_are_scoped_and_retryable() {
+    let fixture = PostgresFixture::start().await;
+    app_contract(Arc::new(fixture.store.clone())).await;
+}
+
+async fn registered_service(store: Arc<dyn WorkflowStore>) -> (WorkflowService, AppId, AppId) {
+    let service = WorkflowService::open(store).await.unwrap();
+    let a = AppId::mint();
+    let b = AppId::mint();
+    for app in [&a, &b] {
+        service
+            .register_app(app, &AppPolicy::default())
+            .await
+            .unwrap();
+        service
+            .register_app(app, &AppPolicy::default())
+            .await
+            .unwrap();
+        service
+            .activate_deploy(
+                app,
+                &DeployRegistration {
+                    id: typed_id::generate("dep"),
+                    hash: "a".repeat(64),
+                    workflows: ["Example".into(), "Child".into()].into(),
+                },
+            )
+            .await
+            .unwrap();
+    }
+    (service, a, b)
+}
+
+async fn app_contract(store: Arc<dyn WorkflowStore>) {
+    let (service, a, b) = registered_service(store).await;
+    let a = service.for_app(a);
+    let b = service.for_app(b);
+    let request = RequestId::mint();
+    let options = StartOptions {
+        input: json!({"hello": "world"}),
+        key: Some("invoice".into()),
+        on_conflict: ConflictPolicy::Join,
+    };
+    let first = a.start(&request, "Example", options.clone()).await.unwrap();
+    assert_eq!(
+        first,
+        a.start(&request, "Example", options.clone()).await.unwrap()
+    );
+    assert_eq!(
+        first.id,
+        a.start(&RequestId::mint(), "Example", options.clone())
+            .await
+            .unwrap()
+            .id
+    );
+    assert_ne!(
+        first.id,
+        b.start(&request, "Example", options.clone())
+            .await
+            .unwrap()
+            .id
+    );
+    assert!(matches!(
+        b.status(&first.id).await,
+        Err(WorkflowServiceError::NotFound(_))
+    ));
+    assert!(matches!(
+        a.start(&request, "Child", options.clone()).await,
+        Err(WorkflowServiceError::Conflict(_))
+    ));
+    let signal_request = RequestId::mint();
+    let signal = SignalOptions {
+        signal_type: "approved".into(),
+        payload: json!(true),
+    };
+    assert!(matches!(
+        b.signal(&signal_request, &first.id, signal.clone()).await,
+        Err(WorkflowServiceError::NotFound(_))
+    ));
+    let delivered = a
+        .signal(&signal_request, &first.id, signal.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        delivered,
+        a.signal(&signal_request, &first.id, signal).await.unwrap()
+    );
+    let mut policy = AppPolicy::default();
+    policy.admission = false;
+    service.register_app(a.app_id(), &policy).await.unwrap();
+    assert_eq!(
+        first,
+        a.start(&request, "Example", options.clone()).await.unwrap()
+    );
+    assert!(matches!(
+        a.start(&RequestId::mint(), "Example", options).await,
+        Err(WorkflowServiceError::PermissionDenied)
+    ));
+}
+
+struct PostgresFixture {
+    _container: Container<GenericImage>,
+    store: PostgresStore,
+    admin_url: String,
+}
+impl PostgresFixture {
+    async fn start() -> Self {
+        let container = GenericImage::new("postgres", "18")
+            .with_exposed_port(5432.tcp())
+            .with_wait_for(WaitFor::message_on_stderr(
+                "database system is ready to accept connections",
+            ))
+            .with_env_var("POSTGRES_HOST_AUTH_METHOD", "trust")
+            .start()
+            .expect("workflow PostgreSQL container");
+        let host = container.get_host().unwrap();
+        let port = container.get_host_port_ipv4(5432).unwrap();
+        let admin_url = format!("postgres://postgres@{host}:{port}/postgres");
+        let admin = connect(&admin_url).await;
+        admin
+            .batch_execute(
+                "CREATE ROLE zeroship_workflow_owner NOLOGIN; \
+             CREATE ROLE zeroship_workflow LOGIN; CREATE ROLE zeroship_worker LOGIN; \
+             CREATE ROLE zeroship_gateway LOGIN; CREATE ROLE zeroship_app LOGIN; \
+             CREATE SCHEMA workflow AUTHORIZATION zeroship_workflow_owner; \
+             SET ROLE zeroship_workflow_owner;",
+            )
+            .await
+            .unwrap();
+        admin.batch_execute(schema::POSTGRES_SQL).await.unwrap();
+        admin.batch_execute(
+            "RESET ROLE; GRANT USAGE ON SCHEMA workflow TO zeroship_workflow; \
+             GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA workflow TO zeroship_workflow;"
+        ).await.unwrap();
+        Self {
+            _container: container,
+            store: PostgresStore::new(format!(
+                "postgres://zeroship_workflow@{host}:{port}/postgres"
+            )),
+            admin_url,
+        }
+    }
+}
+async fn connect(url: &str) -> compio_postgres::Client {
+    let (client, connection) = compio_postgres::connect(url, NoTls).await.unwrap();
+    compio::runtime::spawn(async move {
+        connection.run().await.unwrap();
+    })
+    .detach();
+    client
+}
+
+#[test]
+fn generated_schema_matches_the_shared_migration_definition() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let output = Command::new("node")
+        .arg("crates/zeroship-workflow/schema/generate.mjs")
+        .arg("--check")
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "schema compiler check failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[compio::test]
+async fn sqlite_schema_constraints_and_transaction_rollback() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("workflow.sqlite");
+    schema::initialize_sqlite(&path).unwrap();
+    let store = SqliteStore::new(path);
+    storage_contract(&store).await;
+}
+
+#[compio::test]
+async fn postgres_schema_constraints_and_transaction_rollback() {
+    let fixture = PostgresFixture::start().await;
+    storage_contract(&fixture.store).await;
+}
+
+async fn storage_contract(store: &dyn WorkflowStore) {
+    store.verify().await.unwrap();
+    let mut tx = store.begin().await.unwrap();
+    let apps = tx.table("apps");
+    tx.execute(&format!("INSERT INTO {apps} (app_id, revision, policy, signal_epoch) VALUES ('app_rollback',0,'{{}}',0)"), &[]).await.unwrap();
+    drop(tx);
+    let mut tx = store.begin().await.unwrap();
+    assert!(tx
+        .query(
+            &format!("SELECT app_id FROM {apps} WHERE app_id = 'app_rollback'"),
+            &[]
+        )
+        .await
+        .unwrap()
+        .is_empty());
+    for app in ["app_a", "app_b"] {
+        tx.execute(&format!("INSERT INTO {apps} (app_id, revision, policy, signal_epoch) VALUES ($1,0,'{{}}',0)"), &[app.into()]).await.unwrap();
+        let deploys = tx.table("deploys");
+        tx.execute(&format!("INSERT INTO {deploys} (app_id,id,hash,manifest,created_at,active,state) VALUES ($1,$2,$2,'{{}}',0,1,'available')"), &[app.into(), format!("deploy_{app}").into()]).await.unwrap();
+    }
+    let runs = tx.table("runs");
+    insert_run(&mut tx, "app_a", "run_a", "deploy_app_a", None)
+        .await
+        .unwrap();
+    insert_run(&mut tx, "app_b", "run_b", "deploy_app_b", None)
+        .await
+        .unwrap();
+    assert!(tx.now().await.unwrap() > 0);
+    tx.commit().await.unwrap();
+
+    for (app, run, deploy, parent) in [
+        ("app_a", "bad_deploy", "deploy_app_b", None),
+        ("app_a", "bad_parent", "deploy_app_a", Some("run_b")),
+        ("app_missing", "bad_app", "deploy_app_a", None),
+    ] {
+        let mut tx = store.begin().await.unwrap();
+        assert!(insert_run(&mut tx, app, run, deploy, parent).await.is_err());
+    }
+    let mut tx = store.begin().await.unwrap();
+    assert_eq!(
+        tx.query(&format!("SELECT id FROM {runs}"), &[])
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+    let signals = tx.table("signals");
+    assert!(tx.execute(&format!("INSERT INTO {signals} (app_id,run_id,id,signal_type,payload,created_at) VALUES ('app_a','run_b','bad_signal','approval','null',0)"), &[]).await.is_err());
+}
+
+async fn insert_run(
+    tx: &mut Transaction,
+    app: &str,
+    id: &str,
+    deploy: &str,
+    parent: Option<&str>,
+) -> Result<(), WorkflowServiceError> {
+    let runs = tx.table("runs");
+    tx.execute(&format!("INSERT INTO {runs} (app_id,id,workflow_name,deploy_id,generation,state,control,lease_epoch,cascade,depth,created_at,signal_epoch,parent_id) \
+        VALUES ($1,$2,'Checkout',$3,0,'queued','none',0,0,0,0,0,$4)"),
+        &[app.into(),id.into(),deploy.into(),parent.map(str::to_owned).into()]).await?;
+    Ok(())
+}
+
+#[compio::test]
+async fn workflow_runtime_has_dml_without_ddl_and_app_processes_have_no_access() {
+    let fixture = PostgresFixture::start().await;
+    fixture.store.verify().await.unwrap();
+    let admin = connect(&fixture.admin_url).await;
+    for role in ["zeroship_worker", "zeroship_gateway", "zeroship_app"] {
+        let url = fixture
+            .admin_url
+            .replacen("postgres@", &format!("{role}@"), 1);
+        let client = connect(&url).await;
+        assert!(client
+            .batch_execute("SELECT * FROM workflow.runs")
+            .await
+            .is_err());
+        assert!(client
+            .batch_execute("DELETE FROM workflow.runs")
+            .await
+            .is_err());
+        assert!(client
+            .batch_execute("SET ROLE zeroship_workflow_owner")
+            .await
+            .is_err());
+        let member: bool = admin
+            .query_one(
+                "SELECT pg_has_role($1, 'zeroship_workflow_owner', 'MEMBER')",
+                &[&role],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert!(!member);
+    }
+    let runtime = connect(
+        &fixture
+            .admin_url
+            .replacen("postgres@", "zeroship_workflow@", 1),
+    )
+    .await;
+    assert!(runtime
+        .batch_execute("CREATE TABLE workflow.unauthorized (id text)")
+        .await
+        .is_err());
+    assert!(runtime
+        .batch_execute("ALTER TABLE workflow.runs ADD COLUMN unauthorized text")
+        .await
+        .is_err());
+    assert!(runtime
+        .batch_execute("SET ROLE zeroship_workflow_owner")
+        .await
+        .is_err());
+}
+
+#[test]
+fn local_initialization_never_resets_an_incompatible_journal() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("workflow.sqlite");
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE existing_journal (id text); INSERT INTO existing_journal VALUES ('retained')",
+    )
+    .unwrap();
+    assert!(schema::initialize_sqlite(&path).is_err());
+    assert_eq!(
+        conn.query_row("SELECT id FROM existing_journal", [], |row| row
+            .get::<_, String>(0))
+            .unwrap(),
+        "retained"
+    );
+}
+
+#[compio::test]
+async fn sqlite_task_leases_and_receipts_preserve_the_frontier() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("workflow.sqlite");
+    schema::initialize_sqlite(&path).unwrap();
+    task_contract(Arc::new(SqliteStore::new(path))).await;
+}
+
+#[compio::test]
+async fn postgres_task_leases_and_receipts_preserve_the_frontier() {
+    let fixture = PostgresFixture::start().await;
+    task_contract(Arc::new(fixture.store.clone())).await;
+}
+
+fn execution(value: serde_json::Value) -> crate::WorkflowExecution {
+    crate::WorkflowExecution::from_runtime_value(json!({"outcomes":value})).unwrap()
+}
+
+async fn task_contract(store: Arc<dyn WorkflowStore>) {
+    use super::{TaskToken, WorkerIdentity};
+    use crate::operations::RunState;
+    let (service, app, _) = registered_service(store.clone()).await;
+    let scope = service.for_app(app.clone());
+    let worker = WorkerIdentity::new("worker-a".into()).unwrap();
+    let other = WorkerIdentity::new("worker-b".into()).unwrap();
+    let request = RequestId::mint();
+    let options = StartOptions {
+        key: Some("invoice".into()),
+        ..Default::default()
+    };
+    let run = scope
+        .start(&request, "Example", options.clone())
+        .await
+        .unwrap();
+    let task = service.poll(&worker).await.unwrap().unwrap();
+    assert_eq!(task.invocation.run_id, run.id);
+    assert!(task.invocation.journal.is_empty());
+    assert_eq!(task.invocation.app_id, app.as_str());
+    assert!(service.poll(&other).await.unwrap().is_none());
+    assert!(matches!(
+        service.heartbeat(&other, &task.id, &task.token).await,
+        Err(WorkflowServiceError::NotFound(_))
+    ));
+    assert!(matches!(
+        service
+            .heartbeat(&worker, &task.id, &TaskToken::mint())
+            .await,
+        Err(WorkflowServiceError::NotFound(_))
+    ));
+    assert!(
+        service
+            .heartbeat(&worker, &task.id, &task.token)
+            .await
+            .unwrap()
+            .deadline
+            >= task.deadline
+    );
+    let signal_request = RequestId::mint();
+    scope
+        .signal(
+            &signal_request,
+            &run.id,
+            SignalOptions {
+                signal_type: "approved".into(),
+                payload: json!({"ok":true}),
+            },
+        )
+        .await
+        .unwrap();
+    let wait =
+        execution(json!([{"kind":"Wait","ordinal":0,"name":"approval","signalType":"approved"}]));
+    let receipt = service
+        .complete(&worker, &task.id, &task.token, wait.clone())
+        .await
+        .unwrap();
+    assert_eq!(receipt.state, RunState::Queued);
+    assert_eq!(
+        receipt,
+        service
+            .complete(&worker, &task.id, &task.token, wait)
+            .await
+            .unwrap()
+    );
+    assert!(matches!(
+        service
+            .complete(
+                &worker,
+                &task.id,
+                &task.token,
+                execution(json!([{"kind":"RunCompleted","output":false}]))
+            )
+            .await,
+        Err(WorkflowServiceError::Conflict(_))
+    ));
+    let next = service.poll(&other).await.unwrap().unwrap();
+    assert_eq!(next.invocation.journal[0].state, "completed");
+    assert_eq!(next.invocation.journal[0].output, Some(json!({"ok":true})));
+    let done = execution(json!([{"kind":"RunCompleted","output":{"paid":true}}]));
+    service
+        .complete(&other, &next.id, &next.token, done.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        scope.status(&run.id).await.unwrap().output,
+        Some(json!({"paid":true}))
+    );
+    assert_eq!(
+        run,
+        scope
+            .start(&request, "Example", options.clone())
+            .await
+            .unwrap()
+    );
+    let new = scope
+        .start(&RequestId::mint(), "Example", options)
+        .await
+        .unwrap();
+    assert_ne!(new.id, run.id);
+    let abandoned = service.poll(&worker).await.unwrap().unwrap();
+    let mut tx = store.begin().await.unwrap();
+    let tasks = tx.table("tasks");
+    let runs = tx.table("runs");
+    let expired = tx.now().await.unwrap() - 1;
+    tx.execute(
+        &format!("UPDATE {tasks} SET deadline=$2 WHERE id=$1"),
+        &[abandoned.id.clone().into(), expired.into()],
+    )
+    .await
+    .unwrap();
+    tx.execute(
+        &format!("UPDATE {runs} SET due_at=$3 WHERE app_id=$1 AND id=$2"),
+        &[app.as_str().into(), new.id.clone().into(), expired.into()],
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    assert!(matches!(
+        service
+            .heartbeat(&worker, &abandoned.id, &abandoned.token)
+            .await,
+        Err(WorkflowServiceError::Conflict(_))
+    ));
+    drop(service);
+    let recovered = WorkflowService::open(store).await.unwrap();
+    let replacement = recovered.poll(&other).await.unwrap().unwrap();
+    assert_eq!(replacement.invocation.run_id, new.id);
+    assert!(replacement.epoch > abandoned.epoch);
+    assert!(matches!(
+        recovered
+            .complete(&worker, &abandoned.id, &abandoned.token, done.clone())
+            .await,
+        Err(WorkflowServiceError::Conflict(_))
+    ));
+    let receipt = recovered
+        .complete(&other, &replacement.id, &replacement.token, done.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        receipt,
+        recovered
+            .complete(&other, &replacement.id, &replacement.token, done)
+            .await
+            .unwrap()
+    );
+    assert!(recovered.poll(&worker).await.unwrap().is_none());
+}
+
+#[compio::test]
+async fn sqlite_lifecycle_children_and_restart_share_service_transitions() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("workflow.sqlite");
+    schema::initialize_sqlite(&path).unwrap();
+    behavior_contract(Arc::new(SqliteStore::new(path))).await;
+}
+#[compio::test]
+async fn postgres_lifecycle_children_and_restart_share_service_transitions() {
+    let fixture = PostgresFixture::start().await;
+    behavior_contract(Arc::new(fixture.store.clone())).await;
+}
+async fn behavior_contract(store: Arc<dyn WorkflowStore>) {
+    use super::{ControlIntent, WorkerIdentity};
+    use crate::operations::{RestartOptions, RestartTarget, RunOperation, RunState};
+    let (service, app, _) = registered_service(store.clone()).await;
+    let scope = service.for_app(app.clone());
+    let worker = WorkerIdentity::new("worker".into()).unwrap();
+    let start = scope
+        .start(&RequestId::mint(), "Example", StartOptions::default())
+        .await
+        .unwrap();
+    let task = service.poll(&worker).await.unwrap().unwrap();
+    assert!(matches!(
+        scope
+            .restart(&RequestId::mint(), &start.id, RestartOptions::default())
+            .await,
+        Err(WorkflowServiceError::Conflict(_))
+    ));
+    scope
+        .transition(&RequestId::mint(), &start.id, RunOperation::Pause)
+        .await
+        .unwrap();
+    assert_eq!(
+        service
+            .heartbeat(&worker, &task.id, &task.token)
+            .await
+            .unwrap()
+            .control,
+        ControlIntent::Pause
+    );
+    let receipt=service.complete(&worker,&task.id,&task.token,execution(json!([
+        {"kind":"StepCompleted","ordinal":0,"name":"charge","output":{"charge":"accepted"},"compensable":true},
+        {"kind":"Wait","ordinal":1,"name":"approval","signalType":"approved"}
+    ]))).await.unwrap();
+    assert_eq!(receipt.state, RunState::Paused);
+    scope
+        .signal(
+            &RequestId::mint(),
+            &start.id,
+            SignalOptions {
+                signal_type: "approved".into(),
+                payload: json!(true),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(service.poll(&worker).await.unwrap().is_none());
+    scope
+        .transition(&RequestId::mint(), &start.id, RunOperation::Resume)
+        .await
+        .unwrap();
+    let task = service.poll(&worker).await.unwrap().unwrap();
+    assert_eq!(
+        task.invocation.journal[0].output,
+        Some(json!({"charge":"accepted"}))
+    );
+    assert_eq!(task.invocation.journal[1].output, Some(json!(true)));
+    scope
+        .transition(&RequestId::mint(), &start.id, RunOperation::Cancel)
+        .await
+        .unwrap();
+    let receipt=service.complete(&worker,&task.id,&task.token,execution(json!([
+        {"kind":"StepCompleted","ordinal":2,"name":"reserve","compensable":true,"output":"reservation"},
+        {"kind":"RunCompleted","output":"must be cancelled"}
+    ]))).await.unwrap();
+    assert_eq!(receipt.state, RunState::Compensating);
+    assert!(matches!(
+        scope
+            .restart(&RequestId::mint(), &start.id, RestartOptions::default())
+            .await,
+        Err(WorkflowServiceError::Conflict(_))
+    ));
+    for (ordinal, name) in [(2, "reserve"), (0, "charge")] {
+        let task = service.poll(&worker).await.unwrap().unwrap();
+        assert_eq!(task.invocation.phase, "compensating");
+        service
+            .complete(
+                &worker,
+                &task.id,
+                &task.token,
+                execution(json!([{"kind":"CompensationCompleted","ordinal":ordinal,"name":name}])),
+            )
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        scope.status(&start.id).await.unwrap().state,
+        RunState::Cancelled
+    );
+    assert!(matches!(
+        scope
+            .restart(
+                &RequestId::mint(),
+                &start.id,
+                RestartOptions {
+                    from: Some(RestartTarget {
+                        name: "approval".into(),
+                        occurrence: None
+                    }),
+                    deploy: None
+                }
+            )
+            .await,
+        Err(WorkflowServiceError::Conflict(_))
+    ));
+    let restarted = scope
+        .restart(&RequestId::mint(), &start.id, RestartOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(restarted.run_id, start.id);
+    let task = service.poll(&worker).await.unwrap().unwrap();
+    assert_eq!(task.generation, 1);
+    assert!(task.invocation.journal.is_empty());
+    service
+        .complete(
+            &worker,
+            &task.id,
+            &task.token,
+            execution(json!([
+                {"kind":"StepCompleted","ordinal":0,"name":"keep","output":42},
+                {"kind":"StepCompleted","ordinal":1,"name":"redo","output":0},
+                {"kind":"RunCompleted","output":"original"}
+            ])),
+        )
+        .await
+        .unwrap();
+    scope
+        .restart(
+            &RequestId::mint(),
+            &start.id,
+            RestartOptions {
+                from: Some(RestartTarget {
+                    name: "redo".into(),
+                    occurrence: None,
+                }),
+                deploy: None,
+            },
+        )
+        .await
+        .unwrap();
+    let task = service.poll(&worker).await.unwrap().unwrap();
+    assert_eq!(task.generation, 2);
+    assert_eq!(task.invocation.journal.len(), 1);
+    assert_eq!(task.invocation.journal[0].output, Some(json!(42)));
+    service
+        .complete(
+            &worker,
+            &task.id,
+            &task.token,
+            execution(json!([
+                {"kind":"StepCompleted","ordinal":1,"name":"redo","output":1},
+                {"kind":"RunCompleted","output":"restarted"}
+            ])),
+        )
+        .await
+        .unwrap();
+    let mut tx = store.begin().await.unwrap();
+    let steps = tx.table("steps");
+    let history=tx.query(&format!("SELECT record FROM {steps} WHERE app_id=$1 AND run_id=$2 AND generation=1 AND ordinal=1"), &[app.as_str().into(),start.id.clone().into()]).await.unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&history[0].text("record").unwrap()).unwrap()
+            ["output"],
+        json!(0)
+    );
+    tx.commit().await.unwrap();
+
+    let parent = scope
+        .start(&RequestId::mint(), "Example", StartOptions::default())
+        .await
+        .unwrap();
+    let task = service.poll(&worker).await.unwrap().unwrap();
+    let old_deploy = task.invocation.deploy_id.clone();
+    let new_deploy = DeployRegistration {
+        id: typed_id::generate("dep"),
+        hash: "b".repeat(64),
+        workflows: ["Example".into(), "Child".into()].into(),
+    };
+    service.activate_deploy(&app, &new_deploy).await.unwrap();
+    let invalid = execution(json!([
+        {"kind":"Child","ordinal":0,"name":"child","childWorkflowName":"Child","input":{"task":true}},
+        {"kind":"StepCompleted","ordinal":9,"name":"invalid"}
+    ]));
+    assert!(matches!(
+        service
+            .complete(&worker, &task.id, &task.token, invalid)
+            .await,
+        Err(WorkflowServiceError::InvalidRequest(_))
+    ));
+    let mut tx = store.begin().await.unwrap();
+    let runs = tx.table("runs");
+    assert!(tx
+        .query(
+            &format!("SELECT id FROM {runs} WHERE app_id=$1 AND parent_id=$2"),
+            &[app.as_str().into(), parent.id.clone().into()]
+        )
+        .await
+        .unwrap()
+        .is_empty());
+    tx.commit().await.unwrap();
+    service.complete(&worker,&task.id,&task.token,execution(json!([{ "kind":"Child","ordinal":0,"name":"child","childWorkflowName":"Child","input":{"task":true}}]))).await.unwrap();
+    let child = service.poll(&worker).await.unwrap().unwrap();
+    assert_eq!(child.invocation.workflow_name, "Child");
+    assert_eq!(child.invocation.deploy_id, old_deploy);
+    service
+        .complete(
+            &worker,
+            &child.id,
+            &child.token,
+            execution(json!([{"kind":"RunCompleted","output":"child result"}])),
+        )
+        .await
+        .unwrap();
+    let resumed = service.poll(&worker).await.unwrap().unwrap();
+    assert_eq!(resumed.invocation.run_id, parent.id);
+    assert_eq!(
+        resumed.invocation.journal[0].output,
+        Some(json!("child result"))
+    );
+    service
+        .complete(
+            &worker,
+            &resumed.id,
+            &resumed.token,
+            execution(json!([{"kind":"ContinueAsNew","input":{"next":true}}])),
+        )
+        .await
+        .unwrap();
+    let successor = service.poll(&worker).await.unwrap().unwrap();
+    assert_ne!(successor.invocation.run_id, parent.id);
+    assert_eq!(successor.invocation.deploy_id, new_deploy.id);
+    assert_eq!(
+        successor.invocation.trigger.input,
+        Some(json!({"next":true}))
+    );
+    service
+        .complete(
+            &worker,
+            &successor.id,
+            &successor.token,
+            execution(json!([{"kind":"RunCompleted","output":"finished"}])),
+        )
+        .await
+        .unwrap();
+    assert!(service.poll(&worker).await.unwrap().is_none());
+}
