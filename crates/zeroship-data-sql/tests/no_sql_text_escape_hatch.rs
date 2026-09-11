@@ -10,7 +10,6 @@
 //! control that runs the same predicate over a synthetic violation, so a green
 //! run means the predicate can still say no.
 
-use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 /// Fewer source files than this means the walk collapsed and every negative

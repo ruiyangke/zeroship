@@ -93,6 +93,11 @@ use super::reducer::{
     TxReply,
 };
 
+mod completion;
+pub(crate) use completion::Completion;
+#[cfg(test)]
+mod settlement_tests;
+
 thread_local! {
     /// The generation stamped on the next transaction session this thread opens,
     /// for SC-1's guard order step 4.
@@ -172,7 +177,7 @@ fn observation_for(expected: &ExpectedAuthority) -> ObservedAuthority {
 /// the loop finished on rather than the one it started from. That is the
 /// intended reading: a `BEGIN` that failed does not answer `Began`, it answers
 /// the `Settled(Cancelled(BeginFailed))` its forced cleanup reached.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Driven {
     pub reply: Option<Result<TxReply, TxProtocolError>>,
     /// The backend error behind a failed step, kept so the creator sees the
@@ -342,12 +347,37 @@ pub async fn close_frame(app_id: &str, frame: FrameId, close: FrameClose) -> Dri
 /// an operation owns the session parks in `Quiescing` and issues its terminal
 /// SQL when the operation returns.
 pub async fn settle_root(app_id: &str, intent: SettleIntent) -> Driven {
-    step(
-        app_id,
-        TxEvent::SettleRequested { intent },
-        &StepConfig::default(),
-    )
-    .await
+    let Some(completion) = crate::tx_lanes::with(|l| l.transaction_completion(app_id)) else {
+        return not_ready();
+    };
+    let Some(actions) = apply(app_id, TxEvent::SettleRequested { intent }) else {
+        return not_ready();
+    };
+    for action in &actions {
+        if let Action::Reply(Err(refusal)) = action {
+            // Cleanup already owns settlement. Join its terminal result rather
+            // than reporting a cancellation before rollback has been proved.
+            if matches!(refusal, TxProtocolError::Cleanup(_)) {
+                return completion.wait().await;
+            }
+            return Driven {
+                reply: Some(Err(*refusal)),
+                ..Driven::default()
+            };
+        }
+    }
+    if !actions.is_empty() {
+        let app_id = app_id.to_owned();
+        let attempt = completion.clone();
+        // Once accepted, settlement belongs to the transaction. Dropping a
+        // caller must not cancel terminal I/O; its deadline can also complete
+        // the shared result while that I/O is still awaiting a backend.
+        crate::orm_context::spawn(async move {
+            run_attempt(&app_id, actions, &StepConfig::default(), attempt).await;
+        })
+        .detach();
+    }
+    completion.wait().await
 }
 
 /// Run one creator data statement under the reducer's operation guard.
@@ -473,10 +503,9 @@ async fn complete_operation(
 
 /// Deliver an expired timer.
 ///
-/// The task that calls this carries only the app key, the kind and the
-/// generation - no session, no client, no settle future - which is what makes
-/// SC-1 rule 4's "independent of callback behaviour" true rather than
-/// aspirational.
+/// The timer task authenticates its admission identity before delivering the
+/// app key, kind and timer generation here. It owns no session or callback;
+/// expiry is independent of the caller continuing to poll settlement.
 pub async fn deadline_fired(
     app_id: &str,
     kind: DeadlineKind,
@@ -542,12 +571,16 @@ async fn step(app_id: &str, event: TxEvent, config: &StepConfig) -> Driven {
         // "there is nothing here" answer, and it is a REFUSAL rather than a
         // silent success - reading absence as "already settled" is the shape
         // DBR-03 turned into a false commit.
-        return Driven {
-            reply: Some(Err(TxProtocolError::TransactionNotReady)),
-            ..Driven::default()
-        };
+        return not_ready();
     };
     run(app_id, actions, config).await
+}
+
+fn not_ready() -> Driven {
+    Driven {
+        reply: Some(Err(TxProtocolError::TransactionNotReady)),
+        ..Driven::default()
+    }
 }
 
 fn apply(app_id: &str, event: TxEvent) -> Option<Vec<Action>> {
@@ -572,14 +605,38 @@ fn authority_of(app_id: &str) -> Option<EventAuthority> {
 /// loop that reordered them would publish a commit's events after the session
 /// was already back in the pool.
 async fn run(app_id: &str, actions: Vec<Action>, config: &StepConfig) -> Driven {
+    let Some(completion) = crate::tx_lanes::with(|l| l.transaction_completion(app_id)) else {
+        return not_ready();
+    };
+    run_attempt(app_id, actions, config, completion).await
+}
+
+async fn run_attempt(
+    app_id: &str,
+    actions: Vec<Action>,
+    config: &StepConfig,
+    completion: Completion,
+) -> Driven {
     let mut driven = Driven::default();
     let mut queue: VecDeque<Action> = actions.into();
 
     while let Some(action) = queue.pop_front() {
+        // Replies following our own ReleaseAdmission remain deliverable. All
+        // effects and follow-up events must still belong to this admission.
+        if !matches!(action, Action::Reply(_)) && !completion.is_current(app_id) {
+            break;
+        }
         match action {
-            Action::Reply(reply) => driven.reply = Some(reply),
+            Action::Reply(reply) => {
+                driven.reply = Some(reply);
+                if driven.outcome().is_some() {
+                    completion.finish(driven.clone());
+                }
+            }
 
-            Action::ScheduleTimer(scheduled) => schedule_timer(app_id, scheduled),
+            Action::ScheduleTimer(scheduled) => {
+                schedule_timer(app_id, scheduled, completion.clone());
+            }
 
             Action::IssueBegin { token } => {
                 let generation = next_backend_generation();
@@ -605,7 +662,9 @@ async fn run(app_id: &str, actions: Vec<Action>, config: &StepConfig) -> Driven 
                     queue.push_back(Action::Reply(Err(TxProtocolError::TransactionNotReady)));
                     continue;
                 };
-                let outcome = match open_session(app_id, schema, config.begin, backend).await {
+                let outcome = match open_session(app_id, schema, config.begin, backend, &completion)
+                    .await
+                {
                     Ok(()) => BeginOutcome::Opened(BackendGeneration(generation)),
                     Err(OpenSessionError::Failed(error)) => {
                         driven.error = Some(error);
@@ -625,6 +684,7 @@ async fn run(app_id: &str, actions: Vec<Action>, config: &StepConfig) -> Driven 
                 extend(
                     &mut queue,
                     app_id,
+                    &completion,
                     TxEvent::BeginCompleted { token, outcome },
                 );
             }
@@ -642,6 +702,9 @@ async fn run(app_id: &str, actions: Vec<Action>, config: &StepConfig) -> Driven 
                     exec_on_session(app_id, &format!("SAVEPOINT {name}"), &[]).await,
                 );
                 if ok {
+                    if !completion.is_current(app_id) {
+                        break;
+                    }
                     crate::tx_lanes::with_mut(|l| l.push_frame_emit_mark(app_id));
                 }
                 let Some(frame) = frame else {
@@ -651,6 +714,7 @@ async fn run(app_id: &str, actions: Vec<Action>, config: &StepConfig) -> Driven 
                 extend(
                     &mut queue,
                     app_id,
+                    &completion,
                     TxEvent::OpenFrameCompleted { token, frame, ok },
                 );
             }
@@ -662,6 +726,9 @@ async fn run(app_id: &str, actions: Vec<Action>, config: &StepConfig) -> Driven 
                     exec_on_session(app_id, &format!("ROLLBACK TO SAVEPOINT {name}"), &[]).await,
                 );
                 if ok {
+                    if !completion.is_current(app_id) {
+                        break;
+                    }
                     // The frame's queued events are discarded only now that the
                     // statement has succeeded and the rows they describe are
                     // known to be gone. Discarding first makes the failure row's
@@ -676,6 +743,7 @@ async fn run(app_id: &str, actions: Vec<Action>, config: &StepConfig) -> Driven 
                 extend(
                     &mut queue,
                     app_id,
+                    &completion,
                     TxEvent::CloseFrameCompleted {
                         token,
                         frame,
@@ -692,6 +760,9 @@ async fn run(app_id: &str, actions: Vec<Action>, config: &StepConfig) -> Driven 
                     exec_on_session(app_id, &format!("RELEASE SAVEPOINT {name}"), &[]).await,
                 );
                 if ok {
+                    if !completion.is_current(app_id) {
+                        break;
+                    }
                     // A released frame's events belong to the enclosing frame
                     // now, exactly as its rows do: pop the watermark without
                     // truncating.
@@ -704,6 +775,7 @@ async fn run(app_id: &str, actions: Vec<Action>, config: &StepConfig) -> Driven 
                 extend(
                     &mut queue,
                     app_id,
+                    &completion,
                     TxEvent::CloseFrameCompleted {
                         token,
                         frame,
@@ -721,6 +793,7 @@ async fn run(app_id: &str, actions: Vec<Action>, config: &StepConfig) -> Driven 
                 extend(
                     &mut queue,
                     app_id,
+                    &completion,
                     TxEvent::TerminalCompleted { token, result },
                 );
             }
@@ -730,6 +803,7 @@ async fn run(app_id: &str, actions: Vec<Action>, config: &StepConfig) -> Driven 
                 extend(
                     &mut queue,
                     app_id,
+                    &completion,
                     TxEvent::CancellationAcknowledged { token, ack },
                 );
             }
@@ -742,11 +816,18 @@ async fn run(app_id: &str, actions: Vec<Action>, config: &StepConfig) -> Driven 
 
             Action::ReleaseAdmission => {
                 crate::tx_lanes::with_mut(|l| {
+                    l.detach_transaction_completion(app_id);
                     l.retire_transaction(app_id);
                     l.release_tx_claim(app_id);
                 });
             }
         }
+    }
+    if driven.outcome().is_none() && !completion.is_current(app_id) {
+        // A deadline or teardown may have retired the admission while this
+        // interpreter awaited I/O. Preserve that terminal answer, including
+        // when the interrupted command was BEGIN rather than settlement.
+        return completion.wait().await;
     }
     driven
 }
@@ -755,7 +836,10 @@ async fn run(app_id: &str, actions: Vec<Action>, config: &StepConfig) -> Driven 
 ///
 /// Appended, not prepended: the reducer emitted the actions ahead of this one in
 /// the order it wants them run, and a completion's consequences come after them.
-fn extend(queue: &mut VecDeque<Action>, app_id: &str, event: TxEvent) {
+fn extend(queue: &mut VecDeque<Action>, app_id: &str, completion: &Completion, event: TxEvent) {
+    if !completion.is_current(app_id) {
+        return;
+    }
     if let Some(actions) = apply(app_id, event) {
         queue.extend(actions);
     }
@@ -821,11 +905,16 @@ async fn open_session(
     schema: &zeroship_data_sql::SchemaName,
     begin: BeginIntent,
     backend: &crate::backend::BackendHandle,
+    completion: &Completion,
 ) -> Result<(), OpenSessionError> {
-    install(
-        app_id,
-        backend.open_tx_session(app_id, schema, begin).await?,
-    );
+    let client = backend.open_tx_session(app_id, schema, begin).await?;
+    if !completion.is_current(app_id) {
+        client.discard();
+        return Err(OpenSessionError::Failed(DbError::internal(
+            "db.transaction: admission ended while opening its session",
+        )));
+    }
+    install(app_id, client);
     // Drop any broker residue from an interrupted prior run so it cannot leak
     // into this transaction's drain.
     clear_pending_emits(app_id);
@@ -877,7 +966,7 @@ async fn exec_on_session(app_id: &str, sql: &str, params: &[&str]) -> Result<(),
 /// so this function is the protocol's half alone: take the session, ask it to
 /// settle, put it back for the disposition action the reducer emits next.
 async fn terminal(app_id: &str, intent: SettleIntent) -> (TerminalResult, Option<DbError>) {
-    let Some(client) = crate::tx_lanes::with_mut(|l| l.take_tx_client_for(app_id)) else {
+    let Ok(client) = crate::tx_lanes::TxClientSlotGuard::take(app_id) else {
         // The session is gone before terminal SQL was sent. This does NOT prove
         // the transaction ended - that inference is DBR-03 - so it is
         // indeterminate and the reducer withdraws.
@@ -889,14 +978,9 @@ async fn terminal(app_id: &str, intent: SettleIntent) -> (TerminalResult, Option
         );
     };
 
-    let outcome = client.settle(intent).await;
-
-    // The session is disposed of by `Action::ReleaseSession` / `WithdrawSession`,
-    // which the reducer emits next, so put it back for that action to act on.
-    // Returning it here rather than dropping it is what lets the withdrawal
-    // arm reach the physical connection at all.
-    crate::tx_lanes::with_mut(|l| l.put_tx_client_for(app_id, client));
-    outcome
+    // The guard restores only to the admission it came from. A terminal
+    // deadline may have retired that admission while this await was pending.
+    client.client().settle(intent).await
 }
 
 /// How long forced cleanup waits for a cancelled statement's holder to hand the
@@ -1024,26 +1108,10 @@ async fn cleanup(app_id: &str, token: CommandToken, goal: CleanupGoal) -> Cleanu
         // that found `Preparing` interrupted a transaction whose `BEGIN` was
         // never issued.
         //
-        // **From `Starting` - goal `AbortIfOpened` - it is NOT proved, and this
-        // arm answers it anyway.** `open_session` acquires the client, runs
-        // `BEGIN`, applies the per-app role and only THEN installs, so a force
-        // landing inside that window sees `SessionOwnership::None` while a
-        // transaction may already be open on the server. This is pre-existing
-        // and untouched here, and it is stated rather than papered over: an
-        // earlier version of this comment claimed "nothing can be open", which is
-        // false for exactly one of the two states that reach it.
-        //
-        // Its consequence is bounded but real. The transaction settles
-        // `Cancelled`, `open_session` then installs a live in-transaction client
-        // into a retired transaction's slot, and it is evicted by the NEXT
-        // transaction's `install_tx_client` - whose returned previous occupant
-        // drops into `Pool::return_client`, which rolls back any session it
-        // cannot prove `Idle`. Closing it properly needs `install` to consult the
-        // withdrawal tombstone and to carry a generation, which is a change to
-        // the BEGIN path rather than to cleanup.
-        //
-        // Cancellation cannot help here: the canceller is captured at `install`,
-        // and this is precisely the window before it exists.
+        // `Starting` may still be awaiting BEGIN or session setup on the
+        // server. There is no installed canceller yet. The opening interpreter
+        // checks its admission before installation and discards any session
+        // returned after retirement; it cannot install into a replacement.
         Some(super::reducer::SessionOwnership::None) => {
             let _ = goal;
             CleanupAck::NoOpenTransaction
@@ -1076,13 +1144,8 @@ async fn cleanup(app_id: &str, token: CommandToken, goal: CleanupGoal) -> Cleanu
 /// `None` means the slot was empty - which is a question about ownership, not an
 /// answer, and the caller resolves it.
 async fn rollback_session_in_slot(app_id: &str) -> Option<CleanupAck> {
-    let client = crate::tx_lanes::with_mut(|l| l.take_tx_client_for(app_id))?;
-
-    let ack = client.cleanup().await;
-
-    // Put it back so the reducer's session disposition can act on it.
-    crate::tx_lanes::with_mut(|l| l.put_tx_client_for(app_id, client));
-    Some(ack)
+    let client = crate::tx_lanes::TxClientSlotGuard::take(app_id).ok()?;
+    Some(client.client().cleanup().await)
 }
 
 /// Cancel the statement holding the session, reclaim it, and roll it back.
@@ -1247,10 +1310,9 @@ fn budgets() -> TxBudgets {
 
 /// Spawn the timer [`Action::ScheduleTimer`] asks for.
 ///
-/// The task carries the app key, the kind and the generation, and nothing else -
-/// no session, no client, no settle future. A stale delivery is a pure
-/// diagnostic: the reducer's slot refuses any `(kind, generation)` pair it is
-/// not holding, and refusing produces no SQL, no reply and no state change.
+/// The task carries its admission's completion identity as well as the timer
+/// kind and generation. Generations restart for each reducer, so the admission
+/// must still match before asking its deadline slot to authenticate a delivery.
 ///
 /// ## Known cost, deliberately not paid down here
 ///
@@ -1269,12 +1331,18 @@ fn budgets() -> TxBudgets {
 /// and arms proving a cancelled timer cannot take a live `(kind, generation)`
 /// with it. That is a self-contained change with its own tests, not a rider on
 /// this one.
-fn schedule_timer(app_id: &str, scheduled: super::reducer::deadline::ScheduleTimer) {
+fn schedule_timer(
+    app_id: &str,
+    scheduled: super::reducer::deadline::ScheduleTimer,
+    completion: Completion,
+) {
     let app_id = app_id.to_string();
     crate::orm_context::spawn(async move {
         let delay = scheduled.at.saturating_duration_since(Instant::now());
         compio::time::sleep(delay).await;
-        let _ = deadline_fired(&app_id, scheduled.kind, scheduled.generation).await;
+        if completion.is_current(&app_id) {
+            let _ = deadline_fired(&app_id, scheduled.kind, scheduled.generation).await;
+        }
     })
     .detach();
 }

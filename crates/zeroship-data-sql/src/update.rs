@@ -85,6 +85,7 @@ impl Operator {
     }
 }
 
+#[derive(Debug)]
 pub struct Assignment<'a> {
     pub field: &'a str,
     pub operator: Operator,
