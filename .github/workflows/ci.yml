@@ -1564,13 +1564,8 @@ jobs:
 
   # The creator path, end to end, and until now nothing in CI touched it.
   #
-  # MEASURED 2026-08-10: `tests/` holds 61 shell harnesses. Exactly 7 are named
-  # by this file. Of the 40 `e2e_*.sh` + `golden_path.sh` harnesses, ZERO ran in
-  # CI - so every scenario in docs/pilot/e2e-scenarios.md, all four
-  # dev-vs-deployed harnesses, and every seam fix landed against them were
-  # ungated. (Careful re-deriving that number: run_billing_suite.sh contains the
-  # literal string `tests/e2e_durable_workflows.sh` at line 142, inside a comment
-  # explaining a --test-threads=1 rationale. It is not a call.)
+  # Creator deployment needs both crate tests and a real app served through
+  # the gateway. The example packages own their local and deployed checks.
   #
   # This job closes the first and largest of them. tests/golden_path.sh walks
   # `pnpm build` -> .zship -> provision -> gateway serve -> RPC round-trip ->
@@ -1946,7 +1941,7 @@ jobs:
       - name: Install harness prerequisites
         run: sudo apt-get update && sudo apt-get install -y lsof
       # Postgres as an explicit `docker run`, NOT a `services:` entry, and the
-      # container NAME is the reason: stream/workflows create and drop
+      # container NAME is the reason: stream harnesses create and drop
       # their own dedicated database through `docker exec "$PG_CONTAINER" psql`
       # (default `compose-postgres-1`, matching the dev compose stack). GitHub
       # generates the name of a `services:` container, so `docker exec` by name
@@ -1954,7 +1949,7 @@ jobs:
       #
       # errors and env do NOT use this one - they call stack_pg_up, which starts
       # its OWN postgres:16 container on its own port per harness. The native
-      # KV and storage examples use Testcontainers. They do not use this server.
+      # KV, storage, and workflow tests use Testcontainers.
       - name: Start Postgres
         run: |
           docker run -d --name compose-postgres-1 -p 5440:5432 \
@@ -1972,9 +1967,8 @@ jobs:
       # `pnpm build` FIRST and cargo second is load-bearing, not stylistic: the
       # runtime crate `include_str!`s sdks/bootstrap/dist/{runtime-entry,dispatcher}.js.
       - run: pnpm build
-      # dev-provision (from -p zeroship-control --bins) is what stream/
-      # workflows deploy with; `-p zeroship-cli` produces the binary `pnpm dev` runs
-      # as the dev tier on every one of the six.
+      # dev-provision (from -p zeroship-control --bins) serves the stream
+      # harness; `-p zeroship-cli` produces the binary used by local examples.
       - name: Build the release binaries the harnesses start
         run: |
           cargo build --release -p zeroship-control -p zeroship-worker -p zeroship-data-cdc-server \
@@ -2093,52 +2087,6 @@ jobs:
           ZS_FRESHNESS_STRICT: 1
           PG_CONTAINER: compose-postgres-1
           PG_USER: postgres
-      # tests/e2e_dev_vs_deployed_workflows.sh IS NOT WIRED HERE either, for the
-      # measured timing failures described below:
-      #
-      #   idle machine     3 runs, 3 green   (44 passed, 0 failed)
-      #   12 busy cores    3 runs, 3 RED, and a DIFFERENT failure each time -
-      #                    "dev server never answered" (the runtime missed the
-      #                    25 x 2s readiness window), then `sleep` answering
-      #                    `internal error` with the diff going red behind it,
-      #                    then "platform migrations failed" before anything ran
-      #
-      # Three modes, one cause: every one is a timing budget, and under contention
-      # a different one loses first. That is worse for CI than storage's single
-      # deterministic failure, because each mode reads like a different product
-      # bug. Not wired until the budgets are sized for a loaded host.
-      #
-      # RE-MEASURED 2026-08-12 and the RATE has moved a lot, though the verdict
-      # has not. FOUR rounds under the same 12 busy loops that reproduce
-      # storage's red on this box (so the load is real, not a weaker harness):
-      #     3 rounds GREEN, 44 passed / 0 failed, exit 0
-      #     1 round  RED,   36 passed / 8 failed, exit 1
-      # So "3/3 red" no longer reproduces; it is roughly 1 in 4 now. Several
-      # timing fixes landed in between and I have NOT attributed the change to
-      # any of them.
-      #
-      # The surviving red is a FIFTH mode, none of the three above: the deployed
-      # `wf.start` refuses with
-      #     START-REFUSED {"message":"request timed out","name":"Error"}
-      # and every one of the 8 failures in that round is downstream of that one
-      # refused start.
-      #
-      # THAT IS THE DEPLOYED APP'S 5s WALL BUDGET, not a client timeout. I first
-      # wrote "the @zeroship/rpc client timeout" here off the first grep hit
-      # (sdks/rpc/src/transport.ts carries the same string) and that was wrong:
-      # the harness calls with `curl -m 20`, so the TS client is not on this
-      # path at all, and the value arrived as a RESPONSE BODY. The server-side
-      # emitter is crates/worker/src/handler.rs (`make_error_msg(504, "request
-      # timed out")`), and examples/workflow-probe/src/index.ts already explains
-      # the cause in a comment written during an earlier investigation: dev
-      # (`zeroship serve`) leaves the per-request wall clock unbounded
-      # (crates/runtime/src/core/serve.rs, `wall_timeout: None`) while a
-      # deployed app inherits FREE_TIER_RUNTIME_LIMITS - 5s wall, 50ms CPU.
-      #
-      # So this is the SAME family as the storage red above: a free-tier budget
-      # sized on an idle host, crossed under contention, and invisible in dev
-      # because dev does not enforce that budget at all. Worth knowing before
-      # anyone treats the two as separate problems.
       # Asserts ABSOLUTELY on the deployed body, not only relatively: production
       # shipped Error.stack to anonymous callers for weeks while the auth harness
       # stayed green, because dev leaked the same stack and the diff was empty.
@@ -2207,30 +2155,18 @@ jobs:
         run: |
           set -o pipefail
           tests/e2e_worker_enrolment.sh 2>&1 | tee "$RUNNER_TEMP/dvd-enrolment.log"
-      # The probe that CONFIRMED #199 by execution, and until now it ran in NO
-      # workflow: `grep -rn e2e_gateway_workflow_advance_authz .github/`
-      # returned nothing while the same search for golden_path.sh returned
-      # ci.yml. So the single finding in this review with executed evidence of a
-      # live authorization gap was ungated - whoever FIXES it would have been
-      # told by nothing, and a widening would have been told by nothing either.
-      #
-      # IT IS RED AT HEAD, AND THAT IS WHY IT CARRIES A CLASSIFIER RATHER THAN
-      # `continue-on-error`. #199's gap is real and unfixed, so a raw wiring
-      # would paint this job permanently red and hide the next real regression
-      # inside a failure everyone learns to skip. The script's own two-sided
-      # block (414b8476c) exits 0 only when the documented, bounded gap is the
-      # ONLY failure; it exits 1 on anything new AND on the gap disappearing
-      # while AUTHZ_EXPECTED_FAILURES still names it.
-      #
-      # BOUNDED, and the probe measures the bounds itself rather than asserting
-      # them: phase 2 shows the shipped worker refusing the unsigned advance
-      # (HTTP 403, run stays queued) and phase 3 shows the dotless Host that
-      # bypasses the gate is not routable through Caddy. Reaching the gap needs
-      # BOTH the worker flag ON and direct gateway access.
-      - name: Gateway workflow-advance authorization (#199 - red at HEAD, classified)
-        run: |
-          set -o pipefail
-          tests/e2e_gateway_workflow_advance_authz.sh 2>&1 | tee "$RUNNER_TEMP/dvd-wfadvz.log"
+      - name: Workflow crates and examples
+        run: cargo xtask test workflow
+      - name: Workflow test logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: workflow-test-logs
+          include-hidden-files: true
+          path: |
+            target/workflow-tests/**
+            examples/workflow-probe/tests/.artifacts/**
+            examples/workflows-order/tests/.artifacts/**
       # examples/ are workspace packages (pnpm-workspace.yaml lists `examples/*`)
       # but root `pnpm build` is `pnpm -r --filter './sdks/*' ...`, so it does
       # NOT build them. Without this step the harness below reaches its own
