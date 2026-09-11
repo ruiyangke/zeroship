@@ -35,8 +35,8 @@ test("the database contract holds through local and deployed app requests", asyn
       for (const sql of ["BEGIN ISOLATION LEVEL SERIALIZABLE", "BEGIN ISOLATION LEVEL REPEATABLE READ"]) {
         expect(statements).toContain(sql);
       }
-      const savepoints = [...statements.matchAll(/statement: SAVEPOINT (zs_sp_\d+)/g)].map((match) => match[1]);
-      const rollbacks = [...statements.matchAll(/statement: ROLLBACK TO SAVEPOINT (zs_sp_\d+)/g)].map((match) => match[1]);
+      const savepoints = [...statements.matchAll(/:\s+SAVEPOINT ([^\s;]+)/g)].map((match) => match[1]);
+      const rollbacks = [...statements.matchAll(/:\s+ROLLBACK TO SAVEPOINT ([^\s;]+)/g)].map((match) => match[1]);
       expect(savepoints.length).toBeGreaterThan(0);
       expect(rollbacks.length).toBeGreaterThan(0);
       for (const name of rollbacks) expect(savepoints).toContain(name);
