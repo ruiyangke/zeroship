@@ -65,22 +65,6 @@ export interface RuntimeDescriptor {
 }
 
 /**
- * The 7 platform-injected system columns. They live in `schema.runtime.json`
- * (the runtime installs them), but they are elided from the `env.db.ts` literal
- * because `@zeroship/db` already infers them onto every row - re-declaring them
- * would let a hand edit disagree with the platform.
- */
-const SYSTEM_FIELDS: ReadonlySet<string> = new Set([
-  "id",
-  "created_at",
-  "updated_at",
-  "created_by",
-  "updated_by",
-  "version",
-  "deleted_at",
-]);
-
-/**
  * The banner both schema sources carry. It names the toolchain, not a source,
  * so the two artifacts read identically to a creator.
  */
@@ -126,7 +110,6 @@ export function renderGeneratedEnvDb(descriptor: RuntimeDescriptor): string {
 
     body += `  ${jsKey(collection)}: ${needsBuilder ? "defineSchema({" : "{"}\n`;
     for (const [column, def] of Object.entries(coll.fields ?? {})) {
-      if (SYSTEM_FIELDS.has(column)) continue;
       body += `    ${jsKey(column)}: ${renderBuilderChain(def)},\n`;
     }
     body += needsBuilder ? `  })${renderCollectionChains(options, indexes)}` : "  }";
@@ -288,6 +271,8 @@ function renderBuilderChain(def: RuntimeFieldDef): string {
   }
   if (def.default !== undefined) chain += `.default(${renderDefaultValue(def.default)})`;
 
+  if (def.primaryKey === true) chain += ".primaryKey()";
+  if (def.assign !== undefined) chain += `.assigned(${JSON.stringify(def.assign)})`;
   return chain;
 }
 

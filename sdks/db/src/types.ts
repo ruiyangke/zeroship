@@ -5,9 +5,10 @@
  * `export default { schema: { ... } }`.
  */
 
-import type { PlatformAssignment } from "./generated/confined-system-shape.generated";
-
-export type { PlatformAssignment, PlatformAssignmentEvent } from "./generated/confined-system-shape.generated";
+export interface ColumnAssignment {
+  readonly by: "now" | "typedId" | "actor" | "identity" | `increment(${number})`;
+  readonly on: "insert" | "write" | "delete";
+}
 
 /** Generic plain object type used throughout the SDK. */
 export type PlainObject = Record<string, unknown>;
@@ -135,88 +136,25 @@ export type InferSchema<S> = S extends infer T
 export type InferInsertSchema<S> = S extends infer T
   ? IsSchemaDict<T> extends true
     ? {
-        [K in InsertRequiredKeys<T>]: InferFieldDef<T[K]>;
+        [K in Exclude<InsertRequiredKeys<T>, AssignedKeys<T>>]: InferFieldDef<T[K]>;
       } & {
-        [K in InsertOptionalKeys<T>]?: InferFieldDef<T[K]>;
+        [K in Exclude<InsertOptionalKeys<T>, AssignedKeys<T>>]?: InferFieldDef<T[K]>;
       }
     : T
   : never;
 
-/**
- * platform-managed system fields injected into every
- * `Row<S>`. Mirrors `SYSTEM_FIELD_NAMES` on the Rust side
- * (`crates/zeroship-data-sql/src/compile.rs`). Creator schemas cannot declare
- * fields with these names — the SDK-side reservation in
- * `@zeroship/bootstrap/install-schema` and the migration policy enforce the
- * fence before runtime CRUD can address a collection.
- *
- * Wire types (PR 3 — canonical typed_id + ISO-8601-friendly shape;
- * PR 1 stub of `number` for `id` is widened here in lockstep with
- * the Rust `dispatch_insert` auto-mint pass):
- * - `id` — `string` typed_id (`<prefix>_<22 base62 chars>`); the
- *   `dispatch_insert` path on the Rust side mints fresh ids via
- *   `zeroship_core::typed_id::generate(prefix)` when the inbound
- *   row omits one. Pre-P7 collections that still store integer ids
- *   migrate via PR 6's one-time ALTER pass; until then the SDK's
- *   `Collection._loadById` accepts either shape on the wire but
- *   exposes `string` on `Row<S>`.
- * - `created_at` / `updated_at` — Unix-ms `number`. The wire widens
- *   to ISO 8601 strings in a later PR (P7.5 / P8); the current shape
- *   stays a number to avoid a Date-parse cost on every read.
- * - `created_by` / `updated_by` — nullable actor typed_id string,
- *   `null` for system-initiated writes (migrations, background
- *   jobs). PR 3 wires the auto-populate from the per-request
- *   user context (`RuntimeState::per_request_user`).
- * - `version` — monotonic integer; starts at 1, bumped by 1 on every
- *   UPDATE. PR 4 wires the bump + optimistic-concurrency CAS.
- * - `deleted_at` — nullable timestamp `number`; `null` for live rows.
- *   PR 5 wires `delete()` to set this field and `find()` to
- *   auto-filter `deleted_at IS NULL`.
- *
- * The fields are appended after the user's schema so chain methods
- * on the inferred row see the user shape first (matches the source
- * order: every creator table gets the system fields as
- * platform-injected, not creator-declared).
- */
-export type SystemFields = {
-  id: string;
-  created_at: number;
-  updated_at: number;
-  created_by: string | null;
-  updated_by: string | null;
-  version: number;
-  deleted_at: number | null;
-};
+/** The persisted fields declared by the collection schema. */
+export type Row<S> = InferSchema<S>;
 
-/**
- * The persisted row type: user fields + 7 platform-managed system
- * fields (`id`, `created_at`, `updated_at`, `created_by`, `updated_by`,
- * `version`, `deleted_at`). Extends `InferSchema` so required user
- * fields remain required; system fields are always present at read
- * time (auto-populated by the platform).
- *
- * `id` is a typed_id string
- * (`<prefix>_<base62(uuidv7)>`) and the system fields are exposed in
- * snake_case only.
- */
-export type Row<S> = InferSchema<S> & SystemFields;
+export type AssignedKeys<S> = {
+  [K in keyof S]: S[K] extends { readonly _assigned: true } ? K : never
+}[keyof S];
 
-/** Input type accepted by `insert()` / `upsert()` — required fields
- * stay required, auto-populated system fields are excluded so the
- * platform mints them (PR 3). */
-export type RowInput<S> = InferInsertSchema<S> & {
-  id?: never;
-  created_at?: never;
-  updated_at?: never;
-  created_by?: never;
-  updated_by?: never;
-  version?: never;
-  deleted_at?: never;
-};
+/** Generated fields are read-only inputs. */
+export type RowInput<S> = InferInsertSchema<S> & { [K in AssignedKeys<S>]?: never };
 
-/** Upsert matches an application-owned unique key supplied in the document. */
 export type UpsertOptions<S> = {
-  conflictFields: Exclude<string & keyof Row<S>, keyof SystemFields>[];
+  conflictFields: Exclude<string & keyof Row<S>, AssignedKeys<S>>[];
 };
 
 // ---------------------------------------------------------------------------
@@ -317,16 +255,16 @@ type UpdateFieldValue<T> =
 
 /** Typed update expression — per-field operators. */
 export type UpdateExpression<S> = {
-  [K in keyof InferSchema<S>]?: UpdateFieldValue<InferSchema<S>[K]>
+  [K in Exclude<keyof InferSchema<S>, AssignedKeys<S>>]?: UpdateFieldValue<InferSchema<S>[K]>
 } & {
   // Document operators share the ORM's assignment grammar.
-  $set?: Partial<InferSchema<S>>;
-  $inc?: { [K in keyof InferSchema<S>]?: NonNullable<InferSchema<S>[K]> extends number | bigint ? NonNullable<InferSchema<S>[K]> : never };
-  $dec?: { [K in keyof InferSchema<S>]?: NonNullable<InferSchema<S>[K]> extends number | bigint ? NonNullable<InferSchema<S>[K]> : never };
-  $mul?: { [K in keyof InferSchema<S>]?: NonNullable<InferSchema<S>[K]> extends number | bigint ? NonNullable<InferSchema<S>[K]> : never };
-  $push?: { [K in keyof InferSchema<S>]?: NonNullable<InferSchema<S>[K]> extends readonly unknown[] ? NonNullable<InferSchema<S>[K]>[number] : never };
-  $pull?: { [K in keyof InferSchema<S>]?: NonNullable<InferSchema<S>[K]> extends readonly unknown[] ? NonNullable<InferSchema<S>[K]>[number] : never };
-  $addToSet?: { [K in keyof InferSchema<S>]?: NonNullable<InferSchema<S>[K]> extends readonly unknown[] ? NonNullable<InferSchema<S>[K]>[number] : never };
+  $set?: Partial<Omit<InferSchema<S>, AssignedKeys<S>>>;
+  $inc?: { [K in Exclude<keyof InferSchema<S>, AssignedKeys<S>>]?: NonNullable<InferSchema<S>[K]> extends number | bigint ? NonNullable<InferSchema<S>[K]> : never };
+  $dec?: { [K in Exclude<keyof InferSchema<S>, AssignedKeys<S>>]?: NonNullable<InferSchema<S>[K]> extends number | bigint ? NonNullable<InferSchema<S>[K]> : never };
+  $mul?: { [K in Exclude<keyof InferSchema<S>, AssignedKeys<S>>]?: NonNullable<InferSchema<S>[K]> extends number | bigint ? NonNullable<InferSchema<S>[K]> : never };
+  $push?: { [K in Exclude<keyof InferSchema<S>, AssignedKeys<S>>]?: NonNullable<InferSchema<S>[K]> extends readonly unknown[] ? NonNullable<InferSchema<S>[K]>[number] : never };
+  $pull?: { [K in Exclude<keyof InferSchema<S>, AssignedKeys<S>>]?: NonNullable<InferSchema<S>[K]> extends readonly unknown[] ? NonNullable<InferSchema<S>[K]>[number] : never };
+  $addToSet?: { [K in Exclude<keyof InferSchema<S>, AssignedKeys<S>>]?: NonNullable<InferSchema<S>[K]> extends readonly unknown[] ? NonNullable<InferSchema<S>[K]>[number] : never };
 };
 
 // ---------------------------------------------------------------------------
@@ -683,18 +621,6 @@ export interface EncryptedFieldOpts {
 /** Definition for an array field with a declared item type. */
 export type ArrayTypeDef = { type: "array"; items: PrimitiveTypeName };
 /**
- * All supported type names. Includes "array", "ref" (B2 typed FK),
- * "object" (D2 nested validators), "calendarDate" (D3 — `YYYY-MM-DD`),
- * "literal" (C2 discriminator constant), and "union" (C2 discriminated
- * union document shape — proposal §C2).
- *
- * adds `"id"` (typed_id PK candidate) and `"actor"`
- * (session.actor_id source for `created_by` / `updated_by` style
- * columns). These shapes feed the PR 2 CREATE TABLE rewrite that
- * injects the seven platform system fields; PR 1 ships the builders
- * + wire discriminators only.
- */
-/**
  * Column names that reach the runtime descriptor but that nobody authors.
  *
  * `PrimitiveTypeName` is the surface a creator writes. These are what the
@@ -718,7 +644,7 @@ export type ArrayTypeDef = { type: "array"; items: PrimitiveTypeName };
  */
 export type DescriptorOnlyTypeName = "int" | "integer" | "bigInt" | "float" | "timestamp";
 
-export type TypeName = PrimitiveTypeName | DescriptorOnlyTypeName | "array" | "ref" | "object" | "literal" | "union" | "vector" | "geoPoint" | "bytes" | "id" | "actor";
+export type TypeName = PrimitiveTypeName | DescriptorOnlyTypeName | "array" | "ref" | "object" | "literal" | "union" | "vector" | "geoPoint" | "bytes" | "id";
 
 /**
  * distance metric for `t.vector(...)` fields. The three
@@ -841,33 +767,12 @@ export interface FieldDef {
   unique?: boolean;
   index?: boolean;
   default?: FieldDefaultValue | (() => FieldDefaultValue);
-  /**
-   * Who computes this field's value, and when. Present iff the PLATFORM owns
-   * the value; absent for every field the caller owns.
-   *
-   * **The slot is the override policy, and that is the whole point of having
-   * two slots.** `assign` means the platform computes the value and a
-   * caller-supplied one is not accepted. `default` means a fallback the caller
-   * OVERRIDES by supplying anything. They are not two spellings of the same
-   * idea and a field may carry both: `version` is `assign = increment(1)` with
-   * a DDL `DEFAULT 1`, because the generator is the normal path and the DDL
-   * default is the backstop for writes that never reach the runtime (migration
-   * DML, CDC backfill, raw SQL).
-   *
-   * Everything else a consumer might want here is DERIVED from the presence of
-   * this property and is deliberately not stored beside it - "not required of
-   * the caller", "the client must not materialise a value", "a caller-supplied
-   * value is refused" all follow from it, and `immutable` follows from
-   * `on === "insert"`. A second property restating any of them would be a
-   * second source of truth for one fact.
-   *
-   * Populated from the operator charter
-   * (`policies/confined-system-shape.inject.toml`) rather than from the
-   * creator-authored descriptor, which is why it can be trusted: the descriptor
-   * is client-declared and a creator who hand-edits it can make it say
-   * anything.
-   */
-  assign?: PlatformAssignment;
+  /** Generator and lifecycle event supplied by the runtime descriptor. */
+  assign?: ColumnAssignment;
+  primaryKey?: boolean;
+  softDelete?: boolean;
+  concurrency?: boolean;
+  writable?: boolean;
   min?: number;
   max?: number;
   enum?: (string | number)[];
@@ -887,6 +792,7 @@ export interface FieldDef {
    * every migration-declared foreign key — see `collection/relations.ts`.
    */
   refTarget?: string;
+  refColumn?: string;
   /** ON DELETE policy for `t.ref()`. Omitted means SQL/Postgres `NO ACTION`. */
   onDelete?: FkAction;
   /** ON UPDATE policy for `t.ref()`. Omitted means SQL/Postgres `NO ACTION`. */
@@ -981,44 +887,9 @@ export interface FieldDef {
     kind: MaskKind;
     classification: Classification;
   };
-  /**
-   * typed_id prefix discriminator for `t.id(prefix?)`.
-   * Present iff `type === "id"`. The SDK auto-mint pass (PR 3) will
-   * use this prefix to call `typed_id::new(prefix)` when the row is
-   * inserted without an explicit id. Absent / undefined means the
-   * collection name is used as the prefix (PR 3 deferred decision).
-   *
-   * Wire-format note: this is what makes `t.id("post")` distinguishable
-   * from `t.string()` at the runtime DDL emitter (PR 2) and the
-   * INSERT auto-populate pass (PR 3). The bare `type: "id"` discriminator
-   * is sufficient for the auto-mint candidate detection.
-   */
+  /** Prefix used when this field declares a typedId assignment. */
   idPrefix?: string;
-  /**
-   * explicit nullability for `t.actor()` columns. Set
-   * to `true` by `.nullable()` (Q-SF-I in the proposal: explicit
-   * preferred). The default for `t.actor()` is nullable because
-   * system-initiated writes (migrations, background jobs) have no
-   * actor. Present iff `type === "actor"`.
-   */
-  actorNullable?: boolean;
-  /**
-   * timestamp auto-population modifier set by
-   * `.auto_now()` / `.auto_now_on_update()` on a `t.timestamp()` field.
-   *
-   * - `"now"` — DEFAULT NOW() at INSERT. Used for `created_at`-style
-   *   columns. Emitted as `TIMESTAMPTZ NOT NULL DEFAULT NOW()` on PG
-   *   (PR 2).
-   * - `"now_on_update"` — DEFAULT NOW() at INSERT AND bumped to NOW()
-   *   by every UPDATE (the UPDATE builder appends
-   *   `<col> = NOW()` to the SET clause — PR 4). Used for
-   *   `updated_at`-style columns.
-   *
-   * Present iff a chain method set it; absent on bare `t.timestamp()`.
-   * The chain method refuses any non-timestamp type at SDK time so
-   * the discriminator stays well-formed in the generated descriptor.
-   */
-  timestampAuto?: "now" | "now_on_update";
+
   /**
    * **Where this field physically lives** (runtime descriptor v2). See
    * [`FieldStorage`].
@@ -1062,6 +933,8 @@ const SCHEMA_BUILDER_BRAND = Symbol.for("@zeroship/db/SchemaBuilder");
  * `t.string().mask({ kind: "email" })` → `TypeBuilder<string, false, "email", undefined, false>`
  * `t.string().required().default("x")` → `TypeBuilder<string, true, undefined, undefined, true>`
  */
+type AssignmentBrand<T> = Pick<T, Extract<keyof T, "_assigned">>;
+
 export class TypeBuilder<
   T = unknown,
   R extends boolean = false,
@@ -1097,15 +970,27 @@ export class TypeBuilder<
     this._def = { ...def };
   }
 
+  /** Attach generated-column metadata after the value-type builder chain. */
+  assigned(assign: ColumnAssignment): this & { readonly _assigned: true } {
+    this._def.assign = assign;
+    this._def.writable = false;
+    return this as this & { readonly _assigned: true };
+  }
+
+  primaryKey(): this {
+    this._def.primaryKey = true;
+    return this;
+  }
+
   /** Returns a frozen copy of the field definition. */
   toFieldDef(): Readonly<FieldDef> {
     return Object.freeze({ ...this._def });
   }
 
   /** Marks the field as required; validation will fail if the field is absent. */
-  required(): TypeBuilder<T, true, M, E, D> {
+  required(): TypeBuilder<T, true, M, E, D> & AssignmentBrand<this> {
     this._def.required = true;
-    return this as unknown as TypeBuilder<T, true, M, E, D>;
+    return this as unknown as TypeBuilder<T, true, M, E, D> & AssignmentBrand<this>;
   }
 
   /** Adds a unique index constraint to the field. */
@@ -1129,9 +1014,9 @@ export class TypeBuilder<
   }
 
   /** Sets the default value (or factory function) used when the field is absent on insert. */
-  default(val: FieldDefaultValue | (() => FieldDefaultValue)): TypeBuilder<T, R, M, E, true> {
+  default(val: FieldDefaultValue | (() => FieldDefaultValue)): TypeBuilder<T, R, M, E, true> & AssignmentBrand<this> {
     this._def.default = val;
-    return this as unknown as TypeBuilder<T, R, M, E, true>;
+    return this as unknown as TypeBuilder<T, R, M, E, true> & AssignmentBrand<this>;
   }
 
   /** For strings: minimum length. For numbers: minimum value. */
@@ -1149,9 +1034,9 @@ export class TypeBuilder<
   /** Restricts the field to a fixed set of allowed values. */
   enum<const Values extends readonly (T & (string | number))[]>(
     ...values: Values
-  ): TypeBuilder<Values[number], R, M, E, D> {
+  ): TypeBuilder<Values[number], R, M, E, D> & AssignmentBrand<this> {
     this._def.enum = [...values];
-    return this as unknown as TypeBuilder<Values[number], R, M, E, D>;
+    return this as unknown as TypeBuilder<Values[number], R, M, E, D> & AssignmentBrand<this>;
   }
 
   /** For strings: a RegExp the value must match. */
@@ -1197,7 +1082,7 @@ export class TypeBuilder<
    *   schema-normaliser auto-populates `{ kind: "full",
    *   classification: "pii" }` — fail-safe per §3 of the proposal.
    */
-  mask<K extends MaskKind>(opts: { kind: K; classification?: Classification }): TypeBuilder<T, R, K, E, D> {
+  mask<K extends MaskKind>(opts: { kind: K; classification?: Classification }): TypeBuilder<T, R, K, E, D> & AssignmentBrand<this> {
     if (opts === null || typeof opts !== "object") {
       throw Object.assign(
         new Error(".mask(opts): opts must be an object with at least `{ kind }`"),
@@ -1268,41 +1153,16 @@ export class TypeBuilder<
       );
     }
     this._def.mask = { kind, classification };
-    return this as unknown as TypeBuilder<T, R, K, E, D>;
+    return this as unknown as TypeBuilder<T, R, K, E, D> & AssignmentBrand<this>;
   }
 
-  /**
-   * mark the field as nullable. Today this is meaningful
-   * only on `t.actor()` (matches Q-SF-I in the proposal: explicit
-   * `.nullable()` preferred over implicit). Calling `.nullable()` on
-   * any other type sets the `actorNullable` discriminator only when
-   * `type === "actor"`; on other types it's a no-op so existing
-   * chain ergonomics aren't disturbed (PR 1 foundation only — wider
-   * nullability semantics are out of scope).
-   *
-   * The TS type-side effect (unwrapping non-nullable to nullable) is
-   * deferred to a later PR — PR 1 only ships the wire-format discriminator
-   * so PR 2's CREATE TABLE can emit `NULL` vs `NOT NULL` correctly.
-   */
-  nullable(): this {
-    if (this._def.type === "actor") {
-      this._def.actorNullable = true;
-    }
-    return this;
+  /** Allow null in the field's value type. */
+  nullable(): TypeBuilder<T | null, R, M, E, D> & AssignmentBrand<this> {
+    return this as TypeBuilder<T | null, R, M, E, D> & AssignmentBrand<this>;
   }
 
-  /**
-   * mark a `t.timestamp()` field as auto-populated to
-   * `NOW()` at INSERT. PR 2 emits the DDL as `DEFAULT NOW()`; the
-   * INSERT auto-populate pass (PR 3) lets the DB DEFAULT fire when
-   * the caller omits the column.
-   *
-   * Refused on non-timestamp types with code `AUTO_NOW_ON_NON_TIMESTAMP`
-   * so misuses fail loudly at schema-definition time rather than
-   * silently producing wrong DDL. The validator looks at the underlying
-   * `type === "date"` because `t.timestamp()` aliases to date today.
-   */
-  auto_now(): this {
+  /** Assign the database timestamp on insert. */
+  auto_now(): this & { readonly _assigned: true } {
     if (this._def.type !== "date") {
       throw Object.assign(
         new Error(
@@ -1311,21 +1171,11 @@ export class TypeBuilder<
         { code: "AUTO_NOW_ON_NON_TIMESTAMP" as const },
       );
     }
-    this._def.timestampAuto = "now";
-    return this;
+    return this.assigned({ by: "now", on: "insert" });
   }
 
-  /**
-   * mark a `t.timestamp()` field as auto-populated to
-   * `NOW()` at INSERT AND bumped to `NOW()` by every UPDATE. PR 2
-   * emits the column as `DEFAULT NOW()`; PR 4 wires the UPDATE
-   * builder to append `<col> = NOW()` to every SET clause.
-   *
-   * Refused on non-timestamp types with code `AUTO_NOW_ON_NON_TIMESTAMP`
-   * (shares the code with `.auto_now()` since the misuse class is
-   * identical).
-   */
-  auto_now_on_update(): this {
+  /** Assign the database timestamp on insert and subsequent writes. */
+  auto_now_on_update(): this & { readonly _assigned: true } {
     if (this._def.type !== "date") {
       throw Object.assign(
         new Error(
@@ -1334,8 +1184,7 @@ export class TypeBuilder<
         { code: "AUTO_NOW_ON_NON_TIMESTAMP" as const },
       );
     }
-    this._def.timestampAuto = "now_on_update";
-    return this;
+    return this.assigned({ by: "now", on: "write" });
   }
 }
 
@@ -1712,25 +1561,7 @@ export const t = {
    * }
    * ```
    */
-  /**
-   * typed_id field. At the JS layer the field is exchanged
-   * as a string carrying the UUIDv7 + base62 + optional entity prefix
-   * (e.g. `"post_01HXYZ..."`). At the DB layer it's a TEXT column.
-   *
-   * The optional `prefix` argument names the entity tag the SDK
-   * auto-mint pass (PR 3) will pass to `typed_id::new(prefix)` on
-   * inserts that omit `id`. Omitting `prefix` defers the choice to
-   * PR 3 (default-to-collection-name).
-   *
-   * Wire shape: `{ type: "id", idPrefix?: string }`. The `type: "id"`
-   * discriminator is the signal the PR 3 auto-populate pass uses to
-   * find the auto-mint candidate without keying on the literal name
-   * `"id"` — so a model could in principle have a non-`id`-named
-   * primary key (though §2.1 of the proposal pins the seven names).
-   *
-   * PR 1 ships the builder + wire discriminator only. Auto-mint
-   * behaviour lands in PR 3; CREATE TABLE emission lands in PR 2.
-   */
+  /** A textual identifier type; generation requires a typedId assignment. */
   id(prefix?: string): TypeBuilder<string> {
     if (prefix !== undefined) {
       if (typeof prefix !== "string" || prefix.length === 0) {
@@ -1763,28 +1594,9 @@ export const t = {
     if (prefix !== undefined) def.idPrefix = prefix;
     return new TypeBuilder<string>(def);
   },
-  /**
-   * actor field. Stores a typed_id at the DB layer
-   * (TEXT) sourced from the current request's `SessionMinter.actor_id`
-   * (P3). Used for `created_by` / `updated_by` system fields, and
-   * available to creators who want their own actor-tracking columns
-   * (e.g. `last_edited_by`).
-   *
-   * Nullable by convention (matches Q-SF-I in the proposal: explicit
-   * `.nullable()` is the canonical declaration form, but the default
-   * is nullable because system-initiated writes have no actor). The
-   * default is captured by `actorNullable = true` so the wire shape
-   * is unambiguous regardless of whether `.nullable()` was chained.
-   *
-   * PR 1 ships the builder + wire discriminator only. PR 3 wires the
-   * INSERT auto-populate from `SessionMinter.actor_id`; PR 4 wires
-   * the UPDATE-time bump.
-   */
-  actor(): TypeBuilder<string | null> {
-    // Default-nullable: written explicitly so the wire shape is
-    // unambiguous. `.nullable()` is a no-op (already true) for the
-    // explicit form callers may prefer.
-    return new TypeBuilder<string | null>({ type: "actor", actorNullable: true });
+  /** Assign the request actor on insert, or null for anonymous writes. */
+  actor(): TypeBuilder<string | null> & { readonly _assigned: true } {
+    return new TypeBuilder<string | null>({ type: "string" }).assigned({ by: "actor", on: "insert" });
   },
   union<V extends readonly TypeBuilder<any, any, any, any, any>[]>(...variants: V): TypeBuilder<InferUnion<V>> {
     if (variants.length < 2) {
@@ -2002,13 +1814,7 @@ export class SchemaBuilder<S> {
   get indexes(): readonly NamedIndexSpec[] { return this._indexes; }
 
   /**
-   * Declare a named, multi-column index. Order matters — filters whose
-   * keys form a prefix of `fields` are considered covered by the index.
-   * The SDK passes the declaration to the native side, which materialises
-   * a `CREATE INDEX CONCURRENTLY IF NOT EXISTS "<table>__<name>"` per
-   * declared index. Auto-generated columns (`id`, `created_at`,
-   * `updated_at`, `created_by`, `updated_by`, `deleted_at`, `version`)
-   * are also accepted alongside user fields.
+   * Declare an ordered index over fields present in this schema.
    *
    * Throws `Error` with `code = "SCHEMA_INVALID"` at definition time if:
    *  - `name` is empty or already declared on this schema, or
@@ -2072,43 +1878,17 @@ export class SchemaBuilder<S> {
     this._indexes.push(spec);
   }
 
-  /**
-   * The set of field names this schema accepts in `.index(...)`. Includes
-   * user-declared fields plus the auto-generated system columns the
-   * collection always carries. With the SDK's snake_case system-field
-   * contract, these names match the underlying columns 1:1.
-   */
   private _knownFieldNames(): Set<string> {
-    const out = new Set<string>([
-      "id",
-      "created_at",
-      "updated_at",
-      "created_by",
-      "updated_by",
-      "version",
-      "deleted_at",
-    ]);
-    const f = this.fields;
-    if (f !== null && typeof f === "object") {
-      for (const k of Object.keys(f as Record<string, unknown>)) out.add(k);
-    }
-    return out;
+    return new Set(Object.keys(this.fields ?? {}));
   }
 
-  /** Enable soft delete — deleteOne/deleteMany set `deleted_at` instead of removing rows. */
+  /** Enable the descriptor's soft-delete lifecycle. */
   softDelete(): this {
     this._options.softDelete = true;
     return this;
   }
 
-  /**
-   * D4 — enable optimistic concurrency. Auto-injects a `version` column
-   * (INTEGER NOT NULL DEFAULT 1) at DDL time. Update calls that include
-   * `{ version: N }` in the filter become compare-and-swap: rows are
-   * updated and `version` is incremented only when the stored version
-   * matches N. A mismatch returns
-   * `{ data: null, error: { code: "OPTIMISTIC_CONCURRENCY" } }`.
-   */
+  /** Enable compare-and-swap using the declared concurrency field. */
   withVersioning(): this {
     this._options.versioning = true;
     return this;

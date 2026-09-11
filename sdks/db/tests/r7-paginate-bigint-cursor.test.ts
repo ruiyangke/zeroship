@@ -6,7 +6,7 @@
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { Query } from "../src/query.js";
+import { FixtureQuery as Query } from "./_query-fixture.js";
 
 type PlainObject = Record<string, unknown>;
 

@@ -5,7 +5,7 @@
  * Two SDK-side responsibilities the runtime can't observe directly:
  *
  * 1. The SDK no longer adds `$inc: { version: 1 }` to the patch (the
- *    runtime's `build_update_*_with_system_fields` appends the bump).
+ *    runtime's `build_update_*_with_assignments` appends the bump).
  *    A pre-PR-4 SDK that still adds it would double-bump; we pin the
  *    behaviour change so a regression in `_augmentUpdateWithVersion`
  *    is caught.

@@ -14,7 +14,7 @@
  *    the `AND deleted_at IS NULL` auto-filter.
  *
  * The runtime-side soft-delete is verified by the Rust integration
- * tests in `crates/zeroship-data-orm/src/tests/sqlite/system_fields.rs`; this file
+ * tests in `crates/zeroship-data-orm/src/tests/sqlite/assignments.rs`; this file
  * confirms the SDK boundary is wired correctly.
  */
 import { test, describe } from "node:test";

@@ -1,3 +1,4 @@
+import { generatedSchema } from "./_install-helper.js";
 /**
  * P5.5 PR 8 — SDK type inference snapshot for the masking subsystem.
  *
@@ -50,7 +51,7 @@ describe("P5.5 PR 8 — Row<S> shape under masking", () => {
         .mask({ kind: "last4", classification: "spi" })
         .required(),
     };
-    type UsersRow = Row<typeof usersSchema>;
+    type UsersRow = Row<typeof usersSchema & typeof generatedSchema>;
 
     // The masked column is a MaskedValue<string>, NOT a bare string.
     // The build-tier `tsc` invariant: assigning a bare string to
@@ -79,7 +80,7 @@ describe("P5.5 PR 8 — Row<S> shape under masking", () => {
         .mask({ kind: "last4", classification: "spi" })
         .required(),
     };
-    type UsersRow = Row<typeof usersSchema>;
+    type UsersRow = Row<typeof usersSchema & typeof generatedSchema>;
 
     // A masked field owns a second physical column, `__zs_raw__ssn`,
     // holding the real value. It must NOT be inferred into the row type:
@@ -113,7 +114,7 @@ describe("P5.5 PR 8 — Row<S> shape under masking", () => {
     const usersSchema = {
       email: t.encrypted({ of: t.string() }).required(),
     };
-    type UsersRow = Row<typeof usersSchema>;
+    type UsersRow = Row<typeof usersSchema & typeof generatedSchema>;
 
     // No explicit .mask() — the platform's default-mask rule
     // (kind: "full", classification: "pii") applies and the type
@@ -142,7 +143,7 @@ describe("P5.5 PR 8 — Row<S> shape under masking", () => {
         .mask({ kind: "none", classification: "internal" })
         .required(),
     };
-    type UsersRow = Row<typeof usersSchema>;
+    type UsersRow = Row<typeof usersSchema & typeof generatedSchema>;
     const row: UsersRow = {
       id: "usr_001",
       legacy: "raw",

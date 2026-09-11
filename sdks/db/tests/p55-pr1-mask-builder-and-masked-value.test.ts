@@ -1,3 +1,4 @@
+import { generatedSchema } from "./_install-helper.js";
 /**
  * **P5.5 PR 1** — masking foundation: `t.string().mask(...)` /
  * `t.encrypted().mask(...)` DSL modifier + default-mask rule for
@@ -166,7 +167,7 @@ describe("P5.5 PR 1 — Row<S> type inference (compile-time)", () => {
       ssn: t.encrypted({  }).required(),
       name: t.string(),
     };
-    type R = Row<typeof fields>;
+    type R = Row<typeof fields & typeof generatedSchema>;
     // Type-level assertion: `ssn` is MaskedValue<string>, `name` is
     // string | undefined. The line below would fail to compile if the
     // inference broke (e.g. a bare string assigned to `ssn`).
@@ -195,7 +196,7 @@ describe("P5.5 PR 1 — Row<S> type inference (compile-time)", () => {
     const fields = {
       email: t.string().mask({ kind: "none" }),
     };
-    type R = Row<typeof fields>;
+    type R = Row<typeof fields & typeof generatedSchema>;
     const sample: R = {
       id: "usr_001",
       created_at: 0,
@@ -213,7 +214,7 @@ describe("P5.5 PR 1 — Row<S> type inference (compile-time)", () => {
     const fields = {
       email: t.string().mask({ kind: "email" }).required(),
     };
-    type R = Row<typeof fields>;
+    type R = Row<typeof fields & typeof generatedSchema>;
     const sample: R = {
       id: "usr_001",
       created_at: 0,

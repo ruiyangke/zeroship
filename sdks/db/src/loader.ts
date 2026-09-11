@@ -1,42 +1,5 @@
-/**
- * Per-collection DataLoader for `get(id)`.
- *
- * Coalesces multiple `Collection.get(idOrFilter)` calls that fire within
- * one microtask into a single `WHERE id IN (...)` query. The pattern is
- * the cohort-standard for AI-builder runtimes (Prisma's `findUnique` is
- * now batched, Convex/Drizzle/GraphQL DataLoader popularised it).
- *
- * The loader is transparent: it lives behind the existing `get(id)` API
- * and emits exactly one underlying `find({id: {$in: [...]}})` per batch.
- * Errors from the underlying call propagate to every queued promise.
- *
- * Scope and limits are enforced by the caller (`Collection.get`):
- *   - typed_id string only (not a Filter object)
- *   - no `opts.select` (would force per-projection bucketing)
- *   - no `opts.orderBy` (irrelevant for id reads; falls through to be safe)
- *   - skipped while a transaction is active on the collection (we don't
- *     want to coalesce reads across mixed tx/non-tx contexts inside one
- *     microtask)
- *
- * Tx-race detection: each queued entry remembers `_txDepth` at the time
- * `load()` was called. At flush time we compare against the current
- * depth (via the `getTxDepth` callback). If a caller enqueued OUTSIDE a
- * tx (snapshot === 0) but a tx opened before flush (current > 0), the
- * batched `find` would route through `TX_CONN` in Rust and leak the
- * non-tx read into the tx scope. We reject those entries with a clear
- * error rather than silently routing them wrong — the drain-before-begin
- * in `db.transaction` closes the common window, but a second-microtask
- * enqueue between the drain and the native `transaction(fn)` opening its
- * BEGIN remains observable.
- *
- * **P7 PR 3** — id keyspace widened from `number` to `string` (typed_id)
- * in lockstep with the Rust-side `id TEXT PRIMARY KEY` + auto-mint
- * pass (`crud::system_fields_pass::apply_system_fields_on_insert`).
- * Dedupe + map lookups now use string keys; the `Map<string, R>` value
- * type is unchanged structurally.
- */
+/** Coalesce key lookups while preserving the transaction scope at enqueue time. */
 
-/** A queued request waiting for the next microtask flush. */
 interface QueuedLoad<R> {
   id: string;
   resolve: (row: R | null) => void;
@@ -51,7 +14,7 @@ import { MAX_ID_BATCH } from "./membership-cap.js";
  * fetch. Construct one per Collection and reuse — it's stateless across
  * batches.
  */
-export class IdLoader<R extends { id: string }> {
+export class IdLoader<R> {
   private queue: QueuedLoad<R>[] = [];
   private scheduled = false;
 
@@ -162,7 +125,7 @@ export class IdLoader<R extends { id: string }> {
   }
 }
 
-function resolve<R extends { id: string }>(
+function resolve<R>(
   q: QueuedLoad<R>,
   map: Map<string, R>,
 ): void {

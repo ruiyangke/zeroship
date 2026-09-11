@@ -1,9 +1,11 @@
+import { primaryKey } from "../column-roles";
 import type { NormalizedSchema } from "../schema";
 import type { Filter, PlainObject, Result, WithSpec } from "../types";
 import { readTransactionDepth } from "../tx-state.js";
 import { MAX_ID_BATCH } from "../membership-cap.js";
 
 interface RelationTargetCollection {
+  _schema: NormalizedSchema;
   find(filter: Filter<unknown>): PromiseLike<Result<unknown[]>>;
 }
 
@@ -132,15 +134,16 @@ export async function loadRelations(
     // can run concurrently outside a transaction, and fanning out here
     // too would multiply in-flight queries by the chunk count for a single
     // creator call.
+    const targetKey = fieldDef.refColumn ?? primaryKey(targetCol._schema);
     const byId = new Map<string, PlainObject>();
     for (let i = 0; i < ids.length; i += MAX_ID_BATCH) {
       const chunk = ids.slice(i, i + MAX_ID_BATCH);
       const { data: targetRows, error } = await targetCol.find({
-        id: { $in: chunk },
+        [targetKey]: { $in: chunk },
       } as Filter<unknown>);
       if (error) throw error;
       for (const tr of (targetRows ?? []) as PlainObject[]) {
-        const tid = tr.id;
+        const tid = tr[targetKey];
         if (typeof tid === "string") {
           byId.set(tid, tr);
         }
