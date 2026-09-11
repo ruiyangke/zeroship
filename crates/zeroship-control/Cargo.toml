@@ -22,6 +22,15 @@ target = "dev-provision"
 class = "test-dev-tool"
 reason = "Development and CI provisioning helper that is never deployed as a service."
 
+[[package.metadata.zeroship-config.targets]]
+target = "workflow-test-environment"
+class = "test-dev-tool"
+reason = "Native Testcontainers owner used only by workflow integration tests."
+
+[[example]]
+name = "workflow-test-environment"
+path = "tests/workflow_support/environment.rs"
+
 [[bin]]
 name = "zeroship-control"
 path = "src/main.rs"
