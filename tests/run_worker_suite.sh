@@ -12,9 +12,8 @@
 # (crates/zeroship-plugin-workflow/src/claim.rs:89-91) - PLATFORM tables, which
 # exist only after `db/migrations-ts/` has been applied. No fixture creates
 # them and none should: they are the same tables production reads.
-# `db_posture` has one full boot test behind the same feature because its role
-# posture query reads those three platform tables after checking the cluster's
-# `max_slot_wal_keep_size`.
+# The ordinary `db_posture` tests also require the migrated platform projection
+# and prove the worker can boot without replication or RLS bypass.
 #
 # THE FAILURE THIS EXISTS TO END. Until 2026-08-28 those seven were ungated and
 # nothing provisioned that database, so they ran against the shared, UNMIGRATED
@@ -242,8 +241,10 @@ status=0
 echo "==> Running zeroship-worker against ${TEST_DB}"
 THREAD_ARGS=()
 [ -n "$TEST_THREADS" ] && THREAD_ARGS=(--test-threads "$TEST_THREADS")
+# Capture test output so fixture diagnostics cannot split the result lines
+# consumed by the live-test arms below. Failures still print their diagnostics.
 cargo test -p zeroship-worker --features live-db-tests --no-fail-fast -- \
-  "${THREAD_ARGS[@]}" --nocapture 2>&1 | tee "$LOG" || status=1
+  "${THREAD_ARGS[@]}" 2>&1 | tee "$LOG" || status=1
 
 echo "------------------------------------------------------------------"
 
@@ -280,15 +281,12 @@ if [ "$live_ran" -lt "$WORKER_LIVE_MIN" ]; then
   status=1
 fi
 
-# The full boot posture test needs the migrated platform projection above, so
-# it is feature-gated for the same reason as the workflow tests. Count its exact
-# module path separately: the broad pass floor stays green if one gated test
-# disappears, and the workflow arm cannot see a test outside its module.
+# Count the mandatory boot posture test separately from the workflow tests.
 POSTURE_LIVE_MIN=1
-posture_live_ran="$(grep -cE '^test db_posture::tests::worker_boot_refuses_unlimited_replication_slot_wal_retention \.\.\. ok$' "$LOG")"
+posture_live_ran="$(grep -cE '^test db_posture::tests::worker_boot_accepts_the_migrated_role_without_replication \.\.\. ok$' "$LOG")"
 if [ "$posture_live_ran" -lt "$POSTURE_LIVE_MIN" ]; then
   echo "FAIL: only ${posture_live_ran} full boot-posture test(s) passed, fewer than the ${POSTURE_LIVE_MIN} this gate requires." >&2
-  echo "The max_slot_wal_keep_size regression was gated out, renamed, deleted or" >&2
+  echo "The worker privilege regression was renamed, deleted or" >&2
   echo "did not reach its migrated database. This is no verdict on worker boot." >&2
   status=1
 fi

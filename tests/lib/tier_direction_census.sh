@@ -236,7 +236,7 @@ src_path_exists() {
 tier_of_file() {
   case "$1" in
     ./v8_classes/*|./v8_bridge.rs|./lib.rs|./tx_scope.rs)  echo ADAPTER ;;
-    ./crud/*|./transaction/*|./exec.rs|./backend_selection.rs|./tx_route.rs|./drop_namespace.rs) echo ENGINE ;;
+    ./crud/*|./transaction/*|./exec.rs|./backend_selection.rs|./tx_route.rs) echo ENGINE ;;
     ./auth/bootstrap.rs)                                 echo ENGINE ;;
     # NO ARMS for ./backend/pg_*.rs, ./backend/postgres.rs, ./backend/sqlite/*,
     # ./encryption/*, ./lock_policy.rs, ./broker.rs or ./read_set.rs. Every one
@@ -249,7 +249,6 @@ tier_of_file() {
     # both, and `read_set` went first because the broker names `ReadSetEntry`.
     # NO ARMS for ./error.rs, ./binding.rs or ./budgets.rs either. Same reason,
     # earlier moves: all three are `zeroship-data-core`'s now.
-    ./wal_consumer.rs|./replication.rs|./slot_reaper.rs) echo CDC ;;
     # Settled by docs/proposals/2026-09-02-thread-context-ownership.md, whose
     # ownership table places `lanes` and `mask_policies` in data-engine,
     # `schemas` in data-core, and the pool/backend slots in the adapter -
@@ -261,7 +260,6 @@ tier_of_file() {
     # BackendHandle and TxCanceller name BOTH vendors, so only a tier above both
     # may hold them; the crate-shape proposal puts them in data-engine.
     ./tx_lanes.rs|./backend_handle.rs|./backend/cancel.rs|./system_shape_charter.rs|./metrics.rs) echo ENGINE ;;
-    ./cdc_lifecycle.rs|./change_stream_pg.rs)            echo CDC ;;
     # `descriptor.rs` was CORE here and data-engine in the crate-shape proposal,
     # and the two disagreed for two days. SETTLED as ENGINE on 2026-09-03 by the
     # cut itself: the file left with the engine tier, and the argument that put

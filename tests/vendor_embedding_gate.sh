@@ -152,8 +152,6 @@ is_vendor_tier() {
     zeroship-data-orm/backend/postgres/*|zeroship-data-orm/backend/sqlite/*) return 0 ;;
     zeroship-data-v8/backend/postgres.rs) return 0 ;;
     zeroship-data-v8/backend/pg_*.rs|zeroship-data-v8/backend/sqlite/*) return 0 ;;
-    zeroship-data-v8/replication.rs|zeroship-data-v8/slot_reaper.rs) return 0 ;;
-    zeroship-data-v8/wal_consumer.rs|zeroship-data-v8/change_stream_pg.rs) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -196,7 +194,6 @@ key_to_path() {
 BASELINE_FILES="
 zeroship-data-orm/auth/bootstrap.rs
 zeroship-data-v8/lib.rs
-zeroship-data-v8/service.rs
 "
 # exec.rs                 ENTRY RETIRED 2026-09-04, and it had already been dead
 #                         for a day. It read "Pool + Vec<Row> - the unsettled row

@@ -147,7 +147,7 @@ prod() {
 tier_of_file() {
   case "$1" in
     ./v8_classes/*|./v8_bridge.rs|./lib.rs|./tx_scope.rs)  echo ADAPTER ;;
-    ./crud/*|./transaction/*|./exec.rs|./backend_selection.rs|./tx_route.rs|./drop_namespace.rs) echo ENGINE ;;
+    ./crud/*|./transaction/*|./exec.rs|./backend_selection.rs|./tx_route.rs) echo ENGINE ;;
     ./auth/bootstrap.rs)                                 echo ENGINE ;;
     # NO ARMS for ./broker.rs, ./read_set.rs, ./backend/postgres.rs,
     # ./backend/pg_*.rs, ./backend/sqlite/*, ./encryption/*, ./error.rs or
@@ -155,13 +155,11 @@ tier_of_file() {
     # for a file this region does not hold is a pattern matching nothing - kept
     # in step with tier_direction_census.sh, where the two censuses judging one
     # file differently is defect 1.
-    ./wal_consumer.rs|./replication.rs|./slot_reaper.rs) echo CDC ;;
     # `descriptor.rs` and `backend/mod.rs`: ENGINE, settled by the 2026-09-03
     # cut. See the same two arms in tier_direction_census.sh.
     ./descriptor.rs|./backend/mod.rs)                    echo ENGINE ;;
     ./tx_lanes.rs|./backend_handle.rs|./backend/cancel.rs|./system_shape_charter.rs|./metrics.rs) echo ENGINE ;;
     ./context.rs|./service.rs|./op_error.rs)             echo ADAPTER ;;
-    ./cdc_lifecycle.rs|./change_stream_pg.rs)            echo CDC ;;
     *)                                                   echo CONTESTED ;;
   esac
 }
