@@ -501,17 +501,6 @@ impl WorkflowSchedulerStore {
         Ok(rows.iter().map(LapsedInflightTimer::from_row).collect())
     }
 
-    #[cfg(test)]
-    #[allow(clippy::future_not_send)]
-    pub async fn clear_for_tests(&self) -> Result<(), WorkflowSchedulerStoreError> {
-        let conn = self.open_conn().await?;
-        conn.batch_execute(
-            &format!("TRUNCATE TABLE {}.workflow_scheduler_inflight, {}.workflow_scheduler_timers", self.quoted_schema(), self.quoted_schema()),
-        )
-        .await?;
-        Ok(())
-    }
-
     fn quoted_schema(&self) -> String {
         quote_ident(&self.schema)
     }
