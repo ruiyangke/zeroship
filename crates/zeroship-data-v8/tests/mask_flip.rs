@@ -25,14 +25,9 @@
 //! and the data plane disagree about which physical column holds what, and a
 //! hand-written fixture agrees with whichever one its author had in mind.
 //!
-//! Requires a live PostgreSQL, named by `PG_TEST_URL` or by the overlay
-//! (`deploy/ops/zeroship.test.toml`). Ordinary package tests include this target;
-//! an unreachable server fails the run.
-//!
-//! ```text
-//! PG_TEST_URL=postgres://... cargo test -p zeroship-data-v8 \
-//!   --test test_helpers -- --test-threads=1 mask_flip::
-//! ```
+//! PostgreSQL comes from an owned testcontainer with vector and PostGIS.
+//! Docker and successful fixture startup are required.
+//! Run: `cargo xtask test data --filter 'test(mask_flip::)'`
 
 // `support` and `schema_fixture` are declared once by `tests/test_helpers.rs`,
 // the entry file this module hangs off; its header says why a second declaration
@@ -61,9 +56,7 @@ use zeroship_data_orm::protection::unmask::{
     parse_args, parse_bulk_args,
 };
 
-fn test_url() -> String {
-    zeroship_core::config::test_database_url()
-}
+
 
 /// The backend handle the unmask entry points now take as a parameter.
 ///
@@ -102,8 +95,9 @@ async fn unmask_route(app: &str) -> zeroship_data_orm::tx_route::TxRoute {
 /// Connect, or fail the test.
 ///
 /// Deliberately NOT a skip, for the reason the module doc gives.
-async fn require_pg() -> String {
-    let url = test_url();
+async fn require_pg() -> (crate::support::postgres::Postgres, String) {
+    let postgres = crate::support::postgres::Postgres::start();
+    let url = postgres.url();
     match compio_postgres::connect(&url, NoTls).await {
         Ok((client, connection)) => {
             compio::runtime::spawn(async move {
@@ -111,9 +105,9 @@ async fn require_pg() -> String {
             })
             .detach();
             drop(client);
-            url
+            (postgres, url)
         }
-        Err(e) => panic!("the mask-flip suite requires a reachable server at PG_TEST_URL: {e}"),
+        Err(e) => panic!("the mask-flip suite could not connect to its PostgreSQL testcontainer: {e}"),
     }
 }
 
@@ -326,7 +320,7 @@ async fn run_find(pool: &Rc<Pool>, app: &str, filter: &Value, schema: &Value) ->
 /// where it MUST separate them.
 #[compio::test]
 async fn a_range_filter_on_a_masked_column_cannot_narrow_the_plaintext() {
-    let url = require_pg().await;
+    let (_postgres, url) = require_pg().await;
     let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
     let app = "flip_oracle";
     let schema = flip_schema();
@@ -499,7 +493,7 @@ async fn a_range_filter_on_a_masked_column_cannot_narrow_the_plaintext() {
 /// assertion in this file.
 #[compio::test]
 async fn the_real_value_is_still_stored_and_still_reachable_by_the_audited_path() {
-    let url = require_pg().await;
+    let (_postgres, url) = require_pg().await;
     let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
     let app = "flip_reachable";
     let schema = flip_schema();
@@ -763,7 +757,7 @@ fn refusal_code(err: &DbError) -> String {
 /// exist nowhere in that suite.
 #[compio::test]
 async fn an_actor_the_policy_does_not_permit_is_refused_and_the_refusal_is_audited() {
-    let url = require_pg().await;
+    let (_postgres, url) = require_pg().await;
     let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
     let app = "flip_denied";
     let schema = flip_schema();
@@ -888,7 +882,7 @@ async fn an_actor_the_policy_does_not_permit_is_refused_and_the_refusal_is_audit
 /// permit. So "refused" here is about the ACTOR, not about the row.
 #[compio::test]
 async fn an_unmask_with_no_usable_actor_is_refused_and_audited() {
-    let url = require_pg().await;
+    let (_postgres, url) = require_pg().await;
     let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
     let app = "flip_unauth";
     let schema = flip_schema();
@@ -1034,7 +1028,7 @@ fn bulk_args_json(row_pk: &str, columns: &[&str], actor: &Value) -> Value {
 /// identical payload naming `support` instead of `auto` returns the SSN.
 #[compio::test]
 async fn app_js_claiming_the_auto_system_actor_is_refused_by_the_parser() {
-    let url = require_pg().await;
+    let (_postgres, url) = require_pg().await;
     let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
     let app = "flip_db3_single";
     zeroship_data_v8::testing::clear_mask_policy_cache_for_tests(app);
@@ -1161,7 +1155,7 @@ async fn app_js_claiming_the_auto_system_actor_is_refused_by_the_parser() {
 /// `bulk_unmask_partial_unauthorized`.
 #[compio::test]
 async fn app_js_claiming_the_auto_system_actor_is_refused_by_the_bulk_parser() {
-    let url = require_pg().await;
+    let (_postgres, url) = require_pg().await;
     let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
     let app = "flip_db3_bulk";
     zeroship_data_v8::testing::clear_mask_policy_cache_for_tests(app);
@@ -1285,7 +1279,7 @@ async fn app_js_claiming_the_auto_system_actor_is_refused_by_the_bulk_parser() {
 /// what must change is that the REJECTED claim is recorded rather than dropped.
 #[compio::test]
 async fn a_rejected_impersonation_is_distinguishable_from_an_absent_actor() {
-    let url = require_pg().await;
+    let (_postgres, url) = require_pg().await;
     let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
     let app = "flip_db3_signal";
     zeroship_data_v8::testing::clear_mask_policy_cache_for_tests(app);
@@ -1402,7 +1396,7 @@ fn bulk_args(row_pk: &str, columns: &[&str], actor: Option<Value>) -> BulkUnmask
 /// grants both classes.
 #[compio::test]
 async fn a_bulk_unmask_batch_with_one_forbidden_column_is_refused_whole() {
-    let url = require_pg().await;
+    let (_postgres, url) = require_pg().await;
     let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
     let app = "flip_bulk_denied";
     zeroship_data_v8::testing::clear_mask_policy_cache_for_tests(app);
@@ -1698,7 +1692,7 @@ async fn a_bulk_unmask_batch_with_one_forbidden_column_is_refused_whole() {
 /// withholding something this fixture demonstrably produces.
 #[compio::test]
 async fn a_query_hint_naming_one_forbidden_column_is_refused_whole() {
-    let url = require_pg().await;
+    let (_postgres, url) = require_pg().await;
     let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
     let app = "flip_hint_denied";
     zeroship_data_v8::testing::clear_mask_policy_cache_for_tests(app);
@@ -1901,7 +1895,7 @@ async fn a_query_hint_naming_one_forbidden_column_is_refused_whole() {
 /// fence, then the read, over the same `unmask_columns` slice.
 #[compio::test]
 async fn a_query_hint_reads_the_column_its_alias_resolved_to() {
-    let url = require_pg().await;
+    let (_postgres, url) = require_pg().await;
     let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
     let app = "flip_hint_alias";
     zeroship_data_v8::testing::clear_mask_policy_cache_for_tests(app);
@@ -1992,7 +1986,7 @@ async fn a_query_hint_reads_the_column_its_alias_resolved_to() {
 /// differently-named raw column cannot pass it.
 #[compio::test]
 async fn no_write_verb_hands_back_a_column_the_descriptor_does_not_declare() {
-    let url = require_pg().await;
+    let (_postgres, url) = require_pg().await;
     let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
     let app = "flip_returning";
     let schema = flip_schema();
@@ -2308,7 +2302,7 @@ fn a_masked_predicate_is_lowered_for_the_change_stream() {
 /// collection fails.
 #[compio::test]
 async fn the_declared_type_and_constraints_travel_to_the_raw_column() {
-    let url = require_pg().await;
+    let (_postgres, url) = require_pg().await;
     let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
     let app = "flip_ddl";
     let schema = value!({
@@ -2409,7 +2403,7 @@ async fn the_declared_type_and_constraints_travel_to_the_raw_column() {
 /// duplicate-key error on perfectly valid data.
 #[compio::test]
 async fn a_unique_masked_field_admits_rows_that_share_a_mask() {
-    let url = require_pg().await;
+    let (_postgres, url) = require_pg().await;
     let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
     let app = "flip_unique";
     let schema = value!({
@@ -2586,7 +2580,7 @@ async fn physical_rows(
 /// yields a `MaskedValue`.
 #[compio::test]
 async fn deleting_the_mask_key_from_the_descriptor_must_not_write_plaintext() {
-    let url = require_pg().await;
+    let (_postgres, url) = require_pg().await;
     let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
     let app = "flip_mask_key_deleted";
     let masked = flip_schema();
@@ -2687,7 +2681,7 @@ async fn deleting_the_mask_key_from_the_descriptor_must_not_write_plaintext() {
 /// about the other.
 #[compio::test]
 async fn deleting_the_encrypted_key_from_the_descriptor_must_not_write_plaintext() {
-    let url = require_pg().await;
+    let (_postgres, url) = require_pg().await;
     let _keys = zeroship_data_v8::testing::supply_root_keys_for_tests(&[(
         "k1",
         "0101010101010101010101010101010101010101010101010101010101010101",
@@ -2885,7 +2879,7 @@ async fn column_comment(
 /// to refuse, on the exact tables it was built for.
 #[compio::test]
 async fn a_migration_engine_built_table_refuses_a_mask_downgrade() {
-    let url = require_pg().await;
+    let (_postgres, url) = require_pg().await;
     let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
     // A FIXED uuid rather than a fresh one: the app id IS the schema name, and a
     // random one per run leaves a schema behind on every failing run that the
@@ -2996,7 +2990,7 @@ async fn a_migration_engine_built_table_refuses_a_mask_downgrade() {
 /// comment's prefix, so the two prefixes fail independently.
 #[compio::test]
 async fn a_migration_engine_built_table_refuses_an_encryption_downgrade() {
-    let url = require_pg().await;
+    let (_postgres, url) = require_pg().await;
     let _keys = zeroship_data_v8::testing::supply_root_keys_for_tests(&[(
         "k1",
         "0101010101010101010101010101010101010101010101010101010101010101",

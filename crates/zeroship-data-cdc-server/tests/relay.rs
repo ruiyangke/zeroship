@@ -1,5 +1,8 @@
 //! Separate-process relay test. PostgreSQL is mandatory.
 
+#[path = "../../../tests/fixtures/postgres/mod.rs"]
+mod postgres_fixture;
+
 use compio_postgres::Pool;
 use compio_tls::TlsConnector;
 use compio_ws::{tungstenite::Message, WebSocketStream};
@@ -64,7 +67,8 @@ fn assertion(instance: &str, key: &ServiceSigningKey) -> String {
 
 #[compio::test]
 async fn relay_process_authenticates_workers_and_streams_commits_without_worker_replication() {
-    let admin_url = url::Url::parse(&zeroship_core::config::test_database_url()).unwrap();
+    let postgres = postgres_fixture::Postgres::start();
+    let admin_url = url::Url::parse(&postgres.url()).unwrap();
     let admin = Pool::connect(admin_url.as_str(), 2)
         .await
         .expect("required PostgreSQL");

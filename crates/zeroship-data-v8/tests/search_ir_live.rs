@@ -13,10 +13,8 @@
 //!
 //! # Run it
 //!
-//! ```text
-//! PG_TEST_URL=postgres://postgres:postgres@127.0.0.1:5478/postgres \
-//! cargo test -p zeroship-data-v8 --test test_helpers -- search_ir_live::
-//! ```
+//! `cargo xtask test data --filter 'test(search_ir_live::)'`
+//! PostgreSQL comes from an owned testcontainer; Docker is required.
 //!
 //! The server needs **both** `vector` and `postgis`; the tests create the
 //! extensions themselves and fail loudly, naming the extension, if the server
@@ -68,11 +66,10 @@ fn run<F: std::future::Future>(f: F) -> F::Output {
         .block_on(f)
 }
 
-async fn pool() -> Pool {
-    let url = zeroship_core::config::test_database_url();
-    Pool::connect(&url, 2).await.unwrap_or_else(|e| {
-        panic!("the search IR live suite requires a reachable server at PG_TEST_URL: {e}")
-    })
+async fn pool() -> (crate::support::postgres::Postgres, Pool) {
+    let postgres = crate::support::postgres::Postgres::start();
+    let pool = Pool::connect(&postgres.url(), 2).await.expect("connect search fixture");
+    (postgres, pool)
 }
 
 /// Which server actually answered.
@@ -311,7 +308,7 @@ async fn seed_vectors(pool: &Pool, count: usize) {
 #[test]
 fn a_vector_search_ranks_by_distance_on_real_pgvector() {
     run(async {
-        let pool = pool().await;
+        let (_postgres, pool) = pool().await;
         setup(&pool).await;
         seed_vectors(&pool, 100).await;
 
@@ -367,7 +364,7 @@ fn a_vector_search_ranks_by_distance_on_real_pgvector() {
 #[test]
 fn the_ir_and_the_shipped_builder_rank_identically() {
     run(async {
-        let pool = pool().await;
+        let (_postgres, pool) = pool().await;
         setup(&pool).await;
         seed_vectors(&pool, 100).await;
 
@@ -480,7 +477,7 @@ fn the_ir_and_the_shipped_builder_rank_identically() {
 #[test]
 fn postgres_serves_the_inner_product_that_sqlite_refuses() {
     run(async {
-        let pool = pool().await;
+        let (_postgres, pool) = pool().await;
         setup(&pool).await;
         seed_vectors(&pool, 20).await;
 
@@ -586,7 +583,7 @@ fn postgres_serves_the_inner_product_that_sqlite_refuses() {
 #[test]
 fn a_geo_search_finds_the_near_rows_and_the_coordinate_order_is_load_bearing() {
     run(async {
-        let pool = pool().await;
+        let (_postgres, pool) = pool().await;
         setup(&pool).await;
 
         // London, and a point ~2 km away. Transposing either pair gives a
@@ -667,7 +664,7 @@ fn a_geo_search_finds_the_near_rows_and_the_coordinate_order_is_load_bearing() {
 #[test]
 fn one_statement_serves_every_k() {
     run(async {
-        let pool = pool().await;
+        let (_postgres, pool) = pool().await;
         setup(&pool).await;
         seed_vectors(&pool, 50).await;
 

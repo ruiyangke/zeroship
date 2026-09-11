@@ -24,6 +24,7 @@ only; the boundary gate refuses them in adapter implementation code.
 SQL compilation benchmarks live in `zeroship-data-sql`; native row-decoding
 benchmarks live in `zeroship-data-orm`.
 
-Run the required database conformance suite with
-`tests/run_data_v8_live_suite.sh`. It requires the repository's live PostgreSQL
-fixture and exercises SQLite using explicit temporary files.
+Run the required database conformance suite with `cargo xtask test data`.
+The Rust runner invokes nextest against the data crates, including the real CDC
+relay. Each PostgreSQL test owns its container; SQLite uses explicit temporary files.
+See `xtask/README.md` for prerequisites and focused test runs.

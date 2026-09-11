@@ -29,14 +29,9 @@
 //! rolled back: "the audit row survived" means nothing unless something else
 //! that shared its transaction did not.
 //!
-//! Requires a live PostgreSQL, named by `PG_TEST_URL` or by the overlay
-//! (`deploy/ops/zeroship.test.toml`). It FAILS rather than skips when the
-//! server is unreachable, like its `mask_flip` sibling.
-//!
-//! ```text
-//! PG_TEST_URL=postgres://... cargo test -p zeroship-data-v8 \
-//!   --features test-helpers --test test_helpers -- --test-threads=1 unmask_tx_lane::
-//! ```
+//! PostgreSQL comes from an owned testcontainer with vector and PostGIS.
+//! Docker and successful fixture startup are required.
+//! Run: `cargo xtask test data --filter 'test(unmask_tx_lane::)'`
 
 // `support` and `schema_fixture` are declared once by `tests/test_helpers.rs`,
 // the entry file this module hangs off; its header says why a second declaration
@@ -57,14 +52,13 @@ use zeroship_data_sql::compile::SqlDialect;
 use zeroship_data_orm::protection::mask_policy::install_mask_policy;
 use zeroship_data_orm::tx_route::{CapturedRoute, TxRoute};
 
-fn test_url() -> String {
-    zeroship_core::config::test_database_url()
-}
+
 
 /// Connect, or fail the test. Deliberately NOT a skip: a skipping run of a
 /// masking suite is indistinguishable from a passing one.
-async fn require_pg() -> String {
-    let url = test_url();
+async fn require_pg() -> (crate::support::postgres::Postgres, String) {
+    let postgres = crate::support::postgres::Postgres::start();
+    let url = postgres.url();
     match compio_postgres::connect(&url, NoTls).await {
         Ok((client, connection)) => {
             compio::runtime::spawn(async move {
@@ -72,10 +66,10 @@ async fn require_pg() -> String {
             })
             .detach();
             drop(client);
-            url
+            (postgres, url)
         }
         Err(e) => {
-            panic!("the unmask-tx-lane suite requires a reachable server at PG_TEST_URL: {e}")
+            panic!("the unmask-tx-lane suite could not connect to its PostgreSQL testcontainer: {e}")
         }
     }
 }
@@ -225,7 +219,7 @@ fn code_of(err: &DbError) -> String {
 /// took.
 #[compio::test]
 async fn a_find_unmask_inside_a_transaction_reaches_the_row_that_transaction_inserted() {
-    let url = require_pg().await;
+    let (_postgres, url) = require_pg().await;
     let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
     let app = "unmask_lane_uncommitted";
     fixture(&pool, &url, app).await;
@@ -328,7 +322,7 @@ async fn a_find_unmask_inside_a_transaction_reaches_the_row_that_transaction_ins
 /// would also be satisfied by a transaction that never rolled back at all.
 #[compio::test]
 async fn a_denied_unmask_audit_row_survives_the_rollback_of_its_transaction() {
-    let url = require_pg().await;
+    let (_postgres, url) = require_pg().await;
     let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
     let app = "unmask_lane_denied_audit";
     fixture(&pool, &url, app).await;
@@ -437,7 +431,7 @@ async fn a_denied_unmask_audit_row_survives_the_rollback_of_its_transaction() {
 /// fixture.
 #[compio::test]
 async fn an_encrypted_unmask_inside_a_transaction_reaches_the_row_that_transaction_inserted() {
-    let url = require_pg().await;
+    let (_postgres, url) = require_pg().await;
     let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
     let app = "unmask_lane_encrypted";
     // A synthetic 32-byte root, supplied to THIS isolate. The write pipeline

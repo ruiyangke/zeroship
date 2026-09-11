@@ -31,21 +31,9 @@
 //!
 //! # Fixture
 //!
-//! Needs a live PostgreSQL, named by the typed test config
-//! (`zeroship_core::config::test_database_url`) - `PG_TEST_URL` or the
-//! generated overlay `deploy/ops/zeroship.test.toml`. It FAILS rather than
-//! skips without one, for the same reason `mask_flip` does: a skipping run of a
-//! privilege suite is indistinguishable from a passing one.
-//!
-//! ROLES ARE CLUSTER-GLOBAL, not per-database, so the role name carries a
-//! random suffix and is dropped on the way out. A leftover role from an earlier
-//! run would otherwise fail the next one with `42710 role already exists` -
-//! which has previously been mistaken for a code regression.
-//!
-//! ```text
-//! cargo test -p zeroship-data-v8 --features test-helpers \
-//!   --test test_helpers -- --test-threads=1 column_grants::
-//! ```
+//! PostgreSQL comes from an owned testcontainer. Its roles and schemas are
+//! isolated from other tests and released with the server.
+//! Run: `cargo xtask test data --filter 'test(column_grants::)'`
 
 // `schema_fixture` is declared once by `tests/test_helpers.rs`, the entry file
 // this module hangs off; its header says why a second declaration here would be
@@ -98,15 +86,13 @@ fn people_schema() -> Value {
     })
 }
 
-fn test_url() -> String {
-    zeroship_core::config::test_database_url()
-}
+
 
 async fn connect(url: &str) -> Client {
     let (client, connection) = compio_postgres::connect(url, NoTls)
         .await
         .unwrap_or_else(|e| {
-            panic!("the column-grant suite requires a reachable server at PG_TEST_URL: {e}")
+            panic!("the column-grant suite could not connect to its PostgreSQL testcontainer: {e}")
         });
     compio::runtime::spawn(async move {
         let _ = connection.run().await;
@@ -531,7 +517,8 @@ const SINGLE_ROW_VERBS: usize = 4;
 /// projected verb. Its sole table privilege is the unavoidable DELETE grant.
 #[compio::test]
 async fn column_scoped_reads_complete_every_projected_write_verb() {
-    let url = test_url();
+    let postgres = crate::support::postgres::Postgres::start();
+    let url = postgres.url();
     let admin = connect(&url).await;
     println!(
         "column_grants oracle: server_version_num={}",
@@ -635,7 +622,8 @@ async fn column_scoped_reads_complete_every_projected_write_verb() {
 /// it, the pass is attributable to the projection.
 #[compio::test]
 async fn the_same_verbs_are_refused_outright_when_the_returning_clause_stars() {
-    let url = test_url();
+    let postgres = crate::support::postgres::Postgres::start();
+    let url = postgres.url();
     let admin = connect(&url).await;
     let suffix = unique_suffix();
     let (app, role) = fixture(&admin, &suffix).await;
@@ -706,7 +694,8 @@ async fn the_same_verbs_are_refused_outright_when_the_returning_clause_stars() {
 /// that privilege grants no read access to `ctid` or to the withheld column.
 #[compio::test]
 async fn the_single_row_verbs_succeed_without_ctid_access() {
-    let url = test_url();
+    let postgres = crate::support::postgres::Postgres::start();
+    let url = postgres.url();
     let admin = connect(&url).await;
     let suffix = unique_suffix();
     let (app, role) = fixture(&admin, &suffix).await;
@@ -781,7 +770,8 @@ async fn the_single_row_verbs_succeed_without_ctid_access() {
 /// `ctid`.
 #[compio::test]
 async fn bounded_data_plan_writes_succeed_with_column_scoped_reads() {
-    let url = test_url();
+    let postgres = crate::support::postgres::Postgres::start();
+    let url = postgres.url();
     let admin = connect(&url).await;
     let suffix = unique_suffix();
     let (app, role) = fixture(&admin, &suffix).await;

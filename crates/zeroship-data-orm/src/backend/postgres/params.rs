@@ -212,8 +212,9 @@ mod tests {
 
     #[compio::test]
     async fn native_values_round_trip_through_postgres() {
+        let postgres = crate::postgres_fixture::Postgres::start();
         let (client, connection) = compio_postgres::connect(
-            &zeroship_core::config::test_database_url(),
+            &postgres.url(),
             compio_postgres::NoTls,
         )
         .await
@@ -246,9 +247,10 @@ mod tests {
     }
     #[compio::test]
     async fn json_filter_literals_are_not_encoded_as_strings() {
+        let postgres = crate::postgres_fixture::Postgres::start();
         use zeroship_data_sql::{compile, value};
         let (client, connection) = compio_postgres::connect(
-            &zeroship_core::config::test_database_url(),
+            &postgres.url(),
             compio_postgres::NoTls,
         )
         .await

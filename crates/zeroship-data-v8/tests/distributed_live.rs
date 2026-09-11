@@ -218,20 +218,6 @@ const EVENTS_INDEX_DDL: [&str; 3] = [
 /// two `.replace` call sites would each raise it.
 const APP_SCHEMA_SLOT: &str = "APP_SCHEMA";
 
-/// The database this target dials, or a panic naming the provisioner.
-///
-/// It used to fall back to `127.0.0.1:5440/zeroship` -- the SHARED platform
-/// database on the dev cluster, named here and nowhere the harness could see.
-/// `crates/zeroship-core/src/config/test_overlay.rs` cited this file by name as the one
-/// call site that "substitutes a default"; it no longer does.
-fn pg_url() -> String {
-    // Single funnel for this binary: without a subscriber the runtime's
-    // sanitization rail leaves every dispatch failure as a bare
-    // {"message":"internal error"}. No-op unless RUST_LOG is set.
-    support::init_test_tracing();
-    zeroship_core::config::test_database_url()
-}
-
 fn runtime_for(
     url: &str,
     app_uuid: uuid::Uuid,
@@ -846,7 +832,9 @@ async fn drop_app_role(pool: &Pool, app_id: &str) -> Result<(), String> {
 #[test]
 fn db_live_stream_crosses_relay_and_v8_isolates_without_worker_replication() {
     init_v8();
-    let url = pg_url();
+    support::init_test_tracing();
+    let postgres = crate::support::postgres::Postgres::start();
+    let url = postgres.url();
     let app_uuid = uuid::Uuid::new_v4();
     let app_id = app_uuid.to_string();
     let publication = zeroship_core::replication_names::publication_name(&app_id).unwrap();
@@ -858,7 +846,7 @@ fn db_live_stream_crosses_relay_and_v8_isolates_without_worker_replication() {
             .await
             .unwrap_or_else(|error| {
                 panic!(
-                    "distributed live tests require PostgreSQL at {url}; start it with `docker compose -f deploy/compose/docker-compose.yml up -d postgres`: {error}"
+                    "could not connect to the distributed live PostgreSQL fixture at {url}: {error}"
                 )
             });
         compio::runtime::spawn(async move {

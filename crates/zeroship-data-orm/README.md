@@ -162,9 +162,8 @@ cargo test -p zeroship-data-orm --lib
 cargo test -p zeroship-data-orm --test derive_contract
 ```
 
-The engine suite requires PostgreSQL; an unavailable server fails the run.
-The live PostgreSQL round trip uses the repository's typed test database
-configuration (`PG_TEST_URL` can override it):
+The engine suite starts PostgreSQL through an owned testcontainer. Docker is
+required; startup failure fails the test. No external database URL is needed:
 
 ```sh
 cargo test -p zeroship-data-orm --lib orm::tests::postgres_native_models_round_trip

@@ -1,0 +1,2 @@
+CREATE EXTENSION vector;
+CREATE EXTENSION postgis;

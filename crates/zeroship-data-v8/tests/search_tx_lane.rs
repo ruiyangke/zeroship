@@ -33,17 +33,9 @@
 //!
 //! # Run it
 //!
-//! Needs a live PostgreSQL with **both** `vector` and `postgis`, named by
-//! `PG_TEST_URL` or by the overlay (`deploy/ops/zeroship.test.toml`) - the same
-//! server `search_ir_live` documents. It FAILS rather than skips when the
-//! server is unreachable or an extension cannot be created: a skipping run of a
-//! lane suite is indistinguishable from a passing one.
-//!
-//! ```text
-//! PG_TEST_URL=postgres://postgres:postgres@127.0.0.1:5478/postgres \
-//!   cargo test -p zeroship-data-v8 --features test-helpers \
-//!     --test test_helpers -- --test-threads=1 search_tx_lane::
-//! ```
+//! PostgreSQL comes from an owned testcontainer with vector and PostGIS.
+//! Docker and successful fixture startup are required.
+//! Run: `cargo xtask test data --filter 'test(search_tx_lane::)'`
 
 // `support` and `schema_fixture` are declared once by `tests/test_helpers.rs`,
 // the entry file this module hangs off; its header says why a second declaration
@@ -63,14 +55,13 @@ use zeroship_data_sql::value::{Value, value};
 use zeroship_data_sql::compile::SqlDialect;
 use zeroship_data_orm::tx_route::{CapturedRoute, TxRoute};
 
-fn test_url() -> String {
-    zeroship_core::config::test_database_url()
-}
+
 
 /// Connect, or fail the test. Deliberately NOT a skip, for the reason in the
 /// module header.
-async fn require_pg() -> String {
-    let url = test_url();
+async fn require_pg() -> (crate::support::postgres::Postgres, String) {
+    let postgres = crate::support::postgres::Postgres::start();
+    let url = postgres.url();
     match compio_postgres::connect(&url, NoTls).await {
         Ok((client, connection)) => {
             compio::runtime::spawn(async move {
@@ -78,10 +69,10 @@ async fn require_pg() -> String {
             })
             .detach();
             drop(client);
-            url
+            (postgres, url)
         }
         Err(e) => {
-            panic!("the search-tx-lane suite requires a reachable server at PG_TEST_URL: {e}")
+            panic!("the search-tx-lane suite could not connect to its PostgreSQL testcontainer: {e}")
         }
     }
 }
@@ -102,8 +93,7 @@ async fn require_extension(pool: &Rc<Pool>, extension: &str) {
         .unwrap_or_else(|e| {
             panic!(
                 "the search-tx-lane suite needs the `{extension}` extension and the server \
-                 refused to create it: {e}. Point PG_TEST_URL at a server that has both \
-                 `vector` and `postgis` (e.g. pgvector/pgvector:pg17 with postgis available)."
+                 refused to create it: {e}. Check tests/fixtures/postgres/Dockerfile."
             )
         });
 }
@@ -221,7 +211,7 @@ fn code_of(err: &DbError) -> String {
 /// a fresh pooled checkout that cannot see it.
 #[compio::test]
 async fn a_vector_search_inside_a_transaction_sees_the_row_that_transaction_inserted() {
-    let url = require_pg().await;
+    let (_postgres, url) = require_pg().await;
     let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
     require_extension(&pool, "vector").await;
 
@@ -323,7 +313,7 @@ async fn a_vector_search_inside_a_transaction_sees_the_row_that_transaction_inse
 ///
 #[compio::test]
 async fn a_spatial_near_inside_a_transaction_sees_the_row_that_transaction_inserted() {
-    let url = require_pg().await;
+    let (_postgres, url) = require_pg().await;
     let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
     require_extension(&pool, "postgis").await;
 

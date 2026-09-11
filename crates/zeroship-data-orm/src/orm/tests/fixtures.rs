@@ -5,6 +5,7 @@ pub(super) struct CollectionFixture {
     pub database: Database,
     pub sqlite_file: Option<std::path::PathBuf>,
     directory: Option<tempfile::TempDir>,
+    server: Option<crate::postgres_fixture::Postgres>,
     postgres: Option<(
         Rc<crate::backend::postgres::PostgresBackend>,
         String,
@@ -47,6 +48,7 @@ impl CollectionFixture {
             sqlite_file: Some(file),
             directory: Some(directory),
             postgres: None,
+            server: None,
         }
     }
 
@@ -59,10 +61,11 @@ impl CollectionFixture {
         fields: Value,
         key_source: LocalKeySource,
     ) -> Self {
+        let server = crate::postgres_fixture::Postgres::start();
         crate::reset_engine_for_tests();
         let backend = Rc::new(
             crate::backend::postgres::PostgresBackend::connect(
-                &zeroship_core::config::test_database_url(),
+                &server.url(),
                 4,
                 key_source,
             )
@@ -112,6 +115,7 @@ impl CollectionFixture {
             sqlite_file: None,
             directory: None,
             postgres: Some((backend, schema, role)),
+            server: Some(server),
         }
     }
 
@@ -120,6 +124,7 @@ impl CollectionFixture {
             database,
             directory,
             postgres,
+            server,
             ..
         } = self;
         drop(database);
@@ -138,6 +143,7 @@ impl CollectionFixture {
                 .unwrap();
         }
         drop(directory);
+        drop(server);
     }
 }
 

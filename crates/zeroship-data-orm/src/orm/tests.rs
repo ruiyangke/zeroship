@@ -176,10 +176,11 @@ async fn sqlite_search_values_round_trip_through_the_rust_orm() {
 
 #[compio::test]
 async fn postgres_native_models_round_trip() {
+    let postgres = crate::postgres_fixture::Postgres::start();
     crate::reset_engine_for_tests();
     let backend = Rc::new(
         zeroship_data_orm::backend::postgres::PostgresBackend::connect(
-            &zeroship_core::config::test_database_url(),
+            &postgres.url(),
             4,
             LocalKeySource::EnvVar,
         )
@@ -213,7 +214,7 @@ async fn postgres_native_models_round_trip() {
     let db = Database::connect(
         binding,
         crate::ConnectOptions::new(
-            zeroship_core::config::test_database_url(),
+            postgres.url(),
             LocalKeySource::EnvVar,
         ),
         vec![("posts".into(), <posts::Entity as Entity>::schema().clone())],

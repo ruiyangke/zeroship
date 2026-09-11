@@ -652,24 +652,16 @@ mod live_reserved_sweep_tests {
     // notice, because that command skips a target whose feature is off.
     use crate::backend::pg_session_sql::tx_session_setup_sql;
 
-    /// The DSN comes from typed config
-    /// (`zeroship_core::config::test_database_url`, backed by the overlay at
-    /// `deploy/ops/zeroship.test.toml` or the pre-existing `PG_TEST_URL`
-    /// override). This module declares no environment variable of its own and
-    /// calls no `set_var`.
-    fn test_dsn() -> String {
-        zeroship_core::config::test_database_url()
-    }
-
-    async fn admin_client() -> Client {
-        let (client, conn) = compio_postgres::connect(&test_dsn(), NoTls)
+    async fn admin_client() -> (crate::postgres_fixture::Postgres, Client) {
+        let postgres = crate::postgres_fixture::Postgres::start();
+        let (client, conn) = compio_postgres::connect(&postgres.url(), NoTls)
             .await
             .expect("connect to the plugin-db test database");
         compio::runtime::spawn(async move {
             let _ = conn.run().await;
         })
         .detach();
-        client
+        (postgres, client)
     }
 
     /// A scratch app id with a unique prefix - this server is shared.
@@ -801,12 +793,12 @@ mod live_reserved_sweep_tests {
     }
 
     async fn assert_audit_verb_refused(what: &str, statement: impl FnOnce(&str) -> String) {
-        let admin = admin_client().await;
+        let (postgres, admin) = admin_client().await;
         let app = scratch_app();
         teardown(&admin, &app).await;
         provision_scratch_app(&admin, &app).await;
 
-        let pool = compio_postgres::Pool::connect(&test_dsn(), 2)
+        let pool = compio_postgres::Pool::connect(&postgres.url(), 2)
             .await
             .expect("pool for ensure_per_app_role");
         ensure_per_app_role(&pool, &app)
@@ -828,7 +820,7 @@ mod live_reserved_sweep_tests {
 
     #[compio::test]
     async fn a_wrong_kind_audit_relation_keeps_no_runtime_privileges() {
-        let admin = admin_client().await;
+        let (postgres, admin) = admin_client().await;
         let app = scratch_app();
         teardown(&admin, &app).await;
         admin
@@ -841,7 +833,7 @@ mod live_reserved_sweep_tests {
             .await
             .expect("create a wrong-kind relation at the reserved audit name");
 
-        let pool = compio_postgres::Pool::connect(&test_dsn(), 2)
+        let pool = compio_postgres::Pool::connect(&postgres.url(), 2)
             .await
             .expect("pool for ensure_per_app_role");
         ensure_per_app_role(&pool, &app)
@@ -873,7 +865,7 @@ mod live_reserved_sweep_tests {
 
     #[compio::test]
     async fn a_malformed_audit_table_fails_closed_without_runtime_privileges() {
-        let admin = admin_client().await;
+        let (postgres, admin) = admin_client().await;
         let app = scratch_app();
         teardown(&admin, &app).await;
         admin
@@ -886,7 +878,7 @@ mod live_reserved_sweep_tests {
             .await
             .expect("create an audit table without its required serial sequence");
 
-        let pool = compio_postgres::Pool::connect(&test_dsn(), 2)
+        let pool = compio_postgres::Pool::connect(&postgres.url(), 2)
             .await
             .expect("pool for ensure_per_app_role");
         let outcome = ensure_per_app_role(&pool, &app).await;
@@ -928,12 +920,12 @@ mod live_reserved_sweep_tests {
     /// measured the loss and not the gain.
     #[compio::test]
     async fn the_runtime_role_can_append_to_the_audit_log_after_the_sweep() {
-        let admin = admin_client().await;
+        let (postgres, admin) = admin_client().await;
         let app = scratch_app();
         teardown(&admin, &app).await;
         let role = provision_scratch_app(&admin, &app).await;
 
-        let pool = compio_postgres::Pool::connect(&test_dsn(), 2)
+        let pool = compio_postgres::Pool::connect(&postgres.url(), 2)
             .await
             .expect("pool for ensure_per_app_role");
         ensure_per_app_role(&pool, &app)
@@ -1075,12 +1067,12 @@ mod live_reserved_sweep_tests {
     /// quietly turning this control into a duplicate of the case above.
     #[compio::test]
     async fn without_the_exemption_the_sweep_takes_the_runtime_role_insert() {
-        let admin = admin_client().await;
+        let (postgres, admin) = admin_client().await;
         let app = scratch_app();
         teardown(&admin, &app).await;
         let role = provision_scratch_app(&admin, &app).await;
 
-        let pool = compio_postgres::Pool::connect(&test_dsn(), 2)
+        let pool = compio_postgres::Pool::connect(&postgres.url(), 2)
             .await
             .expect("pool for ensure_per_app_role");
         ensure_per_app_role(&pool, &app)
