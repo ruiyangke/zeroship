@@ -33,6 +33,8 @@ enum Task {
 
 #[derive(Subcommand)]
 enum Suite {
+    /// Check workspace dependency and feature declarations.
+    Repository,
     /// Run workflow crates, runtime, control-plane, SDK and example tests.
     Workflow,
     /// Run storage crate tests and the examples' Vitest/Playwright suites.
@@ -54,6 +56,18 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     let result = match args.command {
+        Task::Test {
+            suite: Suite::Repository,
+        } => checked(
+            cargo().args([
+                "test",
+                "--manifest-path",
+                "xtask/Cargo.toml",
+                "--test",
+                "repository_architecture",
+            ]),
+            "repository architecture",
+        ),
         Task::Test {
             suite: Suite::Workflow,
         } => workflow::run(),

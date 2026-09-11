@@ -9,6 +9,7 @@
 //! lifecycle live in the ORM. This adapter owns the isolate integration.
 
 #![recursion_limit = "256"]
+#![deny(private_interfaces, private_bounds)]
 
 use std::rc::Rc;
 use zeroship_data_orm::connection::ConnectionFactory;

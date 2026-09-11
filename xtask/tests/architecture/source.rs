@@ -51,7 +51,7 @@ fn cfg(meta: &Meta) -> Truth {
     }
 }
 
-fn production(attrs: &[Attribute]) -> bool {
+pub(super) fn production(attrs: &[Attribute]) -> bool {
     attrs.iter().all(|attr| {
         if attr.path().is_ident("cfg") {
             cfg(&attr.parse_args::<Meta>().unwrap()) != Truth::No

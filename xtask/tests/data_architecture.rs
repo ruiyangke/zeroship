@@ -1,5 +1,7 @@
 #[path = "architecture/boundaries.rs"]
 mod boundaries;
+#[path = "architecture/contracts.rs"]
+mod contracts;
 #[path = "architecture/corpus.rs"]
 mod corpus;
 #[path = "architecture/posture.rs"]

@@ -13,6 +13,7 @@
 // attribute for the same reason; it is a compiler resource limit, not a
 // correctness guard.
 #![recursion_limit = "256"]
+#![deny(private_interfaces, private_bounds)]
 
 extern crate self as zeroship_data_orm;
 
