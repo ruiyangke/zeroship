@@ -13,15 +13,19 @@
 //! so the large test really does stream.
 //!
 //! Run explicitly:
-//!   `cargo test -p zeroship-plugin-storage --features s3 --test backend_parity -- --nocapture`
+//!   `cargo test -p zeroship-storage --features s3 --test backend_parity -- --nocapture`
 
 #![allow(clippy::future_not_send)]
 
-use std::process::Command;
+#[cfg(feature = "s3")]
+#[path = "../../../tests/fixtures/s3.rs"]
+mod s3_fixture;
+use zeroship_storage::StorageError;
+#[cfg(feature = "s3")]
 use std::time::Duration;
 
 use bytes::Bytes;
-use zeroship_plugin_storage::backend::{
+use zeroship_storage::backend::{
     Backend, BoxByteStream, ChunkResult, ChunkSource, ListPage, ListRequest, LocalFs,
 };
 
@@ -465,7 +469,7 @@ async fn run_large_stream(backend: &dyn Backend, label: &str) {
 
 use std::time::SystemTime;
 
-use zeroship_plugin_storage::backend::ObjectMeta;
+use zeroship_storage::backend::ObjectMeta;
 
 /// A fake backend whose `get_stream` reports a chosen `advertised_size` but
 /// only ever yields `body` bytes. Lets the C2 test assert both the
@@ -492,9 +496,9 @@ impl Backend for LyingSizeBackend {
         _app_id: &str,
         _bucket: &str,
         _key: &str,
-        _body: zeroship_plugin_storage::backend::BoxChunkSource,
+        _body: zeroship_storage::backend::BoxChunkSource,
         _content_type: Option<&str>,
-    ) -> Result<u64, String> {
+    ) -> Result<u64, StorageError> {
         Ok(0)
     }
 
@@ -503,7 +507,7 @@ impl Backend for LyingSizeBackend {
         _app_id: &str,
         _bucket: &str,
         _key: &str,
-    ) -> Result<Option<(ObjectMeta, BoxByteStream)>, String> {
+    ) -> Result<Option<(ObjectMeta, BoxByteStream)>, StorageError> {
         let meta = ObjectMeta {
             size: self.advertised_size,
             content_type: None,
@@ -513,11 +517,11 @@ impl Backend for LyingSizeBackend {
         Ok(Some((meta, stream)))
     }
 
-    async fn delete(&self, _: &str, _: &str, _: &str) -> Result<bool, String> {
+    async fn delete(&self, _: &str, _: &str, _: &str) -> Result<bool, StorageError> {
         Ok(false)
     }
 
-    async fn list(&self, _: &str, _: &str, _: ListRequest<'_>) -> Result<ListPage, String> {
+    async fn list(&self, _: &str, _: &str, _: ListRequest<'_>) -> Result<ListPage, StorageError> {
         Ok(ListPage { entries: Vec::new(), cursor: None })
     }
 }
@@ -535,7 +539,7 @@ fn buffered_get_rejects_oversized_content_length() {
             .get(APP, BUCKET, "k", cap)
             .await
             .expect_err("oversized Content-Length must be rejected, not buffered");
-        assert!(err.contains("exceeds buffered-get cap"), "unexpected error: {err}");
+        assert!(err.to_string().contains("exceeds buffered-get cap"), "unexpected error: {err}");
 
         // (b) Advertised size lies small but the body streams past the cap →
         // the running-total guard rejects it.
@@ -547,7 +551,7 @@ fn buffered_get_rejects_oversized_content_length() {
             .get(APP, BUCKET, "k", cap)
             .await
             .expect_err("body exceeding the cap must be rejected mid-stream");
-        assert!(err.contains("buffered-get cap"), "unexpected error: {err}");
+        assert!(err.to_string().contains("buffered-get cap"), "unexpected error: {err}");
 
         // Under-cap object still succeeds.
         let ok = LyingSizeBackend { advertised_size: 5, body: b"hello".to_vec() };
@@ -583,185 +587,25 @@ fn localfs_parity_and_large_stream() {
 // S3 (MinIO) leg — Docker-gated, self-contained container
 // ---------------------------------------------------------------------------
 
-const MINIO_ACCESS: &str = "minioadmin";
-const MINIO_SECRET: &str = "minioadmin";
-const MINIO_CONTAINER: &str = "zs-plugin-storage-minio-test";
-const MINIO_PORT: u16 = 9113;
-const MINIO_BUCKET: &str = "zs-storage-test";
-
-/// Refuse the run unless a docker daemon answers `docker info`.
-///
-/// # Panics
-///
-/// When docker is absent or its daemon is not running. It used to announce a
-/// skip, so the S3 half of a parity suite - the half with a second
-/// implementation in it - reported the same green on a machine with no docker
-/// as on one that ran it.
-fn require_docker() {
-    let answered = Command::new("docker")
-        .args(["info"])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success());
-    assert!(
-        answered,
-        "Docker is unavailable, and the S3 half of this parity suite requires it.\n\
-         \n\
-         \x20 backend: MinIO (S3), in a container this test starts itself\n\
-         \x20 probe:   `docker info` did not succeed\n\
-         \n\
-         Nothing in this repository provisions this container - the test does it\n\
-         inline - so what is missing is docker itself. Install it, start the\n\
-         daemon, and check that your user can reach it:\n\
-         \x20 docker info\n\
-         \n\
-         The suite then pulls `minio/minio` on first run, so the first run needs\n\
-         network access to the registry.\n\
-         \n\
-         There is no environment variable that makes this a skip. A backend this\n\
-         suite cannot reach is a failed run, not a green one."
-    );
-}
-
-fn minio_cleanup() {
-    let _ = Command::new("docker")
-        .args(["rm", "-f", MINIO_CONTAINER])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
-}
-
-/// Start the MinIO container this suite's S3 leg runs against.
-///
-/// # Panics
-///
-/// When the container cannot be started, or never becomes ready. Both used to
-/// announce a skip and return `false`, and the caller returned on `false` - so
-/// a docker daemon that WAS present but refused the run, or a MinIO that never
-/// came up, produced the same pass as a successful S3 parity run.
-fn start_minio() {
-    minio_cleanup();
-    let run = Command::new("docker")
-        .args([
-            "run",
-            "-d",
-            "--name",
-            MINIO_CONTAINER,
-            "-p",
-            &format!("{MINIO_PORT}:9000"),
-            "-e",
-            &format!("MINIO_ROOT_USER={MINIO_ACCESS}"),
-            "-e",
-            &format!("MINIO_ROOT_PASSWORD={MINIO_SECRET}"),
-            "minio/minio",
-            "server",
-            "/data",
-        ])
-        .status();
-    assert!(
-        matches!(run, Ok(s) if s.success()),
-        "The MinIO container this suite needs would not start.\n\
-         \n\
-         \x20 backend:   MinIO (S3)\n\
-         \x20 image:     minio/minio\n\
-         \x20 container: {MINIO_CONTAINER}\n\
-         \x20 port:      {MINIO_PORT} on the host, mapped to 9000\n\
-         \n\
-         `docker run` failed. The usual causes, in the order worth checking:\n\
-         \x20 docker ps -a --filter name={MINIO_CONTAINER}   # a leftover container\n\
-         \x20 ss -lptn 'sport = :{MINIO_PORT}'                    # the port is taken\n\
-         \x20 docker pull minio/minio                       # the image is not local\n\
-         \n\
-         Nothing in this repository provisions it; the test starts and removes\n\
-         it itself, so there is no script to run - fix the daemon and re-run.\n\
-         \n\
-         There is no environment variable that makes this a skip."
-    );
-    for _ in 0..40 {
-        std::thread::sleep(Duration::from_millis(500));
-        let alias = Command::new("docker")
-            .args([
-                "exec",
-                MINIO_CONTAINER,
-                "mc",
-                "alias",
-                "set",
-                "local",
-                "http://127.0.0.1:9000",
-                MINIO_ACCESS,
-                MINIO_SECRET,
-            ])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-        if matches!(alias, Ok(s) if s.success()) {
-            let mb = Command::new("docker")
-                .args(["exec", MINIO_CONTAINER, "mc", "mb", "-p", &format!("local/{MINIO_BUCKET}")])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status();
-            if matches!(mb, Ok(s) if s.success()) {
-                return;
-            }
-        }
-    }
-    minio_cleanup();
-    panic!(
-        "The MinIO container started but never became usable.\n\
-         \n\
-         \x20 backend:   MinIO (S3)\n\
-         \x20 container: {MINIO_CONTAINER} (already removed, so it is not in the way)\n\
-         \x20 endpoint:  http://127.0.0.1:{MINIO_PORT}\n\
-         \x20 bucket:    {MINIO_BUCKET}\n\
-         \n\
-         The readiness loop ran to its ceiling without both `mc alias set` and\n\
-         `mc mb` succeeding inside the container. Re-run it by hand to see what\n\
-         MinIO said:\n\
-         \x20 docker run -d --name {MINIO_CONTAINER} -p {MINIO_PORT}:9000 \\\n\
-         \x20   -e MINIO_ROOT_USER={MINIO_ACCESS} -e MINIO_ROOT_PASSWORD={MINIO_SECRET} \\\n\
-         \x20   minio/minio server /data\n\
-         \x20 docker logs {MINIO_CONTAINER}\n\
-         \n\
-         An `mc` that is missing from the image is the one cause this loop\n\
-         cannot outwait; the rest are slow starts, which a re-run clears.\n\
-         \n\
-         There is no environment variable that makes this a skip."
-    )
-}
-
 #[cfg(feature = "s3")]
-fn make_s3() -> zeroship_plugin_storage::S3 {
-    make_s3_tuned(zeroship_plugin_storage::S3UploadTuning::DEFAULTS)
+fn make_s3(minio: &s3_fixture::Minio) -> zeroship_storage::S3 {
+    make_s3_tuned(minio, zeroship_storage::S3UploadTuning::DEFAULTS)
 }
 
 /// The same MinIO-backed backend with the upload knobs stated at the call
 /// site. Tests that need a non-default concurrency or stream ceiling pass one
 /// here; nothing plants a process-global environment variable to do it.
 #[cfg(feature = "s3")]
-fn make_s3_tuned(
-    tuning: zeroship_plugin_storage::S3UploadTuning,
-) -> zeroship_plugin_storage::S3 {
-    use compio_s3::{S3Config, S3Credentials};
-    let url = format!(
-        "s3://{MINIO_BUCKET}/it?provider=minio&endpoint=http://127.0.0.1:{MINIO_PORT}&region=us-east-1&style=path&dev_http=true&checksum=none"
-    );
-    let cfg = S3Config::parse_url(&url).expect("parse minio url");
-    zeroship_plugin_storage::S3::with_tuning(
-        cfg,
-        S3Credentials::new(MINIO_ACCESS, MINIO_SECRET, None),
-        tuning,
-    )
+fn make_s3_tuned(minio: &s3_fixture::Minio, tuning: zeroship_storage::S3UploadTuning) -> zeroship_storage::S3 {
+    zeroship_storage::S3::with_tuning(minio.config("it"), minio.credentials(), tuning)
 }
 
 #[cfg(feature = "s3")]
 #[test]
 fn s3_parity_and_large_stream() {
-    require_docker();
-    start_minio();
+    let minio = s3_fixture::Minio::start();
 
-    let result = std::panic::catch_unwind(|| {
-        let backend = make_s3();
+    let backend = make_s3(&minio);
         compio::runtime::Runtime::new()
             .expect("compio runtime")
             .block_on(async {
@@ -772,39 +616,29 @@ fn s3_parity_and_large_stream() {
                 // Parallel multipart: a many-part object with concurrency > 1
                 // round-trips byte-exact (parts sorted by number before
                 // complete, despite finishing out of order).
-                run_s3_parallel_many_parts().await;
+                run_s3_parallel_many_parts(&minio).await;
                 // HIGH-2: a SLOW producer (real inter-chunk delays spanning
                 // several parts) must still complete byte-exact — the select-
                 // overlap loop drives the in-flight PUTs while the producer
                 // stalls, where the old gate-only-drain loop would starve them.
-                run_s3_slow_producer_overlap().await;
+                run_s3_slow_producer_overlap(&minio).await;
                 // C1: an error mid-multipart-upload must explicitly abort the
                 // upload (no orphaned parts, no process abort).
-                run_s3_mid_upload_abort(&backend).await;
+                run_s3_mid_upload_abort(&backend, &minio).await;
                 // C1 under concurrency: an injected error with N part-uploads
                 // in flight must still abort — no orphaned multipart upload.
-                run_s3_parallel_mid_upload_abort().await;
+                run_s3_parallel_mid_upload_abort(&minio).await;
                 // H2: a stream over the part/size limit fails fast + aborts.
-                run_s3_part_limit_fast_fail().await;
+                run_s3_part_limit_fast_fail(&minio).await;
             });
-    });
 
-    minio_cleanup();
-    if let Err(e) = result {
-        std::panic::resume_unwind(e);
-    }
 }
 
 /// A raw `compio_s3::S3Client` over the same MinIO bucket, for asserting that an
 /// aborted multipart leaves no orphaned upload.
 #[cfg(feature = "s3")]
-fn s3_raw_client() -> compio_s3::S3Client {
-    use compio_s3::{S3Config, S3Credentials};
-    let url = format!(
-        "s3://{MINIO_BUCKET}/it?provider=minio&endpoint=http://127.0.0.1:{MINIO_PORT}&region=us-east-1&style=path&dev_http=true&checksum=none"
-    );
-    let cfg = S3Config::parse_url(&url).expect("parse minio url");
-    compio_s3::S3Client::new(cfg, S3Credentials::new(MINIO_ACCESS, MINIO_SECRET, None))
+fn s3_raw_client(minio: &s3_fixture::Minio) -> compio_s3::S3Client {
+    compio_s3::S3Client::new(minio.config("it"), minio.credentials())
 }
 
 /// A `ChunkSource` that yields `before_err` bytes (in 64 KiB chunks) and then
@@ -825,7 +659,7 @@ impl ChunkSource for ErrAfterChunks {
                 return None;
             }
             self.errored = true;
-            return Some(Err("injected mid-upload chunk failure".to_string()));
+            return Some(Err(StorageError::Stream("injected mid-upload chunk failure".to_string())));
         }
         let n = self.remaining.min(64 * 1024);
         self.remaining -= n;
@@ -881,12 +715,12 @@ impl ChunkSource for SlowChunks {
 /// between dispatches; the new select-overlap loop drives the producer and the
 /// in-flight PUTs concurrently so a slow-but-progressing source finishes.
 #[cfg(feature = "s3")]
-async fn run_s3_slow_producer_overlap() {
-    use zeroship_plugin_storage::S3UploadTuning;
+async fn run_s3_slow_producer_overlap(minio: &s3_fixture::Minio) {
+    use zeroship_storage::S3UploadTuning;
     const PART_SIZE: usize = 8 * 1024 * 1024;
 
     // Concurrency 4 so multiple PUTs are in flight while the producer stalls.
-    let backend = make_s3_tuned(S3UploadTuning {
+    let backend = make_s3_tuned(minio, S3UploadTuning {
         concurrency: 4,
         ..S3UploadTuning::DEFAULTS
     });
@@ -934,7 +768,7 @@ async fn run_s3_slow_producer_overlap() {
 /// C1 regression (plugin-storage `S3::put_stream`): a mid-upload error must
 /// abort the multipart explicitly — no panic/process-abort, no orphaned upload.
 #[cfg(feature = "s3")]
-async fn run_s3_mid_upload_abort(backend: &zeroship_plugin_storage::S3) {
+async fn run_s3_mid_upload_abort(backend: &zeroship_storage::S3, minio: &s3_fixture::Minio) {
     // 8 MiB part size; yield 1.25 parts then error → create_multipart + ≥1
     // upload_part have run before the failure.
     const PART_SIZE: usize = 8 * 1024 * 1024;
@@ -944,7 +778,7 @@ async fn run_s3_mid_upload_abort(backend: &zeroship_plugin_storage::S3) {
     let key_prefix = format!("{APP}/{BUCKET}/{obj_key}");
 
     // Precondition: the listing path is non-vacuous (it can see a live upload).
-    let raw = s3_raw_client();
+    let raw = s3_raw_client(minio);
     {
         let up = raw
             .create_multipart(&key_prefix, "application/octet-stream")
@@ -974,14 +808,14 @@ async fn run_s3_mid_upload_abort(backend: &zeroship_plugin_storage::S3) {
 /// H2 regression: a stream that would exceed the configured max object size
 /// fails fast (and the C1-style abort leaves no orphaned upload).
 #[cfg(feature = "s3")]
-async fn run_s3_part_limit_fast_fail() {
-    use zeroship_plugin_storage::S3UploadTuning;
+async fn run_s3_part_limit_fast_fail(minio: &s3_fixture::Minio) {
+    use zeroship_storage::S3UploadTuning;
     // Cap at 12 MiB so the first full 8 MiB part is flushed (creating a real
     // multipart upload) before the running total trips the cap - exercising the
     // fast-fail AND the C1 abort of an already-started upload. The ceiling is
     // an argument to this backend, so it binds THIS upload and nothing else in
     // the process.
-    let backend = make_s3_tuned(S3UploadTuning {
+    let backend = make_s3_tuned(minio, S3UploadTuning {
         max_stream_bytes: 12 * 1024 * 1024,
         ..S3UploadTuning::DEFAULTS
     });
@@ -994,12 +828,12 @@ async fn run_s3_part_limit_fast_fail() {
         .await;
     let err = res.expect_err("H2: oversized stream must fail fast");
     assert!(
-        err.contains("max stream size") || err.contains("part limit"),
+        err.to_string().contains("max stream size") || err.to_string().contains("part limit"),
         "H2: unexpected error: {err}"
     );
 
     // The fast-fail must still abort any started multipart upload (C1 path).
-    let raw = s3_raw_client();
+    let raw = s3_raw_client(minio);
     let key_prefix = format!("{APP}/{BUCKET}/{obj_key}");
     let uploads = raw
         .list_multipart_uploads(&key_prefix)
@@ -1017,13 +851,13 @@ async fn run_s3_part_limit_fast_fail() {
 /// mis-sorted or duplicated list makes `complete_multipart` reject the upload.
 /// (Pre-change this path was strictly sequential, so the sort line is new.)
 #[cfg(feature = "s3")]
-async fn run_s3_parallel_many_parts() {
-    use zeroship_plugin_storage::S3UploadTuning;
+async fn run_s3_parallel_many_parts(minio: &s3_fixture::Minio) {
+    use zeroship_storage::S3UploadTuning;
     const PART_SIZE: usize = 8 * 1024 * 1024;
 
     // Force 4-way concurrency explicitly so the test does not depend on the
     // default.
-    let backend = make_s3_tuned(S3UploadTuning {
+    let backend = make_s3_tuned(minio, S3UploadTuning {
         concurrency: 4,
         ..S3UploadTuning::DEFAULTS
     });
@@ -1073,11 +907,11 @@ async fn run_s3_parallel_many_parts() {
 /// other in-flight uploads are dropped/cancelled and no orphaned (billed)
 /// multipart upload remains listable.
 #[cfg(feature = "s3")]
-async fn run_s3_parallel_mid_upload_abort() {
-    use zeroship_plugin_storage::S3UploadTuning;
+async fn run_s3_parallel_mid_upload_abort(minio: &s3_fixture::Minio) {
+    use zeroship_storage::S3UploadTuning;
     const PART_SIZE: usize = 8 * 1024 * 1024;
 
-    let backend = make_s3_tuned(S3UploadTuning {
+    let backend = make_s3_tuned(minio, S3UploadTuning {
         concurrency: 4,
         ..S3UploadTuning::DEFAULTS
     });
@@ -1086,7 +920,7 @@ async fn run_s3_parallel_mid_upload_abort() {
     let key_prefix = format!("{APP}/{BUCKET}/{obj_key}");
 
     // Precondition: the listing path can see a live upload (non-vacuous check).
-    let raw = s3_raw_client();
+    let raw = s3_raw_client(minio);
     {
         let up = raw
             .create_multipart(&key_prefix, "application/octet-stream")

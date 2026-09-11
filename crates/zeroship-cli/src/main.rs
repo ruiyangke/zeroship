@@ -236,10 +236,7 @@ fn cmd_serve(args: &[String]) {
         zeroship_core::declared_env!(cli, "ZEROSHIP_STORAGE_URL", crate::ZeroshipCliConsumer)
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| "file://.zeroship/storage".to_string());
-    // `file://` is config ergonomics for a local path; strip the scheme so
-    // the parser sees a bare path. `s3://` falls through to the S3 leg.
-    let storage_arg = storage_url.strip_prefix("file://").unwrap_or(&storage_url);
-    let storage_cfg = match zeroship_plugin_storage::StorageBackendConfig::parse(storage_arg) {
+    let storage_cfg = match zeroship_storage::StorageBackendConfig::parse(&storage_url) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("[zeroship] invalid ZEROSHIP_STORAGE_URL: {e}");
@@ -247,9 +244,9 @@ fn cmd_serve(args: &[String]) {
         }
     };
     let storage_kind = storage_cfg.kind();
-    match zeroship_plugin_storage::build_backend(&storage_cfg) {
+    match zeroship_storage::StorageStore::open(&storage_cfg) {
         Ok(backend) => {
-            plugins.push(Arc::new(zeroship_plugin_storage::StoragePlugin::with_backend_and_meter(
+            plugins.push(Arc::new(zeroship_storage_v8::StorageBinding::new(
                 backend,
                 Some(Arc::clone(&dev_meter)),
             )));

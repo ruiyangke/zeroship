@@ -8,7 +8,7 @@
 import { env } from "zeroship";
 
 // ---------------------------------------------------------------------------
-// Native primitive shape — what the DbPlugin / StoragePlugin actually exposes
+// Native primitive shape — what the DbPlugin / StorageBinding actually exposes
 // on env.storage. All inputs/outputs are JSON strings; this SDK handles the
 // (de)serialization and base64 plumbing so user code works in native types.
 // ---------------------------------------------------------------------------
@@ -41,7 +41,7 @@ function getNativeStorage(): NativeStorage {
   if (!s) {
     throw new Error(
       "@zeroship/storage: env.storage not available — " +
-      "is the StoragePlugin registered on this runtime?"
+      "is the StorageBinding registered on this runtime?"
     );
   }
   return s;

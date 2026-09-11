@@ -243,7 +243,7 @@ if [ "$PUTC" = "200" ] && echo "$PUTB" | grep -q '"json"'; then
     fail "env.storage delete did not remove object (deleted=$DELED found-after=$GONE del=$DEL get=$GET2)"
   fi
 else
-  ERR="$(grep -iE 'env.storage|StoragePlugin|Cannot find module|storage' "$WORK/worker.log" | tail -1)"
+  ERR="$(grep -iE 'env.storage|StorageBinding|Cannot find module|storage' "$WORK/worker.log" | tail -1)"
   fail "env.storage gallery.put failed over /dispatch. HTTP $PUTC; err: ${ERR:-$PUTB}"
 fi
 

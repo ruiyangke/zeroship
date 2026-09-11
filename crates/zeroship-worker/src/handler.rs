@@ -1667,7 +1667,7 @@ pub(crate) mod tests {
     use ntex::web::{self, test};
     use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
     use zeroship_core::types::AppRuntimeLimits;
-    use zeroship_plugin_storage::StorageBackendConfig;
+    use zeroship_storage::StorageBackendConfig;
     use zeroship_runtime::init::init_v8;
 
     use super::*;

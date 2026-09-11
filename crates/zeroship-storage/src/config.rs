@@ -1,19 +1,9 @@
-//! `--storage-url` parsing + backend construction for `env.storage`.
+//! Backend selection shared by Rust hosts, the worker and the CLI.
 //!
-//! One grammar shared by the multi-node worker and the single-tenant
-//! `zeroship serve` CLI, mirroring the deploy blob store's `StoreUrl`
-//! (`crates/zeroship-bundle/src/blob_config.rs`):
-//!
-//! - `s3://bucket/prefix?region=…` → an `S3` backend over the bespoke
-//!   compio-native S3 client (hand-rolled SigV4, cyper transport, zero
-//!   tokio). Credentials resolve from the conventional AWS environment
-//!   variables. Requires the `s3` feature.
-//! - any other value → a bare local filesystem path → [`LocalFs`] (the dev
-//!   default, unchanged).
-//!
-//! This is the kernel wiring for the proposal's "env.storage" config section:
-//! `--storage-root` is gone; the worker / CLI parse `--storage-url` once and
-//! construct the matching `Backend` behind `StoragePlugin`.
+//! Bare paths and `file://` locations select the local filesystem. An
+//! `s3://` location selects the S3-compatible backend. Credentials resolve
+//! through declared AWS environment variables; code can inject a backend with
+//! explicit credentials through `StorageStore::from_backend`.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -34,11 +24,11 @@ pub enum StorageBackendConfig {
 #[derive(Debug, thiserror::Error)]
 pub enum StorageConfigError {
     /// The `s3://…` URL failed to parse/validate.
-    #[error("invalid s3:// storage-url: {0}")]
+    #[error("invalid storage location: {0}")]
     Url(String),
     /// An `s3://` URL was supplied but the crate was built without the `s3`
     /// feature, so no S3 backend exists to construct.
-    #[error("s3:// storage-url requires the plugin-storage `s3` feature")]
+    #[error("s3:// storage-url requires the zeroship-storage `s3` feature")]
     S3FeatureDisabled,
     /// S3 credentials were not resolvable from the environment.
     #[error("missing S3 credentials: {0}")]
@@ -55,6 +45,10 @@ impl StorageBackendConfig {
     /// parse/validate, or [`StorageConfigError::S3FeatureDisabled`] when an
     /// `s3://` URL is given but the `s3` feature is off.
     pub fn parse(raw: &str) -> Result<Self, StorageConfigError> {
+        let raw = raw.strip_prefix("file://").unwrap_or(raw);
+        if raw.is_empty() {
+            return Err(StorageConfigError::Url("location is empty".into()));
+        }
         if raw.starts_with("s3://") {
             #[cfg(feature = "s3")]
             {
@@ -66,6 +60,8 @@ impl StorageBackendConfig {
             {
                 Err(StorageConfigError::S3FeatureDisabled)
             }
+        } else if raw.contains("://") {
+            Err(StorageConfigError::Url("unsupported storage URL scheme".into()))
         } else {
             Ok(Self::Local(PathBuf::from(raw)))
         }
@@ -106,14 +102,14 @@ pub fn s3_credentials_from_env() -> Result<compio_s3::S3Credentials, StorageConf
     let access = zeroship_core::declared_env!(
         external,
         "AWS_ACCESS_KEY_ID",
-        crate::PluginStorageConsumer
+        crate::StorageConsumer
     )
         .filter(|v| !v.is_empty())
         .ok_or_else(|| StorageConfigError::Credentials("AWS_ACCESS_KEY_ID is unset".into()))?;
     let secret = zeroship_core::declared_env!(
         external,
         "AWS_SECRET_ACCESS_KEY",
-        crate::PluginStorageConsumer
+        crate::StorageConsumer
     )
         .filter(|v| !v.is_empty())
         .ok_or_else(|| {
@@ -122,7 +118,7 @@ pub fn s3_credentials_from_env() -> Result<compio_s3::S3Credentials, StorageConf
     let session = zeroship_core::declared_env!(
         external,
         "AWS_SESSION_TOKEN",
-        crate::PluginStorageConsumer
+        crate::StorageConsumer
     )
     .filter(|v| !v.is_empty());
     Ok(compio_s3::S3Credentials::new(access, secret, session))
@@ -164,6 +160,16 @@ mod tests {
         assert!(
             matches!(c, StorageBackendConfig::Local(p) if p == std::path::Path::new("/var/lib/zeroship/storage"))
         );
+    }
+
+    #[test]
+    fn file_urls_share_the_path_parser() {
+        for (url, path) in [("file:///var/lib/storage", "/var/lib/storage"), ("file://.zeroship/storage", ".zeroship/storage")] {
+            assert!(matches!(StorageBackendConfig::parse(url).unwrap(), StorageBackendConfig::Local(root) if root == std::path::Path::new(path)));
+        }
+        for invalid in ["", "file://", "https://storage", "redis://storage"] {
+            assert!(StorageBackendConfig::parse(invalid).is_err());
+        }
     }
 
     #[cfg(feature = "s3")]

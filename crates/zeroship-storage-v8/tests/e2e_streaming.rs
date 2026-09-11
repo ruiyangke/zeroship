@@ -35,7 +35,8 @@ use zeroship_runtime::{
     init_v8, EnvSnapshot, FetchOutcome, ModuleEntry, RequestCtx, Runtime, SettledFetch,
 };
 
-use zeroship_plugin_storage::{LocalFs, StoragePlugin};
+use zeroship_storage::{LocalFs, StorageStore};
+use zeroship_storage_v8::StorageBinding;
 
 // The app exercises the native streaming surface directly (NOT the SDK),
 // then self-asserts. A multi-chunk ReadableStream forces the upload read
@@ -161,7 +162,7 @@ fn run_app(app: &'static str) -> (u16, String) {
         let mut env_vars = HashMap::new();
         env_vars.insert("APP_ID".to_string(), "e2e_app".to_string());
 
-        let plugin: Arc<dyn NativePlugin> = Arc::new(StoragePlugin::local(&dir));
+        let plugin: Arc<dyn NativePlugin> = Arc::new(StorageBinding::new(StorageStore::from_backend(Arc::new(LocalFs::new(&dir))), None));
 
         let runtime = Runtime::builder()
             .modules(module(app))
@@ -228,7 +229,7 @@ fn e2e_storage_streaming_localfs() {
 
 /// Build a Runtime over `LocalFs` + a real Meter bound to `app_id`, pump
 /// it, run the fetch handler, and return `(status, body, meter)`. Faithful:
-/// drives the REAL `StoragePlugin::with_backend_and_meter` → register
+/// drives the REAL `StorageBinding::with_backend_and_meter` → register
 /// (STORAGE_METER) → callbacks path.
 fn run_app_metered(app: &'static str, app_id: &str) -> (u16, String, Arc<zeroship_metering::Meter>) {
     let meter = Arc::new(zeroship_metering::Meter::new());
@@ -246,9 +247,9 @@ fn run_app_metered(app: &'static str, app_id: &str) -> (u16, String, Arc<zeroshi
         let mut env_vars = HashMap::new();
         env_vars.insert("APP_ID".to_string(), app_id.clone());
 
-        let backend: Arc<dyn zeroship_plugin_storage::Backend> = Arc::new(LocalFs::new(&dir));
+        let backend: Arc<dyn zeroship_storage::Backend> = Arc::new(LocalFs::new(&dir));
         let plugin: Arc<dyn NativePlugin> =
-            Arc::new(StoragePlugin::with_backend_and_meter(backend, Some(meter_for_run)));
+            Arc::new(StorageBinding::new(StorageStore::from_backend(backend), Some(meter_for_run)));
 
         let runtime = Runtime::builder()
             .modules(module(app))

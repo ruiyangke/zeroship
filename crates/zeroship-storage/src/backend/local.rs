@@ -44,6 +44,8 @@
 //! gives — and never inherits some other writer's type. "Unknown" is a safe
 //! answer; "confidently wrong" is not.
 
+use crate::StorageError;
+
 use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -210,7 +212,7 @@ async fn write_sidecar(
     path: &Path,
     fingerprint: ObjectFingerprint,
     content_type: &str,
-) -> Result<(), String> {
+) -> Result<(), StorageError> {
     let payload = encode_sidecar(fingerprint, content_type);
     let mut file = fs::File::create(path)
         .await
@@ -219,7 +221,7 @@ async fn write_sidecar(
     res.map_err(|e| format!("storage: write metadata: {e}"))?;
     file.sync_all()
         .await
-        .map_err(|e| format!("storage: fsync metadata: {e}"))
+        .map_err(|e| StorageError::Backend(format!("storage: fsync metadata: {e}")))
 }
 
 /// `fsync` a directory so a `rename` into it is durable. On POSIX the rename
@@ -227,14 +229,14 @@ async fn write_sidecar(
 /// directory entry after `put` has already reported success (and already
 /// billed `storage_bytes`), leaving the caller believing in an object that no
 /// longer exists.
-async fn sync_dir(dir: &Path) -> Result<(), String> {
+async fn sync_dir(dir: &Path) -> Result<(), StorageError> {
     let handle = fs::File::open(dir)
         .await
         .map_err(|e| format!("storage: open dir '{}' for fsync: {e}", dir.display()))?;
     handle
         .sync_all()
         .await
-        .map_err(|e| format!("storage: fsync dir '{}': {e}", dir.display()))
+        .map_err(|e| StorageError::Backend(format!("storage: fsync dir '{}': {e}", dir.display())))
 }
 
 #[async_trait::async_trait(?Send)]
@@ -246,7 +248,7 @@ impl Backend for LocalFs {
         key: &str,
         mut body: BoxChunkSource,
         content_type: Option<&str>,
-    ) -> Result<u64, String> {
+    ) -> Result<u64, StorageError> {
         validate_object_coords(app_id, bucket, key)?;
         let content_type = content_type.unwrap_or(DEFAULT_CONTENT_TYPE);
         let full = self.object_path(app_id, bucket, key);
@@ -279,7 +281,7 @@ impl Backend for LocalFs {
         // the still-open fd AFTER the final fsync, so it describes exactly the
         // bytes about to be renamed live — `rename` changes none of the four
         // fields it is built from.
-        let write_result: Result<ObjectFingerprint, String> = async {
+        let write_result: Result<ObjectFingerprint, StorageError> = async {
             while let Some(chunk) = body.next_chunk().await {
                 let chunk = chunk?;
                 if chunk.is_empty() {
@@ -328,13 +330,13 @@ impl Backend for LocalFs {
         if let Err(e) = fs::rename(&tmp, &full).await {
             let _ = fs::remove_file(&tmp).await;
             let _ = fs::remove_file(&meta_tmp).await;
-            return Err(format!("storage: rename temp into place: {e}"));
+            return Err(format!("storage: rename temp into place: {e}").into());
         }
 
         // Publish the metadata.
         if let Err(e) = fs::rename(&meta_tmp, &meta_full).await {
             let _ = fs::remove_file(&meta_tmp).await;
-            return Err(format!("storage: rename metadata into place: {e}"));
+            return Err(format!("storage: rename metadata into place: {e}").into());
         }
 
         // Make both renames durable. `rename` is atomic on POSIX but NOT
@@ -357,7 +359,7 @@ impl Backend for LocalFs {
         app_id: &str,
         bucket: &str,
         key: &str,
-    ) -> Result<Option<(ObjectMeta, BoxByteStream)>, String> {
+    ) -> Result<Option<(ObjectMeta, BoxByteStream)>, StorageError> {
         validate_object_coords(app_id, bucket, key)?;
         let full = self.object_path(app_id, bucket, key);
         // Open FIRST, then `fstat` the open fd. Stat-then-open would let a
@@ -368,7 +370,7 @@ impl Backend for LocalFs {
         let f = match fs::File::open(&full).await {
             Ok(f) => f,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(format!("storage: open: {e}")),
+            Err(e) => return Err(format!("storage: open: {e}").into()),
         };
         let meta = f
             .metadata()
@@ -395,13 +397,13 @@ impl Backend for LocalFs {
         Ok(Some((object_meta, stream)))
     }
 
-    async fn delete(&self, app_id: &str, bucket: &str, key: &str) -> Result<bool, String> {
+    async fn delete(&self, app_id: &str, bucket: &str, key: &str) -> Result<bool, StorageError> {
         validate_object_coords(app_id, bucket, key)?;
         let full = self.object_path(app_id, bucket, key);
         let existed = match fs::remove_file(&full).await {
             Ok(()) => true,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
-            Err(e) => return Err(format!("storage: delete: {e}")),
+            Err(e) => return Err(format!("storage: delete: {e}").into()),
         };
         // Drop the sidecar too. Correctness does not depend on it — a sidecar
         // outliving its object cannot match the fingerprint of whatever is
@@ -410,7 +412,7 @@ impl Backend for LocalFs {
         match fs::remove_file(self.meta_path(app_id, bucket, key)).await {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(format!("storage: delete metadata: {e}")),
+            Err(e) => return Err(format!("storage: delete metadata: {e}").into()),
         }
         Ok(existed)
     }
@@ -420,7 +422,7 @@ impl Backend for LocalFs {
         app_id: &str,
         bucket: &str,
         req: ListRequest<'_>,
-    ) -> Result<ListPage, String> {
+    ) -> Result<ListPage, StorageError> {
         validate_list_coords(app_id, bucket)?;
         // Walks the `o/` subtree only. Metadata lives in a sibling subtree, so
         // it is not merely filtered out of the listing — it is not reachable
@@ -471,7 +473,7 @@ impl ChunkSource for FileChunks {
             }
             Err(e) => {
                 self.remaining = 0;
-                Some(Err(format!("storage: read: {e}")))
+                Some(Err(StorageError::Stream(format!("storage: read: {e}"))))
             }
         }
     }
@@ -550,7 +552,7 @@ fn list_page_blocking(
     prefix: &str,
     cursor: Option<&str>,
     limit: usize,
-) -> Result<ListPage, String> {
+) -> Result<ListPage, StorageError> {
     #[cfg(test)]
     {
         *LAST_WALK_THREAD.lock().unwrap() = Some(std::thread::current().id());
@@ -588,12 +590,12 @@ impl PageWalk<'_> {
 
     /// Walk `dir`, whose objects have keys beginning with `rel` (`""` at the
     /// root, otherwise `a/b/`).
-    fn dir(&mut self, dir: &Path, rel: &str) -> Result<(), String> {
+    fn dir(&mut self, dir: &Path, rel: &str) -> Result<(), StorageError> {
         let read = match std::fs::read_dir(dir) {
             Ok(rd) => rd,
             // An app-bucket that has never been written to has no directory.
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(e) => return Err(format!("storage: readdir '{}': {e}", dir.display())),
+            Err(e) => return Err(format!("storage: readdir '{}': {e}", dir.display()).into()),
         };
 
         // Collect this directory's children so they can be ordered before

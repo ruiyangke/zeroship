@@ -91,7 +91,8 @@ zeroship-migrate-postgres
 zeroship-migrate-server
 zeroship-migrate-sqlite
 zeroship-data-v8
-zeroship-plugin-storage
+zeroship-storage
+zeroship-storage-v8
 zeroship-plugin-workflow
 zeroship-runtime
 zeroship-runtime-macros

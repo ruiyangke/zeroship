@@ -4,16 +4,15 @@
 //! promise, push an async op into the runtime pump's spawned-ops queue,
 //! return the promise. The pump resolves/rejects via OpResult.
 
-use std::sync::Arc;
-
 use base64::Engine;
 use serde_json::json;
 use zeroship_runtime::channel::{stream_buffer_with_cap, StreamReader};
 use zeroship_runtime::state::{OpError, OpResult, ResolveValue, SharedState};
 use zeroship_runtime::streams::response_forwarder;
 
-use crate::backend::{ChunkResult, ChunkSource, ObjectMeta};
-use crate::{Backend, STORAGE_BACKEND, STORAGE_METER};
+use zeroship_storage::backend::{ChunkResult, ChunkSource, ObjectMeta};
+use zeroship_storage::StorageError;
+use crate::StorageContext;
 
 /// Raw usage metrics a storage op emits in its success arm. `storage_ops`
 /// counts every successful object op; `storage_bytes` accumulates bytes
@@ -25,14 +24,6 @@ const STORAGE_OPS: &str = "storage_ops";
 const STORAGE_BYTES: &str = "storage_bytes";
 const STORAGE_EGRESS_BYTES: &str = "storage_egress_bytes";
 
-/// Build a per-app [`zeroship_metering::MeterHandle`] from the registered
-/// process-wide meter + the request's `app_id`. `None` when no meter is
-/// configured (test harness) — callers then skip the emit.
-fn meter_handle(app_id: &str) -> Option<zeroship_metering::MeterHandle> {
-    STORAGE_METER
-        .with(|m| m.borrow().clone())
-        .map(|m| zeroship_metering::MeterHandle::new(m, app_id))
-}
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -103,14 +94,6 @@ fn throw_type(scope: &mut v8::PinScope, arg_name: &str) -> Option<String> {
     None
 }
 
-fn get_app_id(state: &SharedState) -> String {
-    state
-        .borrow()
-        .env_vars
-        .get("APP_ID")
-        .cloned()
-        .unwrap_or_else(|| "default".to_string())
-}
 
 fn setup_promise<'s>(
     scope: &mut v8::PinScope<'s, '_>,
@@ -129,9 +112,14 @@ fn setup_promise<'s>(
     (op_id, request_id, promise)
 }
 
-fn current_backend() -> Result<Arc<dyn Backend>, String> {
-    STORAGE_BACKEND.with(|c| c.borrow().as_ref().map(Arc::clone))
-        .ok_or_else(|| "storage: not configured — StoragePlugin not registered".to_string())
+fn current_context(scope: &mut v8::PinScope<'_, '_>) -> Option<StorageContext> {
+    if let Some(context) = scope.get_slot::<StorageContext>() {
+        return Some(context.clone());
+    }
+    let message = v8::String::new(scope, "storage: no app storage handle was bound")?;
+    let exception = v8::Exception::type_error(scope, message);
+    scope.throw_exception(exception);
+    None
 }
 
 // ---------------------------------------------------------------------------
@@ -144,14 +132,31 @@ pub fn put(
     mut rv: v8::ReturnValue,
 ) {
     let state: SharedState = scope.get_slot::<SharedState>().expect("state").clone();
+    let Some(context) = current_context(scope) else { return };
 
     let Some(bucket) = require_string_arg(scope, &args, 0, "bucket") else { return };
     let Some(key) = require_string_arg(scope, &args, 1, "key") else { return };
-    let Some(b64) = require_string_arg(scope, &args, 2, "bytesBase64") else { return };
+    if args.length() <= 2 || args.get(2).is_null_or_undefined() {
+        let _ = throw_type(scope, "bytesBase64");
+        return;
+    }
+    let b64 = args.get(2).to_rust_string_lossy(scope);
     let content_type = optional_string_arg(scope, &args, 3);
 
-    let app_id = get_app_id(&state);
     let (op_id, request_id, promise) = setup_promise(scope, &state);
+
+    let max_encoded = context.storage.max_buffered_bytes().div_ceil(3).saturating_mul(4);
+    if b64.len() as u64 > max_encoded {
+        state.borrow_mut().spawned_ops.push(Box::pin(async move {
+            OpResult::Failed {
+                op_id,
+                error: "storage: buffered object exceeds size limit; use putStream".into(),
+                request_id,
+            }
+        }));
+        rv.set(promise.into());
+        return;
+    }
 
     let bytes = match base64::engine::general_purpose::STANDARD.decode(b64.as_bytes()) {
         Ok(b) => b,
@@ -168,20 +173,10 @@ pub fn put(
         }
     };
 
-    let backend = match current_backend() {
-        Ok(r) => r,
-        Err(e) => {
-            state.borrow_mut().spawned_ops.push(Box::pin(async move {
-                OpResult::Failed { op_id, error: e, request_id }
-            }));
-            rv.set(promise.into());
-            return;
-        }
-    };
 
-    let meter = meter_handle(&app_id);
+    let meter = context.meter.clone();
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        match backend.put(&app_id, &bucket, &key, &bytes, content_type.as_deref()).await {
+        match context.storage.put(&bucket, &key, &bytes, content_type.as_deref()).await {
             Ok(size) => {
                 // Success arm only: one op + bytes written. Unforgeable.
                 if let Some(m) = &meter {
@@ -194,7 +189,7 @@ pub fn put(
                     request_id,
                 }
             }
-            Err(e) => OpResult::Failed { op_id, error: e, request_id },
+            Err(e) => OpResult::Failed { op_id, error: e.to_string(), request_id },
         }
     }));
 
@@ -211,28 +206,17 @@ pub fn get(
     mut rv: v8::ReturnValue,
 ) {
     let state: SharedState = scope.get_slot::<SharedState>().expect("state").clone();
+    let Some(context) = current_context(scope) else { return };
 
     let Some(bucket) = require_string_arg(scope, &args, 0, "bucket") else { return };
     let Some(key) = require_string_arg(scope, &args, 1, "key") else { return };
 
-    let app_id = get_app_id(&state);
     let (op_id, request_id, promise) = setup_promise(scope, &state);
 
-    let backend = match current_backend() {
-        Ok(r) => r,
-        Err(e) => {
-            state.borrow_mut().spawned_ops.push(Box::pin(async move {
-                OpResult::Failed { op_id, error: e, request_id }
-            }));
-            rv.set(promise.into());
-            return;
-        }
-    };
 
-    let max_bytes = crate::limits::max_object_bytes();
-    let meter = meter_handle(&app_id);
+    let meter = context.meter.clone();
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        match backend.get(&app_id, &bucket, &key, max_bytes).await {
+        match context.storage.get(&bucket, &key).await {
             Ok(None) => {
                 // A miss is still a successful read op (one storage op,
                 // zero egress bytes).
@@ -259,7 +243,7 @@ pub fn get(
                 });
                 OpResult::Completed { op_id, value: out.to_string(), request_id }
             }
-            Err(e) => OpResult::Failed { op_id, error: e, request_id },
+            Err(e) => OpResult::Failed { op_id, error: e.to_string(), request_id },
         }
     }));
 
@@ -276,27 +260,17 @@ pub fn delete(
     mut rv: v8::ReturnValue,
 ) {
     let state: SharedState = scope.get_slot::<SharedState>().expect("state").clone();
+    let Some(context) = current_context(scope) else { return };
 
     let Some(bucket) = require_string_arg(scope, &args, 0, "bucket") else { return };
     let Some(key) = require_string_arg(scope, &args, 1, "key") else { return };
 
-    let app_id = get_app_id(&state);
     let (op_id, request_id, promise) = setup_promise(scope, &state);
 
-    let backend = match current_backend() {
-        Ok(r) => r,
-        Err(e) => {
-            state.borrow_mut().spawned_ops.push(Box::pin(async move {
-                OpResult::Failed { op_id, error: e, request_id }
-            }));
-            rv.set(promise.into());
-            return;
-        }
-    };
 
-    let meter = meter_handle(&app_id);
+    let meter = context.meter.clone();
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        match backend.delete(&app_id, &bucket, &key).await {
+        match context.storage.delete(&bucket, &key).await {
             Ok(deleted) => {
                 // Success arm only: one storage op (whether or not a key
                 // existed — the delete itself ran).
@@ -309,7 +283,7 @@ pub fn delete(
                     request_id,
                 }
             }
-            Err(e) => OpResult::Failed { op_id, error: e, request_id },
+            Err(e) => OpResult::Failed { op_id, error: e.to_string(), request_id },
         }
     }));
 
@@ -327,35 +301,25 @@ pub fn list(
     mut rv: v8::ReturnValue,
 ) {
     let state: SharedState = scope.get_slot::<SharedState>().expect("state").clone();
+    let Some(context) = current_context(scope) else { return };
 
     let Some(bucket) = require_string_arg(scope, &args, 0, "bucket") else { return };
     let prefix = optional_string_arg(scope, &args, 1).unwrap_or_default();
     let opts = if args.length() > 2 { Some(args.get(2)) } else { None };
     let cursor = opt_string_field(scope, opts, "cursor");
-    let limit = crate::limits::resolve_list_limit(opt_number_field(scope, opts, "limit"));
+    let limit = zeroship_storage::limits::resolve_list_limit(opt_number_field(scope, opts, "limit"));
 
-    let app_id = get_app_id(&state);
     let (op_id, request_id, promise) = setup_promise(scope, &state);
 
-    let backend = match current_backend() {
-        Ok(r) => r,
-        Err(e) => {
-            state.borrow_mut().spawned_ops.push(Box::pin(async move {
-                OpResult::Failed { op_id, error: e, request_id }
-            }));
-            rv.set(promise.into());
-            return;
-        }
-    };
 
-    let meter = meter_handle(&app_id);
+    let meter = context.meter.clone();
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        let req = crate::backend::ListRequest {
+        let req = zeroship_storage::backend::ListRequest {
             prefix: &prefix,
             cursor: cursor.as_deref(),
             limit,
         };
-        match backend.list(&app_id, &bucket, req).await {
+        match context.storage.list(&bucket, req).await {
             Ok(page) => {
                 // Success arm only: one storage op (the list).
                 if let Some(m) = &meter {
@@ -382,41 +346,15 @@ pub fn list(
                     request_id,
                 }
             }
-            Err(e) => OpResult::Failed { op_id, error: e, request_id },
+            Err(e) => OpResult::Failed { op_id, error: e.to_string(), request_id },
         }
     }));
 
     rv.set(promise.into());
 }
 
-// ===========================================================================
-// Streaming through V8 — see the proposal's
-// "env.storage streaming through V8" section.
-//
-// Upload  (`putStream`): consume an app-supplied V8 ReadableStream via the
-//   runtime's `response_forwarder` pump (getReader + promise-reaction read
-//   loop into a Rust `StreamWriter`). A spawned op drains the paired
-//   `StreamReader` and feeds chunks to `Backend::put_stream` → S3 multipart
-//   (or LocalFs temp-file + rename). Memory is bounded by the part size on
-//   upload and the StreamWriter backpressure cap, not the object size.
-//
-// Download (`getStream` + `readChunk` + `cancelStream`): `getStream` opens a
-//   `Backend::get_stream` and parks the `(meta, source)` in the per-THREAD
-//   registry (`crate::live_streams`) under the OWNING APP's id — the thread
-//   hosts many apps' isolates, so ownership is part of the key, never
-//   implied by the id — resolving `{ streamId, contentType, size }`
-//   (or `null`). The `@zeroship/storage` SDK builds a `new ReadableStream`
-//   whose `pull` calls `readChunk(streamId)` — each call pulls the next
-//   `Backend::get_stream` chunk and resolves a `Uint8Array` (or `undefined`
-//   at EOF). `cancelStream` drops a half-read source.
-// ===========================================================================
-
-// The registry of live download streams lives in [`crate::live_streams`].
-// It is per-THREAD (a worker thread multiplexes up to 200 app isolates), so
-// it is keyed by the owning `app_id` and every accessor takes that app_id as
-// its first parameter — see that module's docs for why an unkeyed registry
-// was a cross-tenant read/cancel channel, and for the SEC-1 precedent in
-// `crates/zeroship-data-v8/src/context.rs:127-140`.
+// Uploads bridge V8 to the Rust chunk source. Downloads remain owned by
+// the context captured from this isolate, including across asynchronous pulls.
 
 /// A [`ChunkSource`] over a runtime [`StreamReader`] — the consumer side of
 /// the `response_forwarder` pump used by `putStream`. Yields buffered chunks,
@@ -460,13 +398,13 @@ impl ChunkSource for StreamReaderSource {
             }
             if self.reader.is_overflow() {
                 return Some(Err(
-                    "storage: upload stream exceeded the buffer backpressure cap".to_string(),
+                    StorageError::Stream("storage: upload stream exceeded the buffer backpressure cap".to_string()),
                 ));
             }
             // Checked BEFORE `is_done`, which an abort also sets: a producer
             // that failed partway must not be committed as a complete object.
             if let Some(err) = self.reader.error() {
-                return Some(Err(format!("storage: upload stream failed: {err}")));
+                return Some(Err(StorageError::Stream(format!("storage: upload stream failed: {err}"))));
             }
             if self.reader.is_done() {
                 return None;
@@ -533,6 +471,7 @@ pub fn put_stream(
     mut rv: v8::ReturnValue,
 ) {
     let state: SharedState = scope.get_slot::<SharedState>().expect("state").clone();
+    let Some(context) = current_context(scope) else { return };
 
     let Some(bucket) = require_string_arg(scope, &args, 0, "bucket") else { return };
     let Some(key) = require_string_arg(scope, &args, 1, "key") else { return };
@@ -550,19 +489,8 @@ pub fn put_stream(
     };
     let content_type = optional_string_arg(scope, &args, 3);
 
-    let app_id = get_app_id(&state);
     let (op_id, request_id, promise) = setup_promise(scope, &state);
 
-    let backend = match current_backend() {
-        Ok(r) => r,
-        Err(e) => {
-            state.borrow_mut().spawned_ops.push(Box::pin(async move {
-                OpResult::Failed { op_id, error: e, request_id }
-            }));
-            rv.set(promise.into());
-            return;
-        }
-    };
 
     // Lock the app's ReadableStream and start the read-loop pump. Chunks
     // flow into `writer`; the spawned op drains `reader`.
@@ -585,14 +513,14 @@ pub fn put_stream(
     // generation with the in-flight upload), and so a single app chunk up to
     // the cap is accepted rather than rejected at the 4 MiB default. RPC/SSE
     // response streams keep the small default cap (they don't multipart).
-    let (writer, reader) = stream_buffer_with_cap(crate::backend::UPLOAD_STREAM_BUFFER_CAP);
+    let (writer, reader) = stream_buffer_with_cap(crate::limits::UPLOAD_STREAM_BUFFER_CAP);
     response_forwarder::attach_writer(&state, stream_id, writer);
 
     let source = StreamReaderSource { reader, state: state.clone(), stream_id };
-    let meter = meter_handle(&app_id);
+    let meter = context.meter.clone();
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        match backend
-            .put_stream(&app_id, &bucket, &key, Box::new(source), content_type.as_deref())
+        match context.storage
+            .put_stream(&bucket, &key, Box::new(source), content_type.as_deref())
             .await
         {
             Ok(size) => {
@@ -607,7 +535,7 @@ pub fn put_stream(
                     request_id,
                 }
             }
-            Err(e) => OpResult::Failed { op_id, error: e, request_id },
+            Err(e) => OpResult::Failed { op_id, error: e.to_string(), request_id },
         }
     }));
 
@@ -624,27 +552,17 @@ pub fn get_stream(
     mut rv: v8::ReturnValue,
 ) {
     let state: SharedState = scope.get_slot::<SharedState>().expect("state").clone();
+    let Some(context) = current_context(scope) else { return };
 
     let Some(bucket) = require_string_arg(scope, &args, 0, "bucket") else { return };
     let Some(key) = require_string_arg(scope, &args, 1, "key") else { return };
 
-    let app_id = get_app_id(&state);
     let (op_id, request_id, promise) = setup_promise(scope, &state);
 
-    let backend = match current_backend() {
-        Ok(r) => r,
-        Err(e) => {
-            state.borrow_mut().spawned_ops.push(Box::pin(async move {
-                OpResult::Failed { op_id, error: e, request_id }
-            }));
-            rv.set(promise.into());
-            return;
-        }
-    };
 
-    let meter = meter_handle(&app_id);
+    let meter = context.meter.clone();
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        match backend.get_stream(&app_id, &bucket, &key).await {
+        match context.storage.get_stream(&bucket, &key).await {
             Ok(None) => {
                 // A miss is a successful read op (zero egress).
                 if let Some(m) = &meter {
@@ -653,12 +571,12 @@ pub fn get_stream(
                 OpResult::Completed { op_id, value: "null".into(), request_id }
             }
             Ok(Some((meta, source))) => {
-                // Park the source under THIS app's id. A refusal here means
+                // Park the source in this isolate. A refusal here means
                 // the app is over its live-stream cap; the source is dropped
                 // (releasing its fd / HTTP body) and the op fails.
-                let stream_id = match crate::live_streams::open(&app_id, source) {
+                let stream_id = match context.streams.open(source) {
                     Ok(id) => id,
-                    Err(e) => return OpResult::Failed { op_id, error: e, request_id },
+                    Err(e) => return OpResult::Failed { op_id, error: e.to_string(), request_id },
                 };
                 // Success arm only, and only once the handle is actually
                 // live: one op + the object's full byte count as egress.
@@ -675,7 +593,7 @@ pub fn get_stream(
                     request_id,
                 }
             }
-            Err(e) => OpResult::Failed { op_id, error: e, request_id },
+            Err(e) => OpResult::Failed { op_id, error: e.to_string(), request_id },
         }
     }));
 
@@ -701,14 +619,14 @@ pub fn read_chunk(
     mut rv: v8::ReturnValue,
 ) {
     let state: SharedState = scope.get_slot::<SharedState>().expect("state").clone();
+    let Some(context) = current_context(scope) else { return };
 
     let Some(stream_id) = require_u32_arg(scope, &args, 0, "streamId") else { return };
     // The server-injected APP_ID, not anything the app can choose. A stream
     // owned by a co-resident app is simply not found.
-    let app_id = get_app_id(&state);
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
 
-    let slot = crate::live_streams::slot(&app_id, stream_id);
+    let slot = context.streams.slot(stream_id);
     let Some(slot) = slot else {
         // Unknown / already-finished / not-ours stream → resolve EOF
         // (undefined) so the SDK's pull loop closes cleanly rather than
@@ -725,7 +643,7 @@ pub fn read_chunk(
         // Take the source out for the pull, then put it back. compio is
         // single-threaded and the SDK pulls sequentially, so no two
         // `readChunk`s for the same id overlap.
-        let mut source = match slot.borrow_mut().take() {
+        let mut source = match slot.borrow_mut().source.take() {
             Some(s) => s,
             None => {
                 return OpResult::JsValue {
@@ -738,7 +656,7 @@ pub fn read_chunk(
         let next = source.next_chunk().await;
         match next {
             Some(Ok(chunk)) => {
-                *slot.borrow_mut() = Some(source);
+                slot.borrow_mut().source = Some(source);
                 OpResult::JsValue {
                     resolver,
                     value: ResolveValue::Bytes(chunk.to_vec()),
@@ -746,15 +664,15 @@ pub fn read_chunk(
                 }
             }
             Some(Err(e)) => {
-                crate::live_streams::close(&app_id, stream_id);
+                context.streams.close(stream_id);
                 OpResult::JsValue {
                     resolver,
-                    value: ResolveValue::RejectError(OpError::error(e)),
+                    value: ResolveValue::RejectError(OpError::error(e.to_string())),
                     request_id,
                 }
             }
             None => {
-                crate::live_streams::close(&app_id, stream_id);
+                context.streams.close(stream_id);
                 OpResult::JsValue { resolver, value: ResolveValue::Undefined, request_id }
             }
         }
@@ -773,12 +691,12 @@ pub fn cancel_stream(
     mut rv: v8::ReturnValue,
 ) {
     let state: SharedState = scope.get_slot::<SharedState>().expect("state").clone();
+    let Some(context) = current_context(scope) else { return };
     let Some(stream_id) = require_u32_arg(scope, &args, 0, "streamId") else { return };
     // Scoped to the caller's own app: cancelling a co-resident app's stream
     // is a no-op, not a reclaim.
-    let app_id = get_app_id(&state);
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
-    crate::live_streams::close(&app_id, stream_id);
+    context.streams.close(stream_id);
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
         OpResult::JsValue { resolver, value: ResolveValue::Undefined, request_id }
     }));

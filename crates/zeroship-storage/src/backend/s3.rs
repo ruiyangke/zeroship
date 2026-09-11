@@ -35,6 +35,8 @@
 //! - `get_stream` → the client's streaming GET (cyper `bytes_stream`), wrapped
 //!   with the per-chunk body-read timeout.
 
+use crate::StorageError;
+
 use bytes::Bytes;
 use compio_s3::{PartETag, PutOptions, S3Client, S3Config, S3Credentials, S3Error, UploadId};
 
@@ -54,7 +56,7 @@ pub const PART_SIZE: usize = 8 * 1024 * 1024;
 /// so dropping the set on the error path is a safe cancellation of an ordinary
 /// (un-spawned) future. `'a` ties it to the borrowed session client.
 type InflightPart<'a> =
-    futures::future::LocalBoxFuture<'a, Result<PartETag, String>>;
+    futures::future::LocalBoxFuture<'a, Result<PartETag, StorageError>>;
 
 /// The two upload knobs `put_stream` runs under, resolved ONCE when the
 /// backend is built rather than re-read on every op.
@@ -189,7 +191,7 @@ impl S3 {
         content_type: &str,
         mut body: BoxChunkSource,
         guard: &compio_s3::MultipartGuard,
-    ) -> Result<u64, String> {
+    ) -> Result<u64, StorageError> {
         use futures::stream::FuturesUnordered;
         use futures::{FutureExt, StreamExt};
 
@@ -308,10 +310,10 @@ impl S3 {
             // guard only on a clean complete.
             if !part_buf.is_empty() {
                 if part_number >= crate::limits::MAX_MULTIPART_PARTS {
-                    return Err(format!(
+                    return Err(StorageError::LimitExceeded(format!(
                         "storage: multipart upload would exceed the S3 {}-part limit",
                         crate::limits::MAX_MULTIPART_PARTS
-                    ));
+                    )));
                 }
                 part_number += 1;
                 let part = Bytes::from(std::mem::take(&mut part_buf));
@@ -381,18 +383,18 @@ impl S3 {
         upload_id: &mut Option<UploadId>,
         inflight: &mut futures::stream::FuturesUnordered<InflightPart<'a>>,
         concurrency: usize,
-    ) -> Result<(), String> {
+    ) -> Result<(), StorageError> {
         use futures::FutureExt;
         if chunk.is_empty() {
             return Ok(());
         }
         *total += chunk.len() as u64;
         if *total > max_total {
-            return Err(format!(
+            return Err(StorageError::LimitExceeded(format!(
                 "storage: object exceeds max stream size {max_total} bytes \
                  (set {} to raise)",
                 crate::limits::MAX_STREAM_OBJECT_BYTES_ENV
-            ));
+            )));
         }
         part_buf.extend_from_slice(&chunk);
 
@@ -413,10 +415,10 @@ impl S3 {
             // Refuse to exceed S3's 10,000-part hard limit: such an upload
             // can never `complete`, so fail fast (the caller aborts).
             if *part_number >= crate::limits::MAX_MULTIPART_PARTS {
-                return Err(format!(
+                return Err(StorageError::LimitExceeded(format!(
                     "storage: multipart upload would exceed the S3 {}-part limit",
                     crate::limits::MAX_MULTIPART_PARTS
-                ));
+                )));
             }
             let id = upload_id.as_ref().expect("multipart created");
             // Copy exactly PART_SIZE into a tight buffer rather than
@@ -453,7 +455,7 @@ impl S3 {
         id: &UploadId,
         part_number: u32,
         part: Bytes,
-    ) -> impl std::future::Future<Output = Result<PartETag, String>> + '_ {
+    ) -> impl std::future::Future<Output = Result<PartETag, StorageError>> + '_ {
         let s3 = self.client.clone();
         let http = session.clone(); // Arc-cheap; shared pooled connections
         let key = s3_key.to_string();
@@ -514,7 +516,7 @@ impl Backend for S3 {
         key: &str,
         body: BoxChunkSource,
         content_type: Option<&str>,
-    ) -> Result<u64, String> {
+    ) -> Result<u64, StorageError> {
         validate_object_coords(app_id, bucket, key)?;
         let s3_key = Self::object_key(app_id, bucket, key);
         let content_type = content_type.unwrap_or(DEFAULT_CONTENT_TYPE);
@@ -565,7 +567,7 @@ impl Backend for S3 {
         app_id: &str,
         bucket: &str,
         key: &str,
-    ) -> Result<Option<(ObjectMeta, BoxByteStream)>, String> {
+    ) -> Result<Option<(ObjectMeta, BoxByteStream)>, StorageError> {
         validate_object_coords(app_id, bucket, key)?;
         let s3_key = Self::object_key(app_id, bucket, key);
         match self.client.get_stream(&s3_key).await {
@@ -585,7 +587,7 @@ impl Backend for S3 {
         }
     }
 
-    async fn delete(&self, app_id: &str, bucket: &str, key: &str) -> Result<bool, String> {
+    async fn delete(&self, app_id: &str, bucket: &str, key: &str) -> Result<bool, StorageError> {
         validate_object_coords(app_id, bucket, key)?;
         let s3_key = Self::object_key(app_id, bucket, key);
         // The native `delete(bucket, key)` contract returns `{deleted}`:
@@ -621,7 +623,7 @@ impl Backend for S3 {
         app_id: &str,
         bucket: &str,
         req: ListRequest<'_>,
-    ) -> Result<ListPage, String> {
+    ) -> Result<ListPage, StorageError> {
         validate_list_coords(app_id, bucket)?;
         let scope = Self::list_prefix(app_id, bucket, req.prefix);
         // A page of at least one entry — see the `LocalFs` counterpart.
@@ -670,7 +672,7 @@ impl Backend for S3 {
             (true, None) => {
                 return Err(format!(
                     "storage: s3 list on '{scope}': page held no in-scope keys but more remain"
-                ))
+                ).into())
             }
         };
         Ok(ListPage { entries: out, cursor })
@@ -688,7 +690,7 @@ impl ChunkSource for S3Chunks {
         use futures::StreamExt;
         match self.inner.next().await {
             Some(Ok(b)) => Some(Ok(b)),
-            Some(Err(e)) => Some(Err(format!("storage: s3 get body: {e}"))),
+            Some(Err(e)) => Some(Err(StorageError::Stream(format!("storage: s3 get body: {e}")))),
             None => None,
         }
     }
@@ -707,8 +709,8 @@ impl ChunkSource for S3Chunks {
 /// own id and bucket, not another tenant's, so this is a layout detail rather
 /// than a disclosure - but it is also not information the app asked for, and
 /// it would want trimming if the key shape ever carries anything else.
-fn map_s3(op: &str, key: &str, e: S3Error) -> String {
-    format!("storage: s3 {op} on '{key}': {e}")
+fn map_s3(op: &str, key: &str, e: S3Error) -> StorageError {
+    StorageError::Backend(format!("storage: s3 {op} on '{key}': {e}"))
 }
 
 #[cfg(test)]
@@ -725,7 +727,7 @@ mod tests {
     /// mislabelled at the point of call.
     #[test]
     fn an_s3_failure_names_the_operation() {
-        let msg = map_s3("head_object", "app_x/uploads/a.txt", S3Error::NotFound);
+        let msg = map_s3("head_object", "app_x/uploads/a.txt", S3Error::NotFound).to_string();
         assert!(
             msg.contains("head_object"),
             "s3 error must name the operation; got {msg:?}"

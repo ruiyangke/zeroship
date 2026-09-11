@@ -24,7 +24,8 @@ zeroship-kv = { workspace = true, features = ["redis"] }
 zeroship-kv-v8 = { workspace = true }
 zeroship-metering = { workspace = true }
 zeroship-stream = { workspace = true }
-zeroship-plugin-storage = { workspace = true, features = ["s3"] }
+zeroship-storage = { workspace = true, features = ["s3"] }
+zeroship-storage-v8 = { workspace = true }
 zeroship-plugin-workflow = { workspace = true }
 clap = { workspace = true, features = ["derive", "env"] }
 ntex = { workspace = true }

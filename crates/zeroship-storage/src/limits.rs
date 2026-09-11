@@ -26,7 +26,7 @@ pub fn max_object_bytes() -> u64 {
     positive_u64(zeroship_core::declared_env!(
         platform,
         "ZEROSHIP_STORAGE_MAX_OBJECT_BYTES",
-        crate::PluginStorageConsumer
+        crate::StorageConsumer
     ))
     .unwrap_or(DEFAULT_MAX_OBJECT_BYTES)
 }
@@ -58,7 +58,7 @@ pub fn max_stream_object_bytes() -> u64 {
     positive_u64(zeroship_core::declared_env!(
         platform,
         "ZEROSHIP_STORAGE_MAX_STREAM_BYTES",
-        crate::PluginStorageConsumer
+        crate::StorageConsumer
     ))
     .unwrap_or(DEFAULT_MAX_STREAM_OBJECT_BYTES)
 }
@@ -97,7 +97,7 @@ pub fn upload_concurrency() -> usize {
     positive_u64(zeroship_core::declared_env!(
         platform,
         "ZEROSHIP_STORAGE_UPLOAD_CONCURRENCY",
-        crate::PluginStorageConsumer
+        crate::StorageConsumer
     ))
         .map(|n| n.clamp(1, 64) as usize)
         .unwrap_or(DEFAULT_UPLOAD_CONCURRENCY)
@@ -130,59 +130,6 @@ pub fn resolve_list_limit(limit: Option<f64>) -> usize {
         Some(l) if l.is_finite() && l >= 1.0 => (l as usize).min(LIST_MAX_LIMIT),
         _ => LIST_DEFAULT_LIMIT,
     }
-}
-
-// ---------------------------------------------------------------------------
-// Live download streams
-// ---------------------------------------------------------------------------
-
-/// Max concurrent `getStream` download handles one app may hold open.
-///
-/// Each live handle parks a `ChunkSource` in the per-thread registry
-/// (`crate::live_streams`) and pins a process-wide resource with it: an open
-/// fd on `LocalFs`, a live HTTP response body on S3. Only the app reclaims
-/// them — via `readChunk` reaching EOF or an explicit `cancelStream` — and
-/// there is no runtime teardown hook to sweep them (see the `live_streams`
-/// module docs). So an app that opens handles and never drains them would
-/// otherwise pin fds for the life of the worker thread, starving the up-to-200
-/// other apps' isolates resident on it (`--max-isolates`, default 200).
-///
-/// 64 mirrors `MAX_PENDING_FETCHES` (64, `crates/zeroship-runtime/src/core/state.rs:284`),
-/// which bounds the same class of thing for the same reason: a per-app ceiling
-/// on a shared, per-thread, fd-backed resource, deliberately set low because
-/// "platform apps are expected to reach only a handful of upstreams at once"
-/// and a runaway loop should hit a clean error rather than an OOM. The same
-/// holds here — a handler streams one or a few objects at a time, and the
-/// legitimate working set is far below 64. Compare
-/// `MAX_SUBSCRIPTIONS_PER_APP` (`crates/zeroship-data-orm/src/cdc/broker.rs`), the
-/// house pattern for capping a per-app registry at acquisition.
-pub const DEFAULT_MAX_LIVE_GET_STREAMS_PER_APP: usize = 64;
-
-/// Environment variable overriding [`DEFAULT_MAX_LIVE_GET_STREAMS_PER_APP`].
-pub const MAX_LIVE_GET_STREAMS_PER_APP_ENV: &str = "ZEROSHIP_STORAGE_MAX_LIVE_GET_STREAMS";
-
-/// Hard ceiling on the configured cap. Stream ids are `u32`, so a cap at or
-/// above `u32::MAX` would let an app fill the whole id space and leave
-/// `live_streams::open`'s free-id probe with nothing to find. Clamping here
-/// keeps "a free id always exists" a property of the type, not of operator
-/// discipline. (Unreachable in practice — each stream also pins an fd.)
-const MAX_LIVE_GET_STREAMS_CEILING: usize = (u32::MAX - 1) as usize;
-
-/// Resolve the per-app live-download-stream ceiling: the
-/// `ZEROSHIP_STORAGE_MAX_LIVE_GET_STREAMS` env var if a valid positive
-/// integer (clamped to [`MAX_LIVE_GET_STREAMS_CEILING`]), else
-/// [`DEFAULT_MAX_LIVE_GET_STREAMS_PER_APP`].
-#[must_use]
-pub fn max_live_get_streams_per_app() -> usize {
-    // Class `platform`, for the same reason as `upload_concurrency` above.
-    positive_u64(zeroship_core::declared_env!(
-        platform,
-        "ZEROSHIP_STORAGE_MAX_LIVE_GET_STREAMS",
-        crate::PluginStorageConsumer
-    ))
-        .and_then(|n| usize::try_from(n).ok())
-        .map(|n| n.min(MAX_LIVE_GET_STREAMS_CEILING))
-        .unwrap_or(DEFAULT_MAX_LIVE_GET_STREAMS_PER_APP)
 }
 
 /// Parse an already-read value as a positive `u64`.

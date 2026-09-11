@@ -12,7 +12,7 @@
 #      gateway dispatches a request through to the worker, which loads the
 #      bundle from S3 and serves it.
 #
-#   2. plugin-storage::Backend — the worker's `env.storage` namespace is bound
+#   2. storage-v8::Backend — the worker's `env.storage` namespace is bound
 #      to the SAME MinIO via `--storage-url s3://…`. We drive a LARGE
 #      (> 8 MiB part size) MULTIPART streaming round-trip: an app procedure
 #      builds a multi-MiB object, streams it up with `putStream` (S3 multipart
@@ -324,7 +324,7 @@ if [ "$PUT_CODE" = "200" ] && echo "$PUT_BODY" | grep -q '"json"'; then
     fail "putLarge bad result (size=$PUT_SIZE sum=$PUT_SUM body=$PUT_BODY)"
   fi
 else
-  ERR="$(grep -iE 'env.storage|StoragePlugin|s3|multipart|storage' "$WORK/worker.log" | tail -3)"
+  ERR="$(grep -iE 'env.storage|StorageBinding|s3|multipart|storage' "$WORK/worker.log" | tail -3)"
   fail "putLarge failed over /dispatch (HTTP $PUT_CODE). err: ${ERR:-$PUT_BODY}"
 fi
 
@@ -354,7 +354,7 @@ echo "=== Stage 8: backend-parity cargo tests (LocalFs vs S3, buffered + streami
 # round-trip and skips the S3 leg cleanly without docker. Run it here so one
 # harness asserts BOTH the edge (above) and the trait parity.
 PARITY_LOG="$WORK/parity.log"
-if cargo test -p zeroship-plugin-storage --features s3 --test backend_parity -- --nocapture > "$PARITY_LOG" 2>&1; then
+if cargo test -p zeroship-storage --features s3 --test backend_parity -- --nocapture > "$PARITY_LOG" 2>&1; then
   pass "backend-parity tests passed (LocalFs + S3/MinIO, buffered + streaming + large multipart)"
 else
   fail "backend-parity tests FAILED (see $PARITY_LOG)"; tail -30 "$PARITY_LOG"
