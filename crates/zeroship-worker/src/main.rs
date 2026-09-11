@@ -739,6 +739,7 @@ fn main() -> std::io::Result<()> {
         Some(url) => Some(
             zeroship_data_v8::service::DbService::new(
                 zeroship_data_v8::service::DbServiceConfig {
+                    project_keys: Default::default(),
                     connection: zeroship_data_orm::connection::ConnectionFactory::for_url(url)
                         .map_err(|error| std::io::Error::other(error.to_string()))?,
                     cdc_relay: Some({
@@ -993,19 +994,10 @@ mod tests {
 
     /// `--workflow-advance-unsigned` must not be combined with a routable bind.
     ///
-    /// The flag turns POST `/internal/workflow/advance-unsigned` from a 403 into a
-    /// live endpoint that replays workflow state with NO signature or nonce check
-    /// (the handler says so: DW-05 left verification to a later task). The route is
-    /// registered unconditionally, so the flag is the only thing between an
-    /// unauthenticated caller and workflow replay.
-    ///
-    /// This mirrors the credential guard above: same hazard class -
-    /// unauthenticated mutation reachable over the network - so the same posture.
-    ///
-    /// Cost of the guard measured, not assumed: nothing under `deploy/` passes the
-    /// flag, and the one caller that does (`tests/e2e_durable_workflows.sh`) passes
-    /// no `--bind` at all, so it takes the `127.0.0.1` default and stays allowed.
-    /// Compose binds the worker to `0.0.0.0` but never sets this flag.
+    /// The workflow acceptance fixtures enable the replay endpoint on loopback.
+    /// It still requires the gateway's service assertion. The bind guard keeps
+    /// this extra dispatch path local even when a caller supplies the flag;
+    /// Compose never enables it.
     #[test]
     fn unsigned_advance_refused_on_a_routable_bind() {
         // The dangerous combination, in the three spellings a routable bind takes.

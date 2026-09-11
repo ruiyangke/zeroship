@@ -29,13 +29,13 @@ pub fn install_collections(
                 continue;
             }
             crate::compile::validate_field_name(name)?;
-            if crate::encryption::plaintext::PlaintextType::from_field(definition)?.is_some() {
-                if definition.get("unique").and_then(Value::as_bool) == Some(true) {
-                    return Err(DbError::validation(
-                        "encrypted_unique_unsupported",
-                        "encrypted fields cannot be unique",
-                    ));
-                }
+            if crate::encryption::plaintext::PlaintextType::from_field(definition)?.is_some()
+                && definition.get("unique").and_then(Value::as_bool) == Some(true)
+            {
+                return Err(DbError::validation(
+                    "encrypted_unique_unsupported",
+                    "encrypted fields cannot be unique",
+                ));
             }
             if !definition.is_object() {
                 return Err(DbError::internal("field descriptor must be an object"));

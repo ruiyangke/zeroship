@@ -1022,7 +1022,7 @@ mod tests {
         run(async {
             let project_id = "project_write_pipeline";
             // Bind this fixture app to its supplied project key.
-            let supplied = std::rc::Rc::new(encryption::SuppliedProjectKeys::new());
+            let supplied = std::sync::Arc::new(encryption::SuppliedProjectKeys::new());
             supplied
                 .insert_hex(project_id, &"1".repeat(64))
                 .expect("fixture root key must parse");

@@ -497,6 +497,7 @@ pub fn dispatch_zs_with_descriptor(
     }];
     let plugins: Vec<Arc<dyn NativePlugin>> = vec![
         DbService::new(DbServiceConfig {
+            project_keys: zeroship_data_v8::testing::project_keys(),
             connection: zeroship_data_orm::connection::ConnectionFactory::for_url(url)
                 .expect("valid database configuration"),
             cdc_relay: None,

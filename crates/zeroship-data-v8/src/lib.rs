@@ -59,6 +59,7 @@ pub mod tx_scope;
 #[derive(Debug)]
 pub struct DbPlugin {
     connection: ConnectionFactory,
+    project_keys: std::sync::Arc<zeroship_data_orm::encryption::SuppliedProjectKeys>,
     cdc_relay: Option<zeroship_data_orm::cdc::relay::RelayConfig>,
     meter: Option<std::sync::Arc<zeroship_metering::Meter>>,
     assignments: system_shape_charter::AssignmentPlan,
@@ -69,12 +70,14 @@ impl DbPlugin {
         cdc_relay: Option<zeroship_data_orm::cdc::relay::RelayConfig>,
         meter: Option<std::sync::Arc<zeroship_metering::Meter>>,
         assignments: system_shape_charter::AssignmentPlan,
+        project_keys: std::sync::Arc<zeroship_data_orm::encryption::SuppliedProjectKeys>,
     ) -> Self {
         Self {
             connection,
             cdc_relay,
             meter,
             assignments,
+            project_keys,
         }
     }
 }
@@ -125,6 +128,7 @@ impl NativePlugin for DbPlugin {
 
     fn register(&self, _: &mut NativeRegistrar) {
         ctx_mut(|context| {
+            context.set_supplied_project_keys(Some(self.project_keys.clone()));
             context.install_connection(self.connection.clone());
             context.set_cdc_relay(self.cdc_relay.clone());
         });
@@ -185,6 +189,7 @@ mod runtime_descriptor_binding_tests {
 
     fn plugin() -> std::sync::Arc<DbPlugin> {
         service::DbService::new(service::DbServiceConfig {
+            project_keys: crate::testing::project_keys(),
             connection: zeroship_data_orm::connection::ConnectionFactory::for_url(
                 "sqlite:descriptor-test.sqlite",
             )
@@ -293,12 +298,6 @@ mod runtime_descriptor_binding_tests {
             "schema-less transaction view source must be empty"
         );
     }
-}
-
-/// Install project keys and app bindings supplied by the trusted worker host.
-/// Existing backends retain their source; install this before initializing them.
-pub fn set_project_keys(keys: std::rc::Rc<zeroship_data_orm::encryption::SuppliedProjectKeys>) {
-    context::with_mut(|context| context.set_supplied_project_keys(Some(keys)));
 }
 
 /// Open the ORM connection registered for this worker thread, if configured.

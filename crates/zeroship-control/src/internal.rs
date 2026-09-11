@@ -378,6 +378,30 @@ pub async fn get_app_env(
     }
 }
 
+/// Host-only project key delivery. The app's project comes from control's
+/// registry, and the key never enters the app environment response.
+pub async fn get_app_data_key(
+    req: web::HttpRequest,
+    state: State<Arc<AppState>>,
+    app_id: Path<String>,
+) -> web::HttpResponse {
+    if let Some(response) = check_service_auth(&req, &state, endpoints::CONTROL_APP_DATA_KEY).await {
+        return response;
+    }
+    let Ok(id) = Uuid::parse_str(&app_id) else {
+        return web::HttpResponse::BadRequest().json(&serde_json::json!({"error":"bad app_id"}));
+    };
+    match crate::project_keys::for_app(&state.registry, state.env_store.cipher(), id).await {
+        Ok(key) => web::HttpResponse::Ok().header("cache-control", "no-store").json(&key),
+        Err(crate::project_keys::KeyError::AppNotFound) =>
+            web::HttpResponse::NotFound().json(&serde_json::json!({"error":"app not found"})),
+        Err(crate::project_keys::KeyError::Storage(error)) => {
+            tracing::error!(app_id = %id, %error, "control-internal: project key delivery failed");
+            web::HttpResponse::InternalServerError().json(&serde_json::json!({"error":"internal error"}))
+        }
+    }
+}
+
 /// POST /internal/workers/enrol - a worker registers ONE live process.
 ///
 /// Guarded by the same full assertion profile as the privileged reads above,
