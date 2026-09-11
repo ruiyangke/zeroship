@@ -145,7 +145,7 @@ pub(super) async fn exercise(db: &Database) {
                 .all()
                 .await?;
             assert_eq!(rows[0].0.name, rows[0].1.name);
-            Ok(tx.from(&a).select(a.row::<Summary>())?)
+            tx.from(&a).select(a.row::<Summary>())
         })
         .await
         .unwrap();
