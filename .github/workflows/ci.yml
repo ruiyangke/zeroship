@@ -298,13 +298,8 @@ jobs:
         run: tests/deploy_instructions_gate.sh
       - name: The two [[inject]] ceilings agree
         run: tests/inject_policy_mirror_gate.sh
-      # The organization ownership model, in three gates. Each runs its own
-      # extractors against a positive and a one-variable control FIRST and
-      # refuses if they disagree, because every one of the three is an ABSENCE
-      # check over a corpus and an absence check that cannot read its corpus is
-      # the cleanest green there is - the ownership gate found exactly that in
-      # itself on its first run, a `grep --include` placed after `--` where grep
-      # reads it as a filename.
+      # These organization source scanners remain pending retirement. Behavioral
+      # authorization coverage lives in the authz and control crate tests.
       - name: An app reaches its owner only through its project
         run: tests/organization_ownership_path_gate.sh --self-test
       - name: One ownership path, and no cached authority
@@ -313,8 +308,6 @@ jobs:
         run: tests/organization_route_authorization_gate.sh --self-test
       - name: Every mutating organization route is guarded and locks first
         run: tests/organization_route_authorization_gate.sh
-      - name: The role ladder and the Cedar bands name the same ranks
-        run: tests/organization_policy_ladder_gate.sh
       # THESE THREE LANDED WITHOUT A STEP and tests/ci_wiring_gate.sh has been
       # red on them since. All three are text scans that need no build and no
       # database, so the reason they were unwired was that nobody wired them,
@@ -326,14 +319,6 @@ jobs:
         run: tests/deleted_app_write_fence_gate.sh
       - name: A credential is minted only from a validating read of its row
         run: tests/mint_reads_row_gate.sh
-      # The Cedar schema is the only thing that makes a typo'd action id
-      # visible, and strict validation only rules on the ids the POLICIES
-      # quote. This compares the schema against the Rust vocabulary and against
-      # build_context directly, which is where the ids no band names live -
-      # `migrations:approve` among them. Both gaps it catches surface at runtime
-      # as a 500 raised before audit_decision, so nothing is written down.
-      - name: The schema, the action enum and the request context agree
-        run: tests/cedar_schema_vocabulary_gate.sh
       # Account erasure has to stay REACHABLE: a users foreign key that blocks
       # the delete, or an auth statement naming a table zeroship_auth holds no
       # grant on, both surface only when a real due user is reaped under the

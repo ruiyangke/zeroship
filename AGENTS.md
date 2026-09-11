@@ -195,8 +195,11 @@ through nextest and rejects feature-gated test targets. Data fixtures own their
 PostgreSQL containers; Docker is required and no external database URL is used.
 
 **Writing or changing a check.** Keep nonempty-input assertions and rejection
-controls beside each check. Surviving shell gates use `tests/lib/gate_arms.sh`
-for per-arm floors and failure propagation. There is no central script-count
+controls beside each check. Do not add or port source-text checks: tests must
+exercise behavior, compiler contracts, parsed artifacts or structured metadata,
+rather than search implementation text for expected spellings. Retire existing
+source scanners as their suites are migrated. Surviving shell gates use
+`tests/lib/gate_arms.sh` for per-arm floors and failure propagation. There is no central script-count
 census or requirement to recreate retired bookkeeping checks in Rust.
 
 Data architecture checks are Rust tests in `xtask/tests/data_architecture.rs`,
@@ -205,7 +208,7 @@ Workspace dependency and feature rules run through `cargo xtask test repository`
 in `xtask/tests/repository_architecture.rs`. Driver and storage trait shape is
 checked by the data architecture suite. The ORM and V8 adapter deny
 `private_interfaces` and `private_bounds` during ordinary compilation.
-Keep scan floors and rejection controls beside the checks. Example acceptance
+Keep nonempty-input assertions and rejection controls beside the checks. Example acceptance
 tests live inside each example and use Vitest, TypeScript fixtures and browser
 assertions. Other repository gates remain shell scripts under `tests/` and
 participate in `tests/lib/gate_arms.sh`.
