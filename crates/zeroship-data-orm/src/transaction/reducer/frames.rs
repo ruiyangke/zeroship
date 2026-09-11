@@ -196,6 +196,11 @@ impl FrameStack {
         self.frames.last()
     }
 
+    /// Whether a captured callback still owns an open frame.
+    pub fn contains(&self, id: u64) -> bool {
+        self.frames.iter().any(|frame| frame.id.get() == id)
+    }
+
     /// Every savepoint name minted so far, for the arm that rules on reuse.
     #[must_use]
     pub const fn minted_names(&self) -> &BTreeSet<Box<str>> {
