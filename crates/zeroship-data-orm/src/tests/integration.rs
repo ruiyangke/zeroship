@@ -2,6 +2,7 @@
 
 #[allow(unused_imports)]
 use crate::schema_fixture::{fixture_table_sql, fixture_table_sql_for};
+use crate::tests::host::Host;
 
 use crate::{schema_fixture, support};
 
@@ -21,8 +22,8 @@ use zeroship_data_sql::value::{Value, value};
 /// moved to the V8 dispatcher and the value is passed down. These tests drive
 /// the engine directly, with no V8 frame above them, so they make the same call
 /// the dispatcher makes on their behalf in production.
-async fn unmask_backend() -> zeroship_data_orm::backend::BackendHandle {
-    crate::tests::host::ensure_backend()
+async fn unmask_backend(host: &Host) -> zeroship_data_orm::backend::BackendHandle {
+    host.backend()
         .await
         .expect("the backend the V8 dispatcher would have opened")
 }
@@ -32,11 +33,11 @@ async fn unmask_backend() -> zeroship_data_orm::backend::BackendHandle {
 /// See the twin in `mask_flip.rs` for why. No fixture that reaches it here
 /// parks a transaction, so every call binds `in_tx = false` and takes the lane
 /// it took before.
-async fn unmask_route(app: &str) -> zeroship_data_orm::tx_route::TxRoute {
-    zeroship_data_orm::exec::ambient_route_for_tests(app, unmask_backend().await)
+async fn unmask_route(host: &Host, app: &str) -> zeroship_data_orm::tx_route::TxRoute {
+    zeroship_data_orm::exec::ambient_route_for_tests(app, unmask_backend(host).await)
 }
 
-async fn require_pg() -> (crate::support::postgres::Postgres, String) {
+async fn require_pg(host: &Host) -> (crate::support::postgres::Postgres, String) {
     let postgres = crate::support::postgres::Postgres::start();
     let url = postgres.url();
     match compio_postgres::connect(&url, NoTls).await {
@@ -52,7 +53,7 @@ async fn require_pg() -> (crate::support::postgres::Postgres, String) {
             // `fixture_session`, which reads the URL from the
             // per-thread context. Tests that drive the orchestrator directly
             // need the URL installed in the context before the call.
-            crate::tests::host::set_db_url_for_tests(&url);
+            host.set_database_url(&url);
             (postgres, url)
         }
         Err(e) => {
@@ -246,18 +247,18 @@ fn row_to_value(row: &compio_postgres::Row) -> Value {
 ///
 /// Calling this last keeps the binary inside a bounded connection budget no
 /// matter how many tests it holds.
-async fn release_pg(pool: std::rc::Rc<Pool>) {
+async fn release_pg(host: &Host, pool: std::rc::Rc<Pool>) {
     drop(pool);
-    drain_pg().await;
+    drain_pg(host).await;
 }
 
 /// The half of [`release_pg`] that owns no pool, for tests whose handles have
 /// already gone out of scope. Every handle must be dropped first: a live one
 /// keeps its connection counted and makes this wait out its whole budget.
-async fn drain_pg() {
+async fn drain_pg(host: &Host) {
     // The context can hold its own pool handle and a parked transaction
     // client; those keep connections counted, so clear it before waiting.
-    crate::tests::host::reset_context_for_tests();
+    host.reset();
     if !compio_postgres::drain_connections(std::time::Duration::from_secs(2)).await {
         eprintln!(
             "DRAIN-TIMEOUT: {} connection(s) still live",
@@ -315,10 +316,10 @@ fn connections_do_not_outlive_the_runtime_that_opened_them() {
     for _ in 0..40 {
         let url = postgres.url();
         std::thread::spawn(move || {
-            crate::tests::host::in_test(|| {
-                crate::tests::host::run(async {
-                    crate::tests::host::set_db_url_for_tests(&url);
-                    let backend = crate::tests::host::ensure_backend().await.unwrap();
+            Host::test(|host| {
+                host.run(async {
+                    host.set_database_url(&url);
+                    let backend = host.backend().await.unwrap();
                     backend
                         .get::<zeroship_data_orm::backend::PostgresBackend>()
                         .unwrap()
@@ -374,9 +375,9 @@ fn weather_schema() -> Value {
 
 #[test]
 fn insert_and_find() {
-    crate::tests::host::in_test(|| {
-        crate::tests::host::run(async {
-            let (_postgres, url) = require_pg().await;
+    Host::test(|host| {
+        host.run(async {
+            let (_postgres, url) = require_pg(host).await;
             let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
             let schema = crate::test_app_id!();
             let schema = schema.as_str();
@@ -411,16 +412,16 @@ fn insert_and_find() {
             let rows = exec_query(&pool, bq).await;
             assert_eq!(rows.len(), 1);
             assert_eq!(rows[0]["title"], "Hello");
-            release_pg(pool).await;
+            release_pg(host, pool).await;
         })
     })
 }
 
 #[test]
 fn insert_many_round_trip() {
-    crate::tests::host::in_test(|| {
-        crate::tests::host::run(async {
-            let (_postgres, url) = require_pg().await;
+    Host::test(|host| {
+        host.run(async {
+            let (_postgres, url) = require_pg(host).await;
             let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
             let schema = crate::test_app_id!();
             let schema = schema.as_str();
@@ -459,16 +460,16 @@ fn insert_many_round_trip() {
             .unwrap();
             let count: i64 = rows[0].get("count");
             assert_eq!(count, 3);
-            release_pg(pool).await;
+            release_pg(host, pool).await;
         })
     })
 }
 
 #[test]
 fn update_one_inc() {
-    crate::tests::host::in_test(|| {
-        crate::tests::host::run(async {
-            let (_postgres, url) = require_pg().await;
+    Host::test(|host| {
+        host.run(async {
+            let (_postgres, url) = require_pg(host).await;
             let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
             let schema = crate::test_app_id!();
             let schema = schema.as_str();
@@ -508,16 +509,16 @@ fn update_one_inc() {
             .unwrap();
             let updated = exec_mutation(&pool, bq).await;
             assert_eq!(updated[0]["views"], 8);
-            release_pg(pool).await;
+            release_pg(host, pool).await;
         })
     })
 }
 
 #[test]
 fn update_one_dec_mul() {
-    crate::tests::host::in_test(|| {
-        crate::tests::host::run(async {
-            let (_postgres, url) = require_pg().await;
+    Host::test(|host| {
+        host.run(async {
+            let (_postgres, url) = require_pg(host).await;
             let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
             let schema = crate::test_app_id!();
             let schema = schema.as_str();
@@ -555,16 +556,16 @@ fn update_one_dec_mul() {
             .unwrap();
             let updated = exec_mutation(&pool, bq).await;
             assert_eq!(updated[0]["views"], 14);
-            release_pg(pool).await;
+            release_pg(host, pool).await;
         })
     })
 }
 
 #[test]
 fn update_one_jsonb_array_ops() {
-    crate::tests::host::in_test(|| {
-        crate::tests::host::run(async {
-            let (_postgres, url) = require_pg().await;
+    Host::test(|host| {
+        host.run(async {
+            let (_postgres, url) = require_pg(host).await;
             let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
             let schema = crate::test_app_id!();
             let schema = schema.as_str();
@@ -646,16 +647,16 @@ fn update_one_jsonb_array_ops() {
             let tags = updated[0]["tags"].as_array().unwrap();
             assert_eq!(tags.len(), 2);
             assert!(!tags.contains(&value!("go")));
-            release_pg(pool).await;
+            release_pg(host, pool).await;
         })
     })
 }
 
 #[test]
 fn update_many_round_trip() {
-    crate::tests::host::in_test(|| {
-        crate::tests::host::run(async {
-            let (_postgres, url) = require_pg().await;
+    Host::test(|host| {
+        host.run(async {
+            let (_postgres, url) = require_pg(host).await;
             let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
             let schema = crate::test_app_id!();
             let schema = schema.as_str();
@@ -720,16 +721,16 @@ fn update_many_round_trip() {
             for row in &rows {
                 assert_eq!(row["views"], 1);
             }
-            release_pg(pool).await;
+            release_pg(host, pool).await;
         })
     })
 }
 
 #[test]
 fn delete_operations() {
-    crate::tests::host::in_test(|| {
-        crate::tests::host::run(async {
-            let (_postgres, url) = require_pg().await;
+    Host::test(|host| {
+        host.run(async {
+            let (_postgres, url) = require_pg(host).await;
             let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
             let schema = crate::test_app_id!();
             let schema = schema.as_str();
@@ -809,16 +810,16 @@ fn delete_operations() {
             .await
             .unwrap();
             assert_eq!(rows[0].get::<_, i64>("count"), 2);
-            release_pg(pool).await;
+            release_pg(host, pool).await;
         })
     })
 }
 
 #[test]
 fn filter_comparison_operators() {
-    crate::tests::host::in_test(|| {
-        crate::tests::host::run(async {
-            let (_postgres, url) = require_pg().await;
+    Host::test(|host| {
+        host.run(async {
+            let (_postgres, url) = require_pg(host).await;
             let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
             let schema = crate::test_app_id!();
             let schema = schema.as_str();
@@ -913,16 +914,16 @@ fn filter_comparison_operators() {
             .unwrap();
             let rows = exec_query(&pool, bq).await;
             assert_eq!(rows.len(), 2);
-            release_pg(pool).await;
+            release_pg(host, pool).await;
         })
     })
 }
 
 #[test]
 fn filter_logical_operators() {
-    crate::tests::host::in_test(|| {
-        crate::tests::host::run(async {
-            let (_postgres, url) = require_pg().await;
+    Host::test(|host| {
+        host.run(async {
+            let (_postgres, url) = require_pg(host).await;
             let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
             let schema = crate::test_app_id!();
             let schema = schema.as_str();
@@ -987,16 +988,16 @@ fn filter_logical_operators() {
             .unwrap();
             let rows = exec_query(&pool, bq).await;
             assert_eq!(rows.len(), 2);
-            release_pg(pool).await;
+            release_pg(host, pool).await;
         })
     })
 }
 
 #[test]
 fn filter_pattern_operators() {
-    crate::tests::host::in_test(|| {
-        crate::tests::host::run(async {
-            let (_postgres, url) = require_pg().await;
+    Host::test(|host| {
+        host.run(async {
+            let (_postgres, url) = require_pg(host).await;
             let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
             let schema = crate::test_app_id!();
             let schema = schema.as_str();
@@ -1045,16 +1046,16 @@ fn filter_pattern_operators() {
             .unwrap();
             let rows = exec_query(&pool, bq).await;
             assert_eq!(rows.len(), 2);
-            release_pg(pool).await;
+            release_pg(host, pool).await;
         })
     })
 }
 
 #[test]
 fn find_with_options() {
-    crate::tests::host::in_test(|| {
-        crate::tests::host::run(async {
-            let (_postgres, url) = require_pg().await;
+    Host::test(|host| {
+        host.run(async {
+            let (_postgres, url) = require_pg(host).await;
             let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
             let schema = crate::test_app_id!();
             let schema = schema.as_str();
@@ -1106,16 +1107,16 @@ fn find_with_options() {
             let rows = exec_query(&pool, bq).await;
             assert_eq!(rows.len(), 1);
             assert_eq!(rows[0]["title"], "B"); // 2nd highest
-            release_pg(pool).await;
+            release_pg(host, pool).await;
         })
     })
 }
 
 #[test]
 fn find_with_projection() {
-    crate::tests::host::in_test(|| {
-        crate::tests::host::run(async {
-            let (_postgres, url) = require_pg().await;
+    Host::test(|host| {
+        host.run(async {
+            let (_postgres, url) = require_pg(host).await;
             let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
             let schema = crate::test_app_id!();
             let schema = schema.as_str();
@@ -1148,16 +1149,16 @@ fn find_with_projection() {
             // Should NOT have body, id, views, etc.
             assert!(rows[0].get("body").is_none());
             assert!(rows[0].get("id").is_none());
-            release_pg(pool).await;
+            release_pg(host, pool).await;
         })
     })
 }
 
 #[test]
 fn distinct_values() {
-    crate::tests::host::in_test(|| {
-        crate::tests::host::run(async {
-            let (_postgres, url) = require_pg().await;
+    Host::test(|host| {
+        host.run(async {
+            let (_postgres, url) = require_pg(host).await;
             let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
             let schema = crate::test_app_id!();
             let schema = schema.as_str();
@@ -1207,16 +1208,16 @@ fn distinct_values() {
             .unwrap();
             let rows = exec_query(&pool, bq).await;
             assert_eq!(rows.len(), 2);
-            release_pg(pool).await;
+            release_pg(host, pool).await;
         })
     })
 }
 
 #[test]
 fn count_with_filter() {
-    crate::tests::host::in_test(|| {
-        crate::tests::host::run(async {
-            let (_postgres, url) = require_pg().await;
+    Host::test(|host| {
+        host.run(async {
+            let (_postgres, url) = require_pg(host).await;
             let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
             let schema = crate::test_app_id!();
             let schema = schema.as_str();
@@ -1271,16 +1272,16 @@ fn count_with_filter() {
             .await
             .unwrap();
             assert_eq!(rows[0].get::<_, i64>("count"), 2);
-            release_pg(pool).await;
+            release_pg(host, pool).await;
         })
     })
 }
 
 #[test]
 fn aggregate_full() {
-    crate::tests::host::in_test(|| {
-        crate::tests::host::run(async {
-            let (_postgres, url) = require_pg().await;
+    Host::test(|host| {
+        host.run(async {
+            let (_postgres, url) = require_pg(host).await;
             let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
             let schema = crate::test_app_id!();
             let schema = schema.as_str();
@@ -1327,16 +1328,16 @@ fn aggregate_full() {
             assert_eq!(rows[0]["total"], 60);
             assert_eq!(rows[0]["lo"], 10);
             assert_eq!(rows[0]["hi"], 30);
-            release_pg(pool).await;
+            release_pg(host, pool).await;
         })
     })
 }
 
 #[test]
 fn aggregate_multi_group() {
-    crate::tests::host::in_test(|| {
-        crate::tests::host::run(async {
-            let (_postgres, url) = require_pg().await;
+    Host::test(|host| {
+        host.run(async {
+            let (_postgres, url) = require_pg(host).await;
             let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
             let schema = crate::test_app_id!();
             let schema = schema.as_str();
@@ -1375,16 +1376,16 @@ fn aggregate_multi_group() {
             // tech/rust=2, tech/go=1, food/pasta=1
             assert_eq!(rows.len(), 3);
             assert_eq!(rows[0]["cnt"], 2); // highest count first
-            release_pg(pool).await;
+            release_pg(host, pool).await;
         })
     })
 }
 
 #[test]
 fn aggregate_having() {
-    crate::tests::host::in_test(|| {
-        crate::tests::host::run(async {
-            let (_postgres, url) = require_pg().await;
+    Host::test(|host| {
+        host.run(async {
+            let (_postgres, url) = require_pg(host).await;
             let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
             let schema = crate::test_app_id!();
             let schema = schema.as_str();
@@ -1426,16 +1427,16 @@ fn aggregate_having() {
             assert_eq!(rows.len(), 1);
             assert_eq!(rows[0]["category"], "tech");
             assert_eq!(rows[0]["cnt"], 3);
-            release_pg(pool).await;
+            release_pg(host, pool).await;
         })
     })
 }
 
 #[test]
 fn null_handling() {
-    crate::tests::host::in_test(|| {
-        crate::tests::host::run(async {
-            let (_postgres, url) = require_pg().await;
+    Host::test(|host| {
+        host.run(async {
+            let (_postgres, url) = require_pg(host).await;
             let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
             let schema = crate::test_app_id!();
             let schema = schema.as_str();
@@ -1507,16 +1508,16 @@ fn null_handling() {
             let rows = exec_query(&pool, bq).await;
             assert_eq!(rows.len(), 1);
             assert_eq!(rows[0]["title"], "WithBody");
-            release_pg(pool).await;
+            release_pg(host, pool).await;
         })
     })
 }
 
 #[test]
 fn mixed_update() {
-    crate::tests::host::in_test(|| {
-        crate::tests::host::run(async {
-            let (_postgres, url) = require_pg().await;
+    Host::test(|host| {
+        host.run(async {
+            let (_postgres, url) = require_pg(host).await;
             let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
             let schema = crate::test_app_id!();
             let schema = schema.as_str();
@@ -1545,16 +1546,16 @@ fn mixed_update() {
             assert_eq!(updated[0]["views"], 15);
             let tags = updated[0]["tags"].as_array().unwrap();
             assert!(tags.contains(&value!("new")));
-            release_pg(pool).await;
+            release_pg(host, pool).await;
         })
     })
 }
 
 #[test]
 fn timestamps_as_numbers() {
-    crate::tests::host::in_test(|| {
-        crate::tests::host::run(async {
-            let (_postgres, url) = require_pg().await;
+    Host::test(|host| {
+        host.run(async {
+            let (_postgres, url) = require_pg(host).await;
             let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
             let schema = crate::test_app_id!();
             let schema = schema.as_str();
@@ -1573,16 +1574,16 @@ fn timestamps_as_numbers() {
             // Should be a reasonable Unix millisecond timestamp (after 2020)
             assert!(ts > 1_577_836_800_000); // 2020-01-01
             assert!(ts < 2_000_000_000_000); // ~2033
-            release_pg(pool).await;
+            release_pg(host, pool).await;
         })
     })
 }
 
 #[test]
 fn aggregate_having_postgres_docs_example() {
-    crate::tests::host::in_test(|| {
-        crate::tests::host::run(async {
-            let (_postgres, url) = require_pg().await;
+    Host::test(|host| {
+        host.run(async {
+            let (_postgres, url) = require_pg(host).await;
             let schema = crate::test_app_id!();
             let schema = schema.as_str();
             let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
@@ -1673,16 +1674,16 @@ fn aggregate_having_postgres_docs_example() {
             assert_eq!(rows[0]["city"], "Hayward");
             assert_eq!(rows[0]["cnt"], 3);
             assert_eq!(rows[0]["max_temp"], 41);
-            release_pg(pool).await;
+            release_pg(host, pool).await;
         })
     })
 }
 
 #[test]
 fn a1_unique_index_actually_enforces_uniqueness() {
-    crate::tests::host::in_test(|| {
-        crate::tests::host::run(async {
-            let (_postgres, url) = require_pg().await;
+    Host::test(|host| {
+        host.run(async {
+            let (_postgres, url) = require_pg(host).await;
             let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
 
             // Fresh schema + table — `build_create_table` is the production path.
@@ -1831,7 +1832,7 @@ fn a1_unique_index_actually_enforces_uniqueness() {
                     panic!("idempotent re-run failed for {}: {e}", spec.sql);
                 });
             }
-            release_pg(pool).await;
+            release_pg(host, pool).await;
         })
     })
 }
@@ -1879,9 +1880,9 @@ CREATE TABLE "{app}"."posts" ({PG_SYSTEM_COLUMNS},
 
 #[test]
 fn b2_ref_creates_foreign_key() {
-    crate::tests::host::in_test(|| {
-        crate::tests::host::run(async {
-            let (_postgres, url) = require_pg().await;
+    Host::test(|host| {
+        host.run(async {
+            let (_postgres, url) = require_pg(host).await;
             let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
 
             let app = crate::test_app_id!();
@@ -1934,16 +1935,16 @@ SELECT con.conname AS name,
                 !deferrable,
                 "expected an IMMEDIATE (non-deferrable) FK check"
             );
-            release_pg(pool).await;
+            release_pg(host, pool).await;
         })
     })
 }
 
 #[test]
 fn b2_ref_blocks_orphan_insert() {
-    crate::tests::host::in_test(|| {
-        crate::tests::host::run(async {
-            let (_postgres, url) = require_pg().await;
+    Host::test(|host| {
+        host.run(async {
+            let (_postgres, url) = require_pg(host).await;
             let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
 
             let app = crate::test_app_id!();
@@ -1969,16 +1970,16 @@ fn b2_ref_blocks_orphan_insert() {
                 err_str.contains("23503") || err_str.to_lowercase().contains("foreign key"),
                 "expected foreign_key_violation, got: {err_str}"
             );
-            release_pg(pool).await;
+            release_pg(host, pool).await;
         })
     })
 }
 
 #[test]
 fn b2_ref_on_delete_restrict_blocks_parent_delete() {
-    crate::tests::host::in_test(|| {
-        crate::tests::host::run(async {
-            let (_postgres, url) = require_pg().await;
+    Host::test(|host| {
+        host.run(async {
+            let (_postgres, url) = require_pg(host).await;
             let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
 
             let app = crate::test_app_id!();
@@ -2023,16 +2024,16 @@ fn b2_ref_on_delete_restrict_blocks_parent_delete() {
                 err_str.contains("23503") || err_str.to_lowercase().contains("foreign key"),
                 "expected foreign_key_violation, got: {err_str}"
             );
-            release_pg(pool).await;
+            release_pg(host, pool).await;
         })
     })
 }
 
 #[test]
 fn b2_ref_on_delete_cascade_deletes_children() {
-    crate::tests::host::in_test(|| {
-        crate::tests::host::run(async {
-            let (_postgres, url) = require_pg().await;
+    Host::test(|host| {
+        host.run(async {
+            let (_postgres, url) = require_pg(host).await;
             let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
 
             let app = crate::test_app_id!();
@@ -2105,16 +2106,16 @@ CREATE TABLE "{app}"."posts" ({PG_SYSTEM_COLUMNS},
                 .unwrap();
             let n: i64 = count_rows[0].get("n");
             assert_eq!(n, 0, "CASCADE should have deleted all child posts");
-            release_pg(pool).await;
+            release_pg(host, pool).await;
         })
     })
 }
 
 #[test]
 fn b2_circular_refs_via_deferrable() {
-    crate::tests::host::in_test(|| {
-        crate::tests::host::run(async {
-            let (_postgres, url) = require_pg().await;
+    Host::test(|host| {
+        host.run(async {
+            let (_postgres, url) = require_pg(host).await;
             let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
 
             let app = crate::test_app_id!();
@@ -2239,14 +2240,14 @@ SELECT con.conname AS name, con.condeferrable AS def, con.condeferred AS init_de
             assert_eq!(na, 1);
             assert_eq!(nb, 1);
             drop(client);
-            release_pg(pool).await;
+            release_pg(host, pool).await;
         })
     })
 }
 
 #[test]
 fn c1_broker_event_delivered_for_insert_via_emit() {
-    crate::tests::host::in_test(|| {
+    Host::test(|_| {
         // End-to-end of the local-emit path: the broker, attached
         // on the same thread the test runs on, receives an insert event
         // when `emit_local` is called. No Postgres needed — the broker
@@ -2296,7 +2297,7 @@ fn gapb_ev(app: &str, collection: &str, pk: i64) -> zeroship_data_orm::cdc::Chan
 
 #[test]
 fn gap_b_commit_drains_pending_emits_to_broker() {
-    crate::tests::host::in_test(|| {
+    Host::test(|host| {
         // Subscribe BEFORE pushing events, mid-"transaction" push two,
         // then drain — the broker should receive both.
         zeroship_data_orm::cdc::broker::drain_current_thread_subscriptions();
@@ -2304,12 +2305,12 @@ fn gap_b_commit_drains_pending_emits_to_broker() {
         let app = app.as_str();
         let sub = zeroship_data_orm::cdc::broker::subscribe(app, "users");
 
-        crate::tests::host::push_pending_emit_for_tests(gapb_ev(app, "users", 1));
-        crate::tests::host::push_pending_emit_for_tests(gapb_ev(app, "users", 2));
+        host.push_pending_emit(gapb_ev(app, "users", 1));
+        host.push_pending_emit(gapb_ev(app, "users", 2));
         // Pre-drain: subscriber must observe nothing (events still queued).
         assert!(sub.pop().is_none(), "events must not leak before commit");
 
-        crate::tests::host::drain_pending_emits_for_tests(app);
+        host.drain_pending_emits(app);
 
         let mut pks: Vec<String> = Vec::new();
         while let Some(zeroship_data_orm::cdc::broker::SubscriptionMessage::Change(ev)) = sub.pop()
@@ -2325,7 +2326,7 @@ fn gap_b_commit_drains_pending_emits_to_broker() {
 
 #[test]
 fn gap_b_rollback_clears_pending_emits_silently() {
-    crate::tests::host::in_test(|| {
+    Host::test(|host| {
         // Push events, then `clear` (rollback path). The broker must
         // never see them.
         zeroship_data_orm::cdc::broker::drain_current_thread_subscriptions();
@@ -2333,9 +2334,9 @@ fn gap_b_rollback_clears_pending_emits_silently() {
         let app = app.as_str();
         let sub = zeroship_data_orm::cdc::broker::subscribe(app, "users");
 
-        crate::tests::host::push_pending_emit_for_tests(gapb_ev(app, "users", 42));
-        crate::tests::host::push_pending_emit_for_tests(gapb_ev(app, "users", 43));
-        crate::tests::host::clear_pending_emits_for_tests(app);
+        host.push_pending_emit(gapb_ev(app, "users", 42));
+        host.push_pending_emit(gapb_ev(app, "users", 43));
+        host.clear_pending_emits(app);
 
         assert!(
             sub.pop().is_none(),
@@ -2349,13 +2350,13 @@ fn gap_b_rollback_clears_pending_emits_silently() {
 
 #[test]
 fn gap_b_end_to_end_insert_inside_tx_defers_emit_until_commit() {
-    crate::tests::host::in_test(|| {
-        crate::tests::host::run(async {
+    Host::test(|host| {
+        host.run(async {
             // End-to-end: real Postgres tx, real `exec_mutation_with_emit`
             // call. Pre-commit the broker stays empty; post-drain it sees
             // the insert.
-            let (_postgres, url) = require_pg().await;
-            crate::tests::host::set_db_url_for_tests(&url);
+            let (_postgres, url) = require_pg(host).await;
+            host.set_database_url(&url);
             let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
 
             let app = crate::test_app_id!();
@@ -2395,7 +2396,7 @@ fn gap_b_end_to_end_insert_inside_tx_defers_emit_until_commit() {
             let sub = zeroship_data_orm::cdc::broker::subscribe(app, "users");
 
             // Open the production transaction protocol.
-            crate::support::begin_transaction(app, &url).await;
+            host.begin_transaction(app, &url).await;
 
             let role = zeroship_core::database_role::per_app_role_name(app).unwrap();
             pool.batch_execute(&format!(r#"GRANT SELECT, INSERT ON "{app}"."users" TO "{role}"; GRANT USAGE ON ALL SEQUENCES IN SCHEMA "{app}" TO "{role}""#)).await.unwrap();
@@ -2409,7 +2410,7 @@ fn gap_b_end_to_end_insert_inside_tx_defers_emit_until_commit() {
                 &zeroship_data_sql::value!({ "name": "alice" }),
             )
             .expect("build_insert");
-            let _ = crate::tests::host::exec_mutation_with_emit_for_tests(
+            let _ = host.exec_mutation_with_emit(
                 bq,
                 app,
                 "users",
@@ -2440,7 +2441,7 @@ fn gap_b_end_to_end_insert_inside_tx_defers_emit_until_commit() {
 
             sub.close();
             zeroship_data_orm::cdc::broker::drain_current_thread_subscriptions();
-            release_pg(pool).await;
+            release_pg(host, pool).await;
         })
     })
 }
@@ -2499,11 +2500,11 @@ async fn require_pgvector(pool: &Pool) {
 /// the absence into a pass.
 #[test]
 fn vector_search_returns_k_nearest() {
-    crate::tests::host::in_test(|| {
-        crate::tests::host::run(async {
+    Host::test(|host| {
+        host.run(async {
             use zeroship_data_orm::backend::VectorMetric;
 
-            let (_postgres, url) = require_pg().await;
+            let (_postgres, url) = require_pg(host).await;
             let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
             require_pgvector(&pool).await;
 
@@ -2595,7 +2596,7 @@ fn vector_search_returns_k_nearest() {
             let backend = zeroship_data_orm::backend::PostgresBackend::new(
                 pool.clone(),
                 url.clone(),
-                crate::tests::host::isolate_key_source(),
+                host.key_source(),
             );
             // The search's projection is the descriptor's field list; install the entry
             // this deploy's runtime descriptor would have planted at boot.
@@ -2644,7 +2645,7 @@ fn vector_search_returns_k_nearest() {
                 assert!(r.get("_distance").is_some(), "row missing _distance: {r}");
             }
             drop(backend);
-            release_pg(pool).await;
+            release_pg(host, pool).await;
         })
     })
 }
@@ -2679,12 +2680,12 @@ fn vector_search_returns_k_nearest() {
 /// that load-bearing assertion did not run.
 #[test]
 fn pgvector_extension_missing_reports_typed_error() {
-    crate::tests::host::in_test(|| {
-        crate::tests::host::run(async {
+    Host::test(|host| {
+        host.run(async {
             use zeroship_data_orm::backend::{PostgresBackend, VectorMetric};
             use zeroship_data_orm::error::DbError;
 
-            let (_postgres, url) = require_pg().await;
+            let (_postgres, url) = require_pg(host).await;
             let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
 
             // This test needs the extension ABSENT - it asserts the shape of the error
@@ -2726,7 +2727,7 @@ fn pgvector_extension_missing_reports_typed_error() {
             let backend = zeroship_data_orm::backend::PostgresBackend::new(
                 pool.clone(),
                 url.clone(),
-                crate::tests::host::isolate_key_source(),
+                host.key_source(),
             );
 
             // No descriptor entry is installed for `vector_missing`, and that is
@@ -2789,7 +2790,7 @@ fn pgvector_extension_missing_reports_typed_error() {
                 }
             }
             drop(backend);
-            release_pg(pool).await;
+            release_pg(host, pool).await;
         })
     })
 }
@@ -2806,9 +2807,9 @@ fn pgvector_extension_missing_reports_typed_error() {
 /// expected vs. actual dim count.
 #[test]
 fn vector_dimension_mismatch_rejected_at_insert() {
-    crate::tests::host::in_test(|| {
-        crate::tests::host::run(async {
-            let (_postgres, url) = require_pg().await;
+    Host::test(|host| {
+        host.run(async {
+            let (_postgres, url) = require_pg(host).await;
             let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
             require_pgvector(&pool).await;
 
@@ -2863,7 +2864,7 @@ fn vector_dimension_mismatch_rejected_at_insert() {
                 msg.contains("128") || msg.contains("256") || msg.to_lowercase().contains("vector"),
                 "error message must mention dim mismatch: {msg}"
             );
-            release_pg(pool).await;
+            release_pg(host, pool).await;
         })
     })
 }
@@ -2880,11 +2881,11 @@ fn vector_dimension_mismatch_rejected_at_insert() {
 /// rather than skipping, and no attribute removes this test from the run.
 #[test]
 fn near_returns_within_radius() {
-    crate::tests::host::in_test(|| {
-        crate::tests::host::run(async {
+    Host::test(|host| {
+        host.run(async {
             use zeroship_data_orm::backend::GeoPoint;
 
-            let (_postgres, url) = require_pg().await;
+            let (_postgres, url) = require_pg(host).await;
             let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
             require_postgis(&pool).await;
 
@@ -2968,7 +2969,7 @@ fn near_returns_within_radius() {
             let backend = zeroship_data_orm::backend::PostgresBackend::new(
                 pool.clone(),
                 url.clone(),
-                crate::tests::host::isolate_key_source(),
+                host.key_source(),
             );
             let rows = zeroship_data_orm::search::Search::spatial_near(
                 &backend,
@@ -3006,7 +3007,7 @@ fn near_returns_within_radius() {
                 );
             }
             drop(backend);
-            release_pg(pool).await;
+            release_pg(host, pool).await;
         })
     })
 }
@@ -3020,12 +3021,12 @@ fn near_returns_within_radius() {
 /// probe arm and its cached arm separately.
 #[test]
 fn postgis_extension_missing_reports_typed_error() {
-    crate::tests::host::in_test(|| {
-        crate::tests::host::run(async {
+    Host::test(|host| {
+        host.run(async {
             use zeroship_data_orm::backend::{GeoPoint, PostgresBackend};
             use zeroship_data_orm::error::DbError;
 
-            let (_postgres, url) = require_pg().await;
+            let (_postgres, url) = require_pg(host).await;
             let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
 
             // This test needs the extension ABSENT - it asserts the shape of the error
@@ -3067,7 +3068,7 @@ fn postgis_extension_missing_reports_typed_error() {
             let backend = zeroship_data_orm::backend::PostgresBackend::new(
                 pool.clone(),
                 url.clone(),
-                crate::tests::host::isolate_key_source(),
+                host.key_source(),
             );
 
             // No descriptor entry, deliberately: the extension probe runs BEFORE the
@@ -3118,7 +3119,7 @@ fn postgis_extension_missing_reports_typed_error() {
                 }
             }
             drop(backend);
-            release_pg(pool).await;
+            release_pg(host, pool).await;
         })
     })
 }
@@ -3127,27 +3128,19 @@ use zeroship_data_orm::error::DbError;
 
 use zeroship_data_orm::encryption;
 
-/// Supply a project key for the apps explicitly named by this fixture.
-fn with_project_key(
-    app_ids: &[&str],
-    hex: &str,
-) -> crate::tests::host::SuppliedProjectKeysGuard {
-    crate::tests::host::supply_project_key_for_tests(app_ids, hex)
-}
-
 /// Gate #1: round-trip an encrypted string column. Insert a
 /// row with `ssn` declared `t.encrypted({  })`,
 /// read it back via the PG path, expect the plaintext to recover.
 #[test]
 fn encrypted_column_round_trip_randomised() {
-    crate::tests::host::in_test(|| {
-        crate::tests::host::run(async {
-            let (_postgres, url) = require_pg().await;
+    Host::test(|host| {
+        host.run(async {
+            let (_postgres, url) = require_pg(host).await;
             let schema = crate::test_app_id!();
             let schema = schema.as_str();
             let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
             // Synthetic 32-byte root key.
-            let _keys = with_project_key(&["app1"], &"a".repeat(64));
+            let _keys = host.supply_project_key(&["app1"], &"a".repeat(64));
 
             pool.execute(&format!("DROP SCHEMA IF EXISTS \"{schema}\" CASCADE"), &[])
                 .await
@@ -3172,7 +3165,7 @@ fn encrypted_column_round_trip_randomised() {
             let backend = zeroship_data_orm::backend::PostgresBackend::new(
                 pool.clone(),
                 url.clone(),
-                crate::tests::host::isolate_key_source(),
+                host.key_source(),
             );
             let key = backend
                 .key_store()
@@ -3221,7 +3214,7 @@ fn encrypted_column_round_trip_randomised() {
                 zeroship_data_orm::encryption::aead::decrypt(&key, &raw, &aad).expect("decrypt");
             assert_eq!(recovered, plaintext);
             drop(backend);
-            release_pg(pool).await;
+            release_pg(host, pool).await;
         })
     })
 }
@@ -3231,13 +3224,13 @@ fn encrypted_column_round_trip_randomised() {
 /// defeats the ciphertext-oracle attack on randomised columns).
 #[test]
 fn encrypted_randomised_row_swap_rejected() {
-    crate::tests::host::in_test(|| {
-        crate::tests::host::run(async {
-            let (_postgres, url) = require_pg().await;
+    Host::test(|host| {
+        host.run(async {
+            let (_postgres, url) = require_pg(host).await;
             let schema = crate::test_app_id!();
             let schema = schema.as_str();
             let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
-            let _keys = with_project_key(&["app1"], &"b".repeat(64));
+            let _keys = host.supply_project_key(&["app1"], &"b".repeat(64));
 
             pool.execute(&format!("DROP SCHEMA IF EXISTS \"{schema}\" CASCADE"), &[])
                 .await
@@ -3260,7 +3253,7 @@ fn encrypted_randomised_row_swap_rejected() {
             let backend = zeroship_data_orm::backend::PostgresBackend::new(
                 pool.clone(),
                 url.clone(),
-                crate::tests::host::isolate_key_source(),
+                host.key_source(),
             );
             let key = backend.key_store().resolve("app1").await.unwrap();
             // Insert row A with its OWN AAD (binds row_pk = "row_a").
@@ -3329,7 +3322,7 @@ fn encrypted_randomised_row_swap_rejected() {
                 other => panic!("expected ValidationFailed encryption_aead_failed, got {other:?}"),
             }
             drop(backend);
-            release_pg(pool).await;
+            release_pg(host, pool).await;
         })
     })
 }
@@ -3357,15 +3350,15 @@ fn encrypted_randomised_row_swap_rejected() {
 /// Postgres table, end to end.
 #[test]
 fn p4_round_trip_encrypted_masked_vector_via_descriptor_metadata() {
-    crate::tests::host::in_test(|| {
-        crate::tests::host::run(async {
-            let (_postgres, url) = require_pg().await;
+    Host::test(|host| {
+        host.run(async {
+            let (_postgres, url) = require_pg(host).await;
             let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
 
             let app = crate::test_app_id!();
 
             let app = app.as_str();
-            let _keys = with_project_key(&[app], &"d".repeat(64));
+            let _keys = host.supply_project_key(&[app], &"d".repeat(64));
             pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
                 .await
                 .unwrap();
@@ -3430,7 +3423,7 @@ CREATE TABLE "{app}"."people" ({PG_SYSTEM_COLUMNS},
             // Install the pool into the per-isolate context so the pipelines' own SQL
             // lands on this database, and install the DESCRIPTOR ENTRY the deploy would
             // have installed — exactly what the production register path does.
-            crate::support::install_postgres_pool(std::rc::Rc::clone(&pool), &url);
+            host.install_postgres_pool(std::rc::Rc::clone(&pool), &url);
             zeroship_data_orm::cache_schema_for_tests(app, "people", schema.clone());
 
             // Sanity: the resolution the CRUD passes will perform returns BOTH goodies.
@@ -3456,11 +3449,9 @@ CREATE TABLE "{app}"."people" ({PG_SYSTEM_COLUMNS},
                 "phone": "415-555-0142",
                 "embedding": [0.1, 0.2, 0.3],
             }]);
-            crate::tests::host::prepare_insert_many_docs_for_tests(
-                &mut docs, app, "people", None,
-            )
-            .await
-            .expect("write pipeline");
+            host.prepare_insert_many_docs(&mut docs, app, "people", None)
+                .await
+                .expect("write pipeline");
 
             // The write pipeline encrypted `ssn` into native bytes
             // and RELOCATED `phone`: the mask moves into the field's OWN column and
@@ -3537,10 +3528,10 @@ CREATE TABLE "{app}"."people" ({PG_SYSTEM_COLUMNS},
             let row =
                 zeroship_data_orm::backend::postgres::pg_row_json::row_to_value(&raw[0]).unwrap();
 
-            let finalized =
-                crate::tests::host::finalize_rows_on_read_for_tests(app, "people", vec![row])
-                    .await
-                    .expect("read pipeline");
+            let finalized = host
+                .finalize_rows_on_read(app, "people", vec![row])
+                .await
+                .expect("read pipeline");
             let out = &finalized[0];
 
             // Encrypted column decrypted back to plaintext (driven by introspected meta).
@@ -3568,7 +3559,7 @@ CREATE TABLE "{app}"."people" ({PG_SYSTEM_COLUMNS},
                 !out.to_string().contains("415-555-0142"),
                 "the real phone number must not appear anywhere in the finalized row, got {out:?}"
             );
-            release_pg(pool).await;
+            release_pg(host, pool).await;
         })
     })
 }
@@ -3618,15 +3609,15 @@ async fn schema_relation_count(pool: &std::rc::Rc<Pool>, app: &str) -> Option<i6
 /// reasoning. The round trip below is unchanged.
 #[test]
 fn p5_pg_crud_works_via_engine_created_schema_without_runtime_ddl() {
-    crate::tests::host::in_test(|| {
-        crate::tests::host::run(async {
-            let (_postgres, url) = require_pg().await;
+    Host::test(|host| {
+        host.run(async {
+            let (_postgres, url) = require_pg(host).await;
             let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
 
             let app = crate::test_app_id!();
 
             let app = app.as_str();
-            let _keys = with_project_key(&[app], &"e".repeat(64));
+            let _keys = host.supply_project_key(&[app], &"e".repeat(64));
             pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
                 .await
                 .unwrap();
@@ -3674,7 +3665,7 @@ CREATE TABLE "{app}"."people" ({PG_SYSTEM_COLUMNS},
 
             // Install the runtime backend and the descriptor entry the runtime plants
             // natively at boot.
-            crate::support::install_postgres_pool(std::rc::Rc::clone(&pool), &url);
+            host.install_postgres_pool(std::rc::Rc::clone(&pool), &url);
             zeroship_data_orm::cache_schema_for_tests(app, "people", schema.clone());
 
             // The resolution the CRUD passes will perform returns BOTH goodies.
@@ -3694,11 +3685,9 @@ CREATE TABLE "{app}"."people" ({PG_SYSTEM_COLUMNS},
                 "ssn": "987-65-4321",
                 "phone": "650-555-0199",
             }]);
-            crate::tests::host::prepare_insert_many_docs_for_tests(
-                &mut docs, app, "people", None,
-            )
-            .await
-            .expect("write pipeline");
+            host.prepare_insert_many_docs(&mut docs, app, "people", None)
+                .await
+                .expect("write pipeline");
             let doc = &docs[0];
             let row_id = doc["id"]
                 .as_str()
@@ -3763,10 +3752,10 @@ CREATE TABLE "{app}"."people" ({PG_SYSTEM_COLUMNS},
             assert_eq!(raw.len(), 1);
             let row =
                 zeroship_data_orm::backend::postgres::pg_row_json::row_to_value(&raw[0]).unwrap();
-            let finalized =
-                crate::tests::host::finalize_rows_on_read_for_tests(app, "people", vec![row])
-                    .await
-                    .expect("read pipeline");
+            let finalized = host
+                .finalize_rows_on_read(app, "people", vec![row])
+                .await
+                .expect("read pipeline");
             let out = &finalized[0];
             assert_eq!(
                 out["ssn"],
@@ -3796,7 +3785,7 @@ CREATE TABLE "{app}"."people" ({PG_SYSTEM_COLUMNS},
             let _ = pool
                 .execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
                 .await;
-            release_pg(pool).await;
+            release_pg(host, pool).await;
         })
     })
 }
@@ -3808,18 +3797,18 @@ CREATE TABLE "{app}"."people" ({PG_SYSTEM_COLUMNS},
 /// or returning Internal.
 #[test]
 fn encrypted_column_missing_key_typed_error() {
-    crate::tests::host::in_test(|| {
-        crate::tests::host::run(async {
-            let (_postgres, url) = require_pg().await;
+    Host::test(|host| {
+        host.run(async {
+            let (_postgres, url) = require_pg(host).await;
             let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
             // Resolve against a source that provably has NO key: an empty
             // supplied set, so the fixture is independent of process configuration.
-            let _keys = with_project_key(&[], &"00".repeat(32));
+            let _keys = host.supply_project_key(&[], &"00".repeat(32));
 
             let backend = zeroship_data_orm::backend::PostgresBackend::new(
                 pool.clone(),
                 url.clone(),
-                crate::tests::host::isolate_key_source(),
+                host.key_source(),
             );
             let err = backend
                 .key_store()
@@ -3833,16 +3822,16 @@ fn encrypted_column_missing_key_typed_error() {
                 other => panic!("expected Configuration column_key_not_configured, got {other:?}"),
             }
             drop(backend);
-            release_pg(pool).await;
+            release_pg(host, pool).await;
         })
     })
 }
 
 #[test]
 fn pg_bytea_decoder_preserves_raw_binary_prefix_bytes() {
-    crate::tests::host::in_test(|| {
-        crate::tests::host::run(async {
-            let (_postgres, url) = require_pg().await;
+    Host::test(|host| {
+        host.run(async {
+            let (_postgres, url) = require_pg(host).await;
             let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
             let rows = pool
                 .query_text_params(
@@ -3869,7 +3858,7 @@ fn pg_bytea_decoder_preserves_raw_binary_prefix_bytes() {
                 "BYTEA decoding must not reinterpret raw binary bytes as a \
          text-protocol \\x... payload",
             );
-            release_pg(pool).await;
+            release_pg(host, pool).await;
         })
     })
 }
@@ -3933,14 +3922,14 @@ fn require_pg_client_tool(tool: &str) {
 /// `pg_dump`.
 #[test]
 fn snapshot_during_migration_returns_typed_error() {
-    crate::tests::host::in_test(|| {
-        crate::tests::host::run(async {
-            let (_postgres, url) = require_pg().await;
+    Host::test(|host| {
+        host.run(async {
+            let (_postgres, url) = require_pg(host).await;
             let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
             let backend = zeroship_data_orm::backend::PostgresBackend::new(
                 pool.clone(),
                 url.clone(),
-                crate::tests::host::isolate_key_source(),
+                host.key_source(),
             );
             let app_id = crate::test_app_id!();
             let app_id = app_id.as_str();
@@ -4011,7 +4000,7 @@ fn snapshot_during_migration_returns_typed_error() {
             drop(lock_client);
             lock_conn_task.detach();
             drop(backend);
-            release_pg(pool).await;
+            release_pg(host, pool).await;
         })
     })
 }
@@ -4025,9 +4014,9 @@ fn snapshot_during_migration_returns_typed_error() {
 /// never performed.
 #[test]
 fn snapshot_restore_round_trip_pg() {
-    crate::tests::host::in_test(|| {
-        crate::tests::host::run(async {
-            let (_postgres, url) = require_pg().await;
+    Host::test(|host| {
+        host.run(async {
+            let (_postgres, url) = require_pg(host).await;
             require_pg_client_tool("pg_dump");
             require_pg_client_tool("pg_restore");
             let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
@@ -4070,7 +4059,7 @@ fn snapshot_restore_round_trip_pg() {
             let backend = zeroship_data_orm::backend::PostgresBackend::new(
                 pool.clone(),
                 url.clone(),
-                crate::tests::host::isolate_key_source(),
+                host.key_source(),
             );
 
             // Snapshot to a tempdir-backed file:// URI.
@@ -4137,7 +4126,7 @@ fn snapshot_restore_round_trip_pg() {
                 .await
                 .unwrap();
             drop(backend);
-            release_pg(pool).await;
+            release_pg(host, pool).await;
         })
     })
 }
@@ -4152,9 +4141,9 @@ fn snapshot_restore_round_trip_pg() {
 /// from the run.
 #[test]
 fn snapshot_uri_content_hash_round_trip() {
-    crate::tests::host::in_test(|| {
-        crate::tests::host::run(async {
-            let (_postgres, url) = require_pg().await;
+    Host::test(|host| {
+        host.run(async {
+            let (_postgres, url) = require_pg(host).await;
             require_pg_client_tool("pg_dump");
             let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
             let app_id = crate::test_app_id!();
@@ -4181,7 +4170,7 @@ fn snapshot_uri_content_hash_round_trip() {
             let backend = zeroship_data_orm::backend::PostgresBackend::new(
                 pool.clone(),
                 url.clone(),
-                crate::tests::host::isolate_key_source(),
+                host.key_source(),
             );
             let dir = tempfile::tempdir().unwrap();
             let dest_path = dir.path().join("hash_check.dump");
@@ -4213,7 +4202,7 @@ fn snapshot_uri_content_hash_round_trip() {
                 .await
                 .unwrap();
             drop(backend);
-            release_pg(pool).await;
+            release_pg(host, pool).await;
         })
     })
 }
@@ -4362,9 +4351,9 @@ async fn require_postgis(pool: &Pool) {
 
 #[test]
 fn per_app_role_created_at_provision() {
-    crate::tests::host::in_test(|| {
-        crate::tests::host::run(async {
-            let (_postgres, url) = require_pg().await;
+    Host::test(|host| {
+        host.run(async {
+            let (_postgres, url) = require_pg(host).await;
             let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
             let app = crate::test_app_id!();
             let app = app.as_str();
@@ -4402,16 +4391,16 @@ fn per_app_role_created_at_provision() {
             let _ = pool
                 .execute(&format!("DROP ROLE IF EXISTS \"{role}\""), &[])
                 .await;
-            release_pg(pool).await;
+            release_pg(host, pool).await;
         })
     })
 }
 
 #[test]
 fn per_app_role_has_no_replication_attr() {
-    crate::tests::host::in_test(|| {
-        crate::tests::host::run(async {
-            let (_postgres, url) = require_pg().await;
+    Host::test(|host| {
+        host.run(async {
+            let (_postgres, url) = require_pg(host).await;
             let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
             let app = crate::test_app_id!();
             let app = app.as_str();
@@ -4441,16 +4430,16 @@ fn per_app_role_has_no_replication_attr() {
             let _ = pool
                 .execute(&format!("DROP ROLE IF EXISTS \"{role}\""), &[])
                 .await;
-            release_pg(pool).await;
+            release_pg(host, pool).await;
         })
     })
 }
 
 #[test]
 fn per_app_role_grant_scoped_to_schema() {
-    crate::tests::host::in_test(|| {
-        crate::tests::host::run(async {
-            let (_postgres, url) = require_pg().await;
+    Host::test(|host| {
+        host.run(async {
+            let (_postgres, url) = require_pg(host).await;
             let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
             let app = crate::test_app_id!();
             let app = app.as_str();
@@ -4503,16 +4492,16 @@ fn per_app_role_grant_scoped_to_schema() {
             let _ = pool
                 .execute(&format!("DROP ROLE IF EXISTS \"{role}\""), &[])
                 .await;
-            release_pg(pool).await;
+            release_pg(host, pool).await;
         })
     })
 }
 
 #[test]
 fn per_app_role_cannot_read_sibling_schema_or_touch_slots() {
-    crate::tests::host::in_test(|| {
-        crate::tests::host::run(async {
-            let (_postgres, url) = require_pg().await;
+    Host::test(|host| {
+        host.run(async {
+            let (_postgres, url) = require_pg(host).await;
             let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
             let app_a = crate::test_app_id!("a");
             let app_a = app_a.as_str();
@@ -4611,19 +4600,19 @@ fn per_app_role_cannot_read_sibling_schema_or_touch_slots() {
             let _ = pool
                 .execute(&format!("DROP ROLE IF EXISTS \"{role_b}\""), &[])
                 .await;
-            release_pg(pool).await;
+            release_pg(host, pool).await;
         })
     })
 }
 
 #[test]
 fn client_sql_runs_under_per_app_role() {
-    crate::tests::host::in_test(|| {
-        crate::tests::host::run(async {
+    Host::test(|host| {
+        host.run(async {
             // Proves the `SET LOCAL ROLE` shape `exec_begin`
             // issue actually switches the effective role for the rest of the tx,
             // and reverts at COMMIT/ROLLBACK.
-            let (_postgres, url) = require_pg().await;
+            let (_postgres, url) = require_pg(host).await;
             let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
             let app = crate::test_app_id!();
             let app = app.as_str();
@@ -4675,18 +4664,18 @@ fn client_sql_runs_under_per_app_role() {
             let _ = pool
                 .execute(&format!("DROP ROLE IF EXISTS \"{role}\""), &[])
                 .await;
-            release_pg(pool).await;
+            release_pg(host, pool).await;
         })
     })
 }
 
 #[test]
 fn exec_autocommit_query_runs_under_per_app_role() {
-    crate::tests::host::in_test(|| {
-        crate::tests::host::run(async {
+    Host::test(|host| {
+        host.run(async {
             // I2 regression: the shared autocommit exec path must switch to the
             // per-app role before running the statement, not just explicit/auto tx.
-            let (_postgres, url) = require_pg().await;
+            let (_postgres, url) = require_pg(host).await;
             let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
             let app = crate::test_app_id!();
             let app = app.as_str();
@@ -4694,17 +4683,18 @@ fn exec_autocommit_query_runs_under_per_app_role() {
             crate::support::roles::ensure_per_app_role(&pool, app)
                 .await
                 .unwrap();
-            crate::tests::host::set_db_url_for_tests(&url);
+            host.set_database_url(&url);
 
-            let rows = crate::tests::host::exec_query_for_tests(
-                app,
-                zeroship_data_sql::compile::BuiltQuery {
-                    sql: "SELECT current_user AS u".to_string(),
-                    params: vec![],
-                },
-            )
-            .await
-            .expect("autocommit exec query");
+            let rows = host
+                .exec_query(
+                    app,
+                    zeroship_data_sql::compile::BuiltQuery {
+                        sql: "SELECT current_user AS u".to_string(),
+                        params: vec![],
+                    },
+                )
+                .await
+                .expect("autocommit exec query");
             let current = rows[0]
                 .get("u")
                 .and_then(Value::as_str)
@@ -4730,18 +4720,18 @@ fn exec_autocommit_query_runs_under_per_app_role() {
             let _ = pool
                 .execute(&format!("DROP ROLE IF EXISTS \"{role}\""), &[])
                 .await;
-            release_pg(pool).await;
+            release_pg(host, pool).await;
         })
     })
 }
 
 #[test]
 fn vector_search_runs_under_per_app_role_via_rls() {
-    crate::tests::host::in_test(|| {
-        crate::tests::host::run(async {
+    Host::test(|host| {
+        host.run(async {
             use zeroship_data_orm::backend::VectorMetric;
 
-            let (_postgres, url) = require_pg().await;
+            let (_postgres, url) = require_pg(host).await;
             let admin_pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
             require_pgvector(&admin_pool).await;
 
@@ -4804,7 +4794,7 @@ fn vector_search_runs_under_per_app_role_via_rls() {
             let backend = zeroship_data_orm::backend::PostgresBackend::new(
                 login_pool.clone(),
                 login_url,
-                crate::tests::host::isolate_key_source(),
+                host.key_source(),
             );
             let rows = zeroship_data_orm::search::Search::vector_search(
                 &backend,
@@ -4840,18 +4830,18 @@ fn vector_search_runs_under_per_app_role_via_rls() {
                 .execute(&format!("DROP ROLE IF EXISTS \"{role}\""), &[])
                 .await;
             drop(backend);
-            release_pg(admin_pool).await;
+            release_pg(host, admin_pool).await;
         })
     })
 }
 
 #[test]
 fn spatial_near_runs_under_per_app_role_via_rls() {
-    crate::tests::host::in_test(|| {
-        crate::tests::host::run(async {
+    Host::test(|host| {
+        host.run(async {
             use zeroship_data_orm::backend::GeoPoint;
 
-            let (_postgres, url) = require_pg().await;
+            let (_postgres, url) = require_pg(host).await;
             let admin_pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
             require_postgis(&admin_pool).await;
 
@@ -4915,7 +4905,7 @@ fn spatial_near_runs_under_per_app_role_via_rls() {
             let backend = zeroship_data_orm::backend::PostgresBackend::new(
                 login_pool.clone(),
                 login_url,
-                crate::tests::host::isolate_key_source(),
+                host.key_source(),
             );
             let rows = zeroship_data_orm::search::Search::spatial_near(
                 &backend,
@@ -4954,18 +4944,18 @@ fn spatial_near_runs_under_per_app_role_via_rls() {
                 .execute(&format!("DROP ROLE IF EXISTS \"{role}\""), &[])
                 .await;
             drop(backend);
-            release_pg(admin_pool).await;
+            release_pg(host, admin_pool).await;
         })
     })
 }
 
 #[test]
 fn unmask_fetch_runs_under_per_app_role_via_rls() {
-    crate::tests::host::in_test(|| {
-        crate::tests::host::run(async {
+    Host::test(|host| {
+        host.run(async {
             use zeroship_data_orm::protection::unmask::{self, UnmaskFieldArgs};
 
-            let (_postgres, url) = require_pg().await;
+            let (_postgres, url) = require_pg(host).await;
             let admin_pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
 
             let app = crate::test_app_id!();
@@ -5027,12 +5017,12 @@ fn unmask_fetch_runs_under_per_app_role_via_rls() {
          the role fence"
             );
 
-            crate::support::install_postgres_pool(login_pool.clone(), &login_url);
+            host.install_postgres_pool(login_pool.clone(), &login_url);
             zeroship_data_orm::cache_schema_for_tests(app, coll, schema);
-            crate::tests::host::clear_mask_policy_cache_for_tests(app);
+            host.clear_mask_policy_cache(app);
 
             let result = unmask::dispatch_unmask(
-                &unmask_route(app).await,
+                &unmask_route(host, app).await,
                 &DbBinding::cold_start(app),
                 UnmaskFieldArgs {
                     collection: coll.to_string(),
@@ -5057,7 +5047,7 @@ fn unmask_fetch_runs_under_per_app_role_via_rls() {
             let _ = admin_pool
                 .execute(&format!("DROP ROLE IF EXISTS \"{role}\""), &[])
                 .await;
-            release_pg(admin_pool).await;
+            release_pg(host, admin_pool).await;
         })
     })
 }
@@ -5095,18 +5085,18 @@ fn unmask_fetch_runs_under_per_app_role_via_rls() {
 /// too. The only new thing is the BYTEA raw column.
 #[test]
 fn unmask_encrypted_column_on_pg_reads_bytea_raw_sibling() {
-    crate::tests::host::in_test(|| {
-        crate::tests::host::run(async {
+    Host::test(|host| {
+        host.run(async {
             use zeroship_data_orm::protection::unmask::{self, UnmaskFieldArgs};
 
-            let (_postgres, url) = require_pg().await;
+            let (_postgres, url) = require_pg(host).await;
             let admin_pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
             // Synthetic 32-byte root key, same shape as the encrypted round-trip gate.
 
             let app = crate::test_app_id!();
 
             let app = app.as_str();
-            let _keys = with_project_key(&[app], &"b".repeat(64));
+            let _keys = host.supply_project_key(&[app], &"b".repeat(64));
             let coll = "users";
             let role = provision_app_with_role(&admin_pool, app).await;
             crate::support::roles::ensure_per_app_role(&admin_pool, app)
@@ -5137,7 +5127,7 @@ fn unmask_encrypted_column_on_pg_reads_bytea_raw_sibling() {
             let backend = zeroship_data_orm::backend::PostgresBackend::new(
                 admin_pool.clone(),
                 url.clone(),
-                crate::tests::host::isolate_key_source(),
+                host.key_source(),
             );
             let key = backend.key_store().resolve(app).await.expect("resolve_key");
             let aad = encryption::canonical_aad(app, coll, "ssn", b"u1");
@@ -5161,12 +5151,12 @@ fn unmask_encrypted_column_on_pg_reads_bytea_raw_sibling() {
                 provision_platform_login_pool(&admin_pool, &url, login_role, "test", &role, app)
                     .await;
 
-            crate::support::install_postgres_pool(login_pool.clone(), &login_url);
+            host.install_postgres_pool(login_pool.clone(), &login_url);
             zeroship_data_orm::cache_schema_for_tests(app, coll, schema);
-            crate::tests::host::clear_mask_policy_cache_for_tests(app);
+            host.clear_mask_policy_cache(app);
 
             let result = unmask::dispatch_unmask(
-                &unmask_route(app).await,
+                &unmask_route(host, app).await,
                 &DbBinding::cold_start(app),
                 UnmaskFieldArgs {
                     collection: coll.to_string(),
@@ -5197,7 +5187,7 @@ fn unmask_encrypted_column_on_pg_reads_bytea_raw_sibling() {
             let _ = admin_pool
                 .execute(&format!("DROP ROLE IF EXISTS \"{role}\""), &[])
                 .await;
-            release_pg(admin_pool).await;
+            release_pg(host, admin_pool).await;
         })
     })
 }
@@ -5226,11 +5216,11 @@ fn unmask_encrypted_column_on_pg_reads_bytea_raw_sibling() {
 /// `pg.pool_handle()` and issued the INSERT on a bare checkout.
 #[test]
 fn unmask_audit_insert_runs_under_the_per_app_role_not_the_login_role() {
-    crate::tests::host::in_test(|| {
-        crate::tests::host::run(async {
+    Host::test(|host| {
+        host.run(async {
             use zeroship_data_orm::protection::unmask::{self, UnmaskFieldArgs};
 
-            let (_postgres, url) = require_pg().await;
+            let (_postgres, url) = require_pg(host).await;
             let admin_pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
 
             let app = crate::test_app_id!();
@@ -5312,12 +5302,12 @@ fn unmask_audit_insert_runs_under_the_per_app_role_not_the_login_role() {
                 "the login role must reach nothing ambiently under WITH INHERIT FALSE"
             );
 
-            crate::support::install_postgres_pool(login_pool.clone(), &login_url);
+            host.install_postgres_pool(login_pool.clone(), &login_url);
             zeroship_data_orm::cache_schema_for_tests(app, coll, schema);
-            crate::tests::host::clear_mask_policy_cache_for_tests(app);
+            host.clear_mask_policy_cache(app);
 
             let result = unmask::dispatch_unmask(
-                &unmask_route(app).await,
+                &unmask_route(host, app).await,
                 &DbBinding::cold_start(app),
                 UnmaskFieldArgs {
                     collection: coll.to_string(),
@@ -5366,7 +5356,7 @@ fn unmask_audit_insert_runs_under_the_per_app_role_not_the_login_role() {
             let _ = admin_pool
                 .execute(&format!("DROP ROLE IF EXISTS \"{role}\""), &[])
                 .await;
-            release_pg(admin_pool).await;
+            release_pg(host, admin_pool).await;
         })
     })
 }
@@ -5375,12 +5365,12 @@ fn unmask_audit_insert_runs_under_the_per_app_role_not_the_login_role() {
 /// database policy store. An undeclared role remains denied.
 #[test]
 fn pg_declared_mask_policy_authorizes_unmask_without_durable_store() {
-    crate::tests::host::in_test(|| {
-        crate::tests::host::run(async {
+    Host::test(|host| {
+        host.run(async {
             use zeroship_data_orm::protection::mask_policy;
             use zeroship_data_orm::protection::unmask::{self, UnmaskFieldArgs};
 
-            let (_postgres, url) = require_pg().await;
+            let (_postgres, url) = require_pg(host).await;
             let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
             let app = crate::test_app_id!();
             let app = app.as_str();
@@ -5424,9 +5414,9 @@ fn pg_declared_mask_policy_authorizes_unmask_without_durable_store() {
             .unwrap();
             support::grant_runtime_select_columns(&pool, app, coll, &["id", &ssn_raw]).await;
 
-            crate::support::install_postgres_pool(pool.clone(), &url);
+            host.install_postgres_pool(pool.clone(), &url);
             zeroship_data_orm::cache_schema_for_tests(app, coll, schema);
-            crate::tests::host::clear_mask_policy_cache_for_tests(app);
+            host.clear_mask_policy_cache(app);
 
             // The boot-time install `installSchema` performs. Before the fix
             // this issued `SELECT set_mask_policy(...)` against the platform-owned
@@ -5439,7 +5429,7 @@ fn pg_declared_mask_policy_authorizes_unmask_without_durable_store() {
 
             // A role the declared policy grants reads through.
             let granted = unmask::dispatch_unmask(
-                &unmask_route(app).await,
+                &unmask_route(host, app).await,
                 &DbBinding::cold_start(app),
                 UnmaskFieldArgs {
                     collection: coll.to_string(),
@@ -5458,7 +5448,7 @@ fn pg_declared_mask_policy_authorizes_unmask_without_durable_store() {
             // test would pass on an implementation that authorized everything,
             // which is exactly the failure mode a cache-only policy could hide.
             let err = unmask::dispatch_unmask(
-                &unmask_route(app).await,
+                &unmask_route(host, app).await,
                 &DbBinding::cold_start(app),
                 UnmaskFieldArgs {
                     collection: coll.to_string(),
@@ -5488,7 +5478,7 @@ fn pg_declared_mask_policy_authorizes_unmask_without_durable_store() {
             let _ = pool
                 .execute(&format!("DROP ROLE IF EXISTS \"{role}\""), &[])
                 .await;
-            release_pg(pool).await;
+            release_pg(host, pool).await;
         })
     })
 }
@@ -5500,10 +5490,10 @@ fn fixture_teardown_closes_connections_after_a_panic() {
     let url = postgres.url();
     std::thread::spawn(move || {
         let result = std::panic::catch_unwind(|| {
-            crate::tests::host::in_test(|| {
-                crate::tests::host::run(async {
-                    crate::tests::host::set_db_url_for_tests(&url);
-                    let backend = crate::tests::host::ensure_backend().await.unwrap();
+            Host::test(|host| {
+                host.run(async {
+                    host.set_database_url(&url);
+                    let backend = host.backend().await.unwrap();
                     backend
                         .get::<zeroship_data_orm::backend::PostgresBackend>()
                         .unwrap()
@@ -5528,14 +5518,14 @@ fn fixture_teardown_closes_connections_after_a_panic() {
 
 #[test]
 fn a_dedicated_client_is_a_pool_checkout_and_returns_on_drop() {
-    crate::tests::host::in_test(|| {
-        crate::tests::host::run(async {
-            let (_postgres, url) = require_pg().await;
+    Host::test(|host| {
+        host.run(async {
+            let (_postgres, url) = require_pg(host).await;
             let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
             let backend = zeroship_data_orm::backend::PostgresBackend::new(
                 std::rc::Rc::clone(&pool),
                 url.clone(),
-                crate::tests::host::isolate_key_source(),
+                host.key_source(),
             );
 
             let active_before = pool.active_count();
@@ -5576,11 +5566,11 @@ fn a_dedicated_client_is_a_pool_checkout_and_returns_on_drop() {
 
 #[test]
 fn concurrent_dedicated_clients_are_bounded_by_the_pool() {
-    crate::tests::host::in_test(|| {
-        crate::tests::host::run(async {
+    Host::test(|host| {
+        host.run(async {
             use std::time::Duration;
 
-            let (_postgres, url) = require_pg().await;
+            let (_postgres, url) = require_pg(host).await;
             // `max_size: 1` makes the ceiling observable in one checkout; a short
             // acquire timeout keeps the queued caller's wait bounded so the test is
             // measuring the ceiling rather than sitting on the 30 s default.
@@ -5597,7 +5587,7 @@ fn concurrent_dedicated_clients_are_bounded_by_the_pool() {
             let backend = zeroship_data_orm::backend::PostgresBackend::new(
                 std::rc::Rc::clone(&pool),
                 url.clone(),
-                crate::tests::host::isolate_key_source(),
+                host.key_source(),
             );
 
             use zeroship_data_orm::fixtures::DatabaseFixture;

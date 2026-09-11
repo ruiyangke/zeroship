@@ -36,6 +36,7 @@
 #[allow(unused_imports)]
 use crate::schema_fixture::{fixture_table_sql, fixture_table_sql_for};
 use crate::support;
+use crate::tests::host::Host;
 #[allow(unused_imports)]
 use zeroship_migrate::schema::query::FkEmission;
 
@@ -71,9 +72,9 @@ async fn require_pg() -> (crate::support::postgres::Postgres, String) {
     }
 }
 
-async fn release_pg(pool: Rc<Pool>) {
+async fn release_pg(host: &Host, pool: Rc<Pool>) {
     drop(pool);
-    crate::tests::host::reset_context_for_tests();
+    host.reset();
     let _ = compio_postgres::drain_connections(std::time::Duration::from_secs(2)).await;
 }
 
@@ -96,11 +97,11 @@ fn masked_schema() -> Value {
 /// Build the app schema from the PLATFORM's own DDL emitter, provision the
 /// audit table and the per-app role the unmask path runs under, and install
 /// the descriptor entry a deploy would have installed.
-async fn fixture(pool: &Rc<Pool>, url: &str, app: &str) {
-    fixture_with_schema(pool, url, app, masked_schema()).await;
+async fn fixture(host: &Host, pool: &Rc<Pool>, url: &str, app: &str) {
+    fixture_with_schema(host, pool, url, app, masked_schema()).await;
 }
 
-async fn fixture_with_schema(pool: &Rc<Pool>, url: &str, app: &str, schema: Value) {
+async fn fixture_with_schema(host: &Host, pool: &Rc<Pool>, url: &str, app: &str, schema: Value) {
     pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
         .await
         .unwrap();
@@ -129,14 +130,14 @@ async fn fixture_with_schema(pool: &Rc<Pool>, url: &str, app: &str, schema: Valu
         .expect("per-app role, as the deploy would provision it");
     support::grant_all_runtime_table_columns(pool, app, "people").await;
 
-    crate::support::install_postgres_pool(Rc::clone(pool), url);
+    host.install_postgres_pool(Rc::clone(pool), url);
     zeroship_data_orm::cache_schema_for_tests(app, "people", schema);
-    crate::tests::host::clear_mask_policy_cache_for_tests(app);
+    host.clear_mask_policy_cache(app);
 }
 
 /// The backend handle the V8 dispatcher would have bound for this dispatch.
-async fn backend() -> zeroship_data_orm::backend::BackendHandle {
-    crate::tests::host::ensure_backend()
+async fn backend(host: &Host) -> zeroship_data_orm::backend::BackendHandle {
+    host.backend()
         .await
         .expect("the backend the V8 dispatcher would have opened")
 }
@@ -148,13 +149,13 @@ async fn backend() -> zeroship_data_orm::backend::BackendHandle {
 /// `Postgres` unconditionally until 2026-09-03, which happened to be right here
 /// and was wrong on every SQLite harness. This target is live-PostgreSQL only
 /// (`require_pg`), so `Postgres` is the answer its connection actually speaks.
-async fn tx_route(app: &str) -> TxRoute {
-    CapturedRoute::tx_for_tests(app, SqlDialect::Postgres).bind(backend().await)
+async fn tx_route(host: &Host, app: &str) -> TxRoute {
+    CapturedRoute::tx_for_tests(app, SqlDialect::Postgres).bind(backend(host).await)
 }
 
 /// A route outside any transaction. Dialect stated, as in [`tx_route`].
-async fn pool_route(app: &str) -> TxRoute {
-    CapturedRoute::pool_for_tests(app, SqlDialect::Postgres).bind(backend().await)
+async fn pool_route(host: &Host, app: &str) -> TxRoute {
+    CapturedRoute::pool_for_tests(app, SqlDialect::Postgres).bind(backend(host).await)
 }
 
 /// Insert one document through the real `run_insert` on `route`, returning the
@@ -216,30 +217,35 @@ fn code_of(err: &DbError) -> String {
 /// took.
 #[test]
 fn a_find_unmask_inside_a_transaction_reaches_the_row_that_transaction_inserted() {
-    crate::tests::host::in_test(|| {
-        crate::tests::host::run(async {
+    Host::test(|host| {
+        host.run(async {
             let (_postgres, url) = require_pg().await;
             let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
             let app = "unmask_lane_uncommitted";
-            fixture(&pool, &url, app).await;
+            fixture(host, &pool, &url, app).await;
             // A policy the request's actor satisfies, so the fence GRANTS and the
             // failure below cannot be an authorization refusal wearing another code.
             install_mask_policy(&DbBinding::cold_start(app), value!({ "support": ["pci"] }))
                 .expect("install the app's declared mask policy");
 
-            crate::support::begin_transaction(app, &url).await;
+            host.begin_transaction(app, &url).await;
 
             let id = insert_on(
-                tx_route(app).await,
+                tx_route(host, app).await,
                 app,
                 value!({ "ssn": "123-45-6789", "nickname": "aaa" }),
             )
             .await;
 
             // ---- CONTROL: the same find, same route, same row, no unmask hint.
-            let rows = find_on(tx_route(app).await, app, value!({ "id": &id }), value!({}))
-                .await
-                .expect("a plain find inside the transaction must see the row it inserted");
+            let rows = find_on(
+                tx_route(host, app).await,
+                app,
+                value!({ "id": &id }),
+                value!({}),
+            )
+            .await
+            .expect("a plain find inside the transaction must see the row it inserted");
             assert_eq!(
                 rows.len(),
                 1,
@@ -254,7 +260,7 @@ fn a_find_unmask_inside_a_transaction_reaches_the_row_that_transaction_inserted(
             // visibility accident. Same row, same instant, a route that differs only in
             // `in_tx`.
             let outside = find_on(
-                pool_route(app).await,
+                pool_route(host, app).await,
                 app,
                 value!({ "id": &id }),
                 value!({}),
@@ -269,7 +275,7 @@ fn a_find_unmask_inside_a_transaction_reaches_the_row_that_transaction_inserted(
 
             // ---- SUBJECT: the same find with the unmask hint.
             let unmasked = find_on(
-                tx_route(app).await,
+                tx_route(host, app).await,
                 app,
                 value!({ "id": &id }),
                 value!({
@@ -280,7 +286,7 @@ fn a_find_unmask_inside_a_transaction_reaches_the_row_that_transaction_inserted(
             )
             .await;
 
-            crate::tests::host::rollback_transaction_for_tests(app).await;
+            host.rollback_transaction(app).await;
 
             let unmasked = unmasked.unwrap_or_else(|e| {
                 panic!(
@@ -298,7 +304,7 @@ fn a_find_unmask_inside_a_transaction_reaches_the_row_that_transaction_inserted(
                 "the unmask hint must promote the plaintext: {unmasked:?}",
             );
 
-            release_pg(pool).await;
+            release_pg(host, pool).await;
         })
     })
 }
@@ -323,12 +329,12 @@ fn a_find_unmask_inside_a_transaction_reaches_the_row_that_transaction_inserted(
 /// would also be satisfied by a transaction that never rolled back at all.
 #[test]
 fn a_denied_unmask_audit_row_survives_the_rollback_of_its_transaction() {
-    crate::tests::host::in_test(|| {
-        crate::tests::host::run(async {
+    Host::test(|host| {
+        host.run(async {
             let (_postgres, url) = require_pg().await;
             let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
             let app = "unmask_lane_denied_audit";
-            fixture(&pool, &url, app).await;
+            fixture(host, &pool, &url, app).await;
             // The policy grants `support` and nothing else, so `intern` below is
             // refused by the policy path rather than by the no-policy fallback.
             install_mask_policy(&DbBinding::cold_start(app), value!({ "support": ["pci"] }))
@@ -337,7 +343,7 @@ fn a_denied_unmask_audit_row_survives_the_rollback_of_its_transaction() {
             // A committed row for the denied attempt to name. Committed so the arm
             // cannot be confused with consequence 1.
             let committed = insert_on(
-                pool_route(app).await,
+                pool_route(host, app).await,
                 app,
                 value!({ "ssn": "111-11-1111", "nickname": "committed" }),
             )
@@ -348,19 +354,19 @@ fn a_denied_unmask_audit_row_survives_the_rollback_of_its_transaction() {
                 "no unmask has been attempted yet",
             );
 
-            crate::support::begin_transaction(app, &url).await;
+            host.begin_transaction(app, &url).await;
 
             // The control write: an ordinary insert that shares the transaction the
             // denied attempt is made inside.
             let rolled_back = insert_on(
-                tx_route(app).await,
+                tx_route(host, app).await,
                 app,
                 value!({ "ssn": "222-22-2222", "nickname": "rolled back" }),
             )
             .await;
 
             let err = find_on(
-                tx_route(app).await,
+                tx_route(host, app).await,
                 app,
                 value!({ "id": &committed }),
                 value!({
@@ -378,7 +384,7 @@ fn a_denied_unmask_audit_row_survives_the_rollback_of_its_transaction() {
             );
 
             // ROLLBACK the transaction both writes were made inside.
-            crate::tests::host::rollback_transaction_for_tests(app).await;
+            host.rollback_transaction(app).await;
 
             // ---- CONTROL: the ordinary write inside that transaction is gone.
             let surviving = pool
@@ -412,7 +418,7 @@ fn a_denied_unmask_audit_row_survives_the_rollback_of_its_transaction() {
                 "the audit row names the logical field",
             );
 
-            release_pg(pool).await;
+            release_pg(host, pool).await;
         })
     })
 }
@@ -437,23 +443,22 @@ fn a_denied_unmask_audit_row_survives_the_rollback_of_its_transaction() {
 /// fixture.
 #[test]
 fn an_encrypted_unmask_inside_a_transaction_reaches_the_row_that_transaction_inserted() {
-    crate::tests::host::in_test(|| {
-        crate::tests::host::run(async {
+    Host::test(|host| {
+        host.run(async {
             let (_postgres, url) = require_pg().await;
             let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
             let app = "unmask_lane_encrypted";
             // A synthetic 32-byte root, supplied to THIS isolate. The write pipeline
             // encrypts with it and the unmask fetch decrypts with it.
-            let _keys =
-                crate::tests::host::supply_project_key_for_tests(&[app], &"c".repeat(64));
-            fixture_with_schema(&pool, &url, app, encrypted_schema()).await;
+            let _keys = host.supply_project_key(&[app], &"c".repeat(64));
+            fixture_with_schema(host, &pool, &url, app, encrypted_schema()).await;
             install_mask_policy(&DbBinding::cold_start(app), value!({ "support": ["pci"] }))
                 .expect("install the app's declared mask policy");
 
-            crate::support::begin_transaction(app, &url).await;
+            host.begin_transaction(app, &url).await;
 
             let id = insert_on(
-                tx_route(app).await,
+                tx_route(host, app).await,
                 app,
                 value!({ "ssn": "123-45-6789", "nickname": "aaa" }),
             )
@@ -470,7 +475,7 @@ fn an_encrypted_unmask_inside_a_transaction_reaches_the_row_that_transaction_ins
 
             // ---- CONTROL: outside the transaction the row is genuinely unreachable.
             let outside = zeroship_data_orm::protection::unmask::dispatch_unmask(
-                &pool_route(app).await,
+                &pool_route(host, app).await,
                 &DbBinding::cold_start(app),
                 args(),
             )
@@ -484,13 +489,13 @@ fn an_encrypted_unmask_inside_a_transaction_reaches_the_row_that_transaction_ins
 
             // ---- SUBJECT: the same call on the transaction's own lane.
             let inside = zeroship_data_orm::protection::unmask::dispatch_unmask(
-                &tx_route(app).await,
+                &tx_route(host, app).await,
                 &DbBinding::cold_start(app),
                 args(),
             )
             .await;
 
-            crate::tests::host::rollback_transaction_for_tests(app).await;
+            host.rollback_transaction(app).await;
 
             let inside = inside.unwrap_or_else(|e| {
                 panic!(
@@ -504,7 +509,7 @@ fn an_encrypted_unmask_inside_a_transaction_reaches_the_row_that_transaction_ins
                 "the ciphertext must be read on the transaction's connection and decrypted",
             );
 
-            release_pg(pool).await;
+            release_pg(host, pool).await;
         })
     })
 }
