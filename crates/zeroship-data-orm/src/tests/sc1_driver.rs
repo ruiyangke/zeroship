@@ -1,12 +1,9 @@
+use crate::tests::host::Host;
 use compio_postgres::{Client, NoTls, Pool};
 use zeroship_data_orm::transaction::probe;
 use zeroship_data_orm::transaction::reducer::{
     CleanupCause, SessionOwnership, TerminalOutcome, TxState,
 };
-
-fn block_on<F: std::future::Future>(f: F) -> F::Output {
-    crate::tests::host::in_test(|| crate::tests::host::run(f))
-}
 
 /// The backend `probe::begin` takes as a parameter.
 ///
@@ -25,8 +22,8 @@ fn app_schema(app_id: &str) -> zeroship_data_sql::SchemaName {
     zeroship_data_sql::SchemaName::new(app_id).expect("fixture schema name")
 }
 
-async fn probe_backend() -> zeroship_data_orm::backend::BackendHandle {
-    crate::tests::host::ensure_backend()
+async fn probe_backend(host: &Host) -> zeroship_data_orm::backend::BackendHandle {
+    host.backend()
         .await
         .expect("the adapter funnel must open a backend before BEGIN")
 }
@@ -61,7 +58,7 @@ async fn admin(url: &str) -> Client {
 /// "did the session come back" is answerable by taking the next checkout and
 /// comparing its backend PID, with no chance of being handed a different
 /// idle entry.
-async fn provision(app_id: &str) -> (crate::support::postgres::Postgres, Client) {
+async fn provision(host: &Host, app_id: &str) -> (crate::support::postgres::Postgres, Client) {
     let postgres = crate::support::postgres::Postgres::start();
     let url = postgres.url();
     let client = admin(&url).await;
@@ -84,14 +81,14 @@ async fn provision(app_id: &str) -> (crate::support::postgres::Postgres, Client)
     let pool = Pool::connect(&url, 1)
         .await
         .expect("a one-connection pool for the driver to check out from");
-    crate::support::install_postgres_pool(std::rc::Rc::new(pool), &url);
+    host.install_postgres_pool(std::rc::Rc::new(pool), &url);
     (postgres, client)
 }
 
 /// Drop everything the arm created, and clear this thread's driver state.
-async fn teardown(admin: &Client, app_id: &str) {
+async fn teardown(host: &Host, admin: &Client, app_id: &str) {
     probe::reset(app_id);
-    crate::tests::host::reset_context_for_tests();
+    host.reset();
     let role = zeroship_core::database_role::per_app_role_name(app_id)
         .expect("transaction fixture app id must produce a valid PostgreSQL role name");
     let _ = admin
@@ -112,12 +109,12 @@ async fn teardown(admin: &Client, app_id: &str) {
 /// unrelated failure in `transaction_rolls_back_on_async_reject`: a count of
 /// "how many tests did this mutation redden" that includes collateral from
 /// the harness measures the harness, not the code.
-struct SessionGuard(&'static str);
+struct SessionGuard<'a>(&'a Host, &'static str);
 
-impl Drop for SessionGuard {
+impl Drop for SessionGuard<'_> {
     fn drop(&mut self) {
-        probe::reset(self.0);
-        crate::tests::host::reset_context_for_tests();
+        probe::reset(self.1);
+        self.0.reset();
     }
 }
 
@@ -166,73 +163,76 @@ async fn provision_settlement_table(admin: &Client, app_id: &str) {
 
 #[test]
 fn root_rollback_waits_for_the_active_statement_before_returning() {
-    use zeroship_data_orm::transaction::{SettleOutcome, exec_settle};
+    Host::test(|host| {
+        use zeroship_data_orm::transaction::{SettleOutcome, exec_settle};
 
-    const APP: &str = "zs_sc1drv_waitrollback";
-    block_on(async {
-        let (_postgres, admin) = provision(APP).await;
-        let _session_guard = SessionGuard(APP);
-        provision_settlement_table(&admin, APP).await;
-        admin
-            .batch_execute("SELECT pg_advisory_lock(71001)")
-            .await
-            .unwrap();
-        probe::begin(APP, app_schema(APP), None, probe_backend().await)
-            .await
-            .expect("BEGIN");
-        let pid = probe::session_backend_pid(APP).unwrap();
-        let operation = compio::runtime::spawn(async {
-            probe::operation(
-                APP,
-                &format!(
-                    "INSERT INTO \"{APP}\".settlement SELECT 1 \
+        const APP: &str = "zs_sc1drv_waitrollback";
+        host.run(async {
+            let (_postgres, admin) = provision(host, APP).await;
+            let _session_guard = SessionGuard(host, APP);
+            provision_settlement_table(&admin, APP).await;
+            admin
+                .batch_execute("SELECT pg_advisory_lock(71001)")
+                .await
+                .unwrap();
+            probe::begin(APP, app_schema(APP), None, probe_backend(host).await)
+                .await
+                .expect("BEGIN");
+            let pid = probe::session_backend_pid(APP).unwrap();
+            let operation = compio::runtime::spawn(async {
+                probe::operation(
+                    APP,
+                    &format!(
+                        "INSERT INTO \"{APP}\".settlement SELECT 1 \
                      FROM pg_advisory_xact_lock(71001)"
-                ),
-            )
-            .await
+                    ),
+                )
+                .await
+            });
+            wait_for_advisory_block(&admin, pid, "INSERT").await;
+
+            let mut settlement = Box::pin(exec_settle(APP, false, None));
+            assert!(
+                futures::poll!(&mut settlement).is_pending(),
+                "rollback cannot return while the statement still owns its session"
+            );
+            assert_eq!(probe::state(APP), Some(TxState::Quiescing));
+            assert_eq!(settlement_rows(&admin, APP).await, 0);
+
+            admin
+                .batch_execute("SELECT pg_advisory_unlock(71001)")
+                .await
+                .unwrap();
+            operation
+                .await
+                .unwrap()
+                .expect("the blocked insert finishes");
+            assert!(matches!(settlement.await, SettleOutcome::Ok));
+            assert_eq!(settlement_rows(&admin, APP).await, 0);
+            assert_eq!(probe::state(APP), None);
+            assert_eq!(
+                host.pool_counts(),
+                Some((1, 0, 1)),
+                "settlement returns after releasing its session"
+            );
+            teardown(host, &admin, APP).await;
         });
-        wait_for_advisory_block(&admin, pid, "INSERT").await;
-
-        let mut settlement = Box::pin(exec_settle(APP, false, None));
-        assert!(
-            futures::poll!(&mut settlement).is_pending(),
-            "rollback cannot return while the statement still owns its session"
-        );
-        assert_eq!(probe::state(APP), Some(TxState::Quiescing));
-        assert_eq!(settlement_rows(&admin, APP).await, 0);
-
-        admin
-            .batch_execute("SELECT pg_advisory_unlock(71001)")
-            .await
-            .unwrap();
-        operation
-            .await
-            .unwrap()
-            .expect("the blocked insert finishes");
-        assert!(matches!(settlement.await, SettleOutcome::Ok));
-        assert_eq!(settlement_rows(&admin, APP).await, 0);
-        assert_eq!(probe::state(APP), None);
-        assert_eq!(
-            crate::tests::host::pool_counts_for_tests(),
-            Some((1, 0, 1)),
-            "settlement returns after releasing its session"
-        );
-        teardown(&admin, APP).await;
-    });
+    })
 }
 
 #[test]
 fn root_commit_waits_for_terminal_sql_and_keeps_its_attempt_result() {
-    use zeroship_data_orm::transaction::{SettleOutcome, exec_settle};
+    Host::test(|host| {
+        use zeroship_data_orm::transaction::{SettleOutcome, exec_settle};
 
-    const APP: &str = "zs_sc1drv_waitcommit";
-    block_on(async {
-        let (_postgres, admin) = provision(APP).await;
-        let _session_guard = SessionGuard(APP);
-        provision_settlement_table(&admin, APP).await;
-        admin
-            .batch_execute(&format!(
-                "CREATE FUNCTION \"{APP}\".commit_barrier() RETURNS trigger \
+        const APP: &str = "zs_sc1drv_waitcommit";
+        host.run(async {
+            let (_postgres, admin) = provision(host, APP).await;
+            let _session_guard = SessionGuard(host, APP);
+            provision_settlement_table(&admin, APP).await;
+            admin
+                .batch_execute(&format!(
+                    "CREATE FUNCTION \"{APP}\".commit_barrier() RETURNS trigger \
                    LANGUAGE plpgsql AS $$ BEGIN \
                      PERFORM pg_advisory_xact_lock(71003); RETURN NEW; END $$; \
                  CREATE CONSTRAINT TRIGGER commit_barrier \
@@ -241,139 +241,142 @@ fn root_commit_waits_for_terminal_sql_and_keeps_its_attempt_result() {
                    EXECUTE FUNCTION \"{APP}\".commit_barrier(); \
                  SELECT pg_advisory_lock(71002); \
                  SELECT pg_advisory_lock(71003)"
-            ))
-            .await
-            .expect("hold distinct barriers for the statement and COMMIT");
-        probe::begin(APP, app_schema(APP), None, probe_backend().await)
-            .await
-            .expect("BEGIN");
-        let pid = probe::session_backend_pid(APP).unwrap();
-        let operation = compio::runtime::spawn(async {
-            probe::operation(
-                APP,
-                &format!(
-                    "INSERT INTO \"{APP}\".settlement SELECT 1 \
+                ))
+                .await
+                .expect("hold distinct barriers for the statement and COMMIT");
+            probe::begin(APP, app_schema(APP), None, probe_backend(host).await)
+                .await
+                .expect("BEGIN");
+            let pid = probe::session_backend_pid(APP).unwrap();
+            let operation = compio::runtime::spawn(async {
+                probe::operation(
+                    APP,
+                    &format!(
+                        "INSERT INTO \"{APP}\".settlement SELECT 1 \
                      FROM pg_advisory_xact_lock(71002)"
-                ),
-            )
-            .await
+                    ),
+                )
+                .await
+            });
+            wait_for_advisory_block(&admin, pid, "INSERT").await;
+
+            let mut settlement = Box::pin(exec_settle(APP, true, None));
+            assert!(
+                futures::poll!(&mut settlement).is_pending(),
+                "commit must wait for the outstanding statement"
+            );
+            assert_eq!(probe::state(APP), Some(TxState::Quiescing));
+            admin
+                .batch_execute("SELECT pg_advisory_unlock(71002)")
+                .await
+                .unwrap();
+            wait_for_advisory_block(&admin, pid, "COMMIT").await;
+            assert!(
+                futures::poll!(&mut settlement).is_pending(),
+                "statement completion alone does not prove COMMIT completed"
+            );
+            assert_eq!(settlement_rows(&admin, APP).await, 0);
+            admin
+                .batch_execute("SELECT pg_advisory_unlock(71003)")
+                .await
+                .unwrap();
+            operation
+                .await
+                .unwrap()
+                .expect("the insert and its terminal action finish");
+            assert_eq!(probe::state(APP), None);
+            assert_eq!(settlement_rows(&admin, APP).await, 1);
+
+            // Reuse the lane before polling the old caller's completed wait.
+            probe::begin(APP, app_schema(APP), None, probe_backend(host).await)
+                .await
+                .expect("the released session admits a replacement transaction");
+            assert_eq!(probe::session_backend_pid(APP), Some(pid));
+            assert!(matches!(settlement.await, SettleOutcome::Ok));
+            assert_eq!(probe::state(APP), Some(TxState::Idle));
+            probe::operation(APP, &format!("INSERT INTO \"{APP}\".settlement VALUES (2)"))
+                .await
+                .unwrap();
+            assert!(matches!(
+                exec_settle(APP, false, None).await,
+                SettleOutcome::Ok
+            ));
+            assert_eq!(settlement_rows(&admin, APP).await, 1);
+            teardown(host, &admin, APP).await;
         });
-        wait_for_advisory_block(&admin, pid, "INSERT").await;
-
-        let mut settlement = Box::pin(exec_settle(APP, true, None));
-        assert!(
-            futures::poll!(&mut settlement).is_pending(),
-            "commit must wait for the outstanding statement"
-        );
-        assert_eq!(probe::state(APP), Some(TxState::Quiescing));
-        admin
-            .batch_execute("SELECT pg_advisory_unlock(71002)")
-            .await
-            .unwrap();
-        wait_for_advisory_block(&admin, pid, "COMMIT").await;
-        assert!(
-            futures::poll!(&mut settlement).is_pending(),
-            "statement completion alone does not prove COMMIT completed"
-        );
-        assert_eq!(settlement_rows(&admin, APP).await, 0);
-        admin
-            .batch_execute("SELECT pg_advisory_unlock(71003)")
-            .await
-            .unwrap();
-        operation
-            .await
-            .unwrap()
-            .expect("the insert and its terminal action finish");
-        assert_eq!(probe::state(APP), None);
-        assert_eq!(settlement_rows(&admin, APP).await, 1);
-
-        // Reuse the lane before polling the old caller's completed wait.
-        probe::begin(APP, app_schema(APP), None, probe_backend().await)
-            .await
-            .expect("the released session admits a replacement transaction");
-        assert_eq!(probe::session_backend_pid(APP), Some(pid));
-        assert!(matches!(settlement.await, SettleOutcome::Ok));
-        assert_eq!(probe::state(APP), Some(TxState::Idle));
-        probe::operation(APP, &format!("INSERT INTO \"{APP}\".settlement VALUES (2)"))
-            .await
-            .unwrap();
-        assert!(matches!(
-            exec_settle(APP, false, None).await,
-            SettleOutcome::Ok
-        ));
-        assert_eq!(settlement_rows(&admin, APP).await, 1);
-        teardown(&admin, APP).await;
-    });
+    })
 }
 
 #[test]
 fn root_settlement_observes_deadline_cleanup_of_a_blocked_statement() {
-    use zeroship_data_orm::error::DbError;
-    use zeroship_data_orm::transaction::reducer::deadline::DeadlineKind;
-    use zeroship_data_orm::transaction::{SettleOutcome, exec_settle};
+    Host::test(|host| {
+        use zeroship_data_orm::error::DbError;
+        use zeroship_data_orm::transaction::reducer::deadline::DeadlineKind;
+        use zeroship_data_orm::transaction::{SettleOutcome, exec_settle};
 
-    const APP: &str = "zs_sc1drv_waitdeadline";
-    block_on(async {
-        let (_postgres, admin) = provision(APP).await;
-        let _session_guard = SessionGuard(APP);
-        provision_settlement_table(&admin, APP).await;
-        admin
-            .batch_execute("SELECT pg_advisory_lock(71004)")
-            .await
-            .unwrap();
-        probe::begin(APP, app_schema(APP), None, probe_backend().await)
-            .await
-            .expect("BEGIN");
-        let pid = probe::session_backend_pid(APP).unwrap();
-        let operation = compio::runtime::spawn(async {
-            probe::operation(
-                APP,
-                &format!(
-                    "INSERT INTO \"{APP}\".settlement SELECT 1 \
+        const APP: &str = "zs_sc1drv_waitdeadline";
+        host.run(async {
+            let (_postgres, admin) = provision(host, APP).await;
+            let _session_guard = SessionGuard(host, APP);
+            provision_settlement_table(&admin, APP).await;
+            admin
+                .batch_execute("SELECT pg_advisory_lock(71004)")
+                .await
+                .unwrap();
+            probe::begin(APP, app_schema(APP), None, probe_backend(host).await)
+                .await
+                .expect("BEGIN");
+            let pid = probe::session_backend_pid(APP).unwrap();
+            let operation = compio::runtime::spawn(async {
+                probe::operation(
+                    APP,
+                    &format!(
+                        "INSERT INTO \"{APP}\".settlement SELECT 1 \
                      FROM pg_advisory_xact_lock(71004)"
-                ),
-            )
-            .await
+                    ),
+                )
+                .await
+            });
+            wait_for_advisory_block(&admin, pid, "INSERT").await;
+            let mut settlement = Box::pin(exec_settle(APP, false, None));
+            assert!(futures::poll!(&mut settlement).is_pending());
+            let expired = probe::fire_execution_deadline(APP).await;
+            assert_eq!(
+                expired.outcome,
+                Some(TerminalOutcome::Cancelled(CleanupCause::DeadlineExpired(
+                    DeadlineKind::Execution
+                )))
+            );
+            let error = operation
+                .await
+                .unwrap()
+                .expect_err("PostgreSQL cancels the insert");
+            assert!(
+                error
+                    .message_str()
+                    .contains("canceling statement due to user request")
+            );
+            match settlement.await {
+                SettleOutcome::SettleErr(DbError::Coded { code, .. }) => {
+                    assert_eq!(code, "transaction_deadline_expired");
+                }
+                outcome => {
+                    panic!("the waiter must receive the confirmed deadline outcome: {outcome:?}")
+                }
+            }
+            assert_eq!(settlement_rows(&admin, APP).await, 0);
+            assert_eq!(
+                host.pool_counts(),
+                Some((1, 0, 1)),
+                "the healthy connection is reusable after confirmed rollback"
+            );
+            admin
+                .batch_execute("SELECT pg_advisory_unlock(71004)")
+                .await
+                .unwrap();
+            teardown(host, &admin, APP).await;
         });
-        wait_for_advisory_block(&admin, pid, "INSERT").await;
-        let mut settlement = Box::pin(exec_settle(APP, false, None));
-        assert!(futures::poll!(&mut settlement).is_pending());
-        let expired = probe::fire_execution_deadline(APP).await;
-        assert_eq!(
-            expired.outcome,
-            Some(TerminalOutcome::Cancelled(CleanupCause::DeadlineExpired(
-                DeadlineKind::Execution
-            )))
-        );
-        let error = operation
-            .await
-            .unwrap()
-            .expect_err("PostgreSQL cancels the insert");
-        assert!(
-            error
-                .message_str()
-                .contains("canceling statement due to user request")
-        );
-        match settlement.await {
-            SettleOutcome::SettleErr(DbError::Coded { code, .. }) => {
-                assert_eq!(code, "transaction_deadline_expired");
-            }
-            outcome => {
-                panic!("the waiter must receive the confirmed deadline outcome: {outcome:?}")
-            }
-        }
-        assert_eq!(settlement_rows(&admin, APP).await, 0);
-        assert_eq!(
-            crate::tests::host::pool_counts_for_tests(),
-            Some((1, 0, 1)),
-            "the healthy connection is reusable after confirmed rollback"
-        );
-        admin
-            .batch_execute("SELECT pg_advisory_unlock(71004)")
-            .await
-            .unwrap();
-        teardown(&admin, APP).await;
-    });
+    })
 }
 
 /// **The oracle-sampling trap, as an assertion.**
@@ -396,76 +399,77 @@ fn root_settlement_observes_deadline_cleanup_of_a_blocked_statement() {
 /// session reads `Withdrawn`, and the pool loses its only connection.
 #[test]
 fn a_forced_cleanup_on_a_poisoned_block_keeps_a_healthy_connection() {
-    const APP: &str = "zs_sc1drv_poisoned";
-    block_on(async {
-        let (_postgres, admin) = provision(APP).await;
-        let _session_guard = SessionGuard(APP);
+    Host::test(|host| {
+        const APP: &str = "zs_sc1drv_poisoned";
+        host.run(async {
+            let (_postgres, admin) = provision(host, APP).await;
+            let _session_guard = SessionGuard(host, APP);
 
-        probe::begin(APP, app_schema(APP), None, probe_backend().await)
-            .await
-            .expect("BEGIN");
-        probe::operation(APP, &format!("CREATE TABLE \"{APP}\".kept (id int)"))
-            .await
-            .expect("a statement inside the transaction");
+            probe::begin(APP, app_schema(APP), None, probe_backend(host).await)
+                .await
+                .expect("BEGIN");
+            probe::operation(APP, &format!("CREATE TABLE \"{APP}\".kept (id int)"))
+                .await
+                .expect("a statement inside the transaction");
 
-        // Poison the block with a real server-side error. A creator callback
-        // can swallow exactly this and carry on, which is what makes a
-        // forced cleanup of a poisoned transaction an ordinary case.
-        let poisoned = probe::operation(APP, "SELECT 1 / 0").await;
-        assert!(poisoned.is_err(), "the block must actually be poisoned");
-        assert_eq!(
-            probe::state(APP),
-            Some(TxState::Poisoned),
-            "a statement that errored parks the transaction where PostgreSQL \
+            // Poison the block with a real server-side error. A creator callback
+            // can swallow exactly this and carry on, which is what makes a
+            // forced cleanup of a poisoned transaction an ordinary case.
+            let poisoned = probe::operation(APP, "SELECT 1 / 0").await;
+            assert!(poisoned.is_err(), "the block must actually be poisoned");
+            assert_eq!(
+                probe::state(APP),
+                Some(TxState::Poisoned),
+                "a statement that errored parks the transaction where PostgreSQL \
              has already put it"
-        );
-        let pid_before = probe::session_backend_pid(APP).expect("a pinned session");
+            );
+            let pid_before = probe::session_backend_pid(APP).expect("a pinned session");
 
-        // Force it. Cleanup runs from Cancelling, which is the state whose
-        // oracle read is the trap.
-        let forced = probe::cancel(APP).await;
+            // Force it. Cleanup runs from Cancelling, which is the state whose
+            // oracle read is the trap.
+            let forced = probe::cancel(APP).await;
 
-        assert_eq!(
-            forced.outcome,
-            Some(TerminalOutcome::Cancelled(CleanupCause::Cancelled)),
-            "the cleanup ROLLBACK succeeds from a poisoned block and PROVES \
+            assert_eq!(
+                forced.outcome,
+                Some(TerminalOutcome::Cancelled(CleanupCause::Cancelled)),
+                "the cleanup ROLLBACK succeeds from a poisoned block and PROVES \
              CleanupGoal::OpenTransaction; sampling the oracle before it \
              reads None, which is indeterminate and withdraws"
-        );
-        assert_ne!(
-            forced.session,
-            Some(SessionOwnership::Withdrawn),
-            "a poisoned block is a HEALTHY connection once it is rolled back - \
+            );
+            assert_ne!(
+                forced.session,
+                Some(SessionOwnership::Withdrawn),
+                "a poisoned block is a HEALTHY connection once it is rolled back - \
              withdrawing it destroys a connection on every forced cleanup"
-        );
-        assert!(
-            !probe::withdrawn(APP),
-            "no withdrawal tombstone may be set for a proved cleanup"
-        );
+            );
+            assert!(
+                !probe::withdrawn(APP),
+                "no withdrawal tombstone may be set for a proved cleanup"
+            );
 
-        // The connection is back in the pool and reusable: the next checkout
-        // is the SAME backend. With max_size = 1 there is nothing else it
-        // could be handed.
-        let (idle, active, total) =
-            crate::tests::host::pool_counts_for_tests().expect("a pool is installed");
-        assert_eq!(
-            (idle, active, total),
-            (1, 0, 1),
-            "a released session returns to the pool as idle"
-        );
-        probe::begin(APP, app_schema(APP), None, probe_backend().await)
-            .await
-            .expect("a second BEGIN reuses it");
-        assert_eq!(
-            probe::session_backend_pid(APP),
-            Some(pid_before),
-            "the very same physical connection served the next transaction"
-        );
-        let settled = probe::settle(APP, false).await;
-        assert_eq!(settled.outcome, Some(TerminalOutcome::RolledBack));
+            // The connection is back in the pool and reusable: the next checkout
+            // is the SAME backend. With max_size = 1 there is nothing else it
+            // could be handed.
+            let (idle, active, total) = host.pool_counts().expect("a pool is installed");
+            assert_eq!(
+                (idle, active, total),
+                (1, 0, 1),
+                "a released session returns to the pool as idle"
+            );
+            probe::begin(APP, app_schema(APP), None, probe_backend(host).await)
+                .await
+                .expect("a second BEGIN reuses it");
+            assert_eq!(
+                probe::session_backend_pid(APP),
+                Some(pid_before),
+                "the very same physical connection served the next transaction"
+            );
+            let settled = probe::settle(APP, false).await;
+            assert_eq!(settled.outcome, Some(TerminalOutcome::RolledBack));
 
-        teardown(&admin, APP).await;
-    });
+            teardown(host, &admin, APP).await;
+        });
+    })
 }
 
 /// **`WithdrawSession` genuinely withdraws - and this is the arm that says
@@ -507,95 +511,95 @@ fn a_forced_cleanup_on_a_poisoned_block_keeps_a_healthy_connection() {
 /// protocol withdrew.
 #[test]
 fn a_withdrawn_session_never_comes_back_from_the_pool() {
-    const APP: &str = "zs_sc1drv_withdraw";
-    block_on(async {
-        let (_postgres, admin) = provision(APP).await;
-        let _session_guard = SessionGuard(APP);
+    Host::test(|host| {
+        const APP: &str = "zs_sc1drv_withdraw";
+        host.run(async {
+            let (_postgres, admin) = provision(host, APP).await;
+            let _session_guard = SessionGuard(host, APP);
 
-        probe::begin(APP, app_schema(APP), None, probe_backend().await)
-            .await
-            .expect("BEGIN");
-        let (_, _, total_before) =
-            crate::tests::host::pool_counts_for_tests().expect("a pool is installed");
-        assert_eq!(total_before, 1, "one connection, checked out");
+            probe::begin(APP, app_schema(APP), None, probe_backend(host).await)
+                .await
+                .expect("BEGIN");
+            let (_, _, total_before) = host.pool_counts().expect("a pool is installed");
+            assert_eq!(total_before, 1, "one connection, checked out");
 
-        // Another future owns the session, and NOTHING IS RUNNING ON IT.
-        // A cancel delivered to this backend is discarded by the server, so
-        // cleanup cannot free the session and backend health stays unknown -
-        // which is the case SC-1 answers with a withdrawal.
-        let held = probe::HeldSession::take(APP).expect("hold the session");
-        let withdrawn_pid = held.backend_pid().expect("a Postgres session");
+            // Another future owns the session, and NOTHING IS RUNNING ON IT.
+            // A cancel delivered to this backend is discarded by the server, so
+            // cleanup cannot free the session and backend health stays unknown -
+            // which is the case SC-1 answers with a withdrawal.
+            let held = probe::HeldSession::take(APP).expect("hold the session");
+            let withdrawn_pid = held.backend_pid().expect("a Postgres session");
 
-        let started = std::time::Instant::now();
-        let forced = probe::cancel(APP).await;
-        let elapsed = started.elapsed();
-        assert_eq!(
-            forced.outcome,
-            Some(TerminalOutcome::Indeterminate(CleanupCause::Cancelled)),
-            "cleanup that could not free the session proves no goal"
-        );
-        assert!(
-            elapsed >= probe::cancel_reclaim_grace(),
-            "this arm must reach withdrawal through a cancellation the server \
+            let started = std::time::Instant::now();
+            let forced = probe::cancel(APP).await;
+            let elapsed = started.elapsed();
+            assert_eq!(
+                forced.outcome,
+                Some(TerminalOutcome::Indeterminate(CleanupCause::Cancelled)),
+                "cleanup that could not free the session proves no goal"
+            );
+            assert!(
+                elapsed >= probe::cancel_reclaim_grace(),
+                "this arm must reach withdrawal through a cancellation the server \
              DISCARDED, which is the path that sits out the whole reclaim \
              grace. Returning in {elapsed:?} means the session came back and \
              the arm is now measuring cancellation, not withdrawal"
-        );
-        assert!(
-            probe::withdrawn(APP),
-            "an indeterminate cleanup withdraws the session"
-        );
+            );
+            assert!(
+                probe::withdrawn(APP),
+                "an indeterminate cleanup withdraws the session"
+            );
 
-        // The holder gives it back, exactly as a TxClientSlotGuard's Drop
-        // does. THIS is the moment a withdrawal has to survive.
-        held.restore();
+            // The holder gives it back, exactly as a TxClientSlotGuard's Drop
+            // does. THIS is the moment a withdrawal has to survive.
+            held.restore();
 
-        let (idle, _, total_after) =
-            crate::tests::host::pool_counts_for_tests().expect("a pool is installed");
-        assert_eq!(
-            idle, 0,
-            "a withdrawn session must not be published as idle - a plain \
+            let (idle, _, total_after) = host.pool_counts().expect("a pool is installed");
+            assert_eq!(
+                idle, 0,
+                "a withdrawn session must not be published as idle - a plain \
              drop() would republish it and the next borrower would inherit \
              the connection the protocol withdrew"
-        );
-        assert_eq!(
-            total_after, 0,
-            "the capacity slot is released by eviction, not by redeposit"
-        );
+            );
+            assert_eq!(
+                total_after, 0,
+                "the capacity slot is released by eviction, not by redeposit"
+            );
 
-        // And the strongest form: whatever the pool opens next is a
-        // DIFFERENT backend.
-        probe::reset(APP);
-        probe::begin(APP, app_schema(APP), None, probe_backend().await)
-            .await
-            .expect("a fresh BEGIN");
-        let fresh_pid = probe::session_backend_pid(APP).expect("a pinned session");
-        assert_ne!(
-            fresh_pid, withdrawn_pid,
-            "the withdrawn backend must be gone; the pool opened a new one"
-        );
+            // And the strongest form: whatever the pool opens next is a
+            // DIFFERENT backend.
+            probe::reset(APP);
+            probe::begin(APP, app_schema(APP), None, probe_backend(host).await)
+                .await
+                .expect("a fresh BEGIN");
+            let fresh_pid = probe::session_backend_pid(APP).expect("a pinned session");
+            assert_ne!(
+                fresh_pid, withdrawn_pid,
+                "the withdrawn backend must be gone; the pool opened a new one"
+            );
 
-        // The withdrawn backend is really gone from the server, not merely
-        // unreachable from the pool.
-        let still_there: i64 = admin
-            .query_one(
-                "SELECT count(*) FROM pg_stat_activity WHERE pid = $1",
-                &[&withdrawn_pid],
-            )
-            .await
-            .expect("count the withdrawn backend")
-            .get(0);
-        assert_eq!(
-            still_there, 0,
-            "closing the client's request channel terminates the backend; a \
+            // The withdrawn backend is really gone from the server, not merely
+            // unreachable from the pool.
+            let still_there: i64 = admin
+                .query_one(
+                    "SELECT count(*) FROM pg_stat_activity WHERE pid = $1",
+                    &[&withdrawn_pid],
+                )
+                .await
+                .expect("count the withdrawn backend")
+                .get(0);
+            assert_eq!(
+                still_there, 0,
+                "closing the client's request channel terminates the backend; a \
              session that is still on the server is one a later user could \
              still be handed"
-        );
+            );
 
-        let settled = probe::settle(APP, false).await;
-        assert_eq!(settled.outcome, Some(TerminalOutcome::RolledBack));
-        teardown(&admin, APP).await;
-    });
+            let settled = probe::settle(APP, false).await;
+            assert_eq!(settled.outcome, Some(TerminalOutcome::RolledBack));
+            teardown(host, &admin, APP).await;
+        });
+    })
 }
 
 /// Wait until `pid` is actually executing a statement on the server.
@@ -656,83 +660,83 @@ async fn backend_state(admin: &Client, pid: i32) -> Option<String> {
 /// backend.
 #[test]
 fn a_forced_cleanup_cancels_the_running_statement_and_keeps_the_connection() {
-    const APP: &str = "zs_sc1drv_cancelrun";
-    block_on(async {
-        let (_postgres, admin) = provision(APP).await;
-        let _session_guard = SessionGuard(APP);
+    Host::test(|host| {
+        const APP: &str = "zs_sc1drv_cancelrun";
+        host.run(async {
+            let (_postgres, admin) = provision(host, APP).await;
+            let _session_guard = SessionGuard(host, APP);
 
-        probe::begin(APP, app_schema(APP), None, probe_backend().await)
-            .await
-            .expect("BEGIN");
-        let pid = probe::session_backend_pid(APP).expect("a pinned session");
+            probe::begin(APP, app_schema(APP), None, probe_backend(host).await)
+                .await
+                .expect("BEGIN");
+            let pid = probe::session_backend_pid(APP).expect("a pinned session");
 
-        // A statement that will not end on its own inside this arm. 60s is
-        // deliberately past `DB_STATEMENT_TIMEOUT_MS` (30s) so a failure to
-        // cancel shows up as this arm hanging and then failing, never as a
-        // server-side timeout that happens to look like a cancellation.
-        let running =
-            compio::runtime::spawn(
-                async move { probe::operation(APP, "SELECT pg_sleep(60)").await },
-            );
-        wait_until_active(&admin, pid).await;
-        assert_eq!(
-            probe::session_backend_pid(APP),
-            None,
-            "the running statement holds the session OUT of the slot - that is \
+            // A statement that will not end on its own inside this arm. 60s is
+            // deliberately past `DB_STATEMENT_TIMEOUT_MS` (30s) so a failure to
+            // cancel shows up as this arm hanging and then failing, never as a
+            // server-side timeout that happens to look like a cancellation.
+            let running = compio::runtime::spawn(async move {
+                probe::operation(APP, "SELECT pg_sleep(60)").await
+            });
+            wait_until_active(&admin, pid).await;
+            assert_eq!(
+                probe::session_backend_pid(APP),
+                None,
+                "the running statement holds the session OUT of the slot - that is \
              the condition that used to force a withdrawal"
-        );
+            );
 
-        let started = std::time::Instant::now();
-        let forced = probe::cancel(APP).await;
-        let elapsed = started.elapsed();
+            let started = std::time::Instant::now();
+            let forced = probe::cancel(APP).await;
+            let elapsed = started.elapsed();
 
-        let statement = running.await.expect("the cancelled statement's task");
-        let failure = statement.expect_err("a cancelled statement must not report success");
-        assert!(
-            format!("{failure:?}").contains("canceling statement due to user request"),
-            "the statement must end with PostgreSQL's own 57014, not with some \
+            let statement = running.await.expect("the cancelled statement's task");
+            let failure = statement.expect_err("a cancelled statement must not report success");
+            assert!(
+                format!("{failure:?}").contains("canceling statement due to user request"),
+                "the statement must end with PostgreSQL's own 57014, not with some \
              other failure that would pass this arm for the wrong reason: \
              {failure:?}"
-        );
+            );
 
-        assert_eq!(
-            forced.outcome,
-            Some(TerminalOutcome::Cancelled(CleanupCause::Cancelled)),
-            "cancelling frees the session, the cleanup ROLLBACK then PROVES \
+            assert_eq!(
+                forced.outcome,
+                Some(TerminalOutcome::Cancelled(CleanupCause::Cancelled)),
+                "cancelling frees the session, the cleanup ROLLBACK then PROVES \
              CleanupGoal::OpenTransaction, and the transaction ends as \
              cancelled rather than indeterminate"
-        );
-        assert!(
-            !probe::withdrawn(APP),
-            "a cancelled statement's connection is healthy once rolled back; \
+            );
+            assert!(
+                !probe::withdrawn(APP),
+                "a cancelled statement's connection is healthy once rolled back; \
              withdrawing it is what this change exists to stop"
-        );
-        assert!(
-            elapsed < probe::cancel_reclaim_grace(),
-            "the session must be reclaimed because the cancel landed, not \
+            );
+            assert!(
+                elapsed < probe::cancel_reclaim_grace(),
+                "the session must be reclaimed because the cancel landed, not \
              because the grace expired; {elapsed:?} is the whole grace"
-        );
+            );
 
-        let (idle, active, total) =
-            crate::tests::host::pool_counts_for_tests().expect("a pool is installed");
-        assert_eq!(
-            (idle, active, total),
-            (1, 0, 1),
-            "the session went back to the pool as idle"
-        );
-        probe::begin(APP, app_schema(APP), None, probe_backend().await)
-            .await
-            .expect("a second BEGIN reuses it");
-        assert_eq!(
-            probe::session_backend_pid(APP),
-            Some(pid),
-            "the very same physical connection served the next transaction"
-        );
-        let settled = probe::settle(APP, false).await;
-        assert_eq!(settled.outcome, Some(TerminalOutcome::RolledBack));
+            let (idle, active, total) = host.pool_counts().expect("a pool is installed");
+            assert_eq!(
+                (idle, active, total),
+                (1, 0, 1),
+                "the session went back to the pool as idle"
+            );
+            probe::begin(APP, app_schema(APP), None, probe_backend(host).await)
+                .await
+                .expect("a second BEGIN reuses it");
+            assert_eq!(
+                probe::session_backend_pid(APP),
+                Some(pid),
+                "the very same physical connection served the next transaction"
+            );
+            let settled = probe::settle(APP, false).await;
+            assert_eq!(settled.outcome, Some(TerminalOutcome::RolledBack));
 
-        teardown(&admin, APP).await;
-    });
+            teardown(host, &admin, APP).await;
+        });
+    })
 }
 
 /// **A cleanup that outlived its transaction must not roll back the session
@@ -781,55 +785,57 @@ fn a_forced_cleanup_cancels_the_running_statement_and_keeps_the_connection() {
 /// `idle in transaction`.
 #[test]
 fn a_cleanup_that_outlived_its_transaction_leaves_the_slot_alone() {
-    const APP: &str = "zs_sc1drv_stalecleanup";
-    block_on(async {
-        let (_postgres, admin) = provision(APP).await;
-        let _session_guard = SessionGuard(APP);
+    Host::test(|host| {
+        const APP: &str = "zs_sc1drv_stalecleanup";
+        host.run(async {
+            let (_postgres, admin) = provision(host, APP).await;
+            let _session_guard = SessionGuard(host, APP);
 
-        probe::begin(APP, app_schema(APP), None, probe_backend().await)
-            .await
-            .expect("BEGIN");
-        let held = probe::HeldSession::take(APP).expect("hold the session");
-        let pid = held.backend_pid().expect("a Postgres session");
-        assert_eq!(
-            backend_state(&admin, pid).await.as_deref(),
-            Some("idle in transaction"),
-            "precondition: the session is inside its transaction block"
-        );
+            probe::begin(APP, app_schema(APP), None, probe_backend(host).await)
+                .await
+                .expect("BEGIN");
+            let held = probe::HeldSession::take(APP).expect("hold the session");
+            let pid = held.backend_pid().expect("a Postgres session");
+            assert_eq!(
+                backend_state(&admin, pid).await.as_deref(),
+                Some("idle in transaction"),
+                "precondition: the session is inside its transaction block"
+            );
 
-        // Force it. Nothing is running, so the cancel is discarded and the
-        // cleanup parks on the slot - which is the state this arm needs.
-        let cleanup = compio::runtime::spawn(async move { probe::cancel(APP).await });
-        compio::time::sleep(std::time::Duration::from_millis(250)).await;
+            // Force it. Nothing is running, so the cancel is discarded and the
+            // cleanup parks on the slot - which is the state this arm needs.
+            let cleanup = compio::runtime::spawn(async move { probe::cancel(APP).await });
+            compio::time::sleep(std::time::Duration::from_millis(250)).await;
 
-        // Two steps, with NO await between them, so the woken cleanup task
-        // cannot run in the middle: the session comes back, and then the
-        // transaction it belonged to is retired out from under the cleanup.
-        held.restore();
-        probe::abandon_reducer(APP);
+            // Two steps, with NO await between them, so the woken cleanup task
+            // cannot run in the middle: the session comes back, and then the
+            // transaction it belonged to is retired out from under the cleanup.
+            held.restore();
+            probe::abandon_reducer(APP);
 
-        let forced = cleanup.await.expect("the cleanup task");
-        assert_eq!(
-            forced.outcome, None,
-            "the acknowledgement lands on a retired reducer and changes nothing"
-        );
+            let forced = cleanup.await.expect("the cleanup task");
+            assert_eq!(
+                forced.outcome, None,
+                "the acknowledgement lands on a retired reducer and changes nothing"
+            );
 
-        assert_eq!(
-            backend_state(&admin, pid).await.as_deref(),
-            Some("idle in transaction"),
-            "a cleanup that is no longer the current one must not send \
+            assert_eq!(
+                backend_state(&admin, pid).await.as_deref(),
+                Some("idle in transaction"),
+                "a cleanup that is no longer the current one must not send \
              ROLLBACK to whatever session it finds in the slot - the \
              transaction there is still open, and in production it would \
              belong to the NEXT caller"
-        );
-        assert_eq!(
-            probe::session_backend_pid(APP),
-            Some(pid),
-            "and the session is still parked, not taken"
-        );
+            );
+            assert_eq!(
+                probe::session_backend_pid(APP),
+                Some(pid),
+                "and the session is still parked, not taken"
+            );
 
-        teardown(&admin, APP).await;
-    });
+            teardown(host, &admin, APP).await;
+        });
+    })
 }
 
 /// **The savepoint names dispatch emits are the reducer's.**
@@ -848,79 +854,82 @@ fn a_cleanup_that_outlived_its_transaction_leaves_the_slot_alone() {
 /// `3B001`.
 #[test]
 fn dispatch_emits_the_reducers_monotonic_savepoint_names() {
-    const APP: &str = "zs_sc1drv_names";
-    block_on(async {
-        let (_postgres, admin) = provision(APP).await;
-        let _session_guard = SessionGuard(APP);
+    Host::test(|host| {
+        const APP: &str = "zs_sc1drv_names";
+        host.run(async {
+            let (_postgres, admin) = provision(host, APP).await;
+            let _session_guard = SessionGuard(host, APP);
 
-        probe::begin(APP, app_schema(APP), None, probe_backend().await)
-            .await
-            .expect("BEGIN");
-        probe::operation(APP, &format!("CREATE TABLE \"{APP}\".rows_ (tag text)"))
-            .await
-            .expect("create table");
+            probe::begin(APP, app_schema(APP), None, probe_backend(host).await)
+                .await
+                .expect("BEGIN");
+            probe::operation(APP, &format!("CREATE TABLE \"{APP}\".rows_ (tag text)"))
+                .await
+                .expect("create table");
 
-        let first = probe::open_frame(APP).await.expect("first frame");
-        probe::operation(APP, &format!("INSERT INTO \"{APP}\".rows_ VALUES ('a')"))
-            .await
-            .expect("write inside the first frame");
-        let closed = probe::close_frame(APP, first, true).await;
-        assert_eq!(closed.refused, None, "RELEASE must succeed");
+            let first = probe::open_frame(APP).await.expect("first frame");
+            probe::operation(APP, &format!("INSERT INTO \"{APP}\".rows_ VALUES ('a')"))
+                .await
+                .expect("write inside the first frame");
+            let closed = probe::close_frame(APP, first, true).await;
+            assert_eq!(closed.refused, None, "RELEASE must succeed");
 
-        let second = probe::open_frame(APP).await.expect("second frame");
-        assert_ne!(first, second, "frame ids are never reused");
+            let second = probe::open_frame(APP).await.expect("second frame");
+            assert_ne!(first, second, "frame ids are never reused");
 
-        let names = probe::minted_savepoint_names(APP);
-        assert_eq!(
-            names.len(),
-            2,
-            "two frames at the SAME depth must mint two distinct names; a \
+            let names = probe::minted_savepoint_names(APP);
+            assert_eq!(
+                names.len(),
+                2,
+                "two frames at the SAME depth must mint two distinct names; a \
              depth-derived scheme mints one name twice and this set collapses \
              to a single entry. got {names:?}"
-        );
-        // The names are `zs_sp_<frame sequence>`, NOT `zs_sp_<depth>`, so the
-        // first frame's number is whichever is lower - the root frame takes
-        // sequence 1, which is why neither of these is `zs_sp_1`.
-        let mut ordered = names.clone();
-        ordered.sort_by_key(|name| {
-            name.rsplit('_')
-                .next()
-                .and_then(|n| n.parse::<u64>().ok())
-                .unwrap_or(u64::MAX)
-        });
-        let first_name = ordered[0].clone();
+            );
+            // The names are `zs_sp_<frame sequence>`, NOT `zs_sp_<depth>`, so the
+            // first frame's number is whichever is lower - the root frame takes
+            // sequence 1, which is why neither of these is `zs_sp_1`.
+            let mut ordered = names.clone();
+            ordered.sort_by_key(|name| {
+                name.rsplit('_')
+                    .next()
+                    .and_then(|n| n.parse::<u64>().ok())
+                    .unwrap_or(u64::MAX)
+            });
+            let first_name = ordered[0].clone();
 
-        // The decisive server-side check: the first frame's savepoint is
-        // GONE, because it was released under its own name and no later
-        // frame reused it. A reused name would still be established here and
-        // this rollback would SUCCEED, unwinding to the second frame's scope
-        // under the first frame's name.
-        let shadowed = probe::operation(APP, &format!("ROLLBACK TO SAVEPOINT {first_name}")).await;
-        let message = shadowed
-            .as_ref()
-            .err()
-            .map(|error| format!("{error:?}"))
-            .unwrap_or_default();
-        assert!(
-            shadowed.is_err(),
-            "rolling back to a RELEASED savepoint must be refused; if it \
+            // The decisive server-side check: the first frame's savepoint is
+            // GONE, because it was released under its own name and no later
+            // frame reused it. A reused name would still be established here and
+            // this rollback would SUCCEED, unwinding to the second frame's scope
+            // under the first frame's name.
+            let shadowed =
+                probe::operation(APP, &format!("ROLLBACK TO SAVEPOINT {first_name}")).await;
+            let message = shadowed
+                .as_ref()
+                .err()
+                .map(|error| format!("{error:?}"))
+                .unwrap_or_default();
+            assert!(
+                shadowed.is_err(),
+                "rolling back to a RELEASED savepoint must be refused; if it \
              succeeded, a later frame had re-established the same name and \
              this rollback reached the WRONG scope. names={names:?}"
-        );
-        assert!(
-            message.contains(&format!("savepoint \\\"{first_name}\\\" does not exist"))
-                || message.contains(&format!("savepoint \"{first_name}\" does not exist")),
-            "the refusal must be PostgreSQL's 3B001 naming THIS savepoint, not \
+            );
+            assert!(
+                message.contains(&format!("savepoint \\\"{first_name}\\\" does not exist"))
+                    || message.contains(&format!("savepoint \"{first_name}\" does not exist")),
+                "the refusal must be PostgreSQL's 3B001 naming THIS savepoint, not \
              some other failure that would pass this arm for the wrong reason: \
              {message}"
-        );
+            );
 
-        // That statement poisoned the block, so the settle is a rollback.
-        let settled = probe::settle(APP, false).await;
-        assert_eq!(settled.outcome, Some(TerminalOutcome::RolledBack));
-        let _ = second;
-        teardown(&admin, APP).await;
-    });
+            // That statement poisoned the block, so the settle is a rollback.
+            let settled = probe::settle(APP, false).await;
+            assert_eq!(settled.outcome, Some(TerminalOutcome::RolledBack));
+            let _ = second;
+            teardown(host, &admin, APP).await;
+        });
+    })
 }
 
 /// **A fired execution deadline in `Preparing`, where no `BEGIN` was ever
@@ -945,64 +954,64 @@ fn dispatch_emits_the_reducers_monotonic_savepoint_names() {
 /// transaction's connection, because `put_tx_client_for` consults it.
 #[test]
 fn a_deadline_that_fires_in_preparing_settles_without_a_begin() {
-    const APP: &str = "zs_sc1drv_preparing";
-    block_on(async {
-        let (_postgres, admin) = provision(APP).await;
-        let _session_guard = SessionGuard(APP);
+    Host::test(|host| {
+        const APP: &str = "zs_sc1drv_preparing";
+        host.run(async {
+            let (_postgres, admin) = provision(host, APP).await;
+            let _session_guard = SessionGuard(host, APP);
 
-        // Admit, and stop there. `admit_in_preparing_for_tests` performs the
-        // admission half of `begin_top_level` and returns before the
-        // authority observation that would issue BEGIN.
-        probe::admit_only(APP);
-        assert_eq!(
-            probe::state(APP),
-            Some(TxState::Preparing),
-            "no BEGIN has been sent"
-        );
-        assert_eq!(
-            probe::session(APP),
-            Some(SessionOwnership::None),
-            "Preparing holds no session: the client is acquired by IssueBegin"
-        );
-        let (idle_before, _, _) =
-            crate::tests::host::pool_counts_for_tests().expect("a pool is installed");
+            // Admit, and stop there. `admit_in_preparing_for_tests` performs the
+            // admission half of `begin_top_level` and returns before the
+            // authority observation that would issue BEGIN.
+            probe::admit_only(APP);
+            assert_eq!(
+                probe::state(APP),
+                Some(TxState::Preparing),
+                "no BEGIN has been sent"
+            );
+            assert_eq!(
+                probe::session(APP),
+                Some(SessionOwnership::None),
+                "Preparing holds no session: the client is acquired by IssueBegin"
+            );
+            let (idle_before, _, _) = host.pool_counts().expect("a pool is installed");
 
-        let fired = probe::fire_execution_deadline(APP).await;
+            let fired = probe::fire_execution_deadline(APP).await;
 
-        assert_eq!(
-            fired.outcome,
-            Some(TerminalOutcome::Cancelled(CleanupCause::DeadlineExpired(
-                zeroship_data_orm::transaction::reducer::deadline::DeadlineKind::Execution
-            ))),
-            "the goal NoTransaction is proved by construction - BEGIN was \
+            assert_eq!(
+                fired.outcome,
+                Some(TerminalOutcome::Cancelled(CleanupCause::DeadlineExpired(
+                    zeroship_data_orm::transaction::reducer::deadline::DeadlineKind::Execution
+                ))),
+                "the goal NoTransaction is proved by construction - BEGIN was \
              never sent, so nothing can be open"
-        );
-        assert!(
-            !probe::withdrawn(APP),
-            "there is no session to withdraw, and setting the tombstone here \
+            );
+            assert!(
+                !probe::withdrawn(APP),
+                "there is no session to withdraw, and setting the tombstone here \
              would destroy the NEXT transaction's connection"
-        );
-        assert!(
-            probe::state(APP).is_none(),
-            "ReleaseAdmission retires the transaction on every path to Settled"
-        );
+            );
+            assert!(
+                probe::state(APP).is_none(),
+                "ReleaseAdmission retires the transaction on every path to Settled"
+            );
 
-        let (idle_after, active_after, _) =
-            crate::tests::host::pool_counts_for_tests().expect("a pool is installed");
-        assert_eq!(
-            (idle_after, active_after),
-            (idle_before, 0),
-            "a cleanup in Preparing touches no connection at all"
-        );
+            let (idle_after, active_after, _) = host.pool_counts().expect("a pool is installed");
+            assert_eq!(
+                (idle_after, active_after),
+                (idle_before, 0),
+                "a cleanup in Preparing touches no connection at all"
+            );
 
-        // The claim was released, so the next transaction is admitted
-        // rather than parked forever.
-        probe::begin(APP, app_schema(APP), None, probe_backend().await)
-            .await
-            .expect("the admission claim was released");
-        let settled = probe::settle(APP, false).await;
-        assert_eq!(settled.outcome, Some(TerminalOutcome::RolledBack));
+            // The claim was released, so the next transaction is admitted
+            // rather than parked forever.
+            probe::begin(APP, app_schema(APP), None, probe_backend(host).await)
+                .await
+                .expect("the admission claim was released");
+            let settled = probe::settle(APP, false).await;
+            assert_eq!(settled.outcome, Some(TerminalOutcome::RolledBack));
 
-        teardown(&admin, APP).await;
-    });
+            teardown(host, &admin, APP).await;
+        });
+    })
 }

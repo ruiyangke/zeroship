@@ -31,6 +31,7 @@
 
 #[allow(unused_imports)]
 use crate::schema_fixture::{fixture_table_sql, fixture_table_sql_for};
+use crate::tests::host::Host;
 use crate::{schema_fixture, support};
 #[allow(unused_imports)]
 use zeroship_migrate::schema::query::FkEmission;
@@ -68,8 +69,8 @@ use zeroship_data_sql::value::{Value, value};
 /// different sense of cold, and not a context state.) The lazy open is bound in
 /// `src/tests/sqlite_integration.rs`, by the three
 /// `cold_*_open_comes_from_ensure_backend_not_the_fixture` gates.
-async fn unmask_backend() -> zeroship_data_orm::backend::BackendHandle {
-    crate::tests::host::ensure_backend()
+async fn unmask_backend(host: &Host) -> zeroship_data_orm::backend::BackendHandle {
+    host.backend()
         .await
         .expect("the backend the V8 dispatcher would have opened")
 }
@@ -83,8 +84,8 @@ async fn unmask_backend() -> zeroship_data_orm::backend::BackendHandle {
 /// decision from the parked-tx slot; no fixture in this file parks one, so
 /// every call here binds `in_tx = false` and takes exactly the lane it took
 /// before. The transaction half is bound by `unmask_tx_lane.rs`.
-async fn unmask_route(app: &str) -> zeroship_data_orm::tx_route::TxRoute {
-    zeroship_data_orm::exec::ambient_route_for_tests(app, unmask_backend().await)
+async fn unmask_route(host: &Host, app: &str) -> zeroship_data_orm::tx_route::TxRoute {
+    zeroship_data_orm::exec::ambient_route_for_tests(app, unmask_backend(host).await)
 }
 
 /// Connect, or fail the test.
@@ -108,9 +109,9 @@ async fn require_pg() -> (crate::support::postgres::Postgres, String) {
     }
 }
 
-async fn release_pg(pool: Rc<Pool>) {
+async fn release_pg(host: &Host, pool: Rc<Pool>) {
     drop(pool);
-    crate::tests::host::reset_context_for_tests();
+    host.reset();
     let _ = compio_postgres::drain_connections(std::time::Duration::from_secs(2)).await;
 }
 
@@ -169,7 +170,14 @@ fn two_class_schema() -> Value {
 
 /// Create `<app>.<collection>` from the DDL the platform actually emits, and
 /// install the descriptor entry the deploy would have installed.
-async fn fixture(pool: &Rc<Pool>, url: &str, app: &str, collection: &str, schema: &Value) {
+async fn fixture(
+    host: &Host,
+    pool: &Rc<Pool>,
+    url: &str,
+    app: &str,
+    collection: &str,
+    schema: &Value,
+) {
     pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
         .await
         .unwrap();
@@ -186,7 +194,7 @@ async fn fixture(pool: &Rc<Pool>, url: &str, app: &str, collection: &str, schema
     pool.batch_execute(&ddl)
         .await
         .unwrap_or_else(|e| panic!("emitted DDL must apply: {e}\n{ddl}"));
-    crate::support::install_postgres_pool(Rc::clone(pool), url);
+    host.install_postgres_pool(Rc::clone(pool), url);
     zeroship_data_orm::cache_schema_for_tests(app, collection, schema.clone());
 }
 
@@ -220,6 +228,7 @@ struct Inserted {
 /// because a builder that quietly went back to `*` would put the raw column
 /// back in every row below.
 async fn insert_through_the_pipeline(
+    host: &Host,
     pool: &Rc<Pool>,
     app: &str,
     collection: &str,
@@ -227,7 +236,7 @@ async fn insert_through_the_pipeline(
     doc: Value,
 ) -> Inserted {
     let mut docs = value!([doc]);
-    crate::tests::host::prepare_insert_many_docs_for_tests(&mut docs, app, collection, None)
+    host.prepare_insert_many_docs(&mut docs, app, collection, None)
         .await
         .expect("write pipeline");
     let id = docs[0]["id"]
@@ -317,18 +326,19 @@ async fn run_find(pool: &Rc<Pool>, app: &str, filter: &Value, schema: &Value) ->
 /// where it MUST separate them.
 #[test]
 fn a_range_filter_on_a_masked_column_cannot_narrow_the_plaintext() {
-    crate::tests::host::in_test(|| {
-        crate::tests::host::run(async {
+    Host::test(|host| {
+        host.run(async {
             let (_postgres, url) = require_pg().await;
             let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
             let app = "flip_oracle";
             let schema = flip_schema();
-            fixture(&pool, &url, app, "people", &schema).await;
+            fixture(host, &pool, &url, app, "people", &schema).await;
 
             // The two rows are told apart by the ids the PLATFORM minted for them, not
             // by ids this fixture chose - it may not choose one. `low` is the row whose
             // real SSN sits at the bottom of the range, `high` the one at the top.
             let low = insert_through_the_pipeline(
+                host,
                 &pool,
                 app,
                 "people",
@@ -338,6 +348,7 @@ fn a_range_filter_on_a_masked_column_cannot_narrow_the_plaintext() {
             .await
             .id;
             let high = insert_through_the_pipeline(
+                host,
                 &pool,
                 app,
                 "people",
@@ -483,7 +494,7 @@ fn a_range_filter_on_a_masked_column_cannot_narrow_the_plaintext() {
             };
             assert_eq!(ordered.len(), 1, "the ordered query still returns a row");
 
-            release_pg(pool).await;
+            release_pg(host, pool).await;
         })
     })
 }
@@ -496,19 +507,20 @@ fn a_range_filter_on_a_masked_column_cannot_narrow_the_plaintext() {
 /// assertion in this file.
 #[test]
 fn the_real_value_is_still_stored_and_still_reachable_by_the_audited_path() {
-    crate::tests::host::in_test(|| {
-        crate::tests::host::run(async {
+    Host::test(|host| {
+        host.run(async {
             let (_postgres, url) = require_pg().await;
             let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
             let app = "flip_reachable";
             let schema = flip_schema();
-            fixture(&pool, &url, app, "people", &schema).await;
+            fixture(host, &pool, &url, app, "people", &schema).await;
 
             // The platform mints the id; the row is addressed by that value from here
             // on. `row_pk` below is the same value, which matters beyond addressing:
             // it is the identity the write pipeline binds per-row derivations to, so a
             // stand-in would not merely miss the row, it would fail to decrypt one.
             let person = insert_through_the_pipeline(
+                host,
                 &pool,
                 app,
                 "people",
@@ -562,7 +574,7 @@ fn the_real_value_is_still_stored_and_still_reachable_by_the_audited_path() {
             support::grant_runtime_select_columns(&pool, app, "people", &["id", &raw_col]).await;
 
             let result = zeroship_data_orm::protection::unmask::dispatch_unmask(
-                &unmask_route(app).await,
+                &unmask_route(host, app).await,
                 &zeroship_data_orm::binding::DbBinding::cold_start(app),
                 zeroship_data_orm::protection::unmask::UnmaskFieldArgs {
                     collection: "people".to_string(),
@@ -599,7 +611,7 @@ fn the_real_value_is_still_stored_and_still_reachable_by_the_audited_path() {
                 "the audit row names the LOGICAL field, not the physical column",
             );
 
-            release_pg(pool).await;
+            release_pg(host, pool).await;
         })
     })
 }
@@ -627,6 +639,7 @@ fn the_real_value_is_still_stored_and_still_reachable_by_the_audited_path() {
 /// the check - it would pass against an implementation that had no check and no
 /// data either.
 async fn audited_unmask_fixture(
+    host: &Host,
     pool: &Rc<Pool>,
     url: &str,
     app: &str,
@@ -634,6 +647,7 @@ async fn audited_unmask_fixture(
     ssn: &str,
 ) -> Inserted {
     audited_unmask_fixture_with(
+        host,
         pool,
         url,
         app,
@@ -655,6 +669,7 @@ async fn audited_unmask_fixture(
 /// that were both genuinely there to come back, and a batch that withheld the
 /// permitted one is withholding something it could have returned.
 async fn audited_unmask_fixture_with(
+    host: &Host,
     pool: &Rc<Pool>,
     url: &str,
     app: &str,
@@ -662,8 +677,8 @@ async fn audited_unmask_fixture_with(
     doc: Value,
     masked: &[(&str, &str)],
 ) -> Inserted {
-    fixture(pool, url, app, "people", schema).await;
-    let person = insert_through_the_pipeline(pool, app, "people", schema, doc).await;
+    fixture(host, pool, url, app, "people", schema).await;
+    let person = insert_through_the_pipeline(host, pool, app, "people", schema, doc).await;
     pool.batch_execute(&zeroship_migrate_server::provisioning::audit_unmask_table_sql(app))
         .await
         .expect("the audit table the deploy provisions");
@@ -766,19 +781,19 @@ fn refusal_code(err: &DbError) -> String {
 /// exist nowhere in that suite.
 #[test]
 fn an_actor_the_policy_does_not_permit_is_refused_and_the_refusal_is_audited() {
-    crate::tests::host::in_test(|| {
-        crate::tests::host::run(async {
+    Host::test(|host| {
+        host.run(async {
             let (_postgres, url) = require_pg().await;
             let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
             let app = "flip_denied";
             let schema = flip_schema();
             let ssn = "123-45-6789";
-            let person = audited_unmask_fixture(&pool, &url, app, &schema, ssn).await;
+            let person = audited_unmask_fixture(host, &pool, &url, app, &schema, ssn).await;
 
             // `support` is not `auto`, and no policy is installed - so the no-policy
             // fallback denies it. This is the case `mask_flip` never had.
             let err = dispatch_unmask(
-                &unmask_route(app).await,
+                &unmask_route(host, app).await,
                 &DbBinding::cold_start(app),
                 unmask_args(
                     &person.id,
@@ -842,7 +857,7 @@ fn an_actor_the_policy_does_not_permit_is_refused_and_the_refusal_is_audited() {
             install_mask_policy(&redeployed, value!({ "support": ["pci"] }))
                 .expect("install the new deployment's policy");
             let result = dispatch_unmask(
-                &unmask_route(app).await,
+                &unmask_route(host, app).await,
                 &redeployed,
                 unmask_args(
                     &person.id,
@@ -868,7 +883,7 @@ fn an_actor_the_policy_does_not_permit_is_refused_and_the_refusal_is_audited() {
                 value!({ "hr": { "type": "string", "mask": { "kind": "full", "classification": "phi" } } }),
             );
             let err = dispatch_unmask(
-                &unmask_route(app).await,
+                &unmask_route(host, app).await,
                 &redeployed,
                 UnmaskFieldArgs {
                     collection: "vitals".to_string(),
@@ -883,7 +898,7 @@ fn an_actor_the_policy_does_not_permit_is_refused_and_the_refusal_is_audited() {
             .expect_err("a class the policy does not list must still be refused");
             assert_eq!(refusal_code(&err), "unmask_not_permitted");
 
-            release_pg(pool).await;
+            release_pg(host, pool).await;
         })
     })
 }
@@ -899,14 +914,14 @@ fn an_actor_the_policy_does_not_permit_is_refused_and_the_refusal_is_audited() {
 /// permit. So "refused" here is about the ACTOR, not about the row.
 #[test]
 fn an_unmask_with_no_usable_actor_is_refused_and_audited() {
-    crate::tests::host::in_test(|| {
-        crate::tests::host::run(async {
+    Host::test(|host| {
+        host.run(async {
             let (_postgres, url) = require_pg().await;
             let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
             let app = "flip_unauth";
             let schema = flip_schema();
             let ssn = "987-65-4321";
-            let person = audited_unmask_fixture(&pool, &url, app, &schema, ssn).await;
+            let person = audited_unmask_fixture(host, &pool, &url, app, &schema, ssn).await;
 
             install_mask_policy(&DbBinding::cold_start(app), value!({ "support": ["pci"] }))
                 .expect("install the app's declared mask policy");
@@ -920,7 +935,7 @@ fn an_unmask_with_no_usable_actor_is_refused_and_audited() {
                 ("object with no kind", Some(value!({ "id": "usr_1" }))),
             ] {
                 let err = match dispatch_unmask(
-                    &unmask_route(app).await,
+                    &unmask_route(host, app).await,
                     &DbBinding::cold_start(app),
                     unmask_args(&person.id, actor),
                 )
@@ -962,7 +977,7 @@ fn an_unmask_with_no_usable_actor_is_refused_and_audited() {
 
             // ---- THE CONTROL: the same fixture DOES hand out the plaintext ----
             let result = dispatch_unmask(
-                &unmask_route(app).await,
+                &unmask_route(host, app).await,
                 &DbBinding::cold_start(app),
                 unmask_args(
                     &person.id,
@@ -976,7 +991,7 @@ fn an_unmask_with_no_usable_actor_is_refused_and_audited() {
             assert_eq!(audit.len(), 4);
             assert_eq!(audit[3]["outcome"], value!("granted"));
 
-            release_pg(pool).await;
+            release_pg(host, pool).await;
         })
     })
 }
@@ -1049,15 +1064,15 @@ fn bulk_args_json(row_pk: &str, columns: &[&str], actor: &Value) -> Value {
 /// identical payload naming `support` instead of `auto` returns the SSN.
 #[test]
 fn app_js_claiming_the_auto_system_actor_is_refused_by_the_parser() {
-    crate::tests::host::in_test(|| {
-        crate::tests::host::run(async {
+    Host::test(|host| {
+        host.run(async {
             let (_postgres, url) = require_pg().await;
             let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
             let app = "flip_db3_single";
-            crate::tests::host::clear_mask_policy_cache_for_tests(app);
+            host.clear_mask_policy_cache(app);
             let schema = flip_schema();
             let ssn = "123-45-6789";
-            let person = audited_unmask_fixture(&pool, &url, app, &schema, ssn).await;
+            let person = audited_unmask_fixture(host, &pool, &url, app, &schema, ssn).await;
 
             install_mask_policy(&DbBinding::cold_start(app), value!({ "support": ["pci"] }))
                 .expect("install the app's declared mask policy");
@@ -1073,7 +1088,7 @@ fn app_js_claiming_the_auto_system_actor_is_refused_by_the_parser() {
          nothing about it",
             );
             let err = match dispatch_unmask(
-                &unmask_route(app).await,
+                &unmask_route(host, app).await,
                 &DbBinding::cold_start(app),
                 forged,
             )
@@ -1138,7 +1153,7 @@ fn app_js_claiming_the_auto_system_actor_is_refused_by_the_parser() {
             ))
             .expect("the same payload shape must parse");
             let result = dispatch_unmask(
-                &unmask_route(app).await,
+                &unmask_route(host, app).await,
                 &DbBinding::cold_start(app),
                 permitted,
             )
@@ -1163,7 +1178,7 @@ fn app_js_claiming_the_auto_system_actor_is_refused_by_the_parser() {
          records one: {audit:?}",
             );
 
-            release_pg(pool).await;
+            release_pg(host, pool).await;
         })
     })
 }
@@ -1180,15 +1195,15 @@ fn app_js_claiming_the_auto_system_actor_is_refused_by_the_parser() {
 /// `bulk_unmask_partial_unauthorized`.
 #[test]
 fn app_js_claiming_the_auto_system_actor_is_refused_by_the_bulk_parser() {
-    crate::tests::host::in_test(|| {
-        crate::tests::host::run(async {
+    Host::test(|host| {
+        host.run(async {
             let (_postgres, url) = require_pg().await;
             let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
             let app = "flip_db3_bulk";
-            crate::tests::host::clear_mask_policy_cache_for_tests(app);
+            host.clear_mask_policy_cache(app);
             let schema = flip_schema();
             let ssn = "987-65-4321";
-            let person = audited_unmask_fixture(&pool, &url, app, &schema, ssn).await;
+            let person = audited_unmask_fixture(host, &pool, &url, app, &schema, ssn).await;
 
             install_mask_policy(&DbBinding::cold_start(app), value!({ "support": ["pci"] }))
                 .expect("install the app's declared mask policy");
@@ -1201,7 +1216,7 @@ fn app_js_claiming_the_auto_system_actor_is_refused_by_the_bulk_parser() {
             ))
             .expect("the payload must PARSE; DB-3 is an authorization fence");
             let err = match dispatch_bulk_unmask(
-                &unmask_route(app).await,
+                &unmask_route(host, app).await,
                 &DbBinding::cold_start(app),
                 forged,
             )
@@ -1259,7 +1274,7 @@ fn app_js_claiming_the_auto_system_actor_is_refused_by_the_bulk_parser() {
             ))
             .expect("the same payload shape must parse");
             let granted = dispatch_bulk_unmask(
-                &unmask_route(app).await,
+                &unmask_route(host, app).await,
                 &DbBinding::cold_start(app),
                 permitted,
             )
@@ -1282,7 +1297,7 @@ fn app_js_claiming_the_auto_system_actor_is_refused_by_the_bulk_parser() {
                 "and a NON-reserved kind does travel through to the audit row: {audit:?}",
             );
 
-            release_pg(pool).await;
+            release_pg(host, pool).await;
         })
     })
 }
@@ -1308,14 +1323,15 @@ fn app_js_claiming_the_auto_system_actor_is_refused_by_the_bulk_parser() {
 /// what must change is that the REJECTED claim is recorded rather than dropped.
 #[test]
 fn a_rejected_impersonation_is_distinguishable_from_an_absent_actor() {
-    crate::tests::host::in_test(|| {
-        crate::tests::host::run(async {
+    Host::test(|host| {
+        host.run(async {
             let (_postgres, url) = require_pg().await;
             let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
             let app = "flip_db3_signal";
-            crate::tests::host::clear_mask_policy_cache_for_tests(app);
+            host.clear_mask_policy_cache(app);
             let schema = flip_schema();
-            let person = audited_unmask_fixture(&pool, &url, app, &schema, "123-45-6789").await;
+            let person =
+                audited_unmask_fixture(host, &pool, &url, app, &schema, "123-45-6789").await;
 
             install_mask_policy(&DbBinding::cold_start(app), value!({ "support": ["pci"] }))
                 .expect("install the app's declared mask policy");
@@ -1327,7 +1343,7 @@ fn a_rejected_impersonation_is_distinguishable_from_an_absent_actor() {
             ))
             .expect("the forged payload must parse; DB-3 is a fence, not a shape check");
             dispatch_unmask(
-                &unmask_route(app).await,
+                &unmask_route(host, app).await,
                 &DbBinding::cold_start(app),
                 forged,
             )
@@ -1338,7 +1354,7 @@ fn a_rejected_impersonation_is_distinguishable_from_an_absent_actor() {
             let anonymous = parse_args(&unmask_args_json(&person.id, &Value::Null))
                 .expect("an actor-less payload must parse");
             dispatch_unmask(
-                &unmask_route(app).await,
+                &unmask_route(host, app).await,
                 &DbBinding::cold_start(app),
                 anonymous,
             )
@@ -1363,7 +1379,7 @@ fn a_rejected_impersonation_is_distinguishable_from_an_absent_actor() {
          claim is right; discarding it is what has to change. Rows: {audit:?}",
             );
 
-            release_pg(pool).await;
+            release_pg(host, pool).await;
         })
     })
 }
@@ -1429,15 +1445,16 @@ fn bulk_args(row_pk: &str, columns: &[&str], actor: Option<Value>) -> BulkUnmask
 /// grants both classes.
 #[test]
 fn a_bulk_unmask_batch_with_one_forbidden_column_is_refused_whole() {
-    crate::tests::host::in_test(|| {
-        crate::tests::host::run(async {
+    Host::test(|host| {
+        host.run(async {
             let (_postgres, url) = require_pg().await;
             let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
             let app = "flip_bulk_denied";
-            crate::tests::host::clear_mask_policy_cache_for_tests(app);
+            host.clear_mask_policy_cache(app);
             let schema = two_class_schema();
             let (ssn, email) = ("123-45-6789", "ada@example.com");
             let person = audited_unmask_fixture_with(
+                host,
                 &pool,
                 &url,
                 app,
@@ -1455,7 +1472,7 @@ fn a_bulk_unmask_batch_with_one_forbidden_column_is_refused_whole() {
 
             // ---- the half-authorised batch ----
             let err = dispatch_bulk_unmask(
-                &unmask_route(app).await,
+                &unmask_route(host, app).await,
                 &DbBinding::cold_start(app),
                 bulk_args(&person.id, &["email", "ssn"], Some(actor.clone())),
             )
@@ -1524,7 +1541,7 @@ fn a_bulk_unmask_batch_with_one_forbidden_column_is_refused_whole() {
             // So the refusal above withheld a column this very call could return,
             // which is what makes the fence ATOMIC rather than merely right per column.
             let granted = dispatch_bulk_unmask(
-                &unmask_route(app).await,
+                &unmask_route(host, app).await,
                 &DbBinding::cold_start(app),
                 bulk_args(&person.id, &["email"], Some(actor.clone())),
             )
@@ -1556,6 +1573,7 @@ fn a_bulk_unmask_batch_with_one_forbidden_column_is_refused_whole() {
             // verdict cannot differ per row - but WHAT IS RETURNED can, and that is the
             // half the atomic fence owns.
             let second = insert_through_the_pipeline(
+                host,
                 &pool,
                 app,
                 "people",
@@ -1580,7 +1598,7 @@ fn a_bulk_unmask_batch_with_one_forbidden_column_is_refused_whole() {
                 rejected_claim: None,
             };
             let err = dispatch_bulk_unmask(
-                &unmask_route(app).await,
+                &unmask_route(host, app).await,
                 &DbBinding::cold_start(app),
                 two_rows.clone(),
             )
@@ -1641,7 +1659,7 @@ fn a_bulk_unmask_batch_with_one_forbidden_column_is_refused_whole() {
                 rejected_claim: None,
             };
             let err = dispatch_bulk_unmask(
-                &unmask_route(app).await,
+                &unmask_route(host, app).await,
                 &DbBinding::cold_start(app),
                 both_denied,
             )
@@ -1690,9 +1708,10 @@ fn a_bulk_unmask_batch_with_one_forbidden_column_is_refused_whole() {
             );
             install_mask_policy(&redeployed, value!({ "support": ["pii", "pci"] }))
                 .expect("install the new deployment's policy");
-            let granted = dispatch_bulk_unmask(&unmask_route(app).await, &redeployed, two_rows)
-                .await
-                .expect("the same batch must pass once the policy grants both classes");
+            let granted =
+                dispatch_bulk_unmask(&unmask_route(host, app).await, &redeployed, two_rows)
+                    .await
+                    .expect("the same batch must pass once the policy grants both classes");
             assert_eq!(granted.results[&person.id]["ssn"], ssn);
             assert_eq!(
                 granted.results[&second.id]["email"], "grace@example.com",
@@ -1708,7 +1727,7 @@ fn a_bulk_unmask_batch_with_one_forbidden_column_is_refused_whole() {
             assert_eq!(audit[4]["outcome"], value!("granted"));
             assert_eq!(audit[4]["column"], value!("email,ssn"));
 
-            release_pg(pool).await;
+            release_pg(host, pool).await;
         })
     })
 }
@@ -1733,15 +1752,16 @@ fn a_bulk_unmask_batch_with_one_forbidden_column_is_refused_whole() {
 /// withholding something this fixture demonstrably produces.
 #[test]
 fn a_query_hint_naming_one_forbidden_column_is_refused_whole() {
-    crate::tests::host::in_test(|| {
-        crate::tests::host::run(async {
+    Host::test(|host| {
+        host.run(async {
             let (_postgres, url) = require_pg().await;
             let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
             let app = "flip_hint_denied";
-            crate::tests::host::clear_mask_policy_cache_for_tests(app);
+            host.clear_mask_policy_cache(app);
             let schema = two_class_schema();
             let (ssn, email) = ("987-65-4321", "grace@example.com");
             let person = audited_unmask_fixture_with(
+                host,
                 &pool,
                 &url,
                 app,
@@ -1758,7 +1778,7 @@ fn a_query_hint_naming_one_forbidden_column_is_refused_whole() {
             let both = ["email".to_string(), "ssn".to_string()];
 
             let err = authorize_query_hint(
-                &unmask_backend().await,
+                &unmask_backend(host).await,
                 &DbBinding::cold_start(app),
                 "people",
                 &both,
@@ -1834,7 +1854,7 @@ fn a_query_hint_naming_one_forbidden_column_is_refused_whole() {
             // `audit_query_hint_granted` so a failing SELECT leaves no ghost, which is
             // why the count staying at 1 is the assertion here.
             authorize_query_hint(
-                &unmask_backend().await,
+                &unmask_backend(host).await,
                 &DbBinding::cold_start(app),
                 "people",
                 &["email".to_string()],
@@ -1864,7 +1884,7 @@ fn a_query_hint_naming_one_forbidden_column_is_refused_whole() {
             install_mask_policy(&redeployed, value!({ "support": ["pii", "pci"] }))
                 .expect("install the new deployment's policy");
             authorize_query_hint(
-                &unmask_backend().await,
+                &unmask_backend(host).await,
                 &redeployed,
                 "people",
                 &both,
@@ -1876,7 +1896,7 @@ fn a_query_hint_naming_one_forbidden_column_is_refused_whole() {
             .expect("the same hint must pass once the policy grants both classes");
             let mut rows = run_find(&pool, app, &value!({}), &schema).await;
             dispatch_unmask_for_query(
-                &unmask_route(app).await,
+                &unmask_route(host, app).await,
                 &redeployed,
                 "people",
                 &both,
@@ -1892,7 +1912,7 @@ fn a_query_hint_naming_one_forbidden_column_is_refused_whole() {
             );
             assert_eq!(rows[0]["email"], value!(email));
             audit_query_hint_granted(
-                &unmask_backend().await,
+                &unmask_backend(host).await,
                 &redeployed,
                 "people",
                 &both,
@@ -1918,7 +1938,7 @@ fn a_query_hint_naming_one_forbidden_column_is_refused_whole() {
             assert_eq!(after[0]["ssn"], value!("***"));
             assert_eq!(after[0]["email"], value!("g***@example.com"));
 
-            release_pg(pool).await;
+            release_pg(host, pool).await;
         })
     })
 }
@@ -1944,15 +1964,16 @@ fn a_query_hint_naming_one_forbidden_column_is_refused_whole() {
 /// fence, then the read, over the same `unmask_columns` slice.
 #[test]
 fn a_query_hint_reads_the_column_its_alias_resolved_to() {
-    crate::tests::host::in_test(|| {
-        crate::tests::host::run(async {
+    Host::test(|host| {
+        host.run(async {
             let (_postgres, url) = require_pg().await;
             let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
             let app = "flip_hint_alias";
-            crate::tests::host::clear_mask_policy_cache_for_tests(app);
+            host.clear_mask_policy_cache(app);
             let schema = alias_schema();
             let email = "ada@example.com";
             let person = audited_unmask_fixture_with(
+                host,
                 &pool,
                 &url,
                 app,
@@ -1970,7 +1991,7 @@ fn a_query_hint_reads_the_column_its_alias_resolved_to() {
             let hinted = ["contactEmail".to_string()];
 
             authorize_query_hint(
-                &unmask_backend().await,
+                &unmask_backend(host).await,
                 &DbBinding::cold_start(app),
                 "people",
                 &hinted,
@@ -1991,7 +2012,7 @@ fn a_query_hint_reads_the_column_its_alias_resolved_to() {
                 "nickname": "ada",
             })];
             dispatch_unmask_for_query(
-                &unmask_route(app).await,
+                &unmask_route(host, app).await,
                 &DbBinding::cold_start(app),
                 "people",
                 &hinted,
@@ -2011,7 +2032,7 @@ fn a_query_hint_reads_the_column_its_alias_resolved_to() {
                 "the promoted value lands under the DECLARED name: {rows:?}",
             );
 
-            release_pg(pool).await;
+            release_pg(host, pool).await;
         })
     })
 }
@@ -2039,18 +2060,19 @@ fn a_query_hint_reads_the_column_its_alias_resolved_to() {
 /// differently-named raw column cannot pass it.
 #[test]
 fn no_write_verb_hands_back_a_column_the_descriptor_does_not_declare() {
-    crate::tests::host::in_test(|| {
-        crate::tests::host::run(async {
+    Host::test(|host| {
+        host.run(async {
             let (_postgres, url) = require_pg().await;
             let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
             let app = "flip_returning";
             let schema = flip_schema();
-            fixture(&pool, &url, app, "people", &schema).await;
+            fixture(host, &pool, &url, app, "people", &schema).await;
 
             let Inserted {
                 id: minted_id,
                 rows: returned,
             } = insert_through_the_pipeline(
+                host,
                 &pool,
                 app,
                 "people",
@@ -2098,13 +2120,10 @@ fn no_write_verb_hands_back_a_column_the_descriptor_does_not_declare() {
 
             // BOUNDARY 2, the runtime's.
             let allowed: BTreeSet<String> = read_surface_columns(&schema);
-            let finalized = crate::tests::host::finalize_rows_on_read_for_tests(
-                app,
-                "people",
-                returned.clone(),
-            )
-            .await
-            .expect("read pipeline");
+            let finalized = host
+                .finalize_rows_on_read(app, "people", returned.clone())
+                .await
+                .expect("read pipeline");
             let keys: BTreeSet<String> =
                 finalized[0].as_object().unwrap().keys().cloned().collect();
             assert!(
@@ -2143,13 +2162,10 @@ fn no_write_verb_hands_back_a_column_the_descriptor_does_not_declare() {
             smuggled[raw_column_name("ssn")] = value!("123-45-6789");
             smuggled["__zs_shadow_key"] = value!("aux-42");
             smuggled["totally_undeclared"] = value!("leak-me");
-            let finalized = crate::tests::host::finalize_rows_on_read_for_tests(
-                app,
-                "people",
-                vec![smuggled],
-            )
-            .await
-            .expect("read pipeline");
+            let finalized = host
+                .finalize_rows_on_read(app, "people", vec![smuggled])
+                .await
+                .expect("read pipeline");
             let keys: BTreeSet<String> =
                 finalized[0].as_object().unwrap().keys().cloned().collect();
             assert!(
@@ -2164,7 +2180,7 @@ fn no_write_verb_hands_back_a_column_the_descriptor_does_not_declare() {
                 "and neither did its value: {finalized:?}",
             );
 
-            release_pg(pool).await;
+            release_pg(host, pool).await;
         })
     })
 }
@@ -2184,7 +2200,7 @@ fn no_write_verb_hands_back_a_column_the_descriptor_does_not_declare() {
 /// rename keeps the test pointed at the real column.
 #[test]
 fn the_raw_column_is_refused_on_every_inbound_surface() {
-    crate::tests::host::in_test(|| {
+    Host::test(|_| {
         let raw = raw_column_name("ssn");
         let schema = flip_schema();
 
@@ -2314,7 +2330,7 @@ fn the_raw_column_is_refused_on_every_inbound_surface() {
 /// over-delivers, which is the bias `read_set` already declares.
 #[test]
 fn a_masked_predicate_is_lowered_for_the_change_stream() {
-    crate::tests::host::in_test(|| {
+    Host::test(|_| {
         use zeroship_data_orm::cdc::read_set::{Predicate, PredicateOp, normalise_filter};
         let schema = flip_schema();
 
@@ -2372,8 +2388,8 @@ fn a_masked_predicate_is_lowered_for_the_change_stream() {
 /// collection fails.
 #[test]
 fn the_declared_type_and_constraints_travel_to_the_raw_column() {
-    crate::tests::host::in_test(|| {
-        crate::tests::host::run(async {
+    Host::test(|host| {
+        host.run(async {
             let (_postgres, url) = require_pg().await;
             let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
             let app = "flip_ddl";
@@ -2391,7 +2407,7 @@ fn the_declared_type_and_constraints_travel_to_the_raw_column() {
                 },
                 "plain": { "type": "number" },
             });
-            fixture(&pool, &url, app, "accounts", &schema).await;
+            fixture(host, &pool, &url, app, "accounts", &schema).await;
 
             // The server's own catalog, not the emitted string.
             let cols = pool
@@ -2431,6 +2447,7 @@ fn the_declared_type_and_constraints_travel_to_the_raw_column() {
 
             // And it accepts a write. This is what a mistake in the swap breaks.
             let account = insert_through_the_pipeline(
+                host,
                 &pool,
                 app,
                 "accounts",
@@ -2463,7 +2480,7 @@ fn the_declared_type_and_constraints_travel_to_the_raw_column() {
             assert_eq!(stored[0].get::<_, String>("tier_mask"), "***");
             assert_eq!(stored[0].get::<_, String>("tier_raw"), "gold");
 
-            release_pg(pool).await;
+            release_pg(host, pool).await;
         })
     })
 }
@@ -2477,8 +2494,8 @@ fn the_declared_type_and_constraints_travel_to_the_raw_column() {
 /// duplicate-key error on perfectly valid data.
 #[test]
 fn a_unique_masked_field_admits_rows_that_share_a_mask() {
-    crate::tests::host::in_test(|| {
-        crate::tests::host::run(async {
+    Host::test(|host| {
+        host.run(async {
             let (_postgres, url) = require_pg().await;
             let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
             let app = "flip_unique";
@@ -2489,7 +2506,7 @@ fn a_unique_masked_field_admits_rows_that_share_a_mask() {
                     "mask": { "kind": "last4", "classification": "pci" }
                 },
             });
-            fixture(&pool, &url, app, "people", &schema).await;
+            fixture(host, &pool, &url, app, "people", &schema).await;
 
             // `build_create_indexes` emits CONCURRENTLY, which cannot run inside the
             // implicit transaction `batch_execute` uses, so the fixture's DDL carries
@@ -2510,6 +2527,7 @@ fn a_unique_masked_field_admits_rows_that_share_a_mask() {
             // names its own id - the platform mints one per row, which is what makes
             // them two rows rather than one overwritten one.
             let first = insert_through_the_pipeline(
+                host,
                 &pool,
                 app,
                 "people",
@@ -2518,6 +2536,7 @@ fn a_unique_masked_field_admits_rows_that_share_a_mask() {
             )
             .await;
             let second = insert_through_the_pipeline(
+                host,
                 &pool,
                 app,
                 "people",
@@ -2562,11 +2581,9 @@ fn a_unique_masked_field_admits_rows_that_share_a_mask() {
             // like every other, so the only thing that can be refused below is the
             // duplicate value on the raw column.
             let mut docs = value!([{ "ssn": "111-11-1234" }]);
-            crate::tests::host::prepare_insert_many_docs_for_tests(
-                &mut docs, app, "people", None,
-            )
-            .await
-            .expect("write pipeline");
+            host.prepare_insert_many_docs(&mut docs, app, "people", None)
+                .await
+                .expect("write pipeline");
             let bq = build_insert(
                 &zeroship_data_sql::SchemaName::new(app).expect("fixture schema name"),
                 "people",
@@ -2587,7 +2604,7 @@ fn a_unique_masked_field_admits_rows_that_share_a_mask() {
                 "expected a unique violation on the raw column, got {err:?}",
             );
 
-            release_pg(pool).await;
+            release_pg(host, pool).await;
         })
     })
 }
@@ -2660,17 +2677,18 @@ async fn physical_rows(
 /// yields a `MaskedValue`.
 #[test]
 fn deleting_the_mask_key_from_the_descriptor_must_not_write_plaintext() {
-    crate::tests::host::in_test(|| {
-        crate::tests::host::run(async {
+    Host::test(|host| {
+        host.run(async {
             let (_postgres, url) = require_pg().await;
             let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
             let app = "flip_mask_key_deleted";
             let masked = flip_schema();
-            fixture(&pool, &url, app, "people", &masked).await;
+            fixture(host, &pool, &url, app, "people", &masked).await;
 
             // Deploy 1: the descriptor declares the mask, and the table was built for
             // exactly that.
             let first = insert_through_the_pipeline(
+                host,
                 &pool,
                 app,
                 "people",
@@ -2712,14 +2730,13 @@ fn deleting_the_mask_key_from_the_descriptor_must_not_write_plaintext() {
             // nothing about the warm one production actually runs.
             zeroship_data_orm::cache_schema_for_tests(app, "people", unmasked.clone());
             let mut docs = value!([{ "ssn": "987-65-4321", "nickname": "bob" }]);
-            let err = crate::tests::host::prepare_insert_many_docs_for_tests(
-                &mut docs, app, "people", None,
-            )
-            .await
-            .expect_err(
-                "a descriptor that dropped the mask must not be able to write the \
+            let err = host
+                .prepare_insert_many_docs(&mut docs, app, "people", None)
+                .await
+                .expect_err(
+                    "a descriptor that dropped the mask must not be able to write the \
              plaintext this table still protects",
-            );
+                );
             assert!(
                 format!("{err:?}").contains("protection_removed_from_descriptor"),
                 "the refusal must carry the typed code a creator branches on, got {err:?}",
@@ -2756,7 +2773,7 @@ fn deleting_the_mask_key_from_the_descriptor_must_not_write_plaintext() {
                 .unwrap();
             assert_eq!(leaked[0].get::<_, String>("n"), "0");
 
-            release_pg(pool).await;
+            release_pg(host, pool).await;
         })
     })
 }
@@ -2768,17 +2785,17 @@ fn deleting_the_mask_key_from_the_descriptor_must_not_write_plaintext() {
 /// about the other.
 #[test]
 fn deleting_the_encrypted_key_from_the_descriptor_must_not_write_plaintext() {
-    crate::tests::host::in_test(|| {
-        crate::tests::host::run(async {
+    Host::test(|host| {
+        host.run(async {
             let (_postgres, url) = require_pg().await;
             let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
             let app = "flip_enc_key_deleted";
-            let _keys =
-                crate::tests::host::supply_project_key_for_tests(&[app], &"01".repeat(32));
+            let _keys = host.supply_project_key(&[app], &"01".repeat(32));
             let encrypted = encrypted_schema();
-            fixture(&pool, &url, app, "people", &encrypted).await;
+            fixture(host, &pool, &url, app, "people", &encrypted).await;
 
             let first = insert_through_the_pipeline(
+                host,
                 &pool,
                 app,
                 "people",
@@ -2805,14 +2822,13 @@ fn deleting_the_encrypted_key_from_the_descriptor_must_not_write_plaintext() {
             let plain = encrypted_schema_without_the_encrypted_key();
             zeroship_data_orm::cache_schema_for_tests(app, "people", plain.clone());
             let mut docs = value!([{ "secret": "hunter3-also-real", "nickname": "bob" }]);
-            let err = crate::tests::host::prepare_insert_many_docs_for_tests(
-                &mut docs, app, "people", None,
-            )
-            .await
-            .expect_err(
-                "a descriptor that dropped the encryption block must not be able to \
+            let err = host
+                .prepare_insert_many_docs(&mut docs, app, "people", None)
+                .await
+                .expect_err(
+                    "a descriptor that dropped the encryption block must not be able to \
              write the plaintext this column still protects",
-            );
+                );
             assert!(
                 format!("{err:?}").contains("protection_removed_from_descriptor"),
                 "the refusal must carry the typed code a creator branches on, got {err:?}",
@@ -2838,7 +2854,7 @@ fn deleting_the_encrypted_key_from_the_descriptor_must_not_write_plaintext() {
                 "the refused write must not have stored the plaintext",
             );
 
-            release_pg(pool).await;
+            release_pg(host, pool).await;
         })
     })
 }
@@ -2883,6 +2899,7 @@ fn confined_ceiling_for(app_uuid: &uuid::Uuid) -> zeroship_migrate_policy::Effec
 /// `zeroship_migrate_postgres::DIALECT`, the exact pair `apply.rs` drives, with
 /// the shipped confined ceiling supplying the injected system columns.
 async fn fixture_via_the_migration_engine(
+    host: &Host,
     pool: &Rc<Pool>,
     url: &str,
     app_uuid: &uuid::Uuid,
@@ -2923,7 +2940,7 @@ async fn fixture_via_the_migration_engine(
             .await
             .unwrap_or_else(|e| panic!("engine-emitted DDL must apply: {e}\n{statement}"));
     }
-    crate::support::install_postgres_pool(Rc::clone(pool), url);
+    host.install_postgres_pool(Rc::clone(pool), url);
     zeroship_data_orm::cache_schema_for_tests(&app, collection, schema.clone());
     app
 }
@@ -2969,8 +2986,8 @@ async fn column_comment(
 /// to refuse, on the exact tables it was built for.
 #[test]
 fn a_migration_engine_built_table_refuses_a_mask_downgrade() {
-    crate::tests::host::in_test(|| {
-        crate::tests::host::run(async {
+    Host::test(|host| {
+        host.run(async {
             let (_postgres, url) = require_pg().await;
             let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
             // A FIXED uuid rather than a fresh one: the app id IS the schema name, and a
@@ -2979,7 +2996,8 @@ fn a_migration_engine_built_table_refuses_a_mask_downgrade() {
             let app_uuid = uuid::Uuid::from_u128(0x6d61_736b_5f65_6e67_696e_655f_666c_6f6f);
             let masked = flip_schema();
             let app =
-                fixture_via_the_migration_engine(&pool, &url, &app_uuid, "people", &masked).await;
+                fixture_via_the_migration_engine(host, &pool, &url, &app_uuid, "people", &masked)
+                    .await;
 
             // CONTROL 1, and the one that binds the two crates' codecs together: the
             // comment the ENGINE wrote must be byte-identical to what the RUNTIME's codec
@@ -3002,6 +3020,7 @@ fn a_migration_engine_built_table_refuses_a_mask_downgrade() {
             // the mask lands in the field's own column. Without it a fence that refused
             // every write would satisfy the assertion below.
             let first = insert_through_the_pipeline(
+                host,
                 &pool,
                 &app,
                 "people",
@@ -3040,10 +3059,9 @@ fn a_migration_engine_built_table_refuses_a_mask_downgrade() {
             // the write, and the prepared document is the downgrade itself. Reporting it
             // is the difference between "returned Ok(())" and naming the plaintext that
             // was about to be stored under the field's own name.
-            let err = match crate::tests::host::prepare_insert_many_docs_for_tests(
-                &mut docs, &app, "people", None,
-            )
-            .await
+            let err = match host
+                .prepare_insert_many_docs(&mut docs, &app, "people", None)
+                .await
             {
                 Ok(()) => panic!(
                     "a descriptor that dropped the mask must not be able to write the \
@@ -3076,7 +3094,7 @@ fn a_migration_engine_built_table_refuses_a_mask_downgrade() {
                 .unwrap();
             assert_eq!(leaked[0].get::<_, String>("n"), "0");
 
-            release_pg(pool).await;
+            release_pg(host, pool).await;
         })
     })
 }
@@ -3091,19 +3109,17 @@ fn a_migration_engine_built_table_refuses_a_mask_downgrade() {
 /// comment's prefix, so the two prefixes fail independently.
 #[test]
 fn a_migration_engine_built_table_refuses_an_encryption_downgrade() {
-    crate::tests::host::in_test(|| {
-        crate::tests::host::run(async {
+    Host::test(|host| {
+        host.run(async {
             let (_postgres, url) = require_pg().await;
             let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
             let app_uuid = uuid::Uuid::from_u128(0x656e_635f_656e_6769_6e65_5f66_6c6f_6f72);
             let encrypted = encrypted_schema();
-            let _keys = crate::tests::host::supply_project_key_for_tests(
-                &[&app_uuid.to_string()],
-                &"01".repeat(32),
-            );
-            let app =
-                fixture_via_the_migration_engine(&pool, &url, &app_uuid, "people", &encrypted)
-                    .await;
+            let _keys = host.supply_project_key(&[&app_uuid.to_string()], &"01".repeat(32));
+            let app = fixture_via_the_migration_engine(
+                host, &pool, &url, &app_uuid, "people", &encrypted,
+            )
+            .await;
 
             // CONTROL 1: the engine's encryption sentinel, compared against the runtime
             // codec's own build for the same declaration.
@@ -3124,6 +3140,7 @@ fn a_migration_engine_built_table_refuses_an_encryption_downgrade() {
             // CONTROL 2: the encrypting deploy stores ciphertext, so this test is not
             // green because writes stopped working.
             let first = insert_through_the_pipeline(
+                host,
                 &pool,
                 &app,
                 "people",
@@ -3150,10 +3167,9 @@ fn a_migration_engine_built_table_refuses_an_encryption_downgrade() {
                 encrypted_schema_without_the_encrypted_key(),
             );
             let mut docs = value!([{ "secret": "hunter3-also-real", "nickname": "bob" }]);
-            let err = match crate::tests::host::prepare_insert_many_docs_for_tests(
-                &mut docs, &app, "people", None,
-            )
-            .await
+            let err = match host
+                .prepare_insert_many_docs(&mut docs, &app, "people", None)
+                .await
             {
                 Ok(()) => panic!(
                     "a descriptor that dropped the encryption block must not be able \
@@ -3187,7 +3203,7 @@ fn a_migration_engine_built_table_refuses_an_encryption_downgrade() {
                 "the refused write must not have stored the plaintext",
             );
 
-            release_pg(pool).await;
+            release_pg(host, pool).await;
         })
     })
 }

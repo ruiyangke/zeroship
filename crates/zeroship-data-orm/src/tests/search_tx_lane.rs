@@ -40,6 +40,7 @@
 #[allow(unused_imports)]
 use crate::schema_fixture::{fixture_table_sql, fixture_table_sql_for};
 use crate::support;
+use crate::tests::host::Host;
 #[allow(unused_imports)]
 use zeroship_migrate::schema::query::FkEmission;
 
@@ -74,9 +75,9 @@ async fn require_pg() -> (crate::support::postgres::Postgres, String) {
     }
 }
 
-async fn release_pg(pool: Rc<Pool>) {
+async fn release_pg(host: &Host, pool: Rc<Pool>) {
     drop(pool);
-    crate::tests::host::reset_context_for_tests();
+    host.reset();
     let _ = compio_postgres::drain_connections(std::time::Duration::from_secs(2)).await;
 }
 
@@ -98,7 +99,14 @@ async fn require_extension(pool: &Rc<Pool>, extension: &str) {
 /// Build the app schema from the PLATFORM's own DDL emitter, provision the
 /// per-app role the data plane runs under, and install the descriptor entry a
 /// deploy would have installed.
-async fn fixture(pool: &Rc<Pool>, url: &str, app: &str, collection: &str, schema: Value) {
+async fn fixture(
+    host: &Host,
+    pool: &Rc<Pool>,
+    url: &str,
+    app: &str,
+    collection: &str,
+    schema: Value,
+) {
     pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
         .await
         .unwrap();
@@ -121,26 +129,26 @@ async fn fixture(pool: &Rc<Pool>, url: &str, app: &str, collection: &str, schema
         .expect("per-app role, as the deploy would provision it");
     support::grant_all_runtime_table_columns(pool, app, collection).await;
 
-    crate::support::install_postgres_pool(Rc::clone(pool), url);
+    host.install_postgres_pool(Rc::clone(pool), url);
     zeroship_data_orm::cache_schema_for_tests(app, collection, schema);
 }
 
 /// The backend handle the V8 dispatcher would have bound for this dispatch.
-async fn backend() -> zeroship_data_orm::backend::BackendHandle {
-    crate::tests::host::ensure_backend()
+async fn backend(host: &Host) -> zeroship_data_orm::backend::BackendHandle {
+    host.backend()
         .await
         .expect("the backend the V8 dispatcher would have opened")
 }
 
 /// A route that claims the app's open transaction — what `CapturedRoute::capture`
 /// produces for a dispatch issued inside `db.transaction(fn)`.
-async fn tx_route(app: &str) -> TxRoute {
-    CapturedRoute::tx_for_tests(app, SqlDialect::Postgres).bind(backend().await)
+async fn tx_route(host: &Host, app: &str) -> TxRoute {
+    CapturedRoute::tx_for_tests(app, SqlDialect::Postgres).bind(backend(host).await)
 }
 
 /// A route outside any transaction.
-async fn pool_route(app: &str) -> TxRoute {
-    CapturedRoute::pool_for_tests(app, SqlDialect::Postgres).bind(backend().await)
+async fn pool_route(host: &Host, app: &str) -> TxRoute {
+    CapturedRoute::pool_for_tests(app, SqlDialect::Postgres).bind(backend(host).await)
 }
 
 /// Run the real `plan_find` + `run_find` pair on `route`.
@@ -208,8 +216,8 @@ fn code_of(err: &DbError) -> String {
 /// a fresh pooled checkout that cannot see it.
 #[test]
 fn a_vector_search_inside_a_transaction_sees_the_row_that_transaction_inserted() {
-    crate::tests::host::in_test(|| {
-        crate::tests::host::run(async {
+    Host::test(|host| {
+        host.run(async {
             let (_postgres, url) = require_pg().await;
             let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
             require_extension(&pool, "vector").await;
@@ -217,6 +225,7 @@ fn a_vector_search_inside_a_transaction_sees_the_row_that_transaction_inserted()
             let app = "search_lane_vector";
             let coll = "docs";
             fixture(
+                host,
                 &pool,
                 &url,
                 app,
@@ -228,12 +237,12 @@ fn a_vector_search_inside_a_transaction_sees_the_row_that_transaction_inserted()
             )
             .await;
 
-            crate::support::begin_transaction(app, &url).await;
+            host.begin_transaction(app, &url).await;
 
             let inserted = zeroship_data_orm::crud::run_insert(
                 DbBinding::cold_start(app),
                 coll.to_string(),
-                tx_route(app).await,
+                tx_route(host, app).await,
                 value!({ "embedding": [1.0, 0.0, 0.0, 0.0], "title": "in the transaction" }),
                 None,
             )
@@ -245,7 +254,7 @@ fn a_vector_search_inside_a_transaction_sees_the_row_that_transaction_inserted()
                 .to_string();
 
             // ---- CONTROL 1: the transaction lane sees its own uncommitted row.
-            let inside_plain = find_on(tx_route(app).await, app, coll, value!({ "id": &id }))
+            let inside_plain = find_on(tx_route(host, app).await, app, coll, value!({ "id": &id }))
                 .await
                 .expect("a plain find inside the transaction must be authorised to run");
             assert_eq!(
@@ -261,7 +270,7 @@ fn a_vector_search_inside_a_transaction_sees_the_row_that_transaction_inserted()
             let args = value!({ "vector": [1.0, 0.0, 0.0, 0.0], "k": 10 });
 
             // ---- CONTROL 2: the same search, POOLED. Differs in one token: `in_tx`.
-            let outside = search_on(pool_route(app).await, app, coll, args.clone())
+            let outside = search_on(pool_route(host, app).await, app, coll, args.clone())
                 .await
                 .expect("a pooled vector search is authorised to run");
             assert!(
@@ -271,9 +280,9 @@ fn a_vector_search_inside_a_transaction_sees_the_row_that_transaction_inserted()
             );
 
             // ---- SUBJECT: the same search on the transaction's own lane.
-            let inside = search_on(tx_route(app).await, app, coll, args).await;
+            let inside = search_on(tx_route(host, app).await, app, coll, args).await;
 
-            crate::tests::host::rollback_transaction_for_tests(app).await;
+            host.rollback_transaction(app).await;
 
             let inside = inside.unwrap_or_else(|e| {
                 panic!(
@@ -296,7 +305,7 @@ fn a_vector_search_inside_a_transaction_sees_the_row_that_transaction_inserted()
                 "the row must carry pgvector's synthetic distance column: {inside:?}",
             );
 
-            release_pg(pool).await;
+            release_pg(host, pool).await;
         })
     })
 }
@@ -314,8 +323,8 @@ fn a_vector_search_inside_a_transaction_sees_the_row_that_transaction_inserted()
 ///
 #[test]
 fn a_spatial_near_inside_a_transaction_sees_the_row_that_transaction_inserted() {
-    crate::tests::host::in_test(|| {
-        crate::tests::host::run(async {
+    Host::test(|host| {
+        host.run(async {
             let (_postgres, url) = require_pg().await;
             let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
             require_extension(&pool, "postgis").await;
@@ -323,6 +332,7 @@ fn a_spatial_near_inside_a_transaction_sees_the_row_that_transaction_inserted() 
             let app = "search_lane_spatial";
             let coll = "places";
             fixture(
+                host,
                 &pool,
                 &url,
                 app,
@@ -334,13 +344,13 @@ fn a_spatial_near_inside_a_transaction_sees_the_row_that_transaction_inserted() 
             )
             .await;
 
-            crate::support::begin_transaction(app, &url).await;
+            host.begin_transaction(app, &url).await;
 
             let point = value!({"lat": 51.5074, "lng": -0.1278});
             let inserted = zeroship_data_orm::crud::run_insert(
                 DbBinding::cold_start(app),
                 coll.to_string(),
-                tx_route(app).await,
+                tx_route(host, app).await,
                 value!({"location": point.clone(), "title": "in the transaction"}),
                 None,
             )
@@ -350,7 +360,7 @@ fn a_spatial_near_inside_a_transaction_sees_the_row_that_transaction_inserted() 
             assert_eq!(inserted.rows[0]["location"], point);
 
             // ---- CONTROL 1: the transaction lane sees its own uncommitted row.
-            let inside_plain = find_on(tx_route(app).await, app, coll, value!({ "id": &id }))
+            let inside_plain = find_on(tx_route(host, app).await, app, coll, value!({ "id": &id }))
                 .await
                 .expect("a plain find inside the transaction must be authorised to run");
             assert_eq!(
@@ -369,7 +379,7 @@ fn a_spatial_near_inside_a_transaction_sees_the_row_that_transaction_inserted() 
             });
 
             // ---- CONTROL 2: the same near, POOLED. Differs in one token: `in_tx`.
-            let outside = near_on(pool_route(app).await, app, coll, args.clone())
+            let outside = near_on(pool_route(host, app).await, app, coll, args.clone())
                 .await
                 .expect("a pooled spatial near is authorised to run");
             assert!(
@@ -379,9 +389,9 @@ fn a_spatial_near_inside_a_transaction_sees_the_row_that_transaction_inserted() 
             );
 
             // ---- SUBJECT: the same near on the transaction's own lane.
-            let inside = near_on(tx_route(app).await, app, coll, args).await;
+            let inside = near_on(tx_route(host, app).await, app, coll, args).await;
 
-            crate::tests::host::rollback_transaction_for_tests(app).await;
+            host.rollback_transaction(app).await;
 
             let inside = inside.unwrap_or_else(|e| {
                 panic!(
@@ -404,7 +414,7 @@ fn a_spatial_near_inside_a_transaction_sees_the_row_that_transaction_inserted() 
                 "the row must carry PostGIS's synthetic distance column: {inside:?}",
             );
 
-            release_pg(pool).await;
+            release_pg(host, pool).await;
         })
     })
 }
