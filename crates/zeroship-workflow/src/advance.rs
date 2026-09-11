@@ -665,7 +665,7 @@ fn normalize_workflow_duration_ms(raw: Option<&Value>) -> Option<Value> {
 /// The local dev engine already accepted both (`dev.rs`
 /// `parse_workflow_duration_ms`), so the documented spelling worked under
 /// `pnpm dev` and hung deployed -- found by walking both sides in
-/// `tests/e2e_dev_vs_deployed_workflows.sh`.
+/// `examples/workflow-probe/tests/workflows.test.ts`.
 fn parse_workflow_duration_ms(raw: &str) -> Option<i64> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -1303,7 +1303,7 @@ mod tests {
     /// What this does NOT catch: it exercises the parser, not the wiring. If a
     /// caller stopped routing through `normalize_workflow_wake_at`, or the JS
     /// side started sending a different field, this still passes. That path is
-    /// covered by `tests/e2e_dev_vs_deployed_workflows.sh`, which drives a real
+    /// covered by `examples/workflow-probe/tests/workflows.test.ts`, which drives a real
     /// `step.sleep` through a deployed app.
     #[test]
     fn documented_suffix_durations_normalize_to_a_wake_at() {

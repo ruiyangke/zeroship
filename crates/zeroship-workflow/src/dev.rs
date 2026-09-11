@@ -2255,7 +2255,7 @@ mod tests {
     /// What these tests do NOT catch: they do not prove the dev engine's V8
     /// dispatch ever emits `compensable: true` for a real `step.run`, and they do
     /// not compare against a live deployed run. Those two are the job of
-    /// `tests/e2e_dev_vs_deployed_workflows.sh`, which drives both backends.
+    /// `examples/workflow-probe/tests/workflows.test.ts`, which drives both backends.
     ///
     /// This one is the tripwire under the report itself: the report is honest
     /// only because dev genuinely never compensates. A run parked in
