@@ -21,6 +21,8 @@ export default async function setup(project: TestProject) {
     project.provide("storageArtifacts", platform.logs);
     if (!platform.s3) throw new Error("S3 fixture was not initialized");
     project.provide("storageS3", platform.s3);
+    if (!platform.worker) throw new Error("Worker fixture was not initialized");
+    project.provide("storageWorker", platform.worker);
   } catch (error) {
     try { await cleanup(); } catch (cleanupError) {
       throw new AggregateError([error, cleanupError], "Storage setup and cleanup failed");

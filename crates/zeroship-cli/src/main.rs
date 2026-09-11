@@ -312,10 +312,15 @@ fn cmd_serve(args: &[String]) {
     // Class `creator`, not `cli`: the names in this snapshot belong to the
     // app being served, not to the platform, so there is nothing here for the
     // platform to enumerate. This is the ONE legitimate whole-environment read.
-    let env_vars: std::collections::HashMap<String, String> =
+    let mut env_vars: std::collections::HashMap<String, String> =
         zeroship_core::read_process_env_snapshot!(crate::ZeroshipCliConsumer)
             .into_iter()
             .collect();
+    // The single-app dev host owns its namespace just as the worker does.
+    // Keep it aligned with Vite's DEV_APP_ID when no identity was supplied.
+    env_vars
+        .entry("APP_ID".into())
+        .or_insert_with(|| "default".into());
 
     let workflow_db_path: PathBuf = zeroship_core::declared_env_os!(
         cli,

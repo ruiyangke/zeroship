@@ -13,7 +13,7 @@ import { generate } from "selfsigned";
 import { stringify } from "smol-toml";
 import { Parser } from "tar";
 import { GenericContainer, Wait, type StartedTestContainer } from "testcontainers";
-import type { Target } from "../targets";
+import type { Target, WorkerFixture } from "../targets";
 import { issuer } from "./issuer";
 import { Processes } from "./processes";
 
@@ -61,6 +61,7 @@ export class Platform {
   private readonly ports: Awaited<ReturnType<typeof reservePort>>[] = [];
   private closing?: Promise<void>;
   s3?: { endpoint: string; bucket: string; prefix: string; appId: string; workerPid: number };
+  worker?: WorkerFixture;
 
   private constructor(readonly work: string, readonly logs: string) {
     this.processes = new Processes(logs);
@@ -108,8 +109,9 @@ export class Platform {
 
   private async httpReady(url: string, init?: RequestInit) {
     const response = await fetch(url, { ...init, signal: AbortSignal.any([this.processes.signal, AbortSignal.timeout(5_000)]) });
-    await response.arrayBuffer();
-    return response.ok;
+    const body = await response.text();
+    if (!response.ok) throw new Error(`${url}: HTTP ${response.status}: ${body}`);
+    return true;
   }
 
   async start(): Promise<Target[]> {
@@ -256,6 +258,7 @@ export class Platform {
     assert(storedBlobs.output.trim(), "Deploy must write blobs into S3");
     assert(workerProcess.child.pid, "Worker process must have a PID");
     this.s3 = { endpoint, bucket: "storage-fixture", prefix: "objects", appId: id, workerPid: workerProcess.child.pid };
+    this.worker = { url: worker.url, appId: id, gatewayKey: await readFile(keys.gateway, "utf8") };
 
     console.info("Storage fixture: start local Vite and wait for app dispatch");
     const dev = await this.port();
