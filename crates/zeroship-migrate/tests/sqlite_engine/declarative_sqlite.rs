@@ -269,6 +269,7 @@ async fn descriptor_to_sqlite_apply_roundtrips_foreign_key() {
             name: "author".into(),
             ty: "ref".into(),
             references: Some("users".into()),
+            reference_column: Some("id".into()),
             ..Default::default()
         }],
         indexes: vec![],
@@ -345,6 +346,7 @@ async fn sqlite_deferred_fk_is_typed_error() {
             name: "author".into(),
             ty: "ref".into(),
             references: Some("ghost_users".into()),
+            reference_column: Some("id".into()),
             ..Default::default()
         }],
         indexes: vec![],
@@ -1123,6 +1125,7 @@ async fn golden_sqlite_create_table_and_index() {
                 name: "owner".into(),
                 ty: "ref".into(),
                 references: Some("users".into()),
+                reference_column: Some("id".into()),
                 ..Default::default()
             },
         ],
@@ -1161,7 +1164,7 @@ async fn golden_sqlite_create_table_and_index() {
     let accounts_mig = golden_find(&migs, "create_table_accounts");
     assert_eq!(
         accounts_mig.up,
-        "CREATE TABLE \"accounts\" (\"__zs_raw__secret\" BLOB /* zero-migrate:enc:string */, \"__zs_raw__ssn\" TEXT, \"created_at\" TEXT NOT NULL, \"created_by\" TEXT, \"deleted_at\" TEXT, \"id\" TEXT PRIMARY KEY NOT NULL, \"owner\" TEXT, \"secret\" TEXT /* zero-migrate:mask:kind=full,classification=pii */, \"ssn\" TEXT /* zero-migrate:mask:kind=last4,classification=pii */, \"title\" TEXT NOT NULL, \"updated_at\" TEXT NOT NULL, \"updated_by\" TEXT, \"version\" INTEGER NOT NULL, CONSTRAINT \"accounts_owner_fkey\" FOREIGN KEY (owner) REFERENCES users(id));\nCREATE INDEX IF NOT EXISTS \"accounts_created_by_idx\" ON \"accounts\" (\"created_by\");\nCREATE INDEX IF NOT EXISTS \"accounts_deleted_at_idx\" ON \"accounts\" (\"deleted_at\");\nCREATE INDEX IF NOT EXISTS \"accounts_updated_at_idx\" ON \"accounts\" (\"updated_at\")",
+        "CREATE TABLE \"accounts\" (\"__zs_raw__secret\" BLOB /* zero-migrate:enc:bytes */, \"__zs_raw__ssn\" TEXT, \"created_at\" TEXT NOT NULL, \"created_by\" TEXT, \"deleted_at\" TEXT, \"id\" TEXT PRIMARY KEY NOT NULL, \"owner\" TEXT COLLATE BINARY, \"secret\" TEXT /* zero-migrate:mask:kind=full,classification=pii */, \"ssn\" TEXT /* zero-migrate:mask:kind=last4,classification=pii */, \"title\" TEXT NOT NULL, \"updated_at\" TEXT NOT NULL, \"updated_by\" TEXT, \"version\" INTEGER NOT NULL, CONSTRAINT \"accounts_owner_fkey\" FOREIGN KEY (owner) REFERENCES users(id));\nCREATE INDEX IF NOT EXISTS \"accounts_created_by_idx\" ON \"accounts\" (\"created_by\");\nCREATE INDEX IF NOT EXISTS \"accounts_deleted_at_idx\" ON \"accounts\" (\"deleted_at\");\nCREATE INDEX IF NOT EXISTS \"accounts_updated_at_idx\" ON \"accounts\" (\"updated_at\")",
     );
     assert_eq!(
         accounts_mig.down.as_deref(),
@@ -1241,7 +1244,7 @@ async fn golden_sqlite_add_column() {
     assert_eq!(
         secret_raw.up,
         format!(
-            r#"ALTER TABLE "accounts" ADD COLUMN "{}" BLOB /* zero-migrate:enc:string */"#,
+            r#"ALTER TABLE "accounts" ADD COLUMN "{}" BLOB /* zero-migrate:enc:bytes */"#,
             zeroship_migrate::schema::query::raw_column_name("secret")
         ),
     );
@@ -1476,6 +1479,7 @@ async fn second_deploy_string_to_ref_within_text_affinity_column_is_differ_noop_
             name: "owner".into(),
             ty: "ref".into(),
             references: Some("users".into()),
+            reference_column: Some("id".into()),
             ..Default::default()
         }],
         indexes: vec![],
