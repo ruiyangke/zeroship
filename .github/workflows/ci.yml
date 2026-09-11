@@ -1886,13 +1886,12 @@ jobs:
   #          the step that now does. That is a stale harness, tracked as #262 -
   #          NOT a dev-vs-deployed disagreement, and it must not be read as one.
   #
-  #   storage    GREEN when idle, RED under host load, deterministically.
-  #   workflows  same, with three different timing failures. Both are documented
-  #              at the point where their steps would otherwise sit, below.
+  # Storage now runs through example-owned Vitest suites with explicit plans.
+  # Workflow exclusions are documented beside their omitted step below.
   #
   # Wiring auth or login would mean weakening an assertion to match; they go
   # green by FIXING the divergence. db goes green by teaching the harness the
-  # new dev-migration contract. storage and workflows go green by sizing their
+  # new dev-migration contract. Workflows go green by sizing their
   # CPU and readiness budgets for a loaded host.
   #
   # WHY LOAD IS A WIRING CRITERION AT ALL, and not fussiness: a GitHub-hosted
@@ -1947,7 +1946,7 @@ jobs:
       - name: Install harness prerequisites
         run: sudo apt-get update && sudo apt-get install -y lsof
       # Postgres as an explicit `docker run`, NOT a `services:` entry, and the
-      # container NAME is the reason: stream/storage/workflows create and drop
+      # container NAME is the reason: stream/workflows create and drop
       # their own dedicated database through `docker exec "$PG_CONTAINER" psql`
       # (default `compose-postgres-1`, matching the dev compose stack). GitHub
       # generates the name of a `services:` container, so `docker exec` by name
@@ -1955,7 +1954,7 @@ jobs:
       #
       # errors and env do NOT use this one - they call stack_pg_up, which starts
       # its OWN postgres:16 container on its own port per harness. The native
-      # KV test uses Testcontainers. These need Docker but not this step.
+      # KV and storage examples use Testcontainers. They do not use this server.
       - name: Start Postgres
         run: |
           docker run -d --name compose-postgres-1 -p 5440:5432 \
@@ -1973,7 +1972,7 @@ jobs:
       # `pnpm build` FIRST and cargo second is load-bearing, not stylistic: the
       # runtime crate `include_str!`s sdks/bootstrap/dist/{runtime-entry,dispatcher}.js.
       - run: pnpm build
-      # dev-provision (from -p zeroship-control --bins) is what stream/kv/storage/
+      # dev-provision (from -p zeroship-control --bins) is what stream/
       # workflows deploy with; `-p zeroship-cli` produces the binary `pnpm dev` runs
       # as the dev tier on every one of the six.
       - name: Build the release binaries the harnesses start
@@ -2023,7 +2022,7 @@ jobs:
           ZS_FRESHNESS_STRICT: 1
           PG_CONTAINER: compose-postgres-1
           PG_USER: postgres
-      - name: Install the KV dashboard browser
+      - name: Install the example test browser
         run: pnpm --dir examples/kv-dashboard exec playwright install --with-deps chromium
       - name: KV dashboard (RPC and browser on redb and Redis)
         run: pnpm --dir examples/kv-dashboard test
@@ -2034,8 +2033,20 @@ jobs:
           name: kv-deployment-logs
           path: examples/kv-dashboard/tests/.artifacts/**
           if-no-files-found: ignore
+      - name: Storage crates and examples
+        run: cargo xtask test storage
+      - name: Retain storage fixture failure logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: storage-deployment-logs
+          include-hidden-files: true
+          path: |
+            examples/storage-probe/tests/.artifacts/**
+            examples/storage-gallery/tests/.artifacts/**
+          if-no-files-found: ignore
       # env.auth. This harness existed and ran in NO workflow until 2026-08-12.
-      # Unlike storage and workflows below, whose exclusions are measured and
+      # Unlike workflows below, whose exclusion is measured and
       # written down, nothing recorded a reason for this one - so it was an
       # omission, not a decision.
       #
@@ -2082,54 +2093,8 @@ jobs:
           ZS_FRESHNESS_STRICT: 1
           PG_CONTAINER: compose-postgres-1
           PG_USER: postgres
-      # tests/e2e_dev_vs_deployed_storage.sh IS NOT WIRED HERE, and the reason is
-      # a measurement rather than a suspicion. It carries a floor of 53 and scores
-      # 54/0 on an idle machine - but its deployed 1 MiB chunked streamGet dies on
-      # the worker's per-request CPU budget as soon as the host is contended:
-      #
-      #   idle machine     6 runs, 6 green   (54 passed, 0 failed)
-      #   12 busy cores    2 runs, 2 RED     (48 passed, 6 failed), every time
-      #                    `streamGet {"message":"CPU time limit exceeded"}`
-      #
-      # Same signature both times, so this is a deterministic sensitivity to host
-      # load, not a random flake. A GitHub-hosted runner is 2-4 shared vCPUs, so
-      # wiring it would produce a red that is about the runner rather than about
-      # the product - and the honest fix is neither a retry (this repo's stance:
-      # a flaky step is a defect to diagnose) nor a lowered floor.
-      #
-      # RE-MEASURED 2026-08-12 and the finding is sharper than "a 1 MiB read
-      # costs too much" (task #364). Reproduced at 48/6 under 12 busy loops, and
-      # THREE probes touch the same 1 MiB object in that same run:
-      #   probe.streamPut           1 MiB written in 16 x 64 KiB chunks  PASSES
-      #   probe.streamThenBuffered  1 MiB read buffered + checksummed    PASSES
-      #   probe.streamGet           1 MiB read CHUNKED + checksummed     FAILS
-      # Same bytes, proven by the identical checksum. streamThenBuffered runs
-      # checksumOf() over the whole megabyte, so it does the same JS byte-loop
-      # arithmetic - the differing variable is the `await reader.read()` loop,
-      # not the volume and not the checksum. So this is a question about the
-      # chunked READ path specifically. A creator draining a 1 MiB object
-      # chunked on a busy node gets a 500. Wire it once that is settled.
-      #
-      # Three follow-ups, same day, so nobody re-runs them.
-      #
-      # (1) It REPRODUCES on freshly built worker/gateway/cli binaries (48/6
-      # again), so the earlier measurement was not an artefact of a stale build.
-      #
-      # (2) NEITHER HALF EXCEEDS THE BUDGET ALONE - the sum does. Removing ONLY
-      # the `updateChecksum` call from streamGet's drain loop, same 1 MiB, same
-      # 12 busy loops, gives `53 passed, 1 failed` with ZERO "CPU time limit
-      # exceeded", and the one failure is the checksum-mismatch assertion that
-      # mutation must move. So chunk delivery on its own fits, and the spine
-      # measures the checksum at ~30 ms on its own. Do not read this as "chunked
-      # delivery is too expensive" and go optimise it in isolation.
-      #
-      # (3) What the three arms bound, taking the spine's ~30 ms checksum (which
-      # was measured on a DIFFERENT vehicle, so this is inference, not a reading):
-      # chunked delivery is over ~20 ms, buffered `get` is under ~20 ms, and the
-      # 50 ms free-tier budget fits either one plus the checksum but not the
-      # chunked pair. That is the shape any fix has to move.
       # tests/e2e_dev_vs_deployed_workflows.sh IS NOT WIRED HERE either, for the
-      # same measured reason as storage and with a messier signature:
+      # measured timing failures described below:
       #
       #   idle machine     3 runs, 3 green   (44 passed, 0 failed)
       #   12 busy cores    3 runs, 3 RED, and a DIFFERENT failure each time -
