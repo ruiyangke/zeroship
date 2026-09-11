@@ -36,8 +36,8 @@
 # missing" is only honest if the documented setup provides the thing.
 #
 # WHAT IT DOES NOT PROVISION, so a green here is not over-read: MinIO (the
-# `compio-s3` / storage-parity suites start their own container), Redpanda, a
-# Dragonfly CLUSTER (deploy/compose/cluster.yml), and a PostGIS-bearing Postgres
+# `compio-s3` / storage-parity suites start their own container), Redpanda,
+# Dragonfly (the Redis driver and KV suites use Testcontainers), and a PostGIS-bearing Postgres
 # (no published image carries pgvector and postgis both; ci.yml's
 # plugin-db-live-gate installs the package). Every one of those is a hard
 # failure in the tests that need it, naming what is missing - there is no skip
@@ -47,7 +47,7 @@
 # `PG_TEST_URL`, `REDIS_TEST_URL` and `AUTH_TEST_SMTP_SINK` fall back to when
 # unset, so a developer who runs this script needs to export nothing at all. If
 # you change a port here, change the matching default in the same commit:
-# libs/compio-postgres/tests/common/mod.rs, libs/compio-redis/tests/common/mod.rs
+# libs/compio-postgres/tests/common/mod.rs, crates/zeroship-core/src/config/test_overlay.rs
 # and crates/zeroship-mailer/tests/mailer_test.rs. (The compio-postgres default
 # moved out of integration.rs when it had drifted into 42 test files; every
 # target now calls `common::test_url()`.)

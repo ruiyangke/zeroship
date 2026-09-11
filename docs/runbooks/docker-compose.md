@@ -341,17 +341,17 @@ zeroship-<bin> --check-config --config <file> <normal required flags>
 
 ## Redis cluster test stack
 
-`deploy/compose/cluster.yml` is separate. It does **not** boot the platform stack; it only starts a 3-node Dragonfly cluster for `compio-redis` integration tests:
+Redis driver integration tests start their own Redis and Dragonfly containers
+through Testcontainers. Docker must be running; Compose provisioning and backend
+environment variables are unnecessary:
 
 ```bash
-docker compose -f deploy/compose/cluster.yml up -d
-./deploy/scripts/bootstrap-dragonfly-cluster.sh
-DRAGONFLY_CLUSTER_SEEDS='redis://127.0.0.1:7000,redis://127.0.0.1:7001,redis://127.0.0.1:7002' \
-  cargo test -p compio-redis --test cluster -- --nocapture
-docker compose -f deploy/compose/cluster.yml down -v
+cargo test -p compio-redis --tests
 ```
 
-The cluster file exposes `dragonfly-0`, `dragonfly-1`, and `dragonfly-2` on host ports `7000`, `7001`, and `7002`. These use `network_mode: host` (not a `ports:` mapping), so the ports can't be remapped and must be free on the host before you start the stack.
+The fixtures allocate mapped ports, configure cluster slots, and remove their
+containers when tests finish. The same fixtures support the KV and V8 binding
+suites; see [KV test commands](../../crates/zeroship-kv/README.md).
 
 ## OpenMeter metering-export test stack
 

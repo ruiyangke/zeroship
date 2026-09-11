@@ -1,19 +1,12 @@
-//! Integration tests against a real Redis. There is no way to opt out of the
-//! server: with `REDIS_TEST_URL` unset these dial `common::DEFAULT_REDIS_URL`
-//! and FAIL if nothing answers. They used to return early instead, so an unset
-//! variable produced eleven passes against no server at all.
-//!
-//! Provision it first:
-//!   tests/provision_test_backends.sh
-//!
-//! Or point them elsewhere:
-//!   REDIS_TEST_URL=redis://127.0.0.1:6390 cargo test -p compio-redis -- --nocapture
+//! Live Redis driver tests with owned Testcontainers fixtures.
+//! Run with Cargo or nextest; Docker is required.
 
 mod common;
 
 #[compio::test]
 async fn ping_set_get_del_roundtrip() {
-    let url = common::test_url();
+    let fixture = common::fixtures();
+    let url = fixture.redis_url();
     let mut c = common::connect(&url).await;
     c.ping().await.expect("ping");
 
@@ -30,17 +23,24 @@ async fn ping_set_get_del_roundtrip() {
 
 #[compio::test]
 async fn ttl_ms_expires() {
-    let url = common::test_url();
+    let fixture = common::fixtures();
+    let url = fixture.redis_url();
     let mut c = common::connect(&url).await;
-    c.set("zs:test:ttl", b"bye", Some(100)).await.expect("set ttl");
-    assert_eq!(c.get("zs:test:ttl").await.unwrap().as_deref(), Some(b"bye".as_ref()));
+    c.set("zs:test:ttl", b"bye", Some(100))
+        .await
+        .expect("set ttl");
+    assert_eq!(
+        c.get("zs:test:ttl").await.unwrap().as_deref(),
+        Some(b"bye".as_ref())
+    );
     compio::time::sleep(std::time::Duration::from_millis(200)).await;
     assert!(c.get("zs:test:ttl").await.unwrap().is_none());
 }
 
 #[compio::test]
 async fn incr_is_atomic_and_correct() {
-    let url = common::test_url();
+    let fixture = common::fixtures();
+    let url = fixture.redis_url();
     let mut c = common::connect(&url).await;
     c.del("zs:test:counter").await.ok();
 
@@ -59,7 +59,8 @@ async fn incr_is_atomic_and_correct() {
 
 #[compio::test]
 async fn scan_prefix_returns_matching_keys() {
-    let url = common::test_url();
+    let fixture = common::fixtures();
+    let url = fixture.redis_url();
     let mut c = common::connect(&url).await;
 
     // Seed a few keys under a unique prefix so the test is isolated.
@@ -75,7 +76,9 @@ async fn scan_prefix_returns_matching_keys() {
     loop {
         let (next, keys) = c.scan(&cursor, &format!("{prefix}:*"), 100).await.unwrap();
         found.extend(keys);
-        if next == "0" { break; }
+        if next == "0" {
+            break;
+        }
         cursor = next;
     }
     found.sort();
@@ -91,7 +94,8 @@ async fn scan_prefix_returns_matching_keys() {
 
 #[compio::test]
 async fn pool_acquire_and_reuse() {
-    let url = common::test_url();
+    let fixture = common::fixtures();
+    let url = fixture.redis_url();
     let pool = common::connect_pool(&url, 4).await;
     // Five sequential acquires share the same underlying 1-conn pool.
     for i in 0..5 {
@@ -105,7 +109,8 @@ async fn pool_acquire_and_reuse() {
 
 #[compio::test]
 async fn null_reply_on_missing_key() {
-    let url = common::test_url();
+    let fixture = common::fixtures();
+    let url = fixture.redis_url();
     let mut c = common::connect(&url).await;
     c.del("zs:test:missing").await.ok();
     let v = c.get("zs:test:missing").await.expect("get");
@@ -114,7 +119,8 @@ async fn null_reply_on_missing_key() {
 
 #[compio::test]
 async fn binary_safe_values() {
-    let url = common::test_url();
+    let fixture = common::fixtures();
+    let url = fixture.redis_url();
     let mut c = common::connect(&url).await;
     // NUL bytes + non-UTF8 sequences must survive round-trip.
     let value: Vec<u8> = (0..=255u8).collect();
@@ -126,14 +132,23 @@ async fn binary_safe_values() {
 
 #[compio::test]
 async fn set_nx_acts_as_lock() {
-    let url = common::test_url();
+    let fixture = common::fixtures();
+    let url = fixture.redis_url();
     let mut c = common::connect(&url).await;
     c.del("zs:test:lock").await.ok();
 
     // First acquire: key doesn't exist, SET NX succeeds.
-    assert!(c.set_nx("zs:test:lock", b"owner-1", Some(5_000)).await.unwrap());
+    assert!(
+        c.set_nx("zs:test:lock", b"owner-1", Some(5_000))
+            .await
+            .unwrap()
+    );
     // Second acquire: key exists, SET NX returns false.
-    assert!(!c.set_nx("zs:test:lock", b"owner-2", Some(5_000)).await.unwrap());
+    assert!(
+        !c.set_nx("zs:test:lock", b"owner-2", Some(5_000))
+            .await
+            .unwrap()
+    );
     // Holder is the original owner.
     let v = c.get("zs:test:lock").await.unwrap();
     assert_eq!(v.as_deref(), Some(b"owner-1".as_ref()));
@@ -143,7 +158,8 @@ async fn set_nx_acts_as_lock() {
 
 #[compio::test]
 async fn exists_pexpire_pttl_lifecycle() {
-    let url = common::test_url();
+    let fixture = common::fixtures();
+    let url = fixture.redis_url();
     let mut c = common::connect(&url).await;
     c.del("zs:test:life").await.ok();
 
@@ -168,7 +184,8 @@ async fn exists_pexpire_pttl_lifecycle() {
 
 #[compio::test]
 async fn decr_by_and_strlen() {
-    let url = common::test_url();
+    let fixture = common::fixtures();
+    let url = fixture.redis_url();
     let mut c = common::connect(&url).await;
     c.del("zs:test:cnt").await.ok();
 
@@ -187,11 +204,14 @@ async fn decr_by_and_strlen() {
 
 #[compio::test]
 async fn mget_mset_batch_roundtrip() {
-    let url = common::test_url();
+    let fixture = common::fixtures();
+    let url = fixture.redis_url();
     let mut c = common::connect(&url).await;
 
     let keys = ["zs:test:m1", "zs:test:m2", "zs:test:m3"];
-    for k in &keys { c.del(k).await.ok(); }
+    for k in &keys {
+        c.del(k).await.ok();
+    }
 
     // Empty batch is a no-op that returns an empty vec / Ok.
     assert!(c.mget(&[]).await.unwrap().is_empty());
@@ -201,13 +221,20 @@ async fn mget_mset_batch_roundtrip() {
         ("zs:test:m1", b"one" as &[u8]),
         ("zs:test:m2", b"two"),
         ("zs:test:m3", b"three"),
-    ]).await.unwrap();
+    ])
+    .await
+    .unwrap();
 
-    let values = c.mget(&["zs:test:m1", "zs:test:missing", "zs:test:m3"]).await.unwrap();
+    let values = c
+        .mget(&["zs:test:m1", "zs:test:missing", "zs:test:m3"])
+        .await
+        .unwrap();
     assert_eq!(values.len(), 3);
     assert_eq!(values[0].as_deref(), Some(b"one".as_ref()));
     assert!(values[1].is_none());
     assert_eq!(values[2].as_deref(), Some(b"three".as_ref()));
 
-    for k in &keys { c.del(k).await.ok(); }
+    for k in &keys {
+        c.del(k).await.ok();
+    }
 }

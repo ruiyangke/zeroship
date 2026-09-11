@@ -3505,22 +3505,25 @@ pub(crate) mod tests {
     /// `DbPlugin` + `AuthPlugin`, so `typeof env.kv` / `typeof env.storage`
     /// were `"undefined"` and the handler's assertion would 500.
     ///
-    /// Service dependency: a single-node Redis, resolved from the test overlay
-    /// that `tests/provision_test_backends.sh` writes, or from `REDIS_TEST_URL`
-    /// overriding it. REQUIRED, not optional. Storage + db + auth need no
-    /// external service.
-    ///
-    /// This used to skip when `REDIS_TEST_URL` was unset unless
-    /// `KV_REQUIRE_REDIS=1` turned the skip into a failure, "in CI". Nothing in
-    /// this repository ever set `KV_REQUIRE_REDIS` - not a workflow, not a
-    /// script - so the panic was unreachable and the skip was the only
-    /// behaviour, matching `crates/zeroship-kv/tests/redis_backend.rs`, which had
-    /// the same dead flag and the same untrue comment. Both are resolved the
-    /// way `ZEROSHIP_REQUIRE_LIVE_BACKENDS` was: the flag is deleted and Redis
-    /// is simply required, because the provisioner now supplies it.
+    /// Testcontainers owns the required Redis server. Storage, db namespace
+    /// registration, and anonymous auth need no external service here.
     #[test]
     fn dispatch_resolves_full_kernel_kv_storage_db_auth() {
-        let kv_url = zeroship_core::config::test_kv_url();
+        use testcontainers::{
+            core::{IntoContainerPort, WaitFor},
+            runners::SyncRunner,
+            GenericImage,
+        };
+        let redis = GenericImage::new("redis", "7")
+            .with_exposed_port(6379.tcp())
+            .with_wait_for(WaitFor::message_on_stdout("Ready to accept connections"))
+            .start()
+            .expect("kernel dispatch test requires Docker to start Redis");
+        let endpoint = format!(
+            "{}:{}",
+            redis.get_host().unwrap(),
+            redis.get_host_port_ipv4(6379).unwrap()
+        );
 
         let runtime = compio::runtime::Runtime::new().expect("compio runtime");
 
@@ -3581,9 +3584,7 @@ pub(crate) mod tests {
                     kv_store: Some(
                         zeroship_kv::KvStore::open(&zeroship_kv::KvConfig::Redis {
                             redis: zeroship_kv::RedisConfig::new(
-                                zeroship_kv::Topology::Standalone {
-                                    endpoint: kv_url.trim_start_matches("redis://").to_owned(),
-                                },
+                                zeroship_kv::Topology::Standalone { endpoint },
                             ),
                         })
                         .unwrap(),
