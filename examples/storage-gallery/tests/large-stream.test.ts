@@ -28,6 +28,7 @@ test("large streams preserve wide lengths and checksums with bounded worker memo
     }).catch((error) => { samplingError = error; });
   }, 100);
   try {
+    console.info("Gallery: uploading the wide-length stream");
     const uploaded = await workerRpc("gallery.putLarge", { key, sizeBytes: SIZE, seed: 7, chunkBytes: 1024 * 1024 }, TIMEOUT);
     expect(uploaded.size).toBe(SIZE);
     expect(uploaded.checksum).toMatch(/^[0-9a-f]+$/);
@@ -36,6 +37,7 @@ test("large streams preserve wide lengths and checksums with bounded worker memo
     const object = await aws.fetch(objectUrl, { method: "HEAD", signal: AbortSignal.timeout(10_000) });
     expect(object.status).toBe(200);
     expect(Number(object.headers.get("content-length"))).toBe(SIZE);
+    console.info("Gallery: stored length verified; streaming download for checksum comparison");
     const downloaded = await workerRpc("gallery.getLargeHash", { key }, TIMEOUT);
     expect(downloaded).toEqual({ key, found: true, size: SIZE, checksum: uploaded.checksum });
     expect(await workerRpc("gallery.delete", { key }, TIMEOUT)).toEqual({ key, deleted: true });

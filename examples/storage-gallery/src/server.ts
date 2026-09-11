@@ -19,6 +19,7 @@
 
 import { bucket, type Result } from "@zeroship/storage";
 import { mutation, query } from "@zeroship/rpc/server";
+import { Checksum } from "./checksum";
 
 const BUCKET = "gallery";
 
@@ -188,14 +189,9 @@ export const remove = mutation(
 // server from a tiny `{ sizeBytes, seed }` request, stream it up with
 // `putStream`, and report only its size + checksum. The download counterpart
 // streams it back with `getStream`, drains it incrementally, and reports size
-// + checksum. The E2E test compares the two checksums — a byte-faithful
-// round-trip over a > part-size (8 MiB) multipart upload with bounded memory.
-//
-// Performance note: the body is generated and verified with NATIVE typed-array
-// block copies (`set`) and an INCREMENTAL, position-weighted rolling checksum
-// over each chunk — never a multi-million-iteration scalar JS loop and never a
-// whole-object re-hash. That keeps per-call CPU low enough to stay under the
-// app CPU limit, so the test measures the storage I/O path, not JS compute.
+// + checksum. The tests compare streaming checksums and physical object length.
+// Pattern copies and incremental checksums keep memory bounded. Cooperative
+// pauses respect the runtime's sustained CPU budget while scanning large objects.
 // ---------------------------------------------------------------------------
 
 // One period of the deterministic pattern (a prime length so chunk/part
@@ -220,21 +216,18 @@ function fillFromPattern(out: Uint8Array, pattern: Uint8Array, start: number): v
   }
 }
 
-// A cheap, order-sensitive rolling checksum over the whole object. Each byte
-// is weighted by its absolute position (mod a prime), so duplicated, dropped,
-// reordered, or short multipart parts all change the result — a byte-faithful
-// integrity signal without a 20 MiB SHA-256 on the hot path.
-function updateChecksum(acc: { a: number; b: number }, chunk: Uint8Array, absStart: number): void {
-  let { a, b } = acc;
-  for (let i = 0; i < chunk.length; i++) {
-    a = (a + chunk[i] * (((absStart + i) % 65521) + 1)) % 0xfffffffb;
-    b = (b + a) % 0xfffffffb;
+class StreamPacer {
+  private started = performance.now();
+  private processed = 0;
+
+  async checkpoint(bytes: number): Promise<void> {
+    this.processed += bytes;
+    if (this.processed < 1024 * 1024) return;
+    const elapsed = performance.now() - this.started;
+    await new Promise<void>((resolve) => setTimeout(resolve, Math.max(1, elapsed)));
+    this.started = performance.now();
+    this.processed = 0;
   }
-  acc.a = a;
-  acc.b = b;
-}
-function checksumHex(acc: { a: number; b: number }): string {
-  return (acc.a >>> 0).toString(16).padStart(8, "0") + (acc.b >>> 0).toString(16).padStart(8, "0");
 }
 
 export type PutLargeResult = {
@@ -268,10 +261,11 @@ export const putLarge = mutation(
     }
 
     const pattern = buildPattern(seed);
-    const acc = { a: 1, b: 0 };
+    const checksum = new Checksum();
+    const pacer = new StreamPacer();
     let offset = 0;
     const body = new ReadableStream<Uint8Array>({
-      pull(controller) {
+      async pull(controller) {
         if (offset >= sizeBytes) {
           controller.close();
           return;
@@ -279,16 +273,17 @@ export const putLarge = mutation(
         const len = Math.min(chunkBytes, sizeBytes - offset);
         const chunk = new Uint8Array(len);
         fillFromPattern(chunk, pattern, offset);
-        updateChecksum(acc, chunk, offset);
+        checksum.update(chunk);
         offset += len;
         controller.enqueue(chunk);
+        await pacer.checkpoint(chunk.length);
       },
     });
 
     const res = must(
       await store().putStream(key, body, { contentType: "application/octet-stream" }),
     );
-    return { key: res.key, size: res.size, checksum: checksumHex(acc) };
+    return { key: res.key, size: res.size, checksum: checksum.hex() };
   },
   { id: "gallery.putLarge" },
 );
@@ -309,17 +304,19 @@ export const getLargeHash = query(
     if (!res) return { key, found: false, size: null, checksum: null };
 
     const reader = res.body.getReader();
-    const acc = { a: 1, b: 0 };
+    const checksum = new Checksum();
+    const pacer = new StreamPacer();
     let total = 0;
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
       if (value && value.length) {
-        updateChecksum(acc, value, total);
+        checksum.update(value);
         total += value.length;
+        await pacer.checkpoint(value.length);
       }
     }
-    return { key, found: true, size: total, checksum: checksumHex(acc) };
+    return { key, found: true, size: total, checksum: checksum.hex() };
   },
   { id: "gallery.getLargeHash" },
 );
