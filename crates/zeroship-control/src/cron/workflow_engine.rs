@@ -1412,8 +1412,10 @@ fn spawn_dispatch<D>(
     D: StepDispatcher + 'static,
 {
     INFLIGHT_DISPATCHES.fetch_add(1, Ordering::SeqCst);
+    // Capture ownership before spawning so cancellation before the first poll
+    // still releases the reserved dispatch capacity.
+    let mut inflight_guard = InflightDispatchGuard::new();
     compio::runtime::spawn(async move {
-        let mut inflight_guard = InflightDispatchGuard::new();
         let dispatch_run_id = request.run_id.clone();
         let outcome = dispatcher.dispatch(request).await;
         match outcome {
