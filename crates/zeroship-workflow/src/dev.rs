@@ -1,8 +1,8 @@
 //! Local dev-tier workflow mini-engine.
 //!
 //! This module is intentionally constructed only by `zeroship_workflow_v8::WorkflowBinding::dev_sqlite`
-//! from the CLI serve path. It mirrors the production journal/fold shape for
-//! the local inner loop without a control plane, gateway, or shared database.
+//! from the CLI serve path. It uses the shared journal and execution contract
+//! for the local inner loop without a control plane, gateway, or shared database.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -12,12 +12,13 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chrono::{DateTime, TimeZone, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
-use serde::{de, Deserialize, Deserializer, Serialize};
 use serde_json::{json, Value};
 use zeroship_core::typed_id;
 
 use crate::backend::WorkflowBackend;
+use crate::engine::{JournalStep, RunUpdate, StepCheckpoint, StepResult};
 use crate::errors::WorkflowServiceError;
+use crate::execution::{WorkflowExecutor, WorkflowInvocation, WorkflowTrigger};
 use crate::operations::{
     DeliveredSignal, RestartOptions, RestartedRun, RunOperation, RunStatus, SignalOptions,
     StartOptions, StartedRun, TransitionedRun,
@@ -30,13 +31,6 @@ const DEV_DEPLOY_HASH: &str = "dev-local";
 const DEV_OWNER_ID: &str = "dev-workflow-engine";
 const DEV_TICK_MS: u64 = 100;
 const STUCK_STRIKE_LIMIT: i16 = 3;
-
-/// Executes a serialized workflow dispatch envelope and returns its result.
-/// The host owns the execution environment; the journal engine owns persistence.
-#[async_trait(?Send)]
-pub trait WorkflowExecutor: Send + Sync {
-    async fn dispatch(&self, envelope: &str) -> Result<String, WorkflowServiceError>;
-}
 
 pub struct DevWorkflowEngine {
     path: PathBuf,
@@ -61,7 +55,8 @@ pub struct DevWorkflowBackend {
 
 #[derive(Debug)]
 struct ClaimedRun {
-    request: StepRequest,
+    invocation: WorkflowInvocation,
+    dispatch_nonce: String,
 }
 
 #[derive(Debug, Clone)]
@@ -71,192 +66,9 @@ struct CandidateRun {
     workflow_name: String,
     deploy_id: String,
     deploy_hash: String,
-    // No `state` field. It existed only to feed a `phase: "compensating"` branch
-    // in `claim_one_due` that its own SELECT made unreachable; see the comment
-    // there. Reintroducing it means dev has grown a compensating phase.
     input: Option<Value>,
     started_at: i64,
     waiting_step_key: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct StepRequest {
-    run_id: String,
-    app_id: String,
-    workflow_name: String,
-    deploy_id: String,
-    deploy_hash: String,
-    dispatch_nonce: String,
-    nonce: String,
-    phase: String,
-    input: Option<Value>,
-    trigger: Value,
-    started_at: String,
-    journal: Vec<JournalStep>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct JournalStep {
-    ordinal: i32,
-    name: String,
-    #[serde(default, rename = "nameOccurrence")]
-    name_occurrence: i32,
-    kind: String,
-    state: String,
-    output: Option<Value>,
-    error: Option<Value>,
-    #[serde(default, rename = "childRunId")]
-    child_run_id: Option<String>,
-    #[serde(default, rename = "compensationState")]
-    compensation_state: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct StepCheckpoint {
-    ordinal: i32,
-    name: String,
-    name_occurrence: i32,
-    kind: String,
-    state: String,
-    output: Option<Value>,
-    error: Option<Value>,
-    wake_at: Option<DateTime<Utc>>,
-    signal_type: Option<String>,
-    max_signal_age_ms: Option<i64>,
-    consumed_signal_id: Option<String>,
-    topic: Option<String>,
-    child_run_id: Option<String>,
-    #[serde(default, rename = "compensationState")]
-    compensation_state: Option<String>,
-    #[serde(
-        default = "default_compensation_max_attempts",
-        rename = "compensationMaxAttempts"
-    )]
-    compensation_max_attempts: i32,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "kind")]
-enum StepOutcome {
-    StepCompleted {
-        ordinal: i32,
-        name: String,
-        #[serde(default, rename = "nameOccurrence")]
-        name_occurrence: i32,
-        #[serde(default = "default_step_kind", rename = "stepKind")]
-        step_kind: String,
-        #[serde(default)]
-        compensable: bool,
-        #[serde(
-            default = "default_compensation_max_attempts",
-            rename = "compensationMaxAttempts"
-        )]
-        compensation_max_attempts: i32,
-        #[serde(default)]
-        output: Option<Value>,
-    },
-    StepFailed {
-        ordinal: i32,
-        name: String,
-        #[serde(default, rename = "nameOccurrence")]
-        name_occurrence: i32,
-        #[serde(default)]
-        error: Value,
-    },
-    RunCompleted {
-        #[serde(default)]
-        output: Option<Value>,
-    },
-    RunFailed {
-        #[serde(default)]
-        ordinal: Option<i32>,
-        #[serde(default)]
-        name: Option<String>,
-        #[serde(default, rename = "nameOccurrence")]
-        name_occurrence: i32,
-        error: Value,
-    },
-    Sleep {
-        ordinal: i32,
-        name: String,
-        #[serde(default, rename = "nameOccurrence")]
-        name_occurrence: i32,
-        #[serde(rename = "wakeAt", deserialize_with = "deserialize_wake_at")]
-        wake_at: DateTime<Utc>,
-    },
-    Wait {
-        ordinal: i32,
-        name: String,
-        #[serde(default, rename = "nameOccurrence")]
-        name_occurrence: i32,
-        #[serde(
-            default,
-            rename = "wakeAt",
-            deserialize_with = "deserialize_optional_wake_at"
-        )]
-        wake_at: Option<DateTime<Utc>>,
-        #[serde(default, deserialize_with = "deserialize_optional_wake_duration")]
-        timeout: Option<DateTime<Utc>>,
-        #[serde(default, rename = "signalType")]
-        signal_type: Option<String>,
-        #[serde(default, rename = "maxSignalAgeMs")]
-        max_signal_age_ms: Option<i64>,
-        #[serde(default, rename = "consumedSignalId")]
-        consumed_signal_id: Option<String>,
-        #[serde(default)]
-        topic: Option<String>,
-    },
-    Child {
-        ordinal: i32,
-        name: String,
-        #[serde(default, rename = "nameOccurrence")]
-        name_occurrence: i32,
-    },
-}
-
-#[derive(Debug, Clone)]
-enum RunUpdate {
-    Queued,
-    Sleeping {
-        wake_at: Option<DateTime<Utc>>,
-    },
-    Waiting {
-        wake_at: Option<DateTime<Utc>>,
-    },
-    Completed {
-        output: Option<Value>,
-    },
-    Failed {
-        error: Value,
-    },
-    Stalled {
-        error: Value,
-    },
-    #[allow(
-        dead_code,
-        reason = "cancel transitions are applied directly in the dev instance API"
-    )]
-    Cancelled,
-}
-
-#[derive(Debug, Clone)]
-struct StepResult {
-    run_id: String,
-    dispatch_nonce: String,
-    checkpoints: Vec<StepCheckpoint>,
-    run_update: RunUpdate,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct StepResultWire {
-    run_id: String,
-    dispatch_nonce: String,
-    #[serde(default)]
-    outcomes: Vec<StepOutcome>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -277,83 +89,6 @@ enum WaitingStep {
 enum StepWriteOutcome {
     Wrote,
     Noop,
-}
-
-impl<'de> Deserialize<'de> for StepResult {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let wire = StepResultWire::deserialize(deserializer)?;
-        let (checkpoints, run_update) =
-            fold_dev_outcomes(&wire.outcomes).map_err(serde::de::Error::custom)?;
-        Ok(Self {
-            run_id: wire.run_id,
-            dispatch_nonce: wire.dispatch_nonce,
-            checkpoints,
-            run_update,
-        })
-    }
-}
-
-impl RunUpdate {
-    fn state(&self) -> &'static str {
-        match self {
-            Self::Queued => "queued",
-            Self::Sleeping { .. } => "sleeping",
-            Self::Waiting { .. } => "waiting",
-            Self::Completed { .. } => "completed",
-            Self::Failed { .. } => "failed",
-            Self::Stalled { .. } => "stalled",
-            Self::Cancelled => "cancelled",
-        }
-    }
-
-    fn wake_at_ms(&self) -> Option<i64> {
-        match self {
-            Self::Queued => Some(now_ms()),
-            Self::Sleeping { wake_at } | Self::Waiting { wake_at } => wake_at.map(datetime_to_ms),
-            _ => None,
-        }
-    }
-
-    fn output(&self) -> Option<Value> {
-        match self {
-            Self::Completed { output } => output.clone(),
-            _ => None,
-        }
-    }
-
-    fn error(&self) -> Option<Value> {
-        match self {
-            Self::Failed { error } | Self::Stalled { error } => Some(error.clone()),
-            _ => None,
-        }
-    }
-
-    fn waiting_step_key(&self, checkpoints: &[StepCheckpoint]) -> Option<String> {
-        match self {
-            Self::Sleeping { .. } => checkpoints
-                .iter()
-                .find(|s| s.kind == "sleep" && s.state == "running")
-                .map(|s| format!("sleep:{}:{}", s.ordinal, s.name)),
-            Self::Waiting { .. } => checkpoints
-                .iter()
-                .find(|s| s.kind == "wait_signal" && s.state == "running")
-                .map(|s| {
-                    format!(
-                        "wait:{}:{}:{}{}",
-                        s.ordinal,
-                        s.name,
-                        s.signal_type.as_deref().unwrap_or(s.name.as_str()),
-                        s.max_signal_age_ms
-                            .map(|age| format!(":{age}"))
-                            .unwrap_or_default()
-                    )
-                }),
-            _ => None,
-        }
-    }
 }
 
 impl DevWorkflowEngine {
@@ -775,12 +510,9 @@ impl DevWorkflowEngine {
             let Some(claim) = self.claim_one_due()? else {
                 break;
             };
-            let json = self.dispatch(claim.request.clone()).await?;
-            let result: StepResult = serde_json::from_str(&json).map_err(|e| {
-                WorkflowServiceError::Internal(format!(
-                    "parse workflow StepResult: {e}; body={json}"
-                ))
-            })?;
+            let execution = self.executor.dispatch(&claim.invocation).await?;
+            let result =
+                execution.into_step_result(claim.invocation.run_id, claim.dispatch_nonce)?;
             self.apply_step_result(result)?;
             claimed += 1;
         }
@@ -859,33 +591,21 @@ impl DevWorkflowEngine {
         }
         let journal = load_journal(conn, &candidate.run_id)?;
         let claim = ClaimedRun {
-            request: StepRequest {
+            dispatch_nonce,
+            invocation: WorkflowInvocation {
                 run_id: candidate.run_id.clone(),
-                app_id: candidate.app_id.clone(),
+                app_id: candidate.app_id,
                 workflow_name: candidate.workflow_name.clone(),
                 deploy_id: candidate.deploy_id,
                 deploy_hash: candidate.deploy_hash,
-                dispatch_nonce: dispatch_nonce.clone(),
-                nonce: dispatch_nonce,
-                // Always forward. There is no `compensating` arm because the
-                // dev engine has no compensating phase to be in: the SELECT
-                // above admits only ('queued','running','sleeping','waiting'),
-                // and no dev code path writes state='compensating'. A branch on
-                // `candidate.state == "compensating"` used to sit here, and it
-                // was dead by construction 60 lines below its own filter -- it
-                // read as compensation support to anyone scanning this file,
-                // which is precisely what kept the gap invisible. Dev instead
-                // reports the gap at failure time; see
-                // `annotate_dev_compensation_unsupported`.
+                // Local compensation execution still requires the shared store.
                 phase: "running".to_string(),
-                input: candidate.input.clone(),
-                trigger: json!({
-                    "input": candidate.input,
-                    "runId": candidate.run_id,
-                    "workflowName": candidate.workflow_name,
-                    "startedAt": ms_to_datetime(candidate.started_at).to_rfc3339(),
-                }),
-                started_at: ms_to_datetime(candidate.started_at).to_rfc3339(),
+                trigger: WorkflowTrigger {
+                    input: candidate.input,
+                    run_id: candidate.run_id,
+                    workflow_name: candidate.workflow_name,
+                    started_at: ms_to_datetime(candidate.started_at),
+                },
                 journal,
             },
         };
@@ -893,14 +613,25 @@ impl DevWorkflowEngine {
         Ok(Some(claim))
     }
 
-    async fn dispatch(&self, request: StepRequest) -> Result<String, WorkflowServiceError> {
-        let envelope = serde_json::to_string(&request).map_err(|e| {
-            WorkflowServiceError::Internal(format!("serialize workflow StepRequest: {e}"))
-        })?;
-        self.executor.dispatch(&envelope).await
-    }
-
     fn apply_step_result(&self, mut result: StepResult) -> Result<bool, WorkflowServiceError> {
+        if result
+            .checkpoints
+            .iter()
+            .any(|step| step.output_ref.is_some())
+            || result.run_update.output_ref().is_some()
+            || matches!(result.run_update, RunUpdate::ContinuedAsNew { .. })
+            || result.outcomes.iter().any(|outcome| {
+                matches!(
+                    outcome,
+                    crate::engine::StepOutcome::CompensationCompleted { .. }
+                        | crate::engine::StepOutcome::CompensationFailed { .. }
+                )
+            })
+        {
+            return Err(WorkflowServiceError::InvalidRequest(
+                "this execution requires workflow storage capabilities unavailable locally".into(),
+            ));
+        }
         result.checkpoints.sort_by_key(|s| s.ordinal);
         let now = now_ms();
         let mut connection = self.lock_conn()?;
@@ -1000,7 +731,7 @@ impl DevWorkflowEngine {
         }
 
         let state = result.run_update.state();
-        let wake_at = result.run_update.wake_at_ms();
+        let wake_at = result.run_update.wake_at().map(datetime_to_ms);
         let waiting_step_key = result.run_update.waiting_step_key(&result.checkpoints);
         let output = result
             .run_update
@@ -1313,6 +1044,7 @@ fn load_journal(conn: &Connection, run_id: &str) -> Result<Vec<JournalStep>, Wor
                 output: parse_json_opt(row.get::<_, Option<String>>(5)?).map_err(|e| {
                     rusqlite::Error::ToSqlConversionFailure(Box::new(SimpleError(format!("{e:?}"))))
                 })?,
+                output_ref: None,
                 error: parse_json_opt(row.get::<_, Option<String>>(6)?).map_err(|e| {
                     rusqlite::Error::ToSqlConversionFailure(Box::new(SimpleError(format!("{e:?}"))))
                 })?,
@@ -1411,6 +1143,7 @@ fn resolve_due_waiting_step(
                     kind: "sleep".to_string(),
                     state: "completed".to_string(),
                     output: None,
+                    output_ref: None,
                     error: None,
                     wake_at: None,
                     signal_type: None,
@@ -1418,6 +1151,9 @@ fn resolve_due_waiting_step(
                     consumed_signal_id: None,
                     topic: None,
                     child_run_id: None,
+                    child_workflow_name: None,
+                    child_input: None,
+                    child_options: None,
                     compensation_state: None,
                     compensation_max_attempts: 1,
                 },
@@ -1485,6 +1221,7 @@ fn resolve_due_waiting_step(
                             kind: "wait_signal".to_string(),
                             state: "failed".to_string(),
                             output: None,
+                            output_ref: None,
                             error: Some(json!({
                                 "type": "WorkflowTimeoutError",
                                 "message": format!("workflow signal wait timed out for {signal_type}"),
@@ -1496,6 +1233,9 @@ fn resolve_due_waiting_step(
                             consumed_signal_id: None,
                             topic: None,
                             child_run_id: None,
+                            child_workflow_name: None,
+                            child_input: None,
+                            child_options: None,
                             compensation_state: None,
                             compensation_max_attempts: 1,
                         },
@@ -1538,6 +1278,7 @@ fn resolve_due_waiting_step(
                         "delivery": delivery,
                         "topic": topic,
                     })),
+                    output_ref: None,
                     error: None,
                     wake_at: None,
                     signal_type: Some(signal_type),
@@ -1545,6 +1286,9 @@ fn resolve_due_waiting_step(
                     consumed_signal_id: Some(signal_id.clone()),
                     topic,
                     child_run_id: None,
+                    child_workflow_name: None,
+                    child_input: None,
+                    child_options: None,
                     compensation_state: None,
                     compensation_max_attempts: 1,
                 },
@@ -1687,141 +1431,6 @@ fn consume_signal(
     Ok(())
 }
 
-fn fold_dev_outcomes(outcomes: &[StepOutcome]) -> Result<(Vec<StepCheckpoint>, RunUpdate), String> {
-    let shared_outcomes = outcomes.iter().map(shared_step_outcome).collect::<Vec<_>>();
-    let (checkpoints, run_update) = crate::engine::fold_outcomes(&shared_outcomes)?;
-    Ok((
-        checkpoints.into_iter().map(dev_step_checkpoint).collect(),
-        dev_run_update(run_update),
-    ))
-}
-
-fn shared_step_outcome(outcome: &StepOutcome) -> crate::engine::StepOutcome {
-    match outcome {
-        StepOutcome::StepCompleted {
-            ordinal,
-            name,
-            name_occurrence,
-            step_kind,
-            compensable,
-            compensation_max_attempts,
-            output,
-        } => crate::engine::StepOutcome::StepCompleted {
-            ordinal: *ordinal,
-            name: name.clone(),
-            name_occurrence: *name_occurrence,
-            step_kind: step_kind.clone(),
-            compensable: *compensable,
-            compensation_max_attempts: *compensation_max_attempts,
-            output: output.clone(),
-            output_ref: None,
-        },
-        StepOutcome::StepFailed {
-            ordinal,
-            name,
-            name_occurrence,
-            error,
-        } => crate::engine::StepOutcome::StepFailed {
-            ordinal: *ordinal,
-            name: name.clone(),
-            name_occurrence: *name_occurrence,
-            error: error.clone(),
-        },
-        StepOutcome::RunCompleted { output } => crate::engine::StepOutcome::RunCompleted {
-            output: output.clone(),
-            output_ref: None,
-        },
-        StepOutcome::RunFailed {
-            ordinal,
-            name,
-            name_occurrence,
-            error,
-        } => crate::engine::StepOutcome::RunFailed {
-            ordinal: *ordinal,
-            name: name.clone(),
-            name_occurrence: *name_occurrence,
-            error: error.clone(),
-        },
-        StepOutcome::Sleep {
-            ordinal,
-            name,
-            name_occurrence,
-            wake_at,
-        } => crate::engine::StepOutcome::Sleep {
-            ordinal: *ordinal,
-            name: name.clone(),
-            name_occurrence: *name_occurrence,
-            wake_at: *wake_at,
-        },
-        StepOutcome::Wait {
-            ordinal,
-            name,
-            name_occurrence,
-            wake_at,
-            timeout,
-            signal_type,
-            max_signal_age_ms,
-            consumed_signal_id,
-            topic,
-        } => crate::engine::StepOutcome::Wait {
-            ordinal: *ordinal,
-            name: name.clone(),
-            name_occurrence: *name_occurrence,
-            wake_at: *wake_at,
-            timeout: *timeout,
-            signal_type: signal_type.clone(),
-            max_signal_age_ms: *max_signal_age_ms,
-            consumed_signal_id: consumed_signal_id.clone(),
-            topic: topic.clone(),
-        },
-        StepOutcome::Child {
-            ordinal,
-            name,
-            name_occurrence,
-        } => crate::engine::StepOutcome::Child {
-            ordinal: *ordinal,
-            name: name.clone(),
-            name_occurrence: *name_occurrence,
-            child_workflow_name: name.clone(),
-            input: Value::Null,
-            options: crate::engine::ChildWorkflowOptions::default(),
-        },
-    }
-}
-
-fn dev_step_checkpoint(checkpoint: crate::engine::StepCheckpoint) -> StepCheckpoint {
-    StepCheckpoint {
-        ordinal: checkpoint.ordinal,
-        name: checkpoint.name,
-        name_occurrence: checkpoint.name_occurrence,
-        kind: checkpoint.kind,
-        state: checkpoint.state,
-        output: checkpoint.output,
-        error: checkpoint.error,
-        wake_at: checkpoint.wake_at,
-        signal_type: checkpoint.signal_type,
-        max_signal_age_ms: checkpoint.max_signal_age_ms,
-        consumed_signal_id: checkpoint.consumed_signal_id,
-        topic: checkpoint.topic,
-        child_run_id: checkpoint.child_run_id,
-        compensation_state: checkpoint.compensation_state,
-        compensation_max_attempts: checkpoint.compensation_max_attempts,
-    }
-}
-
-fn dev_run_update(update: crate::engine::RunUpdate) -> RunUpdate {
-    match update {
-        crate::engine::RunUpdate::Queued => RunUpdate::Queued,
-        crate::engine::RunUpdate::Sleeping { wake_at } => RunUpdate::Sleeping { wake_at },
-        crate::engine::RunUpdate::Waiting { wake_at } => RunUpdate::Waiting { wake_at },
-        crate::engine::RunUpdate::Completed { output, .. } => RunUpdate::Completed { output },
-        crate::engine::RunUpdate::ContinuedAsNew { .. } => RunUpdate::Completed { output: None },
-        crate::engine::RunUpdate::Failed { error } => RunUpdate::Failed { error },
-        crate::engine::RunUpdate::Stalled { error } => RunUpdate::Stalled { error },
-        crate::engine::RunUpdate::Cancelled => RunUpdate::Cancelled,
-    }
-}
-
 fn dev_child_unsupported_error() -> Value {
     json!({
         "type": "WorkflowUnsupportedError",
@@ -1917,120 +1526,6 @@ fn annotate_dev_compensation_unsupported(error: Value, pending: &[String]) -> Va
         obj.insert("compensation".to_string(), report);
     }
     error
-}
-
-fn default_step_kind() -> String {
-    "run".to_string()
-}
-
-fn default_compensation_max_attempts() -> i32 {
-    1
-}
-
-fn parse_workflow_duration_ms(raw: &str) -> Option<i64> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    parse_iso_duration_ms(trimmed).or_else(|| parse_suffix_duration_ms(trimmed))
-}
-
-fn parse_iso_duration_ms(raw: &str) -> Option<i64> {
-    let rest = raw.strip_prefix('P')?;
-    let (date, time) = rest.split_once('T').unwrap_or((rest, ""));
-    let mut total_ms = 0f64;
-    if let Some(days) = date.strip_suffix('D') {
-        if days.is_empty() {
-            return None;
-        }
-        total_ms += days.parse::<f64>().ok()? * 86_400_000.0;
-    } else if !date.is_empty() {
-        return None;
-    }
-    let mut number = String::new();
-    for ch in time.chars() {
-        if ch.is_ascii_digit() || ch == '.' {
-            number.push(ch);
-            continue;
-        }
-        if number.is_empty() {
-            return None;
-        }
-        let value = number.parse::<f64>().ok()?;
-        number.clear();
-        match ch {
-            'H' => total_ms += value * 3_600_000.0,
-            'M' => total_ms += value * 60_000.0,
-            'S' => total_ms += value * 1_000.0,
-            _ => return None,
-        }
-    }
-    if !number.is_empty() || total_ms <= 0.0 || !total_ms.is_finite() {
-        return None;
-    }
-    Some(total_ms.ceil() as i64)
-}
-
-fn parse_suffix_duration_ms(raw: &str) -> Option<i64> {
-    let units = [
-        ("ms", 1.0),
-        ("s", 1_000.0),
-        ("m", 60_000.0),
-        ("h", 3_600_000.0),
-        ("d", 86_400_000.0),
-    ];
-    for (suffix, multiplier) in units {
-        let Some(number) = raw.strip_suffix(suffix) else {
-            continue;
-        };
-        if number.is_empty() {
-            return None;
-        }
-        let value = number.parse::<f64>().ok()?;
-        let ms = value * multiplier;
-        if ms <= 0.0 || !ms.is_finite() {
-            return None;
-        }
-        return Some(ms.ceil() as i64);
-    }
-    raw.parse::<i64>().ok().filter(|v| *v > 0)
-}
-
-fn wake_at_from_str(raw: &str) -> Result<DateTime<Utc>, String> {
-    if let Ok(ts) = DateTime::parse_from_rfc3339(raw) {
-        return Ok(ts.with_timezone(&Utc));
-    }
-    parse_workflow_duration_ms(raw)
-        .map(|ms| Utc::now() + chrono::Duration::milliseconds(ms))
-        .ok_or_else(|| format!("invalid workflow wake/duration value {raw:?}"))
-}
-
-fn deserialize_wake_at<'de, D>(deserializer: D) -> Result<DateTime<Utc>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let raw = String::deserialize(deserializer)?;
-    wake_at_from_str(&raw).map_err(de::Error::custom)
-}
-
-fn deserialize_optional_wake_at<'de, D>(deserializer: D) -> Result<Option<DateTime<Utc>>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let raw = Option::<String>::deserialize(deserializer)?;
-    raw.as_deref()
-        .map(wake_at_from_str)
-        .transpose()
-        .map_err(de::Error::custom)
-}
-
-fn deserialize_optional_wake_duration<'de, D>(
-    deserializer: D,
-) -> Result<Option<DateTime<Utc>>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    deserialize_optional_wake_at(deserializer)
 }
 
 fn waiting_key_matches_signal(waiting_step_key: Option<&str>, signal_type: &str) -> bool {
@@ -2164,7 +1659,10 @@ mod tests {
 
     #[async_trait(?Send)]
     impl WorkflowExecutor for NoDispatch {
-        async fn dispatch(&self, _envelope: &str) -> Result<String, WorkflowServiceError> {
+        async fn dispatch(
+            &self,
+            _invocation: &WorkflowInvocation,
+        ) -> Result<crate::WorkflowExecution, WorkflowServiceError> {
             panic!("journal unit tests must not dispatch a workflow");
         }
     }
@@ -2233,6 +1731,7 @@ mod tests {
             kind: "run".to_string(),
             state: "completed".to_string(),
             output: Some(json!({ "reserved": "probe" })),
+            output_ref: None,
             error: None,
             wake_at: None,
             signal_type: None,
@@ -2240,8 +1739,10 @@ mod tests {
             consumed_signal_id: None,
             topic: None,
             child_run_id: None,
-            // What `crates/zeroship-workflow/src/engine.rs:847-848` writes for a
-            // `step.run` that declared `config.compensate`.
+            child_workflow_name: None,
+            child_input: None,
+            child_options: None,
+            // The shared fold marks completed steps that declared a compensator.
             compensation_state: Some("pending".to_string()),
             compensation_max_attempts: 1,
         }
@@ -2255,6 +1756,7 @@ mod tests {
             kind: "run".to_string(),
             state: "failed".to_string(),
             output: None,
+            output_ref: None,
             error: Some(json!({
                 "type": "PermanentError",
                 "message": "probe-intentional-failure",
@@ -2265,6 +1767,9 @@ mod tests {
             consumed_signal_id: None,
             topic: None,
             child_run_id: None,
+            child_workflow_name: None,
+            child_input: None,
+            child_options: None,
             compensation_state: None,
             compensation_max_attempts: 1,
         }
@@ -2292,6 +1797,7 @@ mod tests {
             .apply_step_result(StepResult {
                 run_id: "run_compensable".to_string(),
                 dispatch_nonce: "disp_1".to_string(),
+                outcomes: Vec::new(),
                 checkpoints: vec![compensable_completed(0, "reserve"), failed_step(1, "boom")],
                 run_update: RunUpdate::Failed {
                     error: permanent_failure(),
@@ -2353,6 +1859,7 @@ mod tests {
             .apply_step_result(StepResult {
                 run_id: "run_two_batch".to_string(),
                 dispatch_nonce: "disp_a".to_string(),
+                outcomes: Vec::new(),
                 checkpoints: vec![compensable_completed(0, "reserve")],
                 run_update: RunUpdate::Queued,
             })
@@ -2373,6 +1880,7 @@ mod tests {
             .apply_step_result(StepResult {
                 run_id: "run_two_batch".to_string(),
                 dispatch_nonce: "disp_b".to_string(),
+                outcomes: Vec::new(),
                 checkpoints: vec![failed_step(1, "boom")],
                 run_update: RunUpdate::Failed {
                     error: permanent_failure(),
@@ -2400,6 +1908,7 @@ mod tests {
             .apply_step_result(StepResult {
                 run_id: "run_plain".to_string(),
                 dispatch_nonce: "disp_p".to_string(),
+                outcomes: Vec::new(),
                 checkpoints: vec![failed_step(0, "boom")],
                 run_update: RunUpdate::Failed {
                     error: permanent_failure(),
@@ -2429,6 +1938,7 @@ mod tests {
             .apply_step_result(StepResult {
                 run_id: "run_nondet".to_string(),
                 dispatch_nonce: "disp_n".to_string(),
+                outcomes: Vec::new(),
                 checkpoints: vec![compensable_completed(0, "reserve")],
                 run_update: RunUpdate::Failed {
                     error: json!({
@@ -2498,8 +2008,10 @@ mod tests {
         let result = StepResult {
             run_id: "run_atomic".into(),
             dispatch_nonce: "dispatch_atomic".into(),
+            outcomes: Vec::new(),
             checkpoints: vec![compensable_completed(0, "reserve")],
             run_update: RunUpdate::Completed {
+                output_ref: None,
                 output: Some(json!(true)),
             },
         };
@@ -2545,6 +2057,7 @@ mod tests {
             engine.apply_step_result(StepResult {
                 run_id: "run_a".into(),
                 dispatch_nonce: "dispatch_a".into(),
+                outcomes: Vec::new(),
                 checkpoints: vec![checkpoint],
                 run_update: RunUpdate::Queued,
             }),

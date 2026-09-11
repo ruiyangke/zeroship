@@ -7,14 +7,18 @@ use zeroship_workflow::operations::{
     ConflictPolicy, RestartOptions, RunOperation, RunState, SignalOptions, StartOptions,
 };
 use zeroship_workflow::{
-    DevWorkflowEngine, WorkflowBackend, WorkflowExecutor, WorkflowServiceError,
+    DevWorkflowEngine, WorkflowBackend, WorkflowExecution, WorkflowExecutor, WorkflowInvocation,
+    WorkflowServiceError,
 };
 
 struct MustNotExecute;
 
 #[async_trait(?Send)]
 impl WorkflowExecutor for MustNotExecute {
-    async fn dispatch(&self, _: &str) -> Result<String, WorkflowServiceError> {
+    async fn dispatch(
+        &self,
+        _: &WorkflowInvocation,
+    ) -> Result<WorkflowExecution, WorkflowServiceError> {
         panic!("an app operation must not wait for workflow execution")
     }
 }

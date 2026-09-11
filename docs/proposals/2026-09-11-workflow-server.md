@@ -11,7 +11,9 @@ this document describes the replacement.
 The Rust app-operation API now uses typed requests, responses and domain errors.
 Local and Control paths share input validation and restart safety rules. Local
 mutations and checkpoint batches are transactional, and acceptance returns
-before execution. The service-owned schema, shared store implementation,
+before execution. Native executors and deployed workers now share typed replay
+inputs, journal types and outcome decoding; claim credentials stay in Rust.
+The service-owned schema, shared store implementation,
 workflow server and worker polling remain to be implemented; the current runtime
 still uses Control and the local mini-engine.
 
