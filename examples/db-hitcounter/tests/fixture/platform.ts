@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createWriteStream, type WriteStream } from "node:fs";
 import { generateKeyPairSync, randomBytes, randomUUID } from "node:crypto";
-import { cp, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { appendFile, cp, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { connect, createServer } from "node:net";
 import { join, resolve } from "node:path";
 import { Readable } from "node:stream";
@@ -314,10 +314,12 @@ export class Platform {
     // ignores a fetch Host override. Chromium uses the app hostname directly.
     const probe = `${gateway.url}/apps/db-hitcounter/hit/ready`;
     await this.waitFor("deployed database", async () => {
-      this.readyRequests++;
       const response = await fetch(probe, { signal: AbortSignal.timeout(5000) });
       const value = await response.json();
-      await writeFile(join(this.logs, "readiness.json"), JSON.stringify({ status: response.status, value }));
+      await appendFile(join(this.logs, "readiness.jsonl"), `${JSON.stringify({ status: response.status, value })}\n`);
+      // Gateway routing warmups have no app execution to meter. Count every
+      // response from the counter itself, including unsuccessful database ops.
+      if (response.ok && typeof value.wrote === "boolean" && value.path === "/hit/ready") this.readyRequests++;
       assert(response.ok && value.wrote === true && value.readBack > 0, `Database readiness: HTTP ${response.status}: ${JSON.stringify(value)}`);
       return true;
     });
