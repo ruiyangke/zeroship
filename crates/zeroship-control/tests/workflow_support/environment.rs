@@ -30,7 +30,7 @@ fn main() {
         ))
         .with_env_var("POSTGRES_PASSWORD", "workflow-fixture")
         .with_env_var("POSTGRES_DB", "workflow_template")
-        .with_label("zeroship.workflow.test-process", owner)
+        .with_label("zeroship.workflow.test-process", owner.clone())
         .with_cmd([
             "postgres",
             "-c",
@@ -100,6 +100,9 @@ fn main() {
     std::io::stdin()
         .read_to_end(&mut input)
         .expect("wait for workflow tests");
+    if let Ok(stderr) = server.stderr_to_vec() {
+        let _ = std::fs::write(logs.join(format!("postgres-{owner}.log")), stderr);
+    }
     drop(server);
     drop(work);
 }
