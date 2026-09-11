@@ -75,7 +75,7 @@ impl SqliteBackend {
     /// autocommit reservation on `op_conn`. Those are two connections, so a
     /// scan issued inside `db.transaction(fn)` that took the autocommit handle
     /// could not see the transaction's own uncommitted rows. Bound by
-    /// `plugin-db/src/live_tests/search_tx_lane.rs`.
+    /// `plugin-db/src/tests/search_tx_lane.rs`.
     ///
     /// # Errors
     ///

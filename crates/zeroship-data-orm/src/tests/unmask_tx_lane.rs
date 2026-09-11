@@ -73,7 +73,7 @@ async fn require_pg() -> (crate::support::postgres::Postgres, String) {
 
 async fn release_pg(pool: Rc<Pool>) {
     drop(pool);
-    crate::live_tests::host::reset_context_for_tests();
+    crate::tests::host::reset_context_for_tests();
     let _ = compio_postgres::drain_connections(std::time::Duration::from_secs(2)).await;
 }
 
@@ -131,12 +131,12 @@ async fn fixture_with_schema(pool: &Rc<Pool>, url: &str, app: &str, schema: Valu
 
     crate::support::install_postgres_pool(Rc::clone(pool), url);
     zeroship_data_orm::cache_schema_for_tests(app, "people", schema);
-    crate::live_tests::host::clear_mask_policy_cache_for_tests(app);
+    crate::tests::host::clear_mask_policy_cache_for_tests(app);
 }
 
 /// The backend handle the V8 dispatcher would have bound for this dispatch.
 async fn backend() -> zeroship_data_orm::backend::BackendHandle {
-    crate::live_tests::host::ensure_backend()
+    crate::tests::host::ensure_backend()
         .await
         .expect("the backend the V8 dispatcher would have opened")
 }
@@ -216,8 +216,8 @@ fn code_of(err: &DbError) -> String {
 /// took.
 #[test]
 fn a_find_unmask_inside_a_transaction_reaches_the_row_that_transaction_inserted() {
-    crate::live_tests::host::in_test(|| {
-        crate::live_tests::host::run(async {
+    crate::tests::host::in_test(|| {
+        crate::tests::host::run(async {
             let (_postgres, url) = require_pg().await;
             let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
             let app = "unmask_lane_uncommitted";
@@ -280,7 +280,7 @@ fn a_find_unmask_inside_a_transaction_reaches_the_row_that_transaction_inserted(
             )
             .await;
 
-            crate::live_tests::host::rollback_transaction_for_tests(app).await;
+            crate::tests::host::rollback_transaction_for_tests(app).await;
 
             let unmasked = unmasked.unwrap_or_else(|e| {
                 panic!(
@@ -323,8 +323,8 @@ fn a_find_unmask_inside_a_transaction_reaches_the_row_that_transaction_inserted(
 /// would also be satisfied by a transaction that never rolled back at all.
 #[test]
 fn a_denied_unmask_audit_row_survives_the_rollback_of_its_transaction() {
-    crate::live_tests::host::in_test(|| {
-        crate::live_tests::host::run(async {
+    crate::tests::host::in_test(|| {
+        crate::tests::host::run(async {
             let (_postgres, url) = require_pg().await;
             let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
             let app = "unmask_lane_denied_audit";
@@ -378,7 +378,7 @@ fn a_denied_unmask_audit_row_survives_the_rollback_of_its_transaction() {
             );
 
             // ROLLBACK the transaction both writes were made inside.
-            crate::live_tests::host::rollback_transaction_for_tests(app).await;
+            crate::tests::host::rollback_transaction_for_tests(app).await;
 
             // ---- CONTROL: the ordinary write inside that transaction is gone.
             let surviving = pool
@@ -437,15 +437,15 @@ fn a_denied_unmask_audit_row_survives_the_rollback_of_its_transaction() {
 /// fixture.
 #[test]
 fn an_encrypted_unmask_inside_a_transaction_reaches_the_row_that_transaction_inserted() {
-    crate::live_tests::host::in_test(|| {
-        crate::live_tests::host::run(async {
+    crate::tests::host::in_test(|| {
+        crate::tests::host::run(async {
             let (_postgres, url) = require_pg().await;
             let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
             let app = "unmask_lane_encrypted";
             // A synthetic 32-byte root, supplied to THIS isolate. The write pipeline
             // encrypts with it and the unmask fetch decrypts with it.
             let _keys =
-                crate::live_tests::host::supply_project_key_for_tests(&[app], &"c".repeat(64));
+                crate::tests::host::supply_project_key_for_tests(&[app], &"c".repeat(64));
             fixture_with_schema(&pool, &url, app, encrypted_schema()).await;
             install_mask_policy(&DbBinding::cold_start(app), value!({ "support": ["pci"] }))
                 .expect("install the app's declared mask policy");
@@ -490,7 +490,7 @@ fn an_encrypted_unmask_inside_a_transaction_reaches_the_row_that_transaction_ins
             )
             .await;
 
-            crate::live_tests::host::rollback_transaction_for_tests(app).await;
+            crate::tests::host::rollback_transaction_for_tests(app).await;
 
             let inside = inside.unwrap_or_else(|e| {
                 panic!(

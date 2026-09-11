@@ -1675,7 +1675,7 @@ pub(crate) mod tests {
     static V8_INIT: Once = Once::new();
 
     // `pub(super)` here and on `tmpdir` / `usage_value` below, so
-    // `workflow_live_tests` at the foot of this file - a SIBLING module of this
+    // `workflow_tests` at the foot of this file - a SIBLING module of this
     // one, not a child - can reach them. It is gated on a cargo feature and so
     // cannot live inside this module; those three are the only things it needs
     // from here, and duplicating them would be three more copies to keep in
@@ -4085,7 +4085,7 @@ pub(crate) mod tests {
 // Workflow advance requires the platform migration corpus. These tests run
 // with ordinary cargo test; tests/run_worker_suite.sh provisions their database.
 #[cfg(test)]
-mod workflow_live_tests {
+mod workflow_tests {
     use std::collections::HashMap;
     use std::path::PathBuf;
     use std::sync::{Arc, RwLock};

@@ -52,7 +52,7 @@ const SCHEMA: &str = "search_ir_live";
 const DIMS: usize = 8;
 
 fn run<F: std::future::Future>(f: F) -> F::Output {
-    crate::live_tests::host::run(f)
+    crate::tests::host::run(f)
 }
 
 async fn pool() -> (crate::support::postgres::Postgres, Pool) {
@@ -298,7 +298,7 @@ async fn seed_vectors(pool: &Pool, count: usize) {
 /// distance at all - the failure a top-k membership check cannot see.
 #[test]
 fn a_vector_search_ranks_by_distance_on_real_pgvector() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         run(async {
             let (_postgres, pool) = pool().await;
             setup(&pool).await;
@@ -356,7 +356,7 @@ fn a_vector_search_ranks_by_distance_on_real_pgvector() {
 /// the fixture had made every ordering identical.
 #[test]
 fn the_ir_and_the_shipped_builder_rank_identically() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         run(async {
             let (_postgres, pool) = pool().await;
             setup(&pool).await;
@@ -471,7 +471,7 @@ fn the_ir_and_the_shipped_builder_rank_identically() {
 /// a designed divergence.
 #[test]
 fn postgres_serves_the_inner_product_that_sqlite_refuses() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         run(async {
             let (_postgres, pool) = pool().await;
             setup(&pool).await;
@@ -499,7 +499,7 @@ fn postgres_serves_the_inner_product_that_sqlite_refuses() {
             let dir = tempfile::tempdir().expect("tempdir");
             let sqlite = zeroship_data_orm::backend_selection::new_sqlite_backend(
                 std::path::PathBuf::from(dir.path()),
-                crate::live_tests::host::isolate_key_source(),
+                crate::tests::host::isolate_key_source(),
             )
             .expect("open SqliteBackend");
 
@@ -579,7 +579,7 @@ fn postgres_serves_the_inner_product_that_sqlite_refuses() {
 /// wrote latitude first would return zero rows here, not a different ranking.
 #[test]
 fn a_geo_search_finds_the_near_rows_and_the_coordinate_order_is_load_bearing() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         run(async {
             let (_postgres, pool) = pool().await;
             setup(&pool).await;
@@ -662,7 +662,7 @@ fn a_geo_search_finds_the_near_rows_and_the_coordinate_order_is_load_bearing() {
 /// is a distinct statement and a distinct cache entry.
 #[test]
 fn one_statement_serves_every_k() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         run(async {
             let (_postgres, pool) = pool().await;
             setup(&pool).await;

@@ -439,7 +439,7 @@ fn dispatch_zs_for_app_with_descriptor(
     }];
     let plugins: Vec<Arc<dyn NativePlugin>> = vec![
         DbService::new(DbServiceConfig {
-            connection: crate::live_tests::recording::connection(url),
+            connection: crate::tests::recording::connection(url),
             cdc_relay: None,
             meter: None,
         })
@@ -1932,7 +1932,7 @@ const _procedures = { seed, failBulk };
     assert_eq!(status, 200, "seed failed: {body}");
     assert!(body["json"]["failure"].is_null(), "seed failed: {body}");
 
-    crate::live_tests::recording::clear();
+    crate::tests::recording::clear();
     let (status, body) =
         dispatch_zs_with_descriptor(&url, &src, "failBulk", app, users_runtime_descriptor());
     assert_eq!(
@@ -1949,7 +1949,7 @@ const _procedures = { seed, failBulk };
         2,
         "the exercised target set must be non-empty: {body}"
     );
-    let counters = crate::live_tests::recording::id_probes();
+    let counters = crate::tests::recording::id_probes();
     assert_eq!(
         counters.len(),
         1,

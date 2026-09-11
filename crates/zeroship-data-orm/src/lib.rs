@@ -110,9 +110,9 @@ pub use orm_context::OrmContext;
 mod tx_lane_state_tests;
 
 #[cfg(test)]
-use live_tests::support::postgres as postgres_fixture;
+use tests::support::postgres as postgres_fixture;
 
 #[cfg(test)]
-mod live_tests;
+mod tests;
 #[cfg(test)]
-use live_tests::{schema_fixture, support};
+use tests::{schema_fixture, support};

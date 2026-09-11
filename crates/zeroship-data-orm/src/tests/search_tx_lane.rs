@@ -76,7 +76,7 @@ async fn require_pg() -> (crate::support::postgres::Postgres, String) {
 
 async fn release_pg(pool: Rc<Pool>) {
     drop(pool);
-    crate::live_tests::host::reset_context_for_tests();
+    crate::tests::host::reset_context_for_tests();
     let _ = compio_postgres::drain_connections(std::time::Duration::from_secs(2)).await;
 }
 
@@ -127,7 +127,7 @@ async fn fixture(pool: &Rc<Pool>, url: &str, app: &str, collection: &str, schema
 
 /// The backend handle the V8 dispatcher would have bound for this dispatch.
 async fn backend() -> zeroship_data_orm::backend::BackendHandle {
-    crate::live_tests::host::ensure_backend()
+    crate::tests::host::ensure_backend()
         .await
         .expect("the backend the V8 dispatcher would have opened")
 }
@@ -208,8 +208,8 @@ fn code_of(err: &DbError) -> String {
 /// a fresh pooled checkout that cannot see it.
 #[test]
 fn a_vector_search_inside_a_transaction_sees_the_row_that_transaction_inserted() {
-    crate::live_tests::host::in_test(|| {
-        crate::live_tests::host::run(async {
+    crate::tests::host::in_test(|| {
+        crate::tests::host::run(async {
             let (_postgres, url) = require_pg().await;
             let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
             require_extension(&pool, "vector").await;
@@ -273,7 +273,7 @@ fn a_vector_search_inside_a_transaction_sees_the_row_that_transaction_inserted()
             // ---- SUBJECT: the same search on the transaction's own lane.
             let inside = search_on(tx_route(app).await, app, coll, args).await;
 
-            crate::live_tests::host::rollback_transaction_for_tests(app).await;
+            crate::tests::host::rollback_transaction_for_tests(app).await;
 
             let inside = inside.unwrap_or_else(|e| {
                 panic!(
@@ -314,8 +314,8 @@ fn a_vector_search_inside_a_transaction_sees_the_row_that_transaction_inserted()
 ///
 #[test]
 fn a_spatial_near_inside_a_transaction_sees_the_row_that_transaction_inserted() {
-    crate::live_tests::host::in_test(|| {
-        crate::live_tests::host::run(async {
+    crate::tests::host::in_test(|| {
+        crate::tests::host::run(async {
             let (_postgres, url) = require_pg().await;
             let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
             require_extension(&pool, "postgis").await;
@@ -381,7 +381,7 @@ fn a_spatial_near_inside_a_transaction_sees_the_row_that_transaction_inserted() 
             // ---- SUBJECT: the same near on the transaction's own lane.
             let inside = near_on(tx_route(app).await, app, coll, args).await;
 
-            crate::live_tests::host::rollback_transaction_for_tests(app).await;
+            crate::tests::host::rollback_transaction_for_tests(app).await;
 
             let inside = inside.unwrap_or_else(|e| {
                 panic!(

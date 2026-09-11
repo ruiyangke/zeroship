@@ -4,7 +4,7 @@ use zeroship_data_orm::transaction::reducer::{
 };
 
 fn block_on<F: std::future::Future>(f: F) -> F::Output {
-    crate::live_tests::host::in_test(|| crate::live_tests::host::run(f))
+    crate::tests::host::in_test(|| crate::tests::host::run(f))
 }
 
 /// Connect, and report the server actually reached.

@@ -231,7 +231,7 @@ pub(crate) fn refuse_mv_subscription(collection: &str) -> Option<OpError> {
 #[cfg(test)]
 mod mv_refusal_tests {
     //! Unit-level coverage for the MV-name refusal at the SDK boundary.
-    //! The `src/live_tests/sqlite_integration.rs::mv_subscribe_rejected_at_sdk`
+    //! The `src/tests/sqlite_integration.rs::mv_subscribe_rejected_at_sdk`
     //! gate pins the same invariant end-to-end; this module pins the
     //! pure-Rust predicate so a regression surfaces without compiling
     //! the integration target.

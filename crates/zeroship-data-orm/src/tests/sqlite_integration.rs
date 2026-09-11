@@ -42,7 +42,7 @@ fn fresh_backend() -> (SqliteBackend, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("create tempdir");
     let backend = new_sqlite_backend(
         PathBuf::from(dir.path()),
-        crate::live_tests::host::isolate_key_source(),
+        crate::tests::host::isolate_key_source(),
     )
     .expect("open SqliteBackend");
     (backend, dir)
@@ -65,7 +65,7 @@ fn fresh_backend() -> (SqliteBackend, tempfile::TempDir) {
 /// bound separately and by name, by the three
 /// `cold_*_open_comes_from_ensure_backend_not_the_fixture` tests below.
 async fn unmask_backend() -> zeroship_data_orm::backend::BackendHandle {
-    crate::live_tests::host::ensure_backend()
+    crate::tests::host::ensure_backend()
         .await
         .expect("the backend the V8 dispatcher would have opened")
 }
@@ -83,7 +83,7 @@ async fn unmask_route(app: &str) -> zeroship_data_orm::tx_route::TxRoute {
 /// integration target has no global runtime — each `#[test]` builds
 /// its own so tests stay isolated.
 fn run<F: std::future::Future>(f: F) -> F::Output {
-    crate::live_tests::host::run(f)
+    crate::tests::host::run(f)
 }
 
 async fn pragma_value(backend: &SqliteBackend, pragma: &str) -> String {
@@ -99,7 +99,7 @@ async fn pragma_value(backend: &SqliteBackend, pragma: &str) -> String {
 
 #[test]
 fn pragma_journal_mode_is_wal_after_open() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         run(async {
             let (backend, _dir) = fresh_backend();
             let mode = pragma_value(&backend, "journal_mode").await;
@@ -115,7 +115,7 @@ fn pragma_journal_mode_is_wal_after_open() {
 
 #[test]
 fn pragma_busy_timeout_set() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         run(async {
             let (backend, _dir) = fresh_backend();
             let timeout = pragma_value(&backend, "busy_timeout").await;
@@ -129,7 +129,7 @@ fn pragma_busy_timeout_set() {
 
 #[test]
 fn execute_fixture_round_trip() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         run(async {
             let (backend, _dir) = fresh_backend();
             // DDL — execute returns 0 rows affected for CREATE TABLE.
@@ -149,7 +149,7 @@ fn execute_fixture_round_trip() {
 
 #[test]
 fn execute_fixture_on_round_trip() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         run(async {
             let (backend, _dir) = fresh_backend();
             let client = backend
@@ -183,7 +183,7 @@ fn execute_fixture_on_round_trip() {
 
 #[test]
 fn ensure_app_schema_attaches_file() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         run(async {
             let (backend, dir) = fresh_backend();
             backend
@@ -222,7 +222,7 @@ fn ensure_app_schema_attaches_file() {
 
 #[test]
 fn ensure_app_schema_idempotent() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         run(async {
             let (backend, _dir) = fresh_backend();
             // First call attaches.
@@ -243,7 +243,7 @@ fn ensure_app_schema_idempotent() {
 
 #[test]
 fn ensure_app_schema_isolates_per_app() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         run(async {
             let (backend, _dir) = fresh_backend();
             backend
@@ -300,7 +300,7 @@ fn ensure_app_schema_isolates_per_app() {
 
 #[test]
 fn estimate_row_count_missing_table_returns_zero() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         run(async {
             let (backend, _dir) = fresh_backend();
             backend
@@ -319,7 +319,7 @@ fn estimate_row_count_missing_table_returns_zero() {
 
 #[test]
 fn lock_try_acquire_blocks_second() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         run(async {
             let (backend, _dir) = fresh_backend();
             let client = backend
@@ -355,7 +355,7 @@ fn lock_try_acquire_blocks_second() {
 
 #[test]
 fn lock_release_unblocks() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         run(async {
             let (backend, _dir) = fresh_backend();
             let client = backend
@@ -386,7 +386,7 @@ fn lock_release_unblocks() {
 
 #[test]
 fn lock_acquire_with_backoff_exhausts_into_contention_error() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         // Per plan §2.4 + spec: hold a slot, then call the typed
         // `try_acquire_with_backoff` against the same scope. The
         // five-attempt schedule (0/50/200/500/1000ms = ~1.75s) must
@@ -456,7 +456,7 @@ fn lock_acquire_with_backoff_exhausts_into_contention_error() {
 
 #[test]
 fn introspect_empty_schema_yields_empty_live_schema() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         run(async {
             let (backend, _dir) = fresh_backend();
             backend
@@ -488,7 +488,7 @@ fn introspect_empty_schema_yields_empty_live_schema() {
 
 #[test]
 fn introspect_after_create_table_round_trip() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         run(async {
             let (backend, _dir) = fresh_backend();
             backend
@@ -626,7 +626,7 @@ fn subscribe_local(app_id: &str, collection: &str) -> Subscription {
 
 #[test]
 fn insert_publishes_via_preupdate_hook() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         run(async {
             let (backend, _dir) = fresh_backend();
             backend
@@ -701,7 +701,7 @@ fn insert_publishes_via_preupdate_hook() {
 
 #[test]
 fn insert_publishes_logical_typed_id_not_sqlite_rowid() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         run(async {
             let (backend, _dir) = fresh_backend();
             backend
@@ -752,7 +752,7 @@ fn insert_publishes_logical_typed_id_not_sqlite_rowid() {
 
 #[test]
 fn update_publishes_change_event_with_pre_image() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         run(async {
             let (backend, _dir) = fresh_backend();
             backend
@@ -838,7 +838,7 @@ fn update_publishes_change_event_with_pre_image() {
 
 #[test]
 fn rollback_does_not_publish() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         run(async {
             let (backend, _dir) = fresh_backend();
             backend
@@ -888,7 +888,7 @@ fn rollback_does_not_publish() {
 
 #[test]
 fn mixed_ops_in_one_tx_ordered_by_buffer_index() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         run(async {
             let (backend, _dir) = fresh_backend();
             backend
@@ -988,7 +988,7 @@ fn mixed_ops_in_one_tx_ordered_by_buffer_index() {
 
 #[test]
 fn subscription_fanout_under_load() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         // Plan §8 / §9: a single COMMIT of N rows must reach every
         // active subscriber in INSERT order. Scaled down to 10×100 per the
         // task spec ("100 subscribers × 1000 rows would saturate dev
@@ -1092,7 +1092,7 @@ fn subscription_fanout_under_load() {
 
 #[test]
 fn mv_refresh_does_not_emit_change_events() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         // Plan §6 + §9: writes to `__zeroship_mv_*` shadow tables
         // must be filtered upstream of the broker. The plan acknowledges
         // (§9) that the `db.materializedView(...).refresh()` SDK
@@ -1150,7 +1150,7 @@ fn mv_refresh_does_not_emit_change_events() {
 
 #[test]
 fn mv_refresh_emits_no_change_events_on_base_or_shadow() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         // Variant of the previous gate: when a transaction touches BOTH a
         // shadow table AND a regular collection, the shadow writes are
         // filtered and the regular writes pass through. The regular
@@ -1243,7 +1243,7 @@ fn mv_refresh_emits_no_change_events_on_base_or_shadow() {
 
 #[test]
 fn audit_table_writes_do_not_emit_events() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         // The `is_filtered_relation` predicate covers `__zeroship_audit_*`
         // alongside `__zeroship_mv_*`. The unit test in
         // `cdc.rs::tests::is_filtered_relation_excludes_system_tables`
@@ -1300,7 +1300,7 @@ async fn drain_publisher_long() {
 
 #[test]
 fn backfill_run_pauses_broker_and_emits_one_resync() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         // Plan §7 + §9 gate - backfill pause rail end-to-end:
         //
         // 1. ensure_app_schema + CREATE TABLE.
@@ -1433,7 +1433,7 @@ fn backfill_run_pauses_broker_and_emits_one_resync() {
 
 #[test]
 fn schema_pending_decoder_drops_then_resyncs() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         // Plan §7 + §16.7 + §9 gate - schema-pending decoder rail
         // end-to-end:
         //
@@ -1590,7 +1590,7 @@ fn schema_pending_decoder_drops_then_resyncs() {
 
 #[test]
 fn backfill_pauses_broker_for_a_type_erased_backend_and_resyncs() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         run(async {
             let (backend, _dir) = fresh_backend();
             backend
@@ -1897,7 +1897,7 @@ fn engine_shadow_relation(
 /// rest on a test that could have passed for any name at all.
 #[test]
 fn the_search_really_depends_on_the_name_the_engine_records() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         run(async {
             let (backend, _dir) = fresh_backend();
             backend
@@ -1996,7 +1996,7 @@ fn the_search_really_depends_on_the_name_the_engine_records() {
 
 #[test]
 fn vector_search_returns_k_nearest_sqlite() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         run(async {
             let (backend, _dir) = fresh_backend();
             backend
@@ -2117,7 +2117,7 @@ fn vector_search_returns_k_nearest_sqlite() {
 
 #[test]
 fn vector_dimension_mismatch_rejected_at_insert_sqlite() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         run(async {
             let (backend, _dir) = fresh_backend();
             backend
@@ -2162,7 +2162,7 @@ fn vector_dimension_mismatch_rejected_at_insert_sqlite() {
 
 #[test]
 fn vector_search_respects_filter_sqlite() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         run(async {
             let (backend, _dir) = fresh_backend();
             backend
@@ -2282,7 +2282,7 @@ fn vector_search_respects_filter_sqlite() {
 
 #[test]
 fn vector_l2_distance_matches_cosine_for_unit_vectors_sqlite() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         // Sanity check on the math: for unit vectors, ||a-b||² = 2 * (1 - cos θ)
         // = 2 * cos_distance. With vec0 the metric is pinned at vtable
         // creation time, so we declare TWO vector columns (one cosine,
@@ -2447,7 +2447,7 @@ fn point_to_hex_lit(p: GeoPoint) -> String {
 /// `geoPoint` column is a plain BLOB.
 #[test]
 fn near_returns_within_radius() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         run(async {
             let (backend, _dir) = fresh_backend();
             backend
@@ -2584,7 +2584,7 @@ fn near_returns_within_radius() {
 /// A `near()` inside `db.transaction(fn)` must scan the transaction's own
 /// connection.
 ///
-/// The SQLite half of what `src/live_tests/search_tx_lane.rs` rules on for PostgreSQL,
+/// The SQLite half of what `src/tests/search_tx_lane.rs` rules on for PostgreSQL,
 /// and it is a separate question rather than the same one twice: SC-2 Decision 1
 /// gave this backend TWO connections, `op_conn` for autocommit reads and
 /// `tx_conn` for the creator's transaction, and `SpatialIndex::spatial_near`
@@ -2599,7 +2599,7 @@ fn near_returns_within_radius() {
 /// rather than about the fixture.
 #[test]
 fn a_near_inside_a_transaction_sees_the_row_that_transaction_inserted() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         run(async {
             let (backend, _dir) = fresh_backend();
             let app = "near_tx_lane";
@@ -2729,7 +2729,7 @@ fn a_near_inside_a_transaction_sees_the_row_that_transaction_inserted() {
                 zeroship_data_orm::transaction::SettleOutcome::Ok
             ));
         });
-        crate::live_tests::host::reset_context_for_tests();
+        crate::tests::host::reset_context_for_tests();
     })
 }
 
@@ -2737,8 +2737,8 @@ fn a_near_inside_a_transaction_sees_the_row_that_transaction_inserted() {
 fn with_project_key(
     app_ids: &[&str],
     hex: &str,
-) -> crate::live_tests::host::SuppliedProjectKeysGuard {
-    crate::live_tests::host::supply_project_key_for_tests(app_ids, hex)
+) -> crate::tests::host::SuppliedProjectKeysGuard {
+    crate::tests::host::supply_project_key_for_tests(app_ids, hex)
 }
 
 /// Bind a raw byte slice as a SQLite BLOB literal using the `X'...'`
@@ -2770,7 +2770,7 @@ CREATE INDEX IF NOT EXISTS "{app_id}"."{collection}_created_by_idx" ON "{collect
 
 #[test]
 fn insert_many_encrypts_ciphertext_before_sqlite_storage() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         run(async {
             use std::collections::HashMap;
 
@@ -2814,7 +2814,7 @@ fn insert_many_encrypts_ciphertext_before_sqlite_storage() {
                 { "name": "Alice", "ssn": "123-45-6789" },
                 { "name": "Bob", "ssn": "987-65-4321" }
             ]);
-            crate::live_tests::host::prepare_insert_many_docs_for_tests(
+            crate::tests::host::prepare_insert_many_docs_for_tests(
                 &mut docs,
                 app_id,
                 collection,
@@ -2944,7 +2944,7 @@ fn insert_many_encrypts_ciphertext_before_sqlite_storage() {
 /// test key. Reading the stored ciphertext recovers the original plaintext.
 #[test]
 fn encrypted_column_round_trip_sqlite_randomised() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         use zeroship_data_orm::encryption;
 
         let _keys = with_project_key(&["app1"], &"a".repeat(64));
@@ -3025,7 +3025,7 @@ fn encrypted_column_round_trip_sqlite_randomised() {
 /// assertion for the row-PK-in-AAD policy.
 #[test]
 fn randomised_ciphertext_row_swap_rejected_sqlite() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         use zeroship_data_orm::encryption;
 
         let _keys = with_project_key(&["app1"], &"d".repeat(64));
@@ -3112,7 +3112,7 @@ fn randomised_ciphertext_row_swap_rejected_sqlite() {
 /// the same host-supplied project key.
 #[test]
 fn cross_backend_ciphertext_decrypt_via_shared_key() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         use zeroship_data_orm::encryption;
 
         let _keys = with_project_key(&["app_shared"], &"e".repeat(64));
@@ -3149,7 +3149,7 @@ fn cross_backend_ciphertext_decrypt_via_shared_key() {
 /// columns.
 #[test]
 fn encrypted_column_e2e_crud_round_trip_sqlite() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         use zeroship_data_orm::backend::sqlite::session::TypedCell;
         use zeroship_data_orm::fixtures::DatabaseFixture;
         use zeroship_data_orm::protection::encryption_pass::{
@@ -3308,7 +3308,7 @@ fn encrypted_column_e2e_crud_round_trip_sqlite() {
 /// SQLite-flavoured `CREATE TABLE` path.
 #[test]
 fn a_raw_column_is_emitted_for_a_masked_field_sqlite() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         let schema = zeroship_data_sql::value!({
             "ssn": {
                 "type": "string",
@@ -3360,7 +3360,7 @@ fn a_raw_column_is_emitted_for_a_masked_field_sqlite() {
 /// alongside the plaintext.
 #[test]
 fn dual_write_insert_persists_parent_and_sibling_sqlite() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         use zeroship_data_sql::compile::{SqlDialect, build_insert_with_dialect};
 
         run(async {
@@ -3449,7 +3449,7 @@ fn dual_write_insert_persists_parent_and_sibling_sqlite() {
 /// that the real value is nowhere in the row.
 #[test]
 fn a_select_serves_the_masked_column_sqlite() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         use zeroship_data_sql::compile::{
             SqlDialect, build_find_with_schema, build_insert_with_dialect,
         };
@@ -3585,7 +3585,7 @@ fn a_select_serves_the_masked_column_sqlite() {
 /// the parent column).
 #[test]
 fn aliased_select_skips_kind_none_sqlite() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         use zeroship_data_sql::compile::build_find_with_schema;
 
         let schema = zeroship_data_sql::value!({
@@ -3637,7 +3637,7 @@ fn aliased_select_skips_kind_none_sqlite() {
 /// builder - skip it and the engine rejects with a NOT NULL violation.
 #[test]
 fn missing_sibling_fails_not_null_constraint_sqlite() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         run(async {
             let (backend, _dir) = fresh_backend();
             backend
@@ -3682,7 +3682,7 @@ use zeroship_data_orm::backend::{Backup as _, BusyPolicy as BackupBusyPolicy, Sn
 /// live per-app file (POSIX rename atomic-same-FS contract).
 #[test]
 fn snapshot_restore_round_trip_sqlite() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         run(async {
             let (backend, dir) = fresh_backend();
             backend
@@ -3795,7 +3795,7 @@ fn snapshot_restore_round_trip_sqlite() {
 /// keeps inserting throughout.
 #[test]
 fn vacuum_into_snapshot_consistent_under_concurrent_writer() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
         use std::time::Duration;
@@ -3940,7 +3940,7 @@ fn vacuum_into_snapshot_consistent_under_concurrent_writer() {
 /// already held in this process, `snapshot()` surfaces the typed
 /// `Coded { code: "migration_in_progress" }` rather than blocking
 /// indefinitely. Mirrors the PG arm's `snapshot_during_migration_returns_typed_error`
-/// test (`src/live_tests/integration.rs`).
+/// test (`src/tests/integration.rs`).
 ///
 /// SQLite's lock state lives in `InProcessLockRegistry` (one map per
 /// `SqliteBackend`), so we acquire the slot through the public
@@ -3948,7 +3948,7 @@ fn vacuum_into_snapshot_consistent_under_concurrent_writer() {
 /// races for.
 #[test]
 fn snapshot_during_migration_returns_typed_error_sqlite() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         run(async {
             let (backend, _dir) = fresh_backend();
             let app_id = "app_miglock";
@@ -4023,7 +4023,7 @@ fn snapshot_during_migration_returns_typed_error_sqlite() {
 /// runs after the lock acquire but before any DETACH/rename.
 #[test]
 fn restore_hash_mismatch_rejected_sqlite() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         use std::fs::OpenOptions;
         use std::io::Write;
         run(async {
@@ -4112,7 +4112,7 @@ fn restore_hash_mismatch_rejected_sqlite() {
 
 #[test]
 fn p55_pr1_build_create_table_refuses_masked_suffix_field_sqlite() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         let schema = zeroship_data_sql::value!({
             "name": {"type": "string"},
             // `_masked` is reserved for Path B sibling columns.
@@ -4135,7 +4135,7 @@ fn p55_pr1_build_create_table_refuses_masked_suffix_field_sqlite() {
 
 #[test]
 fn p55_pr1_build_create_table_refuses_classification_name_field_sqlite() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         let schema = zeroship_data_sql::value!({
             "name": {"type": "string"},
             // `phi` collides with the platform classification taxonomy.
@@ -4170,7 +4170,7 @@ async fn unmask_setup_with_schema(
     let backend = Rc::new(
         new_sqlite_backend(
             std::path::PathBuf::from(dir.path()),
-            crate::live_tests::host::isolate_key_source(),
+            crate::tests::host::isolate_key_source(),
         )
         .expect("SqliteBackend::new"),
     );
@@ -4203,7 +4203,7 @@ async fn unmask_setup_with_schema(
     }
     // Install into the per-isolate context so dispatch_unmask's
     // backend() lookup succeeds.
-    crate::live_tests::host::set_backend_for_tests(
+    crate::tests::host::set_backend_for_tests(
         zeroship_data_orm::backend::BackendHandle::new(backend.clone()),
         &format!("sqlite:{}", dir.path().display()),
     );
@@ -4221,9 +4221,9 @@ fn configure_cold_sqlite_unmask_fixture(
     schema: zeroship_data_sql::value::Value,
     policy: zeroship_data_sql::value::Value,
 ) {
-    crate::live_tests::host::reset_context_for_tests();
+    crate::tests::host::reset_context_for_tests();
     let url = format!("sqlite:{}", dir.path().join("zs-control.sqlite").display());
-    crate::live_tests::host::set_db_url_for_tests(&url);
+    crate::tests::host::set_db_url_for_tests(&url);
     zeroship_data_orm::cache_schema_for_tests(app_id, collection, schema);
     mask_policy::install_mask_policy(&DbBinding::cold_start(app_id), policy)
         .expect("reinstall the app declaration during startup");
@@ -4248,7 +4248,7 @@ fn configure_cold_sqlite_unmask_fixture(
 /// for exactly that reason - a dropped `SqliteBackend` could be reallocated at
 /// the same address and make the first assertion pass on a coincidence.
 async fn assert_cold_open_installs_a_fresh_backend(fixture: &SqliteBackend) {
-    let opened = crate::live_tests::host::ensure_backend().await.expect(
+    let opened = crate::tests::host::ensure_backend().await.expect(
         "a cold isolate must be OPENED by ensure_backend: a plain context read answers \
              not_configured here, which is what every fresh isolate would get",
     );
@@ -4260,7 +4260,7 @@ async fn assert_cold_open_installs_a_fresh_backend(fixture: &SqliteBackend) {
         "the cold fixture's backend is still installed, so nothing was opened"
     );
 
-    let again = crate::live_tests::host::ensure_backend()
+    let again = crate::tests::host::ensure_backend()
         .await
         .expect("the second resolution must see the backend the first one opened");
     assert!(
@@ -4310,7 +4310,7 @@ async fn read_audit_rows(backend: &SqliteBackend, app_id: &str) -> Vec<(String, 
 /// nothing else does. See [`assert_cold_open_installs_a_fresh_backend`].
 #[test]
 fn cold_unmask_open_comes_from_ensure_backend_not_the_fixture() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         let schema = zeroship_data_sql::value!({
             "id":  { "type": "string" },
             "ssn": {
@@ -4345,7 +4345,7 @@ fn cold_unmask_open_comes_from_ensure_backend_not_the_fixture() {
 /// `unmask_backend` - and is bound by the cold-open gate directly above.
 #[test]
 fn cold_unmask_with_auto_actor_attaches_before_read() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         let _keys = with_project_key(&["app_unmask_auto"], &"a".repeat(64));
         let schema = zeroship_data_sql::value!({
             "id": { "type": "string" },
@@ -4506,7 +4506,7 @@ fn cold_unmask_with_auto_actor_attaches_before_read() {
 /// error `unmask_not_permitted` reaches the caller.
 #[test]
 fn unmask_with_user_actor_returns_forbidden_audit_logged() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         let _keys = with_project_key(&["app_unmask_user"], &"b".repeat(64));
         let schema = zeroship_data_sql::value!({
             "id": { "type": "string" },
@@ -4579,7 +4579,7 @@ fn unmask_with_user_actor_returns_forbidden_audit_logged() {
 /// arbitrary columns.
 #[test]
 fn unmask_column_not_masked_returns_typed_error() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         // Schema declares `name` as a bare string — no mask block.
         let schema = zeroship_data_sql::value!({
             "id":   { "type": "string" },
@@ -4623,7 +4623,7 @@ fn unmask_column_not_masked_returns_typed_error() {
 /// row's classification text matches.
 #[test]
 fn unmask_writes_audit_row_with_correct_classification() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         let schema = zeroship_data_sql::value!({
             "id":      { "type": "string" },
             "diag":    {
@@ -4686,7 +4686,7 @@ fn unmask_writes_audit_row_with_correct_classification() {
 /// encrypted twin reads the same resolved name through `fetch_and_decrypt`.
 #[test]
 fn unmask_reads_the_raw_column_the_descriptor_declares() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         let declared_raw = "__zs_raw2__ssn";
         let schema = zeroship_data_sql::value!({
             "id": { "type": "string" },
@@ -4760,7 +4760,7 @@ async fn policy_setup(
     schema: zeroship_data_sql::value::Value,
 ) -> (Rc<SqliteBackend>, tempfile::TempDir) {
     let (backend, dir) = unmask_setup_with_schema(app_id, collection, schema).await;
-    crate::live_tests::host::clear_mask_policy_cache_for_tests(app_id);
+    crate::tests::host::clear_mask_policy_cache_for_tests(app_id);
     (backend, dir)
 }
 
@@ -4768,7 +4768,7 @@ async fn policy_setup(
 /// allows a user-role actor to unmask a pii-classified column.
 #[test]
 fn unmask_with_user_role_in_policy_returns_plaintext() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         let _keys = with_project_key(&["app_unmask_policy_grant"], &"c".repeat(64));
         let schema = zeroship_data_sql::value!({
             "id": { "type": "string" },
@@ -4915,7 +4915,7 @@ fn unmask_with_user_role_in_policy_returns_plaintext() {
 /// path emits an audit row.
 #[test]
 fn unmask_with_user_role_not_in_policy_denied() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         let schema = zeroship_data_sql::value!({
             "id": { "type": "string" },
             "ssn": {
@@ -4973,7 +4973,7 @@ fn unmask_with_user_role_not_in_policy_denied() {
 /// allowing everything when no policy is declared" hole.
 #[test]
 fn unmask_default_deny_when_no_policy() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         let schema = zeroship_data_sql::value!({
             "id": { "type": "string" },
             "name": {
@@ -5024,7 +5024,7 @@ fn unmask_default_deny_when_no_policy() {
 /// `invalid_mask_classification`.
 #[test]
 fn unmask_invalid_classification_rejected_at_dispatch_time() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         let schema = zeroship_data_sql::value!({ "id": { "type": "string" } });
         let app_id = "app_unmask_invalid_classification";
         let collection = "users";
@@ -5052,7 +5052,7 @@ fn unmask_invalid_classification_rejected_at_dispatch_time() {
 /// The app's startup declaration stays fixed while the database is in use.
 #[test]
 fn policy_cannot_change_after_startup() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         let app_id = "app_unmask_policy_fixed";
         let collection = "items";
         run(async {
@@ -5111,7 +5111,7 @@ fn policy_cannot_change_after_startup() {
 /// Existing sidecar contents cannot grant access or break authorization.
 #[test]
 fn unmask_ignores_policy_sidecar_files() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         run(async {
             for (app_id, contents) in [
                 (
@@ -5163,7 +5163,7 @@ fn unmask_ignores_policy_sidecar_files() {
 /// the introspection shape).
 #[test]
 fn malformed_mask_sentinel_skipped_on_sqlite() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         run(async {
             let (backend, _dir) = fresh_backend();
             backend
@@ -5210,7 +5210,7 @@ use zeroship_data_orm::protection::unmask::{BulkUnmaskArgs, BulkUnmaskItem, disp
 /// `tx_scope::ensure_backend` exactly as the single-unmask dispatch does.
 #[test]
 fn cold_bulk_unmask_open_comes_from_ensure_backend_not_the_fixture() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         let schema = zeroship_data_sql::value!({
             "id":    { "type": "string" },
             "email": {
@@ -5225,7 +5225,7 @@ fn cold_bulk_unmask_open_comes_from_ensure_backend_not_the_fixture() {
             // `fixture` stays bound for the whole block: the assertion is an
             // address comparison against it.
             let (fixture, dir) = unmask_setup_with_schema(app_id, collection, schema.clone()).await;
-            crate::live_tests::host::clear_mask_policy_cache_for_tests(app_id);
+            crate::tests::host::clear_mask_policy_cache_for_tests(app_id);
             mask_policy::install_mask_policy(
                 &DbBinding::cold_start(app_id),
                 zeroship_data_sql::value!({ "user": ["pii"] }),
@@ -5251,7 +5251,7 @@ fn cold_bulk_unmask_open_comes_from_ensure_backend_not_the_fixture() {
 /// `unmask_backend` - and is bound by the cold-open gate directly above.
 #[test]
 fn cold_bulk_unmask_attaches_before_read() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         let schema = zeroship_data_sql::value!({
             "id":    { "type": "string" },
             "email": {
@@ -5268,7 +5268,7 @@ fn cold_bulk_unmask_attaches_before_read() {
 
         run(async {
             let (backend, dir) = unmask_setup_with_schema(app_id, collection, schema.clone()).await;
-            crate::live_tests::host::clear_mask_policy_cache_for_tests(app_id);
+            crate::tests::host::clear_mask_policy_cache_for_tests(app_id);
             // Post-storage-flip layout: each field's own column holds the
             // mask; the raw sibling (named via `raw_column_name`, never
             // spelled out here) holds the real value `dispatch_bulk_unmask`
@@ -5387,7 +5387,7 @@ fn cold_bulk_unmask_attaches_before_read() {
 /// plaintext returned for the authorised pair either.
 #[test]
 fn bulk_unmask_authorization_atomic_one_unauthorized_fails_all() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         let schema = zeroship_data_sql::value!({
             "id":    { "type": "string" },
             "email": {
@@ -5404,7 +5404,7 @@ fn bulk_unmask_authorization_atomic_one_unauthorized_fails_all() {
 
         run(async {
             let (backend, _dir) = unmask_setup_with_schema(app_id, collection, schema).await;
-            crate::live_tests::host::clear_mask_policy_cache_for_tests(app_id);
+            crate::tests::host::clear_mask_policy_cache_for_tests(app_id);
             backend
                 .execute_fixture(
                     "CREATE TABLE \"app_bulk_atomic_refuse\".\"users\" (\
@@ -5466,7 +5466,7 @@ fn bulk_unmask_authorization_atomic_one_unauthorized_fails_all() {
 /// typed `unmask_column_not_masked` error BEFORE any audit row writes.
 #[test]
 fn bulk_unmask_unknown_column_returns_typed_error_e2e() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         let schema = zeroship_data_sql::value!({
             "id":  { "type": "string" },
             "ssn": {
@@ -5479,7 +5479,7 @@ fn bulk_unmask_unknown_column_returns_typed_error_e2e() {
 
         run(async {
             let (_backend, _dir) = unmask_setup_with_schema(app_id, collection, schema).await;
-            crate::live_tests::host::clear_mask_policy_cache_for_tests(app_id);
+            crate::tests::host::clear_mask_policy_cache_for_tests(app_id);
             let args = BulkUnmaskArgs {
                 collection: collection.to_string(),
                 items: vec![BulkUnmaskItem {
@@ -5522,7 +5522,7 @@ use zeroship_data_orm::protection::unmask::{
 /// resolved by the `find` dispatch through `tx_scope::ensure_backend`.
 #[test]
 fn cold_query_unmask_hint_open_comes_from_ensure_backend_not_the_fixture() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         let schema = zeroship_data_sql::value!({
             "id":  { "type": "string" },
             "ssn": {
@@ -5537,7 +5537,7 @@ fn cold_query_unmask_hint_open_comes_from_ensure_backend_not_the_fixture() {
             // `fixture` stays bound for the whole block: the assertion is an
             // address comparison against it.
             let (fixture, dir) = unmask_setup_with_schema(app_id, collection, schema.clone()).await;
-            crate::live_tests::host::clear_mask_policy_cache_for_tests(app_id);
+            crate::tests::host::clear_mask_policy_cache_for_tests(app_id);
             mask_policy::install_mask_policy(
                 &DbBinding::cold_start(app_id),
                 zeroship_data_sql::value!({ "user": ["spi"] }),
@@ -5563,7 +5563,7 @@ fn cold_query_unmask_hint_open_comes_from_ensure_backend_not_the_fixture() {
 /// `unmask_backend` - and is bound by the cold-open gate directly above.
 #[test]
 fn cold_query_unmask_hint_attaches_before_read() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         let schema = zeroship_data_sql::value!({
             "id":    { "type": "string" },
             "email": {
@@ -5580,7 +5580,7 @@ fn cold_query_unmask_hint_attaches_before_read() {
 
         run(async {
             let (backend, dir) = unmask_setup_with_schema(app_id, collection, schema.clone()).await;
-            crate::live_tests::host::clear_mask_policy_cache_for_tests(app_id);
+            crate::tests::host::clear_mask_policy_cache_for_tests(app_id);
             // Post-storage-flip layout: each field's own column holds the
             // mask; the raw sibling (named via `raw_column_name`, never
             // spelled out here) holds the real value `dispatch_unmask_for_query`
@@ -5732,7 +5732,7 @@ fn cold_query_unmask_hint_attaches_before_read() {
 /// query entirely; we do not silently degrade to masked-only.
 #[test]
 fn per_query_unmask_hint_rejects_unauthorized_actor() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         let schema = zeroship_data_sql::value!({
             "id":  { "type": "string" },
             "ssn": {
@@ -5745,7 +5745,7 @@ fn per_query_unmask_hint_rejects_unauthorized_actor() {
 
         run(async {
             let (backend, _dir) = unmask_setup_with_schema(app_id, collection, schema).await;
-            crate::live_tests::host::clear_mask_policy_cache_for_tests(app_id);
+            crate::tests::host::clear_mask_policy_cache_for_tests(app_id);
             // Policy: `user` can only unmask `pii`, NOT `spi`.
             let policy_v = zeroship_data_sql::value!({ "user": ["pii"] });
             mask_policy::install_mask_policy(&DbBinding::cold_start(app_id), policy_v)
@@ -5782,7 +5782,7 @@ fn per_query_unmask_hint_rejects_unauthorized_actor() {
 /// the typed `unmask_column_not_masked` error before any DB hit.
 #[test]
 fn per_query_unmask_hint_unknown_column_returns_typed_error() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         let schema = zeroship_data_sql::value!({
             "id":  { "type": "string" },
             "ssn": {
@@ -5795,7 +5795,7 @@ fn per_query_unmask_hint_unknown_column_returns_typed_error() {
 
         run(async {
             let (_backend, _dir) = unmask_setup_with_schema(app_id, collection, schema).await;
-            crate::live_tests::host::clear_mask_policy_cache_for_tests(app_id);
+            crate::tests::host::clear_mask_policy_cache_for_tests(app_id);
             let actor = Some(zeroship_data_sql::value!({ "kind": "auto" }));
             let err = authorize_query_hint(
                 &unmask_backend().await,
@@ -5825,7 +5825,7 @@ fn per_query_unmask_hint_unknown_column_returns_typed_error() {
 /// fields after execution.
 #[test]
 fn sqlite_ddl_has_seven_system_field_columns_end_to_end() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         use zeroship_data_sql::compile::SqlDialect;
 
         run(async {
@@ -5904,7 +5904,7 @@ fn sqlite_ddl_has_seven_system_field_columns_end_to_end() {
 /// intentionally unindexed (see `create_table_does_not_emit_index_for_version`).
 #[test]
 fn freshly_created_table_has_three_indexes_end_to_end() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         use zeroship_data_sql::compile::SqlDialect;
         use zeroship_migrate::schema::query::index_name;
 
@@ -5966,7 +5966,7 @@ fn freshly_created_table_has_three_indexes_end_to_end() {
 /// CURRENT_TIMESTAMP defaults firing on omitted columns).
 #[test]
 fn inserting_a_row_without_user_fields_succeeds_via_system_fields_only() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         use zeroship_data_sql::compile::SqlDialect;
 
         run(async {
@@ -6045,7 +6045,7 @@ fn inserting_a_row_without_user_fields_succeeds_via_system_fields_only() {
 /// up V8 — exercises the SQL builder + SQLite engine round-trip.
 #[test]
 fn insert_end_to_end_populates_system_fields_sqlite() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         use zeroship_data_orm::crud::system_fields_pass::apply_system_fields_on_insert;
         use zeroship_data_sql::compile::{SqlDialect, build_insert_with_dialect};
 
@@ -6178,7 +6178,7 @@ fn insert_end_to_end_populates_system_fields_sqlite() {
 /// PG-only path until the cross-app FK rework lands.
 #[test]
 fn insert_with_fk_uses_text_keys_end_to_end_sqlite() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         use zeroship_data_orm::crud::system_fields_pass::apply_system_fields_on_insert;
         use zeroship_data_sql::compile::{SqlDialect, build_insert_with_dialect};
 
@@ -6289,7 +6289,7 @@ fn insert_with_fk_uses_text_keys_end_to_end_sqlite() {
 /// directly).
 #[test]
 fn update_end_to_end_bumps_version_by_one_sqlite() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         use zeroship_data_sql::compile::{
             SqlDialect, SystemFieldAutoBump, build_insert_with_dialect,
             build_update_many_with_system_fields,
@@ -6397,7 +6397,7 @@ fn update_end_to_end_bumps_version_by_one_sqlite() {
 /// `version` bumps the row.
 #[test]
 fn update_end_to_end_with_correct_version_succeeds_and_bumps_sqlite() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         use zeroship_data_sql::compile::{
             SqlDialect, SystemFieldAutoBump, build_insert_with_dialect,
             build_update_many_with_system_fields,
@@ -6481,7 +6481,7 @@ fn update_end_to_end_with_correct_version_succeeds_and_bumps_sqlite() {
 /// layer we just confirm the affected-rows = 0 contract.
 #[test]
 fn update_end_to_end_with_stale_version_affects_zero_rows_sqlite() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         use zeroship_data_sql::compile::{
             SqlDialect, SystemFieldAutoBump, build_insert_with_dialect,
             build_update_many_with_system_fields,
@@ -6562,7 +6562,7 @@ fn update_end_to_end_with_stale_version_affects_zero_rows_sqlite() {
 /// the SET.
 #[test]
 fn update_end_to_end_concurrent_two_updates_one_wins_one_loses_sqlite() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         use zeroship_data_sql::compile::{
             SqlDialect, SystemFieldAutoBump, build_insert_with_dialect,
             build_update_many_with_system_fields,
@@ -6659,7 +6659,7 @@ fn update_end_to_end_concurrent_two_updates_one_wins_one_loses_sqlite() {
 /// bumps version. Confirms the non-CAS path stays last-writer-wins.
 #[test]
 fn update_end_to_end_without_version_filter_succeeds_blindly_sqlite() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         use zeroship_data_sql::compile::{
             SqlDialect, SystemFieldAutoBump, build_insert_with_dialect,
             build_update_many_with_system_fields,
@@ -6743,7 +6743,7 @@ fn update_end_to_end_without_version_filter_succeeds_blindly_sqlite() {
 
 #[test]
 fn soft_delete_end_to_end_sets_deleted_at_and_bumps_version_sqlite() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         use zeroship_data_sql::compile::{
             SqlDialect, SystemFieldAutoBump, build_insert_with_dialect,
             build_soft_delete_many_with_system_fields,
@@ -6821,7 +6821,7 @@ fn soft_delete_end_to_end_sets_deleted_at_and_bumps_version_sqlite() {
 
 #[test]
 fn soft_delete_on_already_soft_deleted_row_affects_zero_rows_sqlite() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         use zeroship_data_sql::compile::{
             SqlDialect, SystemFieldAutoBump, build_insert_with_dialect,
             build_soft_delete_many_with_system_fields,
@@ -6885,7 +6885,7 @@ fn soft_delete_on_already_soft_deleted_row_affects_zero_rows_sqlite() {
 
 #[test]
 fn find_with_soft_delete_filter_hides_soft_deleted_rows_sqlite() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         use zeroship_data_sql::compile::{
             SqlDialect, SystemFieldAutoBump, build_find_with_schema_and_unmask_and_soft_delete,
             build_insert_with_dialect, build_soft_delete_many_with_system_fields,
@@ -6979,7 +6979,7 @@ fn find_with_soft_delete_filter_hides_soft_deleted_rows_sqlite() {
 
 #[test]
 fn restore_clears_deleted_at_and_bumps_version_sqlite() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         use zeroship_data_sql::compile::{
             SqlDialect, SystemFieldAutoBump, build_insert_with_dialect,
             build_restore_many_with_system_fields, build_soft_delete_many_with_system_fields,
@@ -7062,7 +7062,7 @@ fn restore_clears_deleted_at_and_bumps_version_sqlite() {
 
 #[test]
 fn restore_on_already_live_row_affects_zero_rows_sqlite() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         use zeroship_data_sql::compile::{
             SqlDialect, SystemFieldAutoBump, build_insert_with_dialect,
             build_restore_many_with_system_fields,
@@ -7131,7 +7131,7 @@ fn restore_on_already_live_row_affects_zero_rows_sqlite() {
 
 #[test]
 fn soft_delete_then_restore_full_lifecycle_sqlite() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         use zeroship_data_sql::compile::{
             SqlDialect, SystemFieldAutoBump, build_find_with_schema_and_unmask_and_soft_delete,
             build_insert_with_dialect, build_restore_many_with_system_fields,
@@ -7251,7 +7251,7 @@ fn soft_delete_then_restore_full_lifecycle_sqlite() {
 
 #[test]
 fn soft_delete_many_sets_deleted_at_on_all_matching_live_rows_sqlite() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         use zeroship_data_sql::compile::{
             SqlDialect, SystemFieldAutoBump, build_insert_with_dialect,
             build_soft_delete_many_with_system_fields,
@@ -7349,7 +7349,7 @@ fn soft_delete_many_sets_deleted_at_on_all_matching_live_rows_sqlite() {
 
 #[test]
 fn purge_path_uses_hard_delete_sql_unchanged_sqlite() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         use zeroship_data_sql::compile::build_delete_one;
 
         let schema = zeroship_data_sql::value!({ "title": { "type": "string" } });
@@ -7382,7 +7382,7 @@ fn purge_path_uses_hard_delete_sql_unchanged_sqlite() {
 /// at the SQL level.
 #[test]
 fn nested_savepoint_rollback_to_keeps_outer_sqlite() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         run(async {
             let (backend, _dir) = fresh_backend();
             let client = backend
@@ -7468,7 +7468,7 @@ fn nested_savepoint_rollback_to_keeps_outer_sqlite() {
 /// COMMIT. Mirrors `nested_inner_resolve_releases_savepoint`.
 #[test]
 fn nested_savepoint_release_keeps_both_sqlite() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         run(async {
             let (backend, _dir) = fresh_backend();
             let client = backend
@@ -7534,7 +7534,7 @@ fn nested_savepoint_release_keeps_both_sqlite() {
 
 #[test]
 fn p6c_data_plane_reaches_the_app_file_on_demand() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         run(async {
             let dir = tempfile::tempdir().expect("create tempdir");
             let app = "p6c_no_register";
@@ -7555,11 +7555,11 @@ fn p6c_data_plane_reaches_the_app_file_on_demand() {
             let backend = Rc::new(
                 new_sqlite_backend(
                     PathBuf::from(dir.path()),
-                    crate::live_tests::host::isolate_key_source(),
+                    crate::tests::host::isolate_key_source(),
                 )
                 .expect("open backend"),
             );
-            crate::live_tests::host::set_backend_for_tests(
+            crate::tests::host::set_backend_for_tests(
                 zeroship_data_orm::backend::BackendHandle::new(backend.clone()),
                 &format!("sqlite:{}", dir.path().display()),
             );
@@ -7569,7 +7569,7 @@ fn p6c_data_plane_reaches_the_app_file_on_demand() {
             // path a CRUD op takes. Calling `backend.execute_fixture` directly would test
             // a layer BELOW the one that knows the app_id, and so could not observe
             // whether the data plane binds the file for itself.
-            crate::live_tests::host::exec_mutation_with_emit_for_tests(
+            crate::tests::host::exec_mutation_with_emit_for_tests(
                 zeroship_data_sql::compile::BuiltQuery {
                     sql: format!(
                         r#"INSERT INTO "{app}"."{collection}" (id, body)
@@ -7584,7 +7584,7 @@ fn p6c_data_plane_reaches_the_app_file_on_demand() {
             .await
             .expect("the data plane must write after attaching the app file");
 
-            let rows = crate::live_tests::host::exec_query_for_tests(
+            let rows = crate::tests::host::exec_query_for_tests(
                 app,
                 zeroship_data_sql::compile::BuiltQuery {
                     sql: format!(r#"SELECT body FROM "{app}"."{collection}" WHERE id = 'note_1'"#),
@@ -7624,7 +7624,7 @@ const LONG_RUNNING_SQL: &str = "WITH RECURSIVE c(x) AS (\
 /// real on any number of connections and SC-2 states it in the same breath.
 #[test]
 fn an_autocommit_read_proceeds_while_the_app_holds_an_open_transaction() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         run(async {
             let (backend, _dir) = fresh_backend();
             let probe = backend.autocommit_client();
@@ -7677,7 +7677,7 @@ fn an_autocommit_read_proceeds_while_the_app_holds_an_open_transaction() {
 /// with a typed error - not run on whatever connection is free.
 #[test]
 fn a_command_bearing_a_foreign_reservation_is_refused() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         run(async {
             let (backend, _dir) = fresh_backend();
             backend
@@ -7736,7 +7736,7 @@ fn a_command_bearing_a_foreign_reservation_is_refused() {
 /// a pre-start cancellation returns *faster*, not slower.
 #[test]
 fn a_cancellation_interrupts_a_statement_that_is_already_running() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         run(async {
             use std::time::{Duration, Instant};
 
@@ -7806,7 +7806,7 @@ fn a_cancellation_interrupts_a_statement_that_is_already_running() {
 /// sends `ROLLBACK` here and destroys a durable write.
 #[test]
 fn a_cancellation_after_commit_does_not_roll_the_commit_back() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         run(async {
             let (backend, _dir) = fresh_backend();
             backend
@@ -7876,7 +7876,7 @@ fn a_cancellation_after_commit_does_not_roll_the_commit_back() {
 /// close it. Ownership is what closes it.
 #[test]
 fn a_cancel_for_a_retired_reservation_does_not_roll_back_the_next_transaction() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         run(async {
             let (backend, _dir) = fresh_backend();
             backend
@@ -7974,7 +7974,7 @@ fn a_cancel_for_a_retired_reservation_does_not_roll_back_the_next_transaction() 
 /// be answered with what the first one decided.
 #[test]
 fn a_second_cancellation_is_answered_not_re_executed() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         run(async {
             let (backend, _dir) = fresh_backend();
             backend
@@ -8027,7 +8027,7 @@ fn a_second_cancellation_is_answered_not_re_executed() {
 /// was cancelled; a spent reservation was reused.
 #[test]
 fn a_spent_autocommit_reservation_is_refused_as_a_non_owner() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         run(async {
             let (backend, _dir) = fresh_backend();
             backend
@@ -8073,7 +8073,7 @@ fn a_spent_autocommit_reservation_is_refused_as_a_non_owner() {
 /// drop half the change stream now that `op_conn` is a write path too.
 #[test]
 fn writes_on_both_connections_reach_the_broker() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         run(async {
             let (backend, _dir) = fresh_backend();
             backend
@@ -8156,7 +8156,7 @@ fn writes_on_both_connections_reach_the_broker() {
 /// transaction on tx_conn"` - a refusal caused entirely by another tenant.
 #[test]
 fn two_apps_hold_transactions_at_the_same_time() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         run(async {
             let (backend, _dir) = fresh_backend();
             backend
@@ -8249,7 +8249,7 @@ fn two_apps_hold_transactions_at_the_same_time() {
 /// validator.
 #[test]
 fn a_transaction_lane_cannot_address_another_apps_tables() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         run(async {
             let (backend, _dir) = fresh_backend();
             backend
@@ -8315,7 +8315,7 @@ fn a_transaction_lane_cannot_address_another_apps_tables() {
 /// another tenant's" is gone with the cause.
 #[test]
 fn a_second_transaction_for_the_same_app_is_still_refused_and_names_it() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         run(async {
             let (backend, _dir) = fresh_backend();
             backend
@@ -8373,7 +8373,7 @@ fn a_second_transaction_for_the_same_app_is_still_refused_and_names_it() {
 /// refusal path.
 #[test]
 fn transaction_lanes_are_capped_and_the_refusal_has_its_own_code() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         run(async {
             let (backend, _dir) = fresh_backend();
             let cap = zeroship_data_orm::backend::sqlite::session::MAX_TX_LANES_FOR_TESTS;
@@ -8450,7 +8450,7 @@ fn transaction_lanes_are_capped_and_the_refusal_has_its_own_code() {
 /// control that pins why.
 #[test]
 fn a_write_upgrade_on_a_stale_wal_snapshot_is_refused() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         run(async {
             let (backend, _dir) = fresh_backend();
             backend
@@ -8543,7 +8543,7 @@ fn a_write_upgrade_on_a_stale_wal_snapshot_is_refused() {
 /// describe a world we do not run in.
 #[test]
 fn an_app_files_write_upgrade_is_plain_busy_because_it_is_not_in_wal() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         run(async {
             let (backend, _dir) = fresh_backend();
             backend.attach_app_file("jm_app").await.expect("attach");
@@ -8582,7 +8582,7 @@ fn an_app_files_write_upgrade_is_plain_busy_because_it_is_not_in_wal() {
 /// caller-provided instant, then inspects what each actually stored.
 #[test]
 fn dbbind134_sqlite_timestamp_spellings_invert_same_day_ordering() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         use zeroship_data_sql::compile::{SqlDialect, build_insert_with_dialect};
 
         run(async {

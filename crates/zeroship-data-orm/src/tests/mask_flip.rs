@@ -66,10 +66,10 @@ use zeroship_data_sql::value::{Value, value};
 /// before any dispatch, so the isolate already holds a backend and this is a
 /// plain read. (`DbBinding::cold_start` below is a BINDING constructor - a
 /// different sense of cold, and not a context state.) The lazy open is bound in
-/// `src/live_tests/sqlite_integration.rs`, by the three
+/// `src/tests/sqlite_integration.rs`, by the three
 /// `cold_*_open_comes_from_ensure_backend_not_the_fixture` gates.
 async fn unmask_backend() -> zeroship_data_orm::backend::BackendHandle {
-    crate::live_tests::host::ensure_backend()
+    crate::tests::host::ensure_backend()
         .await
         .expect("the backend the V8 dispatcher would have opened")
 }
@@ -110,7 +110,7 @@ async fn require_pg() -> (crate::support::postgres::Postgres, String) {
 
 async fn release_pg(pool: Rc<Pool>) {
     drop(pool);
-    crate::live_tests::host::reset_context_for_tests();
+    crate::tests::host::reset_context_for_tests();
     let _ = compio_postgres::drain_connections(std::time::Duration::from_secs(2)).await;
 }
 
@@ -227,7 +227,7 @@ async fn insert_through_the_pipeline(
     doc: Value,
 ) -> Inserted {
     let mut docs = value!([doc]);
-    crate::live_tests::host::prepare_insert_many_docs_for_tests(&mut docs, app, collection, None)
+    crate::tests::host::prepare_insert_many_docs_for_tests(&mut docs, app, collection, None)
         .await
         .expect("write pipeline");
     let id = docs[0]["id"]
@@ -317,8 +317,8 @@ async fn run_find(pool: &Rc<Pool>, app: &str, filter: &Value, schema: &Value) ->
 /// where it MUST separate them.
 #[test]
 fn a_range_filter_on_a_masked_column_cannot_narrow_the_plaintext() {
-    crate::live_tests::host::in_test(|| {
-        crate::live_tests::host::run(async {
+    crate::tests::host::in_test(|| {
+        crate::tests::host::run(async {
             let (_postgres, url) = require_pg().await;
             let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
             let app = "flip_oracle";
@@ -496,8 +496,8 @@ fn a_range_filter_on_a_masked_column_cannot_narrow_the_plaintext() {
 /// assertion in this file.
 #[test]
 fn the_real_value_is_still_stored_and_still_reachable_by_the_audited_path() {
-    crate::live_tests::host::in_test(|| {
-        crate::live_tests::host::run(async {
+    crate::tests::host::in_test(|| {
+        crate::tests::host::run(async {
             let (_postgres, url) = require_pg().await;
             let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
             let app = "flip_reachable";
@@ -766,8 +766,8 @@ fn refusal_code(err: &DbError) -> String {
 /// exist nowhere in that suite.
 #[test]
 fn an_actor_the_policy_does_not_permit_is_refused_and_the_refusal_is_audited() {
-    crate::live_tests::host::in_test(|| {
-        crate::live_tests::host::run(async {
+    crate::tests::host::in_test(|| {
+        crate::tests::host::run(async {
             let (_postgres, url) = require_pg().await;
             let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
             let app = "flip_denied";
@@ -899,8 +899,8 @@ fn an_actor_the_policy_does_not_permit_is_refused_and_the_refusal_is_audited() {
 /// permit. So "refused" here is about the ACTOR, not about the row.
 #[test]
 fn an_unmask_with_no_usable_actor_is_refused_and_audited() {
-    crate::live_tests::host::in_test(|| {
-        crate::live_tests::host::run(async {
+    crate::tests::host::in_test(|| {
+        crate::tests::host::run(async {
             let (_postgres, url) = require_pg().await;
             let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
             let app = "flip_unauth";
@@ -1049,12 +1049,12 @@ fn bulk_args_json(row_pk: &str, columns: &[&str], actor: &Value) -> Value {
 /// identical payload naming `support` instead of `auto` returns the SSN.
 #[test]
 fn app_js_claiming_the_auto_system_actor_is_refused_by_the_parser() {
-    crate::live_tests::host::in_test(|| {
-        crate::live_tests::host::run(async {
+    crate::tests::host::in_test(|| {
+        crate::tests::host::run(async {
             let (_postgres, url) = require_pg().await;
             let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
             let app = "flip_db3_single";
-            crate::live_tests::host::clear_mask_policy_cache_for_tests(app);
+            crate::tests::host::clear_mask_policy_cache_for_tests(app);
             let schema = flip_schema();
             let ssn = "123-45-6789";
             let person = audited_unmask_fixture(&pool, &url, app, &schema, ssn).await;
@@ -1180,12 +1180,12 @@ fn app_js_claiming_the_auto_system_actor_is_refused_by_the_parser() {
 /// `bulk_unmask_partial_unauthorized`.
 #[test]
 fn app_js_claiming_the_auto_system_actor_is_refused_by_the_bulk_parser() {
-    crate::live_tests::host::in_test(|| {
-        crate::live_tests::host::run(async {
+    crate::tests::host::in_test(|| {
+        crate::tests::host::run(async {
             let (_postgres, url) = require_pg().await;
             let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
             let app = "flip_db3_bulk";
-            crate::live_tests::host::clear_mask_policy_cache_for_tests(app);
+            crate::tests::host::clear_mask_policy_cache_for_tests(app);
             let schema = flip_schema();
             let ssn = "987-65-4321";
             let person = audited_unmask_fixture(&pool, &url, app, &schema, ssn).await;
@@ -1308,12 +1308,12 @@ fn app_js_claiming_the_auto_system_actor_is_refused_by_the_bulk_parser() {
 /// what must change is that the REJECTED claim is recorded rather than dropped.
 #[test]
 fn a_rejected_impersonation_is_distinguishable_from_an_absent_actor() {
-    crate::live_tests::host::in_test(|| {
-        crate::live_tests::host::run(async {
+    crate::tests::host::in_test(|| {
+        crate::tests::host::run(async {
             let (_postgres, url) = require_pg().await;
             let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
             let app = "flip_db3_signal";
-            crate::live_tests::host::clear_mask_policy_cache_for_tests(app);
+            crate::tests::host::clear_mask_policy_cache_for_tests(app);
             let schema = flip_schema();
             let person = audited_unmask_fixture(&pool, &url, app, &schema, "123-45-6789").await;
 
@@ -1429,12 +1429,12 @@ fn bulk_args(row_pk: &str, columns: &[&str], actor: Option<Value>) -> BulkUnmask
 /// grants both classes.
 #[test]
 fn a_bulk_unmask_batch_with_one_forbidden_column_is_refused_whole() {
-    crate::live_tests::host::in_test(|| {
-        crate::live_tests::host::run(async {
+    crate::tests::host::in_test(|| {
+        crate::tests::host::run(async {
             let (_postgres, url) = require_pg().await;
             let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
             let app = "flip_bulk_denied";
-            crate::live_tests::host::clear_mask_policy_cache_for_tests(app);
+            crate::tests::host::clear_mask_policy_cache_for_tests(app);
             let schema = two_class_schema();
             let (ssn, email) = ("123-45-6789", "ada@example.com");
             let person = audited_unmask_fixture_with(
@@ -1733,12 +1733,12 @@ fn a_bulk_unmask_batch_with_one_forbidden_column_is_refused_whole() {
 /// withholding something this fixture demonstrably produces.
 #[test]
 fn a_query_hint_naming_one_forbidden_column_is_refused_whole() {
-    crate::live_tests::host::in_test(|| {
-        crate::live_tests::host::run(async {
+    crate::tests::host::in_test(|| {
+        crate::tests::host::run(async {
             let (_postgres, url) = require_pg().await;
             let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
             let app = "flip_hint_denied";
-            crate::live_tests::host::clear_mask_policy_cache_for_tests(app);
+            crate::tests::host::clear_mask_policy_cache_for_tests(app);
             let schema = two_class_schema();
             let (ssn, email) = ("987-65-4321", "grace@example.com");
             let person = audited_unmask_fixture_with(
@@ -1944,12 +1944,12 @@ fn a_query_hint_naming_one_forbidden_column_is_refused_whole() {
 /// fence, then the read, over the same `unmask_columns` slice.
 #[test]
 fn a_query_hint_reads_the_column_its_alias_resolved_to() {
-    crate::live_tests::host::in_test(|| {
-        crate::live_tests::host::run(async {
+    crate::tests::host::in_test(|| {
+        crate::tests::host::run(async {
             let (_postgres, url) = require_pg().await;
             let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
             let app = "flip_hint_alias";
-            crate::live_tests::host::clear_mask_policy_cache_for_tests(app);
+            crate::tests::host::clear_mask_policy_cache_for_tests(app);
             let schema = alias_schema();
             let email = "ada@example.com";
             let person = audited_unmask_fixture_with(
@@ -2039,8 +2039,8 @@ fn a_query_hint_reads_the_column_its_alias_resolved_to() {
 /// differently-named raw column cannot pass it.
 #[test]
 fn no_write_verb_hands_back_a_column_the_descriptor_does_not_declare() {
-    crate::live_tests::host::in_test(|| {
-        crate::live_tests::host::run(async {
+    crate::tests::host::in_test(|| {
+        crate::tests::host::run(async {
             let (_postgres, url) = require_pg().await;
             let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
             let app = "flip_returning";
@@ -2098,7 +2098,7 @@ fn no_write_verb_hands_back_a_column_the_descriptor_does_not_declare() {
 
             // BOUNDARY 2, the runtime's.
             let allowed: BTreeSet<String> = read_surface_columns(&schema);
-            let finalized = crate::live_tests::host::finalize_rows_on_read_for_tests(
+            let finalized = crate::tests::host::finalize_rows_on_read_for_tests(
                 app,
                 "people",
                 returned.clone(),
@@ -2143,7 +2143,7 @@ fn no_write_verb_hands_back_a_column_the_descriptor_does_not_declare() {
             smuggled[raw_column_name("ssn")] = value!("123-45-6789");
             smuggled["__zs_shadow_key"] = value!("aux-42");
             smuggled["totally_undeclared"] = value!("leak-me");
-            let finalized = crate::live_tests::host::finalize_rows_on_read_for_tests(
+            let finalized = crate::tests::host::finalize_rows_on_read_for_tests(
                 app,
                 "people",
                 vec![smuggled],
@@ -2184,7 +2184,7 @@ fn no_write_verb_hands_back_a_column_the_descriptor_does_not_declare() {
 /// rename keeps the test pointed at the real column.
 #[test]
 fn the_raw_column_is_refused_on_every_inbound_surface() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         let raw = raw_column_name("ssn");
         let schema = flip_schema();
 
@@ -2314,7 +2314,7 @@ fn the_raw_column_is_refused_on_every_inbound_surface() {
 /// over-delivers, which is the bias `read_set` already declares.
 #[test]
 fn a_masked_predicate_is_lowered_for_the_change_stream() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         use zeroship_data_orm::cdc::read_set::{Predicate, PredicateOp, normalise_filter};
         let schema = flip_schema();
 
@@ -2372,8 +2372,8 @@ fn a_masked_predicate_is_lowered_for_the_change_stream() {
 /// collection fails.
 #[test]
 fn the_declared_type_and_constraints_travel_to_the_raw_column() {
-    crate::live_tests::host::in_test(|| {
-        crate::live_tests::host::run(async {
+    crate::tests::host::in_test(|| {
+        crate::tests::host::run(async {
             let (_postgres, url) = require_pg().await;
             let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
             let app = "flip_ddl";
@@ -2477,8 +2477,8 @@ fn the_declared_type_and_constraints_travel_to_the_raw_column() {
 /// duplicate-key error on perfectly valid data.
 #[test]
 fn a_unique_masked_field_admits_rows_that_share_a_mask() {
-    crate::live_tests::host::in_test(|| {
-        crate::live_tests::host::run(async {
+    crate::tests::host::in_test(|| {
+        crate::tests::host::run(async {
             let (_postgres, url) = require_pg().await;
             let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
             let app = "flip_unique";
@@ -2562,7 +2562,7 @@ fn a_unique_masked_field_admits_rows_that_share_a_mask() {
             // like every other, so the only thing that can be refused below is the
             // duplicate value on the raw column.
             let mut docs = value!([{ "ssn": "111-11-1234" }]);
-            crate::live_tests::host::prepare_insert_many_docs_for_tests(
+            crate::tests::host::prepare_insert_many_docs_for_tests(
                 &mut docs, app, "people", None,
             )
             .await
@@ -2660,8 +2660,8 @@ async fn physical_rows(
 /// yields a `MaskedValue`.
 #[test]
 fn deleting_the_mask_key_from_the_descriptor_must_not_write_plaintext() {
-    crate::live_tests::host::in_test(|| {
-        crate::live_tests::host::run(async {
+    crate::tests::host::in_test(|| {
+        crate::tests::host::run(async {
             let (_postgres, url) = require_pg().await;
             let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
             let app = "flip_mask_key_deleted";
@@ -2712,7 +2712,7 @@ fn deleting_the_mask_key_from_the_descriptor_must_not_write_plaintext() {
             // nothing about the warm one production actually runs.
             zeroship_data_orm::cache_schema_for_tests(app, "people", unmasked.clone());
             let mut docs = value!([{ "ssn": "987-65-4321", "nickname": "bob" }]);
-            let err = crate::live_tests::host::prepare_insert_many_docs_for_tests(
+            let err = crate::tests::host::prepare_insert_many_docs_for_tests(
                 &mut docs, app, "people", None,
             )
             .await
@@ -2768,13 +2768,13 @@ fn deleting_the_mask_key_from_the_descriptor_must_not_write_plaintext() {
 /// about the other.
 #[test]
 fn deleting_the_encrypted_key_from_the_descriptor_must_not_write_plaintext() {
-    crate::live_tests::host::in_test(|| {
-        crate::live_tests::host::run(async {
+    crate::tests::host::in_test(|| {
+        crate::tests::host::run(async {
             let (_postgres, url) = require_pg().await;
             let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
             let app = "flip_enc_key_deleted";
             let _keys =
-                crate::live_tests::host::supply_project_key_for_tests(&[app], &"01".repeat(32));
+                crate::tests::host::supply_project_key_for_tests(&[app], &"01".repeat(32));
             let encrypted = encrypted_schema();
             fixture(&pool, &url, app, "people", &encrypted).await;
 
@@ -2805,7 +2805,7 @@ fn deleting_the_encrypted_key_from_the_descriptor_must_not_write_plaintext() {
             let plain = encrypted_schema_without_the_encrypted_key();
             zeroship_data_orm::cache_schema_for_tests(app, "people", plain.clone());
             let mut docs = value!([{ "secret": "hunter3-also-real", "nickname": "bob" }]);
-            let err = crate::live_tests::host::prepare_insert_many_docs_for_tests(
+            let err = crate::tests::host::prepare_insert_many_docs_for_tests(
                 &mut docs, app, "people", None,
             )
             .await
@@ -2969,8 +2969,8 @@ async fn column_comment(
 /// to refuse, on the exact tables it was built for.
 #[test]
 fn a_migration_engine_built_table_refuses_a_mask_downgrade() {
-    crate::live_tests::host::in_test(|| {
-        crate::live_tests::host::run(async {
+    crate::tests::host::in_test(|| {
+        crate::tests::host::run(async {
             let (_postgres, url) = require_pg().await;
             let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
             // A FIXED uuid rather than a fresh one: the app id IS the schema name, and a
@@ -3040,7 +3040,7 @@ fn a_migration_engine_built_table_refuses_a_mask_downgrade() {
             // the write, and the prepared document is the downgrade itself. Reporting it
             // is the difference between "returned Ok(())" and naming the plaintext that
             // was about to be stored under the field's own name.
-            let err = match crate::live_tests::host::prepare_insert_many_docs_for_tests(
+            let err = match crate::tests::host::prepare_insert_many_docs_for_tests(
                 &mut docs, &app, "people", None,
             )
             .await
@@ -3091,13 +3091,13 @@ fn a_migration_engine_built_table_refuses_a_mask_downgrade() {
 /// comment's prefix, so the two prefixes fail independently.
 #[test]
 fn a_migration_engine_built_table_refuses_an_encryption_downgrade() {
-    crate::live_tests::host::in_test(|| {
-        crate::live_tests::host::run(async {
+    crate::tests::host::in_test(|| {
+        crate::tests::host::run(async {
             let (_postgres, url) = require_pg().await;
             let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
             let app_uuid = uuid::Uuid::from_u128(0x656e_635f_656e_6769_6e65_5f66_6c6f_6f72);
             let encrypted = encrypted_schema();
-            let _keys = crate::live_tests::host::supply_project_key_for_tests(
+            let _keys = crate::tests::host::supply_project_key_for_tests(
                 &[&app_uuid.to_string()],
                 &"01".repeat(32),
             );
@@ -3150,7 +3150,7 @@ fn a_migration_engine_built_table_refuses_an_encryption_downgrade() {
                 encrypted_schema_without_the_encrypted_key(),
             );
             let mut docs = value!([{ "secret": "hunter3-also-real", "nickname": "bob" }]);
-            let err = match crate::live_tests::host::prepare_insert_many_docs_for_tests(
+            let err = match crate::tests::host::prepare_insert_many_docs_for_tests(
                 &mut docs, &app, "people", None,
             )
             .await

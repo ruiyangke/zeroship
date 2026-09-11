@@ -126,7 +126,7 @@ impl PostgresBackend {
     /// so a `search` issued inside `db.transaction(fn)` scanned a pooled
     /// checkout and could not see the transaction's own uncommitted rows. The
     /// engine's routed entry point plans here and then executes on the lane
-    /// `route.in_tx()` names. Bound by `plugin-db/src/live_tests/search_tx_lane.rs`.
+    /// `route.in_tx()` names. Bound by `plugin-db/src/tests/search_tx_lane.rs`.
     ///
     /// # Errors
     ///

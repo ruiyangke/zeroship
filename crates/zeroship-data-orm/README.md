@@ -181,6 +181,6 @@ entries are keyed by the complete app/deploy/schema binding.
 
 Physical value codecs live with SQL compilation in `zeroship-data-sql`.
 `Catalog` and `Search` are the runtime service contracts. Database contracts
-live in `src/live_tests/`; their host owns the runtime, connections and ORM
+live in `src/tests/`; their host owns the runtime, connections and ORM
 context through teardown. Raw setup and snapshot fixtures compile under
 `#[cfg(test)]`. Application code uses the native driver/session contract.

@@ -58,7 +58,7 @@
 //! made the outcome a function of publisher scheduling, so even a strictly
 //! sequential caller — engage the guard, write, drop the guard — had no defined
 //! answer. The three integration fences in
-//! `zeroship-data-v8/src/live_tests/sqlite_integration.rs` papered over it by sleeping
+//! `zeroship-data-v8/src/tests/sqlite_integration.rs` papered over it by sleeping
 //! 100 ms to drain the publisher BEFORE dropping the guard, which is exactly the
 //! order that cannot expose the bug; their assertions (`Resync` and zero
 //! `Change`) always described the commit-window contract this file now
@@ -811,7 +811,7 @@ fn quote_ident(name: &str) -> String {
 mod tests {
     //! Unit-level checks for the static helpers, plus the delivery-window
     //! fences. End-to-end behaviour (hook → publisher → broker) is covered by
-    //! the `crates/zeroship-data-orm/src/live_tests/sqlite_integration.rs` mirror; what lives here is the part
+    //! the `crates/zeroship-data-orm/src/tests/sqlite_integration.rs` mirror; what lives here is the part
     //! that mirror CANNOT state deterministically — the interleaving of a guard
     //! drop with an undrained channel.
 

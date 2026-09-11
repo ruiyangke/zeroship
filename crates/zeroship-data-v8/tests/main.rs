@@ -3,7 +3,7 @@
 //! Integration contracts independent of the shared database fixtures.
 //!
 //! Ordinary package tests run this target, the shared fixtures in
-//! `src/live_tests/`, and the process-isolated distributed CDC target.
+//! `src/tests/`, and the process-isolated distributed CDC target.
 //! Database fixtures are private source modules; PostgreSQL is required.
 //!
 //! With `autotests = false`, add each new test file to the appropriate entry

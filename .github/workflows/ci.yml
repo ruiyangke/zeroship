@@ -946,7 +946,7 @@ jobs:
       # Data tests own PostgreSQL containers and run without optional features.
       - run: |
           set -o pipefail
-          cargo test -p zeroship-data-v8 --lib live_tests::sqlite_integration::
+          cargo test -p zeroship-data-v8 --lib tests::sqlite_integration::
           cargo test -p zeroship-data-orm
       # The migration service's suite: the service's own targets, the two live-PG
       # session proofs (`smoke_apply_pg`, `author_and_apply_pg`) and the

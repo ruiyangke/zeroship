@@ -55,7 +55,7 @@ pub trait LockManager: 'static {
     /// backend may want to expose the indefinite-wait shape behind a
     /// feature gate, and (b) the integration test
     /// `b1_advisory_lock_prevents_concurrent_runs` at
-    /// `crates/zeroship-data-orm/src/live_tests/integration.rs` still calls `pg_advisory_lock` SQL
+    /// `crates/zeroship-data-orm/src/tests/integration.rs` still calls `pg_advisory_lock` SQL
     /// directly to exercise the contended branch. No production
     /// caller invokes it.
     ///

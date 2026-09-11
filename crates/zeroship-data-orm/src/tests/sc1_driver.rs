@@ -5,7 +5,7 @@ use zeroship_data_orm::transaction::reducer::{
 };
 
 fn block_on<F: std::future::Future>(f: F) -> F::Output {
-    crate::live_tests::host::in_test(|| crate::live_tests::host::run(f))
+    crate::tests::host::in_test(|| crate::tests::host::run(f))
 }
 
 /// The backend `probe::begin` takes as a parameter.
@@ -26,7 +26,7 @@ fn app_schema(app_id: &str) -> zeroship_data_sql::SchemaName {
 }
 
 async fn probe_backend() -> zeroship_data_orm::backend::BackendHandle {
-    crate::live_tests::host::ensure_backend()
+    crate::tests::host::ensure_backend()
         .await
         .expect("the adapter funnel must open a backend before BEGIN")
 }
@@ -91,7 +91,7 @@ async fn provision(app_id: &str) -> (crate::support::postgres::Postgres, Client)
 /// Drop everything the arm created, and clear this thread's driver state.
 async fn teardown(admin: &Client, app_id: &str) {
     probe::reset(app_id);
-    crate::live_tests::host::reset_context_for_tests();
+    crate::tests::host::reset_context_for_tests();
     let role = zeroship_core::database_role::per_app_role_name(app_id)
         .expect("transaction fixture app id must produce a valid PostgreSQL role name");
     let _ = admin
@@ -117,7 +117,7 @@ struct SessionGuard(&'static str);
 impl Drop for SessionGuard {
     fn drop(&mut self) {
         probe::reset(self.0);
-        crate::live_tests::host::reset_context_for_tests();
+        crate::tests::host::reset_context_for_tests();
     }
 }
 
@@ -213,7 +213,7 @@ fn root_rollback_waits_for_the_active_statement_before_returning() {
         assert_eq!(settlement_rows(&admin, APP).await, 0);
         assert_eq!(probe::state(APP), None);
         assert_eq!(
-            crate::live_tests::host::pool_counts_for_tests(),
+            crate::tests::host::pool_counts_for_tests(),
             Some((1, 0, 1)),
             "settlement returns after releasing its session"
         );
@@ -364,7 +364,7 @@ fn root_settlement_observes_deadline_cleanup_of_a_blocked_statement() {
         }
         assert_eq!(settlement_rows(&admin, APP).await, 0);
         assert_eq!(
-            crate::live_tests::host::pool_counts_for_tests(),
+            crate::tests::host::pool_counts_for_tests(),
             Some((1, 0, 1)),
             "the healthy connection is reusable after confirmed rollback"
         );
@@ -447,7 +447,7 @@ fn a_forced_cleanup_on_a_poisoned_block_keeps_a_healthy_connection() {
         // is the SAME backend. With max_size = 1 there is nothing else it
         // could be handed.
         let (idle, active, total) =
-            crate::live_tests::host::pool_counts_for_tests().expect("a pool is installed");
+            crate::tests::host::pool_counts_for_tests().expect("a pool is installed");
         assert_eq!(
             (idle, active, total),
             (1, 0, 1),
@@ -516,7 +516,7 @@ fn a_withdrawn_session_never_comes_back_from_the_pool() {
             .await
             .expect("BEGIN");
         let (_, _, total_before) =
-            crate::live_tests::host::pool_counts_for_tests().expect("a pool is installed");
+            crate::tests::host::pool_counts_for_tests().expect("a pool is installed");
         assert_eq!(total_before, 1, "one connection, checked out");
 
         // Another future owns the session, and NOTHING IS RUNNING ON IT.
@@ -551,7 +551,7 @@ fn a_withdrawn_session_never_comes_back_from_the_pool() {
         held.restore();
 
         let (idle, _, total_after) =
-            crate::live_tests::host::pool_counts_for_tests().expect("a pool is installed");
+            crate::tests::host::pool_counts_for_tests().expect("a pool is installed");
         assert_eq!(
             idle, 0,
             "a withdrawn session must not be published as idle - a plain \
@@ -714,7 +714,7 @@ fn a_forced_cleanup_cancels_the_running_statement_and_keeps_the_connection() {
         );
 
         let (idle, active, total) =
-            crate::live_tests::host::pool_counts_for_tests().expect("a pool is installed");
+            crate::tests::host::pool_counts_for_tests().expect("a pool is installed");
         assert_eq!(
             (idle, active, total),
             (1, 0, 1),
@@ -965,7 +965,7 @@ fn a_deadline_that_fires_in_preparing_settles_without_a_begin() {
             "Preparing holds no session: the client is acquired by IssueBegin"
         );
         let (idle_before, _, _) =
-            crate::live_tests::host::pool_counts_for_tests().expect("a pool is installed");
+            crate::tests::host::pool_counts_for_tests().expect("a pool is installed");
 
         let fired = probe::fire_execution_deadline(APP).await;
 
@@ -988,7 +988,7 @@ fn a_deadline_that_fires_in_preparing_settles_without_a_begin() {
         );
 
         let (idle_after, active_after, _) =
-            crate::live_tests::host::pool_counts_for_tests().expect("a pool is installed");
+            crate::tests::host::pool_counts_for_tests().expect("a pool is installed");
         assert_eq!(
             (idle_after, active_after),
             (idle_before, 0),
