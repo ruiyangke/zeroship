@@ -29,7 +29,7 @@
 use std::collections::HashMap;
 #[path = "../../../tests/fixtures/postgres/mod.rs"]
 mod postgres;
-#[path = "support/tracing.rs"]
+#[path = "../../../tests/fixtures/data/tracing.rs"]
 mod test_tracing;
 mod relay_fixture;
 use zeroship_data_orm::cdc::relay::RelayConfig;

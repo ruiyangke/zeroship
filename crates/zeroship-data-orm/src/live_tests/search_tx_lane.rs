@@ -51,11 +51,9 @@ use std::rc::Rc;
 use compio_postgres::{NoTls, Pool};
 use zeroship_data_orm::binding::DbBinding;
 use zeroship_data_orm::error::DbError;
-use zeroship_data_sql::value::{Value, value};
-use zeroship_data_sql::compile::SqlDialect;
 use zeroship_data_orm::tx_route::{CapturedRoute, TxRoute};
-
-
+use zeroship_data_sql::compile::SqlDialect;
+use zeroship_data_sql::value::{Value, value};
 
 /// Connect, or fail the test. Deliberately NOT a skip, for the reason in the
 /// module header.
@@ -72,14 +70,16 @@ async fn require_pg() -> (crate::support::postgres::Postgres, String) {
             (postgres, url)
         }
         Err(e) => {
-            panic!("the search-tx-lane suite could not connect to its PostgreSQL testcontainer: {e}")
+            panic!(
+                "the search-tx-lane suite could not connect to its PostgreSQL testcontainer: {e}"
+            )
         }
     }
 }
 
 async fn release_pg(pool: Rc<Pool>) {
     drop(pool);
-    zeroship_data_v8::testing::reset_context_for_tests();
+    crate::live_tests::host::reset_context_for_tests();
     let _ = compio_postgres::drain_connections(std::time::Duration::from_secs(2)).await;
 }
 
@@ -130,7 +130,7 @@ async fn fixture(pool: &Rc<Pool>, url: &str, app: &str, collection: &str, schema
 
 /// The backend handle the V8 dispatcher would have bound for this dispatch.
 async fn backend() -> zeroship_data_orm::backend::BackendHandle {
-    zeroship_data_v8::tx_scope::ensure_backend()
+    crate::live_tests::host::ensure_backend()
         .await
         .expect("the backend the V8 dispatcher would have opened")
 }
@@ -209,95 +209,99 @@ fn code_of(err: &DbError) -> String {
 /// the row exists only on the parked transaction connection. `run_search` calls
 /// `VectorIndex::vector_search`, which lowered to `pg_autocommit::roled_json` -
 /// a fresh pooled checkout that cannot see it.
-#[compio::test]
-async fn a_vector_search_inside_a_transaction_sees_the_row_that_transaction_inserted() {
-    let (_postgres, url) = require_pg().await;
-    let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
-    require_extension(&pool, "vector").await;
+#[test]
+fn a_vector_search_inside_a_transaction_sees_the_row_that_transaction_inserted() {
+    crate::live_tests::host::in_test(|| {
+        crate::live_tests::host::run(async {
+            let (_postgres, url) = require_pg().await;
+            let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
+            require_extension(&pool, "vector").await;
 
-    let app = "search_lane_vector";
-    let coll = "docs";
-    fixture(
-        &pool,
-        &url,
-        app,
-        coll,
-        value!({
-            "embedding": { "type": "vector", "vectorDims": 4 },
-            "title": { "type": "string" },
-        }),
-    )
-    .await;
+            let app = "search_lane_vector";
+            let coll = "docs";
+            fixture(
+                &pool,
+                &url,
+                app,
+                coll,
+                value!({
+                    "embedding": { "type": "vector", "vectorDims": 4 },
+                    "title": { "type": "string" },
+                }),
+            )
+            .await;
 
-    crate::support::begin_transaction(app, &url).await;
+            crate::support::begin_transaction(app, &url).await;
 
-    let inserted = zeroship_data_orm::crud::run_insert(
-        DbBinding::cold_start(app),
-        coll.to_string(),
-        tx_route(app).await,
-        value!({ "embedding": [1.0, 0.0, 0.0, 0.0], "title": "in the transaction" }),
-        None,
-    )
-    .await
-    .expect("the write pipeline + insert builder must apply on the transaction lane");
-    let id = inserted.rows[0]["id"]
-        .as_str()
-        .expect("the write pipeline must mint an id")
-        .to_string();
+            let inserted = zeroship_data_orm::crud::run_insert(
+                DbBinding::cold_start(app),
+                coll.to_string(),
+                tx_route(app).await,
+                value!({ "embedding": [1.0, 0.0, 0.0, 0.0], "title": "in the transaction" }),
+                None,
+            )
+            .await
+            .expect("the write pipeline + insert builder must apply on the transaction lane");
+            let id = inserted.rows[0]["id"]
+                .as_str()
+                .expect("the write pipeline must mint an id")
+                .to_string();
 
-    // ---- CONTROL 1: the transaction lane sees its own uncommitted row.
-    let inside_plain = find_on(tx_route(app).await, app, coll, value!({ "id": &id }))
-        .await
-        .expect("a plain find inside the transaction must be authorised to run");
-    assert_eq!(
-        inside_plain.len(),
-        1,
-        "the transaction lane must see its own uncommitted row; without this the \
+            // ---- CONTROL 1: the transaction lane sees its own uncommitted row.
+            let inside_plain = find_on(tx_route(app).await, app, coll, value!({ "id": &id }))
+                .await
+                .expect("a plain find inside the transaction must be authorised to run");
+            assert_eq!(
+                inside_plain.len(),
+                1,
+                "the transaction lane must see its own uncommitted row; without this the \
          subject arm below rules on nothing: {inside_plain:?}",
-    );
+            );
 
-    assert_eq!(inserted.rows[0]["embedding"], value!([1.0, 0.0, 0.0, 0.0]));
-    assert_eq!(inside_plain[0]["embedding"], value!([1.0, 0.0, 0.0, 0.0]));
+            assert_eq!(inserted.rows[0]["embedding"], value!([1.0, 0.0, 0.0, 0.0]));
+            assert_eq!(inside_plain[0]["embedding"], value!([1.0, 0.0, 0.0, 0.0]));
 
-    let args = value!({ "vector": [1.0, 0.0, 0.0, 0.0], "k": 10 });
+            let args = value!({ "vector": [1.0, 0.0, 0.0, 0.0], "k": 10 });
 
-    // ---- CONTROL 2: the same search, POOLED. Differs in one token: `in_tx`.
-    let outside = search_on(pool_route(app).await, app, coll, args.clone())
-        .await
-        .expect("a pooled vector search is authorised to run");
-    assert!(
-        outside.is_empty(),
-        "the row must be invisible outside the transaction, or the subject arm \
+            // ---- CONTROL 2: the same search, POOLED. Differs in one token: `in_tx`.
+            let outside = search_on(pool_route(app).await, app, coll, args.clone())
+                .await
+                .expect("a pooled vector search is authorised to run");
+            assert!(
+                outside.is_empty(),
+                "the row must be invisible outside the transaction, or the subject arm \
          below cannot distinguish the two lanes: {outside:?}",
-    );
+            );
 
-    // ---- SUBJECT: the same search on the transaction's own lane.
-    let inside = search_on(tx_route(app).await, app, coll, args).await;
+            // ---- SUBJECT: the same search on the transaction's own lane.
+            let inside = search_on(tx_route(app).await, app, coll, args).await;
 
-    zeroship_data_v8::testing::rollback_transaction_for_tests(app).await;
+            crate::live_tests::host::rollback_transaction_for_tests(app).await;
 
-    let inside = inside.unwrap_or_else(|e| {
-        panic!(
-            "a vector search inside a transaction must be authorised to run. Got {}: {e:?}",
-            code_of(&e),
-        )
-    });
-    assert_eq!(
-        inside.len(),
-        1,
-        "a vector search inside a transaction must reach the row that transaction \
+            let inside = inside.unwrap_or_else(|e| {
+                panic!(
+                    "a vector search inside a transaction must be authorised to run. Got {}: {e:?}",
+                    code_of(&e),
+                )
+            });
+            assert_eq!(
+                inside.len(),
+                1,
+                "a vector search inside a transaction must reach the row that transaction \
          inserted. The plain find on the SAME route found it (control 1) and the \
          pooled search did not (control 2), so an empty result here means the \
          scan took the autocommit lane: {inside:?}",
-    );
-    assert_eq!(inside[0]["id"], value!(id));
-    assert_eq!(inside[0]["embedding"], value!([1.0, 0.0, 0.0, 0.0]));
-    assert!(
-        inside[0].get("_distance").is_some(),
-        "the row must carry pgvector's synthetic distance column: {inside:?}",
-    );
+            );
+            assert_eq!(inside[0]["id"], value!(id));
+            assert_eq!(inside[0]["embedding"], value!([1.0, 0.0, 0.0, 0.0]));
+            assert!(
+                inside[0].get("_distance").is_some(),
+                "the row must carry pgvector's synthetic distance column: {inside:?}",
+            );
 
-    release_pg(pool).await;
+            release_pg(pool).await;
+        })
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -311,95 +315,99 @@ async fn a_vector_search_inside_a_transaction_sees_the_row_that_transaction_inse
 /// independent: `run_search` and `run_near` are separate functions calling
 /// separate trait impls, and each reached the pool on its own.
 ///
-#[compio::test]
-async fn a_spatial_near_inside_a_transaction_sees_the_row_that_transaction_inserted() {
-    let (_postgres, url) = require_pg().await;
-    let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
-    require_extension(&pool, "postgis").await;
+#[test]
+fn a_spatial_near_inside_a_transaction_sees_the_row_that_transaction_inserted() {
+    crate::live_tests::host::in_test(|| {
+        crate::live_tests::host::run(async {
+            let (_postgres, url) = require_pg().await;
+            let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
+            require_extension(&pool, "postgis").await;
 
-    let app = "search_lane_spatial";
-    let coll = "places";
-    fixture(
-        &pool,
-        &url,
-        app,
-        coll,
-        value!({
-            "location": { "type": "geoPoint" },
-            "title": { "type": "string" },
-        }),
-    )
-    .await;
+            let app = "search_lane_spatial";
+            let coll = "places";
+            fixture(
+                &pool,
+                &url,
+                app,
+                coll,
+                value!({
+                    "location": { "type": "geoPoint" },
+                    "title": { "type": "string" },
+                }),
+            )
+            .await;
 
-    crate::support::begin_transaction(app, &url).await;
+            crate::support::begin_transaction(app, &url).await;
 
-    let point = value!({"lat": 51.5074, "lng": -0.1278});
-    let inserted = zeroship_data_orm::crud::run_insert(
-        DbBinding::cold_start(app),
-        coll.to_string(),
-        tx_route(app).await,
-        value!({"location": point.clone(), "title": "in the transaction"}),
-        None,
-    )
-    .await
-    .expect("native geographic values must insert through the shared ORM");
-    let id = inserted.rows[0]["id"].as_str().unwrap().to_owned();
-    assert_eq!(inserted.rows[0]["location"], point);
+            let point = value!({"lat": 51.5074, "lng": -0.1278});
+            let inserted = zeroship_data_orm::crud::run_insert(
+                DbBinding::cold_start(app),
+                coll.to_string(),
+                tx_route(app).await,
+                value!({"location": point.clone(), "title": "in the transaction"}),
+                None,
+            )
+            .await
+            .expect("native geographic values must insert through the shared ORM");
+            let id = inserted.rows[0]["id"].as_str().unwrap().to_owned();
+            assert_eq!(inserted.rows[0]["location"], point);
 
-    // ---- CONTROL 1: the transaction lane sees its own uncommitted row.
-    let inside_plain = find_on(tx_route(app).await, app, coll, value!({ "id": &id }))
-        .await
-        .expect("a plain find inside the transaction must be authorised to run");
-    assert_eq!(
-        inside_plain.len(),
-        1,
-        "the transaction lane must see its own uncommitted row; without this the \
+            // ---- CONTROL 1: the transaction lane sees its own uncommitted row.
+            let inside_plain = find_on(tx_route(app).await, app, coll, value!({ "id": &id }))
+                .await
+                .expect("a plain find inside the transaction must be authorised to run");
+            assert_eq!(
+                inside_plain.len(),
+                1,
+                "the transaction lane must see its own uncommitted row; without this the \
          subject arm below rules on nothing: {inside_plain:?}",
-    );
+            );
 
-    assert_eq!(inside_plain[0]["location"], point);
-    let args = value!({
-        "field": "location",
-        "point": { "lat": 51.5074, "lng": -0.1278 },
-        "radius": 1000.0,
-        "limit": 10,
-    });
+            assert_eq!(inside_plain[0]["location"], point);
+            let args = value!({
+                "field": "location",
+                "point": { "lat": 51.5074, "lng": -0.1278 },
+                "radius": 1000.0,
+                "limit": 10,
+            });
 
-    // ---- CONTROL 2: the same near, POOLED. Differs in one token: `in_tx`.
-    let outside = near_on(pool_route(app).await, app, coll, args.clone())
-        .await
-        .expect("a pooled spatial near is authorised to run");
-    assert!(
-        outside.is_empty(),
-        "the row must be invisible outside the transaction, or the subject arm \
+            // ---- CONTROL 2: the same near, POOLED. Differs in one token: `in_tx`.
+            let outside = near_on(pool_route(app).await, app, coll, args.clone())
+                .await
+                .expect("a pooled spatial near is authorised to run");
+            assert!(
+                outside.is_empty(),
+                "the row must be invisible outside the transaction, or the subject arm \
          below cannot distinguish the two lanes: {outside:?}",
-    );
+            );
 
-    // ---- SUBJECT: the same near on the transaction's own lane.
-    let inside = near_on(tx_route(app).await, app, coll, args).await;
+            // ---- SUBJECT: the same near on the transaction's own lane.
+            let inside = near_on(tx_route(app).await, app, coll, args).await;
 
-    zeroship_data_v8::testing::rollback_transaction_for_tests(app).await;
+            crate::live_tests::host::rollback_transaction_for_tests(app).await;
 
-    let inside = inside.unwrap_or_else(|e| {
-        panic!(
-            "a spatial near inside a transaction must be authorised to run. Got {}: {e:?}",
-            code_of(&e),
-        )
-    });
-    assert_eq!(
-        inside.len(),
-        1,
-        "a spatial near inside a transaction must reach the row that transaction \
+            let inside = inside.unwrap_or_else(|e| {
+                panic!(
+                    "a spatial near inside a transaction must be authorised to run. Got {}: {e:?}",
+                    code_of(&e),
+                )
+            });
+            assert_eq!(
+                inside.len(),
+                1,
+                "a spatial near inside a transaction must reach the row that transaction \
          inserted. The plain find on the SAME route found it (control 1) and the \
          pooled near did not (control 2), so an empty result here means the scan \
          took the autocommit lane: {inside:?}",
-    );
-    assert_eq!(inside[0]["id"], value!(id));
-    assert_eq!(inside[0]["location"], point);
-    assert!(
-        inside[0].get("_distance_m").is_some(),
-        "the row must carry PostGIS's synthetic distance column: {inside:?}",
-    );
+            );
+            assert_eq!(inside[0]["id"], value!(id));
+            assert_eq!(inside[0]["location"], point);
+            assert!(
+                inside[0].get("_distance_m").is_some(),
+                "the row must carry PostGIS's synthetic distance column: {inside:?}",
+            );
 
-    release_pg(pool).await;
+            release_pg(pool).await;
+        })
+    })
 }

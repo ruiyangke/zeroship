@@ -67,14 +67,16 @@ async fn require_pg() -> (crate::support::postgres::Postgres, String) {
             (postgres, url)
         }
         Err(e) => {
-            panic!("the unmask-tx-lane suite could not connect to its PostgreSQL testcontainer: {e}")
+            panic!(
+                "the unmask-tx-lane suite could not connect to its PostgreSQL testcontainer: {e}"
+            )
         }
     }
 }
 
 async fn release_pg(pool: Rc<Pool>) {
     drop(pool);
-    zeroship_data_v8::testing::reset_context_for_tests();
+    crate::live_tests::host::reset_context_for_tests();
     let _ = compio_postgres::drain_connections(std::time::Duration::from_secs(2)).await;
 }
 
@@ -132,12 +134,12 @@ async fn fixture_with_schema(pool: &Rc<Pool>, url: &str, app: &str, schema: Valu
 
     crate::support::install_postgres_pool(Rc::clone(pool), url);
     zeroship_data_orm::cache_schema_for_tests(app, "people", schema);
-    zeroship_data_v8::testing::clear_mask_policy_cache_for_tests(app);
+    crate::live_tests::host::clear_mask_policy_cache_for_tests(app);
 }
 
 /// The backend handle the V8 dispatcher would have bound for this dispatch.
 async fn backend() -> zeroship_data_orm::backend::BackendHandle {
-    zeroship_data_v8::tx_scope::ensure_backend()
+    crate::live_tests::host::ensure_backend()
         .await
         .expect("the backend the V8 dispatcher would have opened")
 }
@@ -215,89 +217,93 @@ fn code_of(err: &DbError) -> String {
 /// return the row, so a failure below cannot be "the fixture wrote nothing" or
 /// "the transaction lane is broken" - it can only be the lane the unmask fetch
 /// took.
-#[compio::test]
-async fn a_find_unmask_inside_a_transaction_reaches_the_row_that_transaction_inserted() {
-    let (_postgres, url) = require_pg().await;
-    let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
-    let app = "unmask_lane_uncommitted";
-    fixture(&pool, &url, app).await;
-    // A policy the request's actor satisfies, so the fence GRANTS and the
-    // failure below cannot be an authorization refusal wearing another code.
-    install_mask_policy(&DbBinding::cold_start(app), value!({ "support": ["pci"] }))
-        .expect("install the app's declared mask policy");
+#[test]
+fn a_find_unmask_inside_a_transaction_reaches_the_row_that_transaction_inserted() {
+    crate::live_tests::host::in_test(|| {
+        crate::live_tests::host::run(async {
+            let (_postgres, url) = require_pg().await;
+            let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
+            let app = "unmask_lane_uncommitted";
+            fixture(&pool, &url, app).await;
+            // A policy the request's actor satisfies, so the fence GRANTS and the
+            // failure below cannot be an authorization refusal wearing another code.
+            install_mask_policy(&DbBinding::cold_start(app), value!({ "support": ["pci"] }))
+                .expect("install the app's declared mask policy");
 
-    crate::support::begin_transaction(app, &url).await;
+            crate::support::begin_transaction(app, &url).await;
 
-    let id = insert_on(
-        tx_route(app).await,
-        app,
-        value!({ "ssn": "123-45-6789", "nickname": "aaa" }),
-    )
-    .await;
+            let id = insert_on(
+                tx_route(app).await,
+                app,
+                value!({ "ssn": "123-45-6789", "nickname": "aaa" }),
+            )
+            .await;
 
-    // ---- CONTROL: the same find, same route, same row, no unmask hint.
-    let rows = find_on(tx_route(app).await, app, value!({ "id": &id }), value!({}))
-        .await
-        .expect("a plain find inside the transaction must see the row it inserted");
-    assert_eq!(
-        rows.len(),
-        1,
-        "the transaction lane must see its own uncommitted row; without this the \
+            // ---- CONTROL: the same find, same route, same row, no unmask hint.
+            let rows = find_on(tx_route(app).await, app, value!({ "id": &id }), value!({}))
+                .await
+                .expect("a plain find inside the transaction must see the row it inserted");
+            assert_eq!(
+                rows.len(),
+                1,
+                "the transaction lane must see its own uncommitted row; without this the \
          arm below rules on nothing: {rows:?}",
-    );
-    assert_eq!(rows[0]["id"], value!(id));
+            );
+            assert_eq!(rows[0]["id"], value!(id));
 
-    // ---- and the row really is UNCOMMITTED: a pooled read must NOT see it.
-    //
-    // This is what makes the subject arm a lane question rather than a
-    // visibility accident. Same row, same instant, a route that differs only in
-    // `in_tx`.
-    let outside = find_on(
-        pool_route(app).await,
-        app,
-        value!({ "id": &id }),
-        value!({}),
-    )
-    .await
-    .expect("a pooled find is authorised to run");
-    assert!(
-        outside.is_empty(),
-        "the row must be invisible outside the transaction, or the subject arm \
+            // ---- and the row really is UNCOMMITTED: a pooled read must NOT see it.
+            //
+            // This is what makes the subject arm a lane question rather than a
+            // visibility accident. Same row, same instant, a route that differs only in
+            // `in_tx`.
+            let outside = find_on(
+                pool_route(app).await,
+                app,
+                value!({ "id": &id }),
+                value!({}),
+            )
+            .await
+            .expect("a pooled find is authorised to run");
+            assert!(
+                outside.is_empty(),
+                "the row must be invisible outside the transaction, or the subject arm \
          below cannot distinguish the two lanes: {outside:?}",
-    );
+            );
 
-    // ---- SUBJECT: the same find with the unmask hint.
-    let unmasked = find_on(
-        tx_route(app).await,
-        app,
-        value!({ "id": &id }),
-        value!({
-            "unmask": ["ssn"],
-            "actor": { "kind": "support", "id": "usr_support_1" },
-            "unmaskReason": "unmask tx lane regression",
-        }),
-    )
-    .await;
+            // ---- SUBJECT: the same find with the unmask hint.
+            let unmasked = find_on(
+                tx_route(app).await,
+                app,
+                value!({ "id": &id }),
+                value!({
+                    "unmask": ["ssn"],
+                    "actor": { "kind": "support", "id": "usr_support_1" },
+                    "unmaskReason": "unmask tx lane regression",
+                }),
+            )
+            .await;
 
-    zeroship_data_v8::testing::rollback_transaction_for_tests(app).await;
+            crate::live_tests::host::rollback_transaction_for_tests(app).await;
 
-    let unmasked = unmasked.unwrap_or_else(|e| {
-        panic!(
-            "find({{ unmask }}) inside a transaction must reach the row the \
+            let unmasked = unmasked.unwrap_or_else(|e| {
+                panic!(
+                    "find({{ unmask }}) inside a transaction must reach the row the \
              transaction inserted. Got {}: {e:?}. The SELECT ran on the \
              transaction connection and found the row (the control above); the \
              unmask fetch took a pooled checkout, which cannot see it.",
-            code_of(&e),
-        )
-    });
-    assert_eq!(unmasked.len(), 1, "the unmasked find returns the same row");
-    assert_eq!(
-        unmasked[0]["ssn"],
-        value!("123-45-6789"),
-        "the unmask hint must promote the plaintext: {unmasked:?}",
-    );
+                    code_of(&e),
+                )
+            });
+            assert_eq!(unmasked.len(), 1, "the unmasked find returns the same row");
+            assert_eq!(
+                unmasked[0]["ssn"],
+                value!("123-45-6789"),
+                "the unmask hint must promote the plaintext: {unmasked:?}",
+            );
 
-    release_pg(pool).await;
+            release_pg(pool).await;
+        })
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -318,95 +324,100 @@ async fn a_find_unmask_inside_a_transaction_reaches_the_row_that_transaction_ins
 /// row.** An ordinary insert made inside the same transaction, rolled back by
 /// the same `ROLLBACK`, must be gone. Without it "the audit row is present"
 /// would also be satisfied by a transaction that never rolled back at all.
-#[compio::test]
-async fn a_denied_unmask_audit_row_survives_the_rollback_of_its_transaction() {
-    let (_postgres, url) = require_pg().await;
-    let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
-    let app = "unmask_lane_denied_audit";
-    fixture(&pool, &url, app).await;
-    // The policy grants `support` and nothing else, so `intern` below is
-    // refused by the policy path rather than by the no-policy fallback.
-    install_mask_policy(&DbBinding::cold_start(app), value!({ "support": ["pci"] }))
-        .expect("install the app's declared mask policy");
+#[test]
+fn a_denied_unmask_audit_row_survives_the_rollback_of_its_transaction() {
+    crate::live_tests::host::in_test(|| {
+        crate::live_tests::host::run(async {
+            let (_postgres, url) = require_pg().await;
+            let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
+            let app = "unmask_lane_denied_audit";
+            fixture(&pool, &url, app).await;
+            // The policy grants `support` and nothing else, so `intern` below is
+            // refused by the policy path rather than by the no-policy fallback.
+            install_mask_policy(&DbBinding::cold_start(app), value!({ "support": ["pci"] }))
+                .expect("install the app's declared mask policy");
 
-    // A committed row for the denied attempt to name. Committed so the arm
-    // cannot be confused with consequence 1.
-    let committed = insert_on(
-        pool_route(app).await,
-        app,
-        value!({ "ssn": "111-11-1111", "nickname": "committed" }),
-    )
-    .await;
-    assert_eq!(
-        audit_rows(&pool, app).await.len(),
-        0,
-        "no unmask has been attempted yet",
-    );
+            // A committed row for the denied attempt to name. Committed so the arm
+            // cannot be confused with consequence 1.
+            let committed = insert_on(
+                pool_route(app).await,
+                app,
+                value!({ "ssn": "111-11-1111", "nickname": "committed" }),
+            )
+            .await;
+            assert_eq!(
+                audit_rows(&pool, app).await.len(),
+                0,
+                "no unmask has been attempted yet",
+            );
 
-    crate::support::begin_transaction(app, &url).await;
+            crate::support::begin_transaction(app, &url).await;
 
-    // The control write: an ordinary insert that shares the transaction the
-    // denied attempt is made inside.
-    let rolled_back = insert_on(
-        tx_route(app).await,
-        app,
-        value!({ "ssn": "222-22-2222", "nickname": "rolled back" }),
-    )
-    .await;
+            // The control write: an ordinary insert that shares the transaction the
+            // denied attempt is made inside.
+            let rolled_back = insert_on(
+                tx_route(app).await,
+                app,
+                value!({ "ssn": "222-22-2222", "nickname": "rolled back" }),
+            )
+            .await;
 
-    let err = find_on(
-        tx_route(app).await,
-        app,
-        value!({ "id": &committed }),
-        value!({
-            "unmask": ["ssn"],
-            "actor": { "kind": "intern", "id": "usr_intern_1" },
-            "unmaskReason": "unmask tx lane regression",
-        }),
-    )
-    .await
-    .expect_err("an actor the policy does not permit must be refused");
-    assert_eq!(
-        code_of(&err),
-        "unmask_not_permitted",
-        "the refusal must be the authorization one: {err:?}",
-    );
+            let err = find_on(
+                tx_route(app).await,
+                app,
+                value!({ "id": &committed }),
+                value!({
+                    "unmask": ["ssn"],
+                    "actor": { "kind": "intern", "id": "usr_intern_1" },
+                    "unmaskReason": "unmask tx lane regression",
+                }),
+            )
+            .await
+            .expect_err("an actor the policy does not permit must be refused");
+            assert_eq!(
+                code_of(&err),
+                "unmask_not_permitted",
+                "the refusal must be the authorization one: {err:?}",
+            );
 
-    // ROLLBACK the transaction both writes were made inside.
-    zeroship_data_v8::testing::rollback_transaction_for_tests(app).await;
+            // ROLLBACK the transaction both writes were made inside.
+            crate::live_tests::host::rollback_transaction_for_tests(app).await;
 
-    // ---- CONTROL: the ordinary write inside that transaction is gone.
-    let surviving = pool
-        .query_text_params(
-            &format!("SELECT id FROM \"{app}\".\"people\" ORDER BY id"),
-            &[],
-        )
-        .await
-        .unwrap();
-    let surviving: Vec<String> = surviving.iter().map(|r| r.get::<_, String>("id")).collect();
-    assert_eq!(
-        surviving,
-        vec![committed.clone()],
-        "the ROLLBACK must have destroyed the in-transaction insert {rolled_back}; \
+            // ---- CONTROL: the ordinary write inside that transaction is gone.
+            let surviving = pool
+                .query_text_params(
+                    &format!("SELECT id FROM \"{app}\".\"people\" ORDER BY id"),
+                    &[],
+                )
+                .await
+                .unwrap();
+            let surviving: Vec<String> =
+                surviving.iter().map(|r| r.get::<_, String>("id")).collect();
+            assert_eq!(
+                surviving,
+                vec![committed.clone()],
+                "the ROLLBACK must have destroyed the in-transaction insert {rolled_back}; \
          without that the audit assertion below proves nothing",
-    );
+            );
 
-    // ---- SUBJECT: the denied audit row is still there.
-    let audit = audit_rows(&pool, app).await;
-    assert_eq!(
-        audit.len(),
-        1,
-        "the denied attempt must leave exactly one durable audit row: {audit:?}",
-    );
-    assert_eq!(audit[0]["outcome"], value!("denied"));
-    assert_eq!(audit[0]["actor_role"], value!("intern"));
-    assert_eq!(
-        audit[0]["column"],
-        value!("ssn"),
-        "the audit row names the logical field",
-    );
+            // ---- SUBJECT: the denied audit row is still there.
+            let audit = audit_rows(&pool, app).await;
+            assert_eq!(
+                audit.len(),
+                1,
+                "the denied attempt must leave exactly one durable audit row: {audit:?}",
+            );
+            assert_eq!(audit[0]["outcome"], value!("denied"));
+            assert_eq!(audit[0]["actor_role"], value!("intern"));
+            assert_eq!(
+                audit[0]["column"],
+                value!("ssn"),
+                "the audit row names the logical field",
+            );
 
-    release_pg(pool).await;
+            release_pg(pool).await;
+        })
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -427,73 +438,80 @@ async fn a_denied_unmask_audit_row_survives_the_rollback_of_its_transaction() {
 /// `unmask_not_found` - because the row genuinely is not visible there. That is
 /// what makes the passing arm a statement about the lane and not about the
 /// fixture.
-#[compio::test]
-async fn an_encrypted_unmask_inside_a_transaction_reaches_the_row_that_transaction_inserted() {
-    let (_postgres, url) = require_pg().await;
-    let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
-    let app = "unmask_lane_encrypted";
-    // A synthetic 32-byte root, supplied to THIS isolate. The write pipeline
-    // encrypts with it and the unmask fetch decrypts with it.
-    let _keys = zeroship_data_v8::testing::supply_root_keys_for_tests(&[("default", &"c".repeat(64))]);
-    fixture_with_schema(&pool, &url, app, encrypted_schema()).await;
-    install_mask_policy(&DbBinding::cold_start(app), value!({ "support": ["pci"] }))
-        .expect("install the app's declared mask policy");
+#[test]
+fn an_encrypted_unmask_inside_a_transaction_reaches_the_row_that_transaction_inserted() {
+    crate::live_tests::host::in_test(|| {
+        crate::live_tests::host::run(async {
+            let (_postgres, url) = require_pg().await;
+            let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
+            let app = "unmask_lane_encrypted";
+            // A synthetic 32-byte root, supplied to THIS isolate. The write pipeline
+            // encrypts with it and the unmask fetch decrypts with it.
+            let _keys = crate::live_tests::host::supply_root_keys_for_tests(&[(
+                "default",
+                &"c".repeat(64),
+            )]);
+            fixture_with_schema(&pool, &url, app, encrypted_schema()).await;
+            install_mask_policy(&DbBinding::cold_start(app), value!({ "support": ["pci"] }))
+                .expect("install the app's declared mask policy");
 
-    crate::support::begin_transaction(app, &url).await;
+            crate::support::begin_transaction(app, &url).await;
 
-    let id = insert_on(
-        tx_route(app).await,
-        app,
-        value!({ "ssn": "123-45-6789", "nickname": "aaa" }),
-    )
-    .await;
+            let id = insert_on(
+                tx_route(app).await,
+                app,
+                value!({ "ssn": "123-45-6789", "nickname": "aaa" }),
+            )
+            .await;
 
-    let args = || zeroship_data_orm::protection::unmask::UnmaskFieldArgs {
-        collection: "people".to_string(),
-        row_pk: id.clone(),
-        column: "ssn".to_string(),
-        actor: Some(value!({ "kind": "support", "id": "usr_support_1" })),
-        reason: Some("unmask tx lane regression".to_string()),
-        rejected_claim: None,
-    };
+            let args = || zeroship_data_orm::protection::unmask::UnmaskFieldArgs {
+                collection: "people".to_string(),
+                row_pk: id.clone(),
+                column: "ssn".to_string(),
+                actor: Some(value!({ "kind": "support", "id": "usr_support_1" })),
+                reason: Some("unmask tx lane regression".to_string()),
+                rejected_claim: None,
+            };
 
-    // ---- CONTROL: outside the transaction the row is genuinely unreachable.
-    let outside = zeroship_data_orm::protection::unmask::dispatch_unmask(
-        &pool_route(app).await,
-        &DbBinding::cold_start(app),
-        args(),
-    )
-    .await
-    .expect_err("a pooled unmask cannot see the uncommitted row");
-    assert_eq!(
-        code_of(&outside),
-        "unmask_not_found",
-        "the control must fail for the visibility reason, not another: {outside:?}",
-    );
+            // ---- CONTROL: outside the transaction the row is genuinely unreachable.
+            let outside = zeroship_data_orm::protection::unmask::dispatch_unmask(
+                &pool_route(app).await,
+                &DbBinding::cold_start(app),
+                args(),
+            )
+            .await
+            .expect_err("a pooled unmask cannot see the uncommitted row");
+            assert_eq!(
+                code_of(&outside),
+                "unmask_not_found",
+                "the control must fail for the visibility reason, not another: {outside:?}",
+            );
 
-    // ---- SUBJECT: the same call on the transaction's own lane.
-    let inside = zeroship_data_orm::protection::unmask::dispatch_unmask(
-        &tx_route(app).await,
-        &DbBinding::cold_start(app),
-        args(),
-    )
-    .await;
+            // ---- SUBJECT: the same call on the transaction's own lane.
+            let inside = zeroship_data_orm::protection::unmask::dispatch_unmask(
+                &tx_route(app).await,
+                &DbBinding::cold_start(app),
+                args(),
+            )
+            .await;
 
-    zeroship_data_v8::testing::rollback_transaction_for_tests(app).await;
+            crate::live_tests::host::rollback_transaction_for_tests(app).await;
 
-    let inside = inside.unwrap_or_else(|e| {
-        panic!(
-            "an unmask inside a transaction must reach the row that transaction \
+            let inside = inside.unwrap_or_else(|e| {
+                panic!(
+                    "an unmask inside a transaction must reach the row that transaction \
              inserted. Got {}: {e:?}",
-            code_of(&e),
-        )
-    });
-    assert_eq!(
-        inside.plaintext, "123-45-6789",
-        "the ciphertext must be read on the transaction's connection and decrypted",
-    );
+                    code_of(&e),
+                )
+            });
+            assert_eq!(
+                inside.plaintext, "123-45-6789",
+                "the ciphertext must be read on the transaction's connection and decrypted",
+            );
 
-    release_pg(pool).await;
+            release_pg(pool).await;
+        })
+    })
 }
 
 /// [`masked_schema`] with the masked column also ENCRYPTED, so its raw sibling
