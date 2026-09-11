@@ -1046,15 +1046,39 @@ importers:
         specifier: workspace:*
         version: link:../../sdks/vite-plugin
     devDependencies:
+      '@types/node':
+        specifier: 'catalog:'
+        version: 22.19.17
       '@zeroship/types':
         specifier: workspace:*
         version: link:../../sdks/types
+      aws4fetch:
+        specifier: ^1
+        version: 1.0.20
+      playwright:
+        specifier: 1.58.2
+        version: 1.58.2
+      selfsigned:
+        specifier: ^5.5.0
+        version: 5.5.0
+      smol-toml:
+        specifier: ^1.8.0
+        version: 1.8.0
+      tar:
+        specifier: ^7.5.13
+        version: 7.5.13
+      testcontainers:
+        specifier: ^12.1.0
+        version: 12.1.0(supports-color@8.1.1)
       typescript:
         specifier: 'catalog:'
         version: 5.9.3
       vite:
         specifier: 'catalog:'
         version: 8.0.10(@types/node@22.19.17)(esbuild@0.28.0)(jiti@2.6.1)(tsx@4.21.0)(yaml@2.8.4)
+      vitest:
+        specifier: ^4.1.7
+        version: 4.1.7(@opentelemetry/api@1.9.0)(@types/node@22.19.17)(happy-dom@20.9.0)(jsdom@29.1.1(@noble/hashes@1.8.0))(msw@2.14.2(@types/node@22.19.17)(typescript@5.9.3))(vite@8.0.10(@types/node@22.19.17)(esbuild@0.28.0)(jiti@2.6.1)(tsx@4.21.0)(yaml@2.8.4))
       zeroship:
         specifier: workspace:*
         version: link:../..
@@ -1074,15 +1098,36 @@ importers:
         specifier: workspace:*
         version: link:../../sdks/vite-plugin
     devDependencies:
+      '@types/node':
+        specifier: 'catalog:'
+        version: 22.19.17
       '@zeroship/types':
         specifier: workspace:*
         version: link:../../sdks/types
+      playwright:
+        specifier: 1.58.2
+        version: 1.58.2
+      selfsigned:
+        specifier: ^5.5.0
+        version: 5.5.0
+      smol-toml:
+        specifier: ^1.8.0
+        version: 1.8.0
+      tar:
+        specifier: ^7.5.13
+        version: 7.5.13
+      testcontainers:
+        specifier: ^12.1.0
+        version: 12.1.0(supports-color@8.1.1)
       typescript:
         specifier: 'catalog:'
         version: 5.9.3
       vite:
         specifier: 'catalog:'
         version: 8.0.10(@types/node@22.19.17)(esbuild@0.28.0)(jiti@2.6.1)(tsx@4.21.0)(yaml@2.8.4)
+      vitest:
+        specifier: ^4.1.7
+        version: 4.1.7(@opentelemetry/api@1.9.0)(@types/node@22.19.17)(happy-dom@20.9.0)(jsdom@29.1.1(@noble/hashes@1.8.0))(msw@2.14.2(@types/node@22.19.17)(typescript@5.9.3))(vite@8.0.10(@types/node@22.19.17)(esbuild@0.28.0)(jiti@2.6.1)(tsx@4.21.0)(yaml@2.8.4))
       zeroship:
         specifier: workspace:*
         version: link:../..
@@ -5197,6 +5242,9 @@ packages:
   aws-ssl-profiles@1.1.2:
     resolution: {integrity: sha512-NZKeq9AfyQvEeNlN0zSYAaWrmBffJh3IELMZfRpJVWgrpEbtEpnjvzqBPf+mxoI287JohRDoa+/nsfqqiZmF6g==}
     engines: {node: '>= 6.0.0'}
+
+  aws4fetch@1.0.20:
+    resolution: {integrity: sha512-/djoAN709iY65ETD6LKCtyyEI04XIBP5xVvfmNxsEP0uJB5tyaGBztSryRr4HqMStr9R06PisQE7m9zDTXKu6g==}
 
   axe-core@4.11.4:
     resolution: {integrity: sha512-KunSNx+TVpkAw/6ULfhnx+HWRecjqZGTOyquAoWHYLRSdK1tB5Ihce1ZW+UY3fj33bYAFWPu7W/GRSmmrCGuxA==}
@@ -12343,6 +12391,8 @@ snapshots:
 
   aws-ssl-profiles@1.1.2:
     optional: true
+
+  aws4fetch@1.0.20: {}
 
   axe-core@4.11.4: {}
 
