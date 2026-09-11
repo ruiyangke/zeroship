@@ -13,7 +13,6 @@ import { generate } from "selfsigned";
 import { stringify } from "smol-toml";
 import { Parser } from "tar";
 import { GenericContainer, Wait, type StartedTestContainer } from "testcontainers";
-import type { Target } from "../targets";
 import { issuer } from "./issuer";
 import { Processes } from "./processes";
 
@@ -49,15 +48,25 @@ async function checkManifest(bundle: string) {
   await pipeline(Readable.from([zstdDecompressSync(await readFile(bundle))]), parser);
   assert.equal(first, "manifest.json");
   const manifest = JSON.parse(Buffer.concat(chunks).toString());
-  for (const id of ["rpc:todos.create", "rpc:todos.list", "rpc:todos.subscribe", "rpc:users.public"]) {
-    assert.equal(manifest.resources?.[id]?.auth, "anonymous", `${id} must be publicly reachable in this demo`);
-  }
   assert.equal(typeof manifest.runtime_descriptor?.hash, "string");
   assert(manifest.runtime_descriptor.hash.length > 0, "Bundle must bind its runtime descriptor");
 }
 
 export class Platform {
   readonly processes: Processes;
+  private postgres?: StartedTestContainer;
+  appId = "";
+  apiUrl = "";
+  controlUrl = "";
+  bearer = "";
+  readyRequests = 0;
+
+  async sql(query: string): Promise<string> {
+    assert(this.postgres, "PostgreSQL must be owned by this fixture");
+    const result = await this.postgres.exec(["psql", "-U", "postgres", "-d", "db_fixture", "-v", "ON_ERROR_STOP=1", "-tA", "-c", query]);
+    assert.equal(result.exitCode, 0, result.output);
+    return result.stdout.trim();
+  }
   private readonly containers: StartedTestContainer[] = [];
   private readonly ports: Awaited<ReturnType<typeof reservePort>>[] = [];
   private closing?: Promise<void>;
@@ -114,7 +123,7 @@ export class Platform {
     return response.ok;
   }
 
-  async start(): Promise<Target[]> {
+  async start(): Promise<void> {
     const { work, processes } = this;
     console.info("DB fixture: build platform binaries and database");
     await processes.run("sdks", "pnpm", ["build"], root, process.env);
@@ -139,7 +148,6 @@ export class Platform {
     await processes.run("app-build", process.execPath, [vite, "build"], app);
     const bundle = join(app, "dist/app.zship");
     await checkManifest(bundle);
-    await processes.run("dev-migrate", "pnpm", ["migrate"], app);
 
     console.info("DB fixture: start backing containers and apply platform migrations");
     const postgres = await this.container(new GenericContainer("postgres:16")
@@ -147,6 +155,7 @@ export class Platform {
       .withEnvironment({ POSTGRES_PASSWORD: "db-fixture-password", POSTGRES_DB: "db_fixture" })
       .withCommand(["postgres", "-c", "wal_level=logical", "-c", "max_slot_wal_keep_size=128MB", "-c", "fsync=off", "-c", "log_statement=all"])
       .withWaitStrategy(Wait.forAll([Wait.forLogMessage("database system is ready to accept connections", 2), Wait.forListeningPorts()])));
+    this.postgres = postgres;
     const authority = `${postgres.getHost()}:${postgres.getMappedPort(5432)}/db_fixture`;
     const dsn = `postgres://postgres:db-fixture-password@${authority}`;
     const migration = await this.secret("migrate.toml", stringify({ env: { platform: {
@@ -154,6 +163,35 @@ export class Platform {
       registry: join(root, "policies/platform-table-owners.json"), policy: [join(root, "policies/platform.policy.toml")],
     } } }));
     await processes.run("migrate", process.execPath, [join(root, "packages/zero-migrate-cli/dist/cli-bin.js"), "apply", "--config", migration, "--env", "platform", "--approve"], root);
+
+    await this.sql(`
+      INSERT INTO zeroship.plans (id,name,base_fee_cents,included_units,fx_pico_cents_per_unit,runtime_limits_json,spend_limit_default_cents)
+      VALUES ('pln_db_acceptance','Database acceptance',0,0,1000000000000,'{"cpu_limit_ms":5000,"wall_timeout_ms":30000,"heap_limit_mb":256}',100000000);
+      INSERT INTO zeroship.pricing_config (id,fx_pico_cents_per_unit) VALUES ('global',1000000000000)
+      ON CONFLICT (id) DO UPDATE SET fx_pico_cents_per_unit=EXCLUDED.fx_pico_cents_per_unit;
+      INSERT INTO zeroship.billing_metrics (metric,kind,unit) VALUES
+        ('requests','platform','op'),('cpu_us','platform','us'),('wall_us','platform','us'),
+        ('ingress_bytes','platform','byte'),('egress_bytes','platform','byte'),
+        ('db_reads','primitive','op'),('db_writes','primitive','op'),('db_rows_written','primitive','row')
+      ON CONFLICT (metric) DO UPDATE SET kind=EXCLUDED.kind,unit=EXCLUDED.unit;
+      INSERT INTO zeroship.metric_weights (metric,units_per_op,per_units) VALUES
+        ('requests',1,1),('cpu_us',0,1),('wall_us',0,1),('ingress_bytes',0,1),('egress_bytes',0,1),
+        ('db_reads',1,1),('db_writes',1,1),('db_rows_written',0,1)
+      ON CONFLICT (metric) DO UPDATE SET units_per_op=EXCLUDED.units_per_op,per_units=EXCLUDED.per_units;
+    `);
+    const kafkaPort = await this.port();
+    await kafkaPort.release();
+    const brokers = `127.0.0.1:${kafkaPort.number}`;
+    const redpanda = await this.container(new GenericContainer("docker.redpanda.com/redpandadata/redpanda:latest")
+      .withExposedPorts({ container: 9092, host: kafkaPort.number })
+      .withCommand(["redpanda", "start", "--overprovisioned", "--smp", "1", "--memory", "512M", "--reserve-memory", "0M", "--node-id", "0", "--check=false",
+        "--kafka-addr", "internal://0.0.0.0:9093,external://0.0.0.0:9092", "--advertise-kafka-addr", `internal://127.0.0.1:9093,external://${brokers}`, "--set", "redpanda.auto_create_topics_enabled=true"])
+      .withHealthCheck({ test: ["CMD", "rpk", "cluster", "health", "--exit-when-healthy"], interval: 1000, timeout: 3000, retries: 60 })
+      .withWaitStrategy(Wait.forHealthCheck()));
+    const topic = "zeroship-usage-db-acceptance";
+    const createdTopic = await redpanda.exec(["rpk", "topic", "create", topic, "-X", "brokers=127.0.0.1:9093"]);
+    assert.equal(createdTopic.exitCode, 0, `Create the metering topic: ${createdTopic.output}`);
+    const config = await this.secret("metering.toml", stringify({ metering: { brokers, events_topic: topic } }));
 
     this.pgLogs = await postgres.logs();
     this.pgOutput = createWriteStream(join(this.logs, "postgres.log"), { mode: 0o600 });
@@ -163,9 +201,9 @@ export class Platform {
     const issuerUrl = `http://${jwks.getHost()}:${jwks.getMappedPort(80)}`;
     const owner = randomUUID();
     const seeded = await postgres.exec(["psql", "-U", "postgres", "-d", "db_fixture", "-v", "ON_ERROR_STOP=1", "-c",
-      `INSERT INTO zeroship.users (id, email, name, email_verified_at) VALUES ('${owner}', 'kv-${owner}@zeroship.test', 'DB fixture owner', NOW())`]);
+      `INSERT INTO zeroship.users (id, email, name, email_verified_at) VALUES ('${owner}', 'db-${owner}@zeroship.test', 'DB fixture owner', NOW())`]);
     assert.equal(seeded.exitCode, 0, `Seed authenticated fixture owner: ${seeded.output}`);
-    const bearer = identity.bearer(issuerUrl, owner);
+    const bearer = this.bearer = identity.bearer(issuerUrl, owner);
 
     const keys: Record<string, string> = {};
     const peerKeys = [];
@@ -210,8 +248,8 @@ export class Platform {
       socket.once("error", () => done(false));
       socket.setTimeout(1000, () => done(false));
     }));
-    await service("control", "zeroship-control", control, ["--no-config", "--port", `${control.number}`, "--blob-store", blobs, "--gateway-url", gateway.url, "--worker-urls", worker.url], {
-      ZEROSHIP_CONTROL_DATABASE_URL: dsn, ZEROSHIP_CONTROL_MASTER_KEY: masterKey,
+    await service("control", "zeroship-control", control, ["--config", config, "--meter-provider", "lite", "--invoicer-provider", "lite", "--allow-unsupported-billing", "--spend-recompute-interval", "2", "--stripe-base-url", "http://127.0.0.1:1", "--port", `${control.number}`, "--blob-store", blobs, "--gateway-url", gateway.url, "--worker-urls", worker.url], {
+      ZEROSHIP_CONTROL_STRIPE_SECRET_KEY: "sk_test_unused", ZEROSHIP_CONTROL_DATABASE_URL: dsn, ZEROSHIP_CONTROL_MASTER_KEY: masterKey,
       ZEROSHIP_CONTROL_ALLOW_UNSUPPORTED_BILLING: "true", ZEROSHIP_CONTROL_WORKER_ENROLMENT_NETWORKS: "127.0.0.1/32",
       ZEROSHIP_CONTROL_WORKER_ENROLMENT_PORTS: `${worker.number}`,
       ZEROSHIP_CONTROL_SERVICE_KEY_FILE: keys.control, ZEROSHIP_CONTROL_SERVICE_PEERS_FILE: peers,
@@ -224,13 +262,13 @@ export class Platform {
       ZEROSHIP_MIGRATE_SERVER_POLICY_SEAL_KEY: randomBytes(32).toString("hex"),
     });
     await this.waitFor("migrate-server", () => this.httpReady(`${migrationServer.url}/readyz`));
-    await service("worker", "zeroship-worker", worker, ["--port", `${worker.number}`, "--threads", "1", "--control-url", control.url, "--blob-store", blobs, "--poll-interval", "1"], {
+    await service("worker", "zeroship-worker", worker, ["--metering-brokers", brokers, "--metering-events-topic", topic, "--metering-outbox-wal-path", join(work, "worker-outbox.redb"), "--port", `${worker.number}`, "--threads", "1", "--control-url", control.url, "--blob-store", blobs, "--poll-interval", "1"], {
       ZEROSHIP_WORKER_DATABASE_URL: `postgres://zeroship_worker:zeroship_worker@${authority}`,
       ZEROSHIP_WORKER_SERVICE_KEY_FILE: keys.worker, ZEROSHIP_WORKER_SERVICE_PEERS_FILE: peers,
       ZEROSHIP_WORKER_CDC_RELAY_URL: `wss://localhost:${relay.number}/internal/v1/cdc/subscribe`, ZEROSHIP_WORKER_CDC_RELAY_CA_FILE: cert,
     });
     await this.waitFor("worker", () => this.httpReady(`${worker.url}/readyz`));
-    await service("gateway", "zeroship-gate", gateway, ["--no-config", "--port", `${gateway.number}`, "--control-url", control.url, "--worker-urls", worker.url, "--blob-store", blobs, "--poll-interval", "1", "--broker-secret-file", broker], {
+    await service("gateway", "zeroship-gate", gateway, ["--config", config, "--metering-outbox-wal-path", join(work, "gateway-outbox.redb"), "--port", `${gateway.number}`, "--control-url", control.url, "--worker-urls", worker.url, "--blob-store", blobs, "--poll-interval", "1", "--broker-secret-file", broker], {
       ZEROSHIP_GATEWAY_DATABASE_URL: dsn, ZEROSHIP_GATEWAY_SIGNING_KEY_FILE: keys.gateway,
       ZEROSHIP_GATEWAY_STASH_SIGNING_KEY: masterKey, ZEROSHIP_GATEWAY_SERVICE_KEY_FILE: keys.gateway, ZEROSHIP_GATEWAY_SERVICE_PEERS_FILE: peers,
     });
@@ -239,11 +277,19 @@ export class Platform {
     console.info("DB fixture: create and deploy the app");
     const created = await fetch(`${control.url}/api/apps`, {
       method: "POST", headers: { authorization: `Bearer ${bearer}`, "content-type": "application/json" },
-      body: JSON.stringify({ name: "dbtodos" }), signal: AbortSignal.any([processes.signal, AbortSignal.timeout(10_000)]),
+      body: JSON.stringify({ name: "db-hitcounter", plan_id: "pln_db_acceptance" }), signal: AbortSignal.any([processes.signal, AbortSignal.timeout(10_000)]),
     });
     assert(created.ok, `Create app: HTTP ${created.status}: ${created.ok ? "" : await created.text()}`);
     const { id } = await created.json();
     assert.equal(typeof id, "string", "Created app must have an id");
+    assert.match(id, /^[a-zA-Z0-9_-]+$/, "Fixture app id must be safe in SQL identifiers and literals");
+    this.appId = id;
+    this.controlUrl = control.url;
+    this.apiUrl = `http://db-hitcounter.localhost:${gateway.number}`;
+    const deployArgs = ["deploy", bundle, `--app=${id}`, `--control=${control.url}`, `--token=${bearer}`];
+    await assert.rejects(processes.run("deploy-before-migrate", binary("zeroship"), deployArgs, work), /HTTP 409.*schema_not_applied/);
+    const role = `app_${id}_role`;
+    assert.equal(await this.sql(`SELECT count(*) FROM pg_roles WHERE rolname='${role}'`), "0", "Deployment must not provision an app role");
     const database = await fetch(`${migrationServer.url}/v1/databases/${id}`, {
       method: "POST", headers: { authorization: `Bearer ${bearer}` }, signal: AbortSignal.timeout(30_000),
     });
@@ -253,24 +299,25 @@ export class Platform {
       "migrate", ir, `--app=${id}`, `--control=${migrationServer.url}`, `--token=${bearer}`,
     ], work);
     assert.match(applied, /Applied [1-9][0-9]* migration op/);
-    await processes.run("deploy", binary("zeroship"), ["deploy", bundle, `--app=${id}`, `--control=${control.url}`, `--token=${bearer}`], work);
-
-    console.info("DB fixture: start local Vite and wait for app dispatch");
-    const dev = await this.port();
-    const ui = await this.port();
-    await dev.release();
-    await ui.release();
-    processes.start("dev", process.execPath, [vite, "--host", "127.0.0.1", "--port", `${ui.number}`, "--strictPort"], app, {
-      DB_TODOS_API_PORT: `${dev.number}`, ZEROSHIP_BIN: binary("zeroship"),
+    const reapplied = await processes.run("app-migrate-again", binary("zeroship"), [
+      "migrate", ir, `--app=${id}`, `--control=${migrationServer.url}`, `--token=${bearer}`,
+    ], work);
+    assert.match(reapplied, /Applied 0 migration op/);
+    assert.equal(await this.sql(`SELECT count(*) FROM pg_roles WHERE rolname='${role}'`), "1", "Migration must provision the app role");
+    await processes.run("deploy", binary("zeroship"), deployArgs, work);
+    for (const name of ["worker", "gateway"]) {
+      const log = await readFile(join(this.logs, `${name}.log`), "utf8");
+      assert(log.includes("usage-event outbox started"), `${name} must publish metering events`);
+      assert(!log.includes("DISABLED"), `${name} must not disable its usage producer`);
+    }
+    // Node does not resolve wildcard localhost names; Chromium does.
+    const probe = `${gateway.url}/hit/ready`;
+    await this.waitFor("deployed database", async () => {
+      this.readyRequests++;
+      const response = await fetch(probe, { headers: { host: "db-hitcounter.localhost" }, signal: AbortSignal.timeout(5000) });
+      const value = await response.json();
+      return response.ok && value.wrote === true && value.readBack > 0;
     });
-    const targets = [
-      { name: "sqlite", apiUrl: dev.url, uiUrl: ui.url },
-      { name: "postgres", apiUrl: `${gateway.url}/apps/dbtodos`, uiUrl: `http://dbtodos.localhost:${gateway.number}` },
-    ];
-    for (const target of targets) await this.waitFor(target.name, () => this.httpReady(`${target.apiUrl}/__zeroship/v1/todos.count`, {
-      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ json: { userId: "user_doesNotExist0000000" } }),
-    }));
-    return targets;
   }
 
   close(): Promise<void> {

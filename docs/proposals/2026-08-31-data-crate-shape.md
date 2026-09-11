@@ -1,5 +1,7 @@
 # The data-plane crate shape
 
+The shell architecture gates cited below have been retired. Run `cargo xtask test data-architecture`; the checks live in `xtask/tests/architecture/`. Historical shell references are marked DELETED.
+
 **Status.** Superseded by `docs/architecture/data-orm.md` for the runtime ORM
 crate structure and backend interface. The design below records the earlier
 extraction; its crate inventory is historical. CDC service work remains governed
@@ -88,7 +90,7 @@ the vacuity that test exists to prevent. The property that is true AND enforceab
 > **No SHIPPED binary's normal-dependency closure may contain `zeroship-data-cdc-server`**, with
 > `zeroship-config-contract` - itself `class = "test-dev-tool"` - the single named exception.
 
-`tests/data_crate_closure_gate.sh` arm 3 enforces it by inverting `cargo tree -i` over the
+`tests/data_crate_closure_gate.sh` (DELETED) arm 3 enforces it by inverting `cargo tree -i` over the
 bin-package set `cargo metadata` reports, and rules on the exception rather than skipping it, so the
 arm proves its own instrument. **`cargo tree -e normal` cannot see dev-dependencies**, and
 `zeroship-migrate-server` already carries five of them - a dev-dependency on the relay is the
@@ -302,14 +304,14 @@ no SQL text, `transaction/mod.rs`'s `BEGIN ISOLATION LEVEL` is gone, the `DROP S
 held the largest remaining block of hand-written SQL - is deleted (Open 10).
 
 **Nothing mechanises this decision, which is why its inventory is a reading rather than a check.**
-`tests/vendor_embedding_gate.sh` rules on vendor TYPE NAMES; its own header records SQL-shaped string
+`tests/vendor_embedding_gate.sh` (DELETED) rules on vendor TYPE NAMES; its own header records SQL-shaped string
 literals as a false-POSITIVE source, the opposite direction from what decision 4 needs. No gate in
 `tests/` greps `data-engine` for statement text. Decision 5 is enforced and decision 4 is not, and the
 asymmetry is the reason both undercounts above survived in a document that is otherwise re-measured
 constantly.
 
 **5. THE CORE AND EVERY OTHER NON-VENDOR CRATE NEVER EMBED A VENDOR DIRECTLY.** Not "should avoid" -
-never. Enforced by `tests/vendor_embedding_gate.sh` (source) and `tests/data_crate_closure_gate.sh`
+never. Enforced by `tests/vendor_embedding_gate.sh` (DELETED) (source) and `tests/data_crate_closure_gate.sh` (DELETED)
 (dependency closure). The remaining decision-5 surface is six files, all inside `zeroship-data-v8`:
 `auth/bootstrap.rs`, `backend/cancel.rs`, `exec.rs`, `lib.rs`, `service.rs`, `tx_lanes.rs`. Run the
 gate for the current list; the whole job is to shrink it.
@@ -341,8 +343,8 @@ errors while `cargo check -p zeroship-worker -p zeroship-cli` failed with four u
 2. the crate alone, WITHOUT them
 3. at least one dependent
 
-Plus the gates, before each move rather than after: `tests/vendor_embedding_gate.sh`,
-`tests/data_crate_closure_gate.sh`, `tests/lib/tier_direction_census.sh`,
+Plus the gates, before each move rather than after: `tests/vendor_embedding_gate.sh` (DELETED),
+`tests/data_crate_closure_gate.sh` (DELETED), `tests/lib/tier_direction_census.sh`,
 `tests/lib/tier_signature_census.sh`.
 
 ---
@@ -359,7 +361,7 @@ derive `Serialize`" a structural fact rather than a review item.
 
 **But `E0433` fences the SPELLING, not the TYPE.** It stops a crate naming a path. It says nothing
 about a crate HOLDING a value of that type through a public field, where inference never needs the
-path and no manifest fence can see it. `tests/data_crate_closure_gate.sh` exists for the other half:
+path and no manifest fence can see it. `tests/data_crate_closure_gate.sh` (DELETED) exists for the other half:
 a crate can acquire a driver through a dependency without one line of its own source changing.
 Neither gate substitutes for the other, and neither substitutes for the two censuses, which read
 source direction rather than linkage.
@@ -375,7 +377,7 @@ batch is `crates/zeroship-data-orm/src/backend/postgres/pg_session_sql.rs`, not 
 **Nothing links the relay - not just the worker.** This paragraph said "`zeroship-data-v8` may not
 depend on `zeroship-data-cdc-server`" until 2026-09-03, which is true and too narrow. The rule and
 its one named exception are stated above with the reason the literal wording is unenforceable;
-`tests/data_crate_closure_gate.sh` arm 3 checks it, and both directions were mutation-proved when
+`tests/data_crate_closure_gate.sh` (DELETED) arm 3 checks it, and both directions were mutation-proved when
 the arm landed - planting an edge in an unrelated crate turns it red, and removing the permitted
 edge turns its control arm red.
 
@@ -395,7 +397,7 @@ REPLICATION-gated statements ship in the same binary and one of them is reachabl
 `crates/zeroship-data-v8/src/wal_consumer.rs` opens the `replication=database` connection.
 The evidence, the two PostgreSQL versions it was taken on and the reachability chain are in the CDC
 document's privilege section. So the reaper is a COUPLING problem here and a privilege problem only
-once the relay owns the streaming path; `tests/worker_replication_privilege_gate.sh` refuses the
+once the relay owns the streaming path; `tests/worker_replication_privilege_gate.sh` (DELETED) refuses the
 ordering that treats it as the other way round.
 
 **Dead code does not get a crate.** Giving unreferenced modules a home is how the current clusters
@@ -435,7 +437,7 @@ nobody runs is a census with a stricter name.
    offered three answers, none free: (a) CDC depends on `data-postgres`, honest since CDC is
    Postgres-only, but it drags the worker's data plane into the relay's closure; (b) extract the
    classifier lower, which fights the settled error design AND pushes a vendor translator toward
-   `data-core`, which `tests/data_crate_closure_gate.sh` refuses outright; (c) CDC carries its own
+   `data-core`, which `tests/data_crate_closure_gate.sh` (DELETED) refuses outright; (c) CDC carries its own
    error handling and shares no classifier.
 
    All three answer "who must agree with whom about an error". The relay is a BINARY THAT NOTHING
@@ -491,7 +493,7 @@ nobody runs is a census with a stricter name.
        intermediate one.
    (c) **Mechanise whichever is ratified**, because nothing does today. A gate over
        `crates/zeroship-data-orm/src` for production statement literals, baselined the way
-       `tests/vendor_embedding_gate.sh` baselines decision 5, with the `auth/bootstrap.rs` entry
+       `tests/vendor_embedding_gate.sh` (DELETED) baselines decision 5, with the `auth/bootstrap.rs` entry
        carrying Open 7 as the task that deletes it. Orthogonal to (a) vs (b) - the ratified wording is
        simply what the gate reads.
 
@@ -565,7 +567,7 @@ follows are the mistakes that would otherwise be remade.
   fail - Cargo simply wants the dependency, you declare it, and the build goes GREEN having made the
   violation permanent and official. Structural edges fail loudly as `E0433`; vendor embedding fails
   silently. "Move first, let the compiler produce the task list" works for the former and not the
-  latter. Run `tests/vendor_embedding_gate.sh` BEFORE each move.
+  latter. Run `tests/vendor_embedding_gate.sh` (DELETED) BEFORE each move.
 
 - **Do not verify a move with `cargo check -p <crate>` alone.** It is blind to test cfg and to
   dependents. A `pub use` carrying `#[cfg(feature = "test-helpers")]` had to be split into a gated and
@@ -586,7 +588,7 @@ follows are the mistakes that would otherwise be remade.
 - **Do not put an executor call in a `data-core` trait's default body.** `LockManager` carried a
   five-attempt retry schedule calling `compio::time::sleep`, which would have put the async executor
   into a crate whose description says it names no runtime.
-  `tests/data_crate_closure_gate.sh` would NOT have caught it: it pins `compio-postgres`, `rusqlite`,
+  `tests/data_crate_closure_gate.sh` (DELETED) would NOT have caught it: it pins `compio-postgres`, `rusqlite`,
   `zeroship-runtime` and `v8`, and `compio` is none of those. The cut shipped as
   `lock_policy::BoundedLockAcquire`, blanket-implemented over the contract.
 

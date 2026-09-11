@@ -603,7 +603,7 @@ step "Migrate the same app with the same login credential"
 # BORROWED from `examples/db-todos`. The tables it creates are incidental; only
 # the successful explicit database creation and apply are the claim. If you are
 # looking for "a deployed app's env.db works after migrating", that is
-# `tests/e2e_db_app_end_to_end.sh`, which drives the app's own migrations and
+# `examples/db-hitcounter/tests/deployed.test.ts`, which drives the app's own migrations and
 # then reads a row back.
 BORROWED_IR="$ROOT/examples/db-todos/generated/zeroship/migrations.ir.json"
 if [ ! -f "$BORROWED_IR" ]; then
