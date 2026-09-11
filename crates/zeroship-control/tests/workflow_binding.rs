@@ -420,10 +420,16 @@ async fn native_output_reads_preserve_bytes_and_reject_another_apps_run() {
         app_scoped_token(TEST_CONTROL_KEY, &app.to_string()),
     ));
     let started = backend
-        .start("Checkout".into(), json!({"input":{}}))
+        .start(
+            "Checkout".into(),
+            zeroship_workflow::operations::StartOptions {
+                input: json!({}),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
-    let run = started["id"].as_str().unwrap();
+    let run = &started.id;
     let bytes = vec![0, 255, 128, 10];
     let hash = format!("{:x}", Sha256::digest(&bytes));
     fx.state

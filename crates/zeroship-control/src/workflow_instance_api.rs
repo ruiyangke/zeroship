@@ -22,7 +22,9 @@ use uuid::Uuid;
 use zeroship_authn::rate_limit::{self, Quota, RateLimitDecision};
 use zeroship_core::{crypto, typed_id};
 use zeroship_workflow::engine::{cap_exceeded, WORKFLOW_STATE_CAP_ERROR_CODE};
-use zeroship_workflow::errors::WorkflowError;
+use zeroship_workflow::errors::{WorkflowError, WorkflowServiceError};
+use zeroship_workflow::lifecycle::RestartSafety;
+use zeroship_workflow::operations::{RestartDeploy, RestartOptions};
 use zeroship_workflow::store::pg::{self, WorkflowTables};
 
 use crate::api::infrastructure_error_response;
@@ -153,41 +155,10 @@ pub struct PublishTopicBody {
     pub idempotency_key: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct RestartBody {
-    #[serde(default)]
-    pub from: Option<RestartTargetBody>,
-    #[serde(default)]
-    pub deploy: Option<RestartDeployBody>,
-}
-
 #[derive(Debug, Default, Deserialize)]
 pub struct CancelBody {
     #[serde(default)]
     pub mode: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct RestartTargetBody {
-    pub name: String,
-    #[serde(default)]
-    pub occurrence: Option<i32>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-pub enum RestartDeployBody {
-    Pin(String),
-    Object { pin: String },
-}
-
-impl RestartDeployBody {
-    fn pin(&self) -> &str {
-        match self {
-            Self::Pin(pin) => pin.as_str(),
-            Self::Object { pin } => pin.as_str(),
-        }
-    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -2633,7 +2604,7 @@ pub async fn restart_run(
     req: web::HttpRequest,
     state: State<Arc<AppState>>,
     run_id: Path<String>,
-    body: Json<RestartBody>,
+    body: Json<RestartOptions>,
 ) -> web::HttpResponse {
     let app_id = match app_id_from_channel(&req, &state) {
         Ok(app_id) => app_id,
@@ -2649,28 +2620,21 @@ pub async fn restart_run(
     }
 }
 
+fn restart_error(error: WorkflowServiceError) -> WorkflowApiError {
+    match error {
+        WorkflowServiceError::InvalidRequest(message) => WorkflowApiError::BadRequest(message),
+        error => WorkflowApiError::Restart(error.to_string()),
+    }
+}
+
 async fn restart_run_inner(
     state: &AppState,
     app_id: Uuid,
     run_id: &str,
-    body: RestartBody,
+    body: RestartOptions,
 ) -> Result<Value, WorkflowApiError> {
     let full_restart = body.from.is_none();
-    let deploy_pin = body
-        .deploy
-        .as_ref()
-        .map(RestartDeployBody::pin)
-        .unwrap_or(if full_restart { "latest" } else { "started" });
-    if !matches!(deploy_pin, "latest" | "started") {
-        return Err(WorkflowApiError::Restart(format!(
-            "invalid restart deploy pin '{deploy_pin}'"
-        )));
-    }
-    if !full_restart && deploy_pin != "started" {
-        return Err(WorkflowApiError::Restart(
-            "partial restart cannot change deploy pin".to_string(),
-        ));
-    }
+    let deploy_pin = body.deploy_policy().map_err(restart_error)?;
 
     let mut conn = state.registry.conn().await?;
     let tx = conn
@@ -2678,15 +2642,21 @@ async fn restart_run_inner(
         .await
         .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
     ensure_app_workflows_enabled(&tx, &app_id).await?;
+    workflow_limits::lock_app_journal_accounting(&tx, &app_id).await?;
     let tables = provision_workflow_journal(&tx, &app_id).await?;
 
-    tx.query("SELECT pg_advisory_xact_lock(hashtext($1)::bigint)", &[&run_id])
-        .await
-        .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
+    tx.query(
+        "SELECT pg_advisory_xact_lock(hashtext($1)::bigint)",
+        &[&run_id],
+    )
+    .await
+    .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
 
     let rows = tx
         .query(
-            &format!("SELECT workflow_name, deploy_id, output_kind, output_hash \
+            &format!("SELECT workflow_name, deploy_id, output_kind, output_hash, \
+                      COALESCE(lease_expires > clock_timestamp(), false) AS live_lease, \
+                      COALESCE(state = 'compensating' OR paused_from_status = 'compensating', false) AS active_compensation \
                FROM {runs} \
               WHERE id = $1 AND app_id = $2 \
               FOR UPDATE", runs = tables.runs),
@@ -2707,21 +2677,40 @@ async fn restart_run_inner(
     let output_kind: String = row.get("output_kind");
     let output_hash: Option<String> = row.get("output_hash");
 
+    let descendants = tx
+        .query_one(
+            &format!(
+                "WITH RECURSIVE descendants AS ( \
+            SELECT id, state FROM {runs} WHERE parent_run_id = $1 AND app_id = $2 \
+            UNION \
+            SELECT child.id, child.state FROM {runs} child \
+            JOIN descendants parent ON child.parent_run_id = parent.id \
+            WHERE child.app_id = $2 \
+        ) SELECT EXISTS (SELECT 1 FROM descendants \
+            WHERE state NOT IN ('completed','failed','cancelled')) AS active",
+                runs = tables.runs
+            ),
+            &[&run_id, &app_id],
+        )
+        .await
+        .map_err(workflow_pg_error)?;
+    RestartSafety {
+        live_lease: row.get("live_lease"),
+        active_descendants: descendants.get("active"),
+        active_compensation: row.get("active_compensation"),
+        compensated_prefix: false,
+    }
+    .check()
+    .map_err(restart_error)?;
+
     let target_ordinal = if let Some(target) = body.from.as_ref() {
-        if target.name.is_empty() {
-            return Err(WorkflowApiError::BadRequest(
-                "restart target name must not be empty".to_string(),
-            ));
-        }
-        let occurrence = target.occurrence.unwrap_or(0);
-        if occurrence < 0 {
-            return Err(WorkflowApiError::BadRequest(
-                "restart target occurrence must be >= 0".to_string(),
-            ));
-        }
+        let occurrence = i32::try_from(target.occurrence.unwrap_or(0)).map_err(|_| {
+            WorkflowApiError::BadRequest("restart occurrence is out of range".into())
+        })?;
         let rows = tx
             .query(
-                &format!("SELECT ordinal \
+                &format!(
+                    "SELECT ordinal \
                    FROM {steps} \
                   WHERE run_id = $1 AND name = $2 AND name_occurrence = $3",
                     steps = tables.steps
@@ -2743,25 +2732,28 @@ async fn restart_run_inner(
     if target_ordinal > 0 {
         let rows = tx
             .query(
-                &format!("SELECT 1 \
+                &format!(
+                    "SELECT 1 \
                    FROM {steps} \
                   WHERE run_id = $1 \
                     AND ordinal < $2 \
                     AND compensation_finished_at IS NOT NULL \
-                  LIMIT 1", steps = tables.steps),
+                  LIMIT 1",
+                    steps = tables.steps
+                ),
                 &[&run_id, &target_ordinal],
             )
             .await
             .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
-        if !rows.is_empty() {
-            return Err(WorkflowApiError::Restart(
-                "cannot partial-restart past a completed compensation; use a full restart"
-                    .to_string(),
-            ));
+        RestartSafety {
+            compensated_prefix: !rows.is_empty(),
+            ..Default::default()
         }
+        .check()
+        .map_err(restart_error)?;
     }
 
-    let target_deploy_id = if full_restart && deploy_pin == "latest" {
+    let target_deploy_id = if full_restart && deploy_pin == RestartDeploy::Latest {
         active_deploy_for_workflow(&tx, &app_id, &workflow_name)
             .await?
             .id
@@ -2775,14 +2767,18 @@ async fn restart_run_inner(
     };
 
     tx.execute(
-        &format!("UPDATE {blobs} b \
+        &format!(
+            "UPDATE {blobs} b \
             SET refcount = GREATEST(refcount - 1, 0), \
                 last_referenced_at = now() \
            FROM {steps} s \
           WHERE s.run_id = $1 \
             AND s.ordinal >= $2 \
             AND s.output_kind = 'blob' \
-            AND b.hash = s.output_hash", blobs = tables.blobs, steps = tables.steps),
+            AND b.hash = s.output_hash",
+            blobs = tables.blobs,
+            steps = tables.steps
+        ),
         &[&run_id, &target_ordinal],
     )
     .await
@@ -2790,10 +2786,13 @@ async fn restart_run_inner(
     if output_kind == "blob" {
         if let Some(hash) = output_hash.as_ref() {
             tx.execute(
-                &format!("UPDATE {blobs} \
+                &format!(
+                    "UPDATE {blobs} \
                     SET refcount = GREATEST(refcount - 1, 0), \
                         last_referenced_at = now() \
-                  WHERE hash = $1", blobs = tables.blobs),
+                  WHERE hash = $1",
+                    blobs = tables.blobs
+                ),
                 &[hash],
             )
             .await
@@ -2802,7 +2801,8 @@ async fn restart_run_inner(
     }
 
     tx.execute(
-        &format!("UPDATE {signals} \
+        &format!(
+            "UPDATE {signals} \
             SET consumed_by = NULL \
           WHERE consumed_by = $1 \
             AND delivery <> 'topic' \
@@ -2812,13 +2812,17 @@ async fn restart_run_inner(
                  WHERE run_id = $1 \
                    AND ordinal >= $2 \
                    AND consumed_signal_id IS NOT NULL \
-            )", signals = tables.signals, steps = tables.steps),
+            )",
+            signals = tables.signals,
+            steps = tables.steps
+        ),
         &[&run_id, &target_ordinal],
     )
     .await
     .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
     tx.execute(
-        &format!("DELETE FROM {signals} \
+        &format!(
+            "DELETE FROM {signals} \
           WHERE run_id = $1 \
             AND delivery = 'topic' \
             AND id IN ( \
@@ -2827,13 +2831,17 @@ async fn restart_run_inner(
                  WHERE run_id = $1 \
                    AND ordinal >= $2 \
                    AND consumed_signal_id IS NOT NULL \
-            )", signals = tables.signals, steps = tables.steps),
+            )",
+            signals = tables.signals,
+            steps = tables.steps
+        ),
         &[&run_id, &target_ordinal],
     )
     .await
     .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
     tx.execute(
-        &format!("DELETE FROM {subscriptions} \
+        &format!(
+            "DELETE FROM {subscriptions} \
           WHERE run_id = $1 AND ordinal >= $2",
             subscriptions = tables.subscriptions
         ),
@@ -2842,7 +2850,8 @@ async fn restart_run_inner(
     .await
     .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
     tx.execute(
-        &format!("DELETE FROM {steps} \
+        &format!(
+            "DELETE FROM {steps} \
           WHERE run_id = $1 AND ordinal >= $2",
             steps = tables.steps
         ),
@@ -2851,7 +2860,8 @@ async fn restart_run_inner(
     .await
     .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
     tx.execute(
-        &format!("UPDATE {steps} \
+        &format!(
+            "UPDATE {steps} \
             SET compensation_state = 'pending', \
                 compensation_attempt = 0, \
                 compensation_wake_at = NULL, \
@@ -2870,7 +2880,8 @@ async fn restart_run_inner(
     let restarted_from: Option<i32> = (!full_restart).then_some(target_ordinal);
     let restarted_by = format!("app:{app_id}");
     tx.execute(
-        &format!("UPDATE {runs} \
+        &format!(
+            "UPDATE {runs} \
             SET state = 'queued', \
                 wake_at = now(), \
                 terminal_at = NULL, \
@@ -2882,6 +2893,7 @@ async fn restart_run_inner(
                 output_content_type = NULL, \
                 compensation_target = NULL, \
                 compensation_outcome = NULL, \
+                cancel_requested = false, \
                 next_ordinal = $2, \
                 stuck_strikes = 0, \
                 waiting_step_key = NULL, \

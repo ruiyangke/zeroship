@@ -472,13 +472,20 @@ without running compensators, and ends it as `cancelled`.
 > options object and ignores it, so `{ mode: "compensate" }` aborts exactly
 > like `{ mode: "abort" }` and no rollback runs. This is not a gap at one call
 > site: the backend contract is
-> `transition(run_id, op: &'static str)`, so there is nowhere for a
+> `transition(run_id, op: RunOperation)`, so there is nowhere for a
 > runtime-chosen mode to travel. Implementing it means changing that contract,
 > not forwarding an argument. Until then, do not read a `compensate` cancel as
 > a rollback: to roll back completed steps, let the run FAIL, which is the
 > path that does run compensators.
 
 `restart(opts?)` requeues the same run ID:
+
+The SQLite and PostgreSQL adapters share deploy-policy and quiescence checks.
+A restart rejects live execution leases, active descendants and active
+compensation. A partial restart retains the prefix and its original deploy;
+it cannot retain steps whose compensation already finished. SQLite rewrites
+the discarded checkpoints, their signal consumption and run state in a
+transaction, so a failed restart preserves the previous journal.
 
 ```ts
 interface RestartTarget {
