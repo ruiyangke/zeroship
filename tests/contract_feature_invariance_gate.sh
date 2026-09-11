@@ -335,4 +335,4 @@ if [ "$fail" -ne 0 ]; then
   echo "CONTRACT FEATURE INVARIANCE GATE: FAILED" >&2
   exit 1
 fi
-echo "CONTRACT FEATURE INVARIANCE GATE: ok (${n_items:-0} contract item(s), $n_types signature type(s), $n_builds split-feature build(s))"
+echo "CONTRACT FEATURE INVARIANCE GATE: ok (${n_items:-0} contract item(s), $n_types signature type(s), $n_builds ordinary consumer build(s))"
