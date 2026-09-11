@@ -6,6 +6,66 @@ use crate::tests::fixtures::parity;
 use zeroship_data_sql::compile::raw_column_name;
 
 #[test]
+fn bulk_mutations_return_counts_without_returning_records_sqlite_runtime() {
+    run(async {
+        let dir = tempfile::tempdir().unwrap();
+        apply_schema_ahead_of_runtime(&dir, &users_encrypted_ssn_ddl());
+        let total = zeroship_data_sql::compile::MAX_QUERY_LIMIT + 17;
+        let body = r#"
+async function bulk() {
+    const users = env.db.collection(COLLECTION);
+    const total = BULK_TOTAL;
+    for (let start = 0; start < total; start += 100) {
+        await users.insertMany(Array.from({ length: Math.min(100, total - start) }, (_, i) => ({
+            email: `user-${start + i}@example.com`, name: "new"
+        })));
+    }
+    const updated = await users.updateMany({}, { name: "ready" });
+    const missing = await users.updateMany({ name: "absent" }, { name: "unused" });
+    try {
+        await env.db.transaction(async tx => {
+            await tx[COLLECTION].purgeMany({});
+            throw new Error("rollback");
+        });
+    } catch (error) {
+        if (error.message !== "rollback") throw error;
+    }
+    const deleted = await users.deleteMany({});
+    const restored = await users.restoreMany({});
+    const purged = await users.purgeMany({});
+    return { updated, missing, deleted, restored, purged, remaining: await users.count({}) };
+}
+bulk.config = { kind: "action" };
+const _procedures = { bulk };
+"#
+        .replace("BULK_TOTAL", &total.to_string());
+        let mut source = sqlite_runtime_source("users", &users_encrypted_ssn_schema(), &body);
+        source.descriptor = serde_json::to_string(&zeroship_data_sql::value!({
+            "version":2,
+            "collections":{"users":{
+                "fields":crate::tests::fixtures::schema::generated_fields(users_encrypted_ssn_schema()),
+                "options":{"softDelete":true, "versioning":true, "strictness":"strict"},
+                "indexes":[],
+            }},
+        })).unwrap();
+        crate::tests::fixtures::recording::clear();
+        let result = parity::extract_json(&dispatch_sqlite_runtime(&dir, &source, "bulk"));
+        assert_eq!(
+            result,
+            zeroship_data_sql::value!({
+                "updated":total, "missing":0, "deleted":total, "restored":total,
+                "purged":total, "remaining":0,
+            })
+        );
+        let statements = crate::tests::fixtures::recording::bulk_statements();
+        assert_eq!(statements.len(), 6);
+        for sql in statements {
+            assert!(!sql.contains(" RETURNING "), "{sql}");
+        }
+    });
+}
+
+#[test]
 fn update_non_id_filter_keeps_randomised_ciphertext_readable_sqlite_runtime() {
     let _keys = with_project_key(&["default"], &"7".repeat(64));
 

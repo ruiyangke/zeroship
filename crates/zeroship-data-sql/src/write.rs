@@ -308,20 +308,9 @@ impl ColumnAssignment {
 pub struct Returning(Option<Projection>);
 
 impl Returning {
-    /// No `RETURNING` clause at all. The statement reports an affected-row count
-    /// and no rows.
-    ///
-    /// This is the *narrow* end of the type, not a convenience for the wide end:
-    /// it returns fewer columns than any list, never more. It is right for a
-    /// bulk purge, whose only result today is a row count that
-    /// `dispatch_purge_many` obtains by counting the rows its `RETURNING`
-    /// clause hands back - a projected column list since 2026-08-28, and a
-    /// star before that. Either way it materialises rows to count them.
-    ///
-    /// **It has a consequence the caller owns.** The change-event publication
-    /// correlates on `row["id"]`, so a write that returns nothing has no rows to
-    /// publish and no keys to publish them under. Choosing `nothing()` is
-    /// choosing not to emit events for that write.
+    /// Report affected rows without returning records. The ORM uses this shape
+    /// for count-only mutations; committed-change delivery is independent of
+    /// returned records.
     #[must_use]
     pub const fn nothing() -> Self {
         Self(None)
@@ -675,13 +664,7 @@ impl UpdateBuilder {
     }
 }
 
-/// A bounded delete.
-///
-/// The same bound as [`Update`], for the same reason and with a second site to
-/// point at: `dispatch_purge_many` (`crud/mod.rs:1586-1613`) hands
-/// `build_delete_many` a creator filter and no bound at all, and
-/// `build_delete_many` omits the `WHERE` clause entirely when that filter is
-/// empty (`query.rs:4249-4254`).
+/// A delete plan with an explicit target bound, like [`Update`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Delete {
     namespace: Option<Ident>,
