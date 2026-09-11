@@ -6,6 +6,7 @@ schema!(pub test_schema = "../../tests/fixtures/schema.runtime.json");
 use test_schema::posts;
 
 mod calendar_date;
+mod bulk;
 mod fixtures;
 mod identity;
 mod joins;
@@ -775,6 +776,15 @@ impl crate::executor::ScopedExecutor for RegisteredBackend {
     ) -> Result<Vec<Value>, DbError> {
         self.queries.set(self.queries.get() + 1);
         self.inner.query(app_id, schema, sql, params).await
+    }
+    async fn exec(
+        &self,
+        app_id: &str,
+        schema: &zeroship_data_sql::SchemaName,
+        sql: &str,
+        params: &[Value],
+    ) -> Result<u64, DbError> {
+        self.inner.exec(app_id, schema, sql, params).await
     }
     async fn open_tx_session(
         &self,

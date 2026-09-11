@@ -667,7 +667,11 @@ fn the_same_verbs_are_refused_outright_when_the_returning_clause_stars() {
             let returning = build_returning_expr(&schema).expect("projection");
             let mut ruled_on = 0usize;
             for (verb, sql, params) in column_grant_ready_statements(&app, &schema) {
-                let starred = sql.replace(&format!("RETURNING {returning}"), "RETURNING *");
+                let starred = if sql.contains(" RETURNING ") {
+                    sql.replace(&format!("RETURNING {returning}"), "RETURNING *")
+                } else {
+                    format!("{sql} RETURNING *")
+                };
                 assert!(
                     starred.contains("RETURNING *"),
                     "{verb}: the mutation must have applied, or this control proves nothing: {sql}",

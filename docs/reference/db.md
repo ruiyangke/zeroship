@@ -662,6 +662,12 @@ const { data, error } = await db.products.update(
 // error instanceof OptimisticLockError when stored version != 5
 ```
 
+Bulk update, delete, restore, and purge operations affect all matching rows and
+report database affected-row counts without fetching the changed records.
+They remain atomic; large maintenance jobs should choose explicit bounded
+batches. Updates that encrypt values separately for each target row retain the
+ORM's encrypted-target cap and reject an oversized target set before writing.
+
 #### Retrying CAS updates with `withRetry`
 
 The OCC pattern (read → compute → update with `{ version }` → retry on

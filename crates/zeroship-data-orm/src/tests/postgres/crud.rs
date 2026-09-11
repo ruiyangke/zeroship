@@ -323,8 +323,14 @@ fn update_many_round_trip() {
                 &value!({"views": {"$inc": 1}}),
             )
             .unwrap();
-            let updated = exec_mutation(&pool, bq).await;
-            assert_eq!(updated.len(), 3);
+            let affected = zeroship_data_orm::backend::postgres::params::execute(
+                &pool.acquire().await.unwrap(),
+                &bq.sql,
+                &bq.params,
+            )
+            .await
+            .unwrap();
+            assert_eq!(affected, 3);
 
             // Verify food unchanged
             let bq = build_find_with_schema(
@@ -426,8 +432,14 @@ fn delete_operations() {
                 SqlDialect::Postgres,
             )
             .unwrap();
-            let deleted = exec_mutation(&pool, bq).await;
-            assert_eq!(deleted.len(), 2);
+            let affected = zeroship_data_orm::backend::postgres::params::execute(
+                &pool.acquire().await.unwrap(),
+                &bq.sql,
+                &bq.params,
+            )
+            .await
+            .unwrap();
+            assert_eq!(affected, 2);
 
             // 2 tech remaining
             let bq = build_count(

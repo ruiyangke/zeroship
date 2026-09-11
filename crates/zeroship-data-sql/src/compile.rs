@@ -1662,7 +1662,6 @@ pub fn build_update_many_with_assignments(
     assignments: &WriteAssignments,
 ) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
-    let returning = build_returning_expr(schema_hint)?;
 
     let schema = schema_name.quoted();
     let table = quote_ident(collection);
@@ -1678,14 +1677,11 @@ pub fn build_update_many_with_assignments(
         sql.push_str(" WHERE ");
         sql.push_str(&where_clause);
     }
-    sql.push_str(" RETURNING ");
-    sql.push_str(&returning);
 
     Ok(BuiltQuery { sql, params })
 }
 
-/// Build a DELETE query for multiple rows (no LIMIT 1):
-/// `DELETE FROM "schema_name"."collection" WHERE ... RETURNING "id", ...`
+/// Delete all matching rows without returning records.
 pub fn build_delete_many(
     schema_name: &SchemaName,
     collection: &str,
@@ -1694,7 +1690,6 @@ pub fn build_delete_many(
     dialect: SqlDialect,
 ) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
-    let returning = build_returning_expr(schema_hint)?;
 
     let schema = schema_name.quoted();
     let table = quote_ident(collection);
@@ -1707,8 +1702,6 @@ pub fn build_delete_many(
         sql.push_str(" WHERE ");
         sql.push_str(&where_clause);
     }
-    sql.push_str(" RETURNING ");
-    sql.push_str(&returning);
 
     Ok(BuiltQuery { sql, params })
 }
@@ -1848,13 +1841,7 @@ pub fn build_soft_delete_one_with_assignments(
     Ok(BuiltQuery { sql, params })
 }
 
-/// Dialect-aware `soft_delete_many` builder. Same shape
-/// as [`build_soft_delete_one_with_assignments`] minus the single-row
-/// LIMIT 1 narrowing — every live row matching `filter` flips
-/// `deleted_at` to the dialect's `NOW()`-equivalent.
-///
-/// `AND deleted_at IS NULL` is preserved so re-deleting an already-
-/// deleted row is still a no-op.
+/// Apply soft-delete assignments to matching live rows without returning records.
 pub fn build_soft_delete_many_with_assignments(
     schema_name: &SchemaName,
     collection: &str,
@@ -1864,7 +1851,6 @@ pub fn build_soft_delete_many_with_assignments(
     assignments: &WriteAssignments,
 ) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
-    let returning = build_returning_expr(schema_hint)?;
 
     let schema = schema_name.quoted();
     let table = quote_ident(collection);
@@ -1883,7 +1869,7 @@ pub fn build_soft_delete_many_with_assignments(
     };
 
     let sql = format!(
-        "UPDATE {schema}.{table} SET {}{where_sql} RETURNING {returning}",
+        "UPDATE {schema}.{table} SET {}{where_sql}",
         set_clauses.join(", "),
     );
 
@@ -1932,7 +1918,7 @@ pub fn build_restore_one_with_assignments(
     Ok(BuiltQuery { sql, params })
 }
 
-/// Dialect-aware `restore_many` builder.
+/// Restore matching deleted rows without returning records.
 pub fn build_restore_many_with_assignments(
     schema_name: &SchemaName,
     collection: &str,
@@ -1942,7 +1928,6 @@ pub fn build_restore_many_with_assignments(
     assignments: &WriteAssignments,
 ) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
-    let returning = build_returning_expr(schema_hint)?;
 
     let schema = schema_name.quoted();
     let table = quote_ident(collection);
@@ -1961,7 +1946,7 @@ pub fn build_restore_many_with_assignments(
     };
 
     let sql = format!(
-        "UPDATE {schema}.{table} SET {}{where_sql} RETURNING {returning}",
+        "UPDATE {schema}.{table} SET {}{where_sql}",
         set_clauses.join(", "),
     );
 
@@ -4180,7 +4165,7 @@ mod tests {
             "sql: {}",
             q.sql
         );
-        assert!(q.sql.contains(&treturning()), "sql: {}", q.sql);
+        assert!(!q.sql.contains(" RETURNING "), "sql: {}", q.sql);
         // Must NOT contain updateOne's primary-key LIMIT 1 subquery.
         assert!(!q.sql.contains("LIMIT 1 FOR UPDATE"), "sql: {}", q.sql);
     }
@@ -4201,7 +4186,7 @@ mod tests {
             "sql: {}",
             q.sql
         );
-        assert!(q.sql.contains(&treturning()), "sql: {}", q.sql);
+        assert!(!q.sql.contains(" RETURNING "), "sql: {}", q.sql);
         assert!(!q.sql.contains("LIMIT 1 FOR UPDATE"), "sql: {}", q.sql);
         assert_eq!(q.params, value!([false]).as_array().unwrap().clone());
     }
@@ -4218,7 +4203,7 @@ mod tests {
         )
         .unwrap();
         assert!(!q.sql.contains("WHERE"), "sql: {}", q.sql);
-        assert!(q.sql.contains(&treturning()), "sql: {}", q.sql);
+        assert!(!q.sql.contains(" RETURNING "), "sql: {}", q.sql);
         assert!(q.params.is_empty());
     }
 
@@ -7833,7 +7818,7 @@ mod tests {
         .unwrap();
         assert!(!q.sql.contains("LIMIT 1 FOR UPDATE"), "sql: {}", q.sql);
         assert!(q.sql.contains("AND \"deleted_at\" IS NULL"));
-        assert!(q.sql.ends_with(&treturning()), "sql: {}", q.sql);
+        assert!(!q.sql.contains(" RETURNING "), "sql: {}", q.sql);
     }
 
     /// An anonymous soft delete must CLEAR `updated_by`, not leave it.
@@ -7988,7 +7973,7 @@ mod tests {
         .unwrap();
         assert!(!q.sql.contains("LIMIT 1 FOR UPDATE"));
         assert!(q.sql.contains("AND \"deleted_at\" IS NOT NULL"));
-        assert!(q.sql.ends_with(&treturning()), "sql: {}", q.sql);
+        assert!(!q.sql.contains(" RETURNING "), "sql: {}", q.sql);
     }
 
     #[test]
@@ -8193,14 +8178,7 @@ mod tests {
     // The write-side projection: `RETURNING` names columns, never `*`
     // -----------------------------------------------------------------------
 
-    /// Every write builder in this file, built over one schema, with the verb
-    /// each entry is named for.
-    ///
-    /// A `Vec` rather than twelve separate tests because the property is about
-    /// the SET: the defect this guards is one builder being missed, and a test
-    /// per builder cannot fail for a builder nobody wrote a test for. The arm
-    /// count is asserted by the callers against
-    /// [`WRITE_BUILDERS_EMITTING_RETURNING`].
+    /// Exercise each write shape against the same descriptor.
     fn every_write_query(schema: &Value) -> Vec<(&'static str, BuiltQuery)> {
         let mut complete = write_projection_schema();
         complete
@@ -8329,11 +8307,14 @@ mod tests {
         ]
     }
 
-    /// The arm floor for [`every_write_query`]. Twelve, counted from the
-    /// `RETURNING`-emitting `format!`/`push_str` sites in this file - NOT from
-    /// the twelve doc comments that also spell the word, and not from the
-    /// `//`-comment at [`SYNTHETIC_RESULT_COLUMNS`].
-    const WRITE_BUILDERS_EMITTING_RETURNING: usize = 12;
+    const WRITE_BUILDERS_TESTED: usize = 12;
+
+    fn count_only_write(verb: &str) -> bool {
+        matches!(
+            verb,
+            "updateMany" | "deleteMany" | "softDeleteMany" | "restoreMany"
+        )
+    }
 
     /// A schema whose masked field makes the raw column REACHABLE by `*`.
     ///
@@ -8352,15 +8333,19 @@ mod tests {
     }
 
     #[test]
-    fn every_write_builder_projects_named_columns_and_never_a_star() {
+    fn writes_return_declared_records_or_only_counts() {
         let schema = write_projection_schema();
         let queries = every_write_query(&schema);
         assert_eq!(
             queries.len(),
-            WRITE_BUILDERS_EMITTING_RETURNING,
-            "this test must rule on every RETURNING-emitting builder in the file",
+            WRITE_BUILDERS_TESTED,
+            "this test must rule on every write builder",
         );
         for (verb, q) in &queries {
+            if count_only_write(verb) {
+                assert!(!q.sql.contains(" RETURNING "), "{verb}: {}", q.sql);
+                continue;
+            }
             assert!(
                 !q.sql.contains("RETURNING *"),
                 "{verb} must not expand its RETURNING to `*`: {}",
@@ -8374,7 +8359,7 @@ mod tests {
             for field in FIXTURE_GENERATED_COLUMNS {
                 assert!(
                     q.sql.contains(&quote_ident(field)),
-                    "{verb} must name the system field {field}: {}",
+                    "{verb} must project the declared field {field}: {}",
                     q.sql,
                 );
             }
@@ -8399,7 +8384,7 @@ mod tests {
             .as_str()
             .expect("fixture declares the raw column");
         let queries = every_write_query(&schema);
-        assert_eq!(queries.len(), WRITE_BUILDERS_EMITTING_RETURNING);
+        assert_eq!(queries.len(), WRITE_BUILDERS_TESTED);
         for (verb, q) in &queries {
             assert!(
                 !q.sql.contains(raw),
@@ -8426,11 +8411,11 @@ mod tests {
             "internal_note": { "type": "string", "readable": false },
         });
         let queries = every_write_query(&schema);
-        assert_eq!(queries.len(), WRITE_BUILDERS_EMITTING_RETURNING);
+        assert_eq!(queries.len(), WRITE_BUILDERS_TESTED);
         for (verb, q) in &queries {
             assert!(
-                q.sql.contains(r#""public_note""#),
-                "{verb} must project the readable field: {}",
+                q.sql.contains(r#""public_note""#) == !count_only_write(verb),
+                "{verb} must project readable fields only when returning records: {}",
                 q.sql,
             );
             assert!(
@@ -8519,10 +8504,10 @@ mod tests {
             "amount": { "type": "number", "storage": { "valueColumn": "amount_v2" } },
         });
         let queries = every_write_query(&schema);
-        assert_eq!(queries.len(), WRITE_BUILDERS_EMITTING_RETURNING);
+        assert_eq!(queries.len(), WRITE_BUILDERS_TESTED);
         for (verb, q) in &queries {
             assert!(
-                q.sql.contains(r#""amount_v2" AS "amount""#),
+                q.sql.contains(r#""amount_v2" AS "amount""#) == !count_only_write(verb),
                 "{verb} must read the declared physical column under the logical name: {}",
                 q.sql,
             );

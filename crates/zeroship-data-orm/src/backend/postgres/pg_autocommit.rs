@@ -1,39 +1,4 @@
-//! PostgreSQL pooled ("autocommit") execution under the per-app role fence.
-//!
-//! **PG TIER.** Every function here is PostgreSQL dialect and vendor types:
-//! `SET LOCAL ROLE`, an explicit `BEGIN`/`COMMIT` around a single statement,
-//! and `compio_postgres` rows. The policy these encode - which timeouts, which
-//! role - lives one tier down in [`zeroship_data_orm::budgets`], and the SQL that renders
-//! it is [`crate::backend::postgres::pg_session_sql`].
-//!
-//! # Why this module exists
-//!
-//! The funnel below lived in `crate::backend::postgres::exec` (ENGINE tier) until 2026-09-01, and
-//! `backend/postgres.rs` reached UP into it from two search methods. That was
-//! the whole of the `PG <-> ENGINE` tier cycle: a cycle is not a bad edge, it
-//! is a pair of crates that cannot be separated at all, because cargo cannot
-//! express mutual dependency. Sinking the funnel into the tier that owns its
-//! dialect removes the upward half; what remains is `ENGINE -> PG`, which is
-//! rank 3 -> 2 and legal.
-//!
-//! # Why there is no single "row" return
-//!
-//! The five production callers want three different things, and one neutral row
-//! type would have to lie to at least one of them:
-//!
-//! - the two search methods want JSON, and get it via
-//!   [`crate::backend::postgres::pg_row_json::rows_to_values`];
-//! - the two unmask readers want ONE CELL, and one of them wants it as RAW
-//!   BYTES. Routing that through JSON is not an option:
-//!   `pg_row_json::column_to_value` base64-encodes BYTEA, so an encrypted
-//!   ciphertext would arrive as text and have to be decoded back before it
-//!   could be decrypted - re-introducing the text round-trip that made every
-//!   PostgreSQL unmask of an encrypted column fail until 2026-09-01;
-//! - the audit INSERT wants nothing at all.
-//!
-//! So each shape gets its own entry point. `roled_rows` remains for
-//! `crate::backend::postgres::exec::run_sql`, whose callers are the whole CRUD surface and whose
-//! row vocabulary is a separate, open question.
+//! PostgreSQL pooled execution under the per-app role and timeout guards.
 
 use std::rc::Rc;
 
@@ -44,30 +9,51 @@ use crate::backend::postgres::pg_session_sql::autocommit_local_session_setup_sql
 use zeroship_data_orm::error::DbError;
 use zeroship_data_sql::SchemaName;
 
-// `ScalarRead` is a shared return type - SQLite returns it too, now that the
-// unmask reads dispatch through `BackendHandle` - so it is data-core's, not the
-// PostgreSQL module's. That is the shape #119 was about. Re-exported here
-// because this module's own signatures return it.
 pub use zeroship_data_orm::capability::ScalarRead;
 
-/// Run `sql` on a pooled connection narrowed to `schema`'s runtime role,
-/// returning the
-/// raw driver rows.
-///
-/// This is the primitive the rest of the module is built on, and the one
-/// `crate::backend::postgres::exec::run_sql` still needs because its own callers have not settled
-/// on a row vocabulary. Prefer one of the shaped wrappers below.
-///
-/// # Errors
-///
-/// Returns a typed database error if the pool checkout, the `BEGIN`, the
-/// per-app session setup, the statement itself, or the `COMMIT` fails.
+/// Read driver rows under the binding's authority.
 pub async fn roled_rows(
     pool: &Rc<compio_postgres::Pool>,
     schema: &SchemaName,
     sql: &str,
     params: &[Value],
 ) -> Result<Vec<compio_postgres::Row>, DbError> {
+    with_roled_transaction(pool, schema, async |tx| {
+        let bindings: Vec<_> = params.iter().map(super::params::Parameter).collect();
+        let refs: Vec<&(dyn compio_postgres::types::ToSql + Sync)> =
+            bindings.iter().map(|value| value as _).collect();
+        tx.query(sql, &refs)
+            .await
+            .map_err(|e| pg_error::classify(&e))
+    })
+    .await
+}
+
+/// Execute without fetching rows under the binding's authority.
+pub(crate) async fn roled_execute(
+    pool: &Rc<compio_postgres::Pool>,
+    schema: &SchemaName,
+    sql: &str,
+    params: &[Value],
+) -> Result<u64, DbError> {
+    with_roled_transaction(pool, schema, async |tx| {
+        let bindings: Vec<_> = params.iter().map(super::params::Parameter).collect();
+        let refs: Vec<&(dyn compio_postgres::types::ToSql + Sync)> =
+            bindings.iter().map(|value| value as _).collect();
+        tx.execute(sql, &refs)
+            .await
+            .map_err(|e| pg_error::classify(&e))
+    })
+    .await
+}
+
+async fn with_roled_transaction<T>(
+    pool: &Rc<compio_postgres::Pool>,
+    schema: &SchemaName,
+    operation: impl for<'a, 'conn> AsyncFnOnce(
+        &'a compio_postgres::Transaction<'conn>,
+    ) -> Result<T, DbError>,
+) -> Result<T, DbError> {
     use crate::driver::{Driver, LeaseKind};
     let mut lease = super::driver::PostgresDriver::new(pool.clone())
         .acquire(LeaseKind::Transaction)
@@ -76,17 +62,8 @@ pub async fn roled_rows(
         .get_mut::<compio_postgres::PoolConnection>()
         .expect("PostgresDriver returns a PostgreSQL lease");
 
-    // P2-C1: run the per-app role + DB-1 timeout guards via `SET LOCAL`
-    // inside an explicit transaction, exactly like the explicit-tx path
-    // (`tx_session_setup_sql`). `SET LOCAL` auto-reverts at COMMIT and at
-    // the implicit ROLLBACK the `compio_postgres::Transaction` issues on
-    // drop — so a setup error, a query error, OR a cancellation between
-    // setup and the would-be reset can no longer leave the pooled
-    // connection carrying this tenant's role + timeouts for the next
-    // checkout. The previous shape ran a session-level `SET ROLE` + a
-    // separate `RESET` that was skipped entirely when the future was
-    // cancelled mid-flight (no RAII guard, and the pool's Drop is
-    // synchronous so it cannot issue async RESET SQL).
+    // SET LOCAL is reverted on commit or the transaction guard's rollback,
+    // including when setup or execution is cancelled.
     let tx = client.transaction().await.map_err(|e| {
         let mut err = pg_error::classify(&e);
         zeroship_data_orm::error::prefix_message(
@@ -106,21 +83,8 @@ pub async fn roled_rows(
         classified.into_db_error()
     })?;
 
-    let bindings: Vec<_> = params
-        .iter()
-        .map(crate::backend::postgres::params::Parameter)
-        .collect();
-    let refs: Vec<&(dyn compio_postgres::types::ToSql + Sync)> =
-        bindings.iter().map(|value| value as _).collect();
-    let rows = tx
-        .query(sql, &refs)
-        .await
-        .map_err(|e| pg_error::classify(&e))?;
+    let result = operation(&tx).await?;
 
-    // COMMIT reverts the SET LOCAL state and releases the connection
-    // clean. On any early return above, `tx` is dropped instead, which
-    // rolls back (also reverting the SET LOCAL state) and marks the
-    // connection dirty so the pool drains it before the next checkout.
     tx.commit().await.map_err(|e| {
         let mut err = pg_error::classify(&e);
         zeroship_data_orm::error::prefix_message(
@@ -130,7 +94,7 @@ pub async fn roled_rows(
         err
     })?;
 
-    Ok(rows)
+    Ok(result)
 }
 
 /// Run `sql` under the per-app role and render the rows as JSON objects.
@@ -235,7 +199,7 @@ pub fn scalar_text(rows: &[compio_postgres::Row]) -> Result<ScalarRead<String>, 
     })
 }
 
-/// Run a statement under the per-app role and discard any result rows.
+/// Run a statement under the per-app role without fetching rows.
 ///
 /// # Errors
 ///
@@ -246,6 +210,6 @@ pub(crate) async fn roled_statement(
     sql: &str,
     params: &[Value],
 ) -> Result<(), DbError> {
-    roled_rows(pool, schema, sql, params).await?;
+    roled_execute(pool, schema, sql, params).await?;
     Ok(())
 }

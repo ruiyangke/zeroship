@@ -694,15 +694,13 @@ impl PreparedOperation {
                 operation,
                 many: true,
             } => Output::Count(
-                Box::pin(crate::exec::exec_mutation_with_emit(
+                Box::pin(crate::exec::exec_mutation_count_with_emit(
                     query,
                     &route,
                     &collection,
                     operation,
-                    &binding,
                 ))
-                .await?
-                .len() as i64,
+                .await? as i64,
             ),
             Plan::Upsert {
                 document,

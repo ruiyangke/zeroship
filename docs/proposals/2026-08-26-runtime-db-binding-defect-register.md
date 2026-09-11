@@ -492,29 +492,28 @@ it - a tenant-isolation bypass arriving with no code change and no error, in a
 process that executes creator code. Removing a privilege that currently does
 nothing is free; removing it after something depends on it is a behaviour change.
 
-### L31 - Bulk-write limits do not cover the ordinary update and purge paths
+### L31 - Count-only bulk mutations must not materialize returned records
 
-Status: open; verified against the current ORM and SQL compiler.
+Status: resolved. Ordinary bulk mutations intentionally affect all matching rows.
 
-`run_update_many` in
-[CRUD execution](../../crates/zeroship-data-orm/src/crud/mod.rs) probes target keys
-and rejects targets above `MAX_QUERY_LIMIT` only when
-`per_row_encrypted_update` is true. An update that does not need per-row
-encryption goes directly to `build_update_many_with_assignments` in the
-[SQL compiler](../../crates/zeroship-data-sql/src/compile.rs). That builder adds a
-`WHERE` clause only for a nonempty filter and imposes no row limit. Its
-`RETURNING` projection contains declared readable fields, but still materializes
-all matching rows.
+`updateMany`, `deleteMany`, `restoreMany`, and `purgeMany` compile without
+`RETURNING` and use the driver's affected-row count. The
+[shared executor](../../crates/zeroship-data-orm/src/exec.rs) preserves transaction
+routing and metering. SQLite commit capture remains authoritative; PostgreSQL's
+local fallback queues a collection invalidation until commit.
 
-`plan_purge_many` delegates to `build_delete_many`, which likewise has no target
-cap. Removing implicit column behavior did not address these limits.
+Per-row encrypted updates still probe target keys and enforce `MAX_QUERY_LIMIT`
+in [CRUD execution](../../crates/zeroship-data-orm/src/crud/mod.rs), because that
+path prepares separate encrypted writes. This safeguard does not define the
+ordinary bulk-write contract. Large maintenance jobs should explicitly select
+bounded batches; ordinary calls do not silently split into separate commits.
 
-The regression test
-`update_many_randomised_target_cap_rejects_without_writes_sqlite_runtime` in
-[SQLite update tests](../../crates/zeroship-data-v8/src/tests/sqlite/updates.rs)
-exercises the encrypted branch. It does not establish a bound for ordinary
-updates or purges. Resolving this finding requires enforcing the intended limit
-on those paths and testing that an oversized operation leaves rows unchanged.
+[Native bulk tests](../../crates/zeroship-data-orm/src/orm/tests/bulk.rs) exercise
+all-match counts beyond the read limit, statement failures, rollback, column
+grants, and commit-only CDC against PostgreSQL and file-backed SQLite. The
+[V8 update tests](../../crates/zeroship-data-v8/src/tests/sqlite/updates.rs) verify
+the adapter's counts and the absence of bulk `RETURNING`, while retaining the
+encrypted target-cap regression.
 
 ### L32 - the migration-freeze guard reports instead of failing, and its data source has no writer
 
