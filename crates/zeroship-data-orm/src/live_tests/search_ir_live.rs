@@ -55,20 +55,14 @@ const SCHEMA: &str = "search_ir_live";
 const DIMS: usize = 8;
 
 fn run<F: std::future::Future>(f: F) -> F::Output {
-    // Keep the shared schema intact until this test's runtime has shut down.
-    // Acquire outside the async block so waiting never stalls its executor.
-    static FIXTURE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _fixture = FIXTURE_LOCK
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    compio::runtime::Runtime::new()
-        .expect("compio runtime build")
-        .block_on(f)
+    crate::live_tests::host::run(f)
 }
 
 async fn pool() -> (crate::support::postgres::Postgres, Pool) {
     let postgres = crate::support::postgres::Postgres::start();
-    let pool = Pool::connect(&postgres.url(), 2).await.expect("connect search fixture");
+    let pool = Pool::connect(&postgres.url(), 2)
+        .await
+        .expect("connect search fixture");
     (postgres, pool)
 }
 
@@ -307,46 +301,48 @@ async fn seed_vectors(pool: &Pool, count: usize) {
 /// distance at all - the failure a top-k membership check cannot see.
 #[test]
 fn a_vector_search_ranks_by_distance_on_real_pgvector() {
-    run(async {
-        let (_postgres, pool) = pool().await;
-        setup(&pool).await;
-        seed_vectors(&pool, 100).await;
+    crate::live_tests::host::in_test(|| {
+        run(async {
+            let (_postgres, pool) = pool().await;
+            setup(&pool).await;
+            seed_vectors(&pool, 100).await;
 
-        let plan = docs_search(
-            SearchCriterion::Vector {
-                column: column("embedding"),
-                query: QueryVector::new(&unit_vector(0)).expect("query vector"),
-                metric: VectorMetric::Cosine,
-            },
-            10,
-        );
-        let sql = render_search(&plan).expect("renderable");
-        let owned = bind_text(sql.params());
-        let params: Vec<&str> = owned.iter().map(String::as_str).collect();
-        let rows = pool
-            .query_text_params(sql.sql(), &params)
-            .await
-            .unwrap_or_else(|e| panic!("pgvector refused the IR's SQL: {e}\n{}", sql.sql()));
+            let plan = docs_search(
+                SearchCriterion::Vector {
+                    column: column("embedding"),
+                    query: QueryVector::new(&unit_vector(0)).expect("query vector"),
+                    metric: VectorMetric::Cosine,
+                },
+                10,
+            );
+            let sql = render_search(&plan).expect("renderable");
+            let owned = bind_text(sql.params());
+            let params: Vec<&str> = owned.iter().map(String::as_str).collect();
+            let rows = pool
+                .query_text_params(sql.sql(), &params)
+                .await
+                .unwrap_or_else(|e| panic!("pgvector refused the IR's SQL: {e}\n{}", sql.sql()));
 
-        assert_eq!(rows.len(), 10, "k is the bound and it is bound as $2");
-        assert_eq!(
-            rows[0].get::<_, String>("id"),
-            "doc_000",
-            "the query is row 0's own vector; its distance is zero"
-        );
+            assert_eq!(rows.len(), 10, "k is the bound and it is bound as $2");
+            assert_eq!(
+                rows[0].get::<_, String>("id"),
+                "doc_000",
+                "the query is row 0's own vector; its distance is zero"
+            );
 
-        let distances: Vec<f64> = rows.iter().map(|r| r.get::<_, f64>("_distance")).collect();
-        assert!(
-            distances[0].abs() < 1e-6,
-            "an exact match must have zero cosine distance, got {}",
-            distances[0]
-        );
-        assert!(
-            distances.windows(2).all(|w| w[0] <= w[1]),
-            "the ORDER BY must actually order: {distances:?}"
-        );
-        println!("ruled on 10 ranked rows over 100 seeded vectors");
-    });
+            let distances: Vec<f64> = rows.iter().map(|r| r.get::<_, f64>("_distance")).collect();
+            assert!(
+                distances[0].abs() < 1e-6,
+                "an exact match must have zero cosine distance, got {}",
+                distances[0]
+            );
+            assert!(
+                distances.windows(2).all(|w| w[0] <= w[1]),
+                "the ORDER BY must actually order: {distances:?}"
+            );
+            println!("ruled on 10 ranked rows over 100 seeded vectors");
+        });
+    })
 }
 
 /// THE DIFFERENTIAL ARM. The IR and the shipped builder return the same rows in
@@ -363,97 +359,99 @@ fn a_vector_search_ranks_by_distance_on_real_pgvector() {
 /// the fixture had made every ordering identical.
 #[test]
 fn the_ir_and_the_shipped_builder_rank_identically() {
-    run(async {
-        let (_postgres, pool) = pool().await;
-        setup(&pool).await;
-        seed_vectors(&pool, 100).await;
+    crate::live_tests::host::in_test(|| {
+        run(async {
+            let (_postgres, pool) = pool().await;
+            setup(&pool).await;
+            seed_vectors(&pool, 100).await;
 
-        let query = unit_vector(7);
-        let filter = Predicate::Compare {
-            lhs: Operand::column(column("tenant_id")),
-            op: CompareOp::Eq,
-            rhs: Operand::Lit(Literal::Int(1)),
-        };
+            let query = unit_vector(7);
+            let filter = Predicate::Compare {
+                lhs: Operand::column(column("tenant_id")),
+                op: CompareOp::Eq,
+                rhs: Operand::Lit(Literal::Int(1)),
+            };
 
-        // The IR's answer.
-        let mut plan_builder = Search::builder(
-            Ident::parse_as("docs", IdentRole::Collection).expect("collection"),
-            SearchCriterion::Vector {
-                column: column("embedding"),
-                query: QueryVector::new(&query).expect("query vector"),
-                metric: VectorMetric::Cosine,
-            },
-            docs_projection(),
-        )
-        .namespace(Ident::parse_as(SCHEMA, IdentRole::Namespace).expect("namespace"))
-        .limit(RowLimit::new(10).expect("limit"));
-        plan_builder = plan_builder.filter(filter);
-        let plan = plan_builder.build().expect("buildable");
-        let ir_ids = ranked_ids(&pool, &plan).await;
+            // The IR's answer.
+            let mut plan_builder = Search::builder(
+                Ident::parse_as("docs", IdentRole::Collection).expect("collection"),
+                SearchCriterion::Vector {
+                    column: column("embedding"),
+                    query: QueryVector::new(&query).expect("query vector"),
+                    metric: VectorMetric::Cosine,
+                },
+                docs_projection(),
+            )
+            .namespace(Ident::parse_as(SCHEMA, IdentRole::Namespace).expect("namespace"))
+            .limit(RowLimit::new(10).expect("limit"));
+            plan_builder = plan_builder.filter(filter);
+            let plan = plan_builder.build().expect("buildable");
+            let ir_ids = ranked_ids(&pool, &plan).await;
 
-        // The shipped builder's answer, for the same search. The schema hint is
-        // what `PostgresBackend::vector_search` passes it.
-        let schema_hint = value!({
-            "title": { "type": "string" },
-            "tenant_id": { "type": "number" },
-            "embedding": { "type": "vector", "vectorDims": DIMS },
-        });
-        let shipped = zeroship_data_sql::compile::build_vector_search(
-            &zeroship_data_sql::SchemaName::new(SCHEMA).expect("fixture schema name"),
-            "docs",
-            "embedding",
-            &query,
-            10,
-            zeroship_data_sql::descriptors::VectorMetric::Cosine,
-            &value!({ "tenant_id": 1 }),
-            &schema_hint,
-        )
-        .expect("the shipped builder accepts this search");
-        let shipped_params = &shipped.params;
-        let shipped_rows = zeroship_data_orm::backend::postgres::params::query(
-            &pool.acquire().await.unwrap(),
-            &shipped.sql,
-            shipped_params,
-        )
-        .await
-        .expect("the shipped builder's SQL runs");
-        let shipped_ids: Vec<String> = shipped_rows
-            .iter()
-            .map(|r| r.get::<_, String>("id"))
-            .collect();
+            // The shipped builder's answer, for the same search. The schema hint is
+            // what `PostgresBackend::vector_search` passes it.
+            let schema_hint = value!({
+                "title": { "type": "string" },
+                "tenant_id": { "type": "number" },
+                "embedding": { "type": "vector", "vectorDims": DIMS },
+            });
+            let shipped = zeroship_data_sql::compile::build_vector_search(
+                &zeroship_data_sql::SchemaName::new(SCHEMA).expect("fixture schema name"),
+                "docs",
+                "embedding",
+                &query,
+                10,
+                zeroship_data_sql::descriptors::VectorMetric::Cosine,
+                &value!({ "tenant_id": 1 }),
+                &schema_hint,
+            )
+            .expect("the shipped builder accepts this search");
+            let shipped_params = &shipped.params;
+            let shipped_rows = zeroship_data_orm::backend::postgres::params::query(
+                &pool.acquire().await.unwrap(),
+                &shipped.sql,
+                shipped_params,
+            )
+            .await
+            .expect("the shipped builder's SQL runs");
+            let shipped_ids: Vec<String> = shipped_rows
+                .iter()
+                .map(|r| r.get::<_, String>("id"))
+                .collect();
 
-        assert!(
-            !ir_ids.is_empty(),
-            "the fixture must produce rows, or the comparison below is between two \
+            assert!(
+                !ir_ids.is_empty(),
+                "the fixture must produce rows, or the comparison below is between two \
              empty lists and holds vacuously"
-        );
-        assert_eq!(
-            ir_ids, shipped_ids,
-            "the IR and the shipped builder disagree about the ranking"
-        );
+            );
+            assert_eq!(
+                ir_ids, shipped_ids,
+                "the IR and the shipped builder disagree about the ranking"
+            );
 
-        // THE CONTROL. A different metric must reorder, or the agreement above
-        // is a property of the fixture rather than of the two builders.
-        let l2 = docs_search(
-            SearchCriterion::Vector {
-                column: column("embedding"),
-                query: QueryVector::new(&query).expect("query vector"),
-                metric: VectorMetric::InnerProduct,
-            },
-            10,
-        );
-        let l2_ids = ranked_ids(&pool, &l2).await;
-        assert_ne!(
-            ir_ids, l2_ids,
-            "cosine and inner product returned the same ordering, so the fixture \
+            // THE CONTROL. A different metric must reorder, or the agreement above
+            // is a property of the fixture rather than of the two builders.
+            let l2 = docs_search(
+                SearchCriterion::Vector {
+                    column: column("embedding"),
+                    query: QueryVector::new(&query).expect("query vector"),
+                    metric: VectorMetric::InnerProduct,
+                },
+                10,
+            );
+            let l2_ids = ranked_ids(&pool, &l2).await;
+            assert_ne!(
+                ir_ids, l2_ids,
+                "cosine and inner product returned the same ordering, so the fixture \
              cannot distinguish a metric and the agreement above proves nothing"
-        );
+            );
 
-        println!(
-            "ruled on {} ranked ids from 2 builders plus 1 control",
-            ir_ids.len()
-        );
-    });
+            println!(
+                "ruled on {} ranked ids from 2 builders plus 1 control",
+                ir_ids.len()
+            );
+        });
+    })
 }
 
 /// THE DIVERGENCE ARM, executed on both sides.
@@ -476,101 +474,103 @@ fn the_ir_and_the_shipped_builder_rank_identically() {
 /// a designed divergence.
 #[test]
 fn postgres_serves_the_inner_product_that_sqlite_refuses() {
-    run(async {
-        let (_postgres, pool) = pool().await;
-        setup(&pool).await;
-        seed_vectors(&pool, 20).await;
+    crate::live_tests::host::in_test(|| {
+        run(async {
+            let (_postgres, pool) = pool().await;
+            setup(&pool).await;
+            seed_vectors(&pool, 20).await;
 
-        // The Postgres half: it executes and it ranks.
-        let plan = docs_search(
-            SearchCriterion::Vector {
-                column: column("embedding"),
-                query: QueryVector::new(&unit_vector(3)).expect("query vector"),
-                metric: VectorMetric::InnerProduct,
-            },
-            5,
-        );
-        let ids = ranked_ids(&pool, &plan).await;
-        assert_eq!(
-            ids.len(),
-            5,
-            "pgvector serves inner product through vector_ip_ops"
-        );
-
-        // The SQLite half: the same metric, refused.
-        use zeroship_data_orm::binding::DbBinding;
-        use zeroship_data_orm::backend::VectorMetric as BackendMetric;
-        let dir = tempfile::tempdir().expect("tempdir");
-        let sqlite = zeroship_data_orm::backend_selection::new_sqlite_backend(
-            std::path::PathBuf::from(dir.path()),
-            zeroship_data_v8::testing::isolate_key_source(),
-        )
-        .expect("open SqliteBackend");
-
-        let refused = sqlite
-            .vector_search(
-                None,
-                zeroship_data_orm::search::VectorSearch {
-                    binding: &DbBinding::cold_start("search_ir_live"),
-                    collection: "docs",
-                    column: "embedding",
-                    query: &unit_vector(3),
-                    k: 5,
-                    metric: BackendMetric::InnerProduct,
-                    filter: &zeroship_data_sql::value::Value::Null,
-                    schema: &zeroship_data_sql::value::Value::Null,
+            // The Postgres half: it executes and it ranks.
+            let plan = docs_search(
+                SearchCriterion::Vector {
+                    column: column("embedding"),
+                    query: QueryVector::new(&unit_vector(3)).expect("query vector"),
+                    metric: VectorMetric::InnerProduct,
                 },
-            )
-            .await
-            .expect_err("vec0 has no inner-product metric");
-        let refused_code = match &refused {
-            zeroship_data_orm::error::DbError::Configuration { code, .. } => *code,
-            other => panic!("expected a typed Configuration refusal, got {other:?}"),
-        };
-        assert_eq!(refused_code, "vector_unsupported_metric");
+                5,
+            );
+            let ids = ranked_ids(&pool, &plan).await;
+            assert_eq!(
+                ids.len(),
+                5,
+                "pgvector serves inner product through vector_ip_ops"
+            );
 
-        // THE CONTROL: one variable changed. A supported metric on the same
-        // backend with the same (absent) fixture must fail differently, which is
-        // what proves the refusal above is keyed to the METRIC and not to the
-        // missing relation.
-        let other = sqlite
-            .vector_search(
-                None,
-                zeroship_data_orm::search::VectorSearch {
-                    binding: &DbBinding::cold_start("search_ir_live"),
-                    collection: "docs",
-                    column: "embedding",
-                    query: &unit_vector(3),
-                    k: 5,
-                    metric: BackendMetric::Cosine,
-                    filter: &zeroship_data_sql::value::Value::Null,
-                    schema: &zeroship_data_sql::value::Value::Null,
-                },
+            // The SQLite half: the same metric, refused.
+            use zeroship_data_orm::backend::VectorMetric as BackendMetric;
+            use zeroship_data_orm::binding::DbBinding;
+            let dir = tempfile::tempdir().expect("tempdir");
+            let sqlite = zeroship_data_orm::backend_selection::new_sqlite_backend(
+                std::path::PathBuf::from(dir.path()),
+                crate::live_tests::host::isolate_key_source(),
             )
-            .await
-            .expect_err("there is no table, so this fails too - but for another reason");
-        let other_code = match &other {
-            zeroship_data_orm::error::DbError::Configuration { code, .. } => Some(*code),
-            _ => None,
-        };
-        assert_ne!(
-            other_code,
-            Some("vector_unsupported_metric"),
-            "cosine produced the metric refusal too, so the arm above is reporting the \
+            .expect("open SqliteBackend");
+
+            let refused = sqlite
+                .vector_search(
+                    None,
+                    zeroship_data_orm::search::VectorSearch {
+                        binding: &DbBinding::cold_start("search_ir_live"),
+                        collection: "docs",
+                        column: "embedding",
+                        query: &unit_vector(3),
+                        k: 5,
+                        metric: BackendMetric::InnerProduct,
+                        filter: &zeroship_data_sql::value::Value::Null,
+                        schema: &zeroship_data_sql::value::Value::Null,
+                    },
+                )
+                .await
+                .expect_err("vec0 has no inner-product metric");
+            let refused_code = match &refused {
+                zeroship_data_orm::error::DbError::Configuration { code, .. } => *code,
+                other => panic!("expected a typed Configuration refusal, got {other:?}"),
+            };
+            assert_eq!(refused_code, "vector_unsupported_metric");
+
+            // THE CONTROL: one variable changed. A supported metric on the same
+            // backend with the same (absent) fixture must fail differently, which is
+            // what proves the refusal above is keyed to the METRIC and not to the
+            // missing relation.
+            let other = sqlite
+                .vector_search(
+                    None,
+                    zeroship_data_orm::search::VectorSearch {
+                        binding: &DbBinding::cold_start("search_ir_live"),
+                        collection: "docs",
+                        column: "embedding",
+                        query: &unit_vector(3),
+                        k: 5,
+                        metric: BackendMetric::Cosine,
+                        filter: &zeroship_data_sql::value::Value::Null,
+                        schema: &zeroship_data_sql::value::Value::Null,
+                    },
+                )
+                .await
+                .expect_err("there is no table, so this fails too - but for another reason");
+            let other_code = match &other {
+                zeroship_data_orm::error::DbError::Configuration { code, .. } => Some(*code),
+                _ => None,
+            };
+            assert_ne!(
+                other_code,
+                Some("vector_unsupported_metric"),
+                "cosine produced the metric refusal too, so the arm above is reporting the \
              missing fixture rather than the divergence: {other:?}"
-        );
+            );
 
-        // Recorded on the PASSING path, not only in a failure message. What the
-        // control produced is the evidence that the refusal above is keyed to
-        // the metric, and a reader of a green run should be able to see it
-        // without re-deriving it.
-        println!(
-            "ruled on 1 metric across 2 backends: postgres ranked {} rows by inner \
+            // Recorded on the PASSING path, not only in a failure message. What the
+            // control produced is the evidence that the refusal above is keyed to
+            // the metric, and a reader of a green run should be able to see it
+            // without re-deriving it.
+            println!(
+                "ruled on 1 metric across 2 backends: postgres ranked {} rows by inner \
              product; sqlite refused it as `{refused_code}`; the cosine control on the \
              same backend failed differently ({other_code:?})",
-            ids.len()
-        );
-    });
+                ids.len()
+            );
+        });
+    })
 }
 
 /// The geo lowering runs against real PostGIS, and the coordinate order is the
@@ -582,75 +582,77 @@ fn postgres_serves_the_inner_product_that_sqlite_refuses() {
 /// wrote latitude first would return zero rows here, not a different ranking.
 #[test]
 fn a_geo_search_finds_the_near_rows_and_the_coordinate_order_is_load_bearing() {
-    run(async {
-        let (_postgres, pool) = pool().await;
-        setup(&pool).await;
+    crate::live_tests::host::in_test(|| {
+        run(async {
+            let (_postgres, pool) = pool().await;
+            setup(&pool).await;
 
-        // London, and a point ~2 km away. Transposing either pair gives a
-        // latitude near -0.12 and a longitude near 51.5, which is open ocean.
-        let places = [
-            ("doc_near", 51.5007, -0.1246),
-            ("doc_alsonear", 51.5155, -0.1420),
-            ("doc_far", 48.8584, 2.2945),
-        ];
-        for (id, latitude, longitude) in places {
-            let id = id.to_string();
-            let embedding = vector_text(&unit_vector(0));
-            // Longitude first here too: `ST_MakePoint` is `(x, y)`.
-            let longitude = longitude.to_string();
-            let latitude = latitude.to_string();
-            pool.query_text_params(
-                &format!(
-                    "INSERT INTO \"{SCHEMA}\".\"docs\" \
+            // London, and a point ~2 km away. Transposing either pair gives a
+            // latitude near -0.12 and a longitude near 51.5, which is open ocean.
+            let places = [
+                ("doc_near", 51.5007, -0.1246),
+                ("doc_alsonear", 51.5155, -0.1420),
+                ("doc_far", 48.8584, 2.2945),
+            ];
+            for (id, latitude, longitude) in places {
+                let id = id.to_string();
+                let embedding = vector_text(&unit_vector(0));
+                // Longitude first here too: `ST_MakePoint` is `(x, y)`.
+                let longitude = longitude.to_string();
+                let latitude = latitude.to_string();
+                pool.query_text_params(
+                    &format!(
+                        "INSERT INTO \"{SCHEMA}\".\"docs\" \
                        (id, title, tenant_id, embedding, location) \
                      VALUES ($1, $1, 0, $2::vector, \
                              ST_SetSRID(ST_MakePoint($3, $4), 4326)::geography)"
-                ),
-                &[&id, &embedding, &longitude, &latitude],
-            )
-            .await
-            .expect("insert place");
-        }
+                    ),
+                    &[&id, &embedding, &longitude, &latitude],
+                )
+                .await
+                .expect("insert place");
+            }
 
-        let plan = docs_search(
-            SearchCriterion::Geo {
-                column: column("location"),
-                point: GeoPoint::new(51.5007, -0.1246).expect("London"),
-                radius: RadiusMetres::new(5_000.0).expect("5 km"),
-            },
-            10,
-        );
-        let ids = ranked_ids(&pool, &plan).await;
+            let plan = docs_search(
+                SearchCriterion::Geo {
+                    column: column("location"),
+                    point: GeoPoint::new(51.5007, -0.1246).expect("London"),
+                    radius: RadiusMetres::new(5_000.0).expect("5 km"),
+                },
+                10,
+            );
+            let ids = ranked_ids(&pool, &plan).await;
 
-        assert_eq!(
-            ids,
-            vec!["doc_near".to_string(), "doc_alsonear".to_string()],
-            "ST_DWithin must keep the two London rows and drop Paris, and ST_Distance \
+            assert_eq!(
+                ids,
+                vec!["doc_near".to_string(), "doc_alsonear".to_string()],
+                "ST_DWithin must keep the two London rows and drop Paris, and ST_Distance \
              must rank the exact match first"
-        );
+            );
 
-        // THE CONTROL for the coordinate order. The transposed point is a valid
-        // GeoPoint - both numbers are in range - and it is a different place, so
-        // it must match nothing. If the lowering wrote latitude into
-        // ST_MakePoint's x slot, THIS is the query that would have returned the
-        // London rows.
-        let transposed = docs_search(
-            SearchCriterion::Geo {
-                column: column("location"),
-                point: GeoPoint::new(-0.1246, 51.5007).expect("a valid, wrong point"),
-                radius: RadiusMetres::new(5_000.0).expect("5 km"),
-            },
-            10,
-        );
-        let transposed_ids = ranked_ids(&pool, &transposed).await;
-        assert!(
-            transposed_ids.is_empty(),
-            "a transposed pair is a different place on Earth and must match nothing; \
+            // THE CONTROL for the coordinate order. The transposed point is a valid
+            // GeoPoint - both numbers are in range - and it is a different place, so
+            // it must match nothing. If the lowering wrote latitude into
+            // ST_MakePoint's x slot, THIS is the query that would have returned the
+            // London rows.
+            let transposed = docs_search(
+                SearchCriterion::Geo {
+                    column: column("location"),
+                    point: GeoPoint::new(-0.1246, 51.5007).expect("a valid, wrong point"),
+                    radius: RadiusMetres::new(5_000.0).expect("5 km"),
+                },
+                10,
+            );
+            let transposed_ids = ranked_ids(&pool, &transposed).await;
+            assert!(
+                transposed_ids.is_empty(),
+                "a transposed pair is a different place on Earth and must match nothing; \
              it returned {transposed_ids:?}, which means ST_MakePoint got (lat, lng)"
-        );
+            );
 
-        println!("ruled on 3 placed rows, 1 query and 1 transposition control");
-    });
+            println!("ruled on 3 placed rows, 1 query and 1 transposition control");
+        });
+    })
 }
 
 /// The bound reaches the server as a parameter, so one statement text serves
@@ -663,43 +665,45 @@ fn a_geo_search_finds_the_near_rows_and_the_coordinate_order_is_load_bearing() {
 /// is a distinct statement and a distinct cache entry.
 #[test]
 fn one_statement_serves_every_k() {
-    run(async {
-        let (_postgres, pool) = pool().await;
-        setup(&pool).await;
-        seed_vectors(&pool, 50).await;
+    crate::live_tests::host::in_test(|| {
+        run(async {
+            let (_postgres, pool) = pool().await;
+            setup(&pool).await;
+            seed_vectors(&pool, 50).await;
 
-        let criterion = || SearchCriterion::Vector {
-            column: column("embedding"),
-            query: QueryVector::new(&unit_vector(0)).expect("query vector"),
-            metric: VectorMetric::Cosine,
-        };
-        let five = render_search(&docs_search(criterion(), 5)).expect("renderable");
-        let twenty = render_search(&docs_search(criterion(), 20)).expect("renderable");
+            let criterion = || SearchCriterion::Vector {
+                column: column("embedding"),
+                query: QueryVector::new(&unit_vector(0)).expect("query vector"),
+                metric: VectorMetric::Cosine,
+            };
+            let five = render_search(&docs_search(criterion(), 5)).expect("renderable");
+            let twenty = render_search(&docs_search(criterion(), 20)).expect("renderable");
 
-        assert_eq!(
-            five.sql(),
-            twenty.sql(),
-            "two values of k must be one statement, or the prepared-statement cache \
+            assert_eq!(
+                five.sql(),
+                twenty.sql(),
+                "two values of k must be one statement, or the prepared-statement cache \
              holds one entry per page size"
-        );
+            );
 
-        let mut counts = Vec::new();
-        for rendered in [&five, &twenty] {
-            let owned = bind_text(rendered.params());
-            let params: Vec<&str> = owned.iter().map(String::as_str).collect();
-            let rows = pool
-                .query_text_params(rendered.sql(), &params)
-                .await
-                .expect("runs");
-            counts.push(rows.len());
-        }
-        assert_eq!(
-            counts,
-            vec![5, 20],
-            "one statement, two arguments, two page sizes"
-        );
-        println!("ruled on 2 executions of 1 statement text");
-    });
+            let mut counts = Vec::new();
+            for rendered in [&five, &twenty] {
+                let owned = bind_text(rendered.params());
+                let params: Vec<&str> = owned.iter().map(String::as_str).collect();
+                let rows = pool
+                    .query_text_params(rendered.sql(), &params)
+                    .await
+                    .expect("runs");
+                counts.push(rows.len());
+            }
+            assert_eq!(
+                counts,
+                vec![5, 20],
+                "one statement, two arguments, two page sizes"
+            );
+            println!("ruled on 2 executions of 1 statement text");
+        });
+    })
 }
 
 #[allow(unused_imports)]

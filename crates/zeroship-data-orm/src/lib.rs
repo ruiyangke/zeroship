@@ -119,3 +119,8 @@ mod tx_lane_state_tests;
 #[cfg(test)]
 #[path = "../../../tests/fixtures/postgres/mod.rs"]
 mod postgres_fixture;
+
+#[cfg(test)]
+mod live_tests;
+#[cfg(test)]
+use live_tests::{support, schema_fixture};

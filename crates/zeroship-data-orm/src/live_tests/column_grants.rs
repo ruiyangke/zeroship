@@ -46,6 +46,14 @@ use zeroship_migrate::schema::query::FkEmission;
 use std::collections::BTreeSet;
 
 use compio_postgres::{Client, NoTls};
+use zeroship_data_sql::compile::{
+    SYSTEM_FIELD_NAMES, SqlDialect, SystemFieldAutoBump, build_delete_many, build_delete_one,
+    build_insert, build_insert_many, build_restore_many_with_system_fields,
+    build_restore_one_with_system_fields, build_returning_expr,
+    build_soft_delete_many_with_system_fields, build_soft_delete_one_with_system_fields,
+    build_update_many_with_system_fields, build_update_one_with_system_fields, build_upsert,
+    quote_ident, raw_column_name,
+};
 use zeroship_data_sql::render::postgres::{render_delete, render_update};
 use zeroship_data_sql::value::{Value, value};
 use zeroship_data_sql::{
@@ -54,14 +62,6 @@ use zeroship_data_sql::{
     IdentRole as PlanIdentRole, Literal as PlanLiteral, Operand as PlanOperand,
     Predicate as PlanPredicate, ProjectedField as PlanProjectedField, Projection as PlanProjection,
     Returning as PlanReturning, RowLimit as PlanRowLimit, Update as PlanUpdate,
-};
-use zeroship_data_sql::compile::{
-    SYSTEM_FIELD_NAMES, SqlDialect, SystemFieldAutoBump, build_delete_many, build_delete_one,
-    build_insert, build_insert_many, build_restore_many_with_system_fields,
-    build_restore_one_with_system_fields, build_returning_expr,
-    build_soft_delete_many_with_system_fields, build_soft_delete_one_with_system_fields,
-    build_update_many_with_system_fields, build_update_one_with_system_fields, build_upsert,
-    quote_ident, raw_column_name,
 };
 
 /// The collection every arm writes.
@@ -85,8 +85,6 @@ fn people_schema() -> Value {
         "nickname": { "type": "string" },
     })
 }
-
-
 
 async fn connect(url: &str) -> Client {
     let (client, connection) = compio_postgres::connect(url, NoTls)
@@ -515,104 +513,110 @@ const SINGLE_ROW_VERBS: usize = 4;
 
 /// **THE TEST.** A role with column-scoped read/write grants completes every
 /// projected verb. Its sole table privilege is the unavoidable DELETE grant.
-#[compio::test]
-async fn column_scoped_reads_complete_every_projected_write_verb() {
-    let postgres = crate::support::postgres::Postgres::start();
-    let url = postgres.url();
-    let admin = connect(&url).await;
-    println!(
-        "column_grants oracle: server_version_num={}",
-        server_version_num(&admin).await
-    );
-    let suffix = unique_suffix();
-    let (app, role) = fixture(&admin, &suffix).await;
-    let schema = people_schema();
+#[test]
+fn column_scoped_reads_complete_every_projected_write_verb() {
+    crate::live_tests::host::in_test(|| {
+        crate::live_tests::host::run(async {
+            let postgres = crate::support::postgres::Postgres::start();
+            let url = postgres.url();
+            let admin = connect(&url).await;
+            println!(
+                "column_grants oracle: server_version_num={}",
+                server_version_num(&admin).await
+            );
+            let suffix = unique_suffix();
+            let (app, role) = fixture(&admin, &suffix).await;
+            let schema = people_schema();
 
-    // The role must not be able to read the raw column even by naming it -
-    // otherwise the grant is not what this suite claims it is.
-    let session = connect(&url).await;
-    begin_as_role(&session, &role).await;
+            // The role must not be able to read the raw column even by naming it -
+            // otherwise the grant is not what this suite claims it is.
+            let session = connect(&url).await;
+            begin_as_role(&session, &role).await;
 
-    let table = format!("{}.{}", quote_ident(&app), quote_ident(COLLECTION));
-    let raw = raw_column_name("ssn");
-    let denied = session
-        .query_text_params(&format!("SELECT {} FROM {table}", quote_ident(&raw)), &[])
-        .await
-        .expect_err("the role must not be able to read the raw column");
-    assert!(
-        format!("{denied:?}").contains("42501"),
-        "expected a privilege refusal on the raw column, got {denied:?}",
-    );
-    session
-        .batch_execute("ROLLBACK")
-        .await
-        .expect("close the refused raw-column arm");
+            let table = format!("{}.{}", quote_ident(&app), quote_ident(COLLECTION));
+            let raw = raw_column_name("ssn");
+            let denied = session
+                .query_text_params(&format!("SELECT {} FROM {table}", quote_ident(&raw)), &[])
+                .await
+                .expect_err("the role must not be able to read the raw column");
+            assert!(
+                format!("{denied:?}").contains("42501"),
+                "expected a privilege refusal on the raw column, got {denied:?}",
+            );
+            session
+                .batch_execute("ROLLBACK")
+                .await
+                .expect("close the refused raw-column arm");
 
-    // Seed one row the update / delete / restore verbs act on, as the ROLE.
-    begin_as_role(&session, &role).await;
-    let seed = build_insert(
+            // Seed one row the update / delete / restore verbs act on, as the ROLE.
+            begin_as_role(&session, &role).await;
+            let seed = build_insert(
         &zeroship_data_sql::SchemaName::new(&app).expect("fixture schema name"),
         COLLECTION,
         &schema,
         &value!({ "id": "psn_seed", "nickname": "seed", "ssn": "***", (raw.clone()): "123-45-6789" }),
     )
     .expect("seed insert builds");
-    let seed_params = &seed.params;
-    zeroship_data_orm::backend::postgres::params::query(&session, &seed.sql, seed_params)
-        .await
-        .unwrap_or_else(|e| panic!("the role must be able to seed a row: {e}\n{}", seed.sql));
+            let seed_params = &seed.params;
+            zeroship_data_orm::backend::postgres::params::query(&session, &seed.sql, seed_params)
+                .await
+                .unwrap_or_else(|e| {
+                    panic!("the role must be able to seed a row: {e}\n{}", seed.sql)
+                });
 
-    let statements = column_grant_ready_statements(&app, &schema);
-    assert_eq!(
-        statements.len(),
-        WRITE_VERBS_EXERCISED,
-        "this suite must rule on every write verb it claims to",
-    );
+            let statements = column_grant_ready_statements(&app, &schema);
+            assert_eq!(
+                statements.len(),
+                WRITE_VERBS_EXERCISED,
+                "this suite must rule on every write verb it claims to",
+            );
 
-    let mut ruled_on = 0usize;
-    for (verb, sql, params) in &statements {
-        assert!(
-            !sql.contains("RETURNING *"),
-            "{verb} still stars; the arm below would not be measuring the projection: {sql}",
-        );
-        let refs = &params;
-        zeroship_data_orm::backend::postgres::params::query(&session, sql, refs)
-            .await
-            .unwrap_or_else(|e| {
-                panic!("{verb} must be executable with column-scoped reads: {e}\n{sql}")
-            });
-        ruled_on += 1;
-    }
-    assert_eq!(
-        ruled_on, WRITE_VERBS_EXERCISED,
-        "every verb must have reached the server",
-    );
-    session
-        .batch_execute("COMMIT")
-        .await
-        .expect("commit the projected write verbs");
+            let mut ruled_on = 0usize;
+            for (verb, sql, params) in &statements {
+                assert!(
+                    !sql.contains("RETURNING *"),
+                    "{verb} still stars; the arm below would not be measuring the projection: {sql}",
+                );
+                let refs = &params;
+                zeroship_data_orm::backend::postgres::params::query(&session, sql, refs)
+                    .await
+                    .unwrap_or_else(|e| {
+                        panic!("{verb} must be executable with column-scoped reads: {e}\n{sql}")
+                    });
+                ruled_on += 1;
+            }
+            assert_eq!(
+                ruled_on, WRITE_VERBS_EXERCISED,
+                "every verb must have reached the server",
+            );
+            session
+                .batch_execute("COMMIT")
+                .await
+                .expect("commit the projected write verbs");
 
-    // The raw column really is in the table and really did receive the value -
-    // so "the role cannot read it" is about the grant, not about a write that
-    // never stored anything.
-    let stored = admin
-        .query_text_params(
-            &format!(
-                "SELECT {} AS raw FROM {table} WHERE \"id\" = $1",
-                quote_ident(&raw)
-            ),
-            &["psn_seed"],
-        )
-        .await
-        .expect("the admin can read the raw column");
-    assert_eq!(stored.len(), 1, "the seeded row must exist");
-    assert_eq!(
-        stored[0].get::<_, Option<String>>("raw").as_deref(),
-        Some("123-45-6789"),
-        "the role wrote the authoritative value it may not read back",
-    );
+            // The raw column really is in the table and really did receive the value -
+            // so "the role cannot read it" is about the grant, not about a write that
+            // never stored anything.
+            let stored = admin
+                .query_text_params(
+                    &format!(
+                        "SELECT {} AS raw FROM {table} WHERE \"id\" = $1",
+                        quote_ident(&raw)
+                    ),
+                    &["psn_seed"],
+                )
+                .await
+                .expect("the admin can read the raw column");
+            assert_eq!(stored.len(), 1, "the seeded row must exist");
+            assert_eq!(
+                stored[0].get::<_, Option<String>>("raw").as_deref(),
+                Some("123-45-6789"),
+                "the role wrote the authoritative value it may not read back",
+            );
 
-    teardown(&admin, &app, &role).await;
+            teardown(&admin, &app, &role).await;
+        })
+    })
 }
 
 /// **THE CONTROL**, differing in ONE variable: `RETURNING *` instead of the
@@ -620,67 +624,71 @@ async fn column_scoped_reads_complete_every_projected_write_verb() {
 ///
 /// Without this the test above is only "these statements happen to run". With
 /// it, the pass is attributable to the projection.
-#[compio::test]
-async fn the_same_verbs_are_refused_outright_when_the_returning_clause_stars() {
-    let postgres = crate::support::postgres::Postgres::start();
-    let url = postgres.url();
-    let admin = connect(&url).await;
-    let suffix = unique_suffix();
-    let (app, role) = fixture(&admin, &suffix).await;
-    let schema = people_schema();
+#[test]
+fn the_same_verbs_are_refused_outright_when_the_returning_clause_stars() {
+    crate::live_tests::host::in_test(|| {
+        crate::live_tests::host::run(async {
+            let postgres = crate::support::postgres::Postgres::start();
+            let url = postgres.url();
+            let admin = connect(&url).await;
+            let suffix = unique_suffix();
+            let (app, role) = fixture(&admin, &suffix).await;
+            let schema = people_schema();
 
-    let session = connect(&url).await;
-    begin_as_role(&session, &role).await;
-    let seed = build_insert(
-        &zeroship_data_sql::SchemaName::new(&app).expect("fixture schema name"),
-        COLLECTION,
-        &schema,
-        &value!({ "id": "psn_seed", "nickname": "s" }),
-    )
-    .expect("seed builds");
-    let seed_params = &seed.params;
-    zeroship_data_orm::backend::postgres::params::query(&session, &seed.sql, seed_params)
-        .await
-        .expect("seed insert");
-    session
-        .batch_execute("COMMIT")
-        .await
-        .expect("commit the control seed");
+            let session = connect(&url).await;
+            begin_as_role(&session, &role).await;
+            let seed = build_insert(
+                &zeroship_data_sql::SchemaName::new(&app).expect("fixture schema name"),
+                COLLECTION,
+                &schema,
+                &value!({ "id": "psn_seed", "nickname": "s" }),
+            )
+            .expect("seed builds");
+            let seed_params = &seed.params;
+            zeroship_data_orm::backend::postgres::params::query(&session, &seed.sql, seed_params)
+                .await
+                .expect("seed insert");
+            session
+                .batch_execute("COMMIT")
+                .await
+                .expect("commit the control seed");
 
-    let returning = build_returning_expr(&schema).expect("projection");
-    let mut ruled_on = 0usize;
-    for (verb, sql, params) in column_grant_ready_statements(&app, &schema) {
-        let starred = sql.replace(&format!("RETURNING {returning}"), "RETURNING *");
-        assert!(
-            starred.contains("RETURNING *"),
-            "{verb}: the mutation must have applied, or this control proves nothing: {sql}",
-        );
-        let parameters: Vec<_> = params
-            .iter()
-            .map(zeroship_data_orm::backend::postgres::params::Parameter)
-            .collect();
-        let refs: Vec<&(dyn compio_postgres::types::ToSql + Sync)> =
-            parameters.iter().map(|p| p as _).collect();
-        begin_as_role(&session, &role).await;
-        let err = session.query(&starred, &refs).await.expect_err(&format!(
-            "{verb} with `RETURNING *` must be refused: {starred}"
-        ));
-        assert!(
-            err.code() == Some(&compio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE),
-            "{verb}: expected 42501 permission denied, got {err:?}",
-        );
-        session
-            .batch_execute("ROLLBACK")
-            .await
-            .expect("close the refused RETURNING star arm");
-        ruled_on += 1;
-    }
-    assert_eq!(
-        ruled_on, WRITE_VERBS_EXERCISED,
-        "the control must rule on the same verb set as the test it controls",
-    );
+            let returning = build_returning_expr(&schema).expect("projection");
+            let mut ruled_on = 0usize;
+            for (verb, sql, params) in column_grant_ready_statements(&app, &schema) {
+                let starred = sql.replace(&format!("RETURNING {returning}"), "RETURNING *");
+                assert!(
+                    starred.contains("RETURNING *"),
+                    "{verb}: the mutation must have applied, or this control proves nothing: {sql}",
+                );
+                let parameters: Vec<_> = params
+                    .iter()
+                    .map(zeroship_data_orm::backend::postgres::params::Parameter)
+                    .collect();
+                let refs: Vec<&(dyn compio_postgres::types::ToSql + Sync)> =
+                    parameters.iter().map(|p| p as _).collect();
+                begin_as_role(&session, &role).await;
+                let err = session.query(&starred, &refs).await.expect_err(&format!(
+                    "{verb} with `RETURNING *` must be refused: {starred}"
+                ));
+                assert!(
+                    err.code() == Some(&compio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE),
+                    "{verb}: expected 42501 permission denied, got {err:?}",
+                );
+                session
+                    .batch_execute("ROLLBACK")
+                    .await
+                    .expect("close the refused RETURNING star arm");
+                ruled_on += 1;
+            }
+            assert_eq!(
+                ruled_on, WRITE_VERBS_EXERCISED,
+                "the control must rule on the same verb set as the test it controls",
+            );
 
-    teardown(&admin, &app, &role).await;
+            teardown(&admin, &app, &role).await;
+        })
+    })
 }
 
 /// The four single-row verbs must execute without SELECT access to `ctid`.
@@ -692,75 +700,83 @@ async fn the_same_verbs_are_refused_outright_when_the_returning_clause_stars() {
 /// on PostgreSQL cannot make the test pass. Hard DELETE also needs the fixture's
 /// table DELETE privilege because PostgreSQL has no column form of that verb;
 /// that privilege grants no read access to `ctid` or to the withheld column.
-#[compio::test]
-async fn the_single_row_verbs_succeed_without_ctid_access() {
-    let postgres = crate::support::postgres::Postgres::start();
-    let url = postgres.url();
-    let admin = connect(&url).await;
-    let suffix = unique_suffix();
-    let (app, role) = fixture(&admin, &suffix).await;
-    let schema = people_schema();
+#[test]
+fn the_single_row_verbs_succeed_without_ctid_access() {
+    crate::live_tests::host::in_test(|| {
+        crate::live_tests::host::run(async {
+            let postgres = crate::support::postgres::Postgres::start();
+            let url = postgres.url();
+            let admin = connect(&url).await;
+            let suffix = unique_suffix();
+            let (app, role) = fixture(&admin, &suffix).await;
+            let schema = people_schema();
 
-    let session = connect(&url).await;
-    let table = format!("{}.{}", quote_ident(&app), quote_ident(COLLECTION));
+            let session = connect(&url).await;
+            let table = format!("{}.{}", quote_ident(&app), quote_ident(COLLECTION));
 
-    // The control is its own explicit transaction because PostgreSQL aborts a
-    // transaction after the expected privilege error.
-    begin_as_role(&session, &role).await;
-    let ctid_err = session
-        .query_text_params(&format!("SELECT ctid FROM {table}"), &[])
-        .await
-        .expect_err("the column-scoped role must not be able to read ctid");
-    assert!(
-        format!("{ctid_err:?}").contains("42501"),
-        "expected 42501 on the system column, got {ctid_err:?}",
-    );
-    session
-        .batch_execute("ROLLBACK")
-        .await
-        .expect("close the refused ctid arm");
+            // The control is its own explicit transaction because PostgreSQL aborts a
+            // transaction after the expected privilege error.
+            begin_as_role(&session, &role).await;
+            let ctid_err = session
+                .query_text_params(&format!("SELECT ctid FROM {table}"), &[])
+                .await
+                .expect_err("the column-scoped role must not be able to read ctid");
+            assert!(
+                format!("{ctid_err:?}").contains("42501"),
+                "expected 42501 on the system column, got {ctid_err:?}",
+            );
+            session
+                .batch_execute("ROLLBACK")
+                .await
+                .expect("close the refused ctid arm");
 
-    begin_as_role(&session, &role).await;
-    session
-        .query_text_params(&format!("SELECT \"id\" FROM {table}"), &[])
-        .await
-        .expect("the same role reads an ordinary granted column");
+            begin_as_role(&session, &role).await;
+            session
+                .query_text_params(&format!("SELECT \"id\" FROM {table}"), &[])
+                .await
+                .expect("the same role reads an ordinary granted column");
 
-    let raw = raw_column_name("ssn");
-    let seed = build_insert(
-        &zeroship_data_sql::SchemaName::new(&app).expect("fixture schema name"),
-        COLLECTION,
-        &schema,
-        &value!({ "id": "psn_seed", "nickname": "seed", "ssn": "***", raw: "123-45-6789" }),
-    )
-    .expect("seed insert builds");
-    let seed_refs = &seed.params;
-    zeroship_data_orm::backend::postgres::params::query(&session, &seed.sql, seed_refs)
-        .await
-        .unwrap_or_else(|e| panic!("the role must be able to seed a row: {e}\n{}", seed.sql));
+            let raw = raw_column_name("ssn");
+            let seed = build_insert(
+                &zeroship_data_sql::SchemaName::new(&app).expect("fixture schema name"),
+                COLLECTION,
+                &schema,
+                &value!({ "id": "psn_seed", "nickname": "seed", "ssn": "***", raw: "123-45-6789" }),
+            )
+            .expect("seed insert builds");
+            let seed_refs = &seed.params;
+            zeroship_data_orm::backend::postgres::params::query(&session, &seed.sql, seed_refs)
+                .await
+                .unwrap_or_else(|e| {
+                    panic!("the role must be able to seed a row: {e}\n{}", seed.sql)
+                });
 
-    let statements = single_row_statements(&app, &schema);
-    assert_eq!(statements.len(), SINGLE_ROW_VERBS);
-    let mut ruled_on = 0usize;
-    for (verb, sql, params) in &statements {
-        assert!(
-            !sql.contains("RETURNING *"),
-            "{verb}: the behavioural arm must retain its column projection: {sql}",
-        );
-        let refs = &params;
-        let rows = zeroship_data_orm::backend::postgres::params::query(&session, sql, refs)
-            .await
-            .unwrap_or_else(|e| panic!("{verb} must execute under column grants: {e}\n{sql}"));
-        assert_eq!(rows.len(), 1, "{verb} must affect exactly the seeded row");
-        ruled_on += 1;
-    }
-    assert_eq!(ruled_on, SINGLE_ROW_VERBS);
-    session
-        .batch_execute("COMMIT")
-        .await
-        .expect("commit the successful single-row verbs");
+            let statements = single_row_statements(&app, &schema);
+            assert_eq!(statements.len(), SINGLE_ROW_VERBS);
+            let mut ruled_on = 0usize;
+            for (verb, sql, params) in &statements {
+                assert!(
+                    !sql.contains("RETURNING *"),
+                    "{verb}: the behavioural arm must retain its column projection: {sql}",
+                );
+                let refs = &params;
+                let rows = zeroship_data_orm::backend::postgres::params::query(&session, sql, refs)
+                    .await
+                    .unwrap_or_else(|e| {
+                        panic!("{verb} must execute under column grants: {e}\n{sql}")
+                    });
+                assert_eq!(rows.len(), 1, "{verb} must affect exactly the seeded row");
+                ruled_on += 1;
+            }
+            assert_eq!(ruled_on, SINGLE_ROW_VERBS);
+            session
+                .batch_execute("COMMIT")
+                .await
+                .expect("commit the successful single-row verbs");
 
-    teardown(&admin, &app, &role).await;
+            teardown(&admin, &app, &role).await;
+        })
+    })
 }
 
 /// The replacement data-plan renderer must obey the same live grant boundary.
@@ -768,59 +784,65 @@ async fn the_single_row_verbs_succeed_without_ctid_access() {
 /// Both statements execute on PostgreSQL. A renderer-only assertion would let
 /// a different privilege mistake pass while the SQL merely stopped spelling
 /// `ctid`.
-#[compio::test]
-async fn bounded_data_plan_writes_succeed_with_column_scoped_reads() {
-    let postgres = crate::support::postgres::Postgres::start();
-    let url = postgres.url();
-    let admin = connect(&url).await;
-    let suffix = unique_suffix();
-    let (app, role) = fixture(&admin, &suffix).await;
-    let schema = people_schema();
-    let session = connect(&url).await;
+#[test]
+fn bounded_data_plan_writes_succeed_with_column_scoped_reads() {
+    crate::live_tests::host::in_test(|| {
+        crate::live_tests::host::run(async {
+            let postgres = crate::support::postgres::Postgres::start();
+            let url = postgres.url();
+            let admin = connect(&url).await;
+            let suffix = unique_suffix();
+            let (app, role) = fixture(&admin, &suffix).await;
+            let schema = people_schema();
+            let session = connect(&url).await;
 
-    begin_as_role(&session, &role).await;
-    let raw = raw_column_name("ssn");
-    let seed = build_insert(
-        &zeroship_data_sql::SchemaName::new(&app).expect("fixture schema name"),
-        COLLECTION,
-        &schema,
-        &value!({ "id": "psn_seed", "nickname": "seed", "ssn": "***", raw: "123-45-6789" }),
-    )
-    .expect("seed insert builds");
-    let seed_refs = &seed.params;
-    zeroship_data_orm::backend::postgres::params::query(&session, &seed.sql, seed_refs)
-        .await
-        .unwrap_or_else(|e| panic!("the role must be able to seed a row: {e}\n{}", seed.sql));
+            begin_as_role(&session, &role).await;
+            let raw = raw_column_name("ssn");
+            let seed = build_insert(
+                &zeroship_data_sql::SchemaName::new(&app).expect("fixture schema name"),
+                COLLECTION,
+                &schema,
+                &value!({ "id": "psn_seed", "nickname": "seed", "ssn": "***", raw: "123-45-6789" }),
+            )
+            .expect("seed insert builds");
+            let seed_refs = &seed.params;
+            zeroship_data_orm::backend::postgres::params::query(&session, &seed.sql, seed_refs)
+                .await
+                .unwrap_or_else(|e| {
+                    panic!("the role must be able to seed a row: {e}\n{}", seed.sql)
+                });
 
-    let statements = bounded_data_plan_statements(&app);
-    assert_eq!(
-        statements.len(),
-        2,
-        "update and delete must both be ruled on"
-    );
-    let mut ruled_on = 0usize;
-    for (verb, rendered) in statements {
-        let owned = bounded_data_plan_params(rendered.params());
-        let params: Vec<&str> = owned.iter().map(String::as_str).collect();
-        let rows = session
-            .query_text_params(rendered.sql(), &params)
-            .await
-            .unwrap_or_else(|e| {
-                panic!(
-                    "{verb} must execute under column grants: {e}\n{}",
-                    rendered.sql()
-                )
-            });
-        assert_eq!(rows.len(), 1, "{verb} must affect exactly the bounded row");
-        ruled_on += 1;
-    }
-    assert_eq!(ruled_on, 2, "both bounded writes must reach PostgreSQL");
-    session
-        .batch_execute("COMMIT")
-        .await
-        .expect("commit the successful data-plan writes");
+            let statements = bounded_data_plan_statements(&app);
+            assert_eq!(
+                statements.len(),
+                2,
+                "update and delete must both be ruled on"
+            );
+            let mut ruled_on = 0usize;
+            for (verb, rendered) in statements {
+                let owned = bounded_data_plan_params(rendered.params());
+                let params: Vec<&str> = owned.iter().map(String::as_str).collect();
+                let rows = session
+                    .query_text_params(rendered.sql(), &params)
+                    .await
+                    .unwrap_or_else(|e| {
+                        panic!(
+                            "{verb} must execute under column grants: {e}\n{}",
+                            rendered.sql()
+                        )
+                    });
+                assert_eq!(rows.len(), 1, "{verb} must affect exactly the bounded row");
+                ruled_on += 1;
+            }
+            assert_eq!(ruled_on, 2, "both bounded writes must reach PostgreSQL");
+            session
+                .batch_execute("COMMIT")
+                .await
+                .expect("commit the successful data-plan writes");
 
-    teardown(&admin, &app, &role).await;
+            teardown(&admin, &app, &role).await;
+        })
+    })
 }
 
 /// The grant this fixture issues is the projection's own column set.
@@ -832,30 +854,32 @@ async fn bounded_data_plan_writes_succeed_with_column_scoped_reads() {
 /// exactly one column, and which one.
 #[test]
 fn the_fixture_withholds_exactly_the_raw_column() {
-    let schema = people_schema();
-    let readable: BTreeSet<String> = projected_columns(&schema).into_iter().collect();
-    let raw = raw_column_name("ssn");
-    assert!(
-        !readable.contains(&raw),
-        "the raw column must not be on the read surface: {readable:?}",
-    );
-    for field in SYSTEM_FIELD_NAMES {
+    crate::live_tests::host::in_test(|| {
+        let schema = people_schema();
+        let readable: BTreeSet<String> = projected_columns(&schema).into_iter().collect();
+        let raw = raw_column_name("ssn");
         assert!(
-            readable.contains(*field),
-            "the projection must name the system field {field}: {readable:?}",
+            !readable.contains(&raw),
+            "the raw column must not be on the read surface: {readable:?}",
         );
-    }
-    assert!(
-        readable.contains("ssn"),
-        "the masked column is readable: {readable:?}"
-    );
-    assert!(
-        readable.contains("nickname"),
-        "the control column is readable: {readable:?}"
-    );
-    assert_eq!(
-        readable.len(),
-        SYSTEM_FIELD_NAMES.len() + 2,
-        "the read surface is the seven system fields plus the two declared ones: {readable:?}",
-    );
+        for field in SYSTEM_FIELD_NAMES {
+            assert!(
+                readable.contains(*field),
+                "the projection must name the system field {field}: {readable:?}",
+            );
+        }
+        assert!(
+            readable.contains("ssn"),
+            "the masked column is readable: {readable:?}"
+        );
+        assert!(
+            readable.contains("nickname"),
+            "the control column is readable: {readable:?}"
+        );
+        assert_eq!(
+            readable.len(),
+            SYSTEM_FIELD_NAMES.len() + 2,
+            "the read surface is the seven system fields plus the two declared ones: {readable:?}",
+        );
+    })
 }
