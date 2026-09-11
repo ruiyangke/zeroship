@@ -9,12 +9,11 @@
 //!
 //! ## Streaming is the kernel; buffered is a convenience
 //!
-//! `put_stream` / `get_stream` are the primitive ops. The whole-object
-//! `put` / `get` are thin wrappers built on top of them (no per-backend
-//! whole-object buffering ceiling — memory is bounded by the part size
-//! on upload and by the consumer's pull rate on download). The S3 backend
-//! turns `put_stream` into an S3 multipart upload (bounded `PART_SIZE`
-//! parts), so an arbitrarily large object never lands fully in RAM.
+//! `put_stream` / `get_stream` are the primitive ops. Buffered operations build
+//! on them; `get` checks the caller's cap before buffering. Scoped `Storage`
+//! handles enforce buffered and streamed-upload limits across backends. S3
+//! uploads bound working memory by part size and concurrency, while downloads
+//! advance at the consumer's pull rate.
 
 use crate::StorageError;
 
@@ -73,7 +72,7 @@ pub struct ListRequest<'a> {
     /// Always a key a previous page returned as [`ListPage::cursor`].
     pub cursor: Option<&'a str>,
     /// Maximum entries this page may contain. Backends MUST NOT exceed it.
-    /// Resolved from the caller's request by [`crate::limits::resolve_list_limit`].
+    /// Scoped handles apply the configured pagination bounds before dispatch.
     pub limit: usize,
 }
 
@@ -112,12 +111,12 @@ pub type ChunkResult = Result<Bytes, StorageError>;
 /// as `Arc<dyn Backend>`; `impl Trait` / generic method params are not
 /// object-safe. `next_chunk` is the only operation any backend needs.
 ///
-/// `?Send`: every storage op runs on the worker thread that owns the V8
-/// isolate + compio runtime, mirroring the `Backend(?Send)` contract.
+/// `?Send`: operations stay on the caller's compio thread, mirroring the
+/// `Backend(?Send)` contract.
 #[async_trait::async_trait(?Send)]
 pub trait ChunkSource {
     /// Yield the next chunk, `None` at EOF, or `Some(Err(_))` on a fatal
-    /// upstream error (e.g. the V8 ReadableStream rejected mid-read).
+    /// upstream error (for example, a producer failing during an upload).
     async fn next_chunk(&mut self) -> Option<ChunkResult>;
 }
 
