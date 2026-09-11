@@ -131,7 +131,7 @@ _stk_jget() { node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{t
 # --- preflight: required binaries + tooling ---------------------------------
 stack_preflight() {
   local b
-  for b in zeroship zeroship-control zeroship-gate zeroship-worker; do
+  for b in zeroship zeroship-control zeroship-gate zeroship-worker zeroship-data-cdc-server; do
     [ -x "$E2E_BIN/$b" ] || { _stk_bad "missing $E2E_BIN/$b - run cargo build --release"; return 2; }
   done
   [ -f "$E2E_ROOT/packages/zero-migrate-cli/dist/cli-bin.js" ] || { _stk_bad "missing the zero-migrate CLI - run: pnpm install && pnpm build"; return 2; }
@@ -236,18 +236,11 @@ stack_workspace() {
 stack_pg_up() {
   # --- ephemeral Postgres ---------------------------------------------------
   docker rm -f "$PG_CONTAINER" >/dev/null 2>&1 || true
-  # `max_slot_wal_keep_size` is NOT tuning. `zeroship-worker` reads it in
-  # crates/zeroship-worker/src/db_posture.rs and REFUSES TO START on the
-  # PostgreSQL default of -1 (unlimited), because an abandoned replication slot
-  # would then retain WAL until pg_wal fills the cluster disk. This container
-  # carried the default, so `stack_up` could bring control up and then died at
-  # "worker unhealthy" with the refusal buried in $WORK/worker.log - the same
-  # finite value deploy/compose/docker-compose.yml sets on its postgres service,
-  # which tests/compose_db_posture_gate.sh already fences there and cannot see
-  # here.
+  # The relay requires logical WAL and finite retention so an abandoned slot
+  # cannot retain WAL indefinitely. Match the platform Compose posture.
   docker run --name "$PG_CONTAINER" -d -p "$PG_PORT:5432" \
     -e POSTGRES_PASSWORD=zeroship -e POSTGRES_USER=postgres -e POSTGRES_DB=zeroship \
-    postgres:16 -c max_connections=300 -c max_slot_wal_keep_size=8GB >/dev/null \
+    postgres:16 -c wal_level=logical -c max_connections=300 -c max_slot_wal_keep_size=8GB >/dev/null \
     || { _stk_bad "docker run postgres failed"; return 1; }
   # Readiness = three CONSECUTIVE successful queries, not one pg_isready.
   # Measured 2026-08-09 by sampling both probes ~30x/s against a fresh
@@ -335,6 +328,7 @@ stack_up() {
   curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/readyz" >/dev/null 2>&1 \
     && _stk_ok "control healthy" || { _stk_bad "control unhealthy"; tail -20 "$WORK/control.log"; return 1; }
 
+  e2e_start_cdc_relay "$E2E_BIN/zeroship-data-cdc-server" || return 1
   # --- worker ---------------------------------------------------------------
   "$E2E_BIN/zeroship-worker" --port "$ZEROSHIP_WORKER_PORT" --threads "$ZEROSHIP_WORKER_THREADS" \
     --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" \

@@ -213,6 +213,7 @@ echo $! >> "$PIDFILE"
 for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done
 curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/readyz" >/dev/null 2>&1 && pass "control healthy (blob-store=s3)" || { fail "control unhealthy"; tail -30 "$WORK/control.log"; exit 1; }
 
+e2e_start_cdc_relay "$BIN/zeroship-data-cdc-server" || exit 1
 # worker — capture its PID explicitly for RSS sampling
 "$BIN/zeroship-worker" --port "$ZEROSHIP_WORKER_PORT" --threads "$ZEROSHIP_WORKER_THREADS" \
   --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" \

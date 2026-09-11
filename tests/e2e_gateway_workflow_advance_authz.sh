@@ -322,6 +322,7 @@ e2e_export_database_urls "$DBURL"
 echo $! >> "$PIDFILE"
 wait_health control "http://localhost:$ZEROSHIP_CONTROL_PORT/readyz" "$WORK/control.log"
 
+e2e_start_cdc_relay "$BIN/zeroship-data-cdc-server" || exit 1
 # NO `ZEROSHIP_DEV=1` HERE, and nothing needs one. The only thing that variable
 # ever bought a worker was the SSRF relaxation, and `zeroship-worker` no longer
 # reads it: dev-ness is a stated input written only by `set_dev_mode`, whose one

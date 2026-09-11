@@ -2,12 +2,12 @@
 #
 # zeroship platform image - builds all service binaries:
 #   zeroship-control, zeroship-gate, zeroship-worker, zeroship-auth,
-#   zeroship (CLI), zeroship-migrate-server (the creator migration service).
+#   zeroship (CLI), zeroship-migrate-server, zeroship-data-cdc-server.
 #
 # THE PLATFORM MIGRATION ONE-SHOT IS NO LONGER A RUST BINARY IN THIS IMAGE.
 # `zeroship-platform-migrate` was deleted on 2026-08-28; the platform schema is
 # applied by the general `zero-migrate` CLI, which is a NODE program. It cannot
-# ship in the `runtime` stage: that stage is ubuntu:24.04 plus six static
+# ship in the `runtime` stage: that stage contains the native service
 # binaries and deliberately carries no Node, and adding Node there would put a
 # JavaScript runtime into the control, gateway, worker and auth containers, none
 # of which migrate anything. So the one-shot gets its OWN stage (`migrate`,
@@ -238,7 +238,8 @@ RUN cargo build --release \
     -p zeroship-worker \
     -p zeroship-auth \
     -p zeroship-cli \
-    -p zeroship-migrate-server
+    -p zeroship-migrate-server \
+    -p zeroship-data-cdc-server
 
 # ---------------------------------------------------------------------------
 # Stage 3 - runtime image.
@@ -250,6 +251,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=builder /build/target/release/zeroship-control /usr/local/bin/
 COPY --from=builder /build/target/release/zeroship-gate /usr/local/bin/
 COPY --from=builder /build/target/release/zeroship-worker /usr/local/bin/
+COPY --from=builder /build/target/release/zeroship-data-cdc-server /usr/local/bin/
 COPY --from=builder /build/target/release/zeroship-auth /usr/local/bin/
 COPY --from=builder /build/target/release/zeroship /usr/local/bin/
 # The CREATOR migration service. Distinct from the platform one-shot above:

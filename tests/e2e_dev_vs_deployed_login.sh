@@ -648,6 +648,7 @@ for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/ready
 curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/readyz" >/dev/null 2>&1 \
   && pass "control healthy" || { fail "control unhealthy"; tail -20 "$WORK/control.log"; exit 1; }
 
+e2e_start_cdc_relay "$BIN/zeroship-data-cdc-server" || exit 1
 # --- worker ----------------------------------------------------------------
 "$BIN/zeroship-worker" --port "$ZEROSHIP_WORKER_PORT" --threads 2 \
   --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" \

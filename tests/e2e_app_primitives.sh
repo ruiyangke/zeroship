@@ -227,6 +227,7 @@ PIDS+=($!)
 for i in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_MIGRATE_SERVER_PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done
 curl -sf "http://localhost:$ZEROSHIP_MIGRATE_SERVER_PORT/readyz" >/dev/null 2>&1 && pass "migrated healthy" || { fail "migrated unhealthy"; tail -20 "$WORK/migrated.log"; exit 1; }
 
+e2e_start_cdc_relay "$BIN/zeroship-data-cdc-server" || exit 1
 # worker: generated worker_key; direct /dispatch calls present its bearer;
 # shared blob-store with control (single-host shared-volume pattern);
 # ZEROSHIP_WORKER_DATABASE_URL for env.db.

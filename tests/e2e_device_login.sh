@@ -202,6 +202,7 @@ for _ in $(seq 1 30); do curl -sf "$CONTROL_URL/readyz" >/dev/null 2>&1 && break
 curl -sf "$CONTROL_URL/readyz" >/dev/null 2>&1 \
   && pass "control ready" || { fail "control not ready"; tail -30 "$WORK/control.log"; exit 1; }
 
+e2e_start_cdc_relay "$BIN/zeroship-data-cdc-server" || exit 1
 # The migration service, so this harness can drive `zeroship migrate` on the
 # SAME credential the login flow just produced. Every other harness that
 # migrates mints its bearer itself from a JWKS it serves; this one carries a

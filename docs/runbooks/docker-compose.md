@@ -11,9 +11,10 @@ the `-f` from every call):
 ```bash
 # Provision strong, stable local secrets once. Reruns keep existing values.
 zeroship dev init
+deploy/ops/init-cdc-tls.sh
 
 # Build everything ahead (so `up` never builds): the single shared image
-# (control/gateway/worker/auth/platform-migrate + the `zeroship` CLI) plus the external
+# (control/gateway/worker/auth/migrate-server/CDC relay + the CLI) plus the external
 # images (postgres, caddy, verdaccio, redpanda).
 docker compose -f deploy/compose/docker-compose.yml build   # all Dockerfile-based services
 docker compose -f deploy/compose/docker-compose.yml pull     # external images
@@ -390,45 +391,19 @@ divergences from the mock") for what this e2e catches that the in-test mock cann
 
 ## Postgres connections a worker holds
 
-`--scale worker=10` scales Postgres backends, not just containers, and the
-cluster's `max_connections` is what runs out first. Two pools per worker
-container are worth knowing about before sizing it.
+Worker data pools are thread-local and open lazily when a thread first uses
+`env.db`. Their `PoolConfig` bounds connection acquisition and idle retention;
+scaling worker processes or threads multiplies those pools.
 
-| Pool | Where | Opened | Size | Released |
-| --- | --- | --- | --- | --- |
-| `env.db` data plane | per worker THREAD (`--threads N`) | lazily, on that thread's first `env.db` operation | `max_size` 8, `min_idle` 2 | never; it is the app's database handle |
-| operator lifecycle | the worker's ONE version-poller thread | lazily, when an app first disappears from this process's version feed | 2, and all 2 are held - see below | when the poller's pending-deprovision set drains |
-
-The floor a worker sits at is therefore `2 x (threads that have served an
-`env.db` op)`, plus 2 more while it is reconciling apps removed from the
-runtime feed. Nothing here
-is a ceiling an operator sets: there is no connection-budget flag, and the two
-sizes are compile-time constants (`Pool::connect(&url, 8)` in
-`zeroship-data-v8`'s `init_pool_async`, `OPERATOR_POOL_SIZE` in its
-`service.rs`).
-
-"All 2 are held" is not a rounding-up. `Pool::connect(url, 2)` sets `min_idle`
-to `min(2, max_size)` = 2 and opens that many upfront, and the driver evicts an
-idle connection only while the idle count EXCEEDS `min_idle` - so an operator
-pool never shrinks below two while it is installed, however long it sits unused.
-
-The operator pool is the one to watch, because it is the one that is easy to
-mis-model as free. It exists so that reconciling a batch of apps removed from
-the version feed costs one pool rather than one pool per app; the version
-poller runs on a thread that hosts no isolate, so it has no data-plane pool to
-borrow. Archive deliberately retains the version-feed entry and does not open
-this pool. It used to have no release path at all, which meant a container that
-had ever deprovisioned an app held two extra backends until it exited. It is now
-closed when the poller has nothing left pending, so a steady-state worker holds
-none.
-
-If `max_connections` is the constraint, the lever is `--threads`, not a pool
-setting: the data-plane pool is per thread.
+CDC adds no worker database pool. Workers connect to the relay over TLS, and the
+relay shares capture for each app across workers. Its database pool and logical
+replication sessions have separate capacity settings. See
+`docs/runbooks/cdc-relay.md` for sizing and deployment.
 
 ## Service health
 
-Every platform service (`control`, `gateway`, `worker`, `migrate-server`, `auth`)
-exposes the SAME pair, and compose gives each one a `healthcheck` pointed at
+The HTTP services (`control`, `gateway`, `worker`, `migrate-server`, `auth`)
+expose the same pair, and Compose gives each a `healthcheck` pointed at
 `/readyz`:
 
 | Endpoint | Meaning | Checks |

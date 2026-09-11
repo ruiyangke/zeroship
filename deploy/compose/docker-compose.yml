@@ -684,6 +684,34 @@ services:
       auth:
         condition: service_started
 
+  cdc-relay:
+    build:
+      context: ../..
+      dockerfile: deploy/Dockerfile
+    image: zeroship-platform:dev
+    command:
+      - zeroship-data-cdc-server
+      - --listen
+      - 0.0.0.0:9094
+      - --tls-cert-file
+      - /etc/zeroship/cdc-cert.pem
+      - --tls-key-file
+      - /etc/zeroship/cdc-key.pem
+    environment:
+      ZEROSHIP_DATA_CDC_SERVER_DATABASE_URL: ${ZEROSHIP_DATA_CDC_SERVER_DATABASE_URL:-postgres://zeroship_cdc:zeroship_cdc@postgres:5432/zeroship}
+      ZEROSHIP_OBSERVABILITY_LOG_FORMAT: json
+    volumes:
+      - ${ZEROSHIP_SECRETS_DIR:-./secrets}/cdc-cert.pem:/etc/zeroship/cdc-cert.pem:ro
+      - ${ZEROSHIP_SECRETS_DIR:-./secrets}/cdc-key.pem:/etc/zeroship/cdc-key.pem:ro
+    restart: unless-stopped
+    security_opt:
+      - seccomp:unconfined
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
   worker:
     build:
       context: ../..
@@ -700,8 +728,8 @@ services:
     # constrained zeroship_worker role.
     # zeroship-migrate-server creates app roles, workflow schemas, and publications;
     # the worker receives only runtime-role membership, its narrow workflow
-    # owner membership, and REPLICATION for per-worker logical slots. It has no
-    # write privilege on any zeroship system relation.
+    # owner membership. The CDC relay owns logical replication; workers have
+    # neither REPLICATION nor BYPASSRLS.
     command:
       - zeroship-worker
       - --port
@@ -740,6 +768,8 @@ services:
       # Dedicated constrained worker login. Startup rejects a DSN whose
       # effective database privileges exceed this role's narrow posture.
       ZEROSHIP_WORKER_DATABASE_URL: ${ZEROSHIP_WORKER_DATABASE_URL:-postgres://zeroship_worker:zeroship_worker@postgres:5432/zeroship}
+      ZEROSHIP_WORKER_CDC_RELAY_URL: wss://cdc-relay:9094/internal/v1/cdc/subscribe
+      ZEROSHIP_WORKER_CDC_RELAY_CA_FILE: /etc/zeroship/secrets/cdc-cert.pem
       # KV configuration may contain credentials, so it is secret-classed.
       ZEROSHIP_WORKER_KV_CONFIG: |
         backend = "redis"
@@ -764,12 +794,15 @@ services:
       # Without both it refuses every dispatch and cannot read an app's
       # environment from control - absence is a closed door, not an open one.
       - ${ZEROSHIP_SECRETS_DIR:-./secrets}/svc-worker.pem:/etc/zeroship/secrets/svc-worker.pem:ro
+      - ${ZEROSHIP_SECRETS_DIR:-./secrets}/cdc-cert.pem:/etc/zeroship/secrets/cdc-cert.pem:ro
       - ${ZEROSHIP_SECRETS_DIR:-./secrets}/service-peers.json:/etc/zeroship/secrets/service-peers.json:ro
     deploy:
       replicas: 3
     security_opt:
       - seccomp:unconfined
     depends_on:
+      cdc-relay:
+        condition: service_started
       # The worker DSN points at the shared Postgres, so wait for the schema to
       # exist (postgres healthy + the one-shot migrate completed) the same
       # way control/gateway do - otherwise the first env.db op races the

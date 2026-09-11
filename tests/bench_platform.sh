@@ -109,6 +109,7 @@ BENCH_WORKER_PORT=8080
 export ZEROSHIP_CONTROL_WORKER_ENROLMENT_NETWORKS="127.0.0.0/8"
 export ZEROSHIP_CONTROL_WORKER_ENROLMENT_PORTS="$BENCH_WORKER_PORT"
 
+e2e_start_cdc_relay "$BIN/zeroship-data-cdc-server" || exit 1
 # Start platform
 "$BIN/zeroship-control" --port 9090 \
     --blob-store /tmp/zeroship-bench-bundles > /dev/null 2>&1 &

@@ -1884,7 +1884,7 @@ jobs:
       # drives, and the dev runtime `pnpm dev` spawns in steps 6, 7 and 9.
       - name: Build the release binaries the harness starts
         run: |
-          cargo build --release -p zeroship-control -p zeroship-worker \
+          cargo build --release -p zeroship-control -p zeroship-worker -p zeroship-data-cdc-server \
             -p zeroship-gateway -p zeroship-cli --bins
       # ZS_FRESHNESS_STRICT=1 because the harness's own freshness note says so:
       # step 1 runs `pnpm build` inside the example and consumes whatever
@@ -2137,7 +2137,7 @@ jobs:
       # as the dev tier on every one of the six.
       - name: Build the release binaries the harnesses start
         run: |
-          cargo build --release -p zeroship-control -p zeroship-worker \
+          cargo build --release -p zeroship-control -p zeroship-worker -p zeroship-data-cdc-server \
             -p zeroship-gateway -p zeroship-cli -p zeroship-migrate-server --bins
       # Account-status and spend-state both deploy the migration-first metering
       # probe. Build its ignored .zship and refresh its tracked IR together.
@@ -2632,7 +2632,7 @@ jobs:
       # that binary its env.db has no table.
       - name: Build the release binaries the harness starts
         run: |
-          cargo build --release -p zeroship-control -p zeroship-worker \
+          cargo build --release -p zeroship-control -p zeroship-worker -p zeroship-data-cdc-server \
             -p zeroship-gateway -p zeroship-cli -p zeroship-migrate-server --bins
       # The harness refuses to start without a built probe and says so; building
       # it here rather than letting that refusal read as a CI misconfiguration.

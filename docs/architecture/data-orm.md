@@ -71,24 +71,19 @@ a standalone library with no dependency on the ORM.
 
 Migration services and the CDC relay retain their process boundaries. The ORM
 registration contract grants no DDL, backup, replication, or provisioning power.
-Existing worker CDC integration remains adapter-owned; this reorganization does
-not implement the deferred relay transport or datastore placement system.
-
 Shared CDC contracts live in `zeroship_data_orm::cdc`: `ChangeEvent`, `ChangeOp`,
-`ChangeSink`, `ChangeStream`, and subscription messages. The broker and read-set
-matching live under that module. SQLite capture feeds these contracts beside its
-file-backed writer; worker PostgreSQL capture feeds the same broker today.
-The relay protocol remains in `zeroship-data-cdc-wire`, independent of the ORM.
-V8 owns JavaScript subscription wrappers and isolate cleanup. Its existing
-PostgreSQL consumer, slot management, and consumer leases still await the
-coordinated worker privilege and deployment cutover.
+`ChangeSink`, subscription messages, and process-wide readiness leases. The
+broker and read-set matching live under that module. SQLite commit capture and
+the PostgreSQL relay client feed the same broker. V8 owns JavaScript wrappers
+and isolate cleanup. The bounded transport protocol lives in
+`zeroship-data-cdc-wire`, independent of the ORM.
 
 The standalone relay is implemented in `zeroship-data-cdc-server`. Native hosts
 can configure `cdc::relay::RelayConfig` with a TLS endpoint and their enrolled
 worker `ServiceAuth`, register a broker subscription, and await `spawn` before
 reading the initial snapshot. `RelayHandle` controls shutdown and completion.
 The client resynchronizes subscriptions after reconnect. A private certificate
-authority can be supplied through `with_tls_connector`; otherwise it uses the
+authority can be supplied through `with_ca_file` or `with_tls_connector`; otherwise it uses the
 host trust store.
 
 Relay notifications carry collection and operation only. PostgreSQL events have

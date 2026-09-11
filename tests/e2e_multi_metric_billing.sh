@@ -137,6 +137,7 @@ echo $! >> "$PIDFILE"
 for _ in $(seq 1 30); do curl -sf "$CONTROL_URL/readyz" >/dev/null 2>&1 && break; sleep 1; done
 curl -sf "$CONTROL_URL/readyz" >/dev/null 2>&1 && pass "control healthy (lite provider, stream=redpanda)" || { fail "control"; tail -30 "$WORK/control.log"; exit 1; }
 
+e2e_start_cdc_relay "$BIN/zeroship-data-cdc-server" || exit 1
 # The worker takes NO `--config` - 9b205f6ed removed its TOML overlay source as
 # a credential boundary - and no longer needs one: the usage-stream settings are
 # four real flags with ZEROSHIP_METERING_* twins. Without brokers the worker
