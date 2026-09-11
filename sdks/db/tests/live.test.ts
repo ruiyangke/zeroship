@@ -513,11 +513,7 @@ describe("db.live — reactive query layer", () => {
     // same as a real caller would.
     const { data: alice } = await db.users.insert({ name: "Alice" });
     if (!alice) throw new Error("insert(users) failed");
-    // `SystemFields.id` (src/types.ts) is a bare `string`, not
-    // parameterized per collection - only `t.ref(target)` fields carry
-    // the branded `Id<target>`. A freshly-read row's own id is
-    // genuinely a `users` id here; the cast supplies the brand the
-    // type layer has no way to infer on its own.
+    // The fixture declares an unbranded string key; the reference expects a users ID.
     const aliceId = alice.id as Id<"users">;
     await db.todos.insert({ userId: aliceId, title: "buy milk" });
 

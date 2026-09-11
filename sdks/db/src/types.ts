@@ -679,6 +679,8 @@ export type FkAction = "restrict" | "cascade" | "set null" | "no action";
  * Options accepted by `t.ref()` to control FK behaviour at the DB layer.
  */
 export interface RefOptions {
+  /** Target column. Required when authoring a foreign key through a manual schema. */
+  column?: string;
   /** ON DELETE policy. Omitted means SQL/Postgres `NO ACTION`. */
   onDelete?: FkAction;
   /** ON UPDATE policy. Omitted means SQL/Postgres `NO ACTION`. */
@@ -1267,22 +1269,7 @@ export const t = {
     const itemType = itemDef.type as PrimitiveTypeName;
     return new TypeBuilder<U[]>({ type: "array", items: itemType });
   },
-  /**
-   * Creates a foreign-key field referencing `table` (B2). At the type
-   * level produces `TypeBuilder<Id<T>>` so consumers get a brand-typed
-   * `Id<"users">` rather than a bare `number`. At the DB level it
-   * materialises a `FOREIGN KEY (<column>) REFERENCES "<schema>"."<table>"(id)`
-   * constraint. When action policy is omitted, Postgres defaults to
-   * `NO ACTION` and the renderer omits the clause.
-   *
-   * `opts.onDelete` / `opts.onUpdate` override the policy, e.g.:
-   * ```ts
-   * { authorId: t.ref("users", { onDelete: "cascade" }) }
-   * ```
-   *
-   * `opts.deferrable: true` emits `DEFERRABLE INITIALLY DEFERRED` so
-   * circular references can be inserted in any order within one tx.
-   */
+  /** Declare a branded reference, optionally naming its target column and FK actions. */
   ref<T extends string>(table: T, opts?: RefOptions): TypeBuilder<Id<T>> {
     if (typeof table !== "string" || table.length === 0) {
       throw Object.assign(
@@ -1293,6 +1280,7 @@ export const t = {
     return new TypeBuilder<Id<T>>({
       type: "ref",
       refTarget: table,
+      ...(opts?.column !== undefined ? { refColumn: opts.column } : {}),
       ...(opts?.onDelete !== undefined ? { onDelete: opts.onDelete } : {}),
       ...(opts?.onUpdate !== undefined ? { onUpdate: opts.onUpdate } : {}),
       ...(opts?.deferrable !== undefined ? { deferrable: opts.deferrable } : {}),
