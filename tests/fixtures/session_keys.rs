@@ -1,32 +1,4 @@
-//! Test-only helpers shared across the workspace.
-//!
-//! Consumed as a `dev-dependency`; never linked into a shipping binary.
-//!
-//! THIS CRATE NO LONGER ANNOUNCES SKIPS, and the name it still carries is the
-//! wider one it was always declared with. It held a `SKIP_MARKER` token and a
-//! `skip(reason)` announcer that wrote that token straight to the `Stderr`
-//! handle, plus a shell census under `tests/` that counted the token in a suite
-//! log and failed a run on any occurrence not named in an allowlist. An
-//! operator decision removed the whole apparatus: a test that cannot reach the
-//! backend it needs now FAILS, naming what was missing and the command that
-//! provisions it, and there is no environment variable and no allowlist that
-//! turns that back into a pass.
-//!
-//! THE LESSON THE APPARATUS WAS BUILT ON SURVIVES IT, and it is why the
-//! replacement is a panic rather than a better marker. A test that returns
-//! early prints exactly what a passing test prints. `libs/compio-redis`'s
-//! header records the measurement: an unset variable produced eleven passes
-//! against no server at all. Announcing that on stderr made it *visible*, but
-//! only to whoever ran the census - and the census ran over suite logs, not
-//! over the per-crate `cargo test -p ...` invocations those crates' own headers
-//! document. The marker was therefore load-bearing on a habit. A failing test
-//! is load-bearing on nothing.
-//!
-//! What is left here is a fixture, not a policy. Keep it that way: this crate
-//! declares no dependencies (see `Cargo.toml`), so nothing in it can read
-//! configuration, and a helper that decided anything based on the environment
-//! would be the deleted flag coming back under a new name.
-
+//! Session key files for in-process authentication servers.
 use std::io::Write;
 
 /// The session-secret keyring every in-process auth-server fixture must

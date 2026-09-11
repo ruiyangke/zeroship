@@ -19,7 +19,7 @@ use uuid::Uuid;
 /// so `zeroship.apps` had no `organization_id` and this crate's five database
 /// targets reported a stale fixture as named tests FAILING. A suite that cannot
 /// tell "the code is wrong" from "my database is behind" is not an oracle;
-/// `zeroship_testkit::live_db` makes that a refusal naming
+/// `platform_fixture::live_db` makes that a refusal naming
 /// `deploy/ops/db-migrate.sh` instead.
 ///
 /// AN UNCONFIGURED DSN IS A REFUSAL, NOT A SKIP. This function used to return
@@ -29,7 +29,7 @@ use uuid::Uuid;
 /// variable that turns that back into a skip. The two ways to have no verdict -
 /// "nobody said which database" and "the database named cannot serve this
 /// suite" - read as one problem to the person hitting them, so they print the
-/// same block; [`zeroship_testkit::live_db::require_configured`] is what joins
+/// same block; [`platform_fixture::live_db::require_configured`] is what joins
 /// them, and it names `tests/provision_test_backends.sh` for the first and
 /// `deploy/ops/db-migrate.sh` for the second.
 ///
@@ -40,9 +40,9 @@ pub fn require_platform_db() -> String {
     static CHECKED: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     CHECKED
         .get_or_init(|| {
-            zeroship_testkit::live_db::require_configured(
+            platform_fixture::live_db::require_configured(
                 zeroship_core::config::test_database_url_opt(),
-                zeroship_testkit::live_db::PLATFORM_SCHEMAS,
+                platform_fixture::live_db::PLATFORM_SCHEMAS,
             )
         })
         .clone()
@@ -62,7 +62,7 @@ pub fn require_any_db() -> String {
     static CHECKED: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     CHECKED
         .get_or_init(|| {
-            zeroship_testkit::live_db::require_configured(
+            platform_fixture::live_db::require_configured(
                 zeroship_core::config::test_database_url_opt(),
                 &[],
             )
@@ -102,3 +102,6 @@ pub async fn unowned_project(pg: &compio_postgres::Client) -> String {
     .expect("seed fixture project");
     project_id
 }
+
+#[path = "../../../../tests/fixtures/platform_db/mod.rs"]
+mod platform_fixture;

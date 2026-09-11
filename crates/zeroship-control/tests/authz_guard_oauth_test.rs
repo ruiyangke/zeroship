@@ -6,21 +6,21 @@ use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::{Duration as StdDuration, SystemTime, UNIX_EPOCH};
 
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use compio_postgres::{connect, NoTls};
-use ed25519_dalek::pkcs8::EncodePrivateKey;
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use compio_postgres::{NoTls, connect};
 use ed25519_dalek::SigningKey;
-use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+use ed25519_dalek::pkcs8::EncodePrivateKey;
+use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use ntex::http::StatusCode;
-use ntex::web::{self, test, HttpResponse};
-use serde_json::{json, Value};
+use ntex::web::{self, HttpResponse, test};
+use serde_json::{Value, json};
 use uuid::Uuid;
+use zeroship_authz::{Action, Resource};
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
 use zeroship_control::{
-    api, authz_guard::AuthzGuard, AppState, EnvStore, Quota, RateLimiter, Registry, SecretString,
-    StripeStore,
+    AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore, api,
+    authz_guard::AuthzGuard,
 };
-use zeroship_authz::{Action, Resource};
 use zeroship_core::auth_provider::{AuthProvider, PlatformConfig, PlatformProvider};
 use zeroship_core::config::{Secret, SourceKind};
 use zeroship_core::device_grant::{
@@ -144,7 +144,8 @@ async fn fixture_with_auth_provider(
 ) -> Fixture {
     let db_url = db_url();
 
-    let (control_pg_client, control_pg_conn) = connect(&db_url, NoTls).await.expect("control-pg connect");
+    let (control_pg_client, control_pg_conn) =
+        connect(&db_url, NoTls).await.expect("control-pg connect");
     compio::runtime::spawn(async move {
         let _ = control_pg_conn.run().await;
     })
@@ -153,7 +154,9 @@ async fn fixture_with_auth_provider(
     let blob_root = tmpdir(&format!("blob-{label}"));
     let deploy_tmp_dir = tmpdir(&format!("deploy-{label}"));
     let registry = Registry::new(&db_url).await.expect("registry");
-    zeroship_control::plan_catalog::seed_plans(&registry).await.expect("seed built-in plans");
+    zeroship_control::plan_catalog::seed_plans(&registry)
+        .await
+        .expect("seed built-in plans");
     let env_store = EnvStore::new(registry.clone(), TEST_MASTER_KEY).expect("env store");
     let stripe_store = StripeStore::new(registry.clone());
     let blob_store: Arc<dyn BlobStore> =
@@ -169,7 +172,7 @@ async fn fixture_with_auth_provider(
         env_store,
         stripe_store,
         blob_store,
-            workflow_blob_store,
+        workflow_blob_store,
         control_key: SecretString::new("test-control-key".to_string()),
         master_key: SecretString::new(TEST_MASTER_KEY.to_string()),
         stripe_webhook_secret: SecretString::new(String::new()),
@@ -251,7 +254,12 @@ async fn create_app_owned_by(fx: &mut Fixture, label: &str, owner_id: Uuid) -> U
     let record = fx
         .state
         .registry
-        .create_app(&app_name, &zeroship_control::plan_catalog::free_plan_id(), &owner_id, None)
+        .create_app(
+            &app_name,
+            &zeroship_control::plan_catalog::free_plan_id(),
+            &owner_id,
+            None,
+        )
         .await
         .expect("create app");
     fx.app_id = Some(record.id);
@@ -296,23 +304,14 @@ macro_rules! init_control {
                         .route(web::post().to(api::create_app))
                         .route(web::get().to(api::list_apps)),
                 )
-                .service(
-                    web::resource("/api/apps/{id}")
-                        .route(web::get().to(api::get_app)),
-                )
+                .service(web::resource("/api/apps/{id}").route(web::get().to(api::get_app)))
                 .service(
                     web::resource("/api/apps/{id}/archive")
                         .route(web::put().to(api::archive_app))
                         .route(web::delete().to(api::unarchive_app)),
                 )
-                .service(
-                    web::resource("/api/apps/{id}/deploy")
-                        .route(web::post().to(api::deploy)),
-                )
-                .service(
-                    web::resource("/raw-app/{id}")
-                        .route(web::get().to(raw_app_read)),
-                )
+                .service(web::resource("/api/apps/{id}/deploy").route(web::post().to(api::deploy)))
+                .service(web::resource("/raw-app/{id}").route(web::get().to(raw_app_read)))
                 .service(
                     web::resource("/raw-app/{id}/deploy-check")
                         .route(web::post().to(raw_app_deploy_check)),
@@ -546,16 +545,12 @@ impl PlatformOp {
                     .detach();
                     let pg = Arc::new(pg_client);
 
-                    zeroship_auth::oidc::device_token::reconcile_platform_cli_client(
-                        pg.as_ref(),
-                    )
-                    .await
-                    .expect("reconcile platform CLI client as zeroship_auth");
-                    zeroship_auth::oidc::device_token::reconcile_platform_cli_client(
-                        pg.as_ref(),
-                    )
-                    .await
-                    .expect("platform CLI reconciliation is idempotent");
+                    zeroship_auth::oidc::device_token::reconcile_platform_cli_client(pg.as_ref())
+                        .await
+                        .expect("reconcile platform CLI client as zeroship_auth");
+                    zeroship_auth::oidc::device_token::reconcile_platform_cli_client(pg.as_ref())
+                        .await
+                        .expect("platform CLI reconciliation is idempotent");
 
                     let mut cfg = zeroship_auth::config::AuthConfig::parse_from([
                         "zeroship-auth",
@@ -590,7 +585,7 @@ impl PlatformOp {
                     // token. Shared with the auth crate's fixture through
                     // `zeroship-test-support`, which is where the two stopped
                     // being able to drift apart.
-                    let (hash_file, idem_file) = zeroship_test_support::session_key_files();
+                    let (hash_file, idem_file) = session_keys::session_key_files();
                     cfg.settings.refresh_hash_key_file =
                         zeroship_core::config::Operational::new(hash_file);
                     cfg.settings.refresh_idem_key_file =
@@ -719,9 +714,10 @@ async fn assert_platform_cli_registration(pg: &compio_postgres::Client) {
     assert!(row.get::<_, bool>("refresh_allowed"));
     assert_eq!(row.get::<_, String>("token_endpoint_auth_method"), "none");
     assert!(!row.get::<_, bool>("brokered"));
-    assert!(row
-        .get::<_, Option<String>>("backchannel_logout_uri")
-        .is_none());
+    assert!(
+        row.get::<_, Option<String>>("backchannel_logout_uri")
+            .is_none()
+    );
     assert!(row.get::<_, bool>("has_no_app_extension"));
 }
 
@@ -797,8 +793,8 @@ async fn op_cli_device_token_authorizes_control_endpoint() {
         authorization_status, 200,
         "OP device authorization failed: {authorization_body}"
     );
-    let authorization: Value = serde_json::from_str(&authorization_body)
-        .expect("decode OP device authorization response");
+    let authorization: Value =
+        serde_json::from_str(&authorization_body).expect("decode OP device authorization response");
     let device_code = authorization["device_code"]
         .as_str()
         .expect("device authorization returns device_code");
@@ -823,10 +819,7 @@ async fn op_cli_device_token_authorizes_control_endpoint() {
     assert_eq!(approved, 1, "approve exactly one OP device grant");
 
     let token_form = url::form_urlencoded::Serializer::new(String::new())
-        .append_pair(
-            "grant_type",
-            "urn:ietf:params:oauth:grant-type:device_code",
-        )
+        .append_pair("grant_type", "urn:ietf:params:oauth:grant-type:device_code")
         .append_pair("device_code", device_code)
         .append_pair("client_id", PLATFORM_CLI_CLIENT_ID)
         .finish();
@@ -1104,7 +1097,10 @@ async fn oauth_token_with_apps_read_can_list_apps() {
 
     let req = test::TestRequest::get()
         .uri("/api/apps")
-        .header("authorization", bearer_for_scope(user_id, "apps:read apps:deploy"))
+        .header(
+            "authorization",
+            bearer_for_scope(user_id, "apps:read apps:deploy"),
+        )
         .header("x-request-id", request_id.as_str())
         .to_request();
     let status = test::call_service(&app, req).await.status();
@@ -1263,12 +1259,14 @@ async fn creator_self_service_creates_and_lists_only_own_apps() {
     // 2. List — the creator sees their app, scoped to ownership.
     let req = test::TestRequest::get()
         .uri("/api/apps")
-        .header("authorization", bearer_for_scope(user_id, "apps:write apps:read"))
+        .header(
+            "authorization",
+            bearer_for_scope(user_id, "apps:write apps:read"),
+        )
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status(), StatusCode::OK);
-    let list: Value =
-        serde_json::from_slice(&test::read_body(resp).await).expect("list body json");
+    let list: Value = serde_json::from_slice(&test::read_body(resp).await).expect("list body json");
     let ids: Vec<String> = list
         .as_array()
         .expect("list is array")
@@ -1392,7 +1390,10 @@ async fn invalid_oauth_sub_returns_401() {
 
     let req = test::TestRequest::get()
         .uri("/api/apps")
-        .header("authorization", bearer_for_subject("not-a-uuid", "apps:read"))
+        .header(
+            "authorization",
+            bearer_for_subject("not-a-uuid", "apps:read"),
+        )
         .to_request();
     let status = test::call_service(&app, req).await.status();
     assert_eq!(status, StatusCode::UNAUTHORIZED);
@@ -1412,7 +1413,10 @@ async fn unknown_scope_returns_401_not_silently_dropped() {
 
     let req = test::TestRequest::get()
         .uri("/api/apps")
-        .header("authorization", bearer_for_scope(user_id, "apps:read bogus:scope"))
+        .header(
+            "authorization",
+            bearer_for_scope(user_id, "apps:read bogus:scope"),
+        )
         .to_request();
     let status = test::call_service(&app, req).await.status();
     assert_eq!(status, StatusCode::UNAUTHORIZED);
@@ -1589,7 +1593,10 @@ async fn a_first_cli_request_is_authorized_and_materializes_the_default_grants()
 
     let req = test::TestRequest::post()
         .uri(&format!("/raw-app/{app_id}/deploy-check"))
-        .header("authorization", bearer_for_scope(user_id, "apps:deploy apps:read"))
+        .header(
+            "authorization",
+            bearer_for_scope(user_id, "apps:deploy apps:read"),
+        )
         .to_request();
     let status = test::call_service(&app, req).await.status();
     assert_eq!(
@@ -1648,13 +1655,19 @@ async fn an_operator_deleting_a_grant_row_narrows_the_next_cli_request() {
 
     let read = test::TestRequest::get()
         .uri(&format!("/api/apps/{app_id}"))
-        .header("authorization", bearer_for_scope(user_id, "apps:deploy apps:read"))
+        .header(
+            "authorization",
+            bearer_for_scope(user_id, "apps:deploy apps:read"),
+        )
         .to_request();
     let read_status = test::call_service(&app, read).await.status();
 
     let deploy = test::TestRequest::post()
         .uri(&format!("/raw-app/{app_id}/deploy-check"))
-        .header("authorization", bearer_for_scope(user_id, "apps:deploy apps:read"))
+        .header(
+            "authorization",
+            bearer_for_scope(user_id, "apps:deploy apps:read"),
+        )
         .to_request();
     let deploy_status = test::call_service(&app, deploy).await.status();
 
@@ -1728,3 +1741,6 @@ fn unix_now_secs() -> u64 {
         .unwrap_or_default()
         .as_secs()
 }
+
+#[path = "../../../tests/fixtures/session_keys.rs"]
+mod session_keys;

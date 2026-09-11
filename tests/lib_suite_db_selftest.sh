@@ -37,13 +37,13 @@
 # So they moved, and split by what they can prove:
 #
 #   the DECISIONS (reuse / create-once / lost race / genuine failure /
-#   could-not-tell) -> `cargo test -p zeroship-testkit`, suite_db::tests, over a
+#   could-not-tell) -> `cargo test --manifest-path xtask/Cargo.toml --bin zs-testkit`, suite_db::tests, over a
 #   scripted DbAdmin - the same technique, expressed as data instead of as a
 #   shell function;
 #
 #   the DRIVER AND THE SERVER (create really works outside a transaction, a
 #   duplicate create really returns 42P04, the provisioning lock really
-#   serializes two PROCESSES) -> crates/zeroship-testkit/tests/live_suite_db.rs,
+#   serializes two PROCESSES) -> xtask/tests/live_suite_db.rs,
 #   against a real PostgreSQL, with the race FORCED by a decorator rather than
 #   waited for.
 #
@@ -190,7 +190,7 @@ echo "=== nothing in the suite-database path can issue a DROP ==="
 # Two instruments, because they answer different questions. First, the SHAPE:
 # a trait with a third method is a drop waiting for a caller.
 methods="$(awk '/^pub trait DbAdmin/,/^\}/' \
-  "$ROOT/crates/zeroship-testkit/src/admin.rs" \
+  "$ROOT/xtask/src/platform_db/admin.rs" \
   | sed -n 's/^ *fn \([a-z_]*\).*/\1/p' | tr '\n' ' ')"
 check "the server trait offers exactly these operations" "exists create " "$methods"
 
@@ -198,10 +198,10 @@ check "the server trait offers exactly these operations" "exists create " "$meth
 # string literal, so it matches SQL this code would send and not the same words
 # in a comment or in a test's hostile-input fixture - both of which exist in
 # these files and are meant to.
-if grep -rn '"DROP DATABASE' "$ROOT/crates/zeroship-testkit/src/" >"$TMP/drops" 2>&1; then
+if grep -rn '"DROP DATABASE' "$ROOT/xtask/src/platform_db/admin.rs" "$ROOT/xtask/src/platform_db/suite_db.rs" "$ROOT/xtask/src/platform_db/sweep.rs" "$ROOT/xtask/src/platform_db/lock.rs" >"$TMP/drops" 2>&1; then
   bad "the suite-database path can issue a DROP: $(cat "$TMP/drops")"
 else
-  ok "no DROP statement anywhere under crates/zeroship-testkit/src"
+  ok "no DROP statement in database orchestration"
 fi
 # THE POSITIVE CONTROL, one variable changed: a file that DOES issue one. Without
 # it, a grep that matched nothing and a grep whose pattern was broken read the
@@ -210,7 +210,7 @@ fi
 # WITH (FORCE), correct there and wrong in the sweeper: see that file and
 # tests/lib/sweep_db.sh for whose connections FORCE terminates.
 if grep -q '"DROP DATABASE IF EXISTS {name} WITH (FORCE)"' \
-     "$ROOT/crates/zeroship-testkit/tests/live_suite_db.rs"; then
+     "$ROOT/xtask/tests/live_suite_db.rs"; then
   ok "control: the same pattern finds the scratch drop it is meant to find"
 else
   bad "control: the pattern found nothing even where a DROP exists"

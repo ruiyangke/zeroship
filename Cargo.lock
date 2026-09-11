@@ -7805,8 +7805,6 @@ dependencies = [
  "zeroship-authz",
  "zeroship-core",
  "zeroship-mailer",
- "zeroship-test-support",
- "zeroship-testkit",
 ]
 
 [[package]]
@@ -7844,7 +7842,6 @@ dependencies = [
  "tracing",
  "uuid",
  "zeroship-core",
- "zeroship-testkit",
 ]
 
 [[package]]
@@ -7980,8 +7977,6 @@ dependencies = [
  "zeroship-plugin-workflow",
  "zeroship-runtime",
  "zeroship-stream",
- "zeroship-test-support",
- "zeroship-testkit",
  "zeroship-workflow-scheduler",
  "zstd",
 ]
@@ -8203,8 +8198,6 @@ dependencies = [
  "zeroship-core",
  "zeroship-mailer",
  "zeroship-metering",
- "zeroship-test-support",
- "zeroship-testkit",
 ]
 
 [[package]]
@@ -8616,21 +8609,6 @@ dependencies = [
  "thiserror 2.0.18",
  "tracing",
  "zeroship-core",
-]
-
-[[package]]
-name = "zeroship-test-support"
-version = "0.1.0"
-
-[[package]]
-name = "zeroship-testkit"
-version = "0.1.0"
-dependencies = [
- "clap",
- "compio",
- "compio-postgres",
- "sha2 0.10.9",
- "tempfile",
 ]
 
 [[package]]

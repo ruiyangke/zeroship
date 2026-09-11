@@ -2,10 +2,10 @@
 
 use std::sync::Arc;
 
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use compio_postgres::{Client, GenericClient, Transaction};
-use ntex::http::header::{HeaderValue, COOKIE, LOCATION, WWW_AUTHENTICATE};
 use ntex::http::StatusCode;
+use ntex::http::header::{COOKIE, HeaderValue, LOCATION, WWW_AUTHENTICATE};
 use ntex::web::{self, HttpRequest, HttpResponse};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -20,7 +20,7 @@ use crate::oidc::claims::scope_gated_identity_claims;
 use crate::oidc::device_token;
 use crate::oidc::refresh::{self, ClientAuth, ClientAuthMethod, RefreshSessionPool};
 use crate::oidc::{
-    AccessTokenMint, IdTokenMint, Issuer, PrincipalIdTokenMint, ACCESS_TOKEN_TTL_SECS,
+    ACCESS_TOKEN_TTL_SECS, AccessTokenMint, IdTokenMint, Issuer, PrincipalIdTokenMint,
 };
 use crate::return_to;
 use crate::session_store::{SessionKind, ValidatedSession};
@@ -1555,7 +1555,7 @@ mod access_identity_tests {
     use std::time::Duration;
 
     use base64::Engine as _;
-    use compio_postgres::{connect, Client, NoTls};
+    use compio_postgres::{Client, NoTls, connect};
 
     use super::*;
 
@@ -1640,13 +1640,16 @@ mod access_identity_tests {
         // `db/migrations-ts/20260907000100_session_object.ts` arrives here as
         // an opaque 500 inside `proof_for`'s `expect`, and the tests below
         // present as named failures naming nothing that is wrong with them.
-        // That is the void run `zeroship_testkit::live_db` exists to remove: it
+        // That is the void run `crate::platform_fixture::live_db` exists to remove: it
         // names the database, says how far short its journal is, and prints
         // `deploy/ops/db-migrate.sh`. Asking for the journal schema is what
         // turns that ledger comparison on; the schema list alone would call a
         // behind database ready. Memoised per process, because any of these
         // tests can be the first to reach a database under a filter.
-        zeroship_testkit::live_db::require_once(&dsn, zeroship_testkit::live_db::PLATFORM_SCHEMAS);
+        crate::platform_fixture::live_db::require_once(
+            &dsn,
+            crate::platform_fixture::live_db::PLATFORM_SCHEMAS,
+        );
         let setup = pg_connect(&dsn).await;
         let mint = pg_connect(&dsn).await;
         let deletion = pg_connect(&dsn).await;

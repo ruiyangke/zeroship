@@ -3,21 +3,21 @@
 pub mod authz_fixture;
 pub mod stripe_mock;
 
+use std::sync::OnceLock;
 use std::sync::mpsc;
 use std::sync::{Arc, RwLock};
-use std::sync::OnceLock;
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use ed25519_dalek::pkcs8::EncodePrivateKey;
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ed25519_dalek::SigningKey;
-use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+use ed25519_dalek::pkcs8::EncodePrivateKey;
+use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use ntex::web::{self, HttpResponse};
 use serde_json::json;
 use uuid::Uuid;
-use zeroship_core::auth_provider::{AuthProvider, PlatformConfig, PlatformProvider};
 use zeroship_control::Registry;
+use zeroship_core::auth_provider::{AuthProvider, PlatformConfig, PlatformProvider};
 
 pub const PLATFORM_ISSUER: &str = "https://auth.zeroship.test/oauth2";
 const PLATFORM_KID: &str = "platform-control-test-kid";
@@ -81,7 +81,7 @@ pub async fn drain_pg() {
 /// named tests FAILING with a database error -- which is what a real regression
 /// looks like. It cost two people an evening.
 ///
-/// [`zeroship_testkit::live_db::require`] ends the process with one block
+/// [`platform_fixture::live_db::require`] ends the process with one block
 /// instead. See its header for why exiting beats panicking here.
 ///
 /// MEMOISED, so the probe costs one connection per test binary rather than one
@@ -90,13 +90,13 @@ pub fn require_control_db() -> String {
     static CHECKED: OnceLock<String> = OnceLock::new();
     CHECKED
         .get_or_init(|| {
-            // The pair is `zeroship_testkit::live_db::PLATFORM_SCHEMAS`, whose
+            // The pair is `platform_fixture::live_db::PLATFORM_SCHEMAS`, whose
             // doc comment carries what each half separates and why naming the
             // journal also asks whether the journal is CURRENT. It was spelled
             // out here, and in two other places, until it became one constant.
-            zeroship_testkit::live_db::require_configured(
+            platform_fixture::live_db::require_configured(
                 zeroship_core::config::test_database_url_opt(),
-                zeroship_testkit::live_db::PLATFORM_SCHEMAS,
+                platform_fixture::live_db::PLATFORM_SCHEMAS,
             )
         })
         .clone()
@@ -112,7 +112,7 @@ pub fn require_control_db() -> String {
 /// green while running none of their subjects.
 ///
 /// It PANICS rather than ending the process, which is where it parts company
-/// with `zeroship_testkit::live_db`. That module exits because an unmigrated
+/// with `platform_fixture::live_db`. That module exits because an unmigrated
 /// database voids EVERY module in a target and hundreds of FAILED lines are
 /// the presentation it exists to remove. These backends void a handful of
 /// tests in a target whose other modules need nothing from them, so the
@@ -399,11 +399,7 @@ pub async fn seed_organization(pg: &compio_postgres::Client) -> String {
     pg.execute(
         "INSERT INTO zeroship.organizations (id, slug, name, billing_email) \
          VALUES ($1, $2, 'Fixture Organization', $3)",
-        &[
-            &organization_id,
-            &slug,
-            &format!("{slug}@zeroship.test"),
-        ],
+        &[&organization_id, &slug, &format!("{slug}@zeroship.test")],
     )
     .await
     .expect("seed fixture organization");
@@ -413,10 +409,7 @@ pub async fn seed_organization(pg: &compio_postgres::Client) -> String {
 /// A project inside an organization the caller already has, for a test that
 /// needs several apps to share ONE billing subject.
 #[allow(dead_code)]
-pub async fn unowned_project_in(
-    pg: &compio_postgres::Client,
-    organization_id: &str,
-) -> String {
+pub async fn unowned_project_in(pg: &compio_postgres::Client, organization_id: &str) -> String {
     let project_id = zeroship_core::typed_id::generate("prj");
     let slug = format!("prj-{}", Uuid::new_v4().simple());
     pg.execute(
@@ -655,8 +648,7 @@ pub fn period_date(period_start_unix: i64) -> chrono::NaiveDate {
         .timestamp_opt(period_start_unix, 0)
         .single()
         .unwrap_or_else(chrono::Utc::now);
-    chrono::NaiveDate::from_ymd_opt(dt.year(), dt.month(), 1)
-        .expect("valid first-of-month period")
+    chrono::NaiveDate::from_ymd_opt(dt.year(), dt.month(), 1).expect("valid first-of-month period")
 }
 
 /// Months per caller. See "THE CONTRACT FOR CALLERS" on `next_isolated_period`.
@@ -868,7 +860,8 @@ pub async fn resolve_run_band_base() -> u32 {
         // than splicing it into SQL and hoping.
         for name in [&table, &column] {
             assert!(
-                name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'),
+                name.chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'),
                 "refusing to splice the catalog name {name:?} into SQL"
             );
         }
@@ -988,3 +981,6 @@ pub fn lite_billing_stack(
         invoicer: provider,
     })
 }
+
+#[path = "../../../../tests/fixtures/platform_db/mod.rs"]
+mod platform_fixture;

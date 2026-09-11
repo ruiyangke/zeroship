@@ -25,7 +25,7 @@
 //! clear; an arm that can rule on nothing refuses and emits NO arm line rather
 //! than printing what a clean arm prints. A cargo test binary has the same two
 //! outcomes available - a verdict, or the statement that no verdict was
-//! reachable - and `zeroship_testkit::live_db` already draws that line for the
+//! reachable - and `platform_fixture::live_db` already draws that line for the
 //! control and gateway targets. This uses it. There is no skip path left here,
 //! so the count of database tests that ran is either all of them or none, and
 //! none is loud: the process exits with `REFUSED_EXIT_CODE`, distinct from
@@ -45,7 +45,7 @@ use std::sync::OnceLock;
 /// Memoised, so the preflight costs one connection per test binary rather than
 /// one per test - and so the refusal, when it comes, is printed once.
 ///
-/// The schema pair is [`zeroship_testkit::live_db::PLATFORM_SCHEMAS`], which is
+/// The schema pair is [`platform_fixture::live_db::PLATFORM_SCHEMAS`], which is
 /// also what turns the journal-currency stage on. These tests read
 /// `zeroship.organization_members`, `zeroship.projects` and `zeroship.apps`; a
 /// database migrated by an older checkout answers their queries with a missing
@@ -53,10 +53,13 @@ use std::sync::OnceLock;
 pub fn live_dsn() -> String {
     static DSN: OnceLock<String> = OnceLock::new();
     DSN.get_or_init(|| {
-        zeroship_testkit::live_db::require_configured(
+        platform_fixture::live_db::require_configured(
             zeroship_core::config::test_database_url_opt(),
-            zeroship_testkit::live_db::PLATFORM_SCHEMAS,
+            platform_fixture::live_db::PLATFORM_SCHEMAS,
         )
     })
     .clone()
 }
+
+#[path = "../../../../tests/fixtures/platform_db/mod.rs"]
+mod platform_fixture;

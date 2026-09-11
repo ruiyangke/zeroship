@@ -309,7 +309,7 @@ CANDIDATES="$(grep -c . "$PATTERNS" || true)"
 echo "==> ${CANDIDATES} of the databases on this server belong to a swept family"
 if [ "$CANDIDATES" -eq 0 ]; then
   # SAID, not counted. This is the fifth way an empty answer happens: the
-  # family list in crates/zeroship-testkit/src/sweep.rs stopped matching what
+  # family list in xtask/src/platform_db/sweep.rs stopped matching what
   # the suites name their databases. It cannot delete anything - a database the
   # sweeper does not own is one it can never reclaim - so it is a LEAK rather
   # than a loss, and it prints the same "nothing to do" as a clean cluster.

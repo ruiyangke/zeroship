@@ -83,8 +83,8 @@ pub fn with_file_lock<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     #[test]
     fn a_second_taker_waits_for_the_first() {
@@ -129,6 +129,9 @@ mod tests {
                 .join()
                 .unwrap()
         });
-        assert!(outcome.unwrap().is_err(), "the inner taker should have timed out");
+        assert!(
+            outcome.unwrap().is_err(),
+            "the inner taker should have timed out"
+        );
     }
 }

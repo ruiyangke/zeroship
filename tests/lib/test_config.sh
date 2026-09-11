@@ -2,7 +2,7 @@
 # ============================================================================
 # test_config.sh - the shell half of the test overlay.
 #
-# THE LOGIC IS NOW IN RUST: crates/zeroship-testkit/src/overlay.rs, reached
+# THE LOGIC IS NOW IN RUST: tests/fixtures/platform_db/overlay.rs, reached
 # through `zs-testkit overlay`. This file is the shell BINDING - it keeps the
 # function names and the exported-variable contract that tests/run_auth_suite.sh
 # and tests/run_billing_suite.sh already source, so neither of them changed.

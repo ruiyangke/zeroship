@@ -42,12 +42,12 @@ use zeroship_core::config::{Secret, SourceKind};
 /// `tests/main.rs` is a single binary over every module in this directory, so a
 /// panicking helper would print one FAILED line per live test - hundreds of
 /// verdicts about code that never executed, which is the presentation
-/// `zeroship_testkit::live_db` exists to remove. `require_configured` prints
+/// `platform_fixture::live_db` exists to remove. `require_configured` prints
 /// one block naming what was missing and `tests/provision_test_backends.sh`,
 /// then leaves the process with `live_db::REFUSED_EXIT_CODE`, which cargo
 /// reports as a failed run and which no test can be mistaken for.
 ///
-/// The schema list is [`zeroship_testkit::live_db::PLATFORM_SCHEMAS`], the same
+/// The schema list is [`platform_fixture::live_db::PLATFORM_SCHEMAS`], the same
 /// pair this crate's own lib tests require (`src/oidc/authorization_code.rs`).
 /// Reachable is not sufficient here: these fixtures read `zeroship.signing_keys`
 /// and `zeroship.oauth_clients` on their first statement, so a database that
@@ -59,9 +59,9 @@ use zeroship_core::config::{Secret, SourceKind};
 pub fn test_database_url() -> String {
     static DSN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     DSN.get_or_init(|| {
-        zeroship_testkit::live_db::require_configured(
+        platform_fixture::live_db::require_configured(
             zeroship_core::config::test_database_url_opt(),
-            zeroship_testkit::live_db::PLATFORM_SCHEMAS,
+            platform_fixture::live_db::PLATFORM_SCHEMAS,
         )
     })
     .clone()
@@ -211,7 +211,7 @@ pub fn test_auth_config_with(db_url: &str, extra: &[&str]) -> AuthConfig {
     // `cli_device_refresh_test.rs` is the one fixture that still writes its
     // own pair after calling this. It is correct - it configures both fields
     // - so the gate passes it; it is simply not consolidated.
-    let (hash_file, idem_file) = zeroship_test_support::session_key_files();
+    let (hash_file, idem_file) = session_keys::session_key_files();
     cfg.settings.refresh_hash_key_file = zeroship_core::config::Operational::new(hash_file);
     cfg.settings.refresh_idem_key_file = zeroship_core::config::Operational::new(idem_file);
     cfg
@@ -322,7 +322,7 @@ pub struct SweepLease {
 /// statement due to lock timeout`. So the bound applies to advisory locks and
 /// not only to the table locks the manual names.
 ///
-/// 900s is the figure `zeroship_testkit::suite_db::PROVISION_LOCK_TIMEOUT`
+/// 900s is the figure `platform_fixture::suite_db::PROVISION_LOCK_TIMEOUT`
 /// already uses for the other cross-process wait in this harness. Legitimate
 /// holds are seconds; the size is for a pile-up of concurrent runs, not a test.
 const SWEEP_LEASE_TIMEOUT_MS: u32 = 900_000;
@@ -454,8 +454,7 @@ impl CookieJar {
 
     /// Serialize to a `Cookie:` header value (`a=1; b=2`).
     pub fn header(&self) -> String {
-        let mut parts: Vec<String> =
-            self.inner.iter().map(|(k, v)| format!("{k}={v}")).collect();
+        let mut parts: Vec<String> = self.inner.iter().map(|(k, v)| format!("{k}={v}")).collect();
         parts.sort();
         parts.join("; ")
     }
@@ -579,13 +578,11 @@ impl Fixture {
     // are intentionally `!Send`. Test helper futures here inherit that.
     #[allow(clippy::future_not_send)]
     pub async fn boot(client_id_prefix: &str) -> Self {
-        let db_url =
-            crate::common::test_database_url();
+        let db_url = crate::common::test_database_url();
 
-        let (pg_client, pg_connection) =
-            compio_postgres::connect(&db_url, compio_postgres::NoTls)
-                .await
-                .expect("connect pg");
+        let (pg_client, pg_connection) = compio_postgres::connect(&db_url, compio_postgres::NoTls)
+            .await
+            .expect("connect pg");
         compio::runtime::spawn(async move {
             if let Err(e) = pg_connection.run().await {
                 eprintln!("[common::Fixture] pg connection driver: {e}");
@@ -826,3 +823,9 @@ pub async fn validated_session(
     .expect("session created");
     (created.proof, person_id)
 }
+
+#[path = "../../../../tests/fixtures/platform_db/mod.rs"]
+mod platform_fixture;
+
+#[path = "../../../../tests/fixtures/session_keys.rs"]
+mod session_keys;

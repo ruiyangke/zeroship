@@ -21,15 +21,6 @@ zeroship-core = { workspace = true }
 
 [dev-dependencies]
 compio = { workspace = true }
-# The live-database preflight this crate's two database targets run before
-# their first assertion. Without it they read a stale schema as a code
-# regression, and an unconfigured run reports a green over zero database tests;
-# see `zeroship_testkit::live_db` and `tests/common/mod.rs`.
-#
-# It REPLACED `zeroship-test-support`, whose `skip` marker is what those two
-# targets used to print. There is no skip path left here, so nothing in this
-# crate announces one.
-zeroship-testkit = { workspace = true }
 
 [build-dependencies]
 cedar-policy = { version = "4.11.0", default-features = false, features = ["ipaddr"] }

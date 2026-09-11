@@ -14,7 +14,7 @@
 # fixture assembling the config in Rust skips that refusal.
 #
 # WHY A GATE AND NOT JUST A SHARED HELPER. The helper
-# (`zeroship_test_support::session_key_files`) exists and every fixture now
+# (`session_keys::session_key_files`) exists and every fixture now
 # reaches it, but that is a fact about today's tree. The operation - write a
 # refresh-hmac / refresh-idem pair, point an `AuthConfig` at it - was open-coded
 # across several fixtures in three crates, and the missing copy was found by a
@@ -177,7 +177,7 @@ RS
   # always answered "absent" would pass the positive too.
   cat > "$tmp/crates/scratch/tests/unfenced.rs" <<'RS'
 let cfg = AuthConfig::parse_from(["zeroship-auth"]);
-let (h, i) = zeroship_test_support::session_key_files();
+let (h, i) = session_keys::session_key_files();
 cfg.settings.refresh_hash_key_file = Operational::new(h);
 cfg.settings.refresh_idem_key_file = Operational::new(i);
 web::App::new().state(cfg).configure(server::configure(false, false));
@@ -276,7 +276,7 @@ else
        Their token exchange answers 500 with 'refresh hash key is not
        configured', and the test that finds it will look like a defect in
        whatever it was actually testing. Call
-       zeroship_test_support::session_key_files() and assign both
+       session_keys::session_key_files() and assign both
        cfg.settings.refresh_hash_key_file and .refresh_idem_key_file, or build
        the config through a test_auth_config fixture that already does."
 fi
@@ -349,14 +349,14 @@ if ! gate_arm fixture_builders "$n_builders" 2; then
   fail "the scan found $n_builders AuthConfig fixture builder(s). Arm 1 treats a
        call to one as proof of a keyring, and that proof now rests on nothing."
 elif [ -z "$unbacked" ]; then
-  pass "all $n_builders fixture builder(s) reach zeroship_test_support::session_key_files"
+  pass "all $n_builders fixture builder(s) reach session_keys::session_key_files"
 else
   fail "these AuthConfig fixture builders do not reach the shared keyring
        helper:$unbacked
 
        Arm 1 counts a call to one of these as evidence that the caller is
        configured. Point the builder at
-       zeroship_test_support::session_key_files() so that stays true."
+       session_keys::session_key_files() so that stays true."
 fi
 
 # --- Arm 4: production still requires what the fixtures are held to --------

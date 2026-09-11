@@ -19,7 +19,7 @@
 //! already have that. SCHEMA FRESHNESS: a guarantee that the schema in the
 //! database matches the migrations in the tree under test. That is a property
 //! of the BRANCH, so the name is derived from the migration set itself (see
-//! [`crate::fingerprint`]). Every agent on the same commit shares one database;
+//! [`super::fingerprint`]). Every agent on the same commit shares one database;
 //! an agent on a branch that edits a migration gets its own automatically, with
 //! nobody deciding and nobody passing a flag; and cleanup becomes DECIDABLE,
 //! which is what `tests/sweep_test_databases.sh` relies on.
@@ -47,8 +47,8 @@
 //! instrument that finds them is running two suites at once and reading what
 //! breaks; a serial pass proves nothing, because serial already worked.
 
-use crate::admin::DbAdmin;
-use crate::fingerprint;
+use super::admin::DbAdmin;
+use super::fingerprint;
 use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::time::Duration;
@@ -331,9 +331,15 @@ mod tests {
         assert_eq!(out.unwrap(), Ensured::Created);
         assert_eq!(
             admin.log,
-            vec!["exists zeroship_auth_test_abc", "create zeroship_auth_test_abc"]
+            vec![
+                "exists zeroship_auth_test_abc",
+                "create zeroship_auth_test_abc"
+            ]
         );
-        assert!(said.contains("==> Creating zeroship_auth_test_abc"), "{said}");
+        assert!(
+            said.contains("==> Creating zeroship_auth_test_abc"),
+            "{said}"
+        );
     }
 
     #[test]
@@ -361,8 +367,14 @@ mod tests {
             Err("ERROR:  permission denied to create database".into()),
         );
         let err = run(&mut admin, "zeroship_auth_test_abc").0.unwrap_err();
-        assert!(err.contains("permission denied to create database"), "{err}");
-        assert!(err.contains("FATAL: could not create zeroship_auth_test_abc."), "{err}");
+        assert!(
+            err.contains("permission denied to create database"),
+            "{err}"
+        );
+        assert!(
+            err.contains("FATAL: could not create zeroship_auth_test_abc."),
+            "{err}"
+        );
     }
 
     #[test]
@@ -381,7 +393,8 @@ mod tests {
         let root = root.path();
         std::fs::create_dir_all(root.join(fingerprint::MIGRATIONS_DIR)).unwrap();
         std::fs::write(
-            root.join(fingerprint::MIGRATIONS_DIR).join("20260101_one.ts"),
+            root.join(fingerprint::MIGRATIONS_DIR)
+                .join("20260101_one.ts"),
             "one",
         )
         .unwrap();
@@ -448,7 +461,10 @@ mod tests {
         let a = lock_path(dir, "127.0.0.1", "5440", "zeroship_auth_test_abc");
         let b = lock_path(dir, "127.0.0.1", "5444", "zeroship_auth_test_abc");
         assert_ne!(a, b);
-        assert_eq!(a, lock_path(dir, "127.0.0.1", "5440", "zeroship_auth_test_abc"));
+        assert_eq!(
+            a,
+            lock_path(dir, "127.0.0.1", "5440", "zeroship_auth_test_abc")
+        );
         // The shell computed this exact path; a run of the old harness and a
         // run of this one have to exclude each other, so the value is pinned
         // rather than left to whatever the hash happens to produce.

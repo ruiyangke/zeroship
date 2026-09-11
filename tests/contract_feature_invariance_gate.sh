@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ORM driver and capability contracts must retain their shape across features.
-# Static checks cover trait members and their vocabulary. Consumer builds enable
-# ORM test support while leaving the consumer's own helpers disabled.
+# Static checks cover trait members and their vocabulary. Consumers build
+# through their ordinary library targets.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
