@@ -15,6 +15,7 @@ use crate::{backend::BackendHandle, compile::BuiltQuery, crud, tx_route::Capture
 /// A database connection bound to an app deployment.
 #[derive(Clone, Debug)]
 pub struct Database {
+    identity: Rc<()>,
     context: crate::OrmContext,
     binding: DbBinding,
     backend: BackendHandle,
@@ -24,6 +25,11 @@ pub struct Database {
 }
 
 impl Database {
+    /// Prepare a relational read while the request's transaction and read-set are active.
+    pub fn read(&self, query: ReadQuery) -> impl Future<Output = Result<Output, DbError>> + use<> {
+        let collection = query.source.collection.clone();
+        Collection { database: self.clone(), name: collection }.execute(Operation::Read(Box::new(query)))
+    }
     /// Open the configured backend and bind the deployment's runtime metadata.
     pub async fn connect(
         binding: DbBinding,
@@ -36,6 +42,7 @@ impl Database {
     /// Bind an already installed runtime descriptor to a backend.
     pub fn new(context: crate::OrmContext, binding: DbBinding, backend: BackendHandle) -> Self {
         Self {
+            identity: Rc::new(()),
             context,
             binding,
             backend,
@@ -338,6 +345,11 @@ mod codecs;
 mod model;
 pub use codecs::{Decimal, Point, Protected, sql_types};
 pub use model::*;
+pub mod read;
+pub use read::{ReadQuery, ReadSource, ReadJoin, ReadProjection};
+mod read_builder;
+mod read_input;
+pub use read_builder::*;
 pub use zeroship_data_macros::{Changeset, FromRow, Insertable, schema};
 pub use zeroship_data_sql::value::Record;
 
@@ -356,6 +368,7 @@ mod tests;
 /// accepted from the caller; the host's binding supplies database authority.
 #[derive(Clone, Debug)]
 pub enum Operation {
+    Read(Box<ReadQuery>),
     Find {
         filter: Value,
         options: Value,
@@ -425,6 +438,7 @@ impl From<crud::read_pipeline::ApplyResult> for Output {
 }
 
 enum Plan {
+    Read(Box<read::PreparedRead>),
     Find {
         filter: Value,
         plan: Box<crud::FindPlan>,
@@ -497,6 +511,10 @@ impl PreparedOperation {
         crate::compile::validate_collection(collection)?;
         crate::descriptor::collection_schema(&binding, collection)?;
         let plan = match operation {
+            Operation::Read(query) => {
+                if query.source.collection != collection { return Err(read::invalid("read root does not match its collection")); }
+                Plan::Read(Box::new(read::PreparedRead::new(&binding, route.dialect(), *query)?))
+            }
             Operation::Find { filter, options } => {
                 let plan = crud::plan_find(&binding, collection, &filter, &options);
                 Plan::Find {
@@ -615,6 +633,7 @@ impl PreparedOperation {
         }
         let route = route.bind(backend);
         let result = match plan {
+            Plan::Read(plan) => Box::pin(plan.execute(&binding, &route)).await?,
             Plan::Find { filter, plan } => {
                 Box::pin(crud::run_find(binding, collection, route, filter, *plan))
                     .await?
