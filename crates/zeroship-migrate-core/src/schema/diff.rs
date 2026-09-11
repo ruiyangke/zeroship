@@ -1189,7 +1189,6 @@ mod tests {
             catalog_type: "bytea".into(),
             not_null: false,
             encryption: Some(EncryptionMeta {
-                key_id: "default".into(),
                 wraps: WrappedType::String,
             }),
             ..Default::default()
@@ -1205,7 +1204,7 @@ mod tests {
         // `decode($N,'base64')::bytea` into a still-TEXT column.
         let live = live_with_cols("users", vec![("ssn", plaintext_text_col())]);
         let declared = json!({
-            "ssn": { "type": "string", "encrypted": { "keyId": "default" } }
+            "ssn": { "type": "string", "encrypted": {  } }
         });
         let ops = compute_diff(
             crate::test_fixtures::VENDORS,
@@ -1301,7 +1300,7 @@ mod tests {
         // RewriteColumnType op (must not churn on every deploy).
         let live = live_with_cols("users", vec![("ssn", encrypted_bytea_col())]);
         let declared = json!({
-            "ssn": { "type": "string", "encrypted": { "keyId": "default" } }
+            "ssn": { "type": "string", "encrypted": {  } }
         });
         let ops = compute_diff(
             crate::test_fixtures::VENDORS,
@@ -1873,7 +1872,7 @@ mod tests {
         let declared = json!({
             "ssn": {
                 "type": "string",
-                "encrypted": { "keyId": "default" },
+                "encrypted": {  },
                 "mask": { "kind": "last4", "classification": "spi" }
             }
         });

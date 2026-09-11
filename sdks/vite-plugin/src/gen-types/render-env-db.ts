@@ -26,7 +26,7 @@ export interface RuntimeFieldDef {
   enum?: unknown[];
   mask?: { kind?: string; classification?: string };
   default?: unknown;
-  encrypted?: { keyId?: string; wraps?: string };
+  encrypted?: { wraps?: string };
   idPrefix?: string;
   refTarget?: string;
   onDelete?: string;
@@ -291,26 +291,16 @@ function renderBuilderChain(def: RuntimeFieldDef): string {
   return chain;
 }
 
-/**
- * `t.encrypted({ keyId?, wraps? })`.
- *
- * The default key (`default`) and wrapped type (`string`) are what a bare
- * `t.encrypted()` stamps, so they collapse back to the bare form: the two
- * spellings produce the same `TypeBuilder`, and the full facet is preserved in
- * `schema.runtime.json` regardless. Only a non-default facet renders opts.
- */
+/** Render the wrapped plaintext type; the host owns project-key selection. */
 function renderEncryptedBase(enc: RuntimeFieldDef["encrypted"]): string {
   if (enc === null || typeof enc !== "object") return "t.encrypted()";
-  const keyId = typeof enc.keyId === "string" ? enc.keyId : undefined;
   const wraps = typeof enc.wraps === "string" ? enc.wraps : undefined;
   if (
-    (keyId === undefined || keyId === "default") &&
     (wraps === undefined || wraps === "string")
   ) {
     return "t.encrypted()";
   }
   const opts: string[] = [];
-  if (keyId !== undefined) opts.push(`keyId: ${jsStr(keyId)}`);
   if (wraps !== undefined) {
     // `wraps` is a TypeBuilder argument in the SDK, reconstructed from the
     // inner-type token.

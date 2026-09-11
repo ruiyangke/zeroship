@@ -12,7 +12,7 @@ use zeroship_data_orm::{
 };
 
 /// Column-key source currently supplied to the adapter's worker thread.
-pub fn isolate_key_source() -> encryption::LocalKeySource {
+pub fn isolate_key_source() -> encryption::ProjectKeySource {
     context::isolate_key_source()
 }
 
@@ -46,25 +46,25 @@ pub fn reset_context_for_tests() {
 
 #[doc(hidden)]
 #[must_use]
-pub fn supply_root_keys_for_tests(roots: &[(&str, &str)]) -> SuppliedRootKeysGuard {
-    let keys = Rc::new(encryption::SuppliedRootKeys::new());
-    for (key_id, hex) in roots {
-        keys.insert_hex(key_id, hex)
-            .unwrap_or_else(|e| panic!("fixture root key '{key_id}' must parse: {e:?}"));
+pub fn supply_project_key_for_tests(app_ids: &[&str], hex: &str) -> SuppliedProjectKeysGuard {
+    let keys = Rc::new(encryption::SuppliedProjectKeys::new());
+    keys.insert_hex("fixture_project", hex).expect("fixture project key");
+    for app_id in app_ids {
+        keys.bind_app(app_id, "fixture_project").expect("fixture app binding");
     }
-    ctx_mut(|c| c.set_supplied_root_keys(Some(Rc::clone(&keys))));
-    SuppliedRootKeysGuard { _keys: keys }
+    ctx_mut(|c| c.set_supplied_project_keys(Some(Rc::clone(&keys))));
+    SuppliedProjectKeysGuard { _keys: keys }
 }
 
 #[doc(hidden)]
 #[derive(Debug)]
-pub struct SuppliedRootKeysGuard {
-    _keys: Rc<encryption::SuppliedRootKeys>,
+pub struct SuppliedProjectKeysGuard {
+    _keys: Rc<encryption::SuppliedProjectKeys>,
 }
 
-impl Drop for SuppliedRootKeysGuard {
+impl Drop for SuppliedProjectKeysGuard {
     fn drop(&mut self) {
-        ctx_mut(|c| c.set_supplied_root_keys(None));
+        ctx_mut(|c| c.set_supplied_project_keys(None));
     }
 }
 

@@ -295,6 +295,12 @@ mod runtime_descriptor_binding_tests {
     }
 }
 
+/// Install project keys and app bindings supplied by the trusted worker host.
+/// Existing backends retain their source; install this before initializing them.
+pub fn set_project_keys(keys: std::rc::Rc<zeroship_data_orm::encryption::SuppliedProjectKeys>) {
+    context::with_mut(|context| context.set_supplied_project_keys(Some(keys)));
+}
+
 /// Open the ORM connection registered for this worker thread, if configured.
 pub async fn initialize_backend() -> Result<(), DbError> {
     if let Some(connection) = context::with(|context| context.connection()) {

@@ -9440,7 +9440,7 @@ columns = [
         });
         assert_eq!(
             field.encrypted,
-            Some(serde_json::json!({ "keyId": "default", "wraps": "string" })),
+            Some(serde_json::json!({ "wraps": "string" })),
             "encryption metadata preserves the wrapped plaintext type without a mode"
         );
         assert_eq!(

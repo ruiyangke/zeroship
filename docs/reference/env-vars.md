@@ -635,7 +635,6 @@ the command. See `docs/reference/project-config.md`.
 `ZEROSHIP_STORAGE_UPLOAD_CONCURRENCY` `CONTROL_USAGE_OUTBOX_WAL_PATH`
 `CONTROL_DEPLOY_RETENTION_BATCH_SIZE` `CONTROL_DEPLOY_RETENTION_GRACE_WINDOW_MS`
 `CONTROL_WORKFLOW_RETENTION_BATCH_SIZE` `CONTROL_WORKFLOW_RETENTION_WINDOW_MS`
-`ZEROSHIP_COLUMN_KEY_<COLLECTION>` (a family, one name per collection)
 
 **creator app** (`ZEROSHIP_DEPLOY_ID`), and the ambient/external names the
 process inherits rather than owns: `PATH` `HOME` `HOSTNAME` `PORT` `CI`
@@ -820,7 +819,7 @@ Recorded here so their absence is a stated position rather than an oversight.
 **Set-but-unread at process startup** (proposal Section 4.4). Nothing enumerates
 the ambient `ZEROSHIP_*` names at `bootstrap` and rejects the ones the current
 binary does not consume. It is not simply the contract set: `ZEROSHIP_LOG`,
-`ZEROSHIP_NET_*`, `ZEROSHIP_STORAGE_*` and the `ZEROSHIP_COLUMN_KEY_*` family are
+`ZEROSHIP_NET_*` and `ZEROSHIP_STORAGE_*` are
 legitimately read by libraries inside the same process without being settings,
 so a naive prefix rule would refuse to start a correct deployment. The allowed
 set has to be the contract union the declared per-consumer reads, and that union

@@ -227,9 +227,8 @@ fn resolve_raw_column(schema: &Value, canonical_column: &str) -> Result<String, 
     })
 }
 
-/// Key lookup and plaintext decoding metadata for an encrypted column.
+/// Plaintext decoding metadata for an encrypted column.
 struct ColumnEncryptionMeta {
-    key_id: String,
     wraps: &'static str,
 }
 
@@ -249,18 +248,13 @@ fn lookup_encryption_meta(
     let Some(enc_meta) = def.get("encrypted").and_then(|v| v.as_object()) else {
         return Ok(None);
     };
-    let key_id = enc_meta
-        .get("keyId")
-        .and_then(|v| v.as_str())
-        .unwrap_or("default")
-        .to_string();
     let wraps = match enc_meta.get("wraps").and_then(|v| v.as_str()) {
         Some("string") => "string",
         Some("number") => "number",
         Some("bytes") => "bytes",
         _ => "string",
     };
-    Ok(Some(ColumnEncryptionMeta { key_id, wraps }))
+    Ok(Some(ColumnEncryptionMeta { wraps }))
 }
 
 // ---------------------------------------------------------------------------
@@ -521,6 +515,7 @@ async fn fetch_and_decrypt(
     let app_id = route.app_id();
 
     let aad = crate::encryption::aad::canonical_aad(
+        app_id,
         &args.collection,
         &args.column,
         args.row_pk.as_bytes(),
@@ -592,7 +587,7 @@ async fn fetch_and_decrypt(
         let key = route
             .backend()
             .key_store()
-            .resolve(app_id, &enc_meta.key_id)
+            .resolve(app_id)
             .await?;
         let plaintext_bytes = crate::encryption::aead::decrypt(&key, &bytes, &aad)?;
         wrap_plaintext_per_wraps(&plaintext_bytes, enc_meta.wraps)

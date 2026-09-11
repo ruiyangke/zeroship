@@ -121,7 +121,7 @@ export default async function setup(project: TestProject) {
     await apiPort.release();
     await uiPort.release();
     start(process.execPath, [vite, "--host", "127.0.0.1", "--port", String(uiPort.value), "--strictPort"], app, "dev", {
-      ...cleanEnv, DB_E2E_API_PORT: String(apiPort.value), ZEROSHIP_BIN: binary, ZEROSHIP_COLUMN_KEY_DB_E2E: "a".repeat(64),
+      ...cleanEnv, DB_E2E_API_PORT: String(apiPort.value), ZEROSHIP_BIN: binary,
     });
     const deadline = Date.now() + 90_000;
     let ready = false;

@@ -249,7 +249,7 @@ fn host_service(source: &source::Source) -> bool {
     source.names_any(&[
         "DbBinding",
         "KeyStore",
-        "LocalKeySource",
+        "ProjectKeySource",
         "VectorSearch",
         "SpatialSearch",
         "Search",

@@ -145,7 +145,6 @@ fn seed_descriptors() -> Vec<CollectionDescriptor> {
                 name: "secret".to_string(),
                 ty: "string".to_string(),
                 encrypted: Some(serde_json::json!({
-                    "keyId": "default", "wraps": "string",
                 })),
                 ..Default::default()
             },

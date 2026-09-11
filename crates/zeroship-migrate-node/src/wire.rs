@@ -921,7 +921,7 @@ pub struct FieldDescriptorDto {
     pub vector_metric: Option<String>,
     /// `t.string({ caseSensitive: false })` - only `Some(false)` is meaningful.
     pub case_sensitive: Option<bool>,
-    /// The `t.encrypted({ keyId, wraps })` sub-object (verbatim).
+    /// The `t.encrypted({ wraps })` sub-object (verbatim).
     pub encrypted: Option<JsonValue>,
     /// The `.mask({ kind, classification })` sub-object (verbatim).
     pub mask: Option<JsonValue>,

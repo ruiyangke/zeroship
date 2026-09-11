@@ -1,5 +1,5 @@
 use super::*;
-use zeroship_data_orm::encryption::LocalKeySource;
+use zeroship_data_orm::encryption::ProjectKeySource;
 use zeroship_data_sql::value;
 
 schema!(pub test_schema = "../../tests/fixtures/schema.runtime.json");
@@ -182,7 +182,7 @@ async fn postgres_native_models_round_trip() {
         zeroship_data_orm::backend::postgres::PostgresBackend::connect(
             &postgres.url(),
             4,
-            LocalKeySource::EnvVar,
+            ProjectKeySource::unavailable(),
         )
         .await
         .unwrap(),
@@ -215,7 +215,7 @@ async fn postgres_native_models_round_trip() {
         binding,
         crate::ConnectOptions::new(
             postgres.url(),
-            LocalKeySource::EnvVar,
+            ProjectKeySource::unavailable(),
         ),
         vec![("posts".into(), <posts::Entity as Entity>::schema().clone())],
     )
@@ -464,10 +464,10 @@ async fn typed_handles_refuse_descriptor_drift() {
 }
 
 async fn database() -> (Database, tempfile::TempDir) {
-    database_with_keys(LocalKeySource::EnvVar).await
+    database_with_keys(ProjectKeySource::unavailable()).await
 }
 
-async fn database_with_keys(key_source: LocalKeySource) -> (Database, tempfile::TempDir) {
+async fn database_with_keys(key_source: ProjectKeySource) -> (Database, tempfile::TempDir) {
     crate::reset_engine_for_tests();
     let directory = tempfile::tempdir().unwrap();
     let binding = DbBinding::cold_start("orm_fixture");

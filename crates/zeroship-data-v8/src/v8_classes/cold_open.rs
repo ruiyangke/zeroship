@@ -319,7 +319,7 @@ fn collection_dispatch_uses_the_injected_orm_factory() {
     use zeroship_data_orm::{
         backend::BackendHandle,
         connection::{BackendFactory, ConnectionFactory},
-        encryption::LocalKeySource,
+        encryption::ProjectKeySource,
         error::DbError,
     };
     struct HostFactory(Arc<AtomicUsize>);
@@ -329,7 +329,7 @@ fn collection_dispatch_uses_the_injected_orm_factory() {
         }
         fn connect(
             &self,
-            _: LocalKeySource,
+            _: ProjectKeySource,
         ) -> futures::future::LocalBoxFuture<'_, Result<BackendHandle, DbError>> {
             Box::pin(async {
                 self.0.fetch_add(1, Ordering::SeqCst);

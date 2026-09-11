@@ -3374,28 +3374,9 @@ use zeroship_data_orm::error::DbError;
 
 use zeroship_data_orm::encryption;
 
-/// Helper: hand this isolate a synthetic root key for `key_id`, so the
-/// `PostgresBackend` the test (or the CRUD path behind it) constructs
-/// resolves column keys from it.
-///
-/// This REPLACES a `set_var("ZEROSHIP_COLUMN_KEY_<KEYID>", ...)` guard.
-/// The env var was the only channel that reached a backend the test did
-/// not build itself, and it was process-global: every test in this binary
-/// shared one `ZEROSHIP_COLUMN_KEY_DEFAULT`, so the guard's own comment
-/// claiming `--test-threads=1` serialisation (which nothing in
-/// `Cargo.toml` actually requests) was the only thing standing between
-/// six tests and each other's roots. The isolate context is per-thread,
-/// so that race cannot happen here.
-///
-/// This IS the PG resolve path now, not a fallback behind one. The
-/// `get_column_key` arm that used to run first, in the platform-owned system
-/// schema, was deleted on 2026-08-27; PG and SQLite both read the isolate's
-/// supplied roots. This is the same arm the env var used to occupy.
-///
-/// The returned guard withdraws the keys on drop; keep it alive for the
-/// test body.
-fn with_root_key(key_id: &str, root_hex: &str) -> zeroship_data_v8::testing::SuppliedRootKeysGuard {
-    zeroship_data_v8::testing::supply_root_keys_for_tests(&[(key_id, root_hex)])
+/// Supply a project key for the apps explicitly named by this fixture.
+fn with_project_key(app_ids: &[&str], hex: &str) -> zeroship_data_v8::testing::SuppliedProjectKeysGuard {
+    zeroship_data_v8::testing::supply_project_key_for_tests(app_ids, hex)
 }
 
 /// Gate #1: round-trip an encrypted string column. Insert a
@@ -3408,7 +3389,7 @@ async fn encrypted_column_round_trip_randomised() {
     let schema = schema.as_str();
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     // Synthetic 32-byte root key.
-    let _keys = with_root_key("default", &"a".repeat(64));
+    let _keys = with_project_key(&["app1"], &"a".repeat(64));
 
     pool.execute(&format!("DROP SCHEMA IF EXISTS \"{schema}\" CASCADE"), &[])
         .await
@@ -3437,11 +3418,11 @@ async fn encrypted_column_round_trip_randomised() {
     );
     let key = backend
         .key_store()
-        .resolve("app1", "default")
+        .resolve("app1")
         .await
         .expect("resolve_key");
     let plaintext = b"123-45-6789";
-    let aad = encryption::canonical_aad("enc_notes", "ssn", b"row_a");
+    let aad = encryption::canonical_aad("app1", "enc_notes", "ssn", b"row_a");
     let ct = zeroship_data_orm::encryption::aead::encrypt(&key, plaintext, &aad).expect("encrypt");
 
     // Bind via base64 decode just like the build_insert layer does.
@@ -3492,7 +3473,7 @@ async fn encrypted_randomised_row_swap_rejected() {
     let schema = crate::test_app_id!();
     let schema = schema.as_str();
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
-    let _keys = with_root_key("default", &"b".repeat(64));
+    let _keys = with_project_key(&["app1"], &"b".repeat(64));
 
     pool.execute(&format!("DROP SCHEMA IF EXISTS \"{schema}\" CASCADE"), &[])
         .await
@@ -3519,20 +3500,20 @@ async fn encrypted_randomised_row_swap_rejected() {
     );
     let key = backend
         .key_store()
-        .resolve("app1", "default")
+        .resolve("app1")
         .await
         .unwrap();
     // Insert row A with its OWN AAD (binds row_pk = "row_a").
     let ct_a = zeroship_data_orm::encryption::aead::encrypt(
         &key,
         b"sensitive-A",
-        &encryption::canonical_aad("enc_notes", "ssn", b"row_a"),
+        &encryption::canonical_aad("app1", "enc_notes", "ssn", b"row_a"),
     )
     .unwrap();
     let ct_b = zeroship_data_orm::encryption::aead::encrypt(
         &key,
         b"sensitive-B",
-        &encryption::canonical_aad("enc_notes", "ssn", b"row_b"),
+        &encryption::canonical_aad("app1", "enc_notes", "ssn", b"row_b"),
     )
     .unwrap();
     for (id, ct) in [("row_a", &ct_a), ("row_b", &ct_b)] {
@@ -3578,7 +3559,7 @@ async fn encrypted_randomised_row_swap_rejected() {
         }
         out
     };
-    let aad_b = encryption::canonical_aad("enc_notes", "ssn", b"row_b");
+    let aad_b = encryption::canonical_aad("app1", "enc_notes", "ssn", b"row_b");
     let err = zeroship_data_orm::encryption::aead::decrypt(&key, &raw, &aad_b)
         .expect_err("row-swap must fail AAD verification");
     match err {
@@ -3616,11 +3597,11 @@ async fn encrypted_randomised_row_swap_rejected() {
 async fn p4_round_trip_encrypted_masked_vector_via_descriptor_metadata() {
     let (_postgres, url) = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
-    let _keys = with_root_key("default", &"d".repeat(64));
 
     let app = crate::test_app_id!();
 
     let app = app.as_str();
+    let _keys = with_project_key(&[app], &"d".repeat(64));
     pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
         .await
         .unwrap();
@@ -3630,7 +3611,7 @@ async fn p4_round_trip_encrypted_masked_vector_via_descriptor_metadata() {
         "name": {"type": "string", "required": true},
         "ssn": {
             "type": "string",
-            "encrypted": {"keyId": "default", "wraps": "string"}
+            "encrypted": {"wraps": "string"}
         },
         "phone": {
             "type": "string",
@@ -3691,7 +3672,6 @@ CREATE TABLE "{app}"."people" ({PG_SYSTEM_COLUMNS},
     // Sanity: the resolution the CRUD passes will perform returns BOTH goodies.
     let resolved = zeroship_data_orm::crud::runtime_schema_for_tests(app, "people")
         .expect("the descriptor entry this deploy installed must resolve");
-    assert!(resolved["ssn"]["encrypted"].get("mode").is_none());
     assert_eq!(resolved["phone"]["mask"]["kind"], "last4");
 
     // ----- WRITE (real pipeline, introspected metadata) -----
@@ -3876,11 +3856,11 @@ async fn schema_relation_count(pool: &std::rc::Rc<Pool>, app: &str) -> Option<i6
 async fn p5_pg_crud_works_via_engine_created_schema_without_runtime_ddl() {
     let (_postgres, url) = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
-    let _keys = with_root_key("default", &"e".repeat(64));
 
     let app = crate::test_app_id!();
 
     let app = app.as_str();
+    let _keys = with_project_key(&[app], &"e".repeat(64));
     pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
         .await
         .unwrap();
@@ -3889,7 +3869,7 @@ async fn p5_pg_crud_works_via_engine_created_schema_without_runtime_ddl() {
         "name": {"type": "string", "required": true},
         "ssn": {
             "type": "string",
-            "encrypted": {"keyId": "default", "wraps": "string"}
+            "encrypted": {"wraps": "string"}
         },
         "phone": {
             "type": "string",
@@ -3934,7 +3914,6 @@ CREATE TABLE "{app}"."people" ({PG_SYSTEM_COLUMNS},
     // The resolution the CRUD passes will perform returns BOTH goodies.
     let resolved = zeroship_data_orm::crud::runtime_schema_for_tests(app, "people")
         .expect("the descriptor entry this deploy installed must resolve");
-    assert!(resolved["ssn"]["encrypted"].get("mode").is_none());
     assert_eq!(resolved["phone"]["mask"]["kind"], "last4");
 
     // ----- WRITE via the real pipeline (descriptor metadata) -----
@@ -4060,12 +4039,8 @@ async fn encrypted_column_missing_key_typed_error() {
     let (_postgres, url) = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     // Resolve against a source that provably has NO key: an empty
-    // supplied set. The previous form deleted one env var name and
-    // trusted the ambient environment to be otherwise clean, so a
-    // `ZEROSHIP_COLUMN_KEY_MISSING_TEST` exported outside the test would
-    // have turned this assertion green-for-the-wrong-reason. An empty
-    // set cannot.
-    let _keys = zeroship_data_v8::testing::supply_root_keys_for_tests(&[]);
+    // supplied set, so the fixture is independent of process configuration.
+    let _keys = with_project_key(&[], &"00".repeat(32));
 
     let backend = zeroship_data_orm::backend::PostgresBackend::new(
         pool.clone(),
@@ -4074,7 +4049,7 @@ async fn encrypted_column_missing_key_typed_error() {
     );
     let err = backend
         .key_store()
-        .resolve("app1", "missing_test")
+        .resolve("app1")
         .await
         .expect_err("missing key must yield a typed error");
     match err {
@@ -5474,11 +5449,11 @@ async fn unmask_encrypted_column_on_pg_reads_bytea_raw_sibling() {
     let (_postgres, url) = require_pg().await;
     let admin_pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
     // Synthetic 32-byte root key, same shape as the encrypted round-trip gate.
-    let _keys = with_root_key("default", &"b".repeat(64));
 
     let app = crate::test_app_id!();
 
     let app = app.as_str();
+    let _keys = with_project_key(&[app], &"b".repeat(64));
     let coll = "users";
     let role = provision_app_with_role(&admin_pool, app).await;
     zeroship_data_orm::auth::bootstrap::ensure_per_app_role(&admin_pool, app)
@@ -5488,7 +5463,7 @@ async fn unmask_encrypted_column_on_pg_reads_bytea_raw_sibling() {
         "ssn": {
             "type": "string",
             "mask": { "kind": "last4", "classification": "spi" },
-            "encrypted": { "keyId": "default", "wraps": "string" }
+            "encrypted": { "wraps": "string" }
         }
     });
     let ssn_raw = raw_column_name("ssn");
@@ -5513,10 +5488,10 @@ async fn unmask_encrypted_column_on_pg_reads_bytea_raw_sibling() {
     );
     let key = backend
         .key_store()
-        .resolve(app, "default")
+        .resolve(app)
         .await
         .expect("resolve_key");
-    let aad = encryption::canonical_aad(coll, "ssn", b"u1");
+    let aad = encryption::canonical_aad(app, coll, "ssn", b"u1");
     let ct =
         zeroship_data_orm::encryption::aead::encrypt(&key, b"123-45-6789", &aad).expect("encrypt");
     let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &ct);

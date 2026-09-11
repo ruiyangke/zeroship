@@ -93,7 +93,7 @@ mod tests {
         let backend = super::super::SqliteBackend::open(
             &database_path,
             std::sync::Arc::new(super::super::NullChangeSink),
-            crate::encryption::LocalKeySource::EnvVar,
+            crate::encryption::ProjectKeySource::unavailable(),
         )
         .await
         .unwrap();
@@ -132,7 +132,7 @@ mod tests {
         let reopened = super::super::SqliteBackend::open(
             &database_path,
             std::sync::Arc::new(super::super::NullChangeSink),
-            crate::encryption::LocalKeySource::EnvVar,
+            crate::encryption::ProjectKeySource::unavailable(),
         )
         .await
         .unwrap();
@@ -154,7 +154,7 @@ mod tests {
         let backend = super::super::SqliteBackend::new(
             directory.path().to_owned(),
             std::sync::Arc::new(super::super::NullChangeSink),
-            crate::encryption::LocalKeySource::EnvVar,
+            crate::encryption::ProjectKeySource::unavailable(),
         )
         .unwrap();
         let driver = backend.connection_driver("app_driver").await.unwrap();
@@ -169,7 +169,7 @@ mod tests {
         let backend = super::super::SqliteBackend::new(
             directory.path().to_owned(),
             std::sync::Arc::new(super::super::NullChangeSink),
-            crate::encryption::LocalKeySource::EnvVar,
+            crate::encryption::ProjectKeySource::unavailable(),
         )
         .unwrap();
         let driver = backend.connection_driver("app_decode").await.unwrap();

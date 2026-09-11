@@ -434,7 +434,7 @@ async fn an_encrypted_unmask_inside_a_transaction_reaches_the_row_that_transacti
     let app = "unmask_lane_encrypted";
     // A synthetic 32-byte root, supplied to THIS isolate. The write pipeline
     // encrypts with it and the unmask fetch decrypts with it.
-    let _keys = zeroship_data_v8::testing::supply_root_keys_for_tests(&[("default", &"c".repeat(64))]);
+    let _keys = zeroship_data_v8::testing::supply_project_key_for_tests(&[app], &"c".repeat(64));
     fixture_with_schema(&pool, &url, app, encrypted_schema()).await;
     install_mask_policy(&DbBinding::cold_start(app), value!({ "support": ["pci"] }))
         .expect("install the app's declared mask policy");
@@ -503,7 +503,7 @@ fn encrypted_schema() -> Value {
         "ssn": {
             "type": "string",
             "mask": { "kind": "last4", "classification": "pci" },
-            "encrypted": { "keyId": "default", "wraps": "string" }
+            "encrypted": { "wraps": "string" }
         },
         "nickname": { "type": "string" },
     })

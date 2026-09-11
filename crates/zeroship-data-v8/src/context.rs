@@ -11,14 +11,14 @@ use zeroship_data_orm::backend::BackendHandle;
 use std::{cell::RefCell, rc::Rc};
 use zeroship_data_orm::{
     connection::{ConnectionFactory, LocalConnection},
-    encryption::{LocalKeySource, SuppliedRootKeys},
+    encryption::{ProjectKeySource, SuppliedProjectKeys},
 };
 
 #[derive(Default)]
 pub(crate) struct ThreadDbContext {
     connection: Option<LocalConnection>,
     cdc_relay: Option<zeroship_data_orm::cdc::relay::RelayConfig>,
-    supplied_root_keys: Option<Rc<SuppliedRootKeys>>,
+    supplied_project_keys: Option<Rc<SuppliedProjectKeys>>,
 }
 impl ThreadDbContext {
     pub(crate) fn new() -> Self {
@@ -52,15 +52,14 @@ impl ThreadDbContext {
             .as_ref()
             .map(|current| LocalConnection::new(current.factory().clone()));
     }
-    pub(crate) fn local_key_source(&self) -> LocalKeySource {
-        match &self.supplied_root_keys {
-            Some(keys) => LocalKeySource::Supplied(Rc::clone(keys)),
-            None => LocalKeySource::EnvVar,
+    pub(crate) fn local_key_source(&self) -> ProjectKeySource {
+        match &self.supplied_project_keys {
+            Some(keys) => ProjectKeySource::supplied(Rc::clone(keys)),
+            None => ProjectKeySource::unavailable(),
         }
     }
-    #[cfg(any(test, feature = "test-helpers"))]
-    pub(crate) fn set_supplied_root_keys(&mut self, keys: Option<Rc<SuppliedRootKeys>>) {
-        self.supplied_root_keys = keys;
+    pub(crate) fn set_supplied_project_keys(&mut self, keys: Option<Rc<SuppliedProjectKeys>>) {
+        self.supplied_project_keys = keys;
     }
     pub(crate) fn sql_dialect(&self) -> zeroship_data_sql::compile::SqlDialect {
         self.connection
@@ -87,7 +86,7 @@ pub(crate) fn with<R>(f: impl FnOnce(&ThreadDbContext) -> R) -> R {
 pub(crate) fn with_mut<R>(f: impl FnOnce(&mut ThreadDbContext) -> R) -> R {
     THREAD_DB_CTX.with_borrow_mut(f)
 }
-pub(crate) fn isolate_key_source() -> LocalKeySource {
+pub(crate) fn isolate_key_source() -> ProjectKeySource {
     with(ThreadDbContext::local_key_source)
 }
 
@@ -124,7 +123,7 @@ mod tests {
             }
             fn connect(
                 &self,
-                keys: LocalKeySource,
+                keys: ProjectKeySource,
             ) -> futures::future::LocalBoxFuture<'_, Result<BackendHandle, DbError>> {
                 Box::pin(async move {
                     self.1.recv_async().await.expect("release old open");
