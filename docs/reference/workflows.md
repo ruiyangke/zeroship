@@ -430,6 +430,7 @@ interface WorkflowRun<Output = unknown> {
   readonly id: string;
   signal(opts: { type: string; payload?: unknown; idempotencyKey?: string }): Promise<void>;
   status(): Promise<{ state: WorkflowRunState; output?: Output | StepOutputRef; error?: unknown }>;
+  readStepOutput(name: string, occurrence: number): Promise<Uint8Array>;
   pause(): Promise<void>;
   resume(): Promise<void>;
   cancel(opts?: { mode?: "abort" | "compensate" }): Promise<void>;
@@ -646,6 +647,11 @@ const signal = await step.waitForSignal("market-tick", {
 ```
 
 ## Large Outputs
+
+Saved step outputs are read through the app-scoped native workflow backend.
+`run.readStepOutput(name, occurrence)` returns bytes; replay uses that same
+operation for lazy `StepOutputRef` reads. The host keeps the control endpoint
+and credential in Rust. Local development reads the saved SQLite checkpoint.
 
 Small JSON outputs are inlined in the journal. Larger outputs, or outputs with
 an explicit by-reference mode, are stored as workflow blobs and replayed as

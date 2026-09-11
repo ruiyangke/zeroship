@@ -402,3 +402,63 @@ async fn v8_binding_round_trips_through_the_control_instance_api() {
     drop(fx);
     common::drain_pg().await;
 }
+
+#[compio::test]
+async fn native_output_reads_preserve_bytes_and_reject_another_apps_run() {
+    use sha2::{Digest, Sha256};
+    use zeroship_workflow::{
+        app_scoped_token, HttpWorkflowBackend, WorkflowBackend, WorkflowClientConfig,
+    };
+
+    let fx = build_fixture(crate::workflow_postgres::Database::new(), "output-read").await;
+    let app = seed_app(&fx, &["Checkout"]).await;
+    let other = seed_app(&fx, &["Checkout"]).await;
+    let control = ControlServer::start(Arc::clone(&fx.state));
+    let backend = HttpWorkflowBackend::new(WorkflowClientConfig::new(
+        &control.base,
+        app.to_string(),
+        app_scoped_token(TEST_CONTROL_KEY, &app.to_string()),
+    ));
+    let started = backend
+        .start("Checkout".into(), json!({"input":{}}))
+        .await
+        .unwrap();
+    let run = started["id"].as_str().unwrap();
+    let bytes = vec![0, 255, 128, 10];
+    let hash = format!("{:x}", Sha256::digest(&bytes));
+    fx.state
+        .workflow_blob_store
+        .put_blob(&hash, &bytes)
+        .await
+        .unwrap();
+    fx.pg.execute(
+        &wf_sql(app, "INSERT INTO zeroship.workflow_steps \
+         (run_id, ordinal, name, name_occurrence, kind, state, output_kind, output_hash, output_size, output_content_type, batch_id) \
+         VALUES ($1, 0, 'payload', 0, 'run', 'completed', 'blob', $2, $3, 'application/octet-stream', 'batch_output')"),
+        &[&run, &hash, &(bytes.len() as i64)],
+    ).await.unwrap();
+    let source = format!(
+        r#"
+        export default {{ async fetch(_request, env) {{
+          try {{
+            const bytes = await env.workflows.Checkout.get({run:?}).readStepOutput("payload", 0);
+            return Response.json({{ bytes: [...bytes], typed: bytes instanceof Uint8Array }});
+          }} catch (error) {{ return Response.json({{code: error.code, message: error.message}}, {{status: 400}}); }}
+        }} }};
+    "#
+    );
+    let (status, body) = run_workflow_app(control.base.clone(), app, &source).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        serde_json::from_str::<Value>(&body).unwrap(),
+        json!({"bytes":bytes,"typed":true})
+    );
+    let (status, body) = run_workflow_app(control.base.clone(), other, &source).await;
+    assert_eq!(status, 400, "another app read the saved output: {body}");
+    let error: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(error["code"], "workflow_http_error");
+    assert!(error["message"].as_str().unwrap().contains("HTTP 404"));
+    drop(control);
+    drop(fx);
+    common::drain_pg().await;
+}

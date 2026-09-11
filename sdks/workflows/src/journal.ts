@@ -62,14 +62,10 @@ export interface JournalEnvelope {
   workflowName: string;
   trigger: WorkflowTrigger<unknown>;
   steps: JournalStepRecord[];
-  outputRead?: WorkflowOutputReadConfig;
+  outputRead?: WorkflowOutputReader;
 }
 
-export interface WorkflowOutputReadConfig {
-  controlUrl: string;
-  token: string;
-  appId: string;
-}
+export type WorkflowOutputReader = (name: string, occurrence: number) => Promise<Uint8Array>;
 
 export interface StepOutputRefDescriptor {
   kind?: string;
@@ -958,7 +954,7 @@ function hasCompensator(config: StepConfig<unknown> | undefined): boolean {
 
 function createStepOutputRef(
   descriptor: StepOutputRefDescriptor,
-  outputRead: WorkflowOutputReadConfig | undefined,
+  outputRead: WorkflowOutputReader | undefined,
   runId: string,
   name: string,
   occurrence: number,
@@ -969,7 +965,7 @@ function createStepOutputRef(
   const readBytes = () => {
     let promise = memo.get(memoKey);
     if (!promise) {
-      promise = fetchStepOutputBytes(outputRead, runId, name, occurrence);
+      promise = readStepOutputBytes(outputRead, name, occurrence);
       memo.set(memoKey, promise);
     }
     return promise;
@@ -1005,30 +1001,15 @@ function createStepOutputRef(
   };
 }
 
-async function fetchStepOutputBytes(
-  outputRead: WorkflowOutputReadConfig | undefined,
-  runId: string,
+async function readStepOutputBytes(
+  outputRead: WorkflowOutputReader | undefined,
   name: string,
   occurrence: number,
 ): Promise<Uint8Array> {
-  if (!outputRead) {
-    throw new WorkflowUnsupportedError("workflow output read endpoint is unavailable");
+  if (typeof outputRead !== "function") {
+    throw new WorkflowUnsupportedError("workflow output reader is unavailable");
   }
-  if (typeof workflowRealFetch !== "function") {
-    throw new WorkflowUnsupportedError("fetch is unavailable for workflow output reads");
-  }
-  const base = outputRead.controlUrl.replace(/\/+$/, "");
-  const url = `${base}/internal/workflows/runs/${encodeURIComponent(runId)}/steps/${encodeURIComponent(name)}/output?occurrence=${occurrence}`;
-  const response = await workflowRealFetch(url, {
-    headers: {
-      authorization: `Bearer ${outputRead.token}`,
-      "x-zeroship-app-id": outputRead.appId,
-    },
-  });
-  if (!response.ok) {
-    throw new WorkflowUnsupportedError(`workflow output read failed with HTTP ${response.status}`);
-  }
-  return new Uint8Array(await response.arrayBuffer());
+  return outputRead(name, occurrence);
 }
 
 function parseDurationMs(raw: string): number {

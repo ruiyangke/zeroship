@@ -686,14 +686,11 @@ function wfNormalizeOutputRef(value) {
     };
 }
 
-function wfOutputReadConfig(envelope) {
-    const raw = envelope.outputRead;
-    if (!raw || typeof raw !== "object") return undefined;
-    const controlUrl = typeof raw.controlUrl === "string" ? raw.controlUrl : "";
-    const token = typeof raw.token === "string" ? raw.token : "";
-    const appId = typeof raw.appId === "string" ? raw.appId : "";
-    if (!controlUrl || !token || !appId) return undefined;
-    return { controlUrl, token, appId };
+function wfOutputReader(envelope) {
+    const workflows = globalThis.__zs_env?.()?.workflows;
+    const run = workflows?.[envelope.workflowName]?.get(String(envelope.runId ?? ""));
+    if (typeof run?.readStepOutput !== "function") return undefined;
+    return (name, occurrence) => run.readStepOutput(name, occurrence);
 }
 
 function wfOutputConfig(config) {
@@ -721,7 +718,7 @@ function wfCreateStepOutputRef(descriptor, outputRead, runId, name, occurrence, 
     const readBytes = () => {
         let promise = memo.get(memoKey);
         if (!promise) {
-            promise = wfFetchStepOutputBytes(outputRead, runId, name, occurrence);
+            promise = wfReadStepOutputBytes(outputRead, name, occurrence);
             memo.set(memoKey, promise);
         }
         return promise;
@@ -757,25 +754,11 @@ function wfCreateStepOutputRef(descriptor, outputRead, runId, name, occurrence, 
     };
 }
 
-async function wfFetchStepOutputBytes(outputRead, runId, name, occurrence) {
-    if (!outputRead) {
-        throw wfErr("workflow output read endpoint is unavailable", 500, "WORKFLOW_DEFINITION_ERROR");
+async function wfReadStepOutputBytes(outputRead, name, occurrence) {
+    if (typeof outputRead !== "function") {
+        throw wfErr("workflow output reader is unavailable", 500, "WORKFLOW_DEFINITION_ERROR");
     }
-    if (typeof zsWorkflowRealFetch !== "function") {
-        throw wfErr("fetch is unavailable for workflow output reads", 500, "WORKFLOW_DEFINITION_ERROR");
-    }
-    const base = outputRead.controlUrl.replace(/\/+$/, "");
-    const url = `${base}/internal/workflows/runs/${encodeURIComponent(runId)}/steps/${encodeURIComponent(name)}/output?occurrence=${occurrence}`;
-    const response = await zsWorkflowRealFetch(url, {
-        headers: {
-            authorization: `Bearer ${outputRead.token}`,
-            "x-zeroship-app-id": outputRead.appId,
-        },
-    });
-    if (!response.ok) {
-        throw wfErr(`workflow output read failed with HTTP ${response.status}`, 500, "WORKFLOW_OUTPUT_READ_FAILED");
-    }
-    return new Uint8Array(await response.arrayBuffer());
+    return outputRead(name, occurrence);
 }
 
 // Runtime dispatcher copy: keep behavior in lock-step with
@@ -1509,7 +1492,7 @@ export async function __zsWorkflowDispatch(userNamespace, envelope, _ctx) {
             wfJournal(envelope),
             quiescence,
             String(envelope.runId ?? ""),
-            wfOutputReadConfig(envelope),
+            wfOutputReader(envelope),
             String(envelope.phase ?? "running"),
             trigger,
         );

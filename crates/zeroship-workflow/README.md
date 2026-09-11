@@ -11,7 +11,7 @@ and the local SQLite engine. It does not depend on V8 or the worker runtime.
 - `dev.rs`: SQLite persistence and scheduling through a host-owned `WorkflowExecutor`.
 
 Rust hosts can construct `HttpWorkflowBackend` with `WorkflowClientConfig` and
-call `WorkflowBackend::{start,status,signal,transition,restart}`. The host binds
+call `WorkflowBackend::{start,status,signal,transition,restart,read_step_output}`. The host binds
 the app identity and its scoped token when constructing the backend; individual
 operations cannot supply another app identity. `app_scoped_token` derives the
 credential for a trusted host that already holds the control key.

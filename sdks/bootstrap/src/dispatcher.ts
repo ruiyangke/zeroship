@@ -65,6 +65,9 @@ export {};
 
 declare const globalThis: {
   __zsDispatch?: unknown;
+  __zs_env?: () => { workflows?: Record<string, {
+    get(runId: string): { readStepOutput(name: string, occurrence: number): Promise<Uint8Array> };
+  }> };
   __zsWorkflowDispatch?: unknown;
   __zsEnterKind?: (kind: string) => number;
   __zsExitKind?: (token: number) => void;
@@ -226,11 +229,7 @@ const workflowDispatchAls = new AsyncLocalStorage<WorkflowDispatchContext>();
     childRunId?: string;
     compensationState?: "pending" | "running" | "completed" | "failed";
   };
-  type WorkflowOutputReadConfig = {
-    controlUrl: string;
-    token: string;
-    appId: string;
-  };
+  type WorkflowOutputReader = (name: string, occurrence: number) => Promise<Uint8Array>;
   type StepOutputRefDescriptor = {
     kind?: string;
     ref?: string;
@@ -483,20 +482,16 @@ const workflowDispatchAls = new AsyncLocalStorage<WorkflowDispatchContext>();
     );
   }
 
-  function workflowOutputReadConfig(envelope: Record<string, unknown>): WorkflowOutputReadConfig | undefined {
-    const raw = envelope.outputRead;
-    if (!raw || typeof raw !== "object") return undefined;
-    const value = raw as Record<string, unknown>;
-    const controlUrl = typeof value.controlUrl === "string" ? value.controlUrl : "";
-    const token = typeof value.token === "string" ? value.token : "";
-    const appId = typeof value.appId === "string" ? value.appId : "";
-    if (!controlUrl || !token || !appId) return undefined;
-    return { controlUrl, token, appId };
+  function workflowOutputReader(envelope: Record<string, unknown>): WorkflowOutputReader | undefined {
+    const workflows = globalScope.__zs_env?.()?.workflows;
+    const run = workflows?.[String(envelope.workflowName)]?.get(String(envelope.runId ?? ""));
+    if (typeof run?.readStepOutput !== "function") return undefined;
+    return (name, occurrence) => run.readStepOutput(name, occurrence);
   }
 
   function createStepOutputRef(
     descriptor: StepOutputRefDescriptor,
-    outputRead: WorkflowOutputReadConfig | undefined,
+    outputRead: WorkflowOutputReader | undefined,
     runId: string,
     name: string,
     occurrence: number,
@@ -507,7 +502,7 @@ const workflowDispatchAls = new AsyncLocalStorage<WorkflowDispatchContext>();
     const readBytes = () => {
       let promise = memo.get(memoKey);
       if (!promise) {
-        promise = fetchStepOutputBytes(outputRead, runId, name, occurrence);
+        promise = readStepOutputBytes(outputRead, name, occurrence);
         memo.set(memoKey, promise);
       }
       return promise;
@@ -543,30 +538,15 @@ const workflowDispatchAls = new AsyncLocalStorage<WorkflowDispatchContext>();
     };
   }
 
-  async function fetchStepOutputBytes(
-    outputRead: WorkflowOutputReadConfig | undefined,
-    runId: string,
+  async function readStepOutputBytes(
+    outputRead: WorkflowOutputReader | undefined,
     name: string,
     occurrence: number,
   ): Promise<Uint8Array> {
-    if (!outputRead) {
-      throw mkErr("workflow output read endpoint is unavailable", 500, "WORKFLOW_DEFINITION_ERROR");
+    if (typeof outputRead !== "function") {
+      throw mkErr("workflow output reader is unavailable", 500, "WORKFLOW_DEFINITION_ERROR");
     }
-    if (typeof workflowRealFetch !== "function") {
-      throw mkErr("fetch is unavailable for workflow output reads", 500, "WORKFLOW_DEFINITION_ERROR");
-    }
-    const base = outputRead.controlUrl.replace(/\/+$/, "");
-    const url = `${base}/internal/workflows/runs/${encodeURIComponent(runId)}/steps/${encodeURIComponent(name)}/output?occurrence=${occurrence}`;
-    const response = await workflowRealFetch(url, {
-      headers: {
-        authorization: `Bearer ${outputRead.token}`,
-        "x-zeroship-app-id": outputRead.appId,
-      },
-    });
-    if (!response.ok) {
-      throw mkErr(`workflow output read failed with HTTP ${response.status}`, 500, "WORKFLOW_OUTPUT_READ_FAILED");
-    }
-    return new Uint8Array(await response.arrayBuffer());
+    return outputRead(name, occurrence);
   }
 
   function buildTrigger(envelope: Record<string, unknown>): Record<string, unknown> {
@@ -674,7 +654,7 @@ const workflowDispatchAls = new AsyncLocalStorage<WorkflowDispatchContext>();
     readonly #nameOccurrences = new Map<string, number>();
     readonly #quiescence: DispatchMicrotaskQuiescenceBarrier;
     readonly #runId: string;
-    readonly #outputRead: WorkflowOutputReadConfig | undefined;
+    readonly #outputRead: WorkflowOutputReader | undefined;
     readonly #outputReadMemo = new Map<string, Promise<Uint8Array>>();
     readonly #phase: string;
     readonly #trigger: Record<string, unknown>;
@@ -698,7 +678,7 @@ const workflowDispatchAls = new AsyncLocalStorage<WorkflowDispatchContext>();
       steps: JournalStepRecord[],
       quiescence: DispatchMicrotaskQuiescenceBarrier,
       runId: string,
-      outputRead: WorkflowOutputReadConfig | undefined,
+      outputRead: WorkflowOutputReader | undefined,
       phase: string,
       trigger: Record<string, unknown>,
     ) {
@@ -1429,7 +1409,7 @@ const workflowDispatchAls = new AsyncLocalStorage<WorkflowDispatchContext>();
         normalizeJournal(env),
         quiescence,
         String(env.runId ?? ""),
-        workflowOutputReadConfig(env),
+        workflowOutputReader(env),
         String(env.phase ?? "running"),
         trigger,
       );
