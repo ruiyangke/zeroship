@@ -398,18 +398,6 @@ if ! gate_arm rule_lines "$rule_lines" 5; then
     exit 2
 fi
 
-# ---------------------------------------------------------------------------
-# Compare the charter's assigned fields with the runtime projection order.
-# Types, defaults and index emission are owned by the migration engine.
-# ---------------------------------------------------------------------------
-#
-# A NOTE ON THE SINGLE PATH BELOW. An earlier draft of this arm special-cased a
-# missing Rust file with its own `gate_arm name_agreement 0 4` call before the
-# real one. tests/gate_arm_census.sh refused it: an arm id declared twice means
-# one declaration can vouch for the other's count. It was right, and the fix is
-# better than the code it rejected - a missing file makes the extractor yield
-# nothing, which is already the floor's job to catch, so there is one path and
-# one declaration. Do not reintroduce an early gate_arm call here.
 RUST_NAMES_FILE="crates/zeroship-data-sql/src/compile.rs"
 
 # The fragment's side: every injected column carrying an `assign =` binding, in

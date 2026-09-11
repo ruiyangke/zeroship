@@ -1,7 +1,7 @@
 // This test target is its own crate ROOT and overflows rustc's layout query:
 // "query depth increased by 130 when computing layout of {async block@...}".
 // `recursion_limit` is per crate root, so the gateway's lib and its sibling
-// test targets do not cover this one. Caught by `tests/clippy_gate.sh`, which
+// test targets do not cover this one. Caught by `cargo clippy --workspace --all-targets --all-features`, which
 // lints `--all-targets`; a bare `cargo test -p zeroship-gateway --lib` never
 // builds this file, which is why it compiled clean until the gate ran.
 #![recursion_limit = "256"]

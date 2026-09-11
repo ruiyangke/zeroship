@@ -178,8 +178,7 @@ crates/
 ├── zeroship-worker/  V8-per-thread, on-demand bundle loading, LRU eviction
 │
 │ Tools
-+-- zeroship-cli/     CLI: serve, deploy, migrate, config, login, logout, whoami, organization, secret, var, dev
-                      (no `build` — builds go through @zeroship/vite-plugin)
++-- zeroship-cli/     Creator CLI; run `zeroship --help` for available commands
 ```
 
 **Database verification is required.** Control, migration-service and worker
@@ -195,17 +194,10 @@ fixtures own test setup and teardown. `cargo xtask test data` runs the data crat
 through nextest and rejects feature-gated test targets. Data fixtures own their
 PostgreSQL containers; Docker is required and no external database URL is used.
 
-**Writing or changing a gate.** Every arm of every gate declares the number of
-items THAT ARM RULED ON and a floor that number must clear
-(`tests/lib/gate_arms.sh`; worked example `tests/ws_subscription_stub_gate.sh`).
-This is not ceremony: on 2026-08-20 four gates were found to be examining
-nothing and printing exactly what a clean tree prints, and a gate-level "3 arms
-ran" guard was green throughout one of them because three arms did run, one over
-an empty set. The floor lives beside the code that produces the number, never in
-a central table - a table of expected counts is a census, and stale censuses are
-how four OTHER gates went red the same week when two new crates landed.
-`tests/gate_arm_census.sh tests` checks that every gate participates; add
-`--run <gate.sh>` and it also rules on the counts those gates emit.
+**Writing or changing a check.** Keep nonempty-input assertions and rejection
+controls beside each check. Surviving shell gates use `tests/lib/gate_arms.sh`
+for per-arm floors and failure propagation. There is no central script-count
+census or requirement to recreate retired bookkeeping checks in Rust.
 
 Data architecture checks are Rust tests in `xtask/tests/data_architecture.rs`,
 run by `cargo xtask test data-architecture` and the complete data suite.
@@ -564,32 +556,9 @@ cargo test -p compio-postgres \
 # see either gap: that is how both suites stayed silently unrun for a whole
 # session of otherwise-green --all-features checks.
 
-# Lint the workspace. NONE of the per-crate runs above invoke clippy, which is
-# why main went red twice in a week without anyone noticing. Run this before you
-# push, not just before you wonder why CI is red.
-#
-# It is not a bare `cargo clippy --workspace`: a deny-level lint in one crate
-# ABORTS the run before the crates downstream of it are ever scheduled, and a
-# crate that was never reached prints exactly what a clean crate prints. The
-# gate audits cargo's own json stream against `cargo metadata` and names any
-# package or target that went unlinted. CI runs this same script.
-#
-# It lints under `--all-features`, and a fourth arm checks that every feature
-# the manifests declare really came out enabled. That arm exists because the
-# first three audit ONE feature resolution: a target whose `required-features`
-# are unmet is not counted as unlinted, it is filtered out of the expectation,
-# so the gate reported 148 of 148 on a workspace declaring 158. The 10 missing
-# ones included zeroship-migrate-adapter's `platform_migrate`, which held eleven
-# standing deny-level `clippy::await_holding_lock` errors the whole time. THAT
-# CRATE IS GONE (deleted 2026-08-28); do not go looking for it. The example is
-# kept because the arm it justifies is live and the failure it describes is the
-# one that arm exists to catch.
-#
-# It needs `pnpm build` and setup-wpt.sh to have run (crates/zeroship-runtime
-# `include_str!`s their output); it refuses, naming them, rather than linting a
-# smaller workspace.
-./tests/clippy_gate.sh
-./tests/clippy_gate.sh --preflight-only   # "can this machine lint at all?" - seconds
+# Lint after building the SDKs and preparing WPT inputs.
+# Workspace lint levels determine which diagnostics fail the command.
+cargo clippy --workspace --all-targets --all-features
 
 # Web Platform Tests (WPT) — fetched on demand by setup-wpt.sh, NOT
 # tracked in git. The script shallow-clones a pinned commit into

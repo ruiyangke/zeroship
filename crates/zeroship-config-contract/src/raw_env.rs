@@ -23,7 +23,7 @@
 //! behind a disabled feature compiles out and the lint says nothing, while a
 //! different feature selection ships it. This parses the file, so a disabled
 //! cfg is still source. That is not hypothetical for the WRITE half:
-//! `tests/clippy_gate.sh` lints under a fixed `--features` list that does not
+//! An earlier Clippy invocation used a fixed feature list that did not
 //! include `zeroship-storage/s3`, so the `set_var` calls that used to
 //! sit behind `#[cfg(feature = "s3")]` in `crates/zeroship-storage/tests/
 //! backend_parity.rs` were invisible to the lint and visible only here.

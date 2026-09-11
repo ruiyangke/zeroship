@@ -373,7 +373,7 @@ Compiler tests validate generated schema and Rust model contracts.
 `xtask/tests/data_architecture.rs` checks dependency and plain-driver boundaries,
 concrete driver references, shared execution and SQL placement;
 `cargo xtask test data` runs the required database tests; and
-`tests/clippy_gate.sh` validates the workspace and its declared feature surface.
+`cargo clippy --workspace --all-targets --all-features` lints workspace targets.
 
 ## Context ownership
 
