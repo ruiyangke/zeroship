@@ -103,13 +103,13 @@ mandatory = true
 primary_key = ["id"]
 author_primary_key = "forbid"
 columns = [
-  { name = "id",         type = "text",        nullable = false },
-  { name = "created_at", type = "timestamptz", nullable = false },
-  { name = "updated_at", type = "timestamptz", nullable = false },
-  { name = "created_by", type = "text",        nullable = true  },
-  { name = "updated_by", type = "text",        nullable = true  },
-  { name = "version",    type = "integer",     nullable = false },
-  { name = "deleted_at", type = "timestamptz", nullable = true  },
+  { name = "id",         type = "text",        nullable = false, assign = { by = "typedId", on = "insert" } },
+  { name = "created_at", type = "timestamptz", nullable = false, assign = { by = "now", on = "insert" } },
+  { name = "updated_at", type = "timestamptz", nullable = false, assign = { by = "now", on = "write" } },
+  { name = "created_by", type = "text",        nullable = true, assign = { by = "actor", on = "insert" } },
+  { name = "updated_by", type = "text",        nullable = true, assign = { by = "actor", on = "write" } },
+  { name = "version",    type = "integer",     nullable = false, assign = { by = "increment(1)", on = "write" } },
+  { name = "deleted_at", type = "timestamptz", nullable = true, assign = { by = "now", on = "delete" } },
 ]
 indexes = [
   { name = "ix_deleted_at", columns = ["deleted_at"] },
@@ -122,6 +122,30 @@ indexes = [
 pub fn confined_charter() -> EffectivePolicy {
     effective_policy_from_charter_toml(CONFINED_CHARTER_TOML)
         .expect("explicit confined test charter composes")
+}
+
+/// Resolve lifecycle columns for fixtures that exercise collection options.
+pub fn lifecycle_fixture(
+    ops: &[zeroship_migrate::model::ir::Op],
+    schema: &str,
+) -> (Vec<zeroship_migrate::model::ir::Op>, EffectivePolicy) {
+    let policy = effective_policy_from_charter_toml(r#"policy_version = 1
+[[inject]]
+scope = "all"
+mandatory = true
+columns = [
+  { name = "retired_on", type = "timestamptz", nullable = true, assign = { by = "now", on = "delete" } },
+  { name = "revision", type = "integer", nullable = false, default = "1", assign = { by = "increment(1)", on = "write" } },
+]
+"#).expect("lifecycle fixture policy");
+    let ir = serde_json::from_value(serde_json::json!({
+        "ir_version": zeroship_migrate::model::ir::CURRENT_IR_VERSION,
+        "name": "lifecycle_fixture", "owner_app": "app_test", "ops": ops,
+    }))
+    .expect("fixture IR");
+    let resolved = zeroship_migrate::resolve_create_table_policy(&ir, &policy, schema)
+        .expect("resolve lifecycle assignments");
+    (resolved.ops, policy)
 }
 
 /// The SQLite LINE-1 guard, selected the way the engine selects it.

@@ -920,7 +920,7 @@ pub fn corpus() -> Vec<(&'static str, &'static str, Op)> {
     c.push((
         "addConstraint",
         "fkSimple",
-        add_constraint(fk(vec!["a"], vec!["id"])),
+        add_constraint(fk(vec!["a"], vec!["other_col"])),
     ));
     c.push((
         "addConstraint",
@@ -952,11 +952,6 @@ pub fn corpus() -> Vec<(&'static str, &'static str, Op)> {
         "addConstraint",
         "fkComposite",
         add_constraint(fk(vec!["a", "b"], vec!["id", "x"])),
-    ));
-    c.push((
-        "addConstraint",
-        "fkNonId",
-        add_constraint(fk(vec!["a"], vec!["other_col"])),
     ));
     c.push((
         "addConstraint",

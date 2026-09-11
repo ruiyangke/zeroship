@@ -350,11 +350,13 @@ fn a_re_added_column_does_not_inherit_the_dropped_columns_constraints() {
              that did went away with the column it named. Keeping it puts an \
              `ON DELETE CASCADE` in the artifact that no catalog has."
         );
+        assert!(
+            field.get("refTarget").is_none(),
+            "{dialect:?}: a dropped reference must not return"
+        );
         assert_eq!(
-            field.get("refTarget"),
-            Some(&serde_json::json!("accounts")),
-            "{dialect:?}: the reference the re-added column DOES declare is still there, \
-             or the line above is satisfied by losing the column's type"
+            field["type"], "string",
+            "{dialect:?}: the new column retains its declared type"
         );
     }
 

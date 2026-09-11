@@ -166,12 +166,7 @@ pub const CODE_PARTITION_BOUNDS_ILL_FORMED: &str = "PARTITION_BOUNDS_ILL_FORMED"
 /// Partition tier split: hash child drops have no portable collapse predicate.
 pub const CODE_PARTITION_HASH_DROP_UNDERIVABLE: &str = "PARTITION_HASH_DROP_UNDERIVABLE";
 
-/// The maximum byte length a legacy internal platform-ID prefix may carry.
-/// Mirrors the internal convention (`usr`/`app`/`ses` are 3
-/// chars; the auto-derivation in `plugin-db`'s `system_fields_pass` caps at 4 for
-/// collection-derived prefixes). A hand-authored prefix is bounded to the SAME 4
-/// so the minted `<prefix>_<22 base62 UUIDv7>` value keeps the compact platform
-/// shape. This bound is unrelated to the public TypeID prefix grammar.
+/// The length bound for internal typed-ID prefixes, separate from TypeID formats.
 pub const MAX_ID_PREFIX_LEN: usize = 4;
 
 /// Validate the dialect-neutral structural contract of an explicit primary-key

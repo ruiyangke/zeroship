@@ -436,7 +436,6 @@ impl DmlRenderer for MysqlDmlRenderer {
             FeatureSupportKey::TableLevelForeignKey
             | FeatureSupportKey::TableLevelUnique
             | FeatureSupportKey::CompositeForeignKey
-            | FeatureSupportKey::NonIdForeignKey
             | FeatureSupportKey::InsertOnConflict
             | FeatureSupportKey::TriggerBody
             | FeatureSupportKey::RawViewBody

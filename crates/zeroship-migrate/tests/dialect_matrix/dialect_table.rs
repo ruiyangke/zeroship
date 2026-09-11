@@ -96,7 +96,6 @@ pub const DIALECT_TABLE: &[DispositionRow] = &[
     DispositionRow { kind: "addConstraint", variant: "exclusion", dispositions: &[(DialectId::new("mysql"), Disposition::Unsupported), (DialectId::new("postgres"), Disposition::Portable), (DialectId::new("sqlite"), Disposition::Unsupported)] },
     DispositionRow { kind: "addConstraint", variant: "fkComposite", dispositions: &[(DialectId::new("mysql"), Disposition::Portable), (DialectId::new("postgres"), Disposition::Portable), (DialectId::new("sqlite"), Disposition::Portable)] },
     DispositionRow { kind: "addConstraint", variant: "fkNoLocalColumn", dispositions: &[(DialectId::new("mysql"), Disposition::Unsupported), (DialectId::new("postgres"), Disposition::Unsupported), (DialectId::new("sqlite"), Disposition::Unsupported)] },
-    DispositionRow { kind: "addConstraint", variant: "fkNonId", dispositions: &[(DialectId::new("mysql"), Disposition::Portable), (DialectId::new("postgres"), Disposition::Portable), (DialectId::new("sqlite"), Disposition::Portable)] },
     DispositionRow { kind: "addConstraint", variant: "fkNotValid", dispositions: &[(DialectId::new("mysql"), Disposition::Unsupported), (DialectId::new("postgres"), Disposition::Portable), (DialectId::new("sqlite"), Disposition::Unsupported)] },
     DispositionRow { kind: "addConstraint", variant: "fkSimple", dispositions: &[(DialectId::new("mysql"), Disposition::Portable), (DialectId::new("postgres"), Disposition::Portable), (DialectId::new("sqlite"), Disposition::Portable)] },
     DispositionRow { kind: "addConstraint", variant: "unique", dispositions: &[(DialectId::new("mysql"), Disposition::Portable), (DialectId::new("postgres"), Disposition::Portable), (DialectId::new("sqlite"), Disposition::Unsupported)] },
@@ -187,14 +186,12 @@ pub const DIALECT_TABLE: &[DispositionRow] = &[
 mod tests {
     use super::*;
 
-    /// The generated three-vendor artifact remains a byte-pinned review surface,
-    /// but production asks each registered backend directly. Pin every one of the
-    /// 92 × 3 historical decisions while ownership moves across that boundary.
+    /// Check generated dispositions against the registered backend policies.
     #[test]
     fn generated_cells_match_registered_backend_policies() {
         assert_eq!(
             DIALECT_TABLE.len(),
-            92,
+            91,
             "the reviewed operation-shape census moved"
         );
         assert_eq!(
@@ -232,6 +229,6 @@ mod tests {
             }
         }
 
-        assert_eq!(checked, 276, "the reviewed generated-cell census moved");
+        assert_eq!(checked, 273, "the reviewed generated-cell census moved");
     }
 }

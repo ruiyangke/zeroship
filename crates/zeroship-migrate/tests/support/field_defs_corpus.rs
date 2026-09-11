@@ -121,7 +121,7 @@ pub const CARRIERS: &[(&str, &str)] = &[
         "named_fk_policy_dropped",
         r#"[
   {"op":"createTable","name":"accounts","columns":[{"name":"id","type":"text","nullable":false}],"primaryKey":["id"]},
-  {"op":"createTable","name":"orders","columns":[{"name":"id","type":"text","nullable":false},{"name":"owner_id","type":{"ref":{"references":"accounts"}}}],"primaryKey":["id"],"constraints":[{"name":"orders_owner_fk","kind":{"kind":"fk","columns":["owner_id"],"referencesTable":"accounts","referencesColumns":["id"],"onDelete":"cascade"}}]},
+  {"op":"createTable","name":"orders","columns":[{"name":"id","type":"text","nullable":false},{"name":"owner_id","type":{"ref":{"references":"accounts"}}, "references": {"table": "accounts", "column": "id"}}],"primaryKey":["id"],"constraints":[{"name":"orders_owner_fk","kind":{"kind":"fk","columns":["owner_id"],"referencesTable":"accounts","referencesColumns":["id"],"onDelete":"cascade"}}]},
   {"op":"dropConstraint","table":"orders","name":"orders_owner_fk"}
 ]"#,
     ),
@@ -135,7 +135,7 @@ pub const CARRIERS: &[(&str, &str)] = &[
         "unnamed_fk_policy_dropped_by_derived_name",
         r#"[
   {"op":"createTable","name":"accounts","columns":[{"name":"id","type":"text","nullable":false}],"primaryKey":["id"]},
-  {"op":"createTable","name":"orders","columns":[{"name":"id","type":"text","nullable":false},{"name":"owner_id","type":{"ref":{"references":"accounts"}}}],"primaryKey":["id"],"constraints":[{"kind":{"kind":"fk","columns":["owner_id"],"referencesTable":"accounts","referencesColumns":["id"],"onDelete":"cascade"}}]},
+  {"op":"createTable","name":"orders","columns":[{"name":"id","type":"text","nullable":false},{"name":"owner_id","type":{"ref":{"references":"accounts"}}, "references": {"table": "accounts", "column": "id"}}],"primaryKey":["id"],"constraints":[{"kind":{"kind":"fk","columns":["owner_id"],"referencesTable":"accounts","referencesColumns":["id"],"onDelete":"cascade"}}]},
   {"op":"dropConstraint","table":"orders","name":"orders_owner_id_fkey"}
 ]"#,
     ),
@@ -143,7 +143,7 @@ pub const CARRIERS: &[(&str, &str)] = &[
         "unnamed_fk_policy_kept",
         r#"[
   {"op":"createTable","name":"accounts","columns":[{"name":"id","type":"text","nullable":false}],"primaryKey":["id"]},
-  {"op":"createTable","name":"orders","columns":[{"name":"id","type":"text","nullable":false},{"name":"owner_id","type":{"ref":{"references":"accounts"}}}],"primaryKey":["id"],"constraints":[{"kind":{"kind":"fk","columns":["owner_id"],"referencesTable":"accounts","referencesColumns":["id"],"onDelete":"cascade"}}]}
+  {"op":"createTable","name":"orders","columns":[{"name":"id","type":"text","nullable":false},{"name":"owner_id","type":{"ref":{"references":"accounts"}}, "references": {"table": "accounts", "column": "id"}}],"primaryKey":["id"],"constraints":[{"kind":{"kind":"fk","columns":["owner_id"],"referencesTable":"accounts","referencesColumns":["id"],"onDelete":"cascade"}}]}
 ]"#,
     ),
     // The grantor leaving WITH ITS COLUMN, then the column coming back under the same
@@ -154,9 +154,9 @@ pub const CARRIERS: &[(&str, &str)] = &[
         "fk_column_dropped_and_readded",
         r#"[
   {"op":"createTable","name":"accounts","columns":[{"name":"id","type":"text","nullable":false}],"primaryKey":["id"]},
-  {"op":"createTable","name":"orders","columns":[{"name":"id","type":"text","nullable":false},{"name":"owner_id","type":{"ref":{"references":"accounts"}}}],"primaryKey":["id"],"constraints":[{"name":"orders_owner_fk","kind":{"kind":"fk","columns":["owner_id"],"referencesTable":"accounts","referencesColumns":["id"],"onDelete":"cascade"}}]},
+  {"op":"createTable","name":"orders","columns":[{"name":"id","type":"text","nullable":false},{"name":"owner_id","type":{"ref":{"references":"accounts"}}, "references": {"table": "accounts", "column": "id"}}],"primaryKey":["id"],"constraints":[{"name":"orders_owner_fk","kind":{"kind":"fk","columns":["owner_id"],"referencesTable":"accounts","referencesColumns":["id"],"onDelete":"cascade"}}]},
   {"op":"dropColumn","table":"orders","column":"owner_id"},
-  {"op":"addColumn","table":"orders","column":"owner_id","type":{"ref":{"references":"accounts"}}}
+  {"op":"addColumn","table":"orders","column":"owner_id","type":"text"}
 ]"#,
     ),
     (
@@ -234,7 +234,7 @@ pub const CARRIERS: &[(&str, &str)] = &[
         "table_renamed_with_a_ref_column",
         r#"[
   {"op":"createTable","name":"accounts","columns":[{"name":"id","type":"text","nullable":false}],"primaryKey":["id"]},
-  {"op":"createTable","name":"orders","columns":[{"name":"id","type":"text","nullable":false},{"name":"owner_id","type":{"ref":{"references":"accounts"}}}],"primaryKey":["id"]},
+  {"op":"createTable","name":"orders","columns":[{"name":"id","type":"text","nullable":false},{"name":"owner_id","type":{"ref":{"references":"accounts"}}, "references": {"table": "accounts", "column": "id"}}],"primaryKey":["id"]},
   {"op":"renameTable","table":"accounts","to":"tenants"}
 ]"#,
     ),

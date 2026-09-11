@@ -1188,13 +1188,14 @@ pub enum Disposition {
 
 `crates/zeroship-migrate/tests/dialect_matrix/dialect_table_faithfulness.rs` pins that `Op::support` and the generated table agree.
 
-**Notable dispositions** (P=Portable, V=Vendor, U=Unsupported, TD=TransparentDegradable), `dialect_table.rs:59-146`:
+**Notable dispositions** (P=Portable, V=Vendor, U=Unsupported, TD=TransparentDegradable):
 
 | kind / variant | PG | SQLite | MySQL |
 | --- | --- | --- | --- |
 | `addColumn` base / identity / nextvalDefault | P/P/P | P/U/U | P/U/U |
-| `addConstraint` fkSimple / unique | P/P | P/P | P/P |
-| `addConstraint` check / exclusion / fkComposite / fkNonId / fkNotValid | P | U | U |
+| `addConstraint` unique | P | U | P |
+| `addConstraint` fkSimple / fkComposite | P | P | P |
+| `addConstraint` check / exclusion / fkNotValid | P | U | U |
 | `addConstraint` fkNoLocalColumn | U | U | U |
 | `createTable` base / partitioned / partitionedCollapse | P/P/P | P/U/**TD** | P/U/**TD** |
 | `createIndex` base | P | P | P |

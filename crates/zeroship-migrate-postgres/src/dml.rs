@@ -216,7 +216,6 @@ impl DmlRenderer for PostgresDmlRenderer {
             | FeatureSupportKey::TableLevelUnique
             | FeatureSupportKey::TableLevelCheckExpression
             | FeatureSupportKey::CompositeForeignKey
-            | FeatureSupportKey::NonIdForeignKey
             | FeatureSupportKey::SequenceDefault
             | FeatureSupportKey::ConstraintNotValid
             | FeatureSupportKey::ExclusionConstraint
