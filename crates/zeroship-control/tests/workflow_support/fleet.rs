@@ -483,8 +483,25 @@ impl Fleet {
             .stdin(Stdio::null())
             .stdout(log.try_clone().unwrap())
             .stderr(log);
-        for key in ["PATH", "LD_LIBRARY_PATH"] {
-            if let Some(value) = std::env::var_os(key) {
+        for (key, value) in [
+            (
+                "PATH",
+                zeroship_core::declared_env_os!(
+                    external,
+                    "PATH",
+                    zeroship_core::config::TestHarness
+                ),
+            ),
+            (
+                "LD_LIBRARY_PATH",
+                zeroship_core::declared_env_os!(
+                    external,
+                    "LD_LIBRARY_PATH",
+                    zeroship_core::config::TestHarness
+                ),
+            ),
+        ] {
+            if let Some(value) = value {
                 cmd.env(key, value);
             }
         }
