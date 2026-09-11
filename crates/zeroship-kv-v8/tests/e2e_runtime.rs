@@ -145,9 +145,9 @@ export default {
             // 6. bigint — native resolves BigInt above 2^53
             {
                 await kv.set(k("big"), String(2n ** 53n));
-                const r = await kv.incr(k("big"), { by: 10 });
+                const r = await kv.incr(k("big"), { by: 1 });
                 eq("6.incr.big.type", typeof r, "bigint");
-                eq("6.incr.big.value", r, 2n ** 53n + 10n);
+                eq("6.incr.big.value", r, 2n ** 53n + 1n);
             }
 
             // 7. setIfAbsent
@@ -856,7 +856,7 @@ fn e2e_scenarios() {
 fn e2e_redis() {
     let fixtures = support::fixtures();
     let store = KvStore::open(&KvConfig::Redis {
-        url: fixtures.redis_url().into(),
+        redis: fixtures.redis_config(),
     })
     .unwrap();
     let (status, body) = run_e2e(store);
@@ -867,7 +867,7 @@ fn e2e_redis() {
 fn e2e_dragonfly_cluster() {
     let fixtures = support::fixtures();
     let store = KvStore::open(&KvConfig::Redis {
-        url: fixtures.cluster_url().into(),
+        redis: fixtures.cluster_config(),
     })
     .unwrap();
     let (status, body) = run_e2e(store);
@@ -879,11 +879,11 @@ fn e2e_dragonfly_cluster() {
 #[test]
 fn e2e_backend_unavailable() {
     let server = support::start_redis();
-    let url = support::endpoint(&server);
+    let redis = support::standalone(&server);
     server
         .stop()
         .expect("stop Redis before calling the binding");
-    let store = KvStore::open(&KvConfig::Redis { url }).unwrap();
+    let store = KvStore::open(&KvConfig::Redis { redis }).unwrap();
     let (status, body) = run_app(store, KV_BACKEND_DOWN_APP);
     assert_ok(status, &body);
 }
@@ -1044,9 +1044,9 @@ export default {
 };
 "#;
     let server = support::start_redis();
-    let url = support::endpoint(&server);
+    let redis = support::standalone(&server);
     server.stop().unwrap();
-    let backend = KvStore::open(&KvConfig::Redis { url }).unwrap();
+    let backend = KvStore::open(&KvConfig::Redis { redis }).unwrap();
     let app_id = "00000000-0000-7000-8000-0000000000b2";
     let (status, body, meter) = run_app_metered(backend, APP, app_id);
     assert_ok(status, &body);

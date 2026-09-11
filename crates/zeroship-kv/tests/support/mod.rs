@@ -31,8 +31,8 @@ pub fn fixtures() -> Arc<Fixtures> {
 }
 
 pub struct Fixtures {
-    redis_url: String,
-    cluster_url: String,
+    redis_config: zeroship_kv::RedisConfig,
+    cluster_config: zeroship_kv::RedisConfig,
     _redis: Container<GenericImage>,
     _cluster: Vec<Container<GenericImage>>,
 }
@@ -108,21 +108,24 @@ impl Fixtures {
             assert_eq!(output.trim(), "OK", "Dragonfly rejected its slot map");
         }
 
-        let seeds = cluster.iter().map(endpoint).collect::<Vec<_>>();
+        let seeds = cluster
+            .iter()
+            .map(|node| address(node).to_string())
+            .collect::<Vec<_>>();
         Self {
-            redis_url: endpoint(&redis),
-            cluster_url: format!("{}?cluster=true&seeds={}", seeds[0], seeds.join(",")),
+            redis_config: standalone(&redis),
+            cluster_config: zeroship_kv::RedisConfig::new(zeroship_kv::Topology::Cluster { seeds }),
             _redis: redis,
             _cluster: cluster,
         }
     }
 
-    pub fn redis_url(&self) -> &str {
-        &self.redis_url
+    pub fn redis_config(&self) -> zeroship_kv::RedisConfig {
+        self.redis_config.clone()
     }
 
-    pub fn cluster_url(&self) -> &str {
-        &self.cluster_url
+    pub fn cluster_config(&self) -> zeroship_kv::RedisConfig {
+        self.cluster_config.clone()
     }
 }
 
@@ -133,10 +136,6 @@ pub fn start_redis() -> Container<GenericImage> {
         .with_startup_timeout(Duration::from_secs(60))
         .start()
         .expect("KV tests require Docker to start Redis")
-}
-
-pub fn endpoint(container: &Container<GenericImage>) -> String {
-    format!("redis://{}", address(container))
 }
 
 fn address(container: &Container<GenericImage>) -> SocketAddr {
@@ -151,4 +150,10 @@ fn address(container: &Container<GenericImage>) -> SocketAddr {
         .expect("resolve Docker host")
         .find(SocketAddr::is_ipv4)
         .expect("Docker host needs an IPv4 address for the mapped port")
+}
+
+pub fn standalone(container: &Container<GenericImage>) -> zeroship_kv::RedisConfig {
+    zeroship_kv::RedisConfig::new(zeroship_kv::Topology::Standalone {
+        endpoint: address(container).to_string(),
+    })
 }

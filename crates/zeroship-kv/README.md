@@ -6,15 +6,19 @@ handles bound to a validated app or platform `Namespace`. Operations validate
 input and return `KvError` and `TtlState` without a V8 or metering dependency.
 
 The `redb` feature enables embedded persistence and file-lock diagnostics. The
-`redis` feature enables the compio Redis driver, including cluster routing.
+`redis` feature enables the Redis-compatible backend, including standalone,
+cluster, and Sentinel routing.
 Standalone defaults enable both; workspace hosts enable the implementations
 their configuration permits. `KvConfig` selects the active implementation at
 startup. Selecting an implementation absent from the binary is an error, not a
 fallback. Disable default features to supply a custom `Backend` through
 `KvStore::from_backend`.
 
-Hosts translate their settings into `KvConfig::Redis { url }` or
+Hosts translate their settings into `KvConfig::Redis { redis }` or
 `KvConfig::Redb { path }`; this crate does not read environment variables.
+The same configuration can be parsed with `KvConfig::from_toml`. See the
+[configuration reference](../../docs/reference/kv-configuration.md) for host
+settings, topology examples, authentication, TLS, and recovery.
 Open the store at startup and inject scoped handles into application state:
 
 ```rust
@@ -64,12 +68,13 @@ Run the embedded suite with:
 cargo test -p zeroship-kv --no-default-features --features redb
 ```
 
-`cargo test -p zeroship-kv` also runs the live Redis and Dragonfly cluster suite.
+`cargo test -p zeroship-kv` also runs the live Redis and Dragonfly deployment suites.
 Testcontainers starts isolated databases, configures cluster slots, and removes
 containers when their tests finish. Docker must be available; startup failures
 fail the run. No backend URLs, Compose setup, or bootstrap scripts are needed.
-Image tags and cluster setup live in `tests/support/mod.rs`, which is also used
-by the V8 binding tests. Testcontainers is a development-only dependency; its
+Shared cluster fixtures live in `tests/support/mod.rs`, which is also used
+by the V8 binding tests. `tests/topologies.rs` exercises deployment discovery,
+Sentinel failover, and authenticated TLS. Testcontainers is a development-only dependency; its
 Docker orchestration runs independently of the compio database operations.
 
 `tests/architecture.rs` checks the dependency boundary with every storage

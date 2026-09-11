@@ -369,9 +369,9 @@ fn main() -> std::io::Result<()> {
         }
     };
     let blob_store_is_remote = store_url.is_remote();
-    // KV URL may embed credentials (`redis://user:pass@host`), so it is
-    // secret-classed like the DSNs and reaches the process the same way.
-    let kv_url = settings.kv_url.expose_str().to_owned();
+    // KV configuration may contain credentials, so it is secret-classed like
+    // the DSNs and reaches the process the same way.
+    let kv_config = settings.kv_config.expose_str().to_owned();
     // `env.storage` backend. Empty ⇒ namespace absent. A bare path/`file://`
     // is `LocalFs`; `s3://…` is the S3 backend. Validated now (parse only —
     // S3 credentials are resolved when the plugin is built per worker thread)
@@ -485,7 +485,7 @@ fn main() -> std::io::Result<()> {
         // (it may carry credentials) - presence only, like `db_configured`.
         report.field(
             "kv_configured",
-            CheckValue::Secret(settings.kv_url.is_configured()),
+            CheckValue::Secret(settings.kv_config.is_configured()),
         );
         report.field(
             "storage_configured",
@@ -590,15 +590,10 @@ fn main() -> std::io::Result<()> {
         "worker blob store configured"
     );
 
-    let kv_store = if kv_url.is_empty() {
-        None
-    } else {
-        Some(zeroship_kv::KvStore::open(&zeroship_kv::KvConfig::Redis { url: kv_url })
-            .unwrap_or_else(|error| {
-                eprintln!("worker: KV backend init failed: {error}");
-                std::process::exit(1);
-            }))
-    };
+    let kv_store = zeroship_worker::config::open_kv_store(&kv_config).unwrap_or_else(|error| {
+        eprintln!("worker: KV backend init failed: {error}");
+        std::process::exit(1);
+    });
     // Resolve S3 credentials NOW (fail fast) for a remote storage backend, so
     // a misconfigured worker refuses to start rather than degrading the
     // namespace silently per thread.
@@ -1318,17 +1313,17 @@ mod tests {
         // below can only be the secret leaking and never an unrelated field.
         const SENTINEL: &str = "k9x2m7q4v8b3n6z1p5t0w4y7r2j8h5d3";
         let file = SecretFile::new("debug", SENTINEL);
-        let settings = resolve(&["--kv-url-file", file.arg()]);
+        let settings = resolve(&["--kv-config-file", file.arg()]);
 
-        assert!(settings.kv_url.is_configured());
+        assert!(settings.kv_config.is_configured());
         assert_eq!(
-            settings.kv_url.expose_str(),
+            settings.kv_config.expose_str(),
             SENTINEL,
             "the boot path must still get the real material"
         );
 
         // The secret's OWN formatter: no value, no prefix of it, no length.
-        let field = format!("{:?}", settings.kv_url);
+        let field = format!("{:?}", settings.kv_config);
         for length in 4..=SENTINEL.len() {
             assert!(
                 !field.contains(&SENTINEL[..length]),

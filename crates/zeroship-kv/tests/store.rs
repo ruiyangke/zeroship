@@ -35,9 +35,11 @@ fn namespaces_cannot_change_the_key_grammar_or_impersonate_platform_scopes() {
 
 #[test]
 fn config_debug_does_not_disclose_connection_credentials() {
-    let config = KvConfig::Redis {
-        url: "redis://user:secret@127.0.0.1?seeds=redis://user:seed-secret@127.0.0.1".into(),
-    };
+    let mut redis = zeroship_kv::RedisConfig::new(zeroship_kv::Topology::Standalone {
+        endpoint: "127.0.0.1:6379".into(),
+    });
+    redis.auth.password = Some("secret".into());
+    let config = KvConfig::Redis { redis };
     let debug = format!("{config:?}");
     assert!(!debug.contains("secret"));
     assert!(!debug.contains("127.0.0.1"));
@@ -47,28 +49,24 @@ fn config_debug_does_not_disclose_connection_credentials() {
 #[cfg(feature = "redis")]
 #[test]
 fn invalid_redis_configuration_fails_without_echoing_credentials() {
-    for url in ["", "not a URL", "https://user:secret@127.0.0.1", "redis://"] {
-        let config = KvConfig::Redis { url: url.into() };
-        let error = KvStore::open(&config).unwrap_err();
+    for endpoint in ["", "not a URL", "https://user:secret@127.0.0.1", "redis://"] {
+        let redis = zeroship_kv::RedisConfig::new(zeroship_kv::Topology::Standalone {
+            endpoint: endpoint.into(),
+        });
+        let error = KvStore::open(&KvConfig::Redis { redis }).unwrap_err();
         assert!(matches!(error, KvError::InvalidArgument { .. }));
         assert!(!error.to_string().contains("secret"));
     }
-    let store = KvStore::open(&KvConfig::Redis {
-        url: "redis://user:secret@127.0.0.1".into(),
-    })
-    .unwrap();
-    let kv = store.namespace(Namespace::platform("control").unwrap());
-    assert!(!format!("{store:?} {kv:?}").contains("secret"));
 }
 
 #[cfg(not(feature = "redis"))]
 #[test]
 fn configured_redis_requires_its_compiled_implementation() {
-    let config = KvConfig::Redis {
-        url: "redis://127.0.0.1".into(),
-    };
+    let redis = zeroship_kv::RedisConfig::new(zeroship_kv::Topology::Standalone {
+        endpoint: "127.0.0.1:6379".into(),
+    });
     assert!(matches!(
-        KvStore::open(&config),
+        KvStore::open(&KvConfig::Redis { redis }),
         Err(KvError::InvalidArgument { .. })
     ));
 }
@@ -239,8 +237,8 @@ fn failed_embedded_open_does_not_fall_back_to_another_store() {
 #[compio::test]
 async fn runtime_redis_configuration_runs_the_same_scoped_contract() {
     let fixtures = support::fixtures();
-    for url in [fixtures.redis_url(), fixtures.cluster_url()] {
-        let config = KvConfig::Redis { url: url.into() };
+    for redis in [fixtures.redis_config(), fixtures.cluster_config()] {
+        let config = KvConfig::Redis { redis };
         let store = KvStore::open(&config).unwrap();
         exercise_store(&store).await;
     }

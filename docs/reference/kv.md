@@ -19,10 +19,11 @@ Hosts open a `KvStore` from `KvConfig` at startup and pass it to the binding.
 Cargo features determine which backend implementations are available; runtime
 configuration selects the active implementation. Rust platform code receives
 `Kv` handles bound to `Namespace::platform`, while the V8 binding uses
-`Namespace::app` and the same scoped operations. The CLI selects Redis from
-`ZEROSHIP_KV_URL`, otherwise redb from `ZEROSHIP_KV_PATH` or its local default.
+`Namespace::app` and the same scoped operations. The CLI loads TOML from
+`ZEROSHIP_KV_CONFIG_FILE`, otherwise redb from `ZEROSHIP_KV_PATH` or its local default.
 The distributed worker uses its configured Redis store and shares it across
-worker threads. See `crates/zeroship-kv/README.md` for Rust usage.
+worker threads. See [KV configuration](kv-configuration.md) for standalone,
+cluster, and Sentinel deployments, and `crates/zeroship-kv/README.md` for Rust usage.
 
 Backend and scoped-handle tests run in the storage crate. The binding's suite
 drives the real runtime against those backends and verifies Rust/V8 data sharing.
@@ -184,7 +185,7 @@ const page = await sessions.list("");
 The runtime selects the backend; the SDK contract is the same:
 
 - redb: single-process persistent local backend, used by dev by default.
-- Redis: distributed backend, selected with `ZEROSHIP_KV_URL`.
+- Redis-compatible storage: distributed backend configured through host TOML.
 
 Dev redb state lives under the app's `.zeroship/` directory. Treat it as local
 runtime state that should survive restarts, like the SQLite dev database.

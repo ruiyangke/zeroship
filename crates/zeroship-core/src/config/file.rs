@@ -250,8 +250,8 @@ pub struct GatewaySection {
 pub struct WorkerSection {
     /// `PostgreSQL` DSN for worker-side lookups.
     pub database_url: Option<String>,
-    /// App-runtime KV (Redis) connection URL. May carry credentials.
-    pub kv_url: Option<String>,
+    /// TOML configuration for the app-runtime KV deployment. May carry credentials.
+    pub kv_config: Option<String>,
     /// This worker's OWN ed25519 assertion key FILE. See
     /// `AuthSection::service_key_file` for why the pair lives here.
     pub service_key_file: Option<std::path::PathBuf>,

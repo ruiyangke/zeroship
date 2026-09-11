@@ -441,8 +441,9 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use crate::client::Client;
-use crate::pool::Pool;
+use crate::pool::{Pool, PoolConfig};
 use crate::protocol::build_cmd;
+use crate::{ConnectionConfig, RedisConfig, Topology};
 
 /// Interior shared state — slot map + per-node pool cache. Wrapped in
 /// `Rc<RefCell<…>>` because compio futures are `!Send`, so everything
@@ -450,10 +451,10 @@ use crate::protocol::build_cmd;
 struct Inner {
     topology: ClusterTopology,
     pools: HashMap<NodeAddr, Pool>,
-    pool_size: usize,
-    /// Saved so we can rebuild pools for newly-discovered nodes.
-    password: Option<String>,
-    db: Option<i64>,
+    pool_config: PoolConfig,
+    /// Authentication, TLS and timeout settings inherited by discovered nodes.
+    connection: ConnectionConfig,
+    seeds: Vec<ConnectionConfig>,
     /// CR-CLUSTER-2 / REDIS-SSRF-1: the set of operator-trusted node
     /// addresses (normalized `host:port`) we are willing to connect to
     /// with the cluster credentials. Seeded from the configured seed URLs
@@ -476,50 +477,103 @@ impl ClusterClient {
     /// order; the first one that answers `CLUSTER SLOTS` seeds the
     /// topology. `pool_size` caps connections per node.
     pub async fn connect(seeds: &[&str], pool_size: usize) -> Result<Self> {
+        let connections = seeds
+            .iter()
+            .map(|url| ConnectionConfig::from_url(url))
+            .collect::<Result<Vec<_>>>()?;
+        Self::connect_seeds(
+            connections,
+            PoolConfig {
+                max_size: pool_size,
+                ..PoolConfig::default()
+            },
+        )
+        .await
+    }
+
+    pub async fn connect_config(config: &RedisConfig) -> Result<Self> {
+        config.validate()?;
+        let Topology::Cluster { seeds } = &config.topology else {
+            return Err(Error::Config("expected cluster topology".into()));
+        };
+        Self::connect_seeds(
+            seeds
+                .iter()
+                .map(|endpoint| config.connection(endpoint.clone()))
+                .collect(),
+            (&config.pool).into(),
+        )
+        .await
+    }
+
+    async fn connect_seeds(seeds: Vec<ConnectionConfig>, pool_config: PoolConfig) -> Result<Self> {
         if seeds.is_empty() {
-            return Err(Error::ClusterBootstrap("no seed URLs provided".into()));
+            return Err(Error::ClusterBootstrap(
+                "cluster seeds cannot be empty".into(),
+            ));
         }
-        let mut last_err: Option<Error> = None;
-        for url in seeds {
-            match Self::bootstrap_from(url, pool_size).await {
-                Ok(c) => return Ok(c),
-                Err(e) => last_err = Some(e),
+        if seeds.iter().any(|s| s.database != 0) {
+            return Err(Error::Config("cluster requires database zero".into()));
+        }
+        let mut last_err = Error::ClusterBootstrap("all seeds failed".into());
+        for config in &seeds {
+            match Self::topology_from(config).await {
+                Ok(topology) => {
+                    let mut known_nodes: HashSet<_> = seeds
+                        .iter()
+                        .map(|s| normalize_node_addr(&s.endpoint))
+                        .collect();
+                    known_nodes.extend(topology.node_addrs().map(|s| normalize_node_addr(s)));
+                    let inner = Inner {
+                        topology,
+                        pools: HashMap::new(),
+                        pool_config,
+                        connection: config.clone(),
+                        seeds: seeds.clone(),
+                        known_nodes,
+                    };
+                    return Ok(Self {
+                        inner: Rc::new(RefCell::new(inner)),
+                    });
+                }
+                Err(error) => last_err = error,
             }
         }
-        Err(last_err.unwrap_or_else(|| {
-            Error::ClusterBootstrap("all seeds failed".into())
-        }))
+        Err(last_err)
     }
 
-    async fn bootstrap_from(url: &str, pool_size: usize) -> Result<Self> {
-        // Open one probe connection and issue CLUSTER SLOTS.
-        let mut probe = Client::connect(url).await?;
-        let frame = probe.send_recv(build_cmd(&[b"CLUSTER", b"SLOTS"])).await?;
-        let topology = parse_cluster_slots(frame)?;
-
-        // Capture auth credentials by re-parsing the URL so pools built
-        // for newly-discovered nodes can authenticate.
-        let (password, db) = credentials_from_url(url)?;
-
-        // CR-CLUSTER-2: build the SSRF allowlist. The seed (operator-
-        // configured, trusted) plus every node named by the authoritative
-        // CLUSTER SLOTS topology we just parsed from it. These are the only
-        // addresses we'll later connect to with the cluster password.
-        let mut known_nodes: HashSet<NodeAddr> = HashSet::new();
-        if let Some(seed_addr) = host_port_from_url(url) {
-            known_nodes.insert(seed_addr);
-        }
-        for addr in topology.node_addrs() {
-            known_nodes.insert(normalize_node_addr(addr));
-        }
-
-        let pools = HashMap::new();
-        let inner = Inner { topology, pools, pool_size, password, db, known_nodes };
-        Ok(Self { inner: Rc::new(RefCell::new(inner)) })
+    async fn topology_from(config: &ConnectionConfig) -> Result<ClusterTopology> {
+        let mut probe = Client::connect_config(config).await?;
+        parse_cluster_slots(probe.send_recv(build_cmd(&[b"CLUSTER", b"SLOTS"])).await?)
     }
 
-    /// Return a pool for `addr`, opening one lazily on first use. The
-    /// newly-opened Pool inherits auth/db from the seed URL.
+    /// Refresh only through configured seeds or previously discovered nodes.
+    pub async fn refresh_topology(&self) -> Result<()> {
+        let candidates = {
+            let inner = self.inner.borrow();
+            let mut candidates = inner.seeds.clone();
+            for endpoint in &inner.known_nodes {
+                let mut config = inner.connection.clone();
+                config.endpoint = endpoint.clone();
+                candidates.push(config);
+            }
+            candidates
+        };
+        for candidate in candidates {
+            if let Ok(topology) = Self::topology_from(&candidate).await {
+                let mut inner = self.inner.borrow_mut();
+                inner
+                    .known_nodes
+                    .extend(topology.node_addrs().map(|s| normalize_node_addr(s)));
+                inner.topology = topology;
+                inner.pools.clear();
+                return Ok(());
+            }
+        }
+        Err(Error::ClusterBootstrap("topology refresh failed".into()))
+    }
+
+    /// Return a pool for `addr`, inheriting the configured data-server settings.
     async fn pool_for(&self, addr: &str) -> Result<Pool> {
         if let Some(p) = self.inner.borrow().pools.get(addr).cloned() {
             return Ok(p);
@@ -540,14 +594,18 @@ impl ClusterClient {
                 )));
             }
         }
-        let (pw, db) = {
-            let b = self.inner.borrow();
-            (b.password.clone(), b.db)
+        let (mut connection, config) = {
+            let inner = self.inner.borrow();
+            (inner.connection.clone(), inner.pool_config.clone())
         };
-        let url = build_node_url(addr, pw.as_deref(), db);
-        let size = self.inner.borrow().pool_size;
-        let pool = Pool::connect(&url, size).await.map_err(|e| Error::Pool(format!("{e}")))?;
-        self.inner.borrow_mut().pools.insert(addr.to_string(), pool.clone());
+        connection.endpoint = addr.to_owned();
+        let pool = Pool::connect_config(connection, config)
+            .await
+            .map_err(|error| Error::Pool(error.to_string()))?;
+        self.inner
+            .borrow_mut()
+            .pools
+            .insert(addr.to_string(), pool.clone());
         Ok(pool)
     }
 
@@ -581,9 +639,12 @@ impl ClusterClient {
         let inner = Inner {
             topology,
             pools: HashMap::new(),
-            pool_size: 1,
-            password: None,
-            db: None,
+            pool_config: PoolConfig {
+                max_size: 1,
+                ..PoolConfig::default()
+            },
+            connection: ConnectionConfig::from_url("redis://127.0.0.1:6379").unwrap(),
+            seeds: Vec::new(),
             known_nodes,
         };
         Self { inner: Rc::new(RefCell::new(inner)) }
@@ -607,6 +668,7 @@ impl ClusterClient {
         const MAX_REDIRECTS: u8 = 2;
         let slot = redis_keyslot(routing_key);
         let mut redirects = 0u8;
+        let mut refreshed = false;
 
         // First attempt uses our cached topology.
         let mut addr_override: Option<String> = None;
@@ -628,17 +690,37 @@ impl ClusterClient {
         loop {
             let addr = match addr_override.take() {
                 Some(a) => a,
-                None => self
-                    .inner
-                    .borrow()
-                    .topology
-                    .node_for_slot(slot)
-                    .cloned()
-                    .ok_or(Error::NoRoute { slot })?,
+                None => {
+                    let owner = self.inner.borrow().topology.node_for_slot(slot).cloned();
+                    match owner {
+                        Some(owner) => owner,
+                        None if !refreshed => {
+                            self.refresh_topology().await?;
+                            refreshed = true;
+                            continue;
+                        }
+                        None => return Err(Error::NoRoute { slot }),
+                    }
+                }
             };
 
-            let pool = self.pool_for(&addr).await?;
-            let mut conn = pool.acquire().await.map_err(|e| Error::Pool(format!("{e}")))?;
+            let acquired = match self.pool_for(&addr).await {
+                Ok(pool) => pool.acquire().await,
+                Err(error) => Err(error),
+            };
+            let mut conn = match acquired {
+                Ok(conn) => conn,
+                Err(error) => {
+                    if !refreshed && self.refresh_topology().await.is_ok() {
+                        refreshed = true;
+                        addr_override = None;
+                        pending_moved = None;
+                        ask_once = false;
+                        continue;
+                    }
+                    return Err(error);
+                }
+            };
 
             // After an -ASK redirect, the target needs an ASKING marker
             // before the replay. This is stateful per connection, one-shot.
@@ -650,7 +732,13 @@ impl ClusterClient {
             // `send_recv` returns the raw frame; -MOVED / -ASK come back
             // as `OwnedFrame::Error("MOVED …")`. Intercept those before
             // surfacing the frame to the caller.
-            let frame = conn.send_recv(cmd.clone()).await?;
+            let frame = match conn.send_recv(cmd.clone()).await {
+                Ok(frame) => frame,
+                Err(error) => {
+                    let _ = self.refresh_topology().await;
+                    return Err(error);
+                }
+            };
             // The claimed owner answered, so the pending MOVED is now
             // corroborated and safe to cache. Everything above this line
             // (`pool_for`'s allowlist check, connect, acquire, send_recv)
@@ -980,25 +1068,6 @@ mod cross_slot_tests {
     }
 }
 
-fn credentials_from_url(url: &str) -> Result<(Option<String>, Option<i64>)> {
-    let parsed = url::Url::parse(url).map_err(|e|
-        Error::Config(format!("bad seed URL '{url}': {e}")))?;
-    let pw = parsed.password().map(str::to_string);
-    let db = parsed.path().trim_start_matches('/').parse::<i64>().ok();
-    Ok((pw, db))
-}
-
-/// Extract the bare `host:port` from a seed URL so it can be compared
-/// against server-supplied redirect/topology addresses. Defaults the
-/// port to Redis's 6379 when the URL omits it. Returns `None` if the URL
-/// can't be parsed or has no host.
-fn host_port_from_url(url: &str) -> Option<NodeAddr> {
-    let parsed = url::Url::parse(url).ok()?;
-    let host = parsed.host_str()?;
-    let port = parsed.port().unwrap_or(6379);
-    Some(normalize_node_addr(&format!("{host}:{port}")))
-}
-
 /// Canonicalize a `host:port` string for set membership: the host is
 /// case-insensitive, so we lowercase everything up to (and including) the
 /// final `:` boundary. We split on the **last** colon so bracketed IPv6
@@ -1015,21 +1084,6 @@ fn normalize_node_addr(addr: &str) -> NodeAddr {
 /// before we ever connect — and before we replay the cluster password.
 fn is_known_node(addr: &str, known: &HashSet<NodeAddr>) -> bool {
     known.contains(&normalize_node_addr(addr))
-}
-
-fn build_node_url(addr: &str, password: Option<&str>, db: Option<i64>) -> String {
-    let mut s = String::from("redis://");
-    if let Some(p) = password {
-        s.push(':');
-        s.push_str(p);
-        s.push('@');
-    }
-    s.push_str(addr);
-    if let Some(d) = db {
-        s.push('/');
-        s.push_str(&d.to_string());
-    }
-    s
 }
 
 #[cfg(test)]
@@ -1072,102 +1126,6 @@ mod known_node_tests {
         // and the seed may differ only in case.
         let k = known(&["node-a:7000"]);
         assert!(is_known_node("NODE-A:7000", &k));
-    }
-
-    #[test]
-    fn host_port_from_url_extracts_host_colon_port() {
-        assert_eq!(host_port_from_url("redis://127.0.0.1:7000").as_deref(), Some("127.0.0.1:7000"));
-        assert_eq!(host_port_from_url("redis://:pw@10.0.0.1:6379/3").as_deref(), Some("10.0.0.1:6379"));
-        // No explicit port -> default Redis 6379.
-        assert_eq!(host_port_from_url("redis://myhost").as_deref(), Some("myhost:6379"));
-    }
-
-    #[test]
-    fn host_port_from_url_rejects_garbage() {
-        assert!(host_port_from_url("").is_none());
-        assert!(host_port_from_url("not a url").is_none());
-    }
-}
-
-#[cfg(test)]
-mod url_helper_tests {
-    use super::*;
-
-    #[test]
-    fn credentials_from_url_plain() {
-        let (pw, db) = credentials_from_url("redis://127.0.0.1:6379").unwrap();
-        assert!(pw.is_none());
-        assert!(db.is_none());
-    }
-
-    #[test]
-    fn credentials_from_url_with_password() {
-        let (pw, db) = credentials_from_url("redis://:secret@127.0.0.1:6379").unwrap();
-        assert_eq!(pw.as_deref(), Some("secret"));
-        assert!(db.is_none());
-    }
-
-    #[test]
-    fn credentials_from_url_with_db() {
-        let (pw, db) = credentials_from_url("redis://127.0.0.1:6379/3").unwrap();
-        assert!(pw.is_none());
-        assert_eq!(db, Some(3));
-    }
-
-    #[test]
-    fn credentials_from_url_with_password_and_db() {
-        let (pw, db) = credentials_from_url("redis://:pw@127.0.0.1:6379/7").unwrap();
-        assert_eq!(pw.as_deref(), Some("pw"));
-        assert_eq!(db, Some(7));
-    }
-
-    #[test]
-    fn credentials_from_url_non_numeric_db_silently_dropped() {
-        // A path like "/foo" isn't a valid DB index — we silently treat
-        // it as "no db" rather than erroring. Matches Redis CLI laxness.
-        let (pw, db) = credentials_from_url("redis://127.0.0.1/foo").unwrap();
-        assert!(pw.is_none());
-        assert!(db.is_none());
-    }
-
-    #[test]
-    fn credentials_from_url_rejects_garbage() {
-        // `url::Url::parse` is permissive but rejects strings without any
-        // scheme. Empty string is a solid "no" — captures the error path.
-        let err = match credentials_from_url("") {
-            Ok(_) => panic!("expected parse error on empty URL"),
-            Err(e) => e,
-        };
-        assert!(matches!(err, Error::Config(_)));
-    }
-
-    #[test]
-    fn build_node_url_plain() {
-        assert_eq!(build_node_url("host:6379", None, None), "redis://host:6379");
-    }
-
-    #[test]
-    fn build_node_url_with_password_only() {
-        assert_eq!(
-            build_node_url("host:6379", Some("s3cret"), None),
-            "redis://:s3cret@host:6379"
-        );
-    }
-
-    #[test]
-    fn build_node_url_with_db_only() {
-        assert_eq!(
-            build_node_url("host:6379", None, Some(4)),
-            "redis://host:6379/4"
-        );
-    }
-
-    #[test]
-    fn build_node_url_full() {
-        assert_eq!(
-            build_node_url("host:6379", Some("pw"), Some(2)),
-            "redis://:pw@host:6379/2"
-        );
     }
 }
 

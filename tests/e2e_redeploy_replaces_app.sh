@@ -118,8 +118,11 @@ e2e_export_database_urls "$DB_URL"
 "$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" --blob-store "$WORK/bundles" \
   > "$WORK/control.log" 2>&1 & PIDS+=($!)
 sleep 4
-# env.kv is absent without ZEROSHIP_WORKER_KV_URL by design, and kv-dashboard needs it.
-ZEROSHIP_WORKER_KV_URL="redis://127.0.0.1:$REDIS_PORT" \
+# env.kv is absent without ZEROSHIP_WORKER_KV_CONFIG by design, and kv-dashboard needs it.
+ZEROSHIP_WORKER_KV_CONFIG="backend = \"redis\"
+[redis.topology]
+mode = \"standalone\"
+endpoint = \"127.0.0.1:$REDIS_PORT\"" \
 "$BIN/zeroship-worker" --port "$ZEROSHIP_WORKER_PORT" --threads 2 --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" \
  --blob-store "$WORK/bundles" --poll-interval 2 \
  > "$WORK/worker.log" 2>&1 & PIDS+=($!)

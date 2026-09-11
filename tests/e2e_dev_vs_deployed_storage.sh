@@ -30,7 +30,7 @@
 #   MUTATE=no-storage-url   boot the deployed worker with no --storage-url, so
 #                           the env.storage namespace is absent by design and
 #                           every deployed procedure fails. (The kv harness
-#                           learned this with ZEROSHIP_WORKER_KV_URL.)
+#                           learned this with ZEROSHIP_WORKER_KV_CONFIG.)
 #   MUTATE=no-config        build without src/server/config.ts, so every
 #                           procedure resolves to `auth: "user"` and the
 #                           gateway refuses all fourteen -- green in dev, 401

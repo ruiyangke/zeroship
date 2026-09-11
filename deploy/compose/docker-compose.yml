@@ -740,9 +740,12 @@ services:
       # Dedicated constrained worker login. Startup rejects a DSN whose
       # effective database privileges exceed this role's narrow posture.
       ZEROSHIP_WORKER_DATABASE_URL: ${ZEROSHIP_WORKER_DATABASE_URL:-postgres://zeroship_worker:zeroship_worker@postgres:5432/zeroship}
-      # env.kv backend. Secret-classed: a Redis URL admits userinfo, so it has
-      # no value flag and arrives here instead of on the command line.
-      ZEROSHIP_WORKER_KV_URL: ${ZEROSHIP_WORKER_KV_URL:-redis://redis:6379}
+      # KV configuration may contain credentials, so it is secret-classed.
+      ZEROSHIP_WORKER_KV_CONFIG: |
+        backend = "redis"
+        [redis.topology]
+        mode = "standalone"
+        endpoint = "redis:6379"
       ZEROSHIP_CONTROL_KEY: ${ZEROSHIP_CONTROL_KEY:?run zeroship dev init}
       ZEROSHIP_WORKER_SERVICE_KEY_FILE: /etc/zeroship/secrets/svc-worker.pem
       ZEROSHIP_WORKER_SERVICE_PEERS_FILE: /etc/zeroship/secrets/service-peers.json
@@ -789,12 +792,11 @@ services:
         condition: service_started
 
   # redis - the SHARED key-value store backing the deployed-app `env.kv`
-  # namespace. The worker's `ZEROSHIP_WORKER_KV_URL` points every
+  # namespace. The worker's `ZEROSHIP_WORKER_KV_CONFIG` points every
   # worker replica at this ONE instance, so a `kv.set` on one replica is
   # visible to another (multi-node consistency). The bespoke compio-redis
-  # driver speaks to it; zero tokio. Single-node here in dev; the
-  # `Redis` backend's URL transparently upgrades to cluster mode
-  # (`?cluster=true&seeds=...`) for a sharded prod fleet.
+  # driver speaks to it; zero tokio. Standalone here in dev; the KV topology
+  # configuration selects cluster mode for a sharded deployment.
   redis:
     image: redis:7-alpine
     command: redis-server --save 60 1 --appendonly no

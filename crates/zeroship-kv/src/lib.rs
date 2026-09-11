@@ -15,7 +15,7 @@ pub mod limits;
 mod namespace;
 mod store;
 
-pub use config::KvConfig;
+pub use config::{Auth, KvConfig, PoolSettings, RedisConfig, Timeouts, TlsConfig, Topology};
 pub use namespace::Namespace;
 pub use store::{Kv, KvStore};
 

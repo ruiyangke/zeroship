@@ -394,7 +394,7 @@ by the generator.
 | --- | --- | --- | --- | --- | --- |
 | `worker.bind` | operational | `ZEROSHIP_WORKER_BIND` | `worker.bind` | zeroship-worker `--bind` | `127.0.0.1` |
 | `worker.database_url` | secret | `ZEROSHIP_WORKER_DATABASE_URL` | `worker.database_url` | zeroship-worker `--database-url-file` | - |
-| `worker.kv_url` | secret | `ZEROSHIP_WORKER_KV_URL` | `worker.kv_url` | zeroship-worker `--kv-url-file` | - |
+| `worker.kv_config` | secret | `ZEROSHIP_WORKER_KV_CONFIG` | `worker.kv_config` | zeroship-worker `--kv-config-file` | - |
 | `worker.max_isolates` | operational | `ZEROSHIP_WORKER_MAX_ISOLATES` | `worker.max_isolates` | zeroship-worker `--max-isolates` | `200` |
 | `worker.max_pinned_isolates_per_app` | operational | `ZEROSHIP_WORKER_MAX_PINNED_ISOLATES_PER_APP` | `worker.max_pinned_isolates_per_app` | zeroship-worker `--max-pinned-isolates-per-app` | `4` |
 | `worker.max_step_blob_bytes` | operational | `ZEROSHIP_WORKER_MAX_STEP_BLOB_BYTES` | `worker.max_step_blob_bytes` | zeroship-worker `--max-step-blob-bytes` | `67_108_864` |
@@ -514,7 +514,6 @@ All default to the in-compose Postgres. The `.env` name IS the container name:
 | `ZEROSHIP_AUTH_DATABASE_URL` | `AUTH_DB_URL` |
 | `ZEROSHIP_MIGRATE_SERVER_DATABASE_URL` | `MIGRATED_DATABASE_URL`, then `ZEROSHIP_MIGRATED_DATABASE_URL` |
 | `ZEROSHIP_MIGRATE_SERVER_PROVISION_DATABASE_URL` | `PROVISION_DATABASE_URL`, then `ZEROSHIP_MIGRATED_PROVISION_DATABASE_URL` |
-| `ZEROSHIP_WORKER_KV_URL` | `WORKER_KV_URL` |
 | `ZEROSHIP_CONTROL_STRIPE_WEBHOOK_SECRET` | `STRIPE_WEBHOOK_SECRET` |
 
 An operator upgrading a deployed host must ADD the left-hand name carrying the
@@ -597,7 +596,7 @@ cargo run -p zeroship-config-contract -- raw-env 2>&1 >/dev/null | grep class
 ```
 
 **creator CLI** (`CliEnv`): `ZEROSHIP_TOKEN` `ZEROSHIP_CONTROL_URL`
-`ZEROSHIP_CONFIG` `ZEROSHIP_CONFIG_HOME` `ZEROSHIP_KV_PATH` `ZEROSHIP_KV_URL`
+`ZEROSHIP_CONFIG` `ZEROSHIP_CONFIG_HOME` `ZEROSHIP_KV_PATH` `ZEROSHIP_KV_CONFIG_FILE`
 `ZEROSHIP_STORAGE_URL` `ZEROSHIP_HEAP_LIMIT_MB` `ZEROSHIP_WORKFLOW_SQLITE_PATH`
 `ZEROSHIP_LOG_FORMAT` `ZEROSHIP_DIE_WITH_PARENT`
 
@@ -706,7 +705,7 @@ shell). `deny_unknown_fields` applies, so a misspelled key in it is an error
 rather than a value that silently configures nothing.
 
 It is generated and gitignored rather than committed because every
-`*.database_url` and `worker.kv_url` leaf is `secret`-classed, and check 8 of
+`*.database_url` and `worker.kv_config` leaf is `secret`-classed, and check 8 of
 `tests/config_name_alignment_gate.sh` fails any TRACKED `*.toml` holding a
 literal at a secret-classed leaf - with no exception list, by design. That same
 gate exempts untracked overlays deliberately, which is exactly what this is.

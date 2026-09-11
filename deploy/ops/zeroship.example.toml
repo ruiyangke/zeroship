@@ -158,7 +158,7 @@ broker_secret_file = "/etc/zeroship/secrets/broker_secret"
 
 [worker]
 database_url = "urn:zeroship:file:/etc/zeroship/secrets/worker_database_url"
-kv_url = "urn:zeroship:file:/etc/zeroship/secrets/kv_url"
+kv_config = "urn:zeroship:file:/etc/zeroship/secrets/kv.toml"
 
 [migrate_server]
 database_url = "urn:zeroship:file:/etc/zeroship/secrets/migrated_database_url"

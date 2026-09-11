@@ -10,23 +10,10 @@
 //! `zeroship_core::config::test_overlay`, which parses it with `FileConfig`
 //! under `deny_unknown_fields`.
 //!
-//! WHY A HAND-ROLLED READER AND NOT THE REAL PARSER, still. The shell version's
-//! answer was "a harness cannot afford a cargo build to learn a hostname"; that
-//! argument is spent now that the harness runs a compiled binary either way.
-//! The reason that replaced it is a hard one rather than a preference:
-//! `zeroship_core::config::test_overlay` means depending on `zeroship-core`,
-//! and `zeroship-core` depends on `cyper`, which depends on `hyper`, which
-//! depends on TOKIO. Measured 2026-08-20 with
-//! `cargo tree -i tokio -e normal -p zeroship-control`: that is the ONLY edge
-//! by which tokio enters this workspace at all. Reusing the parser would put
-//! the test harness on the wrong side of the zero-tokio invariant to save
-//! forty lines.
-//!
-//! The VALIDATION still lives in Rust service code -- `test_overlay.rs` fails
-//! on an unknown key under `deny_unknown_fields`, so a typo cannot survive
-//! `cargo test -p zeroship-core`, and this reader would only ever return `None`
-//! for one. The subset parsed here (a `[section]` header and `key = "value"`)
-//! is the whole of what the generator writes.
+//! The scalar reader serves the harness's existing database settings. KV
+//! configuration is a TOML document inside the worker secret setting, so that
+//! field is decoded with the TOML parser. Platform code validates the complete
+//! overlay through its generated configuration contract.
 //!
 //! WHAT IT DOES NOT DO. It does not invent a DSN when the file is missing. A
 //! suite that silently falls back to a compiled default when its configuration
@@ -86,7 +73,7 @@ pub struct Loaded {
     pub overlay: PathBuf,
     /// `ZS_TEST_PG_DSN` -- the server DSN exactly as written.
     pub dsn: String,
-    /// `ZS_TEST_REDIS_URL`, empty when the overlay names no `[worker] kv_url`.
+    /// `ZS_TEST_REDIS_URL`, empty when the overlay names no `[worker] kv_config`.
     pub redis_url: String,
     pub host: String,
     pub port: String,
@@ -98,6 +85,18 @@ pub struct Loaded {
 /// Where the overlay lives under a repository root.
 pub fn overlay_path(root: &Path) -> PathBuf {
     root.join("deploy/ops/zeroship.test.toml")
+}
+
+fn redis_url(document: &str) -> Option<String> {
+    let document: toml::Value = toml::from_str(document).ok()?;
+    let config = document.get("worker")?.get("kv_config")?.as_str()?;
+    let config: toml::Value = toml::from_str(config).ok()?;
+    let endpoint = config
+        .get("redis")?
+        .get("topology")?
+        .get("endpoint")?
+        .as_str()?;
+    Some(format!("redis://{endpoint}"))
 }
 
 /// Read the overlay under `root` and split its `[control] database_url`.
@@ -117,7 +116,7 @@ pub fn load(root: &Path) -> Result<Loaded, String> {
     };
 
     let dsn = get(&document, "control", "database_url").unwrap_or_default();
-    let redis_url = get(&document, "worker", "kv_url").unwrap_or_default();
+    let redis_url = redis_url(&document).unwrap_or_default();
 
     if dsn.is_empty() {
         return Err(format!(
@@ -367,6 +366,21 @@ mod tests {
     use super::*;
 
     const DOC: &str = "[control]\ndatabase_url = \"postgres://postgres:zeroship@127.0.0.1:5440/zeroship\"\n[worker]\nkv_url = \"redis://127.0.0.1:6390\"\n";
+
+    #[test]
+    fn reads_the_kv_deployment_document() {
+        let document = r#"[worker]
+kv_config = '''backend = "redis"
+[redis.topology]
+mode = "standalone"
+endpoint = "localhost:6379"
+'''
+"#;
+        assert_eq!(
+            redis_url(document).as_deref(),
+            Some("redis://localhost:6379")
+        );
+    }
 
     #[test]
     fn reads_a_key_from_the_named_section() {

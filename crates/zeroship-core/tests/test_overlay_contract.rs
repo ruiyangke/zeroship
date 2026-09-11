@@ -20,13 +20,15 @@ use zeroship_core::config::file::FileConfig;
 use zeroship_core::config::test_overlay::{overlay_path, PROVISION_COMMAND};
 
 /// The exact shape `tests/provision_test_backends.sh` writes.
-const GENERATED_SHAPE: &str = "\
-[control]
-database_url = \"postgres://postgres:zeroship@127.0.0.1:5440/zeroship\"
-
+const GENERATED_SHAPE: &str = r#"[control]
+database_url = "postgres://postgres:zeroship@127.0.0.1:5440/zeroship"
 [worker]
-kv_url = \"redis://127.0.0.1:6390\"
-";
+kv_config = '''backend = "redis"
+[redis.topology]
+mode = "standalone"
+endpoint = "127.0.0.1:6390"
+'''
+"#;
 
 fn write_temp(name: &str, contents: &str) -> PathBuf {
     let path = std::env::temp_dir().join(format!(
@@ -53,9 +55,10 @@ fn a_misspelled_key_in_the_generated_shape_is_rejected() {
         parsed.control.database_url.as_deref(),
         Some("postgres://postgres:zeroship@127.0.0.1:5440/zeroship")
     );
+    let kv: toml::Value = toml::from_str(parsed.worker.kv_config.as_deref().unwrap()).unwrap();
     assert_eq!(
-        parsed.worker.kv_url.as_deref(),
-        Some("redis://127.0.0.1:6390")
+        kv["redis"]["topology"]["endpoint"].as_str(),
+        Some("127.0.0.1:6390")
     );
     let _ = std::fs::remove_file(good.as_path());
 
@@ -125,10 +128,9 @@ fn the_generated_overlay_parses_and_names_both_backends() {
 
     let kv = parsed
         .worker
-        .kv_url
-        .expect("the generated overlay must carry [worker] kv_url");
-    assert!(
-        kv.starts_with("redis://") || kv.starts_with("rediss://"),
-        "[worker] kv_url is not a Redis URL: {kv}"
-    );
+        .kv_config
+        .expect("the generated overlay must carry [worker] kv_config");
+    let kv: toml::Value = toml::from_str(&kv).expect("KV configuration TOML");
+    assert_eq!(kv["backend"].as_str(), Some("redis"));
+    assert!(kv["redis"]["topology"]["endpoint"].as_str().is_some());
 }

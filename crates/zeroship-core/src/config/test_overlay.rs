@@ -19,7 +19,7 @@
 //! diverges from the obvious shape. Every DSN leaf in the schema is
 //! `secret`-classed - `auth.database_url`, `control.database_url`,
 //! `gateway.database_url`, `migrate_server.database_url`,
-//! `migrate_server.provision_database_url`, `worker.database_url`, `worker.kv_url`,
+//! `migrate_server.provision_database_url`, `worker.database_url`, `worker.kv_config`,
 //! `workflow_scheduler.database_url`, verified against the compiled contract
 //! dump. Check 8 of `tests/config_name_alignment_gate.sh` fails any TRACKED
 //! `*.toml` holding a literal at a secret-classed leaf, and it says in terms
@@ -213,7 +213,16 @@ fn redact_dsn(url: &str) -> &str {
 pub fn kv_url_opt() -> Option<String> {
     crate::test_env!("REDIS_TEST_URL")
         .filter(|url| !url.is_empty())
-        .or_else(|| load_opt().and_then(|config| config.worker.kv_url))
+        .or_else(|| {
+            let config = load_opt()?.worker.kv_config?;
+            let value: toml::Value = toml::from_str(&config).ok()?;
+            let endpoint = value
+                .get("redis")?
+                .get("topology")?
+                .get("endpoint")?
+                .as_str()?;
+            Some(format!("redis://{endpoint}"))
+        })
         .filter(|url| !url.is_empty())
 }
 
@@ -244,7 +253,7 @@ pub fn database_url() -> String {
 pub fn kv_url() -> String {
     kv_url_opt().unwrap_or_else(|| {
         panic!(
-            "no Redis: neither REDIS_TEST_URL nor worker.kv_url in {}.\n\
+            "no Redis: neither REDIS_TEST_URL nor worker.kv_config in {}.\n\
              Provision the test backends and their configuration with:\n    {PROVISION_COMMAND}",
             overlay_path().display()
         )
