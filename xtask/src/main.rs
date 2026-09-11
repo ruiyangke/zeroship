@@ -1,4 +1,5 @@
 mod data;
+mod storage;
 
 #[path = "../../tests/fixtures/postgres/image.rs"]
 mod postgres_image;
@@ -22,7 +23,7 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Task {
-    /// Run native test suites with owned backing services.
+    /// Run native and example test suites with owned backing services.
     Test {
         #[command(subcommand)]
         suite: Suite,
@@ -31,6 +32,8 @@ enum Task {
 
 #[derive(Subcommand)]
 enum Suite {
+    /// Run storage crate tests and the examples' Vitest/Playwright suites.
+    Storage,
     /// Check data crate boundaries and database deployment/test posture.
     DataArchitecture,
     /// Run the data crates against PostgreSQL, SQLite files and the CDC relay.
@@ -49,6 +52,9 @@ fn main() -> ExitCode {
     }
     let result = match args.command {
         Task::Test {
+            suite: Suite::Storage,
+        } => storage::run(),
+        Task::Test {
             suite: Suite::DataArchitecture,
         } => data::architecture(),
         Task::Test {
@@ -58,7 +64,7 @@ fn main() -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("data tests failed: {error}");
+            eprintln!("tests failed: {error}");
             ExitCode::FAILURE
         }
     }
