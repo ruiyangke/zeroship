@@ -18,10 +18,12 @@ receipts, task leases, completion receipts, waits, children, compensation retrie
 generation-preserving restart and transactional schedule occurrences over shared
 PostgreSQL and SQLite transactions. Continuation retains parent waits and
 schedule overlap ownership. Calendar calculations are shared with Control.
+Topic publications retain their recipient boundary and resume bounded fanout
+after restart; delivery is bound to the subscribing run generation.
 Its schema is generated from the canonical migration DSL, with native contract
 tests against SQLite and Testcontainers PostgreSQL. This module is not yet the
 runtime composition: the server, worker polling loop, authoritative platform
-policy, signal ingress/fanout, payloads and interpreter cutover remain in progress. The
+policy, public signal ingress, payloads and interpreter cutover remain in progress. The
 current runtime still uses Control and the local mini-engine.
 
 ## Decision
