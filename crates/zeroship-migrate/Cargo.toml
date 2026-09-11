@@ -46,7 +46,7 @@ zeroship-migrate-backend = { workspace = true }
 
 [dev-dependencies]
 # Owned PostgreSQL fixtures for target-schema authorization regressions.
-zeroship-test-fixtures = { path = "../zeroship-test-fixtures" }
+testcontainers = { version = "0.28", default-features = false, features = ["blocking", "watchdog"] }
 url = { workspace = true }
 # The wire contract, named DIRECTLY by the suites that build IR envelopes and dialect
 # ids rather than reading them off the engine's re-exports. It is not a `[dependencies]`

@@ -1,6 +1,7 @@
 //! Separate-process relay test. PostgreSQL is mandatory.
 
-use zeroship_test_fixtures::postgres as postgres_fixture;
+#[path = "../../../tests/fixtures/postgres/mod.rs"]
+mod postgres_fixture;
 
 use compio_postgres::Pool;
 use compio_tls::TlsConnector;

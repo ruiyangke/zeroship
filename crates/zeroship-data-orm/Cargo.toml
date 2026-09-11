@@ -38,7 +38,7 @@ sha2 = { workspace = true }
 zeroize = { version = "1", features = ["alloc", "derive"] }
 
 [dev-dependencies]
-zeroship-test-fixtures = { path = "../zeroship-test-fixtures" }
+testcontainers = { version = "0.28", default-features = false, features = ["blocking", "watchdog"] }
 criterion = { workspace = true }
 zeroship-data-orm = { path = ".", features = ["test-helpers"] }
 trybuild = "1.0"
