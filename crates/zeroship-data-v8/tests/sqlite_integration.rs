@@ -1828,11 +1828,6 @@ fn backfill_pauses_broker_via_orchestrator_api_and_emits_one_resync() {
         // Engage backfill pause through the trait-method API. The
         // adapter holds an Rc-clone of the backend so subsequent
         // `execute_fixture` calls below route through the same dispatcher.
-        let cs = zeroship_data_orm::backend::sqlite::cdc::SqliteChangeStream::new(
-            handle
-                .get_rc::<zeroship_data_orm::backend::SqliteBackend>()
-                .expect("SQLite fixture"),
-        );
         let guard = zeroship_data_orm::cdc::broker::BrokerPauseGuard::new("app_orch".to_string());
 
         // Pull a Rc-clone of the inner backend so we can issue the

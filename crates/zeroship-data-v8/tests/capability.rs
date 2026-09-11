@@ -43,7 +43,7 @@ fn dispatch_zs(source: &str, name: &str) -> (u16, serde_json::Value) {
         vec![
             DbService::new(DbServiceConfig {
                 url: "postgres://_capability_test_unused".to_string(),
-                worker_id: "capability-test-worker".to_string(),
+                cdc_relay: None,
                 meter: None,
             })
             .expect("db service")

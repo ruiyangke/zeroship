@@ -228,7 +228,6 @@ crates/zeroship-migrate-sqlite/src/backend/audit_unmask_sql.rs	zeroship_migrate_
 crates/zeroship-migrate-sqlite/src/backend/audit_unmask_sql.rs	zeroship_data_v8	bound=crates/zeroship-data-v8/tests/audit_table_parity.rs#SQLITE_CREATOR
 crates/zeroship-migrate-sqlite/src/dml.rs	zeroship_migrate_backend	prose
 crates/zeroship-migrate-sqlite/src/schema.rs	zeroship_data_sql	bound=crates/zeroship-data-sql/src/compile.rs#mod sqlite_now_parity
-crates/zeroship-data-v8/src/drop_namespace.rs	zeroship_migrate_server	prose
 crates/zeroship-data-sql/src/mask_codec.rs	zeroship_migrate_backend	bound=crates/zeroship-data-sql/src/mask_codec.rs#mod cross_codec_parity
 crates/zeroship-data-sql/src/compile.rs	zeroship_migrate_backend	bound=crates/zeroship-data-sql/src/compile.rs#mod raw_column_parity
 '

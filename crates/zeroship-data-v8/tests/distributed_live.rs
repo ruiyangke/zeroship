@@ -29,6 +29,8 @@
 
 use std::collections::HashMap;
 mod support;
+mod relay_fixture;
+use zeroship_data_orm::cdc::relay::RelayConfig;
 
 use std::sync::Arc;
 use std::thread::{self, JoinHandle, ThreadId};
@@ -235,7 +237,7 @@ fn runtime_for(
     url: &str,
     app_uuid: uuid::Uuid,
     app_id: &str,
-    worker_id: &str,
+    relay: &RelayConfig,
     modules: Vec<ModuleEntry>,
 ) -> Runtime {
     let mut env_vars = HashMap::new();
@@ -243,7 +245,7 @@ fn runtime_for(
     let plugins: Vec<Arc<dyn NativePlugin>> = vec![
         DbService::new(DbServiceConfig {
             url: url.to_string(),
-            worker_id: worker_id.to_string(),
+            cdc_relay: Some(relay.clone()),
             meter: None,
         })
         .expect("db service")
@@ -521,7 +523,7 @@ fn spawn_anchor(
     url: String,
     app_uuid: uuid::Uuid,
     app_id: String,
-    worker_id: String,
+    relay: RelayConfig,
     channels: AnchorChannels,
 ) -> JoinHandle<Result<(), String>> {
     let AnchorChannels {
@@ -533,7 +535,7 @@ fn spawn_anchor(
     thread::spawn(move || {
         init_v8();
         let thread_id = thread::current().id();
-        let runtime = runtime_for(&url, app_uuid, &app_id, &worker_id, anchor_modules());
+        let runtime = runtime_for(&url, app_uuid, &app_id, &relay, anchor_modules());
         let arm = call(&runtime, "GET", "/arm", "");
         let io = compio::runtime::Runtime::new()
             .map_err(|error| format!("anchor compio runtime: {error}"))?;
@@ -579,13 +581,13 @@ fn spawn_subscriber(
     url: String,
     app_uuid: uuid::Uuid,
     app_id: String,
-    worker_id: String,
+    relay: RelayConfig,
     initial: std::sync::mpsc::Sender<Result<(ThreadId, String), String>>,
 ) -> JoinHandle<Result<SubscriberResult, String>> {
     thread::spawn(move || {
         init_v8();
         let thread_id = thread::current().id();
-        let runtime = runtime_for(&url, app_uuid, &app_id, &worker_id, subscriber_modules());
+        let runtime = runtime_for(&url, app_uuid, &app_id, &relay, subscriber_modules());
         let outcome = call(
             &runtime,
             "POST",
@@ -653,12 +655,12 @@ fn spawn_writer(
     url: String,
     app_uuid: uuid::Uuid,
     app_id: String,
-    worker_id: String,
+    relay: RelayConfig,
 ) -> JoinHandle<Result<WriterResult, String>> {
     thread::spawn(move || {
         init_v8();
         let thread_id = thread::current().id();
-        let runtime = runtime_for(&url, app_uuid, &app_id, &worker_id, writer_modules());
+        let runtime = runtime_for(&url, app_uuid, &app_id, &relay, writer_modules());
         let outcome = call(&runtime, "POST", "/write", "{}");
         let io = compio::runtime::Runtime::new()
             .map_err(|error| format!("writer compio runtime: {error}"))?;
@@ -850,16 +852,13 @@ async fn drop_app_role(pool: &Pool, app_id: &str) -> Result<(), String> {
 }
 
 #[test]
-fn db_live_stream_crosses_v8_isolates_and_releases_worker_slot() {
+fn db_live_stream_crosses_relay_and_v8_isolates_without_worker_replication() {
     init_v8();
     let url = pg_url();
     let app_uuid = uuid::Uuid::new_v4();
     let app_id = app_uuid.to_string();
-    let worker_id = format!("distributed-live-worker-{app_uuid}");
-    let slot = zeroship_data_v8::replication::worker_slot_name(&app_id, &worker_id)
-        .expect("valid worker slot name");
-    let publication =
-        zeroship_data_v8::replication::publication_name(&app_id).expect("valid publication name");
+    let publication = zeroship_core::replication_names::publication_name(&app_id).unwrap();
+    let slot = publication.replacen("__zs_pub_", "__zs_relay_", 1);
 
     let io = compio::runtime::Runtime::new().expect("control compio runtime");
     let pool = io.block_on(async {
@@ -903,15 +902,17 @@ fn db_live_stream_crosses_v8_isolates_and_releases_worker_slot() {
         pool
     });
 
+    let relay = io.block_on(relay_fixture::RelayFixture::start(&pool, &url, &app_id));
+    let worker_url = relay.worker_url.clone();
     let (anchor_ready_tx, anchor_ready_rx) = std::sync::mpsc::channel();
     let (close_tx, close_rx) = flume::bounded(1);
     let (closed_tx, closed_rx) = std::sync::mpsc::channel();
     let (finish_tx, finish_rx) = flume::bounded(1);
     let anchor = spawn_anchor(
-        url.clone(),
+        worker_url.clone(),
         app_uuid,
         app_id.clone(),
-        worker_id.clone(),
+        relay.config.clone(),
         AnchorChannels {
             ready: anchor_ready_tx,
             close: close_rx,
@@ -927,10 +928,10 @@ fn db_live_stream_crosses_v8_isolates_and_releases_worker_slot() {
 
         let (initial_tx, initial_rx) = std::sync::mpsc::channel();
         subscriber = Some(spawn_subscriber(
-            url.clone(),
+            worker_url.clone(),
             app_uuid,
             app_id.clone(),
-            worker_id.clone(),
+            relay.config.clone(),
             initial_tx,
         ));
         let (subscriber_thread, initial_body) = receive(&initial_rx, "subscriber initial frame")?;
@@ -941,10 +942,10 @@ fn db_live_stream_crosses_v8_isolates_and_releases_worker_slot() {
         }
 
         writer = Some(spawn_writer(
-            url.clone(),
+            worker_url.clone(),
             app_uuid,
             app_id.clone(),
-            worker_id.clone(),
+            relay.config.clone(),
         ));
         let writer_result = join_role(writer.take().expect("writer handle"), "writer")?;
         if writer_result.status != 200 || !writer_result.body.contains(PROBE) {
@@ -987,7 +988,7 @@ fn db_live_stream_crosses_v8_isolates_and_releases_worker_slot() {
         let state = io.block_on(slot_state(&pool, &slot))?;
         if state != Some(true) {
             return Err(format!(
-                "anchor should keep the worker slot active after the stream closes; state={state:?}"
+                "anchor should keep the relay slot active after the stream closes; state={state:?}"
             ));
         }
 
@@ -1024,7 +1025,7 @@ fn db_live_stream_crosses_v8_isolates_and_releases_worker_slot() {
     let app_delete_result = io.block_on(async {
         let service = DbService::new(DbServiceConfig {
             url: url.clone(),
-            worker_id: "distributed-live-deprovision".to_string(),
+            cdc_relay: None,
             meter: None,
         })
         .map_err(|error| format!("db service: {error}"))?;
@@ -1055,6 +1056,7 @@ fn db_live_stream_crosses_v8_isolates_and_releases_worker_slot() {
         Ok::<bool, String>(publication_retained)
     });
 
+    io.block_on(relay.cleanup(&pool));
     drop(pool);
     io.block_on(async {
         let _ = compio_postgres::drain_connections(Duration::from_secs(3)).await;
@@ -1066,7 +1068,7 @@ fn db_live_stream_crosses_v8_isolates_and_releases_worker_slot() {
     anchor_result.unwrap_or_else(|error| panic!("anchor failed: {error}"));
     assert!(
         slot_removed.expect("slot teardown query"),
-        "last subscriber close must drop this worker's logical slot"
+        "last subscriber close must drop the relay logical slot"
     );
     assert!(
         app_delete_result.expect("app CDC deprovision"),

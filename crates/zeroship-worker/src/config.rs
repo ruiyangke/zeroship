@@ -117,6 +117,14 @@ pub struct WorkerSettings {
     #[config(name = "worker.workflow_advance_unsigned", env = false)]
     pub workflow_advance_unsigned: BootstrapControl<bool>,
 
+    /// TLS endpoint of the PostgreSQL CDC relay.
+    #[config(name = "worker.cdc_relay_url", default = String::new())]
+    pub cdc_relay_url: Operational<String>,
+
+    /// Private certificate authority for the CDC relay; empty uses host trust.
+    #[config(name = "worker.cdc_relay_ca_file", default = PathBuf::new())]
+    pub cdc_relay_ca_file: Operational<PathBuf>,
+
     /// HTTP listen port.
     #[config(name = "worker.port", default = 8080)]
     pub port: Operational<u16>,

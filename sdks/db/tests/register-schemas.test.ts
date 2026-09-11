@@ -104,7 +104,6 @@ describe("installSchema", () => {
       "collection",
       "openSubscription",
       "migrations",
-      "replication",
       "transaction",
       "live",
     ]) {

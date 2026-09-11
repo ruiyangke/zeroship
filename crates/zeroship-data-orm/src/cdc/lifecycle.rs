@@ -1,30 +1,16 @@
-//! Process-wide CDC ownership for live-query subscriptions.
-//!
-//! The V8 runtime owns one isolate per app and worker thread, while a worker
-//! process can host many such threads. Logical replication has a different
-//! ownership boundary: one consumer and one slot per `(app, worker process)`.
-//! This module bridges those boundaries. Every native Subscription owns a
-//! [`CdcLease`]; the first lease that reaches its readiness handshake starts
-//! the consumer, all other isolates await the same startup result, and the
-//! last lease signals shutdown. The consumer task drops its worker slot before
-//! publishing its exit result.
-//!
-//! A process-wide mutex is deliberate. It protects only counters, state enums,
-//! and channel handles; no database or channel await occurs while it is held.
-//! Keeping ownership here avoids one consumer per isolate and gives close/GC a
-//! synchronous, cross-thread teardown seam.
+//! Process-wide subscription leases for embedded capture and the remote relay.
+//! V8 and native Rust subscriptions share readiness, cancellation, and teardown.
 
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex, MutexGuard};
 
+use super::relay::{RelayConfig, RelayHandle};
 use crate::backend::BackendHandle;
-use zeroship_data_orm::cdc::ChangeStream;
-use crate::change_stream_pg::WalConsumerHandle;
-use zeroship_data_orm::error::DbError;
+use crate::error::DbError;
 
 #[derive(Debug)]
 enum RunningConsumer {
-    Postgres(WalConsumerHandle),
+    Postgres(RelayHandle),
     /// SQLite installs its commit publisher with the backend session. It has
     /// no logical slot or per-app task to retain.
     Sqlite,
@@ -69,11 +55,10 @@ fn manager() -> MutexGuard<'static, LifecycleManager> {
 
 /// One live native Subscription's claim on the process-wide consumer.
 ///
-/// The lease is not Clone: exactly one V8 wrapper owns it. Explicit close and
-/// the wrapper's guaranteed finalizer both drop the same Option, so release is
-/// immediate and idempotent.
+/// Dropping the lease releases the subscription claim. Native callers and V8
+/// wrappers use the same ownership rule.
 #[derive(Debug)]
-pub(crate) struct CdcLease {
+pub struct CdcLease {
     app_id: String,
     generation: u64,
 }
@@ -84,8 +69,8 @@ impl Drop for CdcLease {
     }
 }
 
-/// Register a subscription before returning its V8 wrapper.
-pub(crate) fn acquire(app_id: &str) -> CdcLease {
+/// Register a subscription before waiting for capture readiness.
+pub fn acquire(app_id: &str) -> CdcLease {
     let mut lifecycle = manager();
     let generation = if let Some(app) = lifecycle.apps.get_mut(app_id) {
         app.subscribers = app.subscribers.saturating_add(1);
@@ -136,7 +121,7 @@ fn release(app_id: &str, generation: u64) {
                 };
             }
             ConsumerState::Starting { .. } => {
-                // Startup owns no handle until START_REPLICATION succeeds.
+                // Startup owns no handle until the relay reports ready.
                 // finish_start observes subscribers == 0 and stops the handle
                 // before exposing a healthy result.
             }
@@ -209,34 +194,12 @@ fn ready_action(app_id: &str) -> Result<ReadyAction, DbError> {
     }
 }
 
-/// Complete the subscription-open handshake.
-///
-/// This is called by native `Subscription.ready()` and before every `next()`.
-/// A Postgres subscription does not report ready until publication/slot
-/// provisioning and START_REPLICATION have both succeeded. Configuration and
-/// startup failures therefore reject the stream before its initial snapshot.
-///
-/// **`backend` and `worker_id` are handed in, not fetched.** Both used to be
-/// read out of `crate::context` inside [`start_on_current_isolate`], which was
-/// the last CDC-to-ADAPTER reference in the crate and the sole up-edge of the
-/// ADAPTER/CDC cycle on `tests/lib/tier_direction_census.sh`. The cold-init
-/// half of that read is `tx_scope::ensure_backend()` verbatim, so the caller
-/// already has the funnel; the worker identity is adapter configuration stamped
-/// by `DbPlugin::register`. This is the same inversion `bind_route` took: the tier that owns the state resolves it,
-/// and the tier that consumes it receives it.
-///
-/// `worker_id` arrives as an `Option` rather than pre-validated because the
-/// refusal is CDC's, not the adapter's: only the `Start` arm needs an identity,
-/// and only this module knows what to say when there is none. Resolving the
-/// BACKEND has no such lazy form - it is fallible and async - so a `ready()` or
-/// `next()` that finds the consumer already running now warms this isolate's
-/// backend where before it would not have. That is the one behaviour this
-/// change moves, and it is the direction the handshake already documents:
-/// a subscription whose isolate cannot reach the database is not ready.
-pub(crate) async fn ensure_ready(
+/// Wait for capture before taking the subscription's initial snapshot.
+/// PostgreSQL requires an explicitly composed relay client; SQLite captures locally.
+pub async fn ensure_ready(
     app_id: &str,
     backend: BackendHandle,
-    worker_id: Option<String>,
+    relay: Option<RelayConfig>,
 ) -> Result<(), DbError> {
     loop {
         match ready_action(app_id)? {
@@ -255,54 +218,46 @@ pub(crate) async fn ensure_ready(
                 })?;
             }
             ReadyAction::Start { generation } => {
-                let result = start_on_current_isolate(app_id, backend, worker_id).await;
-                return finish_start(app_id, generation, result);
+                // Startup must finish even if the caller drops its readiness
+                // future. Otherwise the app remains Starting indefinitely.
+                let app_id = app_id.to_owned();
+                let backend = backend.clone();
+                let relay = relay.clone();
+                compio::runtime::spawn(async move {
+                    use futures::FutureExt;
+                    let result =
+                        std::panic::AssertUnwindSafe(start_consumer(&app_id, backend, relay))
+                            .catch_unwind()
+                            .await
+                            .unwrap_or_else(|_| {
+                                Err(DbError::Internal {
+                                    message: "CDC startup panicked".into(),
+                                })
+                            });
+                    let _ = finish_start(&app_id, generation, result);
+                })
+                .detach();
             }
         }
     }
 }
 
-/// Spawn this process's consumer for `app_id` on the calling isolate.
-///
-/// The name still describes WHERE the consumer task runs - `spawn_consumer`
-/// detaches onto this thread's compio runtime - but no longer implies that the
-/// inputs are read off it. See [`ensure_ready`] for why they are parameters.
-async fn start_on_current_isolate(
+async fn start_consumer(
     app_id: &str,
     backend: BackendHandle,
-    worker_id: Option<String>,
+    relay: Option<RelayConfig>,
 ) -> Result<RunningConsumer, DbError> {
-    let worker_id = worker_id.ok_or_else(|| {
-        DbError::config_hinted(
-            "cdc_worker_id_missing",
-            "db CDC worker identity is not configured",
-            "construct DbPlugin with the worker process identity",
-        )
-    })?;
-
-    if let Some(pg) = backend.get_rc::<crate::backend::PostgresBackend>() {
-        // CDC composition belongs to the host adapter.
-        let change_stream = crate::change_stream_pg::PgChangeStream::new(pg.clone());
-        // Suppress the local fast path before provisioning. The initial
-        // snapshot is emitted only after readiness, so writes in this
-        // startup window are represented by that snapshot. The consumer
-        // installs its own overlapping guard before it reports ready;
-        // the overlap prevents a local-plus-WAL duplicate-delivery gap.
-        let startup_suppression = crate::broker::SuppressGuard::activate(app_id);
-        let handle = change_stream.spawn_consumer(app_id, &worker_id).await;
-        drop(startup_suppression);
-        let handle = handle?;
-        Ok(RunningConsumer::Postgres(handle))
-    } else if let Some(sqlite) = backend.get_rc::<crate::backend::SqliteBackend>() {
-        let change_stream = crate::backend::sqlite::cdc::SqliteChangeStream::new(sqlite);
-        // Match the Postgres startup window above. Use the startup-only
-        // suppression guard, whose Drop merely re-enables delivery; the
-        // general pause guard emits a Resync on Drop and would add a
-        // synthetic first message to every SQLite subscription.
-        let startup_suppression = crate::broker::SuppressGuard::activate(app_id);
-        let handle = change_stream.spawn_consumer(app_id, &worker_id).await;
-        drop(startup_suppression);
-        let _handle = handle?;
+    let _suppression = super::broker::SuppressGuard::activate(app_id);
+    if backend.get::<crate::backend::PostgresBackend>().is_some() {
+        let relay = relay.ok_or_else(|| {
+            DbError::config(
+                "cdc_relay_missing",
+                "PostgreSQL subscriptions require the CDC relay",
+            )
+        })?;
+        Ok(RunningConsumer::Postgres(relay.spawn(app_id).await?))
+    } else if backend.get::<crate::backend::SqliteBackend>().is_some() {
+        // The SQLite session installs commit capture when it opens.
         Ok(RunningConsumer::Sqlite)
     } else {
         Err(DbError::config(
@@ -458,14 +413,13 @@ fn consumer_exited(app_id: &str, generation: u64, result: Result<(), DbError>) {
         // Wake every pending native next() and turn the failure into a
         // stream-visible close. db.live maps an unexpected close to
         // LIVE_SUBSCRIPTION_CLOSED instead of hanging as a static snapshot.
-        crate::broker::drop_app(app_id);
+        super::broker::drop_app(app_id);
     }
 }
 
 /// Stop this process's consumer immediately when an app is deleted.
 ///
-/// Full Postgres object teardown is performed by the deletion path after this
-/// signal. Leases finalized later are ignored through the generation check.
+/// The relay owns PostgreSQL slot teardown after the connection closes. Leases finalized later are ignored through the generation check.
 pub async fn shutdown_app(app_id: &str) {
     let mut shutdown = None;
     let mut notify_now = Vec::new();
@@ -519,6 +473,29 @@ fn shutdown_app_sync_for_tests(app_id: &str) {
 mod tests {
     use super::*;
 
+    #[compio::test]
+    async fn cancelled_readiness_does_not_strand_startup_or_shutdown() {
+        let files = tempfile::tempdir().unwrap();
+        let sqlite = crate::backend::SqliteBackend::open(
+            files.path(),
+            std::sync::Arc::new(super::super::broker::BrokerChangeSink),
+            crate::encryption::LocalKeySource::env_var(),
+        )
+        .await
+        .unwrap();
+        let backend = BackendHandle::new(std::rc::Rc::new(sqlite));
+        let app = format!("cancel-start-{}", uuid::Uuid::new_v4());
+        let lease = acquire(&app);
+        let mut readiness = Box::pin(ensure_ready(&app, backend, None));
+        assert!(futures::poll!(&mut readiness).is_pending());
+        drop(readiness);
+        drop(lease);
+        compio::time::timeout(std::time::Duration::from_secs(5), shutdown_app(&app))
+            .await
+            .expect("cancelled readiness must not strand shutdown");
+        assert_eq!(subscriber_count_for_tests(&app), 0);
+    }
+
     #[test]
     fn lease_count_is_process_wide_and_last_drop_removes_idle_app() {
         let app = format!("lease-test-{}", uuid::Uuid::new_v4());
@@ -545,63 +522,5 @@ mod tests {
         assert_eq!(subscriber_count_for_tests(&app), 0);
         drop(lease);
         assert_eq!(subscriber_count_for_tests(&app), 0);
-    }
-
-    fn config_code(error: &DbError) -> &str {
-        match error {
-            DbError::Configuration { code, .. } => code,
-            other => panic!("expected a Configuration error, got {other:?}"),
-        }
-    }
-
-    /// The worker identity is refused on the START arm and nowhere else.
-    ///
-    /// Both halves pass `worker_id: None` and differ in exactly one variable -
-    /// whether a lease exists, which is what decides between `ReadyAction::Start`
-    /// and the no-such-app refusal. The claimed app reaches the start path and
-    /// gets `cdc_worker_id_missing`; the unclaimed one never does and gets
-    /// `subscription_closed`.
-    ///
-    /// That pair is what pins the shape of the fix rather than only its result.
-    /// [`ensure_ready`] takes an `Option` because only this arm needs an
-    /// identity: hoisting the `ok_or_else` into the prologue, or raising it in
-    /// `tx_scope::cdc_worker_id`, would make the SECOND assertion report
-    /// `cdc_worker_id_missing` and fail a `next()` on a consumer that another
-    /// isolate already started. Handing the backend in is bound by the same
-    /// test compiling at all - there is no ambient read left to fall back on.
-    #[test]
-    fn a_missing_worker_id_is_refused_by_the_start_arm_and_only_there() {
-        crate::reset_context_for_tests();
-        let dir = tempfile::tempdir().expect("create tempdir");
-        let url = format!("sqlite:{}", dir.path().join("cdc.sqlite").display());
-        crate::set_db_url_for_tests(&url);
-
-        let claimed = format!("cdc-start-{}", uuid::Uuid::new_v4());
-        let unclaimed = format!("cdc-unclaimed-{}", uuid::Uuid::new_v4());
-
-        compio::runtime::Runtime::new()
-            .expect("compio runtime")
-            .block_on(async {
-                // The adapter half, exactly as `v8_classes::subscription`
-                // performs it: open through the funnel, then hand the handle
-                // down. Nothing in this module can reach the thread context.
-                let backend = crate::tx_scope::ensure_backend()
-                    .await
-                    .expect("the adapter funnel must open a cold sqlite backend");
-
-                let lease = acquire(&claimed);
-                let refused = ensure_ready(&claimed, backend.clone(), None)
-                    .await
-                    .expect_err("a start with no worker identity must refuse");
-                assert_eq!(config_code(&refused), "cdc_worker_id_missing");
-                drop(lease);
-
-                let closed = ensure_ready(&unclaimed, backend, None)
-                    .await
-                    .expect_err("an app with no lease has nothing to make ready");
-                assert_eq!(config_code(&closed), "subscription_closed");
-            });
-
-        crate::reset_context_for_tests();
     }
 }

@@ -162,22 +162,9 @@ pub(crate) fn configured_dialect() -> crate::compile::SqlDialect {
     crate::context::with(|c| c.sql_dialect())
 }
 
-/// The worker-process identity CDC slot names are built from, if this process
-/// was composed with one.
-///
-/// Beside [`configured_dialect`] for the same reason: it is a question only the
-/// per-isolate context can answer, asked by a tier that may not read it.
-/// `cdc_lifecycle.rs` used to ask `crate::context` directly, which was the last
-/// CDC-to-ADAPTER edge on `tests/lib/tier_direction_census.sh`.
-///
-/// It answers `Option`, and the refusal is deliberately NOT here. A missing
-/// identity is only an error on the one path that mints a slot name, and the
-/// message and hint for it belong beside that path - see
-/// `cdc_lifecycle::start_on_current_isolate`. Raising it here would fail
-/// `Subscription.next()` on an already-running consumer, which needs no
-/// identity at all.
-pub(crate) fn cdc_worker_id() -> Option<String> {
-    crate::context::with(|c| c.cdc_worker_id())
+/// Relay configuration resolved from this isolate's database service.
+pub(crate) fn cdc_relay() -> Option<zeroship_data_orm::cdc::relay::RelayConfig> {
+    crate::context::with(|c| c.cdc_relay())
 }
 
 /// Read the transaction frame out of V8 and freeze a [`TxRoute`] from it.
@@ -260,8 +247,7 @@ pub(crate) fn capture_route(
 /// test-only CONSTRUCTOR, which has no production twin, so gating it genuinely
 /// removes a capability from the shipped build. `ensure_backend` is the
 /// opposite: eleven production call sites, counted 2026-09-03 - nine in
-/// `v8_classes/` (`dispatch.rs` 5, `masked_value.rs` 2, `replication.rs` 1,
-/// `transaction.rs` 1) and two in `lib.rs` - plus [`bind_route`] below. Every
+/// `v8_classes/` (`dispatch.rs` 5, `masked_value.rs` 2, `transaction.rs` 1) and two in `lib.rs` - plus [`bind_route`] below. Every
 /// one of those files is ADAPTER, so they stay in this crate when `data-engine`
 /// is cut out, and the symbol has to remain reachable from all of them.
 /// (`transaction/probe.rs` also calls it and is NOT in that count: its module

@@ -1,7 +1,6 @@
 //! Capture lifecycle and delivery contracts shared by database adapters.
 
 use super::ChangeEvent;
-use crate::error::DbError;
 
 /// Delivery decision stamped when a captured change commits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,33 +29,4 @@ pub trait ChangeSink: Send + Sync + 'static {
 
     /// Hand one decoded change to the consumer. Compio thread.
     fn publish(&self, event: &ChangeEvent);
-}
-
-pub trait ChangeStream: 'static {
-    /// Concrete handle representing a spawned-but-still-running
-    /// consumer. PG: a task handle / supervisor handle; SQLite: a
-    /// session marker the actor uses to track that hooks are armed.
-    /// Type erased per-impl (associated type) so we don't pay the
-    /// `Box<dyn Future>` price the dyn-safe shape would force.
-    type ConsumerHandle: 'static;
-
-    /// Idempotently tear down the CDC infrastructure for `app_id`.
-    /// Used during app deletion; PG drops the publication and every worker
-    /// slot, while SQLite disarms hooks.
-    #[allow(async_fn_in_trait)]
-    async fn deprovision(&self, app_id: &str) -> Result<(), DbError>;
-
-    /// Provision and spawn the long-running consumer for `(app_id,
-    /// worker_id)`. This is the sole provisioning path so a slot cannot be
-    /// created without an owned task. The returned handle controls explicit
-    /// shutdown and completion.
-    #[allow(async_fn_in_trait)]
-    async fn spawn_consumer(
-        &self,
-        app_id: &str,
-        worker_id: &str,
-    ) -> Result<Self::ConsumerHandle, DbError>;
-
-    // Pause and schema-pending guards belong to cdc::broker, which owns the
-    // delivery registries they change.
 }

@@ -1,4 +1,4 @@
-//! SQLite-side [`zeroship_data_orm::cdc::ChangeStream`] adapter — the
+//! SQLite commit capture — the
 //! `preupdate_hook` / `commit_hook` / `rollback_hook` integration.
 //!
 //! This file installs the three hooks on the writer-actor's
@@ -123,11 +123,9 @@ use rusqlite::hooks::{Action, PreUpdateCase};
 use rusqlite::types::ValueRef;
 use zeroship_data_orm::cdc::{ChangeEvent, ChangeOp};
 
-use crate::backend::sqlite::SqliteBackend;
 use crate::cdc::{ChangeSink, DeliveryDisposition};
 use crate::backend::sqlite::session::SqliteSession;
 use zeroship_data_orm::error::DbError;
-use zeroship_data_orm::cdc::ChangeStream;
 
 // ---------------------------------------------------------------------------
 // Dispatcher state — captured by the hook closures
@@ -592,7 +590,7 @@ fn is_filtered_relation(table: &str) -> bool {
 /// Captures the session handle so it can resolve column names lazily
 /// via `PRAGMA table_info` (which can't run from inside the preupdate
 /// hook — see module rustdoc). Returns the `compio::runtime::JoinHandle`
-/// the caller stores on [`SqliteBackend`] so dropping the backend
+/// the caller stores on [`super::SqliteBackend`] so dropping the backend
 /// cancels the task (the task body is a `while let Ok(packet) =
 /// rx.recv_async().await` loop; cancellation simply stops polling).
 ///
@@ -808,69 +806,6 @@ fn quote_ident(name: &str) -> String {
 // ---------------------------------------------------------------------------
 // `SqliteChangeStream` adapter.
 // ---------------------------------------------------------------------------
-
-/// Handle returned by [`SqliteChangeStream::spawn_consumer`].
-///
-/// A unit struct: no consumer observes the handle today. Carrying the
-/// dispatcher's commit-id watermark for `Resync` correlation is the
-/// natural extension if one ever does.
-#[derive(Debug)]
-pub struct SqliteConsumerHandle;
-
-/// SQLite arm of the [`ChangeStream`] capability.
-///
-/// Constructed via `zeroship_data_orm::backend::BackendHandle::as_change_stream_sqlite`.
-/// Owns an `Rc<SqliteBackend>` (Rc-cloned from the
-/// `zeroship_data_orm::backend::BackendHandle::Sqlite` arm) — same ownership
-/// shape as the PG-arm adapter for the same `'static` reason
-/// (`async fn`-in-trait futures don't compose with borrowed-reference
-/// self).
-///
-/// The hook triplet is installed automatically at
-/// [`SqliteBackend::new`] time (see `backend/sqlite/mod.rs`) rather
-/// than via this adapter — the writer-actor's lifetime IS the
-/// dispatcher's lifetime, so a deferred `provision` would just be a
-/// noop. That split would be worth revisiting if
-/// `provision`/`deprovision` ever grow per-app state.
-#[allow(
-    dead_code,
-    reason = "concrete adapter stays available for the sqlite change-stream capability surface"
-)]
-#[derive(Debug)]
-pub struct SqliteChangeStream {
-    backend: Rc<SqliteBackend>,
-}
-
-impl SqliteChangeStream {
-    /// Construct an adapter holding an Rc-clone of `backend`.
-    /// Crate-private — the
-    /// `zeroship_data_orm::backend::BackendHandle::as_change_stream_sqlite` accessor
-    /// is the public entry point.
-    pub fn new(backend: Rc<SqliteBackend>) -> Self {
-        Self { backend }
-    }
-}
-
-impl ChangeStream for SqliteChangeStream {
-    type ConsumerHandle = SqliteConsumerHandle;
-
-    /// No-op. Disarming hooks for a session whose app is being torn
-    /// down is not implemented.
-    async fn deprovision(&self, _app_id: &str) -> Result<(), DbError> {
-        Ok(())
-    }
-
-    /// Returns a unit handle. The publisher task is already running
-    /// (spawned at `SqliteBackend::new`); there is no per-app
-    /// consumer to spawn on the SQLite arm.
-    async fn spawn_consumer(
-        &self,
-        _app_id: &str,
-        _worker_id: &str,
-    ) -> Result<Self::ConsumerHandle, DbError> {
-        Ok(SqliteConsumerHandle)
-    }
-}
 
 #[cfg(test)]
 mod tests {

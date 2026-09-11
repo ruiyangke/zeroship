@@ -1,80 +1,14 @@
-//! `DbService` - process-wide ownership of the `env.db` primitive.
-//!
-//! One [`DbService`] is constructed at worker / CLI composition, BEFORE any V8
-//! isolate exists, and every isolate on every worker thread is served from it.
-//! It owns the five things the runtime-db-binding design (SC-5) says cannot
-//! live per runtime or per thread:
-//!
-//! | Owned | Why it cannot live per runtime |
-//! | --- | --- |
-//! | Validated configuration | Backend selection happens ONCE. Nothing downstream re-parses the URL. |
-//! | The plugin prototype | `build_runtime` clones an `Arc` instead of minting a plugin set. |
-//! | The stable thread-resource key | Current and deploy-pinned isolates on one OS thread resolve the SAME resources. |
-//! | The process-wide live-metadata cache | Its values are immutable plain data; sharing is the point. |
-//! | The neutral operator-lifecycle handle | Deprovision uses the service's configuration and one shared operator pool instead of re-parsing the URL and building a pool per deletion. |
-//!
-//! # The operator pool exists, and SC-5's arm said it would not
-//!
-//! SC-5 words the deprovision clause as "performs NO second URL parse and opens
-//! NO second pool". The first half holds exactly. **The second does not: this
-//! module opens a dedicated [`OPERATOR_POOL_SIZE`]-connection pool** and shares
-//! it across deletions. The clause was written against the alternative of
-//! re-deriving everything per deleted app; sharing one pool is the better of the
-//! two, but it is not zero, and the arm that measures it asserts `1`, not `0`.
-//! The claim is amended here rather than left to be read off an assertion that
-//! contradicts it.
-//!
-//! What that costs an operator, and what bounds it, is in
-//! `docs/runbooks/docker-compose.md` under "Postgres connections a worker
-//! holds". The short version: the pool is opened lazily on the first deletion a
-//! process reconciles and released by [`close_operator_pools`] once the poller's
-//! pending set drains, so a worker holds these connections while it is
-//! reconciling deletions and none between. It has no `ThreadDbContext` pool to
-//! borrow instead - the version poller runs on a thread that hosts no isolate.
-//!
-//! # `Send + Sync`, and never a driver connection
-//!
-//! [`DbService`] crosses worker-thread boundaries, so it is `Send + Sync` -
-//! which is *itself* the proof that it holds no driver connection.
-//! `compio_postgres::Pool` is `!Send` by construction (`Cell`/`RefCell`, no
-//! atomics), so a `Send` struct cannot transitively own one, by value or behind
-//! an `Rc`. Opening still happens on the owning thread and yields a
-//! thread-bound `Rc`; nothing became `Send` to satisfy service storage.
-//!
-//! # What a `DbResourceKey` is for
-//!
-//! It is the identity of one *database's* resources, minted once from the
-//! validated configuration. Two places index by it today - the process-wide
-//! metadata cache and the per-thread operator pool - and both need an identity
-//! that is stable across isolates and equal for two isolates of the same app at
-//! different deploys. It is a digest, not the URL, because it reaches `Debug`
-//! output and logs and a DSN carries a password.
+//! Process-wide composition of the V8 database adapter.
+//! Validated configuration, the plugin prototype and metadata identity are shared
+//! across isolates. App teardown stops local subscriptions; the relay owns slots.
 
-use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
-use std::rc::Rc;
+use std::cell::Cell;
 use std::sync::Arc;
 
-use compio_postgres::Pool;
 use sha2::{Digest, Sha256};
 
-use crate::{BackendUrl, DbPlugin, backend_for_url};
+use crate::{backend_for_url, BackendUrl, DbPlugin};
 use zeroship_data_orm::error::DbError;
-
-/// Connections the operator-lifecycle pool keeps for maintenance work.
-///
-/// Two, matching what the per-deletion pool used before this pool became
-/// shared. It is a maintenance path, not a data path: its work is catalog
-/// reads and `pg_drop_replication_slot`.
-///
-/// **All of them are real backends for as long as the pool is installed.**
-/// `Pool::connect(url, 2)` lowers the driver's default `min_idle` of 2 to
-/// `min(2, max_size)` = 2 and opens that many upfront, and idle eviction only
-/// closes connections while the idle count EXCEEDS `min_idle` - so neither
-/// `idle_timeout` nor an absent housekeeper ever takes this pool below two.
-/// Read `OPERATOR_POOL_SIZE` as "backends held", not "ceiling occasionally
-/// reached". [`close_operator_pools`] is what takes it back to zero.
-const OPERATOR_POOL_SIZE: usize = 2;
 
 thread_local! {
     /// Database-URL parses performed ON THIS THREAD.
@@ -96,13 +30,6 @@ thread_local! {
     /// which is the right instrument for them.
     static URL_PARSES: Cell<u64> = const { Cell::new(0) };
 
-    /// Operator-lifecycle pools opened ON THIS THREAD.
-    ///
-    /// Same rationale as [`URL_PARSES`], and the pools are thread-bound
-    /// anyway - an `Rc<Pool>` never leaves the thread that opened it, so a
-    /// per-thread count is the complete count for that pool map.
-    static OPERATOR_POOLS_OPENED: Cell<u64> = const { Cell::new(0) };
-
     /// Data-plane backends opened ON THIS THREAD - a Postgres pool or a SQLite
     /// backend handle installed by `init_pool_async`.
     ///
@@ -112,39 +39,8 @@ thread_local! {
     /// "the fixture DSN is unreachable, so a connect would have failed" is an
     /// argument about the fixture rather than a measurement of the code.
     ///
-    /// **What it does NOT count.** It counts the DATA-PLANE backend install,
-    /// not every connection the crate opens. The operator-lifecycle pool
-    /// ([`OPERATOR_POOLS`]) has its own counter, and `wal_consumer`'s
-    /// replication connection has none. Both are outside what this counter is
-    /// for. Read a zero as "no backend was installed", never as "no socket was
-    /// opened".
-    ///
-    /// It said `fixture_session` "calls `compio_postgres::connect`
-    /// straight through for each explicit transaction" and named moving it onto
-    /// a pooled checkout as a later step. That move has landed:
-    /// `PostgresBackend::fixture_session` is `self.pool.acquire()`,
-    /// so an explicit transaction borrows from the data-plane pool and opens no
-    /// socket of its own.
     static BACKENDS_OPENED: Cell<u64> = const { Cell::new(0) };
 
-    /// This thread's operator pools, one per [`DbResourceKey`].
-    ///
-    /// `Rc<Pool>` - thread-bound by construction, exactly like the data plane's
-    /// pool. The map is what makes ONE pool serve a whole run of deletions: the
-    /// operator path used to build a fresh two-connection pool per
-    /// deprovisioned app, paying two connects, two authentications and two TLS
-    /// handshakes each time.
-    ///
-    /// **Installed lazily, and NOT for the life of the process.** An entry
-    /// appears on the first deletion this thread reconciles and is removed by
-    /// [`close_operator_pools`], which the worker's version poller calls once
-    /// its pending set drains. Without that call the entry would be permanent -
-    /// `OPERATOR_POOLS` is a `thread_local!` with no eviction, so a worker
-    /// container would hold [`OPERATOR_POOL_SIZE`] extra Postgres backends from
-    /// its first app deletion until the process exited, against whatever
-    /// `max_connections` the cluster is sized for.
-    static OPERATOR_POOLS: RefCell<HashMap<DbResourceKey, Rc<Pool>>> =
-        RefCell::new(HashMap::new());
 }
 
 /// Database-URL parses on this thread. See [`URL_PARSES`].
@@ -152,14 +48,6 @@ thread_local! {
 #[must_use]
 pub fn url_parse_count() -> u64 {
     URL_PARSES.with(Cell::get)
-}
-
-/// Operator-lifecycle pools opened on this thread. See
-/// [`OPERATOR_POOLS_OPENED`].
-#[doc(hidden)]
-#[must_use]
-pub fn operator_pool_open_count() -> u64 {
-    OPERATOR_POOLS_OPENED.with(Cell::get)
 }
 
 /// Data-plane backends opened on this thread. See [`BACKENDS_OPENED`].
@@ -233,9 +121,8 @@ impl std::fmt::Debug for DbResourceKey {
 pub struct DbServiceConfig {
     /// The database URL. Parsed exactly once, by [`DbService::new`].
     pub url: String,
-    /// Stable across every isolate in one worker process and distinct across
-    /// worker containers. Used to derive the process's per-app CDC slot.
-    pub worker_id: String,
+    /// Authenticated relay transport for PostgreSQL subscriptions.
+    pub cdc_relay: Option<zeroship_data_orm::cdc::relay::RelayConfig>,
     /// The process-wide usage meter. `None` in meter-less test harnesses.
     pub meter: Option<Arc<zeroship_metering::Meter>>,
 }
@@ -249,7 +136,7 @@ impl std::fmt::Debug for DbServiceConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DbServiceConfig")
             .field("url", &"<redacted>")
-            .field("worker_id", &self.worker_id)
+            .field("cdc_relay", &self.cdc_relay)
             .field("meter", &self.meter.as_ref().map(|_| "<meter>"))
             .finish()
     }
@@ -296,7 +183,7 @@ impl DbService {
         let resource_key = DbResourceKey::for_url(&config.url);
         let plugin = Arc::new(DbPlugin::new(
             config.url.clone(),
-            config.worker_id,
+            config.cdc_relay,
             config.meter,
             resource_key,
             backend.clone(),
@@ -343,127 +230,47 @@ impl DbService {
         &self.backend
     }
 
-    /// The neutral operator-lifecycle handle.
-    ///
-    /// "Neutral" in the design's sense: it holds no connection of its own. It
-    /// borrows the service's validated configuration and resolves the calling
-    /// thread's shared operator pool when it actually needs one.
+    /// Local subscription lifecycle, independent of database connections.
     #[must_use]
-    pub fn lifecycle(&self) -> DbLifecycle<'_> {
-        DbLifecycle { service: self }
+    pub fn lifecycle(&self) -> DbLifecycle {
+        DbLifecycle
     }
 }
 
-/// Operator lifecycle operations against one [`DbService`]'s database.
-///
-/// Obtained from [`DbService::lifecycle`]. Deliberately a borrow: the handle is
-/// a view onto validated configuration, not a resource.
+/// Stops local subscription delivery for a deleted app.
 #[derive(Debug, Clone, Copy)]
-pub struct DbLifecycle<'a> {
-    service: &'a DbService,
-}
+pub struct DbLifecycle;
 
-impl DbLifecycle<'_> {
-    /// Tear down all CDC state for a deleted app without requiring a live V8
-    /// isolate.
-    ///
-    /// The worker's process-wide version poller calls this after an app
-    /// disappears from the control-plane registry. It closes local
-    /// subscriptions, stops this process's consumer, then drops every worker
-    /// slot. Publication membership remains owned by the migration service. The
-    /// Postgres teardown is idempotent so every worker container may observe
-    /// the same deletion safely.
-    ///
-    /// The backend selection is the service's, decided once at composition, and
-    /// the pool is this thread's shared operator pool. Neither is derived per
-    /// deletion. That pool is not free and is not zero; see the module header.
-    ///
+impl DbLifecycle {
+    /// Close this process's subscriptions. The relay releases its source when
+    /// the last connected worker leaves; publications remain migration-owned.
     pub async fn deprovision_app(&self, app_id: &str) -> Result<(), DbError> {
-        crate::cdc_lifecycle::shutdown_app(app_id).await;
+        zeroship_data_orm::cdc::lifecycle::shutdown_app(app_id).await;
         crate::broker::drop_app(app_id);
-        match self.service.backend() {
-            BackendUrl::Sqlite { .. } => Ok(()),
-            BackendUrl::Postgres => {
-                let pool = self.operator_pool().await?;
-                crate::replication::drop_worker_slots(&pool, app_id).await
-            }
-        }
+        Ok(())
     }
-
-    /// This thread's operator pool for the service's database, opening it on
-    /// first use.
-    ///
-    /// The borrow is released before every await point, and a pool that lost
-    /// the race to publish is discarded in favour of the published one - so
-    /// concurrent callers on one thread converge on a single pool rather than
-    /// leaving whichever finished last installed.
-    pub(crate) async fn operator_pool(&self) -> Result<Rc<Pool>, DbError> {
-        let key = self.service.resource_key;
-        if let Some(pool) = OPERATOR_POOLS.with(|pools| pools.borrow().get(&key).cloned()) {
-            return Ok(pool);
-        }
-
-        let opened = Rc::new(
-            Pool::connect(&self.service.url, OPERATOR_POOL_SIZE)
-                .await
-                .map_err(|error| DbError::Transient {
-                    message: format!("db operator connection failed: {error}"),
-                })?,
-        );
-        OPERATOR_POOLS_OPENED.with(|count| count.set(count.get() + 1));
-
-        // The loser is carried OUT of the `with` before being dropped. Dropping
-        // a `Pool` only asks its detached driver tasks to shut down; the
-        // `Terminate` write and socket drop still have to be driven, so the drop
-        // has to happen where this async fn's runtime can still run them (see
-        // `tests/integration.rs`'s `release_pg`). Inside the closure it would
-        // also run while the `RefCell` is mutably borrowed. Unreachable today -
-        // only the version poller deprovisions, sequentially - but the doc
-        // above advertises the race as handled, so the handling is written to
-        // be correct rather than to be unreached.
-        let (installed, lost_the_race) =
-            OPERATOR_POOLS.with(|pools| match pools.borrow_mut().entry(key) {
-                std::collections::hash_map::Entry::Occupied(entry) => {
-                    (entry.get().clone(), Some(opened))
-                }
-                std::collections::hash_map::Entry::Vacant(entry) => {
-                    (Rc::clone(entry.insert(opened)), None)
-                }
-            });
-        drop(lost_the_race);
-
-        Ok(installed)
-    }
-}
-
-/// Release this thread's operator pools.
-///
-/// They own live Postgres backends - [`OPERATOR_POOL_SIZE`] of them per
-/// installed pool, none of which idle eviction can reclaim - and nothing else
-/// removes an entry from [`OPERATOR_POOLS`]. Without this call a worker
-/// container holds them from its first app deletion until the process exits.
-///
-/// **Always compiled, and called in production.** The worker's version poller
-/// calls it once its pending-deprovision set drains, so the connections live
-/// for a reconcile batch rather than for the process; the test suites call the
-/// same function for the same reason, through `reset_context_for_tests`. It was
-/// a `#[cfg(test)]` helper first, which is what made "the pool is never closed"
-/// true of every shipped binary while looking handled in the tests.
-///
-/// Call it where a runtime can still drive the connections' shutdown: dropping
-/// a `Pool` asks its detached driver tasks to close, it does not wait for them.
-pub fn close_operator_pools() {
-    OPERATOR_POOLS.with(|pools| pools.borrow_mut().clear());
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[compio::test]
+    async fn postgres_app_teardown_needs_no_database_connection() {
+        let service = DbService::new(config("postgres://unused:unused@127.0.0.1:1/unused"))
+            .expect("validate configuration without connecting");
+        let app = "local-teardown-test";
+        let subscription = crate::broker::subscribe(app, "items");
+        let lease = zeroship_data_orm::cdc::lifecycle::acquire(app);
+        service.lifecycle().deprovision_app(app).await.unwrap();
+        assert!(subscription.is_closed());
+        drop(lease);
+    }
+
     fn config(url: &str) -> DbServiceConfig {
         DbServiceConfig {
             url: url.to_string(),
-            worker_id: "service-test-worker".to_string(),
+            cdc_relay: None,
             meter: None,
         }
     }
@@ -574,7 +381,7 @@ mod tests {
             "DbServiceConfig Debug leaked the DSN password: {rendered}",
         );
         assert!(
-            rendered.contains("service-test-worker"),
+            rendered.contains("cdc_relay"),
             "the redaction must not blind the fields that are safe to print: {rendered}",
         );
     }
@@ -588,7 +395,7 @@ mod tests {
     async fn deprovisioning_on_sqlite_re_parses_nothing() {
         let service = DbService::new(config("sqlite:service-test.sqlite")).expect("service");
         let parses_before = url_parse_count();
-        let pools_before = operator_pool_open_count();
+        let backends_before = backend_open_count();
 
         service
             .lifecycle()
@@ -602,9 +409,9 @@ mod tests {
             "deprovision must use the service's validated backend selection",
         );
         assert_eq!(
-            operator_pool_open_count(),
-            pools_before,
-            "the SQLite arm must not open an operator pool",
+            backend_open_count(),
+            backends_before,
+            "local teardown must not open a database backend",
         );
     }
 }

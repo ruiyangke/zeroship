@@ -48,5 +48,6 @@
   { "file": "20260907000200_drop_oauth_refresh_tokens.ts", "name": "drop_oauth_refresh_tokens", "opCount": 1 },
   { "file": "20260907000300_worker_instances.ts", "name": "worker_instances", "opCount": 10 },
   { "file": "20260908000000_auth_organization_ownership_fence.ts", "name": "auth_organization_ownership_fence", "opCount": 2 },
-  { "file": "20260908000100_delete_apps.ts", "name": "delete_apps", "opCount": 4 }
+  { "file": "20260908000100_delete_apps.ts", "name": "delete_apps", "opCount": 4 },
+  { "file": "20260910000100_cdc_relay_authority.ts", "name": "cdc_relay_authority", "opCount": 5 }
 ]

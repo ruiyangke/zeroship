@@ -176,7 +176,7 @@ pub(crate) fn test_db_service(
 ) -> Arc<zeroship_data_v8::service::DbService> {
     zeroship_data_v8::service::DbService::new(zeroship_data_v8::service::DbServiceConfig {
         url: url.to_string(),
-        worker_id: worker_id.to_string(),
+        cdc_relay: None,
         meter: None,
     })
     .expect("test db service")

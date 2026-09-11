@@ -42,18 +42,11 @@ use crate::broker::{self, Subscription as BrokerSubscription, SubscriptionMessag
 
 /// Resolve the adapter state a CDC start needs, then run the handshake.
 ///
-/// `cdc_lifecycle` owns the process-wide state machine and nothing else; the
-/// backend it starts a consumer on and the worker identity that names the slot
-/// are both this tier's, so they are resolved here and handed down. Before
-/// 2026-09-03 the lifecycle read them out of `crate::context` itself, which was
-/// the last CDC-to-ADAPTER reference in the crate.
-///
-/// [`crate::tx_scope::ensure_backend`] is the same funnel every other V8 entry
-/// point opens its backend through, so a cold isolate is warmed here exactly as
-/// `dispatch.rs` and `masked_value.rs` warm one.
+/// The ORM owns process-wide readiness and teardown. The adapter supplies its
+/// backend and the worker's authenticated relay configuration.
 async fn ensure_cdc_ready(app_id: &str) -> Result<(), zeroship_data_orm::error::DbError> {
     let backend = crate::tx_scope::ensure_backend().await?;
-    crate::cdc_lifecycle::ensure_ready(app_id, backend, crate::tx_scope::cdc_worker_id()).await
+    zeroship_data_orm::cdc::lifecycle::ensure_ready(app_id, backend, crate::tx_scope::cdc_relay()).await
 }
 
 // ---------------------------------------------------------------------------
@@ -76,7 +69,7 @@ pub struct Subscription {
     inner: RefCell<Option<BrokerSubscription>>,
     /// Process-wide CDC claim paired one-to-one with `inner`. Dropping the
     /// last claim signals consumer shutdown and worker-slot cleanup.
-    cdc_lease: RefCell<Option<crate::cdc_lifecycle::CdcLease>>,
+    cdc_lease: RefCell<Option<zeroship_data_orm::cdc::lifecycle::CdcLease>>,
     app_id: String,
 }
 
@@ -358,7 +351,7 @@ pub fn mint_subscription<'s>(
         broker_sub.set_read_set(entries);
     }
 
-    let cdc_lease = crate::cdc_lifecycle::acquire(app_id);
+    let cdc_lease = zeroship_data_orm::cdc::lifecycle::acquire(app_id);
 
     let state = Subscription {
         inner: RefCell::new(Some(broker_sub)),

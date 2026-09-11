@@ -209,7 +209,7 @@ fn cmd_serve(args: &[String]) {
             let service = match zeroship_data_v8::service::DbService::new(
                 zeroship_data_v8::service::DbServiceConfig {
                     url,
-                    worker_id: format!("serve-{}", uuid::Uuid::new_v4()),
+                    cdc_relay: None,
                     meter: Some(Arc::clone(&dev_meter)),
                 },
             ) {

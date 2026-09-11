@@ -18,7 +18,7 @@
 //!
 //! ## Platform-internal surface (behind `__platform`)
 //!
-//! `setMaskPolicy` and the `replication` namespace live off `env.db` on the
+//! `setMaskPolicy` lives off `env.db` on the
 //! [`super::db_platform::DbPlatform`] capability handle. That handle is
 //! set on this `Db` object under the `ZS_PLATFORM` private symbol in
 //! [`mint_db`] and reached only via `@zeroship/bootstrap`'s
@@ -73,12 +73,7 @@ pub struct Db {
     /// calls return the same Global so identity holds:
     /// `env.db.collection("users") === env.db.collection("users")`.
     pub(crate) collection_cache: RefCell<HashMap<String, v8::Global<v8::Object>>>,
-    // The `migrations` / `replication` namespace caches live on
-    // `DbPlatform` (they're reached via `__platform.migrations`
-    // / `__platform.replication`, not `env.db.*`). The `DbPlatform`
-    // instance itself is stashed on this wrapper under the `ZS_PLATFORM`
-    // private symbol (set in `mint_db`), not as a struct field — its
-    // own Weak finalizer reclaims it.
+    // The private DbPlatform policy handle is finalized independently.
 }
 
 impl std::fmt::Debug for Db {
@@ -204,15 +199,6 @@ impl Db {
         Ok(transaction_dispatch(scope, user_fn, isolation, self.binding.clone()).into())
     }
 
-    // `db.setMaskPolicy` and the
-    // `db.replication` getter moved to `DbPlatform` (reached via the
-    // `__platform` capability handle, not `env.db`). Their dispatch
-    // pipelines (`dispatch_set_mask_policy_field`, `mint_replication`) are
-    // unchanged — only the JS carrier relocated.
-    //
-    // `db.unmaskField` / `db.bulkUnmaskFields` moved to
-    // `Collection.unmaskField` / `.bulkUnmask` + `MaskedValue.unmask`.
-
     /// `env.db.__platform` (string access) — **actively refused**. The
     /// real `DbPlatform` capability handle lives under the
     /// `ZS_PLATFORM` private symbol, not under any string-named
@@ -324,8 +310,7 @@ fn normalize_isolation_level(raw: &str) -> Result<IsolationLevel, OpError> {
 /// Before returning, this also mints a [`crate::v8_classes::db_platform::DbPlatform`]
 /// capability handle scoped to the same `app_id` and stashes it on the
 /// `Db` object under the `ZS_PLATFORM` private symbol. The handle
-/// holds the platform-internal callables (`setMaskPolicy`, `migrations`,
-/// `replication`); it is unreachable from creator JS (a `v8::Private`
+/// holds the platform-internal `setMaskPolicy` callable; it is unreachable from creator JS (a `v8::Private`
 /// slot is invisible to every JS reflection path and cannot be keyed
 /// from JS) and is read only by Rust and the bootstrap runtime-entry
 /// resolver (`globalThis.__zsDbPlatform`).

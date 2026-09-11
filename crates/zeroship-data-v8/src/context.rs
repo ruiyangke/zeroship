@@ -65,11 +65,8 @@ pub struct ThreadDbContext {
     /// pool creation.
     db_url: Option<String>,
 
-    /// Stable identity shared by every isolate in this worker process.
-    /// Logical-replication slots are per `(app, worker process)`, so all
-    /// isolates must stamp the same value while different containers stamp
-    /// different values.
-    cdc_worker_id: Option<String>,
+    /// Authenticated relay configuration inherited from process composition.
+    cdc_relay: Option<zeroship_data_orm::cdc::relay::RelayConfig>,
 
     /// The identity of the database this thread's resources belong to.
     ///
@@ -143,7 +140,7 @@ impl ThreadDbContext {
     pub(crate) fn new() -> Self {
         Self {
             db_url: None,
-            cdc_worker_id: None,
+            cdc_relay: None,
             resource_key: DbResourceKey::UNBOUND,
             backend_selection: None,
             backend: None,
@@ -339,13 +336,12 @@ impl ThreadDbContext {
     }
 
     /// Read the worker-process identity used in CDC slot names.
-    pub(crate) fn cdc_worker_id(&self) -> Option<String> {
-        self.cdc_worker_id.clone()
+    pub(crate) fn cdc_relay(&self) -> Option<zeroship_data_orm::cdc::relay::RelayConfig> {
+        self.cdc_relay.clone()
     }
 
-    /// Stamp the worker-process identity during plug-in registration.
-    pub(crate) fn set_cdc_worker_id(&mut self, worker_id: &str) {
-        self.cdc_worker_id = Some(worker_id.to_string());
+    pub(crate) fn set_cdc_relay(&mut self, relay: Option<zeroship_data_orm::cdc::relay::RelayConfig>) {
+        self.cdc_relay = relay;
     }
 }
 
