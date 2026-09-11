@@ -276,11 +276,9 @@ override is a flag so a gate cannot be redirected by a variable left in a shell
 nobody remembers exporting it in.
 
 `tests/run_billing_suite.sh` still takes a private database per run.
-`crates/zeroship-control/tests/workflow_engine_test.rs` clones a whole database per test
-from whatever DSN it is handed, and `CREATE DATABASE ... WITH TEMPLATE`
-requires exclusive access to the source — so that suite cannot share one until
-it clones from a quiescent template instead. See
-`xtask/tests/data_architecture.rs`, which records that ruling.
+`cargo xtask test workflow` owns PostgreSQL through Testcontainers. Its control
+plane tests clone private databases from a migrated, quiescent template. The
+fixture helper removes the cached server when the test process exits.
 
 ## Benchmarks
 

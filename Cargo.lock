@@ -7950,6 +7950,7 @@ dependencies = [
  "mimalloc",
  "ntex",
  "rand 0.8.5",
+ "rcgen",
  "rusqlite",
  "rustls",
  "serde",

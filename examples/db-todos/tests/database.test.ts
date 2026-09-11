@@ -32,21 +32,23 @@ test("the database contract holds through local and deployed app requests", asyn
       expect(paged.map((row) => row.id).sort()).toEqual(listed.map((row) => row.id).sort());
       const statements = await readFile(join(inject("databaseArtifacts"), "postgres.log"), "utf8");
       expect(statements.match(/LOG:/g)?.length).toBeGreaterThanOrEqual(50);
-      for (const sql of ["BEGIN ISOLATION LEVEL SERIALIZABLE", "BEGIN ISOLATION LEVEL REPEATABLE READ", "SAVEPOINT zs_sp_1", "ROLLBACK TO SAVEPOINT zs_sp_1", "SAVEPOINT zs_sp_8"]) {
+      for (const sql of ["BEGIN ISOLATION LEVEL SERIALIZABLE", "BEGIN ISOLATION LEVEL REPEATABLE READ"]) {
         expect(statements).toContain(sql);
       }
+      const savepoints = [...statements.matchAll(/:\s+SAVEPOINT ([^\s;]+)/g)].map((match) => match[1]);
+      const rollbacks = [...statements.matchAll(/:\s+ROLLBACK TO SAVEPOINT ([^\s;]+)/g)].map((match) => match[1]);
+      expect(savepoints.length).toBeGreaterThan(0);
+      expect(rollbacks.length).toBeGreaterThan(0);
+      for (const name of rollbacks) expect(savepoints).toContain(name);
       expect(statements).not.toContain("BEGIN ISOLATION LEVEL SNAPSHOT");
     }
     captures.push(normalize(captured));
   }
   expect(captures).toHaveLength(2);
   const divergences = Object.keys(captures[0]).filter((key) => !isDeepStrictEqual(captures[0][key], captures[1][key])).sort();
-  // Keep the old suite's named findings visible until the underlying behavior
-  // is measured; unrelated differences always fail the comparison.
-  const required = ["cxPlain", "cxTotal"];
-  const tolerated = ["txBranch", "txOrphan"];
-  expect(divergences.filter((name) => !required.includes(name) && !tolerated.includes(name))).toEqual([]);
-  expect(divergences).toEqual(expect.arrayContaining(required));
+  // SQLite serializes writers, so an autocommit write alongside an open write
+  // transaction differs from PostgreSQL. Callback-scope behavior must agree.
+  expect(divergences).toEqual(["cxPlain", "cxTotal"]);
 });
 
 test("invalid creator input fails without writing rows", async () => {

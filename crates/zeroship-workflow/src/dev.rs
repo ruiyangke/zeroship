@@ -955,6 +955,32 @@ impl WorkflowBackend for DevWorkflowBackend {
     async fn restart(&self, run_id: String, body: Value) -> Result<Value, WorkflowRpcError> {
         self.engine.restart(&self.app_id, &run_id, body).await
     }
+
+    async fn read_step_output(
+        &self,
+        run_id: String,
+        name: String,
+        occurrence: u32,
+    ) -> Result<Vec<u8>, WorkflowRpcError> {
+        let conn = self.engine.lock_conn()?;
+        let output: Option<Option<String>> = conn
+            .query_row(
+                "SELECT s.output FROM workflow_steps s JOIN workflow_runs r ON r.id = s.run_id \
+                 WHERE r.app_id = ?1 AND r.id = ?2 AND s.name = ?3 \
+                 AND s.name_occurrence = ?4 AND s.state = 'completed'",
+                params![self.app_id, run_id, name, occurrence],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(db_error)?;
+        match output {
+            Some(output) => Ok(output.unwrap_or_else(|| "null".into()).into_bytes()),
+            None => Err(WorkflowRpcError::Http {
+                status: 404,
+                body: "workflow step output not found".into(),
+            }),
+        }
+    }
 }
 
 fn bootstrap_schema(conn: &Connection) -> rusqlite::Result<()> {

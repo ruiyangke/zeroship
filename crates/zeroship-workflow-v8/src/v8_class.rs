@@ -458,6 +458,45 @@ impl WorkflowRun {
         self.run_id.clone()
     }
 
+    #[v8_method]
+    #[v8_name = "readStepOutput"]
+    fn read_step_output<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        name: String,
+        occurrence: f64,
+    ) -> Result<v8::Local<'s, v8::Value>, OpError> {
+        if name.is_empty()
+            || !occurrence.is_finite()
+            || occurrence < 0.0
+            || occurrence.fract() != 0.0
+            || occurrence > f64::from(u32::MAX)
+        {
+            return Err(OpError::type_error(
+                "readStepOutput requires a step name and a nonnegative integer occurrence",
+            ));
+        }
+        let state = runtime_state(scope);
+        let (resolver, request_id, promise) = setup_promise(scope, &state);
+        let backend = self.backend.clone();
+        let run_id = self.run_id.clone();
+        state.borrow_mut().spawned_ops.push(Box::pin(async move {
+            let value = match backend
+                .read_step_output(run_id, name, occurrence as u32)
+                .await
+            {
+                Ok(bytes) => ResolveValue::Bytes(bytes),
+                Err(error) => ResolveValue::RejectError(crate::error::to_op_error(error)),
+            };
+            OpResult::JsValue {
+                resolver,
+                value,
+                request_id,
+            }
+        }));
+        Ok(promise.into())
+    }
+
     /// `run.status()` → Promise<{ state, output, error }>.
     #[v8_method]
     fn status<'s>(

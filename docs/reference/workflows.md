@@ -26,6 +26,18 @@ authorizes the request; possession of a Rust handle does not bypass it.
 its app-scoped credential with `app_scoped_token`; the control key stays outside
 V8. Workflow execution remains replay of the deployed JavaScript class.
 
+## Testing
+
+Run `cargo xtask test workflow` after building the workspace SDKs. Rust tests
+own backing services through Testcontainers and include API isolation, journal
+fencing, scheduling, real worker replay, and gateway dispatch authorization.
+Docker is required; unavailable services fail the tests.
+
+The workflow examples own their Vitest and Playwright tests, fixtures, and
+configuration. Run `pnpm test` from `examples/workflow-probe` or
+`examples/workflows-order` to test an example independently. The test runner
+builds the example and platform binaries before starting its services.
+
 ## Journal provisioning
 
 Before starting deployed workflows, provision their app journal through the
@@ -430,6 +442,7 @@ interface WorkflowRun<Output = unknown> {
   readonly id: string;
   signal(opts: { type: string; payload?: unknown; idempotencyKey?: string }): Promise<void>;
   status(): Promise<{ state: WorkflowRunState; output?: Output | StepOutputRef; error?: unknown }>;
+  readStepOutput(name: string, occurrence: number): Promise<Uint8Array>;
   pause(): Promise<void>;
   resume(): Promise<void>;
   cancel(opts?: { mode?: "abort" | "compensate" }): Promise<void>;
@@ -646,6 +659,11 @@ const signal = await step.waitForSignal("market-tick", {
 ```
 
 ## Large Outputs
+
+Saved step outputs are read through the app-scoped native workflow backend.
+`run.readStepOutput(name, occurrence)` returns bytes; replay uses that same
+operation for lazy `StepOutputRef` reads. The host keeps the control endpoint
+and credential in Rust. Local development reads the saved SQLite checkpoint.
 
 Small JSON outputs are inlined in the journal. Larger outputs, or outputs with
 an explicit by-reference mode, are stored as workflow blobs and replayed as

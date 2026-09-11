@@ -33,10 +33,14 @@ target = "zeroship-bench-server"
 class = "test-dev-tool"
 reason = "Feature-gated V8 server used only by runtime benchmarks."
 
-# 102 former test files, now modules.
+# Shared runtime integration tests.
 [[test]]
 name = "main"
 path = "tests/main.rs"
+
+[[test]]
+name = "workflow_dispatch"
+path = "tests/workflow_dispatch.rs"
 
 # The 23 `wpt_*.rs` modules. NOT in `main` because every one of them
 # `include_str!`s `tests/wpt/`, which is not tracked in git -

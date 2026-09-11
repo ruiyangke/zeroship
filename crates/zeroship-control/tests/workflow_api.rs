@@ -4,5 +4,5 @@ mod common;
 #[path = "workflow_support/postgres.rs"]
 mod workflow_postgres;
 mod workflow_instance_api_test;
-mod workflow_plugin;
+mod workflow_binding;
 mod workflow_provisioning;
