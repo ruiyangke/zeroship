@@ -7,11 +7,25 @@ CREATE TABLE "workflow"."deploys" ("app_id" text NOT NULL, "id" text NOT NULL, "
 
 CREATE UNIQUE INDEX IF NOT EXISTS "deploy_hash_identity" ON "workflow"."deploys" ("app_id", "hash");
 
-CREATE TABLE "workflow"."runs" ("app_id" text NOT NULL, "id" text NOT NULL, "workflow_name" text NOT NULL, "deploy_id" text NOT NULL, "generation" bigint NOT NULL, "state" text NOT NULL, "control" text NOT NULL, "due_at" bigint, "task_id" text, "lease_epoch" bigint NOT NULL, "key" text, "parent_id" text, "parent_generation" bigint, "parent_ordinal" bigint, "cascade" bigint NOT NULL, "depth" bigint NOT NULL, "created_at" bigint NOT NULL, "terminal_at" bigint, "signal_epoch" bigint NOT NULL, "compensation_target" text, CONSTRAINT "run_deploy" FOREIGN KEY ("app_id", "deploy_id") REFERENCES "workflow"."deploys" ("app_id", id) ON DELETE RESTRICT, CONSTRAINT "run_parent" FOREIGN KEY ("app_id", "parent_id") REFERENCES "workflow"."runs" ("app_id", id) ON DELETE RESTRICT, CONSTRAINT "runs_app" FOREIGN KEY ("app_id") REFERENCES "workflow"."apps" ("app_id") ON DELETE RESTRICT, CONSTRAINT "runs_pkey" PRIMARY KEY (app_id, id));
+CREATE TABLE "workflow"."schedules" ("app_id" text NOT NULL, "id" text NOT NULL, "name" text NOT NULL, "workflow_name" text NOT NULL, "deploy_id" text NOT NULL, "definition" text NOT NULL, "next_at" bigint, "revision" bigint NOT NULL, "anchor_at" bigint NOT NULL, "last_checked_at" bigint NOT NULL, CONSTRAINT "schedule_deploy" FOREIGN KEY ("app_id", "deploy_id") REFERENCES "workflow"."deploys" ("app_id", id) ON DELETE RESTRICT, CONSTRAINT "schedules_app" FOREIGN KEY ("app_id") REFERENCES "workflow"."apps" ("app_id") ON DELETE RESTRICT, CONSTRAINT "schedules_pkey" PRIMARY KEY (app_id, id));
+
+CREATE INDEX IF NOT EXISTS "schedule_deploy_idx" ON "workflow"."schedules" ("app_id", "deploy_id");
+
+CREATE UNIQUE INDEX IF NOT EXISTS "schedule_name" ON "workflow"."schedules" ("app_id", "name");
+
+CREATE INDEX IF NOT EXISTS "schedules_due_idx" ON "workflow"."schedules" ("next_at", "app_id", "id");
+
+CREATE TABLE "workflow"."runs" ("app_id" text NOT NULL, "id" text NOT NULL, "workflow_name" text NOT NULL, "deploy_id" text NOT NULL, "generation" bigint NOT NULL, "state" text NOT NULL, "control" text NOT NULL, "due_at" bigint, "task_id" text, "lease_epoch" bigint NOT NULL, "key" text, "parent_id" text, "parent_generation" bigint, "parent_ordinal" bigint, "cascade" bigint NOT NULL, "depth" bigint NOT NULL, "created_at" bigint NOT NULL, "terminal_at" bigint, "signal_epoch" bigint NOT NULL, "compensation_target" text, "schedule_id" text, "continued_from_id" text, "continued_to_id" text, CONSTRAINT "run_continued_from" FOREIGN KEY ("app_id", "continued_from_id") REFERENCES "workflow"."runs" ("app_id", id) ON DELETE RESTRICT, CONSTRAINT "run_continued_to" FOREIGN KEY ("app_id", "continued_to_id") REFERENCES "workflow"."runs" ("app_id", id) ON DELETE RESTRICT, CONSTRAINT "run_deploy" FOREIGN KEY ("app_id", "deploy_id") REFERENCES "workflow"."deploys" ("app_id", id) ON DELETE RESTRICT, CONSTRAINT "run_parent" FOREIGN KEY ("app_id", "parent_id") REFERENCES "workflow"."runs" ("app_id", id) ON DELETE RESTRICT, CONSTRAINT "run_schedule" FOREIGN KEY ("app_id", "schedule_id") REFERENCES "workflow"."schedules" ("app_id", id) ON DELETE RESTRICT, CONSTRAINT "runs_app" FOREIGN KEY ("app_id") REFERENCES "workflow"."apps" ("app_id") ON DELETE RESTRICT, CONSTRAINT "runs_pkey" PRIMARY KEY (app_id, id));
+
+CREATE INDEX IF NOT EXISTS "run_continued_from_idx" ON "workflow"."runs" ("app_id", "continued_from_id");
+
+CREATE INDEX IF NOT EXISTS "run_continued_to_idx" ON "workflow"."runs" ("app_id", "continued_to_id");
 
 CREATE INDEX IF NOT EXISTS "run_deploy_idx" ON "workflow"."runs" ("app_id", "deploy_id");
 
 CREATE INDEX IF NOT EXISTS "run_parent_idx" ON "workflow"."runs" ("app_id", "parent_id");
+
+CREATE INDEX IF NOT EXISTS "run_schedule_idx" ON "workflow"."runs" ("app_id", "schedule_id");
 
 CREATE UNIQUE INDEX IF NOT EXISTS "live_workflow_key" ON "workflow"."runs" ("app_id", "workflow_name", "key");
 
@@ -65,12 +79,6 @@ CREATE TABLE "workflow"."requests" ("app_id" text NOT NULL, "id" text NOT NULL, 
 
 CREATE INDEX IF NOT EXISTS "requests_expiry_idx" ON "workflow"."requests" ("expires_at");
 
-CREATE TABLE "workflow"."schedules" ("app_id" text NOT NULL, "id" text NOT NULL, "workflow_name" text NOT NULL, "deploy_id" text NOT NULL, "definition" text NOT NULL, "next_at" bigint, "revision" bigint NOT NULL, CONSTRAINT "schedule_deploy" FOREIGN KEY ("app_id", "deploy_id") REFERENCES "workflow"."deploys" ("app_id", id) ON DELETE RESTRICT, CONSTRAINT "schedules_app" FOREIGN KEY ("app_id") REFERENCES "workflow"."apps" ("app_id") ON DELETE RESTRICT, CONSTRAINT "schedules_pkey" PRIMARY KEY (app_id, id));
-
-CREATE INDEX IF NOT EXISTS "schedule_deploy_idx" ON "workflow"."schedules" ("app_id", "deploy_id");
-
-CREATE INDEX IF NOT EXISTS "schedules_due_idx" ON "workflow"."schedules" ("next_at", "app_id", "id");
-
 CREATE TABLE "workflow"."occurrences" ("app_id" text NOT NULL, "schedule_id" text NOT NULL, "at" bigint NOT NULL, "run_id" text, CONSTRAINT "occurrence_run" FOREIGN KEY ("app_id", "run_id") REFERENCES "workflow"."runs" ("app_id", id) ON DELETE RESTRICT, CONSTRAINT "occurrence_schedule" FOREIGN KEY ("app_id", "schedule_id") REFERENCES "workflow"."schedules" ("app_id", id) ON DELETE RESTRICT, CONSTRAINT "occurrences_pkey" PRIMARY KEY (app_id, schedule_id, at));
 
 CREATE INDEX IF NOT EXISTS "occurrence_run_idx" ON "workflow"."occurrences" ("app_id", "run_id");
@@ -90,4 +98,4 @@ CREATE INDEX IF NOT EXISTS "payload_ref_idx" ON "workflow"."payload_refs" ("app_
 CREATE TABLE "workflow"."outbox" ("app_id" text NOT NULL, "id" text NOT NULL, "kind" text NOT NULL, "payload" text NOT NULL, "created_at" bigint NOT NULL, "delivered_at" bigint, CONSTRAINT "outbox_app" FOREIGN KEY ("app_id") REFERENCES "workflow"."apps" ("app_id") ON DELETE RESTRICT, CONSTRAINT "outbox_pkey" PRIMARY KEY (app_id, id));
 
 CREATE INDEX IF NOT EXISTS "outbox_delivery_idx" ON "workflow"."outbox" ("delivered_at", "created_at");
-INSERT INTO workflow.schema_version (id, fingerprint) VALUES ('workflow', 'b8ebd683f5cc64d557dfb8c45e83ac61ac33995a162666700f85928ff1d10270');
+INSERT INTO workflow.schema_version (id, fingerprint) VALUES ('workflow', 'c2f3c2afd38d3fbe2eaaa83702df60da1b1645cffdb87675c5cec9fed3111834');

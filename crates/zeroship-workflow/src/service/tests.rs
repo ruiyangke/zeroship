@@ -49,6 +49,7 @@ async fn registered_service(store: Arc<dyn WorkflowStore>) -> (WorkflowService, 
                     id: typed_id::generate("dep"),
                     hash: "a".repeat(64),
                     workflows: ["Example".into(), "Child".into()].into(),
+                    schedules: Vec::new(),
                 },
             )
             .await
@@ -695,6 +696,7 @@ async fn behavior_contract(store: Arc<dyn WorkflowStore>) {
         id: typed_id::generate("dep"),
         hash: "b".repeat(64),
         workflows: ["Example".into(), "Child".into()].into(),
+        schedules: Vec::new(),
     };
     service.activate_deploy(&app, &new_deploy).await.unwrap();
     let invalid = execution(json!([
@@ -727,6 +729,18 @@ async fn behavior_contract(store: Arc<dyn WorkflowStore>) {
             &worker,
             &child.id,
             &child.token,
+            execution(json!([{"kind":"ContinueAsNew","input":"child continuation"}])),
+        )
+        .await
+        .unwrap();
+    let continued_child = service.poll(&worker).await.unwrap().unwrap();
+    assert_eq!(continued_child.invocation.workflow_name, "Child");
+    assert_eq!(continued_child.invocation.deploy_id, new_deploy.id);
+    service
+        .complete(
+            &worker,
+            &continued_child.id,
+            &continued_child.token,
             execution(json!([{"kind":"RunCompleted","output":"child result"}])),
         )
         .await
@@ -1155,4 +1169,188 @@ async fn signal_race_contract(store: Arc<dyn WorkflowStore>) {
         )
         .await
         .unwrap();
+}
+
+#[compio::test]
+async fn sqlite_schedules_commit_occurrences_with_runs() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("workflow.sqlite");
+    schema::initialize_sqlite(&path).unwrap();
+    schedule_contract(Arc::new(SqliteStore::new(path))).await;
+}
+#[compio::test]
+async fn postgres_schedules_commit_occurrences_with_runs() {
+    let fixture = PostgresFixture::start().await;
+    schedule_contract(Arc::new(fixture.store.clone())).await;
+}
+async fn schedule_contract(store: Arc<dyn WorkflowStore>) {
+    use super::{
+        IntervalAnchor, ScheduleCatchUp, ScheduleOverlap, ScheduleRegistration, ScheduleTiming,
+    };
+    let (service, app, _) = registered_service(store.clone()).await;
+    let deploy = DeployRegistration {
+        id: typed_id::generate("dep"),
+        hash: "c".repeat(64),
+        workflows: ["Example".into()].into(),
+        schedules: vec![ScheduleRegistration {
+            name: "billing".into(),
+            workflow_name: "Example".into(),
+            schedule: ScheduleTiming::Interval {
+                interval_ms: 60_000,
+                anchor: IntervalAnchor::Epoch,
+            },
+            input: json!({"scheduled":true}),
+            overlap: ScheduleOverlap::Allow,
+            catch_up: ScheduleCatchUp::Backfill { max: 3 },
+        }],
+    };
+    service.activate_deploy(&app, &deploy).await.unwrap();
+    assert_eq!(service.tick_schedules().await.unwrap(), 0);
+    let mut tx = store.begin().await.unwrap();
+    let now = tx.now().await.unwrap();
+    let schedules = tx.table("schedules");
+    let at = (now / 60_000 - 5) * 60_000;
+    tx.execute(
+        &format!("UPDATE {schedules} SET next_at=$2 WHERE app_id=$1"),
+        &[app.as_str().into(), at.into()],
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    // Activation notification retries must not move a persisted due frontier.
+    service.activate_deploy(&app, &deploy).await.unwrap();
+    let mut ticks = Vec::new();
+    for _ in 0..3 {
+        let service = service.clone();
+        ticks.push(compio::runtime::spawn(async move {
+            service.tick_schedules().await
+        }));
+    }
+    let mut fired = 0;
+    for tick in ticks {
+        fired += tick.await.unwrap().unwrap();
+    }
+    assert_eq!(fired, 3);
+    let mut tx = store.begin().await.unwrap();
+    let occurrences = tx.table("occurrences");
+    let rows = tx
+        .query(
+            &format!("SELECT at,run_id FROM {occurrences} WHERE app_id=$1 ORDER BY at"),
+            &[app.as_str().into()],
+        )
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[0].integer("at").unwrap(), at);
+    let scheduled_ids: std::collections::BTreeSet<String> =
+        rows.iter().map(|row| row.text("run_id").unwrap()).collect();
+    tx.commit().await.unwrap();
+    let worker = super::WorkerIdentity::new("schedule-worker".into()).unwrap();
+    let mut executed = std::collections::BTreeSet::new();
+    while let Some(task) = service.poll(&worker).await.unwrap() {
+        assert_eq!(task.invocation.deploy_id, deploy.id);
+        assert_eq!(
+            task.invocation.trigger.input,
+            Some(json!({"scheduled":true}))
+        );
+        executed.insert(task.invocation.run_id.clone());
+        service
+            .complete(
+                &worker,
+                &task.id,
+                &task.token,
+                execution(json!([{"kind":"RunCompleted"}])),
+            )
+            .await
+            .unwrap();
+    }
+    assert_eq!(executed, scheduled_ids);
+    let mut skip = deploy.clone();
+    skip.id = typed_id::generate("dep");
+    skip.hash = "d".repeat(64);
+    skip.schedules[0].overlap = ScheduleOverlap::SkipIfRunning;
+    service.activate_deploy(&app, &skip).await.unwrap();
+    let mut tx = store.begin().await.unwrap();
+    let later = tx.now().await.unwrap();
+    let first = at + 180_000 + 10;
+    tx.execute(
+        &format!("UPDATE {schedules} SET next_at=$2 WHERE app_id=$1"),
+        &[app.as_str().into(), first.into()],
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(service.tick_schedules().await.unwrap(), 1);
+    let mut tx = store.begin().await.unwrap();
+    let rows = tx
+        .query(
+            &format!("SELECT run_id FROM {occurrences} WHERE app_id=$1 AND at >= $2 AND at <= $3"),
+            &[app.as_str().into(), first.into(), later.into()],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row.optional_text("run_id").unwrap().is_some())
+            .count(),
+        1
+    );
+    assert!(rows
+        .iter()
+        .any(|row| row.optional_text("run_id").unwrap().is_none()));
+    tx.commit().await.unwrap();
+    let task = service.poll(&worker).await.unwrap().unwrap();
+    service
+        .complete(
+            &worker,
+            &task.id,
+            &task.token,
+            execution(json!([{"kind":"ContinueAsNew","input":"scheduled continuation"}])),
+        )
+        .await
+        .unwrap();
+    let mut tx = store.begin().await.unwrap();
+    tx.execute(
+        &format!("UPDATE {schedules} SET next_at=$2 WHERE app_id=$1"),
+        &[app.as_str().into(), (first + 1).into()],
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(service.tick_schedules().await.unwrap(), 0);
+    let successor = service.poll(&worker).await.unwrap().unwrap();
+    assert_ne!(successor.invocation.run_id, task.invocation.run_id);
+    service
+        .complete(
+            &worker,
+            &successor.id,
+            &successor.token,
+            execution(json!([{"kind":"RunCompleted"}])),
+        )
+        .await
+        .unwrap();
+    let mut disabled = skip.clone();
+    disabled.id = typed_id::generate("dep");
+    disabled.hash = "e".repeat(64);
+    disabled.schedules.clear();
+    service.activate_deploy(&app, &disabled).await.unwrap();
+    let mut tx = store.begin().await.unwrap();
+    assert!(tx
+        .query(
+            &format!("SELECT next_at FROM {schedules} WHERE app_id=$1 AND next_at IS NOT NULL"),
+            &[app.as_str().into()]
+        )
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(!tx
+        .query(
+            &format!("SELECT at FROM {occurrences} WHERE app_id=$1"),
+            &[app.as_str().into()]
+        )
+        .await
+        .unwrap()
+        .is_empty());
+    tx.commit().await.unwrap();
+    assert_eq!(service.tick_schedules().await.unwrap(), 0);
 }

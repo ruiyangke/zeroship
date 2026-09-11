@@ -203,6 +203,7 @@ pub(crate) async fn apply(
             now,
         )
         .await?;
+        link_continuation(tx, app, run, &id).await?;
         return Ok(RunState::Completed);
     }
     if intent == ControlIntent::Pause {
@@ -502,4 +503,44 @@ pub(crate) async fn finish(
     )
     .await?;
     Ok(state)
+}
+
+async fn link_continuation(
+    tx: &mut Transaction,
+    app: &AppId,
+    run: &Row,
+    successor: &str,
+) -> Result<(), WorkflowServiceError> {
+    let id = run.text("id")?;
+    let runs = tx.table("runs");
+    tx.execute(
+        &format!("UPDATE {runs} SET continued_to_id=$3 WHERE app_id=$1 AND id=$2"),
+        &[app.as_str().into(), id.clone().into(), successor.into()],
+    )
+    .await?;
+    tx.execute(&format!("UPDATE {runs} SET continued_from_id=$3,parent_id=$4,parent_generation=$5,parent_ordinal=$6,cascade=$7,depth=$8,schedule_id=$9 WHERE app_id=$1 AND id=$2"),
+        &[app.as_str().into(),successor.into(),id.clone().into(),run.optional_text("parent_id")?.into(),run.optional_integer("parent_generation")?.into(),run.optional_integer("parent_ordinal")?.into(),run.integer("cascade")?.into(),run.integer("depth")?.into(),run.optional_text("schedule_id")?.into()]).await?;
+    // A parent's durable wait follows the continuation. It must not observe the
+    // intermediate run's terminal acknowledgement as the child's final result.
+    let waits = tx.table("waits");
+    let steps = tx.table("steps");
+    let parents=tx.query(&format!("SELECT s.run_id,s.generation,s.record FROM {steps} s JOIN {waits} w ON w.app_id=s.app_id AND w.run_id=s.run_id AND w.generation=s.generation AND w.ordinal=s.ordinal WHERE w.app_id=$1 AND w.child_id=$2 ORDER BY s.run_id,s.ordinal"), &[app.as_str().into(),id.clone().into()]).await?;
+    for parent in parents {
+        let mut step: crate::engine::StepCheckpoint = decode(&parent.text("record")?)?;
+        step.child_run_id = Some(successor.into());
+        journal::update(
+            tx,
+            app,
+            &parent.text("run_id")?,
+            parent.integer("generation")?,
+            &step,
+        )
+        .await?;
+    }
+    tx.execute(
+        &format!("UPDATE {waits} SET child_id=$3 WHERE app_id=$1 AND child_id=$2"),
+        &[app.as_str().into(), id.into(), successor.into()],
+    )
+    .await?;
+    Ok(())
 }

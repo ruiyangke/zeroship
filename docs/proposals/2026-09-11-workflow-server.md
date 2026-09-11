@@ -14,12 +14,14 @@ mutations and checkpoint batches are transactional, and acceptance returns
 before execution. Native executors and deployed workers now share typed replay
 inputs, journal types and outcome decoding; claim credentials stay in Rust.
 The replacement `service` module now implements app-scoped acceptance, request
-receipts, task leases, completion receipts, waits, children, compensation and
-generation-preserving restart over shared PostgreSQL and SQLite transactions.
+receipts, task leases, completion receipts, waits, children, compensation retries,
+generation-preserving restart and transactional schedule occurrences over shared
+PostgreSQL and SQLite transactions. Continuation retains parent waits and
+schedule overlap ownership. Calendar calculations are shared with Control.
 Its schema is generated from the canonical migration DSL, with native contract
 tests against SQLite and Testcontainers PostgreSQL. This module is not yet the
 runtime composition: the server, worker polling loop, authoritative platform
-policy, scheduling, payloads and interpreter cutover remain in progress. The
+policy, signal ingress/fanout, payloads and interpreter cutover remain in progress. The
 current runtime still uses Control and the local mini-engine.
 
 ## Decision

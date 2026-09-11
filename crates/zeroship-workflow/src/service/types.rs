@@ -94,6 +94,9 @@ pub struct AppPolicy {
     pub max_journal_bytes: usize,
     pub max_compensation_attempts: i32,
     pub compensation_retry_ms: i64,
+    pub max_schedules: usize,
+    pub max_schedule_backfill: usize,
+    pub min_schedule_interval_ms: i64,
     pub lease_ms: i64,
     pub request_retention_ms: i64,
 }
@@ -109,6 +112,9 @@ impl Default for AppPolicy {
             max_journal_bytes: 16 * 1024 * 1024,
             max_compensation_attempts: 8,
             compensation_retry_ms: 1_000,
+            max_schedules: 64,
+            max_schedule_backfill: 32,
+            min_schedule_interval_ms: 1_000,
             lease_ms: 60_000,
             request_retention_ms: 86_400_000,
         }
@@ -124,6 +130,8 @@ impl AppPolicy {
             || self.max_journal_bytes == 0
             || self.max_compensation_attempts <= 0
             || self.compensation_retry_ms <= 0
+            || self.max_schedule_backfill == 0
+            || self.min_schedule_interval_ms <= 0
             || self.lease_ms <= 0
             || self.request_retention_ms <= 0
         {
@@ -147,6 +155,8 @@ pub struct DeployRegistration {
     pub id: String,
     pub hash: String,
     pub workflows: BTreeSet<String>,
+    #[serde(default)]
+    pub schedules: Vec<super::ScheduleRegistration>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
