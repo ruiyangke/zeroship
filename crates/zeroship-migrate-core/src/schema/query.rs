@@ -2644,22 +2644,6 @@ columns = [
         )
     }
 
-    fn field_to_column_for_dialect(
-        field: &str,
-        def: &serde_json::Value,
-        dialect: &DialectId,
-    ) -> Result<String, QueryError> {
-        // A test names the dialect it is testing; the wrapper resolves it so the
-        // cases below stay written in the dialect they mean.
-        super::field_to_column_for_dialect(
-            crate::test_fixtures::VENDORS,
-            field,
-            def,
-            renderer(crate::test_fixtures::VENDORS, dialect),
-            &confined_inject("posts"),
-        )
-    }
-
     // -----------------------------------------------------------------------
     // SEC-4 - aggregation pipeline must NOT leak masked-column plaintext.
     //
