@@ -9,6 +9,7 @@ mod calendar_date;
 mod fixtures;
 mod identity;
 mod json;
+mod joins;
 mod nested_temporal;
 mod protected_updates;
 mod schema_updates;
@@ -831,6 +832,7 @@ async fn exercise_registered_backend(mut db: Database) {
         transactions: transactions.clone(),
     }));
     exercise_native_models(&db).await;
+    joins::exercise(&db).await;
     let committed = db
         .transaction(|tx| async move {
             let posts = tx.entity::<posts::Entity>()?;

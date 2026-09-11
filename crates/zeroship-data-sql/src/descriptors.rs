@@ -1,8 +1,33 @@
 //! Value descriptors shared by runtime catalog readers and storage backends.
 
+/// Projectable fields explicitly declared by the generated schema.
+pub fn readable_fields(schema: &crate::value::Value) -> std::collections::BTreeSet<String> {
+    schema
+        .as_object()
+        .into_iter()
+        .flat_map(|fields| fields.iter())
+        .filter(|(name, definition)| {
+            !crate::compile::is_schema_metadata_key(name)
+                && definition.is_object()
+                && definition
+                    .get("readable")
+                    .and_then(crate::value::Value::as_bool)
+                    != Some(false)
+                && definition
+                    .get("projectable")
+                    .and_then(crate::value::Value::as_bool)
+                    != Some(false)
+        })
+        .map(|(name, _)| name.clone())
+        .collect()
+}
+
 /// Whether the field uses encrypted binary storage.
 pub fn is_encrypted(field: &crate::value::Value) -> bool {
-    field.get("encrypted").and_then(crate::value::Value::as_bool) == Some(true)
+    field
+        .get("encrypted")
+        .and_then(crate::value::Value::as_bool)
+        == Some(true)
 }
 
 /// Effective masking metadata from an installed field descriptor.
