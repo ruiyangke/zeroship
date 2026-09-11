@@ -150,9 +150,9 @@ Two leak paths are easy to miss and both are real:
    *resolved* database - a workspace-local label must never be the thing a permission is checked
    against.
 
-This is the discipline `DbResourceKey` already applies to DSN passwords: a digest chosen so the
-secret "cannot reach `Debug` or a log line"
-(`crates/zeroship-data-v8/src/service.rs`).
+The ORM's `ConnectionIdentity` follows this discipline for database configuration:
+its digest is private, and Debug output exposes neither the digest nor the DSN.
+See `crates/zeroship-data-orm/src/connection/factory.rs`.
 
 ---
 
@@ -164,20 +164,18 @@ has is a database.
 **Do not sweep the word out of the code.** It is still the right word in two places, and a
 half-applied rename would be worse than none:
 
-- **Where it names PostgreSQL's own object.** `crates/zeroship-data-v8/src/drop_namespace.rs`
-  sequences "the PG teardown order for deleting an app";
-  `crates/zeroship-data-v8/src/replication.rs` scopes a cluster-wide scan to "the calling
-  app's namespace". Both mean the PostgreSQL schema, and PostgreSQL calls it a namespace
-  (`pg_namespace`). Renaming those to "database" would make them say the wrong thing, because at
-  that layer a database is the Datastore.
+- **Where it names PostgreSQL's own object.** Catalog reads in
+  `crates/zeroship-data-orm/src/backend/postgres/pg_introspect.rs` use `pg_namespace`
+  to identify the physical schema. At this layer, a PostgreSQL database is the
+  datastore, and a namespace is a schema within it.
 - **Where it means something else entirely.** ES module namespace imports
   (`docs/reference/vite-plugin.md`), and the runtime's `env.*` plugin namespaces - a second plugin
   claiming the `db` namespace panics by design.
 
 The rule: **Database** is the product noun, used for the entity, the id, the config and everything
 creator-facing. **namespace** stays where it refers to the PostgreSQL object or to an unrelated
-concept. `NamespaceManager` from the archived `docs/archive/db-system-design.md` never shipped, so
-there is no live type to rename.
+concept. The previously proposed `NamespaceManager` never shipped, so there is
+no live type to rename.
 
 ## Ownership: the creator owns the schema, no app does
 
@@ -523,11 +521,12 @@ DDL that caused it.
 
 ## Physical names are opaque, not descriptive
 
-The database id is internal (above), and that claim is only as strong as the number of channels that
-can leak it. Three were found: a creator migration persisting `currentUser()` into an ordinary column
-it then reads back; the worker `env_vars` map, every entry of which the runtime copies into
-`process.env`; and `DbResourceKey`, a deterministic unsalted digest of the database URL that lets two
-creators compare values and learn they are co-tenants.
+The database id is internal (above), and every exposure channel must preserve that
+boundary. A creator migration can persist `currentUser()` into an ordinary column
+it then reads back; the runtime copies the worker's `env_vars` map into
+`process.env`. A deterministic database-configuration digest would also let
+creators compare values and learn they are co-tenants if exposed. The ORM keeps
+its connection digest private and formats its identity as opaque.
 
 **So the schema and role names are derived from the id by a keyed one-way function rather than
 embedding it.** Settled 2026-08-29. The alternative considered was refusing `currentUser()` in

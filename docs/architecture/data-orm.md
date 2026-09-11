@@ -48,6 +48,7 @@ Host Backend = scoped executor + catalog + protection + search
 crates/
   zeroship-data-orm/
     src/orm/                 Rust models and codecs
+    src/connection/          backend factories and shared local initialization
     src/driver.rs            physical acquisition and session contracts
     src/executor.rs          scoped execution contract
     src/protection/          policy, encryption, masking, unmask authorization
@@ -59,7 +60,7 @@ crates/
     src/transaction/         shared transaction protocol
   zeroship-data-sql/          plans, native values, SQL dialects
   zeroship-data-macros/       schema and mapping derives
-  zeroship-data-v8/         V8 adapter
+  zeroship-data-v8/           V8 adapter
 libs/
   compio-postgres/            standalone transport and pool
 ```
@@ -112,6 +113,35 @@ wrapper. Rust models continue using `schema!`, `FromRow`, `Insertable`, and
 Connection configuration contains credentials and is excluded from Debug output.
 Connection setup does not create application tables.
 Migration artifacts supply the descriptor and the physical schema.
+
+Worker hosts supply the ORM factory to the V8 service:
+
+```rust,ignore
+use zeroship_data_orm::connection::ConnectionFactory;
+use zeroship_data_v8::service::{DbService, DbServiceConfig};
+
+let service = DbService::new(DbServiceConfig {
+    connection: ConnectionFactory::for_url(database_url)?,
+    cdc_relay,
+    meter,
+})?;
+let plugin = service.plugin();
+```
+
+`ConnectionFactory` validates built-in configuration without opening a database.
+It can also wrap a host-defined `BackendFactory`, whose configuration is safe to
+share across threads and whose `connect` future produces a local `BackendHandle`.
+The factory owns backend selection and pool configuration; the V8 adapter
+knows only this contract. Custom factory identities must distinguish credentials
+and routing configurations that cannot safely share a backend.
+
+On each worker thread, the ORM's `LocalConnection` shares pending initialization
+among callers and caches the resulting backend. Dropping a waiter leaves the
+pending open available for another caller to resume. Failed opens preserve their
+typed errors and allow a later attempt. Replacing the configured factory installs
+a separate local connection, so an older pending open cannot overwrite the new
+binding. Reinstalling the same identity preserves the existing connection.
+Connection identity and factory internals are opaque in Debug output.
 
 SQLite opens or creates a filesystem database, for example
 `sqlite:.zeroship/dev.sqlite`. Memory selectors, empty paths, and SQLite URI
