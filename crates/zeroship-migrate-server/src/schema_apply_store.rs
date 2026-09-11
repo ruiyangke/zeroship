@@ -252,14 +252,9 @@ pub enum SchemaApplyStoreError {
     CeilingVersionOverflow(u64),
 }
 
-// Every case in this module opens a real PostgreSQL connection and `expect`s it,
-// so with no server reachable the LIB test target panics and `cargo test
-// --workspace` - which provisions no database - can never be green. The
-// `live-db-tests` feature is the same gate the crate's `apply_api_test`
-// integration target carries in Cargo.toml; `required-features` cannot reach
-// inside a lib, hence the `cfg` here. Nothing in this module is database-free,
-// so the whole module moves behind the gate rather than individual cases.
-#[cfg(all(test, feature = "live-db-tests"))]
+// Mandatory PostgreSQL tests. The suite runner applies the platform corpus
+// before these fixtures connect; unavailable infrastructure fails the run.
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -316,7 +311,7 @@ mod tests {
              This suite needs a database the PLATFORM migrations have been applied to.\n\
              Point it at one, e.g. run `tests/provision_test_backends.sh` to provision \
              a test database and generate the TOML overlay, then:\n  \
-             cargo test -p zeroship-migrate-server --features live-db-tests\n\
+             cargo test -p zeroship-migrate-server\n\
              The DSN comes from `zeroship_core::config::test_database_url()`, which \
              panics naming that command when nothing is configured.",
             missing.join(", zeroship."),

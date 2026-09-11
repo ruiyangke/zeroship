@@ -794,12 +794,8 @@ pub fn has_app(app_id: &Uuid) -> bool {
 
 /// Is a deploy-pinned workflow isolate resident for this (app, deploy)?
 ///
-/// Gated on `live-db-tests` and not merely on `test`, because its only caller
-/// anywhere is `handler::workflow_live_tests`, which carries the same gate. In
-/// the BIN target `mod cache` is private, so a `#[cfg(test)]`-only helper with
-/// no reachable caller is dead code and warns; in the LIB it is `pub` and would
-/// not have, which is why the mismatch is easy to miss.
-#[cfg(all(test, feature = "live-db-tests"))]
+/// Used by the mandatory workflow handler tests.
+#[cfg(test)]
 pub fn has_pinned_workflow_app(app_id: &Uuid, deploy_hash: &str) -> bool {
     let key = PinnedWorkflowKey::new(*app_id, deploy_hash);
     CACHE.with(|c| {

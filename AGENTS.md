@@ -182,7 +182,11 @@ crates/
                       (no `build` — builds go through @zeroship/vite-plugin)
 ```
 
-**Database verification is required.** `zeroship-data-orm` and
+**Database verification is required.** Control, migration-service and worker
+tests run in ordinary `cargo test` and require a migrated PostgreSQL database.
+Use `tests/run_billing_suite.sh` and `tests/run_worker_suite.sh` to prepare it
+and run the suites. Live database verification must never be an opt-in feature.
+`zeroship-data-orm` and
 `zeroship-data-v8` include PostgreSQL tests in ordinary `cargo test`. Do not
 put required database cases behind opt-in features, ignore them, or report success
 when the server or its required extensions are unavailable. Integration helpers

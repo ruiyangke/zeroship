@@ -83,44 +83,18 @@ jsonwebtoken = { workspace = true }
 zeroship-runtime = { workspace = true }
 v8 = { workspace = true }
 
-# ---------------------------------------------------------------------------
-# Live-database test gate
-# ---------------------------------------------------------------------------
-# Same contract as `zeroship-control`'s feature of the same name: it marks the
-# targets that CANNOT run without a reachable, migrated PostgreSQL. Determined
-# by measurement - the built test executables were run with the test database
-# (`zeroship_core::config::test_database_url_opt()`) pointed at a dead port,
-# and `apply_api_test` was the one integration target that failed (it panics
-# in `connect`, it does not skip).
-#
-# The feature also gates `migration_store`'s in-crate `mod tests`, whose two
-# `*_pg` cases dial the same database from the LIB target. A `required-features`
-# entry cannot reach inside a lib, so that module carries the `cfg` directly.
-#
-# Covered in CI by one invocation, with no second list to drift from this one:
-#
-#     cargo test -p zeroship-migrate-server --features live-db-tests
-#
-# driven by `tests/run_billing_suite.sh` (the `billing-gate` job).
-[features]
-live-db-tests = []
+# Database verification is mandatory in ordinary cargo test runs.
+# tests/run_billing_suite.sh and tests/run_worker_suite.sh provision the
+# migrated platform database required by these tests.
 
 [[test]]
 name = "apply_api_test"
 path = "tests/apply_api_test.rs"
-required-features = ["live-db-tests"]
 
-# The driver conformance target for `CompioPgSession`, the seam producer this
-# service SHIPS. It carries the same contract as `apply_api_test`: it cannot run
-# without a reachable PostgreSQL, and it PANICS naming the provisioning fixture
-# rather than skipping when the feature is on and no DSN is configured. A skipped
-# live suite reports exactly like a passing one, which is how this driver went
-# unconformed while `driver::conformance` was run only against the `PgDevSession`
-# and `MysqlDevSession` TEST harnesses in `crates/zeroship-migrate/tests/`.
+# Exercise the shipped CompioPgSession against a required PostgreSQL server.
 [[test]]
 name = "compio_pg_conformance"
 path = "tests/compio_pg_conformance.rs"
-required-features = ["live-db-tests"]
 
 [lints]
 workspace = true

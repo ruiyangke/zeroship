@@ -34,8 +34,7 @@
 # 141 `export` sites across 38 files when this was written - the gate prints
 # both numbers on every run, so read them there rather than trusting this line -
 # and clippy and a syn-based Rust scanner see none of them.
-# `export CONTROL_TEST_DB="$DSN"` at tests/run_billing_suite.sh:181
-# puts a test-class name into the harness's own environment, where a cargo
+# An `export` puts a test-class name into the harness's own environment, where a cargo
 # child inherits it invisibly - action at a distance, in the exact shape the
 # rule forbids - and nothing in the tree could observe it before this file.
 #
@@ -147,7 +146,6 @@ fail() { FAIL=$((FAIL + 1)); RAN=$((RAN + 1)); echo "  FAIL $1"; }
 # deleted minter a pattern to mirror; this gate cannot see a comment.
 INVENTORY="
 AUTH_TEST_SMTP_SINK
-CONTROL_TEST_DB
 CPG_FD_PROBE_CHILD
 PG_TEST_URL
 REDPANDA_BROKERS
@@ -166,16 +164,10 @@ ZEROSHIP_DW_E2E_GATEWAY_URL
 # with the reason it is not yet a command prefix. Arm 3 refuses a new one and
 # refuses a stale one, so this list can only shrink without a deliberate edit.
 #
-#   CONTROL_TEST_DB  crates/zeroship-control/tests/workflow_engine_test.rs:59 still
-#                    reads it. run_billing_suite.sh:166-180 records why the
-#                    export survives and what deletes it. NOTE: this name is
-#                    the one docs/reference/env-vars.md:620 claims is DELETED;
-#                    it is not, and that claim was corrected with this gate.
 #   PG_TEST_URL      the single DSN override, exported by three suites so one
 #                    cargo invocation covers every target in the binary. Making
 #                    it a prefix means repeating it on each of ~20 cargo lines.
 AMBIENT_EXPORTS="
-CONTROL_TEST_DB
 PG_TEST_URL
 "
 

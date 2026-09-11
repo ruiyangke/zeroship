@@ -3,12 +3,8 @@ name = "zeroship-control"
 version = "0.1.0"
 edition = "2021"
 description = "zeroship control plane — admin API, internal API, Postgres, VFS"
-# Cargo links one executable per `tests/*.rs`. Autodiscovery is OFF and the four
-# `[[test]]` targets at the bottom of this file are the only integration-test
-# targets; the other 44 files are `mod` declarations inside two of them. Adding a
-# `tests/<name>.rs` therefore requires a `mod <name>;` line in `tests/main.rs` or
-# `tests/live_db.rs` - see those files' headers for which, for the measured size
-# win, and for what sharing one process stops protecting.
+# Integration files are modules of the explicit targets below. Register new
+# files in tests/main.rs or tests/live_db.rs so Cargo compiles their tests.
 autotests = false
 
 [[package.metadata.zeroship-config.targets]]
@@ -147,95 +143,15 @@ rusqlite = { workspace = true, features = ["bundled"] }
 tempfile = { workspace = true }
 tracing-subscriber = { workspace = true }
 
-# ---------------------------------------------------------------------------
-# Live-database test gate
-# ---------------------------------------------------------------------------
-# `live-db-tests` gates every integration target that CANNOT run without a
-# reachable, migrated PostgreSQL. Those targets resolve their DSN via
-# `zeroship_core::config::test_database_url_opt()` and fall back to the dev
-# Postgres on :5440; with no server there they panic on connect ("error
-# connecting to server"), so
-# `cargo test --workspace` - which provisions no database - could never be green.
-#
-# The failing-without-a-database property is what this feature encodes, and the
-# set was originally determined by MEASUREMENT, not by grep: every control test
-# executable was built once and then run with the DSN environment variables
-# pointed at a dead port. The ones that failed are gated; the six that pass
-# (billing_pipeline_redpanda_e2e, config_env_tier,
-# durable_workflows_keystone_e2e, no_liquibase_residue_test,
-# provider_conformance, trusted_clients_test) are deliberately NOT, so they keep
-# running under a bare `cargo test --workspace`.
-#
-# THE DEAD-PORT MEASUREMENT HAS A BLIND SPOT, and `authz_guard_supabase_test`
-# fell into it. A dead port makes `connect` fail, and that file has a skip arm
-# for exactly that; a port answering for a database with no platform schema does
-# not. It was in the ungated set until 2026-08-20 and joined the gated one when
-# CI began provisioning the backends: `cargo test --workspace` then reached a
-# LIVE, UNMIGRATED `zeroship`, and `seed_plans` `.expect`ed its way out with
-#   seed built-in plans: Db(... relation "zeroship.plans" does not exist)
-# on all six of its tests. MEASURED 2026-08-20 against the overlay's own
-# database with zero tables in the `zeroship` schema, which is the shape a
-# `services:` container has. Reachable is not the same as migrated, and the
-# gate's own sentence - "cannot run without a reachable, MIGRATED PostgreSQL" -
-# is the half the dead-port probe never tested. Re-run that probe against an
-# EMPTY database, not just an absent one, before ungating anything else.
-#
-# THE SET IS NOW A MODULE LIST, NOT A TARGET LIST. Until 2026-08-20 each gated
-# file carried its own `[[test]]` with `required-features`, and the membership
-# question was "is there a stanza for it". It is now "is it declared by
-# `tests/live_db.rs` (gated) or by `tests/main.rs` (not)", plus the two files
-# that kept a stanza of their own for reasons that have nothing to do with the
-# gate - see the target block below. 43 files are gated and 6 are not, out of 49
-# in `tests/`; the count lives here once, and `git grep -c '^mod ' --
-# crates/zeroship-control/tests/live_db.rs` recomputes it rather than trusting it.
-# `egress_rules_test` joined the gated set by CONSTRUCTION - it builds an
-# `AppState` against a live DSN and cannot reach its first assertion without one
-# - not by re-running the dead-port measurement.
-#
-# Gating hides a target from the default build, which is exactly the failure
-# mode a gate is supposed to prevent, so it is only honest while something else
-# runs the gated set. That something is a SINGLE invocation:
-#
-#     cargo test -p zeroship-control --features live-db-tests
-#
-# which builds and runs every target whose `required-features` are satisfied -
-# the gated ones AND the ungated ones. There is no second list to keep in step:
-# a module added to `tests/live_db.rs` is covered by that command the moment it
-# is added, and one moved to `tests/main.rs` stops being gated rather than stops
-# being run. `tests/run_billing_suite.sh` drives that one command (it no longer
-# enumerates binaries by name), and CI's `billing-gate` job runs the script.
-#
-# `autotests = false` is what makes the module lists load-bearing: a new
-# `tests/<name>.rs` that nothing declares is compiled by NOTHING and reports no
-# failure. That is the one way this arrangement can silently lose coverage, and
-# it is the reason both entry files say so in their own headers.
-[features]
-live-db-tests = []
+# Database verification is mandatory in ordinary cargo test runs.
+# tests/run_billing_suite.sh and tests/run_worker_suite.sh provision the
+# migrated platform database required by these tests.
 
-# ---------------------------------------------------------------------------
-# The four integration-test targets
-# ---------------------------------------------------------------------------
-# `autotests = false` at the top of this file, so these four are the whole set
-# and every other `tests/*.rs` is a module of one of them.
-#
-# The split is forced, not stylistic:
-#   main      the files that pass with NO database. They must keep running under
-#             a bare `cargo test --workspace`, so this target carries no
-#             `required-features`.
-#   live_db   the files that cannot reach their first assertion without a
-#             migrated PostgreSQL. `required-features` is a property of a
-#             TARGET, so these cannot share a target with the ones above
-#             without either gating those out of the default build or ungating
-#             these into it.
-# and two files that break as MODULES, each kept whole rather than edited:
-#   workflow_engine_test       clones the migrated database per test with
-#                              `CREATE DATABASE ... WITH TEMPLATE`, which
-#                              PostgreSQL refuses while a sibling module of the
-#                              same binary holds a session on the template.
-#   no_liquibase_residue_test  greps this crate's sources for the dead migration
-#                              tool's name; a `mod ...;` line naming it in an
-#                              entry file is itself an occurrence, so the guard
-#                              would fail on its own declaration.
+# Integration modules share executables to avoid repeatedly linking the service.
+# main and live_db both run by default. workflow_engine_test stays separate
+# because it clones the platform database and must not share a process with
+# tests holding connections to the template. The source residue guard also
+# needs its own target because its filename would match its scan.
 [[test]]
 name = "main"
 path = "tests/main.rs"
@@ -243,12 +159,10 @@ path = "tests/main.rs"
 [[test]]
 name = "live_db"
 path = "tests/live_db.rs"
-required-features = ["live-db-tests"]
 
 [[test]]
 name = "workflow_engine_test"
 path = "tests/workflow_engine_test.rs"
-required-features = ["live-db-tests"]
 
 [[test]]
 name = "no_liquibase_residue_test"

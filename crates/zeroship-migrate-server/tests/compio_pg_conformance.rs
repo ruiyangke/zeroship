@@ -46,13 +46,8 @@
 //!    receipt that the suite's `CREATE TEMP TABLE`s executed on THIS backend - the
 //!    scratch tables themselves are dropped by the suite and leave nothing to look at.
 //!
-//! # Gating
-//!
-//! `required-features = ["live-db-tests"]` (see `Cargo.toml`), the same contract
-//! `apply_api_test` carries: a database-free build never compiles this target. When
-//! the feature IS on and no DSN is configured, this test PANICS naming the fixture
-//! that provisions one. It does not skip - a skipped live suite reports exactly like
-//! a passing one, which is the whole reason this gap survived unnoticed.
+//! This target runs in ordinary cargo test and requires a configured PostgreSQL
+//! server. Missing configuration or a failed connection fails the run.
 
 use zeroship_migrate::driver::conformance::{self, SeamFixture};
 use zeroship_migrate::driver::SqlSession;

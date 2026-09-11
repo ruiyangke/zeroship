@@ -638,22 +638,6 @@ where
     Ok(None)
 }
 
-/// Integration-test window onto [`find_run_tables`], which is private because
-/// nothing outside this module should be locating a run by fleet scan.
-///
-/// Exposed so a test can assert the DIFFERENCE between "no such run" and "could
-/// not tell", which is the whole point of that function and is otherwise only
-/// observable through several layers of scheduler ack.
-#[cfg(feature = "live-db-tests")]
-#[allow(clippy::future_not_send)]
-pub async fn __find_run_app_for_test(
-    registry: &Registry,
-    run_id: &str,
-) -> Result<Option<Uuid>, RegistryError> {
-    let conn = registry.conn().await?;
-    Ok(find_run_tables(&conn, run_id).await?.map(|t| t.app_id))
-}
-
 #[async_trait(?Send)]
 pub trait StepDispatcher: Send + Sync {
     async fn dispatch(&self, request: WorkflowRunDispatchRequest) -> DispatchOutcome;

@@ -180,7 +180,7 @@ mod tests {
 // masquerading as coverage. Behind the gate that fallback is not needed and not
 // wanted: the DSN now defaults to the same dev Postgres the rest of the control
 // suite uses, and an unreachable server fails.
-#[cfg(all(test, feature = "live-db-tests"))]
+#[cfg(test)]
 mod live_db_tests {
     use std::net::{IpAddr, Ipv4Addr};
 

@@ -112,7 +112,7 @@ demand and are not tracked in git:
 ./crates/runtime/tests/setup-wpt.sh
 ```
 
-DB-gated and end-to-end suites (bring up the dev Postgres via
+Database and end-to-end suites (bring up the dev Postgres via
 `docker compose -f deploy/compose/docker-compose.yml up -d postgres`, or point at your
 own server):
 
@@ -123,13 +123,8 @@ tests/run_auth_suite.sh         # the auth live-database gate. Uses a SHARED
                                 # at the same time; --database <name> for a
                                 # private one. TEST_DB in the environment is
                                 # refused. docs/runbooks/local-dev.md says why.
-tests/run_billing_suite.sh      # provisions the DB + runs every live-database suite
-                                # (everything behind the `live-db-tests` feature
-                                #  in zeroship-control / zeroship-migrate-server)
-tests/run_worker_suite.sh       # the same, for zeroship-worker: seven workflow-
-                                # advance tests that join zeroship.apps/plans/
-                                # app_deploys and so need a MIGRATED database.
-                                # --dsn <url> points it at a server you control.
+tests/run_billing_suite.sh      # migrate + test zeroship-control and zeroship-migrate-server
+tests/run_worker_suite.sh       # migrate + test zeroship-worker
 tests/sweep_test_databases.sh   # reclaim the test databases no branch can ask
                                 # for. Dry run unless --apply; never FORCE.
 ./tests/golden_path.sh          # build a creator app locally and deploy it

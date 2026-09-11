@@ -4,16 +4,10 @@
 // `crates/zeroship-gateway/src/lib.rs` for why a structural fix does not apply.
 #![recursion_limit = "256"]
 
-//! Live-PG tests for the DW-04 workflow engine scheduler.
-//!
-//! Requires `CONTROL_TEST_DB` pointing at a migrated disposable database. Each
-//! test clones that migrated DB into its own throwaway database because the
-//! engine claims due workflow runs globally across the connected database.
-//!
-//! An unset `CONTROL_TEST_DB` is a REFUSAL naming `tests/run_billing_suite.sh`,
-//! never a skip. It used to skip, and `tests/run_billing_suite.sh` records what
-//! that bought: dropping the export made this binary's tests announce
-//! "CONTROL_TEST_DB not set" and pass without executing.
+//! Mandatory PostgreSQL tests for the workflow engine scheduler.
+//! The shared test configuration must name a migrated database. Each fixture
+//! clones it into a disposable database to isolate fleet-wide engine claims.
+//! Run tests/run_billing_suite.sh to prepare the template and run the suite.
 
 #![allow(clippy::await_holding_lock, clippy::future_not_send)]
 
@@ -64,10 +58,6 @@ const TEST_WORKER_OWNER: &str = "test-worker-owner";
 
 static DB_CLONE_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 static TIMING_TEST_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-fn db_url() -> Option<String> {
-    zeroship_core::test_env!("CONTROL_TEST_DB")
-}
 
 fn tmpdir(label: &str) -> PathBuf {
     let path = std::env::temp_dir().join(format!(
@@ -242,21 +232,7 @@ async fn isolated_fixture(label: &str) -> Fixture {
 }
 
 async fn isolated_fixture_with_gateway(label: &str, gateway_url: &str) -> Fixture {
-    let Some(base_url) = db_url() else {
-        common::refuse_missing_backend(
-            "a migrated disposable PostgreSQL named by CONTROL_TEST_DB",
-            "CONTROL_TEST_DB is unset, so there is no database to clone a \
-             per-test one from",
-            "Run this target through the suite that provisions and exports it:\n\
-             \x20     tests/run_billing_suite.sh\n\
-             \n\
-             \x20   It creates a per-run database, applies the platform\n\
-             \x20   migrations to it, and exports CONTROL_TEST_DB. Point the\n\
-             \x20   tests at an already-migrated database instead with:\n\
-             \x20     CONTROL_TEST_DB=<dsn> cargo test -p zeroship-control \\\n\
-             \x20       --features live-db-tests --test workflow_engine_test",
-        );
-    };
+    let base_url = common::require_control_db();
     build_isolated_fixture_with_gateway(&base_url, label, gateway_url).await
 }
 
@@ -266,10 +242,10 @@ async fn build_isolated_fixture_with_gateway(
     gateway_url: &str,
 ) -> Fixture {
     let source_db = db_name_from_dsn(base_url)
-        .unwrap_or_else(|| panic!("CONTROL_TEST_DB must include a database name: {base_url}"));
+        .unwrap_or_else(|| panic!("configured test database must include a database name: {base_url}"));
     assert_ne!(
         source_db, "postgres",
-        "CONTROL_TEST_DB must point at a migrated disposable DB, not the postgres maintenance DB"
+        "configured test database must point at a migrated disposable DB, not the postgres maintenance DB"
     );
     let db_name = fresh_test_db_name(label);
     let admin_url = dsn_for_db(base_url, "postgres");
@@ -7277,7 +7253,7 @@ async fn parked_cancel_reaper_skips_an_app_whose_journal_is_unreadable() {
     // VALUE, not in a WARN nobody greps.
     //
     // `apps_skipped` is asserted absolutely and `apps_swept` only as a floor:
-    // the CONTROL_TEST_DB template may already hold journalled apps (a shared
+    // the configured test database template may already hold journalled apps (a shared
     // billing test DB does), which moves `apps_swept` and `apps_total` but not
     // the skip count, since nothing in a migrated template is unreadable.
     assert_eq!(
@@ -7490,7 +7466,7 @@ async fn retention_tick_opens_the_same_connections_for_a_large_fleet_as_a_small_
     let small = retention_over_fleet("fleet-conn-small", 2).await;
     let large = retention_over_fleet("fleet-conn-large", 12).await;
 
-    // A floor, not an equality: the CONTROL_TEST_DB template may already hold
+    // A floor, not an equality: the configured test database template may already hold
     // journalled apps of its own with expired runs. The point of asserting it
     // at all is that both sweeps did real per-app work, so an equal session
     // count cannot come from a loop that never ran.
@@ -7523,90 +7499,94 @@ async fn retention_tick_opens_the_same_connections_for_a_large_fleet_as_a_small_
 // Run lookup: "no such run" must not be manufactured from a permission gap
 // ===========================================================================
 
-/// Locating a run must not answer "no such run" while an app's journal is
-/// unreadable.
-///
-/// `find_run_tables` returning `None` is a DECISION, not a report: its callers
-/// ack the run's scheduler timer as terminal or conclude there are no children
-/// to cancel. Taking the app list from a helper that drops unreadable apps made
-/// a permission gap on ANY app look like "this run does not exist", and the
-/// live run behind it lost its timer.
-///
-/// The pair below is one variable apart. Both seed a run in app A and revoke
-/// app B; the first asks for a run that does exist, the second for one that
-/// does not. The first must still succeed - the fix must not couple a healthy
-/// tenant's lookup to another tenant's privilege gap - and the second must
-/// error rather than say `None`.
-///
-/// WHAT THIS DOES NOT CATCH. It exercises the lookup directly through a
-/// test-only accessor, so it does NOT prove the callers behave better: nothing
-/// here asserts that `sync_scheduler_for_run_on` stops acking terminal or that
-/// `cascade_cancel_children` stops reporting no children. It covers only the
-/// catalog-level unreadable case, not a journal that turns unreadable between
-/// the app-list query and the per-app SELECT, which still propagates as a raw
-/// error. And it says nothing about ordering cost: the fix searches every
-/// readable app before it looks at the exclusions, which is the same scan the
-/// old code did.
+/// Timer registration must find and schedule a readable run despite a
+/// privilege gap in another app's journal. Exercise the production entrypoint
+/// and verify its scheduler write.
 #[compio::test]
 async fn run_lookup_finds_a_readable_apps_run_while_another_journal_is_unreadable() {
     let fx = isolated_fixture("lookup-readable-wins").await;
     let (good_app, good_deploy) = seed_app_and_deploy(&fx, "lookup-good").await;
-    let run_id = seed_run(&fx, good_app, &good_deploy, "sleeping", 60_000, None, None, None, None)
-        .await;
+    let run_id = seed_run(
+        &fx,
+        good_app,
+        &good_deploy,
+        "sleeping",
+        60_000,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
     let (other_app, _other_deploy) = seed_app_and_deploy(&fx, "lookup-other").await;
     revoke_journal_access(&fx, &other_app).await;
 
-    let control_url = dsn_as_role(&fx.db_url, "zeroship_control", "zeroship_control");
-    let found = {
-        let control_registry = Registry::new(&control_url)
-            .await
-            .expect("connect a registry as the zeroship_control role");
-        let found = workflow_engine::__find_run_app_for_test(&control_registry, &run_id).await;
-        drop(control_registry);
-        found
-    };
+    let ctl = control_role_fixture(&fx, "lookup-readable").await;
+    fx.scheduler_store
+        .ack_terminal(&run_id)
+        .await
+        .expect("remove seeded timer");
+    workflow_engine::register_run_timer(&ctl.state, &run_id)
+        .await
+        .expect("a readable run must be scheduled despite another journal's privilege gap");
+    let row = fx
+        .pg
+        .query_one(
+            "SELECT app_id FROM zeroship.workflow_scheduler_timers WHERE run_id = $1",
+            &[&run_id],
+        )
+        .await
+        .expect("timer must be registered");
+    assert_eq!(row.get::<_, Uuid>("app_id"), good_app);
+    drop(ctl);
     drop(fx);
     common::drain_pg().await;
-
-    assert_eq!(
-        found.expect("a run in a READABLE journal must still be found"),
-        Some(good_app),
-        "the lookup must not be coupled to another tenant's privilege gap"
-    );
 }
 
-/// The control for the test above: same fleet, same revoke, a run id that
-/// exists nowhere.
-///
-/// This is the arm that discriminates. Before the fix it returned `Ok(None)`,
-/// which every caller reads as "this run is gone" - and it was the same
-/// `Ok(None)` a genuinely absent run produces, so the two were unrecoverably
-/// confused. It must now be an error.
+/// An unresolved run must retain its timer while any journal is unreadable.
+/// Treating the lookup as definitive absence would acknowledge the timer as
+/// terminal and silently lose the work. Registration must return an error.
 #[compio::test]
 async fn run_lookup_refuses_to_report_absent_while_a_journal_is_unreadable() {
     let fx = isolated_fixture("lookup-unknown-errors").await;
     let (good_app, good_deploy) = seed_app_and_deploy(&fx, "lookup-good").await;
-    let _present = seed_run(&fx, good_app, &good_deploy, "sleeping", 60_000, None, None, None, None)
-        .await;
+    let _present = seed_run(
+        &fx,
+        good_app,
+        &good_deploy,
+        "sleeping",
+        60_000,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
     let (other_app, _other_deploy) = seed_app_and_deploy(&fx, "lookup-other").await;
     revoke_journal_access(&fx, &other_app).await;
 
-    let control_url = dsn_as_role(&fx.db_url, "zeroship_control", "zeroship_control");
-    let absent = {
-        let control_registry = Registry::new(&control_url)
-            .await
-            .expect("connect a registry as the zeroship_control role");
-        let absent =
-            workflow_engine::__find_run_app_for_test(&control_registry, "wfr_does_not_exist").await;
-        drop(control_registry);
-        absent
-    };
+    let ctl = control_role_fixture(&fx, "lookup-unreadable").await;
+    let unknown = "wfr_does_not_exist";
+    fx.scheduler_store
+        .register_timer(unknown, good_app, Utc::now())
+        .await
+        .expect("register a timer whose journal cannot be resolved");
+    let absent = workflow_engine::register_run_timer(&ctl.state, unknown).await;
+    let row = fx.pg.query_one(
+        "SELECT count(*)::bigint AS n FROM zeroship.workflow_scheduler_timers WHERE run_id = $1",
+        &[&unknown],
+    ).await.expect("inspect unresolved timer");
+    assert_eq!(
+        row.get::<_, i64>("n"),
+        1,
+        "an unreadable journal must not cause terminal acknowledgement"
+    );
+    drop(ctl);
     drop(fx);
     common::drain_pg().await;
 
-    let err = absent.expect_err(
-        "with a journal it cannot read, the lookup must not claim the run is absent",
-    );
+    let err = absent
+        .expect_err("with a journal it cannot read, the lookup must not claim the run is absent");
     let message = err.to_string();
     assert!(
         message.contains("unreadable"),

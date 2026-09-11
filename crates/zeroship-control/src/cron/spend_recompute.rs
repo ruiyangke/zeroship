@@ -579,13 +579,8 @@ mod tests {
 /// snapshot, so it needs a reachable, migrated PostgreSQL and panics on connect
 /// without one.
 ///
-/// `required-features` in Cargo.toml gates whole targets and cannot reach inside
-/// a lib, so the gate is spelled as a `cfg` here. It is the same
-/// `live-db-tests` feature the crate's 44 gated integration targets carry, and
-/// the same single `cargo test -p zeroship-control --features live-db-tests`
-/// invocation runs it - the lib target is built with the feature too, so these
-/// cases need no separate entry anywhere.
-#[cfg(all(test, feature = "live-db-tests"))]
+/// Included in ordinary cargo test; tests/run_billing_suite.sh prepares the DB.
+#[cfg(test)]
 mod live_db_tests {
     use std::collections::BTreeMap;
     use std::sync::Mutex;

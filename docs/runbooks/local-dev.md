@@ -220,7 +220,11 @@ The shared PostgreSQL and SMTP suites use the provisioner:
 tests/provision_test_backends.sh
 ```
 
-It writes the PostgreSQL test overlay and starts the mailer test's SMTP sink.
+Database verification is part of ordinary `cargo test`; it has no opt-in
+feature. Libtest runs serially by default because platform fixtures share
+fleet-wide state. The suite runners below prepare the required migrations.
+
+The provisioner writes the PostgreSQL test overlay and starts the mailer test's SMTP sink.
 Use `PG_TEST_URL` or `AUTH_TEST_SMTP_SINK` to target your own servers.
 KV and Redis driver tests provision their required servers with Testcontainers;
 they need Docker and do not read shared Redis URLs. See the
@@ -229,18 +233,9 @@ they need Docker and do not read shared Redis URLs. See the
 ```bash
 cargo test -p zeroship-core
 cargo test -p zeroship-gateway
-cargo test -p zeroship-control
-# The control suites that need a live, migrated Postgres are behind the
-# `live-db-tests` feature, so the line above runs only the database-free ones.
-# To run the whole crate, provision the database first (tests/run_billing_suite.sh
-# does both):
-cargo test -p zeroship-control --features live-db-tests
-cargo test -p zeroship-worker
-# Same arrangement in the worker: the seven `workflow_advance_*` tests claim a
-# run by joining `zeroship.apps` / `plans` / `app_deploys`, so they need a
-# MIGRATED database and not merely a reachable one. They are behind
-# `live-db-tests`, and `tests/run_worker_suite.sh` is what provisions the
-# database and runs them.
+# These runners prepare migrated databases and run all package tests.
+tests/run_billing_suite.sh   # control and migration service
+tests/run_worker_suite.sh
 cargo test -p zeroship-runtime --lib
 cargo test -p compio-postgres -- --test-threads=1
 ./tests/e2e_platform.sh

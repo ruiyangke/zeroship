@@ -166,10 +166,8 @@ echo "=== DW-07 test warmup ==="
 # resolves. Every selection below names the target and filters on the module
 # path, which is a prefix of every test name in it.
 cargo test -p zeroship-control --test main --no-run
-# workflow_engine_test needs a live PostgreSQL and therefore carries
-# `required-features = ["live-db-tests"]`; without the feature cargo reports "no
-# test target named workflow_engine_test" rather than building it.
-cargo test -p zeroship-control --features live-db-tests --test workflow_engine_test --no-run
+# The workflow engine target is included by default and requires migrated PostgreSQL.
+cargo test -p zeroship-control --test workflow_engine_test --no-run
 pass "test binaries warmed"
 
 echo "=== DW-07 database :$PG_PORT ==="
@@ -842,7 +840,7 @@ pass "stopped real services; workflow engine regression runs alone"
 
 echo "=== DW-07 workflow engine regression ==="
 PG_TEST_URL="$DBURL" \
-  cargo test -p zeroship-control --features live-db-tests --test workflow_engine_test -- --nocapture --test-threads=1 || {
+  cargo test -p zeroship-control --test workflow_engine_test -- --nocapture --test-threads=1 || {
     fail "DW-07 workflow engine regression failed"
     echo "--- control.log ---"
     tail -120 "$WORK/control.log" || true
