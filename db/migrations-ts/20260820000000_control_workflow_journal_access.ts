@@ -13,9 +13,9 @@ import { raw } from "@zeroship/migrate";
 // not enough for two independent reasons:
 //
 //   1. Control CREATES journal tables. workflow_instance_api.rs (start run) and
-//      cron/workflow_schedules.rs both call PgStore::provision, whose first
-//      statement is `SET ROLE zeroship_workflow_owner`
-//      (crates/zeroship-plugin-workflow/src/store/pg.rs, set_workflow_journal_owner_role_sql).
+//      cron/workflow_schedules.rs both call PgStore::provision, whose DDL
+//      runs under `SET ROLE zeroship_workflow_owner`
+//      (crates/zeroship-workflow/src/store/pg.rs, set_workflow_journal_owner_role_sql).
 //      SET ROLE is gated on MEMBERSHIP; no combination of table privileges
 //      substitutes for it.
 //   2. The journal schemas are per-app and created after this file runs. A

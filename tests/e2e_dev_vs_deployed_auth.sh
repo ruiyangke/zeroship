@@ -4,9 +4,8 @@
 # against `pnpm dev` and against the same app deployed behind the gateway, then
 # diff the RESULTS.
 #
-# Scenario 6 of docs/pilot/e2e-scenarios.md. The sibling harnesses
-# (e2e_dev_vs_deployed_{kv,storage,workflows}.sh) compare a data primitive
-# across two backends; this one compares the AUTH CONTRACT SURFACE across two
+# See docs/pilot/e2e-scenarios.md. The KV, storage, and workflow examples
+# own their data primitive parity tests. This harness compares auth across
 # identity providers -- status codes, error `code` strings, the JSON error
 # envelope, and the exact field set of `env.auth.getUser()`.
 #

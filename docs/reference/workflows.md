@@ -26,6 +26,18 @@ authorizes the request; possession of a Rust handle does not bypass it.
 its app-scoped credential with `app_scoped_token`; the control key stays outside
 V8. Workflow execution remains replay of the deployed JavaScript class.
 
+## Testing
+
+Run `cargo xtask test workflow` after building the workspace SDKs. Rust tests
+own backing services through Testcontainers and include API isolation, journal
+fencing, scheduling, real worker replay, and gateway dispatch authorization.
+Docker is required; unavailable services fail the tests.
+
+The workflow examples own their Vitest and Playwright tests, fixtures, and
+configuration. Run `pnpm test` from `examples/workflow-probe` or
+`examples/workflows-order` to test an example independently. The test runner
+builds the example and platform binaries before starting its services.
+
 ## Journal provisioning
 
 Before starting deployed workflows, provision their app journal through the
