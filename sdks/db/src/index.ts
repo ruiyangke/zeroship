@@ -32,3 +32,4 @@ export type { Db, Collections, DbExtensions, TxCollection, TxQuery, TransactionO
 export type { PaginationResult } from "./query";
 export type { FieldDef, FieldStorage, AuxiliaryObject, FieldDefaultValue, PlainObject, Result, Row, RowInput, UpsertOptions, SystemFields, UpdateExpression, Filter, NamingStrategy, SchemaOptions, InferSchema, InferUnion, InferFieldDef, IsolationLevel, Id, FkAction, RefOptions, InferRow, InferRowInput, InferId, MaskKind, Classification, MaskOpts, MaskedValueRepr, MaskedValue, Actor, NamedIndexSpec, WithRelations, WithSpec } from "./types";
 export type { NormalizedSchema } from "./schema";
+export type { JsonValue } from "./types";

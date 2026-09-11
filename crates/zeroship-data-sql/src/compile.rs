@@ -503,7 +503,7 @@ fn validate_read_identifier(name: &str, schema_hint: &Value) -> Result<(), Query
 fn validate_value_operation(field: &str, schema: &Value) -> Result<(), QueryError> {
     if schema
         .get(field)
-        .is_some_and(|def| crate::descriptors::is_encrypted(def))
+        .is_some_and(crate::descriptors::is_encrypted)
     {
         return Err(QueryError::InvalidFilter(format!(
             "encrypted field '{field}' cannot be filtered, sorted, grouped, or used as a conflict target"
@@ -771,7 +771,7 @@ fn push_field_value_bind(
     let kind = definition
         .and_then(|field| field.get("type"))
         .and_then(Value::as_str);
-    let protected = definition.is_some_and(|field| crate::descriptors::is_encrypted(field))
+    let protected = definition.is_some_and(crate::descriptors::is_encrypted)
         || column_is_masked(field, schema_hint);
     let timestamp = !protected
         && (matches!(kind, Some("date" | "timestamp"))
