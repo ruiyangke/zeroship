@@ -90,7 +90,9 @@ fn checked(command: &mut Command, description: &str) -> Result<()> {
         }
         if INTERRUPTED.load(Ordering::Relaxed) {
             if let Some(started) = interrupt {
-                if Instant::now().duration_since(started) > Duration::from_secs(30) {
+                // Outlast nextest's shutdown grace period so its fixture
+                // watchdogs can finish removing containers before we reap it.
+                if Instant::now().duration_since(started) > Duration::from_secs(60) {
                     let _ = child.kill();
                     let _ = child.wait();
                     return Err("test run interrupted".into());
