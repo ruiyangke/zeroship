@@ -5,8 +5,11 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "smoke": "cargo test --manifest-path ../../Cargo.toml -p zeroship-cli --test kv_deployment -- --nocapture",
-    "typecheck": "tsc --noEmit"
+    "smoke": "vitest run tests/rpc.test.ts",
+    "test:acceptance": "pnpm test",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.tests.json",
+    "test": "cargo test --manifest-path tests/platform/Cargo.toml --test acceptance -- --nocapture",
+    "test:browser": "vitest run tests/browser.test.ts"
   },
   "dependencies": {
     "@vitejs/plugin-react": "catalog:",
@@ -23,6 +26,9 @@
     "@zeroship/types": "workspace:*",
     "typescript": "catalog:",
     "vite": "catalog:",
-    "zeroship": "workspace:*"
+    "zeroship": "workspace:*",
+    "@types/node": "catalog:",
+    "vitest": "^4.1.7",
+    "playwright": "1.58.2"
   }
 }

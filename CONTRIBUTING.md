@@ -100,6 +100,11 @@ pnpm check            # typecheck every sdks/* package
 pnpm test             # vitest across sdks/*
 ```
 
+Examples own their tests, fixtures, test configuration, and test dependencies
+under their example directory. Repository test commands and CI invoke those
+local entry points. Keep example-specific acceptance logic out of shared test
+helpers and platform crate test suites.
+
 Web Platform Tests (only when you touch the runtime's web surface) are fetched on
 demand and are not tracked in git:
 

@@ -3302,6 +3302,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "kv-dashboard-tests"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "ed25519-dalek",
+ "nix",
+ "rand 0.8.5",
+ "rcgen",
+ "serde_json",
+ "tar",
+ "tempfile",
+ "testcontainers",
+ "toml 0.8.23",
+ "ureq",
+ "uuid",
+ "zeroship-core",
+ "zstd",
+]
+
+[[package]]
 name = "lalrpop"
 version = "0.22.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7959,17 +7979,11 @@ dependencies = [
  "hex",
  "jsonc-parser",
  "libc",
- "nix",
  "percent-encoding",
  "rand 0.8.5",
- "rcgen",
  "serde",
  "serde_json",
- "tar",
  "tempfile",
- "testcontainers",
- "toml 0.8.23",
- "ureq",
  "url",
  "uuid",
  "zeroship-core",
@@ -7981,7 +7995,6 @@ dependencies = [
  "zeroship-plugin-storage",
  "zeroship-plugin-workflow",
  "zeroship-runtime",
- "zstd",
 ]
 
 [[package]]

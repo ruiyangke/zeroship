@@ -16,7 +16,7 @@ use rand::rngs::OsRng;
 use serde_json::{json, Value};
 use tempfile::TempDir;
 use testcontainers::{
-    core::{IntoContainerPort, WaitFor},
+    core::{CmdWaitFor, ExecCommand, IntoContainerPort, WaitFor},
     runners::SyncRunner,
     Container, GenericImage, ImageExt,
 };
@@ -120,7 +120,7 @@ fn copy_app(source: &Path, target: &Path) {
         let name = entry.file_name();
         if matches!(
             name.to_str(),
-            Some("node_modules" | "dist" | ".zeroship" | "scripts")
+            Some("node_modules" | "dist" | ".zeroship" | "tests")
         ) {
             continue;
         }
@@ -182,12 +182,15 @@ impl Drop for Workspace {
 }
 
 pub struct Platform {
-    pub http: ureq::Agent,
     pub dev_url: String,
     pub deployed_url: String,
+    deployed_ui_url: String,
+    example: PathBuf,
+    dev_ui_url: String,
     processes: Vec<Process>,
     _redis: Container<GenericImage>,
     _postgres: Container<GenericImage>,
+    _issuer: super::issuer::Issuer,
     _workspace: Workspace,
 }
 
@@ -195,7 +198,7 @@ impl Platform {
     pub fn start() -> Self {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .ancestors()
-            .nth(2)
+            .nth(4)
             .unwrap();
         let workspace = Workspace(Some(
             tempfile::Builder::new()
@@ -333,6 +336,13 @@ impl Platform {
             redis.get_host_port_ipv4(6379).unwrap()
         );
         let kv_file = secret(work, "kv.toml", kv_config.as_bytes());
+        let issuer = super::issuer::Issuer::start();
+        let owner = uuid::Uuid::new_v4();
+        postgres.exec(ExecCommand::new([
+            "psql", "-U", "postgres", "-d", "kv_fixture", "-v", "ON_ERROR_STOP=1", "-c",
+            &format!("INSERT INTO zeroship.users (id, email, name, email_verified_at) VALUES ('{owner}', 'kv-{owner}@zeroship.test', 'KV fixture owner', NOW())")
+        ]).with_cmd_ready_condition(CmdWaitFor::exit_code(0))).expect("seed the authenticated fixture owner");
+        let bearer = issuer.bearer(owner);
 
         let mut peer_keys = Vec::new();
         let mut keys = BTreeMap::new();
@@ -368,6 +378,10 @@ impl Platform {
         let control_url = format!("http://{}", control_port.local_addr().unwrap());
         let gateway_port = port();
         let gateway_url = format!("http://{}", gateway_port.local_addr().unwrap());
+        let deployed_ui_url = format!(
+            "http://kvdash.localhost:{}",
+            gateway_port.local_addr().unwrap().port()
+        );
         let worker_port = port();
         let worker_url = format!("http://{}", worker_port.local_addr().unwrap());
         let relay_port = port();
@@ -387,10 +401,7 @@ impl Platform {
             cmd.env("ZEROSHIP_CONTROL_KEY", &control_key)
                 .env("ZEROSHIP_PAIRWISE_SALT", &pairwise)
                 .env("ZEROSHIP_ORIGIN_SCHEME", "http")
-                .env(
-                    "ZEROSHIP_AUTH_PLATFORM_ISSUER",
-                    format!("{control_url}/unused-issuer"),
-                )
+                .env("ZEROSHIP_AUTH_PLATFORM_ISSUER", &issuer.url)
                 .env("ZEROSHIP_OBSERVABILITY_LOG_FORMAT", "json");
             cmd
         };
@@ -511,20 +522,31 @@ impl Platform {
             &http,
             &format!("{gateway_url}/readyz"),
         );
+        eprintln!("KV fixture: create the app through control and deploy with the CLI");
+        let created: Value = http
+            .post(&format!("{control_url}/api/apps"))
+            .header("Authorization", &format!("Bearer {bearer}"))
+            .send_json(json!({"name": "kvdash"}))
+            .unwrap_or_else(|error| panic!("create KV app through control: {error}"))
+            .body_mut()
+            .read_json()
+            .expect("created app JSON");
+        let app_id = created["id"].as_str().expect("created app id");
         Process::run(
-            command(&binaries["dev-provision"], work)
-                .env("DATABASE_URL", &dsn)
-                .arg("--blob-store")
-                .arg(&blobs)
-                .args(["--name", "kvdash", "--zship"])
-                .arg(bundle),
+            command(&binaries["zeroship"], work)
+                .arg("deploy")
+                .arg(bundle)
+                .arg(format!("--app={app_id}"))
+                .arg(format!("--control={control_url}"))
+                .arg(format!("--token={bearer}"))
+                .env("HOME", work),
             work.join("deploy.log"),
         );
-
         eprintln!("KV fixture: start local Vite and wait for app dispatch");
         let dev_port = port();
         let dev_url = format!("http://{}", dev_port.local_addr().unwrap());
         let vite_port = port();
+        let dev_ui_url = format!("http://{}", vite_port.local_addr().unwrap());
         let mut vite = command("node", &app);
         vite.arg(app.join("node_modules/vite/bin/vite.js"))
             .args([
@@ -565,12 +587,15 @@ impl Platform {
             }
         }
         Self {
-            http,
             dev_url,
             deployed_url,
+            deployed_ui_url,
+            example: root.join("examples/kv-dashboard"),
+            dev_ui_url,
             processes,
             _redis: redis,
             _postgres: postgres,
+            _issuer: issuer,
             _workspace: workspace,
         }
     }
@@ -579,6 +604,32 @@ impl Platform {
         for process in &mut self.processes {
             process.assert_alive();
         }
+    }
+
+    pub fn test_example(&self) {
+        let targets = json!([
+            {"name":"redb", "apiUrl":self.dev_url, "uiUrl":self.dev_ui_url},
+            {"name":"redis", "apiUrl":self.deployed_url, "uiUrl":self.deployed_ui_url}
+        ]);
+        let mut test = command("node", &self.example);
+        test.arg(self.example.join("node_modules/vitest/vitest.mjs"))
+            .arg("run")
+            .env("KV_DASHBOARD_TARGETS", targets.to_string());
+        if let Some(path) =
+            zeroship_core::declared_env_os!(external, "HOME", zeroship_core::config::TestHarness)
+        {
+            test.env("HOME", path);
+        }
+        if let Some(path) = zeroship_core::declared_env_os!(
+            external,
+            "PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH",
+            zeroship_core::config::TestHarness
+        ) {
+            test.env("PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH", path);
+        }
+        eprintln!("KV fixture: run the example's RPC and browser suites");
+        let output = Process::run(&mut test, self._workspace.path().join("vitest.log"));
+        eprintln!("{output}");
     }
 }
 
