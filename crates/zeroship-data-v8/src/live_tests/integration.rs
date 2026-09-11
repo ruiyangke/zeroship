@@ -205,7 +205,6 @@ fn hex_of(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 #[allow(unused_imports)]
-#[allow(unused_imports)]
 use zeroship_data_orm::search::Search;
 
 /// Release everything this test opened against Postgres, then wait for the

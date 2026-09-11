@@ -110,8 +110,7 @@ pub use orm_context::OrmContext;
 mod tx_lane_state_tests;
 
 #[cfg(test)]
-#[path = "../../../tests/fixtures/postgres/mod.rs"]
-mod postgres_fixture;
+use live_tests::support::postgres as postgres_fixture;
 
 #[cfg(test)]
 mod live_tests;
