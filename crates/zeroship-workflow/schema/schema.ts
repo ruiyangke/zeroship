@@ -33,17 +33,29 @@ export function workflowSchema(namespace) {
   }, ["app_id", "id"], [appFk("deploys")], [
     { name: "deploy_hash_identity", columns: ["app_id", "hash"] },
   ]);
+  create("schedules", {
+    ...identity(), id: text(), name: text(), workflow_name: text(), deploy_id: text(), definition: text(),
+    next_at: t.bigInt(), revision: integer(), anchor_at: integer(), last_checked_at: integer(),
+  }, ["app_id", "id"], [
+    appFk("schedules"),
+    fk("schedule_deploy", ["app_id", "deploy_id"], "deploys", ["app_id", "id"]),
+  ], [{ name: "schedule_name", columns: ["app_id", "name"] }]);
+  index("schedules", "due", ["next_at", "app_id", "id"]);
   create("runs", {
     ...identity(), id: text(), workflow_name: text(), deploy_id: text(),
     generation: integer(), state: text(), control: text(), due_at: t.bigInt(),
     task_id: t.text(), lease_epoch: integer(), key: t.text(),
     parent_id: t.text(), parent_generation: t.bigInt(), parent_ordinal: t.bigInt(),
     cascade: integer(), depth: integer(), created_at: integer(), terminal_at: t.bigInt(),
-    signal_epoch: integer(), compensation_target: t.text(),
+    signal_epoch: integer(), compensation_target: t.text(), schedule_id: t.text(),
+    continued_from_id: t.text(), continued_to_id: t.text(),
   }, ["app_id", "id"], [
     appFk("runs"),
     fk("run_deploy", ["app_id", "deploy_id"], "deploys", ["app_id", "id"]),
     fk("run_parent", ["app_id", "parent_id"], "runs", ["app_id", "id"]),
+    fk("run_schedule", ["app_id", "schedule_id"], "schedules", ["app_id", "id"]),
+    fk("run_continued_from", ["app_id", "continued_from_id"], "runs", ["app_id", "id"]),
+    fk("run_continued_to", ["app_id", "continued_to_id"], "runs", ["app_id", "id"]),
   ], [{ name: "live_workflow_key", columns: ["app_id", "workflow_name", "key"] }]);
   index("runs", "due", ["due_at", "app_id", "id"]);
   index("runs", "parent", ["app_id", "parent_id", "parent_generation"]);
@@ -102,14 +114,6 @@ export function workflowSchema(namespace) {
     ...identity(), id: text(), operation: text(), digest: text(), result: text(), expires_at: integer(),
   }, ["app_id", "id"], [appFk("requests")]);
   index("requests", "expiry", ["expires_at"]);
-  create("schedules", {
-    ...identity(), id: text(), workflow_name: text(), deploy_id: text(), definition: text(),
-    next_at: t.bigInt(), revision: integer(),
-  }, ["app_id", "id"], [
-    appFk("schedules"),
-    fk("schedule_deploy", ["app_id", "deploy_id"], "deploys", ["app_id", "id"]),
-  ]);
-  index("schedules", "due", ["next_at", "app_id", "id"]);
   create("occurrences", {
     ...identity(), schedule_id: text(), at: integer(), run_id: t.text(),
   }, ["app_id", "schedule_id", "at"], [

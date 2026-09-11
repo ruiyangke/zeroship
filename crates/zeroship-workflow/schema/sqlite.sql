@@ -7,11 +7,25 @@ CREATE TABLE "deploys" ("app_id" TEXT NOT NULL, "id" TEXT NOT NULL, "hash" TEXT 
 
 CREATE UNIQUE INDEX IF NOT EXISTS "deploy_hash_identity" ON "deploys" ("app_id", "hash");
 
-CREATE TABLE "runs" ("app_id" TEXT NOT NULL, "id" TEXT NOT NULL, "workflow_name" TEXT NOT NULL, "deploy_id" TEXT NOT NULL, "generation" INTEGER NOT NULL, "state" TEXT NOT NULL, "control" TEXT NOT NULL, "due_at" INTEGER, "task_id" TEXT, "lease_epoch" INTEGER NOT NULL, "key" TEXT, "parent_id" TEXT, "parent_generation" INTEGER, "parent_ordinal" INTEGER, "cascade" INTEGER NOT NULL, "depth" INTEGER NOT NULL, "created_at" INTEGER NOT NULL, "terminal_at" INTEGER, "signal_epoch" INTEGER NOT NULL, "compensation_target" TEXT, CONSTRAINT "run_deploy" FOREIGN KEY (app_id, deploy_id) REFERENCES deploys(app_id, id) ON DELETE RESTRICT, CONSTRAINT "run_parent" FOREIGN KEY (app_id, parent_id) REFERENCES runs(app_id, id) ON DELETE RESTRICT, CONSTRAINT "runs_app" FOREIGN KEY (app_id) REFERENCES apps(app_id) ON DELETE RESTRICT, CONSTRAINT "runs_pkey" PRIMARY KEY (app_id, id));
+CREATE TABLE "schedules" ("app_id" TEXT NOT NULL, "id" TEXT NOT NULL, "name" TEXT NOT NULL, "workflow_name" TEXT NOT NULL, "deploy_id" TEXT NOT NULL, "definition" TEXT NOT NULL, "next_at" INTEGER, "revision" INTEGER NOT NULL, "anchor_at" INTEGER NOT NULL, "last_checked_at" INTEGER NOT NULL, CONSTRAINT "schedule_deploy" FOREIGN KEY (app_id, deploy_id) REFERENCES deploys(app_id, id) ON DELETE RESTRICT, CONSTRAINT "schedules_app" FOREIGN KEY (app_id) REFERENCES apps(app_id) ON DELETE RESTRICT, CONSTRAINT "schedules_pkey" PRIMARY KEY (app_id, id));
+
+CREATE INDEX IF NOT EXISTS "schedule_deploy_idx" ON "schedules" ("app_id", "deploy_id");
+
+CREATE UNIQUE INDEX IF NOT EXISTS "schedule_name" ON "schedules" ("app_id", "name");
+
+CREATE INDEX IF NOT EXISTS "schedules_due_idx" ON "schedules" ("next_at", "app_id", "id");
+
+CREATE TABLE "runs" ("app_id" TEXT NOT NULL, "id" TEXT NOT NULL, "workflow_name" TEXT NOT NULL, "deploy_id" TEXT NOT NULL, "generation" INTEGER NOT NULL, "state" TEXT NOT NULL, "control" TEXT NOT NULL, "due_at" INTEGER, "task_id" TEXT, "lease_epoch" INTEGER NOT NULL, "key" TEXT, "parent_id" TEXT, "parent_generation" INTEGER, "parent_ordinal" INTEGER, "cascade" INTEGER NOT NULL, "depth" INTEGER NOT NULL, "created_at" INTEGER NOT NULL, "terminal_at" INTEGER, "signal_epoch" INTEGER NOT NULL, "compensation_target" TEXT, "schedule_id" TEXT, "continued_from_id" TEXT, "continued_to_id" TEXT, CONSTRAINT "run_continued_from" FOREIGN KEY (app_id, continued_from_id) REFERENCES runs(app_id, id) ON DELETE RESTRICT, CONSTRAINT "run_continued_to" FOREIGN KEY (app_id, continued_to_id) REFERENCES runs(app_id, id) ON DELETE RESTRICT, CONSTRAINT "run_deploy" FOREIGN KEY (app_id, deploy_id) REFERENCES deploys(app_id, id) ON DELETE RESTRICT, CONSTRAINT "run_parent" FOREIGN KEY (app_id, parent_id) REFERENCES runs(app_id, id) ON DELETE RESTRICT, CONSTRAINT "run_schedule" FOREIGN KEY (app_id, schedule_id) REFERENCES schedules(app_id, id) ON DELETE RESTRICT, CONSTRAINT "runs_app" FOREIGN KEY (app_id) REFERENCES apps(app_id) ON DELETE RESTRICT, CONSTRAINT "runs_pkey" PRIMARY KEY (app_id, id));
+
+CREATE INDEX IF NOT EXISTS "run_continued_from_idx" ON "runs" ("app_id", "continued_from_id");
+
+CREATE INDEX IF NOT EXISTS "run_continued_to_idx" ON "runs" ("app_id", "continued_to_id");
 
 CREATE INDEX IF NOT EXISTS "run_deploy_idx" ON "runs" ("app_id", "deploy_id");
 
 CREATE INDEX IF NOT EXISTS "run_parent_idx" ON "runs" ("app_id", "parent_id");
+
+CREATE INDEX IF NOT EXISTS "run_schedule_idx" ON "runs" ("app_id", "schedule_id");
 
 CREATE UNIQUE INDEX IF NOT EXISTS "live_workflow_key" ON "runs" ("app_id", "workflow_name", "key");
 
@@ -65,12 +79,6 @@ CREATE TABLE "requests" ("app_id" TEXT NOT NULL, "id" TEXT NOT NULL, "operation"
 
 CREATE INDEX IF NOT EXISTS "requests_expiry_idx" ON "requests" ("expires_at");
 
-CREATE TABLE "schedules" ("app_id" TEXT NOT NULL, "id" TEXT NOT NULL, "workflow_name" TEXT NOT NULL, "deploy_id" TEXT NOT NULL, "definition" TEXT NOT NULL, "next_at" INTEGER, "revision" INTEGER NOT NULL, CONSTRAINT "schedule_deploy" FOREIGN KEY (app_id, deploy_id) REFERENCES deploys(app_id, id) ON DELETE RESTRICT, CONSTRAINT "schedules_app" FOREIGN KEY (app_id) REFERENCES apps(app_id) ON DELETE RESTRICT, CONSTRAINT "schedules_pkey" PRIMARY KEY (app_id, id));
-
-CREATE INDEX IF NOT EXISTS "schedule_deploy_idx" ON "schedules" ("app_id", "deploy_id");
-
-CREATE INDEX IF NOT EXISTS "schedules_due_idx" ON "schedules" ("next_at", "app_id", "id");
-
 CREATE TABLE "occurrences" ("app_id" TEXT NOT NULL, "schedule_id" TEXT NOT NULL, "at" INTEGER NOT NULL, "run_id" TEXT, CONSTRAINT "occurrence_run" FOREIGN KEY (app_id, run_id) REFERENCES runs(app_id, id) ON DELETE RESTRICT, CONSTRAINT "occurrence_schedule" FOREIGN KEY (app_id, schedule_id) REFERENCES schedules(app_id, id) ON DELETE RESTRICT, CONSTRAINT "occurrences_pkey" PRIMARY KEY (app_id, schedule_id, at));
 
 CREATE INDEX IF NOT EXISTS "occurrence_run_idx" ON "occurrences" ("app_id", "run_id");
@@ -90,4 +98,4 @@ CREATE INDEX IF NOT EXISTS "payload_ref_idx" ON "payload_refs" ("app_id", "paylo
 CREATE TABLE "outbox" ("app_id" TEXT NOT NULL, "id" TEXT NOT NULL, "kind" TEXT NOT NULL, "payload" TEXT NOT NULL, "created_at" INTEGER NOT NULL, "delivered_at" INTEGER, CONSTRAINT "outbox_app" FOREIGN KEY (app_id) REFERENCES apps(app_id) ON DELETE RESTRICT, CONSTRAINT "outbox_pkey" PRIMARY KEY (app_id, id));
 
 CREATE INDEX IF NOT EXISTS "outbox_delivery_idx" ON "outbox" ("delivered_at", "created_at");
-INSERT INTO main.schema_version (id, fingerprint) VALUES ('workflow', '5aa3848772765a5f74fc943b268e129e9f985a02a0ef4b2ef858fed0fc2a3fa1');
+INSERT INTO main.schema_version (id, fingerprint) VALUES ('workflow', '41073211c06f211a25f88b40bcdad8cbcf91bd2f9b58fc08b8592c17bdd5c098');

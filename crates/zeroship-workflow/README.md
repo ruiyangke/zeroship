@@ -6,6 +6,7 @@ and the local SQLite engine. It does not depend on V8 or the worker runtime.
 
 - `engine.rs`: dispatch envelopes, outcomes, and journal folding.
 - `execution.rs`: typed replay inputs, executor outcomes and runtime decoding.
+- `calendar.rs`: shared cron parsing, timezone handling and calendar occurrences.
 - `claim.rs`, `apply.rs`, `advance.rs`: claims, fencing, and durable advancement.
 - `store/`: journal storage and its PostgreSQL implementation.
 - `backend.rs`, `client.rs`: app-scoped control-plane operations for Rust hosts.
@@ -33,8 +34,9 @@ its claim before applying them.
 
 The replacement service is under construction and is not yet composed into the
 worker, Control or CLI. Its native contracts exercise app isolation, retry
-receipts, expired leases, lifecycle changes, child execution and retained restart
-history against both database adapters. PostgreSQL fixtures use Testcontainers.
+receipts, expired leases, lifecycle changes, child execution, retained restart
+history and scheduled occurrences against both database adapters. PostgreSQL
+fixtures use Testcontainers.
 The schema check uses the built `@zeroship/migrate` and `zero-migrate-cli`
 packages and their native migration addon; regenerate with
 `node crates/zeroship-workflow/schema/generate.mjs` from the repository root.

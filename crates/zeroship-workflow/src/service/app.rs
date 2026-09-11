@@ -81,7 +81,7 @@ impl WorkflowService {
             validation::workflow_name(name)?;
         }
         let mut tx = self.store.begin().await?;
-        lock_app(&mut tx, app).await?;
+        let policy = lock_app(&mut tx, app).await?;
         let now = tx.now().await?;
         let table = tx.table("deploys");
         let rows = tx
@@ -111,6 +111,7 @@ impl WorkflowService {
             &[app.as_str().into(), deploy.id.clone().into()],
         )
         .await?;
+        super::schedules::reconcile(&mut tx, app, deploy, &policy, now).await?;
         tx.commit().await
     }
 }
