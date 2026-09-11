@@ -1,6 +1,6 @@
 # Durable workflows: `@zeroship/workflows` — replay-per-dispatch engine on the control plane
 
-- **Status:** DRAFT (uncommitted design; commits with the implementing PR-train per `feedback_proposal_workflow`).
+- **Status:** Superseded by the [workflow server design](2026-09-11-workflow-server.md). Retained as historical design context; use the replacement for implementation decisions.
 - **Date:** 2026-07-05
 - **Decision:** Add a first-class **durable workflow** primitive to the platform — creators author a `Workflow<Params, Output>` class in TypeScript, start **runs** with `env.workflows.X.start(...)`, and the engine drives them to completion across crashes, deploys, sleeps, and signals by **replaying** the workflow function once per dispatch against a **control-plane Postgres journal**. The engine is **zero-tokio** (compio/io_uring), **gateway-edge metered**, and **deploy-pinned**.
 - **Scope:** DAY-1 the engine ships with **concurrent frontier execution** (a single dispatch may execute up to *N* independent frontier steps concurrently — §6). The single-frontier engine is the `concurrency = 1` special case of the same code path; there is no separate "add concurrency later" phase.
