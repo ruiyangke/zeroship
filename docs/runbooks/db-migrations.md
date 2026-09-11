@@ -74,14 +74,21 @@ expected preparation; to rebuild only the CLI while developing it:
 pnpm --filter zero-migrate-cli build
 ```
 
-The native corpus test runs the same CLI and platform policy against an owned
-PostgreSQL container. It reconciles recorded operations with the corpus ledger,
+The native corpus tests run the same CLI and platform policy against owned
+PostgreSQL containers. The apply test reconciles recorded operations with the corpus ledger,
 checks applied identities against durable history and strict status, and verifies
 that applying again skips exactly those identities without changing history:
 
 ```bash
 cargo xtask test migrations
 ```
+
+The organization-authority tests apply the same corpus before exercising
+membership and app ownership, invitation escalation, the control role's
+privileges, and identifier collations. Refusals require PostgreSQL's expected
+SQLSTATE and constraint, with accepted controls and checks of surviving rows.
+Invitation ranks come from the migrated role ladder. These tests exercise
+database constraints; authorization decisions remain covered in `zeroship-authz`.
 
 ## Adding a migration
 
@@ -99,10 +106,12 @@ cargo xtask test migrations
    cargo xtask test migrations
    ```
 
-Docker and Node are required. After building the artifacts, the same test runs
+Docker and Node are required. After building the artifacts, the same tests run
 in ordinary `cargo test -p zeroship-migrate-node`; missing prerequisites fail
-instead of skipping database verification. Its private fixture is in
-`crates/zeroship-migrate-node/tests/platform_corpus/fixture.rs`. This test covers
+instead of skipping database verification. Their private fixture is in
+`crates/zeroship-migrate-node/tests/platform_corpus/fixture.rs`. Each database test
+owns its container and waits for its Rust connection to close before teardown.
+The tests cover
 the host CLI and database contract; it does not build the deployment image or
 invoke the operator's shell wrapper.
 
