@@ -1,41 +1,9 @@
-//! Which CONNECTION the SEARCH FAMILY uses, inside `db.transaction(fn)`.
+//! Search visibility on transaction and autocommit routes.
 //!
-//! # The claim these tests exist to rule on
-//!
-//! `run_search` and `run_near` take a `TxRoute` and read its backend once, so
-//! the scan and the read pipeline name the same `BackendHandle`. A handle is
-//! not a connection. `exec_query` honours `route.in_tx()` and issues on the
-//! app's parked transaction client; `VectorIndex::vector_search` and
-//! `SpatialIndex::spatial_near` used to call the handle directly, which lowers
-//! to `pg_autocommit::roled_json` - its own `pool.acquire()` + `BEGIN` + `COMMIT`.
-//!
-//! The consequence, one per family member and neither implying the other: a
-//! vector `search` or a spatial `near` issued inside `db.transaction(fn)`
-//! cannot see rows that same transaction has written.
-//!
-//! This is the search half of what `unmask_tx_lane.rs` rules on for the unmask
-//! fetch. The two are separate targets because they reach the pool through
-//! different functions, and a fix to one is not evidence about the other.
-//!
-//! # Why each test carries a control that differs in ONE variable
-//!
-//! "The search returned nothing" and "the fixture wrote nothing" are the same
-//! observation from the outside. Every arm therefore runs THREE reads over the
-//! same row at the same instant:
-//!
-//! 1. a plain `find` on the transaction route - proves the row is there and the
-//!    transaction lane reaches it;
-//! 2. the SAME search on a POOLED route - proves the row really is uncommitted,
-//!    so the subject arm is a question about lanes and not about visibility;
-//! 3. the SUBJECT: the search on the transaction route.
-//!
-//! Arms 2 and 3 differ in exactly one token: `route.in_tx()`.
-//!
-//! # Run it
-//!
-//! PostgreSQL comes from an owned testcontainer with vector and PostGIS.
-//! Docker and successful fixture startup are required.
-//! Run: `cargo xtask test data --filter 'test(search_tx_lane::)'`
+//! A plain transactional read proves the row exists. A search on an autocommit
+//! route proves it is uncommitted; the same search on the transaction route must
+//! see it. Vector and geographic searches exercise their respective backend paths.
+//! PostgreSQL and its required extensions come from an owned testcontainer.
 
 use crate::tests::fixtures;
 use crate::tests::fixtures::Host;

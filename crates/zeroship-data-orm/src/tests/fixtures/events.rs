@@ -1,39 +1,6 @@
-//! Test-only `tracing` capture layer for warn/error-shape contract
-//! pinning.
+//! Capture structured tracing events for assertions about diagnostic fields.
 //!
-//! # Why this exists
-//!
-//! The plugin-db crate emits structured `tracing::warn!` /
-//! `tracing::error!` events whose **field names** form an
-//! operator-grep contract — production runbooks search log streams
-//! for `app_id=…`, `audit_id=…`, `transition="Failed/…"`, and
-//! `audit_err=…`. A future commit that renames one of those fields
-//! silently breaks the runbook with no compile error.
-//!
-//! This capture harness also covers the `release_advisory_lock`
-//! typed-error caller paths.
-//!
-//! # Scope
-//!
-//! Captures every event emitted under the
-//! [`capture`] helper's `with_default` subscriber. Each event is
-//! recorded as a [`TestEvent`] carrying:
-//!
-//! - `level` — `Level::ERROR`, `Level::WARN`, etc.
-//! - `target` — module path (e.g. `"zeroship_data_orm::exec"`).
-//! - `fields` — a `HashMap<String, String>` whose keys are the
-//!   field names from the `event!(name = value, …, "message")`
-//!   call. Values are rendered via `Display` (for `record_str`)
-//!   or `Debug` (for `record_debug`). Numeric fields are
-//!   stringified.
-//! - `message` — the format-string body (the unnamed trailing
-//!   argument), captured via the special `"message"` field key
-//!   the `tracing` macros assign.
-//!
-//! `MAX_EVENTS` caps the event buffer so a buggy test
-//! that spins under the layer cannot OOM the runner.
-//!
-//! # Usage
+//! The capture subscriber is scoped to the call. `MAX_EVENTS` bounds its buffer.
 //!
 //! ```ignore
 //! use crate::tests::fixtures::events::capture;
@@ -59,9 +26,7 @@ use tracing::{Event, Level, Subscriber};
 use tracing_subscriber::layer::{Context, Layer};
 use tracing_subscriber::registry::LookupSpan;
 
-/// Cap on the per-`capture()` event buffer. A buggy test that emits
-/// in a tight loop under the layer therefore fails loudly (events
-/// past the cap are dropped) rather than OOM-ing the runner.
+/// Maximum captured events; excess events are dropped to bound memory use.
 const MAX_EVENTS: usize = 1024;
 
 /// One captured tracing event. The shape is intentionally narrow:

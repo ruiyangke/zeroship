@@ -1,53 +1,9 @@
-//! End-to-end tests for the native `Db.transaction(fn)`
-//! orchestrator against real Postgres.
+//! Creator transaction callbacks through the V8 runtime and PostgreSQL.
 //!
-//! These dispatch through a real `Runtime` + the `DbPlugin` and call
-//! `env.db.transaction(async tx => {...})`. They exercise the full
-//! Rust→V8→Rust flow the orchestrator relies on:
-//!
-//!   begin (spawned op) → Continuation (mint tx-view, call callback,
-//!   attach .then) → commit/rollback handler (spawned op) → settle outer.
-//!
-//! Scenarios:
-//!   - commit on resolve (row persists, visible afterwards);
-//!   - rollback on async reject (no row persists);
-//!   - rollback on synchronous throw inside the callback;
-//!   - nested transaction emits SAVEPOINT — inner reject rolls back to
-//!     the savepoint while the outer continues + commits;
-//!   - nested transaction inner resolve releases the savepoint (both
-//!     writes persist);
-//!   - savepoint depth cap (9th level → `savepoint_depth_exceeded`);
-//!   - tx-view is collections-only (no `commit`/`rollback`).
-//!
-//! **`env.db.transaction` HERE IS THE BOOTSTRAP WRAPPER, NOT THE RAW
-//! v8_method, and this header claimed the opposite until 2026-09-04.** Every
-//! dispatch in this file goes through `dispatch_zs_for_app_with_descriptor`,
-//! which sets `.runtime_descriptor(Some(...))`; the runtime then splices
-//! `runtime-entry.js`, which calls `installSchema`, which overwrites
-//! `env.db.transaction` with its own `transactionImpl`
-//! (`sdks/bootstrap/src/install-schema.ts`). That wrapper is what makes
-//! `tx.notes` exist, so it is not removable - it is the shape a deployed app
-//! actually calls. Its published contract is
-//! `transaction(fn) -> Promise<Result<R>>` **which never throws**
-//! (`sdks/db/src/db-types.ts`, `docs/reference/db.md`): a rollback, a setup
-//! denial or a depth-cap refusal arrives as `result.error`, not as an
-//! exception. Assertions in this file must read that envelope, or rethrow
-//! `result.error` deliberately when the test is about the terminal HTTP
-//! remedy. Five tests asserted a throw against this wrapper and had failed
-//! continuously since it was installed; the false sentence above is why they
-//! were repeatedly waved through as "pre-existing".
-//!
-//! PostgreSQL comes from an owned testcontainer; Docker is required.
-//! Run: `cargo xtask test data --filter 'test(tests::postgres::transactions::)'`
-//!
-//! Each runtime receives the same descriptor shape that a deploy carries; the
-//! tables are applied ahead of boot by the fixture. The orchestrator logic is
-//! also covered without a DB by the Rust unit tests + tx-view shape
-//! tests in `crates/zeroship-data-orm/src/transaction/mod.rs` and
-//! `crates/zeroship-data-v8/src/v8_classes/transaction.rs`,
-//! the `db_v8_class.rs` surface tests, the SQLite SAVEPOINT SQL tests in
-//! `sqlite_integration.rs`, and the SDK-side mock tests in
-//! `sdks/db/tests/p9-pr3-native-transaction.test.ts`.
+//! Fixtures install tables before boot and supply runtime descriptors, so calls use
+//! the bootstrap transaction wrapper. It returns a `Result` envelope: failures are
+//! asserted through `result.error`, or deliberately rethrown for HTTP-boundary tests.
+//! PostgreSQL comes from an owned testcontainer; fixture startup is required.
 
 use crate::tests::fixtures;
 
@@ -62,29 +18,8 @@ use zeroship_runtime::runtime::Runtime;
 use zeroship_runtime::{EnvSnapshot, FetchOutcome, ModuleEntry, RequestCtx, SettledFetch, init_v8};
 
 thread_local! {
-    /// ONE compio runtime per test thread, alive for the whole thread.
-    ///
-    /// plugin-db parks its `compio_postgres::Pool` (and the backend handle
-    /// wrapping it) in a **thread-local** `ThreadDbContext` that deliberately
-    /// outlives any single dispatch — `DbPlugin::register` only clears the pool
-    /// when the DB URL *changes*, and every dispatch here uses the same URL. A
-    /// compio runtime built per dispatch and dropped at the end of it therefore
-    /// leaves that cached pool holding sockets registered with a driver that no
-    /// longer exists: the next dispatch's first pooled query is submitted to a
-    /// dead io_uring and never completes. That is the `pending timeout` this
-    /// harness used to hit — and it is not specific to transactions at all
-    /// (a plain `env.db.collection("notes").insert(...)` in a second dispatch
-    /// hangs identically).
-    ///
-    /// Production has exactly one compio runtime per worker thread for the
-    /// process lifetime, so tying the runtime's lifetime to the thread — the
-    /// same scope the DB context already uses — is both the faithful shape and
-    /// the fix.
-    ///
-    /// V8 is still entered OUTSIDE any compio runtime: `block_on` enters the
-    /// runtime only for the duration of the future it drives, and
-    /// `call_fetch_handler` runs before that call. Do not "unify" the two by
-    /// moving the V8 entry inside `block_on`.
+    /// Keep the I/O runtime alive across dispatches so pooled sockets remain valid.
+    /// V8 entry stays outside `block_on`; only pending asynchronous work runs inside it.
     static RT: compio::runtime::Runtime =
         compio::runtime::Runtime::new().expect("build the per-thread compio runtime");
 }

@@ -22,25 +22,8 @@ pub struct MatrixSnapshot {
 static MATRIX_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 thread_local! {
-    /// ONE compio runtime per test thread, alive for the whole thread.
-    ///
-    /// This harness used to build a fresh `compio::runtime::Runtime` inside each
-    /// `dispatch_zs` and drop it on the way out, which is invisible on SQLite and
-    /// fatal on Postgres. plugin-db parks its `compio_postgres::Pool` in a
-    /// THREAD-LOCAL `ThreadDbContext` that outlives any one dispatch, and
-    /// `DbPlugin::register` only clears it when the DB URL changes. So the second
-    /// PG dispatch submits a pooled query on sockets registered with an io_uring
-    /// that no longer exists, and it never completes.
-    ///
-    /// Measured on this matrix, not inferred: `seed` died on the 15s `pending
-    /// timeout` with `pg_stat_activity` showing two
-    /// connections sitting `idle`/`ClientRead` for the whole window - the runtime
-    /// never issued the INSERT. `crates/zeroship-data-v8/src/tests/postgres/transactions.rs`
-    /// hit the identical wall and carries the same thread-local; its header is
-    /// the long-form account.
-    ///
-    /// Production has one compio runtime per worker thread for the process
-    /// lifetime, so this is the faithful shape as well as the working one.
+    /// Keep the I/O runtime alive across dispatches so pooled connections retain
+    /// the reactor that owns their sockets.
     static RT: compio::runtime::Runtime =
         compio::runtime::Runtime::new().expect("build the per-thread compio runtime");
 }
@@ -54,17 +37,8 @@ pub fn sqlite_url(root: &tempfile::TempDir) -> String {
     format!("sqlite:{}", root.path().join("parity.sqlite").display())
 }
 
-/// The app id the runtime derives when `EnvSnapshot::empty()` carries no
-/// `APP_ID` (`crates/zeroship-runtime/src/core/plugin.rs`). It is the DEV app id, so a
-/// SQLite matrix keyed on it runs against the same `<db_dir>/zs-default.sqlite`
-/// a `pnpm dev` app does - which is the property that leg is for.
-///
-/// The Postgres leg must NOT use it. `apply_matrix_schema_ahead_of_postgres`
-/// opens with `DROP SCHEMA ... CASCADE`, and a shared server has exactly one
-/// `default` schema, so two Postgres matrix runs on one server destroy each
-/// other's table. That is what they did until 2026-09-04. Postgres callers pass
-/// their own per-test app id; the SQLite leg keeps this one, and its per-run
-/// `tempfile::tempdir` is what isolates it.
+/// App identity used by the SQLite fixture, isolated by its temporary directory.
+/// PostgreSQL fixtures supply a distinct app identity for their schema.
 pub const DEV_APP_ID: &str = "default";
 
 /// The matrix's deployed field shape. Kept beside the JS so the pre-apply, the
@@ -107,14 +81,8 @@ fn apply_matrix_schema_ahead_of_runtime(url: &str, app_id: &str, collection: &st
     );
 }
 
-/// Raw SQLite DDL for [`matrix_schema`].
-///
-/// Hand-written, not rendered: plugin-db does not own DDL, and a matrix whose
-/// fixture came out of the layer under test could not detect that layer being
-/// wrong (see `fixtures::tables`). The PostgreSQL twin is
-/// [`matrix_ddl_postgres`]; the two must describe the SAME declared shape in
-/// each dialect's spelling, because that equivalence IS what this matrix
-/// asserts.
+/// Hand-authored SQLite storage for [`matrix_schema`]. Keep it equivalent to
+/// [`matrix_ddl_postgres`] so parity checks compare the same logical data.
 fn matrix_ddl_sqlite(app_id: &str, collection: &str) -> String {
     format!(
         r#"CREATE TABLE IF NOT EXISTS "{app_id}"."{collection}" (
@@ -174,26 +142,10 @@ CREATE INDEX IF NOT EXISTS "{collection}_created_by_idx" ON "{app_id}"."{collect
     )
 }
 
-/// Create the matrix collection's table on POSTGRES before the runtime boots.
-///
-/// Like the SQLite leg, this fixture uses a matching hand-authored table. The
-/// matrix proves runtime behavior downstream of schema application; it does not
-/// cover migration recording, lowering, policy, or journal behavior.
-///
-/// # Why it drops the app schema first
-///
-/// The SQLite leg gets a fresh `tempfile::tempdir` per run; Postgres does not.
-/// `run_matrix` mints its collection name from a per-PROCESS counter, so a
-/// second run reuses `fixtures_parity_1` and finds the previous run's rows
-/// already in it - measured, as a `seed` projection with every row DUPLICATED
-/// against a single-copy SQLite side. Dropping the app schema makes the leg
-/// repeatable without leaving a unique-name-per-run trail on a shared server.
-/// It no longer drops a journal schema: nothing here writes one now.
+/// Reset this fixture’s PostgreSQL schema and install the matrix table before startup.
+/// This checks runtime behavior against hand-authored storage, not migration lowering.
 fn apply_matrix_schema_ahead_of_postgres(url: &str, app_id: &str, collection: &str) {
-    // project_schema == app_id: plugin-db's PG data plane resolves a collection
-    // to `"<app_id>"."<collection>"` (the PG data plane's own qualification),
-    // and this DDL qualifies into that same schema, so the runtime reads the
-    // table this created rather than a different one.
+    // This fixture binds the app to a physical schema with the same name.
     let ddl = matrix_ddl_postgres(app_id, collection);
 
     block_on(async move {
@@ -212,14 +164,7 @@ fn apply_matrix_schema_ahead_of_postgres(url: &str, app_id: &str, collection: &s
             .await
             .unwrap_or_else(|e| panic!("matrix DDL failed: {e}\n{ddl}"));
 
-        // The table is created as the ADMIN role. plugin-db's PG data plane then
-        // reads it as the per-app role, which at this point has no USAGE on the
-        // schema - measured, as `permission denied for schema default` in the
-        // server log, surfacing to the caller as a bare `500 internal error`.
-        //
-        // Provisioning that role is part of the deploy-time apply, not an
-        // afterthought. The role recipe supplies schema and sequence reach; the
-        // binding supplies explicit column grants.
+        // Provision the scoped runtime role and its column grants after admin-created DDL.
         crate::tests::fixtures::roles::ensure_per_app_role(&pool, app_id)
             .await
             .expect("provision the matrix app's runtime role");
@@ -227,11 +172,6 @@ fn apply_matrix_schema_ahead_of_postgres(url: &str, app_id: &str, collection: &s
     });
 }
 
-// `maybe_pg_url` lived here and is DELETED. It answered "is there a Postgres?"
-// with `Option`, and its one caller turned `None` into an early `return` - a test
-// that reports "ok" for work it did not do, which is the exact failure
-// `integration.rs::require_pg` was rewritten to stop making. The Postgres parity
-// leg now calls `require_pg` like its 108 siblings and fails without a database.
 
 const SHIM: &str = r#"
 async function _shimRpc(name, input, ctx) {
@@ -477,12 +417,7 @@ pub fn runtime_descriptor(collection: &str, schema: &Value) -> String {
     .expect("runtime descriptor serializes")
 }
 
-/// Drive one RPC through a real runtime against `url`, as app `app_id`.
-///
-/// `app_id` is INJECTED, not inherited. It used to be absent, so the runtime
-/// fell back to `default` (`crates/zeroship-runtime/src/core/plugin.rs`) and
-/// every Postgres matrix run addressed the same schema. Passing it explicitly
-/// also stops the fixture from depending on that fallback continuing to exist.
+/// Dispatch an RPC using an explicit app identity and runtime descriptor.
 pub fn dispatch_zs_with_descriptor(
     url: &str,
     source: &str,

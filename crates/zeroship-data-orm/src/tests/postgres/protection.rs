@@ -1,33 +1,9 @@
-//! The masking storage flip: the filter oracle, and the three silent
-//! consequences of closing it.
+//! Mask storage, authorization and projection contracts against PostgreSQL.
 //!
-//! # The defect these tests exist for
-//!
-//! A masked column used to store PLAINTEXT under the field's own name and the
-//! mask in a `<col>_masked` sibling. The projection substituted
-//! `"ssn_masked" AS "ssn"`, but the filter builder previously ignored its
-//! schema hint and so COULD NOT: `find({ ssn: { $gt: v } })`
-//! rendered `WHERE "ssn" > $1` and compared against plaintext. The caller never
-//! saw a value and did not need to - the set of matching rows IS the answer, and
-//! repeated probes binary-search it, with no authorization check on the path and
-//! no audit row written. Reading `__zeroship_audit_unmask` would show nothing
-//! unusual while it happened.
-//!
-//! The fix is not a fence on the filter builder. It is that `ssn` now stores the
-//! MASK and `__zs_raw__ssn` stores the real value, so the ignorant path is the
-//! safe path: a builder that knows nothing about masking selects and filters the
-//! masked column and leaks nothing.
-//!
-//! # Why these tests build their own tables
-//!
-//! Every fixture here creates its table with the REAL DDL emitter and writes
-//! through the REAL write pipeline. The flip's whole risk is that the emitter
-//! and the data plane disagree about which physical column holds what, and a
-//! hand-written fixture agrees with whichever one its author had in mind.
-//!
-//! PostgreSQL comes from an owned testcontainer with vector and PostGIS.
-//! Docker and successful fixture startup are required.
-//! Run: `cargo xtask test data --filter 'test(tests::postgres::protection::)'`
+//! Fixtures use migration-emitted DDL and the runtime write pipeline so the test
+//! can detect disagreements about visible and protected storage. Predicate checks
+//! verify that filtering cannot reveal a protected value without unmask authorization.
+//! PostgreSQL and its required extensions come from an owned testcontainer.
 
 use crate::tests::fixtures::Host;
 #[allow(unused_imports)]
@@ -54,36 +30,14 @@ use zeroship_data_sql::compile::{
 };
 use zeroship_data_sql::value::{Value, value};
 
-/// The backend handle the unmask entry points now take as a parameter.
-///
-/// They resolved one themselves, from the isolate's context, until 2026-09-03.
-/// That read is the ADAPTER's, and `protection::unmask` is ENGINE, so the resolution
-/// moved to the V8 dispatcher and the value is passed down. These tests drive
-/// the engine directly, with no V8 frame above them, so they make the same call
-/// the dispatcher makes on their behalf in production.
-///
-/// **Its lazy open never fires here, and this comment claimed otherwise until
-/// 2026-09-03.** Every fixture in this file calls `fixtures::install_postgres_pool`
-/// before any dispatch, so the isolate already holds a backend and this is a
-/// plain read. (`DbBinding::cold_start` below is a BINDING constructor - a
-/// different sense of cold, and not a context state.) The lazy open is bound in
-/// `src/tests/sqlite_integration.rs`, by the three
-/// `cold_*_open_comes_from_ensure_backend_not_the_fixture` gates.
+/// Use the backend already installed by the fixture; this helper does not test cold startup.
 async fn unmask_backend(host: &Host) -> zeroship_data_orm::backend::BackendHandle {
     host.backend()
         .await
         .expect("the backend the V8 dispatcher would have opened")
 }
 
-/// The route the three unmask dispatchers now take, in place of a bare handle.
-///
-/// They took a `BackendHandle` until 2026-09-03, which named a BACKEND but not
-/// a CONNECTION, so the ciphertext read always went to the autocommit lane -
-/// including inside `db.transaction(fn)`, where it could not see the
-/// transaction's own rows. `ambient_route_for_tests` reconstructs the routing
-/// decision from the parked-tx slot; no fixture in this file parks one, so
-/// every call here binds `in_tx = false` and takes exactly the lane it took
-/// before. The transaction half is bound by `unmask_tx_lane.rs`.
+/// Bind a route from the fixture’s backend and current transaction scope.
 async fn unmask_route(host: &Host, app: &str) -> zeroship_data_orm::tx_route::TxRoute {
     zeroship_data_orm::exec::ambient_route_for_tests(app, unmask_backend(host).await)
 }
