@@ -283,6 +283,7 @@ fn permuted_update_assignments_render_to_one_canonical_fixture() {
     let build = |sets: [ColumnAssignment; 2], conjuncts: [(&str, i64); 2], returning: [&str; 2]| {
         let mut builder = Update::builder(
             users(),
+            zeroship_data_sql::Ident::parse_as("id", zeroship_data_sql::IdentRole::Column).unwrap(),
             RowLimit::new(25).expect("limit"),
             write_returning(returning),
         )

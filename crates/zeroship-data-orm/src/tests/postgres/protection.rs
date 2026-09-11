@@ -197,6 +197,7 @@ async fn insert_through_the_pipeline(
         .as_str()
         .unwrap_or_else(|| panic!("the write pipeline must mint an id: {}", docs[0]))
         .to_string();
+    let schema = &crate::tests::fixtures::schema::generated_fields(schema.clone());
     let bq = build_insert(
         &zeroship_data_sql::SchemaName::new(app).expect("fixture schema name"),
         collection,
@@ -237,6 +238,7 @@ fn row_to_value(row: &compio_postgres::Row) -> Value {
 }
 
 async fn run_find(pool: &Rc<Pool>, app: &str, filter: &Value, schema: &Value) -> Vec<Value> {
+    let schema = &crate::tests::fixtures::schema::generated_fields(schema.clone());
     let bq = build_find_with_schema(
         &zeroship_data_sql::SchemaName::new(app).expect("fixture schema name"),
         "people",
@@ -2065,7 +2067,9 @@ fn no_write_verb_hands_back_a_column_the_descriptor_does_not_declare() {
             assert_eq!(stored.len(), 1, "the row must exist");
 
             // BOUNDARY 2, the runtime's.
-            let allowed: BTreeSet<String> = read_surface_columns(&schema);
+            let allowed: BTreeSet<String> = read_surface_columns(
+                &crate::tests::fixtures::schema::generated_fields(schema.clone()),
+            );
             let finalized = host
                 .finalize_rows_on_read(app, "people", returned.clone())
                 .await

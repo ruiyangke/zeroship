@@ -60,30 +60,7 @@ pub(super) async fn setup(pool: &Pool, schema: &str) {
         .unwrap();
     pool.execute(
         &format!(
-            // The last four columns are the platform system fields the
-            // migration engine injects into every real creator table
-            // (`query::SYSTEM_FIELD_NAMES`). This fixture omitted them for as
-            // long as the implicit read projection was `SELECT *`; it is now an
-            // explicit list of the seven system columns plus the declared
-            // fields, so a table missing them is not a table `find` can serve.
-            // Adding them makes the fixture look like what production reads.
-            //
-            // THE NULLABILITY MATTERS AS MUCH AS THE COLUMN LIST, and this
-            // fixture got it wrong until 2026-09-01: `created_at` and
-            // `updated_at` were declared nullable while the production emitter
-            // writes them NOT NULL (`zeroship-data-sql/src/compile.rs:212-213`).
-            // Measured against pg18 with the statement `build_insert_many`
-            // emits for a mixed batch - it unions the column set across
-            // documents (`query.rs:4390`) and binds `unwrap_or(&Value::Null)`
-            // for a cell some other row supplied (`:4445`):
-            //
-            //   nullable fixture -> INSERT SUCCEEDS, storing created_at = NULL
-            //   NOT NULL (prod)  -> 23502 not-null violation
-            //
-            // So the lax fixture could not fail on the defect, and would have
-            // stored the silent-wrong value instead - the harder failure to
-            // notice. A fixture that claims to match production must match its
-            // CONSTRAINTS, not only its column names.
+            // The descriptor below declares the same fields and defaults.
             r#"CREATE TABLE "{schema}"."notes" (
                 id SERIAL PRIMARY KEY,
                 title TEXT NOT NULL,
@@ -228,24 +205,16 @@ pub(super) async fn drain_pg(host: &Host) {
     }
 }
 
-/// The descriptor entry for the `notes` fixture table, in the same
-/// `{ <column>: FieldDef }` shape the runtime descriptor hook plants and
-/// `crate::descriptor::collection_schema` returns.
-///
-/// The read builders take it as the projection allowlist and the read-identifier
-/// allowlist: `build_find_with_schema` expands to `"id"` plus the six other
-/// platform system columns plus one term per field declared here, and refuses
-/// any `select` / `orderBy` / `distinct` / `$group.by` identifier that is not in
-/// it. The seven system fields are implicit — they are never declared here, and
-/// `setup()` above creates all seven on the table.
+/// Descriptor for the table created by `setup`.
 pub(super) fn notes_schema() -> Value {
-    value!({
+    crate::tests::fixtures::schema::generated_fields(value!({
+        "id": { "type": "integer", "assign": {"by":"identity", "on":"insert"} },
         "title": { "type": "string" },
         "body": { "type": "string" },
         "category": { "type": "string" },
         "views": { "type": "int" },
         "tags": { "type": "json" },
-    })
+    }))
 }
 
 /// The three system indexes every confined table carries.

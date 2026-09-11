@@ -259,7 +259,7 @@ tier_of_file() {
     ./context.rs|./service.rs|./op_error.rs)              echo ADAPTER ;;
     # BackendHandle and TxCanceller name BOTH vendors, so only a tier above both
     # may hold them; the crate-shape proposal puts them in data-engine.
-    ./tx_lanes.rs|./backend_handle.rs|./backend/cancel.rs|./system_shape_charter.rs|./metrics.rs) echo ENGINE ;;
+    ./tx_lanes.rs|./backend_handle.rs|./backend/cancel.rs|./assignments.rs|./metrics.rs) echo ENGINE ;;
     # `descriptor.rs` was CORE here and data-engine in the crate-shape proposal,
     # and the two disagreed for two days. SETTLED as ENGINE on 2026-09-03 by the
     # cut itself: the file left with the engine tier, and the argument that put
@@ -339,7 +339,7 @@ tier_of_target() {
       if src_path_exists encryption; then echo ENCRYPT; else echo EXTERNAL; fi ;;
     wal_consumer*|replication*|slot_reaper*)             echo CDC ;;
     context*|service*|op_error*)                          echo ADAPTER ;;
-    tx_lanes*|backend_handle*|system_shape_charter*|metrics*) echo ENGINE ;;
+    tx_lanes*|backend_handle*|assignments*|metrics*) echo ENGINE ;;
     # Same file-existence resolution, and it earned it the same way: `cancel.rs`
     # left with the ENGINE tier for `zeroship-data-orm`, and an arm asserting
     # a tier for a file this region no longer holds is the rot documented at the

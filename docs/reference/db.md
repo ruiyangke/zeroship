@@ -301,6 +301,9 @@ export default {
 - `versioning: true` selects the declared write increment generator for
   optimistic concurrency. A filter containing that field performs a revision check.
 
+- `strictness: "strict" | "lenient" | "off"` records the deploy-time data-validation
+  policy. The descriptor preserves it; deployment enforcement is not wired yet.
+
 The migration renderer rejects enabled lifecycle options without an unambiguous
 matching generator. These options select roles; generators determine assignments.
 

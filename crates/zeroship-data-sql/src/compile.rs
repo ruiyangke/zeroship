@@ -27,37 +27,14 @@ pub fn empty_read_schema() -> Value {
     Value::Object(crate::value::Map::new())
 }
 
-/// Errors from query building.
-#[derive(Debug)]
+/// Errors produced while validating and compiling a query.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QueryError {
-    /// Unsupported or malformed filter.
     InvalidFilter(String),
-    /// Collection name is invalid.
     InvalidCollection(String),
-    /// Malformed identifier in a structured input (e.g. named index name or
-    /// field reference). Carries a path-keyed message so the SDK can surface
-    /// it back to the user without losing the offending input.
     InvalidIdent(String),
-    /// Creator declared a field whose name collides with one
-    /// of the seven platform-managed system fields (`id`, `created_at`,
-    /// `updated_at`, `created_by`, `updated_by`, `version`, `deleted_at`).
-    /// Distinct from [`QueryError::InvalidIdent`] so the SDK can surface a typed code
-    /// (`reserved_system_field_name`) that's distinguishable from the
-    /// generic `invalid_identifier` thrown by the `_*` / `__zs_*` prefix
-    /// reservations. Filter-time use of these names is unrestricted
-    /// (`db.users.find({ id: ... })` is the canonical query shape); the
-    /// fence only fires on declaration paths (`field_to_column`).
-    ReservedSystemFieldName(String),
-    /// Creator UPDATE patch attempted to overwrite one of
-    /// the three write-once system fields (`id`, `created_at`,
-    /// `created_by`). These are auto-populated at INSERT and
-    /// immutable thereafter. The carried string names the offending
-    /// field for the SDK error envelope. Distinct from
-    /// `ReservedSystemFieldName` (which fires only at declaration
-    /// time): this fires at UPDATE-patch validation, NOT on filter
-    /// reads (`update({ id: ... }, ...)` is fine — the filter
-    /// references id; only the PATCH side is fenced).
-    ImmutableSystemField(String),
+    ReservedIdPrefix(String),
+    ImmutableAssignedField(String),
 }
 
 impl std::fmt::Display for QueryError {
@@ -66,11 +43,11 @@ impl std::fmt::Display for QueryError {
             Self::InvalidFilter(msg) => write!(f, "invalid filter: {msg}"),
             Self::InvalidCollection(msg) => write!(f, "invalid collection: {msg}"),
             Self::InvalidIdent(msg) => write!(f, "invalid identifier: {msg}"),
-            Self::ReservedSystemFieldName(msg) => {
-                write!(f, "reserved system field name: {msg}")
+            Self::ReservedIdPrefix(msg) => {
+                write!(f, "reserved ID prefix: {msg}")
             }
-            Self::ImmutableSystemField(msg) => {
-                write!(f, "immutable system field: {msg}")
+            Self::ImmutableAssignedField(msg) => {
+                write!(f, "immutable assigned field: {msg}")
             }
         }
     }
@@ -396,8 +373,8 @@ pub const RESERVED_ID_PREFIXES: &[&str] = &["usr"];
 ///
 /// Rules:
 /// - must match `^[a-z][a-z0-9_]*$` → [`QueryError::InvalidIdent`]
-/// - must not be a [`RESERVED_ID_PREFIXES`] entry → [`QueryError::ReservedSystemFieldName`]
-///   (reuses the typed `reserved_system_field_name` SDK code; the prefix
+/// - must not be a [`RESERVED_ID_PREFIXES`] entry → [`QueryError::ReservedIdPrefix`]
+///   (reuses the typed `reserved_id_prefix` SDK code; the prefix
 ///   collision is morally a system-field reservation).
 pub fn validate_id_prefix(prefix: &str) -> Result<(), QueryError> {
     let valid = prefix
@@ -413,7 +390,7 @@ pub fn validate_id_prefix(prefix: &str) -> Result<(), QueryError> {
         )));
     }
     if RESERVED_ID_PREFIXES.contains(&prefix) {
-        return Err(QueryError::ReservedSystemFieldName(format!(
+        return Err(QueryError::ReservedIdPrefix(format!(
             "t.id(prefix): '{prefix}' is reserved for platform ids; choose a different prefix"
         )));
     }
@@ -5272,7 +5249,7 @@ mod tests {
     }
 
     #[test]
-    fn test_upsert_preserves_insert_only_system_fields_on_conflict() {
+    fn test_upsert_preserves_insert_only_assigned_fields_on_conflict() {
         let doc = value!({
             "email": "a@b.com",
             "id": "user_new",
@@ -6879,15 +6856,6 @@ mod tests {
         assert!(!is_schema_metadata_key("ssn"));
     }
 
-    // -----------------------------------------------------------------
-    // Platform system-field reservation (declaration-only)
-    // -----------------------------------------------------------------
-
-    /// Each of the 7 platform-managed system field names must be refused
-    /// by `validate_field_name_for_declaration`. Mirrors the seven names
-    /// in `FIXTURE_GENERATED_COLUMNS`. Filter-time validators continue to
-    /// accept these names (covered by
-    /// `system_field_names_allowed_in_filter_path`).
     #[test]
     fn former_system_names_are_ordinary_declarations() {
         for name in FIXTURE_GENERATED_COLUMNS {
@@ -6895,26 +6863,18 @@ mod tests {
         }
     }
 
-    /// Filter-time validation (`validate_field_name`) MUST continue to
-    /// accept all 7 system field names. `db.users.find({ id: "..." })`
-    /// is the canonical query shape — fencing `id` at filter time would
-    /// break the entire SDK. The system-field reservation is declaration-only.
     #[test]
-    fn system_field_names_allowed_in_filter_path() {
+    fn assigned_field_names_allowed_in_filter_path() {
         for name in FIXTURE_GENERATED_COLUMNS {
             assert!(
                 validate_field_name(name).is_ok(),
-                "system field {name:?} must be accepted by the filter-time validator"
+                "declared field {name:?} must be accepted by the filter-time validator"
             );
         }
     }
 
-    /// Filter-time use of a system-field name flows end-to-end through
-    /// `build_where`: a query like `db.users.find({ id: "usr_01" })`
-    /// must build a WHERE clause, NOT raise an error. This pins the
-    /// "declaration-only" boundary at the call-site level.
     #[test]
-    fn build_where_accepts_system_field_names_in_filter() {
+    fn build_where_accepts_assigned_field_names_in_filter() {
         for name in FIXTURE_GENERATED_COLUMNS {
             let mut filter_obj = crate::value::Map::new();
             filter_obj.insert(
@@ -6936,49 +6896,16 @@ mod tests {
         }
     }
 
-    /// Non-system-field names continue to be accepted by the
-    /// declaration-time validator (regression fence for the
-    /// `validate_field_name_for_declaration` wrapper).
     #[test]
-    fn non_system_field_names_accepted_at_declaration() {
+    fn non_assigned_field_names_accepted_at_declaration() {
         for name in &["title", "content", "user_id", "createdAt", "first_name"] {
             assert!(
                 validate_field_name_for_declaration(name).is_ok(),
-                "non-system field {name:?} must be accepted at declaration"
+                "non-declared field {name:?} must be accepted at declaration"
             );
         }
     }
 
-    /// `FIXTURE_GENERATED_COLUMNS` is the canonical list — every new addition
-    /// is a deliberate platform decision. Pinning the size to 7 surfaces
-    /// any drift in code review.
-    #[test]
-    fn system_field_names_has_exactly_seven_entries() {
-        assert_eq!(
-            FIXTURE_GENERATED_COLUMNS.len(),
-            7,
-            "FIXTURE_GENERATED_COLUMNS must list exactly 7 entries (id, created_at, \
-             updated_at, created_by, updated_by, version, deleted_at)"
-        );
-    }
-
-    // Database error conversion is tested in the ORM; this crate tests query errors.
-
-    // -----------------------------------------------------------------
-    // CREATE TABLE prepends 7 system fields + 3 auto-indexes
-    //
-    // Tests the dialect-aware emitter
-    // (`build_create_table_with_fks_for_dialect`) and the PG-flavoured
-    // shim (`build_create_table_with_fks`). The system-field prefix and
-    // auto-index emission are dialect-symmetric except for timestamp
-    // type / default expression and the SQLite `<schema>.<index_name>`
-    // form vs PG's `ON <schema>.<table>`.
-    // -----------------------------------------------------------------
-
-    /// `validate_field_name_for_declaration` MUST still enforce all
-    /// the underlying `validate_field_name` rules (ASCII allowlist,
-    /// length cap, null bytes, the `_*` / `__zs_*` / `_masked` reserved
-    /// shapes). Regression fence for the wrapper composition.
     #[test]
     fn validate_field_name_for_declaration_layers_underlying_rules() {
         // Length cap inherited from `validate_field_name`.
@@ -9063,13 +8990,13 @@ mod reserved_id_prefix_parity {
     /// `is_ok()` alone cannot separate the deny-list from the charset rule, so a
     /// side that deleted its list but happened to refuse `usr` for some other
     /// reason would read as agreement. Both crates spell the refusal
-    /// `ReservedSystemFieldName`.
+    /// `ReservedIdPrefix`.
     #[test]
     fn both_refuse_a_reserved_prefix_as_reserved_rather_than_as_malformed() {
         for prefix in RESERVED {
             let ours = validate_id_prefix(prefix).expect_err("the data plane must refuse it");
             assert!(
-                matches!(ours, QueryError::ReservedSystemFieldName(_)),
+                matches!(ours, QueryError::ReservedIdPrefix(_)),
                 "the data plane refused {prefix:?} for the wrong reason: {ours:?}",
             );
             let theirs = engine::validate_id_prefix(prefix).expect_err("the engine must refuse it");

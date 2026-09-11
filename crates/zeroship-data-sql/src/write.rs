@@ -544,6 +544,7 @@ impl InsertBuilder {
 pub struct Update {
     namespace: Option<Ident>,
     collection: Ident,
+    row_key: Ident,
     /// Canonical: sorted by column, unique, non-empty.
     assignments: Vec<ColumnAssignment>,
     filter: Predicate,
@@ -557,12 +558,14 @@ impl Update {
     #[must_use]
     pub const fn builder(
         collection: Ident,
+        row_key: Ident,
         limit: RowLimit,
         returning: Returning,
     ) -> UpdateBuilder {
         UpdateBuilder {
             namespace: None,
             collection,
+            row_key,
             assignments: Vec::new(),
             filter: Predicate::always(),
             limit,
@@ -584,6 +587,11 @@ impl Update {
     #[must_use]
     pub fn assignments(&self) -> &[ColumnAssignment] {
         &self.assignments
+    }
+
+    #[must_use]
+    pub const fn row_key(&self) -> &Ident {
+        &self.row_key
     }
 
     #[must_use]
@@ -616,6 +624,7 @@ impl Update {
 pub struct UpdateBuilder {
     namespace: Option<Ident>,
     collection: Ident,
+    row_key: Ident,
     assignments: Vec<ColumnAssignment>,
     filter: Predicate,
     limit: RowLimit,
@@ -657,6 +666,7 @@ impl UpdateBuilder {
         Ok(Update {
             namespace: self.namespace,
             collection: self.collection,
+            row_key: self.row_key,
             assignments,
             filter,
             limit: self.limit,
@@ -676,6 +686,7 @@ impl UpdateBuilder {
 pub struct Delete {
     namespace: Option<Ident>,
     collection: Ident,
+    row_key: Ident,
     filter: Predicate,
     limit: RowLimit,
     returning: Returning,
@@ -686,12 +697,14 @@ impl Delete {
     #[must_use]
     pub const fn builder(
         collection: Ident,
+        row_key: Ident,
         limit: RowLimit,
         returning: Returning,
     ) -> DeleteBuilder {
         DeleteBuilder {
             namespace: None,
             collection,
+            row_key,
             filter: Predicate::always(),
             limit,
             returning,
@@ -706,6 +719,11 @@ impl Delete {
     #[must_use]
     pub const fn collection(&self) -> &Ident {
         &self.collection
+    }
+
+    #[must_use]
+    pub const fn row_key(&self) -> &Ident {
+        &self.row_key
     }
 
     #[must_use]
@@ -729,6 +747,7 @@ impl Delete {
 pub struct DeleteBuilder {
     namespace: Option<Ident>,
     collection: Ident,
+    row_key: Ident,
     filter: Predicate,
     limit: RowLimit,
     returning: Returning,
@@ -761,6 +780,7 @@ impl DeleteBuilder {
         Ok(Delete {
             namespace: self.namespace,
             collection: self.collection,
+            row_key: self.row_key,
             filter,
             limit: self.limit,
             returning: self.returning,

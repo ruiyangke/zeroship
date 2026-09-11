@@ -190,9 +190,15 @@ impl Host {
     ) -> Result<Vec<zeroship_data_sql::value::Value>, String> {
         let backend = self.backend().await.map_err(DbError::into_string)?;
         let route = exec::ambient_route_for_tests(app_id, backend);
-        exec::exec_mutation_with_emit(bq, &route, collection, op)
-            .await
-            .map_err(DbError::into_string)
+        exec::exec_mutation_with_emit(
+            bq,
+            &route,
+            collection,
+            op,
+            &crate::binding::DbBinding::cold_start(app_id),
+        )
+        .await
+        .map_err(DbError::into_string)
     }
 
     pub(crate) async fn exec_query(

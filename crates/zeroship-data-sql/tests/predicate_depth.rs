@@ -201,23 +201,33 @@ fn a_hand_built_over_deep_tree_is_refused_at_every_plan_boundary() {
     ruled_on += 1;
 
     assert_eq!(
-        Update::builder(collection(), RowLimit::default(), Returning::nothing())
-            .set(ColumnAssignment::new(
-                column("name"),
-                Assignment::bind(Literal::Int(1))
-            ))
-            .filter(over.clone())
-            .build()
-            .expect_err("must refuse"),
+        Update::builder(
+            collection(),
+            zeroship_data_sql::Ident::parse_as("id", zeroship_data_sql::IdentRole::Column).unwrap(),
+            RowLimit::default(),
+            Returning::nothing()
+        )
+        .set(ColumnAssignment::new(
+            column("name"),
+            Assignment::bind(Literal::Int(1))
+        ))
+        .filter(over.clone())
+        .build()
+        .expect_err("must refuse"),
         WriteError::FilterTooDeep { depth }
     );
     ruled_on += 1;
 
     assert_eq!(
-        Delete::builder(collection(), RowLimit::default(), Returning::nothing())
-            .filter(over)
-            .build()
-            .expect_err("must refuse"),
+        Delete::builder(
+            collection(),
+            zeroship_data_sql::Ident::parse_as("id", zeroship_data_sql::IdentRole::Column).unwrap(),
+            RowLimit::default(),
+            Returning::nothing()
+        )
+        .filter(over)
+        .build()
+        .expect_err("must refuse"),
         WriteError::FilterTooDeep { depth }
     );
     ruled_on += 1;
@@ -255,22 +265,32 @@ fn every_plan_boundary_accepts_a_tree_at_exactly_the_limit() {
     ruled_on += 1;
 
     assert!(
-        Update::builder(collection(), RowLimit::default(), Returning::nothing())
-            .set(ColumnAssignment::new(
-                column("name"),
-                Assignment::bind(Literal::Int(1))
-            ))
-            .filter(at.clone())
-            .build()
-            .is_ok()
+        Update::builder(
+            collection(),
+            zeroship_data_sql::Ident::parse_as("id", zeroship_data_sql::IdentRole::Column).unwrap(),
+            RowLimit::default(),
+            Returning::nothing()
+        )
+        .set(ColumnAssignment::new(
+            column("name"),
+            Assignment::bind(Literal::Int(1))
+        ))
+        .filter(at.clone())
+        .build()
+        .is_ok()
     );
     ruled_on += 1;
 
     assert!(
-        Delete::builder(collection(), RowLimit::default(), Returning::nothing())
-            .filter(at)
-            .build()
-            .is_ok()
+        Delete::builder(
+            collection(),
+            zeroship_data_sql::Ident::parse_as("id", zeroship_data_sql::IdentRole::Column).unwrap(),
+            RowLimit::default(),
+            Returning::nothing()
+        )
+        .filter(at)
+        .build()
+        .is_ok()
     );
     ruled_on += 1;
 

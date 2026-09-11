@@ -235,13 +235,18 @@ fn a_written_value_reaches_the_parameter_list_and_never_the_statement() {
             )])
             .build()
             .expect("valid insert");
-        let update = Update::builder(users(), RowLimit::default(), Returning::nothing())
-            .set(ColumnAssignment::new(
-                column("name"),
-                Assignment::bind(value.clone()),
-            ))
-            .build()
-            .expect("valid update");
+        let update = Update::builder(
+            users(),
+            zeroship_data_sql::Ident::parse_as("id", zeroship_data_sql::IdentRole::Column).unwrap(),
+            RowLimit::default(),
+            Returning::nothing(),
+        )
+        .set(ColumnAssignment::new(
+            column("name"),
+            Assignment::bind(value.clone()),
+        ))
+        .build()
+        .expect("valid update");
 
         for rendered in [
             postgres::render_insert(&insert).expect("renders"),
@@ -337,27 +342,37 @@ fn every_placeholder_has_exactly_one_parameter_on_a_write() {
         ])
         .build()
         .expect("valid insert");
-    let update = Update::builder(users(), RowLimit::default(), returning.clone())
-        .set(ColumnAssignment::new(
-            column("a"),
-            Assignment::bind(Literal::Int(1)),
-        ))
-        .set(ColumnAssignment::new(column("b"), Assignment::null()))
-        .set(ColumnAssignment::new(
-            column("c"),
-            Assignment::arithmetic(ArithmeticOp::Add, Literal::Int(1)).expect("numeric"),
-        ))
-        .set(ColumnAssignment::new(
-            column("d"),
-            Assignment::CurrentTimestamp,
-        ))
-        .filter(filter.clone())
-        .build()
-        .expect("valid update");
-    let delete = Delete::builder(users(), RowLimit::default(), returning)
-        .filter(filter)
-        .build()
-        .expect("valid delete");
+    let update = Update::builder(
+        users(),
+        zeroship_data_sql::Ident::parse_as("id", zeroship_data_sql::IdentRole::Column).unwrap(),
+        RowLimit::default(),
+        returning.clone(),
+    )
+    .set(ColumnAssignment::new(
+        column("a"),
+        Assignment::bind(Literal::Int(1)),
+    ))
+    .set(ColumnAssignment::new(column("b"), Assignment::null()))
+    .set(ColumnAssignment::new(
+        column("c"),
+        Assignment::arithmetic(ArithmeticOp::Add, Literal::Int(1)).expect("numeric"),
+    ))
+    .set(ColumnAssignment::new(
+        column("d"),
+        Assignment::CurrentTimestamp,
+    ))
+    .filter(filter.clone())
+    .build()
+    .expect("valid update");
+    let delete = Delete::builder(
+        users(),
+        zeroship_data_sql::Ident::parse_as("id", zeroship_data_sql::IdentRole::Column).unwrap(),
+        RowLimit::default(),
+        returning,
+    )
+    .filter(filter)
+    .build()
+    .expect("valid delete");
 
     let rendered = [
         postgres::render_insert(&insert).expect("renders"),

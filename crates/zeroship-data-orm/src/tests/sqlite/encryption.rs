@@ -429,6 +429,7 @@ fn encrypted_column_e2e_crud_round_trip_sqlite() {
 
             // The field descriptor selects encryption; the host supplies the project key.
             let schema = zeroship_data_sql::value!({
+                "id": {"type":"string", "primaryKey":true},
                 "ssn": {
                     "type": "string",
                     "encrypted": true,

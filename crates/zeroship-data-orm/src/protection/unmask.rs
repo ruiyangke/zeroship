@@ -342,8 +342,8 @@ pub async fn dispatch_unmask(
     // and the write that placed the value name one column.
     let raw_column = resolve_raw_column(&schema, &args.column)?;
     let plaintext = match lookup_encryption_meta(&schema, &args.column)? {
-        Some(enc_meta) => fetch_and_decrypt(&raw_column, route, &args, &enc_meta).await?,
-        None => fetch_plaintext_raw(&raw_column, route, &args).await?,
+        Some(enc_meta) => fetch_and_decrypt(&raw_column, route, &args, &enc_meta, &schema).await?,
+        None => fetch_plaintext_raw(&raw_column, route, &args, &schema).await?,
     };
     // Both arms ran exactly one SELECT and both `?`, so reaching here means it
     // succeeded. Neither goes through `exec::run_sql`, so neither was billed
@@ -391,6 +391,7 @@ async fn fetch_and_decrypt(
     route: &crate::tx_route::TxRoute,
     args: &UnmaskFieldArgs,
     enc_meta: &PlaintextType,
+    schema: &Value,
 ) -> Result<Value, DbError> {
     let app_id = route.app_id();
 
@@ -409,6 +410,7 @@ async fn fetch_and_decrypt(
             &args.collection,
             raw_column,
             &args.row_pk,
+            schema,
         )
         .await?
         {
@@ -436,11 +438,7 @@ async fn fetch_and_decrypt(
         };
         // Key sourcing and AEAD are vendor-neutral; only the read above was
         // not, and it now dispatches inside `crate::backend_handle`.
-        let key = route
-            .backend()
-            .key_store()
-            .resolve(app_id)
-            .await?;
+        let key = route.backend().key_store().resolve(app_id).await?;
         let plaintext_bytes =
             zeroize::Zeroizing::new(crate::encryption::aead::decrypt(&key, &bytes, &aad)?);
         enc_meta.decode(&plaintext_bytes)
@@ -452,6 +450,7 @@ async fn fetch_plaintext_raw(
     raw_column: &str,
     route: &crate::tx_route::TxRoute,
     args: &UnmaskFieldArgs,
+    schema: &Value,
 ) -> Result<Value, DbError> {
     let app_id = route.app_id();
 
@@ -460,6 +459,7 @@ async fn fetch_plaintext_raw(
         &args.collection,
         raw_column,
         &args.row_pk,
+        schema,
     )
     .await?
     {
@@ -482,7 +482,6 @@ async fn fetch_plaintext_raw(
         ScalarRead::Value(text) => Ok(text),
     }
 }
-
 
 // ---------------------------------------------------------------------------
 // Audit row writer
@@ -772,9 +771,9 @@ pub async fn dispatch_bulk_unmask(
             let raw_column = resolve_raw_column(&schema, canonical_col)?;
             let plaintext = match lookup_encryption_meta(&schema, canonical_col)? {
                 Some(enc_meta) => {
-                    fetch_and_decrypt(&raw_column, route, &single_args, &enc_meta).await?
+                    fetch_and_decrypt(&raw_column, route, &single_args, &enc_meta, &schema).await?
                 }
-                None => fetch_plaintext_raw(&raw_column, route, &single_args).await?,
+                None => fetch_plaintext_raw(&raw_column, route, &single_args, &schema).await?,
             };
             // One SELECT per (row, column) pair. The bulk call writes a single
             // audit row for the whole request, but it reads once per cell, and
@@ -1056,11 +1055,14 @@ pub async fn dispatch_unmask_for_query(
     let schema = crate::descriptor::collection_schema(binding, collection)?;
     prepare_unmask_backend(route.backend(), app_id).await?;
     for row in rows.iter_mut() {
-        let Some(row_pk) = row.get("id").map(|v| match v {
-            Value::String(s) => s.clone(),
-            Value::Number(n) => n.to_string(),
-            _ => String::new(),
-        }) else {
+        let Some(row_pk) = row
+            .get(zeroship_data_sql::lifecycle::primary_key(&schema)?)
+            .map(|v| match v {
+                Value::String(s) => s.clone(),
+                Value::Number(n) => n.to_string(),
+                _ => String::new(),
+            })
+        else {
             continue;
         };
         if row_pk.is_empty() {
@@ -1117,9 +1119,9 @@ pub async fn dispatch_unmask_for_query(
             let raw_column = resolve_raw_column(&schema, &canonical)?;
             let plaintext = match lookup_encryption_meta(&schema, &canonical)? {
                 Some(enc_meta) => {
-                    fetch_and_decrypt(&raw_column, route, &single_args, &enc_meta).await?
+                    fetch_and_decrypt(&raw_column, route, &single_args, &enc_meta, &schema).await?
                 }
-                None => fetch_plaintext_raw(&raw_column, route, &single_args).await?,
+                None => fetch_plaintext_raw(&raw_column, route, &single_args, &schema).await?,
             };
             // One SELECT per (row, column) pair. The bulk call writes a single
             // audit row for the whole request, but it reads once per cell, and

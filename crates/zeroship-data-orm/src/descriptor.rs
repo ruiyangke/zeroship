@@ -24,7 +24,43 @@ pub fn install_collections(
         let fields = schema
             .as_object()
             .ok_or_else(|| DbError::internal("collection descriptor must be an object"))?;
+        let assignments = crate::assignments::AssignmentPlan::from_schema(schema)?;
+        zeroship_data_sql::lifecycle::soft_delete_column(schema)?;
+        zeroship_data_sql::lifecycle::concurrency_column(schema)?;
         for (name, definition) in fields {
+            for (role, event, generator) in [
+                (
+                    "softDelete",
+                    zeroship_migrate_policy::AssignmentEvent::Delete,
+                    "now",
+                ),
+                (
+                    "concurrency",
+                    zeroship_migrate_policy::AssignmentEvent::Write,
+                    "increment",
+                ),
+            ] {
+                if definition.get(role).and_then(Value::as_bool) == Some(true)
+                    && !assignments.columns().iter().any(|column| {
+                        column.name == *name
+                            && column.on == event
+                            && match generator {
+                                "now" => {
+                                    column.by == zeroship_migrate_policy::AssignmentGenerator::Now
+                                }
+                                _ => matches!(
+                                    column.by,
+                                    zeroship_migrate_policy::AssignmentGenerator::Increment(_)
+                                ),
+                            }
+                    })
+                {
+                    return Err(DbError::validation(
+                        "invalid_column_role",
+                        format!("'{name}' requires a matching generator for {role}"),
+                    ));
+                }
+            }
             if crate::compile::is_schema_metadata_key(name) {
                 continue;
             }

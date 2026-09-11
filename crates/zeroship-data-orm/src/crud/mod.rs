@@ -7,16 +7,18 @@
 
 use zeroship_data_sql::value::Value;
 
+use crate::assignments::AssignmentPlan;
 use crate::compile;
 use crate::exec::{exec_mutation_with_emit, exec_query};
 use crate::tx_route::TxRoute;
 use zeroship_data_orm::binding::DbBinding;
 use zeroship_data_orm::error::DbError;
 use zeroship_data_sql::codecs::{lower_document, lower_documents, lower_filter, lower_update};
+use zeroship_data_sql::lifecycle::{concurrency_column, primary_key, soft_delete_column};
 
 use crate::protection::{mask_pass, protection_floor, unmask};
 
-pub(crate) mod system_fields_pass;
+pub(crate) mod assignment_pass;
 
 mod bytes_pass;
 pub mod read_pipeline;
@@ -28,7 +30,6 @@ pub use write_pipeline::{
     WritePathCounters, reset_write_path_counters_for_tests, write_path_counters_for_tests,
 };
 
-
 /// Execute a row-returning mutation, emit its change event and process the result.
 /// Owned arguments let the returned future outlive the dispatch closure.
 pub async fn exec_mutation_then_read(
@@ -38,7 +39,7 @@ pub async fn exec_mutation_then_read(
     bq: compile::BuiltQuery,
     op: zeroship_data_orm::cdc::ChangeOp,
 ) -> Result<read_pipeline::ApplyResult, DbError> {
-    let rows = exec_mutation_with_emit(bq, &route, &coll, op).await?;
+    let rows = exec_mutation_with_emit(bq, &route, &coll, op, &binding).await?;
     read_pipeline::apply(
         &route,
         &binding,
@@ -196,6 +197,7 @@ fn parse_unmask_opt(opt: Option<&Value>) -> Vec<String> {
 fn validate_unmask_projection(
     select: Option<&Value>,
     unmask_columns: &[String],
+    schema: &Value,
 ) -> Result<(), DbError> {
     if unmask_columns.is_empty() {
         return Ok(());
@@ -206,7 +208,7 @@ fn validate_unmask_projection(
     if arr.is_empty() {
         return Ok(());
     }
-    if arr.iter().any(|v| v.as_str() == Some("id")) {
+    if arr.iter().any(|v| v.as_str() == primary_key(schema).ok()) {
         return Ok(());
     }
     Err(DbError::ValidationFailed {
@@ -301,7 +303,11 @@ pub async fn run_find(
     filter: Value,
     plan: FindPlan,
 ) -> Result<read_pipeline::ApplyResult, DbError> {
-    validate_unmask_projection(plan.select.as_ref(), &plan.unmask_columns)?;
+    validate_unmask_projection(
+        plan.select.as_ref(),
+        &plan.unmask_columns,
+        crate::descriptor::collection_schema(&binding, &coll)?.as_ref(),
+    )?;
 
     // Unmask reads follow this operation's transaction route. Authorization and
     // audit writes use the backend separately so creator rollback cannot erase
@@ -323,7 +329,7 @@ pub async fn run_find(
     // Default reads use visible value columns; raw storage requires unmask access.
     let schema_hint = crate::descriptor::collection_schema(&binding, &coll)?;
     // Soft-delete auto-filter gate.
-    let filter_soft_deleted = system_fields_pass::should_filter_soft_deleted(plan.include_deleted);
+    let filter_soft_deleted = assignment_pass::should_filter_soft_deleted(plan.include_deleted);
     let mut sql_filter = filter;
     lower_filter(route.dialect(), &schema_hint, &mut sql_filter);
     let bq = compile::build_find_with_schema_and_unmask_and_soft_delete_with_dialect(
@@ -381,7 +387,7 @@ pub async fn run_find(
 /// The ENGINE half of `insert`: no `scope`, no `v8::`, no `ResolveValue`.
 ///
 /// `actor_id` is a PARAMETER rather than something this function looks up, and
-/// that is load-bearing. `system_fields_pass::current_actor_id` reads
+/// that is load-bearing. `assignment_pass::current_actor_id` reads
 /// `executing_request_id` off the runtime state, which is only guaranteed-set
 /// on the pump turn that initiates the dispatch. This function awaits before it
 /// writes (the encryption pass's `resolve_key` round-trip), so resolving the
@@ -419,8 +425,14 @@ pub async fn run_insert(
     let bq =
         compile::build_insert_with_dialect(binding.schema(), &coll, &schema, &doc, route.dialect())
             .map_err(DbError::from)?;
-    let rows = exec_mutation_with_emit(bq, &route, &coll, zeroship_data_orm::cdc::ChangeOp::Insert)
-        .await?;
+    let rows = exec_mutation_with_emit(
+        bq,
+        &route,
+        &coll,
+        zeroship_data_orm::cdc::ChangeOp::Insert,
+        &binding,
+    )
+    .await?;
     read_pipeline::apply(
         &route,
         &binding,
@@ -465,8 +477,14 @@ pub async fn run_insert_many(
         route.dialect(),
     )
     .map_err(DbError::from)?;
-    let rows = exec_mutation_with_emit(bq, &route, &coll, zeroship_data_orm::cdc::ChangeOp::Insert)
-        .await?;
+    let rows = exec_mutation_with_emit(
+        bq,
+        &route,
+        &coll,
+        zeroship_data_orm::cdc::ChangeOp::Insert,
+        &binding,
+    )
+    .await?;
     read_pipeline::apply(
         &route,
         &binding,
@@ -497,19 +515,17 @@ pub async fn run_update_one(
     actor_id: Option<String>,
 ) -> Result<(Vec<Value>, bool), DbError> {
     let mut update = update;
-    write_pipeline::inspect_update(binding.app_id(), &coll, &mut update)?;
+    let schema = crate::descriptor::collection_schema(&binding, &coll)?;
+    write_pipeline::inspect_update(&schema, &mut update)?;
     // Detect creator-supplied CAS version + reject
     // the unsupported "version filter without id" shape eagerly.
-    let cas_version = system_fields_pass::extract_cas_version(&filter, &coll)?;
-    if cas_version.is_some() && !system_fields_pass::filter_has_id_predicate(&filter) {
+    let cas_version = assignment_pass::extract_cas_version(&filter, &coll, &schema)?;
+    if cas_version.is_some()
+        && !assignment_pass::filter_has_primary_key_predicate(&filter, &schema)?
+    {
         return Err(DbError::multi_row_version_filter_unsupported(&coll));
     }
 
-    // The descriptor entry for this collection. Everything below reads it:
-    // the per-row-randomised-encryption decision, the SQLite boolean
-    // lowering, and the target-row probe's filter. An undeclared collection
-    // rejects the op rather than silently skipping the per-row path.
-    let schema = crate::descriptor::collection_schema(&binding, &coll)?;
     update_validation::validate(&schema, &update)?;
     zeroship_data_sql::codecs::prepare_update(&schema, &mut update)?;
     let per_row_encrypted_update =
@@ -528,7 +544,7 @@ pub async fn run_update_one(
             if let Some(expected_version) = cas_version {
                 let row_id = filter
                     .as_object()
-                    .and_then(|o| o.get("id"))
+                    .and_then(|o| primary_key(&schema).ok().and_then(|key| o.get(key)))
                     .and_then(|v| v.as_str());
                 return Err(DbError::version_mismatch(&coll, row_id, expected_version));
             }
@@ -555,9 +571,11 @@ pub async fn run_update_one(
     .await?;
     lower_update(route.dialect(), &schema, &mut update);
     let sql_filter = if let Some(target_row) = target_row {
-        let mut sql_filter = zeroship_data_sql::value!({ "id": target_row.id_value });
+        let mut sql_filter =
+            zeroship_data_sql::value!({ (primary_key(&schema)?): target_row.id_value });
         if let Some(expected_version) = cas_version {
-            sql_filter["version"] = Value::from(expected_version);
+            sql_filter[concurrency_column(&schema)?.expect("CAS column")] =
+                Value::from(expected_version);
         }
         sql_filter
     } else {
@@ -565,18 +583,19 @@ pub async fn run_update_one(
         lower_filter(route.dialect(), &schema, &mut sql_filter);
         sql_filter
     };
-    // Auto-bump via the system-fields-aware builder.
+    // Compile the descriptor's write assignments.
     // Actor flows into the `updated_by` bind; the `hints` from the
     // pre-pass tell the builder which auto-bumps to suppress.
     // No `skip_*` knob is set: the pass stripped every column the
     // charter re-assigns on write, so the patch cannot carry a
     // competing assignment for the builder to defer to.
-    let autobump = compile::SystemFieldAutoBump {
-        dispatch_write: true,
-        actor_id: actor_id.as_deref(),
-        ..Default::default()
-    };
-    let built = compile::build_update_one_with_system_fields(
+    let autobump = AssignmentPlan::from_schema(&schema)?.write_assignments(
+        &schema,
+        actor_id.as_deref(),
+        false,
+        false,
+    );
+    let built = compile::build_update_one_with_assignments(
         binding.schema(),
         &coll,
         &schema,
@@ -586,8 +605,14 @@ pub async fn run_update_one(
         &autobump,
     );
     let bq = built.map_err(DbError::from)?;
-    let rows = exec_mutation_with_emit(bq, &route, &coll, zeroship_data_orm::cdc::ChangeOp::Update)
-        .await?;
+    let rows = exec_mutation_with_emit(
+        bq,
+        &route,
+        &coll,
+        zeroship_data_orm::cdc::ChangeOp::Update,
+        &binding,
+    )
+    .await?;
     let result = read_pipeline::apply(
         &route,
         &binding,
@@ -605,7 +630,7 @@ pub async fn run_update_one(
         if result.rows.is_empty() {
             let row_id = filter
                 .as_object()
-                .and_then(|o| o.get("id"))
+                .and_then(|o| primary_key(&schema).ok().and_then(|key| o.get(key)))
                 .and_then(|v| v.as_str());
             return Err(DbError::version_mismatch(&coll, row_id, expected_version));
         }
@@ -644,16 +669,15 @@ pub async fn run_update_many(
     // stamp, so this is the same value either arm would read, taken before the
     // move rather than through two different accessors.
     let dialect = route.dialect();
-    write_pipeline::inspect_update(binding.app_id(), &coll, &mut update)?;
-    let cas_version = system_fields_pass::extract_cas_version(&filter, &coll)?;
-    if cas_version.is_some() && !system_fields_pass::filter_has_id_predicate(&filter) {
+    let schema = crate::descriptor::collection_schema(&binding, &coll)?;
+    write_pipeline::inspect_update(&schema, &mut update)?;
+    let cas_version = assignment_pass::extract_cas_version(&filter, &coll, &schema)?;
+    if cas_version.is_some()
+        && !assignment_pass::filter_has_primary_key_predicate(&filter, &schema)?
+    {
         return Err(DbError::multi_row_version_filter_unsupported(&coll));
     }
 
-    // The descriptor entry, resolved once for the whole op: the per-row
-    // randomised-encryption decision, the SQLite boolean lowering and the
-    // target-row probe all read it. An undeclared collection rejects.
-    let schema = crate::descriptor::collection_schema(&binding, &coll)?;
     update_validation::validate(&schema, &update)?;
     zeroship_data_sql::codecs::prepare_update(&schema, &mut update)?;
     let per_row_encrypted_update =
@@ -661,11 +685,12 @@ pub async fn run_update_many(
     // No `skip_*` knob is set: the pass stripped every column the
     // charter re-assigns on write, so the patch cannot carry a
     // competing assignment for the builder to defer to.
-    let autobump = compile::SystemFieldAutoBump {
-        dispatch_write: true,
-        actor_id: actor_id.as_deref(),
-        ..Default::default()
-    };
+    let autobump = AssignmentPlan::from_schema(&schema)?.write_assignments(
+        &schema,
+        actor_id.as_deref(),
+        false,
+        false,
+    );
     if per_row_encrypted_update {
         let frame = crate::transaction::AtomicWriteFrame::begin(route).await?;
         let work_result: Result<usize, DbError> = async {
@@ -698,7 +723,7 @@ pub async fn run_update_many(
                 if let Some(expected_version) = cas_version {
                     let row_id = filter
                         .as_object()
-                        .and_then(|o| o.get("id"))
+                        .and_then(|o| primary_key(&schema).ok().and_then(|key| o.get(key)))
                         .and_then(|v| v.as_str());
                     return Err(DbError::version_mismatch(&coll, row_id, expected_version));
                 }
@@ -725,9 +750,10 @@ pub async fn run_update_many(
                 )
                 .await?;
                 lower_update(dialect, &schema, &mut row_update);
-                let mut row_filter = zeroship_data_sql::value!({ "id": row_id });
+                let mut row_filter = zeroship_data_sql::value!({ (primary_key(&schema)?): row_id });
                 if let Some(expected_version) = cas_version {
-                    row_filter["version"] = Value::from(expected_version);
+                    row_filter[concurrency_column(&schema)?.expect("CAS column")] =
+                        Value::from(expected_version);
                 }
                 // The probe resolved this row by its primary-key `id`, so
                 // the per-row statement does not need a second bounded
@@ -735,7 +761,7 @@ pub async fn run_update_many(
                 // ordinary column-grant surface while the primary key still
                 // bounds the statement to this exact row.
                 row_queries.push(
-                    compile::build_update_many_with_system_fields(
+                    compile::build_update_many_with_assignments(
                         binding.schema(),
                         &coll,
                         &schema,
@@ -755,6 +781,7 @@ pub async fn run_update_many(
                     frame.route(),
                     &coll,
                     zeroship_data_orm::cdc::ChangeOp::Update,
+                    &binding,
                 )
                 .await?
                 .len();
@@ -764,7 +791,7 @@ pub async fn run_update_many(
                 if affected != target_count {
                     let row_id = filter
                         .as_object()
-                        .and_then(|o| o.get("id"))
+                        .and_then(|o| primary_key(&schema).ok().and_then(|key| o.get(key)))
                         .and_then(|v| v.as_str());
                     return Err(DbError::version_mismatch(&coll, row_id, expected_version));
                 }
@@ -795,7 +822,7 @@ pub async fn run_update_many(
     lower_update(dialect, &schema, &mut update);
     let mut sql_filter = filter.clone();
     lower_filter(dialect, &schema, &mut sql_filter);
-    let bq = compile::build_update_many_with_system_fields(
+    let bq = compile::build_update_many_with_assignments(
         binding.schema(),
         &coll,
         &schema,
@@ -805,8 +832,14 @@ pub async fn run_update_many(
         &autobump,
     )
     .map_err(DbError::from)?;
-    let rows = exec_mutation_with_emit(bq, &route, &coll, zeroship_data_orm::cdc::ChangeOp::Update)
-        .await?;
+    let rows = exec_mutation_with_emit(
+        bq,
+        &route,
+        &coll,
+        zeroship_data_orm::cdc::ChangeOp::Update,
+        &binding,
+    )
+    .await?;
     // CAS path on updateMany: with `{ id, version: N }` the
     // RETURNING is at most one row. Same empty-check as
     // updateOne so the SDK's CAS contract holds for both
@@ -815,7 +848,7 @@ pub async fn run_update_many(
         if rows.is_empty() {
             let row_id = filter
                 .as_object()
-                .and_then(|o| o.get("id"))
+                .and_then(|o| primary_key(&schema).ok().and_then(|key| o.get(key)))
                 .and_then(|v| v.as_str());
             return Err(DbError::version_mismatch(&coll, row_id, expected_version));
         }
@@ -827,23 +860,7 @@ pub async fn run_update_many(
     Ok(rows.len())
 }
 
-// ---------------------------------------------------------------------------
-// deleteOne / deleteMany / purge / restore — write paths
-//
-// `delete()` soft-deletes by updating `deleted_at`.
-// `purge()` remains the explicit hard-delete, and `restore()` clears
-// `deleted_at` on a soft-deleted row.
-// ---------------------------------------------------------------------------
-
-/// Shared dispatch for `deleteOne`. See `v8_classes::dispatch::dispatch_insert` for the
-/// capability-gate contract.
-/// The ENGINE half of `delete_one`. Peer of [`plan_count`] and [`plan_purge_one`],
-/// and the first that threads `actor_id`.
-///
-/// `actor_id` arrives as a PARAMETER rather than being read here, because reading
-/// it needs the runtime state and therefore `scope`. The adapter reads it at the
-/// synchronous boundary and passes it down - see the comment in `dispatch_insert`
-/// for why that read must not drift into an async tail.
+/// Delete one row, applying soft-delete assignments when the descriptor enables them.
 pub fn plan_delete_one(
     binding: &DbBinding,
     route: &crate::tx_route::CapturedRoute,
@@ -851,17 +868,25 @@ pub fn plan_delete_one(
     filter: Value,
     actor_id: Option<&str>,
 ) -> Result<compile::BuiltQuery, DbError> {
-    let autobump = compile::SystemFieldAutoBump {
-        actor_id,
-        ..Default::default()
-    };
     // Resolve-then-build, folded into the one `Result` `run_op` already
     // rejects on: an undeclared collection cannot be soft-deleted through a
     // filter this deploy has no schema to lower.
     crate::descriptor::collection_schema(binding, collection).and_then(|schema| {
+        let autobump =
+            AssignmentPlan::from_schema(&schema)?.write_assignments(&schema, actor_id, true, false);
+        if soft_delete_column(&schema)?.is_none() {
+            return compile::build_delete_one_with_dialect(
+                binding.schema(),
+                collection,
+                &schema,
+                &filter,
+                route.dialect(),
+            )
+            .map_err(DbError::from);
+        }
         let mut filter = filter;
         lower_filter(route.dialect(), &schema, &mut filter);
-        compile::build_soft_delete_one_with_system_fields(
+        compile::build_soft_delete_one_with_assignments(
             binding.schema(),
             collection,
             &schema,
@@ -884,14 +909,22 @@ pub fn plan_delete_many(
     filter: Value,
     actor_id: Option<&str>,
 ) -> Result<compile::BuiltQuery, DbError> {
-    let autobump = compile::SystemFieldAutoBump {
-        actor_id,
-        ..Default::default()
-    };
     crate::descriptor::collection_schema(binding, collection).and_then(|schema| {
+        let autobump =
+            AssignmentPlan::from_schema(&schema)?.write_assignments(&schema, actor_id, true, false);
+        if soft_delete_column(&schema)?.is_none() {
+            return compile::build_delete_many(
+                binding.schema(),
+                collection,
+                &schema,
+                &filter,
+                route.dialect(),
+            )
+            .map_err(DbError::from);
+        }
         let mut filter = filter;
         lower_filter(route.dialect(), &schema, &mut filter);
-        compile::build_soft_delete_many_with_system_fields(
+        compile::build_soft_delete_many_with_assignments(
             binding.schema(),
             collection,
             &schema,
@@ -903,19 +936,7 @@ pub fn plan_delete_many(
     })
 }
 
-/// Explicit hard-delete entry point. Always emits
-/// `DELETE FROM ...` regardless of marker state. Used by the SDK's
-/// `purge(filter)` for compliance / right-to-be-forgotten flows.
-///
-/// `purge` does NOT respect the `deleted_at IS NULL` auto-filter —
-/// it removes both live and soft-deleted rows matching the filter.
-/// The ENGINE half of `purge_one`. Peer of [`plan_count`]; see that function for
-/// the seam this follows and the proposal lines that require it.
-///
-/// `purge_one` is a MUTATION that needs no `actor_id`: a hard delete stamps
-/// nobody. That is why the 17-strong `dispatch_*` family divides into "needs
-/// `current_actor_id(&state)`" (9) and "does not" (8) rather than read vs write -
-/// this function is a write on the not-needed side.
+/// Permanently remove a matching row regardless of its deletion marker.
 pub fn plan_purge_one(
     binding: &DbBinding,
     route: &crate::tx_route::CapturedRoute,
@@ -972,15 +993,12 @@ pub fn plan_restore_one(
     filter: Value,
     actor_id: Option<&str>,
 ) -> Result<compile::BuiltQuery, DbError> {
-    let autobump = compile::SystemFieldAutoBump {
-        dispatch_write: true,
-        actor_id,
-        ..Default::default()
-    };
     crate::descriptor::collection_schema(binding, collection).and_then(|schema| {
+        let autobump =
+            AssignmentPlan::from_schema(&schema)?.write_assignments(&schema, actor_id, false, true);
         let mut filter = filter;
         lower_filter(route.dialect(), &schema, &mut filter);
-        compile::build_restore_one_with_system_fields(
+        compile::build_restore_one_with_assignments(
             binding.schema(),
             collection,
             &schema,
@@ -1002,15 +1020,12 @@ pub fn plan_restore_many(
     filter: Value,
     actor_id: Option<&str>,
 ) -> Result<compile::BuiltQuery, DbError> {
-    let autobump = compile::SystemFieldAutoBump {
-        dispatch_write: true,
-        actor_id,
-        ..Default::default()
-    };
     crate::descriptor::collection_schema(binding, collection).and_then(|schema| {
+        let autobump =
+            AssignmentPlan::from_schema(&schema)?.write_assignments(&schema, actor_id, false, true);
         let mut filter = filter;
         lower_filter(route.dialect(), &schema, &mut filter);
-        compile::build_restore_many_with_system_fields(
+        compile::build_restore_many_with_assignments(
             binding.schema(),
             collection,
             &schema,
@@ -1067,7 +1082,7 @@ pub fn plan_aggregate(
         .get("include_deleted")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-    let filter_soft_deleted = system_fields_pass::should_filter_soft_deleted(include_deleted);
+    let filter_soft_deleted = assignment_pass::should_filter_soft_deleted(include_deleted);
 
     // The descriptor entry is the aggregate builder's identifier allowlist.
     // `$group.by` / `$sum` / `$sort` on a masked column read the field's own
@@ -1099,7 +1114,7 @@ pub fn plan_distinct(
         .get("include_deleted")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-    let filter_soft_deleted = system_fields_pass::should_filter_soft_deleted(include_deleted);
+    let filter_soft_deleted = assignment_pass::should_filter_soft_deleted(include_deleted);
 
     // A DISTINCT over a masked column returns MASKS - the column with the
     // field's own name is the one it selects, and that column holds the mask.
@@ -1165,7 +1180,7 @@ pub fn plan_count(
         .get("include_deleted")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-    let filter_soft_deleted = system_fields_pass::should_filter_soft_deleted(include_deleted);
+    let filter_soft_deleted = assignment_pass::should_filter_soft_deleted(include_deleted);
 
     crate::descriptor::collection_schema(binding, collection).and_then(|schema| {
         let mut filter = filter;
@@ -1208,13 +1223,19 @@ pub async fn run_upsert(
     .await?;
     let schema = crate::descriptor::collection_schema(&binding, &coll)?;
     lower_document(route.dialect(), &schema, &mut doc);
-    let bq = compile::build_upsert_with_dialect(
+    let bq = compile::build_upsert_with_assignments(
         binding.schema(),
         &coll,
         &schema,
         &doc,
         &conflict_fields,
         route.dialect(),
+        &AssignmentPlan::from_schema(&schema)?.write_assignments(
+            &schema,
+            actor_id.as_deref(),
+            false,
+            false,
+        ),
     )
     .map_err(DbError::from)?;
     // Upsert can be either INSERT (new row) or UPDATE (existing).
@@ -1222,8 +1243,14 @@ pub async fn run_upsert(
     // same -- re-fetch. Finer-grained read-set narrowing could
     // distinguish INSERT from UPDATE; this coarser tagging
     // doesn't need to.
-    let rows = exec_mutation_with_emit(bq, &route, &coll, zeroship_data_orm::cdc::ChangeOp::Update)
-        .await?;
+    let rows = exec_mutation_with_emit(
+        bq,
+        &route,
+        &coll,
+        zeroship_data_orm::cdc::ChangeOp::Update,
+        &binding,
+    )
+    .await?;
     read_pipeline::apply(
         &route,
         &binding,
@@ -1663,6 +1690,7 @@ mod tests {
         let err = validate_unmask_projection(
             Some(&zeroship_data_sql::value!(["ssn", "email"])),
             &["ssn".to_string()],
+            &zeroship_data_sql::value!({"id":{"primaryKey":true}}),
         )
         .expect_err("explicit unmask projection without id must be refused");
 
@@ -1680,10 +1708,16 @@ mod tests {
 
     #[test]
     fn validate_unmask_projection_accepts_implicit_or_id_inclusive_select() {
-        validate_unmask_projection(None, &["ssn".to_string()]).expect("implicit select ok");
+        validate_unmask_projection(
+            None,
+            &["ssn".to_string()],
+            &zeroship_data_sql::value!({"id":{"primaryKey":true}}),
+        )
+        .expect("implicit select ok");
         validate_unmask_projection(
             Some(&zeroship_data_sql::value!(["id", "ssn"])),
             &["ssn".to_string()],
+            &zeroship_data_sql::value!({"id":{"primaryKey":true}}),
         )
         .expect("id-inclusive projection ok");
     }

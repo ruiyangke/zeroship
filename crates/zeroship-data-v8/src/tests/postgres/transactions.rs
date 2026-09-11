@@ -316,7 +316,7 @@ export default { fetch: _zsFetch, rpc: _shimRpc };
 "#;
 
 fn notes_runtime_descriptor() -> String {
-    serde_json::json!({
+    let mut descriptor = serde_json::json!({
         "version": 2,
         "collections": {
             "notes": {
@@ -331,12 +331,25 @@ fn notes_runtime_descriptor() -> String {
                 "indexes": [],
             },
         },
-    })
-    .to_string()
+    });
+    for collection in descriptor["collections"]
+        .as_object_mut()
+        .unwrap()
+        .values_mut()
+    {
+        let fields = serde_json::from_value(collection["fields"].clone()).unwrap();
+        let mut fields = crate::tests::fixtures::schema::generated_fields(fields);
+        for field in fields.as_object_mut().unwrap().values_mut() {
+            field.as_object_mut().unwrap().shift_remove("softDelete");
+            field.as_object_mut().unwrap().shift_remove("concurrency");
+        }
+        collection["fields"] = serde_json::to_value(fields).unwrap();
+    }
+    descriptor.to_string()
 }
 
 fn users_runtime_descriptor() -> String {
-    serde_json::json!({
+    let mut descriptor = serde_json::json!({
         "version": 2,
         "collections": {
             "users": {
@@ -356,8 +369,21 @@ fn users_runtime_descriptor() -> String {
                 "indexes": [],
             },
         },
-    })
-    .to_string()
+    });
+    for collection in descriptor["collections"]
+        .as_object_mut()
+        .unwrap()
+        .values_mut()
+    {
+        let fields = serde_json::from_value(collection["fields"].clone()).unwrap();
+        let mut fields = crate::tests::fixtures::schema::generated_fields(fields);
+        for field in fields.as_object_mut().unwrap().values_mut() {
+            field.as_object_mut().unwrap().shift_remove("softDelete");
+            field.as_object_mut().unwrap().shift_remove("concurrency");
+        }
+        collection["fields"] = serde_json::to_value(fields).unwrap();
+    }
+    descriptor.to_string()
 }
 
 fn dispatch_zs_for_app_with_descriptor(

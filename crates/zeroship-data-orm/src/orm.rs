@@ -5,8 +5,8 @@
 //! execution can then yield without consulting another request's context.
 
 use std::{cell::Cell, future::Future, marker::PhantomData, rc::Rc};
-use zeroship_data_orm::cdc::ChangeOp;
 use zeroship_data_orm::binding::DbBinding;
+use zeroship_data_orm::cdc::ChangeOp;
 pub use zeroship_data_orm::error::DbError;
 pub use zeroship_data_sql::value::Value;
 
@@ -28,7 +28,11 @@ impl Database {
     /// Prepare a relational read while the request's transaction and read-set are active.
     pub fn read(&self, query: ReadQuery) -> impl Future<Output = Result<Output, DbError>> + use<> {
         let collection = query.source.collection.clone();
-        Collection { database: self.clone(), name: collection }.execute(Operation::Read(Box::new(query)))
+        Collection {
+            database: self.clone(),
+            name: collection,
+        }
+        .execute(Operation::Read(Box::new(query)))
     }
     /// Open the configured backend and bind the deployment's runtime metadata.
     pub async fn connect(
@@ -346,7 +350,7 @@ mod model;
 pub use codecs::{Decimal, Point, Protected, sql_types};
 pub use model::*;
 pub mod read;
-pub use read::{ReadQuery, ReadSource, ReadJoin, ReadProjection};
+pub use read::{ReadJoin, ReadProjection, ReadQuery, ReadSource};
 mod read_builder;
 mod read_input;
 pub use read_builder::*;
@@ -512,8 +516,14 @@ impl PreparedOperation {
         crate::descriptor::collection_schema(&binding, collection)?;
         let plan = match operation {
             Operation::Read(query) => {
-                if query.source.collection != collection { return Err(read::invalid("read root does not match its collection")); }
-                Plan::Read(Box::new(read::PreparedRead::new(&binding, route.dialect(), *query)?))
+                if query.source.collection != collection {
+                    return Err(read::invalid("read root does not match its collection"));
+                }
+                Plan::Read(Box::new(read::PreparedRead::new(
+                    &binding,
+                    route.dialect(),
+                    *query,
+                )?))
             }
             Operation::Find { filter, options } => {
                 let plan = crud::plan_find(&binding, collection, &filter, &options);
@@ -689,6 +699,7 @@ impl PreparedOperation {
                     &route,
                     &collection,
                     operation,
+                    &binding,
                 ))
                 .await?
                 .len() as i64,

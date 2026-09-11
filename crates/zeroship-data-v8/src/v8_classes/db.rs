@@ -525,7 +525,9 @@ mod tests {
             resolve_collection_binding(&pinned_runtime, &pinned_collection),
             (
                 PINNED.to_string(),
-                Some(value!({ "marker": { "type": "string" } }))
+                Some(crate::tests::fixtures::schema::generated_fields(
+                    value!({ "marker": { "type": "string" } })
+                ))
             ),
             "the pinned deploy must resolve the entry it installed",
         );
@@ -554,7 +556,9 @@ mod tests {
             resolve_collection_binding(&pinned_runtime, &pinned_collection),
             (
                 PINNED.to_string(),
-                Some(value!({ "marker": { "type": "string" } }))
+                Some(crate::tests::fixtures::schema::generated_fields(
+                    value!({ "marker": { "type": "string" } })
+                ))
             ),
             "installing the current deploy redirected the pinned binding",
         );
@@ -562,7 +566,9 @@ mod tests {
             resolve_collection_binding(&current_runtime, &current_collection),
             (
                 CURRENT.to_string(),
-                Some(value!({ "other": { "type": "string" } }))
+                Some(crate::tests::fixtures::schema::generated_fields(
+                    value!({ "other": { "type": "string" } })
+                ))
             ),
             "the current binding must retain its own deploy token and descriptor entry",
         );
