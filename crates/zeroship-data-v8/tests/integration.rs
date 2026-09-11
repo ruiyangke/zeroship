@@ -3611,7 +3611,7 @@ async fn p4_round_trip_encrypted_masked_vector_via_descriptor_metadata() {
         "name": {"type": "string", "required": true},
         "ssn": {
             "type": "string",
-            "encrypted": {"wraps": "string"}
+            "encrypted": true
         },
         "phone": {
             "type": "string",
@@ -3869,7 +3869,7 @@ async fn p5_pg_crud_works_via_engine_created_schema_without_runtime_ddl() {
         "name": {"type": "string", "required": true},
         "ssn": {
             "type": "string",
-            "encrypted": {"wraps": "string"}
+            "encrypted": true
         },
         "phone": {
             "type": "string",
@@ -5463,7 +5463,7 @@ async fn unmask_encrypted_column_on_pg_reads_bytea_raw_sibling() {
         "ssn": {
             "type": "string",
             "mask": { "kind": "last4", "classification": "spi" },
-            "encrypted": { "wraps": "string" }
+            "encrypted": true
         }
     });
     let ssn_raw = raw_column_name("ssn");

@@ -720,8 +720,10 @@ pub fn build_mask_sentinel_comments(
 /// parser is [`crate::mask_codec::parse_encryption_sentinel`].
 #[must_use]
 pub fn encryption_sentinel_body_for_field(def: &serde_json::Value) -> Option<String> {
-    let enc = def.get("encrypted").and_then(|v| v.as_object())?;
-    let wraps = match enc.get("wraps").and_then(serde_json::Value::as_str).unwrap_or("string") {
+    if def.get("encrypted").and_then(serde_json::Value::as_bool) != Some(true) {
+        return None;
+    }
+    let wraps = match def.get("type").and_then(serde_json::Value::as_str)? {
         "string" => crate::mask_meta::WrappedType::String,
         "number" => crate::mask_meta::WrappedType::Number,
         "bytes" => crate::mask_meta::WrappedType::Bytes,

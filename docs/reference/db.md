@@ -1656,9 +1656,17 @@ as text and holds no foreign key into them.
 
 This section resolves `docs/archive/sensitive-field-masking.md` against the shipped implementation in `sdks/db/src/types.ts`, `crates/zeroship-data-sql/src/compile.rs`, `crates/zeroship-data-orm/src/protection/mask_pass.rs`, `crates/zeroship-data-v8/src/v8_classes/masked_value.rs`, `crates/zeroship-data-orm/src/protection/unmask.rs`, `sdks/db/src/collection/masking.ts`, `sdks/db/src/policy.ts`.
 
-Every masked field owns TWO physical columns. The field's OWN column holds the MASK, as bare `TEXT` carrying none of the declared constraints; a hidden sibling holds the REAL value, and carries the declared type and every constraint. Both are written atomically, and a default read serves the field's own column, so it serves the mask (`crates/zeroship-data-sql/src/compile.rs`, `crates/zeroship-data-orm/src/protection/mask_pass.rs`).
+The migration engine records physical placement in each field's runtime
+`storage` mapping. Default reads use `storage.valueColumn`; authorized unmasking
+and protected writes use `storage.rawColumn`. The raw column holds the real
+value and its constraints; the visible column holds the mask. The ORM validates
+that the raw column is inaccessible to ordinary creator queries.
 
-The layout used to be the other way round - plaintext under the field's name, the mask in a `<field>_masked` sibling that the SELECT aliased back. That made the SELECT the only mask-aware surface: the WHERE builder takes no schema and could not substitute, so `find({ ssn: { $gt: v } })` compared against plaintext and repeated probes binary-searched a value the caller could not read, unauthorized and unaudited. The flip makes the ignorant path the safe path - a builder that has never heard of masking names the column with the natural name, and that column is the mask. The sibling's name is `__zs_raw__<field>`, which `validate_field_name` refuses, so no filter, projection, sort, conflict probe or write-document key can name it either. `t.encrypted(...)` applies the fail-safe default mask at builder time, so an encrypted field without an explicit `.mask(...)` behaves as if it were declared with `.mask({ kind: "full", classification: "pii" })`; `.mask({ kind: "none" })` is the explicit opt-out that suppresses the sibling column and the masked read wrapper (`sdks/db/src/types.ts`, `crates/zeroship-data-sql/src/compile.rs`).
+`t.encrypted(...)` applies a full mask with `pii` classification by default.
+`.mask({ kind: "none" })` opts into plaintext reads and suppresses masked
+storage. Both operations follow the runtime descriptor rather than naming a
+mask column from a suffix (`crates/zeroship-data-sql/src/compile.rs`,
+`crates/zeroship-data-orm/src/protection/mask_pass.rs`).
 
 On writes, `apply_mask_on_write` computes the mask from plaintext, not from a later read-path decrypt, and a separate relocation stage - the ONE stage that owns physical placement, running after the encryption and bytes passes - moves the finished value to the raw column and writes the mask into the field's own. Encrypted columns use the encryption pass sidechannel, plain masked columns read directly from `row[col]`, `null` and absent values relocate nothing and write no mask, and `kind: "none"` skips the field entirely (`crates/zeroship-data-orm/src/protection/mask_pass.rs`). The shipped built-ins are `full`, `last4`, `first4`, `email`, `name`, `date-year`, `date-decade`, and `none` (`sdks/db/src/types.ts`, `crates/zeroship-data-orm/src/protection/mask_pass.rs`).
 
@@ -1677,6 +1685,18 @@ equality and `IN`), sorted, grouped, or declared unique. Masking remains a
 separate read policy; disabling the mask does not enable encrypted queries.
 Use an ordinary field to locate a row before reading or updating its encrypted
 values. These rules apply to Rust callers and worker TypeScript alike.
+
+Runtime descriptors carry the logical plaintext type and an encryption flag:
+
+```json
+{ "type": "number", "encrypted": true, "mask": { "kind": "full", "classification": "pii" } }
+```
+
+The SDK declaration is `t.encrypted({ of: t.number() })`; `t.encrypted()`
+selects string plaintext. Rust writes, reads and unmasking share a native
+plaintext codec selected by `type`. Binary values remain native buffers.
+The physical catalog sentinel also records the plaintext type, since the
+stored SQL type describes ciphertext.
 
 The host supplies a project encryption key and explicit app-to-project bindings
 to the ORM. Every encrypted column in that project uses the same key. The ORM

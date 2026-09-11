@@ -29,13 +29,7 @@ pub fn install_collections(
                 continue;
             }
             crate::compile::validate_field_name(name)?;
-            if let Some(encrypted) = definition.get("encrypted") {
-                encrypted.as_object().ok_or_else(|| {
-                    DbError::validation(
-                        "invalid_encryption_metadata",
-                        "encrypted must be an options object",
-                    )
-                })?;
+            if crate::encryption::plaintext::PlaintextType::from_field(definition)?.is_some() {
                 if definition.get("unique").and_then(Value::as_bool) == Some(true) {
                     return Err(DbError::validation(
                         "encrypted_unique_unsupported",

@@ -550,9 +550,7 @@
         },
         "contactEmail": {
           "type": "string",
-          "encrypted": {
-            "wraps": "string"
-          },
+          "encrypted": true,
           "mask": {
             "kind": "full",
             "classification": "pii"
@@ -571,9 +569,7 @@
         },
         "ssn": {
           "type": "string",
-          "encrypted": {
-            "wraps": "string"
-          },
+          "encrypted": true,
           "mask": {
             "kind": "full",
             "classification": "pii"

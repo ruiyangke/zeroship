@@ -734,7 +734,7 @@ pub fn compute_diff(
                 // nor a decrypt primitive. That arm stays refused. Up-front
                 // encrypted masks remain supported by the trusted CRUD path.
                 (None, Some(new_meta)) => {
-                    let encrypted = live_col.encryption.is_some() || def.get("encrypted").is_some();
+                    let encrypted = live_col.encryption.is_some() || def.get("encrypted").and_then(serde_json::Value::as_bool) == Some(true);
                     let mut details = serde_json::json!({
                         "kind": "mask_backfill",
                         "field": field,
@@ -856,7 +856,7 @@ pub fn compute_diff(
                 continue;
             };
 
-            let declared_encrypted = def.get("encrypted").is_some();
+            let declared_encrypted = def.get("encrypted").and_then(serde_json::Value::as_bool) == Some(true);
             let live_encrypted = live_col.encryption.is_some();
             if declared_encrypted == live_encrypted {
                 // No encryption toggle - nothing for this op to do.
@@ -1204,7 +1204,7 @@ mod tests {
         // `decode($N,'base64')::bytea` into a still-TEXT column.
         let live = live_with_cols("users", vec![("ssn", plaintext_text_col())]);
         let declared = json!({
-            "ssn": { "type": "string", "encrypted": {  } }
+            "ssn": { "type": "string", "encrypted": true }
         });
         let ops = compute_diff(
             crate::test_fixtures::VENDORS,
@@ -1300,7 +1300,7 @@ mod tests {
         // RewriteColumnType op (must not churn on every deploy).
         let live = live_with_cols("users", vec![("ssn", encrypted_bytea_col())]);
         let declared = json!({
-            "ssn": { "type": "string", "encrypted": {  } }
+            "ssn": { "type": "string", "encrypted": true }
         });
         let ops = compute_diff(
             crate::test_fixtures::VENDORS,
@@ -1872,7 +1872,7 @@ mod tests {
         let declared = json!({
             "ssn": {
                 "type": "string",
-                "encrypted": {  },
+                "encrypted": true,
                 "mask": { "kind": "last4", "classification": "spi" }
             }
         });

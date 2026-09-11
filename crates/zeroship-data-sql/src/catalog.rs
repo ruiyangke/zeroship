@@ -131,20 +131,13 @@ impl Default for ColumnInfo {
     }
 }
 
-/// Encryption metadata attached to a [`ColumnInfo`] when
-/// the SDK declares the column with `t.encrypted({ wraps })`.
-///
-/// Populated by schema introspection:
-/// - **PG**: from encryption metadata emitted alongside the table create.
-/// - **SQLite**: from a sentinel CHECK comment
-///   `/* zero-migrate:enc:{wraps} */` parsed out of
-///   `sqlite_master.sql` (the same regex-on-DDL pattern used for
-///   vector dims; a sidecar `__zs_schema_meta` table is the upgrade path).
+/// Plaintext type retained by the physical catalog for encrypted storage.
+/// PostgreSQL records the encryption sentinel in a column comment; SQLite
+/// retains its inline comment in `sqlite_master.sql`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EncryptionMeta {
-    /// Wrapped primitive type. The DDL emitter uses `BYTEA`/`BLOB`
-    /// regardless; `wraps` survives so validation walks the right
-    /// type-checker before the encrypt pass swaps bytes in.
+    /// The logical primitive hidden by the physical binary SQL type. Runtime
+    /// codecs use the installed field descriptor's `type`.
     pub wraps: WrappedType,
 }
 

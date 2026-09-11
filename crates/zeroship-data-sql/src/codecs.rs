@@ -383,7 +383,7 @@ fn normalize_row_on_read(
 
         // Protected storage is decoded by the protection pipeline. A mask is
         // stored as text even when its logical field is numeric or binary.
-        if def.get("encrypted").is_some() || compile::column_is_masked(key, schema) {
+        if def.get("encrypted").and_then(Value::as_bool) == Some(true) || compile::column_is_masked(key, schema) {
             continue;
         }
 
@@ -645,9 +645,7 @@ mod tests {
         let schema = crate::value!({
             "secret": {
                 "type": "bytes",
-                "encrypted": {
-                    "wraps": "bytes"
-                }
+                "encrypted": true
             }
         });
         let mut row = crate::value!({
@@ -768,10 +766,10 @@ mod timestamp_tests {
     }
 
     #[test]
-    fn protected_timestamps_keep_their_storage_shape_until_protection_decodes_them() {
+    fn protected_fields_keep_their_storage_shape_until_protection_decodes_them() {
         let schema = value!({
             "masked":{"type":"date", "mask":{"kind":"full"}},
-            "encrypted":{"type":"timestamp", "encrypted":{"wraps":"string"}},
+            "encrypted":{"type":"string", "encrypted":true},
         });
         let original = value!({"masked":"***", "encrypted":Value::Bytes(vec![1, 2, 3])});
         let mut rows = [original.clone()];

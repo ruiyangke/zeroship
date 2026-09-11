@@ -3011,7 +3011,7 @@ fn users_encrypted_ssn_schema() -> zeroship_data_sql::value::Value {
         "name": {"type": "string", "required": true},
         "ssn": {
             "type": "string",
-            "encrypted": {"wraps": "string"},
+            "encrypted": true,
             "mask": {"kind": "last4", "classification": "spi"}
         }
     })
@@ -3026,7 +3026,7 @@ fn users_encrypted_secret_schema() -> zeroship_data_sql::value::Value {
         "name": {"type": "string", "required": true},
         "secret": {
             "type": "string",
-            "encrypted": {"wraps": "string"}
+            "encrypted": true
         }
     })
 }
@@ -3198,7 +3198,7 @@ fn insert_many_encrypts_ciphertext_before_sqlite_storage() {
             "name": { "type": "string" },
             "ssn": {
                 "type": "string",
-                "encrypted": { "wraps": "string" },
+                "encrypted": true,
                 "mask": { "kind": "last4", "classification": "spi" }
             }
         });
@@ -4804,7 +4804,7 @@ fn encrypted_column_e2e_crud_round_trip_sqlite() {
             .expect("ensure_app_schema");
         // PRIMARY KEY `id TEXT` + encrypted `ssn BLOB` — same shape the
         // CRUD path's `build_create_table_with_fks` emits for an
-        // `t.encrypted({ wraps: "string" })` field, except we skip the
+        // `t.encrypted()` field, except we skip the
         // sentinel-comment metadata because the introspector isn't on
         // the e2e read path here.
         backend
@@ -4824,9 +4824,7 @@ fn encrypted_column_e2e_crud_round_trip_sqlite() {
         let schema = zeroship_data_sql::value!({
             "ssn": {
                 "type": "string",
-                "encrypted": {
-                    "wraps": "string",
-                },
+                "encrypted": true,
             },
         });
 
@@ -5235,7 +5233,7 @@ fn aliased_select_skips_kind_none_sqlite() {
     let schema = zeroship_data_sql::value!({
         "ssn": {
             "type": "string",
-            "encrypted": { "wraps": "string" },
+            "encrypted": true,
             "mask": { "kind": "none", "classification": "spi" }
         },
         "name": { "type": "string" }
@@ -6023,9 +6021,7 @@ fn cold_unmask_with_auto_actor_attaches_before_read() {
         "id": { "type": "string" },
         "ssn": {
             "type": "string",
-            "encrypted": {
-                "wraps": "string",
-            },
+            "encrypted": true,
             "mask": { "kind": "last4", "classification": "spi" },
         },
     });
@@ -6184,9 +6180,7 @@ fn unmask_with_user_actor_returns_forbidden_audit_logged() {
         "id": { "type": "string" },
         "ssn": {
             "type": "string",
-            "encrypted": {
-                "wraps": "string",
-            },
+            "encrypted": true,
             "mask": { "kind": "last4", "classification": "spi" },
         },
     });
@@ -6442,9 +6436,7 @@ fn unmask_with_user_role_in_policy_returns_plaintext() {
         "id": { "type": "string" },
         "email": {
             "type": "string",
-            "encrypted": {
-                "wraps": "string",
-            },
+            "encrypted": true,
             "mask": { "kind": "email", "classification": "pii" },
         },
     });

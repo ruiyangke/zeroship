@@ -126,7 +126,7 @@ describe("P9 PR 2 — Collection.bulkUnmask → native Collection.bulkUnmask", (
     return installSchemaForTest(
       {
         users: schemaWrap({
-          ssn: t.encrypted({ wraps: t.string() }).mask({ kind: "last4", classification: "spi" }),
+          ssn: t.encrypted({ of: t.string() }).mask({ kind: "last4", classification: "spi" }),
           email: t.string().mask({ kind: "email" }),
         }),
       },
@@ -185,7 +185,7 @@ describe("P9 PR 2 — Collection.bulkUnmask → native Collection.bulkUnmask", (
   test("missing native Collection.bulkUnmask surfaces bulk_unmask_not_available", async () => {
     const native = makeNativeMissingBulkUnmask();
     const db = installSchemaForTest(
-      { users: schemaWrap({ ssn: t.encrypted({ wraps: t.string() }) }) },
+      { users: schemaWrap({ ssn: t.encrypted({ of: t.string() }) }) },
       { native },
     );
     const result = await db.users.bulkUnmask(
@@ -226,7 +226,7 @@ describe("P9 PR 2 — MaskedValue declare-class type surface (compile-time)", ()
 
   test("Row<S>['ssn'] is MaskedValue<string>", () => {
     const fields = {
-      ssn: t.encrypted({ wraps: t.string() }).mask({ kind: "last4", classification: "spi" }).required(),
+      ssn: t.encrypted({ of: t.string() }).mask({ kind: "last4", classification: "spi" }).required(),
       name: t.string().required(),
     };
     type R = Row<typeof fields>;

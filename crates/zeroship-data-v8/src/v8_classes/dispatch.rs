@@ -469,7 +469,7 @@ pub(crate) fn dispatch_unmask_field<'s>(
             },
             |result| {
                 // Wire shape: `{ plaintext: <string> }`. The SDK reads
-                // `result.plaintext` directly; for `wraps = bytes` the
+                // `result.plaintext` directly; for `type = bytes` the
                 // SDK base64-decodes on its side.
                 crate::v8_values::resolve(
                     zeroship_data_sql::value!({ "plaintext": result.plaintext }),

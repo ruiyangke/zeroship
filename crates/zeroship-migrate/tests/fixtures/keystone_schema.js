@@ -14,7 +14,7 @@ const users = {
   role: internalDbType.string(),
   active: internalDbType.boolean(),
   // An encrypted column using the default key. `internalDbType.encrypted()`
-  // stamps `encrypted: { wraps:"string" }` AND a
+  // stamps `encrypted: true` AND a
   // fail-safe auto-mask `{ kind:"full", classification:"pii" }`; the author->generate
   // ->fold chain must recover BOTH byte-identically.
   token: internalDbType.encrypted(),

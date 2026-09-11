@@ -353,11 +353,11 @@ fn stamp_physical_storage(
         def_obj.insert("readable".to_string(), Value::Bool(true));
         def_obj.insert(
             "filterable".to_string(),
-            Value::Bool(def.get("encrypted").is_none()),
+            Value::Bool(def.get("encrypted").and_then(serde_json::Value::as_bool) != Some(true)),
         );
         def_obj.insert(
             "sortable".to_string(),
-            Value::Bool(def.get("encrypted").is_none()),
+            Value::Bool(def.get("encrypted").and_then(serde_json::Value::as_bool) != Some(true)),
         );
         def_obj.insert("projectable".to_string(), Value::Bool(true));
         def_obj.insert(

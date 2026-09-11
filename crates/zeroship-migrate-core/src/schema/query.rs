@@ -131,7 +131,7 @@ pub(crate) fn column_snapshot_for_type_def(
     let unbounded_text = def.get("type").and_then(serde_json::Value::as_str) == Some("string")
         && max_length(def).is_none()
         && !legacy_bound
-        && def.get("encrypted").is_none()
+        && def.get("encrypted").and_then(serde_json::Value::as_bool) != Some(true)
         && def.get("enum").is_none()
         && def.get("idPrefix").is_none();
     crate::model::snapshot::ColumnSnapshot {
@@ -1940,25 +1940,25 @@ pub(crate) fn validate_encryption_sentinel_for_field(
     let Some(raw) = def.get("encrypted") else {
         return Ok(());
     };
-    let enc = raw.as_object().ok_or_else(|| {
-        QueryError::InvalidFilter("encrypted must be an options object".to_string())
+    let encrypted = raw.as_bool().ok_or_else(|| {
+        QueryError::InvalidFilter("encrypted must be a boolean".to_string())
     })?;
+    if !encrypted {
+        return Ok(());
+    }
 
     if def.get("unique").and_then(serde_json::Value::as_bool) == Some(true) {
         return Err(QueryError::InvalidFilter(
             "encrypted fields cannot be unique".to_string(),
         ));
     }
-    let wraps = match enc.get("wraps") {
-        None => "string",
-        Some(value) => value.as_str().ok_or_else(|| {
-            QueryError::InvalidFilter("encrypted.wraps must be a string".to_string())
-        })?,
-    };
-    if !matches!(wraps, "string" | "number" | "bytes") {
-        return Err(QueryError::InvalidFilter(format!(
-            "encrypted.wraps must be string, number, or bytes, got {wraps:?}"
-        )));
+    if !matches!(
+        def.get("type").and_then(serde_json::Value::as_str),
+        Some("string" | "number" | "bytes")
+    ) {
+        return Err(QueryError::InvalidFilter(
+            "encrypted field type must be string, number, or bytes".to_string(),
+        ));
     }
     Ok(())
 }
@@ -4978,7 +4978,7 @@ columns = [
     fn raw_column_for_field_returns_none_for_kind_none() {
         let def = serde_json::json!({
             "type": "string",
-            "encrypted": { "wraps": "string" },
+            "encrypted": true,
             "mask": { "kind": "none", "classification": "spi" }
         });
         assert_eq!(raw_column_for_field("ssn", &def), None);
@@ -4986,9 +4986,9 @@ columns = [
 
     #[test]
     fn encrypted_ddl_rejects_unique_constraints() {
-        let schema = serde_json::json!({"secret":{"type":"string","encrypted":{},"unique":true}});
+        let schema = serde_json::json!({"secret":{"type":"string","encrypted":true,"unique":true}});
         assert!(build_create_table_with_fks("app1", "records", &schema, &FkEmission::Inline).is_err());
-        let schema = serde_json::json!({"secret":{"type":"string","encrypted":{}}});
+        let schema = serde_json::json!({"secret":{"type":"string","encrypted":true}});
         assert!(build_create_table_with_fks("app1", "records", &schema, &FkEmission::Inline).is_ok());
     }
 
@@ -5141,7 +5141,7 @@ columns = [
         let schema = serde_json::json!({
             "ssn": {
                 "type": "string",
-                "encrypted": { "wraps": "string" },
+                "encrypted": true,
                 "mask": { "kind": "full", "classification": "pii" }
             }
         });
@@ -5173,7 +5173,7 @@ columns = [
         let schema = serde_json::json!({
             "ssn": {
                 "type": "string",
-                "encrypted": { "wraps": "string" },
+                "encrypted": true,
                 "mask": { "kind": "none", "classification": "pii" }
             }
         });
@@ -5230,7 +5230,7 @@ columns = [
             },
             "secret": {
                 "type": "bytes",
-                "encrypted": {}
+                "encrypted": true
             },
             "owner": {
                 "type": "ref",

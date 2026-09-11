@@ -406,7 +406,7 @@ fn sqlite_canonical_type(data_type: &str) -> &'static str {
 }
 
 fn column_type_for_def(def: &serde_json::Value) -> String {
-    if def.get("encrypted").is_some() {
+    if def.get("encrypted").and_then(serde_json::Value::as_bool) == Some(true) {
         return "BLOB".to_string();
     }
 

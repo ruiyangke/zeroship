@@ -18,24 +18,13 @@
 //! vendor rather than a vendor's spelling, and stays in the engine by the boundary
 //! rule `zeroship_migrate::render::backends` states at length.
 
-/// Encryption metadata attached to a `ColumnInfo` when
-/// the SDK declares the column with `t.encrypted({ wraps })`.
-///
-/// Populated by schema introspection:
-/// - **PG**: from `<meta>.encrypted_columns` rows written alongside the table
-///   create by whichever orchestrator drives this kernel. In appbase that is
-///   the platform migration service; runtime data-plane code only consumes
-///   those rows.
-/// - **SQLite**: from a sentinel CHECK comment
-///   `/* zero-migrate:enc:{wraps} */` parsed out of
-///   `sqlite_master.sql` (same regex-on-DDL pattern used for
-///   vector dims; a sidecar `__zero_migrate_schema_meta` would be the upgrade path
-///   and does not exist).
+/// Plaintext type retained by the physical catalog for encrypted storage.
+/// PostgreSQL records the encryption sentinel in a column comment; SQLite
+/// retains its inline comment in `sqlite_master.sql`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EncryptionMeta {
-    /// Wrapped primitive type. The DDL emitter uses `BYTEA`/`BLOB`
-    /// regardless; `wraps` survives so validation walks the right
-    /// type-checker before the encrypt pass swaps bytes in.
+    /// The logical primitive hidden by the physical binary SQL type. Runtime
+    /// codecs use the installed field descriptor's `type`.
     pub wraps: WrappedType,
 }
 

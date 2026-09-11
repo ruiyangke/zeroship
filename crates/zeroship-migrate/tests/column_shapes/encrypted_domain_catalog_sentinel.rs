@@ -395,7 +395,7 @@ fn an_unrelated_rename_carries_the_encrypted_domain_columns_sentinel_unchanged()
 /// descriptor). The previous defect was precisely that the third disagreed with the
 /// first two. All three are asserted here, in one test, on the same ops.
 #[test]
-fn the_lower_the_snapshot_fold_and_the_field_defs_agree_on_wraps() {
+fn the_lower_the_snapshot_fold_and_the_field_defs_agree_on_plaintext_type() {
     for (label, dialect) in ALL_DIALECTS {
         let ops = create_ops(
             json!("int"),
@@ -450,12 +450,12 @@ fn the_lower_the_snapshot_fold_and_the_field_defs_agree_on_wraps() {
         .expect("field-def fold succeeds");
         let amounts = defs.get("amounts").expect("amounts in the field defs");
         assert_eq!(
-            amounts["amount"]["encrypted"]["wraps"], "number",
+            amounts["amount"]["type"], "number",
             "{label}: field-def replay disagrees: {amounts}"
         );
         assert_eq!(
-            amounts["amount"]["type"], "int",
-            "{label}: and the token must move with it: {amounts}"
+            amounts["amount"]["encrypted"], true,
+            "{label}: the field uses encrypted storage: {amounts}"
         );
     }
 }

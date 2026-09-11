@@ -94,7 +94,7 @@ fn goodies_desc() -> CollectionDescriptor {
             FieldDescriptor {
                 name: "secret".into(),
                 ty: "bytes".into(),
-                encrypted: Some(serde_json::json!({  })),
+                encrypted: Some(true),
                 ..Default::default()
             },
         ],
@@ -768,7 +768,7 @@ fn spelling_gap_desc() -> CollectionDescriptor {
             FieldDescriptor {
                 name: "secret".into(),
                 ty: "bytes".into(),
-                encrypted: Some(serde_json::json!({  })),
+                encrypted: Some(true),
                 ..Default::default()
             },
             // `double precision` (desired) vs `real` (live SQLite).
@@ -1116,7 +1116,7 @@ async fn golden_sqlite_create_table_and_index() {
             FieldDescriptor {
                 name: "secret".into(),
                 ty: "bytes".into(),
-                encrypted: Some(serde_json::json!({  })),
+                encrypted: Some(true),
                 ..Default::default()
             },
             FieldDescriptor {
@@ -1209,7 +1209,7 @@ async fn golden_sqlite_add_column() {
     v2.fields.push(FieldDescriptor {
         name: "secret".into(),
         ty: "bytes".into(),
-        encrypted: Some(serde_json::json!({  })),
+        encrypted: Some(true),
         ..Default::default()
     });
     let (live, ownership) = golden_live(std::slice::from_ref(&v1));

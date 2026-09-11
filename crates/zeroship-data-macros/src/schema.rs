@@ -198,10 +198,8 @@ fn generate(
 
 fn logical_type(def: &Value, orm: &syn::Path, span: proc_macro2::Span) -> syn::Result<TokenStream> {
     let name = def
-        .get("encrypted")
-        .and_then(|enc| enc.get("wraps"))
+        .get("type")
         .and_then(Value::as_str)
-        .or_else(|| def.get("type").and_then(Value::as_str))
         .ok_or_else(|| syn::Error::new(span, "missing logical field type"))?;
     let marker = match name {
         "string" | "text" | "id" | "ref" | "actor" => "Text",

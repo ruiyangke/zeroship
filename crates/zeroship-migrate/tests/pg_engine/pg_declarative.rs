@@ -617,9 +617,7 @@ async fn adding_a_mask_to_an_existing_encrypted_column_names_key_material_refusa
                     name: "secret".into(),
                     ty: "string".into(),
                     required: true,
-                    encrypted: Some(serde_json::json!({
-                        "wraps": "string"
-                    })),
+                    encrypted: Some(true),
                     mask: Some(serde_json::json!({
                         "kind": "full",
                         "classification": "pii"

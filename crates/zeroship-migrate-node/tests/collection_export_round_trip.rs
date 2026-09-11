@@ -75,7 +75,7 @@ fn dialect_debug_label(dialect: &DialectId) -> &'static str {
 // ---------------------------------------------------------------------------
 
 /// Seed descriptors covering the facets that are EASY TO LOSE: the ones carried as
-/// opaque sub-objects (`encrypted`, `mask`, `generated`, `identity`), the ones
+/// protection flags and sub-objects (`encrypted`, `mask`, `generated`, `identity`), the ones
 /// recovered from a constraint rather than a column (`min`/`max`, `enum`, `unique`,
 /// the FK actions), and the reference identity a `ref` brand cannot express.
 ///
@@ -140,12 +140,11 @@ fn seed_descriptors() -> Vec<CollectionDescriptor> {
                 enum_values: Some(vec!["draft".into(), "live".into()]),
                 ..Default::default()
             },
-            // Opaque sub-object facets, carried verbatim across the wire.
+            // Protection facets carried across the wire.
             FieldDescriptor {
                 name: "secret".to_string(),
                 ty: "string".to_string(),
-                encrypted: Some(serde_json::json!({
-                })),
+                encrypted: Some(true),
                 ..Default::default()
             },
             FieldDescriptor {
@@ -379,7 +378,7 @@ fn facets_present(field: &FieldDescriptor) -> Vec<&'static str> {
     mark(field.char_len.is_some(), "char_len");
     mark(field.max_length.is_some(), "max_length");
     mark(field.case_sensitive.is_some(), "case_sensitive");
-    mark(field.encrypted.is_some(), "encrypted");
+    mark(field.encrypted == Some(true), "encrypted");
     out
 }
 
@@ -429,7 +428,7 @@ fn the_corpus_exercises_every_facet_it_claims_to() {
     // VERBATIM as opaque JSON, so a wire that dropped one would still pass a
     // presence check on the others.
     let masked = fields.iter().filter(|(_, f)| f.mask.is_some()).count();
-    let encrypted = fields.iter().filter(|(_, f)| f.encrypted.is_some()).count();
+    let encrypted = fields.iter().filter(|(_, f)| f.encrypted == Some(true)).count();
     let generated = fields.iter().filter(|(_, f)| f.generated.is_some()).count();
     let identity = fields.iter().filter(|(_, f)| f.identity.is_some()).count();
     // TWO masks: the one authored on `email`, plus the fail-safe `{ full, pii }` the

@@ -503,7 +503,7 @@ fn validate_read_identifier(name: &str, schema_hint: &Value) -> Result<(), Query
 fn validate_value_operation(field: &str, schema: &Value) -> Result<(), QueryError> {
     if schema
         .get(field)
-        .is_some_and(|def| def.get("encrypted").is_some())
+        .is_some_and(|def| crate::descriptors::is_encrypted(def))
     {
         return Err(QueryError::InvalidFilter(format!(
             "encrypted field '{field}' cannot be filtered, sorted, grouped, or used as a conflict target"
@@ -771,7 +771,7 @@ fn push_field_value_bind(
     let kind = definition
         .and_then(|field| field.get("type"))
         .and_then(Value::as_str);
-    let protected = definition.is_some_and(|field| field.get("encrypted").is_some())
+    let protected = definition.is_some_and(|field| crate::descriptors::is_encrypted(field))
         || column_is_masked(field, schema_hint);
     let timestamp = !protected
         && (matches!(kind, Some("date" | "timestamp"))
@@ -934,35 +934,11 @@ pub fn build_conflict_probe_with_dialect(
     Ok(BuiltQuery { sql, params })
 }
 
-/// Schema-aware SELECT builder.
+/// Build a SELECT over the runtime descriptor's readable fields.
 ///
-/// Same shape as the deleted `build_find` (see the test-local stand-in of that
-/// name), plus an optional `schema` (the cached
-/// `crate::value::Value` from `ThreadDbContext::schema_for`). When the
-/// schema is `Some(_)` and declares masked columns (`def.mask = Some({...})`
-/// with `kind != "none"`), the SELECT clause emits
-/// `"<col>_masked" AS "<col>"` in place of the bare parent column, and
-/// the ciphertext / plaintext column is NOT included. This flips the
-/// read side from decrypting on read to serving the masked sibling.
-///
-/// Generated SQL example (PG):
-/// ```sql
-/// -- baseline (schema=None or no masked columns):
-/// SELECT "id", "created_at", ... FROM users WHERE id = $1
-///
-/// -- schema declares ssn + email masked:
-/// SELECT "id", "ssn_masked" AS "ssn", "email_masked" AS "email", "name"
-///   FROM users WHERE id = $1
-/// ```
-///
-/// Opt-out path: columns declared with `.mask({ kind: "none" })` keep
-/// emitting the parent column directly, preserving decrypt-on-read
-/// behaviour for callers that explicitly need plaintext.
-///
-/// When `select` carries an explicit projection array, each requested
-/// column is rewritten the same way — `select: ["ssn"]` becomes
-/// `SELECT "ssn_masked" AS "ssn"`. `id` and other non-masked columns
-/// pass through unchanged.
+/// Each logical field projects its `storage.valueColumn`, aliased when needed.
+/// Masked fields therefore return their display values. Raw storage is excluded
+/// from both implicit and explicit projections.
 #[allow(clippy::too_many_arguments)]
 pub fn build_find_with_schema(
     schema_name: &SchemaName,
@@ -987,43 +963,12 @@ pub fn build_find_with_schema(
     )
 }
 
-/// Schema-aware SELECT builder with per-query unmask
-/// hint support.
+/// Build a schema-aware SELECT with an unmask request for later processing.
 ///
-/// Same shape as [`build_find_with_schema`], plus an `unmask_columns`
-/// slice listing columns the caller wants in plaintext rather than the
-/// masked sibling form. For each column in the slice that is ALSO a
-/// masked column on the schema, the SELECT clause emits the bare
-/// parent (the ciphertext for encrypted columns, plaintext for mask-
-/// only columns) rather than the `"<col>_masked" AS "<col>"` alias.
-/// The downstream pipeline (`apply_encryption_on_read` →
-/// `apply_mask_wrap_on_read` → `dispatch_unmask_for_query`) then
-/// decrypts the parent and replaces the row slot with the plaintext.
-///
-/// `unmask_columns` items not present on the schema are silently
-/// ignored at the build layer — the auth fence
-/// (`protection::unmask::authorize_query_hint`) already refused that case
-/// with a typed `unmask_column_not_masked` error. Columns named in
-/// `unmask_columns` AND on the schema but NOT carrying a `.mask({...})`
-/// declaration are also passed through verbatim.
-///
-/// Generated SQL example (PG, schema declares ssn + email masked,
-/// `unmask_columns = ["ssn"]`):
-/// ```sql
-/// SELECT "id", "ssn", "email_masked" AS "email", "name"
-///   FROM users WHERE id = $1
-/// ```
-///
-/// Note `"ssn"` is the bare ciphertext column (BYTEA on PG; BLOB on
-/// SQLite) — the encryption pass will decrypt it on the way out, and
-/// the unmask-for-query pass will overwrite the row slot with the
-/// plaintext for the SDK to consume.
-///
-/// Thin shim around
-/// [`build_find_with_schema_and_unmask_and_soft_delete`] passing
-/// `filter_soft_deleted = false` so direct callers (the legacy CRUD
-/// entry points + tests) keep their existing contract. The CRUD dispatch
-/// path threads the soft-delete flag through the dedicated entry.
+/// The SELECT still projects creator-visible values. The authorized unmask pass
+/// separately reads `storage.rawColumn`, decrypts when needed, records the audit,
+/// and replaces the logical field's result. An unmask hint never projects raw
+/// storage through the ordinary query builder.
 #[allow(clippy::too_many_arguments)]
 pub fn build_find_with_schema_and_unmask(
     schema_name: &SchemaName,
@@ -1215,10 +1160,7 @@ fn compose_where_with_soft_delete(where_clause: &str, filter_soft_deleted: bool)
     }
 }
 
-/// Compose the SELECT column-list expression, accounting
-/// for masked columns when `schema_hint` is `Some(_)`. Thin shim around
-/// [`build_masked_aware_select_expr_with_unmask`] for legacy callers
-/// that have no per-query unmask hint to thread through.
+/// Project readable fields through the runtime storage mapping.
 pub fn build_masked_aware_select_expr(
     select: Option<&Value>,
     schema_hint: &Value,
@@ -1226,26 +1168,8 @@ pub fn build_masked_aware_select_expr(
     build_masked_aware_select_expr_with_unmask(select, schema_hint, &[])
 }
 
-/// Compose the implicit `SELECT` list for a qualified
-/// table source (`t`, `src`, ...), accounting for masked columns in the
-/// cached schema.
-///
-/// This is the specialized-search sibling of
-/// [`build_masked_aware_select_expr`]. The search paths (`search`, `near`)
-/// read from a table alias (`t`) and append one synthetic engine column
-/// (`_distance`, `_distance_m`). When
-/// the cached schema declares any masked column, emitting `t.*` drifts
-/// back to the un-masked shape: the parent ciphertext/plaintext column
-/// rides out of SQL and only gets corrected later in the read pipeline.
-///
-/// It always expands to an explicit qualified list:
-/// - `t."id" AS "id"` first,
-/// - `t."<col>_masked" AS "<col>"` for masked columns,
-/// - `t."<col>" AS "<col>"` for non-masked columns.
-///
-/// **L24** — there is no `t.*` arm any more. It used to be taken whenever the
-/// schema had not been resolved yet, which is precisely when the search paths
-/// served the raw parent column and every internal physical column.
+/// Project the descriptor's readable value columns from a qualified table.
+/// Each physical `storage.valueColumn` is aliased to its logical field name.
 pub fn build_masked_aware_select_expr_for_table_alias(
     schema_hint: &Value,
     table_alias: &str,
@@ -1254,22 +1178,8 @@ pub fn build_masked_aware_select_expr_for_table_alias(
     Ok(parts.join(", "))
 }
 
-/// Compose the SELECT column-list expression, accounting
-/// for masked columns AND a per-query unmask hint.
-///
-/// Three cases (same as [`build_masked_aware_select_expr`]) — the unmask hint just overrides the
-/// per-column sibling-alias decision for any listed column:
-/// 1. `select` is an explicit, non-empty projection array → for each
-///    listed column, emit the bare parent if the column is unmask-
-///    listed, the sibling alias if the schema marks it masked, else
-///    the bare parent.
-/// 2. `select` is absent / empty AND `schema_hint` is `Some(_)` →
-///    expand to an explicit list: every public system field plus every
-///    declared schema field, with masked columns aliased through the
-///    sibling EXCEPT where the unmask hint promotes them back to the
-///    parent.
-/// 3. `select` is absent / empty AND `schema_hint` is `None` → fall
-///    through to `*`.
+/// Project explicit fields or expand the descriptor's readable field set.
+/// Unmasking runs later; its hint does not change the physical read projection.
 fn build_masked_aware_select_expr_with_unmask(
     select: Option<&Value>,
     schema_hint: &Value,
@@ -2793,7 +2703,7 @@ pub fn build_aggregate_with_result_columns(
                         })?;
                         validate_read_identifier(field, schema_hint)?;
                         validate_value_operation(field, schema_hint)?;
-                        // SEC-4: read the masked sibling for masked columns.
+                        // Read the descriptor's creator-visible column, including masks.
                         format!("SUM({})", quote_ident(field))
                     }
                     "$avg" => {
@@ -2834,7 +2744,7 @@ pub fn build_aggregate_with_result_columns(
                         })?;
                         validate_read_identifier(field, schema_hint)?;
                         validate_value_operation(field, schema_hint)?;
-                        // SEC-4: read the masked sibling for masked columns.
+                        // Read the descriptor's creator-visible column, including masks.
                         let read_ident = quote_ident(field);
                         if last_sort.is_empty() {
                             format!("(array_agg({read_ident}))[1]")
@@ -2878,7 +2788,7 @@ pub fn build_aggregate_with_result_columns(
                 }
             }
             // SEC-4: aggregate $sort on a masked base column must order by
-            // the masked sibling, not plaintext. Aggregate aliases
+            // the creator-visible mask, not raw plaintext. Aggregate aliases
             // (`agg_exprs`) order by the alias name as-is.
             order_clause = build_aggregate_order_by(sort_val, dialect, &agg_exprs, schema_hint)?;
         } else if let Some(limit_val) = obj.get("$limit") {
@@ -3267,7 +3177,7 @@ fn build_having_inner(
                 } else {
                     // Resolve alias → aggregate expression, or fall back to
                     // the quoted column. SEC-4: a masked base column in
-                    // HAVING reads its masked sibling, never plaintext.
+                    // HAVING reads the creator-visible mask, never raw plaintext.
                     let (col, creator_field) = if let Some(expr) = agg_exprs.get(key) {
                         (expr.clone(), None)
                     } else {
@@ -3476,7 +3386,7 @@ where
 /// Keys that name an aggregate alias (`agg_exprs`) order by the alias as
 /// a bare quoted identifier (the SELECT already projected `<expr> AS
 /// <alias>`). Any other key is a base column, validated as readable and
-/// — when masked — lowered to its `<col>_masked` sibling so the sort
+/// lowered to its configured value column so the sort
 /// never touches the plaintext column.
 fn build_aggregate_order_by(
     order: &Value,
@@ -7672,7 +7582,7 @@ mod tests {
     fn raw_column_for_field_returns_none_for_kind_none() {
         let def = crate::value!({
             "type": "string",
-            "encrypted": { "wraps": "string" },
+            "encrypted": true,
             "mask": { "kind": "none", "classification": "spi" }
         });
         assert_eq!(raw_column_for_field("ssn", &def), None);
@@ -7734,7 +7644,7 @@ mod tests {
     #[test]
     fn default_read_does_not_touch_the_raw_column() {
         let schema = crate::value!({
-            "ssn":   { "type": "string", "encrypted": {  },
+            "ssn":   { "type": "string", "encrypted": true,
                        "mask": { "kind": "last4", "classification": "spi" } },
             "email": { "type": "string" },
             "name":  { "type": "string" },
@@ -7821,7 +7731,7 @@ mod tests {
     #[test]
     fn unmask_hint_does_not_change_the_projection() {
         let schema = crate::value!({
-            "ssn":   { "type": "string", "encrypted": {  },
+            "ssn":   { "type": "string", "encrypted": true,
                        "mask": { "kind": "last4", "classification": "spi" } },
             "email": { "type": "string",
                        "mask": { "kind": "full", "classification": "pii" } },
@@ -9853,7 +9763,7 @@ mod encrypted_query_tests {
                 value!({"kind":"last4","classification":"spi"}),
             ] {
                 let schema = value!({
-                    "secret":{"type":"string","encrypted":{},"mask":mask,"filterable":true,"sortable":true},
+                    "secret":{"type":"string","encrypted":true,"mask":mask,"filterable":true,"sortable":true},
                     "name":{"type":"string"}
                 });
                 for operand in [

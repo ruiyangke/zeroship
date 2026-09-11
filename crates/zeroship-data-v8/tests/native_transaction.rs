@@ -413,9 +413,7 @@ fn users_runtime_descriptor() -> String {
                     "name": {"type": "string", "required": true},
                     "ssn": {
                         "type": "string",
-                        "encrypted": {
-                            "wraps": "string",
-                        },
+                        "encrypted": true,
                     },
                 },
                 "options": {
