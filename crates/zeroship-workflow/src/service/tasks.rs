@@ -21,7 +21,8 @@ impl WorkflowService {
         let now = tx.now().await?;
         let runs = tx.table("runs");
         let tasks = tx.table("tasks");
-        let candidates = tx.query(&format!("SELECT app_id,id FROM {runs} WHERE due_at <= $1 ORDER BY due_at,app_id,id LIMIT 128"), &[now.into()]).await?;
+        let apps = tx.table("apps");
+        let candidates = tx.query(&format!("WITH candidates AS (SELECT app_id,id,due_at,ROW_NUMBER() OVER (PARTITION BY app_id ORDER BY due_at,id) AS position FROM {runs} WHERE due_at <= $1) SELECT c.app_id,c.id FROM candidates c JOIN {apps} a ON a.app_id=c.app_id WHERE c.position=1 ORDER BY a.last_polled_at,c.due_at,c.app_id LIMIT 128"), &[now.into()]).await?;
         tx.commit().await?;
         for candidate in candidates {
             let app = AppId::parse(&candidate.text("app_id")?).map_err(|_| {
@@ -32,9 +33,15 @@ impl WorkflowService {
             let policy = lock_app(&mut tx, &app).await?;
             let mut run = lock_run(&mut tx, &app, &id).await?;
             let now = tx.now().await?;
+            tx.execute(
+                &format!("UPDATE {apps} SET last_polled_at=$2 WHERE app_id=$1"),
+                &[app.as_str().into(), now.into()],
+            )
+            .await?;
             if run.optional_integer("due_at")?.is_none_or(|due| due > now)
                 || parse_state(&run.text("state")?)?.is_terminal()
             {
+                tx.commit().await?;
                 continue;
             }
             if let Some(task) = run.optional_text("task_id")? {
@@ -155,6 +162,7 @@ impl WorkflowService {
             claim.now,
         )
         .await?;
+        claim.validate_at(tx.now().await?)?;
         let receipt = CompletionReceipt {
             task_id: task_id.into(),
             app_id: claim.app.clone(),
@@ -211,8 +219,11 @@ pub(crate) struct AuthorizedTask {
 }
 impl AuthorizedTask {
     pub(crate) fn validate_live(&self) -> Result<(), WorkflowServiceError> {
+        self.validate_at(self.now)
+    }
+    pub(crate) fn validate_at(&self, now: i64) -> Result<(), WorkflowServiceError> {
         if self.task.text("state")? != "leased"
-            || self.task.integer("deadline")? <= self.now
+            || self.task.integer("deadline")? <= now
             || self.run.optional_text("task_id")?.as_deref() != Some(self.task.text("id")?.as_str())
             || self.run.integer("generation")? != self.task.integer("generation")?
             || self.run.integer("lease_epoch")? != self.task.integer("epoch")?

@@ -91,6 +91,9 @@ pub struct AppPolicy {
     pub max_running: i64,
     pub max_input_bytes: usize,
     pub max_frontier: usize,
+    pub max_journal_bytes: usize,
+    pub max_compensation_attempts: i32,
+    pub compensation_retry_ms: i64,
     pub lease_ms: i64,
     pub request_retention_ms: i64,
 }
@@ -103,6 +106,9 @@ impl Default for AppPolicy {
             max_running: 16,
             max_input_bytes: 1024 * 1024,
             max_frontier: 256,
+            max_journal_bytes: 16 * 1024 * 1024,
+            max_compensation_attempts: 8,
+            compensation_retry_ms: 1_000,
             lease_ms: 60_000,
             request_retention_ms: 86_400_000,
         }
@@ -115,6 +121,9 @@ impl AppPolicy {
             || self.max_running < 0
             || self.max_input_bytes == 0
             || self.max_frontier == 0
+            || self.max_journal_bytes == 0
+            || self.max_compensation_attempts <= 0
+            || self.compensation_retry_ms <= 0
             || self.lease_ms <= 0
             || self.request_retention_ms <= 0
         {

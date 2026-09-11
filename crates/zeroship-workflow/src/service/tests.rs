@@ -764,3 +764,395 @@ async fn behavior_contract(store: Arc<dyn WorkflowStore>) {
         .unwrap();
     assert!(service.poll(&worker).await.unwrap().is_none());
 }
+
+#[compio::test]
+async fn sqlite_concurrent_admission_cycles_and_compensation_retries() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("workflow.sqlite");
+    schema::initialize_sqlite(&path).unwrap();
+    review_contract(Arc::new(SqliteStore::new(path))).await;
+}
+#[compio::test]
+async fn postgres_concurrent_admission_cycles_and_compensation_retries() {
+    let fixture = PostgresFixture::start().await;
+    review_contract(Arc::new(fixture.store.clone())).await;
+}
+async fn review_contract(store: Arc<dyn WorkflowStore>) {
+    use super::WorkerIdentity;
+    use crate::operations::{RunOperation, RunState};
+    let (service, app, other_app) = registered_service(store.clone()).await;
+    let scope = service.for_app(app.clone());
+    let policy = AppPolicy {
+        max_running: 1,
+        compensation_retry_ms: 60_000,
+        ..Default::default()
+    };
+    service.register_app(&app, &policy).await.unwrap();
+    let request = RequestId::mint();
+    let mut starts = Vec::new();
+    for _ in 0..4 {
+        let scope = scope.clone();
+        let request = request.clone();
+        starts.push(compio::runtime::spawn(async move {
+            scope
+                .start(
+                    &request,
+                    "Example",
+                    StartOptions {
+                        key: Some("concurrent".into()),
+                        ..Default::default()
+                    },
+                )
+                .await
+        }));
+    }
+    let mut ids = std::collections::BTreeSet::new();
+    for task in starts {
+        ids.insert(task.await.unwrap().unwrap().id);
+    }
+    assert_eq!(ids.len(), 1);
+    let mut polls = Vec::new();
+    for i in 0..4 {
+        let service = service.clone();
+        polls.push(compio::runtime::spawn(async move {
+            service
+                .poll(&WorkerIdentity::new(format!("concurrent-{i}")).unwrap())
+                .await
+                .map(|task| (i, task))
+        }));
+    }
+    let mut assignments = Vec::new();
+    for poll in polls {
+        let (i, task) = poll.await.unwrap().unwrap();
+        if let Some(task) = task {
+            assignments.push((i, task));
+        }
+    }
+    assert_eq!(assignments.len(), 1);
+    let (i, task) = assignments.remove(0);
+    service
+        .complete(
+            &WorkerIdentity::new(format!("concurrent-{i}")).unwrap(),
+            &task.id,
+            &task.token,
+            execution(json!([{"kind":"RunCompleted"}])),
+        )
+        .await
+        .unwrap();
+
+    let worker = WorkerIdentity::new("worker".into()).unwrap();
+    let a = scope
+        .start(
+            &RequestId::mint(),
+            "Example",
+            StartOptions {
+                key: Some("a".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let b = scope
+        .start(
+            &RequestId::mint(),
+            "Child",
+            StartOptions {
+                key: Some("b".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let task = service.poll(&worker).await.unwrap().unwrap();
+    assert_eq!(task.invocation.run_id, a.id);
+    service.complete(&worker,&task.id,&task.token,execution(json!([{"kind":"Child","ordinal":0,"name":"b","childWorkflowName":"Child","options":{"key":"b"}}]))).await.unwrap();
+    let task = service.poll(&worker).await.unwrap().unwrap();
+    assert_eq!(task.invocation.run_id, b.id);
+    assert!(matches!(service.complete(&worker,&task.id,&task.token,execution(json!([{"kind":"Child","ordinal":0,"name":"a","childWorkflowName":"Example","options":{"key":"a"}}]))).await,Err(WorkflowServiceError::InvalidRequest(_))));
+    service
+        .complete(
+            &worker,
+            &task.id,
+            &task.token,
+            execution(json!([{"kind":"RunCompleted"}])),
+        )
+        .await
+        .unwrap();
+    let task = service.poll(&worker).await.unwrap().unwrap();
+    service
+        .complete(
+            &worker,
+            &task.id,
+            &task.token,
+            execution(json!([{"kind":"RunCompleted"}])),
+        )
+        .await
+        .unwrap();
+
+    let run = scope
+        .start(&RequestId::mint(), "Example", StartOptions::default())
+        .await
+        .unwrap();
+    let task = service.poll(&worker).await.unwrap().unwrap();
+    service.complete(&worker,&task.id,&task.token,execution(json!([
+        {"kind":"StepCompleted","ordinal":0,"name":"older","compensable":true,"output":0},
+        {"kind":"StepCompleted","ordinal":1,"name":"newer","compensable":true,"compensationMaxAttempts":2,"output":1},
+        {"kind":"RunFailed","error":{"message":"trigger compensation"}}
+    ]))).await.unwrap();
+    let task = service.poll(&worker).await.unwrap().unwrap();
+    let failed = execution(
+        json!([{"kind":"CompensationFailed","ordinal":1,"name":"newer","error":{"message":"try again"}}]),
+    );
+    let receipt = service
+        .complete(&worker, &task.id, &task.token, failed.clone())
+        .await
+        .unwrap();
+    assert_eq!(receipt.state, RunState::Compensating);
+    assert_eq!(
+        receipt,
+        service
+            .complete(&worker, &task.id, &task.token, failed)
+            .await
+            .unwrap()
+    );
+    scope
+        .transition(&RequestId::mint(), &run.id, RunOperation::Pause)
+        .await
+        .unwrap();
+    scope
+        .transition(&RequestId::mint(), &run.id, RunOperation::Resume)
+        .await
+        .unwrap();
+    assert!(service.poll(&worker).await.unwrap().is_none());
+    let mut tx = store.begin().await.unwrap();
+    let steps = tx.table("steps");
+    let runs = tx.table("runs");
+    let now = tx.now().await.unwrap();
+    tx.execute(
+        &format!("UPDATE {steps} SET compensation_due_at=$3 WHERE app_id=$1 AND run_id=$2"),
+        &[app.as_str().into(), run.id.clone().into(), now.into()],
+    )
+    .await
+    .unwrap();
+    tx.execute(
+        &format!("UPDATE {runs} SET due_at=$3 WHERE app_id=$1 AND id=$2"),
+        &[app.as_str().into(), run.id.clone().into(), now.into()],
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    let recovered = WorkflowService::open(store.clone()).await.unwrap();
+    let task = recovered.poll(&worker).await.unwrap().unwrap();
+    assert_eq!(
+        task.invocation.journal[1].compensation_state.as_deref(),
+        Some("pending")
+    );
+    recovered.complete(&worker,&task.id,&task.token,execution(json!([{"kind":"CompensationFailed","ordinal":1,"name":"newer","error":{"message":"exhausted"}}]))).await.unwrap();
+    let task = recovered.poll(&worker).await.unwrap().unwrap();
+    assert_eq!(
+        task.invocation.journal[1].compensation_state.as_deref(),
+        Some("failed")
+    );
+    recovered
+        .complete(
+            &worker,
+            &task.id,
+            &task.token,
+            execution(json!([{"kind":"CompensationCompleted","ordinal":0,"name":"older"}])),
+        )
+        .await
+        .unwrap();
+    let status = scope.status(&run.id).await.unwrap();
+    assert_eq!(status.state, RunState::Failed);
+    assert_eq!(
+        status.error.as_ref().unwrap()["name"],
+        json!("WorkflowCompensationError")
+    );
+    assert_eq!(
+        status.error.as_ref().unwrap()["failures"][0]["ordinal"],
+        json!(1)
+    );
+
+    // An app with a full execution allocation must not hide another app behind
+    // its backlog in the candidate page.
+    service
+        .register_app(
+            &app,
+            &AppPolicy {
+                max_running: 0,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    for _ in 0..130 {
+        scope
+            .start(&RequestId::mint(), "Example", StartOptions::default())
+            .await
+            .unwrap();
+    }
+    let other = service
+        .for_app(other_app)
+        .start(&RequestId::mint(), "Example", StartOptions::default())
+        .await
+        .unwrap();
+    let task = service.poll(&worker).await.unwrap().unwrap();
+    assert_eq!(task.invocation.run_id, other.id);
+    service
+        .complete(
+            &worker,
+            &task.id,
+            &task.token,
+            execution(json!([{"kind":"RunCompleted"}])),
+        )
+        .await
+        .unwrap();
+}
+
+#[compio::test]
+async fn postgres_completion_that_outlives_its_lease_rolls_back() {
+    let fixture = PostgresFixture::start().await;
+    let store: Arc<dyn WorkflowStore> = Arc::new(fixture.store.clone());
+    let (service, app, _) = registered_service(store.clone()).await;
+    let scope = service.for_app(app.clone());
+    let run = scope
+        .start(&RequestId::mint(), "Example", StartOptions::default())
+        .await
+        .unwrap();
+    service
+        .register_app(
+            &app,
+            &AppPolicy {
+                lease_ms: 300,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let admin = connect(&fixture.admin_url).await;
+    admin.batch_execute("CREATE FUNCTION workflow.delay_checkpoint() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(0.5); RETURN NEW; END $$; CREATE TRIGGER delay_checkpoint BEFORE INSERT ON workflow.steps FOR EACH ROW EXECUTE FUNCTION workflow.delay_checkpoint();").await.unwrap();
+    let worker = super::WorkerIdentity::new("worker".into()).unwrap();
+    let task = service.poll(&worker).await.unwrap().unwrap();
+    assert!(matches!(service.complete(&worker,&task.id,&task.token,execution(json!([{"kind":"StepCompleted","ordinal":0,"name":"slow","output":"must roll back"},{"kind":"RunCompleted"}]))).await,Err(WorkflowServiceError::Conflict(_))));
+    let mut tx = store.begin().await.unwrap();
+    let steps = tx.table("steps");
+    assert!(tx
+        .query(
+            &format!("SELECT record FROM {steps} WHERE app_id=$1 AND run_id=$2"),
+            &[app.as_str().into(), run.id.clone().into()]
+        )
+        .await
+        .unwrap()
+        .is_empty());
+    tx.commit().await.unwrap();
+    admin
+        .batch_execute("DROP TRIGGER delay_checkpoint ON workflow.steps;")
+        .await
+        .unwrap();
+    let replacement = service.poll(&worker).await.unwrap().unwrap();
+    assert!(replacement.epoch > task.epoch);
+    service
+        .complete(
+            &worker,
+            &replacement.id,
+            &replacement.token,
+            execution(json!([{"kind":"RunCompleted","output":"recovered"}])),
+        )
+        .await
+        .unwrap();
+}
+
+#[compio::test]
+async fn sqlite_signal_completion_races_do_not_lose_wakeups() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("workflow.sqlite");
+    schema::initialize_sqlite(&path).unwrap();
+    signal_race_contract(Arc::new(SqliteStore::new(path))).await;
+}
+#[compio::test]
+async fn postgres_signal_completion_races_do_not_lose_wakeups() {
+    let fixture = PostgresFixture::start().await;
+    signal_race_contract(Arc::new(fixture.store.clone())).await;
+}
+async fn signal_race_contract(store: Arc<dyn WorkflowStore>) {
+    let (service, app, _) = registered_service(store).await;
+    let scope = service.for_app(app);
+    let worker = super::WorkerIdentity::new("worker".into()).unwrap();
+    let run = scope
+        .start(&RequestId::mint(), "Example", StartOptions::default())
+        .await
+        .unwrap();
+    let task = service.poll(&worker).await.unwrap().unwrap();
+    let signal = {
+        let scope = scope.clone();
+        let id = run.id.clone();
+        compio::runtime::spawn(async move {
+            scope
+                .signal(
+                    &RequestId::mint(),
+                    &id,
+                    SignalOptions {
+                        signal_type: "ready".into(),
+                        payload: json!("delivered"),
+                    },
+                )
+                .await
+        })
+    };
+    service
+        .complete(
+            &worker,
+            &task.id,
+            &task.token,
+            execution(json!([{"kind":"Wait","ordinal":0,"name":"wait","signalType":"ready"}])),
+        )
+        .await
+        .unwrap();
+    signal.await.unwrap().unwrap();
+    let resumed = service.poll(&worker).await.unwrap().unwrap();
+    assert_eq!(
+        resumed.invocation.journal[0].output,
+        Some(json!("delivered"))
+    );
+    service
+        .complete(
+            &worker,
+            &resumed.id,
+            &resumed.token,
+            execution(json!([{"kind":"RunCompleted"}])),
+        )
+        .await
+        .unwrap();
+    let run = scope
+        .start(&RequestId::mint(), "Example", StartOptions::default())
+        .await
+        .unwrap();
+    let task = service.poll(&worker).await.unwrap().unwrap();
+    scope
+        .signal(
+            &RequestId::mint(),
+            &run.id,
+            SignalOptions {
+                signal_type: "late".into(),
+                payload: json!("after timeout"),
+            },
+        )
+        .await
+        .unwrap();
+    service.complete(&worker,&task.id,&task.token,execution(json!([{"kind":"Wait","ordinal":0,"name":"timed","signalType":"late","wakeAt":"2000-01-01T00:00:00Z"}]))).await.unwrap();
+    let resumed = service.poll(&worker).await.unwrap().unwrap();
+    assert_eq!(resumed.invocation.journal[0].state, "failed");
+    assert_eq!(
+        resumed.invocation.journal[0].error.as_ref().unwrap()["name"],
+        json!("WorkflowTimeoutError")
+    );
+    service
+        .complete(
+            &worker,
+            &resumed.id,
+            &resumed.token,
+            execution(json!([{"kind":"RunCompleted"}])),
+        )
+        .await
+        .unwrap();
+}
