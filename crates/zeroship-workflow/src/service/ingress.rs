@@ -236,6 +236,9 @@ impl WorkflowService {
             return Ok(receipt);
         }
         policy.admit()?;
+        if !policy.ingress {
+            return Err(WorkflowServiceError::PermissionDenied);
+        }
         if encode(&options.payload)?.len() > policy.max_input_bytes {
             return Err(WorkflowServiceError::PayloadTooLarge);
         }

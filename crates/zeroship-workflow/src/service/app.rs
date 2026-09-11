@@ -62,6 +62,11 @@ impl WorkflowService {
     ) -> Result<(), WorkflowServiceError> {
         policy.validate()?;
         let mut tx = self.store.begin().await?;
+        if tx.platform_policy.is_some() {
+            return Err(WorkflowServiceError::InvalidRequest(
+                "platform workflow policy is owned by Control".into(),
+            ));
+        }
         let table = tx.table("apps");
         tx.execute(&format!("INSERT INTO {table} (app_id,revision,policy,signal_epoch) VALUES ($1,0,$2,0) \
             ON CONFLICT (app_id) DO UPDATE SET revision = {table}.revision + 1, policy = excluded.policy"),
@@ -285,6 +290,16 @@ pub(crate) async fn lock_app(
     tx: &mut Transaction,
     app: &AppId,
 ) -> Result<AppPolicy, WorkflowServiceError> {
+    let platform = if let Some(source) = tx.platform_policy.clone() {
+        let policy = source.lock(tx, app).await?;
+        tx.execute(
+            &format!("INSERT INTO {} (app_id,revision,signal_epoch) VALUES ($1,0,0) ON CONFLICT (app_id) DO NOTHING", tx.table("apps")),
+            &[app.as_str().into()],
+        ).await?;
+        Some(policy)
+    } else {
+        None
+    };
     let sql = format!(
         "SELECT policy FROM {} WHERE app_id=$1{}",
         tx.table("apps"),
@@ -292,7 +307,10 @@ pub(crate) async fn lock_app(
     );
     let rows = tx.query(&sql, &[app.as_str().into()]).await?;
     let row = rows.first().ok_or_else(|| not_found("workflow app"))?;
-    decode(&row.text("policy")?)
+    match platform {
+        Some(policy) => Ok(policy),
+        None => decode(&row.text("policy")?),
+    }
 }
 pub(crate) async fn lock_run(
     tx: &mut Transaction,

@@ -8,6 +8,8 @@ mod ingress;
 pub use ingress::{IngressReceipt, RevokedSignals, SignalAuthority, SignalTokenRequest};
 mod journal;
 mod payloads;
+mod policy;
+pub use policy::PlatformPolicy;
 pub use payloads::{PayloadRead, PayloadSlot, StagedPayload};
 mod remote;
 pub use remote::{RemoteAppWorkflows, RemoteTasks, WorkflowEndpoint};

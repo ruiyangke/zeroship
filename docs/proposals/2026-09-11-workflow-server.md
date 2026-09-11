@@ -391,6 +391,22 @@ transactions, using the existing app lifecycle locking protocol so an archive
 cannot race an admitted claim. This introduces no speculative asynchronously
 cached policy authority.
 
+`PostgresStore::platform` resolves policy in the workflow transaction. It reads
+the app's lifecycle and plan selection, plan eligibility, app spending state,
+organization billing state and operator rollout switches. Migration-owned
+invoker-rights triggers take policy resource locks on every write; readers hold
+the shared locks until commit. This also fences the first insertion of a
+billing restriction. The workflow role receives column-level read grants on
+platform authority and cannot update it. Embedded hosts install local policy
+explicitly; the platform store refuses that registration path.
+
+Plan workflow limits live in the `workflow` object of `runtime_limits_json`.
+They can restrict the server's operator limits, including raising the minimum
+schedule interval. They cannot override lease, receipt retention or signing
+policy. Malformed limits and missing rollout configuration fail closed.
+Dispatch pause stops new task claims; ingress disable stops public signal
+delivery. Accepted work keeps its journal and remains visible to management.
+
 Disabling admission prevents new work. Active frontiers follow the documented
 drain/cancellation policy and remain bounded by their existing budgets. Status
 and necessary management operations remain available to authorized callers.

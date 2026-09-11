@@ -71,7 +71,7 @@ impl WorkflowService {
                     tx.commit().await?;
                     continue;
                 }
-                if !policy.admission || policy.max_running == 0 {
+                if !policy.admission || !policy.dispatch || policy.max_running == 0 {
                     tx.commit().await?;
                     continue;
                 }

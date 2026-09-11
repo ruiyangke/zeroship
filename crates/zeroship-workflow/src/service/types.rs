@@ -108,6 +108,8 @@ impl From<WorkerIdentity> for String {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AppPolicy {
     pub admission: bool,
+    pub dispatch: bool,
+    pub ingress: bool,
     pub max_live_runs: i64,
     pub max_child_depth: i64,
     pub max_running: i64,
@@ -131,6 +133,8 @@ impl Default for AppPolicy {
     fn default() -> Self {
         Self {
             admission: true,
+            dispatch: true,
+            ingress: true,
             max_live_runs: 10_000,
             max_child_depth: 16,
             max_running: 16,
