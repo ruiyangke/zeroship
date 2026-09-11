@@ -1932,7 +1932,7 @@ fn update_many_randomised_failure_is_atomic_postgres() {
     let app = app.as_str();
     reset_schema(&url, app);
     create_encrypted_users_table(&url, app);
-    let _keys = zeroship_data_v8::testing::supply_project_key_for_tests(&[&app], &"b".repeat(64));
+    let _keys = zeroship_data_v8::testing::supply_project_key_for_tests(&[app], &"b".repeat(64));
 
     let src = build_encrypted_users_src(
         r#"

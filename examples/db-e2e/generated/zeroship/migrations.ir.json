@@ -1,6 +1,6 @@
 {
   "kind": "ir",
-  "descriptor_sha256": "d084ddf85b2de0cd66d1a2f30bccc2eeded9511c7f9f2530f66a702fa8591f18",
+  "descriptor_sha256": "a991e23cefdb0bbfbb2026ce096586237110fbc3c87dc5f7ef56ed9fa61404a4",
   "documents": [
     {
       "filename": "20260101000000_create_db_e2e.ir.json",
@@ -87,6 +87,10 @@
                   "encrypted": {
                     "of": "text"
                   }
+                },
+                "mask": {
+                  "kind": "email",
+                  "classification": "pii"
                 }
               },
               {
@@ -95,6 +99,10 @@
                   "encrypted": {
                     "of": "text"
                   }
+                },
+                "mask": {
+                  "kind": "last4",
+                  "classification": "spi"
                 }
               },
               {
