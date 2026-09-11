@@ -1223,7 +1223,7 @@ impl TxReducer {
                 // ZERO frame or terminal SQL until the active command returns.
                 vec![]
             }
-            TxState::Quiescing => {
+            TxState::Quiescing | TxState::Settling => {
                 // Exactly one intent is latched: a second request naming the
                 // same attempt joins the waiter already there and issues no
                 // second command; a different attempt is a settle conflict.
@@ -1233,7 +1233,6 @@ impl TxReducer {
                     vec![Action::Reply(Err(TxProtocolError::SettleConflict))]
                 }
             }
-            TxState::Settling => vec![],
             _ => vec![Action::Reply(Err(TxProtocolError::TransactionNotReady))],
         }
     }

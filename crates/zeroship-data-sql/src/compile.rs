@@ -6894,61 +6894,6 @@ mod tests {
     // ... DEFAULT 1`.
     // -----------------------------------------------------------------
 
-    // -----------------------------------------------------------------
-    // C2 — discriminated union document shapes
-    //
-    // The SDK normalises `t.union(t.object({...}), t.object({...}))` into
-    // a flat schema where each variant's fields are top-level entries
-    // and the discriminator column carries a `variants` JSON payload
-    // plus `discriminator: "__discriminator__"`. The DDL emitter
-    // converts that into:
-    //   - TEXT/NUMERIC/BOOLEAN column for the discriminator with
-    //     `CHECK (col IN (...))` (via the regular enum constraint)
-    //   - nullable columns for every variant field
-    //   - per-variant CHECK constraint enforcing that required fields
-    //     for the active variant are NOT NULL
-    // -----------------------------------------------------------------
-
-    fn c2_events_union_schema() -> crate::value::Value {
-        // Equivalent of:
-        //   events: t.union(
-        //     t.object({ kind: t.literal("login"), userId: t.number().required(), ip: t.string().required() }),
-        //     t.object({ kind: t.literal("error"), message: t.string().required(), stack: t.string() }),
-        //     t.object({ kind: t.literal("metric"), name: t.string().required(), value: t.number().required() }),
-        //   )
-        value!({
-            "kind": {
-                "type": "string",
-                "required": true,
-                "enum": ["login", "error", "metric"],
-                "discriminator": "__discriminator__",
-                "variants": [
-                    {
-                        "kind":   { "type": "literal", "literalValue": "login", "required": true },
-                        "userId": { "type": "number", "required": true },
-                        "ip":     { "type": "string", "required": true }
-                    },
-                    {
-                        "kind":    { "type": "literal", "literalValue": "error", "required": true },
-                        "message": { "type": "string", "required": true },
-                        "stack":   { "type": "string" }
-                    },
-                    {
-                        "kind":  { "type": "literal", "literalValue": "metric", "required": true },
-                        "name":  { "type": "string", "required": true },
-                        "value": { "type": "number", "required": true }
-                    }
-                ]
-            },
-            "userId":  { "type": "number" },
-            "ip":      { "type": "string" },
-            "message": { "type": "string" },
-            "stack":   { "type": "string" },
-            "name":    { "type": "string" },
-            "value":   { "type": "number" }
-        })
-    }
-
     // -----------------------------------------------------------------------
     // Security IMPORTANT #1 — validate_collection reserved-name checks
     // -----------------------------------------------------------------------
@@ -8793,32 +8738,6 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // PHASE 4 — `SqliteEmitScope` namespacing (descriptor→DDL for the migrate
-    // engine). The `MainUnqualified` scope drops the `<schema_name>` qualifier on
-    // the SQLite arm so the DDL lands in `main` (= the app file). PG and the
-    // `AttachAlias` SQLite default are unchanged (regression guard).
-    // -----------------------------------------------------------------------
-
-    /// A descriptor carrying a masked column, an encrypted column, and an FK —
-    /// the goodies PHASE 4 must round-trip through emit→apply→drift.
-    fn goodies_schema() -> crate::value::Value {
-        value!({
-            "ssn": {
-                "type": "string",
-                "mask": { "kind": "last4", "classification": "pii" }
-            },
-            "secret": {
-                "type": "bytes",
-                "encrypted": { "mode": "randomized", "keyId": "k1" }
-            },
-            "owner": {
-                "type": "ref",
-                "refTarget": "users"
-            }
-        })
-    }
-
-    // -----------------------------------------------------------------------
     // The write-side projection: `RETURNING` names columns, never `*`
     // -----------------------------------------------------------------------
 
@@ -9213,28 +9132,6 @@ mod raw_column_parity {
     /// fail.
     const IDENTIFIER_BUDGET_BYTES: usize = 63;
 
-    /// A schema name both `validate_schema` implementations accept, and the one
-    /// [`CHARTER`] grants `schema.create_table` over.
-    const APP: &str = "app";
-
-    /// `APP` as the physical schema the emitter takes.
-    fn s(name: &str) -> SchemaName {
-        SchemaName::new(name).expect("fixture schema name")
-    }
-
-    /// The minimum charter that lets the engine's CREATE TABLE emitter run at
-    /// all: one grant over [`APP`], no injected columns. Injection shape is
-    /// irrelevant here - these tests compare an accept/refuse VERDICT, never
-    /// emitted SQL - and an empty inject set keeps the comparison about the
-    /// masked field name and nothing else.
-    const CHARTER: &str = r#"policy_version = 1
-
-[[grant]]
-key = "schema.create_table"
-value = true
-scope = { include = ["app"] }
-"#;
-
     /// Field-name shapes the two `raw_column_name`s must agree on.
     ///
     /// Includes the empty string and a name that already carries the prefix:
@@ -9577,74 +9474,15 @@ mod reserved_id_prefix_parity {
     }
 }
 
-/// The SQLite "now" expression, held across the migration-engine boundary.
-///
-/// # Three declarations, and a failure mode a one-sided edit cannot produce
-///
-/// [`SQLITE_NOW_EXPR`] is one of THREE spellings of the same expression, and the
-/// other two are in the vendor crate the composition root ships for SQLite:
-/// `SchemaRenderer::current_timestamp_expr`, which becomes the `DEFAULT` clause
-/// on `created_at` / `updated_at` when the migration engine CREATES a creator
-/// table, and `DmlRenderer::synth_now`, which the same engine renders for a
-/// migration-time assignment. This crate's copy is what the data plane assigns
-/// on every runtime write (`build_set_clauses_with_system_fields`, `now_expr`).
-///
-/// Each of the three was already pinned to its literal by its OWN crate's unit
-/// tests, so a ONE-SIDED edit was loud before this module existed. What was not
-/// covered is a COORDINATED edit: change all three and every suite in the tree
-/// stayed green, because nothing compared them.
-///
-/// # Why the agreement has to be BYTEWISE, and only on SQLite
-///
-/// The three system timestamp columns are `TEXT` on SQLite and carry no
-/// `COLLATE`, so ordering is a byte comparison over whatever string got stored.
-/// `' '` is 0x20 and `'T'` is 0x54, so a row defaulted by `CURRENT_TIMESTAMP`
-/// ("YYYY-MM-DD HH:MM:SS") sorts BEFORE a row the data plane stamped with the
-/// ISO-T form for the same instant - a same-day ordering inversion in a column
-/// creators sort by. Two spellings in one column is the whole hazard.
-///
-/// That reasoning does NOT generalise, and the tree proves it: PostgreSQL's two
-/// sides are `NOW()` here and `now()` in the engine's DML renderer. They differ
-/// BYTEWISE and it is harmless, because the column is `TIMESTAMPTZ` and the
-/// comparison is temporal rather than textual. So the obligation this module
-/// binds is "byte-identical on the dialect that stores these as TEXT, and equal
-/// up to case elsewhere", which is what
-/// [`the_byte_identity_obligation_is_scoped_to_the_dialect_that_stores_text`]
-/// states and derives rather than assumes.
-///
-/// # What each arm is bound by
-///
-/// - [`all_three_sqlite_now_spellings_are_the_one_this_module_states`] is the
-///   binding proper. It compares each side to [`SQLITE_NOW`], a fourth literal
-///   in this file, rather than to the other sides: comparing the three to each
-///   other alone would go green on the coordinated edit that is the whole
-///   reason for the module.
-/// - [`neither_side_may_fall_back_to_bare_current_timestamp`] is what keeps
-///   [`SQLITE_NOW`] itself honest. It is the only arm that fails if all FOUR
-///   spellings move together to the space-separated form, and it fails on the
-///   ordering fact rather than on a string.
-/// - the scope arm above is independently bound in the other direction: it
-///   fails if a shipping backend's engine and data-plane spellings diverge
-///   beyond case, which the SQLite-only arms cannot see.
-///
-/// It reaches the vendor through the existing test-only `zeroship-migrate`
-/// dev-dependency - the composition root, which is what a host really ships -
-/// so it costs no production dependency edge, the same route
-/// [`mod raw_column_parity`] takes for the raw column name.
+/// Runtime and migration timestamp renderers must agree across dialects.
+/// SQLite stores these timestamps as text, so defaults and updates must use
+/// the same ISO timestamp spelling to preserve chronological ordering.
 #[cfg(test)]
 mod sqlite_now_parity {
     use super::*;
 
     use zeroship_migrate_backend::registry::BackendVendor;
-    use zeroship_migrate_backend::renderer::DmlRenderer;
-    use zeroship_migrate_backend::schema::SchemaRenderer as EngineSchemaRenderer;
 
-    /// The one spelling, stated here as a literal.
-    ///
-    /// A fourth copy on purpose. It is what makes a coordinated three-file edit
-    /// fail, and
-    /// [`neither_side_may_fall_back_to_bare_current_timestamp`] is what keeps it
-    /// from becoming a fourth place the wrong answer can hide.
     const SQLITE_NOW: &str = "(strftime('%Y-%m-%dT%H:%M:%fZ','now'))";
 
     /// The dialect ids this crate's [`SqlDialect`] variants correspond to.
@@ -9684,7 +9522,32 @@ mod sqlite_now_parity {
             .collect()
     }
 
-    /// The SQLite vendor, which owns two of the three spellings.
+    #[test]
+    fn all_three_sqlite_now_spellings_are_the_one_this_module_states() {
+        let vendor = sqlite_vendor();
+        assert_eq!(now_expr(SqlDialect::Sqlite), SQLITE_NOW);
+        assert_eq!(vendor.schema.current_timestamp_expr(), SQLITE_NOW);
+        assert_eq!(vendor.dml.synth_now(), SQLITE_NOW);
+    }
+
+    #[test]
+    fn the_byte_identity_obligation_is_scoped_to_the_dialect_that_stores_text() {
+        for (dialect, vendor) in pairs() {
+            let runtime = now_expr(dialect);
+            for migrated in [
+                vendor.schema.current_timestamp_expr().to_owned(),
+                vendor.dml.synth_now(),
+            ] {
+                if matches!(dialect, SqlDialect::Sqlite) {
+                    assert_eq!(runtime, migrated);
+                } else {
+                    assert!(runtime.eq_ignore_ascii_case(&migrated), "{dialect:?}: {runtime} != {migrated}");
+                }
+            }
+        }
+    }
+
+    /// The migration vendor that supplies SQLite defaults and assignments.
     fn sqlite_vendor() -> &'static BackendVendor {
         pairs()
             .into_iter()

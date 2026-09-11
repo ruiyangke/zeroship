@@ -25,6 +25,10 @@ pub struct TxLane {
     /// The SC-1 state machine. `None` between the claim and `admit_transaction`.
     reducer: Option<crate::transaction::reducer::TxReducer>,
 
+    /// Shared terminal result and identity for this admission. Waiters retain
+    /// it after the app's lane is released.
+    completion: Option<crate::transaction::driver::Completion>,
+
     /// The pinned session, or `None` while a `TxClientSlotGuard` holds it out
     /// of the lane across an await. "In transaction" is the lane existing, not
     /// this being `Some`.
@@ -88,6 +92,9 @@ impl Drop for TxLane {
         if let Some(session) = self.session.take() {
             destroy_tx_connection(session);
         }
+        if let Some(completion) = self.completion.take() {
+            completion.abandon();
+        }
     }
 }
 
@@ -110,6 +117,7 @@ pub struct TxClientSlotGuard {
     context: crate::OrmContext,
     app_id: String,
     client: Option<Session>,
+    completion: Option<crate::transaction::driver::Completion>,
 }
 
 impl TxClientSlotGuard {
@@ -118,12 +126,18 @@ impl TxClientSlotGuard {
     /// a cancellation mid-await can never re-park one app's client under
     /// another's key.
     pub fn take(app_id: &str) -> Result<Self, DbError> {
-        let client = crate::tx_lanes::with_mut(|l| l.take_tx_client_for(app_id))
-            .ok_or_else(|| DbError::internal("db: transaction connection lost"))?;
+        let (client, completion) = crate::tx_lanes::with_mut(|l| {
+            (
+                l.take_tx_client_for(app_id),
+                l.transaction_completion(app_id),
+            )
+        });
+        let client = client.ok_or_else(|| DbError::internal("db: transaction connection lost"))?;
         Ok(Self {
             context: crate::orm_context::current(),
             app_id: app_id.to_string(),
             client: Some(client),
+            completion,
         })
     }
 
@@ -139,8 +153,17 @@ impl Drop for TxClientSlotGuard {
     fn drop(&mut self) {
         if let Some(client) = self.client.take() {
             let app_id = std::mem::take(&mut self.app_id);
-            self.context
-                .lanes_mut(|l| l.put_tx_client_for(&app_id, client));
+            self.context.lanes_mut(|l| {
+                if self
+                    .completion
+                    .as_ref()
+                    .is_some_and(|completion| !completion.is_current_in(l, &app_id))
+                {
+                    destroy_tx_connection(client);
+                } else {
+                    l.put_tx_client_for(&app_id, client);
+                }
+            });
         }
     }
 }
@@ -475,6 +498,7 @@ impl TxLanes {
             previous.is_none(),
             "admit_transaction: a transaction is already admitted for this app",
         );
+        lane.completion = Some(crate::transaction::driver::Completion::default());
         // A fresh transaction starts from a clean withdrawal state; the
         // tombstone belongs to the session that was withdrawn, not to the app.
         self.withdrawn_tx_sessions.remove(app_id);
@@ -504,6 +528,21 @@ impl TxLanes {
         self.lanes
             .get(app_id)
             .and_then(|lane| lane.reducer.as_ref())
+    }
+
+    pub(crate) fn transaction_completion(
+        &self,
+        app_id: &str,
+    ) -> Option<crate::transaction::driver::Completion> {
+        self.lanes.get(app_id)?.completion.clone()
+    }
+
+    /// Normal settlement publishes after session disposition and lane release.
+    /// Detach the publisher so dropping the lane does not report abandonment.
+    pub(crate) fn detach_transaction_completion(&mut self, app_id: &str) {
+        if let Some(lane) = self.lanes.get_mut(app_id) {
+            lane.completion = None;
+        }
     }
 
     /// The authority `app_id`'s transaction was admitted under, for the events
@@ -536,6 +575,9 @@ impl TxLanes {
             lane.reducer = None;
             lane.emit_marks.clear();
             lane.canceller = None;
+            if let Some(completion) = lane.completion.take() {
+                completion.abandon();
+            }
         }
         self.wake_tx_slot_waiters(app_id);
     }
