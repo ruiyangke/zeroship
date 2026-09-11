@@ -1,5 +1,5 @@
 use super::{
-    app::{active_deploy, decode, emit, encode, insert_root_run, parse_state},
+    app::{active_deploy, deadline, decode, emit, encode, insert_root_run, parse_state},
     journal,
     store::{Row, Transaction},
     AppPolicy, ControlIntent,
@@ -60,14 +60,18 @@ pub(crate) async fn prepare(
     let intent = ControlIntent::parse(&run.text("control")?)?;
     if intent == ControlIntent::Cancel {
         settle(tx, app, run, RunUpdate::Cancelled, now).await?;
-        return Ok(has_compensation(tx, app, run).await?);
+        return if has_compensation(tx, app, run).await? {
+            compensation_ready(tx, app, run, now).await
+        } else {
+            Ok(false)
+        };
     }
     if intent == ControlIntent::Pause {
         park(tx, app, run).await?;
         return Ok(false);
     }
     if run.text("state")? == "compensating" {
-        return Ok(true);
+        return compensation_ready(tx, app, run, now).await;
     }
     let progressed = journal::resolve(tx, app, run, now).await?;
     let steps = journal::load(tx, app, &run.text("id")?, run.integer("generation")?).await?;
@@ -108,6 +112,21 @@ pub(crate) async fn apply(
         )
     }) {
         return journal::invalid("forward task cannot submit compensation results");
+    }
+    for outcome in &execution.outcomes {
+        if let StepOutcome::StepCompleted {
+            compensation_max_attempts,
+            ..
+        } = outcome
+        {
+            if *compensation_max_attempts <= 0
+                || *compensation_max_attempts > policy.max_compensation_attempts
+            {
+                return journal::invalid(
+                    "workflow compensation retry policy exceeds the app limit",
+                );
+            }
+        }
     }
     let (checkpoints, update) =
         fold_outcomes(&execution.outcomes).map_err(WorkflowServiceError::InvalidRequest)?;
@@ -302,6 +321,42 @@ async fn settle(
         finish(tx, app, run, target, None, update.error(), now).await
     }
 }
+async fn compensation_ready(
+    tx: &mut Transaction,
+    app: &AppId,
+    run: &Row,
+    now: i64,
+) -> Result<bool, WorkflowServiceError> {
+    let id = run.text("id")?;
+    let pending = journal::load(tx, app, &id, run.integer("generation")?)
+        .await?
+        .into_iter()
+        .rev()
+        .find(|step| {
+            step.compensation_state
+                .as_deref()
+                .is_some_and(|state| matches!(state, "pending" | "running"))
+        })
+        .ok_or_else(|| {
+            WorkflowServiceError::Internal("compensating workflow has no pending operation".into())
+        })?;
+    let steps = tx.table("steps");
+    let rows=tx.query(&format!("SELECT compensation_due_at FROM {steps} WHERE app_id=$1 AND run_id=$2 AND generation=$3 AND ordinal=$4"), &[app.as_str().into(),id.clone().into(),run.integer("generation")?.into(),i64::from(pending.ordinal).into()]).await?;
+    let due = rows[0]
+        .optional_integer("compensation_due_at")?
+        .unwrap_or(now);
+    if due > now {
+        let runs = tx.table("runs");
+        tx.execute(
+            &format!("UPDATE {runs} SET due_at=$3 WHERE app_id=$1 AND id=$2"),
+            &[app.as_str().into(), id.into(), due.into()],
+        )
+        .await?;
+        return Ok(false);
+    }
+    Ok(true)
+}
+
 async fn compensate(
     tx: &mut Transaction,
     app: &AppId,
@@ -341,8 +396,17 @@ async fn compensate(
     {
         return journal::invalid("compensation outcome does not match the pending operation");
     }
+    let steps = tx.table("steps");
+    let rows=tx.query(&format!("SELECT compensation_attempts,compensation_retry_ms FROM {steps} WHERE app_id=$1 AND run_id=$2 AND generation=$3 AND ordinal=$4"), &[app.as_str().into(),id.clone().into(),generation.into(),i64::from(ordinal).into()]).await?;
+    let attempts = rows[0]
+        .integer("compensation_attempts")?
+        .checked_add(1)
+        .ok_or_else(|| WorkflowServiceError::Internal("compensation attempt overflow".into()))?;
+    let retry = error.is_some() && attempts < i64::from(pending.compensation_max_attempts);
     pending.compensation_state = Some(
-        if error.is_some() {
+        if retry {
+            "pending"
+        } else if error.is_some() {
             "failed"
         } else {
             "completed"
@@ -350,9 +414,13 @@ async fn compensate(
         .into(),
     );
     journal::update(tx, app, &id, generation, &pending).await?;
-    if let Some(error) = error {
-        return finish(tx,app,run,RunState::Failed,None,Some(json!({"name":"WorkflowCompensationError","message":"workflow compensation failed","cause":error,"ordinal":ordinal})),now).await;
-    }
+    let due = if retry {
+        Some(deadline(now, rows[0].integer("compensation_retry_ms")?)?)
+    } else {
+        None
+    };
+    tx.execute(&format!("UPDATE {steps} SET compensation_attempts=$5,compensation_due_at=$6,compensation_error=$7 WHERE app_id=$1 AND run_id=$2 AND generation=$3 AND ordinal=$4"),
+        &[app.as_str().into(),id.clone().into(),generation.into(),i64::from(ordinal).into(),attempts.into(),due.into(),error.map(|value|encode(&value)).transpose()?.into()]).await?;
     if has_compensation(tx, app, run).await? {
         if ControlIntent::parse(&run.text("control")?)? == ControlIntent::Pause {
             park(tx, app, run).await?;
@@ -361,7 +429,11 @@ async fn compensate(
         let runs = tx.table("runs");
         tx.execute(
             &format!("UPDATE {runs} SET task_id=NULL,due_at=$3 WHERE app_id=$1 AND id=$2"),
-            &[app.as_str().into(), id.into(), now.into()],
+            &[
+                app.as_str().into(),
+                id.clone().into(),
+                due.unwrap_or(now).into(),
+            ],
         )
         .await?;
         return Ok(RunState::Compensating);
@@ -372,23 +444,28 @@ async fn compensate(
             &format!(
                 "SELECT error FROM {generations} WHERE app_id=$1 AND run_id=$2 AND generation=$3"
             ),
-            &[app.as_str().into(), id.into(), generation.into()],
+            &[app.as_str().into(), id.clone().into(), generation.into()],
         )
         .await?;
-    let error = rows[0]
+    let original: Option<Value> = rows[0]
         .optional_text("error")?
         .map(|value| decode(&value))
         .transpose()?;
-    finish(
-        tx,
-        app,
-        run,
-        parse_state(&run.text("compensation_target")?)?,
-        None,
-        error,
-        now,
-    )
-    .await
+    let failures=tx.query(&format!("SELECT ordinal,compensation_error FROM {steps} WHERE app_id=$1 AND run_id=$2 AND generation=$3 AND compensation_error IS NOT NULL ORDER BY ordinal DESC"), &[app.as_str().into(),id.into(),generation.into()]).await?;
+    if failures.is_empty() {
+        return finish(
+            tx,
+            app,
+            run,
+            parse_state(&run.text("compensation_target")?)?,
+            None,
+            original,
+            now,
+        )
+        .await;
+    }
+    let failures:Vec<Value>=failures.iter().map(|row|Ok(json!({"ordinal":row.integer("ordinal")?,"error":decode::<Value>(&row.text("compensation_error")?)?}))).collect::<Result<_,WorkflowServiceError>>()?;
+    finish(tx,app,run,RunState::Failed,None,Some(json!({"name":"WorkflowCompensationError","message":"workflow compensation did not fully succeed","cause":original,"failures":failures})),now).await
 }
 pub(crate) async fn finish(
     tx: &mut Transaction,

@@ -25,6 +25,7 @@ export function workflowSchema(namespace) {
   create("schema_version", { id: text(), fingerprint: text() }, ["id"]);
   create("apps", {
     ...identity(), revision: integer(), policy: text(), signal_epoch: integer(),
+    last_polled_at: integer().default(0),
   }, ["app_id"]);
   create("deploys", {
     ...identity(), id: text(), hash: text(), manifest: text(), created_at: integer(),
@@ -56,6 +57,8 @@ export function workflowSchema(namespace) {
   create("steps", {
     ...generation(), ordinal: integer(), name: text(), occurrence: integer(),
     origin_generation: integer(), kind: text(), state: text(), record: text(),
+    compensation_attempts: integer().default(0), compensation_due_at: t.bigInt(),
+    compensation_error: t.text(), compensation_retry_ms: integer().default(1000),
   }, ["app_id", "run_id", "generation", "ordinal"], [generationFk("steps")], [
     { name: "step_name_occurrence", columns: ["app_id", "run_id", "generation", "name", "occurrence"] },
   ]);

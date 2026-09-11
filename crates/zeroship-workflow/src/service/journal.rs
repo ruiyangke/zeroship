@@ -60,6 +60,11 @@ pub(crate) async fn append(
     let id = run.text("id")?;
     let generation = run.integer("generation")?;
     let mut journal = load(tx, app, &id, generation).await?;
+    let mut journal_bytes = journal.iter().try_fold(0usize, |total, step| {
+        total.checked_add(encode(step)?.len()).ok_or_else(|| {
+            WorkflowServiceError::ResourceExhausted("workflow journal size overflow".into())
+        })
+    })?;
     let steps = tx.table("steps");
     for mut step in checkpoints {
         if step.ordinal < 0
@@ -113,8 +118,18 @@ pub(crate) async fn append(
         if step.kind == "child" {
             step.child_run_id = Some(child(tx, app, run, policy, &step, now).await?);
         }
-        tx.execute(&format!("INSERT INTO {steps} (app_id,run_id,generation,ordinal,name,occurrence,origin_generation,kind,state,record) VALUES ($1,$2,$3,$4,$5,$6,$3,$7,$8,$9)"),
-            &[app.as_str().into(),id.clone().into(),generation.into(),i64::from(step.ordinal).into(),step.name.clone().into(),i64::from(step.name_occurrence).into(),step.kind.clone().into(),step.state.clone().into(),encode(&step)?.into()]).await?;
+        journal_bytes = journal_bytes
+            .checked_add(encode(&step)?.len())
+            .ok_or_else(|| {
+                WorkflowServiceError::ResourceExhausted("workflow journal size overflow".into())
+            })?;
+        if journal_bytes > policy.max_journal_bytes {
+            return Err(WorkflowServiceError::ResourceExhausted(
+                "workflow journal size limit reached".into(),
+            ));
+        }
+        tx.execute(&format!("INSERT INTO {steps} (app_id,run_id,generation,ordinal,name,occurrence,origin_generation,kind,state,record,compensation_retry_ms) VALUES ($1,$2,$3,$4,$5,$6,$3,$7,$8,$9,$10)"),
+            &[app.as_str().into(),id.clone().into(),generation.into(),i64::from(step.ordinal).into(),step.name.clone().into(),i64::from(step.name_occurrence).into(),step.kind.clone().into(),step.state.clone().into(),encode(&step)?.into(),policy.compensation_retry_ms.into()]).await?;
         if step.state == "running" {
             let waits = tx.table("waits");
             tx.execute(&format!("INSERT INTO {waits} (app_id,run_id,generation,ordinal,kind,signal_type,topic,max_signal_age,due_at,child_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)"),
@@ -182,6 +197,12 @@ async fn child(
             if !ancestors.is_empty() {
                 return invalid("child workflow would wait on its ancestor");
             }
+            let waits = tx.table("waits");
+            let cycle = tx.query(&format!("WITH RECURSIVE dependencies(id) AS (SELECT id FROM {runs} WHERE app_id=$1 AND id=$2 UNION SELECT w.child_id FROM {waits} w JOIN dependencies d ON w.run_id=d.id JOIN {runs} r ON r.app_id=w.app_id AND r.id=w.run_id AND r.generation=w.generation WHERE w.app_id=$1 AND w.child_id IS NOT NULL) SELECT id FROM dependencies WHERE id=$3"),
+                &[app.as_str().into(),id.clone().into(),parent.text("id")?.into()]).await?;
+            if !cycle.is_empty() {
+                return invalid("child workflow would create a dependency cycle");
+            }
             return Ok(id);
         }
     }
@@ -238,8 +259,11 @@ pub(crate) async fn resolve(
                 .max_signal_age_ms
                 .map(|age| now.saturating_sub(age))
                 .unwrap_or(i64::MIN);
-            let rows=tx.query(&format!("SELECT id,payload FROM {signals} WHERE app_id=$1 AND run_id=$2 AND signal_type=$3 AND consumed_generation IS NULL AND created_at >= $4 ORDER BY created_at,id LIMIT 1"),
-                &[app.as_str().into(),id.clone().into(),step.signal_type.clone().into(),oldest.into()]).await?;
+            let latest = step
+                .wake_at
+                .map_or(now, |due| due.timestamp_millis().min(now));
+            let rows=tx.query(&format!("SELECT id,payload FROM {signals} WHERE app_id=$1 AND run_id=$2 AND signal_type=$3 AND consumed_generation IS NULL AND created_at >= $4 AND created_at <= $5 ORDER BY created_at,id LIMIT 1"),
+                &[app.as_str().into(),id.clone().into(),step.signal_type.clone().into(),oldest.into(),latest.into()]).await?;
             if let Some(signal) = rows.first() {
                 let signal_id = signal.text("id")?;
                 output = Some(decode(&signal.text("payload")?)?);

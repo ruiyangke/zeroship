@@ -134,6 +134,14 @@ impl AppWorkflows {
         let retained: Vec<_> = steps.iter().filter(|step| step.ordinal < prefix).collect();
         let tasks = tx.table("tasks");
         let runs = tx.table("runs");
+        if parse_state(&run.text("state")?)?.is_terminal() {
+            let live = tx.query(&format!("SELECT COUNT(*) AS total FROM {runs} WHERE app_id=$1 AND state NOT IN ('completed','failed','cancelled')"), &[self.app.as_str().into()]).await?;
+            if live[0].integer("total")? >= policy.max_live_runs {
+                return Err(WorkflowServiceError::ResourceExhausted(
+                    "workflow live-run limit reached".into(),
+                ));
+            }
+        }
         let live=tx.query(&format!("SELECT id FROM {tasks} WHERE app_id=$1 AND run_id=$2 AND generation=$3 AND state='leased' AND deadline>$4"),
             &[self.app.as_str().into(),run_id.into(),current.into(),now.into()]).await?;
         let descendants=tx.query(&format!("WITH RECURSIVE descendants AS (SELECT id,state FROM {runs} WHERE app_id=$1 AND parent_id=$2 UNION ALL SELECT r.id,r.state FROM {runs} r JOIN descendants d ON r.parent_id=d.id WHERE r.app_id=$1) SELECT id FROM descendants WHERE state NOT IN ('completed','failed','cancelled')"), &[self.app.as_str().into(),run_id.into()]).await?;
@@ -194,7 +202,7 @@ impl AppWorkflows {
         tx.execute(&format!("INSERT INTO {generations} (app_id,run_id,generation,deploy_id,input,state,started_at) SELECT app_id,run_id,$4,$5,input,'queued',$6 FROM {generations} WHERE app_id=$1 AND run_id=$2 AND generation=$3"),
             &[self.app.as_str().into(),run_id.into(),current.into(),generation.into(),deploy.clone().into(),now.into()]).await?;
         let steps_table = tx.table("steps");
-        tx.execute(&format!("INSERT INTO {steps_table} (app_id,run_id,generation,ordinal,name,occurrence,origin_generation,kind,state,record) SELECT app_id,run_id,$4,ordinal,name,occurrence,origin_generation,kind,state,record FROM {steps_table} WHERE app_id=$1 AND run_id=$2 AND generation=$3 AND ordinal<$5"),
+        tx.execute(&format!("INSERT INTO {steps_table} (app_id,run_id,generation,ordinal,name,occurrence,origin_generation,kind,state,record,compensation_attempts,compensation_due_at,compensation_error,compensation_retry_ms) SELECT app_id,run_id,$4,ordinal,name,occurrence,origin_generation,kind,state,record,compensation_attempts,compensation_due_at,compensation_error,compensation_retry_ms FROM {steps_table} WHERE app_id=$1 AND run_id=$2 AND generation=$3 AND ordinal<$5"),
             &[self.app.as_str().into(),run_id.into(),current.into(),generation.into(),i64::from(prefix).into()]).await?;
         tx.execute(&format!("UPDATE {runs} SET generation=$3,deploy_id=$4,state='queued',control='none',due_at=$5,task_id=NULL,terminal_at=NULL,compensation_target=NULL WHERE app_id=$1 AND id=$2"),
             &[self.app.as_str().into(),run_id.into(),generation.into(),deploy.clone().into(),now.into()]).await?;
