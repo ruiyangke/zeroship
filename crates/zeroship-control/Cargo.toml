@@ -118,6 +118,7 @@ chrono = { version = "0.4", default-features = false, features = ["std", "serde"
 chrono-tz = "0.10"
 
 [dev-dependencies]
+rcgen = "0.14"
 testcontainers = { version = "0.28", features = ["blocking"] }
 zeroship-workflow-v8 = { workspace = true }
 zeroship-test-support = { workspace = true }
@@ -169,6 +170,10 @@ path = "tests/main.rs"
 [[test]]
 name = "live_db"
 path = "tests/live_db.rs"
+
+[[test]]
+name = "workflow_e2e"
+path = "tests/workflow_e2e.rs"
 
 [[test]]
 name = "workflow_api"
