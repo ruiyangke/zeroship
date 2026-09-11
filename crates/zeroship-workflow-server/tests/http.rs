@@ -1,5 +1,6 @@
 use ntex::{http::StatusCode, web};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use std::{
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
@@ -71,6 +72,11 @@ async fn remote_clients_obey_app_capabilities_and_registered_task_ownership() {
     let service = WorkflowService::open(Arc::new(PostgresStore::new(dsn)))
         .await
         .unwrap();
+    let objects = tempfile::tempdir().unwrap();
+    let storage = zeroship_storage::StorageStore::from_backend(Arc::new(
+        zeroship_storage::LocalFs::new(objects.path()),
+    ));
+    let service = service.with_payload_storage(storage.clone()).unwrap();
     let a = AppId::mint();
     let b = AppId::mint();
     for app in [&a, &b] {
@@ -152,6 +158,7 @@ async fn remote_clients_obey_app_capabilities_and_registered_task_ownership() {
                 AppOperation::Status,
                 AppOperation::Signal,
                 AppOperation::Control,
+                AppOperation::ReadOutput,
             ]
             .into(),
         },
@@ -335,4 +342,129 @@ async fn remote_clients_obey_app_capabilities_and_registered_task_ownership() {
         Some(json!({"done":true}))
     );
     assert!(!format!("{app:?}").contains(token.as_str()));
+
+    let run = app
+        .start(&RequestId::mint(), "Example", StartOptions::default())
+        .await
+        .unwrap();
+    let task = tasks.poll().await.unwrap().unwrap();
+    let data = bytes::Bytes::from(vec![42; 128 * 1024]);
+    let reference = zeroship_workflow::engine::WorkflowOutputRef {
+        hash: format!("{:x}", Sha256::digest(&data)),
+        size: data.len() as i64,
+        content_type: Some("application/octet-stream".into()),
+    };
+    let request = RequestId::mint();
+    let staged = tasks
+        .stage_payload(
+            &task.id,
+            &task.token,
+            &request,
+            reference.clone(),
+            Box::new(zeroship_storage::backend::OnceChunk::new(data.clone())),
+        )
+        .await
+        .unwrap();
+    let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let retry = compio::time::timeout(
+        std::time::Duration::from_secs(5),
+        replica_tasks.stage_payload(
+            &task.id,
+            &task.token,
+            &request,
+            reference.clone(),
+            Box::new(NeverSource(dropped.clone())),
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(retry, staged);
+    compio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !dropped.load(std::sync::atomic::Ordering::SeqCst) {
+            compio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(matches!(
+        stranger
+            .read_payload(&task.id, &task.token, &reference)
+            .await,
+        Err(WorkflowServiceError::NotFound(_))
+    ));
+    let mut download = tasks
+        .read_payload(&task.id, &task.token, &reference)
+        .await
+        .unwrap();
+    let mut received = Vec::new();
+    while let Some(chunk) = download.body.next_chunk().await {
+        received.extend_from_slice(&chunk.unwrap());
+    }
+    assert_eq!(received, data);
+    let done: WorkflowExecution =
+        serde_json::from_value(json!({"outcomes":[{"kind":"RunCompleted","outputRef":reference}]}))
+            .unwrap();
+    tasks.complete(&task.id, &task.token, done).await.unwrap();
+    let mut download = app
+        .read_payload(
+            &run.id,
+            task.generation,
+            zeroship_workflow::service::PayloadSlot::Output,
+        )
+        .await
+        .unwrap();
+    let mut received = Vec::new();
+    while let Some(chunk) = download.body.next_chunk().await {
+        received.extend_from_slice(&chunk.unwrap());
+    }
+    assert_eq!(received, data);
+    assert!(matches!(
+        tasks.read_payload(&task.id, &task.token, &reference).await,
+        Err(WorkflowServiceError::Conflict(_))
+    ));
+    // A Content-Length response may finish before the server can report a
+    // trailing stream error. The client independently checks the digest.
+    let objects = storage.namespace(zeroship_storage::Namespace::platform("workflow").unwrap());
+    objects
+        .put(
+            a.as_str(),
+            &staged.id,
+            &vec![43; data.len()],
+            Some("application/octet-stream"),
+        )
+        .await
+        .unwrap();
+    let mut corrupt = app
+        .read_payload(
+            &run.id,
+            task.generation,
+            zeroship_workflow::service::PayloadSlot::Output,
+        )
+        .await
+        .unwrap();
+    let mut rejected = false;
+    while let Some(chunk) = corrupt.body.next_chunk().await {
+        if chunk.is_err() {
+            rejected = true;
+            break;
+        }
+    }
+    assert!(
+        rejected,
+        "corrupt bytes must not finish as a verified payload"
+    );
+}
+
+struct NeverSource(Arc<std::sync::atomic::AtomicBool>);
+impl Drop for NeverSource {
+    fn drop(&mut self) {
+        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+#[async_trait::async_trait(?Send)]
+impl zeroship_storage::backend::ChunkSource for NeverSource {
+    async fn next_chunk(&mut self) -> Option<zeroship_storage::backend::ChunkResult> {
+        std::future::pending().await
+    }
 }

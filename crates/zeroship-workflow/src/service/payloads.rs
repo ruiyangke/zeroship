@@ -45,6 +45,25 @@ pub struct PayloadRead {
     pub reference: WorkflowOutputRef,
     pub body: BoxByteStream,
 }
+impl PayloadRead {
+    pub(crate) fn checked(
+        reference: WorkflowOutputRef,
+        body: BoxByteStream,
+    ) -> Result<Self, WorkflowServiceError> {
+        validate_reference(&reference)?;
+        Ok(Self {
+            reference: reference.clone(),
+            body: Box::new(VerifiedSource {
+                inner: body,
+                expected: reference,
+                bytes: 0,
+                hash: Sha256::new(),
+                verified: Rc::new(Cell::new(false)),
+                finished: false,
+            }),
+        })
+    }
+}
 impl std::fmt::Debug for PayloadRead {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PayloadRead")
@@ -474,17 +493,7 @@ async fn open_payload(
             "committed workflow payload size changed".into(),
         ));
     }
-    Ok(PayloadRead {
-        reference: reference.clone(),
-        body: Box::new(VerifiedSource {
-            inner: body,
-            expected: reference,
-            bytes: 0,
-            hash: Sha256::new(),
-            verified: Rc::new(Cell::new(false)),
-            finished: false,
-        }),
-    })
+    PayloadRead::checked(reference, body)
 }
 
 struct VerifiedSource {

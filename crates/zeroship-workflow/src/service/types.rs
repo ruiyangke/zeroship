@@ -33,7 +33,7 @@ impl From<RequestId> for String {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-#[serde(transparent)]
+#[serde(try_from = "String", into = "String")]
 pub struct TaskToken(String);
 impl std::fmt::Debug for TaskToken {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -41,6 +41,10 @@ impl std::fmt::Debug for TaskToken {
     }
 }
 impl TaskToken {
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
     pub(crate) fn mint() -> Self {
         Self(format!(
             "{}{}",
@@ -50,6 +54,24 @@ impl TaskToken {
     }
     pub(crate) fn hash(&self) -> String {
         hash(self.0.as_bytes())
+    }
+}
+impl TryFrom<String> for TaskToken {
+    type Error = WorkflowServiceError;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        if value.len() != 64
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(WorkflowServiceError::Unauthenticated);
+        }
+        Ok(Self(value))
+    }
+}
+impl From<TaskToken> for String {
+    fn from(value: TaskToken) -> Self {
+        value.0
     }
 }
 

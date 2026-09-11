@@ -21,6 +21,8 @@ thread_local! {
     static CLIENT: cyper::Client = cyper::Client::new();
 }
 
+mod payloads;
+
 #[derive(Debug, Clone)]
 pub struct WorkflowEndpoint {
     base: String,
@@ -76,6 +78,36 @@ impl WorkflowEndpoint {
             identity,
         }
     }
+    async fn decode_response<T: DeserializeOwned>(
+        &self,
+        mut response: cyper::Response,
+    ) -> Result<T, WorkflowServiceError> {
+        let status = response.status();
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response.next().await {
+            let chunk = chunk.map_err(|_| {
+                WorkflowServiceError::Unavailable("workflow response interrupted".into())
+            })?;
+            if bytes
+                .len()
+                .checked_add(chunk.len())
+                .is_none_or(|size| size > self.max_response_bytes)
+            {
+                return Err(WorkflowServiceError::PayloadTooLarge);
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        if !status.is_success() {
+            return Err(serde_json::from_slice::<Failure>(&bytes)
+                .map(Failure::into_error)
+                .unwrap_or_else(|_| {
+                    WorkflowServiceError::Unavailable("invalid workflow error response".into())
+                }));
+        }
+        serde_json::from_slice(&bytes)
+            .map_err(|_| WorkflowServiceError::Unavailable("invalid workflow response".into()))
+    }
+
     async fn request<T: DeserializeOwned>(
         &self,
         path: &str,
@@ -108,33 +140,10 @@ impl WorkflowEndpoint {
         compio::time::timeout(self.timeout, async {
             // An ambiguous response is returned to the caller. It may retry
             // with the same request identity; the transport never invents one.
-            let mut response = builder.send().await.map_err(|_| {
+            let response = builder.send().await.map_err(|_| {
                 WorkflowServiceError::Unavailable("workflow service unreachable".into())
             })?;
-            let status = response.status();
-            let mut bytes = Vec::new();
-            while let Some(chunk) = response.next().await {
-                let chunk = chunk.map_err(|_| {
-                    WorkflowServiceError::Unavailable("workflow response interrupted".into())
-                })?;
-                if bytes
-                    .len()
-                    .checked_add(chunk.len())
-                    .is_none_or(|size| size > self.max_response_bytes)
-                {
-                    return Err(WorkflowServiceError::PayloadTooLarge);
-                }
-                bytes.extend_from_slice(&chunk);
-            }
-            if !status.is_success() {
-                return Err(serde_json::from_slice::<Failure>(&bytes)
-                    .map(Failure::into_error)
-                    .unwrap_or_else(|_| {
-                        WorkflowServiceError::Unavailable("invalid workflow error response".into())
-                    }));
-            }
-            serde_json::from_slice(&bytes)
-                .map_err(|_| WorkflowServiceError::Unavailable("invalid workflow response".into()))
+            self.decode_response(response).await
         })
         .await
         .map_err(|_| WorkflowServiceError::Timeout)?
