@@ -212,18 +212,7 @@ fn insert_end_to_end_populates_assigned_fields_sqlite() {
     })
 }
 
-/// FK type cascade end-to-end: a `t.ref(...)` column now emits TEXT
-/// (not INTEGER) so the column accepts typed_id string
-/// values without storage-class mismatch.
-///
-/// **Scope note**: the actual `FOREIGN KEY ... REFERENCES "app"."tbl"`
-/// constraint clause uses a schema-qualified target name that SQLite's
-/// CREATE TABLE parser refuses (a pre-existing PG-only path). This
-/// test stands up the posts table WITHOUT the FK clause (skipping the
-/// constraint with `FkEmission::Deferred` + empty existing set) and
-/// asserts the column TYPE is TEXT - the FK type-cascade surface this
-/// test pins. End-to-end FK constraint validation on SQLite remains a
-/// PG-only path until the cross-app FK rework lands.
+/// Reference fields preserve string keys when foreign-key creation is deferred.
 #[test]
 fn insert_with_fk_uses_text_keys_end_to_end_sqlite() {
     Host::test(|host| {
@@ -237,17 +226,13 @@ fn insert_with_fk_uses_text_keys_end_to_end_sqlite() {
                 .await
                 .expect("ensure_app_schema");
 
-            // Stand up the posts table with an `authorId` ref column. The
-            // FK type cascade emits TEXT for the column type. We use
-            // `FkEmission::Deferred(empty)` so the FK clause is omitted -
-            // SQLite refuses schema-qualified REFERENCES targets, a
-            // pre-existing PG-only path this test does not attempt to fix.
+            // Defer the constraint to exercise reference storage independently.
             let empty: std::collections::HashSet<String> = std::collections::HashSet::new();
             // One binding for the table's shape and for the write's projection: the
             // DDL emitter and the INSERT builder must not read two literals.
             let schema = generated_fields(zeroship_data_sql::value!({
                 "title": {"type": "string", "required": true},
-                "authorId": {"type": "ref", "refTarget": "users"},
+                "authorId": {"type": "ref", "refTarget": "users", "refColumn": "id"},
             }));
             let posts_ddl = fixture_table_sql_for(
                 &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
@@ -287,10 +272,7 @@ fn insert_with_fk_uses_text_keys_end_to_end_sqlite() {
             });
             apply_assignments_on_insert(
                 &mut post_doc,
-                &zeroship_data_sql::value!({
-                    "title": {"type": "string", "required": true},
-                    "authorId": {"type": "ref", "refTarget": "users"},
-                }),
+                &schema,
                 "posts",
                 None,
             )
