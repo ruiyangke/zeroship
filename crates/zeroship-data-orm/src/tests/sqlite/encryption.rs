@@ -362,10 +362,8 @@ fn randomised_ciphertext_row_swap_rejected_sqlite() {
     })
 }
 
-/// **Cross-backend equivalence (SQLite <-> SQLite via shared
-/// env-var key).** Encrypt plaintext on backend_a; copy the ciphertext
-/// bytes; decrypt on backend_b (different temp file) configured with
-/// the same host-supplied project key.
+/// Backend instances with the same supplied project key can decrypt each other’s
+/// ciphertext when the app, field and row identity also match.
 #[test]
 fn cross_backend_ciphertext_decrypt_via_shared_key() {
     Host::test(|host| {
@@ -398,11 +396,8 @@ fn cross_backend_ciphertext_decrypt_via_shared_key() {
     })
 }
 
-/// Full encrypted-column round-trip through the SQLite CRUD pipeline
-/// (encryption pass -> SQL builder w/ SQLite dialect -> SQLite session
-/// bind -> typed row decode -> decrypt pass). This is the test that
-/// proves the end-to-end SDK works on SQLite for `t.encrypted(...)`
-/// columns.
+/// Round-trip encryption through SQLite SQL binding and typed decoding.
+/// This exercises the Rust pipeline directly.
 #[test]
 fn encrypted_column_e2e_crud_round_trip_sqlite() {
     Host::test(|host| {
@@ -420,11 +415,7 @@ fn encrypted_column_e2e_crud_round_trip_sqlite() {
                 .attach_app_file("app_demo")
                 .await
                 .expect("ensure_app_schema");
-            // PRIMARY KEY `id TEXT` + encrypted `ssn BLOB` — same shape the
-            // CRUD path's `build_create_table_with_fks` emits for an
-            // `t.encrypted()` field, except we skip the
-            // sentinel-comment metadata because the introspector isn't on
-            // the e2e read path here.
+            // Only ciphertext binding is under test, so this fixture omits catalog sentinels.
             backend
                 .execute_fixture(
                     "CREATE TABLE \"app_demo\".\"users\" (\
@@ -436,9 +427,7 @@ fn encrypted_column_e2e_crud_round_trip_sqlite() {
                 .await
                 .expect("CREATE TABLE users");
 
-            // The schema the encryption pass sees — declares `ssn` as a
-            // randomised-encrypted column wrapping the string type, keyed
-            // to the e2e-test-specific env var.
+            // The field descriptor selects encryption; the host supplies the project key.
             let schema = zeroship_data_sql::value!({
                 "ssn": {
                     "type": "string",

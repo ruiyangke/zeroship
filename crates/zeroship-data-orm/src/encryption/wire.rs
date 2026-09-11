@@ -1,55 +1,24 @@
-//! Wire format for column-encrypted blobs.
+//! Column-ciphertext framing: version flag, nonce, ciphertext and authentication tag.
 //!
-//! ```text
-//! [version_flag (1 B) | nonce (12 B) | ciphertext + GCM tag (N B)]
-//! ```
-//!
-//! ## Why the leading version flag
-//!
-//! The baseline ships `version_flag = 0x01` (AAD = `(collection, column,
-//! row_pk_bytes?)`). The post-system-fields proposal (see
-//! `docs/archive/platform-system-fields.md` §8) introduces a
-//! `version_flag = 0x02` shape where AAD additionally binds the
-//! row-version bytes. The leading byte is reserved from day one so
-//! the upgrade requires no in-place data migration of existing
-//! ciphertext — `re-encrypt-on-write` produces v2 blobs naturally,
-//! and decryption inspects the flag to pick the right AAD
-//! reconstruction.
-//!
-//! ## Why not split nonce from ciphertext+tag at the API boundary
-//!
-//! The Rust-Crypto `Aead::encrypt` / `Aead::decrypt` impls return /
-//! accept the ciphertext-with-appended-tag as a single byte slice. We
-//! keep that shape on the wire too rather than splitting tag off, so
-//! the unpack path can hand the slice straight to `Aes256Gcm::decrypt`
-//! without re-stitching.
+//! Only `WIRE_VERSION_V1` is accepted. Ciphertext and its appended tag stay together
+//! to match the AEAD API; AAD construction belongs to `super::aad`.
 
 use crate::error::DbError;
 
-/// Reserved version flag for the baseline AAD shape.
-///
-/// Only this version is emitted today; the post-system-fields phase
-/// will introduce `0x02` alongside the version-bytes AAD extension.
+/// Version emitted by `pack` and accepted by `unpack`.
 pub(crate) const WIRE_VERSION_V1: u8 = 0x01;
 
-/// AES-GCM nonce length (RFC 5116 §5.3). The aes-gcm crate's
-/// `Nonce::from_slice` panics on anything else, so this is a
-/// hard-coded invariant.
+/// Nonce length required by the AES-GCM implementation.
 const NONCE_LEN: usize = 12;
 
-/// `[version_flag (1) | nonce (12)]` = 13 bytes.
+/// Version and nonce prefix length.
 const HEADER_LEN: usize = 1 + NONCE_LEN;
 
 /// AES-GCM authentication tag length (RFC 5116 §5.3).
 const GCM_TAG_LEN: usize = 16;
 
-/// Pack a freshly-encrypted blob: prefix the v1 version flag, then the
-/// nonce, then the ciphertext-with-appended-tag.
-///
-/// Returns `Err(Internal)` if the cipher output is shorter than the
-/// minimum 16-byte tag — that's an invariant breach inside aes-gcm,
-/// not user input, so the variant choice is internal-error rather
-/// than validation.
+/// Prefix the version and nonce to authenticated ciphertext.
+/// Cipher output shorter than `GCM_TAG_LEN` indicates an internal invariant failure.
 pub(crate) fn pack(nonce: &[u8; NONCE_LEN], ct_and_tag: &[u8]) -> Result<Vec<u8>, DbError> {
     if ct_and_tag.len() < GCM_TAG_LEN {
         return Err(DbError::internal(format!(
@@ -135,9 +104,7 @@ mod tests {
         assert!(unpack(&boundary).is_err());
     }
 
-    /// Unpack rejects any version flag other than `0x01` today.
-    /// `0x02` is reserved for the post-system-fields shape but is not
-    /// yet emitted; treat as unknown.
+    /// Reject any version other than `WIRE_VERSION_V1`.
     #[test]
     fn unpack_rejects_unknown_version() {
         let mut blob = vec![0xFFu8]; // unknown version
@@ -151,17 +118,14 @@ mod tests {
             other => panic!("expected ValidationFailed, got {other:?}"),
         }
 
-        // 0x02 also rejected today (post-system-fields shape not yet
-        // emitted; this test pins the reservation).
+        // A nearby version is unknown too; do not accept it as a compatible variant.
         let mut blob_v2 = vec![0x02u8];
         blob_v2.extend_from_slice(&[0u8; NONCE_LEN]);
         blob_v2.extend_from_slice(&[0u8; GCM_TAG_LEN]);
         assert!(unpack(&blob_v2).is_err());
     }
 
-    /// Wire layout is exactly `1 + 12 + len(ct+tag)` bytes — pin the
-    /// invariant so a future change that introduces extra framing
-    /// (sentinel prefix, alignment padding, …) trips here.
+    /// Packing adds only the declared header to the authenticated payload.
     #[test]
     fn wire_size_is_header_plus_payload() {
         let nonce = [0u8; NONCE_LEN];

@@ -1,40 +1,13 @@
-//! The anchor regression, against a REAL PostgreSQL server.
+//! Classify real PostgreSQL role-setup failures at the adapter boundary.
 //!
-//! A creator deploys an `env.db` app and skips `zeroship migrate`. The
-//! per-app role was never created, so `SET LOCAL ROLE "app_<id>_role"` in
-//! the autocommit session setup (`plugin_db::exec`) refuses before any
-//! creator SQL runs. The contextual session-setup classifier turns that
-//! measured failure into a creator-facing provisioning error; generic
-//! PostgreSQL errors remain on `pg_error::classify`.
-//!
-//! This test exists because the discriminator's unit tests in
-//! `backend/pg_error.rs` cannot construct a `compio_postgres::Error`: the
-//! driver exposes no public constructor, so only a live server can synthesise
-//! the measured failure. That also makes this the test that fails if the
-//! contextual session-setup arm is deleted.
-//!
-//! PostgreSQL comes from an owned testcontainer; Docker is required.
-//! Run: `cargo xtask test data --filter 'test(missing_role::)'`
-//!
-//! WHAT THIS TEST DOES NOT CATCH:
-//!   - The HTTP boundary. It asserts the classification and the message
-//!     plugin-db produces, not that the runtime rail lets it through --
-//!     that is `crates/zeroship-runtime/src/core/dispatch.rs`'s
-//!     `schema_not_provisioned_survives_the_5xx_rail_in_both_spellings`
-//!     and its one-variable control.
-//!   - A non-English server. The classifier matches PostgreSQL's
-//!     English primary message; under a translated `lc_messages` this
-//!     test's case would classify `internal` again, and so would
-//!     production. The failure mode is a false NEGATIVE (today's
-//!     behaviour), never a false positive.
-//!   - Any role-missing path that does not go through `SET LOCAL ROLE`.
-//!     Those paths deliberately stay on the generic classifier.
+//! Missing app roles must produce a provisioning error during session setup;
+//! ordinary SQL errors retain generic classification. The fixture uses PostgreSQL’s
+//! English messages. These assertions cover error lowering, not HTTP delivery.
 
 use compio_postgres::NoTls;
 use zeroship_data_orm::backend::pg_error;
 use zeroship_data_orm::error::DbError;
-// `DbError` is data-core's; lowering it to a V8 `OpError` is the ADAPTER's job,
-// so it arrives as a trait from plugin-db rather than an inherent method.
+// The ORM owns database errors; the adapter maps them to V8 operation errors.
 use zeroship_data_v8::op_error::ToOpError;
 
 async fn connect_test_client() -> (

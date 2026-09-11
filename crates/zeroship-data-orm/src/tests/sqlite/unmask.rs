@@ -26,33 +26,15 @@ use zeroship_data_orm::protection::Catalog;
 #[cfg(test)]
 use crate::tests::fixtures::DatabaseFixture;
 
-/// The backend handle the unmask entry points now take as a parameter.
-///
-/// They resolved one themselves, from the isolate's context, until 2026-09-03.
-/// That read is the ADAPTER's and `protection::unmask` is ENGINE, so the resolution
-/// moved to the V8 dispatcher and the value is passed down. These tests drive
-/// the engine directly, so they make the same call the dispatcher makes on
-/// their behalf.
-///
-/// **THIS HELPER IS THE HARNESS PERFORMING THE OPEN, not a witness that
-/// something else performed it.** It is literally `tx_scope::ensure_backend`,
-/// so every `configure_cold_sqlite_unmask_fixture` case that reaches an engine
-/// entry point through it has had its isolate warmed by this line rather than
-/// by the code under test. What that leaves bound is the ATTACH half
-/// (`prepare_unmask_backend` -> `backend.prepare_for_app`); the OPEN half is
-/// bound separately and by name, by the three
-/// `cold_*_open_comes_from_ensure_backend_not_the_fixture` tests below.
+/// Open the fixture backend before calling the ORM directly. This helper warms
+/// the backend; adapter tests cover opening it through a creator operation.
 async fn unmask_backend(host: &Host) -> zeroship_data_orm::backend::BackendHandle {
     host.backend()
         .await
         .expect("the backend the V8 dispatcher would have opened")
 }
 
-/// The route the unmask dispatchers now take, in place of a bare handle.
-///
-/// See the twin in `mask_flip.rs` for why. No fixture that reaches it here
-/// parks a transaction, so every call binds `in_tx = false` and takes the lane
-/// it took before - `op_conn`, on this tier.
+/// Bind a route from the fixture’s backend and current transaction scope.
 async fn unmask_route(host: &Host, app: &str) -> zeroship_data_orm::tx_route::TxRoute {
     zeroship_data_orm::exec::ambient_route_for_tests(app, unmask_backend(host).await)
 }
