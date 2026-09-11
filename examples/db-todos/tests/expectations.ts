@@ -15,8 +15,6 @@ export function assertDeployed(captured: Capture, run: string) {
   expect(object(result("mkT1"))).not.toHaveProperty("userid");
   const second = object(result("mkT2"));
   expect(second).toMatchObject({ title: "walk dog", priority: "medium", done: false, tags: [], version: 1 });
-  expect(typeof second.created_at).toBe("number");
-  expect(String(second.created_at)).toMatch(/^[0-9]{13}$/);
   expect(captured.orphan).not.toHaveProperty("json");
   expect(captured.orphan).toMatchObject({ error: { code: "FOREIGN_KEY_VIOLATION" } });
   expect(captured.dupEmail).toMatchObject({ error: { code: "UNIQUE_VIOLATION", message: expect.any(String) } });

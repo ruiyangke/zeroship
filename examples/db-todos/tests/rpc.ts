@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { setTimeout as sleep } from "node:timers/promises";
+import { assertInsertedTimestamps, assertUpdatedTimestamps, waitForClockAfter } from "./timestamps";
 
 export type Row = Record<string, unknown>;
 export type Capture = Record<string, unknown>;
@@ -49,12 +50,20 @@ export async function capture(base: string, run: string): Promise<Capture> {
   for (const [index, [title, priority, userId]] of [
     ["buy milk", "low", alice], ["walk dog", undefined, alice], ["ship it", "high", alice],
     ["bob task", undefined, bob], ["read book", undefined, alice], ["pay bills", "high", alice],
-  ].entries()) tasks.push(await row(`mkT${index + 1}`, "todos.create", { userId, title, ...(priority ? { priority } : {}) }));
+  ].entries()) {
+    const started = Date.now();
+    const inserted = object(await row(`mkT${index + 1}`, "todos.create", { userId, title, ...(priority ? { priority } : {}) }));
+    assertInsertedTimestamps(inserted, { started, finished: Date.now() });
+    tasks.push(inserted);
+  }
   const first = id(tasks[0]);
   await row("orphan", "todos.create", { userId: "user_doesNotExist0000000", title: "orphan" });
   await row("orphanN", "todos.count", { userId: "user_doesNotExist0000000" });
   await row("dupEmail", "users.seed", { email: `alice-${run}@probe.test`, name: "Dup", handle: `dup_${run}` });
-  await row("getT1", "todos.get", { id: first });
+  const readBack = object(await row("getT1", "todos.get", { id: first }));
+  const original = object(tasks[0]);
+  assert.equal(readBack.created_at, original.created_at, "reading preserves created_at");
+  assert.equal(readBack.updated_at, original.updated_at, "reading preserves updated_at");
   await row("getNone", "todos.get", { id: "todo_0000000000000000000000" });
   await row("countA", "todos.count", { userId: alice });
   await row("list", "todos.list", { userId: alice });
@@ -67,17 +76,15 @@ export async function capture(base: string, run: string): Promise<Capture> {
     assert.equal(typeof page.continueCursor, "string");
     out[key] = JSON.parse(Buffer.from(page.continueCursor as string, "base64").toString("utf8"));
   }
-  await sleep(1_200);
+  const updateStarted = await waitForClockAfter(original.updated_at);
   const updated = object(await row("setDone", "todos.setDone", { id: first, done: true }));
-  await row("archive", "todos.archive", { id: first });
+  assertUpdatedTimestamps(original, updated, { started: updateStarted, finished: Date.now() });
+  const archiveStarted = await waitForClockAfter(updated.updated_at);
+  const archived = object(await row("archive", "todos.archive", { id: first }));
+  assertUpdatedTimestamps(updated, archived, { started: archiveStarted, finished: Date.now() });
   await row("del", "todos.delete", { id: first });
   await row("getDel", "todos.get", { id: first });
   await row("listAfter", "todos.list", { userId: alice });
-  const task = object(tasks[1]);
-  out.tsrel = { digits: String(task.created_at).length, equal: task.created_at === task.updated_at };
-  assert.equal(typeof updated.updated_at, "number"); assert.equal(typeof updated.created_at, "number");
-  out.tsupd = { moved: (updated.updated_at as number) > (updated.created_at as number) };
-  out.tsres = { distinct: new Set(tasks.map((task) => object(task).created_at)).size, inserted: tasks.length };
   const tx = id(await seed("seedTx", "Tx"));
   for (const [label, operation, tag] of [["txCommit", "txCommit", "c"], ["txRoll", "txRollback", "r"], ["txNest", "txNested", "n"]]) {
     await row(label, `todos.${operation}`, { userId: tx, tag: `${tag}${run}` });
