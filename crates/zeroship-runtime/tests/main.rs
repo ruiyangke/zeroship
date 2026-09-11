@@ -228,5 +228,4 @@ mod websocket_attrs;
 mod websocket_close;
 mod websocket_construct;
 mod websocket_e2e;
-mod workflow_dispatch;
 mod ws_auth_identity;
