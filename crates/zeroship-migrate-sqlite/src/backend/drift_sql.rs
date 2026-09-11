@@ -1541,22 +1541,23 @@ mod tests {
     fn recover_inline_mask_sentinel_from_create_text() {
         let sql = "CREATE TABLE \"app\".\"users\" (\
             \"id\" TEXT PRIMARY KEY, \
-            \"ssn\" BYTEA, \
-            \"ssn_masked\" TEXT /* zero-migrate:mask:kind=last4,classification=pii */)";
+            \"__zs_private_ssn\" BLOB, \
+            \"ssn\" TEXT /* zero-migrate:mask:kind=last4,classification=pii */)";
         assert_eq!(
-            recover_inline_sentinel(sql, "ssn_masked").as_deref(),
+            recover_inline_sentinel(sql, "ssn").as_deref(),
             Some("zero-migrate:mask:kind=last4,classification=pii")
         );
+        assert_eq!(recover_inline_sentinel(sql, "__zs_private_ssn"), None);
         // A plain column carries no sentinel.
         assert_eq!(recover_inline_sentinel(sql, "id"), None);
     }
 
     #[test]
     fn recover_inline_enc_sentinel() {
-        let sql = "CREATE TABLE \"t\" (\"secret\" BYTEA /* zero-migrate:enc:randomised:default:string */, \"x\" INTEGER)";
+        let sql = "CREATE TABLE \"t\" (\"secret\" BLOB /* zero-migrate:enc:string */, \"x\" INTEGER)";
         assert_eq!(
             recover_inline_sentinel(sql, "secret").as_deref(),
-            Some("zero-migrate:enc:randomised:default:string")
+            Some("zero-migrate:enc:string")
         );
         // The later column must NOT inherit the earlier column's sentinel.
         assert_eq!(recover_inline_sentinel(sql, "x"), None);
