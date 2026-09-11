@@ -31,7 +31,7 @@
 //!
 //! * The descriptor travels inside the `.zship` the worker executes. It is
 //!   creator-authored, and the worker is the process that runs creator code.
-//! * The sentinels (`zero-migrate:mask:kind=…`, `zero-migrate:enc:<mode>:<keyId>:<wraps>`) and the
+//! * The sentinels (`zero-migrate:mask:kind=…`, `zero-migrate:enc:<keyId>:<wraps>`) and the
 //!   `__zs_raw__<col>` sibling are written by the MIGRATION SERVICE, which does
 //!   not execute creator code, under a migration the diff classifier already
 //!   grades `ChangeKind::MaskRemove` / `ChangeClass::Destructive`.
@@ -274,7 +274,7 @@ mod tests {
     use zeroship_data_sql::catalog::{
         Classification, ColumnInfo, EncryptionMeta, LiveSchema, MaskKind, MaskMeta,
     };
-    use zeroship_data_sql::descriptors::EncryptionMode;
+
     use zeroship_data_sql::value;
 
     fn masked_column() -> ColumnInfo {
@@ -291,7 +291,6 @@ mod tests {
     fn encrypted_column() -> ColumnInfo {
         ColumnInfo {
             encryption: Some(EncryptionMeta {
-                mode: EncryptionMode::Randomised,
                 key_id: "k1".to_string(),
                 wraps: WrappedType::String,
             }),
@@ -384,7 +383,7 @@ mod tests {
             &value!({ "type": "string" })
         ));
         assert!(descriptor_declares_encryption(
-            &value!({ "type": "string", "encrypted": { "mode": "randomised" } })
+            &value!({ "type": "string", "encrypted": {  } })
         ));
         // A non-object `encrypted` is not a declaration; the encryption pass
         // reads it with `as_object()` and skips the column.

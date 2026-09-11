@@ -457,7 +457,7 @@ export interface FieldDescriptorDto {
   vectorMetric?: string
   /** `t.string({ caseSensitive: false })` - only `Some(false)` is meaningful. */
   caseSensitive?: boolean
-  /** The `t.encrypted({ mode, keyId, wraps })` sub-object (verbatim). */
+  /** The `t.encrypted({ keyId, wraps })` sub-object (verbatim). */
   encrypted?: JsonValue
   /** The `.mask({ kind, classification })` sub-object (verbatim). */
   mask?: JsonValue

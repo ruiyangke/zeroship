@@ -437,7 +437,7 @@ mod tests {
         let schema = value!({
             "ssn": {
                 "type": "string",
-                "encrypted": { "mode": "randomised", "keyId": "default", "wraps": "string" },
+                "encrypted": { "keyId": "default", "wraps": "string" },
                 "mask": { "kind": "last4", "classification": "spi" }
             }
         });
@@ -479,7 +479,7 @@ mod tests {
         let schema = value!({
             "ssn": {
                 "type": "string",
-                "encrypted": { "mode": "randomised", "keyId": "default", "wraps": "string" },
+                "encrypted": { "keyId": "default", "wraps": "string" },
                 "mask": { "kind": "last4", "classification": "spi" }
             }
         });
@@ -529,7 +529,7 @@ mod tests {
         let schema = value!({
             "ssn": {
                 "type": "string",
-                "encrypted": { "mode": "randomised", "keyId": "default", "wraps": "string" },
+                "encrypted": { "keyId": "default", "wraps": "string" },
                 "mask": { "kind": "none", "classification": "spi" }
             }
         });
@@ -761,7 +761,7 @@ mod tests {
         let schema = value!({
             "ssn": {
                 "type": "string",
-                "encrypted": { "mode": "randomised", "keyId": "default", "wraps": "string" },
+                "encrypted": { "keyId": "default", "wraps": "string" },
                 "mask": { "kind": "none", "classification": "spi" }
             }
         });

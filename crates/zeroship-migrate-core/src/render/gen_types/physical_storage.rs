@@ -74,7 +74,7 @@ fn masked(name: &str) -> FieldDescriptor {
 
 fn encrypted_and_masked(name: &str) -> FieldDescriptor {
     FieldDescriptor {
-        encrypted: Some(json!({ "mode": "randomised", "keyId": "default", "wraps": "string" })),
+        encrypted: Some(json!({ "keyId": "default", "wraps": "string" })),
         mask: Some(json!({ "kind": "full", "classification": "pii" })),
         ..plain(name)
     }

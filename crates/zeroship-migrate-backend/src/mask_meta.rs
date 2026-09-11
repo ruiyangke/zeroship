@@ -18,10 +18,8 @@
 //! vendor rather than a vendor's spelling, and stays in the engine by the boundary
 //! rule `zeroship_migrate::render::backends` states at length.
 
-use crate::descriptors::EncryptionMode;
-
 /// Encryption metadata attached to a `ColumnInfo` when
-/// the SDK declares the column with `t.encrypted({ mode, keyId, wraps })`.
+/// the SDK declares the column with `t.encrypted({ keyId, wraps })`.
 ///
 /// Populated by schema introspection:
 /// - **PG**: from `<meta>.encrypted_columns` rows written alongside the table
@@ -29,17 +27,12 @@ use crate::descriptors::EncryptionMode;
 ///   the platform migration service; runtime data-plane code only consumes
 ///   those rows.
 /// - **SQLite**: from a sentinel CHECK comment
-///   `/* zero-migrate:enc:{mode}:{keyId}:{wraps} */` parsed out of
+///   `/* zero-migrate:enc:{keyId}:{wraps} */` parsed out of
 ///   `sqlite_master.sql` (same regex-on-DDL pattern used for
 ///   vector dims; a sidecar `__zero_migrate_schema_meta` would be the upgrade path
 ///   and does not exist).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EncryptionMeta {
-    /// Encryption mode declared by the SDK.
-    /// `Randomised` (default, fail-safe) or `Deterministic` (enables
-    /// B-tree equality lookups; carries the standard deterministic
-    /// leak). See `EncryptionMode`.
-    pub mode: EncryptionMode,
     /// Key id selecting the per-platform root from
     /// a per-key env var (`COLUMN_KEY_<KEYID>`) / a `<admin>.column_keys` table.
     /// Defaults to `"default"` when the SDK caller omits the field.

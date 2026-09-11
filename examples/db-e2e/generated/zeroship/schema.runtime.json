@@ -551,7 +551,6 @@
         "contactEmail": {
           "type": "string",
           "encrypted": {
-            "mode": "randomised",
             "keyId": "default",
             "wraps": "string"
           },
@@ -560,8 +559,8 @@
             "classification": "pii"
           },
           "readable": true,
-          "filterable": true,
-          "sortable": true,
+          "filterable": false,
+          "sortable": false,
           "projectable": true,
           "storage": {
             "valueColumn": "contactEmail",
@@ -574,7 +573,6 @@
         "ssn": {
           "type": "string",
           "encrypted": {
-            "mode": "randomised",
             "keyId": "default",
             "wraps": "string"
           },
@@ -583,8 +581,8 @@
             "classification": "pii"
           },
           "readable": true,
-          "filterable": true,
-          "sortable": true,
+          "filterable": false,
+          "sortable": false,
           "projectable": true,
           "storage": {
             "valueColumn": "ssn",

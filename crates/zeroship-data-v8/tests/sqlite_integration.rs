@@ -26,18 +26,18 @@ use std::path::PathBuf;
 
 use std::rc::Rc;
 
-use zeroship_data_orm::cdc::ChangeOp;
-use zeroship_data_orm::binding::DbBinding;
-use zeroship_data_orm::error::DbError;
 use zeroship_data_orm::backend::sqlite::SqliteBackend;
 use zeroship_data_orm::backend::sqlite::reservation::{CancelCleanup, TerminalOutcome};
 use zeroship_data_orm::backend::sqlite::session::TerminalIntent;
 use zeroship_data_orm::backend::{BackendHandle, LockManager, LockScope};
 use zeroship_data_orm::backend_selection::new_sqlite_backend;
+use zeroship_data_orm::binding::DbBinding;
+use zeroship_data_orm::cdc::ChangeOp;
+use zeroship_data_orm::error::DbError;
 // The bounded-retry surface is the policy extension trait, not `LockManager`.
 use zeroship_data_orm::cdc::broker::{Subscription, SubscriptionMessage, subscribe};
-use zeroship_data_sql::compile::raw_column_name;
 use zeroship_data_orm::lock_policy::BoundedLockAcquire;
+use zeroship_data_sql::compile::raw_column_name;
 
 /// Spin up a fresh `SqliteBackend` rooted at a per-test temp dir.
 ///
@@ -3030,26 +3030,7 @@ fn users_encrypted_ssn_schema(key_id: &str) -> zeroship_data_sql::value::Value {
         "name": {"type": "string", "required": true},
         "ssn": {
             "type": "string",
-            "encrypted": {"mode": "randomised", "keyId": key_id, "wraps": "string"},
-            "mask": {"kind": "last4", "classification": "spi"}
-        }
-    })
-}
-
-/// As above, plus `email` itself deterministically encrypted - the shape the
-/// deterministic-conflict upsert needs (a unique index over ciphertext).
-fn users_deterministic_email_schema(key_id: &str) -> zeroship_data_sql::value::Value {
-    zeroship_data_sql::value!({
-        "email": {
-            "type": "string",
-            "required": true,
-            "unique": true,
-            "encrypted": {"mode": "deterministic", "keyId": key_id, "wraps": "string"}
-        },
-        "name": {"type": "string", "required": true},
-        "ssn": {
-            "type": "string",
-            "encrypted": {"mode": "randomised", "keyId": key_id, "wraps": "string"},
+            "encrypted": {"keyId": key_id, "wraps": "string"},
             "mask": {"kind": "last4", "classification": "spi"}
         }
     })
@@ -3064,7 +3045,7 @@ fn users_encrypted_secret_schema(key_id: &str) -> zeroship_data_sql::value::Valu
         "name": {"type": "string", "required": true},
         "secret": {
             "type": "string",
-            "encrypted": {"mode": "randomised", "keyId": key_id, "wraps": "string"}
+            "encrypted": {"keyId": key_id, "wraps": "string"}
         }
     })
 }
@@ -3131,7 +3112,7 @@ fn users_encrypted_ssn_ddl(key_id: &str) -> String {
         r#"CREATE TABLE IF NOT EXISTS "default"."users" ({SYSTEM_COLUMNS_SQLITE},
   "email" TEXT NOT NULL,
   "name" TEXT NOT NULL,
-  "{raw_ssn}" BLOB /* zero-migrate:enc:randomised:{key_id}:string */,
+  "{raw_ssn}" BLOB /* zero-migrate:enc:{key_id}:string */,
   "ssn" TEXT /* zero-migrate:mask:kind=last4,classification=spi */
 );
 {}
@@ -3147,31 +3128,9 @@ fn users_encrypted_secret_ddl(key_id: &str) -> String {
         r#"CREATE TABLE IF NOT EXISTS "default"."users" ({SYSTEM_COLUMNS_SQLITE},
   "email" TEXT NOT NULL,
   "name" TEXT NOT NULL,
-  "secret" BLOB /* zero-migrate:enc:randomised:{key_id}:string */
+  "secret" BLOB /* zero-migrate:enc:{key_id}:string */
 );
 {}
-CREATE UNIQUE INDEX IF NOT EXISTS "default"."users_email_key" ON "users" ("email");
-"#,
-        system_indexes_sqlite("default", "users")
-    )
-}
-
-/// Raw DDL matching [`users_deterministic_email_schema`].
-///
-/// `email` is deterministically encrypted AND unique, so it carries BOTH a plain
-/// lookup index and the unique constraint over ciphertext - that pair is what the
-/// deterministic-conflict upsert needs, and the reason this schema exists.
-fn users_deterministic_email_ddl(key_id: &str) -> String {
-    let raw_ssn = raw_column_name("ssn");
-    format!(
-        r#"CREATE TABLE IF NOT EXISTS "default"."users" ({SYSTEM_COLUMNS_SQLITE},
-  "email" BLOB /* zero-migrate:enc:deterministic:{key_id}:string */ NOT NULL,
-  "name" TEXT NOT NULL,
-  "{raw_ssn}" BLOB /* zero-migrate:enc:randomised:{key_id}:string */,
-  "ssn" TEXT /* zero-migrate:mask:kind=last4,classification=spi */
-);
-{}
-CREATE INDEX IF NOT EXISTS "default"."users_email_idx" ON "users" ("email");
 CREATE UNIQUE INDEX IF NOT EXISTS "default"."users_email_key" ON "users" ("email");
 "#,
         system_indexes_sqlite("default", "users")
@@ -3248,8 +3207,8 @@ fn insert_many_encrypts_ciphertext_before_sqlite_storage() {
         use std::collections::HashMap;
 
         use zeroship_data_orm::backend::sqlite::session::TypedCell;
-        use zeroship_data_sql::compile::{SqlDialect, build_insert_many_with_dialect};
         use zeroship_data_orm::encryption;
+        use zeroship_data_sql::compile::{SqlDialect, build_insert_many_with_dialect};
 
         let key_id = "c1_insert_many";
         let _keys = with_root_key("c1_insert_many", &"d".repeat(64));
@@ -3259,7 +3218,7 @@ fn insert_many_encrypts_ciphertext_before_sqlite_storage() {
             "name": { "type": "string" },
             "ssn": {
                 "type": "string",
-                "encrypted": { "mode": "randomised", "keyId": key_id, "wraps": "string" },
+                "encrypted": { "keyId": key_id, "wraps": "string" },
                 "mask": { "kind": "last4", "classification": "spi" }
             }
         });
@@ -3401,7 +3360,7 @@ fn insert_many_encrypts_ciphertext_before_sqlite_storage() {
             let plaintext = zeroship_data_orm::encryption::aead::decrypt(
                 &key,
                 &stored_blob,
-                &encryption::canonical_aad(collection, "ssn", Some(id.as_bytes())),
+                &encryption::canonical_aad(collection, "ssn", id.as_bytes()),
             )
             .expect("decrypt stored blob");
             assert!(
@@ -3662,146 +3621,13 @@ const _procedures = { upsertConflict };
         let plaintext = zeroship_data_orm::encryption::aead::decrypt(
             &key,
             &stored_blob,
-            &encryption::canonical_aad("users", "ssn", Some(first_id.as_bytes())),
+            &encryption::canonical_aad("users", "ssn", first_id.as_bytes()),
         )
         .expect("decrypt stored conflict ciphertext");
         assert_eq!(
             plaintext,
             b"987-65-4321".to_vec(),
             "stored ciphertext must decrypt to the updated plaintext"
-        );
-    });
-}
-
-#[test]
-fn upsert_conflict_with_deterministic_key_keeps_randomised_ciphertext_readable_sqlite_runtime() {
-    let key_id = "c2_upsert_det_conflict_runtime";
-    let _keys = with_root_key("c2_upsert_det_conflict_runtime", &"6".repeat(64));
-
-    run(async {
-        use zeroship_data_orm::backend::sqlite::session::TypedCell;
-        use zeroship_data_orm::encryption;
-
-        let dir = tempfile::tempdir().expect("tempdir");
-        let schema = users_deterministic_email_schema(key_id);
-        apply_schema_ahead_of_runtime(&dir, &users_deterministic_email_ddl(key_id));
-        let source = sqlite_runtime_source(
-            "users",
-            &schema,
-            r#"
-async function upsertConflict(_input, _ctx) {
-    const coll = env.db.collection(COLLECTION);
-    const first = await coll.upsert(
-        {
-            email: "alice@example.com",
-            name: "Alice",
-            ssn: "123-45-6789"
-        },
-        { conflictFields: ["email"] },
-    );
-    const second = await coll.upsert(
-        {
-            email: "alice@example.com",
-            name: "Alice Updated",
-            ssn: "987-65-4321"
-        },
-        { conflictFields: ["email"] },
-    );
-    return { first, second };
-}
-upsertConflict.config = { kind: "action" };
-
-const _procedures = { upsertConflict };
-"#,
-        );
-
-        let result = dispatch_sqlite_runtime(&dir, &source, "upsertConflict");
-        let payload = parity::extract_json(&result);
-        let first_id = payload["first"]["id"].as_str().expect("generated id");
-        let second = payload.get("second").expect("second response row");
-        assert_eq!(
-            second.get("id").and_then(|v| v.as_str()),
-            Some(first_id),
-            "deterministic conflict probe must rewrite to the existing row id"
-        );
-
-        let backend = new_sqlite_backend(
-            PathBuf::from(dir.path()),
-            zeroship_data_v8::testing::isolate_key_source(),
-        )
-        .expect("open backend");
-        backend
-            .attach_app_file("default")
-            .await
-            .expect("ensure default schema");
-        let client = backend
-            .fixture_session("default")
-            .await
-            .expect("acquire client");
-        let raw_ssn = raw_column_name("ssn");
-        let typed = client
-            .query_typed(
-                &format!(
-                    r#"SELECT id, email, "{raw_ssn}", ssn
-                   FROM "default"."users""#
-                ),
-                &[],
-            )
-            .await
-            .expect("SELECT typed conflict row");
-        assert_eq!(typed.rows.len(), 1, "exactly one row after conflict upsert");
-
-        let row = &typed.rows[0];
-        let row_id = match &row[0] {
-            TypedCell::Text(id) => id.clone(),
-            other => panic!("id must be TEXT, got {other:?}"),
-        };
-        let email_blob = match &row[1] {
-            TypedCell::Blob(bytes) => bytes.clone(),
-            other => panic!("email must be stored as deterministic ciphertext BLOB, got {other:?}"),
-        };
-        let ssn_blob = match &row[2] {
-            TypedCell::Blob(bytes) => bytes.clone(),
-            other => {
-                panic!("{raw_ssn} must be stored as randomised ciphertext BLOB, got {other:?}")
-            }
-        };
-        match &row[3] {
-            TypedCell::Text(masked) => {
-                assert_eq!(masked, "***-**-4321");
-                // The field's own column (`ssn`) must hold the mask, never
-                // the plaintext the conflict-update wrote.
-                assert_ne!(
-                    masked, "987-65-4321",
-                    "ssn (field's own column) must not hold plaintext"
-                );
-            }
-            other => panic!("ssn (the masked column) must be TEXT, got {other:?}"),
-        }
-
-        let key = backend
-            .key_store()
-            .resolve("default", key_id)
-            .await
-            .expect("resolve key");
-        let email_plaintext = zeroship_data_orm::encryption::aead::decrypt(
-            &key,
-            &email_blob,
-            &encryption::canonical_aad("users", "email", None),
-        )
-        .expect("decrypt deterministic conflict key");
-        assert_eq!(email_plaintext, b"alice@example.com".to_vec());
-
-        let ssn_plaintext = zeroship_data_orm::encryption::aead::decrypt(
-            &key,
-            &ssn_blob,
-            &encryption::canonical_aad("users", "ssn", Some(row_id.as_bytes())),
-        )
-        .expect("decrypt conflict-updated randomised sibling");
-        assert_eq!(
-            ssn_plaintext,
-            b"987-65-4321".to_vec(),
-            "randomised sibling must be readable against the existing row id"
         );
     });
 }
@@ -3912,7 +3738,7 @@ const _procedures = { seed, updateByEmail };
         let plaintext = zeroship_data_orm::encryption::aead::decrypt(
             &key,
             &stored_blob,
-            &encryption::canonical_aad("users", "ssn", Some(row_id.as_bytes())),
+            &encryption::canonical_aad("users", "ssn", row_id.as_bytes()),
         )
         .expect("decrypt updated ciphertext");
         assert_eq!(
@@ -4066,7 +3892,7 @@ const _procedures = { seed, updateManyByName };
             let plaintext = zeroship_data_orm::encryption::aead::decrypt(
                 &key,
                 &stored_blob,
-                &encryption::canonical_aad("users", "ssn", Some(row_id.as_bytes())),
+                &encryption::canonical_aad("users", "ssn", row_id.as_bytes()),
             )
             .expect("decrypt updated ciphertext");
             assert_eq!(
@@ -4779,7 +4605,7 @@ const _procedures = { seed, nestedCasUpdateMany };
 
 /// **Gate #1 (SQLite half)**: round-trip an encrypted string
 /// column under Randomised mode. Insert a row with `ssn` declared
-/// `t.encrypted({ mode: "randomised" })`, read it back via the SQLite
+/// `t.encrypted({  })`, read it back via the SQLite
 /// path, expect the plaintext to recover.
 ///
 /// Each SQLite test uses a UNIQUE `keyId` so concurrent tests don't
@@ -4789,7 +4615,6 @@ const _procedures = { seed, nestedCasUpdateMany };
 /// in-crate `encryption::keys::tests` use.
 #[test]
 fn encrypted_column_round_trip_sqlite_randomised() {
-    use zeroship_data_orm::backend::EncryptionMode;
     use zeroship_data_orm::encryption;
     let key_id = "p5_sqlite_rt_rand";
     let _keys = with_root_key("p5_sqlite_rt_rand", &"a".repeat(64));
@@ -4816,14 +4641,9 @@ fn encrypted_column_round_trip_sqlite_randomised() {
             .await
             .expect("resolve_key");
         let plaintext = b"123-45-6789";
-        let aad = encryption::canonical_aad("enc_notes", "ssn", Some(b"row_a"));
-        let ct = zeroship_data_orm::encryption::aead::encrypt(
-            &key,
-            EncryptionMode::Randomised,
-            plaintext,
-            &aad,
-        )
-        .expect("encrypt");
+        let aad = encryption::canonical_aad("enc_notes", "ssn", b"row_a");
+        let ct =
+            zeroship_data_orm::encryption::aead::encrypt(&key, plaintext, &aad).expect("encrypt");
 
         // Bind the ciphertext as an inline X'...' BLOB literal. The
         // session actor's `[&str]` params lane only carries TEXT; SQL
@@ -4867,206 +4687,6 @@ fn encrypted_column_round_trip_sqlite_randomised() {
     });
 }
 
-/// **Gate #1 (SQLite half), deterministic variant**.
-#[test]
-fn encrypted_column_round_trip_sqlite_deterministic() {
-    use zeroship_data_orm::backend::EncryptionMode;
-    use zeroship_data_orm::encryption;
-    let key_id = "p5_sqlite_rt_det";
-    let _keys = with_root_key("p5_sqlite_rt_det", &"b".repeat(64));
-    run(async {
-        let (backend, _dir) = fresh_backend();
-        backend
-            .attach_app_file("app_demo")
-            .await
-            .expect("ensure_app_schema");
-        backend
-            .execute_fixture(
-                "CREATE TABLE \"app_demo\".\"enc_notes\" (\
-                     id  TEXT PRIMARY KEY, \
-                     ssn BLOB\
-                 )",
-                &[],
-            )
-            .await
-            .expect("CREATE TABLE enc_notes");
-
-        let key = backend
-            .key_store()
-            .resolve("app1", key_id)
-            .await
-            .expect("resolve_key");
-        let plaintext = b"DETERMINISTIC-PLAINTEXT";
-        // Deterministic AAD: row_pk omitted (Camp A).
-        let aad = encryption::canonical_aad("enc_notes", "ssn", None);
-        let ct = zeroship_data_orm::encryption::aead::encrypt(
-            &key,
-            EncryptionMode::Deterministic,
-            plaintext,
-            &aad,
-        )
-        .expect("encrypt");
-
-        let blob_lit = sqlite_blob_literal(&ct);
-        let insert_sql =
-            format!("INSERT INTO \"app_demo\".\"enc_notes\" (id, ssn) VALUES (?, {blob_lit})");
-        backend
-            .execute_fixture(&insert_sql, &[("row_a").into()])
-            .await
-            .expect("INSERT");
-
-        let client = backend
-            .fixture_session("app_demo")
-            .await
-            .expect("acquire client");
-        let rows = client
-            .query(
-                "SELECT hex(ssn) FROM \"app_demo\".\"enc_notes\" WHERE id = ?",
-                &["row_a"],
-            )
-            .await
-            .expect("SELECT");
-        let hex_str = rows[0][0].clone().expect("ssn must be present");
-        let raw: Vec<u8> = (0..hex_str.len())
-            .step_by(2)
-            .map(|i| u8::from_str_radix(&hex_str[i..i + 2], 16).unwrap())
-            .collect();
-
-        let recovered =
-            zeroship_data_orm::encryption::aead::decrypt(&key, &raw, &aad).expect("decrypt");
-        assert_eq!(recovered, plaintext);
-    });
-}
-
-/// **Gate #2 (SQLite half), CRITICAL #1 fence (SQLite half)**.
-///
-/// Insert 100 rows under deterministic mode with five distinct plaintexts
-/// (so equality groups overlap), query by ciphertext equality, assert
-/// the matching set. Also asserts that two identical plaintexts produce
-/// byte-identical ciphertexts — the defining deterministic property
-/// that makes the B-tree equality lookup sound.
-///
-/// The `EXPLAIN QUERY PLAN` SEARCH/index-use assertion is omitted here
-/// because creating a B-tree index on a SQLite BLOB column is
-/// supported but the planner's choice between SCAN and SEARCH depends
-/// on table size + ANALYZE state; pinning a specific shape would make
-/// the test flaky across SQLite versions. The matching-set assertion
-/// alone exercises the equality-lookup contract.
-#[test]
-fn deterministic_encrypted_equality_via_index_sqlite() {
-    use zeroship_data_orm::backend::EncryptionMode;
-    use zeroship_data_orm::encryption;
-    let key_id = "p5_sqlite_det_eq";
-    let _keys = with_root_key("p5_sqlite_det_eq", &"c".repeat(64));
-    run(async {
-        let (backend, _dir) = fresh_backend();
-        backend
-            .attach_app_file("app_demo")
-            .await
-            .expect("ensure_app_schema");
-        backend
-            .execute_fixture(
-                "CREATE TABLE \"app_demo\".\"enc_notes\" (\
-                     id  TEXT PRIMARY KEY, \
-                     ssn BLOB\
-                 )",
-                &[],
-            )
-            .await
-            .expect("CREATE TABLE enc_notes");
-        backend
-            .execute_fixture(
-                "CREATE INDEX \"app_demo\".\"enc_notes_ssn_idx\" \
-                 ON \"enc_notes\"(ssn)",
-                &[],
-            )
-            .await
-            .expect("CREATE INDEX");
-
-        let key = backend
-            .key_store()
-            .resolve("app1", key_id)
-            .await
-            .expect("resolve_key");
-
-        // Five distinct plaintexts; 100 rows total. The expected
-        // equality group for "P0" is 20 rows (0..100 step 5).
-        let plaintexts = [
-            &b"P0-shared"[..],
-            &b"P1-distinct"[..],
-            &b"P2-distinct"[..],
-            &b"P3-distinct"[..],
-            &b"P4-distinct"[..],
-        ];
-        let aad = encryption::canonical_aad("enc_notes", "ssn", None);
-        let ciphertexts: Vec<Vec<u8>> = plaintexts
-            .iter()
-            .map(|p| {
-                zeroship_data_orm::encryption::aead::encrypt(
-                    &key,
-                    EncryptionMode::Deterministic,
-                    p,
-                    &aad,
-                )
-                .expect("encrypt")
-            })
-            .collect();
-
-        // Defining deterministic property: re-encrypt P0 → same bytes.
-        let p0_again = zeroship_data_orm::encryption::aead::encrypt(
-            &key,
-            EncryptionMode::Deterministic,
-            plaintexts[0],
-            &aad,
-        )
-        .expect("re-encrypt P0");
-        assert_eq!(
-            ciphertexts[0], p0_again,
-            "deterministic mode must produce byte-identical ciphertext for the same plaintext"
-        );
-
-        // Insert 100 rows; row N gets plaintexts[N % 5].
-        for i in 0..100usize {
-            let ct = &ciphertexts[i % 5];
-            let blob_lit = sqlite_blob_literal(ct);
-            let id = format!("row_{i:03}");
-            let sql =
-                format!("INSERT INTO \"app_demo\".\"enc_notes\" (id, ssn) VALUES (?, {blob_lit})");
-            backend
-                .execute_fixture(&sql, &[(id.as_str()).into()])
-                .await
-                .expect("INSERT");
-        }
-
-        // Equality lookup on P0's ciphertext should match exactly 20
-        // rows (0, 5, 10, ..., 95).
-        let client = backend
-            .fixture_session("app_demo")
-            .await
-            .expect("acquire client");
-        let p0_lit = sqlite_blob_literal(&ciphertexts[0]);
-        let count_sql =
-            format!("SELECT COUNT(*) FROM \"app_demo\".\"enc_notes\" WHERE ssn = {p0_lit}");
-        let rows = client.query(&count_sql, &[]).await.expect("SELECT COUNT");
-        let n: i64 = rows[0][0]
-            .as_deref()
-            .and_then(|s| s.parse().ok())
-            .expect("count must parse");
-        assert_eq!(
-            n, 20,
-            "equality on shared ciphertext must match every 5th row"
-        );
-
-        // P1's ciphertext should also match 20 rows.
-        let p1_lit = sqlite_blob_literal(&ciphertexts[1]);
-        let count_sql =
-            format!("SELECT COUNT(*) FROM \"app_demo\".\"enc_notes\" WHERE ssn = {p1_lit}");
-        let rows = client.query(&count_sql, &[]).await.expect("SELECT COUNT");
-        let n: i64 = rows[0][0].as_deref().and_then(|s| s.parse().ok()).unwrap();
-        assert_eq!(n, 20);
-    });
-}
-
 /// **§13 Camp A fence (SQLite half), mirror of the PG test
 /// `encrypted_randomised_row_swap_rejected`**. Insert two Randomised
 /// rows; UPDATE swaps their ciphertexts; reading row B with row B's
@@ -5074,7 +4694,6 @@ fn deterministic_encrypted_equality_via_index_sqlite() {
 /// assertion for the row-PK-in-AAD policy.
 #[test]
 fn randomised_ciphertext_row_swap_rejected_sqlite() {
-    use zeroship_data_orm::backend::EncryptionMode;
     use zeroship_data_orm::encryption;
     let key_id = "p5_sqlite_row_swap";
     let _keys = with_root_key("p5_sqlite_row_swap", &"d".repeat(64));
@@ -5099,16 +4718,14 @@ fn randomised_ciphertext_row_swap_rejected_sqlite() {
         // Insert row A and row B, each with its OWN AAD (binds row_pk).
         let ct_a = zeroship_data_orm::encryption::aead::encrypt(
             &key,
-            EncryptionMode::Randomised,
             b"sensitive-A",
-            &encryption::canonical_aad("enc_notes", "ssn", Some(b"row_a")),
+            &encryption::canonical_aad("enc_notes", "ssn", b"row_a"),
         )
         .unwrap();
         let ct_b = zeroship_data_orm::encryption::aead::encrypt(
             &key,
-            EncryptionMode::Randomised,
             b"sensitive-B",
-            &encryption::canonical_aad("enc_notes", "ssn", Some(b"row_b")),
+            &encryption::canonical_aad("enc_notes", "ssn", b"row_b"),
         )
         .unwrap();
         for (id, ct) in [("row_a", &ct_a), ("row_b", &ct_b)] {
@@ -5143,7 +4760,7 @@ fn randomised_ciphertext_row_swap_rejected_sqlite() {
             .step_by(2)
             .map(|i| u8::from_str_radix(&hex_str[i..i + 2], 16).unwrap())
             .collect();
-        let aad_b = encryption::canonical_aad("enc_notes", "ssn", Some(b"row_b"));
+        let aad_b = encryption::canonical_aad("enc_notes", "ssn", b"row_b");
         let err = zeroship_data_orm::encryption::aead::decrypt(&key, &raw, &aad_b)
             .expect_err("row-swap must fail AAD verification");
         match err {
@@ -5165,7 +4782,6 @@ fn randomised_ciphertext_row_swap_rejected_sqlite() {
 /// decryption result).
 #[test]
 fn cross_backend_ciphertext_decrypt_via_shared_key() {
-    use zeroship_data_orm::backend::EncryptionMode;
     use zeroship_data_orm::encryption;
     let key_id = "p5_sqlite_cross";
     let _keys = with_root_key("p5_sqlite_cross", &"e".repeat(64));
@@ -5181,17 +4797,11 @@ fn cross_backend_ciphertext_decrypt_via_shared_key() {
         let key_b = backend_b.key_store().resolve(app_id, key_id).await.unwrap();
         // The derived halves must match — same root + same app_id.
         assert_eq!(key_a.k_enc, key_b.k_enc);
-        assert_eq!(key_a.k_siv, key_b.k_siv);
 
         let plaintext = b"cross-instance-payload";
-        let aad = encryption::canonical_aad("enc_notes", "ssn", Some(b"row_a"));
-        let ct = zeroship_data_orm::encryption::aead::encrypt(
-            &key_a,
-            EncryptionMode::Randomised,
-            plaintext,
-            &aad,
-        )
-        .expect("encrypt on A");
+        let aad = encryption::canonical_aad("enc_notes", "ssn", b"row_a");
+        let ct = zeroship_data_orm::encryption::aead::encrypt(&key_a, plaintext, &aad)
+            .expect("encrypt on A");
 
         // Decrypt the SAME ciphertext on backend_b with backend_b's
         // resolved key. Must round-trip.
@@ -5211,11 +4821,11 @@ fn cross_backend_ciphertext_decrypt_via_shared_key() {
 /// columns.
 #[test]
 fn encrypted_column_e2e_crud_round_trip_sqlite() {
+    use zeroship_data_orm::backend::sqlite::session::TypedCell;
     use zeroship_data_orm::fixtures::DatabaseFixture;
     use zeroship_data_orm::protection::encryption_pass::{
         decrypt_row_on_read, encrypt_row_on_write,
     };
-    use zeroship_data_orm::backend::sqlite::session::TypedCell;
     use zeroship_data_sql::compile::{SqlDialect, build_insert_with_dialect};
 
     let _keys = with_root_key("p5_e2e_crud", &"c".repeat(64));
@@ -5248,7 +4858,6 @@ fn encrypted_column_e2e_crud_round_trip_sqlite() {
             "ssn": {
                 "type": "string",
                 "encrypted": {
-                    "mode": "randomised",
                     "keyId": "p5_e2e_crud",
                     "wraps": "string",
                 },
@@ -5660,7 +5269,7 @@ fn aliased_select_skips_kind_none_sqlite() {
     let schema = zeroship_data_sql::value!({
         "ssn": {
             "type": "string",
-            "encrypted": { "mode": "randomised", "keyId": "default", "wraps": "string" },
+            "encrypted": { "keyId": "default", "wraps": "string" },
             "mask": { "kind": "none", "classification": "spi" }
         },
         "name": { "type": "string" }
@@ -6449,7 +6058,6 @@ fn cold_unmask_with_auto_actor_attaches_before_read() {
         "ssn": {
             "type": "string",
             "encrypted": {
-                "mode": "randomised",
                 "keyId": "p55_pr4_auto",
                 "wraps": "string",
             },
@@ -6612,7 +6220,6 @@ fn unmask_with_user_actor_returns_forbidden_audit_logged() {
         "ssn": {
             "type": "string",
             "encrypted": {
-                "mode": "randomised",
                 "keyId": "p55_pr4_user",
                 "wraps": "string",
             },
@@ -6872,7 +6479,6 @@ fn unmask_with_user_role_in_policy_returns_plaintext() {
         "email": {
             "type": "string",
             "encrypted": {
-                "mode": "randomised",
                 "keyId": "p55_pr5_grant",
                 "wraps": "string",
             },
@@ -8167,8 +7773,8 @@ fn inserting_a_row_without_user_fields_succeeds_via_system_fields_only() {
 /// up V8 — exercises the SQL builder + SQLite engine round-trip.
 #[test]
 fn insert_end_to_end_populates_system_fields_sqlite() {
-    use zeroship_data_sql::compile::{SqlDialect, build_insert_with_dialect};
     use zeroship_data_orm::crud::system_fields_pass::apply_system_fields_on_insert;
+    use zeroship_data_sql::compile::{SqlDialect, build_insert_with_dialect};
 
     run(async {
         let (backend, _dir) = fresh_backend();
@@ -8298,8 +7904,8 @@ fn insert_end_to_end_populates_system_fields_sqlite() {
 /// PG-only path until the cross-app FK rework lands.
 #[test]
 fn insert_with_fk_uses_text_keys_end_to_end_sqlite() {
-    use zeroship_data_sql::compile::{SqlDialect, build_insert_with_dialect};
     use zeroship_data_orm::crud::system_fields_pass::apply_system_fields_on_insert;
+    use zeroship_data_sql::compile::{SqlDialect, build_insert_with_dialect};
 
     run(async {
         let (backend, _dir) = fresh_backend();
@@ -10860,3 +10466,29 @@ use zeroship_data_orm::fixtures::DatabaseFixture;
 
 #[allow(unused_imports)]
 use zeroship_data_orm::search::Search;
+
+#[test]
+fn encrypted_conflict_target_is_refused_sqlite_runtime() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let schema = users_encrypted_ssn_schema("unused");
+    apply_schema_ahead_of_runtime(&dir, &users_encrypted_ssn_ddl("unused"));
+    let source = sqlite_runtime_source(
+        "users",
+        &schema,
+        r#"
+async function rejectConflict() {
+  try {
+    await env.db.collection(COLLECTION).upsert(
+      { email: "a@example.com", name: "Alice", ssn: "secret" },
+      { conflictFields: ["ssn"] },
+    );
+    return { accepted: true };
+  } catch (error) { return { code: error.code }; }
+}
+rejectConflict.config = { kind: "action" };
+const _procedures = { rejectConflict };
+"#,
+    );
+    let result = parity::extract_json(&dispatch_sqlite_runtime(&dir, &source, "rejectConflict"));
+    assert_eq!(result["code"], "encrypted_conflict_field", "{result}");
+}

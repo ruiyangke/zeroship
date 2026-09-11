@@ -4,8 +4,8 @@ use super::*;
 fn fields() -> Value {
     value!({
         "label":{"type":"string"},
-        "random":{"type":"number","encrypted":{"mode":"randomised","keyId":"update_fixture","wraps":"number"}},
-        "deterministic":{"type":"number","encrypted":{"mode":"deterministic","keyId":"update_fixture","wraps":"number"}},
+        "random":{"type":"number","encrypted":{"keyId":"update_fixture","wraps":"number"}},
+        "second_secret":{"type":"number","encrypted":{"keyId":"update_fixture","wraps":"number"}},
         "masked":{"type":"number","mask":{"kind":"full","classification":"spi"}},
         "plain":{"type":"number","mask":{"kind":"none","classification":"spi"}}
     })
@@ -36,14 +36,14 @@ async fn postgres_updates_refuse_operations_on_protected_storage() {
 async fn exercise_protected_updates(db: &Database) {
     let records = db.collection("records").unwrap();
     records
-        .insert(value!({"label":"original","random":10,"deterministic":20,"masked":30,"plain":40}))
+        .insert(value!({"label":"original","random":10,"second_secret":20,"masked":30,"plain":40}))
         .await
         .unwrap();
     let Output::Rows { rows: before, .. } = records.find(value!({}), value!({})).await.unwrap()
     else {
         panic!("find must return rows")
     };
-    for field in ["random", "deterministic", "masked"] {
+    for field in ["random", "second_secret", "masked"] {
         for operator in ["$inc", "$dec", "$mul", "$push", "$pull", "$addToSet"] {
             for many in [false, true] {
                 for label in ["missing", "original"] {
@@ -109,7 +109,7 @@ async fn exercise_protected_updates(db: &Database) {
         records
             .update(
                 value!({}),
-                value!({"$set":{"random":11,"deterministic":21,"masked":31},"plain":{"$inc":2}}),
+                value!({"$set":{"random":11,"second_secret":21,"masked":31},"plain":{"$inc":2}}),
             )
             .await?;
         Ok(())
@@ -120,7 +120,7 @@ async fn exercise_protected_updates(db: &Database) {
         panic!("find must return rows")
     };
     assert_eq!(rows[0]["random"].as_f64(), Some(11.0));
-    assert_eq!(rows[0]["deterministic"].as_f64(), Some(21.0));
+    assert_eq!(rows[0]["second_secret"].as_f64(), Some(21.0));
     assert_eq!(rows[0]["plain"].as_f64(), Some(42.0));
     assert_eq!(rows[0]["version"].as_i64(), Some(2));
 }

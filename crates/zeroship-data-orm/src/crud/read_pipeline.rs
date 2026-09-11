@@ -276,7 +276,6 @@ mod tests {
                 "secret": {
                     "type": "string",
                     "encrypted": {
-                        "mode": "randomised",
                         "keyId": "default",
                         "wraps": "string"
                     },

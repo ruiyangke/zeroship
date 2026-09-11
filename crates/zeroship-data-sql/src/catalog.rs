@@ -132,21 +132,16 @@ impl Default for ColumnInfo {
 }
 
 /// Encryption metadata attached to a [`ColumnInfo`] when
-/// the SDK declares the column with `t.encrypted({ mode, keyId, wraps })`.
+/// the SDK declares the column with `t.encrypted({ keyId, wraps })`.
 ///
 /// Populated by schema introspection:
 /// - **PG**: from encryption metadata emitted alongside the table create.
 /// - **SQLite**: from a sentinel CHECK comment
-///   `/* zero-migrate:enc:{mode}:{keyId}:{wraps} */` parsed out of
+///   `/* zero-migrate:enc:{keyId}:{wraps} */` parsed out of
 ///   `sqlite_master.sql` (the same regex-on-DDL pattern used for
 ///   vector dims; a sidecar `__zs_schema_meta` table is the upgrade path).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EncryptionMeta {
-    /// Encryption mode declared by the SDK.
-    /// `Randomised` (default, fail-safe) or `Deterministic` (enables
-    /// B-tree equality lookups; carries the standard deterministic
-    /// leak). See `crate::descriptors::EncryptionMode`.
-    pub mode: crate::descriptors::EncryptionMode,
     /// Key id selecting the per-platform root from
     /// `ZEROSHIP_COLUMN_KEY_<KEYID>` (or a root supplied to the
     /// process directly).

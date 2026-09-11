@@ -84,7 +84,7 @@ impl crate::protection::Catalog for SqliteBackend {
 
             // Pull the original `CREATE TABLE` text from
             // `sqlite_master.sql` so we can recover per-column
-            // encryption metadata from the `/* zero-migrate:enc:<mode>:<keyId>:
+            // encryption metadata from the `/* zero-migrate:enc:<keyId>:
             // <wraps> */` sentinel the DDL emitter writes for every
             // `t.encrypted(...)`-declared column (see
             // `zeroship_data_sql::compile::field_to_column`). PRAGMA `table_info`

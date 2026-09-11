@@ -44,19 +44,17 @@ use std::rc::Rc;
 use compio_postgres::{NoTls, Pool};
 use zeroship_data_orm::binding::DbBinding;
 use zeroship_data_orm::error::DbError;
-use zeroship_data_sql::value::{Value, value};
-use zeroship_data_sql::compile::{
-    build_aggregate, build_distinct, build_find_with_schema, build_insert, build_where,
-    raw_column_name, read_surface_columns, validate_field_name,
-};
 use zeroship_data_orm::protection::mask_policy::install_mask_policy;
 use zeroship_data_orm::protection::unmask::{
     BulkUnmaskArgs, BulkUnmaskItem, UnmaskFieldArgs, audit_query_hint_granted,
     authorize_query_hint, dispatch_bulk_unmask, dispatch_unmask, dispatch_unmask_for_query,
     parse_args, parse_bulk_args,
 };
-
-
+use zeroship_data_sql::compile::{
+    build_aggregate, build_distinct, build_find_with_schema, build_insert, build_where,
+    raw_column_name, read_surface_columns, validate_field_name,
+};
+use zeroship_data_sql::value::{Value, value};
 
 /// The backend handle the unmask entry points now take as a parameter.
 ///
@@ -107,7 +105,9 @@ async fn require_pg() -> (crate::support::postgres::Postgres, String) {
             drop(client);
             (postgres, url)
         }
-        Err(e) => panic!("the mask-flip suite could not connect to its PostgreSQL testcontainer: {e}"),
+        Err(e) => {
+            panic!("the mask-flip suite could not connect to its PostgreSQL testcontainer: {e}")
+        }
     }
 }
 
@@ -2530,7 +2530,7 @@ fn encrypted_schema() -> Value {
     value!({
         "secret": {
             "type": "string",
-            "encrypted": { "mode": "randomised", "keyId": "k1", "wraps": "string" }
+            "encrypted": { "keyId": "k1", "wraps": "string" }
         },
         "nickname": { "type": "string" },
     })
@@ -3009,7 +3009,6 @@ async fn a_migration_engine_built_table_refuses_an_encryption_downgrade() {
         stored,
         zeroship_data_sql::mask_codec::build_encryption_sentinel(
             &zeroship_data_sql::catalog::EncryptionMeta {
-                mode: zeroship_data_sql::descriptors::EncryptionMode::Randomised,
                 key_id: "k1".to_string(),
                 wraps: zeroship_data_sql::catalog::WrappedType::String,
             }

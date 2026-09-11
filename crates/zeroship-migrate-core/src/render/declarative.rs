@@ -290,9 +290,9 @@ pub struct FieldDescriptor {
     /// text shape.
     #[serde(rename = "caseSensitive", default)]
     pub case_sensitive: Option<bool>,
-    /// `t.encrypted({ mode, keyId, wraps })` - the encryption sub-object,
+    /// `t.encrypted({ keyId, wraps })` - the encryption sub-object,
     /// carried VERBATIM. When present the column DDLs to `BYTEA` with the inline
-    /// `/* zero-migrate:enc:mode:keyId:wraps */` sentinel (the contract plugin-db reads at
+    /// `/* zero-migrate:enc:keyId:wraps */` sentinel (the contract plugin-db reads at
     /// runtime). Mirrors `encrypted` on the wire `FieldDef`.
     #[serde(default)]
     pub encrypted: Option<serde_json::Value>,
@@ -672,23 +672,13 @@ pub fn descriptor_to_sdk_schema(d: &CollectionDescriptor) -> serde_json::Value {
 /// Used to render the PG `COMMENT ON COLUMN` `zero-migrate:enc:` sentinel (via the shared
 /// codec's `build_encryption_sentinel`) so the engine's emitted comment is
 /// byte-identical to what plugin-db's runtime parser expects. Defaults mirror
-/// the inline sentinel emitter (`mode = randomised`, `keyId = default`,
+/// the inline sentinel emitter (`keyId = default`,
 /// `wraps = string`).
 fn encryption_meta_for_field(
     def: &serde_json::Value,
 ) -> Option<crate::schema::diff::EncryptionMeta> {
-    use crate::schema::descriptors::EncryptionMode;
     use crate::schema::diff::{EncryptionMeta, WrappedType};
     let enc = def.get("encrypted").and_then(|v| v.as_object())?;
-    let mode_str = enc
-        .get("mode")
-        .and_then(|v| v.as_str())
-        .unwrap_or("randomised");
-    let mode = match mode_str {
-        "deterministic" => EncryptionMode::Deterministic,
-        // `randomised` / `randomized` (US) / anything else -> fail-safe default.
-        _ => EncryptionMode::Randomised,
-    };
     let key_id = enc
         .get("keyId")
         .and_then(|v| v.as_str())
@@ -699,11 +689,7 @@ fn encryption_meta_for_field(
         Some("bytes") => WrappedType::Bytes,
         _ => WrappedType::String,
     };
-    Some(EncryptionMeta {
-        mode,
-        key_id,
-        wraps,
-    })
+    Some(EncryptionMeta { key_id, wraps })
 }
 
 /// The hidden `__zs_raw__<col>` column a field's `.mask({...})` declaration

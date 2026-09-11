@@ -68,35 +68,3 @@ pub struct GeoPoint {
     /// rejects out-of-range values before the trait method is called.
     pub lng: f64,
 }
-
-/// Encryption mode — chooses nonce derivation + AAD shape.
-///
-/// Two-mode design from `docs/archive/db-system-design.md` §7.2.
-/// The on-wire blob layout is identical between modes (the synthetic
-/// vs random distinction is fully internal to the encrypt side); the
-/// caller has to track the mode to reconstruct the right AAD on
-/// decrypt.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EncryptionMode {
-    /// Per-row random nonce. AAD =
-    /// `(collection, column, row_pk_bytes)` — binds ciphertext to its
-    /// row position. Per the Camp A architecture
-    /// (`docs/archive/p5-encryption-backup-implementation-plan.md`
-    /// §13): plugin-db mints typed_id PKs **SDK-side** before INSERT,
-    /// so `row_pk` is always available when `encrypt()` is called.
-    /// Single-phase INSERT — no chicken-and-egg vs Microsoft Always
-    /// Encrypted / MongoDB CSFLE. Defeats the ciphertext-oracle
-    /// attack on randomised columns. Default (fail-safe).
-    Randomised,
-
-    /// Synthetic nonce = HMAC-SHA256(k_siv, plaintext)[..12]. AAD =
-    /// `(collection, column)` only — `row_pk_bytes` intentionally
-    /// omitted because deterministic mode's defining property is
-    /// "same plaintext → same ciphertext under (collection, column)",
-    /// which the B-tree-on-ciphertext equality index depends on.
-    /// Inherits the standard deterministic-mode leak (equality
-    /// across rows is observable to anyone with column read access).
-    /// The SDK filter pre-flight refuses range / regex / `LIKE`
-    /// queries on deterministic columns regardless.
-    Deterministic,
-}

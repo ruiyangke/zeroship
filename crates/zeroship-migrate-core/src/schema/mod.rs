@@ -30,7 +30,7 @@
 //! - [`mask_codec`] - the **sentinel CODEC** ([`mask_codec::build_mask_sentinel`]
 //!   / [`mask_codec::parse_mask_sentinel`]).
 //! - [`descriptors`] - the schema-shape **enums** ([`descriptors::VectorMetric`],
-//!   [`descriptors::EncryptionMode`]) + [`descriptors::GeoPoint`].
+//!   [`descriptors::GeoPoint`]).
 //! - [`error`] - leaf error types ([`error::MaskSentinelError`]).
 
 // **Inherited lint posture.** `query.rs` and `diff.rs` were relocated verbatim

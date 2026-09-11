@@ -47,12 +47,10 @@ use std::rc::Rc;
 use compio_postgres::{NoTls, Pool};
 use zeroship_data_orm::binding::DbBinding;
 use zeroship_data_orm::error::DbError;
-use zeroship_data_sql::value::{Value, value};
-use zeroship_data_sql::compile::SqlDialect;
 use zeroship_data_orm::protection::mask_policy::install_mask_policy;
 use zeroship_data_orm::tx_route::{CapturedRoute, TxRoute};
-
-
+use zeroship_data_sql::compile::SqlDialect;
+use zeroship_data_sql::value::{Value, value};
 
 /// Connect, or fail the test. Deliberately NOT a skip: a skipping run of a
 /// masking suite is indistinguishable from a passing one.
@@ -505,7 +503,7 @@ fn encrypted_schema() -> Value {
         "ssn": {
             "type": "string",
             "mask": { "kind": "last4", "classification": "pci" },
-            "encrypted": { "mode": "randomised", "keyId": "default", "wraps": "string" }
+            "encrypted": { "keyId": "default", "wraps": "string" }
         },
         "nickname": { "type": "string" },
     })

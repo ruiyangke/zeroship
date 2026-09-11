@@ -713,7 +713,7 @@ impl SqliteBackend {
 }
 
 /// Recover per-column encryption metadata from the
-/// `/* zero-migrate:enc:<mode>:<keyId>:<wraps> */` sentinel comments the DDL
+/// `/* zero-migrate:enc:<keyId>:<wraps> */` sentinel comments the DDL
 /// emitter writes into the `CREATE TABLE` text (see
 /// `zeroship_data_sql::compile::field_to_column`).
 ///
@@ -728,7 +728,7 @@ impl SqliteBackend {
 /// body for `/* zero-migrate:enc:...` markers and rewinds to the preceding
 /// double-quoted identifier, because every column DDL the emitter writes for
 /// an encrypted field is of the shape
-/// `"<col>" BYTEA /* zero-migrate:enc:<mode>:<keyId>:<wraps> */ <constraints>`.
+/// `"<col>" BYTEA /* zero-migrate:enc:<keyId>:<wraps> */ <constraints>`.
 ///
 /// **The SENTINEL BODY is not parsed here.** Locating the comment is this
 /// function's job; interpreting it belongs to
@@ -1727,14 +1727,10 @@ mod tests {
     fn parse_encryption_sentinel_single_column() {
         let ddl = "CREATE TABLE \"app\".\"users\" (\n  \
             id SERIAL PRIMARY KEY,\n  \
-            \"ssn\" BYTEA /* zero-migrate:enc:randomised:default:string */  NOT NULL,\n  \
+            \"ssn\" BYTEA /* zero-migrate:enc:default:string */  NOT NULL,\n  \
             \"name\" TEXT \n)";
         let got = parse_encryption_sentinels(ddl);
         let m = got.get("ssn").expect("ssn must be parsed");
-        assert!(matches!(
-            m.mode,
-            zeroship_data_sql::descriptors::EncryptionMode::Randomised
-        ));
         assert_eq!(m.key_id, "default");
         assert!(matches!(
             m.wraps,
@@ -1749,15 +1745,11 @@ mod tests {
 
     /// Deterministic mode + non-string wraps + custom key id.
     #[test]
-    fn parse_encryption_sentinel_deterministic_number_custom_key() {
+    fn parse_encryption_sentinel_number_custom_key() {
         let ddl = "CREATE TABLE \"app\".\"events\" (\n  \
-            \"salary\" BYTEA /* zero-migrate:enc:deterministic:payroll_v2:number */ NOT NULL\n)";
+            \"salary\" BYTEA /* zero-migrate:enc:payroll_v2:number */ NOT NULL\n)";
         let got = parse_encryption_sentinels(ddl);
         let m = got.get("salary").expect("salary must be parsed");
-        assert!(matches!(
-            m.mode,
-            zeroship_data_sql::descriptors::EncryptionMode::Deterministic
-        ));
         assert_eq!(m.key_id, "payroll_v2");
         assert!(matches!(
             m.wraps,
@@ -1770,13 +1762,9 @@ mod tests {
     /// the US form).
     #[test]
     fn parse_encryption_sentinel_accepts_us_spelling() {
-        let ddl = "CREATE TABLE t (\"a\" BYTEA /* zero-migrate:enc:randomized:default:bytes */)";
+        let ddl = "CREATE TABLE t (\"a\" BYTEA /* zero-migrate:enc:default:bytes */)";
         let got = parse_encryption_sentinels(ddl);
         let m = got.get("a").expect("a must be parsed");
-        assert!(matches!(
-            m.mode,
-            zeroship_data_sql::descriptors::EncryptionMode::Randomised
-        ));
         assert!(matches!(
             m.wraps,
             zeroship_data_sql::catalog::WrappedType::Bytes
@@ -1788,18 +1776,11 @@ mod tests {
     #[test]
     fn parse_encryption_sentinel_multiple_columns() {
         let ddl = "CREATE TABLE \"app\".\"u\" (\n  \
-            \"ssn\" BYTEA /* zero-migrate:enc:randomised:default:string */,\n  \
-            \"tin\" BYTEA /* zero-migrate:enc:deterministic:tax:string */\n)";
+            \"ssn\" BYTEA /* zero-migrate:enc:default:string */,\n  \
+            \"tin\" BYTEA /* zero-migrate:enc:tax:string */\n)";
         let got = parse_encryption_sentinels(ddl);
         assert_eq!(got.len(), 2);
-        assert!(matches!(
-            got["ssn"].mode,
-            zeroship_data_sql::descriptors::EncryptionMode::Randomised
-        ));
-        assert!(matches!(
-            got["tin"].mode,
-            zeroship_data_sql::descriptors::EncryptionMode::Deterministic
-        ));
+
         assert_eq!(got["tin"].key_id, "tax");
     }
 
@@ -1815,12 +1796,12 @@ mod tests {
         );
     }
 
-    /// Unknown mode → refused loudly, through the codec's typed error.
+    /// Removed mode-bearing sentinels are refused.
     #[test]
-    fn parse_encryption_sentinel_rejects_unknown_mode() {
+    fn parse_encryption_sentinel_rejects_removed_mode() {
         assert_enc_sentinel_refused_loudly(
             "CREATE TABLE t (\"a\" BYTEA /* zero-migrate:enc:hashed:default:string */)",
-            "unknown mode",
+            "expected zero-migrate:enc:",
         );
     }
 
@@ -1829,7 +1810,7 @@ mod tests {
     #[test]
     fn parse_encryption_sentinel_rejects_unknown_wraps() {
         assert_enc_sentinel_refused_loudly(
-            "CREATE TABLE t (\"a\" BYTEA /* zero-migrate:enc:randomised:default:blob */)",
+            "CREATE TABLE t (\"a\" BYTEA /* zero-migrate:enc:default:blob */)",
             "unknown wraps",
         );
     }
@@ -1837,13 +1818,13 @@ mod tests {
     /// Empty keyId → refused loudly. There is no key to look up, so this must
     /// stay a refusal even though the codec dropped the alphabet check.
     ///
-    /// The body has to carry all three fields (`<mode>::<wraps>`) to reach
+    /// The body must preserve the empty key slot (`:<wraps>`) to reach
     /// this arm; drop one and the codec refuses on ARITY first, which is a
     /// different arm and a different message.
     #[test]
     fn parse_encryption_sentinel_rejects_empty_key_id() {
         assert_enc_sentinel_refused_loudly(
-            "CREATE TABLE t (\"a\" BYTEA /* zero-migrate:enc:randomised::string */)",
+            "CREATE TABLE t (\"a\" BYTEA /* zero-migrate:enc::string */)",
             "empty keyId",
         );
     }
@@ -1861,8 +1842,7 @@ mod tests {
     /// reading the column back as plaintext.
     #[test]
     fn parse_encryption_sentinel_accepts_a_key_id_outside_the_sdk_alphabet() {
-        let ddl =
-            "CREATE TABLE t (\"a\" BYTEA /* zero-migrate:enc:randomised:payroll-2026-09:string */)";
+        let ddl = "CREATE TABLE t (\"a\" BYTEA /* zero-migrate:enc:payroll-2026-09:string */)";
         let (got, events) = capture_events(|| parse_encryption_sentinels(ddl));
         assert_eq!(
             got.get("a").map(|m| m.key_id.as_str()),
@@ -1880,7 +1860,7 @@ mod tests {
     /// so the event carries no `error` field.
     #[test]
     fn parse_encryption_sentinel_warns_when_no_column_precedes_it() {
-        let ddl = "CREATE TABLE t (\n  /* zero-migrate:enc:randomised:default:string */\n)";
+        let ddl = "CREATE TABLE t (\n  /* zero-migrate:enc:default:string */\n)";
         let (got, fields) = sole_warning(|| parse_encryption_sentinels(ddl));
         assert!(
             got.is_empty(),
@@ -1903,12 +1883,10 @@ mod tests {
     #[test]
     fn parse_encryption_sentinel_round_trips_every_built_sentinel() {
         use zeroship_data_sql::catalog::{EncryptionMeta, WrappedType};
-        use zeroship_data_sql::descriptors::EncryptionMode;
 
-        for mode in [EncryptionMode::Randomised, EncryptionMode::Deterministic] {
+        {
             for wraps in [WrappedType::String, WrappedType::Number, WrappedType::Bytes] {
                 let meta = EncryptionMeta {
-                    mode,
                     key_id: "default".to_string(),
                     wraps,
                 };
@@ -1918,7 +1896,7 @@ mod tests {
                 let parsed = got.get("ssn").unwrap_or_else(|| {
                     panic!("built sentinel {sentinel:?} must round-trip: {got:?}")
                 });
-                assert_eq!(parsed.mode, meta.mode, "mode drifted for {sentinel:?}");
+
                 assert_eq!(parsed.key_id, meta.key_id, "keyId drifted for {sentinel:?}");
                 assert_eq!(parsed.wraps, meta.wraps, "wraps drifted for {sentinel:?}");
                 assert!(
@@ -1946,7 +1924,7 @@ mod tests {
     /// sentinel at all.
     #[test]
     fn parse_encryption_sentinel_warns_on_an_unterminated_comment() {
-        let ddl = "CREATE TABLE t (\"a\" BYTEA /* zero-migrate:enc:randomised:default:string";
+        let ddl = "CREATE TABLE t (\"a\" BYTEA /* zero-migrate:enc:default:string";
         let (got, fields) = sole_warning(|| parse_encryption_sentinels(ddl));
         assert!(
             got.is_empty(),
@@ -1976,9 +1954,9 @@ mod tests {
     #[test]
     fn parse_encryption_sentinel_unterminated_comment_strands_nothing_recoverable() {
         let unterminated = "CREATE TABLE t (\n  \
-             \"a\" BYTEA /* zero-migrate:enc:randomised:default:string */,\n  \
-             \"b\" BYTEA /* zero-migrate:enc:randomised:default:string,\n  \
-             \"c\" BYTEA /* zero-migrate:enc:deterministic:default:number\n)";
+             \"a\" BYTEA /* zero-migrate:enc:default:string */,\n  \
+             \"b\" BYTEA /* zero-migrate:enc:default:string,\n  \
+             \"c\" BYTEA /* zero-migrate:enc:default:number\n)";
         let (got, fields) = sole_warning(|| parse_encryption_sentinels(unterminated));
         assert_eq!(
             got.keys().collect::<Vec<_>>(),
@@ -1991,9 +1969,9 @@ mod tests {
         );
 
         let control = "CREATE TABLE t (\n  \
-             \"a\" BYTEA /* zero-migrate:enc:randomised:default:string */,\n  \
-             \"b\" BYTEA /* zero-migrate:enc:randomised:default:string */,\n  \
-             \"c\" BYTEA /* zero-migrate:enc:deterministic:default:number */\n)";
+             \"a\" BYTEA /* zero-migrate:enc:default:string */,\n  \
+             \"b\" BYTEA /* zero-migrate:enc:default:string */,\n  \
+             \"c\" BYTEA /* zero-migrate:enc:default:number */\n)";
         let (got, events) = capture_events(|| parse_encryption_sentinels(control));
         let mut names: Vec<_> = got.keys().cloned().collect();
         names.sort();

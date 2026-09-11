@@ -2114,7 +2114,7 @@ impl<'a> CatalogFold<'a> {
                             return Err(FoldError::CheckCascadeColumnsMissing {
                                 table: table.clone(),
                                 name: c.name.clone(),
-                            })
+                            });
                         }
                         None => constraint_local_columns_contain(&c.definition, column),
                     };
@@ -2997,7 +2997,7 @@ impl<'a> CatalogFold<'a> {
                             name: name.clone(),
                             existing_materialized: existing.materialized,
                             declared_materialized,
-                        })
+                        });
                     }
                     _ => {}
                 }
@@ -9420,28 +9420,9 @@ columns = [
         );
     }
 
-    // -- The encrypted-mode finding -------------------------------------------
-    // op.* can author ONLY a DEFAULT-mode encrypted column: `ColType::Encrypted`
-    // carries the inner type ONLY, and the recorder `t.encrypted({ of })` exposes
-    // no mode/keyId/wraps surface. So a non-default-encrypted column is
-    // UNREPRESENTABLE in the IR - fail-closed BY CONSTRUCTION, NOT a silently
-    // wrong-mode sentinel.
-    //
-    // Recovery restores the KERNEL DEFAULTS the SDK's
-    // `t.encrypted()` stamps (`mode:randomised, keyId:default, wraps:<inner>`) PLUS the
-    // fail-safe auto-mask (`full/pii`), so the author->generate->fold chain is byte-
-    // lossless over a default `t.encrypted()` (the round-trip). The fail-closed property
-    // is UNCHANGED: that recovered triple is the ONLY shape op.* can produce - there is
-    // no IR surface for a non-default mode/keyId.
-
     #[test]
-    fn encrypted_via_op_star_is_default_mode_only_fail_closed_by_construction() {
-        // The recorder/IR can build an encrypted column carrying ONLY the inner type.
+    fn encrypted_migration_recovers_wrapped_type_and_default_mask() {
         let enc = encrypted_text();
-        // The descriptor the shared kernel reads back recovers the encrypted facet as
-        // the SDK kernel default (`t.encrypted()` byte-image) + the fail-safe auto-mask
-        // - there is NO mode/keyId/wraps field on `ColType::Encrypted` to make it carry
-        // a NON-default mode, so this is the only representable encrypted shape.
         let field = ir_column_to_field(&IrColumn {
             name: "secret".into(),
             ty: enc,
@@ -9460,12 +9441,8 @@ columns = [
         });
         assert_eq!(
             field.encrypted,
-            Some(
-                serde_json::json!({ "mode": "randomised", "keyId": "default", "wraps": "string" })
-            ),
-            "op.* encrypted recovers the SDK kernel-DEFAULT triple (the `t.encrypted()` \
-             byte-image) — a non-default mode is unrepresentable in ColType::Encrypted, \
-             so the path is fail-closed by construction, never a wrong-mode sentinel"
+            Some(serde_json::json!({ "keyId": "default", "wraps": "string" })),
+            "encryption metadata preserves the wrapped plaintext type without a mode"
         );
         assert_eq!(
             field.mask,

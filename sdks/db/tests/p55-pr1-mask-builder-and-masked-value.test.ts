@@ -49,8 +49,8 @@ describe("P5.5 PR 1 — t.encrypted() default-mask rule", () => {
     assert.equal(def.mask!.classification, "pii");
   });
 
-  test("t.encrypted({ mode: 'deterministic' }) also gets the default mask", () => {
-    const b = t.encrypted({ mode: "deterministic" });
+  test("t.encrypted({  }) also gets the default mask", () => {
+    const b = t.encrypted({  });
     const def = b.toFieldDef();
     assert.ok(def.mask);
     assert.equal(def.mask!.kind, "full");
@@ -163,7 +163,7 @@ describe("P5.5 PR 1 — Row<S> type inference (compile-time)", () => {
 
   test("masked encrypted field is wrapped in MaskedValue<string>", () => {
     const fields = {
-      ssn: t.encrypted({ mode: "randomised" }).required(),
+      ssn: t.encrypted({  }).required(),
       name: t.string(),
     };
     type R = Row<typeof fields>;

@@ -1,85 +1,16 @@
-//! Canonical AAD (additional authenticated data) construction for the
-//! column-encryption AEAD.
+//! Canonical authenticated context for column encryption.
 //!
-//! AAD binds a ciphertext to its logical context. AES-GCM verifies the
-//! AAD as part of decryption: any mismatch produces a tag-verification
-//! failure (the SDK-visible `encryption_aead_failed` error). Per the
-//! Camp-A resolution in `docs/archive/p5-encryption-backup-implementation-plan.md`
-//! §13 (2026-05-24), plugin-db binds:
-//!
-//! - **Randomised mode**: `(collection, column, row_pk_bytes)`.
-//!   row_pk binding is what defeats the ciphertext-oracle attack: an
-//!   attacker with UPDATE-only access who copies row A's ciphertext
-//!   into row B's column slot now triggers AAD mismatch on read,
-//!   surfacing the tamper instead of silently leaking row A's
-//!   plaintext through row B's API surface.
-//! - **Deterministic mode**: `(collection, column)` only.
-//!   row_pk is intentionally omitted because deterministic mode's
-//!   defining property — "same plaintext under the same `(collection,
-//!   column)` produces the same ciphertext" — is what makes the
-//!   B-tree-on-ciphertext equality lookup work. Binding row_pk would
-//!   produce a different ciphertext per row and break that lookup
-//!   (the entire reason deterministic mode exists).
-//!
-//!   **DB-13 — accepted residual risk:** because deterministic columns omit
-//!   row_pk, the Camp-A relocation defence does NOT cover them: an attacker
-//!   with UPDATE access who copies row A's deterministic ciphertext into row
-//!   B's same column reads A's secret through B (AAD still matches). This is an
-//!   inherent tension with searchable equality — it CANNOT be fixed without
-//!   destroying the lookup property — so it is an explicit, documented
-//!   threat-acceptance. Deterministic mode is opt-in per column; a column whose
-//!   relocation risk is unacceptable must use randomised mode (which binds
-//!   row_pk) and forgo equality search.
-//!
-//! All modes additionally bind the **wire version** (DB-14) so the
-//! version flag — otherwise unauthenticated framing in the wire envelope —
-//! cannot be downgraded to force a weaker AAD reconstruction.
-//!
-//! ## Length-prefix encoding
-//!
-//! Each segment is encoded as `[u32 big-endian length][bytes]`. This
-//! removes the obvious collision class where two different
-//! `(collection, column)` pairs concat to the same byte string:
-//!
-//! ```text
-//! ("ab",  "c") =/= ("a",  "bc")
-//! ```
-//!
-//! Without the length prefix both encode to `b"abc"`. With it the
-//! first encodes `00 00 00 02 'a' 'b' 00 00 00 01 'c'`, the second
-//! `00 00 00 01 'a' 00 00 00 02 'b' 'c'`.
-//!
-//! The trailing `row_pk_bytes` block is always emitted with its own
-//! length prefix; `None` (deterministic mode) and `Some(b"")` (empty
-//! pk — an unsupported caller mistake we still want to be
-//! deterministic about) both encode `00 00 00 00` and therefore
-//! produce byte-identical AAD. The aad_pk_none_and_empty_equivalent
-//! test pins that property; the docs comment on the public function
-//! flags it explicitly so callers know not to rely on the distinction.
+//! The wire version, collection, column and row identity are length-prefixed.
+//! Moving ciphertext to another row or column fails authentication.
 
-/// Build the canonical AAD bytes for an AEAD encrypt / decrypt
-/// operation on an encrypted column.
-///
-/// `row_pk_bytes` is `Some(bytes)` in
-/// [`zeroship_data_sql::descriptors::EncryptionMode::Randomised`] (Camp A binding),
-/// `None` in [`zeroship_data_sql::descriptors::EncryptionMode::Deterministic`]. The
-/// caller is responsible for choosing the mode; this function just
-/// serialises the result. See the module-level docs for the
-/// rationale.
-///
-/// **Edge case**: `Some(b"")` and `None` produce byte-identical AAD
-/// (both encode `len=0`). Callers must not rely on the distinction —
-/// "empty pk" is not a supported state in plugin-db (typed_id PKs are
-/// minted SDK-side and always non-empty).
+/// Build the authenticated context for a stored field value.
 #[must_use]
-pub fn canonical_aad(collection: &str, column: &str, row_pk_bytes: Option<&[u8]>) -> Vec<u8> {
+pub fn canonical_aad(collection: &str, column: &str, row_pk_bytes: &[u8]) -> Vec<u8> {
     // Pre-allocate enough for typical names (collection ~16B, column
     // ~16B, pk ~32B + three length prefixes). Over-allocation is
     // cheap; the helper runs once per encrypt/decrypt of a column
     // value.
-    let mut out = Vec::with_capacity(
-        17 + collection.len() + column.len() + row_pk_bytes.map_or(0, <[u8]>::len),
-    );
+    let mut out = Vec::with_capacity(17 + collection.len() + column.len() + row_pk_bytes.len());
     // DB-14: bind the wire version FIRST, so the version byte (unauthenticated
     // framing in the wire envelope) is authenticated by the AEAD tag. A future
     // `0x02` (row-version-binding) shape that downgraded a stored `0x02` → `0x01`
@@ -89,7 +20,7 @@ pub fn canonical_aad(collection: &str, column: &str, row_pk_bytes: Option<&[u8]>
     extend_with_len(&mut out, &[crate::encryption::wire::WIRE_VERSION_V1]);
     extend_with_len(&mut out, collection.as_bytes());
     extend_with_len(&mut out, column.as_bytes());
-    extend_with_len(&mut out, row_pk_bytes.unwrap_or(&[]));
+    extend_with_len(&mut out, row_pk_bytes);
     out
 }
 
@@ -121,18 +52,9 @@ mod tests {
     /// length-prefix collision defence.
     #[test]
     fn length_prefix_blocks_concat_collision() {
-        let a = canonical_aad("ab", "c", None);
-        let b = canonical_aad("a", "bc", None);
+        let a = canonical_aad("ab", "c", b"row_a");
+        let b = canonical_aad("a", "bc", b"row_a");
         assert_ne!(a, b);
-    }
-
-    /// row_pk binding flips the AAD — same `(collection, column)`
-    /// with a `Some(pk)` block differs from `None`.
-    #[test]
-    fn row_pk_changes_aad() {
-        let with_pk = canonical_aad("users", "ssn", Some(b"usr_01HX"));
-        let without_pk = canonical_aad("users", "ssn", None);
-        assert_ne!(with_pk, without_pk);
     }
 
     /// Different row PKs under the same `(collection, column)`
@@ -140,8 +62,8 @@ mod tests {
     /// (Camp A binding) hinges on this.
     #[test]
     fn different_row_pks_differ() {
-        let a = canonical_aad("users", "ssn", Some(b"usr_01"));
-        let b = canonical_aad("users", "ssn", Some(b"usr_02"));
+        let a = canonical_aad("users", "ssn", b"usr_01");
+        let b = canonical_aad("users", "ssn", b"usr_02");
         assert_ne!(a, b);
     }
 
@@ -151,20 +73,9 @@ mod tests {
     /// ciphertext.
     #[test]
     fn deterministic_output() {
-        let a = canonical_aad("c", "f", Some(b"pk"));
-        let b = canonical_aad("c", "f", Some(b"pk"));
+        let a = canonical_aad("c", "f", b"pk");
+        let b = canonical_aad("c", "f", b"pk");
         assert_eq!(a, b);
-    }
-
-    /// `Some(b"")` and `None` map to byte-identical AAD because both
-    /// encode `len = 0` for the row-pk segment. Documented in the
-    /// public function's doc-comment so callers know not to rely on
-    /// the distinction.
-    #[test]
-    fn aad_pk_none_and_empty_equivalent() {
-        let none = canonical_aad("c", "f", None);
-        let empty = canonical_aad("c", "f", Some(&[]));
-        assert_eq!(none, empty);
     }
 
     /// Spot-check the exact byte layout — locks in the wire
@@ -174,20 +85,11 @@ mod tests {
     fn explicit_byte_layout() {
         // version = 0x01 (DB-14, bound first), collection = "u", column = "s",
         // pk = "p". Encoding: 00000001 01 | 00000001 75 | 00000001 73 | 00000001 70
-        let aad = canonical_aad("u", "s", Some(b"p"));
+        let aad = canonical_aad("u", "s", b"p");
         assert_eq!(
             aad,
             vec![
                 0, 0, 0, 1, 0x01, 0, 0, 0, 1, b'u', 0, 0, 0, 1, b's', 0, 0, 0, 1, b'p'
-            ]
-        );
-
-        // None pk → final segment length 0, no bytes.
-        let aad_none = canonical_aad("u", "s", None);
-        assert_eq!(
-            aad_none,
-            vec![
-                0, 0, 0, 1, 0x01, 0, 0, 0, 1, b'u', 0, 0, 0, 1, b's', 0, 0, 0, 0
             ]
         );
     }
@@ -195,7 +97,7 @@ mod tests {
     /// DB-14: the wire version is bound into the AAD (first segment).
     #[test]
     fn aad_binds_wire_version_db14() {
-        let aad = canonical_aad("users", "ssn", None);
+        let aad = canonical_aad("users", "ssn", b"row_a");
         // First length-prefixed segment is the 1-byte wire version.
         assert_eq!(
             &aad[..5],

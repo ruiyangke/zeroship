@@ -391,11 +391,9 @@ fn normalize_row_on_read(
             Some("boolean") => normalize_boolean_value(value)?,
             Some("json") | Some("object") | Some("array") | Some("union") => {
                 normalize_json_value(dialect, key, value)?;
-                prepare_value(key, &schema[key], value).map_err(|_| {
-                    CodecError::Decode {
-                        column: key.clone(),
-                        reason: "invalid typed JSON storage",
-                    }
+                prepare_value(key, &schema[key], value).map_err(|_| CodecError::Decode {
+                    column: key.clone(),
+                    reason: "invalid typed JSON storage",
                 })?;
             }
             Some("bytes") => normalize_bytes_value(value)?,
@@ -648,7 +646,6 @@ mod tests {
             "secret": {
                 "type": "bytes",
                 "encrypted": {
-                    "mode": "randomized",
                     "wraps": "bytes"
                 }
             }
@@ -774,7 +771,7 @@ mod timestamp_tests {
     fn protected_timestamps_keep_their_storage_shape_until_protection_decodes_them() {
         let schema = value!({
             "masked":{"type":"date", "mask":{"kind":"full"}},
-            "encrypted":{"type":"timestamp", "encrypted":{"mode":"randomized","wraps":"string"}},
+            "encrypted":{"type":"timestamp", "encrypted":{"wraps":"string"}},
         });
         let original = value!({"masked":"***", "encrypted":Value::Bytes(vec![1, 2, 3])});
         let mut rows = [original.clone()];

@@ -348,14 +348,17 @@ fn stamp_physical_storage(
             continue;
         };
         let mut def_obj = def_obj.clone();
-        // The read surface of the LOGICAL field, so a consumer stops inferring it from
-        // one membership test. Every declared field is fully capable today, which is
-        // exactly what `validate_read_identifier` already concludes - the value is not
-        // the point. Narrowing one later becomes a change here rather than in Rust
-        // spread across the query builders.
+        // Encrypted fields remain readable and projectable, but randomised
+        // ciphertext cannot support predicates or ordering.
         def_obj.insert("readable".to_string(), Value::Bool(true));
-        def_obj.insert("filterable".to_string(), Value::Bool(true));
-        def_obj.insert("sortable".to_string(), Value::Bool(true));
+        def_obj.insert(
+            "filterable".to_string(),
+            Value::Bool(def.get("encrypted").is_none()),
+        );
+        def_obj.insert(
+            "sortable".to_string(),
+            Value::Bool(def.get("encrypted").is_none()),
+        );
         def_obj.insert("projectable".to_string(), Value::Bool(true));
         def_obj.insert(
             "storage".to_string(),
