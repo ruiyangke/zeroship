@@ -25,6 +25,10 @@ pub mod return_to;
 pub mod server;
 pub mod session_store;
 pub mod sessions;
-pub mod store;
 pub mod startup_validation;
+pub mod store;
 pub mod ui;
+
+#[cfg(test)]
+#[path = "../../../tests/fixtures/platform_db/mod.rs"]
+mod platform_fixture;

@@ -79,7 +79,6 @@ jsonwebtoken = { workspace = true }
 askama = "0.12"
 
 [dev-dependencies]
-zeroship-test-support = { workspace = true }
 # Auth unit tests include `#[compio::test]` live-PG tests. The polling fallback
 # keeps them runnable in sandboxes that block io_uring; production builds use
 # the normal workspace compio dependency above the dev-dependency boundary.
@@ -100,7 +99,6 @@ tracing-subscriber = { workspace = true }
 # `zeroship-gateway`, `zeroship-authz` and `zeroship-control` already run: a
 # database behind the migration ledger is refused by name rather than surfacing
 # as a failing assertion.
-zeroship-testkit = { workspace = true }
 
 [lints]
 workspace = true

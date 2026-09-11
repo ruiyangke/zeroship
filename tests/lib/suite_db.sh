@@ -3,7 +3,7 @@
 # suite_db.sh - the SHARED database the live-Postgres test GATES run against,
 # named after the schema they need rather than after whoever launched them.
 #
-# THE LOGIC IS NOW IN RUST: crates/zeroship-testkit/src/suite_db.rs (the
+# THE LOGIC IS NOW IN RUST: xtask/src/platform_db/suite_db.rs (the
 # decisions), src/admin.rs (the server), src/fingerprint.rs (the name), reached
 # through `zs-testkit suite-db`. This file is the shell BINDING - it keeps the
 # function names and the exported-variable contract tests/run_auth_suite.sh and
@@ -41,7 +41,7 @@
 #
 # tests/lib_suite_db_selftest.sh covers this file. The cases that scripted a
 # fake `run_psql` cannot drive a separate process and are covered instead by
-# `cargo test -p zeroship-testkit` and crates/zeroship-testkit/tests/.
+# `cargo test --manifest-path xtask/Cargo.toml --bin zs-testkit` and crates/zeroship-testkit/tests/.
 # ============================================================================
 
 # shellcheck source=tests/lib/testkit.sh

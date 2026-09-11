@@ -41,6 +41,18 @@ fn platform_database_tests_are_mandatory() {
     );
     for package in workspace {
         assert!(
+            ![
+                "zeroship-testkit",
+                "zeroship-test-support",
+                "zeroship-test-fixtures",
+                "zeroship-data-fixtures"
+            ]
+            .iter()
+            .any(|name| package["name"] == *name),
+            "fixtures belong to source modules: {}",
+            package["name"]
+        );
+        assert!(
             ["live-db-tests", "test-helpers"]
                 .iter()
                 .all(|feature| package["features"].get(feature).is_none()),

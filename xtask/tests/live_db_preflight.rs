@@ -1,76 +1,9 @@
-//! The live-database preflight against a REAL `PostgreSQL`.
-//!
-//! WHAT THE UNIT TESTS CANNOT SETTLE. `live_db`'s unit tests prove the SHAPE of
-//! a refusal -- that it names the database, the gap and the remedy, and that the
-//! password does not travel with it. They cannot prove the preflight
-//! DISCRIMINATES, because a preflight that refused everything would produce
-//! exactly the same strings.
-//!
-//! SO EVERY CASE HERE IS A PAIR DIFFERING IN ONE VARIABLE.
-//!
-//!   same database, different schema asked for   -> Ready / Refused
-//!   same schema asked for, different database   -> Ready / Refused
-//!   same database and schemas, journal absent   -> Refused / Ready
-//!   same database and schemas, journal short    -> Refused / Ready
-//!
-//! AND EVERY REFUSED SIDE ASSERTS ON THE REMEDY, not only on the refusal. A
-//! preflight that refuses correctly and prints the wrong command is the defect
-//! it exists to remove, one indirection out: the reader is still sent to the
-//! wrong place, and no arm that checks only "did it refuse" can see it.
-//!
-//! Without both directions the file is worthless in the specific way the thing
-//! it guards was worthless: a check that always says the same thing reads as a
-//! check.
-//!
-//! THIS FILE TAKES THE SERVER FROM THE OVERLAY AND THE DATABASES FROM ITSELF,
-//! AND THE SPLIT IS THE POINT. READ THIS BEFORE ADDING AN ARM.
-//!
-//! The first version of this file did not make that split. Its `Ready` side was
-//! `inspect(&loaded.dsn, ..)` -- the overlay's OWN database -- under a comment
-//! that stated the premise out loud: "The overlay's database is migrated by the
-//! suite gates and answers `Ready`."
-//!
-//! That premise is precisely the thing this whole change exists because it is
-//! FALSE. The overlay on the machine this was written on named the shared
-//! `zeroship` database on :5440, which by then held none of `zeroship`,
-//! `zeroship_migrations` or `service_authn` and 84 `cpg_*` schemas left by
-//! another suite. So the arm asserted that the defect it was written to detect
-//! was absent. It passed only because the author's overlay happened, for the
-//! length of that run, to name a database they had created and migrated by
-//! hand; it was RED for the reviewer within the hour, and would have been RED
-//! on main for every developer here.
-//!
-//! It fails in the exact family this module's own header warns about: a check
-//! bound to something other than what it is checking. And it USED TO fail
-//! INVISIBLY in CI, because with no overlay at all `server()` returned `None`
-//! and the file skipped -- green forever centrally, red on every desk. That
-//! half is closed: `server()` panics, naming the provisioning script.
-//!
-//! So: the overlay supplies HOST, PORT, USER, PASSWORD and nothing else. Its
-//! `database` field is read by nothing here. Every database an arm rules on is
-//! created by that arm, populated by that arm, and dropped by that arm. `Ready`
-//! is then CAUSED by a `CREATE SCHEMA` this file issued, rather than assumed
-//! from the state of a database the tree does not own and cannot migrate.
-//!
-//! WHY NOT MIGRATE A SCRATCH DATABASE FOR THE `Ready` SIDE. `CREATE SCHEMA
-//! zeroship` is not a migration and this file does not pretend it is -- the
-//! preflight under test asks "does this schema exist", so a bare `CREATE
-//! SCHEMA` is exactly the input that exercises it. Running the real
-//! `zeroship-platform-migrate` here would cost a V8 boot per arm and would
-//! drag in the cluster-wide role provisioning, whose advisory lock exists
-//! because concurrent runs collide on `pg_authid`. That is a large, slow,
-//! shared-state dependency bought for a property this file does not test.
-//!
-//! NOTHING HERE USES `WITH (FORCE)`. The databases are this run's own, so a
-//! plain `DROP` is enough once the connections are closed -- and `drop_scratch`
-//! closes them rather than assuming. FORCE terminates every backend on a
-//! database, and a file that reaches for it habitually is one edit away from
-//! doing that to a peer.
+//! Database orchestration verified against an owned PostgreSQL container.
 
 use std::path::{Path, PathBuf};
 
 use compio_postgres::NoTls;
-use zeroship_testkit::{admin, live_db, overlay};
+use xtask::platform_db::{admin, live_db};
 
 /// The schemas a platform live-DB target requires, and what this file uses as
 /// its `Ready` input.
@@ -104,7 +37,7 @@ const JOURNAL_TABLE: &str = live_db::JOURNAL_TABLE;
 /// Re-derived from the tree on every run through the SAME enumeration the
 /// preflight uses, so the two cannot drift apart and neither is written down.
 fn migrations_carried() -> usize {
-    zeroship_testkit::fingerprint::files_in(&repo_root())
+    xtask::platform_db::fingerprint::files_in(&repo_root())
         .expect("this checkout carries a migration set")
         .len()
 }
@@ -133,71 +66,16 @@ fn repo_root() -> PathBuf {
     // Substituted at COMPILE time by `env!`, so this is a constant in the
     // binary rather than a read of the process environment.
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
+        .join("..")
         .canonicalize()
         .expect("repo root")
 }
 
-/// The SERVER the overlay names. Its database is deliberately not returned.
-///
-/// IT PANICS RATHER THAN SKIPPING. The header above records what the skip cost:
-/// with no overlay at all this returned `None` and every arm returned early, so
-/// the file was green forever in CI and red on every desk. An absent server is
-/// now a failure naming the script that provisions one.
-fn server() -> admin::Server {
-    let loaded = overlay::load(&repo_root()).unwrap_or_else(|error| {
-        panic!(
-            "The test overlay is missing, and this suite requires it.\n\
-             \n\
-             \x20 backend: PostgreSQL (named by deploy/ops/zeroship.test.toml)\n\
-             \x20 error:   {error}\n\
-             \n\
-             Write the overlay and bring the server up:\n\
-             \x20 tests/provision_test_backends.sh\n\
-             \n\
-             That starts deploy/compose's `postgres` service and the SMTP sink, waits\n\
-             for both to be healthy, and writes the overlay naming them. Use\n\
-             `--check` instead if the servers are already running and you only\n\
-             need them described.\n\
-             \n\
-             There is no environment variable that makes this a skip. A suite\n\
-             that cannot reach its database is a failed run, not a green one."
-        )
-    });
-    let server = admin::Server::from_overlay(&loaded).unwrap_or_else(|error| {
-        panic!(
-            "The test overlay does not describe a PostgreSQL this suite can dial.\n\
-             \n\
-             \x20 backend: PostgreSQL\n\
-             \x20 overlay: deploy/ops/zeroship.test.toml\n\
-             \x20 error:   {error}\n\
-             \n\
-             Rewrite it from the servers you actually have:\n\
-             \x20 tests/provision_test_backends.sh --check\n\
-             \n\
-             There is no environment variable that makes this a skip."
-        )
-    });
-    let mut probe = admin::PgAdmin::new(server.clone());
-    if let Err(error) = admin::DbAdmin::exists(&mut probe, "postgres") {
-        panic!(
-            "PostgreSQL is unreachable, and this suite requires it.\n\
-             \n\
-             \x20 backend: PostgreSQL\n\
-             \x20 dialled: {host}:{port} (from deploy/ops/zeroship.test.toml)\n\
-             \x20 error:   {error}\n\
-             \n\
-             Nothing answered the `postgres` maintenance database, so provision\n\
-             it and re-run:\n\
-             \x20 tests/provision_test_backends.sh\n\
-             \n\
-             There is no environment variable that makes this a skip. A database\n\
-             this suite cannot reach is a failed run, not a green one.",
-            host = server.host,
-            port = server.port,
-        )
-    }
-    server
+mod common;
+fn server() -> (common::Database, admin::Server) {
+    let database = common::Database::start();
+    let (_, server) = database.configuration();
+    (database, server)
 }
 
 /// A name no other run can collide with, and short enough for the 63-byte limit.
@@ -332,7 +210,7 @@ fn drop_scratch(server: &admin::Server, scratch: &Scratch) {
 /// is about.
 #[test]
 fn one_database_answers_ready_for_a_schema_it_has_and_refuses_for_one_it_does_not() {
-    let server = server();
+    let (_fixture, server) = server();
     let db = scratch(&server, "schema_axis", PLATFORM_SCHEMAS);
     seed_journal(&db.dsn, migrations_carried());
 
@@ -379,7 +257,7 @@ fn one_database_answers_ready_for_a_schema_it_has_and_refuses_for_one_it_does_no
 /// the preflight, it is testing the machine.
 #[test]
 fn the_same_question_answers_ready_on_a_seeded_database_and_refuses_on_a_fresh_one() {
-    let server = server();
+    let (_fixture, server) = server();
     let seeded = scratch(&server, "db_axis_seeded", PLATFORM_SCHEMAS);
     seed_journal(&seeded.dsn, migrations_carried());
     let fresh = scratch(&server, "db_axis_fresh", &[]);
@@ -397,9 +275,12 @@ fn the_same_question_answers_ready_on_a_seeded_database_and_refuses_on_a_fresh_o
         PLATFORM_SCHEMAS,
         on_seeded.refusal().unwrap_or("")
     );
-    let text = on_fresh
-        .refusal()
-        .unwrap_or_else(|| panic!("{} was created empty and cannot hold {PLATFORM_SCHEMAS:?}", fresh.name));
+    let text = on_fresh.refusal().unwrap_or_else(|| {
+        panic!(
+            "{} was created empty and cannot hold {PLATFORM_SCHEMAS:?}",
+            fresh.name
+        )
+    });
     assert!(
         text.contains(&format!("/{}", fresh.name)),
         "the refusal must name the database it dialled; got {text}"
@@ -437,7 +318,7 @@ fn the_same_question_answers_ready_on_a_seeded_database_and_refuses_on_a_fresh_o
 /// whether the journal table exists.
 #[test]
 fn a_database_with_the_schemas_but_no_journal_table_is_told_to_apply_the_corpus() {
-    let server = server();
+    let (_fixture, server) = server();
     let db = scratch(&server, "no_journal", PLATFORM_SCHEMAS);
 
     let without_table = live_db::inspect(&db.dsn, PLATFORM_SCHEMAS);
@@ -446,9 +327,12 @@ fn a_database_with_the_schemas_but_no_journal_table_is_told_to_apply_the_corpus(
 
     drop_scratch(&server, &db);
 
-    let text = without_table
-        .refusal()
-        .unwrap_or_else(|| panic!("{} has no journal table, so it has applied nothing", db.name));
+    let text = without_table.refusal().unwrap_or_else(|| {
+        panic!(
+            "{} has no journal table, so it has applied nothing",
+            db.name
+        )
+    });
     assert!(
         text.contains("a server answered"),
         "the server answered every question but the last; got {text}"
@@ -515,7 +399,7 @@ fn an_unreachable_server_refuses_differently_from_an_unmigrated_database() {
 /// its journal; topping the journal up in place leaves exactly one variable.
 #[test]
 fn one_database_refuses_on_a_short_journal_and_is_ready_once_it_is_topped_up() {
-    let server = server();
+    let (_fixture, server) = server();
     let carried = migrations_carried();
     let db = scratch(&server, "ledger_axis", PLATFORM_SCHEMAS);
 
@@ -557,7 +441,7 @@ fn one_database_refuses_on_a_short_journal_and_is_ready_once_it_is_topped_up() {
 /// about a corpus it does not use.
 #[test]
 fn a_caller_that_never_asked_for_the_journal_is_not_judged_on_it() {
-    let server = server();
+    let (_fixture, server) = server();
     let db = scratch(&server, "ledger_switch", PLATFORM_SCHEMAS);
     seed_journal(&db.dsn, 0);
 

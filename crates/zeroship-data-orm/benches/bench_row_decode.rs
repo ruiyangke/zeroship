@@ -10,7 +10,7 @@ use criterion::{Criterion, black_box, criterion_group, criterion_main};
 
 use zeroship_data_orm::error;
 #[path = "../src/backend/postgres/pg_row_json.rs"]
-#[allow(dead_code)]
+#[allow(dead_code, unused_imports)]
 mod pg_row_json;
 
 // ---------------------------------------------------------------------------

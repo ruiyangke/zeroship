@@ -1,38 +1,8 @@
-//! `zs-testkit` -- the harness's database tool.
-//!
-//! WHY ONE BINARY WITH SUBCOMMANDS, and not `cargo xtask`, a thin binary per
-//! helper, or `#[test]` functions:
-//!
-//!   - The consumers are `.sh` files. `tests/run_auth_suite.sh` sources
-//!     `tests/lib/suite_db.sh` and calls `zs_suite_db_provision`; a `#[test]`
-//!     cannot be reached from there at all, and a harness nobody can invoke is
-//!     worse than the shell it replaced. Those `tests/lib/*.sh` files still
-//!     exist and still export the same function names -- their bodies are now
-//!     one call to this binary each, so no consumer changed.
-//!   - One target rather than eight means one `cargo build` and one path for
-//!     the shims to find. Eight thin binaries would each pay their own link.
-//!   - No `xtask`: the operator dropped that wrapper deliberately. This is a
-//!     normal workspace crate.
-//!
-//! NOTHING HERE READS THE PROCESS ENVIRONMENT. Every value arrives as an
-//! argument or on stdin, including the ones the shell held in exported
-//! variables: the shim reads its own environment and passes what it found. A
-//! Rust harness that read `TEST_DB` itself would be rebuilding the ambient
-//! opt-out the flag-only override exists to prevent -- and the refusal for an
-//! ambient `TEST_DB` would then be checking the very channel it was using.
-//!
-//! OUTPUT CONTRACT. Subcommands that replace a shell function which SET
-//! variables print `NAME=value` lines on stdout for the shim to `eval`, with
-//! the value single-quoted. Diagnostics go to stderr. Exit codes are the shell
-//! library's: 0 yes, 1 no, 2 refused-or-broken, 3 could-not-look. The last one
-//! is not a synonym for 2: `sweep decide` uses it to say that a check came back
-//! empty because it could not run, which is the one answer a sweeper must never
-//! read as "nothing is alive".
-
+//! Database fixture commands used by repository test scripts.
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use zeroship_testkit::{admin, exit, fingerprint, lock, overlay, suite_db, sweep};
+use xtask::platform_db::{admin, exit, fingerprint, lock, overlay, suite_db, sweep};
 
 #[derive(Parser)]
 #[command(
@@ -387,7 +357,10 @@ fn run_provision(root: &Path, name: &str, lock_dir: &Path, argv: &[String]) -> i
         // is `CREATE SCHEMA`, which happens before the migrate binary takes its
         // own advisory lock. It is released the moment this closure returns --
         // never held over the tests, which run for tens of minutes.
-        match std::process::Command::new(&argv[0]).args(&argv[1..]).status() {
+        match std::process::Command::new(&argv[0])
+            .args(&argv[1..])
+            .status()
+        {
             Ok(status) => status.code().unwrap_or(exit::FATAL),
             Err(why) => refuse(
                 &format!("FATAL: could not run {}: {why}\n", argv[0]),
@@ -438,7 +411,7 @@ fn run_sweep(cmd: SweepCmd) -> i32 {
                     return refuse(
                         &format!("FATAL: could not read {}: {why}\n", patterns.display()),
                         exit::FATAL,
-                    )
+                    );
                 }
             };
             let names: Vec<String> = body
@@ -476,7 +449,10 @@ fn run_sweep(cmd: SweepCmd) -> i32 {
                 "ZS_SWEEP_PROC_UNLISTABLE",
                 if held.proc_unlistable { "1" } else { "0" },
             );
-            assign("ZS_SWEEP_PROC_HIDDEN", if held.proc_hidden { "1" } else { "0" });
+            assign(
+                "ZS_SWEEP_PROC_HIDDEN",
+                if held.proc_hidden { "1" } else { "0" },
+            );
             exit::OK
         }
         SweepCmd::HoldersOf { name } => {

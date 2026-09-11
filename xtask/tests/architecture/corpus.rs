@@ -147,9 +147,9 @@ fn database_creation_stays_inside_its_explicit_fixture_owners() {
         // Tracked violation: workflow tests clone the live suite database.
         "crates/zeroship-control/tests/workflow_engine_test.rs",
         // The shared provisioning fixture owns database creation.
-        "crates/zeroship-testkit/src/admin.rs",
+        "xtask/src/platform_db/admin.rs",
         // Asserts a database-creation permission error, without executing DDL.
-        "crates/zeroship-testkit/src/suite_db.rs",
+        "xtask/src/platform_db/suite_db.rs",
     ]
     .into_iter()
     .map(|p| repo::root().join(p))
@@ -160,6 +160,7 @@ fn database_creation_stays_inside_its_explicit_fixture_owners() {
     for file in repo::files("crates", &["rs"])
         .into_iter()
         .chain(repo::files("libs", &["rs"]))
+        .chain(repo::files("xtask/src/platform_db", &["rs"]))
     {
         let input = std::fs::read_to_string(&file).unwrap();
         if !file.components().any(|c| c.as_os_str() == "tests") && !input.contains("#[cfg(test)]") {

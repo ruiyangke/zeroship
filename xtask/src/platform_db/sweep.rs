@@ -448,7 +448,7 @@ pub fn gaps(evidence: &Evidence) -> Vec<Gap> {
                  with no backend attached saw nothing at all. That is the case \
                  the /proc scan exists for; its argv half alone does not cover \
                  it."
-                    .to_owned(),
+                .to_owned(),
             );
         }
         if !evidence.proc_unexplained.is_empty() {
@@ -626,7 +626,10 @@ mod tests {
             "zs_wf_engine_restart_f897474e",
             "zeroship_auth_r9_jwks",
         ] {
-            assert!(family_of(name).is_none(), "CLAIMED {name}, which it does not own");
+            assert!(
+                family_of(name).is_none(),
+                "CLAIMED {name}, which it does not own"
+            );
         }
     }
 
@@ -686,7 +689,10 @@ mod tests {
         let stranger = 2147483647;
 
         let before = scan_holders(&names, stranger);
-        assert!(holders_of(&before, &needle).is_empty(), "something already held it");
+        assert!(
+            holders_of(&before, &needle).is_empty(),
+            "something already held it"
+        );
 
         let mut holder = std::process::Command::new("sleep")
             .arg("60")
@@ -703,7 +709,10 @@ mod tests {
         holder.kill().ok();
         holder.wait().ok();
 
-        assert!(holders_of(&found, &needle).contains(&pid), "missed the holder {pid}");
+        assert!(
+            holders_of(&found, &needle).contains(&pid),
+            "missed the holder {pid}"
+        );
         assert!(
             !holders_of(&excluded, &needle).contains(&pid),
             "a descendant of the scanner was reported as a holder"
@@ -730,7 +739,10 @@ mod tests {
         holder.kill().ok();
         holder.wait().ok();
 
-        assert!(holders_of(&found, &long).contains(&pid), "missed the long name");
+        assert!(
+            holders_of(&found, &long).contains(&pid),
+            "missed the long name"
+        );
         assert!(
             !holders_of(&found, "zeroship_auth_test").contains(&pid),
             "the prefix was reported held"
@@ -1000,7 +1012,10 @@ mod tests {
     #[test]
     fn tokens_split_on_every_non_identifier_byte() {
         let got = identifier_tokens(b"postgres://u:p@h:5432/zeroship_auth_test_s46\0X=1");
-        let got: Vec<&str> = got.iter().map(|t| std::str::from_utf8(t).unwrap()).collect();
+        let got: Vec<&str> = got
+            .iter()
+            .map(|t| std::str::from_utf8(t).unwrap())
+            .collect();
         assert!(got.contains(&"zeroship_auth_test_s46"));
         assert!(!got.contains(&"zeroship_auth_test"));
         assert!(got.contains(&"5432"));

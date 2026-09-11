@@ -67,7 +67,7 @@ impl Server {
     ///
     /// The database is `postgres` rather than the overlay's, because you cannot
     /// create a database from inside it; see `PgAdmin::simple`.
-    pub fn from_overlay(loaded: &crate::overlay::Loaded) -> Result<Server, String> {
+    pub fn from_overlay(loaded: &super::overlay::Loaded) -> Result<Server, String> {
         let port: u16 = loaded.port.parse().map_err(|_| {
             format!(
                 "FATAL: {} names port '{}', which is not a port number.\n",
@@ -180,7 +180,8 @@ impl DbAdmin for PgAdmin {
         // protocol-level parameter can carry. `check_identifier` is the gate;
         // it runs again here because this function is public and the gate being
         // somewhere else is not the same as it having run.
-        crate::suite_db::check_identifier(name).map_err(|refusal| refusal.trim_end().to_string())?;
+        super::suite_db::check_identifier(name)
+            .map_err(|refusal| refusal.trim_end().to_string())?;
         self.simple(&format!("CREATE DATABASE {name}")).map(|_| ())
     }
 }
@@ -197,6 +198,9 @@ mod tests {
     #[test]
     fn a_quote_cannot_close_the_literal() {
         assert_eq!(quote_literal("o'brien"), "'o''brien'");
-        assert_eq!(quote_literal("a'; DROP DATABASE x --"), "'a''; DROP DATABASE x --'");
+        assert_eq!(
+            quote_literal("a'; DROP DATABASE x --"),
+            "'a''; DROP DATABASE x --'"
+        );
     }
 }

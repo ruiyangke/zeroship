@@ -82,14 +82,6 @@ chrono = { version = "0.4", default-features = false, features = ["std", "serde"
 # The generated-controls test parses an overlay fixture to prove the
 # observability tier is read from the canonical TOML path.
 toml = { workspace = true }
-zeroship-test-support = { workspace = true }
-# The live-database preflight this crate's five database targets run before
-# their first assertion. Without it they read a stale schema as a code
-# regression; see `zeroship_testkit::live_db`.
-zeroship-testkit = { workspace = true }
-# Integration tests construct `GateState`, whose `meter` field is an
-# `Arc<zeroship_metering::Meter>` (coverage #27). They need the type in
-# scope to build the fixture.
 zeroship-metering = { workspace = true }
 async-trait = { workspace = true }
 # Phase 3 U4 smoke test runs `zeroship_auth::store::migrations::migrate`

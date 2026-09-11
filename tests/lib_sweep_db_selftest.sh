@@ -231,7 +231,7 @@ echo "=== the verdict: an empty answer and an absent check are not the same ==="
 #
 # The `/proc` half is STATED here rather than taken from the live scan above.
 # What is under test below is the DECISION; the scan that produces these
-# numbers is covered by its own cases and by `cargo test -p zeroship-testkit`.
+# numbers is covered by its own cases and by `cargo test --manifest-path xtask/Cargo.toml --bin zs-testkit`.
 # Reading them from a real pass would make every case here a function of what
 # else happens to be running on the box.
 ZS_SWEEP_PROC_UNLISTABLE=0

@@ -25,8 +25,9 @@ pub mod credit;
 pub mod cron;
 pub mod deploy;
 pub mod deploy_inflight;
-pub mod disputes;
 pub mod device_handlers;
+pub mod disputes;
+pub mod egress_rules;
 pub mod env_handlers;
 pub mod env_store;
 pub mod erasure;
@@ -35,12 +36,11 @@ pub mod http_util;
 pub mod internal;
 pub mod invoice_payments;
 pub mod metering;
-pub mod egress_rules;
 pub mod notify;
-pub mod oauth_grants_handlers;
 pub mod oauth_clients;
-pub mod organizations;
+pub mod oauth_grants_handlers;
 pub mod openmeter_client;
+pub mod organizations;
 pub mod plan_catalog;
 pub mod pricing;
 pub mod pricing_store;
@@ -80,9 +80,9 @@ pub(crate) mod test_live_db {
         static CHECKED: OnceLock<String> = OnceLock::new();
         CHECKED
             .get_or_init(|| {
-                zeroship_testkit::live_db::require_configured(
+                crate::platform_fixture::live_db::require_configured(
                     zeroship_core::config::test_database_url_opt(),
-                    zeroship_testkit::live_db::PLATFORM_SCHEMAS,
+                    crate::platform_fixture::live_db::PLATFORM_SCHEMAS,
                 )
             })
             .clone()
@@ -135,16 +135,22 @@ pub fn platform_auth_provider(
 pub struct SecretString(Zeroizing<String>);
 
 impl SecretString {
-    pub fn new(s: String) -> Self { Self(Zeroizing::new(s)) }
+    pub fn new(s: String) -> Self {
+        Self(Zeroizing::new(s))
+    }
 
     /// Borrow the underlying string. Name is intentionally noisy —
     /// every call site documents that the caller knows it's holding
     /// secret material.
-    pub fn expose_secret(&self) -> &str { &self.0 }
+    pub fn expose_secret(&self) -> &str {
+        &self.0
+    }
 
     /// `true` for empty / unset secret. Lets callers gate on
     /// "is this configured" without exposing the value.
-    pub fn is_empty(&self) -> bool { self.0.is_empty() }
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
 }
 
 impl std::fmt::Debug for SecretString {
@@ -214,10 +220,14 @@ impl BillingStreamConfig {
         forwarder_group_id: impl Into<String>,
         recompute_group_id: impl Into<String>,
     ) -> Result<Self, StreamError> {
-        let replica = zeroship_core::declared_env!(external, "HOSTNAME", crate::config::ControlSettingsConsumer)
-            .map(|h| h.trim().to_string())
-            .filter(|h| !h.is_empty())
-            .unwrap_or_else(|| "solo".to_string());
+        let replica = zeroship_core::declared_env!(
+            external,
+            "HOSTNAME",
+            crate::config::ControlSettingsConsumer
+        )
+        .map(|h| h.trim().to_string())
+        .filter(|h| !h.is_empty())
+        .unwrap_or_else(|| "solo".to_string());
         Self::new_for_replica(
             registry,
             transport_id,
@@ -281,8 +291,8 @@ impl BillingStreamConfig {
             crate::config::ControlSettingsConsumer
         )
         .filter(|value| !value.trim().is_empty())
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(DEFAULT_CONTROL_USAGE_OUTBOX_WAL_PATH));
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_CONTROL_USAGE_OUTBOX_WAL_PATH));
         let this = Self {
             registry,
             transport_id: transport_id.into(),
@@ -715,7 +725,13 @@ impl AppState {
             .map_err(|e| format!("control db conn: {e}"))?;
         app_oauth_client::ensure_app_client(
             // Creator apps are NEVER first-party (spec §5.2): skip_consent=false.
-            &mut conn, app_id, name, scheme, &hosts, declared_scopes, false,
+            &mut conn,
+            app_id,
+            name,
+            scheme,
+            &hosts,
+            declared_scopes,
+            false,
         )
         .await
         .map_err(|e| e.to_string())
@@ -727,10 +743,7 @@ impl AppState {
     /// kept as an associated fn so existing call sites and tests keep the
     /// `AppState::is_trusted_client_id(&set, id)` shape.
     #[must_use]
-    pub fn is_trusted_client_id(
-        trusted_oauth_clients: &HashSet<String>,
-        client_id: &str,
-    ) -> bool {
+    pub fn is_trusted_client_id(trusted_oauth_clients: &HashSet<String>, client_id: &str) -> bool {
         zeroship_core::auth::trusted_clients::is_trusted_client_id(trusted_oauth_clients, client_id)
     }
 }
@@ -803,7 +816,17 @@ mod billing_stream_group_tests {
         // Suffixing must not accidentally collide any pair.
         let a = config_for("control-a");
         assert_ne!(a.forwarder_group_id(), a.recompute_group_id());
-        assert_ne!(a.recompute_group_id(), DEFAULT_CONTROL_USAGE_PRODUCER_GROUP_ID);
-        assert_ne!(a.forwarder_group_id(), DEFAULT_CONTROL_USAGE_PRODUCER_GROUP_ID);
+        assert_ne!(
+            a.recompute_group_id(),
+            DEFAULT_CONTROL_USAGE_PRODUCER_GROUP_ID
+        );
+        assert_ne!(
+            a.forwarder_group_id(),
+            DEFAULT_CONTROL_USAGE_PRODUCER_GROUP_ID
+        );
     }
 }
+
+#[cfg(test)]
+#[path = "../../../tests/fixtures/platform_db/mod.rs"]
+mod platform_fixture;

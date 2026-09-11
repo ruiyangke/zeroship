@@ -1,102 +1,13 @@
-//! The suite-database provisioner against a REAL PostgreSQL.
-//!
-//! WHY THIS EXISTS BESIDE THE UNIT TESTS. `suite_db`'s unit tests script a
-//! `DbAdmin` and prove the DECISIONS: reuse, create-once, lost race, genuine
-//! failure, could-not-tell. What they cannot prove is that the driver and the
-//! server behave the way the script assumes -- that `CREATE DATABASE` outside a
-//! transaction succeeds, that a duplicate create fails with a message rather
-//! than hanging, that an absent database really reads as zero rows. A scripted
-//! double answers whatever it was told to; that is its value and its limit.
-//!
-//! WHAT THE SHELL SELFTEST USED TO DO HERE, AND WHY IT CANNOT ANY MORE. It
-//! injected a fake `run_psql` shell function that recorded the SQL it was
-//! handed. That worked because the library was shell running in the selftest's
-//! own process. The logic is a separate process now, so a shell function
-//! defined in the caller is unreachable -- and the fake closed over the
-//! selftest's non-exported `$TMP`, so even exporting the function would not
-//! carry it. This file and `suite_db`'s unit tests are where those cases went.
-//!
-//! THE RACE IS FORCED, NOT WAITED FOR. `ensure` has an arm that only runs when
-//! a peer creates the database between our probe and our `CREATE`. Two
-//! processes started together might simply not collide, so the collision is
-//! MANUFACTURED: a decorator creates the database for real, from a second
-//! connection, immediately before delegating the create. The failure the server
-//! then returns is a real 42P04, not a string a fake was told to produce.
+//! Database orchestration verified against an owned PostgreSQL container.
 
 use compio_postgres::NoTls;
-use std::path::{Path, PathBuf};
-use zeroship_testkit::{admin, overlay, suite_db};
+use xtask::platform_db::{admin, overlay, suite_db};
 
-fn repo_root() -> PathBuf {
-    // `CARGO_MANIFEST_DIR` is substituted at COMPILE time by `env!`, so this is
-    // a constant in the binary rather than a read of the process environment.
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .canonicalize()
-        .expect("repo root")
-}
-
-/// The overlay names the server; without one there is nothing to dial.
-///
-/// IT PANICS RATHER THAN SKIPPING, and that is the whole point of the file.
-/// Every arm here rules on a real `CREATE DATABASE` against a real server; with
-/// no server there is nothing to rule on, and an early return would report the
-/// same green a full run reports. There is no environment variable that turns
-/// this back into a skip.
-fn server() -> (overlay::Loaded, admin::Server) {
-    let loaded = overlay::load(&repo_root()).unwrap_or_else(|error| {
-        panic!(
-            "The test overlay is missing, and this suite requires it.\n\
-             \n\
-             \x20 backend: PostgreSQL (named by deploy/ops/zeroship.test.toml)\n\
-             \x20 error:   {error}\n\
-             \n\
-             Write the overlay and bring the server up:\n\
-             \x20 tests/provision_test_backends.sh\n\
-             \n\
-             That starts deploy/compose's `postgres` service and the SMTP sink, waits\n\
-             for both to be healthy, and writes the overlay naming them. Use\n\
-             `--check` instead if the servers are already running and you only\n\
-             need them described.\n\
-             \n\
-             There is no environment variable that makes this a skip. A suite\n\
-             that cannot reach its database is a failed run, not a green one."
-        )
-    });
-    let server = admin::Server::from_overlay(&loaded).unwrap_or_else(|error| {
-        panic!(
-            "The test overlay does not describe a PostgreSQL this suite can dial.\n\
-             \n\
-             \x20 backend: PostgreSQL\n\
-             \x20 overlay: deploy/ops/zeroship.test.toml\n\
-             \x20 error:   {error}\n\
-             \n\
-             Rewrite it from the servers you actually have:\n\
-             \x20 tests/provision_test_backends.sh --check\n\
-             \n\
-             There is no environment variable that makes this a skip."
-        )
-    });
-    let mut probe = admin::PgAdmin::new(server.clone());
-    if let Err(error) = admin::DbAdmin::exists(&mut probe, "postgres") {
-        panic!(
-            "PostgreSQL is unreachable, and this suite requires it.\n\
-             \n\
-             \x20 backend: PostgreSQL\n\
-             \x20 dialled: {host}:{port} (from deploy/ops/zeroship.test.toml)\n\
-             \x20 error:   {error}\n\
-             \n\
-             Nothing answered the `postgres` maintenance database, so provision\n\
-             it and re-run:\n\
-             \x20 tests/provision_test_backends.sh\n\
-             \n\
-             There is no environment variable that makes this a skip. A database\n\
-             this suite cannot reach is a failed run, not a green one.",
-            host = server.host,
-            port = server.port,
-        )
-    }
-    (loaded, server)
+mod common;
+fn server() -> (common::Database, overlay::Loaded, admin::Server) {
+    let database = common::Database::start();
+    let (loaded, server) = database.configuration();
+    (database, loaded, server)
 }
 
 /// A name no other run can collide with, and short enough for the 63-byte limit.
@@ -133,19 +44,21 @@ fn drop_scratch(server: &admin::Server, name: &str) {
         config.password(&server.pass);
     }
     let sql = format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)");
-    let _ = compio::runtime::Runtime::new().unwrap().block_on(async move {
-        let (client, connection) = config.connect(NoTls).await?;
-        compio::runtime::spawn(async move {
-            let _ = connection.run().await;
-        })
-        .detach();
-        client.simple_query(&sql).await
-    });
+    let _ = compio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(async move {
+            let (client, connection) = config.connect(NoTls).await?;
+            compio::runtime::spawn(async move {
+                let _ = connection.run().await;
+            })
+            .detach();
+            client.simple_query(&sql).await
+        });
 }
 
 #[test]
 fn an_absent_database_is_created_and_the_next_run_reuses_it_untouched() {
-    let (_, server) = server();
+    let (_fixture, _, server) = server();
     let name = scratch_name("reuse");
     let mut admin = admin::PgAdmin::new(server.clone());
     let mut said = String::new();
@@ -162,14 +75,17 @@ fn an_absent_database_is_created_and_the_next_run_reuses_it_untouched() {
     let mut said2 = String::new();
     let second = suite_db::ensure(&mut admin, &name, &mut |l| said2.push_str(l));
     assert_eq!(second.unwrap(), suite_db::Ensured::Reused, "{said2}");
-    assert!(marker_present(&server, &name), "the database was recreated under us");
+    assert!(
+        marker_present(&server, &name),
+        "the database was recreated under us"
+    );
 
     drop_scratch(&server, &name);
 }
 
 #[test]
 fn losing_a_real_create_race_is_success() {
-    let (_, server) = server();
+    let (_fixture, _, server) = server();
     let name = scratch_name("race");
 
     /// Creates the database for real just before delegating, so the delegate's
@@ -227,7 +143,7 @@ fn two_provision_processes_do_not_overlap() {
     // prove nothing on their own, since they might simply not have collided.
     // The command each one runs records the interval it ran for, and the check
     // is that the two intervals do not intersect.
-    let (loaded, server) = server();
+    let (_fixture, loaded, server) = server();
     let name = scratch_name("lock");
     let scratch = tempfile::tempdir().expect("scratch root");
     let root = scratch.path();
@@ -340,7 +256,7 @@ fn run_in(server: &admin::Server, database: &str, sql: &str) -> bool {
 fn admin_statements_do_not_abandon_their_connections() {
     const STATEMENTS: usize = 8;
 
-    let (_, server) = server();
+    let (_fixture, _, server) = server();
     let live = std::thread::spawn(move || {
         let mut admin = admin::PgAdmin::new(server);
         for _ in 0..STATEMENTS {

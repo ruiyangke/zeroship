@@ -9,7 +9,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 gate_arms_init shipped_config
 
 # ---------------------------------------------------------------------------
-# Floors guard target enumeration and both crates retaining test helpers.
+# Floors guard target enumeration and workspace feature declarations.
 MIN_TARGETS=30
 MIN_BUILT=30
 MIN_FEATURE_MEMBERS=10

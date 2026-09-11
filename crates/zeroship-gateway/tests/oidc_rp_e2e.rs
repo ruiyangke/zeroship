@@ -31,9 +31,9 @@ use zeroship_gateway::enforce;
 use zeroship_gateway::idempotency;
 use zeroship_gateway::oidc_rp::{BrokerSecret, BrowserAuthorizeParams, OidcRp, TokenSet};
 use zeroship_gateway::proxy::HashRing;
-use zeroship_gateway::sessions::{create, revoke_app_sessions_for_user, NewSession};
+use zeroship_gateway::sessions::{NewSession, create, revoke_app_sessions_for_user};
 use zeroship_gateway::sync::RouteCache;
-use zeroship_gateway::{session_token, GateConfig, GateState};
+use zeroship_gateway::{GateConfig, GateState, session_token};
 
 /// The test's own oracle for "is this audit row still live", replacing the
 /// crate's deleted `sessions::validate`. That function had no production
@@ -79,8 +79,9 @@ const GATEWAY_ISS: &str = "https://api.zeroship.ai";
 /// and the worker different keys and the worker would refuse every request -
 /// so the fixture holds one and hands out both halves.
 fn gateway_identity() -> &'static std::sync::Arc<zeroship_core::service_peers::ServiceAuth> {
-    static IDENTITY: std::sync::OnceLock<std::sync::Arc<zeroship_core::service_peers::ServiceAuth>> =
-        std::sync::OnceLock::new();
+    static IDENTITY: std::sync::OnceLock<
+        std::sync::Arc<zeroship_core::service_peers::ServiceAuth>,
+    > = std::sync::OnceLock::new();
     IDENTITY.get_or_init(|| std::sync::Arc::new(zeroship_gateway::test_gateway_service_auth()))
 }
 
@@ -222,10 +223,7 @@ impl zeroship_bundle::BlobStore for MemoryBlobStore {
         Ok(false)
     }
 
-    async fn delete_app_manifests(
-        &self,
-        _a: &Uuid,
-    ) -> Result<(), zeroship_bundle::BlobError> {
+    async fn delete_app_manifests(&self, _a: &Uuid) -> Result<(), zeroship_bundle::BlobError> {
         Ok(())
     }
 }
@@ -552,7 +550,10 @@ async fn drive_login_to_code(
         .expect("send GET /authorize");
     assert_eq!(first.status().as_u16(), 303);
     let login_loc = location(&first);
-    assert!(login_loc.starts_with("/login?return_to="), "login redirect: {login_loc}");
+    assert!(
+        login_loc.starts_with("/login?return_to="),
+        "login redirect: {login_loc}"
+    );
     let return_to = relative_query_param(&login_loc, "return_to").expect("return_to");
 
     let login_get = http
@@ -582,8 +583,7 @@ async fn drive_login_to_code(
         .expect("send POST /login");
     assert_eq!(login_post.status().as_u16(), 303);
     assert_eq!(location(&login_post), return_to);
-    let session =
-        read_set_cookie(&login_post, "__Host-zsidp_session").expect("session cookie");
+    let session = read_set_cookie(&login_post, "__Host-zsidp_session").expect("session cookie");
 
     let final_authorize = http
         .request(http::Method::GET, format!("{auth_base}{return_to}"))
@@ -603,7 +603,12 @@ async fn drive_login_to_code(
     }
 }
 
-async fn browser_pkce_tokens(rp: &OidcRp, auth_base: &str, client_id: &str, email: &str) -> TokenSet {
+async fn browser_pkce_tokens(
+    rp: &OidcRp,
+    auth_base: &str,
+    client_id: &str,
+    email: &str,
+) -> TokenSet {
     let verifier = zeroship_core::pkce::generate_verifier();
     let challenge = zeroship_core::pkce::s256_challenge(&verifier);
     let state = format!("st-{}", Uuid::new_v4().simple());
@@ -684,7 +689,7 @@ fn test_auth_config(db_url: &str) -> (AuthConfig, tempfile::TempDir) {
         "--public-url",
         "http://localhost:0",
     ]);
-    let (hash_file, idem_file) = zeroship_test_support::session_key_files();
+    let (hash_file, idem_file) = session_keys::session_key_files();
     config.settings.refresh_hash_key_file = zeroship_core::config::Operational::new(hash_file);
     config.settings.refresh_idem_key_file = zeroship_core::config::Operational::new(idem_file);
     (config, dir)
@@ -731,7 +736,7 @@ async fn seed_user_client(
         &[
             &app_id,
             &format!("gateway-e2e-app-{}", app_id.simple()),
-            &project_id
+            &project_id,
         ],
     )
     .await
@@ -776,13 +781,22 @@ async fn seed_user_client(
 
 async fn cleanup(db: &Client, user_id: Uuid, app_id: Uuid, client_id: &str) {
     let _ = db
-        .execute("DELETE FROM zeroship.oauth_grants WHERE client_id = $1", &[&client_id])
+        .execute(
+            "DELETE FROM zeroship.oauth_grants WHERE client_id = $1",
+            &[&client_id],
+        )
         .await;
     let _ = db
-        .execute("DELETE FROM zeroship.oauth_clients WHERE client_id = $1", &[&client_id])
+        .execute(
+            "DELETE FROM zeroship.oauth_clients WHERE client_id = $1",
+            &[&client_id],
+        )
         .await;
     let _ = db
-        .execute("DELETE FROM zeroship.idp_sessions WHERE user_id = $1", &[&user_id])
+        .execute(
+            "DELETE FROM zeroship.idp_sessions WHERE user_id = $1",
+            &[&user_id],
+        )
         .await;
     let _ = db
         .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user_id])
@@ -799,8 +813,7 @@ async fn gateway_bearer_rejects_real_op_id_token_but_accepts_access_token() {
 
     let pg_client = connect_test_db(&db_url).await;
     let signing = op_signing();
-    let broker =
-        BrokerSecrets::new(BROKER_MASTER.to_vec(), None).expect("auth broker secrets");
+    let broker = BrokerSecrets::new(BROKER_MASTER.to_vec(), None).expect("auth broker secrets");
     let issuer = Arc::new(
         Issuer::from_signing_key(&signing, [9u8; 32], ISSUER.to_string())
             .expect("issuer")
@@ -832,20 +845,24 @@ async fn gateway_bearer_rejects_real_op_id_token_but_accepts_access_token() {
     )
     .with_issuer(ISSUER);
     let tokens = browser_pkce_tokens(&rp, &auth_base, &client_id, &email).await;
-    let id_token = tokens.id_token.as_deref().expect("openid flow returns id_token");
+    let id_token = tokens
+        .id_token
+        .as_deref()
+        .expect("openid flow returns id_token");
 
     let worker = test::server(|| async {
-        web::App::new().service(
-            web::resource("/dispatch/{app_id}").route(web::post().to(echo_verified_user)),
-        )
+        web::App::new()
+            .service(web::resource("/dispatch/{app_id}").route(web::post().to(echo_verified_user)))
     })
     .await;
     let worker_base = worker.url("").trim_end_matches('/').to_string();
     let state = build_gateway_state(&auth_base, app_id, &client_id, Some(&worker_base), None);
-    let app = test::init_service(web::App::new().state(state).service(
-        web::resource("/{tail}*")
-            .route(web::route().to(zeroship_gateway::router::handle_subdomain)),
-    ))
+    let app = test::init_service(
+        web::App::new().state(state).service(
+            web::resource("/{tail}*")
+                .route(web::route().to(zeroship_gateway::router::handle_subdomain)),
+        ),
+    )
     .await;
 
     let access_req = test::TestRequest::get()
@@ -865,11 +882,8 @@ async fn gateway_bearer_rejects_real_op_id_token_but_accepts_access_token() {
     let access_body = test::read_body(access_resp).await;
     let projected_user: serde_json::Value =
         serde_json::from_slice(&access_body).expect("worker returned projected user JSON");
-    let expected_pws = zeroship_core::auth::derive_pairwise(
-        &[9u8; 32],
-        &user_id.to_string(),
-        SECTOR,
-    );
+    let expected_pws =
+        zeroship_core::auth::derive_pairwise(&[9u8; 32], &user_id.to_string(), SECTOR);
     assert_eq!(
         projected_user["id"],
         serde_json::json!(expected_pws),
@@ -911,10 +925,12 @@ async fn gateway_bearer_rejects_access_token_for_different_resource_audience() {
     let srv = start_platform_op(&db_url, pg_client, issuer.clone()).await;
     let auth_base = srv.url("").trim_end_matches('/').to_string();
     let state = build_gateway_state(&auth_base, app_id, &client_id, None, None);
-    let app = test::init_service(web::App::new().state(state).service(
-        web::resource("/{tail}*")
-            .route(web::route().to(zeroship_gateway::router::handle_subdomain)),
-    ))
+    let app = test::init_service(
+        web::App::new().state(state).service(
+            web::resource("/{tail}*")
+                .route(web::route().to(zeroship_gateway::router::handle_subdomain)),
+        ),
+    )
     .await;
 
     let wrong_resource_audience = format!("app:{}", Uuid::new_v4());
@@ -966,8 +982,7 @@ async fn gateway_oidc_rp_full_dance_against_platform_op() {
     let pg_client = Arc::new(pg_client);
 
     let signing = op_signing();
-    let broker =
-        BrokerSecrets::new(BROKER_MASTER.to_vec(), None).expect("auth broker secrets");
+    let broker = BrokerSecrets::new(BROKER_MASTER.to_vec(), None).expect("auth broker secrets");
     let issuer = Arc::new(
         Issuer::from_signing_key(&signing, [9u8; 32], ISSUER.to_string())
             .expect("issuer")
@@ -1025,11 +1040,19 @@ async fn gateway_oidc_rp_full_dance_against_platform_op() {
     )
     .with_issuer(ISSUER);
 
-    let (auth_url, stash) =
-        rp.build_authorize_redirect(&client_id, "/some/path", REDIRECT_URI);
-    assert!(auth_url.starts_with(&format!("{auth_base}/oauth2/authorize?")), "{auth_url}");
-    assert!(auth_url.contains(&format!("client_id={client_id}")), "{auth_url}");
-    assert!(auth_url.contains("scope=openid+offline_access+email+profile"), "{auth_url}");
+    let (auth_url, stash) = rp.build_authorize_redirect(&client_id, "/some/path", REDIRECT_URI);
+    assert!(
+        auth_url.starts_with(&format!("{auth_base}/oauth2/authorize?")),
+        "{auth_url}"
+    );
+    assert!(
+        auth_url.contains(&format!("client_id={client_id}")),
+        "{auth_url}"
+    );
+    assert!(
+        auth_url.contains("scope=openid+offline_access+email+profile"),
+        "{auth_url}"
+    );
 
     let http = cyper::Client::new();
 
@@ -1041,7 +1064,10 @@ async fn gateway_oidc_rp_full_dance_against_platform_op() {
         .expect("send GET /authorize");
     assert_eq!(first.status().as_u16(), 303);
     let login_loc = location(&first);
-    assert!(login_loc.starts_with("/login?return_to="), "login redirect: {login_loc}");
+    assert!(
+        login_loc.starts_with("/login?return_to="),
+        "login redirect: {login_loc}"
+    );
     let return_to = relative_query_param(&login_loc, "return_to").expect("return_to");
 
     let login_get = http
@@ -1071,8 +1097,7 @@ async fn gateway_oidc_rp_full_dance_against_platform_op() {
         .expect("send POST /login");
     assert_eq!(login_post.status().as_u16(), 303);
     assert_eq!(location(&login_post), return_to);
-    let session =
-        read_set_cookie(&login_post, "__Host-zsidp_session").expect("session cookie");
+    let session = read_set_cookie(&login_post, "__Host-zsidp_session").expect("session cookie");
 
     let final_authorize = http
         .request(http::Method::GET, format!("{auth_base}{return_to}"))
@@ -1085,7 +1110,10 @@ async fn gateway_oidc_rp_full_dance_against_platform_op() {
     assert_eq!(final_authorize.status().as_u16(), 303);
     let cb_url = location(&final_authorize);
     assert!(cb_url.starts_with(REDIRECT_URI), "callback: {cb_url}");
-    assert_eq!(query_param(&cb_url, "state").as_deref(), query_param(&auth_url, "state").as_deref());
+    assert_eq!(
+        query_param(&cb_url, "state").as_deref(),
+        query_param(&auth_url, "state").as_deref()
+    );
     assert_eq!(query_param(&cb_url, "iss").as_deref(), Some(ISSUER));
     let code = query_param(&cb_url, "code").expect("code param");
     let state = query_param(&cb_url, "state").expect("state param");
@@ -1099,7 +1127,10 @@ async fn gateway_oidc_rp_full_dance_against_platform_op() {
         .finish_callback(&code, &state, &stash, "oac_someotherapp000000000000")
         .await;
     assert!(
-        matches!(mismatch, Err(zeroship_gateway::oidc_rp::OidcRpError::ClientMismatch)),
+        matches!(
+            mismatch,
+            Err(zeroship_gateway::oidc_rp::OidcRpError::ClientMismatch)
+        ),
         "stash redeemed under a mismatched route client_id must fail ClientMismatch, got {mismatch:?}"
     );
 
@@ -1112,10 +1143,9 @@ async fn gateway_oidc_rp_full_dance_against_platform_op() {
     assert!(granted_scopes.contains(&"openid".to_string()));
     assert!(granted_scopes.contains(&"offline_access".to_string()));
 
-    let (mut sess_client, sess_connection) =
-        compio_postgres::connect(&db_url, NoTls)
-            .await
-            .expect("connect pg (session store)");
+    let (mut sess_client, sess_connection) = compio_postgres::connect(&db_url, NoTls)
+        .await
+        .expect("connect pg (session store)");
     compio::runtime::spawn(async move {
         if let Err(e) = sess_connection.run().await {
             eprintln!("[oidc_rp_e2e] session-store pg driver: {e}");
@@ -1152,7 +1182,9 @@ async fn gateway_oidc_rp_full_dance_against_platform_op() {
         .await
         .expect("revoke");
     assert!(
-        live_session(&sess_client, session.id, app_id).await.is_none(),
+        live_session(&sess_client, session.id, app_id)
+            .await
+            .is_none(),
         "a revoked session must not resolve as live"
     );
 
@@ -1297,7 +1329,10 @@ async fn app_session_revoke_at_the_op_ends_the_gateway_session() {
         .header(http::header::HOST, APP_HOST)
         .header("origin", SECTOR)
         .header("x-zs-auth", "1")
-        .header(http::header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .header(
+            http::header::CONTENT_TYPE,
+            "application/x-www-form-urlencoded",
+        )
         .set_payload(body)
         .to_request();
     let resp = test::call_service(&app, req).await;
@@ -1394,11 +1429,8 @@ async fn app_session_revoke_at_the_op_ends_the_gateway_session() {
         "a revoked anchor must not yield a fresh session cookie"
     );
 
-    let pws = zeroship_core::auth::derive_pairwise(
-        &state.pairwise_salt,
-        &user_id.to_string(),
-        SECTOR,
-    );
+    let pws =
+        zeroship_core::auth::derive_pairwise(&state.pairwise_salt, &user_id.to_string(), SECTOR);
     let _ = pg_client
         .execute(
             "DELETE FROM zeroship.token_revocations WHERE client_id = $1 AND sub = $2",
@@ -1479,3 +1511,6 @@ fn set_cookie_pair(resp: &ntex::web::WebResponse, prefix: &str) -> Option<String
     }
     None
 }
+
+#[path = "../../../tests/fixtures/session_keys.rs"]
+mod session_keys;
