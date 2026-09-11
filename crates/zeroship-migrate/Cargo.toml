@@ -149,8 +149,9 @@ schemars = { workspace = true }
 # it). It reaches tokio via `cyper`/`hyper` as a NORMAL dependency of zeroship-core
 # itself, which is not a new category of exposure for this crate's TEST build: the
 # `postgres` dev-dependency above already pulls tokio in transitively, accepted for the
-# same never-ships reason. `tests/zero_tokio_gate.sh` arms 2 and 3 both resolve with
-# `-e normal`, which never walks a dev edge, so this addition moves neither pinned set.
+# same never-ships reason. `cargo xtask test repository` checks normal dependency
+# paths and direct carrier declarations across every dependency kind. This dev
+# dependency names zeroship-core, not a carrier, so neither boundary set changes.
 zeroship-core = { workspace = true }
 
 [lints]

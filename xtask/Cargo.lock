@@ -3416,6 +3416,7 @@ dependencies = [
  "syn 2.0.119",
  "tempfile",
  "testcontainers",
+ "toml_edit",
  "url",
 ]
 
