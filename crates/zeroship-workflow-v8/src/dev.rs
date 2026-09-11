@@ -47,7 +47,11 @@ impl WorkflowExecutor for V8WorkflowExecutor {
         runtime.start_pump();
         let env = env_snapshot_from_prefixed_vars(&self.env_vars);
         let ctx = RequestCtx::new(CancelFlag::new());
-        match runtime.call_workflow_dispatch(envelope, &env, ctx) {
+        let outcome = runtime.call_workflow_dispatch(envelope, &env, ctx);
+        // Restore the host isolate before yielding. The pump enters this
+        // workflow isolate only while processing its own events.
+        runtime.exit_isolate();
+        match outcome {
             WorkflowOutcome::Response { json, .. } => Ok(json),
             WorkflowOutcome::Pending { rx, cancel } => {
                 runtime.notify_pump();
