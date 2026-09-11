@@ -239,22 +239,29 @@ pub(crate) async fn lock_app(
     let platform = if let Some(source) = tx.platform_policy.clone() {
         let policy = source.lock(tx, app).await?;
         tx.execute(
-            &format!("INSERT INTO {} (app_id,revision,signal_epoch) VALUES ($1,0,0) ON CONFLICT (app_id) DO NOTHING", tx.table("app_state")),
-            &[app.as_str().into()],
+            &format!("INSERT INTO {} (app_id,revision,signal_epoch,platform_app_id) VALUES ($1,0,0,$2) ON CONFLICT (app_id) DO NOTHING", tx.table("app_state")),
+            &[app.as_str().into(),app.uuid().to_string().into()],
         ).await?;
         Some(policy)
     } else {
         None
     };
     let sql = format!(
-        "SELECT policy FROM {} WHERE app_id=$1{}",
+        "SELECT policy,platform_app_id FROM {} WHERE app_id=$1{}",
         tx.table("app_state"),
         tx.lock_clause()
     );
     let rows = tx.query(&sql, &[app.as_str().into()]).await?;
     let row = rows.first().ok_or_else(|| not_found("workflow app"))?;
     match platform {
-        Some(policy) => Ok(policy),
+        Some(policy) => {
+            if row.optional_text("platform_app_id")?.as_deref() != Some(&app.uuid().to_string()) {
+                return Err(WorkflowServiceError::Unavailable(
+                    "invalid workflow platform app mapping".into(),
+                ));
+            }
+            Ok(policy)
+        }
         None => decode(&row.text("policy")?),
     }
 }

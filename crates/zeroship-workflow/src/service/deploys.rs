@@ -128,6 +128,7 @@ pub(crate) async fn reconcile_platform(
         )
         .await?;
     let current = rows.first().ok_or_else(invalid_authority)?;
+    let revision = super::deploy_notifications::revision(tx, app).await?;
     let Some(hash) = current.optional_text("deploy_hash")? else {
         let deploys = tx.table("deploys");
         let schedules = tx.table("schedules");
@@ -141,8 +142,12 @@ pub(crate) async fn reconcile_platform(
             &[app.as_str().into()],
         )
         .await?;
+        super::deploy_notifications::acknowledge(tx, app, revision).await?;
         return Ok(());
     };
+    if revision.is_none() {
+        return Err(invalid_authority());
+    }
     let manifest = current
         .optional_text("manifest_json")?
         .ok_or_else(invalid_authority)?;
@@ -164,7 +169,8 @@ pub(crate) async fn reconcile_platform(
         workflows,
         schedules: manifest.schedules,
     };
-    install(tx, app, &deploy, policy, history.integer("activated_at")?).await
+    install(tx, app, &deploy, policy, history.integer("activated_at")?).await?;
+    super::deploy_notifications::acknowledge(tx, app, revision).await
 }
 
 fn invalid_authority() -> WorkflowServiceError {

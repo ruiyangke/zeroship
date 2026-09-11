@@ -126,8 +126,19 @@ pub async fn run(settings: WorkflowSettings, options: ServerOptions) -> Result<(
             replay.clone(),
         ),
     });
+    let mut deploy_cursor = service
+        .reconcile_pending_deploys(None, options.maintenance_batch)
+        .await?
+        .next;
     let maintenance = compio::runtime::spawn(async move {
         loop {
+            match service
+                .reconcile_pending_deploys(deploy_cursor.clone(), options.maintenance_batch)
+                .await
+            {
+                Ok(batch) => deploy_cursor = batch.next,
+                Err(error) => tracing::error!(%error, "workflow deployment sweep failed"),
+            }
             if let Err(error) = service.tick_schedules().await {
                 tracing::error!(%error, "workflow schedule sweep failed");
             }

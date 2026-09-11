@@ -27,9 +27,10 @@ export function workflowSchema(namespace) {
   create("schema_version", { id: text(), fingerprint: text() }, ["id"]);
   create("app_state", {
     ...identity(), revision: integer(), policy: t.text(), signal_epoch: integer(),
+    platform_app_id: t.text(), deploy_revision: integer().default(0),
     last_polled_at: integer().default(0),
     subscription_sequence: integer().default(0),
-  }, ["app_id"]);
+  }, ["app_id"], [], [{ name: "platform_app_identity", columns: ["platform_app_id"] }]);
   create("deploys", {
     ...identity(), id: text(), hash: text(), manifest: text(), created_at: integer(),
     active: integer(), state: text(),

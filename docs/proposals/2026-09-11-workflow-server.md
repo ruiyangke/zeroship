@@ -43,8 +43,10 @@ access; request handlers authenticate before buffering JSON bodies.
 Deployment notifications now reconcile current Control authority under the app
 fence. Start and schedule execution also check that authority; live runs retain
 their snapshot. Deployment history rejects mutations of snapshot contents.
-Durable notification delivery and periodic deployment reconciliation remain
-to be connected to Control activation.
+Control activation records its durable notification in the same database
+transaction through an invoker-rights trigger. Startup and periodic service
+sweeps deliver pending revisions; reconciliation and acknowledgement commit
+together. Bounded passes preserve retry fairness when an app cannot reconcile.
 The worker polling loop, Control capability
 issuance, public HTTP ingress, retention of
 completed run graphs and interpreter cutover remain in progress. The

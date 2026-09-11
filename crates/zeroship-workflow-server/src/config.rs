@@ -55,7 +55,7 @@ pub struct WorkflowSettings {
     /// Interval between durable maintenance sweeps.
     #[config(name = "workflow.tick_interval_ms", default = 1000)]
     pub tick_interval_ms: Operational<u64>,
-    /// Payload objects inspected per maintenance sweep.
+    /// Maximum items in each deployment or payload maintenance sweep.
     #[config(name = "workflow.maintenance_batch", default = 128)]
     pub maintenance_batch: Operational<usize>,
     /// Maximum live runs per app.

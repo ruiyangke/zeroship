@@ -604,3 +604,147 @@ async fn platform_deploy_history_writes_wait_for_workflow_admission() {
     reader.commit().await.unwrap();
     assert_eq!(write.await.unwrap().unwrap(), 1);
 }
+
+#[compio::test]
+async fn platform_deploy_outbox_commits_with_activation_and_recovers_fairly() {
+    let fixture = PlatformFixture::start().await;
+    let mut apps = [&fixture.app, &fixture.other];
+    apps.sort_by_key(|app| app.uuid());
+    let [earlier, later] = apps;
+    let revision: i64 = fixture
+        .admin
+        .query_one(
+            "SELECT revision FROM zeroship.workflow_deploy_notifications WHERE app_id=$1",
+            &[&earlier.uuid()],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    let writer = connect(&fixture.pg.admin_url).await;
+    writer.batch_execute("BEGIN").await.unwrap();
+    writer
+        .execute(
+            "UPDATE zeroship.apps SET deploy_hash=$2 WHERE id=$1",
+            &[&earlier.uuid(), &"f".repeat(64)],
+        )
+        .await
+        .unwrap();
+    let uncommitted: i64 = writer
+        .query_one(
+            "SELECT revision FROM zeroship.workflow_deploy_notifications WHERE app_id=$1",
+            &[&earlier.uuid()],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert!(uncommitted > revision);
+    writer.batch_execute("ROLLBACK").await.unwrap();
+    let after: i64 = fixture
+        .admin
+        .query_one(
+            "SELECT revision FROM zeroship.workflow_deploy_notifications WHERE app_id=$1",
+            &[&earlier.uuid()],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(
+        after, revision,
+        "rolled-back activation cannot leave a notification"
+    );
+    for app in apps {
+        publish_deploy(
+            &fixture.pg.admin_url,
+            app,
+            &DeployRegistration {
+                id: typed_id::generate("dep"),
+                hash: "b".repeat(64),
+                workflows: ["Next".into()].into(),
+                schedules: Vec::new(),
+            },
+        )
+        .await;
+    }
+    fixture
+        .admin
+        .execute(
+            "UPDATE zeroship.apps SET manifest_json='{}' WHERE id=$1",
+            &[&earlier.uuid()],
+        )
+        .await
+        .unwrap();
+    let first = fixture
+        .service
+        .reconcile_pending_deploys(None, 1)
+        .await
+        .unwrap();
+    assert_eq!(first.reconciled, 0);
+    assert!(first.next.is_some());
+
+    // A newly created app belongs to the next pass, so it cannot keep the
+    // failed earlier app waiting behind an expanding page boundary.
+    let newcomer = AppId::mint();
+    assert!(newcomer.uuid() > later.uuid());
+    fixture.admin.execute("INSERT INTO zeroship.apps (id,plan_id,organization_id,workflows_enabled) VALUES ($1,$2,$3,true)", &[&newcomer.uuid(),&fixture.plan,&fixture.organization]).await.unwrap();
+    publish_deploy(
+        &fixture.pg.admin_url,
+        &newcomer,
+        &DeployRegistration {
+            id: typed_id::generate("dep"),
+            hash: "c".repeat(64),
+            workflows: ["Next".into()].into(),
+            schedules: Vec::new(),
+        },
+    )
+    .await;
+    let second = fixture
+        .service
+        .reconcile_pending_deploys(first.next, 1)
+        .await
+        .unwrap();
+    assert_eq!(
+        second.reconciled, 1,
+        "a malformed earlier deployment must not block a later app"
+    );
+    let end = fixture
+        .service
+        .reconcile_pending_deploys(second.next, 1)
+        .await
+        .unwrap();
+    assert_eq!(end.reconciled, 0);
+    assert!(end.next.is_none());
+    let unmapped: i64 = fixture
+        .admin
+        .query_one(
+            "SELECT count(*) FROM workflow.app_state WHERE app_id=$1",
+            &[&newcomer.as_str()],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(unmapped, 0);
+    fixture.admin.execute("UPDATE zeroship.apps a SET manifest_json=d.manifest_json FROM zeroship.app_deploys d WHERE a.id=$1 AND d.app_id=a.id AND d.deploy_hash=a.deploy_hash", &[&earlier.uuid()]).await.unwrap();
+    let recovered = WorkflowService::open(fixture.service.store.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        recovered
+            .reconcile_pending_deploys(None, 64)
+            .await
+            .unwrap()
+            .reconciled,
+        2
+    );
+    assert_eq!(
+        recovered
+            .reconcile_pending_deploys(None, 64)
+            .await
+            .unwrap()
+            .reconciled,
+        0
+    );
+    for app in [earlier, later, &newcomer] {
+        let row = fixture.admin.query_one("SELECT n.revision,s.deploy_revision FROM zeroship.workflow_deploy_notifications n JOIN workflow.app_state s ON s.platform_app_id=n.app_id::text WHERE n.app_id=$1", &[&app.uuid()]).await.unwrap();
+        assert_eq!(row.get::<_, i64>(0), row.get::<_, i64>(1));
+    }
+}

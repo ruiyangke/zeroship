@@ -45,7 +45,7 @@ impl PlatformPolicy {
         }
         let rows = tx.query(
             "WITH expected(kind,relation) AS (VALUES ('app','apps'),('plan','plans'), \
-             ('organization','organization_billing_status'),('spend','app_spend_state'),('rollout','workflow_rollout_config'),('deploy','app_deploys')) \
+             ('organization','organization_billing_status'),('spend','app_spend_state'),('rollout','workflow_rollout_config'),('deploy','app_deploys'),('notification','workflow_deploy_notifications')) \
              SELECT CASE WHEN EXISTS (SELECT 1 FROM pg_trigger t JOIN pg_proc p ON p.oid=t.tgfoid \
              WHERE t.tgrelid=to_regclass('zeroship.' || e.relation) AND t.tgname='workflow_policy_fence_' || e.kind \
              AND t.tgenabled IN ('O','A') AND NOT p.prosecdef \
@@ -57,6 +57,19 @@ impl PlatformPolicy {
         if rows.is_empty() || rows.iter().any(|row| row.integer("safe").ok() != Some(1)) {
             return Err(WorkflowServiceError::Unavailable(
                 "workflow policy writer fences are missing or disabled".into(),
+            ));
+        }
+        let rows = tx.query(
+            "SELECT CASE WHEN EXISTS (SELECT 1 FROM pg_trigger t JOIN pg_proc p ON p.oid=t.tgfoid \
+             WHERE t.tgrelid='zeroship.apps'::regclass AND t.tgname='workflow_deploy_notify' \
+             AND t.tgenabled IN ('O','A') AND NOT p.prosecdef AND t.tgtype=21 \
+             AND t.tgqual IS NULL AND t.tgnargs=0 AND cardinality(t.tgattr::smallint[])=0 \
+             AND p.oid='zeroship.workflow_deploy_notify()'::regprocedure) THEN 1 ELSE 0 END::bigint AS safe",
+            &[],
+        ).await?;
+        if rows.len() != 1 || rows[0].integer("safe")? != 1 {
+            return Err(WorkflowServiceError::Unavailable(
+                "workflow deployment notification trigger is missing or disabled".into(),
             ));
         }
         let rows = tx
@@ -72,6 +85,7 @@ impl PlatformPolicy {
         for sql in [
             "SELECT id,plan_id,organization_id,workflows_enabled,archived_at,deleted_at,deploy_hash,manifest_json FROM zeroship.apps LIMIT 0",
             "SELECT id,app_id,deploy_hash,manifest_json,activated_at FROM zeroship.app_deploys LIMIT 0",
+            "SELECT app_id,revision FROM zeroship.workflow_deploy_notifications LIMIT 0",
             "SELECT id,workflows_allowed,archived,runtime_limits_json FROM zeroship.plans LIMIT 0",
             "SELECT app_id,state FROM zeroship.app_spend_state LIMIT 0",
             "SELECT organization_id,state FROM zeroship.organization_billing_status LIMIT 0",
