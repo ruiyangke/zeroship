@@ -838,10 +838,9 @@ const { data, error } = await db.docs.search({
 
 `_distance` is a synthetic column the row carries back from the scan.
 On PG this is `col <-> $query` (pgvector's distance operator
-specialised to the metric). On SQLite this is the distance reported
-by the `sqlite-vec` `vec0` virtual table — the `MATCH` operator
-returns rows joined back to the base collection by `rowid`, with
-`v.distance` aliased as `_distance`.
+specialised to the metric). SQLite uses sqlite-vec's scalar distance
+functions on the stored BLOB column. Filtering happens before ranking and
+limiting the result, so matching rows fill the requested result window.
 
 ### Geo (point + radius)
 
@@ -931,26 +930,11 @@ search. There is no runtime path that notices and repairs it.
 - **PG vector** — `pgvector` `ivfflat` index over the declared metric's
   operator class (`vector_cosine_ops` / `vector_l2_ops` /
   `vector_ip_ops`). Production-grade; scales to millions of rows.
-- **SQLite vector** — `sqlite-vec` `vec0` virtual table, statically
-  compiled into the binary via the `sqlite-vec` Rust crate (no `.so`
-  shipping; the bundled-SQLite invariant is preserved). SIMD distance
-  + native dimension validation + `MATCH` query operator. The base
-  collection keeps a `BLOB` column for the vector payload; AFTER
-  triggers mirror writes into the `<collection>__vec_<column>` vec0
-  vtable so reads can JOIN base <-> vec0 on `rowid` and rank by
-  `MATCH` distance. Metric is pinned at vtable-creation time
-  (`distance_metric=cosine|l2`); **inner product is not supported on
-  SQLite** — vec0 supports cosine + L2 only, and `metric:
-  "inner_product"` surfaces as a typed `VECTOR_UNSUPPORTED_METRIC`
-  error. Use PG (pgvector `vector_ip_ops`) for production inner-
-  product workloads.
-
-  **Not yet built by the migration toolchain.** The `vec0` vtable and
-  its triggers are the one search object nothing creates for you today:
-  on SQLite a `.vector()` field currently migrates to a `BLOB` column
-  with a plain index, and `.search()` against it fails rather than
-  falling back to a scan. Vector search on the `pnpm dev` tier is
-  therefore not usable yet; run vector workloads against PG.
+- **SQLite vector** — exact search over the migrated BLOB column using
+  statically linked sqlite-vec scalar distance functions. No virtual table,
+  trigger, or runtime DDL is required. Cosine and L2 are supported;
+  inner product returns `VECTOR_UNSUPPORTED_METRIC`. This path suits local
+  development; production vector workloads use PostgreSQL indexes.
 - **PG geo** — PostGIS `geography(POINT, 4326)` + GiST index; spheroid
   distance via `ST_DWithin` / `ST_Distance`.
 - **SQLite geo** — packed `(lat, lng)` BLOB + full-scan haversine

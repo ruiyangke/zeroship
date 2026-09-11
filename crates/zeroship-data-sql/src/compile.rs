@@ -1240,7 +1240,7 @@ fn field_is_readable(def: &Value) -> bool {
 /// It is deliberately NOT where the raw column is excluded. `storage.rawColumn`
 /// is a sibling key of `valueColumn`, so a projection that reads `valueColumn`
 /// cannot reach the raw column by any input - there is no branch to get wrong.
-fn value_column_for_field(field: &str, schema_hint: &Value) -> String {
+pub(crate) fn value_column_for_field(field: &str, schema_hint: &Value) -> String {
     schema_hint
         .get(field)
         .and_then(|def| def.get("storage"))

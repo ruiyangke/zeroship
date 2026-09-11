@@ -60,7 +60,7 @@ test("invalid creator input fails without writing rows", async () => {
   }
 });
 
-test("an action composes a query and sends the resulting row to a webhook", async () => {
+test("webhook actions compose queries and respect each host's loopback policy", async () => {
   const received: unknown[] = [];
   const server = createServer(async (request, response) => {
     const chunks: Buffer[] = [];
@@ -82,11 +82,22 @@ test("an action composes a query and sends the resulting row to a webhook", asyn
       const created = await call(target.apiUrl, "todos.create", { userId, title: "share me", priority: "low" });
       const id = object(created.json).id;
       expect(typeof id).toBe("string");
-      expect((await call(target.apiUrl, "todos.shareToWebhook", { id, webhookUrl: `http://127.0.0.1:${address.port}` })).json)
-        .toEqual({ status: 200, ok: true });
-      expect(received.at(-1)).toEqual({ todo: expect.objectContaining({ id, userId, title: "share me" }) });
+      const before = received.length;
+      const result = await call(target.apiUrl, "todos.shareToWebhook", { id, webhookUrl: `http://127.0.0.1:${address.port}` });
+      if (target.name === "sqlite") {
+        expect(result.json).toEqual({ status: 200, ok: true });
+        expect(received).toHaveLength(before + 1);
+        expect(received.at(-1)).toEqual({ todo: expect.objectContaining({ id, userId, title: "share me" }) });
+      } else {
+        expect(target.name).toBe("postgres");
+        expect(result).toHaveProperty("error");
+        expect(received).toHaveLength(before);
+        const log = await readFile(join(inject("databaseArtifacts"), "worker.log"), "utf8");
+        expect(log).toContain("Blocked request to private/internal IP: 127.0.0.1");
+      }
     }
-    expect(received).toHaveLength(targets().length);
+    expect(targets().map((target) => target.name).sort()).toEqual(["postgres", "sqlite"]);
+    expect(received).toHaveLength(1);
   } finally {
     server.closeAllConnections();
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));

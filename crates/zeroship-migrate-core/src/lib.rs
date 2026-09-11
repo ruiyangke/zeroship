@@ -354,13 +354,13 @@ pub use zeroship_migrate_policy::EffectivePolicy;
 // `--check` drift gate. Both sources route through the SAME renderer, so output is
 // byte-identical for equivalent schemas.
 //
-// `FieldStorage` and `AuxiliaryObject` ride on this line rather than staying reachable
-// only through `render::gen_types::`: they are what a consumer reads INSTEAD of
+// `FieldStorage` rides on this line rather than staying reachable
+// only through `render::gen_types::`: it is what a consumer reads INSTEAD of
 // formatting a physical column name, so the type it deserializes into belongs in the
 // one vocabulary an embedding host already names.
 pub use render::gen_types::{
     check_artifacts, diff_artifacts, render_artifacts, render_artifacts_from_descriptors,
-    render_schema_export, render_schema_export_from_descriptors, AuxiliaryObject, CheckDiff,
+    render_schema_export, render_schema_export_from_descriptors, CheckDiff,
     FieldStorage, GenTypesError, GeneratedArtifacts, SchemaExport, DEFAULT_PROJECT_SCHEMA,
     ENV_DTS_FILE, RUNTIME_DESCRIPTOR_FILE,
 };
