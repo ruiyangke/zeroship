@@ -15,60 +15,25 @@ use crate::compile::SqlDialect;
 use crate::transaction::scope::TransactionScope;
 use zeroship_data_sql::SchemaName;
 
-/// The routing decision, frozen at the dispatch frame and not yet bound to a
-/// backend.
-///
-/// **This exists because capture is SYNC and resolution is ASYNC.** The
-/// decision has to be taken while the V8 scope is live; opening the backend
-/// may have to connect, which cannot happen there. Splitting the two states
-/// into two types is what keeps that gap from becoming an `Option` - see
-/// [`TxRoute`].
+/// A synchronous routing decision awaiting backend binding.
+/// Capture callback identity before asynchronous connection setup can yield.
 #[derive(Debug)]
 pub struct CapturedRoute {
     app_id: String,
-    /// The PHYSICAL SCHEMA this dispatch qualifies its tables with and derives
-    /// its PostgreSQL role from. Separate from `app_id`, which is the TENANT:
-    /// the transaction-lane key, the SQLite ATTACH alias, the metering subject
-    /// and the CDC stamp. They hold the same characters today; carrying them
-    /// apart is what forces each consumer to say which one it means.
+    /// Physical schema used for SQL qualification and PostgreSQL role selection.
+    /// App identity remains the transaction-lane and metering key.
     schema: SchemaName,
     /// `true` iff this dispatch is lexically-and-asynchronously inside a
     /// `db.transaction(fn)` callback **for this same app**.
     in_tx: bool,
     scope: Option<TransactionScope>,
-    /// Which SQL dialect this dispatch's statements must be written in.
-    ///
-    /// **A configuration fact, not a connection fact**, which is why it can
-    /// ride here at all: the eager `plan_*` half runs in the V8 prelude,
-    /// BEFORE [`Self::bind`] has opened anything, and still has to emit SQL
-    /// text. `crate::tx_scope::capture_route` reads it once, from the one
-    /// place that can answer it cold, and stamps it here.
-    ///
-    /// Carrying it on the route rather than passing it beside one is what
-    /// makes "planned Postgres, executed on SQLite" unrepresentable instead
-    /// of merely avoided: the plan and the connection come from ONE capture.
+    /// Dialect captured from configuration for planning before backend acquisition.
     dialect: SqlDialect,
 }
 
-/// Where one CRUD dispatch's SQL must go, decided at the dispatch frame and
-/// bound to the backend it will run on.
-///
-/// Carries the `app_id` too, so the exec helpers take a single argument
-/// and cannot be handed a route captured for one app alongside another
-/// app's id.
-///
-/// Deliberately NOT `Clone`/`Copy`: a route is minted for one dispatch and
-/// moved into that dispatch's future. Deliberately NOT `Default` and with
-/// no `From<&str>` — see the module docs.
-///
-/// **There is no `TxRoute::capture` and no public constructor.**
-/// [`CapturedRoute::bind`] is the only way to obtain one, so a dispatcher that
-/// forgets to capture and a dispatcher that captures but forgets to bind are
-/// BOTH compile errors. Carrying `Option<BackendHandle>` on a single type
-/// would have demoted the second one to a runtime `None`, surfacing as
-/// `not_configured` - the same error a genuinely unconfigured plugin returns -
-/// which is precisely the silent-fallthrough class the module docs above say
-/// this type exists to prevent.
+/// A captured dispatch bound to its backend. It carries app identity, callback
+/// scope and dialect together, so execution does not re-read host context.
+/// Construct through [`CapturedRoute::bind`].
 #[derive(Debug)]
 pub struct TxRoute {
     app_id: String,
@@ -109,7 +74,7 @@ impl CapturedRoute {
         &self.schema
     }
 
-    /// The app whose schema/role/metering this dispatch runs under.
+    /// App identity used for transaction lanes and metering.
     pub fn app_id(&self) -> &str {
         &self.app_id
     }
@@ -123,17 +88,7 @@ impl CapturedRoute {
         self.in_tx
     }
 
-    /// The dialect the eager `plan_*` half must write its SQL in.
-    ///
-    /// Readable BEFORE [`Self::bind`], which is the whole reason the dialect is
-    /// stamped at capture rather than derived from the backend: nine `plan_*`
-    /// functions build SQL in the synchronous V8 prelude, where no backend
-    /// exists yet.
-    ///
-    /// It cannot go stale between here and the statement running. The only
-    /// thing that changes a thread's configured dialect is
-    /// `ThreadDbContext::set_resource`, which runs at request admission - never
-    /// inside a dispatch - and capture and bind are both inside ONE dispatch.
+    /// Dialect used by synchronous query planning before backend binding.
     pub fn dialect(&self) -> SqlDialect {
         self.dialect
     }
@@ -155,27 +110,7 @@ impl CapturedRoute {
         }
     }
 
-    /// **Test-only**: a decision known to be outside any transaction.
-    ///
-    /// For test harnesses that drive the exec helpers directly, with no
-    /// V8 isolate to capture from. Gated so it cannot appear in a shipped
-    /// binary; see the module docs. Still has to be `bind`-ed.
-    ///
-    /// **THE DIALECT IS A PARAMETER, and it was `SqlDialect::Postgres`
-    /// unconditionally until 2026-09-03.** A capture without a V8 frame has no
-    /// adapter to ask, and this module may not read `crate::context` to find
-    /// out - but "cannot derive it" is a reason to make the caller state it,
-    /// not a licence to guess. The old constant was wrong on every SQLite
-    /// harness in the tree and was contained by nothing reading it, which is
-    /// not containment but luck: `crud/mod.rs` alone spells `route.dialect()`
-    /// 34 times, counted 2026-09-03 - 17 of them on a `&CapturedRoute` in the
-    /// `plan_*` half, 17 on a `&TxRoute` in the `run_*` half - so the day a
-    /// SQLite fixture reached one it would have planned Postgres SQL and
-    /// blamed the builder.
-    ///
-    /// Callers that already hold the backend should not spell the answer at
-    /// all: `crate::exec::ambient_route_for_tests` derives it from the handle
-    /// it is given.
+    /// Test-only autocommit route. The fixture must supply its backend’s dialect.
     #[cfg(test)]
     #[doc(hidden)]
     pub fn pool_for_tests(app_id: &str, dialect: SqlDialect) -> Self {
@@ -188,11 +123,7 @@ impl CapturedRoute {
         }
     }
 
-    /// **Test-only**: a decision that claims the app's open transaction.
-    ///
-    /// Pairs with `crate::install_tx_marker_for_tests`, which parks a real
-    /// connection in the per-isolate slot. Gated like [`Self::pool_for_tests`],
-    /// and taking the dialect as a parameter for the same reason.
+    /// Test-only route claiming the app’s currently installed transaction scope.
     #[cfg(test)]
     #[doc(hidden)]
     pub fn tx_for_tests(app_id: &str, dialect: SqlDialect) -> Self {
@@ -236,45 +167,14 @@ impl TxRoute {
         &self.backend
     }
 
-    /// The dialect this dispatch's statements are written in.
-    ///
-    /// The value [`CapturedRoute::capture`] stamped, carried through
-    /// [`CapturedRoute::bind`] unchanged. Deliberately NOT re-derived from
-    /// [`Self::backend`]: matching on the handle's variants is the
-    /// vendor-enum read the engine was taken off in the first place, and it
-    /// would let the async half answer a different dialect than the eager half
-    /// planned against.
+    /// Dialect captured for this dispatch’s query planning.
     pub fn dialect(&self) -> SqlDialect {
         self.dialect
     }
 
-    /// `true` when this dispatch's SQL must run on the app's open
-    /// transaction connection.
-    ///
-    /// A `true` here is a claim about the CALL, not about the app, so the
-    /// transaction it names may not be reachable when the SQL finally runs.
-    /// The exec path REFUSES in both such cases rather than quietly
-    /// autocommitting on a pooled connection — `transaction_scope_expired`
-    /// when the enclosing transaction has already settled (a continuation
-    /// that outlived its `transaction()`), `transaction_connection_busy`
-    /// when it is still open but another op holds its one connection.
-    /// Falling back to the pool would let a write the creator wrote inside
-    /// a transaction commit unilaterally, which is the mirror image of the
-    /// defect this type fixes.
-    ///
-    /// This used to buy nothing on the dev tier: SQLite ran the whole app on
-    /// one connection, so a correctly pool-routed write still executed inside
-    /// whatever transaction that connection was holding, and died with its
-    /// `ROLLBACK`. SC-2 Decision 1 retired that on 2026-08-27 - the actor now
-    /// keeps a shared `op_conn` and a transaction connection **per app**, so
-    /// both tiers have somewhere else to send it. The
-    /// `docs/reference/sqlite-divergences.md` row is marked retired in the same
-    /// change.
-    ///
-    /// What SQLite still cannot give, and no number of connections would: an
-    /// autocommit *write* contends for the single writer lock an open
-    /// transaction holds, and waits out `busy_timeout` before reporting lock
-    /// contention. Reads are unaffected.
+    /// Whether this call belongs to a transaction callback. An expired scope or busy
+    /// transaction session must fail instead of falling back to autocommit.
+    /// SQLite autocommit writes can still contend with an open transaction’s writer lock.
     pub fn in_tx(&self) -> bool {
         self.in_tx
     }

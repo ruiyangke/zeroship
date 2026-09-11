@@ -1,39 +1,9 @@
-//! The CRUD query pipeline — one `plan_*` / `run_*` pair per Collection method.
+//! Plan and execute collection operations for Rust callers and the V8 adapter.
 //!
-//! **This module names no `v8` type.** Every operation is split in two, and
-//! the split is a crate boundary, not a style:
-//!
-//! * `plan_*` is the **eager** half. It runs synchronously, before any
-//!   `await`, because what it does cannot be moved past one: recording into
-//!   the active read-set ([`crate::cdc::read_set`]) for subscription narrowing,
-//!   and applying the DB-3 actor fence. It returns a plan - a `BuiltQuery`, a
-//!   [`FindPlan`], a [`SearchPlan`] - and touches no connection.
-//!
-//!   Nine of them take the [`crate::tx_route::CapturedRoute`] the same prelude
-//!   froze, and take it for its `dialect()` alone - a plan is SQL TEXT, and
-//!   text has a dialect long before it has a connection. Taking the route
-//!   rather than a bare `dialect:` argument is what makes "planned Postgres,
-//!   executed on SQLite" unrepresentable: the plan and the connection are two
-//!   halves of ONE capture, and a dispatcher that plans before it captures no
-//!   longer compiles. `plan_search` / `plan_near` take a bare dialect instead,
-//!   because their dispatches deliberately capture no route (they never reach
-//!   `crate::exec::run_sql`); see the adapter tier's `v8_classes::dispatch`.
-//! * `run_*` is the **async** half. It takes the plan plus a
-//!   [`crate::tx_route::TxRoute`] captured by the caller, drives the backend
-//!   through [`crate::exec`], and returns data.
-//!
-//! Neither half allocates a promise or resolves one. That is the adapter's
-//! job: the adapter tier's `v8_classes::dispatch` holds the 17 `dispatch_*` helpers
-//! that mint the promise, freeze the route while the V8 scope is live, and
-//! lower a `run_*` result into a `ResolveValue` via `settle` / `run_op`.
-//!
-//! Those helpers lived HERE until 2026-09-02. Splitting each operation into
-//! `plan_*` / `run_*` came first and made them thin; moving them out came
-//! second and is what let this file stop mentioning V8 at all.
-//!
-//! The capability gate (`refuse_if_query_capability`) is enforced by the
-//! `#[v8_class]` methods *before* reaching a dispatch helper - write ops
-//! trust their callers.
+//! Synchronous planning captures descriptors, records read dependencies and sanitizes
+//! unmask hints before execution can yield. Async execution uses the captured route
+//! for ordinary queries and search, then applies result protection and decoding.
+//! V8 promise creation and delivery belong to the adapter.
 
 use zeroship_data_sql::value::Value;
 
@@ -58,25 +28,9 @@ pub use write_pipeline::{
     WritePathCounters, reset_write_path_counters_for_tests, write_path_counters_for_tests,
 };
 
-// ---------------------------------------------------------------------------
-// dispatch_op template
 
-/// The ENGINE composition behind the three row-returning mutation dispatches -
-/// `deleteOne`, `purgeOne`, `restoreOne`: execute, emit the change event, then
-/// run the read pipeline over the RETURNING rows.
-///
-/// It takes `binding`, `coll` and `route` BY VALUE, which is the point rather
-/// than an accident: it is handed to the adapter tier's `run_op` as
-/// `move |bq| exec_mutation_then_read(binding, coll, route, bq, op)`, and
-/// `run_op`'s `EFut` cannot borrow from the closure it was produced by.
-///
-/// The three callers differ ONLY in `op` - Update, Delete, Update. Each was a
-/// separate copy of this body until 2026-09-02, and the copies were read against
-/// each other first: same `ApplyOptions::default()`, same
-/// `first_row_or_null_masked` resolve. The three-line dispatches that call this
-/// are NOT evidence the family is uniform elsewhere; `deleteMany`, `purgeMany`
-/// and `restoreMany` run no read pipeline at all and are deliberately not folded
-/// in here.
+/// Execute a row-returning mutation, emit its change event and process the result.
+/// Owned arguments let the returned future outlive the dispatch closure.
 pub async fn exec_mutation_then_read(
     binding: DbBinding,
     coll: String,
@@ -95,13 +49,8 @@ pub async fn exec_mutation_then_read(
     .await
 }
 
-/// The ENGINE composition behind `aggregate`. It gets its own function rather
-/// than sharing [`exec_mutation_then_read`] because its `ApplyOptions` are not
-/// the default ones and cannot be reached by a parameter on that signature.
-///
-/// `group_fields` and `result_columns` are owned rather than borrowed because
-/// `ApplyOptions` holds SLICES of them, so both have to outlive the `apply`
-/// call inside this future - a caller-side borrow could not.
+/// Execute an aggregate with its grouping and result-column metadata.
+/// The owned metadata remains available while the read pipeline borrows it.
 pub async fn exec_aggregate_read(
     binding: DbBinding,
     coll: String,
@@ -1311,21 +1260,8 @@ pub struct SearchPlan {
     filter: Value,
 }
 
-/// The EAGER half of `search`: argument decoding plus the descriptor lookup the
-/// SQLite boolean lowering needs.
-///
-/// Every refusal here used to be an eagerly-spawned rejection future with its
-/// own early `return promise`. They are plain `Err`s now, and the adapter feeds
-/// them to `settle`, whose error arm calls the SAME `reject_op` those
-/// rejections did - it is literally
-/// `OpResult::JsValue { resolver, value: ResolveValue::RejectError(err.to_op_error()), request_id }`,
-/// and the old helper was a one-line push of exactly that. Verified by reading
-/// both before the fold, not by test; the helper is now deleted, since folding
-/// the last two search-family dispatchers left it with no callers.
-///
-/// The decoding stays SYNCHRONOUS rather than moving into [`run_search`]: the
-/// ordering of a descriptor read against the dispatching turn is the same
-/// question [`plan_find`] documents, and this half is where the original put it.
+/// Decode search arguments and lower filters using the deployment descriptor
+/// before asynchronous execution.
 pub fn plan_search(
     binding: &DbBinding,
     dialect: compile::SqlDialect,
@@ -1411,12 +1347,7 @@ pub fn plan_search(
     })
 }
 
-/// The DEFERRED half of `search`: no `scope`, no `v8::`, no `OpResult`.
-///
-/// This body still names both backends by their accessors, which is the subject
-/// of the backend-downcast inversion, not of this cut. Moving it here neither
-/// helps nor worsens that; it relocates the same code to the tier that will be
-/// fixed.
+/// Run vector search on the captured transaction route and process the result.
 pub async fn run_search(
     route: &crate::tx_route::TxRoute,
     binding: DbBinding,
@@ -1431,40 +1362,15 @@ pub async fn run_search(
         filter,
     } = plan;
 
-    // The vendor branch lives in `crate::backend_handle`, where naming a vendor
-    // is legitimate, and this function still does not know either backend
-    // exists.
-    //
-    // **This took a bare `&BackendHandle` until 2026-09-03**, on the argument
-    // that `impl VectorIndex for BackendHandle` never reads `in_tx`, so a route
-    // would carry a promise the scan discards. The scan really did discard it,
-    // and that made a vector search inside `db.transaction(fn)` blind to the
-    // transaction's own uncommitted rows. `routed_vector_search` reads the bit
-    // this parameter was already carrying; the trait impl on `BackendHandle` is
-    // gone, because a type that cannot name a connection cannot answer the
-    // question. Bound by `plugin-db/src/tests/search_tx_lane.rs`.
-    //
-    // The descriptor slice is resolved HERE and handed down. The vendor used to
-    // fetch it from `crate::context` itself, which is the backend tier reaching
-    // into engine state - an edge that cannot survive the crate split.
+    // Pass the deployment descriptor and captured route to the search backend so
+    // transactional searches can see their own writes.
     let schema = crate::descriptor::collection_schema(&binding, &coll)?;
     let rows = crate::backend_handle::routed_vector_search(
         route, &binding, &coll, &column, &vector, k, metric, &filter, &schema,
     )
     .await?;
 
-    // Metering, success arm only. The search family is a read op on
-    // either backend and reaches the database WITHOUT passing
-    // through `exec::run_sql` - the PG arm goes to
-    // `PostgresBackend::query_roled_values`, the SQLite arm to its own
-    // scan - so until 2026-09-01 it was billed as nothing at all.
-    // Counted here at the op boundary rather than in either vendor:
-    // the vendor tier must not reach up into the engine for the
-    // meter handle, which is the cycle #110 just removed.
-    //
-    // It stays AFTER the search and BEFORE the read pipeline, exactly where the
-    // hand-rolled `match result { Ok(rows) => ... }` put it: a read that
-    // succeeds and then fails to decrypt is still a read that hit the database.
+    // Count the successful database read even if later result decoding fails.
     crate::metrics::emit_db_metric(binding.app_id(), crate::metrics::DB_READS, 1);
 
     read_pipeline::apply(
@@ -1582,10 +1488,7 @@ pub fn plan_near(
     })
 }
 
-/// The DEFERRED half of `near`: no `scope`, no `v8::`, no `OpResult`.
-///
-/// Like [`run_search`], this still names both backends by their accessors. That
-/// belongs to the backend-downcast inversion, not to this cut.
+/// Run geographic search on the captured transaction route and process the result.
 pub async fn run_near(
     route: &crate::tx_route::TxRoute,
     binding: DbBinding,
@@ -1600,28 +1503,14 @@ pub async fn run_near(
         filter,
     } = plan;
 
-    // As in `run_search`: the vendor branch and the SQLite ATTACH prelude live
-    // in `crate::backend_handle`, and the scan runs on the lane `route.in_tx()`
-    // names - which it did not until 2026-09-03, with the same consequence the
-    // vector half carried.
-    // Resolved here for the same reason as `run_search` above.
+    // Use the captured route so the search sees this transaction’s writes.
     let schema = crate::descriptor::collection_schema(&binding, &coll)?;
     let rows = crate::backend_handle::routed_spatial_near(
         route, &binding, &coll, &field, point, radius_m, &filter, limit, &schema,
     )
     .await?;
 
-    // Metering, success arm only. The search family is a read op on
-    // either backend and reaches the database WITHOUT passing
-    // through `exec::run_sql` - the PG arm goes to
-    // `PostgresBackend::query_roled_values`, the SQLite arm to its own
-    // scan - so until 2026-09-01 it was billed as nothing at all.
-    // Counted here at the op boundary rather than in either vendor:
-    // the vendor tier must not reach up into the engine for the
-    // meter handle, which is the cycle #110 just removed.
-    //
-    // Position preserved from the hand-rolled `match result`: after the search,
-    // before the read pipeline.
+    // Count the successful database read even if later result decoding fails.
     crate::metrics::emit_db_metric(binding.app_id(), crate::metrics::DB_READS, 1);
 
     read_pipeline::apply(
@@ -1704,35 +1593,9 @@ async fn prepare_upsert_doc_for_write(
     .await
 }
 
-/// Run the write-side encryption pass over `doc`.
-///
-/// **The CRYPTO does not branch on the arm; the SQL LOWERING does.** Both
-/// arms encrypt with `encryption::aead` under a key from the same
-/// `encryption::KeyStore`, which is why this function no longer selects a
-/// backend at all. What still differs is how the ciphertext is bound:
-///
-/// - **PG arm** (chosen at runtime, not compiled in): the SQL builder
-///   binds the native ciphertext directly.
-/// - **SQLite arm** (chosen at runtime, not compiled in): the keys are
-///   env-var-sourced. The SQL builder (when called with `SqlDialect::Sqlite`)
-///   emits `unhex($N)` over a hex parameter to produce the BLOB.
-///
-/// Encrypted columns work end-to-end on both backends through the
-/// SDK's CRUD path.
-///
-/// If neither backend arm is compiled in (no `pg`, no `sqlite`) and the
-/// schema declares an encrypted column, surface a typed Configuration
-/// error so the SDK can branch on `.code` rather than silently writing
-/// plaintext to the BYTEA/BLOB column.
-///
-/// `keys` is a PARAMETER rather than something this function resolves, and it
-/// is a [`crate::encryption::KeyStore`] rather than a backend or a route: this
-/// pass issues no SQL, so it has no routing decision to make and must not be
-/// handed one to make it from. It called `exec::ensure_backend_for_shared_sql`
-/// until 2026-09-03 purely to reach `backend.key_store()`, which put an
-/// ADAPTER read (`crate::context`, `init_pool_async`) behind an ENGINE
-/// function on every encrypted write. Every caller already holds the handle
-/// the write itself will run on, so the store travels down from there.
+/// Encrypt declared fields with the host-supplied project key store.
+/// The shared pass returns native ciphertext and retains mask inputs in a
+/// zeroizing sidechannel; it performs no SQL or backend resolution.
 async fn encryption_pass_dispatch(
     keys: &crate::encryption::KeyStore,
     app_id: &str,
@@ -1742,22 +1605,6 @@ async fn encryption_pass_dispatch(
     doc: &mut Value,
     sidechannel: &mut mask_pass::MaskPlaintextSidechannel,
 ) -> Result<(), DbError> {
-    // One arm, not two: see the twin note in `read_pipeline.rs`. Both branches
-    // called this same function with these same arguments before the
-    // `EncryptedColumn` trait was deleted on 2026-09-02.
-    //
-    // A `column_encryption_unavailable` refusal used to follow them, guarded by
-    // `schema_has_encrypted_columns`. IT WAS UNREACHABLE, and collapsing the
-    // arms is what exposed that: the backend resolution returned a
-    // `BackendHandle`, not an `Option`, and the handle has exactly two variants
-    // - so `as_encrypted_column_pg()` and `as_encrypted_column_sqlite()` were
-    // exhaustive between them and one always returned first. The refusal read
-    // as the fence that stops a declared-encrypted column being written in
-    // plaintext; it never ran, and deleting it removes that impression rather
-    // than a protection. The real fence is now stronger than the `?` it
-    // replaced: `keys` is a required borrow, so a caller with no key store
-    // cannot reach this function at all - a compile error where the funnel
-    // gave a runtime one.
     crate::protection::encryption_pass::encrypt_row_on_write_with_sidechannel(
         keys,
         app_id,

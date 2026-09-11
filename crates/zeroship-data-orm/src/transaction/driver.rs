@@ -36,26 +36,8 @@ pub(crate) use completion::Completion;
 mod settlement_tests;
 
 thread_local! {
-    /// The generation stamped on the next transaction session this thread opens,
-    /// for SC-1's guard order step 4.
-    ///
-    /// **Thread-level, NOT per-lane**, which is why it is a module thread-local
-    /// here rather than a `TxLane` field: a counter that restarted per lane
-    /// would let a stale completion authenticate against a later session by
-    /// arithmetic coincidence. A completion naming a generation the current
-    /// session does not carry is stale, and that check is only as good as the
-    /// counter never going backwards.
-    ///
-    /// **It has no `reset_for_tests`, deliberately.** It lived on
-    /// `ThreadDbContext` until 2026-09-02, where `reset_context_for_tests`
-    /// rebuilt the whole struct and so silently returned it to 0 - contradicting
-    /// the "never reset" its own doc claimed. Nothing depended on the reset
-    /// (the one test built a private context), and not offering one makes the
-    /// documented property true rather than nearly true.
-    ///
-    /// Its only consumer is [`Action::IssueBegin`] below. It sat in the adapter
-    /// purely because that is where the context was; no adapter code ever read
-    /// or wrote it.
+    /// Monotonic session generation for this thread. Never reset it: generations must
+    /// remain distinct across lane reuse so stale completions cannot match a new session.
     static BACKEND_GENERATION: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
@@ -68,19 +50,8 @@ fn next_backend_generation() -> u64 {
     })
 }
 
-/// The authority axis a transaction is admitted under, today.
-///
-/// **Deliberately opaque, and named for the axis rather than baked into it.**
-/// [`AuthorityIdentity`] compares only for equality and never parses its key;
-/// the operator is weighing decoupling apps from databases, which would re-key
-/// this onto the database or the grant. That move must be a change *here* and
-/// nowhere else, so nothing downstream of this function may look inside the key.
-///
-/// The incarnation is `0` because no authority record exists to read one from
-/// yet. That is stated rather than hidden: until a lifecycle record is published
-/// and observed, the classifier has nothing to disagree with and
-/// [`observation_for`] echoes the expectation. The wiring is real; the *input*
-/// is not yet.
+/// Placeholder authority until a lifecycle source supplies identity, domain and epoch.
+/// Keep identity opaque to callers; this value does not fence live schema changes.
 fn expected_authority(app_id: &str) -> ExpectedAuthority {
     ExpectedAuthority {
         identity: AuthorityIdentity::for_app(app_id, 0),
@@ -89,13 +60,8 @@ fn expected_authority(app_id: &str) -> ExpectedAuthority {
     }
 }
 
-/// The authority observation the driver submits for `Preparing`.
-///
-/// See [`expected_authority`]: there is no lifecycle record to read, so this
-/// echoes the expectation and the classifier returns `Current`. It runs anyway,
-/// because the reducer re-runs the classifier on the observation itself - a
-/// publisher cannot smuggle a verdict past it - and because the day a record
-/// exists, this is the one function that has to change.
+/// Echo the placeholder authority while no lifecycle source is connected.
+/// The reducer validates observations itself rather than accepting a supplied verdict.
 fn observation_for(expected: &ExpectedAuthority) -> ObservedAuthority {
     ObservedAuthority {
         identity: expected.identity.clone(),
@@ -969,11 +935,7 @@ impl CleanupIdentity {
         crate::tx_lanes::with(|l| Self::read(l, app_id, token))
     }
 
-    /// Is this still the cleanup the app's reducer is running?
-    /// Takes the LANES, not the whole context: everything it reads is lane
-    /// state (`transaction_reducer`). It took `&ThreadDbContext` until
-    /// 2026-09-02, which forced its caller to hold an adapter borrow to answer
-    /// an engine question.
+    /// Check that this token and session generation still identify the active cleanup.
     fn is_current(self, lanes: &crate::tx_lanes::TxLanes, app_id: &str) -> bool {
         Self::read(lanes, app_id, self.token) == Some(self)
     }

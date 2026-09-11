@@ -18,17 +18,11 @@ pub struct ProbeOutcome {
     pub refused: Option<&'static str>,
 }
 
-/// Admit a top-level transaction and drive it to `Idle`.
-///
-/// **The backend is a parameter.** This resolved its own through
-/// `crate::tx_scope::ensure_backend()` until 2026-09-03 - an ENGINE file calling
-/// the ADAPTER, which cargo refuses once the two are separate crates. The caller
-/// that owns the thread context does the lookup, which for every arm in
-/// `crates/zeroship-data-v8/src/tests/postgres/transactions.rs` is one `zeroship_data_v8::tx_scope::ensure_backend()`.
+/// Admit a top-level transaction on the supplied backend and drive it to `Idle`.
 ///
 /// # Errors
 ///
-/// The backend error behind a `BEGIN` that did not open.
+/// Returns the error reported by transaction admission or session setup.
 pub async fn begin(
     app_id: &str,
     schema: zeroship_data_sql::SchemaName,
