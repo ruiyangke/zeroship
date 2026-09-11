@@ -63,6 +63,7 @@ pub(crate) const SPEND_RECOMPUTE: i64 = 0x7a73_7263_6d70_0001;
 /// checks. `workflow_blob_gc` is deliberately absent - it uses
 /// `pg_try_advisory_xact_lock` with a `hashtextextended` of a text label
 /// rather than a literal key from this set.
+#[cfg(test)]
 pub(crate) const ALL: [(i64, &str); 7] = [
     (BILLING_SWEEP, "billing sweep"),
     (BILLING_SAFETY_NET, "billing safety net"),

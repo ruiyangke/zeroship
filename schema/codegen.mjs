@@ -362,6 +362,7 @@ function rsSource() {
   L.push("/// Named rather than merely absent so the gate can assert the list is the exact");
   L.push("/// complete schema `default` set -- an omission here would read as \"no default");
   L.push("/// exists\" instead of a deliberate resolution rule.");
+  L.push("#[cfg(test)]");
   L.push(`pub const SCHEMA_DEFAULTED_FIELDS: &[&str] = &[${withDefaults.map((l) => jsonLit(l.path)).join(", ")}];`);
   L.push("");
   L.push("/// Optional defaults explicitly safe for a present file's resolved view.");
