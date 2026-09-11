@@ -554,16 +554,8 @@ impl Writer {
         self.write_bound(slot);
     }
 
-    /// Bind a value **without** writing anything, returning its slot.
-    ///
-    /// Paired with [`Writer::write_bound`] for the one shape that needs a
-    /// parameter in two places: a search's distance expression appears in the
-    /// select list and again in the `ORDER BY`, and the operand is the same
-    /// value both times. Binding it twice would be correct and would put a
-    /// second copy of the query vector on the wire - for a 1536-dimension
-    /// embedding, roughly 12 KB of duplicated text per search. Today's builder
-    /// re-uses `$1` for exactly this reason
-    /// (`crates/zeroship-data-sql/src/compile.rs:5006-5013`).
+    /// Bind a value without rendering its placeholder. Reusing the slot avoids
+    /// sending duplicate search operands for projection and ordering.
     fn bind(&mut self, value: Literal) -> usize {
         self.params.push(value);
         self.params.len()
@@ -590,15 +582,8 @@ impl Writer {
     }
 }
 
-/// `PostgreSQL`'s parameter spellings.
-///
-/// Every one of them is a bare `$n`, and the `bytes` arm is the interesting
-/// one: today's builder wraps it as `decode($N, 'base64')::bytea`
-/// (`query.rs:106-122`) because the parameter is a `String` carrying base64.
-/// A [`Literal::Bytes`] is a `Vec<u8>`, so the driver binds it as binary
-/// directly and the wrapper has nothing left to do. The fragment is deleted,
-/// not moved - which is the test to apply to any "typed parameter" change:
-/// if the SQL wrapper survives, the type did not replace the tag, it joined it.
+/// PostgreSQL parameter spelling for native values. Bytes bind directly; vector
+/// parameters require a cast to the extension type.
 #[derive(Debug, Clone, Copy)]
 pub struct PostgresValueFormat;
 
@@ -627,15 +612,8 @@ impl ValueFormat for PostgresValueFormat {
         format!("${slot}")
     }
 
-    /// `$n::vector`, and the cast is not decoration.
-    ///
-    /// The `vector` type is created by `CREATE EXTENSION vector`, so its OID is
-    /// per-database and is not a constant the driver can know at compile time.
-    /// Binding the value as text and casting is what sidesteps the binary
-    /// protocol's type-discovery handshake - the reason
-    /// `crates/zeroship-data-sql/src/compile.rs:4936-4940` gives for the same
-    /// choice. Unlike the `bytes` wrapper this crate deleted, this one does
-    /// real work and stays.
+    /// Cast the text-bound vector because its extension-defined type identity
+    /// varies by database.
     fn vector_placeholder(&self, slot: usize) -> String {
         format!("${slot}::vector")
     }

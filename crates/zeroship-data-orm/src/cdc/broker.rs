@@ -867,16 +867,8 @@ pub fn live_subscription_count() -> usize {
     lock_broker().current_thread_subscription_count()
 }
 
-/// Close and remove every subscription owned by the CALLING THREAD, whatever
-/// app it belongs to. Test cleanup only: it is the "clean slate" a test takes
-/// before asserting on counts it owns.
-///
-/// Thread-scoped by construction, and that is the whole contract. The
-/// process-wide spelling of this used to exist as the `None` arm of
-/// [`drop_app`], where it tore down concurrently-running tests on other
-/// threads; `zeroship_data_orm::exec`'s `reset_world` records what that
-/// cost. Prefer [`drop_app`] when the test knows its app id - it is scoped
-/// tighter still, and it is the spelling production uses.
+/// Close and remove subscriptions owned by the calling test thread, leaving
+/// concurrent tests’ subscriptions intact.
 #[cfg(test)]
 pub fn drain_current_thread_subscriptions() {
     let subscriptions = lock_broker().take_current_thread_subscriptions();
@@ -951,17 +943,8 @@ pub fn message_to_json(msg: &SubscriptionMessage) -> String {
     }
 }
 
-/// Drop platform-internal column names from a change event's column list.
-///
-/// A change to a masked field touches two physical columns - the field's own
-/// (the mask) and `__zs_raw__<field>` (the real value) - and the second is not
-/// a name a creator has ever seen. Only the `__zs_` family is removed, so a
-/// system field like `updated_at` still reaches the subscriber.
-///
-/// The event carries no schema, which is exactly why this is a name test on a
-/// prefix the platform owns and `validate_field_name` refuses, rather than a
-/// descriptor lookup: the WAL consumer builds these lists in a background task
-/// with no isolate and no descriptor in reach.
+/// Remove protected storage names while retaining visible system fields.
+/// Events carry no descriptor, so this uses the platform’s reserved storage prefix.
 fn creator_visible_columns(columns: &[String]) -> Vec<String> {
     columns
         .iter()
@@ -970,31 +953,8 @@ fn creator_visible_columns(columns: &[String]) -> Vec<String> {
         .collect()
 }
 
-// ---------------------------------------------------------------------------
-// WS push-frame format
-// ---------------------------------------------------------------------------
-//
-// Mirrors the shape spelled out in the subscription task contract:
-//
-// ```json
-// { "type": "zs.subscription.event",
-//   "handle": "<subscription_id>",
-//   "event": { "kind": "insert", "collection": "users", "pk": "usr_42" } }
-// ```
-//
-// The intent is that a WS handler in JS owns a `Map<handle, ws_conn>`
-// and pushes the JSON-encoded frame on receipt. The frame is shaped to
-// be self-describing — `type` lets the WS handler distinguish broker
-// events from app-level WS messages on the same connection.
-//
-// **There is deliberately no row payload.** `ws_frame_for_change` used to carry
-// `ev.new_tuple`, which is every physical column of the row with its value -
-// including a masked field's raw column, unmasked, undecrypted and unaudited.
-// It had no caller outside this module, and keeping a dead exporter of the raw
-// tuple around while the rest of this change removes every other way to reach
-// it is how it gets wired up later by someone who reads the function and not
-// the design. The frame a subscriber gets names the changed columns; fetching
-// the row goes through `find`, which is where the read pipeline runs.
+// WebSocket notifications contain invalidation metadata only. Row values must
+// be fetched through the ORM’s authorization and read-protection pipeline.
 
 /// Build a WS push frame for a subscription message (Resync / Closed /
 /// Change). A `Change` reports its op, collection, pk and creator-visible
@@ -1898,11 +1858,7 @@ mod tests {
     // Schema-pending decoder window unit tests.
     // -----------------------------------------------------------------
 
-    /// Guard that engages schema-pending on construction + clears on
-    /// Drop, even on panic-unwind. Tests use this so a panicked
-    /// assertion doesn't leak the thread-local into the next test on
-    /// the same thread (cargo test runs each `#[test]` on its own
-    /// thread by default, but the safety belt costs nothing).
+    /// Clear schema-pending state even if a test assertion panics.
     struct SchemaPendingTestGuard {
         app_id: String,
     }

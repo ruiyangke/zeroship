@@ -65,10 +65,8 @@ libs/
   compio-postgres/            standalone transport and pool
 ```
 
-The former engine, domain, and vendor crates are consolidated into the ORM.
-The query-builder crate is replaced by the SQL crate. PostgreSQL and SQLite
-implementations live under the ORM's `backend` module. `compio-postgres` remains
-a standalone library with no dependency on the ORM.
+PostgreSQL and SQLite implementations live under the ORM’s `backend` module.
+`compio-postgres` is a standalone library with no dependency on the ORM.
 
 Migration services and the CDC relay retain their process boundaries. The ORM
 registration contract grants no DDL, backup, replication, or provisioning power.

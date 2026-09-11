@@ -63,14 +63,7 @@ pub struct ColumnInfo {
 }
 
 impl Default for ColumnInfo {
-    /// `Default` impl so call sites can use
-    /// `..Default::default()` for the vector/geopoint fields
-    /// without restating the base field defaults. The B-tree column
-    /// shape is: empty type string, nullable, no default, no
-    /// volatility, no vector dimension, not a geopoint, **no
-    /// encryption**. Every existing
-    /// introspection / test site overrides `pg_type` + `not_null`
-    /// explicitly.
+    /// Empty catalog metadata for callers to populate from introspection.
     fn default() -> Self {
         Self {
             pg_type: String::new(),
@@ -80,11 +73,6 @@ impl Default for ColumnInfo {
             vector_dims: None,
             is_geopoint: false,
             encryption: None,
-            // Mask defaults to None. Every existing
-            // column gets `mask: None`; only NEW `.mask(...)`
-            // declarations populate `Some(_)`, from
-            // schema-meta introspection (PG sidecar /
-            // SQLite sentinel comment).
             mask: None,
         }
     }
@@ -100,12 +88,7 @@ pub struct EncryptionMeta {
     pub wraps: WrappedType,
 }
 
-/// The inner type wrapped by a `t.encrypted(...)` builder.
-///
-/// Per Q-P5-B: only string / number / bytes are supported. Arbitrary
-/// JSON (object / array) wraps are deferred -- they'd add a
-/// serialisation round-trip on every read/write that isn't needed for
-/// the current surface.
+/// Plaintext primitive encoded in a catalog encryption sentinel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WrappedType {
     String,
@@ -113,69 +96,23 @@ pub enum WrappedType {
     Bytes,
 }
 
-/// Column-mask metadata attached to a [`ColumnInfo`]
-/// when the SDK declares the column with `.mask({ kind, classification })`
-/// or, for `t.encrypted()` columns, when the schema-normaliser
-/// auto-populates the default mask (`{ kind: "full", classification: "pii" }`).
-///
-/// Two-column: when present, the field's OWN column holds the MASK and a
-/// hidden `__zs_raw__<col>` sibling holds the REAL value, carrying the
-/// declared type and constraints. A default read needs no aliasing - the
-/// column with the declared name is the mask - and the sibling is HIDDEN
-/// from the SDK surface: `Row<S>` contains only the declared field, wrapped
-/// in `MaskedValue<T>`.
-///
-/// Population path:
-/// - **PG**: from `__zeroship_meta.mask_columns` rows the DDL
-///   emitter writes alongside the table create.
-/// - **SQLite**: from a sentinel CHECK comment
-///   `/* zsmask:{kind}:{classification} */` parsed out of
-///   `sqlite_master.sql` (the same regex-on-DDL pattern used for encryption).
+/// Mask metadata recovered from a protection sentinel on the visible column.
+/// PostgreSQL stores it in a column comment; SQLite retains it in table DDL.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MaskMeta {
-    /// Mask transform applied at write time to compute the sibling
-    /// column's value from the plaintext. See [`MaskKind`].
+    /// Transform used to derive the visible mask from the plaintext.
     pub kind: MaskKind,
     /// Classification of the source field -- drives unmask
     /// authorization and audit-row tagging.
     pub classification: Classification,
-    /// Name of the physical sibling column holding the REAL value.
-    /// Always `crate::compile::raw_column_name(field)`.
-    ///
-    /// **It is a DERIVATION, not a catalog record, and this doc said the
-    /// opposite until 2026-09-04** - that it was "stored explicitly so the
-    /// read/write passes can quote the right identifier without re-deriving it".
-    /// Both introspectors that populate it call `raw_column_name` themselves
-    /// (`zeroship_data_orm::backend::postgres::pg_introspect`, `zeroship_data_orm::backend::sqlite`), because
-    /// the mask sentinel rides the MASKED column on both vendors and nothing
-    /// marks the raw one - there is no pairing in the catalog to read. Storing a
-    /// derivation does not make a consumer independent of it, and no read or
-    /// write pass ever consumed this field: measured 2026-09-04, its only
-    /// readers in the tree are three assertions in test code.
-    ///
-    /// The passes get the name from the descriptor instead, via
-    /// `crate::compile::declared_raw_column`. Nothing in `src` reads this field on
-    /// any path - not even the diff classifier, whose own mask arms call
-    /// `crate::compile::raw_column_name(field)` directly rather than consulting the
-    /// `MaskMeta` beside them. Do not add a consumer without deciding what the
-    /// field is FOR; a struct member that only tests read is a claim about the
-    /// system that the system does not make.
+    /// Conventional raw-column name derived during catalog recovery.
+    /// Runtime reads and writes use the installed descriptor’s storage mapping.
     pub sibling_column: String,
 }
 
-/// Built-in mask transform applied at write time.
-///
-/// Mirrors the SDK's `MaskKind` union (`sdks/db/src/types.ts`).
-/// `None` is the explicit opt-out variant for encrypted columns
-/// where the creator genuinely wants plaintext-on-read; introspection
-/// branches on `kind == None` to skip sibling emission and use the
-/// decrypt-on-read path. Every other variant produces a
-/// pre-computed masked string stored in the sibling column.
-///
-/// **No raw user-defined JS functions for masking.** Creator-supplied
-/// mask functions are a security risk (an AI-generated `mask: v => v`
-/// defeats the purpose). Only named built-in strategies -- adding a
-/// new strategy is a platform code change, not creator config.
+/// Built-in mask strategy. `None` disables masking while retaining encryption.
+/// Custom callbacks are not accepted: a transform that returns its input would
+/// expose plaintext through the ordinary read surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MaskKind {
     /// `"***"` — maximum redaction. Default for encrypted columns.

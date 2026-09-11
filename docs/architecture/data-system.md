@@ -105,14 +105,14 @@ Three ideas, and the whole design is the consequence of separating them:
 - A **Grant** binds an app to a database with a capability. This is the edge that used to be an
   equality.
 
-### What it replaces
+### Current identity boundary
 
-Today an app id **is** the schema name, the role name, the encryption salt and the publication key -
-one string playing five parts. `crates/zeroship-data-orm/src/cdc/broker.rs` says so plainly:
-"`schema` is conflated with `app_id` (every app has its own schema named after `app_id`)."
+Runtime bindings carry app identity separately from the physical schema. App identity
+keys transaction lanes and metering; the schema selects SQL qualification and PostgreSQL
+roles. The host supplies project encryption keys and authorized app bindings through
+`crates/zeroship-data-orm/src/encryption/keys.rs`.
 
-That conflation is why an app cannot have a database that outlives it, and why two apps cannot
-share one. Giving the database its own identity is the whole change; everything below follows.
+The independently managed Database and Grant records described below remain planned.
 
 ---
 
@@ -408,29 +408,16 @@ that would have sunk the role-name form, and both were measured away:
 So the comparison form buys nothing the name does not, and costs a statement in every setup batch
 forever.
 
-**Only the producer is missing; the consumer ships.**
-`crates/zeroship-data-orm/src/transaction/reducer/identity.rs` defines `SchemaEpoch`, and `:265-267`
-compares the observed epoch against the expected one and returns `Verdict::ReResolve` - retryable,
-distinct from the terminal denials above it. What has no input is `expected_authority` at
-`crates/zeroship-data-orm/src/transaction/driver.rs`, which mints `SchemaEpoch::new(0)`, and
-`observation_for` at `:157-167`, which echoes it back; the doc comment at `:140-141` says so outright:
-"The wiring is real; the *input* is not yet." Building the epoch is supplying one input to a
-classifier that already ships.
+**Schema-epoch comparison exists; a live authority source is still missing.**
+`crates/zeroship-data-orm/src/transaction/reducer/identity.rs` compares observed and expected
+epochs and can return `Verdict::ReResolve`. In
+`crates/zeroship-data-orm/src/transaction/driver.rs`, `expected_authority` supplies a
+placeholder and `observation_for` echoes it. This is not a live migration fence.
 
-<!-- CORRECTED 2026-09-04. Three of this paragraph's four line citations were
-wrong, and they were wrong DIFFERENTLY from the same claims in AGENTS.md - two
-documents drifting independently over one piece of code, not one copy-paste
-propagating. `identity.rs:313-315` pointed at `);`, `}` and a blank line;
-`driver.rs:106` is inside unrelated BACKEND_GENERATION prose; and `:100-101` was
-credited with a quote that lives at `:140-141`. Only `identity.rs:97` was right.
-Every one passed tests/doc_citation_gate.sh, which rules on the path and on the
-line being inside the file, never on it being the right line. -->
-
-
-**Live epochs are capped at two, fail-closed.** The reaper is part of the apply, not a sweep: an
-apply that cannot drop epoch `E-1`'s roles refuses to advance to `E+1`. That bounds an otherwise
-unbounded leak into the cluster-shared catalog, and it is what gives an in-flight isolate one epoch
-of grace rather than none.
+**Epoch retention must be bounded and fail closed (designed).** Applying a new epoch must
+retire obsolete roles before advancing, retaining the current epoch and its predecessor
+for in-flight isolates.
+A failed retirement must refuse advancement to prevent unbounded catalog growth.
 
 **What is not measured, and must not be read as covered:** per-backend membership cache construction
 at CONNECT time. The `SET ROLE` measurement above is on an established backend; a new backend still
