@@ -13,7 +13,7 @@
 //!       → StreamWriter → StreamReader → Backend::put_stream
 //!
 //!     JS `env.storage.getStream(bucket, key)` + `readChunk(id)` loop
-//!       → Backend::get_stream → per-thread, app-keyed registry
+//!       → Backend::get_stream → isolate-owned registry
 //!         (cross-tenant isolation is covered by cross_tenant_streams.rs)
 //!       → ResolveValue::Bytes
 //!       → JS reassembles the object
@@ -37,6 +37,9 @@ use zeroship_runtime::{
 
 use zeroship_storage::{LocalFs, StorageStore};
 use zeroship_storage_v8::StorageBinding;
+
+#[path = "../../../tests/fixtures/s3.rs"]
+mod s3_fixture;
 
 // The app exercises the native streaming surface directly (NOT the SDK),
 // then self-asserts. A multi-chunk ReadableStream forces the upload read
@@ -148,21 +151,16 @@ fn module(source: &str) -> Vec<ModuleEntry> {
 }
 
 fn run_app(app: &'static str) -> (u16, String) {
+    let root = tempfile::tempdir().unwrap();
+    let store = StorageStore::from_backend(Arc::new(LocalFs::new(root.path())));
+    run_app_with_store(app, store)
+}
+
+fn run_app_with_store(app: &'static str, store: StorageStore) -> (u16, String) {
     compio::runtime::Runtime::new().unwrap().block_on(async move {
         init_v8();
-
-        // Unique per call so concurrent tests in this binary never share a
-        // storage root (cargo runs test fns on parallel threads).
-        static SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let dir = std::env::temp_dir()
-            .join(format!("zs-storage-e2e-{}-{seq}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-
-        let mut env_vars = HashMap::new();
-        env_vars.insert("APP_ID".to_string(), "e2e_app".to_string());
-
-        let plugin: Arc<dyn NativePlugin> = Arc::new(StorageBinding::new(StorageStore::from_backend(Arc::new(LocalFs::new(&dir))), None));
+        let env_vars = HashMap::from([("APP_ID".to_owned(), "e2e_app".to_owned())]);
+        let plugin: Arc<dyn NativePlugin> = Arc::new(StorageBinding::new(store, None));
 
         let runtime = Runtime::builder()
             .modules(module(app))
@@ -175,7 +173,7 @@ fn run_app(app: &'static str) -> (u16, String) {
         let ctx = RequestCtx::new(CancelFlag::new());
         let outcome = runtime.call_fetch_handler("GET", "http://localhost/", &[], "", &env, ctx);
 
-        let result = match outcome {
+        match outcome {
             FetchOutcome::Response { status, body, .. } => {
                 (status, String::from_utf8_lossy(&body).into_owned())
             }
@@ -202,10 +200,7 @@ fn run_app(app: &'static str) -> (u16, String) {
             FetchOutcome::WebSocketUpgrade { .. } => {
                 panic!("storage e2e: unexpected WebSocketUpgrade outcome")
             }
-        };
-
-        let _ = std::fs::remove_dir_all(&dir);
-        result
+        }
     })
 }
 
@@ -562,4 +557,18 @@ fn e2e_storage_streaming_backpressure_over_cap() {
         body.contains(r#""ok":true"#),
         "over-cap streaming round-trip reported failure; body: {body}"
     );
+}
+
+#[test]
+fn e2e_storage_streaming_s3() {
+    let minio = s3_fixture::Minio::start();
+    let backend = zeroship_storage::S3::with_tuning(
+        minio.config("v8"),
+        minio.credentials(),
+        zeroship_storage::S3UploadTuning::DEFAULTS,
+    );
+    let store = StorageStore::from_backend(Arc::new(backend));
+    let (status, body) = run_app_with_store(STORAGE_STREAM_E2E_APP, store);
+    assert_eq!(status, 200, "storage S3 binding failed: {body}");
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["ok"], true);
 }
