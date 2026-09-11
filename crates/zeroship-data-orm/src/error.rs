@@ -262,26 +262,9 @@ impl fmt::Display for DenyReason {
     }
 }
 
-/// Classified error origin for every fallible `plugin-db` helper.
-///
-/// Construct via the variant directly. Vendor tiers translate driver errors
-/// into this neutral hierarchy before handing them to core consumers.
+/// Backend-neutral database errors shared by ORM callers and host adapters.
 #[derive(Debug, Clone)]
-// NOT `#[non_exhaustive]`, and that is a decision rather than an omission.
-//
-// The attribute was here while `DbError` and its `to_op_error` lowering lived
-// in ONE crate, where it cost nothing: rustc only demands a wildcard arm across
-// a CRATE BOUNDARY. The split put the lowering in `zeroship-data-v8` and the
-// type here, so the attribute would have forced `_ => ...` into
-// `op_error.rs` - silently retiring the exhaustiveness check that is the only
-// guarantee every variant reaches the V8 boundary with a canonical `.code`
-// instead of falling into a default.
-//
-// `#[non_exhaustive]` buys the freedom to add a variant without breaking
-// downstream matches. There is no downstream: zeroship is pre-launch and every
-// consumer is in this workspace, so it protects nobody and disables a real
-// check. If this crate is ever published, restore it - and expect to hand-audit
-// every match on `DbError` from then on.
+// Keep this enum exhaustive so host adapters must map every variant explicitly.
 pub enum DbError {
     /// A backend constraint refusal represented as a JSON envelope. The full
     /// envelope is in `envelope_json`; the variant exists so callers know the wire
@@ -651,36 +634,9 @@ impl DbError {
     }
 }
 
-// `DbError::backend_unsupported(op)` stood here until 2026-09-04, when it was
-// deleted as dead: zero callers in any cfg. Its own rustdoc claimed "every call
-// site routes through this helper", and that was the reverse of the truth - the
-// two sites emitting that `code` today spell the struct literal out by hand
-// (`zeroship-data-orm`'s `exec.rs` and `zeroship-data-v8`'s
-// `v8_classes/replication.rs`), with two different `hint` shapes.
-//
-// THE WARNING THE HELPER CARRIED IS WORTH MORE THAN THE HELPER WAS, so it is
-// kept here: four hand-rolled literals of this code had already drifted into
-// three distinct hints once, which is why the helper was written. The drift has
-// simply restarted from two. Anyone re-centralising it should start from the
-// live literals rather than resurrecting this function, whose message text no
-// callers ever agreed to.
 
-/// Prepend a contextual phrase to the human-readable body of `err`
-/// while keeping its variant (and therefore its wire `.code`) intact.
-///
-/// This is the shared primitive every per-module `coded_sql`-style
-/// helper routes through: `audit`, `auth::bootstrap`, `auth::keys`,
-/// `auth::session`, `diff`, and `replication`. Operators see "what we
-/// were doing when the SQL failed" without losing the SQLSTATE-driven
-/// classification at the V8 boundary.
-///
-/// The set of "prefix-eligible" variants is the SQLSTATE-derived
-/// classification set plus `Internal` (the catch-all). The structured
-/// variants: `ValidationFailed`, `Configuration`, `PermissionDenied`, `Coded`,
-/// and `SchemaRefused` carry their own contracted message bodies (and
-/// `.code`s the SDK already branches on) and are intentionally left
-/// alone: prefixing them would distort a wire payload the SDK parses
-/// verbatim.
+/// Add context to database failure messages while preserving their classification.
+/// Structured validation, configuration and policy errors retain their original bodies.
 pub fn prefix_message(err: &mut DbError, prefix: &str) {
     match err {
         DbError::UniqueViolation { message }

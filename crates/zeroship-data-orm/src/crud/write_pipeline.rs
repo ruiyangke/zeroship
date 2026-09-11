@@ -19,29 +19,15 @@ pub enum ApplyMode<'a> {
     Update {
         row_pk: &'a str,
     },
-    /// The conflict probe reads the existing row's id
-    /// before the write is composed.
-    ///
-    /// It used to be the ONLY pre-pass issuing SQL of its own, so this variant
-    /// carried the dispatch's [`TxRoute`] as a field - which made an upsert site
-    /// that had not captured a route unable to construct the mode at all. The
-    /// protection-floor fence now issues a catalog read for EVERY mode, so
-    /// [`apply`] takes the route as a parameter and the same "no route, no
-    /// write" property holds for all four rather than one.
+    /// Resolve the existing row identity before encrypting an upsert.
     Upsert {
         actor_id: Option<&'a str>,
         conflict_fields: &'a Value,
     },
 }
 
-/// Run the UPDATE-time assignment pass: refuse a patch that rewrites a column
-/// the platform fixed at insert, and STRIP the columns it re-assigns on every
-/// write so the builder's own bumps are the only assignment to them.
-///
-/// Takes the patch by `&mut` because the strip is the point. It ran before the
-/// strip existed and returned a set of "the creator supplied this, skip your
-/// bump" hints; under `assign` there is no such thing as a creator-supplied
-/// value for an assigned column.
+/// Normalize the update and enforce system assignments. Insert-fixed fields are
+/// refused; write-assigned fields are removed so the SQL builder supplies them.
 pub fn inspect_update(app_id: &str, collection: &str, patch: &mut Value) -> Result<(), DbError> {
     zeroship_data_sql::update::normalize(patch)?;
     super::system_fields_pass::apply_system_fields_on_update(patch, app_id, collection)
@@ -145,43 +131,10 @@ fn validate_update_patch_keys(patch: &Value) -> Result<(), DbError> {
     Ok(())
 }
 
-/// Apply the canonical write-side transform once per write site.
-///
-/// The ordered stages are fixed:
-///
-/// 1. system-field pre-pass for the write shape (`insert*`, `update`, `upsert`)
-/// 2. any mode-specific row-id rewrite required before encryption (`upsert`)
-/// 3. encrypt encrypted columns
-/// 4. derive masked sibling columns from plaintext / sidechannel
-/// 5. lower binary columns to the dialect's bind: SQLite vector/geoPoint blobs,
-///    then plain `t.bytes()` (base64 wire string -> raw bytes) on both dialects
-///
-/// The SQL builders still own dialect lowering and UPDATE auto-bump
-/// emission. This module centralises the transform stages that were
-/// previously hand-wired per dispatch site.
-///
-/// `keys` is a PARAMETER because the encryption stage needs a key store and
-/// nothing more. It used to reach one by resolving a backend inside
-/// `super::encryption_pass_dispatch`, through the engine funnel that read
-/// ADAPTER state; a key is not a routing decision, so the store is passed in
-/// by the caller that already holds the handle this write will run on. It is a
-/// borrow rather than an `Option`, so a caller with no key store fails to
-/// compile instead of failing mid-write.
-///
-/// `dialect` is a PARAMETER for exactly the same reason. Stage 5 needs to know
-/// which bind form the column takes and nothing more; a dialect is not a
-/// routing decision either. It used to be read here as
-/// `super::current_sql_dialect()`, the same engine-reads-adapter funnel, four
-/// separate times per write. It now rides down from the caller that resolved
-/// it - off the dispatch's captured route in production - so one write op
-/// lowers under ONE dialect rather than four independent derivations of it.
-///
-/// `route` is a parameter for the OPPOSITE reason, and the contrast is the
-/// point: stage 0 below reads the live catalog, which IS a routing decision. A
-/// key store and a dialect are not, so they stay separate arguments rather than
-/// being derived from the route here - a write that lowers under `route`'s
-/// dialect and one that lowers under a dialect its caller resolved must remain
-/// distinguishable in the signature.
+/// Validate and protect a write using its runtime descriptor. Catalog markers
+/// prevent protection downgrades; row identity is established before encryption.
+/// Mask inputs survive encryption in a sidechannel, and physical storage is
+/// assigned after value encoding. Keys and dialect come from the caller’s setup.
 pub async fn apply(
     keys: &crate::encryption::KeyStore,
     dialect: compile::SqlDialect,
@@ -197,12 +150,7 @@ pub async fn apply(
         app_id,
         "the write route must belong to the app being written"
     );
-    // DB-8: validate every USER-supplied document field key BEFORE the system /
-    // encryption / mask passes below add their own reserved sibling columns. The write SQL builders only `quote_ident`'d these keys —
-    // they skipped the `validate_field_name` fence the read/filter path enforces,
-    // letting a write smuggle a null-byte key, a >63-byte key (NAMEDATALEN
-    // truncation collision), or a reserved name (e.g. `ssn_masked`) straight into
-    // a column. Run the same fence here, on the raw user keys, once.
+    // Validate creator keys before protection and system passes add reserved storage keys.
     match &mode {
         ApplyMode::Insert { .. } | ApplyMode::Upsert { .. } => {
             validate_user_doc_keys(payload)?;
@@ -219,11 +167,7 @@ pub async fn apply(
         ApplyMode::Update { .. } => validate_update_patch_keys(payload)?,
     }
 
-    // The encrypt/mask write transforms are driven by THE RUNTIME DESCRIPTOR
-    // this isolate was built from, not by a live catalog read. A collection the
-    // descriptor does not declare is refused here rather than written with the
-    // encryption and mask stages silently skipped - which is what an absent
-    // schema used to mean, on a write.
+    // Require the deployment descriptor before applying protection to any write.
     let schema = crate::descriptor::collection_schema(binding, collection)?;
     if let ApplyMode::Upsert {
         conflict_fields, ..
@@ -246,11 +190,7 @@ pub async fn apply(
         // row matches. Per-row protection must not repeat that traversal.
         ApplyMode::Update { .. } => {}
     }
-    // Stage 0. The descriptor decides which protections the stages below APPLY;
-    // the live catalog decides which ones this collection is ALLOWED to have
-    // lost. Deleting a `mask` or `encrypted` key from a field is otherwise a
-    // silent downgrade - the stages simply find nothing to do and the real value
-    // is written in the clear. See `super::protection_floor`.
+    // Reject descriptors that remove protection recorded in the live catalog.
     super::protection_floor::refuse_protection_downgrade(route, binding, collection, &schema)
         .await?;
     let stages = WriteStages::new(&schema);
@@ -378,10 +318,7 @@ impl<'a> WriteStages<'a> {
         if self.has_storage_encoding {
             zeroship_data_sql::codecs::encode_document(dialect, schema, row)?;
         }
-        // AFTER encryption: a `t.encrypted({ of: t.bytes() })` column is the
-        // encryption pass's, and this pass skips it by construction, but the
-        // ordering also means the ciphertext it deposits is never re-read as a
-        // plain bytes value.
+        // Validate plain bytes after encryption; encrypted fields already hold ciphertext.
         if self.has_plain_bytes {
             super::bytes_pass::validate_bytes_on_write(schema, row)?;
         }

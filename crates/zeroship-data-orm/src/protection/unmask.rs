@@ -383,13 +383,8 @@ fn meter_audit_write(app_id: &str) {
 // Fetch helpers — encrypted vs plaintext, PG vs SQLite
 // ---------------------------------------------------------------------------
 
-/// Encrypted-column path: SELECT the BYTEA / BLOB ciphertext for
-/// `(collection, row_pk)`, reconstruct the row-bound AAD,
-/// and decrypt through `encryption::aead`. The SELECT is
-/// still per-arm because the SQL differs; the decrypt is not, and stopped
-/// being so when `EncryptedColumn` was deleted on 2026-09-02.
-/// Returns the plaintext as a native string, byte buffer, or number according
-/// to the declared wrapped type.
+/// Read ciphertext on the captured route, reconstruct row-bound AAD and decrypt.
+/// Decode the plaintext according to its declared field type.
 #[allow(unused_variables)]
 async fn fetch_and_decrypt(
     raw_column: &str,
@@ -397,15 +392,6 @@ async fn fetch_and_decrypt(
     args: &UnmaskFieldArgs,
     enc_meta: &PlaintextType,
 ) -> Result<Value, DbError> {
-    // The prepared route arrives as an argument. This re-resolved a BACKEND
-    // through the funnel until 2026-09-03, which was idempotent but pointless:
-    // every reaching path runs `prepare_unmask_backend` first, so the second
-    // lookup could only ever return what the caller already held. Taking it as
-    // a parameter makes that ordering a data dependency rather than a comment.
-    //
-    // It became a ROUTE the same day, because a handle answers "which backend"
-    // and this read also has to answer "which connection" - see
-    // `crate::backend_handle::read_raw_column_bytes`.
     let app_id = route.app_id();
 
     let aad = crate::encryption::aad::canonical_aad(
@@ -415,37 +401,9 @@ async fn fetch_and_decrypt(
         args.row_pk.as_bytes(),
     );
 
-    // ---- read the ciphertext ----
-    //
-    // The vendor split moved into `BackendHandle::read_raw_column_bytes` on
-    // 2026-09-02 (#119). Everything below the read - key resolution, AEAD,
-    // plaintext decoding - was already vendor-neutral and was duplicated
-    // VERBATIM in the two arms this replaces.
     {
-        // The real value lives in the RAW column - the field's own column
-        // holds the mask. This read and its plaintext sibling are the only
-        // readers of that column in the tree, and both sit behind
-        // `check_unmask_authorization` and the `__zeroship_audit_unmask` row.
-        //
-        // READ THE RAW SIBLING AS BYTES, NOT TEXT.
-        //
-        // The raw sibling of an ENCRYPTED column is BYTEA, and the funnel binds
-        // every result in BINARY format (`libs/compio-postgres/src/query.rs:186`),
-        // so there is no text rendering to parse.
-        //
-        // This asked for `Option<&str>` until 2026-09-01, and that is refused
-        // outright rather than mis-parsed: `&str: FromSql::accepts` takes
-        // VARCHAR/TEXT/BPCHAR/NAME/UNKNOWN plus citext/ltree and nothing else
-        // (`libs/compio-postgres/vendor/postgres-types/src/lib.rs:729-742`), and
-        // `Row::get_inner` consults `accepts` BEFORE decoding, even for NULL
-        // (`libs/compio-postgres/src/row.rs:256`). So EVERY unmask of an
-        // encrypted column on PostgreSQL failed, 100% of the time, with
-        // `unmask: get column value: error deserializing column 0`. The comment
-        // that used to sit here described `\xHHHH...` text arriving over the
-        // text protocol - the legacy shape `decrypt_row_on_read` still keeps a
-        // compatibility arm for, and one this call has never produced.
-        //
-        // Ciphertext is read as bytes on the captured transaction route.
+        // Read ciphertext as native bytes on the captured transaction route.
+        // The visible column contains the mask, not the encrypted value.
         let bytes = match crate::backend_handle::read_raw_column_bytes(
             route,
             &args.collection,
@@ -495,22 +453,8 @@ async fn fetch_plaintext_raw(
     route: &crate::tx_route::TxRoute,
     args: &UnmaskFieldArgs,
 ) -> Result<Value, DbError> {
-    // The prepared route arrives as an argument, for the reason spelled out
-    // on `fetch_and_decrypt`.
     let app_id = route.app_id();
 
-    // The real value lives in the RAW column - the field's own column holds
-    // the mask. This read and its encrypted sibling are the only readers of
-    // that column in the tree, and both sit behind
-    // `check_unmask_authorization` and the `__zeroship_audit_unmask` row.
-    //
-    // Text, not bytes: this is the PLAINTEXT-storage path, so the raw sibling
-    // is the column's own declared type. The encrypted path above reads bytes.
-    //
-    // The vendor split moved into `backend_handle::read_raw_column_value` on
-    // 2026-09-02 (#119); the two error codes below are engine-tier policy and
-    // stay here, which is why the backend returns a tri-state rather than
-    // minting them itself.
     match crate::backend_handle::read_raw_column_value(
         route,
         &args.collection,
@@ -539,82 +483,15 @@ async fn fetch_plaintext_raw(
     }
 }
 
-// `hex_to_bytes` and `nibble` lived here until 2026-09-01, carrying
-// `#[allow(dead_code)]` and a doc line claiming they were "only reachable
-// through `fetch_and_decrypt`'s PG arm". That arm asked BYTEA for a `&str` and
-// so could never reach them - the driver refused the column before any hex
-// existed to parse. Their only caller was their own unit test, which is the
-// built-tested-unreferenced shape: a test proving a helper works says nothing
-// about whether anything uses it. Reading the column as `&[u8]` removes the
-// text detour entirely, so both are gone rather than re-homed.
 
 // ---------------------------------------------------------------------------
 // Audit row writer
 // ---------------------------------------------------------------------------
 
-/// Write one row into `<app>.__zeroship_audit_unmask`. Called from the
-/// granted path on success AND the denied path on refusal — per
-/// design Q-MASK-C "both granted and denied attempts logged".
-///
-/// The table is **per-app** (lives in the app's schema). Per-app
-/// placement keeps audit data accessible to operators querying the
-/// app's schema directly, without needing platform-role access.
-///
-/// # This function does not create the table, and that is the point
-///
-/// It used to. Every call ran `ensure_audit_unmask_table` first, which
-/// issued `CREATE TABLE IF NOT EXISTS` plus three `CREATE INDEX IF NOT
-/// EXISTS` on both dialects — eight DDL statements per `unmask()`
-/// dispatch, granted and denied alike, on the privileged read path, from
-/// the process that executes creator code. That was the last live DDL
-/// the data plane emitted; schema change belongs to `zeroship-migrate`.
-///
-/// The creators are now the two migration apply hosts, which run before
-/// the worker serves and do not execute creator code:
-///
-/// * Postgres — `zeroship_migrate_server::provisioning::provision_audit_unmask_table`,
-///   called from the apply path BEFORE the runtime role's snapshot grants,
-///   so the role reaches both the table and its `BIGSERIAL` sequence.
-/// * SQLite — `zeroship_migrate_sqlite::backend::audit_unmask_sql`, called
-///   by the dev-tier `applyIrSqlite` host after the envelopes deploy.
-///
-/// If an authority somehow has not run, this INSERT fails normally
-/// ("relation does not exist" / "no such table") and the unmask refuses
-/// with it. That is deliberate and it is the SAFE direction: an unmask
-/// whose audit row cannot be written must not return plaintext, and the
-/// granted-path caller sequences this before it hands the value back.
-/// There is no create-on-demand fallback, because a fallback is a second
-/// schema authority.
-///
-/// # This write is deliberately NOT on the caller's transaction lane
-///
-/// It takes a `BackendHandle` while the raw-column READ beside it takes a
-/// `TxRoute`, and the asymmetry is the decision, not an oversight. `append_unmask_audit`
-/// goes through the autocommit funnel on both vendors, so an audit row written
-/// inside `db.transaction(fn)` COMMITS even when that transaction rolls back.
-/// That is the behaviour we want in both directions:
-///
-/// * a DENIED row records an attempt that really happened. Letting the
-///   attempt's own transaction erase it would hand any caller a one-line way to
-///   try and leave no trace.
-/// * a GRANTED row records that plaintext left the database. It did leave;
-///   rolling the surrounding work back does not un-read it.
-///
-/// The audit table is append-only and operator-read-only, so nothing about the
-/// creator's transaction is inconsistent afterwards - it holds no foreign key
-/// into the rows the transaction touched, only their ids as text.
-///
-/// **This interacts with the DB-3 strip.** `sanitize_app_actor` zeroes the
-/// actor on exactly the rows most likely to be denied, so a surviving denied
-/// row can carry `actor_id = ''` and `actor_role = ''`. That is why
-/// `claimed_actor` exists: the refused claim is preserved verbatim in its own
-/// UNTRUSTED column rather than being erased with the identity it failed to
-/// establish. A denied row with an empty actor and a populated `claimed_actor`
-/// is an impersonation attempt; one with both empty is an anonymous call.
-///
-/// Bound by `plugin-db/tests/unmask_tx_lane.rs`, whose control writes an
-/// ordinary row in the same transaction and asserts the ROLLBACK destroys THAT
-/// and not this.
+/// Append an unmask audit record outside the creator’s transaction so rollback
+/// cannot erase the attempt. Migration hosts provision the table; a failed audit
+/// write prevents plaintext delivery. Preserve rejected actor claims separately
+/// from trusted identity fields.
 async fn write_audit_unmask_row(
     backend: &BackendHandle,
     // SCHEMA: where the audit table lives on PostgreSQL, and what the runtime
@@ -657,12 +534,6 @@ async fn write_audit_unmask_row(
     let actor_role_s: String = actor_role.unwrap_or_default();
     let reason_s: String = args.reason.clone().unwrap_or_default();
 
-    // The two INSERTs this replaces differed only in placeholder syntax and
-    // identifier quoting, and the six lines above were written out twice - once
-    // per vendor - behind an `as_postgres()` / `as_sqlite()` downcast. Both
-    // statements now live in `BackendHandle::append_unmask_audit`, which also
-    // carries the note about routing PostgreSQL through the role fence rather
-    // than a bare pool checkout.
     backend
         .append_unmask_audit(
             db_schema,
@@ -1168,33 +1039,9 @@ pub async fn audit_query_hint_granted(
     Ok(())
 }
 
-/// Rewrite rows from a `find` result so the
-/// `unmask`-listed columns carry plaintext instead of the
-/// `__zsmask__`-wrapped sibling.
-///
-/// Per-query hint promotes plaintext for ONLY the listed columns;
-/// non-listed masked columns keep their `MaskedValue<T>` wrapping (the
-/// `apply_mask_wrap_on_read` pass already attached the sentinel before
-/// this helper runs). On the wire we replace `row[col]` with the bare
-/// decrypted string for each listed column.
-///
-/// `rows` is mutated in place. Each row's PK is read from `row["id"]`
-/// (the implicit primary key; aligns with `wrap_row_on_read`'s
-/// expectation).
-///
-/// `route` arrives from `crate::crud::read_pipeline::apply`, which is the stage
-/// this promotion belongs to and which takes it off the read's own dispatch.
-/// The stage resolved a backend through the engine funnel until 2026-09-03; the
-/// handle it found was the route's anyway, so the parameter costs nothing and
-/// stops an ENGINE file reading ADAPTER state. See `prepare_unmask_backend`.
-///
-/// **The whole route, not the handle it carries.** These SELECTs unmask the
-/// rows `exec_query` just returned, and `exec_query` honours `route.in_tx()`.
-/// Reading only the handle sent them to the autocommit lane, so a
-/// `find({ unmask })` inside `db.transaction(fn)` failed `unmask_not_found`
-/// over a row the same transaction had inserted - the rows were there, the
-/// connection sent to fetch their plaintext was not the one that could see
-/// them. Bound by `plugin-db/tests/unmask_tx_lane.rs`.
+/// Unmask only the requested columns in place, preserving wrappers on other fields.
+/// Reads use the query’s captured route so newly written rows remain visible;
+/// audit writes remain outside that transaction.
 pub async fn dispatch_unmask_for_query(
     route: &crate::tx_route::TxRoute,
     binding: &DbBinding,
