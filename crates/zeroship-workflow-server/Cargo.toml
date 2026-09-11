@@ -1,0 +1,24 @@
+[package]
+name = "zeroship-workflow-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Workflow HTTP authority and worker task service"
+
+[dependencies]
+async-trait = { workspace = true }
+compio = { workspace = true }
+compio-postgres = { workspace = true }
+ntex = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+zeroship-core = { workspace = true }
+zeroship-workflow = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+testcontainers = { version = "0.28", default-features = false, features = ["blocking"] }
+
+[lints]
+workspace = true

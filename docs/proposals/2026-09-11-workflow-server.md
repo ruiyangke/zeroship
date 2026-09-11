@@ -28,8 +28,10 @@ identities and promote journal references transactionally. Replay, child results
 and continuation inputs retain scoped reference edges. Collection rechecks those
 edges and preserves tombstones for late remote writes.
 Its schema is generated from the canonical migration DSL, with native contract
-tests against SQLite, Testcontainers PostgreSQL and S3-compatible storage. This module is not yet the
-runtime composition: the server, worker polling loop, Control capability
+tests against SQLite, Testcontainers PostgreSQL and S3-compatible storage. The new HTTP host library and Rust remote clients now expose app and task
+operations. Worker verification resolves active enrollment keys and binds
+assignments to the verified instance; native tests exercise the HTTP boundary.
+This is not yet the runtime composition: server startup, the worker polling loop, Control capability
 issuance, authoritative platform policy, public HTTP ingress, retention of
 completed run graphs and interpreter cutover remain in progress. The
 current runtime still uses Control and the local mini-engine.
