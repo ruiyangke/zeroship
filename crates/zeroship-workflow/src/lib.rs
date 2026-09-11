@@ -11,6 +11,7 @@ pub mod client;
 pub mod dev;
 pub mod engine;
 pub mod errors;
+pub mod execution;
 pub mod lifecycle;
 pub mod operations;
 pub mod store;
@@ -18,5 +19,6 @@ pub mod validation;
 
 pub use backend::{HttpWorkflowBackend, SharedWorkflowBackend, WorkflowBackend};
 pub use client::{app_scoped_token, WorkflowClientConfig, WorkflowHttpMethod, WorkflowHttpRequest};
-pub use dev::{DevWorkflowEngine, WorkflowExecutor};
+pub use dev::DevWorkflowEngine;
 pub use errors::WorkflowServiceError;
+pub use execution::{WorkflowExecution, WorkflowExecutor, WorkflowInvocation, WorkflowTrigger};

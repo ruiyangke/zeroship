@@ -2,23 +2,28 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use rusqlite::{params, Connection};
-use serde_json::{json, Value};
+use serde_json::json;
+use zeroship_workflow::engine::StepOutcome;
 use zeroship_workflow::operations::{RestartDeploy, RestartOptions, RestartTarget, StartOptions};
 use zeroship_workflow::{
     DevWorkflowEngine, WorkflowBackend, WorkflowExecutor, WorkflowServiceError,
 };
+use zeroship_workflow::{WorkflowExecution, WorkflowInvocation};
 
 struct Complete;
 
 #[async_trait(?Send)]
 impl WorkflowExecutor for Complete {
-    async fn dispatch(&self, envelope: &str) -> Result<String, WorkflowServiceError> {
-        let request: Value = serde_json::from_str(envelope).unwrap();
-        Ok(json!({
-            "runId": request["runId"], "dispatchNonce": request["dispatchNonce"],
-            "outcomes": [{ "kind": "RunCompleted", "output": "original" }]
+    async fn dispatch(
+        &self,
+        _: &WorkflowInvocation,
+    ) -> Result<WorkflowExecution, WorkflowServiceError> {
+        Ok(WorkflowExecution {
+            outcomes: vec![StepOutcome::RunCompleted {
+                output: Some(json!("original")),
+                output_ref: None,
+            }],
         })
-        .to_string())
     }
 }
 
@@ -99,7 +104,9 @@ async fn partial_restart_retains_the_prefix_and_pin_and_rewinds_only_discarded_s
             |row| row.get(0),
         )
         .unwrap();
-    let latest = zeroship_core::typed_id::from_uuid_string("dep", &uuid::Uuid::now_v7().to_string()).unwrap();
+    let latest =
+        zeroship_core::typed_id::from_uuid_string("dep", &uuid::Uuid::now_v7().to_string())
+            .unwrap();
     fx.conn.execute(
         "INSERT INTO app_deploys (id, app_id, deploy_hash, manifest_json, created_at, activated_at) \
          VALUES (?1, ?2, 'latest', '{}', 0, 9223372036854775807)", params![latest, fx.app],

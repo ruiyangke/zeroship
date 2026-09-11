@@ -11,7 +11,9 @@ use zeroship_runtime::{
     EnvSnapshot, ModuleEntry, RequestCtx, Runtime, SettledWorkflow, WorkflowOutcome,
 };
 
-use zeroship_workflow::{WorkflowExecutor, WorkflowServiceError};
+use zeroship_workflow::{
+    WorkflowExecution, WorkflowExecutor, WorkflowInvocation, WorkflowServiceError,
+};
 
 const DEV_DISPATCH_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -37,7 +39,13 @@ impl V8WorkflowExecutor {
 
 #[async_trait(?Send)]
 impl WorkflowExecutor for V8WorkflowExecutor {
-    async fn dispatch(&self, envelope: &str) -> Result<String, WorkflowServiceError> {
+    async fn dispatch(
+        &self,
+        invocation: &WorkflowInvocation,
+    ) -> Result<WorkflowExecution, WorkflowServiceError> {
+        let envelope = serde_json::to_string(invocation).map_err(|e| {
+            WorkflowServiceError::Internal(format!("encode workflow invocation: {e}"))
+        })?;
         zeroship_runtime::init_v8();
         let runtime = Runtime::builder()
             .modules(self.modules.clone())
@@ -47,16 +55,18 @@ impl WorkflowExecutor for V8WorkflowExecutor {
         runtime.start_pump();
         let env = env_snapshot_from_prefixed_vars(&self.env_vars);
         let ctx = RequestCtx::new(CancelFlag::new());
-        let outcome = runtime.call_workflow_dispatch(envelope, &env, ctx);
+        let outcome = runtime.call_workflow_dispatch(&envelope, &env, ctx);
         // Restore the host isolate before yielding. The pump enters this
         // workflow isolate only while processing its own events.
         runtime.exit_isolate();
         match outcome {
-            WorkflowOutcome::Response { json, .. } => Ok(json),
+            WorkflowOutcome::Response { json, .. } => WorkflowExecution::from_runtime_json(&json),
             WorkflowOutcome::Pending { rx, cancel } => {
                 runtime.notify_pump();
                 match compio::time::timeout(DEV_DISPATCH_TIMEOUT, rx.recv()).await {
-                    Ok(Ok(SettledWorkflow { json, .. })) => Ok(json),
+                    Ok(Ok(SettledWorkflow { json, .. })) => {
+                        WorkflowExecution::from_runtime_json(&json)
+                    }
                     Ok(Err(e)) => Err(WorkflowServiceError::Unavailable(e.message)),
                     Err(_) => {
                         cancel.cancel();

@@ -12,7 +12,7 @@ token and topic broadcast helpers used by systems outside the app.
 This reference describes the current implementation. The finalized
 [workflow server design](../proposals/2026-09-11-workflow-server.md) replaces
 Control/Gateway workflow dispatch with a dedicated server and polling workers,
-and embeds the shared engine in local development. That refactor is pending;
+and embeds the shared engine in local development. That refactor is in progress;
 the local limitations and provisioning instructions below still apply today.
 
 ## Rust integration
@@ -39,6 +39,12 @@ codes. The V8 adapter exposes the corresponding `workflow_*` error codes.
 `WorkflowBinding` performs the same binding for JavaScript. The host derives
 its app-scoped credential with `app_scoped_token`; the control key stays outside
 V8. Workflow execution remains replay of the deployed JavaScript class.
+
+Native executors receive `WorkflowInvocation` and return `WorkflowExecution`
+outcomes. Local development and deployed workers use the same replay input,
+journal types and outcome decoder. The invocation carries no lease credential;
+the Rust host binds outcomes to its claimed run before applying them. Run IDs
+or nonces returned by JavaScript do not select the mutation target.
 
 ## Testing
 

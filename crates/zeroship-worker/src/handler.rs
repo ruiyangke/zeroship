@@ -17,8 +17,8 @@ use zeroship_core::dispatch_frame::decode_dispatch_frame;
 use zeroship_core::types::{AppNetPolicy, AppRuntimeLimits};
 use zeroship_bundle::sha256_hex;
 use zeroship_workflow::advance::{
-    collect_post_apply_registrations, worker_json_to_step_result, WorkflowAdvanceNackKind,
-    WorkflowAdvanceResponse, WorkflowRunDispatchRequest,
+    collect_post_apply_registrations, WorkflowAdvanceNackKind, WorkflowAdvanceResponse,
+    WorkflowRunDispatchRequest,
 };
 use zeroship_workflow::apply;
 use zeroship_workflow::claim::{
@@ -564,30 +564,6 @@ fn workflow_worker_config() -> WorkflowEngineConfig {
     }
 }
 
-fn workflow_runtime_envelope(request: &StepRequest) -> serde_json::Value {
-    serde_json::json!({
-        "runId": &request.run_id,
-        "workflowName": &request.workflow_name,
-        "trigger": {
-            "input": request.input.clone().unwrap_or(Value::Null),
-            "startedAt": request.started_at.to_rfc3339(),
-            "runId": &request.run_id,
-            "workflowName": &request.workflow_name,
-        },
-        "journal": request.journal.clone(),
-        "phase": &request.phase,
-        "deployHash": &request.deploy_hash,
-        "attempt": 0,
-        "nonce": &request.dispatch_nonce,
-        "ownerId": &request.owner_id,
-        "stuckStrikeLimit": request.stuck_strike_limit,
-        "maxChildDepth": request.max_child_depth,
-        "maxLiveDescendants": request.max_live_descendants,
-        "maxStartManyBatch": request.max_start_many_batch,
-        "journalLimits": request.journal_limits,
-    })
-}
-
 /// Durable-workflow replay ingress that performs NO signature or nonce
 /// verification. Signed advance is the production transport; this exists so
 /// the replay path could be exercised before the signing work landed.
@@ -752,7 +728,7 @@ pub async fn workflow_advance_unsigned(
         }
     };
 
-    let runtime_envelope = workflow_runtime_envelope(&claim);
+    let runtime_envelope = zeroship_workflow::WorkflowInvocation::from(&claim);
     let runtime_envelope_json = match serde_json::to_string(&runtime_envelope) {
         Ok(json) => json,
         Err(e) => {
@@ -988,16 +964,19 @@ async fn apply_workflow_advance_json(
     request: &StepRequest,
     json: &str,
 ) -> Result<WorkflowAdvanceResponse, WorkflowAdvanceResponse> {
-    let step_result = match worker_json_to_step_result(&request.run_id, &request.dispatch_nonce, json) {
-        Ok(result) => result,
-        Err(e) => {
-            return Err(WorkflowAdvanceResponse::nack(
-                request.run_id.clone(),
-                WorkflowAdvanceNackKind::Invalid,
-                format!("invalid workflow replay result: {e}"),
-            ));
-        }
-    };
+    let step_result =
+        match zeroship_workflow::WorkflowExecution::from_runtime_json(json).and_then(|execution| {
+            execution.into_step_result(request.run_id.clone(), request.dispatch_nonce.clone())
+        }) {
+            Ok(result) => result,
+            Err(e) => {
+                return Err(WorkflowAdvanceResponse::nack(
+                    request.run_id.clone(),
+                    WorkflowAdvanceNackKind::Invalid,
+                    format!("invalid workflow replay result: {e}"),
+                ));
+            }
+        };
 
     if let Err(e) = ensure_workflow_journal_provisioned(db_url, &request.app_id).await {
         return Err(WorkflowAdvanceResponse::nack(
