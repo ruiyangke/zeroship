@@ -4,7 +4,7 @@ use super::*;
 fn fields() -> Value {
     value!({
         "key":{"type":"string","unique":true},
-        "secret":{"type":"number","encrypted":{"keyId":"array_fixture","wraps":"number"}},
+        "secret":{"type":"number","encrypted":{"wraps":"number"}},
         "strings":{"type":"array","items":"string"},
         "numbers":{"type":"array","items":"number"},
         "flags":{"type":"array","items":"boolean"},

@@ -290,9 +290,9 @@ pub struct FieldDescriptor {
     /// text shape.
     #[serde(rename = "caseSensitive", default)]
     pub case_sensitive: Option<bool>,
-    /// `t.encrypted({ keyId, wraps })` - the encryption sub-object,
+    /// `t.encrypted({ wraps })` - the encryption sub-object,
     /// carried VERBATIM. When present the column DDLs to `BYTEA` with the inline
-    /// `/* zero-migrate:enc:keyId:wraps */` sentinel (the contract plugin-db reads at
+    /// `/* zero-migrate:enc:wraps */` sentinel (the contract plugin-db reads at
     /// runtime). Mirrors `encrypted` on the wire `FieldDef`.
     #[serde(default)]
     pub encrypted: Option<serde_json::Value>,
@@ -672,24 +672,18 @@ pub fn descriptor_to_sdk_schema(d: &CollectionDescriptor) -> serde_json::Value {
 /// Used to render the PG `COMMENT ON COLUMN` `zero-migrate:enc:` sentinel (via the shared
 /// codec's `build_encryption_sentinel`) so the engine's emitted comment is
 /// byte-identical to what plugin-db's runtime parser expects. Defaults mirror
-/// the inline sentinel emitter (`keyId = default`,
-/// `wraps = string`).
+/// the inline sentinel emitter (`wraps = string`).
 fn encryption_meta_for_field(
     def: &serde_json::Value,
 ) -> Option<crate::schema::diff::EncryptionMeta> {
     use crate::schema::diff::{EncryptionMeta, WrappedType};
     let enc = def.get("encrypted").and_then(|v| v.as_object())?;
-    let key_id = enc
-        .get("keyId")
-        .and_then(|v| v.as_str())
-        .unwrap_or("default")
-        .to_string();
     let wraps = match enc.get("wraps").and_then(|v| v.as_str()) {
         Some("number") => WrappedType::Number,
         Some("bytes") => WrappedType::Bytes,
         _ => WrappedType::String,
     };
-    Some(EncryptionMeta { key_id, wraps })
+    Some(EncryptionMeta { wraps })
 }
 
 /// The hidden `__zs_raw__<col>` column a field's `.mask({...})` declaration

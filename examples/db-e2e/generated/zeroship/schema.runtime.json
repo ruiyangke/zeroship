@@ -551,7 +551,6 @@
         "contactEmail": {
           "type": "string",
           "encrypted": {
-            "keyId": "default",
             "wraps": "string"
           },
           "mask": {
@@ -573,7 +572,6 @@
         "ssn": {
           "type": "string",
           "encrypted": {
-            "keyId": "default",
             "wraps": "string"
           },
           "mask": {

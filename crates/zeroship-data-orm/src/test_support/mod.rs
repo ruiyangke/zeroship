@@ -313,13 +313,13 @@ pub(crate) fn unit_route(app_id: &str) -> (crate::tx_route::TxRoute, tempfile::T
 
 pub(crate) fn unit_backend() -> (crate::backend::BackendHandle, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("create tempdir");
-    // `LocalKeySource::env_var()` and not the adapter's per-isolate lookup: the
+    // `ProjectKeySource::unavailable()` and not the adapter's per-isolate lookup: the
     // engine cannot read `zeroship_data_v8::context` from here, and env-var
     // sourcing is exactly what that lookup returns when no fixture has supplied
     // roots - which is the state every caller of this helper is in.
     let backend = crate::backend_selection::new_sqlite_backend(
         dir.path().to_path_buf(),
-        crate::encryption::LocalKeySource::env_var(),
+        crate::encryption::ProjectKeySource::unavailable(),
     )
     .expect("open SqliteBackend");
     (

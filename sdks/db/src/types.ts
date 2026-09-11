@@ -667,16 +667,10 @@ export declare class MaskedValue<T extends string | number | bigint | Uint8Array
 /**
  * options accepted by `t.encrypted(opts?)`.
  *
- * - `keyId` — selects the per-platform root key (env var
- *   `ZEROSHIP_COLUMN_KEY_<KEYID>`). Defaults to `"default"`.
- * - `wraps` — the inner primitive type, ONE OF `t.string()` /
- *   `t.number()` / `t.bytes()` (the `bytes` wrap accepts base64-encoded
- *   string at the JS layer). Defaults to `t.string()`. Other types
- *   throw synchronously with `ENCRYPTED_WRAPS_UNSUPPORTED`.
+ * The host supplies the project encryption key; schemas contain no key selector.
  */
 export interface EncryptedFieldOpts {
   /** Key id selecting the per-platform root. Defaults to `"default"`. */
-  keyId?: string;
   /**
    * Inner type the encrypted value wraps. Only string / number / bytes
    * are supported. Passing any other `TypeBuilder` throws with code
@@ -978,7 +972,6 @@ export interface FieldDef {
   vectorMetric?: VectorMetric;
   /** Column encryption metadata. The wrapped type describes the plaintext. */
   encrypted?: {
-    keyId: string;
     wraps: "string" | "number" | "bytes";
   };
   /**
@@ -1645,18 +1638,6 @@ export const t = {
         );
       }
     }
-    if (opts && "mode" in opts) {
-      throw Object.assign(new Error("t.encrypted(): mode is unsupported; encryption is always randomised"), { code: "ENCRYPTED_INVALID_OPTIONS" as const });
-    }
-    const keyId = opts?.keyId ?? "default";
-    if (typeof keyId !== "string" || keyId.length === 0 || !/^[A-Za-z0-9_]+$/.test(keyId)) {
-      throw Object.assign(
-        new Error(
-          `t.encrypted({ keyId }): keyId must be a [A-Za-z0-9_]+ token, got "${String(keyId)}"`,
-        ),
-        { code: "ENCRYPTED_INVALID_KEY_ID" as const },
-      );
-    }
     // The DB column TYPE is BYTEA — the encryption pass + DDL emitter
     // (`field_to_column` in plugin-db) ignore the `type` field when
     // `encrypted` is present. We still carry the wrapped primitive's
@@ -1673,7 +1654,7 @@ export const t = {
     // builder's `.mask` method (assigns `_def.mask` unconditionally).
     return new TypeBuilder<T, false, "full", true>({
       type: wrapsKind === "bytes" ? "bytes" : wrapsKind === "number" ? "number" : "string",
-      encrypted: { keyId, wraps: wrapsKind },
+      encrypted: { wraps: wrapsKind },
       mask: { kind: "full", classification: "pii" },
     });
   },

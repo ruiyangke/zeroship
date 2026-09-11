@@ -7672,7 +7672,7 @@ mod tests {
     fn raw_column_for_field_returns_none_for_kind_none() {
         let def = crate::value!({
             "type": "string",
-            "encrypted": { "keyId": "default", "wraps": "string" },
+            "encrypted": { "wraps": "string" },
             "mask": { "kind": "none", "classification": "spi" }
         });
         assert_eq!(raw_column_for_field("ssn", &def), None);

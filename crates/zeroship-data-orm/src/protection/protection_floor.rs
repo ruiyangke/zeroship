@@ -31,7 +31,7 @@
 //!
 //! * The descriptor travels inside the `.zship` the worker executes. It is
 //!   creator-authored, and the worker is the process that runs creator code.
-//! * The sentinels (`zero-migrate:mask:kind=…`, `zero-migrate:enc:<keyId>:<wraps>`) and the
+//! * The sentinels (`zero-migrate:mask:kind=…`, `zero-migrate:enc:<wraps>`) and the
 //!   `__zs_raw__<col>` sibling are written by the MIGRATION SERVICE, which does
 //!   not execute creator code, under a migration the diff classifier already
 //!   grades `ChangeKind::MaskRemove` / `ChangeClass::Destructive`.
@@ -291,7 +291,6 @@ mod tests {
     fn encrypted_column() -> ColumnInfo {
         ColumnInfo {
             encryption: Some(EncryptionMeta {
-                key_id: "k1".to_string(),
                 wraps: WrappedType::String,
             }),
             ..Default::default()

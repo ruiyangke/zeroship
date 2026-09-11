@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use crate::backend::sqlite::SqliteBackend;
 use crate::cdc::broker::BrokerChangeSink;
-use zeroship_data_orm::encryption::LocalKeySource;
+use zeroship_data_orm::encryption::ProjectKeySource;
 use zeroship_data_orm::error::DbError;
 
 /// Open the selected SQLite backend with the production broker sink.
@@ -16,7 +16,7 @@ use zeroship_data_orm::error::DbError;
 /// construction never reads V8 or per-isolate state.
 pub async fn open_sqlite_backend(
     path: impl AsRef<Path>,
-    key_source: LocalKeySource,
+    key_source: ProjectKeySource,
 ) -> Result<SqliteBackend, DbError> {
     SqliteBackend::open(path, std::sync::Arc::new(BrokerChangeSink), key_source).await
 }
@@ -25,7 +25,7 @@ pub async fn open_sqlite_backend(
 #[cfg(any(test, feature = "test-helpers"))]
 pub fn new_sqlite_backend(
     db_dir: PathBuf,
-    key_source: LocalKeySource,
+    key_source: ProjectKeySource,
 ) -> Result<SqliteBackend, DbError> {
     SqliteBackend::new(db_dir, std::sync::Arc::new(BrokerChangeSink), key_source)
 }

@@ -587,7 +587,7 @@ mod tests {
             let sqlite = Rc::new(
                 crate::backend_selection::new_sqlite_backend(
                     PathBuf::from(dir.path()),
-                    crate::encryption::LocalKeySource::env_var(),
+                    crate::encryption::ProjectKeySource::unavailable(),
                 )
                 .expect("open sqlite backend"),
             );
@@ -919,7 +919,7 @@ mod tests {
             let backend = Rc::new(
                 crate::backend_selection::new_sqlite_backend(
                     PathBuf::from(dir.path()),
-                    crate::encryption::LocalKeySource::env_var(),
+                    crate::encryption::ProjectKeySource::unavailable(),
                 )
                 .expect("open sqlite backend"),
             );
@@ -993,7 +993,7 @@ mod tests {
             let backend = Rc::new(
                 crate::backend_selection::new_sqlite_backend(
                     PathBuf::from(dir.path()),
-                    crate::encryption::LocalKeySource::env_var(),
+                    crate::encryption::ProjectKeySource::unavailable(),
                 )
                 .expect("open sqlite backend"),
             );
@@ -1113,7 +1113,7 @@ mod tests {
             let backend = Rc::new(
                 crate::backend_selection::new_sqlite_backend(
                     PathBuf::from(dir.path()),
-                    crate::encryption::LocalKeySource::env_var(),
+                    crate::encryption::ProjectKeySource::unavailable(),
                 )
                 .expect("open sqlite backend"),
             );
@@ -1244,7 +1244,7 @@ mod tests {
             let backend = Rc::new(
                 crate::backend_selection::new_sqlite_backend(
                     PathBuf::from(dir.path()),
-                    crate::encryption::LocalKeySource::env_var(),
+                    crate::encryption::ProjectKeySource::unavailable(),
                 )
                 .expect("open sqlite backend"),
             );
@@ -1318,7 +1318,7 @@ mod tests {
             let backend = Rc::new(
                 crate::backend_selection::new_sqlite_backend(
                     PathBuf::from(dir.path()),
-                    crate::encryption::LocalKeySource::env_var(),
+                    crate::encryption::ProjectKeySource::unavailable(),
                 )
                 .expect("open sqlite backend"),
             );
@@ -1434,12 +1434,12 @@ mod tests {
             let dir_b = tempfile::tempdir().expect("tempdir b");
             let backend_a = crate::backend_selection::new_sqlite_backend(
                 PathBuf::from(dir_a.path()),
-                crate::encryption::LocalKeySource::env_var(),
+                crate::encryption::ProjectKeySource::unavailable(),
             )
             .expect("open backend a");
             let backend_b = crate::backend_selection::new_sqlite_backend(
                 PathBuf::from(dir_b.path()),
-                crate::encryption::LocalKeySource::env_var(),
+                crate::encryption::ProjectKeySource::unavailable(),
             )
             .expect("open backend b");
 

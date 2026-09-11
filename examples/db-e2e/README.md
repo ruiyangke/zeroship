@@ -26,11 +26,10 @@ pnpm --dir examples/db-e2e build
 
 ## Run the demo server manually
 
-The encrypted fields use the `db_e2e` key id, so the runtime needs a root key:
+Start the server with a file-backed database:
 
 ```bash
 cd examples/db-e2e
-export ZEROSHIP_COLUMN_KEY_DB_E2E=$(printf 'a%.0s' {1..64})
 DATABASE_URL=sqlite:.zeroship/dev.sqlite \
   ../../target/debug/zeroship serve dist/server/index.js --port 3000
 ```
@@ -55,3 +54,7 @@ toolchains and Chromium from the development environment, or install it with
 `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` selects an explicit browser executable.
 Service logs and failure screenshots remain under `tests/.artifacts/`.
 An unavailable runtime, browser, or failed migration fails the suite.
+
+Encrypted cases require host-supplied project keys. The control-to-worker key
+bootstrap is not implemented yet, so these cases currently fail with
+`column_key_not_configured`; environment variables do not supply column keys.

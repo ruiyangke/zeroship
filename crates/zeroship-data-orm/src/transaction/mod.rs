@@ -732,7 +732,7 @@ mod tests {
         let backend = Rc::new(
             crate::backend_selection::new_sqlite_backend(
                 PathBuf::from(dir.path()),
-                crate::encryption::LocalKeySource::env_var(),
+                crate::encryption::ProjectKeySource::unavailable(),
             )
             .expect("open sqlite backend"),
         );

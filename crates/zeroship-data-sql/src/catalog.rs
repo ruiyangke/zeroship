@@ -132,21 +132,16 @@ impl Default for ColumnInfo {
 }
 
 /// Encryption metadata attached to a [`ColumnInfo`] when
-/// the SDK declares the column with `t.encrypted({ keyId, wraps })`.
+/// the SDK declares the column with `t.encrypted({ wraps })`.
 ///
 /// Populated by schema introspection:
 /// - **PG**: from encryption metadata emitted alongside the table create.
 /// - **SQLite**: from a sentinel CHECK comment
-///   `/* zero-migrate:enc:{keyId}:{wraps} */` parsed out of
+///   `/* zero-migrate:enc:{wraps} */` parsed out of
 ///   `sqlite_master.sql` (the same regex-on-DDL pattern used for
 ///   vector dims; a sidecar `__zs_schema_meta` table is the upgrade path).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EncryptionMeta {
-    /// Key id selecting the per-platform root from
-    /// `ZEROSHIP_COLUMN_KEY_<KEYID>` (or a root supplied to the
-    /// process directly).
-    /// Defaults to `"default"` when the SDK caller omits the field.
-    pub key_id: String,
     /// Wrapped primitive type. The DDL emitter uses `BYTEA`/`BLOB`
     /// regardless; `wraps` survives so validation walks the right
     /// type-checker before the encrypt pass swaps bytes in.

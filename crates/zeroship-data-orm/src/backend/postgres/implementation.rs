@@ -22,13 +22,7 @@ pub struct PostgresBackend {
     pool: Rc<compio_postgres::Pool>,
     /// Configured URL, retained for backend configuration accessors.
     url: String,
-    /// Per-backend column-key cache. Lazily resolves
-    /// `(app_id, key_id) → AeadKey` from this isolate's in-process root
-    /// key source -- roots the host supplied, else
-    /// `ZEROSHIP_COLUMN_KEY_<KEYID>` env vars. No database round-trip is
-    /// involved and none is wanted (see `zeroship_data_orm::encryption::keys`).
-    /// Single-threaded (`RefCell` inside `KeyStore`) since every
-    /// `PostgresBackend` is owned by a single compio thread.
+    /// Project encryption keys supplied by the trusted host.
     key_store: zeroship_data_orm::encryption::KeyStore,
     /// Cached pgvector extension presence probe.
     ///
@@ -81,7 +75,7 @@ impl PostgresBackend {
     pub fn new(
         pool: Rc<compio_postgres::Pool>,
         url: String,
-        key_source: zeroship_data_orm::encryption::LocalKeySource,
+        key_source: zeroship_data_orm::encryption::ProjectKeySource,
     ) -> Self {
         Self {
             pool,
@@ -118,7 +112,7 @@ impl PostgresBackend {
     pub async fn connect(
         url: &str,
         max_size: usize,
-        key_source: zeroship_data_orm::encryption::LocalKeySource,
+        key_source: zeroship_data_orm::encryption::ProjectKeySource,
     ) -> Result<Self, DbError> {
         let pool = compio_postgres::Pool::connect(url, max_size)
             .await

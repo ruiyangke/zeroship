@@ -479,7 +479,7 @@ mod tests {
         let sqlite = crate::backend::SqliteBackend::open(
             files.path(),
             std::sync::Arc::new(super::super::broker::BrokerChangeSink),
-            crate::encryption::LocalKeySource::env_var(),
+            crate::encryption::ProjectKeySource::unavailable(),
         )
         .await
         .unwrap();

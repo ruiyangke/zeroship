@@ -214,7 +214,7 @@ async fn sqlite_tx_conn(dir: &tempfile::TempDir) -> Session {
     use zeroship_data_orm::fixtures::DatabaseFixture;
     let backend = crate::backend_selection::new_sqlite_backend(
         std::path::PathBuf::from(dir.path()),
-        crate::encryption::LocalKeySource::EnvVar,
+        crate::encryption::ProjectKeySource::unavailable(),
     )
     .expect("open sqlite backend");
     let client = backend

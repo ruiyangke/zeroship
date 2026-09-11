@@ -2933,27 +2933,9 @@ fn a_near_inside_a_transaction_sees_the_row_that_transaction_inserted() {
 // rusqlite's typed BLOB binding, decrypt-on-read. Mirrors the PG suite's
 // column-encryption tests in `tests/integration.rs`.
 
-/// Helper: hand this isolate a synthetic root key for `key_id`, for the
-/// duration of a test. Same shape as the PG-side `with_root_key` in
-/// `tests/integration.rs`.
-///
-/// This REPLACES a `set_var("ZEROSHIP_COLUMN_KEY_<KEYID>", ...)` guard.
-/// The env var was the only channel that reached the `SqliteBackend`
-/// these tests never construct themselves - the one `initialize_backend`
-/// builds behind a `dispatch_zs` V8 call - and mutating it is
-/// process-global, racy with any concurrent `getenv`, and `unsafe`. The
-/// isolate context is per-thread and typed, so none of the three apply,
-/// and `SqliteBackend::{new, open}` read it wherever they are called
-/// from.
-///
-/// Install it BEFORE the backend is constructed: a backend captures the
-/// source at construction, so a key supplied afterwards will not reach
-/// it.
-///
-/// The returned guard withdraws the key on drop; keep it alive for the
-/// test body.
-fn with_root_key(key_id: &str, root_hex: &str) -> zeroship_data_v8::testing::SuppliedRootKeysGuard {
-    zeroship_data_v8::testing::supply_root_keys_for_tests(&[(key_id, root_hex)])
+/// Supply a project key for the apps explicitly named by this fixture.
+fn with_project_key(app_ids: &[&str], hex: &str) -> zeroship_data_v8::testing::SuppliedProjectKeysGuard {
+    zeroship_data_v8::testing::supply_project_key_for_tests(app_ids, hex)
 }
 
 /// Bind a raw byte slice as a SQLite BLOB literal using the `X'...'`
@@ -3023,13 +3005,13 @@ export default { fetch: _zsFetch, rpc: _shimRpc };
 // ---------------------------------------------------------------------------
 
 /// `email` unique + plaintext, `ssn` randomised-encrypted with a `last4` mask.
-fn users_encrypted_ssn_schema(key_id: &str) -> zeroship_data_sql::value::Value {
+fn users_encrypted_ssn_schema() -> zeroship_data_sql::value::Value {
     zeroship_data_sql::value!({
         "email": {"type": "string", "required": true, "unique": true},
         "name": {"type": "string", "required": true},
         "ssn": {
             "type": "string",
-            "encrypted": {"keyId": key_id, "wraps": "string"},
+            "encrypted": {"wraps": "string"},
             "mask": {"kind": "last4", "classification": "spi"}
         }
     })
@@ -3038,13 +3020,13 @@ fn users_encrypted_ssn_schema(key_id: &str) -> zeroship_data_sql::value::Value {
 /// One randomised-encrypted column and no mask - the fast-path fixtures assert
 /// a PLAIN write skips row resolution, so the encrypted column must exist but
 /// stay untouched by the write under test.
-fn users_encrypted_secret_schema(key_id: &str) -> zeroship_data_sql::value::Value {
+fn users_encrypted_secret_schema() -> zeroship_data_sql::value::Value {
     zeroship_data_sql::value!({
         "email": {"type": "string", "required": true, "unique": true},
         "name": {"type": "string", "required": true},
         "secret": {
             "type": "string",
-            "encrypted": {"keyId": key_id, "wraps": "string"}
+            "encrypted": {"wraps": "string"}
         }
     })
 }
@@ -3105,13 +3087,13 @@ CREATE INDEX IF NOT EXISTS "{app_id}"."{collection}_created_by_idx" ON "{collect
 /// masked representation as bare `TEXT`; the sibling raw column (named via
 /// [`raw_column_name`], NOT spelled out here) carries the declared type,
 /// the encryption sentinel, and any constraints.
-fn users_encrypted_ssn_ddl(key_id: &str) -> String {
+fn users_encrypted_ssn_ddl() -> String {
     let raw_ssn = raw_column_name("ssn");
     format!(
         r#"CREATE TABLE IF NOT EXISTS "default"."users" ({SYSTEM_COLUMNS_SQLITE},
   "email" TEXT NOT NULL,
   "name" TEXT NOT NULL,
-  "{raw_ssn}" BLOB /* zero-migrate:enc:{key_id}:string */,
+  "{raw_ssn}" BLOB /* zero-migrate:enc:string */,
   "ssn" TEXT /* zero-migrate:mask:kind=last4,classification=spi */
 );
 {}
@@ -3122,12 +3104,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS "default"."users_email_key" ON "users" ("email
 }
 
 /// Raw DDL matching [`users_encrypted_secret_schema`].
-fn users_encrypted_secret_ddl(key_id: &str) -> String {
+fn users_encrypted_secret_ddl() -> String {
     format!(
         r#"CREATE TABLE IF NOT EXISTS "default"."users" ({SYSTEM_COLUMNS_SQLITE},
   "email" TEXT NOT NULL,
   "name" TEXT NOT NULL,
-  "secret" BLOB /* zero-migrate:enc:{key_id}:string */
+  "secret" BLOB /* zero-migrate:enc:string */
 );
 {}
 CREATE UNIQUE INDEX IF NOT EXISTS "default"."users_email_key" ON "users" ("email");
@@ -3209,15 +3191,14 @@ fn insert_many_encrypts_ciphertext_before_sqlite_storage() {
         use zeroship_data_orm::encryption;
         use zeroship_data_sql::compile::{SqlDialect, build_insert_many_with_dialect};
 
-        let key_id = "c1_insert_many";
-        let _keys = with_root_key("c1_insert_many", &"d".repeat(64));
+        let _keys = with_project_key(&["app_demo"], &"d".repeat(64));
         let app_id = "app_demo";
         let collection = "bulk_people";
         let schema = zeroship_data_sql::value!({
             "name": { "type": "string" },
             "ssn": {
                 "type": "string",
-                "encrypted": { "keyId": key_id, "wraps": "string" },
+                "encrypted": { "wraps": "string" },
                 "mask": { "kind": "last4", "classification": "spi" }
             }
         });
@@ -3311,7 +3292,7 @@ fn insert_many_encrypts_ciphertext_before_sqlite_storage() {
 
         let key = backend
             .key_store()
-            .resolve(app_id, key_id)
+            .resolve(app_id)
             .await
             .expect("resolve key");
         for row in &typed.rows {
@@ -3359,7 +3340,7 @@ fn insert_many_encrypts_ciphertext_before_sqlite_storage() {
             let plaintext = zeroship_data_orm::encryption::aead::decrypt(
                 &key,
                 &stored_blob,
-                &encryption::canonical_aad(collection, "ssn", id.as_bytes()),
+                &encryption::canonical_aad(app_id, collection, "ssn", id.as_bytes()),
             )
             .expect("decrypt stored blob");
             assert!(
@@ -3372,13 +3353,13 @@ fn insert_many_encrypts_ciphertext_before_sqlite_storage() {
 
 #[test]
 fn upsert_insert_branch_auto_mints_id_sqlite_runtime() {
-    let key_id = "c2_upsert_runtime_insert";
-    let _keys = with_root_key("c2_upsert_runtime_insert", &"e".repeat(64));
+
+    let _keys = with_project_key(&["default"], &"e".repeat(64));
 
     run(async {
         let dir = tempfile::tempdir().expect("tempdir");
-        let schema = users_encrypted_ssn_schema(key_id);
-        apply_schema_ahead_of_runtime(&dir, &users_encrypted_ssn_ddl(key_id));
+        let schema = users_encrypted_ssn_schema();
+        apply_schema_ahead_of_runtime(&dir, &users_encrypted_ssn_ddl());
         let source = sqlite_runtime_source(
             "users",
             &schema,
@@ -3451,16 +3432,16 @@ const _procedures = { upsertInsert };
 
 #[test]
 fn upsert_conflict_update_preserves_insert_only_fields_and_encrypts_sqlite_runtime() {
-    let key_id = "c2_upsert_runtime_conflict";
-    let _keys = with_root_key("c2_upsert_runtime_conflict", &"f".repeat(64));
+
+    let _keys = with_project_key(&["default"], &"f".repeat(64));
 
     run(async {
         use zeroship_data_orm::backend::sqlite::session::TypedCell;
         use zeroship_data_orm::encryption;
 
         let dir = tempfile::tempdir().expect("tempdir");
-        let schema = users_encrypted_ssn_schema(key_id);
-        apply_schema_ahead_of_runtime(&dir, &users_encrypted_ssn_ddl(key_id));
+        let schema = users_encrypted_ssn_schema();
+        apply_schema_ahead_of_runtime(&dir, &users_encrypted_ssn_ddl());
         let source = sqlite_runtime_source(
             "users",
             &schema,
@@ -3614,13 +3595,13 @@ const _procedures = { upsertConflict };
 
         let key = backend
             .key_store()
-            .resolve("default", key_id)
+            .resolve("default")
             .await
             .expect("resolve key");
         let plaintext = zeroship_data_orm::encryption::aead::decrypt(
             &key,
             &stored_blob,
-            &encryption::canonical_aad("users", "ssn", first_id.as_bytes()),
+            &encryption::canonical_aad("default", "users", "ssn", first_id.as_bytes()),
         )
         .expect("decrypt stored conflict ciphertext");
         assert_eq!(
@@ -3633,16 +3614,16 @@ const _procedures = { upsertConflict };
 
 #[test]
 fn update_non_id_filter_keeps_randomised_ciphertext_readable_sqlite_runtime() {
-    let key_id = "c1_update_non_id_runtime";
-    let _keys = with_root_key("c1_update_non_id_runtime", &"7".repeat(64));
+
+    let _keys = with_project_key(&["default"], &"7".repeat(64));
 
     run(async {
         use zeroship_data_orm::backend::sqlite::session::TypedCell;
         use zeroship_data_orm::encryption;
 
         let dir = tempfile::tempdir().expect("tempdir");
-        let schema = users_encrypted_ssn_schema(key_id);
-        apply_schema_ahead_of_runtime(&dir, &users_encrypted_ssn_ddl(key_id));
+        let schema = users_encrypted_ssn_schema();
+        apply_schema_ahead_of_runtime(&dir, &users_encrypted_ssn_ddl());
         let source = sqlite_runtime_source(
             "users",
             &schema,
@@ -3731,13 +3712,13 @@ const _procedures = { seed, updateByEmail };
 
         let key = backend
             .key_store()
-            .resolve("default", key_id)
+            .resolve("default")
             .await
             .expect("resolve key");
         let plaintext = zeroship_data_orm::encryption::aead::decrypt(
             &key,
             &stored_blob,
-            &encryption::canonical_aad("users", "ssn", row_id.as_bytes()),
+            &encryption::canonical_aad("default", "users", "ssn", row_id.as_bytes()),
         )
         .expect("decrypt updated ciphertext");
         assert_eq!(
@@ -3750,16 +3731,16 @@ const _procedures = { seed, updateByEmail };
 
 #[test]
 fn update_many_non_id_filter_encrypts_per_row_sqlite_runtime() {
-    let key_id = "c1_update_many_non_id_runtime";
-    let _keys = with_root_key("c1_update_many_non_id_runtime", &"8".repeat(64));
+
+    let _keys = with_project_key(&["default"], &"8".repeat(64));
 
     run(async {
         use zeroship_data_orm::backend::sqlite::session::TypedCell;
         use zeroship_data_orm::encryption;
 
         let dir = tempfile::tempdir().expect("tempdir");
-        let schema = users_encrypted_ssn_schema(key_id);
-        apply_schema_ahead_of_runtime(&dir, &users_encrypted_ssn_ddl(key_id));
+        let schema = users_encrypted_ssn_schema();
+        apply_schema_ahead_of_runtime(&dir, &users_encrypted_ssn_ddl());
         let source = sqlite_runtime_source(
             "users",
             &schema,
@@ -3862,7 +3843,7 @@ const _procedures = { seed, updateManyByName };
 
         let key = backend
             .key_store()
-            .resolve("default", key_id)
+            .resolve("default")
             .await
             .expect("resolve key");
         for row in &typed.rows {
@@ -3891,7 +3872,7 @@ const _procedures = { seed, updateManyByName };
             let plaintext = zeroship_data_orm::encryption::aead::decrypt(
                 &key,
                 &stored_blob,
-                &encryption::canonical_aad("users", "ssn", row_id.as_bytes()),
+                &encryption::canonical_aad("default", "users", "ssn", row_id.as_bytes()),
             )
             .expect("decrypt updated ciphertext");
             assert_eq!(
@@ -3905,8 +3886,8 @@ const _procedures = { seed, updateManyByName };
 
 #[test]
 fn update_many_randomised_target_cap_rejects_without_writes_sqlite_runtime() {
-    let key_id = "c1_update_many_target_cap_runtime";
-    let _keys = with_root_key("c1_update_many_target_cap_runtime", &"c".repeat(64));
+
+    let _keys = with_project_key(&["default"], &"c".repeat(64));
 
     run(async {
         use zeroship_data_orm::backend::sqlite::session::TypedCell;
@@ -3919,14 +3900,14 @@ fn update_many_randomised_target_cap_rejects_without_writes_sqlite_runtime() {
             .map(|index| format!("('user_{index:04}', 'user_{index:04}@example.com', 'Red Team')"))
             .collect::<Vec<_>>();
         assert!(!values.is_empty(), "overflow fixture must seed target rows");
-        let mut ddl = users_encrypted_ssn_ddl(key_id);
+        let mut ddl = users_encrypted_ssn_ddl();
         ddl.push_str(&format!(
             "INSERT INTO \"default\".\"users\" (id, email, name) VALUES {};",
             values.join(",")
         ));
         apply_schema_ahead_of_runtime(&dir, &ddl);
 
-        let schema = users_encrypted_ssn_schema(key_id);
+        let schema = users_encrypted_ssn_schema();
         let source = sqlite_runtime_source(
             "users",
             &schema,
@@ -4020,15 +4001,15 @@ const _procedures = { overflow };
 
 #[test]
 fn update_many_randomised_failure_rolls_back_committed_prefix_sqlite_runtime() {
-    let key_id = "c1_update_many_atomic_failure_runtime";
-    let _keys = with_root_key("c1_update_many_atomic_failure_runtime", &"a".repeat(64));
+
+    let _keys = with_project_key(&["default"], &"a".repeat(64));
 
     run(async {
         use zeroship_data_orm::backend::sqlite::session::TypedCell;
 
         let dir = tempfile::tempdir().expect("tempdir");
-        let schema = users_encrypted_ssn_schema(key_id);
-        apply_schema_ahead_of_runtime(&dir, &users_encrypted_ssn_ddl(key_id));
+        let schema = users_encrypted_ssn_schema();
+        apply_schema_ahead_of_runtime(&dir, &users_encrypted_ssn_ddl());
         let source = sqlite_runtime_source(
             "users",
             &schema,
@@ -4272,13 +4253,13 @@ const _procedures = { seed, failBulk, failBulkInsideTransaction };
 
 #[test]
 fn plain_updates_on_encrypted_collection_stay_on_fast_path_sqlite_runtime() {
-    let key_id = "perf_plain_update_fast_path_runtime";
-    let _keys = with_root_key("perf_plain_update_fast_path_runtime", &"9".repeat(64));
+
+    let _keys = with_project_key(&["default"], &"9".repeat(64));
 
     run(async {
         let dir = tempfile::tempdir().expect("tempdir");
-        let schema = users_encrypted_ssn_schema(key_id);
-        apply_schema_ahead_of_runtime(&dir, &users_encrypted_ssn_ddl(key_id));
+        let schema = users_encrypted_ssn_schema();
+        apply_schema_ahead_of_runtime(&dir, &users_encrypted_ssn_ddl());
         let source = sqlite_runtime_source(
             "users",
             &schema,
@@ -4350,13 +4331,13 @@ const _procedures = { seed, updatePlain, updateManyPlain };
 
 #[test]
 fn plain_upsert_on_encrypted_collection_skips_conflict_probe_sqlite_runtime() {
-    let key_id = "perf_plain_upsert_fast_path_runtime";
-    let _keys = with_root_key("perf_plain_upsert_fast_path_runtime", &"a".repeat(64));
+
+    let _keys = with_project_key(&["default"], &"a".repeat(64));
 
     run(async {
         let dir = tempfile::tempdir().expect("tempdir");
-        let schema = users_encrypted_secret_schema(key_id);
-        apply_schema_ahead_of_runtime(&dir, &users_encrypted_secret_ddl(key_id));
+        let schema = users_encrypted_secret_schema();
+        apply_schema_ahead_of_runtime(&dir, &users_encrypted_secret_ddl());
         let source = sqlite_runtime_source(
             "users",
             &schema,
@@ -4414,13 +4395,13 @@ const _procedures = { seed, upsertPlainConflict };
 
 #[test]
 fn update_rejects_nested_version_filter_without_mutating_sqlite_row() {
-    let key_id = "i5_update_nested_version";
-    let _keys = with_root_key("i5_update_nested_version", &"1".repeat(64));
+
+    let _keys = with_project_key(&["default"], &"1".repeat(64));
 
     run(async {
         let dir = tempfile::tempdir().expect("tempdir");
-        let schema = users_encrypted_ssn_schema(key_id);
-        apply_schema_ahead_of_runtime(&dir, &users_encrypted_ssn_ddl(key_id));
+        let schema = users_encrypted_ssn_schema();
+        apply_schema_ahead_of_runtime(&dir, &users_encrypted_ssn_ddl());
         let source = sqlite_runtime_source(
             "users",
             &schema,
@@ -4512,13 +4493,13 @@ const _procedures = { seed, nestedCasUpdate };
 
 #[test]
 fn update_many_rejects_nested_version_filter_without_mutating_sqlite_row() {
-    let key_id = "i5_update_many_nested_version";
-    let _keys = with_root_key("i5_update_many_nested_version", &"2".repeat(64));
+
+    let _keys = with_project_key(&["default"], &"2".repeat(64));
 
     run(async {
         let dir = tempfile::tempdir().expect("tempdir");
-        let schema = users_encrypted_ssn_schema(key_id);
-        apply_schema_ahead_of_runtime(&dir, &users_encrypted_ssn_ddl(key_id));
+        let schema = users_encrypted_ssn_schema();
+        apply_schema_ahead_of_runtime(&dir, &users_encrypted_ssn_ddl());
         let source = sqlite_runtime_source(
             "users",
             &schema,
@@ -4607,8 +4588,8 @@ const _procedures = { seed, nestedCasUpdateMany };
 #[test]
 fn encrypted_column_round_trip_sqlite_randomised() {
     use zeroship_data_orm::encryption;
-    let key_id = "p5_sqlite_rt_rand";
-    let _keys = with_root_key("p5_sqlite_rt_rand", &"a".repeat(64));
+
+    let _keys = with_project_key(&["app1"], &"a".repeat(64));
     run(async {
         let (backend, _dir) = fresh_backend();
         backend
@@ -4628,11 +4609,11 @@ fn encrypted_column_round_trip_sqlite_randomised() {
 
         let key = backend
             .key_store()
-            .resolve("app1", key_id)
+            .resolve("app1")
             .await
             .expect("resolve_key");
         let plaintext = b"123-45-6789";
-        let aad = encryption::canonical_aad("enc_notes", "ssn", b"row_a");
+        let aad = encryption::canonical_aad("app1", "enc_notes", "ssn", b"row_a");
         let ct =
             zeroship_data_orm::encryption::aead::encrypt(&key, plaintext, &aad).expect("encrypt");
 
@@ -4686,8 +4667,8 @@ fn encrypted_column_round_trip_sqlite_randomised() {
 #[test]
 fn randomised_ciphertext_row_swap_rejected_sqlite() {
     use zeroship_data_orm::encryption;
-    let key_id = "p5_sqlite_row_swap";
-    let _keys = with_root_key("p5_sqlite_row_swap", &"d".repeat(64));
+
+    let _keys = with_project_key(&["app1"], &"d".repeat(64));
     run(async {
         let (backend, _dir) = fresh_backend();
         backend
@@ -4705,18 +4686,18 @@ fn randomised_ciphertext_row_swap_rejected_sqlite() {
             .await
             .expect("CREATE TABLE enc_notes");
 
-        let key = backend.key_store().resolve("app1", key_id).await.unwrap();
+        let key = backend.key_store().resolve("app1").await.unwrap();
         // Insert row A and row B, each with its OWN AAD (binds row_pk).
         let ct_a = zeroship_data_orm::encryption::aead::encrypt(
             &key,
             b"sensitive-A",
-            &encryption::canonical_aad("enc_notes", "ssn", b"row_a"),
+            &encryption::canonical_aad("app1", "enc_notes", "ssn", b"row_a"),
         )
         .unwrap();
         let ct_b = zeroship_data_orm::encryption::aead::encrypt(
             &key,
             b"sensitive-B",
-            &encryption::canonical_aad("enc_notes", "ssn", b"row_b"),
+            &encryption::canonical_aad("app1", "enc_notes", "ssn", b"row_b"),
         )
         .unwrap();
         for (id, ct) in [("row_a", &ct_a), ("row_b", &ct_b)] {
@@ -4751,7 +4732,7 @@ fn randomised_ciphertext_row_swap_rejected_sqlite() {
             .step_by(2)
             .map(|i| u8::from_str_radix(&hex_str[i..i + 2], 16).unwrap())
             .collect();
-        let aad_b = encryption::canonical_aad("enc_notes", "ssn", b"row_b");
+        let aad_b = encryption::canonical_aad("app1", "enc_notes", "ssn", b"row_b");
         let err = zeroship_data_orm::encryption::aead::decrypt(&key, &raw, &aad_b)
             .expect_err("row-swap must fail AAD verification");
         match err {
@@ -4766,31 +4747,26 @@ fn randomised_ciphertext_row_swap_rejected_sqlite() {
 /// **Cross-backend equivalence (SQLite <-> SQLite via shared
 /// env-var key).** Encrypt plaintext on backend_a; copy the ciphertext
 /// bytes; decrypt on backend_b (different temp file) configured with
-/// the same `ZEROSHIP_COLUMN_KEY_DEFAULT`. Proves HKDF derivation is
-/// deterministic across instances — the encryption module is the
-/// shared cross-backend surface, so two SQLite backends with the same
-/// root key produce the same derived AEAD key (and thus the same
-/// decryption result).
+/// the same host-supplied project key.
 #[test]
 fn cross_backend_ciphertext_decrypt_via_shared_key() {
     use zeroship_data_orm::encryption;
-    let key_id = "p5_sqlite_cross";
-    let _keys = with_root_key("p5_sqlite_cross", &"e".repeat(64));
+
+    let _keys = with_project_key(&["app_shared"], &"e".repeat(64));
     run(async {
         // Two separate backends rooted at separate temp dirs.
         let (backend_a, _dir_a) = fresh_backend();
         let (backend_b, _dir_b) = fresh_backend();
 
-        // Use the SAME app_id so HKDF salt matches; the env-var key
-        // sourcing is process-global, so the root key is identical.
+        // Both backends receive the same explicit app-to-project binding.
         let app_id = "app_shared";
-        let key_a = backend_a.key_store().resolve(app_id, key_id).await.unwrap();
-        let key_b = backend_b.key_store().resolve(app_id, key_id).await.unwrap();
-        // The derived halves must match — same root + same app_id.
+        let key_a = backend_a.key_store().resolve(app_id).await.unwrap();
+        let key_b = backend_b.key_store().resolve(app_id).await.unwrap();
+        // Both handles must resolve the supplied project key.
         assert_eq!(key_a.k_enc, key_b.k_enc);
 
         let plaintext = b"cross-instance-payload";
-        let aad = encryption::canonical_aad("enc_notes", "ssn", b"row_a");
+        let aad = encryption::canonical_aad(app_id, "enc_notes", "ssn", b"row_a");
         let ct = zeroship_data_orm::encryption::aead::encrypt(&key_a, plaintext, &aad)
             .expect("encrypt on A");
 
@@ -4819,7 +4795,7 @@ fn encrypted_column_e2e_crud_round_trip_sqlite() {
     };
     use zeroship_data_sql::compile::{SqlDialect, build_insert_with_dialect};
 
-    let _keys = with_root_key("p5_e2e_crud", &"c".repeat(64));
+    let _keys = with_project_key(&["app_demo"], &"c".repeat(64));
     run(async {
         let (backend, _dir) = fresh_backend();
         backend
@@ -4849,7 +4825,6 @@ fn encrypted_column_e2e_crud_round_trip_sqlite() {
             "ssn": {
                 "type": "string",
                 "encrypted": {
-                    "keyId": "p5_e2e_crud",
                     "wraps": "string",
                 },
             },
@@ -5260,7 +5235,7 @@ fn aliased_select_skips_kind_none_sqlite() {
     let schema = zeroship_data_sql::value!({
         "ssn": {
             "type": "string",
-            "encrypted": { "keyId": "default", "wraps": "string" },
+            "encrypted": { "wraps": "string" },
             "mask": { "kind": "none", "classification": "spi" }
         },
         "name": { "type": "string" }
@@ -6043,13 +6018,12 @@ fn cold_unmask_open_comes_from_ensure_backend_not_the_fixture() {
 /// `unmask_backend` - and is bound by the cold-open gate directly above.
 #[test]
 fn cold_unmask_with_auto_actor_attaches_before_read() {
-    let _keys = with_root_key("p55_pr4_auto", &"a".repeat(64));
+    let _keys = with_project_key(&["app_unmask_auto"], &"a".repeat(64));
     let schema = zeroship_data_sql::value!({
         "id": { "type": "string" },
         "ssn": {
             "type": "string",
             "encrypted": {
-                "keyId": "p55_pr4_auto",
                 "wraps": "string",
             },
             "mask": { "kind": "last4", "classification": "spi" },
@@ -6143,7 +6117,7 @@ fn cold_unmask_with_auto_actor_attaches_before_read() {
             schema.clone(),
             zeroship_data_sql::value!({}),
         );
-        let _cold_keys = with_root_key("p55_pr4_auto", &"a".repeat(64));
+        let _cold_keys = with_project_key(&["app_unmask_auto"], &"a".repeat(64));
 
         // Dispatch unmask with `kind: "auto"` actor — must succeed.
         let args = unmask::UnmaskFieldArgs {
@@ -6205,13 +6179,12 @@ fn cold_unmask_with_auto_actor_attaches_before_read() {
 /// error `unmask_not_permitted` reaches the caller.
 #[test]
 fn unmask_with_user_actor_returns_forbidden_audit_logged() {
-    let _keys = with_root_key("p55_pr4_user", &"b".repeat(64));
+    let _keys = with_project_key(&["app_unmask_user"], &"b".repeat(64));
     let schema = zeroship_data_sql::value!({
         "id": { "type": "string" },
         "ssn": {
             "type": "string",
             "encrypted": {
-                "keyId": "p55_pr4_user",
                 "wraps": "string",
             },
             "mask": { "kind": "last4", "classification": "spi" },
@@ -6464,13 +6437,12 @@ async fn policy_setup(
 /// allows a user-role actor to unmask a pii-classified column.
 #[test]
 fn unmask_with_user_role_in_policy_returns_plaintext() {
-    let _keys = with_root_key("p55_pr5_grant", &"c".repeat(64));
+    let _keys = with_project_key(&["app_unmask_policy_grant"], &"c".repeat(64));
     let schema = zeroship_data_sql::value!({
         "id": { "type": "string" },
         "email": {
             "type": "string",
             "encrypted": {
-                "keyId": "p55_pr5_grant",
                 "wraps": "string",
             },
             "mask": { "kind": "email", "classification": "pii" },
@@ -10461,8 +10433,8 @@ use zeroship_data_orm::search::Search;
 #[test]
 fn encrypted_conflict_target_is_refused_sqlite_runtime() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let schema = users_encrypted_ssn_schema("unused");
-    apply_schema_ahead_of_runtime(&dir, &users_encrypted_ssn_ddl("unused"));
+    let schema = users_encrypted_ssn_schema();
+    apply_schema_ahead_of_runtime(&dir, &users_encrypted_ssn_ddl());
     let source = sqlite_runtime_source(
         "users",
         &schema,

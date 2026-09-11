@@ -9564,7 +9564,7 @@ pub(crate) fn ir_column_to_field(c: &IrColumn) -> FieldDescriptor {
     //
     // The op.* `ColType::Encrypted` carries the wrapped type. Recovery
     // restores the key and mask defaults the SDK's `t.encrypted()` stamps
-    // (`{ keyId: "default", wraps: <inner> }`) and the FAIL-SAFE
+    // (`{ wraps: <inner> }`) and the FAIL-SAFE
     // AUTO-MASK (`{ kind: "full", classification: "pii" }`) - BYTE-IDENTICAL to what
     // `descriptor_to_sdk_schema` emits for an authored `t.encrypted()` and to what the
     // runtime recovers from the `zero-migrate:enc`/`zero-migrate:mask` sentinels (`introspect_schema.rs`).
@@ -9574,7 +9574,6 @@ pub(crate) fn ir_column_to_field(c: &IrColumn) -> FieldDescriptor {
             let wraps = encrypted_wraps_token(of);
             (
                 Some(serde_json::json!({
-                    "keyId": "default",
                     "wraps": wraps,
                 })),
                 // The fail-safe auto-mask every `t.encrypted()` column gets at builder
@@ -9859,7 +9858,7 @@ pub(crate) fn resolve_domain_base_type<'a>(
 /// rendered type IS `"schema"."domain_name"`, so resolving it here would change the
 /// DDL. An ENCRYPTED column's physical type is `BYTEA`/`BLOB`/`LONGBLOB` regardless of
 /// what it wraps, so the inner type reaches the catalog through exactly one channel -
-/// the `zero-migrate:enc:<keyId>:<wraps>` sentinel - and through the runtime
+/// the `zero-migrate:enc:<wraps>` sentinel - and through the runtime
 /// descriptor's type token. Both are DESCRIPTIONS of the plaintext, and both were
 /// describing a domain over `int` as `string`.
 ///

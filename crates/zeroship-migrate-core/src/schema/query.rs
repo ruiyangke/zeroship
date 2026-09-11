@@ -1910,7 +1910,7 @@ fn short_hash_base32(input: &str) -> String {
     String::from_utf8(out.to_vec()).expect("ALPHABET is ASCII")
 }
 
-/// Render the inline `/* zero-migrate:enc:{keyId}:{wraps} */`
+/// Render the inline `/* zero-migrate:enc:{wraps} */`
 /// encryption sentinel for a field's `t.encrypted({...})` declaration, IFF the
 /// field carries an `encrypted` sub-object. Returns `None` for a plain column.
 ///
@@ -1933,7 +1933,7 @@ pub fn encryption_sentinel_for_field(def: &serde_json::Value) -> Option<String> 
 /// Validate the author-controlled atoms embedded in an encryption sentinel.
 /// The inline form is a SQL block comment, so each atom must belong to the
 /// sentinel's closed grammar before the body can be emitted verbatim. In
-/// particular, a key id may never carry `*/`, `:`, whitespace, or SQL text.
+/// particular, the wrapped type must come from the supported primitive types.
 pub(crate) fn validate_encryption_sentinel_for_field(
     def: &serde_json::Value,
 ) -> Result<(), QueryError> {
@@ -1944,11 +1944,6 @@ pub(crate) fn validate_encryption_sentinel_for_field(
         QueryError::InvalidFilter("encrypted must be an options object".to_string())
     })?;
 
-    if enc.contains_key("mode") {
-        return Err(QueryError::InvalidFilter(
-            "encrypted.mode is unsupported; encryption is always randomised".to_string(),
-        ));
-    }
     if def.get("unique").and_then(serde_json::Value::as_bool) == Some(true) {
         return Err(QueryError::InvalidFilter(
             "encrypted fields cannot be unique".to_string(),
@@ -1964,23 +1959,6 @@ pub(crate) fn validate_encryption_sentinel_for_field(
         return Err(QueryError::InvalidFilter(format!(
             "encrypted.wraps must be string, number, or bytes, got {wraps:?}"
         )));
-    }
-    let key_id = match enc.get("keyId") {
-        None => "default",
-        Some(value) => value.as_str().ok_or_else(|| {
-            QueryError::InvalidFilter("encrypted.keyId must be a string".to_string())
-        })?,
-    };
-    if key_id.is_empty()
-        || !key_id
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
-    {
-        return Err(QueryError::InvalidFilter(
-            "encrypted.keyId must be a non-empty ASCII token using only letters, digits, '.', \
-             '_', or '-'"
-                .to_string(),
-        ));
     }
     Ok(())
 }
@@ -2024,7 +2002,7 @@ fn field_to_column_for_dialect(
     // out before the INSERT/UPDATE, and the SQL builder casts the
     // base64 parameter back to BYTEA via `decode($N, 'base64')::bytea`.
     //
-    // Emit a `/* zero-migrate:enc:{keyId}:{wraps} */` sentinel
+    // Emit a `/* zero-migrate:enc:{wraps} */` sentinel
     // comment alongside the column type so the SQLite-arm introspector
     // can regex-recover the encryption metadata from `sqlite_master.sql`.
     // PG ignores SQL comments at parse time (the type is still BYTEA);
@@ -5016,25 +4994,16 @@ columns = [
     fn raw_column_for_field_returns_none_for_kind_none() {
         let def = serde_json::json!({
             "type": "string",
-            "encrypted": { "keyId": "default", "wraps": "string" },
+            "encrypted": { "wraps": "string" },
             "mask": { "kind": "none", "classification": "spi" }
         });
         assert_eq!(raw_column_for_field("ssn", &def), None);
     }
 
-    /// **DDL shape** - a masked column emits the RAW column (declared type, its
-    /// constraints, named by `raw_column_name`) plus the field's own column as
-    /// bare nullable TEXT holding the mask.
     #[test]
-    fn encrypted_ddl_rejects_removed_mode_and_unique_constraints() {
-        for def in [
-            serde_json::json!({"type":"string","encrypted":{"mode":"randomised"}}),
-            serde_json::json!({"type":"string","encrypted":{"mode":"deterministic"}}),
-            serde_json::json!({"type":"string","encrypted":{},"unique":true}),
-        ] {
-            let schema = serde_json::json!({"secret":def});
-            assert!(build_create_table_with_fks("app1", "records", &schema, &FkEmission::Inline).is_err());
-        }
+    fn encrypted_ddl_rejects_unique_constraints() {
+        let schema = serde_json::json!({"secret":{"type":"string","encrypted":{},"unique":true}});
+        assert!(build_create_table_with_fks("app1", "records", &schema, &FkEmission::Inline).is_err());
         let schema = serde_json::json!({"secret":{"type":"string","encrypted":{}}});
         assert!(build_create_table_with_fks("app1", "records", &schema, &FkEmission::Inline).is_ok());
     }
@@ -5188,7 +5157,7 @@ columns = [
         let schema = serde_json::json!({
             "ssn": {
                 "type": "string",
-                "encrypted": { "keyId": "default", "wraps": "string" },
+                "encrypted": { "wraps": "string" },
                 "mask": { "kind": "full", "classification": "pii" }
             }
         });
@@ -5220,7 +5189,7 @@ columns = [
         let schema = serde_json::json!({
             "ssn": {
                 "type": "string",
-                "encrypted": { "keyId": "default", "wraps": "string" },
+                "encrypted": { "wraps": "string" },
                 "mask": { "kind": "none", "classification": "pii" }
             }
         });
@@ -5233,35 +5202,6 @@ columns = [
         assert!(
             sql.contains("\"ssn\" BYTEA"),
             "field's own column still holds the ciphertext directly: {sql}"
-        );
-    }
-
-    #[test]
-    fn encryption_sentinel_rejects_comment_terminator_before_mysql_ddl() {
-        let hostile = json!({
-            "type": "string",
-            "encrypted": {
-                "keyId": "k*/ VARCHAR(255); DROP TABLE users; /*",
-                "wraps": "string"
-            }
-        });
-        let error = field_to_column_for_dialect("secret", &hostile, &MYSQL)
-            .expect_err("hostile sentinel atom must be refused");
-        assert!(
-            error.to_string().contains("encrypted.keyId"),
-            "the refusal should identify the unsafe atom: {error}"
-        );
-
-        let valid = json!({
-            "type": "string",
-            "encrypted": {
-                "keyId": "pii-key.v2",
-                "wraps": "bytes"
-            }
-        });
-        assert!(
-            field_to_column_for_dialect("secret", &valid, &MYSQL).is_ok(),
-            "documented safe key-id punctuation remains valid"
         );
     }
 
@@ -5306,7 +5246,7 @@ columns = [
             },
             "secret": {
                 "type": "bytes",
-                "encrypted": { "keyId": "k1" }
+                "encrypted": {}
             },
             "owner": {
                 "type": "ref",
