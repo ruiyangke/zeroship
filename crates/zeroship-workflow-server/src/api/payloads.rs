@@ -67,7 +67,7 @@ async fn read_task(
     request: web::HttpRequest,
     state: State<SharedState>,
     path: Path<String>,
-    body: JsonBody<ReadTaskPayload>,
+    body: web::types::Payload,
 ) -> web::HttpResponse {
     streaming(
         async {
@@ -75,7 +75,7 @@ async fn read_task(
                 .auth
                 .worker(authorization(&request), endpoints::WORKFLOW_TASK_READ)
                 .await?;
-            let body = body.map_err(json_error)?.into_inner();
+            let body: ReadTaskPayload = read_json(&request, body).await?;
             state
                 .service
                 .read_task_payload(&worker, &path.into_inner(), &body.token, &body.reference)
@@ -89,7 +89,7 @@ async fn read_app(
     request: web::HttpRequest,
     state: State<SharedState>,
     path: Path<(String, String)>,
-    body: JsonBody<ReadAppPayload>,
+    body: web::types::Payload,
 ) -> web::HttpResponse {
     streaming(
         async {
@@ -98,7 +98,7 @@ async fn read_app(
             state
                 .auth
                 .app(authorization(&request), &app, AppOperation::ReadOutput)?;
-            let body = body.map_err(json_error)?.into_inner();
+            let body: ReadAppPayload = read_json(&request, body).await?;
             state
                 .service
                 .for_app(app)

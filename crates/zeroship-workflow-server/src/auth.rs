@@ -9,8 +9,8 @@ use zeroship_core::{
         presented_issuer, thumbprint_key_id, ReplayStore, ServiceAssertionVerifier,
         ServiceTrustBundle,
     },
-    service_identity::{verify_service_call, AuthError, ServiceEndpoint},
-    service_peers::{service_issuer, ServiceAuth, WORKER_SERVICE_NAME},
+    service_identity::{verify_service_call, AuthError, IdentityVerifier, ServiceEndpoint},
+    service_peers::{service_issuer, WORKER_SERVICE_NAME},
     typed_id,
 };
 use zeroship_workflow::{
@@ -25,6 +25,7 @@ use zeroship_workflow::{
 #[async_trait(?Send)]
 pub trait WorkerRegistry: Send + Sync + std::fmt::Debug {
     async fn active_key(&self, instance: &str) -> Result<Option<[u8; 32]>, WorkflowServiceError>;
+    async fn ready(&self) -> Result<(), WorkflowServiceError>;
 }
 
 #[derive(Debug)]
@@ -39,6 +40,16 @@ impl PostgresWorkerRegistry {
 }
 #[async_trait(?Send)]
 impl WorkerRegistry for PostgresWorkerRegistry {
+    async fn ready(&self) -> Result<(), WorkflowServiceError> {
+        self.client
+            .query(
+                "SELECT id,status,public_key FROM zeroship.worker_instances LIMIT 0",
+                &[],
+            )
+            .await
+            .map(|_| ())
+            .map_err(|_| WorkflowServiceError::Unavailable("worker registry unavailable".into()))
+    }
     async fn active_key(&self, instance: &str) -> Result<Option<[u8; 32]>, WorkflowServiceError> {
         let rows = self
             .client
@@ -63,7 +74,7 @@ impl WorkerRegistry for PostgresWorkerRegistry {
 
 pub struct WorkflowAuth {
     app_keys: ServiceTrustBundle,
-    peers: ServiceAuth,
+    peers: Arc<dyn IdentityVerifier + Send + Sync>,
     workers: Arc<dyn WorkerRegistry>,
     replay: Arc<dyn ReplayStore + Send + Sync>,
 }
@@ -73,10 +84,13 @@ impl std::fmt::Debug for WorkflowAuth {
     }
 }
 impl WorkflowAuth {
+    pub async fn ready(&self) -> Result<(), WorkflowServiceError> {
+        self.workers.ready().await
+    }
     #[must_use]
     pub fn new(
         app_keys: ServiceTrustBundle,
-        peers: ServiceAuth,
+        peers: Arc<dyn IdentityVerifier + Send + Sync>,
         workers: Arc<dyn WorkerRegistry>,
         replay: Arc<dyn ReplayStore + Send + Sync>,
     ) -> Self {
@@ -109,8 +123,7 @@ impl WorkflowAuth {
         header: Option<&str>,
         endpoint: ServiceEndpoint,
     ) -> Result<(), WorkflowServiceError> {
-        self.peers
-            .verify(header, endpoint)
+        verify_service_call(self.peers.as_ref(), header, WORKFLOW_AUDIENCE, endpoint)
             .await
             .map(|_| ())
             .map_err(auth_error)

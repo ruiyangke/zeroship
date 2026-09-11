@@ -7913,6 +7913,7 @@ dependencies = [
  "zeroship-migrate-server",
  "zeroship-worker",
  "zeroship-workflow-scheduler",
+ "zeroship-workflow-server",
 ]
 
 [[package]]
@@ -8684,8 +8685,10 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "bytes",
+ "clap",
  "compio",
  "compio-postgres",
+ "ed25519-dalek",
  "futures",
  "ntex",
  "serde",
@@ -8695,6 +8698,7 @@ dependencies = [
  "testcontainers",
  "toml 0.8.23",
  "tracing",
+ "zeroship-authn",
  "zeroship-core",
  "zeroship-storage",
  "zeroship-workflow",

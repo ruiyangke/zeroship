@@ -1,3 +1,4 @@
+use compio::io::{AsyncRead, AsyncWriteExt};
 use ntex::{http::StatusCode, web};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -42,6 +43,31 @@ fn peer(issuer: &str, key: ServiceSigningKey, keys: ServiceTrustBundle) -> Servi
         Arc::new(InMemoryReplayStore::new()),
     );
     ServiceAuth::new(keyring, Arc::new(verifier))
+}
+
+async fn rejects_before_reading_body(address: std::net::SocketAddr, path: &str) {
+    compio::time::timeout(std::time::Duration::from_secs(5), async {
+        let mut stream = compio::net::TcpStream::connect(address).await.unwrap();
+        let headers = format!(
+            "POST {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 1024\r\nConnection: close\r\n\r\n"
+        );
+        stream.write_all(headers.into_bytes()).await.0.unwrap();
+        // Deliberately withhold the declared body. Authentication must finish
+        // without waiting for the buffered JSON extractor.
+        let mut response = Vec::new();
+        loop {
+            let compio::BufResult(read, bytes) = stream.read(vec![0; 1024]).await;
+            let read = read.unwrap();
+            assert_ne!(read, 0, "connection closed without an HTTP status");
+            response.extend_from_slice(&bytes[..read]);
+            if response.windows(2).any(|window| window == b"\r\n") {
+                break;
+            }
+        }
+        assert!(response.starts_with(b"HTTP/1.1 401 "), "{response:?}");
+    })
+    .await
+    .expect("unauthenticated request waited for its body");
 }
 
 #[ntex::test]
@@ -113,7 +139,10 @@ async fn remote_clients_obey_app_capabilities_and_registered_task_ownership() {
             &control_key,
         )
         .unwrap();
-    let server_identity = peer(WORKFLOW_AUDIENCE, ServiceSigningKey::generate(), peer_keys);
+    let server_identity = Arc::new(ServiceAssertionVerifier::new(
+        peer_keys,
+        Arc::new(InMemoryReplayStore::new()),
+    ));
     let state = Arc::new(WorkflowHttpState {
         service,
         auth: WorkflowAuth::new(
@@ -145,6 +174,14 @@ async fn remote_clients_obey_app_capabilities_and_registered_task_ownership() {
     .await;
     let endpoint = WorkflowEndpoint::new(&server.url("")).unwrap();
     let other_endpoint = WorkflowEndpoint::new(&replica.url("")).unwrap();
+    for path in [
+        format!("/v1/apps/{}/workflows/Example/runs", a.as_str()),
+        zeroship_core::service_identity::endpoints::WORKFLOW_TASK_POLL
+            .path_template()
+            .to_owned(),
+    ] {
+        rejects_before_reading_body(server.addr(), &path).await;
+    }
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()

@@ -32,6 +32,9 @@ pub struct AppWorkflows {
 }
 
 impl WorkflowService {
+    pub async fn verify(&self) -> Result<(), WorkflowServiceError> {
+        self.store.verify().await
+    }
     pub async fn open(store: Arc<dyn WorkflowStore>) -> Result<Self, WorkflowServiceError> {
         store.verify().await?;
         Ok(Self {

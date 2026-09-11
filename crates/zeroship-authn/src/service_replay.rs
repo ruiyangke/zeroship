@@ -176,6 +176,14 @@ impl SharedClientReplayStore {
     pub const fn new(client: Arc<compio_postgres::Client>) -> Self {
         Self { client }
     }
+
+    /// Remove expired assertion claims using the shared authentication client.
+    pub async fn purge_expired(&self) -> Result<u64, ReplayStoreError> {
+        self.client
+            .execute(PURGE_SQL, &[])
+            .await
+            .map_err(|error| ReplayStoreError(describe(&error)))
+    }
 }
 
 impl ReplayStore for SharedClientReplayStore {
