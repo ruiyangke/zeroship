@@ -163,11 +163,8 @@ jobs:
       # PROVISION BEFORE TESTING, and this step is what makes the deletion of
       # `ZEROSHIP_REQUIRE_LIVE_BACKENDS` safe here rather than merely correct.
       #
-      # `cargo test --workspace` below runs `compio-postgres` and `compio-redis`.
-      # Until now this job ran them with no servers at all: they returned early
-      # and cargo counted every one as a pass, so 42 Postgres tests and 14 Redis
-      # tests reported green in a job that had neither backend. Those targets now
-      # FAIL when nothing answers, so the backends have to be here.
+      # The PostgreSQL suites still require the shared provisioner. Redis
+      # driver and KV tests start their own servers through Testcontainers.
       #
       # `zeroship-mailer` is the same shape and is why the SMTP sink is in that
       # script's set: its plaintext-transport test is not feature-gated, so
@@ -2106,15 +2103,15 @@ jobs:
       - name: Install harness prerequisites
         run: sudo apt-get update && sudo apt-get install -y lsof
       # Postgres as an explicit `docker run`, NOT a `services:` entry, and the
-      # container NAME is the reason: stream/kv/storage/workflows create and drop
+      # container NAME is the reason: stream/storage/workflows create and drop
       # their own dedicated database through `docker exec "$PG_CONTAINER" psql`
       # (default `compose-postgres-1`, matching the dev compose stack). GitHub
       # generates the name of a `services:` container, so `docker exec` by name
       # cannot reach it. Same reasoning as golden-path and billing-gate.
       #
       # errors and env do NOT use this one - they call stack_pg_up, which starts
-      # its OWN postgres:16 container on its own port per harness. That is why
-      # they need docker but not this step.
+      # its OWN postgres:16 container on its own port per harness. The native
+      # KV test uses Testcontainers. These need Docker but not this step.
       - name: Start Postgres
         run: |
           docker run -d --name compose-postgres-1 -p 5440:5432 \
@@ -2183,13 +2180,14 @@ jobs:
           PG_CONTAINER: compose-postgres-1
           PG_USER: postgres
       - name: env.kv (redb dev vs Redis deployed)
-        run: |
-          set -o pipefail
-          tests/e2e_dev_vs_deployed_kv.sh 2>&1 | tee "$RUNNER_TEMP/dvd-kv.log"
-        env:
-          ZS_FRESHNESS_STRICT: 1
-          PG_CONTAINER: compose-postgres-1
-          PG_USER: postgres
+        run: cargo test -p zeroship-cli --test kv_deployment -- --nocapture
+      - name: Retain KV fixture failure logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kv-deployment-logs
+          path: /tmp/zeroship-kv-deployment-*/*.log
+          if-no-files-found: ignore
       # env.auth. This harness existed and ran in NO workflow until 2026-08-12.
       # Unlike storage and workflows below, whose exclusions are measured and
       # written down, nothing recorded a reason for this one - so it was an

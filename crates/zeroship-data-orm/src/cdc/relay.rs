@@ -73,9 +73,13 @@ impl RelayConfig {
         if roots.is_empty() {
             return Err(failure("CDC relay CA bundle contains no certificates"));
         }
-        let tls = rustls::ClientConfig::builder()
-            .with_root_certificates(roots)
-            .with_no_client_auth();
+        let tls = rustls::ClientConfig::builder_with_provider(Arc::new(
+            rustls::crypto::aws_lc_rs::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .map_err(|_| failure("invalid CDC relay TLS protocols"))?
+        .with_root_certificates(roots)
+        .with_no_client_auth();
         Ok(self.with_tls_connector(compio_tls::TlsConnector::from(Arc::new(tls))))
     }
 

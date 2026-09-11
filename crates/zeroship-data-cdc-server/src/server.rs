@@ -49,9 +49,13 @@ pub(crate) async fn run(settings: CdcServerSettings) -> Result<(), Error> {
     let certs = CertificateDer::pem_file_iter(settings.tls_cert_file.get())?
         .collect::<Result<Vec<_>, _>>()?;
     let key = PrivateKeyDer::from_pem_file(settings.tls_key_file.get())?;
-    let tls = rustls::ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(certs, key)?;
+    // Workspace builds can also enable ring through another dependency.
+    let tls = rustls::ServerConfig::builder_with_provider(Arc::new(
+        rustls::crypto::aws_lc_rs::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()?
+    .with_no_client_auth()
+    .with_single_cert(certs, key)?;
     let acceptor = TlsAcceptor::from(Arc::new(tls));
     let url = settings.database_url.expose_str().to_owned();
     let pool = Pool::connect(&url, 16).await?;

@@ -55,7 +55,7 @@ DB_URL="${DATABASE_URL:-postgres://postgres:zeroship@localhost:5440/$PG_DB}"
 # zs_scratch_db_cleanup reaches the server through `run_psql`; without it the
 # generated database is leaked and the library says so rather than pretending.
 run_psql() { docker exec "$PG_CONTAINER" psql -U "$PG_USER" "$@"; }
-# Distinct from golden_path.sh and e2e_dev_vs_deployed_kv.sh.
+# Distinct from golden_path.sh; the native KV deployment test allocates its ports.
 ZEROSHIP_CONTROL_PORT="${ZEROSHIP_CONTROL_PORT:-9393}"
 ZEROSHIP_WORKER_PORT="${ZEROSHIP_WORKER_PORT:-8393}"
 ZEROSHIP_GATEWAY_PORT="${ZEROSHIP_GATEWAY_PORT:-8303}"
