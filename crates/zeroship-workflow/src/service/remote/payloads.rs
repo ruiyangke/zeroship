@@ -178,14 +178,23 @@ impl RemoteAppWorkflows {
         generation: i64,
         slot: PayloadSlot,
     ) -> Result<PayloadRead, WorkflowServiceError> {
-        self.endpoint
-            .download(
-                &self.path(&format!("workflow-runs/{}/payloads/read", segment(run_id))),
-                &self.authorization(),
-                ReadAppPayload { generation, slot },
-                None,
-            )
-            .await
+        let path = self.path(&format!("workflow-runs/{}/payloads/read", segment(run_id)));
+        let body = ReadAppPayload { generation, slot };
+        let token = self.credentials.token(&self.app).await?;
+        let result = self
+            .endpoint
+            .download(&path, &authorization(&token), &body, None)
+            .await;
+        if matches!(result, Err(WorkflowServiceError::Unauthenticated))
+            && self.credentials.reject(&token)?
+        {
+            let refreshed = self.credentials.token(&self.app).await?;
+            return self
+                .endpoint
+                .download(&path, &authorization(&refreshed), body, None)
+                .await;
+        }
+        result
     }
 }
 

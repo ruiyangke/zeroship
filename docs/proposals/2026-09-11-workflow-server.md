@@ -51,7 +51,11 @@ Control now issues app capabilities through the runtime app resource, accepting
 only active enrolled worker assertions. Issuance uses the loaded Control signing
 snapshot and shared assertion replay protection. Bootstrap role credentials and
 draining workers cannot acquire capabilities.
-The worker polling loop, capability refresh, public HTTP ingress, retention of
+Rust remote app handles now refresh those capabilities through the enrolled
+worker identity. Clones share only their app's cache. Expiry and authentication
+rejection trigger bounded renewal; retries preserve mutation identity and refuse
+to fall back to stale authority when Control is unavailable.
+The worker polling loop, public HTTP ingress, retention of
 completed run graphs and interpreter cutover remain in progress. The
 current runtime still uses Control and the local mini-engine.
 
