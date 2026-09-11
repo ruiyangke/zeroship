@@ -95,8 +95,8 @@ pnpm build
 pnpm --dir examples/kv-dashboard test
 ```
 
-The example's Rust harness provisions its platform with Testcontainers, then
+The example's TypeScript setup provisions its platform with Testcontainers, then
 Vitest checks RPC behavior and Playwright checks the UI against redb and Redis.
 Use `pnpm --dir examples/kv-dashboard smoke` for an already-running dashboard.
 See the [example README](../../examples/kv-dashboard/README.md) for browser setup,
-URL selection, nextest, and failure artifacts.
+URL selection and failure artifacts.

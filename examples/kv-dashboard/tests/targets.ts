@@ -1,10 +1,23 @@
+import { inject } from "vitest";
+
 export interface Target {
   name: string;
   apiUrl: string;
   uiUrl: string;
 }
 
+declare module "vitest" {
+  export interface ProvidedContext {
+    dashboardTargets: Target[];
+    dashboardArtifacts: string;
+    dashboardExisting: boolean;
+  }
+}
+
 export function targets(): Target[] {
+  const provisioned = inject("dashboardTargets");
+  if (provisioned) return provisioned;
+  if (!inject("dashboardExisting")) throw new Error("Dashboard fixture did not provide test targets");
   const configured = process.env.KV_DASHBOARD_TARGETS;
   const values: unknown = configured ? JSON.parse(configured) : [{
     name: "existing server",

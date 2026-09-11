@@ -226,8 +226,6 @@ jobs:
       # status reported is the LAST command's - 0 whenever it could write - and
       # every failing test in the workspace sails through as a pass. The billing
       # gate hit that trap and solved it with PIPESTATUS.
-      - name: Install the KV dashboard browser
-        run: pnpm --dir examples/kv-dashboard exec playwright install --with-deps chromium
       - run: |
           set -o pipefail
           cargo test --workspace --no-fail-fast
@@ -2091,9 +2089,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: kv-deployment-logs
-          path: |
-            /tmp/zeroship-kv-deployment-*/*.log
-            examples/kv-dashboard/tests/.artifacts/**
+          path: examples/kv-dashboard/tests/.artifacts/**
           if-no-files-found: ignore
       # env.auth. This harness existed and ran in NO workflow until 2026-08-12.
       # Unlike storage and workflows below, whose exclusions are measured and
