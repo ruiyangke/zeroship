@@ -289,6 +289,7 @@ fn validate_unmask_projection(
 /// they cannot be hoisted ahead of the V8 boundary at all. The engine half is
 /// therefore an `async fn`, and this struct carries what must still be read
 /// eagerly across into it.
+#[derive(Debug)]
 pub struct FindPlan {
     limit: Option<i64>,
     offset: Option<i64>,
@@ -1376,6 +1377,7 @@ pub async fn run_upsert(
 /// SQLSTATE) so the SDK can branch on `e.code`.
 /// The eagerly-decoded inputs of a vector `search`, produced by [`plan_search`]
 /// and consumed by [`run_search`].
+#[derive(Debug)]
 pub struct SearchPlan {
     vector: Vec<f32>,
     k: usize,
@@ -1567,6 +1569,7 @@ pub async fn run_search(
 /// returned row carries a synthetic `_distance_m` (`f64`) column.
 /// The eagerly-decoded inputs of a spatial `near`, produced by [`plan_near`] and
 /// consumed by [`run_near`].
+#[derive(Debug)]
 pub struct NearPlan {
     field: String,
     point: crate::backend::GeoPoint,

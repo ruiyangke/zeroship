@@ -5,6 +5,7 @@ use zeroship_data_sql::value::Value;
 use zeroship_data_orm::binding::DbBinding;
 use zeroship_data_orm::error::DbError;
 
+#[derive(Debug)]
 pub enum SchemaFieldScope<'a> {
     All,
     Only(&'a [String]),
@@ -17,6 +18,7 @@ pub enum SchemaFieldScope<'a> {
 /// site that wants something else has to name a list. That is the whole
 /// defence against the next row-returning verb: it cannot opt out of the
 /// surface filter because there is nothing to opt out to.
+#[derive(Debug)]
 pub enum RowSurface<'a> {
     /// Declared fields + the seven system fields + the closed set of synthetic
     /// result columns. The default.
@@ -26,6 +28,7 @@ pub enum RowSurface<'a> {
     Projected(&'a [String]),
 }
 
+#[derive(Debug)]
 pub struct ApplyOptions<'a> {
     pub unmask_columns: &'a [String],
     pub schema_field_scope: SchemaFieldScope<'a>,
@@ -46,6 +49,7 @@ impl<'a> Default for ApplyOptions<'a> {
     }
 }
 
+#[derive(Debug)]
 pub struct ApplyResult {
     pub rows: Vec<Value>,
     pub has_masked: bool,

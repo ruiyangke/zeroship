@@ -1074,6 +1074,7 @@ mod tests {
     //! seam break.
 
     use super::*;
+    use crate::fixtures::DatabaseFixture;
     use crate::backend::postgres::PgLockManager;
     use zeroship_data_orm::storage::LockManager;
     // A plain `use` is private, so `use super::*` above does not re-export the
@@ -1301,8 +1302,6 @@ mod terminal_projection_tests {
     }
 }
 
-#[cfg(any(test, feature = "test-helpers"))]
-use zeroship_data_orm::fixtures::DatabaseFixture;
 
 #[cfg(any(test, feature = "test-helpers"))]
 use zeroship_data_sql::value::Value;

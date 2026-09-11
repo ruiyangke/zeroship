@@ -20,7 +20,7 @@ use zeroship_data_orm::error::DbError;
 /// Every field is `Option` or a collection with a meaningful empty state,
 /// because a lane exists before it has any of them: `try_claim_tx` wins the
 /// race first and `BEGIN` runs after.
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct TxLane {
     /// The SC-1 state machine. `None` between the claim and `admit_transaction`.
     reducer: Option<crate::transaction::reducer::TxReducer>,
@@ -113,6 +113,7 @@ pub fn destroy_tx_connection(client: Session) {
 /// harmless on Postgres and keeps the `take` / `put` contract in one
 /// typed place.
 #[must_use = "TxClientSlotGuard restores the tx slot on Drop unless consumed via into_inner()"]
+#[derive(Debug)]
 pub struct TxClientSlotGuard {
     context: crate::OrmContext,
     app_id: String,
@@ -203,7 +204,7 @@ impl Drop for TxClientSlotGuard {
 /// [`TxLane`] would die with the lane and let a condemned session reach the
 /// pool, and from there the next borrower. A tombstone cannot live inside the
 /// thing it is a tombstone for.
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct TxLanes {
     /// Every app's open transaction, one entry each.
     ///
@@ -225,6 +226,7 @@ pub struct TxLanes {
 
 impl TxLanes {
     /// An empty lane set. A fresh worker thread has no open transaction.
+    #[cfg(any(test, feature = "test-helpers"))]
     pub fn new() -> Self {
         Self::default()
     }
@@ -596,6 +598,7 @@ impl TxLanes {
     }
 
     /// Has `app_id`'s transaction session been withdrawn?
+    #[cfg(any(test, feature = "test-helpers"))]
     pub fn tx_session_withdrawn(&self, app_id: &str) -> bool {
         self.withdrawn_tx_sessions.contains(app_id)
     }

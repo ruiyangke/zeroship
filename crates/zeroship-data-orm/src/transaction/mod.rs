@@ -216,6 +216,7 @@ impl std::future::Future for AwaitTxClaim {
 /// a `return` can skip. A creator callback that never settles is bounded by the
 /// execution deadline, which is armed on the same transition that granted
 /// admission.
+#[derive(Debug)]
 pub struct TxAdmission {
     app_id: String,
     armed: bool,
@@ -276,6 +277,7 @@ impl Drop for TxAdmission {
 /// session through [`TxAdmission`]: the connection is destroyed rather than
 /// pooled, because a transaction abandoned mid-flight has unknown health.
 #[must_use = "an atomic write frame must be settled with finish"]
+#[derive(Debug)]
 pub struct AtomicWriteFrame {
     route: TxRoute,
     frame: Option<reducer::frames::FrameId>,
@@ -285,7 +287,7 @@ pub struct AtomicWriteFrame {
     admission: Option<TxAdmission>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 enum AtomicWriteFrameState {
     Open,
     Settling,

@@ -637,7 +637,7 @@ mod tests {
                 "mask": { "kind": "absurdly-novel-kind", "classification": "spi" }
             }
         });
-        let mut row = value!({ "ssn": "abc" });
+        let row = value!({ "ssn": "abc" });
         let plaintexts = MaskPlaintextSidechannel::new();
 
         let err = apply_mask_on_write(&schema, &plaintexts, &row).unwrap_err();

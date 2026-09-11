@@ -24,12 +24,17 @@
 
 #[cfg(any(test, feature = "test-helpers"))]
 use compio_postgres::Pool;
+#[cfg(any(test, feature = "test-helpers"))]
 use zeroship_core::database_role::per_app_role_name;
 
+#[cfg(any(test, feature = "test-helpers"))]
 use super::APP_ROLE_TEMPLATE;
+#[cfg(any(test, feature = "test-helpers"))]
 use crate::backend::pg_error;
+#[cfg(any(test, feature = "test-helpers"))]
 use zeroship_data_orm::error::DbError;
 
+#[cfg(any(test, feature = "test-helpers"))]
 const RESERVED_SYSTEM_TABLE_PREFIX: &str = "__zeroship_";
 
 /// The ONE `__zeroship_`-prefixed table in an app schema the runtime role must
@@ -60,6 +65,7 @@ const RESERVED_SYSTEM_TABLE_PREFIX: &str = "__zeroship_";
 /// Read from [`crate::backend_handle::AUDIT_UNMASK_TABLE`] rather than restated:
 /// the grant recipe and the INSERT that uses the grant must name one relation,
 /// and until 2026-09-04 they were two independent literals in two files.
+#[cfg(any(test, feature = "test-helpers"))]
 const WORKER_WRITABLE_RESERVED_TABLE: &str = crate::backend_handle::AUDIT_UNMASK_TABLE;
 
 /// Wrap a `compio_postgres::Error` in [`DbError`] with a context phrase
@@ -100,6 +106,7 @@ async fn create_role_if_missing(pool: &Pool, name: &str, attrs: &str) -> Result<
     Ok(true)
 }
 
+#[cfg(any(test, feature = "test-helpers"))]
 fn sql_string_literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
@@ -311,6 +318,7 @@ pub async fn ensure_per_app_role(pool: &Pool, app_id: &str) -> Result<PerAppRole
 /// without a live cluster. The behaviour it encodes is a privilege boundary,
 /// and the only other way to check it is a live-PG suite that does not run in
 /// the default gate.
+#[cfg(any(test, feature = "test-helpers"))]
 fn revoke_reserved_system_table_privileges_sql(app_id: &str, role: &str) -> String {
     let schema_literal = sql_string_literal(app_id);
     let role_literal = sql_string_literal(role);
@@ -350,6 +358,7 @@ fn revoke_reserved_system_table_privileges_sql(app_id: &str, role: &str) -> Stri
 /// audit table makes the grant step fail, this deny remains committed instead
 /// of rolling back with that failure. ACL-bearing objects of the wrong kind at
 /// the reserved name also lose their blanket privileges and get nothing back.
+#[cfg(any(test, feature = "test-helpers"))]
 fn revoke_worker_unmask_audit_privileges_sql(app_id: &str, role: &str) -> String {
     let schema_literal = sql_string_literal(app_id);
     let role_literal = sql_string_literal(role);
@@ -410,6 +419,7 @@ fn revoke_worker_unmask_audit_privileges_sql(app_id: &str, role: &str) -> String
 /// provisioned yet, preserving [`ensure_per_app_role`]'s schema-only
 /// precondition. A real audit table without its contractually required
 /// `BIGSERIAL` sequence is rejected after the deny has committed.
+#[cfg(any(test, feature = "test-helpers"))]
 fn grant_worker_unmask_audit_append_privileges_sql(app_id: &str, role: &str) -> String {
     let schema_literal = sql_string_literal(app_id);
     let role_literal = sql_string_literal(role);

@@ -249,6 +249,7 @@ async fn exercise_native_models(db: &Database) {
         })
         .await
         .unwrap();
+    assert_eq!(row.title, "native");
     assert_eq!(row.payload, Some(vec![0, 255, 128]));
     assert!(row.created_at > 0);
     assert_eq!(row.counter, 7);

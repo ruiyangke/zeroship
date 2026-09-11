@@ -55,6 +55,7 @@ impl OrmContext {
     pub(crate) fn schemas_mut<T>(&self, f: impl FnOnce(&mut SchemaCache) -> T) -> T {
         f(&mut self.0.schemas.borrow_mut())
     }
+    #[cfg(any(test, feature = "test-helpers"))]
     pub(crate) fn policies<T>(&self, f: impl FnOnce(&HashMap<DbBinding, MaskPolicy>) -> T) -> T {
         f(&self.0.policies.borrow())
     }
