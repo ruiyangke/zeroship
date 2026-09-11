@@ -456,8 +456,8 @@ async fn native_output_reads_preserve_bytes_and_reject_another_apps_run() {
     let (status, body) = run_workflow_app(control.base.clone(), other, &source).await;
     assert_eq!(status, 400, "another app read the saved output: {body}");
     let error: Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(error["code"], "workflow_http_error");
-    assert!(error["message"].as_str().unwrap().contains("HTTP 404"));
+    assert_eq!(error["code"], "workflow_not_found");
+    assert_eq!(error["message"], "workflow resource not found");
     drop(control);
     drop(fx);
     common::drain_pg().await;

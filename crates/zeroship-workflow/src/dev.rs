@@ -17,7 +17,7 @@ use serde_json::{json, Value};
 use zeroship_core::typed_id;
 
 use crate::backend::WorkflowBackend;
-use crate::client::WorkflowRpcError;
+use crate::errors::WorkflowServiceError;
 use crate::operations::{
     DeliveredSignal, RestartOptions, RestartedRun, RunOperation, RunStatus, SignalOptions,
     StartOptions, StartedRun, TransitionedRun,
@@ -33,7 +33,7 @@ const STUCK_STRIKE_LIMIT: i16 = 3;
 /// The host owns the execution environment; the journal engine owns persistence.
 #[async_trait(?Send)]
 pub trait WorkflowExecutor: Send + Sync {
-    async fn dispatch(&self, envelope: &str) -> Result<String, WorkflowRpcError>;
+    async fn dispatch(&self, envelope: &str) -> Result<String, WorkflowServiceError>;
 }
 
 pub struct DevWorkflowEngine {
@@ -410,7 +410,7 @@ impl DevWorkflowEngine {
         app_id: &str,
         workflow_name: &str,
         options: StartOptions,
-    ) -> Result<StartedRun, WorkflowRpcError> {
+    ) -> Result<StartedRun, WorkflowServiceError> {
         validate_workflow_name(workflow_name)?;
         let input = options.input;
         let key = options.key.filter(|key| !key.is_empty());
@@ -476,7 +476,7 @@ impl DevWorkflowEngine {
         })
     }
 
-    async fn status(&self, app_id: &str, run_id: &str) -> Result<RunStatus, WorkflowRpcError> {
+    async fn status(&self, app_id: &str, run_id: &str) -> Result<RunStatus, WorkflowServiceError> {
         let conn = self.lock_conn()?;
         let row = conn
             .query_row(
@@ -508,13 +508,12 @@ impl DevWorkflowEngine {
             output_content_type,
         )) = row
         else {
-            return Err(WorkflowRpcError::Http {
-                status: 404,
-                body: "workflow run not found".to_string(),
-            });
+            return Err(WorkflowServiceError::NotFound(
+                "workflow run not found".to_string(),
+            ));
         };
         Ok(RunStatus {
-            state: state.parse().map_err(WorkflowRpcError::Decode)?,
+            state: state.parse().map_err(WorkflowServiceError::Internal)?,
             output: Some(status_output(
                 output_kind,
                 output_hash,
@@ -531,7 +530,7 @@ impl DevWorkflowEngine {
         app_id: &str,
         run_id: &str,
         options: SignalOptions,
-    ) -> Result<DeliveredSignal, WorkflowRpcError> {
+    ) -> Result<DeliveredSignal, WorkflowServiceError> {
         let signal_type = &options.signal_type;
         validate_signal_type(signal_type)?;
         let payload = options.payload;
@@ -549,10 +548,9 @@ impl DevWorkflowEngine {
                 .optional()
                 .map_err(db_error)?;
             let Some((state, waiting_step_key)) = run else {
-                return Err(WorkflowRpcError::Http {
-                    status: 404,
-                    body: "workflow run not found".to_string(),
-                });
+                return Err(WorkflowServiceError::NotFound(
+                    "workflow run not found".to_string(),
+                ));
             };
             conn.execute(
                 "INSERT INTO workflow_signals \
@@ -580,7 +578,7 @@ impl DevWorkflowEngine {
         app_id: &str,
         run_id: &str,
         op: RunOperation,
-    ) -> Result<TransitionedRun, WorkflowRpcError> {
+    ) -> Result<TransitionedRun, WorkflowServiceError> {
         let now = now_ms();
         let conn = self.lock_conn()?;
         let current = conn
@@ -591,17 +589,13 @@ impl DevWorkflowEngine {
             )
             .optional()
             .map_err(db_error)?
-            .ok_or_else(|| WorkflowRpcError::Http {
-                status: 404,
-                body: "workflow run not found".to_string(),
-            })?;
+            .ok_or_else(|| WorkflowServiceError::NotFound("workflow run not found".to_string()))?;
         let next = match op {
             RunOperation::Pause => {
                 if is_terminal(&current) {
-                    return Err(WorkflowRpcError::Http {
-                        status: 409,
-                        body: format!("cannot pause workflow run in state {current}"),
-                    });
+                    return Err(WorkflowServiceError::Conflict(format!(
+                        "cannot pause workflow run in state {current}"
+                    )));
                 }
                 conn.execute(
                     "UPDATE workflow_runs \
@@ -615,10 +609,9 @@ impl DevWorkflowEngine {
             }
             RunOperation::Resume => {
                 if current != "paused" {
-                    return Err(WorkflowRpcError::Http {
-                        status: 409,
-                        body: format!("cannot resume workflow run in state {current}"),
-                    });
+                    return Err(WorkflowServiceError::Conflict(format!(
+                        "cannot resume workflow run in state {current}"
+                    )));
                 }
                 let restored = restored_state(&conn, run_id)?;
                 let wake_at = if restored == "queued" {
@@ -637,10 +630,9 @@ impl DevWorkflowEngine {
             }
             RunOperation::Cancel => {
                 if is_terminal(&current) {
-                    return Err(WorkflowRpcError::Http {
-                        status: 409,
-                        body: format!("cannot cancel workflow run in state {current}"),
-                    });
+                    return Err(WorkflowServiceError::Conflict(format!(
+                        "cannot cancel workflow run in state {current}"
+                    )));
                 }
                 conn.execute(
                     "UPDATE workflow_runs \
@@ -655,7 +647,7 @@ impl DevWorkflowEngine {
             }
         };
         Ok(TransitionedRun {
-            state: next.parse().map_err(WorkflowRpcError::Decode)?,
+            state: next.parse().map_err(WorkflowServiceError::Internal)?,
         })
     }
 
@@ -664,7 +656,7 @@ impl DevWorkflowEngine {
         app_id: &str,
         run_id: &str,
         _options: RestartOptions,
-    ) -> Result<RestartedRun, WorkflowRpcError> {
+    ) -> Result<RestartedRun, WorkflowServiceError> {
         let now = now_ms();
         {
             let conn = self.lock_conn()?;
@@ -678,10 +670,9 @@ impl DevWorkflowEngine {
                 .map_err(db_error)?
                 .is_some();
             if !exists {
-                return Err(WorkflowRpcError::Http {
-                    status: 404,
-                    body: "workflow run not found".to_string(),
-                });
+                return Err(WorkflowServiceError::NotFound(
+                    "workflow run not found".to_string(),
+                ));
             }
             conn.execute(
                 "DELETE FROM workflow_steps WHERE run_id = ?1",
@@ -714,7 +705,7 @@ impl DevWorkflowEngine {
         })
     }
 
-    async fn tick_due(&self) -> Result<usize, WorkflowRpcError> {
+    async fn tick_due(&self) -> Result<usize, WorkflowServiceError> {
         let mut claimed = 0usize;
         for _ in 0..32 {
             let Some(claim) = self.claim_one_due()? else {
@@ -722,7 +713,9 @@ impl DevWorkflowEngine {
             };
             let json = self.dispatch(claim.request.clone()).await?;
             let result: StepResult = serde_json::from_str(&json).map_err(|e| {
-                WorkflowRpcError::Decode(format!("parse workflow StepResult: {e}; body={json}"))
+                WorkflowServiceError::Internal(format!(
+                    "parse workflow StepResult: {e}; body={json}"
+                ))
             })?;
             self.apply_step_result(result)?;
             claimed += 1;
@@ -730,7 +723,7 @@ impl DevWorkflowEngine {
         Ok(claimed)
     }
 
-    fn claim_one_due(&self) -> Result<Option<ClaimedRun>, WorkflowRpcError> {
+    fn claim_one_due(&self) -> Result<Option<ClaimedRun>, WorkflowServiceError> {
         let now = now_ms();
         let conn = self.lock_conn()?;
         rearm_waiting_runs_with_pending_signals(&conn, now)?;
@@ -827,14 +820,14 @@ impl DevWorkflowEngine {
         }))
     }
 
-    async fn dispatch(&self, request: StepRequest) -> Result<String, WorkflowRpcError> {
+    async fn dispatch(&self, request: StepRequest) -> Result<String, WorkflowServiceError> {
         let envelope = serde_json::to_string(&request).map_err(|e| {
-            WorkflowRpcError::Decode(format!("serialize workflow StepRequest: {e}"))
+            WorkflowServiceError::Internal(format!("serialize workflow StepRequest: {e}"))
         })?;
         self.executor.dispatch(&envelope).await
     }
 
-    fn apply_step_result(&self, mut result: StepResult) -> Result<bool, WorkflowRpcError> {
+    fn apply_step_result(&self, mut result: StepResult) -> Result<bool, WorkflowServiceError> {
         result.checkpoints.sort_by_key(|s| s.ordinal);
         let now = now_ms();
         let conn = self.lock_conn()?;
@@ -972,9 +965,9 @@ impl DevWorkflowEngine {
         Ok(true)
     }
 
-    fn lock_conn(&self) -> Result<MutexGuard<'_, Connection>, WorkflowRpcError> {
+    fn lock_conn(&self) -> Result<MutexGuard<'_, Connection>, WorkflowServiceError> {
         self.conn.lock().map_err(|_| {
-            WorkflowRpcError::Transport("workflow dev sqlite lock poisoned".to_string())
+            WorkflowServiceError::Unavailable("workflow dev sqlite lock poisoned".to_string())
         })
     }
 }
@@ -985,13 +978,13 @@ impl WorkflowBackend for DevWorkflowBackend {
         &self,
         workflow_name: String,
         body: StartOptions,
-    ) -> Result<StartedRun, WorkflowRpcError> {
+    ) -> Result<StartedRun, WorkflowServiceError> {
         self.engine
             .start_run(&self.app_id, &workflow_name, body)
             .await
     }
 
-    async fn status(&self, run_id: String) -> Result<RunStatus, WorkflowRpcError> {
+    async fn status(&self, run_id: String) -> Result<RunStatus, WorkflowServiceError> {
         self.engine.status(&self.app_id, &run_id).await
     }
 
@@ -999,7 +992,7 @@ impl WorkflowBackend for DevWorkflowBackend {
         &self,
         run_id: String,
         body: SignalOptions,
-    ) -> Result<DeliveredSignal, WorkflowRpcError> {
+    ) -> Result<DeliveredSignal, WorkflowServiceError> {
         self.engine.signal(&self.app_id, &run_id, body).await
     }
 
@@ -1007,7 +1000,7 @@ impl WorkflowBackend for DevWorkflowBackend {
         &self,
         run_id: String,
         op: RunOperation,
-    ) -> Result<TransitionedRun, WorkflowRpcError> {
+    ) -> Result<TransitionedRun, WorkflowServiceError> {
         self.engine.transition(&self.app_id, &run_id, op).await
     }
 
@@ -1015,7 +1008,7 @@ impl WorkflowBackend for DevWorkflowBackend {
         &self,
         run_id: String,
         body: RestartOptions,
-    ) -> Result<RestartedRun, WorkflowRpcError> {
+    ) -> Result<RestartedRun, WorkflowServiceError> {
         self.engine.restart(&self.app_id, &run_id, body).await
     }
 
@@ -1024,7 +1017,7 @@ impl WorkflowBackend for DevWorkflowBackend {
         run_id: String,
         name: String,
         occurrence: u32,
-    ) -> Result<Vec<u8>, WorkflowRpcError> {
+    ) -> Result<Vec<u8>, WorkflowServiceError> {
         let conn = self.engine.lock_conn()?;
         let output: Option<Option<String>> = conn
             .query_row(
@@ -1038,10 +1031,9 @@ impl WorkflowBackend for DevWorkflowBackend {
             .map_err(db_error)?;
         match output {
             Some(output) => Ok(output.unwrap_or_else(|| "null".into()).into_bytes()),
-            None => Err(WorkflowRpcError::Http {
-                status: 404,
-                body: "workflow step output not found".into(),
-            }),
+            None => Err(WorkflowServiceError::NotFound(
+                "workflow step output not found".into(),
+            )),
         }
     }
 }
@@ -1166,7 +1158,7 @@ fn bootstrap_schema(conn: &Connection) -> rusqlite::Result<()> {
     )
 }
 
-fn ensure_dev_deploy(conn: &Connection, app_id: &str) -> Result<(), WorkflowRpcError> {
+fn ensure_dev_deploy(conn: &Connection, app_id: &str) -> Result<(), WorkflowServiceError> {
     let now = now_ms();
     conn.execute(
         "INSERT INTO app_deploys (id, app_id, deploy_hash, manifest_json, created_at, activated_at) \
@@ -1189,7 +1181,7 @@ fn existing_keyed_run(
     app_id: &str,
     workflow_name: &str,
     key: &str,
-) -> Result<Option<String>, WorkflowRpcError> {
+) -> Result<Option<String>, WorkflowServiceError> {
     conn.query_row(
         "SELECT id FROM workflow_runs WHERE app_id = ?1 AND workflow_name = ?2 AND dedup_key = ?3 LIMIT 1",
         params![app_id, workflow_name, key],
@@ -1199,7 +1191,7 @@ fn existing_keyed_run(
     .map_err(db_error)
 }
 
-fn load_journal(conn: &Connection, run_id: &str) -> Result<Vec<JournalStep>, WorkflowRpcError> {
+fn load_journal(conn: &Connection, run_id: &str) -> Result<Vec<JournalStep>, WorkflowServiceError> {
     let mut stmt = conn
         .prepare(
             "SELECT ordinal, name, name_occurrence, kind, state, output, error, child_run_id, compensation_state \
@@ -1237,7 +1229,7 @@ fn load_journal(conn: &Connection, run_id: &str) -> Result<Vec<JournalStep>, Wor
 fn rearm_waiting_runs_with_pending_signals(
     conn: &Connection,
     now: i64,
-) -> Result<(), WorkflowRpcError> {
+) -> Result<(), WorkflowServiceError> {
     conn.execute(
         "UPDATE workflow_runs \
             SET wake_at = ?1 \
@@ -1258,18 +1250,22 @@ fn rearm_waiting_runs_with_pending_signals(
     Ok(())
 }
 
-fn parse_waiting_step_key(key: &str) -> Result<WaitingStep, WorkflowRpcError> {
+fn parse_waiting_step_key(key: &str) -> Result<WaitingStep, WorkflowServiceError> {
     let parts: Vec<&str> = key.split(':').collect();
     match parts.as_slice() {
         ["sleep", ordinal, name] => Ok(WaitingStep::Sleep {
             ordinal: ordinal.parse::<i32>().map_err(|_| {
-                WorkflowRpcError::Decode(format!("invalid sleep waiting_step_key ordinal: {key}"))
+                WorkflowServiceError::Internal(format!(
+                    "invalid sleep waiting_step_key ordinal: {key}"
+                ))
             })?,
             name: (*name).to_string(),
         }),
         ["wait", ordinal, name, signal_type] => Ok(WaitingStep::WaitSignal {
             ordinal: ordinal.parse::<i32>().map_err(|_| {
-                WorkflowRpcError::Decode(format!("invalid wait waiting_step_key ordinal: {key}"))
+                WorkflowServiceError::Internal(format!(
+                    "invalid wait waiting_step_key ordinal: {key}"
+                ))
             })?,
             name: (*name).to_string(),
             signal_type: (*signal_type).to_string(),
@@ -1277,15 +1273,19 @@ fn parse_waiting_step_key(key: &str) -> Result<WaitingStep, WorkflowRpcError> {
         }),
         ["wait", ordinal, name, signal_type, max_age] => Ok(WaitingStep::WaitSignal {
             ordinal: ordinal.parse::<i32>().map_err(|_| {
-                WorkflowRpcError::Decode(format!("invalid wait waiting_step_key ordinal: {key}"))
+                WorkflowServiceError::Internal(format!(
+                    "invalid wait waiting_step_key ordinal: {key}"
+                ))
             })?,
             name: (*name).to_string(),
             signal_type: (*signal_type).to_string(),
             max_signal_age_ms: Some(max_age.parse::<i64>().map_err(|_| {
-                WorkflowRpcError::Decode(format!("invalid wait waiting_step_key max age: {key}"))
+                WorkflowServiceError::Internal(format!(
+                    "invalid wait waiting_step_key max age: {key}"
+                ))
             })?),
         }),
-        _ => Err(WorkflowRpcError::Decode(format!(
+        _ => Err(WorkflowServiceError::Internal(format!(
             "unrecognized waiting_step_key: {key}"
         ))),
     }
@@ -1297,7 +1297,7 @@ fn resolve_due_waiting_step(
     key: &str,
     dispatch_nonce: &str,
     now: i64,
-) -> Result<bool, WorkflowRpcError> {
+) -> Result<bool, WorkflowServiceError> {
     match parse_waiting_step_key(key)? {
         WaitingStep::Sleep { ordinal, name } => {
             insert_resolved_step(
@@ -1471,7 +1471,7 @@ fn insert_resolved_step(
     run_id: &str,
     batch_id: &str,
     batch_width: i16,
-) -> Result<StepWriteOutcome, WorkflowRpcError> {
+) -> Result<StepWriteOutcome, WorkflowServiceError> {
     let existing = conn
         .query_row(
             "SELECT state, name, kind FROM workflow_steps WHERE run_id = ?1 AND ordinal = ?2",
@@ -1738,7 +1738,7 @@ fn reject_child_checkpoints_for_dev(result: &mut StepResult) {
 fn pending_compensator_steps(
     conn: &Connection,
     run_id: &str,
-) -> Result<Vec<String>, WorkflowRpcError> {
+) -> Result<Vec<String>, WorkflowServiceError> {
     let mut stmt = conn
         .prepare(
             "SELECT name FROM workflow_steps \
@@ -1915,28 +1915,28 @@ where
     deserialize_optional_wake_at(deserializer)
 }
 
-fn validate_workflow_name(name: &str) -> Result<(), WorkflowRpcError> {
+fn validate_workflow_name(name: &str) -> Result<(), WorkflowServiceError> {
     if name.is_empty() || name.len() > 128 {
-        return Err(WorkflowRpcError::InvalidRequest(
+        return Err(WorkflowServiceError::InvalidRequest(
             "workflow name must be 1-128 bytes".to_string(),
         ));
     }
     if name.starts_with("__zs.") {
-        return Err(WorkflowRpcError::InvalidRequest(
+        return Err(WorkflowServiceError::InvalidRequest(
             "workflow name uses a reserved prefix".to_string(),
         ));
     }
     Ok(())
 }
 
-fn validate_signal_type(signal_type: &str) -> Result<(), WorkflowRpcError> {
+fn validate_signal_type(signal_type: &str) -> Result<(), WorkflowServiceError> {
     if signal_type.is_empty() || signal_type.len() > 256 {
-        return Err(WorkflowRpcError::InvalidRequest(
+        return Err(WorkflowServiceError::InvalidRequest(
             "signal type must be 1-256 bytes".to_string(),
         ));
     }
     if signal_type.starts_with("__zs.") {
-        return Err(WorkflowRpcError::InvalidRequest(
+        return Err(WorkflowServiceError::InvalidRequest(
             "signal type uses a reserved prefix".to_string(),
         ));
     }
@@ -1951,7 +1951,7 @@ fn waiting_key_matches_signal(waiting_step_key: Option<&str>, signal_type: &str)
     matches!(parts.as_slice(), ["wait", _, _, ty] | ["wait", _, _, ty, _] if *ty == signal_type)
 }
 
-fn restored_state(conn: &Connection, run_id: &str) -> Result<String, WorkflowRpcError> {
+fn restored_state(conn: &Connection, run_id: &str) -> Result<String, WorkflowServiceError> {
     conn.query_row(
         "SELECT paused_from_status, waiting_step_key, wake_at FROM workflow_runs WHERE id = ?1",
         params![run_id],
@@ -1991,7 +1991,7 @@ fn status_output(
     output_size: Option<i64>,
     output_content_type: Option<String>,
     output: Option<String>,
-) -> Result<Value, WorkflowRpcError> {
+) -> Result<Value, WorkflowServiceError> {
     if output_kind == "blob" {
         if let (Some(hash), Some(size)) = (output_hash, output_size) {
             return Ok(json!({
@@ -2019,19 +2019,20 @@ fn stalled_error(strikes: i16) -> Value {
     })
 }
 
-fn json_to_string(value: &Value) -> Result<String, WorkflowRpcError> {
+fn json_to_string(value: &Value) -> Result<String, WorkflowServiceError> {
     serde_json::to_string(value)
-        .map_err(|e| WorkflowRpcError::Decode(format!("serialize workflow JSON: {e}")))
+        .map_err(|e| WorkflowServiceError::Internal(format!("serialize workflow JSON: {e}")))
 }
 
 fn json_size(value: &Value) -> i64 {
     serde_json::to_vec(value).map_or(0, |bytes| bytes.len() as i64)
 }
 
-fn parse_json_opt(raw: Option<String>) -> Result<Option<Value>, WorkflowRpcError> {
+fn parse_json_opt(raw: Option<String>) -> Result<Option<Value>, WorkflowServiceError> {
     raw.map(|s| {
-        serde_json::from_str(&s)
-            .map_err(|e| WorkflowRpcError::Decode(format!("parse workflow JSON: {e}; body={s}")))
+        serde_json::from_str(&s).map_err(|e| {
+            WorkflowServiceError::Internal(format!("parse workflow JSON: {e}; body={s}"))
+        })
     })
     .transpose()
 }
@@ -2050,8 +2051,8 @@ fn ms_to_datetime(value: i64) -> DateTime<Utc> {
         .unwrap_or_else(Utc::now)
 }
 
-fn db_error(e: rusqlite::Error) -> WorkflowRpcError {
-    WorkflowRpcError::Transport(format!("workflow dev sqlite: {e}"))
+fn db_error(e: rusqlite::Error) -> WorkflowServiceError {
+    WorkflowServiceError::Internal(format!("workflow dev sqlite: {e}"))
 }
 
 #[derive(Debug)]
@@ -2073,7 +2074,7 @@ mod tests {
 
     #[async_trait(?Send)]
     impl WorkflowExecutor for NoDispatch {
-        async fn dispatch(&self, _envelope: &str) -> Result<String, WorkflowRpcError> {
+        async fn dispatch(&self, _envelope: &str) -> Result<String, WorkflowServiceError> {
             panic!("journal unit tests must not dispatch a workflow");
         }
     }

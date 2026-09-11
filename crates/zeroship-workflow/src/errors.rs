@@ -1,5 +1,60 @@
 use compio_postgres::error::SqlState;
 
+/// Operation failures shared by embedded callers and remote clients.
+///
+/// HTTP status codes and response bodies are translated by the client adapter;
+/// embedded storage and execution do not manufacture transport failures.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkflowServiceError {
+    InvalidRequest(String),
+    Unauthenticated,
+    PermissionDenied,
+    NotFound(String),
+    Conflict(String),
+    ResourceExhausted(String),
+    PayloadTooLarge,
+    Unavailable(String),
+    Timeout,
+    Internal(String),
+}
+
+impl WorkflowServiceError {
+    #[must_use]
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::InvalidRequest(_) => "workflow_invalid_request",
+            Self::Unauthenticated => "workflow_unauthenticated",
+            Self::PermissionDenied => "workflow_permission_denied",
+            Self::NotFound(_) => "workflow_not_found",
+            Self::Conflict(_) => "workflow_conflict",
+            Self::ResourceExhausted(_) => "workflow_resource_exhausted",
+            Self::PayloadTooLarge => "workflow_payload_too_large",
+            Self::Unavailable(_) => "workflow_unavailable",
+            Self::Timeout => "workflow_timeout",
+            Self::Internal(_) => "workflow_internal_error",
+        }
+    }
+}
+
+impl std::fmt::Display for WorkflowServiceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidRequest(message)
+            | Self::NotFound(message)
+            | Self::Conflict(message)
+            | Self::ResourceExhausted(message)
+            | Self::Unavailable(message)
+            | Self::Internal(message) => f.write_str(message),
+            Self::Unauthenticated => f.write_str("workflow credentials are missing or expired"),
+            Self::PermissionDenied => f.write_str("workflow operation is not permitted"),
+            Self::PayloadTooLarge => f.write_str("workflow payload exceeds the configured limit"),
+            Self::Timeout => f.write_str("workflow operation timed out"),
+        }
+    }
+}
+
+impl std::error::Error for WorkflowServiceError {}
+
 #[derive(Debug)]
 pub enum WorkflowError {
     Invalid(String),

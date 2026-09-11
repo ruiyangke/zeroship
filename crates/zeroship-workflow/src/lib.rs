@@ -15,8 +15,6 @@ pub mod operations;
 pub mod store;
 
 pub use backend::{HttpWorkflowBackend, SharedWorkflowBackend, WorkflowBackend};
-pub use client::{
-    app_scoped_token, WorkflowClientConfig, WorkflowHttpMethod, WorkflowHttpRequest,
-    WorkflowRpcError,
-};
+pub use client::{app_scoped_token, WorkflowClientConfig, WorkflowHttpMethod, WorkflowHttpRequest};
 pub use dev::{DevWorkflowEngine, WorkflowExecutor};
+pub use errors::WorkflowServiceError;
