@@ -19,3 +19,11 @@ unsafe_code = "forbid"
 
 [lints.clippy]
 all = "deny"
+
+[dev-dependencies]
+proc-macro2 = "1"
+quote = "1"
+regex = "1"
+syn = { version = "2", features = ["full", "visit", "extra-traits"] }
+tempfile = "3"
+serde_yaml = "0.9"

@@ -30,7 +30,7 @@
 //! without making each vendor depend on the adapter that depends on it.
 //!
 //! The manifest line was the thing that had to give, and it was imprecise
-//! rather than load-bearing: `tests/data_crate_closure_gate.sh` pins
+//! rather than load-bearing: `xtask/tests/data_architecture.rs` pins
 //! `compio-postgres`, `rusqlite`, `zeroship-runtime` and `v8`, and `compio` is
 //! none of those. The fence that matters - no DRIVER, no V8 - is untouched.
 //! What this crate gives up is the claim to name no executor, which it could

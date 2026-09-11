@@ -339,9 +339,8 @@ engines. Integration tests exercise V8 behavior, isolation, search and unmask
 transaction routing, cancellation, poisoned transactions, and session cleanup.
 Compiler tests validate generated schema and Rust model contracts.
 
-`tests/data_crate_closure_gate.sh` checks dependency and plain-driver boundaries;
-`tests/vendor_embedding_gate.sh` checks concrete driver references;
-`tests/decision_four_gate.sh` fences shared execution and SQL placement;
+`xtask/tests/data_architecture.rs` checks dependency and plain-driver boundaries,
+concrete driver references, shared execution and SQL placement;
 `cargo xtask test data` runs the required database tests; and
 `tests/clippy_gate.sh` validates the workspace and its declared feature surface.
 
@@ -381,7 +380,7 @@ fixtures use a separate test-only `DatabaseFixture` helper with native values.
 There is no production text-parameter execution trait or backend DDL type mapper;
 the migration engine remains the authority for schema creation.
 
-`tests/data_boundary_gate.sh` checks these source boundaries and validates its
-rejection predicates with negative controls. `tests/data_crate_closure_gate.sh`
-checks the dependency closures; `cargo xtask test data` exercises the
+`xtask/tests/data_architecture.rs` checks source boundaries and dependency
+closures, with negative controls for its rejection predicates.
+`cargo xtask test data` exercises the
 Rust and V8 paths against the required databases.

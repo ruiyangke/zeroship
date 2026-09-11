@@ -32,7 +32,7 @@
 //! IT IS ALSO THE ONE CRATE IN THIS WORKSPACE THAT NOTHING ELSE MAY LINK. This
 //! tool is the single named exception, and it qualifies because it is
 //! `class = "test-dev-tool"` and is never shipped.
-//! `tests/data_crate_closure_gate.sh` arm 3 asserts that inversion directly.
+//! `xtask/tests/data_architecture.rs` asserts that inversion directly.
 //!
 //! IT WAS SEVEN UNTIL 2026-08-28. The seventh was `zeroship-platform-migrate`, the
 //! platform-schema migrate one-shot, whose declaration lived in

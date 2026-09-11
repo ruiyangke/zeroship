@@ -200,12 +200,12 @@ how four OTHER gates went red the same week when two new crates landed.
 `tests/gate_arm_census.sh tests` checks that every gate participates; add
 `--run <gate.sh>` and it also rules on the counts those gates emit.
 
-EVERY GATE IS A SHELL SCRIPT under `tests/`, and the census itself is one. Five
-compose gates and the census were Rust in a `zeroship-gatekit` crate for a week;
-all of it was deleted on 2026-08-21, the gates for the complexity they cost and
-the census because 959 lines of Rust to read shell scripts and enforce a shell
-convention is a workspace member paying for nothing. Write a new gate in shell,
-source `tests/lib/gate_arms.sh`, and give every arm a floor.
+Data architecture checks are Rust tests in `xtask/tests/data_architecture.rs`,
+run by `cargo xtask test data-architecture` and the complete data suite.
+Keep scan floors and rejection controls beside the checks. Example acceptance
+tests live inside each example and use Vitest, TypeScript fixtures and browser
+assertions. Other repository gates remain shell scripts under `tests/` and
+participate in `tests/lib/gate_arms.sh`.
 
 Standalone, zeroship-independent driver libraries (own top-level `libs/`, publishable):
 
