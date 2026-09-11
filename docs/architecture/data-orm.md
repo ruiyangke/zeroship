@@ -147,6 +147,26 @@ SQLite opens or creates a filesystem database, for example
 options are rejected. Tests provide explicit temporary files; the ORM owns no
 temporary directory and never removes database files when a backend closes.
 
+## Bulk mutations
+
+`updateMany`, `deleteMany`, `restoreMany`, and `purgeMany` return affected-row
+counts. Their SQL omits `RETURNING`; `ScopedExecutor::exec` and
+`DriverSession::exec` expose the database count without decoding records.
+Single-row writes and inserts retain their record-returning paths.
+
+Ordinary bulk operations affect every matching row. The read-query limit does
+not truncate writes, and an operation does not split itself into independently
+committed batches. Per-row encrypted updates retain their target cap and atomic
+write frame. Hosts retain their existing transaction and statement budgets;
+large maintenance jobs should choose explicit batches.
+
+SQLite publishes committed changes through its capture hooks. PostgreSQL's
+local fallback emits a collection invalidation for a successful bulk statement
+that affected rows, deferred until commit inside a transaction. A connected
+relay remains the authoritative PostgreSQL change source. Removing returned
+records avoids result-buffer growth; it does not eliminate database locking,
+WAL work, or SQLite's bounded CDC buffers.
+
 ## Explicit joins
 
 `Database::from` builds source-qualified reads from generated entity aliases.
@@ -310,7 +330,7 @@ requires no new backend enum variant in those paths.
 ```text
 ordinary operation                 explicit transaction
        |                                   |
-ScopedExecutor::query              ScopedExecutor::open_tx_session
+ScopedExecutor::{query,exec}        ScopedExecutor::open_tx_session
        |                                   |
 driver acquires access              owned Session
 executor applies authority          parked in transaction lane

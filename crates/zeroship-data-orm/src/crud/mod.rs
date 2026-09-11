@@ -9,7 +9,7 @@ use zeroship_data_sql::value::Value;
 
 use crate::assignments::AssignmentPlan;
 use crate::compile;
-use crate::exec::{exec_mutation_with_emit, exec_query};
+use crate::exec::{exec_mutation_count_with_emit, exec_mutation_with_emit, exec_query};
 use crate::tx_route::TxRoute;
 use zeroship_data_orm::binding::DbBinding;
 use zeroship_data_orm::error::DbError;
@@ -649,12 +649,7 @@ pub async fn run_update_one(
     Ok((result.rows, result.has_masked))
 }
 
-/// The ENGINE half of `updateMany`. Resolves to a COUNT, so unlike
-/// [`run_update_one`] it returns a plain `usize` and the adapter lowers once.
-///
-/// `route` is taken BY VALUE because the per-row-encrypted arm moves it into
-/// `AtomicWriteFrame::begin`; the other arm only borrows it. `actor_id` is eager
-/// for the reason given on [`run_insert`].
+/// Update matching rows and return the database's affected-row count.
 pub async fn run_update_many(
     binding: DbBinding,
     coll: String,
@@ -662,7 +657,7 @@ pub async fn run_update_many(
     filter: Value,
     update: Value,
     actor_id: Option<String>,
-) -> Result<usize, DbError> {
+) -> Result<u64, DbError> {
     let mut update = update;
     // Read off the route ONCE, here, because the per-row arm below MOVES the
     // route into `AtomicWriteFrame::begin` - the frame's route carries the same
@@ -693,7 +688,7 @@ pub async fn run_update_many(
     );
     if per_row_encrypted_update {
         let frame = crate::transaction::AtomicWriteFrame::begin(route).await?;
-        let work_result: Result<usize, DbError> = async {
+        let work_result: Result<u64, DbError> = async {
             let target_rows = write_pipeline::resolve_target_row_ids(
                 frame.route(),
                 dialect,
@@ -755,7 +750,7 @@ pub async fn run_update_many(
                     row_filter[concurrency_column(&schema)?.expect("CAS column")] =
                         Value::from(expected_version);
                 }
-                // The probe resolved this row by its primary-key `id`, so
+                // The probe resolved this row by its declared primary key, so
                 // the per-row statement does not need a second bounded
                 // subquery. Using the many builder here preserves the
                 // ordinary column-grant surface while the primary key still
@@ -774,21 +769,19 @@ pub async fn run_update_many(
                 );
             }
 
-            let mut affected = 0usize;
+            let mut affected = 0u64;
             for built in row_queries {
-                affected += exec_mutation_with_emit(
+                affected += exec_mutation_count_with_emit(
                     built,
                     frame.route(),
                     &coll,
                     zeroship_data_orm::cdc::ChangeOp::Update,
-                    &binding,
                 )
-                .await?
-                .len();
+                .await?;
             }
 
             if let Some(expected_version) = cas_version {
-                if affected != target_count {
+                if affected != target_count as u64 {
                     let row_id = filter
                         .as_object()
                         .and_then(|o| primary_key(&schema).ok().and_then(|key| o.get(key)))
@@ -799,10 +792,7 @@ pub async fn run_update_many(
             Ok(affected)
         }
         .await;
-        // `finish` is the commit/rollback boundary and already takes and
-        // returns a `Result<usize, DbError>` - the same shape `settle`
-        // wants - so the frame is committed or rolled back exactly once
-        // whichever way the work went. Do NOT `?` the work_result above it.
+        // Settle the entire write even when a per-row operation fails.
         return frame.finish(work_result).await;
     }
 
@@ -832,20 +822,16 @@ pub async fn run_update_many(
         &autobump,
     )
     .map_err(DbError::from)?;
-    let rows = exec_mutation_with_emit(
+    let affected = exec_mutation_count_with_emit(
         bq,
         &route,
         &coll,
         zeroship_data_orm::cdc::ChangeOp::Update,
-        &binding,
     )
     .await?;
-    // CAS path on updateMany: with `{ id, version: N }` the
-    // RETURNING is at most one row. Same empty-check as
-    // updateOne so the SDK's CAS contract holds for both
-    // entry points.
+    // A primary-key CAS miss has the same error contract as updateOne.
     if let Some(expected_version) = cas_version {
-        if rows.is_empty() {
+        if affected == 0 {
             let row_id = filter
                 .as_object()
                 .and_then(|o| primary_key(&schema).ok().and_then(|key| o.get(key)))
@@ -853,11 +839,7 @@ pub async fn run_update_many(
             return Err(DbError::version_mismatch(&coll, row_id, expected_version));
         }
     }
-    // Both arms resolve to a COUNT, so both return `usize` and the adapter
-    // lowers once. The encrypted arm already did (`usize_count_as_f64`);
-    // this arm used `row_count_as_f64(rows)`, which is `rows.len() as f64` -
-    // the same `ResolveValue::F64`, so unifying changes no output.
-    Ok(rows.len())
+    Ok(affected)
 }
 
 /// Delete one row, applying soft-delete assignments when the descriptor enables them.

@@ -34,6 +34,20 @@ impl ScopedExecutor for SqliteBackend {
             .query(sql, params)
             .await
     }
+    async fn exec(
+        &self,
+        app_id: &str,
+        _schema: &SchemaName,
+        sql: &str,
+        params: &[Value],
+    ) -> Result<u64, DbError> {
+        self.connection_driver(app_id)
+            .await?
+            .acquire(LeaseKind::Autocommit)
+            .await?
+            .exec(sql, params)
+            .await
+    }
     async fn open_tx_session(
         &self,
         app_id: &str,

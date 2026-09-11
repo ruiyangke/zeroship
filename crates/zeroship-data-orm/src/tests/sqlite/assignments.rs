@@ -373,7 +373,7 @@ fn update_end_to_end_bumps_version_by_one_sqlite() {
                 .await
                 .expect("INSERT");
 
-            // UPDATE via the system-fields-aware builder.
+            // UPDATE with descriptor assignments.
             let filter = zeroship_data_sql::value!({ "id": "post_v1bump" });
             let update = zeroship_data_sql::value!({ "title": "v2" });
             let autobump = Some("usr_e2e_updater");
@@ -388,11 +388,11 @@ fn update_end_to_end_bumps_version_by_one_sqlite() {
             )
             .unwrap();
             let upd_params = &upd.params;
-            let returning = client
-                .query_values(&upd.sql, upd_params)
+            let affected = client
+                .exec_values(&upd.sql, upd_params)
                 .await
                 .expect("UPDATE");
-            assert_eq!(returning.len(), 1, "UPDATE returned 1 row");
+            assert_eq!(affected, 1, "UPDATE affected the matching row");
 
             // SELECT and confirm version bumped to 2 and updated_by was set.
             let rows = client
@@ -479,8 +479,8 @@ fn update_end_to_end_with_correct_version_succeeds_and_bumps_sqlite() {
             )
             .unwrap();
             let upd_params = &upd.params;
-            let returning = client.query_values(&upd.sql, upd_params).await.unwrap();
-            assert_eq!(returning.len(), 1, "CAS matched: 1 affected row");
+            let affected = client.exec_values(&upd.sql, upd_params).await.unwrap();
+            assert_eq!(affected, 1, "CAS matched: 1 affected row");
 
             let rows = client
                 .query(
@@ -500,7 +500,7 @@ fn update_end_to_end_with_correct_version_succeeds_and_bumps_sqlite() {
 
 /// End-to-end CAS failure: an UPDATE that filters by a stale `version`
 /// affects zero rows. The dispatch layer (not exercised here) converts
-/// the empty RETURNING into a typed `version_mismatch` — at the SQL
+/// the empty affected-row count into a typed `version_mismatch` — at the SQL
 /// layer we just confirm the affected-rows = 0 contract.
 #[test]
 fn update_end_to_end_with_stale_version_affects_zero_rows_sqlite() {
@@ -561,8 +561,8 @@ fn update_end_to_end_with_stale_version_affects_zero_rows_sqlite() {
             )
             .unwrap();
             let upd_params = &upd.params;
-            let returning = client.query_values(&upd.sql, upd_params).await.unwrap();
-            assert!(returning.is_empty(), "stale CAS: 0 affected rows");
+            let affected = client.exec_values(&upd.sql, upd_params).await.unwrap();
+            assert!(affected == 0, "stale CAS: 0 affected rows");
 
             // Row stays at version 1 and original title.
             let rows = client
@@ -640,8 +640,8 @@ fn update_end_to_end_concurrent_two_updates_one_wins_one_loses_sqlite() {
             )
             .unwrap();
             let p1 = &upd1.params;
-            let r1 = client.query_values(&upd1.sql, p1).await.unwrap();
-            assert_eq!(r1.len(), 1, "first CAS wins");
+            let r1 = client.exec_values(&upd1.sql, p1).await.unwrap();
+            assert_eq!(r1, 1, "first CAS wins");
 
             // Second UPDATE at version=1 loses (row is now at version=2).
             let filter2 = zeroship_data_sql::value!({ "id": "post_race", "version": 1 });
@@ -659,8 +659,8 @@ fn update_end_to_end_concurrent_two_updates_one_wins_one_loses_sqlite() {
             )
             .unwrap();
             let p2 = &upd2.params;
-            let r2 = client.query_values(&upd2.sql, p2).await.unwrap();
-            assert!(r2.is_empty(), "second CAS loses");
+            let r2 = client.exec_values(&upd2.sql, p2).await.unwrap();
+            assert!(r2 == 0, "second CAS loses");
 
             // Final state: winner's title, version=2.
             let rows = client
@@ -739,8 +739,8 @@ fn update_end_to_end_without_version_filter_succeeds_blindly_sqlite() {
                 )
                 .unwrap();
                 let p = &upd.params;
-                let r = client.query_values(&upd.sql, p).await.unwrap();
-                assert_eq!(r.len(), 1, "blind UPDATE succeeds");
+                let r = client.exec_values(&upd.sql, p).await.unwrap();
+                assert_eq!(r, 1, "blind UPDATE succeeds");
             }
 
             let rows = client
@@ -812,8 +812,8 @@ fn soft_delete_end_to_end_sets_deleted_at_and_bumps_version_sqlite() {
             )
             .unwrap();
             let p = &sd.params;
-            let returning = client.query_values(&sd.sql, p).await.unwrap();
-            assert_eq!(returning.len(), 1, "soft-delete returned 1 row");
+            let affected = client.exec_values(&sd.sql, p).await.unwrap();
+            assert_eq!(affected, 1, "soft-delete affected the live row");
 
             let rows = client
             .query(
@@ -889,10 +889,10 @@ fn soft_delete_on_already_soft_deleted_row_affects_zero_rows_sqlite() {
             )
             .unwrap();
             let p1 = &sd.params;
-            let r1 = client.query_values(&sd.sql, p1).await.unwrap();
-            assert_eq!(r1.len(), 1, "first soft-delete hits");
-            let r2 = client.query_values(&sd.sql, p1).await.unwrap();
-            assert!(r2.is_empty(), "re-soft-deleting is a no-op");
+            let r1 = client.exec_values(&sd.sql, p1).await.unwrap();
+            assert_eq!(r1, 1, "first soft-delete hits");
+            let r2 = client.exec_values(&sd.sql, p1).await.unwrap();
+            assert!(r2 == 0, "re-soft-deleting is a no-op");
         });
     })
 }
@@ -954,7 +954,7 @@ fn find_with_soft_delete_filter_hides_soft_deleted_rows_sqlite() {
             .unwrap();
             let p = &sd.params;
             let client = backend.fixture_session("app_demo").await.unwrap();
-            client.query_values(&sd.sql, p).await.unwrap();
+            client.exec_values(&sd.sql, p).await.unwrap();
 
             let q = build_find_with_schema_and_unmask_and_soft_delete(
                 &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
@@ -1043,7 +1043,7 @@ fn restore_clears_deleted_at_and_bumps_version_sqlite() {
             )
             .unwrap();
             let p = &sd.params;
-            client.query_values(&sd.sql, p).await.unwrap();
+            client.exec_values(&sd.sql, p).await.unwrap();
 
             let rs = build_restore_many_with_assignments(
                 &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
@@ -1055,8 +1055,8 @@ fn restore_clears_deleted_at_and_bumps_version_sqlite() {
             )
             .unwrap();
             let p = &rs.params;
-            let returning = client.query_values(&rs.sql, p).await.unwrap();
-            assert_eq!(returning.len(), 1, "restore hit the soft-deleted row");
+            let affected = client.exec_values(&rs.sql, p).await.unwrap();
+            assert_eq!(affected, 1, "restore hit the soft-deleted row");
 
             let rows = client
             .query(
@@ -1125,8 +1125,8 @@ fn restore_on_already_live_row_affects_zero_rows_sqlite() {
             )
             .unwrap();
             let p = &rs.params;
-            let returning = client.query_values(&rs.sql, p).await.unwrap();
-            assert!(returning.is_empty(), "restoring a live row is a no-op");
+            let affected = client.exec_values(&rs.sql, p).await.unwrap();
+            assert!(affected == 0, "restoring a live row is a no-op");
             let rows = client
                 .query(
                     "SELECT version FROM \"app_demo\".\"posts\" WHERE id = 'post_live'",
@@ -1211,7 +1211,7 @@ fn soft_delete_then_restore_full_lifecycle_sqlite() {
             )
             .unwrap();
             let p = &sd.params;
-            client.query_values(&sd.sql, p).await.unwrap();
+            client.exec_values(&sd.sql, p).await.unwrap();
 
             let r = client.query(&find_default.sql, &[]).await.unwrap();
             assert!(r.is_empty(), "soft-deleted row hidden");
@@ -1244,7 +1244,7 @@ fn soft_delete_then_restore_full_lifecycle_sqlite() {
             )
             .unwrap();
             let p = &rs.params;
-            client.query_values(&rs.sql, p).await.unwrap();
+            client.exec_values(&rs.sql, p).await.unwrap();
 
             let r = client.query(&find_default.sql, &[]).await.unwrap();
             assert_eq!(r.len(), 1, "restored row visible to default find");
@@ -1328,9 +1328,9 @@ fn soft_delete_many_sets_deleted_at_on_all_matching_live_rows_sqlite() {
             .unwrap();
             let p = &sd.params;
             let client = backend.fixture_session("app_demo").await.unwrap();
-            let returning = client.query_values(&sd.sql, p).await.unwrap();
+            let affected = client.exec_values(&sd.sql, p).await.unwrap();
             assert_eq!(
-                returning.len(),
+                affected,
                 2,
                 "only 2 live usr_a rows affected; already-deleted excluded"
             );
