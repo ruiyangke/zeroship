@@ -27,10 +27,6 @@ BEGIN
 END;`,
   });
   raw({
-    sql: "ALTER FUNCTION zeroship.workflow_policy_lock(text,text,boolean) SET search_path = pg_catalog",
-    reason: "lock functions must resolve only trusted database builtins",
-  });
-  raw({
     sql: "REVOKE ALL ON FUNCTION zeroship.workflow_policy_lock(text,text,boolean) FROM PUBLIC",
     reason: "the function grant identifies its overload explicitly",
   });
@@ -59,10 +55,6 @@ END;`,
   PERFORM zeroship.workflow_policy_lock('${kind}', NEW.${column}::text, true);
   RETURN NEW;
 END;`,
-    });
-    raw({
-      sql: `ALTER FUNCTION zeroship.${fn}() SET search_path = pg_catalog`,
-      reason: "policy triggers resolve only trusted database builtins",
     });
     raw({
       sql: `REVOKE ALL ON FUNCTION zeroship.${fn}() FROM PUBLIC`,

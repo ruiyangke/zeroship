@@ -67,7 +67,7 @@ impl WorkflowService {
                 "platform workflow policy is owned by Control".into(),
             ));
         }
-        let table = tx.table("apps");
+        let table = tx.table("app_state");
         tx.execute(&format!("INSERT INTO {table} (app_id,revision,policy,signal_epoch) VALUES ($1,0,$2,0) \
             ON CONFLICT (app_id) DO UPDATE SET revision = {table}.revision + 1, policy = excluded.policy"),
             &[app.as_str().into(), encode(policy)?.into()]).await?;
@@ -293,7 +293,7 @@ pub(crate) async fn lock_app(
     let platform = if let Some(source) = tx.platform_policy.clone() {
         let policy = source.lock(tx, app).await?;
         tx.execute(
-            &format!("INSERT INTO {} (app_id,revision,signal_epoch) VALUES ($1,0,0) ON CONFLICT (app_id) DO NOTHING", tx.table("apps")),
+            &format!("INSERT INTO {} (app_id,revision,signal_epoch) VALUES ($1,0,0) ON CONFLICT (app_id) DO NOTHING", tx.table("app_state")),
             &[app.as_str().into()],
         ).await?;
         Some(policy)
@@ -302,7 +302,7 @@ pub(crate) async fn lock_app(
     };
     let sql = format!(
         "SELECT policy FROM {} WHERE app_id=$1{}",
-        tx.table("apps"),
+        tx.table("app_state"),
         tx.lock_clause()
     );
     let rows = tx.query(&sql, &[app.as_str().into()]).await?;

@@ -31,6 +31,12 @@ impl PlatformFixture {
             .batch_execute(include_str!("../../../schema/platform-policy.sql"))
             .await
             .unwrap();
+        admin
+            .batch_execute(
+                "REVOKE INSERT,UPDATE,DELETE ON workflow.schema_version FROM zeroship_workflow",
+            )
+            .await
+            .unwrap();
         let app = AppId::mint();
         let other = AppId::mint();
         let plan = typed_id::generate("pln");
@@ -152,7 +158,7 @@ async fn platform_admission_reads_live_authority_and_keeps_management_available(
     // A workflow-owned row is not a cache of platform admission authority.
     admin
         .execute(
-            "UPDATE workflow.apps SET policy=$2 WHERE app_id=$1",
+            "UPDATE workflow.app_state SET policy=$2 WHERE app_id=$1",
             &[
                 &fixture.app.as_str(),
                 &serde_json::to_string(&AppPolicy::default()).unwrap(),
@@ -251,8 +257,8 @@ async fn policy_read_privileges_do_not_grant_control_writes_or_ddl() {
         "DELETE FROM zeroship.plans",
         "INSERT INTO zeroship.workflow_rollout_config VALUES ('rogue',false,false)",
         "CREATE TABLE workflow.rogue (id text)",
-        "ALTER TABLE workflow.apps ADD COLUMN rogue text",
-        "SET ROLE zeroship_workflow_owner",
+        "ALTER TABLE workflow.app_state ADD COLUMN rogue text",
+        "SET ROLE zeroship_workflow_migrator",
     ] {
         let error = runtime.batch_execute(sql).await.unwrap_err();
         assert_eq!(
@@ -270,7 +276,7 @@ async fn policy_read_privileges_do_not_grant_control_writes_or_ddl() {
         )
         .await;
         assert!(client
-            .batch_execute("SELECT * FROM workflow.apps")
+            .batch_execute("SELECT * FROM workflow.app_state")
             .await
             .is_err());
         assert!(client

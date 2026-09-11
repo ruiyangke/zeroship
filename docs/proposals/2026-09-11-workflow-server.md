@@ -31,8 +31,13 @@ Its schema is generated from the canonical migration DSL, with native contract
 tests against SQLite, Testcontainers PostgreSQL and S3-compatible storage. The new HTTP host library and Rust remote clients now expose app and task
 operations. Worker verification resolves active enrollment keys and binds
 assignments to the verified instance; native tests exercise the HTTP boundary.
+The platform corpus provisions the shared journal, its migration-only owner,
+the workflow login and policy writer fences. Startup verification rejects
+administrative role privileges, writable fingerprints and disabled fences.
+Native migration tests apply the full corpus before checking these permissions.
+The platform store resolves admission under those locks without a policy cache.
 This is not yet the runtime composition: server startup, the worker polling loop, Control capability
-issuance, authoritative platform policy, public HTTP ingress, retention of
+issuance, public HTTP ingress, retention of
 completed run graphs and interpreter cutover remain in progress. The
 current runtime still uses Control and the local mini-engine.
 
@@ -163,7 +168,7 @@ app's workflows.
   handle binds SQL scope; parameterized predicates and relational constraints
   protect reads, mutations, child links and payload references.
 
-`zeroship_workflow_owner` becomes a migration-only owner. The workflow server's
+`zeroship_workflow_migrator` is a migration-only owner. The workflow server's
 runtime role receives the required DML grants. Worker, Gateway and app database
 roles have no direct workflow-table privileges or workflow-owner membership.
 The worker's existing access to business data is a separate subsystem; this

@@ -3,6 +3,7 @@ import { table, t } from "../../../packages/zero-migrate/dist/index.js";
 // The workflow service owns this schema. Platform migrations and local schema
 // generation call the same definition through the migration compiler.
 export function workflowSchema(namespace) {
+  const tables = [];
   const text = () => t.text().notNull();
   const integer = () => t.bigInt().notNull();
   const identity = () => ({ app_id: text() });
@@ -11,10 +12,11 @@ export function workflowSchema(namespace) {
   const fk = (name, columns, target, targetColumns, onDelete = "restrict") => ({
     name, columns, references: { table: target, schema: namespace, columns: targetColumns }, onDelete,
   });
-  const appFk = (name) => fk(`${name}_app`, ["app_id"], "apps", ["app_id"]);
+  const appFk = (name) => fk(`${name}_app`, ["app_id"], "app_state", ["app_id"]);
   const runFk = (name) => fk(`${name}_run`, ["app_id", "run_id"], "runs", ["app_id", "id"]);
   const generationFk = (name) => fk(`${name}_generation`, ["app_id", "run_id", "generation"], "generations", ["app_id", "run_id", "generation"]);
   const create = (name, columns, primaryKey, foreignKeys = [], uniques = []) => {
+    tables.push(name);
     table(name, { schema: namespace }).create({ columns, primaryKey, foreignKeys });
     for (const unique of uniques) {
       table(name, { schema: namespace }).index(unique.name).add({ on: unique.columns, unique: true });
@@ -23,7 +25,7 @@ export function workflowSchema(namespace) {
   const index = (name, purpose, columns) => table(name, { schema: namespace }).index(`${name}_${purpose}_idx`).add({ on: columns });
 
   create("schema_version", { id: text(), fingerprint: text() }, ["id"]);
-  create("apps", {
+  create("app_state", {
     ...identity(), revision: integer(), policy: t.text(), signal_epoch: integer(),
     last_polled_at: integer().default(0),
     subscription_sequence: integer().default(0),
@@ -150,4 +152,5 @@ export function workflowSchema(namespace) {
     ...identity(), id: text(), kind: text(), payload: text(), created_at: integer(), delivered_at: t.bigInt(),
   }, ["app_id", "id"], [appFk("outbox")]);
   index("outbox", "delivery", ["delivered_at", "created_at"]);
+  return tables;
 }

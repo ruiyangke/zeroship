@@ -177,7 +177,7 @@ impl AppWorkflows {
                 .await?;
             }
             None => {
-                let apps = tx.table("apps");
+                let apps = tx.table("app_state");
                 tx.execute(
                     &format!("UPDATE {apps} SET signal_epoch=$2 WHERE app_id=$1"),
                     &[self.app.as_str().into(), epoch.into()],
@@ -274,7 +274,7 @@ fn authority(service: &WorkflowService) -> Result<Arc<SignalAuthority>, Workflow
     })
 }
 async fn app_epoch(tx: &mut Transaction, app: &AppId) -> Result<i64, WorkflowServiceError> {
-    let apps = tx.table("apps");
+    let apps = tx.table("app_state");
     let rows = tx
         .query(
             &format!("SELECT signal_epoch FROM {apps} WHERE app_id=$1"),

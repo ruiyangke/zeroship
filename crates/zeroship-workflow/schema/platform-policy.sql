@@ -16,8 +16,6 @@ BEGIN
 END;
 $zsfn$;
 
-ALTER FUNCTION zeroship.workflow_policy_lock(text,text,boolean) SET search_path = pg_catalog;
-
 REVOKE ALL ON FUNCTION zeroship.workflow_policy_lock(text,text,boolean) FROM PUBLIC;
 
 GRANT EXECUTE ON FUNCTION zeroship.workflow_policy_lock(text,text,boolean) TO zeroship_control, zeroship_workflow;
@@ -35,8 +33,6 @@ BEGIN
   RETURN NEW;
 END;
 $zsfn$;
-
-ALTER FUNCTION zeroship.workflow_policy_fence_app() SET search_path = pg_catalog;
 
 REVOKE ALL ON FUNCTION zeroship.workflow_policy_fence_app() FROM PUBLIC;
 
@@ -56,8 +52,6 @@ BEGIN
 END;
 $zsfn$;
 
-ALTER FUNCTION zeroship.workflow_policy_fence_plan() SET search_path = pg_catalog;
-
 REVOKE ALL ON FUNCTION zeroship.workflow_policy_fence_plan() FROM PUBLIC;
 
 CREATE TRIGGER "workflow_policy_fence_plan" BEFORE INSERT OR UPDATE OR DELETE ON "zeroship"."plans" FOR EACH ROW EXECUTE FUNCTION "zeroship"."workflow_policy_fence_plan"();
@@ -75,8 +69,6 @@ BEGIN
   RETURN NEW;
 END;
 $zsfn$;
-
-ALTER FUNCTION zeroship.workflow_policy_fence_organization() SET search_path = pg_catalog;
 
 REVOKE ALL ON FUNCTION zeroship.workflow_policy_fence_organization() FROM PUBLIC;
 
@@ -96,8 +88,6 @@ BEGIN
 END;
 $zsfn$;
 
-ALTER FUNCTION zeroship.workflow_policy_fence_spend() SET search_path = pg_catalog;
-
 REVOKE ALL ON FUNCTION zeroship.workflow_policy_fence_spend() FROM PUBLIC;
 
 CREATE TRIGGER "workflow_policy_fence_spend" BEFORE INSERT OR UPDATE OR DELETE ON "zeroship"."app_spend_state" FOR EACH ROW EXECUTE FUNCTION "zeroship"."workflow_policy_fence_spend"();
@@ -115,8 +105,6 @@ BEGIN
   RETURN NEW;
 END;
 $zsfn$;
-
-ALTER FUNCTION zeroship.workflow_policy_fence_rollout() SET search_path = pg_catalog;
 
 REVOKE ALL ON FUNCTION zeroship.workflow_policy_fence_rollout() FROM PUBLIC;
 
@@ -137,3 +125,4 @@ GRANT SELECT (app_id,state) ON zeroship.app_spend_state TO zeroship_workflow;
 GRANT SELECT (id,dispatch_paused,ingress_disabled) ON zeroship.workflow_rollout_config TO zeroship_workflow;
 
 GRANT SELECT (id,status,public_key) ON zeroship.worker_instances TO zeroship_workflow;
+INSERT INTO workflow.schema_version (id, fingerprint) VALUES ('platform_policy', '9b2c99417f542e51aa08bcbaf435e52527ac3547321763e30ba805f419426de4');

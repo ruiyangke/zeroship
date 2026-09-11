@@ -8693,6 +8693,7 @@ dependencies = [
  "sha2 0.10.9",
  "tempfile",
  "testcontainers",
+ "toml 0.8.23",
  "tracing",
  "zeroship-core",
  "zeroship-storage",
