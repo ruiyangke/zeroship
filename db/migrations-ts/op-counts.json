@@ -35,7 +35,7 @@
   { "file": "20260820000000_control_workflow_journal_access.ts", "name": "control_workflow_journal_access", "opCount": 1 },
   { "file": "20260820000100_app_egress_rules.ts", "name": "app_egress_rules", "opCount": 8 },
   { "file": "20260831000000_archive_apps.ts", "name": "archive_apps", "opCount": 3 },
-  { "file": "20260831000001_sortable_entity_id_collations.ts", "name": "sortable_entity_id_collations", "opCount": 37 },
+  { "file": "20260831000001_sortable_entity_id_collations.ts", "name": "sortable_entity_id_collations", "opCount": 38 },
   { "file": "20260905000000_drop_jwk_key_state.ts", "name": "drop_jwk_key_state", "opCount": 1 },
   { "file": "20260905000100_drop_app_api_key_hash.ts", "name": "drop_app_api_key_hash", "opCount": 1 },
   { "file": "20260905000200_drop_app_api_key.ts", "name": "drop_app_api_key", "opCount": 1 },
@@ -50,6 +50,6 @@
   { "file": "20260908000000_auth_organization_ownership_fence.ts", "name": "auth_organization_ownership_fence", "opCount": 2 },
   { "file": "20260908000100_delete_apps.ts", "name": "delete_apps", "opCount": 4 },
   { "file": "20260910000100_cdc_relay_authority.ts", "name": "cdc_relay_authority", "opCount": 5 },
-  { "file": "20260911000100_project_data_keys.ts", "name": "project_data_keys", "opCount": 4 },
-  {"file":"20260911000000_workflow_service.ts","name":"workflow_service","opCount":98}
+  { "file": "20260911000000_workflow_service.ts", "name": "workflow_service", "opCount": 96 },
+  { "file": "20260911000100_project_data_keys.ts", "name": "project_data_keys", "opCount": 4 }
 ]

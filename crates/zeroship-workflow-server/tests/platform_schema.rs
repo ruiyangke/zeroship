@@ -114,6 +114,14 @@ async fn platform_migration_provisions_workflow_authority_without_worker_access(
         ] {
             assert!(peer.batch_execute(sql).await.is_err(), "{role}: {sql}");
         }
+        if role != "zeroship_control" {
+            for sql in [
+                "UPDATE zeroship.apps SET deploy_hash='forged'",
+                "UPDATE zeroship.app_deploys SET manifest_json='{}'",
+            ] {
+                assert!(peer.batch_execute(sql).await.is_err(), "{role}: {sql}");
+            }
+        }
     }
     let admin = connect(&url).await;
     let owner: String = admin
@@ -137,6 +145,10 @@ async fn platform_migration_provisions_workflow_authority_without_worker_access(
         );
     }
     for (break_policy, restore_policy) in [
+        (
+            "ALTER TABLE zeroship.app_deploys DISABLE TRIGGER workflow_policy_fence_deploy",
+            "ALTER TABLE zeroship.app_deploys ENABLE TRIGGER workflow_policy_fence_deploy",
+        ),
         (
             "ALTER TABLE zeroship.apps DISABLE TRIGGER workflow_policy_fence_app",
             "ALTER TABLE zeroship.apps ENABLE TRIGGER workflow_policy_fence_app",

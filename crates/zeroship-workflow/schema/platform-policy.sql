@@ -110,11 +110,34 @@ REVOKE ALL ON FUNCTION zeroship.workflow_policy_fence_rollout() FROM PUBLIC;
 
 CREATE TRIGGER "workflow_policy_fence_rollout" BEFORE INSERT OR UPDATE OR DELETE ON "zeroship"."workflow_rollout_config" FOR EACH ROW EXECUTE FUNCTION "zeroship"."workflow_policy_fence_rollout"();
 
+CREATE FUNCTION "zeroship"."workflow_policy_fence_deploy"() RETURNS trigger LANGUAGE plpgsql AS $zsfn$
+BEGIN
+  IF TG_OP = 'UPDATE' AND (
+      NEW.id IS DISTINCT FROM OLD.id OR NEW.app_id IS DISTINCT FROM OLD.app_id
+      OR NEW.deploy_hash IS DISTINCT FROM OLD.deploy_hash
+      OR NEW.manifest_json IS DISTINCT FROM OLD.manifest_json) THEN
+    RAISE EXCEPTION 'workflow deployment snapshot is immutable';
+  END IF;
+  IF TG_OP = 'DELETE' THEN
+    PERFORM zeroship.workflow_policy_lock('app', OLD.app_id::text, true);
+    RETURN OLD;
+  END IF;
+  PERFORM zeroship.workflow_policy_lock('app', NEW.app_id::text, true);
+  RETURN NEW;
+END;
+$zsfn$;
+
+REVOKE ALL ON FUNCTION zeroship.workflow_policy_fence_deploy() FROM PUBLIC;
+
+CREATE TRIGGER "workflow_policy_fence_deploy" BEFORE INSERT OR UPDATE OR DELETE ON "zeroship"."app_deploys" FOR EACH ROW EXECUTE FUNCTION "zeroship"."workflow_policy_fence_deploy"();
+
 INSERT INTO zeroship.workflow_rollout_config (id,dispatch_paused,ingress_disabled) VALUES ('global',false,false) ON CONFLICT (id) DO NOTHING;
 
 GRANT USAGE ON SCHEMA "zeroship" TO "zeroship_workflow";
 
-GRANT SELECT (id,plan_id,organization_id,workflows_enabled,archived_at,deleted_at) ON zeroship.apps TO zeroship_workflow;
+GRANT SELECT (id,plan_id,organization_id,workflows_enabled,archived_at,deleted_at,deploy_hash,manifest_json) ON zeroship.apps TO zeroship_workflow;
+
+GRANT SELECT (id,app_id,deploy_hash,manifest_json,activated_at) ON zeroship.app_deploys TO zeroship_workflow;
 
 GRANT SELECT (id,workflows_allowed,archived,runtime_limits_json) ON zeroship.plans TO zeroship_workflow;
 
@@ -125,4 +148,4 @@ GRANT SELECT (app_id,state) ON zeroship.app_spend_state TO zeroship_workflow;
 GRANT SELECT (id,dispatch_paused,ingress_disabled) ON zeroship.workflow_rollout_config TO zeroship_workflow;
 
 GRANT SELECT (id,status,public_key) ON zeroship.worker_instances TO zeroship_workflow;
-INSERT INTO workflow.schema_version (id, fingerprint) VALUES ('platform_policy', '9b2c99417f542e51aa08bcbaf435e52527ac3547321763e30ba805f419426de4');
+INSERT INTO workflow.schema_version (id, fingerprint) VALUES ('platform_policy', '7ffdcf6ee518fda4b4220e093e64dbb0bcc2fb6b6495dca3a2f2c72a548ebf2b');

@@ -76,63 +76,6 @@ impl WorkflowService {
             &[app.as_str().into(), encode(policy)?.into()]).await?;
         tx.commit().await
     }
-
-    /// Publish an immutable executable deployment and select it for new runs.
-    pub async fn activate_deploy(
-        &self,
-        app: &AppId,
-        deploy: &DeployRegistration,
-    ) -> Result<(), WorkflowServiceError> {
-        typed_id::parse_with_prefix(&deploy.id, "dep").map_err(|_| {
-            WorkflowServiceError::InvalidRequest("invalid workflow deploy identity".into())
-        })?;
-        if deploy.hash.len() != 64
-            || !deploy
-                .hash
-                .bytes()
-                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-        {
-            return Err(WorkflowServiceError::InvalidRequest(
-                "invalid workflow deploy hash".into(),
-            ));
-        }
-        for name in &deploy.workflows {
-            validation::workflow_name(name)?;
-        }
-        let mut tx = self.store.begin().await?;
-        let policy = lock_app(&mut tx, app).await?;
-        let now = tx.now().await?;
-        let table = tx.table("deploys");
-        let rows = tx
-            .query(
-                &format!("SELECT hash,manifest,state FROM {table} WHERE app_id=$1 AND id=$2"),
-                &[app.as_str().into(), deploy.id.clone().into()],
-            )
-            .await?;
-        if let Some(existing) = rows.first() {
-            let manifest: DeployRegistration = decode(&existing.text("manifest")?)?;
-            if manifest != *deploy || existing.text("state")? != "available" {
-                return Err(WorkflowServiceError::Conflict(
-                    "workflow deployment is immutable or being deleted".into(),
-                ));
-            }
-        } else {
-            tx.execute(&format!("INSERT INTO {table} (app_id,id,hash,manifest,created_at,active,state) VALUES ($1,$2,$3,$4,$5,0,'available')"),
-                &[app.as_str().into(),deploy.id.clone().into(),deploy.hash.clone().into(),encode(deploy)?.into(),now.into()]).await?;
-        }
-        tx.execute(
-            &format!("UPDATE {table} SET active=0 WHERE app_id=$1"),
-            &[app.as_str().into()],
-        )
-        .await?;
-        tx.execute(
-            &format!("UPDATE {table} SET active=1 WHERE app_id=$1 AND id=$2"),
-            &[app.as_str().into(), deploy.id.clone().into()],
-        )
-        .await?;
-        super::schedules::reconcile(&mut tx, app, deploy, &policy, now).await?;
-        tx.commit().await
-    }
 }
 
 impl AppWorkflows {
@@ -162,7 +105,7 @@ impl AppWorkflows {
         if encode(&options.input)?.len() > policy.max_input_bytes {
             return Err(WorkflowServiceError::PayloadTooLarge);
         }
-        let deploy = active_deploy(&mut tx, &self.app).await?;
+        let deploy = active_deploy(&mut tx, &self.app, &policy).await?;
         if !deploy.workflows.contains(name) {
             return Err(not_found("workflow"));
         }
@@ -334,7 +277,9 @@ pub(crate) async fn lock_run(
 pub(crate) async fn active_deploy(
     tx: &mut Transaction,
     app: &AppId,
+    policy: &AppPolicy,
 ) -> Result<DeployRegistration, WorkflowServiceError> {
+    super::deploys::reconcile_platform(tx, app, policy).await?;
     let table = tx.table("deploys");
     let rows = tx
         .query(

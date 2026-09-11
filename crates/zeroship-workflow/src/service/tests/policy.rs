@@ -19,7 +19,8 @@ impl PlatformFixture {
         admin.batch_execute(
             "CREATE ROLE zeroship_control LOGIN; CREATE SCHEMA zeroship; \
              CREATE TABLE zeroship.plans (id text PRIMARY KEY, workflows_allowed bool NOT NULL, archived bool NOT NULL, runtime_limits_json jsonb NOT NULL); \
-             CREATE TABLE zeroship.apps (id uuid PRIMARY KEY, plan_id text NOT NULL REFERENCES zeroship.plans, organization_id text NOT NULL, workflows_enabled bool NOT NULL, archived_at timestamptz, deleted_at timestamptz); \
+             CREATE TABLE zeroship.apps (id uuid PRIMARY KEY, plan_id text NOT NULL REFERENCES zeroship.plans, organization_id text NOT NULL, workflows_enabled bool NOT NULL, archived_at timestamptz, deleted_at timestamptz, deploy_hash text, manifest_json text); \
+             CREATE TABLE zeroship.app_deploys (id text PRIMARY KEY,app_id uuid NOT NULL REFERENCES zeroship.apps,deploy_hash text NOT NULL,manifest_json text NOT NULL,activated_at timestamptz,UNIQUE(app_id,deploy_hash)); \
              CREATE TABLE zeroship.app_spend_state (app_id uuid PRIMARY KEY REFERENCES zeroship.apps, state text NOT NULL); \
              CREATE TABLE zeroship.organization_billing_status (organization_id text PRIMARY KEY, state text NOT NULL); \
              CREATE TABLE zeroship.workflow_rollout_config (id text PRIMARY KEY, dispatch_paused bool NOT NULL, ingress_disabled bool NOT NULL); \
@@ -51,7 +52,7 @@ impl PlatformFixture {
         for id in [&app, &other] {
             admin
                 .execute(
-                    "INSERT INTO zeroship.apps VALUES ($1,$2,$3,true,NULL,NULL)",
+                    "INSERT INTO zeroship.apps (id,plan_id,organization_id,workflows_enabled) VALUES ($1,$2,$3,true)",
                     &[&id.uuid(), &plan, &organization],
                 )
                 .await
@@ -65,18 +66,18 @@ impl PlatformFixture {
         .await
         .unwrap();
         for id in [&app, &other] {
-            service
-                .activate_deploy(
-                    id,
-                    &DeployRegistration {
-                        id: typed_id::generate("dep"),
-                        hash: "a".repeat(64),
-                        workflows: ["Example".into()].into(),
-                        schedules: Vec::new(),
-                    },
-                )
-                .await
-                .unwrap();
+            publish_deploy(
+                &pg.admin_url,
+                id,
+                &DeployRegistration {
+                    id: typed_id::generate("dep"),
+                    hash: "a".repeat(64),
+                    workflows: ["Example".into()].into(),
+                    schedules: Vec::new(),
+                },
+            )
+            .await;
+            service.reconcile_deploy(id).await.unwrap();
         }
         Self {
             pg,
@@ -95,6 +96,23 @@ impl PlatformFixture {
             .start(&RequestId::mint(), "Example", StartOptions::default())
             .await
     }
+}
+
+async fn publish_deploy(url: &str, app: &AppId, deploy: &DeployRegistration) {
+    let mut conn = connect(url).await;
+    let tx = conn.transaction().await.unwrap();
+    let manifest = serde_json::to_string(&serde_json::json!({
+        "workflows":deploy.workflows,"schedules":deploy.schedules
+    }))
+    .unwrap();
+    tx.execute(
+        "UPDATE zeroship.apps SET deploy_hash=$2,manifest_json=$3 WHERE id=$1",
+        &[&app.uuid(), &deploy.hash, &manifest],
+    )
+    .await
+    .unwrap();
+    tx.execute("INSERT INTO zeroship.app_deploys (id,app_id,deploy_hash,manifest_json,activated_at) VALUES ($1,$2,$3,$4,now())", &[&deploy.id,&app.uuid(),&deploy.hash,&manifest]).await.unwrap();
+    tx.commit().await.unwrap();
 }
 
 #[compio::test]
@@ -414,4 +432,175 @@ async fn policy_writes_serialize_with_admission_including_absent_billing_rows() 
     wait_for_advisory_wait(&fixture.admin, waiting.await.unwrap()).await;
     writer.batch_execute("ROLLBACK").await.unwrap();
     assert!(!reader.await.unwrap().admission);
+}
+
+#[compio::test]
+async fn platform_deploy_selection_is_current_while_live_runs_keep_their_snapshot() {
+    use crate::service::{
+        IntervalAnchor, ScheduleCatchUp, ScheduleOverlap, ScheduleRegistration, ScheduleTiming,
+    };
+    let fixture = PlatformFixture::start().await;
+    let first = fixture.start_run().await.unwrap();
+    let original: String = fixture
+        .admin
+        .query_one(
+            "SELECT deploy_id FROM workflow.runs WHERE id=$1",
+            &[&first.id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    let next = DeployRegistration {
+        id: typed_id::generate("dep"),
+        hash: "b".repeat(64),
+        workflows: ["Next".into()].into(),
+        schedules: vec![ScheduleRegistration {
+            name: "Recurring".into(),
+            workflow_name: "Next".into(),
+            schedule: ScheduleTiming::Interval {
+                interval_ms: 60_000,
+                anchor: IntervalAnchor::Deploy,
+            },
+            input: json!(null),
+            overlap: ScheduleOverlap::Allow,
+            catch_up: ScheduleCatchUp::Skip,
+        }],
+    };
+    publish_deploy(&fixture.pg.admin_url, &fixture.app, &next).await;
+    // Start must observe the current selection even before a notification arrives.
+    let run = fixture
+        .service
+        .for_app(fixture.app.clone())
+        .start(&RequestId::mint(), "Next", StartOptions::default())
+        .await
+        .unwrap();
+    let selected: String = fixture
+        .admin
+        .query_one(
+            "SELECT deploy_id FROM workflow.runs WHERE id=$1",
+            &[&run.id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(selected, next.id);
+    assert!(matches!(
+        fixture.start_run().await,
+        Err(WorkflowServiceError::NotFound(_))
+    ));
+    assert!(fixture
+        .service
+        .activate_deploy(&fixture.app, &next)
+        .await
+        .is_err());
+    let before: i64 = fixture
+        .admin
+        .query_one(
+            "SELECT next_at FROM workflow.schedules WHERE app_id=$1",
+            &[&fixture.app.as_str()],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    fixture
+        .service
+        .reconcile_deploy(&fixture.app)
+        .await
+        .unwrap();
+    fixture
+        .service
+        .reconcile_deploy(&fixture.app)
+        .await
+        .unwrap();
+    let after: i64 = fixture
+        .admin
+        .query_one(
+            "SELECT next_at FROM workflow.schedules WHERE app_id=$1",
+            &[&fixture.app.as_str()],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(
+        before, after,
+        "delayed notifications must preserve the current frontier"
+    );
+    let task = fixture
+        .service
+        .poll(&WorkerIdentity::new("test-worker".into()).unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(task.invocation.run_id, first.id);
+    assert_eq!(task.invocation.deploy_id, original);
+    assert!(fixture
+        .admin
+        .execute(
+            "UPDATE zeroship.app_deploys SET manifest_json='{}' WHERE id=$1",
+            &[&next.id]
+        )
+        .await
+        .is_err());
+
+    fixture
+        .admin
+        .execute(
+            "UPDATE workflow.schedules SET next_at=0 WHERE app_id=$1",
+            &[&fixture.app.as_str()],
+        )
+        .await
+        .unwrap();
+    let removed = DeployRegistration {
+        id: typed_id::generate("dep"),
+        hash: "c".repeat(64),
+        workflows: ["Next".into()].into(),
+        schedules: Vec::new(),
+    };
+    publish_deploy(&fixture.pg.admin_url, &fixture.app, &removed).await;
+    assert_eq!(
+        fixture.service.tick_schedules().await.unwrap(),
+        0,
+        "a removed schedule cannot fire while its notification is delayed"
+    );
+    let due: Option<i64> = fixture
+        .admin
+        .query_one(
+            "SELECT next_at FROM workflow.schedules WHERE app_id=$1",
+            &[&fixture.app.as_str()],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(due, None);
+}
+
+#[compio::test]
+async fn platform_deploy_history_writes_wait_for_workflow_admission() {
+    let fixture = PlatformFixture::start().await;
+    let mut reader = fixture.service.store.begin().await.unwrap();
+    lock_app(&mut reader, &fixture.app).await.unwrap();
+    let writer = connect(
+        &fixture
+            .pg
+            .admin_url
+            .replace("postgres@", "zeroship_control@"),
+    )
+    .await;
+    let pid: i32 = writer
+        .query_one("SELECT pg_backend_pid()", &[])
+        .await
+        .unwrap()
+        .get(0);
+    let app = fixture.app.uuid();
+    let write = compio::runtime::spawn(async move {
+        writer
+            .execute(
+                "UPDATE zeroship.app_deploys SET activated_at=now() WHERE app_id=$1",
+                &[&app],
+            )
+            .await
+    });
+    wait_for_advisory_wait(&fixture.admin, pid).await;
+    reader.commit().await.unwrap();
+    assert_eq!(write.await.unwrap().unwrap(), 1);
 }

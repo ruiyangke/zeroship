@@ -182,7 +182,7 @@ async fn seed_app_on_plan(
     PgStore::provision(fx.pg.as_ref(), &app_id)
         .await
         .expect("provision workflow journal");
-    let deploy_id = format!("dep_{}", Uuid::new_v4().simple());
+    let deploy_id = zeroship_core::typed_id::generate("dep");
     let manifest = json!({
         "version": 1,
         "workflows": workflows,

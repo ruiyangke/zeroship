@@ -216,6 +216,7 @@ impl WorkflowService {
             let id = candidate.text("id")?;
             let mut tx = self.store.begin().await?;
             let policy = lock_app(&mut tx, &app).await?;
+            super::deploys::reconcile_platform(&mut tx, &app, &policy).await?;
             let now = tx.now().await?;
             tx.execute(
                 &format!("UPDATE {schedules} SET last_checked_at=$3 WHERE app_id=$1 AND id=$2"),

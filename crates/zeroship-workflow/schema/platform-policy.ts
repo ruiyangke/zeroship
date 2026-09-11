@@ -64,6 +64,31 @@ END;`,
       timing: "before", events: ["insert", "update", "delete"], forEach: "row", execute: fn,
     });
   }
+  createFunction({
+    schema: "zeroship", name: "workflow_policy_fence_deploy", language: "procedural", returns: "trigger",
+    body: `BEGIN
+  IF TG_OP = 'UPDATE' AND (
+      NEW.id IS DISTINCT FROM OLD.id OR NEW.app_id IS DISTINCT FROM OLD.app_id
+      OR NEW.deploy_hash IS DISTINCT FROM OLD.deploy_hash
+      OR NEW.manifest_json IS DISTINCT FROM OLD.manifest_json) THEN
+    RAISE EXCEPTION 'workflow deployment snapshot is immutable';
+  END IF;
+  IF TG_OP = 'DELETE' THEN
+    PERFORM zeroship.workflow_policy_lock('app', OLD.app_id::text, true);
+    RETURN OLD;
+  END IF;
+  PERFORM zeroship.workflow_policy_lock('app', NEW.app_id::text, true);
+  RETURN NEW;
+END;`,
+  });
+  raw({
+    sql: "REVOKE ALL ON FUNCTION zeroship.workflow_policy_fence_deploy() FROM PUBLIC",
+    reason: "the deployment trigger is invoked only by its table",
+  });
+  table("app_deploys", { schema: "zeroship" }).trigger("workflow_policy_fence_deploy").create({
+    timing: "before", events: ["insert", "update", "delete"], forEach: "row",
+    execute: "workflow_policy_fence_deploy",
+  });
   raw({
     sql: "INSERT INTO zeroship.workflow_rollout_config (id,dispatch_paused,ingress_disabled) VALUES ('global',false,false) ON CONFLICT (id) DO NOTHING",
     reason: "workflow startup requires an explicit operator policy row",
@@ -72,7 +97,8 @@ END;`,
   // Column grants intentionally omit UPDATE. A workflow process can read
   // current policy but cannot change the platform's admission authority.
   for (const [name, columns] of [
-    ["apps", "id,plan_id,organization_id,workflows_enabled,archived_at,deleted_at"],
+    ["apps", "id,plan_id,organization_id,workflows_enabled,archived_at,deleted_at,deploy_hash,manifest_json"],
+    ["app_deploys", "id,app_id,deploy_hash,manifest_json,activated_at"],
     ["plans", "id,workflows_allowed,archived,runtime_limits_json"],
     ["organization_billing_status", "organization_id,state"],
     ["app_spend_state", "app_id,state"],

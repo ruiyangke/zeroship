@@ -229,7 +229,7 @@ async fn seed_app(fx: &Fixture, workflows: &[&str]) -> Uuid {
     PgStore::provision(fx.pg.as_ref(), &app_id)
         .await
         .expect("provision workflow journal");
-    let deploy_id = format!("dep_{}", Uuid::new_v4().simple());
+    let deploy_id = zeroship_core::typed_id::generate("dep");
     let manifest = json!({
         "version": 1,
         "workflows": workflows,

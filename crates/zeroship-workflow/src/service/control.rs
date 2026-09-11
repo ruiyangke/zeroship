@@ -169,7 +169,7 @@ impl AppWorkflows {
             ));
         }
         let deploy = if deploy_policy == RestartDeploy::Latest {
-            let deploy = active_deploy(&mut tx, &self.app).await?;
+            let deploy = active_deploy(&mut tx, &self.app, &policy).await?;
             if !deploy.workflows.contains(&run.text("workflow_name")?) {
                 return Err(WorkflowServiceError::Conflict(
                     "workflow is absent from the active deployment".into(),
