@@ -210,6 +210,8 @@ pub struct TaskAssignment {
     pub generation: i64,
     pub epoch: i64,
     pub deadline: i64,
+    /// Granted lease duration; runners subtract local transport elapsed time.
+    pub lease_ms: i64,
     pub invocation: WorkflowInvocation,
 }
 
@@ -237,6 +239,7 @@ impl ControlIntent {
 #[serde(rename_all = "camelCase")]
 pub struct Heartbeat {
     pub deadline: i64,
+    pub lease_ms: i64,
     pub control: ControlIntent,
 }
 

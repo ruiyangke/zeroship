@@ -100,6 +100,7 @@ impl WorkflowService {
                     generation,
                     epoch,
                     deadline: expires,
+                    lease_ms: policy.lease_ms,
                     invocation,
                 }));
             }
@@ -140,6 +141,7 @@ impl WorkflowService {
         tx.commit().await?;
         Ok(Heartbeat {
             deadline: expires,
+            lease_ms: claim.policy.lease_ms,
             control,
         })
     }
