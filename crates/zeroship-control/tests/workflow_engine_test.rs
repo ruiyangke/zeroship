@@ -7456,7 +7456,7 @@ async fn control_role_fixture(fx: &Fixture, label: &str) -> Fixture {
              GRANT ALL ON ALL SEQUENCES IN SCHEMA zeroship TO zeroship_control; \
              ALTER TABLE zeroship.workflow_scheduler_timers OWNER TO zeroship_control; \
              ALTER TABLE zeroship.workflow_scheduler_inflight OWNER TO zeroship_control;",
-            db = quote_ident(&db_name)
+            db = quote_ident(db_name)
         ))
         .await
         .expect("give the control role a deployment's platform-schema privileges");

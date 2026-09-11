@@ -1,5 +1,6 @@
 mod data;
 mod storage;
+mod workflow;
 
 #[path = "../../tests/fixtures/postgres/image.rs"]
 mod postgres_image;
@@ -32,6 +33,8 @@ enum Task {
 
 #[derive(Subcommand)]
 enum Suite {
+    /// Run workflow crates, runtime, control-plane, SDK and example tests.
+    Workflow,
     /// Run storage crate tests and the examples' Vitest/Playwright suites.
     Storage,
     /// Check data crate boundaries and database deployment/test posture.
@@ -51,6 +54,9 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     let result = match args.command {
+        Task::Test {
+            suite: Suite::Workflow,
+        } => workflow::run(),
         Task::Test {
             suite: Suite::Storage,
         } => storage::run(),

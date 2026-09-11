@@ -1,22 +1,16 @@
 //! Process-owned migrated template and disposable workflow databases.
-//! Testcontainers' reaper removes the template server when the test process
-//! disconnects. Individual fixtures drop only databases created on that server.
-
-use std::os::unix::fs::PermissionsExt;
+//! A native helper owns the Testcontainers handle and watches the test's stdin
+//! pipe, so the cached server is removed even if the test process aborts.
+use std::io::{BufRead, BufReader};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::OnceLock;
-use std::time::Duration;
-use testcontainers::{
-    core::{IntoContainerPort, WaitFor},
-    runners::SyncRunner,
-    Container, GenericImage, ImageExt,
-};
 
 struct Template {
-    _server: Container<GenericImage>,
+    _process: Child,
+    _input: ChildStdin,
     url: String,
-    _work: tempfile::TempDir,
 }
 
 pub fn root() -> PathBuf {
@@ -28,42 +22,70 @@ pub fn root() -> PathBuf {
 
 pub fn template_url() -> String {
     static TEMPLATE: OnceLock<Template> = OnceLock::new();
-    TEMPLATE.get_or_init(|| {
-        let work = tempfile::tempdir().expect("workflow migration directory");
-        let server = GenericImage::new("postgres", "18")
-            .with_exposed_port(5432.tcp())
-            .with_wait_for(WaitFor::message_on_stdout("PostgreSQL init process complete; ready for start up."))
-            .with_wait_for(WaitFor::message_on_stderr("database system is ready to accept connections"))
-            .with_env_var("POSTGRES_PASSWORD", "workflow-fixture")
-            .with_env_var("POSTGRES_DB", "workflow_template")
-            .with_cmd(["postgres", "-c", "wal_level=logical", "-c", "max_replication_slots=128", "-c", "max_wal_senders=128", "-c", "fsync=off"])
-            .with_startup_timeout(Duration::from_secs(120))
-            .start().expect("workflow tests require Docker and PostgreSQL");
-        let mut url = url::Url::parse("postgres://postgres:workflow-fixture@localhost/workflow_template").unwrap();
-        url.set_host(Some(&server.get_host().expect("Postgres host").to_string())).unwrap();
-        url.set_port(Some(server.get_host_port_ipv4(5432).expect("Postgres port"))).unwrap();
-        let url = url.to_string();
-        let root = root();
-        let config = serde_json::json!({ "env": { "platform": {
-            "url": url, "dir": root.join("db/migrations-ts"), "schema": "zeroship", "owner_app": "zeroship_platform",
-            "registry": root.join("policies/platform-table-owners.json"), "policy": [root.join("policies/platform.policy.toml")],
-        } } });
-        let config_path = work.path().join("migrate.toml");
-        std::fs::write(&config_path, toml::to_string(&config).expect("migration config")).expect("write config");
-        std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o600)).expect("private migration config");
-        let logs = root.join("target/workflow-tests");
-        std::fs::create_dir_all(&logs).expect("migration log directory");
-        let log_path = logs.join(format!("migrate-{}.log", uuid::Uuid::new_v4()));
-        let log = std::fs::File::create(&log_path).expect("migration log");
-        let status = Command::new("node")
-            .arg(root.join("packages/zero-migrate-cli/dist/cli-bin.js"))
-            .args(["apply", "--config"]).arg(config_path).args(["--env", "platform", "--approve"])
-            .current_dir(&root).stdin(Stdio::null())
-            .stdout(log.try_clone().unwrap()).stderr(log)
-            .status().expect("run the built migration CLI; prepare SDKs with pnpm build");
-        assert!(status.success(), "workflow platform migrations failed; see {}", log_path.display());
-        Template { _server: server, url, _work: work }
-    }).url.clone()
+    TEMPLATE
+        .get_or_init(|| {
+            let root = root();
+            let build = Command::new(env!("CARGO"))
+                .args([
+                    "build",
+                    "--locked",
+                    "-p",
+                    "zeroship-control",
+                    "--example",
+                    "workflow-test-environment",
+                    "--message-format=json",
+                ])
+                .current_dir(&root)
+                .output()
+                .expect("build workflow test environment");
+            assert!(
+                build.status.success(),
+                "workflow environment build failed: {}",
+                String::from_utf8_lossy(&build.stderr)
+            );
+            let binary = String::from_utf8_lossy(&build.stdout)
+                .lines()
+                .find_map(|line| {
+                    let artifact: serde_json::Value = serde_json::from_str(line).ok()?;
+                    (artifact["target"]["name"] == "workflow-test-environment")
+                        .then(|| artifact["executable"].as_str().map(str::to_owned))
+                        .flatten()
+                })
+                .expect("workflow environment executable");
+            let logs = root.join("target/workflow-tests");
+            std::fs::create_dir_all(&logs).expect("workflow environment logs");
+            let path = logs.join(format!("environment-{}.log", uuid::Uuid::new_v4()));
+            let log = std::fs::File::create(&path).expect("workflow environment log");
+            let mut process = Command::new(binary)
+                .arg(std::process::id().to_string())
+                .process_group(0)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(log)
+                .spawn()
+                .expect("start workflow test environment");
+            let input = process
+                .stdin
+                .take()
+                .expect("workflow environment lifetime pipe");
+            let mut ready = String::new();
+            BufReader::new(process.stdout.take().unwrap())
+                .read_line(&mut ready)
+                .expect("read workflow environment readiness");
+            let value: serde_json::Value = serde_json::from_str(&ready).unwrap_or_else(|error| {
+                panic!(
+                    "workflow database startup failed: {error}; see {}",
+                    path.display()
+                )
+            });
+            Template {
+                _process: process,
+                _input: input,
+                url: value["url"].as_str().expect("workflow database URL").into(),
+            }
+        })
+        .url
+        .clone()
 }
 
 #[derive(Debug)]

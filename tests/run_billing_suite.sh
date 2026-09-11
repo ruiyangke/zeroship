@@ -77,23 +77,8 @@ cd "$ROOT"
 # product defects. `tests/lib_scratch_db_selftest.sh` covers both directions.
 . "$ROOT/tests/lib/scratch_db.sh"
 
-# THE SKIP ALLOWLIST THAT STOOD HERE IS GONE, and its two entries are now
-# ordinary failures. It tolerated `ZEROSHIP_DW_E2E` (the durable-workflows
-# end-to-end spine, which tests/e2e_durable_workflows.sh owns and sets the
-# variable for) and `REDPANDA_BROKERS` (the real-broker half of the billing
-# pipeline, which this script runs when the variable is set and cannot stand up
-# a broker for itself).
-#
-# The operator decision that removed skipping covers every backend, not just the
-# databases this script provisions, so both of those tests now FAIL here rather
-# than announcing. THAT IS A REAL CONSEQUENCE AND IT IS NOT SOFTENED ANYWHERE:
-# running this script without a Redpanda broker and without the durable-workflows
-# fleet is a red run. `#[ignore]` was considered and rejected - it would be a
-# second skip mechanism under another name, and tests/e2e_durable_workflows.sh
-# drives those tests WITHOUT `--ignored`, so it would stop reaching them.
-#
-# The old note here said "neither is Postgres or Redis. That is the line."
-# There is no line any more; there is no allowlist to draw one in.
+# Workflow acceptance owns its database and service fleet through Testcontainers.
+# It also has a dedicated runner: `cargo xtask test workflow`.
 
 # The server's coordinates come from the generated overlay, not from four
 # `${PG_x:-...}` lines here and four identical ones in run_auth_suite.sh. See
@@ -167,15 +152,7 @@ else
   echo "==> SKIP_DB_RECREATE set; reusing ${TEST_DB}"
 fi
 
-# Default to ONE test thread per binary. The old name list ran only the billing
-# binaries, which carry their own intra-binary mutexes and tolerate the default
-# thread pool. The set now includes `workflow_engine_test` and
-# `workflow_instance_api_test`, which do not: they drive advisory-locked engine
-# ticks and assert on claim counts, so under the default pool sibling tests steal
-# each other's claims and ten of forty cases fail nondeterministically.
-# `tests/e2e_durable_workflows.sh` has always run those two with
-# `--test-threads=1` for the same reason. Determinism is worth the wall clock
-# here; override TEST_THREADS to trade it back.
+# Serialize this suite’s tests against its shared billing fixture.
 THREAD_ARG=(--test-threads "${TEST_THREADS:-1}")
 
 # Capture every group's output so the run can be COUNTED, not just exit-checked.

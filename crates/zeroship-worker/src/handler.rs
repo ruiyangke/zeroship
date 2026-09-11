@@ -11,7 +11,6 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use zeroship_core::app_id::AppId;
-use zeroship_core::auth::derive_app_scoped_control_token;
 use zeroship_core::service_identity::{endpoints, ServiceEndpoint};
 use zeroship_core::service_peers::ServiceAuth;
 use zeroship_core::dispatch_frame::decode_dispatch_frame;
@@ -565,10 +564,7 @@ fn workflow_worker_config() -> WorkflowEngineConfig {
     }
 }
 
-fn workflow_runtime_envelope(
-    config: &WorkerConfig,
-    request: &StepRequest,
-) -> serde_json::Value {
+fn workflow_runtime_envelope(request: &StepRequest) -> serde_json::Value {
     serde_json::json!({
         "runId": &request.run_id,
         "workflowName": &request.workflow_name,
@@ -589,14 +585,6 @@ fn workflow_runtime_envelope(
         "maxLiveDescendants": request.max_live_descendants,
         "maxStartManyBatch": request.max_start_many_batch,
         "journalLimits": request.journal_limits,
-        "outputRead": {
-            "controlUrl": &config.control_url,
-            "token": derive_app_scoped_control_token(
-                &config.control_key,
-                &request.app_id.to_string(),
-            ),
-            "appId": request.app_id.to_string(),
-        },
     })
 }
 
@@ -611,7 +599,7 @@ fn workflow_runtime_envelope(
 /// absence - the handler returns 403 unless `workflow_advance_unsigned` is set,
 /// and that flag is hidden, defaults to false, and has no environment binding,
 /// so it takes an explicit CLI argument to turn on. `deploy/` passes it
-/// nowhere; only `tests/e2e_durable_workflows.sh` does.
+/// nowhere; the native workflow acceptance fixtures enable it explicitly.
 ///
 /// The distinction is the point: "production never enables this" is a statement
 /// about how the binary is invoked, not something the build enforces. Read it
@@ -764,7 +752,7 @@ pub async fn workflow_advance_unsigned(
         }
     };
 
-    let runtime_envelope = workflow_runtime_envelope(&config, &claim);
+    let runtime_envelope = workflow_runtime_envelope(&claim);
     let runtime_envelope_json = match serde_json::to_string(&runtime_envelope) {
         Ok(json) => json,
         Err(e) => {
@@ -4246,9 +4234,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
             crate::cache::KernelConfig {
                 control_url: "http://127.0.0.1:1".to_string(),
                 control_key: String::new(),
-                db_service: db_url
-                    .as_deref()
-                    .map(|url| crate::cache::test_db_service(url)),
+                db_service: db_url.as_deref().map(crate::cache::test_db_service),
                 kv_store: None,
                 storage_backend: None,
                 meter: meter.clone(),

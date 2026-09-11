@@ -22,6 +22,15 @@ target = "dev-provision"
 class = "test-dev-tool"
 reason = "Development and CI provisioning helper that is never deployed as a service."
 
+[[package.metadata.zeroship-config.targets]]
+target = "workflow-test-environment"
+class = "test-dev-tool"
+reason = "Native Testcontainers owner used only by workflow integration tests."
+
+[[example]]
+name = "workflow-test-environment"
+path = "tests/workflow_support/environment.rs"
+
 [[bin]]
 name = "zeroship-control"
 path = "src/main.rs"
@@ -109,6 +118,7 @@ chrono = { version = "0.4", default-features = false, features = ["std", "serde"
 chrono-tz = "0.10"
 
 [dev-dependencies]
+rcgen = "0.14"
 testcontainers = { version = "0.28", features = ["blocking"] }
 zeroship-workflow-v8 = { workspace = true }
 toml = { workspace = true }
@@ -155,6 +165,10 @@ path = "tests/main.rs"
 [[test]]
 name = "live_db"
 path = "tests/live_db.rs"
+
+[[test]]
+name = "workflow_e2e"
+path = "tests/workflow_e2e.rs"
 
 [[test]]
 name = "workflow_api"
