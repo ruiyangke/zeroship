@@ -701,7 +701,7 @@ mod tests {
     use std::rc::Rc;
 
     use crate::backend::sqlite::SqliteBackend;
-    use zeroship_data_orm::fixtures::DatabaseFixture;
+    use crate::tests::fixtures::DatabaseFixture;
 
     fn run<F: std::future::Future>(f: F) -> F::Output {
         compio::runtime::Runtime::new()

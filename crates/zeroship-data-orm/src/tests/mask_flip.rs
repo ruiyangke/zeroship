@@ -30,9 +30,9 @@
 //! Run: `cargo xtask test data --filter 'test(mask_flip::)'`
 
 #[allow(unused_imports)]
-use crate::schema_fixture::{fixture_table_sql, fixture_table_sql_for};
-use crate::tests::host::Host;
-use crate::{schema_fixture, support};
+use crate::tests::fixtures::schema::{fixture_table_sql, fixture_table_sql_for};
+use crate::tests::fixtures::Host;
+use crate::tests::fixtures::{self, schema};
 #[allow(unused_imports)]
 use zeroship_migrate::schema::query::FkEmission;
 
@@ -63,7 +63,7 @@ use zeroship_data_sql::value::{Value, value};
 /// the dispatcher makes on their behalf in production.
 ///
 /// **Its lazy open never fires here, and this comment claimed otherwise until
-/// 2026-09-03.** Every fixture in this file calls `support::install_postgres_pool`
+/// 2026-09-03.** Every fixture in this file calls `fixtures::install_postgres_pool`
 /// before any dispatch, so the isolate already holds a backend and this is a
 /// plain read. (`DbBinding::cold_start` below is a BINDING constructor - a
 /// different sense of cold, and not a context state.) The lazy open is bound in
@@ -91,8 +91,8 @@ async fn unmask_route(host: &Host, app: &str) -> zeroship_data_orm::tx_route::Tx
 /// Connect, or fail the test.
 ///
 /// Deliberately NOT a skip, for the reason the module doc gives.
-async fn require_pg() -> (crate::support::postgres::Postgres, String) {
-    let postgres = crate::support::postgres::Postgres::start();
+async fn require_pg() -> (crate::tests::fixtures::postgres::Postgres, String) {
+    let postgres = crate::tests::fixtures::postgres::Postgres::start();
     let url = postgres.url();
     match compio_postgres::connect(&url, NoTls).await {
         Ok((client, connection)) => {
@@ -195,7 +195,7 @@ async fn fixture(
         .await
         .unwrap_or_else(|e| panic!("emitted DDL must apply: {e}\n{ddl}"));
     host.install_postgres_pool(Rc::clone(pool), url);
-    zeroship_data_orm::cache_schema_for_tests(app, collection, schema.clone());
+    crate::tests::fixtures::cache_schema(app, collection, schema.clone());
 }
 
 /// What one write through the pipeline left behind.
@@ -568,10 +568,10 @@ fn the_real_value_is_still_stored_and_still_reachable_by_the_audited_path() {
             // The unmask fetch runs `SET LOCAL ROLE app_<id>_role`, so the per-app role
             // and its grants have to exist - the deploy's `zeroship migrate` creates
             // them, and this stands in for it.
-            crate::support::roles::ensure_per_app_role(&pool, app)
+            crate::tests::fixtures::roles::ensure_per_app_role(&pool, app)
                 .await
                 .expect("per-app role, as the deploy would provision it");
-            support::grant_runtime_select_columns(&pool, app, "people", &["id", &raw_col]).await;
+            fixtures::grant_runtime_select_columns(&pool, app, "people", &["id", &raw_col]).await;
 
             let result = zeroship_data_orm::protection::unmask::dispatch_unmask(
                 &unmask_route(host, app).await,
@@ -687,7 +687,7 @@ async fn audited_unmask_fixture_with(
     // deploy's `zeroship migrate` creates them; this stands in for it. The
     // append privilege on the audit table comes from `ensure_per_app_role`
     // itself, which is why it runs AFTER the table is provisioned.
-    crate::support::roles::ensure_per_app_role(pool, app)
+    crate::tests::fixtures::roles::ensure_per_app_role(pool, app)
         .await
         .expect("per-app role, as the deploy would provision it");
     let raw_columns: Vec<String> = masked
@@ -696,7 +696,7 @@ async fn audited_unmask_fixture_with(
         .collect();
     let mut readable: Vec<&str> = vec!["id"];
     readable.extend(raw_columns.iter().map(String::as_str));
-    support::grant_runtime_select_columns(pool, app, "people", &readable).await;
+    fixtures::grant_runtime_select_columns(pool, app, "people", &readable).await;
 
     // Control zero, read as the admin principal: the plaintext really is on
     // disk under the minted id. Every refusal asserted below is therefore a
@@ -849,7 +849,7 @@ fn an_actor_the_policy_does_not_permit_is_refused_and_the_refusal_is_audited() {
                 "granted_policy",
                 DbBinding::cold_start(app).schema().clone(),
             );
-            zeroship_data_orm::cache_schema_for_deploy_for_tests(
+            crate::tests::fixtures::cache_schema_for_deploy(
                 &redeployed,
                 "people",
                 schema.clone(),
@@ -877,7 +877,7 @@ fn an_actor_the_policy_does_not_permit_is_refused_and_the_refusal_is_audited() {
             // And the grant is scoped to the classification the policy named: the same
             // role is still refused a class the policy does not list. Without this the
             // control could pass against an `allows` that ignores its arguments.
-            zeroship_data_orm::cache_schema_for_deploy_for_tests(
+            crate::tests::fixtures::cache_schema_for_deploy(
                 &redeployed,
                 "vitals",
                 value!({ "hr": { "type": "string", "mask": { "kind": "full", "classification": "phi" } } }),
@@ -1701,7 +1701,7 @@ fn a_bulk_unmask_batch_with_one_forbidden_column_is_refused_whole() {
                 "wider_policy",
                 DbBinding::cold_start(app).schema().clone(),
             );
-            zeroship_data_orm::cache_schema_for_deploy_for_tests(
+            crate::tests::fixtures::cache_schema_for_deploy(
                 &redeployed,
                 "people",
                 schema.clone(),
@@ -1876,7 +1876,7 @@ fn a_query_hint_naming_one_forbidden_column_is_refused_whole() {
                 "wider_policy",
                 DbBinding::cold_start(app).schema().clone(),
             );
-            zeroship_data_orm::cache_schema_for_deploy_for_tests(
+            crate::tests::fixtures::cache_schema_for_deploy(
                 &redeployed,
                 "people",
                 schema.clone(),
@@ -2511,7 +2511,7 @@ fn a_unique_masked_field_admits_rows_that_share_a_mask() {
             // `build_create_indexes` emits CONCURRENTLY, which cannot run inside the
             // implicit transaction `batch_execute` uses, so the fixture's DDL carries
             // the table alone. Apply the index the platform would build.
-            for spec in schema_fixture::fixture_indexes(
+            for spec in schema::fixture_indexes(
                 &zeroship_data_sql::SchemaName::new(app).expect("fixture schema name"),
                 "people",
                 &schema,
@@ -2728,7 +2728,7 @@ fn deleting_the_mask_key_from_the_descriptor_must_not_write_plaintext() {
             // right, because the CATALOG did not change, only the descriptor did. A test
             // that reset it here would prove the fence works on a cold cache and say
             // nothing about the warm one production actually runs.
-            zeroship_data_orm::cache_schema_for_tests(app, "people", unmasked.clone());
+            crate::tests::fixtures::cache_schema(app, "people", unmasked.clone());
             let mut docs = value!([{ "ssn": "987-65-4321", "nickname": "bob" }]);
             let err = host
                 .prepare_insert_many_docs(&mut docs, app, "people", None)
@@ -2820,7 +2820,7 @@ fn deleting_the_encrypted_key_from_the_descriptor_must_not_write_plaintext() {
             );
 
             let plain = encrypted_schema_without_the_encrypted_key();
-            zeroship_data_orm::cache_schema_for_tests(app, "people", plain.clone());
+            crate::tests::fixtures::cache_schema(app, "people", plain.clone());
             let mut docs = value!([{ "secret": "hunter3-also-real", "nickname": "bob" }]);
             let err = host
                 .prepare_insert_many_docs(&mut docs, app, "people", None)
@@ -2941,7 +2941,7 @@ async fn fixture_via_the_migration_engine(
             .unwrap_or_else(|e| panic!("engine-emitted DDL must apply: {e}\n{statement}"));
     }
     host.install_postgres_pool(Rc::clone(pool), url);
-    zeroship_data_orm::cache_schema_for_tests(&app, collection, schema.clone());
+    crate::tests::fixtures::cache_schema(&app, collection, schema.clone());
     app
 }
 
@@ -3049,7 +3049,7 @@ fn a_migration_engine_built_table_refuses_a_mask_downgrade() {
             );
 
             // The one-key deletion, against the table the engine built.
-            zeroship_data_orm::cache_schema_for_tests(
+            crate::tests::fixtures::cache_schema(
                 &app,
                 "people",
                 flip_schema_without_the_mask_key(),
@@ -3161,7 +3161,7 @@ fn a_migration_engine_built_table_refuses_an_encryption_downgrade() {
                 "control: the encrypting deploy must not store plaintext: {before:?}",
             );
 
-            zeroship_data_orm::cache_schema_for_tests(
+            crate::tests::fixtures::cache_schema(
                 &app,
                 "people",
                 encrypted_schema_without_the_encrypted_key(),

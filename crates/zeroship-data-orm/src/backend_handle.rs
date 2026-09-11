@@ -231,7 +231,7 @@ mod routed_read_tests {
 
     use super::*;
     use crate::tx_route::CapturedRoute;
-    use zeroship_data_orm::fixtures::DatabaseFixture;
+    use crate::tests::fixtures::DatabaseFixture;
 
     /// A raw-sibling read inside a transaction must see that transaction's own
     /// write; the same read outside it must not.

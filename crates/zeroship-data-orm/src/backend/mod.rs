@@ -1,7 +1,7 @@
 //! Built-in ORM adapters and their low-level capability vocabulary.
 pub use crate::protection::Catalog;
 #[cfg(test)]
-use zeroship_data_orm::fixtures::DatabaseFixture;
+use crate::tests::fixtures::DatabaseFixture;
 
 pub mod cancel;
 pub mod postgres;

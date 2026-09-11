@@ -72,7 +72,7 @@ mod tests {
 
     #[test]
     fn an_undeclared_collection_is_a_typed_error_not_a_missing_schema() {
-        crate::reset_engine_for_tests();
+        crate::tests::fixtures::reset_engine();
         let binding = DbBinding::cold_start("app_descriptor_miss");
         let err = collection_schema(&binding, "users").expect_err("must not resolve");
         assert!(
@@ -93,7 +93,7 @@ mod tests {
     /// that one would still pass if the key were right for the wrong reason.
     #[test]
     fn two_deploys_of_one_app_hold_separate_descriptor_entries() {
-        crate::reset_engine_for_tests();
+        crate::tests::fixtures::reset_engine();
         let pinned = DbBinding::new(
             "app_two_deploys",
             "deploy_pinned",

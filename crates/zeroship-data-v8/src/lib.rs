@@ -26,16 +26,11 @@ use zeroship_data_orm::{
 use zeroship_data_sql::compile;
 
 pub(crate) mod context;
-#[cfg(test)]
-mod tests;
 pub mod op_error;
 #[cfg(test)]
-#[path = "tests/host.rs"]
-mod testing;
+mod tests;
 #[cfg(test)]
 extern crate self as zeroship_data_v8;
-#[cfg(test)]
-use tests::{parity, schema_fixture, support};
 pub(crate) mod v8_bridge;
 pub mod v8_classes;
 
@@ -196,7 +191,7 @@ mod runtime_descriptor_binding_tests {
 
     #[test]
     fn validated_runtime_descriptor_makes_declared_collection_serveable() {
-        crate::testing::reset_context_for_tests();
+        crate::tests::fixtures::reset_context();
         init_v8();
         let mut isolate = v8::Isolate::new(v8::CreateParams::default());
         v8::scope!(let handle_scope, &mut isolate);
@@ -245,7 +240,7 @@ mod runtime_descriptor_binding_tests {
 
     #[test]
     fn schema_less_runtime_replaces_binding_with_an_empty_view() {
-        crate::testing::reset_context_for_tests();
+        crate::tests::fixtures::reset_context();
         init_v8();
         let mut isolate = v8::Isolate::new(v8::CreateParams::default());
         v8::scope!(let handle_scope, &mut isolate);
@@ -310,11 +305,11 @@ pub async fn initialize_backend() -> Result<(), DbError> {
 #[cfg(test)]
 mod backend_init_tests {
     use super::{context, ctx_mut, initialize_backend};
-    use crate::testing::set_db_url_for_tests;
+    use crate::tests::fixtures::set_database_url;
 
     fn set_fresh_db_url(url: &str) {
         ctx_mut(|c| c.clear_backend());
-        set_db_url_for_tests(url);
+        set_database_url(url);
     }
 
     /// Eight concurrent cold inits open exactly ONE backend.

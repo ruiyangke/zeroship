@@ -40,7 +40,7 @@
 
 #![allow(clippy::items_after_statements)]
 
-use crate::tests::host::Host;
+use crate::tests::fixtures::Host;
 
 use compio_postgres::Pool;
 use zeroship_data_sql::render::postgres::render_search;
@@ -53,8 +53,8 @@ use zeroship_data_sql::{
 const SCHEMA: &str = "search_ir_live";
 const DIMS: usize = 8;
 
-async fn pool() -> (crate::support::postgres::Postgres, Pool) {
-    let postgres = crate::support::postgres::Postgres::start();
+async fn pool() -> (crate::tests::fixtures::postgres::Postgres, Pool) {
+    let postgres = crate::tests::fixtures::postgres::Postgres::start();
     let pool = Pool::connect(&postgres.url(), 2)
         .await
         .expect("connect search fixture");

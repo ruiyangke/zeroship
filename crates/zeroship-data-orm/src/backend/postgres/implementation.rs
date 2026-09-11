@@ -267,7 +267,7 @@ impl PostgresBackend {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-impl crate::fixtures::DatabaseFixture for PostgresBackend {
+impl crate::tests::fixtures::DatabaseFixture for PostgresBackend {
     type Client = compio_postgres::PoolConnection;
 
     async fn fixture_session(&self, _app_id: &str) -> Result<Self::Client, DbError> {
@@ -602,7 +602,7 @@ mod tests {
 
     use super::*;
     use crate::backend::postgres::PgLockManager;
-    use crate::fixtures::DatabaseFixture;
+    use crate::tests::fixtures::DatabaseFixture;
     use zeroship_data_orm::protection::Catalog;
     use zeroship_data_orm::storage::LockManager;
 

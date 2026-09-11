@@ -49,7 +49,7 @@
 //! `sqlite_integration.rs`, and the SDK-side mock tests in
 //! `sdks/db/tests/p9-pr3-native-transaction.test.ts`.
 
-use crate::support;
+use crate::tests::fixtures;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -98,14 +98,14 @@ fn block_on<F: std::future::Future>(fut: F) -> F::Output {
 ///
 /// PostgreSQL is required by ordinary package tests. An unavailable server
 /// fails the test instead of reporting success without exercising a transaction.
-fn require_pg() -> (crate::support::postgres::Postgres, String) {
+fn require_pg() -> (crate::tests::fixtures::postgres::Postgres, String) {
     // Every test in this binary funnels through here, so this is the one place
     // that has to install the subscriber. Without it the runtime's sanitization
     // rail leaves a failure as a bare `{"message":"internal error"}` and the
     // real cause goes to a discarded tracing stream. No-op unless RUST_LOG is
-    // set. See `support::init_test_tracing`.
-    support::init_test_tracing();
-    let postgres = crate::support::postgres::Postgres::start();
+    // set. See `fixtures::init_test_tracing`.
+    fixtures::init_test_tracing();
+    let postgres = crate::tests::fixtures::postgres::Postgres::start();
     let url = postgres.url();
     let url_clone = url.clone();
     let ok = block_on(async move {
@@ -157,7 +157,7 @@ fn require_pg() -> (crate::support::postgres::Postgres, String) {
 /// Reset the adapter context; callers must release their local clients and
 /// pools before draining so those handles cannot keep connections alive.
 async fn drain_open_connections() {
-    zeroship_data_v8::testing::reset_context_for_tests();
+    crate::tests::fixtures::reset_context();
     assert!(
         compio_postgres::drain_connections(std::time::Duration::from_secs(2)).await,
         "fixture left database connections alive: {}",
@@ -186,7 +186,7 @@ fn reset_schema(url: &str, app: &str) {
         // authority, so a test that needs the `notes` table creates it. The
         // per-thread context still needs the URL
         // for the transaction orchestrator under test.
-        zeroship_data_v8::testing::set_db_url_for_tests(&url);
+        crate::tests::fixtures::set_database_url(&url);
         let pool = std::rc::Rc::new(compio_postgres::Pool::connect(&url, 2).await.unwrap());
         pool.batch_execute(&format!(
             r#"CREATE SCHEMA IF NOT EXISTS "{app}";
@@ -221,10 +221,10 @@ CREATE INDEX IF NOT EXISTS "notes_created_by_idx" ON "{app}"."notes" ("created_b
         // `DROP SCHEMA CASCADE` there destroys the per-app grants AND the
         // schema's `ALTER DEFAULT PRIVILEGES` entries, and `pg_restore
         // --no-privileges` puts none back.
-        crate::support::roles::ensure_per_app_role(&pool, &app)
+        crate::tests::fixtures::roles::ensure_per_app_role(&pool, &app)
             .await
             .expect("per-app role must be re-established after the CASCADE");
-        support::grant_all_runtime_table_columns(&pool, &app, "notes").await;
+        fixtures::grant_all_runtime_table_columns(&pool, &app, "notes").await;
         pool.close().await;
         drop(pool);
         drain_open_connections().await;
@@ -278,7 +278,7 @@ fn create_encrypted_users_table(url: &str, app: &str) {
     let url = url.to_string();
     let app = app.to_string();
     block_on(async move {
-        zeroship_data_v8::testing::set_db_url_for_tests(&url);
+        crate::tests::fixtures::set_database_url(&url);
         let pool = std::rc::Rc::new(compio_postgres::Pool::connect(&url, 2).await.unwrap());
         pool.batch_execute(&format!(
             r#"CREATE TABLE "{app}"."users" (
@@ -300,10 +300,10 @@ CREATE INDEX "users_created_by_idx" ON "{app}"."users" (created_by);"#
         ))
         .await
         .expect("deploy stand-in must create encrypted users");
-        crate::support::roles::ensure_per_app_role(&pool, &app)
+        crate::tests::fixtures::roles::ensure_per_app_role(&pool, &app)
             .await
             .expect("per-app role must exist for encrypted users");
-        support::grant_all_runtime_table_columns(&pool, &app, "users").await;
+        fixtures::grant_all_runtime_table_columns(&pool, &app, "users").await;
         pool.close().await;
         drop(pool);
         drain_open_connections().await;
@@ -439,7 +439,7 @@ fn dispatch_zs_for_app_with_descriptor(
     }];
     let plugins: Vec<Arc<dyn NativePlugin>> = vec![
         DbService::new(DbServiceConfig {
-            connection: crate::tests::recording::connection(url),
+            connection: crate::tests::fixtures::recording::connection(url),
             cdc_relay: None,
             meter: None,
         })
@@ -576,7 +576,7 @@ import {{ env }} from "zeroship";
 #[test]
 fn orphaned_callbacks_cannot_enter_a_replacement_transaction_or_parent_frame() {
     let (_postgres, url) = require_pg();
-    let app = crate::test_app_id!();
+    let app = crate::tests::fixtures::test_app_id!();
     reset_schema(&url, &app);
     let source = build_src(
         r#"
@@ -766,7 +766,7 @@ fn revoked_grant_transaction_surfaces_grant_revoked() {
             let _ = worker_connection.run().await;
         })
         .detach();
-        let set_local_role_sql = crate::support::roles::set_local_role_sql(&app_id)
+        let set_local_role_sql = crate::tests::fixtures::roles::set_local_role_sql(&app_id)
             .expect("grant-revocation app id must produce valid SET LOCAL ROLE SQL");
         worker.batch_execute("BEGIN").await.expect("control BEGIN");
         worker
@@ -946,7 +946,7 @@ export default { fetch: _fetch, rpc: _procedures };
 #[test]
 fn native_bytes_and_bigints_round_trip_through_worker_transactions() {
     let (_postgres, url) = require_pg();
-    let app = crate::test_app_id!();
+    let app = crate::tests::fixtures::test_app_id!();
     let app = app.as_str();
     reset_schema(&url, app);
     let role = zeroship_core::database_role::per_app_role_name(app).unwrap();
@@ -994,7 +994,7 @@ const _procedures = {nativeValues};
 #[test]
 fn native_json_types_round_trip_through_worker_transactions() {
     let (_postgres, url) = require_pg();
-    let app = crate::test_app_id!();
+    let app = crate::tests::fixtures::test_app_id!();
     let app = app.as_str();
     reset_schema(&url, app);
     let role = zeroship_core::database_role::per_app_role_name(app).unwrap();
@@ -1043,7 +1043,7 @@ const _procedures = {jsonValues};
 #[test]
 fn timestamps_round_trip_through_worker_transactions() {
     let (_postgres, url) = require_pg();
-    let app = crate::test_app_id!();
+    let app = crate::tests::fixtures::test_app_id!();
     let app = app.as_str();
     reset_schema(&url, app);
     let role = zeroship_core::database_role::per_app_role_name(app).unwrap();
@@ -1109,7 +1109,7 @@ const _procedures = {timestamps};
 #[test]
 fn nested_timestamps_follow_worker_descriptors() {
     let (_postgres, url) = require_pg();
-    let app = crate::test_app_id!();
+    let app = crate::tests::fixtures::test_app_id!();
     let app = app.as_str();
     reset_schema(&url, app);
     let role = zeroship_core::database_role::per_app_role_name(app).unwrap();
@@ -1182,7 +1182,7 @@ const _procedures = {nestedTimestamps};
 #[test]
 fn array_updates_preserve_worker_json_elements() {
     let (_postgres, url) = require_pg();
-    let app = crate::test_app_id!();
+    let app = crate::tests::fixtures::test_app_id!();
     let app = app.as_str();
     reset_schema(&url, app);
     let role = zeroship_core::database_role::per_app_role_name(app).unwrap();
@@ -1235,7 +1235,7 @@ const _procedures = {arrays};
 #[test]
 fn update_validation_is_shared_by_native_and_sdk_worker_calls() {
     let (_postgres, url) = require_pg();
-    let app = crate::test_app_id!();
+    let app = crate::tests::fixtures::test_app_id!();
     let app = app.as_str();
     reset_schema(&url, app);
     let role = zeroship_core::database_role::per_app_role_name(app).unwrap();
@@ -1296,7 +1296,7 @@ const _procedures = {updates};
 #[test]
 fn native_worker_calls_validate_array_item_types() {
     let (_postgres, url) = require_pg();
-    let app = crate::test_app_id!();
+    let app = crate::tests::fixtures::test_app_id!();
     let app = app.as_str();
     reset_schema(&url, app);
     let role = zeroship_core::database_role::per_app_role_name(app).unwrap();
@@ -1354,7 +1354,7 @@ const _procedures = {arrayTypes};
 #[test]
 fn calendar_dates_round_trip_through_worker_transactions() {
     let (_postgres, url) = require_pg();
-    let app = crate::test_app_id!();
+    let app = crate::tests::fixtures::test_app_id!();
     let app = app.as_str();
     reset_schema(&url, app);
     let role = zeroship_core::database_role::per_app_role_name(app).unwrap();
@@ -1411,7 +1411,7 @@ const _procedures = {calendarDates};
 #[test]
 fn worker_upserts_preserve_platform_identity_and_reject_invalid_conflict_keys() {
     let (_postgres, url) = require_pg();
-    let app = crate::test_app_id!();
+    let app = crate::tests::fixtures::test_app_id!();
     let app = app.as_str();
     reset_schema(&url, app);
     exec_owner_sql(
@@ -1460,7 +1460,7 @@ const _procedures = {identities};
 #[test]
 fn transaction_commits_on_resolve() {
     let (_postgres, url) = require_pg();
-    let app = crate::test_app_id!();
+    let app = crate::tests::fixtures::test_app_id!();
     let app = app.as_str();
     reset_schema(&url, app);
 
@@ -1498,7 +1498,7 @@ const _procedures = { commitOne };
 #[test]
 fn transaction_rolls_back_on_async_reject() {
     let (_postgres, url) = require_pg();
-    let app = crate::test_app_id!();
+    let app = crate::tests::fixtures::test_app_id!();
     let app = app.as_str();
     reset_schema(&url, app);
 
@@ -1553,7 +1553,7 @@ const _procedures = { insertThenThrow };
 #[test]
 fn transaction_sync_throw_in_callback_rolls_back() {
     let (_postgres, url) = require_pg();
-    let app = crate::test_app_id!();
+    let app = crate::tests::fixtures::test_app_id!();
     let app = app.as_str();
     reset_schema(&url, app);
 
@@ -1590,7 +1590,7 @@ const _procedures = { syncThrow };
 #[test]
 fn nested_inner_reject_rolls_back_to_savepoint_outer_continues() {
     let (_postgres, url) = require_pg();
-    let app = crate::test_app_id!();
+    let app = crate::tests::fixtures::test_app_id!();
     let app = app.as_str();
     reset_schema(&url, app);
 
@@ -1658,7 +1658,7 @@ const _procedures = { nestedPartialFailure };
 #[test]
 fn savepoint_rollback_must_not_publish_its_change_event_at_outer_commit() {
     let (_postgres, url) = require_pg();
-    let app = crate::test_app_id!();
+    let app = crate::tests::fixtures::test_app_id!();
     let app = app.as_str();
     reset_schema(&url, app);
 
@@ -1720,7 +1720,7 @@ const _procedures = { savepointEmitLeak };
 #[test]
 fn nested_inner_resolve_releases_savepoint() {
     let (_postgres, url) = require_pg();
-    let app = crate::test_app_id!();
+    let app = crate::tests::fixtures::test_app_id!();
     let app = app.as_str();
     reset_schema(&url, app);
 
@@ -1772,7 +1772,7 @@ const _procedures = { nestedBothCommit };
 #[test]
 fn savepoint_depth_cap_8_exceeded_is_refused() {
     let (_postgres, url) = require_pg();
-    let app = crate::test_app_id!();
+    let app = crate::tests::fixtures::test_app_id!();
     let app = app.as_str();
     reset_schema(&url, app);
 
@@ -1845,7 +1845,7 @@ const _procedures = { deepNest };
 #[test]
 fn tx_view_has_no_lifecycle_methods() {
     let (_postgres, url) = require_pg();
-    let app = crate::test_app_id!();
+    let app = crate::tests::fixtures::test_app_id!();
     let app = app.as_str();
     reset_schema(&url, app);
 
@@ -1902,7 +1902,7 @@ const _procedures = { probeTxView };
 #[test]
 fn begin_transaction_not_on_env_db() {
     let (_postgres, url) = require_pg();
-    let app = crate::test_app_id!();
+    let app = crate::tests::fixtures::test_app_id!();
     let app = app.as_str();
     reset_schema(&url, app);
 
@@ -1929,11 +1929,11 @@ const _procedures = { probeBegin };
 #[test]
 fn update_many_randomised_failure_is_atomic_postgres() {
     let (_postgres, url) = require_pg();
-    let app = crate::test_app_id!();
+    let app = crate::tests::fixtures::test_app_id!();
     let app = app.as_str();
     reset_schema(&url, app);
     create_encrypted_users_table(&url, app);
-    let _keys = zeroship_data_v8::testing::supply_project_key_for_tests(&[app], &"b".repeat(64));
+    let _keys = crate::tests::fixtures::supply_project_key(&[app], &"b".repeat(64));
 
     let src = build_encrypted_users_src(
         r#"
@@ -1991,7 +1991,7 @@ const _procedures = { seed, failBulk };
     assert_eq!(status, 200, "seed failed: {body}");
     assert!(body["json"]["failure"].is_null(), "seed failed: {body}");
 
-    crate::tests::recording::clear();
+    crate::tests::fixtures::recording::clear();
     let (status, body) =
         dispatch_zs_with_descriptor(&url, &src, "failBulk", app, users_runtime_descriptor());
     assert_eq!(
@@ -2008,7 +2008,7 @@ const _procedures = { seed, failBulk };
         2,
         "the exercised target set must be non-empty: {body}"
     );
-    let counters = crate::tests::recording::id_probes();
+    let counters = crate::tests::fixtures::recording::id_probes();
     assert_eq!(
         counters.len(),
         1,
@@ -2106,7 +2106,7 @@ const _procedures = { seed, failBulk };
 #[test]
 fn commit_that_postgres_rolled_back_must_not_report_success_l8() {
     let (_postgres, url) = require_pg();
-    let app = crate::test_app_id!();
+    let app = crate::tests::fixtures::test_app_id!();
     let app = app.as_str();
     reset_schema(&url, app);
 

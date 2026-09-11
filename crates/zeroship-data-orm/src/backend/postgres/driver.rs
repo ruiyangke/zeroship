@@ -96,7 +96,7 @@ mod tests {
 
     #[compio::test]
     async fn native_exec_reports_command_counts() {
-        let postgres = crate::postgres_fixture::Postgres::start();
+        let postgres = crate::tests::fixtures::postgres::Postgres::start();
         let pool = Pool::connect(&postgres.url(), 2)
             .await
             .unwrap();
@@ -105,7 +105,7 @@ mod tests {
 
     #[compio::test]
     async fn invalid_native_results_are_errors_and_the_session_remains_usable() {
-        let postgres = crate::postgres_fixture::Postgres::start();
+        let postgres = crate::tests::fixtures::postgres::Postgres::start();
         let pool = Pool::connect(&postgres.url(), 1)
             .await
             .unwrap();
@@ -140,7 +140,7 @@ mod tests {
 
     #[compio::test]
     async fn timestamp_rounding_is_consistent_across_epochs() {
-        let postgres = crate::postgres_fixture::Postgres::start();
+        let postgres = crate::tests::fixtures::postgres::Postgres::start();
         let pool = Pool::connect(&postgres.url(), 1)
             .await
             .unwrap();

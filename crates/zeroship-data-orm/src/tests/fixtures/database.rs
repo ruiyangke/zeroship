@@ -1,6 +1,6 @@
 //! Host-level database setup helpers for conformance fixtures.
 use crate::error::DbError;
-pub trait DatabaseFixture: 'static {
+pub(crate) trait DatabaseFixture: 'static {
     type Client;
 
     #[allow(async_fn_in_trait)]

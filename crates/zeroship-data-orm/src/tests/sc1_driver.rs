@@ -1,4 +1,4 @@
-use crate::tests::host::Host;
+use crate::tests::fixtures::Host;
 use compio_postgres::{Client, NoTls, Pool};
 use zeroship_data_orm::transaction::probe;
 use zeroship_data_orm::transaction::reducer::{
@@ -58,8 +58,8 @@ async fn admin(url: &str) -> Client {
 /// "did the session come back" is answerable by taking the next checkout and
 /// comparing its backend PID, with no chance of being handed a different
 /// idle entry.
-async fn provision(host: &Host, app_id: &str) -> (crate::support::postgres::Postgres, Client) {
-    let postgres = crate::support::postgres::Postgres::start();
+async fn provision(host: &Host, app_id: &str) -> (crate::tests::fixtures::postgres::Postgres, Client) {
+    let postgres = crate::tests::fixtures::postgres::Postgres::start();
     let url = postgres.url();
     let client = admin(&url).await;
     let role = zeroship_core::database_role::per_app_role_name(app_id)

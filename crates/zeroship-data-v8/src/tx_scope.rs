@@ -246,8 +246,8 @@ mod tests {
     #[test]
     fn a_configured_sqlite_dialect_is_captured_without_an_open_backend() {
         in_scope!(let scope);
-        crate::testing::reset_context_for_tests();
-        crate::testing::set_db_url_for_tests("sqlite:route-test.sqlite");
+        crate::tests::fixtures::reset_context();
+        crate::tests::fixtures::set_database_url("sqlite:route-test.sqlite");
         assert!(
             crate::context::with(|context| context.backend()).is_none(),
             "precondition: nothing has opened a backend on this thread"
@@ -256,7 +256,7 @@ mod tests {
             super::capture_route(scope, &app_a_binding()).dialect(),
             crate::compile::SqlDialect::Sqlite
         );
-        crate::testing::reset_context_for_tests();
+        crate::tests::fixtures::reset_context();
     }
 
     #[test]
@@ -328,9 +328,9 @@ mod tests {
     /// The first database operation must still initialize a cold backend.
     #[test]
     fn ensure_backend_opens_a_cold_sqlite_context() {
-        crate::testing::reset_context_for_tests();
+        crate::tests::fixtures::reset_context();
         let dir = tempfile::tempdir().expect("create tempdir");
-        crate::testing::set_db_url_for_tests(&format!(
+        crate::tests::fixtures::set_database_url(&format!(
             "sqlite:{}",
             dir.path().join("cold.sqlite").display()
         ));
@@ -340,6 +340,6 @@ mod tests {
             assert_eq!(backend.dialect(), crate::compile::SqlDialect::Sqlite);
             assert!(crate::context::with(|context| context.backend()).is_some());
         });
-        crate::testing::reset_context_for_tests();
+        crate::tests::fixtures::reset_context();
     }
 }

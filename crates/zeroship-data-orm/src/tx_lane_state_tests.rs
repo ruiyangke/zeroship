@@ -211,7 +211,7 @@ fn run_async<F: std::future::Future>(f: F) -> F::Output {
 /// tempdir-backed store. No SQL is executed on it — these tests
 /// exercise the slot state machine only.
 async fn sqlite_tx_conn(dir: &tempfile::TempDir) -> Session {
-    use zeroship_data_orm::fixtures::DatabaseFixture;
+    use crate::tests::fixtures::DatabaseFixture;
     let backend = crate::backend_selection::new_sqlite_backend(
         std::path::PathBuf::from(dir.path()),
         crate::encryption::ProjectKeySource::unavailable(),

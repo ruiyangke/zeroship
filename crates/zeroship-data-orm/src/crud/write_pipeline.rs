@@ -800,7 +800,7 @@ mod tests {
             for (index, &prefix) in crate::compile::RESERVED_ID_PREFIXES.iter().enumerate() {
                 let app_id = format!("app_reserved_descriptor_id_prefix_{index}");
                 let binding = DbBinding::cold_start(&app_id);
-                crate::cache_schema_for_tests(
+                crate::tests::fixtures::cache_schema(
                     &app_id,
                     collection,
                     zeroship_data_sql::value!({
@@ -848,7 +848,7 @@ mod tests {
             let app_id = "app_ordinary_descriptor_id_prefix";
             let collection = "people";
             let binding = DbBinding::cold_start(app_id);
-            crate::cache_schema_for_tests(
+            crate::tests::fixtures::cache_schema(
                 app_id,
                 collection,
                 zeroship_data_sql::value!({
@@ -880,10 +880,10 @@ mod tests {
         });
     }
 
-    use crate::cache_schema_for_tests;
+    use crate::tests::fixtures::cache_schema;
     use crate::compile::{SqlDialect, build_insert_with_dialect};
     use crate::encryption;
-    use zeroship_data_orm::fixtures::DatabaseFixture;
+    use crate::tests::fixtures::DatabaseFixture;
     use zeroship_migrate::schema::query::FkEmission;
     fn sqlite_fixture_sql(
         schema: &zeroship_data_sql::SchemaName,
@@ -1069,7 +1069,7 @@ mod tests {
             // sentinels the DDL further down really wrote - the happy arm, where
             // descriptor and catalog agree.
             let route = crate::exec::ambient_route_for_tests(app_id, handle.clone());
-            cache_schema_for_tests(app_id, collection, schema);
+            cache_schema(app_id, collection, schema);
 
             let ddl = sqlite_fixture_sql(
                 &zeroship_data_sql::SchemaName::new(app_id).expect("fixture schema name"),
@@ -1122,7 +1122,7 @@ mod tests {
             )
             .await;
 
-            // `schema` was moved into `cache_schema_for_tests`; `ddl_schema` is
+            // `schema` was moved into `cache_schema`; `ddl_schema` is
             // its byte-identical twin and is still owned here.
             let insert_built = build_insert_with_dialect(
                 &zeroship_data_sql::SchemaName::new(app_id).expect("fixture schema name"),
@@ -1370,7 +1370,7 @@ mod tests {
 
             // Control: under the mask-declaring descriptor the write prepares,
             // and the mask lands in the field's own column.
-            cache_schema_for_tests(app_id, collection, masked);
+            cache_schema(app_id, collection, masked);
             let mut ok_doc =
                 zeroship_data_sql::value!({ "ssn": "123-45-6789", "nickname": "alice" });
             apply(
@@ -1391,7 +1391,7 @@ mod tests {
             );
 
             // The one-key deletion, against the same file.
-            cache_schema_for_tests(
+            cache_schema(
                 app_id,
                 collection,
                 zeroship_data_sql::value!({

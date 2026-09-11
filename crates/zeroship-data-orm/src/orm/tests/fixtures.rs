@@ -5,7 +5,7 @@ pub(super) struct CollectionFixture {
     pub database: Database,
     pub sqlite_file: Option<std::path::PathBuf>,
     directory: Option<tempfile::TempDir>,
-    server: Option<crate::postgres_fixture::Postgres>,
+    server: Option<crate::tests::fixtures::postgres::Postgres>,
     postgres: Option<(
         Rc<crate::backend::postgres::PostgresBackend>,
         String,
@@ -61,8 +61,8 @@ impl CollectionFixture {
         fields: Value,
         key_source: ProjectKeySource,
     ) -> Self {
-        let server = crate::postgres_fixture::Postgres::start();
-        crate::reset_engine_for_tests();
+        let server = crate::tests::fixtures::postgres::Postgres::start();
+        crate::tests::fixtures::reset_engine();
         let backend = Rc::new(
             crate::backend::postgres::PostgresBackend::connect(&server.url(), 4, key_source)
                 .await
@@ -84,7 +84,7 @@ impl CollectionFixture {
             ))
             .await
             .unwrap();
-        crate::support::roles::ensure_per_app_role(backend.pool(), &app)
+        crate::tests::fixtures::roles::ensure_per_app_role(backend.pool(), &app)
             .await
             .unwrap();
         let role = crate::compile::quote_ident(

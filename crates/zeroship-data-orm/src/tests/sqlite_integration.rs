@@ -1,8 +1,8 @@
 //! Database engine contracts against real backend fixtures.
 
 #[allow(unused_imports)]
-use crate::schema_fixture::{fixture_table_sql, fixture_table_sql_for};
-use crate::tests::host::Host;
+use crate::tests::fixtures::schema::{fixture_table_sql, fixture_table_sql_for};
+use crate::tests::fixtures::Host;
 
 #[allow(unused_imports)]
 use zeroship_migrate::schema::query::FkEmission;
@@ -1910,7 +1910,7 @@ fn the_search_really_depends_on_the_name_the_engine_records() {
                 )
                 .await
                 .expect("CREATE TABLE docs");
-            zeroship_data_orm::cache_schema_for_tests(
+            crate::tests::fixtures::cache_schema(
                 "vector_wrongname",
                 "docs",
                 zeroship_data_sql::value!({ "embedding": { "type": "vector", "vectorDims": 8 } }),
@@ -2013,7 +2013,7 @@ fn vector_search_returns_k_nearest_sqlite() {
                 )
                 .await
                 .expect("CREATE TABLE docs");
-            zeroship_data_orm::cache_schema_for_tests(
+            crate::tests::fixtures::cache_schema(
                 "vector_topk",
                 "docs",
                 zeroship_data_sql::value!({ "embedding": { "type": "vector", "vectorDims": 8 } }),
@@ -2176,7 +2176,7 @@ fn vector_search_respects_filter_sqlite() {
                 )
                 .await
                 .expect("CREATE TABLE docs");
-            zeroship_data_orm::cache_schema_for_tests(
+            crate::tests::fixtures::cache_schema(
                 "vector_filter",
                 "docs",
                 zeroship_data_sql::value!({
@@ -2302,7 +2302,7 @@ fn vector_l2_distance_matches_cosine_for_unit_vectors_sqlite() {
                 )
                 .await
                 .expect("CREATE TABLE docs");
-            zeroship_data_orm::cache_schema_for_tests(
+            crate::tests::fixtures::cache_schema(
                 "vector_math",
                 "docs",
                 zeroship_data_sql::value!({
@@ -2463,7 +2463,7 @@ fn near_returns_within_radius() {
                 )
                 .await
                 .expect("CREATE TABLE places");
-            zeroship_data_orm::cache_schema_for_tests(
+            crate::tests::fixtures::cache_schema(
                 "near_radius",
                 "places",
                 zeroship_data_sql::value!({ "location": { "type": "geoPoint" } }),
@@ -2611,7 +2611,7 @@ fn a_near_inside_a_transaction_sees_the_row_that_transaction_inserted() {
                 )
                 .await
                 .expect("CREATE TABLE places");
-            zeroship_data_orm::cache_schema_for_tests(
+            crate::tests::fixtures::cache_schema(
                 app,
                 "places",
                 zeroship_data_sql::value!({ "location": { "type": "geoPoint" } }),
@@ -3129,7 +3129,7 @@ fn cross_backend_ciphertext_decrypt_via_shared_key() {
 fn encrypted_column_e2e_crud_round_trip_sqlite() {
     Host::test(|host| {
         use zeroship_data_orm::backend::sqlite::session::TypedCell;
-        use zeroship_data_orm::fixtures::DatabaseFixture;
+        use crate::tests::fixtures::DatabaseFixture;
         use zeroship_data_orm::protection::encryption_pass::{
             decrypt_row_on_read, encrypt_row_on_write,
         };
@@ -4183,7 +4183,7 @@ async fn unmask_setup_with_schema(
         zeroship_data_orm::backend::BackendHandle::new(backend.clone()),
         &format!("sqlite:{}", dir.path().display()),
     );
-    zeroship_data_orm::cache_schema_for_tests(app_id, collection, schema);
+    crate::tests::fixtures::cache_schema(app_id, collection, schema);
     (backend, dir)
 }
 
@@ -4201,7 +4201,7 @@ fn configure_cold_sqlite_unmask_fixture(
     host.reset();
     let url = format!("sqlite:{}", dir.path().join("zs-control.sqlite").display());
     host.set_database_url(&url);
-    zeroship_data_orm::cache_schema_for_tests(app_id, collection, schema);
+    crate::tests::fixtures::cache_schema(app_id, collection, schema);
     mask_policy::install_mask_policy(&DbBinding::cold_start(app_id), policy)
         .expect("reinstall the app declaration during startup");
 }
@@ -7532,7 +7532,7 @@ fn p6c_data_plane_reaches_the_app_file_on_demand() {
             let app = "p6c_no_register";
             let collection = "notes";
 
-            crate::support::tables::create_sqlite_table(
+            crate::tests::fixtures::tables::create_sqlite_table(
                 dir.path(),
                 app,
                 &format!(
@@ -8695,7 +8695,7 @@ use zeroship_data_orm::protection::Catalog;
 
 #[cfg(test)]
 #[allow(unused_imports)]
-use zeroship_data_orm::fixtures::DatabaseFixture;
+use crate::tests::fixtures::DatabaseFixture;
 
 #[allow(unused_imports)]
 use zeroship_data_orm::search::Search;

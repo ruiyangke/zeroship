@@ -503,7 +503,7 @@ mod tests {
         // The descriptor store is PER-THREAD, so replacing this thread's
         // context is the whole isolation this fixture needs — it cannot reach
         // a concurrently-running test on another thread.
-        crate::testing::reset_context_for_tests();
+        crate::tests::fixtures::reset_context();
 
         let pinned_runtime = runtime_for_deploy(APP, PINNED);
         let pinned_collection = mint_collection_binding(&pinned_runtime, APP, COLLECTION);
@@ -512,7 +512,7 @@ mod tests {
             PINNED,
             zeroship_data_sql::SchemaName::new(APP).unwrap(),
         );
-        crate::testing::install_schema(
+        crate::tests::fixtures::install_schema(
             &pinned_binding,
             COLLECTION,
             value!({ "marker": { "type": "string" } }),
@@ -543,7 +543,7 @@ mod tests {
             CURRENT,
             zeroship_data_sql::SchemaName::new(APP).unwrap(),
         );
-        crate::testing::install_schema(
+        crate::tests::fixtures::install_schema(
             &current_binding,
             COLLECTION,
             value!({ "other": { "type": "string" } }),
@@ -651,7 +651,7 @@ mod tests {
 
         // THE PROPERTY: the mint refuses it, rather than handing back a binding
         // that only fails one operation at a time.
-        crate::testing::reset_context_for_tests();
+        crate::tests::fixtures::reset_context();
         let runtime = runtime_for_deploy(ILLEGAL, "deploy_mint_refusal");
         let minted = runtime.with_scope(|scope| super::mint_db(scope, ILLEGAL).is_some());
         runtime.exit_isolate();
