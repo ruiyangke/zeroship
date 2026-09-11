@@ -147,6 +147,10 @@ export interface DevEntry {
  * shape because the bundle is frozen.
  */
 export function devEntry(options: DevEntryOptions): DevEntry {
+  // The runtime wrapper evaluates before Vite loads the creator module.
+  // This entry owns schema installation after that lazy import, including
+  // sealing the app's policy before its first handler can run.
+  globalThis.__zsDeferSchemaInstall = true;
   const log = options.logger?.log ?? ((m) => console.log(m));
   const logError = options.logger?.error ?? ((m) => console.error(m));
 
