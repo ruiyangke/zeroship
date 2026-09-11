@@ -220,12 +220,12 @@ provides the native V8 surface; the TS SDK (`@zeroship/db`) wraps it. Both Postg
 | Migration sweeper (orphan reaper) | ⚫ | none | — | — | — | Deleted with `@zeroship/migrations`; there is no orphan-migration state left to reap. |
 | Process-wide CDC broker (openSubscription) | green | `collection.openSubscription()` / `subscribe(name)` | `crates/zeroship-data-orm/src/cdc/broker.rs`, `v8_classes/subscription.rs`, `sdks/db/src/subscribe.ts` | - | `sdks/db/tests/subscribe-close.test.ts` | Cross-isolate within one worker process; coarse-grained; 1024-event queue. |
 | Live queries — db.live(queryFn) | 🟢 | `db.live(queryFn, opts?)` | `sdks/db/src/live.ts` | `docs/reference/db.md` | `sdks/db/tests/live.test.ts` | v1 coarse-grained; LIVE_IN_TRANSACTION error. |
-| WAL replication consumer | green | `Subscription.ready()` auto-start | `crates/zeroship-data-v8/src/cdc_lifecycle.rs`, `wal_consumer.rs`, `replication.rs` | `docs/reference/db.md` | `crates/zeroship-data-v8/tests/distributed_live.rs` | One slot per app per worker process; starts on first live subscription and stops on last close. |
-| Replication slot/publication lifecycle | green | automatic on first subscription | `crates/zeroship-data-v8/src/cdc_lifecycle.rs`, `replication.rs` | `docs/reference/db.md` | `crates/zeroship-data-v8/tests/distributed_live.rs` | Shared app publication; one slot per subscribing worker; last-close teardown. Archive retains the worker feed and does not request CDC teardown. |
+| PostgreSQL CDC relay | green | `Subscription.ready()` starts the ORM relay client | `crates/zeroship-data-orm/src/cdc/relay.rs`, `crates/zeroship-data-cdc-server/src/source.rs` | `docs/runbooks/cdc-relay.md` | `crates/zeroship-data-v8/tests/distributed_live.rs` | Workers use authenticated TLS; the separate relay owns logical decoding. |
+| Replication slot/publication lifecycle | green | relay-managed capture | `crates/zeroship-data-cdc-server/src/source.rs`, `crates/zeroship-data-orm/src/cdc/lifecycle.rs` | `docs/runbooks/cdc-relay.md` | `crates/zeroship-data-v8/tests/distributed_live.rs` | The relay shares capture by app and cleans up slots. Workers subscribe to migration-provisioned publications through the relay. |
 | Migration event journal (__zeroship_schema_migrations) | &#x1F7E2; | internal (SQL-readable) | `crates/zeroship-migrate-postgres/src/backend/journal_sql.rs` | &mdash; | &mdash; | Admin-written append-only events in the per-app schema. |
 | Unmask audit log (__zeroship_audit_unmask) | 🟢 | internal (SQL-readable) | `crates/zeroship-data-orm/src/protection/unmask.rs` | `docs/reference/db.md` | — | Granted + denied audited. |
-| App namespace drop (drop_namespace) | &#x1F7E2; | internal library (no app-archive caller) | `crates/zeroship-data-v8/src/drop_namespace.rs` | &mdash; | &mdash; | DROP SCHEMA CASCADE; PG-only. Archive never calls it; privileged database teardown belongs to zeroship-migrate-server. |
-| Dual-backend support (PG + SQLite) | 🟢 | internal (`DbService::new`) | `crates/zeroship-data-v8/src/service.rs` | `docs/reference/sqlite-divergences.md` | `crates/zeroship-data-v8/tests/sqlite_integration.rs` | URL-driven; the backend is selected once at composition. SQLite dev/test only. |
+| Worker database teardown | removed | none | `crates/zeroship-data-v8/src/service.rs` | `docs/architecture/data-system.md` | `tests/worker_replication_privilege_gate.sh` | The adapter releases local subscriptions. Privileged schema teardown belongs to a separate service. |
+| Pluggable ORM backends | green | host `ConnectionFactory` | `crates/zeroship-data-orm/src/connection/factory.rs`, `crates/zeroship-data-v8/src/service.rs` | `docs/architecture/data-orm.md` | `crates/zeroship-data-v8/src/v8_classes/cold_open.rs` | Built-in PostgreSQL and file-backed SQLite, or a host-defined factory; V8 uses the same adapter. |
 | Per-app auth schema (PG roles, sessions) | 🟢 | internal (bootstrap) | `crates/zeroship-data-orm/src/auth/` | — | — | PG-only; SQLite has shim. |
 | DataLoader (batched get by id) | 🟢 | internal (Collection.get) | `sdks/db/src/loader.ts` | — | `sdks/db/tests/loader.test.ts` | Per-collection, per-tx-depth. |
 | Input validation | 🟢 | automatic on insert/update | `sdks/db/src/validate.ts` | `docs/reference/db.md` | `sdks/db/tests/validate.test.ts` | Runs in JS before native call. |
@@ -1180,11 +1180,11 @@ surfaces have no `docs/reference/` page. The actionable list, grouped by area:
   the `__zeroshipNodeBuiltin` dev bridge, and the `getCiphers()` / `node:zlib`–`node:os`
   build↔runtime divergences are undocumented.
 
-**env.db:** CDC broker / `openSubscription`, WAL replication consumer, replication slot lifecycle,
-mask/encryption backfill DDL ops, `__zeroship_migrations` audit table, migration
-sweeper, `drop_namespace`, per-app PG auth bootstrap, DataLoader, encrypted-field filter fence,
-`init_pool_async` lazy-init contract. (`sqlite-divergences.md` omits auth/session bootstrap and
-the SQLite mask-migration limitation.)
+**env.db:** CDC ownership and relay operation are described in
+`docs/architecture/data-orm.md` and `docs/runbooks/cdc-relay.md`. The ORM's
+connection factories and lazy initialization contract are covered in the
+architecture document. Reference coverage remains incomplete for per-app
+PostgreSQL auth bootstrap and encrypted-field filter restrictions.
 
 **env.kv:** the `{app_id}:` scope/hash-tag wire format, the validation constants (key 512 B, value
 256 KiB, TTL 100 yr, list limits), the full error-code set + sync TypeError paths, `createKv`
