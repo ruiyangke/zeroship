@@ -224,7 +224,7 @@ impl GuardConfig {
     /// policy the caller already holds - it grants nothing that
     /// [`GuardConfig::with_effective_policy`] does not already allow, and it is what
     /// keeps the `compile_fail` struct-literal boundary below intact: an external
-    /// crate still cannot NAME either field.
+    /// crate still cannot name its private fields.
     #[must_use]
     pub const fn effective(&self) -> &EffectivePolicy {
         &self.effective
@@ -289,9 +289,9 @@ impl GuardConfig {
 
     // --- PDP decision-query helpers ------------------------------------------
     // The guard's capability + data-security gate asks these instead of reading a
-    // raw `VendorCapabilities` bit / `require_rls` / `destructive_ops` field. All
-    // scope resolution lives inside the `EffectivePolicy`; the guard passes a
-    // concrete object and reads back a value.
+    // raw `VendorCapabilities` bit / `require_rls` / `destructive_ops` field.
+    // Composable scope decisions live inside the `EffectivePolicy`; the guard passes
+    // a concrete object and reads back a value. The host selects the target schema.
 
     /// Does the effective policy GRANT the whole-DB (Global) capability `key` at
     /// `object`? A Global Bool grant resolves the same at every object; we pass a
@@ -321,7 +321,7 @@ impl GuardConfig {
     /// targeting `object`?
     ///
     /// `None` is a statement whose target the guard cannot name: an unqualified
-    /// relation under a charter with no unique owned schema, a `CREATE SCHEMA
+    /// relation without a host-selected target, a `CREATE SCHEMA
     /// AUTHORIZATION` form carrying no schema name. Such a target is not provably
     /// inside any narrower scope, so only a whole-universe grant reaches it.
     pub fn grants_object_bool(&self, key: &str, object: Option<&ObjectName>) -> bool {

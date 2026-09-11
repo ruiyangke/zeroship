@@ -761,14 +761,11 @@ scope = {{ include = ["{schema}"], exclude = ["{schema}.secret"] }}
     /// App binding must refuse a schema-scoped grant it cannot confine.
     ///
     /// `bind_confined_charter_to_schema` rewrites `schema.create_table` and
-    /// `schema.rename` from `scope = "all"` to this app's schema, and appends a bound
-    /// `schema.cross_schema`. Every other key fell to `_ => {}` and passed through
-    /// untouched. For a non-schema key (`safety.*`, `runtime.*`) that is right. For a
-    /// schema-scoped one it is the exact opposite of the function's purpose: the grant
-    /// reaches the composed charter still saying `scope = "all"`.
+    /// `schema.rename` from `scope = "all"` to this app's schema. Global keys such
+    /// as `safety.*` and `runtime.*` can pass through unchanged. An unhandled
+    /// schema-scoped key must be refused so its grant cannot retain `scope = "all"`.
     ///
-    /// The registry defines three such keys today that this function does not handle,
-    /// so the case below uses a real one (`schema.create_schema`, PerSchema) rather
+    /// The case below uses a registered key (`schema.create_schema`, PerSchema) rather
     /// than an invented key - a made-up key would prove the arm fires without proving
     /// it fires on anything that can actually appear.
     #[test]
