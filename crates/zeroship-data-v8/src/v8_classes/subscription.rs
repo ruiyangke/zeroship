@@ -68,7 +68,7 @@ pub struct Subscription {
     /// macro stores the Box behind a `*const Self` recovered as `&Self`).
     inner: RefCell<Option<BrokerSubscription>>,
     /// Process-wide CDC claim paired one-to-one with `inner`. Dropping the
-    /// last claim signals consumer shutdown and worker-slot cleanup.
+    /// last claim shuts down the ORM relay client for this app.
     cdc_lease: RefCell<Option<zeroship_data_orm::cdc::lifecycle::CdcLease>>,
     app_id: String,
 }

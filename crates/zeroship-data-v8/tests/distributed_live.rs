@@ -3,26 +3,25 @@
 // is in the async body, not in anything this file can restructure.
 #![recursion_limit = "256"]
 
-//! Distributed `db.live` regression against the compose Postgres.
+//! Distributed `db.live` regression against PostgreSQL and a real relay process.
 //!
-//! This target deliberately owns three V8 runtimes on three concurrently
-//! alive OS threads:
+//! The target keeps V8 runtimes alive on separate OS threads:
 //!
-//! - isolate A opens the first native subscription and therefore owns this
-//!   worker process's logical-decoding consumer;
+//! - isolate A opens an anchor subscription through the ORM relay client;
 //! - isolate B serves a stream RPC backed by the shipped `createLive` SDK
 //!   implementation;
 //! - isolate C performs the native insert.
 //!
 //! Keeping A alive until B has received the write is load-bearing. It forces
-//! the decoded WAL event to cross the process broker seam from A to B. The
-//! writer's local fast path is suppressed while the WAL consumer is active,
-//! so C cannot make this test pass without logical decoding.
+//! decoded invalidation to cross the shared ORM broker seam from A to B. The
+//! writer's local fast path is suppressed while the relay client is active,
+//! so C cannot make this test pass without the relay decoding the commit.
 //!
 //! Run with:
 //!
 //! ```text
 //! docker compose -f deploy/compose/docker-compose.yml up -d postgres
+//! cargo build -p zeroship-data-cdc-server
 //! cargo test -p zeroship-data-v8 \
 //!   --test distributed_live -- --test-threads=1
 //! ```
@@ -760,17 +759,9 @@ async fn publication_exists(pool: &Pool, publication: &str) -> Result<bool, Stri
 
 /// Stand in for `zeroship-migrate-server`, which owns the app publication.
 ///
-/// The worker only PROVES the publication exists: `replication::
-/// ensure_worker_slot` fails closed with `replication_publication_missing`
-/// when it does not, and `replication.rs`'s
-/// `worker_setup_only_probes_for_the_migrated_publication` pins that the
-/// worker setup path carries no publication DDL at all. Membership is an
-/// authorization decision the migration service makes while holding
-/// table-owner authority (`crates/zeroship-migrate-server/src/publication.rs`), so
-/// this harness makes it on the migration service's behalf, exactly as
-/// `tests/integration.rs::c1_create_publication_for_tables` does for the C1
-/// suite. `events` has to be IN the set or pgoutput sends nothing and the
-/// cross-isolate delivery this target exists to prove never happens.
+/// The relay requires an existing publication and never chooses its members.
+/// The harness supplies that migration-owned fixture with table-owner authority.
+/// `events` must be a member for pgoutput to deliver its changes.
 async fn create_app_publication(
     pool: &Pool,
     app_id: &str,
@@ -1034,12 +1025,8 @@ fn db_live_stream_crosses_relay_and_v8_isolates_without_worker_replication() {
             .deprovision_app(&app_id)
             .await
             .map_err(|error| format!("deprovision app CDC: {error}"))?;
-        // The worker's deprovision drops ITS replication slots and stops
-        // there. The publication is migration-owned and stays behind for a
-        // privileged reconciler to remove - see `drop_namespace.rs`'s
-        // "Publication ownership" section and `DbLifecycle::deprovision_app`.
-        // This target asserted the opposite until now: the worker did hold
-        // that authority, and 2a44ea8ef took it away without updating here.
+        // Local subscription teardown leaves migration-owned publications
+        // intact. Only the operator fixture cleans up this publication.
         let publication_retained = publication_exists(&pool, &publication).await?;
         pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app_id}\" CASCADE"), &[])
             .await

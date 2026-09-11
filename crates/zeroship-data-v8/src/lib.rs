@@ -478,9 +478,6 @@ pub fn set_postgres_pool_for_tests(pool: Rc<compio_postgres::Pool>, url: &str) {
 /// goes away. Clearing the context first lets the connections close while
 /// there is still a runtime to close them.
 ///
-/// Also drops this thread's operator pools, which own live connections for the
-/// same reason.
-///
 /// Everything it clears is PER-THREAD: the descriptor store, the pool, the
 /// parked transaction client, the mask-policy cache. There is no process-global
 /// state left for it to wipe, and there must not be - `drain_pg()` is the

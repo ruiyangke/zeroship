@@ -1439,7 +1439,7 @@ fn audit_table_writes_do_not_emit_events() {
 // These two tests are fences for the backfill-pause + schema-pending
 // decoder rails. They must pass
 // byte-for-byte: a regression that detaches `BrokerPauseGuard::drop`
-// from `wal_consumer::unsuppress_app` + `Broker::resume_app_with_resync`,
+// from `broker::unsuppress_app` + `Broker::resume_app_with_resync`,
 // or that detaches `SchemaPendingGuard::drop` from
 // `broker::disengage_schema_pending` + `Broker::resume_app_with_resync`,
 // or that drops the publisher's per-event suppression check, will
@@ -1519,7 +1519,7 @@ fn backfill_run_pauses_broker_and_emits_one_resync() {
         let sub = subscribe_local("app_backfill", "items");
 
         // Engage backfill pause. `BrokerPauseGuard::new` calls
-        // `wal_consumer::suppress_app(app_id)`; the publisher's
+        // `broker::suppress_app(app_id)`; the publisher's
         // per-event check drops every packet for this app until the
         // guard drops.
         let guard = zeroship_data_orm::cdc::broker::BrokerPauseGuard::new("app_backfill".to_string());
@@ -1759,46 +1759,11 @@ fn schema_pending_decoder_drops_then_resyncs() {
 }
 
 // ---------------------------------------------------------------------------
-// Orchestrator-driven BrokerPauseGuard fence.
-//
-// `backfill_run_pauses_broker_and_emits_one_resync` (above) exercises the
-// guard via `SqliteBackend::pause_broker_for_tests` — the test-helper
-// `pub(crate)` shortcut. This second fence exercises the SAME guard
-// behaviour but through `BackendHandle::as_change_stream_sqlite()
-// .pause_broker(app_id)` — the general broker-pause-window API a
-// DDL/bulk-write caller drives. A regression that detaches the
-// `ChangeStream::pause_broker` trait method from the underlying
-// `BrokerPauseGuard` construction (e.g. someone "optimises" the trait
-// to return a no-op guard while leaving the test helper intact) would
-// pass the existing fence but fail here.
+// BrokerPauseGuard also fences writes through a type-erased backend handle.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn backfill_pauses_broker_via_orchestrator_api_and_emits_one_resync() {
-    // Plan §7 + §9 — backfill pause rail driven through the orchestrator's
-    // ChangeStream trait surface:
-    //
-    // 1. ensure_app_schema + CREATE TABLE.
-    // 2. Wrap the backend in a `BackendHandle::new(Rc<...>)` — the
-    //    same enum shape the per-isolate context owns. Subscribe BEFORE
-    //    the pause window so `resume_app_with_resync` sees the
-    //    subscription on guard drop.
-    // 3. Acquire `BrokerPauseGuard` via
-    //    `BackendHandle::as_change_stream_sqlite()
-    //    .pause_broker(app_id)` — the canonical path a DDL/bulk-write
-    //    caller reaches the guard through.
-    // 4. INSERT 100 rows. The preupdate hook still fires + buffers,
-    //    the commit_hook ships packets, BUT the publisher's per-event
-    //    `is_app_suppressed` check drops each one.
-    // 5. Drop the guard. `unsuppress_app` clears the flag +
-    //    `resume_app_with_resync` pushes ONE `Resync` per active
-    //    subscription.
-    // 6. Drain the subscriber → exactly ONE `Resync`, ZERO `Change`.
-    //
-    // What we pin here is that the `ChangeStream::pause_broker` API
-    // still routes through the `wal_consumer::suppress_app` +
-    // `broker::resume_app_with_resync` primitives this rail's contract
-    // is built on.
+fn backfill_pauses_broker_for_a_type_erased_backend_and_resyncs() {
     run(async {
         let (backend, _dir) = fresh_backend();
         backend
@@ -1816,26 +1781,18 @@ fn backfill_pauses_broker_via_orchestrator_api_and_emits_one_resync() {
             .await
             .expect("CREATE TABLE items");
 
-        // Move the backend into the `BackendHandle::Sqlite` arm — the
-        // shape the per-isolate context's `ctx.backend()` accessor
-        // returns. `as_change_stream_sqlite()` then yields the
-        // `SqliteChangeStream` adapter whose `pause_broker(app_id)`
-        // mints the `BrokerPauseGuard`.
+        // Use the same type-erased handle held by the isolate context.
         let handle = BackendHandle::new(Rc::new(backend));
 
         let sub = subscribe_local("app_orch", "items");
 
-        // Engage backfill pause through the trait-method API. The
-        // adapter holds an Rc-clone of the backend so subsequent
-        // `execute_fixture` calls below route through the same dispatcher.
+        // The ORM owns pause state independently of driver dispatch.
         let guard = zeroship_data_orm::cdc::broker::BrokerPauseGuard::new("app_orch".to_string());
 
-        // Pull a Rc-clone of the inner backend so we can issue the
-        // 100 INSERTs against it. (The `BackendHandle::Sqlite` arm owns
-        // the master Rc; `as_sqlite()` returns a borrow.)
+        // Borrow the concrete backend from its type-erased owner.
         let backend_ref = handle
             .get::<zeroship_data_orm::backend::SqliteBackend>()
-            .expect("BackendHandle::Sqlite::as_sqlite");
+            .expect("the handle contains SQLite");
 
         // INSERT 100 rows under the suppression window. The orchestrator-
         // owned guard's contract: the publisher drops every packet for
