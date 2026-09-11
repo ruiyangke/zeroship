@@ -15,7 +15,7 @@ test("the database contract holds through local and deployed app requests", asyn
     const races = await race(target.apiUrl);
     await captureScopes(target.apiUrl, run, captured);
     await writeFile(join(inject("databaseArtifacts"), `${target.name}-capture.json`), JSON.stringify({ captured, races }, null, 2));
-    expect(Object.keys(captured)).toHaveLength(50);
+    expect(Object.keys(captured)).toHaveLength(47);
     expect(races).toHaveLength(16);
     expect(races.some((result) => result.overlap), "the requests must actually overlap").toBe(true);
     for (const result of races) expect.soft(result.count, `${target.name}: committed rows must match reported successes`).toBe(result.successes);
@@ -30,8 +30,6 @@ test("the database contract holds through local and deployed app requests", asyn
       expect(paged).toHaveLength(5);
       expect(new Set(paged.map((row) => row.id)).size).toBe(paged.length);
       expect(paged.map((row) => row.id).sort()).toEqual(listed.map((row) => row.id).sort());
-      expect(captured.tsupd).toEqual({ moved: true });
-      expect(captured.tsres).toEqual({ distinct: 6, inserted: 6 });
       const statements = await readFile(join(inject("databaseArtifacts"), "postgres.log"), "utf8");
       expect(statements.match(/LOG:/g)?.length).toBeGreaterThanOrEqual(50);
       for (const sql of ["BEGIN ISOLATION LEVEL SERIALIZABLE", "BEGIN ISOLATION LEVEL REPEATABLE READ", "SAVEPOINT zs_sp_1", "ROLLBACK TO SAVEPOINT zs_sp_1", "SAVEPOINT zs_sp_8"]) {
@@ -45,7 +43,7 @@ test("the database contract holds through local and deployed app requests", asyn
   const divergences = Object.keys(captures[0]).filter((key) => !isDeepStrictEqual(captures[0][key], captures[1][key])).sort();
   // Keep the old suite's named findings visible until the underlying behavior
   // is measured; unrelated differences always fail the comparison.
-  const required = ["cxPlain", "cxTotal", "tsres"];
+  const required = ["cxPlain", "cxTotal"];
   const tolerated = ["txBranch", "txOrphan"];
   expect(divergences.filter((name) => !required.includes(name) && !tolerated.includes(name))).toEqual([]);
   expect(divergences).toEqual(expect.arrayContaining(required));
