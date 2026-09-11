@@ -28,10 +28,6 @@ use crate::common;
 const TEST_CONTROL_KEY: &str = "test-control-key";
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
 
-fn db_url() -> String {
-    common::require_control_db()
-}
-
 fn tmpdir(label: &str) -> PathBuf {
     let path = std::env::temp_dir().join(format!(
         "zs-wf-plugin-{label}-{}",
@@ -46,6 +42,7 @@ struct Fixture {
     pg: Arc<compio_postgres::Client>,
     blob_root: PathBuf,
     deploy_tmp_dir: PathBuf,
+    _database: crate::workflow_postgres::Database,
 }
 
 struct ControlServer {
@@ -117,7 +114,9 @@ async fn pg(db_url: &str) -> compio_postgres::Client {
     client
 }
 
-async fn build_fixture(db_url: &str, label: &str) -> Fixture {
+async fn build_fixture(database: crate::workflow_postgres::Database, label: &str) -> Fixture {
+    let db_url = database.url();
+    let db_url = db_url.as_str();
     let blob_root = tmpdir(&format!("blob-{label}"));
     let deploy_tmp_dir = tmpdir(&format!("deploy-{label}"));
     let registry = Registry::new(db_url).await.expect("registry");
@@ -202,6 +201,7 @@ async fn build_fixture(db_url: &str, label: &str) -> Fixture {
         pg: control_pg,
         blob_root,
         deploy_tmp_dir,
+        _database: database,
     }
 }
 
@@ -318,8 +318,7 @@ async fn run_workflow_app(control_url: String, app_id: Uuid, source: &str) -> (u
 
 #[compio::test]
 async fn v8_binding_round_trips_through_the_control_instance_api() {
-    let db_url = db_url();
-    let fx = build_fixture(&db_url, "round-trip").await;
+    let fx = build_fixture(crate::workflow_postgres::Database::new(), "round-trip").await;
     let app_id = seed_app(&fx, &["Checkout"]).await;
     let control = ControlServer::start(Arc::clone(&fx.state));
     let control_url = control.base.clone();

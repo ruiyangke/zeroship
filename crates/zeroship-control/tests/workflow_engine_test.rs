@@ -5,13 +5,14 @@
 #![recursion_limit = "256"]
 
 //! Mandatory PostgreSQL tests for the workflow engine scheduler.
-//! The shared test configuration must name a migrated database. Each fixture
-//! clones it into a disposable database to isolate fleet-wide engine claims.
-//! Run tests/run_billing_suite.sh to prepare the template and run the suite.
+//! Testcontainers owns a migrated template. Each fixture clones it into a
+//! disposable database to isolate fleet-wide engine claims.
 
 #![allow(clippy::await_holding_lock, clippy::future_not_send)]
 
 mod common;
+#[path = "workflow_support/postgres.rs"]
+mod workflow_postgres;
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -56,7 +57,6 @@ const TEST_CONTROL_KEY: &str = "test-control-key";
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
 const TEST_WORKER_OWNER: &str = "test-worker-owner";
 
-static DB_CLONE_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 static TIMING_TEST_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn tmpdir(label: &str) -> PathBuf {
@@ -90,7 +90,7 @@ struct Fixture {
     blob_root: PathBuf,
     deploy_tmp_dir: PathBuf,
     scheduler_store: WorkflowSchedulerStore,
-    _db: TestDatabase,
+    _db: Option<workflow_postgres::Database>,
     /// Milliseconds spent cloning this test's database from the template.
     ///
     /// Carried so a failing wait can report it. `CREATE DATABASE ... WITH
@@ -182,36 +182,6 @@ impl Drop for Fixture {
     }
 }
 
-struct TestDatabase {
-    admin_url: String,
-    name: String,
-}
-
-impl Drop for TestDatabase {
-    fn drop(&mut self) {
-        if self.name.is_empty() {
-            return;
-        }
-        let admin_url = self.admin_url.clone();
-        let name = self.name.clone();
-        let _ = std::thread::spawn(move || {
-            let rt = compio::runtime::Runtime::new().expect("compio runtime");
-            rt.block_on(async move {
-                let Ok(admin) = try_pg(&admin_url).await else {
-                    return;
-                };
-                let _ = admin
-                    .batch_execute(&format!(
-                        "DROP DATABASE IF EXISTS {} WITH (FORCE)",
-                        quote_ident(&name)
-                    ))
-                    .await;
-            });
-        })
-        .join();
-    }
-}
-
 async fn pg(db_url: &str) -> compio_postgres::Client {
     try_pg(db_url).await.expect("pg connect")
 }
@@ -232,172 +202,24 @@ async fn isolated_fixture(label: &str) -> Fixture {
 }
 
 async fn isolated_fixture_with_gateway(label: &str, gateway_url: &str) -> Fixture {
-    let base_url = common::require_control_db();
-    build_isolated_fixture_with_gateway(&base_url, label, gateway_url).await
-}
-
-async fn build_isolated_fixture_with_gateway(
-    base_url: &str,
-    label: &str,
-    gateway_url: &str,
-) -> Fixture {
-    let source_db = db_name_from_dsn(base_url)
-        .unwrap_or_else(|| panic!("configured test database must include a database name: {base_url}"));
-    assert_ne!(
-        source_db, "postgres",
-        "configured test database must point at a migrated disposable DB, not the postgres maintenance DB"
-    );
-    let db_name = fresh_test_db_name(label);
-    let admin_url = dsn_for_db(base_url, "postgres");
-    let isolated_url = dsn_for_db(base_url, &db_name);
-
-    let clone_started = std::time::Instant::now();
-    {
-        let _clone_gate = DB_CLONE_GATE
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let admin = pg(&admin_url).await;
-        admin
-            .batch_execute(&format!(
-                "DROP DATABASE IF EXISTS {} WITH (FORCE)",
-                quote_ident(&db_name),
-            ))
-            .await
-            .unwrap_or_else(|err| panic!("drop stale workflow engine test DB {db_name}: {err}"));
-        admin
-            .batch_execute(&format!(
-                "CREATE DATABASE {} WITH TEMPLATE {}",
-                quote_ident(&db_name),
-                quote_ident(&source_db),
-            ))
-            .await
-            .unwrap_or_else(|err| {
-                panic!("create isolated workflow engine test DB {db_name} from {source_db}: {err}")
-            });
-    }
-
-    let test_db = TestDatabase {
-        admin_url,
-        name: db_name,
-    };
-    let clone_ms = clone_started.elapsed().as_millis();
-    let mut fx = build_fixture_with_gateway(&isolated_url, label, gateway_url, test_db).await;
-    fx.setup_ms = clone_ms;
-    scrub_cloned_fixture_data(&fx.pg).await;
-    fx
-}
-
-fn fresh_test_db_name(label: &str) -> String {
-    let label = label
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() {
-                ch.to_ascii_lowercase()
-            } else {
-                '_'
-            }
-        })
-        .collect::<String>();
-    let label = label.trim_matches('_');
-    format!("zs_wf_engine_{}_{}", label, Uuid::new_v4().simple())
-}
-
-fn db_name_from_dsn(dsn: &str) -> Option<String> {
-    let trimmed = dsn.trim_start();
-    if trimmed.starts_with("postgres://") || trimmed.starts_with("postgresql://") {
-        let base = trimmed.split_once('?').map_or(trimmed, |(base, _)| base);
-        let scheme_end = base.find("://").map_or(0, |idx| idx + 3);
-        let path_start = base[scheme_end..].find('/')? + scheme_end;
-        let db = &base[path_start + 1..];
-        return (!db.is_empty()).then(|| db.to_string());
-    }
-
-    dsn.split_whitespace().find_map(|tok| {
-        let (key, value) = tok.split_once('=')?;
-        key.eq_ignore_ascii_case("dbname")
-            .then(|| value.trim_matches('\'').trim_matches('"').to_string())
-    })
-}
-
-fn dsn_for_db(dsn: &str, db: &str) -> String {
-    let trimmed = dsn.trim_start();
-    if trimmed.starts_with("postgres://") || trimmed.starts_with("postgresql://") {
-        let (base, query) = trimmed
-            .split_once('?')
-            .map_or((trimmed, None), |(base, query)| (base, Some(query)));
-        let scheme_end = base.find("://").map_or(0, |idx| idx + 3);
-        let new_base = base[scheme_end..].find('/').map_or_else(
-            || format!("{base}/{db}"),
-            |rel| {
-                let path_start = scheme_end + rel;
-                format!("{}/{}", &base[..path_start], db)
-            },
-        );
-        return match query {
-            Some(query) => format!("{new_base}?{query}"),
-            None => new_base,
-        };
-    }
-
-    let mut parts = Vec::new();
-    for tok in dsn.split_whitespace() {
-        if !tok
-            .split_once('=')
-            .is_some_and(|(key, _)| key.eq_ignore_ascii_case("dbname"))
-        {
-            parts.push(tok.to_string());
-        }
-    }
-    parts.push(format!("dbname={db}"));
-    parts.join(" ")
+    let started = std::time::Instant::now();
+    let database = workflow_postgres::Database::new();
+    let url = database.url();
+    let setup_ms = started.elapsed().as_millis();
+    let mut fixture = build_fixture_with_gateway(&url, label, gateway_url, Some(database)).await;
+    fixture.setup_ms = setup_ms;
+    fixture
 }
 
 fn quote_ident(ident: &str) -> String {
     format!("\"{}\"", ident.replace('"', "\"\""))
 }
 
-async fn scrub_cloned_fixture_data(pg: &TestPg) {
-    pg.batch_execute(
-        "TRUNCATE TABLE \
-             zeroship.workflow_schedules, \
-             zeroship.workflow_rollout_config, \
-             zeroship.workflow_broadcasts, \
-             zeroship.workflow_signal_keys, \
-             zeroship.app_deploys, \
-             zeroship.apps \
-         CASCADE;",
-    )
-    .await
-    .expect("scrub cloned workflow fixture data");
-    pg.batch_execute(
-        "DO $$ \
-         BEGIN \
-           IF to_regclass('zeroship.workflow_scheduler_inflight') IS NOT NULL THEN \
-             TRUNCATE TABLE zeroship.workflow_scheduler_inflight; \
-           END IF; \
-           IF to_regclass('zeroship.workflow_scheduler_timers') IS NOT NULL THEN \
-             TRUNCATE TABLE zeroship.workflow_scheduler_timers; \
-           END IF; \
-           IF to_regclass('zeroship.workflow_e2e_side_effects') IS NOT NULL THEN \
-             TRUNCATE TABLE zeroship.workflow_e2e_side_effects; \
-           END IF; \
-           IF to_regclass('zeroship.workflow_e2e_effect_attempts') IS NOT NULL THEN \
-             TRUNCATE TABLE zeroship.workflow_e2e_effect_attempts; \
-           END IF; \
-           IF to_regclass('zeroship.workflow_e2e_effect_commits') IS NOT NULL THEN \
-             TRUNCATE TABLE zeroship.workflow_e2e_effect_commits; \
-           END IF; \
-         END $$;",
-    )
-    .await
-    .expect("scrub cloned workflow e2e effect tables");
-}
-
 async fn build_fixture_with_gateway(
     db_url: &str,
     label: &str,
     gateway_url: &str,
-    test_db: TestDatabase,
+    test_db: Option<workflow_postgres::Database>,
 ) -> Fixture {
     let blob_root = tmpdir(&format!("blob-{label}"));
     let deploy_tmp_dir = tmpdir(&format!("deploy-{label}"));
@@ -485,9 +307,7 @@ async fn build_fixture_with_gateway(
         deploy_tmp_dir,
         scheduler_store,
         _db: test_db,
-        // Overwritten by `build_isolated_fixture_with_gateway`, which is the
-        // caller that actually clones the database. Fixtures built directly
-        // against an existing database do no cloning, so zero is accurate.
+        // The owning fixture records database setup separately from dispatch.
         setup_ms: 0,
     }
 }
@@ -7608,10 +7428,7 @@ async fn run_lookup_refuses_to_report_absent_while_a_journal_is_unreadable() {
 /// unreadable journal as readable and no exclusion is ever observable. Every
 /// sweep whose coverage is asserted below therefore runs through THIS state.
 ///
-/// The returned fixture's `TestDatabase` carries an EMPTY name, which its
-/// `Drop` treats as a no-op - `fx` still owns the database and drops it. Its
-/// blob roots are its own, so anything a sweep must SEE in object storage has
-/// to be seeded through this fixture's stores, not through `fx`'s.
+/// The returned fixture borrows the original database and owns its blob roots.
 async fn control_role_fixture(fx: &Fixture, label: &str) -> Fixture {
     // Open the PLATFORM schema up to the control role, and only that.
     //
@@ -7628,7 +7445,8 @@ async fn control_role_fixture(fx: &Fixture, label: &str) -> Fixture {
     // (`app_deploys`). Granting them restores what a running control plane has;
     // withholding them would only fail these tests for a reason that has
     // nothing to do with journal coverage.
-    let db_name = db_name_from_dsn(&fx.db_url).expect("the fixture DSN names a database");
+    let url = url::Url::parse(&fx.db_url).expect("fixture database URL");
+    let db_name = url.path().trim_start_matches('/');
     fx.pg
         .inner
         .batch_execute(&format!(
@@ -7647,10 +7465,7 @@ async fn control_role_fixture(fx: &Fixture, label: &str) -> Fixture {
         &control_url,
         &format!("{label}-ctl"),
         "http://127.0.0.1:9",
-        TestDatabase {
-            admin_url: dsn_for_db(&fx.db_url, "postgres"),
-            name: String::new(),
-        },
+        None,
     )
     .await
 }

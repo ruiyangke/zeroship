@@ -144,8 +144,8 @@ fn database_creation_stays_inside_its_explicit_fixture_owners() {
     let allow: BTreeSet<_> = [
         // The statement itself is the driver's subject.
         "libs/compio-postgres/tests/suite/integration.rs",
-        // Tracked violation: workflow tests clone the live suite database.
-        "crates/zeroship-control/tests/workflow_engine_test.rs",
+        // Workflow fixtures clone only their owned Testcontainers template.
+        "crates/zeroship-control/tests/workflow_support/postgres.rs",
         // The shared provisioning fixture owns database creation.
         "xtask/src/platform_db/admin.rs",
         // Asserts a database-creation permission error, without executing DDL.

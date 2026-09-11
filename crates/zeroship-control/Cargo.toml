@@ -3,8 +3,8 @@ name = "zeroship-control"
 version = "0.1.0"
 edition = "2021"
 description = "zeroship control plane — admin API, internal API, Postgres, VFS"
-# Integration files are modules of the explicit targets below. Register new
-# files in tests/main.rs or tests/live_db.rs so Cargo compiles their tests.
+# Integration targets are registered explicitly below. Workflow targets own
+# their Testcontainers fixtures; shared service suites remain grouped.
 autotests = false
 
 [[package.metadata.zeroship-config.targets]]
@@ -109,6 +109,7 @@ chrono = { version = "0.4", default-features = false, features = ["std", "serde"
 chrono-tz = "0.10"
 
 [dev-dependencies]
+testcontainers = { version = "0.28", features = ["blocking"] }
 zeroship-workflow-v8 = { workspace = true }
 toml = { workspace = true }
 # `deploy_test.rs` builds a synthetic `.zship` payload (tar+zstd) and
@@ -144,10 +145,9 @@ tracing-subscriber = { workspace = true }
 # migrated platform database required by these tests.
 
 # Integration modules share executables to avoid repeatedly linking the service.
-# main and live_db both run by default. workflow_engine_test stays separate
-# because it clones the platform database and must not share a process with
-# tests holding connections to the template. The source residue guard also
-# needs its own target because its filename would match its scan.
+# Workflow targets own their migrated template and disposable databases.
+# The source residue guard needs its own target because its filename would
+# match its scan.
 [[test]]
 name = "main"
 path = "tests/main.rs"
@@ -155,6 +155,10 @@ path = "tests/main.rs"
 [[test]]
 name = "live_db"
 path = "tests/live_db.rs"
+
+[[test]]
+name = "workflow_api"
+path = "tests/workflow_api.rs"
 
 [[test]]
 name = "workflow_engine_test"
