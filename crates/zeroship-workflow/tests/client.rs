@@ -1,5 +1,6 @@
 use serde_json::{json, Value};
 use uuid::Uuid;
+use zeroship_workflow::operations::{RestartOptions, RestartTarget, StartOptions};
 use zeroship_workflow::{app_scoped_token, WorkflowClientConfig, WorkflowHttpMethod};
 
 const TEST_CONTROL_KEY: &str = "test-control-key";
@@ -34,7 +35,11 @@ fn builds_authenticated_workflow_instance_requests() {
     let start = zeroship_workflow::client::build_start_request(
         &cfg,
         "Checkout/Final",
-        json!({ "input": { "orderId": 42 }, "key": "cart-42" }),
+        StartOptions {
+            input: json!({ "orderId": 42 }),
+            key: Some("cart-42".into()),
+            ..Default::default()
+        },
     )
     .expect("start request");
     assert_eq!(start.method, WorkflowHttpMethod::Post);
@@ -61,7 +66,13 @@ fn builds_authenticated_workflow_instance_requests() {
     let restart = zeroship_workflow::client::build_restart_request(
         &cfg,
         "run_abc/def",
-        json!({ "from": { "name": "charge" } }),
+        RestartOptions {
+            from: Some(RestartTarget {
+                name: "charge".into(),
+                occurrence: None,
+            }),
+            ..Default::default()
+        },
     )
     .expect("restart request");
     assert_eq!(restart.method, WorkflowHttpMethod::Post);

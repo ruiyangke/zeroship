@@ -7,7 +7,10 @@
 use std::time::Duration;
 
 use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
+use serde::{de::DeserializeOwned, Serialize};
 use serde_json::{json, Value};
+
+use crate::operations::{RestartOptions, RunOperation, SignalOptions, StartOptions};
 
 const WORKFLOW_CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -159,13 +162,13 @@ pub fn app_scoped_token(control_key: &str, app_id: &str) -> String {
 pub fn build_start_request(
     config: &WorkflowClientConfig,
     workflow_name: &str,
-    body: Value,
+    options: StartOptions,
 ) -> Result<WorkflowHttpRequest, WorkflowRpcError> {
     request(
         config,
         WorkflowHttpMethod::Post,
         format!("/internal/workflows/{}/runs", path_segment(workflow_name)),
-        Some(body),
+        Some(encode_options(options)?),
     )
 }
 
@@ -184,25 +187,29 @@ pub fn build_get_status_request(
 pub fn build_signal_request(
     config: &WorkflowClientConfig,
     run_id: &str,
-    body: Value,
+    options: SignalOptions,
 ) -> Result<WorkflowHttpRequest, WorkflowRpcError> {
     request(
         config,
         WorkflowHttpMethod::Post,
         format!("/internal/workflows/runs/{}/signal", path_segment(run_id)),
-        Some(body),
+        Some(encode_options(options)?),
     )
 }
 
 pub fn build_transition_request(
     config: &WorkflowClientConfig,
     run_id: &str,
-    op: &'static str,
+    op: RunOperation,
 ) -> Result<WorkflowHttpRequest, WorkflowRpcError> {
     request(
         config,
         WorkflowHttpMethod::Post,
-        format!("/internal/workflows/runs/{}/{}", path_segment(run_id), op),
+        format!(
+            "/internal/workflows/runs/{}/{}",
+            path_segment(run_id),
+            op.as_str()
+        ),
         Some(json!({})),
     )
 }
@@ -210,13 +217,13 @@ pub fn build_transition_request(
 pub fn build_restart_request(
     config: &WorkflowClientConfig,
     run_id: &str,
-    body: Value,
+    options: RestartOptions,
 ) -> Result<WorkflowHttpRequest, WorkflowRpcError> {
     request(
         config,
         WorkflowHttpMethod::Post,
         format!("/internal/workflows/runs/{}/restart", path_segment(run_id)),
-        Some(body),
+        Some(encode_options(options)?),
     )
 }
 
@@ -243,7 +250,14 @@ pub fn build_read_step_output_request(
     )
 }
 
-pub async fn execute_json(req: WorkflowHttpRequest) -> Result<Value, WorkflowRpcError> {
+fn encode_options(options: impl Serialize) -> Result<Value, WorkflowRpcError> {
+    serde_json::to_value(options)
+        .map_err(|error| WorkflowRpcError::InvalidRequest(error.to_string()))
+}
+
+pub async fn execute_json<T: DeserializeOwned>(
+    req: WorkflowHttpRequest,
+) -> Result<T, WorkflowRpcError> {
     let bytes = execute_bytes(req).await?;
     serde_json::from_slice(&bytes)
         .map_err(|e| WorkflowRpcError::Decode(format!("decode workflow response JSON: {e}")))

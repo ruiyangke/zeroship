@@ -8676,6 +8676,7 @@ dependencies = [
  "async-trait",
  "compio",
  "rusqlite",
+ "serde",
  "serde_json",
  "tempfile",
  "uuid",
