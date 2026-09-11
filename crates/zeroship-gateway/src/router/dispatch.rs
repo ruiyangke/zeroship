@@ -3696,8 +3696,8 @@ mod tests {
         assert_eq!(json["code"], "SPEND_LIMIT");
     }
 
-    /// The exploit `tests/e2e_gateway_workflow_advance_authz.sh` drives, at the
-    /// handler.
+    /// The unauthorized request exercised by
+    /// `crates/zeroship-control/tests/workflow_advance_authz.rs`, at the handler.
     ///
     /// A caller with a reachable Host, a real `runId` and a real `appId`, and NO
     /// credential. Until the caller check landed this reached the forwarder and
