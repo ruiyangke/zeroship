@@ -15,7 +15,7 @@
 //
 // Backends (selected by the runtime, identical wire contract): redb
 // (single-process persistent — the default; ZEROSHIP_KV_PATH) and Redis
-// (distributed; ZEROSHIP_KV_URL).
+// (distributed; selected through the host's KV TOML configuration).
 
 import { env } from "zeroship";
 

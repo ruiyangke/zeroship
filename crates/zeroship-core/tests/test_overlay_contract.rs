@@ -1,8 +1,8 @@
 //! The generated test overlay is held to the real config contract.
 //!
 //! `deploy/ops/zeroship.test.toml` is written by
-//! `tests/provision_test_backends.sh` and names the PostgreSQL and Redis every
-//! suite in this workspace dials. It replaced eight environment variables that
+//! `tests/provision_test_backends.sh` and names the shared PostgreSQL used by
+//! suites that consume this overlay. It replaced eight environment variables that
 //! all meant "the test database", and the whole reason a file is better than
 //! eight names is that a file can be VALIDATED. A test topology in a document
 //! nothing parses is the same sprawl with fewer places to look.
@@ -22,12 +22,6 @@ use zeroship_core::config::test_overlay::{overlay_path, PROVISION_COMMAND};
 /// The exact shape `tests/provision_test_backends.sh` writes.
 const GENERATED_SHAPE: &str = r#"[control]
 database_url = "postgres://postgres:zeroship@127.0.0.1:5440/zeroship"
-[worker]
-kv_config = '''backend = "redis"
-[redis.topology]
-mode = "standalone"
-endpoint = "127.0.0.1:6390"
-'''
 "#;
 
 fn write_temp(name: &str, contents: &str) -> PathBuf {
@@ -55,11 +49,7 @@ fn a_misspelled_key_in_the_generated_shape_is_rejected() {
         parsed.control.database_url.as_deref(),
         Some("postgres://postgres:zeroship@127.0.0.1:5440/zeroship")
     );
-    let kv: toml::Value = toml::from_str(parsed.worker.kv_config.as_deref().unwrap()).unwrap();
-    assert_eq!(
-        kv["redis"]["topology"]["endpoint"].as_str(),
-        Some("127.0.0.1:6390")
-    );
+    assert!(parsed.worker.kv_config.is_none());
     let _ = std::fs::remove_file(good.as_path());
 
     // One character, in one key, in the same document.
@@ -76,7 +66,7 @@ fn a_misspelled_key_in_the_generated_shape_is_rejected() {
 }
 
 /// When the overlay HAS been generated, it must satisfy the same contract and
-/// carry the two values every suite resolves from it.
+/// carry the PostgreSQL DSN its consumers resolve from it.
 ///
 /// AN ABSENT OVERLAY FAILS. It used to announce a skip here - the argument
 /// being that `cargo test -p zeroship-core` runs constantly on checkouts that
@@ -88,7 +78,7 @@ fn a_misspelled_key_in_the_generated_shape_is_rejected() {
 /// from a pass, and this is the only test that rules on the shape every suite
 /// resolves its backends from.
 #[test]
-fn the_generated_overlay_parses_and_names_both_backends() {
+fn the_generated_overlay_parses_and_names_postgres() {
     let path = overlay_path();
     assert!(
         path.exists(),
@@ -103,9 +93,8 @@ fn the_generated_overlay_parses_and_names_both_backends() {
          Both forms of that script write the overlay; `--check` adopts servers\n\
          that are already running instead of starting its own.\n\
          \n\
-         There is no environment variable that makes this a skip. Every suite in\n\
-         this workspace resolves its PostgreSQL and its Redis from this file, so\n\
-         an absent one is not a smaller run - it is no run at all.",
+         There is no environment variable that makes this a skip. Suites that use this\n\
+         overlay require it to name their shared PostgreSQL server.",
         path = path.display()
     );
 
@@ -125,12 +114,4 @@ fn the_generated_overlay_parses_and_names_both_backends() {
         dsn.starts_with("postgres://") || dsn.starts_with("postgresql://"),
         "[control] database_url is not a PostgreSQL DSN: {dsn}"
     );
-
-    let kv = parsed
-        .worker
-        .kv_config
-        .expect("the generated overlay must carry [worker] kv_config");
-    let kv: toml::Value = toml::from_str(&kv).expect("KV configuration TOML");
-    assert_eq!(kv["backend"].as_str(), Some("redis"));
-    assert!(kv["redis"]["topology"]["endpoint"].as_str().is_some());
 }

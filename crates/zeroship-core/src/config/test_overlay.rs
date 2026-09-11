@@ -37,8 +37,7 @@
 //! the real schema, and no credential enters git.
 //!
 //! PRECEDENCE is the services' own, and the surviving environment names are the
-//! overlay tier rather than a parallel system: an explicit `PG_TEST_URL` /
-//! `REDIS_TEST_URL` wins, else the generated file, and there is no third tier -
+//! overlay tier rather than a parallel system: an explicit `PG_TEST_URL` wins, else the generated file, and there is no third tier -
 //! a missing file is a hard failure naming the provisioning command rather than
 //! a compiled default that would let a suite pass against nothing.
 
@@ -205,27 +204,6 @@ fn redact_dsn(url: &str) -> &str {
     url
 }
 
-/// The one Redis every test in this workspace dials, or `None`.
-///
-/// `REDIS_TEST_URL` wins over the overlay, for the same reason `PG_TEST_URL`
-/// does.
-#[must_use]
-pub fn kv_url_opt() -> Option<String> {
-    crate::test_env!("REDIS_TEST_URL")
-        .filter(|url| !url.is_empty())
-        .or_else(|| {
-            let config = load_opt()?.worker.kv_config?;
-            let value: toml::Value = toml::from_str(&config).ok()?;
-            let endpoint = value
-                .get("redis")?
-                .get("topology")?
-                .get("endpoint")?
-                .as_str()?;
-            Some(format!("redis://{endpoint}"))
-        })
-        .filter(|url| !url.is_empty())
-}
-
 /// [`database_url_opt`], for a caller that cannot proceed without one.
 ///
 /// # Panics
@@ -237,23 +215,6 @@ pub fn database_url() -> String {
     database_url_opt().unwrap_or_else(|| {
         panic!(
             "no PostgreSQL: neither PG_TEST_URL nor control.database_url in {}.\n\
-             Provision the test backends and their configuration with:\n    {PROVISION_COMMAND}",
-            overlay_path().display()
-        )
-    })
-}
-
-/// [`kv_url_opt`], for a caller that cannot proceed without one.
-///
-/// # Panics
-///
-/// When neither `REDIS_TEST_URL` nor the overlay supplies one, naming the
-/// provisioning command.
-#[must_use]
-pub fn kv_url() -> String {
-    kv_url_opt().unwrap_or_else(|| {
-        panic!(
-            "no Redis: neither REDIS_TEST_URL nor worker.kv_config in {}.\n\
              Provision the test backends and their configuration with:\n    {PROVISION_COMMAND}",
             overlay_path().display()
         )

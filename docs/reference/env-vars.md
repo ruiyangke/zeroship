@@ -729,7 +729,7 @@ each named the same server, each was read by one crate, and each had to be
 exported by whichever suite remembered it. `GATEWAY_POOL_SMOKE_URL` was set
 NOWHERE in the repository, so its one test had never executed;
 `GATEWAY_ANCHORS_DB_URL` was in the same state until 2026-08-18. `PG_TEST_URL`
-is the single override, and `REDIS_TEST_URL` its Redis peer.
+is the PostgreSQL override. KV tests own their configuration and containers.
 
 SEVEN of those eight are deleted, not eight. `CONTROL_TEST_DB` is still read at
 `crates/zeroship-control/tests/workflow_engine_test.rs:59` and still exported at
@@ -747,7 +747,7 @@ required now, like Postgres, for the same reason
 
 ### The surviving test-only names
 
-`PG_TEST_URL` `REDIS_TEST_URL`
+`PG_TEST_URL`
 `AUTH_TEST_SMTP_SINK` `ZEROSHIP_DW_E2E*`
 
 `ZEROSHIP_SESSION_SECRET`, `ZEROSHIP_SESSION_SECRET_PREV` and
@@ -770,7 +770,7 @@ CI also sets `PG_CONTAINER` `PG_HOST` `PG_PORT` `PG_USER` `PG_PASS`
 `PG_HOST`/`PG_PORT`/`PG_USER`/`PG_PASS` are INPUTS to
 `tests/provision_test_backends.sh`, which writes what they resolve to into the
 overlay; no harness carries its own copy of the defaults any more. That script
-takes `REDIS_HOST`/`REDIS_PORT` and `SMTP_HOST`/`SMTP_PORT`/`SMTP_UI_PORT`/
+takes `SMTP_HOST`/`SMTP_PORT`/`SMTP_UI_PORT`/
 `SMTP_CONTAINER`/`SMTP_IMAGE` the same way. The SMTP ones are the sink's
 coordinates rather than a variable any test reads: the sink is named to test
 code only by `AUTH_TEST_SMTP_SINK`, and by the compiled default it falls back
@@ -783,14 +783,11 @@ on, and FAILS naming that script if nothing answers. It was the one standing
 allowlist entry in the deleted skip census, on the ground that no script could
 stand a sink up; provisioning one is what retired the exemption.
 
-`PG_TEST_URL` and `REDIS_TEST_URL` REDIRECT the suites; they do not enable
-them. Unset, everything resolves from the overlay - and `libs/compio-postgres`,
-`libs/compio-redis` and `libs/compio-s3` keep their own compiled defaults
-(`postgres://postgres:zeroship@localhost:5440/zeroship`,
-`redis://127.0.0.1:6390`) because they are standalone publishable drivers with
-no zeroship dependency and cannot read the overlay. A server that does not
-answer FAILS the test with the address it tried and the command that provisions
-one. There is no variable that turns that back into a skip.
+`PG_TEST_URL` redirects PostgreSQL suites; it does not enable them. The shared
+suites resolve their default from the generated overlay. Standalone driver
+configuration belongs to each driver's test harness. KV and Redis driver suites
+start their own Redis and Dragonfly containers and fail if Docker cannot provide
+them; there is no Redis test URL override or opt-in switch.
 `ZEROSHIP_REQUIRE_LIVE_BACKENDS` was that variable, opt-in and therefore unset
 in every run it would have helped; it is deleted, not renamed.
 

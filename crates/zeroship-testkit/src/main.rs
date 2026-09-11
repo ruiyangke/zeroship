@@ -275,7 +275,6 @@ fn run_overlay(cmd: OverlayCmd) -> i32 {
             assign("PG_PASS", &loaded.pass);
             assign("PG_DB", &loaded.db);
             assign("ZS_TEST_PG_DSN", &loaded.dsn);
-            assign("ZS_TEST_REDIS_URL", &loaded.redis_url);
             exit::OK
         }
     }

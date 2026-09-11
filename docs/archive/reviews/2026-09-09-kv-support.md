@@ -18,15 +18,12 @@ within the same Lua execution. Rust decodes the decimal string directly into
 an integer. The native topology contract and V8 runtime tests now use increments
 whose result cannot be represented exactly as a floating-point number.
 
-## Embedded delete treats an expired row as present
+## Embedded deletion of expired keys — resolved
 
-`RedbBackend::delete` in `crates/zeroship-kv/src/backend/redb.rs` returns
-`removed.is_some()` without consulting the stored expiration. In contrast,
-`get`, `ttl`, `expire`, and `persist` inspect expiration and treat an expired row
-as missing. Source inspection therefore identifies a dev/Redis difference:
-deleting an expired key can report success locally after reads already report
-absence. The correction should remove the stale row but compute the return
-value using its expiration, with a shared backend regression case.
+`RedbBackend::delete` removes stale rows while reporting success only for live
+keys. `crates/zeroship-kv/tests/delete_contract.rs` checks the shared contract
+against redb, Redis and Dragonfly, with and without a preceding read, and checks
+that deleting an expired key leaves the neighboring app's key intact.
 
 ## Boundaries to preserve
 

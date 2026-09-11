@@ -18,7 +18,6 @@ path = "src/main.rs"
 compio = { workspace = true }
 compio-postgres = { workspace = true }
 sha2 = { workspace = true }
-toml = { workspace = true }
 clap = { workspace = true }
 
 [dev-dependencies]
