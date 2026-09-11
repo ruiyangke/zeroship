@@ -8,7 +8,7 @@ import { raw } from "@zeroship/migrate";
 // against the collated entity id cannot use the copy's ordinary index.
 //
 // This map is semantic, not name-based. It deliberately excludes raw UUID
-// domains; app_deploys.id (dep_ plus UUIDv4 hex) and its deploy_id copies;
+// domains;
 // pricing_config.id and workflow_rollout_config.id (the constant "global");
 // OAuth client ids, provider ids, hashes, idempotency keys, boot ids, snapshot
 // and worker ids, the URL-safe share token id, and arbitrary text. Some included
@@ -42,10 +42,11 @@ const typedIdColumnsByTable: Readonly<Record<string, readonly string[]>> = {
   app_session_anchors: ["refresh_family_id"],
   oauth_refresh_tokens: ["refresh_family_id"],
 
-  // Durable workflows: 19 columns.
-  workflow_broadcasts: ["id"],
-  workflow_runs: ["id", "dispatch_nonce", "parent_run_id"],
-  workflow_schedules: ["id"],
+  // Workflow identities and immutable deployment references.
+  app_deploys: ["id"],
+  workflow_broadcasts: ["id", "deploy_id"],
+  workflow_runs: ["id", "dispatch_nonce", "parent_run_id", "deploy_id"],
+  workflow_schedules: ["id", "deploy_id"],
   workflow_scheduler_inflight: ["run_id"],
   workflow_scheduler_timers: ["run_id"],
   workflow_signal_keys: ["id", "kid"],

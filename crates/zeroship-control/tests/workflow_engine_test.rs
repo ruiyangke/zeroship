@@ -348,7 +348,7 @@ async fn seed_app_and_deploy_on_plan(
         .await
         .expect("provision workflow journal");
     fx.pg.set_default_app_id(app_id);
-    let deploy_id = format!("dep_{}", Uuid::new_v4().simple());
+    let deploy_id = zeroship_core::typed_id::generate("dep");
     fx.pg
         .execute(
             "INSERT INTO zeroship.app_deploys (id, app_id, deploy_hash, manifest_json, activated_at) \
@@ -365,8 +365,8 @@ async fn seed_app_and_deploy_on_plan(
     (app_id, deploy_id)
 }
 
-async fn seed_additional_deploy(fx: &Fixture, app_id: Uuid, label: &str) -> String {
-    let deploy_id = format!("dep_{}_{}", label, Uuid::new_v4().simple());
+async fn seed_additional_deploy(fx: &Fixture, app_id: Uuid, _label: &str) -> String {
+    let deploy_id = zeroship_core::typed_id::generate("dep");
     fx.pg
         .execute(
             "INSERT INTO zeroship.app_deploys (id, app_id, deploy_hash, manifest_json, activated_at) \

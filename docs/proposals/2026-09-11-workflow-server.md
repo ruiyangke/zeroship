@@ -40,6 +40,11 @@ The server executable now composes that policy with an immutable key snapshot,
 shared assertion replay storage and durable maintenance. Native process tests
 exercise replicas and restart recovery. Configuration checks avoid dependency
 access; request handlers authenticate before buffering JSON bodies.
+Deployment notifications now reconcile current Control authority under the app
+fence. Start and schedule execution also check that authority; live runs retain
+their snapshot. Deployment history rejects mutations of snapshot contents.
+Durable notification delivery and periodic deployment reconciliation remain
+to be connected to Control activation.
 The worker polling loop, Control capability
 issuance, public HTTP ingress, retention of
 completed run graphs and interpreter cutover remain in progress. The

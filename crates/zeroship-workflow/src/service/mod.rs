@@ -3,6 +3,7 @@
 mod app;
 pub mod capability;
 mod control;
+mod deploys;
 mod frontier;
 mod ingress;
 pub use ingress::{IngressReceipt, RevokedSignals, SignalAuthority, SignalTokenRequest};

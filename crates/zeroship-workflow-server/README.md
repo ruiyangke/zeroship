@@ -3,7 +3,10 @@
 The V8-free HTTP host for `zeroship-workflow::service`. App routes require a
 Control-issued capability. Task routes verify an active enrolled worker's
 signature and bind the service's task token to that instance. Operator deploy
-notifications use the platform service allowlist.
+notifications use the platform service allowlist. They carry no deployment
+selection: the service reads Control's current immutable snapshot under the
+app's transaction lock. New starts and schedule sweeps also reconcile that
+selection, so delayed notifications cannot restore older code or schedules.
 
 Streaming payload routes keep upload identities and task tokens in Rust. Clients
 apply bounded backpressure and independently verify downloaded content; retries

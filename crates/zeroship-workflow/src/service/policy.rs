@@ -45,7 +45,7 @@ impl PlatformPolicy {
         }
         let rows = tx.query(
             "WITH expected(kind,relation) AS (VALUES ('app','apps'),('plan','plans'), \
-             ('organization','organization_billing_status'),('spend','app_spend_state'),('rollout','workflow_rollout_config')) \
+             ('organization','organization_billing_status'),('spend','app_spend_state'),('rollout','workflow_rollout_config'),('deploy','app_deploys')) \
              SELECT CASE WHEN EXISTS (SELECT 1 FROM pg_trigger t JOIN pg_proc p ON p.oid=t.tgfoid \
              WHERE t.tgrelid=to_regclass('zeroship.' || e.relation) AND t.tgname='workflow_policy_fence_' || e.kind \
              AND t.tgenabled IN ('O','A') AND NOT p.prosecdef \
@@ -70,7 +70,8 @@ impl PlatformPolicy {
             return Err(unavailable());
         }
         for sql in [
-            "SELECT id,plan_id,organization_id,workflows_enabled,archived_at,deleted_at FROM zeroship.apps LIMIT 0",
+            "SELECT id,plan_id,organization_id,workflows_enabled,archived_at,deleted_at,deploy_hash,manifest_json FROM zeroship.apps LIMIT 0",
+            "SELECT id,app_id,deploy_hash,manifest_json,activated_at FROM zeroship.app_deploys LIMIT 0",
             "SELECT id,workflows_allowed,archived,runtime_limits_json FROM zeroship.plans LIMIT 0",
             "SELECT app_id,state FROM zeroship.app_spend_state LIMIT 0",
             "SELECT organization_id,state FROM zeroship.organization_billing_status LIMIT 0",

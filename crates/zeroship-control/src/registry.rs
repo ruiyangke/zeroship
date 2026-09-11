@@ -672,7 +672,7 @@ impl Registry {
             });
         }
 
-        let deploy_id = format!("dep_{}", uuid::Uuid::new_v4().simple());
+        let deploy_id = zeroship_core::typed_id::generate("dep");
         let row = tx
             .query_one(
                 "INSERT INTO zeroship.app_deploys \

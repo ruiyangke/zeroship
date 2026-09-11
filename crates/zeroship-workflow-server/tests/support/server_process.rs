@@ -158,6 +158,17 @@ pub async fn contract(admin: &compio_postgres::Client, runtime_url: &str, dir: &
         workflows: ["Example".into()].into(),
         schedules: Vec::new(),
     };
+    let manifest = serde_json::to_string(&json!({"workflows":deployment.workflows})).unwrap();
+    admin.batch_execute("BEGIN").await.unwrap();
+    admin
+        .execute(
+            "UPDATE zeroship.apps SET deploy_hash=$2,manifest_json=$3 WHERE id=$1",
+            &[&app.uuid(), &deployment.hash, &manifest],
+        )
+        .await
+        .unwrap();
+    admin.execute("INSERT INTO zeroship.app_deploys (id,app_id,deploy_hash,manifest_json,activated_at) VALUES ($1,$2,$3,$4,now())", &[&deployment.id,&app.uuid(),&deployment.hash,&manifest]).await.unwrap();
+    admin.batch_execute("COMMIT").await.unwrap();
     let response = client
         .post(format!(
             "{}/v1/apps/{}/workflow-deploy",
@@ -168,7 +179,7 @@ pub async fn contract(admin: &compio_postgres::Client, runtime_url: &str, dir: &
             "authorization",
             format!("Bearer {}", minter.mint(&workflow_issuer).unwrap()),
         )
-        .send_json(&deployment)
+        .send()
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);

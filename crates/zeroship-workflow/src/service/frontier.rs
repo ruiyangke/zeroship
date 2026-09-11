@@ -191,7 +191,7 @@ pub(crate) async fn apply(
             );
         }
         policy.admit()?;
-        let deploy = active_deploy(tx, app).await?;
+        let deploy = active_deploy(tx, app, policy).await?;
         let name = run.text("workflow_name")?;
         if !deploy.workflows.contains(&name) {
             return journal::invalid("workflow is absent from the active deployment");

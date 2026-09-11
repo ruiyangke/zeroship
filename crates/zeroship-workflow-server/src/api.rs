@@ -13,7 +13,7 @@ use zeroship_workflow::{
     service::{
         capability::{AppOperation, SignalTarget},
         wire::{CompleteTask, Failure, Mutation, PollTask, TaskCredential},
-        DeployRegistration, SignalTokenRequest,
+        SignalTokenRequest,
     },
     WorkflowServiceError,
 };
@@ -62,7 +62,7 @@ pub fn configure_with_limit(config: &mut web::ServiceConfig, max_request_bytes: 
         )
         .service(
             web::resource(endpoints::WORKFLOW_DEPLOY.path_template())
-                .route(web::post().to(activate_deploy)),
+                .route(web::post().to(reconcile_deploy)),
         )
         .service(
             web::resource(endpoints::WORKFLOW_TASK_POLL.path_template())
@@ -312,11 +312,10 @@ async fn revoke_signal_tokens(
         .await,
     )
 }
-async fn activate_deploy(
+async fn reconcile_deploy(
     request: web::HttpRequest,
     state: State<SharedState>,
     path: Path<String>,
-    body: web::types::Payload,
 ) -> web::HttpResponse {
     respond(
         async {
@@ -325,13 +324,7 @@ async fn activate_deploy(
                 .peer(authorization(&request), endpoints::WORKFLOW_DEPLOY)
                 .await?;
             let app = app_id(&path.into_inner())?;
-            state
-                .service
-                .activate_deploy(
-                    &app,
-                    &read_json::<DeployRegistration>(&request, body).await?,
-                )
-                .await
+            state.service.reconcile_deploy(&app).await
         }
         .await,
     )
