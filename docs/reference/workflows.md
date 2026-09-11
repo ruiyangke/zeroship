@@ -28,6 +28,11 @@ it with `WorkflowClientConfig`, binding the app identity and its scoped token
 once. Individual operations cannot select another app. The control plane still
 authorizes the request; possession of a Rust handle does not bypass it.
 
+The `operations` module defines typed requests and responses for these calls:
+`StartOptions`, `SignalOptions`, `RestartOptions`, `RunOperation` and `RunState`.
+Only workflow input, output and signal payloads are arbitrary JSON. Transport
+serialization belongs to the HTTP client and V8 binding.
+
 `WorkflowBinding` performs the same binding for JavaScript. The host derives
 its app-scoped credential with `app_scoped_token`; the control key stays outside
 V8. Workflow execution remains replay of the deployed JavaScript class.

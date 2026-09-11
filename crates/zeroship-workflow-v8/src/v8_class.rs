@@ -10,7 +10,7 @@
 
 use std::future::Future;
 
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value};
 use zeroship_runtime::state::{OpError, OpResult, ResolveValue, SharedState};
 use zeroship_runtime_macros::v8_class;
 #[allow(unused_imports)]
@@ -18,6 +18,7 @@ use zeroship_runtime_macros::{v8_constructor, v8_getter, v8_method, v8_name};
 
 use zeroship_workflow::backend::SharedWorkflowBackend;
 use zeroship_workflow::client::WorkflowRpcError;
+use zeroship_workflow::operations::{RestartOptions, RunOperation, SignalOptions, StartOptions};
 
 // ---------------------------------------------------------------------------
 // State
@@ -79,7 +80,9 @@ fn value_to_json(
     };
     let raw = json_str.to_rust_string_lossy(scope);
     serde_json::from_str(&raw).map_err(|e| {
-        OpError::type_error(format!("{context} must be valid JSON-serializable data: {e}"))
+        OpError::type_error(format!(
+            "{context} must be valid JSON-serializable data: {e}"
+        ))
     })
 }
 
@@ -120,7 +123,7 @@ fn json_type_name(v: &Value) -> &'static str {
 fn start_body(
     scope: &mut v8::PinScope<'_, '_>,
     opts: v8::Local<v8::Value>,
-) -> Result<Value, OpError> {
+) -> Result<StartOptions, OpError> {
     let mut opts = read_options_object(scope, opts, "workflows.start")?;
     let input = opts.remove("input").unwrap_or(Value::Null);
     let mut body = Map::new();
@@ -143,7 +146,11 @@ fn start_body(
         match on_conflict {
             Value::Null => {}
             Value::String(_) | Value::Object(_) => {
-                body.insert("onConflict".to_string(), on_conflict);
+                let policy = match on_conflict {
+                    Value::Object(mut map) => map.remove("policy").unwrap_or(Value::Null),
+                    value => value,
+                };
+                body.insert("onConflict".to_string(), policy);
             }
             other => {
                 return Err(OpError::type_error(format!(
@@ -153,13 +160,14 @@ fn start_body(
             }
         }
     }
-    Ok(Value::Object(body))
+    serde_json::from_value(Value::Object(body))
+        .map_err(|error| OpError::type_error(format!("workflows.start: {error}")))
 }
 
 fn signal_body(
     scope: &mut v8::PinScope<'_, '_>,
     opts: v8::Local<v8::Value>,
-) -> Result<Value, OpError> {
+) -> Result<SignalOptions, OpError> {
     let mut opts = read_options_object(scope, opts, "workflow.signal")?;
     let Some(signal_type) = opts.remove("type") else {
         return Err(OpError::type_error(
@@ -180,16 +188,16 @@ fn signal_body(
             )));
         }
     };
-    Ok(json!({
-        "type": signal_type,
-        "payload": opts.remove("payload").unwrap_or(Value::Null),
-    }))
+    Ok(SignalOptions {
+        signal_type,
+        payload: opts.remove("payload").unwrap_or(Value::Null),
+    })
 }
 
 fn restart_body(
     scope: &mut v8::PinScope<'_, '_>,
     opts: v8::Local<v8::Value>,
-) -> Result<Value, OpError> {
+) -> Result<RestartOptions, OpError> {
     let mut opts = read_options_object(scope, opts, "workflow.restart")?;
     let mut body = Map::new();
     if let Some(from) = opts.remove("from") {
@@ -237,7 +245,11 @@ fn restart_body(
         match deploy {
             Value::Null => {}
             Value::String(_) | Value::Object(_) => {
-                body.insert("deploy".to_string(), deploy);
+                let pin = match deploy {
+                    Value::Object(mut map) => map.remove("pin").unwrap_or(Value::Null),
+                    value => value,
+                };
+                body.insert("deploy".to_string(), pin);
             }
             other => {
                 return Err(OpError::type_error(format!(
@@ -247,7 +259,8 @@ fn restart_body(
             }
         }
     }
-    Ok(Value::Object(body))
+    serde_json::from_value(Value::Object(body))
+        .map_err(|error| OpError::type_error(format!("workflow.restart: {error}")))
 }
 
 fn runtime_state(scope: &mut v8::PinScope<'_, '_>) -> SharedState {
@@ -272,15 +285,18 @@ fn setup_promise<'s>(
     (global_resolver, request_id, promise)
 }
 
-fn dispatch_json<'s>(
+fn dispatch_json<'s, T: serde::Serialize + 'static>(
     scope: &mut v8::PinScope<'s, '_>,
-    op: impl Future<Output = Result<Value, WorkflowRpcError>> + 'static,
+    op: impl Future<Output = Result<T, WorkflowRpcError>> + 'static,
 ) -> v8::Local<'s, v8::Promise> {
     let state = runtime_state(scope);
     let (resolver, request_id, promise) = setup_promise(scope, &state);
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
         let value = match op.await {
-            Ok(value) => ResolveValue::Json(value.to_string()),
+            Ok(value) => match serde_json::to_string(&value) {
+                Ok(json) => ResolveValue::Json(json),
+                Err(error) => ResolveValue::RejectError(OpError::error(error.to_string())),
+            },
             Err(e) => ResolveValue::RejectError(crate::error::to_op_error(e)),
         };
         OpResult::JsValue {
@@ -296,90 +312,53 @@ fn dispatch_start<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     backend: SharedWorkflowBackend,
     workflow_name: String,
-    body: Value,
+    options: StartOptions,
 ) -> v8::Local<'s, v8::Promise> {
-    let state = runtime_state(scope);
-    let (resolver, request_id, promise) = setup_promise(scope, &state);
-    state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        let value = match backend.start(workflow_name, body).await {
-            Ok(value) => {
-                let run_id = value
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-                    .ok_or_else(|| {
-                        WorkflowRpcError::Decode(
-                            "workflow start response did not include id".to_string(),
-                        )
-                    });
-                match run_id {
-                    Ok(run_id) => {
-                        let backend = backend.clone();
-                        let resolver_for_continuation = resolver.clone();
-                        ResolveValue::Continuation(Box::new(move |scope, _state| {
-                            let local_resolver = v8::Local::new(scope, &resolver_for_continuation);
-                            match mint_workflow_run(scope, backend, run_id) {
-                                Some(obj) => {
-                                    local_resolver.resolve(scope, obj.into());
-                                }
-                                None => {
-                                    let err =
-                                        OpError::error("workflow start: failed to mint WorkflowRun");
-                                    let exc = err.to_exception(scope);
-                                    local_resolver.reject(scope, exc);
-                                }
-                            }
-                        }))
-                    }
-                    Err(e) => ResolveValue::RejectError(crate::error::to_op_error(e)),
-                }
-            }
-            Err(e) => ResolveValue::RejectError(crate::error::to_op_error(e)),
-        };
-        OpResult::JsValue {
-            resolver,
-            value,
-            request_id,
-        }
-    }));
-    promise
+    dispatch_run_handle(scope, backend.clone(), async move {
+        backend
+            .start(workflow_name, options)
+            .await
+            .map(|run| run.id)
+    })
 }
 
 fn dispatch_restart<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     backend: SharedWorkflowBackend,
     run_id: String,
-    body: Value,
+    options: RestartOptions,
+) -> v8::Local<'s, v8::Promise> {
+    dispatch_run_handle(scope, backend.clone(), async move {
+        backend.restart(run_id, options).await.map(|run| run.run_id)
+    })
+}
+
+fn dispatch_run_handle<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    backend: SharedWorkflowBackend,
+    operation: impl Future<Output = Result<String, WorkflowRpcError>> + 'static,
 ) -> v8::Local<'s, v8::Promise> {
     let state = runtime_state(scope);
     let (resolver, request_id, promise) = setup_promise(scope, &state);
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        let value = match backend.restart(run_id.clone(), body).await {
-            Ok(value) => {
-                let response_run_id = value
-                    .get("runId")
-                    .or_else(|| value.get("id"))
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-                    .unwrap_or_else(|| run_id.clone());
-                let backend = backend.clone();
+        let value = match operation.await {
+            Ok(run_id) => {
                 let resolver_for_continuation = resolver.clone();
                 ResolveValue::Continuation(Box::new(move |scope, _state| {
                     let local_resolver = v8::Local::new(scope, &resolver_for_continuation);
-                    match mint_workflow_run(scope, backend, response_run_id) {
+                    match mint_workflow_run(scope, backend, run_id) {
                         Some(obj) => {
                             local_resolver.resolve(scope, obj.into());
                         }
                         None => {
-                            let err =
-                                OpError::error("workflow restart: failed to mint WorkflowRun");
-                            let exc = err.to_exception(scope);
-                            local_resolver.reject(scope, exc);
+                            let error = OpError::error("failed to mint WorkflowRun");
+                            let exception = error.to_exception(scope);
+                            local_resolver.reject(scope, exception);
                         }
                     }
                 }))
-                }
-            Err(e) => ResolveValue::RejectError(crate::error::to_op_error(e)),
+            }
+            Err(error) => ResolveValue::RejectError(crate::error::to_op_error(error)),
         };
         OpResult::JsValue {
             resolver,
@@ -528,7 +507,10 @@ impl WorkflowRun {
     ) -> Result<v8::Local<'s, v8::Value>, OpError> {
         let backend = self.backend.clone();
         let run_id = self.run_id.clone();
-        Ok(dispatch_json(scope, async move { backend.transition(run_id, "pause").await }).into())
+        Ok(dispatch_json(scope, async move {
+            backend.transition(run_id, RunOperation::Pause).await
+        })
+        .into())
     }
 
     #[v8_method]
@@ -538,7 +520,10 @@ impl WorkflowRun {
     ) -> Result<v8::Local<'s, v8::Value>, OpError> {
         let backend = self.backend.clone();
         let run_id = self.run_id.clone();
-        Ok(dispatch_json(scope, async move { backend.transition(run_id, "resume").await }).into())
+        Ok(dispatch_json(scope, async move {
+            backend.transition(run_id, RunOperation::Resume).await
+        })
+        .into())
     }
 
     #[v8_method]
@@ -549,7 +534,10 @@ impl WorkflowRun {
     ) -> Result<v8::Local<'s, v8::Value>, OpError> {
         let backend = self.backend.clone();
         let run_id = self.run_id.clone();
-        Ok(dispatch_json(scope, async move { backend.transition(run_id, "cancel").await }).into())
+        Ok(dispatch_json(scope, async move {
+            backend.transition(run_id, RunOperation::Cancel).await
+        })
+        .into())
     }
 
     #[v8_method]
@@ -559,13 +547,7 @@ impl WorkflowRun {
         opts: v8::Local<v8::Value>,
     ) -> Result<v8::Local<'s, v8::Value>, OpError> {
         let body = restart_body(scope, opts)?;
-        Ok(dispatch_restart(
-            scope,
-            self.backend.clone(),
-            self.run_id.clone(),
-            body,
-        )
-        .into())
+        Ok(dispatch_restart(scope, self.backend.clone(), self.run_id.clone(), body).into())
     }
 }
 
@@ -577,8 +559,7 @@ impl WorkflowRun {
 pub fn is_excluded_workflow_property(name: &str) -> bool {
     matches!(
         name,
-        ""
-            | "then"
+        "" | "then"
             | "toJSON"
             | "inspect"
             | "constructor"

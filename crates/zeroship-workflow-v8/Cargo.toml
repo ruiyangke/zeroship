@@ -10,6 +10,7 @@ zeroship-runtime = { workspace = true }
 zeroship-runtime-macros = { workspace = true }
 async-trait = { workspace = true }
 compio = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 v8 = { workspace = true }
 

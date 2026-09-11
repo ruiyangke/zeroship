@@ -18,6 +18,10 @@ use zeroship_core::typed_id;
 
 use crate::backend::WorkflowBackend;
 use crate::client::WorkflowRpcError;
+use crate::operations::{
+    DeliveredSignal, RestartOptions, RestartedRun, RunOperation, RunStatus, SignalOptions,
+    StartOptions, StartedRun, TransitionedRun,
+};
 
 const DEV_DEPLOY_ID: &str = "dev-local";
 const DEV_DEPLOY_HASH: &str = "dev-local";
@@ -125,7 +129,10 @@ struct StepCheckpoint {
     child_run_id: Option<String>,
     #[serde(default, rename = "compensationState")]
     compensation_state: Option<String>,
-    #[serde(default = "default_compensation_max_attempts", rename = "compensationMaxAttempts")]
+    #[serde(
+        default = "default_compensation_max_attempts",
+        rename = "compensationMaxAttempts"
+    )]
     compensation_max_attempts: i32,
 }
 
@@ -141,7 +148,10 @@ enum StepOutcome {
         step_kind: String,
         #[serde(default)]
         compensable: bool,
-        #[serde(default = "default_compensation_max_attempts", rename = "compensationMaxAttempts")]
+        #[serde(
+            default = "default_compensation_max_attempts",
+            rename = "compensationMaxAttempts"
+        )]
         compensation_max_attempts: i32,
         #[serde(default)]
         output: Option<Value>,
@@ -180,7 +190,11 @@ enum StepOutcome {
         name: String,
         #[serde(default, rename = "nameOccurrence")]
         name_occurrence: i32,
-        #[serde(default, rename = "wakeAt", deserialize_with = "deserialize_optional_wake_at")]
+        #[serde(
+            default,
+            rename = "wakeAt",
+            deserialize_with = "deserialize_optional_wake_at"
+        )]
         wake_at: Option<DateTime<Utc>>,
         #[serde(default, deserialize_with = "deserialize_optional_wake_duration")]
         timeout: Option<DateTime<Utc>>,
@@ -204,12 +218,25 @@ enum StepOutcome {
 #[derive(Debug, Clone)]
 enum RunUpdate {
     Queued,
-    Sleeping { wake_at: Option<DateTime<Utc>> },
-    Waiting { wake_at: Option<DateTime<Utc>> },
-    Completed { output: Option<Value> },
-    Failed { error: Value },
-    Stalled { error: Value },
-    #[allow(dead_code, reason = "cancel transitions are applied directly in the dev instance API")]
+    Sleeping {
+        wake_at: Option<DateTime<Utc>>,
+    },
+    Waiting {
+        wake_at: Option<DateTime<Utc>>,
+    },
+    Completed {
+        output: Option<Value>,
+    },
+    Failed {
+        error: Value,
+    },
+    Stalled {
+        error: Value,
+    },
+    #[allow(
+        dead_code,
+        reason = "cancel transitions are applied directly in the dev instance API"
+    )]
     Cancelled,
 }
 
@@ -256,8 +283,8 @@ impl<'de> Deserialize<'de> for StepResult {
         D: serde::Deserializer<'de>,
     {
         let wire = StepResultWire::deserialize(deserializer)?;
-        let (checkpoints, run_update) = fold_dev_outcomes(&wire.outcomes)
-            .map_err(serde::de::Error::custom)?;
+        let (checkpoints, run_update) =
+            fold_dev_outcomes(&wire.outcomes).map_err(serde::de::Error::custom)?;
         Ok(Self {
             run_id: wire.run_id,
             dispatch_nonce: wire.dispatch_nonce,
@@ -283,9 +310,7 @@ impl RunUpdate {
     fn wake_at_ms(&self) -> Option<i64> {
         match self {
             Self::Queued => Some(now_ms()),
-            Self::Sleeping { wake_at } | Self::Waiting { wake_at } => {
-                wake_at.map(datetime_to_ms)
-            }
+            Self::Sleeping { wake_at } | Self::Waiting { wake_at } => wake_at.map(datetime_to_ms),
             _ => None,
         }
     }
@@ -384,15 +409,11 @@ impl DevWorkflowEngine {
         &self,
         app_id: &str,
         workflow_name: &str,
-        body: Value,
-    ) -> Result<Value, WorkflowRpcError> {
+        options: StartOptions,
+    ) -> Result<StartedRun, WorkflowRpcError> {
         validate_workflow_name(workflow_name)?;
-        let input = body.get("input").cloned().unwrap_or(Value::Null);
-        let key = body
-            .get("key")
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string);
+        let input = options.input;
+        let key = options.key.filter(|key| !key.is_empty());
         let run_id = typed_id::new_workflow_run_id();
         let now = now_ms();
         let input_json = json_to_string(&input)?;
@@ -449,10 +470,13 @@ impl DevWorkflowEngine {
         };
 
         let _ = self.tick_due().await?;
-        Ok(json!({ "id": selected_run_id, "state": "queued" }))
+        Ok(StartedRun {
+            id: selected_run_id,
+            state: crate::operations::RunState::Queued,
+        })
     }
 
-    async fn status(&self, app_id: &str, run_id: &str) -> Result<Value, WorkflowRpcError> {
+    async fn status(&self, app_id: &str, run_id: &str) -> Result<RunStatus, WorkflowRpcError> {
         let conn = self.lock_conn()?;
         let row = conn
             .query_row(
@@ -474,36 +498,43 @@ impl DevWorkflowEngine {
             )
             .optional()
             .map_err(db_error)?;
-        let Some((state, output, error, output_kind, output_hash, output_size, output_content_type)) =
-            row
+        let Some((
+            state,
+            output,
+            error,
+            output_kind,
+            output_hash,
+            output_size,
+            output_content_type,
+        )) = row
         else {
             return Err(WorkflowRpcError::Http {
                 status: 404,
                 body: "workflow run not found".to_string(),
             });
         };
-        Ok(json!({
-            "state": state,
-            "output": status_output(output_kind, output_hash, output_size, output_content_type, output)?,
-            "error": parse_json_opt(error)?,
-        }))
+        Ok(RunStatus {
+            state: state.parse().map_err(WorkflowRpcError::Decode)?,
+            output: Some(status_output(
+                output_kind,
+                output_hash,
+                output_size,
+                output_content_type,
+                output,
+            )?),
+            error: parse_json_opt(error)?,
+        })
     }
 
     async fn signal(
         &self,
         app_id: &str,
         run_id: &str,
-        body: Value,
-    ) -> Result<Value, WorkflowRpcError> {
-        let signal_type = body
-            .get("type")
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| {
-                WorkflowRpcError::InvalidRequest("workflow signal type is required".to_string())
-            })?;
+        options: SignalOptions,
+    ) -> Result<DeliveredSignal, WorkflowRpcError> {
+        let signal_type = &options.signal_type;
         validate_signal_type(signal_type)?;
-        let payload = body.get("payload").cloned().unwrap_or(Value::Null);
+        let payload = options.payload;
         let payload_json = json_to_string(&payload)?;
         let signal_id = typed_id::new_workflow_signal_id();
         let now = now_ms();
@@ -530,7 +561,9 @@ impl DevWorkflowEngine {
                 params![signal_id, run_id, signal_type, payload_json, now],
             )
             .map_err(db_error)?;
-            if state == "waiting" && waiting_key_matches_signal(waiting_step_key.as_deref(), signal_type) {
+            if state == "waiting"
+                && waiting_key_matches_signal(waiting_step_key.as_deref(), signal_type)
+            {
                 conn.execute(
                     "UPDATE workflow_runs SET wake_at = ?1 WHERE id = ?2 AND app_id = ?3",
                     params![now, run_id, app_id],
@@ -539,15 +572,15 @@ impl DevWorkflowEngine {
             }
         }
         let _ = self.tick_due().await?;
-        Ok(json!({ "id": signal_id }))
+        Ok(DeliveredSignal { id: signal_id })
     }
 
     async fn transition(
         &self,
         app_id: &str,
         run_id: &str,
-        op: &'static str,
-    ) -> Result<Value, WorkflowRpcError> {
+        op: RunOperation,
+    ) -> Result<TransitionedRun, WorkflowRpcError> {
         let now = now_ms();
         let conn = self.lock_conn()?;
         let current = conn
@@ -563,7 +596,7 @@ impl DevWorkflowEngine {
                 body: "workflow run not found".to_string(),
             })?;
         let next = match op {
-            "pause" => {
+            RunOperation::Pause => {
                 if is_terminal(&current) {
                     return Err(WorkflowRpcError::Http {
                         status: 409,
@@ -580,7 +613,7 @@ impl DevWorkflowEngine {
                 .map_err(db_error)?;
                 "paused".to_string()
             }
-            "resume" => {
+            RunOperation::Resume => {
                 if current != "paused" {
                     return Err(WorkflowRpcError::Http {
                         status: 409,
@@ -588,7 +621,11 @@ impl DevWorkflowEngine {
                     });
                 }
                 let restored = restored_state(&conn, run_id)?;
-                let wake_at = if restored == "queued" { Some(now) } else { None };
+                let wake_at = if restored == "queued" {
+                    Some(now)
+                } else {
+                    None
+                };
                 conn.execute(
                     "UPDATE workflow_runs \
                         SET state = ?3, wake_at = COALESCE(?4, wake_at), terminal_at = NULL, paused_from_status = NULL \
@@ -598,7 +635,7 @@ impl DevWorkflowEngine {
                 .map_err(db_error)?;
                 restored
             }
-            "cancel" => {
+            RunOperation::Cancel => {
                 if is_terminal(&current) {
                     return Err(WorkflowRpcError::Http {
                         status: 409,
@@ -616,21 +653,18 @@ impl DevWorkflowEngine {
                 .map_err(db_error)?;
                 "cancelled".to_string()
             }
-            _ => {
-                return Err(WorkflowRpcError::InvalidRequest(format!(
-                    "unsupported workflow transition {op}"
-                )))
-            }
         };
-        Ok(json!({ "state": next }))
+        Ok(TransitionedRun {
+            state: next.parse().map_err(WorkflowRpcError::Decode)?,
+        })
     }
 
     async fn restart(
         &self,
         app_id: &str,
         run_id: &str,
-        _body: Value,
-    ) -> Result<Value, WorkflowRpcError> {
+        _options: RestartOptions,
+    ) -> Result<RestartedRun, WorkflowRpcError> {
         let now = now_ms();
         {
             let conn = self.lock_conn()?;
@@ -649,8 +683,11 @@ impl DevWorkflowEngine {
                     body: "workflow run not found".to_string(),
                 });
             }
-            conn.execute("DELETE FROM workflow_steps WHERE run_id = ?1", params![run_id])
-                .map_err(db_error)?;
+            conn.execute(
+                "DELETE FROM workflow_steps WHERE run_id = ?1",
+                params![run_id],
+            )
+            .map_err(db_error)?;
             conn.execute(
                 "UPDATE workflow_signals SET consumed_by = NULL WHERE consumed_by = ?1",
                 params![run_id],
@@ -669,13 +706,12 @@ impl DevWorkflowEngine {
             .map_err(db_error)?;
         }
         let _ = self.tick_due().await?;
-        Ok(json!({
-            "runId": run_id,
-            "id": run_id,
-            "state": "queued",
-            "restartedFromOrdinal": Value::Null,
-            "pinnedTo": DEV_DEPLOY_ID,
-        }))
+        Ok(RestartedRun {
+            run_id: run_id.to_owned(),
+            state: crate::operations::RunState::Queued,
+            restarted_from_ordinal: None,
+            pinned_to: DEV_DEPLOY_ID.to_owned(),
+        })
     }
 
     async fn tick_due(&self) -> Result<usize, WorkflowRpcError> {
@@ -718,8 +754,11 @@ impl DevWorkflowEngine {
                         workflow_name: row.get(2)?,
                         deploy_id: row.get(3)?,
                         deploy_hash: row.get(4)?,
-                        input: parse_json_opt(row.get::<_, Option<String>>(5)?)
-                            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(SimpleError(format!("{e:?}")))))?,
+                        input: parse_json_opt(row.get::<_, Option<String>>(5)?).map_err(|e| {
+                            rusqlite::Error::ToSqlConversionFailure(Box::new(SimpleError(format!(
+                                "{e:?}"
+                            ))))
+                        })?,
                         started_at: row.get(6)?,
                         waiting_step_key: row.get(7)?,
                     })
@@ -830,7 +869,13 @@ impl DevWorkflowEngine {
         let batch_width = i16::try_from(result.checkpoints.len()).unwrap_or(i16::MAX);
         let mut wrote_checkpoints = 0usize;
         for checkpoint in &result.checkpoints {
-            match insert_resolved_step(&conn, checkpoint, &result.run_id, &result.dispatch_nonce, batch_width)? {
+            match insert_resolved_step(
+                &conn,
+                checkpoint,
+                &result.run_id,
+                &result.dispatch_nonce,
+                batch_width,
+            )? {
                 StepWriteOutcome::Wrote => {
                     wrote_checkpoints += 1;
                     if let Some(signal_id) = checkpoint.consumed_signal_id.as_ref() {
@@ -928,31 +973,49 @@ impl DevWorkflowEngine {
     }
 
     fn lock_conn(&self) -> Result<MutexGuard<'_, Connection>, WorkflowRpcError> {
-        self.conn
-            .lock()
-            .map_err(|_| WorkflowRpcError::Transport("workflow dev sqlite lock poisoned".to_string()))
+        self.conn.lock().map_err(|_| {
+            WorkflowRpcError::Transport("workflow dev sqlite lock poisoned".to_string())
+        })
     }
 }
 
 #[async_trait(?Send)]
 impl WorkflowBackend for DevWorkflowBackend {
-    async fn start(&self, workflow_name: String, body: Value) -> Result<Value, WorkflowRpcError> {
-        self.engine.start_run(&self.app_id, &workflow_name, body).await
+    async fn start(
+        &self,
+        workflow_name: String,
+        body: StartOptions,
+    ) -> Result<StartedRun, WorkflowRpcError> {
+        self.engine
+            .start_run(&self.app_id, &workflow_name, body)
+            .await
     }
 
-    async fn status(&self, run_id: String) -> Result<Value, WorkflowRpcError> {
+    async fn status(&self, run_id: String) -> Result<RunStatus, WorkflowRpcError> {
         self.engine.status(&self.app_id, &run_id).await
     }
 
-    async fn signal(&self, run_id: String, body: Value) -> Result<Value, WorkflowRpcError> {
+    async fn signal(
+        &self,
+        run_id: String,
+        body: SignalOptions,
+    ) -> Result<DeliveredSignal, WorkflowRpcError> {
         self.engine.signal(&self.app_id, &run_id, body).await
     }
 
-    async fn transition(&self, run_id: String, op: &'static str) -> Result<Value, WorkflowRpcError> {
+    async fn transition(
+        &self,
+        run_id: String,
+        op: RunOperation,
+    ) -> Result<TransitionedRun, WorkflowRpcError> {
         self.engine.transition(&self.app_id, &run_id, op).await
     }
 
-    async fn restart(&self, run_id: String, body: Value) -> Result<Value, WorkflowRpcError> {
+    async fn restart(
+        &self,
+        run_id: String,
+        body: RestartOptions,
+    ) -> Result<RestartedRun, WorkflowRpcError> {
         self.engine.restart(&self.app_id, &run_id, body).await
     }
 
@@ -1153,10 +1216,12 @@ fn load_journal(conn: &Connection, run_id: &str) -> Result<Vec<JournalStep>, Wor
                 name_occurrence: row.get(2)?,
                 kind: row.get(3)?,
                 state: row.get(4)?,
-                output: parse_json_opt(row.get::<_, Option<String>>(5)?)
-                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(SimpleError(format!("{e:?}")))))?,
-                error: parse_json_opt(row.get::<_, Option<String>>(6)?)
-                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(SimpleError(format!("{e:?}")))))?,
+                output: parse_json_opt(row.get::<_, Option<String>>(5)?).map_err(|e| {
+                    rusqlite::Error::ToSqlConversionFailure(Box::new(SimpleError(format!("{e:?}"))))
+                })?,
+                error: parse_json_opt(row.get::<_, Option<String>>(6)?).map_err(|e| {
+                    rusqlite::Error::ToSqlConversionFailure(Box::new(SimpleError(format!("{e:?}"))))
+                })?,
                 child_run_id: row.get(7)?,
                 compensation_state: row.get(8)?,
             })
@@ -1169,7 +1234,10 @@ fn load_journal(conn: &Connection, run_id: &str) -> Result<Vec<JournalStep>, Wor
     Ok(out)
 }
 
-fn rearm_waiting_runs_with_pending_signals(conn: &Connection, now: i64) -> Result<(), WorkflowRpcError> {
+fn rearm_waiting_runs_with_pending_signals(
+    conn: &Connection,
+    now: i64,
+) -> Result<(), WorkflowRpcError> {
     conn.execute(
         "UPDATE workflow_runs \
             SET wake_at = ?1 \
@@ -1408,7 +1476,13 @@ fn insert_resolved_step(
         .query_row(
             "SELECT state, name, kind FROM workflow_steps WHERE run_id = ?1 AND ordinal = ?2",
             params![run_id, checkpoint.ordinal],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)),
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
         )
         .optional()
         .map_err(db_error)?;
@@ -1425,21 +1499,12 @@ fn insert_resolved_step(
         false
     };
     let now = now_ms();
-    let output = checkpoint
-        .output
-        .as_ref()
-        .map(json_to_string)
-        .transpose()?;
-    let error = checkpoint
-        .error
-        .as_ref()
-        .map(json_to_string)
-        .transpose()?;
+    let output = checkpoint.output.as_ref().map(json_to_string).transpose()?;
+    let error = checkpoint.error.as_ref().map(json_to_string).transpose()?;
     let wake_at = checkpoint.wake_at.map(datetime_to_ms);
-    let compensation_state =
-        (checkpoint.kind == "run" && checkpoint.state == "completed")
-            .then(|| checkpoint.compensation_state.clone())
-            .flatten();
+    let compensation_state = (checkpoint.kind == "run" && checkpoint.state == "completed")
+        .then(|| checkpoint.compensation_state.clone())
+        .flatten();
     let changed = if resolves_running {
         conn.execute(
             "UPDATE workflow_steps \
@@ -1505,10 +1570,7 @@ fn insert_resolved_step(
 }
 
 fn fold_dev_outcomes(outcomes: &[StepOutcome]) -> Result<(Vec<StepCheckpoint>, RunUpdate), String> {
-    let shared_outcomes = outcomes
-        .iter()
-        .map(shared_step_outcome)
-        .collect::<Vec<_>>();
+    let shared_outcomes = outcomes.iter().map(shared_step_outcome).collect::<Vec<_>>();
     let (checkpoints, run_update) = crate::engine::fold_outcomes(&shared_outcomes)?;
     Ok((
         checkpoints.into_iter().map(dev_step_checkpoint).collect(),
@@ -1739,7 +1801,6 @@ fn annotate_dev_compensation_unsupported(error: Value, pending: &[String]) -> Va
     error
 }
 
-
 fn default_step_kind() -> String {
     "run".to_string()
 }
@@ -1753,8 +1814,7 @@ fn parse_workflow_duration_ms(raw: &str) -> Option<i64> {
     if trimmed.is_empty() {
         return None;
     }
-    parse_iso_duration_ms(trimmed)
-        .or_else(|| parse_suffix_duration_ms(trimmed))
+    parse_iso_duration_ms(trimmed).or_else(|| parse_suffix_duration_ms(trimmed))
 }
 
 fn parse_iso_duration_ms(raw: &str) -> Option<i64> {
@@ -1835,9 +1895,7 @@ where
     wake_at_from_str(&raw).map_err(de::Error::custom)
 }
 
-fn deserialize_optional_wake_at<'de, D>(
-    deserializer: D,
-) -> Result<Option<DateTime<Utc>>, D::Error>
+fn deserialize_optional_wake_at<'de, D>(deserializer: D) -> Result<Option<DateTime<Utc>>, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -1907,9 +1965,15 @@ fn restored_state(conn: &Connection, run_id: &str) -> Result<String, WorkflowRpc
     )
     .map(|(paused, waiting_key, wake_at)| {
         paused.unwrap_or_else(|| {
-            if waiting_key.as_deref().is_some_and(|key| key.starts_with("wait:")) {
+            if waiting_key
+                .as_deref()
+                .is_some_and(|key| key.starts_with("wait:"))
+            {
                 "waiting".to_string()
-            } else if waiting_key.as_deref().is_some_and(|key| key.starts_with("sleep:")) {
+            } else if waiting_key
+                .as_deref()
+                .is_some_and(|key| key.starts_with("sleep:"))
+            {
                 "sleeping".to_string()
             } else if wake_at.is_none_or(|wake| wake <= now_ms()) {
                 "queued".to_string()
@@ -1941,7 +2005,6 @@ fn status_output(
     }
     Ok(parse_json_opt(output)?.unwrap_or(Value::Null))
 }
-
 
 fn is_terminal(state: &str) -> bool {
     matches!(state, "completed" | "failed" | "cancelled" | "stalled")
@@ -2022,11 +2085,8 @@ mod tests {
     /// `StepResult`, which is exactly what `tick_due` would hand it after a V8
     /// dispatch. Nothing in this module boots V8.
     fn engine(dir: &tempfile::TempDir) -> Arc<DevWorkflowEngine> {
-        DevWorkflowEngine::open(
-            dir.path().join("workflows.sqlite"),
-            Arc::new(NoDispatch),
-        )
-        .expect("open dev engine")
+        DevWorkflowEngine::open(dir.path().join("workflows.sqlite"), Arc::new(NoDispatch))
+            .expect("open dev engine")
     }
 
     /// Insert a run and put it in the exact state `claim_one_due` leaves behind,
@@ -2041,7 +2101,15 @@ mod tests {
              (id, workflow_name, app_id, deploy_id, state, input, journal_bytes, wake_at, \
               started_at, created_at, claimed_by, lease_expires, dispatch_nonce) \
              VALUES (?1, 'CompensateCase', ?2, ?3, 'running', '{}', 2, ?4, ?4, ?4, ?5, ?6, ?7)",
-            params![run_id, TEST_APP, DEV_DEPLOY_ID, now, DEV_OWNER_ID, now + 120_000, nonce],
+            params![
+                run_id,
+                TEST_APP,
+                DEV_DEPLOY_ID,
+                now,
+                DEV_OWNER_ID,
+                now + 120_000,
+                nonce
+            ],
         )
         .expect("insert run");
     }
@@ -2133,16 +2201,18 @@ mod tests {
             .apply_step_result(StepResult {
                 run_id: "run_compensable".to_string(),
                 dispatch_nonce: "disp_1".to_string(),
-                checkpoints: vec![
-                    compensable_completed(0, "reserve"),
-                    failed_step(1, "boom"),
-                ],
-                run_update: RunUpdate::Failed { error: permanent_failure() },
+                checkpoints: vec![compensable_completed(0, "reserve"), failed_step(1, "boom")],
+                run_update: RunUpdate::Failed {
+                    error: permanent_failure(),
+                },
             })
             .expect("apply");
 
         let (state, error) = run_row(&engine, "run_compensable");
-        assert_eq!(state, "failed", "the run must still fail; rollback is not a rescue");
+        assert_eq!(
+            state, "failed",
+            "the run must still fail; rollback is not a rescue"
+        );
         let error = error.expect("failed run must carry an error");
 
         // The original business failure is preserved -- the dev tier annotates
@@ -2157,7 +2227,11 @@ mod tests {
             !comp.is_null(),
             "dev failure carried no compensation report at all: {error}"
         );
-        assert_eq!(comp["supported"], json!(false), "must say dev cannot compensate");
+        assert_eq!(
+            comp["supported"],
+            json!(false),
+            "must say dev cannot compensate"
+        );
         assert_eq!(comp["outcome"], json!("not-attempted"));
         assert_eq!(
             comp["type"], "WorkflowUnsupportedError",
@@ -2209,7 +2283,9 @@ mod tests {
                 run_id: "run_two_batch".to_string(),
                 dispatch_nonce: "disp_b".to_string(),
                 checkpoints: vec![failed_step(1, "boom")],
-                run_update: RunUpdate::Failed { error: permanent_failure() },
+                run_update: RunUpdate::Failed {
+                    error: permanent_failure(),
+                },
             })
             .expect("apply batch 2");
 
@@ -2234,7 +2310,9 @@ mod tests {
                 run_id: "run_plain".to_string(),
                 dispatch_nonce: "disp_p".to_string(),
                 checkpoints: vec![failed_step(0, "boom")],
-                run_update: RunUpdate::Failed { error: permanent_failure() },
+                run_update: RunUpdate::Failed {
+                    error: permanent_failure(),
+                },
             })
             .expect("apply");
 

@@ -11,6 +11,7 @@ pub mod client;
 pub mod dev;
 pub mod engine;
 pub mod errors;
+pub mod operations;
 pub mod store;
 
 pub use backend::{HttpWorkflowBackend, SharedWorkflowBackend, WorkflowBackend};
