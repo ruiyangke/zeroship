@@ -13,7 +13,7 @@ use compio_postgres::error::SqlState;
 use serde_json::Value;
 use uuid::Uuid;
 use zeroship_core::typed_id;
-use zeroship_plugin_workflow::store::pg::{self, WorkflowTables};
+use zeroship_workflow::store::pg::{self, WorkflowTables};
 
 use crate::cron::workflow_engine::SweepCoverage;
 use crate::registry::RegistryError;

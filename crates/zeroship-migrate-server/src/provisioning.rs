@@ -268,7 +268,7 @@ pub async fn provision_migrator(
 /// The schema an app's durable-workflow journal tables live in: `app_<uuid>`.
 ///
 /// Distinct from the app's DATA schema, which is the bare `<uuid>`. Kept in
-/// sync with `zeroship_plugin_workflow::store::pg::app_schema_for`, which
+/// sync with `zeroship_workflow::store::pg::app_schema_for`, which
 /// derives the same name on the read/write side; this crate does not depend on
 /// that one, so the derivation is duplicated rather than shared.
 #[must_use]

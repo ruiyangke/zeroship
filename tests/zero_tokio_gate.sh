@@ -210,7 +210,7 @@ PINNED_CARRIERS="cyper cyper-core hyper hyper-util"
 # grants.
 PINNED_ENTRYPOINTS="compio-s3 zeroship-auth \
 zeroship-control zeroship-core zeroship-gateway zeroship-mailer \
-zeroship-plugin-workflow zeroship-runtime zeroship-worker"
+zeroship-workflow zeroship-runtime zeroship-worker"
 
 fail=0
 TMP="$(mktemp -d)"

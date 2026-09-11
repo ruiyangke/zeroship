@@ -1,8 +1,8 @@
 use uuid::Uuid;
-use zeroship_plugin_workflow::engine::{
+use zeroship_workflow::engine::{
     workflow_journal_limits_from_plan, WorkflowJournalLimits,
 };
-use zeroship_plugin_workflow::store::pg::WorkflowTables;
+use zeroship_workflow::store::pg::WorkflowTables;
 
 use crate::registry::RegistryError;
 

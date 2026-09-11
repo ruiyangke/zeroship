@@ -35,7 +35,7 @@ base64 = { workspace = true }
 rusqlite = { workspace = true, features = ["bundled", "preupdate_hook"] }
 tempfile = { workspace = true }
 tracing-subscriber = { workspace = true }
-zeroship-plugin-workflow = { workspace = true }
+zeroship-workflow = { workspace = true }
 # Fixtures apply the migration engine's schema and privilege statements.
 zeroship-migrate-server = { workspace = true }
 zeroship-migrate-sqlite = { workspace = true }

@@ -21,9 +21,9 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 use zeroship_authn::rate_limit::{self, Quota, RateLimitDecision};
 use zeroship_core::{crypto, typed_id};
-use zeroship_plugin_workflow::engine::{cap_exceeded, WORKFLOW_STATE_CAP_ERROR_CODE};
-use zeroship_plugin_workflow::errors::WorkflowError;
-use zeroship_plugin_workflow::store::pg::{self, WorkflowTables};
+use zeroship_workflow::engine::{cap_exceeded, WORKFLOW_STATE_CAP_ERROR_CODE};
+use zeroship_workflow::errors::WorkflowError;
+use zeroship_workflow::store::pg::{self, WorkflowTables};
 
 use crate::api::infrastructure_error_response;
 use crate::cron::workflow_engine;
