@@ -1,12 +1,14 @@
+use futures::FutureExt;
 use std::io::{Read, Seek, SeekFrom, Write};
+use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
 use tempfile::NamedTempFile;
 use testcontainers::{
+    Container, GenericImage, ImageExt,
     core::{IntoContainerPort, WaitFor},
     runners::SyncRunner,
-    Container, GenericImage, ImageExt,
 };
 
 pub fn root() -> PathBuf {
@@ -19,6 +21,7 @@ pub fn root() -> PathBuf {
 
 pub struct Platform {
     config: NamedTempFile,
+    url: url::Url,
     _postgres: Container<GenericImage>,
 }
 
@@ -75,8 +78,46 @@ impl Platform {
             .expect("write migration config");
         Self {
             config,
+            url,
             _postgres: postgres,
         }
+    }
+
+    pub fn with_database(test: impl AsyncFnOnce(&compio_postgres::Client)) {
+        let platform = Self::start();
+        platform.run("apply", &["--approve"]);
+        let mut config: compio_postgres::Config = platform.url.as_str().parse().unwrap();
+        config
+            .ssl_mode(compio_postgres::config::SslMode::Disable)
+            .connect_timeout(Duration::from_secs(15))
+            .options("-c statement_timeout=15000 -c lock_timeout=5000");
+        compio::runtime::Runtime::new()
+            .expect("database assertions require a compio runtime")
+            .block_on(async {
+                let (client, connection) = config
+                    .connect(compio_postgres::NoTls)
+                    .await
+                    .expect("connect to the fixture's migrated PostgreSQL");
+                let driver = compio::runtime::spawn(async move { connection.run().await });
+                let outcome = AssertUnwindSafe(async {
+                    compio::time::timeout(Duration::from_secs(60), test(&client))
+                        .await
+                        .expect("platform database assertions timed out");
+                })
+                .catch_unwind()
+                .await;
+                drop(client);
+                // Drive this connection's shutdown before the runtime and
+                // container disappear, including after a failed assertion.
+                let closed = compio::time::timeout(Duration::from_secs(10), driver).await;
+                if let Err(panic) = outcome {
+                    std::panic::resume_unwind(panic);
+                }
+                closed
+                    .expect("PostgreSQL connection did not close")
+                    .expect("PostgreSQL driver panicked")
+                    .expect("PostgreSQL connection failed");
+            });
     }
 
     pub fn run(&self, verb: &str, flags: &[&str]) -> Output {

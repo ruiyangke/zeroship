@@ -2,6 +2,8 @@
 
 #[path = "platform_corpus/fixture.rs"]
 mod fixture;
+#[path = "platform_corpus/organization_authority.rs"]
+mod organization_authority;
 
 use serde::Deserialize;
 use serde_json::Value;
