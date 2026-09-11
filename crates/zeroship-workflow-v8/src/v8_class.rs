@@ -17,8 +17,8 @@ use zeroship_runtime_macros::v8_class;
 use zeroship_runtime_macros::{v8_constructor, v8_getter, v8_method, v8_name};
 
 use zeroship_workflow::backend::SharedWorkflowBackend;
-use zeroship_workflow::client::WorkflowRpcError;
 use zeroship_workflow::operations::{RestartOptions, RunOperation, SignalOptions, StartOptions};
+use zeroship_workflow::WorkflowServiceError;
 
 // ---------------------------------------------------------------------------
 // State
@@ -287,7 +287,7 @@ fn setup_promise<'s>(
 
 fn dispatch_json<'s, T: serde::Serialize + 'static>(
     scope: &mut v8::PinScope<'s, '_>,
-    op: impl Future<Output = Result<T, WorkflowRpcError>> + 'static,
+    op: impl Future<Output = Result<T, WorkflowServiceError>> + 'static,
 ) -> v8::Local<'s, v8::Promise> {
     let state = runtime_state(scope);
     let (resolver, request_id, promise) = setup_promise(scope, &state);
@@ -336,7 +336,7 @@ fn dispatch_restart<'s>(
 fn dispatch_run_handle<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     backend: SharedWorkflowBackend,
-    operation: impl Future<Output = Result<String, WorkflowRpcError>> + 'static,
+    operation: impl Future<Output = Result<String, WorkflowServiceError>> + 'static,
 ) -> v8::Local<'s, v8::Promise> {
     let state = runtime_state(scope);
     let (resolver, request_id, promise) = setup_promise(scope, &state);

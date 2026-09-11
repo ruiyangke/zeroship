@@ -10,6 +10,7 @@ use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::{json, Value};
 
+use crate::errors::WorkflowServiceError;
 use crate::operations::{RestartOptions, RunOperation, SignalOptions, StartOptions};
 
 const WORKFLOW_CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
@@ -83,36 +84,6 @@ pub struct WorkflowHttpRequest {
     pub body: Option<Vec<u8>>,
 }
 
-#[derive(Debug)]
-pub enum WorkflowRpcError {
-    InvalidRequest(String),
-    Transport(String),
-    Timeout,
-    Http { status: u16, body: String },
-    Decode(String),
-}
-
-impl std::fmt::Display for WorkflowRpcError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::InvalidRequest(msg) | Self::Transport(msg) | Self::Decode(msg) => {
-                f.write_str(msg)
-            }
-            Self::Timeout => write!(
-                f,
-                "workflow control request timed out after {}s",
-                WORKFLOW_CONTROL_TIMEOUT.as_secs()
-            ),
-            Self::Http { status, body } => write!(
-                f,
-                "workflow control request failed with HTTP {status}: {body}"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for WorkflowRpcError {}
-
 fn path_segment(raw: &str) -> String {
     utf8_percent_encode(raw, PATH_SEGMENT_ENCODE_SET).to_string()
 }
@@ -122,29 +93,29 @@ fn request(
     method: WorkflowHttpMethod,
     path: String,
     body: Option<Value>,
-) -> Result<WorkflowHttpRequest, WorkflowRpcError> {
+) -> Result<WorkflowHttpRequest, WorkflowServiceError> {
     if config.control_url.is_empty() {
-        return Err(WorkflowRpcError::InvalidRequest(
+        return Err(WorkflowServiceError::InvalidRequest(
             "workflows: control URL is not configured".to_string(),
         ));
     }
     if config.app_id.is_empty() {
-        return Err(WorkflowRpcError::InvalidRequest(
+        return Err(WorkflowServiceError::InvalidRequest(
             "workflows: app id is not configured".to_string(),
         ));
     }
     if config.token.is_empty() {
-        return Err(WorkflowRpcError::InvalidRequest(
+        return Err(WorkflowServiceError::InvalidRequest(
             "workflows: app-scoped control token is not configured".to_string(),
         ));
     }
-    let body = match body {
-        Some(value) => Some(
-            serde_json::to_vec(&value)
-                .map_err(|e| WorkflowRpcError::InvalidRequest(format!("serialize body: {e}")))?,
-        ),
-        None => None,
-    };
+    let body =
+        match body {
+            Some(value) => Some(serde_json::to_vec(&value).map_err(|e| {
+                WorkflowServiceError::InvalidRequest(format!("serialize body: {e}"))
+            })?),
+            None => None,
+        };
     Ok(WorkflowHttpRequest {
         method,
         url: format!("{}{}", config.control_url, path),
@@ -163,7 +134,7 @@ pub fn build_start_request(
     config: &WorkflowClientConfig,
     workflow_name: &str,
     options: StartOptions,
-) -> Result<WorkflowHttpRequest, WorkflowRpcError> {
+) -> Result<WorkflowHttpRequest, WorkflowServiceError> {
     request(
         config,
         WorkflowHttpMethod::Post,
@@ -175,7 +146,7 @@ pub fn build_start_request(
 pub fn build_get_status_request(
     config: &WorkflowClientConfig,
     run_id: &str,
-) -> Result<WorkflowHttpRequest, WorkflowRpcError> {
+) -> Result<WorkflowHttpRequest, WorkflowServiceError> {
     request(
         config,
         WorkflowHttpMethod::Get,
@@ -188,7 +159,7 @@ pub fn build_signal_request(
     config: &WorkflowClientConfig,
     run_id: &str,
     options: SignalOptions,
-) -> Result<WorkflowHttpRequest, WorkflowRpcError> {
+) -> Result<WorkflowHttpRequest, WorkflowServiceError> {
     request(
         config,
         WorkflowHttpMethod::Post,
@@ -201,7 +172,7 @@ pub fn build_transition_request(
     config: &WorkflowClientConfig,
     run_id: &str,
     op: RunOperation,
-) -> Result<WorkflowHttpRequest, WorkflowRpcError> {
+) -> Result<WorkflowHttpRequest, WorkflowServiceError> {
     request(
         config,
         WorkflowHttpMethod::Post,
@@ -218,7 +189,7 @@ pub fn build_restart_request(
     config: &WorkflowClientConfig,
     run_id: &str,
     options: RestartOptions,
-) -> Result<WorkflowHttpRequest, WorkflowRpcError> {
+) -> Result<WorkflowHttpRequest, WorkflowServiceError> {
     request(
         config,
         WorkflowHttpMethod::Post,
@@ -232,9 +203,9 @@ pub fn build_read_step_output_request(
     run_id: &str,
     name: &str,
     occurrence: u32,
-) -> Result<WorkflowHttpRequest, WorkflowRpcError> {
+) -> Result<WorkflowHttpRequest, WorkflowServiceError> {
     if matches!(run_id, "" | "." | "..") || matches!(name, "" | "." | "..") {
-        return Err(WorkflowRpcError::InvalidRequest(
+        return Err(WorkflowServiceError::InvalidRequest(
             "workflow output requires a run id and step name".into(),
         ));
     }
@@ -250,62 +221,137 @@ pub fn build_read_step_output_request(
     )
 }
 
-fn encode_options(options: impl Serialize) -> Result<Value, WorkflowRpcError> {
+fn encode_options(options: impl Serialize) -> Result<Value, WorkflowServiceError> {
     serde_json::to_value(options)
-        .map_err(|error| WorkflowRpcError::InvalidRequest(error.to_string()))
+        .map_err(|error| WorkflowServiceError::InvalidRequest(error.to_string()))
 }
 
 pub async fn execute_json<T: DeserializeOwned>(
     req: WorkflowHttpRequest,
-) -> Result<T, WorkflowRpcError> {
+) -> Result<T, WorkflowServiceError> {
     let bytes = execute_bytes(req).await?;
     serde_json::from_slice(&bytes)
-        .map_err(|e| WorkflowRpcError::Decode(format!("decode workflow response JSON: {e}")))
+        .map_err(|e| WorkflowServiceError::Internal(format!("decode workflow response JSON: {e}")))
 }
 
-pub async fn execute_bytes(req: WorkflowHttpRequest) -> Result<Vec<u8>, WorkflowRpcError> {
+pub async fn execute_bytes(req: WorkflowHttpRequest) -> Result<Vec<u8>, WorkflowServiceError> {
     let client = this_thread_client();
     let mut builder = match req.method {
         WorkflowHttpMethod::Get => client.get(&req.url),
         WorkflowHttpMethod::Post => client.post(&req.url),
     }
-    .map_err(|e| WorkflowRpcError::InvalidRequest(format!("invalid workflow control URL: {e}")))?;
+    .map_err(|e| {
+        WorkflowServiceError::InvalidRequest(format!("invalid workflow control URL: {e}"))
+    })?;
 
     builder = builder
         .header("authorization", &req.authorization)
-        .map_err(|e| WorkflowRpcError::InvalidRequest(format!("invalid auth header: {e}")))?;
+        .map_err(|e| WorkflowServiceError::InvalidRequest(format!("invalid auth header: {e}")))?;
     builder = builder
         .header("x-zeroship-app-id", &req.app_id_header)
-        .map_err(|e| WorkflowRpcError::InvalidRequest(format!("invalid app header: {e}")))?;
+        .map_err(|e| WorkflowServiceError::InvalidRequest(format!("invalid app header: {e}")))?;
     if req.body.is_some() {
         builder = builder
             .header("content-type", "application/json")
             .map_err(|e| {
-                WorkflowRpcError::InvalidRequest(format!("invalid content-type header: {e}"))
+                WorkflowServiceError::InvalidRequest(format!("invalid content-type header: {e}"))
             })?;
     }
 
-    let send = async {
-        match req.body {
+    let exchange = async {
+        let response = match req.body {
             Some(body) => builder.body(body).send().await,
             None => builder.send().await,
         }
-    };
-    let response = compio::time::timeout(WORKFLOW_CONTROL_TIMEOUT, send)
-        .await
-        .map_err(|_| WorkflowRpcError::Timeout)?
-        .map_err(|e| WorkflowRpcError::Transport(e.to_string()))?;
+        .map_err(|e| WorkflowServiceError::Unavailable(e.to_string()))?;
 
-    let status = response.status().as_u16();
-    let bytes = response
-        .bytes()
+        let status = response.status().as_u16();
+        let bytes = response.bytes().await.map_err(|e| {
+            WorkflowServiceError::Unavailable(format!("read workflow response body: {e}"))
+        })?;
+        if !(200..300).contains(&status) {
+            return Err(response_error(status, &bytes));
+        }
+        Ok(bytes.to_vec())
+    };
+    compio::time::timeout(WORKFLOW_CONTROL_TIMEOUT, exchange)
         .await
-        .map_err(|e| WorkflowRpcError::Transport(format!("read workflow response body: {e}")))?;
-    if !(200..300).contains(&status) {
-        return Err(WorkflowRpcError::Http {
-            status,
-            body: String::from_utf8_lossy(&bytes).to_string(),
-        });
+        .map_err(|_| WorkflowServiceError::Timeout)?
+}
+
+fn response_error(status: u16, body: &[u8]) -> WorkflowServiceError {
+    // Only structured client-error messages may cross the adapter. Proxy HTML,
+    // database failures and arbitrary server bodies are not domain messages.
+    let message = || {
+        let value: Value = serde_json::from_slice(body).ok()?;
+        value
+            .get("message")
+            .or_else(|| value.get("error"))?
+            .as_str()
+            .map(str::to_owned)
+    };
+    match status {
+        400 | 422 => WorkflowServiceError::InvalidRequest(
+            message().unwrap_or_else(|| "invalid workflow request".into()),
+        ),
+        401 => WorkflowServiceError::Unauthenticated,
+        403 => WorkflowServiceError::PermissionDenied,
+        404 => WorkflowServiceError::NotFound("workflow resource not found".into()),
+        409 => WorkflowServiceError::Conflict(
+            message().unwrap_or_else(|| "workflow operation conflicts with current state".into()),
+        ),
+        413 => WorkflowServiceError::PayloadTooLarge,
+        429 => WorkflowServiceError::ResourceExhausted(
+            message().unwrap_or_else(|| "workflow capacity is exhausted".into()),
+        ),
+        408 | 504 => WorkflowServiceError::Timeout,
+        500..=599 => WorkflowServiceError::Unavailable("workflow service is unavailable".into()),
+        _ => {
+            WorkflowServiceError::Internal(format!("unexpected workflow response status: {status}"))
+        }
     }
-    Ok(bytes.to_vec())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remote_failures_have_domain_types() {
+        assert!(matches!(
+            response_error(401, b""),
+            WorkflowServiceError::Unauthenticated
+        ));
+        assert!(matches!(
+            response_error(403, b""),
+            WorkflowServiceError::PermissionDenied
+        ));
+        assert!(matches!(
+            response_error(404, b""),
+            WorkflowServiceError::NotFound(_)
+        ));
+        assert_eq!(
+            response_error(
+                409,
+                br#"{"error":"RunConflict","message":"key already exists"}"#
+            ),
+            WorkflowServiceError::Conflict("key already exists".into())
+        );
+        assert!(matches!(
+            response_error(429, b""),
+            WorkflowServiceError::ResourceExhausted(_)
+        ));
+    }
+
+    #[test]
+    fn server_details_and_non_json_proxy_bodies_are_not_exposed() {
+        let secret = b"database password=sensitive";
+        assert!(!response_error(500, secret)
+            .to_string()
+            .contains("sensitive"));
+        assert!(!response_error(409, secret)
+            .to_string()
+            .contains("sensitive"));
+        assert_eq!(response_error(404, secret), response_error(404, b""));
+    }
 }

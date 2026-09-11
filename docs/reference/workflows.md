@@ -32,6 +32,9 @@ The `operations` module defines typed requests and responses for these calls:
 `StartOptions`, `SignalOptions`, `RestartOptions`, `RunOperation` and `RunState`.
 Only workflow input, output and signal payloads are arbitrary JSON. Transport
 serialization belongs to the HTTP client and V8 binding.
+Operations return `WorkflowServiceError`, so Rust callers can match not-found,
+conflict, authorization and capacity failures without interpreting HTTP status
+codes. The V8 adapter exposes the corresponding `workflow_*` error codes.
 
 `WorkflowBinding` performs the same binding for JavaScript. The host derives
 its app-scoped credential with `app_scoped_token`; the control key stays outside

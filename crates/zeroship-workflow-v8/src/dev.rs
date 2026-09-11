@@ -11,7 +11,7 @@ use zeroship_runtime::{
     EnvSnapshot, ModuleEntry, RequestCtx, Runtime, SettledWorkflow, WorkflowOutcome,
 };
 
-use zeroship_workflow::{WorkflowExecutor, WorkflowRpcError};
+use zeroship_workflow::{WorkflowExecutor, WorkflowServiceError};
 
 const DEV_DISPATCH_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -37,7 +37,7 @@ impl V8WorkflowExecutor {
 
 #[async_trait(?Send)]
 impl WorkflowExecutor for V8WorkflowExecutor {
-    async fn dispatch(&self, envelope: &str) -> Result<String, WorkflowRpcError> {
+    async fn dispatch(&self, envelope: &str) -> Result<String, WorkflowServiceError> {
         zeroship_runtime::init_v8();
         let runtime = Runtime::builder()
             .modules(self.modules.clone())
@@ -57,11 +57,11 @@ impl WorkflowExecutor for V8WorkflowExecutor {
                 runtime.notify_pump();
                 match compio::time::timeout(DEV_DISPATCH_TIMEOUT, rx.recv()).await {
                     Ok(Ok(SettledWorkflow { json, .. })) => Ok(json),
-                    Ok(Err(e)) => Err(WorkflowRpcError::Transport(e.message)),
+                    Ok(Err(e)) => Err(WorkflowServiceError::Unavailable(e.message)),
                     Err(_) => {
                         cancel.cancel();
                         runtime.notify_pump();
-                        Err(WorkflowRpcError::Timeout)
+                        Err(WorkflowServiceError::Timeout)
                     }
                 }
             }
