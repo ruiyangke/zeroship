@@ -55,7 +55,10 @@ Rust remote app handles now refresh those capabilities through the enrolled
 worker identity. Clones share only their app's cache. Expiry and authentication
 rejection trigger bounded renewal; retries preserve mutation identity and refuse
 to fall back to stale authority when Control is unavailable.
-The worker polling loop, public HTTP ingress, retention of
+The shared runner now drives embedded and remote task transports, renews leases
+and retries completion receipts without re-executing callbacks. Execution slots
+hold capacity until the host confirms shutdown or quarantine, including after
+caller cancellation. The V8 host and worker polling loop, public HTTP ingress, retention of
 completed run graphs and interpreter cutover remain in progress. The
 current runtime still uses Control and the local mini-engine.
 
@@ -302,6 +305,14 @@ Worker                            Workflow server                 Store
   |<-- accepted -------------------------|                          |
   | release local capacity               |                          |
 ```
+
+Assignments and heartbeats carry the granted lease duration alongside the
+database deadline. A runner subtracts transport elapsed time from that duration
+and uses a monotonic clock, avoiding assumptions about wall-clock agreement
+between a worker and the database. An exhausted local lease budget signals
+cancellation and holds the slot until shutdown or quarantine completes.
+Completion retries retain the accepted
+outcomes and remain bounded independently of ongoing heartbeats.
 
 Workers report available execution capacity and compatible runtime capabilities.
 Deploy affinity is a cache hint; it does not confer ownership or authorize app
