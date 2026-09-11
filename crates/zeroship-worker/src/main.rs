@@ -102,16 +102,13 @@ fn enforce_worker_credentials(
     }
 }
 
-/// `true` iff the worker must REFUSE to start with this `DATABASE_URL` (SQLite-
-/// engine wiring design R3.4 fix 2). SQLite is the dev tier only; a multi-
-/// replica worker fed a `sqlite:`/`file:` DSN would run concurrent
-/// cross-process migrations on one file with a no-op project lock — a
-/// data-corruption class. Classification routes through the shared
-/// `zeroship_core::db_url::is_sqlite_url` so the grammar matches plugin-db's
-/// opener exactly. The authority is the worker's identity, not an env flag:
-/// SQLite is refused even if `ZEROSHIP_DEV=1` leaked into a prod worker.
+/// Workers accept PostgreSQL only. Absence is handled separately so an
+/// auth-only worker and a configuration dry run need no database connection.
 fn worker_rejects_db_url(db_url: &str) -> bool {
-    zeroship_core::db_url::is_sqlite_url(db_url)
+    let normalized = db_url.trim().to_ascii_lowercase();
+    !normalized.is_empty()
+        && !normalized.starts_with("postgres://")
+        && !normalized.starts_with("postgresql://")
 }
 
 /// Whether `bind_host` reaches only this machine.
@@ -385,23 +382,13 @@ fn main() -> std::io::Result<()> {
         std::process::exit(1);
     }
 
-    // SQLite is the DEV TIER ONLY — refuse it on the worker (SQLite-engine
-    // wiring design R3.4 fix 2 / the re-keyed C1 guard). The worker is
-    // multi-replica BY IDENTITY: N replicas fed a `sqlite:`/`file:` DSN would
-    // each open their own SqliteBackend on a (possibly shared-volume) file with
-    // the engine's project-lock a no-op — concurrent cross-process apply with
-    // zero serialization (a data-corruption class). Prod is always
-    // `postgres://`; a SQLite DSN here is always a misconfig. The authority is
-    // the worker's IDENTITY, not an env flag — this refuses SQLite even if
-    // someone exported `ZEROSHIP_DEV=1` into a prod worker. We classify through
-    // the shared `zeroship_core::db_url::is_sqlite_url` (the same grammar
-    // plugin-db's `backend_for_url` opens with). Under `--check-config` a DSN
-    // supplied by a file the dry run deliberately did not read classifies as the
-    // empty string, which is not SQLite, so a dry run never false-positives.
+    // SQLite belongs to local `zeroship serve`. Require a PostgreSQL selector
+    // here rather than treating an invalid SQLite selector as another backend.
+    // A configuration dry run deliberately leaves secret files unread.
     if worker_rejects_db_url(&db_url) {
         tracing::error!(
-            "worker: refusing to start with a SQLite ZEROSHIP_WORKER_DATABASE_URL; SQLite is the dev tier \
-             only (single-process `zeroship serve`); a multi-replica worker MUST use a postgres:// DSN"
+            "worker: ZEROSHIP_WORKER_DATABASE_URL must select PostgreSQL; \
+             file-backed SQLite belongs to local `zeroship serve`"
         );
         std::process::exit(1);
     }
@@ -1057,13 +1044,24 @@ mod tests {
 
     #[test]
     fn worker_rejects_sqlite_database_url() {
-        // SQLite is the dev tier only — the worker hard-aborts (design R3.4
-        // fix 2). Every SQLite DSN shape the dev tier accepts must be refused.
+        // File-backed SQLite and ephemeral selectors are both refused.
         assert!(worker_rejects_db_url("sqlite:.zeroship/dev.sqlite"));
         assert!(worker_rejects_db_url("sqlite://./data/app.sqlite"));
         assert!(worker_rejects_db_url("file:./local.db"));
         assert!(worker_rejects_db_url(":memory:"));
         assert!(worker_rejects_db_url("/var/lib/zeroship/dev.sqlite"));
+    }
+
+    #[test]
+    fn worker_rejects_invalid_and_unsupported_database_selectors() {
+        for selector in [
+            "sqlite:",
+            "sqlite::memory:",
+            "file:db?mode=memory",
+            "mysql://localhost/db",
+        ] {
+            assert!(worker_rejects_db_url(selector), "{selector}");
+        }
     }
 
     #[test]
@@ -1274,7 +1272,7 @@ mod tests {
             .get_arguments()
             .filter_map(|arg| arg.get_long().map(str::to_owned))
             .collect::<Vec<_>>();
-        for secret in ["control-key", "database-url", "kv-url"] {
+        for secret in ["control-key", "database-url", "kv-config"] {
             assert!(
                 longs.iter().any(|long| long == &format!("{secret}-file")),
                 "{secret} must offer a -file path flag: {longs:?}"

@@ -101,16 +101,6 @@ ALLOW=(
   # was wired into CI.
   "libs/compio-postgres/tests/suite/integration.rs|the statement under test is CREATE DATABASE WITH TEMPLATE itself"
 
-  # ON THE MERITS, and the same merit as the row above: the SUBJECT of
-  # `c1_cleanup_sweep_does_not_cross_database_boundaries` is that the residue
-  # sweep must not reach ANOTHER database's replication slots. A second database
-  # on the same cluster is not this test's isolation strategy, it is the thing
-  # being observed - `pg_replication_slots` is a cluster-wide view, so a test
-  # confined to one database cannot see the bug it guards. It creates the
-  # neighbour, drops it first with `DROP DATABASE IF EXISTS`, and holds
-  # `cdc_budget::exclusive()` while it runs.
-  "crates/zeroship-data-v8/tests/integration.rs|the subject is a sweep crossing database boundaries, which one database cannot show"
-
   # NOT an exemption on the merits - a TRACKED VIOLATION, listed so the gate
   # reports the rest of the tree rather than staying unwritten until this is
   # fixed. `build_isolated_fixture_with_gateway` clones a whole database per

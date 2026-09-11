@@ -338,14 +338,13 @@ tier() {
     # matching nothing, a map claiming coverage it does not have. Kept in step
     # with tier_direction_census.sh, where the two censuses judging one file
     # differently is defect 1.
-    ./crud/*|./transaction/*|./exec.rs|./backend_selection.rs|./tx_route.rs|./drop_namespace.rs) echo "ENGINE" ;;
+    ./crud/*|./transaction/*|./exec.rs|./backend_selection.rs|./tx_route.rs) echo "ENGINE" ;;
     ./auth/bootstrap.rs)                                 echo "ENGINE" ;;
     # NO ARMS for ./backend/postgres.rs, ./backend/pg_*.rs, ./backend/sqlite/*,
     # ./encryption/* or ./lock_policy.rs. Every one of those was extracted into
     # a dependency crate before 2026-09-03 and the arms were patterns matching
     # nothing - a map claiming coverage it does not have. Deleted rather than
     # kept, exactly as the `broker`/`read_set` note above describes.
-    ./wal_consumer.rs|./replication.rs|./slot_reaper.rs) echo "CDC" ;;
     # CORE is now HALF EXTRACTED. `error.rs` and `binding.rs` left for
     # `zeroship-data-core`; this census scans only `zeroship-data-v8/src`, so
     # naming them here would be two patterns that match nothing - a map claiming
@@ -358,7 +357,6 @@ tier() {
     # judging one file differently is defect 1 in that file.
     ./context.rs|./service.rs|./op_error.rs)              echo "ADAPTER" ;;
     ./tx_lanes.rs|./backend_handle.rs|./backend/cancel.rs|./system_shape_charter.rs|./metrics.rs) echo "ENGINE" ;;
-    ./cdc_lifecycle.rs|./change_stream_pg.rs)            echo "CDC" ;;
     # `descriptor.rs` was CORE here and data-engine in the proposal; SETTLED as
     # ENGINE on 2026-09-03 by the cut, and changed in the same commit as
     # tier_direction_census.sh - the two censuses judging one file differently

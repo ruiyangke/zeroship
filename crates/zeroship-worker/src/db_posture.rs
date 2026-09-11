@@ -311,6 +311,18 @@ mod tests {
         assert!(validate(&posture).is_ok());
     }
 
+    /// Validate the shipped role after the sanctioned platform corpus is applied.
+    #[compio::test]
+    async fn worker_boot_accepts_the_migrated_role_without_replication() {
+        let mut worker_url = url::Url::parse(&zeroship_core::config::test_database_url())
+            .expect("required PostgreSQL fixture URL");
+        worker_url.set_username(WORKER_DATABASE_ROLE).unwrap();
+        worker_url.set_password(Some(WORKER_DATABASE_ROLE)).unwrap();
+        validate_database_url(worker_url.as_str())
+            .await
+            .expect("the migrated worker role must satisfy the production boot gate");
+    }
+
     #[test]
     fn rejects_any_effective_write_to_the_platform_schema() {
         let mut posture = narrow_posture();

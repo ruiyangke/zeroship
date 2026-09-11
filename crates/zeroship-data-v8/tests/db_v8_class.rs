@@ -465,17 +465,14 @@ fn db_platform_handle_reachable_via_private_symbol() {
         value.is_function(),
         "__platform.setMaskPolicy must be a function on the capability handle"
     );
-    // And the namespace getters resolve to objects. `replication` is the only
-    // one left: the migrations namespace went away with the SDK that backed it,
-    // and migrations are now applied by the migration service rather than
-    // through `env.db`.
+    // Replication belongs to the relay process, including internal callers.
     {
         let name = "replication";
         let key = v8::String::new(scope, name).unwrap();
         let v = handle_obj.get(scope, key.into()).expect("get");
         assert!(
-            v.is_object(),
-            "__platform.{name} must resolve to a namespace object"
+            v.is_undefined(),
+            "__platform.{name} must not expose relay operations in V8"
         );
     }
 }
