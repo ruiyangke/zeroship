@@ -26,7 +26,8 @@ function fixture() {
   const installSchema = () => ({ collections: {} });
   const load = async (name: string) => name === "@zeroship/db/internal"
     ? { _flushPendingMaskPolicy } : { installSchema };
-  return { installed, db, installSchema, wrapper: () => new AsyncFunction("load", source)(load) };
+  return { installed, db, installSchema, wrapper: (devMode = false) =>
+    new AsyncFunction("load", "__zsAllowDeferredSchemaInstall", source)(load, devMode) };
 }
 
 test("the runtime wrapper leaves lazy app policy initialization to devEntry", async () => {
@@ -43,7 +44,7 @@ test("the runtime wrapper leaves lazy app policy initialization to devEntry", as
     getDevAuthEnv: () => undefined,
     logger: { log: () => {}, error: () => {} },
   });
-  await f.wrapper();
+  await f.wrapper(true);
   assert.deepEqual(f.installed, []);
   assert.equal(global.__zsDbPlatform, undefined);
   assert.equal(global.__zsDeferSchemaInstall, undefined);
@@ -61,5 +62,16 @@ test("ordinary runtime startup seals even an undeclared policy", async () => {
   await global.__zsSchemaReady;
   assert.deepEqual(f.installed, [{}]);
   assert.throws(() => defineMaskPolicy({ support: ["pii"] }), { code: "MASK_POLICY_IMMUTABLE" });
+  assert.equal(global.__zsDbPlatform, undefined);
+});
+
+test("a creator global cannot defer production policy sealing", async () => {
+  const f = fixture();
+  global.__zsDeferSchemaInstall = true;
+  await f.wrapper();
+  await global.__zsSchemaReady;
+  assert.deepEqual(f.installed, [{}]);
+  assert.throws(() => defineMaskPolicy({ support: ["pii"] }), { code: "MASK_POLICY_IMMUTABLE" });
+  assert.equal(global.__zsDeferSchemaInstall, undefined);
   assert.equal(global.__zsDbPlatform, undefined);
 });

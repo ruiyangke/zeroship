@@ -310,13 +310,16 @@ export class Platform {
       assert(log.includes("usage-event outbox started"), `${name} must publish metering events`);
       assert(!log.includes("DISABLED"), `${name} must not disable its usage producer`);
     }
-    // Node does not resolve wildcard localhost names; Chromium does.
-    const probe = `${gateway.url}/hit/ready`;
+    // Use path routing for Node, which does not resolve wildcard localhost and
+    // ignores a fetch Host override. Chromium uses the app hostname directly.
+    const probe = `${gateway.url}/apps/db-hitcounter/hit/ready`;
     await this.waitFor("deployed database", async () => {
       this.readyRequests++;
-      const response = await fetch(probe, { headers: { host: "db-hitcounter.localhost" }, signal: AbortSignal.timeout(5000) });
+      const response = await fetch(probe, { signal: AbortSignal.timeout(5000) });
       const value = await response.json();
-      return response.ok && value.wrote === true && value.readBack > 0;
+      await writeFile(join(this.logs, "readiness.json"), JSON.stringify({ status: response.status, value }));
+      assert(response.ok && value.wrote === true && value.readBack > 0, `Database readiness: HTTP ${response.status}: ${JSON.stringify(value)}`);
+      return true;
     });
   }
 

@@ -48,6 +48,10 @@
 // for the same pattern.
 export {};
 
+// Private bootstrap-module binding emitted by the Rust host. Creator globals
+// cannot turn a production runtime into a deferred dev entry.
+declare const __zsAllowDeferredSchemaInstall: boolean;
+
 declare const globalThis: {
   __zs_env?: () => { db?: unknown } | undefined;
   // **P9 §8** — the capability-handle resolver the runtime installs.
@@ -75,7 +79,7 @@ const descriptor = globalThis.__zsRuntimeDescriptor;
 // Vite's dev entry captured the private platform resolver during evaluation
 // and owns installation after importing the creator module. Sealing here would
 // freeze the default policy before the app could declare its startup policy.
-const deferredInstall = globalThis.__zsDeferSchemaInstall === true;
+const deferredInstall = __zsAllowDeferredSchemaInstall && globalThis.__zsDeferSchemaInstall === true;
 delete globalThis.__zsDeferSchemaInstall;
 const hasDescriptor =
   descriptor != null &&

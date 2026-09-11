@@ -60,10 +60,16 @@ export default { fetch: _zsFetch, rpc: _zsRpcAndRespond };
 
 fn dispatch(source: &str, name: &str) -> (u16, serde_json::Value) {
     init_v8();
-    let modules = vec![ModuleEntry {
-        specifier: "index.js".into(),
-        source: source.into(),
-    }];
+    let modules = vec![
+        ModuleEntry {
+            specifier: "index.js".into(),
+            source: source.into(),
+        },
+        ModuleEntry {
+            specifier: "@zeroship/db".into(),
+            source: include_str!("../../../sdks/db/dist/index.js").into(),
+        },
+    ];
     let plugins: Vec<Arc<dyn NativePlugin>> = vec![
         DbService::new(DbServiceConfig {
             connection: zeroship_data_orm::connection::ConnectionFactory::for_url("postgres://_platform_fence_unused")
@@ -130,6 +136,33 @@ const _procedures = { probe };
         json.get("resolver").and_then(|v| v.as_str()),
         Some("undefined"),
         "globalThis.__zsDbPlatform must be deleted before creator handlers run; body={body}"
+    );
+}
+
+#[test]
+fn creator_globals_cannot_defer_production_mask_policy_sealing() {
+    let user_code = r#"
+import { defineMaskPolicy } from "@zeroship/db";
+globalThis.__zsRuntimeDescriptor = { version: 2, collections: {} };
+globalThis.__zsDeferSchemaInstall = true;
+globalThis.__zsAllowDeferredSchemaInstall = true;
+function probe() {
+    try {
+        defineMaskPolicy({ support: ["pii"] });
+        return { changed: true };
+    } catch (error) {
+        return { changed: false, code: error.code };
+    }
+}
+const _procedures = { probe };
+"#;
+    let src = format!("{user_code}\n{SHIM}");
+    let (status, body) = dispatch(&src, "probe");
+    assert_eq!(status, 200, "policy probe failed: {body}");
+    assert_eq!(
+        body["json"],
+        serde_json::json!({ "changed": false, "code": "MASK_POLICY_IMMUTABLE" }),
+        "creator globals must not suppress the host's production startup: {body}"
     );
 }
 

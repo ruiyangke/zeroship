@@ -2416,7 +2416,13 @@ fn wrap_with_bootstrap(
     // entry 0: bootstrap becomes the new entrypoint under "index.js".
     out.push(ModuleEntry {
         specifier: "index.js".into(),
-        source: BOOTSTRAP_JS.clone(),
+        // Keep this host decision in the bootstrap module's lexical scope;
+        // an app-controlled global must not suppress production policy sealing.
+        source: format!(
+            "const __zsAllowDeferredSchemaInstall = {};\n{}",
+            crate::transport::ssrf::dev_mode_enabled(),
+            &*BOOTSTRAP_JS,
+        ),
     });
 
     // entry 1: internal kind bridge. The bootstrap imports this before
