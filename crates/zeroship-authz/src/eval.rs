@@ -230,7 +230,8 @@ fn build_request(
 /// This map and the `RequestContext` type in
 /// `deploy/policies/zeroship.cedarschema` must agree EXACTLY, in both
 /// directions - a schema-bound request refuses a missing key and an extra one
-/// alike. `tests/cedar_schema_vocabulary_gate.sh` compares the two.
+/// alike. `every_action_builds_a_schema_bound_request_at_every_resource_type`
+/// exercises this contract through the real request builder.
 fn build_context(ctx: &AuthzContext<'_>, authority: &Authority) -> Result<Context, AuthzError> {
     let request_ip = ctx
         .request_ip

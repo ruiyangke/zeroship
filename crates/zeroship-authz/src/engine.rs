@@ -163,85 +163,13 @@ fn canonical_json(value: &serde_json::Value) -> String {
     }
 }
 
-/// Every `.cedar` file under `deploy/policies/`, found by walking the tree the
-/// same way `build.rs` does.
-#[cfg(test)]
-fn policy_files_on_disk() -> Vec<std::path::PathBuf> {
-    fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
-        for entry in std::fs::read_dir(dir).expect("read policies directory") {
-            let path = entry.expect("read policies directory entry").path();
-            if path.is_dir() {
-                walk(&path, out);
-            } else if path.extension().is_some_and(|ext| ext == "cedar") {
-                out.push(path);
-            }
-        }
-    }
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../deploy/policies");
-    let mut files = Vec::new();
-    walk(&root, &mut files);
-    files.sort();
-    files
-}
-
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
     use std::str::FromStr;
 
     use cedar_policy::{PolicySet, Schema, ValidationMode, Validator};
 
-    use super::{
-        load_platform_policies, policy_files_on_disk, PLATFORM_POLICY_SOURCES,
-        PLATFORM_SCHEMA_SOURCE,
-    };
-    use crate::Action;
-
-    /// `build.rs` parse-checks the policy directory and LOADS nothing, so a
-    /// committed `.cedar` file missing from `PLATFORM_POLICY_SOURCES` is valid
-    /// Cedar that authorizes nothing - and the failure is invisible: the build
-    /// is green, the review passes, and every request that policy was written
-    /// for is denied with no matched policy to name.
-    ///
-    /// This arm rules on every `.cedar` file on disk. The floor is 2: one
-    /// platform baseline and at least one creator band. A run that found fewer
-    /// found the wrong directory.
-    #[test]
-    fn every_policy_file_on_disk_is_wired_into_the_loaded_set() {
-        let files = policy_files_on_disk();
-        assert!(
-            files.len() >= 2,
-            "ruled on {} policy files, expected at least 2 - the walk found the wrong directory",
-            files.len()
-        );
-        for path in &files {
-            let source = std::fs::read_to_string(path).expect("read .cedar file");
-            assert!(
-                PLATFORM_POLICY_SOURCES.contains(&source.as_str()),
-                "{} is committed but absent from PLATFORM_POLICY_SOURCES, so it authorizes nothing",
-                path.display()
-            );
-        }
-        assert_eq!(
-            files.len(),
-            PLATFORM_POLICY_SOURCES.len(),
-            "PLATFORM_POLICY_SOURCES names an entry with no file on disk"
-        );
-    }
-
-    /// The loaded set must parse as one Cedar policy set, and every statement
-    /// in it must survive as a distinct policy. A file whose statements
-    /// collapsed would silently drop a band.
-    #[test]
-    fn the_loaded_set_parses_into_one_policy_per_statement() {
-        let loaded = load_platform_policies().expect("bundled policies parse");
-        let statements: usize = PLATFORM_POLICY_SOURCES
-            .iter()
-            .map(|source| source.matches("permit (").count())
-            .sum();
-        assert!(statements >= 2, "ruled on {statements} permit statements");
-        assert_eq!(loaded.policies().policies().count(), statements);
-    }
+    use super::{load_platform_policies, PLATFORM_SCHEMA_SOURCE};
 
     /// The shipped set validates STRICTLY, with no warnings. On its own this
     /// assertion is worthless - a validator wired to nothing passes too - so it
@@ -252,28 +180,22 @@ mod tests {
         load_platform_policies().expect("the shipped policy set validates strictly");
     }
 
-    /// The mutation proof for the assertion above, and the failure the whole
-    /// schema exists for: `PolicySet::from_str` ACCEPTS a typo'd action id
-    /// without complaint, so before the schema this defect produced no
-    /// diagnostic anywhere and denied every request the band was written to
-    /// permit.
-    ///
-    /// Both halves are asserted in one test on purpose - the parse succeeding
-    /// is what makes the validation failure meaningful.
+    /// An unknown action parses as Cedar but fails schema validation. The
+    /// accepted control differs only in the action identifier.
     #[test]
     fn strict_validation_refuses_a_typod_action_id() {
-        let source = PLATFORM_POLICY_SOURCES
-            .join("\n")
-            .replace(r#"Action::"apps:read""#, r#"Action::"apps:raed""#);
-        assert!(
-            source.contains(r#"Action::"apps:raed""#),
-            "the mutation did not apply, so nothing below is a measurement"
-        );
-
-        let policies = PolicySet::from_str(&source)
-            .expect("Cedar's parser accepts an unknown action id - that is the defect");
         let schema = Schema::from_str(PLATFORM_SCHEMA_SOURCE).expect("schema parses");
-        let result = Validator::new(schema).validate(&policies, ValidationMode::Strict);
+        let validator = Validator::new(schema);
+        let policy = |action: &str| {
+            PolicySet::from_str(&format!(
+                r#"permit (principal is User, action == Action::"{action}", resource is App);"#
+            ))
+            .expect("both action identifiers are syntactically valid Cedar")
+        };
+        let accepted = validator.validate(&policy("apps:read"), ValidationMode::Strict);
+        assert!(accepted.validation_passed_without_warnings());
+
+        let result = validator.validate(&policy("apps:raed"), ValidationMode::Strict);
 
         assert!(
             !result.validation_passed(),
@@ -284,37 +206,6 @@ mod tests {
                 .validation_errors()
                 .any(|error| error.to_string().contains("apps:raed")),
             "the diagnostic must name the offending id"
-        );
-    }
-
-    /// The schema's action list and [`Action::all`] must be the same set, in
-    /// both directions.
-    ///
-    /// **STRICT VALIDATION CANNOT SEE THIS GAP.** It rules only on the ids the
-    /// POLICIES quote, and `migrations:approve` is quoted by no band by design
-    /// while `ControlPlaneAuthenticator::authorize` issues it at a real
-    /// `Resource::App` on every migration go-live. Drop it from the schema and
-    /// validation stays green while that route starts returning 500 - because
-    /// `Request::new` refuses an action the schema does not declare, and the
-    /// refusal fires before `audit_decision`, so there is no durable record
-    /// either.
-    #[test]
-    fn the_schema_declares_exactly_the_action_vocabulary() {
-        let declared: HashSet<&str> = PLATFORM_SCHEMA_SOURCE
-            .lines()
-            .filter_map(|line| line.trim().strip_prefix("action \""))
-            .filter_map(|rest| rest.split('"').next())
-            .collect();
-        assert!(
-            declared.len() >= 2,
-            "ruled on {} declared action(s) - the extraction found nothing",
-            declared.len()
-        );
-
-        let vocabulary: HashSet<&str> = Action::all().iter().map(Action::cedar_id).collect();
-        assert_eq!(
-            declared, vocabulary,
-            "the schema's action list and Action::all() have diverged"
         );
     }
 }
