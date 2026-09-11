@@ -378,18 +378,6 @@ async fn seed_app(conn: &Client, app_id: Uuid, owner_id: Uuid) {
     .expect("seed app owner");
 }
 
-async fn seed_user(conn: &Client, user_id: Uuid, label: &str) {
-    cleanup_user(conn, &user_id).await;
-    let email = format!("migrated-{label}-{user_id}@zeroship.test");
-    conn.execute(
-        "INSERT INTO zeroship.users (id, email, name, email_verified_at) \
-         VALUES ($1, $2::citext, $3, NOW())",
-        &[&user_id, &email, &format!("Migrated {label}")],
-    )
-    .await
-    .expect("seed user");
-}
-
 fn state_for(authenticator: Arc<dyn Authenticator>) -> (Arc<MigrationServiceState>, PathBuf) {
     state_for_with_dsns(authenticator, dsn(), dsn())
 }
@@ -422,19 +410,6 @@ fn state_for_with_dsns(
         provision_dsn,
         control_dsn,
         ManagedPolicyConfig::default_confined(TEST_POLICY_SEAL_KEY.to_vec(), 1)
-            .expect("test policy config"),
-    )
-}
-
-fn state_for_with_ceiling_version(
-    authenticator: Arc<dyn Authenticator>,
-    ceiling_version: u64,
-) -> (Arc<MigrationServiceState>, PathBuf) {
-    state_for_with_policy_config(
-        authenticator,
-        dsn(),
-        dsn(),
-        ManagedPolicyConfig::default_confined(TEST_POLICY_SEAL_KEY.to_vec(), ceiling_version)
             .expect("test policy config"),
     )
 }

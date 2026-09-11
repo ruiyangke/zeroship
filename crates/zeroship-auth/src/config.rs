@@ -937,8 +937,6 @@ fn non_empty_path(value: &Path) -> Option<&Path> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
-
     use clap::CommandFactory;
 
     use super::*;

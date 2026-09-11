@@ -376,19 +376,6 @@ async fn make_organization(state: &AppState, label: &str) -> String {
     organization_id
 }
 
-async fn make_user(state: &AppState, label: &str) -> Uuid {
-    let email = format!("{label}-{}@example.test", Uuid::new_v4().simple());
-    let rows = state
-        .control_pg
-        .query(
-            "INSERT INTO zeroship.users (email, name) VALUES ($1, $2) RETURNING id",
-            &[&email, &"Tax Creator".to_string()],
-        )
-        .await
-        .expect("insert user");
-    rows[0].get("id")
-}
-
 async fn ensure_organization_billing(state: &AppState, organization: &str) {
     state
         .control_pg
