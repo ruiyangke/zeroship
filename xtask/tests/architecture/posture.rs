@@ -2,6 +2,78 @@ use super::{repo, source};
 use regex::Regex;
 use std::collections::BTreeSet;
 
+fn mandatory_database_tests(package: &serde_json::Value) -> Result<usize, String> {
+    let name = package["name"].as_str().ok_or("package name missing")?;
+    if package["features"].get("live-db-tests").is_some() {
+        return Err(format!(
+            "{name}: live database verification cannot be optional"
+        ));
+    }
+    let targets = package["targets"].as_array().ok_or("targets missing")?;
+    let mut examined = 0;
+    for target in targets.iter().filter(|target| target["test"] == true) {
+        examined += 1;
+        if target["required-features"]
+            .as_array()
+            .is_some_and(|features| !features.is_empty())
+        {
+            return Err(format!(
+                "{name}: {} hides tests behind a feature",
+                target["name"]
+            ));
+        }
+    }
+    if examined == 0 {
+        return Err(format!("{name}: no ordinary test targets"));
+    }
+    Ok(examined)
+}
+
+#[test]
+fn platform_database_tests_are_mandatory() {
+    let workspace = repo::workspace();
+    assert!(
+        workspace.len() >= 10,
+        "workspace feature scan lost its corpus"
+    );
+    for package in workspace {
+        assert!(
+            package["features"].get("live-db-tests").is_none(),
+            "{} declares optional live database verification",
+            package["name"]
+        );
+    }
+    for name in [
+        "zeroship-control",
+        "zeroship-migrate-server",
+        "zeroship-worker",
+    ] {
+        let examined = mandatory_database_tests(repo::package(name)).unwrap();
+        assert!(
+            examined >= 2,
+            "{name}: database test target scan lost its corpus"
+        );
+    }
+}
+
+#[test]
+fn mandatory_database_test_check_rejects_feature_and_target_gates() {
+    let ordinary = serde_json::json!({
+        "name": "service", "features": {},
+        "targets": [{"name": "database", "test": true}]
+    });
+    assert_eq!(mandatory_database_tests(&ordinary).unwrap(), 1);
+    let mut hidden = ordinary.clone();
+    hidden["features"]["live-db-tests"] = serde_json::json!([]);
+    assert!(mandatory_database_tests(&hidden).is_err());
+    let mut hidden = ordinary.clone();
+    hidden["targets"][0]["required-features"] = serde_json::json!(["optional-db"]);
+    assert!(mandatory_database_tests(&hidden).is_err());
+    let mut hidden = ordinary;
+    hidden["targets"][0]["test"] = serde_json::json!(false);
+    assert!(mandatory_database_tests(&hidden).is_err());
+}
+
 fn finite_wal_limit(document: &str) -> Result<(), String> {
     let parsed: serde_yaml::Value = serde_yaml::from_str(document).map_err(|e| e.to_string())?;
     let command = parsed["services"]["postgres"]["command"]

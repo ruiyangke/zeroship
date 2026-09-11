@@ -68,7 +68,7 @@ pub(crate) mod workflow_rollout;
 /// dial the same database, so both need the same refusal - the `#[cfg(test)]`
 /// modules under `src/` were the half that kept the silent fallback when the
 /// integration targets lost theirs.
-#[cfg(all(test, feature = "live-db-tests"))]
+#[cfg(test)]
 pub(crate) mod test_live_db {
     use std::sync::OnceLock;
 

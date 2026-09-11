@@ -17,7 +17,7 @@ fn cfg(meta: &Meta) -> Truth {
         Meta::NameValue(value) if value.path.is_ident("feature") => {
             if let syn::Expr::Lit(value) = &value.value {
                 if let Lit::Str(value) = &value.lit {
-                    if matches!(value.value().as_str(), "test-helpers" | "live-db-tests") {
+                    if value.value() == "test-helpers" {
                         return Truth::No;
                     }
                 }

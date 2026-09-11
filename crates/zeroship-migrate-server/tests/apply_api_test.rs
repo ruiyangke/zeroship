@@ -205,7 +205,7 @@ async fn assert_platform_schema_present(conn: &Client) {
          This target needs a database the PLATFORM migrations have been applied to; \
          it no longer creates any table of its own.\n\
          Run `tests/provision_test_backends.sh`, then:\n  \
-         cargo test -p zeroship-migrate-server --features live-db-tests",
+         cargo test -p zeroship-migrate-server",
         missing.join(", zeroship."),
     );
 }

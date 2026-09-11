@@ -263,7 +263,7 @@ itself:
 ## Tests
 
 The control/auth integration tests connect to a **pre-migrated** database
-(`AUTH_DB_URL` / `CONTROL_TEST_DB`) — they no longer self-migrate. Bring the
+(the generated test overlay or `PG_TEST_URL`) — they no longer self-migrate. Bring the
 schema up once before running them: the compose `migrate` service does this for
 the compose DB, or set `ZEROSHIP_MIGRATE_DSN` and run
 `deploy/ops/db-migrate.sh` against your test DB.

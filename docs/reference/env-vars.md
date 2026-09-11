@@ -722,22 +722,10 @@ It is generated and gitignored rather than committed because every
 literal at a secret-classed leaf - with no exception list, by design. That same
 gate exempts untracked overlays deliberately, which is exactly what this is.
 
-**Eight names became one.** `AUTH_DB_URL`, `CONTROL_TEST_DB`,
-`GATEWAY_ANCHORS_DB_URL`, `GATEWAY_POOL_SMOKE_URL`, `LIVE_DB_TEST_URL`,
-`MIGRATE_SERVER_TEST_DB`, `ZERO_MIGRATE_TEST_PG_URL` and `ZEROSHIP_SCHEDULER_TEST_DB`
-each named the same server, each was read by one crate, and each had to be
-exported by whichever suite remembered it. `GATEWAY_POOL_SMOKE_URL` was set
-NOWHERE in the repository, so its one test had never executed;
-`GATEWAY_ANCHORS_DB_URL` was in the same state until 2026-08-18. `PG_TEST_URL`
-is the PostgreSQL override. KV tests own their configuration and containers.
-
-SEVEN of those eight are deleted, not eight. `CONTROL_TEST_DB` is still read at
-`crates/zeroship-control/tests/workflow_engine_test.rs:59` and still exported at
-`tests/run_billing_suite.sh:181`, which records why: dropping the export before
-converting that file made its 93 tests announce "skip: CONTROL_TEST_DB not set"
-and pass without executing. This paragraph claimed all eight were gone from the
-day the other seven went, so the one that survived was documented as absent -
-the reason `tests/test_only_env_gate.sh` rules on the tree instead.
+`PG_TEST_URL` is the PostgreSQL test override, including the workflow engine
+fixtures. Otherwise tests read the generated overlay. Suite runners export this
+setting after preparing their migrated database. KV tests own their
+configuration and containers.
 
 `KV_REQUIRE_REDIS` is also deleted. Its comment claimed CI set it; nothing in
 the tree ever did, so its panic arm was unreachable and the Redis backend tests

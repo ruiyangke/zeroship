@@ -4082,42 +4082,9 @@ pub(crate) mod tests {
     }
 }
 
-// ---------------------------------------------------------------------------
-// The live-PostgreSQL half of this module's tests.
-//
-// WHY THESE ARE NOT IN `mod tests` ABOVE. Every test here drives
-// `workflow_advance_unsigned` end to end, and that path claims a run with
-//
-//     JOIN zeroship.apps  JOIN zeroship.plans  JOIN zeroship.app_deploys
-//
-// (crates/zeroship-plugin-workflow/src/claim.rs:89-91). Those are PLATFORM
-// tables, created by the committed migration corpus in `db/migrations-ts/` -
-// not by any fixture. A database that is merely REACHABLE is not enough, and
-// the difference is invisible in the failure: pointed at the shared, unmigrated
-// `zeroship` database these seven died on
-//
-//     relation "zeroship.plans" does not exist
-//
-// which cargo prints as seven ordinary FAILED lines. That is a VOID RUN dressed
-// as a regression - `zeroship-control` hit the identical shape on 2026-08-20
-// (see the `live-db-tests` block in crates/zeroship-control/Cargo.toml) and the
-// answer there is the answer here.
-//
-// WHAT RUNS THEM. `tests/run_worker_suite.sh`, which creates and migrates a
-// database named after this tree's migration set and then invokes
-//
-//     cargo test -p zeroship-worker --features live-db-tests
-//
-// It also counts how many of these actually reported `ok`, so gating them out
-// of the default build cannot silently become gating them out of everything.
-// CI runs that script as the `worker-live-gate` job.
-//
-// WHAT A DEFAULT `cargo test -p zeroship-worker` THEREFORE MEANS. It rules on
-// the worker's request path, config, cache and boot posture and says NOTHING
-// about workflow advance. That is the honest reading, and it is why the
-// suite script exists rather than a tolerated red.
-// ---------------------------------------------------------------------------
-#[cfg(all(test, feature = "live-db-tests"))]
+// Workflow advance requires the platform migration corpus. These tests run
+// with ordinary cargo test; tests/run_worker_suite.sh provisions their database.
+#[cfg(test)]
 mod workflow_live_tests {
     use std::collections::HashMap;
     use std::path::PathBuf;

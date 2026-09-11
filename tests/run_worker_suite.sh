@@ -2,37 +2,9 @@
 # ============================================================================
 # run_worker_suite.sh - the live-PostgreSQL gate for zeroship-worker.
 #
-# WHAT IT GATES
-# -------------
-# `crates/zeroship-worker/src/handler.rs` holds seven tests that drive
-# `workflow_advance_unsigned` end to end. Their claim path joins
-#
-#     zeroship.apps   zeroship.plans   zeroship.app_deploys
-#
-# (crates/zeroship-plugin-workflow/src/claim.rs:89-91) - PLATFORM tables, which
-# exist only after `db/migrations-ts/` has been applied. No fixture creates
-# them and none should: they are the same tables production reads.
-# The ordinary `db_posture` tests also require the migrated platform projection
-# and prove the worker can boot without replication or RLS bypass.
-#
-# THE FAILURE THIS EXISTS TO END. Until 2026-08-28 those seven were ungated and
-# nothing provisioned that database, so they ran against the shared, UNMIGRATED
-# `zeroship` and died on
-#
-#     relation "zeroship.plans" does not exist
-#
-# which `cargo test` prints as seven ordinary FAILED lines. That is a VOID RUN -
-# the code under test never executed - wearing the costume of a regression, and
-# a suite that is red for environmental reasons trains people to ignore it.
-# They now carry `--features live-db-tests` and this script is what runs them.
-# `zeroship-control` hit the identical shape on 2026-08-20; see the
-# `live-db-tests` block in crates/zeroship-control/Cargo.toml.
-#
-# WHY BOTH HALVES ARE NEEDED. Gating alone would leave the tests runnable
-# nowhere, which is barely better than deleting them. Self-provisioning alone
-# would leave the default `cargo test -p zeroship-worker` red on every machine
-# without a migrated database. Together: the default command is honest about
-# what it ruled on, and this script makes the gated set actually run.
+# Workflow advance and boot-posture tests run in ordinary cargo test. They
+# require the committed platform migration corpus. This runner prepares the
+# database and checks that the required live modules actually executed.
 #
 # IT DOES NOT SKIP, AND IT DOES NOT CREATE A SERVER
 # -------------------------------------------------
@@ -104,13 +76,7 @@ cd "$ROOT" || exit 2
 # shellcheck source=tests/lib/test_config.sh
 . "$ROOT/tests/lib/test_config.sh"
 
-# Default parallel. Each of the seven seeds a fresh `Uuid::new_v4()` app, so it
-# owns its `zeroship.apps` row and its own `app_<uuid>` journal schema, and the
-# worker's isolate cache is a `thread_local!` that each test initialises on its
-# own libtest thread (crates/zeroship-worker/src/cache.rs:56). Measured
-# 2026-08-28 against a freshly migrated PostgreSQL 17: 7 passed, 0 failed, at
-# the default thread count. TEST_THREADS is here for bisecting a suspected
-# race, not because one is known.
+# Use the workspace libtest default unless explicitly testing concurrency.
 TEST_THREADS="${TEST_THREADS:-}"
 
 DB_OVERRIDE=""
@@ -148,7 +114,7 @@ if [ -n "$DSN_OVERRIDE" ] && [ -n "$DB_OVERRIDE" ]; then
   exit 2
 fi
 
-# The gated tests resolve their DSN through
+# The database tests resolve their DSN through
 # `zeroship_core::config::test_database_url`, whose override tier is
 # PG_TEST_URL. The suite database name is derived from this tree's migration
 # set and so cannot live in the shared overlay; this is exactly what that tier
@@ -230,20 +196,14 @@ echo "==> Provisioning complete (${applied_files}/${corpus_files} corpus files a
 LOG="$(mktemp -t zeroship-worker-suite.XXXXXX.log)"
 status=0
 
-# ONE invocation, and it is by construction rather than a name list: the
-# feature satisfies `#[cfg(all(test, feature = "live-db-tests"))]` wherever it
-# appears in the crate, so a live test added tomorrow is covered the moment it
-# is written. Nothing here enumerates test names.
-#
-# --no-fail-fast because cargo otherwise STOPS at the first failing target and
-# never runs the ones after it, and "not run" is indistinguishable from
-# "passed" in the tally below. This crate has two targets and the lib is first.
+# Run the entire package so newly added tests are included automatically.
+# Continue after a failed target so later targets still report a verdict.
 echo "==> Running zeroship-worker against ${TEST_DB}"
 THREAD_ARGS=()
 [ -n "$TEST_THREADS" ] && THREAD_ARGS=(--test-threads "$TEST_THREADS")
 # Capture test output so fixture diagnostics cannot split the result lines
 # consumed by the live-test arms below. Failures still print their diagnostics.
-cargo test -p zeroship-worker --features live-db-tests --no-fail-fast -- \
+cargo test -p zeroship-worker --no-fail-fast -- \
   "${THREAD_ARGS[@]}" 2>&1 | tee "$LOG" || status=1
 
 echo "------------------------------------------------------------------"
@@ -275,9 +235,8 @@ live_ran="$(grep -cE '^test handler::workflow_live_tests::[a-z0-9_]+ \.\.\. ok$'
 if [ "$live_ran" -lt "$WORKER_LIVE_MIN" ]; then
   echo "FAIL: only ${live_ran} workflow_advance test(s) passed, fewer than the ${WORKER_LIVE_MIN} this gate exists to run." >&2
   echo "This gate's entire purpose is that those tests execute against a migrated" >&2
-  echo "database. A smaller number means they were gated out, renamed or deleted -" >&2
-  echo "not that the suite got faster. Check that the crate still declares" >&2
-  echo "\`live-db-tests\` and that handler::workflow_live_tests is still behind it." >&2
+  echo "database. Missing passes mean tests failed, were hidden, or were removed." >&2
+  echo "Check that handler::workflow_live_tests is compiled under cfg(test)." >&2
   status=1
 fi
 

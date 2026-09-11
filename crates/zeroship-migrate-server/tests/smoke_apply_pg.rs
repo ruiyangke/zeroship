@@ -13,11 +13,9 @@
 //!   4. assert the table, the added column, AND the journal row all exist via an
 //!      INDEPENDENT query over the same seam.
 //!
-//! GATED behind a test database (a DSN on :5440; set `PG_TEST_URL` or run
-//! `tests/provision_test_backends.sh`): the test skips cleanly when unset, so
-//! DB-free CI stays green. It runs in its OWN meta + project schema
-//! (suffixed by a unique token) so the shared DB stays clean and re-runs are
-//! independent.
+//! Requires PostgreSQL through the test overlay or `PG_TEST_URL`; missing
+//! configuration or connectivity fails the test. Each run owns token-suffixed
+//! metadata and project schemas.
 
 use zeroship_migrate::driver::SqlSession;
 use zeroship_migrate::{

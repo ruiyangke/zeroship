@@ -43,43 +43,9 @@ base64 = { workspace = true }
 cyper = { workspace = true }
 tracing = { workspace = true }
 
-# ---------------------------------------------------------------------------
-# Live-database test gate
-# ---------------------------------------------------------------------------
-# `live-db-tests` compiles `handler::workflow_live_tests` - seven tests that
-# drive `workflow_advance_unsigned` end to end - plus db_posture's full worker
-# boot test. They need a PostgreSQL that is MIGRATED, not merely reachable: the
-# claim and posture paths read `zeroship.apps`, `zeroship.plans` and
-# `zeroship.app_deploys`
-# (crates/zeroship-plugin-workflow/src/claim.rs:89-91), and those tables come
-# from the committed corpus in `db/migrations-ts/`, never from a fixture.
-#
-# THEY WERE UNGATED UNTIL 2026-08-28 and nothing provisioned that database, so
-# `cargo test -p zeroship-worker` reported seven FAILED lines reading
-# `relation "zeroship.plans" does not exist` - a void run wearing the costume of
-# a regression. It was invisible only while nobody ran the bin target;
-# d57ba4caa made the documented command reach it. `zeroship-control` hit the
-# identical shape on 2026-08-20 (see its own `live-db-tests` block, and in
-# particular the paragraph on why a DEAD-PORT probe cannot find this class of
-# gap - an empty-but-answering database is the case that bites).
-#
-# Gating hides tests from the default build, which is the very failure a gate is
-# meant to prevent, so it is honest only while something else runs them. That
-# something is `tests/run_worker_suite.sh`: it creates and migrates a database
-# named after this tree's migration set, exports it as `PG_TEST_URL`, runs
-#
-#     cargo test -p zeroship-worker --features live-db-tests
-#
-# and then FAILS unless at least seven `workflow_advance_*` tests and the one
-# full boot-posture test reported `ok`. Those named arms matter - a total-passes
-# floor cannot tell a gated-out live set from a shrunken one, because both just
-# print a smaller number. CI runs the script as the `worker-live-gate` job.
-#
-# The dev-dependency below is NOT gated with it: Cargo rejects
-# `optional = true` on a dev-dependency, so `zeroship-migrate-server` is built
-# for every test profile whether or not the feature is on.
-[features]
-live-db-tests = []
+# Database verification is mandatory in ordinary cargo test runs.
+# tests/run_billing_suite.sh and tests/run_worker_suite.sh provision the
+# migrated platform database required by these tests.
 
 [dev-dependencies]
 # DEV-only, and zeroship-migrate-server does not depend on zeroship-worker, so

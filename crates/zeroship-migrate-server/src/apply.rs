@@ -1968,11 +1968,8 @@ mod tests {
 // Live provisioning proofs for the unmask audit table
 // ---------------------------------------------------------------------------
 //
-// Every case here opens a real PostgreSQL connection and creates roles, so the
-// module carries the same `live-db-tests` gate `schema_apply_store`'s tests do:
-// `required-features` in Cargo.toml cannot reach inside a lib target, and a
-// `cargo test --workspace` that provisions no database must not be made red by
-// a case that needs one.
+// These ordinary cargo tests require PostgreSQL and permission to create roles.
+// tests/run_billing_suite.sh prepares the migrated database.
 //
 // WHAT THESE COVER THAT THE UNIT TESTS ABOVE CANNOT. `audit_unmask_tests` in
 // `provisioning.rs` greps the generated string: it proves the DDL SAYS
@@ -1981,7 +1978,7 @@ mod tests {
 // binds, or that the runtime role can reach it afterwards. The whole point of
 // moving this DDL out of the worker is a privilege change, and a privilege
 // change is only observable against a live catalog.
-#[cfg(all(test, feature = "live-db-tests"))]
+#[cfg(test)]
 /// The scratch schema as the TYPE `provision_runtime_app_role` takes.
 ///
 /// The binding stays a `String` because the other helpers here - `teardown`,
@@ -1998,7 +1995,7 @@ fn scratch_schema_name(raw: &str) -> SchemaName {
     SchemaName::new(raw).expect("a scratch schema is a valid schema name")
 }
 
-#[cfg(all(test, feature = "live-db-tests"))]
+#[cfg(test)]
 mod live_audit_unmask_provisioning {
     use super::*;
     use compio_postgres::NoTls;
@@ -2374,7 +2371,7 @@ mod live_audit_unmask_provisioning {
 // The journal's table names come from the ENGINE here - `ensure_journal` is the
 // real producer - so a rename in `zeroship-migrate-postgres` shows up as a failed
 // expectation instead of a sweep that quietly rules on nothing.
-#[cfg(all(test, feature = "live-db-tests"))]
+#[cfg(test)]
 mod live_reserved_journal_privileges {
     use super::*;
     use compio_postgres::NoTls;
@@ -2780,7 +2777,7 @@ mod live_reserved_journal_privileges {
 // worker, and it needs no password and no DSN surgery. It requires the
 // connecting user to be a superuser; if it is not, these cases fail naming it
 // rather than skipping.
-#[cfg(all(test, feature = "live-db-tests"))]
+#[cfg(test)]
 mod live_worker_role_fence {
     use super::*;
     use compio_postgres::NoTls;

@@ -1,59 +1,11 @@
-//! The integration-test target behind `--features live-db-tests`: the files
-//! that CANNOT run without a reachable, migrated PostgreSQL.
+//! Mandatory PostgreSQL integration tests, included in ordinary cargo test.
 //!
-//! One `[[test]]` carrying `required-features = ["live-db-tests"]` gates every
-//! module below exactly as one `[[test]]` block per module did. See
-//! `tests/main.rs` for why the collapse stops at four targets rather than one,
-//! for the measured before-figure, and for the full list of what sharing a
-//! process does NOT protect against. The "Live-database test gate" comment in
-//! `Cargo.toml` says what the gate encodes and how the set was determined.
+//! Run tests/run_billing_suite.sh to prepare a migrated database and run the
+//! suite. Fleet sweeps share state, so libtest defaults to serial execution
+//! through .cargo/config.toml.
 //!
-//! WHAT THIS DOES NOT PROTECT AGAINST
-//! ----------------------------------
-//! The short form of `tests/main.rs`'s list, because it bites hardest here:
-//! every module below shares ONE process and ONE database. The `static Mutex`
-//! gates in this directory are per-MODULE, so two modules driving the same
-//! fleet-wide, advisory-locked sweep - each declaring its own `RECONCILE_LOCK`
-//! or `SWEEP_LOCK` - are no longer held apart by anything. Until now the
-//! PROCESS did it: cargo runs test binaries one at a time and never two at once.
-//! Count them with `grep -rn 'static [A-Z_]*: Mutex' .` rather than trusting a
-//! number here; a tally in a comment does not re-measure itself, and every one
-//! this passage used to carry had drifted by the time it was read.
-//!
-//! `common` is compiled once for the whole target, so a `static` in it is shared
-//! by every module rather than being one cell per binary. The billing period
-//! helper was such a `static`; merging collapsed its memoised months into one
-//! and exposed a bug older than the merge, in which a test asserted on a
-//! period-wide count it did not own. That is FIXED - every caller now reserves a
-//! private window from `common::next_isolated_period()`, whose header explains
-//! why a lock cannot do the same job. The general lesson stands for the next
-//! `static` added here: sharing a process makes one visible to every module.
-//!
-//! THREADING
-//! ---------
-//! `tests/run_billing_suite.sh` runs this target with `--test-threads 1` and has
-//! always had to: `workflow_instance_api_test` drives advisory-locked engine
-//! ticks and asserts on claim counts, so sibling tests steal each other's claims
-//! under the default pool. Collapsing the targets WIDENS the set of tests that
-//! flag protects, from one binary's to this one's; it does not introduce a new
-//! requirement, but it does mean a bare `cargo test -p zeroship-control
-//! --features live-db-tests` - which passes no such flag - now exposes the
-//! cross-module gates described above.
-//!
-//! HOW TO ADD A TEST FILE
-//! ----------------------
-//! `autotests = false`, so a new `tests/<name>.rs` is compiled by NOTHING until
-//! `mod <name>;` appears below (or in `tests/main.rs` if it needs no database).
-//! Add it in the same commit as the file, or its tests never run and nothing
-//! says so.
-//!
-//! HOW TO RUN A SUBSET
-//! -------------------
-//! `cargo test -p zeroship-control --test <file>` no longer resolves. The module
-//! path is a prefix of every test name, so filter on it:
-//!
-//!   cargo test -p zeroship-control --features live-db-tests \
-//!       --test live_db env_store::
+//! With autotests disabled, register new database test modules below. Filter a
+//! module with `cargo test -p zeroship-control --test live_db env_store::`.
 
 mod common;
 

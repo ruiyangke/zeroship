@@ -3,30 +3,9 @@
 # run_billing_suite.sh - the CI runner for every zeroship-control /
 # zeroship-migrate-server test that needs a live, migrated PostgreSQL.
 #
-# WHAT THIS SCRIPT GATES
-# ----------------------
-# `cargo test --workspace` provisions no database, so any target that dials one
-# either fails there or (worse) skips and reports a pass. Those targets carry
-# `required-features = ["live-db-tests"]` in crates/zeroship-control/Cargo.toml and
-# crates/zeroship-migrate-server/Cargo.toml, which removes them from the default build. This
-# script is what runs them, against a database it creates and migrates itself.
-#
-# NO NAME LIST. Earlier revisions enumerated the binaries here by hand, which
-# meant the set that RAN was maintained separately from the set that was GATED,
-# and the two drifted: the list held the billing binaries only, so roughly
-# fifteen non-billing control suites (deploy, oauth, device, token, admin,
-# bootstrap, workflow, ...) were gated out of `cargo test --workspace` and
-# picked up by nothing. The invocation below is by construction instead:
-#
-#     cargo test -p zeroship-control --features live-db-tests
-#
-# builds and runs EVERY target in the crate whose `required-features` are
-# satisfied - the gated ones plus the handful that were never gated. Adding a
-# `[[test]]` block with the feature is therefore sufficient to be covered here;
-# there is nothing to remember to update, and nothing that can fall out of step.
-# The crate's LIB target is built with the feature too, so the in-crate
-# `#[cfg(all(test, feature = "live-db-tests"))]` modules (cron::spend_recompute,
-# http_util) run in the same invocation.
+# Database tests run in ordinary cargo test. This runner creates and migrates
+# their database, then runs each package without a target list or feature flag.
+# Missing infrastructure or failing tests must fail the run.
 #
 # SERIALISATION (the original constraint, unchanged)
 # --------------------------------------------------
@@ -141,36 +120,9 @@ if [ -z "$PSQL" ]; then
 fi
 
 DSN="postgresql://${PG_USER}:${PG_PASS}@${PG_HOST}:${PG_PORT}/${TEST_DB}"
-# ONE name for one database. This exported CONTROL_TEST_DB, AUTH_DB_URL and
-# MIGRATE_SERVER_TEST_DB, because the control suite was not consistent about which it
-# read - billing and registry targets took CONTROL_TEST_DB, the auth-adjacent
-# handlers took AUTH_DB_URL, and zeroship-migrate-server took MIGRATE_SERVER_TEST_DB.
-# Exporting all three was how one cargo invocation covered all of them, and it
-# is also why adding a target meant guessing which name it had picked.
-#
-# They now read the overlay through zeroship_core::config::test_database_url_opt,
-# whose override tier is PG_TEST_URL. The scratch database name is per run and
-# cannot live in the shared file, which is exactly what that tier is for.
+# Every PostgreSQL fixture, including workflow database cloning, reads this
+# shared override. It points at the migrated database owned by this run.
 export PG_TEST_URL="$DSN"
-
-# ONE BRIDGE REMAINS, and it is temporary and load-bearing.
-#
-# crates/zeroship-control/tests/workflow_engine_test.rs still reads CONTROL_TEST_DB. It
-# was the single file left unconverted, because another worktree is editing it
-# and converting it here would have produced a conflict rather than a change.
-#
-# Dropping the export without converting the file is NOT harmless, and this
-# gate is what proved it: with only PG_TEST_URL exported, that binary's 93 tests
-# announced "skip: CONTROL_TEST_DB not set" and the skip census failed the run.
-# 0 failed, 751 passed, and 93 tests that had silently stopped executing - which
-# is precisely the failure mode this whole change exists to remove, reproduced
-# by the change itself.
-#
-# So the name is exported until that file lands. DELETE THIS EXPORT in the same
-# commit that converts workflow_engine_test.rs to
-# zeroship_core::config::test_database_url_opt; the skip census will tell you
-# immediately if you delete it too early.
-export CONTROL_TEST_DB="$DSN"
 
 run_psql() { PGPASSWORD="$PG_PASS" "$PSQL" -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" "$@"; }
 
@@ -294,17 +246,17 @@ fail=0
 declare -a failed=()
 
 echo "------------------------------------------------------------------"
-echo "==> zeroship-control live-database suite (--features live-db-tests)"
-if run_group cargo test -p zeroship-control --features live-db-tests --no-fail-fast \
+echo "==> zeroship-control live-database suite"
+if run_group cargo test -p zeroship-control --no-fail-fast \
      -- "${THREAD_ARG[@]}"; then
   :
 else
   fail=1
-  failed+=("zeroship-control::live-db-tests")
+  failed+=("zeroship-control::database")
 fi
 
 echo "------------------------------------------------------------------"
-echo "==> zeroship-migrate-server live-database suite (--features live-db-tests)"
+echo "==> zeroship-migrate-server live-database suite"
 # This package holds the service's own targets AND the two live-PG session proofs
 # `smoke_apply_pg` / `author_and_apply_pg`. The invocation below names no targets,
 # so a target added to the package is covered here the moment it is added.
@@ -319,12 +271,12 @@ echo "==> zeroship-migrate-server live-database suite (--features live-db-tests)
 #   set   -> "test result: ok. 2 passed ... finished in 0.34s", no skip line
 # The result lines are IDENTICAL. Only the clock and the announcement differ,
 # which is exactly why being named in a script is not evidence of coverage.
-if run_group cargo test -p zeroship-migrate-server --features live-db-tests --no-fail-fast \
+if run_group cargo test -p zeroship-migrate-server --no-fail-fast \
      -- "${THREAD_ARG[@]}"; then
   :
 else
   fail=1
-  failed+=("zeroship-migrate-server::live-db-tests")
+  failed+=("zeroship-migrate-server::database")
 fi
 
 echo "------------------------------------------------------------------"

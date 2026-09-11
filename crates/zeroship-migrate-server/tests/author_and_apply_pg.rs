@@ -28,9 +28,9 @@
 //! zeroship-runtime's V8. Everything downstream of the envelope is the SAME native
 //! apply path as Stage 1.
 //!
-//! GATED behind a test database (a DSN on :5440; set `PG_TEST_URL`): skips
-//! cleanly when unset, so DB-free CI stays green. The V8-authoring assertions run
-//! UNCONDITIONALLY (they need no DB) so authoring itself is proven even without PG.
+//! PostgreSQL apply requires the test overlay or `PG_TEST_URL`; missing
+//! configuration or connectivity fails the test. V8 authoring is also tested
+//! independently of the database.
 
 use zeroship_migrate::driver::SqlSession;
 use zeroship_migrate::{
