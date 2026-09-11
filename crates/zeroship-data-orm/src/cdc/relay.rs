@@ -56,6 +56,29 @@ impl RelayConfig {
         self
     }
 
+    /// Trust the PEM certificates in a private relay CA bundle.
+    ///
+    /// # Errors
+    /// Rejects an unreadable, empty, or malformed bundle.
+    pub fn with_ca_file(self, path: &std::path::Path) -> Result<Self, DbError> {
+        use compio_tls::rustls::{self, pki_types::pem::PemObject};
+        let certificates = rustls::pki_types::CertificateDer::pem_file_iter(path)
+            .map_err(|_| failure("cannot read CDC relay CA bundle"))?;
+        let mut roots = rustls::RootCertStore::empty();
+        for certificate in certificates {
+            roots
+                .add(certificate.map_err(|_| failure("invalid CDC relay CA PEM"))?)
+                .map_err(|_| failure("invalid CDC relay CA certificate"))?;
+        }
+        if roots.is_empty() {
+            return Err(failure("CDC relay CA bundle contains no certificates"));
+        }
+        let tls = rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        Ok(self.with_tls_connector(compio_tls::TlsConnector::from(Arc::new(tls))))
+    }
+
     /// Start delivery and wait until the relay has established capture.
     ///
     /// # Errors

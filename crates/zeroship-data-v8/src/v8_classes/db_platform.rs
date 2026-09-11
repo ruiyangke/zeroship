@@ -1,46 +1,17 @@
 //! `DbPlatform` — the `#[v8_class]` capability handle holding the
 //! platform-internal DB callables.
 //!
-//! ## Why this class exists
-//!
-//! The platform-internal entry points - `setMaskPolicy` and the `replication`
-//! sub-namespace — do not live directly on the `Db` v8_class
-//! (`env.db`). Living there would make them directly reachable from creator JS
-//! and would surface them in IDE hover on the published `@zeroship/types`
-//! surface.
-//!
-//! Instead they live behind a single `DbPlatform` handle that is set on
-//! the `Db` object under a **V8 private symbol** (`ZS_PLATFORM`, minted
-//! once per isolate by the runtime — see
-//! `crates/zeroship-runtime/src/core/init.rs`). A `v8::Private` is a Rust-only
-//! construct: it is NOT a `v8::Symbol`, cannot be used as a property key
-//! from JS, and is invisible to `Object.keys` /
-//! `Object.getOwnPropertyNames` / `Object.getOwnPropertySymbols` /
-//! `for..in` / `JSON.stringify`. The only readers are Rust
-//! (`get_private`) and `@zeroship/bootstrap`'s `runtime-entry`, which
-//! the runtime hands a resolver to (and which creator code cannot
-//! import). See the module doc on `db.rs::mint_db` for the wiring.
-//!
-//! ## What this class adds
-//!
-//! The `set_mask_policy` pipeline and the `Replication` v8_class delegate to
-//! their app-scoped native implementations; this wrapper is their private
-//! capability carrier.
-//!
-//! ## App scoping
-//!
-//! `app_id` is stamped at mint time (in `db.rs::mint_db`, from the live
-//! `Db`'s own `app_id`). The handle is therefore bound to exactly one
-//! tenant; there is no caller-supplied app-id override on any method
+//! Policy installation lives behind the runtime's V8 private symbol. Creator
+//! JavaScript cannot resolve that symbol; bootstrap receives its resolver from
+//! the runtime. The handle is bound to the app's immutable deployment identity.
 
 #![allow(unsafe_code)]
 
-use std::cell::RefCell;
 
 use zeroship_runtime::state::OpError;
 use zeroship_runtime_macros::v8_class;
 #[allow(unused_imports)]
-use zeroship_runtime_macros::{v8_constructor, v8_getter, v8_method};
+use zeroship_runtime_macros::{v8_constructor, v8_method};
 
 use crate::v8_bridge::read_native_arg;
 use crate::v8_classes::dispatch::dispatch_set_mask_policy_field;
@@ -54,9 +25,7 @@ use zeroship_data_orm::binding::DbBinding;
 ///
 /// Field 0 of the wrapper holds a `Box<DbPlatform>`. The Weak finalizer
 /// registered by [`mint_db_platform`] drops the Box on GC. There are no
-/// native resources to release — `binding` is owned and the cached
-/// `replication_obj` holds a `v8::Global<v8::Object>` handle whose own
-/// Weak counterpart reclaims the wrapped state.
+/// native resources to release; `binding` is owned.
 pub struct DbPlatform {
     /// The app-at-deploy identity this handle is scoped to. Stamped at mint
     /// time from the live `Db`; never mutated. Security-critical — the
@@ -64,9 +33,6 @@ pub struct DbPlatform {
     /// caller-supplied override is never honoured (see
     /// platform operations).
     pub(crate) binding: DbBinding,
-    /// Cache of the `Replication` namespace wrapper minted on first
-    /// access of `__platform.replication`. Stable identity.
-    pub(crate) replication_obj: RefCell<Option<v8::Global<v8::Object>>>,
 }
 
 impl std::fmt::Debug for DbPlatform {
@@ -109,22 +75,6 @@ impl DbPlatform {
         Ok(dispatch_set_mask_policy_field(scope, &self.binding, policy_v).into())
     }
 
-    /// `__platform.replication` — the [`super::replication::Replication`]
-    /// namespace (`watchdog`) scoped to this app. Cached on first access.
-    /// Moved off `Db`.
-    #[v8_getter]
-    fn replication<'s>(
-        &self,
-        scope: &mut v8::PinScope<'s, '_>,
-    ) -> Result<v8::Local<'s, v8::Object>, OpError> {
-        if let Some(existing) = self.replication_obj.borrow().as_ref() {
-            return Ok(v8::Local::new(scope, existing));
-        }
-        let obj = super::replication::mint_replication(scope, self.binding.app_id())?;
-        let global = v8::Global::new(scope, obj);
-        *self.replication_obj.borrow_mut() = Some(global);
-        Ok(obj)
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -152,7 +102,6 @@ pub(crate) fn mint_db_platform<'s>(
 
     let state = DbPlatform {
         binding,
-        replication_obj: RefCell::new(None),
     };
     let boxed: Box<DbPlatform> = Box::new(state);
     let raw = Box::into_raw(boxed);
@@ -163,9 +112,7 @@ pub(crate) fn mint_db_platform<'s>(
     // SAFETY: `raw_addr` was Box::into_raw'd from `Box<DbPlatform>`; the
     // finalizer casts back to the same type and drops the Box exactly
     // once when V8 reclaims the wrapper. There are no native resources
-    // to release in Drop — `app_id` is an owned String and the cached
-    // Global is dropped with the Box (its own Weak finalizer
-    // reclaims the wrapped Replication state).
+    // to release in Drop; the binding is dropped with the Box.
     let weak = v8::Weak::with_guaranteed_finalizer(
         scope,
         obj,

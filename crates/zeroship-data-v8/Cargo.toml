@@ -15,7 +15,7 @@ zeroship-data-orm = { workspace = true }
 # Operator policy and metering are injected when the worker primitive is built.
 zeroship-migrate-policy = { workspace = true }
 zeroship-metering = { workspace = true }
-# PostgreSQL is used for worker change delivery and resource composition.
+# PostgreSQL is used for resource composition.
 # Query execution and physical row codecs belong to the ORM.
 compio-postgres = { workspace = true }
 compio = { workspace = true }
@@ -27,6 +27,8 @@ flume = { workspace = true }
 futures = { workspace = true }
 
 [dev-dependencies]
+rcgen = "0.14"
+url = { workspace = true }
 # Database integration tests are required by ordinary cargo test.
 zeroship-data-v8 = { path = ".", features = ["test-helpers"] }
 zeroship-data-orm = { workspace = true, features = ["test-helpers"] }

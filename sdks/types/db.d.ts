@@ -314,11 +314,6 @@ interface ZeroshipSubscription {
   close(): void;
 }
 
-// `ZeroshipMigrations` and `ZeroshipReplication` moved to
-// `@zeroship/bootstrap`'s framework-internal `internal.d.ts` (reached
-// via `__platform.migrations` / `__platform.replication`, not
-// `env.db.*`). Absent from this published surface.
-
 // ---------------------------------------------------------------------------
 // Db entry point — env.db
 // ---------------------------------------------------------------------------
@@ -327,7 +322,7 @@ interface ZeroshipSubscription {
  * The `zeroship.db` namespace surfaced as `env.db` on every isolate.
  * The creator-facing operations live on the Db v8_class instance —
  * collection mint and transaction open. The platform-internal entry
- * points (mask policy, replication, migrations) live on the `__platform`
+ * policy installation live on the `__platform`
  * capability handle and are
  * not on this surface.
  */
@@ -336,8 +331,6 @@ interface ZeroshipDb {
   // to the `__platform` capability handle (reached only via a V8
   // private symbol; §8). Removed from this published surface:
   //   - `setMaskPolicy`         → `__platform.setMaskPolicy`
-  //   - `migrations` (getter)   → `__platform.migrations`
-  //   - `replication` (getter)  → `__platform.replication`
   // Their type declarations live in `@zeroship/bootstrap`'s
   // framework-internal `internal.d.ts` (the `ZeroshipDbPlatform`
   // interface). Creator IDE hover on `env.db` no longer surfaces them.
@@ -393,9 +386,4 @@ interface ZeroshipDb {
     },
   ): Promise<R>;
 
-  // `migrations` and
-  // `replication` moved to the `__platform` capability handle (see the
-  // note at the top of this interface and `ZeroshipDbPlatform` in
-  // `@zeroship/bootstrap`'s `internal.d.ts`). They are no longer on the
-  // published `env.db` surface.
 }

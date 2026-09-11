@@ -250,6 +250,10 @@ pub struct GatewaySection {
 pub struct WorkerSection {
     /// `PostgreSQL` DSN for worker-side lookups.
     pub database_url: Option<String>,
+    /// Authenticated TLS endpoint of the PostgreSQL CDC relay.
+    pub cdc_relay_url: Option<String>,
+    /// Optional private relay certificate authority bundle.
+    pub cdc_relay_ca_file: Option<std::path::PathBuf>,
     /// TOML configuration for the app-runtime KV deployment. May carry credentials.
     pub kv_config: Option<String>,
     /// This worker's OWN ed25519 assertion key FILE. See
@@ -358,17 +362,22 @@ pub struct SchedulerSection {
 /// binary uses comes from its generated declaration, which walks the same
 /// overlay by canonical path.
 ///
-/// ONE KEY, and that is the whole relay surface today: it serves no endpoint, so
-/// there is no listener to configure. `zeroship-config-contract audit` is what
-/// makes this section obligatory rather than optional - a declared overlay path
-/// with no field here is accepted by the generator and then REJECTED by
-/// `deny_unknown_fields` at parse time, so the operator's TOML would fail on a
-/// key the reference documents.
+/// The typed overlay accepts every generated relay setting.
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct CdcServerSection {
     /// `PostgreSQL` DSN the relay streams logical replication from.
     pub database_url: Option<String>,
+    pub listen: Option<String>,
+    pub tls_cert_file: Option<std::path::PathBuf>,
+    pub tls_key_file: Option<std::path::PathBuf>,
+    pub max_apps: Option<usize>,
+    pub max_connections: Option<usize>,
+    pub clients_per_app: Option<usize>,
+    pub queue_capacity: Option<usize>,
+    pub transaction_bytes: Option<usize>,
+    pub transaction_changes: Option<usize>,
+    pub max_relations: Option<usize>,
 }
 
 /// Usage-metering stream configuration supplied by the shared file overlay.

@@ -7,7 +7,8 @@ with the runtime and installs deployment metadata before app code evaluates.
 
 CRUD, protection, SQL compilation, database drivers, and transaction policy
 belong to `zeroship-data-orm` and `zeroship-data-sql`. This adapter owns V8
-classes, per-isolate integration, resource composition, and change delivery.
+classes, per-isolate integration, resource composition, and subscription wrappers. The ORM owns subscription
+lifecycle; the PostgreSQL relay owns capture and slot cleanup.
 Rust applications use `zeroship-data-orm` directly.
 
 The adapter does not re-export ORM or SQL modules. Integration fixtures import

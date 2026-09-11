@@ -232,6 +232,8 @@ echo "    PG_TEST_URL=${PG_TEST_URL%%\?*}"
 # Run all targets; database fixtures within each target run serially.
 suite_rc=0
 : > "$SUITE_LOG"
+# Build the real relay used by distributed V8 subscriptions.
+cargo build -p zeroship-data-cdc-server || exit 1
 # Ordinary package tests include every database target and enable their helpers.
 cargo test -p zeroship-data-orm -p zeroship-data-v8 --no-fail-fast \
   -- --nocapture --test-threads=1 2>&1 | tee -a "$SUITE_LOG"

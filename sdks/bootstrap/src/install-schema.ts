@@ -985,7 +985,6 @@ export interface InstallSchemaOptions {
 const RESERVED_ENV_DB_NAMES = new Set<string>([
   "collection",
   "migrations",
-  "replication",
   // **P9 PR 3** — `beginTransaction` removed: the native primitive was
   // deleted entirely (transaction orchestration moved into Rust). The
   // creator-facing `transaction` (below) is now a native method on

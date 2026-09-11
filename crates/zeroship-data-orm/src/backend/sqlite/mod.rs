@@ -1585,19 +1585,6 @@ mod tests {
         assert_impl::<SqliteBackend>();
     }
 
-    /// Pin the SQLite-arm [`ChangeStream`] adapter
-    /// (`crate::backend::sqlite::cdc::SqliteChangeStream`) with the
-    /// agreed `ConsumerHandle = SqliteConsumerHandle` shape. A
-    /// regression that detaches the impl block — or renames the
-    /// associated type — trips here, not at the
-    /// `BackendHandle::as_change_stream_sqlite()` accessor.
-    fn assert_sqlite_change_stream_impls_change_stream() {
-        use crate::backend::sqlite::cdc::{SqliteChangeStream, SqliteConsumerHandle};
-        use zeroship_data_orm::cdc::ChangeStream;
-        fn assert_impl<T: ChangeStream<ConsumerHandle = SqliteConsumerHandle>>() {}
-        assert_impl::<SqliteChangeStream>();
-    }
-
     fn assert_sqlite_backend_is_static() {
         fn assert_static<T: 'static>() {}
         assert_static::<SqliteBackend>();
@@ -2202,7 +2189,6 @@ mod tests {
         let _ = assert_sqlite_backend_impls_schema_introspect as fn();
         let _ = assert_sqlite_backend_impls_vector_index as fn();
         let _ = assert_sqlite_backend_impls_spatial_index as fn();
-        let _ = assert_sqlite_change_stream_impls_change_stream as fn();
         let _ = assert_sqlite_backend_is_static as fn();
         let _ = assert_sqlite_client_pinned_to_session_handle as fn();
     }

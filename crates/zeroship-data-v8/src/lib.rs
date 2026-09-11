@@ -9,13 +9,12 @@
 //!   that hands the callback a collections-only tx view (the old
 //!   `beginTransaction` / `Transaction` wrapper surface was deleted).
 //!
-//! Platform-internal capabilities such as mask-policy installation and
-//! replication do not sit on the public `Db` wrapper; they hang off the
+//! Platform-internal policy installation uses the
 //! private `__platform` capability handle instead.
 //!
 //! Each wrapper carries a `v8::Weak` guaranteed finalizer that
 //! releases its backing resource on GC (broker handle, transaction
-//! connection, migration advisory lock).
+//! connection).
 //!
 //! Each app gets its own PostgreSQL schema (`"app_id".*`) for data
 //! isolation. The pool is created lazily on first use (one per worker
@@ -82,41 +81,6 @@ pub(crate) mod v8_bridge;
 
 pub mod service;
 
-// PostgreSQL change delivery composes the ORM backend with replication.
-#[cfg(not(feature = "test-helpers"))]
-pub(crate) mod change_stream_pg;
-#[cfg(feature = "test-helpers")]
-pub mod change_stream_pg;
-
-// Process-wide owner for per-app CDC consumers. Native Subscription wrappers
-// acquire leases here so all isolates in one worker share one logical slot.
-mod cdc_lifecycle;
-
-// COMPILED ONLY INTO TEST BUILDS, and that is now structural rather than
-// documented. `drop_namespace` has no production caller anywhere in the
-// workspace - measured 2026-09-02 across every crate, excluding tests and its
-// own file: zero call sites. `zeroship-control`'s
-// `cron/workflow_engine.rs` says so independently ("plugin-db's currently
-// unwired drop_namespace"). It is exercised only by the PG integration suite.
-//
-// The module carried `#![allow(dead_code)]` and a comment saying to remove the
-// allow "when a database-keyed migrate-server coordinator owns the call". That
-// comment was accurate and is the reason this is a GATE rather than a deletion:
-// the code is wanted, its caller is not built yet. Gating rather than allowing
-// makes the fact checkable - a production build no longer contains a
-// `DROP SCHEMA` / `DROP ROLE` path at all - and takes the module's
-// `compio_postgres` coupling out of the engine tier the split has to extract.
-#[cfg(any(test, feature = "test-helpers"))]
-pub mod drop_namespace;
-
-#[cfg(not(feature = "test-helpers"))]
-pub(crate) mod replication;
-#[cfg(feature = "test-helpers")]
-pub mod replication;
-
-/// Operator-owned cleanup for abandoned worker replication slots.
-pub mod slot_reaper;
-
 // Async-scoped transaction marker. Read by `transaction` to tell a
 // genuinely NESTED `transaction()` call from one that merely overlaps
 // another in time; see the module docs for the defect that distinction
@@ -125,11 +89,6 @@ pub mod slot_reaper;
 pub(crate) mod tx_scope;
 #[cfg(feature = "test-helpers")]
 pub mod tx_scope;
-
-#[cfg(not(feature = "test-helpers"))]
-pub(crate) mod wal_consumer;
-#[cfg(feature = "test-helpers")]
-pub mod wal_consumer;
 
 // `test_support` - the `tracing-subscriber` capture layer for warn/error-shape
 // contract tests - LEFT for `zeroship-data-orm` on 2026-09-03, and it left
@@ -158,9 +117,8 @@ pub mod wal_consumer;
 /// beside the service would be a second, unvalidated configuration.
 pub struct DbPlugin {
     url: String,
-    /// Stable across every isolate in one worker process and distinct across
-    /// worker containers. Used to derive the process's per-app CDC slot.
-    worker_id: String,
+    /// Authenticated relay transport for PostgreSQL subscriptions.
+    cdc_relay: Option<zeroship_data_orm::cdc::relay::RelayConfig>,
     /// Process-wide usage meter (metering-as-infrastructure). Stamped into
     /// the per-isolate context on `register`; the exec boundary emits
     /// `db_reads` / `db_writes` / `db_rows_written` through it on success.
@@ -200,7 +158,7 @@ impl DbPlugin {
     /// only caller, and it has already validated the configuration.
     pub(crate) fn new(
         url: String,
-        worker_id: String,
+        cdc_relay: Option<zeroship_data_orm::cdc::relay::RelayConfig>,
         meter: Option<std::sync::Arc<zeroship_metering::Meter>>,
         resource_key: service::DbResourceKey,
         backend: BackendUrl,
@@ -208,7 +166,7 @@ impl DbPlugin {
     ) -> Self {
         Self {
             url,
-            worker_id,
+            cdc_relay,
             meter,
             resource_key,
             backend,
@@ -287,7 +245,7 @@ impl NativePlugin for DbPlugin {
             if c.install_db_resources(&self.url, self.resource_key, self.backend.clone()) {
                 c.clear_pool();
             }
-            c.set_cdc_worker_id(&self.worker_id);
+            c.set_cdc_relay(self.cdc_relay.clone());
             // Stamp the process-wide meter so the exec boundary can emit a
             // per-app usage metric on each successful op.
         });
@@ -366,7 +324,7 @@ mod runtime_descriptor_binding_tests {
     fn plugin() -> std::sync::Arc<DbPlugin> {
         service::DbService::new(service::DbServiceConfig {
             url: "sqlite:descriptor-test.sqlite".to_string(),
-            worker_id: "worker_descriptor_test".to_string(),
+            cdc_relay: None,
             meter: None,
         })
         .expect("db service")
@@ -535,7 +493,6 @@ pub fn set_postgres_pool_for_tests(pool: Rc<compio_postgres::Pool>, url: &str) {
 #[cfg(any(test, feature = "test-helpers"))]
 #[doc(hidden)]
 pub fn reset_context_for_tests() {
-    service::close_operator_pools();
     ctx_mut(|c| *c = context::ThreadDbContext::new());
     // BOTH thread-locals, since the lanes became their own owner on 2026-09-02.
     //
@@ -890,7 +847,7 @@ pub fn is_sqlite_url(url: &str) -> bool {
 /// // Once, at composition, before any isolate exists:
 /// let service = DbService::new(DbServiceConfig {
 ///     url,
-///     worker_id: "worker-instance-id".into(),
+///     cdc_relay: None,
 ///     meter: None,
 /// })?;
 /// // Inside a compio runtime, per isolate:

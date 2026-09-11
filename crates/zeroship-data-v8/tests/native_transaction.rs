@@ -466,7 +466,7 @@ fn dispatch_zs_for_app_with_descriptor(
     let plugins: Vec<Arc<dyn NativePlugin>> = vec![
         DbService::new(DbServiceConfig {
             url: url.to_string(),
-            worker_id: "native-transaction-test-worker".to_string(),
+            cdc_relay: None,
             meter: None,
         })
         .expect("db service")

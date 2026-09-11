@@ -5,8 +5,8 @@
 //!
 //! - [`db`] — `Db` backs `env.db`. Exposes `.collection(name)`
 //!   returning a `Collection` v8_class wrapper, plus the native
-//!   `transaction(fn)` orchestrator. Platform-internal mask-policy and
-//!   replication entry points live on [`db_platform`].
+//!   `transaction(fn)` orchestrator. Platform-internal policy
+//!   installation lives on [`db_platform`].
 //! - [`db_platform`] — `DbPlatform`, the capability handle
 //!   set on `Db` under a V8 private symbol (`ZS_PLATFORM`). Holds the
 //!   platform-internal callables; unreachable from creator JS.
@@ -43,6 +43,5 @@ pub mod db;
 pub mod db_platform;
 pub mod dispatch;
 pub mod masked_value;
-pub mod replication;
 pub mod subscription;
 pub mod transaction;
