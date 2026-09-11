@@ -296,26 +296,9 @@ fn lower_operand(mask_kind: Option<MaskKind>, value: &Value) -> Value {
     Value::String(apply_mask_kind(kind, &value_to_text(value)))
 }
 
-// ---------------------------------------------------------------------------
-// Thread-local capture buffer
-// ---------------------------------------------------------------------------
-//
-// The capture buffer is keyed by the active procedure kind: capture is
-// enabled only when an [`Active`] scope guard is in scope (set up by
-// the runtime's query-dispatch entry path). The API is split so:
-//
-// 1. find / count / aggregate callbacks can call
-//    [`record_if_active`] without checking themselves.
-// 2. Tests and the SDK layer can set the active scope explicitly.
 
-/// One thread's in-flight capture.
-///
-/// **`recording` is the caller's answer to "is this a query?", not a lookup.**
-/// This module used to ask `zeroship_runtime::rpc::current_kind()` on every
-/// record, which made a data-plane module depend on the V8 runtime crate for a
-/// fact its own installer already knows. The tier is the reason: the procedure
-/// kind is ambient adapter state, and an engine that reads it directly is
-/// reaching up. The installer decides once; this records.
+/// Thread-local read capture. The host supplies whether this dispatch records reads;
+/// the ORM does not query runtime procedure state.
 struct Capture {
     /// `false` installs an inert capture: entries are dropped rather than
     /// buffered. Kept representable rather than refusing to install, because
@@ -650,21 +633,8 @@ mod tests {
         assert!(!entry.matches(&row(&[("userId", "99")])));
     }
 
-    // -------- Active guard / record_if_active --------
-    //
-    // These tests intentionally do NOT set the procedure kind - they
-    // verify the guard mechanics.
-    //
-    // THE KIND GATE IS NOT TESTED HERE, AND CANNOT BE. `recording` is the
-    // caller's answer to "is this a query?", and the caller is the adapter:
-    // `v8_bridge::ensure_read_set_capture` reads `zeroship_runtime::rpc`'s
-    // procedure kind and passes the boolean down. Three arms used to live in
-    // this module driving `KindGuard` directly; they moved to
-    // `zeroship_data_v8::v8_bridge`'s tests on 2026-09-03, with this module,
-    // because naming the runtime crate here is exactly what
-    // `xtask/tests/data_architecture.rs` refuses. They got stronger in the
-    // move: they now drive `ensure_read_set_capture` itself rather than a
-    // test-local copy of the kind-to-boolean mapping.
+    // These tests cover capture lifetime and recording. Adapter tests cover the
+    // procedure-kind decision passed into capture.
 
     #[test]
     fn record_no_op_when_inactive() {
