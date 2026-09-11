@@ -7,6 +7,8 @@ use zeroship_data_orm::{connection::ConnectionFactory, error::DbError};
 #[derive(Debug, Clone)]
 pub struct DbServiceConfig {
     pub connection: ConnectionFactory,
+    /// Project material and app bindings delivered by the trusted host.
+    pub project_keys: Arc<zeroship_data_orm::encryption::SuppliedProjectKeys>,
     pub cdc_relay: Option<zeroship_data_orm::cdc::relay::RelayConfig>,
     pub meter: Option<Arc<zeroship_metering::Meter>>,
 }
@@ -24,27 +26,36 @@ impl DbService {
                 config.cdc_relay,
                 config.meter,
                 assignments,
+                config.project_keys,
             )),
         }))
     }
     pub fn plugin(&self) -> Arc<DbPlugin> {
         Arc::clone(&self.plugin)
     }
+    pub fn project_keys(&self) -> &Arc<zeroship_data_orm::encryption::SuppliedProjectKeys> {
+        &self.plugin.project_keys
+    }
     pub fn connection(&self) -> &ConnectionFactory {
         &self.plugin.connection
     }
     pub fn lifecycle(&self) -> DbLifecycle {
-        DbLifecycle
+        DbLifecycle {
+            keys: self.project_keys().clone(),
+        }
     }
 }
 
 /// Host teardown for the adapter's local subscriptions.
-#[derive(Debug, Clone, Copy)]
-pub struct DbLifecycle;
+#[derive(Debug, Clone)]
+pub struct DbLifecycle {
+    keys: Arc<zeroship_data_orm::encryption::SuppliedProjectKeys>,
+}
 impl DbLifecycle {
     pub async fn deprovision_app(&self, app_id: &str) -> Result<(), DbError> {
         zeroship_data_orm::cdc::lifecycle::shutdown_app(app_id).await;
         zeroship_data_orm::cdc::broker::drop_app(app_id);
+        self.keys.remove_app(app_id)?;
         Ok(())
     }
 }
@@ -57,6 +68,7 @@ mod tests {
         let connection =
             ConnectionFactory::for_url("postgres://unused:unused@127.0.0.1:1/unused").unwrap();
         let service = DbService::new(DbServiceConfig {
+            project_keys: crate::testing::project_keys(),
             connection,
             cdc_relay: None,
             meter: None,
@@ -72,6 +84,7 @@ mod tests {
     #[test]
     fn service_clones_the_plugin_and_redacts_configuration() {
         let config = DbServiceConfig {
+            project_keys: crate::testing::project_keys(),
             connection: ConnectionFactory::for_url("postgres://user:secret@host/db").unwrap(),
             cdc_relay: None,
             meter: None,

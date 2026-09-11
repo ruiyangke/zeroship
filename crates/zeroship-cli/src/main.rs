@@ -27,6 +27,7 @@ mod migrate;
 mod organizations;
 mod parent_death;
 mod project_config;
+mod project_keys;
 mod secrets;
 
 zeroship_core::declare_env_consumer!(
@@ -168,6 +169,22 @@ fn cmd_serve(args: &[String]) {
     // Socket is released here so `start_server` can bind the real listener.
     eprintln!("[zeroship] Starting server on port {port}");
 
+    // Forward process env to the V8 runtime so `process.env.FOO` works in JS.
+    // Important for dev: the vite-plugin sets ZEROSHIP_ENTRY / ZEROSHIP_VITE_WS
+    // in the spawned child env. Without this, `process.env` in V8 is empty.
+    // Class `creator`, not `cli`: the names in this snapshot belong to the
+    // app being served, not to the platform, so there is nothing here for the
+    // platform to enumerate. This is the ONE legitimate whole-environment read.
+    let mut env_vars: std::collections::HashMap<String, String> =
+        zeroship_core::read_process_env_snapshot!(crate::ZeroshipCliConsumer)
+            .into_iter()
+            .collect();
+    // The single-app dev host owns its namespace just as the worker does.
+    // Keep it aligned with Vite's DEV_APP_ID when no identity was supplied.
+    env_vars
+        .entry("APP_ID".into())
+        .or_insert_with(|| "default".into());
+
     // Opt-in db plugin: when DATABASE_URL is set, register the db plugin
     // so JS `zeroship.db.*` works in the dev path (e.g. `vite-plugin` spawns
     // `zeroship serve` with DATABASE_URL forwarded from `.env`).
@@ -210,6 +227,10 @@ fn cmd_serve(args: &[String]) {
                 .and_then(|connection| {
                     zeroship_data_v8::service::DbService::new(
                         zeroship_data_v8::service::DbServiceConfig {
+                            project_keys: project_keys::load(
+                                std::path::Path::new(".zeroship/private"),
+                                &env_vars["APP_ID"],
+                            ).map_err(|error| zeroship_data_orm::error::DbError::config("local_project_key", error))?,
                             connection,
                             cdc_relay: None,
                             meter: Some(Arc::clone(&dev_meter)),
@@ -305,22 +326,6 @@ fn cmd_serve(args: &[String]) {
         kv_store,
         Some(Arc::clone(&dev_meter)),
     )));
-
-    // Forward process env to the V8 runtime so `process.env.FOO` works in JS.
-    // Important for dev: the vite-plugin sets ZEROSHIP_ENTRY / ZEROSHIP_VITE_WS
-    // in the spawned child env. Without this, `process.env` in V8 is empty.
-    // Class `creator`, not `cli`: the names in this snapshot belong to the
-    // app being served, not to the platform, so there is nothing here for the
-    // platform to enumerate. This is the ONE legitimate whole-environment read.
-    let mut env_vars: std::collections::HashMap<String, String> =
-        zeroship_core::read_process_env_snapshot!(crate::ZeroshipCliConsumer)
-            .into_iter()
-            .collect();
-    // The single-app dev host owns its namespace just as the worker does.
-    // Keep it aligned with Vite's DEV_APP_ID when no identity was supplied.
-    env_vars
-        .entry("APP_ID".into())
-        .or_insert_with(|| "default".into());
 
     let workflow_db_path: PathBuf = zeroship_core::declared_env_os!(
         cli,

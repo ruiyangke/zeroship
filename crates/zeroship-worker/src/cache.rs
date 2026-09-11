@@ -183,6 +183,7 @@ pub fn init_cache(max_size: usize, max_pinned_isolates_per_app: usize, kernel: K
 #[cfg(test)]
 pub(crate) fn test_db_service(url: &str) -> Arc<zeroship_data_v8::service::DbService> {
     zeroship_data_v8::service::DbService::new(zeroship_data_v8::service::DbServiceConfig {
+        project_keys: Default::default(),
         connection: zeroship_data_orm::connection::ConnectionFactory::for_url(url)
             .expect("valid database configuration"),
         cdc_relay: None,
@@ -197,6 +198,13 @@ pub fn db_url() -> Option<String> {
             .borrow()
             .as_ref()
             .and_then(|service| service.connection().url().map(str::to_owned))
+    })
+}
+
+/// Project material held by the installed database service for this host.
+pub fn project_keys() -> Option<Arc<zeroship_data_orm::encryption::SuppliedProjectKeys>> {
+    DB_SERVICE.with(|service| {
+        service.borrow().as_ref().map(|service| service.project_keys().clone())
     })
 }
 

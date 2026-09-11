@@ -2,7 +2,6 @@
 use crate::{
     compile, context, ctx_mut, metrics, system_shape_charter, transaction, tx_lanes, tx_scope,
 };
-use std::rc::Rc;
 use zeroship_data_orm::{
     backend,
     connection::{ConnectionFactory, LocalConnection},
@@ -47,19 +46,19 @@ pub fn reset_context_for_tests() {
 #[doc(hidden)]
 #[must_use]
 pub fn supply_project_key_for_tests(app_ids: &[&str], hex: &str) -> SuppliedProjectKeysGuard {
-    let keys = Rc::new(encryption::SuppliedProjectKeys::new());
+    let keys = std::sync::Arc::new(encryption::SuppliedProjectKeys::new());
     keys.insert_hex("fixture_project", hex).expect("fixture project key");
     for app_id in app_ids {
         keys.bind_app(app_id, "fixture_project").expect("fixture app binding");
     }
-    ctx_mut(|c| c.set_supplied_project_keys(Some(Rc::clone(&keys))));
+    ctx_mut(|c| c.set_supplied_project_keys(Some(std::sync::Arc::clone(&keys))));
     SuppliedProjectKeysGuard { _keys: keys }
 }
 
 #[doc(hidden)]
 #[derive(Debug)]
 pub struct SuppliedProjectKeysGuard {
-    _keys: Rc<encryption::SuppliedProjectKeys>,
+    _keys: std::sync::Arc<encryption::SuppliedProjectKeys>,
 }
 
 impl Drop for SuppliedProjectKeysGuard {
@@ -207,4 +206,10 @@ pub fn drain_pending_emits_for_tests(app_id: &str) {
 #[doc(hidden)]
 pub fn clear_pending_emits_for_tests(app_id: &str) {
     exec::clear_pending_emits(app_id);
+}
+
+/// Share explicitly supplied fixture keys with the real service composition.
+#[doc(hidden)]
+pub fn project_keys() -> std::sync::Arc<encryption::SuppliedProjectKeys> {
+    crate::context::with(|context| context.project_keys().unwrap_or_default())
 }
