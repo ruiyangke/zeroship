@@ -1,7 +1,7 @@
 //! Resolved column roles and SQL assignments supplied by the ORM.
 
 use crate::{
-    compile::{quote_ident, QueryError, SqlDialect},
+    compile::{QueryError, SqlDialect, quote_ident},
     value::Value,
 };
 
@@ -10,7 +10,11 @@ fn invalid(message: &str) -> QueryError {
 }
 
 pub fn primary_key(schema: &Value) -> Result<&str, QueryError> {
-    role(schema, "primaryKey")?.ok_or_else(|| invalid("operation requires a declared primary key"))
+    primary_key_column(schema)?.ok_or_else(|| invalid("operation requires a declared primary key"))
+}
+
+pub fn primary_key_column(schema: &Value) -> Result<Option<&str>, QueryError> {
+    role(schema, "primaryKey")
 }
 
 pub fn soft_delete_column(schema: &Value) -> Result<Option<&str>, QueryError> {
