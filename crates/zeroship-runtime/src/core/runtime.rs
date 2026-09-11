@@ -527,6 +527,52 @@ impl Runtime {
         RuntimeInner::start_pump(self.inner.clone());
     }
 
+    /// Permanently stop app dispatch and cancel this isolate's native work.
+    /// Native task teardown retains the isolate until its futures are destroyed.
+    /// Hosts may call this synchronously when a workflow loses its authority.
+    pub fn quarantine(&self) {
+        let tasks = self.state().borrow().tasks.clone();
+        if !tasks.cancel() {
+            return;
+        }
+        let queued = {
+            let mut inner = self.inner.borrow_mut();
+            inner.initialized = true;
+            inner.init_error = Some("runtime has been quarantined".into());
+            inner.fetch_handler_fn = None;
+            inner.fetch_fast_fn = None;
+            inner.rpc_fn = None;
+            inner.workflow_fn = None;
+            for request in inner.pending_requests.values() {
+                request.cancel.cancel();
+            }
+            inner.cleanup_cancelled_requests();
+            let mut state = inner.state.borrow_mut();
+            state.spawned_timers.clear();
+            state.ready_timers.clear();
+            std::mem::take(&mut state.spawned_ops)
+        };
+        drop(queued);
+        self.close_native_sockets_for_eviction();
+        if !tasks.is_idle() {
+            let keep_alive = self.clone();
+            // The supervisor is outside the cancelled group. It preserves V8
+            // until pump and socket futures have dropped their native handles.
+            compio::runtime::spawn(async move {
+                tasks.join().await;
+                drop(keep_alive);
+            }).detach();
+        }
+    }
+
+    /// Join native task teardown after permanently quarantining the isolate.
+    /// Cancelling this wait leaves quarantine in force and a later call can join.
+    pub async fn shutdown(&self) {
+        self.quarantine();
+        let tasks = self.state().borrow().tasks.clone();
+        tasks.join().await;
+    }
+
     /// Number of times the per-isolate idle-GC ticker has fired
     /// `low_memory_notification`. Increments on every GC hint; useful as
     /// a test-visible signal (the alternative — sampling V8 heap stats
@@ -1286,6 +1332,7 @@ impl RuntimeInner {
     /// (handled by `Runtime::build`). Prefer calling `Runtime::start_pump`
     /// on the public handle — it hides the `Rc<RefCell<_>>` plumbing.
     pub(crate) fn start_pump(self_ref: Rc<RefCell<Self>>) {
+        let tasks = self_ref.borrow().state.borrow().tasks.clone();
         let (notify_tx, notify_rx) = futures::channel::mpsc::channel::<()>(1);
         let idle_gc_after = {
             let mut rt = self_ref.borrow_mut();
@@ -1304,24 +1351,22 @@ impl RuntimeInner {
         // the pump upgrades transiently per iteration and exits the moment
         // `upgrade()` returns `None`.
         let weak = Rc::downgrade(&self_ref);
-        compio::runtime::spawn(async move {
+        tasks.spawn(async move {
             crate::panic_util::guard("pump_loop", async move {
                 Self::pump_loop(weak, notify_rx).await;
             }).await;
-        })
-        .detach();
+        });
 
         // Idle-GC ticker — sibling task with a Weak handle so isolate
         // teardown drops it without a join. `idle_gc_after == 0` opts
         // out (used by tests that don't want the timer at all).
         if !idle_gc_after.is_zero() {
             let weak = Rc::downgrade(&self_ref);
-            compio::runtime::spawn(async move {
+            tasks.spawn(async move {
                 crate::panic_util::guard("idle_gc_ticker", async move {
                     Self::idle_gc_ticker(weak, idle_gc_after).await;
                 }).await;
-            })
-            .detach();
+            });
         }
     }
 

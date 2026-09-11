@@ -1,5 +1,7 @@
 use std::time::Duration;
 
+mod workflow_shutdown;
+
 use serde_json::Value;
 use zeroship_runtime::{
     init_v8, EnvSnapshot, ModuleEntry, RequestCtx, WorkflowOutcome,

@@ -185,6 +185,7 @@ fn validate_connect_kind(scope: &mut v8::PinScope, violated: &str) -> Result<(),
 }
 
 pub(super) fn spawn_connect_task(state: SharedState, socket_id: u32, target: AuthorizedConnect) {
+    let tasks = state.borrow().tasks.clone();
     let task = async move {
         let Some((addr, tcp)) = connect_tcp(&state, socket_id, target).await else {
             return;
@@ -217,7 +218,9 @@ pub(super) fn spawn_connect_task(state: SharedState, socket_id: u32, target: Aut
         push_event(&state, socket_id, SocketEvent::Ready);
         run_socket_driver(state, socket_id, SocketStream::Plain(tcp), rx).await;
     };
-    compio::runtime::spawn(crate::panic_util::guard("node-net-connect", task)).detach();
+    tasks.spawn(async move {
+        crate::panic_util::guard("node-net-connect", task).await;
+    });
 }
 
 #[cfg(feature = "runtime_tls")]
@@ -227,6 +230,7 @@ pub(super) fn spawn_tls_connect_task(
     target: AuthorizedConnect,
     opts: TlsOptions,
 ) {
+    let tasks = state.borrow().tasks.clone();
     let task = async move {
         let Some((addr, tcp)) = connect_tcp(&state, socket_id, target).await else {
             return;
@@ -317,7 +321,9 @@ pub(super) fn spawn_tls_connect_task(
         );
         run_socket_driver(state, socket_id, SocketStream::Tls(tls), rx).await;
     };
-    compio::runtime::spawn(crate::panic_util::guard("node-tls-connect", task)).detach();
+    tasks.spawn(async move {
+        crate::panic_util::guard("node-tls-connect", task).await;
+    });
 }
 
 #[cfg(feature = "runtime_tls")]
