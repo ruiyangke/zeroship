@@ -47,8 +47,11 @@ Control activation records its durable notification in the same database
 transaction through an invoker-rights trigger. Startup and periodic service
 sweeps deliver pending revisions; reconciliation and acknowledgement commit
 together. Bounded passes preserve retry fairness when an app cannot reconcile.
-The worker polling loop, Control capability
-issuance, public HTTP ingress, retention of
+Control now issues app capabilities through the runtime app resource, accepting
+only active enrolled worker assertions. Issuance uses the loaded Control signing
+snapshot and shared assertion replay protection. Bootstrap role credentials and
+draining workers cannot acquire capabilities.
+The worker polling loop, capability refresh, public HTTP ingress, retention of
 completed run graphs and interpreter cutover remain in progress. The
 current runtime still uses Control and the local mini-engine.
 

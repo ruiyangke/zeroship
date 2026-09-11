@@ -335,6 +335,7 @@ struct PeerKeyDocument {
 pub struct ServiceKeyring {
     issuer: ServiceIssuer,
     audience: ServiceIssuer,
+    signing_key: Arc<ServiceSigningKey>,
     minter: ServiceAssertionMinter,
     envelope: UserEnvelopeSigner,
     bundle: Option<ServiceTrustBundle>,
@@ -419,6 +420,7 @@ impl ServiceKeyring {
         signing_key: ServiceSigningKey,
         bundle: ServiceTrustBundle,
     ) -> Result<Self, PeerKeyError> {
+        let signing_key = Arc::new(signing_key);
         // Derived from the PRIVATE half, which is what makes this a comparison
         // of the two documents rather than of the bundle against itself.
         let own_public = signing_key.verifying_key_bytes();
@@ -435,15 +437,13 @@ impl ServiceKeyring {
         }
         let minter =
             ServiceAssertionMinter::new(issuer.clone(), signing_key.key_id(), &signing_key)?;
-        // The key is MOVED in rather than borrowed, because this process signs
-        // two different things with it: service assertions (the minter) and, at
-        // the gateway, the `ZeroShip-User` identity envelope. Loading the file
-        // twice to get two owners is how the two would drift onto different
-        // key material after a rotation.
-        let envelope = UserEnvelopeSigner::new(signing_key)?;
+        // Every signing protocol uses the same immutable loaded key snapshot.
+        // Reloading its file to compose another signer could cross a rotation.
+        let envelope = UserEnvelopeSigner::new(signing_key.clone())?;
         Ok(Self {
             audience: issuer.clone(),
             issuer,
+            signing_key,
             minter,
             envelope,
             bundle: Some(bundle),
@@ -700,6 +700,15 @@ impl fmt::Debug for ServiceAuth {
 }
 
 impl ServiceAuth {
+    /// The verified local issuer and its loaded key for protocol-specific
+    /// capability codecs. Sharing this snapshot does not reload key files.
+    #[must_use]
+    pub fn signing_identity(&self) -> Option<(&ServiceIssuer, &ServiceSigningKey)> {
+        self.keyring
+            .as_ref()
+            .map(|keyring| (&keyring.issuer, keyring.signing_key.as_ref()))
+    }
+
     /// Build a capability from a loaded keyring and the verifier for its tier.
     #[must_use]
     pub fn new(
