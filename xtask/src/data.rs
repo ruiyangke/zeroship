@@ -134,7 +134,7 @@ fn validate_targets(metadata: &Value) -> Result<()> {
             .iter()
             .any(|feature| package["features"].get(feature).is_some())
         {
-            return Err(format!("{name}: live database tests cannot be feature-gated").into());
+            return Err(format!("{name}: database tests cannot be feature-gated").into());
         }
         let targets = package["targets"]
             .as_array()

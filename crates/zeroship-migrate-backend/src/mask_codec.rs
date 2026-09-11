@@ -212,10 +212,9 @@ mod tests {
     /// dev-dependency; this crate has no edge back and must not grow one.
     ///
     /// **This doc named `zeroship-data-v8`'s `mask_flip.rs` until
-    /// 2026-09-04.** That test does drive this emitter against a real catalog,
-    /// but it needs a live `PostgreSQL` and `--features test-helpers`, so it never
-    /// runs in `cargo test -p zeroship-migrate-backend` and could not have
-    /// caught the divergence this constant's doc describes.
+    /// 2026-09-04.** Those catalog tests now live in
+    /// `crates/zeroship-data-orm/src/tests/postgres/protection.rs` and run in
+    /// ordinary ORM tests. This crate's suite still needs its own sentinel guard.
     #[test]
     fn the_persisted_sentinel_prefixes_are_the_zero_migrate_brand() {
         assert_eq!(ENC_SENTINEL_PREFIX, "zero-migrate:enc:");

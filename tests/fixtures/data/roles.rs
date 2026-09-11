@@ -107,9 +107,8 @@ pub fn set_local_role_sql(app_id: &str) -> Result<String, DbError> {
     ))
 }
 
-/// Result of `ensure_per_app_role` (which is behind `test-helpers`, so a
-/// default build has this type without its producer) — distinguishes "created the role
-/// now" from "role already existed" for idempotency telemetry.
+/// Result of `ensure_per_app_role`, distinguishing a newly created role from
+/// an existing role for idempotency telemetry.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PerAppRoleOutcome {
     /// True iff this call issued the `CREATE ROLE`.

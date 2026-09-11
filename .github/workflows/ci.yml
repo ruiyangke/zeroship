@@ -100,10 +100,9 @@ jobs:
       - run: cargo check --workspace
       # The same configuration, as a gate: it audits cargo's artifact stream
       # against `cargo metadata` so a scheduling abort cannot read as a clean
-      # tree, and it asserts that `test-helpers` really resolved OFF for the
-      # five members that declare it. The line above reads only an exit code and
-      # has no opinion on feature resolution, which is the axis the defect lived
-      # on. Twenty seconds; no services, no database.
+      # tree, and it rejects test-only feature declarations across the workspace.
+      # The line above reads only an exit code; this gate also checks which
+      # artifacts Cargo emitted and how their features are declared.
       - name: shipped configuration compiles
         run: tests/shipped_config_gate.sh
       # The same shipped-vs-test feature split, one member down, read off the
@@ -1080,19 +1079,10 @@ jobs:
       - name: The ORM driver contract is invariant across the feature split
         run: tests/contract_feature_invariance_gate.sh
 
-  # The live-database gate. zeroship-control and zeroship-migrate-server between them
-  # hold 45 test targets that dial a real Postgres and panic on connect without
-  # one - the billing money path (which additionally drives the advisory-locked
-  # fleet-wide cron sweeps), plus deploy, oauth, device, token, admin, bootstrap,
-  # registry and workflow suites. They carry
-  # `required-features = ["live-db-tests"]`, so the `rust` job above skips them;
-  # this job provisions the database and is what actually runs them.
-  #
-  # The set it runs is the set that is gated, by construction: the script issues
-  # `cargo test -p <crate> --features live-db-tests`, which runs every target in
-  # the crate whose required-features are satisfied. There is no name list, so
-  # nothing can be gated out of the default build and land in neither job - which
-  # is exactly how fifteen non-billing control suites went unrun before.
+  # Required control-plane and migration-service database verification. The suite
+  # provisions a migrated PostgreSQL database and runs ordinary crate tests,
+  # including billing, deployment, identity, registry and workflow behavior.
+  # These targets require no opt-in feature.
   #
   # The job name is kept because branch protection references it.
   #
@@ -1347,27 +1337,9 @@ jobs:
           name: data-test-results
           path: target/nextest/data/junit.xml
 
-  # The live-Postgres gate for zeroship-worker: seven tests that drive
-  # `workflow_advance_unsigned` end to end and whose claim path joins
-  # `zeroship.apps` / `plans` / `app_deploys`.
-  #
-  # WHY IT IS ITS OWN JOB. Those seven were UNGATED until 2026-08-28 and nothing
-  # provisioned a migrated database for them, so the `rust` job above - which
-  # runs `tests/provision_test_backends.sh` and gets a live but EMPTY `zeroship`
-  # - failed all seven on `relation "zeroship.plans" does not exist`. That is a
-  # void run presented as seven regressions, and `zeroship-control` hit the
-  # identical shape on 2026-08-20. The fix is the same pair: the tests moved
-  # behind `--features live-db-tests` (so `cargo test --workspace` above is
-  # honest about what it ruled on) and this job runs them against a database the
-  # suite script creates and migrates itself.
-  #
-  # NOT folded into auth-gate, which already owns a migrated database. Two
-  # reasons, and the second is the binding one: auth-gate builds no crate that
-  # depends on zeroship-runtime, so adding zeroship-worker would pull V8 into a
-  # job that does not otherwise need it; and auth-gate's AUTH_MIN_PASSED floor
-  # is a sum over every binary it runs, so adding ~114 passes to it means
-  # re-measuring that floor against the whole auth suite - a number this crate's
-  # change has no way to establish.
+  # Required worker database verification. Workflow advancement reads the platform
+  # schema, so the suite creates and migrates its database before ordinary tests.
+  # This job builds the worker's V8 dependencies independently of auth-gate.
   #
   # THE SCRIPT DOES NOT SKIP. Without an overlay, a server, or the `zero-migrate`
   # CLI it exits 2 naming the fix and never reaches `cargo test`, so this job

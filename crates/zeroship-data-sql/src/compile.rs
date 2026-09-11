@@ -6785,10 +6785,8 @@ mod tests {
     // any future target syntax that encodes a qualifier without a dot.
     //
     // WHAT THESE DO NOT PROVE, AND IT MATTERS. They are NOT evidence
-    // about a deployed app. This crate is consumed only by plugin-db
-    // (checked 2026-08-20: nothing else names it in a Cargo.toml), and
-    // plugin-db's callers of these builders all sit in
-    // `#[cfg(any(test, feature = "test-helpers"))]` code. The migration engine,
+    // about a deployed app. The ORM's callers of these DDL builders sit in
+    // private test fixtures under `#[cfg(test)]`. The migration engine,
     // which applies schema at deploy, carries its OWN copy of this renderer.
     //
     // THAT COPY IS IN-TREE AND LIVE. This comment cited `third_party/zero-migrate`

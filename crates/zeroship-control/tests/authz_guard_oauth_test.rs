@@ -583,7 +583,7 @@ impl PlatformOp {
                     // without it the device-grant exchange below answers 500
                     // with "refresh hash key is not configured" instead of a
                     // token. Shared with the auth crate's fixture through
-                    // `zeroship-test-support`, which is where the two stopped
+                    // `tests/fixtures/session_keys.rs`, which is where the two stopped
                     // being able to drift apart.
                     let (hash_file, idem_file) = session_keys::session_key_files();
                     cfg.settings.refresh_hash_key_file =
