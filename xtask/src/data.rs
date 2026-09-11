@@ -12,6 +12,9 @@ const PACKAGES: &[&str] = &[
 ];
 
 pub fn run(filter: Option<&str>) -> Result<()> {
+    if filter.is_none() {
+        architecture()?;
+    }
     checked(
         cargo().args(["nextest", "--version"]),
         "cargo-nextest is required",
@@ -59,6 +62,19 @@ pub fn run(filter: Option<&str>) -> Result<()> {
         Ok(())
     };
     tests.and(docs)
+}
+
+pub fn architecture() -> Result<()> {
+    checked(
+        cargo().args([
+            "test",
+            "--manifest-path",
+            "xtask/Cargo.toml",
+            "--test",
+            "data_architecture",
+        ]),
+        "data architecture and database posture",
+    )
 }
 
 fn check_snapshot_clients() -> Result<()> {

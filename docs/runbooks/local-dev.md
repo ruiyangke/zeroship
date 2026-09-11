@@ -285,7 +285,7 @@ nobody remembers exporting it in.
 from whatever DSN it is handed, and `CREATE DATABASE ... WITH TEMPLATE`
 requires exclusive access to the source — so that suite cannot share one until
 it clones from a quiescent template instead. See
-`tests/tests_do_not_create_databases_gate.sh`, which records that ruling.
+`xtask/tests/data_architecture.rs`, which records that ruling.
 
 ## Benchmarks
 

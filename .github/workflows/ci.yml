@@ -553,8 +553,8 @@ jobs:
         run: tests/ws_subscription_stub_gate.sh --self-test
       - name: websocket subscription stub agrees with what describes it
         run: tests/ws_subscription_stub_gate.sh
-      - name: Deleted database full-text search stays deleted
-        run: tests/db_fts_deletion_gate.sh
+      - name: Data architecture and database posture
+        run: cargo xtask test data-architecture
       # The same shape as the WS stub above, one layer up: a comment ASSERTING
       # that two crates stay in agreement, with nothing enforcing it. Found ten
       # times in the data plane and migration engine; two were fixed in the week
@@ -568,40 +568,6 @@ jobs:
         run: tests/sync_claim_gate.sh --self-test
       - name: Every cross-crate agreement claim is on the ledger
         run: tests/sync_claim_gate.sh
-      # Decision 4 of docs/proposals/2026-08-31-data-crate-shape.md - "no SQL and
-      # no dialect knowledge in the engine" - had NOTHING enforcing it, while
-      # decision 5 beside it had tests/vendor_embedding_gate.sh. The asymmetry
-      # showed: the decision's own statement inventory was wrong in both
-      # directions, billing five cfg-gated statement families in auth/bootstrap.rs
-      # as production while omitting the three always-compiled PL/pgSQL builders
-      # beside them, and undercounting backend_handle.rs by one. Operator
-      # decision 2026-09-04 was to keep the property and mechanise it. Shrink-only
-      # baseline: additions refused, removals accepted with a note. Self-test
-      # first, because a detector that matches nothing and an engine holding no
-      # new SQL print the same thing.
-      - name: Decision four gate self-test
-        run: tests/decision_four_gate.sh --self-test
-      - name: No new production SQL statement text in the data engine
-        run: tests/decision_four_gate.sh
-      # DECISION 5's GATE HAD NEVER RUN HERE. It was written on 2026-09-01, it
-      # is named in the comment above as the thing decision 4 lacked, and the
-      # only occurrence of its filename in this workflow was that comment - so
-      # for three days the gate that refuses a vendor type in a non-vendor crate
-      # was enforced by whoever remembered to run it. That is the same failure
-      # the meta-gate below exists for, one level up: a gate nobody invokes and
-      # a clean tree produce identical CI output.
-      #
-      # Self-test first, and it is not ceremony. The gate SKIPS modules that are
-      # test-gated at their declaration, and a file it declines to rule on
-      # prints nothing at all - so a wrong skip predicate is invisible from the
-      # gate's own output. It was wrong until 2026-09-04: a comment quoting
-      # `#[cfg(test)]` above a `mod x;` read as a gate and removed two files
-      # from the scan. tests/lib/module_gating.sh now holds the one definition,
-      # and these two steps are where its controls run.
-      - name: Vendor embedding gate self-test
-        run: tests/vendor_embedding_gate.sh --self-test
-      - name: No non-vendor crate embeds a vendor type
-        run: tests/vendor_embedding_gate.sh
       # THE STEP ABOVE WAS THE VISIBLE HALF OF A LARGER MISS. Measuring "which
       # gates does this workflow actually run" on 2026-09-04 found TWELVE of the
       # 37 gates in tests/ wired nowhere - a third of them - and not one of the
@@ -625,8 +591,6 @@ jobs:
         run: tests/cargo_package_spec_gate.sh --self-test
       - name: Every cargo -p spec in the repo names a real package
         run: tests/cargo_package_spec_gate.sh
-      - name: The data crates cannot reach a driver or the V8 runtime
-        run: tests/data_crate_closure_gate.sh
       - name: KV storage remains independent of the V8 binding
         run: cargo test -p zeroship-kv --test architecture
       - name: No feature routes onto a dev-only dependency
@@ -648,8 +612,6 @@ jobs:
         run: tests/napi_export_parity_gate.sh
       - name: No cfg pair whose two arms declare the identical item
         run: tests/noop_cfg_pair_gate.sh
-      - name: Compose ships a finite max_slot_wal_keep_size
-        run: tests/compose_db_posture_gate.sh
       - name: No platform column is stored beside its own hash
         run: tests/secret_beside_its_hash_gate.sh
       # Arm 2 of this one was RED on main the whole time it was unwired:
@@ -800,15 +762,6 @@ jobs:
       # neither is in a suite anyone watches. Text-only: no binary, no docker.
       - name: dev secret provisioning check can actually pass
         run: tests/dev_secrets_gate.sh
-      # The harness creates the database and passes the DSN in; a test that
-      # makes its own decides its own isolation invisibly and cannot run
-      # against a database anybody else is connected to. Four files issue
-      # CREATE DATABASE and each is ruled on in the script, with the reason;
-      # a ruling that no longer matches anything fails this too, because an
-      # exemption nobody removed is how the next one gets waved through.
-      # Text-only: no build, no database.
-      - name: test code does not create its own databases
-        run: tests/tests_do_not_create_databases_gate.sh
       # AGENTS.md's "zero tokio in the stack" invariant has never been checked by
       # anything. It is two claims: no manifest we own declares tokio (true, and
       # briefly false in b72fee096, caught by a human reading the diff), and the
@@ -821,16 +774,6 @@ jobs:
       # compiled. This step sits in the rust job for the toolchain, not a build.
       - name: zero-tokio invariant
         run: tests/zero_tokio_gate.sh
-      # AGENTS.md's "privilege follows the PROCESS, not the function" applied to
-      # the one attribute the worker holds that creator code can reach:
-      # PostgreSQL REPLICATION. The grant lives in db/migrations-ts, the boot
-      # check that demands it lives in the worker, and the statements that need
-      # it live in data-v8 - three files that must agree, and did not have to.
-      # The gate joins them and is self-inverting, so it refuses both a premature
-      # deletion of the reaper and a grant left behind after the CDC relay takes
-      # the streaming path. Runs cargo tree and greps; nothing is compiled.
-      - name: worker replication privilege coupling
-        run: tests/worker_replication_privilege_gate.sh
       # THE INSTRUMENTS' OWN SELF-TESTS. Every e2e harness in tests/ sources one
       # or more of tests/lib/*.sh for its run accounting: whether a binary is
       # stale against its sources, whether a Rust test skipped and still counted

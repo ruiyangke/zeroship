@@ -31,6 +31,8 @@ enum Task {
 
 #[derive(Subcommand)]
 enum Suite {
+    /// Check data crate boundaries and database deployment/test posture.
+    DataArchitecture,
     /// Run the data crates against PostgreSQL, SQLite files and the CDC relay.
     Data {
         /// Select tests for a diagnostic run; database setup remains mandatory.
@@ -46,6 +48,9 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     let result = match args.command {
+        Task::Test {
+            suite: Suite::DataArchitecture,
+        } => data::architecture(),
         Task::Test {
             suite: Suite::Data { filter },
         } => data::run(filter.as_deref()),

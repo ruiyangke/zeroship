@@ -4,7 +4,7 @@
 relay tests. Assertions remain in their owning crates. This independent tooling
 workspace keeps orchestration dependencies out of shipped services.
 
-The command builds the real relay executable and the PostgreSQL fixture image,
+The command checks data architecture, builds the real relay executable and the PostgreSQL fixture image,
 runs nextest, then runs Cargo doctests. Each database test owns its PostgreSQL
 container through an explicit Rust guard. The container supplies logical WAL,
 pgvector and PostGIS, with a dynamically assigned host port. SQLite tests use
@@ -20,12 +20,20 @@ before compiling the V8 runtime.
 
 ```console
 cargo xtask test data
+cargo xtask test data-architecture
 cargo xtask test data --filter 'test(native_transaction)'
 ```
 
 The filtered command is for diagnosis. The unfiltered command runs the complete
 suite and is used by CI. Tests release their containers after success or panic;
 testcontainers' watchdog handles interrupted test processes.
+
+`tests/data_architecture.rs` owns dependency, SQL placement, adapter, driver,
+worker privilege and database fixture checks. Rust source parsing distinguishes
+production code from test modules and documentation; Cargo metadata supplies
+normal dependency closures. Each scan has a corpus floor and rejection controls.
+Example acceptance tests belong to their examples and run through Vitest with
+TypeScript fixtures and browser assertions.
 
 Nextest owns reporting, timeouts and process isolation. Its `data` profile writes
 JUnit results under the Cargo target directory. The database group bounds

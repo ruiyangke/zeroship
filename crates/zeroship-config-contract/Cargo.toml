@@ -25,7 +25,7 @@ zeroship-auth = { workspace = true }
 zeroship-control = { workspace = true }
 # THE ONE EXCEPTION TO "NOTHING DEPENDS ON THE CDC RELAY", and it is named as
 # such in `crates/zeroship-data-cdc-server/Cargo.toml` and enforced by
-# `tests/data_crate_closure_gate.sh` arm 3. This tool is `class =
+# `xtask/tests/data_architecture.rs`. This tool is `class =
 # "test-dev-tool"` - it is not shipped - so linking the relay's registry does not
 # put a relay in any deployed binary's closure. The alternative was to classify
 # the relay as something other than `platform`, which would leave a shipped

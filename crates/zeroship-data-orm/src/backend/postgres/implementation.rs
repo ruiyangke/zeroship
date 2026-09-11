@@ -101,7 +101,7 @@ impl PostgresBackend {
     /// `tests/lib/tier_signature_census.sh` as the adapter embedding a vendor
     /// type. Pushing the composer DOWN instead of up is the only direction that
     /// works: an `open_postgres_backend` in the engine's `backend_selection` was
-    /// tried the same day and refused by `tests/vendor_embedding_gate.sh`,
+    /// tried the same day and refused by `xtask/tests/data_architecture.rs`,
     /// because taking `Rc<Pool>` names the vendor from a non-vendor crate just
     /// as surely. Inside this crate the name is simply local.
     ///

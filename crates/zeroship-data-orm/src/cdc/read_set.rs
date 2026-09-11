@@ -741,7 +741,7 @@ mod tests {
     // this module driving `KindGuard` directly; they moved to
     // `zeroship_data_v8::v8_bridge`'s tests on 2026-09-03, with this module,
     // because naming the runtime crate here is exactly what
-    // `tests/data_crate_closure_gate.sh` refuses. They got stronger in the
+    // `xtask/tests/data_architecture.rs` refuses. They got stronger in the
     // move: they now drive `ensure_read_set_capture` itself rather than a
     // test-local copy of the kind-to-boolean mapping.
 
