@@ -968,12 +968,15 @@ sleep 3
 # worker. Step 9 is dev-only and never noticed; step 10 drives the DEPLOYED tier
 # and would have reported the gateway's 502 as a platform divergence.
 #
-# ZEROSHIP_WORKER_DATABASE_URL / ZEROSHIP_WORKER_KV_URL / --storage-url: without
+# ZEROSHIP_WORKER_DATABASE_URL / ZEROSHIP_WORKER_KV_CONFIG / --storage-url: without
 # them env.db / env.kv / env.storage are
 # ABSENT on the deployed tier and step 10's app would fail for a reason that
 # has nothing to do with what it is measuring.
 gp_start_worker() {
-  ZEROSHIP_WORKER_KV_URL="redis://127.0.0.1:$REDIS_PORT" \
+  ZEROSHIP_WORKER_KV_CONFIG="backend = \"redis\"
+[redis.topology]
+mode = \"standalone\"
+endpoint = \"127.0.0.1:$REDIS_PORT\"" \
   "$BIN/zeroship-worker" --port "$ZEROSHIP_WORKER_PORT" --threads 2 --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" \
     --storage-url /tmp/gp-storage \
     --blob-store /tmp/gp-bundles --poll-interval 2 >>/tmp/gp-worker.log 2>&1 &

@@ -11,7 +11,7 @@ use zeroship_kv::backend::{Backend, Redis, TtlState};
 #[compio::test]
 async fn single_node_roundtrip() {
     let fixtures = support::fixtures();
-    let url = fixtures.redis_url();
+    let url = fixtures.redis_config();
     let b = Redis::new(url);
     let app = "kv-test-single";
 
@@ -53,7 +53,7 @@ async fn list_all(b: &Redis, app: &str, prefix: &str) -> Vec<String> {
 #[compio::test]
 async fn cluster_roundtrip_via_backend() {
     let fixtures = support::fixtures();
-    let b = Redis::new(fixtures.cluster_url());
+    let b = Redis::new(fixtures.cluster_config());
     let app = "kv-test-cluster";
 
     b.delete(app, "k1").await.ok();
@@ -90,7 +90,7 @@ async fn cluster_roundtrip_via_backend() {
 #[compio::test]
 async fn ttl_expires_in_cluster_mode() {
     let fixtures = support::fixtures();
-    let url = fixtures.cluster_url();
+    let url = fixtures.cluster_config();
     let b = Redis::new(url);
     let app = "kv-test-cluster-ttl";
 
@@ -108,8 +108,8 @@ where
     Fut: std::future::Future<Output = ()>,
 {
     let fixtures = support::fixtures();
-    f(Redis::new(fixtures.redis_url()), "single").await;
-    f(Redis::new(fixtures.cluster_url()), "cluster").await;
+    f(Redis::new(fixtures.redis_config()), "single").await;
+    f(Redis::new(fixtures.cluster_config()), "cluster").await;
 }
 
 #[compio::test]
@@ -371,19 +371,13 @@ async fn incr_on_non_numeric_is_typed_error() {
 #[compio::test]
 async fn reordered_seeds_preserve_data_access() {
     let fixtures = support::fixtures();
-    let url = url::Url::parse(fixtures.cluster_url()).unwrap();
-    let seeds = url.query_pairs().find(|(key, _)| key == "seeds").unwrap().1;
-    let parts: Vec<&str> = seeds.split(',').map(str::trim).collect();
-    assert!(parts.len() >= 2, "need >= 2 seeds for this test");
-
-    // Same seed set, opposite order.
-    let url_forward = format!("{}?cluster=true&seeds={}", parts[0], parts.join(","));
-    let mut reversed = parts.clone();
-    reversed.reverse();
-    let url_reverse = format!("{}?cluster=true&seeds={}", reversed[0], reversed.join(","));
-
-    let a = Redis::new(url_forward);
-    let b = Redis::new(url_reverse);
+    let forward = fixtures.cluster_config();
+    let mut reverse = forward.clone();
+    let zeroship_kv::Topology::Cluster { seeds } = &mut reverse.topology else { panic!("expected cluster") };
+    assert!(seeds.len() >= 2);
+    seeds.reverse();
+    let a = Redis::new(forward);
+    let b = Redis::new(reverse);
 
     let app = "kv-test-share-seeds";
     b.delete(app, "shared").await.ok();

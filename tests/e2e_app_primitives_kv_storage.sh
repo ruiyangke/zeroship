@@ -11,7 +11,7 @@
 #   2. Stand up a throwaway Redis (env.kv's multi-node backend is Redis, NOT
 #      embedded redb — see crates/zeroship-worker/src/cache.rs create_plugins()).
 #   3. Boot control + worker + gateway with generated keys. The worker gets
-#      `ZEROSHIP_WORKER_KV_URL=redis://...` (enables env.kv) AND `--storage-url <path|s3://…>`
+#      `ZEROSHIP_WORKER_KV_CONFIG` with TOML (enables env.kv) AND `--storage-url <path|s3://…>`
 #      (enables env.storage). Without those inputs the namespaces simply are
 #      not registered.
 #   4. Mint an admin platform bearer OFFLINE (a one-key JWKS served on the
@@ -189,9 +189,12 @@ PIDS+=($!)
 for i in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done
 curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/readyz" >/dev/null 2>&1 && pass "control healthy" || { fail "control unhealthy"; tail -20 "$WORK/control.log"; exit 1; }
 
-# worker: env.kv <- ZEROSHIP_WORKER_KV_URL (Redis), env.storage <- --storage-url (LocalFs path),
+# worker: env.kv <- ZEROSHIP_WORKER_KV_CONFIG (Redis), env.storage <- --storage-url (LocalFs path),
 # env.db comes from --db; direct /dispatch uses the generated worker bearer.
-ZEROSHIP_WORKER_KV_URL="$KVURL" \
+ZEROSHIP_WORKER_KV_CONFIG="backend = \"redis\"
+[redis.topology]
+mode = \"standalone\"
+endpoint = \"${KVURL#redis://}\"" \
 "$BIN/zeroship-worker" --port $ZEROSHIP_WORKER_PORT --threads 2 \
   --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" \
  --storage-url "$WORK/storage" \

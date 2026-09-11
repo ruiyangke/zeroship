@@ -3579,8 +3579,14 @@ pub(crate) mod tests {
                         "handler-test-worker",
                     )),
                     kv_store: Some(
-                        zeroship_kv::KvStore::open(&zeroship_kv::KvConfig::Redis { url: kv_url })
-                            .unwrap(),
+                        zeroship_kv::KvStore::open(&zeroship_kv::KvConfig::Redis {
+                            redis: zeroship_kv::RedisConfig::new(
+                                zeroship_kv::Topology::Standalone {
+                                    endpoint: kv_url.trim_start_matches("redis://").to_owned(),
+                                },
+                            ),
+                        })
+                        .unwrap(),
                     ),
                     storage_backend: Some(StorageBackendConfig::Local(storage_root.clone())),
                     meter: std::sync::Arc::new(zeroship_metering::Meter::new()),

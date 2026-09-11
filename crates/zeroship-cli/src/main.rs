@@ -267,19 +267,32 @@ fn cmd_serve(args: &[String]) {
     eprintln!("[zeroship] auth plugin registered");
 
     // Resolve the host's runtime configuration before constructing storage.
-    let kv_config =
-        match zeroship_core::declared_env!(cli, "ZEROSHIP_KV_URL", crate::ZeroshipCliConsumer) {
-            Some(url) if !url.is_empty() => zeroship_kv::KvConfig::Redis { url },
-            _ => zeroship_kv::KvConfig::Redb {
-                path: zeroship_core::declared_env_os!(
-                    cli,
-                    "ZEROSHIP_KV_PATH",
-                    crate::ZeroshipCliConsumer
-                )
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from(".zeroship/kv.redb")),
-            },
-        };
+    let kv_config = match zeroship_core::declared_env!(
+        cli,
+        "ZEROSHIP_KV_CONFIG_FILE",
+        crate::ZeroshipCliConsumer
+    ) {
+        Some(path) if !path.is_empty() => {
+            let contents =
+                zeroship_core::config::secrets::read_secret_file(&path).unwrap_or_else(|error| {
+                    eprintln!("[zeroship] KV configuration: {error}");
+                    std::process::exit(1);
+                });
+            zeroship_kv::KvConfig::from_toml(&contents).unwrap_or_else(|error| {
+                eprintln!("[zeroship] KV configuration: {error}");
+                std::process::exit(1);
+            })
+        }
+        _ => zeroship_kv::KvConfig::Redb {
+            path: zeroship_core::declared_env_os!(
+                cli,
+                "ZEROSHIP_KV_PATH",
+                crate::ZeroshipCliConsumer
+            )
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(".zeroship/kv.redb")),
+        },
+    };
     let kv_store = zeroship_kv::KvStore::open(&kv_config).unwrap_or_else(|error| {
         eprintln!("[zeroship] kv backend init failed: {error}");
         std::process::exit(1);

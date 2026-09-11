@@ -1210,7 +1210,7 @@ jobs:
   # mechanism than the one the harness advertises.
   #
   # `redis:` is a real service and not a stub because the overlay names Redis
-  # too (`worker.kv_url`), and the provisioner probes it. Neither of these two
+  # too (`worker.kv_config`), and the provisioner probes it. Neither of these two
   # suites reads `ZS_TEST_REDIS_URL` or `test_kv_url()` today - the sole call
   # site is crates/worker/src/handler.rs:3497, in a crate neither gate builds -
   # so this is here to keep the generated topology TRUE rather than to serve a

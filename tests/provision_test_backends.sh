@@ -405,7 +405,11 @@ database_url = "$PG_DSN"
 
 [worker]
 database_url = "$PG_DSN"
-kv_url = "$REDIS_URL"
+kv_config = '''backend = "redis"
+[redis.topology]
+mode = "standalone"
+endpoint = "${REDIS_URL#redis://}"
+'''
 
 [workflow_scheduler]
 database_url = "$PG_DSN"

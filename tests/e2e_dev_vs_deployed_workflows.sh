@@ -336,7 +336,7 @@ e2e_export_database_urls "$DB_URL"
   --gateway-url "http://localhost:$ZEROSHIP_GATEWAY_PORT" > "$WORK/control.log" 2>&1 & PIDS+=($!)
 sleep 4
 # --control-url + ZEROSHIP_CONTROL_KEY give the worker's env.workflows namespace its
-# HTTP backend; ZEROSHIP_WORKER_KV_URL gives env.kv one. Omitting either would look like an
+# HTTP backend; ZEROSHIP_WORKER_KV_CONFIG gives env.kv one. Omitting either would look like an
 # app bug rather than a harness one.
 #
 # --workflow-advance-unsigned is not a shortcut here; it is the ONLY way a
@@ -351,7 +351,10 @@ sleep 4
 # tree are this file's sibling e2e and its worktree copy. So a production
 # deployment as shipped in deploy/compose cannot advance a workflow at all.
 # Recorded as a finding in docs/pilot/e2e-scenarios.md rather than worked around.
-ZEROSHIP_WORKER_KV_URL="redis://127.0.0.1:$REDIS_PORT" \
+ZEROSHIP_WORKER_KV_CONFIG="backend = \"redis\"
+[redis.topology]
+mode = \"standalone\"
+endpoint = \"127.0.0.1:$REDIS_PORT\"" \
 "$BIN/zeroship-worker" --port "$ZEROSHIP_WORKER_PORT" --threads 2 --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" \
  --blob-store "$WORK/bundles" --poll-interval 2 \
  --workflow-advance-unsigned \

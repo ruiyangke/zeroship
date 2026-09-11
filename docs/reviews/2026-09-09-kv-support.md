@@ -9,32 +9,14 @@ and V8 use scoped `Kv` handles from that store. Backend tests moved with the
 storage implementation. The dependency boundary is enforced by
 `crates/zeroship-kv/tests/architecture.rs`.
 
-The review also found existing behavior defects that remain outside the crate
-extraction:
+The review also found behavior defects outside the crate extraction.
 
-## Redis increment replies can lose precision
+## Redis increment precision — resolved
 
-`INCR_TTL_SCRIPT` in `crates/zeroship-kv/src/backend/redis.rs` returns the Lua
-numeric result of `INCRBY`. Redis stores the exact integer, but the Lua result
-can round before the driver decodes it. The V8 binding's BigInt conversion cannot
-recover information already lost at that boundary. This contradicts the native
-integer-counter contract even when the TypeScript SDK is bypassed.
-
-A live Redis probe reproduced a mismatch between the script's returned integer
-and `GET` of the same key. Reproduce against the local test Redis with:
-
-```sh
-nix shell nixpkgs#redis -c redis-cli -p 6390 EVAL \
-  "redis.call('SET', KEYS[1], '9007199254740992', 'PX', 60000); local n=redis.call('INCRBY', KEYS[1], '1'); local s=redis.call('GET', KEYS[1]); redis.call('DEL', KEYS[1]); return {n,s}" \
-  1 '{kv-review}:precision'
-```
-
-The correction must return the stored decimal string from within the same Lua
-execution and decode it into the Rust integer. A separate `GET` after `EVAL`
-would race concurrent increments. The driver currently exposes integer-only
-`eval` methods, so the storage and driver reply contracts must change together.
-Add coverage at the Rust backend and V8 boundaries using increments that cannot
-be represented exactly as a floating-point number.
+The Redis deployment refactor changed `INCR_TTL_SCRIPT` to return `GET` from
+within the same Lua execution. Rust decodes the decimal string directly into
+an integer. The native topology contract and V8 runtime tests now use increments
+whose result cannot be represented exactly as a floating-point number.
 
 ## Embedded delete treats an expired row as present
 

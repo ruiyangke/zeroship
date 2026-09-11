@@ -6,9 +6,15 @@ description = "Minimal compio-native Redis client — RESP2, pooled connections,
 
 [dependencies]
 compio = { workspace = true }
-bytes = "1"
+bytes = { version = "1" }
 redis-protocol = { version = "6", default-features = false, features = ["std", "resp2", "resp3", "bytes"] }
 url = { workspace = true }
+serde = { workspace = true }
+percent-encoding = "2"
+compio-tls = { workspace = true }
+rustls = { version = "0.23", default-features = false, features = ["std", "aws_lc_rs"] }
+rustls-native-certs = { version = "0.8" }
+rustls-pemfile = { version = "2" }
 
 [dev-dependencies]
 compio = { workspace = true }

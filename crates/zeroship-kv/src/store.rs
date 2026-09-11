@@ -40,19 +40,17 @@ impl KvStore {
     ///
     /// # Errors
     /// Returns `InvalidArgument` for a missing implementation or invalid Redis
-    /// URL, and `Connection` when embedded storage cannot be opened.
+    /// configuration, and `Connection` when embedded storage cannot be opened.
     pub fn open(config: &KvConfig) -> Result<Self, KvError> {
         match config {
             #[cfg(feature = "redis")]
-            KvConfig::Redis { url } => {
-                let parsed = url::Url::parse(url)
-                    .map_err(|_| KvError::invalid_argument("kv: invalid Redis URL"))?;
-                if parsed.scheme() != "redis" || parsed.host().is_none() {
-                    return Err(KvError::invalid_argument(
-                        "kv: expected a redis:// URL with a host",
-                    ));
-                }
-                Ok(Self::from_backend(Arc::new(crate::Redis::new(url))))
+            KvConfig::Redis { redis } => {
+                redis
+                    .validate()
+                    .map_err(|error| KvError::invalid_argument(error.to_string()))?;
+                Ok(Self::from_backend(Arc::new(crate::Redis::new(
+                    redis.clone(),
+                ))))
             }
             #[cfg(not(feature = "redis"))]
             KvConfig::Redis { .. } => Err(KvError::invalid_argument(

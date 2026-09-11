@@ -1429,7 +1429,7 @@ mod tests {
                     )),
                     kv_store: Some(
                         zeroship_kv::KvStore::open(&zeroship_kv::KvConfig::Redis {
-                            url: "redis://127.0.0.1:6379".to_string(),
+                            redis: zeroship_kv::RedisConfig::new(zeroship_kv::Topology::Standalone { endpoint: "127.0.0.1:6379".into() }),
                         })
                         .unwrap(),
                     ),
@@ -1472,7 +1472,9 @@ mod tests {
                 meter: Arc::new(zeroship_metering::Meter::new()),
             };
             let store = zeroship_kv::KvStore::open(&zeroship_kv::KvConfig::Redis {
-                url: "redis://127.0.0.1:6379".into(),
+                redis: zeroship_kv::RedisConfig::new(zeroship_kv::Topology::Standalone {
+                    endpoint: "127.0.0.1:6379".into(),
+                }),
             })
             .unwrap();
             init_cache(4, 4, kernel(Some(store)));
