@@ -19,12 +19,9 @@
 #      expired was the 40 s budget, while vite logged "Re-optimizing
 #      dependencies because lockfile has changed" -- twice.
 #
-#   2. Host contention. The CI file records this from the other direction:
-#      e2e_dev_vs_deployed_workflows.sh is 3/3 green idle and 3/3 RED on 12
-#      busy cores, one mode being "the runtime missed the 25 x 2s readiness
-#      window". Its own comment concludes "every one is a timing budget", and
-#      that is the stated reason it and the storage harness are NOT wired into
-#      CI.
+#   Host contention can also exhaust readiness attempts before the runtime
+#   finishes starting. Workflow examples now own their readiness deadlines in
+#   their TypeScript fixtures.
 #
 # So the fix is not a bigger number -- a bigger fixed number just moves the
 # cliff. It is (a) a deadline in SECONDS that a loaded host can be given
