@@ -16,14 +16,11 @@ fail() { FAIL=$((FAIL + 1)); echo "  FAIL $1"; }
 # ---------------------------------------------------------------------------
 # THE ALLOWLIST. `<gate basename><TAB><reason>`.
 #
-# Assigned 2026-09-04 by running every unwired gate and reading what it needs.
-# Twelve gates were unwired when this file was written; eleven of them are now
-# steps in the `rust` job. This is the twelfth.
+# Each entry explains why a surviving shell gate is not invoked by CI.
 # ---------------------------------------------------------------------------
 ALLOWLIST='
-platform_migration_corpus_gate.sh	brings up its OWN postgres:17 container and needs a FRESH database per run; the rust job Postgres it would otherwise reach has the platform corpus already applied, and --static-only exits non-zero by design, so this is a job with a service of its own, not a step
-rls_binding_gate.sh	RED BY DESIGN, and the red is the deliverable: it names which row-level-security policies in db/migrations-ts/ bind a role and which bind none, as the premise for the sessions redesign. A step that must fail pins CI red and teaches everyone to ignore it. Wire it the day its verdict is all BOUND, which is the day docs/proposals/2026-09-05-auth-foundation-redesign.md step 5 lands - and note this reason is a different KIND from the row above, which is about infrastructure a step cannot bring
-organization_authority_gate.sh	SAME SHAPE AS THE CORPUS GATE ABOVE, and for the same reason rather than by analogy: it applies the committed migration corpus to an EMPTY database and then drives escalation and narrowing cases through it, so the rust job Postgres - which already carries that corpus - is the one database it cannot use. It brings up its own postgres:17 on a port range of its own. That makes it a job with a service, not a step, and until such a job exists it runs by hand
+rls_binding_gate.sh	Reports unbound row-level-security policies as input to the sessions redesign; enable it in CI when the authority model provides a passing invariant.
+organization_authority_gate.sh	Applies the corpus to an empty owned PostgreSQL database and exercises authority changes; currently run manually rather than wired into CI.
 '
 
 RESIDUE='

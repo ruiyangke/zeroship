@@ -74,12 +74,13 @@ expected preparation; to rebuild only the CLI while developing it:
 pnpm --filter zero-migrate-cli build
 ```
 
-The regression gate runs this same wrapper against a fresh PostgreSQL database,
-proves every corpus file records operations and applies, and then proves the
-second run is empty:
+The native corpus test runs the same CLI and platform policy against an owned
+PostgreSQL container. It reconciles recorded operations with the corpus ledger,
+checks applied identities against durable history and strict status, and verifies
+that applying again skips exactly those identities without changing history:
 
 ```bash
-tests/platform_migration_corpus_gate.sh
+cargo xtask test migrations
 ```
 
 ## Adding a migration
@@ -90,13 +91,20 @@ tests/platform_migration_corpus_gate.sh
    portably; they are capability-gated by the engine, not by the import path.
 3. Keep DDL in `schema()`. Put DML in a separate `data()` migration and declare
    either its recorded `inverse()` or why it is `irreversible`.
-4. Build and run the corpus gate on a fresh Postgres database before relying on
-   the change:
+4. Update `db/migrations-ts/op-counts.json` when the recorded operations change.
+   Run the corpus test before relying on the change; this command builds the
+   migration host and CLI and provisions its own fresh PostgreSQL database:
 
    ```bash
-   pnpm build
-   tests/platform_migration_corpus_gate.sh
+   cargo xtask test migrations
    ```
+
+Docker and Node are required. After building the artifacts, the same test runs
+in ordinary `cargo test -p zeroship-migrate-node`; missing prerequisites fail
+instead of skipping database verification. Its private fixture is in
+`crates/zeroship-migrate-node/tests/platform_corpus/fixture.rs`. This test covers
+the host CLI and database contract; it does not build the deployment image or
+invoke the operator's shell wrapper.
 
 The loader picks the file up by its timestamp order - no master file to edit.
 While the platform remains pre-launch, the repository `AGENTS.md` policy is the
