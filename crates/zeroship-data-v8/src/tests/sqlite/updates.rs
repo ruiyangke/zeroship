@@ -418,7 +418,6 @@ async function failBulkInsideTransaction(_input, _ctx) {
             };
         }
         await tx[COLLECTION].insert({
-            id: "control_row",
             email: "control@example.com",
             name: "Blue Team",
             ssn: "111-22-3333"
@@ -562,16 +561,7 @@ const _procedures = { seed, failBulk, failBulkInsideTransaction };
         }
         let control = client
             .query_typed(
-                // KEYED ON EMAIL, NOT ON THE SUPPLIED id. The procedure inserts
-                // `{ id: "control_row", ... }`, and the write path DISCARDS that
-                // and mints a typed id - the row lands as
-                // `user_034HHQXErG6U2Eb6CiCTu0`. `id` is in
-                // IMMUTABLE_SYSTEM_FIELDS (`crud/system_fields_pass.rs:46`), and
-                // on INSERT a caller-supplied value is replaced silently, where
-                // an UPDATE touching the same field is refused loudly (`:399`,
-                // `:428`). So `WHERE id = 'control_row'` matched nothing and this
-                // assertion read 0 - which looked exactly like the outer
-                // transaction having been rolled back, and was not.
+                // Find the control insert by its unique fixture email.
                 r#"SELECT COUNT(*) FROM "default"."users" WHERE email = 'control@example.com'"#,
                 &[],
             )
@@ -676,7 +666,7 @@ fn update_rejects_nested_version_filter_without_mutating_sqlite_row() {
         let dir = tempfile::tempdir().expect("tempdir");
         let schema = users_encrypted_ssn_schema();
         apply_schema_ahead_of_runtime(&dir, &users_encrypted_ssn_ddl());
-        let source = sqlite_runtime_source(
+        let mut source = sqlite_runtime_source(
             "users",
             &schema,
             r#"
@@ -708,6 +698,10 @@ nestedCasUpdate.config = { kind: "action" };
 const _procedures = { seed, nestedCasUpdate };
 "#,
         );
+        let mut descriptor: serde_json::Value = serde_json::from_str(&source.descriptor).unwrap();
+        descriptor["collections"]["users"]["options"]["versioning"] = true.into();
+        descriptor["collections"]["users"]["fields"]["version"]["concurrency"] = true.into();
+        source.descriptor = descriptor.to_string();
 
         let seeded = dispatch_sqlite_runtime(&dir, &source, "seed");
         let row = parity::extract_json(&seeded);
@@ -761,7 +755,7 @@ fn update_many_rejects_nested_version_filter_without_mutating_sqlite_row() {
         let dir = tempfile::tempdir().expect("tempdir");
         let schema = users_encrypted_ssn_schema();
         apply_schema_ahead_of_runtime(&dir, &users_encrypted_ssn_ddl());
-        let source = sqlite_runtime_source(
+        let mut source = sqlite_runtime_source(
             "users",
             &schema,
             r#"
@@ -793,6 +787,10 @@ nestedCasUpdateMany.config = { kind: "action" };
 const _procedures = { seed, nestedCasUpdateMany };
 "#,
         );
+        let mut descriptor: serde_json::Value = serde_json::from_str(&source.descriptor).unwrap();
+        descriptor["collections"]["users"]["options"]["versioning"] = true.into();
+        descriptor["collections"]["users"]["fields"]["version"]["concurrency"] = true.into();
+        source.descriptor = descriptor.to_string();
 
         dispatch_sqlite_runtime(&dir, &source, "seed");
 

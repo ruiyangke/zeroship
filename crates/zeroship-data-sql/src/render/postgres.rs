@@ -213,52 +213,11 @@ pub fn render_insert(plan: &Insert) -> Result<RenderedSql, RenderError> {
     Ok(RenderedSql::new(out.sql, out.params))
 }
 
-/// Lower a bounded update.
-///
-/// ```text
-/// UPDATE "ns"."t" SET "a" = $1, "v" = "v" + $2
-///   WHERE "id" IN (SELECT "id" FROM "ns"."t" WHERE .. LIMIT $3 FOR UPDATE)
-///   RETURNING ...
-/// ```
-///
-/// # Why the bound is a subquery over `id` and not a `LIMIT` on the `UPDATE`
-///
-/// `PostgreSQL` has no `LIMIT` on `UPDATE`, so the bound has to be expressed as
-/// a set of rows chosen by a subquery. Every creator collection carries an
-/// immutable `id TEXT PRIMARY KEY`, so this generalises the single-row shape
-/// from one logical row to `n` and makes the bound unconditional: there is no
-/// arm where the clause is absent.
-///
-/// Doing it in **one statement** rather than as a probe followed by a write is
-/// the other half. The encrypted branch of `dispatch_update_many` reads the
-/// target ids in one query and then issues per-row updates
-/// (`write_pipeline.rs:329-360`, `crud/mod.rs:1278-1321`); the unencrypted
-/// branch does neither. Here the row choice and the write are one statement
-/// against one snapshot.
-///
-/// # `FOR UPDATE` is load-bearing, not decoration
-///
-/// A logical key removes `ctid`'s line-pointer reuse hazard, but it does not
-/// make the lock optional. Without a lock, a concurrent update can change a
-/// selected row so it no longer satisfies the original filter before the outer
-/// write reaches it; the outer predicate names only `id` and would still match.
-/// `FOR UPDATE` keeps selection and mutation tied to the same row. The shipped
-/// encrypted-write probe uses the same lock for this reason.
-///
-/// The clause goes after `LIMIT`, which is where `PostgreSQL`'s `SELECT` grammar
-/// puts a locking clause. The shipped probe likewise appends it to a statement
-/// that already ends in `LIMIT $n OFFSET $n`.
-///
-/// One property is worth stating rather than leaving to be discovered: the
-/// subquery has no `ORDER BY`, so the lock order is the scan order. Two
-/// concurrent bounded updates over overlapping filters can therefore take their
-/// locks in different orders. Pinning an order would cost a sort on every write
-/// and is a trade to make with a measurement, not in passing.
+/// Lower a bounded update using the plan's declared row key.
+/// Row selection and mutation share a statement; the selector locks its rows.
 ///
 /// # Errors
-///
-/// [`RenderError`] if the filter or the `RETURNING` list carries a node this
-/// backend does not serve.
+/// Returns a render error for unsupported filter or projection expressions.
 pub fn render_update(plan: &Update) -> Result<RenderedSql, RenderError> {
     let mut out = Writer::default();
     out.sql.push_str("UPDATE ");
@@ -271,6 +230,7 @@ pub fn render_update(plan: &Update) -> Result<RenderedSql, RenderError> {
         plan.collection(),
         plan.filter(),
         plan.limit(),
+        plan.row_key(),
     )?;
     write_returning(&mut out, plan.returning())?;
     Ok(RenderedSql::new(out.sql, out.params))
@@ -293,6 +253,7 @@ pub fn render_delete(plan: &Delete) -> Result<RenderedSql, RenderError> {
         plan.collection(),
         plan.filter(),
         plan.limit(),
+        plan.row_key(),
     )?;
     write_returning(&mut out, plan.returning())?;
     Ok(RenderedSql::new(out.sql, out.params))
@@ -636,12 +597,6 @@ impl ValueFormat for PostgresValueFormat {
     fn current_timestamp_expr(&self) -> &'static str {
         "NOW()"
     }
-
-    /// The platform-injected `id TEXT PRIMARY KEY`. It is stable across tuple
-    /// versions and belongs to the ordinary column-grant surface.
-    fn row_identity_column(&self) -> &'static str {
-        "id"
-    }
 }
 
 /// Quote an identifier.
@@ -654,12 +609,7 @@ fn quote(ident: &Ident) -> String {
     quote_raw(ident.as_str())
 }
 
-/// Quote a name this backend chose itself.
-///
-/// The **only** callers are [`ValueFormat::row_identity_column`]'s result and
-/// [`quote`]. It deliberately does not take an [`Ident`], because the bounded
-/// write identity is a spelling the backend owns, not an identifier a caller
-/// may choose. No public function accepts a `&str` that reaches statement text.
+/// Escape an identifier already validated by the typed plan.
 fn quote_raw(name: &str) -> String {
     let mut out = String::with_capacity(name.len() + 2);
     out.push('"');
@@ -744,7 +694,7 @@ fn write_assignments(out: &mut Writer, assignments: &[ColumnAssignment]) {
     }
 }
 
-/// ` WHERE "id" IN (SELECT "id" FROM <table>[ WHERE ..] LIMIT $n FOR UPDATE)`
+/// Restrict a write to the declared key values selected under the row limit.
 ///
 /// Emitted **unconditionally**, which is what makes an unbounded write
 /// unrepresentable: the filter may simplify to `TRUE` and vanish, but the bound
@@ -755,8 +705,9 @@ fn write_bounded_target(
     collection: &Ident,
     filter: &Predicate,
     limit: RowLimit,
+    row_key: &Ident,
 ) -> Result<(), RenderError> {
-    let identity = quote_raw(PostgresValueFormat.row_identity_column());
+    let identity = quote(row_key);
     out.sql.push_str(" WHERE ");
     out.sql.push_str(&identity);
     out.sql.push_str(" IN (SELECT ");

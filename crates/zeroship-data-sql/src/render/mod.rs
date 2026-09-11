@@ -12,7 +12,7 @@ use crate::literal::Literal;
 /// Every spelling that is a dialect's rather than the grammar's.
 ///
 /// Most of them are placeholders, and the two that are not
-/// ([`ValueFormat::current_timestamp_expr`], [`ValueFormat::row_identity_column`])
+/// ([`ValueFormat::current_timestamp_expr`])
 /// arrived with the write family. They are here rather than as constants in
 /// [`postgres`] for the reason the trait exists: one place to read what a
 /// dialect does, and a compiler error rather than a silent inheritance when a
@@ -38,7 +38,6 @@ use crate::literal::Literal;
 ///     fn bytes_placeholder(&self, slot: usize) -> String { format!("${slot}") }
 ///     fn vector_placeholder(&self, slot: usize) -> String { format!("${slot}::vector") }
 ///     fn current_timestamp_expr(&self) -> &'static str { "NOW()" }
-///     fn row_identity_column(&self) -> &'static str { "id" }
 /// }
 /// ```
 ///
@@ -88,7 +87,6 @@ use crate::literal::Literal;
 ///     fn text_placeholder(&self, slot: usize) -> String { format!("${slot}") }
 ///     fn bytes_placeholder(&self, slot: usize) -> String { format!("${slot}") }
 ///     fn current_timestamp_expr(&self) -> &'static str { "NOW()" }
-///     fn row_identity_column(&self) -> &'static str { "id" }
 /// }
 /// ```
 pub trait ValueFormat {
@@ -136,15 +134,6 @@ pub trait ValueFormat {
     /// text cast sidesteps the binary type-discovery handshake - and that cast
     /// is a spelling, which is why it is here rather than in the plan.
     fn vector_placeholder(&self, slot: usize) -> String;
-    /// The column that stably names one row for a bounded write's subquery.
-    ///
-    /// PostgreSQL uses the platform-injected `id TEXT PRIMARY KEY`. A physical
-    /// locator such as `ctid` is outside ordinary column grants and can be
-    /// reused after its tuple dies.
-    ///
-    /// It is emitted quoted like any other identifier, and it never comes from a
-    /// caller: no [`crate::Ident`] a caller holds reaches this position.
-    fn row_identity_column(&self) -> &'static str;
 }
 
 /// The single exhaustive dispatch from a value's type to its spelling.

@@ -40,7 +40,10 @@ impl CollectionFixture {
         let database = Database::from_schema(
             original.binding.clone(),
             original.backend.clone(),
-            vec![(collection.into(), fields)],
+            vec![(
+                collection.into(),
+                crate::tests::fixtures::schema::generated_fields(fields),
+            )],
         )
         .unwrap();
         Self {
@@ -103,7 +106,10 @@ impl CollectionFixture {
         let database = Database::from_schema(
             DbBinding::cold_start(&app),
             crate::backend_handle::BackendHandle::new(backend.clone()),
-            vec![(collection.into(), fields)],
+            vec![(
+                collection.into(),
+                crate::tests::fixtures::schema::generated_fields(fields),
+            )],
         )
         .unwrap();
         Self {
@@ -113,6 +119,49 @@ impl CollectionFixture {
             postgres: Some((backend, schema, role)),
             server: Some(server),
         }
+    }
+
+    pub async fn rename_fields(&mut self, collection: &str, names: &[(&str, &str)]) {
+        let fields = self.database.context.with(|| {
+            crate::descriptor::collection_schema(&self.database.binding, collection).unwrap()
+        });
+        let mut fields = fields.as_ref().clone();
+        for (old, new) in names {
+            let table = crate::compile::quote_ident(collection);
+            let column = crate::compile::quote_ident(old);
+            let renamed = crate::compile::quote_ident(new);
+            if let Some(file) = &self.sqlite_file {
+                rusqlite::Connection::open(file)
+                    .unwrap()
+                    .execute_batch(&format!(
+                        "ALTER TABLE {table} RENAME COLUMN {column} TO {renamed}"
+                    ))
+                    .unwrap();
+            } else {
+                let (backend, namespace, _) = self.postgres.as_ref().unwrap();
+                backend
+                    .execute_fixture(
+                        &format!(
+                            "ALTER TABLE {namespace}.{table} RENAME COLUMN {column} TO {renamed}"
+                        ),
+                        &[],
+                    )
+                    .await
+                    .unwrap();
+            }
+            let mut definition = fields.as_object_mut().unwrap().shift_remove(*old).unwrap();
+            definition["storage"] = value!({"valueColumn":new});
+            fields
+                .as_object_mut()
+                .unwrap()
+                .insert((*new).into(), definition);
+        }
+        self.database = Database::from_schema(
+            self.database.binding.clone(),
+            self.database.backend.clone(),
+            vec![(collection.into(), fields)],
+        )
+        .unwrap();
     }
 
     pub async fn close(self) {
@@ -153,7 +202,16 @@ fn table_sql(
         zeroship_migrate_server::policy::CONFINED_CEILING_TOML,
     )
     .unwrap();
-    let fields = serde_json::to_value(fields).unwrap();
+    let authored = Value::Object(
+        fields
+            .as_object()
+            .unwrap()
+            .iter()
+            .filter(|(_, definition)| definition.get("assign").is_none())
+            .map(|(name, definition)| (name.clone(), definition.clone()))
+            .collect(),
+    );
+    let fields = serde_json::to_value(authored).unwrap();
     let mut sql = zeroship_migrate::schema::query::build_create_table_with_fks_for_dialect(
         zeroship_migrate::shipping_vendors(),
         schema,

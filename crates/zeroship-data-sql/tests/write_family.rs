@@ -57,19 +57,29 @@ fn insert_one(returning: Returning) -> Insert {
 }
 
 fn update_one(returning: Returning) -> Update {
-    Update::builder(collection(), RowLimit::default(), returning)
-        .set(ColumnAssignment::new(
-            column("name"),
-            Assignment::bind(Literal::Int(1)),
-        ))
-        .build()
-        .expect("valid update")
+    Update::builder(
+        collection(),
+        zeroship_data_sql::Ident::parse_as("id", zeroship_data_sql::IdentRole::Column).unwrap(),
+        RowLimit::default(),
+        returning,
+    )
+    .set(ColumnAssignment::new(
+        column("name"),
+        Assignment::bind(Literal::Int(1)),
+    ))
+    .build()
+    .expect("valid update")
 }
 
 fn delete_one(returning: Returning) -> Delete {
-    Delete::builder(collection(), RowLimit::default(), returning)
-        .build()
-        .expect("valid delete")
+    Delete::builder(
+        collection(),
+        zeroship_data_sql::Ident::parse_as("id", zeroship_data_sql::IdentRole::Column).unwrap(),
+        RowLimit::default(),
+        returning,
+    )
+    .build()
+    .expect("valid delete")
 }
 
 fn sql_of(plan: &zeroship_data_sql::DbPlan) -> String {
@@ -429,18 +439,28 @@ fn no_update_or_delete_is_unbounded() {
     ];
     let mut ruled_on = 0_usize;
     for filter in filters {
-        let update = Update::builder(collection(), RowLimit::default(), Returning::nothing())
-            .set(ColumnAssignment::new(
-                column("name"),
-                Assignment::bind(Literal::Int(1)),
-            ))
-            .filter(filter.clone())
-            .build()
-            .expect("valid update");
-        let delete = Delete::builder(collection(), RowLimit::default(), Returning::nothing())
-            .filter(filter)
-            .build()
-            .expect("valid delete");
+        let update = Update::builder(
+            collection(),
+            zeroship_data_sql::Ident::parse_as("id", zeroship_data_sql::IdentRole::Column).unwrap(),
+            RowLimit::default(),
+            Returning::nothing(),
+        )
+        .set(ColumnAssignment::new(
+            column("name"),
+            Assignment::bind(Literal::Int(1)),
+        ))
+        .filter(filter.clone())
+        .build()
+        .expect("valid update");
+        let delete = Delete::builder(
+            collection(),
+            zeroship_data_sql::Ident::parse_as("id", zeroship_data_sql::IdentRole::Column).unwrap(),
+            RowLimit::default(),
+            Returning::nothing(),
+        )
+        .filter(filter)
+        .build()
+        .expect("valid delete");
 
         for sql in [
             postgres::render_update(&update)
@@ -477,13 +497,18 @@ fn no_update_or_delete_is_unbounded() {
 #[test]
 fn the_write_bound_is_capped_and_defaults_to_the_cap() {
     assert_eq!(RowLimit::default().get(), MAX_ROW_LIMIT);
-    let update = Update::builder(collection(), RowLimit::default(), Returning::nothing())
-        .set(ColumnAssignment::new(
-            column("name"),
-            Assignment::bind(Literal::Int(1)),
-        ))
-        .build()
-        .expect("valid update");
+    let update = Update::builder(
+        collection(),
+        zeroship_data_sql::Ident::parse_as("id", zeroship_data_sql::IdentRole::Column).unwrap(),
+        RowLimit::default(),
+        Returning::nothing(),
+    )
+    .set(ColumnAssignment::new(
+        column("name"),
+        Assignment::bind(Literal::Int(1)),
+    ))
+    .build()
+    .expect("valid update");
     assert_eq!(update.limit().get(), MAX_ROW_LIMIT);
     let rendered = postgres::render_update(&update).expect("renders");
     assert_eq!(
@@ -511,6 +536,7 @@ fn the_write_bound_is_capped_and_defaults_to_the_cap() {
 fn a_single_row_update_is_the_same_node_bounded_to_one() {
     let update = Update::builder(
         collection(),
+        zeroship_data_sql::Ident::parse_as("id", zeroship_data_sql::IdentRole::Column).unwrap(),
         RowLimit::new(1).expect("limit"),
         Returning::nothing(),
     )
@@ -551,10 +577,15 @@ fn a_written_null_renders_the_keyword_and_binds_nothing() {
     assert_eq!(rendered.placeholder_count(), 1);
 
     // And on the UPDATE side.
-    let update = Update::builder(collection(), RowLimit::default(), Returning::nothing())
-        .set(ColumnAssignment::new(column("note"), Assignment::null()))
-        .build()
-        .expect("valid update");
+    let update = Update::builder(
+        collection(),
+        zeroship_data_sql::Ident::parse_as("id", zeroship_data_sql::IdentRole::Column).unwrap(),
+        RowLimit::default(),
+        Returning::nothing(),
+    )
+    .set(ColumnAssignment::new(column("note"), Assignment::null()))
+    .build()
+    .expect("valid update");
     let rendered = postgres::render_update(&update).expect("renders");
     assert!(rendered.sql().contains(r#"SET "note" = NULL WHERE"#));
     // Only the bound remains as a parameter.
@@ -584,18 +615,23 @@ fn the_nullable_conversion_boundary_produces_a_node() {
 /// ABSENT: it exists because that parameter is a `String`, and a typed integer
 /// gives it nothing to repair.
 #[test]
-fn the_platform_system_field_bumps_both_render() {
-    let update = Update::builder(collection(), RowLimit::default(), Returning::nothing())
-        .set(ColumnAssignment::new(
-            column("version"),
-            Assignment::arithmetic(ArithmeticOp::Add, Literal::Int(1)).expect("numeric"),
-        ))
-        .set(ColumnAssignment::new(
-            column("updated_at"),
-            Assignment::CurrentTimestamp,
-        ))
-        .build()
-        .expect("valid update");
+fn the_platform_assigned_field_bumps_both_render() {
+    let update = Update::builder(
+        collection(),
+        zeroship_data_sql::Ident::parse_as("id", zeroship_data_sql::IdentRole::Column).unwrap(),
+        RowLimit::default(),
+        Returning::nothing(),
+    )
+    .set(ColumnAssignment::new(
+        column("version"),
+        Assignment::arithmetic(ArithmeticOp::Add, Literal::Int(1)).expect("numeric"),
+    ))
+    .set(ColumnAssignment::new(
+        column("updated_at"),
+        Assignment::CurrentTimestamp,
+    ))
+    .build()
+    .expect("valid update");
     let rendered = postgres::render_update(&update).expect("renders");
     let sql = rendered.sql();
     assert!(
@@ -651,13 +687,18 @@ fn arithmetic_can_only_reference_the_column_it_assigns() {
         (ArithmeticOp::Subtract, "-"),
         (ArithmeticOp::Multiply, "*"),
     ] {
-        let update = Update::builder(collection(), RowLimit::default(), Returning::nothing())
-            .set(ColumnAssignment::new(
-                column("score"),
-                Assignment::arithmetic(op, Literal::Int(3)).expect("numeric"),
-            ))
-            .build()
-            .expect("valid update");
+        let update = Update::builder(
+            collection(),
+            zeroship_data_sql::Ident::parse_as("id", zeroship_data_sql::IdentRole::Column).unwrap(),
+            RowLimit::default(),
+            Returning::nothing(),
+        )
+        .set(ColumnAssignment::new(
+            column("score"),
+            Assignment::arithmetic(op, Literal::Int(3)).expect("numeric"),
+        ))
+        .build()
+        .expect("valid update");
         let sql = postgres::render_update(&update)
             .expect("renders")
             .sql()
@@ -746,9 +787,14 @@ fn the_empty_write_shapes_are_refused() {
     ruled_on += 1;
 
     assert_eq!(
-        Update::builder(collection(), RowLimit::default(), Returning::nothing())
-            .build()
-            .expect_err("must refuse"),
+        Update::builder(
+            collection(),
+            zeroship_data_sql::Ident::parse_as("id", zeroship_data_sql::IdentRole::Column).unwrap(),
+            RowLimit::default(),
+            Returning::nothing()
+        )
+        .build()
+        .expect_err("must refuse"),
         WriteError::EmptyAssignments
     );
     ruled_on += 1;
@@ -762,17 +808,22 @@ fn the_empty_write_shapes_are_refused() {
 #[test]
 fn a_column_written_twice_is_refused() {
     assert_eq!(
-        Update::builder(collection(), RowLimit::default(), Returning::nothing())
-            .set(ColumnAssignment::new(
-                column("name"),
-                Assignment::bind(Literal::Int(1))
-            ))
-            .set(ColumnAssignment::new(
-                column("name"),
-                Assignment::bind(Literal::Int(2))
-            ))
-            .build()
-            .expect_err("must refuse"),
+        Update::builder(
+            collection(),
+            zeroship_data_sql::Ident::parse_as("id", zeroship_data_sql::IdentRole::Column).unwrap(),
+            RowLimit::default(),
+            Returning::nothing()
+        )
+        .set(ColumnAssignment::new(
+            column("name"),
+            Assignment::bind(Literal::Int(1))
+        ))
+        .set(ColumnAssignment::new(
+            column("name"),
+            Assignment::bind(Literal::Int(2))
+        ))
+        .build()
+        .expect_err("must refuse"),
         WriteError::DuplicateColumn {
             column: "name".to_string()
         }
@@ -799,21 +850,31 @@ fn an_aggregate_in_a_write_filter_is_refused() {
         Operand::Lit(Literal::Int(5)),
     );
     assert_eq!(
-        Update::builder(collection(), RowLimit::default(), Returning::nothing())
-            .set(ColumnAssignment::new(
-                column("name"),
-                Assignment::bind(Literal::Int(1))
-            ))
-            .filter(count_gt.clone())
-            .build()
-            .expect_err("must refuse"),
+        Update::builder(
+            collection(),
+            zeroship_data_sql::Ident::parse_as("id", zeroship_data_sql::IdentRole::Column).unwrap(),
+            RowLimit::default(),
+            Returning::nothing()
+        )
+        .set(ColumnAssignment::new(
+            column("name"),
+            Assignment::bind(Literal::Int(1))
+        ))
+        .filter(count_gt.clone())
+        .build()
+        .expect_err("must refuse"),
         WriteError::AggregateInFilter
     );
     assert_eq!(
-        Delete::builder(collection(), RowLimit::default(), Returning::nothing())
-            .filter(count_gt)
-            .build()
-            .expect_err("must refuse"),
+        Delete::builder(
+            collection(),
+            zeroship_data_sql::Ident::parse_as("id", zeroship_data_sql::IdentRole::Column).unwrap(),
+            RowLimit::default(),
+            Returning::nothing()
+        )
+        .filter(count_gt)
+        .build()
+        .expect_err("must refuse"),
         WriteError::AggregateInFilter
     );
     println!("ruled on 2 misplaced aggregates");
@@ -833,18 +894,23 @@ fn an_unservable_node_in_a_write_is_refused_with_a_typed_error() {
     };
 
     // In the filter.
-    let update = Update::builder(collection(), RowLimit::default(), Returning::nothing())
-        .set(ColumnAssignment::new(
-            column("name"),
-            Assignment::bind(Literal::Int(1)),
-        ))
-        .filter(Predicate::compare(
-            Operand::Path(nested()),
-            CompareOp::Eq,
-            Operand::Lit(Literal::Int(1)),
-        ))
-        .build()
-        .expect("the PLAN is valid; only the lowering refuses");
+    let update = Update::builder(
+        collection(),
+        zeroship_data_sql::Ident::parse_as("id", zeroship_data_sql::IdentRole::Column).unwrap(),
+        RowLimit::default(),
+        Returning::nothing(),
+    )
+    .set(ColumnAssignment::new(
+        column("name"),
+        Assignment::bind(Literal::Int(1)),
+    ))
+    .filter(Predicate::compare(
+        Operand::Path(nested()),
+        CompareOp::Eq,
+        Operand::Lit(Literal::Int(1)),
+    ))
+    .build()
+    .expect("the PLAN is valid; only the lowering refuses");
     let outcome = postgres::render_update(&update);
     assert!(
         matches!(outcome, Err(RenderError::Unsupported { .. })),
@@ -866,4 +932,34 @@ fn an_unservable_node_in_a_write_is_refused_with_a_typed_error() {
     // The control: the same shapes without nesting render.
     assert!(postgres::render_insert(&insert_one(returning_name())).is_ok());
     println!("ruled on 2 unservable positions and 1 control");
+}
+
+#[test]
+fn bounded_writes_use_the_declared_key() {
+    let key = column("record_key");
+    let update = Update::builder(
+        collection(),
+        key.clone(),
+        RowLimit::default(),
+        Returning::nothing(),
+    )
+    .set(ColumnAssignment::new(
+        column("title"),
+        Assignment::bind(Literal::text("changed").unwrap()),
+    ))
+    .build()
+    .unwrap();
+    let delete = Delete::builder(collection(), key, RowLimit::default(), Returning::nothing())
+        .build()
+        .unwrap();
+    for sql in [
+        postgres::render_update(&update).unwrap(),
+        postgres::render_delete(&delete).unwrap(),
+    ] {
+        assert!(
+            sql.sql()
+                .contains("WHERE \"record_key\" IN (SELECT \"record_key\"")
+        );
+        assert!(!sql.sql().contains("\"id\""));
+    }
 }

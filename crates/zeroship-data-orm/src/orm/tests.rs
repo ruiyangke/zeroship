@@ -8,8 +8,9 @@ use test_schema::posts;
 mod calendar_date;
 mod fixtures;
 mod identity;
-mod json;
 mod joins;
+mod json;
+mod lifecycle;
 mod nested_temporal;
 mod protected_updates;
 mod schema_updates;
@@ -214,10 +215,7 @@ async fn postgres_native_models_round_trip() {
         .unwrap();
     let db = Database::connect(
         binding,
-        crate::ConnectOptions::new(
-            postgres.url(),
-            ProjectKeySource::unavailable(),
-        ),
+        crate::ConnectOptions::new(postgres.url(), ProjectKeySource::unavailable()),
         vec![("posts".into(), <posts::Entity as Entity>::schema().clone())],
     )
     .await

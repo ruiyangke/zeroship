@@ -253,7 +253,7 @@ fn an_alias_may_carry_a_platform_underscore_name_that_a_column_may_not() {
 /// time reservation (`query.rs:867-878`) is a different call site this crate
 /// does not have.
 #[test]
-fn the_system_field_names_are_referenceable_columns() {
+fn the_assigned_field_names_are_referenceable_columns() {
     // Spelled locally on purpose. The claim under test is about the IDENTIFIER
     // FENCE - that these ordinary names are not reserved - and that needs a
     // witness of its own. A shared constant would make the test agree with

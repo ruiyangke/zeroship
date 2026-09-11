@@ -61,7 +61,7 @@ fn p55_pr1_build_create_table_refuses_classification_name_field_sqlite() {
 /// SQLite engine accepts, and PRAGMA `table_info` reports all 7 system
 /// fields after execution.
 #[test]
-fn sqlite_ddl_has_seven_system_field_columns_end_to_end() {
+fn sqlite_ddl_has_seven_assigned_field_columns_end_to_end() {
     Host::test(|host| {
         use zeroship_data_sql::compile::SqlDialect;
 

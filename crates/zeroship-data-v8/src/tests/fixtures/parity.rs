@@ -179,7 +179,6 @@ fn apply_matrix_schema_ahead_of_postgres(url: &str, app_id: &str, collection: &s
     });
 }
 
-
 const SHIM: &str = r#"
 async function _shimRpc(name, input, ctx) {
     const fn = _procedures[name];
@@ -397,7 +396,13 @@ const _procedures = { seed, transactionMatrix, typedRoundTrip };
 }
 
 pub fn runtime_descriptor(collection: &str, schema: &Value) -> String {
-    let mut fields = schema.clone();
+    let mut fields = super::schema::generated_fields(schema.clone());
+    for field in fields.as_object_mut().unwrap().values_mut() {
+        if let Some(definition) = field.as_object_mut() {
+            definition.shift_remove("softDelete");
+            definition.shift_remove("concurrency");
+        }
+    }
     let strictness = fields
         .as_object_mut()
         .and_then(|map| map.shift_remove("_meta"))

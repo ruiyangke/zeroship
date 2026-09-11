@@ -11,7 +11,6 @@
 #![recursion_limit = "256"]
 #![deny(private_interfaces, private_bounds)]
 
-use std::rc::Rc;
 use zeroship_data_orm::connection::ConnectionFactory;
 
 use zeroship_runtime::plugin::{NativePlugin, NativeRegistrar};
@@ -21,9 +20,7 @@ use zeroship_data_orm::error::DbError;
 
 // Private imports used to compose ORM operations with isolate state.
 use zeroship_data_orm::cdc::{broker, read_set};
-use zeroship_data_orm::{
-    backend, descriptor, metrics, system_shape_charter, transaction, tx_route,
-};
+use zeroship_data_orm::{backend, descriptor, metrics, transaction, tx_route};
 use zeroship_data_sql::compile;
 
 pub(crate) mod context;
@@ -56,21 +53,18 @@ pub struct DbPlugin {
     project_keys: std::sync::Arc<zeroship_data_orm::encryption::SuppliedProjectKeys>,
     cdc_relay: Option<zeroship_data_orm::cdc::relay::RelayConfig>,
     meter: Option<std::sync::Arc<zeroship_metering::Meter>>,
-    assignments: system_shape_charter::AssignmentPlan,
 }
 impl DbPlugin {
     pub(crate) fn new(
         connection: ConnectionFactory,
         cdc_relay: Option<zeroship_data_orm::cdc::relay::RelayConfig>,
         meter: Option<std::sync::Arc<zeroship_metering::Meter>>,
-        assignments: system_shape_charter::AssignmentPlan,
         project_keys: std::sync::Arc<zeroship_data_orm::encryption::SuppliedProjectKeys>,
     ) -> Self {
         Self {
             connection,
             cdc_relay,
             meter,
-            assignments,
             project_keys,
         }
     }
@@ -127,7 +121,6 @@ impl NativePlugin for DbPlugin {
             context.set_cdc_relay(self.cdc_relay.clone());
         });
         metrics::stamp(self.meter.clone());
-        system_shape_charter::stamp(Rc::new(self.assignments.clone()));
     }
 }
 
@@ -163,7 +156,6 @@ fn descriptor_schemas(
 mod runtime_descriptor_binding_tests {
     use std::cell::RefCell;
     use std::collections::HashMap;
-    use std::rc::Rc;
 
     use zeroship_data_sql::value;
     use zeroship_runtime::{RuntimeState, SharedState, init_v8};
@@ -177,7 +169,7 @@ mod runtime_descriptor_binding_tests {
         let mut env = HashMap::new();
         env.insert("APP_ID".to_string(), APP.to_string());
         env.insert("ZEROSHIP_DEPLOY_ID".to_string(), DEPLOY.to_string());
-        let state: SharedState = Rc::new(RefCell::new(RuntimeState::new(env, None, None)));
+        let state: SharedState = std::rc::Rc::new(RefCell::new(RuntimeState::new(env, None, None)));
         scope.set_slot(state);
     }
 

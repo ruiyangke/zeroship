@@ -3,8 +3,8 @@ use quote::quote;
 use serde_json::Value;
 use std::collections::HashSet;
 use syn::{
-    parse::{Parse, ParseStream},
     Ident, LitStr, Token, Visibility,
+    parse::{Parse, ParseStream},
 };
 
 pub struct Input {
@@ -131,17 +131,9 @@ fn generate(
             let readable =
                 flag(def, "readable", true, span)? && flag(def, "projectable", true, span)?;
             let filterable = flag(def, "filterable", true, span)?;
-            let system = matches!(
-                field.as_str(),
-                "id" | "created_at"
-                    | "updated_at"
-                    | "created_by"
-                    | "updated_by"
-                    | "version"
-                    | "deleted_at"
-            );
-            let writable =
-                !system && flag(def, "writable", true, span)? && def.get("generated").is_none();
+            let writable = flag(def, "writable", true, span)?
+                && def.get("assign").is_none()
+                && def.get("generated").is_none();
             let defaultable =
                 writable && (def.get("default").is_some() || !flag(def, "required", false, span)?);
             let read = readable.then(|| quote!(impl #orm::ReadableColumn for #column {}));
@@ -218,7 +210,7 @@ fn logical_type(def: &Value, orm: &syn::Path, span: proc_macro2::Span) -> syn::R
             return Err(syn::Error::new(
                 span,
                 format!("unsupported logical field type '{name}'"),
-            ))
+            ));
         }
     };
     let marker = syn::Ident::new(marker, span);

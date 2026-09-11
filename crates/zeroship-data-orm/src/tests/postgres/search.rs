@@ -445,7 +445,7 @@ fn near_returns_within_radius() {
             crate::tests::fixtures::cache_schema(
                 app,
                 coll,
-                value!({ "location": { "type": "geoPoint" } }),
+                value!({ "id": {"type":"integer", "primaryKey":true}, "location": { "type": "geoPoint" } }),
             );
 
             crate::tests::fixtures::roles::ensure_per_app_role(&pool, app)
@@ -506,7 +506,7 @@ fn near_returns_within_radius() {
                     radius_m: 1000.0,
                     filter: &zeroship_data_sql::value::Value::Null,
                     limit: None,
-                    schema: &value!({ "location": { "type": "geoPoint" } }),
+                    schema: &value!({ "id": {"type":"integer", "primaryKey":true}, "location": { "type": "geoPoint" } }),
                 },
             )
             .await

@@ -45,12 +45,11 @@ use std::collections::BTreeSet;
 
 use compio_postgres::{Client, NoTls};
 use zeroship_data_sql::compile::{
-    SYSTEM_FIELD_NAMES, SqlDialect, SystemFieldAutoBump, build_delete_many, build_delete_one,
-    build_insert, build_insert_many, build_restore_many_with_system_fields,
-    build_restore_one_with_system_fields, build_returning_expr,
-    build_soft_delete_many_with_system_fields, build_soft_delete_one_with_system_fields,
-    build_update_many_with_system_fields, build_update_one_with_system_fields, build_upsert,
-    quote_ident, raw_column_name,
+    SqlDialect, WriteAssignments, build_delete_many, build_delete_one, build_insert,
+    build_insert_many, build_restore_many_with_assignments, build_restore_one_with_assignments,
+    build_returning_expr, build_soft_delete_many_with_assignments,
+    build_soft_delete_one_with_assignments, build_update_many_with_assignments,
+    build_update_one_with_assignments, build_upsert, quote_ident, raw_column_name,
 };
 use zeroship_data_sql::render::postgres::{render_delete, render_update};
 use zeroship_data_sql::value::{Value, value};
@@ -73,7 +72,7 @@ const COLLECTION: &str = "people";
 /// `__zs_raw__ssn` - that is not a declared field and therefore not on the
 /// projection. That column is the whole point of the fixture.
 fn people_schema() -> Value {
-    value!({
+    crate::tests::fixtures::schema::generated_fields(value!({
         "ssn": {
             "type": "string",
             "mask": { "kind": "full", "classification": "pci" }
@@ -81,7 +80,7 @@ fn people_schema() -> Value {
         // The unmasked control: one column, on the read surface, so an arm that
         // passed by returning nothing at all would fail here.
         "nickname": { "type": "string" },
-    })
+    }))
 }
 
 async fn connect(url: &str) -> Client {
@@ -261,12 +260,10 @@ async fn begin_as_role(session: &Client, role: &str) {
 
 type Statement = (&'static str, String, Vec<Value>);
 
-fn autobump() -> SystemFieldAutoBump<'static> {
-    SystemFieldAutoBump {
-        dispatch_write: true,
-        actor_id: Some("usr_actor"),
-        ..Default::default()
-    }
+fn assignments(schema: &Value, deleting: bool, restoring: bool) -> WriteAssignments {
+    crate::assignments::AssignmentPlan::from_schema(schema)
+        .unwrap()
+        .write_assignments(schema, Some("usr_actor"), deleting, restoring)
 }
 
 /// The write verbs whose statements name nothing but ordinary columns.
@@ -276,7 +273,6 @@ fn autobump() -> SystemFieldAutoBump<'static> {
 /// difference is the only variable between this list and
 /// [`the_same_verbs_are_refused_outright_when_the_returning_clause_stars`].
 fn column_grant_ready_statements(app: &str, schema: &Value) -> Vec<Statement> {
-    let ab = autobump();
     let d = SqlDialect::Postgres;
     let filter = value!({ "id": "psn_seed" });
     let update = value!({ "nickname": "updated" });
@@ -316,38 +312,38 @@ fn column_grant_ready_statements(app: &str, schema: &Value) -> Vec<Statement> {
         ),
         mk(
             "updateMany",
-            build_update_many_with_system_fields(
+            build_update_many_with_assignments(
                 &zeroship_data_sql::SchemaName::new(app).expect("fixture schema name"),
                 COLLECTION,
                 schema,
                 &filter,
                 &update,
                 d,
-                &ab,
+                &assignments(schema, false, false),
             )
             .unwrap(),
         ),
         mk(
             "softDeleteMany",
-            build_soft_delete_many_with_system_fields(
+            build_soft_delete_many_with_assignments(
                 &zeroship_data_sql::SchemaName::new(app).expect("fixture schema name"),
                 COLLECTION,
                 schema,
                 &filter,
                 d,
-                &ab,
+                &assignments(schema, true, false),
             )
             .unwrap(),
         ),
         mk(
             "restoreMany",
-            build_restore_many_with_system_fields(
+            build_restore_many_with_assignments(
                 &zeroship_data_sql::SchemaName::new(app).expect("fixture schema name"),
                 COLLECTION,
                 schema,
                 &filter,
                 d,
-                &ab,
+                &assignments(schema, false, true),
             )
             .unwrap(),
         ),
@@ -368,7 +364,6 @@ fn column_grant_ready_statements(app: &str, schema: &Value) -> Vec<Statement> {
 /// The four single-row verbs, kept together so the live privilege test rules
 /// on every production builder that shares the bounded target shape.
 fn single_row_statements(app: &str, schema: &Value) -> Vec<Statement> {
-    let ab = autobump();
     let d = SqlDialect::Postgres;
     let filter = value!({ "id": "psn_seed" });
     let update = value!({ "nickname": "updated" });
@@ -377,38 +372,38 @@ fn single_row_statements(app: &str, schema: &Value) -> Vec<Statement> {
     vec![
         mk(
             "updateOne",
-            build_update_one_with_system_fields(
+            build_update_one_with_assignments(
                 &zeroship_data_sql::SchemaName::new(app).expect("fixture schema name"),
                 COLLECTION,
                 schema,
                 &filter,
                 &update,
                 d,
-                &ab,
+                &assignments(schema, false, false),
             )
             .unwrap(),
         ),
         mk(
             "softDeleteOne",
-            build_soft_delete_one_with_system_fields(
+            build_soft_delete_one_with_assignments(
                 &zeroship_data_sql::SchemaName::new(app).expect("fixture schema name"),
                 COLLECTION,
                 schema,
                 &filter,
                 d,
-                &ab,
+                &assignments(schema, true, false),
             )
             .unwrap(),
         ),
         mk(
             "restoreOne",
-            build_restore_one_with_system_fields(
+            build_restore_one_with_assignments(
                 &zeroship_data_sql::SchemaName::new(app).expect("fixture schema name"),
                 COLLECTION,
                 schema,
                 &filter,
                 d,
-                &ab,
+                &assignments(schema, false, true),
             )
             .unwrap(),
         ),
@@ -458,20 +453,38 @@ fn bounded_data_plan_statements(app: &str) -> Vec<(&'static str, zeroship_data_s
     };
     let limit = PlanRowLimit::new(1).expect("single-row bound");
 
-    let update = PlanUpdate::builder(collection.clone(), limit, returning())
-        .namespace(namespace.clone())
-        .set(PlanColumnAssignment::new(
-            PlanIdent::parse_as("nickname", PlanIdentRole::Column).expect("nickname column"),
-            PlanAssignment::bind(PlanLiteral::text("updated-by-plan").expect("update literal")),
-        ))
-        .filter(filter())
-        .build()
-        .expect("bounded update plan");
-    let delete = PlanDelete::builder(collection, limit, returning())
-        .namespace(namespace)
-        .filter(filter())
-        .build()
-        .expect("bounded delete plan");
+    let update = PlanUpdate::builder(
+        collection.clone(),
+        PlanIdent::parse_as(
+            zeroship_data_sql::lifecycle::primary_key(&people_schema()).unwrap(),
+            PlanIdentRole::Column,
+        )
+        .unwrap(),
+        limit,
+        returning(),
+    )
+    .namespace(namespace.clone())
+    .set(PlanColumnAssignment::new(
+        PlanIdent::parse_as("nickname", PlanIdentRole::Column).expect("nickname column"),
+        PlanAssignment::bind(PlanLiteral::text("updated-by-plan").expect("update literal")),
+    ))
+    .filter(filter())
+    .build()
+    .expect("bounded update plan");
+    let delete = PlanDelete::builder(
+        collection,
+        PlanIdent::parse_as(
+            zeroship_data_sql::lifecycle::primary_key(&people_schema()).unwrap(),
+            PlanIdentRole::Column,
+        )
+        .unwrap(),
+        limit,
+        returning(),
+    )
+    .namespace(namespace)
+    .filter(filter())
+    .build()
+    .expect("bounded delete plan");
 
     vec![
         (
@@ -860,9 +873,13 @@ fn the_fixture_withholds_exactly_the_raw_column() {
             !readable.contains(&raw),
             "the raw column must not be on the read surface: {readable:?}",
         );
-        for field in SYSTEM_FIELD_NAMES {
+        for field in crate::tests::fixtures::schema::generated_fields(value!({}))
+            .as_object()
+            .unwrap()
+            .keys()
+        {
             assert!(
-                readable.contains(*field),
+                readable.contains(field),
                 "the projection must name the system field {field}: {readable:?}",
             );
         }
@@ -876,7 +893,7 @@ fn the_fixture_withholds_exactly_the_raw_column() {
         );
         assert_eq!(
             readable.len(),
-            SYSTEM_FIELD_NAMES.len() + 2,
+            people_schema().as_object().unwrap().len(),
             "the read surface is the seven system fields plus the two declared ones: {readable:?}",
         );
     })

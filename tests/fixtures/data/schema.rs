@@ -32,11 +32,21 @@ pub fn fixture_table_sql_for(
         SqlDialect::Sqlite => &zeroship_migrate_sqlite::DIALECT,
         SqlDialect::Mysql => panic!("the runtime has no MySQL fixture backend"),
     };
+    // The confined policy supplies assigned fields when compiling authored DDL.
+    let authored = Value::Object(
+        fields
+            .as_object()
+            .expect("fixture field map")
+            .iter()
+            .filter(|(_, definition)| definition.get("assign").is_none())
+            .map(|(name, definition)| (name.clone(), definition.clone()))
+            .collect(),
+    );
     zeroship_migrate::schema::query::build_create_table_with_fks_for_dialect(
         zeroship_migrate::shipping_vendors(),
         schema.as_str(),
         collection,
-        &serde_json::to_value(fields).expect("encode migration descriptor"),
+        &serde_json::to_value(&authored).expect("encode migration descriptor"),
         fks,
         dialect,
         &policy,
@@ -61,4 +71,30 @@ pub fn fixture_indexes(
 #[allow(dead_code)]
 pub fn fixture_schema_sql(schema: &SchemaName) -> String {
     format!("CREATE SCHEMA IF NOT EXISTS {}", schema.quoted())
+}
+
+/// Add the fields emitted by the fixture's confined migration policy.
+pub fn generated_fields(fields: Value) -> Value {
+    let descriptor: Value = serde_json::from_str(include_str!(
+        "../../../crates/zeroship-data-orm/tests/fixtures/schema.runtime.json"
+    ))
+    .expect("generated fixture descriptor");
+    let mut generated = descriptor["collections"]["posts"]["fields"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .filter(|(_, definition)| definition.get("assign").is_some())
+        .map(|(name, definition)| (name.clone(), definition.clone()))
+        .collect::<zeroship_data_sql::value::Map<_, _>>();
+    for (name, definition) in fields.as_object().expect("fixture field map") {
+        if let Some(existing) = generated.get_mut(name) {
+            existing
+                .as_object_mut()
+                .unwrap()
+                .extend(definition.as_object().unwrap().clone());
+        } else {
+            generated.insert(name.clone(), definition.clone());
+        }
+    }
+    Value::Object(generated)
 }

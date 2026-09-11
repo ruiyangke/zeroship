@@ -158,7 +158,7 @@ tier_of_file() {
     # `descriptor.rs` and `backend/mod.rs`: ENGINE, settled by the 2026-09-03
     # cut. See the same two arms in tier_direction_census.sh.
     ./descriptor.rs|./backend/mod.rs)                    echo ENGINE ;;
-    ./tx_lanes.rs|./backend_handle.rs|./backend/cancel.rs|./system_shape_charter.rs|./metrics.rs) echo ENGINE ;;
+    ./tx_lanes.rs|./backend_handle.rs|./backend/cancel.rs|./assignments.rs|./metrics.rs) echo ENGINE ;;
     ./context.rs|./service.rs|./op_error.rs)             echo ADAPTER ;;
     *)                                                   echo CONTESTED ;;
   esac

@@ -28,43 +28,46 @@ pub enum ApplyMode<'a> {
 
 /// Normalize the update and enforce system assignments. Insert-fixed fields are
 /// refused; write-assigned fields are removed so the SQL builder supplies them.
-pub fn inspect_update(app_id: &str, collection: &str, patch: &mut Value) -> Result<(), DbError> {
+pub fn inspect_update(schema: &Value, patch: &mut Value) -> Result<(), DbError> {
     zeroship_data_sql::update::normalize(patch)?;
-    super::system_fields_pass::apply_system_fields_on_update(patch, app_id, collection)
+    super::assignment_pass::apply_assignments_on_update(patch, schema)
 }
 
 /// DB-8: validate every top-level field key of a plain write document
 /// (insert / insertMany element / upsert) with the same `validate_field_name`
 /// fence the read/filter path enforces. Runs on the raw user document before
 /// any system/encryption/mask pass adds its own (legitimately reserved) keys.
-fn validate_user_doc_keys(doc: &Value) -> Result<(), DbError> {
+fn validate_user_doc_keys(doc: &Value, schema: &Value) -> Result<(), DbError> {
     if let Some(obj) = doc.as_object() {
         for key in obj.keys() {
             compile::validate_field_name(key)?;
+            if schema.get(key).is_none() {
+                return Err(DbError::validation(
+                    "unknown_field",
+                    format!("field '{key}' is not declared"),
+                ));
+            }
         }
     }
     Ok(())
 }
 
-/// `id` is platform-assigned, so a creator-supplied one is refused rather than
-/// honoured.
-///
-/// **Why here and not in the system-fields pass.** That pass mints the id, and
-/// it is documented and tested as idempotent - so a check keyed on `id` being
-/// PRESENT cannot tell a creator's value from one the pass itself minted on an
-/// earlier call. This boundary runs on the raw document before any pass, so
-/// presence here means exactly one thing: the creator sent it.
-///
-/// Refused rather than silently dropped, so a creator cannot believe the id
-/// they chose is the id the row has.
-fn refuse_platform_assigned_id(doc: &Value) -> Result<(), DbError> {
+/// Reject a caller-supplied generated identifier before the assignment pass.
+fn refuse_generated_identifier(doc: &Value, schema: &Value) -> Result<(), DbError> {
     let Some(obj) = doc.as_object() else {
         return Ok(());
     };
-    if obj.contains_key("id") {
+    if crate::assignments::AssignmentPlan::from_schema(schema)?
+        .columns()
+        .iter()
+        .any(|column| {
+            column.by == zeroship_migrate_policy::AssignmentGenerator::TypedId
+                && obj.contains_key(&column.name)
+        })
+    {
         return Err(DbError::validation(
             "platform_assigned_field",
-            "`id` is assigned by the platform; remove it from the document",
+            "the identifier is generated; remove it from the document",
         ));
     }
     Ok(())
@@ -76,7 +79,7 @@ fn validate_upsert_conflict_fields(
     conflict_fields: &Value,
 ) -> Result<(), DbError> {
     let fields = compile::parse_conflict_fields(conflict_fields)?;
-    let assignments = crate::system_shape_charter::plan()?;
+    let assignments = crate::assignments::AssignmentPlan::from_schema(schema)?;
     for field in fields {
         if assignments
             .columns()
@@ -150,25 +153,24 @@ pub async fn apply(
         app_id,
         "the write route must belong to the app being written"
     );
+    let schema = crate::descriptor::collection_schema(binding, collection)?;
     // Validate creator keys before protection and system passes add reserved storage keys.
     match &mode {
         ApplyMode::Insert { .. } | ApplyMode::Upsert { .. } => {
-            validate_user_doc_keys(payload)?;
-            refuse_platform_assigned_id(payload)?;
+            validate_user_doc_keys(payload, &schema)?;
+            refuse_generated_identifier(payload, &schema)?;
         }
         ApplyMode::InsertMany { .. } => {
             if let Some(docs) = payload.as_array() {
                 for doc in docs {
-                    validate_user_doc_keys(doc)?;
-                    refuse_platform_assigned_id(doc)?;
+                    validate_user_doc_keys(doc, &schema)?;
+                    refuse_generated_identifier(doc, &schema)?;
                 }
             }
         }
         ApplyMode::Update { .. } => validate_update_patch_keys(payload)?,
     }
 
-    // Require the deployment descriptor before applying protection to any write.
-    let schema = crate::descriptor::collection_schema(binding, collection)?;
     if let ApplyMode::Upsert {
         conflict_fields, ..
     } = &mode
@@ -197,24 +199,24 @@ pub async fn apply(
 
     match mode {
         ApplyMode::Insert { actor_id } => {
-            super::system_fields_pass::apply_system_fields_on_insert(
+            super::assignment_pass::apply_assignments_on_insert(
                 payload, &schema, collection, actor_id,
             )?;
-            let row_pk = row_pk_from_doc(payload);
+            let row_pk = row_pk_from_doc(payload, &schema);
             stages
                 .apply_to_doc(keys, dialect, app_id, collection, &row_pk, payload)
                 .await?;
             Ok(())
         }
         ApplyMode::InsertMany { actor_id } => {
-            super::system_fields_pass::apply_system_fields_on_insert_many(
+            super::assignment_pass::apply_assignments_on_insert_many(
                 payload, &schema, collection, actor_id,
             )?;
             let Some(docs) = payload.as_array_mut() else {
                 return Ok(());
             };
             for doc in docs.iter_mut() {
-                let row_pk = row_pk_from_doc(doc);
+                let row_pk = row_pk_from_doc(doc, &schema);
                 stages
                     .apply_to_doc(keys, dialect, app_id, collection, &row_pk, doc)
                     .await?;
@@ -231,7 +233,7 @@ pub async fn apply(
             actor_id,
             conflict_fields,
         } => {
-            super::system_fields_pass::apply_system_fields_on_insert(
+            super::assignment_pass::apply_assignments_on_insert(
                 payload, &schema, collection, actor_id,
             )?;
             rewrite_upsert_doc_id_to_existing_row_id(
@@ -243,7 +245,7 @@ pub async fn apply(
                 &schema,
             )
             .await?;
-            let row_pk = row_pk_from_doc(payload);
+            let row_pk = row_pk_from_doc(payload, &schema);
             stages
                 .apply_to_doc(keys, dialect, app_id, collection, &row_pk, payload)
                 .await?;
@@ -381,8 +383,12 @@ impl<'a> WriteStages<'a> {
     }
 }
 
-fn row_pk_from_doc(doc: &Value) -> String {
-    row_pk_from_value(doc.get("id"))
+fn row_pk_from_doc(doc: &Value, schema: &Value) -> String {
+    row_pk_from_value(
+        zeroship_data_sql::lifecycle::primary_key(schema)
+            .ok()
+            .and_then(|key| doc.get(key)),
+    )
 }
 
 fn row_pk_from_value(value: Option<&Value>) -> String {
@@ -441,7 +447,9 @@ pub async fn resolve_target_row_ids(
     Ok(rows
         .into_iter()
         .filter_map(|row| {
-            let id_value = row.get("id")?.clone();
+            let id_value = row
+                .get(zeroship_data_sql::lifecycle::primary_key(schema).ok()?)?
+                .clone();
             Some(TargetRowId {
                 row_pk: row_pk_from_value(Some(&id_value)),
                 id_value,
@@ -576,14 +584,14 @@ async fn rewrite_upsert_doc_id_to_existing_row_id(
     )
     .map_err(DbError::from)?;
     let rows = exec_query(route, built).await?;
-    let Some(existing_id) = rows.first().and_then(|row| match row.get("id") {
-        Some(Value::String(id)) => Some(id.clone()),
-        Some(Value::Number(n)) => Some(n.to_string()),
-        _ => None,
-    }) else {
-        return Ok(());
-    };
-    obj.insert("id".to_string(), Value::String(existing_id));
+    let key = zeroship_data_sql::lifecycle::primary_key(schema)?;
+    if let Some(existing_id) = rows
+        .first()
+        .and_then(|row| row.get(key))
+        .filter(|value| !value.is_null())
+    {
+        obj.insert(key.to_owned(), existing_id.clone());
+    }
     Ok(())
 }
 
@@ -656,7 +664,10 @@ mod tests {
     #[test]
     fn a_supplied_id_is_refused_at_the_document_boundary() {
         let doc = zeroship_data_sql::value!({ "title": "hi", "id": "usr_034HQyaJ0C11GCzHMMrWwz" });
-        match super::refuse_platform_assigned_id(&doc) {
+        match super::refuse_generated_identifier(
+            &doc,
+            &crate::tests::fixtures::schema::generated_fields(zeroship_data_sql::value!({})),
+        ) {
             Err(zeroship_data_orm::error::DbError::ValidationFailed { code, .. }) => {
                 assert_eq!(code, "platform_assigned_field");
             }
@@ -669,8 +680,11 @@ mod tests {
     #[test]
     fn a_document_without_an_id_passes_the_boundary() {
         let doc = zeroship_data_sql::value!({ "title": "hi" });
-        super::refuse_platform_assigned_id(&doc)
-            .expect("a document that supplies no id must be accepted");
+        super::refuse_generated_identifier(
+            &doc,
+            &crate::tests::fixtures::schema::generated_fields(zeroship_data_sql::value!({})),
+        )
+        .expect("a document that supplies no id must be accepted");
     }
 
     /// A non-object payload must not panic or refuse - the shape checks belong
@@ -678,8 +692,11 @@ mod tests {
     #[test]
     fn a_non_object_payload_is_not_this_fence_s_business() {
         let doc = zeroship_data_sql::value!("not a document");
-        super::refuse_platform_assigned_id(&doc)
-            .expect("a non-object payload is another validator's concern");
+        super::refuse_generated_identifier(
+            &doc,
+            &crate::tests::fixtures::schema::generated_fields(zeroship_data_sql::value!({})),
+        )
+        .expect("a non-object payload is another validator's concern");
     }
 
     use std::path::PathBuf;
@@ -699,17 +716,43 @@ mod tests {
     fn db8_rejects_reserved_and_malformed_user_doc_keys() {
         use zeroship_data_sql::value;
         // A normal document passes.
-        assert!(validate_user_doc_keys(&value!({ "name": "a", "ssn": "x" })).is_ok());
+        assert!(
+            validate_user_doc_keys(
+                &value!({ "name": "a", "ssn": "x" }),
+                &value!({"name":{}, "ssn":{}})
+            )
+            .is_ok()
+        );
         // The user must not forge the masked sibling suffix the platform emits.
-        assert!(validate_user_doc_keys(&value!({ "ssn_masked": "x" })).is_err());
+        assert!(
+            validate_user_doc_keys(
+                &value!({ "ssn_masked": "x" }),
+                &value!({"name":{}, "ssn":{}})
+            )
+            .is_err()
+        );
         // Nor a platform-internal `_`-prefixed name (covers `__zsbin__` markers,
         // `__zs_`, synthetic `_rank`/`_score`).
-        assert!(validate_user_doc_keys(&value!({ "__zsbin__ssn": true })).is_err());
-        assert!(validate_user_doc_keys(&value!({ "_rank": 1 })).is_err());
+        assert!(
+            validate_user_doc_keys(
+                &value!({ "__zsbin__ssn": true }),
+                &value!({"name":{}, "ssn":{}})
+            )
+            .is_err()
+        );
+        assert!(
+            validate_user_doc_keys(&value!({ "_rank": 1 }), &value!({"name":{}, "ssn":{}}))
+                .is_err()
+        );
         // Null-byte and >63-byte keys (NAMEDATALEN truncation collision).
-        assert!(validate_user_doc_keys(&value!({ "a\u{0}b": 1 })).is_err());
+        assert!(
+            validate_user_doc_keys(&value!({ "a\u{0}b": 1 }), &value!({"name":{}, "ssn":{}}))
+                .is_err()
+        );
         let long = "x".repeat(64);
-        assert!(validate_user_doc_keys(&value!({ long: 1 })).is_err());
+        assert!(
+            validate_user_doc_keys(&value!({ long: 1 }), &value!({"name":{}, "ssn":{}})).is_err()
+        );
     }
 
     #[test]
@@ -765,7 +808,7 @@ mod tests {
 
                 match result {
                     Err(zeroship_data_orm::error::DbError::ValidationFailed { code, .. }) => {
-                        assert_eq!(code, "reserved_system_field_name");
+                        assert_eq!(code, "reserved_id_prefix");
                     }
                     other => {
                         panic!("expected descriptor prefix '{prefix}' to be refused, got {other:?}")
@@ -817,10 +860,10 @@ mod tests {
         });
     }
 
-    use crate::tests::fixtures::cache_schema;
     use crate::compile::{SqlDialect, build_insert_with_dialect};
     use crate::encryption;
     use crate::tests::fixtures::DatabaseFixture;
+    use crate::tests::fixtures::cache_schema;
     use zeroship_migrate::schema::query::FkEmission;
     fn sqlite_fixture_sql(
         schema: &zeroship_data_sql::SchemaName,
@@ -971,15 +1014,16 @@ mod tests {
             let key_source = encryption::ProjectKeySource::supplied(supplied);
             let binding = DbBinding::cold_start(app_id);
             let collection = "users";
-            let schema = zeroship_data_sql::value!({
-                "email": { "type": "string", "required": true, "unique": true },
-                "name": { "type": "string", "required": true },
-                "ssn": {
-                    "type": "string",
-                    "encrypted": true,
-                    "mask": { "kind": "last4", "classification": "spi" }
-                }
-            });
+            let schema =
+                crate::tests::fixtures::schema::generated_fields(zeroship_data_sql::value!({
+                    "email": { "type": "string", "required": true, "unique": true },
+                    "name": { "type": "string", "required": true },
+                    "ssn": {
+                        "type": "string",
+                        "encrypted": true,
+                        "mask": { "kind": "last4", "classification": "spi" }
+                    }
+                }));
             let ddl_schema = zeroship_data_sql::value!({
                 "email": { "type": "string", "required": true, "unique": true },
                 "name": { "type": "string", "required": true },
@@ -1006,7 +1050,7 @@ mod tests {
             // sentinels the DDL further down really wrote - the happy arm, where
             // descriptor and catalog agree.
             let route = crate::exec::ambient_route_for_tests(app_id, handle.clone());
-            cache_schema(app_id, collection, schema);
+            cache_schema(app_id, collection, schema.clone());
 
             let ddl = sqlite_fixture_sql(
                 &zeroship_data_sql::SchemaName::new(app_id).expect("fixture schema name"),
@@ -1137,7 +1181,7 @@ mod tests {
                 },
                 "ssn": { "$set": "555-55-5555" }
             });
-            inspect_update(app_id, collection, &mut update_patch).expect("inspect update patch");
+            inspect_update(&schema, &mut update_patch).expect("inspect update patch");
             assert_eq!(
                 update_patch
                     .get("$set")

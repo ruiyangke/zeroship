@@ -333,8 +333,7 @@ fn aliased_select_skips_kind_none_sqlite() {
             bq.sql,
         );
         assert!(
-            bq.sql
-                .contains("SELECT \"id\", \"created_at\", \"updated_at\"")
+            bq.sql.contains("SELECT \"ssn\", \"name\"")
                 && bq.sql.contains("\"ssn\"")
                 && bq.sql.contains("\"name\""),
             "schema-backed reads must project the public column set: {}",

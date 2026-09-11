@@ -179,6 +179,7 @@ pub async fn exec_mutation_with_emit(
     route: &TxRoute,
     collection: &str,
     op: zeroship_data_orm::cdc::ChangeOp,
+    binding: &crate::binding::DbBinding,
 ) -> Result<Vec<Value>, DbError> {
     // `exec_mutation` returns the typed `Vec<Value>` already decoded
     // from `compio_postgres::Row`. Pre-fix we re-parsed our own JSON
@@ -186,6 +187,8 @@ pub async fn exec_mutation_with_emit(
     // iterate the live `Value`s directly. The CRUD resolver in
     // `crud.rs` does the final `Value::Array(rows).to_string()` once
     // at the V8 boundary.
+    let schema = crate::descriptor::collection_schema(binding, collection)?;
+    let key = zeroship_data_sql::lifecycle::primary_key_column(&schema)?;
     let rows = exec_mutation(route, bq).await?;
     emit_for_rows(
         &rows,
@@ -194,6 +197,7 @@ pub async fn exec_mutation_with_emit(
         backend_publishes_committed_changes(route.backend()),
         collection,
         op,
+        key,
     );
     Ok(rows)
 }
@@ -258,6 +262,7 @@ fn emit_for_rows(
     backend_publishes: bool,
     collection: &str,
     op: zeroship_data_orm::cdc::ChangeOp,
+    key: Option<&str>,
 ) {
     if rows.is_empty() {
         // No rows affected — no broker event. UPDATE with a non-
@@ -278,24 +283,13 @@ fn emit_for_rows(
         return;
     }
     for row in rows {
-        let pk = row
-            .get("id")
-            .and_then(value_to_logical_id)
-            .or_else(|| row.get("_id").and_then(value_to_logical_id));
-        // changed_columns: the keys present in the returned row,
-        // minus the system columns we never want to report. For
-        // INSERT this is "every declared column" — for UPDATE it's
-        // the post-image, which is a superset of what changed.
-        // Filtering down to "what changed" requires a before/after
-        // diff that we don't have here; a future pass could compute it
-        // from the mutation's SET clause directly.
+        let pk = key
+            .and_then(|key| row.get(key))
+            .and_then(value_to_logical_id);
+        // The returned post-image conservatively reports every projected field.
         let (columns, tuple): (Vec<String>, std::collections::HashMap<String, String>) = match row {
             Value::Object(m) => {
-                let cols = m
-                    .keys()
-                    .filter(|k| !matches!(k.as_str(), "created_at" | "updated_at"))
-                    .cloned()
-                    .collect();
+                let cols = m.keys().cloned().collect();
                 // Render the full RETURNING row into a
                 // `column → text` map for the broker's predicate
                 // evaluation. Numbers / bools are stringified to
@@ -413,12 +407,12 @@ pub fn ambient_route_for_tests(app_id: &str, backend: crate::backend::BackendHan
 mod tests {
     use super::*;
     use crate::driver::Session;
+    use crate::tests::fixtures::DatabaseFixture;
     use std::cell::Cell;
     use std::collections::HashMap;
     use std::path::PathBuf;
     use std::rc::Rc;
     use zeroship_data_orm::cdc::ChangeOp;
-    use crate::tests::fixtures::DatabaseFixture;
 
     thread_local! {
         /// Counter incremented every time the production code path
@@ -627,6 +621,7 @@ mod tests {
             /* backend_publishes */ false,
             "messages",
             ChangeOp::Insert,
+            Some("id"),
         );
 
         assert_eq!(
@@ -654,6 +649,7 @@ mod tests {
             /* backend_publishes */ false,
             "ghosts",
             ChangeOp::Insert,
+            Some("id"),
         );
 
         assert_eq!(
@@ -844,6 +840,7 @@ mod tests {
             /* backend_publishes */ false,
             "messages",
             ChangeOp::Insert,
+            Some("id"),
         );
 
         assert_eq!(
@@ -908,6 +905,7 @@ mod tests {
                 backend_publishes_committed_changes(&handle),
                 "messages",
                 ChangeOp::Insert,
+                Some("id"),
             );
 
             assert_eq!(
@@ -941,6 +939,7 @@ mod tests {
             /* backend_publishes */ false,
             "messages",
             ChangeOp::Insert,
+            Some("id"),
         );
 
         match sub.pop() {

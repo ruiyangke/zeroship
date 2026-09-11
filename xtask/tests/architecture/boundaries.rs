@@ -340,7 +340,7 @@ fn shared_execution_keeps_sql_and_driver_work_at_their_boundaries() {
         ("transaction/driver.rs", "SAVEPOINT"),
         ("transaction/driver.rs", "ROLLBACK TO SAVEPOINT"),
         ("transaction/driver.rs", "RELEASE SAVEPOINT"),
-        ("crud/system_fields_pass.rs", "UPDATE"),
+        ("crud/assignment_pass.rs", "UPDATE"),
     ];
     let baseline: BTreeSet<_> = baseline
         .into_iter()

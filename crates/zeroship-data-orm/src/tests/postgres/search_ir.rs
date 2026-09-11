@@ -386,6 +386,7 @@ fn the_ir_and_the_shipped_builder_rank_identically() {
             // The shipped builder's answer, for the same search. The schema hint is
             // what `PostgresBackend::vector_search` passes it.
             let schema_hint = value!({
+                "id": {"type":"integer", "primaryKey":true},
                 "title": { "type": "string" },
                 "tenant_id": { "type": "number" },
                 "embedding": { "type": "vector", "vectorDims": DIMS },

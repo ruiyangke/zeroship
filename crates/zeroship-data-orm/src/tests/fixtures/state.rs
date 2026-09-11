@@ -1,4 +1,4 @@
-use crate::{metrics, protection, system_shape_charter, tx_lanes};
+use crate::{metrics, protection, tx_lanes};
 
 /// Install a descriptor for an isolated test binding.
 pub(crate) fn cache_schema(
@@ -21,7 +21,9 @@ pub(crate) fn cache_schema_for_deploy(
     collection: &str,
     schema: zeroship_data_sql::value::Value,
 ) {
-    zeroship_data_orm::schema_cache::with_mut(|c| c.insert_one(binding, collection, schema));
+    zeroship_data_orm::schema_cache::with_mut(|c| {
+        c.insert_one(binding, collection, super::schema::generated_fields(schema))
+    });
 }
 
 pub(crate) fn reset_engine() {
@@ -29,7 +31,6 @@ pub(crate) fn reset_engine() {
     protection::mask_policy::reset_for_tests();
     protection::protection_floor::reset_for_tests();
     metrics::reset_for_tests();
-    system_shape_charter::reset_for_tests();
     zeroship_data_orm::schema_cache::reset_for_tests();
 }
 

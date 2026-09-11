@@ -34,7 +34,7 @@ use zeroship_data_orm::protection::unmask::{
 /// proposal); the column is nullable so the INSERT succeeds.
 ///
 /// **Lives here, in the adapter, because per-request identity is runtime
-/// state.** It sat in `crud/system_fields_pass.rs` until 2026-09-02, where its
+/// state.** It sat in `crud/assignment_pass.rs` until 2026-09-02, where its
 /// `&SharedState` parameter was the LAST signature in the ENGINE tier naming
 /// the V8 runtime crate - the final row on
 /// `tests/lib/tier_signature_census.sh`. All nine of its callers were already

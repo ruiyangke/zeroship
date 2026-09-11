@@ -257,7 +257,7 @@ tier() {
     # byte-identical in intent to tier_direction_census.sh: the two censuses
     # judging one file differently is defect 1 in that file.
     ./context.rs|./service.rs|./op_error.rs)              echo "ADAPTER" ;;
-    ./tx_lanes.rs|./backend_handle.rs|./backend/cancel.rs|./system_shape_charter.rs|./metrics.rs) echo "ENGINE" ;;
+    ./tx_lanes.rs|./backend_handle.rs|./backend/cancel.rs|./assignments.rs|./metrics.rs) echo "ENGINE" ;;
     # `descriptor.rs` was CORE here and data-engine in the proposal; SETTLED as
     # ENGINE on 2026-09-03 by the cut, and changed in the same commit as
     # tier_direction_census.sh - the two censuses judging one file differently

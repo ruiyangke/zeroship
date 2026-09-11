@@ -318,7 +318,7 @@ CREATE TABLE "{app}"."people" ({PG_SYSTEM_COLUMNS},
 
             // ----- WRITE (real pipeline, introspected metadata) -----
             // No `id`: the write pipeline refuses a creator-supplied one and mints a
-            // typed id in `system_fields_pass`. The raw INSERT below MUST then carry
+            // typed id in `assignment_pass`. The raw INSERT below MUST then carry
             // THAT MINTED ID and nothing else: encryption binds the row primary key
             // into the AEAD's
             // additional data (`canonical_aad(collection, column, row_pk_bytes)` in
