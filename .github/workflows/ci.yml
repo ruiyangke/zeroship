@@ -2059,37 +2059,21 @@ jobs:
           ZS_FRESHNESS_STRICT: 1
           PG_CONTAINER: compose-postgres-1
           PG_USER: postgres
-      # env.db and login. Both were classified before auth was, and both were
-      # deliberately LEFT unwired for one stated reason: their counts had only
-      # ever been measured on an idle machine, and storage and workflows (below)
-      # are two standing cases of a harness that is stable idle and not stable
-      # contended. That objection is now discharged by measurement rather than
-      # by argument.
-      #
-      # MEASURED 2026-08-12, the condition a CI runner actually imposes: db and
-      # login run CONCURRENTLY WITH EACH OTHER (four services each, and their
-      # port bands do not overlap - db 93xx/3021/5021/5487, login 94xx/3092/
-      # 5092/5460) plus 8 extra busy loops on a 16-core box. TWO such rounds:
-      #     db     121 passed, 1 failed  (floor 121)  exit 0, both rounds
-      #     login   30 passed, 1 failed  (floor 30)   exit 0, both rounds
-      # and the divergent row SET was identical across both rounds on each.
-      #
-      # The load did change something, and it is the thing the design predicted:
-      # db diverged on all FIVE rows both loaded rounds - including txBranch and
-      # txOrphan, which are the two carried on db's TOLERATED list precisely
-      # because they are timing-dependent (idle rounds have gone 5, 5 and 3).
-      # A fixed COUNT would therefore have been wrong in one direction or the
-      # other here, and the idle 3-run would have reported STALE EXPECTATION.
-      # That is why these two are wireable only now that they compare identities
-      # with a tolerated list, and not before.
-      - name: env.db (SQLite dev vs Postgres deployed)
+      - name: Database examples (Vitest, SQLite files, PostgreSQL, and Chromium)
         run: |
-          set -o pipefail
-          tests/e2e_dev_vs_deployed_db.sh 2>&1 | tee "$RUNNER_TEMP/dvd-db.log"
-        env:
-          ZS_FRESHNESS_STRICT: 1
-          PG_CONTAINER: compose-postgres-1
-          PG_USER: postgres
+          pnpm --dir examples/db-e2e test
+          pnpm --dir examples/db-todos test
+          pnpm --dir examples/db-hitcounter test
+      - name: Retain database fixture failure logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: database-example-logs
+          path: |
+            examples/db-e2e/tests/.artifacts/**
+            examples/db-todos/tests/.artifacts/**
+            examples/db-hitcounter/tests/.artifacts/**
+          if-no-files-found: ignore
       - name: Login (dev auth provider vs deployed OP)
         run: |
           set -o pipefail

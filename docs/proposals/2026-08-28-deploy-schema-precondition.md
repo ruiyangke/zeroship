@@ -243,11 +243,11 @@ and `e2e_spend_state_transitions` all ship `examples/metering-probe`, which
 carries a descriptor, and none of them mentions the migration service. Fixing
 them means adding a whole service to six harnesses.
 `tests/e2e_metering_billing.sh`, `tests/golden_path.sh` and
-`tests/e2e_dev_vs_deployed_db.sh` were converted in the landing commit and are
+`tests/e2e_dev_vs_deployed_db.sh` (DELETED; acceptance now lives in `examples/db-todos/tests/`) were converted in the landing commit and are
 the worked examples.
 
 **Two harnesses whose subject the guard abolished.**
-`tests/e2e_db_app_end_to_end.sh:322` is a section headed "THE PRE-MIGRATE
+`tests/e2e_db_app_end_to_end.sh` (DELETED; acceptance now lives in `examples/db-hitcounter/tests/`) had a section headed "THE PRE-MIGRATE
 CONTROL" whose own prose says *"the app is deployed and serving, and its
 database schema does not exist yet. That is the state a creator reaches by
 following the documented chain up to `zeroship deploy`"*, and

@@ -453,7 +453,7 @@ curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/readyz" >/dev/null 2>&1 \
   && pass "gateway healthy (route-pull poll-interval 2s)" || { fail "gateway unhealthy"; tail -30 "$WORK/gate.log"; exit 1; }
 e2e_assert_usage_producer "$WORK/gate.log" "gateway"
 
-# The migration service. Same invocation as tests/e2e_db_app_end_to_end.sh.
+# The migration service. Same invocation as examples/db-hitcounter/tests/deployed.test.ts.
 "$BIN/zeroship-migrate-server" --port "$ZEROSHIP_MIGRATE_SERVER_PORT" \
   --tmp-dir "$WORK/migrated-tmp" \
   > "$WORK/migrated.log" 2>&1 &
@@ -739,7 +739,7 @@ if [ -n "$CPU" ] && [ "$CPU" -ge 0 ] 2>/dev/null; then pass "cpu_us present (syn
 # so nothing installs on env.db and every insert fails -- which is exactly what
 # `probe db write ok=false` above was reporting. This harness also never invokes
 # zeroship-migrate-server (zero references in the file), unlike
-# tests/e2e_db_app_end_to_end.sh, whose db-hitcounter has a committed
+# examples/db-hitcounter/tests/deployed.test.ts, whose db-hitcounter has a committed
 # migrations/20260711000000_create_hits.ts and an apply step.
 #
 # So this gate is RED at HEAD BY DESIGN until the probe gets migrations. That is

@@ -568,7 +568,7 @@ The required arms, and where each lives today:
 
 The `Promise.all` case has a black-box probe (`todos.txParallel` in
 `examples/db-todos/src/index.ts`, asserted by `cxPar` in
-`tests/e2e_dev_vs_deployed_db.sh`). Keep it as a **preservation property**: it is
+`examples/db-todos/tests/database.test.ts`). Keep it as a **preservation property**: it is
 not acceptance for this contract, because the durability half cannot fail and it
 would pass on an implementation that keyed admission by transaction id. The
 discriminating observable is the exclusion itself, which is a white-box arm on

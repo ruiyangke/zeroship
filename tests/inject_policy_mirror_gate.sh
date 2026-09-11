@@ -64,7 +64,7 @@
 # is:
 #   - It does NOT check that the shape is CORRECT. A wrong rule, now shared by
 #     everything, passes here. The end-to-end proof that the shape works is
-#     tests/e2e_db_app_end_to_end.sh stage 4 and tests/golden_path.sh.
+#     examples/db-hitcounter/tests/deployed.test.ts stage 4 and tests/golden_path.sh.
 #   - A rule ASSEMBLED at runtime (string concatenation, a builder, a serde
 #     struct rendered to TOML) carries no `author_primary_key =` line and is
 #     invisible to arm 1. Runtime code no longer emits DDL; the migration

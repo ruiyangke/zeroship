@@ -153,7 +153,7 @@ agents_bad=0
 # result of a command substitution - which is why the comment above reasoned
 # about `{}` and not about `*`.
 set -f
-for p in $(grep -oE '(crates|libs|sdks|db|tests|deploy|policies|schema|examples|docs)/[A-Za-z0-9_./{},*-]+' AGENTS.md \
+for p in $(grep -oE '(xtask|crates|libs|sdks|db|tests|deploy|policies|schema|examples|docs)/[A-Za-z0-9_./{},*-]+' AGENTS.md \
            | tr -d '`' | sed 's/[.,)]*$//' | sort -u); do
   case "$p" in *[{}\*]*) continue ;; esac      # brace/glob forms are prose
   is_generated_artifact "$p" && continue
@@ -256,7 +256,7 @@ check_citations() {
     for cite in $("$CITE_SOURCE" "$f" \
                   | grep -oE '[A-Za-z0-9_./-]+\.[A-Za-z0-9]+(:[0-9]+(-[0-9]+)?)?' \
                   | sed -E 's#^((\.\.?)/)+##' \
-                  | grep -E '^(crates|libs|sdks|tests|db|deploy|policies|schema|examples|docs)/[A-Za-z0-9_./-]+\.(tsx|jsx|jsonc|mjs|cjs|json|rs|ts|js|sh|toml|md)(:[0-9]+(-[0-9]+)?)?$' \
+                  | grep -E '^(xtask|crates|libs|sdks|tests|db|deploy|policies|schema|examples|docs)/[A-Za-z0-9_./-]+\.(tsx|jsx|jsonc|mjs|cjs|json|rs|ts|js|sh|toml|md)(:[0-9]+(-[0-9]+)?)?$' \
                   | sort -u); do
       case "$cite" in
         *:[0-9]*)
@@ -427,6 +427,11 @@ if [ "${1:-}" = "--self-test" ]; then
         ;;
     esac
   }
+
+  printf 'Native architecture checks: `xtask/tests/data_architecture.rs`.\n' > "$probe/xtask.md"
+  printf 'Missing native check: `xtask/tests/absent-%s.rs`.\n' "$$" > "$probe/xtask_missing.md"
+  st_case selftest_xtask_present 1 accept "$probe/xtask.md" "an existing xtask citation"
+  st_case selftest_xtask_missing 1 refuse "$probe/xtask_missing.md" "an absent xtask citation"
 
   # 1+2. PAST EOF, and its control one line lower. This is the pair that binds
   # the line check itself: with the line group deleted from the extractor, the
