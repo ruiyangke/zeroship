@@ -231,25 +231,15 @@ fn the_corpus_golden_actually_covers_the_map_that_moved() {
              would still satisfy a `> 0` floor"
         );
     }
-    // The auxiliary leg is a different shape and a much thinner one: only a `vector`
-    // column on a target with no non-B-tree index method owns a shadow relation, which
-    // is Sqlite and Mysql here and never Postgres. Pinned separately so a change that
-    // stopped emitting it cannot hide inside the totals above.
-    assert!(
-        count("\"kind\":\"shadowTable\"") > 0,
-        "the golden must carry at least one `auxiliary` shadow relation, or a change \
-         that stopped naming them would regenerate green"
-    );
-    assert_eq!(
-        lines
-            .iter()
-            .filter(|line| line.contains("\"kind\":\"shadowTable\"")
-                && line.contains("|Postgres|"))
-            .count(),
-        0,
-        "and NONE of them on Postgres, which indexes a vector in place - the control \
-         that says the shadow relation is a capability answer, not a default"
-    );
+    let vectors: Vec<_> = lines.iter()
+        .filter(|line| line.contains("|field|") && line.contains("\"type\":\"vector\""))
+        .collect();
+    assert!(!vectors.is_empty(), "the corpus must exercise vector storage");
+    for line in vectors {
+        let parts: Vec<_> = line.splitn(6, '|').collect();
+        let field: serde_json::Value = serde_json::from_str(parts[5]).expect("field JSON");
+        assert_eq!(field["storage"], serde_json::json!({"valueColumn": parts[4]}));
+    }
 
     // Both outcomes of `render_artifacts`, so the golden pins refusals as well as
     // renders. An all-rendered corpus would say nothing about over-refusal.

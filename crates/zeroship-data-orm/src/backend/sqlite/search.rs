@@ -55,32 +55,12 @@ impl Search for SqliteBackend {
 }
 
 impl SqliteBackend {
-    /// vec0-powered top-k vector search **on `session`**. Composes a SQL of the
-    /// form
-    ///
-    /// ```sql
-    /// SELECT t.*, v.distance AS _distance
-    ///   FROM "<app>"."<coll>" t
-    ///   JOIN "<app>"."<coll>__vec_<col>" v ON t.rowid = v.rowid
-    ///  WHERE v."<col>" MATCH x'…' AND k = ?
-    ///    AND <filter>
-    ///  ORDER BY v.distance;
-    /// ```
-    ///
-    /// The compiler binds the vector as native bytes and preserves the
-    /// descriptor's protected projection.
-    ///
-    /// **`session` is a parameter because SC-2 split the lanes.** A handle
-    /// carrying a transaction lease routes onto `tx_conn`; one without mints an
-    /// autocommit reservation on `op_conn`. Those are two connections, so a
-    /// scan issued inside `db.transaction(fn)` that took the autocommit handle
-    /// could not see the transaction's own uncommitted rows. Bound by
-    /// `plugin-db/tests/search_tx_lane.rs`.
+    /// Exact vector ranking on the captured session. SQLite development reads
+    /// the migrated base column, applies the query filter, and then ranks rows
+    /// with sqlite-vec's scalar distance function. No index table is required.
     ///
     /// # Errors
-    ///
-    /// `vector_unsupported` for an inner-product metric, the query builder's
-    /// own refusals, and any error the statement raises.
+    /// Returns the unsupported-metric error, a compiler refusal, or a SQL error.
     #[allow(clippy::too_many_arguments)]
     pub async fn vector_search_on(
         &self,
@@ -95,15 +75,10 @@ impl SqliteBackend {
         schema: &zeroship_data_sql::value::Value,
     ) -> Result<Vec<zeroship_data_sql::value::Value>, DbError> {
         let app_id = binding.app_id();
-        // Reject inner-product before issuing any SQL — a vec0 vtable
-        // cannot be declared with `distance_metric=ip`, so no shadow
-        // relation this search could join to would ever answer an IP
-        // query. Refuse with the typed code rather than emitting SQL
-        // that fails on a missing operator.
         vector::reject_inner_product(metric)?;
 
         let query = zeroship_data_sql::sqlite_search::build_vector_search(
-            app_id, collection, column, query, k, filter, schema,
+            app_id, collection, column, query, k, metric, filter, schema,
         )?;
         session.query(&query.sql, &query.params).await
     }

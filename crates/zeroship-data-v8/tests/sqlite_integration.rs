@@ -1855,45 +1855,8 @@ fn backfill_pauses_broker_for_a_type_erased_backend_and_resyncs() {
 }
 
 // ---------------------------------------------------------------------------
-// SQLite VectorIndex (`sqlite-vec` `vec0` virtual table)
-// integration tests.
-//
-// Supersedes the earlier pure-Rust flat scan tests at the same point
-// in this file (see `docs/archive/p4-search-implementation-plan.md`
-// §10 2026-05-24 reassessment). The membership-set assertions are
-// preserved byte-for-byte; only the underlying storage layer changed.
-//
-// Mirrors the PG arm's `vector_search_returns_k_nearest` /
-// `vector_dimension_mismatch_rejected_at_insert` /
-// `vector_search_respects_filter` structurally so a reviewer can
-// diff the two suites side-by-side.
-//
-// Storage: base-table BLOB column with a CHECK constraint (the
-// dimension contract at write time) + a `vec0` virtual table + AFTER
-// triggers that mirror the BLOB column into vec0 on INSERT/UPDATE/DELETE.
-// INSERTs use SQLite's hex-blob literal `x'<hex>'` so we avoid plumbing
-// typed BLOB params through the session actor's `&[String]` surface.
-//
-// WHO CREATES THE vec0 RELATION, AND WHAT THAT MEANS FOR THESE TESTS.
-// It used to be `VectorIndex::ensure_vector_index` on the data plane,
-// behind `#[cfg(any(test, feature = "test-helpers"))]`. That method is
-// deleted: schema is `zeroship-migrate`'s, and a data plane that can
-// alter schema can disagree with the descriptor describing it.
-//
-// So the fixture below issues the DDL itself, and the honest reading of
-// these tests changed with it. Before, they exercised production code
-// that no shipped binary could reach; now they exercise a fixture that
-// stands in for a migration that DOES NOT EXIST YET -- the SQLite
-// renderer folds a vector field's index to a plain B-tree
-// (`zeroship-migrate-sqlite/src/schema.rs:98`) and the engine states that
-// it never authors a virtual table
-// (`zeroship-migrate-backend/src/error.rs:270`). What they still prove is
-// the SEARCH contract: given the shadow relation the runtime descriptor
-// NAMES (`AuxiliaryObject::ShadowTable`), `vector_search` finds the right
-// rows. What they CANNOT reach, and never could, is a database produced
-// by an actual migration -- on one of those, SQLite `vector_search` fails
-// with "no such table". That gap is pre-existing and is recorded at
-// `backend/sqlite/mod.rs`'s `VectorIndex` block.
+// SQLite vector search over the base table's stored BLOB column.
+// These fixtures create only the base schema, matching migration output.
 // ---------------------------------------------------------------------------
 
 use zeroship_data_orm::backend::VectorMetric;
@@ -1935,275 +1898,6 @@ fn mk_unit_vec(i: usize, dims: usize) -> Vec<f32> {
     v
 }
 
-/// Stand in for the migration that ought to author a vector field's `vec0`
-/// shadow relation on SQLite: the virtual table plus the three AFTER triggers
-/// that mirror `(rowid, <col>)` into it.
-///
-/// The names are NOT invented here, and as of 2026-09-04 that sentence is TRUE.
-/// It was not before: this fixture carried its own `format!("{coll}__vec_{col}")`
-/// while claiming to take the names from the runtime descriptor, so it was a
-/// THIRD independent spelling agreeing with the data plane by luck. Both now
-/// come from [`engine_shadow_relation`], which renders the descriptor with the
-/// migration engine and reads `storage.auxiliary` out of it.
-///
-/// That is the whole binding for this pair. The engine is what physically
-/// creates every creator table, so the data plane's `vec_table_name` is a READER
-/// of a name the engine writes - and nothing compared the two. With the fixture
-/// derived from the engine, a divergence makes the search JOIN a relation that
-/// does not exist and every vector test below fails.
-/// [`the_search_really_depends_on_the_name_the_engine_records`] is the control
-/// that keeps that from being a claim about a test which would pass anyway.
-///
-/// The vec0 constructor rejects a double-quoted column identifier, so `column`
-/// is spliced unquoted -- the same constraint the deleted production builder
-/// carried. Test-local input only.
-///
-/// No initial-population statement: every caller creates the relation before
-/// inserting rows, so the triggers carry the whole payload.
-async fn create_vec0_shadow_relation(
-    backend: &SqliteBackend,
-    app: &str,
-    coll: &str,
-    column: &str,
-    dims: usize,
-    metric: &str,
-) {
-    let (vtab, triggers) = engine_shadow_relation(coll, column, dims, metric);
-    let (ai, ad, au) = (&triggers[0], &triggers[1], &triggers[2]);
-    for sql in [
-        format!(
-            "CREATE VIRTUAL TABLE IF NOT EXISTS \"{app}\".\"{vtab}\" \
-             USING vec0({column} float[{dims}] distance_metric={metric})"
-        ),
-        format!(
-            "CREATE TRIGGER IF NOT EXISTS \"{app}\".\"{ai}\" \
-             AFTER INSERT ON \"{app}\".\"{coll}\" \
-             WHEN NEW.\"{column}\" IS NOT NULL BEGIN \
-             INSERT INTO \"{vtab}\" (rowid, \"{column}\") \
-               VALUES (NEW.rowid, NEW.\"{column}\"); END"
-        ),
-        format!(
-            "CREATE TRIGGER IF NOT EXISTS \"{app}\".\"{ad}\" \
-             AFTER DELETE ON \"{app}\".\"{coll}\" BEGIN \
-             DELETE FROM \"{vtab}\" WHERE rowid = OLD.rowid; END"
-        ),
-        format!(
-            "CREATE TRIGGER IF NOT EXISTS \"{app}\".\"{au}\" \
-             AFTER UPDATE OF \"{column}\" ON \"{app}\".\"{coll}\" BEGIN \
-             DELETE FROM \"{vtab}\" WHERE rowid = OLD.rowid; \
-             INSERT INTO \"{vtab}\" (rowid, \"{column}\") \
-               SELECT NEW.rowid, NEW.\"{column}\" WHERE NEW.\"{column}\" IS NOT NULL; END"
-        ),
-    ] {
-        backend
-            .execute_fixture(&sql, &[])
-            .await
-            .unwrap_or_else(|e| panic!("vec0 shadow-relation fixture failed: {sql}: {e:?}"));
-    }
-}
-
-/// The minimum charter the descriptor renderer needs to run.
-///
-/// It is not the shipped ceiling and does not have to be: this reads the
-/// auxiliary-object NAMES a vector field owns, and injection shape does not
-/// reach them. `no_inject` is the same choice `gen_types`'s own physical-storage
-/// suite makes, for the same reason.
-const VECTOR_DESCRIPTOR_CHARTER: &str = r#"policy_version = 1
-
-[[grant]]
-key = "schema.create_table"
-value = true
-scope = "all"
-"#;
-
-/// The shadow relation and its three trigger names, AS THE MIGRATION ENGINE
-/// RECORDS THEM for a vector field on SQLite.
-///
-/// Rendered through the public `render_artifacts_from_descriptors` under the
-/// SQLite dialect and read back off `schema.runtime.json` - the same bytes a
-/// creator's generated descriptor carries, not a Rust struct the test could
-/// have built itself. Whether the shadow relation exists at all is a CAPABILITY
-/// question the engine asks of the target (`NonBtreeIndexMethod`), so this also
-/// fails loudly if SQLite ever stops owning one, instead of quietly returning a
-/// name for an object nobody makes.
-fn engine_shadow_relation(
-    collection: &str,
-    column: &str,
-    dims: usize,
-    metric: &str,
-) -> (String, Vec<String>) {
-    let effective = zeroship_migrate::effective_policy_from_charter_toml(VECTOR_DESCRIPTOR_CHARTER)
-        .expect("the fixture charter must compose");
-    let descriptors = [zeroship_migrate::CollectionDescriptor {
-        name: collection.to_string(),
-        owner_app: "app_fixture".to_string(),
-        fields: vec![zeroship_migrate::FieldDescriptor {
-            name: column.to_string(),
-            ty: "vector".to_string(),
-            vector_dims: Some(i64::try_from(dims).expect("test dims fit in i64")),
-            vector_metric: Some(metric.to_string()),
-            ..Default::default()
-        }],
-        indexes: Vec::new(),
-        runtime_options: Default::default(),
-    }];
-    let artifacts = zeroship_migrate::render_artifacts_from_descriptors(
-        zeroship_migrate::shipping_vendors(),
-        &descriptors,
-        &zeroship_migrate_sqlite::DIALECT,
-        zeroship_migrate::DEFAULT_PROJECT_SCHEMA,
-        &effective,
-    )
-    .expect("the migration engine must render a descriptor for a vector field");
-
-    let value: zeroship_data_sql::value::Value =
-        serde_json::from_str(&artifacts.runtime_json).expect("the runtime descriptor is JSON");
-    let auxiliary = value["collections"][collection]["fields"][column]["storage"]["auxiliary"]
-        .as_array()
-        .unwrap_or_else(|| {
-            panic!(
-                "a SQLite vector field must own a shadow relation in the descriptor: \
-                 {value}"
-            )
-        })
-        .clone();
-    assert_eq!(
-        auxiliary.len(),
-        1,
-        "expected exactly one auxiliary object for a vector field: {value}"
-    );
-    assert_eq!(auxiliary[0]["kind"], "shadowTable", "{value}");
-
-    let name = auxiliary[0]["name"]
-        .as_str()
-        .expect("the shadow relation is named")
-        .to_string();
-    let triggers: Vec<String> = auxiliary[0]["triggers"]
-        .as_array()
-        .expect("the shadow relation names its triggers")
-        .iter()
-        .map(|t| {
-            t.as_str()
-                .expect("each trigger name is a string")
-                .to_string()
-        })
-        .collect();
-    assert_eq!(
-        triggers.len(),
-        3,
-        "after-insert, after-delete and after-update, in that order: {value}"
-    );
-    (name, triggers)
-}
-
-/// The control for the binding above: the search really does depend on the name.
-///
-/// Every vector case below creates its shadow relation under the engine's name
-/// and then searches successfully. That proves agreement ONLY if a DISAGREEMENT
-/// would have failed - and a `JOIN` naming a missing relation is the kind of
-/// thing an engine can be lenient about. It is not: this creates the relation
-/// one character away from the engine's name, populates it identically, and the
-/// search refuses.
-///
-/// Without this arm, "the data plane joins the name the engine records" would
-/// rest on a test that could have passed for any name at all.
-#[test]
-fn the_search_really_depends_on_the_name_the_engine_records() {
-    run(async {
-        let (backend, _dir) = fresh_backend();
-        backend
-            .attach_app_file("vector_wrongname")
-            .await
-            .expect("ensure_app_schema");
-
-        let dims = 8usize;
-        backend
-            .execute_fixture(
-                &format!(
-                    "CREATE TABLE \"vector_wrongname\".\"docs\" (\
-                       id INTEGER PRIMARY KEY AUTOINCREMENT, \
-                       embedding BLOB CHECK(length(embedding) = 32) NOT NULL, \
-                       {SYSTEM_COLUMNS_SQLITE_TAIL}\
-                     )"
-                ),
-                &[],
-            )
-            .await
-            .expect("CREATE TABLE docs");
-        zeroship_data_orm::cache_schema_for_tests(
-            "vector_wrongname",
-            "docs",
-            zeroship_data_sql::value!({ "embedding": { "type": "vector", "vectorDims": 8 } }),
-        );
-
-        // The engine's name, with one byte changed. Everything else - the vec0
-        // declaration, the mirror trigger, the rows - is what the passing cases
-        // use.
-        let (engine_name, _) = engine_shadow_relation("docs", "embedding", dims, "cosine");
-        let wrong = format!("{engine_name}x");
-        for sql in [
-            format!(
-                "CREATE VIRTUAL TABLE \"vector_wrongname\".\"{wrong}\" \
-                 USING vec0(embedding float[{dims}] distance_metric=cosine)"
-            ),
-            format!(
-                "CREATE TRIGGER \"vector_wrongname\".\"{wrong}_ai\" \
-                 AFTER INSERT ON \"vector_wrongname\".\"docs\" \
-                 WHEN NEW.\"embedding\" IS NOT NULL BEGIN \
-                 INSERT INTO \"{wrong}\" (rowid, \"embedding\") \
-                   VALUES (NEW.rowid, NEW.\"embedding\"); END"
-            ),
-        ] {
-            backend
-                .execute_fixture(&sql, &[])
-                .await
-                .expect("misnamed fixture");
-        }
-        for i in 0..4usize {
-            let hex = vec_to_hex_lit(&mk_unit_vec(i, dims));
-            backend
-                .execute_fixture(
-                    &format!(
-                        "INSERT INTO \"vector_wrongname\".\"docs\" (embedding) VALUES ({hex})"
-                    ),
-                    &[],
-                )
-                .await
-                .expect("INSERT");
-        }
-
-        let err = backend
-            .vector_search(
-                None,
-                zeroship_data_orm::search::VectorSearch {
-                    binding: &DbBinding::cold_start("vector_wrongname"),
-                    collection: "docs",
-                    column: "embedding",
-                    query: &mk_unit_vec(0, dims),
-                    k: 4,
-                    metric: VectorMetric::Cosine,
-                    filter: &zeroship_data_sql::value::Value::Null,
-                    schema: &zeroship_data_orm::descriptor::collection_schema(
-                        &DbBinding::cold_start("vector_wrongname"),
-                        "docs",
-                    )
-                    .expect("descriptor slice for the control fixture"),
-                },
-            )
-            .await
-            .expect_err(
-                "the search must refuse when the shadow relation is not the one the \
-                 engine's descriptor names; if this succeeds, every vector case above \
-                 proves nothing about the name",
-            );
-        let message = format!("{err:?}");
-        assert!(
-            message.contains(&wrong) || message.contains(&engine_name),
-            "the refusal must name the relation it could not reach; got: {message}"
-        );
-    });
-}
-
 #[test]
 fn vector_search_returns_k_nearest_sqlite() {
     run(async {
@@ -2215,8 +1909,7 @@ fn vector_search_returns_k_nearest_sqlite() {
 
         // CREATE TABLE with the BLOB column the SDK's `t.vector(dims)`
         // lowering emits. The CHECK constraint pins the write-side
-        // dimension contract; vec0's own dimension check is the
-        // second line of defence (trigger-time).
+        // dimension contract at the canonical write surface.
         let dims = 8usize;
         backend
             .execute_fixture(
@@ -2237,16 +1930,6 @@ fn vector_search_returns_k_nearest_sqlite() {
             zeroship_data_sql::value!({ "embedding": { "type": "vector", "vectorDims": 8 } }),
         );
 
-        // Create the vec0 vtable + mirror triggers BEFORE inserting
-        // rows. With the triggers in place, every INSERT into the
-        // base table fans out into the vec0 index inside the same
-        // transaction; vector_search joins on rowid.
-        create_vec0_shadow_relation(&backend, "vector_topk", "docs", "embedding", 8, "cosine")
-            .await;
-
-        // Insert 100 deterministic unit vectors. Each INSERT fires
-        // the `docs__vec_embedding_ai` trigger which mirrors
-        // `(rowid, embedding)` into the vec0 index.
         for i in 0..100usize {
             let v = mk_unit_vec(i, dims);
             let hex = vec_to_hex_lit(&v);
@@ -2398,11 +2081,6 @@ fn vector_search_respects_filter_sqlite() {
             }),
         );
 
-        // Create vec0 + triggers BEFORE inserts so the mirror fires
-        // for every row.
-        create_vec0_shadow_relation(&backend, "vector_filter", "docs", "embedding", 4, "cosine")
-            .await;
-
         // Insert 10 rows in tenant "a" and 10 rows in tenant "b".
         // The first row of each tenant uses an identical query
         // vector so the filter discriminates BY tenant, not by
@@ -2459,10 +2137,7 @@ fn vector_search_respects_filter_sqlite() {
             .expect("vector_search with filter");
 
         assert!(!rows.is_empty(), "filter must not exclude every row");
-        assert!(
-            rows.len() <= 10,
-            "k=10 with 10 candidate rows yields at most 10 results"
-        );
+        assert_eq!(rows.len(), 10, "filter before ranking must fill the result from matching rows");
         for r in &rows {
             let tenant = r
                 .get("tenant")
@@ -2479,12 +2154,7 @@ fn vector_search_respects_filter_sqlite() {
 #[test]
 fn vector_l2_distance_matches_cosine_for_unit_vectors_sqlite() {
     // Sanity check on the math: for unit vectors, ||a-b||² = 2 * (1 - cos θ)
-    // = 2 * cos_distance. With vec0 the metric is pinned at vtable
-    // creation time, so we declare TWO vector columns (one cosine,
-    // one L2) sharing the same source rows. The two shadow-relation
-    // fixtures produce two paired vec0 vtables (`docs__vec_emb_cos` /
-    // `docs__vec_emb_l2`); the AFTER triggers mirror BOTH columns on
-    // every INSERT.
+    // = 2 * cos_distance. Search the same source rows under each metric.
     run(async {
         let (backend, _dir) = fresh_backend();
         backend
@@ -2515,8 +2185,6 @@ fn vector_l2_distance_matches_cosine_for_unit_vectors_sqlite() {
             }),
         );
 
-        create_vec0_shadow_relation(&backend, "vector_math", "docs", "emb_cos", 4, "cosine").await;
-        create_vec0_shadow_relation(&backend, "vector_math", "docs", "emb_l2", 4, "l2").await;
 
         let v1 = mk_unit_vec(0, 4);
         let v2 = mk_unit_vec(1, 4);
