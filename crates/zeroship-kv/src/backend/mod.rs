@@ -64,7 +64,7 @@ pub trait Backend: Send + Sync + std::fmt::Debug {
         ttl_ms: Option<u64>,
     ) -> Result<(), KvError>;
 
-    /// Delete — returns true when the key existed.
+    /// Delete — returns true when the key existed and had not expired.
     async fn delete(&self, app_id: &str, key: &str) -> Result<bool, KvError>;
 
     /// Atomic increment. Creates the key (value=0) if missing before
