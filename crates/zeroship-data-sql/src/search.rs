@@ -23,7 +23,7 @@
 //!
 //! | | `PostgreSQL` | `SQLite` |
 //! | --- | --- | --- |
-//! | vector | `"col" <=> $1::vector`, an operator on the base table | a JOIN to a `vec0` virtual table on `rowid`, ranked by `v.distance` |
+//! | vector | `"col" <=> $1::vector`, an operator on the base table | a scalar distance function on the base BLOB column |
 //! | geo | `ST_Distance(col, ST_MakePoint($1,$2)::geography)` | a haversine computed in Rust over a BLOB, sorted in the worker |
 //!
 //! Neither shape is expressible as the other with a different operator string,

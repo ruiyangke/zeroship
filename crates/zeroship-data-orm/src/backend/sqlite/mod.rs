@@ -67,15 +67,7 @@ pub mod session;
 // (`haversine_m`) and the `point_to_blob` / `blob_to_point` helpers
 // stay unit-testable in `spatial.rs`.
 pub mod spatial;
-// `sqlite-vec` vec0 vtable lifecycle + MATCH query composition.
-// Supersedes the earlier pure-Rust flat scan (see
-// `docs/archive/p4-search-implementation-plan.md` §10, 2026-05-24
-// reassessment). The `impl VectorIndex for SqliteBackend` block at
-// the bottom of this file orchestrates the five idempotent DDL
-// statements + the JOIN+MATCH search path; the SQL primitives
-// (`build_create_vec0_sql`, `build_*_trigger_sql`, `vec_to_le_bytes`)
-// live in `vector.rs` so the documented shapes stay unit-testable
-// in isolation.
+// SQLite vector metric validation.
 pub mod vector;
 // `session_minter` was the SQLite half of the HMAC session anchor. Its PG half
 // was deleted on 2026-08-27 under AGENTS.md's "privilege follows the PROCESS"
@@ -640,58 +632,10 @@ impl SqliteBackend {
 // `zeroship-data-v8/src/backend/mod.rs`, beside the PostgreSQL arm's.
 
 // ---------------------------------------------------------------------------
-// `VectorIndex` impl (sqlite-vec `vec0` virtual table)
-// ---------------------------------------------------------------------------
-//
-// Swapped from the earlier pure-Rust flat scan (the
-// original Q-P4-D decision in `docs/archive/p4-search-implementation-plan.md`
-// §10). Reassessment dated 2026-05-24 corrected the bundled-vs-`.so`
-// mistake: the `sqlite-vec` Rust crate compiles the C extension
-// statically and registers it via `sqlite3_auto_extension`
-// (`session::register_sqlite_vec_once`). NO `.so` ships; the
-// bundled-SQLite invariant (design §1) is preserved.
-//
-// Storage shape: each `t.vector(dims, { metric })` column gets a
-// paired vec0 virtual table `<coll>__vec_<col>`, declared with the
-// engine-native `float[<dims>]` element type + `distance_metric=`
-// configuration. AFTER triggers mirror `(rowid, <col>)` into the
-// vec0 table on INSERT/UPDATE/DELETE; the base table still holds the
-// canonical write surface (a `BLOB` column) so the SDK's regular
-// INSERT path lands writes there, the CDC preupdate hook observes
-// them, and the trigger fans the row out to the vec0 index.
-//
-// One method: `vector_search` — emits a JOIN against the vec0 vtable on
-// rowid, MATCHes the query vector through vec0's KNN operator, orders by
-// `v.distance`, applies the filter via the standard `build_find`
-// machinery, and decodes the result rows through the session actor's
-// `query_typed` path. Inner-product is rejected up front via
-// [`vector::reject_inner_product`] — vec0 supports cosine + L2 only.
-//
-// **This arm does NOT create the vec0 vtable or its mirror triggers, and
-// nothing else in the tree does either.** `ensure_vector_index` used to,
-// behind `#[cfg(any(test, feature = "test-helpers"))]`, so it never ran
-// in a shipped binary; it is deleted rather than kept as data-plane DDL.
-// The runtime descriptor NAMES the shadow relation and its three triggers
-// (`AuxiliaryObject::ShadowTable`, `zeroship-migrate-core/src/render/
-// gen_types.rs:219` and `auxiliary_objects` at `:255`), which the JOIN
-// below relies on, but the engine emits no DDL for it: the SQLite renderer
-// folds a vector field's index to a plain B-tree
-// (`zeroship-migrate-sqlite/src/schema.rs:98`), and the engine states outright
-// that it never authors a virtual table
-// (`zeroship-migrate-backend/src/error.rs:270`). So `vector_search` on SQLite
-// fails with "no such table" against any database the migration engine
-// produced. That gap is REAL and PRE-EXISTING.
-//
-// One thing the engine DOES get right about it already: on a vec0 vtable it
-// finds live but undeclared, the drop pass fails closed with
-// `DropOfVirtualTable` (`error.rs:291`) rather than cascading the shadow
-// tables away. So authoring the relation is the only half still missing - a
-// migration that creates it will not be undone by the next diff.
-//
-// **Trigger-vs-preupdate-hook coexistence** (Q-P4-F): preupdate fires
-// BEFORE the row mutation, AFTER triggers fire after, both run inside
-// the same transaction. The broker sees the base-row event with the
-// vec0 index already updated at COMMIT time.
+// Vector search uses sqlite-vec's scalar distance functions on the base BLOB
+// column. The extension is linked statically and registered by the session
+// host. SQLite development requires no extra tables or triggers; the ORM
+// applies filters before ranking on the captured transaction or autocommit lane.
 
 impl SqliteBackend {
     /// Borrow this isolate's column-encryption key store.

@@ -201,7 +201,7 @@ fixture:dialectal_ops|Postgres|field|docs|updated_by|{"type":"string","maxLength
 fixture:dialectal_ops|Postgres|field|docs|version|{"type":"int","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"version"}}
 fixture:dialectal_ops|Postgres|field|docs|deleted_at|{"type":"date","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"deleted_at"}}
 fixture:dialectal_ops|Postgres|field|docs|embedding|{"type":"vector","vectorDims":3,"vectorMetric":"cosine","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"embedding"}}
-fixture:dialectal_ops|Sqlite|sha|runtime.json|f0cb16a255550ddccf1b3303116d9eb3c14f884fc3f0a7e0844c53d00e520ed3
+fixture:dialectal_ops|Sqlite|sha|runtime.json|46bd761f1ab6088f3dbe0bb478fa4f61648e00a3afdef05812f5c4b5e837ee7c
 fixture:dialectal_ops|Sqlite|sha|env.db.ts|a5ce483ecc6079bc4c0ae56a34095838edd39f5866006075b4905b0b4e4084ef
 fixture:dialectal_ops|Sqlite|field|docs|id|{"type":"string","maxLength":255,"required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"}}
 fixture:dialectal_ops|Sqlite|field|docs|created_at|{"type":"date","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"created_at"}}
@@ -210,9 +210,9 @@ fixture:dialectal_ops|Sqlite|field|docs|created_by|{"type":"string","maxLength":
 fixture:dialectal_ops|Sqlite|field|docs|updated_by|{"type":"string","maxLength":255,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"updated_by"}}
 fixture:dialectal_ops|Sqlite|field|docs|version|{"type":"int","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"version"}}
 fixture:dialectal_ops|Sqlite|field|docs|deleted_at|{"type":"date","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"deleted_at"}}
-fixture:dialectal_ops|Sqlite|field|docs|embedding|{"type":"vector","vectorDims":3,"vectorMetric":"cosine","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"embedding","auxiliary":[{"kind":"shadowTable","name":"docs__vec_embedding","joinOn":"rowid","triggers":["docs__vec_embedding_ai","docs__vec_embedding_ad","docs__vec_embedding_au"]}]}}
+fixture:dialectal_ops|Sqlite|field|docs|embedding|{"type":"vector","vectorDims":3,"vectorMetric":"cosine","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"embedding"}}
 fixture:dialectal_ops|Sqlite|sqlite_create_refused|docs|reserved system field name: Field name 'id' is reserved by the active table-injection policy. Injected fields (id, created_at, updated_at, created_by, updated_by, version, deleted_at) are managed by the platform and cannot be overridden.
-fixture:dialectal_ops|Mysql|sha|runtime.json|f0cb16a255550ddccf1b3303116d9eb3c14f884fc3f0a7e0844c53d00e520ed3
+fixture:dialectal_ops|Mysql|sha|runtime.json|46bd761f1ab6088f3dbe0bb478fa4f61648e00a3afdef05812f5c4b5e837ee7c
 fixture:dialectal_ops|Mysql|sha|env.db.ts|a5ce483ecc6079bc4c0ae56a34095838edd39f5866006075b4905b0b4e4084ef
 fixture:dialectal_ops|Mysql|field|docs|id|{"type":"string","maxLength":255,"required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"}}
 fixture:dialectal_ops|Mysql|field|docs|created_at|{"type":"date","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"created_at"}}
@@ -221,7 +221,7 @@ fixture:dialectal_ops|Mysql|field|docs|created_by|{"type":"string","maxLength":2
 fixture:dialectal_ops|Mysql|field|docs|updated_by|{"type":"string","maxLength":255,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"updated_by"}}
 fixture:dialectal_ops|Mysql|field|docs|version|{"type":"int","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"version"}}
 fixture:dialectal_ops|Mysql|field|docs|deleted_at|{"type":"date","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"deleted_at"}}
-fixture:dialectal_ops|Mysql|field|docs|embedding|{"type":"vector","vectorDims":3,"vectorMetric":"cosine","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"embedding","auxiliary":[{"kind":"shadowTable","name":"docs__vec_embedding","joinOn":"rowid","triggers":["docs__vec_embedding_ai","docs__vec_embedding_ad","docs__vec_embedding_au"]}]}}
+fixture:dialectal_ops|Mysql|field|docs|embedding|{"type":"vector","vectorDims":3,"vectorMetric":"cosine","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"embedding"}}
 fixture:dml|Postgres|sha|runtime.json|02fde4bafc1d28049ed4d9512bacaf1ba4e7227ac95dd593317af4d431313303
 fixture:dml|Postgres|sha|env.db.ts|fc1ee08c12a48d34c16022ac48da4a8bc9a73cb8c430caf3fb2015f90ac041c9
 fixture:dml|Sqlite|sha|runtime.json|02fde4bafc1d28049ed4d9512bacaf1ba4e7227ac95dd593317af4d431313303
@@ -343,7 +343,7 @@ fixture:p2a_facets|Postgres|field|posts|deleted_at|{"type":"date","readable":tru
 fixture:p2a_facets|Postgres|field|posts|title|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"title"}}
 fixture:p2a_facets|Postgres|field|posts|embedding|{"type":"vector","vectorDims":1536,"vectorMetric":"cosine","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"embedding"}}
 fixture:p2a_facets|Postgres|field|posts|secondary_embedding|{"type":"vector","vectorDims":768,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"secondary_embedding"}}
-fixture:p2a_facets|Sqlite|sha|runtime.json|6bbe95514a5e60fd779beda29057d35b2fc279fe061bc3f8c270e0fbcdb0a215
+fixture:p2a_facets|Sqlite|sha|runtime.json|00ddc916e29275c788cb0bd39226138f35ec82f16d2a3d22a90d9a346a26cf66
 fixture:p2a_facets|Sqlite|sha|env.db.ts|7323fc56b70e3502d57fdf81357dd91ad82011f009953a9a1dfad895bc3d8647
 fixture:p2a_facets|Sqlite|field|posts|id|{"type":"string","maxLength":255,"required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"}}
 fixture:p2a_facets|Sqlite|field|posts|created_at|{"type":"date","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"created_at"}}
@@ -353,10 +353,10 @@ fixture:p2a_facets|Sqlite|field|posts|updated_by|{"type":"string","maxLength":25
 fixture:p2a_facets|Sqlite|field|posts|version|{"type":"int","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"version"}}
 fixture:p2a_facets|Sqlite|field|posts|deleted_at|{"type":"date","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"deleted_at"}}
 fixture:p2a_facets|Sqlite|field|posts|title|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"title"}}
-fixture:p2a_facets|Sqlite|field|posts|embedding|{"type":"vector","vectorDims":1536,"vectorMetric":"cosine","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"embedding","auxiliary":[{"kind":"shadowTable","name":"posts__vec_embedding","joinOn":"rowid","triggers":["posts__vec_embedding_ai","posts__vec_embedding_ad","posts__vec_embedding_au"]}]}}
-fixture:p2a_facets|Sqlite|field|posts|secondary_embedding|{"type":"vector","vectorDims":768,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"secondary_embedding","auxiliary":[{"kind":"shadowTable","name":"posts__vec_secondary_embedding","joinOn":"rowid","triggers":["posts__vec_secondary_embedding_ai","posts__vec_secondary_embedding_ad","posts__vec_secondary_embedding_au"]}]}}
+fixture:p2a_facets|Sqlite|field|posts|embedding|{"type":"vector","vectorDims":1536,"vectorMetric":"cosine","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"embedding"}}
+fixture:p2a_facets|Sqlite|field|posts|secondary_embedding|{"type":"vector","vectorDims":768,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"secondary_embedding"}}
 fixture:p2a_facets|Sqlite|sqlite_create_refused|posts|reserved system field name: Field name 'id' is reserved by the active table-injection policy. Injected fields (id, created_at, updated_at, created_by, updated_by, version, deleted_at) are managed by the platform and cannot be overridden.
-fixture:p2a_facets|Mysql|sha|runtime.json|6bbe95514a5e60fd779beda29057d35b2fc279fe061bc3f8c270e0fbcdb0a215
+fixture:p2a_facets|Mysql|sha|runtime.json|00ddc916e29275c788cb0bd39226138f35ec82f16d2a3d22a90d9a346a26cf66
 fixture:p2a_facets|Mysql|sha|env.db.ts|7323fc56b70e3502d57fdf81357dd91ad82011f009953a9a1dfad895bc3d8647
 fixture:p2a_facets|Mysql|field|posts|id|{"type":"string","maxLength":255,"required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"}}
 fixture:p2a_facets|Mysql|field|posts|created_at|{"type":"date","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"created_at"}}
@@ -366,8 +366,8 @@ fixture:p2a_facets|Mysql|field|posts|updated_by|{"type":"string","maxLength":255
 fixture:p2a_facets|Mysql|field|posts|version|{"type":"int","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"version"}}
 fixture:p2a_facets|Mysql|field|posts|deleted_at|{"type":"date","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"deleted_at"}}
 fixture:p2a_facets|Mysql|field|posts|title|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"title"}}
-fixture:p2a_facets|Mysql|field|posts|embedding|{"type":"vector","vectorDims":1536,"vectorMetric":"cosine","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"embedding","auxiliary":[{"kind":"shadowTable","name":"posts__vec_embedding","joinOn":"rowid","triggers":["posts__vec_embedding_ai","posts__vec_embedding_ad","posts__vec_embedding_au"]}]}}
-fixture:p2a_facets|Mysql|field|posts|secondary_embedding|{"type":"vector","vectorDims":768,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"secondary_embedding","auxiliary":[{"kind":"shadowTable","name":"posts__vec_secondary_embedding","joinOn":"rowid","triggers":["posts__vec_secondary_embedding_ai","posts__vec_secondary_embedding_ad","posts__vec_secondary_embedding_au"]}]}}
+fixture:p2a_facets|Mysql|field|posts|embedding|{"type":"vector","vectorDims":1536,"vectorMetric":"cosine","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"embedding"}}
+fixture:p2a_facets|Mysql|field|posts|secondary_embedding|{"type":"vector","vectorDims":768,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"secondary_embedding"}}
 fixture:partition|Postgres|refused|gen-types: fold the declared ops into a schema failed: fold: table `events_2026_05` does not exist
 fixture:partition|Sqlite|refused|gen-types: fold the declared ops into a schema failed: fold: table `events_2026_05` does not exist
 fixture:partition|Mysql|refused|gen-types: fold the declared ops into a schema failed: fold: table `events_2026_05` does not exist

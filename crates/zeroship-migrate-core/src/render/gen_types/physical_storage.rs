@@ -289,87 +289,24 @@ fn the_recorded_columns_are_the_ddl_emitters_own_names() {
     }
 }
 
-/// Auxiliary physical objects a field owns round-trip through the artifact.
-///
-/// A `vector` column on a target that cannot express a non-B-tree index method is
-/// searched through a shadow relation joined on `rowid`; the data plane names that
-/// relation by formatting `"{collection}__vec_{column}"`. Recording it makes the
-/// descriptor the authority for the name instead of the fifth independent `format!`.
-///
-/// The fixture drives the target through the registry rather than by name: SQLITE is
-/// used because it is a target that does NOT declare `Capability::NonBtreeIndexMethod`,
-/// and the control arm below pins that a target which DOES declare it owns no shadow
-/// relation at all.
+/// Vector storage describes the column migrations actually create.
 #[test]
-fn auxiliary_physical_objects_round_trip() {
-    let embedding = FieldDescriptor {
-        name: "embedding".to_string(),
-        ty: "vector".to_string(),
-        vector_dims: Some(3),
-        vector_metric: Some("cosine".to_string()),
-        ..Default::default()
-    };
-    let value = descriptor_for(vec![embedding], &SQLITE);
-    let storage = &value["collections"]["people"]["fields"]["embedding"]["storage"];
-
-    let auxiliary = storage["auxiliary"]
-        .as_array()
-        .unwrap_or_else(|| panic!("a sqlite vector column owns auxiliary objects: {value}"));
-    assert_eq!(auxiliary.len(), 1, "{value}");
-    assert_eq!(auxiliary[0]["kind"], "shadowTable", "{value}");
-    assert_eq!(auxiliary[0]["name"], "people__vec_embedding", "{value}");
-    assert_eq!(auxiliary[0]["joinOn"], "rowid", "{value}");
-    assert_eq!(
-        auxiliary[0]["triggers"],
-        json!([
-            "people__vec_embedding_ai",
-            "people__vec_embedding_ad",
-            "people__vec_embedding_au"
-        ]),
-        "{value}"
-    );
-
-    let reparsed: Value =
-        serde_json::from_str(&serde_json::to_string(&value).expect("descriptor reserializes"))
-            .expect("descriptor reparses");
-    assert_eq!(
-        reparsed["collections"]["people"]["fields"]["embedding"]["storage"]["auxiliary"],
-        storage["auxiliary"],
-        "auxiliary survives the round trip: {reparsed}"
-    );
-}
-
-/// A field with no auxiliary objects emits no empty array.
-#[test]
-fn a_field_owning_no_auxiliary_objects_emits_no_auxiliary_key() {
-    let value = descriptor_for(vec![plain("nickname")], &POSTGRES);
-    let storage = &value["collections"]["people"]["fields"]["nickname"]["storage"];
-    assert!(storage.get("auxiliary").is_none(), "{value}");
-}
-
-/// The CONTROL for `auxiliary_physical_objects_round_trip`, differing in exactly one
-/// variable: the same vector column, on a target that DOES declare
-/// `Capability::NonBtreeIndexMethod`, owns no shadow relation.
-///
-/// Without this arm the round-trip test above would pass just as well if the producer
-/// emitted a shadow table for every vector column on every target, which is the bug the
-/// capability gate exists to prevent.
-#[test]
-fn a_vector_column_on_a_target_with_native_vector_indexing_owns_no_shadow_table() {
-    let embedding = FieldDescriptor {
-        name: "embedding".to_string(),
-        ty: "vector".to_string(),
-        vector_dims: Some(3),
-        vector_metric: Some("cosine".to_string()),
-        ..Default::default()
-    };
-    let value = descriptor_for(vec![embedding], &POSTGRES);
-    let storage = &value["collections"]["people"]["fields"]["embedding"]["storage"];
-    assert_eq!(storage["valueColumn"], "embedding", "{value}");
-    assert!(
-        storage.get("auxiliary").is_none(),
-        "a target that indexes a vector column in place owns no extra object: {value}"
-    );
+fn vector_storage_is_the_base_column_on_each_target() {
+    for dialect in [&SQLITE, &POSTGRES] {
+        let embedding = FieldDescriptor {
+            name: "embedding".to_string(),
+            ty: "vector".to_string(),
+            vector_dims: Some(3),
+            vector_metric: Some("cosine".to_string()),
+            ..Default::default()
+        };
+        let value = descriptor_for(vec![embedding], dialect);
+        assert_eq!(
+            value["collections"]["people"]["fields"]["embedding"]["storage"],
+            json!({"valueColumn": "embedding"}),
+            "{value}"
+        );
+    }
 }
 
 /// The descriptor announces itself as v2.
@@ -429,26 +366,4 @@ fn the_typed_storage_block_survives_a_serde_round_trip() {
     }
     assert_eq!(seen_raw, 1, "the masked field must exercise the raw arm");
     assert_eq!(seen_plain, 1, "the plain field must exercise the no-raw arm");
-}
-
-/// The auxiliary vocabulary round-trips as a TYPED value, tag included.
-#[test]
-fn the_typed_auxiliary_vocabulary_survives_a_serde_round_trip() {
-    let original = AuxiliaryObject::ShadowTable {
-        name: "people__vec_embedding".to_string(),
-        join_on: "rowid".to_string(),
-        triggers: vec![
-            "people__vec_embedding_ai".to_string(),
-            "people__vec_embedding_ad".to_string(),
-            "people__vec_embedding_au".to_string(),
-        ],
-    };
-    let bytes = serde_json::to_string(&original).expect("auxiliary serializes");
-    assert!(
-        bytes.contains("\"kind\":\"shadowTable\""),
-        "the variant tag rides on the wire: {bytes}"
-    );
-    let back: AuxiliaryObject =
-        serde_json::from_str(&bytes).expect("auxiliary deserializes");
-    assert_eq!(back, original);
 }
