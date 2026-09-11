@@ -1,42 +1,13 @@
-//! The dedicated, hardened, CDC-free migration connection actor.
+//! Hardened SQLite connection actor for migration work.
 //!
-//! `SqliteBackend` does NOT reuse plugin-db's data-plane `SqliteSession` (which
-//! auto-loads `vec0` process-globally, installs CDC hooks, and multiplexes the
-//! data plane). It owns a **thin migration-only sibling actor**: the same
-//! zero-tokio shape (a dedicated OS thread owns the single `rusqlite::Connection`
-//! and drains a `flume` queue; callers `await` a `flume` reply), but the
-//! connection is opened with the **migration-hardening profile** and is
-//! migration-private (no CDC, no data-plane sharing).
+//! The app file is opened as `main`; an existing journal is attached as `_mig`
+//! before installing the authorizer. Creator SQL cannot attach databases or change
+//! connection hardening. Journal bootstrap replaces the connection when attachment
+//! is needed.
 //!
-//! # Open sequence
-//!
-//! ```text
-//! 0. open the APP FILE as the connection's MAIN db (the creator `up` lands here)
-//! 0. ATTACH an existing journal as `_mig`, or leave it unattached when absent
-//! 1. pin both databases to DELETE rollback journals + FULL synchronous;
-//!    PRAGMA foreign_keys = ON
-//! 2. conn.load_extension_disable -- real rusqlite API (not a DbConfig)
-//! 3. set_db_config(DEFENSIVE, true)
-//! 4. set_db_config(TRUSTED_SCHEMA, false)
-//! 5. set_db_config(DQS_DDL, false)
-//! 6. set_db_config(DQS_DML, false)
-//! 7. conn.authorizer(Some(callback)) -- LAST, before any creator SQL
-//! ```
-//!
-//! After step 7, ATTACH/DETACH are denied for the connection's life. A fresh
-//! read-only status connection therefore has only `main`. Journal bootstrap
-//! replaces it with a newly hardened connection that attached `_mig` before its
-//! authorizer was installed. A connection never executes ATTACH after hardening.
-//!
-//! # Why `main` IS the app file (not `:memory:`, not a double-ATTACH)
-//!
-//! The app file is the connection's **main** database, so an UNqualified creator
-//! `CREATE TABLE users(...)` lands in - and PERSISTS to - the app file. We do NOT
-//! ATTACH the app file a second time: opening the same file as both `main` and an
-//! `app` alias would open it TWICE on one connection, and `BEGIN IMMEDIATE` would
-//! deadlock the two handles against each other on the file's RESERVED lock. With
-//! `main` = the app file there is exactly ONE handle on it, plus ONE on `_mig`, so
-//! a single-connection `BEGIN IMMEDIATE` takes their RESERVED locks cleanly.
+//! Connections use the migration journal and durability settings and do not share
+//! runtime CDC hooks or ORM sessions. Opening the app file only as `main` avoids
+//! self-contention from attaching the same file again.
 
 use std::path::{Path, PathBuf};
 

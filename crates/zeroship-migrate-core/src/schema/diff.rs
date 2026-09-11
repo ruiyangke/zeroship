@@ -1,34 +1,8 @@
-//! Schema diff engine.
+//! Classify differences between declared fields and live schema metadata.
 //!
-//! Compares a desired (declared) schema against the live `pg_catalog`
-//! state and classifies each change into **additive** (auto-apply),
-//! **compatible** (auto-apply, may need a validation backfill), or
-//! **destructive** (refused; surfaces a `validation_refused` envelope).
-//!
-//! The engine intentionally does not run any DDL on its own - it returns
-//! a `Vec<DiffOp>` that an orchestrator sequences with the advisory lock,
-//! audit writes, and validation pass.
-//!
-//! The platform migration service owns that orchestration. This module remains
-//! the classifier it consumes and does not execute a diff by itself.
-//!
-//! No line number sits on that citation, deliberately. A coordinate into a
-//! repository this one does not build cannot be kept true, and the reader who
-//! follows a stale one lands on unrelated code believing they arrived. The date is
-//! what makes the claim checkable; the function name is what makes it findable.
-//!
-//! ## Volatile-default trap
-//!
-//! Proposal A2 line 120: Postgres' fast-path `ALTER TABLE ADD COLUMN
-//! NOT NULL DEFAULT 'literal'` is metadata-only, but a volatile or
-//! stable default (`DEFAULT NOW()`, `DEFAULT gen_random_uuid()`) forces
-//! a full table rewrite under `ACCESS EXCLUSIVE`. The classifier inspects
-//! `pg_get_expr` + `pg_proc.provolatile`: only `'i'` (immutable) takes the
-//! fast path; `'v'` and `'s'` escalate to destructive. What this module applies
-//! is a literal-only heuristic on declared defaults, which is sound because the
-//! engine never emits a volatile default - `default()` values are JS literals. A
-//! real `pg_get_expr` inspection would read the live catalog over the
-//! `driver::SqlSession` seam, the way the rest of the engine introspects.
+//! The result describes additive, compatible and destructive changes for migration
+//! planning. This module does not execute SQL or run backfills. Default-expression
+//! classification distinguishes literal defaults from values requiring evaluation.
 
 use serde_json::Value;
 use zeroship_migrate_backend::registry::VendorSet;
@@ -36,13 +10,7 @@ use zeroship_migrate_ir::dialect::DialectId;
 
 use crate::model::table_shape::ResolvedInject;
 
-/// Classification per the three-bucket split.
-///
-/// The `as_audit()` conversion to plugin-db's audit-row enum lives in
-/// plugin-db (`impl From<ChangeClass> for audit::ChangeClass`), not here:
-/// the audit enum is a data-plane lifecycle type and this schema layer must
-/// not reach into it. Schema-layer code that needs the audit value calls
-/// the conversion at the plugin-db boundary.
+/// Classify a schema change for apply, backfill or refusal decisions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChangeClass {
     /// Add column nullable, add index, relax constraint - auto-apply.
@@ -110,11 +78,7 @@ pub enum ChangeKind {
         kind: MaskKind,
         classification: Classification,
     },
-    /// Rewrite the sibling `<col>_masked` column when
-    /// an existing masked column's `.mask({...})` kind or classification
-    /// changes. Touches every row (no IS NULL filter); the sibling
-    /// column already exists + is NOT NULL so no schema mutation is
-    /// needed. Driven by the data plane's `run_mask_rewrite`.
+    /// A mask strategy or classification changed and requires rewriting stored masks.
     MaskRewrite {
         collection: String,
         column: String,
@@ -126,11 +90,7 @@ pub enum ChangeKind {
         new_kind: MaskKind,
         classification: Classification,
     },
-    /// Drop the sibling `<col>_masked` column when an
-    /// existing masked column loses its `.mask({...})` declaration (or
-    /// switches to `kind: "none"`). Classified `Destructive`; the
-    /// validate stage refuses it under `strictness == "strict"` and
-    /// `strictness == "lenient"`, applies under `strictness == "off"`.
+    /// Removing an effective mask is classified as destructive.
     MaskRemove { collection: String, column: String },
     /// A column's physical storage type changed on an **existing**
     /// column - the declared SDK type maps to a different SQL type than
@@ -242,38 +202,14 @@ pub struct ColumnInfo {
         reason = "This metadata is exported for test-helper diff assertions and future live-schema consumers beyond the current release path."
     )]
     pub is_geopoint: bool,
-    /// Column-encryption metadata when the SDK
-    /// declared the column with `t.encrypted(...)`. `None` for every
-    /// existing column (the default); the PG
-    /// side is populated from the `<meta>.encrypted_columns` metadata table; the
-    /// SQLite side via regex on `sqlite_master.sql` for the
-    /// sentinel CHECK comment. Stays `None` in the default-feature
-    /// build because no consumer wires the field yet.
+    /// Encryption metadata recovered from the column's stored sentinel.
     #[allow(
         dead_code,
         reason = "This metadata is exported for test-helper diff assertions and future live-schema consumers beyond the current release path."
     )]
     pub encryption: Option<EncryptionMeta>,
-    /// Column-mask metadata when the SDK declared the
-    /// column with `t.string().mask(...)` or `t.encrypted(...)` (the
-    /// latter auto-populating `mask = { kind: "full", classification:
-    /// "pii" }` at schema-normalisation time when no explicit `.mask()`
-    /// is chained). `None` for every existing column by default.
-    ///
-    /// Path B (sibling-column-based, resolved 2026-05-24): when
-    /// `mask` is `Some(_)`, the platform emits a hidden
-    /// `<col>_masked` sibling column at CREATE TABLE time,
-    /// reads route through `<col>_masked AS <col>` aliasing,
-    /// and writes dual-bind both columns atomically. The
-    /// sibling column is NEVER part of the creator-visible SDK
-    /// surface - `Row<S>` only contains the parent column wrapped
-    /// in `MaskedValue<T>`.
-    ///
-    /// Live-schema introspection on PG/SQLite does NOT populate this from
-    /// existing tables: nothing runs the sibling-column-existence check or
-    /// parses the sentinel comment, so `mask` always reads as `None` from live
-    /// introspection. The diff classifier treats schema-mask against
-    /// live-no-mask as Recoverable Additive (the mask backfill is safe to apply).
+    /// Mask metadata recovered from the visible column's sentinel.
+    /// It describes the strategy, classification and protected raw column.
     pub mask: Option<MaskMeta>,
 }
 
@@ -955,11 +891,7 @@ pub(crate) fn mask_meta_from_schema_def(def: &Value) -> Option<MaskMeta> {
         .and_then(|v| v.as_str())
         .unwrap_or("pii");
     let classification = Classification::from_sql(class_str)?;
-    // The sibling is always `<field>_masked` - the schema_def doesn't
-    // carry the field name, so the helper returns `String::new()` here
-    // and callers that need the sibling name format it from the field
-    // name themselves. We keep the field on `MaskMeta` so
-    // the live-introspection round-trip carries the same shape.
+    // The field name is supplied by the caller when a physical column name is needed.
     Some(MaskMeta {
         kind,
         classification,

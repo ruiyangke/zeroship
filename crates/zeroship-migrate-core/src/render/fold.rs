@@ -1938,11 +1938,7 @@ impl<'a> CatalogFold<'a> {
                         column: column.clone(),
                     });
                 }
-                // Thread the carried facets so the SNAPSHOT for a vector
-                // / masked added column renders the metric opclass / `zero-migrate:mask` sentinel
-                // (this snapshot feeds the `--sql` plan preview + the apply path), and grow
-                // the `<col>_masked` sibling for a masked column so the offline fold matches
-                // the live apply.
+                // Include any protected raw column emitted for the added field.
                 let resolved_ty = resolve_encrypted_inner_domain(ty, named_types);
                 let ty = resolved_ty.as_ref().unwrap_or(ty);
                 let (col, masked_sibling) = add_column_snapshot(
@@ -3612,18 +3608,9 @@ fn create_table_descriptor(
     }
 }
 
-/// The `ColumnSnapshot`(s) for a single added field - routes ONE field through the
-/// shared resolved snapshot builder (a one-field descriptor) and pulls the matching
-/// column out, so the default / encryption / comment sentinel is built by the shared
-/// kernel, never re-spelled. The table's active policy injection is explicit, but
-/// the one-field descriptor never matches its complete resolved prefix, so no
-/// column is injected or reshaped. Mirrors `IrAuthor::add_column_snapshot_with_sibling`.
-///
-/// Returns the MAIN column plus the hidden `<col>_masked TEXT` sibling the
-/// shared builder injects for a masked column, so the OFFLINE fold snapshot grows the
-/// SAME sibling the live apply path does (otherwise `fold_ops` would phantom-drift
-/// against the introspected live table for a masked added column). A non-masked column
-/// returns `(main, None)`.
+/// Build snapshots for an added field through the shared schema renderer.
+/// Masked fields include the protected raw column so folded and applied storage
+/// agree. Unmasked fields return no companion column.
 #[allow(clippy::too_many_arguments)]
 fn add_column_snapshot(
     vendors: VendorSet,
