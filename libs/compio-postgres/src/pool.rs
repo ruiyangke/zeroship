@@ -3740,7 +3740,7 @@ mod tests {
     /// queued since the previous one.
     fn queued_rollbacks(receiver: &mut mpsc::UnboundedReceiver<Request>) -> usize {
         let mut rollbacks = 0;
-        while let Ok(Some(request)) = receiver.try_next() {
+        while let Ok(request) = receiver.try_recv() {
             if let RequestMessages::Single(FrontendMessage::Raw(bytes)) = &request.messages
                 && bytes.windows(b"ROLLBACK".len()).any(|w| w == b"ROLLBACK")
             {
