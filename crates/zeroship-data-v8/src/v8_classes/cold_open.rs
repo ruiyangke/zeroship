@@ -142,7 +142,7 @@ fn cold_collection<'s>(
     app_id: &str,
     name: &str,
 ) -> v8::Local<'s, v8::Object> {
-    super::collection::mint_collection(scope, name.to_string(), DbBinding::cold_start(app_id))
+    super::collection::mint_collection(scope, name.to_string(), crate::testing::binding(app_id))
         .expect("mint_collection")
 }
 
@@ -182,7 +182,7 @@ fn a_bulk_unmask_dispatch_opens_the_cold_isolates_backend() {
 fn mask_policy_install_does_not_open_a_database() {
     let dir = cold_sqlite_isolate();
     cold_isolate!(let scope, let state);
-    let binding = DbBinding::cold_start("app_cold_policy");
+    let binding = crate::testing::binding("app_cold_policy");
     let platform = super::db_platform::mint_db_platform(scope, binding.clone()).unwrap();
     let policy = js_json(scope, r#"{ "support": ["spi"] }"#);
     call_js_method(scope, platform, "setMaskPolicy", &[policy]);
@@ -191,11 +191,11 @@ fn mask_policy_install_does_not_open_a_database() {
     assert!(rejection_code(&settled[0]).is_none());
     assert!(crate::context::with(|context| context.backend()).is_none());
     assert!(std::fs::read_dir(dir.path()).unwrap().next().is_none());
-    assert!(
-        zeroship_data_orm::protection::mask_policy::cache_get(&binding)
-            .unwrap()
-            .allows("support", "spi")
-    );
+    zeroship_data_orm::protection::mask_policy::install_mask_policy(
+        &binding,
+        zeroship_data_sql::value!({ "support": ["spi"] }),
+    )
+    .expect("V8 installed this policy");
 
     let changed = js_json(scope, r#"{ "support": ["pii"] }"#);
     call_js_method(scope, platform, "setMaskPolicy", &[changed]);
@@ -209,20 +209,23 @@ fn mask_policy_install_does_not_open_a_database() {
     call_js_method(scope, next_platform, "setMaskPolicy", &[changed]);
     let settled = settle_pushed_ops(&state);
     assert!(rejection_code(&settled[0]).is_none());
+    zeroship_data_orm::protection::mask_policy::install_mask_policy(
+        &next,
+        zeroship_data_sql::value!({ "support": ["pii"] }),
+    )
+    .expect("V8 installed this policy");
+    zeroship_data_orm::protection::mask_policy::install_mask_policy(
+        &binding,
+        zeroship_data_sql::value!({ "support": ["spi"] }),
+    )
+    .expect("V8 installed this policy");
     assert!(
-        zeroship_data_orm::protection::mask_policy::cache_get(&next)
-            .unwrap()
-            .allows("support", "pii")
-    );
-    assert!(
-        zeroship_data_orm::protection::mask_policy::cache_get(&binding)
-            .unwrap()
-            .allows("support", "spi")
-    );
-    assert!(
-        !zeroship_data_orm::protection::mask_policy::cache_get(&binding)
-            .unwrap()
-            .allows("support", "pii")
+        zeroship_data_orm::protection::mask_policy::install_mask_policy(
+            &binding,
+            zeroship_data_sql::value!({ "support": ["pii"] })
+        )
+        .is_err(),
+        "the pinned policy remains immutable"
     );
     assert!(crate::context::with(|context| context.backend()).is_none());
     assert!(std::fs::read_dir(dir.path()).unwrap().next().is_none());
@@ -237,7 +240,7 @@ fn a_masked_value_unmask_opens_the_cold_isolates_backend() {
 
     let masked = super::masked_value::mint_masked_value(
         scope,
-        DbBinding::cold_start("app_cold_mv"),
+        crate::testing::binding("app_cold_mv"),
         "users".to_string(),
         "usr_01".to_string(),
         "ssn".to_string(),
@@ -263,7 +266,7 @@ fn a_masked_value_multi_column_unmask_opens_the_cold_isolates_backend() {
 
     let masked = super::masked_value::mint_masked_value(
         scope,
-        DbBinding::cold_start("app_cold_mv_multi"),
+        crate::testing::binding("app_cold_mv_multi"),
         "users".to_string(),
         "usr_01".to_string(),
         "ssn".to_string(),
@@ -288,7 +291,7 @@ fn a_masked_value_multi_column_unmask_opens_the_cold_isolates_backend() {
 fn a_query_hint_carrying_find_opens_the_cold_isolates_backend() {
     let _dir = cold_sqlite_isolate();
     let app_id = "app_cold_qhint";
-    zeroship_data_orm::cache_schema_for_tests(
+    crate::testing::install_cold_schema(
         app_id,
         "users",
         zeroship_data_sql::value!({
@@ -352,7 +355,7 @@ fn collection_dispatch_uses_the_injected_orm_factory() {
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     crate::context::with_mut(|context| context.install_connection(service.connection().clone()));
     cold_isolate!(let scope, let state);
-    zeroship_data_orm::cache_schema_for_tests(
+    crate::testing::install_cold_schema(
         "app_injected",
         "items",
         zeroship_data_sql::value!({

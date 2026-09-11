@@ -212,7 +212,9 @@ pub(crate) fn capture_route(
 pub async fn ensure_backend() -> Result<crate::backend::BackendHandle, DbError> {
     let connection = crate::context::with(|context| context.connection())
         .ok_or_else(|| DbError::config("not_configured", "db: no connection is installed"))?;
-    connection.ensure(crate::context::isolate_key_source()).await
+    connection
+        .ensure(crate::context::isolate_key_source())
+        .await
 }
 
 /// Bind a captured routing decision to the backend its SQL will run on.
@@ -355,7 +357,7 @@ mod tests {
     fn capture_is_not_the_ambient_has_tx_for_answer() {
         in_scope!(let scope);
         let prev = super::enter(scope, "app_a");
-        let ambient = crate::tx_lanes::with(|l| l.has_tx_for("app_a"));
+        let ambient = zeroship_data_orm::transaction::is_active("app_a");
         let captured = super::capture_route(scope, &app_a_binding()).in_tx();
         super::leave(scope, prev);
         assert!(!ambient, "precondition: no transaction is parked for app_a");

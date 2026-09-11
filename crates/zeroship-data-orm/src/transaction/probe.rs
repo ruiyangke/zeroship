@@ -1,17 +1,3 @@
-//! The `test-helpers` seam onto the SC-1 driver.
-//!
-//! The driver's entry points are `pub` and its state lives in a
-//! thread-local an integration target cannot reach. This module is the only way
-//! in, and it is gated on `test-helpers` so a production build does not carry
-//! it.
-//!
-//! **It performs no logic of its own.** Every function forwards to the driver or
-//! reads the reducer; anything that made a judgement here would be a second
-//! implementation for a test to agree with, which is how a test starts checking
-//! itself. The one exception is
-//! [`HeldSession`](crate::transaction::probe::HeldSession), which exists to reproduce a
-//! *timing* the production paths reach by scheduling rather than by request.
-
 use zeroship_data_orm::error::DbError;
 
 use crate::backend::BackendHandle;

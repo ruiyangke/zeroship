@@ -38,9 +38,6 @@
 //! both statements are executed against the same rows, and the two orderings
 //! are compared. It rules on behaviour, not on a call graph.
 
-// The `recursion_limit` this file used to declare is now on `tests/test_helpers.rs`,
-// the entry file it hangs off: the attribute is per crate root, and every module
-// there needed it for the same reason.
 #![allow(clippy::items_after_statements)]
 
 use compio_postgres::Pool;

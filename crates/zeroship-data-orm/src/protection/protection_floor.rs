@@ -105,7 +105,9 @@ impl StoredProtection {
 /// catalog does not record as protected imposes no floor.
 pub(crate) type ProtectionFloor = HashMap<String, HashMap<String, StoredProtection>>;
 
-fn floor_key(binding: &DbBinding) -> DbBinding { binding.clone() }
+fn floor_key(binding: &DbBinding) -> DbBinding {
+    binding.clone()
+}
 
 /// Reduce a `LiveSchema` to the protected columns alone.
 fn floor_from_live(live: &zeroship_data_sql::catalog::LiveSchema) -> ProtectionFloor {
@@ -193,23 +195,7 @@ pub async fn refuse_protection_downgrade(
     refuse_offences(&floor, collection, schema)
 }
 
-/// The verdict, split from the catalog read above.
-///
-/// Split on 2026-09-04, and the reason is a measurement rather than a taste.
-/// The only place this fence's REFUSAL was bound was
-/// `zeroship-data-v8/tests/mask_flip.rs`, whose test build enables
-/// `test-helpers` - so the durable proof that a
-/// protection downgrade is refused came from a build configuration that DOES
-/// NOT SHIP. On the same day, the capability this fence reads
-/// (`Catalog`) turned out to be gated on that same feature while the
-/// caller was not, and the shipped binaries had not compiled for a day. A fence
-/// whose only witness needs the feature is one flag away from being a fence
-/// that only exists in test builds.
-///
-/// Everything above this line needs a backend; nothing below it does. Taking
-/// the resolved floor as a parameter is what lets `#[cfg(test)] mod tests`
-/// drive the refusal in the engine's DEFAULT-feature build, where
-/// `feature = "test-helpers"` is off.
+/// Evaluate the protection floor independently of catalog I/O.
 fn refuse_offences(
     floor: &ProtectionFloor,
     collection: &str,
@@ -262,7 +248,7 @@ fn refuse_offences(
 /// The peer of the schema-cache and lane resets, called from the same helper: a
 /// test that installs a second descriptor over the same binding would otherwise
 /// see the floor the first one resolved.
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 pub fn reset_for_tests() {
     crate::orm_context::current().floors_mut(HashMap::clear);
 }
@@ -392,32 +378,9 @@ mod tests {
         ));
     }
 
-    /// THE FENCE REFUSES IN A BUILD THAT HAS NO `test-helpers`.
-    ///
-    /// This module is `#[cfg(test)]`, so it compiles under `cargo test -p
-    /// zeroship-data-orm --lib` with DEFAULT features - where this crate's
-    /// own `feature = "test-helpers"` is off, because nothing in the build
-    /// turns it on (the `[dev-dependencies]` entries enable it on the three
-    /// crates BELOW, never on this one). That is the configuration the
-    /// pre-existing witness could not reach:
-    /// `zeroship-data-v8/tests/mask_flip.rs` enables `test-helpers` in its
-    /// test build, so the original proof that a downgrade is refused came from
-    /// a build that does not ship.
-    ///
-    /// Both protections, because the fence reads them independently and a
-    /// single-protection test cannot refute the collapsed-to-one-bit shape.
-    ///
-    /// **`cfg(not(feature))` and not a runtime assertion.** The configuration
-    /// is what this test IS, so it is spelled where the compiler enforces it: a
-    /// `--all-features` run does not collect it at all, rather than collecting
-    /// it and failing an assertion about its own build. `mask_flip.rs` binds the
-    /// same refusal on a live database with the feature ON, so the two are
-    /// complementary and neither configuration is left unwitnessed. Verify this
-    /// one still runs with:
-    ///   cargo test -p zeroship-data-orm --lib protection_floor
-    #[cfg(not(feature = "test-helpers"))]
+    /// Removing masking or encryption from a descriptor is always refused.
     #[test]
-    fn a_downgrade_is_refused_without_the_test_helpers_feature() {
+    fn a_protection_downgrade_is_refused() {
         let floor = floor_from_live(&live_with("ssn", masked_column()));
         // The descriptor still declares the field - it just dropped the `mask`
         // key. That one deletion is the whole defect this fence exists for.

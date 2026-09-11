@@ -19,7 +19,7 @@ pub struct SchemaCache {
 impl SchemaCache {
     /// An empty cache. A fresh isolate has installed no schema.
     #[must_use]
-    #[cfg(any(test, feature = "test-helpers"))]
+    #[cfg(test)]
     pub fn new() -> Self {
         Self::default()
     }
@@ -103,7 +103,7 @@ impl SchemaCache {
     /// Install ONE collection's entry. Test fixtures use this narrow helper;
     /// production boot replaces a binding's complete descriptor through
     /// [`Self::replace_for_binding`].
-    #[cfg(any(test, feature = "test-helpers"))]
+    #[cfg(test)]
     pub fn insert_one(&mut self, binding: &DbBinding, collection: &str, schema: Value) {
         self.entries
             .insert(Self::key(binding, collection), Arc::new(schema));
@@ -129,7 +129,7 @@ pub fn with_mut<R>(f: impl FnOnce(&mut SchemaCache) -> R) -> R {
 ///
 /// Reset alongside lane and context state when a fixture installs another
 /// database or deployment on the same thread.
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 pub fn reset_for_tests() {
     with_mut(|c| *c = SchemaCache::new());
 }

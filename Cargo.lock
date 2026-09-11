@@ -8100,7 +8100,6 @@ dependencies = [
  "zeroship-core",
  "zeroship-data-cdc-wire",
  "zeroship-data-macros",
- "zeroship-data-orm",
  "zeroship-data-sql",
  "zeroship-metering",
  "zeroship-migrate",
@@ -8131,6 +8130,7 @@ dependencies = [
 name = "zeroship-data-v8"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "base64",
  "compio",
  "compio-postgres",
@@ -8150,7 +8150,6 @@ dependencies = [
  "zeroship-core",
  "zeroship-data-orm",
  "zeroship-data-sql",
- "zeroship-data-v8",
  "zeroship-metering",
  "zeroship-migrate",
  "zeroship-migrate-policy",

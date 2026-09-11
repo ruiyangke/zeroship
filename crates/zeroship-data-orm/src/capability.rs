@@ -23,7 +23,7 @@
 //! # NO `cfg(feature)` IN THIS FILE
 //!
 //! Four types here - `SnapshotOpts`, `BusyPolicy`, `SnapshotHandle` and a
-//! `PitrTarget` since deleted - carried `#[cfg(feature = "test-helpers")]`
+//! `PitrTarget` since deleted - carried `#[cfg(test)]`
 //! until 2026-09-04, because their only consumer,
 //! [`crate::storage::Backup`], carried it too.
 //! Both gates are gone. Every one of the four appears in a `Backup` method

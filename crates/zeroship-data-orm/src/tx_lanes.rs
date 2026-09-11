@@ -71,17 +71,7 @@ pub struct TxLane {
 /// caller must remember is the point - see [`destroy_tx_connection`] for what
 /// "destroy" costs and why a drop does not achieve it.
 impl TxLane {
-    /// The queued pre-commit events, for the SEC-1 scoping tests in
-    /// `zeroship-data-v8`'s `context.rs`. A slice rather than the field, so
-    /// the tests can read the queue without production code gaining the ability
-    /// to mutate a lane's internals from another module.
-    ///
-    /// **The gate is `any(test, feature = "test-helpers")` and NOT `cfg(test)`,
-    /// and it had to change when this file became another crate's.** The one
-    /// reader is in the ADAPTER; across a crate boundary `cfg(test)` is THIS
-    /// crate's test build, which never fires for a consumer, so the method
-    /// simply would not exist for the tests it was written for.
-    #[cfg(any(test, feature = "test-helpers"))]
+    #[cfg(test)]
     pub fn pending_emits(&self) -> &[ChangeEvent] {
         &self.pending_emits
     }
@@ -226,7 +216,7 @@ pub struct TxLanes {
 
 impl TxLanes {
     /// An empty lane set. A fresh worker thread has no open transaction.
-    #[cfg(any(test, feature = "test-helpers"))]
+    #[cfg(test)]
     pub fn new() -> Self {
         Self::default()
     }
@@ -240,7 +230,7 @@ impl TxLanes {
     ///
     /// Same gate correction as [`TxLane::pending_emits`] above, for the same
     /// reason: its only reader is in the adapter crate.
-    #[cfg(any(test, feature = "test-helpers"))]
+    #[cfg(test)]
     pub fn by_app(&self) -> &HashMap<String, TxLane> {
         &self.lanes
     }
@@ -598,7 +588,7 @@ impl TxLanes {
     }
 
     /// Has `app_id`'s transaction session been withdrawn?
-    #[cfg(any(test, feature = "test-helpers"))]
+    #[cfg(test)]
     pub fn tx_session_withdrawn(&self, app_id: &str) -> bool {
         self.withdrawn_tx_sessions.contains(app_id)
     }
@@ -698,7 +688,7 @@ pub fn with_mut<R>(f: impl FnOnce(&mut TxLanes) -> R) -> R {
 /// thread-local. Both must run: a test that reset only the context would leave
 /// the previous test's lanes - and therefore its transaction claims - visible
 /// to the next one on the same thread.
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 pub fn reset_for_tests() {
     with_mut(|l| *l = TxLanes::new());
 }

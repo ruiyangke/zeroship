@@ -317,60 +317,16 @@ if [ "${n_type_viol:-0}" -gt 0 ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# ARM 3 - the configuration this workspace does not contain.
-#
-# For each member forwarding `zeroship-data-orm/test-helpers`, turn CORE's
-# feature on and leave the member's own off. That is exactly the resolution a
-# single dependent's manifest produces, and it is the one that reported E0046
-# against both vendors before 2026-09-04.
-# ---------------------------------------------------------------------------
-if ! (cd "$ROOT" && cargo metadata --format-version 1 --no-deps) \
-    > "$TMP/meta.json" 2> "$TMP/meta.err"; then
-  echo "  x REFUSED: cargo metadata failed; arm 3 has no set to derive." >&2
-  cat "$TMP/meta.err" >&2
-  exit 1
-fi
-
-jq -r '
-  .packages[]
-  | select((.features["test-helpers"] // [])
-           | any(. == "zeroship-data-orm/test-helpers"))
-  | .name
-' "$TMP/meta.json" | LC_ALL=C sort -u > "$TMP/forwarders.txt"
-
-n_forwarders="$(grep -c . "$TMP/forwarders.txt" || true)"
-if [ "${n_forwarders:-0}" -lt 1 ]; then
-  echo "  x REFUSED: no workspace member forwards zeroship-data-orm/test-helpers." >&2
-  echo "             The derivation matched nothing, so it proves nothing." >&2
-  exit 1
-fi
-
+# Production consumers must compile without a fixture feature.
 n_builds=0
-while IFS= read -r pkg; do
-  [ -n "$pkg" ] || continue
+for pkg in zeroship-data-orm zeroship-data-v8; do
   n_builds=$((n_builds + 1))
-  build_ok=1
-  if ! (cd "$ROOT" && cargo check -p "$pkg" \
-          --features zeroship-data-orm/test-helpers \
-          --message-format=json) > "$TMP/$pkg.json" 2> "$TMP/$pkg.err"; then
-    build_ok=0
-  fi
-  jq -r 'select(.reason == "compiler-message")
-         | select(.message.level == "error")
-         | .message.rendered // empty' "$TMP/$pkg.json" > "$TMP/$pkg.errors" 2>/dev/null
-  n_err="$(grep -c '^error' "$TMP/$pkg.errors" || true)"
-  if [ "$build_ok" -eq 0 ] || [ "${n_err:-0}" -gt 0 ]; then
-    echo "" >&2
-    echo "  x $pkg DOES NOT COMPILE with zeroship-data-orm/test-helpers ON" >&2
-    echo "    and its own test-helpers OFF - ${n_err} error(s):" >&2
-    cat "$TMP/$pkg.errors" >&2
+  if ! (cd "$ROOT" && cargo check -p "$pkg" --lib) > "$TMP/$pkg.log" 2>&1; then
+    cat "$TMP/$pkg.log" >&2
     fail=1
-  else
-    echo "  - ok  $pkg (core feature on, own feature off)"
   fi
-done < "$TMP/forwarders.txt"
-
-gate_arm split_feature_builds "$n_builds" "$MIN_BUILDS" || fail=1
+done
+gate_arm ordinary_consumer_builds "$n_builds" "$MIN_BUILDS" || fail=1
 
 gate_arms_finish || fail=1
 

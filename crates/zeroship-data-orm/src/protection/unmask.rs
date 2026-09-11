@@ -77,14 +77,6 @@ use zeroship_data_orm::error::DbError;
 // Args / result shape
 // ---------------------------------------------------------------------------
 
-/// Inputs to `dispatch_unmask`. Mirrors the `MaskedValue._meta` payload
-/// the SDK ships through `zeroship.db.unmaskField({...})`. The `actor`
-/// argument is the bare `Actor = Record<string, unknown>` shape; only
-/// `actor.kind` and `actor.id` are inspected.
-///
-/// `pub` under `test-helpers` so `crates/zeroship-data-v8/tests/sqlite_integration.rs` can drive
-/// `dispatch_unmask` directly; production callers reach this through
-/// the V8 dispatcher's `parse_args`.
 #[derive(Debug, Clone, Default)]
 pub struct UnmaskFieldArgs {
     pub collection: String,
@@ -363,28 +355,6 @@ async fn prepare_unmask_backend(backend: &BackendHandle, app_id: &str) -> Result
 // Public dispatch entry
 // ---------------------------------------------------------------------------
 
-/// Public dispatch entry called from the V8 `unmaskField` glue.
-///
-/// Performs the §6 flow: metadata lookup → authorization → SELECT +
-/// optional decrypt → audit row → plaintext return. Every path writes
-/// an audit row before returning (granted on success, denied on
-/// refusal); SQL failures inside the SELECT path also surface a denied
-/// audit row when the row PK existed in the SDK's MaskedValue but the
-/// SELECT returned zero rows.
-/// Public under `test-helpers` so the integration suite can drive
-/// the dispatch flow without standing up V8; the production V8 glue
-/// in the adapter tier's `dispatch_unmask_field` is the only crate-internal caller.
-///
-/// `route` is supplied by the caller because this function is ENGINE and the
-/// funnel that opens a backend is ADAPTER state; the V8 dispatcher captures the
-/// route at its own frame and hands the value down. See
-/// `prepare_unmask_backend`.
-///
-/// **It is a `TxRoute` and not a bare `BackendHandle`.** A `MaskedValue.unmask()`
-/// issued inside a `db.transaction(fn)` callback has to read the ciphertext on
-/// that transaction's connection - a pooled read cannot see a row the same
-/// transaction has just written. The audit row deliberately does NOT follow the
-/// lane; see [`write_audit_unmask_row`].
 pub async fn dispatch_unmask(
     route: &crate::tx_route::TxRoute,
     binding: &DbBinding,

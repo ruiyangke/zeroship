@@ -1,69 +1,3 @@
-//! [`TxRoute`] — the tx-vs-pool routing decision for ONE CRUD dispatch,
-//! captured synchronously at the V8 frame that started it.
-//!
-//! ## The defect this type exists to make unrepresentable
-//!
-//! `crate::exec` used to decide "transaction connection or pool?" at SQL
-//! time, from ambient state:
-//!
-//! ```text
-//! crate::tx_lanes::with(|l| l.has_tx_for(app_id))   // "does this app have a tx open RIGHT NOW"
-//! ```
-//!
-//! That is a *temporal* test standing in for a *structural* one, and the
-//! two come apart the moment an ordinary write overlaps someone else's
-//! transaction. They overlap routinely: a worker OS thread multiplexes
-//! many requests over one isolate and hands control to another dispatch at
-//! every `.await`, and `pnpm dev` is a single isolate by construction
-//! (`zeroship serve --workers=1`). Measured on BOTH tiers by
-//! `examples/db-todos/tests/database.test.ts` (`cxPlain`):
-//!
-//! ```text
-//! request A   db.transaction(async tx => { insert; await …; throw })
-//! request B                     db.todos.insert(…)   // NO transaction anywhere
-//! ```
-//!
-//! B's plain insert read `has_tx_for == true`, was routed onto **A's**
-//! transaction connection, reported `inserted: true` — and A's `ROLLBACK`
-//! then destroyed it (`bAfter: 0`). This is the same root cause as the
-//! `transaction()`-nesting defect fixed in 00188d788, in a different
-//! consumer: there it decided BEGIN-vs-SAVEPOINT, here it decides
-//! tx-conn-vs-pool. The default write path is the worse of the two,
-//! because most creator writes are not inside a transaction at all.
-//!
-//! ## The discriminator, and why it must be captured at dispatch
-//!
-//! Whether an op belongs to a transaction is a property of its **async
-//! context**, not of the app's wall-clock state — see the adapter tier's `tx_scope`,
-//! which reads V8's continuation-preserved embedder data (the slot
-//! `AsyncLocalStorage` uses). `crate::tx_scope::current_tx_app` answers it,
-//! but it needs a `&mut v8::PinScope`, and `crate::exec::run_sql` runs
-//! inside a spawned future long after the V8 frame returned. So the answer
-//! is read in the `dispatch_*` prelude — the last place `scope` is live —
-//! frozen into a `TxRoute`, and moved into the spawned async block.
-//!
-//! ## Why a missed dispatch site cannot compile
-//!
-//! `TxRoute` has exactly ONE production constructor, [`CapturedRoute::capture`],
-//! and it takes the OBSERVED transaction frame - not an `app_id`, and not a
-//! `bool`. There is no `From<&str>`, no `Default`, no `new(app_id)`, and the
-//! fields are private, so a `TxRoute` cannot be conjured from an `app_id`.
-//! Every exec entry point (`exec_query`, `exec_count`,
-//! `exec_mutation`, `exec_mutation_with_emit`) takes `&TxRoute` instead of
-//! `app_id: &str`. A new dispatcher that forgets to capture therefore has
-//! nothing to pass and fails to compile — it cannot silently fall through
-//! to the pool, which would be a WORSE defect than the one being fixed
-//! (a transactional write leaking out of its transaction).
-//!
-//! The two non-`scope` constructors, `CapturedRoute::{pool_for_tests,
-//! tx_for_tests}`, are `#[cfg(any(test, feature = "test-helpers"))]`: the
-//! `test-helpers` feature is declared in this crate's `[features]` and is
-//! enabled only by its own `[[test]]` targets, never by a binary that ships.
-//! They yield a `CapturedRoute`, so even a test still has to `bind` a backend
-//! to reach the type the exec helpers take, and they take the dialect as a
-//! parameter rather than assuming one - see `pool_for_tests` for why the
-//! constant they used to stamp was a latent SQLite bug.
-
 use crate::backend::BackendHandle;
 use crate::compile::SqlDialect;
 use zeroship_data_sql::SchemaName;
@@ -246,7 +180,7 @@ impl CapturedRoute {
     /// Callers that already hold the backend should not spell the answer at
     /// all: `crate::exec::ambient_route_for_tests` derives it from the handle
     /// it is given.
-    #[cfg(any(test, feature = "test-helpers"))]
+    #[cfg(test)]
     #[doc(hidden)]
     pub fn pool_for_tests(app_id: &str, dialect: SqlDialect) -> Self {
         Self {
@@ -262,7 +196,7 @@ impl CapturedRoute {
     /// Pairs with `crate::install_tx_marker_for_tests`, which parks a real
     /// connection in the per-isolate slot. Gated like [`Self::pool_for_tests`],
     /// and taking the dialect as a parameter for the same reason.
-    #[cfg(any(test, feature = "test-helpers"))]
+    #[cfg(test)]
     #[doc(hidden)]
     pub fn tx_for_tests(app_id: &str, dialect: SqlDialect) -> Self {
         Self {

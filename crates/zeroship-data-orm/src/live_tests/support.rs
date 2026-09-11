@@ -21,7 +21,7 @@ pub async fn begin_transaction(app_id: &str, url: &str) {
             .await
             .expect("fixture pool"),
     );
-    zeroship_data_orm::auth::bootstrap::ensure_per_app_role(&pool, app_id)
+    crate::support::roles::ensure_per_app_role(&pool, app_id)
         .await
         .expect("fixture role");
     if super::host::current_backend_for_tests().is_none() {

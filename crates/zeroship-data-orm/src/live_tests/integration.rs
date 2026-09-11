@@ -2517,7 +2517,7 @@ fn vector_search_returns_k_nearest() {
             // it was written until 2026-09-01. It never surfaced because the test was
             // statically `#[ignore]`d, so a setup gap looked like a missing extension.
             let _role = provision_app_with_role(&pool, app).await;
-            zeroship_data_orm::auth::bootstrap::ensure_per_app_role(&pool, app)
+            crate::support::roles::ensure_per_app_role(&pool, app)
                 .await
                 .unwrap();
             // The six non-`id` platform system columns are part of every real creator
@@ -2819,7 +2819,7 @@ fn vector_dimension_mismatch_rejected_at_insert() {
             // Same provisioning gap as `vector_search_returns_k_nearest`: a schema
             // without its per-app role fails closed before the insert is ever attempted.
             let _role = provision_app_with_role(&pool, app).await;
-            zeroship_data_orm::auth::bootstrap::ensure_per_app_role(&pool, app)
+            crate::support::roles::ensure_per_app_role(&pool, app)
                 .await
                 .unwrap();
             pool.execute(
@@ -2923,7 +2923,7 @@ fn near_returns_within_radius() {
                 value!({ "location": { "type": "geoPoint" } }),
             );
 
-            zeroship_data_orm::auth::bootstrap::ensure_per_app_role(&pool, app)
+            crate::support::roles::ensure_per_app_role(&pool, app)
                 .await
                 .unwrap();
             support::grant_all_runtime_table_columns(&pool, app, coll).await;
@@ -3556,8 +3556,7 @@ CREATE TABLE "{app}"."people" ({PG_SYSTEM_COLUMNS},
                 .unwrap();
             assert_eq!(raw.len(), 1);
             let row =
-                zeroship_data_orm::backend::postgres::pg_row_json::row_to_value_for_bench(&raw[0])
-                    .unwrap();
+                zeroship_data_orm::backend::postgres::pg_row_json::row_to_value(&raw[0]).unwrap();
 
             let finalized =
                 crate::live_tests::host::finalize_rows_on_read_for_tests(app, "people", vec![row])
@@ -3785,8 +3784,7 @@ CREATE TABLE "{app}"."people" ({PG_SYSTEM_COLUMNS},
                 .unwrap();
             assert_eq!(raw.len(), 1);
             let row =
-                zeroship_data_orm::backend::postgres::pg_row_json::row_to_value_for_bench(&raw[0])
-                    .unwrap();
+                zeroship_data_orm::backend::postgres::pg_row_json::row_to_value(&raw[0]).unwrap();
             let finalized =
                 crate::live_tests::host::finalize_rows_on_read_for_tests(app, "people", vec![row])
                     .await
@@ -3880,8 +3878,7 @@ fn pg_bytea_decoder_preserves_raw_binary_prefix_bytes() {
                 .await
                 .unwrap();
             let json =
-                zeroship_data_orm::backend::postgres::pg_row_json::row_to_value_for_bench(&rows[0])
-                    .unwrap();
+                zeroship_data_orm::backend::postgres::pg_row_json::row_to_value(&rows[0]).unwrap();
             let payload = json
                 .get("payload")
                 .and_then(Value::as_bytes)
@@ -4400,7 +4397,7 @@ fn per_app_role_created_at_provision() {
             let role = provision_app_with_role(&pool, app).await;
 
             // First provision creates the role.
-            let first = zeroship_data_orm::auth::bootstrap::ensure_per_app_role(&pool, app)
+            let first = crate::support::roles::ensure_per_app_role(&pool, app)
                 .await
                 .expect("provision per-app role");
             assert!(first.created_role, "first provision must create the role");
@@ -4417,7 +4414,7 @@ fn per_app_role_created_at_provision() {
 
             // Idempotent: a second provision is a no-op create (GRANTs re-run
             // harmlessly).
-            let second = zeroship_data_orm::auth::bootstrap::ensure_per_app_role(&pool, app)
+            let second = crate::support::roles::ensure_per_app_role(&pool, app)
                 .await
                 .expect("re-provision per-app role");
             assert!(
@@ -4445,7 +4442,7 @@ fn per_app_role_has_no_replication_attr() {
             let app = crate::test_app_id!();
             let app = app.as_str();
             let role = provision_app_with_role(&pool, app).await;
-            zeroship_data_orm::auth::bootstrap::ensure_per_app_role(&pool, app)
+            crate::support::roles::ensure_per_app_role(&pool, app)
                 .await
                 .unwrap();
 
@@ -4484,7 +4481,7 @@ fn per_app_role_grant_scoped_to_schema() {
             let app = crate::test_app_id!();
             let app = app.as_str();
             let role = provision_app_with_role(&pool, app).await;
-            zeroship_data_orm::auth::bootstrap::ensure_per_app_role(&pool, app)
+            crate::support::roles::ensure_per_app_role(&pool, app)
                 .await
                 .unwrap();
 
@@ -4561,10 +4558,10 @@ fn per_app_role_cannot_read_sibling_schema_or_touch_slots() {
                 .await
                 .unwrap();
 
-            zeroship_data_orm::auth::bootstrap::ensure_per_app_role(&pool, app_a)
+            crate::support::roles::ensure_per_app_role(&pool, app_a)
                 .await
                 .unwrap();
-            zeroship_data_orm::auth::bootstrap::ensure_per_app_role(&pool, app_b)
+            crate::support::roles::ensure_per_app_role(&pool, app_b)
                 .await
                 .unwrap();
             pool.execute(
@@ -4657,7 +4654,7 @@ fn client_sql_runs_under_per_app_role() {
             let app = crate::test_app_id!();
             let app = app.as_str();
             let role = provision_app_with_role(&pool, app).await;
-            zeroship_data_orm::auth::bootstrap::ensure_per_app_role(&pool, app)
+            crate::support::roles::ensure_per_app_role(&pool, app)
                 .await
                 .unwrap();
 
@@ -4670,7 +4667,7 @@ fn client_sql_runs_under_per_app_role() {
             .detach();
 
             client.execute("BEGIN", &[]).await.unwrap();
-            let set_sql = zeroship_data_orm::auth::bootstrap::set_local_role_sql(app)
+            let set_sql = crate::support::roles::set_local_role_sql(app)
                 .expect("integration app id must produce valid SET LOCAL ROLE SQL");
             client.execute(&set_sql, &[]).await.unwrap();
 
@@ -4720,7 +4717,7 @@ fn exec_autocommit_query_runs_under_per_app_role() {
             let app = crate::test_app_id!();
             let app = app.as_str();
             let role = provision_app_with_role(&pool, app).await;
-            zeroship_data_orm::auth::bootstrap::ensure_per_app_role(&pool, app)
+            crate::support::roles::ensure_per_app_role(&pool, app)
                 .await
                 .unwrap();
             crate::live_tests::host::set_db_url_for_tests(&url);
@@ -4779,7 +4776,7 @@ fn vector_search_runs_under_per_app_role_via_rls() {
             let app = app.as_str();
             let coll = "docs";
             let role = provision_app_with_role(&admin_pool, app).await;
-            zeroship_data_orm::auth::bootstrap::ensure_per_app_role(&admin_pool, app)
+            crate::support::roles::ensure_per_app_role(&admin_pool, app)
                 .await
                 .unwrap();
             admin_pool
@@ -4889,7 +4886,7 @@ fn spatial_near_runs_under_per_app_role_via_rls() {
             let app = app.as_str();
             let coll = "places";
             let role = provision_app_with_role(&admin_pool, app).await;
-            zeroship_data_orm::auth::bootstrap::ensure_per_app_role(&admin_pool, app)
+            crate::support::roles::ensure_per_app_role(&admin_pool, app)
                 .await
                 .unwrap();
             admin_pool
@@ -5002,7 +4999,7 @@ fn unmask_fetch_runs_under_per_app_role_via_rls() {
             let app = app.as_str();
             let coll = "users";
             let role = provision_app_with_role(&admin_pool, app).await;
-            zeroship_data_orm::auth::bootstrap::ensure_per_app_role(&admin_pool, app)
+            crate::support::roles::ensure_per_app_role(&admin_pool, app)
                 .await
                 .unwrap();
             let schema = value!({
@@ -5138,7 +5135,7 @@ fn unmask_encrypted_column_on_pg_reads_bytea_raw_sibling() {
             let app = app.as_str();
             let coll = "users";
             let role = provision_app_with_role(&admin_pool, app).await;
-            zeroship_data_orm::auth::bootstrap::ensure_per_app_role(&admin_pool, app)
+            crate::support::roles::ensure_per_app_role(&admin_pool, app)
                 .await
                 .unwrap();
             let schema = value!({
@@ -5271,7 +5268,7 @@ fn unmask_audit_insert_runs_under_the_per_app_role_not_the_login_role() {
             let app = app.as_str();
             let coll = "patients";
             let role = provision_app_with_role(&admin_pool, app).await;
-            zeroship_data_orm::auth::bootstrap::ensure_per_app_role(&admin_pool, app)
+            crate::support::roles::ensure_per_app_role(&admin_pool, app)
                 .await
                 .unwrap();
             let schema = value!({
@@ -5424,7 +5421,7 @@ fn pg_declared_mask_policy_authorizes_unmask_without_durable_store() {
             // the read path checks for -- without it the unmask SELECT refuses
             // with `schema_not_provisioned` before authorization is ever reached.
             let role = provision_app_with_role(&pool, app).await;
-            zeroship_data_orm::auth::bootstrap::ensure_per_app_role(&pool, app)
+            crate::support::roles::ensure_per_app_role(&pool, app)
                 .await
                 .unwrap();
 
@@ -5669,7 +5666,7 @@ fn concurrent_dedicated_clients_are_bounded_by_the_pool() {
     })
 }
 
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 #[allow(unused_imports)]
 use zeroship_data_orm::fixtures::DatabaseFixture;
 

@@ -6,7 +6,7 @@ use crate::tx_route::TxRoute;
 use zeroship_data_orm::binding::DbBinding;
 use zeroship_data_orm::error::DbError;
 
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 use std::cell::RefCell;
 
 pub enum ApplyMode<'a> {
@@ -225,7 +225,10 @@ pub async fn apply(
     // encryption and mask stages silently skipped - which is what an absent
     // schema used to mean, on a write.
     let schema = crate::descriptor::collection_schema(binding, collection)?;
-    if let ApplyMode::Upsert { conflict_fields, .. } = &mode {
+    if let ApplyMode::Upsert {
+        conflict_fields, ..
+    } = &mode
+    {
         validate_upsert_conflict_fields(&schema, payload, conflict_fields)?;
     }
     match &mode {
@@ -647,7 +650,7 @@ async fn rewrite_upsert_doc_id_to_existing_row_id(
     Ok(())
 }
 
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct WritePathCounters {
     pub target_row_resolution_calls: usize,
@@ -655,13 +658,13 @@ pub struct WritePathCounters {
     pub target_row_resolution_sql: Vec<String>,
 }
 
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 thread_local! {
     static WRITE_PATH_COUNTERS: RefCell<WritePathCounters> =
         RefCell::new(WritePathCounters::default());
 }
 
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 #[cfg_attr(test, allow(dead_code))]
 pub fn reset_write_path_counters_for_tests() {
     WRITE_PATH_COUNTERS.with(|counters| {
@@ -669,23 +672,23 @@ pub fn reset_write_path_counters_for_tests() {
     });
 }
 
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 #[cfg_attr(test, allow(dead_code))]
 pub fn write_path_counters_for_tests() -> WritePathCounters {
     WRITE_PATH_COUNTERS.with(|counters| counters.borrow().clone())
 }
 
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 fn note_target_row_resolution_for_tests() {
     WRITE_PATH_COUNTERS.with(|counters| {
         counters.borrow_mut().target_row_resolution_calls += 1;
     });
 }
 
-#[cfg(not(any(test, feature = "test-helpers")))]
+#[cfg(not(test))]
 fn note_target_row_resolution_for_tests() {}
 
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 fn note_target_row_resolution_sql_for_tests(sql: &str) {
     WRITE_PATH_COUNTERS.with(|counters| {
         counters
@@ -695,17 +698,17 @@ fn note_target_row_resolution_sql_for_tests(sql: &str) {
     });
 }
 
-#[cfg(not(any(test, feature = "test-helpers")))]
+#[cfg(not(test))]
 fn note_target_row_resolution_sql_for_tests(_sql: &str) {}
 
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 fn note_upsert_conflict_probe_for_tests() {
     WRITE_PATH_COUNTERS.with(|counters| {
         counters.borrow_mut().upsert_conflict_probe_calls += 1;
     });
 }
 
-#[cfg(not(any(test, feature = "test-helpers")))]
+#[cfg(not(test))]
 fn note_upsert_conflict_probe_for_tests() {}
 
 #[cfg(test)]

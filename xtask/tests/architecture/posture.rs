@@ -4,7 +4,10 @@ use std::collections::BTreeSet;
 
 fn mandatory_database_tests(package: &serde_json::Value) -> Result<usize, String> {
     let name = package["name"].as_str().ok_or("package name missing")?;
-    if package["features"].get("live-db-tests").is_some() {
+    if ["live-db-tests", "test-helpers"]
+        .iter()
+        .any(|feature| package["features"].get(feature).is_some())
+    {
         return Err(format!(
             "{name}: live database verification cannot be optional"
         ));
@@ -38,12 +41,16 @@ fn platform_database_tests_are_mandatory() {
     );
     for package in workspace {
         assert!(
-            package["features"].get("live-db-tests").is_none(),
+            ["live-db-tests", "test-helpers"]
+                .iter()
+                .all(|feature| package["features"].get(feature).is_none()),
             "{} declares optional live database verification",
             package["name"]
         );
     }
     for name in [
+        "zeroship-data-orm",
+        "zeroship-data-v8",
         "zeroship-control",
         "zeroship-migrate-server",
         "zeroship-worker",
@@ -65,6 +72,9 @@ fn mandatory_database_test_check_rejects_feature_and_target_gates() {
     assert_eq!(mandatory_database_tests(&ordinary).unwrap(), 1);
     let mut hidden = ordinary.clone();
     hidden["features"]["live-db-tests"] = serde_json::json!([]);
+    assert!(mandatory_database_tests(&hidden).is_err());
+    let mut hidden = ordinary.clone();
+    hidden["features"]["test-helpers"] = serde_json::json!([]);
     assert!(mandatory_database_tests(&hidden).is_err());
     let mut hidden = ordinary.clone();
     hidden["targets"][0]["required-features"] = serde_json::json!(["optional-db"]);
@@ -205,9 +215,11 @@ fn role_attributes(input: &str) -> Option<bool> {
 
 #[test]
 fn worker_role_and_boot_checks_refuse_replication_authority() {
-    assert!(repo::root()
-        .join("db/migrations-ts/20260910000100_cdc_relay_authority.ts")
-        .exists());
+    assert!(
+        repo::root()
+            .join("db/migrations-ts/20260910000100_cdc_relay_authority.ts")
+            .exists()
+    );
     let mut attributes = Vec::new();
     for file in repo::files("db/migrations-ts", &["ts"]) {
         if let Some(value) = role_attributes(&std::fs::read_to_string(file).unwrap()) {

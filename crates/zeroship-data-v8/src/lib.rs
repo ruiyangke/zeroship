@@ -18,23 +18,24 @@ use zeroship_runtime::plugin::{NativePlugin, NativeRegistrar};
 use crate::context::with_mut as ctx_mut;
 use zeroship_data_orm::error::DbError;
 
-// The test-helpers feature exposes adapter lifecycle fixtures. Database
-// internals are accessed directly through the ORM and SQL crates.
-
 // Private imports used to compose ORM operations with isolate state.
 use zeroship_data_orm::cdc::{broker, read_set};
-#[cfg(any(test, feature = "test-helpers"))]
-use zeroship_data_orm::tx_lanes;
 use zeroship_data_orm::{
     backend, descriptor, metrics, system_shape_charter, transaction, tx_route,
 };
 use zeroship_data_sql::compile;
 
 pub(crate) mod context;
+#[cfg(test)]
+mod live_tests;
 pub mod op_error;
-/// Fixtures for embedding the adapter in integration tests.
-#[cfg(any(test, feature = "test-helpers"))]
-pub mod testing;
+#[cfg(test)]
+#[path = "live_tests/host.rs"]
+mod testing;
+#[cfg(test)]
+extern crate self as zeroship_data_v8;
+#[cfg(test)]
+use live_tests::{parity, schema_fixture, support};
 pub(crate) mod v8_bridge;
 pub mod v8_classes;
 
@@ -44,10 +45,7 @@ pub mod service;
 // genuinely NESTED `transaction()` call from one that merely overlaps
 // another in time; see the module docs for the defect that distinction
 // closes.
-#[cfg(not(feature = "test-helpers"))]
 pub(crate) mod tx_scope;
-#[cfg(feature = "test-helpers")]
-pub mod tx_scope;
 
 /// The database plugin — registers `zeroship.db.*` methods.
 ///
@@ -406,99 +404,6 @@ mod journal_schema_derivations_agree {
                  write its journal where nothing looks for it"
             );
         }
-    }
-}
-
-/// `reset_context_for_tests` must clear ALL THREE thread-locals.
-///
-/// The context was one struct until 2026-09-02. It is now three owners with
-/// three thread-locals - the adapter context, the engine.s lanes, and
-/// data-core.s descriptor store - so "reset" became three calls, any one of
-/// which could be dropped without an existing test noticing. One test per
-/// store, because a single test asserting all three would pass while two of
-/// them regressed.
-///
-/// **Both halves live in ONE test on purpose.** The obvious shape - claim in
-/// test A, assert clean in test B - proves nothing here: libtest gives every
-/// `#[test]` its own OS thread even under `--test-threads=1` (measured
-/// 2026-09-01), so B would read a fresh thread-local and pass whatever the
-/// helper does. Such a guard is green by construction. The real hazard is a
-/// MID-TEST reset - scenario setup between phases, and the `ContextReset` drop
-/// guard in `transaction/mod.rs` - and that is what this reproduces.
-#[cfg(test)]
-mod reset_clears_every_thread_local {
-    /// Deleting `tx_lanes::reset_for_tests()` from `reset_context_for_tests`
-    /// must fail this.
-    ///
-    /// `TxLanes` has TWO stores and both are asserted, because they have
-    /// different lifetimes and a partial reset could plausibly clear one: the
-    /// lane map is emptied by ordinary retirement, whereas the withdrawal
-    /// tombstone is documented to outlive its lane and to be cleared only by
-    /// the next `admit_transaction`. The tombstone is therefore the residue
-    /// most likely to survive a reset that looks correct.
-    #[test]
-    fn a_mid_test_reset_drops_a_claim_and_a_withdrawal_tombstone() {
-        let app = "app_reset_guard";
-
-        assert!(
-            crate::tx_lanes::with_mut(|l| l.try_claim_tx(app)),
-            "an unclaimed app claims on a fresh thread"
-        );
-        // `tx_claimed_by`, not `has_tx_for`: claiming opens the lane, and
-        // `has_tx_for` additionally requires the BEGIN to have landed a
-        // session. The claim without a session is exactly the window this
-        // helper has to clean up, so it is the one to assert on.
-        assert!(crate::tx_lanes::with(|l| l.tx_claimed_by(app)));
-
-        crate::tx_lanes::with_mut(|l| l.withdraw_tx_session(app));
-        assert!(crate::tx_lanes::with(|l| l.tx_session_withdrawn(app)));
-
-        crate::testing::reset_context_for_tests();
-
-        assert!(
-            !crate::tx_lanes::with(|l| l.tx_claimed_by(app)),
-            "reset_context_for_tests left a transaction claim behind: the lane \
-             thread-local was not reset"
-        );
-        assert!(
-            !crate::tx_lanes::with(|l| l.tx_session_withdrawn(app)),
-            "reset_context_for_tests left a withdrawal tombstone behind: the \
-             next phase's session would be destroyed on return instead of parked"
-        );
-        // Re-claiming is the stronger statement, and it is the one a later
-        // phase of a multi-phase test actually makes: `tx_claimed_by` could
-        // read false off a half-cleared lane that still refuses a new claim.
-        assert!(
-            crate::tx_lanes::with_mut(|l| l.try_claim_tx(app)),
-            "the app is claimable again after a reset"
-        );
-    }
-
-    /// The descriptor store is the THIRD thread-local the reset must clear, and
-    /// the one furthest from the helper: it moved to `zeroship-data-core` on
-    /// 2026-09-02, so a reset that forgot it would leave a stale schema visible
-    /// to the next phase of a test - the exact L24 shape, where serving a read
-    /// against the wrong descriptor is what drops the projection allowlist.
-    #[test]
-    fn a_mid_test_reset_drops_an_installed_descriptor() {
-        let binding = zeroship_data_orm::binding::DbBinding::cold_start("app_reset_schema");
-
-        zeroship_data_orm::schema_cache::with_mut(|c| {
-            c.insert_one(
-                &binding,
-                "users",
-                zeroship_data_sql::value!({ "email": { "type": "string" } }),
-            );
-        });
-        assert!(zeroship_data_orm::schema_cache::with(|c| c.get(&binding, "users")).is_some());
-
-        crate::testing::reset_context_for_tests();
-
-        assert!(
-            zeroship_data_orm::schema_cache::with(|c| c.get(&binding, "users")).is_none(),
-            "reset_context_for_tests left a descriptor entry behind: the schema \
-             thread-local in data-core was not reset"
-        );
     }
 }
 

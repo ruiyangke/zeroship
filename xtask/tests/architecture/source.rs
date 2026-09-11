@@ -2,7 +2,7 @@ use proc_macro2::{TokenStream, TokenTree};
 use quote::ToTokens;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use syn::{parse::Parser, punctuated::Punctuated, visit::Visit, Attribute, Item, Lit, Meta, Token};
+use syn::{Attribute, Item, Lit, Meta, Token, parse::Parser, punctuated::Punctuated, visit::Visit};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Truth {
@@ -14,16 +14,7 @@ enum Truth {
 fn cfg(meta: &Meta) -> Truth {
     match meta {
         Meta::Path(path) if path.is_ident("test") => Truth::No,
-        Meta::NameValue(value) if value.path.is_ident("feature") => {
-            if let syn::Expr::Lit(value) = &value.value {
-                if let Lit::Str(value) = &value.lit {
-                    if value.value() == "test-helpers" {
-                        return Truth::No;
-                    }
-                }
-            }
-            Truth::Maybe
-        }
+        Meta::NameValue(value) if value.path.is_ident("feature") => Truth::Maybe,
         Meta::List(list) => {
             let args = Punctuated::<Meta, Token![,]>::parse_terminated
                 .parse2(list.tokens.clone())
@@ -261,11 +252,7 @@ pub fn module_tree(entry: &Path) -> BTreeMap<PathBuf, Source> {
                     "ambiguous or missing module {}",
                     flat.display()
                 );
-                if flat.exists() {
-                    flat
-                } else {
-                    nested
-                }
+                if flat.exists() { flat } else { nested }
             });
             let children = if path.file_name().unwrap() == "mod.rs" {
                 path.parent().unwrap().to_owned()
@@ -290,8 +277,8 @@ fn production_analysis_distinguishes_cfg_code_comments_and_literals() {
         r##"
         // compio_postgres::Comment
         #[cfg(test)] mod tests { use compio_postgres::TestOnly; }
-        #[cfg(feature = "test-helpers")] fn helper() { let _: rusqlite::Connection; }
-        #[cfg(not(feature = "test-helpers"))] fn shipped() { let _: RealDriver; }
+        #[cfg(test)] fn helper() { let _: rusqlite::Connection; }
+        #[cfg(not(test))] fn shipped() { let _: RealDriver; }
         #[cfg(any(test, feature = "production"))] fn possible() { let _: PossibleDriver; }
         #[cfg(all(test, feature = "production"))] fn impossible() { let _: ImpossibleDriver; }
         fn q() { format!(r#"SELECT id FROM users"#); panic!("rusqlite in an error"); }

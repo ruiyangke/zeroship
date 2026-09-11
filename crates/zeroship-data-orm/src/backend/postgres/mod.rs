@@ -1,11 +1,11 @@
 //! PostgreSQL sessions, native codecs, catalog access, and ORM driver integration.
 
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 use zeroship_data_orm::error::DbError;
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 use zeroship_data_orm::storage::LockManager;
 
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 pub mod lock_guard;
 pub mod pg_autocommit;
 pub mod pg_error;
@@ -33,7 +33,7 @@ pub use implementation::*;
 /// is load-bearing: the returned lease is the [`DatabaseFixture::Client`](zeroship_data_orm::storage::DatabaseFixture::Client) that
 /// [`LockManager::acquire_advisory_lock`](zeroship_data_orm::storage::LockManager::acquire_advisory_lock) takes, so the orchestrator can hand
 /// it straight into `LockGuard::acquire` without an adapter.
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 pub trait PgLockManager: LockManager<Client = compio_postgres::PoolConnection> {
     /// Acquire a pool-leased client for advisory-lock duty.
     ///

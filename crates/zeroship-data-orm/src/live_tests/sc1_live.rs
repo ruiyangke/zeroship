@@ -1,23 +1,3 @@
-/// Live arms binding the SC-1 reducer's model to a real server.
-///
-/// The reducer (`zeroship_data_orm::transaction::reducer`) is **pure** - it
-/// owns no session and issues no SQL - so a "live reducer test" would be a
-/// contradiction. What a live arm can and must prove is narrower: that the
-/// three **server behaviours the reducer models** are real on the server we
-/// ship against. Each arm below, if PostgreSQL behaved otherwise, would
-/// invalidate one specific modelling decision, and each names which.
-///
-/// Each test owns the PostgreSQL server used by its sessions.
-///
-/// Run with:
-///
-/// ```text
-/// cargo test -p zeroship-data-v8 --features test-helpers --test test_helpers \
-///   -- --test-threads=1 native_transaction::sc1_live
-/// ```
-///
-/// Everything these arms create is a `TEMP` table, which dies with the
-/// connection: nothing is left in the shared database to drop.
 mod sc1_live {
     use compio_postgres::{Client, NoTls, TransactionStatus};
     use zeroship_data_orm::transaction::reducer::{

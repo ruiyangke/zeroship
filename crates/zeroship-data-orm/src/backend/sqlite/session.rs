@@ -528,7 +528,7 @@ pub(crate) struct SqliteSession {
     /// whichever actor happened to receive the next command, so a gate armed
     /// by one test stalled a concurrently running test's actor and satisfied
     /// the arming test's `wait_until_blocked` with a foreign command.
-    #[cfg(any(test, feature = "test-helpers"))]
+    #[cfg(test)]
     next_command_gate: NextCommandGateSlot,
     /// Worker `JoinHandle`. Held only so the OS thread is tracked (we never
     /// join it from the session side - cancellation is signalled via the
@@ -577,7 +577,7 @@ const MAX_TX_LANES: usize = 8;
 /// Exported rather than repeated as a literal in the test: a test that spells
 /// its own `8` keeps passing when the cap moves, over a fixture that no longer
 /// reaches the boundary it claims to.
-#[cfg(feature = "test-helpers")]
+#[cfg(test)]
 pub const MAX_TX_LANES_FOR_TESTS: usize = MAX_TX_LANES;
 
 /// Startup handshake payload: the worker publishes `op_conn`'s interrupt
@@ -629,9 +629,9 @@ impl SqliteSession {
         let app_id_owned: Option<String> = app_id.map(str::to_string);
         let packet_tx_owned = packet_tx;
 
-        #[cfg(any(test, feature = "test-helpers"))]
+        #[cfg(test)]
         let next_command_gate: NextCommandGateSlot = Arc::new(Mutex::new(None));
-        #[cfg(any(test, feature = "test-helpers"))]
+        #[cfg(test)]
         let gate_for_worker = Arc::clone(&next_command_gate);
 
         let worker = std::thread::Builder::new()
@@ -644,7 +644,7 @@ impl SqliteSession {
                         return;
                     }
                 };
-                #[cfg(any(test, feature = "test-helpers"))]
+                #[cfg(test)]
                 {
                     actor.next_command_gate = gate_for_worker;
                 }
@@ -669,7 +669,7 @@ impl SqliteSession {
                 next_reservation: Cell::new(1),
                 tx_lanes: RefCell::new(HashMap::new()),
                 next_tx_lane: Cell::new(0),
-                #[cfg(any(test, feature = "test-helpers"))]
+                #[cfg(test)]
                 next_command_gate,
                 _worker: worker,
             }),
@@ -703,7 +703,7 @@ impl SqliteSession {
     /// **Test-only**: hand an autocommit reservation to the caller so it can be
     /// submitted twice. See
     /// [`crate::backend::sqlite::SqliteBackend::spent_autocommit_reservation_for_tests`].
-    #[cfg(feature = "test-helpers")]
+    #[cfg(test)]
     pub(crate) fn autocommit_reservation_for_tests(&self) -> Arc<Reservation> {
         self.autocommit_reservation()
     }
@@ -816,7 +816,7 @@ impl SqliteSession {
     /// refused with a typed error, and the class of bug the pre-SC-2 command
     /// shape could not express. It deliberately does NOT publish itself in
     /// `tx_owner`, so it cannot block a legitimate reservation.
-    #[cfg(feature = "test-helpers")]
+    #[cfg(test)]
     pub(crate) fn unregistered_transaction_handle_for_tests(
         self: &Rc<Self>,
     ) -> SqliteSessionHandle {
@@ -945,12 +945,6 @@ impl SqliteSession {
         recv_reply(reply_rx).await?
     }
 
-    /// Send a `VacuumInto` command and await the reply.
-    ///
-    /// The `#[allow(dead_code)]` is REAL and not defensive: the only caller is
-    /// in the `backup_sqlite` module (`backend/sqlite/mod.rs`), which is gated
-    /// on `feature = "test-helpers"`. In a default build that module does not
-    /// exist, so this method genuinely has no caller and rustc warns.
     #[allow(dead_code)]
     pub(crate) async fn vacuum_into(
         &self,
@@ -1271,7 +1265,7 @@ impl SqliteSessionHandle {
     }
 
     /// Execute native parameters and return the driver's text projection.
-    #[cfg(feature = "test-helpers")]
+    #[cfg(test)]
     pub async fn query_values(&self, sql: &str, params: &[Value]) -> Result<Vec<Row>, DbError> {
         let reservation = self.reservation();
         let (tx, rx) = flume::bounded(1);
@@ -1318,26 +1312,26 @@ impl From<Rc<SqliteSession>> for SqliteSessionHandle {
 // Test gate
 // ---------------------------------------------------------------------------
 
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 struct NextCommandGateWorker {
     entered_tx: flume::Sender<()>,
     release_rx: flume::Receiver<()>,
 }
 
 /// The arming slot one session shares with its own actor thread.
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 type NextCommandGateSlot = Arc<Mutex<Option<NextCommandGateWorker>>>;
 
 /// Test helper: stall the next worker command before execution until the
 /// returned gate is released.
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 #[derive(Debug)]
 pub struct NextCommandGate {
     entered_rx: flume::Receiver<()>,
     release_tx: flume::Sender<()>,
 }
 
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 impl NextCommandGate {
     pub async fn wait_until_blocked(&self) -> Result<(), DbError> {
         self.entered_rx.recv_async().await.map_err(|_| {
@@ -1350,7 +1344,7 @@ impl NextCommandGate {
     }
 }
 
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 impl SqliteSession {
     /// Install a one-shot gate for the next command **this session's** actor
     /// runs. Sessions do not share the slot, so a gate armed here can only ever
@@ -1429,7 +1423,7 @@ struct Actor {
     /// starts at 1.
     seq: u64,
     /// This actor's own gate slot, shared with the session that owns it.
-    #[cfg(any(test, feature = "test-helpers"))]
+    #[cfg(test)]
     next_command_gate: NextCommandGateSlot,
 }
 
@@ -1489,7 +1483,7 @@ impl Actor {
             app_id,
             packet_tx,
             seq: 0,
-            #[cfg(any(test, feature = "test-helpers"))]
+            #[cfg(test)]
             next_command_gate: Arc::new(Mutex::new(None)),
         })
     }
@@ -1798,7 +1792,7 @@ impl Actor {
 
     fn run(&mut self, rx: &flume::Receiver<Command>) {
         while let Ok(cmd) = rx.recv() {
-            #[cfg(any(test, feature = "test-helpers"))]
+            #[cfg(test)]
             {
                 let armed = self
                     .next_command_gate

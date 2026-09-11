@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 use std::path::PathBuf;
 
 use crate::backend::sqlite::SqliteBackend;
@@ -22,7 +22,7 @@ pub async fn open_sqlite_backend(
 }
 
 /// Test composition for the synchronous directory constructor.
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 pub fn new_sqlite_backend(
     db_dir: PathBuf,
     key_source: LocalKeySource,

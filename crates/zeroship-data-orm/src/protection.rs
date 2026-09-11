@@ -14,14 +14,8 @@ pub trait Protection {
     fn key_store(&self) -> &KeyStore;
 }
 
-#[cfg(not(feature = "test-helpers"))]
 pub(crate) mod encryption_pass;
-#[cfg(feature = "test-helpers")]
-pub mod encryption_pass;
 pub mod mask_pass;
 pub mod mask_policy;
-#[cfg(not(feature = "test-helpers"))]
 pub(crate) mod protection_floor;
-#[cfg(feature = "test-helpers")]
-pub mod protection_floor;
 pub mod unmask;

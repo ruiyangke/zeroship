@@ -35,9 +35,6 @@
 //! isolated from other tests and released with the server.
 //! Run: `cargo xtask test data --filter 'test(column_grants::)'`
 
-// `schema_fixture` is declared once by `tests/test_helpers.rs`, the entry file
-// this module hangs off; its header says why a second declaration here would be
-// a second copy of the shared fixtures' statics.
 #[allow(unused_imports)]
 use crate::schema_fixture::{fixture_table_sql, fixture_table_sql_for};
 #[allow(unused_imports)]

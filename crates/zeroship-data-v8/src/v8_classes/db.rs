@@ -512,7 +512,7 @@ mod tests {
             PINNED,
             zeroship_data_sql::SchemaName::new(APP).unwrap(),
         );
-        zeroship_data_orm::cache_schema_for_deploy_for_tests(
+        crate::testing::install_schema(
             &pinned_binding,
             COLLECTION,
             value!({ "marker": { "type": "string" } }),
@@ -543,7 +543,7 @@ mod tests {
             CURRENT,
             zeroship_data_sql::SchemaName::new(APP).unwrap(),
         );
-        zeroship_data_orm::cache_schema_for_deploy_for_tests(
+        crate::testing::install_schema(
             &current_binding,
             COLLECTION,
             value!({ "other": { "type": "string" } }),

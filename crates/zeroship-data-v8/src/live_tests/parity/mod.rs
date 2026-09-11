@@ -220,7 +220,7 @@ fn apply_matrix_schema_ahead_of_postgres(url: &str, app_id: &str, collection: &s
         // Provisioning that role is part of the deploy-time apply, not an
         // afterthought. The role recipe supplies schema and sequence reach; the
         // binding supplies explicit column grants.
-        zeroship_data_orm::auth::bootstrap::ensure_per_app_role(&pool, app_id)
+        crate::support::roles::ensure_per_app_role(&pool, app_id)
             .await
             .expect("provision the matrix app's runtime role");
         super::support::grant_all_runtime_table_columns(&pool, app_id, collection).await;
@@ -497,8 +497,7 @@ pub fn dispatch_zs_with_descriptor(
     }];
     let plugins: Vec<Arc<dyn NativePlugin>> = vec![
         DbService::new(DbServiceConfig {
-            connection: zeroship_data_orm::connection::ConnectionFactory::for_url(url)
-                .expect("valid database configuration"),
+            connection: crate::live_tests::recording::connection(url),
             cdc_relay: None,
             meter: None,
         })

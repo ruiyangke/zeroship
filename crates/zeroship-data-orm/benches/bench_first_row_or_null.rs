@@ -8,7 +8,10 @@ use compio_postgres::test_utils::{column_for_test, row_for_test};
 use compio_postgres::types::Type;
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 
-use zeroship_data_orm::backend::postgres::pg_row_json::first_row_or_null_for_bench;
+use zeroship_data_orm::error;
+#[path = "../src/backend/postgres/pg_row_json.rs"]
+#[allow(dead_code)]
+mod pg_row_json;
 
 // ---------------------------------------------------------------------------
 // Wire-format encoders for the OID branches we exercise
@@ -204,3 +207,12 @@ fn bench_first_row_or_null(c: &mut Criterion) {
 
 criterion_group!(benches, bench_first_row_or_null);
 criterion_main!(benches);
+
+fn first_row_or_null_for_bench(
+    rows: &[Row],
+) -> Result<zeroship_data_sql::value::Value, error::DbError> {
+    rows.first()
+        .map(pg_row_json::row_to_value)
+        .transpose()
+        .map(|row| row.unwrap_or(zeroship_data_sql::value::Value::Null))
+}

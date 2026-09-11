@@ -195,27 +195,6 @@ pub fn prefix_for_collection(
     Ok(prefix)
 }
 
-/// Run the auto-population pass over a single insert document.
-///
-/// Mutates `doc` in place when it is a JSON object. Non-object docs
-/// pass through untouched — the downstream `build_insert` will return
-/// a typed `InvalidFilter` error for those.
-///
-/// Idempotent: calling this twice on the same doc is a no-op the
-/// second time (every check is "field absent → inject").
-///
-/// Unconditionally `pub`: this crate's real release-vs-`test-helpers`
-/// visibility gate is on the ENCLOSING `system_fields_pass` module in
-/// `crud/mod.rs` (`pub(crate)` in release, `pub` under `test-helpers`), the
-/// same mechanism `encryption_pass` uses. This function used to be declared
-/// twice, once per feature arm, both times as `pub fn` with an identical
-/// body - a second, redundant no-op split one level below the module gate
-/// that already does the narrowing. Collapsed 2026-09-04.
-///
-/// # Errors
-///
-/// Returns a validation error before minting when the resolved typed-id prefix
-/// is malformed or reserved for platform ids.
 pub fn apply_system_fields_on_insert(
     doc: &mut Value,
     schema: &Value,
@@ -350,41 +329,6 @@ fn inject_into_object(
 // UPDATE-time validation pass + CAS-version extraction.
 // ---------------------------------------------------------------------------
 
-/// Run the UPDATE-time assignment pass over an UPDATE patch, in place.
-///
-/// The charter decides both arms; this function names no column.
-///
-/// 1. **Fixed at insert** (`on = "insert"`) — the patch may not carry the
-///    column at all. Returns a typed
-///    `DbError::ValidationFailed { code: "immutable_system_field" }` via
-///    `QueryError::ImmutableSystemField`. Refusal rather than removal is right
-///    HERE and only here: an update patch is entirely creator-authored, so
-///    "the creator sent it" is knowable, and silently discarding an attempt to
-///    rewrite `created_by` would let the caller believe it landed.
-/// 2. **Re-assigned on every write** (`on = "write"`) — the key is REMOVED.
-///    The SQL builder then appends its own `version` / `updated_at` /
-///    `updated_by` clauses unconditionally, because the patch can no longer
-///    carry a competing assignment to the same column.
-/// 3. **Assigned on delete** (`on = "delete"`) — left exactly as the caller
-///    sent it, and that is a DEPENDENCY, not an exemption. The SDK's own soft
-///    delete is an UPDATE carrying `deleted_at`
-///    (`sdks/db/src/collection/crud.ts:519-523` and `:562-566`; restore is
-///    `:745-748`), so touching it here would refuse the platform's own
-///    `delete()`. Soft delete has to route through the native op first.
-///
-/// Both arms cover the top-level keys, the nested `$set`, and the arithmetic
-/// operators `$inc` / `$dec` / `$mul`, matching the flattening
-/// `build_set_clauses` performs.
-///
-/// A patch whose ONLY key was a re-assigned column comes out empty and the SQL
-/// builder rejects it with `update fields cannot be empty`. That is a true
-/// statement about the request - nothing remained to write - and it is the
-/// builder's own message rather than a second refusal here.
-///
-/// Unconditionally `pub`: same rationale as
-/// [`apply_system_fields_on_insert`] - the module gate in `crud/mod.rs`
-/// does the release-vs-`test-helpers` narrowing, so this is not duplicated
-/// per feature arm.
 pub fn apply_system_fields_on_update(
     patch: &mut Value,
     app_id: &str,

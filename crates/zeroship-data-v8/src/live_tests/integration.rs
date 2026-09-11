@@ -203,10 +203,8 @@ fn hex_of(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 #[allow(unused_imports)]
-use zeroship_data_orm::fixtures::DatabaseFixture;
-
 #[allow(unused_imports)]
 use zeroship_data_orm::search::Search;
 
@@ -297,7 +295,7 @@ async fn workflow_journal_redeploy_grants_do_not_reopen_without_reprovision() {
     zeroship_plugin_workflow::store::pg::PgStore::provision(&client, &app_id)
         .await
         .expect("provision app-local workflow journal");
-    zeroship_data_orm::auth::bootstrap::ensure_per_app_role(&pool, &app_schema)
+    crate::support::roles::ensure_per_app_role(&pool, &app_schema)
         .await
         .expect("redeploy plugin-db per-app role grants");
 

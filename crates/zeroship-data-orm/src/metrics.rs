@@ -118,7 +118,7 @@ fn handle_for(app_id: &str) -> Option<zeroship_metering::MeterHandle> {
 }
 
 /// Drop this thread's meter.
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 pub fn reset_for_tests() {
     stamp(None);
 }

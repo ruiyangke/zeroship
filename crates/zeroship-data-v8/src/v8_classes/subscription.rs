@@ -46,7 +46,8 @@ use crate::broker::{self, Subscription as BrokerSubscription, SubscriptionMessag
 /// backend and the worker's authenticated relay configuration.
 async fn ensure_cdc_ready(app_id: &str) -> Result<(), zeroship_data_orm::error::DbError> {
     let backend = crate::tx_scope::ensure_backend().await?;
-    zeroship_data_orm::cdc::lifecycle::ensure_ready(app_id, backend, crate::tx_scope::cdc_relay()).await
+    zeroship_data_orm::cdc::lifecycle::ensure_ready(app_id, backend, crate::tx_scope::cdc_relay())
+        .await
 }
 
 // ---------------------------------------------------------------------------
@@ -508,7 +509,7 @@ mod tests {
         // altogether). Run in a fresh thread so we don't race with
         // other broker users on this test runner thread.
         let handle = std::thread::spawn(|| {
-            assert_eq!(broker::live_subscription_count(), 0);
+            assert_eq!(broker::app_subscription_count("test_app_unit"), 0);
             zeroship_runtime::init_v8();
             let mut isolate = v8::Isolate::new(v8::CreateParams::default());
             v8::scope!(let handle_scope, &mut isolate);
@@ -519,7 +520,7 @@ mod tests {
                 let _obj = super::mint_subscription(inner, "test_app_unit", "messages")
                     .expect("mint_subscription should succeed");
                 assert_eq!(
-                    broker::live_subscription_count(),
+                    broker::app_subscription_count("test_app_unit"),
                     1,
                     "expected exactly one broker entry after mint"
                 );
@@ -530,7 +531,7 @@ mod tests {
             // below would race the finalizer.
             scope.request_garbage_collection_for_testing(v8::GarbageCollectionType::Full);
             scope.perform_microtask_checkpoint();
-            assert_eq!(broker::live_subscription_count(), 0);
+            assert_eq!(broker::app_subscription_count("test_app_unit"), 0);
         });
         handle.join().expect("thread panicked");
     }
