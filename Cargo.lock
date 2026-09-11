@@ -8696,7 +8696,10 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "compio",
+ "rusqlite",
  "serde_json",
+ "tempfile",
+ "uuid",
  "v8",
  "zeroship-runtime",
  "zeroship-runtime-macros",
