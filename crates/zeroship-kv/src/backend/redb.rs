@@ -215,7 +215,7 @@ impl Backend for RedbBackend {
             let removed = table
                 .remove(scoped.as_str())
                 .map_err(|e| KvError::backend(format!("kv: redb delete remove: {e}")))?;
-            removed.is_some()
+            removed.is_some_and(|row| !is_expired(row.value().1, now_ms()))
         };
         txn.commit()
             .map_err(|e| KvError::backend(format!("kv: redb delete commit: {e}")))?;
