@@ -27,8 +27,7 @@
 //! ```
 
 use std::collections::HashMap;
-#[path = "../../../tests/fixtures/postgres/mod.rs"]
-mod postgres;
+use zeroship_test_fixtures::postgres;
 #[path = "support/tracing.rs"]
 mod test_tracing;
 mod relay_fixture;
