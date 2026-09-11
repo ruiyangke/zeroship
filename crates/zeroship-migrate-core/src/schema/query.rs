@@ -334,20 +334,7 @@ pub fn validate_collection(vendors: VendorSet, name: &str) -> Result<(), QueryEr
     Ok(())
 }
 
-/// Taxonomy of reserved name shapes the platform
-/// enforces on creator-declared field names.
-///
-/// Three match arms cover the patterns we currently reserve:
-/// - `Exact(s)`  - refuse a field named literally `s`.
-/// - `Prefix(p)` - refuse any field name starting with `p`.
-/// - `Suffix(s)` - refuse any field name ending with `s`.
-///
-/// The `_masked` suffix is reserved for sibling columns auto-emitted
-/// by the platform's `.mask()` / `.encrypted()` machinery (Path B).
-/// The six default classifications
-/// (`public`/`pii`/`spi`/`phi`/`pci`/`internal`) are reserved as
-/// exact names so creator schemas cannot collide with the
-/// classification taxonomy used by audit + authorization.
+/// Platform field-name reservations: exact names, prefixes and suffixes.
 pub(crate) enum ReservedName {
     /// Literal name match - refuse a field named exactly `&str`.
     Exact(&'static str),
@@ -357,37 +344,13 @@ pub(crate) enum ReservedName {
     Suffix(&'static str),
 }
 
-/// Platform-reserved field names. Centralised list - every new
-/// reserved prefix / suffix / exact-name lands here, exercised by
-/// both the schema-registration validator and the filter-time
-/// validator (the latter fences `db.users.find({ ssn_masked: ... })`
-/// with the same error code path).
+/// Platform-reserved field names checked alongside vendor identifier reservations.
 pub(crate) const RESERVED_NAMES: &[ReservedName] = &[
     // Synthetic-result columns the runtime emits (e.g. `_distance` and
     // `_score` on vector / spatial search). Reserved so creator-declared
     // columns can't shadow them.
     ReservedName::Prefix("_"),
-    // `ReservedName::Prefix("__zero_migrate_")` SAT HERE until 2026-09-07, kept
-    // for the mirror with `validate_collection` rather than for effect - the scan
-    // returns on its first match and `Prefix("_")` above catches every name it
-    // could. It went with the collection-side reservation, which is what it
-    // mirrored: the engine's journal is `__zeroship_schema_migrations` and
-    // nothing in the tree is named with a `__zero_migrate` PREFIX. Column-level
-    // coverage is unchanged, because `Prefix("_")` was always the rule doing the
-    // work.
-    // `ReservedName::Prefix("sqlite_")` USED TO SIT HERE, in a table this file calls
-    // PLATFORM-reserved. It is not a platform reservation: it is one BACKEND's internal
-    // schema namespace, and it was the only row here that belonged to a vendor rather
-    // than to zero-migrate. The backend that owns it declares it now
-    // (`Limits::reserved_identifier_prefixes`), and `validate_field_name` checks every
-    // REGISTERED backend's reservations below - so a fourth backend's namespace is
-    // fenced by the same loop instead of needing a row added to this table.
-    // Masked-column sibling suffix. The platform
-    // emits `<col>_masked` siblings (Path B); creators must not
-    // declare a column ending in `_masked` themselves. Refused at
-    // both schema-registration time (in `field_to_column_for_dialect`) and
-    // filter-time (so `db.users.find({ ssn_masked: ... })` is
-    // refused with the same code path).
+    // Platform-reserved suffix.
     ReservedName::Suffix("_masked"),
     // Six default-classification names. Reserved at
     // the column-name level so creator schemas can't accidentally
@@ -402,28 +365,9 @@ pub(crate) const RESERVED_NAMES: &[ReservedName] = &[
     ReservedName::Exact("internal"),
 ];
 
-/// Validate a field (column) name used in DDL.
-///
-/// Postgres silently truncates identifiers longer than 63 bytes (NAMEDATALEN),
-/// which would alias two distinct fields to the same column. Injection is
-/// already blocked by `quote_ident`. The ASCII allowlist matches
-/// [`validate_collection`]'s policy: a multi-byte identifier like `"cafe"`
-/// is 4 chars / 5 bytes, and two distinct unicode-spelled fields could
-/// collide on the same Postgres-truncated column if either side approached
-/// the 63-byte ceiling. Enforcing ASCII-alphanumeric + underscore prevents
-/// that whole class.
-///
-/// Also refuses any field name matching the
-/// `RESERVED_NAMES` table (platform suffixes / prefixes / exact
-/// names). The `_masked` suffix is reserved for Path B sibling
-/// columns; the six default-classification names (`public`, `pii`,
-/// `spi`, `phi`, `pci`, `internal`) are reserved at the column-name
-/// level.
-///
-/// This function intentionally has no policy context and therefore does NOT fence
-/// names injected by an active table policy. Those names are reserved only at
-/// schema-declaration time, not at filter time. Declaration paths must call
-/// [`validate_field_name_for_declaration`] instead of this function.
+/// Validate a DDL field identifier against length, syntax and reserved-name rules.
+/// Declaration paths additionally check policy-injected names with
+/// `validate_field_name_for_declaration`.
 pub fn validate_field_name(vendors: VendorSet, name: &str) -> Result<(), QueryError> {
     if name.is_empty() {
         return Err(QueryError::InvalidIdent(
@@ -605,42 +549,12 @@ fn validate_schema(name: &str) -> Result<(), QueryError> {
     Ok(())
 }
 
-/* THE BACKTICK SPELLING IS GONE FROM CORE TOO.
- *
- * It used to live here as `pub fn mysql_quote_ident`, and it was the exact MIRROR
- * IMAGE of the ANSI arrangement described below: instead of core reaching a
- * backend-private primitive through a named door, the MySQL BACKEND reached into
- * core - `render::backends::mysql` called this function to get its own spelling.
- *
- * Nothing here was mis-emitted. Every call site named MySQL in the callee's name,
- * so unlike the `quote_ident` case there was no unnamed vendor, and the
- * one-dialect-literal test passed because the reach was by function name rather
- * than a closed-enum literal. What it blocked was the crate split: the future
- * `zeroship-migrate-mysql` would have needed core AT RUNTIME to spell an identifier.
- *
- * The bytes now live in `render::backends::mysql`'s own `quote_ident`, which core
- * cannot name, so this module reaches them the same way it reaches the ANSI ones -
- * through the registered schema renderer.
- */
-
 // ---------------------------------------------------------------------------
 // DDL builders for declarative schema application
 // ---------------------------------------------------------------------------
 
-/* THE `pub fn` THAT BUILT A `CREATE SCHEMA` STATEMENT IS DELETED. It had ZERO callers:
- * one mention in the whole repository across every `.rs` and `.ts` file, and that
- * mention was its own definition. A previous pass routed its identifier through the
- * PostgreSQL door rather than delete it, because removing public API was outside that
- * brief; the routing was correct and the function was still dead. `CREATE SCHEMA` is
- * emitted by the apply layer, not from here. */
-
-// The production CREATE path passes the orchestrator's live table set through
-// `FkEmission::Deferred` so an FK to a not-yet-created target becomes a separate
-// `ALTER TABLE ... ADD CONSTRAINT` rather than an inline clause the statement
-// order cannot satisfy. `render::declarative::lower_create_table` is that caller,
-// reaching `build_create_table_with_fks_for_dialect_scoped_statements` directly.
-// The orchestrator that drives these builders in production is appbase's plugin-db,
-// from which this kernel was seeded; nothing in this workspace plays that role.
+// Declarative lowering defers foreign keys whose targets are not yet present.
+// The apply plan adds them after the required tables exist.
 
 /// Controls FK emission strategy for `build_create_table_with_fks_for_dialect`.
 ///
@@ -693,20 +607,9 @@ pub fn build_create_table_with_fks_for_dialect(
     )
 }
 
-/// Scope-aware variant of [`build_create_table_with_fks_for_dialect`]. Identical
-/// in every respect except that a caller may request unqualified table/index
-/// targets. The selected backend owns whether that primitive changes its syntax;
-/// PostgreSQL and MySQL explicitly ignore it.
-///
-/// The migrate engine's Confined SQLite path passes
-/// `unqualified = true` so the emitted DDL is UNqualified and
-/// lands in `main` (= the app file) under the hardened authorizer (which denies
-/// any non-`main` alias). The plugin-db runtime passes
-/// `unqualified = false` (via the stable entry point) because it
-/// ATTACHes the file under the `<app_id>` alias.
-///
-/// # Errors
-/// Same as [`build_create_table_with_fks_for_dialect`].
+/// Build table and index DDL with optional unqualified SQLite targets.
+/// Confined migrations use `main`; host fixtures may target an attached alias.
+/// Other dialects retain their normal qualification rules.
 pub fn build_create_table_with_fks_for_dialect_scoped(
     vendors: VendorSet,
     app_id: &str,
@@ -1453,31 +1356,11 @@ pub struct IndexSpec {
     pub unique: bool,
     /// `CREATE ...` DDL ready for execution.
     pub sql: String,
-    /// Index shape - selects the backend builder branch.
-    ///
-    /// EVERY index, not just the exotic kinds, is deferred to a second pass by
-    /// the orchestrator that consumes these ops: appbase's `plugin-db` splits on
-    /// `ChangeKind::AddIndex`, releasing the advisory lock before pass 2 because
-    /// holding it through `CREATE INDEX CONCURRENTLY` deadlocks. This comment
-    /// used to name `Vector` / `Spatial` as the ones that "dispatch
-    /// through Pass 2", which would read as false the moment a fifth kind is
-    /// added. The partition is by op, not by kind.
+    /// Index shape used to select the backend renderer.
     pub kind: IndexKind,
 }
 
-/// Index shape - the closed sum over the four kinds of indexes
-/// declarative schema application can materialise.
-///
-/// The default is [`IndexKind::BTree`] so every existing call site keeps
-/// the same observable behaviour. Which kind an index carries does NOT decide
-/// when it is created: a consuming orchestrator defers every `AddIndex` op
-/// alike (see [`IndexSpec::kind`]).
-///
-/// **Why an enum, not a string**: same rationale as
-/// [`crate::schema::descriptors::VectorMetric`] - the rustc exhaustiveness check
-/// trips every match arm if a future change adds a fifth kind, rather
-/// than a default branch silently routing the new kind to the B-tree
-/// builder.
+/// Index shape for backend-specific DDL generation.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum IndexKind {
     /// Plain B-tree index over the listed columns. PG: `CREATE INDEX
@@ -1577,16 +1460,8 @@ pub fn build_create_indexes(
             continue;
         }
 
-        // Vector fields always emit an `IndexKind::Vector`
-        // spec regardless of the `index`/`unique` markers; the SDK's
-        // `t.vector()` builder doesn't expose those modifiers (they
-        // would be meaningless on an ivfflat-indexed column). The
-        // builder leaves the `sql` field EMPTY because the consumer builds the
-        // DDL itself - it needs the metric-specific opclass, which the spec
-        // does not carry. In appbase that consumer is
-        // `VectorIndex::ensure_vector_index`, reached from plugin-db's
-        // second index pass; this workspace ships no such builder, so an empty
-        // `sql` here is a contract with the embedder rather than an omission.
+        // Vector descriptors produce metadata for dialect-specific index planning.
+        // This field-level helper does not generate vector-index DDL.
         if def.get("type").and_then(|t| t.as_str()) == Some("vector") {
             let dims = def
                 .get("vectorDims")

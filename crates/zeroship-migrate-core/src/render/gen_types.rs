@@ -1,53 +1,12 @@
-//! **`gen-types` - the schema-artifact emitter.** Emit a typed authoring-schema
-//! artifact FROM the schema source (op.* migrations OR a declared
-//! `CollectionDescriptor` set). The runtime projection consumes the fold-and-recover
-//! seam - `FoldedSchema::project_field_defs`, which replaced a deleted op-stream
-//! `FieldDef` walker (`docs/proposals/single-fold-and-effects.md`) and reads
-//! the same value the other two projections are read from; the TypeScript projection
-//! replays the richer IR so physical types, defaults, value formats, and keys are
-//! not collapsed by the runtime `FieldDef` vocabulary.
+//! Generate runtime descriptors and passive TypeScript authoring schemas.
 //!
-//! (Backticks rather than an intra-doc link: the replacement is a `pub` method on a type
-//! this module does not import, and the link this line used to carry became the crate's
-//! only NEW `unresolved link` warning the moment the walker was deleted. Measured with
-//! `cargo doc -p zero-migrate --no-deps`, which no gate in this repo runs - so a dangling
-//! link here would have shipped green.)
+//! Migration operations and collection descriptors enter the same fold for the
+//! selected dialect. Runtime fields include protection and physical storage
+//! metadata; the TypeScript projection retains the richer authoring types, defaults
+//! and constraints using `@zeroship/migrate`.
 //!
-//! Two projections are produced from ONE snapshot, in ONE pass ([`render_artifacts`]):
-//!
-//! - **`schema.runtime.json`** - the v2 `RuntimeSchemaDescriptor`:
-//!   `{ version: 2, collections: { [collection]: { fields, options, indexes }}}`,
-//!   where each `FieldDef` additionally carries the physical `storage` mapping
-//!   (`valueColumn` / `rawColumn` / the raw column's capabilities) and
-//!   its own read-surface capability flags.
-//!   The `fields` map is snake_case columns, including exactly the fields injected
-//!   by the caller's effective policy, as the fold recovers them. The runtime
-//!   validates this shape.
-//! - **`env.db.ts`** - a GENERATED, passive `CreateTableArgs` schema map using the
-//!   current `zero-migrate` authoring builders. It contains no lifecycle calls;
-//!   `satisfies Record<string, CreateTableArgs>` makes `tsc` validate every emitted
-//!   column/constraint against the real public package.
-//!
-//! **Byte-identical-by-construction.** Both sources funnel through ONE renderer:
-//! op.* migrations fold directly; a declared `CollectionDescriptor` set is turned
-//! into ops via [`crate::descriptors_to_create_ops`] and then folds the same way.
-//! So the generated and manual paths produce identical artifacts for equivalent
-//! schemas - for the SAME target dialect. The artifacts are per-target, not
-//! portable: the fold selects `Op::Dialectal` legs, so one history legitimately
-//! yields different column sets on Postgres and MySQL.
-//!
-//! [`check_artifacts`] DIFFS already-generated artifacts against the committed ones -
-//! the CI drift gate, no DB write and no IO. It does NOT regenerate: it takes a
-//! `&GeneratedArtifacts` the CALLER produced and delegates to [`diff_artifacts`]. The
-//! distinction is not pedantry. This line used to say "regenerates", and a reviewer
-//! reasoning about what a change to the renderer could reach repeated it and had to be
-//! corrected by reading the signature - which is the cost of a doc that describes a
-//! function's job rather than its inputs.
-//!
-//! Alongside them, [`render_schema_export`] returns the same two artifacts PLUS the
-//! typed collection set they were rendered from, for a host that wants to render its
-//! own files rather than consume these. [`render_artifacts`] is that function with the
-//! collections dropped, so there is one fold behind both.
+//! `render_schema_export` also returns typed collection descriptors.
+//! `check_artifacts` compares supplied generated artifacts with committed text.
 
 use std::collections::{BTreeMap, BTreeSet};
 use zeroship_migrate_backend::registry::VendorSet;

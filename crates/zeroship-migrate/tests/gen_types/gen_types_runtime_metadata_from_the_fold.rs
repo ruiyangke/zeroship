@@ -1,71 +1,9 @@
-//! **Step 4, consumer 1: the runtime collection metadata comes from the single fold.**
+//! Check runtime collection metadata against the recorded corpus.
 //!
-//! `docs/proposals/single-fold-and-effects.md` section G step 4 moves the artifact
-//! consumers off their private walkers one at a time, and the runtime-metadata
-//! walker is the first because it has the smallest blast radius.
-//! This file is the gate on that move.
-//!
-//! # What the move can actually change, measured rather than assumed
-//!
-//! The metadata map reaches exactly three places in the two artifacts:
-//!
-//! * `schema.runtime.json` -> `collections[<t>].options` (the three runtime flags),
-//! * `schema.runtime.json` -> `collections[<t>].indexes` (the plain index list),
-//! * `env.db.ts` -> the `runtimeOptions` block (`render_table` passes the metadata
-//!   entry to `render_runtime_options` and to nothing else - the `indexes:` block in
-//!   `env.db.ts` is rendered from the AUTHORING table, not from here).
-//!
-//! Everything else in both artifacts comes from the other two walkers, which this
-//! move does not touch. So the assertions below probe those three places per FIELD,
-//! and [`the_recorded_corpus_renders_the_same_artifacts_through_the_fold`] pins the
-//! whole of both artifacts by content hash so a change outside those three places
-//! cannot pass unnoticed either.
-//!
-//! # Why these streams
-//!
-//! The step 3 gate (`render/gen_types/fold_projection_equality.rs`) proved
-//! `project_runtime_metadata` equal to that walker and found no
-//! difference. It was nonetheless BLIND to the three divergences below, because no
-//! stream in the step 1 corpus crosses a `unique` column with a rename or with a
-//! `dropIndex`. Passing that gate was necessary and not sufficient, and these are the
-//! streams that show why.
-//!
-//! Be precise about how much that gate established, because "2,720 byte-identical
-//! comparisons" is the number that gets quoted and it is the wrong one: 2,720 was the
-//! total across ALL FOUR projections. The runtime-metadata leg contributed **683** of
-//! it - measured, as the fall in `EQUAL_COMPARISONS` when that leg retired and
-//! nothing else about the corpus changed. Quoting the four-projection total for a
-//! one-projection claim overstates the prior evidence fourfold, and an inflated
-//! evidence claim is the same failure as a gate that passes for the wrong reason,
-//! only in prose.
-//!
-//! # The rule the three rename arms encode
-//!
-//! An implicit unique index is named `<table>_<column>_key` ONCE, when `createTable`
-//! creates it. PostgreSQL and SQLite store an index name independently of the table
-//! and column it covers, so neither `ALTER TABLE ... RENAME TO` nor
-//! `ALTER TABLE ... RENAME COLUMN` renames it. `render/fold.rs`'s `Op::RenameTable`
-//! arm states the same rule for the catalog half and cites the live-server test that
-//! measured it (`fold_roundtrip_pg.rs`: "`ALTER TABLE tags RENAME TO labels`
-//! genuinely leaves `tags_pkey` named `tags_pkey`"). A projection that re-derived the
-//! name from the CURRENT table and column would put an index name in
-//! `schema.runtime.json` that no catalog anywhere has.
-//!
-//! # The one deliberate behaviour CHANGE
-//!
-//! [`dropping_an_included_column_drops_the_index_from_the_runtime_descriptor`] is the
-//! single row where the old walker and the new projection disagree AND the old walker
-//! is the one that is wrong. That walker retained an index whose
-//! `INCLUDE` payload named the dropped column, because it matched on its own `fields`
-//! list and `INCLUDE` columns were never in it. `render/fold.rs` records the
-//! measurement that settles it - on PG 18.4,
-//! `CREATE INDEX i ON t (b) INCLUDE (a); ALTER TABLE t DROP COLUMN a` leaves no `i` in
-//! `pg_indexes` - so the artifact named an index the database does not have. The fold
-//! cascades it away, the authoring-table walker already cascaded it away for
-//! `env.db.ts`, and this arm pins the corrected answer.
-//!
-//! Offline throughout: the oracle is the emitted artifact, so there is no skip here
-//! that could read as a pass.
+//! Lifecycle carriers verify index identity and removal across schema changes.
+//! Option and index rows describe metadata changes; artifact hashes also cover
+//! fields and the accompanying TypeScript authoring schema.
+//! The golden comparison has no automatic update mode.
 
 use crate::support;
 
