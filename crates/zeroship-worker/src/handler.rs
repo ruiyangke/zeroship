@@ -4240,9 +4240,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
             crate::cache::KernelConfig {
                 control_url: "http://127.0.0.1:1".to_string(),
                 control_key: String::new(),
-                db_service: db_url
-                    .as_deref()
-                    .map(|url| crate::cache::test_db_service(url)),
+                db_service: db_url.as_deref().map(crate::cache::test_db_service),
                 kv_store: None,
                 storage_backend: None,
                 meter: meter.clone(),
