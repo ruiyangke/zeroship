@@ -13,8 +13,8 @@ const users = {
   age: internalDbType.number(),
   role: internalDbType.string(),
   active: internalDbType.boolean(),
-  // A DEFAULT-mode encrypted column. `internalDbType.encrypted()`
-  // stamps `encrypted: { mode:"randomised", keyId:"default", wraps:"string" }` AND a
+  // An encrypted column using the default key. `internalDbType.encrypted()`
+  // stamps `encrypted: { keyId:"default", wraps:"string" }` AND a
   // fail-safe auto-mask `{ kind:"full", classification:"pii" }`; the author->generate
   // ->fold chain must recover BOTH byte-identically.
   token: internalDbType.encrypted(),

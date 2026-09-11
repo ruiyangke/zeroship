@@ -192,7 +192,7 @@ fn no_non_character_spelling_takes_a_collation() {
         ("bytes", serde_json::json!({ "type": "bytes" }), "LONGBLOB"),
         (
             "encrypted",
-            serde_json::json!({ "type": "string", "encrypted": { "mode": "deterministic" } }),
+            serde_json::json!({ "type": "string", "encrypted": {  } }),
             "LONGBLOB",
         ),
         ("vector", serde_json::json!({ "type": "vector" }), "BLOB"),

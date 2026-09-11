@@ -97,7 +97,7 @@ mod tests {
         let ct2 = encrypt(&key, pt, aad).expect("encrypt 2");
         assert_ne!(
             ct1, ct2,
-            "randomised mode must produce a fresh nonce per write"
+            "each write must produce a fresh nonce"
         );
 
         let recovered1 = decrypt(&key, &ct1, aad).expect("decrypt 1");

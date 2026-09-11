@@ -1722,7 +1722,7 @@ mod tests {
     // -----------------------------------------------------------------
 
     /// Round-trip a single encrypted column: emitter shape → parser
-    /// extracts `(mode, key_id, wraps)` correctly.
+    /// extracts `(key_id, wraps)` correctly.
     #[test]
     fn parse_encryption_sentinel_single_column() {
         let ddl = "CREATE TABLE \"app\".\"users\" (\n  \
@@ -1743,7 +1743,7 @@ mod tests {
         assert!(!got.contains_key("id"));
     }
 
-    /// Deterministic mode + non-string wraps + custom key id.
+    /// Non-string wraps with a custom key id.
     #[test]
     fn parse_encryption_sentinel_number_custom_key() {
         let ddl = "CREATE TABLE \"app\".\"events\" (\n  \
@@ -1757,11 +1757,9 @@ mod tests {
         ));
     }
 
-    /// US spelling `randomized` round-trips as canonical Randomised
-    /// (the DDL emitter normalises but a hand-edited DDL could carry
-    /// the US form).
+    /// Byte-valued plaintext retains its wrapped type.
     #[test]
-    fn parse_encryption_sentinel_accepts_us_spelling() {
+    fn parse_encryption_sentinel_bytes() {
         let ddl = "CREATE TABLE t (\"a\" BYTEA /* zero-migrate:enc:default:bytes */)";
         let got = parse_encryption_sentinels(ddl);
         let m = got.get("a").expect("a must be parsed");

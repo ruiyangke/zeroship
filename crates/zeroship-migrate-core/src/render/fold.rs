@@ -4781,7 +4781,7 @@ fn add_constraint_snapshot(
 // CHECK there - it cannot render the SQL `definition` offline); this seam
 // reconstructs, per column, the FieldDescriptor / wire-`FieldDef` the SDK type
 // inference consumes, by RECOVERING facets from the applied migration shape:
-//   - type / vector dims / encrypted (default mode) / ref target / id_prefix /
+//   - type / vector dims / encrypted / ref target / id_prefix /
 //     vector_metric - already on the descriptor `ir_column_to_field` builds from
 //     the op `IrColumn` (the carried fields + the structural ones);
 //   - enum / min / max - LIFTED from the canonical closed-AST CHECK shapes
@@ -9285,15 +9285,14 @@ columns = [
     }
 
     #[test]
-    fn recover_encrypted_default_mode_facet() {
-        // An encrypted column is recovered structurally (default mode) - the
-        // ONLY encrypted shape op.* can author (see the encrypted-mode finding test).
+    fn recover_encrypted_facet() {
+        // Recover encryption metadata from the structural encrypted column type.
         let secret = col("secret", encrypted_text(), true);
         let m = defs(&[create("vaults", vec![secret])]);
         let def = field_def(&m, "vaults", "secret");
         assert!(
             def.get("encrypted").is_some(),
-            "an encrypted column is recovered with the (default-mode) encrypted facet: {def}"
+            "an encrypted column is recovered with the encrypted facet: {def}"
         );
     }
 

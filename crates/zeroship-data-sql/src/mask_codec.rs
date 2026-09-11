@@ -308,7 +308,7 @@ mod tests {
     #[test]
     fn parse_encryption_sentinel_rejects_missing_prefix() {
         assert!(
-            parse_encryption_sentinel("randomised:default:string")
+            parse_encryption_sentinel("default:string")
                 .unwrap_err()
                 .message()
                 .contains("enc_sentinel_malformed")

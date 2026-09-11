@@ -331,18 +331,7 @@ fn parse_wraps(enc_meta: &zeroship_data_sql::value::Map<String, Value>) -> &'sta
 mod tests {
     use super::*;
 
-    /// A key store over one supplied root, for the encrypt/decrypt tests.
-    ///
-    /// This replaces three hand-written `StubBackend` types that each impl'd
-    /// the `EncryptedColumn` trait deleted on 2026-09-02. Each stub returned a
-    /// FIXED `AeadKey` and re-implemented the mode dispatch, so the tests
-    /// exercised a copy of the production path rather than the path itself.
-    /// A real `KeyStore` runs the actual HKDF expansion, which is strictly more
-    /// binding; the tests assert round-trips and AAD behaviour, neither of
-    /// which depends on the key's bytes.
-    ///
-    /// `supplied`, never `env_var`: the root is handed to the store directly,
-    /// so no test reads or writes process environment.
+    /// Exercise production key derivation with directly supplied test roots.
     fn test_key_store() -> KeyStore {
         use crate::encryption::{LocalKeySource, SuppliedRootKeys};
         let keys = std::rc::Rc::new(

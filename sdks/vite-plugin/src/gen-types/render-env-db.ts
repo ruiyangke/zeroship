@@ -294,8 +294,8 @@ function renderBuilderChain(def: RuntimeFieldDef): string {
 /**
  * `t.encrypted({ keyId?, wraps? })`.
  *
- * The kernel-default triple (`randomised` / `default` / `string`) is what a bare
- * `t.encrypted()` stamps, so it collapses back to the bare form: the two
+ * The default key (`default`) and wrapped type (`string`) are what a bare
+ * `t.encrypted()` stamps, so they collapse back to the bare form: the two
  * spellings produce the same `TypeBuilder`, and the full facet is preserved in
  * `schema.runtime.json` regardless. Only a non-default facet renders opts.
  */

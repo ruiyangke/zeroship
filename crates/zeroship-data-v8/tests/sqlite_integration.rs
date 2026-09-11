@@ -2928,9 +2928,8 @@ fn a_near_inside_a_transaction_sees_the_row_that_transaction_inserted() {
 // ===========================================================================
 //
 // These tests exercise the full SQLite round-trip for `t.encrypted(...)`-
-// declared columns: env-var key sourcing through KeyStore, AES-GCM
-// encrypt with the right AAD shape (Camp A - row_pk in AAD for
-// Randomised, omitted for Deterministic), BLOB storage on disk via
+// declared columns: supplied keys through KeyStore, AES-GCM encryption
+// authenticating the row primary key, BLOB storage on disk via
 // rusqlite's typed BLOB binding, decrypt-on-read. Mirrors the PG suite's
 // column-encryption tests in `tests/integration.rs`.
 
@@ -4603,16 +4602,8 @@ const _procedures = { seed, nestedCasUpdateMany };
     });
 }
 
-/// **Gate #1 (SQLite half)**: round-trip an encrypted string
-/// column under Randomised mode. Insert a row with `ssn` declared
-/// `t.encrypted({  })`, read it back via the SQLite
-/// path, expect the plaintext to recover.
-///
-/// Each SQLite test uses a UNIQUE `keyId` so concurrent tests don't
-/// race on the process-global env table - the
-/// `ZEROSHIP_COLUMN_KEY_<KEYID>` namespace is per-key, so distinct
-/// `keyId`s give each test its own env-var slot. Same pattern as the
-/// in-crate `encryption::keys::tests` use.
+/// Round-trip an encrypted string through file-backed SQLite with a supplied
+/// test key. Reading the stored ciphertext recovers the original plaintext.
 #[test]
 fn encrypted_column_round_trip_sqlite_randomised() {
     use zeroship_data_orm::encryption;
@@ -4688,7 +4679,7 @@ fn encrypted_column_round_trip_sqlite_randomised() {
 }
 
 /// **§13 Camp A fence (SQLite half), mirror of the PG test
-/// `encrypted_randomised_row_swap_rejected`**. Insert two Randomised
+/// `encrypted_randomised_row_swap_rejected`**. Insert encrypted
 /// rows; UPDATE swaps their ciphertexts; reading row B with row B's
 /// AAD must surface `encryption_aead_failed`. This is the load-bearing
 /// assertion for the row-PK-in-AAD policy.
