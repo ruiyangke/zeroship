@@ -20,7 +20,6 @@ fail() { FAIL=$((FAIL + 1)); echo "  FAIL $1"; }
 # ---------------------------------------------------------------------------
 ALLOWLIST='
 rls_binding_gate.sh	Reports unbound row-level-security policies as input to the sessions redesign; enable it in CI when the authority model provides a passing invariant.
-organization_authority_gate.sh	Applies the corpus to an empty owned PostgreSQL database and exercises authority changes; currently run manually rather than wired into CI.
 '
 
 RESIDUE='
