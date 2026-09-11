@@ -258,31 +258,8 @@ pub(crate) const RESERVED_NAMES: &[ReservedName] = &[
     ReservedName::Exact("internal"),
 ];
 
-/// Validate a field (column) name used in DDL.
-///
-/// Postgres silently truncates identifiers longer than 63 bytes (NAMEDATALEN),
-/// which would alias two distinct fields to the same column. Injection is
-/// already blocked by `quote_ident`. The ASCII allowlist matches
-/// [`validate_collection`]'s policy: a multi-byte identifier like `"café"`
-/// is 4 chars / 5 bytes, and two distinct unicode-spelled fields could
-/// collide on the same Postgres-truncated column if either side approached
-/// the 63-byte ceiling. Enforcing ASCII-alphanumeric + underscore prevents
-/// that whole class.
-///
-/// Also refuses any field name matching the
-/// `RESERVED_NAMES` table (platform suffixes / prefixes / exact
-/// names). The `_masked` suffix is reserved for Path B sibling
-/// columns; the six default-classification names (`public`, `pii`,
-/// `spi`, `phi`, `pci`, `internal`) are reserved at the column-name
-/// level.
-///
-/// Note this function does NOT fence the seven
-/// system-field names (`id`, `created_at`, `updated_at`, `created_by`,
-/// `updated_by`, `version`, `deleted_at`). Those names are reserved
-/// only at SCHEMA-DECLARATION time, not at filter time —
-/// `db.users.find({ id: "..." })` is the canonical query shape and
-/// must keep working. Declaration paths must call
-/// [`validate_field_name_for_declaration`] instead of this function.
+/// Validate a field identifier and platform namespace reservations.
+/// Assignment and lifecycle behavior comes from the collection descriptor.
 pub fn validate_field_name(name: &str) -> Result<(), QueryError> {
     if name.is_empty() {
         return Err(QueryError::InvalidIdent(
@@ -351,31 +328,11 @@ pub fn validate_field_name_for_declaration(name: &str) -> Result<(), QueryError>
     validate_field_name(name)
 }
 
-/// Typed-id prefixes reserved for the platform. A creator-declared
-/// `id: t.id("usr")` would mint ids that collide with platform user ids
-/// (`USER_PREFIX`, defined in
-/// `crates/zeroship-core/src/typed_id.rs`), so the prefix is rejected.
-///
-/// `usr` is the whole list. Two other copies of it exist:
-/// `zeroship_migrate_core::schema::query::RESERVED_ID_PREFIXES`, which the
-/// `#[cfg(test)] mod reserved_id_prefix_parity` below holds this one against,
-/// and `ID_RESERVED_PREFIX` in `sdks/db/src/types.ts`. THE SDK PAIR IS UNBOUND -
-/// this doc claimed a match with it and nothing checks one; see that module's
-/// header for what binding it would take.
+/// Typed-ID prefixes reserved for platform identities.
+/// `reserved_id_prefix_parity` checks the migration validator agrees.
 pub const RESERVED_ID_PREFIXES: &[&str] = &["usr"];
 
-/// Validate a creator-declared typed-id prefix (`t.id("blog")`).
-///
-/// Defense in depth behind the SDK-side check in `sdks/db/src/types.ts`: the SDK
-/// throws at build time, while the migration service re-validates authored
-/// operations before applying them. The two are unrelated code with no guard
-/// between them - see [`RESERVED_ID_PREFIXES`].
-///
-/// Rules:
-/// - must match `^[a-z][a-z0-9_]*$` → [`QueryError::InvalidIdent`]
-/// - must not be a [`RESERVED_ID_PREFIXES`] entry → [`QueryError::ReservedIdPrefix`]
-///   (reuses the typed `reserved_id_prefix` SDK code; the prefix
-///   collision is morally a system-field reservation).
+/// Validate prefix syntax and platform identity reservations.
 pub fn validate_id_prefix(prefix: &str) -> Result<(), QueryError> {
     let valid = prefix
         .chars()
@@ -1466,11 +1423,7 @@ pub fn build_update_one_with_dialect(
     )
 }
 
-/// Dialect-aware `updateOne` builder + system-field
-/// auto-bump. The CRUD dispatch path uses this so every UPDATE
-/// transparently bumps `version` + `updated_at` + `updated_by` (per
-/// the `assignments` knobs). Direct callers that need SQL without the
-/// auto-bumps keep using [`build_update_one_with_dialect`].
+/// Compile the update with the assignments resolved from its collection descriptor.
 pub fn build_update_one_with_assignments(
     schema_name: &SchemaName,
     collection: &str,
@@ -1698,11 +1651,7 @@ pub fn build_update_many_with_dialect(
     )
 }
 
-/// Dialect-aware `updateMany` builder + system-field
-/// auto-bump. Same auto-bump semantics as
-/// [`build_update_one_with_assignments`]; CRUD dispatch path uses
-/// this to keep the bulk-update SQL emitting `version` + `updated_at`
-/// + `updated_by` bumps even on multi-row updates.
+/// Compile the update with the assignments resolved from its collection descriptor.
 pub fn build_update_many_with_assignments(
     schema_name: &SchemaName,
     collection: &str,
@@ -9001,7 +8950,7 @@ mod reserved_id_prefix_parity {
             );
             let theirs = engine::validate_id_prefix(prefix).expect_err("the engine must refuse it");
             assert!(
-                matches!(theirs, engine::QueryError::ReservedSystemFieldName(_)),
+                matches!(theirs, engine::QueryError::ReservedIdPrefix(_)),
                 "the engine refused {prefix:?} for the wrong reason: {theirs:?}",
             );
         }

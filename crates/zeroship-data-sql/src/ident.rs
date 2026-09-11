@@ -1,7 +1,7 @@
 //! Validated SQL identifiers with role-specific reservations.
 //!
 //! `Ident::parse_as` is the public construction boundary. Collection, column and
-//! alias roles have different reserved-name rules; system-field declaration rules
+//! alias roles have different reserved-name rules; injected-column collision checks
 //! belong to migration validation so queries can still address those fields.
 //!
 //! ```

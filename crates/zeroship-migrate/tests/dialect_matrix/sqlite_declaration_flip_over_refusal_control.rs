@@ -128,6 +128,7 @@ fn v1_with_fk() -> Vec<CollectionDescriptor> {
                 name: "author".into(),
                 ty: "ref".into(),
                 references: Some("users".into()),
+                reference_column: Some("id".into()),
                 ..Default::default()
             }],
             indexes: vec![],

@@ -48,6 +48,7 @@ fn posts_descriptor() -> CollectionDescriptor {
             name: "authorId".to_string(),
             ty: "ref".to_string(),
             references: Some("users".to_string()),
+            reference_column: Some("id".into()),
             ..Default::default()
         }],
         indexes: Vec::new(),
@@ -109,7 +110,7 @@ fn ref_brand_envelope() -> MigrationIr {
             {
                 "op": "createTable",
                 "name": "posts",
-                "columns": [{ "name": "authorId", "type": { "ref": { "references": "users" } } }],
+                "columns": [{ "name": "authorId", "type": { "ref": { "references": "users" } }, "references": {"table": "users", "column": "id"} }],
                 "primaryKey": null
             }
         ]
@@ -134,7 +135,7 @@ fn doubly_declared_reference_envelope() -> MigrationIr {
             {
                 "op": "createTable",
                 "name": "posts",
-                "columns": [{ "name": "authorId", "type": { "ref": { "references": "users" } } }],
+                "columns": [{ "name": "authorId", "type": { "ref": { "references": "users" } }, "references": {"table": "users", "column": "id"} }],
                 "primaryKey": null,
                 "constraints": [
                     {

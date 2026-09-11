@@ -898,7 +898,7 @@ fn prelude(
 
         ("renameColumn", _) => vec![table_t_without_b()],
 
-        ("addConstraint", "fkNonId") => vec![table_other(keyable()), keyed()],
+        ("addConstraint", "fkSimple") => vec![table_other(keyable()), keyed()],
         ("addConstraint", "unique" | "check") => vec![keyed()],
         ("addConstraint", "exclusion") => vec![text()],
         ("addConstraint", _) => vec![table_other(keyable()), bigint()],

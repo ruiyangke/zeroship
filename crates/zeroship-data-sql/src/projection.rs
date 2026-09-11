@@ -2,7 +2,7 @@
 //!
 //! There is no wildcard node. Callers enumerate the fields their read needs,
 //! including identity fields used for row mapping or relation loading. The
-//! runtime ORM compiler separately preserves the system fields its protection
+//! runtime ORM compiler separately preserves the declared identity fields its protection
 //! and change-event pipelines require.
 //!
 //! Protected storage can use a physical column under a logical alias through

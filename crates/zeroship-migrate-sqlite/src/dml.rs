@@ -429,7 +429,6 @@ impl DmlRenderer for SqliteDmlRenderer {
             | FeatureSupportKey::ExpressionIndex
             | FeatureSupportKey::TableLevelForeignKey
             | FeatureSupportKey::CompositeForeignKey
-            | FeatureSupportKey::NonIdForeignKey
             | FeatureSupportKey::ExistenceGuardProbe
             | FeatureSupportKey::InsertOnConflict
             | FeatureSupportKey::TriggerInsteadOfTiming

@@ -570,7 +570,7 @@ pub fn render_schema_export(
 /// source). This turns the descriptors into `createTable` ops via
 /// [`crate::descriptors_to_create_ops`] - which resolves each descriptor's
 /// table shape under the supplied `effective` policy (injecting the confined
-/// system columns/indexes/PK the caller's charter declares) - and then routes
+/// injected columns/indexes/PK the caller's charter declares) - and then routes
 /// through the SAME [`render_artifacts`] tail. So the manual and generated paths
 /// are byte-identical for equivalent schemas, PROVIDED both are driven by an
 /// `EffectivePolicy` that injects the same shape (the generated path resolves the

@@ -18,7 +18,6 @@ const OP_DISPOSITIONS: &[((&str, &str), Disposition)] = &[
     (("addConstraint", "exclusion"), Disposition::Portable),
     (("addConstraint", "fkComposite"), Disposition::Portable),
     (("addConstraint", "fkNoLocalColumn"), Disposition::Unsupported),
-    (("addConstraint", "fkNonId"), Disposition::Portable),
     (("addConstraint", "fkNotValid"), Disposition::Portable),
     (("addConstraint", "fkSimple"), Disposition::Portable),
     (("addConstraint", "unique"), Disposition::Portable),

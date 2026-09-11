@@ -1255,7 +1255,7 @@ pub struct IrAuthor {
     /// backend rather than derived from the id in core.
     backend: &'static dyn crate::render::renderer::DmlRenderer,
     /// The exact composed policy whose inject rules shaped resolved create-table
-    /// IR. Lowering never consults an ambient system-field profile.
+    /// IR. Lowering never consults an ambient injected-column profile.
     effective: EffectivePolicy,
     /// the connection/CLI-level DEFAULT schema (search_path-like), used
     /// when an op omits its own `schema` qualifier. `None` => the dialect
@@ -3164,8 +3164,7 @@ impl IrAuthor {
                 ));
             }
 
-            let local_column =
-                self.authored_reference_column_snapshot(schema, site.table, site.column)?;
+            let local_column = self.authored_reference_column_snapshot(site.table, site.column)?;
             let reference_policy =
                 crate::render::backends::vendor(self.vendors, &self.dialect).catalog_fold;
             // PostgreSQL's catalog exposes the base storage family separately
@@ -3246,22 +3245,19 @@ impl IrAuthor {
 
     fn authored_reference_column_snapshot(
         &self,
-        effective_schema: &str,
         table: &str,
         column: &IrColumn,
     ) -> Result<ColumnSnapshot, IrLowerError> {
-        let mut snapshot = self.add_column_snapshot(
-            effective_schema,
-            table,
-            &column.name,
-            &column.ty,
-            column.nullable,
-            None,
-            column.vector_metric,
-            column.case_sensitive,
-            None,
-            None,
-            None,
+        // Catalog compatibility needs the column shape, without emitting its foreign key.
+        let mut field = ir_column_to_field(column);
+        field.default = None;
+        field.generated = None;
+        field.identity = None;
+        let mut snapshot = crate::render::declarative::column_snapshot_for_field(
+            self.vendors,
+            &field,
+            &self.dialect,
+            false,
         )?;
         apply_author_type_override_to_column(
             self.vendors,
@@ -3294,13 +3290,11 @@ impl IrAuthor {
     /// target merely supplies the other side of the positional physical check.
     fn authored_logical_reference_column_snapshot(
         &self,
-        effective_schema: &str,
         table: &str,
         column: &str,
         contract: &crate::model::validate::LogicalColumnContract,
     ) -> Result<ColumnSnapshot, IrLowerError> {
         self.authored_reference_column_snapshot(
-            effective_schema,
             table,
             &IrColumn {
                 name: column.to_string(),
@@ -3415,7 +3409,6 @@ impl IrAuthor {
                         )
                     })?;
                     Some(self.authored_logical_reference_column_snapshot(
-                        schema,
                         references_table,
                         target_name,
                         contract,
@@ -3447,9 +3440,7 @@ impl IrAuthor {
                     Op::CreateTable { columns, .. } => columns
                         .iter()
                         .find(|column| column.name == *local_name)
-                        .map(|column| {
-                            self.authored_reference_column_snapshot(schema, site.table, column)
-                        })
+                        .map(|column| self.authored_reference_column_snapshot(site.table, column))
                         .transpose()?,
                     _ => {
                         let local_key = crate::model::validate::LogicalColumnKey {
@@ -3461,7 +3452,7 @@ impl IrAuthor {
                             .get(&local_key)
                             .map(|contract| {
                                 self.authored_logical_reference_column_snapshot(
-                                    schema, site.table, local_name, contract,
+                                    site.table, local_name, contract,
                                 )
                             })
                             .transpose()?
@@ -9542,7 +9533,7 @@ pub(crate) fn ir_column_to_field(c: &IrColumn) -> FieldDescriptor {
     let (ty, legacy_references) = col_type_to_token(&c.ty);
     // A genuine unbounded `t.text()` column (`ColType::Text`, no value-format /
     // id-prefix facet) renders as MySQL `TEXT`. Typed-ids carry a facet and bounded
-    // system columns are `String`, so neither is flagged here.
+    // injected columns are `String`, so neither is flagged here.
     let unbounded_text =
         matches!(c.ty, ColType::Text) && c.value_format.is_none() && c.id_prefix.is_none();
     let references = c
@@ -13815,9 +13806,9 @@ columns = [
     // resolves the confined policy's injected columns + indexes BYTE-EQUAL to the
     // differ's `desired_snapshot` TableSnapshot. Pinned at the snapshot layer,
     // independent of the render golden - so a future fork of IrAuthor's
-    // descriptor mapping that drops/renames a system field or index is caught here.
+    // descriptor mapping that drops/renames an injected column or index is caught here.
     #[test]
-    fn ir_author_createtable_snapshot_injects_system_fields_byte_equal_to_differ() {
+    fn ir_author_createtable_snapshot_injects_injected_columns_byte_equal_to_differ() {
         for dialect in [POSTGRES, SQLITE] {
             let author = test_ir_author("app", "app_a", dialect.clone());
             let effective = crate::test_fixtures::confined_charter();
@@ -13873,12 +13864,12 @@ columns = [
             .expect("differ snapshot");
 
             // The full TableSnapshot (columns + indexes + constraints) is byte-equal
-            // - system fields injected identically. `TableSnapshot`'s `==` covers
+            // - injected columns injected identically. `TableSnapshot`'s `==` covers
             // columns/indexes/constraints; the per-column sentinels of the (non-
-            // encrypted) system fields are all `None`, so `==` is exact here.
+            // encrypted) injected columns are all `None`, so `==` is exact here.
             assert_eq!(
                 ir_snap.columns, differ_snap.columns,
-                "{dialect:?}: createTable columns (incl. injected system fields) must be byte-equal"
+                "{dialect:?}: createTable columns (incl. injected columns) must be byte-equal"
             );
             assert_eq!(
                 ir_snap.indexes, differ_snap.indexes,
@@ -13895,7 +13886,7 @@ columns = [
             for sys in inject.columns().iter().map(|column| column.name.as_str()) {
                 assert!(
                     ir_snap.columns.iter().any(|c| c.name == sys),
-                    "{dialect:?}: system field {sys:?} must be injected by createTable"
+                    "{dialect:?}: injected column {sys:?} must be injected by createTable"
                 );
             }
         }

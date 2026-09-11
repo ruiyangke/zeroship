@@ -194,15 +194,12 @@ fn the_per_field_reader_is_not_a_broken_instrument() {
    "runtimeOptions":{"softDelete":true,"versioning":false}}
 ]"#,
     );
-    let text = env_db_ts(
-        &ops,
-        &zeroship_migrate_postgres::DIALECT,
-        &support::no_inject(SCHEMA),
-    );
+    let (ops, policy) = support::lifecycle_fixture(&ops, SCHEMA);
+    let text = env_db_ts(&ops, &zeroship_migrate_postgres::DIALECT, &policy);
     let block = block(&text, "users");
     assert_eq!(
         block.columns.len(),
-        4,
+        6,
         "the reader must see every column line: {block:#?}\n{text}"
     );
     assert_eq!(
@@ -766,7 +763,7 @@ const CARRIERS: &[(&str, &str)] = &[
         "table_renamed_with_fk_and_expressions",
         r#"[
   {"op":"createTable","name":"accounts","columns":[{"name":"id","type":"text","nullable":false}],"primaryKey":["id"]},
-  {"op":"createTable","name":"orders","columns":[{"name":"id","type":"text","nullable":false},{"name":"owner_id","type":{"ref":{"references":"accounts"}}}],"primaryKey":["id"],"constraints":[{"name":"orders_owner_fk","kind":{"kind":"fk","columns":["owner_id"],"referencesTable":"accounts","referencesColumns":["id"],"onDelete":"cascade"}}]},
+  {"op":"createTable","name":"orders","columns":[{"name":"id","type":"text","nullable":false},{"name":"owner_id","type":"text"}],"primaryKey":["id"],"constraints":[{"name":"orders_owner_fk","kind":{"kind":"fk","columns":["owner_id"],"referencesTable":"accounts","referencesColumns":["id"],"onDelete":"cascade"}}]},
   {"op":"renameTable","table":"accounts","to":"tenants"}
 ]"#,
     ),
