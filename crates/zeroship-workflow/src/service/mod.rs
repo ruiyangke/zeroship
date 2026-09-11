@@ -1,8 +1,11 @@
 //! Shared workflow service for embedded and remote hosts.
 
 mod app;
+pub mod capability;
 mod control;
 mod frontier;
+mod ingress;
+pub use ingress::{IngressReceipt, RevokedSignals, SignalAuthority, SignalTokenRequest};
 mod journal;
 mod schedules;
 mod signals;

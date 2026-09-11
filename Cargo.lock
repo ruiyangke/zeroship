@@ -8635,12 +8635,14 @@ name = "zeroship-workflow"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64",
  "bytes",
  "chrono",
  "chrono-tz",
  "compio",
  "compio-postgres",
  "cyper",
+ "ed25519-dalek",
  "percent-encoding",
  "rusqlite",
  "serde",

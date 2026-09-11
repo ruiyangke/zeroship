@@ -97,6 +97,7 @@ pub struct AppPolicy {
     pub max_schedules: usize,
     pub max_schedule_backfill: usize,
     pub min_schedule_interval_ms: i64,
+    pub max_signal_token_lifetime_seconds: i64,
     pub lease_ms: i64,
     pub request_retention_ms: i64,
 }
@@ -115,6 +116,7 @@ impl Default for AppPolicy {
             max_schedules: 64,
             max_schedule_backfill: 32,
             min_schedule_interval_ms: 1_000,
+            max_signal_token_lifetime_seconds: 86_400,
             lease_ms: 60_000,
             request_retention_ms: 86_400_000,
         }
@@ -132,6 +134,9 @@ impl AppPolicy {
             || self.compensation_retry_ms <= 0
             || self.max_schedule_backfill == 0
             || self.min_schedule_interval_ms <= 0
+            || self.max_signal_token_lifetime_seconds <= 0
+            || self.max_signal_token_lifetime_seconds
+                > super::capability::SIGNAL_CAPABILITY_MAX_LIFETIME_SECONDS
             || self.lease_ms <= 0
             || self.request_retention_ms <= 0
         {
