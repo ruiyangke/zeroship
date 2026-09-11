@@ -5647,7 +5647,7 @@ use zeroship_data_orm::search::Search;
 ///
 /// Hand-written, not rendered. plugin-db does not own DDL, so a test that needs
 /// a table spells it; a fixture rendered by the layer under test cannot detect
-/// that layer being wrong. Same argument as `tests/support/tables.rs` on the
+/// that layer being wrong. Same argument as `tests/fixtures/data/sqlite.rs` on the
 /// SQLite side.
 const PG_SYSTEM_COLUMNS: &str = r#"
   id TEXT PRIMARY KEY,

@@ -12,7 +12,7 @@
 //!      strong handles to the wrapper.
 //!   3. Forces a major GC via
 //!      `request_garbage_collection_for_testing`.
-//!   4. Asserts `broker::live_subscription_count() == 0`.
+//!   4. Asserts `broker::app_subscription_count("test_app") == 0`.
 //!
 //! Before this PR the handle-id-based registry (`SUBSCRIPTIONS` in
 //! the legacy `callbacks.rs`) had no way to detect that the JS-side AsyncIterable
@@ -27,13 +27,9 @@ use zeroship_runtime::init_v8;
 
 #[test]
 fn dropping_subscription_closes_broker_handle_on_gc() {
-    // Make sure other tests didn't leave a stray entry on this thread's
-    // broker. The broker is thread-local, and Cargo runs tests on
-    // worker threads, but this single test runs in isolation in its
-    // own #[test] fn — its thread is fresh, so this is a sanity assert
-    // rather than a teardown.
+    // Scope diagnostics to this test's app on the production broker.
     assert_eq!(
-        broker::live_subscription_count(),
+        broker::app_subscription_count("test_app"),
         0,
         "broker not clean at test start"
     );
@@ -50,11 +46,10 @@ fn dropping_subscription_closes_broker_handle_on_gc() {
     // is gone too.
     {
         v8::scope!(let inner, scope);
-        let _wrapper =
-            mint_subscription(inner, "test_app", "messages").expect("mint_subscription");
+        let _wrapper = mint_subscription(inner, "test_app", "messages").expect("mint_subscription");
         // Sanity: broker registered an entry.
         assert_eq!(
-            broker::live_subscription_count(),
+            broker::app_subscription_count("test_app"),
             1,
             "broker did not see the new subscription"
         );
@@ -74,7 +69,7 @@ fn dropping_subscription_closes_broker_handle_on_gc() {
     // entry -> the broker's next sweep (via `subscription_count`'s
     // `is_closed` filter) reports 0.
     assert_eq!(
-        broker::live_subscription_count(),
+        broker::app_subscription_count("test_app"),
         0,
         "GC finalizer did not close the broker subscription"
     );
@@ -86,7 +81,7 @@ fn dropping_subscription_closes_broker_handle_on_gc() {
 #[test]
 fn explicit_close_releases_broker_handle_synchronously() {
     assert_eq!(
-        broker::live_subscription_count(),
+        broker::app_subscription_count("test_app2"),
         0,
         "broker not clean at test start"
     );
@@ -97,10 +92,9 @@ fn explicit_close_releases_broker_handle_synchronously() {
     let context = v8::Context::new(handle_scope, Default::default());
     let scope = &mut v8::ContextScope::new(handle_scope, context);
 
-    let wrapper = mint_subscription(scope, "test_app2", "messages2")
-        .expect("mint_subscription");
+    let wrapper = mint_subscription(scope, "test_app2", "messages2").expect("mint_subscription");
     assert_eq!(
-        broker::live_subscription_count(),
+        broker::app_subscription_count("test_app2"),
         1,
         "broker did not see the new subscription"
     );
@@ -111,18 +105,16 @@ fn explicit_close_releases_broker_handle_synchronously() {
     let close_v = wrapper
         .get(scope, close_key.into())
         .expect("close prop missing");
-    let close_fn: v8::Local<v8::Function> = close_v
-        .try_into()
-        .expect("close is not a function");
+    let close_fn: v8::Local<v8::Function> = close_v.try_into().expect("close is not a function");
     close_fn.call(scope, wrapper.into(), &[]);
 
     assert_eq!(
-        broker::live_subscription_count(),
+        broker::app_subscription_count("test_app2"),
         0,
         ".close() did not release the broker subscription"
     );
 
     // Idempotent: a second close() should be a no-op (still 0).
     close_fn.call(scope, wrapper.into(), &[]);
-    assert_eq!(broker::live_subscription_count(), 0);
+    assert_eq!(broker::app_subscription_count("test_app2"), 0);
 }

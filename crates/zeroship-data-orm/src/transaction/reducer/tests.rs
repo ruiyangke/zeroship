@@ -1147,7 +1147,7 @@ fn a_second_operation_while_one_is_in_flight_is_refused() {
 /// a `ROLLBACK TO` of the recovery child returns the parent to `Idle`.
 ///
 /// **This arc is the reason the forbidden-route arms exist.** It is a real,
-/// shipped behaviour (`crates/zeroship-data-v8/tests/native_transaction.rs:671-705`), so it cannot be
+/// shipped behaviour (`crates/zeroship-data-v8/src/live_tests/native_transaction.rs`), so it cannot be
 /// removed to make forced cleanup safe; the force has to avoid `Poisoned`
 /// instead.
 ///

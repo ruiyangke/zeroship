@@ -2341,7 +2341,7 @@ mod tests {
     // could never match the `pws_…` subject).
 
     // Postgres is not optional for this workspace's tests (see
-    // crates/zeroship-test-support/src/lib.rs); `test_database_url()` panics with the
+    // tests/fixtures/session_keys.rs); `test_database_url()` panics with the
     // provisioning command rather than let these revocation tests report a
     // pass for a check they never ran.
     async fn connect_auth_db() -> crate::db::DbConfig {

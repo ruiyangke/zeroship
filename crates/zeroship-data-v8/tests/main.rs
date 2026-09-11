@@ -3,8 +3,8 @@
 //! Integration contracts independent of the shared database fixtures.
 //!
 //! Ordinary package tests run this target, the shared fixtures in
-//! `tests/test_helpers.rs`, and the process-isolated distributed CDC target.
-//! Test builds enable integration helpers automatically and require PostgreSQL.
+//! `src/live_tests/`, and the process-isolated distributed CDC target.
+//! Database fixtures are private source modules; PostgreSQL is required.
 //!
 //! With `autotests = false`, add each new test file to the appropriate entry
 //! file's module list. Select a subset using its module path, for example:
