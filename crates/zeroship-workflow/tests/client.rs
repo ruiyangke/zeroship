@@ -74,3 +74,19 @@ fn builds_authenticated_workflow_instance_requests() {
         json!({ "from": { "name": "charge" } })
     );
 }
+
+#[test]
+fn output_requests_keep_the_host_scope_and_escape_step_names() {
+    use zeroship_workflow::client::build_read_step_output_request;
+    let config = WorkflowClientConfig::new("http://control.test", "app_a", "scoped-token");
+    let request = build_read_step_output_request(&config, "run_a", "part/next?other=1", 2).unwrap();
+    assert_eq!(request.url, "http://control.test/internal/workflows/runs/run_a/steps/part%2Fnext%3Fother=1/output?occurrence=2");
+    assert_eq!(request.app_id_header, "app_a");
+    assert_eq!(request.authorization, "Bearer scoped-token");
+    let escaped = build_read_step_output_request(&config, "run_a", "part\\next", 0).unwrap();
+    assert!(escaped.url.contains("/steps/part%5Cnext/output"));
+    for name in ["", ".", ".."] {
+        assert!(build_read_step_output_request(&config, "run_a", name, 0).is_err());
+        assert!(build_read_step_output_request(&config, name, "step", 0).is_err());
+    }
+}

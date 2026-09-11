@@ -40,6 +40,44 @@ fn dispatch_workflow(runtime: &Runtime, envelope: &str) -> Value {
 }
 
 #[test]
+fn blob_replay_uses_the_native_run_reader() {
+    let runtime = build_runtime(
+        r#"
+        let reads = 0;
+        globalThis.__zs_env = () => ({ workflows: { BlobWorkflow: { get(id) {
+          if (id !== "run_saved") throw new Error("wrong run");
+          return { async readStepOutput(name, occurrence) {
+            if (name !== "payload" || occurrence !== 0) throw new Error("wrong step");
+            reads++;
+            return new TextEncoder().encode('{"saved":true}');
+          } };
+        } } } });
+        export class BlobWorkflow {
+          async run(_trigger, step) {
+            const output = await step.run("payload", () => { throw new Error("replayed callback"); });
+            const value = await output.json();
+            await output.bytes();
+            return { value, reads };
+          }
+        }
+        export default { workflows: { BlobWorkflow } };
+    "#,
+    );
+    let envelope = serde_json::json!({
+        "runId": "run_saved", "workflowName": "BlobWorkflow", "nonce": "dispatch_saved",
+        "trigger": { "runId": "run_saved", "workflowName": "BlobWorkflow", "startedAt": "2026-09-11T00:00:00Z", "input": {} },
+        "journal": [{ "ordinal": 0, "name": "payload", "kind": "run", "state": "completed",
+            "outputRef": { "hash": "a".repeat(64), "size": 14, "contentType": "application/json" } }],
+    });
+    let result = dispatch_workflow(&runtime, &envelope.to_string());
+    assert_eq!(result["kind"], "RunCompleted", "{result}");
+    assert_eq!(
+        result["output"],
+        serde_json::json!({"value":{"saved":true},"reads":1})
+    );
+}
+
+#[test]
 fn unawaited_step_frontier_fails_closed() {
     let runtime = build_runtime(
         r#"

@@ -156,6 +156,8 @@ export interface RestartOptions {
 }
 
 export interface WorkflowRun<Output = unknown> {
+  /** Read a completed step through this run's app-scoped native backend. */
+  readStepOutput(name: string, occurrence: number): Promise<Uint8Array>;
   readonly id: string;
   signal(opts: { type: string; payload?: unknown; idempotencyKey?: string }): Promise<void>;
   status(): Promise<{ state: WorkflowRunState; output?: StatusOutput<Output>; error?: unknown }>;

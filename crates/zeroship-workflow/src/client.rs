@@ -22,6 +22,7 @@ const PATH_SEGMENT_ENCODE_SET: &AsciiSet = &CONTROLS
     .add(b'`')
     .add(b'{')
     .add(b'}')
+    .add(b'\\')
     .add(b'/');
 
 thread_local! {
@@ -219,7 +220,36 @@ pub fn build_restart_request(
     )
 }
 
+pub fn build_read_step_output_request(
+    config: &WorkflowClientConfig,
+    run_id: &str,
+    name: &str,
+    occurrence: u32,
+) -> Result<WorkflowHttpRequest, WorkflowRpcError> {
+    if matches!(run_id, "" | "." | "..") || matches!(name, "" | "." | "..") {
+        return Err(WorkflowRpcError::InvalidRequest(
+            "workflow output requires a run id and step name".into(),
+        ));
+    }
+    request(
+        config,
+        WorkflowHttpMethod::Get,
+        format!(
+            "/internal/workflows/runs/{}/steps/{}/output?occurrence={occurrence}",
+            path_segment(run_id),
+            path_segment(name),
+        ),
+        None,
+    )
+}
+
 pub async fn execute_json(req: WorkflowHttpRequest) -> Result<Value, WorkflowRpcError> {
+    let bytes = execute_bytes(req).await?;
+    serde_json::from_slice(&bytes)
+        .map_err(|e| WorkflowRpcError::Decode(format!("decode workflow response JSON: {e}")))
+}
+
+pub async fn execute_bytes(req: WorkflowHttpRequest) -> Result<Vec<u8>, WorkflowRpcError> {
     let client = this_thread_client();
     let mut builder = match req.method {
         WorkflowHttpMethod::Get => client.get(&req.url),
@@ -257,11 +287,11 @@ pub async fn execute_json(req: WorkflowHttpRequest) -> Result<Value, WorkflowRpc
         .bytes()
         .await
         .map_err(|e| WorkflowRpcError::Transport(format!("read workflow response body: {e}")))?;
-    let body = String::from_utf8_lossy(&bytes).to_string();
     if !(200..300).contains(&status) {
-        return Err(WorkflowRpcError::Http { status, body });
+        return Err(WorkflowRpcError::Http {
+            status,
+            body: String::from_utf8_lossy(&bytes).to_string(),
+        });
     }
-    serde_json::from_str(&body).map_err(|e| {
-        WorkflowRpcError::Decode(format!("decode workflow response JSON: {e}; body={body}"))
-    })
+    Ok(bytes.to_vec())
 }

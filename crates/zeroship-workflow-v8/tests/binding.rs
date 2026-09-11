@@ -179,7 +179,8 @@ async fn dev_sqlite_engine_runs_sleep_signal_core_loop_once() {
               if (finalStatus.state === "completed") break;
               await delay(20);
             }
-            return Response.json({ runId: run.id, beforeSignal, signal, finalStatus });
+            const saved = JSON.parse(new TextDecoder().decode(await run.readStepOutput("record", 0)));
+            return Response.json({ runId: run.id, beforeSignal, signal, finalStatus, saved });
           }
         };
     "#;
@@ -189,6 +190,7 @@ async fn dev_sqlite_engine_runs_sleep_signal_core_loop_once() {
     let value: Value = serde_json::from_str(&body).expect("body json");
     assert_eq!(value["beforeSignal"]["state"], "waiting", "body: {body}");
     assert_eq!(value["finalStatus"]["state"], "completed", "body: {body}");
+    assert_eq!(value["saved"], json!({"orderId":"ord_1"}));
     assert_eq!(
         value["finalStatus"]["output"],
         json!({
