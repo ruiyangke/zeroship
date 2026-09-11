@@ -1,4 +1,6 @@
 import { createHash, createPrivateKey, createPublicKey, randomBytes, sign } from "node:crypto";
+import { request } from "node:http";
+import { text } from "node:stream/consumers";
 import { inject } from "vitest";
 import type { Row } from "./rpc";
 
@@ -37,12 +39,21 @@ export async function workerRpc(operation: string, input: Row, timeout: number):
   const length = Buffer.alloc(4);
   length.writeUInt32LE(metadata.length);
   const body = Buffer.concat([length, metadata, Buffer.from(JSON.stringify({ json: input }))]);
-  const response = await fetch(`${worker.url}/dispatch/${appPath(worker.appId)}`, {
-    method: "POST", headers: { authorization: `Bearer ${assertion}`, "content-type": "application/octet-stream" },
-    body, signal: AbortSignal.timeout(timeout),
+  // Use the test's deadline for the entire operation, including response headers.
+  const response = await new Promise<{ status: number | undefined; body: string }>((resolve, reject) => {
+    const req = request(`${worker.url}/dispatch/${appPath(worker.appId)}`, {
+      method: "POST", headers: {
+        authorization: `Bearer ${assertion}`, "content-type": "application/octet-stream", "content-length": body.length,
+      },
+      signal: AbortSignal.timeout(timeout),
+    }, (incoming) => {
+      text(incoming).then((body) => resolve({ status: incoming.statusCode, body }), reject);
+    });
+    req.once("error", reject);
+    req.end(body);
   });
-  if (!response.ok) throw new Error(`${operation}: worker HTTP ${response.status}: ${await response.text()}`);
-  const result = await response.json();
+  if (response.status !== 200) throw new Error(`${operation}: worker HTTP ${response.status}: ${response.body}`);
+  const result = JSON.parse(response.body);
   if (!result?.json || typeof result.json !== "object" || Array.isArray(result.json)) {
     throw new Error(`${operation}: missing RPC result envelope: ${JSON.stringify(result)}`);
   }
