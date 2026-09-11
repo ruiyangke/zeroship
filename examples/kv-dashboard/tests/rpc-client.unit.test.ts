@@ -1,7 +1,12 @@
 import { afterEach, expect, test, vi } from "vitest";
 import { listKeys, rpc } from "./rpc";
+import { targets } from "./targets";
 
 afterEach(() => vi.unstubAllGlobals());
+
+test("missing fixture targets cannot silently use an existing server", () => {
+  expect(() => targets()).toThrow("did not provide test targets");
+});
 
 test("HTTP failures and missing result envelopes cannot look like a successful smoke", async () => {
   for (const response of [new Response("unavailable", { status: 503 }), Response.json({ error: "rejected" }), Response.json({ json: null })]) {

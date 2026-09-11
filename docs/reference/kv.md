@@ -201,7 +201,7 @@ cleanup.
 
 `pnpm --dir examples/kv-dashboard test` builds this demo and checks its SDK
 contract and browser UI through local Vite and the deployed gateway. The
-example owns its Vitest/Playwright suites and Rust Testcontainers harness.
+example owns its Vitest/Playwright suites and TypeScript Testcontainers setup.
 No shared Compose stack or backend URLs are needed.
 See the [KV test commands](../../crates/zeroship-kv/README.md) for the native
 driver, storage, and V8 suites and nextest usage.

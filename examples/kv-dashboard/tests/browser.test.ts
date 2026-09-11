@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync } from "node:fs";
 import { delimiter, join } from "node:path";
 import { chromium, type Locator, type Page } from "playwright";
-import { expect, test } from "vitest";
+import { expect, inject, test } from "vitest";
 import { rpc } from "./rpc";
 import { targets } from "./targets";
 
@@ -76,8 +76,9 @@ test("the dashboard controls reach real KV and recover from RPC failure", async 
         await expect.poll(() => text.locator("dd").first().textContent()).toBe("browser value");
         expect(errors).toEqual([]);
       } catch (error) {
-        mkdirSync("tests/.artifacts", { recursive: true });
-        await page.screenshot({ path: `tests/.artifacts/${target.name.replace(/[^a-z0-9-]/gi, "_")}.png`, fullPage: true });
+        const artifacts = inject("dashboardArtifacts") ?? "tests/.artifacts";
+        mkdirSync(artifacts, { recursive: true });
+        await page.screenshot({ path: join(artifacts, `${target.name.replace(/[^a-z0-9-]/gi, "_")}.png`), fullPage: true });
         throw error;
       } finally {
         await page.close();

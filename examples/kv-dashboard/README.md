@@ -77,18 +77,18 @@ On NixOS, use Chromium from Nix on `PATH`, or set
 `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` to its executable. The tests otherwise
 use Playwright's browser installation. Missing browsers or Docker fail the run.
 
-`tests/platform/` owns the Rust Testcontainers harness and its Cargo test
-dependencies. It builds the demo and platform binaries, starts PostgreSQL,
-Redis, and an issuer JWKS fixture, applies platform migrations, and creates
-and deploys the app through authenticated control APIs and the CLI. It then
-runs the example's Vitest suites against local redb and deployed Redis.
-The harness cleans up its processes and containers and retains failure logs.
-Browser failure screenshots live in `tests/.artifacts/`.
+`pnpm test` runs Vitest directly. Its TypeScript global setup uses
+Testcontainers for Node to start PostgreSQL, Redis, and an issuer JWKS fixture.
+It builds the demo and platform binaries, applies platform migrations, and
+creates and deploys the app through authenticated control APIs and the CLI.
+The RPC and browser suites then run against local redb and deployed Redis.
+Teardown cleans up the owned processes, containers, and temporary app data.
+Logs and browser failure screenshots live in `tests/.artifacts/`.
 
-`pnpm test:acceptance` runs the same acceptance command. From the repository
-root, `cargo nextest run -p kv-dashboard-tests --test acceptance` also works.
-For the HTTP helper's isolated validation tests, run
-`pnpm --dir examples/kv-dashboard exec vitest run tests/rpc-client.test.ts`.
+`pnpm test:acceptance` runs the dashboard suites with their platform fixture.
+`pnpm test:unit` checks the HTTP helper and process cleanup without starting
+the platform. The `smoke` and `test:browser` commands use Vitest's `existing`
+mode to target running servers without provisioning them.
 
 The dev runtime uses redb by default at `examples/kv-dashboard/.zeroship/kv.redb`.
 Set `ZEROSHIP_KV_CONFIG_FILE` to a Redis TOML configuration to select Redis;
