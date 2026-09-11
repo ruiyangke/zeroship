@@ -4,6 +4,7 @@
  * format, calls the native driver, and maps results back to the user-facing shape.
  */
 import type { IdLoader } from "./loader";
+import { AliasedCollection } from "./read";
 import {
   requireNativeCollection,
   type NativeCollection,
@@ -177,6 +178,10 @@ export class Collection<
 
   declare readonly Id: Id<N>;
   declare readonly RowInput: RowInput<S>;
+
+  as<const A extends string>(alias: A): AliasedCollection<Row<S>, A> {
+    return new AliasedCollection(this._native, this._name, alias, Object.keys(this._schema), this._toColumn, this._toField);
+  }
 
   constructor(
     name: string,

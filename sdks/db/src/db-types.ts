@@ -49,6 +49,7 @@
  */
 
 import type { Collection } from "./collection";
+import type { AliasedCollection, ReadFrom } from "./read";
 import type { LiveOptions, LiveQuery } from "./live";
 import type {
   PlainObject,
@@ -106,6 +107,7 @@ type TxPaginationResult<P> = {
  * consumers compiling (joined fields degrade to `PlainObject`).
  */
 export type TxCollection<S = PlainObject, AllSchemas extends Record<string, unknown> = Record<string, unknown>> = {
+  as<const A extends string>(alias: A): AliasedCollection<Row<S>, A>;
   insert(row: RowInput<S>): Promise<Row<S>>;
   insertMany(rows: RowInput<S>[]): Promise<Row<S>[]>;
   get<K extends string & keyof Row<S>>(
@@ -242,7 +244,8 @@ export type Collections<T extends Record<string, SchemaInput>> = {
  * Rust as of P9 PR 3); `live` wraps the subscription primitives.
  */
 export type DbExtensions<T extends Record<string, SchemaInput>> = {
-  transaction: <R>(fn: (tx: { [K in keyof T]: TxCollection<UnwrapSchema<T[K]>, T> }) => Promise<R>, options?: TransactionOptions) => Promise<Result<R>>;
+  from: ReadFrom;
+  transaction: <R>(fn: (tx: { [K in keyof T]: TxCollection<UnwrapSchema<T[K]>, T> } & { from: ReadFrom<true> }) => Promise<R>, options?: TransactionOptions) => Promise<Result<R>>;
   /**
    * Reactive query layer. Runs `queryFn`, yields the initial result,
    * then re-runs and yields a fresh result on every change to any

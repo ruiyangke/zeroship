@@ -259,3 +259,38 @@ impl ReadQuery {
         Ok(query)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zeroship_data_sql::{Literal, value};
+
+    fn query() -> Value {
+        value!({"from":{"collection":"records", "alias":"r"}, "select":{"record":{"row":"r"}}})
+    }
+
+    #[test]
+    fn adapter_predicates_preserve_native_bytes() {
+        let bytes = vec![0, 128, 255];
+        let mut input = query();
+        input["where"] = value!({"op":"eq", "left":{"source":"r", "field":"payload"}, "right":{"value":Value::Bytes(bytes.clone())}});
+        let query = ReadQuery::decode(input).unwrap();
+        assert!(
+            matches!(query.filter, Predicate::Compare { rhs: Operand::Lit(Literal::Bytes(actual)), .. } if actual == bytes)
+        );
+    }
+
+    #[test]
+    fn unknown_stages_and_excessive_predicates_fail_during_decode() {
+        let mut input = query();
+        input["sql"] = value!("SELECT * FROM records");
+        assert!(ReadQuery::decode(input).is_err());
+        let mut input = query();
+        let mut condition = value!({"op":"isNull", "arg":{"source":"r", "field":"payload"}});
+        for _ in 0..zeroship_data_sql::MAX_PREDICATE_DEPTH {
+            condition = value!({"op":"not", "arg":condition});
+        }
+        input["where"] = condition;
+        assert!(ReadQuery::decode(input).is_err());
+    }
+}

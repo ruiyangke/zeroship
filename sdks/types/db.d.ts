@@ -132,6 +132,8 @@ type ZeroshipDbAccumulator =
  * count of affected rows.
  */
 interface ZeroshipCollection {
+  /** Execute a structured relational read prepared by the shared ORM. */
+  read(query: Record<string, unknown>): Promise<Record<string, unknown>[]>;
   /** Find multiple documents. Returns the row array. */
   find(filter: ZeroshipDbFilter, opts?: ZeroshipDbFindOpts): Promise<Record<string, unknown>[]>;
 

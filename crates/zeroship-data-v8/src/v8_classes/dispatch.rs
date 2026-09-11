@@ -52,7 +52,7 @@ pub(crate) fn current_actor_id(state: &SharedState) -> Option<String> {
         .map(|s| s.to_string())
 }
 
-fn dispatch_operation<'s>(
+pub(super) fn dispatch_operation<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     binding: DbBinding,
     collection: &str,
