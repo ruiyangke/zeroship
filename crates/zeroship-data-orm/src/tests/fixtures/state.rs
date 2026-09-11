@@ -32,3 +32,77 @@ pub(crate) fn reset_engine() {
     system_shape_charter::reset_for_tests();
     zeroship_data_orm::schema_cache::reset_for_tests();
 }
+
+#[cfg(test)]
+mod tests {
+    /// Deleting `tx_lanes::reset_for_tests()` from `reset_engine`
+    /// must fail this.
+    ///
+    /// Claims and withdrawal tombstones have different lifetimes, so a partial
+    /// reset could plausibly clear only one store: the
+    /// lane map is emptied by ordinary retirement, whereas the withdrawal
+    /// tombstone is documented to outlive its lane and to be cleared only by
+    /// the next `admit_transaction`. The tombstone is therefore the residue
+    /// most likely to survive a reset that looks correct.
+    #[test]
+    fn a_mid_test_reset_drops_a_claim_and_a_withdrawal_tombstone() {
+        let app = "app_reset_guard";
+
+        assert!(
+            crate::tx_lanes::with_mut(|l| l.try_claim_tx(app)),
+            "an unclaimed app claims on a fresh thread"
+        );
+        // `tx_claimed_by`, not `has_tx_for`: claiming opens the lane, and
+        // `has_tx_for` additionally requires the BEGIN to have landed a
+        // session. The claim without a session is exactly the window this
+        // helper has to clean up, so it is the one to assert on.
+        assert!(crate::tx_lanes::with(|l| l.tx_claimed_by(app)));
+
+        crate::tx_lanes::with_mut(|l| l.withdraw_tx_session(app));
+        assert!(crate::tx_lanes::with(|l| l.tx_session_withdrawn(app)));
+
+        crate::tests::fixtures::reset_engine();
+
+        assert!(
+            !crate::tx_lanes::with(|l| l.tx_claimed_by(app)),
+            "reset_engine left a transaction claim behind: the lane \
+             thread-local was not reset"
+        );
+        assert!(
+            !crate::tx_lanes::with(|l| l.tx_session_withdrawn(app)),
+            "reset_engine left a withdrawal tombstone behind: the \
+             next phase's session would be destroyed on return instead of parked"
+        );
+        // Re-claiming is the stronger statement, and it is the one a later
+        // phase of a multi-phase test actually makes: `tx_claimed_by` could
+        // read false off a half-cleared lane that still refuses a new claim.
+        assert!(
+            crate::tx_lanes::with_mut(|l| l.try_claim_tx(app)),
+            "the app is claimable again after a reset"
+        );
+    }
+
+    /// Reset must clear descriptors as well as transaction state. A stale schema
+    /// could otherwise expose the wrong projection in the next test phase.
+    #[test]
+    fn a_mid_test_reset_drops_an_installed_descriptor() {
+        let binding = zeroship_data_orm::binding::DbBinding::cold_start("app_reset_schema");
+
+        zeroship_data_orm::schema_cache::with_mut(|c| {
+            c.insert_one(
+                &binding,
+                "users",
+                zeroship_data_sql::value!({ "email": { "type": "string" } }),
+            );
+        });
+        assert!(zeroship_data_orm::schema_cache::with(|c| c.get(&binding, "users")).is_some());
+
+        crate::tests::fixtures::reset_engine();
+
+        assert!(
+            zeroship_data_orm::schema_cache::with(|c| c.get(&binding, "users")).is_none(),
+            "reset_engine left a descriptor entry behind: the descriptor \
+             store was not reset"
+        );
+    }
+}

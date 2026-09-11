@@ -12,7 +12,7 @@
 //!
 //! 1. **That the emitted SQL is valid `pgvector`/`PostGIS`.** A string
 //!    comparison cannot tell. That is established by
-//!    `crates/zeroship-data-orm/src/tests/search_ir_live.rs`, which executes these
+//!    `crates/zeroship-data-orm/src/tests/postgres/search_ir.rs`, which executes these
 //!    same statements against a real server.
 //! 2. **That the shipped product path uses any of it.** It does not yet - no
 //!    crate outside this one depends on `zeroship-data-sql`. These arms rule
@@ -559,7 +559,7 @@ fn a_search_at_the_depth_bound_renders() {
 /// backend refuses it with a typed error.
 ///
 /// The `SQLite` half of the pair lives in
-/// `crates/zeroship-data-orm/src/tests/search_ir_live.rs`, because
+/// `crates/zeroship-data-orm/src/tests/postgres/search_ir.rs`, because
 /// `reject_inner_product` is that crate's function and this one has no
 /// dependencies. What is asserted **here** is the half that belongs to the
 /// grammar: that all three metrics are representable and that `PostgreSQL`

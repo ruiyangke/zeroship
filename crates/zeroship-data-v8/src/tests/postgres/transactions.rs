@@ -624,12 +624,22 @@ const _procedures = {orphanedScopes};
     );
     let (status, body) = dispatch_zs(&url, &source, "orphanedScopes", &app);
     assert_eq!(status, 200, "orphan scope regression: {body}");
-    assert_eq!(body["json"], serde_json::json!([
-        "transaction_scope_expired", "transaction_scope_expired",
-        "transaction_scope_expired", "transaction_scope_expired",
-        "transaction_scope_expired", "transaction_scope_expired",
-    ]));
-    assert_eq!(count_notes(&url, &app), 2, "only current callbacks may write");
+    assert_eq!(
+        body["json"],
+        serde_json::json!([
+            "transaction_scope_expired",
+            "transaction_scope_expired",
+            "transaction_scope_expired",
+            "transaction_scope_expired",
+            "transaction_scope_expired",
+            "transaction_scope_expired",
+        ])
+    );
+    assert_eq!(
+        count_notes(&url, &app),
+        2,
+        "only current callbacks may write"
+    );
 }
 
 #[test]
@@ -902,7 +912,7 @@ fn unmigrated_app_streaming_response_names_migrate() {
     let app_id = uuid::Uuid::new_v4().simple().to_string();
     let src = [
         r#"import { env } from "zeroship";"#,
-        include_str!("../../../../sdks/bootstrap/dist/fetch-handler.js"),
+        include_str!("../../../../../sdks/bootstrap/dist/fetch-handler.js"),
         r#"
 globalThis.__zsDispatch = async (rpc, name, input, ctx) => rpc[name](input, ctx);
 

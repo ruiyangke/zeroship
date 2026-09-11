@@ -33,10 +33,10 @@
 //! Docker and successful fixture startup are required.
 //! Run: `cargo xtask test data --filter 'test(unmask_tx_lane::)'`
 
-#[allow(unused_imports)]
-use crate::tests::fixtures::schema::{fixture_table_sql, fixture_table_sql_for};
 use crate::tests::fixtures;
 use crate::tests::fixtures::Host;
+#[allow(unused_imports)]
+use crate::tests::fixtures::schema::{fixture_table_sql, fixture_table_sql_for};
 #[allow(unused_imports)]
 use zeroship_migrate::schema::query::FkEmission;
 

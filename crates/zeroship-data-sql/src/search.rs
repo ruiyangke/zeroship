@@ -291,7 +291,7 @@ impl SearchCriterion {
 /// tie exactly - and the existing `PostgreSQL` test says so in its own comment,
 /// asserting set membership rather than order because "pgvector distance ties
 /// between FP-close vectors can re-order across builds"
-/// (`crates/zeroship-data-orm/src/tests/integration.rs`).
+/// (`crates/zeroship-data-orm/src/tests/postgres/mod.rs`).
 ///
 /// A tiebreak carries its own [`crate::NullOrder`], for the reason
 /// [`crate::OrderKey`] does: the two backends' defaults differ.

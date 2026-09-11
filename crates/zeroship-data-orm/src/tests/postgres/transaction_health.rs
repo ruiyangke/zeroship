@@ -15,7 +15,7 @@ async fn connect() -> (crate::tests::fixtures::postgres::Postgres, Client) {
     let url = postgres.url();
     let (client, connection) = compio_postgres::connect(&url, NoTls)
         .await
-        .unwrap_or_else(|e| panic!("sc1_live needs a live PostgreSQL at {url}: {e}"));
+        .unwrap_or_else(|e| panic!("sc1_live requires PostgreSQL at {url}: {e}"));
     compio::runtime::spawn(async move {
         let _ = connection.run().await;
     })

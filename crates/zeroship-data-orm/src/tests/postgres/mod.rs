@@ -1,0 +1,20 @@
+//! PostgreSQL contracts, grouped by behavior.
+mod cdc;
+mod column_grants;
+mod connections;
+mod crud;
+mod encryption;
+mod fixtures;
+mod protection;
+mod provisioning;
+mod queries;
+mod roles;
+mod schema;
+mod search;
+mod search_ir;
+mod search_transactions;
+mod snapshots;
+mod transaction_health;
+mod transactions;
+mod unmask;
+mod unmask_transactions;

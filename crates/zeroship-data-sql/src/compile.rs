@@ -3861,7 +3861,7 @@ mod tests {
     ///
     /// `build_find` used to exist in the production API as a shim that passed
     /// `None` for the schema; it had no production caller (measured: only this
-    /// module, `crates/zeroship-data-orm/src/tests/integration.rs` and
+    /// module, `crates/zeroship-data-orm/src/tests/postgres/mod.rs` and
     /// `crates/zeroship-data-sql/benches/bench_query_build.rs`) and it was the
     /// only way to reach the `SELECT *` arm L24 is about. It is gone. These
     /// tests are about WHERE / ORDER BY / LIMIT shape, so they declare the
