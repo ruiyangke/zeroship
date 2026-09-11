@@ -16,7 +16,7 @@
 //!   `cpu_us`, `wall_us`, `egress_bytes`, `ingress_bytes`) via
 //!   [`Meter::record_request`] once per dispatched request.
 //! - The trusted data primitives (`plugin-db`, `kv-v8`,
-//!   `plugin-storage`) emit raw usage metrics (`db_reads`, `db_writes`,
+//!   `storage-v8`) emit raw usage metrics (`db_reads`, `db_writes`,
 //!   `kv_reads`, `kv_writes`, `storage_ops`, …) at their op boundary, in
 //!   the success arm only, via a [`MeterHandle`].
 //!

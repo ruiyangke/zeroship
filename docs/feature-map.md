@@ -286,35 +286,21 @@ typed TS SDK (`@zeroship/kv`) adding JSON serialization, Result wrapping, and co
 
 ## 5. env.storage / @zeroship/storage
 
-An object-store CRUD primitive (`env.storage.*`) wrapped by `@zeroship/storage` as a typed
-`Bucket` class. The Rust kernel is fully implemented against a LocalFs backend keyed under
-`<root>/<app_id>/<bucket>/<key>`; an S3/R2 backend is declared in a feature flag with **no
-implementation**. The SDK ships in the app template, but there is **no reference doc page**.
+Scoped object storage lives in `zeroship-storage`, with a separate
+`zeroship-storage-v8` binding for `env.storage`. Both Rust services and creator
+apps can use LocalFs or S3-compatible backends. See [Object storage](reference/storage.md).
 
 | Feature | Status | Surface | Code | Docs | Example | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
-| env.storage.put | 🟢 | `env.storage.put(bucket, key, bytesBase64, contentType?)` | `crates/zeroship-plugin-storage/src/callbacks.rs`, `backend/local.rs` | — | `crates/zeroship-worker/src/handler.rs` | content_type silently ignored; 2x-RAM OOM vector (ST-2). |
-| env.storage.get | 🟢 | `env.storage.get(bucket, key)` | `crates/zeroship-plugin-storage/src/callbacks.rs`, `backend/local.rs` | — | `crates/zeroship-worker/src/handler.rs` | contentType always null; triple-buffers (ST-3). |
-| env.storage.delete | 🟢 | `env.storage.delete(bucket, key)` | `crates/zeroship-plugin-storage/src/callbacks.rs`, `backend/local.rs` | — | — | Returns false on NotFound. |
-| env.storage.list | 🟢 | `env.storage.list(bucket, prefix?)` | `crates/zeroship-plugin-storage/src/callbacks.rs`, `backend/local.rs` | — | `sdks/create-zeroship-app/template/src/index.ts` | Blocking read_dir; no pagination; follows symlinks (ST-6). |
-| Multi-tenancy isolation via app_id | 🟢 | internal | `crates/zeroship-plugin-storage/src/callbacks.rs`, `backend/local.rs` | — | — | Falls back to "default" if APP_ID absent (ST-5). |
-| Path-traversal rejection | 🟡 | internal | `crates/zeroship-plugin-storage/src/backend/mod.rs` | — | `crates/zeroship-plugin-storage/src/backend/mod.rs` | No NUL/backslash/dotfile reject (ST-1); list bypasses validator (ST-4). |
-| LocalFs backend | 🟢 | internal | `crates/zeroship-plugin-storage/src/backend/local.rs` | — | — | compio AsyncWriteAt/ReadAt; list walk is blocking std::fs. |
-| S3/R2/MinIO/Spaces/B2 backend (s3 flag) | 🟠 | internal | `crates/zeroship-plugin-storage/Cargo.toml` | — | — | Feature flag exists; zero source files; gates nothing. |
-| Pluggable Backend trait | 🟢 | internal | `crates/zeroship-plugin-storage/src/backend/mod.rs` | `docs/reference/plugin-system.md` | — | async_trait(?Send); ObjectMeta/ListEntry. |
-| StoragePlugin constructor variants | 🟢 | internal | `crates/zeroship-plugin-storage/src/lib.rs` | — | — | ::new is a back-compat alias (removal candidate). |
-| StoragePlugin registration | 🟢 | `zeroship serve` / worker --storage-root | `crates/zeroship-cli/src/main.rs`, `crates/zeroship-worker/src/main.rs`, `worker/src/cache.rs` | — | — | Degrades gracefully if root empty. |
-| @zeroship/storage — Bucket class | 🟢 | `import { Bucket, bucket } from '@zeroship/storage'` | `sdks/storage/src/index.ts` | — | `sdks/create-zeroship-app/template/src/index.ts` | Result envelopes; no tests dir present. |
-| @zeroship/storage — bucket() factory | 🟢 | `import { bucket } from '@zeroship/storage'` | `sdks/storage/src/index.ts` | — | `sdks/create-zeroship-app/template/src/index.ts` | Canonical template entry. |
-| @zeroship/storage — Bucket.put() | 🟢 | `bucket.put(key, body, opts?)` | `sdks/storage/src/index.ts` | — | `sdks/create-zeroship-app/template/src/index.ts` | contentType discarded by LocalFs. |
-| @zeroship/storage — Bucket.get() | 🟢 | `bucket.get(key)` | `sdks/storage/src/index.ts` | — | — | contentType always null in practice. |
-| @zeroship/storage — Bucket.getText() | 🟢 | `bucket.getText(key)` | `sdks/storage/src/index.ts` | — | — | Thin UTF-8 wrapper. |
-| @zeroship/storage — Bucket.delete() | 🟢 | `bucket.delete(key)` | `sdks/storage/src/index.ts` | — | — | deleted:false if not found. |
-| @zeroship/storage — Bucket.list() | 🟢 | `bucket.list(prefix?)` | `sdks/storage/src/index.ts` | — | `sdks/create-zeroship-app/template/src/index.ts` | modifiedAt → Date; inherits unbounded walk. |
-| Presigned URL / direct upload URL | 🔵 | `env.storage.presignUrl` (planned) | — | `docs/proposals/feature-roadmap.md` | — | Requires S3 backend. |
-| Image resize / transform on upload | 🔵 | @zeroship/storage (planned) | — | `docs/proposals/feature-roadmap.md` | — | No code. |
-| content_type sidecar metadata | 🟠 | put contentType / get contentType | `crates/zeroship-plugin-storage/src/backend/local.rs` | — | — | Accepted, dropped; always null on get. |
-| Per-app storage quota enforcement | 🔵 | internal | — | — | — | Open finding ST-2 (HIGH); no code. |
+| Scoped Rust operations | 🟢 | `StorageStore`, `Storage`, `Namespace` | `crates/zeroship-storage/src/store.rs` | `docs/reference/storage.md` | `crates/zeroship-storage/README.md` | App and platform handles; typed errors; no V8 dependency. |
+| App isolation | 🟢 | Host-bound namespace | `crates/zeroship-storage/src/namespace.rs`, `crates/zeroship-storage-v8/src/lib.rs` | `docs/reference/storage.md` | `crates/zeroship-storage/tests/store.rs` | Identity and backend captured at initialization; invalid coordinates rejected. |
+| LocalFs | 🟢 | Runtime backend selection | `crates/zeroship-storage/src/backend/local.rs` | `docs/reference/storage.md` | `crates/zeroship-storage/tests/backend_parity.rs` | Separate content-type sidecars; paginated directory walk on the blocking pool. |
+| S3-compatible backend | 🟢 | `s3` feature and storage URL | `crates/zeroship-storage/src/backend/s3.rs` | `docs/reference/storage.md` | `crates/zeroship-storage/tests/backend_parity.rs` | Compio client; multipart uploads; Testcontainers MinIO verification. |
+| Buffered and streaming native operations | 🟢 | `env.storage` | `crates/zeroship-storage-v8/src/callbacks.rs` | `docs/reference/storage.md` | `crates/zeroship-storage-v8/tests/e2e_streaming.rs` | Size limits, backpressure and metering. |
+| Download ownership | 🟢 | Isolate-owned handles | `crates/zeroship-storage-v8/src/live_streams.rs` | `docs/reference/storage.md` | `crates/zeroship-storage-v8/tests/cross_tenant_streams.rs` | Isolates cannot access each other's downloads; teardown releases sources. |
+| TypeScript bucket API | 🟢 | `Bucket`, `bucket()` | `sdks/storage/src/index.ts` | `docs/reference/storage.md` | `sdks/storage/tests` | Result envelopes, byte/text helpers, streaming and paginated listing. |
+| Aggregate stored-byte quotas | 🔵 | Per-app quota | — | — | — | Operation limits ship; total retained-byte enforcement does not. |
+| Presigned URLs and image transforms | 🔵 | Planned | — | `docs/proposals/feature-roadmap.md` | — | No implementation. |
 
 ---
 

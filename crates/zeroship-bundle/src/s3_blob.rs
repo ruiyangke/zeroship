@@ -149,7 +149,7 @@ impl S3BlobStore {
         // deploy artifact on local disk / in memory): a `read()` returns
         // immediately, so — unlike a slow async producer — it cannot park this
         // loop and starve the in-flight PUTs between drains. The
-        // `plugin-storage` `S3::put_stream` path (a slow V8 `ReadableStream`)
+        // `zeroship-storage` `S3::put_stream` path (a slow V8 `ReadableStream`)
         // therefore `select!`s its async producer against the in-flight drain
         // for true overlap (HIGH-2); here the read is fast and the
         // gate/backpressure drain suffices, so a `select!` over a synchronous

@@ -598,7 +598,7 @@ pub struct RuntimeState {
     /// Worker-internal environment variables — NOT user-facing.
     ///
     /// Carries hand-injected slots like `APP_ID` (set by
-    /// `crates/zeroship-worker/src/cache.rs` so plugin-db / plugin-storage /
+    /// `crates/zeroship-worker/src/cache.rs` so plugin-db / storage-v8 /
     /// kv-v8 can resolve the per-tenant scope). Distinct from the
     /// per-app `env_app_vars` / `env_app_secrets` which are the
     /// user-controlled environment.

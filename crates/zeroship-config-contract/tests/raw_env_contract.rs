@@ -272,7 +272,7 @@ fn a_raw_read_inside_a_macro_body_is_found() {
     // Regression for a REAL blind spot found on 2026-08-12: syn's default walk
     // stops at a macro's token stream, so
     // `assert!(std::env::var(NAME).is_err())` in
-    // crates/zeroship-plugin-storage/src/limits.rs:198 was invisible, and the file's
+    // crates/zeroship-storage/src/limits.rs was invisible, and the file's
     // other read made the omission look like a correct count.
     // Does not cover: an ALIASED read inside a macro body that does not parse
     // as an expression list. The text fallback matches literal spellings only.

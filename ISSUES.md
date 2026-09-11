@@ -123,7 +123,7 @@ epic below.
 ### ISS-72 · env.storage multipart: in-flight parts overlap a slow producer (FIXED — select pipeline)
 **Status:** FIXED (`design/s3-object-storage`) · **Effort:** M · **Tier:** T3 · Surfaced by the fable S3 review (HIGH-2)
 
-The parallel multipart loop in `S3::put_stream` (`crates/zeroship-plugin-storage/src/backend/s3.rs`) was
+The parallel multipart loop in `S3::put_stream` (`crates/zeroship-storage/src/backend/s3.rs`) was
 restructured from a gate-only-drain loop into a **select-based bounded-concurrency overlap
 pipeline**: one task drives the producer (`body.next_chunk()`) and the in-flight `UploadPart`
 `FuturesUnordered` CONCURRENTLY via `futures::select!`, so a PUT completing *while the next chunk
@@ -139,8 +139,8 @@ slowness: `CompleteMultipartUpload`/`AbortMultipartUpload` now REUSE the upload 
 pooled `cyper::Client` (`complete_multipart_on` / `abort_multipart_on` in `crates/compio-s3`), so
 finalization no longer opens a cold connection after a long upload. The per-part scaled timeout
 (`S3Timeouts::send_for_body`) is kept as defense-in-depth against a genuinely *stalled* part.
-**Regression test:** `run_s3_slow_producer_overlap` in `crates/zeroship-plugin-storage/tests/backend_parity.rs`
-(MinIO-gated) drives `put_stream` with a real inter-chunk-delayed producer spanning several parts
+**Regression test:** `run_s3_slow_producer_overlap` in `crates/zeroship-storage/tests/backend_parity.rs`
+(Testcontainers-owned MinIO) drives `put_stream` with a real inter-chunk-delayed producer spanning several parts
 and asserts a byte-exact round-trip + finalized object. NB: this test proves the new loop COMPLETES
 correctly under a slow producer; it cannot be made to *fail* on the old loop against **local** MinIO,
 because local parts complete in milliseconds whenever polled, so a fast part is never starved across
@@ -240,7 +240,7 @@ shipped in v1 — nothing deferred.
   immutable manifests with conditional PUT; `delete_app_manifests` paginated purge; gateway
   disk-cache refill streams `get_blob_to_file` into a `create_new` temp + no-clobber publish.
   Control's legacy `BundleStore`/VFS deleted; control writes S3 deploy artifacts.
-- **PR3 — `plugin-storage::S3` + `env.storage` streaming through V8:** `Backend` gains
+- **PR3 — `zeroship-storage::S3` + `env.storage` streaming through V8:** `Backend` gains
   `put_stream`/`get_stream`; S3 `put_stream` → multipart (bounded by 8 MiB part size);
   LocalFs gains object/metadata-sidecar layout. Native `putStream`/`getStream`/`readChunk`/
   `cancelStream` wired through the runtime's `response_forwarder` + `StreamWriter` bridges;
@@ -253,7 +253,7 @@ shipped in v1 — nothing deferred.
   `s3://` → S3); `StoragePlugin::new` deleted. **Runtime fix:** the upload streaming
   `response_forwarder` learned pause/resume backpressure on the buffer high/low-water marks,
   so a > buffer-cap streaming upload no longer overflows (regression test in
-  `plugin-storage/tests/e2e_streaming.rs`). Docs: `blob-store.md`, `plugin-system.md`,
+  `crates/zeroship-storage-v8/tests/e2e_streaming.rs`). Docs: `blob-store.md`, `plugin-system.md`,
   docker-compose runbook (MinIO/R2), design doc marked shipped.
 
 ### ISS-33 · No platform backups / disaster recovery

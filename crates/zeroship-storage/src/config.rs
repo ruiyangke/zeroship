@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use crate::backend::{Backend, LocalFs};
 
-/// A parsed `--storage-url` location for `env.storage`.
+/// A parsed object-storage location for Rust hosts.
 #[derive(Debug, Clone)]
 pub enum StorageBackendConfig {
     /// Local filesystem root (dev default).
@@ -23,7 +23,7 @@ pub enum StorageBackendConfig {
 /// Errors building a storage backend from `--storage-url`.
 #[derive(Debug, thiserror::Error)]
 pub enum StorageConfigError {
-    /// The `s3://…` URL failed to parse/validate.
+    /// The storage location failed validation.
     #[error("invalid storage location: {0}")]
     Url(String),
     /// An `s3://` URL was supplied but the crate was built without the `s3`
@@ -38,11 +38,11 @@ pub enum StorageConfigError {
 impl StorageBackendConfig {
     /// Classify a raw `--storage-url` value. An `s3://` scheme parses +
     /// validates the full S3 config now (so misconfiguration fails fast at
-    /// startup); anything else is a local filesystem path.
+    /// startup). Bare paths and `file://` select local storage; other schemes
+    /// and empty locations are rejected.
     ///
     /// # Errors
-    /// Returns [`StorageConfigError::Url`] when an `s3://` value fails to
-    /// parse/validate, or [`StorageConfigError::S3FeatureDisabled`] when an
+    /// Returns [`StorageConfigError::Url`] for an invalid location, or [`StorageConfigError::S3FeatureDisabled`] when an
     /// `s3://` URL is given but the `s3` feature is off.
     pub fn parse(raw: &str) -> Result<Self, StorageConfigError> {
         let raw = raw.strip_prefix("file://").unwrap_or(raw);
