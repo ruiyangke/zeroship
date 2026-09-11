@@ -12,6 +12,9 @@ export type { PlatformAssignment, PlatformAssignmentEvent } from "./generated/co
 /** Generic plain object type used throughout the SDK. */
 export type PlainObject = Record<string, unknown>;
 
+/** A JSON column can hold an object, array, or scalar at its root. */
+export type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
+
 /** PostgreSQL transaction isolation levels. */
 /**
  * Postgres transaction isolation level. Alias of the ambient
@@ -1392,9 +1395,9 @@ export const t = {
   timestamp(): TypeBuilder<number> {
     return new TypeBuilder<number>({ type: "date" });
   },
-  /** Creates a JSON/object field definition for arbitrary nested data. */
-  json(): TypeBuilder<Record<string, unknown>> {
-    return new TypeBuilder<Record<string, unknown>>({ type: "json" });
+  /** Creates a JSON field definition for objects, arrays, and scalars. */
+  json(): TypeBuilder<JsonValue> {
+    return new TypeBuilder<JsonValue>({ type: "json" });
   },
   /**
    * Creates an array field definition. Pass the item type builder as the argument:
