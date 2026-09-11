@@ -16,12 +16,13 @@
 mod read;
 pub use read::{ReadSource, build_select};
 
+pub use crate::lifecycle::WriteAssignments;
+use crate::lifecycle::{primary_key, soft_delete_column};
 use crate::value::Value;
 
 use crate::schema_name::SchemaName;
 
-/// A declared collection with no creator fields. Projection still includes
-/// the platform fields; this is never a replacement for a missing descriptor.
+/// An empty field map for statements that do not project collection fields.
 pub fn empty_read_schema() -> Value {
     Value::Object(crate::value::Map::new())
 }
@@ -251,36 +252,6 @@ pub(crate) enum ReservedName {
     Suffix(&'static str),
 }
 
-/// The seven platform-managed system fields.
-///
-/// Every creator table receives these at CREATE TABLE time;
-/// creators cannot declare their own field with any of these
-/// names. Filter-time use is unrestricted — `db.users.find({ id: "..." })`
-/// is the canonical query shape.
-///
-/// This list is intentionally separate from `RESERVED_NAMES` because
-/// the two categories enforce at different call sites:
-///
-/// - `RESERVED_NAMES` fires at BOTH schema-declaration time AND
-///   filter time (e.g. `_masked` suffix, `_*` prefix). Synthetic /
-///   sibling columns must never appear in user input at all.
-/// - `SYSTEM_FIELD_NAMES` fires ONLY at schema-declaration time. The
-///   names themselves (`id`, `created_at`, …) are the canonical
-///   query keys creators use every day.
-///
-/// The reservation produces [`QueryError::ReservedSystemFieldName`]
-/// (distinct from [`QueryError::InvalidIdent`]) so the SDK can branch
-/// on a stable code (`reserved_system_field_name`).
-pub const SYSTEM_FIELD_NAMES: &[&str] = &[
-    "id",
-    "created_at",
-    "updated_at",
-    "created_by",
-    "updated_by",
-    "version",
-    "deleted_at",
-];
-
 /// Platform-reserved field names. Centralised list — every new
 /// reserved prefix / suffix / exact-name lands here, exercised by
 /// both the schema-registration validator and the filter-time
@@ -398,33 +369,9 @@ pub fn validate_field_name(name: &str) -> Result<(), QueryError> {
     Ok(())
 }
 
-/// Declaration-time wrapper around [`validate_field_name`]
-/// that additionally fences the seven platform-managed system field
-/// names ([`SYSTEM_FIELD_NAMES`]).
-///
-/// Call this from every code path that translates a creator-declared
-/// schema field into DDL (currently `field_to_column`). Filter-time
-/// validators (`build_field_condition_with_dialect`, `build_vector_search`,
-/// `build_spatial_near`) must continue to call the underlying
-/// [`validate_field_name`] so creators can keep writing
-/// `db.users.find({ id: "..." })`.
-///
-/// On reservation hit returns [`QueryError::ReservedSystemFieldName`]
-/// — distinct from `InvalidIdent` so the SDK can branch on a stable
-/// `reserved_system_field_name` code. The message names the offending
-/// field; the hint enumerates all 7 system fields so the creator
-/// knows the full reserved set without consulting docs.
+/// Validate an ordinary field declaration.
 pub fn validate_field_name_for_declaration(name: &str) -> Result<(), QueryError> {
-    validate_field_name(name)?;
-    if SYSTEM_FIELD_NAMES.contains(&name) {
-        return Err(QueryError::ReservedSystemFieldName(format!(
-            "Field name '{name}' is reserved for platform system fields. \
-             System fields ({}) are managed by the platform and cannot be \
-             overridden.",
-            SYSTEM_FIELD_NAMES.join(", ")
-        )));
-    }
-    Ok(())
+    validate_field_name(name)
 }
 
 /// Typed-id prefixes reserved for the platform. A creator-declared
@@ -480,21 +427,14 @@ fn schema_declares_readable_field(schema_hint: &Value, name: &str) -> bool {
     schema_hint.get(name).is_some_and(field_is_readable)
 }
 
-/// **L24** — the read-identifier allowlist.
-///
-/// There is no permissive arm. Until this took a mandatory schema it raised
-/// `InvalidIdent` only `if schema_hint.is_some()`, so a caller that had not yet
-/// resolved a schema had EVERY field name accepted into `select` and `orderBy`
-/// including a mask sibling or any other internal physical column. The schema
-/// is now a value the caller must already hold, so "not yet resolved" cannot be
-/// expressed here at all.
+/// Require an explicitly declared readable field.
 fn validate_read_identifier(name: &str, schema_hint: &Value) -> Result<(), QueryError> {
     validate_field_name(name)?;
-    if SYSTEM_FIELD_NAMES.contains(&name) || schema_declares_readable_field(schema_hint, name) {
+    if schema_declares_readable_field(schema_hint, name) {
         return Ok(());
     }
     Err(QueryError::InvalidIdent(format!(
-        "field '{name}' is not a readable schema field; readable fields are declared schema fields plus the public system fields"
+        "field '{name}' is not a readable schema field; readable fields must be declared in the schema"
     )))
 }
 
@@ -740,7 +680,7 @@ pub fn build_write_target_probe(
     limit: i64,
     dialect: SqlDialect,
 ) -> Result<BuiltQuery, QueryError> {
-    let select = crate::value!(["id"]);
+    let select = crate::value!([primary_key(schema_hint)?]);
     let mut built =
         build_find_with_schema_and_unmask_and_soft_delete_with_dialect_and_limit_ceiling(
             schema_name,
@@ -955,7 +895,8 @@ fn build_find_with_schema_and_unmask_and_soft_delete_with_dialect_and_limit_ceil
         build_masked_aware_select_expr_with_unmask(select, schema_hint, unmask_columns)?;
 
     let mut sql = format!("SELECT {select_expr} FROM {schema}.{table}");
-    let composed_where = compose_where_with_soft_delete(&where_clause, filter_soft_deleted);
+    let composed_where =
+        compose_where_with_soft_delete(&where_clause, filter_soft_deleted, schema_hint)?;
     if !composed_where.is_empty() {
         sql.push_str(" WHERE ");
         sql.push_str(&composed_where);
@@ -1030,8 +971,8 @@ pub fn build_find_with_schema_and_unmask_and_soft_delete(
 
 /// Compose a WHERE clause body with the soft-delete
 /// auto-filter. Mirrors the same `creator AND deleted_at IS NULL`
-/// pattern used by [`build_soft_delete_one_with_system_fields`] /
-/// [`build_restore_one_with_system_fields`] inner SELECTs.
+/// pattern used by [`build_soft_delete_one_with_assignments`] /
+/// [`build_restore_one_with_assignments`] inner SELECTs.
 ///
 /// Three cases:
 /// 1. `!filter_soft_deleted` → return `where_clause` verbatim (back-
@@ -1041,15 +982,28 @@ pub fn build_find_with_schema_and_unmask_and_soft_delete(
 ///    WHERE body).
 /// 3. `filter_soft_deleted && !where_clause.is_empty()` → return
 ///    `<where_clause> AND "deleted_at" IS NULL`.
-fn compose_where_with_soft_delete(where_clause: &str, filter_soft_deleted: bool) -> String {
-    if !filter_soft_deleted {
-        return where_clause.to_string();
-    }
-    if where_clause.is_empty() {
-        "\"deleted_at\" IS NULL".to_string()
+fn compose_where_with_soft_delete(
+    where_clause: &str,
+    filter_soft_deleted: bool,
+    schema: &Value,
+) -> Result<String, QueryError> {
+    let marker = if filter_soft_deleted {
+        soft_delete_column(schema)?
     } else {
-        format!("{where_clause} AND \"deleted_at\" IS NULL")
-    }
+        None
+    };
+    let Some(marker) = marker else {
+        return Ok(where_clause.into());
+    };
+    let predicate = format!(
+        "{} IS NULL",
+        quote_ident(&value_column_for_field(marker, schema))
+    );
+    Ok(if where_clause.is_empty() {
+        predicate
+    } else {
+        format!("({where_clause}) AND {predicate}")
+    })
 }
 
 /// Project readable fields through the runtime storage mapping.
@@ -1102,36 +1056,13 @@ fn qualified_read_field(table_alias: Option<&str>, field: &str) -> String {
     }
 }
 
-/// Is `field` on the creator-facing read surface, per the descriptor?
-///
-/// The v2 descriptor stamps `readable` on every field it emits
-/// (`crates/zeroship-migrate-core/src/render/gen_types.rs`, `stamp_physical_storage`),
-/// and until the write projection landed nothing in Rust read it: the flag was
-/// emitted, shipped, cached and ignored, so "the version tag means less than it
-/// looks" was literally true of this key.
-///
-/// **An absent flag means readable.** `readable` narrows a declared field OUT of
-/// the surface; it is not what puts it in. A field map that predates the stamp -
-/// every hand-written test schema, and a descriptor from a dev-tier build that
-/// did not go through the fold - carries no
-/// flag at all, and refusing those would take the projection to zero columns
-/// rather than to a narrower set.
+/// Read capabilities may narrow a declared field out of the projection.
 fn field_is_readable(def: &Value) -> bool {
-    def.get("readable").and_then(Value::as_bool).unwrap_or(true)
+    def.get("readable").and_then(Value::as_bool) != Some(false)
+        && def.get("projectable").and_then(Value::as_bool) != Some(false)
 }
 
-/// The physical column that carries `field`'s creator-visible value.
-///
-/// Read from the descriptor's `storage.valueColumn` rather than formatted from
-/// the field name. The two agree on every artifact the fold emits today
-/// (`gen_artifacts_byte_identical.rs` asserts `valueColumn == name`), so this
-/// buys nothing observable now and everything later: a physical rename that
-/// keeps the logical name is then a producer change, where a `format!` here
-/// would name a column the table does not have.
-///
-/// It is deliberately NOT where the raw column is excluded. `storage.rawColumn`
-/// is a sibling key of `valueColumn`, so a projection that reads `valueColumn`
-/// cannot reach the raw column by any input - there is no branch to get wrong.
+/// Resolve the physical value column from field storage metadata.
 pub(crate) fn value_column_for_field(field: &str, schema_hint: &Value) -> String {
     schema_hint
         .get(field)
@@ -1161,21 +1092,7 @@ fn project_read_field(field: &str, schema_hint: &Value, table_alias: Option<&str
     }
 }
 
-/// **L24** — the explicit read allowlist. TOTAL: it has no "no schema" arm.
-///
-/// Every caller previously treated `None` here as "emit `*`", which is the
-/// projection failing open: mask siblings, raw columns and every other
-/// platform-emitted physical column ride out of SQL. The schema is now a value
-/// the caller holds, and a non-object one is an error rather than a fallback,
-/// so there is no input to this function that produces an unrestricted
-/// projection.
-///
-/// The seven system fields are projected unconditionally, ahead of any
-/// `readable` test. They are not the creator's to withdraw: `id` is the row
-/// identity every later stage routes by (the decrypt pass reads it for the AAD,
-/// the mask pass stamps it into `_meta.row_pk`), and a descriptor that said
-/// `readable: false` on it would produce rows no consumer in the pipeline can
-/// use rather than a narrower read surface.
+/// Expand an omitted projection using the descriptor.
 fn implicit_read_projection_parts(
     schema_hint: &Value,
     table_alias: Option<&str>,
@@ -1186,47 +1103,23 @@ fn implicit_read_projection_parts(
                 .to_string(),
         )
     })?;
-    let mut parts = Vec::with_capacity(SYSTEM_FIELD_NAMES.len() + schema_obj.len());
-    for field in SYSTEM_FIELD_NAMES {
-        parts.push(project_read_field(field, schema_hint, table_alias));
-    }
+    let mut parts = Vec::new();
     for (field, def) in schema_obj {
-        if is_schema_metadata_key(field)
-            || SYSTEM_FIELD_NAMES.contains(&field.as_str())
-            || !field_is_readable(def)
-        {
+        if is_schema_metadata_key(field) || !field_is_readable(def) {
             continue;
         }
         parts.push(project_read_field(field, schema_hint, table_alias));
     }
+    if parts.is_empty() {
+        return Err(QueryError::InvalidFilter(
+            "read requires a declared projection".into(),
+        ));
+    }
+
     Ok(parts)
 }
 
-/// The `RETURNING` column list every write builder emits.
-///
-/// # Why the write path needs one at all
-///
-/// `RETURNING *` and `SELECT *` are refused outright for a role that holds
-/// COLUMN-level grants: `*` expands to columns the role cannot read, so
-/// PostgreSQL rejects the whole statement rather than the columns
-/// (`ERROR: permission denied for table t`, measured on 17.11 for INSERT,
-/// UPDATE and SELECT alike). A per-app role narrowed to the columns its app
-/// declares therefore cannot execute a single write verb while the star is
-/// there. Naming the columns is what makes column grants expressible.
-///
-/// # What it does NOT replace
-///
-/// `crud::read_pipeline::restrict_rows_to_surface` still runs, and must. This
-/// narrows the rows one SQL statement returns; that stage narrows every row that
-/// reaches a creator, including the ones no statement here produced - the WAL
-/// consumer decodes pgoutput with no schema in reach and no projection to apply.
-/// The two overlap on the write path on purpose: the projection is the boundary
-/// the database enforces, the predicate is the boundary the runtime enforces,
-/// and the second is the only one that covers logical decoding.
-///
-/// Returns the bare comma-joined list, without the `RETURNING` keyword, because
-/// `build_find_or_create` appends a computed column after it
-/// (`(xmax = 0) AS __created`).
+/// Project declared readable fields after a mutation.
 pub fn build_returning_expr(schema_hint: &Value) -> Result<String, QueryError> {
     Ok(implicit_read_projection_parts(schema_hint, None)?.join(", "))
 }
@@ -1250,57 +1143,15 @@ pub const SYNTHETIC_RESULT_COLUMNS: &[&str] = &[
     "__created",
 ];
 
-/// Every column name a decoded row may carry across the JS boundary.
-///
-/// The seven system fields, every declared field's LOGICAL name, and
-/// [`SYNTHETIC_RESULT_COLUMNS`]. A physical column that is not one of those - a
-/// raw column, an auxiliary shadow-table key - is not on this surface and is
-/// removed before the row is serialised.
-///
-/// # A row predicate AS WELL AS a `RETURNING` column list
-///
-/// This paragraph used to read "rather than", and argued that narrowing the
-/// twelve `RETURNING *` sites "would not close the hole it appears to close".
-/// That argument was sound about EXPOSURE and is why this predicate still runs:
-/// the same rows feed the change broker, and on a deployed Postgres app the
-/// authoritative event source is the WAL consumer, which zips every physical
-/// column out of pgoutput with no schema in sight. A predicate over key names
-/// applies to both; a projection applies only to statements this file emits.
-///
-/// It was answering the wrong question. The projection is not a second attempt
-/// at the same containment - it is what makes the statements EXECUTABLE for a
-/// role holding column-level grants, because `*` expands to columns the role
-/// cannot read and PostgreSQL then refuses the whole statement. See
-/// [`build_returning_expr`]. Both now exist, and neither is redundant: the
-/// projection is the boundary the database enforces, this predicate is the
-/// boundary the runtime enforces, and only the second covers logical decoding.
-///
-/// The union of system fields and declared fields is not a choice between the
-/// two: `id` is minted SDK-side and read back out of the `RETURNING` row,
-/// `version` and `updated_at` are auto-bumped in SQL, `deleted_at` is what
-/// soft-delete writes, and none of the seven is necessarily a descriptor key.
-///
-/// Note this set is deliberately WIDER than what [`build_returning_expr`]
-/// projects: it admits every declared key, including one the descriptor marks
-/// `readable: false`. A predicate that drops keys is the wrong place to enforce
-/// a read surface the projection has already refused to produce - if an
-/// unreadable column ever appears in a row here it arrived from logical
-/// decoding, where narrowing it silently would hide the fact.
+/// Keep declared readable fields and known computed result columns.
 #[must_use]
 pub fn read_surface_columns(schema_hint: &Value) -> std::collections::BTreeSet<String> {
-    let mut out: std::collections::BTreeSet<String> = SYSTEM_FIELD_NAMES
-        .iter()
-        .chain(SYNTHETIC_RESULT_COLUMNS.iter())
-        .map(|name| (*name).to_string())
-        .collect();
-    if let Some(obj) = schema_hint.as_object() {
-        for field in obj.keys() {
-            if is_schema_metadata_key(field) {
-                continue;
-            }
-            out.insert(field.clone());
-        }
-    }
+    let mut out = crate::descriptors::readable_fields(schema_hint);
+    out.extend(
+        SYNTHETIC_RESULT_COLUMNS
+            .iter()
+            .map(|name| (*name).to_owned()),
+    );
     out
 }
 
@@ -1376,7 +1227,8 @@ pub fn build_count_with_soft_delete(
     let where_clause = build_where_with_dialect(filter, &mut params, schema_hint, dialect)?;
 
     let mut sql = format!("SELECT COUNT(*) AS count FROM {schema}.{table}");
-    let composed_where = compose_where_with_soft_delete(&where_clause, filter_soft_deleted);
+    let composed_where =
+        compose_where_with_soft_delete(&where_clause, filter_soft_deleted, schema_hint)?;
     if !composed_where.is_empty() {
         sql.push_str(" WHERE ");
         sql.push_str(&composed_where);
@@ -1503,51 +1355,6 @@ pub fn build_set_clauses(
     build_set_clauses_with_dialect(update, params, schema_hint, SqlDialect::Postgres)
 }
 
-/// Knobs the SET-clause builder needs to compose the
-/// platform's auto-bump system-field SET clauses correctly.
-///
-/// Three independent bumps, each suppressed when the creator's patch
-/// already provided an explicit value for that column (per
-/// `zeroship_data_orm::crud::system_fields_pass::apply_system_fields_on_update`
-/// which inspects the patch and surfaces these flags via
-/// `UpdateAutoBumpHints`):
-///
-/// 1. `version` → `"version" = "version" + 1` — every UPDATE bumps,
-///    unless `skip_version` is true (creator supplied an explicit
-///    value).
-/// 2. `updated_at` → `"updated_at" = NOW()` (PG) / `CURRENT_TIMESTAMP`
-///    (SQLite) — same skip rule.
-/// 3. `updated_by` → `"updated_by" = $N` bound to `actor_id` — emitted
-///    only when an actor is in scope AND `skip_updated_by` is false.
-///
-/// `Default::default()` produces the "no auto-bump" shape, used by the
-/// existing dispatch-free callers (e.g. raw SQL tests, the
-/// `build_set_clauses_with_dialect` wrapper) so behaviour
-/// outside the dispatch path is unchanged.
-#[derive(Debug, Clone, Default)]
-pub struct SystemFieldAutoBump<'a> {
-    /// `true` when the call came from the CRUD dispatch path rather than a
-    /// legacy direct builder caller. Controls whether version auto-bumps run
-    /// for anonymous writes.
-    pub dispatch_write: bool,
-    /// Bind value for the `updated_by` placeholder. When `None`, the
-    /// `updated_by` SET clause is suppressed (no actor in scope —
-    /// matches the INSERT path's "leave NULL when anonymous"
-    /// behaviour). When `Some`, the column is bound to the
-    /// typed_id string.
-    pub actor_id: Option<&'a str>,
-    /// `true` when the creator's patch carried an explicit `version`.
-    /// Suppresses the `"version" = "version" + 1` auto-bump so the
-    /// explicit value wins.
-    pub skip_version: bool,
-    /// Same as `skip_version` for `updated_at`. Suppresses the
-    /// dialect-appropriate `NOW()` / `CURRENT_TIMESTAMP` auto-bump.
-    pub skip_updated_at: bool,
-    /// Same as `skip_version` for `updated_by`. Suppresses the
-    /// actor-bound `$N` SET clause.
-    pub skip_updated_by: bool,
-}
-
 pub fn build_set_clauses_with_dialect(
     update: &Value,
     params: &mut Vec<Value>,
@@ -1556,43 +1363,22 @@ pub fn build_set_clauses_with_dialect(
 ) -> Result<Vec<String>, QueryError> {
     // The default auto-bump is empty (no version bump, no updated_by) —
     // preserves the contract for callers that don't need auto-bump.
-    build_set_clauses_with_system_fields(
+    build_set_clauses_with_assignments(
         update,
         params,
         schema_hint,
         dialect,
-        &SystemFieldAutoBump::default(),
+        &WriteAssignments::default(),
     )
 }
 
-/// SET-clause builder + system-field auto-bump pass.
-///
-/// Mirrors [`build_set_clauses_with_dialect`] for the creator-supplied
-/// portion of the SET clause (encryption-aware, operator-aware,
-/// `$set`-flattening), then appends — strictly AFTER all creator
-/// clauses, grep-friendly ordering — the three platform auto-bumps the
-/// system-field contract requires:
-///
-/// ```text
-///   "version"    = "version" + 1            (unless skip_version)
-///   "updated_at" = NOW() / CURRENT_TIMESTAMP (unless skip_updated_at)
-///   "updated_by" = $N                       (unless skip_updated_by OR
-///                                            actor_id is None)
-/// ```
-///
-/// The auto-bump SET clauses bypass the encryption / mask passes by
-/// construction — they are appended AFTER the encryption-aware loop
-/// runs, with their own SQL fragments and bind params (using the
-/// running `$N` counter so encryption-pass `$N` claims don't collide
-/// with the auto-bump's `$N`). System fields are platform-managed
-/// plaintext; routing them through encryption / masking would corrupt
-/// the on-disk values.
-pub fn build_set_clauses_with_system_fields(
+/// Combine user updates with the assignments prepared by the ORM.
+pub fn build_set_clauses_with_assignments(
     update: &Value,
     params: &mut Vec<Value>,
     schema_hint: &Value,
     dialect: SqlDialect,
-    autobump: &SystemFieldAutoBump<'_>,
+    assignments: &WriteAssignments,
 ) -> Result<Vec<String>, QueryError> {
     use crate::update::Operator;
     let fields = crate::update::assignments(update)
@@ -1653,72 +1439,7 @@ pub fn build_set_clauses_with_system_fields(
         set_clauses.push(clause);
     }
 
-    // System-field auto-bump SET clauses. Appended AFTER
-    // every creator-supplied clause (encryption-pass / mask-pass output
-    // included) so the diff against the creator's patch is grep-able
-    // AND so the auto-bumps bypass encryption / masking by
-    // construction. Each bump skipped when the creator's patch
-    // explicitly supplied that column (the value flows through the
-    // standard SET loop above; the explicit value wins per Q-SF-B).
-    //
-    // For direct callers, the
-    // "auto-bump updated_at when not explicit" path stays
-    // unchanged: when the caller passed `SystemFieldAutoBump::default()`
-    // (the wrapper from `build_set_clauses_with_dialect`), the only
-    // bump emitted is `updated_at` and it inspects the existing
-    // `set_clauses` for an explicit override. The `autobump.skip_*`
-    // flags are only ever set by the CRUD dispatch path
-    // (`apply_system_fields_on_update` populates the hints).
-    let already_has_updated_at = set_clauses.iter().any(|c| c.contains("\"updated_at\""));
-    let already_has_version = set_clauses.iter().any(|c| c.contains("\"version\""));
-    let already_has_updated_by = set_clauses.iter().any(|c| c.contains("\"updated_by\""));
-
-    // `version` auto-bump fires only on the CRUD dispatch path
-    // (signalled by an `actor_id` being threaded through OR by an
-    // explicit `skip_version = false` from the caller's hints). To
-    // keep the direct-caller contract intact, we use a
-    // discriminator: direct callers always pass `actor_id = None`
-    // AND `skip_version = false` (the `Default::default()` shape) —
-    // we only emit the version bump when `actor_id.is_some()` OR the
-    // caller asked for it explicitly via a `skip_updated_by = true`
-    // setting (which is impossible from the default and only set by
-    // the dispatch-path helper). The actor presence is the discriminator
-    // because direct callers never thread one through.
-    let on_pr4_dispatch_path = autobump.dispatch_write;
-    if on_pr4_dispatch_path && !autobump.skip_version && !already_has_version {
-        set_clauses.push("\"version\" = \"version\" + 1".to_string());
-    }
-
-    // `updated_at` auto-bump — dialect-aware (PG `NOW()` /
-    // SQLite `CURRENT_TIMESTAMP`). This fires on BOTH paths (CRUD
-    // dispatch AND direct callers) — every UPDATE emits
-    // `updated_at = NOW()` regardless of caller.
-    if !autobump.skip_updated_at && !already_has_updated_at {
-        let ts_expr = dialect.current_timestamp_expr();
-        set_clauses.push(format!("\"updated_at\" = {ts_expr}"));
-    }
-
-    // `updated_by` auto-bump — actor-bound, and it RUNS on every dispatch
-    // write, yielding NULL when nobody is signed in.
-    //
-    // It used to be skipped entirely on an anonymous write, which left the
-    // column naming the actor of some EARLIER write - a false claim about who
-    // touched the row, believed by anything reading `updated_by` for audit or
-    // authorization. Absent attribution is honest; stale attribution is not.
-    //
-    // Keyed on `dispatch_write` rather than on the actor: a direct builder
-    // caller (`build_set_clauses_with_dialect`) is not writing on anyone's
-    // behalf, so it must still emit no clause at all.
-    if on_pr4_dispatch_path && !autobump.skip_updated_by && !already_has_updated_by {
-        match autobump.actor_id {
-            Some(actor) => {
-                params.push((actor).into());
-                let n = params.len();
-                set_clauses.push(format!("\"updated_by\" = ${n}"));
-            }
-            None => set_clauses.push("\"updated_by\" = NULL".to_string()),
-        }
-    }
+    set_clauses.extend(assignments.render(dialect, params, None)?);
 
     Ok(set_clauses)
 }
@@ -1757,30 +1478,30 @@ pub fn build_update_one_with_dialect(
     update: &Value,
     dialect: SqlDialect,
 ) -> Result<BuiltQuery, QueryError> {
-    build_update_one_with_system_fields(
+    build_update_one_with_assignments(
         schema_name,
         collection,
         schema_hint,
         filter,
         update,
         dialect,
-        &SystemFieldAutoBump::default(),
+        &WriteAssignments::default(),
     )
 }
 
 /// Dialect-aware `updateOne` builder + system-field
 /// auto-bump. The CRUD dispatch path uses this so every UPDATE
 /// transparently bumps `version` + `updated_at` + `updated_by` (per
-/// the `autobump` knobs). Direct callers that need SQL without the
+/// the `assignments` knobs). Direct callers that need SQL without the
 /// auto-bumps keep using [`build_update_one_with_dialect`].
-pub fn build_update_one_with_system_fields(
+pub fn build_update_one_with_assignments(
     schema_name: &SchemaName,
     collection: &str,
     schema_hint: &Value,
     filter: &Value,
     update: &Value,
     dialect: SqlDialect,
-    autobump: &SystemFieldAutoBump<'_>,
+    assignments: &WriteAssignments,
 ) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
     let returning = build_returning_expr(schema_hint)?;
@@ -1790,7 +1511,7 @@ pub fn build_update_one_with_system_fields(
 
     let mut params: Vec<Value> = Vec::new();
     let set_clauses =
-        build_set_clauses_with_system_fields(update, &mut params, schema_hint, dialect, autobump)?;
+        build_set_clauses_with_assignments(update, &mut params, schema_hint, dialect, assignments)?;
 
     let where_clause = build_where_with_dialect(filter, &mut params, schema_hint, dialect)?;
 
@@ -1799,7 +1520,7 @@ pub fn build_update_one_with_system_fields(
     } else {
         format!(" WHERE {where_clause}")
     };
-    let (target_col, lock_clause) = single_row_write_target(dialect);
+    let (target_col, lock_clause) = single_row_write_target(dialect, schema_hint)?;
     let sql = format!(
         "UPDATE {schema}.{table} SET {} WHERE {target_col} = (SELECT {target_col} FROM {schema}.{table}{inner_where} LIMIT 1{lock_clause}) RETURNING {returning}",
         set_clauses.join(", "),
@@ -1989,30 +1710,30 @@ pub fn build_update_many_with_dialect(
     update: &Value,
     dialect: SqlDialect,
 ) -> Result<BuiltQuery, QueryError> {
-    build_update_many_with_system_fields(
+    build_update_many_with_assignments(
         schema_name,
         collection,
         schema_hint,
         filter,
         update,
         dialect,
-        &SystemFieldAutoBump::default(),
+        &WriteAssignments::default(),
     )
 }
 
 /// Dialect-aware `updateMany` builder + system-field
 /// auto-bump. Same auto-bump semantics as
-/// [`build_update_one_with_system_fields`]; CRUD dispatch path uses
+/// [`build_update_one_with_assignments`]; CRUD dispatch path uses
 /// this to keep the bulk-update SQL emitting `version` + `updated_at`
 /// + `updated_by` bumps even on multi-row updates.
-pub fn build_update_many_with_system_fields(
+pub fn build_update_many_with_assignments(
     schema_name: &SchemaName,
     collection: &str,
     schema_hint: &Value,
     filter: &Value,
     update: &Value,
     dialect: SqlDialect,
-    autobump: &SystemFieldAutoBump<'_>,
+    assignments: &WriteAssignments,
 ) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
     let returning = build_returning_expr(schema_hint)?;
@@ -2022,7 +1743,7 @@ pub fn build_update_many_with_system_fields(
 
     let mut params: Vec<Value> = Vec::new();
     let set_clauses =
-        build_set_clauses_with_system_fields(update, &mut params, schema_hint, dialect, autobump)?;
+        build_set_clauses_with_assignments(update, &mut params, schema_hint, dialect, assignments)?;
 
     let where_clause = build_where_with_dialect(filter, &mut params, schema_hint, dialect)?;
 
@@ -2100,7 +1821,7 @@ pub fn build_delete_one_with_dialect(
     let mut params: Vec<Value> = Vec::new();
     let where_clause = build_where_with_dialect(filter, &mut params, schema_hint, dialect)?;
 
-    let (target_col, lock_clause) = single_row_write_target(dialect);
+    let (target_col, lock_clause) = single_row_write_target(dialect, schema_hint)?;
     let sql = format!(
         "DELETE FROM {schema}.{table} WHERE {target_col} = (SELECT {target_col} FROM {schema}.{table}{} LIMIT 1{lock_clause}) RETURNING {returning}",
         if where_clause.is_empty() {
@@ -2113,122 +1834,32 @@ pub fn build_delete_one_with_dialect(
     Ok(BuiltQuery { sql, params })
 }
 
-// ---------------------------------------------------------------------------
-// Soft-delete / restore SQL builders.
-//
-// `delete()` on a post-migration table becomes an UPDATE that flips
-// `deleted_at` from NULL to `NOW()` / `CURRENT_TIMESTAMP`. The
-// builders mirror `build_update_*_with_system_fields` but stamp the
-// `deleted_at` SET clause themselves (system-field, not creator-
-// supplied) and add `AND deleted_at IS NULL` to the WHERE clause so
-// re-deleting an already-deleted row is a no-op (affected-rows = 0).
-//
-// `restore()` is the symmetric UPDATE: `deleted_at = NULL` with
-// `AND deleted_at IS NOT NULL` so restoring a live row is a no-op.
-//
-// Both bump `version` + `updated_at` + `updated_by` via the same
-// `SystemFieldAutoBump` knob the UPDATE path uses; the SET clauses are
-// composed inline (rather than routing through
-// `build_set_clauses_with_system_fields`) because the creator's "patch"
-// for soft-delete / restore is fixed by the platform — only the actor
-// and the timestamp expression differ from the auto-bump set.
-// ---------------------------------------------------------------------------
+// Lifecycle mutations use assignments prepared by the ORM.
 
-/// Dialect-appropriate `NOW()` / `CURRENT_TIMESTAMP`
-/// expression for stamping a `deleted_at` column on the soft-delete
-/// path. Mirrors the same lookup
-/// [`build_set_clauses_with_system_fields`] does for `updated_at`.
-fn now_expr(dialect: SqlDialect) -> &'static str {
-    dialect.current_timestamp_expr()
-}
-
-/// The stable identity and lock suffix for a single-row write.
-///
-/// The binding's ordinary PostgreSQL column grants omit `ctid`, while every
-/// creator table has an immutable, readable `id TEXT PRIMARY KEY`. Locking that
-/// logical row inside the selecting subquery keeps selection and mutation in
-/// one statement. The SQLite dev tier has no column-grant boundary and retains
-/// its native `rowid`.
-fn single_row_write_target(dialect: SqlDialect) -> (&'static str, &'static str) {
-    match dialect {
-        SqlDialect::Postgres => ("id", " FOR UPDATE"),
-        SqlDialect::Sqlite => ("rowid", ""),
-        SqlDialect::Mysql => ("id", ""),
-    }
-}
-
-/// Compose the SET clauses for a soft-delete: the
-/// `deleted_at` stamp + the standard `version` / `updated_at` /
-/// `updated_by` auto-bump triple (per the `autobump` knobs).
-///
-/// `actor_id` flows through into the `updated_by` placeholder when
-/// non-null; the dialect-flag picks the timestamp expression for both
-/// `deleted_at` and `updated_at`. `skip_*` knobs work identically to
-/// [`build_set_clauses_with_system_fields`].
-///
-/// SET clause ordering (grep-friendly diff): `deleted_at` first
-/// (the soft-delete-specific stamp), then the standard `version` /
-/// `updated_at` / `updated_by` bumps in that order.
-fn build_soft_delete_set_clauses(
-    params: &mut Vec<Value>,
+/// Use the declared key to select and lock a row for mutation.
+fn single_row_write_target(
     dialect: SqlDialect,
-    autobump: &SystemFieldAutoBump<'_>,
-) -> Vec<String> {
-    let now = now_expr(dialect);
-    let mut clauses = vec![format!("\"deleted_at\" = {now}")];
-    if !autobump.skip_version {
-        clauses.push("\"version\" = \"version\" + 1".to_string());
-    }
-    if !autobump.skip_updated_at {
-        clauses.push(format!("\"updated_at\" = {now}"));
-    }
-    push_updated_by_clause(&mut clauses, params, autobump);
-    clauses
+    schema: &Value,
+) -> Result<(String, &'static str), QueryError> {
+    let key = primary_key(schema)?;
+    Ok((
+        quote_ident(&value_column_for_field(key, schema)),
+        if dialect == SqlDialect::Postgres {
+            " FOR UPDATE"
+        } else {
+            ""
+        },
+    ))
 }
 
-/// The `updated_by` assignment shared by the soft-delete and restore builders.
-///
-/// Unconditional - no `dispatch_write` test - because these two builders exist
-/// only for the CRUD dispatch path. A delete or restore always writes on
-/// somebody's behalf, or on nobody's, and NULL is what "nobody" means. Leaving
-/// the column would have it name the actor of an earlier write.
-fn push_updated_by_clause(
-    clauses: &mut Vec<String>,
-    params: &mut Vec<Value>,
-    autobump: &SystemFieldAutoBump<'_>,
-) {
-    if autobump.skip_updated_by {
-        return;
-    }
-    match autobump.actor_id {
-        Some(actor) => {
-            params.push((actor).into());
-            let n = params.len();
-            clauses.push(format!("\"updated_by\" = ${n}"));
-        }
-        None => clauses.push("\"updated_by\" = NULL".to_string()),
-    }
-}
-
-/// Compose the SET clauses for `restore()`: clear
-/// `deleted_at` + bump the standard triple. Symmetric to
-/// [`build_soft_delete_set_clauses`]. The timestamp expression isn't
-/// needed for `deleted_at` here (we write `NULL` directly, not a stamp).
-fn build_restore_set_clauses(
-    params: &mut Vec<Value>,
-    dialect: SqlDialect,
-    autobump: &SystemFieldAutoBump<'_>,
-) -> Vec<String> {
-    let now = now_expr(dialect);
-    let mut clauses = vec!["\"deleted_at\" = NULL".to_string()];
-    if !autobump.skip_version {
-        clauses.push("\"version\" = \"version\" + 1".to_string());
-    }
-    if !autobump.skip_updated_at {
-        clauses.push(format!("\"updated_at\" = {now}"));
-    }
-    push_updated_by_clause(&mut clauses, params, autobump);
-    clauses
+fn deleted_predicate(schema: &Value, deleted: bool) -> Result<String, QueryError> {
+    let marker = soft_delete_column(schema)?
+        .ok_or_else(|| QueryError::InvalidFilter("collection has no soft-delete column".into()))?;
+    Ok(format!(
+        "{} IS {}NULL",
+        quote_ident(&value_column_for_field(marker, schema)),
+        if deleted { "NOT " } else { "" }
+    ))
 }
 
 /// Dialect-aware `soft_delete_one` builder. Used by the
@@ -2249,13 +1880,13 @@ fn build_restore_set_clauses(
 /// idempotent: re-deleting an already-deleted row affects 0 rows. The
 /// dispatch layer translates 0-affected to a `null` result (matches the
 /// `deleteOne` contract).
-pub fn build_soft_delete_one_with_system_fields(
+pub fn build_soft_delete_one_with_assignments(
     schema_name: &SchemaName,
     collection: &str,
     schema_hint: &Value,
     filter: &Value,
     dialect: SqlDialect,
-    autobump: &SystemFieldAutoBump<'_>,
+    assignments: &WriteAssignments,
 ) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
     let returning = build_returning_expr(schema_hint)?;
@@ -2264,7 +1895,7 @@ pub fn build_soft_delete_one_with_system_fields(
     let table = quote_ident(collection);
 
     let mut params: Vec<Value> = Vec::new();
-    let set_clauses = build_soft_delete_set_clauses(&mut params, dialect, autobump);
+    let set_clauses = assignments.render(dialect, &mut params, None)?;
 
     let where_clause = build_where_with_dialect(filter, &mut params, schema_hint, dialect)?;
     // The inner SELECT scopes the soft-delete to a single live row.
@@ -2274,12 +1905,15 @@ pub fn build_soft_delete_one_with_system_fields(
     // id or filter — but we mirror the same defensive behaviour as
     // `build_delete_one`.
     let inner_where = if where_clause.is_empty() {
-        " WHERE \"deleted_at\" IS NULL".to_string()
+        format!(" WHERE {}", deleted_predicate(schema_hint, false)?)
     } else {
-        format!(" WHERE {where_clause} AND \"deleted_at\" IS NULL")
+        format!(
+            " WHERE ({where_clause}) AND {}",
+            deleted_predicate(schema_hint, false)?
+        )
     };
 
-    let (target_col, lock_clause) = single_row_write_target(dialect);
+    let (target_col, lock_clause) = single_row_write_target(dialect, schema_hint)?;
     let sql = format!(
         "UPDATE {schema}.{table} SET {} WHERE {target_col} = (SELECT {target_col} FROM {schema}.{table}{inner_where} LIMIT 1{lock_clause}) RETURNING {returning}",
         set_clauses.join(", "),
@@ -2289,19 +1923,19 @@ pub fn build_soft_delete_one_with_system_fields(
 }
 
 /// Dialect-aware `soft_delete_many` builder. Same shape
-/// as [`build_soft_delete_one_with_system_fields`] minus the single-row
+/// as [`build_soft_delete_one_with_assignments`] minus the single-row
 /// LIMIT 1 narrowing — every live row matching `filter` flips
 /// `deleted_at` to the dialect's `NOW()`-equivalent.
 ///
 /// `AND deleted_at IS NULL` is preserved so re-deleting an already-
 /// deleted row is still a no-op.
-pub fn build_soft_delete_many_with_system_fields(
+pub fn build_soft_delete_many_with_assignments(
     schema_name: &SchemaName,
     collection: &str,
     schema_hint: &Value,
     filter: &Value,
     dialect: SqlDialect,
-    autobump: &SystemFieldAutoBump<'_>,
+    assignments: &WriteAssignments,
 ) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
     let returning = build_returning_expr(schema_hint)?;
@@ -2310,13 +1944,16 @@ pub fn build_soft_delete_many_with_system_fields(
     let table = quote_ident(collection);
 
     let mut params: Vec<Value> = Vec::new();
-    let set_clauses = build_soft_delete_set_clauses(&mut params, dialect, autobump);
+    let set_clauses = assignments.render(dialect, &mut params, None)?;
 
     let where_clause = build_where_with_dialect(filter, &mut params, schema_hint, dialect)?;
     let where_sql = if where_clause.is_empty() {
-        " WHERE \"deleted_at\" IS NULL".to_string()
+        format!(" WHERE {}", deleted_predicate(schema_hint, false)?)
     } else {
-        format!(" WHERE {where_clause} AND \"deleted_at\" IS NULL")
+        format!(
+            " WHERE ({where_clause}) AND {}",
+            deleted_predicate(schema_hint, false)?
+        )
     };
 
     let sql = format!(
@@ -2328,18 +1965,18 @@ pub fn build_soft_delete_many_with_system_fields(
 }
 
 /// Dialect-aware `restore_one` builder. Symmetric to
-/// [`build_soft_delete_one_with_system_fields`]: clears `deleted_at`
+/// [`build_soft_delete_one_with_assignments`]: clears `deleted_at`
 /// and scopes to rows that are CURRENTLY soft-deleted
 /// (`deleted_at IS NOT NULL`) so restoring a live row is a no-op
 /// (affected-rows = 0 → typed `not_found_or_already_live` via the
 /// dispatch layer).
-pub fn build_restore_one_with_system_fields(
+pub fn build_restore_one_with_assignments(
     schema_name: &SchemaName,
     collection: &str,
     schema_hint: &Value,
     filter: &Value,
     dialect: SqlDialect,
-    autobump: &SystemFieldAutoBump<'_>,
+    assignments: &WriteAssignments,
 ) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
     let returning = build_returning_expr(schema_hint)?;
@@ -2348,16 +1985,19 @@ pub fn build_restore_one_with_system_fields(
     let table = quote_ident(collection);
 
     let mut params: Vec<Value> = Vec::new();
-    let set_clauses = build_restore_set_clauses(&mut params, dialect, autobump);
+    let set_clauses = assignments.render(dialect, &mut params, None)?;
 
     let where_clause = build_where_with_dialect(filter, &mut params, schema_hint, dialect)?;
     let inner_where = if where_clause.is_empty() {
-        " WHERE \"deleted_at\" IS NOT NULL".to_string()
+        format!(" WHERE {}", deleted_predicate(schema_hint, true)?)
     } else {
-        format!(" WHERE {where_clause} AND \"deleted_at\" IS NOT NULL")
+        format!(
+            " WHERE ({where_clause}) AND {}",
+            deleted_predicate(schema_hint, true)?
+        )
     };
 
-    let (target_col, lock_clause) = single_row_write_target(dialect);
+    let (target_col, lock_clause) = single_row_write_target(dialect, schema_hint)?;
     let sql = format!(
         "UPDATE {schema}.{table} SET {} WHERE {target_col} = (SELECT {target_col} FROM {schema}.{table}{inner_where} LIMIT 1{lock_clause}) RETURNING {returning}",
         set_clauses.join(", "),
@@ -2367,13 +2007,13 @@ pub fn build_restore_one_with_system_fields(
 }
 
 /// Dialect-aware `restore_many` builder.
-pub fn build_restore_many_with_system_fields(
+pub fn build_restore_many_with_assignments(
     schema_name: &SchemaName,
     collection: &str,
     schema_hint: &Value,
     filter: &Value,
     dialect: SqlDialect,
-    autobump: &SystemFieldAutoBump<'_>,
+    assignments: &WriteAssignments,
 ) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
     let returning = build_returning_expr(schema_hint)?;
@@ -2382,13 +2022,16 @@ pub fn build_restore_many_with_system_fields(
     let table = quote_ident(collection);
 
     let mut params: Vec<Value> = Vec::new();
-    let set_clauses = build_restore_set_clauses(&mut params, dialect, autobump);
+    let set_clauses = assignments.render(dialect, &mut params, None)?;
 
     let where_clause = build_where_with_dialect(filter, &mut params, schema_hint, dialect)?;
     let where_sql = if where_clause.is_empty() {
-        " WHERE \"deleted_at\" IS NOT NULL".to_string()
+        format!(" WHERE {}", deleted_predicate(schema_hint, true)?)
     } else {
-        format!(" WHERE {where_clause} AND \"deleted_at\" IS NOT NULL")
+        format!(
+            " WHERE ({where_clause}) AND {}",
+            deleted_predicate(schema_hint, true)?
+        )
     };
 
     let sql = format!(
@@ -2691,7 +2334,8 @@ pub fn build_aggregate_with_result_columns(
 
     let mut sql = format!("SELECT {select_expr} FROM {schema}.{table}");
 
-    let composed_where = compose_where_with_soft_delete(&where_clause, filter_soft_deleted);
+    let composed_where =
+        compose_where_with_soft_delete(&where_clause, filter_soft_deleted, schema_hint)?;
     if !composed_where.is_empty() {
         sql.push_str(" WHERE ");
         sql.push_str(&composed_where);
@@ -2783,7 +2427,8 @@ pub fn build_distinct_with_soft_delete_with_dialect(
     let where_clause = build_where_with_dialect(filter, &mut params, schema_hint, dialect)?;
 
     let mut sql = format!("SELECT DISTINCT {select_expr} FROM {schema}.{table}");
-    let composed_where = compose_where_with_soft_delete(&where_clause, filter_soft_deleted);
+    let composed_where =
+        compose_where_with_soft_delete(&where_clause, filter_soft_deleted, schema_hint)?;
     if !composed_where.is_empty() {
         sql.push_str(" WHERE ");
         sql.push_str(&composed_where);
@@ -3518,6 +3163,26 @@ pub fn build_upsert_with_dialect(
     conflict_fields: &Value,
     dialect: SqlDialect,
 ) -> Result<BuiltQuery, QueryError> {
+    build_upsert_with_assignments(
+        schema_name,
+        collection,
+        schema_hint,
+        doc,
+        conflict_fields,
+        dialect,
+        &WriteAssignments::default(),
+    )
+}
+
+pub fn build_upsert_with_assignments(
+    schema_name: &SchemaName,
+    collection: &str,
+    schema_hint: &Value,
+    doc: &Value,
+    conflict_fields: &Value,
+    dialect: SqlDialect,
+    assignments: &WriteAssignments,
+) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
     let returning = build_returning_expr(schema_hint)?;
 
@@ -3545,17 +3210,9 @@ pub fn build_upsert_with_dialect(
     let mut placeholders = Vec::new();
     let mut params: Vec<Value> = Vec::new();
     let mut update_clauses = Vec::new();
-    let mut doc_has_version = false;
-    let mut doc_has_updated_at = false;
 
     for (key, value) in obj {
         columns.push(quote_ident(key));
-
-        match key.as_str() {
-            "version" => doc_has_version = true,
-            "updated_at" => doc_has_updated_at = true,
-            _ => {}
-        }
 
         if value.is_null() {
             placeholders.push("NULL".to_string());
@@ -3577,7 +3234,11 @@ pub fn build_upsert_with_dialect(
 
         // Non-conflict columns get updated to the EXCLUDED value
         if !conflict_set.contains(key.as_str())
-            && !matches!(key.as_str(), "id" | "created_at" | "created_by")
+            && schema_hint[key]["assign"]["on"].as_str() != Some("insert")
+            && !assignments
+                .columns
+                .iter()
+                .any(|assignment| assignment.column == *key)
         {
             update_clauses.push(format!(
                 "{} = EXCLUDED.{}",
@@ -3592,27 +3253,11 @@ pub fn build_upsert_with_dialect(
         .map(|field| quote_ident(field))
         .collect();
 
-    if !doc_has_version {
-        // The READ of `version` must name its relation. Inside `ON CONFLICT DO
-        // UPDATE SET`, both the target row and the proposed row (`excluded`)
-        // are in scope, so an unqualified column reference in the SET
-        // EXPRESSION is ambiguous - PostgreSQL refuses the whole statement with
-        // `42702 column reference "version" is ambiguous`. The assignment
-        // TARGET on the left is unambiguous by position and stays bare, which
-        // is why this reads lopsided.
-        //
-        // Every PG upsert took this branch: the insert-side system-fields pass
-        // deliberately leaves `version` to the DDL default, so `doc_has_version`
-        // is false on the dispatch path. Nothing caught it because the upsert
-        // tests that EXECUTE run on SQLite, where the same reference is legal,
-        // and the PG upsert tests only compare strings.
-        update_clauses.push(format!(
-            r#""version" = COALESCE({schema}.{table}."version", 0) + 1"#
-        ));
-    }
-    if !doc_has_updated_at {
-        update_clauses.push(format!(r#""updated_at" = {}"#, now_expr(dialect)));
-    }
+    update_clauses.extend(assignments.render(
+        dialect,
+        &mut params,
+        Some(&format!("{schema}.{table}")),
+    )?);
 
     // If all columns are conflict columns, use DO UPDATE SET for the first non-id conflict col
     // to make it a true upsert (otherwise Postgres treats it as DO NOTHING).
@@ -3722,7 +3367,18 @@ pub fn build_find_or_create(
 
 #[cfg(test)]
 mod tests {
+    const FIXTURE_GENERATED_COLUMNS: &[&str] = &[
+        "id",
+        "created_at",
+        "updated_at",
+        "created_by",
+        "updated_by",
+        "version",
+        "deleted_at",
+    ];
+
     use super::*;
+    use crate::lifecycle::{AssignedValue, ColumnAssignment};
     use crate::value;
 
     /// Wrap a fixture app id as the physical schema the builders now take.
@@ -3731,6 +3387,33 @@ mod tests {
     /// parameter that wants a schema. Tests still spell one string for both,
     /// because that is what production mints today - the point is that the
     /// CALL says which meaning it is passing.
+    fn lifecycle_assignments(restoring: bool) -> WriteAssignments {
+        WriteAssignments {
+            columns: vec![
+                ColumnAssignment {
+                    column: "version".into(),
+                    value: AssignedValue::Increment(1),
+                },
+                ColumnAssignment {
+                    column: "updated_at".into(),
+                    value: AssignedValue::CurrentTimestamp,
+                },
+                ColumnAssignment {
+                    column: "updated_by".into(),
+                    value: AssignedValue::Bound(Value::Null),
+                },
+                ColumnAssignment {
+                    column: "deleted_at".into(),
+                    value: if restoring {
+                        AssignedValue::Bound(Value::Null)
+                    } else {
+                        AssignedValue::CurrentTimestamp
+                    },
+                },
+            ],
+        }
+    }
+
     fn s(name: &str) -> SchemaName {
         SchemaName::new(name).expect("fixture schema name")
     }
@@ -3746,7 +3429,13 @@ mod tests {
     /// columns they name and let the projection be the ordinary allowlist.
     fn tschema() -> Value {
         value!({
+            "id": { "type": "string", "assign":{"by":"typedId", "on":"insert"}, "primaryKey": true },
+            "created_at": { "type": "date", "assign":{"by":"now", "on":"insert"} },
             "updated_at": { "type": "date" },
+            "created_by": { "type": "string", "assign":{"by":"actor", "on":"insert"} },
+            "updated_by": { "type": "string" },
+            "version": { "type": "int", "concurrency": true },
+            "deleted_at": { "type": "date", "softDelete": true },
             "age":        { "type": "number" },
             "amount":     { "type": "number" },
             "bio":        { "type": "string" },
@@ -4936,7 +4625,8 @@ mod tests {
         // Plain field: value → SET "name" = $1
         assert!(q.sql.contains(r#""name" = $1"#), "sql: {}", q.sql);
         assert!(
-            q.sql.contains("WHERE id = (SELECT id FROM") && q.sql.contains("LIMIT 1 FOR UPDATE)"),
+            q.sql.contains("WHERE \"id\" = (SELECT \"id\" FROM")
+                && q.sql.contains("LIMIT 1 FOR UPDATE)"),
             "sql: {}",
             q.sql
         );
@@ -4951,7 +4641,7 @@ mod tests {
         let q = build_update_one(&s("app1"), "users", &tschema(), &filter, &update).unwrap();
         assert!(q.sql.contains(r#""name" = $1"#), "sql: {}", q.sql);
         assert!(
-            q.sql.contains("WHERE id = (SELECT id FROM"),
+            q.sql.contains("WHERE \"id\" = (SELECT \"id\" FROM"),
             "sql: {}",
             q.sql
         );
@@ -4964,7 +4654,8 @@ mod tests {
         let filter = value!({});
         let q = build_delete_one(&s("app1"), "users", &tschema(), &filter).unwrap();
         assert!(
-            q.sql.contains("WHERE id = (SELECT id FROM") && q.sql.contains("LIMIT 1 FOR UPDATE)"),
+            q.sql.contains("WHERE \"id\" = (SELECT \"id\" FROM")
+                && q.sql.contains("LIMIT 1 FOR UPDATE)"),
             "sql: {}",
             q.sql
         );
@@ -4978,7 +4669,7 @@ mod tests {
         let filter = value!({"role": "guest"});
         let q = build_delete_one(&s("app1"), "users", &tschema(), &filter).unwrap();
         assert!(
-            q.sql.contains("WHERE id = (SELECT id FROM"),
+            q.sql.contains("WHERE \"id\" = (SELECT \"id\" FROM"),
             "sql: {}",
             q.sql
         );
@@ -5620,21 +5311,22 @@ mod tests {
     /// statement the production dialect cannot run. See
     /// [`the_upserts_version_bump_qualifies_the_column_it_reads`].
     #[test]
-    fn test_upsert_autobumps_version_and_updated_at_when_omitted() {
+    fn test_upsert_assignmentss_version_and_updated_at_when_omitted() {
         let doc = value!({"email": "a@b.com", "name": "alice"});
         let conflict = value!(["email"]);
-        let q = build_upsert_with_dialect(
+        let q = build_upsert_with_assignments(
             &s("app1"),
             "users",
             &tschema(),
             &doc,
             &conflict,
             SqlDialect::Sqlite,
+            &lifecycle_assignments(false),
         )
         .unwrap();
         assert!(
             q.sql
-                .contains(r#""version" = COALESCE("app1"."users"."version", 0) + 1"#),
+                .contains(r#""version" = "app1"."users"."version" + $"#),
             "upsert must auto-bump version on conflict when omitted: {}",
             q.sql
         );
@@ -5879,13 +5571,13 @@ mod tests {
     }
 
     #[test]
-    fn test_update_updated_at_auto_injected() {
+    fn test_update_updated_at_requires_assignment() {
         // Every UPDATE implicitly bumps updated_at unless the caller
         // explicitly set it. This is part of the platform contract.
         let filter = value!({"id": 1});
         let update = value!({"name": "bob"});
         let q = build_update_one(&s("app1"), "users", &tschema(), &filter, &update).unwrap();
-        assert!(q.sql.contains(r#""updated_at" = NOW()"#), "sql: {}", q.sql);
+        assert!(!q.sql.contains(r#""updated_at" = NOW()"#), "sql: {}", q.sql);
     }
 
     #[test]
@@ -6005,13 +5697,13 @@ mod tests {
     }
 
     #[test]
-    fn test_update_many_auto_updates_timestamp() {
+    fn test_update_many_leaves_unassigned_timestamp_unchanged() {
         // updateMany shares the same build_set_clauses path, so the
         // auto-timestamp behaviour must hold there too.
         let filter = value!({"status": "draft"});
         let update = value!({"status": "published"});
         let q = build_update_many(&s("app1"), "posts", &tschema(), &filter, &update).unwrap();
-        assert!(q.sql.contains(r#""updated_at" = NOW()"#), "sql: {}", q.sql);
+        assert!(!q.sql.contains(r#""updated_at" = NOW()"#), "sql: {}", q.sql);
         // updateMany must not wrap the WHERE in a LIMIT 1 subquery.
         assert!(!q.sql.contains("LIMIT 1"), "sql: {}", q.sql);
     }
@@ -6064,23 +5756,34 @@ mod tests {
     fn update_appends_version_increment_to_set_clause() {
         let filter = value!({ "id": "post_x" });
         let update = value!({ "title": "new" });
-        let autobump = SystemFieldAutoBump {
-            dispatch_write: true,
-            actor_id: Some("usr_actor"),
-            ..Default::default()
+        let assignments = WriteAssignments {
+            columns: vec![
+                ColumnAssignment {
+                    column: "version".into(),
+                    value: AssignedValue::Increment(1),
+                },
+                ColumnAssignment {
+                    column: "updated_at".into(),
+                    value: AssignedValue::CurrentTimestamp,
+                },
+                ColumnAssignment {
+                    column: "updated_by".into(),
+                    value: AssignedValue::Bound(value!("usr_actor")),
+                },
+            ],
         };
-        let q = build_update_one_with_system_fields(
+        let q = build_update_one_with_assignments(
             &s("app1"),
             "posts",
             &tschema(),
             &filter,
             &update,
             SqlDialect::Postgres,
-            &autobump,
+            &assignments,
         )
         .unwrap();
         assert!(
-            q.sql.contains(r#""version" = "version" + 1"#),
+            q.sql.contains(r#""version" = "version" + $"#),
             "PR 4 must append version auto-bump: {}",
             q.sql,
         );
@@ -6090,22 +5793,34 @@ mod tests {
     fn update_appends_version_increment_for_anonymous_dispatch_write() {
         let filter = value!({ "id": "post_x" });
         let update = value!({ "title": "new" });
-        let autobump = SystemFieldAutoBump {
-            dispatch_write: true,
-            ..Default::default()
+        let assignments = WriteAssignments {
+            columns: vec![
+                ColumnAssignment {
+                    column: "version".into(),
+                    value: AssignedValue::Increment(1),
+                },
+                ColumnAssignment {
+                    column: "updated_at".into(),
+                    value: AssignedValue::CurrentTimestamp,
+                },
+                ColumnAssignment {
+                    column: "updated_by".into(),
+                    value: AssignedValue::Bound(Value::Null),
+                },
+            ],
         };
-        let q = build_update_one_with_system_fields(
+        let q = build_update_one_with_assignments(
             &s("app1"),
             "posts",
             &tschema(),
             &filter,
             &update,
             SqlDialect::Sqlite,
-            &autobump,
+            &assignments,
         )
         .unwrap();
         assert!(
-            q.sql.contains(r#""version" = "version" + 1"#),
+            q.sql.contains(r#""version" = "version" + $"#),
             "anonymous dispatched updates must still bump version: {}",
             q.sql,
         );
@@ -6115,19 +5830,30 @@ mod tests {
     fn update_appends_updated_at_now_pg() {
         let filter = value!({ "id": "post_x" });
         let update = value!({ "title": "new" });
-        let autobump = SystemFieldAutoBump {
-            dispatch_write: true,
-            actor_id: Some("usr_actor"),
-            ..Default::default()
+        let assignments = WriteAssignments {
+            columns: vec![
+                ColumnAssignment {
+                    column: "version".into(),
+                    value: AssignedValue::Increment(1),
+                },
+                ColumnAssignment {
+                    column: "updated_at".into(),
+                    value: AssignedValue::CurrentTimestamp,
+                },
+                ColumnAssignment {
+                    column: "updated_by".into(),
+                    value: AssignedValue::Bound(value!("usr_actor")),
+                },
+            ],
         };
-        let q = build_update_one_with_system_fields(
+        let q = build_update_one_with_assignments(
             &s("app1"),
             "posts",
             &tschema(),
             &filter,
             &update,
             SqlDialect::Postgres,
-            &autobump,
+            &assignments,
         )
         .unwrap();
         assert!(
@@ -6141,19 +5867,30 @@ mod tests {
     fn update_appends_updated_at_current_timestamp_sqlite() {
         let filter = value!({ "id": "post_x" });
         let update = value!({ "title": "new" });
-        let autobump = SystemFieldAutoBump {
-            dispatch_write: true,
-            actor_id: Some("usr_actor"),
-            ..Default::default()
+        let assignments = WriteAssignments {
+            columns: vec![
+                ColumnAssignment {
+                    column: "version".into(),
+                    value: AssignedValue::Increment(1),
+                },
+                ColumnAssignment {
+                    column: "updated_at".into(),
+                    value: AssignedValue::CurrentTimestamp,
+                },
+                ColumnAssignment {
+                    column: "updated_by".into(),
+                    value: AssignedValue::Bound(value!("usr_actor")),
+                },
+            ],
         };
-        let q = build_update_one_with_system_fields(
+        let q = build_update_one_with_assignments(
             &s("app1"),
             "posts",
             &tschema(),
             &filter,
             &update,
             SqlDialect::Sqlite,
-            &autobump,
+            &assignments,
         )
         .unwrap();
         assert!(
@@ -6177,19 +5914,30 @@ mod tests {
         // the actor's presence. It had to move: an anonymous dispatch write
         // assigns NULL, so "an actor is bound" can no longer distinguish a
         // dispatch write from a direct builder call.
-        let autobump = SystemFieldAutoBump {
-            dispatch_write: true,
-            actor_id: Some("usr_session"),
-            ..Default::default()
+        let assignments = WriteAssignments {
+            columns: vec![
+                ColumnAssignment {
+                    column: "version".into(),
+                    value: AssignedValue::Increment(1),
+                },
+                ColumnAssignment {
+                    column: "updated_at".into(),
+                    value: AssignedValue::CurrentTimestamp,
+                },
+                ColumnAssignment {
+                    column: "updated_by".into(),
+                    value: AssignedValue::Bound(value!("usr_session")),
+                },
+            ],
         };
-        let q = build_update_one_with_system_fields(
+        let q = build_update_one_with_assignments(
             &s("app1"),
             "posts",
             &tschema(),
             &filter,
             &update,
             SqlDialect::Postgres,
-            &autobump,
+            &assignments,
         )
         .unwrap();
         // updated_by is a bound param; the SQL fragment is `"updated_by" = $N`
@@ -6213,15 +5961,15 @@ mod tests {
         // default fallback applies — only `updated_at` auto-bumps.
         let filter = value!({ "id": "post_x" });
         let update = value!({ "title": "new" });
-        let autobump = SystemFieldAutoBump::default();
-        let q = build_update_one_with_system_fields(
+        let assignments = WriteAssignments::default();
+        let q = build_update_one_with_assignments(
             &s("app1"),
             "posts",
             &tschema(),
             &filter,
             &update,
             SqlDialect::Postgres,
-            &autobump,
+            &assignments,
         )
         .unwrap();
         assert!(
@@ -6237,24 +5985,25 @@ mod tests {
         // MUST NOT fire (the explicit value wins per Q-SF-B).
         let filter = value!({ "id": "post_x" });
         let update = value!({ "title": "new", "version": 99 });
-        let autobump = SystemFieldAutoBump {
-            actor_id: Some("usr_actor"),
-            skip_version: true,
-            ..Default::default()
+        let assignments = WriteAssignments {
+            columns: vec![ColumnAssignment {
+                column: "updated_at".into(),
+                value: AssignedValue::CurrentTimestamp,
+            }],
         };
-        let q = build_update_one_with_system_fields(
+        let q = build_update_one_with_assignments(
             &s("app1"),
             "posts",
             &tschema(),
             &filter,
             &update,
             SqlDialect::Postgres,
-            &autobump,
+            &assignments,
         )
         .unwrap();
         // The version auto-bump must NOT appear.
         assert!(
-            !q.sql.contains(r#""version" = "version" + 1"#),
+            !q.sql.contains(r#""version" = "version" + $"#),
             "skip_version must suppress the auto-bump: {}",
             q.sql,
         );
@@ -6276,19 +6025,20 @@ mod tests {
         let filter = value!({ "id": "post_x" });
         let explicit = "2026-01-01T00:00:00Z";
         let update = value!({ "title": "new", "updated_at": explicit });
-        let autobump = SystemFieldAutoBump {
-            actor_id: Some("usr_actor"),
-            skip_updated_at: true,
-            ..Default::default()
+        let assignments = WriteAssignments {
+            columns: vec![ColumnAssignment {
+                column: "version".into(),
+                value: AssignedValue::Increment(1),
+            }],
         };
-        let q = build_update_one_with_system_fields(
+        let q = build_update_one_with_assignments(
             &s("app1"),
             "posts",
             &tschema(),
             &filter,
             &update,
             SqlDialect::Postgres,
-            &autobump,
+            &assignments,
         )
         .unwrap();
         assert!(
@@ -6314,18 +6064,26 @@ mod tests {
         let update = value!({
             "secret": Value::Bytes(b"ciphertext".to_vec()),
         });
-        let autobump = SystemFieldAutoBump {
-            actor_id: Some("usr_actor"),
-            ..Default::default()
+        let assignments = WriteAssignments {
+            columns: vec![
+                ColumnAssignment {
+                    column: "version".into(),
+                    value: AssignedValue::Increment(1),
+                },
+                ColumnAssignment {
+                    column: "updated_at".into(),
+                    value: AssignedValue::CurrentTimestamp,
+                },
+            ],
         };
-        let q = build_update_one_with_system_fields(
+        let q = build_update_one_with_assignments(
             &s("app1"),
             "posts",
             &tschema(),
             &filter,
             &update,
             SqlDialect::Postgres,
-            &autobump,
+            &assignments,
         )
         .unwrap();
         // Encrypted column gets the decode(...)::bytea wrap.
@@ -6335,7 +6093,7 @@ mod tests {
             q.sql,
         );
         // Auto-bumps are plain SET clauses — must NOT be inside a decode().
-        // The version bump's SQL fragment is `"version" = "version" + 1`
+        // The version bump's SQL fragment is `"version" = "version" + $`
         // (no $N), so decode() can't wrap it. The updated_by SET clause
         // is `"updated_by" = $N` — assert there's no `decode($N..)::bytea`
         // associated with the updated_by column.
@@ -6355,19 +6113,30 @@ mod tests {
         let update = value!({
             "secret": Value::Bytes(b"ciphertext".to_vec()),
         });
-        let autobump = SystemFieldAutoBump {
-            dispatch_write: true,
-            actor_id: Some("usr_actor"),
-            ..Default::default()
+        let assignments = WriteAssignments {
+            columns: vec![
+                ColumnAssignment {
+                    column: "version".into(),
+                    value: AssignedValue::Increment(1),
+                },
+                ColumnAssignment {
+                    column: "updated_at".into(),
+                    value: AssignedValue::CurrentTimestamp,
+                },
+                ColumnAssignment {
+                    column: "updated_by".into(),
+                    value: AssignedValue::Bound(value!("usr_actor")),
+                },
+            ],
         };
-        let q = build_update_one_with_system_fields(
+        let q = build_update_one_with_assignments(
             &s("app1"),
             "posts",
             &tschema(),
             &filter,
             &update,
             SqlDialect::Postgres,
-            &autobump,
+            &assignments,
         )
         .unwrap();
         // The actor id must appear in the params vector AFTER the
@@ -6397,18 +6166,26 @@ mod tests {
         // composes with the WHERE naturally.
         let filter = value!({ "id": "post_x", "version": 5 });
         let update = value!({ "title": "new" });
-        let autobump = SystemFieldAutoBump {
-            actor_id: Some("usr_actor"),
-            ..Default::default()
+        let assignments = WriteAssignments {
+            columns: vec![
+                ColumnAssignment {
+                    column: "version".into(),
+                    value: AssignedValue::Increment(1),
+                },
+                ColumnAssignment {
+                    column: "updated_at".into(),
+                    value: AssignedValue::CurrentTimestamp,
+                },
+            ],
         };
-        let q = build_update_one_with_system_fields(
+        let q = build_update_one_with_assignments(
             &s("app1"),
             "posts",
             &tschema(),
             &filter,
             &update,
             SqlDialect::Postgres,
-            &autobump,
+            &assignments,
         )
         .unwrap();
         // WHERE clause references `version` as an equality predicate.
@@ -6422,7 +6199,7 @@ mod tests {
     }
 
     #[test]
-    fn update_default_path_emits_dialect_aware_updated_at_sqlite() {
+    fn update_default_path_leaves_unassigned_timestamp_unchanged_sqlite() {
         // Direct calls to the legacy wrapper on the SQLite arm: the
         // auto-bump is dialect-aware rather than hardcoding NOW().
         let filter = value!({ "id": "post_x" });
@@ -6437,7 +6214,7 @@ mod tests {
         )
         .unwrap();
         assert!(
-            q.sql
+            !q.sql
                 .contains(r#""updated_at" = (strftime('%Y-%m-%dT%H:%M:%fZ','now'))"#),
             "SQLite-arm direct callers get the ISO-T now expression: {}",
             q.sql,
@@ -6454,22 +6231,20 @@ mod tests {
         // explicit value).
         let filter = crate::value!({ "id": "post_x", "version": 5 });
         let update = crate::value!({ "title": "new", "version": 99 });
-        let autobump = SystemFieldAutoBump {
-            actor_id: Some("usr_actor"),
-            // The caller's `apply_system_fields_on_update` would set
-            // this from inspecting the patch — we set it manually here
-            // to pin the contract.
-            skip_version: true,
-            ..Default::default()
+        let assignments = WriteAssignments {
+            columns: vec![ColumnAssignment {
+                column: "updated_at".into(),
+                value: AssignedValue::CurrentTimestamp,
+            }],
         };
-        let q = build_update_one_with_system_fields(
+        let q = build_update_one_with_assignments(
             &s("app1"),
             "posts",
             &tschema(),
             &filter,
             &update,
             SqlDialect::Postgres,
-            &autobump,
+            &assignments,
         )
         .unwrap();
         // SET carries the creator's explicit value (`"version" = $N`).
@@ -6479,7 +6254,7 @@ mod tests {
             q.sql,
         );
         assert!(
-            !q.sql.contains(r#""version" = "version" + 1"#),
+            !q.sql.contains(r#""version" = "version" + $"#),
             "auto-bump must be suppressed: {}",
             q.sql,
         );
@@ -6498,18 +6273,26 @@ mod tests {
         let update = crate::value!({
             "ssn": Value::Bytes(b"ciphertext_blob".to_vec()),
         });
-        let autobump = SystemFieldAutoBump {
-            actor_id: Some("usr_actor"),
-            ..Default::default()
+        let assignments = WriteAssignments {
+            columns: vec![
+                ColumnAssignment {
+                    column: "version".into(),
+                    value: AssignedValue::Increment(1),
+                },
+                ColumnAssignment {
+                    column: "updated_at".into(),
+                    value: AssignedValue::CurrentTimestamp,
+                },
+            ],
         };
-        let q = build_update_one_with_system_fields(
+        let q = build_update_one_with_assignments(
             &s("app1"),
             "posts",
             &tschema(),
             &filter,
             &update,
             SqlDialect::Postgres,
-            &autobump,
+            &assignments,
         )
         .unwrap();
         // `ssn` gets the decode(...)::bytea wrap.
@@ -6536,18 +6319,26 @@ mod tests {
         // Automatic system-field updates must not add mask storage columns.
         let filter = crate::value!({ "id": "post_x" });
         let update = crate::value!({ "title": "new" });
-        let autobump = SystemFieldAutoBump {
-            actor_id: Some("usr_actor"),
-            ..Default::default()
+        let assignments = WriteAssignments {
+            columns: vec![
+                ColumnAssignment {
+                    column: "version".into(),
+                    value: AssignedValue::Increment(1),
+                },
+                ColumnAssignment {
+                    column: "updated_at".into(),
+                    value: AssignedValue::CurrentTimestamp,
+                },
+            ],
         };
-        let q = build_update_one_with_system_fields(
+        let q = build_update_one_with_assignments(
             &s("app1"),
             "posts",
             &tschema(),
             &filter,
             &update,
             SqlDialect::Postgres,
-            &autobump,
+            &assignments,
         )
         .unwrap();
         // The auto-bump columns never get a sibling `*_masked` SET
@@ -6577,19 +6368,30 @@ mod tests {
         // creator's keys — never touch the auto-bumps).
         let filter = value!({ "id": "post_x" });
         let update = value!({ "title": "new" });
-        let autobump = SystemFieldAutoBump {
-            dispatch_write: true,
-            actor_id: Some("usr_actor"),
-            ..Default::default()
+        let assignments = WriteAssignments {
+            columns: vec![
+                ColumnAssignment {
+                    column: "version".into(),
+                    value: AssignedValue::Increment(1),
+                },
+                ColumnAssignment {
+                    column: "updated_at".into(),
+                    value: AssignedValue::CurrentTimestamp,
+                },
+                ColumnAssignment {
+                    column: "updated_by".into(),
+                    value: AssignedValue::Bound(value!("usr_actor")),
+                },
+            ],
         };
-        let q = build_update_one_with_system_fields(
+        let q = build_update_one_with_assignments(
             &s("app1"),
             "posts",
             &tschema(),
             &filter,
             &update,
             SqlDialect::Postgres,
-            &autobump,
+            &assignments,
         )
         .unwrap();
         let title_pos = q.sql.find(r#""title""#).expect("title in SET");
@@ -6662,7 +6464,7 @@ mod tests {
     // so the DDL emission below matches.
     //
     // `version` is a reserved system-field name
-    // (`SYSTEM_FIELD_NAMES`); the declaration-time validator refuses
+    // (`FIXTURE_GENERATED_COLUMNS`); the declaration-time validator refuses
     // a creator-declared `version` column. `build_create_table_with_fks`
     // injects the seven system fields directly (not via a creator-shape
     // entry). This test uses a placeholder field
@@ -7083,30 +6885,13 @@ mod tests {
 
     /// Each of the 7 platform-managed system field names must be refused
     /// by `validate_field_name_for_declaration`. Mirrors the seven names
-    /// in `SYSTEM_FIELD_NAMES`. Filter-time validators continue to
+    /// in `FIXTURE_GENERATED_COLUMNS`. Filter-time validators continue to
     /// accept these names (covered by
     /// `system_field_names_allowed_in_filter_path`).
     #[test]
-    fn system_field_names_refused_at_declaration() {
-        for name in &[
-            "id",
-            "created_at",
-            "updated_at",
-            "created_by",
-            "updated_by",
-            "version",
-            "deleted_at",
-        ] {
-            let err = validate_field_name_for_declaration(name).unwrap_err();
-            match err {
-                QueryError::ReservedSystemFieldName(msg) => {
-                    assert!(
-                        msg.contains(name) && msg.contains("reserved"),
-                        "expected reserved-system-field message naming {name:?}, got: {msg}"
-                    );
-                }
-                other => panic!("expected ReservedSystemFieldName for {name:?}, got {other:?}"),
-            }
+    fn former_system_names_are_ordinary_declarations() {
+        for name in FIXTURE_GENERATED_COLUMNS {
+            validate_field_name_for_declaration(name).unwrap();
         }
     }
 
@@ -7116,7 +6901,7 @@ mod tests {
     /// break the entire SDK. The system-field reservation is declaration-only.
     #[test]
     fn system_field_names_allowed_in_filter_path() {
-        for name in SYSTEM_FIELD_NAMES {
+        for name in FIXTURE_GENERATED_COLUMNS {
             assert!(
                 validate_field_name(name).is_ok(),
                 "system field {name:?} must be accepted by the filter-time validator"
@@ -7130,7 +6915,7 @@ mod tests {
     /// "declaration-only" boundary at the call-site level.
     #[test]
     fn build_where_accepts_system_field_names_in_filter() {
-        for name in SYSTEM_FIELD_NAMES {
+        for name in FIXTURE_GENERATED_COLUMNS {
             let mut filter_obj = crate::value::Map::new();
             filter_obj.insert(
                 (*name).to_string(),
@@ -7164,15 +6949,15 @@ mod tests {
         }
     }
 
-    /// `SYSTEM_FIELD_NAMES` is the canonical list — every new addition
+    /// `FIXTURE_GENERATED_COLUMNS` is the canonical list — every new addition
     /// is a deliberate platform decision. Pinning the size to 7 surfaces
     /// any drift in code review.
     #[test]
     fn system_field_names_has_exactly_seven_entries() {
         assert_eq!(
-            SYSTEM_FIELD_NAMES.len(),
+            FIXTURE_GENERATED_COLUMNS.len(),
             7,
-            "SYSTEM_FIELD_NAMES must list exactly 7 entries (id, created_at, \
+            "FIXTURE_GENERATED_COLUMNS must list exactly 7 entries (id, created_at, \
              updated_at, created_by, updated_by, version, deleted_at)"
         );
     }
@@ -7519,7 +7304,7 @@ mod tests {
     /// read. The raw column never appears.
     #[test]
     fn an_explicit_projection_of_a_masked_column_reads_the_masked_column() {
-        let schema = crate::value!({
+        let schema = crate::value!({ "id":{"type":"string", "primaryKey":true},
             "ssn": { "type": "string",
                      "mask": { "kind": "last4", "classification": "spi" } },
         });
@@ -7676,7 +7461,7 @@ mod tests {
             "masked column must ride through under its own name: {}",
             bq.sql,
         );
-        assert!(bq.sql.contains("\"id\""));
+        assert!(!bq.sql.contains("\"id\""));
         assert!(
             !bq.sql.contains(&raw_column_name("ssn")),
             "the raw column must never appear: {}",
@@ -7899,7 +7684,7 @@ mod tests {
             bq.sql,
         );
         assert!(
-            bq.sql.contains("\"created_at\"") && bq.sql.contains("\"name\""),
+            !bq.sql.contains("\"created_at\"") && bq.sql.contains("\"name\""),
             "schema-backed find must project public system fields + declared fields: {}",
             bq.sql,
         );
@@ -8064,9 +7849,12 @@ mod tests {
 
     #[test]
     fn compose_where_with_soft_delete_no_op_when_flag_false() {
-        assert_eq!(compose_where_with_soft_delete("", false), "");
         assert_eq!(
-            compose_where_with_soft_delete("\"id\" = $1", false),
+            compose_where_with_soft_delete("", false, &tschema()).unwrap(),
+            ""
+        );
+        assert_eq!(
+            compose_where_with_soft_delete("\"id\" = $1", false, &tschema()).unwrap(),
             "\"id\" = $1"
         );
     }
@@ -8074,7 +7862,7 @@ mod tests {
     #[test]
     fn compose_where_with_soft_delete_empty_to_lone_predicate() {
         assert_eq!(
-            compose_where_with_soft_delete("", true),
+            compose_where_with_soft_delete("", true, &tschema()).unwrap(),
             "\"deleted_at\" IS NULL"
         );
     }
@@ -8082,25 +7870,22 @@ mod tests {
     #[test]
     fn compose_where_with_soft_delete_appends_with_and() {
         assert_eq!(
-            compose_where_with_soft_delete("\"id\" = $1", true),
-            "\"id\" = $1 AND \"deleted_at\" IS NULL"
+            compose_where_with_soft_delete("\"id\" = $1", true, &tschema()).unwrap(),
+            "(\"id\" = $1) AND \"deleted_at\" IS NULL"
         );
     }
 
     #[test]
     fn build_soft_delete_one_emits_update_with_deleted_at_now() {
         let filter = crate::value!({ "id": "post_x" });
-        let autobump = SystemFieldAutoBump {
-            actor_id: Some("usr_actor"),
-            ..Default::default()
-        };
-        let q = build_soft_delete_one_with_system_fields(
+        let assignments = lifecycle_assignments(false);
+        let q = build_soft_delete_one_with_assignments(
             &s("app1"),
             "posts",
             &tschema(),
             &filter,
             SqlDialect::Postgres,
-            &autobump,
+            &assignments,
         )
         .unwrap();
         assert!(
@@ -8113,28 +7898,25 @@ mod tests {
             "expected deleted_at = NOW(); got: {}",
             q.sql
         );
-        assert!(q.sql.contains("\"version\" = \"version\" + 1"));
+        assert!(q.sql.contains("\"version\" = \"version\" + $"));
         assert!(q.sql.contains("\"updated_at\" = NOW()"));
         assert!(q.sql.contains("\"updated_by\" ="));
         assert!(q.sql.contains("AND \"deleted_at\" IS NULL"));
-        assert!(q.sql.contains("WHERE id = (SELECT id FROM"));
+        assert!(q.sql.contains("WHERE \"id\" = (SELECT \"id\" FROM"));
         assert!(q.sql.contains("LIMIT 1 FOR UPDATE)"));
     }
 
     #[test]
     fn build_soft_delete_one_sqlite_uses_current_timestamp() {
         let filter = crate::value!({ "id": "post_x" });
-        let autobump = SystemFieldAutoBump {
-            actor_id: Some("usr"),
-            ..Default::default()
-        };
-        let q = build_soft_delete_one_with_system_fields(
+        let assignments = lifecycle_assignments(false);
+        let q = build_soft_delete_one_with_assignments(
             &s("app1"),
             "posts",
             &tschema(),
             &filter,
             SqlDialect::Sqlite,
-            &autobump,
+            &assignments,
         )
         .unwrap();
         assert!(
@@ -8152,17 +7934,25 @@ mod tests {
     #[test]
     fn build_soft_delete_many_omits_single_row_narrowing() {
         let filter = crate::value!({ "author": "usr_x" });
-        let autobump = SystemFieldAutoBump {
-            actor_id: Some("usr_actor"),
-            ..Default::default()
+        let assignments = WriteAssignments {
+            columns: vec![
+                ColumnAssignment {
+                    column: "version".into(),
+                    value: AssignedValue::Increment(1),
+                },
+                ColumnAssignment {
+                    column: "updated_at".into(),
+                    value: AssignedValue::CurrentTimestamp,
+                },
+            ],
         };
-        let q = build_soft_delete_many_with_system_fields(
+        let q = build_soft_delete_many_with_assignments(
             &s("app1"),
             "posts",
             &tschema(),
             &filter,
             SqlDialect::Postgres,
-            &autobump,
+            &assignments,
         )
         .unwrap();
         assert!(!q.sql.contains("LIMIT 1 FOR UPDATE"), "sql: {}", q.sql);
@@ -8179,18 +7969,18 @@ mod tests {
     #[test]
     fn build_soft_delete_one_no_actor_nulls_updated_by() {
         let filter = crate::value!({ "id": "post_x" });
-        let autobump = SystemFieldAutoBump::default();
-        let q = build_soft_delete_one_with_system_fields(
+        let assignments = lifecycle_assignments(false);
+        let q = build_soft_delete_one_with_assignments(
             &s("app1"),
             "posts",
             &tschema(),
             &filter,
             SqlDialect::Postgres,
-            &autobump,
+            &assignments,
         )
         .unwrap();
         assert!(
-            set_clause_of(&q.sql).contains("\"updated_by\" = NULL"),
+            set_clause_of(&q.sql).contains("\"updated_by\" = $"),
             "an anonymous soft delete must null updated_by rather than leave a stale actor: {}",
             q.sql
         );
@@ -8201,18 +7991,18 @@ mod tests {
     #[test]
     fn build_restore_one_no_actor_nulls_updated_by() {
         let filter = crate::value!({ "id": "post_x" });
-        let autobump = SystemFieldAutoBump::default();
-        let q = build_restore_one_with_system_fields(
+        let assignments = lifecycle_assignments(true);
+        let q = build_restore_one_with_assignments(
             &s("app1"),
             "posts",
             &tschema(),
             &filter,
             SqlDialect::Postgres,
-            &autobump,
+            &assignments,
         )
         .unwrap();
         assert!(
-            set_clause_of(&q.sql).contains("\"updated_by\" = NULL"),
+            set_clause_of(&q.sql).contains("\"updated_by\" = $"),
             "an anonymous restore must null updated_by: {}",
             q.sql
         );
@@ -8222,27 +8012,39 @@ mod tests {
     ///
     /// Keyed on `dispatch_write`, not on the actor being absent: a DIRECT
     /// builder caller (`build_set_clauses_with_dialect`) passes
-    /// `SystemFieldAutoBump::default()` and must keep emitting no `updated_by`
+    /// `lifecycle_assignments(true)` and must keep emitting no `updated_by`
     /// clause at all, because it is not writing on any actor's behalf.
     #[test]
     fn build_update_one_anonymous_dispatch_write_nulls_updated_by() {
         let filter = crate::value!({ "id": "post_x" });
         let update = crate::value!({ "title": "x" });
-        let dispatched = build_update_one_with_system_fields(
+        let dispatched = build_update_one_with_assignments(
             &s("app1"),
             "posts",
             &tschema(),
             &filter,
             &update,
             SqlDialect::Postgres,
-            &SystemFieldAutoBump {
-                dispatch_write: true,
-                ..Default::default()
+            &WriteAssignments {
+                columns: vec![
+                    ColumnAssignment {
+                        column: "version".into(),
+                        value: AssignedValue::Increment(1),
+                    },
+                    ColumnAssignment {
+                        column: "updated_at".into(),
+                        value: AssignedValue::CurrentTimestamp,
+                    },
+                    ColumnAssignment {
+                        column: "updated_by".into(),
+                        value: AssignedValue::Bound(Value::Null),
+                    },
+                ],
             },
         )
         .unwrap();
         assert!(
-            set_clause_of(&dispatched.sql).contains("\"updated_by\" = NULL"),
+            set_clause_of(&dispatched.sql).contains("\"updated_by\" = $"),
             "an anonymous dispatch write must null updated_by: {}",
             dispatched.sql
         );
@@ -8267,21 +8069,18 @@ mod tests {
     #[test]
     fn build_restore_one_clears_deleted_at_and_scopes_to_soft_deleted() {
         let filter = crate::value!({ "id": "post_x" });
-        let autobump = SystemFieldAutoBump {
-            actor_id: Some("usr_actor"),
-            ..Default::default()
-        };
-        let q = build_restore_one_with_system_fields(
+        let assignments = lifecycle_assignments(true);
+        let q = build_restore_one_with_assignments(
             &s("app1"),
             "posts",
             &tschema(),
             &filter,
             SqlDialect::Postgres,
-            &autobump,
+            &assignments,
         )
         .unwrap();
-        assert!(q.sql.contains("\"deleted_at\" = NULL"));
-        assert!(q.sql.contains("\"version\" = \"version\" + 1"));
+        assert!(q.sql.contains("\"deleted_at\" = $"));
+        assert!(q.sql.contains("\"version\" = \"version\" + $"));
         assert!(q.sql.contains("\"updated_at\" = NOW()"));
         assert!(q.sql.contains("\"updated_by\" ="));
         assert!(q.sql.contains("AND \"deleted_at\" IS NOT NULL"));
@@ -8290,17 +8089,25 @@ mod tests {
     #[test]
     fn build_restore_many_omits_single_row_narrowing() {
         let filter = crate::value!({ "author": "usr_x" });
-        let autobump = SystemFieldAutoBump {
-            actor_id: Some("usr_actor"),
-            ..Default::default()
+        let assignments = WriteAssignments {
+            columns: vec![
+                ColumnAssignment {
+                    column: "version".into(),
+                    value: AssignedValue::Increment(1),
+                },
+                ColumnAssignment {
+                    column: "updated_at".into(),
+                    value: AssignedValue::CurrentTimestamp,
+                },
+            ],
         };
-        let q = build_restore_many_with_system_fields(
+        let q = build_restore_many_with_assignments(
             &s("app1"),
             "posts",
             &tschema(),
             &filter,
             SqlDialect::Postgres,
-            &autobump,
+            &assignments,
         )
         .unwrap();
         assert!(!q.sql.contains("LIMIT 1 FOR UPDATE"));
@@ -8458,25 +8265,25 @@ mod tests {
     }
 
     #[test]
-    fn build_update_one_sqlite_uses_rowid_narrowing() {
+    fn build_update_one_sqlite_uses_declared_key_narrowing() {
         let filter = crate::value!({ "id": "post_1" });
         let update = crate::value!({ "title": "next" });
-        let q = build_update_one_with_system_fields(
+        let q = build_update_one_with_assignments(
             &s("app1"),
             "posts",
             &tschema(),
             &filter,
             &update,
             SqlDialect::Sqlite,
-            &SystemFieldAutoBump::default(),
+            &WriteAssignments::default(),
         )
         .unwrap();
-        assert!(q.sql.contains("WHERE rowid = (SELECT rowid FROM"));
+        assert!(q.sql.contains("WHERE \"id\" = (SELECT \"id\" FROM"));
         assert!(!q.sql.contains("FOR UPDATE"));
     }
 
     #[test]
-    fn build_delete_one_sqlite_uses_rowid_narrowing() {
+    fn build_delete_one_sqlite_uses_declared_key_narrowing() {
         let filter = crate::value!({ "id": "post_1" });
         let q = build_delete_one_with_dialect(
             &s("app1"),
@@ -8486,23 +8293,23 @@ mod tests {
             SqlDialect::Sqlite,
         )
         .unwrap();
-        assert!(q.sql.contains("WHERE rowid = (SELECT rowid FROM"));
+        assert!(q.sql.contains("WHERE \"id\" = (SELECT \"id\" FROM"));
         assert!(!q.sql.contains("FOR UPDATE"));
     }
 
     #[test]
-    fn build_soft_delete_one_sqlite_uses_rowid_narrowing() {
+    fn build_soft_delete_one_sqlite_uses_declared_key_narrowing() {
         let filter = crate::value!({ "id": "post_1" });
-        let q = build_soft_delete_one_with_system_fields(
+        let q = build_soft_delete_one_with_assignments(
             &s("app1"),
             "posts",
             &tschema(),
             &filter,
             SqlDialect::Sqlite,
-            &SystemFieldAutoBump::default(),
+            &WriteAssignments::default(),
         )
         .unwrap();
-        assert!(q.sql.contains("WHERE rowid = (SELECT rowid FROM"));
+        assert!(q.sql.contains("WHERE \"id\" = (SELECT \"id\" FROM"));
         assert!(!q.sql.contains("FOR UPDATE"));
     }
 
@@ -8519,14 +8326,29 @@ mod tests {
     /// count is asserted by the callers against
     /// [`WRITE_BUILDERS_EMITTING_RETURNING`].
     fn every_write_query(schema: &Value) -> Vec<(&'static str, BuiltQuery)> {
+        let mut complete = write_projection_schema();
+        complete
+            .as_object_mut()
+            .unwrap()
+            .extend(schema.as_object().unwrap().clone());
+        let schema = &complete;
+
         let doc = crate::value!({ "ssn": "123-45-6789" });
         let docs = crate::value!([{ "ssn": "1" }, { "ssn": "2" }]);
         let filter = crate::value!({ "id": "usr_1" });
         let update = crate::value!({ "ssn": "9" });
         let conflict = crate::value!(["id"]);
-        let autobump = SystemFieldAutoBump {
-            actor_id: Some("usr_actor"),
-            ..Default::default()
+        let assignments = WriteAssignments {
+            columns: vec![
+                ColumnAssignment {
+                    column: "version".into(),
+                    value: AssignedValue::Increment(1),
+                },
+                ColumnAssignment {
+                    column: "updated_at".into(),
+                    value: AssignedValue::CurrentTimestamp,
+                },
+            ],
         };
         let d = SqlDialect::Postgres;
         vec![
@@ -8540,27 +8362,27 @@ mod tests {
             ),
             (
                 "updateOne",
-                build_update_one_with_system_fields(
+                build_update_one_with_assignments(
                     &s("app1"),
                     "users",
                     schema,
                     &filter,
                     &update,
                     d,
-                    &autobump,
+                    &assignments,
                 )
                 .unwrap(),
             ),
             (
                 "updateMany",
-                build_update_many_with_system_fields(
+                build_update_many_with_assignments(
                     &s("app1"),
                     "users",
                     schema,
                     &filter,
                     &update,
                     d,
-                    &autobump,
+                    &assignments,
                 )
                 .unwrap(),
             ),
@@ -8574,49 +8396,49 @@ mod tests {
             ),
             (
                 "softDeleteOne",
-                build_soft_delete_one_with_system_fields(
+                build_soft_delete_one_with_assignments(
                     &s("app1"),
                     "users",
                     schema,
                     &filter,
                     d,
-                    &autobump,
+                    &assignments,
                 )
                 .unwrap(),
             ),
             (
                 "softDeleteMany",
-                build_soft_delete_many_with_system_fields(
+                build_soft_delete_many_with_assignments(
                     &s("app1"),
                     "users",
                     schema,
                     &filter,
                     d,
-                    &autobump,
+                    &assignments,
                 )
                 .unwrap(),
             ),
             (
                 "restoreOne",
-                build_restore_one_with_system_fields(
+                build_restore_one_with_assignments(
                     &s("app1"),
                     "users",
                     schema,
                     &filter,
                     d,
-                    &autobump,
+                    &assignments,
                 )
                 .unwrap(),
             ),
             (
                 "restoreMany",
-                build_restore_many_with_system_fields(
+                build_restore_many_with_assignments(
                     &s("app1"),
                     "users",
                     schema,
                     &filter,
                     d,
-                    &autobump,
+                    &assignments,
                 )
                 .unwrap(),
             ),
@@ -8645,7 +8467,12 @@ mod tests {
     /// masked field cannot, because there every physical column is also a
     /// logical one.
     fn write_projection_schema() -> Value {
-        l26_masked_schema()
+        let mut fields = tschema();
+        fields
+            .as_object_mut()
+            .unwrap()
+            .extend(l26_masked_schema().as_object().unwrap().clone());
+        fields
     }
 
     #[test]
@@ -8668,7 +8495,7 @@ mod tests {
                 "{verb} must open its RETURNING with the named id column: {}",
                 q.sql,
             );
-            for field in SYSTEM_FIELD_NAMES {
+            for field in FIXTURE_GENERATED_COLUMNS {
                 assert!(
                     q.sql.contains(&quote_ident(field)),
                     "{verb} must name the system field {field}: {}",
@@ -8715,6 +8542,10 @@ mod tests {
     #[test]
     fn an_unreadable_field_leaves_every_projection_and_is_refused_by_name() {
         let schema = crate::value!({
+            "id":{"type":"string", "primaryKey":true},
+            "created_at":{"type":"date"}, "updated_at":{"type":"date"},
+            "created_by":{"type":"string"}, "updated_by":{"type":"string"},
+            "version":{"type":"int"}, "deleted_at":{"type":"date", "softDelete":true},
             "public_note": { "type": "string", "readable": true },
             "internal_note": { "type": "string", "readable": false },
         });
@@ -8845,12 +8676,19 @@ mod tests {
         let doc = crate::value!({ "ssn": "1" });
         let conflict = crate::value!(["id"]);
         for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite] {
-            let q =
-                build_upsert_with_dialect(&s("app1"), "users", &schema, &doc, &conflict, dialect)
-                    .unwrap();
+            let q = build_upsert_with_assignments(
+                &s("app1"),
+                "users",
+                &schema,
+                &doc,
+                &conflict,
+                dialect,
+                &lifecycle_assignments(false),
+            )
+            .unwrap();
             assert!(
                 q.sql
-                    .contains(r#""version" = COALESCE("app1"."users"."version", 0) + 1"#),
+                    .contains(r#""version" = "app1"."users"."version" + $"#),
                 "{dialect:?}: the read of `version` must name its relation: {}",
                 q.sql,
             );
@@ -9294,7 +9132,7 @@ mod sqlite_now_parity {
     #[test]
     fn all_three_sqlite_now_spellings_are_the_one_this_module_states() {
         let vendor = sqlite_vendor();
-        assert_eq!(now_expr(SqlDialect::Sqlite), SQLITE_NOW);
+        assert_eq!(SqlDialect::Sqlite.current_timestamp_expr(), SQLITE_NOW);
         assert_eq!(vendor.schema.current_timestamp_expr(), SQLITE_NOW);
         assert_eq!(vendor.dml.synth_now(), SQLITE_NOW);
     }
@@ -9302,7 +9140,7 @@ mod sqlite_now_parity {
     #[test]
     fn the_byte_identity_obligation_is_scoped_to_the_dialect_that_stores_text() {
         for (dialect, vendor) in pairs() {
-            let runtime = now_expr(dialect);
+            let runtime = dialect.current_timestamp_expr();
             for migrated in [
                 vendor.schema.current_timestamp_expr().to_owned(),
                 vendor.dml.synth_now(),
@@ -9499,7 +9337,7 @@ mod binary_expression_tests {
     #[test]
     fn binary_values_follow_the_column_expression_on_every_write_shape() {
         let schema = SchemaName::new("binary_fixture").unwrap();
-        let fields = value!({"payload":{"type":"bytes"}});
+        let fields = value!({"id":{"type":"string", "primaryKey":true},"payload":{"type":"bytes"}});
         let document = value!({"id":"row_a", "payload":Value::Bytes(vec![0, 1, 255])});
         for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite] {
             let queries = [

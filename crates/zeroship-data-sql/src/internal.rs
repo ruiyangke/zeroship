@@ -18,18 +18,20 @@ pub fn raw_column(
     namespace: &str,
     collection: &str,
     column: &str,
-    id: &str,
+    key_column: &str,
+    key: Value,
     dialect: SqlDialect,
 ) -> BuiltQuery {
     BuiltQuery {
         sql: format!(
-            "SELECT {} FROM {}.{} WHERE id = {}",
+            "SELECT {} FROM {}.{} WHERE {} = {}",
             quote_ident_for_dialect(column, dialect),
             quote_ident_for_dialect(namespace, dialect),
             quote_ident_for_dialect(collection, dialect),
+            quote_ident_for_dialect(key_column, dialect),
             placeholder(dialect, 1)
         ),
-        params: vec![id.into()],
+        params: vec![key],
     }
 }
 
