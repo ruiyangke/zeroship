@@ -100,7 +100,9 @@ fn target_and_foreign_authority_agree_for_sql_ir_and_probes() {
         if dialect == zeroship_migrate_postgres::DIALECT {
             lower(&granted, &dialect, "analytics").expect("explicit foreign grant authorizes IR");
         }
-        assert!(lower(&cfg(None, false), &dialect, PROJECT).is_err());
+        let refusal = lower(&cfg(None, false), &dialect, PROJECT)
+            .expect_err("own-schema access does not grant table creation");
+        assert!(refusal.contains("CreateTableNotGranted"), "{refusal}");
     }
     let guard =
         SqlGuard::new(cfg(None, true).guard_config_for(&zeroship_migrate_postgres::DIALECT));
@@ -251,5 +253,53 @@ scope = { include = ["analytics*"], exclude = ["analytics_private"] }
             admitted,
             "SQL parsing for {schema}"
         );
+    }
+}
+
+#[test]
+fn local_table_rename_requires_its_own_operation_grant() {
+    let source = serde_json::json!({
+        "ir_version": 1, "name": "rename_rows", "owner_app": OWNER,
+        "ops": [
+            {"op": "createTable", "name": "rows", "columns": [{"name": "id", "type": "int"}]},
+            {"op": "renameTable", "table": "rows", "to": "renamed_rows"}
+        ]
+    })
+    .to_string();
+    for dialect in [
+        zeroship_migrate_postgres::DIALECT,
+        zeroship_migrate_sqlite::DIALECT,
+    ] {
+        for rename_granted in [false, true] {
+            let mut charter = String::from("policy_version = 1\n[[grant]]\nkey = \"schema.create_table\"\nvalue = true\nscope = \"all\"\n");
+            if rename_granted {
+                charter.push_str("[[grant]]\nkey = \"schema.rename\"\nvalue = true\nscope = { include = [\"public.renamed_rows\"] }\n");
+            }
+            let policy = zeroship_migrate::effective_policy_from_charter_toml(&charter).unwrap();
+            let guard = GuardConfig::from_policy(policy.clone(), dialect.clone(), PROJECT);
+            let result = IrAuthor::new(
+                zeroship_migrate::shipping_vendors(),
+                PROJECT,
+                OWNER,
+                &dialect,
+                &policy,
+            )
+            .load_and_lower_guarded(
+                &source,
+                OWNER,
+                &BTreeMap::new(),
+                &LiveSchema::default(),
+                &guard,
+            );
+            if rename_granted {
+                result.expect("scoped rename grant authorizes the local operation");
+            } else {
+                let error = result.expect_err("target-schema access does not grant rename");
+                assert!(
+                    error.to_string().contains("RenameIntoNotGranted"),
+                    "{error}"
+                );
+            }
+        }
     }
 }

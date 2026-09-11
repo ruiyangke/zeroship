@@ -197,9 +197,8 @@ pub struct ExecutorConfig {
     /// lock (on PostgreSQL, the two `int4` halves of
     /// `hashtextextended(project_id, 0)`).
     pub project_id: String,
-    /// The one schema this project's migrations own and may touch. Pinned into
-    /// `search_path` for every apply, and the registered line-1
-    /// guard's confinement target.
+    /// The host-selected migration target, pinned into `search_path` for apply.
+    /// Foreign-schema references require separate policy grants.
     pub project_schema: String,
     /// The **confinement parameters** - the journal's meta schema and the three
     /// timeout budgets, each read by more than one dialect, plus whatever

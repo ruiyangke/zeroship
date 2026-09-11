@@ -561,7 +561,7 @@ impl GuardConfig {
 /// the doctests FAIL, then put the visibility back.
 ///
 /// (1) An external crate cannot write a `GuardConfig { .. }` struct literal - the
-/// fields (`dialect`, `effective`) are private, so a privileged
+/// fields (`dialect`, `effective`, `project_schema`) are private, so a privileged
 /// profile can never be forged by a literal (the `EffectivePolicy` is itself
 /// unforgeable). This MUST fail to compile:
 ///

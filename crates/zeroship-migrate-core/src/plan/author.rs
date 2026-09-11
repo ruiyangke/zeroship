@@ -446,7 +446,7 @@ pub struct RawSqlAuthor {
 }
 
 impl RawSqlAuthor {
-    /// Construct a raw-SQL author bound to an owner app, backend, and explicit policy.
+    /// Construct a raw-SQL author bound to an owner app, target schema, backend, and policy.
     #[must_use]
     pub fn new(
         vendors: VendorSet,
