@@ -206,70 +206,13 @@ pub(crate) fn capture_route(
     )
 }
 
-/// Open this thread's backend if it is cold, and hand it back.
-///
-/// **This is the funnel, and it lives here because the state it reads is the
-/// adapter's.** It was `exec::ensure_backend_for_shared_sql` until 2026-09-03,
-/// which put an ENGINE file's hands on `crate::context` and `init_pool_async`,
-/// the one edge direction the crate split forbids. Nothing about the body
-/// changed; only its address did, so the engine now receives a backend instead
-/// of fetching one.
-///
-/// Database operations open the backend lazily. Startup mask-policy installation
-/// is independent of the database and leaves this context cold.
-///
-/// **`pub`, not `pub(crate)`, and the shipped surface is unchanged ONLY
-/// BECAUSE OF A CONDITION THIS DOC USED TO LEAVE UNSTATED.** The condition is
-/// `lib.rs:353-356`, which declares this module as a two-arm pair:
-///
-/// ```text
-/// #[cfg(not(feature = "test-helpers"))] pub(crate) mod tx_scope;
-/// #[cfg(feature = "test-helpers")]      pub       mod tx_scope;
-/// ```
-///
-/// A `pub fn` inside a `pub(crate) mod` has crate-only EFFECTIVE visibility,
-/// so in a release build this symbol is unreachable from outside. Delete the
-/// `not(...)` arm, or re-declare the module `pub` unconditionally in whatever
-/// crate ends up holding it, and `ensure_backend` silently becomes public API
-/// with no compile error anywhere. The old wording asserted the conclusion; the
-/// point of this paragraph is that the conclusion has a premise, and the
-/// premise is one line in another file.
-///
-/// **The crate split does not remove that cap, and a reviewer's worry that it
-/// would is refuted by the proposal.** `docs/proposals/2026-08-31-data-crate-shape.md:50`
-/// keeps `zeroship-data-v8` as "THIN. The worker/runtime plugin ADAPTER
-/// ONLY", and `tests/lib/tier_direction_census.sh` tiers `tx_scope.rs` ADAPTER.
-/// The engine is cut OUT to `data-engine`; this file does not move, so the
-/// two-arm declaration above moves with neither.
-///
-/// **Why there is no `ensure_backend_for_tests` wrapper**, the idiom
-/// `tx_route.rs` uses for `pool_for_tests` / `tx_for_tests`: that idiom fits a
-/// test-only CONSTRUCTOR, which has no production twin, so gating it genuinely
-/// removes a capability from the shipped build. `ensure_backend` is the
-/// opposite: eleven production call sites, counted 2026-09-03 - nine in
-/// `v8_classes/` (`dispatch.rs` 5, `masked_value.rs` 2, `transaction.rs` 1) and two in `lib.rs` - plus [`bind_route`] below. Every
-/// one of those files is ADAPTER, so they stay in this crate when `data-engine`
-/// is cut out, and the symbol has to remain reachable from all of them.
-/// (`transaction/probe.rs` also calls it and is NOT in that count: its module
-/// is declared `#[cfg(any(test, feature = "test-helpers"))]` at
-/// `transaction/mod.rs:145`, so it is in no production build.) A gated wrapper
-/// would therefore hide nothing that is not already hidden; it would only
-/// rename five calls in
-/// `tests/{integration,sqlite_integration,mask_flip}.rs`. Naming the condition
-/// is the fix that does work; a wrapper would be ceremony that reads as one.
-///
-/// The integration targets need the `pub` arm because they drive the engine's
-/// unmask entry points directly, and those take the backend as a parameter now.
-/// It is the same call the V8 dispatcher makes on their behalf in production.
+/// Resolve the registered ORM connection and open it lazily.
+/// The captured handle remains bound to its original configuration while the
+/// future waits, even if another isolate replaces the thread's registration.
 pub async fn ensure_backend() -> Result<crate::backend::BackendHandle, DbError> {
-    if crate::context::with(|c| c.backend().is_none()) {
-        crate::init_pool_async().await.map_err(|e| {
-            DbError::config("lazy_init_failed", format!("db: lazy init failed: {e}"))
-        })?;
-    }
-
-    crate::context::with(|c| c.backend())
-        .ok_or_else(|| DbError::config("not_configured", "db: backend not initialized".to_string()))
+    let connection = crate::context::with(|context| context.connection())
+        .ok_or_else(|| DbError::config("not_configured", "db: no connection is installed"))?;
+    connection.ensure(crate::context::isolate_key_source()).await
 }
 
 /// Bind a captured routing decision to the backend its SQL will run on.
@@ -352,8 +295,8 @@ mod tests {
     #[test]
     fn a_configured_sqlite_dialect_is_captured_without_an_open_backend() {
         in_scope!(let scope);
-        crate::reset_context_for_tests();
-        crate::set_db_url_for_tests("sqlite:route-test.sqlite");
+        crate::testing::reset_context_for_tests();
+        crate::testing::set_db_url_for_tests("sqlite:route-test.sqlite");
         assert!(
             crate::context::with(|context| context.backend()).is_none(),
             "precondition: nothing has opened a backend on this thread"
@@ -362,7 +305,7 @@ mod tests {
             super::capture_route(scope, &app_a_binding()).dialect(),
             crate::compile::SqlDialect::Sqlite
         );
-        crate::reset_context_for_tests();
+        crate::testing::reset_context_for_tests();
     }
 
     #[test]
@@ -425,22 +368,18 @@ mod tests {
     /// The first database operation must still initialize a cold backend.
     #[test]
     fn ensure_backend_opens_a_cold_sqlite_context() {
-        crate::reset_context_for_tests();
+        crate::testing::reset_context_for_tests();
         let dir = tempfile::tempdir().expect("create tempdir");
-        crate::set_db_url_for_tests(&format!(
+        crate::testing::set_db_url_for_tests(&format!(
             "sqlite:{}",
             dir.path().join("cold.sqlite").display()
         ));
         assert!(crate::context::with(|context| context.backend()).is_none());
         run(async {
             let backend = super::ensure_backend().await.expect("open cold backend");
-            assert!(
-                backend
-                    .get::<zeroship_data_orm::backend::SqliteBackend>()
-                    .is_some()
-            );
+            assert_eq!(backend.dialect(), crate::compile::SqlDialect::Sqlite);
             assert!(crate::context::with(|context| context.backend()).is_some());
         });
-        crate::reset_context_for_tests();
+        crate::testing::reset_context_for_tests();
     }
 }

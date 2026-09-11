@@ -1,46 +1,8 @@
-//! Typed error classification for `plugin-db`.
+//! Typed errors for ORM operations and connection setup.
 //!
-//! Every fallible internal helper returns `Result<_, DbError>`. At the
-//! V8 boundary the dispatcher calls `ToOpError::to_op_error` (the adapter
-//! tier's, in `zeroship-data-v8`) to materialise a `zeroship_runtime`
-//! `OpError` whose `.code` is stamped from the variant
-//! — the SDK can then branch on `err.code` instead of substring-matching
-//! opaque messages.
-//!
-//! `Result<_, String>` is now confined to a small set of deliberate
-//! hold-outs across three categories:
-//!
-//! 1. **Wire-contract envelopes**: the constraint-violation paths, whose
-//!    `Err` IS a JSON envelope rather than a message (a documented SDK wire
-//!    contract — `JSON.parse(err.message)` recovers the payload). The backends
-//!    build it in `backend/postgres.rs` and `backend/sqlite/error.rs` and
-//!    return [`DbError::SchemaRefused`]; the static `.code` is stamped from
-//!    the variant.
-//!
-//! 2. **Pure parsers** internal to `auth/session.rs`: `hex_decode` /
-//!    `hex_nibble` ASCII-only decoders that never cross an isolate
-//!    boundary; lifted into `DbError::internal(...)` at their
-//!    call sites. The whole `auth/*` subtree is always compiled but
-//!    dormant (no production callers yet); the hold-out class applies
-//!    inside the SECURITY DEFINER bootstrap flow once it's wired up.
-//!
-//! 3. **JS-input arg parsers** in `v8_classes/migration.rs` (`parse_commit_spec`,
-//!    `parse_spec`) and `v8_classes/migrations.rs` (`parse_name_and_collection`):
-//!    return free-text rejection messages converted to `OpError::type_error`
-//!    at the V8 boundary (these are TypeError-class, never need `.code`).
-//!
-//! 4. **Cold-init**: `lib.rs::init_pool_async` returns `Result<_, String>`;
-//!    `exec.rs::ensure_pool` synthesises `DbError::Configuration` with
-//!    code `lazy_init_failed` (the same code at
-//!    every cold-init call site).
-//!
-//! 5. **Test helpers** (`exec.rs::exec_query_with_pool_for_tests`,
-//!    similar): `#[cfg(any(test, feature = "test-helpers"))]`-gated;
-//!    never reach the V8 boundary.
-//!
-//! Every fallible helper that touches Postgres or the V8 boundary in a
-//! production path now returns `Result<_, DbError>` — SDK callers can
-//! branch on `err.code` end-to-end on the production code path.
+//! Database operations and lazy initialization preserve `DbError` through the
+//! native API. The V8 adapter's `ToOpError` conversion maps these variants into
+//! runtime errors, keeping codes and retry hints available to JavaScript.
 //!
 //! The wire format JS sees is a JS `Error` with `message` + `code`, plus
 //! `hint` when present and `status` when a classification has an HTTP remedy.

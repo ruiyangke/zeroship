@@ -1,35 +1,8 @@
-//! V8 ↔ Rust marshaling layer for `zeroship.db.*` callbacks.
+//! Capture native arguments and adapt ORM results to V8 promises.
 //!
-//! This module is the seam between V8 and the rest of the plugin —
-//! nothing here knows about SQL or schema. Callers above
-//! (`crud`, `transaction`, `drop_namespace`,
-//! `replication_ops`) parse args via these helpers, mint promises, and
-//! hand the work to the async layer.
-//!
-//! Contents:
-//!
-//! - **Promise plumbing**: `setup_promise` for the `OpResult::Completed`
-//!   path (string-typed value), `setup_js_promise` for the
-//!   `OpResult::JsValue` path (real JS values via `ResolveValue::Json` /
-//!   `ResolveValue::F64` / `ResolveValue::JsGlobal`).
-//! - **Argument decoders**: `read_native_arg`, `decode_native`
-//!   (the hot-path walker that avoids a `JSON.stringify` round-trip).
-//! - **State accessors**: `runtime_state` (read the `SharedState` off
-//!   the isolate slot). `get_app_id` and its `get_app_id_pub` wrapper
-//!   were deleted on 2026-09-04: the wrapper existed for
-//!   `v8_classes::migration`, that consumer is gone, and a two-link
-//!   chain like this only reads as dead once the public half goes -
-//!   the private half looks called right up until then.
-//! - **Capability gate**: `refuse_if_query_capability` — the B3 gate
-//!   that rejects writes from inside a `query()` handler.
-//! - **Row decoding**: `row_to_value`, `column_to_value`,
-//!   `rows_to_values` (the typed `Vec<Value>` intermediate the
-//!   CRUD chain threads end-to-end) — Postgres OID → JSON conversion,
-//!   used by every exec path. The `fmt_db_err` shim that used to sit
-//!   beside them is gone with its last caller (the deleted
-//!   `create_index_with_recovery_audited`); reach for
-//!   [`crate::backend::pg_error::classify`] directly so the SQLSTATE
-//!   classification survives to the V8 boundary.
+//! The adapter snapshots request identity, transaction routing and read-set
+//! capture before yielding. Values cross through the native value walker;
+//! result resolvers materialize V8 values when the runtime re-enters the isolate.
 
 use zeroship_data_sql::value::Value;
 use zeroship_runtime::state::{ResolveValue, SharedState};
@@ -92,7 +65,7 @@ pub(crate) fn refuse_if_query_capability<'s>(
 
 /// Open (or keep) the read-set capture for the dispatch frame this read runs
 /// in. Call from the adapter's read entry points, before the engine plans the
-/// query - `crate::crud`'s `record_read_set` runs inside `plan_find` and needs
+/// query - the ORM's `record_read_set` runs inside `plan_find` and needs
 /// a capture already installed.
 ///
 /// **This function exists so that `read_set` and `crud` need not.** Both are
@@ -465,19 +438,6 @@ pub(crate) fn setup_js_promise<'s>(
 pub(crate) fn first_row_or_null_masked(rows: Vec<Value>, has_masked: bool) -> ResolveValue {
     let value = rows.into_iter().next().unwrap_or(Value::Null);
     maybe_rehydrate(value, has_masked)
-}
-
-/// Lower a `Vec<Value>` result to the row count, as a JS `number`.
-/// Used by `updateMany` / `deleteMany` (resolves to the affected-row
-/// count).
-#[allow(clippy::cast_precision_loss)]
-pub(crate) fn row_count_as_f64(rows: Vec<Value>) -> ResolveValue {
-    ResolveValue::F64(rows.len() as f64)
-}
-
-#[allow(clippy::cast_precision_loss)]
-pub(crate) fn usize_count_as_f64(count: usize) -> ResolveValue {
-    ResolveValue::F64(count as f64)
 }
 
 /// Materialize native rows and rehydrate masked fields when present.

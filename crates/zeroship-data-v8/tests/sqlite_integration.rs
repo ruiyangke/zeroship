@@ -49,7 +49,7 @@ fn fresh_backend() -> (SqliteBackend, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("create tempdir");
     let backend = new_sqlite_backend(
         PathBuf::from(dir.path()),
-        zeroship_data_v8::isolate_key_source(),
+        zeroship_data_v8::testing::isolate_key_source(),
     )
     .expect("open SqliteBackend");
     (backend, dir)
@@ -145,7 +145,7 @@ fn bytes_column_stores_a_raw_blob_on_sqlite() {
         // alias, so re-attach it before the schema-qualified name resolves.
         let backend = new_sqlite_backend(
             PathBuf::from(dir.path()),
-            zeroship_data_v8::isolate_key_source(),
+            zeroship_data_v8::testing::isolate_key_source(),
         )
         .expect("open the parity backend");
         backend
@@ -2920,7 +2920,7 @@ fn a_near_inside_a_transaction_sees_the_row_that_transaction_inserted() {
             zeroship_data_orm::transaction::SettleOutcome::Ok
         ));
     });
-    zeroship_data_v8::reset_context_for_tests();
+    zeroship_data_v8::testing::reset_context_for_tests();
 }
 
 // ===========================================================================
@@ -2940,7 +2940,7 @@ fn a_near_inside_a_transaction_sees_the_row_that_transaction_inserted() {
 ///
 /// This REPLACES a `set_var("ZEROSHIP_COLUMN_KEY_<KEYID>", ...)` guard.
 /// The env var was the only channel that reached the `SqliteBackend`
-/// these tests never construct themselves - the one `init_pool_async`
+/// these tests never construct themselves - the one `initialize_backend`
 /// builds behind a `dispatch_zs` V8 call - and mutating it is
 /// process-global, racy with any concurrent `getenv`, and `unsafe`. The
 /// isolate context is per-thread and typed, so none of the three apply,
@@ -2953,8 +2953,8 @@ fn a_near_inside_a_transaction_sees_the_row_that_transaction_inserted() {
 ///
 /// The returned guard withdraws the key on drop; keep it alive for the
 /// test body.
-fn with_root_key(key_id: &str, root_hex: &str) -> zeroship_data_v8::SuppliedRootKeysGuard {
-    zeroship_data_v8::supply_root_keys_for_tests(&[(key_id, root_hex)])
+fn with_root_key(key_id: &str, root_hex: &str) -> zeroship_data_v8::testing::SuppliedRootKeysGuard {
+    zeroship_data_v8::testing::supply_root_keys_for_tests(&[(key_id, root_hex)])
 }
 
 /// Bind a raw byte slice as a SQLite BLOB literal using the `X'...'`
@@ -3289,7 +3289,7 @@ fn insert_many_encrypts_ciphertext_before_sqlite_storage() {
             { "name": "Alice", "ssn": "123-45-6789" },
             { "name": "Bob", "ssn": "987-65-4321" }
         ]);
-        zeroship_data_v8::prepare_insert_many_docs_for_tests(
+        zeroship_data_v8::testing::prepare_insert_many_docs_for_tests(
             &mut docs,
             app_id,
             collection,
@@ -3461,7 +3461,7 @@ const _procedures = { upsertInsert };
 
         let backend = new_sqlite_backend(
             PathBuf::from(dir.path()),
-            zeroship_data_v8::isolate_key_source(),
+            zeroship_data_v8::testing::isolate_key_source(),
         )
         .expect("open backend");
         backend
@@ -3586,7 +3586,7 @@ const _procedures = { upsertConflict };
 
         let backend = new_sqlite_backend(
             PathBuf::from(dir.path()),
-            zeroship_data_v8::isolate_key_source(),
+            zeroship_data_v8::testing::isolate_key_source(),
         )
         .expect("open backend");
         backend
@@ -3731,7 +3731,7 @@ const _procedures = { upsertConflict };
 
         let backend = new_sqlite_backend(
             PathBuf::from(dir.path()),
-            zeroship_data_v8::isolate_key_source(),
+            zeroship_data_v8::testing::isolate_key_source(),
         )
         .expect("open backend");
         backend
@@ -3864,7 +3864,7 @@ const _procedures = { seed, updateByEmail };
 
         let backend = new_sqlite_backend(
             PathBuf::from(dir.path()),
-            zeroship_data_v8::isolate_key_source(),
+            zeroship_data_v8::testing::isolate_key_source(),
         )
         .expect("open backend");
         backend
@@ -4015,7 +4015,7 @@ const _procedures = { seed, updateManyByName };
 
         let backend = new_sqlite_backend(
             PathBuf::from(dir.path()),
-            zeroship_data_v8::isolate_key_source(),
+            zeroship_data_v8::testing::isolate_key_source(),
         )
         .expect("open backend");
         backend
@@ -4157,7 +4157,7 @@ const _procedures = { overflow };
 
         let backend = new_sqlite_backend(
             PathBuf::from(dir.path()),
-            zeroship_data_v8::isolate_key_source(),
+            zeroship_data_v8::testing::isolate_key_source(),
         )
         .expect("open backend");
         backend
@@ -4331,7 +4331,7 @@ const _procedures = { seed, failBulk, failBulkInsideTransaction };
 
         let backend = new_sqlite_backend(
             PathBuf::from(dir.path()),
-            zeroship_data_v8::isolate_key_source(),
+            zeroship_data_v8::testing::isolate_key_source(),
         )
         .expect("open backend");
         backend
@@ -4659,7 +4659,7 @@ const _procedures = { seed, nestedCasUpdate };
 
         let backend = new_sqlite_backend(
             PathBuf::from(dir.path()),
-            zeroship_data_v8::isolate_key_source(),
+            zeroship_data_v8::testing::isolate_key_source(),
         )
         .expect("open backend");
         backend
@@ -4751,7 +4751,7 @@ const _procedures = { seed, nestedCasUpdateMany };
 
         let backend = new_sqlite_backend(
             PathBuf::from(dir.path()),
-            zeroship_data_v8::isolate_key_source(),
+            zeroship_data_v8::testing::isolate_key_source(),
         )
         .expect("open backend");
         backend
@@ -6279,7 +6279,7 @@ async fn unmask_setup_with_schema(
     let backend = Rc::new(
         new_sqlite_backend(
             std::path::PathBuf::from(dir.path()),
-            zeroship_data_v8::isolate_key_source(),
+            zeroship_data_v8::testing::isolate_key_source(),
         )
         .expect("SqliteBackend::new"),
     );
@@ -6312,7 +6312,7 @@ async fn unmask_setup_with_schema(
     }
     // Install into the per-isolate context so dispatch_unmask's
     // backend() lookup succeeds.
-    zeroship_data_v8::set_sqlite_backend_for_tests(backend.clone());
+    zeroship_data_v8::testing::set_backend_for_tests(zeroship_data_orm::backend::BackendHandle::new(backend.clone()), &format!("sqlite:{}", dir.path().display()));
     zeroship_data_orm::cache_schema_for_tests(app_id, collection, schema);
     (backend, dir)
 }
@@ -6327,9 +6327,9 @@ fn configure_cold_sqlite_unmask_fixture(
     schema: zeroship_data_sql::value::Value,
     policy: zeroship_data_sql::value::Value,
 ) {
-    zeroship_data_v8::reset_context_for_tests();
+    zeroship_data_v8::testing::reset_context_for_tests();
     let url = format!("sqlite:{}", dir.path().join("zs-control.sqlite").display());
-    zeroship_data_v8::set_db_url_for_tests(&url);
+    zeroship_data_v8::testing::set_db_url_for_tests(&url);
     zeroship_data_orm::cache_schema_for_tests(app_id, collection, schema);
     mask_policy::install_mask_policy(&DbBinding::cold_start(app_id), policy)
         .expect("reinstall the app declaration during startup");
@@ -6864,7 +6864,7 @@ async fn policy_setup(
     schema: zeroship_data_sql::value::Value,
 ) -> (Rc<SqliteBackend>, tempfile::TempDir) {
     let (backend, dir) = unmask_setup_with_schema(app_id, collection, schema).await;
-    zeroship_data_v8::clear_mask_policy_cache_for_tests(app_id);
+    zeroship_data_v8::testing::clear_mask_policy_cache_for_tests(app_id);
     (backend, dir)
 }
 
@@ -7356,7 +7356,7 @@ fn cold_bulk_unmask_open_comes_from_ensure_backend_not_the_fixture() {
         // `fixture` stays bound for the whole block: the assertion is an
         // address comparison against it.
         let (fixture, dir) = unmask_setup_with_schema(app_id, collection, schema.clone()).await;
-        zeroship_data_v8::clear_mask_policy_cache_for_tests(app_id);
+        zeroship_data_v8::testing::clear_mask_policy_cache_for_tests(app_id);
         mask_policy::install_mask_policy(
             &DbBinding::cold_start(app_id),
             zeroship_data_sql::value!({ "user": ["pii"] }),
@@ -7397,7 +7397,7 @@ fn cold_bulk_unmask_attaches_before_read() {
 
     run(async {
         let (backend, dir) = unmask_setup_with_schema(app_id, collection, schema.clone()).await;
-        zeroship_data_v8::clear_mask_policy_cache_for_tests(app_id);
+        zeroship_data_v8::testing::clear_mask_policy_cache_for_tests(app_id);
         // Post-storage-flip layout: each field's own column holds the
         // mask; the raw sibling (named via `raw_column_name`, never
         // spelled out here) holds the real value `dispatch_bulk_unmask`
@@ -7531,7 +7531,7 @@ fn bulk_unmask_authorization_atomic_one_unauthorized_fails_all() {
 
     run(async {
         let (backend, _dir) = unmask_setup_with_schema(app_id, collection, schema).await;
-        zeroship_data_v8::clear_mask_policy_cache_for_tests(app_id);
+        zeroship_data_v8::testing::clear_mask_policy_cache_for_tests(app_id);
         backend
             .execute_fixture(
                 "CREATE TABLE \"app_bulk_atomic_refuse\".\"users\" (\
@@ -7604,7 +7604,7 @@ fn bulk_unmask_unknown_column_returns_typed_error_e2e() {
 
     run(async {
         let (_backend, _dir) = unmask_setup_with_schema(app_id, collection, schema).await;
-        zeroship_data_v8::clear_mask_policy_cache_for_tests(app_id);
+        zeroship_data_v8::testing::clear_mask_policy_cache_for_tests(app_id);
         let args = BulkUnmaskArgs {
             collection: collection.to_string(),
             items: vec![BulkUnmaskItem {
@@ -7662,7 +7662,7 @@ fn cold_query_unmask_hint_open_comes_from_ensure_backend_not_the_fixture() {
         // `fixture` stays bound for the whole block: the assertion is an
         // address comparison against it.
         let (fixture, dir) = unmask_setup_with_schema(app_id, collection, schema.clone()).await;
-        zeroship_data_v8::clear_mask_policy_cache_for_tests(app_id);
+        zeroship_data_v8::testing::clear_mask_policy_cache_for_tests(app_id);
         mask_policy::install_mask_policy(
             &DbBinding::cold_start(app_id),
             zeroship_data_sql::value!({ "user": ["spi"] }),
@@ -7703,7 +7703,7 @@ fn cold_query_unmask_hint_attaches_before_read() {
 
     run(async {
         let (backend, dir) = unmask_setup_with_schema(app_id, collection, schema.clone()).await;
-        zeroship_data_v8::clear_mask_policy_cache_for_tests(app_id);
+        zeroship_data_v8::testing::clear_mask_policy_cache_for_tests(app_id);
         // Post-storage-flip layout: each field's own column holds the
         // mask; the raw sibling (named via `raw_column_name`, never
         // spelled out here) holds the real value `dispatch_unmask_for_query`
@@ -7866,7 +7866,7 @@ fn per_query_unmask_hint_rejects_unauthorized_actor() {
 
     run(async {
         let (backend, _dir) = unmask_setup_with_schema(app_id, collection, schema).await;
-        zeroship_data_v8::clear_mask_policy_cache_for_tests(app_id);
+        zeroship_data_v8::testing::clear_mask_policy_cache_for_tests(app_id);
         // Policy: `user` can only unmask `pii`, NOT `spi`.
         let policy_v = zeroship_data_sql::value!({ "user": ["pii"] });
         mask_policy::install_mask_policy(&DbBinding::cold_start(app_id), policy_v)
@@ -7914,7 +7914,7 @@ fn per_query_unmask_hint_unknown_column_returns_typed_error() {
 
     run(async {
         let (_backend, _dir) = unmask_setup_with_schema(app_id, collection, schema).await;
-        zeroship_data_v8::clear_mask_policy_cache_for_tests(app_id);
+        zeroship_data_v8::testing::clear_mask_policy_cache_for_tests(app_id);
         let actor = Some(zeroship_data_sql::value!({ "kind": "auto" }));
         let err = authorize_query_hint(
             &unmask_backend().await,
@@ -9678,18 +9678,18 @@ fn p6c_data_plane_reaches_the_app_file_on_demand() {
         let backend = Rc::new(
             new_sqlite_backend(
                 PathBuf::from(dir.path()),
-                zeroship_data_v8::isolate_key_source(),
+                zeroship_data_v8::testing::isolate_key_source(),
             )
             .expect("open backend"),
         );
-        zeroship_data_v8::set_sqlite_backend_for_tests(backend.clone());
+        zeroship_data_v8::testing::set_backend_for_tests(zeroship_data_orm::backend::BackendHandle::new(backend.clone()), &format!("sqlite:{}", dir.path().display()));
 
         // Both statements go through `exec::exec_*_for_tests`, which is the
         // PRODUCTION data-plane entry - the same `TxRoute` -> `exec_sqlite_values`
         // path a CRUD op takes. Calling `backend.execute_fixture` directly would test
         // a layer BELOW the one that knows the app_id, and so could not observe
         // whether the data plane binds the file for itself.
-        zeroship_data_v8::exec_mutation_with_emit_for_tests(
+        zeroship_data_v8::testing::exec_mutation_with_emit_for_tests(
             zeroship_data_sql::compile::BuiltQuery {
                 sql: format!(
                     r#"INSERT INTO "{app}"."{collection}" (id, body)
@@ -9704,7 +9704,7 @@ fn p6c_data_plane_reaches_the_app_file_on_demand() {
         .await
         .expect("the data plane must write after attaching the app file");
 
-        let rows = zeroship_data_v8::exec_query_for_tests(
+        let rows = zeroship_data_v8::testing::exec_query_for_tests(
             app,
             zeroship_data_sql::compile::BuiltQuery {
                 sql: format!(r#"SELECT body FROM "{app}"."{collection}" WHERE id = 'note_1'"#),

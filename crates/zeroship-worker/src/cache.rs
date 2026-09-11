@@ -175,7 +175,8 @@ pub(crate) fn test_db_service(
     worker_id: &str,
 ) -> Arc<zeroship_data_v8::service::DbService> {
     zeroship_data_v8::service::DbService::new(zeroship_data_v8::service::DbServiceConfig {
-        url: url.to_string(),
+        connection: zeroship_data_orm::connection::ConnectionFactory::for_url(url)
+            .expect("valid database configuration"),
         cdc_relay: None,
         meter: None,
     })
@@ -183,7 +184,12 @@ pub(crate) fn test_db_service(
 }
 
 pub fn db_url() -> Option<String> {
-    DB_SERVICE.with(|s| s.borrow().as_ref().map(|service| service.url().to_string()))
+    DB_SERVICE.with(|service| {
+        service
+            .borrow()
+            .as_ref()
+            .and_then(|service| service.connection().url().map(str::to_owned))
+    })
 }
 
 /// Create plugins for a new Runtime — the kernel every deployed app boots
@@ -1130,7 +1136,9 @@ mod tests {
     /// the arm could see.
     #[test]
     fn building_the_plugin_set_selects_no_backend_and_opens_no_pool() {
-        use zeroship_data_v8::service::{backend_open_count, url_parse_count};
+        use zeroship_data_orm::connection::{
+            backend_open_count, configuration_parse_count as url_parse_count,
+        };
 
         std::thread::spawn(|| {
             // Composition happens first and is allowed exactly one parse; the

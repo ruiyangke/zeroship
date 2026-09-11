@@ -18,6 +18,7 @@ zeroship-core = { workspace = true }
 uuid = { workspace = true }
 zeroship-runtime = { workspace = true }
 zeroship-data-v8 = { workspace = true }
+zeroship-data-orm = { workspace = true }
 zeroship-plugin-storage = { workspace = true, features = ["s3"] }
 zeroship-kv = { workspace = true, features = ["redis", "redb"] }
 zeroship-kv-v8 = { workspace = true }

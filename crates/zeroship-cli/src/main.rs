@@ -206,13 +206,16 @@ fn cmd_serve(args: &[String]) {
             // A URL naming no supported backend fails HERE, with the same
             // exit(2) the invalid-`ZEROSHIP_STORAGE_URL` arm below already
             // uses, rather than surfacing inside the creator's first query.
-            let service = match zeroship_data_v8::service::DbService::new(
-                zeroship_data_v8::service::DbServiceConfig {
-                    url,
-                    cdc_relay: None,
-                    meter: Some(Arc::clone(&dev_meter)),
-                },
-            ) {
+            let service = match zeroship_data_orm::connection::ConnectionFactory::for_url(&url)
+                .and_then(|connection| {
+                    zeroship_data_v8::service::DbService::new(
+                        zeroship_data_v8::service::DbServiceConfig {
+                            connection,
+                            cdc_relay: None,
+                            meter: Some(Arc::clone(&dev_meter)),
+                        },
+                    )
+                }) {
                 Ok(service) => service,
                 Err(e) => {
                     eprintln!("[zeroship] invalid DATABASE_URL: {e}");

@@ -506,7 +506,7 @@ fn postgres_serves_the_inner_product_that_sqlite_refuses() {
         let dir = tempfile::tempdir().expect("tempdir");
         let sqlite = zeroship_data_orm::backend_selection::new_sqlite_backend(
             std::path::PathBuf::from(dir.path()),
-            zeroship_data_v8::isolate_key_source(),
+            zeroship_data_v8::testing::isolate_key_source(),
         )
         .expect("open SqliteBackend");
 

@@ -30,9 +30,9 @@ macro_rules! cold_isolate {
 /// is unlinked while the backend still has it open.
 fn cold_sqlite_isolate() -> tempfile::TempDir {
     let dir = tempfile::tempdir().expect("create tempdir");
-    crate::reset_context_for_tests();
+    crate::testing::reset_context_for_tests();
     let url = format!("sqlite:{}", dir.path().join("cold.sqlite").display());
-    crate::set_db_url_for_tests(&url);
+    crate::testing::set_db_url_for_tests(&url);
     assert!(
         crate::context::with(|c| c.backend()).is_none(),
         "precondition: the fixture must leave the isolate with no backend, or \
@@ -159,7 +159,7 @@ fn a_single_unmask_dispatch_opens_the_cold_isolates_backend() {
     call_js_method(scope, collection, "unmaskField", &[row_pk, column, opts]);
 
     assert_the_dispatch_opened_the_backend("dispatch_unmask_field", &state);
-    crate::reset_context_for_tests();
+    crate::testing::reset_context_for_tests();
 }
 
 /// `dispatch_bulk_unmask_field`, entered at `collection.bulkUnmask(items)`.
@@ -174,7 +174,7 @@ fn a_bulk_unmask_dispatch_opens_the_cold_isolates_backend() {
     call_js_method(scope, collection, "bulkUnmask", &[items, opts]);
 
     assert_the_dispatch_opened_the_backend("dispatch_bulk_unmask_field", &state);
-    crate::reset_context_for_tests();
+    crate::testing::reset_context_for_tests();
 }
 
 /// Startup policy installation neither opens a backend nor touches its files.
@@ -226,7 +226,7 @@ fn mask_policy_install_does_not_open_a_database() {
     );
     assert!(crate::context::with(|context| context.backend()).is_none());
     assert!(std::fs::read_dir(dir.path()).unwrap().next().is_none());
-    crate::reset_context_for_tests();
+    crate::testing::reset_context_for_tests();
 }
 
 /// `MaskedValue::dispatch_unmask_single`, entered at `mv.unmask()`.
@@ -249,7 +249,7 @@ fn a_masked_value_unmask_opens_the_cold_isolates_backend() {
     call_js_method(scope, masked, "unmask", &[opts]);
 
     assert_the_dispatch_opened_the_backend("MaskedValue::dispatch_unmask_single", &state);
-    crate::reset_context_for_tests();
+    crate::testing::reset_context_for_tests();
 }
 
 /// `MaskedValue::dispatch_unmask_multi`, entered at `mv.unmask([column])`.
@@ -276,7 +276,7 @@ fn a_masked_value_multi_column_unmask_opens_the_cold_isolates_backend() {
     call_js_method(scope, masked, "unmask", &[columns, opts]);
 
     assert_the_dispatch_opened_the_backend("MaskedValue::dispatch_unmask_multi", &state);
-    crate::reset_context_for_tests();
+    crate::testing::reset_context_for_tests();
 }
 
 /// `dispatch_find`, the carrier of the per-query unmask hint.
@@ -307,5 +307,67 @@ fn a_query_hint_carrying_find_opens_the_cold_isolates_backend() {
     call_js_method(scope, collection, "find", &[filter, opts]);
 
     assert_the_dispatch_opened_the_backend("dispatch_find", &state);
-    crate::reset_context_for_tests();
+    crate::testing::reset_context_for_tests();
+}
+
+#[test]
+fn collection_dispatch_uses_the_injected_orm_factory() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use zeroship_data_orm::{
+        backend::BackendHandle,
+        connection::{BackendFactory, ConnectionFactory},
+        encryption::LocalKeySource,
+        error::DbError,
+    };
+    struct HostFactory(Arc<AtomicUsize>);
+    impl BackendFactory for HostFactory {
+        fn dialect(&self) -> zeroship_data_sql::compile::SqlDialect {
+            zeroship_data_sql::compile::SqlDialect::Sqlite
+        }
+        fn connect(
+            &self,
+            _: LocalKeySource,
+        ) -> futures::future::LocalBoxFuture<'_, Result<BackendHandle, DbError>> {
+            Box::pin(async {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Err(DbError::config(
+                    "host_factory_called",
+                    "host refused the fixture connection",
+                ))
+            })
+        }
+    }
+    crate::testing::reset_context_for_tests();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let factory = ConnectionFactory::new("adapter_injection", HostFactory(calls.clone()));
+    let service = crate::service::DbService::new(crate::service::DbServiceConfig {
+        connection: factory.clone(),
+        cdc_relay: None,
+        meter: None,
+    })
+    .unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    crate::context::with_mut(|context| context.install_connection(service.connection().clone()));
+    cold_isolate!(let scope, let state);
+    zeroship_data_orm::cache_schema_for_tests(
+        "app_injected",
+        "items",
+        zeroship_data_sql::value!({
+            "id": { "type": "id" }, "name": { "type": "string" }
+        }),
+    );
+    let collection = cold_collection(scope, "app_injected", "items");
+    let filter = js_json(scope, "{}");
+    call_js_method(scope, collection, "find", &[filter]);
+    let values = settle_pushed_ops(&state);
+    assert_eq!(values.len(), 1);
+    assert_eq!(
+        rejection_code(&values[0]).as_deref(),
+        Some("host_factory_called")
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    crate::testing::reset_context_for_tests();
 }

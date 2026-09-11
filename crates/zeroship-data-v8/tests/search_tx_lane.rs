@@ -88,7 +88,7 @@ async fn require_pg() -> String {
 
 async fn release_pg(pool: Rc<Pool>) {
     drop(pool);
-    zeroship_data_v8::reset_context_for_tests();
+    zeroship_data_v8::testing::reset_context_for_tests();
     let _ = compio_postgres::drain_connections(std::time::Duration::from_secs(2)).await;
 }
 
@@ -134,7 +134,7 @@ async fn fixture(pool: &Rc<Pool>, url: &str, app: &str, collection: &str, schema
         .expect("per-app role, as the deploy would provision it");
     support::grant_all_runtime_table_columns(pool, app, collection).await;
 
-    zeroship_data_v8::set_postgres_pool_for_tests(Rc::clone(pool), url);
+    crate::support::install_postgres_pool(Rc::clone(pool), url);
     zeroship_data_orm::cache_schema_for_tests(app, collection, schema);
 }
 
@@ -239,7 +239,7 @@ async fn a_vector_search_inside_a_transaction_sees_the_row_that_transaction_inse
     )
     .await;
 
-    zeroship_data_v8::begin_transaction_for_tests(app, &url).await;
+    crate::support::begin_transaction(app, &url).await;
 
     let inserted = zeroship_data_orm::crud::run_insert(
         DbBinding::cold_start(app),
@@ -284,7 +284,7 @@ async fn a_vector_search_inside_a_transaction_sees_the_row_that_transaction_inse
     // ---- SUBJECT: the same search on the transaction's own lane.
     let inside = search_on(tx_route(app).await, app, coll, args).await;
 
-    zeroship_data_v8::rollback_transaction_for_tests(app).await;
+    zeroship_data_v8::testing::rollback_transaction_for_tests(app).await;
 
     let inside = inside.unwrap_or_else(|e| {
         panic!(
@@ -341,7 +341,7 @@ async fn a_spatial_near_inside_a_transaction_sees_the_row_that_transaction_inser
     )
     .await;
 
-    zeroship_data_v8::begin_transaction_for_tests(app, &url).await;
+    crate::support::begin_transaction(app, &url).await;
 
     let point = value!({"lat": 51.5074, "lng": -0.1278});
     let inserted = zeroship_data_orm::crud::run_insert(
@@ -388,7 +388,7 @@ async fn a_spatial_near_inside_a_transaction_sees_the_row_that_transaction_inser
     // ---- SUBJECT: the same near on the transaction's own lane.
     let inside = near_on(tx_route(app).await, app, coll, args).await;
 
-    zeroship_data_v8::rollback_transaction_for_tests(app).await;
+    zeroship_data_v8::testing::rollback_transaction_for_tests(app).await;
 
     let inside = inside.unwrap_or_else(|e| {
         panic!(

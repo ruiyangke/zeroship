@@ -1,83 +1,42 @@
-//! V8 adapter for the data ORM, exposed through the typed `env.db` surface.
+//! V8 bindings for the shared data ORM, exposed through `env.db`.
 //!
-//! `env.db` is the `Db` v8_class instance (see [`v8_classes::db`]).
-//! The creator-facing surface on that wrapper is:
+//! The host supplies a validated ORM connection factory. This crate captures
+//! JavaScript arguments and request identity, delegates operations to the ORM,
+//! and materializes native results as V8 values and promises. Subscription and
+//! transaction wrappers release their ORM handles on close or garbage collection.
 //!
-//! - `collection(name)` — mints a [`v8_classes::collection::Collection`]
-//!   wrapper for CRUD, vector search, and `openSubscription()`.
-//! - `transaction(callback, opts?)` — native transaction orchestrator
-//!   that hands the callback a collections-only tx view (the old
-//!   `beginTransaction` / `Transaction` wrapper surface was deleted).
-//!
-//! Platform-internal policy installation uses the
-//! private `__platform` capability handle instead.
-//!
-//! Each wrapper carries a `v8::Weak` guaranteed finalizer that
-//! releases its backing resource on GC (broker handle, transaction
-//! connection).
-//!
-//! Each app gets its own PostgreSQL schema (`"app_id".*`) for data
-//! isolation. The pool is created lazily on first use (one per worker
-//! thread).
+//! Backend construction, pooling, SQL execution, protection policy and CDC
+//! lifecycle live in the ORM. This adapter owns the isolate integration.
 
-// The `env.db` surface nests async blocks deeply - a v8_class method awaiting a
-// pooled `compio-postgres` request awaiting the connection task's own
-// request/response future - and rustc walks that whole chain when it computes a
-// block's layout. Two driver changes each added per-request state (a request
-// now carries both a disposition and a transaction effect), and together they
-// pushed one block in `v8_classes::masked_value` past the default depth of 128.
-//
-// NEITHER driver change crosses it alone; only a build carrying both does. It
-// is therefore invisible when each is checked on its own branch, which is how
-// it reached a merge before anything noticed.
-//
-// `crates/zeroship-gateway/src/main.rs` carries this attribute for the same reason. It
-// is a compiler resource limit, not a correctness guard - raising it costs
-// compile time and nothing else.
 #![recursion_limit = "256"]
 
 use std::rc::Rc;
-use std::time::Duration;
-use zeroship_data_orm::connection::{BackendUrl, backend_for_url};
+use zeroship_data_orm::connection::ConnectionFactory;
 
-use compio_postgres::Pool;
 use zeroship_runtime::plugin::{NativePlugin, NativeRegistrar};
 
-use crate::context::{BackendInitState, with_mut as ctx_mut};
+use crate::context::with_mut as ctx_mut;
 use zeroship_data_orm::error::DbError;
 
 // The test-helpers feature exposes adapter lifecycle fixtures. Database
 // internals are accessed directly through the ORM and SQL crates.
 
-zeroship_core::declare_env_consumer!(
-    /// The database plugin's own environment reads.
-    ///
-    /// A LIBRARY consumer, so `target` is the cargo package: this crate is
-    /// linked into `zeroship-worker` AND into the CLI's `zeroship serve`
-    /// vector, and naming one binary would be a claim the other falsifies.
-    pub PluginDbConsumer,
-    target = "zeroship-data-v8",
-    scope = "plugin_db");
-
 // Private imports used to compose ORM operations with isolate state.
+use zeroship_data_orm::cdc::{broker, read_set};
 #[cfg(any(test, feature = "test-helpers"))]
 use zeroship_data_orm::tx_lanes;
 use zeroship_data_orm::{
-    auth, backend, backend_selection, crud, descriptor, encryption, exec, metrics,
-    system_shape_charter, transaction, tx_route,
+    backend, descriptor, metrics, system_shape_charter, transaction, tx_route,
 };
-use zeroship_data_orm::cdc::{broker, read_set};
 use zeroship_data_sql::compile;
 
-pub mod op_error;
-pub mod v8_classes;
 pub(crate) mod context;
-/// This isolate's column-key source for adapter integration fixtures.
+pub mod op_error;
+/// Fixtures for embedding the adapter in integration tests.
 #[cfg(any(test, feature = "test-helpers"))]
-pub fn isolate_key_source() -> encryption::LocalKeySource {
-    context::isolate_key_source()
-}
+pub mod testing;
 pub(crate) mod v8_bridge;
+pub mod v8_classes;
 
 pub mod service;
 
@@ -90,24 +49,6 @@ pub(crate) mod tx_scope;
 #[cfg(feature = "test-helpers")]
 pub mod tx_scope;
 
-// `test_support` - the `tracing-subscriber` capture layer for warn/error-shape
-// contract tests - LEFT for `zeroship-data-orm` on 2026-09-03, and it left
-// because every one of its call sites did. Measured before the move: six, all
-// in `crud/{mask_drift,read_pipeline,unmask}.rs`, and zero anywhere else in this
-// crate. It is not re-exported: it is `cfg(test)` in the engine, so it is
-// invisible here by construction, and a warn-shape assertion about an adapter
-// event would need it rebuilt against `tracing_subscriber` as a dev-dependency
-// of THIS crate.
-
-// The synchronous `ensure_pool(scope)` helper that used to live here
-// has been removed — every callback dispatches through
-// `init_pool_async()` + `context::with_mut(...)` directly (or the
-// `exec::ensure_pool` async helper that wraps the same).
-
-// ---------------------------------------------------------------------------
-// DbPlugin
-// ---------------------------------------------------------------------------
-
 /// The database plugin — registers `zeroship.db.*` methods.
 ///
 /// **The prototype, not a per-runtime object.** One instance is minted by
@@ -115,73 +56,26 @@ pub mod tx_scope;
 /// thread clones the same `Arc`. There is deliberately no public constructor:
 /// a `DbPlugin` is a view of validated service configuration, and minting one
 /// beside the service would be a second, unvalidated configuration.
+#[derive(Debug)]
 pub struct DbPlugin {
-    url: String,
-    /// Authenticated relay transport for PostgreSQL subscriptions.
+    connection: ConnectionFactory,
     cdc_relay: Option<zeroship_data_orm::cdc::relay::RelayConfig>,
-    /// Process-wide usage meter (metering-as-infrastructure). Stamped into
-    /// the per-isolate context on `register`; the exec boundary emits
-    /// `db_reads` / `db_writes` / `db_rows_written` through it on success.
-    /// `None` in meter-less test harnesses.
     meter: Option<std::sync::Arc<zeroship_metering::Meter>>,
-    /// The service's stable thread-resource key. Stamped into the thread
-    /// context on `register`, so every isolate this plugin serves — current and
-    /// deploy-pinned alike — resolves resources under one identity.
-    resource_key: service::DbResourceKey,
-    /// The backend the service selected at composition. Carried so lazy pool
-    /// init reads a decision rather than re-parsing the URL.
-    backend: BackendUrl,
-    /// The operator's assignment authority, parsed once at composition.
-    ///
-    /// Held here rather than re-parsed per request, and held on the PROTOTYPE
-    /// rather than per-isolate, because it is identical for every app this
-    /// process serves - it is compiled into the binary, not derived from any
-    /// app's descriptor.
-    ///
-    /// Read by [`Self::register`], which projects it into the per-worker-thread
-    /// context as a [`system_shape_charter::AssignmentPlan`]. The write pass
-    /// iterates that projection and names no column of its own.
-    system_shape_charter: zeroship_migrate_policy::RootCharter,
+    assignments: system_shape_charter::AssignmentPlan,
 }
-
-impl std::fmt::Debug for DbPlugin {
-    /// No URL — it carries a password.
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("DbPlugin")
-            .field("resource", &self.resource_key)
-            .finish_non_exhaustive()
-    }
-}
-
 impl DbPlugin {
-    /// Mint the prototype. Crate-private: [`service::DbService::new`] is the
-    /// only caller, and it has already validated the configuration.
     pub(crate) fn new(
-        url: String,
+        connection: ConnectionFactory,
         cdc_relay: Option<zeroship_data_orm::cdc::relay::RelayConfig>,
         meter: Option<std::sync::Arc<zeroship_metering::Meter>>,
-        resource_key: service::DbResourceKey,
-        backend: BackendUrl,
-        system_shape_charter: zeroship_migrate_policy::RootCharter,
+        assignments: system_shape_charter::AssignmentPlan,
     ) -> Self {
         Self {
-            url,
+            connection,
             cdc_relay,
             meter,
-            resource_key,
-            backend,
-            system_shape_charter,
+            assignments,
         }
-    }
-
-    /// The operator's assignment authority for this process.
-    ///
-    /// Every consumer that needs to know who assigns a column's value reads it
-    /// from here. It deliberately has no setter and no descriptor-derived
-    /// alternative: the descriptor is creator-authored, so it may mirror this
-    /// but may never replace it.
-    pub(crate) fn system_shape_charter(&self) -> &zeroship_migrate_policy::RootCharter {
-        &self.system_shape_charter
     }
 }
 
@@ -198,7 +92,8 @@ impl NativePlugin for DbPlugin {
     /// `env.db`. The runtime then attaches the Db-scoped entry points
     /// registered via [`Self::register`] on top. The `.collection(name)`
     /// `#[v8_method]` on the instance returns a `Collection` v8_class
-    /// wrapper whose CRUD methods call `crud::dispatch_*` directly.
+    /// wrapper whose methods prepare ORM operations through the shared
+    /// adapter dispatch.
     fn build_instance<'s>(
         &self,
         scope: &mut v8::PinScope<'s, '_>,
@@ -228,46 +123,13 @@ impl NativePlugin for DbPlugin {
         Ok(())
     }
 
-    fn register(&self, r: &mut NativeRegistrar) {
-        // Poison the URL thread-local so `ensure_pool_initialized`
-        // (invoked lazily on first callback) can find it. `register()`
-        // may fire multiple times per thread in multi-tenant workers —
-        // idempotent overwrite is intentional.
-        //
-        // Invariant: in today's production each worker thread hosts a single
-        // DB URL, so the `different` branch is a no-op. It exists for the
-        // multi-URL-per-thread case: when two DbPlugin instances with
-        // distinct URLs register on the same thread, we must drop any
-        // previously-created pool so `init_pool_async` / `ensure_pool`
-        // build a fresh one for the new URL instead of silently aliasing
-        // the first pool to the second URL.
-        ctx_mut(|c| {
-            if c.install_db_resources(&self.url, self.resource_key, self.backend.clone()) {
-                c.clear_pool();
-            }
-            c.set_cdc_relay(self.cdc_relay.clone());
-            // Stamp the process-wide meter so the exec boundary can emit a
-            // per-app usage metric on each successful op.
+    fn register(&self, _: &mut NativeRegistrar) {
+        ctx_mut(|context| {
+            context.install_connection(self.connection.clone());
+            context.set_cdc_relay(self.cdc_relay.clone());
         });
-        // The meter is stamped on the metrics module, not parked in the context:
-        // that module is its only reader. Outside the `ctx_mut` borrow above for
-        // the same reason the charter stamp is.
         metrics::stamp(self.meter.clone());
-        ctx_mut(|c| {});
-        // Stamp the operator charter's assignment projection, so the write pass
-        // reads the authority this process was composed with rather than
-        // deriving one on its first write.
-        //
-        // OUTSIDE the `ctx_mut` closure, and on the charter's own thread-local:
-        // the projection is an engine-owned value that the adapter merely
-        // composes, so the adapter calls DOWN to store it rather than parking it
-        // in its own struct for the engine to reach back up for.
-        system_shape_charter::stamp(std::rc::Rc::new(
-            system_shape_charter::AssignmentPlan::from_charter(self.system_shape_charter()),
-        ));
-        // Every JS-visible entry point lives on the Db v8_class wrapper
-        // (see `v8_classes::db`).
-        let _ = r;
+        system_shape_charter::stamp(Rc::new(self.assignments.clone()));
     }
 }
 
@@ -323,7 +185,10 @@ mod runtime_descriptor_binding_tests {
 
     fn plugin() -> std::sync::Arc<DbPlugin> {
         service::DbService::new(service::DbServiceConfig {
-            url: "sqlite:descriptor-test.sqlite".to_string(),
+            connection: zeroship_data_orm::connection::ConnectionFactory::for_url(
+                "sqlite:descriptor-test.sqlite",
+            )
+            .expect("valid database configuration"),
             cdc_relay: None,
             meter: None,
         })
@@ -333,7 +198,7 @@ mod runtime_descriptor_binding_tests {
 
     #[test]
     fn validated_runtime_descriptor_makes_declared_collection_serveable() {
-        reset_context_for_tests();
+        crate::testing::reset_context_for_tests();
         init_v8();
         let mut isolate = v8::Isolate::new(v8::CreateParams::default());
         v8::scope!(let handle_scope, &mut isolate);
@@ -382,7 +247,7 @@ mod runtime_descriptor_binding_tests {
 
     #[test]
     fn schema_less_runtime_replaces_binding_with_an_empty_view() {
-        reset_context_for_tests();
+        crate::testing::reset_context_for_tests();
         init_v8();
         let mut isolate = v8::Isolate::new(v8::CreateParams::default());
         v8::scope!(let handle_scope, &mut isolate);
@@ -430,690 +295,21 @@ mod runtime_descriptor_binding_tests {
     }
 }
 
-/// **Test-only**: install this thread's DB resources directly, bypassing the
-/// usual `DbService` → `DbPlugin::register()` path. Used by integration tests
-/// that drive DB ops directly without spinning up a full runtime.
-///
-/// It derives the same resource key `DbService` would from the same URL, so a
-/// harness and a composed service address one identity - a harness that made up
-/// its own key would silently get a private slice of the process-wide cache and
-/// every cross-thread assertion would pass vacuously.
-#[cfg(any(test, feature = "test-helpers"))]
-#[doc(hidden)]
-pub fn set_db_url_for_tests(url: &str) {
-    let key = service::DbResourceKey::for_url(url);
-    let backend = service::select_backend(url).expect("test URL must be a supported backend");
-    ctx_mut(|c| {
-        c.install_db_resources(url, key, backend);
-    });
-}
-
-/// **Test-only**: install a concrete Postgres pool/backend into the
-/// per-thread context. Used by integration tests that need to force the
-/// plugin onto a non-default login role without waiting for lazy init to
-/// rebuild from a prior test's URL.
-#[cfg(any(test, feature = "test-helpers"))]
-#[doc(hidden)]
-pub fn set_postgres_pool_for_tests(pool: Rc<compio_postgres::Pool>, url: &str) {
-    let key = service::DbResourceKey::for_url(url);
-    let backend = service::select_backend(url).expect("test URL must be a supported backend");
-    ctx_mut(|c| {
-        c.install_db_resources(url, key, backend);
-    });
-    // The key source is read AFTER the borrow above is released, not inside it:
-    // `isolate_key_source` takes a context borrow of its own, and nesting the
-    // two panics. Production reaches the same shape through
-    // `PostgresBackend::connect`, which is handed the source by its caller.
-    let pg =
-        crate::backend::PostgresBackend::new(pool, url.to_string(), context::isolate_key_source());
-    ctx_mut(|c| c.set_postgres_backend(Rc::new(pg)));
-}
-
-/// **Test-only**: drop everything the per-thread context holds, including
-/// the pool and any parked transaction client.
-///
-/// Those handles own live Postgres connections. A test that leaves them in
-/// the context leaves the connections open, and because releasing a
-/// connection is asynchronous they are then orphaned when the test's runtime
-/// goes away. Clearing the context first lets the connections close while
-/// there is still a runtime to close them.
-///
-/// Everything it clears is PER-THREAD: the descriptor store, the pool, the
-/// parked transaction client, the mask-policy cache. There is no process-global
-/// state left for it to wipe, and there must not be - `drain_pg()` is the
-/// teardown of essentially every Postgres integration test, and a test binary
-/// is multi-threaded unless the invocation says otherwise, so a process-global
-/// wipe here would empty a concurrently running test's entries mid-assertion.
-/// A fixture that needs its entries kept apart from another's takes its own
-/// identity ([`binding::DbBinding`]'s deploy token, or a fixture-specific URL
-/// and therefore [`service::DbResourceKey`]) rather than emptying a shared map.
-#[cfg(any(test, feature = "test-helpers"))]
-#[doc(hidden)]
-pub fn reset_context_for_tests() {
-    ctx_mut(|c| *c = context::ThreadDbContext::new());
-    // BOTH thread-locals, since the lanes became their own owner on 2026-09-02.
-    //
-    // **The reason is WITHIN one test, not between two.** This comment first
-    // said resetting only the context would leak lanes "to the next test on the
-    // same thread". That is false: libtest gives every `#[test]` its own OS
-    // thread even under `--test-threads=1` (measured 2026-09-01), so a
-    // `thread_local!` cannot leak across tests at all.
-    //
-    // What is real: this helper is called MID-TEST - by scenario setup that
-    // resets between phases, and by the `ContextReset` drop guard in
-    // `transaction/mod.rs`. A reset that cleared the context and left the lanes
-    // would hand the next phase a stale transaction claim and a parked session,
-    // inside one test.
-    tx_lanes::reset_for_tests();
-    zeroship_data_orm::protection::mask_policy::reset_for_tests();
-    metrics::reset_for_tests();
-    system_shape_charter::reset_for_tests();
-    zeroship_data_orm::schema_cache::reset_for_tests();
-}
-
-/// Test helper: hand this isolate the column root keys its backends
-/// should resolve `t.encrypted(...)` columns from, instead of
-/// `ZEROSHIP_COLUMN_KEY_<KEYID>`.
-///
-/// Each entry is `(key_id, root_hex)` where `root_hex` is 64 hex
-/// characters. The keys land in the per-isolate context
-/// (`ThreadDbContext::set_supplied_root_keys`), so every backend
-/// constructed on this thread AFTERWARDS picks them up - including the
-/// ones a test never sees, such as the `SqliteBackend` that
-/// `init_pool_async` builds behind a V8 dispatch and the
-/// `PostgresBackend` that `set_pool` builds. That is the whole point:
-/// the process environment was the only channel that reached those, and
-/// mutating it is process-global, racy, and `unsafe`. A thread-local is
-/// none of the three, so two tests running in parallel on different
-/// threads cannot see each other's roots.
-///
-/// An EMPTY slice installs a source that provably holds no key, which is
-/// how a test asserts the `column_key_not_configured` error without
-/// depending on what the ambient environment happens to contain.
-///
-/// The returned guard withdraws the whole source on drop, so a test's
-/// roots do not leak into the next test that runs on the same thread.
-/// Hold it for the body of the test (`let _keys = ...;`).
-///
-/// # Panics
-/// If any `root_hex` is not 64 hex characters. A malformed fixture key
-/// is a test bug, and failing here names the key id instead of
-/// surfacing as a decrypt failure later.
-#[cfg(any(test, feature = "test-helpers"))]
-#[doc(hidden)]
-#[must_use]
-pub fn supply_root_keys_for_tests(roots: &[(&str, &str)]) -> SuppliedRootKeysGuard {
-    let keys = Rc::new(crate::encryption::SuppliedRootKeys::new());
-    for (key_id, hex) in roots {
-        keys.insert_hex(key_id, hex)
-            .unwrap_or_else(|e| panic!("fixture root key '{key_id}' must parse: {e:?}"));
+/// Open the ORM connection registered for this worker thread, if configured.
+pub async fn initialize_backend() -> Result<(), DbError> {
+    if let Some(connection) = context::with(|context| context.connection()) {
+        connection.ensure(context::isolate_key_source()).await?;
     }
-    ctx_mut(|c| c.set_supplied_root_keys(Some(Rc::clone(&keys))));
-    SuppliedRootKeysGuard { _keys: keys }
-}
-
-/// Guard returned by [`supply_root_keys_for_tests`]. Withdraws the
-/// isolate's supplied root keys on drop.
-///
-/// Opaque on purpose: the source itself stays reachable only through the
-/// context, so a test cannot hold a root alive past the guard.
-#[cfg(any(test, feature = "test-helpers"))]
-#[doc(hidden)]
-#[derive(Debug)]
-pub struct SuppliedRootKeysGuard {
-    _keys: Rc<crate::encryption::SuppliedRootKeys>,
-}
-
-#[cfg(any(test, feature = "test-helpers"))]
-impl Drop for SuppliedRootKeysGuard {
-    fn drop(&mut self) {
-        ctx_mut(|c| c.set_supplied_root_keys(None));
-    }
-}
-
-/// Test helper: install a `SqliteBackend` into the per-
-/// isolate context so the unmask integration suite can drive
-/// `protection::unmask::dispatch_unmask` against a freshly-constructed
-/// backend without the full V8 runtime + plugin wiring.
-///
-/// Production code reaches the SQLite arm through the
-/// `DbPlugin::build_instance` path; this helper short-circuits that
-/// for SQLite-only integration tests in `tests/sqlite_integration.rs`.
-#[cfg(any(test, feature = "test-helpers"))]
-#[doc(hidden)]
-pub fn set_sqlite_backend_for_tests(backend: Rc<crate::backend::sqlite::SqliteBackend>) {
-    ctx_mut(|c| c.set_sqlite_backend(backend));
-}
-
-/// Clear the cold-start binding's policy for an integration fixture.
-#[cfg(any(test, feature = "test-helpers"))]
-#[doc(hidden)]
-pub fn clear_mask_policy_cache_for_tests(app_id: &str) {
-    zeroship_data_orm::protection::mask_policy::cache_put(
-        &zeroship_data_orm::binding::DbBinding::cold_start(app_id),
-        None,
-    );
-}
-
-/// **Test-only**: run the write-side prep an insert dispatch performs before the
-/// engine sees the docs (encrypt + lower + system fields), without an isolate.
-///
-/// It lives HERE and not beside `crud::prepare_insert_many_docs_for_binding`,
-/// which it calls, because resolving the key store and the dialect is the
-/// DISPATCHER's frame: `tx_scope` is adapter state, so an engine module reading
-/// it is an ENGINE-to-ADAPTER call. `test-helpers` is a normal cargo feature, so
-/// such a call compiles into the library; the gate only hides it from
-/// `tests/lib/tier_direction_census.sh`, which excises gated items. Cargo will
-/// not be as forgiving once the engine is its own crate. Same argument, same
-/// words, at `exec::ambient_route_for_tests`.
-///
-/// The binding is a COLD START, matching every other `_for_tests` seam here.
-#[cfg(feature = "test-helpers")]
-#[doc(hidden)]
-pub async fn prepare_insert_many_docs_for_tests(
-    docs: &mut zeroship_data_sql::value::Value,
-    app_id: &str,
-    collection: &str,
-    actor_id: Option<&str>,
-) -> Result<(), DbError> {
-    let binding = zeroship_data_orm::binding::DbBinding::cold_start(app_id);
-    let backend = tx_scope::ensure_backend().await?;
-    let dialect = tx_scope::configured_dialect();
-    // The route the V8 dispatcher would have captured. The protection-floor
-    // fence reads the live catalog, so the helper has to stand in for that half
-    // of the dispatcher's frame too - a helper that skipped it would let a test
-    // write through a fence production applies.
-    let route = crate::exec::ambient_route_for_tests(app_id, backend.clone());
-    crud::prepare_insert_many_docs_for_binding(
-        backend.key_store(),
-        dialect,
-        &route,
-        docs,
-        &binding,
-        collection,
-        actor_id,
-    )
-    .await
-}
-
-/// **Test-only**: drive the REAL read pipeline (`crud::read_pipeline::apply`
-/// with default options: decrypt + mask-wrap on) over a set of freshly-fetched
-/// rows, so a round-trip test exercises the descriptor-sourced decrypt +
-/// mask-wrap path end to end rather than an AEAD-unit shim. Returns the
-/// finalized rows; `has_masked` is dropped (the caller asserts on contents).
-///
-/// Adapter-side for the reason spelled out on
-/// [`prepare_insert_many_docs_for_tests`]: resolving the backend is the
-/// dispatcher's job, and this helper is standing in for the dispatcher.
-#[cfg(feature = "test-helpers")]
-#[doc(hidden)]
-pub async fn finalize_rows_on_read_for_tests(
-    app_id: &str,
-    collection: &str,
-    rows: Vec<zeroship_data_sql::value::Value>,
-) -> Result<Vec<zeroship_data_sql::value::Value>, DbError> {
-    let binding = zeroship_data_orm::binding::DbBinding::cold_start(app_id);
-    let backend = tx_scope::ensure_backend().await?;
-    // The route comes from the ambient parked-tx slot rather than from a V8
-    // scope, because there is no isolate here - the same trade
-    // `exec_mutation_with_emit_for_tests` below documents. `apply` needs a
-    // route, not a handle: its unmask stage issues SELECTs of its own and they
-    // must land on the lane the read that produced these rows ran on.
-    let result = crud::read_pipeline::apply(
-        &exec::ambient_route_for_tests(app_id, backend),
-        &binding,
-        collection,
-        rows,
-        crud::read_pipeline::ApplyOptions::default(),
-    )
-    .await?;
-    Ok(result.rows)
-}
-
-/// **Test-only**: end-to-end wrapper around `exec::exec_mutation_with_emit` so
-/// integration tests can drive the queue/drain machinery against a real
-/// Postgres connection without spinning up a V8 isolate.
-///
-/// **This lived in `exec.rs` until the engine became its own crate**, and had
-/// to move for the same reason as its two neighbours above: resolving the
-/// backend is `tx_scope::ensure_backend`'s job, and that is adapter-side. The
-/// engine keeps `exec::ambient_route_for_tests`, which now TAKES the handle.
-///
-/// The route is derived from the ambient parked-tx slot rather than from a V8
-/// scope, because there is no isolate here. That is exactly the discriminator
-/// production no longer uses; it is sound ONLY because a test drives one unit
-/// of work at a time, and it is why this helper cannot stand in for the
-/// `cxPlain` coverage in `tests/e2e_dev_vs_deployed_db.sh`.
-///
-/// # Errors
-///
-/// The statement's own error, stringified.
-#[cfg(feature = "test-helpers")]
-#[doc(hidden)]
-pub async fn exec_mutation_with_emit_for_tests(
-    bq: compile::BuiltQuery,
-    app_id: &str,
-    collection: &str,
-    op: zeroship_data_orm::cdc::ChangeOp,
-) -> Result<Vec<zeroship_data_sql::value::Value>, String> {
-    let backend = tx_scope::ensure_backend()
-        .await
-        .map_err(DbError::into_string)?;
-    let route = exec::ambient_route_for_tests(app_id, backend);
-    exec::exec_mutation_with_emit(bq, &route, collection, op)
-        .await
-        .map_err(DbError::into_string)
-}
-
-/// **Test-only**: exec a read query through the same shared pool-or-tx path
-/// production CRUD uses, including the Postgres autocommit per-app role fence.
-///
-/// Adapter-side for the reason on [`exec_mutation_with_emit_for_tests`].
-///
-/// # Errors
-///
-/// The statement's own error, stringified.
-#[cfg(feature = "test-helpers")]
-#[doc(hidden)]
-pub async fn exec_query_for_tests(
-    app_id: &str,
-    bq: compile::BuiltQuery,
-) -> Result<Vec<zeroship_data_sql::value::Value>, String> {
-    let backend = tx_scope::ensure_backend()
-        .await
-        .map_err(DbError::into_string)?;
-    let route = exec::ambient_route_for_tests(app_id, backend);
-    exec::exec_query(&route, bq)
-        .await
-        .map_err(DbError::into_string)
-}
-
-/// **Test-only**: `(idle, active, total)` for this isolate's data pool.
-///
-/// `transaction::probe::pool_counts` takes the handle now - the engine may not
-/// read the adapter's context - so this is where the lookup lives.
-#[cfg(feature = "test-helpers")]
-#[doc(hidden)]
-#[must_use]
-pub fn pool_counts_for_tests() -> Option<(usize, usize, usize)> {
-    transaction::probe::pool_counts(&context::with(|c| c.backend())?)
-}
-
-/// Open a real transaction through admission, role setup and the reducer.
-#[cfg(any(test, feature = "test-helpers"))]
-#[doc(hidden)]
-pub async fn begin_transaction_for_tests(app_id: &str, url: &str) {
-    let pool = Rc::new(Pool::connect(url, 2).await.expect("fixture pool"));
-    auth::bootstrap::ensure_per_app_role(&pool, app_id)
-        .await
-        .expect("fixture role");
-    if context::with(|c| c.backend().is_none()) {
-        set_postgres_pool_for_tests(pool, url);
-    }
-    let backend = tx_scope::ensure_backend()
-        .await
-        .expect("registered fixture backend");
-    let admission = transaction::TxAdmission::acquire(app_id.to_owned()).await;
-    transaction::exec_begin_or_savepoint(
-        false,
-        None,
-        app_id,
-        zeroship_data_sql::SchemaName::new(app_id).expect("fixture schema"),
-        backend,
-    )
-    .await
-    .expect("fixture BEGIN");
-    admission.handed_to_reducer();
-}
-
-/// Roll back the fixture transaction and release its admission.
-#[cfg(any(test, feature = "test-helpers"))]
-#[doc(hidden)]
-pub async fn rollback_transaction_for_tests(app_id: &str) {
-    assert!(matches!(
-        transaction::exec_settle(app_id, false, None).await,
-        transaction::SettleOutcome::Ok
-    ));
-}
-
-/// **Test-only**: push a `ChangeEvent` onto the pending-emits queue
-/// (the same path `exec_mutation_with_emit` takes when inside a tx).
-/// Used by the Gap B test to assert the drain/clear behavior without
-/// running real SQL.
-#[cfg(any(test, feature = "test-helpers"))]
-#[doc(hidden)]
-pub fn push_pending_emit_for_tests(ev: zeroship_data_orm::cdc::ChangeEvent) {
-    crate::tx_lanes::with_mut(|l| l.push_pending_emit(ev));
-}
-
-/// **Test-only**: drain the pending-emits queue (fire all events
-/// through `emit_local`). Exposed so the Gap B tests can drive the
-/// transaction settle path's commit branch without standing up V8.
-#[cfg(any(test, feature = "test-helpers"))]
-#[doc(hidden)]
-pub fn drain_pending_emits_for_tests(app_id: &str) {
-    exec::drain_pending_emits_on_commit(app_id);
-}
-
-/// **Test-only**: clear the pending-emits queue without firing
-/// (rollback branch).
-#[cfg(any(test, feature = "test-helpers"))]
-#[doc(hidden)]
-pub fn clear_pending_emits_for_tests(app_id: &str) {
-    exec::clear_pending_emits(app_id);
-}
-
-// `drop_pooled_lock_guard_without_release_for_tests` was deleted on
-// 2026-09-04. Its doc claimed "used by the integration suite to verify the
-// catastrophic Drop path"; no integration test ever called it, in this crate or
-// any other. A `#[cfg(any(test, feature = "test-helpers"))] #[doc(hidden)] pub`
-// item is invisible BOTH ways - rustc's dead_code lint cannot see a `pub` item,
-// and a default-features build does not compile it at all - so nothing was ever
-// going to report it. The Drop path it named is still guarded, by
-// `drop_with_released_true_does_not_warn` in data-postgres's `lock_guard.rs`,
-// against the flag rather than a live pool.
-
-/// `true` iff `url` resolves to the SQLite (dev-tier) backend under the SAME
-/// grammar [`backend_for_url`] uses (`sqlite:` / `sqlite://` / `file:` /
-/// a bare filesystem path). PG (`postgres://`/`postgresql://`)
-/// and an empty / unknown-scheme URL are `false`.
-///
-/// Delegates to [`zeroship_core::db_url::is_sqlite_url`] so the grammar has ONE
-/// source of truth shared with the runtime's single-isolate clamp and the
-/// worker's hard-abort guard (neither can depend on plugin-db, which depends on
-/// the runtime). A debug assertion keeps it in lock-step with `backend_for_url`
-/// — the opener and the classifier can never silently diverge.
-#[must_use]
-pub fn is_sqlite_url(url: &str) -> bool {
-    let v = zeroship_core::db_url::is_sqlite_url(url);
-    debug_assert_eq!(
-        v,
-        matches!(backend_for_url(url), Ok(BackendUrl::Sqlite { .. })),
-        "is_sqlite_url drifted from backend_for_url for {url:?}"
-    );
-    v
-}
-
-/// Initialize the connection pool asynchronously.
-///
-/// Must be called on the compio runtime thread BEFORE any JS execution.
-/// Typically called after the plugin has been registered on a Runtime but
-/// before the isolate starts processing requests.
-///
-/// ```ignore
-/// // Once, at composition, before any isolate exists:
-/// let service = DbService::new(DbServiceConfig {
-///     url,
-///     cdc_relay: None,
-///     meter: None,
-/// })?;
-/// // Inside a compio runtime, per isolate:
-/// let runtime = Runtime::builder().plugin(service.plugin()).build();
-/// zeroship_data_v8::init_pool_async().await?;
-/// // Now safe to run JS that calls zeroship.db.*
-/// ```
-struct BackendInitGuard;
-
-impl Drop for BackendInitGuard {
-    fn drop(&mut self) {
-        ctx_mut(|c| c.finish_backend_init());
-    }
-}
-
-/// Decide what this thread's installed DB resources mean for backend init.
-///
-/// `Ok(None)` - nothing is installed; the DB plugin is disabled on this thread
-/// and `env.db` is legitimately absent.
-/// `Ok(Some(..))` - a URL and the backend selection made for it at composition.
-/// `Err(..)` - exactly one of the two is installed.
-///
-/// **The mixed state is an error, not a disabled plugin.** It is unreachable
-/// today - `install_db_resources` writes both fields together and is the only
-/// writer - but the two are separate `Option`s, so the arm has to say something,
-/// and "either is missing means the DB plugin is disabled" says the wrong thing.
-/// Under it, a thread that had a URL and somehow no selection would run every
-/// `env.db` call as a silent no-op that reports success, which is
-/// indistinguishable from an app that never configured a database. Naming the
-/// state costs one arm and turns a whole class of silent misconfiguration into a
-/// message with both halves in it.
-fn backend_init_inputs(
-    url: Option<String>,
-    selection: Option<BackendUrl>,
-) -> Result<Option<(String, BackendUrl)>, String> {
-    match (url, selection) {
-        (None, None) => Ok(None),
-        (Some(url), Some(selection)) => Ok(Some((url, selection))),
-        (Some(_), None) => Err(
-            "db: a database URL is installed on this thread with no backend selection; \
-             the two are installed together by DbPlugin::register, so this thread's \
-             resources were installed by something else"
-                .to_string(),
-        ),
-        (None, Some(selection)) => Err(format!(
-            "db: a backend selection ({selection:?}) is installed on this thread with no \
-             database URL; the two are installed together by DbPlugin::register, so this \
-             thread's resources were installed by something else"
-        )),
-    }
-}
-
-pub async fn init_pool_async() -> Result<(), String> {
-    let Some((url, selection)) =
-        context::with(|c| backend_init_inputs(c.db_url(), c.backend_selection()))?
-    else {
-        return Ok(()); // Nothing configured — DB plugin is disabled
-    };
-
-    // SQLite installs only a backend handle (no pool), and lazy init
-    // can be reached by multiple request futures before the first open
-    // completes. Make cold init single-flight per isolate so concurrent
-    // startup RPCs wait for the first backend instead of racing PRAGMA
-    // bootstrap against the same dev database file.
-    loop {
-        match ctx_mut(|c| c.begin_backend_init()) {
-            BackendInitState::Ready => return Ok(()),
-            BackendInitState::Acquired => break,
-            BackendInitState::InProgress => {
-                compio::time::sleep(Duration::from_millis(10)).await;
-            }
-        }
-    }
-
-    let _init_guard = BackendInitGuard;
-
-    async {
-        // The backend selection the service made at composition, NOT a fresh
-        // parse of the URL. `install_db_resources` stamped it onto this thread
-        // when the plugin registered.
-        match selection {
-            BackendUrl::Postgres => {
-                // Symmetric with the SQLite arm below: the backend is composed
-                // whole by the tier that may name its driver, and this arm only
-                // installs it. The connect, the pool size and the error-chain
-                // walk all live in `PostgresBackend::connect`.
-                let backend = crate::backend::PostgresBackend::connect(
-                    &url,
-                    8,
-                    context::isolate_key_source(),
-                )
-                .await
-                .map_err(DbError::into_string)?;
-                service::note_backend_open();
-                ctx_mut(|c| c.set_postgres_backend(Rc::new(backend)));
-            }
-            BackendUrl::Sqlite { path } => {
-                let backend = crate::backend_selection::open_sqlite_backend(
-                    &path,
-                    context::isolate_key_source(),
-                )
-                .await
-                .map_err(DbError::into_string)?;
-                service::note_backend_open();
-                ctx_mut(|c| c.set_sqlite_backend(Rc::new(backend)));
-            }
-        }
-        Ok(())
-    }
-    .await
-}
-
-// App CDC deprovisioning moved onto the service's neutral operator-lifecycle
-// handle: `DbService::lifecycle().deprovision_app(app_id)`. The free function
-// that used to live here took a `&str` URL, re-ran `backend_for_url` on it and
-// built a fresh two-connection `Pool` per deleted app.
-
-#[cfg(test)]
-mod backend_init_input_tests {
-    use super::{BackendUrl, backend_init_inputs};
-
-    /// Nothing installed is the DISABLED state and stays a success.
-    ///
-    /// The control for the two arms below. Without it, "every absent field is
-    /// an error" would satisfy them and would break every meter-less,
-    /// database-less harness in the tree.
-    #[test]
-    fn nothing_installed_is_a_disabled_plugin_not_an_error() {
-        assert_eq!(backend_init_inputs(None, None), Ok(None));
-    }
-
-    #[test]
-    fn both_installed_resolve_to_the_composed_selection() {
-        assert_eq!(
-            backend_init_inputs(
-                Some("postgres://host/db".to_string()),
-                Some(BackendUrl::Postgres)
-            ),
-            Ok(Some((
-                "postgres://host/db".to_string(),
-                BackendUrl::Postgres
-            ))),
-        );
-    }
-
-    /// A URL with no selection must be REPORTED, not silently disabled.
-    ///
-    /// The pre-fix guard was `Some((c.db_url()?, c.backend_selection()?))`, so
-    /// either field being absent returned `Ok(())` under the comment "No URL
-    /// configured - DB plugin is disabled". That is true of one of the three
-    /// non-trivial states and wrong about the other two: a thread carrying a
-    /// database and no selection ran every `env.db` op as a successful no-op.
-    #[test]
-    fn a_url_without_a_selection_is_a_reported_configuration_error() {
-        let error = backend_init_inputs(Some("postgres://host/db".to_string()), None)
-            .expect_err("a half-installed thread must not read as 'no database configured'");
-        assert!(
-            error.contains("no backend selection"),
-            "the error must name which half is missing: {error}",
-        );
-    }
-
-    #[test]
-    fn a_selection_without_a_url_is_a_reported_configuration_error() {
-        let error = backend_init_inputs(None, Some(BackendUrl::Postgres))
-            .expect_err("a half-installed thread must not read as 'no database configured'");
-        assert!(
-            error.contains("no database URL"),
-            "the error must name which half is missing: {error}",
-        );
-    }
-}
-
-#[cfg(test)]
-mod backend_url_tests {
-    use super::{BackendUrl, backend_for_url};
-    use std::path::PathBuf;
-
-    #[test]
-    fn postgres_urls_dispatch_to_postgres() {
-        assert!(matches!(
-            backend_for_url("postgres://localhost/dev").unwrap(),
-            BackendUrl::Postgres
-        ));
-        assert!(matches!(
-            backend_for_url("postgresql://localhost/dev").unwrap(),
-            BackendUrl::Postgres
-        ));
-    }
-
-    #[test]
-    fn sqlite_urls_dispatch_to_sqlite() {
-        assert_eq!(
-            backend_for_url("sqlite:/tmp/dev.sqlite").unwrap(),
-            BackendUrl::Sqlite {
-                path: PathBuf::from("/tmp/dev.sqlite"),
-            }
-        );
-        assert_eq!(
-            backend_for_url("sqlite:///tmp/dev.sqlite").unwrap(),
-            BackendUrl::Sqlite {
-                path: PathBuf::from("/tmp/dev.sqlite"),
-            }
-        );
-        assert_eq!(
-            backend_for_url("file:./dev.sqlite").unwrap(),
-            BackendUrl::Sqlite {
-                path: PathBuf::from("./dev.sqlite"),
-            }
-        );
-
-        assert_eq!(
-            backend_for_url("./dev.sqlite").unwrap(),
-            BackendUrl::Sqlite {
-                path: PathBuf::from("./dev.sqlite"),
-            }
-        );
-        assert_eq!(
-            backend_for_url("sqlite://host/db").unwrap(),
-            BackendUrl::Sqlite {
-                path: PathBuf::from("host/db"),
-            }
-        );
-    }
-
-    #[test]
-    fn memory_urls_cannot_select_a_backend() {
-        for url in [
-            ":memory:",
-            "sqlite::memory:",
-            "file::memory:",
-            "sqlite:",
-            "sqlite://",
-            "file:",
-            "sqlite:db?mode=memory&cache=shared",
-        ] {
-            assert!(!super::is_sqlite_url(url), "{url}");
-            assert!(
-                matches!(
-                    backend_for_url(url),
-                    Err(zeroship_data_orm::error::DbError::Configuration {
-                        code: "sqlite_file_required",
-                        ..
-                    })
-                ),
-                "{url}",
-            );
-        }
-    }
-
-    #[test]
-    fn unknown_scheme_is_rejected() {
-        let err = backend_for_url("mysql://localhost/dev").unwrap_err();
-        assert!(matches!(
-            err,
-            zeroship_data_orm::error::DbError::Configuration {
-                code: "unsupported_database_url_scheme",
-                ..
-            }
-        ));
-    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod backend_init_tests {
-    use super::{context, ctx_mut, init_pool_async, set_db_url_for_tests};
+    use super::{context, ctx_mut, initialize_backend};
+    use crate::testing::set_db_url_for_tests;
 
     fn set_fresh_db_url(url: &str) {
-        ctx_mut(|c| c.clear_pool());
+        ctx_mut(|c| c.clear_backend());
         set_db_url_for_tests(url);
     }
 
@@ -1125,7 +321,7 @@ mod backend_init_tests {
     /// because each overwrites the last. Remove `begin_backend_init` and this
     /// arm reports 8.
     ///
-    /// It is also the liveness proof for [`crate::service::backend_open_count`]
+    /// It is also the liveness proof for [`zeroship_data_orm::connection::backend_open_count`]
     /// itself. The worker's "building the plugin set opens no pool" guard reads
     /// that counter and asserts it did NOT move; a counter wired to nothing
     /// satisfies that forever. This arm shows it moves when a backend really is
@@ -1135,11 +331,11 @@ mod backend_init_tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let url = format!("sqlite:{}", dir.path().join("cold-init.sqlite").display());
         set_fresh_db_url(&url);
-        let opens_before = crate::service::backend_open_count();
+        let opens_before = zeroship_data_orm::connection::backend_open_count();
 
         const CONCURRENCY: usize = 8;
         let handles = (0..CONCURRENCY)
-            .map(|_| compio::runtime::spawn(async { init_pool_async().await }))
+            .map(|_| compio::runtime::spawn(async { initialize_backend().await }))
             .collect::<Vec<_>>();
 
         for handle in handles {
@@ -1154,7 +350,7 @@ mod backend_init_tests {
             "concurrent init calls should leave a usable backend installed"
         );
         assert_eq!(
-            crate::service::backend_open_count() - opens_before,
+            zeroship_data_orm::connection::backend_open_count() - opens_before,
             1,
             "{CONCURRENCY} concurrent cold inits must open ONE backend, not one each",
         );
@@ -1257,7 +453,7 @@ mod reset_clears_every_thread_local {
         crate::tx_lanes::with_mut(|l| l.withdraw_tx_session(app));
         assert!(crate::tx_lanes::with(|l| l.tx_session_withdrawn(app)));
 
-        crate::reset_context_for_tests();
+        crate::testing::reset_context_for_tests();
 
         assert!(
             !crate::tx_lanes::with(|l| l.tx_claimed_by(app)),
@@ -1296,7 +492,7 @@ mod reset_clears_every_thread_local {
         });
         assert!(zeroship_data_orm::schema_cache::with(|c| c.get(&binding, "users")).is_some());
 
-        crate::reset_context_for_tests();
+        crate::testing::reset_context_for_tests();
 
         assert!(
             zeroship_data_orm::schema_cache::with(|c| c.get(&binding, "users")).is_none(),

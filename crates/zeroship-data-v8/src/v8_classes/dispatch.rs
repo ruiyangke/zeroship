@@ -8,12 +8,13 @@ use zeroship_runtime::state::{OpResult, ResolveValue, SharedState};
 use zeroship_data_orm::binding::DbBinding;
 use zeroship_data_orm::error::DbError;
 
-use crate::compile;
-use zeroship_data_orm::protection::mask_policy::install_mask_policy;
-use zeroship_data_orm::protection::unmask::{dispatch_bulk_unmask, dispatch_unmask, parse_args, parse_bulk_args};
 use crate::op_error::ToOpError;
 use crate::v8_bridge::{runtime_state, setup_js_promise};
 use zeroship_data_orm::orm::{Operation, Output, PreparedOperation};
+use zeroship_data_orm::protection::mask_policy::install_mask_policy;
+use zeroship_data_orm::protection::unmask::{
+    dispatch_bulk_unmask, dispatch_unmask, parse_args, parse_bulk_args,
+};
 
 /// Look up the current request's authenticated actor id (typed_id
 /// string), if any.
@@ -372,46 +373,7 @@ pub(crate) fn dispatch_near<'s>(
 }
 // ---------------------------------------------------------------------------
 
-/// The shared "build → exec → resolve" tail every CRUD dispatcher
-/// shares. Drives the spawned-op future, packs the result into an
-/// `OpResult::JsValue`, and stamps `.code` on any `DbError` via
-/// `to_op_error()` so the SDK sees `err.code` regardless of which
-/// dispatcher threw.
-///
-/// `build_result` is the (already-evaluated) output of the
-/// schema-resolution + `compile::build_*` chain. Builder errors are `QueryError`
-/// → `DbError::ValidationFailed` via the `From` impl — the resulting JS error
-/// carries `code = "invalid_filter"` / `"invalid_collection"` /
-/// `"invalid_identifier"`. It is a `DbError` rather than a `QueryError` so the
-/// same arm carries the descriptor's `collection_not_declared` refusal, which
-/// the sync half of a dispatcher folds in ahead of the builder call.
-///
-/// `exec` runs against either the pool or the active
-/// `ThreadDbContext::tx_conns` (transparently —
-/// `exec::run_sql` already handles that).
-///
-/// `resolve` lowers the exec's success value to the V8-bound
-/// `ResolveValue` shape (typically `Json` for arrays/objects, `F64`
-/// for counts).
-/// Settle one dispatch: run the engine's work, then let the ADAPTER decide how
-/// its result reaches V8.
-///
-/// This is the whole of the completion protocol, and the shape every dispatch
-/// should have. `work` is engine code - it returns `Result<R, DbError>` and
-/// names no runtime type. `resolve` is adapter code - it is the only thing that
-/// may build a `ResolveValue`. Nothing in between knows about V8.
-///
-/// [`run_op`] is the special case where the query can be built synchronously in
-/// the prologue, before the future starts. Nine dispatches are shaped that way.
-/// The other eight cannot be: they `await` before a query exists - `insert_many`
-/// prepares documents, `find` resolves a descriptor - so a `build_result`
-/// computed up front is not available to them. That is the only reason they
-/// hand-rolled `OpResult` construction, and this is what they hand-rolled it
-/// INTO, badly: every one of them repeated the same three-arm match over
-/// `Ok`/`Err` and rebuilt `OpResult::JsValue` by hand.
-///
-/// Prefer this over `run_op` in new code. `run_op` is expressible in terms of it
-/// and is kept only because nine call sites read well with the build/exec split.
+/// Settle ORM work into the originating V8 promise.
 pub(crate) async fn settle<R, Fut, Resolve>(
     resolver: v8::Global<v8::PromiseResolver>,
     request_id: Option<u64>,
@@ -432,30 +394,6 @@ where
     }
 }
 
-pub(crate) async fn run_op<R, EFut, Resolve>(
-    resolver: v8::Global<v8::PromiseResolver>,
-    request_id: Option<u64>,
-    build_result: Result<compile::BuiltQuery, DbError>,
-    exec: impl FnOnce(compile::BuiltQuery) -> EFut,
-    resolve: Resolve,
-) -> OpResult
-where
-    EFut: Future<Output = Result<R, DbError>>,
-    Resolve: FnOnce(R) -> ResolveValue,
-{
-    let bq = match build_result {
-        Ok(bq) => bq,
-        Err(e) => return reject_op(resolver, request_id, e),
-    };
-    match exec(bq).await {
-        Ok(v) => OpResult::JsValue {
-            resolver,
-            value: resolve(v),
-            request_id,
-        },
-        Err(e) => reject_op(resolver, request_id, e),
-    }
-}
 pub(crate) fn reject_op(
     resolver: v8::Global<v8::PromiseResolver>,
     request_id: Option<u64>,
@@ -469,13 +407,12 @@ pub(crate) fn reject_op(
 }
 
 // ---------------------------------------------------------------------------
-// The platform-internal dispatches: unmask and mask policy
+// Protection dispatch: unmask and deployment policy installation
 // ---------------------------------------------------------------------------
 //
-// Reached from `DbPlatform`, not from `Collection` - they hang off the
-// capability handle set on `Db` under a private symbol, so creator JS cannot
-// name them. They are here for the same reason as everything above: the
-// signature returns a `v8::Local<v8::Promise>`, so the function is boundary.
+// Collection exposes audited unmask operations. DbPlatform carries policy
+// installation through the runtime's private capability handle. These helpers
+// capture arguments and return V8 promises; authorization stays in the ORM.
 //
 // Their engine halves stay in `protection::unmask` and `protection::mask_policy`, which is
 // where the DB-3 fence lives - `sanitize_app_actor` runs inside `parse_args` /
@@ -486,8 +423,7 @@ pub(crate) fn reject_op(
 /// `dispatch_unmask` body runs as a spawned op and resolves with
 /// `{ plaintext }` on success or rejects with the typed `OpError`.
 ///
-/// Called from `v8_classes::db::Db::unmask_field` (the `#[v8_method]`
-/// wrapping this entry point).
+/// Called from `Collection::unmask_field`, which binds the collection identity.
 pub(crate) fn dispatch_unmask_field<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     binding: &DbBinding,

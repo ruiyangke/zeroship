@@ -82,7 +82,7 @@ async fn require_pg() -> String {
 
 async fn release_pg(pool: Rc<Pool>) {
     drop(pool);
-    zeroship_data_v8::reset_context_for_tests();
+    zeroship_data_v8::testing::reset_context_for_tests();
     let _ = compio_postgres::drain_connections(std::time::Duration::from_secs(2)).await;
 }
 
@@ -138,9 +138,9 @@ async fn fixture_with_schema(pool: &Rc<Pool>, url: &str, app: &str, schema: Valu
         .expect("per-app role, as the deploy would provision it");
     support::grant_all_runtime_table_columns(pool, app, "people").await;
 
-    zeroship_data_v8::set_postgres_pool_for_tests(Rc::clone(pool), url);
+    crate::support::install_postgres_pool(Rc::clone(pool), url);
     zeroship_data_orm::cache_schema_for_tests(app, "people", schema);
-    zeroship_data_v8::clear_mask_policy_cache_for_tests(app);
+    zeroship_data_v8::testing::clear_mask_policy_cache_for_tests(app);
 }
 
 /// The backend handle the V8 dispatcher would have bound for this dispatch.
@@ -234,7 +234,7 @@ async fn a_find_unmask_inside_a_transaction_reaches_the_row_that_transaction_ins
     install_mask_policy(&DbBinding::cold_start(app), value!({ "support": ["pci"] }))
         .expect("install the app's declared mask policy");
 
-    zeroship_data_v8::begin_transaction_for_tests(app, &url).await;
+    crate::support::begin_transaction(app, &url).await;
 
     let id = insert_on(
         tx_route(app).await,
@@ -287,7 +287,7 @@ async fn a_find_unmask_inside_a_transaction_reaches_the_row_that_transaction_ins
     )
     .await;
 
-    zeroship_data_v8::rollback_transaction_for_tests(app).await;
+    zeroship_data_v8::testing::rollback_transaction_for_tests(app).await;
 
     let unmasked = unmasked.unwrap_or_else(|e| {
         panic!(
@@ -351,7 +351,7 @@ async fn a_denied_unmask_audit_row_survives_the_rollback_of_its_transaction() {
         "no unmask has been attempted yet",
     );
 
-    zeroship_data_v8::begin_transaction_for_tests(app, &url).await;
+    crate::support::begin_transaction(app, &url).await;
 
     // The control write: an ordinary insert that shares the transaction the
     // denied attempt is made inside.
@@ -381,7 +381,7 @@ async fn a_denied_unmask_audit_row_survives_the_rollback_of_its_transaction() {
     );
 
     // ROLLBACK the transaction both writes were made inside.
-    zeroship_data_v8::rollback_transaction_for_tests(app).await;
+    zeroship_data_v8::testing::rollback_transaction_for_tests(app).await;
 
     // ---- CONTROL: the ordinary write inside that transaction is gone.
     let surviving = pool
@@ -442,12 +442,12 @@ async fn an_encrypted_unmask_inside_a_transaction_reaches_the_row_that_transacti
     let app = "unmask_lane_encrypted";
     // A synthetic 32-byte root, supplied to THIS isolate. The write pipeline
     // encrypts with it and the unmask fetch decrypts with it.
-    let _keys = zeroship_data_v8::supply_root_keys_for_tests(&[("default", &"c".repeat(64))]);
+    let _keys = zeroship_data_v8::testing::supply_root_keys_for_tests(&[("default", &"c".repeat(64))]);
     fixture_with_schema(&pool, &url, app, encrypted_schema()).await;
     install_mask_policy(&DbBinding::cold_start(app), value!({ "support": ["pci"] }))
         .expect("install the app's declared mask policy");
 
-    zeroship_data_v8::begin_transaction_for_tests(app, &url).await;
+    crate::support::begin_transaction(app, &url).await;
 
     let id = insert_on(
         tx_route(app).await,
@@ -487,7 +487,7 @@ async fn an_encrypted_unmask_inside_a_transaction_reaches_the_row_that_transacti
     )
     .await;
 
-    zeroship_data_v8::rollback_transaction_for_tests(app).await;
+    zeroship_data_v8::testing::rollback_transaction_for_tests(app).await;
 
     let inside = inside.unwrap_or_else(|e| {
         panic!(

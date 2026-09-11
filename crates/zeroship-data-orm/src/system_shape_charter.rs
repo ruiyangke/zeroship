@@ -75,6 +75,11 @@ pub struct AssignmentPlan {
 }
 
 impl AssignmentPlan {
+    /// Load the fixed operator policy and project runtime assignments.
+    pub fn load() -> Result<Self, DbError> {
+        load().map(|charter| Self::from_charter(&charter))
+    }
+
     /// Project every assigned column out of a parsed charter's inject rules.
     ///
     /// Infallible on purpose. The only failure this could report is two inject

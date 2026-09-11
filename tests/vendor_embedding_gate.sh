@@ -193,7 +193,6 @@ key_to_path() {
 # `service.rs` are the adapter's and stayed.
 BASELINE_FILES="
 zeroship-data-orm/auth/bootstrap.rs
-zeroship-data-v8/lib.rs
 "
 # exec.rs                 ENTRY RETIRED 2026-09-04, and it had already been dead
 #                         for a day. It read "Pool + Vec<Row> - the unsettled row
