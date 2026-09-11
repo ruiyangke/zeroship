@@ -8,7 +8,6 @@ use std::time::Duration;
 
 use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
 use serde_json::{json, Value};
-use zeroship_runtime::state::OpError;
 
 const WORKFLOW_CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -89,33 +88,26 @@ pub enum WorkflowRpcError {
     Decode(String),
 }
 
-impl WorkflowRpcError {
-    #[must_use]
-    pub fn to_op_error(&self) -> OpError {
+impl std::fmt::Display for WorkflowRpcError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::InvalidRequest(msg) => OpError::type_error(msg.clone()),
-            Self::Transport(msg) => {
-                OpError::coded("workflow_transport_error", msg.clone(), None::<String>)
+            Self::InvalidRequest(msg) | Self::Transport(msg) | Self::Decode(msg) => {
+                f.write_str(msg)
             }
-            Self::Timeout => OpError::coded(
-                "workflow_timeout",
-                format!(
-                    "workflow control request timed out after {}s",
-                    WORKFLOW_CONTROL_TIMEOUT.as_secs()
-                ),
-                None::<String>,
+            Self::Timeout => write!(
+                f,
+                "workflow control request timed out after {}s",
+                WORKFLOW_CONTROL_TIMEOUT.as_secs()
             ),
-            Self::Http { status, body } => OpError::coded(
-                "workflow_http_error",
-                format!("workflow control request failed with HTTP {status}: {body}"),
-                None::<String>,
+            Self::Http { status, body } => write!(
+                f,
+                "workflow control request failed with HTTP {status}: {body}"
             ),
-            Self::Decode(msg) => {
-                OpError::coded("workflow_decode_error", msg.clone(), None::<String>)
-            }
         }
     }
 }
+
+impl std::error::Error for WorkflowRpcError {}
 
 fn path_segment(raw: &str) -> String {
     utf8_percent_encode(raw, PATH_SEGMENT_ENCODE_SET).to_string()
@@ -233,9 +225,7 @@ pub async fn execute_json(req: WorkflowHttpRequest) -> Result<Value, WorkflowRpc
         WorkflowHttpMethod::Get => client.get(&req.url),
         WorkflowHttpMethod::Post => client.post(&req.url),
     }
-    .map_err(|e| {
-        WorkflowRpcError::InvalidRequest(format!("invalid workflow control URL: {e}"))
-    })?;
+    .map_err(|e| WorkflowRpcError::InvalidRequest(format!("invalid workflow control URL: {e}")))?;
 
     builder = builder
         .header("authorization", &req.authorization)

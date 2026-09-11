@@ -339,7 +339,7 @@ fn cmd_serve(args: &[String]) {
         }
     }
     let workflow_peer_plugins = plugins.clone();
-    let workflow_plugin = zeroship_plugin_workflow::WorkflowPlugin::dev_sqlite(
+    let workflow_plugin = zeroship_workflow_v8::WorkflowBinding::dev_sqlite(
         &workflow_db_path,
         modules.clone(),
         env_vars.clone(),

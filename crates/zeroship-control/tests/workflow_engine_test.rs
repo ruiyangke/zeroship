@@ -40,13 +40,13 @@ use zeroship_control::{
     workflow_instance_api, AppState, EnvStore, Quota, RateLimiter, Registry, SecretString,
     StripeStore,
 };
-use zeroship_plugin_workflow::advance::{
+use zeroship_workflow::advance::{
     collect_post_apply_registrations_on_conn, WorkflowAdvanceNackKind,
     WorkflowAdvanceRegistration, WorkflowAdvanceResponse, WorkflowRunDispatchRequest,
 };
-use zeroship_plugin_workflow::claim::{claim_workflow_run_on_conn, WorkflowClaimOutcome};
-use zeroship_plugin_workflow::engine::STUCK_STRIKE_LIMIT_FIELD;
-use zeroship_plugin_workflow::store::pg::{PgStore, WorkflowTables};
+use zeroship_workflow::claim::{claim_workflow_run_on_conn, WorkflowClaimOutcome};
+use zeroship_workflow::engine::STUCK_STRIKE_LIMIT_FIELD;
+use zeroship_workflow::store::pg::{PgStore, WorkflowTables};
 use zeroship_workflow_scheduler::{
     self as scheduler_store_engine, SchedulerConfig as StoreSchedulerConfig, TimerWheel,
     WakeHandle, WorkflowSchedulerStore,

@@ -1,10 +1,9 @@
 //! Local dev-tier workflow mini-engine.
 //!
-//! This module is intentionally constructed only by `WorkflowPlugin::dev_sqlite`
+//! This module is intentionally constructed only by `zeroship_workflow_v8::WorkflowBinding::dev_sqlite`
 //! from the CLI serve path. It mirrors the production journal/fold shape for
 //! the local inner loop without a control plane, gateway, or shared database.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -16,11 +15,6 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{de, Deserialize, Deserializer, Serialize};
 use serde_json::{json, Value};
 use zeroship_core::typed_id;
-use zeroship_runtime::channel::CancelFlag;
-use zeroship_runtime::plugin::NativePlugin;
-use zeroship_runtime::{
-    EnvSnapshot, ModuleEntry, RequestCtx, Runtime, SettledWorkflow, WorkflowOutcome,
-};
 
 use crate::backend::WorkflowBackend;
 use crate::client::WorkflowRpcError;
@@ -29,15 +23,19 @@ const DEV_DEPLOY_ID: &str = "dev-local";
 const DEV_DEPLOY_HASH: &str = "dev-local";
 const DEV_OWNER_ID: &str = "dev-workflow-engine";
 const DEV_TICK_MS: u64 = 100;
-const DEV_DISPATCH_TIMEOUT: Duration = Duration::from_secs(30);
 const STUCK_STRIKE_LIMIT: i16 = 3;
+
+/// Executes a serialized workflow dispatch envelope and returns its result.
+/// The host owns the execution environment; the journal engine owns persistence.
+#[async_trait(?Send)]
+pub trait WorkflowExecutor: Send + Sync {
+    async fn dispatch(&self, envelope: &str) -> Result<String, WorkflowRpcError>;
+}
 
 pub struct DevWorkflowEngine {
     path: PathBuf,
     conn: Mutex<Connection>,
-    modules: Vec<ModuleEntry>,
-    env_vars: HashMap<String, String>,
-    plugins: Vec<Arc<dyn NativePlugin>>,
+    executor: Arc<dyn WorkflowExecutor>,
     scheduler_started: AtomicBool,
 }
 
@@ -45,9 +43,6 @@ impl std::fmt::Debug for DevWorkflowEngine {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DevWorkflowEngine")
             .field("path", &self.path)
-            .field("modules", &self.modules.len())
-            .field("env_vars", &self.env_vars.len())
-            .field("plugins", &self.plugins.len())
             .finish()
     }
 }
@@ -337,9 +332,7 @@ impl RunUpdate {
 impl DevWorkflowEngine {
     pub fn open(
         db_path: impl AsRef<Path>,
-        modules: Vec<ModuleEntry>,
-        env_vars: HashMap<String, String>,
-        plugins: Vec<Arc<dyn NativePlugin>>,
+        executor: Arc<dyn WorkflowExecutor>,
     ) -> Result<Arc<Self>, String> {
         let path = db_path.as_ref().to_path_buf();
         if let Some(parent) = path.parent() {
@@ -353,9 +346,7 @@ impl DevWorkflowEngine {
         Ok(Arc::new(Self {
             path,
             conn: Mutex::new(conn),
-            modules,
-            env_vars,
-            plugins,
+            executor,
             scheduler_started: AtomicBool::new(false),
         }))
     }
@@ -798,33 +789,10 @@ impl DevWorkflowEngine {
     }
 
     async fn dispatch(&self, request: StepRequest) -> Result<String, WorkflowRpcError> {
-        zeroship_runtime::init_v8();
-        let runtime = Runtime::builder()
-            .modules(self.modules.clone())
-            .env_vars(self.env_vars.clone())
-            .plugins(self.plugins.clone())
-            .build();
-        runtime.start_pump();
-        let env = env_snapshot_from_prefixed_vars(&self.env_vars);
-        let ctx = RequestCtx::new(CancelFlag::new());
         let envelope = serde_json::to_string(&request).map_err(|e| {
             WorkflowRpcError::Decode(format!("serialize workflow StepRequest: {e}"))
         })?;
-        match runtime.call_workflow_dispatch(&envelope, &env, ctx) {
-            WorkflowOutcome::Response { json, .. } => Ok(json),
-            WorkflowOutcome::Pending { rx, cancel } => {
-                runtime.notify_pump();
-                match compio::time::timeout(DEV_DISPATCH_TIMEOUT, rx.recv()).await {
-                    Ok(Ok(SettledWorkflow { json, .. })) => Ok(json),
-                    Ok(Err(e)) => Err(WorkflowRpcError::Transport(e.message)),
-                    Err(_) => {
-                        cancel.cancel();
-                        runtime.notify_pump();
-                        Err(WorkflowRpcError::Timeout)
-                    }
-                }
-            }
-        }
+        self.executor.dispatch(&envelope).await
     }
 
     fn apply_step_result(&self, mut result: StepResult) -> Result<bool, WorkflowRpcError> {
@@ -902,7 +870,7 @@ impl DevWorkflowEngine {
         // `compensation_state = 'pending'`) and never RUNS one, so a failed saga
         // ends here looking exactly like a saga that had nothing to roll back.
         // Deployed, the same failure enters the compensating phase and undoes
-        // those steps (crates/zeroship-plugin-workflow/src/apply.rs:233-243). Runs AFTER
+        // those steps (crates/zeroship-workflow/src/apply.rs:233-243). Runs AFTER
         // the stalled override above so a StalledError is never annotated --
         // deployed does not compensate that error either.
         let unsupported = match &result.run_update {
@@ -1712,7 +1680,7 @@ fn pending_compensator_steps(
 /// for two reasons. The creator's own failure is still why the run failed and
 /// must stay at the top level. And the deployed engine fills that same slot with
 /// its rollback summary (`compensation_progress_error`,
-/// crates/zeroship-plugin-workflow/src/apply.rs:447-457), so an app that reads
+/// crates/zeroship-workflow/src/apply.rs:447-457), so an app that reads
 /// `error.compensation` gets an answer from BOTH backends -- and the answers
 /// differ in `outcome`, which is the fact worth surfacing.
 fn annotate_dev_compensation_unsupported(error: Value, pending: &[String]) -> Value {
@@ -1948,15 +1916,6 @@ fn status_output(
     Ok(parse_json_opt(output)?.unwrap_or(Value::Null))
 }
 
-fn env_snapshot_from_prefixed_vars(env_vars: &HashMap<String, String>) -> EnvSnapshot {
-    let mut vars = serde_json::Map::new();
-    for (key, value) in env_vars {
-        if let Some(name) = key.strip_prefix("ZS_VAR_").filter(|s| !s.is_empty()) {
-            vars.insert(name.to_string(), Value::String(value.clone()));
-        }
-    }
-    EnvSnapshot::vars_only(Value::Object(vars))
-}
 
 fn is_terminal(state: &str) -> bool {
     matches!(state, "completed" | "failed" | "cancelled" | "stalled")
@@ -2021,6 +1980,15 @@ impl std::error::Error for SimpleError {}
 mod tests {
     use super::*;
 
+    struct NoDispatch;
+
+    #[async_trait(?Send)]
+    impl WorkflowExecutor for NoDispatch {
+        async fn dispatch(&self, _envelope: &str) -> Result<String, WorkflowRpcError> {
+            panic!("journal unit tests must not dispatch a workflow");
+        }
+    }
+
     const TEST_APP: &str = "app_devtest";
 
     /// A dev engine over a scratch sqlite file. No modules and no plugins: every
@@ -2030,9 +1998,7 @@ mod tests {
     fn engine(dir: &tempfile::TempDir) -> Arc<DevWorkflowEngine> {
         DevWorkflowEngine::open(
             dir.path().join("workflows.sqlite"),
-            Vec::new(),
-            HashMap::new(),
-            Vec::new(),
+            Arc::new(NoDispatch),
         )
         .expect("open dev engine")
     }
@@ -2089,7 +2055,7 @@ mod tests {
             consumed_signal_id: None,
             topic: None,
             child_run_id: None,
-            // What `crates/zeroship-plugin-workflow/src/engine.rs:847-848` writes for a
+            // What `crates/zeroship-workflow/src/engine.rs:847-848` writes for a
             // `step.run` that declared `config.compensate`.
             compensation_state: Some("pending".to_string()),
             compensation_max_attempts: 1,
@@ -2155,7 +2121,7 @@ mod tests {
 
         // The original business failure is preserved -- the dev tier annotates
         // the failure, it does not replace it. Deployed does the same
-        // (crates/zeroship-plugin-workflow/src/apply.rs:435-457 keeps `base` and inserts
+        // (crates/zeroship-workflow/src/apply.rs:435-457 keeps `base` and inserts
         // its rollback summary under the same `compensation` key).
         assert_eq!(error["type"], "PermanentError");
         assert_eq!(error["message"], "probe-intentional-failure");
@@ -2255,7 +2221,7 @@ mod tests {
     }
 
     /// Deployed skips compensation for `NondeterministicError` and `StalledError`
-    /// (`should_enter_compensation_for_error`, crates/zeroship-plugin-workflow/src/apply.rs
+    /// (`should_enter_compensation_for_error`, crates/zeroship-workflow/src/apply.rs
     /// :461-466). Dev must skip the REPORT on the same errors, or it would claim
     /// deployed would have rolled back when deployed would not.
     #[test]
