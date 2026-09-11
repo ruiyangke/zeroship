@@ -22,8 +22,10 @@ use crate::operations::{
     DeliveredSignal, RestartOptions, RestartedRun, RunOperation, RunStatus, SignalOptions,
     StartOptions, StartedRun, TransitionedRun,
 };
+use crate::validation::{
+    signal_type as validate_signal_type, workflow_name as validate_workflow_name,
+};
 
-const DEV_DEPLOY_ID: &str = "dev-local";
 const DEV_DEPLOY_HASH: &str = "dev-local";
 const DEV_OWNER_ID: &str = "dev-workflow-engine";
 const DEV_TICK_MS: u64 = 100;
@@ -405,78 +407,80 @@ impl DevWorkflowEngine {
         .detach();
     }
 
-    async fn start_run(
+    fn start_run(
         &self,
         app_id: &str,
         workflow_name: &str,
         options: StartOptions,
     ) -> Result<StartedRun, WorkflowServiceError> {
         validate_workflow_name(workflow_name)?;
-        let input = options.input;
-        let key = options.key.filter(|key| !key.is_empty());
-        let run_id = typed_id::new_workflow_run_id();
+        crate::validation::start(&options)?;
+        let mut conn = self.lock_conn()?;
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(db_error)?;
+        let deploy_id = ensure_dev_deploy(&tx, app_id)?;
         let now = now_ms();
-        let input_json = json_to_string(&input)?;
-
-        let selected_run_id = {
-            let conn = self.lock_conn()?;
-            ensure_dev_deploy(&conn, app_id)?;
-            if let Some(key) = key.as_ref() {
-                if let Some(existing) = existing_keyed_run(&conn, app_id, workflow_name, key)? {
-                    existing
-                } else {
-                    conn.execute(
-                        "INSERT INTO workflow_runs \
-                         (id, workflow_name, app_id, deploy_id, state, input, journal_bytes, \
-                          dedup_key, wake_at, started_at, created_at) \
-                         VALUES (?1, ?2, ?3, ?4, 'queued', ?5, ?6, ?7, ?8, ?9, ?10)",
-                        params![
-                            run_id,
-                            workflow_name,
-                            app_id,
-                            DEV_DEPLOY_ID,
-                            input_json,
-                            json_size(&input),
-                            key,
-                            now,
-                            now,
-                            now
-                        ],
-                    )
-                    .map_err(db_error)?;
-                    run_id
+        if let Some(key) = &options.key {
+            tx.execute(
+                "UPDATE workflow_runs SET dedup_key = NULL \
+                 WHERE app_id = ?1 AND workflow_name = ?2 AND dedup_key = ?3 \
+                 AND state IN ('completed','failed','cancelled')",
+                params![app_id, workflow_name, key],
+            )
+            .map_err(db_error)?;
+            if let Some(existing) = existing_keyed_run(&tx, app_id, workflow_name, key)? {
+                match options.on_conflict {
+                    crate::operations::ConflictPolicy::Join => {
+                        let state: String = tx
+                            .query_row(
+                                "SELECT state FROM workflow_runs WHERE id = ?1 AND app_id = ?2",
+                                params![existing, app_id],
+                                |row| row.get(0),
+                            )
+                            .map_err(db_error)?;
+                        tx.commit().map_err(db_error)?;
+                        drop(conn);
+                        return Ok(StartedRun {
+                            id: existing,
+                            state: state.parse().map_err(WorkflowServiceError::Internal)?,
+                        });
+                    }
+                    crate::operations::ConflictPolicy::Reject => {
+                        return Err(WorkflowServiceError::Conflict(
+                            "workflow run already exists for key".into(),
+                        ))
+                    }
+                    crate::operations::ConflictPolicy::Replace => {
+                        tx.execute(
+                            "UPDATE workflow_runs SET state = 'cancelled', dedup_key = NULL, wake_at = NULL, \
+                             terminal_at = ?3, output = NULL, error = NULL, output_kind = 'inline', \
+                             output_hash = NULL, output_size = NULL, output_content_type = NULL, paused_from_status = NULL, \
+                             claimed_by = NULL, lease_expires = NULL, dispatch_nonce = NULL \
+                             WHERE id = ?1 AND app_id = ?2",
+                            params![existing, app_id, now],
+                        ).map_err(db_error)?;
+                    }
                 }
-            } else {
-                conn.execute(
-                    "INSERT INTO workflow_runs \
-                     (id, workflow_name, app_id, deploy_id, state, input, journal_bytes, \
-                      wake_at, started_at, created_at) \
-                     VALUES (?1, ?2, ?3, ?4, 'queued', ?5, ?6, ?7, ?8, ?9)",
-                    params![
-                        run_id,
-                        workflow_name,
-                        app_id,
-                        DEV_DEPLOY_ID,
-                        input_json,
-                        json_size(&input),
-                        now,
-                        now,
-                        now
-                    ],
-                )
-                .map_err(db_error)?;
-                run_id
             }
-        };
-
-        let _ = self.tick_due().await?;
+        }
+        let run_id = typed_id::new_workflow_run_id();
+        tx.execute(
+            "INSERT INTO workflow_runs \
+             (id, workflow_name, app_id, deploy_id, state, input, journal_bytes, dedup_key, wake_at, started_at, created_at) \
+             VALUES (?1, ?2, ?3, ?4, 'queued', ?5, ?6, ?7, ?8, ?8, ?8)",
+            params![run_id, workflow_name, app_id, deploy_id, json_to_string(&options.input)?,
+                json_size(&options.input), options.key, now],
+        ).map_err(db_error)?;
+        tx.commit().map_err(db_error)?;
+        drop(conn);
         Ok(StartedRun {
-            id: selected_run_id,
+            id: run_id,
             state: crate::operations::RunState::Queued,
         })
     }
 
-    async fn status(&self, app_id: &str, run_id: &str) -> Result<RunStatus, WorkflowServiceError> {
+    fn status(&self, app_id: &str, run_id: &str) -> Result<RunStatus, WorkflowServiceError> {
         let conn = self.lock_conn()?;
         let row = conn
             .query_row(
@@ -525,7 +529,7 @@ impl DevWorkflowEngine {
         })
     }
 
-    async fn signal(
+    fn signal(
         &self,
         app_id: &str,
         run_id: &str,
@@ -538,7 +542,11 @@ impl DevWorkflowEngine {
         let signal_id = typed_id::new_workflow_signal_id();
         let now = now_ms();
         {
-            let conn = self.lock_conn()?;
+            let mut connection = self.lock_conn()?;
+            let tx = connection
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .map_err(db_error)?;
+            let conn = &tx;
             let run = conn
                 .query_row(
                     "SELECT state, waiting_step_key FROM workflow_runs WHERE id = ?1 AND app_id = ?2",
@@ -568,19 +576,23 @@ impl DevWorkflowEngine {
                 )
                 .map_err(db_error)?;
             }
+            tx.commit().map_err(db_error)?;
         }
-        let _ = self.tick_due().await?;
         Ok(DeliveredSignal { id: signal_id })
     }
 
-    async fn transition(
+    fn transition(
         &self,
         app_id: &str,
         run_id: &str,
         op: RunOperation,
     ) -> Result<TransitionedRun, WorkflowServiceError> {
         let now = now_ms();
-        let conn = self.lock_conn()?;
+        let mut connection = self.lock_conn()?;
+        let tx = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(db_error)?;
+        let conn = &tx;
         let current = conn
             .query_row(
                 "SELECT state FROM workflow_runs WHERE id = ?1 AND app_id = ?2",
@@ -613,7 +625,7 @@ impl DevWorkflowEngine {
                         "cannot resume workflow run in state {current}"
                     )));
                 }
-                let restored = restored_state(&conn, run_id)?;
+                let restored = restored_state(conn, run_id)?;
                 let wake_at = if restored == "queued" {
                     Some(now)
                 } else {
@@ -646,12 +658,14 @@ impl DevWorkflowEngine {
                 "cancelled".to_string()
             }
         };
+        tx.commit().map_err(db_error)?;
+        drop(connection);
         Ok(TransitionedRun {
             state: next.parse().map_err(WorkflowServiceError::Internal)?,
         })
     }
 
-    async fn restart(
+    fn restart(
         &self,
         app_id: &str,
         run_id: &str,
@@ -702,29 +716,7 @@ impl DevWorkflowEngine {
             compensated_prefix: false,
         }
         .check()?;
-        let target_ordinal: u32 = if let Some(target) = &options.from {
-            tx.query_row(
-                "SELECT ordinal FROM workflow_steps WHERE run_id = ?1 AND name = ?2 AND name_occurrence = ?3",
-                params![run_id, target.name, target.occurrence.unwrap_or(0)], |row| row.get(0),
-            ).optional().map_err(db_error)?.ok_or_else(|| {
-                WorkflowServiceError::NotFound("workflow restart target not found".into())
-            })?
-        } else {
-            0
-        };
-        let compensated_prefix = tx
-            .query_row(
-                "SELECT EXISTS (SELECT 1 FROM workflow_steps \
-             WHERE run_id = ?1 AND ordinal < ?2 AND compensation_finished_at IS NOT NULL)",
-                params![run_id, target_ordinal],
-                |row| row.get::<_, bool>(0),
-            )
-            .map_err(db_error)?;
-        crate::lifecycle::RestartSafety {
-            compensated_prefix,
-            ..Default::default()
-        }
-        .check()?;
+        let target_ordinal = restart_target_ordinal(&tx, run_id, options.from.as_ref())?;
         let deploy = if policy == crate::operations::RestartDeploy::Latest {
             tx.query_row(
                 "SELECT id FROM app_deploys WHERE app_id = ?1 AND activated_at IS NOT NULL \
@@ -768,6 +760,7 @@ impl DevWorkflowEngine {
                 restarted_from, deploy, i32::from(deploy != current_deploy)],
         ).map_err(db_error)?;
         tx.commit().map_err(db_error)?;
+        drop(conn);
         Ok(RestartedRun {
             run_id: run_id.to_owned(),
             state: crate::operations::RunState::Queued,
@@ -796,8 +789,12 @@ impl DevWorkflowEngine {
 
     fn claim_one_due(&self) -> Result<Option<ClaimedRun>, WorkflowServiceError> {
         let now = now_ms();
-        let conn = self.lock_conn()?;
-        rearm_waiting_runs_with_pending_signals(&conn, now)?;
+        let mut connection = self.lock_conn()?;
+        let tx = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(db_error)?;
+        let conn = &tx;
+        rearm_waiting_runs_with_pending_signals(conn, now)?;
         let candidate = conn
             .query_row(
                 "SELECT r.id, r.app_id, r.workflow_name, r.deploy_id, d.deploy_hash, \
@@ -831,11 +828,13 @@ impl DevWorkflowEngine {
             .optional()
             .map_err(db_error)?;
         let Some(candidate) = candidate else {
+            tx.commit().map_err(db_error)?;
             return Ok(None);
         };
         let dispatch_nonce = typed_id::new_workflow_dispatch_id();
         if let Some(key) = candidate.waiting_step_key.as_deref() {
-            if !resolve_due_waiting_step(&conn, &candidate.run_id, key, &dispatch_nonce, now)? {
+            if !resolve_due_waiting_step(conn, &candidate.run_id, key, &dispatch_nonce, now)? {
+                tx.commit().map_err(db_error)?;
                 return Ok(None);
             }
         }
@@ -855,10 +854,11 @@ impl DevWorkflowEngine {
             )
             .map_err(db_error)?;
         if changed == 0 {
+            tx.commit().map_err(db_error)?;
             return Ok(None);
         }
-        let journal = load_journal(&conn, &candidate.run_id)?;
-        Ok(Some(ClaimedRun {
+        let journal = load_journal(conn, &candidate.run_id)?;
+        let claim = ClaimedRun {
             request: StepRequest {
                 run_id: candidate.run_id.clone(),
                 app_id: candidate.app_id.clone(),
@@ -888,7 +888,9 @@ impl DevWorkflowEngine {
                 started_at: ms_to_datetime(candidate.started_at).to_rfc3339(),
                 journal,
             },
-        }))
+        };
+        tx.commit().map_err(db_error)?;
+        Ok(Some(claim))
     }
 
     async fn dispatch(&self, request: StepRequest) -> Result<String, WorkflowServiceError> {
@@ -901,7 +903,11 @@ impl DevWorkflowEngine {
     fn apply_step_result(&self, mut result: StepResult) -> Result<bool, WorkflowServiceError> {
         result.checkpoints.sort_by_key(|s| s.ordinal);
         let now = now_ms();
-        let conn = self.lock_conn()?;
+        let mut connection = self.lock_conn()?;
+        let tx = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(db_error)?;
+        let conn = &tx;
         let row = conn
             .query_row(
                 "SELECT claimed_by, state, dispatch_nonce, stuck_strikes \
@@ -934,7 +940,7 @@ impl DevWorkflowEngine {
         let mut wrote_checkpoints = 0usize;
         for checkpoint in &result.checkpoints {
             match insert_resolved_step(
-                &conn,
+                conn,
                 checkpoint,
                 &result.run_id,
                 &result.dispatch_nonce,
@@ -943,11 +949,7 @@ impl DevWorkflowEngine {
                 StepWriteOutcome::Wrote => {
                     wrote_checkpoints += 1;
                     if let Some(signal_id) = checkpoint.consumed_signal_id.as_ref() {
-                        conn.execute(
-                            "UPDATE workflow_signals SET consumed_by = ?1 WHERE id = ?2 AND consumed_by IS NULL",
-                            params![result.run_id, signal_id],
-                        )
-                        .map_err(db_error)?;
+                        consume_signal(conn, &result.run_id, signal_id)?;
                     }
                 }
                 StepWriteOutcome::Noop => {}
@@ -986,7 +988,7 @@ impl DevWorkflowEngine {
             RunUpdate::Failed { error }
                 if crate::apply::should_enter_compensation_for_error(error) =>
             {
-                let pending = pending_compensator_steps(&conn, &result.run_id)?;
+                let pending = pending_compensator_steps(conn, &result.run_id)?;
                 (!pending.is_empty()).then(|| (error.clone(), pending))
             }
             _ => None,
@@ -1033,6 +1035,7 @@ impl DevWorkflowEngine {
             ],
         )
         .map_err(db_error)?;
+        tx.commit().map_err(db_error)?;
         Ok(true)
     }
 
@@ -1050,13 +1053,11 @@ impl WorkflowBackend for DevWorkflowBackend {
         workflow_name: String,
         body: StartOptions,
     ) -> Result<StartedRun, WorkflowServiceError> {
-        self.engine
-            .start_run(&self.app_id, &workflow_name, body)
-            .await
+        self.engine.start_run(&self.app_id, &workflow_name, body)
     }
 
     async fn status(&self, run_id: String) -> Result<RunStatus, WorkflowServiceError> {
-        self.engine.status(&self.app_id, &run_id).await
+        self.engine.status(&self.app_id, &run_id)
     }
 
     async fn signal(
@@ -1064,7 +1065,7 @@ impl WorkflowBackend for DevWorkflowBackend {
         run_id: String,
         body: SignalOptions,
     ) -> Result<DeliveredSignal, WorkflowServiceError> {
-        self.engine.signal(&self.app_id, &run_id, body).await
+        self.engine.signal(&self.app_id, &run_id, body)
     }
 
     async fn transition(
@@ -1072,7 +1073,7 @@ impl WorkflowBackend for DevWorkflowBackend {
         run_id: String,
         op: RunOperation,
     ) -> Result<TransitionedRun, WorkflowServiceError> {
-        self.engine.transition(&self.app_id, &run_id, op).await
+        self.engine.transition(&self.app_id, &run_id, op)
     }
 
     async fn restart(
@@ -1080,7 +1081,7 @@ impl WorkflowBackend for DevWorkflowBackend {
         run_id: String,
         body: RestartOptions,
     ) -> Result<RestartedRun, WorkflowServiceError> {
-        self.engine.restart(&self.app_id, &run_id, body).await
+        self.engine.restart(&self.app_id, &run_id, body)
     }
 
     async fn read_step_output(
@@ -1107,6 +1108,38 @@ impl WorkflowBackend for DevWorkflowBackend {
             )),
         }
     }
+}
+
+fn restart_target_ordinal(
+    conn: &Connection,
+    run_id: &str,
+    target: Option<&crate::operations::RestartTarget>,
+) -> Result<u32, WorkflowServiceError> {
+    let target_ordinal: u32 = if let Some(target) = target {
+        conn.query_row(
+                "SELECT ordinal FROM workflow_steps WHERE run_id = ?1 AND name = ?2 AND name_occurrence = ?3",
+                params![run_id, target.name, target.occurrence.unwrap_or(0)], |row| row.get(0),
+            ).optional().map_err(db_error)?.ok_or_else(|| {
+                WorkflowServiceError::NotFound("workflow restart target not found".into())
+            })?
+    } else {
+        0
+    };
+    let compensated_prefix = conn
+        .query_row(
+            "SELECT EXISTS (SELECT 1 FROM workflow_steps \
+             WHERE run_id = ?1 AND ordinal < ?2 AND compensation_finished_at IS NOT NULL)",
+            params![run_id, target_ordinal],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(db_error)?;
+    crate::lifecycle::RestartSafety {
+        compensated_prefix,
+        ..Default::default()
+    }
+    .check()?;
+
+    Ok(target_ordinal)
 }
 
 fn bootstrap_schema(conn: &Connection) -> rusqlite::Result<()> {
@@ -1229,22 +1262,20 @@ fn bootstrap_schema(conn: &Connection) -> rusqlite::Result<()> {
     )
 }
 
-fn ensure_dev_deploy(conn: &Connection, app_id: &str) -> Result<(), WorkflowServiceError> {
+fn ensure_dev_deploy(conn: &Connection, app_id: &str) -> Result<String, WorkflowServiceError> {
+    let candidate = typed_id::generate("dep");
     let now = now_ms();
     conn.execute(
         "INSERT INTO app_deploys (id, app_id, deploy_hash, manifest_json, created_at, activated_at) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?5) \
-         ON CONFLICT(id) DO UPDATE SET activated_at = excluded.activated_at",
-        params![
-            DEV_DEPLOY_ID,
-            app_id,
-            DEV_DEPLOY_HASH,
-            json!({"version":1,"workflows":[]}).to_string(),
-            now
-        ],
+         VALUES (?1, ?2, ?3, ?4, ?5, ?5) ON CONFLICT(app_id, deploy_hash) DO NOTHING",
+        params![candidate, app_id, DEV_DEPLOY_HASH, json!({"version":1,"workflows":[]}).to_string(), now],
+    ).map_err(db_error)?;
+    conn.query_row(
+        "SELECT id FROM app_deploys WHERE app_id = ?1 AND deploy_hash = ?2",
+        params![app_id, DEV_DEPLOY_HASH],
+        |row| row.get(0),
     )
-    .map_err(db_error)?;
-    Ok(())
+    .map_err(db_error)
 }
 
 fn existing_keyed_run(
@@ -1521,11 +1552,7 @@ fn resolve_due_waiting_step(
                 dispatch_nonce,
                 1,
             )?;
-            conn.execute(
-                "UPDATE workflow_signals SET consumed_by = ?1 WHERE id = ?2 AND consumed_by IS NULL",
-                params![run_id, signal_id],
-            )
-            .map_err(db_error)?;
+            consume_signal(conn, run_id, &signal_id)?;
             conn.execute(
                 "UPDATE workflow_runs SET waiting_step_key = NULL, wake_at = ?1 WHERE id = ?2",
                 params![now, run_id],
@@ -1638,6 +1665,26 @@ fn insert_resolved_step(
     } else {
         StepWriteOutcome::Noop
     })
+}
+
+fn consume_signal(
+    conn: &Connection,
+    run_id: &str,
+    signal_id: &str,
+) -> Result<(), WorkflowServiceError> {
+    let changed = conn
+        .execute(
+            "UPDATE workflow_signals SET consumed_by = ?1 \
+         WHERE id = ?2 AND run_id = ?1 AND (consumed_by IS NULL OR consumed_by = ?1)",
+            params![run_id, signal_id],
+        )
+        .map_err(db_error)?;
+    if changed == 0 {
+        return Err(WorkflowServiceError::InvalidRequest(
+            "workflow signal is not available to this run".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn fold_dev_outcomes(outcomes: &[StepOutcome]) -> Result<(Vec<StepCheckpoint>, RunUpdate), String> {
@@ -1986,34 +2033,6 @@ where
     deserialize_optional_wake_at(deserializer)
 }
 
-fn validate_workflow_name(name: &str) -> Result<(), WorkflowServiceError> {
-    if name.is_empty() || name.len() > 128 {
-        return Err(WorkflowServiceError::InvalidRequest(
-            "workflow name must be 1-128 bytes".to_string(),
-        ));
-    }
-    if name.starts_with("__zs.") {
-        return Err(WorkflowServiceError::InvalidRequest(
-            "workflow name uses a reserved prefix".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-fn validate_signal_type(signal_type: &str) -> Result<(), WorkflowServiceError> {
-    if signal_type.is_empty() || signal_type.len() > 256 {
-        return Err(WorkflowServiceError::InvalidRequest(
-            "signal type must be 1-256 bytes".to_string(),
-        ));
-    }
-    if signal_type.starts_with("__zs.") {
-        return Err(WorkflowServiceError::InvalidRequest(
-            "signal type uses a reserved prefix".to_string(),
-        ));
-    }
-    Ok(())
-}
-
 fn waiting_key_matches_signal(waiting_step_key: Option<&str>, signal_type: &str) -> bool {
     let Some(key) = waiting_step_key else {
         return false;
@@ -2167,7 +2186,7 @@ mod tests {
     fn claimed_run(engine: &DevWorkflowEngine, run_id: &str, nonce: &str) {
         let now = now_ms();
         let conn = engine.lock_conn().expect("lock");
-        ensure_dev_deploy(&conn, TEST_APP).expect("deploy");
+        let deploy_id = ensure_dev_deploy(&conn, TEST_APP).expect("deploy");
         conn.execute(
             "INSERT INTO workflow_runs \
              (id, workflow_name, app_id, deploy_id, state, input, journal_bytes, wake_at, \
@@ -2176,7 +2195,7 @@ mod tests {
             params![
                 run_id,
                 TEST_APP,
-                DEV_DEPLOY_ID,
+                deploy_id,
                 now,
                 DEV_OWNER_ID,
                 now + 120_000,
@@ -2461,5 +2480,92 @@ mod tests {
             "dev claimed a compensating run -- it now has a compensating phase, so the \
              not-attempted report is no longer true"
         );
+    }
+
+    #[test]
+    fn checkpoint_batch_rolls_back_when_the_run_transition_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = engine(&dir);
+        claimed_run(&engine, "run_atomic", "dispatch_atomic");
+        engine
+            .lock_conn()
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER reject_apply BEFORE UPDATE OF next_ordinal ON workflow_runs \
+             BEGIN SELECT RAISE(ABORT, 'injected apply failure'); END;",
+            )
+            .unwrap();
+        let result = StepResult {
+            run_id: "run_atomic".into(),
+            dispatch_nonce: "dispatch_atomic".into(),
+            checkpoints: vec![compensable_completed(0, "reserve")],
+            run_update: RunUpdate::Completed {
+                output: Some(json!(true)),
+            },
+        };
+        assert!(matches!(
+            engine.apply_step_result(result.clone()),
+            Err(WorkflowServiceError::Internal(_))
+        ));
+        {
+            let conn = engine.lock_conn().unwrap();
+            let count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM workflow_steps WHERE run_id = 'run_atomic'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 0);
+            conn.execute_batch("DROP TRIGGER reject_apply").unwrap();
+        }
+        assert_eq!(run_row(&engine, "run_atomic").0, "running");
+        assert!(engine.apply_step_result(result).unwrap());
+        assert_eq!(run_row(&engine, "run_atomic").0, "completed");
+    }
+
+    #[test]
+    fn an_execution_cannot_consume_another_apps_signal() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = engine(&dir);
+        claimed_run(&engine, "run_a", "dispatch_a");
+        claimed_run(&engine, "run_b", "dispatch_b");
+        {
+            let conn = engine.lock_conn().unwrap();
+            conn.execute(
+                "UPDATE workflow_runs SET app_id = 'app_other' WHERE id = 'run_b'",
+                [],
+            )
+            .unwrap();
+            conn.execute("INSERT INTO workflow_signals (id, run_id, type, created_at) VALUES ('signal_b', 'run_b', 'approved', 0)", []).unwrap();
+        }
+        let mut checkpoint = compensable_completed(0, "forged");
+        checkpoint.consumed_signal_id = Some("signal_b".into());
+        assert!(matches!(
+            engine.apply_step_result(StepResult {
+                run_id: "run_a".into(),
+                dispatch_nonce: "dispatch_a".into(),
+                checkpoints: vec![checkpoint],
+                run_update: RunUpdate::Queued,
+            }),
+            Err(WorkflowServiceError::InvalidRequest(_))
+        ));
+        let conn = engine.lock_conn().unwrap();
+        let consumed: Option<String> = conn
+            .query_row(
+                "SELECT consumed_by FROM workflow_signals WHERE id = 'signal_b'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(consumed, None);
+        let checkpoints: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM workflow_steps WHERE run_id = 'run_a'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(checkpoints, 0);
     }
 }

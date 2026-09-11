@@ -4856,6 +4856,49 @@ async fn schedule_sweep_fires_claims_whose_batch_lease_already_expired() {
 }
 
 #[compio::test]
+async fn signal_consumption_is_bound_to_its_run_and_repeatable_for_that_run() {
+    use zeroship_workflow::store::{WorkflowStore, WorkflowTx};
+    let fx = isolated_fixture("signal-owner").await;
+    let (app_id, deploy_id) = seed_app_and_deploy(&fx, "signal-owner").await;
+    let a = seed_run(
+        &fx, app_id, &deploy_id, "waiting", 0, None, None, None, None,
+    )
+    .await;
+    let b = seed_run(
+        &fx, app_id, &deploy_id, "waiting", 0, None, None, None, None,
+    )
+    .await;
+    let signal = zeroship_core::typed_id::new_workflow_signal_id();
+    fx.pg
+        .execute(
+            "INSERT INTO zeroship.workflow_signals (id, run_id, type) VALUES ($1, $2, 'approved')",
+            &[&signal, &b],
+        )
+        .await
+        .unwrap();
+    let store = PgStore::new(&fx.db_url, app_id);
+    let mut tx = store.begin().await.unwrap();
+    assert!(matches!(
+        tx.mark_signal_consumed(&a, &signal).await,
+        Err(zeroship_workflow::errors::WorkflowError::Invalid(_))
+    ));
+    tx.mark_signal_consumed(&b, &signal).await.unwrap();
+    tx.mark_signal_consumed(&b, &signal).await.unwrap();
+    tx.commit().await.unwrap();
+    let row = fx
+        .pg
+        .query_one(
+            "SELECT consumed_by FROM zeroship.workflow_signals WHERE id = $1",
+            &[&signal],
+        )
+        .await
+        .unwrap();
+    assert_eq!(row.get::<_, Option<String>>(0), Some(b));
+    drop(fx);
+    common::drain_pg().await;
+}
+
+#[compio::test]
 async fn batch_step_result_applies_atomically_and_preserves_effn1() {
     let fx = isolated_fixture("batch-apply").await;
     compio::time::timeout(Duration::from_secs(10), async {

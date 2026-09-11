@@ -135,6 +135,8 @@ pub fn build_start_request(
     workflow_name: &str,
     options: StartOptions,
 ) -> Result<WorkflowHttpRequest, WorkflowServiceError> {
+    crate::validation::workflow_name(workflow_name)?;
+    crate::validation::start(&options)?;
     request(
         config,
         WorkflowHttpMethod::Post,
@@ -160,6 +162,7 @@ pub fn build_signal_request(
     run_id: &str,
     options: SignalOptions,
 ) -> Result<WorkflowHttpRequest, WorkflowServiceError> {
+    crate::validation::signal_type(&options.signal_type)?;
     request(
         config,
         WorkflowHttpMethod::Post,
@@ -190,6 +193,7 @@ pub fn build_restart_request(
     run_id: &str,
     options: RestartOptions,
 ) -> Result<WorkflowHttpRequest, WorkflowServiceError> {
+    options.deploy_policy()?;
     request(
         config,
         WorkflowHttpMethod::Post,

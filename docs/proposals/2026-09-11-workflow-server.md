@@ -1,12 +1,19 @@
 # Workflow server and shared local execution
 
-**Status:** Final design; implementation pending. This is the implementation
+**Status:** Final design; implementation in progress. This is the implementation
 target agreed during the workflow architecture review. It supersedes the older
 [control-plane design](2026-07-05-durable-workflows-design.md),
 [scheduler registration design](2026-07-08-durable-workflows-scheduler-worker-design.md)
 and [implementation plan](2026-07-05-durable-workflows-implementation-plan.md).
 The [workflow reference](../reference/workflows.md) describes the current code;
 this document describes the replacement.
+
+The Rust app-operation API now uses typed requests, responses and domain errors.
+Local and Control paths share input validation and restart safety rules. Local
+mutations and checkpoint batches are transactional, and acceptance returns
+before execution. The service-owned schema, shared store implementation,
+workflow server and worker polling remain to be implemented; the current runtime
+still uses Control and the local mini-engine.
 
 ## Decision
 
