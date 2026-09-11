@@ -240,47 +240,26 @@ These don't change. If you're about to violate one, stop and ask.
 - **Wire formats are explicit contracts.** `Manifest`, `RouteEntry`, `AppRecord`, `.zship` archive layout, and RPC envelopes must be changed deliberately. Pre-launch can break them, but every producer, consumer, fixture, and reference doc changes in the same patch; no hidden compatibility shim.
 - **Native primitives are the kernel.** Anything user code can do via `fetch` or composition belongs in an npm package (`@zeroship/*`), not in Rust. The native surface is small and stable on purpose.
 - **The gateway is dumb.** It does manifest dispatch, JWT, rate-limit, CHWBL routing — and forwards. All app logic runs in the worker.
-- **Privilege follows the PROCESS, not the function.** The worker executes creator code. Granting the worker a privileged database capability - a `SECURITY DEFINER` wrapper, an elevated role, a signed session token it presents on its own behalf - does not create a boundary; it creates the *appearance* of one, because everything behind that capability is reachable by whatever reaches the worker. The rule that follows has two halves and both are load-bearing:
-  - **If the worker can do it, it is not privileged.** It lives in the **app's own schema**, written by ordinary parameterised SQL, with provenance enforced at the Rust call boundary. No system schema, no `SECURITY DEFINER`, no session ceremony.
-  - **If it must be privileged, it belongs to a separate service** that does not execute creator code - the migration service, the CDC relay, the control plane. Never to a function the worker calls.
+- **Privilege follows the process.** The worker executes creator code. A privileged
+  database function the worker can invoke does not create a security boundary.
+  Runtime writes belong in the app's schema under scoped, parameterized SQL.
+  Privileged schema changes, replication ownership and key management belong to
+  the migration service, CDC relay and control plane respectively.
 
-  A platform-owned system schema under the `__zeroship` prefix is therefore reserved for exactly one thing: **state a separate service WRITES and the worker only READS**, which the tenant must not be able to forge. A schema epoch is that shape. It is not a place to keep the worker's powers.
+  Preserve reserved system names: they protect migration, audit and workflow
+  tables in app schemas. Any future shared system schema must hold state written
+  by a separate service that workers cannot forge.
 
-  **THAT SCHEMA DOES NOT EXIST TODAY, AND THIS PARAGRAPH SAID IT DID UNTIL 2026-08-29.** The sentence above describes the END STATE the invariant permits, not the tree. The schema, its six tables and its 32 definer-rights routines were deleted on 2026-08-27 under this very invariant, and `crates/zeroship-data-orm/src/auth/bootstrap.rs` records that **nothing replaced them**. `db/migrations-ts/` provisions no such schema - measured against every file in that directory, with a positive control proving the search would have found the `__zeroship_` prefix had it been there.
+  Runtime descriptors define an isolate's schema. Catalog protection markers
+  prevent descriptors from removing masking or encryption. Transaction identity
+  checks support schema epochs, but `expected_authority` in
+  `crates/zeroship-data-orm/src/transaction/driver.rs` still supplies a placeholder
+  epoch; do not treat it as a live migration fence.
 
-  **NO CODE NAMES IT, AND THIS PARAGRAPH CLAIMED OTHERWISE UNTIL 2026-09-07 - IN THE DIRECTION THAT READS AS A LIVE DEFECT.** It said one statement still named the schema and "therefore fails on every database", citing a PITR placeholder in `zeroship-data-postgres`. That statement carried `#[cfg(feature = "test-helpers")]` on both its module and its `impl Backup for PostgresBackend` block - feature only, no `any(test, ...)` arm - so it shipped in no binary and could not fail on any database. It had no caller and no test. It was deleted on 2026-09-07 together with the `Backup::pitr_replay` method it implemented, the `PitrTarget` type in its signature and the SQLite refusal arm that deferred to it; `zeroship_data_orm::storage::Backup`'s rustdoc now records why PITR is an operator capability with a database-server contract rather than a data-store method. Both line citations in the deleted sentence had also drifted by roughly a hundred lines, which is the defect this file documents about itself elsewhere and had here.
-
-  **The name is reserved, not retired, and the fences that hold it are not guarding an empty namespace.** `__zeroship_` is the live prefix of tables in every app schema today - the migration journal, the unmask audit table, the workflow journal - so the five reservation surfaces (the namespace, column and alias tables in `zeroship-data-sql`'s `ident`, `zeroship-data-sql`'s compiler `RESERVED_NAMES`, and the `PLATFORM_RESERVED_COLLECTION_PREFIXES` list three crates pin against each other) protect live objects as well as holding the namespace open. Do not narrow them on the grounds that the schema is gone.
-
-  The schema epoch does not exist either - but **a comparison for it is built**. `crates/zeroship-data-orm/src/transaction/reducer/identity.rs` defines `SchemaEpoch`, and `:265-267` compares observed against expected and returns `Verdict::ReResolve`. The producer is missing: `expected_authority` at `crates/zeroship-data-orm/src/transaction/driver.rs` mints `SchemaEpoch::new(0)`, and `observation_for` at `:157-167` echoes it back, so both sides are the same constant. Both say so - "The wiring is real; the *input* is not yet... the day a record exists, this is the one function that has to change."
-
-  **THIS PARAGRAPH HAS NOW BEEN WRONG IN BOTH DIRECTIONS WITHIN ONE DAY, AND THE SECOND ERROR IS THE MORE INSTRUCTIVE ONE.** Earlier on 2026-08-29 it said the producer was the only missing piece. That was corrected the same morning to "necessary and not sufficient", on the grounds that a real `SET LOCAL ROLE` failure arrived as `BeginCompleted { opened: false }` and was routed to cleanup before `classify` ever saw it, so an epoch fence enforced by PostgreSQL needed a third piece nobody had named: an adapter from the session-setup outcome into `Verdict::ReResolve`.
-
-  **That correction was itself outdated hours later, by a fix that landed the same day.** `8e191f650` replaced the `opened: bool` with a typed `BeginOutcome`, and the adapter now exists (`crates/zeroship-data-orm/src/transaction/reducer/mod.rs`):
-
-  ```rust
-  BeginOutcome::SetupFailed => {
-      self.force(CleanupCause::SessionSetupFailed, now).1
-  }
-  BeginOutcome::ReResolve => self.on_verdict(Verdict::ReResolve, now),
-  BeginOutcome::Denied(reason) => self.on_verdict(Verdict::Deny(reason), now),
-  ```
-
-  It is reachable, not merely spelled: `crates/zeroship-data-orm/src/transaction/driver.rs` maps `SessionSetupDisposition::ReResolve` and its denial arm onto those outcomes, and both are covered at `crates/zeroship-data-orm/src/transaction/reducer/tests.rs` and `:1698`. `CleanupCause::BeginFailed` survives at `reducer/mod.rs:996` for a BEGIN that genuinely failed, which is what it was always for; it is no longer where classified setup errors go to die.
-
-  So: the invariant is live and binding, the schema is a reservation rather than a fact, and **the epoch again needs only its producer** - the classifier, the adapter, the retryable verdict and both rotation directions all ship. Read the two sentences above as a design permission, never as a description of what you will find.
-
-  **CORRECTED 2026-09-04, AND THE SCALE OF THE DRIFT IS THE POINT.** This passage carried TEN line citations. SEVEN were wrong: `identity.rs:325-327` (the comparison is at `:265-267`; `:325-327` is prose inside a test's doc comment), `driver.rs:106` (`SchemaEpoch::new(0)` is at `:146`, inside `expected_authority` at `:142-148`; `:104-108` is unrelated `BACKEND_GENERATION` doc prose), `reducer/mod.rs:1005-1016` (`:985-989`), `driver.rs:460-462` (`:528-537`), a bare `:1015` for `CleanupCause::BeginFailed` (`:996`; `:1015` is the `TransactionConnectionBusy` arm), the parenthetical re-litigating `:313-315`, and "mints `SchemaEpoch::new(0)` on both sides" - which was wrong as a CLAIM, not just a number: `expected_authority` mints it and `observation_for` at `:157-167` ECHOES it. Three were right: `identity.rs:97`, `tests.rs:1679`, `:1698`. That last range was `:158-165` until later the same day - the struct-literal body, one line below the `fn` line, while its sibling `expected_authority` is cited `:142-148`, signature through closing brace. Substantively right, inconsistent by one line, and both spellings are now the sibling's. The fenced quote was also no longer verbatim - rustfmt has since wrapped the `SetupFailed` arm across three lines.
-
-  `docs/architecture/data-system.md` drifted INDEPENDENTLY and DIFFERENTLY over the same code, so this was not one copy-paste propagating. All of it stayed green under `tests/doc_citation_gate.sh`, which checks that a cited line is inside its file and never that it is the right line - and AGENTS.md is not line-checked at all, because arm 1's character class excludes `:`. A line-accuracy arm was measured and rejected again on 2026-09-04; the reasoning is in that gate's header. So: **the path is the durable claim and the line is a courtesy.** Verify these numbers before you rely on them, and if a line matters to an argument, quote the code.
-
-  **The counter-example is live in the tree.** DB-3: app JS reached a privileged unmask call and could pass `actor: { kind: "auto" }` to read its own PII, PHI and PCI at will. It is patched by `sanitize_app_actor`, which strips an actor claiming a reserved system kind to `None` (defined in `crates/zeroship-data-orm/src/protection/unmask.rs`). **THIS SENTENCE SAID "ALL THREE SITES" UNTIL 2026-09-01; THERE ARE FIVE**, and the two it omitted are the creator-facing ones - `zeroship-data-v8`'s `v8_classes/masked_value.rs:300` (single unmask) and `:423` (bulk), each carrying its own `DB-3` comment and feeding `UnmaskFieldArgs` / `BulkUnmaskArgs`. The three it named are real and are now the ENGINE's: `zeroship-data-orm`'s `crud/mod.rs:692` (the query hint, which moved out of `dispatch_find` into `plan_find` on 2026-09-02 and is a fence on the EAGER half, not the async body) plus `crud/unmask.rs:1514` and `:1629` (arg parsing). **THE FIVE FENCES NOW SPAN TWO CRATES**, which is the third re-measurement this paragraph has needed: the line numbers drifted on 2026-09-02, and on 2026-09-03 the engine tier left `zeroship-data-v8` for `zeroship-data-orm`, taking three of the five with it and making the previous one-root grep an undercount by construction. Count them with `grep -rn 'sanitize_app_actor(' crates/zeroship-data-orm/src crates/zeroship-data-v8/src` - BOTH roots - and do NOT pipe that through `head`; a truncated enumeration read as a complete one is how this paragraph was nearly "corrected" in the wrong direction, into a report of a live regression that does not exist. An undercount here is not harmless: it invites an auditor to conclude the two undocumented fences are redundant.
-
-  **The fence is now bound on live PostgreSQL, and the binding exposed a second gap.** `crates/zeroship-data-v8/tests/mask_flip.rs` drives app-shaped JSON through `parse_args` / `parse_bulk_args` and refuses it; restoring DB-3 by deleting either `sanitize_app_actor` call makes exactly one of those tests fail, and it fails by RETURNING THE PLAINTEXT, because the no-policy fallback is literally `Ok(kind == "auto")`. The gap: `sanitize_app_actor` strips the WHOLE actor, `id` included, so the denied audit row carries `actor_role=""` / `actor_id=""` - byte-identical to a call that simply sent no actor. The one durable record of an attempt to exploit DB-3 is therefore indistinguishable from routine anonymous traffic. The strip is right and stays; what is missing is auditing the REJECTED claim in its own column rather than forwarding it into the trusted fields.
-
-  But the bug is not an accident of that implementation. It is what the shape produces, and a privileged call the worker can make will keep producing it.
-
-  Operator decision, 2026-08-27. Consequences already taken: the HMAC session anchor (`hmac_keys`, `session_ctx`, `session_nonces`, `sign_session`, `verify_signature`, `init_session`, `rotate_session_keys`) is deleted rather than completed; CDC slot and publication ownership moves to the CDC relay service rather than to a wrapper the worker calls.
+  Creator-supplied actors must pass through `sanitize_app_actor` in
+  `crates/zeroship-data-orm/src/protection/unmask.rs`. Reserved system claims are
+  removed from authorization and retained separately for audit. Unmask audit
+  writes must survive rollback of the creator transaction.
 
 ---
 
