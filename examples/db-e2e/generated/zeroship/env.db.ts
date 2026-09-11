@@ -47,8 +47,8 @@ const schema = {
     handle: t.string().required().unique(),
     fullName: t.string().required(),
     email: t.string().required().unique(),
-    contactEmail: t.encrypted(),
-    ssn: t.encrypted(),
+    contactEmail: t.encrypted().mask({ kind: "email", classification: "pii" }),
+    ssn: t.encrypted().mask({ kind: "last4", classification: "spi" }),
     city: t.string().required(),
   }).uniqueIndex("users_handle_key", ["handle"]).uniqueIndex("users_email_key", ["email"]).index("users_workspace_idx", ["workspaceId"]).index("users_deleted_at_idx", ["deleted_at"]).index("users_updated_at_idx", ["updated_at"]).index("users_created_by_idx", ["created_by"]),
   workspaces: defineSchema({

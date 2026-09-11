@@ -1,9 +1,9 @@
 import { table, t } from "@zeroship/migrate";
 
-// db-e2e's schema, authored migration-first.
-//
-// WHY THIS FILE EXISTS. This example used to declare its schema INLINE
-// (`export default { schema: dbSchema }` built from `@zeroship/db`'s
+// Migrations own the schema and its mask configuration. Generated env.db.ts
+// supplies the matching TypeScript surface. The charter injects system fields;
+// application relationships are declared with native foreign keys.
+export default { schema: dbSchema }` built from `@zeroship/db`'s
 // `schema()`/`t.*`) with no `migrations/` directory. That is the #209/#174
 // mechanism: the installer builds `env.db` from the generated runtime
 // descriptor, which is folded from COMMITTED MIGRATIONS, and an inline
@@ -49,10 +49,8 @@ export default {
         handle: t.text().notNull().unique(),
         fullName: t.text().notNull(),
         email: t.text().notNull().unique(),
-        // The runtime descriptor currently uses the host's default key. Project
-        // key provisioning belongs to control, separately from schema authoring.
-        contactEmail: t.encrypted({ of: t.text() }),
-        ssn: t.encrypted({ of: t.text() }),
+        contactEmail: t.encrypted({ of: t.text() }).mask({ kind: "email", classification: "pii" }),
+        ssn: t.encrypted({ of: t.text() }).mask({ kind: "last4", classification: "spi" }),
         city: t.text().notNull(),
       },
       indexes: [{ name: "users_workspace_idx", on: ["workspaceId"] }],

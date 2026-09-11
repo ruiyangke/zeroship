@@ -126,7 +126,7 @@ test("SQLite CRUD, queries, transactions, protection and committed live changes"
     version: created.version,
     title: "This stale update should fail",
   });
-  eq("stale update returns a typed VERSION_MISMATCH", stale.code, "VERSION_MISMATCH");
+  eq("stale update returns a typed optimistic concurrency error", stale.code, "OPTIMISTIC_CONCURRENCY");
 
   const softDeleted = await rpc(baseUrl, rpcIds.softDeleteTask, { id: created.id });
   check("soft delete stamps deleted_at", typeof softDeleted.deleted.deleted_at === "number");
