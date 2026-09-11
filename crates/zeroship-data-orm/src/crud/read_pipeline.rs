@@ -114,7 +114,7 @@ pub async fn apply(
 ) -> Result<ApplyResult, DbError> {
     let app_id = binding.app_id();
     // The runtime data-access metadata (column types, encrypted
-    // mode/keyId/wraps, mask kind/classification) comes from THE RUNTIME
+    // wrapped type, mask kind/classification) comes from THE RUNTIME
     // DESCRIPTOR this isolate was built from. It used to come from a live
     // catalog read plus the migration engine's `zero-migrate:enc:` / `zero-migrate:mask:` column
     // comments - a round trip through the same DSL the descriptor is folded
@@ -275,10 +275,7 @@ mod tests {
             zeroship_data_sql::value!({
                 "secret": {
                     "type": "string",
-                    "encrypted": {
-                        "keyId": "default",
-                        "wraps": "string"
-                    },
+                    "encrypted": true,
                     "mask": {
                         "kind": "last4",
                         "classification": "spi"

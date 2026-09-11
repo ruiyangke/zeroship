@@ -4,31 +4,35 @@ use super::*;
 fn fields() -> Value {
     value!({
         "label":{"type":"string"},
-        "random":{"type":"number","encrypted":{"keyId":"update_fixture","wraps":"number"}},
-        "second_secret":{"type":"number","encrypted":{"keyId":"update_fixture","wraps":"number"}},
+        "random":{"type":"number","encrypted":true},
+        "second_secret":{"type":"number","encrypted":true},
         "masked":{"type":"number","mask":{"kind":"full","classification":"spi"}},
         "plain":{"type":"number","mask":{"kind":"none","classification":"spi"}}
     })
 }
 
-fn keys() -> LocalKeySource {
-    let supplied = Rc::new(crate::encryption::SuppliedRootKeys::new());
+fn keys() -> Rc<crate::encryption::SuppliedProjectKeys> {
+    let supplied = Rc::new(crate::encryption::SuppliedProjectKeys::new());
     supplied
         .insert_hex("update_fixture", &"1".repeat(64))
         .unwrap();
-    LocalKeySource::supplied(supplied)
+    supplied
 }
 
 #[compio::test]
 async fn sqlite_updates_refuse_operations_on_protected_storage() {
-    let owner = CollectionFixture::sqlite_with_keys("records", fields(), keys()).await;
+    let keys = keys();
+    let owner = CollectionFixture::sqlite_with_keys("records", fields(), ProjectKeySource::supplied(keys.clone())).await;
+    keys.bind_app(owner.database.binding.app_id(), "update_fixture").unwrap();
     exercise_protected_updates(&owner.database).await;
     owner.close().await;
 }
 
 #[compio::test]
 async fn postgres_updates_refuse_operations_on_protected_storage() {
-    let owner = CollectionFixture::postgres_with_keys("records", fields(), keys()).await;
+    let keys = keys();
+    let owner = CollectionFixture::postgres_with_keys("records", fields(), ProjectKeySource::supplied(keys.clone())).await;
+    keys.bind_app(owner.database.binding.app_id(), "update_fixture").unwrap();
     exercise_protected_updates(&owner.database).await;
     owner.close().await;
 }

@@ -9562,26 +9562,13 @@ pub(crate) fn ir_column_to_field(c: &IrColumn) -> FieldDescriptor {
     // facet - the shared builder reads the facet to pick BYTEA + the `zero-migrate:enc`
     // sentinel (built by the shared kernel, never re-spelled here).
     //
-    // The op.* `ColType::Encrypted` carries the wrapped type. Recovery
-    // restores the key and mask defaults the SDK's `t.encrypted()` stamps
-    // (`{ keyId: "default", wraps: <inner> }`) and the FAIL-SAFE
-    // AUTO-MASK (`{ kind: "full", classification: "pii" }`) - BYTE-IDENTICAL to what
-    // `descriptor_to_sdk_schema` emits for an authored `t.encrypted()` and to what the
-    // runtime recovers from the `zero-migrate:enc`/`zero-migrate:mask` sentinels (`introspect_schema.rs`).
-    // A bare `{}` would DROP both, drifting the round-trip (the prior bug).
+    // Encryption is a flag; `ty` already describes the plaintext. Apply the
+    // same default mask as the SDK builder.
     let (encrypted, encrypted_mask) = match &c.ty {
-        ColType::Encrypted { of } => {
-            let wraps = encrypted_wraps_token(of);
-            (
-                Some(serde_json::json!({
-                    "keyId": "default",
-                    "wraps": wraps,
-                })),
-                // The fail-safe auto-mask every `t.encrypted()` column gets at builder
-                // time when no `.mask(...)` is chained (SDK `types.ts` `t.encrypted`).
-                Some(serde_json::json!({ "kind": "full", "classification": "pii" })),
-            )
-        }
+        ColType::Encrypted { .. } => (
+            Some(true),
+            Some(serde_json::json!({ "kind": "full", "classification": "pii" })),
+        ),
         _ => (None, None),
     };
     // A `vector(N)` column carries its dimensionality N (the `vector` facet on the
@@ -9798,24 +9785,6 @@ pub(crate) fn rendered_column_default(
     snapshot.default
 }
 
-/// The `wraps` token (`"string"` | `"number"` | `"bytes"`) an encrypted column's
-/// inner [`ColType`] maps to - the SDK's `t.encrypted({ wraps })` domain (only those
-/// three are admissible; everything else folds to `"string"`, the kernel default).
-/// Used by [`ir_column_to_field`] to recover the encrypted facet's `wraps` BYTE-EXACT
-/// to what `t.encrypted()` stamps for the same inner type.
-fn encrypted_wraps_token(of: &ColType) -> &'static str {
-    match of {
-        ColType::SmallInt
-        | ColType::Int
-        | ColType::BigInt
-        | ColType::Double
-        | ColType::Real
-        | ColType::Decimal { .. } => "number",
-        ColType::Bytes => "bytes",
-        _ => "string",
-    }
-}
-
 /// Walk a domain name to the first base type that is not itself a domain.
 ///
 /// `None` when the name is not registered, when the walk leaves the registry, or when
@@ -9859,18 +9828,12 @@ pub(crate) fn resolve_domain_base_type<'a>(
 /// rendered type IS `"schema"."domain_name"`, so resolving it here would change the
 /// DDL. An ENCRYPTED column's physical type is `BYTEA`/`BLOB`/`LONGBLOB` regardless of
 /// what it wraps, so the inner type reaches the catalog through exactly one channel -
-/// the `zero-migrate:enc:<keyId>:<wraps>` sentinel - and through the runtime
+/// the `zero-migrate:enc:<wraps>` sentinel - and through the runtime
 /// descriptor's type token. Both are DESCRIPTIONS of the plaintext, and both were
 /// describing a domain over `int` as `string`.
 ///
-/// # Why the normalisation is applied to the TYPE, not patched onto the descriptor
-///
-/// `wraps` and the descriptor's `ty` are derived from the inner type by two different
-/// functions ([`encrypted_wraps_token`] and [`col_type_to_token`]) reached through the
-/// single shared [`ir_column_to_field`]. Resolving the inner type BEFORE it enters that
-/// bridge makes both derivations agree by construction, on every caller, instead of
-/// leaving a second site that has to remember to patch the facet afterwards. That
-/// forgotten second site is the defect this fixes.
+/// Resolve the inner type before building the descriptor. The runtime codec
+/// and catalog sentinel then derive from the same logical type.
 ///
 /// An unresolvable name, a cycle, or a base that is itself an ENUM all return the
 /// column unchanged: the sentinel is not optional, so "absent beats wrong" is
@@ -9943,7 +9906,11 @@ pub(crate) fn col_type_to_token(ty: &ColType) -> (String, Option<String>) {
         // facet to pick BYTEA + the sentinel). The inner token drives the masked
         // sibling's plaintext shape.
         ColType::Encrypted { of } => {
-            let (inner, _) = col_type_to_token(of);
+            let inner = match of.as_ref() {
+                ColType::SmallInt | ColType::Int | ColType::BigInt | ColType::Double
+                | ColType::Real | ColType::Decimal { .. } => "number".into(),
+                _ => col_type_to_token(of).0,
+            };
             (inner, None)
         }
     }
@@ -13730,7 +13697,7 @@ mod tests {
                 .expect("ir add_column_snapshot");
 
             // The differ's snapshot for the SAME field, via the SAME shared builder
-            // fed from a `t.encrypted(...)`-shaped descriptor (`encrypted: {}` selects
+            // fed from a `t.encrypted(...)`-shaped descriptor (`encrypted: true` selects
             // the kernel defaults - the shape `ir_column_to_field` emits).
             let desc = CollectionDescriptor {
                 name: "vault".into(),
@@ -13738,7 +13705,7 @@ mod tests {
                 fields: vec![FieldDescriptor {
                     name: "secret".into(),
                     ty: "string".into(),
-                    encrypted: Some(serde_json::json!({})),
+                    encrypted: Some(true),
                     ..Default::default()
                 }],
                 indexes: vec![],

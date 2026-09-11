@@ -1,5 +1,5 @@
 //! Host configuration and built-in driver selection shared by Rust and V8.
-use crate::{backend::BackendHandle, encryption::LocalKeySource, error::DbError};
+use crate::{backend::BackendHandle, encryption::ProjectKeySource, error::DbError};
 use std::{num::NonZeroUsize, path::PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,7 +62,7 @@ pub fn configuration_parse_count() -> u64 {
 /// Connection configuration. Debug output never contains the database URL.
 pub struct ConnectOptions {
     url: String,
-    key_source: LocalKeySource,
+    key_source: ProjectKeySource,
     max_connections: Option<NonZeroUsize>,
 }
 impl std::fmt::Debug for ConnectOptions {
@@ -73,7 +73,7 @@ impl std::fmt::Debug for ConnectOptions {
     }
 }
 impl ConnectOptions {
-    pub fn new(url: impl Into<String>, key_source: LocalKeySource) -> Self {
+    pub fn new(url: impl Into<String>, key_source: ProjectKeySource) -> Self {
         Self {
             url: url.into(),
             key_source,

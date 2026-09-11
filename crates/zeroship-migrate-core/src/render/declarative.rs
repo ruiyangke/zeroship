@@ -290,15 +290,12 @@ pub struct FieldDescriptor {
     /// text shape.
     #[serde(rename = "caseSensitive", default)]
     pub case_sensitive: Option<bool>,
-    /// `t.encrypted({ keyId, wraps })` - the encryption sub-object,
-    /// carried VERBATIM. When present the column DDLs to `BYTEA` with the inline
-    /// `/* zero-migrate:enc:keyId:wraps */` sentinel (the contract plugin-db reads at
-    /// runtime). Mirrors `encrypted` on the wire `FieldDef`.
+    /// Whether the logical field uses encrypted binary storage. The plaintext
+    /// type is `ty`; the physical catalog retains it in the encryption sentinel.
     #[serde(default)]
-    pub encrypted: Option<serde_json::Value>,
-    /// `.mask({ kind, classification })` - the mask sub-object, carried
-    /// VERBATIM. When present the table gains a hidden `<col>_masked TEXT` sibling
-    /// + a `COMMENT ... zero-migrate:mask:...` sentinel. Mirrors `mask` on the wire `FieldDef`.
+    pub encrypted: Option<bool>,
+    /// Mask policy copied into the runtime field definition. An effective mask
+    /// adds raw storage; the renderer records its physical placement in `storage`.
     #[serde(default)]
     pub mask: Option<serde_json::Value>,
     /// A generated/computed column facet. The expression is structured IR, never
@@ -507,11 +504,11 @@ fn field_to_sdk_def(f: &FieldDescriptor) -> serde_json::Value {
         }
     }
     if let Some(enc) = &f.encrypted {
-        def.insert("encrypted".into(), enc.clone());
+        def.insert("encrypted".into(), serde_json::Value::Bool(*enc));
     }
     if let Some(mask) = &f.mask {
         def.insert("mask".into(), mask.clone());
-    } else if f.encrypted.is_some() {
+    } else if f.encrypted == Some(true) {
         // Mirror the SDK's `t.encrypted()` builder: encrypted columns get the
         // fail-safe full/pii mask unless the author explicitly overrides or opts
         // out with `.mask({ kind: "none" })`.
@@ -598,7 +595,7 @@ fn rename_sdk_schema_field(
 /// corruption). Conservative + fail-closed: any of these present => refuse.
 fn data_transforming_facet(def: &serde_json::Value) -> Option<&'static str> {
     let obj = def.as_object()?;
-    if obj.contains_key("encrypted") {
+    if obj.get("encrypted").and_then(serde_json::Value::as_bool) == Some(true) {
         return Some("encrypted");
     }
     if obj.contains_key("mask") {
@@ -671,25 +668,22 @@ pub fn descriptor_to_sdk_schema(d: &CollectionDescriptor) -> serde_json::Value {
 /// a field's `t.encrypted({...})` declaration, or `None` for a plaintext field.
 /// Used to render the PG `COMMENT ON COLUMN` `zero-migrate:enc:` sentinel (via the shared
 /// codec's `build_encryption_sentinel`) so the engine's emitted comment is
-/// byte-identical to what plugin-db's runtime parser expects. Defaults mirror
-/// the inline sentinel emitter (`keyId = default`,
-/// `wraps = string`).
+/// byte-identical to what the runtime parser expects. The plaintext type comes
+/// from the field descriptor.
 fn encryption_meta_for_field(
     def: &serde_json::Value,
 ) -> Option<crate::schema::diff::EncryptionMeta> {
     use crate::schema::diff::{EncryptionMeta, WrappedType};
-    let enc = def.get("encrypted").and_then(|v| v.as_object())?;
-    let key_id = enc
-        .get("keyId")
-        .and_then(|v| v.as_str())
-        .unwrap_or("default")
-        .to_string();
-    let wraps = match enc.get("wraps").and_then(|v| v.as_str()) {
+    if def.get("encrypted").and_then(serde_json::Value::as_bool) != Some(true) {
+        return None;
+    }
+    let wraps = match def.get("type").and_then(|v| v.as_str()) {
         Some("number") => WrappedType::Number,
         Some("bytes") => WrappedType::Bytes,
-        _ => WrappedType::String,
+        Some("string") => WrappedType::String,
+        _ => return None,
     };
-    Some(EncryptionMeta { key_id, wraps })
+    Some(EncryptionMeta { wraps })
 }
 
 /// The hidden `__zs_raw__<col>` column a field's `.mask({...})` declaration
@@ -1584,7 +1578,7 @@ pub(crate) fn column_snapshot_for_field(
     let unbounded_text = f.unbounded_text
         || (f.ty == "string"
             && f.max_length.is_none()
-            && f.encrypted.is_none()
+            && f.encrypted != Some(true)
             && f.enum_values.is_none()
             && f.id_prefix.is_none());
     let mut column = ColumnSnapshot {
@@ -7350,7 +7344,7 @@ mod snapshot_builder_refactor_safety_tests {
                 FieldDescriptor {
                     name: "secret".into(),
                     ty: "string".into(),
-                    encrypted: Some(serde_json::json!({})),
+                    encrypted: Some(true),
                     mask: Some(serde_json::json!({ "kind": "partial" })),
                     ..Default::default()
                 },

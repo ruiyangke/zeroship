@@ -15,13 +15,13 @@ pub(super) struct CollectionFixture {
 
 impl CollectionFixture {
     pub async fn sqlite(collection: &str, fields: Value) -> Self {
-        Self::sqlite_with_keys(collection, fields, LocalKeySource::EnvVar).await
+        Self::sqlite_with_keys(collection, fields, ProjectKeySource::unavailable()).await
     }
 
     pub async fn sqlite_with_keys(
         collection: &str,
         fields: Value,
-        key_source: LocalKeySource,
+        key_source: ProjectKeySource,
     ) -> Self {
         let (original, directory) = database_with_keys(key_source).await;
         let file = directory
@@ -53,13 +53,13 @@ impl CollectionFixture {
     }
 
     pub async fn postgres(collection: &str, fields: Value) -> Self {
-        Self::postgres_with_keys(collection, fields, LocalKeySource::EnvVar).await
+        Self::postgres_with_keys(collection, fields, ProjectKeySource::unavailable()).await
     }
 
     pub async fn postgres_with_keys(
         collection: &str,
         fields: Value,
-        key_source: LocalKeySource,
+        key_source: ProjectKeySource,
     ) -> Self {
         let server = crate::postgres_fixture::Postgres::start();
         crate::reset_engine_for_tests();

@@ -6,8 +6,8 @@ import { dbType } from "@zeroship/migrate";
 
 const users = {
   email: dbType.string().required().unique(),
-  // Encrypted (deterministic so .unique() is coherent); auto-masks PII.
-  ssn: dbType.encrypted({ keyId: "pii_key" }),
+  // Encrypted; auto-masks PII.
+  ssn: dbType.encrypted(),
   // Explicit mask on a plain string.
   phone: dbType.string().mask({ kind: "last4", classification: "pii" }),
   age: dbType.number(),

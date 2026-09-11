@@ -1413,9 +1413,9 @@ const ROWS: &[Row] = &[
 
     // The encrypted-domain sentinel fix (docs/review-log.md:29643-29667): the
     // the resolved base reaches the FieldDef projection on all three dialects.
-    Row { key: "c_encrypted_domain_column|Postgres|column_carries(amounts.amount ~ int|Int|integer|INTEGER)", verdict: "DIVERGENT FO=no FFD=yes ATO=no", status: Status::ByDesign(A_NAMED_TYPE_HAS_THREE_TRUE_SPELLINGS) },
-    Row { key: "c_encrypted_domain_column|Sqlite|column_carries(amounts.amount ~ int|Int|integer|INTEGER)", verdict: "DIVERGENT FO=no FFD=yes ATO=no", status: Status::ByDesign(A_NAMED_TYPE_HAS_THREE_TRUE_SPELLINGS) },
-    Row { key: "c_encrypted_domain_column|Mysql|column_carries(amounts.amount ~ int|Int|integer|INTEGER)", verdict: "DIVERGENT FO=no FFD=yes ATO=no", status: Status::ByDesign(A_NAMED_TYPE_HAS_THREE_TRUE_SPELLINGS) },
+    Row { key: "c_encrypted_domain_column|Postgres|column_carries(amounts.amount ~ int|Int|integer|INTEGER)", verdict: "AGREED no", status: Status::Consistent },
+    Row { key: "c_encrypted_domain_column|Sqlite|column_carries(amounts.amount ~ int|Int|integer|INTEGER)", verdict: "AGREED no", status: Status::Consistent },
+    Row { key: "c_encrypted_domain_column|Mysql|column_carries(amounts.amount ~ int|Int|integer|INTEGER)", verdict: "AGREED no", status: Status::Consistent },
 
     // Row 11 (`renameColumn` + a CHECK body, docs/review-log.md:28198-28204):
     // the COLUMN-level inline check was fixed. A TABLE-level CHECK's

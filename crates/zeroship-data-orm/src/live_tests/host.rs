@@ -7,7 +7,7 @@ struct Host {
     runtime: compio::runtime::Runtime,
     orm: crate::OrmContext,
     connection: RefCell<Option<LocalConnection>>,
-    keys: RefCell<Option<Rc<encryption::SuppliedRootKeys>>>,
+    keys: RefCell<Option<Rc<encryption::SuppliedProjectKeys>>>,
 }
 scoped_tls::scoped_thread_local!(static ACTIVE: Rc<Host>);
 
@@ -44,13 +44,13 @@ impl Drop for Host {
     }
 }
 
-pub fn isolate_key_source() -> encryption::LocalKeySource {
+pub fn isolate_key_source() -> encryption::ProjectKeySource {
     ACTIVE.with(|h| {
         h.keys
             .borrow()
             .as_ref()
-            .map_or(encryption::LocalKeySource::EnvVar, |keys| {
-                encryption::LocalKeySource::Supplied(Rc::clone(keys))
+            .map_or(encryption::ProjectKeySource::unavailable(), |keys| {
+                encryption::ProjectKeySource::supplied(Rc::clone(keys))
             })
     })
 }
@@ -106,20 +106,23 @@ pub fn reset_context_for_tests() {
     });
     crate::reset_engine_for_tests();
 }
-pub fn supply_root_keys_for_tests(roots: &[(&str, &str)]) -> SuppliedRootKeysGuard {
-    let keys = Rc::new(encryption::SuppliedRootKeys::new());
-    for (id, hex) in roots {
-        keys.insert_hex(id, hex).expect("fixture root key");
+pub fn supply_project_key_for_tests(app_ids: &[&str], hex: &str) -> SuppliedProjectKeysGuard {
+    let keys = Rc::new(encryption::SuppliedProjectKeys::new());
+    keys.insert_hex("fixture_project", hex)
+        .expect("fixture project key");
+    for app_id in app_ids {
+        keys.bind_app(app_id, "fixture_project")
+            .expect("fixture app binding");
     }
     let host = ACTIVE.with(Rc::clone);
     let previous = host.keys.replace(Some(keys));
-    SuppliedRootKeysGuard { host, previous }
+    SuppliedProjectKeysGuard { host, previous }
 }
-pub struct SuppliedRootKeysGuard {
+pub struct SuppliedProjectKeysGuard {
     host: Rc<Host>,
-    previous: Option<Rc<encryption::SuppliedRootKeys>>,
+    previous: Option<Rc<encryption::SuppliedProjectKeys>>,
 }
-impl Drop for SuppliedRootKeysGuard {
+impl Drop for SuppliedProjectKeysGuard {
     fn drop(&mut self) {
         self.host.keys.replace(self.previous.take());
     }

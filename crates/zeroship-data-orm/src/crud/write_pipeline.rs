@@ -378,7 +378,7 @@ impl<'a> WriteStages<'a> {
         if self.has_storage_encoding {
             zeroship_data_sql::codecs::encode_document(dialect, schema, row)?;
         }
-        // AFTER encryption: a `t.encrypted({ wraps: t.bytes() })` column is the
+        // AFTER encryption: a `t.encrypted({ of: t.bytes() })` column is the
         // encryption pass's, and this pass skips it by construction, but the
         // ordering also means the ciphertext it deposits is never re-read as a
         // plain bytes value.
@@ -575,7 +575,7 @@ fn doc_touches_encrypted_field(schema: &Value, doc: &Value) -> bool {
 }
 
 fn field_is_encrypted(field_def: &Value) -> bool {
-    field_def.get("encrypted").is_some_and(Value::is_object)
+    zeroship_data_sql::descriptors::is_encrypted(field_def)
 }
 
 fn field_update_writes_value(value: &Value) -> bool {
@@ -928,7 +928,7 @@ mod tests {
     /// per-isolate context: `env_var()` is what that read returns when no
     /// fixture has supplied roots, which is the state every case here is in.
     fn test_key_store() -> encryption::KeyStore {
-        encryption::KeyStore::new(encryption::LocalKeySource::env_var())
+        encryption::KeyStore::new(encryption::ProjectKeySource::unavailable())
     }
 
     /// A real SQLite backend over a fresh directory, and the route bound to it.
@@ -946,7 +946,7 @@ mod tests {
         let backend = Rc::new(
             crate::backend_selection::new_sqlite_backend(
                 PathBuf::from(dir.path()),
-                encryption::LocalKeySource::env_var(),
+                encryption::ProjectKeySource::unavailable(),
             )
             .expect("open sqlite backend"),
         );
@@ -971,7 +971,6 @@ mod tests {
         backend: &SqliteBackend,
         app_id: &str,
         collection: &str,
-        key_id: &str,
         row: &Value,
         expected_plaintext: &str,
         expected_actor: Option<&str>,
@@ -1008,10 +1007,10 @@ mod tests {
 
         let key = backend
             .key_store()
-            .resolve(app_id, key_id)
+            .resolve(app_id)
             .await
             .expect("resolve key");
-        let aad = encryption::canonical_aad(collection, "ssn", id.as_bytes());
+        let aad = encryption::canonical_aad(app_id, collection, "ssn", id.as_bytes());
         let plaintext = crate::encryption::aead::decrypt(&key, ciphertext, &aad)
             .expect("decrypt prepared ciphertext");
         assert_eq!(
@@ -1024,22 +1023,15 @@ mod tests {
     #[test]
     fn write_pipeline_applies_every_stage_across_insert_many_update_and_upsert() {
         run(async {
-            let key_id = "write_pipeline_uniform";
-            // Hand the root key to the BACKEND rather than to the process
-            // environment. `new_sqlite_backend` below takes this source, so the
-            // encrypt/decrypt legs still run through the real
-            // `KeyStore::resolve` + HKDF derivation.
-            //
-            // It used to go through the adapter's `supply_root_keys_for_tests`,
-            // which parked it in the per-isolate context for the constructor to
-            // read back. Passing it in is the same correction the constructor's
-            // own signature took: the owner of the roots does the handing over.
-            let supplied = std::rc::Rc::new(encryption::SuppliedRootKeys::new());
+            let project_id = "project_write_pipeline";
+            // Bind this fixture app to its supplied project key.
+            let supplied = std::rc::Rc::new(encryption::SuppliedProjectKeys::new());
             supplied
-                .insert_hex(key_id, &"1".repeat(64))
+                .insert_hex(project_id, &"1".repeat(64))
                 .expect("fixture root key must parse");
-            let key_source = encryption::LocalKeySource::supplied(supplied);
             let app_id = "app_write_pipeline";
+            supplied.bind_app(app_id, project_id).unwrap();
+            let key_source = encryption::ProjectKeySource::supplied(supplied);
             let binding = DbBinding::cold_start(app_id);
             let collection = "users";
             let schema = zeroship_data_sql::value!({
@@ -1047,7 +1039,7 @@ mod tests {
                 "name": { "type": "string", "required": true },
                 "ssn": {
                     "type": "string",
-                    "encrypted": { "keyId": key_id, "wraps": "string" },
+                    "encrypted": true,
                     "mask": { "kind": "last4", "classification": "spi" }
                 }
             });
@@ -1056,7 +1048,7 @@ mod tests {
                 "name": { "type": "string", "required": true },
                 "ssn": {
                     "type": "string",
-                    "encrypted": { "keyId": key_id, "wraps": "string" },
+                    "encrypted": true,
                     "mask": { "kind": "last4", "classification": "spi" }
                 }
             });
@@ -1124,7 +1116,6 @@ mod tests {
                 backend.as_ref(),
                 app_id,
                 collection,
-                key_id,
                 &insert_doc,
                 "123-45-6789",
                 Some("usr_insert"),
@@ -1187,7 +1178,6 @@ mod tests {
                 backend.as_ref(),
                 app_id,
                 collection,
-                key_id,
                 &bulk[0],
                 "987-65-4321",
                 Some("usr_bulk"),
@@ -1197,7 +1187,6 @@ mod tests {
                 backend.as_ref(),
                 app_id,
                 collection,
-                key_id,
                 &bulk[1],
                 "111-22-3333",
                 Some("usr_bulk"),
@@ -1249,13 +1238,13 @@ mod tests {
                 .expect("update ssn ciphertext in the raw column");
             let update_key = backend
                 .key_store()
-                .resolve(app_id, key_id)
+                .resolve(app_id)
                 .await
                 .expect("resolve update key");
             let update_plaintext = crate::encryption::aead::decrypt(
                 &update_key,
                 update_ciphertext,
-                &encryption::canonical_aad(collection, "ssn", seeded_id.as_bytes()),
+                &encryption::canonical_aad(app_id, collection, "ssn", seeded_id.as_bytes()),
             )
             .expect("decrypt update ciphertext");
             assert_eq!(
@@ -1302,7 +1291,6 @@ mod tests {
                 backend.as_ref(),
                 app_id,
                 collection,
-                key_id,
                 &upsert_doc,
                 "222-33-4444",
                 Some("usr_upsert"),
@@ -1340,7 +1328,7 @@ mod tests {
             let backend = Rc::new(
                 crate::backend_selection::new_sqlite_backend(
                     PathBuf::from(dir.path()),
-                    encryption::LocalKeySource::env_var(),
+                    encryption::ProjectKeySource::unavailable(),
                 )
                 .expect("open sqlite backend"),
             );

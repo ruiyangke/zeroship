@@ -6,7 +6,7 @@ use zeroship_data_orm::{
     backend::{Backend, BackendHandle},
     connection::{BackendFactory, ConnectionFactory},
     driver::{CancellationHandle, DriverSession, Session},
-    encryption::{KeyStore, LocalKeySource},
+    encryption::{KeyStore, ProjectKeySource},
     error::{BeginIntent, CleanupAck, DbError, OpenSessionError, SettleIntent, TerminalResult},
     executor::ScopedExecutor,
     protection::{Catalog, Protection},
@@ -43,7 +43,10 @@ impl BackendFactory for RecordingFactory {
     fn dialect(&self) -> SqlDialect {
         self.0.dialect()
     }
-    fn connect(&self, keys: LocalKeySource) -> LocalBoxFuture<'_, Result<BackendHandle, DbError>> {
+    fn connect(
+        &self,
+        keys: ProjectKeySource,
+    ) -> LocalBoxFuture<'_, Result<BackendHandle, DbError>> {
         Box::pin(async move {
             Ok(BackendHandle::new(Rc::new(RecordingBackend(
                 self.0.connect(keys).await?,

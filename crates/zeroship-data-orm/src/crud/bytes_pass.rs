@@ -8,7 +8,7 @@ pub fn schema_has_plain_bytes_columns(schema: &Value) -> bool {
         .is_some_and(|fields| fields.values().any(is_plain_bytes))
 }
 fn is_plain_bytes(def: &Value) -> bool {
-    def.get("encrypted").is_none() && def.get("type").and_then(Value::as_str) == Some("bytes")
+    !zeroship_data_sql::descriptors::is_encrypted(def) && def.get("type").and_then(Value::as_str) == Some("bytes")
 }
 pub fn validate_bytes_on_write(schema: &Value, doc: &mut Value) -> Result<(), DbError> {
     let Some(fields) = schema.as_object() else {
@@ -107,7 +107,7 @@ mod tests {
     }
     #[test]
     fn encrypted_fields_belong_to_the_encryption_pass() {
-        let schema = value!({ "secret": { "type": "bytes", "encrypted": { "wraps": "bytes" } } });
+        let schema = value!({ "secret": { "type": "bytes", "encrypted": true } });
         assert!(!schema_has_plain_bytes_columns(&schema));
         validate_bytes_on_write(&schema, &mut value!({ "secret": Value::Bytes(vec![1]) })).unwrap();
     }

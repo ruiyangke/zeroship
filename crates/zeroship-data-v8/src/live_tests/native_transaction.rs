@@ -273,16 +273,10 @@ fn exec_owner_sql(url: &str, sql: &str) {
 /// The table the deploy-time migration would have created for
 /// [`build_encrypted_users_src`]'s declared schema.
 ///
-/// It used to end with `COMMENT ON COLUMN ... 'zero-migrate:enc:<key>:string'`.
-/// That sentinel is gone with the catalog read that recovered it: the encryption
-/// metadata the CRUD passes act on now comes from the RUNTIME DESCRIPTOR, which
-/// in these tests is installed from the RuntimeBuilder descriptor. `key_id` is
-/// still a parameter because the descriptor and supplied root key have to
-/// agree on it; nothing in the SQL below reads it any more.
-fn create_encrypted_users_table(url: &str, app: &str, key_id: &str) {
+/// The runtime descriptor supplies its logical encryption metadata.
+fn create_encrypted_users_table(url: &str, app: &str) {
     let url = url.to_string();
     let app = app.to_string();
-    let _ = key_id;
     block_on(async move {
         zeroship_data_v8::testing::set_db_url_for_tests(&url);
         let pool = std::rc::Rc::new(compio_postgres::Pool::connect(&url, 2).await.unwrap());
@@ -406,7 +400,7 @@ fn notes_runtime_descriptor() -> String {
     .to_string()
 }
 
-fn users_runtime_descriptor(key_id: &str) -> String {
+fn users_runtime_descriptor() -> String {
     serde_json::json!({
         "version": 2,
         "collections": {
@@ -416,10 +410,7 @@ fn users_runtime_descriptor(key_id: &str) -> String {
                     "name": {"type": "string", "required": true},
                     "ssn": {
                         "type": "string",
-                        "encrypted": {
-                            "keyId": key_id,
-                            "wraps": "string",
-                        },
+                        "encrypted": true,
                     },
                 },
                 "options": {
@@ -1882,9 +1873,8 @@ fn update_many_randomised_failure_is_atomic_postgres() {
     let app = crate::test_app_id!();
     let app = app.as_str();
     reset_schema(&url, app);
-    let key_id = "update_many_atomic_pg";
-    create_encrypted_users_table(&url, app, key_id);
-    let _keys = zeroship_data_v8::testing::supply_root_keys_for_tests(&[(key_id, &"b".repeat(64))]);
+    create_encrypted_users_table(&url, app);
+    let _keys = zeroship_data_v8::testing::supply_project_key_for_tests(&[&app], &"b".repeat(64));
 
     let src = build_encrypted_users_src(
         r#"
@@ -1938,18 +1928,13 @@ const _procedures = { seed, failBulk };
     );
 
     let (status, body) =
-        dispatch_zs_with_descriptor(&url, &src, "seed", app, users_runtime_descriptor(key_id));
+        dispatch_zs_with_descriptor(&url, &src, "seed", app, users_runtime_descriptor());
     assert_eq!(status, 200, "seed failed: {body}");
     assert!(body["json"]["failure"].is_null(), "seed failed: {body}");
 
     crate::live_tests::recording::clear();
-    let (status, body) = dispatch_zs_with_descriptor(
-        &url,
-        &src,
-        "failBulk",
-        app,
-        users_runtime_descriptor(key_id),
-    );
+    let (status, body) =
+        dispatch_zs_with_descriptor(&url, &src, "failBulk", app, users_runtime_descriptor());
     assert_eq!(
         status, 200,
         "caught updateMany failure must remain inspectable: {body}"

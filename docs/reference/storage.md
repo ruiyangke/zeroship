@@ -146,5 +146,8 @@ pnpm --filter @zeroship/storage test
 ```
 
 S3 tests require Docker and provision their own containers; an unavailable
-container runtime fails verification. Deployment smoke scripts under `tests/`
-remain separate checks of the gateway/control/worker integration.
+container runtime fails verification. The storage examples own their deployment
+tests in Vitest and browser checks in Playwright. `cargo xtask test storage` runs the Rust suites and both example
+suites. Their Testcontainers fixtures exercise real control, gateway and worker
+processes, including S3-backed deploy artifacts and a stream crossing the `u32`
+length boundary.

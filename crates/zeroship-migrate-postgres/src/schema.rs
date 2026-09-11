@@ -72,7 +72,7 @@ impl SchemaRenderer for PostgresSchemaRenderer {
         // legacy SDK spelling table still has no `bytes` arm.
         if c.type_def.as_ref().is_some_and(|def| {
             def.get("type").and_then(serde_json::Value::as_str) == Some("bytes")
-                && def.get("encrypted").is_none()
+                && def.get("encrypted").and_then(serde_json::Value::as_bool) != Some(true)
         }) {
             return "bytea".to_string();
         }
@@ -450,7 +450,7 @@ impl SchemaRenderer for PostgresSchemaRenderer {
 }
 
 fn column_type_for_def(def: &serde_json::Value) -> String {
-    if def.get("encrypted").is_some() {
+    if def.get("encrypted").and_then(serde_json::Value::as_bool) == Some(true) {
         return "BYTEA".to_string();
     }
 

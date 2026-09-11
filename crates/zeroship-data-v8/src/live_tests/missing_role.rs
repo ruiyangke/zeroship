@@ -175,7 +175,7 @@ async fn classify_missing_role(app_id: &str) -> DbError {
 
     let backend = zeroship_data_orm::connection::ConnectOptions::new(
         postgres.url(),
-        zeroship_data_orm::encryption::LocalKeySource::EnvVar,
+        zeroship_data_orm::encryption::ProjectKeySource::unavailable(),
     )
     .connect()
     .await

@@ -1,5 +1,5 @@
 use super::ConnectionFactory;
-use crate::{backend::BackendHandle, encryption::LocalKeySource, error::DbError};
+use crate::{backend::BackendHandle, encryption::ProjectKeySource, error::DbError};
 use futures::{
     future::{LocalBoxFuture, Shared},
     FutureExt,
@@ -61,7 +61,7 @@ impl LocalConnection {
             })),
         })
     }
-    pub async fn ensure(&self, keys: LocalKeySource) -> Result<BackendHandle, DbError> {
+    pub async fn ensure(&self, keys: ProjectKeySource) -> Result<BackendHandle, DbError> {
         let (generation, opening) = {
             let mut state = self.state.borrow_mut();
             if let Some(backend) = &state.backend {

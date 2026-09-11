@@ -112,12 +112,7 @@ pub struct SqliteBackend {
     /// `Drop` cancels the task per the `async-task` contract (see
     /// `async_task::Task` rustdoc).
     _publisher: compio::runtime::JoinHandle<()>,
-    /// Per-backend column-key cache. Resolves
-    /// `(app_id, key_id) -> AeadKey` via the `ZEROSHIP_COLUMN_KEY_<KEYID>`
-    /// env var (the only sourcing variant on the SQLite arm - no
-    /// admin-schema sidecar; mirrors the session-minter pattern).
-    /// Single-threaded (`RefCell` inside `KeyStore`) since every
-    /// `SqliteBackend` is owned by a single compio thread.
+    /// Project encryption keys supplied by the trusted host.
     key_store: zeroship_data_orm::encryption::KeyStore,
 }
 
@@ -194,7 +189,7 @@ impl SqliteBackend {
     pub async fn open(
         path: impl AsRef<Path>,
         sink: Arc<dyn ChangeSink>,
-        key_source: zeroship_data_orm::encryption::LocalKeySource,
+        key_source: zeroship_data_orm::encryption::ProjectKeySource,
     ) -> Result<Self, DbError> {
         let path = path.as_ref().to_path_buf();
         let sink_for_session = Arc::clone(&sink);
@@ -217,7 +212,7 @@ impl SqliteBackend {
     pub fn new(
         db_dir: PathBuf,
         sink: Arc<dyn ChangeSink>,
-        key_source: zeroship_data_orm::encryption::LocalKeySource,
+        key_source: zeroship_data_orm::encryption::ProjectKeySource,
     ) -> Result<Self, DbError> {
         let session_path = db_dir.join("zs-control.sqlite");
         Self::open_with_session_path(db_dir, session_path, sink, key_source)
@@ -251,7 +246,7 @@ impl SqliteBackend {
         db_dir: PathBuf,
         session_path: PathBuf,
         sink: Arc<dyn ChangeSink>,
-        key_source: zeroship_data_orm::encryption::LocalKeySource,
+        key_source: zeroship_data_orm::encryption::ProjectKeySource,
     ) -> Result<Self, DbError> {
         let opened = Self::open_session(db_dir, session_path, Arc::clone(&sink))?;
         Ok(Self::finish_open(opened, sink, key_source))
@@ -296,7 +291,7 @@ impl SqliteBackend {
     fn finish_open(
         opened: OpenedBackend,
         sink: Arc<dyn ChangeSink>,
-        key_source: zeroship_data_orm::encryption::LocalKeySource,
+        key_source: zeroship_data_orm::encryption::ProjectKeySource,
     ) -> Self {
         let OpenedBackend {
             session,
@@ -321,10 +316,7 @@ impl SqliteBackend {
         );
 
         // Wire the column-key store. SQLite has no admin-schema sidecar
-        // (no SECURITY DEFINER getter equivalent), so sourcing is always
-        // LOCAL: the roots this isolate was handed, else
-        // `ZEROSHIP_COLUMN_KEY_<KEYID>`. Cache lives for the lifetime of the
-        // backend; clears on backend drop.
+        // Project keys are supplied by the host, independently of the database.
         let key_store = zeroship_data_orm::encryption::KeyStore::new(key_source);
 
         Self {
@@ -693,7 +685,7 @@ impl SqliteBackend {
 }
 
 /// Recover per-column encryption metadata from the
-/// `/* zero-migrate:enc:<keyId>:<wraps> */` sentinel comments the DDL
+/// `/* zero-migrate:enc:<wraps> */` sentinel comments the DDL
 /// emitter writes into the `CREATE TABLE` text (see
 /// `zeroship_data_sql::compile::field_to_column`).
 ///
@@ -708,15 +700,13 @@ impl SqliteBackend {
 /// body for `/* zero-migrate:enc:...` markers and rewinds to the preceding
 /// double-quoted identifier, because every column DDL the emitter writes for
 /// an encrypted field is of the shape
-/// `"<col>" BYTEA /* zero-migrate:enc:<keyId>:<wraps> */ <constraints>`.
+/// `"<col>" BYTEA /* zero-migrate:enc:<wraps> */ <constraints>`.
 ///
 /// **The SENTINEL BODY is not parsed here.** Locating the comment is this
 /// function's job; interpreting it belongs to
 /// [`zeroship_data_sql::mask_codec::parse_encryption_sentinel`], the one
 /// authority on the wire shape (shared with the PG introspector and the
-/// migration backend). Hand-parsing it here made a third opinion of it, and
-/// the third opinion drifted: it enforced a `[A-Za-z0-9_]` keyId alphabet the
-/// codec does not, and dropped every mismatch in silence.
+/// migration backend).
 ///
 /// **Sidecar upgrade path**: recovering metadata from DDL TEXT is fragile — a
 /// future SDK that emits column DDL with non-trivial line breaks or stacked
@@ -998,7 +988,7 @@ mod tests {
             let error = SqliteBackend::open(
                 path,
                 std::sync::Arc::new(NullChangeSink),
-                zeroship_data_orm::encryption::LocalKeySource::env_var(),
+                zeroship_data_orm::encryption::ProjectKeySource::unavailable(),
             )
             .await
             .unwrap_err();
@@ -1233,16 +1223,15 @@ mod tests {
     // -----------------------------------------------------------------
 
     /// Round-trip a single encrypted column: emitter shape → parser
-    /// extracts `(key_id, wraps)` correctly.
+    /// extracts the wrapped type correctly.
     #[test]
     fn parse_encryption_sentinel_single_column() {
         let ddl = "CREATE TABLE \"app\".\"users\" (\n  \
             id SERIAL PRIMARY KEY,\n  \
-            \"ssn\" BYTEA /* zero-migrate:enc:default:string */  NOT NULL,\n  \
+            \"ssn\" BYTEA /* zero-migrate:enc:string */  NOT NULL,\n  \
             \"name\" TEXT \n)";
         let got = parse_encryption_sentinels(ddl);
         let m = got.get("ssn").expect("ssn must be parsed");
-        assert_eq!(m.key_id, "default");
         assert!(matches!(
             m.wraps,
             zeroship_data_sql::catalog::WrappedType::String
@@ -1254,14 +1243,13 @@ mod tests {
         assert!(!got.contains_key("id"));
     }
 
-    /// Non-string wraps with a custom key id.
+    /// A numeric wrapped type survives introspection.
     #[test]
-    fn parse_encryption_sentinel_number_custom_key() {
+    fn parse_encryption_sentinel_number() {
         let ddl = "CREATE TABLE \"app\".\"events\" (\n  \
-            \"salary\" BYTEA /* zero-migrate:enc:payroll_v2:number */ NOT NULL\n)";
+            \"salary\" BYTEA /* zero-migrate:enc:number */ NOT NULL\n)";
         let got = parse_encryption_sentinels(ddl);
         let m = got.get("salary").expect("salary must be parsed");
-        assert_eq!(m.key_id, "payroll_v2");
         assert!(matches!(
             m.wraps,
             zeroship_data_sql::catalog::WrappedType::Number
@@ -1271,7 +1259,7 @@ mod tests {
     /// Byte-valued plaintext retains its wrapped type.
     #[test]
     fn parse_encryption_sentinel_bytes() {
-        let ddl = "CREATE TABLE t (\"a\" BYTEA /* zero-migrate:enc:default:bytes */)";
+        let ddl = "CREATE TABLE t (\"a\" BYTEA /* zero-migrate:enc:bytes */)";
         let got = parse_encryption_sentinels(ddl);
         let m = got.get("a").expect("a must be parsed");
         assert!(matches!(
@@ -1285,12 +1273,10 @@ mod tests {
     #[test]
     fn parse_encryption_sentinel_multiple_columns() {
         let ddl = "CREATE TABLE \"app\".\"u\" (\n  \
-            \"ssn\" BYTEA /* zero-migrate:enc:default:string */,\n  \
-            \"tin\" BYTEA /* zero-migrate:enc:tax:string */\n)";
+            \"ssn\" BYTEA /* zero-migrate:enc:string */,\n  \
+            \"tin\" BYTEA /* zero-migrate:enc:string */\n)";
         let got = parse_encryption_sentinels(ddl);
         assert_eq!(got.len(), 2);
-
-        assert_eq!(got["tin"].key_id, "tax");
     }
 
     /// Malformed sentinel — wrong number of parts → refused, and the refusal
@@ -1305,62 +1291,13 @@ mod tests {
         );
     }
 
-    /// Removed mode-bearing sentinels are refused.
-    #[test]
-    fn parse_encryption_sentinel_rejects_removed_mode() {
-        assert_enc_sentinel_refused_loudly(
-            "CREATE TABLE t (\"a\" BYTEA /* zero-migrate:enc:hashed:default:string */)",
-            "expected zero-migrate:enc:",
-        );
-    }
-
     /// Unknown wraps → refused loudly. This arm had no test at all before the
     /// walker was collapsed onto the codec.
     #[test]
     fn parse_encryption_sentinel_rejects_unknown_wraps() {
         assert_enc_sentinel_refused_loudly(
             "CREATE TABLE t (\"a\" BYTEA /* zero-migrate:enc:default:blob */)",
-            "unknown wraps",
-        );
-    }
-
-    /// Empty keyId → refused loudly. There is no key to look up, so this must
-    /// stay a refusal even though the codec dropped the alphabet check.
-    ///
-    /// The body must preserve the empty key slot (`:<wraps>`) to reach
-    /// this arm; drop one and the codec refuses on ARITY first, which is a
-    /// different arm and a different message.
-    #[test]
-    fn parse_encryption_sentinel_rejects_empty_key_id() {
-        assert_enc_sentinel_refused_loudly(
-            "CREATE TABLE t (\"a\" BYTEA /* zero-migrate:enc::string */)",
-            "empty keyId",
-        );
-    }
-
-    /// A key id outside the SDK's `[A-Za-z0-9_]` alphabet is ACCEPTED.
-    ///
-    /// The hand-rolled walker this replaced enforced that alphabet itself and
-    /// dropped anything else in silence. That check was a THIRD opinion on the
-    /// wire shape: `zeroship_data_sql::mask_codec::parse_encryption_sentinel`
-    /// requires only a non-empty keyId, and `t.encrypted()` already fences the
-    /// alphabet at author time (`sdks/db/src/types.ts`, `/^[A-Za-z0-9_]+$/`).
-    /// The decided direction is one authority for the wire, enforcement at the
-    /// authoring edge — so a hand-edited DDL, or a future rotation scheme
-    /// spelling ids `payroll-2026-09`, now round-trips instead of quietly
-    /// reading the column back as plaintext.
-    #[test]
-    fn parse_encryption_sentinel_accepts_a_key_id_outside_the_sdk_alphabet() {
-        let ddl = "CREATE TABLE t (\"a\" BYTEA /* zero-migrate:enc:payroll-2026-09:string */)";
-        let (got, events) = capture_events(|| parse_encryption_sentinels(ddl));
-        assert_eq!(
-            got.get("a").map(|m| m.key_id.as_str()),
-            Some("payroll-2026-09"),
-            "the codec accepts any non-empty keyId: {got:?}"
-        );
-        assert!(
-            events.is_empty(),
-            "an accepted sentinel must be silent: {events:?}"
+            "expected zero-migrate:enc:",
         );
     }
 
@@ -1369,7 +1306,7 @@ mod tests {
     /// so the event carries no `error` field.
     #[test]
     fn parse_encryption_sentinel_warns_when_no_column_precedes_it() {
-        let ddl = "CREATE TABLE t (\n  /* zero-migrate:enc:default:string */\n)";
+        let ddl = "CREATE TABLE t (\n  /* zero-migrate:enc:string */\n)";
         let (got, fields) = sole_warning(|| parse_encryption_sentinels(ddl));
         assert!(
             got.is_empty(),
@@ -1381,7 +1318,7 @@ mod tests {
         );
     }
 
-    /// Every `(mode, wraps)` the emitter can produce round-trips through the
+    /// Every wrapped type the emitter can produce round-trips through the
     /// walker unchanged, and silently.
     ///
     /// The input is BUILT by `zeroship_data_sql::mask_codec::build_encryption_sentinel`
@@ -1396,7 +1333,6 @@ mod tests {
         {
             for wraps in [WrappedType::String, WrappedType::Number, WrappedType::Bytes] {
                 let meta = EncryptionMeta {
-                    key_id: "default".to_string(),
                     wraps,
                 };
                 let sentinel = zeroship_data_sql::mask_codec::build_encryption_sentinel(&meta);
@@ -1405,8 +1341,6 @@ mod tests {
                 let parsed = got.get("ssn").unwrap_or_else(|| {
                     panic!("built sentinel {sentinel:?} must round-trip: {got:?}")
                 });
-
-                assert_eq!(parsed.key_id, meta.key_id, "keyId drifted for {sentinel:?}");
                 assert_eq!(parsed.wraps, meta.wraps, "wraps drifted for {sentinel:?}");
                 assert!(
                     events.is_empty(),
@@ -1433,7 +1367,7 @@ mod tests {
     /// sentinel at all.
     #[test]
     fn parse_encryption_sentinel_warns_on_an_unterminated_comment() {
-        let ddl = "CREATE TABLE t (\"a\" BYTEA /* zero-migrate:enc:default:string";
+        let ddl = "CREATE TABLE t (\"a\" BYTEA /* zero-migrate:enc:string";
         let (got, fields) = sole_warning(|| parse_encryption_sentinels(ddl));
         assert!(
             got.is_empty(),
@@ -1463,9 +1397,9 @@ mod tests {
     #[test]
     fn parse_encryption_sentinel_unterminated_comment_strands_nothing_recoverable() {
         let unterminated = "CREATE TABLE t (\n  \
-             \"a\" BYTEA /* zero-migrate:enc:default:string */,\n  \
-             \"b\" BYTEA /* zero-migrate:enc:default:string,\n  \
-             \"c\" BYTEA /* zero-migrate:enc:default:number\n)";
+             \"a\" BYTEA /* zero-migrate:enc:string */,\n  \
+             \"b\" BYTEA /* zero-migrate:enc:string,\n  \
+             \"c\" BYTEA /* zero-migrate:enc:number\n)";
         let (got, fields) = sole_warning(|| parse_encryption_sentinels(unterminated));
         assert_eq!(
             got.keys().collect::<Vec<_>>(),
@@ -1478,9 +1412,9 @@ mod tests {
         );
 
         let control = "CREATE TABLE t (\n  \
-             \"a\" BYTEA /* zero-migrate:enc:default:string */,\n  \
-             \"b\" BYTEA /* zero-migrate:enc:default:string */,\n  \
-             \"c\" BYTEA /* zero-migrate:enc:default:number */\n)";
+             \"a\" BYTEA /* zero-migrate:enc:string */,\n  \
+             \"b\" BYTEA /* zero-migrate:enc:string */,\n  \
+             \"c\" BYTEA /* zero-migrate:enc:number */\n)";
         let (got, events) = capture_events(|| parse_encryption_sentinels(control));
         let mut names: Vec<_> = got.keys().cloned().collect();
         names.sort();

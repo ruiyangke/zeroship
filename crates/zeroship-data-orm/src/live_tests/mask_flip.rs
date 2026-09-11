@@ -2610,7 +2610,7 @@ fn encrypted_schema() -> Value {
     value!({
         "secret": {
             "type": "string",
-            "encrypted": { "keyId": "k1", "wraps": "string" }
+            "encrypted": true
         },
         "nickname": { "type": "string" },
     })
@@ -2771,12 +2771,10 @@ fn deleting_the_encrypted_key_from_the_descriptor_must_not_write_plaintext() {
     crate::live_tests::host::in_test(|| {
         crate::live_tests::host::run(async {
             let (_postgres, url) = require_pg().await;
-            let _keys = crate::live_tests::host::supply_root_keys_for_tests(&[(
-                "k1",
-                "0101010101010101010101010101010101010101010101010101010101010101",
-            )]);
             let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
             let app = "flip_enc_key_deleted";
+            let _keys =
+                crate::live_tests::host::supply_project_key_for_tests(&[app], &"01".repeat(32));
             let encrypted = encrypted_schema();
             fixture(&pool, &url, app, "people", &encrypted).await;
 
@@ -3096,13 +3094,13 @@ fn a_migration_engine_built_table_refuses_an_encryption_downgrade() {
     crate::live_tests::host::in_test(|| {
         crate::live_tests::host::run(async {
             let (_postgres, url) = require_pg().await;
-            let _keys = crate::live_tests::host::supply_root_keys_for_tests(&[(
-                "k1",
-                "0101010101010101010101010101010101010101010101010101010101010101",
-            )]);
             let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
             let app_uuid = uuid::Uuid::from_u128(0x656e_635f_656e_6769_6e65_5f66_6c6f_6f72);
             let encrypted = encrypted_schema();
+            let _keys = crate::live_tests::host::supply_project_key_for_tests(
+                &[&app_uuid.to_string()],
+                &"01".repeat(32),
+            );
             let app =
                 fixture_via_the_migration_engine(&pool, &url, &app_uuid, "people", &encrypted)
                     .await;
@@ -3116,7 +3114,6 @@ fn a_migration_engine_built_table_refuses_an_encryption_downgrade() {
                 stored,
                 zeroship_data_sql::mask_codec::build_encryption_sentinel(
                     &zeroship_data_sql::catalog::EncryptionMeta {
-                        key_id: "k1".to_string(),
                         wraps: zeroship_data_sql::catalog::WrappedType::String,
                     }
                 ),

@@ -5146,10 +5146,8 @@ fn lift_named_enum_membership(
 /// column's inner domain is resolved UPSTREAM of the descriptor, on the `ColType`
 /// itself, by [`crate::render::lower::resolve_encrypted_inner_domain`] - so by the time
 /// a column reaches this lift its `Encrypted { of }` already names a base type and
-/// there is nothing left to lift. That is deliberate: `wraps` is ALSO stamped into the
-/// catalog sentinel by the lower, and patching the descriptor here would have fixed the
-/// runtime's copy while leaving the catalog's saying `string`. Normalising the type
-/// makes both derivations agree by construction rather than by two sites remembering.
+/// there is nothing left to lift. The catalog sentinel and runtime codec both
+/// derive from the descriptor's logical type.
 fn lift_named_domain_base_type(
     field: &mut crate::render::declarative::FieldDescriptor,
     ty: &ColType,
@@ -5434,7 +5432,7 @@ fn token_to_col_type(f: &crate::render::declarative::FieldDescriptor) -> Option<
             // An encrypted column carries the `encrypted` facet PLUS the inner token
             // as `ty`; wrap the inner ColType (the inverse of `col_type_to_token`'s
             // `Encrypted{of}` -> inner token).
-            if f.encrypted.is_some() {
+            if f.encrypted == Some(true) {
                 Some(ColType::Encrypted { of: Box::new(base) })
             } else {
                 Some(base)
@@ -5832,7 +5830,7 @@ fn standalone_mask_facet(
     // Suppress the encrypted auto-mask: only when the column is ACTUALLY encrypted and
     // the mask is the exact kernel default. (A plaintext column authored with
     // `.mask({ full, pii })` is a real standalone mask and IS carried.)
-    let is_encrypted = f.encrypted.is_some();
+    let is_encrypted = f.encrypted == Some(true);
     if is_encrypted && kind == "full" && classification == "pii" {
         return None;
     }
@@ -9291,7 +9289,7 @@ columns = [
         let m = defs(&[create("vaults", vec![secret])]);
         let def = field_def(&m, "vaults", "secret");
         assert!(
-            def.get("encrypted").is_some(),
+            def.get("encrypted").and_then(serde_json::Value::as_bool) == Some(true),
             "an encrypted column is recovered with the encrypted facet: {def}"
         );
     }
@@ -9440,7 +9438,7 @@ columns = [
         });
         assert_eq!(
             field.encrypted,
-            Some(serde_json::json!({ "keyId": "default", "wraps": "string" })),
+            Some(true),
             "encryption metadata preserves the wrapped plaintext type without a mode"
         );
         assert_eq!(

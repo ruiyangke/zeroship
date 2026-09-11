@@ -3,7 +3,7 @@ import { expect, test } from "vitest";
 import { rpc } from "./rpc";
 import { targets } from "./targets";
 
-test("gallery CRUD preserves bytes, metadata, ordering and absence on every backend", async () => {
+test("gallery CRUD preserves bytes, metadata and absence on every backend", async () => {
   for (const target of targets()) {
     const call = (op: string, input = {}) => rpc(target.apiUrl, `gallery.${op}`, input);
     const prefix = `acceptance/${randomUUID()}/`;

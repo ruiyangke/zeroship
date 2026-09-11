@@ -1,7 +1,7 @@
 use super::{backend_for_url, BackendUrl};
 use crate::{
     backend::{BackendHandle, PostgresBackend},
-    encryption::LocalKeySource,
+    encryption::ProjectKeySource,
     error::DbError,
 };
 use futures::future::LocalBoxFuture;
@@ -13,7 +13,7 @@ use zeroship_data_sql::compile::SqlDialect;
 /// opening happens on the destination compio thread and returns a local handle.
 pub trait BackendFactory: Send + Sync + 'static {
     fn dialect(&self) -> SqlDialect;
-    fn connect(&self, keys: LocalKeySource) -> LocalBoxFuture<'_, Result<BackendHandle, DbError>>;
+    fn connect(&self, keys: ProjectKeySource) -> LocalBoxFuture<'_, Result<BackendHandle, DbError>>;
 }
 
 /// Opaque identity for configuration that may share a local backend.
@@ -93,7 +93,7 @@ impl ConnectionFactory {
     pub fn url(&self) -> Option<&str> {
         self.url.as_deref()
     }
-    pub async fn connect(&self, keys: LocalKeySource) -> Result<BackendHandle, DbError> {
+    pub async fn connect(&self, keys: ProjectKeySource) -> Result<BackendHandle, DbError> {
         let backend = self.factory.connect(keys).await?;
         if backend.dialect() != self.dialect() {
             return Err(DbError::config(
@@ -127,7 +127,7 @@ impl BackendFactory for BuiltinFactory {
             BackendUrl::Sqlite { .. } => SqlDialect::Sqlite,
         }
     }
-    fn connect(&self, keys: LocalKeySource) -> LocalBoxFuture<'_, Result<BackendHandle, DbError>> {
+    fn connect(&self, keys: ProjectKeySource) -> LocalBoxFuture<'_, Result<BackendHandle, DbError>> {
         Box::pin(async move {
             match &self.selection {
                 BackendUrl::Postgres => Ok(BackendHandle::new(Rc::new(
