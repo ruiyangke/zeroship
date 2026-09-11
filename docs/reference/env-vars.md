@@ -747,7 +747,7 @@ required now, like Postgres, for the same reason
 
 ### The surviving test-only names
 
-`PG_TEST_URL` `REDIS_TEST_URL` `DRAGONFLY_CLUSTER_SEEDS`
+`PG_TEST_URL` `REDIS_TEST_URL`
 `AUTH_TEST_SMTP_SINK` `ZEROSHIP_DW_E2E*`
 
 `ZEROSHIP_SESSION_SECRET`, `ZEROSHIP_SESSION_SECRET_PREV` and

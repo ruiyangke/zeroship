@@ -643,8 +643,8 @@ compose_superuser_role() {
 #     INPUT this arm derives the superuser's identity from, and it carries no
 #     URL grammar - check 8's header records the same value as undetectable by
 #     any registry-driven means. Refusing it would need a name heuristic.
-#   - compose files other than the one passed in. `deploy/compose/cluster.yml`
-#     and the two backing-service overlays are not walked by any check here.
+#   - compose files other than the one passed in. Backing-service overlays
+#     are not walked by any check here.
 #   - what a container does after parsing. This is a text check on a deploy file.
 check_compose_env_superuser() {
     local env_arm="$1" compose="$2" label="$3"

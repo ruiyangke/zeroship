@@ -1,47 +1,9 @@
-//! Cluster integration tests against a live 3-node Dragonfly.
-//!
-//! Bring up the cluster first:
-//!   docker compose -f deploy/compose/cluster.yml up -d
-//!   ./deploy/scripts/bootstrap-dragonfly-cluster.sh
-//!
-//! Then:
-//!   DRAGONFLY_CLUSTER_SEEDS='redis://127.0.0.1:7000,redis://127.0.0.1:7001,redis://127.0.0.1:7002' \
-//!     cargo test -p compio-redis --test cluster -- --nocapture
-//!
-//! EVERY seed-gated test REFUSES, through `common::cluster_seeds_unset`. An
-//! unset variable is a failed run naming the two commands above, never a pass.
-//!
-//! THE HISTORY IS THE ARGUMENT, IN TWO STEPS. Most of these tests were once a
-//! bare `let Some(s) = seeds() else { return; };`, which prints `ok` and lands
-//! inside "N passed": measured 2026-08-19 with the variable unset, the whole
-//! target passed in hundredths of a second while a log census saw ONE
-//! announcement covering sixteen tests that did nothing. The fix then was to
-//! make every one of them announce, so the census could count them.
-//!
-//! That was still the weaker half. A census can only count what somebody runs
-//! it over, and the command in this file's own header is a plain `cargo test
-//! -p compio-redis --test cluster` that no suite script wraps - so run the
-//! documented way, sixteen announcements went to a terminal and the target
-//! still exited 0. What makes a test's non-execution visible is the test
-//! failing, not a marker in a log; the census is gone and the refusal is what
-//! replaced it.
+//! Live Redis driver tests with owned Testcontainers fixtures.
+//! Run with Cargo or nextest; Docker is required.
 
 use compio_redis::ClusterClient;
 
 mod common;
-
-/// The seed list, or the refusal naming what provisions one.
-///
-/// No `Option` arm. Every caller needed the cluster, so an `Option` here only
-/// ever meant "each of sixteen tests decides again whether to do nothing", and
-/// they answered inconsistently - which is how fifteen of them came to return
-/// silently and one to announce.
-fn seeds() -> Vec<String> {
-    match common::env::get(common::env::TestEnvKey::DragonflyClusterSeeds) {
-        Some(s) => s.split(',').map(|x| x.trim().to_string()).collect(),
-        None => common::cluster_seeds_unset(),
-    }
-}
 
 fn seeds_refs(v: &[String]) -> Vec<&str> {
     v.iter().map(|s| s.as_str()).collect()
@@ -49,7 +11,8 @@ fn seeds_refs(v: &[String]) -> Vec<&str> {
 
 #[compio::test]
 async fn connect_and_roundtrip() {
-    let s = seeds();
+    let fixture = common::fixtures();
+    let s = fixture.cluster_urls();
     let seeds = seeds_refs(&s);
     let cc = ClusterClient::connect(&seeds, 4).await.expect("connect");
 
@@ -63,16 +26,21 @@ async fn connect_and_roundtrip() {
 
 #[compio::test]
 async fn hash_tag_isolation_enables_mget() {
-    let s = seeds();
+    let fixture = common::fixtures();
+    let s = fixture.cluster_urls();
     let seeds = seeds_refs(&s);
     let cc = ClusterClient::connect(&seeds, 4).await.expect("connect");
 
     // All keys share an {app42} hash tag — same slot, same node.
     for i in 0..10 {
-        cc.set(&format!("{{app42}}:k{i}"), b"v", None).await.unwrap();
+        cc.set(&format!("{{app42}}:k{i}"), b"v", None)
+            .await
+            .unwrap();
     }
-    let values = cc.mget(&["{app42}:k0", "{app42}:k5", "{app42}:k9"])
-        .await.expect("mget same slot");
+    let values = cc
+        .mget(&["{app42}:k0", "{app42}:k5", "{app42}:k9"])
+        .await
+        .expect("mget same slot");
     assert_eq!(values.len(), 3);
     assert!(values.iter().all(|v| v.is_some()));
 
@@ -83,19 +51,23 @@ async fn hash_tag_isolation_enables_mget() {
 
 #[compio::test]
 async fn cross_slot_mget_errors_without_network_call() {
-    let s = seeds();
+    let fixture = common::fixtures();
+    let s = fixture.cluster_urls();
     let seeds = seeds_refs(&s);
     let cc = ClusterClient::connect(&seeds, 4).await.expect("connect");
 
     // No hash tags — "foo" and "bar" land on different slots.
     let err = cc.mget(&["foo", "bar"]).await.unwrap_err();
-    assert!(matches!(err, compio_redis::Error::CrossSlot),
-        "expected CrossSlot, got {err:?}");
+    assert!(
+        matches!(err, compio_redis::Error::CrossSlot),
+        "expected CrossSlot, got {err:?}"
+    );
 }
 
 #[compio::test]
 async fn atomic_incr_survives_routing() {
-    let s = seeds();
+    let fixture = common::fixtures();
+    let s = fixture.cluster_urls();
     let seeds = seeds_refs(&s);
     let cc = ClusterClient::connect(&seeds, 4).await.expect("connect");
 
@@ -109,7 +81,8 @@ async fn atomic_incr_survives_routing() {
 
 #[compio::test]
 async fn scan_on_routing_key_returns_matching() {
-    let s = seeds();
+    let fixture = common::fixtures();
+    let s = fixture.cluster_urls();
     let seeds = seeds_refs(&s);
     let cc = ClusterClient::connect(&seeds, 4).await.expect("connect");
 
@@ -121,10 +94,14 @@ async fn scan_on_routing_key_returns_matching() {
     let mut cursor = String::from("0");
     let mut found = Vec::new();
     loop {
-        let (next, keys) = cc.scan("{appS}", &cursor, &format!("{prefix}:*"), 100)
-            .await.expect("scan");
+        let (next, keys) = cc
+            .scan("{appS}", &cursor, &format!("{prefix}:*"), 100)
+            .await
+            .expect("scan");
         found.extend(keys);
-        if next == "0" { break; }
+        if next == "0" {
+            break;
+        }
         cursor = next;
     }
     found.sort();
@@ -137,7 +114,8 @@ async fn scan_on_routing_key_returns_matching() {
 
 #[compio::test]
 async fn ttl_lifecycle_on_cluster() {
-    let s = seeds();
+    let fixture = common::fixtures();
+    let s = fixture.cluster_urls();
     let seeds = seeds_refs(&s);
     let cc = ClusterClient::connect(&seeds, 4).await.expect("connect");
 
@@ -167,8 +145,10 @@ async fn all_seeds_unreachable_errors_quickly() {
     assert!(result.is_err(), "expected unreachable seeds to error");
     // Shouldn't hang on long timeouts — each seed should fail within a
     // few seconds max. If this balloons, something added a long timeout.
-    assert!(elapsed < std::time::Duration::from_secs(15),
-        "connect took {elapsed:?} — too slow for unreachable seeds");
+    assert!(
+        elapsed < std::time::Duration::from_secs(15),
+        "connect took {elapsed:?} — too slow for unreachable seeds"
+    );
 }
 
 #[compio::test]
@@ -190,7 +170,8 @@ async fn non_cluster_redis_behavior_is_bounded() {
     // against `ClusterBootstrap` - a red test whose message names the wrong
     // problem. Proving the node is up first means the match below is only ever
     // read as what it is about.
-    let url = common::test_url();
+    let fixture = common::fixtures();
+    let url = fixture.redis_url();
     drop(common::connect(&url).await);
     match ClusterClient::connect(&[url.as_str()], 4).await {
         Ok(cc) => {
@@ -199,20 +180,25 @@ async fn non_cluster_redis_behavior_is_bounded() {
                 Ok(_) => panic!("expected error against non-cluster Redis"),
                 Err(e) => e,
             };
-            assert!(matches!(err, compio_redis::Error::NoRoute { .. }),
-                "expected NoRoute, got {err:?}");
+            assert!(
+                matches!(err, compio_redis::Error::NoRoute { .. }),
+                "expected NoRoute, got {err:?}"
+            );
         }
         Err(e) => {
             // Older-Redis case: connect rejects at bootstrap.
-            assert!(matches!(e, compio_redis::Error::ClusterBootstrap(_)),
-                "expected ClusterBootstrap, got {e:?}");
+            assert!(
+                matches!(e, compio_redis::Error::ClusterBootstrap(_)),
+                "expected ClusterBootstrap, got {e:?}"
+            );
         }
     }
 }
 
 #[compio::test]
 async fn set_nx_is_idempotent() {
-    let s = seeds();
+    let fixture = common::fixtures();
+    let s = fixture.cluster_urls();
     let seeds = seeds_refs(&s);
     let cc = ClusterClient::connect(&seeds, 4).await.expect("connect");
 
@@ -234,7 +220,8 @@ async fn set_nx_is_idempotent() {
 
 #[compio::test]
 async fn pexpire_and_pttl_semantics() {
-    let s = seeds();
+    let fixture = common::fixtures();
+    let s = fixture.cluster_urls();
     let seeds = seeds_refs(&s);
     let cc = ClusterClient::connect(&seeds, 4).await.expect("connect");
 
@@ -259,7 +246,8 @@ async fn pexpire_and_pttl_semantics() {
 
 #[compio::test]
 async fn binary_safe_values_roundtrip_through_cluster() {
-    let s = seeds();
+    let fixture = common::fixtures();
+    let s = fixture.cluster_urls();
     let seeds = seeds_refs(&s);
     let cc = ClusterClient::connect(&seeds, 4).await.expect("connect");
 
@@ -278,7 +266,8 @@ async fn binary_safe_values_roundtrip_through_cluster() {
 
 #[compio::test]
 async fn cloned_handle_shares_topology_and_pools() {
-    let s = seeds();
+    let fixture = common::fixtures();
+    let s = fixture.cluster_urls();
     let seeds = seeds_refs(&s);
     let cc1 = ClusterClient::connect(&seeds, 4).await.expect("connect");
     let cc2 = cc1.clone();
@@ -287,14 +276,18 @@ async fn cloned_handle_shares_topology_and_pools() {
     let key = "{appShare}:k";
     cc2.del(key).await.ok();
     cc1.set(key, b"via-1", None).await.unwrap();
-    assert_eq!(cc2.get(key).await.unwrap().as_deref(), Some(b"via-1".as_ref()));
+    assert_eq!(
+        cc2.get(key).await.unwrap().as_deref(),
+        Some(b"via-1".as_ref())
+    );
 
     cc2.del(key).await.ok();
 }
 
 #[compio::test]
 async fn cross_slot_mset_rejected_before_network() {
-    let s = seeds();
+    let fixture = common::fixtures();
+    let s = fixture.cluster_urls();
     let seeds = seeds_refs(&s);
     let cc = ClusterClient::connect(&seeds, 4).await.expect("connect");
 
@@ -307,7 +300,8 @@ async fn cross_slot_mset_rejected_before_network() {
 
 #[compio::test]
 async fn empty_batch_ops_are_noops() {
-    let s = seeds();
+    let fixture = common::fixtures();
+    let s = fixture.cluster_urls();
     let seeds = seeds_refs(&s);
     let cc = ClusterClient::connect(&seeds, 4).await.expect("connect");
 
@@ -317,20 +311,26 @@ async fn empty_batch_ops_are_noops() {
 
 #[compio::test]
 async fn mget_preserves_order_and_holes() {
-    let s = seeds();
+    let fixture = common::fixtures();
+    let s = fixture.cluster_urls();
     let seeds = seeds_refs(&s);
     let cc = ClusterClient::connect(&seeds, 4).await.expect("connect");
 
     let tag = "{appOrd}";
     for k in ["a", "c"] {
-        cc.set(&format!("{tag}:{k}"), k.as_bytes(), None).await.unwrap();
+        cc.set(&format!("{tag}:{k}"), k.as_bytes(), None)
+            .await
+            .unwrap();
     }
     // Middle key is intentionally missing → Some / None / Some shape.
-    let results = cc.mget(&[
-        &format!("{tag}:a"),
-        &format!("{tag}:missing"),
-        &format!("{tag}:c"),
-    ]).await.unwrap();
+    let results = cc
+        .mget(&[
+            &format!("{tag}:a"),
+            &format!("{tag}:missing"),
+            &format!("{tag}:c"),
+        ])
+        .await
+        .unwrap();
 
     assert_eq!(results.len(), 3);
     assert_eq!(results[0].as_deref(), Some(b"a".as_ref()));
@@ -344,7 +344,8 @@ async fn mget_preserves_order_and_holes() {
 
 #[compio::test]
 async fn decr_by_can_go_negative() {
-    let s = seeds();
+    let fixture = common::fixtures();
+    let s = fixture.cluster_urls();
     let seeds = seeds_refs(&s);
     let cc = ClusterClient::connect(&seeds, 4).await.expect("connect");
 
@@ -361,7 +362,8 @@ async fn decr_by_can_go_negative() {
 
 #[compio::test]
 async fn incr_on_non_numeric_errors_with_server() {
-    let s = seeds();
+    let fixture = common::fixtures();
+    let s = fixture.cluster_urls();
     let seeds = seeds_refs(&s);
     let cc = ClusterClient::connect(&seeds, 4).await.expect("connect");
 
@@ -373,15 +375,18 @@ async fn incr_on_non_numeric_errors_with_server() {
         Ok(_) => panic!("INCR on non-numeric must error"),
         Err(e) => e,
     };
-    assert!(matches!(err, compio_redis::Error::Server(ref m) if m.contains("not an integer")),
-        "expected Server(not an integer), got {err:?}");
+    assert!(
+        matches!(err, compio_redis::Error::Server(ref m) if m.contains("not an integer")),
+        "expected Server(not an integer), got {err:?}"
+    );
 
     cc.del(key).await.ok();
 }
 
 #[compio::test]
 async fn large_value_roundtrip() {
-    let s = seeds();
+    let fixture = common::fixtures();
+    let s = fixture.cluster_urls();
     let seeds = seeds_refs(&s);
     let cc = ClusterClient::connect(&seeds, 4).await.expect("connect");
 
