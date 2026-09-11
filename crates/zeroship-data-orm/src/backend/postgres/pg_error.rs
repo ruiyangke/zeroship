@@ -110,7 +110,7 @@ pub(crate) fn classify_pg_per_app_session_setup(
 
 /// Test-only view of the contextual classifier's creator-facing error.
 /// Production transaction code also consumes the private disposition.
-#[cfg(feature = "test-helpers")]
+#[cfg(test)]
 pub fn classify_pg_per_app_session_setup_for_tests(
     e: &compio_postgres::Error,
     schema: &zeroship_data_sql::SchemaName,

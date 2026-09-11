@@ -189,8 +189,7 @@ and run the suites. Live database verification must never be an opt-in feature.
 `zeroship-data-orm` and
 `zeroship-data-v8` include PostgreSQL tests in ordinary `cargo test`. Do not
 put required database cases behind opt-in features, ignore them, or report success
-when the server or its required extensions are unavailable. Integration helpers
-are enabled by test dependencies. `cargo xtask test data` runs the data crates
+when the server or its required extensions are unavailable. Database contracts live in their owning source crates; fixtures compile only for tests. `cargo xtask test data` runs the data crates
 through nextest and rejects feature-gated test targets. Rust fixtures own their
 PostgreSQL containers; Docker is required and no external database URL is used.
 

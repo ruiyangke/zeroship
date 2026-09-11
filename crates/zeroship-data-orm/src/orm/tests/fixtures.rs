@@ -64,13 +64,9 @@ impl CollectionFixture {
         let server = crate::postgres_fixture::Postgres::start();
         crate::reset_engine_for_tests();
         let backend = Rc::new(
-            crate::backend::postgres::PostgresBackend::connect(
-                &server.url(),
-                4,
-                key_source,
-            )
-            .await
-            .unwrap(),
+            crate::backend::postgres::PostgresBackend::connect(&server.url(), 4, key_source)
+                .await
+                .unwrap(),
         );
         let app = format!("zsorm_{}", uuid::Uuid::new_v4().simple());
         let schema = crate::compile::quote_ident(&app);
@@ -88,7 +84,7 @@ impl CollectionFixture {
             ))
             .await
             .unwrap();
-        crate::auth::bootstrap::ensure_per_app_role(backend.pool(), &app)
+        crate::support::roles::ensure_per_app_role(backend.pool(), &app)
             .await
             .unwrap();
         let role = crate::compile::quote_ident(

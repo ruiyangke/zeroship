@@ -156,16 +156,7 @@ struct SubscriptionInner {
     /// against the event tuple and delivers only if at least one entry
     /// for the matching collection matches.
     read_set: Option<Vec<ReadSetEntry>>,
-    /// Unit tests run in parallel while sharing the production-style
-    /// process broker. Track ownership so test-only global cleanup and
-    /// counts do not interfere with unrelated test threads.
-    ///
-    /// Gated on `test` OR `test-helpers`, not on `test` alone: since this
-    /// module moved to `zeroship-data-core` on 2026-09-03 the consumers'
-    /// test builds are NOT this crate's `cfg(test)`, and a bare `test` gate
-    /// silently dropped them onto the process-wide arms. See
-    /// [`live_subscription_count`].
-    #[cfg(any(test, feature = "test-helpers"))]
+    #[cfg(test)]
     owner_thread: std::thread::ThreadId,
 }
 
@@ -202,7 +193,7 @@ impl Subscription {
             closed: false,
             resync_pending: false,
             read_set: None,
-            #[cfg(any(test, feature = "test-helpers"))]
+            #[cfg(test)]
             owner_thread: std::thread::current().id(),
         })))
     }
@@ -362,7 +353,7 @@ impl Subscription {
         self.lock_inner().closed
     }
 
-    #[cfg(any(test, feature = "test-helpers"))]
+    #[cfg(test)]
     fn is_owned_by_current_thread(&self) -> bool {
         self.lock_inner().owner_thread == std::thread::current().id()
     }
@@ -646,7 +637,7 @@ impl Broker {
             .collect()
     }
 
-    #[cfg(any(test, feature = "test-helpers"))]
+    #[cfg(test)]
     fn take_current_thread_subscriptions(&mut self) -> Vec<Subscription> {
         let mut taken = Vec::new();
         self.by_key.retain(|_, by_collection| {
@@ -666,7 +657,7 @@ impl Broker {
         taken
     }
 
-    #[cfg(any(test, feature = "test-helpers"))]
+    #[cfg(test)]
     fn current_thread_subscription_count(&self) -> usize {
         self.by_key
             .values()
@@ -983,40 +974,7 @@ pub fn try_subscribe(app_id: &str, collection: &str) -> Result<Subscription, DbE
     lock_broker().try_subscribe(app_id, collection)
 }
 
-/// Live (not-yet-closed) subscriptions in this process's broker owned by the
-/// CALLING THREAD. Tests use this to verify the
-/// `zeroship_data_v8::v8_classes::subscription` Weak finalizer reclaims
-/// broker slots when V8 GCs an orphaned wrapper.
-///
-/// # Test-only, with one body
-///
-/// There is no production caller, so there is no production arm. The gate
-/// compiles the symbol away entirely outside a test build rather than swapping
-/// in process-wide semantics: an observation helper that means something
-/// different in the artifact under test than in the artifact that ships is not
-/// an observation of the shipped artifact. It carried exactly that fork -
-/// thread-scoped under the gate, [`Broker::subscription_count`] outside it -
-/// until 2026-09-09.
-///
-/// # Why the gate is `any(test, feature = "test-helpers")`
-///
-/// A bare `#[cfg(test)]` cannot reach the consumers that need it. Across a
-/// crate boundary `cfg(test)` is the DEFINING crate's test build, so under a
-/// `test`-only gate this symbol does not exist for
-/// `crates/zeroship-data-v8/tests/subscription_finalizer.rs`, which links
-/// this crate as an ordinary dependency. The `test` arm serves this crate's own
-/// tests; the feature arm carries the same helper to consumers, which declare
-/// `zeroship-data-core = { features = ["test-helpers"] }` in
-/// `[dev-dependencies]` (under resolver 3 that does not leak into a non-test
-/// build).
-///
-/// Thread scoping is the point, not an implementation detail. The broker is
-/// process-wide and cargo runs tests on parallel threads, so a process-wide
-/// count is a count of whatever else happened to be running. That fork is what
-/// made `cargo test -p zeroship-data-v8 --lib` nondeterministic before the
-/// gate was widened: `v8_classes::subscription` asserts an exact count while
-/// `exec`'s tests subscribe on other threads.
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 pub fn live_subscription_count() -> usize {
     lock_broker().current_thread_subscription_count()
 }
@@ -1031,7 +989,7 @@ pub fn live_subscription_count() -> usize {
 /// threads; `zeroship_data_orm::exec`'s `reset_world` records what that
 /// cost. Prefer [`drop_app`] when the test knows its app id - it is scoped
 /// tighter still, and it is the spelling production uses.
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 pub fn drain_current_thread_subscriptions() {
     let subscriptions = lock_broker().take_current_thread_subscriptions();
     for subscription in subscriptions {
@@ -1058,17 +1016,6 @@ pub(crate) fn resume_app_with_resync(app_id: &str) {
     }
 }
 
-/// Close and remove every subscriber of `app_id`, on every thread. The
-/// per-app slot GC, the CDC lifecycle and the drop-namespace orchestrator call
-/// this when an app goes away.
-///
-/// Scoped to one app on purpose, and there is no unscoped spelling. This took
-/// an `Option` until 2026-09-09, where `None` meant "drop everything" - and
-/// what "everything" meant depended on the build: thread-scoped under
-/// `cfg(any(test, feature = "test-helpers"))`, process-wide otherwise. No
-/// production caller ever passed `None`; every caller that did was test
-/// cleanup, and it now says so by calling
-/// [`drain_current_thread_subscriptions`].
 pub fn drop_app(app_id: &str) {
     let subscriptions = lock_broker().take_app_subscriptions(app_id);
     for subscription in subscriptions {
@@ -1646,10 +1593,16 @@ mod tests {
     fn value_free_invalidations_reach_filtered_subscriptions_in_their_collection() {
         let mut broker = Broker::new();
         let matching = broker.subscribe("app", "orders");
-        matching.set_read_set(vec![rs_entry("orders", serde_json::json!({"owner": "alice"}))]);
+        matching.set_read_set(vec![rs_entry(
+            "orders",
+            serde_json::json!({"owner": "alice"}),
+        )]);
         let other = broker.subscribe("app", "messages");
         broker.publish(&ev_with_tuple("app", "orders", ChangeOp::Update, None, &[]));
-        assert!(matches!(matching.pop(), Some(SubscriptionMessage::Change(_))));
+        assert!(matches!(
+            matching.pop(),
+            Some(SubscriptionMessage::Change(_))
+        ));
         assert!(other.pop().is_none());
     }
 
@@ -1970,17 +1923,6 @@ mod tests {
         assert!(!s3.is_closed());
     }
 
-    /// Test cleanup must be thread-scoped, and `live_subscription_count` must
-    /// report the same scope the cleanup acts on.
-    ///
-    /// This pins the behaviour that used to fork on the build. `drop_app(None)`
-    /// took the calling thread's subscriptions under
-    /// `cfg(any(test, feature = "test-helpers"))` and EVERY subscription in the
-    /// process otherwise; `live_subscription_count` was thread-scoped under the
-    /// same gate and process-wide outside it. Both spellings now have one body,
-    /// so what a test observes is what the code does - and a reintroduced
-    /// process-wide arm fails here on the surviving-neighbour assertion rather
-    /// than by tearing down a concurrent test on another thread.
     #[test]
     fn draining_this_thread_leaves_another_threads_subscription_open() {
         const MINE: &str = "broker_drain_scope_mine";

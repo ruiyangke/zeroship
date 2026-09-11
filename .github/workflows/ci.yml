@@ -943,11 +943,10 @@ jobs:
           # comment came to say "64 assertions, floor 63" while the script's own
           # floor was 107. One copy, next to the code that reads it.
           bash tests/test_target_census_gate.sh "$RUNNER_TEMP/targets.json"
-      # Data tests require the PostgreSQL provisioned by this job. Test builds
-      # enable integration helpers without an opt-in feature.
+      # Data tests own PostgreSQL containers and run without optional features.
       - run: |
           set -o pipefail
-          cargo test -p zeroship-data-v8 --test test_helpers sqlite_integration::
+          cargo test -p zeroship-data-v8 --lib live_tests::sqlite_integration::
           cargo test -p zeroship-data-orm
       # The migration service's suite: the service's own targets, the two live-PG
       # session proofs (`smoke_apply_pg`, `author_and_apply_pg`) and the

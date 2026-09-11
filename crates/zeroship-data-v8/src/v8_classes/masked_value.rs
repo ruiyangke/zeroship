@@ -46,11 +46,11 @@ use zeroship_runtime_macros::v8_class;
 #[allow(unused_imports)]
 use zeroship_runtime_macros::{v8_async_method, v8_constructor, v8_getter, v8_method};
 
+use crate::v8_bridge::{decode_native, runtime_state, setup_js_promise};
+use zeroship_data_orm::binding::DbBinding;
 use zeroship_data_orm::protection::unmask::{
     BulkUnmaskArgs, BulkUnmaskItem, UnmaskFieldArgs, dispatch_bulk_unmask, dispatch_unmask,
 };
-use crate::v8_bridge::{decode_native, runtime_state, setup_js_promise};
-use zeroship_data_orm::binding::DbBinding;
 
 // ---------------------------------------------------------------------------
 // MaskedValue state
@@ -664,7 +664,9 @@ impl RehydrateWalker {
                     .and_then(|k| obj.get(scope, k))
                     .filter(|v| v.is_string())
                     .map(|v| v.to_rust_string_lossy(scope))
-                    .is_some_and(|sig| sig == zeroship_data_orm::protection::mask_pass::mask_sentinel_signature());
+                    .is_some_and(|sig| {
+                        sig == zeroship_data_orm::protection::mask_pass::mask_sentinel_signature()
+                    });
                 if signed {
                     return self.mint_replacement(scope, obj);
                 }
@@ -824,7 +826,7 @@ mod tests {
             .run(scope)
             .unwrap();
         let mut walker = RehydrateWalker {
-            binding: DbBinding::cold_start("app_a"),
+            binding: crate::testing::binding("app_a"),
             depth: 0,
             cap: 16,
         };
@@ -853,7 +855,7 @@ mod tests {
 
         let obj = mint_masked_value(
             scope,
-            DbBinding::cold_start("app_a"),
+            crate::testing::binding("app_a"),
             "users".into(),
             "usr_01".into(),
             "ssn".into(),
@@ -913,7 +915,7 @@ mod tests {
         // carries the binding itself and is the unit under test).
         fn new_walker() -> RehydrateWalker {
             RehydrateWalker {
-                binding: DbBinding::cold_start("app_a"),
+                binding: crate::testing::binding("app_a"),
                 depth: 0,
                 cap: 16,
             }
@@ -957,7 +959,7 @@ mod tests {
 
         let obj = mint_masked_value(
             scope,
-            DbBinding::cold_start("app_a"),
+            crate::testing::binding("app_a"),
             "users".into(),
             "usr_01".into(),
             "ssn".into(),
@@ -986,7 +988,7 @@ mod tests {
 
         let obj = mint_masked_value(
             scope,
-            DbBinding::cold_start("app_a"),
+            crate::testing::binding("app_a"),
             "users".into(),
             "usr_01".into(),
             "ssn".into(),
@@ -1023,7 +1025,7 @@ mod tests {
 
         let obj = mint_masked_value(
             scope,
-            DbBinding::cold_start("app_a"),
+            crate::testing::binding("app_a"),
             "users".into(),
             "usr_01".into(),
             "ssn".into(),
@@ -1054,7 +1056,7 @@ mod tests {
 
         let obj = mint_masked_value(
             scope,
-            DbBinding::cold_start("app_a"),
+            crate::testing::binding("app_a"),
             "users".into(),
             "usr_01".into(),
             "ssn".into(),
@@ -1134,7 +1136,7 @@ mod tests {
         // We just need to make sure the walker doesn't panic on a plain
         // object.
         let mut walker = RehydrateWalker {
-            binding: DbBinding::cold_start("app_a"),
+            binding: crate::testing::binding("app_a"),
             depth: 0,
             cap: 16,
         };

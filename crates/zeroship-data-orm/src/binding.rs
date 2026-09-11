@@ -71,7 +71,7 @@ impl DbBinding {
     /// place that still assumes the tenant id doubles as the schema, which is
     /// exactly why it is test-gated: production mints the schema through
     /// `SchemaName::new` and REFUSES the binding instead of panicking.
-    #[cfg(feature = "test-helpers")]
+    #[cfg(test)]
     pub fn cold_start(app_id: impl Into<String>) -> Self {
         let app_id = app_id.into();
         let schema = SchemaName::new(&app_id)

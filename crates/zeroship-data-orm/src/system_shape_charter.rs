@@ -146,18 +146,6 @@ impl AssignmentPlan {
     }
 }
 
-/// This worker thread's projection of the operator charter.
-///
-/// The plugin stamps it during the adapter tier's `DbPlugin::register`, the same way it
-/// stamps the meter and the resource key. A vector that never registered a
-/// plugin - the unit tests, and the `test-helpers` integration targets that
-/// drive the pass directly - derives it here on first use.
-///
-/// **That fallback is not a second authority.** Both paths parse
-/// [`SYSTEM_SHAPE_CHARTER_TOML`], which is `include_str!`-ed from the operator's
-/// one file; there is no configuration, no descriptor and no environment in
-/// either path, so the two cannot disagree. What the stamp buys is that a
-/// production worker fails at composition rather than inside its first write.
 pub fn plan() -> Result<Rc<AssignmentPlan>, DbError> {
     if let Some(plan) = PLAN.with_borrow(Clone::clone) {
         return Ok(plan);
@@ -189,7 +177,7 @@ pub fn stamp(plan: Rc<AssignmentPlan>) {
 }
 
 /// Drop this thread's projection, so the next [`plan`] re-derives.
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 pub fn reset_for_tests() {
     PLAN.with_borrow_mut(|slot| *slot = None);
 }

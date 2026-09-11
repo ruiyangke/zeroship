@@ -1,4 +1,4 @@
-use crate::{cargo, checked, Result};
+use crate::{Result, cargo, checked};
 use serde_json::Value;
 use std::process::Command;
 
@@ -130,7 +130,10 @@ fn validate_targets(metadata: &Value) -> Result<()> {
             .iter()
             .find(|package| package["name"] == *name)
             .ok_or_else(|| format!("missing required data package: {name}"))?;
-        if package["features"].get("live-db-tests").is_some() {
+        if ["live-db-tests", "test-helpers"]
+            .iter()
+            .any(|feature| package["features"].get(feature).is_some())
+        {
             return Err(format!("{name}: live database tests cannot be feature-gated").into());
         }
         let targets = package["targets"]

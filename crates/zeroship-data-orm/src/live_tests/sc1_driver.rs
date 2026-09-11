@@ -1,22 +1,3 @@
-/// Arms binding the SC-1 **driver** to a real server.
-///
-/// The module above proves the server behaves the way the reducer models. This
-/// one proves the driver acts on those behaviours correctly - it drives
-/// `transaction::driver` through `transaction::probe` and asserts on the session
-/// disposition, the pool, and the savepoint names that actually reached the
-/// wire.
-///
-/// Each test owns the PostgreSQL server used by its sessions.
-///
-/// Every arm uses a unique `zs_sc1drv_*` app id and drops the role and schema it
-/// created, so a shared server is left as it was found.
-///
-/// Run with:
-///
-/// ```text
-/// cargo test -p zeroship-data-v8 --features test-helpers --test test_helpers \
-///   -- --test-threads=1 native_transaction::sc1_driver
-/// ```
 mod sc1_driver {
     use compio_postgres::{Client, NoTls, Pool};
     use zeroship_data_orm::transaction::probe;

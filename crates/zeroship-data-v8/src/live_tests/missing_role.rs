@@ -31,20 +31,20 @@
 //!     Those paths deliberately stay on the generic classifier.
 
 use compio_postgres::NoTls;
-use zeroship_data_orm::error::DbError;
 use zeroship_data_orm::backend::pg_error;
+use zeroship_data_orm::error::DbError;
 // `DbError` is data-core's; lowering it to a V8 `OpError` is the ADAPTER's job,
 // so it arrives as a trait from plugin-db rather than an inherent method.
 use zeroship_data_v8::op_error::ToOpError;
-
-
 
 async fn connect_test_client() -> (crate::support::postgres::Postgres, compio_postgres::Client) {
     let postgres = crate::support::postgres::Postgres::start();
     let url = postgres.url();
     let (client, connection) = compio_postgres::connect(&url, NoTls)
         .await
-        .unwrap_or_else(|e| panic!("live-Postgres test could not connect to its PostgreSQL testcontainer: {e}"));
+        .unwrap_or_else(|e| {
+            panic!("live-Postgres test could not connect to its PostgreSQL testcontainer: {e}")
+        });
     compio::runtime::spawn(async move {
         let _ = connection.run().await;
     })
@@ -155,7 +155,7 @@ async fn drain_pg() {
 /// Drive a real `SET LOCAL ROLE` against a role that does not exist and
 /// hand the resulting server error to the classifier.
 async fn classify_missing_role(app_id: &str) -> DbError {
-    let (_postgres, client) = connect_test_client().await;
+    let (postgres, client) = connect_test_client().await;
     let role = zeroship_core::database_role::per_app_role_name(app_id)
         .expect("missing-role fixture app id must produce a valid PostgreSQL role name");
 
@@ -173,10 +173,26 @@ async fn classify_missing_role(app_id: &str) -> DbError {
         "missing-role SET LOCAL ROLE must report the measured SQLSTATE"
     );
 
-    let classified = pg_error::classify_pg_per_app_session_setup_for_tests(
-        &err,
-        &zeroship_data_sql::SchemaName::new(app_id).expect("fixture schema name"),
-    );
+    let backend = zeroship_data_orm::connection::ConnectOptions::new(
+        postgres.url(),
+        zeroship_data_orm::encryption::LocalKeySource::EnvVar,
+    )
+    .connect()
+    .await
+    .expect("open production backend");
+    let classified = match backend
+        .open_tx_session(
+            app_id,
+            &zeroship_data_sql::SchemaName::new(app_id).expect("fixture schema name"),
+            zeroship_data_orm::error::BeginIntent::Default,
+        )
+        .await
+        .expect_err("missing role must refuse session setup")
+    {
+        zeroship_data_orm::error::OpenSessionError::Setup(error) => error.into_db_error(),
+        error => panic!("expected contextual setup refusal, got {error:?}"),
+    };
+    drop(backend);
     drop(client);
     drain_pg().await;
     classified
@@ -261,7 +277,9 @@ async fn a_real_internal_pg_failure_is_still_internal() {
     let url = postgres.url();
     let (client, connection) = compio_postgres::connect(&url, NoTls)
         .await
-        .unwrap_or_else(|e| panic!("live-Postgres test could not connect to its PostgreSQL testcontainer: {e}"));
+        .unwrap_or_else(|e| {
+            panic!("live-Postgres test could not connect to its PostgreSQL testcontainer: {e}")
+        });
     compio::runtime::spawn(async move {
         let _ = connection.run().await;
     })

@@ -49,7 +49,6 @@
 //! `sqlite_integration.rs`, and the SDK-side mock tests in
 //! `sdks/db/tests/p9-pr3-native-transaction.test.ts`.
 
-// Shared fixture helpers are declared by `tests/test_helpers.rs`.
 use crate::support;
 
 use std::sync::Arc;
@@ -222,7 +221,7 @@ CREATE INDEX IF NOT EXISTS "notes_created_by_idx" ON "{app}"."notes" ("created_b
         // `DROP SCHEMA CASCADE` there destroys the per-app grants AND the
         // schema's `ALTER DEFAULT PRIVILEGES` entries, and `pg_restore
         // --no-privileges` puts none back.
-        zeroship_data_orm::auth::bootstrap::ensure_per_app_role(&pool, &app)
+        crate::support::roles::ensure_per_app_role(&pool, &app)
             .await
             .expect("per-app role must be re-established after the CASCADE");
         support::grant_all_runtime_table_columns(&pool, &app, "notes").await;
@@ -307,7 +306,7 @@ CREATE INDEX "users_created_by_idx" ON "{app}"."users" (created_by);"#
         ))
         .await
         .expect("deploy stand-in must create encrypted users");
-        zeroship_data_orm::auth::bootstrap::ensure_per_app_role(&pool, &app)
+        crate::support::roles::ensure_per_app_role(&pool, &app)
             .await
             .expect("per-app role must exist for encrypted users");
         support::grant_all_runtime_table_columns(&pool, &app, "users").await;
@@ -449,8 +448,7 @@ fn dispatch_zs_for_app_with_descriptor(
     }];
     let plugins: Vec<Arc<dyn NativePlugin>> = vec![
         DbService::new(DbServiceConfig {
-            connection: zeroship_data_orm::connection::ConnectionFactory::for_url(url)
-                .expect("valid database configuration"),
+            connection: crate::live_tests::recording::connection(url),
             cdc_relay: None,
             meter: None,
         })
@@ -718,7 +716,7 @@ fn revoked_grant_transaction_surfaces_grant_revoked() {
             let _ = worker_connection.run().await;
         })
         .detach();
-        let set_local_role_sql = zeroship_data_orm::auth::bootstrap::set_local_role_sql(&app_id)
+        let set_local_role_sql = crate::support::roles::set_local_role_sql(&app_id)
             .expect("grant-revocation app id must produce valid SET LOCAL ROLE SQL");
         worker.batch_execute("BEGIN").await.expect("control BEGIN");
         worker
@@ -854,7 +852,7 @@ fn unmigrated_app_streaming_response_names_migrate() {
     let app_id = uuid::Uuid::new_v4().simple().to_string();
     let src = [
         r#"import { env } from "zeroship";"#,
-        include_str!("../../../sdks/bootstrap/dist/fetch-handler.js"),
+        include_str!("../../../../sdks/bootstrap/dist/fetch-handler.js"),
         r#"
 globalThis.__zsDispatch = async (rpc, name, input, ctx) => rpc[name](input, ctx);
 
@@ -1944,7 +1942,7 @@ const _procedures = { seed, failBulk };
     assert_eq!(status, 200, "seed failed: {body}");
     assert!(body["json"]["failure"].is_null(), "seed failed: {body}");
 
-    zeroship_data_orm::crud::reset_write_path_counters_for_tests();
+    crate::live_tests::recording::clear();
     let (status, body) = dispatch_zs_with_descriptor(
         &url,
         &src,
@@ -1966,13 +1964,14 @@ const _procedures = { seed, failBulk };
         2,
         "the exercised target set must be non-empty: {body}"
     );
-    let counters = zeroship_data_orm::crud::write_path_counters_for_tests();
+    let counters = crate::live_tests::recording::id_probes();
     assert_eq!(
-        counters.target_row_resolution_calls, 1,
+        counters.len(),
+        1,
         "the PG failure must occur on the per-row fan-out path: {counters:?}"
     );
     assert_eq!(
-        counters.target_row_resolution_sql.len(),
+        counters.len(),
         1,
         "the PG fan-out must execute one non-empty target probe: {counters:?}"
     );
@@ -1981,7 +1980,7 @@ const _procedures = { seed, failBulk };
         zeroship_data_sql::compile::MAX_QUERY_LIMIT + 1
     );
     assert!(
-        counters.target_row_resolution_sql[0].ends_with(&expected_probe_suffix),
+        counters[0].ends_with(&expected_probe_suffix),
         "the PG target probe must cap and lock the rows it will update: {counters:?}"
     );
     let mut caller_visible: Vec<(String, i64)> = after

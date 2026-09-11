@@ -175,13 +175,13 @@ pub(crate) fn allows(binding: &DbBinding, role: &str, classification: &str) -> b
     })
 }
 
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 pub fn cache_get(binding: &DbBinding) -> Option<MaskPolicy> {
     crate::orm_context::current().policies(|m| m.get(binding).cloned())
 }
 
 /// Test-only fixture seeding and removal. Production installs immutable policy.
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 pub fn cache_put(binding: &DbBinding, policy: Option<MaskPolicy>) {
     crate::orm_context::current().policies_mut(|m| match policy {
         Some(p) => {
@@ -193,7 +193,7 @@ pub fn cache_put(binding: &DbBinding, policy: Option<MaskPolicy>) {
     });
 }
 
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 pub fn reset_for_tests() {
     crate::orm_context::current().policies_mut(HashMap::clear);
 }

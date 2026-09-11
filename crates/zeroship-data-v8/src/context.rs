@@ -5,7 +5,7 @@
 //! Transaction lanes, descriptors, protection and CDC state belong to the ORM;
 //! request and deployment identity are captured by the V8 wrappers.
 
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 use zeroship_data_orm::backend::BackendHandle;
 
 use std::{cell::RefCell, rc::Rc};
@@ -27,7 +27,7 @@ impl ThreadDbContext {
     pub(crate) fn connection(&self) -> Option<LocalConnection> {
         self.connection.clone()
     }
-    #[cfg(any(test, feature = "test-helpers"))]
+    #[cfg(test)]
     pub(crate) fn backend(&self) -> Option<BackendHandle> {
         self.connection.as_ref().and_then(LocalConnection::backend)
     }
@@ -40,10 +40,6 @@ impl ThreadDbContext {
         {
             self.connection = Some(LocalConnection::new(factory));
         }
-    }
-    #[cfg(any(test, feature = "test-helpers"))]
-    pub(crate) fn set_connection(&mut self, connection: LocalConnection) {
-        self.connection = Some(connection);
     }
     #[cfg(test)]
     pub(crate) fn clear_backend(&mut self) {
@@ -58,7 +54,7 @@ impl ThreadDbContext {
             None => LocalKeySource::EnvVar,
         }
     }
-    #[cfg(any(test, feature = "test-helpers"))]
+    #[cfg(test)]
     pub(crate) fn set_supplied_root_keys(&mut self, keys: Option<Rc<SuppliedRootKeys>>) {
         self.supplied_root_keys = keys;
     }

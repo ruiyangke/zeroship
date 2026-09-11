@@ -86,16 +86,6 @@ fn run<F: std::future::Future>(f: F) -> F::Output {
     crate::live_tests::host::run(f)
 }
 
-/// Read the value of a single-column scalar PRAGMA back from the
-/// session.
-///
-/// SQLite's `PRAGMA <name>` syntax returns a single one-column row;
-/// the column name is the pragma's name (e.g. `journal_mode`,
-/// `timeout`). The session's `query` helper materialises each cell
-/// as `Option<String>` already, which is the right shape for PRAGMA
-/// inspection at this layer. The `Catalog` impl provides a
-/// proper typed surface; these tests use the session directly via the
-/// `test-helpers`-gated handle accessor.
 async fn pragma_value(backend: &SqliteBackend, pragma: &str) -> String {
     let client = backend
         .fixture_session("default")
@@ -8744,7 +8734,7 @@ fn dbbind134_sqlite_timestamp_spellings_invert_same_day_ordering() {
 #[allow(unused_imports)]
 use zeroship_data_orm::protection::Catalog;
 
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 #[allow(unused_imports)]
 use zeroship_data_orm::fixtures::DatabaseFixture;
 

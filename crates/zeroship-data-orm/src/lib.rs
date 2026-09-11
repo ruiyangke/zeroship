@@ -27,7 +27,6 @@ zeroship_core::declare_env_consumer!(
     scope = "data_orm");
 
 pub use zeroship_data_sql::{catalog, compile};
-pub mod auth;
 pub mod backend;
 pub mod backend_handle;
 pub mod backend_selection;
@@ -48,24 +47,18 @@ pub mod masking;
 pub mod metrics;
 pub mod orm;
 pub mod protection;
-#[cfg(not(feature = "test-helpers"))]
 pub(crate) mod schema_cache;
-#[cfg(feature = "test-helpers")]
-pub mod schema_cache;
 pub mod search;
 pub mod storage;
 pub mod system_shape_charter;
 pub mod transaction;
-#[cfg(not(feature = "test-helpers"))]
 pub(crate) mod tx_lanes;
-#[cfg(feature = "test-helpers")]
-pub mod tx_lanes;
 pub mod tx_route;
 pub use connection::ConnectOptions;
 pub use orm::{Collection, Database, Value};
 
 /// Install a descriptor for an isolated test binding.
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 #[doc(hidden)]
 pub fn cache_schema_for_tests(
     app_id: &str,
@@ -82,7 +75,7 @@ pub fn cache_schema_for_tests(
 /// Test helper: [`cache_schema_for_tests`] for an explicit binding, so a
 /// fixture can install two deploys of one app and assert they do not see each
 /// other's descriptor entries.
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 #[doc(hidden)]
 pub fn cache_schema_for_deploy_for_tests(
     binding: &zeroship_data_orm::binding::DbBinding,
@@ -107,7 +100,7 @@ pub(crate) fn reset_engine_for_tests() {
     zeroship_data_orm::schema_cache::reset_for_tests();
 }
 
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 pub mod fixtures;
 
 pub mod orm_context;
@@ -123,4 +116,4 @@ mod postgres_fixture;
 #[cfg(test)]
 mod live_tests;
 #[cfg(test)]
-use live_tests::{support, schema_fixture};
+use live_tests::{schema_fixture, support};

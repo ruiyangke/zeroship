@@ -140,9 +140,7 @@ pub mod driver;
 // stayed, and rustdoc then attached it to whatever came next. Deleted rather
 // than re-pointed: `backend/mod.rs:80` declares the module and carries its own.
 
-/// The `test-helpers` seam onto the driver, for integration targets that need a
-/// live server. Not compiled into a production build.
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 pub mod probe;
 
 use crate::exec::clear_pending_emits;

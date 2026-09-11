@@ -8,10 +8,6 @@ use crate::schema_fixture::{fixture_table_sql, fixture_table_sql_for};
 #[allow(unused_imports)]
 use zeroship_migrate::schema::query::FkEmission;
 
-use std::path::PathBuf;
-
-use zeroship_data_orm::backend_selection::new_sqlite_backend;
-
 use zeroship_data_sql::compile::raw_column_name;
 
 /// Drive a future to completion on a fresh compio runtime. The
@@ -71,19 +67,7 @@ fn bytes_column_stores_a_raw_blob_on_sqlite() {
         // A fresh backend has attached nothing: the matrix's app database is a
         // separate file (`<dir>/zs-default.sqlite`) reached through an ATTACH
         // alias, so re-attach it before the schema-qualified name resolves.
-        let backend = new_sqlite_backend(
-            PathBuf::from(dir.path()),
-            zeroship_data_v8::testing::isolate_key_source(),
-        )
-        .expect("open the parity backend");
-        backend
-            .attach_app_file("default")
-            .await
-            .expect("attach the matrix app database");
-        let client = backend
-            .fixture_session("default")
-            .await
-            .expect("acquire client");
+        let client = crate::live_tests::sqlite::Inspector::open(dir.path());
         // `query` materialises every cell as `Option<String>` and renders a BLOB
         // as `<N bytes blob>`, so ask SQLite itself for the discriminant and the
         // hex - the same route `p5_*` uses for ciphertext.
@@ -303,13 +287,15 @@ fn dispatch_sqlite_runtime(
 }
 
 fn assert_write_path_fast_path(label: &str) {
-    let counters = zeroship_data_orm::crud::write_path_counters_for_tests();
+    let counters = crate::live_tests::recording::id_probes();
     assert_eq!(
-        counters.target_row_resolution_calls, 0,
+        counters.len(),
+        0,
         "{label}: plain write must not resolve row ids: {counters:?}",
     );
     assert_eq!(
-        counters.upsert_conflict_probe_calls, 0,
+        counters.len(),
+        0,
         "{label}: plain write must not run an upsert conflict probe: {counters:?}",
     );
 }
@@ -359,19 +345,7 @@ const _procedures = { upsertInsert };
             "freshly inserted upsert row should start at version 1: {row}"
         );
 
-        let backend = new_sqlite_backend(
-            PathBuf::from(dir.path()),
-            zeroship_data_v8::testing::isolate_key_source(),
-        )
-        .expect("open backend");
-        backend
-            .attach_app_file("default")
-            .await
-            .expect("ensure default schema");
-        let client = backend
-            .fixture_session("default")
-            .await
-            .expect("acquire client");
+        let client = crate::live_tests::sqlite::Inspector::open(dir.path());
         let rows = client
             .query(
                 r#"SELECT id, version FROM "default"."users" WHERE email = 'mint@example.com'"#,
@@ -399,7 +373,7 @@ fn upsert_conflict_update_preserves_insert_only_fields_and_encrypts_sqlite_runti
     let _keys = with_root_key("c2_upsert_runtime_conflict", &"f".repeat(64));
 
     run(async {
-        use zeroship_data_orm::backend::sqlite::session::TypedCell;
+        use rusqlite::types::Value as TypedCell;
         use zeroship_data_orm::encryption;
 
         let dir = tempfile::tempdir().expect("tempdir");
@@ -486,19 +460,7 @@ const _procedures = { upsertConflict };
             "conflict update must auto-bump version"
         );
 
-        let backend = new_sqlite_backend(
-            PathBuf::from(dir.path()),
-            zeroship_data_v8::testing::isolate_key_source(),
-        )
-        .expect("open backend");
-        backend
-            .attach_app_file("default")
-            .await
-            .expect("ensure default schema");
-        let client = backend
-            .fixture_session("default")
-            .await
-            .expect("acquire client");
+        let client = crate::live_tests::sqlite::Inspector::open(dir.path());
         let raw_ssn = raw_column_name("ssn");
         let typed = client
             .query_typed(
@@ -559,11 +521,9 @@ const _procedures = { upsertConflict };
             other => panic!("ssn (the masked column) must be TEXT, got {other:?}"),
         }
 
-        let key = backend
-            .key_store()
-            .resolve("default", key_id)
-            .await
-            .expect("resolve key");
+        let keys =
+            zeroship_data_orm::encryption::KeyStore::new(crate::testing::isolate_key_source());
+        let key = keys.resolve("default", key_id).await.expect("resolve key");
         let plaintext = zeroship_data_orm::encryption::aead::decrypt(
             &key,
             &stored_blob,
@@ -584,7 +544,7 @@ fn update_non_id_filter_keeps_randomised_ciphertext_readable_sqlite_runtime() {
     let _keys = with_root_key("c1_update_non_id_runtime", &"7".repeat(64));
 
     run(async {
-        use zeroship_data_orm::backend::sqlite::session::TypedCell;
+        use rusqlite::types::Value as TypedCell;
         use zeroship_data_orm::encryption;
 
         let dir = tempfile::tempdir().expect("tempdir");
@@ -629,19 +589,7 @@ const _procedures = { seed, updateByEmail };
             "update by non-id filter should still target the seeded row"
         );
 
-        let backend = new_sqlite_backend(
-            PathBuf::from(dir.path()),
-            zeroship_data_v8::testing::isolate_key_source(),
-        )
-        .expect("open backend");
-        backend
-            .attach_app_file("default")
-            .await
-            .expect("ensure default schema");
-        let client = backend
-            .fixture_session("default")
-            .await
-            .expect("acquire client");
+        let client = crate::live_tests::sqlite::Inspector::open(dir.path());
         let raw_ssn = raw_column_name("ssn");
         let typed = client
             .query_typed(
@@ -676,11 +624,9 @@ const _procedures = { seed, updateByEmail };
             other => panic!("ssn (the masked column) must be TEXT, got {other:?}"),
         }
 
-        let key = backend
-            .key_store()
-            .resolve("default", key_id)
-            .await
-            .expect("resolve key");
+        let keys =
+            zeroship_data_orm::encryption::KeyStore::new(crate::testing::isolate_key_source());
+        let key = keys.resolve("default", key_id).await.expect("resolve key");
         let plaintext = zeroship_data_orm::encryption::aead::decrypt(
             &key,
             &stored_blob,
@@ -701,7 +647,7 @@ fn update_many_non_id_filter_encrypts_per_row_sqlite_runtime() {
     let _keys = with_root_key("c1_update_many_non_id_runtime", &"8".repeat(64));
 
     run(async {
-        use zeroship_data_orm::backend::sqlite::session::TypedCell;
+        use rusqlite::types::Value as TypedCell;
         use zeroship_data_orm::encryption;
 
         let dir = tempfile::tempdir().expect("tempdir");
@@ -754,7 +700,7 @@ const _procedures = { seed, updateManyByName };
         );
 
         dispatch_sqlite_runtime(&dir, &source, "seed");
-        zeroship_data_orm::crud::reset_write_path_counters_for_tests();
+        crate::live_tests::recording::clear();
         let updated =
             parity::extract_json(&dispatch_sqlite_runtime(&dir, &source, "updateManyByName"));
         assert_eq!(
@@ -762,36 +708,25 @@ const _procedures = { seed, updateManyByName };
             Some(2.0),
             "two rows should match the non-id updateMany filter: {updated}"
         );
-        let counters = zeroship_data_orm::crud::write_path_counters_for_tests();
+        let counters = crate::live_tests::recording::id_probes();
         assert_eq!(
-            counters.target_row_resolution_calls, 1,
+            counters.len(),
+            1,
             "encrypted updateMany must resolve one non-empty target set: {counters:?}"
         );
         assert!(
-            !counters.target_row_resolution_sql.is_empty(),
+            !counters.is_empty(),
             "the target-resolution SQL set must be non-empty: {counters:?}"
         );
         let expected_limit = format!(" LIMIT {}", zeroship_data_sql::compile::MAX_QUERY_LIMIT + 1);
-        for sql in &counters.target_row_resolution_sql {
+        for sql in &counters {
             assert!(
                 sql.ends_with(&expected_limit),
                 "updateMany target resolution must carry the row ceiling; sql={sql}"
             );
         }
 
-        let backend = new_sqlite_backend(
-            PathBuf::from(dir.path()),
-            zeroship_data_v8::testing::isolate_key_source(),
-        )
-        .expect("open backend");
-        backend
-            .attach_app_file("default")
-            .await
-            .expect("ensure default schema");
-        let client = backend
-            .fixture_session("default")
-            .await
-            .expect("acquire client");
+        let client = crate::live_tests::sqlite::Inspector::open(dir.path());
         let raw_ssn = raw_column_name("ssn");
         let typed = client
             .query_typed(
@@ -807,11 +742,9 @@ const _procedures = { seed, updateManyByName };
             .expect("SELECT typed updated rows");
         assert_eq!(typed.rows.len(), 2, "exactly two rows should be updated");
 
-        let key = backend
-            .key_store()
-            .resolve("default", key_id)
-            .await
-            .expect("resolve key");
+        let keys =
+            zeroship_data_orm::encryption::KeyStore::new(crate::testing::isolate_key_source());
+        let key = keys.resolve("default", key_id).await.expect("resolve key");
         for row in &typed.rows {
             let row_id = match &row[0] {
                 TypedCell::Text(id) => id.clone(),
@@ -856,7 +789,7 @@ fn update_many_randomised_target_cap_rejects_without_writes_sqlite_runtime() {
     let _keys = with_root_key("c1_update_many_target_cap_runtime", &"c".repeat(64));
 
     run(async {
-        use zeroship_data_orm::backend::sqlite::session::TypedCell;
+        use rusqlite::types::Value as TypedCell;
 
         let dir = tempfile::tempdir().expect("tempdir");
         let target_cap = usize::try_from(zeroship_data_sql::compile::MAX_QUERY_LIMIT)
@@ -899,41 +832,30 @@ const _procedures = { overflow };
 "#,
         );
 
-        zeroship_data_orm::crud::reset_write_path_counters_for_tests();
+        crate::live_tests::recording::clear();
         let result = parity::extract_json(&dispatch_sqlite_runtime(&dir, &source, "overflow"));
         assert_eq!(
             result["failure"]["code"], "update_many_target_limit_exceeded",
             "the bounded probe must reject an overflowing target set: {result}"
         );
-        let counters = zeroship_data_orm::crud::write_path_counters_for_tests();
+        let counters = crate::live_tests::recording::id_probes();
         assert_eq!(
-            counters.target_row_resolution_calls, 1,
+            counters.len(),
+            1,
             "overflow detection must use one bounded target probe: {counters:?}"
         );
         assert_eq!(
-            counters.target_row_resolution_sql.len(),
+            counters.len(),
             1,
             "the overflow SQL witness set must contain exactly the exercised probe"
         );
         let expected_limit = format!(" LIMIT {}", target_cap + 1);
         assert!(
-            counters.target_row_resolution_sql[0].ends_with(&expected_limit),
+            counters[0].ends_with(&expected_limit),
             "the overflow probe must fetch at most one row beyond the write cap: {counters:?}"
         );
 
-        let backend = new_sqlite_backend(
-            PathBuf::from(dir.path()),
-            zeroship_data_v8::testing::isolate_key_source(),
-        )
-        .expect("open backend");
-        backend
-            .attach_app_file("default")
-            .await
-            .expect("ensure default schema");
-        let client = backend
-            .fixture_session("default")
-            .await
-            .expect("acquire client");
+        let client = crate::live_tests::sqlite::Inspector::open(dir.path());
         let state = client
             .query_typed(
                 r#"SELECT COUNT(*), SUM(version), COUNT(ssn)
@@ -971,7 +893,7 @@ fn update_many_randomised_failure_rolls_back_committed_prefix_sqlite_runtime() {
     let _keys = with_root_key("c1_update_many_atomic_failure_runtime", &"a".repeat(64));
 
     run(async {
-        use zeroship_data_orm::backend::sqlite::session::TypedCell;
+        use rusqlite::types::Value as TypedCell;
 
         let dir = tempfile::tempdir().expect("tempdir");
         let schema = users_encrypted_ssn_schema(key_id);
@@ -1048,7 +970,7 @@ const _procedures = { seed, failBulk, failBulkInsideTransaction };
         );
 
         dispatch_sqlite_runtime(&dir, &source, "seed");
-        zeroship_data_orm::crud::reset_write_path_counters_for_tests();
+        crate::live_tests::recording::clear();
         let result = parity::extract_json(&dispatch_sqlite_runtime(&dir, &source, "failBulk"));
         let after = result["after"]
             .as_array()
@@ -1058,13 +980,14 @@ const _procedures = { seed, failBulk, failBulkInsideTransaction };
             2,
             "the exercised target set must be non-empty: {result}"
         );
-        let counters = zeroship_data_orm::crud::write_path_counters_for_tests();
+        let counters = crate::live_tests::recording::id_probes();
         assert_eq!(
-            counters.target_row_resolution_calls, 1,
+            counters.len(),
+            1,
             "the failing call must exercise one per-row fan-out target query: {counters:?}"
         );
         assert!(
-            !counters.target_row_resolution_sql.is_empty(),
+            !counters.is_empty(),
             "the failing fan-out SQL witness must be non-empty: {counters:?}"
         );
         assert_eq!(
@@ -1095,19 +1018,7 @@ const _procedures = { seed, failBulk, failBulkInsideTransaction };
             "after rejection, the caller must observe that no prefix committed"
         );
 
-        let backend = new_sqlite_backend(
-            PathBuf::from(dir.path()),
-            zeroship_data_v8::testing::isolate_key_source(),
-        )
-        .expect("open backend");
-        backend
-            .attach_app_file("default")
-            .await
-            .expect("ensure default schema");
-        let client = backend
-            .fixture_session("default")
-            .await
-            .expect("acquire client");
+        let client = crate::live_tests::sqlite::Inspector::open(dir.path());
         let typed = client
             .query_typed(
                 r#"SELECT email, version
@@ -1274,7 +1185,7 @@ const _procedures = { seed, updatePlain, updateManyPlain };
 
         dispatch_sqlite_runtime(&dir, &source, "seed");
 
-        zeroship_data_orm::crud::reset_write_path_counters_for_tests();
+        crate::live_tests::recording::clear();
         let updated = parity::extract_json(&dispatch_sqlite_runtime(&dir, &source, "updatePlain"));
         assert_eq!(
             updated.get("name").and_then(|v| v.as_str()),
@@ -1283,7 +1194,7 @@ const _procedures = { seed, updatePlain, updateManyPlain };
         );
         assert_write_path_fast_path("updateOne plain field");
 
-        zeroship_data_orm::crud::reset_write_path_counters_for_tests();
+        crate::live_tests::recording::clear();
         let updated_many =
             parity::extract_json(&dispatch_sqlite_runtime(&dir, &source, "updateManyPlain"));
         assert_eq!(
@@ -1339,7 +1250,7 @@ const _procedures = { seed, upsertPlainConflict };
         let seed_row = parity::extract_json(&seeded);
         let seed_id = seed_row["id"].as_str().expect("generated id");
 
-        zeroship_data_orm::crud::reset_write_path_counters_for_tests();
+        crate::live_tests::recording::clear();
         let updated = parity::extract_json(&dispatch_sqlite_runtime(
             &dir,
             &source,
@@ -1423,19 +1334,7 @@ const _procedures = { seed, nestedCasUpdate };
             "nested CAS rejection must carry the canonical code: {body}"
         );
 
-        let backend = new_sqlite_backend(
-            PathBuf::from(dir.path()),
-            zeroship_data_v8::testing::isolate_key_source(),
-        )
-        .expect("open backend");
-        backend
-            .attach_app_file("default")
-            .await
-            .expect("ensure default schema");
-        let client = backend
-            .fixture_session("default")
-            .await
-            .expect("acquire client");
+        let client = crate::live_tests::sqlite::Inspector::open(dir.path());
         let rows = client
             .query(
                 r#"SELECT name, version FROM "default"."users" WHERE email = 'alice@example.com'"#,
@@ -1515,19 +1414,7 @@ const _procedures = { seed, nestedCasUpdateMany };
             "nested CAS rejection must carry the canonical code: {body}"
         );
 
-        let backend = new_sqlite_backend(
-            PathBuf::from(dir.path()),
-            zeroship_data_v8::testing::isolate_key_source(),
-        )
-        .expect("open backend");
-        backend
-            .attach_app_file("default")
-            .await
-            .expect("ensure default schema");
-        let client = backend
-            .fixture_session("default")
-            .await
-            .expect("acquire client");
+        let client = crate::live_tests::sqlite::Inspector::open(dir.path());
         let rows = client
             .query(
                 r#"SELECT name, version FROM "default"."users" WHERE email = 'alice@example.com'"#,
@@ -1552,10 +1439,8 @@ const _procedures = { seed, nestedCasUpdateMany };
 #[allow(unused_imports)]
 use zeroship_data_orm::protection::Catalog;
 
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 #[allow(unused_imports)]
-use zeroship_data_orm::fixtures::DatabaseFixture;
-
 #[allow(unused_imports)]
 use zeroship_data_orm::search::Search;
 

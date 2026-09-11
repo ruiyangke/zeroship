@@ -29,9 +29,6 @@
 //! Docker and successful fixture startup are required.
 //! Run: `cargo xtask test data --filter 'test(mask_flip::)'`
 
-// `support` and `schema_fixture` are declared once by `tests/test_helpers.rs`,
-// the entry file this module hangs off; its header says why a second declaration
-// here would be a second copy of their statics.
 #[allow(unused_imports)]
 use crate::schema_fixture::{fixture_table_sql, fixture_table_sql_for};
 use crate::{schema_fixture, support};
@@ -559,7 +556,7 @@ fn the_real_value_is_still_stored_and_still_reachable_by_the_audited_path() {
             // The unmask fetch runs `SET LOCAL ROLE app_<id>_role`, so the per-app role
             // and its grants have to exist - the deploy's `zeroship migrate` creates
             // them, and this stands in for it.
-            zeroship_data_orm::auth::bootstrap::ensure_per_app_role(&pool, app)
+            crate::support::roles::ensure_per_app_role(&pool, app)
                 .await
                 .expect("per-app role, as the deploy would provision it");
             support::grant_runtime_select_columns(&pool, app, "people", &["id", &raw_col]).await;
@@ -675,7 +672,7 @@ async fn audited_unmask_fixture_with(
     // deploy's `zeroship migrate` creates them; this stands in for it. The
     // append privilege on the audit table comes from `ensure_per_app_role`
     // itself, which is why it runs AFTER the table is provisioned.
-    zeroship_data_orm::auth::bootstrap::ensure_per_app_role(pool, app)
+    crate::support::roles::ensure_per_app_role(pool, app)
         .await
         .expect("per-app role, as the deploy would provision it");
     let raw_columns: Vec<String> = masked

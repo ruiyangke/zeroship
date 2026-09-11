@@ -127,6 +127,7 @@ pub async fn grant_all_runtime_table_columns(pool: &compio_postgres::Pool, app: 
 }
 
 /// Grant only the columns an audited read fixture needs.
+#[allow(dead_code)]
 pub async fn grant_runtime_select_columns(
     pool: &compio_postgres::Pool,
     app: &str,
@@ -156,3 +157,5 @@ pub async fn grant_runtime_select_columns(
 
 mod tracing;
 pub use tracing::init_test_tracing;
+
+pub(crate) mod roles;

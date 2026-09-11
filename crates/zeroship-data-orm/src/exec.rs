@@ -398,33 +398,7 @@ pub fn clear_pending_emits(app_id: &str) {
     crate::tx_lanes::with_mut(|l| l.clear_pending_emits_for(app_id));
 }
 
-/// Reconstruct a [`TxRoute`] from the ambient parked-tx slot and the backend
-/// the caller already holds, for the no-isolate test helpers only.
-///
-/// **The backend is a parameter, and that is the whole point.** This used to
-/// read `crate::context::with(|c| c.backend())` - an ENGINE file reaching into
-/// the ADAPTER's per-isolate context. The gate kept it off
-/// `tests/lib/tier_direction_census.sh` and its own comment said cargo would not
-/// be as forgiving once the engine became a crate. It did not: `test-helpers` is
-/// a normal feature, so that read would have needed the adapter as a normal
-/// dependency of its own dependency.
-///
-/// The two `*_for_tests` wrappers that used to sit either side of this function
-/// moved to the adapter with it - `zeroship_data_v8::exec_mutation_with_emit_for_tests`
-/// and `zeroship_data_v8::exec_query_for_tests`, which resolve the backend
-/// through `tx_scope::ensure_backend()` where the thread context lives.
-///
-/// **The dialect is DERIVED from that backend, not assumed.** The two test
-/// constructors below it stamped `SqlDialect::Postgres` unconditionally until
-/// 2026-09-03, which made every SQLite harness that reaches this helper -
-/// `test_support::unit_route` and `crates/zeroship-data-v8/tests/sqlite_integration.rs` among them -
-/// carry a route claiming a dialect its connection does not speak. Nothing read
-/// it, so nothing failed; that is luck, not containment. Production reads the
-/// configured dialect BEFORE a backend exists and must not re-derive it (see
-/// [`crate::tx_route::TxRoute::dialect`]), but this helper is handed the open
-/// backend up front, so here the handle is the best answer available and asking
-/// it is strictly better than picking one.
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 pub fn ambient_route_for_tests(app_id: &str, backend: crate::backend::BackendHandle) -> TxRoute {
     let dialect = backend.dialect();
     let captured = if crate::tx_lanes::with(|l| l.has_tx_for(app_id)) {
@@ -1483,7 +1457,6 @@ mod tests {
     // (SET LOCAL inside an explicit transaction), the rollback-on-drop
     // reverts both, so the next checkout sees the clean login role and
     // default timeout.
-
 
     #[test]
     fn autocommit_cancelled_query_does_not_leak_role_or_timeout_to_pool() {

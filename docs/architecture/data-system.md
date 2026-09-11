@@ -381,7 +381,7 @@ than served the wrong columns.
 is `zs_bind_<gid>_e<E>`; an apply that advances the epoch mints the roles for `E+1` and drops those
 for `E-1`. An isolate carrying a stale epoch therefore fails at `SET LOCAL ROLE`, which is the
 **first statement of the setup batch that already exists** (`tx_session_setup_sql` and
-`autocommit_local_session_setup_sql`, `crates/zeroship-data-orm/src/auth/bootstrap.rs` and
+`autocommit_local_session_setup_sql`, `tests/fixtures/data/roles.rs` and
 `:226-233`, issued as one simple query at `crates/zeroship-data-orm/src/exec.rs`). Nothing has
 to remember to check: the batch is the only route to a usable connection, and a stale epoch never
 gets one.
@@ -441,7 +441,7 @@ the role graph ships.
 
 `__zeroship_admin` **does not exist.** It was deleted on 2026-08-27 - six tables and 32
 definer-rights routines - because the worker could call every one of them, and a privileged call the
-worker can make is not a boundary. `crates/zeroship-data-orm/src/auth/bootstrap.rs` records
+worker can make is not a boundary. `tests/fixtures/data/roles.rs` records
 that nothing replaced it, and `db/migrations-ts/` provisions no such schema. One live statement still
 names it and therefore fails on every database: the PITR placeholder at
 `crates/zeroship-data-orm/src/backend/postgres/implementation.rs`, whose own comment at `:839-844` says so.

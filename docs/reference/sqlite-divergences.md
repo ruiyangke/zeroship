@@ -50,6 +50,6 @@ For the **migration** authoring surface, the equivalent boundary — which DML t
 
 ## Test coverage
 
-SQLite-specific backend coverage lives in [crates/zeroship-data-v8/tests/sqlite_integration.rs](../../crates/zeroship-data-v8/tests/sqlite_integration.rs). The parity matrix helpers live in [crates/zeroship-data-v8/tests/parity/mod.rs](../../crates/zeroship-data-v8/tests/parity/mod.rs).
+SQLite-specific backend coverage lives in [crates/zeroship-data-orm/src/live_tests/sqlite_integration.rs](../../crates/zeroship-data-orm/src/live_tests/sqlite_integration.rs). The parity matrix helpers live in [crates/zeroship-data-v8/src/live_tests/parity/mod.rs](../../crates/zeroship-data-v8/src/live_tests/parity/mod.rs).
 
 The two rows above that compare the *tiers* rather than the engines — transaction isolation, and system timestamp resolution — are measured by [examples/db-todos/tests/database.test.ts](../../examples/db-todos/tests/database.test.ts), which runs one identical operation sequence against `pnpm dev` and against the same app deployed behind the gateway and diffs the results. A crate-local test cannot see either, because both are properties of the seam and not of a backend.

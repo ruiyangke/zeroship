@@ -6,17 +6,17 @@ schema!(pub test_schema = "../../tests/fixtures/schema.runtime.json");
 use test_schema::posts;
 
 mod calendar_date;
-mod timestamp;
 mod fixtures;
 mod identity;
 mod json;
 mod nested_temporal;
+mod protected_updates;
+mod schema_updates;
+mod timestamp;
+mod typed_arrays;
+mod typed_updates;
 mod update_operators;
 mod update_validation;
-mod schema_updates;
-mod protected_updates;
-mod typed_updates;
-mod typed_arrays;
 
 #[derive(Debug, FromRow)]
 #[orm(entity = posts)]
@@ -197,7 +197,7 @@ async fn postgres_native_models_round_trip() {
     for sql in table_statements(&app, &zeroship_migrate_postgres::DIALECT) {
         backend.execute_fixture(&sql, &[]).await.unwrap();
     }
-    crate::auth::bootstrap::ensure_per_app_role(backend.pool(), &app)
+    crate::support::roles::ensure_per_app_role(backend.pool(), &app)
         .await
         .unwrap();
     let role = zeroship_core::database_role::per_app_role_name(&app).unwrap();
@@ -213,10 +213,7 @@ async fn postgres_native_models_round_trip() {
         .unwrap();
     let db = Database::connect(
         binding,
-        crate::ConnectOptions::new(
-            postgres.url(),
-            LocalKeySource::EnvVar,
-        ),
+        crate::ConnectOptions::new(postgres.url(), LocalKeySource::EnvVar),
         vec![("posts".into(), <posts::Entity as Entity>::schema().clone())],
     )
     .await
@@ -940,7 +937,7 @@ async fn changing_backend_registration_refuses_an_open_transaction() {
     );
 }
 
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 use zeroship_data_orm::fixtures::DatabaseFixture;
 
 #[compio::test]

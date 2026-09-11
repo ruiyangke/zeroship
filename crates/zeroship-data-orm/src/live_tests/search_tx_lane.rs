@@ -37,9 +37,6 @@
 //! Docker and successful fixture startup are required.
 //! Run: `cargo xtask test data --filter 'test(search_tx_lane::)'`
 
-// `support` and `schema_fixture` are declared once by `tests/test_helpers.rs`,
-// the entry file this module hangs off; its header says why a second declaration
-// here would be a second copy of their statics.
 #[allow(unused_imports)]
 use crate::schema_fixture::{fixture_table_sql, fixture_table_sql_for};
 use crate::support;
@@ -119,7 +116,7 @@ async fn fixture(pool: &Rc<Pool>, url: &str, app: &str, collection: &str, schema
         .await
         .unwrap_or_else(|e| panic!("emitted DDL must apply: {e}\n{ddl}"));
 
-    zeroship_data_orm::auth::bootstrap::ensure_per_app_role(pool, app)
+    crate::support::roles::ensure_per_app_role(pool, app)
         .await
         .expect("per-app role, as the deploy would provision it");
     support::grant_all_runtime_table_columns(pool, app, collection).await;

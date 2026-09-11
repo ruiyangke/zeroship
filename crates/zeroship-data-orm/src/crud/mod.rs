@@ -46,22 +46,14 @@ use zeroship_data_sql::codecs::{lower_document, lower_documents, lower_filter, l
 
 use crate::protection::{mask_pass, protection_floor, unmask};
 
-// INSERT-time auto-population of platform system fields
-// (`id`, `created_by`, `updated_by`). Same visibility pattern as the
-// sibling encryption / mask passes so the integration tests can drive
-// `apply_system_fields_on_insert*` directly under the `test-helpers`
-// gate.
-#[cfg(not(feature = "test-helpers"))]
 pub(crate) mod system_fields_pass;
-#[cfg(feature = "test-helpers")]
-pub mod system_fields_pass;
 
 mod bytes_pass;
 pub mod read_pipeline;
 mod update_validation;
 mod write_pipeline;
 
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 pub use write_pipeline::{
     WritePathCounters, reset_write_path_counters_for_tests, write_path_counters_for_tests,
 };
@@ -505,13 +497,8 @@ pub async fn run_insert(
     let bq =
         compile::build_insert_with_dialect(binding.schema(), &coll, &schema, &doc, route.dialect())
             .map_err(DbError::from)?;
-    let rows = exec_mutation_with_emit(
-        bq,
-        &route,
-        &coll,
-        zeroship_data_orm::cdc::ChangeOp::Insert,
-    )
-    .await?;
+    let rows = exec_mutation_with_emit(bq, &route, &coll, zeroship_data_orm::cdc::ChangeOp::Insert)
+        .await?;
     read_pipeline::apply(
         &route,
         &binding,
@@ -556,13 +543,8 @@ pub async fn run_insert_many(
         route.dialect(),
     )
     .map_err(DbError::from)?;
-    let rows = exec_mutation_with_emit(
-        bq,
-        &route,
-        &coll,
-        zeroship_data_orm::cdc::ChangeOp::Insert,
-    )
-    .await?;
+    let rows = exec_mutation_with_emit(bq, &route, &coll, zeroship_data_orm::cdc::ChangeOp::Insert)
+        .await?;
     read_pipeline::apply(
         &route,
         &binding,
@@ -682,13 +664,8 @@ pub async fn run_update_one(
         &autobump,
     );
     let bq = built.map_err(DbError::from)?;
-    let rows = exec_mutation_with_emit(
-        bq,
-        &route,
-        &coll,
-        zeroship_data_orm::cdc::ChangeOp::Update,
-    )
-    .await?;
+    let rows = exec_mutation_with_emit(bq, &route, &coll, zeroship_data_orm::cdc::ChangeOp::Update)
+        .await?;
     let result = read_pipeline::apply(
         &route,
         &binding,
@@ -906,13 +883,8 @@ pub async fn run_update_many(
         &autobump,
     )
     .map_err(DbError::from)?;
-    let rows = exec_mutation_with_emit(
-        bq,
-        &route,
-        &coll,
-        zeroship_data_orm::cdc::ChangeOp::Update,
-    )
-    .await?;
+    let rows = exec_mutation_with_emit(bq, &route, &coll, zeroship_data_orm::cdc::ChangeOp::Update)
+        .await?;
     // CAS path on updateMany: with `{ id, version: N }` the
     // RETURNING is at most one row. Same empty-check as
     // updateOne so the SDK's CAS contract holds for both
@@ -1343,13 +1315,8 @@ pub async fn run_upsert(
     // same -- re-fetch. Finer-grained read-set narrowing could
     // distinguish INSERT from UPDATE; this coarser tagging
     // doesn't need to.
-    let rows = exec_mutation_with_emit(
-        bq,
-        &route,
-        &coll,
-        zeroship_data_orm::cdc::ChangeOp::Update,
-    )
-    .await?;
+    let rows = exec_mutation_with_emit(bq, &route, &coll, zeroship_data_orm::cdc::ChangeOp::Update)
+        .await?;
     read_pipeline::apply(
         &route,
         &binding,
@@ -1714,20 +1681,6 @@ pub async fn run_near(
 // `compile::build_find_or_create` SQL builder stays for now —
 // `upsert({where, create})` shape lands in a follow-up.
 
-// ===========================================================================
-// Transparent column encryption hooks
-// ===========================================================================
-/// `keys` and `dialect` are parameters for the same reason they are ones on
-/// [`write_pipeline::apply`]: this prep encrypts and lowers, and neither the
-/// key store nor the dialect is a routing decision. The production caller takes
-/// both off the route the insert will run on.
-///
-/// `pub` rather than private because the no-isolate test entry point
-/// `crate::prepare_insert_many_docs_for_tests` calls it. That helper lives at
-/// the crate root, on the ADAPTER side, precisely so the resolution of the two
-/// parameters stays there: an engine-side helper resolving them itself would be
-/// an ENGINE-to-ADAPTER call, which a `test-helpers` gate hides from the census
-/// but does not stop cargo refusing once the engine is its own crate.
 pub async fn prepare_insert_many_docs_for_binding(
     keys: &crate::encryption::KeyStore,
     dialect: compile::SqlDialect,
@@ -1749,26 +1702,13 @@ pub async fn prepare_insert_many_docs_for_binding(
     .await
 }
 
-// The two no-isolate test entry points that USED to sit here -
-// `prepare_insert_many_docs_for_write` and `finalize_rows_on_read_for_tests` -
-// moved to the crate root on 2026-09-03 and are now
-// `crate::prepare_insert_many_docs_for_tests` and
-// `crate::finalize_rows_on_read_for_tests`. They each resolved a backend (and
-// one of them a dialect) through `tx_scope`, which is ADAPTER, so this ENGINE
-// module held two calls up the lattice. Being `test-helpers`-gated hid them
-// from `tests/lib/tier_direction_census.sh`, which excises gated items - it did
-// not make them legal. `test-helpers` is a normal cargo feature, so the calls
-// compile into the library, and cargo refuses that direction outright once the
-// engine is a separate crate. Both helpers stand in for the V8 dispatcher,
-// which is adapter work, so the adapter is where they belong.
-
 /// Test helper that resolves the runtime data-access schema the way the CRUD
 /// passes do — through [`crate::descriptor::collection_schema`], the data
 /// plane's sole schema authority. Lets a test assert that the metadata the
 /// read/write passes will act on is exactly the descriptor entry the deploy
 /// installed, and that an undeclared collection is a typed refusal rather than
 /// an absent schema.
-#[cfg(feature = "test-helpers")]
+#[cfg(test)]
 pub fn runtime_schema_for_tests(app_id: &str, collection: &str) -> Result<Value, DbError> {
     let binding = DbBinding::cold_start(app_id);
     // Deep-clone out of the shared store: the helper's callers own and mutate
@@ -1777,11 +1717,6 @@ pub fn runtime_schema_for_tests(app_id: &str, collection: &str) -> Result<Value,
     crate::descriptor::collection_schema(&binding, collection).map(|facts| (*facts).clone())
 }
 
-/// Upsert's write-side prep. Unlike its `insert_many` sibling this is
-/// private with no `test-helpers` twin — nothing outside this crate
-/// called the `pub` arm, and the upsert path now needs the dispatch's
-/// [`TxRoute`] (its conflict probe issues a
-/// read that must land on the same connection as the write).
 async fn prepare_upsert_doc_for_write(
     doc: &mut Value,
     binding: &DbBinding,

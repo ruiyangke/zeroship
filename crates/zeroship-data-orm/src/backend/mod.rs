@@ -8,7 +8,7 @@ pub mod postgres;
 pub mod sqlite;
 pub use crate::backend_handle::BackendHandle;
 pub use crate::capability::{BusyPolicy, ScalarRead, SnapshotHandle, SnapshotOpts, UnmaskAuditRow};
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 pub use crate::capability::{LockScope, SNAPSHOT_RESTORE_LOCK_TAG};
 /// Host registration combining execution and ORM services. A connection driver
 /// implements only `driver::Driver`; application services are composed here.
@@ -22,9 +22,9 @@ pub trait Backend:
     fn publishes_committed_changes(&self) -> bool;
 }
 pub use crate::storage::{Backup, LockManager};
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 pub use postgres::lock_guard::LockGuard;
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 pub use postgres::{PgLockManager, lock_guard, pg_autocommit, pg_introspect, pg_session_sql};
 pub use postgres::{PostgresBackend, pg_error, pg_row_json};
 pub use sqlite::SqliteBackend;
@@ -54,7 +54,7 @@ mod tests {
         fn assert_impl<T: PgLockManager>() {}
         assert_impl::<PostgresBackend>();
     }
-    #[cfg(feature = "test-helpers")]
+    #[cfg(test)]
     #[allow(dead_code)]
     fn _assert_backup<T: Backup>() {}
     #[allow(dead_code)]
@@ -62,13 +62,13 @@ mod tests {
         fn assert_store<T: Fn(&BackendHandle) -> &crate::encryption::KeyStore>(_: T) {}
         assert_store(|handle: &BackendHandle| handle.key_store());
     }
-    #[cfg(feature = "test-helpers")]
+    #[cfg(test)]
     #[allow(dead_code)]
     fn _assert_postgres_backend_impls_backup() {
         fn assert_impl<T: Backup>() {}
         assert_impl::<PostgresBackend>();
     }
-    #[cfg(feature = "test-helpers")]
+    #[cfg(test)]
     #[allow(dead_code)]
     fn _assert_sqlite_backend_impls_backup() {
         fn assert_impl<T: Backup>() {}

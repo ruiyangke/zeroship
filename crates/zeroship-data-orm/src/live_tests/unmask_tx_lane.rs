@@ -33,9 +33,6 @@
 //! Docker and successful fixture startup are required.
 //! Run: `cargo xtask test data --filter 'test(unmask_tx_lane::)'`
 
-// `support` and `schema_fixture` are declared once by `tests/test_helpers.rs`,
-// the entry file this module hangs off; its header says why a second declaration
-// here would be a second copy of their statics.
 #[allow(unused_imports)]
 use crate::schema_fixture::{fixture_table_sql, fixture_table_sql_for};
 use crate::support;
@@ -127,7 +124,7 @@ async fn fixture_with_schema(pool: &Rc<Pool>, url: &str, app: &str, schema: Valu
     pool.batch_execute(&zeroship_migrate_server::provisioning::audit_unmask_table_sql(app))
         .await
         .expect("the audit table the deploy provisions");
-    zeroship_data_orm::auth::bootstrap::ensure_per_app_role(pool, app)
+    crate::support::roles::ensure_per_app_role(pool, app)
         .await
         .expect("per-app role, as the deploy would provision it");
     support::grant_all_runtime_table_columns(pool, app, "people").await;

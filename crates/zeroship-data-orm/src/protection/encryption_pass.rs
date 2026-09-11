@@ -37,7 +37,7 @@ type PendingEncryption = (
     Zeroizing<String>,
 );
 
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 pub async fn encrypt_row_on_write(
     keys: &KeyStore,
     app_id: &str,

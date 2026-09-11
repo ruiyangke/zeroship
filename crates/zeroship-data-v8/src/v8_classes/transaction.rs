@@ -643,8 +643,6 @@ mod tests {
 
     use zeroship_runtime::init_v8;
 
-    use zeroship_data_orm::binding::DbBinding;
-
     fn assert_absent(scope: &mut v8::PinScope, obj: v8::Local<v8::Object>, name: &str) {
         let key = v8::String::new(scope, name).unwrap();
         let v = obj.get(scope, key.into()).unwrap();
@@ -663,7 +661,7 @@ mod tests {
         let context = v8::Context::new(handle_scope, Default::default());
         let scope = &mut v8::ContextScope::new(handle_scope, context);
 
-        let binding = DbBinding::cold_start("test_app");
+        let binding = crate::testing::binding("test_app");
         let view = super::mint_tx_view(scope, &binding).expect("mint_tx_view");
 
         // None of the legacy `Transaction` methods, nor `transaction` /
@@ -702,7 +700,7 @@ mod tests {
         let context = v8::Context::new(handle_scope, Default::default());
         let scope = &mut v8::ContextScope::new(handle_scope, context);
 
-        let binding = DbBinding::cold_start("test_app");
+        let binding = crate::testing::binding("test_app");
         let view = super::mint_tx_view(scope, &binding).expect("mint_tx_view");
         let names = view
             .get_own_property_names(scope, v8::GetPropertyNamesArgs::default())
