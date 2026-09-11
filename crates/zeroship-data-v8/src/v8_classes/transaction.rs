@@ -195,7 +195,7 @@ pub fn transaction_dispatch<'s>(
     // unrelated request's `transaction()` read `true`, opened a SAVEPOINT
     // on the FIRST request's connection, reported success, and then lost
     // its row to the first request's ROLLBACK. Measured on both tiers by
-    // `tests/e2e_dev_vs_deployed_db.sh` (`cxOvl`).
+    // `examples/db-todos/tests/database.test.ts` (`cxOvl`).
     //
     // `current_tx_app` is true only inside the enclosing callback's own
     // continuation chain — see `crate::tx_scope`. SEC-1 still holds and is

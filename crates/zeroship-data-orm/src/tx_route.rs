@@ -16,7 +16,7 @@
 //! many requests over one isolate and hands control to another dispatch at
 //! every `.await`, and `pnpm dev` is a single isolate by construction
 //! (`zeroship serve --workers=1`). Measured on BOTH tiers by
-//! `tests/e2e_dev_vs_deployed_db.sh` (`cxPlain`):
+//! `examples/db-todos/tests/database.test.ts` (`cxPlain`):
 //!
 //! ```text
 //! request A   db.transaction(async tx => { insert; await …; throw })

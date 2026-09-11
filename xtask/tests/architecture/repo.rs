@@ -20,7 +20,15 @@ pub fn files(directory: &str, extensions: &[&str]) -> Vec<PathBuf> {
             if entry.file_type().unwrap().is_dir() {
                 if matches!(
                     entry.file_name().to_str(),
-                    Some("target" | "dist" | "node_modules" | ".git" | "wpt" | ".zeroship")
+                    Some(
+                        "target"
+                            | "dist"
+                            | "node_modules"
+                            | ".git"
+                            | "wpt"
+                            | ".zeroship"
+                            | ".artifacts"
+                    )
                 ) {
                     continue;
                 }

@@ -120,7 +120,7 @@ pub struct ErrorExtras<'a> {
 /// on both tiers (`sdks/vite-plugin/src/rpc-registry.ts` generates the
 /// synthetic entry and calls `createFetchHandler`), so
 /// `fetch-handler.ts`'s own 5xx rail is reachable in principle. It did not
-/// serve the constraint errors measured by `tests/e2e_dev_vs_deployed_db.sh`:
+/// serve the constraint errors measured by `examples/db-todos/tests/database.test.ts`:
 /// its `newRequestId()` returns a UUID, and those bodies carried
 /// `"request_id":"5"` / `"6"` — the u64 counter below. The two emit an
 /// identical body shape when there is no code, so the id format is the only
@@ -280,7 +280,7 @@ pub fn build_error_body(
 ///
 /// The two lists are hand-mirrored across a language boundary with nothing
 /// joining them, so a THIRD override added to `canonicalErrorCode` re-opens
-/// this silently. `tests/e2e_dev_vs_deployed_db.sh` is the only instrument
+/// this silently. `examples/db-todos/tests/database.test.ts` is the only instrument
 /// that could catch that, and it deliberately asserts the FK by row count
 /// rather than by error text.
 fn is_public_error_code(code: &str) -> bool {
@@ -328,7 +328,7 @@ fn is_public_error_code(code: &str) -> bool {
 /// stamped in `to_op_error`); before this existed the rail dropped the code on
 /// the floor and a creator inserting a duplicate email got
 /// `{"message":"internal error"}` — indistinguishable from the server falling
-/// over. Measured end to end by `tests/e2e_dev_vs_deployed_db.sh`.
+/// over. Measured end to end by `examples/db-todos/tests/database.test.ts`.
 ///
 /// The message stays blanked because it is written by the backend, not by us:
 /// Postgres says `duplicate key value violates unique constraint
@@ -734,7 +734,7 @@ mod tests {
     /// WHAT THIS TEST DOES NOT CATCH: it pins the two spellings that exist
     /// today. If `canonicalErrorCode` grows a third override, nothing here
     /// fails — the lists are hand-mirrored across a language boundary and
-    /// only `tests/e2e_dev_vs_deployed_db.sh` exercises the real join.
+    /// only `examples/db-todos/tests/database.test.ts` exercises the real join.
     #[test]
     fn sdk_canonicalised_codes_survive_the_5xx_sanitization_rail() {
         // (canonical spelling, whether the MESSAGE may also survive)
@@ -906,7 +906,7 @@ mod tests {
     /// A database CONSTRAINT violation must reach the caller with its
     /// `.code`, and without its message.
     ///
-    /// Measured 2026-08-10 by `tests/e2e_dev_vs_deployed_db.sh`: inserting a
+    /// Measured 2026-08-10 by `examples/db-todos/tests/database.test.ts`: inserting a
     /// todo whose `userId` names no user, and re-inserting a duplicate
     /// `users.email`, both came back as
     /// `{"message":"internal error","name":"Error","request_id":"5"}` — no

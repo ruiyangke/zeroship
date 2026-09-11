@@ -5,7 +5,7 @@ import { defineApp } from "@zeroship/server";
 // `{"code":"UNAUTHENTICATED","message":"authentication required"}` -- which is
 // exactly how this example shipped: green under `pnpm dev` (18 of 19 smoke
 // checks) and 100% unreachable once deployed. Measured by
-// `tests/e2e_dev_vs_deployed_db.sh` on its first run, 2026-08-10.
+// `examples/db-todos/tests/database.test.ts` on its first run, 2026-08-10.
 //
 // THE BUILD ALREADY SAID SO, in detail, and the example shipped anyway. Deleting
 // this file and rebuilding printed this when there were fourteen procedures

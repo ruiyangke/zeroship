@@ -17,7 +17,7 @@
 //! over one isolate and hands control to another dispatch at every
 //! `.await`, and `pnpm dev` is a single isolate by construction
 //! (`zeroship serve --workers=1`). Measured on both tiers by
-//! `tests/e2e_dev_vs_deployed_db.sh`:
+//! `examples/db-todos/tests/database.test.ts`:
 //!
 //! ```text
 //! request A   db.transaction(async tx => { insert; await …; throw })
@@ -241,7 +241,7 @@ mod tests {
     //!   - that every `dispatch_*` actually calls `capture`. Nothing at runtime
     //!     can check that; it is enforced by the TYPE (the exec entry points
     //!     take `&TxRoute`, and `TxRoute` has no other production constructor)
-    //!     and end to end by `tests/e2e_dev_vs_deployed_db.sh` (`cxPlain`).
+    //!     and end to end by `examples/db-todos/tests/database.test.ts` (`cxPlain`).
     //!   - the OTHER direction of the #254 defect - an app with a transaction
     //!     genuinely PARKED in the per-isolate slot while an unrelated dispatch
     //!     runs. Reaching that state needs a real `Session` (a live
