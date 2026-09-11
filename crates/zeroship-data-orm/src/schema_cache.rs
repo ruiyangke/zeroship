@@ -19,6 +19,7 @@ pub struct SchemaCache {
 impl SchemaCache {
     /// An empty cache. A fresh isolate has installed no schema.
     #[must_use]
+    #[cfg(any(test, feature = "test-helpers"))]
     pub fn new() -> Self {
         Self::default()
     }
@@ -102,13 +103,7 @@ impl SchemaCache {
     /// Install ONE collection's entry. Test fixtures use this narrow helper;
     /// production boot replaces a binding's complete descriptor through
     /// [`Self::replace_for_binding`].
-    ///
-    /// **Deliberately NOT feature-gated**, though its only callers are tests.
-    /// A `cfg(feature = "test-helpers")` here would be unreachable from a
-    /// consumer's `cargo test`: across a crate boundary the consumer's `test`
-    /// cfg cannot turn THIS crate's feature on, so plugin-db's test code would
-    /// call a method that does not exist. That is the hazard recorded in #162,
-    /// and three lines of always-present code is the cheap side of it.
+    #[cfg(any(test, feature = "test-helpers"))]
     pub fn insert_one(&mut self, binding: &DbBinding, collection: &str, schema: Value) {
         self.entries
             .insert(Self::key(binding, collection), Arc::new(schema));

@@ -833,6 +833,7 @@ impl SqliteSession {
     }
 
     /// Send an `Exec` command on an autocommit reservation and await the reply.
+    #[cfg(test)]
     pub async fn exec(&self, sql: &str, params: &[&str]) -> Result<u64, DbError> {
         self.exec_on(&self.autocommit_reservation(), sql, params)
             .await
@@ -1330,6 +1331,7 @@ type NextCommandGateSlot = Arc<Mutex<Option<NextCommandGateWorker>>>;
 /// Test helper: stall the next worker command before execution until the
 /// returned gate is released.
 #[cfg(any(test, feature = "test-helpers"))]
+#[derive(Debug)]
 pub struct NextCommandGate {
     entered_rx: flume::Receiver<()>,
     release_tx: flume::Sender<()>,

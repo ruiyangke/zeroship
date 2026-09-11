@@ -934,10 +934,7 @@ mod tests {
                 &rows,
                 "app_active_exec_mutation_with_emit_skips_local_emit_when_sqlite_cdc_publishes",
                 /* in_tx */ false,
-                // The SQLite arm: its commit hook publishes, so the local emit
-                // must short-circuit. This is the one site that passes `true`.
-                /* backend_publishes */
-                true,
+                backend_publishes_committed_changes(&handle),
                 "messages",
                 ChangeOp::Insert,
             );

@@ -86,6 +86,7 @@ use zeroship_data_orm::lock_policy::BoundedLockAcquire;
 /// warnings on common patterns (e.g. `let _ = acquire(...).await`).
 #[must_use = "LockGuard must be released via .release().await; \
               dropping it leaks the session-scoped advisory lock"]
+#[derive(Debug)]
 pub struct LockGuard {
     /// The pooled client that holds the advisory lock at session
     /// scope. `None` after `release()` has moved it
