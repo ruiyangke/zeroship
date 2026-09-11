@@ -2591,6 +2591,259 @@ mod sc1_driver {
         }
     }
 
+    async fn wait_for_advisory_block(admin: &Client, pid: i32, statement: &str) {
+        compio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let row = admin
+                    .query_one(
+                        "SELECT wait_event, query FROM pg_stat_activity WHERE pid = $1",
+                        &[&pid],
+                    )
+                    .await
+                    .expect("observe the blocked transaction statement");
+                let wait: Option<String> = row.get(0);
+                let query: String = row.get(1);
+                if wait.as_deref() == Some("advisory") && query.starts_with(statement) {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("the transaction must reach its advisory-lock barrier");
+    }
+
+    async fn settlement_rows(admin: &Client, app_id: &str) -> i64 {
+        admin
+            .query_one(
+                &format!("SELECT count(*) FROM \"{app_id}\".settlement"),
+                &[],
+            )
+            .await
+            .expect("inspect committed rows independently of the ORM")
+            .get(0)
+    }
+
+    async fn provision_settlement_table(admin: &Client, app_id: &str) {
+        let role = zeroship_core::database_role::per_app_role_name(app_id).unwrap();
+        admin
+            .batch_execute(&format!(
+                "CREATE TABLE \"{app_id}\".settlement (id int PRIMARY KEY); \
+                 GRANT SELECT, INSERT ON \"{app_id}\".settlement TO \"{role}\""
+            ))
+            .await
+            .expect("provision the transaction's data table");
+    }
+
+    #[test]
+    fn root_rollback_waits_for_the_active_statement_before_returning() {
+        use zeroship_data_orm::transaction::{exec_settle, SettleOutcome};
+
+        const APP: &str = "zs_sc1drv_waitrollback";
+        block_on(async {
+            let (_postgres, admin) = provision(APP).await;
+            let _session_guard = SessionGuard(APP);
+            provision_settlement_table(&admin, APP).await;
+            admin
+                .batch_execute("SELECT pg_advisory_lock(71001)")
+                .await
+                .unwrap();
+            probe::begin(APP, app_schema(APP), None, probe_backend().await)
+                .await
+                .expect("BEGIN");
+            let pid = probe::session_backend_pid(APP).unwrap();
+            let operation = compio::runtime::spawn(async {
+                probe::operation(
+                    APP,
+                    &format!(
+                        "INSERT INTO \"{APP}\".settlement SELECT 1 \
+                         FROM pg_advisory_xact_lock(71001)"
+                    ),
+                )
+                .await
+            });
+            wait_for_advisory_block(&admin, pid, "INSERT").await;
+
+            let mut settlement = Box::pin(exec_settle(APP, false, None));
+            assert!(
+                futures::poll!(&mut settlement).is_pending(),
+                "rollback cannot return while the statement still owns its session"
+            );
+            assert_eq!(probe::state(APP), Some(TxState::Quiescing));
+            assert_eq!(settlement_rows(&admin, APP).await, 0);
+
+            admin
+                .batch_execute("SELECT pg_advisory_unlock(71001)")
+                .await
+                .unwrap();
+            operation
+                .await
+                .unwrap()
+                .expect("the blocked insert finishes");
+            assert!(matches!(settlement.await, SettleOutcome::Ok));
+            assert_eq!(settlement_rows(&admin, APP).await, 0);
+            assert_eq!(probe::state(APP), None);
+            assert_eq!(
+                zeroship_data_v8::testing::pool_counts_for_tests(),
+                Some((1, 0, 1)),
+                "settlement returns after releasing its session"
+            );
+            teardown(&admin, APP).await;
+        });
+    }
+
+    #[test]
+    fn root_commit_waits_for_terminal_sql_and_keeps_its_attempt_result() {
+        use zeroship_data_orm::transaction::{exec_settle, SettleOutcome};
+
+        const APP: &str = "zs_sc1drv_waitcommit";
+        block_on(async {
+            let (_postgres, admin) = provision(APP).await;
+            let _session_guard = SessionGuard(APP);
+            provision_settlement_table(&admin, APP).await;
+            admin
+                .batch_execute(&format!(
+                    "CREATE FUNCTION \"{APP}\".commit_barrier() RETURNS trigger \
+                       LANGUAGE plpgsql AS $$ BEGIN \
+                         PERFORM pg_advisory_xact_lock(71003); RETURN NEW; END $$; \
+                     CREATE CONSTRAINT TRIGGER commit_barrier \
+                       AFTER INSERT ON \"{APP}\".settlement \
+                       DEFERRABLE INITIALLY DEFERRED FOR EACH ROW \
+                       EXECUTE FUNCTION \"{APP}\".commit_barrier(); \
+                     SELECT pg_advisory_lock(71002); \
+                     SELECT pg_advisory_lock(71003)"
+                ))
+                .await
+                .expect("hold distinct barriers for the statement and COMMIT");
+            probe::begin(APP, app_schema(APP), None, probe_backend().await)
+                .await
+                .expect("BEGIN");
+            let pid = probe::session_backend_pid(APP).unwrap();
+            let operation = compio::runtime::spawn(async {
+                probe::operation(
+                    APP,
+                    &format!(
+                        "INSERT INTO \"{APP}\".settlement SELECT 1 \
+                         FROM pg_advisory_xact_lock(71002)"
+                    ),
+                )
+                .await
+            });
+            wait_for_advisory_block(&admin, pid, "INSERT").await;
+
+            let mut settlement = Box::pin(exec_settle(APP, true, None));
+            assert!(
+                futures::poll!(&mut settlement).is_pending(),
+                "commit must wait for the outstanding statement"
+            );
+            assert_eq!(probe::state(APP), Some(TxState::Quiescing));
+            admin
+                .batch_execute("SELECT pg_advisory_unlock(71002)")
+                .await
+                .unwrap();
+            wait_for_advisory_block(&admin, pid, "COMMIT").await;
+            assert!(
+                futures::poll!(&mut settlement).is_pending(),
+                "statement completion alone does not prove COMMIT completed"
+            );
+            assert_eq!(settlement_rows(&admin, APP).await, 0);
+            admin
+                .batch_execute("SELECT pg_advisory_unlock(71003)")
+                .await
+                .unwrap();
+            operation
+                .await
+                .unwrap()
+                .expect("the insert and its terminal action finish");
+            assert_eq!(probe::state(APP), None);
+            assert_eq!(settlement_rows(&admin, APP).await, 1);
+
+            // Reuse the lane before polling the old caller's completed wait.
+            probe::begin(APP, app_schema(APP), None, probe_backend().await)
+                .await
+                .expect("the released session admits a replacement transaction");
+            assert_eq!(probe::session_backend_pid(APP), Some(pid));
+            assert!(matches!(settlement.await, SettleOutcome::Ok));
+            assert_eq!(probe::state(APP), Some(TxState::Idle));
+            probe::operation(APP, &format!("INSERT INTO \"{APP}\".settlement VALUES (2)"))
+                .await
+                .unwrap();
+            assert!(matches!(
+                exec_settle(APP, false, None).await,
+                SettleOutcome::Ok
+            ));
+            assert_eq!(settlement_rows(&admin, APP).await, 1);
+            teardown(&admin, APP).await;
+        });
+    }
+
+    #[test]
+    fn root_settlement_observes_deadline_cleanup_of_a_blocked_statement() {
+        use zeroship_data_orm::error::DbError;
+        use zeroship_data_orm::transaction::reducer::deadline::DeadlineKind;
+        use zeroship_data_orm::transaction::{exec_settle, SettleOutcome};
+
+        const APP: &str = "zs_sc1drv_waitdeadline";
+        block_on(async {
+            let (_postgres, admin) = provision(APP).await;
+            let _session_guard = SessionGuard(APP);
+            provision_settlement_table(&admin, APP).await;
+            admin
+                .batch_execute("SELECT pg_advisory_lock(71004)")
+                .await
+                .unwrap();
+            probe::begin(APP, app_schema(APP), None, probe_backend().await)
+                .await
+                .expect("BEGIN");
+            let pid = probe::session_backend_pid(APP).unwrap();
+            let operation = compio::runtime::spawn(async {
+                probe::operation(
+                    APP,
+                    &format!(
+                        "INSERT INTO \"{APP}\".settlement SELECT 1 \
+                         FROM pg_advisory_xact_lock(71004)"
+                    ),
+                )
+                .await
+            });
+            wait_for_advisory_block(&admin, pid, "INSERT").await;
+            let mut settlement = Box::pin(exec_settle(APP, false, None));
+            assert!(futures::poll!(&mut settlement).is_pending());
+            let expired = probe::fire_execution_deadline(APP).await;
+            assert_eq!(
+                expired.outcome,
+                Some(TerminalOutcome::Cancelled(CleanupCause::DeadlineExpired(
+                    DeadlineKind::Execution
+                )))
+            );
+            let error = operation
+                .await
+                .unwrap()
+                .expect_err("PostgreSQL cancels the insert");
+            assert!(error
+                .message_str()
+                .contains("canceling statement due to user request"));
+            match settlement.await {
+                SettleOutcome::SettleErr(DbError::Coded { code, .. }) => {
+                    assert_eq!(code, "transaction_deadline_expired");
+                }
+                outcome => {
+                    panic!("the waiter must receive the confirmed deadline outcome: {outcome:?}")
+                }
+            }
+            assert_eq!(settlement_rows(&admin, APP).await, 0);
+            assert_eq!(
+                zeroship_data_v8::testing::pool_counts_for_tests(),
+                Some((1, 0, 1)),
+                "the healthy connection is reusable after confirmed rollback"
+            );
+            admin
+                .batch_execute("SELECT pg_advisory_unlock(71004)")
+                .await
+                .unwrap();
+            teardown(&admin, APP).await;
+        });
+    }
+
     /// **The oracle-sampling trap, as an assertion.**
     ///
     /// A forced cleanup of a POISONED transaction must not withdraw the
