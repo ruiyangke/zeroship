@@ -195,3 +195,9 @@ runtime state that should survive restarts, like the SQLite dev database.
 `examples/kv-dashboard/` exercises every SDK method: JSON values, strings,
 TTL, counters, leases, cache-aside, namespacing, prefix list pagination, and
 cleanup.
+
+`cargo test -p zeroship-cli --test kv_deployment` builds this demo and checks its
+SDK contract through both local Vite and the deployed gateway. Testcontainers
+owns PostgreSQL and Redis; no shared Compose stack or backend URLs are needed.
+See the [KV test commands](../../crates/zeroship-kv/README.md) for the native
+driver, storage, and V8 suites and nextest usage.
