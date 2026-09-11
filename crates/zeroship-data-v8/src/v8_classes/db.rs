@@ -14,7 +14,7 @@
 //! Per-collection CRUD lives on the `Collection` wrapper, not here —
 //! every `find` / `insert` / `update` / `delete` etc. is a
 //! `#[v8_method]` on `Collection` that calls into the
-//! `crate::crud::dispatch_*` helpers.
+//! `super::dispatch` helpers.
 //!
 //! ## Platform-internal surface (behind `__platform`)
 //!
@@ -503,7 +503,7 @@ mod tests {
         // The descriptor store is PER-THREAD, so replacing this thread's
         // context is the whole isolation this fixture needs — it cannot reach
         // a concurrently-running test on another thread.
-        crate::reset_context_for_tests();
+        crate::testing::reset_context_for_tests();
 
         let pinned_runtime = runtime_for_deploy(APP, PINNED);
         let pinned_collection = mint_collection_binding(&pinned_runtime, APP, COLLECTION);
@@ -651,7 +651,7 @@ mod tests {
 
         // THE PROPERTY: the mint refuses it, rather than handing back a binding
         // that only fails one operation at a time.
-        crate::reset_context_for_tests();
+        crate::testing::reset_context_for_tests();
         let runtime = runtime_for_deploy(ILLEGAL, "deploy_mint_refusal");
         let minted = runtime.with_scope(|scope| super::mint_db(scope, ILLEGAL).is_some());
         runtime.exit_isolate();

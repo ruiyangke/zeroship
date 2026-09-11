@@ -19,7 +19,7 @@
 //! (Q-P9-C). `tx.posts.find(...)` works because each property is a real
 //! `Collection`; every CRUD method on it routes through the open
 //! transaction connection automatically, since
-//! [`crate::exec::run_sql`] consults
+//! the ORM executor consults
 //! `ThreadDbContext::tx_conns` whenever it is set (the
 //! orchestrator sets it for the duration of the transaction).
 //!
@@ -261,7 +261,7 @@ pub fn transaction_dispatch<'s>(
         // released on that path too.
         //
         // BEHAVIOUR CHANGE, stated rather than discovered: a cold
-        // `init_pool_async` now runs HERE, after `TxAdmission::acquire` but
+        // `initialize_backend` now runs HERE, after `TxAdmission::acquire` but
         // before the BEGIN, where it used to run deeper inside `open_session`.
         // It shortens the window the claim is held across, but it is a change
         // to admission timing, not a refactor.

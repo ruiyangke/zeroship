@@ -243,7 +243,8 @@ fn runtime_for(
     env_vars.insert("APP_ID".to_string(), app_id.to_string());
     let plugins: Vec<Arc<dyn NativePlugin>> = vec![
         DbService::new(DbServiceConfig {
-            url: url.to_string(),
+            connection: zeroship_data_orm::connection::ConnectionFactory::for_url(url)
+                .expect("valid database configuration"),
             cdc_relay: Some(relay.clone()),
             meter: None,
         })
@@ -1015,7 +1016,8 @@ fn db_live_stream_crosses_relay_and_v8_isolates_without_worker_replication() {
 
     let app_delete_result = io.block_on(async {
         let service = DbService::new(DbServiceConfig {
-            url: url.clone(),
+            connection: zeroship_data_orm::connection::ConnectionFactory::for_url(&url)
+                .expect("valid database configuration"),
             cdc_relay: None,
             meter: None,
         })

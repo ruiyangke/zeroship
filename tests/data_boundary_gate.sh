@@ -40,17 +40,17 @@ gate_arm context_ownership "$checked" 4
 
 adapter_dependency_is_forbidden() {
   case "$1" in
-    aes-gcm|hkdf|hmac|zeroize|rusqlite|sqlite-vec) return 0 ;;
+    aes-gcm|hkdf|hmac|zeroize|rusqlite|sqlite-vec|compio-postgres|zeroship-migrate-policy) return 0 ;;
     *) return 1 ;;
   esac
 }
 
-# Physical SQLite and encryption implementation dependencies belong to the ORM.
+# Driver construction and protection policy implementation belong to the ORM.
 # Adapter fixtures may still use them through dev-dependencies.
 adapter=$(cargo metadata --no-deps --format-version 1 | jq -ec '
   [.packages[] | select(.name == "zeroship-data-v8")] |
   if length == 1 then .[0] else error("adapter package missing or repeated") end')
-dependencies=$(jq -r '.dependencies[] | select(.kind == null) | .name' <<<"$adapter")
+dependencies=$(jq -r '.dependencies[] | select(.kind != "dev") | .name' <<<"$adapter")
 checked=0
 while IFS= read -r dependency; do
   [[ -n "$dependency" ]] || continue
@@ -76,12 +76,26 @@ while IFS= read -r file; do
 done < <(rg --files crates/zeroship-data-v8/src -g '*.rs')
 gate_arm adapter_exports "$checked" 1
 
+# Every source file participates, including adapter integration helpers.
+adapter_names_backend() {
+  rg -n '\b(compio_postgres|rusqlite|PostgresBackend|SqliteBackend|BackendUrl)\b'
+}
 checked=0
-for dependency in aes-gcm hkdf hmac zeroize rusqlite sqlite-vec; do
+while IFS= read -r file; do
+  checked=$((checked + 1))
+  if adapter_names_backend < "$file"; then
+    echo "FAIL: concrete backend knowledge in V8 adapter: $file"
+    failed=1
+  fi
+done < <(rg --files crates/zeroship-data-v8/src -g '*.rs')
+gate_arm adapter_backend_knowledge "$checked" 1
+
+checked=0
+for dependency in aes-gcm hkdf hmac zeroize rusqlite sqlite-vec compio-postgres zeroship-migrate-policy; do
   checked=$((checked + 1))
   adapter_dependency_is_forbidden "$dependency" || failed=1
 done
-for dependency in zeroship-data-orm zeroship-data-sql zeroship-runtime compio-postgres; do
+for dependency in zeroship-data-orm zeroship-data-sql zeroship-runtime; do
   checked=$((checked + 1))
   if adapter_dependency_is_forbidden "$dependency"; then failed=1; fi
 done
@@ -92,6 +106,14 @@ done
 for declaration in 'use zeroship_data_orm::cdc::broker;' 'pub(crate) use zeroship_data_sql::compile;'; do
   checked=$((checked + 1))
   if adapter_exports_owner <<<"$declaration" >/dev/null; then failed=1; fi
+done
+for declaration in 'compio_postgres::Pool' 'PostgresBackend::connect(url)' 'BackendUrl::Sqlite' 'rusqlite::Connection' 'SqliteBackend::open'; do
+  checked=$((checked + 1))
+  adapter_names_backend <<<"$declaration" >/dev/null || failed=1
+done
+for declaration in 'ConnectionFactory::for_url(url)' 'backend.ensure(keys)' 'BackendHandle'; do
+  checked=$((checked + 1))
+  if adapter_names_backend <<<"$declaration" >/dev/null; then failed=1; fi
 done
 gate_arm adapter_controls "$checked" 1
 

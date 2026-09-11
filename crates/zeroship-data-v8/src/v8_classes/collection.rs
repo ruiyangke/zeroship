@@ -3,7 +3,7 @@
 //! A `Collection` instance is returned by `Db::collection`.
 //! Each CRUD method on it decodes its V8 arguments directly into a
 //! `zeroship_data_sql::value::Value` (via `decode_native`)
-//! and calls the shared `dispatch_*` helper in [`crate::crud`] — no
+//! and calls the shared `dispatch_*` helper in [`super::dispatch`] — no
 //! JSON.stringify / parse round-trip on the CRUD hot path.
 
 #![allow(unsafe_code)]

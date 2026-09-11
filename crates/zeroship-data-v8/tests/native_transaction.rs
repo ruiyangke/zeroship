@@ -173,7 +173,7 @@ fn require_pg() -> String {
 /// Reset the adapter context; callers must release their local clients and
 /// pools before draining so those handles cannot keep connections alive.
 async fn drain_open_connections() {
-    zeroship_data_v8::reset_context_for_tests();
+    zeroship_data_v8::testing::reset_context_for_tests();
     assert!(
         compio_postgres::drain_connections(std::time::Duration::from_secs(2)).await,
         "fixture left database connections alive: {}",
@@ -202,7 +202,7 @@ fn reset_schema(url: &str, app: &str) {
         // authority, so a test that needs the `notes` table creates it. The
         // per-thread context still needs the URL
         // for the transaction orchestrator under test.
-        zeroship_data_v8::set_db_url_for_tests(&url);
+        zeroship_data_v8::testing::set_db_url_for_tests(&url);
         let pool = std::rc::Rc::new(compio_postgres::Pool::connect(&url, 2).await.unwrap());
         pool.batch_execute(&format!(
             r#"CREATE SCHEMA IF NOT EXISTS "{app}";
@@ -300,7 +300,7 @@ fn create_encrypted_users_table(url: &str, app: &str, key_id: &str) {
     let app = app.to_string();
     let _ = key_id;
     block_on(async move {
-        zeroship_data_v8::set_db_url_for_tests(&url);
+        zeroship_data_v8::testing::set_db_url_for_tests(&url);
         let pool = std::rc::Rc::new(compio_postgres::Pool::connect(&url, 2).await.unwrap());
         pool.batch_execute(&format!(
             r#"CREATE TABLE "{app}"."users" (
@@ -465,7 +465,8 @@ fn dispatch_zs_for_app_with_descriptor(
     }];
     let plugins: Vec<Arc<dyn NativePlugin>> = vec![
         DbService::new(DbServiceConfig {
-            url: url.to_string(),
+            connection: zeroship_data_orm::connection::ConnectionFactory::for_url(url)
+                .expect("valid database configuration"),
             cdc_relay: None,
             meter: None,
         })
@@ -1895,7 +1896,7 @@ fn update_many_randomised_failure_is_atomic_postgres() {
     reset_schema(&url, app);
     let key_id = "update_many_atomic_pg";
     create_encrypted_users_table(&url, app, key_id);
-    let _keys = zeroship_data_v8::supply_root_keys_for_tests(&[(key_id, &"b".repeat(64))]);
+    let _keys = zeroship_data_v8::testing::supply_root_keys_for_tests(&[(key_id, &"b".repeat(64))]);
 
     let src = build_encrypted_users_src(
         r#"
@@ -2568,14 +2569,14 @@ mod sc1_driver {
         let pool = Pool::connect(&pg_url(), 1)
             .await
             .expect("a one-connection pool for the driver to check out from");
-        zeroship_data_v8::set_postgres_pool_for_tests(std::rc::Rc::new(pool), &pg_url());
+        crate::support::install_postgres_pool(std::rc::Rc::new(pool), &pg_url());
         client
     }
 
     /// Drop everything the arm created, and clear this thread's driver state.
     async fn teardown(admin: &Client, app_id: &str) {
         probe::reset(app_id);
-        zeroship_data_v8::reset_context_for_tests();
+        zeroship_data_v8::testing::reset_context_for_tests();
         let role = zeroship_core::database_role::per_app_role_name(app_id)
             .expect("transaction fixture app id must produce a valid PostgreSQL role name");
         let _ = admin
@@ -2601,7 +2602,7 @@ mod sc1_driver {
     impl Drop for SessionGuard {
         fn drop(&mut self) {
             probe::reset(self.0);
-            zeroship_data_v8::reset_context_for_tests();
+            zeroship_data_v8::testing::reset_context_for_tests();
         }
     }
 
@@ -2676,7 +2677,7 @@ mod sc1_driver {
             // is the SAME backend. With max_size = 1 there is nothing else it
             // could be handed.
             let (idle, active, total) =
-                zeroship_data_v8::pool_counts_for_tests().expect("a pool is installed");
+                zeroship_data_v8::testing::pool_counts_for_tests().expect("a pool is installed");
             assert_eq!(
                 (idle, active, total),
                 (1, 0, 1),
@@ -2745,7 +2746,7 @@ mod sc1_driver {
                 .await
                 .expect("BEGIN");
             let (_, _, total_before) =
-                zeroship_data_v8::pool_counts_for_tests().expect("a pool is installed");
+                zeroship_data_v8::testing::pool_counts_for_tests().expect("a pool is installed");
             assert_eq!(total_before, 1, "one connection, checked out");
 
             // Another future owns the session, and NOTHING IS RUNNING ON IT.
@@ -2780,7 +2781,7 @@ mod sc1_driver {
             held.restore();
 
             let (idle, _, total_after) =
-                zeroship_data_v8::pool_counts_for_tests().expect("a pool is installed");
+                zeroship_data_v8::testing::pool_counts_for_tests().expect("a pool is installed");
             assert_eq!(
                 idle, 0,
                 "a withdrawn session must not be published as idle - a plain \
@@ -2942,7 +2943,7 @@ mod sc1_driver {
             );
 
             let (idle, active, total) =
-                zeroship_data_v8::pool_counts_for_tests().expect("a pool is installed");
+                zeroship_data_v8::testing::pool_counts_for_tests().expect("a pool is installed");
             assert_eq!(
                 (idle, active, total),
                 (1, 0, 1),
@@ -3194,7 +3195,7 @@ mod sc1_driver {
                 "Preparing holds no session: the client is acquired by IssueBegin"
             );
             let (idle_before, _, _) =
-                zeroship_data_v8::pool_counts_for_tests().expect("a pool is installed");
+                zeroship_data_v8::testing::pool_counts_for_tests().expect("a pool is installed");
 
             let fired = probe::fire_execution_deadline(APP).await;
 
@@ -3217,7 +3218,7 @@ mod sc1_driver {
             );
 
             let (idle_after, active_after, _) =
-                zeroship_data_v8::pool_counts_for_tests().expect("a pool is installed");
+                zeroship_data_v8::testing::pool_counts_for_tests().expect("a pool is installed");
             assert_eq!(
                 (idle_after, active_after),
                 (idle_before, 0),

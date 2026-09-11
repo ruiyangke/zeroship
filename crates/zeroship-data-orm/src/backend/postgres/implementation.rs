@@ -16,10 +16,8 @@ use zeroship_data_orm::storage::LockManager;
 
 /// PostgreSQL adapter backed by an owned compio pool.
 ///
-/// Holds the `Rc<Pool>` for the configured URL. The pool itself is
-/// created by `zeroship_data_v8::init_pool_async` (the adapter tier, which
-/// this crate must not name as a dependency) and stashed in the per-isolate
-/// context; this wrapper just provides the trait facade.
+/// Holds the local pool, keys and catalog state for the configured URL.
+/// The ORM connection factory constructs this backend on its compio thread.
 pub struct PostgresBackend {
     pool: Rc<compio_postgres::Pool>,
     /// Configured URL, retained for backend configuration accessors.

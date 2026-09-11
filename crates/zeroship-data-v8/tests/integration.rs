@@ -80,7 +80,7 @@ async fn require_pg() -> String {
             // `fixture_session`, which reads the URL from the
             // per-thread context. Tests that drive the orchestrator directly
             // need the URL installed in the context before the call.
-            zeroship_data_v8::set_db_url_for_tests(&url);
+            zeroship_data_v8::testing::set_db_url_for_tests(&url);
             url
         }
         Err(e) => {
@@ -285,7 +285,7 @@ async fn release_pg(pool: std::rc::Rc<Pool>) {
 async fn drain_pg() {
     // The context can hold its own pool handle and a parked transaction
     // client; those keep connections counted, so clear it before waiting.
-    zeroship_data_v8::reset_context_for_tests();
+    zeroship_data_v8::testing::reset_context_for_tests();
     if !compio_postgres::drain_connections(std::time::Duration::from_secs(2)).await {
         eprintln!(
             "DRAIN-TIMEOUT: {} connection(s) still live",
@@ -2551,12 +2551,12 @@ async fn gap_b_commit_drains_pending_emits_to_broker() {
     let app = app.as_str();
     let sub = zeroship_data_orm::cdc::broker::subscribe(app, "users");
 
-    zeroship_data_v8::push_pending_emit_for_tests(gapb_ev(app, "users", 1));
-    zeroship_data_v8::push_pending_emit_for_tests(gapb_ev(app, "users", 2));
+    zeroship_data_v8::testing::push_pending_emit_for_tests(gapb_ev(app, "users", 1));
+    zeroship_data_v8::testing::push_pending_emit_for_tests(gapb_ev(app, "users", 2));
     // Pre-drain: subscriber must observe nothing (events still queued).
     assert!(sub.pop().is_none(), "events must not leak before commit");
 
-    zeroship_data_v8::drain_pending_emits_for_tests(app);
+    zeroship_data_v8::testing::drain_pending_emits_for_tests(app);
 
     let mut pks: Vec<String> = Vec::new();
     while let Some(zeroship_data_orm::cdc::broker::SubscriptionMessage::Change(ev)) = sub.pop() {
@@ -2577,9 +2577,9 @@ async fn gap_b_rollback_clears_pending_emits_silently() {
     let app = app.as_str();
     let sub = zeroship_data_orm::cdc::broker::subscribe(app, "users");
 
-    zeroship_data_v8::push_pending_emit_for_tests(gapb_ev(app, "users", 42));
-    zeroship_data_v8::push_pending_emit_for_tests(gapb_ev(app, "users", 43));
-    zeroship_data_v8::clear_pending_emits_for_tests(app);
+    zeroship_data_v8::testing::push_pending_emit_for_tests(gapb_ev(app, "users", 42));
+    zeroship_data_v8::testing::push_pending_emit_for_tests(gapb_ev(app, "users", 43));
+    zeroship_data_v8::testing::clear_pending_emits_for_tests(app);
 
     assert!(
         sub.pop().is_none(),
@@ -2596,7 +2596,7 @@ async fn gap_b_end_to_end_insert_inside_tx_defers_emit_until_commit() {
     // call. Pre-commit the broker stays empty; post-drain it sees
     // the insert.
     let url = require_pg().await;
-    zeroship_data_v8::set_db_url_for_tests(&url);
+    zeroship_data_v8::testing::set_db_url_for_tests(&url);
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
 
     let app = crate::test_app_id!();
@@ -2636,7 +2636,7 @@ async fn gap_b_end_to_end_insert_inside_tx_defers_emit_until_commit() {
     let sub = zeroship_data_orm::cdc::broker::subscribe(app, "users");
 
     // Open the production transaction protocol.
-    zeroship_data_v8::begin_transaction_for_tests(app, &url).await;
+    crate::support::begin_transaction(app, &url).await;
 
     let role = zeroship_core::database_role::per_app_role_name(app).unwrap();
     pool.batch_execute(&format!(r#"GRANT SELECT, INSERT ON "{app}"."users" TO "{role}"; GRANT USAGE ON ALL SEQUENCES IN SCHEMA "{app}" TO "{role}""#)).await.unwrap();
@@ -2650,7 +2650,7 @@ async fn gap_b_end_to_end_insert_inside_tx_defers_emit_until_commit() {
         &zeroship_data_sql::value!({ "name": "alice" }),
     )
     .expect("build_insert");
-    let _ = zeroship_data_v8::exec_mutation_with_emit_for_tests(
+    let _ = zeroship_data_v8::testing::exec_mutation_with_emit_for_tests(
         bq,
         app,
         "users",
@@ -2871,7 +2871,7 @@ async fn vector_search_returns_k_nearest() {
     let backend = zeroship_data_orm::backend::PostgresBackend::new(
         pool.clone(),
         url.clone(),
-        zeroship_data_v8::isolate_key_source(),
+        zeroship_data_v8::testing::isolate_key_source(),
     );
     // The search's projection is the descriptor's field list; install the entry
     // this deploy's runtime descriptor would have planted at boot.
@@ -2995,7 +2995,7 @@ async fn pgvector_extension_missing_reports_typed_error() {
     let backend = zeroship_data_orm::backend::PostgresBackend::new(
         pool.clone(),
         url.clone(),
-        zeroship_data_v8::isolate_key_source(),
+        zeroship_data_v8::testing::isolate_key_source(),
     );
 
     // No descriptor entry is installed for `vector_missing`, and that is
@@ -3240,7 +3240,7 @@ async fn near_returns_within_radius() {
     let backend = zeroship_data_orm::backend::PostgresBackend::new(
         pool.clone(),
         url.clone(),
-        zeroship_data_v8::isolate_key_source(),
+        zeroship_data_v8::testing::isolate_key_source(),
     );
     let rows = zeroship_data_orm::search::Search::spatial_near(
         &backend,
@@ -3335,7 +3335,7 @@ async fn postgis_extension_missing_reports_typed_error() {
     let backend = zeroship_data_orm::backend::PostgresBackend::new(
         pool.clone(),
         url.clone(),
-        zeroship_data_v8::isolate_key_source(),
+        zeroship_data_v8::testing::isolate_key_source(),
     );
 
     // No descriptor entry, deliberately: the extension probe runs BEFORE the
@@ -3432,8 +3432,8 @@ use zeroship_data_orm::encryption;
 ///
 /// The returned guard withdraws the keys on drop; keep it alive for the
 /// test body.
-fn with_root_key(key_id: &str, root_hex: &str) -> zeroship_data_v8::SuppliedRootKeysGuard {
-    zeroship_data_v8::supply_root_keys_for_tests(&[(key_id, root_hex)])
+fn with_root_key(key_id: &str, root_hex: &str) -> zeroship_data_v8::testing::SuppliedRootKeysGuard {
+    zeroship_data_v8::testing::supply_root_keys_for_tests(&[(key_id, root_hex)])
 }
 
 /// Gate #1: round-trip an encrypted string column. Insert a
@@ -3471,7 +3471,7 @@ async fn encrypted_column_round_trip_randomised() {
     let backend = zeroship_data_orm::backend::PostgresBackend::new(
         pool.clone(),
         url.clone(),
-        zeroship_data_v8::isolate_key_source(),
+        zeroship_data_v8::testing::isolate_key_source(),
     );
     let key = backend
         .key_store()
@@ -3559,7 +3559,7 @@ async fn encrypted_randomised_row_swap_rejected() {
     let backend = zeroship_data_orm::backend::PostgresBackend::new(
         pool.clone(),
         url.clone(),
-        zeroship_data_v8::isolate_key_source(),
+        zeroship_data_v8::testing::isolate_key_source(),
     );
     let key = backend
         .key_store()
@@ -3677,7 +3677,7 @@ async fn encrypted_deterministic_equality_lookup() {
     let backend = zeroship_data_orm::backend::PostgresBackend::new(
         pool.clone(),
         url.clone(),
-        zeroship_data_v8::isolate_key_source(),
+        zeroship_data_v8::testing::isolate_key_source(),
     );
     let key = backend
         .key_store()
@@ -3842,7 +3842,7 @@ CREATE TABLE "{app}"."people" ({PG_SYSTEM_COLUMNS},
     // Install the pool into the per-isolate context so the pipelines' own SQL
     // lands on this database, and install the DESCRIPTOR ENTRY the deploy would
     // have installed — exactly what the production register path does.
-    zeroship_data_v8::set_postgres_pool_for_tests(std::rc::Rc::clone(&pool), &url);
+    crate::support::install_postgres_pool(std::rc::Rc::clone(&pool), &url);
     zeroship_data_orm::cache_schema_for_tests(app, "people", schema.clone());
 
     // Sanity: the resolution the CRUD passes will perform returns BOTH goodies.
@@ -3869,7 +3869,7 @@ CREATE TABLE "{app}"."people" ({PG_SYSTEM_COLUMNS},
         "phone": "415-555-0142",
         "embedding": [0.1, 0.2, 0.3],
     }]);
-    zeroship_data_v8::prepare_insert_many_docs_for_tests(&mut docs, app, "people", None)
+    zeroship_data_v8::testing::prepare_insert_many_docs_for_tests(&mut docs, app, "people", None)
         .await
         .expect("write pipeline");
 
@@ -3947,7 +3947,7 @@ CREATE TABLE "{app}"."people" ({PG_SYSTEM_COLUMNS},
     assert_eq!(raw.len(), 1);
     let row = zeroship_data_orm::backend::postgres::pg_row_json::row_to_value_for_bench(&raw[0]).unwrap();
 
-    let finalized = zeroship_data_v8::finalize_rows_on_read_for_tests(app, "people", vec![row])
+    let finalized = zeroship_data_v8::testing::finalize_rows_on_read_for_tests(app, "people", vec![row])
         .await
         .expect("read pipeline");
     let out = &finalized[0];
@@ -4085,7 +4085,7 @@ CREATE TABLE "{app}"."people" ({PG_SYSTEM_COLUMNS},
 
     // Install the runtime backend and the descriptor entry the runtime plants
     // natively at boot.
-    zeroship_data_v8::set_postgres_pool_for_tests(std::rc::Rc::clone(&pool), &url);
+    crate::support::install_postgres_pool(std::rc::Rc::clone(&pool), &url);
     zeroship_data_orm::cache_schema_for_tests(app, "people", schema.clone());
 
     // The resolution the CRUD passes will perform returns BOTH goodies.
@@ -4106,7 +4106,7 @@ CREATE TABLE "{app}"."people" ({PG_SYSTEM_COLUMNS},
         "ssn": "987-65-4321",
         "phone": "650-555-0199",
     }]);
-    zeroship_data_v8::prepare_insert_many_docs_for_tests(&mut docs, app, "people", None)
+    zeroship_data_v8::testing::prepare_insert_many_docs_for_tests(&mut docs, app, "people", None)
         .await
         .expect("write pipeline");
     let doc = &docs[0];
@@ -4172,7 +4172,7 @@ CREATE TABLE "{app}"."people" ({PG_SYSTEM_COLUMNS},
         .unwrap();
     assert_eq!(raw.len(), 1);
     let row = zeroship_data_orm::backend::postgres::pg_row_json::row_to_value_for_bench(&raw[0]).unwrap();
-    let finalized = zeroship_data_v8::finalize_rows_on_read_for_tests(app, "people", vec![row])
+    let finalized = zeroship_data_v8::testing::finalize_rows_on_read_for_tests(app, "people", vec![row])
         .await
         .expect("read pipeline");
     let out = &finalized[0];
@@ -4222,12 +4222,12 @@ async fn encrypted_column_missing_key_typed_error() {
     // `ZEROSHIP_COLUMN_KEY_MISSING_TEST` exported outside the test would
     // have turned this assertion green-for-the-wrong-reason. An empty
     // set cannot.
-    let _keys = zeroship_data_v8::supply_root_keys_for_tests(&[]);
+    let _keys = zeroship_data_v8::testing::supply_root_keys_for_tests(&[]);
 
     let backend = zeroship_data_orm::backend::PostgresBackend::new(
         pool.clone(),
         url.clone(),
-        zeroship_data_v8::isolate_key_source(),
+        zeroship_data_v8::testing::isolate_key_source(),
     );
     let err = backend
         .key_store()
@@ -4364,7 +4364,7 @@ async fn snapshot_during_migration_returns_typed_error() {
     let backend = zeroship_data_orm::backend::PostgresBackend::new(
         pool.clone(),
         url.clone(),
-        zeroship_data_v8::isolate_key_source(),
+        zeroship_data_v8::testing::isolate_key_source(),
     );
     let app_id = crate::test_app_id!();
     let app_id = app_id.as_str();
@@ -4488,7 +4488,7 @@ async fn snapshot_restore_round_trip_pg() {
     let backend = zeroship_data_orm::backend::PostgresBackend::new(
         pool.clone(),
         url.clone(),
-        zeroship_data_v8::isolate_key_source(),
+        zeroship_data_v8::testing::isolate_key_source(),
     );
 
     // Snapshot to a tempdir-backed file:// URI.
@@ -4595,7 +4595,7 @@ async fn snapshot_uri_content_hash_round_trip() {
     let backend = zeroship_data_orm::backend::PostgresBackend::new(
         pool.clone(),
         url.clone(),
-        zeroship_data_v8::isolate_key_source(),
+        zeroship_data_v8::testing::isolate_key_source(),
     );
     let dir = tempfile::tempdir().unwrap();
     let dest_path = dir.path().join("hash_check.dump");
@@ -5266,9 +5266,9 @@ async fn exec_autocommit_query_runs_under_per_app_role() {
     zeroship_data_orm::auth::bootstrap::ensure_per_app_role(&pool, app)
         .await
         .unwrap();
-    zeroship_data_v8::set_db_url_for_tests(&url);
+    zeroship_data_v8::testing::set_db_url_for_tests(&url);
 
-    let rows = zeroship_data_v8::exec_query_for_tests(
+    let rows = zeroship_data_v8::testing::exec_query_for_tests(
         app,
         zeroship_data_sql::compile::BuiltQuery {
             sql: "SELECT current_user AS u".to_string(),
@@ -5369,7 +5369,7 @@ async fn vector_search_runs_under_per_app_role_via_rls() {
     let backend = zeroship_data_orm::backend::PostgresBackend::new(
         login_pool.clone(),
         login_url,
-        zeroship_data_v8::isolate_key_source(),
+        zeroship_data_v8::testing::isolate_key_source(),
     );
     let rows = zeroship_data_orm::search::Search::vector_search(
         &backend,
@@ -5472,7 +5472,7 @@ async fn spatial_near_runs_under_per_app_role_via_rls() {
     let backend = zeroship_data_orm::backend::PostgresBackend::new(
         login_pool.clone(),
         login_url,
-        zeroship_data_v8::isolate_key_source(),
+        zeroship_data_v8::testing::isolate_key_source(),
     );
     let rows = zeroship_data_orm::search::Search::spatial_near(
         &backend,
@@ -5576,9 +5576,9 @@ async fn unmask_fetch_runs_under_per_app_role_via_rls() {
          the role fence"
     );
 
-    zeroship_data_v8::set_postgres_pool_for_tests(login_pool.clone(), &login_url);
+    crate::support::install_postgres_pool(login_pool.clone(), &login_url);
     zeroship_data_orm::cache_schema_for_tests(app, coll, schema);
-    zeroship_data_v8::clear_mask_policy_cache_for_tests(app);
+    zeroship_data_v8::testing::clear_mask_policy_cache_for_tests(app);
 
     let result = unmask::dispatch_unmask(
         &unmask_route(app).await,
@@ -5683,7 +5683,7 @@ async fn unmask_encrypted_column_on_pg_reads_bytea_raw_sibling() {
     let backend = zeroship_data_orm::backend::PostgresBackend::new(
         admin_pool.clone(),
         url.clone(),
-        zeroship_data_v8::isolate_key_source(),
+        zeroship_data_v8::testing::isolate_key_source(),
     );
     let key = backend
         .key_store()
@@ -5715,9 +5715,9 @@ async fn unmask_encrypted_column_on_pg_reads_bytea_raw_sibling() {
     let (login_url, login_pool) =
         provision_platform_login_pool(&admin_pool, &url, login_role, "test", &role, app).await;
 
-    zeroship_data_v8::set_postgres_pool_for_tests(login_pool.clone(), &login_url);
+    crate::support::install_postgres_pool(login_pool.clone(), &login_url);
     zeroship_data_orm::cache_schema_for_tests(app, coll, schema);
-    zeroship_data_v8::clear_mask_policy_cache_for_tests(app);
+    zeroship_data_v8::testing::clear_mask_policy_cache_for_tests(app);
 
     let result = unmask::dispatch_unmask(
         &unmask_route(app).await,
@@ -5862,9 +5862,9 @@ async fn unmask_audit_insert_runs_under_the_per_app_role_not_the_login_role() {
         "the login role must reach nothing ambiently under WITH INHERIT FALSE"
     );
 
-    zeroship_data_v8::set_postgres_pool_for_tests(login_pool.clone(), &login_url);
+    crate::support::install_postgres_pool(login_pool.clone(), &login_url);
     zeroship_data_orm::cache_schema_for_tests(app, coll, schema);
-    zeroship_data_v8::clear_mask_policy_cache_for_tests(app);
+    zeroship_data_v8::testing::clear_mask_policy_cache_for_tests(app);
 
     let result = unmask::dispatch_unmask(
         &unmask_route(app).await,
@@ -5970,9 +5970,9 @@ async fn pg_declared_mask_policy_authorizes_unmask_without_durable_store() {
     .unwrap();
     support::grant_runtime_select_columns(&pool, app, coll, &["id", &ssn_raw]).await;
 
-    zeroship_data_v8::set_postgres_pool_for_tests(pool.clone(), &url);
+    crate::support::install_postgres_pool(pool.clone(), &url);
     zeroship_data_orm::cache_schema_for_tests(app, coll, schema);
-    zeroship_data_v8::clear_mask_policy_cache_for_tests(app);
+    zeroship_data_v8::testing::clear_mask_policy_cache_for_tests(app);
 
     // The boot-time install `installSchema` performs. Before the fix
     // this issued `SELECT set_mask_policy(...)` against the platform-owned
@@ -6265,7 +6265,7 @@ async fn a_dedicated_client_is_a_pool_checkout_and_returns_on_drop() {
     let backend = zeroship_data_orm::backend::PostgresBackend::new(
         std::rc::Rc::clone(&pool),
         url.clone(),
-        zeroship_data_v8::isolate_key_source(),
+        zeroship_data_v8::testing::isolate_key_source(),
     );
 
     let active_before = pool.active_count();
@@ -6323,7 +6323,7 @@ async fn concurrent_dedicated_clients_are_bounded_by_the_pool() {
     let backend = zeroship_data_orm::backend::PostgresBackend::new(
         std::rc::Rc::clone(&pool),
         url.clone(),
-        zeroship_data_v8::isolate_key_source(),
+        zeroship_data_v8::testing::isolate_key_source(),
     );
 
     use zeroship_data_orm::fixtures::DatabaseFixture;
