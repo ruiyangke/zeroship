@@ -247,7 +247,7 @@ echo "  ok   SMTP sink answering on ${SMTP_SINK}"
 # Observed 2026-08-27: 127.0.0.1:5440 was held by `zs-auth-pg-5440` (up 12
 # days) running wal_level=replica, max_prepared_transactions=0. Both
 # LOAD-BEARING values were wrong, the `pg_has_logical_wal`-guarded tests in
-# crates/zeroship-data-orm/src/tests/postgres/mod.rs skipped-and-counted-as-passed,
+# the former ORM integration suite skipped-and-counted-as-passed,
 # and nothing in any printed number said so. That reading is the argument for
 # the guards being refusals today - it is not a description of them: `skip` and
 # the crate that announced it are deleted, and the same wrong server now takes
@@ -269,9 +269,8 @@ if command -v docker >/dev/null 2>&1; then
       echo "  ok   PostgreSQL wal_level=logical (logical-decoding tests will run)"
     else
       echo "  WARN PostgreSQL wal_level=${wal:-unknown}, not 'logical'." >&2
-      echo "       The pg_has_logical_wal-guarded tests in" >&2
-      echo "       crates/zeroship-data-orm/src/tests/postgres/mod.rs will FAIL" >&2
-      echo "       against this server. Setting it is postmaster-level: ALTER" >&2
+      echo "       Suites using this server cannot verify logical replication." >&2
+      echo "       Setting it is postmaster-level: ALTER" >&2
       echo "       SYSTEM SET needs a RESTART, not a reload, and the compose" >&2
       echo "       postgres already carries -c wal_level=logical." >&2
     fi

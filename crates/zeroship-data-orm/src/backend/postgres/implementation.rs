@@ -581,7 +581,7 @@ mod tests {
     //! Even those need an `Rc<compio_postgres::Pool>` to construct, and
     //! `Pool::connect` requires a live Postgres listener. There is no
     //! stub / no-IO constructor. The async methods need both a Pool
-    //! AND a real `Client`; they're exercised by `crates/zeroship-data-orm/src/tests/postgres/mod.rs`.
+    //! AND a real `Client`; they're exercised by `crates/zeroship-data-orm/src/tests/postgres/schema.rs`.
     //!
     //! That leaves *compile-time* tests as the highest-signal coverage
     //! we can add in `--lib`:
