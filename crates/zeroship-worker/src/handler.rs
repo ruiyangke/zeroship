@@ -1674,12 +1674,8 @@ pub(crate) mod tests {
 
     static V8_INIT: Once = Once::new();
 
-    // `pub(super)` here and on `tmpdir` / `usage_value` below, so
-    // `workflow_tests` at the foot of this file - a SIBLING module of this
-    // one, not a child - can reach them. It is gated on a cargo feature and so
-    // cannot live inside this module; those three are the only things it needs
-    // from here, and duplicating them would be three more copies to keep in
-    // step (one of them the V8 one-shot).
+    // `pub(super)` lets the sibling `workflow_tests` module share V8 setup,
+    // temporary directories and usage assertions.
     pub(super) fn init_runtime() {
         V8_INIT.call_once(init_v8);
     }
@@ -4199,10 +4195,8 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
         })
     }
 
-    // Postgres is not optional for this workspace's tests (see
-    // tests/fixtures/session_keys.rs); the workflow-apply tests below cannot
-    // do without it, so this panics with the provisioning command rather than
-    // let them report a pass for a check they never ran.
+    // Workflow tests require migrated PostgreSQL. Missing configuration fails
+    // with the provisioning command so an unrun database check cannot pass.
     fn workflow_test_db_url() -> String {
         zeroship_core::config::test_database_url()
     }
