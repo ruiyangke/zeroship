@@ -161,6 +161,7 @@ async fn read_on_route<T>(
     read: impl std::future::Future<Output = Result<T, DbError>>,
 ) -> Result<T, DbError> {
     if route.in_tx() {
+        route.check_scope()?;
         crate::transaction::driver::execute_operation(route.app_id(), read).await
     } else {
         read.await

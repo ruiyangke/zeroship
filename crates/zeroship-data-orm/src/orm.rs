@@ -20,6 +20,7 @@ pub struct Database {
     backend: BackendHandle,
     actor_id: Option<String>,
     scope: Option<Rc<Cell<bool>>>,
+    transaction_scope: Option<crate::transaction::scope::TransactionScope>,
 }
 
 impl Database {
@@ -40,6 +41,7 @@ impl Database {
             backend,
             actor_id: None,
             scope: None,
+            transaction_scope: None,
         }
     }
 
@@ -124,6 +126,9 @@ impl Database {
                 let _guard = ScopeGuard(active.clone());
                 let mut transaction = self.clone();
                 transaction.scope = Some(active.clone());
+                transaction.transaction_scope = Some(
+                    crate::transaction::scope::TransactionScope::current(self.binding.app_id())?,
+                );
                 let result = body(transaction).await;
                 active.set(false);
                 frame.finish(result).await
@@ -137,7 +142,7 @@ impl Database {
 
     fn capture_route(&self) -> CapturedRoute {
         CapturedRoute::capture(
-            self.scope.as_ref().map(|_| self.binding.app_id()),
+            self.transaction_scope.as_ref(),
             self.binding.app_id(),
             self.binding.schema().clone(),
             self.backend.dialect(),

@@ -1,67 +1,13 @@
-//! Async-scoped "am I inside a transaction callback" marker.
+//! Preserve ORM transaction scope through V8 promise continuations.
 //!
-//! ## Why this exists
-//!
-//! `env.db.transaction(fn)` has to decide, at call time, whether it is
-//! opening a **new** transaction (`BEGIN`) or **nesting** inside one that
-//! is already open (`SAVEPOINT`). Until 2026-08-10 that decision read
-//! `ThreadDbContext::has_tx_for` — "does this app currently have a
-//! transaction open on this isolate?". That accessor no longer exists on
-//! `ThreadDbContext`; the live reading of the same fact is
-//! `zeroship_data_orm::tx_lanes::TxLanes::has_tx_for`, and the point below
-//! is that neither one answers the question the decision needs answered.
-//!
-//! That is a *temporal* test standing in for a *structural* one, and the
-//! two come apart the moment two transactions for one app overlap in
-//! time. They do overlap: a worker OS thread multiplexes many requests
-//! over one isolate and hands control to another dispatch at every
-//! `.await`, and `pnpm dev` is a single isolate by construction
-//! (`zeroship serve --workers=1`). Measured on both tiers by
-//! `examples/db-todos/tests/database.test.ts`:
-//!
-//! ```text
-//! request A   db.transaction(async tx => { insert; await …; throw })
-//! request B                     db.transaction(async tx => { insert })  // resolves "committed"
-//! ```
-//!
-//! B read `has_tx_for == true`, opened a SAVEPOINT on **A's** connection,
-//! reported success — and A's `ROLLBACK` then destroyed B's row. Two
-//! unrelated end users' work, entangled, with the loser told it had
-//! committed.
-//!
-//! ## The discriminator
-//!
-//! Nesting is a property of the **call's async context**, not of the
-//! app's wall-clock state: a `transaction()` call nests exactly when it
-//! runs inside the enclosing callback's continuation chain. V8 v147 has
-//! the primitive for that — `Isolate::SetContinuationPreservedEmbedderData`,
-//! the same slot `node:async_hooks`' `AsyncLocalStorage` uses (see
-//! `crates/zeroship-runtime/src/node/async_hooks/als.rs`). The slot holds a JS
-//! `Map`, and V8 carries it across every async hop, restoring it when a
-//! promise reaction runs.
-//!
-//! So: [`enter`] plants `app_id` under our own registry Symbol for the
-//! duration of the synchronous `user_fn.call(...)` frame, every
-//! continuation that branches off inside the callback inherits it, and
-//! [`current_tx_app`] reads it back. A concurrent dispatch's continuations
-//! branched off *before* that frame and therefore see nothing — which is
-//! the whole point.
-//!
-//! ## Interop with `AsyncLocalStorage`
-//!
-//! The slot is shared with ALS, so this module obeys the same convention:
-//! the value is a `v8::Map`, entries are keyed by Symbol, and [`enter`]
-//! CLONES the map before adding its entry (mutating in place would leak
-//! the entry into sibling async branches that captured the map by
-//! reference). Our key comes from the global symbol registry rather than
-//! a per-instance Symbol, because there is exactly one transaction scope
-//! per isolate and it must be readable from a different call site than
-//! the one that wrote it.
+//! The shared continuation-preserved Map follows AsyncLocalStorage's
+//! clone-before-write convention. Our symbol holds the app, session generation
+//! and savepoint frame. Promise reactions retain that identity after settlement;
+//! the ORM then refuses them instead of borrowing a replacement transaction.
+//! Unrelated async branches retain their original Map and route to the pool.
 
-/// Global-registry key for the transaction-scope entry in the shared
-/// continuation-preserved `Map`. Namespaced so it cannot collide with a
-/// creator's own `Symbol.for(...)` key.
 use zeroship_data_orm::error::DbError;
+use zeroship_data_orm::transaction::scope::TransactionScope;
 
 const SCOPE_SYMBOL_KEY: &str = "zeroship.plugin-db.txScope";
 
@@ -100,31 +46,34 @@ fn clone_context_map<'s>(
     dst
 }
 
-/// The `app_id` whose `transaction()` callback the CURRENT async context
-/// is executing inside, or `None` at top level.
-///
-/// `None` is the answer for a dispatch that merely *overlaps* another
-/// app-level transaction in time, which is exactly the case the old
-/// `has_tx_for` test got wrong.
-pub(crate) fn current_tx_app(scope: &mut v8::PinScope<'_, '_>) -> Option<String> {
+/// Decode the transaction scope inherited by this async continuation.
+pub(crate) fn current_tx_scope(scope: &mut v8::PinScope<'_, '_>) -> Option<TransactionScope> {
     let map = read_context_map(scope)?;
     let sym = scope_symbol(scope)?;
     let value = map.get(scope, sym.into())?;
-    if value.is_undefined() || value.is_null() {
-        return None;
-    }
-    Some(value.to_rust_string_lossy(scope))
+    let value = v8::Local::<v8::Array>::try_from(value).ok()?;
+    let app = value.get_index(scope, 0)?.to_rust_string_lossy(scope);
+    let generation = v8::Local::<v8::BigInt>::try_from(value.get_index(scope, 1)?).ok()?;
+    let frame = v8::Local::<v8::BigInt>::try_from(value.get_index(scope, 2)?).ok()?;
+    Some(TransactionScope::observed(
+        app,
+        generation.u64_value().0,
+        frame.u64_value().0,
+    ))
 }
 
-/// Plant `app_id` as the current transaction scope. Returns the previous
+/// Plant a captured transaction identity. Returns the previous
 /// slot value, which the caller MUST hand to [`leave`] on every exit path
 /// so a sibling branch is not left inside a scope it never entered.
 pub(crate) fn enter(
     scope: &mut v8::PinScope<'_, '_>,
-    app_id: &str,
+    transaction: &TransactionScope,
 ) -> Option<v8::Global<v8::Value>> {
     let sym = scope_symbol(scope)?;
-    let value = v8::String::new(scope, app_id)?;
+    let app = v8::String::new(scope, transaction.app_id())?;
+    let generation = v8::BigInt::new_from_u64(scope, transaction.generation());
+    let frame = v8::BigInt::new_from_u64(scope, transaction.frame());
+    let value = v8::Array::new_with_elements(scope, &[app.into(), generation.into(), frame.into()]);
     let prev = scope.get_continuation_preserved_embedder_data();
     let prev_global = v8::Global::new(scope, prev);
 
@@ -199,7 +148,7 @@ pub(crate) fn capture_route(
     binding: &zeroship_data_orm::binding::DbBinding,
 ) -> crate::tx_route::CapturedRoute {
     crate::tx_route::CapturedRoute::capture(
-        current_tx_app(scope).as_deref(),
+        current_tx_scope(scope).as_ref(),
         binding.app_id(),
         binding.schema().clone(),
         configured_dialect(),
@@ -321,7 +270,10 @@ mod tests {
     #[test]
     fn dispatch_inside_the_callback_routes_to_the_transaction() {
         in_scope!(let scope);
-        let prev = super::enter(scope, "app_a");
+        let prev = super::enter(
+            scope,
+            &super::TransactionScope::observed("app_a".to_owned(), 1, 1),
+        );
         assert!(super::capture_route(scope, &app_a_binding()).in_tx());
         super::leave(scope, prev);
         assert!(
@@ -333,7 +285,10 @@ mod tests {
     #[test]
     fn a_co_resident_apps_transaction_scope_does_not_capture_this_app() {
         in_scope!(let scope);
-        let prev = super::enter(scope, "app_other");
+        let prev = super::enter(
+            scope,
+            &super::TransactionScope::observed("app_other".to_owned(), 2, 1),
+        );
         assert!(
             !super::capture_route(scope, &app_a_binding()).in_tx(),
             "SEC-1: app_a must not join app_other's transaction"
@@ -356,7 +311,10 @@ mod tests {
     #[test]
     fn capture_is_not_the_ambient_has_tx_for_answer() {
         in_scope!(let scope);
-        let prev = super::enter(scope, "app_a");
+        let prev = super::enter(
+            scope,
+            &super::TransactionScope::observed("app_a".to_owned(), 1, 1),
+        );
         let ambient = zeroship_data_orm::transaction::is_active("app_a");
         let captured = super::capture_route(scope, &app_a_binding()).in_tx();
         super::leave(scope, prev);

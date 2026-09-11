@@ -27,12 +27,7 @@ use crate::metrics::{DB_READS, DB_ROWS_WRITTEN, DB_WRITES, emit_db_metric};
 /// which is the mirror image of the defect `TxRoute` fixes. Mirrors
 /// `transaction::transaction_dispatch`'s `transaction_scope_expired`.
 fn tx_scope_expired() -> DbError {
-    DbError::validation_hinted(
-        "transaction_scope_expired",
-        "db: this operation was issued inside a transaction that has already settled".to_string(),
-        "Every env.db call started inside a db.transaction(...) callback must be awaited before \
-         the callback returns; work left running past the callback has no transaction to run on.",
-    )
+    crate::transaction::scope::expired()
 }
 
 /// The route says "in transaction" and the transaction is still open, but
@@ -80,6 +75,7 @@ fn tx_slot_unavailable(app_id: &str) -> DbError {
 /// [`crate::backend_handle`] need the same claim, and they must not re-derive
 /// the classification.
 pub(crate) fn take_tx_lane(route: &TxRoute) -> Result<crate::tx_lanes::TxClientSlotGuard, DbError> {
+    route.check_scope()?;
     crate::tx_lanes::TxClientSlotGuard::take(route.app_id())
         .map_err(|_| tx_slot_unavailable(route.app_id()))
 }
@@ -88,6 +84,7 @@ pub(crate) fn take_tx_lane(route: &TxRoute) -> Result<crate::tx_lanes::TxClientS
 /// dispatch was issued inside that transaction, otherwise the pool.
 pub async fn run_sql(route: &TxRoute, sql: &str, params: &[Value]) -> Result<Vec<Value>, DbError> {
     if route.in_tx() {
+        route.check_scope()?;
         return crate::transaction::driver::execute_operation(route.app_id(), async {
             let lane = take_tx_lane(route)?;
             route.backend().validate_session(lane.client())?;

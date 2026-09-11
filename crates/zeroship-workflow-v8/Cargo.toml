@@ -13,5 +13,10 @@ compio = { workspace = true }
 serde_json = { workspace = true }
 v8 = { workspace = true }
 
+[dev-dependencies]
+tempfile = { workspace = true }
+uuid = { workspace = true }
+rusqlite = { workspace = true, features = ["bundled"] }
+
 [lints]
 workspace = true
