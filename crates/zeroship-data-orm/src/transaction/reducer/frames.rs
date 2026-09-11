@@ -29,7 +29,7 @@ use std::collections::BTreeSet;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 // `pub`, and the fourth item in this crate whose zero-ish reader count would
 // have narrowed it wrongly. Phase 0.5's audit tried `pub` on
-// 2026-09-02: `crates/zeroship-data-v8/src/tests/native_transaction.rs` binds one from
+// 2026-09-02: `crates/zeroship-data-v8/src/tests/postgres/transactions.rs` binds one from
 // `probe::open_frame(APP)` and compares two of them, never writing the type's
 // name, so six errors. Its siblings in this file narrowed cleanly. See the
 // return-position rule in tests/lib/pub_fence_census.sh.

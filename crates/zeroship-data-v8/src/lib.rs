@@ -374,7 +374,7 @@ mod backend_init_tests {
 ///
 /// WHY AN EQUALITY TEST AND NOT AN INTEGRATION TEST. The obvious alternative -
 /// provision through the writer, then read through the reader - is what
-/// `src/tests/integration.rs` looks like it does and does NOT: it computes the name
+/// `src/tests/postgres/workflow.rs` looks like it does and does NOT: it computes the name
 /// with the READER, then creates and drops that schema as its own fixture, so a
 /// drift in the writer alone leaves it green. A test that builds its own
 /// precondition cannot detect a disagreement between two producers.

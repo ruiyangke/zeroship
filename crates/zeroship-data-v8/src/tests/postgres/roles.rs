@@ -37,7 +37,10 @@ use zeroship_data_orm::error::DbError;
 // so it arrives as a trait from plugin-db rather than an inherent method.
 use zeroship_data_v8::op_error::ToOpError;
 
-async fn connect_test_client() -> (crate::tests::fixtures::postgres::Postgres, compio_postgres::Client) {
+async fn connect_test_client() -> (
+    crate::tests::fixtures::postgres::Postgres,
+    compio_postgres::Client,
+) {
     let postgres = crate::tests::fixtures::postgres::Postgres::start();
     let url = postgres.url();
     let (client, connection) = compio_postgres::connect(&url, NoTls)

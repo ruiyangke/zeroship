@@ -162,7 +162,7 @@ mod live_reserved_sweep_tests {
     /// is a private `async fn` that resolves its backend out of the isolate
     /// context, which this module has no reason to stand up. So this case cannot
     /// catch the column list drifting apart from the DDL; the live `unmask()`
-    /// cases in `crates/zeroship-data-orm/src/tests/integration.rs` are what covers that. What it IS here to
+    /// cases in `crates/zeroship-data-orm/src/tests/postgres/mod.rs` are what covers that. What it IS here to
     /// catch is the privilege, which those cases run as the owning superuser and
     /// therefore cannot see.
     fn audit_insert_sql(app: &str) -> String {

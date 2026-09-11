@@ -17,7 +17,8 @@ URL validation, backend selection, pool configuration, and concurrent lazy
 opening all stay in the ORM. Hosts can inject a custom `BackendFactory` without
 changing V8 bindings or application code.
 
-Adapter tests live in `src/tests/` and use private setup modules. Query
+Adapter tests live in `src/tests/postgres/` and `src/tests/sqlite/`, grouped by
+behavior. Private setup and parity fixtures live in `src/tests/fixtures/`. Query
 recording wraps the public backend interface; persisted SQLite values are
 inspected independently with the SQLite driver. Engine contracts live in the
 ORM crate. Concrete drivers and migration policy are dev dependencies only;

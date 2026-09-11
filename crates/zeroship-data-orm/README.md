@@ -181,6 +181,8 @@ entries are keyed by the complete app/deploy/schema binding.
 
 Physical value codecs live with SQL compilation in `zeroship-data-sql`.
 `Catalog` and `Search` are the runtime service contracts. Database contracts
-live in `src/tests/`; their host owns the runtime, connections and ORM
-context through teardown. Raw setup and snapshot fixtures compile under
+live in `src/tests/postgres/` and `src/tests/sqlite/`, grouped by behavior.
+`tests::fixtures::Host::test` passes an explicit fixture owner to the test body;
+it owns the runtime, connections and ORM context through teardown. Shared state
+setup and tracing capture stay inside `tests::fixtures`. Snapshot fixtures compile under
 `#[cfg(test)]`. Application code uses the native driver/session contract.

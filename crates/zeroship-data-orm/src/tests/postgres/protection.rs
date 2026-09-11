@@ -29,9 +29,9 @@
 //! Docker and successful fixture startup are required.
 //! Run: `cargo xtask test data --filter 'test(mask_flip::)'`
 
+use crate::tests::fixtures::Host;
 #[allow(unused_imports)]
 use crate::tests::fixtures::schema::{fixture_table_sql, fixture_table_sql_for};
-use crate::tests::fixtures::Host;
 use crate::tests::fixtures::{self, schema};
 #[allow(unused_imports)]
 use zeroship_migrate::schema::query::FkEmission;
@@ -1701,11 +1701,7 @@ fn a_bulk_unmask_batch_with_one_forbidden_column_is_refused_whole() {
                 "wider_policy",
                 DbBinding::cold_start(app).schema().clone(),
             );
-            crate::tests::fixtures::cache_schema_for_deploy(
-                &redeployed,
-                "people",
-                schema.clone(),
-            );
+            crate::tests::fixtures::cache_schema_for_deploy(&redeployed, "people", schema.clone());
             install_mask_policy(&redeployed, value!({ "support": ["pii", "pci"] }))
                 .expect("install the new deployment's policy");
             let granted =
@@ -1876,11 +1872,7 @@ fn a_query_hint_naming_one_forbidden_column_is_refused_whole() {
                 "wider_policy",
                 DbBinding::cold_start(app).schema().clone(),
             );
-            crate::tests::fixtures::cache_schema_for_deploy(
-                &redeployed,
-                "people",
-                schema.clone(),
-            );
+            crate::tests::fixtures::cache_schema_for_deploy(&redeployed, "people", schema.clone());
             install_mask_policy(&redeployed, value!({ "support": ["pii", "pci"] }))
                 .expect("install the new deployment's policy");
             authorize_query_hint(

@@ -35,9 +35,9 @@
 //! isolated from other tests and released with the server.
 //! Run: `cargo xtask test data --filter 'test(column_grants::)'`
 
+use crate::tests::fixtures::Host;
 #[allow(unused_imports)]
 use crate::tests::fixtures::schema::{fixture_table_sql, fixture_table_sql_for};
-use crate::tests::fixtures::Host;
 #[allow(unused_imports)]
 use zeroship_migrate::schema::query::FkEmission;
 

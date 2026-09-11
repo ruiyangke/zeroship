@@ -37,7 +37,7 @@ async fn probe_backend(host: &Host) -> zeroship_data_orm::backend::BackendHandle
 async fn admin(url: &str) -> Client {
     let (client, connection) = compio_postgres::connect(url, NoTls)
         .await
-        .unwrap_or_else(|e| panic!("sc1_driver needs a live PostgreSQL at {url}: {e}"));
+        .unwrap_or_else(|e| panic!("sc1_driver requires PostgreSQL at {url}: {e}"));
     compio::runtime::spawn(async move {
         let _ = connection.run().await;
     })
@@ -58,7 +58,10 @@ async fn admin(url: &str) -> Client {
 /// "did the session come back" is answerable by taking the next checkout and
 /// comparing its backend PID, with no chance of being handed a different
 /// idle entry.
-async fn provision(host: &Host, app_id: &str) -> (crate::tests::fixtures::postgres::Postgres, Client) {
+async fn provision(
+    host: &Host,
+    app_id: &str,
+) -> (crate::tests::fixtures::postgres::Postgres, Client) {
     let postgres = crate::tests::fixtures::postgres::Postgres::start();
     let url = postgres.url();
     let client = admin(&url).await;
