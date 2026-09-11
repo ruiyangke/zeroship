@@ -11,6 +11,7 @@ pub mod client;
 pub mod dev;
 pub mod engine;
 pub mod errors;
+pub mod lifecycle;
 pub mod operations;
 pub mod store;
 

@@ -6488,6 +6488,119 @@ async fn cancel_mid_dispatch_discards_late_outcome() {
 
 #[compio::test]
 #[serial]
+async fn restart_requires_quiescence_before_rewriting_history() {
+    let fx = isolated_fixture("restart-quiescence").await;
+    let (app_id, deploy_id) = seed_app_and_deploy(&fx, "restart-quiescence").await;
+    let run = seed_run(
+        &fx,
+        app_id,
+        &deploy_id,
+        "completed",
+        0,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
+    fx.pg.execute(
+        "INSERT INTO zeroship.workflow_steps (run_id, ordinal, name, kind, state, output, batch_id) \
+         VALUES ($1, 0, 'retained', 'run', 'completed', 'true', 'seed')", &[&run],
+    ).await.unwrap();
+    let app = test::init_service(
+        web::App::new()
+            .state(Arc::clone(&fx.state))
+            .configure(workflow_instance_api::configure),
+    )
+    .await;
+
+    for (state, live_lease, paused_from) in [
+        ("running", true, None),
+        ("paused", true, Some("running")),
+        ("compensating", false, None),
+        ("paused", false, Some("compensating")),
+    ] {
+        fx.pg.execute(
+            "UPDATE zeroship.workflow_runs SET state = $2, paused_from_status = $4, \
+             lease_expires = CASE WHEN $3 THEN now() + interval '1 hour' ELSE NULL END WHERE id = $1",
+            &[&run, &state, &live_lease, &paused_from],
+        ).await.unwrap();
+        let status = test::call_service(
+            &app,
+            authed(
+                test::TestRequest::post()
+                    .uri(&format!("/internal/workflows/runs/{run}/restart"))
+                    .set_json(&serde_json::json!({})),
+                app_id,
+            )
+            .to_request(),
+        )
+        .await
+        .status();
+        assert_eq!(status, ntex::http::StatusCode::CONFLICT, "state={state}");
+        let row = fx
+            .pg
+            .query_one(
+                "SELECT name FROM zeroship.workflow_steps WHERE run_id = $1",
+                &[&run],
+            )
+            .await
+            .unwrap();
+        assert_eq!(row.get::<_, String>(0), "retained");
+    }
+    fx.pg.execute("UPDATE zeroship.workflow_runs SET state = 'completed', paused_from_status = NULL, lease_expires = NULL WHERE id = $1", &[&run]).await.unwrap();
+    let child = seed_run(
+        &fx, app_id, &deploy_id, "waiting", 0, None, None, None, None,
+    )
+    .await;
+    fx.pg
+        .execute(
+            "UPDATE zeroship.workflow_runs SET parent_run_id = $2, \
+             parent_wait_step_key = 'child:1:child', tree_depth = 1 WHERE id = $1",
+            &[&child, &run],
+        )
+        .await
+        .unwrap();
+    let status = test::call_service(
+        &app,
+        authed(
+            test::TestRequest::post()
+                .uri(&format!("/internal/workflows/runs/{run}/restart"))
+                .set_json(&serde_json::json!({})),
+            app_id,
+        )
+        .to_request(),
+    )
+    .await
+    .status();
+    assert_eq!(status, ntex::http::StatusCode::CONFLICT);
+    fx.pg
+        .execute(
+            "UPDATE zeroship.workflow_runs SET state = 'completed' WHERE id = $1",
+            &[&child],
+        )
+        .await
+        .unwrap();
+    let status = test::call_service(
+        &app,
+        authed(
+            test::TestRequest::post()
+                .uri(&format!("/internal/workflows/runs/{run}/restart"))
+                .set_json(&serde_json::json!({})),
+            app_id,
+        )
+        .to_request(),
+    )
+    .await
+    .status();
+    assert_eq!(status, ntex::http::StatusCode::OK);
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
+}
+
+#[compio::test]
+#[serial]
 async fn restart_rewinds_prefix_requeues_and_guards_completed_compensation() {
     let fx = isolated_fixture("restart").await;
     let (app_id, deploy_id) = seed_app_and_deploy(&fx, "restart").await;

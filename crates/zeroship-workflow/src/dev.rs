@@ -655,53 +655,124 @@ impl DevWorkflowEngine {
         &self,
         app_id: &str,
         run_id: &str,
-        _options: RestartOptions,
+        options: RestartOptions,
     ) -> Result<RestartedRun, WorkflowServiceError> {
-        let now = now_ms();
-        {
-            let conn = self.lock_conn()?;
-            let exists = conn
-                .query_row(
-                    "SELECT 1 FROM workflow_runs WHERE id = ?1 AND app_id = ?2",
-                    params![run_id, app_id],
-                    |_| Ok(()),
-                )
-                .optional()
-                .map_err(db_error)?
-                .is_some();
-            if !exists {
-                return Err(WorkflowServiceError::NotFound(
-                    "workflow run not found".to_string(),
-                ));
-            }
-            conn.execute(
-                "DELETE FROM workflow_steps WHERE run_id = ?1",
-                params![run_id],
+        let policy = options.deploy_policy()?;
+        let mut conn = self.lock_conn()?;
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(db_error)?;
+        let now: i64 = tx
+            .query_row(
+                "SELECT CAST(unixepoch('subsec') * 1000 AS INTEGER)",
+                [],
+                |row| row.get(0),
             )
             .map_err(db_error)?;
-            conn.execute(
-                "UPDATE workflow_signals SET consumed_by = NULL WHERE consumed_by = ?1",
-                params![run_id],
+        let (current_deploy, live_lease, active_compensation) = tx
+            .query_row(
+                "SELECT deploy_id, COALESCE(lease_expires > ?3, 0), \
+             COALESCE(state = 'compensating' OR paused_from_status = 'compensating', 0) \
+             FROM workflow_runs WHERE id = ?1 AND app_id = ?2",
+                params![run_id, app_id, now],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, bool>(1)?,
+                        row.get::<_, bool>(2)?,
+                    ))
+                },
             )
-            .map_err(db_error)?;
-            conn.execute(
-                "UPDATE workflow_runs \
-                    SET state = 'queued', wake_at = ?3, terminal_at = NULL, output = NULL, error = NULL, \
-                        output_kind = 'inline', output_hash = NULL, output_size = NULL, output_content_type = NULL, \
-                        next_ordinal = 0, stuck_strikes = 0, waiting_step_key = NULL, paused_from_status = NULL, \
-                        claimed_by = NULL, lease_expires = NULL, dispatch_nonce = NULL, restart_count = restart_count + 1, \
-                        restarted_at = ?3, restarted_from_ordinal = NULL, restarted_by = ?4 \
-                  WHERE id = ?1 AND app_id = ?2",
-                params![run_id, app_id, now, format!("app:{app_id}")],
-            )
-            .map_err(db_error)?;
+            .optional()
+            .map_err(db_error)?
+            .ok_or_else(|| WorkflowServiceError::NotFound("workflow run not found".into()))?;
+        let active_descendants = tx.query_row(
+            "WITH RECURSIVE descendants AS ( \
+                SELECT id, state FROM workflow_runs WHERE parent_run_id = ?1 AND app_id = ?2 \
+                UNION \
+                SELECT child.id, child.state FROM workflow_runs child \
+                JOIN descendants parent ON child.parent_run_id = parent.id WHERE child.app_id = ?2 \
+             ) SELECT EXISTS (SELECT 1 FROM descendants WHERE state NOT IN ('completed','failed','cancelled'))",
+            params![run_id, app_id], |row| row.get::<_, bool>(0),
+        ).map_err(db_error)?;
+        crate::lifecycle::RestartSafety {
+            live_lease,
+            active_descendants,
+            active_compensation,
+            compensated_prefix: false,
         }
-        let _ = self.tick_due().await?;
+        .check()?;
+        let target_ordinal: u32 = if let Some(target) = &options.from {
+            tx.query_row(
+                "SELECT ordinal FROM workflow_steps WHERE run_id = ?1 AND name = ?2 AND name_occurrence = ?3",
+                params![run_id, target.name, target.occurrence.unwrap_or(0)], |row| row.get(0),
+            ).optional().map_err(db_error)?.ok_or_else(|| {
+                WorkflowServiceError::NotFound("workflow restart target not found".into())
+            })?
+        } else {
+            0
+        };
+        let compensated_prefix = tx
+            .query_row(
+                "SELECT EXISTS (SELECT 1 FROM workflow_steps \
+             WHERE run_id = ?1 AND ordinal < ?2 AND compensation_finished_at IS NOT NULL)",
+                params![run_id, target_ordinal],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(db_error)?;
+        crate::lifecycle::RestartSafety {
+            compensated_prefix,
+            ..Default::default()
+        }
+        .check()?;
+        let deploy = if policy == crate::operations::RestartDeploy::Latest {
+            tx.query_row(
+                "SELECT id FROM app_deploys WHERE app_id = ?1 AND activated_at IS NOT NULL \
+                 ORDER BY activated_at DESC, id DESC LIMIT 1",
+                params![app_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(db_error)?
+            .ok_or_else(|| WorkflowServiceError::NotFound("workflow deploy not found".into()))?
+        } else {
+            current_deploy.clone()
+        };
+        tx.execute(
+            "UPDATE workflow_signals SET consumed_by = NULL \
+             WHERE run_id = ?1 AND consumed_by = ?1 AND delivery <> 'topic' \
+             AND id IN (SELECT consumed_signal_id FROM workflow_steps WHERE run_id = ?1 AND ordinal >= ?2)",
+            params![run_id, target_ordinal],
+        ).map_err(db_error)?;
+        tx.execute(
+            "DELETE FROM workflow_signals WHERE run_id = ?1 AND delivery = 'topic' \
+             AND id IN (SELECT consumed_signal_id FROM workflow_steps WHERE run_id = ?1 AND ordinal >= ?2)",
+            params![run_id, target_ordinal],
+        ).map_err(db_error)?;
+        tx.execute(
+            "DELETE FROM workflow_steps WHERE run_id = ?1 AND ordinal >= ?2",
+            params![run_id, target_ordinal],
+        )
+        .map_err(db_error)?;
+        let restarted_from = options.from.as_ref().map(|_| target_ordinal);
+        tx.execute(
+            "UPDATE workflow_runs \
+             SET state = 'queued', wake_at = ?3, terminal_at = NULL, output = NULL, error = NULL, \
+                 output_kind = 'inline', output_hash = NULL, output_size = NULL, output_content_type = NULL, \
+                 next_ordinal = ?5, stuck_strikes = 0, waiting_step_key = NULL, paused_from_status = NULL, \
+                 claimed_by = NULL, lease_expires = NULL, dispatch_nonce = NULL, restart_count = restart_count + 1, \
+                 restarted_at = ?3, restarted_from_ordinal = ?6, restarted_by = ?4, deploy_id = ?7, \
+                 signal_epoch = signal_epoch + ?8, cancel_requested = 0, compensation_target = NULL, compensation_outcome = NULL \
+             WHERE id = ?1 AND app_id = ?2",
+            params![run_id, app_id, now, format!("app:{app_id}"), target_ordinal,
+                restarted_from, deploy, i32::from(deploy != current_deploy)],
+        ).map_err(db_error)?;
+        tx.commit().map_err(db_error)?;
         Ok(RestartedRun {
             run_id: run_id.to_owned(),
             state: crate::operations::RunState::Queued,
-            restarted_from_ordinal: None,
-            pinned_to: DEV_DEPLOY_ID.to_owned(),
+            restarted_from_ordinal: restarted_from,
+            pinned_to: deploy,
         })
     }
 

@@ -3,6 +3,7 @@ use crate::workflow_fleet::{self, Fleet};
 use serde_json::{json, Value};
 use testcontainers::{core::WaitFor, runners::SyncRunner, GenericImage, ImageExt};
 use zeroship_core::service_peers::service_issuer;
+use zeroship_workflow::operations::{RunState, StartOptions};
 use zeroship_workflow::{
     app_scoped_token, HttpWorkflowBackend, WorkflowBackend, WorkflowClientConfig,
 };
@@ -72,14 +73,14 @@ async fn start(fleet: &Fleet) -> String {
     let result = backend(fleet)
         .start(
             "ChildEchoWorkflow".into(),
-            json!({"input":{"value":"authorization-probe"}}),
+            StartOptions {
+                input: json!({"value":"authorization-probe"}),
+                ..Default::default()
+            },
         )
         .await
         .unwrap();
-    result["id"]
-        .as_str()
-        .expect("created workflow run id")
-        .into()
+    result.id
 }
 
 fn control_assertion() -> Option<String> {
@@ -121,8 +122,8 @@ async fn the_gateway_requires_a_control_service_assertion_before_app_lookup() {
         assert_eq!(post(&url, host, &request, None).await.0, 404);
     }
     assert_eq!(
-        backend(&fleet).status(run.clone()).await.unwrap()["state"],
-        "queued"
+        backend(&fleet).status(run.clone()).await.unwrap().state,
+        RunState::Queued
     );
     assert_eq!(step_count(&fleet, &run).await, 0);
 
@@ -195,8 +196,8 @@ async fn the_worker_default_refuses_advancement_even_from_an_authenticated_gatew
     assert_eq!(response.0, 403);
     assert!(String::from_utf8_lossy(&response.1).contains("workflow advance unsigned disabled"));
     assert_eq!(
-        backend(&fleet).status(run.clone()).await.unwrap()["state"],
-        "queued"
+        backend(&fleet).status(run.clone()).await.unwrap().state,
+        RunState::Queued
     );
     assert_eq!(step_count(&fleet, &run).await, 0);
     fleet.assert_alive();
