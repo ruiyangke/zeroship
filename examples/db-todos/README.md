@@ -55,24 +55,44 @@ not create duplicate network traffic.
 
 ## Run locally
 
-The Vite plugin defaults the dev database to project-local SQLite at
-`.zeroship/dev.sqlite`. No local Postgres is required for the default path.
+The Vite plugin defaults the dev database to a project-local SQLite file.
+No local Postgres is required for the default path.
 `.zeroship/` is persistent dev runtime state and should survive restarts.
 
 ```bash
 pnpm install
 pnpm typecheck
+pnpm migrate
 pnpm dev
 ```
 
-In another shell:
+## Tests
+
+The example owns its tests and service fixtures. No running development server
+or shared database is needed:
 
 ```bash
-pnpm smoke
+pnpm test
 ```
 
-The smoke test covers create/list/update/delete flows, FK enforcement, wrapper
-registration, `db.live` snapshot delivery, and the generated RPC path.
+Vitest runs the React tests and TypeScript acceptance tests. The acceptance
+fixture builds the SDKs and Rust services, copies this app into its own workspace
+directory, and applies the app's migrations. It owns a SQLite file for development
+and a PostgreSQL testcontainer for the deployed app, plus the gateway, control
+plane, worker, migration service, and CDC relay. Chromium exercises both targets.
+
+The tests cover CRUD, constraints, relations, pagination, transaction isolation
+and overlapping requests, webhook composition, generated RPC calls, and live
+snapshots between browser tabs. The backend comparison retains the named
+divergences documented in `docs/reference/sqlite-divergences.md`.
+
+Use the repository's Rust and Node toolchains, Docker, and Chromium. Install the
+browser with `pnpm exec playwright install chromium` if it is not available in
+the development environment. `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` selects an
+explicit executable. Run `pnpm test --project unit` for React tests, or
+`pnpm test:e2e` for acceptance tests. Missing services and migration failures fail
+the acceptance suite. Logs and screenshots remain under `tests/.artifacts/`;
+the fixture removes its own processes, containers, and app copy.
 
 ## What is not the focus
 

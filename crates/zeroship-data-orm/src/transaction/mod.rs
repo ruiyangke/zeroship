@@ -105,7 +105,7 @@
 //! plain `env.db.x.insert()` issued while some unrelated unit of work
 //! holds a transaction open executes inside it and is undone by its
 //! rollback. Measured on both tiers (`cxPlain` in
-//! `tests/e2e_dev_vs_deployed_db.sh`). Closing it means capturing the
+//! `examples/db-todos/tests/database.test.ts`). Closing it means capturing the
 //! async scope at each CRUD dispatch site the way this module now does
 //! for `transaction()`.
 //!

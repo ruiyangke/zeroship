@@ -493,6 +493,9 @@ importers:
       '@testing-library/react':
         specifier: ^16.3.2
         version: 16.3.2(@testing-library/dom@10.4.1)(@types/react-dom@18.3.7(@types/react@18.3.28))(@types/react@18.3.28)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
+      '@types/node':
+        specifier: 'catalog:'
+        version: 22.19.17
       '@types/react':
         specifier: catalog:react18
         version: 18.3.28
@@ -505,6 +508,21 @@ importers:
       jsdom:
         specifier: ^29.1.1
         version: 29.1.1(@noble/hashes@1.8.0)
+      playwright:
+        specifier: 1.58.2
+        version: 1.58.2
+      selfsigned:
+        specifier: ^5.5.0
+        version: 5.5.0
+      smol-toml:
+        specifier: ^1.8.0
+        version: 1.8.0
+      tar:
+        specifier: ^7.5.13
+        version: 7.5.13
+      testcontainers:
+        specifier: ^12.1.0
+        version: 12.1.0(supports-color@8.1.1)
       typescript:
         specifier: 'catalog:'
         version: 5.9.3
