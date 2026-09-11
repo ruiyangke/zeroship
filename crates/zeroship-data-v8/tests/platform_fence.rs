@@ -72,8 +72,10 @@ fn dispatch(source: &str, name: &str) -> (u16, serde_json::Value) {
     ];
     let plugins: Vec<Arc<dyn NativePlugin>> = vec![
         DbService::new(DbServiceConfig {
-            connection: zeroship_data_orm::connection::ConnectionFactory::for_url("postgres://_platform_fence_unused")
-                .expect("valid database configuration"),
+            connection: zeroship_data_orm::connection::ConnectionFactory::for_url(
+                "postgres://_platform_fence_unused",
+            )
+            .expect("valid database configuration"),
             cdc_relay: None,
             meter: None,
         })
