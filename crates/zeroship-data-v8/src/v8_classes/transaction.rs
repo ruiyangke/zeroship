@@ -202,21 +202,14 @@ pub fn transaction_dispatch<'s>(
     // now structural rather than incidental: a co-resident app's callback
     // plants ITS app_id, so the comparison below fails and this app opens
     // its own top-level BEGIN.
-    let nested = crate::tx_scope::current_tx_app(scope).as_deref() == Some(app_id.as_str());
-
-    // A nested call whose enclosing transaction has already settled (a
-    // continuation that outlived its tx — e.g. a callback that was never
-    // awaited) has nothing to open a SAVEPOINT on. Refuse loudly rather
-    // than emitting SQL against a drained slot.
-    if nested && !zeroship_data_orm::transaction::is_active(&app_id) {
-        let err = DbError::validation_hinted(
-            "transaction_scope_expired",
-            "db.transaction: the enclosing transaction has already settled".to_string(),
-            "A nested env.db.transaction(...) must run while its enclosing transaction is still \
-             open; awaiting the outer transaction's result first makes this a top-level call.",
-        );
-        reject_outer_now(scope, &outer_global, err);
-        return outer_promise;
+    let parent_scope = crate::tx_scope::current_tx_scope(scope)
+        .filter(|parent| parent.app_id() == app_id);
+    let nested = parent_scope.is_some();
+    if let Some(parent) = &parent_scope {
+        if let Err(error) = parent.check() {
+            reject_outer_now(scope, &outer_global, error);
+            return outer_promise;
+        }
     }
 
     // The savepoint-depth cap is NOT re-checked here. `FrameStack::open_child`
@@ -267,7 +260,10 @@ pub fn transaction_dispatch<'s>(
         // to admission timing, not a refactor.
         let began = match crate::tx_scope::ensure_backend().await {
             Ok(backend) => {
-                exec_begin_or_savepoint(nested, isolation_level, &app_id, schema, backend).await
+                match parent_scope.as_ref().map_or(Ok(()), |parent| parent.check()) {
+                    Ok(()) => exec_begin_or_savepoint(nested, isolation_level, &app_id, schema, backend).await,
+                    Err(error) => Err(error),
+                }
             }
             Err(e) => Err(e),
         };
@@ -371,7 +367,14 @@ fn run_begin_continuation(
     //    isolate think it was inside this transaction.
     let user_fn = v8::Local::new(scope, &user_fn_global);
     let undefined = v8::undefined(scope).into();
-    let prev_scope = crate::tx_scope::enter(scope, app_id);
+    let callback_scope = match zeroship_data_orm::transaction::scope::TransactionScope::current(app_id) {
+        Ok(callback_scope) => callback_scope,
+        Err(error) => {
+            settle_failed_before_body(scope, state, finalizer, error.to_op_error());
+            return;
+        }
+    };
+    let prev_scope = crate::tx_scope::enter(scope, &callback_scope);
     let call_result = {
         v8::tc_scope!(let tc, scope);
         let ret = user_fn.call(tc, undefined, &[tx_view.into()]);

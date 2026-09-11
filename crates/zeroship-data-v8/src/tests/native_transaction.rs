@@ -574,6 +574,65 @@ import {{ env }} from "zeroship";
 // ---------------------------------------------------------------------------
 
 #[test]
+fn orphaned_callbacks_cannot_enter_a_replacement_transaction_or_parent_frame() {
+    let (_postgres, url) = require_pg();
+    let app = crate::test_app_id!();
+    reset_schema(&url, &app);
+    let source = build_src(
+        r#"
+async function orphanedScopes() {
+    const errors = [];
+    function branch() {
+        let resume;
+        const ready = new Promise(resolve => { resume = resolve; });
+        const done = (async () => {
+            await ready;
+            try {
+                await env.db.collection("notes").insert({title: "orphan"});
+                errors.push("write accepted");
+            } catch (error) { errors.push(error.code); }
+            const nested = await env.db.transaction(async tx => {
+                await tx.notes.insert({title: "orphan nested"});
+            });
+            errors.push(nested.error?.code ?? "nested accepted");
+        })();
+        return {resume, done};
+    }
+    function unwrap(result) { if (result.error) throw result.error; return result.data; }
+    // A barrier determines when the orphan resumes; no timing assumption.
+    let orphan;
+    unwrap(await env.db.transaction(async () => { orphan = branch(); }));
+    orphan.resume();
+    await orphan.done;
+    unwrap(await env.db.transaction(async () => { orphan = branch(); }));
+    unwrap(await env.db.transaction(async tx => {
+        orphan.resume();
+        await orphan.done;
+        await tx.notes.insert({title: "replacement"});
+    }));
+    unwrap(await env.db.transaction(async tx => {
+        unwrap(await env.db.transaction(async () => { orphan = branch(); }));
+        orphan.resume();
+        await orphan.done;
+        await tx.notes.insert({title: "parent"});
+    }));
+    return errors;
+}
+orphanedScopes.config = {kind: "action"};
+const _procedures = {orphanedScopes};
+"#,
+    );
+    let (status, body) = dispatch_zs(&url, &source, "orphanedScopes", &app);
+    assert_eq!(status, 200, "orphan scope regression: {body}");
+    assert_eq!(body["json"], serde_json::json!([
+        "transaction_scope_expired", "transaction_scope_expired",
+        "transaction_scope_expired", "transaction_scope_expired",
+        "transaction_scope_expired", "transaction_scope_expired",
+    ]));
+    assert_eq!(count_notes(&url, &app), 2, "only current callbacks may write");
+}
+
+#[test]
 fn unmigrated_app_autocommit_response_names_migrate() {
     let (_postgres, url) = require_pg();
     let app_id = uuid::Uuid::new_v4().simple().to_string();

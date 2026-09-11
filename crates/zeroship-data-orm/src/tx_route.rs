@@ -1,5 +1,18 @@
+//! Per-dispatch SQL routing, captured before asynchronous backend resolution.
+//!
+//! A transaction belongs to a callback's async context. App identity alone
+//! cannot distinguish an orphan from work in a replacement transaction. The
+//! captured scope therefore carries the session generation and savepoint frame.
+//! Execution validates both before touching the lane. Unrelated callbacks use
+//! the pool even while the app has a transaction open.
+//!
+//! Capture and bind are separate because hosts observe async context
+//! synchronously, while opening a connection can yield. The route also carries
+//! the physical schema and dialect used by query preparation.
+
 use crate::backend::BackendHandle;
 use crate::compile::SqlDialect;
+use crate::transaction::scope::TransactionScope;
 use zeroship_data_sql::SchemaName;
 
 /// The routing decision, frozen at the dispatch frame and not yet bound to a
@@ -22,6 +35,7 @@ pub struct CapturedRoute {
     /// `true` iff this dispatch is lexically-and-asynchronously inside a
     /// `db.transaction(fn)` callback **for this same app**.
     in_tx: bool,
+    scope: Option<TransactionScope>,
     /// Which SQL dialect this dispatch's statements must be written in.
     ///
     /// **A configuration fact, not a connection fact**, which is why it can
@@ -60,39 +74,16 @@ pub struct TxRoute {
     app_id: String,
     schema: SchemaName,
     in_tx: bool,
+    scope: Option<TransactionScope>,
     backend: BackendHandle,
     dialect: SqlDialect,
 }
 
 impl CapturedRoute {
-    /// Freeze the routing decision for a dispatch.
-    ///
-    /// The ONLY production constructor. `current_tx_app` is whichever app
-    /// owns the transaction frame this dispatch started inside, as observed
-    /// at the dispatch boundary - `None` at top level.
-    ///
-    /// SEC-1 is structural here rather than incidental: a co-resident app's
-    /// callback plants ITS app_id in the continuation slot, so the comparison
-    /// below fails and this app routes to its own pool connection.
-    ///
-    /// **It takes the OBSERVATION, not the V8 scope, and that is the point.**
-    /// Until 2026-08-31 this read `crate::tx_scope::current_tx_app(scope)`
-    /// itself, which made a routing decision - engine vocabulary - depend on
-    /// the adapter that reads V8's context map. The comparison is the security
-    /// property and stays here; only the READING of the context moved out, to
-    /// the adapter tier's `tx_scope::capture_route`, which is the one place a V8 scope is
-    /// in hand. This module now names no `v8::` type.
-    ///
-    /// Deliberately not a `bool` parameter: a caller cannot assert "I am in a
-    /// transaction", only report which app the frame belongs to. The
-    /// comparison that turns that into a route is not the caller's to make.
-    ///
-    /// `dialect` arrives the same way and for the same reason: it is read from
-    /// the thread's database configuration, which is ADAPTER state this module
-    /// may not name. See the adapter tier's `tx_scope::capture_route` for the read, and
-    /// [`Self::dialect`] for why the answer is stable for the whole dispatch.
+    /// Freeze the host's observed async scope for this dispatch. A scope for
+    /// another app does not confer access to this app's transaction.
     pub fn capture(
-        current_tx_app: Option<&str>,
+        current_scope: Option<&TransactionScope>,
         app_id: &str,
         schema: SchemaName,
         dialect: SqlDialect,
@@ -100,11 +91,15 @@ impl CapturedRoute {
         // SEC-1 compares TENANT against TENANT. The schema rides along; it is
         // never the admission key, because two apps sharing one database would
         // share a schema and must still not share a transaction frame.
-        let in_tx = current_tx_app == Some(app_id);
+        let scope = current_scope
+            .filter(|scope| scope.app_id() == app_id)
+            .cloned();
+        let in_tx = scope.is_some();
         Self {
             app_id: app_id.to_string(),
             schema,
             in_tx,
+            scope,
             dialect,
         }
     }
@@ -154,6 +149,7 @@ impl CapturedRoute {
             app_id: self.app_id,
             schema: self.schema,
             in_tx: self.in_tx,
+            scope: self.scope,
             backend,
             dialect: self.dialect,
         }
@@ -187,6 +183,7 @@ impl CapturedRoute {
             app_id: app_id.to_string(),
             schema: SchemaName::new(app_id).expect("test app ids are legal schema names"),
             in_tx: false,
+            scope: None,
             dialect,
         }
     }
@@ -203,12 +200,18 @@ impl CapturedRoute {
             app_id: app_id.to_string(),
             schema: SchemaName::new(app_id).expect("test app ids are legal schema names"),
             in_tx: true,
+            scope: TransactionScope::current(app_id).ok(),
             dialect,
         }
     }
 }
 
 impl TxRoute {
+    /// Validate the captured callback before admitting work to its lane.
+    pub(crate) fn check_scope(&self) -> Result<(), crate::error::DbError> {
+        self.scope.as_ref().map_or(Ok(()), TransactionScope::check)
+    }
+
     /// The TENANT this dispatch runs for: the transaction-lane key, the SQLite
     /// ATTACH alias, the metering subject, the CDC stamp.
     ///
@@ -283,9 +286,10 @@ impl TxRoute {
     /// still have to come from [`CapturedRoute::capture`]. Bulk write fan-out uses it
     /// only after opening either a top-level transaction or a savepoint, so
     /// every statement and its deferred broker event share that frame.
-    pub fn into_internal_transaction(mut self) -> Self {
+    pub fn into_internal_transaction(mut self) -> Result<Self, crate::error::DbError> {
         self.in_tx = true;
-        self
+        self.scope = Some(TransactionScope::current(&self.app_id)?);
+        Ok(self)
     }
 }
 
