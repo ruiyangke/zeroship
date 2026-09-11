@@ -295,8 +295,27 @@ async fn a_pending_workflow_restores_the_hosts_active_isolate() {
     let FetchOutcome::Pending { rx, .. } = outcome else {
         panic!("start must await the workflow backend")
     };
-    // Yield to the workflow executor, then dispatch on the host while it awaits.
-    compio::time::sleep(Duration::from_millis(20)).await;
+    // Wait for the separate runner to claim the accepted run, then dispatch on
+    // the host while the workflow callback awaits its timer.
+    let journal = rusqlite::Connection::open(directory.path().join("journal.sqlite")).unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let running: bool = journal
+            .query_row(
+                "SELECT EXISTS (SELECT 1 FROM workflow_runs WHERE state = 'running')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        if running {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "workflow was not claimed"
+        );
+        compio::time::sleep(Duration::from_millis(1)).await;
+    }
     let ping = runtime.call_fetch_handler(
         "GET",
         "http://localhost/ping",

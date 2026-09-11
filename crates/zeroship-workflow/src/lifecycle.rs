@@ -5,6 +5,10 @@ use crate::operations::{RestartDeploy, RestartOptions};
 
 /// Observed under the journal transaction's locks, before any history is removed.
 #[derive(Debug, Clone, Copy, Default)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent restart hazards can be present together"
+)]
 pub struct RestartSafety {
     pub live_lease: bool,
     pub active_descendants: bool,
@@ -13,6 +17,9 @@ pub struct RestartSafety {
 }
 
 impl RestartSafety {
+    /// # Errors
+    /// Returns a conflict if execution, descendants or retained compensation
+    /// make rewinding the journal unsafe.
     pub fn check(self) -> Result<(), WorkflowServiceError> {
         let reason = if self.live_lease {
             "cannot restart while an execution lease is live"
@@ -31,6 +38,9 @@ impl RestartSafety {
 
 impl RestartOptions {
     /// Resolve the deploy policy without changing the immutable retained prefix.
+    ///
+    /// # Errors
+    /// Rejects an invalid target or a partial restart onto another deploy.
     pub fn deploy_policy(&self) -> Result<RestartDeploy, WorkflowServiceError> {
         if let Some(target) = &self.from {
             if target.name.is_empty() {

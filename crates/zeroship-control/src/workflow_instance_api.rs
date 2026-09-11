@@ -24,7 +24,7 @@ use zeroship_core::{crypto, typed_id};
 use zeroship_workflow::engine::{cap_exceeded, WORKFLOW_STATE_CAP_ERROR_CODE};
 use zeroship_workflow::errors::{WorkflowError, WorkflowServiceError};
 use zeroship_workflow::lifecycle::RestartSafety;
-use zeroship_workflow::operations::{RestartDeploy, RestartOptions};
+use zeroship_workflow::operations::{ConflictPolicy, RestartDeploy, RestartOptions};
 use zeroship_workflow::store::pg::{self, WorkflowTables};
 
 use crate::api::infrastructure_error_response;
@@ -96,13 +96,6 @@ pub struct StepOutputQuery {
 pub enum OnConflictBody {
     Policy(String),
     Object { policy: String },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ConflictPolicy {
-    Join,
-    Reject,
-    Replace,
 }
 
 impl OnConflictBody {
@@ -389,54 +382,24 @@ fn parse_app_id(raw: &str) -> Result<Uuid, String> {
     })
 }
 
+fn request_validation_error(error: WorkflowServiceError) -> WorkflowApiError {
+    match error {
+        WorkflowServiceError::PermissionDenied => WorkflowApiError::Forbidden(error.to_string()),
+        error => WorkflowApiError::BadRequest(error.to_string()),
+    }
+}
+
 fn validate_workflow_name(name: &str) -> Result<(), WorkflowApiError> {
-    if name.is_empty() || name.len() > 128 {
-        return Err(WorkflowApiError::BadRequest(
-            "workflow name must be 1-128 bytes".to_string(),
-        ));
-    }
-    if name.starts_with("__zs.") {
-        return Err(WorkflowApiError::BadRequest(
-            "workflow name uses a reserved prefix".to_string(),
-        ));
-    }
-    Ok(())
+    zeroship_workflow::validation::workflow_name(name).map_err(request_validation_error)
 }
 
 fn normalize_key(key: Option<String>) -> Result<Option<String>, WorkflowApiError> {
-    let Some(key) = key else {
-        return Ok(None);
-    };
-    if key.is_empty() {
-        return Err(WorkflowApiError::BadRequest(
-            "workflow key must not be empty".to_string(),
-        ));
-    }
-    if key.len() > 1024 {
-        return Err(WorkflowApiError::BadRequest(
-            "workflow key must be at most 1024 bytes".to_string(),
-        ));
-    }
-    Ok(Some(key))
-}
-
-fn validate_signal_type(signal_type: &str) -> Result<(), WorkflowApiError> {
-    if signal_type.is_empty() || signal_type.len() > 256 {
-        return Err(WorkflowApiError::BadRequest(
-            "signal type must be 1-256 bytes".to_string(),
-        ));
-    }
-    Ok(())
+    zeroship_workflow::validation::key(key.as_deref()).map_err(request_validation_error)?;
+    Ok(key)
 }
 
 fn validate_ingress_signal_type(signal_type: &str) -> Result<(), WorkflowApiError> {
-    validate_signal_type(signal_type)?;
-    if signal_type.starts_with("__zs.") {
-        return Err(WorkflowApiError::Forbidden(
-            "signal type uses a reserved prefix".to_string(),
-        ));
-    }
-    Ok(())
+    zeroship_workflow::validation::signal_type(signal_type).map_err(request_validation_error)
 }
 
 fn validate_topic(topic: &str) -> Result<(), WorkflowApiError> {
@@ -1177,6 +1140,30 @@ where
     Ok(rows.first().map(|row| row.get("id")))
 }
 
+async fn release_terminal_key<C>(
+    tx: &C,
+    tables: &WorkflowTables,
+    app_id: &Uuid,
+    workflow_name: &str,
+    key: &str,
+) -> Result<(), WorkflowApiError>
+where
+    C: compio_postgres::GenericClient + Sync,
+{
+    tx.execute(
+        &format!(
+            "UPDATE {runs} SET dedup_key = NULL \
+            WHERE app_id = $1 AND workflow_name = $2 AND dedup_key = $3 \
+            AND state IN ('completed','failed','cancelled')",
+            runs = tables.runs
+        ),
+        &[app_id, &workflow_name, &key],
+    )
+    .await
+    .map_err(workflow_pg_error)?;
+    Ok(())
+}
+
 /// Requires `run.dedup_key` to be `Some` — this is the "keyed" join-or-create
 /// path; an unkeyed run should call [`insert_run`] directly.
 async fn join_or_create_keyed_run<C>(
@@ -1308,6 +1295,7 @@ async fn create_run_inner(
     let mut cascade_run_ids = Vec::new();
 
     let run_id = if let Some(key) = dedup_key.as_ref() {
+        release_terminal_key(&tx, &tables, &app_id, &workflow_name, key).await?;
         match policy {
             ConflictPolicy::Join => {
                 join_or_create_keyed_run(
@@ -1505,6 +1493,7 @@ async fn start_many_inner(
             .map_err(WorkflowApiError::from)?;
         let key = normalize_key(item.key)?;
         if let Some(key) = key.as_ref() {
+            release_terminal_key(&tx, &tables, &app_id, &workflow_name, key).await?;
             let duplicate_in_batch = !seen_keys.insert(key.clone());
             let existing = existing_keyed_run(&tx, &tables, &app_id, &workflow_name, key).await?;
             match policy {

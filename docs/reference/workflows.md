@@ -421,7 +421,9 @@ const status = await run.status();
 
 `start({ input, key, onConflict })` creates a run and returns a `WorkflowRun`.
 `key` is optional. When present, it deduplicates starts for the same app,
-workflow, and key.
+workflow, and key while the run is live. Once that run is completed, failed or
+cancelled, an app start may reuse the key. This does not make the key a
+permanent receipt for retrying an ambiguous transport request.
 
 `onConflict` accepts:
 
@@ -513,6 +515,11 @@ dropped. The run input is retained; use a new `start()` to change input.
 It uses the same `@zeroship/workflows` SDK surface and the same runtime replay
 shim as deployed runs, but stores the journal in a dev-local SQLite database
 owned by the local process.
+
+Local `start()`, `signal()` and `restart()` return after their journal
+transaction commits. The local runner executes accepted work separately;
+execution failure does not turn an accepted start into a failed API call.
+Checkpoint batches and their resulting run state also commit together.
 
 The local engine is dev-only by construction: the CLI serve path is the only
 construction vector that can create the SQLite backend. Production workers build

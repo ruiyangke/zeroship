@@ -13,12 +13,16 @@ pub enum ConflictPolicy {
 }
 
 impl ConflictPolicy {
+    #[allow(
+        clippy::trivially_copy_pass_by_ref,
+        reason = "serde skip_serializing_if requires a borrowed field"
+    )]
     fn is_join(&self) -> bool {
         *self == Self::Join
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct StartOptions {
     #[serde(default)]
@@ -29,7 +33,7 @@ pub struct StartOptions {
     pub on_conflict: ConflictPolicy,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SignalOptions {
     #[serde(rename = "type")]
@@ -145,7 +149,7 @@ pub struct StartedRun {
     pub state: RunState,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunStatus {
     pub state: RunState,
     pub output: Option<Value>,

@@ -726,12 +726,19 @@ impl WorkflowTx for PgTx {
         let sql = format!(
             "UPDATE {signals} \
                             SET consumed_by = $1 \
-                          WHERE id = $2 AND consumed_by IS NULL",
+                          WHERE id = $2 AND run_id = $1 \
+                            AND (consumed_by IS NULL OR consumed_by = $1)",
             signals = self.tables.signals
         );
-        self.conn
+        let changed = self
+            .conn
             .execute(&sql, &[&run_id, &signal_id])
             .await?;
+        if changed == 0 {
+            return Err(WorkflowError::Invalid(
+                "workflow signal is not available to this run".into(),
+            ));
+        }
         Ok(())
     }
 

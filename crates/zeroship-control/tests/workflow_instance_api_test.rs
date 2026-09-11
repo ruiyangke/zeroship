@@ -664,6 +664,68 @@ async fn create_conflicts_status_and_cross_app_isolation() {
 }
 
 #[compio::test]
+async fn terminal_runs_release_their_app_start_key_without_changing_history() {
+    let fx = build_fixture(crate::workflow_postgres::Database::new(), "terminal-key").await;
+    let (app_id, _) = seed_app(&fx, "terminal-key", &["Checkout"]).await;
+    let app = test::init_service(
+        web::App::new()
+            .state(Arc::clone(&fx.state))
+            .configure(workflow_instance_api::configure),
+    )
+    .await;
+    for terminal in ["completed", "failed", "cancelled"] {
+        let response = test::call_service(
+            &app,
+            authed(
+                test::TestRequest::post()
+                    .uri("/internal/workflows/Checkout/runs")
+                    .set_json(&json!({"input":{}, "key":terminal})),
+                app_id,
+            )
+            .to_request(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body: Value = serde_json::from_slice(&test::read_body(response).await).unwrap();
+        let previous = run_id(&body);
+        fx.pg.execute(&wf_sql(app_id,
+            "UPDATE zeroship.workflow_runs SET state = $2, output = 'true', terminal_at = now(), wake_at = NULL WHERE id = $1"),
+            &[&previous, &terminal]).await.unwrap();
+        let response = test::call_service(
+            &app,
+            authed(
+                test::TestRequest::post()
+                    .uri("/internal/workflows/Checkout/runs")
+                    .set_json(&json!({"input":{}, "key":terminal, "onConflict":"reject"})),
+                app_id,
+            )
+            .to_request(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body: Value = serde_json::from_slice(&test::read_body(response).await).unwrap();
+        assert_ne!(run_id(&body), previous);
+        let row = fx
+            .pg
+            .query_one(
+                &wf_sql(
+                    app_id,
+                    "SELECT state, output, dedup_key FROM zeroship.workflow_runs WHERE id = $1",
+                ),
+                &[&previous],
+            )
+            .await
+            .unwrap();
+        assert_eq!(row.get::<_, String>("state"), terminal);
+        assert_eq!(row.get::<_, Value>("output"), json!(true));
+        assert_eq!(row.get::<_, Option<String>>("dedup_key"), None);
+    }
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
+}
+
+#[compio::test]
 async fn signal_writes_row_and_pulls_matching_wait_wake_at() {
     let fx = build_fixture(crate::workflow_postgres::Database::new(), "signal").await;
     let (app_id, _) = seed_app(&fx, "signal", &["Checkout"]).await;
