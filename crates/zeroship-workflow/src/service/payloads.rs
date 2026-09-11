@@ -321,19 +321,23 @@ impl AppWorkflows {
     }
 }
 
+pub(crate) struct RunGeneration<'a> {
+    pub id: &'a str,
+    pub generation: i64,
+}
+
 pub(crate) async fn promote(
     tx: &mut Transaction,
     app: &AppId,
     source: &Row,
-    target_run: &str,
-    target_generation: i64,
+    target: RunGeneration<'_>,
     slot: PayloadSlot,
     reference: &WorkflowOutputRef,
     now: i64,
 ) -> Result<(), WorkflowServiceError> {
     validate_reference(reference)?;
     let row = owned_reference(tx, app, source, reference, now).await?;
-    attach(tx, app, target_run, target_generation, slot, &row, now).await
+    attach(tx, app, target.id, target.generation, slot, &row, now).await
 }
 
 async fn attach(
@@ -372,19 +376,17 @@ async fn attach(
 pub(crate) async fn inherit_child_output(
     tx: &mut Transaction,
     app: &AppId,
-    child_id: &str,
-    child_generation: i64,
-    parent_id: &str,
-    parent_generation: i64,
+    child: RunGeneration<'_>,
+    parent: RunGeneration<'_>,
     ordinal: i32,
     now: i64,
 ) -> Result<WorkflowOutputRef, WorkflowServiceError> {
-    let row = reference_at(tx, app, child_id, child_generation, PayloadSlot::Output).await?;
+    let row = reference_at(tx, app, child.id, child.generation, PayloadSlot::Output).await?;
     attach(
         tx,
         app,
-        parent_id,
-        parent_generation,
+        parent.id,
+        parent.generation,
         PayloadSlot::Step { ordinal },
         &row,
         now,

@@ -115,8 +115,10 @@ async fn app_contract(store: Arc<dyn WorkflowStore>) {
         delivered,
         a.signal(&signal_request, &first.id, signal).await.unwrap()
     );
-    let mut policy = AppPolicy::default();
-    policy.admission = false;
+    let policy = AppPolicy {
+        admission: false,
+        ..AppPolicy::default()
+    };
     service.register_app(a.app_id(), &policy).await.unwrap();
     assert_eq!(
         first,
