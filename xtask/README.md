@@ -21,7 +21,7 @@ before compiling the V8 runtime.
 ```console
 cargo xtask test data
 cargo xtask test data-architecture
-cargo xtask test data --filter 'test(native_transaction)'
+cargo xtask test data --filter 'test(tests::postgres::transactions::)'
 ```
 
 The filtered command is for diagnosis. The unfiltered command runs the complete

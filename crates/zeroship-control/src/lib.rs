@@ -30,6 +30,8 @@ pub mod disputes;
 pub mod egress_rules;
 pub mod env_handlers;
 pub mod env_store;
+mod project_keys;
+mod secret_cipher;
 pub mod erasure;
 pub mod fee_policy;
 pub mod http_util;

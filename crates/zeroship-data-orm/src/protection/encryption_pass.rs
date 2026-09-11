@@ -184,7 +184,7 @@ mod tests {
     /// Exercise project-key resolution with explicitly bound test apps.
     fn test_key_store() -> KeyStore {
         use crate::encryption::{ProjectKeySource, SuppliedProjectKeys};
-        let keys = std::rc::Rc::new(
+        let keys = std::sync::Arc::new(
             SuppliedProjectKeys::new()
                 .with_hex("default", &"11".repeat(32))
                 .expect("fixture project key must parse"),
@@ -276,7 +276,7 @@ mod tests {
     #[compio::test]
     async fn decrypt_row_on_read_respects_implicit_full_mask() {
         let keys = KeyStore::new(crate::encryption::ProjectKeySource::supplied(
-            std::rc::Rc::new(crate::encryption::SuppliedProjectKeys::new()),
+            std::sync::Arc::new(crate::encryption::SuppliedProjectKeys::new()),
         ));
         let schema = zeroship_data_sql::value!({
             "secret": {"type":"string", "encrypted":true, "mask":{"classification":"pii"}}

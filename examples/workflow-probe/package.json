@@ -5,7 +5,9 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.tests.json",
+    "test": "vitest run",
+    "test:acceptance": "vitest run"
   },
   "dependencies": {
     "@zeroship/rpc": "workspace:*",
@@ -17,6 +19,13 @@
     "@zeroship/types": "workspace:*",
     "typescript": "catalog:",
     "vite": "catalog:",
-    "zeroship": "workspace:*"
+    "zeroship": "workspace:*",
+    "@types/node": "catalog:",
+    "playwright": "1.58.2",
+    "selfsigned": "^5.5.0",
+    "smol-toml": "^1.8.0",
+    "tar": "^7.5.13",
+    "testcontainers": "^12.1.0",
+    "vitest": "^4.1.7"
   }
 }

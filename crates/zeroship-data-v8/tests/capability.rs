@@ -42,6 +42,7 @@ fn dispatch_zs(source: &str, name: &str) -> (u16, serde_json::Value) {
     let plugins: Vec<Arc<dyn NativePlugin>> =
         vec![
             DbService::new(DbServiceConfig {
+                project_keys: Default::default(),
                 connection: zeroship_data_orm::connection::ConnectionFactory::for_url("postgres://_capability_test_unused")
                     .expect("valid database configuration"),
                 cdc_relay: None,

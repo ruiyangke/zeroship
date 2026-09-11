@@ -55,6 +55,8 @@ toolchains and Chromium from the development environment, or install it with
 Service logs and failure screenshots remain under `tests/.artifacts/`.
 An unavailable runtime, browser, or failed migration fails the suite.
 
-Encrypted cases require host-supplied project keys. The control-to-worker key
-bootstrap is not implemented yet, so these cases currently fail with
-`column_key_not_configured`; environment variables do not supply column keys.
+The local host keeps its project encryption key in
+`.zeroship/private/project-data-key.json`, alongside the local runtime state.
+Keep that private file with database backups. The fixture owns a disposable
+project directory and key. Deployed workers receive their project key from
+control; column keys are never supplied through environment variables.

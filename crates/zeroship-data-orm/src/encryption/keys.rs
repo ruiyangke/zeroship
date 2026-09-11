@@ -7,17 +7,22 @@
 use super::aead::AeadKey;
 use crate::error::DbError;
 use std::{
-    cell::{Cell, RefCell},
+    cell::Cell,
     collections::HashMap,
-    rc::Rc,
+    sync::{Arc, RwLock},
 };
 use zeroize::Zeroizing;
 
 /// Project keys supplied through the trusted Rust host boundary.
 #[derive(Default)]
 pub struct SuppliedProjectKeys {
-    projects: RefCell<HashMap<String, AeadKey>>,
-    app_projects: RefCell<HashMap<String, String>>,
+    bindings: RwLock<KeyBindings>,
+}
+
+#[derive(Default)]
+struct KeyBindings {
+    projects: HashMap<String, AeadKey>,
+    app_projects: HashMap<String, String>,
 }
 
 impl std::fmt::Debug for SuppliedProjectKeys {
@@ -39,7 +44,8 @@ impl SuppliedProjectKeys {
         let key = AeadKey {
             k_enc: parse_project_key(hex)?,
         };
-        let mut projects = self.projects.borrow_mut();
+        let mut bindings = self.bindings.write().map_err(|_| key_store_unavailable())?;
+        let projects = &mut bindings.projects;
         if project_id.is_empty() || projects.contains_key(project_id) {
             return Err(DbError::validation(
                 "invalid_project_key_binding",
@@ -58,13 +64,14 @@ impl SuppliedProjectKeys {
     /// Authorize an app to use an installed project's key. An existing app
     /// cannot be reassigned to another project through this interface.
     pub fn bind_app(&self, app_id: &str, project_id: &str) -> Result<(), DbError> {
-        if app_id.is_empty() || !self.projects.borrow().contains_key(project_id) {
+        let mut bindings = self.bindings.write().map_err(|_| key_store_unavailable())?;
+        if app_id.is_empty() || !bindings.projects.contains_key(project_id) {
             return Err(DbError::validation(
                 "invalid_project_key_binding",
                 "app must be nonempty and project key must be installed",
             ));
         }
-        let mut bindings = self.app_projects.borrow_mut();
+        let bindings = &mut bindings.app_projects;
         if let Some(current) = bindings.get(app_id) {
             if current != project_id {
                 return Err(DbError::validation(
@@ -77,11 +84,43 @@ impl SuppliedProjectKeys {
         Ok(())
     }
 
+    /// Install an authenticated host response atomically. Repeated delivery
+    /// of the same key and binding is harmless; changing either is refused.
+    pub fn supply(&self, app_id: &str, project_id: &str, key: [u8; 32]) -> Result<(), DbError> {
+        let key = AeadKey { k_enc: key };
+        let mut bindings = self.bindings.write().map_err(|_| key_store_unavailable())?;
+        if app_id.is_empty()
+            || project_id.is_empty()
+            || bindings
+                .app_projects
+                .get(app_id)
+                .is_some_and(|current| current != project_id)
+            || bindings
+                .projects
+                .get(project_id)
+                .is_some_and(|current| current.k_enc != key.k_enc)
+        {
+            return Err(DbError::validation(
+                "invalid_project_key_binding",
+                "project key or app binding conflicts with its installed identity",
+            ));
+        }
+        bindings
+            .projects
+            .entry(project_id.to_owned())
+            .or_insert(key);
+        bindings
+            .app_projects
+            .insert(app_id.to_owned(), project_id.to_owned());
+        Ok(())
+    }
+
     fn lookup(&self, app_id: &str) -> Result<AeadKey, DbError> {
-        let bindings = self.app_projects.borrow();
+        let bindings = self.bindings.read().map_err(|_| key_store_unavailable())?;
         let key = bindings
+            .app_projects
             .get(app_id)
-            .and_then(|project| self.projects.borrow().get(project).cloned());
+            .and_then(|project| bindings.projects.get(project).cloned());
         key.ok_or_else(|| DbError::Configuration {
             code: "column_key_not_configured",
             message: format!("No project encryption key was supplied for app '{app_id}'"),
@@ -90,18 +129,43 @@ impl SuppliedProjectKeys {
             ),
         })
     }
+
+    /// Whether this host has already installed an app's immutable binding.
+    pub fn is_bound(&self, app_id: &str) -> Result<bool, DbError> {
+        Ok(self
+            .bindings
+            .read()
+            .map_err(|_| key_store_unavailable())?
+            .app_projects
+            .contains_key(app_id))
+    }
+
+    /// Retire a deleted app's binding, releasing unused project material.
+    pub fn remove_app(&self, app_id: &str) -> Result<(), DbError> {
+        let mut bindings = self.bindings.write().map_err(|_| key_store_unavailable())?;
+        if let Some(project) = bindings.app_projects.remove(app_id) {
+            if !bindings
+                .app_projects
+                .values()
+                .any(|value| value == &project)
+            {
+                bindings.projects.remove(&project);
+            }
+        }
+        Ok(())
+    }
 }
 
 /// A local handle to project keys supplied by the host. The default has no keys.
 #[derive(Clone, Debug, Default)]
-pub struct ProjectKeySource(Rc<SuppliedProjectKeys>);
+pub struct ProjectKeySource(Arc<SuppliedProjectKeys>);
 impl ProjectKeySource {
     #[must_use]
     pub fn unavailable() -> Self {
         Self::default()
     }
     #[must_use]
-    pub fn supplied(keys: Rc<SuppliedProjectKeys>) -> Self {
+    pub fn supplied(keys: Arc<SuppliedProjectKeys>) -> Self {
         Self(keys)
     }
 }
@@ -133,6 +197,10 @@ impl KeyStore {
     }
 }
 
+fn key_store_unavailable() -> DbError {
+    DbError::internal("project key store lock is poisoned")
+}
+
 fn parse_project_key(hex: &str) -> Result<[u8; 32], DbError> {
     let invalid = || DbError::Configuration {
         code: "column_key_not_configured",
@@ -156,8 +224,40 @@ mod tests {
     use super::*;
 
     #[compio::test]
+    async fn an_existing_key_store_observes_host_delivery_from_another_thread() {
+        let source = Arc::new(SuppliedProjectKeys::new());
+        let store = KeyStore::new(ProjectKeySource::supplied(source.clone()));
+        assert!(store.resolve("app").await.is_err());
+        std::thread::spawn(move || source.supply("app", "project", [9; 32]).unwrap())
+            .join()
+            .unwrap();
+        assert_eq!(store.resolve("app").await.unwrap().k_enc, [9; 32]);
+    }
+
+    #[test]
+    fn host_delivery_is_shared_idempotent_and_does_not_partially_rebind() {
+        let keys = Arc::new(SuppliedProjectKeys::new());
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                let keys = keys.clone();
+                scope.spawn(move || keys.supply("app", "project", [7; 32]).unwrap());
+            }
+        });
+        keys.supply("sibling", "project", [7; 32]).unwrap();
+        assert!(keys.supply("other", "project", [8; 32]).is_err());
+        assert!(!keys.is_bound("other").unwrap());
+        assert!(keys.supply("app", "other", [8; 32]).is_err());
+        assert_eq!(keys.lookup("app").unwrap().k_enc, [7; 32]);
+        keys.remove_app("app").unwrap();
+        assert!(keys.lookup("app").is_err());
+        assert_eq!(keys.lookup("sibling").unwrap().k_enc, [7; 32]);
+        keys.remove_app("sibling").unwrap();
+        assert!(keys.bindings.read().unwrap().projects.is_empty());
+    }
+
+    #[compio::test]
     async fn project_key_is_shared_only_by_bound_apps() {
-        let supplied = Rc::new(SuppliedProjectKeys::new());
+        let supplied = Arc::new(SuppliedProjectKeys::new());
         supplied.insert_hex("project_a", &"11".repeat(32)).unwrap();
         supplied.insert_hex("project_b", &"22".repeat(32)).unwrap();
         supplied.bind_app("app_a", "project_a").unwrap();

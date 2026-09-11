@@ -1,6 +1,6 @@
 //! Private adapter setup for tests in this crate.
 use crate::{context, ctx_mut};
-use std::rc::Rc;
+use std::sync::Arc;
 use zeroship_data_orm::{connection::ConnectionFactory, encryption};
 
 /// Column-key source currently supplied to the adapter's worker thread.
@@ -19,20 +19,20 @@ pub(crate) fn reset_context() {
 
 #[must_use]
 pub(crate) fn supply_project_key(app_ids: &[&str], hex: &str) -> SuppliedProjectKeysGuard {
-    let keys = Rc::new(encryption::SuppliedProjectKeys::new());
+    let keys = Arc::new(encryption::SuppliedProjectKeys::new());
     keys.insert_hex("fixture_project", hex)
         .expect("fixture project key");
     for app_id in app_ids {
         keys.bind_app(app_id, "fixture_project")
             .expect("fixture app binding");
     }
-    ctx_mut(|c| c.set_supplied_project_keys(Some(Rc::clone(&keys))));
+    ctx_mut(|c| c.set_supplied_project_keys(Some(Arc::clone(&keys))));
     SuppliedProjectKeysGuard { _keys: keys }
 }
 
 #[derive(Debug)]
 pub(crate) struct SuppliedProjectKeysGuard {
-    _keys: Rc<encryption::SuppliedProjectKeys>,
+    _keys: Arc<encryption::SuppliedProjectKeys>,
 }
 
 impl Drop for SuppliedProjectKeysGuard {
@@ -67,4 +67,9 @@ pub(crate) fn install_cold_schema(
     schema: zeroship_data_sql::value::Value,
 ) {
     install_schema(&binding(app_id), collection, schema);
+}
+
+/// Share explicitly supplied keys with the real service composition.
+pub(crate) fn project_keys() -> Arc<encryption::SuppliedProjectKeys> {
+    context::with(|context| context.project_keys().unwrap_or_default())
 }

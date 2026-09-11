@@ -7,7 +7,7 @@ mod context;
 pub(crate) mod schema;
 pub(crate) use context::{
     SuppliedProjectKeysGuard, binding, install_cold_schema, install_schema, key_source,
-    reset_context, set_database_url, supply_project_key,
+    project_keys, reset_context, set_database_url, supply_project_key,
 };
 pub(crate) mod parity;
 pub(crate) mod recording;

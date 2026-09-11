@@ -1699,6 +1699,18 @@ The physical catalog sentinel also records the plaintext type, since the
 stored SQL type describes ciphertext.
 
 The host supplies a project encryption key and explicit app-to-project bindings
-to the ORM. Every encrypted column in that project uses the same key. The ORM
-reads no column keys from environment variables or tenant tables. Control-plane
-key provisioning and delivery are not wired into the worker yet.
+through `DbServiceConfig.project_keys`. Every encrypted column in that project
+uses the same key. The ORM reads no column keys from environment variables or
+tenant tables.
+
+Control generates and persists the project key in `zeroship.project_data_keys`,
+wrapped with its secret-storage master key and authenticated against the project
+identity. Workers hydrate their shared key source through the authenticated
+`/internal/apps/{app_id}/data-key` endpoint before loading an app. Key material
+never enters the app environment, runtime descriptor or deployment bundle.
+Wrapping-key rotation preserves the data key and rewraps it when next read.
+
+The standalone development host keeps its own project key in
+`.zeroship/private/project-data-key.json`. It survives runtime restarts and is
+shared by apps served from that local project directory. Keep this private file
+with local database backups; it is separate from the deployed project's key.

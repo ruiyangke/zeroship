@@ -1,0 +1,94 @@
+import { setTimeout as sleep } from "node:timers/promises";
+import { expect, test } from "vitest";
+import { targets, type Target } from "./targets";
+
+type Run = { workflow: string; runId: string };
+type Status = { state: string; output: unknown; error: null | { type: string; message: string; compensation: unknown } };
+
+async function rpc<T>(target: Target, procedure: string, input: unknown): Promise<T> {
+  const response = await fetch(`${target.apiUrl}/__zeroship/v1/wf.${procedure}`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ json: input }), signal: AbortSignal.timeout(15_000),
+  });
+  const text = await response.text();
+  expect(response.ok, `${target.name} ${procedure}: ${response.status}: ${text}`).toBe(true);
+  const body = JSON.parse(text);
+  expect(body).toHaveProperty("json");
+  return body.json;
+}
+
+async function start(target: Target, name: string): Promise<Run> {
+  const run = await rpc<Run>(target, "start", { case: name });
+  if (typeof run.runId !== "string") throw new Error(`${target.name} workflow start failed: ${JSON.stringify(run)}`);
+  expect(run.runId).toMatch(/^run_/);
+  return run;
+}
+
+async function until(target: Target, run: Run, state: string): Promise<Status> {
+  const deadline = Date.now() + 60_000;
+  let status: Status;
+  do {
+    status = await rpc<Status>(target, "status", run);
+    if (status.state === state) return status;
+    if (["completed", "failed", "cancelled", "stalled"].includes(status.state)) {
+      throw new Error(`${target.name}: expected ${state}, received ${JSON.stringify(status)}`);
+    }
+    await sleep(100);
+  } while (Date.now() < deadline);
+  throw new Error(`${target.name}: did not reach ${state}: ${JSON.stringify(status)}`);
+}
+
+test("journaled steps preserve their input and derived outputs across local and deployed runs", async () => {
+  const results = [];
+  for (const target of targets()) {
+    const result = await until(target, await start(target, "basic"), "completed");
+    expect(result).toEqual({ state: "completed", error: null, output: {
+      first: { label: "probe", n: 1 }, second: { n: 2 }, frozen: 42, frozenAgain: 42, steps: 4,
+    } });
+    results.push(result);
+  }
+  expect(results[0]).toEqual(results[1]);
+});
+
+test("sleep persists a suspended run before resuming the following step", async () => {
+  for (const target of targets()) {
+    const started = performance.now();
+    const run = await start(target, "sleep");
+    await until(target, run, "sleeping");
+    expect((await until(target, run, "completed")).output).toEqual({ before: "before", after: "after", slept: true });
+    expect(performance.now() - started).toBeGreaterThanOrEqual(20_000);
+  }
+});
+
+test("signals resume an observed waiting run with the supplied payload", async () => {
+  for (const target of targets()) {
+    const run = await start(target, "signal");
+    await until(target, run, "waiting");
+    expect(await rpc(target, "signal", { ...run, token: "probe-token" })).toEqual({ signalled: true });
+    expect((await until(target, run, "completed")).output).toEqual({ received: true, payload: { token: "probe-token" }, type: "probe.go" });
+  }
+});
+
+test("deployed child workflows return their output and local development reports unsupported calls", async () => {
+  for (const target of targets()) {
+    const run = await start(target, "child");
+    if (target.name === "local") {
+      expect((await until(target, run, "failed")).error?.type).toBe("WorkflowUnsupportedError");
+    } else {
+      expect((await until(target, run, "completed")).output).toEqual({ child: { doubled: 42 }, parentSaw: 42 });
+    }
+  }
+});
+
+test("compensation reverses the deployed effect and preserves the original error in both tiers", async () => {
+  for (const target of targets()) {
+    expect(await rpc(target, "resetTrail", {})).toEqual({ reset: true });
+    const result = await until(target, await start(target, "compensate"), "failed");
+    expect(result.error?.message).toContain("probe-intentional-failure");
+    const local = target.name === "local";
+    expect(await rpc(target, "trail", {})).toEqual({ trail: local ? "do:reserve" : "do:reserve,undo:reserve" });
+    expect(result.error?.compensation).toMatchObject(local
+      ? { supported: false, outcome: "not-attempted", type: "WorkflowUnsupportedError", steps: ["reserve"] }
+      : { outcome: "completed" });
+  }
+});

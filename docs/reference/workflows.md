@@ -9,6 +9,40 @@ The SDK types live in `sdks/workflows/`. The native `env.workflows` binding
 starts and controls runs from app code, and the control client exposes the
 token and topic broadcast helpers used by systems outside the app.
 
+## Rust integration
+
+`zeroship-workflow` owns the journal engine, claim/apply protocol, PostgreSQL
+store, scoped HTTP client, and local SQLite persistence. It has no V8 dependency.
+`zeroship-workflow-v8` installs `env.workflows` and supplies the V8 executor
+used by the local engine. The control plane uses the Rust engine directly.
+
+A trusted Rust host can use `HttpWorkflowBackend` through `WorkflowBackend`
+to start runs, read status, signal, restart, or change lifecycle state. Construct
+it with `WorkflowClientConfig`, binding the app identity and its scoped token
+once. Individual operations cannot select another app. The control plane still
+authorizes the request; possession of a Rust handle does not bypass it.
+
+`WorkflowBinding` performs the same binding for JavaScript. The host derives
+its app-scoped credential with `app_scoped_token`; the control key stays outside
+V8. Workflow execution remains replay of the deployed JavaScript class.
+
+## Journal provisioning
+
+Before starting deployed workflows, provision their app journal through the
+migration service:
+
+```http
+POST /v1/apps/{app_id}/workflows/provision
+Authorization: Bearer <creator-access-token>
+```
+
+The caller needs deployment permission for that app. The operation is
+idempotent and creates no creator database tables. Applying creator migrations
+also provisions the journal schema, so apps already using that path need no
+additional request. The control origin routes this endpoint to the migration
+service; control and workers only create journal tables inside the provisioned
+schema. Local workflows create their SQLite journal automatically.
+
 ## Model
 
 A workflow is a class extending `Workflow<Params, Output>`:

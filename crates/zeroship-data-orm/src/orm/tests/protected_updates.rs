@@ -11,8 +11,8 @@ fn fields() -> Value {
     })
 }
 
-fn keys() -> Rc<crate::encryption::SuppliedProjectKeys> {
-    let supplied = Rc::new(crate::encryption::SuppliedProjectKeys::new());
+fn keys() -> std::sync::Arc<crate::encryption::SuppliedProjectKeys> {
+    let supplied = std::sync::Arc::new(crate::encryption::SuppliedProjectKeys::new());
     supplied
         .insert_hex("update_fixture", &"1".repeat(64))
         .unwrap();

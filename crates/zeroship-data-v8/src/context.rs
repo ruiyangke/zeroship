@@ -8,7 +8,7 @@
 #[cfg(test)]
 use zeroship_data_orm::backend::BackendHandle;
 
-use std::{cell::RefCell, rc::Rc};
+use std::{cell::RefCell, sync::Arc};
 use zeroship_data_orm::{
     connection::{ConnectionFactory, LocalConnection},
     encryption::{ProjectKeySource, SuppliedProjectKeys},
@@ -18,7 +18,7 @@ use zeroship_data_orm::{
 pub(crate) struct ThreadDbContext {
     connection: Option<LocalConnection>,
     cdc_relay: Option<zeroship_data_orm::cdc::relay::RelayConfig>,
-    supplied_project_keys: Option<Rc<SuppliedProjectKeys>>,
+    supplied_project_keys: Option<Arc<SuppliedProjectKeys>>,
 }
 impl ThreadDbContext {
     pub(crate) fn new() -> Self {
@@ -48,13 +48,28 @@ impl ThreadDbContext {
             .as_ref()
             .map(|current| LocalConnection::new(current.factory().clone()));
     }
+    #[cfg(test)]
+    pub(crate) fn project_keys(&self) -> Option<Arc<SuppliedProjectKeys>> {
+        self.supplied_project_keys.clone()
+    }
     pub(crate) fn local_key_source(&self) -> ProjectKeySource {
         match &self.supplied_project_keys {
-            Some(keys) => ProjectKeySource::supplied(Rc::clone(keys)),
+            Some(keys) => ProjectKeySource::supplied(Arc::clone(keys)),
             None => ProjectKeySource::unavailable(),
         }
     }
-    pub(crate) fn set_supplied_project_keys(&mut self, keys: Option<Rc<SuppliedProjectKeys>>) {
+    pub(crate) fn set_supplied_project_keys(&mut self, keys: Option<Arc<SuppliedProjectKeys>>) {
+        let same = match (&self.supplied_project_keys, &keys) {
+            (Some(old), Some(new)) => Arc::ptr_eq(old, new),
+            (None, None) => true,
+            _ => false,
+        };
+        if !same {
+            self.connection = self
+                .connection
+                .as_ref()
+                .map(|current| LocalConnection::new(current.factory().clone()));
+        }
         self.supplied_project_keys = keys;
     }
     pub(crate) fn sql_dialect(&self) -> zeroship_data_sql::compile::SqlDialect {
