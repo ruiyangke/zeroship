@@ -137,6 +137,7 @@ pub trait WorkflowStore: Send + Sync {
 #[derive(Clone)]
 pub struct PostgresStore {
     url: String,
+    policy: Option<super::PlatformPolicy>,
 }
 impl std::fmt::Debug for PostgresStore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -146,7 +147,16 @@ impl std::fmt::Debug for PostgresStore {
 impl PostgresStore {
     #[must_use]
     pub fn new(url: String) -> Self {
-        Self { url }
+        Self { url, policy: None }
+    }
+
+    /// Resolve platform policy inside every workflow transaction.
+    #[must_use]
+    pub fn platform(url: String, policy: super::PlatformPolicy) -> Self {
+        Self {
+            url,
+            policy: Some(policy),
+        }
     }
 }
 #[async_trait(?Send)]
@@ -168,6 +178,7 @@ impl WorkflowStore for PostgresStore {
         Ok(Transaction {
             backend: Backend::Postgres(client),
             finished: false,
+            platform_policy: self.policy.clone(),
         })
     }
 }
@@ -201,6 +212,7 @@ impl WorkflowStore for SqliteStore {
         Ok(Transaction {
             backend: Backend::Sqlite(conn),
             finished: false,
+            platform_policy: None,
         })
     }
 }
@@ -214,6 +226,7 @@ enum Backend {
 pub struct Transaction {
     backend: Backend,
     finished: bool,
+    pub(crate) platform_policy: Option<super::PlatformPolicy>,
 }
 impl Transaction {
     pub(crate) fn dialect(&self) -> &'static str {

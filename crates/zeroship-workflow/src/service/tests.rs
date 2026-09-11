@@ -16,6 +16,7 @@ use testcontainers::{
 use zeroship_core::{app_id::AppId, typed_id};
 
 mod payloads;
+mod policy;
 
 #[compio::test]
 async fn sqlite_app_operations_are_scoped_and_retryable() {

@@ -24,7 +24,7 @@ export function workflowSchema(namespace) {
 
   create("schema_version", { id: text(), fingerprint: text() }, ["id"]);
   create("apps", {
-    ...identity(), revision: integer(), policy: text(), signal_epoch: integer(),
+    ...identity(), revision: integer(), policy: t.text(), signal_epoch: integer(),
     last_polled_at: integer().default(0),
     subscription_sequence: integer().default(0),
   }, ["app_id"]);
