@@ -5,6 +5,10 @@ Control-issued capability. Task routes verify an active enrolled worker's
 signature and bind the service's task token to that instance. Operator deploy
 notifications use the platform service allowlist.
 
+Streaming payload routes keep upload identities and task tokens in Rust. Clients
+apply bounded backpressure and independently verify downloaded content; retries
+reuse the durable upload receipt and cancel an unused source.
+
 The host library and Rust remote clients are implemented. Startup configuration,
 platform policy composition and the deployed worker cutover remain in progress.
 

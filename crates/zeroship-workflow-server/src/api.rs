@@ -18,7 +18,10 @@ use zeroship_workflow::{
     WorkflowServiceError,
 };
 
+mod payloads;
+
 pub fn configure(config: &mut web::ServiceConfig) {
+    payloads::configure(config);
     config
         .state(web::types::JsonConfig::default().limit(1024 * 1024))
         .service(web::resource("/healthz").route(web::get().to(health)))

@@ -1,8 +1,26 @@
 //! Requests shared by remote clients and the workflow HTTP host.
 
-use super::{RequestId, TaskToken};
-use crate::{WorkflowExecution, WorkflowServiceError};
+use super::{PayloadSlot, RequestId, TaskToken};
+use crate::{engine::WorkflowOutputRef, WorkflowExecution, WorkflowServiceError};
 use serde::{Deserialize, Serialize};
+
+pub const TASK_TOKEN_HEADER: &str = "zeroship-workflow-task";
+pub const REQUEST_ID_HEADER: &str = "zeroship-workflow-request";
+pub const PAYLOAD_HEADER: &str = "zeroship-workflow-payload";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReadTaskPayload {
+    pub token: TaskToken,
+    pub reference: WorkflowOutputRef,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReadAppPayload {
+    pub generation: i64,
+    pub slot: PayloadSlot,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

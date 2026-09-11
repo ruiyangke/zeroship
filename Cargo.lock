@@ -8683,15 +8683,19 @@ name = "zeroship-workflow-server"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "bytes",
  "compio",
  "compio-postgres",
+ "futures",
  "ntex",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "testcontainers",
  "tracing",
  "zeroship-core",
+ "zeroship-storage",
  "zeroship-workflow",
 ]
 

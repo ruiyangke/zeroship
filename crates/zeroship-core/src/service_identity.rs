@@ -487,6 +487,16 @@ pub mod endpoints {
         "POST",
         "/v1/tasks/{task_id}/release",
     );
+    pub const WORKFLOW_TASK_UPLOAD: ServiceEndpoint = ServiceEndpoint::new(
+        "workflow",
+        "POST",
+        "/v1/tasks/{task_id}/payloads",
+    );
+    pub const WORKFLOW_TASK_READ: ServiceEndpoint = ServiceEndpoint::new(
+        "workflow",
+        "POST",
+        "/v1/tasks/{task_id}/payloads/read",
+    );
     pub const WORKER_DISPATCH: ServiceEndpoint =
         ServiceEndpoint::new("worker", "POST", "/dispatch/{app_id}");
     pub const WORKER_WORKFLOW_ADVANCE: ServiceEndpoint = ServiceEndpoint::new(
@@ -582,6 +592,8 @@ pub fn service_allowlist() -> &'static [ServiceAuthorization] {
                     endpoints::WORKFLOW_TASK_HEARTBEAT,
                     endpoints::WORKFLOW_TASK_COMPLETE,
                     endpoints::WORKFLOW_TASK_RELEASE,
+                    endpoints::WORKFLOW_TASK_UPLOAD,
+                    endpoints::WORKFLOW_TASK_READ,
                     endpoints::CDC_SUBSCRIBE,
                     // Host app reads are role-scoped: an authenticated worker
                     // may request any app's version, environment, and project
