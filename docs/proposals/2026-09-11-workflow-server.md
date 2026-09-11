@@ -13,9 +13,14 @@ Local and Control paths share input validation and restart safety rules. Local
 mutations and checkpoint batches are transactional, and acceptance returns
 before execution. Native executors and deployed workers now share typed replay
 inputs, journal types and outcome decoding; claim credentials stay in Rust.
-The service-owned schema, shared store implementation,
-workflow server and worker polling remain to be implemented; the current runtime
-still uses Control and the local mini-engine.
+The replacement `service` module now implements app-scoped acceptance, request
+receipts, task leases, completion receipts, waits, children, compensation and
+generation-preserving restart over shared PostgreSQL and SQLite transactions.
+Its schema is generated from the canonical migration DSL, with native contract
+tests against SQLite and Testcontainers PostgreSQL. This module is not yet the
+runtime composition: the server, worker polling loop, authoritative platform
+policy, scheduling, payloads and interpreter cutover remain in progress. The
+current runtime still uses Control and the local mini-engine.
 
 ## Decision
 
@@ -92,7 +97,8 @@ keep the execution journal inside each creator database.
 
 ## Rust composition
 
-The following are target types, not interfaces that already exist:
+The table describes the final contracts. The replacement service and store types
+exist in `zeroship-workflow::service`; transport and host integration are pending.
 
 | Type or package | Contract |
 | --- | --- |

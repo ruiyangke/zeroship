@@ -5,6 +5,7 @@ edition = "2021"
 description = "Durable workflow engine, journal, and Rust client"
 
 [dependencies]
+bytes = { workspace = true }
 zeroship-core = { workspace = true }
 async-trait = { workspace = true }
 chrono = { version = "0.4", default-features = false, features = ["std", "serde", "clock"] }
@@ -20,6 +21,7 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+testcontainers = { version = "0.28", features = ["blocking"] }
 tempfile = { workspace = true }
 
 [lints]

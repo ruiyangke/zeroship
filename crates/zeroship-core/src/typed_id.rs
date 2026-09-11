@@ -558,6 +558,9 @@ pub const WORKFLOW_SCHEDULE_PREFIX: &str = "sch";
 /// (billing disputes).
 pub const WORKFLOW_DISPATCH_PREFIX: &str = "wfd";
 
+/// Workflow operation retry identity, distinct from a live business key.
+pub const WORKFLOW_REQUEST_PREFIX: &str = "wreq";
+
 /// Workflow inbound-signal signing-key typed-id prefix.
 pub const WORKFLOW_SIGNAL_KEY_PREFIX: &str = "wsk";
 

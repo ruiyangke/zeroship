@@ -8635,6 +8635,7 @@ name = "zeroship-workflow"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "bytes",
  "chrono",
  "compio",
  "compio-postgres",
@@ -8645,6 +8646,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
+ "testcontainers",
  "tracing",
  "uuid",
  "zeroship-core",
