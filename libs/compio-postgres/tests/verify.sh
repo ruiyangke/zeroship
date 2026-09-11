@@ -173,6 +173,6 @@ echo "NOT covered by this script, and each is its own runbook under docs/runbook
 echo "  - a second server version (compio-postgres-cross-version-check.md)"
 echo "  - a transaction pooler   (compio-postgres-transaction-pooler-check.md)"
 echo "  - sustained load + chaos (compio-postgres-soak.md)"
-echo "  - the workspace lint and doc gates: ./tests/clippy_gate.sh, ./tests/run_doc_gate.sh"
+echo "  - workspace checks: cargo clippy --workspace --all-targets --all-features; ./tests/run_doc_gate.sh"
 
 exit $([ "$failures" -eq 0 ] && echo 0 || echo 1)
