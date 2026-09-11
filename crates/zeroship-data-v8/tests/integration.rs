@@ -2741,7 +2741,7 @@ async fn require_pgvector(pool: &Pool) {
 /// the absence into a pass.
 #[compio::test]
 async fn vector_search_returns_k_nearest() {
-    use zeroship_data_orm::backend::{PostgresBackend, VectorMetric};
+    use zeroship_data_orm::backend::VectorMetric;
 
     let (_postgres, url) = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
@@ -3118,7 +3118,7 @@ async fn vector_dimension_mismatch_rejected_at_insert() {
 /// rather than skipping, and no attribute removes this test from the run.
 #[compio::test]
 async fn near_returns_within_radius() {
-    use zeroship_data_orm::backend::{GeoPoint, PostgresBackend};
+    use zeroship_data_orm::backend::GeoPoint;
 
     let (_postgres, url) = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
@@ -3371,7 +3371,7 @@ async fn postgis_extension_missing_reports_typed_error() {
 // 2026-09-02 and these tests now call `encryption::aead` directly with a key
 // from `backend.key_store()` - the same path production takes.
 use zeroship_data_orm::error::DbError;
-use zeroship_data_orm::backend::{EncryptionMode, PostgresBackend};
+use zeroship_data_orm::backend::EncryptionMode;
 use zeroship_data_orm::encryption;
 
 /// Helper: hand this isolate a synthetic root key for `key_id`, so the
@@ -5253,7 +5253,7 @@ async fn exec_autocommit_query_runs_under_per_app_role() {
 
 #[compio::test]
 async fn vector_search_runs_under_per_app_role_via_rls() {
-    use zeroship_data_orm::backend::{PostgresBackend, VectorMetric};
+    use zeroship_data_orm::backend::VectorMetric;
 
     let (_postgres, url) = require_pg().await;
     let admin_pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
@@ -5353,7 +5353,7 @@ async fn vector_search_runs_under_per_app_role_via_rls() {
 
 #[compio::test]
 async fn spatial_near_runs_under_per_app_role_via_rls() {
-    use zeroship_data_orm::backend::{GeoPoint, PostgresBackend};
+    use zeroship_data_orm::backend::GeoPoint;
 
     let (_postgres, url) = require_pg().await;
     let admin_pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());

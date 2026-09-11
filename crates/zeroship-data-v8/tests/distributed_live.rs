@@ -27,7 +27,10 @@
 //! ```
 
 use std::collections::HashMap;
-mod support;
+#[path = "../../../tests/fixtures/postgres/mod.rs"]
+mod postgres;
+#[path = "support/tracing.rs"]
+mod test_tracing;
 mod relay_fixture;
 use zeroship_data_orm::cdc::relay::RelayConfig;
 
@@ -832,8 +835,8 @@ async fn drop_app_role(pool: &Pool, app_id: &str) -> Result<(), String> {
 #[test]
 fn db_live_stream_crosses_relay_and_v8_isolates_without_worker_replication() {
     init_v8();
-    support::init_test_tracing();
-    let postgres = crate::support::postgres::Postgres::start();
+    test_tracing::init_test_tracing();
+    let postgres = postgres::Postgres::start();
     let url = postgres.url();
     let app_uuid = uuid::Uuid::new_v4();
     let app_id = app_uuid.to_string();
