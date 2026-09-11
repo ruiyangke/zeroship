@@ -369,7 +369,7 @@ mod backend_init_tests {
 ///
 /// `zeroship-migrate-server` WRITES the schema
 /// (`provisioning::workflow_journal_schema_name`, called at
-/// `provisioning.rs:327` and `apply.rs:1526`); `zeroship-plugin-workflow` READS
+/// `provisioning.rs:327` and `apply.rs:1526`); `zeroship-workflow` READS
 /// it (`store::pg::app_schema_for`, called at `store/pg.rs:81`). The writer's
 /// own doc says why they are separate: "this crate does not depend on that one,
 /// so the derivation is duplicated rather than shared."
@@ -404,7 +404,7 @@ mod journal_schema_derivations_agree {
         ];
         for id in ids {
             let writer = zeroship_migrate_server::provisioning::workflow_journal_schema_name(&id);
-            let reader = zeroship_plugin_workflow::store::pg::app_schema_for(&id);
+            let reader = zeroship_workflow::store::pg::app_schema_for(&id);
             assert_eq!(
                 writer, reader,
                 "the migration service provisions the workflow journal schema as \

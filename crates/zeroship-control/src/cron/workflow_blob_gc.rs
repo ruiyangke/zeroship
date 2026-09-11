@@ -11,7 +11,7 @@ use std::time::{Duration, SystemTime};
 use chrono::Utc;
 use compio_postgres::{Client, GenericClient};
 use uuid::Uuid;
-use zeroship_plugin_workflow::store::pg::WorkflowTables;
+use zeroship_workflow::store::pg::WorkflowTables;
 
 use crate::cron::workflow_engine::SweepCoverage;
 use crate::registry::RegistryError;

@@ -1,30 +1,23 @@
-//! Durable workflow plugin — `env.workflows`.
+//! Durable workflow V8 binding — `env.workflows`.
 //!
-//! `WorkflowPlugin::build_instance` mints a native `env.workflows` namespace
+//! `WorkflowBinding::build_instance` mints a native `env.workflows` namespace
 //! per isolate. The namespace carries only an app-scoped bearer token derived
 //! in Rust as `HMAC-SHA256(control_key, app_id)`; the raw control key never
 //! enters V8.
 
-pub mod backend;
-pub mod advance;
-pub mod apply;
-pub mod claim;
-pub mod client;
-pub mod dev;
-pub mod engine;
-pub mod errors;
-pub mod store;
+mod dev;
+mod error;
 pub mod v8_class;
 
 use std::path::Path;
 use std::sync::Arc;
 
-use backend::{HttpWorkflowBackend, SharedWorkflowBackend};
 use zeroship_runtime::plugin::{NativePlugin, NativeRegistrar};
+use zeroship_workflow::backend::{HttpWorkflowBackend, SharedWorkflowBackend};
 
-pub use backend::WorkflowBackend;
-pub use client::{app_scoped_token, WorkflowClientConfig, WorkflowHttpMethod, WorkflowHttpRequest};
-pub use dev::DevWorkflowEngine;
+use zeroship_workflow::DevWorkflowEngine;
+use zeroship_workflow::WorkflowClientConfig;
+
 pub use v8_class::{is_excluded_workflow_property, mint_workflows};
 
 #[derive(Clone, Debug)]
@@ -39,11 +32,11 @@ enum WorkflowBackendFactory {
 }
 
 #[derive(Clone, Debug)]
-pub struct WorkflowPlugin {
+pub struct WorkflowBinding {
     backend: WorkflowBackendFactory,
 }
 
-impl WorkflowPlugin {
+impl WorkflowBinding {
     #[must_use]
     pub fn new(control_url: impl Into<String>, control_key: impl Into<String>) -> Self {
         Self {
@@ -65,7 +58,10 @@ impl WorkflowPlugin {
         env_vars: std::collections::HashMap<String, String>,
         plugins: Vec<Arc<dyn NativePlugin>>,
     ) -> Result<Self, String> {
-        let engine = DevWorkflowEngine::open(db_path, modules, env_vars, plugins)?;
+        let engine = DevWorkflowEngine::open(
+            db_path,
+            Arc::new(dev::V8WorkflowExecutor::new(modules, env_vars, plugins)),
+        )?;
         Ok(Self {
             backend: WorkflowBackendFactory::DevSqlite { engine },
         })
@@ -77,7 +73,7 @@ impl WorkflowPlugin {
                 control_url,
                 control_key,
             } => {
-                let token = client::app_scoped_token(control_key, app_id);
+                let token = zeroship_workflow::app_scoped_token(control_key, app_id);
                 Arc::new(HttpWorkflowBackend::new(WorkflowClientConfig::new(
                     control_url.clone(),
                     app_id.to_string(),
@@ -92,7 +88,7 @@ impl WorkflowPlugin {
     }
 }
 
-impl NativePlugin for WorkflowPlugin {
+impl NativePlugin for WorkflowBinding {
     fn namespace(&self) -> &str {
         "workflows"
     }

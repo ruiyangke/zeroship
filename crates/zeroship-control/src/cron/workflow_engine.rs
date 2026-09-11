@@ -13,14 +13,14 @@ use chrono::{DateTime, Utc};
 use compio_postgres::error::SqlState;
 use compio_postgres::GenericClient;
 use uuid::Uuid;
-use zeroship_plugin_workflow::advance::{
+use zeroship_workflow::advance::{
     WorkflowAdvanceNackKind, WorkflowAdvanceRegistration, WorkflowAdvanceResponse,
     WorkflowRunDispatchRequest,
 };
-use zeroship_plugin_workflow::apply;
-use zeroship_plugin_workflow::engine;
-use zeroship_plugin_workflow::errors::WorkflowError;
-use zeroship_plugin_workflow::store::pg::{self, PgStore, WorkflowTables};
+use zeroship_workflow::apply;
+use zeroship_workflow::engine;
+use zeroship_workflow::errors::WorkflowError;
+use zeroship_workflow::store::pg::{self, PgStore, WorkflowTables};
 use zeroship_workflow_scheduler::{
     self as workflow_scheduler, SchedulerConfig, TimerWheel, WakeHandle,
     WorkflowSchedulerStore, WorkflowSchedulerStoreError, WORKFLOW_ADVANCE_PATH,

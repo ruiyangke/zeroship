@@ -6,7 +6,7 @@ const WORKER_DATABASE_ROLE: &str = "zeroship_worker";
 ///
 /// The workflow journal tables are owned by this role and revoked from PUBLIC
 /// and from the app runtime role
-/// (`zeroship-plugin-workflow/src/store/pg.rs::reassert_table_revokes`), and
+/// (`zeroship-workflow/src/store/pg.rs::reassert_table_revokes`), and
 /// only `PgStore::provision` issues an explicit `SET ROLE` - every other
 /// journal statement reaches those tables by inheriting this membership. Adding
 /// it to the deny-by-default sweep below would refuse every boot.

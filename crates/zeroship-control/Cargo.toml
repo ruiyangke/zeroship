@@ -54,7 +54,7 @@ zeroship-auth = { workspace = true }
 # the same `email_suppressions` contract auth uses. PR-0 deliberately left control
 # un-wired; this is the wiring.
 zeroship-mailer = { workspace = true }
-zeroship-plugin-workflow = { workspace = true }
+zeroship-workflow = { workspace = true }
 zeroship-workflow-scheduler = { workspace = true }
 zeroship-stream = { workspace = true }
 zeroship-metering = { workspace = true }
@@ -109,6 +109,7 @@ chrono = { version = "0.4", default-features = false, features = ["std", "serde"
 chrono-tz = "0.10"
 
 [dev-dependencies]
+zeroship-workflow-v8 = { workspace = true }
 zeroship-test-support = { workspace = true }
 # The live-database preflight (`zeroship_testkit::live_db`). Every target in
 # `tests/live_db.rs` runs it before its first fixture, so an unmigrated database

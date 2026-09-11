@@ -4660,8 +4660,8 @@ async fn workflow_journal_redeploy_grants_do_not_reopen_without_reprovision() {
     })
     .detach();
     let app_id = Uuid::new_v4();
-    let app_schema = zeroship_plugin_workflow::store::pg::app_schema_for(&app_id);
-    let tables = zeroship_plugin_workflow::store::pg::WorkflowTables::for_app_id(&app_id);
+    let app_schema = zeroship_workflow::store::pg::app_schema_for(&app_id);
+    let tables = zeroship_workflow::store::pg::WorkflowTables::for_app_id(&app_id);
     let schema_role = zeroship_core::database_role::per_app_role_name(&app_schema)
         .expect("workflow schema must produce a valid PostgreSQL role name");
     let uuid_role = zeroship_core::database_role::per_app_role_name(&app_id.to_string())
@@ -4713,7 +4713,7 @@ async fn workflow_journal_redeploy_grants_do_not_reopen_without_reprovision() {
     zeroship_migrate_server::provisioning::provision_workflow_journal_schema(&client, &app_id)
         .await
         .expect("provision the app workflow journal schema");
-    zeroship_plugin_workflow::store::pg::PgStore::provision(&client, &app_id)
+    zeroship_workflow::store::pg::PgStore::provision(&client, &app_id)
         .await
         .expect("provision app-local workflow journal");
     zeroship_data_orm::auth::bootstrap::ensure_per_app_role(&pool, &app_schema)

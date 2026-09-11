@@ -23,7 +23,7 @@ zeroship-storage = { workspace = true, features = ["s3"] }
 zeroship-storage-v8 = { workspace = true }
 zeroship-kv = { workspace = true, features = ["redis", "redb"] }
 zeroship-kv-v8 = { workspace = true }
-zeroship-plugin-workflow = { workspace = true }
+zeroship-workflow-v8 = { workspace = true }
 zeroship-metering = { workspace = true }
 libc = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
