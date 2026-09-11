@@ -4761,7 +4761,7 @@ async fn workflow_journal_redeploy_grants_do_not_reopen_without_reprovision() {
             .expect("check journal table owner");
         let owner: String = owner_rows[0].get("owner");
         // Bound to `zeroship-migrate-server`'s copy of the owner-role name while the
-        // writer is `plugin-workflow`'s private copy of it, so the two
+        // writer is `zeroship-workflow`'s private copy of it, so the two
         // duplicated constants disagreeing shows up here rather than as a
         // journal nobody can reach. Until 2026-08-20 this compared against
         // `__zeroship_platform_role`, the role the store created for itself

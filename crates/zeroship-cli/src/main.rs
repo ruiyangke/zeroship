@@ -344,7 +344,7 @@ fn cmd_serve(args: &[String]) {
         }
     }
     let workflow_peer_plugins = plugins.clone();
-    let workflow_plugin = zeroship_workflow_v8::WorkflowBinding::dev_sqlite(
+    let workflow_binding = zeroship_workflow_v8::WorkflowBinding::dev_sqlite(
         &workflow_db_path,
         modules.clone(),
         env_vars.clone(),
@@ -357,9 +357,9 @@ fn cmd_serve(args: &[String]) {
         );
         std::process::exit(1);
     });
-    plugins.push(Arc::new(workflow_plugin));
+    plugins.push(Arc::new(workflow_binding));
     eprintln!(
-        "[zeroship] workflows plugin registered (sqlite; path={})",
+        "[zeroship] workflows binding registered (sqlite; path={})",
         workflow_db_path.display()
     );
 

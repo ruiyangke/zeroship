@@ -94,7 +94,7 @@ thread_local! {
     /// namespace is absent.
     static STORAGE_BACKEND: RefCell<Option<StorageBackendConfig>> = const { RefCell::new(None) };
     /// Control-plane endpoint and raw control key used only to derive
-    /// app-scoped workflow tokens in `WorkflowPlugin::build_instance`.
+    /// app-scoped workflow tokens in `WorkflowBinding::build_instance`.
     /// The raw key stays in Rust process memory and is never exposed to V8.
     static CONTROL_URL: RefCell<Option<String>> = const { RefCell::new(None) };
     static CONTROL_KEY: RefCell<Option<String>> = const { RefCell::new(None) };
