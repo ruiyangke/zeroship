@@ -1371,10 +1371,15 @@ fn stream_response(
         macro_rules! flush_delta {
             () => {{
                 let elapsed_us = stream_start.elapsed().as_micros() as u64;
-                let wall_delta = elapsed_us.saturating_sub(wall_recorded_us);
-                cache::record_stream_delta(&app_id, bytes_since_flush, wall_delta);
-                bytes_since_flush = 0;
-                wall_recorded_us = elapsed_us;
+                let wall_delta = elapsed_us.saturating_sub(std::mem::replace(
+                    &mut wall_recorded_us,
+                    elapsed_us,
+                ));
+                cache::record_stream_delta(
+                    &app_id,
+                    std::mem::take(&mut bytes_since_flush),
+                    wall_delta,
+                );
             }};
         }
 
@@ -3577,10 +3582,7 @@ pub(crate) mod tests {
                     // Dummy DSN: the service validates and stores the URL and
                     // the backend connects lazily, so `env.db` is installed
                     // without a live Postgres.
-                    db_service: Some(crate::cache::test_db_service(
-                        "postgres://localhost/zs_phase2_unused",
-                        "handler-test-worker",
-                    )),
+                    db_service: Some(crate::cache::test_db_service("postgres://localhost/zs_phase2_unused")),
                     kv_store: Some(
                         zeroship_kv::KvStore::open(&zeroship_kv::KvConfig::Redis {
                             redis: zeroship_kv::RedisConfig::new(
@@ -4285,7 +4287,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
                 control_key: String::new(),
                 db_service: db_url
                     .as_deref()
-                    .map(|url| crate::cache::test_db_service(url, "handler-test-worker")),
+                    .map(|url| crate::cache::test_db_service(url)),
                 kv_store: None,
                 storage_backend: None,
                 meter: meter.clone(),

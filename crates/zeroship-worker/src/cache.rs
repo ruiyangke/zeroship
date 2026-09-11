@@ -133,6 +133,17 @@ pub struct KernelConfig {
     pub meter: Arc<zeroship_metering::Meter>,
 }
 
+impl std::fmt::Debug for KernelConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KernelConfig")
+            .field("control_key", &"[REDACTED]")
+            .field("db_configured", &self.db_service.is_some())
+            .field("kv_configured", &self.kv_store.is_some())
+            .field("storage_configured", &self.storage_backend.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
 /// Install this thread's isolate cache and runtime kernel.
 ///
 /// Replacing the kernel also replaces its DB and KV stores. Passing no KV
@@ -170,10 +181,7 @@ pub fn init_cache(max_size: usize, max_pinned_isolates_per_app: usize, kernel: K
 /// the prototype is shared must build ONE service and hand it to both threads -
 /// not two services and hope.
 #[cfg(test)]
-pub(crate) fn test_db_service(
-    url: &str,
-    worker_id: &str,
-) -> Arc<zeroship_data_v8::service::DbService> {
+pub(crate) fn test_db_service(url: &str) -> Arc<zeroship_data_v8::service::DbService> {
     zeroship_data_v8::service::DbService::new(zeroship_data_v8::service::DbServiceConfig {
         connection: zeroship_data_orm::connection::ConnectionFactory::for_url(url)
             .expect("valid database configuration"),
@@ -192,28 +200,6 @@ pub fn db_url() -> Option<String> {
     })
 }
 
-/// Create plugins for a new Runtime — the kernel every deployed app boots
-/// against. This is the SINGLE source of truth for the multi-node `env.*`
-/// surface; the CLI `zeroship serve` vector (`crates/zeroship-cli/src/main.rs`)
-/// mirrors it for the single-tenant dev path.
-///
-/// Namespaces and their multi-node backend choices:
-/// - `auth` — pushed unconditionally. Stateless (callbacks read the
-///   per-request user from `RuntimeState`), so every app gets a working
-///   `env.auth.getUser()` / `env.auth.requireUser()`.
-/// - `db` — pushed when a DB URL is configured. Postgres is inherently
-///   shared across nodes.
-/// - `kv` — pushed when startup supplied a configured `KvStore`. The
-///   distributed worker selects Redis so nodes share storage; its URL selects
-///   standalone or cluster mode. Isolate construction clones the configured
-///   store and performs no backend selection.
-/// - `storage` — pushed when a storage backend is configured (`--storage-url`).
-///   `LocalFs` gets multi-node consistency from rooting its path on a SHARED
-///   volume — the exact pattern the deploy blob store already uses
-///   (control/gateway/worker all mount the same `bundles` volume). `S3`
-///   (S3/R2/MinIO) is the prod backend behind the same `Backend` trait and is
-///   inherently shared across nodes. An object written on node A is readable
-///   on node B in both cases.
 thread_local! {
     /// The thread's plugin prototype set, minted once and cloned thereafter.
     ///
@@ -248,6 +234,28 @@ fn plugin_set() -> Vec<Arc<dyn NativePlugin>> {
     })
 }
 
+/// Create plugins for a new Runtime — the kernel every deployed app boots
+/// against. This is the SINGLE source of truth for the multi-node `env.*`
+/// surface; the CLI `zeroship serve` vector (`crates/zeroship-cli/src/main.rs`)
+/// mirrors it for the single-tenant dev path.
+///
+/// Namespaces and their multi-node backend choices:
+/// - `auth` — pushed unconditionally. Stateless (callbacks read the
+///   per-request user from `RuntimeState`), so every app gets a working
+///   `env.auth.getUser()` / `env.auth.requireUser()`.
+/// - `db` — pushed when a DB URL is configured. Postgres is inherently
+///   shared across nodes.
+/// - `kv` — pushed when startup supplied a configured `KvStore`. The
+///   distributed worker selects Redis so nodes share storage; its URL selects
+///   standalone or cluster mode. Isolate construction clones the configured
+///   store and performs no backend selection.
+/// - `storage` — pushed when a storage backend is configured (`--storage-url`).
+///   `LocalFs` gets multi-node consistency from rooting its path on a SHARED
+///   volume — the exact pattern the deploy blob store already uses
+///   (control/gateway/worker all mount the same `bundles` volume). `S3`
+///   (S3/R2/MinIO) is the prod backend behind the same `Backend` trait and is
+///   inherently shared across nodes. An object written on node A is readable
+///   on node B in both cases.
 fn create_plugins() -> Vec<Arc<dyn NativePlugin>> {
     let mut plugins: Vec<Arc<dyn NativePlugin>> = Vec::new();
     // The process-wide meter, if configured. Metering is infrastructure:
@@ -1143,7 +1151,7 @@ mod tests {
         std::thread::spawn(|| {
             // Composition happens first and is allowed exactly one parse; the
             // arm measures everything AFTER it.
-            let service = test_db_service("postgres://localhost/zs_unused_build", "build-worker");
+            let service = test_db_service("postgres://localhost/zs_unused_build");
             let parses = url_parse_count();
             let opens = backend_open_count();
 
@@ -1252,7 +1260,7 @@ mod tests {
                 .expect("the db namespace must be registered when a service is installed")
                 .clone()
         }
-        let service = test_db_service("postgres://localhost/zs_unused_shared", "shared-worker");
+        let service = test_db_service("postgres://localhost/zs_unused_shared");
         let kernel = |service: Arc<zeroship_data_v8::service::DbService>| KernelConfig {
             control_url: "http://127.0.0.1:1".to_string(),
             control_key: "test-control-key".to_string(),
@@ -1313,10 +1321,7 @@ mod tests {
             let kernel = || KernelConfig {
                 control_url: "http://127.0.0.1:1".to_string(),
                 control_key: "test-control-key".to_string(),
-                db_service: Some(test_db_service(
-                    "postgres://localhost/zs_unused",
-                    "share-test-worker",
-                )),
+                db_service: Some(test_db_service("postgres://localhost/zs_unused")),
                 kv_store: None,
                 storage_backend: None,
                 meter: Arc::new(zeroship_metering::Meter::new()),
@@ -1368,10 +1373,7 @@ mod tests {
             let with_db = || KernelConfig {
                 control_url: "http://127.0.0.1:1".to_string(),
                 control_key: "test-control-key".to_string(),
-                db_service: Some(test_db_service(
-                    "postgres://localhost/zs_unused_sticky",
-                    "sticky-test-worker",
-                )),
+                db_service: Some(test_db_service("postgres://localhost/zs_unused_sticky")),
                 kv_store: None,
                 storage_backend: None,
                 meter: Arc::new(zeroship_metering::Meter::new()),
@@ -1431,10 +1433,7 @@ mod tests {
                 KernelConfig {
                     control_url: "http://127.0.0.1:1".to_string(),
                     control_key: "test-control-key".to_string(),
-                    db_service: Some(test_db_service(
-                        "postgres://localhost/zs_unused",
-                        "kernel-test-worker",
-                    )),
+                    db_service: Some(test_db_service("postgres://localhost/zs_unused")),
                     kv_store: Some(
                         zeroship_kv::KvStore::open(&zeroship_kv::KvConfig::Redis {
                             redis: zeroship_kv::RedisConfig::new(zeroship_kv::Topology::Standalone { endpoint: "127.0.0.1:6379".into() }),

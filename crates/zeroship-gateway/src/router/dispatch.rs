@@ -6312,12 +6312,8 @@ mod tests {
     /// A route with one `idempotent: true` mutation at wire-id
     /// `todos.add`, reachable at `/__zeroship/v1/todos.add`. This is the
     /// only resource shape that reaches the step-9 idempotency capture.
-    fn idempotent_mutation_route() -> zeroship_core::types::RouteEntry {
-        idempotent_mutation_route_with_oauth(None)
-    }
-
-    /// As [`idempotent_mutation_route`], but with the app's OAuth client id
-    /// set. That id is what decides which gateway-originated response the
+    ///
+    /// The app's OAuth client id decides which gateway-originated response the
     /// worker-401-on-an-HTML-navigation branch emits: `Some` → the 302 into
     /// the OP (`start_oidc_redirect`), `None` → the 503
     /// `client_not_provisioned`.
