@@ -16,8 +16,8 @@ use zeroship_runtime_macros::v8_class;
 #[allow(unused_imports)]
 use zeroship_runtime_macros::{v8_constructor, v8_getter, v8_method, v8_name};
 
-use crate::backend::SharedWorkflowBackend;
-use crate::client::WorkflowRpcError;
+use zeroship_workflow::backend::SharedWorkflowBackend;
+use zeroship_workflow::client::WorkflowRpcError;
 
 // ---------------------------------------------------------------------------
 // State
@@ -281,7 +281,7 @@ fn dispatch_json<'s>(
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
         let value = match op.await {
             Ok(value) => ResolveValue::Json(value.to_string()),
-            Err(e) => ResolveValue::RejectError(e.to_op_error()),
+            Err(e) => ResolveValue::RejectError(crate::error::to_op_error(e)),
         };
         OpResult::JsValue {
             resolver,
@@ -331,10 +331,10 @@ fn dispatch_start<'s>(
                             }
                         }))
                     }
-                    Err(e) => ResolveValue::RejectError(e.to_op_error()),
+                    Err(e) => ResolveValue::RejectError(crate::error::to_op_error(e)),
                 }
             }
-            Err(e) => ResolveValue::RejectError(e.to_op_error()),
+            Err(e) => ResolveValue::RejectError(crate::error::to_op_error(e)),
         };
         OpResult::JsValue {
             resolver,
@@ -379,7 +379,7 @@ fn dispatch_restart<'s>(
                     }
                 }))
                 }
-            Err(e) => ResolveValue::RejectError(e.to_op_error()),
+            Err(e) => ResolveValue::RejectError(crate::error::to_op_error(e)),
         };
         OpResult::JsValue {
             resolver,

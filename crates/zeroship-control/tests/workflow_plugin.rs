@@ -15,11 +15,9 @@ use zeroship_control::{
     workflow_instance_api, AppState, EnvStore, Quota, RateLimiter, Registry, SecretString,
     StripeStore,
 };
-use zeroship_plugin_workflow::{
-    app_scoped_token, is_excluded_workflow_property, WorkflowClientConfig, WorkflowHttpMethod,
-    WorkflowPlugin,
-};
-use zeroship_plugin_workflow::store::pg::{PgStore, WorkflowTables};
+use zeroship_workflow::{app_scoped_token, WorkflowClientConfig, WorkflowHttpMethod};
+use zeroship_workflow_v8::{is_excluded_workflow_property, WorkflowBinding};
+use zeroship_workflow::store::pg::{PgStore, WorkflowTables};
 use zeroship_runtime::channel::CancelFlag;
 use zeroship_runtime::plugin::NativePlugin;
 use zeroship_runtime::{
@@ -278,7 +276,7 @@ async fn run_workflow_app(control_url: String, app_id: Uuid, source: &str) -> (u
     let mut env_vars = HashMap::new();
     env_vars.insert("APP_ID".to_string(), app_id.to_string());
     let plugin: Arc<dyn NativePlugin> =
-        Arc::new(WorkflowPlugin::new(control_url, TEST_CONTROL_KEY));
+        Arc::new(WorkflowBinding::new(control_url, TEST_CONTROL_KEY));
     let runtime = Runtime::builder()
         .modules(modules(source))
         .env_vars(env_vars)
@@ -328,7 +326,7 @@ async fn run_dev_workflow_app(
     let mut env_vars = HashMap::new();
     env_vars.insert("APP_ID".to_string(), app_id.to_string());
     let plugin: Arc<dyn NativePlugin> = Arc::new(
-        WorkflowPlugin::dev_sqlite(db_path, modules(source), env_vars.clone(), Vec::new())
+        WorkflowBinding::dev_sqlite(db_path, modules(source), env_vars.clone(), Vec::new())
             .expect("dev workflow plugin"),
     );
     let runtime = Runtime::builder()
@@ -398,7 +396,7 @@ fn builds_authenticated_workflow_instance_requests() {
         "app_123",
         app_scoped_token(TEST_CONTROL_KEY, "app_123"),
     );
-    let start = zeroship_plugin_workflow::client::build_start_request(
+    let start = zeroship_workflow::client::build_start_request(
         &cfg,
         "Checkout/Final",
         json!({ "input": { "orderId": 42 }, "key": "cart-42" }),
@@ -417,7 +415,7 @@ fn builds_authenticated_workflow_instance_requests() {
     );
 
     let status =
-        zeroship_plugin_workflow::client::build_get_status_request(&cfg, "run_abc/def")
+        zeroship_workflow::client::build_get_status_request(&cfg, "run_abc/def")
             .expect("status request");
     assert_eq!(status.method, WorkflowHttpMethod::Get);
     assert_eq!(
@@ -426,7 +424,7 @@ fn builds_authenticated_workflow_instance_requests() {
     );
     assert!(status.body.is_none());
 
-    let restart = zeroship_plugin_workflow::client::build_restart_request(
+    let restart = zeroship_workflow::client::build_restart_request(
         &cfg,
         "run_abc/def",
         json!({ "from": { "name": "charge" } }),

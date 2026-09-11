@@ -93,7 +93,7 @@ zeroship-migrate-sqlite
 zeroship-data-v8
 zeroship-storage
 zeroship-storage-v8
-zeroship-plugin-workflow
+zeroship-workflow
 zeroship-runtime
 zeroship-runtime-macros
 zeroship-stream
@@ -101,3 +101,4 @@ zeroship-testkit
 zeroship-test-support
 zeroship-worker
 zeroship-workflow-scheduler
+zeroship-workflow-v8

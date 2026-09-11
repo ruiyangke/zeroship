@@ -35,11 +35,11 @@ use zeroship_control::registry::RegistryError;
 use zeroship_control::{
     AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore,
 };
-use zeroship_plugin_workflow::advance::{
+use zeroship_workflow::advance::{
     WorkflowAdvanceNackKind, WorkflowAdvanceResponse, WorkflowRunDispatchRequest,
 };
-use zeroship_plugin_workflow::engine::MAX_LIVE_DESCENDANTS_FIELD;
-use zeroship_plugin_workflow::store::pg::{PgStore, WorkflowTables};
+use zeroship_workflow::engine::MAX_LIVE_DESCENDANTS_FIELD;
+use zeroship_workflow::store::pg::{PgStore, WorkflowTables};
 use zeroship_workflow_scheduler::WorkflowSchedulerStore;
 
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";

@@ -17,17 +17,17 @@ use zeroship_core::service_peers::ServiceAuth;
 use zeroship_core::dispatch_frame::decode_dispatch_frame;
 use zeroship_core::types::{AppNetPolicy, AppRuntimeLimits};
 use zeroship_bundle::sha256_hex;
-use zeroship_plugin_workflow::advance::{
+use zeroship_workflow::advance::{
     collect_post_apply_registrations, worker_json_to_step_result, WorkflowAdvanceNackKind,
     WorkflowAdvanceResponse, WorkflowRunDispatchRequest,
 };
-use zeroship_plugin_workflow::apply;
-use zeroship_plugin_workflow::claim::{
+use zeroship_workflow::apply;
+use zeroship_workflow::claim::{
     claim_workflow_run, renew_workflow_claim, WorkflowClaimOutcome,
 };
-use zeroship_plugin_workflow::engine::{StepRequest, WorkflowEngineConfig};
-use zeroship_plugin_workflow::errors::WorkflowError;
-use zeroship_plugin_workflow::store::pg::PgStore;
+use zeroship_workflow::engine::{StepRequest, WorkflowEngineConfig};
+use zeroship_workflow::errors::WorkflowError;
+use zeroship_workflow::store::pg::PgStore;
 use zeroship_runtime::runtime::DispatchError;
 use zeroship_runtime::{
     CancelFlag, EnvSnapshot, FetchOutcome, RequestCtx, ResultReceiver, Runtime, SettledFetch,
@@ -4095,7 +4095,7 @@ mod workflow_live_tests {
     use ntex::web::{self, test};
     use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
     use zeroship_migrate_server::provisioning::provision_workflow_journal_schema;
-    use zeroship_plugin_workflow::store::pg::{PgStore, WorkflowTables};
+    use zeroship_workflow::store::pg::{PgStore, WorkflowTables};
 
     use super::tests::{
         gateway_authorization, init_runtime, test_service_auth, tmpdir, usage_value, worker_app_path,

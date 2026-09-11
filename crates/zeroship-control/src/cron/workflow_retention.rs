@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use compio_postgres::GenericClient;
-use zeroship_plugin_workflow::store::pg::WorkflowTables;
+use zeroship_workflow::store::pg::WorkflowTables;
 
 use zeroship_core::config::DeclaredEnvKey;
 

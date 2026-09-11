@@ -7889,10 +7889,10 @@ dependencies = [
  "zeroship-kv",
  "zeroship-kv-v8",
  "zeroship-metering",
- "zeroship-plugin-workflow",
  "zeroship-runtime",
  "zeroship-storage",
  "zeroship-storage-v8",
+ "zeroship-workflow-v8",
 ]
 
 [[package]]
@@ -7977,12 +7977,13 @@ dependencies = [
  "zeroship-mailer",
  "zeroship-metering",
  "zeroship-migrate-server",
- "zeroship-plugin-workflow",
  "zeroship-runtime",
  "zeroship-stream",
  "zeroship-test-support",
  "zeroship-testkit",
+ "zeroship-workflow",
  "zeroship-workflow-scheduler",
+ "zeroship-workflow-v8",
  "zstd",
 ]
 
@@ -8156,9 +8157,9 @@ dependencies = [
  "zeroship-migrate-postgres",
  "zeroship-migrate-server",
  "zeroship-migrate-sqlite",
- "zeroship-plugin-workflow",
  "zeroship-runtime",
  "zeroship-runtime-macros",
+ "zeroship-workflow",
 ]
 
 [[package]]
@@ -8492,29 +8493,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "zeroship-plugin-workflow"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "chrono",
- "compio",
- "compio-postgres",
- "cyper",
- "percent-encoding",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tempfile",
- "tracing",
- "uuid",
- "v8",
- "zeroship-core",
- "zeroship-runtime",
- "zeroship-runtime-macros",
-]
-
-[[package]]
 name = "zeroship-runtime"
 version = "0.1.0"
 dependencies = [
@@ -8664,12 +8642,33 @@ dependencies = [
  "zeroship-kv-v8",
  "zeroship-metering",
  "zeroship-migrate-server",
- "zeroship-plugin-workflow",
  "zeroship-runtime",
  "zeroship-storage",
  "zeroship-storage-v8",
  "zeroship-stream",
+ "zeroship-workflow",
+ "zeroship-workflow-v8",
  "zstd",
+]
+
+[[package]]
+name = "zeroship-workflow"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "compio",
+ "compio-postgres",
+ "cyper",
+ "percent-encoding",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "tracing",
+ "uuid",
+ "zeroship-core",
 ]
 
 [[package]]
@@ -8689,6 +8688,19 @@ dependencies = [
  "tracing",
  "uuid",
  "zeroship-core",
+]
+
+[[package]]
+name = "zeroship-workflow-v8"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "compio",
+ "serde_json",
+ "v8",
+ "zeroship-runtime",
+ "zeroship-runtime-macros",
+ "zeroship-workflow",
 ]
 
 [[package]]

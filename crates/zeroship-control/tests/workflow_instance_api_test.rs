@@ -23,7 +23,7 @@ use zeroship_control::{
     workflow_instance_api, AppState, EnvStore, Quota, RateLimiter, Registry, SecretString,
     StripeStore,
 };
-use zeroship_plugin_workflow::store::pg::{PgStore, WorkflowTables};
+use zeroship_workflow::store::pg::{PgStore, WorkflowTables};
 use zeroship_workflow_scheduler::WorkflowSchedulerStore;
 
 const TEST_CONTROL_KEY: &str = "test-control-key";

@@ -296,7 +296,7 @@ fn create_plugins() -> Vec<Arc<dyn NativePlugin>> {
     }
     if let Some(control_url) = CONTROL_URL.with(|u| u.borrow().clone()) {
         let control_key = CONTROL_KEY.with(|k| k.borrow().clone()).unwrap_or_default();
-        plugins.push(Arc::new(zeroship_plugin_workflow::WorkflowPlugin::new(
+        plugins.push(Arc::new(zeroship_workflow_v8::WorkflowBinding::new(
             control_url,
             control_key,
         )));
