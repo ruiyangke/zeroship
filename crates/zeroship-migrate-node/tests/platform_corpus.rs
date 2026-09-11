@@ -1,4 +1,4 @@
-//! The platform corpus through the real Node host, recorder and PostgreSQL database.
+//! The platform corpus through the real Node host, recorder and `PostgreSQL`.
 
 #[path = "platform_corpus/fixture.rs"]
 mod fixture;
