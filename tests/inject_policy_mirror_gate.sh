@@ -52,7 +52,7 @@
 #   lose their system columns. No text comparison of the remaining copies would
 #   have seen that either. Arm 2 counts the consumers.
 #
-#   Arm 2 is not hypothetical. crates/zeroship-data-v8/src/live_tests/parity/mod.rs was NEVER one
+#   Arm 2 is not hypothetical. crates/zeroship-data-v8/src/tests/parity/mod.rs was NEVER one
 #   of the six copies, correctly - it include_str!s plugin-db's ceiling instead of
 #   restating the rule, which is why the old gate had nothing to compare and said
 #   nothing about it. Moving the rule out of that ceiling would have silently left

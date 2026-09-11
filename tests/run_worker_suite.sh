@@ -227,16 +227,16 @@ fi
 # `config::tests::unsigned_workflow_advance_has_no_environment_or_overlay_source`
 # is a database-free lib test whose name contains the phrase. An arm that counts
 # a neighbouring test is an arm that would stay above its floor with one of the
-# seven deleted. `handler::workflow_live_tests` is the module the feature gates,
+# seven deleted. `handler::workflow_tests` is the module the feature gates,
 # so it is the thing to count; a live test added tomorrow under a different name
 # is counted for free, and no other test can drift into the set.
 WORKER_LIVE_MIN=7
-live_ran="$(grep -cE '^test handler::workflow_live_tests::[a-z0-9_]+ \.\.\. ok$' "$LOG")"
+live_ran="$(grep -cE '^test handler::workflow_tests::[a-z0-9_]+ \.\.\. ok$' "$LOG")"
 if [ "$live_ran" -lt "$WORKER_LIVE_MIN" ]; then
   echo "FAIL: only ${live_ran} workflow_advance test(s) passed, fewer than the ${WORKER_LIVE_MIN} this gate exists to run." >&2
   echo "This gate's entire purpose is that those tests execute against a migrated" >&2
   echo "database. Missing passes mean tests failed, were hidden, or were removed." >&2
-  echo "Check that handler::workflow_live_tests is compiled under cfg(test)." >&2
+  echo "Check that handler::workflow_tests is compiled under cfg(test)." >&2
   status=1
 fi
 

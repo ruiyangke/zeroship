@@ -10,7 +10,7 @@
 #
 #   crates/zeroship-data-sql/src/mask_codec.rs  and its peer in
 #   zeroship-migrate-backend both cited a round-trip guard in
-#   crates/zeroship-data-orm/src/live_tests/mask_flip.rs. That test needs
+#   crates/zeroship-data-orm/src/tests/mask_flip.rs. That test needs
 #   `--features test-helpers` PLUS a live PostgreSQL, builds and parses with ONE
 #   crate's codec, and covers one (kind, classification) pair. It could not have
 #   caught the divergence it was cited as preventing, and a real fail-open
@@ -202,7 +202,7 @@ claim_pairs() {
 LEDGER='
 crates/zeroship-data-orm/src/backend/postgres/pg_session_sql.rs	zeroship_migrate_server	unbound
 crates/zeroship-data-orm/src/exec.rs	compio_postgres	prose
-crates/zeroship-data-orm/src/backend/sqlite/vector.rs	zeroship_migrate_core	bound=crates/zeroship-data-orm/src/live_tests/sqlite_integration.rs#fn engine_shadow_relation
+crates/zeroship-data-orm/src/backend/sqlite/vector.rs	zeroship_migrate_core	bound=crates/zeroship-data-orm/src/tests/sqlite_integration.rs#fn engine_shadow_relation
 crates/zeroship-migrate-backend/src/backend.rs	zeroship_migrate_postgres	prose
 crates/zeroship-migrate-backend/src/constraint_definition.rs	zeroship_migrate	prose
 crates/zeroship-migrate-backend/src/ddl.rs	zeroship_migrate	prose

@@ -1484,7 +1484,7 @@ pub async fn run_search(
     // transaction's own uncommitted rows. `routed_vector_search` reads the bit
     // this parameter was already carrying; the trait impl on `BackendHandle` is
     // gone, because a type that cannot name a connection cannot answer the
-    // question. Bound by `plugin-db/src/live_tests/search_tx_lane.rs`.
+    // question. Bound by `plugin-db/src/tests/search_tx_lane.rs`.
     //
     // The descriptor slice is resolved HERE and handed down. The vendor used to
     // fetch it from `crate::context` itself, which is the backend tier reaching

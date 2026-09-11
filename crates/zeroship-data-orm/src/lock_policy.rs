@@ -25,7 +25,7 @@
 //! `zeroship-data-postgres` supplied the fact that argument was missing: BOTH
 //! vendors call this. `LockGuard::acquire` needs it and `LockGuard` travels
 //! with the PostgreSQL backend by the orphan rule; and
-//! `crates/zeroship-data-orm/src/live_tests/sqlite_integration.rs` needs it on the
+//! `crates/zeroship-data-orm/src/tests/sqlite_integration.rs` needs it on the
 //! other side. A policy both vendors need cannot live in the crate ABOVE them
 //! without making each vendor depend on the adapter that depends on it.
 //!

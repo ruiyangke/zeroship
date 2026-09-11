@@ -27,15 +27,15 @@ use zeroship_data_sql::compile;
 
 pub(crate) mod context;
 #[cfg(test)]
-mod live_tests;
+mod tests;
 pub mod op_error;
 #[cfg(test)]
-#[path = "live_tests/host.rs"]
+#[path = "tests/host.rs"]
 mod testing;
 #[cfg(test)]
 extern crate self as zeroship_data_v8;
 #[cfg(test)]
-use live_tests::{parity, schema_fixture, support};
+use tests::{parity, schema_fixture, support};
 pub(crate) mod v8_bridge;
 pub mod v8_classes;
 
@@ -379,7 +379,7 @@ mod backend_init_tests {
 ///
 /// WHY AN EQUALITY TEST AND NOT AN INTEGRATION TEST. The obvious alternative -
 /// provision through the writer, then read through the reader - is what
-/// `src/live_tests/integration.rs` looks like it does and does NOT: it computes the name
+/// `src/tests/integration.rs` looks like it does and does NOT: it computes the name
 /// with the READER, then creates and drops that schema as its own fixture, so a
 /// drift in the writer alone leaves it green. A test that builds its own
 /// precondition cannot detect a disagreement between two producers.

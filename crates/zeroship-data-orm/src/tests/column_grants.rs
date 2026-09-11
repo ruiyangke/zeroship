@@ -512,8 +512,8 @@ const SINGLE_ROW_VERBS: usize = 4;
 /// projected verb. Its sole table privilege is the unavoidable DELETE grant.
 #[test]
 fn column_scoped_reads_complete_every_projected_write_verb() {
-    crate::live_tests::host::in_test(|| {
-        crate::live_tests::host::run(async {
+    crate::tests::host::in_test(|| {
+        crate::tests::host::run(async {
             let postgres = crate::support::postgres::Postgres::start();
             let url = postgres.url();
             let admin = connect(&url).await;
@@ -623,8 +623,8 @@ fn column_scoped_reads_complete_every_projected_write_verb() {
 /// it, the pass is attributable to the projection.
 #[test]
 fn the_same_verbs_are_refused_outright_when_the_returning_clause_stars() {
-    crate::live_tests::host::in_test(|| {
-        crate::live_tests::host::run(async {
+    crate::tests::host::in_test(|| {
+        crate::tests::host::run(async {
             let postgres = crate::support::postgres::Postgres::start();
             let url = postgres.url();
             let admin = connect(&url).await;
@@ -699,8 +699,8 @@ fn the_same_verbs_are_refused_outright_when_the_returning_clause_stars() {
 /// that privilege grants no read access to `ctid` or to the withheld column.
 #[test]
 fn the_single_row_verbs_succeed_without_ctid_access() {
-    crate::live_tests::host::in_test(|| {
-        crate::live_tests::host::run(async {
+    crate::tests::host::in_test(|| {
+        crate::tests::host::run(async {
             let postgres = crate::support::postgres::Postgres::start();
             let url = postgres.url();
             let admin = connect(&url).await;
@@ -783,8 +783,8 @@ fn the_single_row_verbs_succeed_without_ctid_access() {
 /// `ctid`.
 #[test]
 fn bounded_data_plan_writes_succeed_with_column_scoped_reads() {
-    crate::live_tests::host::in_test(|| {
-        crate::live_tests::host::run(async {
+    crate::tests::host::in_test(|| {
+        crate::tests::host::run(async {
             let postgres = crate::support::postgres::Postgres::start();
             let url = postgres.url();
             let admin = connect(&url).await;
@@ -851,7 +851,7 @@ fn bounded_data_plan_writes_succeed_with_column_scoped_reads() {
 /// exactly one column, and which one.
 #[test]
 fn the_fixture_withholds_exactly_the_raw_column() {
-    crate::live_tests::host::in_test(|| {
+    crate::tests::host::in_test(|| {
         let schema = people_schema();
         let readable: BTreeSet<String> = projected_columns(&schema).into_iter().collect();
         let raw = raw_column_name("ssn");
