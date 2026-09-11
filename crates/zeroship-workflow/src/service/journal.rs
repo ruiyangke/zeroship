@@ -134,14 +134,7 @@ pub(crate) async fn append(
             let waits = tx.table("waits");
             tx.execute(&format!("INSERT INTO {waits} (app_id,run_id,generation,ordinal,kind,signal_type,topic,max_signal_age,due_at,child_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)"),
                 &[app.as_str().into(),id.clone().into(),generation.into(),i64::from(step.ordinal).into(),step.kind.clone().into(),step.signal_type.clone().into(),step.topic.clone().into(),step.max_signal_age_ms.into(),step.wake_at.map(|time|time.timestamp_millis()).into(),step.child_run_id.clone().into()]).await?;
-            if let Some(topic) = &step.topic {
-                if topic.is_empty() || topic.len() > 256 {
-                    return invalid("invalid workflow topic");
-                }
-                let subscriptions = tx.table("subscriptions");
-                tx.execute(&format!("INSERT INTO {subscriptions} (app_id,run_id,generation,ordinal,id,topic,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7)"),
-                    &[app.as_str().into(),id.clone().into(),generation.into(),i64::from(step.ordinal).into(),typed_id::new_workflow_subscription_id().into(),topic.clone().into(),now.into()]).await?;
-            }
+            super::signals::subscribe(tx, app, &id, generation, &step, now).await?;
         }
         journal.push(step);
     }
@@ -262,18 +255,27 @@ pub(crate) async fn resolve(
             let latest = step
                 .wake_at
                 .map_or(now, |due| due.timestamp_millis().min(now));
-            let rows=tx.query(&format!("SELECT id,payload FROM {signals} WHERE app_id=$1 AND run_id=$2 AND signal_type=$3 AND consumed_generation IS NULL AND created_at >= $4 AND created_at <= $5 ORDER BY created_at,id LIMIT 1"),
-                &[app.as_str().into(),id.clone().into(),step.signal_type.clone().into(),oldest.into(),latest.into()]).await?;
+            let rows=tx.query(&format!("SELECT id,payload,created_at,origin,delivery,topic FROM {signals} WHERE app_id=$1 AND run_id=$2 AND signal_type=$3 AND consumed_generation IS NULL AND created_at >= $4 AND created_at <= $5 AND (target_generation IS NULL OR (target_generation=$6 AND target_ordinal=$7)) ORDER BY created_at,id LIMIT 1"),
+                &[app.as_str().into(),id.clone().into(),step.signal_type.clone().into(),oldest.into(),latest.into(),generation.into(),i64::from(step.ordinal).into()]).await?;
             if let Some(signal) = rows.first() {
                 let signal_id = signal.text("id")?;
-                output = Some(decode(&signal.text("payload")?)?);
+                let created_at =
+                    chrono::DateTime::from_timestamp_millis(signal.integer("created_at")?)
+                        .ok_or_else(|| {
+                            WorkflowServiceError::Internal(
+                                "invalid workflow signal timestamp".into(),
+                            )
+                        })?;
+                output = Some(json!({
+                    "id":signal_id,"type":step.signal_type,"payload":decode::<Value>(&signal.text("payload")?)?,
+                    "createdAt":created_at.to_rfc3339(),"origin":signal.text("origin")?,
+                    "delivery":signal.text("delivery")?,"topic":signal.optional_text("topic")?,
+                }));
                 step.consumed_signal_id = Some(signal_id.clone());
                 tx.execute(&format!("UPDATE {signals} SET consumed_generation=$3,consumed_ordinal=$4 WHERE app_id=$1 AND id=$2 AND run_id=$5 AND consumed_generation IS NULL"),
                     &[app.as_str().into(),signal_id.into(),generation.into(),i64::from(step.ordinal).into(),id.clone().into()]).await?;
             } else if expired {
-                error = Some(
-                    json!({"name":"WorkflowTimeoutError","message":"workflow signal wait expired"}),
-                );
+                output = Some(Value::Null);
             }
         }
         if step.kind == "child" {

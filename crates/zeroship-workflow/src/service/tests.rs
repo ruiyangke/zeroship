@@ -438,7 +438,17 @@ async fn task_contract(store: Arc<dyn WorkflowStore>) {
     ));
     let next = service.poll(&other).await.unwrap().unwrap();
     assert_eq!(next.invocation.journal[0].state, "completed");
-    assert_eq!(next.invocation.journal[0].output, Some(json!({"ok":true})));
+    let envelope = next.invocation.journal[0].output.as_ref().unwrap();
+    assert_eq!(envelope["payload"], json!({"ok":true}));
+    assert_eq!(envelope["type"], json!("approved"));
+    assert_eq!(envelope["origin"], json!("app"));
+    assert_eq!(envelope["delivery"], json!("direct"));
+    typed_id::parse_with_prefix(
+        envelope["id"].as_str().unwrap(),
+        typed_id::WORKFLOW_SIGNAL_PREFIX,
+    )
+    .unwrap();
+    chrono::DateTime::parse_from_rfc3339(envelope["createdAt"].as_str().unwrap()).unwrap();
     let done = execution(json!([{"kind":"RunCompleted","output":{"paid":true}}]));
     service
         .complete(&other, &next.id, &next.token, done.clone())
@@ -576,7 +586,10 @@ async fn behavior_contract(store: Arc<dyn WorkflowStore>) {
         task.invocation.journal[0].output,
         Some(json!({"charge":"accepted"}))
     );
-    assert_eq!(task.invocation.journal[1].output, Some(json!(true)));
+    assert_eq!(
+        task.invocation.journal[1].output.as_ref().unwrap()["payload"],
+        json!(true)
+    );
     scope
         .transition(&RequestId::mint(), &start.id, RunOperation::Cancel)
         .await
@@ -1125,8 +1138,8 @@ async fn signal_race_contract(store: Arc<dyn WorkflowStore>) {
     signal.await.unwrap().unwrap();
     let resumed = service.poll(&worker).await.unwrap().unwrap();
     assert_eq!(
-        resumed.invocation.journal[0].output,
-        Some(json!("delivered"))
+        resumed.invocation.journal[0].output.as_ref().unwrap()["payload"],
+        json!("delivered")
     );
     service
         .complete(
@@ -1155,11 +1168,12 @@ async fn signal_race_contract(store: Arc<dyn WorkflowStore>) {
         .unwrap();
     service.complete(&worker,&task.id,&task.token,execution(json!([{"kind":"Wait","ordinal":0,"name":"timed","signalType":"late","wakeAt":"2000-01-01T00:00:00Z"}]))).await.unwrap();
     let resumed = service.poll(&worker).await.unwrap().unwrap();
-    assert_eq!(resumed.invocation.journal[0].state, "failed");
+    assert_eq!(resumed.invocation.journal[0].state, "completed");
     assert_eq!(
-        resumed.invocation.journal[0].error.as_ref().unwrap()["name"],
-        json!("WorkflowTimeoutError")
+        serde_json::to_value(&resumed.invocation.journal[0]).unwrap()["output"],
+        json!(null)
     );
+    assert!(resumed.invocation.journal[0].error.is_none());
     service
         .complete(
             &worker,
@@ -1353,4 +1367,149 @@ async fn schedule_contract(store: Arc<dyn WorkflowStore>) {
         .is_empty());
     tx.commit().await.unwrap();
     assert_eq!(service.tick_schedules().await.unwrap(), 0);
+}
+
+#[compio::test]
+async fn sqlite_topic_fanout_preserves_recipient_scope_after_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("workflow.sqlite");
+    schema::initialize_sqlite(&path).unwrap();
+    broadcast_contract(Arc::new(SqliteStore::new(path))).await;
+}
+#[compio::test]
+async fn postgres_topic_fanout_preserves_recipient_scope_after_restart() {
+    let fixture = PostgresFixture::start().await;
+    broadcast_contract(Arc::new(fixture.store.clone())).await;
+}
+async fn wait_on_topic(
+    service: &WorkflowService,
+    scope: &super::AppWorkflows,
+    worker: &super::WorkerIdentity,
+) -> String {
+    let run = scope
+        .start(&RequestId::mint(), "Example", StartOptions::default())
+        .await
+        .unwrap();
+    let task = service.poll(worker).await.unwrap().unwrap();
+    assert_eq!(task.invocation.run_id, run.id);
+    service.complete(worker,&task.id,&task.token,execution(json!([{"kind":"Wait","ordinal":0,"name":"event","signalType":"news","topic":"updates"}]))).await.unwrap();
+    run.id
+}
+async fn broadcast_contract(store: Arc<dyn WorkflowStore>) {
+    let (service, app, other) = registered_service(store.clone()).await;
+    let scope = service.for_app(app.clone());
+    let other_scope = service.for_app(other);
+    let worker = super::WorkerIdentity::new("fanout-worker".into()).unwrap();
+    let mut expected = std::collections::BTreeSet::new();
+    for _ in 0..129 {
+        expected.insert(wait_on_topic(&service, &scope, &worker).await);
+    }
+    let foreign = wait_on_topic(&service, &other_scope, &worker).await;
+    let request = RequestId::mint();
+    let message = SignalOptions {
+        signal_type: "news".into(),
+        payload: json!({"release":"ready"}),
+    };
+    let broadcast = scope
+        .broadcast(&request, "updates", message.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        broadcast,
+        scope.broadcast(&request, "updates", message).await.unwrap()
+    );
+    assert!(matches!(
+        scope
+            .broadcast(
+                &request,
+                "another",
+                SignalOptions {
+                    signal_type: "news".into(),
+                    payload: json!(null)
+                }
+            )
+            .await,
+        Err(WorkflowServiceError::Conflict(_))
+    ));
+    let late = wait_on_topic(&service, &scope, &worker).await;
+    assert_eq!(service.tick_broadcasts().await.unwrap(), 128);
+    let recovered = WorkflowService::open(store.clone()).await.unwrap();
+    assert_eq!(recovered.tick_broadcasts().await.unwrap(), 1);
+    assert_eq!(recovered.tick_broadcasts().await.unwrap(), 0);
+    let mut actual = std::collections::BTreeSet::new();
+    let mut signals = std::collections::BTreeSet::new();
+    while let Some(task) = recovered.poll(&worker).await.unwrap() {
+        let envelope = task.invocation.journal[0].output.as_ref().unwrap();
+        assert_eq!(envelope["payload"], json!({"release":"ready"}));
+        assert_eq!(envelope["topic"], json!("updates"));
+        assert_eq!(envelope["delivery"], json!("topic"));
+        assert!(signals.insert(envelope["id"].as_str().unwrap().to_owned()));
+        actual.insert(task.invocation.run_id.clone());
+        recovered
+            .complete(
+                &worker,
+                &task.id,
+                &task.token,
+                execution(json!([{"kind":"RunCompleted"}])),
+            )
+            .await
+            .unwrap();
+    }
+    assert_eq!(actual, expected);
+    assert!(!actual.contains(&foreign));
+    assert!(!actual.contains(&late));
+    // Restarting a subscriber invalidates a publication still awaiting fanout.
+    scope
+        .broadcast(
+            &RequestId::mint(),
+            "updates",
+            SignalOptions {
+                signal_type: "news".into(),
+                payload: json!("old generation"),
+            },
+        )
+        .await
+        .unwrap();
+    scope
+        .restart(
+            &RequestId::mint(),
+            &late,
+            crate::operations::RestartOptions::default(),
+        )
+        .await
+        .unwrap();
+    let task = recovered.poll(&worker).await.unwrap().unwrap();
+    assert_eq!(task.invocation.run_id, late);
+    recovered.complete(&worker,&task.id,&task.token,execution(json!([{"kind":"Wait","ordinal":0,"name":"event","signalType":"news","topic":"updates"}]))).await.unwrap();
+    assert_eq!(recovered.tick_broadcasts().await.unwrap(), 0);
+    assert!(recovered.poll(&worker).await.unwrap().is_none());
+    scope
+        .signal(
+            &RequestId::mint(),
+            &late,
+            SignalOptions {
+                signal_type: "news".into(),
+                payload: json!("current generation"),
+            },
+        )
+        .await
+        .unwrap();
+    let task = recovered.poll(&worker).await.unwrap().unwrap();
+    assert_eq!(
+        task.invocation.journal[0].output.as_ref().unwrap()["payload"],
+        json!("current generation")
+    );
+    recovered
+        .complete(
+            &worker,
+            &task.id,
+            &task.token,
+            execution(json!([{"kind":"RunCompleted"}])),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        other_scope.status(&foreign).await.unwrap().state,
+        crate::operations::RunState::Waiting
+    );
 }

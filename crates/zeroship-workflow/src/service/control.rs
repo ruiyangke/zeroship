@@ -195,9 +195,11 @@ impl AppWorkflows {
         let signals = tx.table("signals");
         for step in steps.iter().filter(|step| step.ordinal >= prefix) {
             if let Some(signal) = &step.consumed_signal_id {
-                tx.execute(&format!("UPDATE {signals} SET consumed_generation=NULL,consumed_ordinal=NULL WHERE app_id=$1 AND run_id=$2 AND id=$3"), &[self.app.as_str().into(),run_id.into(),signal.clone().into()]).await?;
+                tx.execute(&format!("DELETE FROM {signals} WHERE app_id=$1 AND run_id=$2 AND id=$3 AND delivery='topic'"), &[self.app.as_str().into(),run_id.into(),signal.clone().into()]).await?;
+                tx.execute(&format!("UPDATE {signals} SET consumed_generation=NULL,consumed_ordinal=NULL WHERE app_id=$1 AND run_id=$2 AND id=$3 AND delivery='direct'"), &[self.app.as_str().into(),run_id.into(),signal.clone().into()]).await?;
             }
         }
+        tx.execute(&format!("DELETE FROM {signals} WHERE app_id=$1 AND run_id=$2 AND delivery='topic' AND target_generation=$3 AND target_ordinal >= $4"), &[self.app.as_str().into(),run_id.into(),current.into(),i64::from(prefix).into()]).await?;
         tx.execute(&format!("UPDATE {generations} SET state=CASE WHEN terminal_at IS NULL THEN 'restarted' ELSE state END,terminal_at=COALESCE(terminal_at,$4) WHERE app_id=$1 AND run_id=$2 AND generation=$3"), &[self.app.as_str().into(),run_id.into(),current.into(),now.into()]).await?;
         tx.execute(&format!("INSERT INTO {generations} (app_id,run_id,generation,deploy_id,input,state,started_at) SELECT app_id,run_id,$4,$5,input,'queued',$6 FROM {generations} WHERE app_id=$1 AND run_id=$2 AND generation=$3"),
             &[self.app.as_str().into(),run_id.into(),current.into(),generation.into(),deploy.clone().into(),now.into()]).await?;

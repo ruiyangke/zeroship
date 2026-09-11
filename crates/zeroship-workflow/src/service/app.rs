@@ -247,23 +247,8 @@ impl AppWorkflows {
         if encode(&options.payload)?.len() > policy.max_input_bytes {
             return Err(WorkflowServiceError::PayloadTooLarge);
         }
-        let run = lock_run(&mut tx, &self.app, run_id).await?;
-        if parse_state(&run.text("state")?)?.is_terminal() {
-            return Err(WorkflowServiceError::Conflict(
-                "cannot signal a terminal workflow run".into(),
-            ));
-        }
-        let signals = tx.table("signals");
-        let runs = tx.table("runs");
-        let waits = tx.table("waits");
-        let result = DeliveredSignal {
-            id: typed_id::new_workflow_signal_id(),
-        };
-        tx.execute(&format!("INSERT INTO {signals} (app_id,run_id,id,signal_type,payload,created_at) VALUES ($1,$2,$3,$4,$5,$6)"),
-            &[self.app.as_str().into(),run_id.into(),result.id.clone().into(),options.signal_type.clone().into(),encode(&options.payload)?.into(),now.into()]).await?;
-        tx.execute(&format!("UPDATE {runs} SET due_at=$3 WHERE app_id=$1 AND id=$2 AND task_id IS NULL AND control='none' AND state='waiting' \
-            AND EXISTS (SELECT 1 FROM {waits} w WHERE w.app_id=$1 AND w.run_id=$2 AND w.generation={runs}.generation AND w.signal_type=$4)"),
-            &[self.app.as_str().into(),run_id.into(),now.into(),options.signal_type.into()]).await?;
+        let result =
+            super::signals::deliver(&mut tx, &self.app, run_id, &options, "app", now).await?;
         store_request(
             &mut tx,
             &self.app,

@@ -26,6 +26,7 @@ export function workflowSchema(namespace) {
   create("apps", {
     ...identity(), revision: integer(), policy: text(), signal_epoch: integer(),
     last_polled_at: integer().default(0),
+    subscription_sequence: integer().default(0),
   }, ["app_id"]);
   create("deploys", {
     ...identity(), id: text(), hash: text(), manifest: text(), created_at: integer(),
@@ -92,23 +93,30 @@ export function workflowSchema(namespace) {
   ]);
   create("broadcasts", {
     ...identity(), id: text(), topic: text(), signal_type: text(), payload: text(),
-    created_at: integer(), cursor: t.text(), finished: integer(),
+    created_at: integer(), cursor: integer(), cutoff_sequence: integer(),
+    origin: text(), finished: integer(),
   }, ["app_id", "id"], [appFk("broadcasts")]);
   create("signals", {
     ...runIdentity(), id: text(), signal_type: text(), payload: text(),
     created_at: integer(), consumed_generation: t.bigInt(), consumed_ordinal: t.bigInt(),
     broadcast_id: t.text(),
+    origin: text().default("app"), delivery: text().default("direct"), topic: t.text(),
+    target_generation: t.bigInt(), target_ordinal: t.bigInt(),
   }, ["app_id", "id"], [
     runFk("signals"),
     fk("signal_consumption", ["app_id", "run_id", "consumed_generation", "consumed_ordinal"], "steps", ["app_id", "run_id", "generation", "ordinal"]),
     fk("signal_broadcast", ["app_id", "broadcast_id"], "broadcasts", ["app_id", "id"]),
+    fk("signal_target", ["app_id", "run_id", "target_generation", "target_ordinal"], "steps", ["app_id", "run_id", "generation", "ordinal"]),
   ], [{ name: "broadcast_delivery", columns: ["app_id", "broadcast_id", "run_id"] }]);
   index("signals", "mailbox", ["app_id", "run_id", "signal_type", "consumed_generation", "created_at"]);
   create("subscriptions", {
-    ...generation(), ordinal: integer(), id: text(), topic: text(), created_at: integer(),
+    ...generation(), ordinal: integer(), id: text(), topic: text(), created_at: integer(), sequence: integer(),
   }, ["app_id", "run_id", "generation", "ordinal"], [
     fk("subscription_step", ["app_id", "run_id", "generation", "ordinal"], "steps", ["app_id", "run_id", "generation", "ordinal"]),
-  ], [{ name: "subscription_identity", columns: ["app_id", "id"] }]);
+  ], [
+    { name: "subscription_identity", columns: ["app_id", "id"] },
+    { name: "subscription_sequence", columns: ["app_id", "sequence"] },
+  ]);
   index("subscriptions", "topic", ["app_id", "topic", "id"]);
   create("requests", {
     ...identity(), id: text(), operation: text(), digest: text(), result: text(), expires_at: integer(),

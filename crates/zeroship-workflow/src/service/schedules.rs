@@ -43,8 +43,8 @@ pub enum IntervalAnchor {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ScheduleOverlap {
-    Allow,
     #[default]
+    Allow,
     SkipIfRunning,
 }
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
