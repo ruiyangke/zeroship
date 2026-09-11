@@ -462,6 +462,31 @@ pub mod endpoints {
         "GET",
         "/internal/principals/{principal_id}/erasure-preflight",
     );
+    pub const WORKFLOW_DEPLOY: ServiceEndpoint = ServiceEndpoint::new(
+        "workflow",
+        "POST",
+        "/v1/apps/{app_id}/workflow-deploy",
+    );
+    pub const WORKFLOW_TASK_POLL: ServiceEndpoint = ServiceEndpoint::new(
+        "workflow",
+        "POST",
+        "/v1/tasks/poll",
+    );
+    pub const WORKFLOW_TASK_HEARTBEAT: ServiceEndpoint = ServiceEndpoint::new(
+        "workflow",
+        "POST",
+        "/v1/tasks/{task_id}/heartbeat",
+    );
+    pub const WORKFLOW_TASK_COMPLETE: ServiceEndpoint = ServiceEndpoint::new(
+        "workflow",
+        "POST",
+        "/v1/tasks/{task_id}/complete",
+    );
+    pub const WORKFLOW_TASK_RELEASE: ServiceEndpoint = ServiceEndpoint::new(
+        "workflow",
+        "POST",
+        "/v1/tasks/{task_id}/release",
+    );
     pub const WORKER_DISPATCH: ServiceEndpoint =
         ServiceEndpoint::new("worker", "POST", "/dispatch/{app_id}");
     pub const WORKER_WORKFLOW_ADVANCE: ServiceEndpoint = ServiceEndpoint::new(
@@ -519,6 +544,7 @@ pub fn service_allowlist() -> &'static [ServiceAuthorization] {
                 principal("svc/control"),
                 &[
                     endpoints::GATEWAY_WORKFLOW_ADVANCE,
+                    endpoints::WORKFLOW_DEPLOY,
                     endpoints::WORKER_APP_LOGS,
                 ],
             ),
@@ -552,6 +578,10 @@ pub fn service_allowlist() -> &'static [ServiceAuthorization] {
                 principal("svc/worker"),
                 &[
                     endpoints::CONTROL_VERSIONS,
+                    endpoints::WORKFLOW_TASK_POLL,
+                    endpoints::WORKFLOW_TASK_HEARTBEAT,
+                    endpoints::WORKFLOW_TASK_COMPLETE,
+                    endpoints::WORKFLOW_TASK_RELEASE,
                     endpoints::CDC_SUBSCRIBE,
                     // Host app reads are role-scoped: an authenticated worker
                     // may request any app's version, environment, and project

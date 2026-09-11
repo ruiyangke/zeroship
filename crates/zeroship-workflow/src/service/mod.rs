@@ -9,6 +9,8 @@ pub use ingress::{IngressReceipt, RevokedSignals, SignalAuthority, SignalTokenRe
 mod journal;
 mod payloads;
 pub use payloads::{PayloadRead, PayloadSlot, StagedPayload};
+mod remote;
+pub use remote::{RemoteAppWorkflows, RemoteTasks, WorkflowEndpoint};
 mod schedules;
 mod signals;
 pub use schedules::{
@@ -20,6 +22,7 @@ pub use app::{AppWorkflows, WorkflowService};
 pub mod schema;
 pub mod store;
 mod types;
+pub mod wire;
 pub use types::*;
 
 #[cfg(test)]

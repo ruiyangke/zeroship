@@ -8644,6 +8644,7 @@ dependencies = [
  "compio-s3",
  "cyper",
  "ed25519-dalek",
+ "futures",
  "percent-encoding",
  "rusqlite",
  "serde",
@@ -8652,6 +8653,7 @@ dependencies = [
  "tempfile",
  "testcontainers",
  "tracing",
+ "url",
  "uuid",
  "zeroship-core",
  "zeroship-storage",
@@ -8674,6 +8676,23 @@ dependencies = [
  "tracing",
  "uuid",
  "zeroship-core",
+]
+
+[[package]]
+name = "zeroship-workflow-server"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "compio",
+ "compio-postgres",
+ "ntex",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "testcontainers",
+ "tracing",
+ "zeroship-core",
+ "zeroship-workflow",
 ]
 
 [[package]]
