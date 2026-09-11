@@ -1,9 +1,6 @@
 //! HTTP-level tests for the durable-workflows instance API.
 //!
-//! Requires a configured, migrated test database. This matches the rest of the
-//! control integration suite: no database is a REFUSAL naming
-//! `tests/provision_test_backends.sh`, never a skip that passes without
-//! running anything (`common::require_control_db`).
+//! Each fixture uses an owned, migrated Testcontainers database.
 
 #![allow(clippy::await_holding_lock, clippy::future_not_send)]
 
@@ -29,10 +26,6 @@ use zeroship_workflow_scheduler::WorkflowSchedulerStore;
 const TEST_CONTROL_KEY: &str = "test-control-key";
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
 
-fn db_url() -> String {
-    common::require_control_db()
-}
-
 fn tmpdir(label: &str) -> PathBuf {
     let path = std::env::temp_dir().join(format!(
         "zs-wf-instance-{label}-{}",
@@ -47,6 +40,7 @@ struct Fixture {
     pg: Arc<compio_postgres::Client>,
     blob_root: PathBuf,
     deploy_tmp_dir: PathBuf,
+    _database: crate::workflow_postgres::Database,
 }
 
 impl Drop for Fixture {
@@ -65,7 +59,9 @@ async fn pg(db_url: &str) -> compio_postgres::Client {
     client
 }
 
-async fn build_fixture(db_url: &str, label: &str) -> Fixture {
+async fn build_fixture(database: crate::workflow_postgres::Database, label: &str) -> Fixture {
+    let db_url = database.url();
+    let db_url = db_url.as_str();
     let blob_root = tmpdir(&format!("blob-{label}"));
     let deploy_tmp_dir = tmpdir(&format!("deploy-{label}"));
     let registry = Registry::new(db_url).await.expect("registry");
@@ -147,6 +143,7 @@ async fn build_fixture(db_url: &str, label: &str) -> Fixture {
         pg: control_pg,
         blob_root,
         deploy_tmp_dir,
+        _database: database,
     }
 }
 
@@ -293,8 +290,7 @@ fn run_id(value: &Value) -> String {
 
 #[compio::test]
 async fn workflow_routes_reject_missing_auth() {
-    let db_url = db_url();
-    let fx = build_fixture(&db_url, "auth-required").await;
+    let fx = build_fixture(crate::workflow_postgres::Database::new(), "auth-required").await;
     let app = test::init_service(
         web::App::new()
             .state(Arc::clone(&fx.state))
@@ -341,8 +337,7 @@ async fn workflow_routes_reject_missing_auth() {
 
 #[compio::test]
 async fn archived_app_rejects_new_runs_until_restore() {
-    let db_url = db_url();
-    let fx = build_fixture(&db_url, "archived-admission").await;
+    let fx = build_fixture(crate::workflow_postgres::Database::new(), "archived-admission").await;
     let (app_id, _) = seed_app(&fx, "archived-admission", &["Checkout"]).await;
     fx.state
         .registry
@@ -411,8 +406,7 @@ async fn archived_app_rejects_new_runs_until_restore() {
 
 #[compio::test]
 async fn create_conflicts_status_and_cross_app_isolation() {
-    let db_url = db_url();
-    let fx = build_fixture(&db_url, "create").await;
+    let fx = build_fixture(crate::workflow_postgres::Database::new(), "create").await;
     let (app_a, _) = seed_app(&fx, "a", &["Checkout", "OtherWorkflow"]).await;
     let (app_b, _) = seed_app(&fx, "b", &["Checkout"]).await;
     let app_no_deploy = seed_app_without_deploy(&fx, "create").await;
@@ -671,8 +665,7 @@ async fn create_conflicts_status_and_cross_app_isolation() {
 
 #[compio::test]
 async fn signal_writes_row_and_pulls_matching_wait_wake_at() {
-    let db_url = db_url();
-    let fx = build_fixture(&db_url, "signal").await;
+    let fx = build_fixture(crate::workflow_postgres::Database::new(), "signal").await;
     let (app_id, _) = seed_app(&fx, "signal", &["Checkout"]).await;
     let app = test::init_service(
         web::App::new()
@@ -877,8 +870,7 @@ async fn signal_writes_row_and_pulls_matching_wait_wake_at() {
 
 #[compio::test]
 async fn pause_resume_cancel_transitions_preserve_wake_and_discard_claim() {
-    let db_url = db_url();
-    let fx = build_fixture(&db_url, "control").await;
+    let fx = build_fixture(crate::workflow_postgres::Database::new(), "control").await;
     let (app_id, _) = seed_app(&fx, "control", &["Checkout"]).await;
     let app = test::init_service(
         web::App::new()
@@ -1135,8 +1127,7 @@ async fn count_runs(fx: &Fixture, app_id: Uuid, workflow_name: &str) -> i64 {
 /// protected by the unique index on `(app_id, workflow_name, dedup_key)`.
 #[compio::test]
 async fn failed_timer_registration_leaves_no_run_so_a_retry_starts_exactly_one() {
-    let db_url = db_url();
-    let fx = build_fixture(&db_url, "timerfail").await;
+    let fx = build_fixture(crate::workflow_postgres::Database::new(), "timerfail").await;
     let (app_id, _) = seed_app(&fx, "timerfail", &["Charge"]).await;
     install_timer_registration_failpoint(&fx).await;
     arm_timer_registration_failure(&fx, app_id).await;
