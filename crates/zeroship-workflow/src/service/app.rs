@@ -17,6 +17,7 @@ use zeroship_core::{app_id::AppId, typed_id};
 #[derive(Clone)]
 pub struct WorkflowService {
     pub(crate) store: Arc<dyn WorkflowStore>,
+    pub(crate) signal_authority: Option<Arc<super::SignalAuthority>>,
 }
 impl std::fmt::Debug for WorkflowService {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -32,7 +33,15 @@ pub struct AppWorkflows {
 impl WorkflowService {
     pub async fn open(store: Arc<dyn WorkflowStore>) -> Result<Self, WorkflowServiceError> {
         store.verify().await?;
-        Ok(Self { store })
+        Ok(Self {
+            store,
+            signal_authority: None,
+        })
+    }
+    #[must_use]
+    pub fn with_signal_authority(mut self, authority: Arc<super::SignalAuthority>) -> Self {
+        self.signal_authority = Some(authority);
+        self
     }
     /// Bind an app whose identity the host has already authorized.
     #[must_use]

@@ -48,29 +48,7 @@ impl AppWorkflows {
         if encode(&options.payload)?.len() > policy.max_input_bytes {
             return Err(WorkflowServiceError::PayloadTooLarge);
         }
-        let apps = tx.table("apps");
-        let rows = tx
-            .query(
-                &format!("SELECT subscription_sequence FROM {apps} WHERE app_id=$1"),
-                &[self.app.as_str().into()],
-            )
-            .await?;
-        let cutoff = rows[0].integer("subscription_sequence")?;
-        let broadcasts = tx.table("broadcasts");
-        let result = AcceptedBroadcast {
-            id: typed_id::new_workflow_broadcast_id(),
-        };
-        tx.execute(&format!("INSERT INTO {broadcasts} (app_id,id,topic,signal_type,payload,created_at,cursor,cutoff_sequence,origin,finished) VALUES ($1,$2,$3,$4,$5,$6,0,$7,'app',0)"),
-            &[self.app.as_str().into(),result.id.clone().into(),topic.into(),options.signal_type.into(),encode(&options.payload)?.into(),now.into(),cutoff.into()]).await?;
-        emit(
-            &mut tx,
-            &self.app,
-            &result.id,
-            "workflow.broadcast",
-            json!({"topic":topic}),
-            now,
-        )
-        .await?;
+        let result = publish(&mut tx, &self.app, topic, &options, "app", now).await?;
         store_request(
             &mut tx,
             &self.app,
@@ -228,4 +206,38 @@ impl WorkflowService {
         }
         Ok(delivered)
     }
+}
+
+pub(crate) async fn publish(
+    tx: &mut Transaction,
+    app: &AppId,
+    topic: &str,
+    options: &SignalOptions,
+    origin: &str,
+    now: i64,
+) -> Result<AcceptedBroadcast, WorkflowServiceError> {
+    let apps = tx.table("apps");
+    let rows = tx
+        .query(
+            &format!("SELECT subscription_sequence FROM {apps} WHERE app_id=$1"),
+            &[app.as_str().into()],
+        )
+        .await?;
+    let cutoff = rows[0].integer("subscription_sequence")?;
+    let broadcasts = tx.table("broadcasts");
+    let result = AcceptedBroadcast {
+        id: typed_id::new_workflow_broadcast_id(),
+    };
+    tx.execute(&format!("INSERT INTO {broadcasts} (app_id,id,topic,signal_type,payload,created_at,cursor,cutoff_sequence,origin,finished) VALUES ($1,$2,$3,$4,$5,$6,0,$7,$8,0)"),
+        &[app.as_str().into(),result.id.clone().into(),topic.into(),options.signal_type.clone().into(),encode(&options.payload)?.into(),now.into(),cutoff.into(),origin.into()]).await?;
+    emit(
+        tx,
+        app,
+        &result.id,
+        "workflow.broadcast",
+        json!({"topic":topic}),
+        now,
+    )
+    .await?;
+    Ok(result)
 }

@@ -1513,3 +1513,305 @@ async fn broadcast_contract(store: Arc<dyn WorkflowStore>) {
         crate::operations::RunState::Waiting
     );
 }
+
+#[compio::test]
+async fn sqlite_signal_ingress_enforces_scopes_epochs_and_receipts() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("workflow.sqlite");
+    schema::initialize_sqlite(&path).unwrap();
+    ingress_contract(Arc::new(SqliteStore::new(path))).await;
+}
+#[compio::test]
+async fn postgres_signal_ingress_enforces_scopes_epochs_and_receipts() {
+    let fixture = PostgresFixture::start().await;
+    ingress_contract(Arc::new(fixture.store.clone())).await;
+}
+async fn ingress_contract(store: Arc<dyn WorkflowStore>) {
+    use super::{
+        capability::{mint_signal_capability, SignalGrant, SignalTarget},
+        IngressReceipt, SignalAuthority, SignalTokenRequest,
+    };
+    use zeroship_core::service_assertion::{ServiceSigningKey, ServiceTrustBundle};
+    let (service, app, other) = registered_service(store.clone()).await;
+    let worker = super::WorkerIdentity::new("ingress-worker".into()).unwrap();
+    let scope = service.for_app(app.clone());
+    let run = wait_on_topic(&service, &scope, &worker).await;
+    let target = SignalTarget::Run {
+        run_id: run.clone(),
+    };
+    let options = SignalTokenRequest {
+        target: target.clone(),
+        types: ["news".into()].into(),
+        lifetime_seconds: 60,
+    };
+    assert!(matches!(
+        scope
+            .issue_signal_token(&RequestId::mint(), options.clone())
+            .await,
+        Err(WorkflowServiceError::Unavailable(_))
+    ));
+    let key = Arc::new(ServiceSigningKey::generate());
+    let authority = Arc::new(SignalAuthority::new(key.clone(), ServiceTrustBundle::new()).unwrap());
+    let service = service.with_signal_authority(authority.clone());
+    let scope = service.for_app(app.clone());
+    let other_scope = service.for_app(other.clone());
+    let foreign = wait_on_topic(&service, &other_scope, &worker).await;
+    let issue = RequestId::mint();
+    let token = scope
+        .issue_signal_token(&issue, options.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        token.as_str(),
+        scope
+            .issue_signal_token(&issue, options.clone())
+            .await
+            .unwrap()
+            .as_str()
+    );
+    let message = SignalOptions {
+        signal_type: "news".into(),
+        payload: json!({"approved":true}),
+    };
+    assert!(matches!(
+        service
+            .ingest_signal(
+                &RequestId::mint(),
+                token.as_str(),
+                &other,
+                &target,
+                message.clone()
+            )
+            .await,
+        Err(WorkflowServiceError::NotFound(_))
+    ));
+    assert!(matches!(
+        service
+            .ingest_signal(
+                &RequestId::mint(),
+                token.as_str(),
+                &app,
+                &SignalTarget::Run { run_id: foreign },
+                message.clone()
+            )
+            .await,
+        Err(WorkflowServiceError::NotFound(_))
+    ));
+    assert_eq!(
+        service
+            .ingest_signal(
+                &RequestId::mint(),
+                token.as_str(),
+                &app,
+                &target,
+                SignalOptions {
+                    signal_type: "unlisted".into(),
+                    payload: json!(null)
+                }
+            )
+            .await,
+        Err(WorkflowServiceError::PermissionDenied)
+    );
+    let expired = mint_signal_capability(
+        &key,
+        SignalGrant {
+            app_id: app.clone(),
+            target: target.clone(),
+            types: ["news".into()].into(),
+            epoch: 0,
+            app_epoch: 0,
+        },
+        1000,
+        60,
+    )
+    .unwrap();
+    assert_eq!(
+        service
+            .ingest_signal(
+                &RequestId::mint(),
+                expired.as_str(),
+                &app,
+                &target,
+                message.clone()
+            )
+            .await,
+        Err(WorkflowServiceError::Unauthenticated)
+    );
+    let request = RequestId::mint();
+    let receipt = service
+        .ingest_signal(&request, token.as_str(), &app, &target, message.clone())
+        .await
+        .unwrap();
+    assert!(matches!(receipt, IngressReceipt::Direct { .. }));
+    assert_eq!(
+        receipt,
+        service
+            .ingest_signal(&request, token.as_str(), &app, &target, message.clone())
+            .await
+            .unwrap()
+    );
+    assert!(matches!(
+        service
+            .ingest_signal(
+                &request,
+                token.as_str(),
+                &app,
+                &target,
+                SignalOptions {
+                    signal_type: "news".into(),
+                    payload: json!("changed")
+                }
+            )
+            .await,
+        Err(WorkflowServiceError::Conflict(_))
+    ));
+    let revoke = RequestId::mint();
+    let revoked = scope
+        .revoke_signal_tokens(&revoke, Some(target.clone()))
+        .await
+        .unwrap();
+    assert_eq!(
+        revoked,
+        scope
+            .revoke_signal_tokens(&revoke, Some(target.clone()))
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        service
+            .ingest_signal(&request, token.as_str(), &app, &target, message.clone())
+            .await,
+        Err(WorkflowServiceError::Unauthenticated)
+    );
+    let task = service.poll(&worker).await.unwrap().unwrap();
+    assert_eq!(task.invocation.run_id, run);
+    assert_eq!(
+        task.invocation.journal[0].output.as_ref().unwrap()["origin"],
+        json!("ingress")
+    );
+    service
+        .complete(
+            &worker,
+            &task.id,
+            &task.token,
+            execution(json!([{"kind":"RunCompleted"}])),
+        )
+        .await
+        .unwrap();
+
+    let waiting = wait_on_topic(&service, &scope, &worker).await;
+    let topic = SignalTarget::Topic {
+        topic: "updates".into(),
+    };
+    let topic_options = SignalTokenRequest {
+        target: topic.clone(),
+        types: ["news".into()].into(),
+        lifetime_seconds: 60,
+    };
+    let token = scope
+        .issue_signal_token(&RequestId::mint(), topic_options.clone())
+        .await
+        .unwrap();
+    let request = RequestId::mint();
+    let receipt = service
+        .ingest_signal(&request, token.as_str(), &app, &topic, message.clone())
+        .await
+        .unwrap();
+    assert!(matches!(receipt, IngressReceipt::Topic { .. }));
+    assert_eq!(
+        receipt,
+        service
+            .ingest_signal(&request, token.as_str(), &app, &topic, message.clone())
+            .await
+            .unwrap()
+    );
+    scope
+        .revoke_signal_tokens(&RequestId::mint(), Some(topic.clone()))
+        .await
+        .unwrap();
+    assert_eq!(
+        service
+            .ingest_signal(
+                &RequestId::mint(),
+                token.as_str(),
+                &app,
+                &topic,
+                message.clone()
+            )
+            .await,
+        Err(WorkflowServiceError::Unauthenticated)
+    );
+    let recovered = WorkflowService::open(store.clone())
+        .await
+        .unwrap()
+        .with_signal_authority(authority);
+    assert_eq!(recovered.tick_broadcasts().await.unwrap(), 1);
+    let task = recovered.poll(&worker).await.unwrap().unwrap();
+    assert_eq!(task.invocation.run_id, waiting);
+    assert_eq!(
+        task.invocation.journal[0].output.as_ref().unwrap()["delivery"],
+        json!("topic")
+    );
+    assert_eq!(
+        task.invocation.journal[0].output.as_ref().unwrap()["origin"],
+        json!("ingress")
+    );
+    recovered
+        .complete(
+            &worker,
+            &task.id,
+            &task.token,
+            execution(json!([{"kind":"RunCompleted"}])),
+        )
+        .await
+        .unwrap();
+    let token = scope
+        .issue_signal_token(&RequestId::mint(), topic_options)
+        .await
+        .unwrap();
+    scope
+        .revoke_signal_tokens(&RequestId::mint(), None)
+        .await
+        .unwrap();
+    assert_eq!(
+        recovered
+            .ingest_signal(
+                &RequestId::mint(),
+                token.as_str(),
+                &app,
+                &topic,
+                message.clone()
+            )
+            .await,
+        Err(WorkflowServiceError::Unauthenticated)
+    );
+
+    let run = wait_on_topic(&service, &scope, &worker).await;
+    let target = SignalTarget::Run {
+        run_id: run.clone(),
+    };
+    let token = scope
+        .issue_signal_token(
+            &RequestId::mint(),
+            SignalTokenRequest {
+                target: target.clone(),
+                ..options
+            },
+        )
+        .await
+        .unwrap();
+    scope
+        .restart(
+            &RequestId::mint(),
+            &run,
+            crate::operations::RestartOptions::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        service
+            .ingest_signal(&RequestId::mint(), token.as_str(), &app, &target, message)
+            .await,
+        Err(WorkflowServiceError::Unauthenticated)
+    );
+}

@@ -20,10 +20,14 @@ PostgreSQL and SQLite transactions. Continuation retains parent waits and
 schedule overlap ownership. Calendar calculations are shared with Control.
 Topic publications retain their recipient boundary and resume bounded fanout
 after restart; delivery is bound to the subscribing run generation.
+The core checks signed signal capabilities and revocation epochs in the delivery
+transaction. App capability codecs bind Control's signature, the workflow
+audience, app identity and allowed operations.
 Its schema is generated from the canonical migration DSL, with native contract
 tests against SQLite and Testcontainers PostgreSQL. This module is not yet the
-runtime composition: the server, worker polling loop, authoritative platform
-policy, public signal ingress, payloads and interpreter cutover remain in progress. The
+runtime composition: the server, worker polling loop, Control capability
+issuance, authoritative platform policy, public HTTP ingress, payloads and
+interpreter cutover remain in progress. The
 current runtime still uses Control and the local mini-engine.
 
 ## Decision

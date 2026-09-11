@@ -55,6 +55,8 @@ CREATE TABLE "waits" ("app_id" TEXT NOT NULL, "run_id" TEXT NOT NULL, "generatio
 
 CREATE INDEX IF NOT EXISTS "wait_child_idx" ON "waits" ("app_id", "child_id");
 
+CREATE TABLE "topics" ("app_id" TEXT NOT NULL, "topic" TEXT NOT NULL, "signal_epoch" INTEGER NOT NULL, CONSTRAINT "topics_app" FOREIGN KEY (app_id) REFERENCES apps(app_id) ON DELETE RESTRICT, CONSTRAINT "topics_pkey" PRIMARY KEY (app_id, topic));
+
 CREATE TABLE "broadcasts" ("app_id" TEXT NOT NULL, "id" TEXT NOT NULL, "topic" TEXT NOT NULL, "signal_type" TEXT NOT NULL, "payload" TEXT NOT NULL, "created_at" INTEGER NOT NULL, "cursor" INTEGER NOT NULL, "cutoff_sequence" INTEGER NOT NULL, "origin" TEXT NOT NULL, "finished" INTEGER NOT NULL, CONSTRAINT "broadcasts_app" FOREIGN KEY (app_id) REFERENCES apps(app_id) ON DELETE RESTRICT, CONSTRAINT "broadcasts_pkey" PRIMARY KEY (app_id, id));
 
 CREATE TABLE "signals" ("app_id" TEXT NOT NULL, "run_id" TEXT NOT NULL, "id" TEXT NOT NULL, "signal_type" TEXT NOT NULL, "payload" TEXT NOT NULL, "created_at" INTEGER NOT NULL, "consumed_generation" INTEGER, "consumed_ordinal" INTEGER, "broadcast_id" TEXT, "origin" TEXT NOT NULL DEFAULT 'app', "delivery" TEXT NOT NULL DEFAULT 'direct', "topic" TEXT, "target_generation" INTEGER, "target_ordinal" INTEGER, CONSTRAINT "signal_broadcast" FOREIGN KEY (app_id, broadcast_id) REFERENCES broadcasts(app_id, id) ON DELETE RESTRICT, CONSTRAINT "signal_consumption" FOREIGN KEY (app_id, run_id, consumed_generation, consumed_ordinal) REFERENCES steps(app_id, run_id, generation, ordinal) ON DELETE RESTRICT, CONSTRAINT "signal_target" FOREIGN KEY (app_id, run_id, target_generation, target_ordinal) REFERENCES steps(app_id, run_id, generation, ordinal) ON DELETE RESTRICT, CONSTRAINT "signals_pkey" PRIMARY KEY (app_id, id), CONSTRAINT "signals_run" FOREIGN KEY (app_id, run_id) REFERENCES runs(app_id, id) ON DELETE RESTRICT);
@@ -102,4 +104,4 @@ CREATE INDEX IF NOT EXISTS "payload_ref_idx" ON "payload_refs" ("app_id", "paylo
 CREATE TABLE "outbox" ("app_id" TEXT NOT NULL, "id" TEXT NOT NULL, "kind" TEXT NOT NULL, "payload" TEXT NOT NULL, "created_at" INTEGER NOT NULL, "delivered_at" INTEGER, CONSTRAINT "outbox_app" FOREIGN KEY (app_id) REFERENCES apps(app_id) ON DELETE RESTRICT, CONSTRAINT "outbox_pkey" PRIMARY KEY (app_id, id));
 
 CREATE INDEX IF NOT EXISTS "outbox_delivery_idx" ON "outbox" ("delivered_at", "created_at");
-INSERT INTO main.schema_version (id, fingerprint) VALUES ('workflow', 'e9aa3d89deff05de54443d11c85553615a0eb67b6d23dec5ba634129e09cb670');
+INSERT INTO main.schema_version (id, fingerprint) VALUES ('workflow', 'a864d74f04ed2d14643a8307c19e715d7fadd37e7ea1d37d64e69e79c6aabc0f');

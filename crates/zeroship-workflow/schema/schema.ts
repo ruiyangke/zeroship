@@ -91,6 +91,9 @@ export function workflowSchema(namespace) {
     fk("wait_step", ["app_id", "run_id", "generation", "ordinal"], "steps", ["app_id", "run_id", "generation", "ordinal"]),
     fk("wait_child", ["app_id", "child_id"], "runs", ["app_id", "id"]),
   ]);
+  create("topics", {
+    ...identity(), topic: text(), signal_epoch: integer(),
+  }, ["app_id", "topic"], [appFk("topics")]);
   create("broadcasts", {
     ...identity(), id: text(), topic: text(), signal_type: text(), payload: text(),
     created_at: integer(), cursor: integer(), cutoff_sequence: integer(),

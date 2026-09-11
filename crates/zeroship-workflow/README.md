@@ -37,6 +37,9 @@ worker, Control or CLI. Its native contracts exercise app isolation, retry
 receipts, expired leases, lifecycle changes, child execution, retained restart
 history and scheduled occurrences against both database adapters. PostgreSQL
 fixtures use Testcontainers.
+The replacement capability codecs use the platform's service signing keys.
+Public signal delivery checks app and target revocation epochs transactionally;
+the Control issuer and HTTP hosts are not yet wired to this replacement.
 The schema check uses the built `@zeroship/migrate` and `zero-migrate-cli`
 packages and their native migration addon; regenerate with
 `node crates/zeroship-workflow/schema/generate.mjs` from the repository root.

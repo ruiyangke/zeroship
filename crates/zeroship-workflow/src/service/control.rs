@@ -182,6 +182,9 @@ impl AppWorkflows {
         let generation = current.checked_add(1).ok_or_else(|| {
             WorkflowServiceError::ResourceExhausted("workflow generation exhausted".into())
         })?;
+        let signal_epoch = run.integer("signal_epoch")?.checked_add(1).ok_or_else(|| {
+            WorkflowServiceError::ResourceExhausted("workflow signal epoch exhausted".into())
+        })?;
         let generations = tx.table("generations");
         tx.execute(&format!("UPDATE {tasks} SET state='expired',finished_at=$4 WHERE app_id=$1 AND run_id=$2 AND generation=$3 AND state='leased'"), &[self.app.as_str().into(),run_id.into(),current.into(),now.into()]).await?;
         for table in ["waits", "subscriptions"] {
@@ -206,8 +209,8 @@ impl AppWorkflows {
         let steps_table = tx.table("steps");
         tx.execute(&format!("INSERT INTO {steps_table} (app_id,run_id,generation,ordinal,name,occurrence,origin_generation,kind,state,record,compensation_attempts,compensation_due_at,compensation_error,compensation_retry_ms) SELECT app_id,run_id,$4,ordinal,name,occurrence,origin_generation,kind,state,record,compensation_attempts,compensation_due_at,compensation_error,compensation_retry_ms FROM {steps_table} WHERE app_id=$1 AND run_id=$2 AND generation=$3 AND ordinal<$5"),
             &[self.app.as_str().into(),run_id.into(),current.into(),generation.into(),i64::from(prefix).into()]).await?;
-        tx.execute(&format!("UPDATE {runs} SET generation=$3,deploy_id=$4,state='queued',control='none',due_at=$5,task_id=NULL,terminal_at=NULL,compensation_target=NULL WHERE app_id=$1 AND id=$2"),
-            &[self.app.as_str().into(),run_id.into(),generation.into(),deploy.clone().into(),now.into()]).await?;
+        tx.execute(&format!("UPDATE {runs} SET generation=$3,deploy_id=$4,state='queued',control='none',due_at=$5,task_id=NULL,terminal_at=NULL,compensation_target=NULL,signal_epoch=$6 WHERE app_id=$1 AND id=$2"),
+            &[self.app.as_str().into(),run_id.into(),generation.into(),deploy.clone().into(),now.into(),signal_epoch.into()]).await?;
         let result = RestartedRun {
             run_id: run_id.into(),
             state: RunState::Queued,

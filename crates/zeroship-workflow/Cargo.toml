@@ -6,6 +6,8 @@ description = "Durable workflow engine, journal, and Rust client"
 
 [dependencies]
 bytes = { workspace = true }
+base64 = { workspace = true }
+ed25519-dalek = { workspace = true }
 zeroship-core = { workspace = true }
 async-trait = { workspace = true }
 chrono = { version = "0.4", default-features = false, features = ["std", "serde", "clock"] }

@@ -561,6 +561,9 @@ pub const WORKFLOW_DISPATCH_PREFIX: &str = "wfd";
 /// Workflow operation retry identity, distinct from a live business key.
 pub const WORKFLOW_REQUEST_PREFIX: &str = "wreq";
 
+/// Workflow capability identity for issuance and audit provenance.
+pub const WORKFLOW_CAPABILITY_PREFIX: &str = "wcap";
+
 /// Workflow inbound-signal signing-key typed-id prefix.
 pub const WORKFLOW_SIGNAL_KEY_PREFIX: &str = "wsk";
 
