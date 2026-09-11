@@ -125,7 +125,7 @@ pub fn s3_credentials_from_env() -> Result<compio_s3::S3Credentials, StorageConf
 }
 
 /// Build an `Arc<dyn Backend>` from a parsed [`StorageBackendConfig`]. The S3
-/// leg pulls credentials from the environment via [`s3_credentials_from_env`].
+/// leg pulls credentials from the environment via `s3_credentials_from_env`.
 ///
 /// # Errors
 /// Propagates credential-resolution failures for the S3 leg.

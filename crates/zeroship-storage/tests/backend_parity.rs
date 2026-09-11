@@ -596,7 +596,10 @@ fn make_s3(minio: &s3_fixture::Minio) -> zeroship_storage::S3 {
 /// site. Tests that need a non-default concurrency or stream ceiling pass one
 /// here; nothing plants a process-global environment variable to do it.
 #[cfg(feature = "s3")]
-fn make_s3_tuned(minio: &s3_fixture::Minio, tuning: zeroship_storage::S3UploadTuning) -> zeroship_storage::S3 {
+fn make_s3_tuned(
+    minio: &s3_fixture::Minio,
+    tuning: zeroship_storage::S3UploadTuning,
+) -> zeroship_storage::S3 {
     zeroship_storage::S3::with_tuning(minio.config("it"), minio.credentials(), tuning)
 }
 
@@ -606,32 +609,23 @@ fn s3_parity_and_large_stream() {
     let minio = s3_fixture::Minio::start();
 
     let backend = make_s3(&minio);
-        compio::runtime::Runtime::new()
-            .expect("compio runtime")
-            .block_on(async {
-                run_parity(&backend, "s3").await;
-                run_content_type_parity(&backend, "s3").await;
-                run_list_pagination_parity(&backend, "s3").await;
-                run_large_stream(&backend, "s3").await;
-                // Parallel multipart: a many-part object with concurrency > 1
-                // round-trips byte-exact (parts sorted by number before
-                // complete, despite finishing out of order).
-                run_s3_parallel_many_parts(&minio).await;
-                // HIGH-2: a SLOW producer (real inter-chunk delays spanning
-                // several parts) must still complete byte-exact — the select-
-                // overlap loop drives the in-flight PUTs while the producer
-                // stalls, where the old gate-only-drain loop would starve them.
-                run_s3_slow_producer_overlap(&minio).await;
-                // C1: an error mid-multipart-upload must explicitly abort the
-                // upload (no orphaned parts, no process abort).
-                run_s3_mid_upload_abort(&backend, &minio).await;
-                // C1 under concurrency: an injected error with N part-uploads
-                // in flight must still abort — no orphaned multipart upload.
-                run_s3_parallel_mid_upload_abort(&minio).await;
-                // H2: a stream over the part/size limit fails fast + aborts.
-                run_s3_part_limit_fast_fail(&minio).await;
-            });
-
+    compio::runtime::Runtime::new()
+        .expect("compio runtime")
+        .block_on(async {
+            run_parity(&backend, "s3").await;
+            run_content_type_parity(&backend, "s3").await;
+            run_list_pagination_parity(&backend, "s3").await;
+            run_large_stream(&backend, "s3").await;
+            // Concurrent parts must be ordered correctly at completion.
+            run_s3_parallel_many_parts(&minio).await;
+            // A slow producer must not starve the in-flight upload futures.
+            run_s3_slow_producer_overlap(&minio).await;
+            // Producer errors must abort uploads without leaving orphaned parts.
+            run_s3_mid_upload_abort(&backend, &minio).await;
+            run_s3_parallel_mid_upload_abort(&minio).await;
+            // Size and part-count limits must also abort incomplete uploads.
+            run_s3_part_limit_fast_fail(&minio).await;
+        });
 }
 
 /// A raw `compio_s3::S3Client` over the same MinIO bucket, for asserting that an
