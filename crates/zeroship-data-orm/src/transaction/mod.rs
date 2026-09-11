@@ -131,6 +131,7 @@
 /// and settlement below is an event applied to this machine, and the SQL that
 /// results is whatever [`driver`] was told to issue.
 pub mod reducer;
+pub mod scope;
 
 /// The driver: the only place a reducer action becomes I/O.
 pub mod driver;
@@ -297,6 +298,7 @@ enum AtomicWriteFrameState {
 impl AtomicWriteFrame {
     /// Open the frame and promote the captured dispatch route onto it.
     pub async fn begin(route: TxRoute) -> Result<Self, DbError> {
+        route.check_scope()?;
         let nested = route.in_tx();
         let app_id = route.app_id().to_string();
         let schema = route.schema().clone();
@@ -320,7 +322,7 @@ impl AtomicWriteFrame {
         let backend = route.backend().clone();
         match exec_begin_or_savepoint(nested, None, &app_id, schema, backend).await {
             Ok(frame) => Ok(Self {
-                route: route.into_internal_transaction(),
+                route: route.into_internal_transaction()?,
                 frame,
                 state: AtomicWriteFrameState::Open,
                 admission,
