@@ -7,6 +7,8 @@ mod frontier;
 mod ingress;
 pub use ingress::{IngressReceipt, RevokedSignals, SignalAuthority, SignalTokenRequest};
 mod journal;
+mod payloads;
+pub use payloads::{PayloadRead, PayloadSlot, StagedPayload};
 mod schedules;
 mod signals;
 pub use schedules::{

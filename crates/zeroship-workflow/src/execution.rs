@@ -29,6 +29,8 @@ pub struct WorkflowInvocation {
 #[serde(rename_all = "camelCase")]
 pub struct WorkflowTrigger {
     pub input: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_ref: Option<crate::engine::WorkflowOutputRef>,
     pub started_at: DateTime<Utc>,
     pub run_id: String,
     pub workflow_name: String,
@@ -45,6 +47,7 @@ impl From<&StepRequest> for WorkflowInvocation {
             phase: request.phase.clone(),
             trigger: WorkflowTrigger {
                 input: request.input.clone(),
+                input_ref: None,
                 started_at: request.started_at,
                 run_id: request.run_id.clone(),
                 workflow_name: request.workflow_name.clone(),

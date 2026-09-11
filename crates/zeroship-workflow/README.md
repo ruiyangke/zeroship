@@ -40,6 +40,12 @@ fixtures use Testcontainers.
 The replacement capability codecs use the platform's service signing keys.
 Public signal delivery checks app and target revocation epochs transactionally;
 the Control issuer and HTTP hosts are not yet wired to this replacement.
+The service stages task-owned payloads through `zeroship-storage`, verifies
+streamed content and promotes references in the completion transaction.
+Replay generations, child results and continuation inputs retain explicit
+reference edges. Collection fences uploads and retries failed deletions;
+tombstones remain discoverable when an interrupted remote write arrives late.
+Payload contracts run against local storage and Testcontainers S3.
 The schema check uses the built `@zeroship/migrate` and `zero-migrate-cli`
 packages and their native migration addon; regenerate with
 `node crates/zeroship-workflow/schema/generate.mjs` from the repository root.

@@ -18,6 +18,7 @@ use zeroship_core::{app_id::AppId, typed_id};
 pub struct WorkflowService {
     pub(crate) store: Arc<dyn WorkflowStore>,
     pub(crate) signal_authority: Option<Arc<super::SignalAuthority>>,
+    pub(crate) payload_storage: Option<zeroship_storage::Storage>,
 }
 impl std::fmt::Debug for WorkflowService {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -36,6 +37,7 @@ impl WorkflowService {
         Ok(Self {
             store,
             signal_authority: None,
+            payload_storage: None,
         })
     }
     #[must_use]
@@ -219,14 +221,20 @@ impl AppWorkflows {
         let mut tx = self.service.store.begin().await?;
         let runs = tx.table("runs");
         let generations = tx.table("generations");
-        let rows=tx.query(&format!("SELECT r.state,g.output,g.error FROM {runs} r JOIN {generations} g ON g.app_id=r.app_id AND g.run_id=r.id AND g.generation=r.generation WHERE r.app_id=$1 AND r.id=$2"), &[self.app.as_str().into(),run_id.into()]).await?;
+        let rows=tx.query(&format!("SELECT r.state,g.output,g.output_ref,g.error FROM {runs} r JOIN {generations} g ON g.app_id=r.app_id AND g.run_id=r.id AND g.generation=r.generation WHERE r.app_id=$1 AND r.id=$2"), &[self.app.as_str().into(),run_id.into()]).await?;
         let row = rows.first().ok_or_else(|| not_found("workflow run"))?;
         let status = RunStatus {
             state: parse_state(&row.text("state")?)?,
-            output: row
-                .optional_text("output")?
-                .map(|value| decode(&value))
-                .transpose()?,
+            output: if let Some(reference) = row.optional_text("output_ref")? {
+                let reference: crate::engine::WorkflowOutputRef = decode(&reference)?;
+                Some(
+                    json!({"kind":"ref","ref":format!("wfblob:sha256:{}",reference.hash),"hash":reference.hash,"size":reference.size,"contentType":reference.content_type}),
+                )
+            } else {
+                row.optional_text("output")?
+                    .map(|value| decode(&value))
+                    .transpose()?
+            },
             error: row
                 .optional_text("error")?
                 .map(|value| decode(&value))

@@ -61,7 +61,7 @@ export function workflowSchema(namespace) {
   index("runs", "due", ["due_at", "app_id", "id"]);
   index("runs", "parent", ["app_id", "parent_id", "parent_generation"]);
   create("generations", {
-    ...generation(), deploy_id: text(), input: text(), output: t.text(), error: t.text(),
+    ...generation(), deploy_id: text(), input: text(), input_ref: t.text(), output: t.text(), output_ref: t.text(), error: t.text(),
     state: text(), started_at: integer(), terminal_at: t.bigInt(),
   }, ["app_id", "run_id", "generation"], [
     runFk("generations"),
@@ -132,16 +132,17 @@ export function workflowSchema(namespace) {
     fk("occurrence_run", ["app_id", "run_id"], "runs", ["app_id", "id"]),
   ]);
   create("payloads", {
-    ...generation(), id: text(), task_id: text(), hash: text(), size: integer(),
+    ...generation(), id: text(), task_id: text(), request_id: text(), hash: text(), size: integer(),
     content_type: t.text(), state: text(), created_at: integer(), expires_at: integer(),
   }, ["app_id", "id"], [
     generationFk("payloads"),
     fk("payload_task", ["app_id", "run_id", "generation", "task_id"], "tasks", ["app_id", "run_id", "generation", "id"]),
   ]);
+  table("payloads", { schema: namespace }).index("payload_upload_request").add({ on: ["app_id", "task_id", "request_id"], unique: true });
   index("payloads", "expiry", ["state", "expires_at"]);
   create("payload_refs", {
-    ...generation(), ordinal: integer(), payload_id: text(),
-  }, ["app_id", "run_id", "generation", "ordinal"], [
+    ...generation(), slot: text(), ordinal: integer(), payload_id: text(),
+  }, ["app_id", "run_id", "generation", "slot", "ordinal"], [
     generationFk("payload_refs"),
     fk("payload_ref", ["app_id", "payload_id"], "payloads", ["app_id", "id"]),
   ]);

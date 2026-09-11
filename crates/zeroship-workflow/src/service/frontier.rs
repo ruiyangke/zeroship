@@ -21,7 +21,7 @@ pub(crate) async fn invocation(
     let id = run.text("id")?;
     let generations = tx.table("generations");
     let deploys = tx.table("deploys");
-    let rows=tx.query(&format!("SELECT g.input,g.started_at,d.hash FROM {generations} g JOIN {deploys} d ON d.app_id=g.app_id AND d.id=g.deploy_id WHERE g.app_id=$1 AND g.run_id=$2 AND g.generation=$3 AND d.state='available'"), &[app.as_str().into(),id.clone().into(),run.integer("generation")?.into()]).await?;
+    let rows=tx.query(&format!("SELECT g.input,g.input_ref,g.started_at,d.hash FROM {generations} g JOIN {deploys} d ON d.app_id=g.app_id AND d.id=g.deploy_id WHERE g.app_id=$1 AND g.run_id=$2 AND g.generation=$3 AND d.state='available'"), &[app.as_str().into(),id.clone().into(),run.integer("generation")?.into()]).await?;
     let row = rows.first().ok_or_else(|| {
         WorkflowServiceError::Unavailable("workflow pinned executable is unavailable".into())
     })?;
@@ -40,6 +40,10 @@ pub(crate) async fn invocation(
         .into(),
         trigger: WorkflowTrigger {
             input: Some(decode(&row.text("input")?)?),
+            input_ref: row
+                .optional_text("input_ref")?
+                .map(|value| decode(&value))
+                .transpose()?,
             started_at: DateTime::from_timestamp_millis(row.integer("started_at")?).ok_or_else(
                 || WorkflowServiceError::Internal("invalid workflow start time".into()),
             )?,
@@ -139,8 +143,23 @@ pub(crate) async fn apply(
         return settle(tx, app, run, update, now).await;
     }
     if let RunUpdate::Completed { output, output_ref } = update {
-        if output_ref.is_some() {
-            return journal::invalid("workflow output reference has no staged payload");
+        if let Some(reference) = &output_ref {
+            if output.is_some() {
+                return journal::invalid("workflow output cannot be both inline and referenced");
+            }
+            super::payloads::promote(
+                tx,
+                app,
+                run,
+                &run.text("id")?,
+                run.integer("generation")?,
+                super::PayloadSlot::Output,
+                reference,
+                now,
+            )
+            .await?;
+            let generations = tx.table("generations");
+            tx.execute(&format!("UPDATE {generations} SET output_ref=$4 WHERE app_id=$1 AND run_id=$2 AND generation=$3"), &[app.as_str().into(),run.text("id")?.into(),run.integer("generation")?.into(),encode(reference)?.into()]).await?;
         }
         if journal::load(tx, app, &run.text("id")?, run.integer("generation")?)
             .await?
@@ -156,8 +175,8 @@ pub(crate) async fn apply(
         seed_input_ref,
     } = update
     {
-        if seed_input_ref.is_some() {
-            return journal::invalid("workflow input reference has no staged payload");
+        if seed_input_ref.is_some() && seed_input.is_some() {
+            return journal::invalid("workflow input cannot be both inline and referenced");
         }
         let steps = journal::load(tx, app, &run.text("id")?, run.integer("generation")?).await?;
         if steps.iter().any(|step| {
@@ -203,6 +222,21 @@ pub(crate) async fn apply(
             now,
         )
         .await?;
+        if let Some(reference) = seed_input_ref {
+            super::payloads::promote(
+                tx,
+                app,
+                run,
+                &id,
+                0,
+                super::PayloadSlot::Input,
+                &reference,
+                now,
+            )
+            .await?;
+            let generations = tx.table("generations");
+            tx.execute(&format!("UPDATE {generations} SET input_ref=$3 WHERE app_id=$1 AND run_id=$2 AND generation=0"), &[app.as_str().into(),id.clone().into(),encode(&reference)?.into()]).await?;
+        }
         link_continuation(tx, app, run, &id).await?;
         return Ok(RunState::Completed);
     }

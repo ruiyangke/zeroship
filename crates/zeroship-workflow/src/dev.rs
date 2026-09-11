@@ -602,6 +602,7 @@ impl DevWorkflowEngine {
                 phase: "running".to_string(),
                 trigger: WorkflowTrigger {
                     input: candidate.input,
+                    input_ref: None,
                     run_id: candidate.run_id,
                     workflow_name: candidate.workflow_name,
                     started_at: ms_to_datetime(candidate.started_at),

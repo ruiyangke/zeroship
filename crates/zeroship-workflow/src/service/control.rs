@@ -204,11 +204,13 @@ impl AppWorkflows {
         }
         tx.execute(&format!("DELETE FROM {signals} WHERE app_id=$1 AND run_id=$2 AND delivery='topic' AND target_generation=$3 AND target_ordinal >= $4"), &[self.app.as_str().into(),run_id.into(),current.into(),i64::from(prefix).into()]).await?;
         tx.execute(&format!("UPDATE {generations} SET state=CASE WHEN terminal_at IS NULL THEN 'restarted' ELSE state END,terminal_at=COALESCE(terminal_at,$4) WHERE app_id=$1 AND run_id=$2 AND generation=$3"), &[self.app.as_str().into(),run_id.into(),current.into(),now.into()]).await?;
-        tx.execute(&format!("INSERT INTO {generations} (app_id,run_id,generation,deploy_id,input,state,started_at) SELECT app_id,run_id,$4,$5,input,'queued',$6 FROM {generations} WHERE app_id=$1 AND run_id=$2 AND generation=$3"),
+        tx.execute(&format!("INSERT INTO {generations} (app_id,run_id,generation,deploy_id,input,input_ref,state,started_at) SELECT app_id,run_id,$4,$5,input,input_ref,'queued',$6 FROM {generations} WHERE app_id=$1 AND run_id=$2 AND generation=$3"),
             &[self.app.as_str().into(),run_id.into(),current.into(),generation.into(),deploy.clone().into(),now.into()]).await?;
         let steps_table = tx.table("steps");
         tx.execute(&format!("INSERT INTO {steps_table} (app_id,run_id,generation,ordinal,name,occurrence,origin_generation,kind,state,record,compensation_attempts,compensation_due_at,compensation_error,compensation_retry_ms) SELECT app_id,run_id,$4,ordinal,name,occurrence,origin_generation,kind,state,record,compensation_attempts,compensation_due_at,compensation_error,compensation_retry_ms FROM {steps_table} WHERE app_id=$1 AND run_id=$2 AND generation=$3 AND ordinal<$5"),
             &[self.app.as_str().into(),run_id.into(),current.into(),generation.into(),i64::from(prefix).into()]).await?;
+        let refs = tx.table("payload_refs");
+        tx.execute(&format!("INSERT INTO {refs} (app_id,run_id,generation,slot,ordinal,payload_id) SELECT app_id,run_id,$4,slot,ordinal,payload_id FROM {refs} WHERE app_id=$1 AND run_id=$2 AND generation=$3 AND (slot='input' OR (slot='step' AND ordinal<$5))"), &[self.app.as_str().into(),run_id.into(),current.into(),generation.into(),i64::from(prefix).into()]).await?;
         tx.execute(&format!("UPDATE {runs} SET generation=$3,deploy_id=$4,state='queued',control='none',due_at=$5,task_id=NULL,terminal_at=NULL,compensation_target=NULL,signal_epoch=$6 WHERE app_id=$1 AND id=$2"),
             &[self.app.as_str().into(),run_id.into(),generation.into(),deploy.clone().into(),now.into(),signal_epoch.into()]).await?;
         let result = RestartedRun {

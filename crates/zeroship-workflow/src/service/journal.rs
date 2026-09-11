@@ -101,8 +101,25 @@ pub(crate) async fn append(
         if step.consumed_signal_id.is_some() {
             return invalid("signal consumption belongs to the workflow service");
         }
-        if step.output_ref.is_some() {
-            return invalid("workflow output reference has no staged payload");
+        if let Some(reference) = &step.output_ref {
+            if step.state != "completed" || step.kind != "run" || step.output.is_some() {
+                return invalid(
+                    "payload references require a completed operation without inline output",
+                );
+            }
+            super::payloads::promote(
+                tx,
+                app,
+                run,
+                &id,
+                generation,
+                super::PayloadSlot::Step {
+                    ordinal: step.ordinal,
+                },
+                reference,
+                now,
+            )
+            .await?;
         }
         if encode(&step)?.len() > policy.max_input_bytes {
             return Err(WorkflowServiceError::PayloadTooLarge);
@@ -281,19 +298,37 @@ pub(crate) async fn resolve(
         if step.kind == "child" {
             let runs = tx.table("runs");
             let generations = tx.table("generations");
-            let rows=tx.query(&format!("SELECT r.state,g.output,g.error FROM {runs} r JOIN {generations} g ON g.app_id=r.app_id AND g.run_id=r.id AND g.generation=r.generation WHERE r.app_id=$1 AND r.id=$2"), &[app.as_str().into(),step.child_run_id.clone().into()]).await?;
+            let rows=tx.query(&format!("SELECT r.state,r.generation,g.output,g.output_ref,g.error FROM {runs} r JOIN {generations} g ON g.app_id=r.app_id AND g.run_id=r.id AND g.generation=r.generation WHERE r.app_id=$1 AND r.id=$2"), &[app.as_str().into(),step.child_run_id.clone().into()]).await?;
             let child = rows.first().ok_or_else(|| {
                 WorkflowServiceError::Internal("workflow child reference is missing".into())
             })?;
             let state = parse_state(&child.text("state")?)?;
             if state == crate::operations::RunState::Completed {
-                output = Some(
-                    child
-                        .optional_text("output")?
-                        .map(|value| decode(&value))
-                        .transpose()?
-                        .unwrap_or(Value::Null),
-                );
+                if child.optional_text("output_ref")?.is_some() {
+                    step.output_ref = Some(
+                        super::payloads::inherit_child_output(
+                            tx,
+                            app,
+                            step.child_run_id.as_deref().ok_or_else(|| {
+                                WorkflowServiceError::Internal("missing workflow child".into())
+                            })?,
+                            child.integer("generation")?,
+                            &id,
+                            generation,
+                            step.ordinal,
+                            now,
+                        )
+                        .await?,
+                    );
+                } else {
+                    output = Some(
+                        child
+                            .optional_text("output")?
+                            .map(|value| decode(&value))
+                            .transpose()?
+                            .unwrap_or(Value::Null),
+                    );
+                }
             } else if state.is_terminal() {
                 error=Some(child.optional_text("error")?.map(|value|decode(&value)).transpose()?.unwrap_or(json!({"name":"ChildWorkflowError","message":"child workflow was cancelled"})));
             } else if expired {
@@ -302,7 +337,7 @@ pub(crate) async fn resolve(
                 );
             }
         }
-        if output.is_none() && error.is_none() {
+        if output.is_none() && error.is_none() && step.output_ref.is_none() {
             continue;
         }
         step.state = if error.is_some() {

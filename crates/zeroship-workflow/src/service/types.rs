@@ -92,6 +92,10 @@ pub struct AppPolicy {
     pub max_input_bytes: usize,
     pub max_frontier: usize,
     pub max_journal_bytes: usize,
+    pub max_payload_bytes: i64,
+    pub max_payload_objects: i64,
+    pub max_payload_storage_bytes: i64,
+    pub payload_staging_retention_ms: i64,
     pub max_compensation_attempts: i32,
     pub compensation_retry_ms: i64,
     pub max_schedules: usize,
@@ -111,6 +115,10 @@ impl Default for AppPolicy {
             max_input_bytes: 1024 * 1024,
             max_frontier: 256,
             max_journal_bytes: 16 * 1024 * 1024,
+            max_payload_bytes: 64 * 1024 * 1024,
+            max_payload_objects: 100_000,
+            max_payload_storage_bytes: 1024 * 1024 * 1024,
+            payload_staging_retention_ms: 86_400_000,
             max_compensation_attempts: 8,
             compensation_retry_ms: 1_000,
             max_schedules: 64,
@@ -130,6 +138,10 @@ impl AppPolicy {
             || self.max_input_bytes == 0
             || self.max_frontier == 0
             || self.max_journal_bytes == 0
+            || self.max_payload_bytes <= 0
+            || self.max_payload_objects <= 0
+            || self.max_payload_storage_bytes < self.max_payload_bytes
+            || self.payload_staging_retention_ms <= 0
             || self.max_compensation_attempts <= 0
             || self.compensation_retry_ms <= 0
             || self.max_schedule_backfill == 0

@@ -9,6 +9,7 @@ bytes = { workspace = true }
 base64 = { workspace = true }
 ed25519-dalek = { workspace = true }
 zeroship-core = { workspace = true }
+zeroship-storage = { workspace = true }
 async-trait = { workspace = true }
 chrono = { version = "0.4", default-features = false, features = ["std", "serde", "clock"] }
 chrono-tz = "0.10"
@@ -24,6 +25,8 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+zeroship-storage = { workspace = true, features = ["s3"] }
+compio-s3 = { workspace = true }
 testcontainers = { version = "0.28", features = ["blocking"] }
 tempfile = { workspace = true }
 
