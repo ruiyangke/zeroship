@@ -184,8 +184,9 @@ crates/
 `zeroship-data-v8` include PostgreSQL tests in ordinary `cargo test`. Do not
 put required database cases behind opt-in features, ignore them, or report success
 when the server or its required extensions are unavailable. Integration helpers
-are enabled by test dependencies. `tests/run_data_v8_live_suite.sh` runs both
-packages and rejects feature-gated test targets.
+are enabled by test dependencies. `cargo xtask test data` runs the data crates
+through nextest and rejects feature-gated test targets. Rust fixtures own their
+PostgreSQL containers; Docker is required and no external database URL is used.
 
 **Writing or changing a gate.** Every arm of every gate declares the number of
 items THAT ARM RULED ON and a floor that number must clear

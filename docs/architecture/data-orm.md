@@ -329,8 +329,9 @@ unavailable; the backend must report that explicitly.
 
 ## Verification
 
-Ordinary tests require real PostgreSQL and SQLite execution. PostgreSQL must
-provide the extensions and WAL configuration required by the database suite.
+Ordinary tests require real PostgreSQL and SQLite execution. Rust fixtures own
+PostgreSQL testcontainers with the required extensions and logical WAL, and
+SQLite fixtures own temporary database files. Docker is required.
 There is no opt-in live-database feature on the ORM or V8 adapter.
 
 The model contract runs through a host-defined registered backend on both
@@ -341,7 +342,7 @@ Compiler tests validate generated schema and Rust model contracts.
 `tests/data_crate_closure_gate.sh` checks dependency and plain-driver boundaries;
 `tests/vendor_embedding_gate.sh` checks concrete driver references;
 `tests/decision_four_gate.sh` fences shared execution and SQL placement;
-`tests/run_data_v8_live_suite.sh` runs the required database tests; and
+`cargo xtask test data` runs the required database tests; and
 `tests/clippy_gate.sh` validates the workspace and its declared feature surface.
 
 ## Context ownership
@@ -382,5 +383,5 @@ the migration engine remains the authority for schema creation.
 
 `tests/data_boundary_gate.sh` checks these source boundaries and validates its
 rejection predicates with negative controls. `tests/data_crate_closure_gate.sh`
-checks the dependency closures; `tests/run_data_v8_live_suite.sh` exercises the
+checks the dependency closures; `cargo xtask test data` exercises the
 Rust and V8 paths against the required databases.

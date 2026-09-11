@@ -582,7 +582,7 @@ the same shape as the four gates found in August examining nothing and printing
 exactly what a clean tree prints - the difference is only that this one
 documented its blind spot.
 
-`tests/run_data_v8_live_suite.sh` runs the target and caught it, which is why
+`tests/run_data_v8_live_suite.sh` runs the target and caught it, which is why (DELETED; current runner: `cargo xtask test data`.)
 the failure surfaced at all. **Fixed 2026-08-27**: `verify_impl.sh` now runs
 `distributed_live` as a twelfth arm with floor 0, expected red until this is
 fixed - the same treatment `missing_role` received while it was failing. A red
@@ -592,7 +592,7 @@ arm you can see beats a skipped arm you cannot.
 reasons at once** - this failure, and the 15 integration tests the deletion
 legitimately removed (measured: 98 passed, 1 failed). Decrementing the floor to
 match while L27 is unfixed would bury a live failure inside an accounting
-change, which is exactly what the ledger at `tests/run_data_v8_live_suite.sh:92-142`
+change, which is exactly what the ledger at `tests/run_data_v8_live_suite.sh` (DELETED; current runner: `cargo xtask test data`.)
 exists to prevent. **The floor must not move until L27 is resolved.**
 
 ### L6 (CLOSED 2026-08-27) - `__zeroship_admin` has no production provisioner

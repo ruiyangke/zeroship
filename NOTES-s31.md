@@ -71,7 +71,7 @@ pgvector, one needs the platform migrations for `zeroship_workflow_owner`, and
 pinned 119.)
 
 The compose service comment says the cost of `replica` is "12 plugin-db
-integration tests"; `tests/run_data_v8_live_suite.sh` and ci.yml both say
+integration tests"; `tests/run_data_v8_live_suite.sh` and ci.yml both say (DELETED; current runner: `cargo xtask test data`.)
 eleven. The guard `pg_has_logical_wal` has TEN call sites, and ten is what the
 run announces.
 
@@ -119,7 +119,7 @@ provider_conformance, trusted_clients_test
   whose required-features are met. Same at :227 for zeroship-migrated.
   Exports CONTROL_TEST_DB / AUTH_DB_URL / MIGRATED_TEST_DB, all one DSN.
   Invoked by ci.yml `billing-gate`.
-- tests/run_data_v8_live_suite.sh:129 names `distributed_live` explicitly and
+- tests/run_data_v8_live_suite.sh names `distributed_live` explicitly and (DELETED; current runner: `cargo xtask test data`.)
   exports LIVE_DB_TEST_URL. Invoked by ci.yml `plugin-db-live-gate`.
 - tests/e2e_durable_workflows.sh:745 also runs `workflow_engine_test`.
 
@@ -140,7 +140,7 @@ than by a name list:
   `postgresql://postgres:zeroship@localhost:5440/zeroship_billing_test` and
   PANICS if nothing answers - it cannot report a hollow pass.
 - Same for zeroship-migrated (`MIGRATED_TEST_DB`, exported at :118).
-- plugin-db's `distributed_live` is named at run_data_v8_live_suite.sh:129
+- plugin-db's `distributed_live` is named at run_data_v8_live_suite.sh (DELETED; current runner: `cargo xtask test data`.)
   with `LIVE_DB_TEST_URL` exported at :66.
 
 The brief's premise -- "authz_guard_oauth_test ... no gate runs it" -- does not
@@ -181,7 +181,7 @@ Evidence for "NOBODY", each an independent grep over tests/ .github/ deploy/:
 
 Control on the pattern (an empty grep is not proof): the same search DOES find
 the covered ones - `zeroship-gateway:oidc_rp_e2e` at run_auth_suite.sh:158,
-`distributed_live` at run_data_v8_live_suite.sh:129 - so the pattern finds
+`distributed_live` at run_data_v8_live_suite.sh - so the pattern finds (DELETED; current runner: `cargo xtask test data`.)
 binaries that are gated, and the misses above are real misses.
 
 ## MEASURED: tests/run_billing_suite.sh is RED on main, 50 failures

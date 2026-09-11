@@ -12,8 +12,9 @@ explicit temporary files. Startup failure fails the test; no external database
 URL or test overlay is needed.
 
 Install [cargo-nextest](https://nexte.st/docs/installation/pre-built-binaries/),
-make Docker available, and put compatible `pg_dump` and `pg_restore` clients on
-PATH. The fixture server is declared in `tests/fixtures/postgres/Dockerfile`.
+make Docker available, and put `pg_dump` and `pg_restore` clients matching the
+fixture server major version on PATH. The task rejects a version mismatch before
+building the suite. The fixture server is declared in `tests/fixtures/postgres/Dockerfile`.
 Build the workspace SDKs with `pnpm install --frozen-lockfile` and `pnpm build`
 before compiling the V8 runtime.
 
