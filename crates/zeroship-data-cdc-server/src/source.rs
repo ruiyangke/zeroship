@@ -11,6 +11,13 @@ use zeroship_data_cdc_wire::{Event, Operation};
 
 type Error = Box<dyn std::error::Error>;
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Limits {
+    pub max_bytes: usize,
+    pub max_changes: usize,
+    pub max_relations: usize,
+}
+
 pub(crate) const SLOT_PREFIX: &str = "__zs_relay_";
 
 pub(crate) fn slot_name(app: &str) -> Result<String, Error> {
@@ -29,9 +36,7 @@ pub(crate) async fn run(
     start: Start,
     pool: Pool,
     url: String,
-    max_bytes: usize,
-    max_changes: usize,
-    max_relations: usize,
+    limits: Limits,
 ) {
     let slot = match slot_name(&app) {
         Ok(slot) => slot,
@@ -41,18 +46,7 @@ pub(crate) async fn run(
         }
     };
     let result = {
-        let capture = capture(
-            &hub,
-            &app,
-            start.generation,
-            &pool,
-            &url,
-            &slot,
-            max_bytes,
-            max_changes,
-            max_relations,
-        )
-        .fuse();
+        let capture = capture(&hub, &app, start.generation, &pool, &url, &slot, limits).fuse();
         let stop = start.shutdown.recv_async().fuse();
         futures::pin_mut!(capture, stop);
         futures::select! { result = capture => result, _ = stop => Ok(()) }
@@ -75,10 +69,13 @@ async fn capture(
     pool: &Pool,
     url: &str,
     slot: &str,
-    max_bytes: usize,
-    max_changes: usize,
-    max_relations: usize,
+    limits: Limits,
 ) -> Result<(), Error> {
+    let Limits {
+        max_bytes,
+        max_changes,
+        max_relations,
+    } = limits;
     let publication = zeroship_core::replication_names::publication_name(app)?;
     if pool
         .query(
@@ -214,9 +211,11 @@ mod tests {
             start.unwrap(),
             pool.clone(),
             url,
-            1024 * 1024,
-            100,
-            100,
+            Limits {
+                max_bytes: 1024 * 1024,
+                max_changes: 100,
+                max_relations: 100,
+            },
         ));
         assert_eq!(event(&first).await, Event::Ready);
         assert_eq!(event(&second).await, Event::Ready);

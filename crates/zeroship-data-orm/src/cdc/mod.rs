@@ -12,3 +12,5 @@ mod source;
 pub use broker::{Subscription, SubscriptionMessage};
 pub use event::{ChangeEvent, ChangeOp};
 pub use source::{ChangeSink, ChangeStream, DeliveryDisposition};
+
+pub mod relay;

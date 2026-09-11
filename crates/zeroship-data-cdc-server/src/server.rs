@@ -162,6 +162,8 @@ where
         .max_frame_size(Some(MAX_MESSAGE_BYTES));
     let config =
         compio_ws::Config::from(config).with_buffer_sizes(MAX_MESSAGE_BYTES, MAX_MESSAGE_BYTES * 2);
+    // Tungstenite fixes this callback's error type to an HTTP response.
+    #[allow(clippy::result_large_err)]
     let callback = |request: &tungstenite::handshake::server::Request,
                     response: tungstenite::handshake::server::Response| {
         if request.uri().path() != PATH || request.uri().query().is_some() {
@@ -202,9 +204,11 @@ where
                 start,
                 state.pool.clone(),
                 state.url.clone(),
-                state.max_bytes,
-                state.max_changes,
-                state.max_relations,
+                source::Limits {
+                    max_bytes: state.max_bytes,
+                    max_changes: state.max_changes,
+                    max_relations: state.max_relations,
+                },
             )
             .await;
         })

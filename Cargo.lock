@@ -8000,6 +8000,7 @@ dependencies = [
  "url",
  "zeroship-core",
  "zeroship-data-cdc-wire",
+ "zeroship-data-orm",
 ]
 
 [[package]]
@@ -8026,8 +8027,11 @@ dependencies = [
  "base64",
  "compio",
  "compio-postgres",
+ "compio-tls",
+ "compio-ws",
  "criterion",
  "flume 0.11.1",
+ "futures",
  "hkdf",
  "hmac 0.12.1",
  "rusqlite",
@@ -8040,9 +8044,11 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "trybuild",
+ "url",
  "uuid",
  "zeroize",
  "zeroship-core",
+ "zeroship-data-cdc-wire",
  "zeroship-data-macros",
  "zeroship-data-orm",
  "zeroship-data-sql",

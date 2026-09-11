@@ -37,6 +37,8 @@ zeroship-core = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+# Exercise the public ORM client against the separate relay executable.
+zeroship-data-orm = { workspace = true }
 rcgen = "0.14"
 tempfile = { workspace = true }
 url = { workspace = true }

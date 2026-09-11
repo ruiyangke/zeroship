@@ -80,8 +80,21 @@ matching live under that module. SQLite capture feeds these contracts beside its
 file-backed writer; worker PostgreSQL capture feeds the same broker today.
 The relay protocol remains in `zeroship-data-cdc-wire`, independent of the ORM.
 V8 owns JavaScript subscription wrappers and isolate cleanup. Its existing
-PostgreSQL consumer, slot management, and consumer leases still await the relay
-transport; moving the shared contracts does not relocate replication authority.
+PostgreSQL consumer, slot management, and consumer leases still await the
+coordinated worker privilege and deployment cutover.
+
+The standalone relay is implemented in `zeroship-data-cdc-server`. Native hosts
+can configure `cdc::relay::RelayConfig` with a TLS endpoint and their enrolled
+worker `ServiceAuth`, register a broker subscription, and await `spawn` before
+reading the initial snapshot. `RelayHandle` controls shutdown and completion.
+The client resynchronizes subscriptions after reconnect. A private certificate
+authority can be supplied through `with_tls_connector`; otherwise it uses the
+host trust store.
+
+Relay notifications carry collection and operation only. PostgreSQL events have
+no primary key, changed-column list, or row images, so predicate matching falls
+back to collection invalidation. Re-reads still pass through the ORM's normal
+access controls. SQLite retains its local row-image matching.
 
 ## Setup and application code
 
