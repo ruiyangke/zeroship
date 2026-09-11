@@ -470,11 +470,6 @@ fn dict_or_bool_non_object_non_bool_falls_back_to_dict_path() {
 // can throw user values that MUST propagate.
 // ---------------------------------------------------------------------------
 
-#[derive(WebIdlDict, Default, Debug)]
-struct WithStringMember {
-    name: Option<USVString>,
-}
-
 // Helper: run JS that defines an object whose member's toString
 // throws a user-defined exception, then call `Foo::from_v8` and
 // catch — the caught value should be the same JS object.
@@ -505,7 +500,7 @@ fn dict_member_user_throw_tostring_preserves_error_object() {
                 };
             })()
         "#,
-        |val, scope| WithStringMember::from_v8(scope, val).err(),
+        |val, scope| Inner::from_v8(scope, val).err(),
     )
     .expect("expected error from throwing toString");
 
@@ -552,7 +547,7 @@ fn dict_member_user_throw_preserves_code_property() {
     .unwrap();
     let script = v8::Script::compile(scope, src, None).unwrap();
     let value = script.run(scope).unwrap();
-    let err = WithStringMember::from_v8(scope, value).expect_err("must error");
+    let err = Inner::from_v8(scope, value).expect_err("must error");
 
     match &err.kind {
         OpErrorKind::JsValue(global) => {
@@ -604,7 +599,7 @@ fn dict_member_user_throw_string_preserves_string() {
     .unwrap();
     let script = v8::Script::compile(scope, src, None).unwrap();
     let value = script.run(scope).unwrap();
-    let err = WithStringMember::from_v8(scope, value).expect_err("must error");
+    let err = Inner::from_v8(scope, value).expect_err("must error");
 
     match &err.kind {
         OpErrorKind::JsValue(global) => {

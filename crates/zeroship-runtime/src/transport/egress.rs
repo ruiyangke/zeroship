@@ -537,7 +537,7 @@ pub async fn evaluate(
 mod tests {
     use super::*;
     use std::cell::RefCell;
-    use zeroship_core::net_policy::{EgressRule, EgressRules, Verdict};
+    use zeroship_core::net_policy::{EgressRule, Verdict};
 
     /// A resolver that RECORDS every lookup. "A lookup happened" is not
     /// otherwise observable, and an unobservable property is an unenforceable
