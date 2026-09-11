@@ -503,7 +503,7 @@ fn encrypted_schema() -> Value {
         "ssn": {
             "type": "string",
             "mask": { "kind": "last4", "classification": "pci" },
-            "encrypted": { "wraps": "string" }
+            "encrypted": true
         },
         "nickname": { "type": "string" },
     })

@@ -74,7 +74,7 @@ fn masked(name: &str) -> FieldDescriptor {
 
 fn encrypted_and_masked(name: &str) -> FieldDescriptor {
     FieldDescriptor {
-        encrypted: Some(json!({ "wraps": "string" })),
+        encrypted: Some(true),
         mask: Some(json!({ "kind": "full", "classification": "pii" })),
         ..plain(name)
     }
@@ -155,7 +155,7 @@ fn an_encrypted_and_masked_field_puts_the_ciphertext_column_in_raw_column() {
     let storage = &field["storage"];
 
     assert!(
-        field.get("encrypted").is_some(),
+        field.get("encrypted").and_then(serde_json::Value::as_bool) == Some(true),
         "fixture must actually be encrypted: {value}"
     );
     assert_eq!(

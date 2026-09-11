@@ -1,5 +1,10 @@
 //! Value descriptors shared by runtime catalog readers and storage backends.
 
+/// Whether the field uses encrypted binary storage.
+pub fn is_encrypted(field: &crate::value::Value) -> bool {
+    field.get("encrypted").and_then(crate::value::Value::as_bool) == Some(true)
+}
+
 /// Effective masking metadata from an installed field descriptor.
 #[derive(Debug, Clone, Copy)]
 pub struct EffectiveMask<'a> {

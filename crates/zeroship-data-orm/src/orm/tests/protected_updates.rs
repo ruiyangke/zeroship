@@ -4,8 +4,8 @@ use super::*;
 fn fields() -> Value {
     value!({
         "label":{"type":"string"},
-        "random":{"type":"number","encrypted":{"wraps":"number"}},
-        "second_secret":{"type":"number","encrypted":{"wraps":"number"}},
+        "random":{"type":"number","encrypted":true},
+        "second_secret":{"type":"number","encrypted":true},
         "masked":{"type":"number","mask":{"kind":"full","classification":"spi"}},
         "plain":{"type":"number","mask":{"kind":"none","classification":"spi"}}
     })

@@ -397,7 +397,7 @@ fn create_table_with_encrypted_column_render_is_byte_identical_pg() {
         fields: vec![FieldDescriptor {
             name: "secret".into(),
             ty: "string".into(),
-            encrypted: Some(serde_json::json!({})),
+            encrypted: Some(true),
             // Mirror the SDK's `t.encrypted()` normalized shape: encrypted columns
             // carry the fail-safe full/pii mask unless explicitly opted out.
             mask: Some(serde_json::json!({ "kind": "full", "classification": "pii" })),
@@ -1634,7 +1634,7 @@ fn create_table_with_encrypted_column_render_is_byte_identical_sqlite() {
         fields: vec![FieldDescriptor {
             name: "secret".into(),
             ty: "string".into(),
-            encrypted: Some(serde_json::json!({})),
+            encrypted: Some(true),
             mask: Some(serde_json::json!({ "kind": "full", "classification": "pii" })),
             ..Default::default()
         }],

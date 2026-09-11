@@ -7,19 +7,13 @@
 //! the name is worth keeping because the trade-off analysis is recorded under
 //! it).
 //!
-//! # Which column holds what
+//! # Physical storage
 //!
-//! The field's OWN column (`ssn`) holds the **mask**; the sibling
-//! `__zs_raw__ssn` holds the **real value**. That is the 2026-08-28 storage
-//! flip and it is the reason this module has a relocation stage rather than a
-//! second-column-insert stage.
-//!
-//! It used to be the other way round, and the consequence was a filter oracle:
-//! the projection substituted `"ssn_masked" AS "ssn"` but the WHERE builder
-//! takes no schema hint and could not, so `find({ ssn: { $gt: v } })` compared
-//! against plaintext. The caller never saw a value and did not need to - the
-//! set of matching rows is the answer, and repeated probes binary-search it
-//! with no authorization check on the path and no audit row written.
+//! The runtime descriptor pairs the visible value with `storage.rawColumn`,
+//! which holds the real value. The mask is derived under the logical field's
+//! key; relocation moves the finished plaintext or ciphertext to that declared
+//! raw column. Ordinary reads project the configured value column and cannot
+//! request raw storage.
 //!
 //! # The stage order this depends on
 //!
@@ -208,7 +202,7 @@ pub fn apply_mask_on_write(
 /// The ONE stage that owns physical placement, and the last one to run. For
 /// every `(field, mask)` in `masks`:
 ///
-/// 1. `row[__zs_raw__<field>] = row[<field>]` (the real value, whatever stage
+/// 1. `row[storage.rawColumn] = row[<field>]` (the real value, whatever stage
 ///    produced it - plaintext or native ciphertext);
 /// 2. `row[<field>] = mask`;
 ///
@@ -437,7 +431,7 @@ mod tests {
         let schema = value!({
             "ssn": {
                 "type": "string",
-                "encrypted": { "wraps": "string" },
+                "encrypted": true,
                 "mask": { "kind": "last4", "classification": "spi" }
             }
         });
@@ -479,7 +473,7 @@ mod tests {
         let schema = value!({
             "ssn": {
                 "type": "string",
-                "encrypted": { "wraps": "string" },
+                "encrypted": true,
                 "mask": { "kind": "last4", "classification": "spi" }
             }
         });
@@ -529,7 +523,7 @@ mod tests {
         let schema = value!({
             "ssn": {
                 "type": "string",
-                "encrypted": { "wraps": "string" },
+                "encrypted": true,
                 "mask": { "kind": "none", "classification": "spi" }
             }
         });
@@ -761,7 +755,7 @@ mod tests {
         let schema = value!({
             "ssn": {
                 "type": "string",
-                "encrypted": { "wraps": "string" },
+                "encrypted": true,
                 "mask": { "kind": "none", "classification": "spi" }
             }
         });

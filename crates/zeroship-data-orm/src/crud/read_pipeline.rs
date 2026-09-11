@@ -275,9 +275,7 @@ mod tests {
             zeroship_data_sql::value!({
                 "secret": {
                     "type": "string",
-                    "encrypted": {
-                        "wraps": "string"
-                    },
+                    "encrypted": true,
                     "mask": {
                         "kind": "last4",
                         "classification": "spi"

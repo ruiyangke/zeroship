@@ -3,6 +3,7 @@
 pub mod aad;
 pub mod aead;
 pub mod keys;
+pub(crate) mod plaintext;
 pub mod wire;
 
 #[allow(unused_imports)] // consumed by crud/encryption_pass.rs

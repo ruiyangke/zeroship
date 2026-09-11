@@ -26,7 +26,7 @@ export interface RuntimeFieldDef {
   enum?: unknown[];
   mask?: { kind?: string; classification?: string };
   default?: unknown;
-  encrypted?: { wraps?: string };
+  encrypted?: boolean;
   idPrefix?: string;
   refTarget?: string;
   onDelete?: string;
@@ -179,11 +179,11 @@ function renderCollectionChains(options: RuntimeOptions, indexes: RuntimeIndex[]
  */
 function renderBuilderChain(def: RuntimeFieldDef): string {
   if (def === null || typeof def !== "object") return "t.json()";
-  const hasEncrypted = def.encrypted !== undefined;
+  const hasEncrypted = def.encrypted === true;
 
   let chain: string;
   if (hasEncrypted) {
-    chain = renderEncryptedBase(def.encrypted);
+    chain = renderEncryptedBase(def.type);
   } else if (typeof def.refTarget === "string" && def.refTarget.length > 0) {
     // A relation is identified by its relation METADATA, not by the `type`
     // token, which describes storage. This mirrors the same decision already
@@ -291,24 +291,14 @@ function renderBuilderChain(def: RuntimeFieldDef): string {
   return chain;
 }
 
-/** Render the wrapped plaintext type; the host owns project-key selection. */
-function renderEncryptedBase(enc: RuntimeFieldDef["encrypted"]): string {
-  if (enc === null || typeof enc !== "object") return "t.encrypted()";
-  const wraps = typeof enc.wraps === "string" ? enc.wraps : undefined;
-  if (
-    (wraps === undefined || wraps === "string")
-  ) {
-    return "t.encrypted()";
+/** Render the logical plaintext type; the host owns project-key selection. */
+function renderEncryptedBase(type: RuntimeFieldDef["type"]): string {
+  switch (type) {
+    case "string": return "t.encrypted()";
+    case "number": return "t.encrypted({ of: t.number() })";
+    case "bytes": return "t.encrypted({ of: t.bytes() })";
+    default: throw new Error(`Unsupported encrypted field type: ${type}`);
   }
-  const opts: string[] = [];
-  if (wraps !== undefined) {
-    // `wraps` is a TypeBuilder argument in the SDK, reconstructed from the
-    // inner-type token.
-    const wrapsBuilder =
-      wraps === "number" ? "t.number()" : wraps === "bytes" ? "t.bytes()" : "t.string()";
-    opts.push(`wraps: ${wrapsBuilder}`);
-  }
-  return opts.length === 0 ? "t.encrypted()" : `t.encrypted({ ${opts.join(", ")} })`;
 }
 
 /** `t.id(prefix?)` - the typed-id base, threading the recovered `idPrefix`. */

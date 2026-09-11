@@ -375,7 +375,7 @@ impl<'a> WriteStages<'a> {
         if self.has_storage_encoding {
             zeroship_data_sql::codecs::encode_document(dialect, schema, row)?;
         }
-        // AFTER encryption: a `t.encrypted({ wraps: t.bytes() })` column is the
+        // AFTER encryption: a `t.encrypted({ of: t.bytes() })` column is the
         // encryption pass's, and this pass skips it by construction, but the
         // ordering also means the ciphertext it deposits is never re-read as a
         // plain bytes value.
@@ -572,7 +572,7 @@ fn doc_touches_encrypted_field(schema: &Value, doc: &Value) -> bool {
 }
 
 fn field_is_encrypted(field_def: &Value) -> bool {
-    field_def.get("encrypted").is_some_and(Value::is_object)
+    zeroship_data_sql::descriptors::is_encrypted(field_def)
 }
 
 fn field_update_writes_value(value: &Value) -> bool {
@@ -1036,7 +1036,7 @@ mod tests {
                 "name": { "type": "string", "required": true },
                 "ssn": {
                     "type": "string",
-                    "encrypted": { "wraps": "string" },
+                    "encrypted": true,
                     "mask": { "kind": "last4", "classification": "spi" }
                 }
             });
@@ -1045,7 +1045,7 @@ mod tests {
                 "name": { "type": "string", "required": true },
                 "ssn": {
                     "type": "string",
-                    "encrypted": { "wraps": "string" },
+                    "encrypted": true,
                     "mask": { "kind": "last4", "classification": "spi" }
                 }
             });

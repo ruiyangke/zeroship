@@ -2530,7 +2530,7 @@ fn encrypted_schema() -> Value {
     value!({
         "secret": {
             "type": "string",
-            "encrypted": { "wraps": "string" }
+            "encrypted": true
         },
         "nickname": { "type": "string" },
     })
