@@ -17,9 +17,9 @@ use zeroship_migrate_backend::registry::VendorSet;
 use indexmap::IndexMap;
 
 use super::{
-    flatten_dialectal_ops, fold_create_column_to_field, fold_named_type_error,
-    lift_named_type_facets, recover_check_facet, recover_fk_policy, resolved_inject_prefix_len,
-    CatalogFold, FoldError, RecoveredCheck, FOLD_OWNER_APP,
+    CatalogFold, FOLD_OWNER_APP, FoldError, RecoveredCheck, flatten_dialectal_ops,
+    fold_create_column_to_field, fold_named_type_error, lift_named_type_facets,
+    recover_check_facet, recover_fk_policy, resolved_inject_prefix_len,
 };
 use crate::model::ir::{ColType, IrColumn, IrConstraintKind, IrIndex, Op, TableRuntimeOptions};
 use crate::model::schema_model::SchemaModel;
@@ -27,13 +27,13 @@ use crate::model::snapshot::SchemaSnapshot;
 use crate::model::table_shape::ResolvedInject;
 use crate::render::declarative::CollectionDescriptor;
 use crate::render::gen_types::{
-    add_runtime_index, constraint_uses_local_column, derived_unique_index_name,
-    effective_constraint_name, effective_index_name, for_each_expr_mut, index_uses_column,
-    named_constraint, named_index, plain_index_fields, rename_constraint_local_column,
-    rename_expr_column, rename_expr_table, rename_index_column, replace_name, AuthoringTable,
-    RuntimeCollectionMetadata, RuntimeIndexDescriptor,
+    AuthoringTable, RuntimeCollectionMetadata, RuntimeIndexDescriptor, add_runtime_index,
+    constraint_uses_local_column, derived_unique_index_name, effective_constraint_name,
+    effective_index_name, for_each_expr_mut, index_uses_column, named_constraint, named_index,
+    plain_index_fields, rename_constraint_local_column, rename_expr_column, rename_expr_table,
+    rename_index_column, replace_name,
 };
-use crate::render::lower::{resolve_encrypted_inner_domain_in_column, NamedTypeRegistry};
+use crate::render::lower::{NamedTypeRegistry, resolve_encrypted_inner_domain_in_column};
 use zeroship_migrate_ir::dialect::DialectId;
 use zeroship_migrate_policy::EffectivePolicy;
 
@@ -54,6 +54,7 @@ pub(crate) struct AuthoredTable {
     /// Runtime-visible collection options, stated by `createTable`'s
     /// `runtimeOptions` and by `setTableOptions`.
     pub runtime_options: TableRuntimeOptions,
+    pub assignments: BTreeMap<String, zeroship_migrate_policy::Assignment>,
     /// The columns the policy-resolved inject prefix owns as the ID primary key.
     ///
     /// Decided at `createTable` from the [`ResolvedInject`] the charter yields, which
@@ -200,12 +201,39 @@ impl AuthoredState<'_> {
                 let resolved_inject = ResolvedInject::for_table(effective, effective_schema, name)
                     .map_err(|error| FoldError::Render(error.to_string()))?;
                 let injected_prefix_len = resolved_inject_prefix_len(columns, &resolved_inject);
+                let object = zeroship_migrate_policy::ObjectName::table(
+                    effective_schema.as_bytes().to_vec(),
+                    name.as_bytes().to_vec(),
+                );
+                let mut assignments: BTreeMap<String, zeroship_migrate_policy::Assignment> =
+                    effective
+                        .injects_for(&object)
+                        .into_iter()
+                        .flat_map(|spec| spec.columns.iter())
+                        .filter_map(|column| {
+                            column
+                                .assign
+                                .as_ref()
+                                .map(|assign| (column.name.clone(), assign.clone()))
+                        })
+                        .collect();
                 let mut id_primary_key_columns = BTreeSet::new();
                 let mut implicit_unique_indexes = Vec::new();
                 for (index, column) in columns.iter().enumerate() {
+                    if let Some(assignment) = assignments.get_mut(&column.name) {
+                        if assignment.by == zeroship_migrate_policy::AssignmentGenerator::TypedId
+                            && column.identity.is_some()
+                        {
+                            assignment.by = zeroship_migrate_policy::AssignmentGenerator::Identity;
+                        }
+                    }
                     if index < injected_prefix_len
-                        && column.name == "id"
-                        && resolved_inject.owns_id_primary_key()
+                        && assignments.get(&column.name).is_some_and(|assignment| {
+                            assignment.by == zeroship_migrate_policy::AssignmentGenerator::TypedId
+                        })
+                        && primary_key
+                            .as_ref()
+                            .is_some_and(|key| key.contains(&column.name))
                     {
                         id_primary_key_columns.insert(column.name.clone());
                     }
@@ -238,6 +266,7 @@ impl AuthoredState<'_> {
                             schema: schema.clone(),
                         },
                         runtime_options: runtime_options.clone().unwrap_or_default(),
+                        assignments,
                         id_primary_key_columns,
                         implicit_unique_indexes,
                     },
@@ -351,6 +380,7 @@ impl AuthoredState<'_> {
                 if let Some(state) = self.tables.get_mut(table) {
                     state.core.columns.shift_remove(column);
                     state.id_primary_key_columns.remove(column);
+                    state.assignments.remove(column);
                     if state
                         .core
                         .primary_key
@@ -386,6 +416,9 @@ impl AuthoredState<'_> {
                     }
                     if state.id_primary_key_columns.remove(from) {
                         state.id_primary_key_columns.insert(to.clone());
+                    }
+                    if let Some(assignment) = state.assignments.remove(from) {
+                        state.assignments.insert(to.clone(), assignment);
                     }
                     if let Some(primary_key) = &mut state.core.primary_key {
                         replace_name(primary_key, from, to);
@@ -934,6 +967,8 @@ impl FoldedSchema {
             let mut metadata = RuntimeCollectionMetadata {
                 options: table.runtime_options.clone(),
                 indexes: Vec::new(),
+                assignments: table.assignments.clone(),
+                primary_key: table.core.primary_key.clone().unwrap_or_default(),
             };
             for index in &table.implicit_unique_indexes {
                 add_runtime_index(
