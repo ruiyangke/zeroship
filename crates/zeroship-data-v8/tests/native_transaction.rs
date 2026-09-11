@@ -2508,7 +2508,7 @@ mod sc1_driver {
     /// failure in this repository; the number below comes from the session that
     /// ran the assertions.
     async fn admin(url: &str) -> Client {
-        let (client, connection) = compio_postgres::connect(&url, NoTls)
+        let (client, connection) = compio_postgres::connect(url, NoTls)
             .await
             .unwrap_or_else(|e| panic!("sc1_driver needs a live PostgreSQL at {url}: {e}"));
         compio::runtime::spawn(async move {

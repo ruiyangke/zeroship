@@ -172,9 +172,8 @@ jobs:
       #
       # The SAME script a developer runs, not a `services:` block that would be a
       # second definition of the same servers. `services:` also cannot pass
-      # `-c wal_level=logical`, which is why data-v8-live-gate below uses an
-      # explicit `docker run`; going through compose keeps this job on the
-      # definition the compose file already carries.
+      # `-c wal_level=logical`. The native data job configures its owned
+      # testcontainers separately; this job uses the compose definition.
       - name: Provision the required test backends (postgres, redis, smtp sink)
         run: bash tests/provision_test_backends.sh
       - name: Install snapshot clients matching the test server
@@ -1385,7 +1384,7 @@ jobs:
       #   error: couldn't read .../sdks/db/dist/internal.js
       #   error: couldn't read .../sdks/bootstrap/dist/runtime-entry.js
       #   error: could not compile `zeroship-runtime` (lib) due to 3 previous errors
-      # billing-gate and data-v8-live-gate already carry this block for the
+      # billing-gate and data-tests already carry this block for the
       # same reason; auth-gate reaches the same crate by a different route (the
       # migrate binary rather than the crate under test) and was missed.
       - uses: actions/setup-node@v4
@@ -1402,38 +1401,15 @@ jobs:
       - name: Run the auth live-database gate
         run: tests/run_auth_suite.sh
 
-  # Required database verification for the engine and worker DB adapter.
-  # Ordinary package tests include every integration target. This job supplies
-  # the logical WAL and extensions required by CDC and spatial operations.
-  #
-  # Postgres is an explicit `docker run`, NOT a `services:` entry, and that is
-  # forced rather than stylistic: `-c wal_level=logical` is a command argument
-  # and GitHub service containers accept none. Same reason golden-path and
-  # dev-vs-deployed launch theirs this way.
-  #
-  # WITHOUT that flag THE WAL-GUARDED TESTS USED TO SKIP AND STILL COUNT AS
-  # PASSED, and a census over the run log was the ONLY thing that told a
-  # `replica` server from a `logical` one - the two printed identical result
-  # lines and both cleared the floor. That census is deleted along with the rest
-  # of the skip apparatus. The guards REFUSE now: on a server without logical
-  # WAL those tests FAIL, naming the setting, that it is postmaster-level, and
-  # that `ALTER SYSTEM SET` needs a restart rather than a reload. The flag is no
-  # less load-bearing; what changed is that omitting it is now visible in cargo's
-  # own output rather than only in a marker somebody had to count.
-  #
-  # The history is kept because it is the argument for the replacement, not a
-  # footnote to it: the figures here read 12/11 until 2026-08-18, having been
-  # copied into three files and re-run in none, which is the same defect in the
-  # instrument that the instrument existed to catch.
-  data-v8-live-gate:
+  # Native data tests own their PostgreSQL fixture and real CDC relay process.
+  data-tests:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # Same reason as the `rust` job: run_data_v8_live_suite.sh builds
-      # zeroship-data-v8, which depends on zeroship-runtime, which
-      # `include_str!`s three gitignored SDK dist files a fresh checkout lacks.
+      - uses: taiki-e/install-action@nextest
+      # Build the SDK modules embedded by the V8 runtime.
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -1441,50 +1417,19 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter @zeroship/migrate build
       - run: pnpm build
-      # pgvector because two tests build vector columns, and the extension has
-      # to be CREATED in the target database, not merely available: a fresh
-      # database with it available still fails `type "vector" does not exist`.
-      #
-      # POSTGIS IS INSTALLED HERE, and it is a package rather than an image
-      # because no published image carries both extensions - `pgvector/pgvector`
-      # and `postgis/postgis` are disjoint. `pgvector/pgvector:pg16` is
-      # `postgres:16-bookworm` plus a compiled pgvector (its Dockerfile says so),
-      # so it carries the PGDG apt repository the base image installs postgres
-      # from, and `postgresql-16-postgis-3` is in that repository.
-      #
-      # It became a REQUIREMENT rather than a nicety when the skip apparatus was
-      # deleted: `spatial_near_runs_under_per_app_role_via_rls` announced a skip
-      # on a server without the extension and was excused by name in a census in
-      # run_data_v8_live_suite.sh. That census is gone and the test FAILS
-      # instead, so a server without postgis is a red job, not a quieter one.
-      - name: Start Postgres (pgvector, postgis, logical WAL)
-        run: |
-          docker run -d --name data-v8-pg -p 5441:5432 \
-            -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=zeroship \
-            -e POSTGRES_DB=zeroship \
-            pgvector/pgvector:pg16 -c wal_level=logical
-          for i in $(seq 1 40); do
-            if docker exec data-v8-pg pg_isready -U postgres; then
-              docker exec data-v8-pg bash -c \
-                'apt-get update && apt-get install -y --no-install-recommends postgresql-16-postgis-3'
-              docker exec data-v8-pg psql -U postgres -d zeroship \
-                -v ON_ERROR_STOP=1 \
-                -c 'CREATE EXTENSION IF NOT EXISTS vector;' \
-                -c 'CREATE EXTENSION IF NOT EXISTS postgis;'
-              exit 0
-            fi
-            sleep 3
-          done
-          echo "postgres failed to become ready" >&2; docker logs data-v8-pg; exit 1
       - name: Install snapshot clients matching the test server
         run: |
           sudo apt-get update
           sudo apt-get install -y postgresql-client-16
           echo '/usr/lib/postgresql/16/bin' >> "$GITHUB_PATH"
-      - name: Run the data-v8 live-database gate
-        run: tests/run_data_v8_live_suite.sh
-        env:
-          PG_TEST_URL: postgres://postgres:zeroship@127.0.0.1:5441/zeroship
+      - name: Run native data tests with owned PostgreSQL
+        run: cargo xtask test data
+      - name: Upload native test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: data-test-results
+          path: target/nextest/data/junit.xml
 
   # The live-Postgres gate for zeroship-worker: seven tests that drive
   # `workflow_advance_unsigned` end to end and whose claim path joins
@@ -1561,7 +1506,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # Twice load-bearing, same as billing-gate / auth-gate / data-v8-live-gate:
+      # Twice load-bearing, same as billing-gate / auth-gate / data-tests:
       # zeroship-worker depends on zeroship-runtime, which `include_str!`s three
       # gitignored SDK dist files, AND deploy/ops/db-migrate.sh is a Node program
       # that the suite script shells out to.

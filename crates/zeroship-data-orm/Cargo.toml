@@ -16,6 +16,8 @@ zeroship-migrate-policy = { workspace = true }
 compio = { workspace = true }
 compio-ws = { workspace = true }
 compio-tls = { workspace = true }
+# The relay client explicitly selects this provider, including in isolated builds.
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std"] }
 futures = { workspace = true }
 url = { workspace = true }
 zeroship-data-cdc-wire = { workspace = true }

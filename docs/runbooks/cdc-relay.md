@@ -65,7 +65,8 @@ Relay `max_apps`, `max_connections`, and `clients_per_app` bound admission;
 limits bound retained decoding state. Overflow or reconnect causes a fresh
 snapshot through `Resync`; delivery is not a durable replay API.
 
-Run `tests/run_data_v8_live_suite.sh` against the required PostgreSQL fixture.
+Run `cargo xtask test data`. Each PostgreSQL test owns a
+testcontainer with the required extensions and logical WAL.
 It builds the relay and exercises TypeScript live queries through TLS using a
 worker login without replication privileges. Ordinary tests in
 `zeroship-data-cdc-server` cover authentication, revocation, commit ordering,

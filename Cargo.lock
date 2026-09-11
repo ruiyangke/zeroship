@@ -8172,6 +8172,7 @@ dependencies = [
  "hkdf",
  "hmac 0.12.1",
  "rusqlite",
+ "rustls",
  "scoped-tls",
  "serde",
  "serde_json",

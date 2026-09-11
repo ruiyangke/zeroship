@@ -926,7 +926,7 @@ compile-time trait assertions (`backend/postgres.rs:1798`,
 `backend/mod.rs:1931`, `backend/sqlite/mod.rs:2875`), which survive because
 `SchemaIntrospect` itself survives for the migrate plane.
 
-**Shell gates - 3 arms in one file, `tests/run_data_v8_live_suite.sh`:**
+**Shell gates - 3 arms in one file, `tests/run_data_v8_live_suite.sh`:** (DELETED; current runner: `cargo xtask test data`.)
 
 - `:143` `PLUGIN_DB_MIN_PASSED=118` - a hard pass-count floor summed across four
   live-PG binaries (loop `:171`, sum `:180-183`, comparison `:191-199`).
@@ -1094,7 +1094,7 @@ not, the dev tier would be visibly broken.
    (`crates/zeroship-data-v8/src/live_metadata.rs`)? If yes, one of its seven
    tests becomes a rewrite instead of a deletion; if no, the whole 517-line
    module goes.
-8. **section 4.4 shell gate**: `tests/run_data_v8_live_suite.sh:143`'s
+8. **section 4.4 shell gate**: `tests/run_data_v8_live_suite.sh`'s (DELETED; current runner: `cargo xtask test data`.)
    `PLUGIN_DB_MIN_PASSED=118` floor must be decremented deliberately, with the
    provenance ledger at `:92-142` updated in the same change. Who signs that
    off, and to what number?
