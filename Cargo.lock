@@ -1353,6 +1353,7 @@ dependencies = [
  "percent-encoding",
  "quick-xml",
  "sha2 0.10.9",
+ "testcontainers",
  "thiserror 2.0.18",
  "time",
  "tracing",

@@ -28,6 +28,7 @@ time = { workspace = true }
 httpdate = { workspace = true }
 
 [dev-dependencies]
+testcontainers = { version = "0.28", default-features = false, features = ["blocking"] }
 compio = { workspace = true }
 bytes = { workspace = true }
 
