@@ -13,7 +13,8 @@ mod source;
 mod transaction;
 
 #[cfg(test)]
-use zeroship_test_fixtures::postgres as postgres_fixture;
+#[path = "../../../tests/fixtures/postgres/mod.rs"]
+mod postgres_fixture;
 
 #[compio::main]
 async fn main() {

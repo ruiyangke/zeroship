@@ -1,6 +1,7 @@
 //! The host-selected migration target is independent of foreign-schema grants.
 
-use zeroship_test_fixtures::postgres as postgres_fixture;
+#[path = "../../../../tests/fixtures/postgres/mod.rs"]
+mod postgres_fixture;
 
 use std::collections::BTreeMap;
 

@@ -117,4 +117,5 @@ pub use orm_context::OrmContext;
 mod tx_lane_state_tests;
 
 #[cfg(test)]
-use zeroship_test_fixtures::postgres as postgres_fixture;
+#[path = "../../../tests/fixtures/postgres/mod.rs"]
+mod postgres_fixture;
