@@ -245,11 +245,11 @@ shipped in v1 — nothing deferred.
   LocalFs gains object/metadata-sidecar layout. Native `putStream`/`getStream`/`readChunk`/
   `cancelStream` wired through the runtime's `response_forwarder` + `StreamWriter` bridges;
   `@zeroship/storage` SDK grows streaming `put`/`getStream`.
-- **PR4 — E2E + parity + docs (this PR):** `tests/e2e_s3_storage.sh` (MinIO) proves the whole
+- **PR4 — E2E + parity + docs (this PR):** `examples/storage-gallery/tests/` (MinIO) proves the whole
   edge — control writes deploy blobs to S3, gateway→worker dispatch reads the bundle FROM S3,
-  and a 20 MiB (> part size) multipart `env.storage` streaming round-trip is byte-compared
-  (18/18 green). Backend-parity (LocalFs vs S3, buffered + streaming + large multipart) wired
-  in. Worker `--storage-root` replaced by `--storage-url` (bare path/`file://` → LocalFs;
+  and multipart `env.storage` streaming checksums are compared. Backend-parity
+  (LocalFs vs S3, buffered + streaming + large multipart) is wired in.
+  Worker `--storage-root` replaced by `--storage-url` (bare path/`file://` → LocalFs;
   `s3://` → S3); `StoragePlugin::new` deleted. **Runtime fix:** the upload streaming
   `response_forwarder` learned pause/resume backpressure on the buffer high/low-water marks,
   so a > buffer-cap streaming upload no longer overflows (regression test in
@@ -427,7 +427,7 @@ Issues surfaced while exercising the framework end-to-end. Detail + ledger:
 
 ### ISS-53 · `tests/e2e_platform.sh` is broken against current code
 **Status:** superseded (2026-06-11) · **Effort:** S–M · **Tier:** T2 (test infra)
-> Coverage moved to `tests/e2e_app_primitives.sh`, `tests/e2e_app_primitives_storage.sh`,
+> Coverage moved to `tests/e2e_app_primitives.sh`, `examples/storage-gallery/tests/`,
 > and `examples/kv-dashboard/tests/`. The stale
 > `e2e_platform.sh` can be deleted or rewritten to match; not blocking now.
 
@@ -461,7 +461,7 @@ control→gateway→worker + asserting the primitives over the edge, plus `stora
 `auth-notes` examples + a kv runner.
 **Update (2026-06-11) — largely CLOSED.** The primitive suites proved **env.db, env.kv, and env.storage
 end-to-end over worker dispatch**. Current coverage lives in `tests/e2e_app_primitives.sh`,
-`tests/e2e_app_primitives_storage.sh`, and `examples/kv-dashboard/tests/`.
+`examples/storage-gallery/tests/`, and `examples/kv-dashboard/tests/`.
 Created the missing storage example and KV runner. Remaining: env.auth
 E2E (G3) and the gateway-auth path (ISS-64, by decision uses Hydra not a bypass).
 

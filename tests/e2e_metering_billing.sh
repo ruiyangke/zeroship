@@ -119,7 +119,7 @@ JOSE_JS="$ROOT/node_modules/.pnpm/jose@6.2.3/node_modules/jose/dist/webapi/index
 # --- PER-RUN ports + containers ---------------------------------------------
 # The header used to call these "DEDICATED ... distinct from every other
 # harness", and the second half was not true. :5471 was ALSO this Postgres in
-# tests/e2e_s3_large_stream.sh:114 and tests/e2e_project_config.sh:56 (and
+# the retired storage stress script and tests/e2e_project_config.sh (and
 # tests/e2e_gateway_path_backslash.sh:82 already carried a comment saying so);
 # :8071 was tests/e2e_real_app_end_to_end.sh:52's GATEWAY port. A constant is
 # only "dedicated" against the harnesses that were written after it and looked.
@@ -890,7 +890,7 @@ MOCK_REQS="$(curl -s "$MOCK_URL/__mock/requests")"
 # which is why .billed and .period_start were never affected.
 #
 # THIS COMMENT SAID "a NUMBER" UNTIL 2026-08-12, and that wording cost a whole
-# extra round. Booleans colourise identically: e2e_app_primitives_storage.sh
+# extra round. Booleans colourise identically: the retired storage smoke suite
 # compared `.deleted` and `.found` and got ESC[33mtrueESC[39m /
 # ESC[33mfalseESC[39m, so the storage-delete assertion reported a failure over
 # correct behaviour. I had swept for the class the day before and declared it
