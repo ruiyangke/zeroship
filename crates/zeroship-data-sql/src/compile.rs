@@ -13,6 +13,9 @@
 //! All user values are bound as parameters (`$1`, `$2`, ...).
 //! Column and table names are quoted with double-quotes to prevent injection.
 
+mod read;
+pub use read::{ReadSource, build_select};
+
 use crate::value::Value;
 
 use crate::schema_name::SchemaName;
@@ -9323,7 +9326,7 @@ pub fn build_where_plan(
     if matches!(predicate, crate::Predicate::Const(true)) {
         return Ok(String::new());
     }
-    let sql = render_filter(predicate, params, schema, dialect, true)?;
+    let sql = render_filter(predicate, params, &[ReadSource { alias: None, schema }], dialect, true)?;
     Ok(if sql == "TRUE" { String::new() } else { sql })
 }
 
@@ -9346,23 +9349,10 @@ fn filter_literal(value: &crate::Literal) -> Result<Value, QueryError> {
     })
 }
 
-fn filter_column<'a>(operand: &'a crate::Operand, schema: &Value) -> Result<&'a str, QueryError> {
-    match operand {
-        crate::Operand::Path(path) if path.segments().is_empty() => {
-            let field = path.root().as_str();
-            validate_value_operation(field, schema)?;
-            Ok(field)
-        }
-        _ => Err(QueryError::InvalidFilter(
-            "a collection filter requires a column operand".into(),
-        )),
-    }
-}
-
 fn render_filter(
     predicate: &crate::Predicate,
     params: &mut Vec<Value>,
-    schema: &Value,
+    sources: &[ReadSource<'_>],
     dialect: SqlDialect,
     root: bool,
 ) -> Result<String, QueryError> {
@@ -9383,7 +9373,7 @@ fn render_filter(
             }
             let parts = children
                 .iter()
-                .map(|child| render_filter(child, params, schema, dialect, false))
+                .map(|child| render_filter(child, params, sources, dialect, false))
                 .collect::<Result<Vec<_>, _>>()?;
             let joined = parts.join(if is_and { " AND " } else { " OR " });
             if root || parts.len() == 1 {
@@ -9394,22 +9384,19 @@ fn render_filter(
         }
         Predicate::Not(child) => format!(
             "NOT ({})",
-            render_filter(child, params, schema, dialect, true)?
+            render_filter(child, params, sources, dialect, true)?
         ),
         Predicate::IsNull { operand, negated } => format!(
             "{} IS {}NULL",
-            quote_ident(filter_column(operand, schema)?),
+            read::operand_sql(operand, sources, dialect)?,
             if *negated { "NOT " } else { "" }
         ),
         Predicate::Compare { lhs, op, rhs } => {
-            let field = filter_column(lhs, schema)?;
-            let Operand::Lit(value) = rhs else {
-                return Err(QueryError::InvalidFilter(
-                    "a collection comparison requires a value operand".into(),
-                ));
+            let left = read::operand_sql(lhs, sources, dialect)?;
+            let bind = match rhs {
+                Operand::Lit(value) => read::bind_operand(params, value, lhs, sources, dialect)?,
+                _ => read::operand_sql(rhs, sources, dialect)?,
             };
-            let bind =
-                push_field_value_bind(params, &filter_literal(value)?, field, schema, dialect)?;
             let op = match op {
                 CompareOp::Eq => "=",
                 CompareOp::Ne => "!=",
@@ -9418,26 +9405,20 @@ fn render_filter(
                 CompareOp::Lt => "<",
                 CompareOp::Lte => "<=",
             };
-            format!("{} {op} {bind}", quote_ident(field))
+            format!("{left} {op} {bind}")
         }
         Predicate::Membership { lhs, op, set } => {
-            let field = filter_column(lhs, schema)?;
+            let left = read::operand_sql(lhs, sources, dialect)?;
             let binds = set
                 .values()
                 .iter()
                 .map(|value| {
-                    push_field_value_bind(
-                        params,
-                        &filter_literal(value)?,
-                        field,
-                        schema,
-                        dialect,
-                    )
+                    read::bind_operand(params, value, lhs, sources, dialect)
                 })
                 .collect::<Result<Vec<_>, QueryError>>()?;
             format!(
                 "{} {}IN ({})",
-                quote_ident(field),
+                left,
                 if *op == MembershipOp::NotIn {
                     "NOT "
                 } else {
@@ -9452,7 +9433,7 @@ fn render_filter(
             pattern,
             escape,
         } => {
-            let col = quote_ident(filter_column(lhs, schema)?);
+            let col = read::operand_sql(lhs, sources, dialect)?;
             params.push(pattern.as_str().into());
             let slot = params.len();
             let negated = matches!(op, PatternOp::NotLike | PatternOp::NotILike);
