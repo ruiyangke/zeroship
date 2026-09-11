@@ -69,9 +69,9 @@ crate-type = ["cdylib", "rlib"]
 # way to compile this crate without the N-API surface, but it is NO LONGER
 # REQUIRED and is no longer the recommended path: it type-checks 1486 fewer lines.
 #
-# NO cargo test may CALL an N-API function - see the `[dev-dependencies] napi`
-# comment for the false-success mechanism. The napi boundary is `npm test`'s
-# question, through the real `.node`.
+# No Rust test process may call an N-API function; it has no Node host. The
+# platform corpus test launches the real CLI in a Node subprocess, while the
+# package's Node tests exercise addon APIs directly through the real `.node`.
 default = ["napi"]
 napi = ["dep:napi", "dep:napi-derive"]
 
@@ -134,6 +134,10 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
+testcontainers = { version = "0.28", default-features = false, features = ["blocking", "watchdog"] }
+toml = { workspace = true }
+url = { workspace = true }
+
 # The rollback verb is proven against a REAL temp-file SQLite database rather
 # than a canned rowset, because the question is whether the reconstructed `down`
 # reverses what apply did. Workspace-pinned, and test-only.
@@ -155,13 +159,12 @@ tempfile = { workspace = true }
 # shipped cdylib keeps 52 undefined `napi_*` symbols and a defined
 # `napi_register_module_v1`; tests/napi_symbol_shape_gate.sh holds both halves.
 #
-# NO cargo test may CALL an N-API function. With no host loaded the napi-sys stub
+# No Rust test process may call an N-API function. With no host loaded the napi-sys stub
 # prints `Node-API symbol ... has not been loaded` to stderr and returns 1 for a
 # `-> napi_status` fn and `mem::zeroed()` for every other return type - and
 # `mem::zeroed()` of a `napi_status` reads as `napi_ok`, i.e. a false success with
-# an uninitialised out-param. Measured: zero such lines across all 115 tests,
-# because nothing enters bridge.rs except through `napi_register_module_v1`, which
-# only a `.node` dlopen calls. The napi boundary is `npm test`'s question.
+# an uninitialised out-param. Tests of this boundary must use a real Node host,
+# as the platform corpus subprocess and the package's Node tests do.
 napi = { version = "3", default-features = false, features = ["napi6", "serde-json", "dyn-symbols"] }
 
 [build-dependencies]

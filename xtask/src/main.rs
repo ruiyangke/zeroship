@@ -1,4 +1,5 @@
 mod data;
+mod migrations;
 mod storage;
 mod workflow;
 
@@ -33,6 +34,8 @@ enum Task {
 
 #[derive(Subcommand)]
 enum Suite {
+    /// Build the Node host and test the platform corpus on owned PostgreSQL.
+    Migrations,
     /// Check workspace dependency and feature declarations.
     Repository,
     /// Run workflow crates, runtime, control-plane, SDK and example tests.
@@ -56,6 +59,9 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     let result = match args.command {
+        Task::Test {
+            suite: Suite::Migrations,
+        } => migrations::run(),
         Task::Test {
             suite: Suite::Repository,
         } => checked(

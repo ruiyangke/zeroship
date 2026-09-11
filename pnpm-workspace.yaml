@@ -28,8 +28,8 @@ packages:
   #      read those files as ESM. With no `package.json` above them they are
   #      treated as CJS and fail with `Cannot require() ES Module ... in a cycle`.
   #
-  # Both were live defects until 2026-08-28; `tests/platform_migration_corpus_gate.sh`
-  # rules on them.
+  # The native platform corpus test exercises this resolution and module loading
+  # through the real CLI: `cargo xtask test migrations`.
   - "db/migrations-ts"
 
 # Packages permitted to run lifecycle scripts. pnpm 11 renamed this from
