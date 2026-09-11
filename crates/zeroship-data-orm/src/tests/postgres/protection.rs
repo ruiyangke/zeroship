@@ -27,7 +27,7 @@
 //!
 //! PostgreSQL comes from an owned testcontainer with vector and PostGIS.
 //! Docker and successful fixture startup are required.
-//! Run: `cargo xtask test data --filter 'test(mask_flip::)'`
+//! Run: `cargo xtask test data --filter 'test(tests::postgres::protection::)'`
 
 use crate::tests::fixtures::Host;
 #[allow(unused_imports)]

@@ -1,9 +1,9 @@
 //! Runtime and database state owned explicitly by each engine test.
 use crate::connection::{ConnectionFactory, LocalConnection};
 use crate::{backend, compile, crud, encryption, error::DbError, exec, transaction};
-use std::{cell::RefCell, rc::Rc};
+use std::{cell::RefCell, rc::Rc, sync::Arc};
 
-type ProjectKeys = Option<Rc<encryption::SuppliedProjectKeys>>;
+type ProjectKeys = Option<Arc<encryption::SuppliedProjectKeys>>;
 
 pub(crate) struct Host {
     runtime: compio::runtime::Runtime,
@@ -33,7 +33,7 @@ impl Host {
             .borrow()
             .as_ref()
             .map_or_else(encryption::ProjectKeySource::unavailable, |keys| {
-                encryption::ProjectKeySource::supplied(Rc::clone(keys))
+                encryption::ProjectKeySource::supplied(Arc::clone(keys))
             })
     }
 
@@ -89,7 +89,7 @@ impl Host {
         app_ids: &[&str],
         hex: &str,
     ) -> SuppliedProjectKeysGuard {
-        let keys = Rc::new(encryption::SuppliedProjectKeys::new());
+        let keys = Arc::new(encryption::SuppliedProjectKeys::new());
         keys.insert_hex("fixture_project", hex)
             .expect("fixture project key");
         for app_id in app_ids {

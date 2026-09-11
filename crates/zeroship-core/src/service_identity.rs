@@ -449,6 +449,8 @@ pub mod endpoints {
         ServiceEndpoint::new("control", "GET", "/internal/apps/{app_id}");
     pub const CONTROL_APP_ENV: ServiceEndpoint =
         ServiceEndpoint::new("control", "GET", "/internal/apps/{app_id}/env");
+    pub const CONTROL_APP_DATA_KEY: ServiceEndpoint =
+        ServiceEndpoint::new("control", "GET", "/internal/apps/{app_id}/data-key");
     pub const CONTROL_BILLING_RECONCILE: ServiceEndpoint =
         ServiceEndpoint::new("control", "POST", "/internal/billing/reconcile");
     pub const CONTROL_SPEND_RECONCILE: ServiceEndpoint =
@@ -551,18 +553,13 @@ pub fn service_allowlist() -> &'static [ServiceAuthorization] {
                 &[
                     endpoints::CONTROL_VERSIONS,
                     endpoints::CDC_SUBSCRIBE,
-                    // NO APP SCOPE NARROWS THESE TWO TODAY, and this comment
-                    // claimed one until 2026-09-07. `get_app_env` and
-                    // `get_app_version` verify the assertion, DISCARD the
-                    // identity, and serve whatever app the path names, so
-                    // holding `svc/worker` is holding every app's environment.
-                    // The narrowing is step 4 of
-                    // docs/proposals/2026-09-05-auth-foundation-redesign.md and
-                    // it cannot be written before per-instance worker identity:
-                    // every replica signs as this same principal, so there is
-                    // nothing here to compare an eligible set against.
+                    // Host app reads are role-scoped: an authenticated worker
+                    // may request any app's version, environment, and project
+                    // data key. Instance enrolment provides attribution and
+                    // revocation; it does not establish app assignment.
                     endpoints::CONTROL_APP,
                     endpoints::CONTROL_APP_ENV,
+                    endpoints::CONTROL_APP_DATA_KEY,
                     // Enrolment authenticates with THIS SHARED ROLE KEY, so a
                     // holder of it can enrol many instances. That is a
                     // DISTINGUISHER, not a boundary: what it buys is

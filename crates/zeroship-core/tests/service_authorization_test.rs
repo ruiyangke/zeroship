@@ -7,7 +7,7 @@ use zeroship_core::service_identity::{
 };
 
 /// Every operation the catalog names, in one place for the table-wide guards.
-const CATALOG: [ServiceEndpoint; 14] = [
+const CATALOG: [ServiceEndpoint; 16] = [
     endpoints::GATEWAY_BACKCHANNEL_LOGOUT,
     endpoints::GATEWAY_WORKFLOW_ADVANCE,
     endpoints::CONTROL_ROUTES,
@@ -15,6 +15,8 @@ const CATALOG: [ServiceEndpoint; 14] = [
     endpoints::CONTROL_VERSIONS,
     endpoints::CONTROL_APP,
     endpoints::CONTROL_APP_ENV,
+    endpoints::CONTROL_APP_DATA_KEY,
+    endpoints::CDC_SUBSCRIBE,
     endpoints::CONTROL_WORKER_ENROL,
     endpoints::CONTROL_BILLING_RECONCILE,
     endpoints::CONTROL_SPEND_RECONCILE,
@@ -115,6 +117,12 @@ fn endpoint_catalog_records_exact_measured_operations() {
             "/internal/apps/{app_id}/env",
         ),
         (
+            endpoints::CONTROL_APP_DATA_KEY,
+            "control",
+            "GET",
+            "/internal/apps/{app_id}/data-key",
+        ),
+        (
             endpoints::CONTROL_WORKER_ENROL,
             "control",
             "POST",
@@ -197,8 +205,10 @@ fn measured_allowlist_is_encoded_and_enforced_row_by_row() {
         "svc/worker",
         &[
             endpoints::CONTROL_VERSIONS,
+            endpoints::CDC_SUBSCRIBE,
             endpoints::CONTROL_APP,
             endpoints::CONTROL_APP_ENV,
+            endpoints::CONTROL_APP_DATA_KEY,
             // Enrolment authenticates with the SHARED role key, so this grant
             // DISTINGUISHES instances rather than fencing a role-key holder
             // out. It is in the row because per-instance identity is what makes

@@ -497,6 +497,7 @@ pub fn dispatch_zs_with_descriptor(
     }];
     let plugins: Vec<Arc<dyn NativePlugin>> = vec![
         DbService::new(DbServiceConfig {
+            project_keys: crate::tests::fixtures::project_keys(),
             connection: crate::tests::fixtures::recording::connection(url),
             cdc_relay: None,
             meter: None,

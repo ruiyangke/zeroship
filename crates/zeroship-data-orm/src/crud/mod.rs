@@ -1815,8 +1815,7 @@ async fn encryption_pass_dispatch(
 fn schema_has_encrypted_columns(schema: &Value) -> bool {
     schema
         .as_object()
-        .map(|o| o.values().any(zeroship_data_sql::descriptors::is_encrypted))
-        .unwrap_or(false)
+        .is_some_and(|o| o.values().any(zeroship_data_sql::descriptors::is_encrypted))
 }
 
 /// Cheap walk: does any field def on `schema` carry a

@@ -307,7 +307,8 @@ pub(crate) fn workflow_journal_schema_sql(app_schema: &str) -> String {
 /// CREATE on the database and no authority to make a schema of their own - a
 /// process running creator code must not be able to author schemas
 /// (2a44ea8ef). So the schema has to exist first, and in production it exists
-/// because a deploy's migration apply created it.
+/// because a migration apply or the authenticated workflow provisioning route
+/// created it.
 ///
 /// Exported because callers outside the apply path need a deployed app's
 /// journal schema to exist and must get it from the production statement rather
