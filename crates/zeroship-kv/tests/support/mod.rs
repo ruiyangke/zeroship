@@ -4,6 +4,6 @@ use zeroship_kv as redis_types;
 
 #[allow(dead_code)]
 #[path = "../../../../libs/compio-redis/tests/common/containers.rs"]
-mod containers;
+pub mod containers;
 
-pub use containers::{fixtures, standalone, start_redis};
+pub use containers::fixtures;
