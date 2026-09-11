@@ -472,6 +472,12 @@ pub struct ClusterClient {
     inner: Rc<RefCell<Inner>>,
 }
 
+impl std::fmt::Debug for ClusterClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClusterClient").finish_non_exhaustive()
+    }
+}
+
 impl ClusterClient {
     /// Connect to a cluster using a list of seed URLs. Probes seeds in
     /// order; the first one that answers `CLUSTER SLOTS` seeds the

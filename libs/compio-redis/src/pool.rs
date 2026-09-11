@@ -387,6 +387,15 @@ pub struct PooledConn {
     generation: u64,
 }
 
+impl std::fmt::Debug for PooledConn {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PooledConn")
+            .field("client", &self.client)
+            .field("generation", &self.generation)
+            .finish_non_exhaustive()
+    }
+}
+
 impl PooledConn {
     /// Not named `as_mut`: that reads as the `AsMut` trait method and would
     /// resolve differently depending on which traits are in scope at the call

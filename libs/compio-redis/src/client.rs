@@ -94,6 +94,16 @@ pub struct Client {
     dirty: bool,
 }
 
+impl std::fmt::Debug for Client {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Client")
+            .field("buffered_bytes", &self.rx.len())
+            .field("cmd_timeout", &self.cmd_timeout)
+            .field("dirty", &self.dirty)
+            .finish_non_exhaustive()
+    }
+}
+
 impl Client {
     /// Connect using a direct Redis URL.
     pub async fn connect(url: &str) -> Result<Self> {
