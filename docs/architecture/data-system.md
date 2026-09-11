@@ -54,9 +54,9 @@ The migration engine owns DDL, schema differencing, and schema changes. Runtime
 code does not contain another schema emitter, and database fixtures use the
 migration engine's emitter.
 
-Writes and reads pass through the existing system-field, masking, encryption,
-and result-decoding stages. Drivers bind binary values from their native type;
-a text value cannot select binary binding by carrying a prefix.
+Writes apply declared assignment generators. Reads and writes use the masking,
+encryption and result-decoding stages. Drivers bind binary values from their
+native type; a text value cannot select binary binding by carrying a prefix.
 Transaction statements report completion to the reducer, which rolls back a
 poisoned transaction. Rust callback transactions use the same protocol as the
 worker, including savepoints and cancellation cleanup. Handles returned from a

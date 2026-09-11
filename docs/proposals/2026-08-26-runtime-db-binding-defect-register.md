@@ -492,38 +492,29 @@ it - a tenant-isolation bypass arriving with no code change and no error, in a
 process that executes creator code. Removing a privilege that currently does
 nothing is free; removing it after something depends on it is a behaviour change.
 
-### L31 - `updateMany`'s row cap guards one of two branches, and its only test is written on the guarded one
+### L31 - Bulk-write limits do not cover the ordinary update and purge paths
 
-`db.updateMany({}, {...})` on an ordinary collection renders an unbounded
-whole-table rewrite that also materialises every row.
+Status: open; verified against the current ORM and SQL compiler.
 
-- `dispatch_update_many` probes target ids and refuses above `MAX_QUERY_LIMIT`, but
-  that check sits **inside `if per_row_encrypted_update`** (`crud/mod.rs:1233`). An
-  update touching no randomised-encrypted column falls through to
-  `crud/mod.rs:1353+`, which builds the statement straight from the caller's
-  filter - no probe, no cap.
-- `build_update_many_with_system_fields` emits the `WHERE` clause only when the
-  filter is non-empty (`zeroship-schema/src/query.rs:4220-4228`), then appends
-  `RETURNING *`.
+`run_update_many` in
+[CRUD execution](../../crates/zeroship-data-orm/src/crud/mod.rs) probes target keys
+and rejects targets above `MAX_QUERY_LIMIT` only when
+`per_row_encrypted_update` is true. An update that does not need per-row
+encryption goes directly to `build_update_many_with_assignments` in the
+[SQL compiler](../../crates/zeroship-data-sql/src/compile.rs). That builder adds a
+`WHERE` clause only for a nonempty filter and imposes no row limit. Its
+`RETURNING` projection contains declared readable fields, but still materializes
+all matching rows.
 
-So the rendered statement is `UPDATE "app"."t" SET ... RETURNING *`.
+`plan_purge_many` delegates to `build_delete_many`, which likewise has no target
+cap. Removing implicit column behavior did not address these limits.
 
-**What makes it invisible is the part worth keeping.** The cap has a test and the
-test is green:
-`update_many_randomised_target_cap_rejects_without_writes_sqlite_runtime`
-(`crates/zeroship-data-v8/tests/sqlite_integration.rs`). Its fixture updates `{ ssn: ... }` against
-`users_encrypted_ssn_schema`, and `ssn` is the randomised-encrypted column - which
-is exactly what selects the **guarded** branch. The guard exists, has a passing
-test, and the test's fixture is what routes around the hole. Not a vacuous test and
-not a wrong assertion, but a **fixture that cannot reach the unguarded path**.
-
-`dispatch_purge_many` has the same shape with no cap at all (`crud/mod.rs:1599` ->
-`query.rs:4249-4254`).
-
-**Not fixed, per the standing deferral.** The IR's write family already makes this
-unrepresentable - `RowLimit` is mandatory on `Update` and `Delete` with no "all
-rows" value - so the port closes it by construction rather than by adding a second
-guard to the second branch.
+The regression test
+`update_many_randomised_target_cap_rejects_without_writes_sqlite_runtime` in
+[SQLite update tests](../../crates/zeroship-data-v8/src/tests/sqlite/updates.rs)
+exercises the encrypted branch. It does not establish a bound for ordinary
+updates or purges. Resolving this finding requires enforcing the intended limit
+on those paths and testing that an oversized operation leaves rows unchanged.
 
 ### L32 - the migration-freeze guard reports instead of failing, and its data source has no writer
 
