@@ -29,6 +29,26 @@ pub fn install_collections(
                 continue;
             }
             crate::compile::validate_field_name(name)?;
+            if let Some(encrypted) = definition.get("encrypted") {
+                let metadata = encrypted.as_object().ok_or_else(|| {
+                    DbError::validation(
+                        "invalid_encryption_metadata",
+                        "encrypted must be an options object",
+                    )
+                })?;
+                if metadata.contains_key("mode") {
+                    return Err(DbError::validation(
+                        "invalid_encryption_metadata",
+                        "encrypted.mode is unsupported; encryption is always randomised",
+                    ));
+                }
+                if definition.get("unique").and_then(Value::as_bool) == Some(true) {
+                    return Err(DbError::validation(
+                        "encrypted_unique_unsupported",
+                        "encrypted fields cannot be unique",
+                    ));
+                }
+            }
             if !definition.is_object() {
                 return Err(DbError::internal("field descriptor must be an object"));
             }
@@ -61,6 +81,24 @@ pub fn declared_collections(binding: &DbBinding) -> Vec<(String, Arc<Value>)> {
 mod tests {
     use super::*;
     use zeroship_data_sql::value;
+
+    #[test]
+    fn descriptors_refuse_removed_encryption_mode() {
+        let binding = DbBinding::cold_start("app_encryption_mode");
+        for mode in ["randomised", "deterministic"] {
+            let schema = value!({"secret":{"type":"string","encrypted":{"mode":mode}}});
+            let err = install_collections(&binding, vec![("secrets".into(), schema)]).unwrap_err();
+            assert!(err.to_string().contains("encrypted.mode"));
+        }
+        install_collections(
+            &binding,
+            vec![(
+                "secrets".into(),
+                value!({"secret":{"type":"string","encrypted":{}}}),
+            )],
+        )
+        .unwrap();
+    }
 
     #[test]
     fn an_undeclared_collection_is_a_typed_error_not_a_missing_schema() {

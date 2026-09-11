@@ -1,7 +1,6 @@
 //! Encrypt and decrypt declared fields using native ciphertext buffers.
 //! Randomised encryption authenticates the row identity as well as collection
 //! and column, so moving ciphertext to another row fails authentication.
-//! Deterministic encryption omits row identity to support equality matching.
 //! Mask derivation receives protected plaintext before encryption replaces it.
 
 use base64::Engine as _;
@@ -26,13 +25,12 @@ use zeroship_data_orm::error::DbError;
 /// ciphertext, so the mask pass can derive the sibling
 /// `<col>_masked` column without re-decrypting. The original
 /// signature stays for callers that don't care about mask integration.
-/// One column staged for encryption: `(col, mode, key_id, wraps,
+/// One column staged for encryption: `(col, key_id, wraps,
 /// plaintext_bytes, sidechannel_str)` — collected up front (see
 /// [`encrypt_row_on_write`]'s body comment) so the borrow on the
 /// schema object can be released before the async `resolve_key` call.
 type PendingEncryption = (
     String,
-    crate::backend::EncryptionMode,
     String,
     &'static str,
     Zeroizing<Vec<u8>>,
@@ -92,7 +90,7 @@ pub async fn encrypt_row_on_write_with_sidechannel(
         ));
     };
 
-    // Collect (col, mode, key_id, wraps, plaintext_bytes, sidechannel_str)
+    // Collect (col, key_id, wraps, plaintext_bytes, sidechannel_str)
     // up front so we can release the borrow on `obj` before calling the
     // async `resolve_key` (which would otherwise hold a mutable borrow
     // across the await).
@@ -108,7 +106,6 @@ pub async fn encrypt_row_on_write_with_sidechannel(
         let Some(enc_meta) = def.get("encrypted").and_then(|v| v.as_object()) else {
             continue;
         };
-        let mode = parse_mode(enc_meta)?;
         let key_id = enc_meta
             .get("keyId")
             .and_then(|v| v.as_str())
@@ -122,22 +119,21 @@ pub async fn encrypt_row_on_write_with_sidechannel(
         if value.is_null() {
             continue; // NULL stays NULL — encrypting NULL has no semantic meaning
         }
+        if row_pk.is_empty() {
+            return Err(DbError::validation(
+                "encrypted_row_id_required",
+                "encrypted values require a row identity",
+            ));
+        }
         let plaintext = Zeroizing::new(serialise_wrapped(value, wraps)?);
         let sidechannel_str = Zeroizing::new(plaintext_to_sidechannel_string(value, wraps));
-        to_encrypt.push((col.clone(), mode, key_id, wraps, plaintext, sidechannel_str));
+        to_encrypt.push((col.clone(), key_id, wraps, plaintext, sidechannel_str));
     }
 
-    for (col, mode, key_id, _wraps, plaintext, sidechannel_str) in to_encrypt {
+    for (col, key_id, _wraps, plaintext, sidechannel_str) in to_encrypt {
         let key = keys.resolve(app_id, &key_id).await?;
-        let aad = crate::encryption::aad::canonical_aad(
-            collection,
-            &col,
-            match mode {
-                crate::backend::EncryptionMode::Randomised => Some(row_pk.as_bytes()),
-                crate::backend::EncryptionMode::Deterministic => None,
-            },
-        );
-        let ciphertext = crate::encryption::aead::encrypt(&key, mode, &plaintext, &aad)?;
+        let aad = crate::encryption::aad::canonical_aad(collection, &col, row_pk.as_bytes());
+        let ciphertext = crate::encryption::aead::encrypt(&key, &plaintext, &aad)?;
         sidechannel.insert(col.clone(), sidechannel_str);
         let obj = row.as_object_mut().expect("checked above");
         obj.insert(col.clone(), Value::Bytes(ciphertext));
@@ -162,11 +158,7 @@ fn plaintext_to_sidechannel_string(value: &Value, wraps: &str) -> String {
 
 /// Decrypt every `t.encrypted(...)`-declared column on `row` in place.
 ///
-/// `row_pk` is read from `row["id"]`. The function mirrors the
-/// AAD-shape policy of [`encrypt_row_on_write`] — Randomised binds
-/// `row_pk`, Deterministic omits it. The wire format is mode-agnostic
-/// on the read side; the AAD reconstruction is what selects the
-/// mode-appropriate behaviour.
+/// `row_pk` is read from `row["id"]` and authenticated on every decrypt.
 ///
 /// On a tag-verification failure (tampered ciphertext, wrong AAD,
 /// wrong key) the function surfaces
@@ -197,18 +189,11 @@ pub async fn decrypt_row_on_read(
     };
 
     // Same async-borrow shuffle as the write path.
-    let mut to_decrypt: Vec<(
-        String,
-        crate::backend::EncryptionMode,
-        String,
-        &'static str,
-        Vec<u8>,
-    )> = Vec::new();
+    let mut to_decrypt: Vec<(String, String, &'static str, Vec<u8>)> = Vec::new();
     for (col, def) in schema_obj.iter() {
         let Some(enc_meta) = def.get("encrypted").and_then(|v| v.as_object()) else {
             continue;
         };
-        let mode = parse_mode(enc_meta)?;
         let key_id = enc_meta
             .get("keyId")
             .and_then(|v| v.as_str())
@@ -246,29 +231,24 @@ pub async fn decrypt_row_on_read(
         if value.is_null() {
             continue;
         }
+        if row_pk.is_empty() {
+            return Err(DbError::validation(
+                "encrypted_row_id_required",
+                "encrypted values require a row identity",
+            ));
+        }
         let bytes = value
             .as_bytes()
             .ok_or_else(|| {
                 DbError::internal(format!("encrypted column '{col}' requires native bytes"))
             })?
             .to_vec();
-        to_decrypt.push((col.clone(), mode, key_id, wraps, bytes));
+        to_decrypt.push((col.clone(), key_id, wraps, bytes));
     }
 
-    for (col, mode, key_id, wraps, blob) in to_decrypt {
+    for (col, key_id, wraps, blob) in to_decrypt {
         let key = keys.resolve(app_id, &key_id).await?;
-        let aad = crate::encryption::aad::canonical_aad(
-            collection,
-            &col,
-            match mode {
-                crate::backend::EncryptionMode::Randomised => Some(row_pk.as_bytes()),
-                crate::backend::EncryptionMode::Deterministic => None,
-            },
-        );
-        // Decrypt is mode-agnostic - the wire format carries the nonce and
-        // AES-GCM verifies the tag however it was produced - so `mode` reaches
-        // only the AAD reconstruction above, never this call. Both deleted
-        // `EncryptedColumn::decrypt` impls took `mode` and ignored it too.
+        let aad = crate::encryption::aad::canonical_aad(collection, &col, row_pk.as_bytes());
         let plaintext = Zeroizing::new(crate::encryption::aead::decrypt(&key, &blob, &aad)?);
         let value = deserialise_wrapped(&plaintext, wraps)?;
         let obj = row.as_object_mut().expect("checked above");
@@ -332,24 +312,6 @@ fn deserialise_wrapped(bytes: &[u8], wraps: &str) -> Result<Value, DbError> {
         "bytes" => Ok(Value::Bytes(bytes.to_vec())),
         other => Err(DbError::internal(format!(
             "encrypted wraps must be string/number/bytes, got '{other}'"
-        ))),
-    }
-}
-
-/// Parse the `mode` field from an `encrypted` metadata object. Returns
-/// a typed error if the mode is missing or unknown.
-fn parse_mode(
-    enc_meta: &zeroship_data_sql::value::Map<String, Value>,
-) -> Result<crate::backend::EncryptionMode, DbError> {
-    let mode_str = enc_meta
-        .get("mode")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| DbError::internal("encrypted.mode missing in schema"))?;
-    match mode_str {
-        "randomised" | "randomized" => Ok(crate::backend::EncryptionMode::Randomised),
-        "deterministic" => Ok(crate::backend::EncryptionMode::Deterministic),
-        other => Err(DbError::internal(format!(
-            "encrypted.mode must be 'randomised' or 'deterministic', got '{other}'"
         ))),
     }
 }
@@ -435,42 +397,13 @@ mod tests {
         }
     }
 
-    #[test]
-    fn parse_mode_variants() {
-        let mut m = zeroship_data_sql::value::Map::new();
-        m.insert("mode".to_string(), Value::String("randomised".to_string()));
-        assert!(matches!(
-            parse_mode(&m).unwrap(),
-            crate::backend::EncryptionMode::Randomised
-        ));
-        m.insert("mode".to_string(), Value::String("randomized".to_string()));
-        assert!(matches!(
-            parse_mode(&m).unwrap(),
-            crate::backend::EncryptionMode::Randomised
-        ));
-        m.insert(
-            "mode".to_string(),
-            Value::String("deterministic".to_string()),
-        );
-        assert!(matches!(
-            parse_mode(&m).unwrap(),
-            crate::backend::EncryptionMode::Deterministic
-        ));
-        m.insert("mode".to_string(), Value::String("nope".to_string()));
-        assert!(parse_mode(&m).is_err());
-    }
-
-    /// `encrypt_row_on_write` + `decrypt_row_on_read` round-trip with a
-    /// stub backend (`AeadKey` directly, no PG round-trip). Pins the
-    /// AAD policy: Randomised binds row_pk; Deterministic omits it.
-    /// A row_pk mismatch on read of a Randomised column produces
-    /// `encryption_aead_failed`.
+    /// Writes round-trip only when the read uses the same row identity.
     #[test]
     fn write_then_read_round_trip_randomised() {
         let keys = test_key_store();
 
         let schema = zeroship_data_sql::value!({
-            "ssn": { "type": "string", "encrypted": { "mode": "randomised", "keyId": "default", "wraps": "string" } },
+            "ssn": { "type": "string", "encrypted": { "keyId": "default", "wraps": "string" } },
             "name": { "type": "string" },
         });
         let mut row =
@@ -524,7 +457,7 @@ mod tests {
         let schema = zeroship_data_sql::value!({
             "contactEmail": {
                 "type": "string",
-                "encrypted": { "mode": "deterministic", "keyId": "default", "wraps": "string" },
+                "encrypted": { "keyId": "default", "wraps": "string" },
                 "mask": { "kind": "email", "classification": "pii" }
             }
         });
@@ -549,7 +482,7 @@ mod tests {
             std::rc::Rc::new(crate::encryption::SuppliedRootKeys::new()),
         ));
         let schema = zeroship_data_sql::value!({
-            "secret": {"type":"string", "encrypted":{"mode":"randomised","keyId":"unused"}, "mask":{"classification":"pii"}}
+            "secret": {"type":"string", "encrypted":{"keyId":"unused"}, "mask":{"classification":"pii"}}
         });
         let mut row = zeroship_data_sql::value!({"id":"row", "secret":"***"});
         decrypt_row_on_read(&keys, "app", "records", &schema, &mut row)
@@ -558,16 +491,13 @@ mod tests {
         assert_eq!(row["secret"].as_str(), Some("***"));
     }
 
-    /// Deterministic mode: same plaintext under same `(collection,
-    /// column)` produces the same ciphertext, regardless of row_pk
-    /// (proof that AAD omits row_pk in this mode). Equality-on-
-    /// ciphertext lookups depend on this.
+    /// Equal plaintexts produce different ciphertexts across rows.
     #[test]
-    fn deterministic_same_plaintext_yields_same_ciphertext() {
+    fn same_plaintext_yields_distinct_ciphertext() {
         let keys = test_key_store();
 
         let schema = zeroship_data_sql::value!({
-            "ssn": { "type": "string", "encrypted": { "mode": "deterministic", "keyId": "default", "wraps": "string" } },
+            "ssn": { "type": "string", "encrypted": { "keyId": "default", "wraps": "string" } },
         });
 
         let mut row_a = zeroship_data_sql::value!({ "id": "usr_a", "ssn": "shared" });
@@ -583,8 +513,6 @@ mod tests {
                 .unwrap();
         });
 
-        // Both row encryptions used DIFFERENT row_pks but produced
-        // IDENTICAL ciphertext — that's the deterministic property.
-        assert_eq!(row_a["ssn"], row_b["ssn"]);
+        assert_ne!(row_a["ssn"], row_b["ssn"]);
     }
 }

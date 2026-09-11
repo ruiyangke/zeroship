@@ -233,11 +233,6 @@ type ComparisonOps<T> = {
   $exists?: boolean;
 };
 
-/** Equality operators allowed on deterministic-encrypted fields. */
-type EqualityOnlyOps<T> = {
-  $eq?: T;
-  $in?: T[];
-};
 
 /** String-specific operators. */
 type StringOps = {
@@ -259,26 +254,20 @@ type PlainFilterValue<T> =
    NonNullable<T> extends boolean ? ComparisonOps<NonNullable<T>> :
    ComparisonOps<NonNullable<T>>);
 
-/** Filter value for a deterministic-encrypted field — equality only. */
-type DeterministicEncryptedFilterValue<T> =
-  T | null | EqualityOnlyOps<NonNullable<T>>;
 
 /**
  * Filter legality derived from the schema field builder itself.
  *
  * This keeps the type layer aligned with the runtime fence in
  * `validateEncryptedFieldsInFilter`:
- * - randomised-encrypted fields are un-filterable
- * - deterministic-encrypted fields accept only bare equality / `$eq` / `$in`
+ * - encrypted fields cannot be filtered
  * - plain fields keep the normal operator surface
  */
 type FilterValueForFieldBuilder<F> =
   F extends TypeBuilder<infer U, any, any, infer E, any>
-    ? E extends "randomised"
+    ? E extends true
       ? never
-      : E extends "deterministic"
-        ? DeterministicEncryptedFilterValue<NonNullable<U>>
-        : PlainFilterValue<NonNullable<U>>
+      : PlainFilterValue<NonNullable<U>>
     : never;
 
 type FilterValueForKey<S, K extends keyof Row<S>> =
@@ -476,24 +465,6 @@ export function err<T>(error: Error): Result<T> {
 /** Primitive field type names supported by the SDK. */
 export type PrimitiveTypeName = "string" | "number" | "boolean" | "date" | "json" | "calendarDate";
 
-/**
- * column-encryption mode. Picks both the nonce-derivation
- * strategy and the AAD shape (Camp A, resolved 2026-05-24):
- *
- * - `randomised` — per-write fresh nonce; AAD binds `(collection,
- *   column, row_pk)`. Two encrypts of the same plaintext produce
- *   different ciphertext (fail-safe default). The SDK refuses ANY
- *   filter on a randomised column at the boundary because no
- *   equality-on-ciphertext lookup can match.
- * - `deterministic` — synthetic nonce HMAC-derived from the plaintext;
- *   AAD binds `(collection, column)` only. Same plaintext under the
- *   same column produces identical ciphertext, enabling B-tree
- *   equality lookups. The SDK refuses range / regex / LIKE on
- *   deterministic columns (only `$eq`/`$in`). Inherits the standard
- *   deterministic-mode leak — equality across rows is observable to
- *   anyone with column read access.
- */
-export type EncryptionMode = "randomised" | "deterministic";
 
 /**
  * built-in mask transform applied at write time to compute the value
@@ -696,7 +667,6 @@ export declare class MaskedValue<T extends string | number | bigint | Uint8Array
 /**
  * options accepted by `t.encrypted(opts?)`.
  *
- * - `mode` — defaults to `"randomised"` (fail-safe).
  * - `keyId` — selects the per-platform root key (env var
  *   `ZEROSHIP_COLUMN_KEY_<KEYID>`). Defaults to `"default"`.
  * - `wraps` — the inner primitive type, ONE OF `t.string()` /
@@ -704,9 +674,7 @@ export declare class MaskedValue<T extends string | number | bigint | Uint8Array
  *   string at the JS layer). Defaults to `t.string()`. Other types
  *   throw synchronously with `ENCRYPTED_WRAPS_UNSUPPORTED`.
  */
-export interface EncryptedFieldOpts<Mode extends EncryptionMode = EncryptionMode> {
-  /** Encryption mode. Defaults to `"randomised"`. */
-  mode?: Mode;
+export interface EncryptedFieldOpts {
   /** Key id selecting the per-platform root. Defaults to `"default"`. */
   keyId?: string;
   /**
@@ -1008,24 +976,8 @@ export interface FieldDef {
    * ivfflat index and the operator for ORDER BY at search time.
    */
   vectorMetric?: VectorMetric;
-  /**
-   * column-encryption metadata. Present iff the SDK
-   * declared the column with `t.encrypted({ mode, keyId, wraps })`.
-   * The DDL emitter renders BYTEA / BLOB regardless of `wraps`; the
-   * `wraps` field survives so the validator walks the right
-   * type-checker before the encrypt pass swaps bytes in.
-   *
-   * - `mode` — `"randomised"` (default, fail-safe) or `"deterministic"`
-   *   (enables B-tree equality lookups; carries the standard
-   *   deterministic-mode leak).
-   * - `keyId` — selects the per-platform root key. Defaults to
-   *   `"default"`.
-   * - `wraps` — the inner primitive (`"string"` | `"number"` | `"bytes"`).
-   *   Other types are refused at schema-definition time with code
-   *   `ENCRYPTED_WRAPS_UNSUPPORTED`.
-   */
+  /** Column encryption metadata. The wrapped type describes the plaintext. */
   encrypted?: {
-    mode: EncryptionMode;
     keyId: string;
     wraps: "string" | "number" | "bytes";
   };
@@ -1127,13 +1079,11 @@ const SCHEMA_BUILDER_BRAND = Symbol.for("@zeroship/db/SchemaBuilder");
  *   `undefined` for unmasked columns. Surfaces through
  *   `InferFieldDef` so `Row<S>` wraps masked fields in
  *   `MaskedValue<T>` at the type level.
- * - `E` — encryption filter brand: `undefined` for plain fields,
- *   `"randomised"` for un-filterable encrypted fields, or
- *   `"deterministic"` for equality-only encrypted fields. Used by
- *   `Filter<S>` so the type layer matches the runtime fence.
+ * - `E` — `true` for encrypted fields, `undefined` for plain fields.
+ *   `Filter<S>` excludes encrypted values.
  *
  * `t.string().required().min(3).max(50)` → `TypeBuilder<string, true>`
- * `t.encrypted()` → `TypeBuilder<string, false, "full", "randomised", false>`
+ * `t.encrypted()` → `TypeBuilder<string, false, "full", true, false>`
  * `t.string().mask({ kind: "email" })` → `TypeBuilder<string, false, "email", undefined, false>`
  * `t.string().required().default("x")` → `TypeBuilder<string, true, undefined, undefined, true>`
  */
@@ -1141,7 +1091,7 @@ export class TypeBuilder<
   T = unknown,
   R extends boolean = false,
   M extends MaskKind | undefined = undefined,
-  E extends EncryptionMode | undefined = undefined,
+  E extends true | undefined = undefined,
   D extends boolean = false,
 > {
   /** @internal Type-level brand — do not access at runtime. */
@@ -1185,18 +1135,12 @@ export class TypeBuilder<
 
   /** Adds a unique index constraint to the field. */
   unique(): this {
-    // randomised + unique is incoherent: randomised mode
-    // produces a fresh nonce per write, so the ciphertext for the
-    // same plaintext differs across rows, which defeats any
-    // ciphertext-equality uniqueness constraint. Deterministic mode
-    // CAN enforce uniqueness because identical plaintexts produce
-    // identical ciphertexts under the same (collection, column).
-    if (this._def.encrypted !== undefined && this._def.encrypted.mode === "randomised") {
+    if (this._def.encrypted !== undefined) {
       throw Object.assign(
         new Error(
-          "t.encrypted({ mode: 'randomised' }).unique(): unique enforcement requires equality on ciphertext, which randomised mode cannot provide. Switch to { mode: 'deterministic' } or drop .unique().",
+          "t.encrypted().unique(): encrypted fields cannot enforce uniqueness.",
         ),
-        { code: "UNIQUE_ENCRYPTED_RANDOMISED_UNSUPPORTED" as const },
+        { code: "UNIQUE_ENCRYPTED_UNSUPPORTED" as const },
       );
     }
     this._def.unique = true;
@@ -1264,7 +1208,7 @@ export class TypeBuilder<
    *
    * ```ts
    * const fields = {
-   *   ssn:      t.encrypted({ mode: "randomised" }),           // → default mask = "full" + "pii"
+   *   ssn:      t.encrypted(),           // → default mask = "full" + "pii"
    *   card_pan: t.encrypted().mask({ kind: "last4" }),         // → MaskedValue<string>
    *   email:    t.string().mask({ kind: "email" }),            // → MaskedValue<string>
    *   notes:    t.string().mask({ kind: "full", classification: "internal" }),
@@ -1656,61 +1600,29 @@ export const t = {
     return new TypeBuilder<Uint8Array>({ type: "bytes" });
   },
   /**
-   * transparent column encryption. Wraps a string /
-   * number / bytes field with AEAD encryption at the storage boundary.
+   * Encrypt string, number or byte values with a fresh random nonce per write.
+   * The ciphertext is bound to its collection, column and row identity.
+   * Encrypted fields cannot be filtered, sorted, or unique.
+   * A full mask is applied by default; `.mask({ kind: "none" })` opts out.
    *
    * ```ts
    * const fields = {
-   *   ssn:        t.encrypted({ mode: "randomised" }).required(),
-   *   apiKey:     t.encrypted({ mode: "deterministic" }).unique(),
-   *   payload:    t.encrypted({ wraps: t.bytes() }),
-   *   amount:     t.encrypted({ wraps: t.number() }),
+   *   ssn: t.encrypted().required(),
+   *   payload: t.encrypted({ wraps: t.bytes() }),
+   *   amount: t.encrypted({ wraps: t.number() }),
    * };
    * ```
-   *
-   * Modes:
-   * - `"randomised"` (default) — per-write fresh nonce; AAD binds
-   *   `(collection, column, row_pk)`. Two encrypts of the same plaintext
-   *   produce DIFFERENT ciphertext. Defeats the ciphertext-oracle
-   *   attack on rows with shared columns. ALL filtering on the column
-   *   is refused at the SDK boundary
-   *   (`RANDOMISED_ENCRYPTED_FIELD_NOT_FILTERABLE`).
-   * - `"deterministic"` — synthetic nonce HMAC-derived from plaintext;
-   *   AAD binds `(collection, column)` only. Same plaintext → same
-   *   ciphertext, enabling B-tree equality lookups. Only equality
-   *   + `$in` filters are accepted; range / regex / LIKE are refused
-   *   with `DETERMINISTIC_ENCRYPTED_OP_NOT_SUPPORTED`.
-   *
-   * Constraints:
-   * - `wraps` must be `t.string()` / `t.number()` / `t.bytes()`. Other
-   *   types throw with `ENCRYPTED_WRAPS_UNSUPPORTED`.
-   * - The combination `mode: "randomised"` + `.unique()` is refused at
-   *   schema-definition time with `UNIQUE_ENCRYPTED_RANDOMISED_UNSUPPORTED`
-   *   (randomised mode can't enforce uniqueness without equality).
-   * - Applying `t.encrypted()` to a `t.ref()` field is refused with
-   *   `ENCRYPTED_ON_REF_UNSUPPORTED` — FK columns must remain unencrypted
-   *   so the JOIN integrity check works.
    */
   encrypted<
-    // `W` captures the `opts.wraps` builder so `T` (below) can be INFERRED
-    // from it instead of defaulting to `string` regardless of what was
-    // passed. Before this, `t.encrypted({ wraps: t.number() })` still
-    // produced a `TypeBuilder<string, ...>` unless the caller manually
-    // wrote `t.encrypted<number>({ wraps: t.number() })` - so `Filter<S>`
-    // typed the field's `$eq`/`$in` values as `string`, rejecting the
-    // number values `wraps: t.number()` was declared to accept. Ticket
-    // #267 surfaced this via `filter-encryption-types.test.ts`'s
-    // `amountDet: t.encrypted({ mode: "deterministic", wraps: t.number()
-    // })` filter assertion, which had never been typechecked.
+    // Infer the plaintext type from the wrapped builder.
     W extends TypeBuilder<string | number | bigint | Uint8Array, any, any, any, any> | undefined = undefined,
-    Mode extends EncryptionMode = "randomised",
     T extends string | number | bigint | Uint8Array =
       W extends TypeBuilder<infer WT extends string | number | bigint | Uint8Array, any, any, any, any>
         ? WT
         : string,
   >(
-    opts?: Omit<EncryptedFieldOpts<Mode>, "wraps"> & { wraps?: W },
-  ): TypeBuilder<T, false, "full", Mode, false> {
+    opts?: Omit<EncryptedFieldOpts, "wraps"> & { wraps?: W },
+  ): TypeBuilder<T, false, "full", true, false> {
     const wrapsBuilder = opts?.wraps;
     let wrapsKind: "string" | "number" | "bytes" = "string";
     if (wrapsBuilder !== undefined) {
@@ -1733,14 +1645,8 @@ export const t = {
         );
       }
     }
-    const mode = (opts?.mode ?? "randomised") as Mode;
-    if (mode !== "randomised" && mode !== "deterministic") {
-      throw Object.assign(
-        new Error(
-          `t.encrypted({ mode }): must be "randomised" or "deterministic", got "${String(mode)}"`,
-        ),
-        { code: "ENCRYPTED_INVALID_MODE" as const },
-      );
+    if (opts && "mode" in opts) {
+      throw Object.assign(new Error("t.encrypted(): mode is unsupported; encryption is always randomised"), { code: "ENCRYPTED_INVALID_OPTIONS" as const });
     }
     const keyId = opts?.keyId ?? "default";
     if (typeof keyId !== "string" || keyId.length === 0 || !/^[A-Za-z0-9_]+$/.test(keyId)) {
@@ -1765,9 +1671,9 @@ export const t = {
     // `.mask({ kind: "none" })` opt-out. Chaining `.mask({...})`
     // after `t.encrypted()` overwrites this default via the
     // builder's `.mask` method (assigns `_def.mask` unconditionally).
-    return new TypeBuilder<T, false, "full", Mode>({
+    return new TypeBuilder<T, false, "full", true>({
       type: wrapsKind === "bytes" ? "bytes" : wrapsKind === "number" ? "number" : "string",
-      encrypted: { mode, keyId, wraps: wrapsKind },
+      encrypted: { keyId, wraps: wrapsKind },
       mask: { kind: "full", classification: "pii" },
     });
   },

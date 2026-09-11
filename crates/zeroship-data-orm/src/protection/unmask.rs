@@ -241,7 +241,6 @@ fn resolve_raw_column(schema: &Value, canonical_column: &str) -> Result<String, 
 /// `wraps` in both `wrap_plaintext_per_wraps` calls - so the allow was
 /// suppressing a warning that could not fire. Removed rather than reworded.
 struct ColumnEncryptionMeta {
-    mode: crate::backend::EncryptionMode,
     key_id: String,
     wraps: &'static str,
 }
@@ -262,19 +261,6 @@ fn lookup_encryption_meta(
     let Some(enc_meta) = def.get("encrypted").and_then(|v| v.as_object()) else {
         return Ok(None);
     };
-    let mode_str = enc_meta
-        .get("mode")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| DbError::internal("unmask: encrypted.mode missing in schema"))?;
-    let mode = match mode_str {
-        "randomised" | "randomized" => crate::backend::EncryptionMode::Randomised,
-        "deterministic" => crate::backend::EncryptionMode::Deterministic,
-        other => {
-            return Err(DbError::internal(format!(
-                "unmask: encrypted.mode must be 'randomised' or 'deterministic', got '{other}'"
-            )));
-        }
-    };
     let key_id = enc_meta
         .get("keyId")
         .and_then(|v| v.as_str())
@@ -286,11 +272,7 @@ fn lookup_encryption_meta(
         Some("bytes") => "bytes",
         _ => "string",
     };
-    Ok(Some(ColumnEncryptionMeta {
-        mode,
-        key_id,
-        wraps,
-    }))
+    Ok(Some(ColumnEncryptionMeta { key_id, wraps }))
 }
 
 // ---------------------------------------------------------------------------
@@ -526,8 +508,8 @@ fn meter_audit_write(app_id: &str) {
 // ---------------------------------------------------------------------------
 
 /// Encrypted-column path: SELECT the BYTEA / BLOB ciphertext for
-/// `(collection, row_pk)`, reconstruct the canonical AAD per
-/// `EncryptionMode`, and decrypt through `encryption::aead`. The SELECT is
+/// `(collection, row_pk)`, reconstruct the row-bound AAD,
+/// and decrypt through `encryption::aead`. The SELECT is
 /// still per-arm because the SQL differs; the decrypt is not, and stopped
 /// being so when `EncryptedColumn` was deleted on 2026-09-02.
 /// Returns the plaintext as a native string, byte buffer, or number according
@@ -553,10 +535,7 @@ async fn fetch_and_decrypt(
     let aad = crate::encryption::aad::canonical_aad(
         &args.collection,
         &args.column,
-        match enc_meta.mode {
-            crate::backend::EncryptionMode::Randomised => Some(args.row_pk.as_bytes()),
-            crate::backend::EncryptionMode::Deterministic => None,
-        },
+        args.row_pk.as_bytes(),
     );
 
     // ---- read the ciphertext ----

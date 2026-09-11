@@ -26,7 +26,7 @@ export interface RuntimeFieldDef {
   enum?: unknown[];
   mask?: { kind?: string; classification?: string };
   default?: unknown;
-  encrypted?: { mode?: string; keyId?: string; wraps?: string };
+  encrypted?: { keyId?: string; wraps?: string };
   idPrefix?: string;
   refTarget?: string;
   onDelete?: string;
@@ -292,7 +292,7 @@ function renderBuilderChain(def: RuntimeFieldDef): string {
 }
 
 /**
- * `t.encrypted({ mode?, keyId?, wraps? })`.
+ * `t.encrypted({ keyId?, wraps? })`.
  *
  * The kernel-default triple (`randomised` / `default` / `string`) is what a bare
  * `t.encrypted()` stamps, so it collapses back to the bare form: the two
@@ -301,18 +301,15 @@ function renderBuilderChain(def: RuntimeFieldDef): string {
  */
 function renderEncryptedBase(enc: RuntimeFieldDef["encrypted"]): string {
   if (enc === null || typeof enc !== "object") return "t.encrypted()";
-  const mode = typeof enc.mode === "string" ? enc.mode : undefined;
   const keyId = typeof enc.keyId === "string" ? enc.keyId : undefined;
   const wraps = typeof enc.wraps === "string" ? enc.wraps : undefined;
   if (
-    (mode === undefined || mode === "randomised") &&
     (keyId === undefined || keyId === "default") &&
     (wraps === undefined || wraps === "string")
   ) {
     return "t.encrypted()";
   }
   const opts: string[] = [];
-  if (mode !== undefined) opts.push(`mode: ${jsStr(mode)}`);
   if (keyId !== undefined) opts.push(`keyId: ${jsStr(keyId)}`);
   if (wraps !== undefined) {
     // `wraps` is a TypeBuilder argument in the SDK, reconstructed from the

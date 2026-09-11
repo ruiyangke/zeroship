@@ -58,8 +58,8 @@ pub mod system_fields_pass;
 
 mod bytes_pass;
 pub mod read_pipeline;
-mod write_pipeline;
 mod update_validation;
+mod write_pipeline;
 
 #[cfg(any(test, feature = "test-helpers"))]
 pub use write_pipeline::{
@@ -1780,7 +1780,7 @@ pub fn runtime_schema_for_tests(app_id: &str, collection: &str) -> Result<Value,
 /// Upsert's write-side prep. Unlike its `insert_many` sibling this is
 /// private with no `test-helpers` twin — nothing outside this crate
 /// called the `pub` arm, and the upsert path now needs the dispatch's
-/// [`TxRoute`] (its deterministic-encryption conflict probe issues a
+/// [`TxRoute`] (its conflict probe issues a
 /// read that must land on the same connection as the write).
 async fn prepare_upsert_doc_for_write(
     doc: &mut Value,

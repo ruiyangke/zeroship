@@ -1,36 +1,7 @@
 import type { NormalizedSchema } from "../schema";
 import type { PlainObject } from "../types";
 
-/**
- * **P5 PR 2** — operators allowed on a `deterministic`-encrypted column.
- * Only equality (`$eq`, `$in`) is sound on the ciphertext; range /
- * regex / LIKE require ordering or substring matching that
- * deterministic mode cannot provide. A query that mentions any other
- * operator on a deterministic-encrypted field is rejected at the SDK
- * boundary with `DETERMINISTIC_ENCRYPTED_OP_NOT_SUPPORTED` so the
- * call never reaches Rust.
- *
- * Bare values (`{ ssn: "X" }`) are treated as `$eq` and accepted.
- */
-const DETERMINISTIC_ENCRYPTED_OPS_ALLOWED: ReadonlySet<string> = new Set([
-  "$eq",
-  "$in",
-]);
-
-/**
- * **P5 PR 2** — walk a filter looking for keys that the schema marks
- * as `encrypted`. Refuse:
- *   - ANY use of a randomised-encrypted field
- *     (`RANDOMISED_ENCRYPTED_FIELD_NOT_FILTERABLE`) — the ciphertext
- *     differs per write so no equality lookup can match.
- *   - Range / regex / LIKE on a deterministic-encrypted field
- *     (`DETERMINISTIC_ENCRYPTED_OP_NOT_SUPPORTED`) — only `$eq`/`$in`
- *     are sound on the ciphertext.
- *
- * Recurses into `$and` / `$or` arms. The walker is intentionally
- * conservative — anything not on the allowed list is refused — so
- * future operator additions stay fail-closed for encrypted columns.
- */
+/** Encrypted values cannot participate in predicates, including nested filters. */
 export function validateEncryptedFieldsInFilter(
   filter: PlainObject | undefined,
   schema: NormalizedSchema,
@@ -58,33 +29,9 @@ export function validateEncryptedFieldsInFilter(
     if (!def || def.encrypted === undefined) {
       continue;
     }
-    const mode = def.encrypted.mode;
-    if (mode === "randomised") {
-      throw Object.assign(
-        new Error(
-          `filter on "${key}": randomised-encrypted columns cannot be filtered — ` +
-            `the ciphertext differs per write so no equality lookup can match. ` +
-            `Switch the column to { mode: "deterministic" } if you need lookup, ` +
-            `or drop the filter clause.`,
-        ),
-        { code: "RANDOMISED_ENCRYPTED_FIELD_NOT_FILTERABLE" as const },
-      );
-    }
-    if (value !== null && typeof value === "object" && !Array.isArray(value)) {
-      for (const op of Object.keys(value as PlainObject)) {
-        if (
-          op.startsWith("$") &&
-          !DETERMINISTIC_ENCRYPTED_OPS_ALLOWED.has(op)
-        ) {
-          throw Object.assign(
-            new Error(
-              `filter on "${key}": deterministic-encrypted columns support only $eq and $in (got "${op}"). ` +
-                `Range / regex / LIKE require ordering or substring matching that deterministic mode cannot provide.`,
-            ),
-            { code: "DETERMINISTIC_ENCRYPTED_OP_NOT_SUPPORTED" as const },
-          );
-        }
-      }
-    }
+    throw Object.assign(
+      new Error(`filter on "${key}": encrypted fields cannot be filtered`),
+      { code: "ENCRYPTED_FIELD_NOT_FILTERABLE" as const },
+    );
   }
 }

@@ -500,6 +500,18 @@ fn validate_read_identifier(name: &str, schema_hint: &Value) -> Result<(), Query
     )))
 }
 
+fn validate_value_operation(field: &str, schema: &Value) -> Result<(), QueryError> {
+    if schema
+        .get(field)
+        .is_some_and(|def| def.get("encrypted").is_some())
+    {
+        return Err(QueryError::InvalidFilter(format!(
+            "encrypted field '{field}' cannot be filtered, sorted, grouped, or used as a conflict target"
+        )));
+    }
+    Ok(())
+}
+
 fn validate_limit_bound(name: &str, value: i64, max: i64) -> Result<(), QueryError> {
     if value < 0 {
         return Err(QueryError::InvalidFilter(format!(
@@ -883,6 +895,7 @@ pub fn build_conflict_probe_with_dialect(
 
     for (field, value) in obj {
         validate_field_name(field)?;
+        validate_value_operation(field, schema_hint)?;
         let col = quote_ident(field);
         if value.is_null() {
             conditions.push(format!("{col} IS NULL"));
@@ -2726,6 +2739,7 @@ pub fn build_aggregate_with_result_columns(
                 match by_val {
                     Value::String(s) => {
                         validate_read_identifier(s, schema_hint)?;
+                        validate_value_operation(s, schema_hint)?;
                         push_group_by_field(s, &mut select_cols, &mut group_by_cols);
                         result_cols.push(s.clone());
                     }
@@ -2738,6 +2752,7 @@ pub fn build_aggregate_with_result_columns(
                                 )
                             })?;
                             validate_read_identifier(s, schema_hint)?;
+                            validate_value_operation(s, schema_hint)?;
                             push_group_by_field(s, &mut select_cols, &mut group_by_cols);
                             result_cols.push(s.to_string());
                         }
@@ -2777,6 +2792,7 @@ pub fn build_aggregate_with_result_columns(
                             )
                         })?;
                         validate_read_identifier(field, schema_hint)?;
+                        validate_value_operation(field, schema_hint)?;
                         // SEC-4: read the masked sibling for masked columns.
                         format!("SUM({})", quote_ident(field))
                     }
@@ -2787,6 +2803,7 @@ pub fn build_aggregate_with_result_columns(
                             )
                         })?;
                         validate_read_identifier(field, schema_hint)?;
+                        validate_value_operation(field, schema_hint)?;
                         format!("AVG({})", quote_ident(field))
                     }
                     "$min" => {
@@ -2796,6 +2813,7 @@ pub fn build_aggregate_with_result_columns(
                             )
                         })?;
                         validate_read_identifier(field, schema_hint)?;
+                        validate_value_operation(field, schema_hint)?;
                         format!("MIN({})", quote_ident(field))
                     }
                     "$max" => {
@@ -2805,6 +2823,7 @@ pub fn build_aggregate_with_result_columns(
                             )
                         })?;
                         validate_read_identifier(field, schema_hint)?;
+                        validate_value_operation(field, schema_hint)?;
                         format!("MAX({})", quote_ident(field))
                     }
                     "$first" => {
@@ -2814,6 +2833,7 @@ pub fn build_aggregate_with_result_columns(
                             )
                         })?;
                         validate_read_identifier(field, schema_hint)?;
+                        validate_value_operation(field, schema_hint)?;
                         // SEC-4: read the masked sibling for masked columns.
                         let read_ident = quote_ident(field);
                         if last_sort.is_empty() {
@@ -2961,6 +2981,7 @@ pub fn build_distinct_with_soft_delete_with_dialect(
 ) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
     validate_read_identifier(field, schema_hint)?;
+    validate_value_operation(field, schema_hint)?;
 
     let schema = schema_name.quoted();
     let table = quote_ident(collection);
@@ -3394,7 +3415,10 @@ fn build_order_by_read_with_dialect(
     build_order_by_with_validator(
         order,
         dialect,
-        |field| validate_read_identifier(field, schema_hint),
+        |field| {
+            validate_read_identifier(field, schema_hint)?;
+            validate_value_operation(field, schema_hint)
+        },
         |field| field.to_string(),
     )
 }
@@ -3469,6 +3493,7 @@ fn build_aggregate_order_by(
             ))
         } else {
             validate_read_identifier(field, schema_hint)?;
+            validate_value_operation(field, schema_hint)?;
             Ok(build_order_term(field, descending, dialect))
         }
     };
@@ -3719,8 +3744,10 @@ pub fn build_upsert_with_dialect(
     }
 
     let conflict_arr = parse_conflict_fields(conflict_fields)?;
-    let conflict_set: std::collections::HashSet<&str> =
-        conflict_arr.iter().copied().collect();
+    for field in &conflict_arr {
+        validate_value_operation(field, schema_hint)?;
+    }
+    let conflict_set: std::collections::HashSet<&str> = conflict_arr.iter().copied().collect();
 
     let schema = schema_name.quoted();
     let table = quote_ident(collection);
@@ -3849,6 +3876,9 @@ pub fn build_find_or_create(
     }
 
     let conflict_arr = parse_conflict_fields(conflict_fields)?;
+    for field in &conflict_arr {
+        validate_value_operation(field, schema_hint)?;
+    }
     let first_conflict = conflict_arr[0];
 
     let schema = schema_name.quoted();
@@ -7642,7 +7672,7 @@ mod tests {
     fn raw_column_for_field_returns_none_for_kind_none() {
         let def = crate::value!({
             "type": "string",
-            "encrypted": { "mode": "randomised", "keyId": "default", "wraps": "string" },
+            "encrypted": { "keyId": "default", "wraps": "string" },
             "mask": { "kind": "none", "classification": "spi" }
         });
         assert_eq!(raw_column_for_field("ssn", &def), None);
@@ -7704,7 +7734,7 @@ mod tests {
     #[test]
     fn default_read_does_not_touch_the_raw_column() {
         let schema = crate::value!({
-            "ssn":   { "type": "string", "encrypted": { "mode": "randomised" },
+            "ssn":   { "type": "string", "encrypted": {  },
                        "mask": { "kind": "last4", "classification": "spi" } },
             "email": { "type": "string" },
             "name":  { "type": "string" },
@@ -7791,7 +7821,7 @@ mod tests {
     #[test]
     fn unmask_hint_does_not_change_the_projection() {
         let schema = crate::value!({
-            "ssn":   { "type": "string", "encrypted": { "mode": "randomised" },
+            "ssn":   { "type": "string", "encrypted": {  },
                        "mask": { "kind": "last4", "classification": "spi" } },
             "email": { "type": "string",
                        "mask": { "kind": "full", "classification": "pii" } },
@@ -9596,9 +9626,13 @@ fn filter_literal(value: &crate::Literal) -> Result<Value, QueryError> {
     })
 }
 
-fn filter_column(operand: &crate::Operand) -> Result<&str, QueryError> {
+fn filter_column<'a>(operand: &'a crate::Operand, schema: &Value) -> Result<&'a str, QueryError> {
     match operand {
-        crate::Operand::Path(path) if path.segments().is_empty() => Ok(path.root().as_str()),
+        crate::Operand::Path(path) if path.segments().is_empty() => {
+            let field = path.root().as_str();
+            validate_value_operation(field, schema)?;
+            Ok(field)
+        }
         _ => Err(QueryError::InvalidFilter(
             "a collection filter requires a column operand".into(),
         )),
@@ -9644,11 +9678,11 @@ fn render_filter(
         ),
         Predicate::IsNull { operand, negated } => format!(
             "{} IS {}NULL",
-            quote_ident(filter_column(operand)?),
+            quote_ident(filter_column(operand, schema)?),
             if *negated { "NOT " } else { "" }
         ),
         Predicate::Compare { lhs, op, rhs } => {
-            let field = filter_column(lhs)?;
+            let field = filter_column(lhs, schema)?;
             let Operand::Lit(value) = rhs else {
                 return Err(QueryError::InvalidFilter(
                     "a collection comparison requires a value operand".into(),
@@ -9667,7 +9701,7 @@ fn render_filter(
             format!("{} {op} {bind}", quote_ident(field))
         }
         Predicate::Membership { lhs, op, set } => {
-            let field = filter_column(lhs)?;
+            let field = filter_column(lhs, schema)?;
             let binds = set
                 .values()
                 .iter()
@@ -9698,7 +9732,7 @@ fn render_filter(
             pattern,
             escape,
         } => {
-            let col = quote_ident(filter_column(lhs)?);
+            let col = quote_ident(filter_column(lhs, schema)?);
             params.push(pattern.as_str().into());
             let slot = params.len();
             let negated = matches!(op, PatternOp::NotLike | PatternOp::NotILike);
@@ -9802,6 +9836,72 @@ mod binary_expression_tests {
             .unwrap();
             assert_eq!(query.params, value!([value]).as_array().unwrap().clone());
             assert!(!query.sql.contains("unhex("));
+        }
+    }
+}
+
+#[cfg(test)]
+mod encrypted_query_tests {
+    use super::*;
+    use crate::value;
+
+    #[test]
+    fn encrypted_values_cannot_be_queried_even_when_capability_flags_claim_otherwise() {
+        for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite, SqlDialect::Mysql] {
+            for mask in [
+                value!({"kind":"none"}),
+                value!({"kind":"last4","classification":"spi"}),
+            ] {
+                let schema = value!({
+                    "secret":{"type":"string","encrypted":{},"mask":mask,"filterable":true,"sortable":true},
+                    "name":{"type":"string"}
+                });
+                for operand in [
+                    value!("x"),
+                    value!(null),
+                    value!({"$eq":"x"}),
+                    value!({"$in":["x"]}),
+                    value!({"$gt":"x"}),
+                    value!({"$like":"x%"}),
+                    value!({"$exists":true}),
+                ] {
+                    for filter in [
+                        value!({"secret":operand.clone()}),
+                        value!({"$or":[{"name":"ok"},{"$not":{"secret":operand}}]}),
+                    ] {
+                        let err =
+                            build_where_with_dialect(&filter, &mut Vec::new(), &schema, dialect)
+                                .expect_err("encrypted filter must fail");
+                        assert!(err.to_string().contains("encrypted field"), "{err}");
+                    }
+                }
+                let namespace = SchemaName::new("encrypted_fixture").unwrap();
+                for pipeline in [value!([{"$group":{"by":"secret"}}]), value!([{"$group":{"by":["secret"]}}]), value!([{"$group":{"total":{"$min":"secret"}}}]), value!([{"$sort":{"secret":1}}])] {
+                    assert!(build_aggregate_with_soft_delete_with_dialect(&namespace, "records", &pipeline, false, &schema, dialect).is_err());
+                }
+                assert!(build_conflict_probe_with_dialect(&namespace, "records", &schema, &value!({"secret":"x"}), dialect).is_err());
+                assert!(build_distinct_with_soft_delete_with_dialect(&namespace, "records", "secret", &value!({}), false, &schema, dialect).is_err());
+                assert!(
+                    build_order_by_read_with_dialect(&value!({"secret":1}), dialect, &schema)
+                        .is_err()
+                );
+                assert!(
+                    build_order_by_read_with_dialect(&value!([["secret", -1]]), dialect, &schema)
+                        .is_err()
+                );
+                assert!(
+                    build_where_with_dialect(
+                        &value!({"name":"ok"}),
+                        &mut Vec::new(),
+                        &schema,
+                        dialect
+                    )
+                    .is_ok()
+                );
+                assert!(
+                    build_order_by_read_with_dialect(&value!({"name":1}), dialect, &schema).is_ok()
+                );
+            }
         }
     }
 }

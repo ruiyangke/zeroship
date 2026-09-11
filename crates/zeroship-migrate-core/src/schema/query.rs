@@ -1637,47 +1637,6 @@ pub fn build_create_indexes(
             continue;
         }
 
-        // Deterministic-encrypted columns get an
-        // automatic B-tree index. The SDK refuses range / regex / LIKE
-        // on deterministic columns (only equality + `$in`), so a
-        // B-tree on the ciphertext is sufficient and matches the
-        // user's expectation that `find({ssnDet: "X"})` is fast.
-        // Randomised columns do NOT get this index - the ciphertext is
-        // different per write so equality lookups can't work anyway.
-        let det_encrypted = def
-            .get("encrypted")
-            .and_then(|enc| enc.get("mode"))
-            .and_then(|v| v.as_str())
-            == Some("deterministic");
-        if det_encrypted {
-            let name = index_name(collection, &[field.as_str()], /* unique = */ false);
-            let sql = create_index_if_not_exists(
-                backend,
-                app_id,
-                collection,
-                &name,
-                &[field.as_str()],
-                false,
-            )?;
-            out.push(IndexSpec {
-                name,
-                columns: vec![field.clone()],
-                unique: false,
-                sql,
-                kind: IndexKind::BTree,
-            });
-            // Fall through - a deterministic-encrypted column may also
-            // carry `.unique()` (we still want a uniqueness constraint
-            // on the ciphertext, valid because deterministic mode
-            // preserves equality). The `wants_unique` branch below
-            // emits the unique index alongside; PG dedupes
-            // (two identical-shape indexes are cheap to ignore in
-            // theory, but our deterministic-name contract collapses
-            // them to a single entry if both were B-tree). We rely on
-            // the caller-side scope check to refuse
-            // randomised+unique earlier; deterministic+unique is OK.
-        }
-
         let wants_index = def.get("index").and_then(|v| v.as_bool()) == Some(true);
         let wants_unique = def.get("unique").and_then(|v| v.as_bool()) == Some(true);
 
@@ -1951,7 +1910,7 @@ fn short_hash_base32(input: &str) -> String {
     String::from_utf8(out.to_vec()).expect("ALPHABET is ASCII")
 }
 
-/// Render the inline `/* zero-migrate:enc:{mode}:{keyId}:{wraps} */`
+/// Render the inline `/* zero-migrate:enc:{keyId}:{wraps} */`
 /// encryption sentinel for a field's `t.encrypted({...})` declaration, IFF the
 /// field carries an `encrypted` sub-object. Returns `None` for a plain column.
 ///
@@ -1985,16 +1944,15 @@ pub(crate) fn validate_encryption_sentinel_for_field(
         QueryError::InvalidFilter("encrypted must be an options object".to_string())
     })?;
 
-    let mode = match enc.get("mode") {
-        None => "randomised",
-        Some(value) => value.as_str().ok_or_else(|| {
-            QueryError::InvalidFilter("encrypted.mode must be a string".to_string())
-        })?,
-    };
-    if !matches!(mode, "randomised" | "randomized" | "deterministic") {
-        return Err(QueryError::InvalidFilter(format!(
-            "encrypted.mode must be randomised or deterministic, got {mode:?}"
-        )));
+    if enc.contains_key("mode") {
+        return Err(QueryError::InvalidFilter(
+            "encrypted.mode is unsupported; encryption is always randomised".to_string(),
+        ));
+    }
+    if def.get("unique").and_then(serde_json::Value::as_bool) == Some(true) {
+        return Err(QueryError::InvalidFilter(
+            "encrypted fields cannot be unique".to_string(),
+        ));
     }
     let wraps = match enc.get("wraps") {
         None => "string",
@@ -2066,7 +2024,7 @@ fn field_to_column_for_dialect(
     // out before the INSERT/UPDATE, and the SQL builder casts the
     // base64 parameter back to BYTEA via `decode($N, 'base64')::bytea`.
     //
-    // Emit a `/* zero-migrate:enc:{mode}:{keyId}:{wraps} */` sentinel
+    // Emit a `/* zero-migrate:enc:{keyId}:{wraps} */` sentinel
     // comment alongside the column type so the SQLite-arm introspector
     // can regex-recover the encryption metadata from `sqlite_master.sql`.
     // PG ignores SQL comments at parse time (the type is still BYTEA);
@@ -5058,7 +5016,7 @@ columns = [
     fn raw_column_for_field_returns_none_for_kind_none() {
         let def = serde_json::json!({
             "type": "string",
-            "encrypted": { "mode": "randomised", "keyId": "default", "wraps": "string" },
+            "encrypted": { "keyId": "default", "wraps": "string" },
             "mask": { "kind": "none", "classification": "spi" }
         });
         assert_eq!(raw_column_for_field("ssn", &def), None);
@@ -5067,6 +5025,20 @@ columns = [
     /// **DDL shape** - a masked column emits the RAW column (declared type, its
     /// constraints, named by `raw_column_name`) plus the field's own column as
     /// bare nullable TEXT holding the mask.
+    #[test]
+    fn encrypted_ddl_rejects_removed_mode_and_unique_constraints() {
+        for def in [
+            serde_json::json!({"type":"string","encrypted":{"mode":"randomised"}}),
+            serde_json::json!({"type":"string","encrypted":{"mode":"deterministic"}}),
+            serde_json::json!({"type":"string","encrypted":{},"unique":true}),
+        ] {
+            let schema = serde_json::json!({"secret":def});
+            assert!(build_create_table_with_fks("app1", "records", &schema, &FkEmission::Inline).is_err());
+        }
+        let schema = serde_json::json!({"secret":{"type":"string","encrypted":{}}});
+        assert!(build_create_table_with_fks("app1", "records", &schema, &FkEmission::Inline).is_ok());
+    }
+
     #[test]
     fn build_create_table_emits_raw_column_for_masked_field() {
         let schema = serde_json::json!({
@@ -5216,7 +5188,7 @@ columns = [
         let schema = serde_json::json!({
             "ssn": {
                 "type": "string",
-                "encrypted": { "mode": "randomised", "keyId": "default", "wraps": "string" },
+                "encrypted": { "keyId": "default", "wraps": "string" },
                 "mask": { "kind": "full", "classification": "pii" }
             }
         });
@@ -5248,7 +5220,7 @@ columns = [
         let schema = serde_json::json!({
             "ssn": {
                 "type": "string",
-                "encrypted": { "mode": "randomised", "keyId": "default", "wraps": "string" },
+                "encrypted": { "keyId": "default", "wraps": "string" },
                 "mask": { "kind": "none", "classification": "pii" }
             }
         });
@@ -5269,7 +5241,6 @@ columns = [
         let hostile = json!({
             "type": "string",
             "encrypted": {
-                "mode": "randomised",
                 "keyId": "k*/ VARCHAR(255); DROP TABLE users; /*",
                 "wraps": "string"
             }
@@ -5284,7 +5255,6 @@ columns = [
         let valid = json!({
             "type": "string",
             "encrypted": {
-                "mode": "deterministic",
                 "keyId": "pii-key.v2",
                 "wraps": "bytes"
             }
@@ -5336,7 +5306,7 @@ columns = [
             },
             "secret": {
                 "type": "bytes",
-                "encrypted": { "mode": "randomized", "keyId": "k1" }
+                "encrypted": { "keyId": "k1" }
             },
             "owner": {
                 "type": "ref",

@@ -2912,8 +2912,8 @@ async fn vector_search_returns_k_nearest() {
 /// that load-bearing assertion did not run.
 #[compio::test]
 async fn pgvector_extension_missing_reports_typed_error() {
-    use zeroship_data_orm::error::DbError;
     use zeroship_data_orm::backend::{PostgresBackend, VectorMetric};
+    use zeroship_data_orm::error::DbError;
 
     let (_postgres, url) = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
@@ -3252,8 +3252,8 @@ async fn near_returns_within_radius() {
 /// probe arm and its cached arm separately.
 #[compio::test]
 async fn postgis_extension_missing_reports_typed_error() {
-    use zeroship_data_orm::error::DbError;
     use zeroship_data_orm::backend::{GeoPoint, PostgresBackend};
+    use zeroship_data_orm::error::DbError;
 
     let (_postgres, url) = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
@@ -3371,7 +3371,7 @@ async fn postgis_extension_missing_reports_typed_error() {
 // 2026-09-02 and these tests now call `encryption::aead` directly with a key
 // from `backend.key_store()` - the same path production takes.
 use zeroship_data_orm::error::DbError;
-use zeroship_data_orm::backend::EncryptionMode;
+
 use zeroship_data_orm::encryption;
 
 /// Helper: hand this isolate a synthetic root key for `key_id`, so the
@@ -3399,7 +3399,7 @@ fn with_root_key(key_id: &str, root_hex: &str) -> zeroship_data_v8::testing::Sup
 }
 
 /// Gate #1: round-trip an encrypted string column. Insert a
-/// row with `ssn` declared `t.encrypted({ mode: "randomised" })`,
+/// row with `ssn` declared `t.encrypted({  })`,
 /// read it back via the PG path, expect the plaintext to recover.
 #[compio::test]
 async fn encrypted_column_round_trip_randomised() {
@@ -3441,14 +3441,8 @@ async fn encrypted_column_round_trip_randomised() {
         .await
         .expect("resolve_key");
     let plaintext = b"123-45-6789";
-    let aad = encryption::canonical_aad("enc_notes", "ssn", Some(b"row_a"));
-    let ct = zeroship_data_orm::encryption::aead::encrypt(
-        &key,
-        EncryptionMode::Randomised,
-        plaintext,
-        &aad,
-    )
-    .expect("encrypt");
+    let aad = encryption::canonical_aad("enc_notes", "ssn", b"row_a");
+    let ct = zeroship_data_orm::encryption::aead::encrypt(&key, plaintext, &aad).expect("encrypt");
 
     // Bind via base64 decode just like the build_insert layer does.
     let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &ct);
@@ -3531,16 +3525,14 @@ async fn encrypted_randomised_row_swap_rejected() {
     // Insert row A with its OWN AAD (binds row_pk = "row_a").
     let ct_a = zeroship_data_orm::encryption::aead::encrypt(
         &key,
-        EncryptionMode::Randomised,
         b"sensitive-A",
-        &encryption::canonical_aad("enc_notes", "ssn", Some(b"row_a")),
+        &encryption::canonical_aad("enc_notes", "ssn", b"row_a"),
     )
     .unwrap();
     let ct_b = zeroship_data_orm::encryption::aead::encrypt(
         &key,
-        EncryptionMode::Randomised,
         b"sensitive-B",
-        &encryption::canonical_aad("enc_notes", "ssn", Some(b"row_b")),
+        &encryption::canonical_aad("enc_notes", "ssn", b"row_b"),
     )
     .unwrap();
     for (id, ct) in [("row_a", &ct_a), ("row_b", &ct_b)] {
@@ -3586,7 +3578,7 @@ async fn encrypted_randomised_row_swap_rejected() {
         }
         out
     };
-    let aad_b = encryption::canonical_aad("enc_notes", "ssn", Some(b"row_b"));
+    let aad_b = encryption::canonical_aad("enc_notes", "ssn", b"row_b");
     let err = zeroship_data_orm::encryption::aead::decrypt(&key, &raw, &aad_b)
         .expect_err("row-swap must fail AAD verification");
     match err {
@@ -3595,117 +3587,6 @@ async fn encrypted_randomised_row_swap_rejected() {
         }
         other => panic!("expected ValidationFailed encryption_aead_failed, got {other:?}"),
     }
-    drop(backend);
-    release_pg(pool).await;
-}
-
-/// Gate #2: deterministic mode produces identical
-/// ciphertext for identical plaintext under the same `(collection,
-/// column)` regardless of row_pk. This is what makes equality lookups
-/// on the ciphertext sound; the deterministic-encrypted column gets an
-/// automatic B-tree index from `build_create_indexes`.
-#[compio::test]
-async fn encrypted_deterministic_equality_lookup() {
-    let (_postgres, url) = require_pg().await;
-    let schema = crate::test_app_id!();
-    let schema = schema.as_str();
-    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
-    let _keys = with_root_key("default", &"c".repeat(64));
-
-    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{schema}\" CASCADE"), &[])
-        .await
-        .unwrap();
-    pool.execute(&format!("CREATE SCHEMA \"{schema}\""), &[])
-        .await
-        .unwrap();
-    pool.execute(
-        &format!(
-            r#"CREATE TABLE "{schema}"."enc_notes" (
-                id   TEXT PRIMARY KEY,
-                ssn  BYTEA
-            )"#
-        ),
-        &[],
-    )
-    .await
-    .unwrap();
-    pool.execute(
-        &format!(r#"CREATE INDEX ON "{schema}"."enc_notes" (ssn)"#),
-        &[],
-    )
-    .await
-    .unwrap();
-
-    let backend = zeroship_data_orm::backend::PostgresBackend::new(
-        pool.clone(),
-        url.clone(),
-        zeroship_data_v8::testing::isolate_key_source(),
-    );
-    let key = backend
-        .key_store()
-        .resolve("app1", "default")
-        .await
-        .unwrap();
-
-    // Insert 5 rows with the same SSN to confirm deterministic mode
-    // produces identical ciphertext (we then query by exact ciphertext
-    // and expect all 5 to come back).
-    let aad = encryption::canonical_aad("enc_notes", "ssn", None);
-    let ct_shared = zeroship_data_orm::encryption::aead::encrypt(
-        &key,
-        EncryptionMode::Deterministic,
-        b"shared-ssn",
-        &aad,
-    )
-    .unwrap();
-    let b64_shared = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &ct_shared);
-
-    for i in 0..5 {
-        pool.execute(
-            &format!(
-                "INSERT INTO \"{schema}\".\"enc_notes\" (id, ssn) VALUES ($1, decode($2, 'base64')::bytea)"
-            ),
-            &[&format!("row_{i}").as_str(), &b64_shared.as_str()],
-        )
-        .await
-        .unwrap();
-    }
-    // Plus a distinct row.
-    let ct_other = zeroship_data_orm::encryption::aead::encrypt(
-        &key,
-        EncryptionMode::Deterministic,
-        b"other-ssn",
-        &aad,
-    )
-    .unwrap();
-    let b64_other = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &ct_other);
-    pool.execute(
-        &format!(
-            "INSERT INTO \"{schema}\".\"enc_notes\" (id, ssn) VALUES ($1, decode($2, 'base64')::bytea)"
-        ),
-        &[&"row_other", &b64_other.as_str()],
-    )
-    .await
-    .unwrap();
-
-    // Query by the ciphertext (the SDK would compute the SAME
-    // ciphertext for `find({ssn: "shared-ssn"})` because deterministic
-    // mode is, well, deterministic; the orchestrator binds the same
-    // BYTEA via decode($N, 'base64')).
-    let rows = pool
-        .query_text_params(
-            &format!(
-                "SELECT id FROM \"{schema}\".\"enc_notes\" WHERE ssn = decode($1, 'base64')::bytea"
-            ),
-            &[b64_shared.as_str()],
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        rows.len(),
-        5,
-        "deterministic equality lookup must match all 5 shared-ssn rows"
-    );
     drop(backend);
     release_pg(pool).await;
 }
@@ -3749,7 +3630,7 @@ async fn p4_round_trip_encrypted_masked_vector_via_descriptor_metadata() {
         "name": {"type": "string", "required": true},
         "ssn": {
             "type": "string",
-            "encrypted": {"mode": "randomised", "keyId": "default", "wraps": "string"}
+            "encrypted": {"keyId": "default", "wraps": "string"}
         },
         "phone": {
             "type": "string",
@@ -3810,7 +3691,7 @@ CREATE TABLE "{app}"."people" ({PG_SYSTEM_COLUMNS},
     // Sanity: the resolution the CRUD passes will perform returns BOTH goodies.
     let resolved = zeroship_data_orm::crud::runtime_schema_for_tests(app, "people")
         .expect("the descriptor entry this deploy installed must resolve");
-    assert_eq!(resolved["ssn"]["encrypted"]["mode"], "randomised");
+    assert!(resolved["ssn"]["encrypted"].get("mode").is_none());
     assert_eq!(resolved["phone"]["mask"]["kind"], "last4");
 
     // ----- WRITE (real pipeline, introspected metadata) -----
@@ -4008,7 +3889,7 @@ async fn p5_pg_crud_works_via_engine_created_schema_without_runtime_ddl() {
         "name": {"type": "string", "required": true},
         "ssn": {
             "type": "string",
-            "encrypted": {"mode": "randomised", "keyId": "default", "wraps": "string"}
+            "encrypted": {"keyId": "default", "wraps": "string"}
         },
         "phone": {
             "type": "string",
@@ -4053,7 +3934,7 @@ CREATE TABLE "{app}"."people" ({PG_SYSTEM_COLUMNS},
     // The resolution the CRUD passes will perform returns BOTH goodies.
     let resolved = zeroship_data_orm::crud::runtime_schema_for_tests(app, "people")
         .expect("the descriptor entry this deploy installed must resolve");
-    assert_eq!(resolved["ssn"]["encrypted"]["mode"], "randomised");
+    assert!(resolved["ssn"]["encrypted"].get("mode").is_none());
     assert_eq!(resolved["phone"]["mask"]["kind"], "last4");
 
     // ----- WRITE via the real pipeline (descriptor metadata) -----
@@ -5607,7 +5488,7 @@ async fn unmask_encrypted_column_on_pg_reads_bytea_raw_sibling() {
         "ssn": {
             "type": "string",
             "mask": { "kind": "last4", "classification": "spi" },
-            "encrypted": { "mode": "randomised", "keyId": "default", "wraps": "string" }
+            "encrypted": { "keyId": "default", "wraps": "string" }
         }
     });
     let ssn_raw = raw_column_name("ssn");
@@ -5624,7 +5505,7 @@ async fn unmask_encrypted_column_on_pg_reads_bytea_raw_sibling() {
     admin_pool.batch_execute(&create_table).await.unwrap();
 
     // Real ciphertext from the platform's own encryptor, under the AAD the read
-    // path recomputes: canonical_aad(collection, column, Some(row_pk)) for the
+    // path recomputes: canonical_aad(collection, column, row_pk) for the
     // randomised mode (crud/unmask.rs:503-510).
     let backend = zeroship_data_orm::backend::PostgresBackend::new(
         admin_pool.clone(),
@@ -5636,14 +5517,9 @@ async fn unmask_encrypted_column_on_pg_reads_bytea_raw_sibling() {
         .resolve(app, "default")
         .await
         .expect("resolve_key");
-    let aad = encryption::canonical_aad(coll, "ssn", Some(b"u1"));
-    let ct = zeroship_data_orm::encryption::aead::encrypt(
-        &key,
-        EncryptionMode::Randomised,
-        b"123-45-6789",
-        &aad,
-    )
-    .expect("encrypt");
+    let aad = encryption::canonical_aad(coll, "ssn", b"u1");
+    let ct =
+        zeroship_data_orm::encryption::aead::encrypt(&key, b"123-45-6789", &aad).expect("encrypt");
     let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &ct);
     admin_pool
         .execute(

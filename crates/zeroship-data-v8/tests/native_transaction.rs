@@ -276,7 +276,7 @@ fn exec_owner_sql(url: &str, sql: &str) {
 /// The table the deploy-time migration would have created for
 /// [`build_encrypted_users_src`]'s declared schema.
 ///
-/// It used to end with `COMMENT ON COLUMN ... 'zero-migrate:enc:randomised:<key>:string'`.
+/// It used to end with `COMMENT ON COLUMN ... 'zero-migrate:enc:<key>:string'`.
 /// That sentinel is gone with the catalog read that recovered it: the encryption
 /// metadata the CRUD passes act on now comes from the RUNTIME DESCRIPTOR, which
 /// in these tests is installed from the RuntimeBuilder descriptor. `key_id` is
@@ -420,7 +420,6 @@ fn users_runtime_descriptor(key_id: &str) -> String {
                     "ssn": {
                         "type": "string",
                         "encrypted": {
-                            "mode": "randomised",
                             "keyId": key_id,
                             "wraps": "string",
                         },
@@ -2636,7 +2635,7 @@ mod sc1_driver {
 
     #[test]
     fn root_rollback_waits_for_the_active_statement_before_returning() {
-        use zeroship_data_orm::transaction::{exec_settle, SettleOutcome};
+        use zeroship_data_orm::transaction::{SettleOutcome, exec_settle};
 
         const APP: &str = "zs_sc1drv_waitrollback";
         block_on(async {
@@ -2693,7 +2692,7 @@ mod sc1_driver {
 
     #[test]
     fn root_commit_waits_for_terminal_sql_and_keeps_its_attempt_result() {
-        use zeroship_data_orm::transaction::{exec_settle, SettleOutcome};
+        use zeroship_data_orm::transaction::{SettleOutcome, exec_settle};
 
         const APP: &str = "zs_sc1drv_waitcommit";
         block_on(async {
@@ -2780,7 +2779,7 @@ mod sc1_driver {
     fn root_settlement_observes_deadline_cleanup_of_a_blocked_statement() {
         use zeroship_data_orm::error::DbError;
         use zeroship_data_orm::transaction::reducer::deadline::DeadlineKind;
-        use zeroship_data_orm::transaction::{exec_settle, SettleOutcome};
+        use zeroship_data_orm::transaction::{SettleOutcome, exec_settle};
 
         const APP: &str = "zs_sc1drv_waitdeadline";
         block_on(async {

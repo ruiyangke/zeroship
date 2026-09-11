@@ -19,7 +19,7 @@ pub enum ApplyMode<'a> {
     Update {
         row_pk: &'a str,
     },
-    /// The deterministic-encryption conflict probe reads the existing row's id
+    /// The conflict probe reads the existing row's id
     /// before the write is composed.
     ///
     /// It used to be the ONLY pre-pass issuing SQL of its own, so this variant
@@ -102,6 +102,12 @@ fn validate_upsert_conflict_fields(
                 format!(
                     "upsert conflict field '{field}' is platform-assigned; use an application-owned unique key"
                 ),
+            ));
+        }
+        if schema.get(field).is_some_and(field_is_encrypted) {
+            return Err(DbError::validation(
+                "encrypted_conflict_field",
+                format!("encrypted field '{field}' cannot be a conflict target"),
             ));
         }
         if schema.get(field).is_none() || doc.get(field).is_none() {
@@ -286,7 +292,6 @@ pub async fn apply(
                 payload, &schema, collection, actor_id,
             )?;
             rewrite_upsert_doc_id_to_existing_row_id(
-                keys,
                 dialect,
                 payload,
                 route,
@@ -515,17 +520,17 @@ pub async fn resolve_target_row_ids(
 /// schema is what the old `Option` shape did, and it would give every row in a
 /// batch the same AAD.
 pub fn update_requires_per_row_encryption(schema: &Value, patch: &Value) -> bool {
-    update_touches_randomised_encrypted_field(schema, patch)
+    update_touches_encrypted_field(schema, patch)
 }
 
 /// The upsert twin of [`update_requires_per_row_encryption`]: a doc that writes
-/// a randomised-encrypted column needs the deterministic conflict probe run
+/// a randomised-encrypted column needs the conflict probe run
 /// first, because its ciphertext cannot be compared for ON CONFLICT equality.
 pub fn upsert_requires_conflict_probe(schema: &Value, doc: &Value) -> bool {
-    doc_touches_randomised_encrypted_field(schema, doc)
+    doc_touches_encrypted_field(schema, doc)
 }
 
-fn update_touches_randomised_encrypted_field(schema: &Value, patch: &Value) -> bool {
+fn update_touches_encrypted_field(schema: &Value, patch: &Value) -> bool {
     let Some(schema_obj) = schema.as_object() else {
         return false;
     };
@@ -534,11 +539,10 @@ fn update_touches_randomised_encrypted_field(schema: &Value, patch: &Value) -> b
     };
 
     if let Some(set_obj) = update_obj.get("$set").and_then(Value::as_object) {
-        if set_obj.iter().any(|(field, _)| {
-            schema_obj
-                .get(field)
-                .is_some_and(field_is_randomised_encrypted)
-        }) {
+        if set_obj
+            .iter()
+            .any(|(field, _)| schema_obj.get(field).is_some_and(field_is_encrypted))
+        {
             return true;
         }
     }
@@ -547,14 +551,11 @@ fn update_touches_randomised_encrypted_field(schema: &Value, patch: &Value) -> b
         if field.starts_with('$') {
             return false;
         }
-        schema_obj
-            .get(field)
-            .is_some_and(field_is_randomised_encrypted)
-            && field_update_writes_value(value)
+        schema_obj.get(field).is_some_and(field_is_encrypted) && field_update_writes_value(value)
     })
 }
 
-fn doc_touches_randomised_encrypted_field(schema: &Value, doc: &Value) -> bool {
+fn doc_touches_encrypted_field(schema: &Value, doc: &Value) -> bool {
     let Some(schema_obj) = schema.as_object() else {
         return false;
     };
@@ -566,18 +567,12 @@ fn doc_touches_randomised_encrypted_field(schema: &Value, doc: &Value) -> bool {
         if value.is_null() {
             return false;
         }
-        schema_obj
-            .get(field)
-            .is_some_and(field_is_randomised_encrypted)
+        schema_obj.get(field).is_some_and(field_is_encrypted)
     })
 }
 
-fn field_is_randomised_encrypted(field_def: &Value) -> bool {
-    field_def
-        .get("encrypted")
-        .and_then(Value::as_object)
-        .and_then(|enc| enc.get("mode").and_then(Value::as_str))
-        .is_some_and(|mode| matches!(mode, "randomised" | "randomized"))
+fn field_is_encrypted(field_def: &Value) -> bool {
+    field_def.get("encrypted").is_some_and(Value::is_object)
 }
 
 fn field_update_writes_value(value: &Value) -> bool {
@@ -595,17 +590,9 @@ fn update_target(patch: &mut Value) -> &mut Value {
     }
 }
 
-/// `keys` is passed in even though this function holds a [`TxRoute`] it could
-/// take a handle off. The route is here to run the probe SELECT on the right
-/// connection; the deterministic-encryption step below needs a key and nothing
-/// else, and taking it from [`apply`]'s parameter keeps one key store per write
-/// op rather than two independent derivations of it.
-///
-/// `dialect` is passed in for the same reason: the probe's SQL text has to be
-/// the dialect the enclosing upsert was planned in, and taking it from
-/// [`apply`]'s parameter keeps one dialect per write op rather than re-asking.
+/// The probe uses the write's route and dialect to see the existing row in
+/// the same transaction before producing ciphertext bound to its identity.
 async fn rewrite_upsert_doc_id_to_existing_row_id(
-    keys: &crate::encryption::KeyStore,
     dialect: compile::SqlDialect,
     doc: &mut Value,
     route: &TxRoute,
@@ -613,7 +600,6 @@ async fn rewrite_upsert_doc_id_to_existing_row_id(
     conflict_fields: &Value,
     schema: &Value,
 ) -> Result<(), DbError> {
-    let app_id = route.app_id();
     if !upsert_requires_conflict_probe(schema, doc) {
         return Ok(());
     }
@@ -639,19 +625,6 @@ async fn rewrite_upsert_doc_id_to_existing_row_id(
     }
 
     let mut filter = Value::Object(filter_obj);
-    if let Some(probe_schema) = deterministic_conflict_probe_schema(schema, conflict_arr)? {
-        let mut sidechannel = super::mask_pass::MaskPlaintextSidechannel::new();
-        super::encryption_pass_dispatch(
-            keys,
-            app_id,
-            collection,
-            &probe_schema,
-            "",
-            &mut filter,
-            &mut sidechannel,
-        )
-        .await?;
-    }
     note_upsert_conflict_probe_for_tests();
     zeroship_data_sql::codecs::lower_filter(dialect, schema, &mut filter);
     let built = compile::build_conflict_probe_with_dialect(
@@ -734,46 +707,6 @@ fn note_upsert_conflict_probe_for_tests() {
 
 #[cfg(not(any(test, feature = "test-helpers")))]
 fn note_upsert_conflict_probe_for_tests() {}
-
-fn deterministic_conflict_probe_schema(
-    schema: &Value,
-    conflict_fields: &[Value],
-) -> Result<Option<Value>, DbError> {
-    let Some(schema_obj) = schema.as_object() else {
-        return Ok(None);
-    };
-    let mut out = zeroship_data_sql::value::Map::new();
-    for field in conflict_fields.iter().filter_map(Value::as_str) {
-        let Some(def) = schema_obj.get(field) else {
-            continue;
-        };
-        let Some(enc) = def.get("encrypted").and_then(Value::as_object) else {
-            continue;
-        };
-        let Some(mode) = enc.get("mode").and_then(Value::as_str) else {
-            continue;
-        };
-        match mode {
-            "deterministic" => {
-                out.insert(field.to_string(), def.clone());
-            }
-            "randomised" | "randomized" => {
-                return Err(DbError::validation(
-                    "upsert_conflict_field_requires_deterministic_encryption",
-                    format!(
-                        "upsert: conflict field `{field}` uses randomised encryption; ON CONFLICT equality requires deterministic ciphertext"
-                    ),
-                ));
-            }
-            _ => {}
-        }
-    }
-    if out.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(Value::Object(out)))
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -1075,7 +1008,7 @@ mod tests {
             .resolve(app_id, key_id)
             .await
             .expect("resolve key");
-        let aad = encryption::canonical_aad(collection, "ssn", Some(id.as_bytes()));
+        let aad = encryption::canonical_aad(collection, "ssn", id.as_bytes());
         let plaintext = crate::encryption::aead::decrypt(&key, ciphertext, &aad)
             .expect("decrypt prepared ciphertext");
         assert_eq!(
@@ -1111,7 +1044,7 @@ mod tests {
                 "name": { "type": "string", "required": true },
                 "ssn": {
                     "type": "string",
-                    "encrypted": { "mode": "randomised", "keyId": key_id, "wraps": "string" },
+                    "encrypted": { "keyId": key_id, "wraps": "string" },
                     "mask": { "kind": "last4", "classification": "spi" }
                 }
             });
@@ -1120,7 +1053,7 @@ mod tests {
                 "name": { "type": "string", "required": true },
                 "ssn": {
                     "type": "string",
-                    "encrypted": { "mode": "randomised", "keyId": key_id, "wraps": "string" },
+                    "encrypted": { "keyId": key_id, "wraps": "string" },
                     "mask": { "kind": "last4", "classification": "spi" }
                 }
             });
@@ -1319,7 +1252,7 @@ mod tests {
             let update_plaintext = crate::encryption::aead::decrypt(
                 &update_key,
                 update_ciphertext,
-                &encryption::canonical_aad(collection, "ssn", Some(seeded_id.as_bytes())),
+                &encryption::canonical_aad(collection, "ssn", seeded_id.as_bytes()),
             )
             .expect("decrypt update ciphertext");
             assert_eq!(

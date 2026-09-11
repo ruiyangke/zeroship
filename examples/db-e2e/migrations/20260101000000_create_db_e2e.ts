@@ -49,45 +49,8 @@ export default {
         handle: t.text().notNull().unique(),
         fullName: t.text().notNull(),
         email: t.text().notNull().unique(),
-        // BLOCKED, AND THIS IS THE ONE THING THIS FILE CANNOT EXPRESS.
-        // src/server.ts declares `contactEmail` as `mode: "deterministic",
-        // keyId: "db_e2e"` and `ssn` as `mode: "randomised", keyId: "db_e2e"`.
-        // NEITHER the mode NOR the key id is representable in a migration:
-        // `t.encrypted()` takes only `of`, and `keyId` appears ZERO times in
-        // the whole of packages/zero-migrate/src. The engine says so itself, by
-        // design and fail-closed rather than silently wrong -- see the comment
-        // and test in third_party/zero-migrate/.../render/fold.rs, anchored on
-        // the text "op.* can author ONLY a DEFAULT-mode encrypted column ...
-        // there is no IR surface for a non-default mode/keyId" (quote the text,
-        // not a line number: it has already moved once upstream).
-        //
-        // THE VALUE IS OVERWRITTEN, NOT DROPPED, which is the sharper and more
-        // useful statement -- established 2026-08-12 with zero-migrate over
-        // ZEROSHIP-2026-08-12-251/252 and confirmed by my own read of the
-        // vendored tree. The op lane DOES build the encrypted facet:
-        //
-        //     fold.rs `fold_create_column_to_field`
-        //       -> lower.rs `ir_column_to_field_resolved_create`
-        //         -> lower.rs `ir_column_to_field`, whose ColType::Encrypted arm
-        //            emits a literal `{ mode: "randomised", keyId: "default",
-        //            wraps: <inner> }`
-        //
-        // so the descriptor comes out WITH a keyId that the creator never chose,
-        // rather than with the facet missing. That is why the failure below is
-        // "key 'default' not configured" and not "no encryption configured".
-        //
-        // The OBSERVABLE consequence, measured 2026-08-12: the generated
-        // descriptor comes out carrying `keyId: "default"`, so the running app
-        // demands `ZEROSHIP_COLUMN_KEY_DEFAULT` and fails with
-        // `Column key 'default' not configured` -- while README.md, the schema
-        // and e2e/run.mjs all say the key is `db_e2e`. An app moving from an
-        // inline schema to migration-first therefore LOSES its key selection
-        // and its encryption mode, and nothing warns.
-        //
-        // Deliberately NOT worked around: weakening src/server.ts to the
-        // default key/mode would make this example pass by deleting the
-        // property it exists to cover. It stays red here until the IR can
-        // carry mode/keyId.
+        // The runtime descriptor currently uses the host's default key. Project
+        // key provisioning belongs to control, separately from schema authoring.
         contactEmail: t.encrypted({ of: t.text() }),
         ssn: t.encrypted({ of: t.text() }),
         city: t.text().notNull(),

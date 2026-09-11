@@ -16,7 +16,6 @@
 //! The `(MaskKind, Classification)` types this codec round-trips live in
 //! `crate::schema::diff` (the schema metadata types).
 
-use crate::descriptors::EncryptionMode;
 use crate::mask_meta::{Classification, EncryptionMeta, MaskKind, WrappedType};
 use crate::schema_error::MaskSentinelError;
 
@@ -45,32 +44,6 @@ pub const ENC_SENTINEL_PREFIX: &str = "zero-migrate:enc:";
 /// The mask-sentinel prefix this engine persists. See [`ENC_SENTINEL_PREFIX`].
 pub const MASK_SENTINEL_PREFIX: &str = "zero-migrate:mask:";
 
-/// The canonical wire string for an [`EncryptionMode`] in a
-/// `zero-migrate:enc:` sentinel. `randomised` is the canonical spelling (the US
-/// `randomized` is normalised to it at emit time so the parser only needs the
-/// one form). Kept here next to the codec rather than on `EncryptionMode` so the
-/// descriptor enum stays a pure data type with no wire-format opinions.
-#[must_use]
-fn encryption_mode_as_sql(mode: EncryptionMode) -> &'static str {
-    match mode {
-        EncryptionMode::Randomised => "randomised",
-        EncryptionMode::Deterministic => "deterministic",
-    }
-}
-
-/// Parse a `zero-migrate:enc:` mode token. Accepts the canonical
-/// `randomised` plus the legacy US `randomized` spelling (the SDK historically
-/// emitted it; the emit path normalises to `randomised`, but a hand-written
-/// migration may carry either). `None` for any other token.
-#[must_use]
-fn encryption_mode_from_sql(s: &str) -> Option<EncryptionMode> {
-    match s {
-        "randomised" | "randomized" => Some(EncryptionMode::Randomised),
-        "deterministic" => Some(EncryptionMode::Deterministic),
-        _ => None,
-    }
-}
-
 /// The canonical wire string for a [`WrappedType`].
 #[must_use]
 fn wrapped_type_as_sql(w: WrappedType) -> &'static str {
@@ -93,7 +66,7 @@ fn wrapped_type_from_sql(s: &str) -> Option<WrappedType> {
 }
 
 /// Build the canonical encryption-sentinel BODY for an
-/// [`EncryptionMeta`]: `zero-migrate:enc:<mode>:<keyId>:<wraps>`.
+/// [`EncryptionMeta`]: `zero-migrate:enc:<keyId>:<wraps>`.
 ///
 /// This is the COMMENT-body form (no surrounding `/* */`): on PG it is stored
 /// via `COMMENT ON COLUMN "<schema>"."<table>"."<col>" IS '<body>'` on the
@@ -102,32 +75,31 @@ fn wrapped_type_from_sql(s: &str) -> Option<WrappedType> {
 /// On SQLite the inline form (`query::encryption_sentinel_for_field`, which
 /// wraps this same `zero-migrate:enc:...` body in `/* */`) survives in `sqlite_master.sql`.
 ///
-/// The two emitters share the SAME `zero-migrate:enc:<mode>:<keyId>:<wraps>` body, so the
+/// The two emitters share the SAME `zero-migrate:enc:<keyId>:<wraps>` body, so the
 /// metadata a `generate`d migration carries is byte-identical to the one
 /// schema application writes - the verify-bricking guard. The parser side is
 /// [`parse_encryption_sentinel`].
 #[must_use]
 pub fn build_encryption_sentinel(meta: &EncryptionMeta) -> String {
     format!(
-        "{ENC_SENTINEL_PREFIX}{}:{}:{}",
-        encryption_mode_as_sql(meta.mode),
+        "{ENC_SENTINEL_PREFIX}{}:{}",
         meta.key_id,
         wrapped_type_as_sql(meta.wraps),
     )
 }
 
-/// Parse a `zero-migrate:enc:<mode>:<keyId>:<wraps>` sentinel body back
+/// Parse a `zero-migrate:enc:<keyId>:<wraps>` sentinel body back
 /// into an [`EncryptionMeta`].
 ///
-/// Accepts either the bare comment body (`zero-migrate:enc:randomised:default:string`, the
+/// Accepts either the bare comment body (`zero-migrate:enc:default:string`, the
 /// PG `pg_description` form) or the inline-comment form wrapping it
-/// (`/* zero-migrate:enc:randomised:default:string */`, the SQLite `sqlite_master.sql`
+/// (`/* zero-migrate:enc:default:string */`, the SQLite `sqlite_master.sql`
 /// form) - the leading/trailing `/* */` and whitespace are stripped first, so
 /// both introspectors feed the SAME parser.
 ///
 /// Returns `Err(MaskSentinelError)` (the shared sentinel-error type) carrying an
 /// `enc_sentinel_malformed` discriminator for any parse failure - wrong prefix,
-/// wrong arity, unknown mode/wraps, empty keyId - so a hand-edited or
+/// wrong arity, unknown wraps, empty keyId - so a hand-edited or
 /// future-version sentinel produces a typed error rather than silently routing
 /// through a default codec (the fail-closed contract).
 pub fn parse_encryption_sentinel(s: &str) -> Result<EncryptionMeta, MaskSentinelError> {
@@ -145,32 +117,25 @@ pub fn parse_encryption_sentinel(s: &str) -> Result<EncryptionMeta, MaskSentinel
         ))
     })?;
     let parts: Vec<&str> = rest.split(':').collect();
-    if parts.len() != 3 {
+    if parts.len() != 2 {
         return Err(MaskSentinelError::new(format!(
-            "enc_sentinel_malformed: expected {ENC_SENTINEL_PREFIX}<mode>:<keyId>:<wraps>, \
+            "enc_sentinel_malformed: expected {ENC_SENTINEL_PREFIX}<keyId>:<wraps>, \
              got {s:?}"
         )));
     }
-    let mode = encryption_mode_from_sql(parts[0]).ok_or_else(|| {
-        MaskSentinelError::new(format!(
-            "enc_sentinel_malformed: unknown mode {:?} in {s:?}",
-            parts[0]
-        ))
-    })?;
-    let key_id = parts[1];
+    let key_id = parts[0];
     if key_id.is_empty() {
         return Err(MaskSentinelError::new(format!(
             "enc_sentinel_malformed: empty keyId in {s:?}"
         )));
     }
-    let wraps = wrapped_type_from_sql(parts[2]).ok_or_else(|| {
+    let wraps = wrapped_type_from_sql(parts[1]).ok_or_else(|| {
         MaskSentinelError::new(format!(
             "enc_sentinel_malformed: unknown wraps {:?} in {s:?}",
-            parts[2]
+            parts[1]
         ))
     })?;
     Ok(EncryptionMeta {
-        mode,
         key_id: key_id.to_string(),
         wraps,
     })
@@ -349,9 +314,8 @@ mod tests {
 
     // ----- encryption sentinel codec -----
 
-    fn enc(mode: EncryptionMode, key: &str, wraps: WrappedType) -> EncryptionMeta {
+    fn enc(key: &str, wraps: WrappedType) -> EncryptionMeta {
         EncryptionMeta {
-            mode,
             key_id: key.to_string(),
             wraps,
         }
@@ -359,26 +323,18 @@ mod tests {
 
     #[test]
     fn build_encryption_sentinel_canonical_shape() {
-        let s = build_encryption_sentinel(&enc(
-            EncryptionMode::Randomised,
-            "default",
-            WrappedType::String,
-        ));
-        assert_eq!(s, "zero-migrate:enc:randomised:default:string");
-        let d = build_encryption_sentinel(&enc(
-            EncryptionMode::Deterministic,
-            "k7",
-            WrappedType::Number,
-        ));
-        assert_eq!(d, "zero-migrate:enc:deterministic:k7:number");
+        let s = build_encryption_sentinel(&enc("default", WrappedType::String));
+        assert_eq!(s, "zero-migrate:enc:default:string");
+        let d = build_encryption_sentinel(&enc("k7", WrappedType::Number));
+        assert_eq!(d, "zero-migrate:enc:k7:number");
     }
 
     #[test]
     fn encryption_sentinel_round_trips_every_combination() {
-        for mode in [EncryptionMode::Randomised, EncryptionMode::Deterministic] {
+        {
             for wraps in [WrappedType::String, WrappedType::Number, WrappedType::Bytes] {
                 for key in ["default", "k7", "tenant_42_root"] {
-                    let meta = enc(mode, key, wraps);
+                    let meta = enc(key, wraps);
                     let s = build_encryption_sentinel(&meta);
                     assert_eq!(parse_encryption_sentinel(&s).unwrap(), meta);
                 }
@@ -390,20 +346,10 @@ mod tests {
     fn parse_encryption_sentinel_accepts_inline_comment_form() {
         // The SQLite-surviving inline form parses to the same meta as the bare
         // PG comment body - both introspectors feed one parser.
-        let bare = parse_encryption_sentinel("zero-migrate:enc:randomised:default:string").unwrap();
-        let inline =
-            parse_encryption_sentinel("/* zero-migrate:enc:randomised:default:string */").unwrap();
+        let bare = parse_encryption_sentinel("zero-migrate:enc:default:string").unwrap();
+        let inline = parse_encryption_sentinel("/* zero-migrate:enc:default:string */").unwrap();
         assert_eq!(bare, inline);
-        assert_eq!(
-            bare,
-            enc(EncryptionMode::Randomised, "default", WrappedType::String)
-        );
-    }
-
-    #[test]
-    fn parse_encryption_sentinel_normalises_us_spelling() {
-        let m = parse_encryption_sentinel("zero-migrate:enc:randomized:default:string").unwrap();
-        assert_eq!(m.mode, EncryptionMode::Randomised);
+        assert_eq!(bare, enc("default", WrappedType::String));
     }
 
     #[test]
@@ -417,13 +363,13 @@ mod tests {
     #[test]
     fn parse_encryption_sentinel_rejects_wrong_arity() {
         assert!(
-            parse_encryption_sentinel("zero-migrate:enc:randomised:default")
+            parse_encryption_sentinel("zero-migrate:enc:default")
                 .unwrap_err()
                 .message()
                 .contains("enc_sentinel_malformed")
         );
         assert!(
-            parse_encryption_sentinel("zero-migrate:enc:randomised:default:string:extra")
+            parse_encryption_sentinel("zero-migrate:enc:default:string:extra")
                 .unwrap_err()
                 .message()
                 .contains("enc_sentinel_malformed")
@@ -439,7 +385,7 @@ mod tests {
                 .contains("enc_sentinel_malformed")
         );
         assert!(
-            parse_encryption_sentinel("zero-migrate:enc:randomised:default:blob")
+            parse_encryption_sentinel("zero-migrate:enc:default:blob")
                 .unwrap_err()
                 .message()
                 .contains("enc_sentinel_malformed")
@@ -449,7 +395,7 @@ mod tests {
     #[test]
     fn parse_encryption_sentinel_rejects_empty_key_id() {
         assert!(
-            parse_encryption_sentinel("zero-migrate:enc:randomised::string")
+            parse_encryption_sentinel("zero-migrate:enc::string")
                 .unwrap_err()
                 .message()
                 .contains("enc_sentinel_malformed")

@@ -9110,6 +9110,14 @@ fn validate_column_facets(
         suggested_fix: Some(fix),
     };
 
+    if matches!(col.ty, crate::model::ir::ColType::Encrypted { .. }) && col.unique == Some(true) {
+        return Err(mk(
+            CODE_OP_INVALID,
+            format!("encrypted column {:?} cannot be unique", col.name),
+            "remove the unique constraint or use an unencrypted lookup field".into(),
+        ));
+    }
+
     if let Some(name) = col
         .references
         .as_ref()

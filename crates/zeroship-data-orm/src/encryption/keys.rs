@@ -11,7 +11,6 @@
 //! root  = 32 bytes for <KEYID>          (see "Key sources" below)
 //! salt  = app_id                        (per-tenant isolation)
 //! info  = "zsenc/aead/v1/k_enc"   →  k_enc
-//! info  = "zsenc/aead/v1/k_siv"   →  k_siv
 //! ```
 //!
 //! The salt-by-app step closes cross-tenant ciphertext replay even if
@@ -396,18 +395,14 @@ pub(crate) fn parse_root_key(source: &str, hex: &str) -> Result<[u8; 32], DbErro
     Ok(out)
 }
 
-/// HKDF-SHA256 expansion of `root` into `(k_enc, k_siv)`, salted by
 /// `app_id` so two apps under the same root produce independent
 /// AEAD keys.
 fn derive_key(root: &[u8; 32], app_id: &str) -> Result<AeadKey, DbError> {
     let hkdf = Hkdf::<Sha256>::new(Some(app_id.as_bytes()), root);
     let mut k_enc = [0u8; 32];
-    let mut k_siv = [0u8; 32];
     hkdf.expand(b"zsenc/aead/v1/k_enc", &mut k_enc)
         .map_err(|_| DbError::internal("HKDF expand k_enc"))?;
-    hkdf.expand(b"zsenc/aead/v1/k_siv", &mut k_siv)
-        .map_err(|_| DbError::internal("HKDF expand k_siv"))?;
-    Ok(AeadKey { k_enc, k_siv })
+    Ok(AeadKey { k_enc })
 }
 
 /// Tiny local hex decoder — keeps the encryption module independent
@@ -461,14 +456,12 @@ mod tests {
     }
 
     /// `derive_key` is deterministic: same `(root, app_id)` always
-    /// produces the same `(k_enc, k_siv)`.
     #[test]
     fn derive_key_is_deterministic() {
         let root = [0x42u8; 32];
         let a = derive_key(&root, "app_1").expect("derive");
         let b = derive_key(&root, "app_1").expect("derive");
         assert_eq!(a.k_enc, b.k_enc);
-        assert_eq!(a.k_siv, b.k_siv);
     }
 
     /// Per-app isolation: same root + different `app_id` yields
@@ -480,7 +473,6 @@ mod tests {
         let a = derive_key(&root, "app_1").expect("derive 1");
         let b = derive_key(&root, "app_2").expect("derive 2");
         assert_ne!(a.k_enc, b.k_enc);
-        assert_ne!(a.k_siv, b.k_siv);
     }
 
     /// Different roots produce different derived keys (sanity).
@@ -491,18 +483,6 @@ mod tests {
         let a = derive_key(&root_a, "app").expect("derive a");
         let b = derive_key(&root_b, "app").expect("derive b");
         assert_ne!(a.k_enc, b.k_enc);
-        assert_ne!(a.k_siv, b.k_siv);
-    }
-
-    /// `k_enc` and `k_siv` are distinct within one derivation —
-    /// they share a root but the `info` strings differ so HKDF
-    /// expands different bytes. A regression here would mean the
-    /// two halves alias and a `k_siv` leak compromises `k_enc`.
-    #[test]
-    fn derive_key_halves_are_distinct() {
-        let root = [0x42u8; 32];
-        let key = derive_key(&root, "app").expect("derive");
-        assert_ne!(key.k_enc, key.k_siv);
     }
 
     /// Missing env var → typed `Configuration` error with the
@@ -673,7 +653,6 @@ mod tests {
         let k1 = first.unwrap();
         let k2 = second.unwrap();
         assert_eq!(k1.k_enc, k2.k_enc);
-        assert_eq!(k1.k_siv, k2.k_siv);
     }
 
     /// KeyStore caches per `(app_id, key_id)`, not just `key_id`:
