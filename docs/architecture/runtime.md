@@ -46,7 +46,7 @@ Plugins register namespaces on `env` through `NativePlugin`:
 
 - `env.db.*` -> `crates/plugin-db`
 - `env.kv.*` -> `crates/zeroship-kv-v8`
-- `env.storage.*` -> `crates/plugin-storage`
+- `env.storage.*` -> `crates/zeroship-storage-v8`
 
 The `#[v8_class]` macro support lives in `crates/runtime-macros`.
 

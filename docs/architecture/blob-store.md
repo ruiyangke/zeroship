@@ -99,9 +99,9 @@ All three services build their store from the SAME `--blob-store` grammar via `z
 ## The other S3 consumer: `env.storage`
 
 The same `compio-s3` client and the same `s3://…` URL grammar back the
-creator-facing `env.storage` namespace (`crates/plugin-storage`). It is a
+creator-facing `env.storage` namespace ([`zeroship-storage-v8`](../../crates/zeroship-storage-v8/)). It is a
 **separate** keyspace and a **separate** flag — `--storage-url` on the worker
-(and `ZEROSHIP_WORKER_STORAGE_URL` for `zeroship serve`) — but resolves credentials
+(and `ZEROSHIP_STORAGE_URL` for `zeroship serve`) — but resolves credentials
 from the same AWS env vars (one S3 identity per process). A worker can point
 `--blob-store` and `--storage-url` at different prefixes (or different
 buckets) of the same provider.

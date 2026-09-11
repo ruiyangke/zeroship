@@ -1,18 +1,8 @@
-//! Size ceilings for the buffered `env.storage` convenience surface.
-//!
-//! Streaming (`putStream` / `getStream`) is unbounded by design — memory is
-//! bounded by the part size on upload and the consumer's pull rate on
-//! download. The buffered `put` / `get` conveniences, however, materialise the
-//! whole object in RAM (and `get` base64-encodes it on the way back to JS,
-//! ~1.33× the raw size, plus the decoded `Vec` → ~2.3× peak). An unbounded
-//! buffered `get` driven by an attacker-controlled `Content-Length` is an
-//! OOM-DoS, so the buffered path is capped.
-//!
-//! The cap mirrors the proposal's `ZEROSHIP_STORAGE_MAX_OBJECT_BYTES`
-//! (default 16 MiB) and is the same ceiling the buffered `put` enforces.
+//! Object-size limits, multipart concurrency and list pagination.
+//! Scoped Rust handles apply object limits across both backends. Streaming
+//! bounds working memory and also enforces a total upload-size ceiling.
 
-/// Default buffered-object cap (16 MiB). Applies to the buffered `get`/`put`
-/// conveniences only; streaming bypasses it.
+/// Default buffered-object cap. Streaming uses its separate total-size limit.
 pub const DEFAULT_MAX_OBJECT_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Environment variable that overrides [`DEFAULT_MAX_OBJECT_BYTES`].
@@ -22,7 +12,6 @@ pub const MAX_OBJECT_BYTES_ENV: &str = "ZEROSHIP_STORAGE_MAX_OBJECT_BYTES";
 /// env var if set to a valid positive integer, else [`DEFAULT_MAX_OBJECT_BYTES`].
 #[must_use]
 pub fn max_object_bytes() -> u64 {
-    // Class `platform`, like the other three knobs in this file.
     positive_u64(zeroship_core::declared_env!(
         platform,
         "ZEROSHIP_STORAGE_MAX_OBJECT_BYTES",
@@ -35,15 +24,11 @@ pub fn max_object_bytes() -> u64 {
 // Streaming-upload ceiling
 // ---------------------------------------------------------------------------
 
-/// S3's hard ceiling on multipart parts (1..=10000). A `put_stream` that would
-/// emit more than this can never `complete`, so the upload fails fast at the
-/// offending part rather than wasting every prior `UploadPart`.
+/// S3 multipart part-count ceiling. Uploads fail before exceeding it.
 pub const MAX_MULTIPART_PARTS: u32 = 10_000;
 
-/// Default ceiling for a single streamed object (32 GiB). Streaming is
-/// unbounded *relative to RAM* (memory is bounded by the part size), but an
-/// unbounded *total* lets a single app write without limit; this is the
-/// fail-fast guard. Configurable via [`MAX_STREAM_OBJECT_BYTES_ENV`].
+/// Default total streamed-upload cap, configurable through
+/// [`MAX_STREAM_OBJECT_BYTES_ENV`].
 pub const DEFAULT_MAX_STREAM_OBJECT_BYTES: u64 = 32 * 1024 * 1024 * 1024;
 
 /// Environment variable overriding [`DEFAULT_MAX_STREAM_OBJECT_BYTES`].
@@ -54,7 +39,6 @@ pub const MAX_STREAM_OBJECT_BYTES_ENV: &str = "ZEROSHIP_STORAGE_MAX_STREAM_BYTES
 /// else [`DEFAULT_MAX_STREAM_OBJECT_BYTES`].
 #[must_use]
 pub fn max_stream_object_bytes() -> u64 {
-    // Class `platform`, like the other three knobs in this file.
     positive_u64(zeroship_core::declared_env!(
         platform,
         "ZEROSHIP_STORAGE_MAX_STREAM_BYTES",
@@ -67,18 +51,8 @@ pub fn max_stream_object_bytes() -> u64 {
 // Multipart upload concurrency
 // ---------------------------------------------------------------------------
 
-/// Default number of multipart `UploadPart` requests in flight at once.
-///
-/// The source stream is still read strictly sequentially into one part buffer
-/// at a time; only the network PUTs overlap. Bounded concurrency is the S3
-/// throughput lever (the official `@aws-sdk/lib-storage` runs ~4 parallel
-/// parts and is ~2× a sequential `upload_part().await` loop) while keeping
-/// memory bounded: at most `UPLOAD_CONCURRENCY × PART_SIZE` of part buffers
-/// can be in flight (4 × 8 MiB = 32 MiB), never the whole object.
-// 4 matches lib-storage's default queueSize. Verified on a CLEAN (uncontended)
-// box: 5 GiB conc=8 e2e completed in 244s (vs 268s sequential), memory bounded
-// (401 MiB), object finalized + checksum-matched. Override via
-// ZEROSHIP_STORAGE_UPLOAD_CONCURRENCY (clamped 1..=64).
+/// Default concurrent multipart uploads. Memory scales with the number of
+/// in-flight parts and the backend part size, rather than the whole object.
 pub const DEFAULT_UPLOAD_CONCURRENCY: usize = 4;
 
 /// Environment variable overriding [`DEFAULT_UPLOAD_CONCURRENCY`]. Clamped to
@@ -107,18 +81,10 @@ pub fn upload_concurrency() -> usize {
 // List pagination
 // ---------------------------------------------------------------------------
 
-/// Default `list` page size when the caller doesn't specify `limit`.
-///
-/// Mirrors `zeroship_kv::limits::LIST_DEFAULT_LIMIT` — the same
-/// question (how many keys does one `list` call return) answered the same way,
-/// so a creator moving between `env.kv.list` and `env.storage.list` does not
-/// meet two different defaults.
+/// Default list page size when the caller does not specify a limit.
 pub const LIST_DEFAULT_LIMIT: usize = 1000;
 
-/// Hard ceiling on a `list` page. A caller-supplied `limit` above this is
-/// **clamped**, not rejected — and the clamp is never silent, because a
-/// clamped page that does not exhaust the listing still reports a
-/// [`crate::backend::ListPage::cursor`]. Also mirrors kv-v8.
+/// Maximum list page size. Incomplete pages return a continuation cursor.
 pub const LIST_MAX_LIMIT: usize = 10_000;
 
 /// Normalise a caller-supplied `list` limit into the effective page size.

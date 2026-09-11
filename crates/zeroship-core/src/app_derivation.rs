@@ -50,7 +50,7 @@
 //! The seam is typed on [`AppId`], and much of the tree still carries an app id
 //! as `&str` - `zeroship_data_orm::encryption::keys::resolve`,
 //! `zeroship_data_v8::replication`, `zeroship_kv::backend::scope`,
-//! `zeroship_plugin_storage::backend`. Those sites cannot construct an
+//! `zeroship_storage::backend`. Those sites cannot construct an
 //! [`AppId`] without a fallible parse that would refuse the non-uuid app ids
 //! their own tests pass, so they keep their present composers until the string
 //! is typed out of them. [`crate::database_role::per_app_role_name`] and

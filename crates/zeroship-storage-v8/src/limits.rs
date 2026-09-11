@@ -21,7 +21,6 @@ const MAX_LIVE_GET_STREAMS_CEILING: usize = (u32::MAX - 1) as usize;
 /// [`DEFAULT_MAX_LIVE_GET_STREAMS_PER_APP`].
 #[must_use]
 pub fn max_live_get_streams_per_app() -> usize {
-    // Class `platform`, for the same reason as `upload_concurrency` above.
     positive_u64(zeroship_core::declared_env!(
         platform,
         "ZEROSHIP_STORAGE_MAX_LIVE_GET_STREAMS",

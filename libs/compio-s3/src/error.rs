@@ -1,7 +1,7 @@
 //! Typed S3 client errors and retryability classification.
 //!
 //! The taxonomy here is the contract the higher layers (`S3BlobStore`,
-//! `plugin-storage::S3`) map from. Each variant carries enough shape for a
+//! `zeroship-storage::S3`) map from. Each variant carries enough shape for a
 //! caller to decide retry / not-found / auth / integrity handling without
 //! re-parsing strings. See the proposal §4 "Error taxonomy and retries".
 

@@ -12,7 +12,7 @@
 #      gateway dispatches a request through to the worker, which loads the
 #      bundle from S3 and serves it.
 #
-#   2. storage-v8::Backend — the worker's `env.storage` namespace is bound
+#   2. zeroship-storage::Backend — the worker's `env.storage` namespace is bound
 #      to the SAME MinIO via `--storage-url s3://…`. We drive a LARGE
 #      (> 8 MiB part size) MULTIPART streaming round-trip: an app procedure
 #      builds a multi-MiB object, streams it up with `putStream` (S3 multipart
@@ -351,7 +351,7 @@ echo ""
 echo "=== Stage 8: backend-parity cargo tests (LocalFs vs S3, buffered + streaming) ==="
 # The trait-level parity suite runs LocalFs always + an S3 leg against its OWN
 # MinIO container; it covers buffered + streaming + a > part-size multipart
-# round-trip and skips the S3 leg cleanly without docker. Run it here so one
+# round-trip with a Testcontainers-owned MinIO. Docker is required. This
 # harness asserts BOTH the edge (above) and the trait parity.
 PARITY_LOG="$WORK/parity.log"
 if cargo test -p zeroship-storage --features s3 --test backend_parity -- --nocapture > "$PARITY_LOG" 2>&1; then
