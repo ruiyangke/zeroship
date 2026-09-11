@@ -114,6 +114,7 @@ fn guard_cfg(cfg: &ExecutorConfig) -> GuardConfig {
     GuardConfig::from_policy(
         support::no_inject(&cfg.project_schema),
         zeroship_migrate_postgres::DIALECT,
+        &cfg.project_schema,
     )
 }
 

@@ -93,8 +93,11 @@ async fn an_engine_rendered_down_restores_the_schema_its_up_changed() {
             &zeroship_migrate_sqlite::DIALECT,
             &support::confined_charter(),
         );
-        let gc =
-            GuardConfig::from_policy(support::no_inject(PROJECT), zeroship_migrate_sqlite::DIALECT);
+        let gc = GuardConfig::from_policy(
+            support::no_inject(PROJECT),
+            zeroship_migrate_sqlite::DIALECT,
+            PROJECT,
+        );
         if needs_seed {
             let s = format!(r#"{{"ir_version":1,"name":"seed","ops":[{seed}]}}"#);
             let a = author

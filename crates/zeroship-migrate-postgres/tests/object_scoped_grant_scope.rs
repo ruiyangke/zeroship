@@ -46,6 +46,7 @@ fn guard_for(grant: &str) -> SqlGuard {
     SqlGuard::new(GuardConfig::from_policy(
         support::effective_policy_from_charter_toml(&charter(grant)),
         POSTGRES,
+        "app",
     ))
 }
 

@@ -46,6 +46,7 @@ fn cfg_for(default_scope: &str, require: &str) -> GuardConfig {
     GuardConfig::from_policy(
         support::effective_policy_from_charter_toml(&charter(default_scope, require)),
         POSTGRES,
+        "app",
     )
 }
 
@@ -262,13 +263,9 @@ fn scoped_require_rls_judges_the_renamed_identity() {
     );
 }
 
-// -- an unqualified table under a multi-schema charter fails CLOSED --------------
-
-/// Two owned schemas means no unique pinned schema, so the guard's table key carries
-/// an EMPTY schema and no `ObjectName` can be built from it. That table is not
-/// provably outside the obligation, so it must be refused.
+/// Foreign-schema grants do not detach unqualified objects from the host target.
 #[test]
-fn unqualified_table_under_a_multi_schema_charter_fails_closed() {
+fn unqualified_table_under_a_foreign_schema_grant_keeps_target_obligations() {
     let charter = r#"policy_version = 1
 
 [[grant]]
@@ -294,9 +291,10 @@ scope = { include = ["app"] }
     let cfg = GuardConfig::from_policy(
         support::effective_policy_from_charter_toml(charter),
         POSTGRES,
+        "app",
     );
     assert_require_rls_refused(&cfg, &ir_with(vec![create_table(None, "users")]), 0);
-    // Same charter, same missing pin, reached through raw SQL instead.
+    // Raw SQL resolves the same unqualified identity.
     assert_require_rls_refused(
         &cfg,
         &ir_with(vec![raw("INSERT INTO ledger (id) VALUES (1)")]),

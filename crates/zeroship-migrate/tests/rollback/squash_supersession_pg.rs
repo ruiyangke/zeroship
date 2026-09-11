@@ -100,7 +100,11 @@ async fn apply_doc(
         &zeroship_migrate_postgres::DIALECT,
         &pol,
     );
-    let guard = GuardConfig::from_policy(pol.clone(), zeroship_migrate_postgres::DIALECT);
+    let guard = GuardConfig::from_policy(
+        pol.clone(),
+        zeroship_migrate_postgres::DIALECT,
+        &cfg.project_schema,
+    );
     let folded = fold_ops(
         zeroship_migrate::shipping_vendors(),
         history,
@@ -678,7 +682,11 @@ async fn a_rollback_may_not_force_skip_an_irreversible_squash() {
         set.push(s.clone());
         let guard = guard_for(
             zeroship_migrate::shipping_vendors(),
-            &GuardConfig::from_policy(policy(&cfg.project_schema), zeroship_migrate_postgres::DIALECT),
+            &GuardConfig::from_policy(
+                policy(&cfg.project_schema),
+                zeroship_migrate_postgres::DIALECT,
+                &cfg.project_schema,
+            ),
         );
         let forced = RollbackRequest::new(RollbackTarget::All).with_options(RollbackOptions {
             force: true,
@@ -805,7 +813,11 @@ async fn a_squash_that_can_reverse_itself_still_rolls_back_under_force() {
         set.push(reversible.clone());
         let guard = guard_for(
             zeroship_migrate::shipping_vendors(),
-            &GuardConfig::from_policy(policy(&cfg.project_schema), zeroship_migrate_postgres::DIALECT),
+            &GuardConfig::from_policy(
+                policy(&cfg.project_schema),
+                zeroship_migrate_postgres::DIALECT,
+                &cfg.project_schema,
+            ),
         );
         let outcome = rollback(
             &backend,

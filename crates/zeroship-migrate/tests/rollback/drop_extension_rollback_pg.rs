@@ -132,7 +132,11 @@ async fn apply_doc(
         &zeroship_migrate_postgres::DIALECT,
         &pol,
     );
-    let guard = GuardConfig::from_policy(pol.clone(), zeroship_migrate_postgres::DIALECT);
+    let guard = GuardConfig::from_policy(
+        pol.clone(),
+        zeroship_migrate_postgres::DIALECT,
+        &cfg.project_schema,
+    );
     let folded = fold_ops(
         zeroship_migrate::shipping_vendors(),
         history,
@@ -189,7 +193,11 @@ async fn live_extension(
 fn pg_guard(cfg: &ExecutorConfig) -> Box<dyn zeroship_migrate::MigrationGuard> {
     guard_for(
         zeroship_migrate::shipping_vendors(),
-        &GuardConfig::from_policy(policy(&cfg.project_schema), zeroship_migrate_postgres::DIALECT),
+        &GuardConfig::from_policy(
+            policy(&cfg.project_schema),
+            zeroship_migrate_postgres::DIALECT,
+            &cfg.project_schema,
+        ),
     )
 }
 
@@ -224,7 +232,7 @@ fn lower_drop_from_history(history: &[Op], if_exists: Option<bool>) -> Migration
         "ops": [drop]
     })
     .to_string();
-    let guard = GuardConfig::from_policy(pol.clone(), (*dialect).clone());
+    let guard = GuardConfig::from_policy(pol.clone(), (*dialect).clone(), PROJECT_SCHEMA);
     let artifact = IrAuthor::new(
         zeroship_migrate::shipping_vendors(),
         PROJECT_SCHEMA,
@@ -250,7 +258,11 @@ async fn unguarded_drop_extension_from_folded_history_has_create_inverse() {
     );
     guard_for(
         zeroship_migrate::shipping_vendors(),
-        &GuardConfig::from_policy(policy(PROJECT_SCHEMA), zeroship_migrate_postgres::DIALECT),
+        &GuardConfig::from_policy(
+            policy(PROJECT_SCHEMA),
+            zeroship_migrate_postgres::DIALECT,
+            PROJECT_SCHEMA,
+        ),
     )
     .as_ref()
     .check(migration.down.as_deref().expect("the inverse exists"))

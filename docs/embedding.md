@@ -69,11 +69,6 @@ use zeroship_migrate_postgres::PostgresBackend;
 const POLICY_CHARTER: &str = r#"policy_version = 1
 
 [[grant]]
-key = "schema.cross_schema"
-value = true
-scope = { include = ["app_demo"] }
-
-[[grant]]
 key = "schema.create_table"
 value = true
 scope = { include = ["app_demo"] }
@@ -95,7 +90,7 @@ async fn apply_postgres<S: SqlSession>(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let policy = effective_policy_from_charter_toml(POLICY_CHARTER)
         .map_err(std::io::Error::other)?;
-    let guard = GuardConfig::from_policy(policy.clone(), POSTGRES);
+    let guard = GuardConfig::from_policy(policy.clone(), POSTGRES, "app_demo");
 
     let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
     let plan = engine.plan(migrations, &guard);
@@ -245,7 +240,12 @@ Unsupported capabilities return an error; they are not silently approximated.
 
 ## Policy
 
-Policies are authored as root charter TOML and loaded explicitly:
+Policies are authored as root charter TOML and loaded explicitly. The trusted host
+supplies the target schema separately: references within that schema need no
+`schema.cross_schema` grant. Foreign schemas require an explicit grant; table
+creation and rename still require their operation grants in either schema.
+Unqualified objects resolve against the host target even when foreign access is
+granted.
 
 ```rust
 # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -255,6 +255,7 @@ let policy =
 let guard = zeroship_migrate::GuardConfig::from_policy(
     policy.clone(),
     zeroship_migrate_postgres::DIALECT,
+    "app_demo",
 );
 let executor = zeroship_migrate::ExecutorConfig::new(
     "project_demo",

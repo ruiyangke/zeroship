@@ -435,6 +435,8 @@ impl MigrationAuthor for DeterministicAuthor {
 pub struct RawSqlAuthor {
     /// The declaring app (`app_...`) recorded on the migration.
     owner_app: String,
+    /// The host-selected schema used for unqualified SQL objects.
+    project_schema: String,
     /// The backend whose guard grammar and fail-safe rules inspect the SQL.
     dialect: DialectId,
     /// The explicitly authored policy used to inspect the supplied SQL.
@@ -451,9 +453,11 @@ impl RawSqlAuthor {
         owner_app: impl Into<String>,
         dialect: DialectId,
         effective: EffectivePolicy,
+        project_schema: impl Into<String>,
     ) -> Self {
         Self {
             owner_app: owner_app.into(),
+            project_schema: project_schema.into(),
             dialect,
             effective,
             vendors,
@@ -483,7 +487,11 @@ impl RawSqlAuthor {
         // errors at authoring time.
         let guard = guard_for(
             self.vendors,
-            &GuardConfig::from_policy(self.effective.clone(), self.dialect.clone()),
+            &GuardConfig::from_policy(
+                self.effective.clone(),
+                self.dialect.clone(),
+                &self.project_schema,
+            ),
         );
         let flags = guard.flags_for_sql(up).map_err(AuthorError::Guard)?;
         let checksum = Checksum::of(&crate::model::migration::ChecksumInput {
@@ -746,6 +754,7 @@ mod tests {
             "app_acme",
             POSTGRES,
             crate::test_fixtures::no_inject("proj_acme"),
+            "proj_acme",
         );
         let m = author
             .wrap(
@@ -771,6 +780,7 @@ mod tests {
             "app_acme",
             POSTGRES,
             crate::test_fixtures::no_inject("proj_acme"),
+            "proj_acme",
         );
         let m = author
             .wrap("drop_legacy", "DROP TABLE \"proj_acme\".\"legacy\"", None)
@@ -790,6 +800,7 @@ mod tests {
             "app_acme",
             POSTGRES,
             crate::test_fixtures::no_inject("proj_acme"),
+            "proj_acme",
         );
         let err = author
             .wrap("broken", "THIS IS NOT SQL ;;", None)
@@ -810,6 +821,7 @@ mod tests {
             "app_acme",
             POSTGRES,
             crate::test_fixtures::no_inject("proj_acme"),
+            "proj_acme",
         );
         let m = author
             .wrap("evil", "SELECT * FROM control.users", None)

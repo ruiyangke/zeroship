@@ -94,7 +94,7 @@ fn lower_for(dialect: &DialectId, bytes: &str) -> Result<zeroship_migrate::Lower
         APP,
         &registry(),
         &LiveSchema::default(),
-        &GuardConfig::from_policy(support::no_inject(PROJECT), (*dialect).clone()),
+        &GuardConfig::from_policy(support::no_inject(PROJECT), (*dialect).clone(), PROJECT),
     )
     .map_err(|e| format!("{e:?}"))
 }

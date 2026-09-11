@@ -8349,6 +8349,10 @@ fn validate_op_schema_and_guard(
                         ),
                         format!("name one of the permitted schemas {allowed:?}"),
                     ),
+                    crate::model::policy::SchemaScope::Policy { project_schema, .. } => (
+                        format!("{what} names foreign schema {schema:?}, outside target {project_schema:?} and its cross-schema grants"),
+                        format!("use target {project_schema:?} or grant schema.cross_schema for {schema:?}"),
+                    ),
                     crate::model::policy::SchemaScope::Unconfined => (
                         format!(
                             "internal error: unconfined operator scope unexpectedly refused \
