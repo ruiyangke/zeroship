@@ -57,9 +57,8 @@
 #
 # Both spellings put the same bytes in the same child's environment. This gate
 # discriminates on the DELIVERY, which is what makes it bound to the hazard
-# rather than to a spelling of a name: `ZEROSHIP_DW_E2E=1 \ cargo test` at
-# tests/e2e_durable_workflows.sh:687 is green and must stay green, while
-# `export CONTROL_TEST_DB=...` is not.
+# rather than to a spelling of a name: a command prefix is permitted,
+# while `export CONTROL_TEST_DB=...` is not.
 #
 # ---------------------------------------------------------------------------
 # WHAT THIS GATE DOES NOT DO, stated so nobody reads it as complete
@@ -152,12 +151,6 @@ REDPANDA_BROKERS
 ZERO_MIGRATE_MYSQL_URL
 ZERO_MIGRATE_TEST_PG_URL
 ZEROSHIP_CONFIG_CONTRACT_FIXTURE_TEST
-ZEROSHIP_DW_E2E
-ZEROSHIP_DW_E2E_APP_ID
-ZEROSHIP_DW_E2E_BLOB_ROOT
-ZEROSHIP_DW_E2E_CONTROL_URL
-ZEROSHIP_DW_E2E_DEPLOY_ID
-ZEROSHIP_DW_E2E_GATEWAY_URL
 "
 
 # Test-class names a harness puts in its OWN environment with `export`, each
@@ -203,6 +196,11 @@ read_sites() {
     grep -HnoE '"[A-Z][A-Z0-9_]*"' "$f" \
       | sed -E 's/^([^:]*:[0-9]+):"([A-Z][A-Z0-9_]*)"$/\2 \1/'
   done < <(find "$root/libs" -type f -path '*/tests/common/env.rs' -print)
+}
+
+# Distinct variable names from the read-site stream.
+site_names() {
+  awk 'NF {print $1}' | sort -u
 }
 
 # $1 = repo root. Every AMBIENT export site under tests/, as `NAME file:line`.
@@ -254,6 +252,18 @@ RS
     status=1
   fi
 
+  # Repeated reads in different files contribute the same inventory name.
+  cp "$tmp/crates/scratch/tests/a.rs" "$tmp/crates/scratch/tests/b.rs"
+  got="$(read_sites "$tmp" | site_names)"
+  sites="$(read_sites "$tmp" | wc -l | tr -d ' ')"
+  if [ "$sites" -eq 2 ] && [ "$got" = ZS_BRAND_NEW_KNOB ]; then
+    echo "  ok   repeated reads retain their sites and share an inventory name"
+  else
+    echo "  FAIL repeated reads changed the distinct-name inventory"
+    status=1
+  fi
+  rm "$tmp/crates/scratch/tests/b.rs"
+
   # -- Rust CONTROL, ONE VARIABLE: the same name, same file, same test, but
   #    DELIVERED to a child as a command prefix instead of read from ambient.
   #    This is `Command::env`, exactly what libs/compio-postgres does with
@@ -288,8 +298,7 @@ SH
   fi
 
   # -- Shell CONTROL, ONE VARIABLE: the same name, same file, same value,
-  #    delivered as a COMMAND PREFIX. This is the shape at
-  #    tests/e2e_durable_workflows.sh:687 and it must stay green.
+  #    delivered as a COMMAND PREFIX, which must stay permitted.
   cat > "$tmp/tests/h.sh" <<'SH'
 CONTROL_TEST_DB="$DSN" \
   cargo test -p zeroship-control
@@ -382,11 +391,12 @@ fi
 # one, and a reader who checks the list instead of the tree gets a wrong answer
 # with no signal that anything is off.
 #
-# examined = inventory entries ruled on. The floor is READ_FILES, an
-# INDEPENDENT measurement of the corpus: it is what stops somebody silencing
-# arm 1 by gutting the inventory, because arm 1's floor is the corpus and this
-# arm's count is the list.
-declared_names="$(printf '%s\n' "$SITES" | awk '{print $1}' | sort -u)"
+# examined = inventory entries ruled on. The floor is the distinct names
+# observed in source, since different files can read the same variable.
+# Arm 1 independently checks read-site coverage against source-file coverage.
+declared_names="$(printf '%s\n' "$SITES" | site_names)"
+read_names="$(printf '%s\n' "$declared_names" | awk 'NF {n++} END {print n+0}')"
+[ "$read_names" -gt 0 ] || read_names=1
 dead=""
 n_entries=0
 for name in $INVENTORY; do
@@ -394,10 +404,9 @@ for name in $INVENTORY; do
   printf '%s\n' "$declared_names" | grep -qx -- "$name" || dead="$dead $name"
 done
 
-if ! gate_arm inventory_liveness "$n_entries" "$READ_FILES"; then
-  fail "the inventory holds $n_entries entr(ies) against a corpus of $READ_FILES
-       file(s) that read the environment. It has been emptied or truncated, so
-       arm 1 above is excusing names nobody listed."
+if ! gate_arm inventory_liveness "$n_entries" "$read_names"; then
+  fail "the inventory holds $n_entries entr(ies) against $read_names
+       distinct names read by test code. The inventory does not cover its corpus."
 elif [ -z "$dead" ]; then
   pass "all $n_entries inventory entr(ies) are still read by live test code"
 else
