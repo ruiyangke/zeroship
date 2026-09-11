@@ -790,22 +790,6 @@ export type Id<T extends string> = string & {
 };
 
 /**
- * A physical database object a single field owns beyond its own columns.
- *
- * Tagged by `kind` so a consumer never has to guess from a name's shape which sort of
- * object it is looking at - the failure mode `FieldStorage` exists to remove.
- */
-export type AuxiliaryObject = {
-  kind: "sqliteVec0Table";
-  /** The `vec0` virtual table's name. */
-  name: string;
-  /** The column the base table and the virtual table are joined on. */
-  joinOn: string;
-  /** The after-insert, after-delete and after-update trigger names, in that order. */
-  triggers: string[];
-};
-
-/**
  * **Where one declared field physically lives** (runtime descriptor v2).
  *
  * A declared field is not always one column. A masked field occupies two: the value a
@@ -847,8 +831,6 @@ export interface FieldStorage {
   rawSortable?: boolean;
   /** May a creator-facing projection return `rawColumn`? See `rawFilterable`. */
   rawProjectable?: boolean;
-  /** Physical objects this field owns beyond its columns. Omitted when there are none. */
-  auxiliary?: AuxiliaryObject[];
 }
 
 /** Internal representation of a fully-specified field definition used by validate and collection. */

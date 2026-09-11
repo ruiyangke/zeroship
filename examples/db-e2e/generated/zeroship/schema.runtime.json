@@ -552,7 +552,7 @@
           "type": "string",
           "encrypted": true,
           "mask": {
-            "kind": "full",
+            "kind": "email",
             "classification": "pii"
           },
           "readable": true,
@@ -571,8 +571,8 @@
           "type": "string",
           "encrypted": true,
           "mask": {
-            "kind": "full",
-            "classification": "pii"
+            "kind": "last4",
+            "classification": "spi"
           },
           "readable": true,
           "filterable": false,

@@ -1,42 +1,30 @@
 # Workflow order example
 
-A minimal durable workflow app that shows the raw creator contract:
+A raw JavaScript deploy contract for an order workflow. `OrderWorkflow` loads
+an order, calls `RiskReviewWorkflow`, reserves inventory, waits for payment
+approval, and creates a shipment. Reservations and shipments have compensators.
+The default export exposes the workflow classes and an HTTP fetch handler.
 
-- `OrderWorkflow` extends `Workflow<Params, Output>`.
-- The handler starts runs with `env.workflows.OrderWorkflow.start(...)`.
-- The workflow uses `step.run`, `step.sleep`, `step.waitForSignal`, a child
-  workflow, and compensators.
-- The default export exposes `workflows` plus a small fetch handler.
-
-## Typecheck
-
-```bash
-pnpm --filter zeroship-workflows-order-example typecheck
+```sh
+pnpm build
+zeroship serve dist/index.js --port 3000
+pnpm test
 ```
 
-## Build and run locally
+Vite bundles the SDK into `dist/index.js`. Local development uses the SQLite
+workflow engine. Its child-workflow limitation means an order currently ends
+with `WorkflowUnsupportedError` locally; the deployed engine runs the full
+order flow.
 
-```bash
-pnpm --filter zeroship-workflows-order-example build
-ZEROSHIP_CONTROL_URL=http://localhost:9090 \
-ZEROSHIP_CONTROL_KEY=<control-key> \
-zeroship serve examples/workflows-order/dist/index.js --port 3000
-```
+The example owns its Vitest and Playwright tests under `tests/`. Its fixture
+builds a raw `.zship`, starts PostgreSQL through Testcontainers, applies platform
+migrations, and deploys to real control, gateway, and worker processes. Docker
+and the built workspace SDKs are required. Tests cover duplicate starts,
+approval signals, shipment results, and browser requests. Logs and screenshots
+remain under `tests/.artifacts/`.
 
-Then start and approve an order:
+HTTP routes:
 
-```bash
-curl -X POST http://localhost:3000/orders \
-  -H 'content-type: application/json' \
-  -d '{"orderId":"ord_demo","sku":"sku_hat","quantity":2}'
-
-curl -X POST http://localhost:3000/orders/<runId>/approve \
-  -H 'content-type: application/json' \
-  -d '{"approved":true,"approvalCode":"demo-ok"}'
-```
-
-Check status:
-
-```bash
-curl http://localhost:3000/orders/<runId>
-```
+- `POST /orders`: start or join an order using `orderId`, `sku`, and `quantity`.
+- `GET /orders/{runId}`: read durable state and output.
+- `POST /orders/{runId}/approve`: send `approved` and an optional `approvalCode`.

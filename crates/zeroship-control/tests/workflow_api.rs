@@ -5,3 +5,4 @@ mod common;
 mod workflow_postgres;
 mod workflow_instance_api_test;
 mod workflow_plugin;
+mod workflow_provisioning;
