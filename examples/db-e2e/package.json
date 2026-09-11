@@ -6,8 +6,8 @@
     "dev": "vite",
     "migrate": "zeroship-dev-migrate",
     "build": "vite build",
-    "typecheck": "tsc --noEmit",
-    "e2e": "node e2e/run.mjs"
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.tests.json",
+    "test": "vitest run"
   },
   "dependencies": {
     "@zeroship/bootstrap": "workspace:*",
@@ -17,7 +17,10 @@
     "@zeroship/vite-plugin": "workspace:*"
   },
   "devDependencies": {
+    "@types/node": "catalog:",
     "@zeroship/types": "workspace:*",
+    "playwright": "1.58.2",
+    "vitest": "^4.1.7",
     "typescript": "catalog:",
     "vite": "catalog:",
     "zeroship": "workspace:*"

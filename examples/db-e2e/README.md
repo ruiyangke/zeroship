@@ -39,9 +39,19 @@ Then hit the RPC endpoints under `http://127.0.0.1:3000/__zeroship/v1/*`.
 
 ## End-to-end suite
 
-The repo-level runner builds the SDKs, builds this example, boots the real runtime
-against `sqlite:.zeroship/dev.sqlite`, and executes the assertion harness:
+Vitest owns the fixture and assertions in `tests/`. It builds the SDKs and Rust
+runtime, copies the app into a disposable workspace directory, applies its
+migrations to a SQLite file, and starts Vite and the runtime on allocated ports.
+Chromium exercises the page and RPC proxy; TypeScript tests exercise the database
+contract. The fixture removes its own app copy and processes when the run ends.
 
 ```bash
-./tests/e2e_db_sqlite.sh
+pnpm --dir examples/db-e2e test
 ```
+
+Install workspace dependencies first. Use the repository's Rust and Node
+toolchains and Chromium from the development environment, or install it with
+`pnpm --dir examples/db-e2e exec playwright install chromium`.
+`PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` selects an explicit browser executable.
+Service logs and failure screenshots remain under `tests/.artifacts/`.
+An unavailable runtime, browser, or failed migration fails the suite.
