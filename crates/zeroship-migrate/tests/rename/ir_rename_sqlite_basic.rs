@@ -746,6 +746,7 @@ fn referencing_descriptor(table: &str, parent: &str) -> CollectionDescriptor {
                 ty: "ref".into(),
                 required: true,
                 references: Some(parent.into()),
+                reference_column: Some("id".into()),
                 ..Default::default()
             },
             FieldDescriptor {
@@ -791,7 +792,7 @@ fn renamecolumn_sqlite_retains_fk_to_another_known_live_table() {
     };
 
     assert!(
-        create.contains("REFERENCES \"departments\" (id)"),
+        create.contains("REFERENCES \"departments\" (\"id\")"),
         "the rebuild must retain the child FK to the known live parent: {create}"
     );
 }

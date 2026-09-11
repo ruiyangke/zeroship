@@ -1222,7 +1222,7 @@ The per-target refusal lives in `validate_op_support` (`validate.rs:1912`): it f
 
 ### 8.5 How ops render — the lower phase (`render/lower.rs`)
 
-The `render/lower.rs` `IrAuthor` (the largest file in the crate) is the DDL **Lower** phase (§6/§6.4/§6.5). `IrAuthor::lower` compiles a validated, ownership-checked `MigrationIr` into the same `Migration` shape the declarative differ produces — it is the IR-path peer of `DeclarativeAuthor::diff` ([§5.1](#5-authoring-declarative-desired-state--the-fold)). Its **single-source-of-truth mandate** (§6.5, `render/lower.rs:7-19`): `IrAuthor` does **not** hand-construct snapshots and does **not** re-spell the default/system-field/encryption/comment-sentinel logic — it routes every op's fields through the **shared** dialect-parameterized snapshot-builder `render::declarative::build_table_snapshot` (the SAME builder the differ's `desired_snapshot_for_dialect` calls) and renders the resulting `TableSnapshot`/`ColumnSnapshot`/`IndexSnapshot` through the SAME render methods (`DeclarativeAuthor::lower_*` → `render_create_table`/`DdlEmitter`). So the emitted SQL is byte-identical to the declarative path **by construction**, guarded by the §6.4 cross-path golden (`crates/zeroship-migrate/tests/ir_contract/ir_author_render_parity.rs`).
+`IrAuthor::lower` turns migration IR into executable plans. The declarative and IR paths share column and table snapshot builders, then render SQL through the selected backend. Table injection comes from the effective policy; lifecycle roles come from declared assignments. The cross-path checks in `crates/zeroship-migrate/tests/ir_contract/ir_author_render_parity.rs` compare the emitted statements.
 
 A lowered plan is a sequence of `PlanStep` (`render/step.rs:48`). The dialect-distinct shapes:
 
@@ -1622,23 +1622,13 @@ A confined creator writes `table("posts").create({…})` with **no** `{schema}` 
 
 The bootstrap file `schema_roles_extensions.ts` is the infrastructure floor: the `zeroship` schema, `citext`, 10 roles (service roles `zeroship_{auth,control,gateway,worker,app}` — the first two `bypassRls: true` — plus four `sandbox_*` roles, §11.5), 13 `domain`s acting as platform-wide enums (`spend_state ∈ {allow,warn,degrade,block}`, `invoice_status`, `billing_period`), and the `audit_events_id_seq` sequence. The corpus uses one `table(...)` handle for portable and PG-vendor table operations alike: partial indexes, RLS, regex CHECKs, and constraint validation all stay capability/dialect-gated by the engine. Where the DSL cannot express a construct, the corpus uses the gated `raw({ sql, reason })` escape — e.g. a `CREATE TRIGGER … BEFORE UPDATE OF sector_identifier …` the trigger DSL cannot express (`functions_triggers_comments.ts:27`). `raw`/`raw_view_body` are capabilities *only Platform enables*. The trigger-heavy file encodes financial-integrity invariants in plpgsql (append-only audit tables, immutable ledgers, controlled state machines); RLS tenant isolation keys off `current_setting('zeroship.tenant_app', true)::uuid`.
 
-### 11.3 The two trust profiles (Confined vs Platform)
+### 11.3 Policy-defined table shape
 
-The engine ships two embedded profiles, both `include_str!`'d TOML (`model/profile.rs:27,32`): `policy-profiles/confined.toml` (least-privilege default + fail-closed fallback, `PolicyProfile::default()` → `confined()`) and `policy-profiles/platform.toml` (`extends = "confined"`, everything enabled). The current platform runner selects Platform internally; it exposes no profile flag. There is deliberately **no** `permissive` preset and no sealed belt-skip posture (`SealedPosture` has only `Confined`/`Platform`).
+The engine receives an `EffectivePolicy`. Covering `[[inject]]` rules declare columns, indexes, `primary_key`, and `author_primary_key`; `resolve_create_table_policy` materializes that shape into the migration IR.
 
-| Knob | Confined | Platform |
-| --- | --- | --- |
-| `capabilities.*` (extension/schema/role/grant/rls/partition/policy/function/raw_sql/raw_view_body/materialized_view/cross_schema) | all **false** | all **true** |
-| `system_shape.columns` | 7 injected columns | **none** (`[]`) |
-| `system_shape.primary_key` | `["id"]` (platform-owned) | `"author"` |
-| `system_shape.author_primary_key` | `"forbid"` | `"allow"` |
-| `data_security.require_rls` | false | **true** |
-| `data_security.destructive_ops` | `"allow"` | `"forbid"` |
-| `operational.lock_timeout_ms / statement_timeout_ms` | 3000 / 60000 | 3000 / 60000 |
+The creator defaults are declared in [confined-system-shape.inject.toml](../../policies/confined-system-shape.inject.toml). Its columns carry explicit `assign` generators for identity, timestamps, actors, and revision updates. Runtime descriptors preserve those assignments and the selected primary key. The engine does not recognize lifecycle roles by column name.
 
-The most important *authoring* difference: **Confined injects a platform-managed system-column shape** (auto `id` text PK + `created_at`/`updated_at`/`created_by`/`updated_by`/`version`/`deleted_at` + indexes; author-supplied PKs *forbidden*, `TableSystemShapePolicy::confined()`, `profile.rs:188-241`), while **Platform injects nothing** (`author_primary_key: Allow`, `profile.rs:245-252`). That is why a creator never declares `id` (the platform owns it), and why `app_secrets` can be keyed `["app_id","key_name"]` with a `bytes` ciphertext column and no synthetic `id` — impossible under Confined.
-
-The profiles compose via a monotonic **meet** (`PolicyProfile::meet_ceiling_draft`, `profile.rs:137`): permission knobs boolean-AND / set-intersect / take the ordered minimum (a draft cannot exceed the trusted ceiling — rejected `SealError::PolicyExceedsCeiling`), while obligation knobs (`require_rls`, `no_hard_delete`, `sensitive_columns`) union upward. A `SealedProfile` (HMAC-SHA256-MAC'd, `profile.rs:1155`) is the tamper-evident carrier for an out-of-process apply path. Platform is constructible only with `OperatorCapability`, and the creator-submission ingress is hard-wired to Confined with no API path to Platform.
+The [platform policy](../../policies/platform.policy.toml) injects no table shape, so platform migrations declare their own columns and keys. An ordinary `id`, `created_at`, or `deleted_at` has only the behavior declared for it. Prefix and identity refinements follow the injected scalar key's declared name, and foreign keys name their target column explicitly.
 
 ### 11.4 Applying the platform migrations (the build/boot wiring)
 

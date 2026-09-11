@@ -383,7 +383,7 @@ async fn add_column_ifnotexists_present_integer_affinity_match_is_noop() {
 }
 
 #[compio::test]
-async fn add_column_ifnotexists_sqlite_ref_over_live_string_is_noop() {
+async fn add_column_ifnotexists_sqlite_bounded_string_over_text_is_noop() {
     // **F1 — within-TEXT-affinity facet change is a no-op on SQLite (differ-consistent).**
     // addColumn ifNotExists declaring a `ref` over a column the live DB authored as
     // `string`. BOTH `string` and `ref` fold to the SQLite `text` affinity, and on
@@ -434,16 +434,12 @@ async fn add_column_ifnotexists_sqlite_ref_over_live_string_is_noop() {
             .expect("add the live string column unguarded");
     }
 
-    // Guarded add declaring a REF (a different SDK facet that also folds to the `text`
-    // affinity) → present-match → SatisfiedNoop (NOT a fail-closed, NOT a silent skip
-    // over a real divergence — there is none on SQLite).
+    // Bounded strings and unbounded text share SQLite storage affinity.
     let migs = lower(Op::AddColumn {
         attributes: zeroship_migrate_ir::attribute::AddColumnAttributes::new(),
         table: "t".into(),
         column: "owner".into(),
-        ty: ColType::Ref {
-            references: "people".into(),
-        },
+        ty: ColType::String { length: 255 },
         nullable: Some(true),
         default: None,
         value_format: None,
