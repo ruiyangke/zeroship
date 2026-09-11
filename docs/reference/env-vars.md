@@ -735,7 +735,7 @@ required now, like Postgres, for the same reason
 ### The surviving test-only names
 
 `PG_TEST_URL`
-`AUTH_TEST_SMTP_SINK` `ZEROSHIP_DW_E2E*`
+`AUTH_TEST_SMTP_SINK`
 
 `ZEROSHIP_SESSION_SECRET`, `ZEROSHIP_SESSION_SECRET_PREV` and
 `ZEROSHIP_SESSION_NONCE_CAPACITY` were on that list until 2026-09-04 and
