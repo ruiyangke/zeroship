@@ -1,10 +1,6 @@
 //! Host configuration and built-in driver selection shared by Rust and V8.
-use crate::{
-    backend::{BackendHandle, PostgresBackend},
-    encryption::LocalKeySource,
-    error::DbError,
-};
-use std::{num::NonZeroUsize, path::PathBuf, rc::Rc};
+use crate::{backend::BackendHandle, encryption::LocalKeySource, error::DbError};
+use std::{num::NonZeroUsize, path::PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BackendUrl {
@@ -14,6 +10,7 @@ pub enum BackendUrl {
 
 /// Parse configuration without opening a database.
 pub fn backend_for_url(url: &str) -> Result<BackendUrl, DbError> {
+    CONFIGURATION_PARSES.with(|count| count.set(count.get() + 1));
     let trimmed = url.trim();
     if trimmed.is_empty() {
         return Err(DbError::config_hinted(
@@ -47,6 +44,21 @@ pub fn backend_for_url(url: &str) -> Result<BackendUrl, DbError> {
     ))
 }
 
+mod factory;
+mod local;
+pub use factory::{backend_open_count, BackendFactory, ConnectionFactory, ConnectionIdentity};
+pub use local::LocalConnection;
+
+thread_local! {
+    static CONFIGURATION_PARSES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Configuration parses performed on the calling thread.
+#[doc(hidden)]
+pub fn configuration_parse_count() -> u64 {
+    CONFIGURATION_PARSES.with(std::cell::Cell::get)
+}
+
 /// Connection configuration. Debug output never contains the database URL.
 pub struct ConnectOptions {
     url: String,
@@ -74,19 +86,11 @@ impl ConnectOptions {
         self
     }
     pub async fn connect(self) -> Result<BackendHandle, DbError> {
-        match backend_for_url(&self.url)? {
-            BackendUrl::Postgres => {
-                let limit = self
-                    .max_connections
-                    .map(NonZeroUsize::get)
-                    .unwrap_or_else(crate::backend::postgres::default_pool_capacity);
-                Ok(BackendHandle::new(Rc::new(
-                    PostgresBackend::connect(self.url.trim(), limit, self.key_source).await?,
-                )))
-            }
-            BackendUrl::Sqlite { path } => Ok(BackendHandle::new(Rc::new(
-                crate::backend_selection::open_sqlite_backend(path, self.key_source).await?,
-            ))),
-        }
+        ConnectionFactory::for_url_with_limit(&self.url, self.max_connections)?
+            .connect(self.key_source)
+            .await
     }
 }
+
+#[cfg(test)]
+mod tests;
