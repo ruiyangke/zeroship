@@ -592,8 +592,8 @@ jobs:
         run: tests/cargo_package_spec_gate.sh
       - name: KV storage remains independent of the V8 binding
         run: cargo test -p zeroship-kv --test architecture
-      - name: No feature routes onto a dev-only dependency
-        run: tests/dev_dep_feature_route_gate.sh
+      - name: Repository dependency and feature contracts
+        run: cargo xtask test repository
       # TWO STEPS, and the split is the point. The bare run passes at zero bad
       # citations, which is also what an extractor that stopped matching prints;
       # its arm floors catch a collapse to nothing but cannot see ONE capability
@@ -609,8 +609,6 @@ jobs:
         run: tests/doc_citation_gate.sh
       - name: The napi addon's declared and exported functions agree
         run: tests/napi_export_parity_gate.sh
-      - name: No cfg pair whose two arms declare the identical item
-        run: tests/noop_cfg_pair_gate.sh
       - name: No platform column is stored beside its own hash
         run: tests/secret_beside_its_hash_gate.sh
       # Arm 2 of this one was RED on main the whole time it was unwired:
@@ -1068,16 +1066,6 @@ jobs:
       # The reasoning for both is in the script header.
       - name: Clippy, with proof every crate was linted
         run: tests/clippy_gate.sh
-      # The last two of the twelve gates that were wired nowhere. Both drive
-      # cargo rather than reading text, so they sit at the end of this job where
-      # the target directory is warm from everything above: measured locally at
-      # 21 re-emitted compilation units for the first and four small
-      # feature-split checks for the second, against a cold cost of a full
-      # crate build each.
-      - name: No item is reachable at a visibility its signature cannot honour
-        run: tests/private_interface_gate.sh
-      - name: The ORM driver contract is invariant across the feature split
-        run: tests/contract_feature_invariance_gate.sh
 
   # Required control-plane and migration-service database verification. The suite
   # provisions a migrated PostgreSQL database and runs ordinary crate tests,

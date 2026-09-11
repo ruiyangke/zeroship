@@ -209,6 +209,10 @@ how four OTHER gates went red the same week when two new crates landed.
 
 Data architecture checks are Rust tests in `xtask/tests/data_architecture.rs`,
 run by `cargo xtask test data-architecture` and the complete data suite.
+Workspace dependency and feature rules run through `cargo xtask test repository`
+in `xtask/tests/repository_architecture.rs`. Driver and storage trait shape is
+checked by the data architecture suite. The ORM and V8 adapter deny
+`private_interfaces` and `private_bounds` during ordinary compilation.
 Keep scan floors and rejection controls beside the checks. Example acceptance
 tests live inside each example and use Vitest, TypeScript fixtures and browser
 assertions. Other repository gates remain shell scripts under `tests/` and

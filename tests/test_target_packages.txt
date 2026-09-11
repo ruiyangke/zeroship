@@ -23,7 +23,7 @@
 #
 #   - The first said `cargo test --workspace --no-run` could not be produced at
 #     all (feature unification broke registry `postgres-types`). That was fixed
-#     by tests/dev_dep_feature_route_gate.sh's subject.
+#     by the dependency-feature rule in xtask/tests/repository_architecture.rs.
 #   - The second said the command failed on ONE package, `zeroship-migrate-node`,
 #     whose integration targets could not LINK (`undefined reference to
 #     napi_create_function`), and concluded: "The census cannot be made correct

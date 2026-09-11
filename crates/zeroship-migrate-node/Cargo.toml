@@ -149,7 +149,7 @@ tempfile = { workspace = true }
 # "dyn-symbols")`, so it is the code that ALREADY SHIPS on x86_64-pc-windows-msvc.
 #
 # DECLARED ON THE DEV-DEPENDENCY, never routed through `[features]`, per
-# tests/dev_dep_feature_route_gate.sh. Under resolver v3 a dev-dependency's
+# xtask/tests/repository_architecture.rs. Under resolver v3 a dev-dependency's
 # features unify into the normal edge WHENEVER A TEST TARGET IS IN THE UNIT GRAPH,
 # so `cargo test` gets it and a `--lib`/`--bins` build does not. Measured: the
 # shipped cdylib keeps 52 undefined `napi_*` symbols and a defined

@@ -127,7 +127,7 @@ cd "$(dirname "$0")/../.."
 #     the engine is unreachable from the adapter that calls it.
 #
 # The combined figure is what the split publishes in total, and it is the number
-# `tests/private_interface_gate.sh` rules on the health of.
+# the data crates' private_interfaces and private_bounds lints enforce.
 ADAPTER_SRC=crates/zeroship-data-v8/src
 ENGINE_SRC=crates/zeroship-data-orm/src
 
