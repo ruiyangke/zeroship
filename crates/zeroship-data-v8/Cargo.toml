@@ -22,7 +22,7 @@ flume = { workspace = true }
 futures = { workspace = true }
 
 [dev-dependencies]
-testcontainers = { version = "0.28", default-features = false, features = ["blocking", "watchdog"] }
+zeroship-test-fixtures = { path = "../zeroship-test-fixtures" }
 zeroship-migrate-policy = { workspace = true }
 compio-postgres = { workspace = true }
 sha2 = { workspace = true }

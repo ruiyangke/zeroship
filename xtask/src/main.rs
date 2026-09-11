@@ -1,6 +1,6 @@
 mod data;
 
-#[path = "../../tests/fixtures/postgres/image.rs"]
+#[path = "../../crates/zeroship-test-fixtures/src/postgres/image.rs"]
 mod postgres_image;
 
 use clap::{Parser, Subcommand};

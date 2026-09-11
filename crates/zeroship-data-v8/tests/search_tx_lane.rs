@@ -93,7 +93,7 @@ async fn require_extension(pool: &Rc<Pool>, extension: &str) {
         .unwrap_or_else(|e| {
             panic!(
                 "the search-tx-lane suite needs the `{extension}` extension and the server \
-                 refused to create it: {e}. Check tests/fixtures/postgres/Dockerfile."
+                 refused to create it: {e}. Check crates/zeroship-test-fixtures/src/postgres/Dockerfile."
             )
         });
 }

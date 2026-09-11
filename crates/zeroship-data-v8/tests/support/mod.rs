@@ -6,8 +6,7 @@
 
 pub mod tables;
 
-#[path = "../../../../tests/fixtures/postgres/mod.rs"]
-pub mod postgres;
+pub use zeroship_test_fixtures::postgres;
 
 fn quote_ident(ident: &str) -> String {
     format!("\"{}\"", ident.replace('"', "\"\""))
