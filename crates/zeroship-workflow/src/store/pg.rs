@@ -57,20 +57,19 @@ impl PgStore {
         C: GenericClient + Sync,
     {
         let tables = WorkflowTables::for_app_id(app_id);
+        // A single batch is atomic even on a connection outside a transaction.
+        // Serialize catalog writes across control and worker processes; repeated
+        // ALTER/REVOKE statements can otherwise report "tuple concurrently updated".
+        let lock = sql_string_literal(&format!("zeroship:workflow:provision:{app_id}"));
         platform_client
-            .batch_execute(&set_workflow_journal_owner_role_sql())
+            .batch_execute(&format!(
+                "SELECT pg_advisory_xact_lock(hashtextextended({lock}, 0));\n{owner};\n{tables}\nRESET ROLE;\n{reconcile}\n{revoke}",
+                owner = set_workflow_journal_owner_role_sql(),
+                tables = provision_sql(&tables),
+                reconcile = reconcile_owner_sql(&tables),
+                revoke = reassert_table_revokes_sql(&tables)?,
+            ))
             .await?;
-        let provision_result = platform_client.batch_execute(&provision_sql(&tables)).await;
-        let reset_result = platform_client.batch_execute("RESET ROLE").await;
-        match (provision_result, reset_result) {
-            (Err(e), _) => return Err(e.into()),
-            (Ok(_), Err(e)) => return Err(e.into()),
-            (Ok(_), Ok(_)) => {}
-        }
-        platform_client
-            .batch_execute(&reconcile_owner_sql(&tables))
-            .await?;
-        reassert_table_revokes(platform_client, &tables).await?;
         Ok(tables)
     }
 }
@@ -330,15 +329,6 @@ fn reconcile_owner_sql(tables: &WorkflowTables) -> String {
         .map(|table| format!("ALTER TABLE {table} OWNER TO {owner};"))
         .collect::<Vec<_>>()
         .join("\n")
-}
-
-async fn reassert_table_revokes<C>(conn: &C, tables: &WorkflowTables) -> Result<(), WorkflowError>
-where
-    C: GenericClient + Sync,
-{
-    let sql = reassert_table_revokes_sql(tables)?;
-    conn.batch_execute(&sql).await?;
-    Ok(())
 }
 
 fn reassert_table_revokes_sql(tables: &WorkflowTables) -> Result<String, WorkflowError> {
