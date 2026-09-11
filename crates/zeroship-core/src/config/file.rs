@@ -99,6 +99,9 @@ pub struct FileConfig {
     /// Standalone workflow-scheduler settings.
     #[serde(default)]
     pub workflow_scheduler: SchedulerSection,
+    /// Workflow authority settings.
+    #[serde(default)]
+    pub workflow: WorkflowSection,
     /// CDC relay settings.
     #[serde(default)]
     pub data_cdc_server: CdcServerSection,
@@ -353,6 +356,68 @@ pub struct SchedulerSection {
     pub max_due_per_tick: Option<usize>,
     /// Inflight-lease time-to-live in milliseconds.
     pub inflight_ttl_ms: Option<i64>,
+}
+
+/// Workflow authority values supplied by the shared overlay.
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowSection {
+    /// HTTP listener address.
+    pub listen: Option<String>,
+    /// Private workflow signing key file.
+    pub service_key_file: Option<PathBuf>,
+    /// Issuer-bound peer verification keys.
+    pub service_peers_file: Option<PathBuf>,
+    /// Workflow payload storage location.
+    pub payload_url: Option<String>,
+    /// HTTP worker threads.
+    pub http_threads: Option<usize>,
+    /// Maximum connections per HTTP thread.
+    pub max_connections: Option<usize>,
+    /// Maximum JSON request size; payload uploads stream separately.
+    pub max_request_bytes: Option<usize>,
+    /// Interval between durable maintenance sweeps.
+    pub tick_interval_ms: Option<u64>,
+    /// Payload objects inspected per maintenance sweep.
+    pub maintenance_batch: Option<usize>,
+    /// Maximum live runs per app.
+    pub max_live_runs: Option<i64>,
+    /// Maximum child workflow depth.
+    pub max_child_depth: Option<i64>,
+    /// Maximum concurrent tasks per app.
+    pub max_running: Option<i64>,
+    /// Maximum inline input or signal size.
+    pub max_input_bytes: Option<usize>,
+    /// Maximum operations accepted in a task completion.
+    pub max_frontier: Option<usize>,
+    /// Maximum retained journal size per generation.
+    pub max_journal_bytes: Option<usize>,
+    /// Maximum size of a payload object.
+    pub max_payload_bytes: Option<i64>,
+    /// Maximum payload objects per app.
+    pub max_payload_objects: Option<i64>,
+    /// Maximum retained payload storage per app.
+    pub max_payload_storage_bytes: Option<i64>,
+    /// Retention window for unreferenced uploads.
+    pub payload_staging_retention_ms: Option<i64>,
+    /// Maximum attempts for a compensator.
+    pub max_compensation_attempts: Option<i32>,
+    /// Delay between compensation attempts.
+    pub compensation_retry_ms: Option<i64>,
+    /// Maximum active schedules per app.
+    pub max_schedules: Option<usize>,
+    /// Maximum occurrences replayed in a schedule sweep.
+    pub max_schedule_backfill: Option<usize>,
+    /// Minimum fixed schedule interval.
+    pub min_schedule_interval_ms: Option<i64>,
+    /// Maximum public signal capability lifetime.
+    pub max_signal_token_lifetime_seconds: Option<i64>,
+    /// Task lease duration.
+    pub lease_ms: Option<i64>,
+    /// Retention window for mutation receipts.
+    pub request_retention_ms: Option<i64>,
+    /// Workflow database login.
+    pub database_url: Option<String>,
 }
 
 /// CDC relay values supplied by the overlay.

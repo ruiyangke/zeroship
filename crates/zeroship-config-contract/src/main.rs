@@ -201,7 +201,7 @@ fn audit(args: &[String]) {
     }
 
     let compiled = from_specs(&specs);
-    let extracted = from_inventory(&extract_rows(&root), &DECLARING_BINARIES);
+    let extracted = from_inventory(&extract_rows(&root), DECLARING_BINARIES);
     match compare(&compiled, &extracted) {
         Ok(count) => {
             eprintln!(

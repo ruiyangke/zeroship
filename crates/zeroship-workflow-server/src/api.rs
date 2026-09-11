@@ -21,10 +21,15 @@ use zeroship_workflow::{
 mod payloads;
 
 pub fn configure(config: &mut web::ServiceConfig) {
+    configure_with_limit(config, 64 * 1024 * 1024);
+}
+
+pub fn configure_with_limit(config: &mut web::ServiceConfig, max_request_bytes: usize) {
     payloads::configure(config);
     config
-        .state(web::types::JsonConfig::default().limit(1024 * 1024))
+        .state(web::types::JsonConfig::default().limit(max_request_bytes))
         .service(web::resource("/healthz").route(web::get().to(health)))
+        .service(web::resource("/readyz").route(web::get().to(ready)))
         .service(
             web::resource("/v1/apps/{app_id}/workflows/{name}/runs").route(web::post().to(start)),
         )
@@ -115,11 +120,23 @@ async fn health() -> web::HttpResponse {
     web::HttpResponse::Ok().finish()
 }
 
+async fn ready(state: State<SharedState>) -> web::HttpResponse {
+    let ready = compio::time::timeout(std::time::Duration::from_secs(5), async {
+        state.service.verify().await?;
+        state.auth.ready().await
+    })
+    .await;
+    match ready {
+        Ok(Ok(())) => web::HttpResponse::Ok().finish(),
+        _ => web::HttpResponse::ServiceUnavailable().finish(),
+    }
+}
+
 async fn start(
     request: web::HttpRequest,
     state: State<SharedState>,
     path: Path<(String, String)>,
-    body: JsonBody<Mutation<StartOptions>>,
+    body: web::types::Payload,
 ) -> web::HttpResponse {
     respond(
         async {
@@ -128,7 +145,7 @@ async fn start(
             state
                 .auth
                 .app(authorization(&request), &app, AppOperation::Start)?;
-            let body = body.map_err(json_error)?.into_inner();
+            let body: Mutation<StartOptions> = read_json(&request, body).await?;
             state
                 .service
                 .for_app(app)
@@ -159,7 +176,7 @@ async fn signal(
     request: web::HttpRequest,
     state: State<SharedState>,
     path: Path<(String, String)>,
-    body: JsonBody<Mutation<SignalOptions>>,
+    body: web::types::Payload,
 ) -> web::HttpResponse {
     respond(
         async {
@@ -168,7 +185,7 @@ async fn signal(
             state
                 .auth
                 .app(authorization(&request), &app, AppOperation::Signal)?;
-            let body = body.map_err(json_error)?.into_inner();
+            let body: Mutation<SignalOptions> = read_json(&request, body).await?;
             state
                 .service
                 .for_app(app)
@@ -182,7 +199,7 @@ async fn transition(
     request: web::HttpRequest,
     state: State<SharedState>,
     path: Path<(String, String)>,
-    body: JsonBody<Mutation<RunOperation>>,
+    body: web::types::Payload,
 ) -> web::HttpResponse {
     respond(
         async {
@@ -191,7 +208,7 @@ async fn transition(
             state
                 .auth
                 .app(authorization(&request), &app, AppOperation::Control)?;
-            let body = body.map_err(json_error)?.into_inner();
+            let body: Mutation<RunOperation> = read_json(&request, body).await?;
             state
                 .service
                 .for_app(app)
@@ -205,7 +222,7 @@ async fn restart(
     request: web::HttpRequest,
     state: State<SharedState>,
     path: Path<(String, String)>,
-    body: JsonBody<Mutation<RestartOptions>>,
+    body: web::types::Payload,
 ) -> web::HttpResponse {
     respond(
         async {
@@ -214,7 +231,7 @@ async fn restart(
             state
                 .auth
                 .app(authorization(&request), &app, AppOperation::Restart)?;
-            let body = body.map_err(json_error)?.into_inner();
+            let body: Mutation<RestartOptions> = read_json(&request, body).await?;
             state
                 .service
                 .for_app(app)
@@ -228,7 +245,7 @@ async fn broadcast(
     request: web::HttpRequest,
     state: State<SharedState>,
     path: Path<(String, String)>,
-    body: JsonBody<Mutation<SignalOptions>>,
+    body: web::types::Payload,
 ) -> web::HttpResponse {
     respond(
         async {
@@ -237,7 +254,7 @@ async fn broadcast(
             state
                 .auth
                 .app(authorization(&request), &app, AppOperation::Broadcast)?;
-            let body = body.map_err(json_error)?.into_inner();
+            let body: Mutation<SignalOptions> = read_json(&request, body).await?;
             state
                 .service
                 .for_app(app)
@@ -251,7 +268,7 @@ async fn issue_signal_token(
     request: web::HttpRequest,
     state: State<SharedState>,
     path: Path<String>,
-    body: JsonBody<Mutation<SignalTokenRequest>>,
+    body: web::types::Payload,
 ) -> web::HttpResponse {
     respond(
         async {
@@ -261,7 +278,7 @@ async fn issue_signal_token(
                 &app,
                 AppOperation::IssueSignalToken,
             )?;
-            let body = body.map_err(json_error)?.into_inner();
+            let body: Mutation<SignalTokenRequest> = read_json(&request, body).await?;
             state
                 .service
                 .for_app(app)
@@ -275,7 +292,7 @@ async fn revoke_signal_tokens(
     request: web::HttpRequest,
     state: State<SharedState>,
     path: Path<String>,
-    body: JsonBody<Mutation<Option<SignalTarget>>>,
+    body: web::types::Payload,
 ) -> web::HttpResponse {
     respond(
         async {
@@ -285,7 +302,7 @@ async fn revoke_signal_tokens(
                 &app,
                 AppOperation::RevokeSignalTokens,
             )?;
-            let body = body.map_err(json_error)?.into_inner();
+            let body: Mutation<Option<SignalTarget>> = read_json(&request, body).await?;
             state
                 .service
                 .for_app(app)
@@ -299,7 +316,7 @@ async fn activate_deploy(
     request: web::HttpRequest,
     state: State<SharedState>,
     path: Path<String>,
-    body: JsonBody<DeployRegistration>,
+    body: web::types::Payload,
 ) -> web::HttpResponse {
     respond(
         async {
@@ -310,7 +327,10 @@ async fn activate_deploy(
             let app = app_id(&path.into_inner())?;
             state
                 .service
-                .activate_deploy(&app, &body.map_err(json_error)?.into_inner())
+                .activate_deploy(
+                    &app,
+                    &read_json::<DeployRegistration>(&request, body).await?,
+                )
                 .await
         }
         .await,
@@ -319,7 +339,7 @@ async fn activate_deploy(
 async fn poll(
     request: web::HttpRequest,
     state: State<SharedState>,
-    body: JsonBody<PollTask>,
+    body: web::types::Payload,
 ) -> web::HttpResponse {
     respond(
         async {
@@ -327,7 +347,7 @@ async fn poll(
                 .auth
                 .worker(authorization(&request), endpoints::WORKFLOW_TASK_POLL)
                 .await?;
-            body.map_err(json_error)?;
+            read_json::<PollTask>(&request, body).await?;
             state.service.poll(&worker).await
         }
         .await,
@@ -337,7 +357,7 @@ async fn heartbeat(
     request: web::HttpRequest,
     state: State<SharedState>,
     path: Path<String>,
-    body: JsonBody<TaskCredential>,
+    body: web::types::Payload,
 ) -> web::HttpResponse {
     respond(
         async {
@@ -345,7 +365,7 @@ async fn heartbeat(
                 .auth
                 .worker(authorization(&request), endpoints::WORKFLOW_TASK_HEARTBEAT)
                 .await?;
-            let body = body.map_err(json_error)?.into_inner();
+            let body: TaskCredential = read_json(&request, body).await?;
             state
                 .service
                 .heartbeat(&worker, &path.into_inner(), &body.token)
@@ -358,7 +378,7 @@ async fn complete(
     request: web::HttpRequest,
     state: State<SharedState>,
     path: Path<String>,
-    body: JsonBody<CompleteTask>,
+    body: web::types::Payload,
 ) -> web::HttpResponse {
     respond(
         async {
@@ -366,7 +386,7 @@ async fn complete(
                 .auth
                 .worker(authorization(&request), endpoints::WORKFLOW_TASK_COMPLETE)
                 .await?;
-            let body = body.map_err(json_error)?.into_inner();
+            let body: CompleteTask = read_json(&request, body).await?;
             state
                 .service
                 .complete(&worker, &path.into_inner(), &body.token, body.execution)
@@ -379,7 +399,7 @@ async fn release(
     request: web::HttpRequest,
     state: State<SharedState>,
     path: Path<String>,
-    body: JsonBody<TaskCredential>,
+    body: web::types::Payload,
 ) -> web::HttpResponse {
     respond(
         async {
@@ -387,7 +407,7 @@ async fn release(
                 .auth
                 .worker(authorization(&request), endpoints::WORKFLOW_TASK_RELEASE)
                 .await?;
-            let body = body.map_err(json_error)?.into_inner();
+            let body: TaskCredential = read_json(&request, body).await?;
             state
                 .service
                 .release(&worker, &path.into_inner(), &body.token)
@@ -397,7 +417,24 @@ async fn release(
     )
 }
 
-type JsonBody<T> = Result<Json<T>, web::error::JsonPayloadError>;
+async fn read_json<T: serde::de::DeserializeOwned + 'static>(
+    request: &web::HttpRequest,
+    body: web::types::Payload,
+) -> Result<T, WorkflowServiceError> {
+    // Handlers authenticate before invoking the buffered JSON extractor.
+    let mut payload = body.into_inner();
+    compio::time::timeout(
+        std::time::Duration::from_secs(30),
+        <Json<T> as web::FromRequest<web::error::DefaultError>>::from_request(
+            request,
+            &mut payload,
+        ),
+    )
+    .await
+    .map_err(|_| WorkflowServiceError::InvalidRequest("workflow request body timed out".into()))?
+    .map(Json::into_inner)
+    .map_err(json_error)
+}
 fn json_error(error: web::error::JsonPayloadError) -> WorkflowServiceError {
     match error {
         web::error::JsonPayloadError::Overflow => WorkflowServiceError::PayloadTooLarge,

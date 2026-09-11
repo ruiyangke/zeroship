@@ -36,7 +36,11 @@ the workflow login and policy writer fences. Startup verification rejects
 administrative role privileges, writable fingerprints and disabled fences.
 Native migration tests apply the full corpus before checking these permissions.
 The platform store resolves admission under those locks without a policy cache.
-This is not yet the runtime composition: server startup, the worker polling loop, Control capability
+The server executable now composes that policy with an immutable key snapshot,
+shared assertion replay storage and durable maintenance. Native process tests
+exercise replicas and restart recovery. Configuration checks avoid dependency
+access; request handlers authenticate before buffering JSON bodies.
+The worker polling loop, Control capability
 issuance, public HTTP ingress, retention of
 completed run graphs and interpreter cutover remain in progress. The
 current runtime still uses Control and the local mini-engine.

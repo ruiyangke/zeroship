@@ -612,6 +612,7 @@ fn unix_seconds(at: SystemTime) -> Option<i64> {
 
 // ─── The trust bundle ────────────────────────────────────────────────────
 
+#[derive(Clone)]
 struct TrustedServiceKey {
     key_id: String,
     public: [u8; 32],
@@ -653,7 +654,7 @@ struct TrustedServiceKey {
 /// binding for free: it is keyed on a single URL and `keys()` returns a flat
 /// `Vec<CachedKey>` with no issuer attached, so a JWKS design would have needed
 /// one cache instance per issuer anyway.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct ServiceTrustBundle {
     issuers: BTreeMap<String, Vec<TrustedServiceKey>>,
 }

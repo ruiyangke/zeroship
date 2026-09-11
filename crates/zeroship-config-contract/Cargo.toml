@@ -16,7 +16,7 @@ reason = "Non-shipped configuration contract checker."
 
 [dependencies]
 zeroship-core = { workspace = true }
-# The seven generated registries this tool checks and documents. Linking them is
+# The generated registries this tool checks and documents. Linking them is
 # the point: `ConfigSpec` and `CONFIG_READ_SITES` are what the COMPILER produced
 # from the declarations, so a check against them cannot be satisfied by editing
 # a manifest, and the syn-based `inventory` scan stays an independent second
@@ -36,6 +36,7 @@ zeroship-gateway = { workspace = true }
 zeroship-migrate-server = { workspace = true }
 zeroship-worker = { workspace = true }
 zeroship-workflow-scheduler = { workspace = true }
+zeroship-workflow-server = { workspace = true }
 # A SEVENTH ENTRY USED TO SIT HERE: `zeroship-migrate-adapter`, linked for the
 # `zeroship-platform-migrate` one-shot's declaration. Both the binary and the
 # `PlatformMigrateSettings` declaration were deleted on 2026-08-28 when the

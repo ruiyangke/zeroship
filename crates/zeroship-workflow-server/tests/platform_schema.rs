@@ -11,6 +11,9 @@ use zeroship_workflow::service::{
     AppPolicy, PlatformPolicy, WorkflowService,
 };
 
+#[path = "support/server_process.rs"]
+mod server_process;
+
 async fn connect(url: &str) -> compio_postgres::Client {
     let (client, connection) = compio_postgres::connect(url, compio_postgres::NoTls)
         .await
@@ -19,7 +22,7 @@ async fn connect(url: &str) -> compio_postgres::Client {
     client
 }
 
-#[compio::test]
+#[ntex::test]
 async fn platform_migration_provisions_workflow_authority_without_worker_access() {
     let postgres = GenericImage::new("postgres", "18")
         .with_exposed_port(5432.tcp())
@@ -159,4 +162,5 @@ async fn platform_migration_provisions_workflow_authority_without_worker_access(
         admin.batch_execute(restore_policy).await.unwrap();
         store.verify().await.unwrap();
     }
+    server_process::contract(&admin, &runtime_url, work.path()).await;
 }
