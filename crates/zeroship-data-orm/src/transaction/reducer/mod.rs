@@ -300,19 +300,7 @@ impl CommandToken {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BackendGeneration(pub u64);
 
-/// The settle vocabulary, which this module USES but does not OWN.
-///
-/// `SettleIntent` and `TerminalResult` moved to `zeroship-data-core` on
-/// 2026-09-02. They are the two types that cross the backend seam - the intent
-/// goes down to a lane, the result comes back - so a lane must be able to name
-/// them without depending on the protocol that interprets them. Leaving them
-/// here would make every vendor backend reach UP into the reducer, which is the
-/// inversion `DenyReason` was moved down to fix (#103): the engine keeps the
-/// logic, the core keeps the vocabulary.
-///
-/// Re-exported rather than re-pathed at ~40 call sites, and that is not a
-/// compatibility shim: `reducer::SettleIntent` is the name the protocol reads
-/// in, and it is the same type.
+/// Share settlement intent and outcome types with backend sessions.
 pub use zeroship_data_orm::error::{SettleIntent, TerminalResult};
 
 /// How a transaction ended.

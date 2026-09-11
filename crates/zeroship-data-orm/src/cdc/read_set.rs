@@ -1,91 +1,12 @@
-//! Read-set capture + predicate evaluation.
+//! Capture query dependencies and conservatively match change events.
 //!
-//! # WIRED 2026-09-02. It was inert on both ends until then.
+//! The host enables capture for query dispatches and attaches a collection's
+//! nonempty read set when opening its subscription. Subscribing without a captured
+//! read stays coarse; an explicitly empty read set matches nothing.
 //!
-//! This module was fully built and connected to nothing, while its own text
-//! described the narrowing in the present tense - which is what made every
-//! reader believe it ran. The two ends, each verified separately because
-//! "inert on both ends" is two claims:
-//!
-//! * **Producer.** [`record_if_active`] had one production call site and still
-//!   recorded nothing: its first line is `if !is_active()`, and the only thing
-//!   that made `is_active()` true was `Active::begin`, which is `#[cfg(test)]`
-//!   and so did not exist in a shipped build.
-//! * **Consumer.** `broker::Subscription::set_read_set` had ten call sites, all
-//!   inside `broker.rs`'s own `#[cfg(test)]` module, so `read_set` was `None`
-//!   on every real subscription and `Subscription::accepts` returned `true` for
-//!   every event.
-//!
-//! **What now connects them:**
-//!
-//! * [`ensure_capture`] opens the buffer, called from
-//!   `v8_bridge::ensure_read_set_capture` at the three adapter read entries
-//!   (`dispatch_find` / `dispatch_aggregate` / `dispatch_count`) before the
-//!   engine plans the query. It is keyed on the runtime's dispatch generation
-//!   rather than held as a guard, because the handler is JS and the functions
-//!   that bracket it live in a crate BELOW this one.
-//! * [`snapshot_for`] hands the entries to the subscription, at
-//!   `v8_classes::subscription`'s `openSubscription`. `db.live(fn)` runs the
-//!   reads first and only then calls `subscribe(name)` per collection, so the
-//!   buffer is populated by the time a subscription is opened.
-//!
-//! **The one rule that keeps this from being worse than what it replaced:**
-//! `accepts` treats `None` as "coarse, take everything" but `Some(vec![])` as
-//! "take nothing". So the caller attaches a read-set ONLY when it is non-empty
-//! for that collection; a handler that subscribes without having read the
-//! collection stays coarse instead of going silent.
-//!
-//! Without a read-set, the broker and the cross-worker WAL consumer
-//! deliver **coarse-grained**: every subscription on
-//! `(app_id, collection)` receives every change to that collection.
-//! This module narrows the delivery to "only events whose row actually
-//! matches the subscription's filter".
-//!
-//! ## What a read-set is
-//!
-//! When a `query()` handler runs `ctx.db.find({ userId: 42 })` against
-//! `messages`, the runtime records a [`ReadSetEntry`]:
-//!
-//! ```text
-//! ReadSetEntry {
-//!     collection: "messages",
-//!     predicate: Some(Predicate::All(vec![
-//!         Conjunct { column: "userId", op: Eq, value: Number(42) },
-//!     ])),
-//! }
-//! ```
-//!
-//! That entry attaches to the [`Subscription`](crate::cdc::broker::Subscription)
-//! the handler opens. On the next WAL event the broker evaluates the
-//! event's row against every subscriber's predicate; non-matching
-//! subscribers are skipped.
-//!
-//! `predicate == None` (a missing or unsupported filter shape) means
-//! "match every row in the collection" — equivalent to the coarse-grained
-//! default. Subscribers that use `$or`, `$nor`, JSON path operators,
-//! or any other shape we don't normalise fall back to this safe default.
-//!
-//! ## Capture site
-//!
-//! Capture happens inside `ctx.db.find / count / aggregate`, and is enabled
-//! **only** when the active procedure kind is `Query`. Mutations and actions
-//! never participate.
-//!
-//! **The kind is resolved by whoever opens the scope, not read here.** This
-//! module consulted the B3 capability layer's thread-local `current_kind`
-//! marker on every record until 2026-09-02, which made a data-plane module
-//! depend on the V8 runtime crate for a fact its own installer already had.
-//! `Active::begin` now takes the answer as a boolean; see `Capture::recording`.
-//!
-//! ## What this module does NOT do
-//!
-//! - It doesn't open a subscription. The capture buffer is a passive
-//!   thread-local; the layer that opens subscriptions
-//!   (`@zeroship/db`'s reactive-query helper) snapshots it into a
-//!   `Subscription` when the handler returns.
-//! - It doesn't talk to V8. All the V8-facing surface lives in
-//!   `crud.rs` (capture sites: dispatch_find / dispatch_count) and
-//!   the broker's v8_class wrapper.
+//! Supported predicates can narrow events with row images. Unsupported filters or
+//! missing row data fall back to collection invalidation to avoid dropping changes.
+//! This module owns neither V8 callbacks nor subscription lifecycle.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -564,7 +485,7 @@ pub fn snapshot_for(collection: &str) -> Vec<ReadSetEntry> {
 ///
 /// **That gate is carried by the capture, not looked up here.** The kind is
 /// ambient adapter state; whoever opened the scope resolved it once, at the one
-/// moment it is unambiguous. See [`Capture::recording`].
+/// moment it is unambiguous. See `Capture::recording`.
 ///
 /// `schema` is the collection's descriptor entry; every call site already holds
 /// one because the read builder it just called takes the same value. It is

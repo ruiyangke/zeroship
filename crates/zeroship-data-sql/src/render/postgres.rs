@@ -307,7 +307,7 @@ pub fn render_delete(plan: &Delete) -> Result<RenderedSql, RenderError> {
 /// works the same way. Sorting by an alias leaves the planner to prove the two
 /// are the same thing.
 ///
-/// The operand is bound **once** and referenced twice; see [`Writer::bind`] for
+/// The operand is bound **once** and referenced twice; see `Writer::bind` for
 /// what that saves.
 ///
 /// # The radius is a criterion, not a filter
@@ -569,7 +569,7 @@ impl Writer {
         self.params.len()
     }
 
-    /// Write the placeholder for a slot [`Writer::bind`] already took.
+    /// Write the placeholder for a slot `Writer::bind` already took.
     ///
     /// The spelling is read back off the bound value, so it goes through the
     /// same exhaustive dispatch as a first occurrence and a re-use cannot spell
@@ -578,7 +578,7 @@ impl Writer {
     /// # Panics
     ///
     /// Only if `slot` was never bound, which no caller here can arrange: every
-    /// slot comes from a [`Writer::bind`] on the same `Writer`, and the vector
+    /// slot comes from a `Writer::bind` on the same `Writer`, and the vector
     /// only grows.
     fn write_bound(&mut self, slot: usize) {
         let value = self

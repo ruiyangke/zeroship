@@ -537,42 +537,12 @@ pub(crate) fn mint_masked_value<'s>(
     Some(obj)
 }
 
-// ---------------------------------------------------------------------------
-// rehydrate_masked_values — V8 walker invoked by the pump after JSON.parse
-// ---------------------------------------------------------------------------
+// Masked-value rehydration after native V8 result materialization.
 
-/// Walk the parsed-JSON V8 value and replace every `__zsmask__`-tagged
-/// sentinel object with a native `MaskedValue` v8_class instance. The
-/// native result adapter calls this after direct V8 materialization
-/// of the spawned-op pump (see `crates/zeroship-runtime/src/core/runtime.rs`).
-///
-/// The function is the post-parse hook plugin-db registers; the runtime
-/// itself has no knowledge of the sentinel shape — that information
-/// lives here.
-///
-/// The binding is captured at call time (i.e. when the row serializer
-/// queues the OpResult) and threaded through via the function pointer;
-/// the runtime sees only `fn(scope, value) -> Option<value>`, so we read
-/// `APP_ID` and `ZEROSHIP_DEPLOY_ID` out of the isolate's `SharedState` slot
-/// here. Every MaskedValue instance carries that pair verbatim, so neither
-/// cross-app nor cross-deploy instance reuse is possible.
-///
-/// Returns `Some(new_value)` when the walk replaced at least one
-/// sub-object (the caller resolves with the new value); `None` when
-/// nothing matched (the caller falls back to the input).
-///
-/// Walk shape:
-/// - Top-level array → recurse into each element (rows).
-/// - Top-level object → check each property; if a property value is a
-///   sentinel object, mint `MaskedValue` and replace.
-/// - Nested objects in property values → recurse one level (e.g. a row
-///   carries a nested object whose property is a sentinel). Bounded at
-///   16 levels of recursion to defend against pathological shapes.
-/// - Anything else (primitive, null) → return unchanged.
-///
-/// Returns the post-walk value as a `Local<Value>`; if no sentinel was
-/// found the input `value` Local is returned unchanged (cheap — no
-/// re-allocation).
+/// Replace masked-field sentinels with native `MaskedValue` instances.
+/// The adapter invokes this after materializing native results. Wrappers capture
+/// the isolate's app and deploy binding to prevent reuse under another binding.
+/// Returns a replacement value when any sentinel was converted.
 pub fn rehydrate_masked_values<'s, 'a>(
     scope: &mut v8::PinScope<'s, 'a>,
     value: v8::Local<'s, v8::Value>,

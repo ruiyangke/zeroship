@@ -1,115 +1,13 @@
-//! SQLite commit capture — the
-//! `preupdate_hook` / `commit_hook` / `rollback_hook` integration.
+//! Capture SQLite changes on the actor thread and publish committed events.
 //!
-//! This file installs the three hooks on the writer-actor's
-//! `rusqlite::Connection`, buffers per-transaction change events, and
-//! ships a `CommitPacket` over a `flume` channel to a publisher task
-//! that delegates to the consumer-supplied [`ChangeSink`] on the compio
-//! thread.
+//! Preupdate hooks copy positional values into a transaction buffer. Commit hooks
+//! stamp delivery disposition and enqueue packets; rollback hooks discard the
+//! buffer. Sampling disposition at commit time keeps suppression independent of
+//! publisher scheduling.
 //!
-//! ## Hook → publisher data flow
-//!
-//! ```text
-//!   writer thread (std::thread)              compio thread
-//!   ----------------------------             -------------
-//!   INSERT INTO "app".t VALUES(...)
-//!       │
-//!       ▼
-//!   sqlite3_preupdate_hook fires
-//!       │
-//!       ▼ preupdate_callback
-//!   buffer.events.push(PendingEvent { … })
-//!       │
-//!       ▼ (transaction commits)
-//!   sqlite3_commit_hook fires
-//!       │
-//!       ▼ commit_callback
-//!   sink.disposition(app_id)  ← stamped HERE, per event
-//!       │
-//!       ▼
-//!   try_send(CommitPacket { events, commit_id })  ─────────►  publisher_task
-//!                                                                  │
-//!                                                                  ▼ (per event)
-//!                                                            read the stamp; drop
-//!                                                            anything not Deliver
-//!                                                                  │
-//!                                                                  ▼ (per event)
-//!                                                            resolve column names via
-//!                                                            session.query("PRAGMA …")
-//!                                                                  │
-//!                                                                  ▼
-//!                                                            sink.publish(&ChangeEvent)
-//! ```
-//!
-//! ## Delivery-window semantics
-//!
-//! **The window a suppression guard covers is the set of commits made inside
-//! its scope — not the set of packets the publisher happens not to have drained
-//! yet.** [`ChangeSink::disposition`] is sampled in the `commit_hook`, on the
-//! writer thread, and the answer rides the packet as
-//! [`DispositionedEvent::disposition`]. The publisher reads that stamp; it never
-//! re-samples.
-//!
-//! It sampled at DEQUEUE time until 2026-09-03, and the difference is not
-//! academic. The channel is `flume::unbounded`, so `try_send` never applies
-//! backpressure and a packet can sit in it arbitrarily long. A guard dropped
-//! between enqueue and dequeue therefore cleared the state before the publisher
-//! looked, and the commit the guard was supposed to swallow was delivered. That
-//! made the outcome a function of publisher scheduling, so even a strictly
-//! sequential caller — engage the guard, write, drop the guard — had no defined
-//! answer. The three integration fences in
-//! `zeroship-data-v8/tests/sqlite_integration.rs` papered over it by sleeping
-//! 100 ms to drain the publisher BEFORE dropping the guard, which is exactly the
-//! order that cannot expose the bug; their assertions (`Resync` and zero
-//! `Change`) always described the commit-window contract this file now
-//! implements.
-//!
-//! The converse ordering is not a gap under this contract but a consequence of
-//! it: a commit that lands BEFORE a guard is engaged is outside the window, so
-//! delivering it late — after the guard has come and gone — is correct. That is
-//! why the publisher's `.await` on the column-name PRAGMA needs no fence.
-//!
-//! The cost is two uncontended global-mutex acquisitions per commit that
-//! produces events, on the writer thread. That is far below the WAL write the
-//! same commit is already paying for, and it is only paid when a transaction
-//! actually changed a CDC-relevant row (`commit_callback` returns before
-//! sampling when the buffer is empty).
-//!
-//! ## Cross-thread invariants
-//!
-//! - Hook closures captured by `preupdate_hook`/`commit_hook`/`rollback_hook`
-//!   must be `Send + 'static`. All shared state uses `Arc<Mutex<…>>`,
-//!   never `Rc<RefCell<…>>`.
-//! - `ValueRef<'_>` borrows from SQLite scratch — copy to owned `String`
-//!   inside the callback before any return path.
-//! - `commit_hook` returns `bool` where `true = veto/rollback`. We
-//!   always return `false`.
-//! - SQLite forbids calling `prepare`/`step`/`execute` on the same
-//!   `sqlite3*` connection from within the preupdate hook. Column-name
-//!   resolution therefore happens lazily on the publisher side (compio
-//!   thread, post-COMMIT) via the session actor's `Query` command.
-//! - The delivery sink is owned by the compio publisher task. The hook
-//!   **never** calls it directly; the only path is via the `flume` channel and
-//!   the publisher task.
-//!
-//! ## Column-name cache strategy
-//!
-//! The preupdate hook only receives column **values by index** (via
-//! `PreUpdate{Old,New}ValueAccessor::get_*_column_value(i)`). It does
-//! NOT receive column names — and we can't query `PRAGMA table_info`
-//! from inside the hook because that would re-enter the connection
-//! while the engine is mid-statement.
-//!
-//! The dispatcher buffers positional values
-//! (`Vec<Option<String>>`) keyed by `(db_name, table)`, and the
-//! publisher task — running on the compio thread, post-COMMIT —
-//! resolves column names lazily via
-//! `session.query("PRAGMA \"<db_name>\".table_info(\"<table>\")")`.
-//! Names are memoised inside the publisher task in a local
-//! `HashMap<(db, table), Arc<Vec<String>>>` so the second touch on the
-//! same table doesn't pay another round-trip. Cache invalidation on
-//! DDL is not yet implemented (per plan §10 Q-P2-B); the engaged
-//! schema-pending guard clears the cache at that point.
+//! The compio publisher resolves and caches column names through the session actor
+//! before calling the change sink. Hooks cannot query the connection they run on,
+//! and borrowed SQLite values must be copied before returning.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};

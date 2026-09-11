@@ -1,16 +1,7 @@
-//! Leaf-crate errors for the schema layer.
-//!
-//! `zeroship-data-sql` cannot depend on plugin-db's runtime-coupled `DbError`.
-//! The sentinel codec therefore returns the small, self-contained error below;
-//! plugin-db maps it into its neutral data-plane error at the call boundary.
+//! Errors shared by schema metadata codecs and runtime query validation.
+//! The ORM converts these errors to its database error contract.
 
-/// Error from parsing a `zero-migrate:mask:` sentinel string
-/// ([`crate::mask_codec::parse_mask_sentinel`]).
-///
-/// Carries the human-readable rejection message. plugin-db's
-/// `From<MaskSentinelError> for DbError` re-creates the exact
-/// `DbError::internal("mask_sentinel_malformed: …")` the SDK round-trips,
-/// so the `mask_sentinel_malformed` code-discriminator is preserved.
+/// A malformed protection sentinel, with a diagnostic message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MaskSentinelError {
     /// The full rejection message, including the `mask_sentinel_malformed: `

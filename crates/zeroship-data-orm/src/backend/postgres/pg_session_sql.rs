@@ -1,22 +1,7 @@
-//! PostgreSQL per-app session setup: the `SET LOCAL` batch that narrows a
-//! connection to one tenant's role and bounds how long it may hold resources.
+//! Render PostgreSQL role and resource-budget setup for app sessions.
 //!
-//! **PG TIER. This is dialect, not policy.** `SET LOCAL ROLE`,
-//! `statement_timeout`, `idle_in_transaction_session_timeout` and `lock_timeout`
-//! are PostgreSQL GUCs; SQLite has no equivalent and never will. The NUMBERS
-//! these render are the opposite - cross-backend policy - and live in
-//! [`zeroship_data_orm::budgets`], because `transaction/driver.rs` derives BOTH backends'
-//! protocol execution deadline from `DB_IDLE_IN_TX_TIMEOUT_MS`.
-//!
-//! Both functions lived in `auth/bootstrap.rs` until 2026-09-01, which the tier
-//! census reads as ENGINE. That mattered for more than tidiness: the roled
-//! autocommit funnel is moving down into this tier, and it calls
-//! [`autocommit_local_session_setup_sql`]. Had the builder stayed engine-side,
-//! the `PG -> ENGINE` cycle the move exists to break would simply re-form under
-//! a different symbol, and the census would still refuse the split.
-//!
-//! Callers above may reach down here freely - ENGINE -> PG is rank 3 -> 2. What
-//! must never happen is the reverse.
+//! Role names derive from the physical schema provisioned by the migration service.
+//! Timeout policy comes from `crate::budgets`; this module supplies SQL spelling.
 
 use zeroship_core::database_role::per_app_role_name;
 use zeroship_data_sql::SchemaName;

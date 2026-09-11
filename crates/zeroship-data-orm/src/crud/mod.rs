@@ -362,32 +362,9 @@ pub async fn run_find(
 ) -> Result<read_pipeline::ApplyResult, DbError> {
     validate_unmask_projection(plan.select.as_ref(), &plan.unmask_columns)?;
 
-    // Upfront auth fence for the unmask hint.
-    //
-    // ONE HANDLE IS NOT ONE CONNECTION. This comment used to say the fence, the
-    // SELECT, the unmask fetch and the audit row "all run on `route.backend()`,
-    // the handle the adapter bound for THIS dispatch" - true of the HANDLE and
-    // false of the CONNECTION, which is what the sentence was read as meaning.
-    // Only `exec_query` honours `route.in_tx()`; every `BackendHandle` read
-    // lowers to a fresh pooled checkout. So a `find({ unmask })` inside
-    // `db.transaction(fn)` selected its rows on the transaction and then sent a
-    // pooled connection to fetch their plaintext, which returned
-    // `unmask_not_found` for any row the same transaction had inserted.
-    // Measured, then fixed, on 2026-09-03.
-    //
-    // What each of the four takes NOW, and why they differ:
-    //
-    // * the SELECT (`exec_query`) and the unmask fetch (inside
-    //   `read_pipeline::apply`) take the ROUTE, so both run on this dispatch's
-    //   CONNECTION - the transaction's when there is one.
-    // * the fence and the audit row below take the HANDLE, so both run on the
-    //   autocommit lane whatever the caller's transaction is doing. That is
-    //   deliberate: the audit table is append-only evidence, and an attempt
-    //   must not be erasable by rolling back the transaction it was made in.
-    //   The reasoning, and how it interacts with the DB-3 actor strip, is on
-    //   `protection::unmask::write_audit_unmask_row`.
-    //
-    // Both halves are bound by `plugin-db/tests/unmask_tx_lane.rs`.
+    // Unmask reads follow this operation's transaction route. Authorization and
+    // audit writes use the backend separately so creator rollback cannot erase
+    // an attempt's audit record.
     if !plan.unmask_columns.is_empty() {
         crate::protection::unmask::authorize_query_hint(
             route.backend(),
@@ -401,12 +378,8 @@ pub async fn run_find(
         .await?;
     }
 
-    // Resolve the descriptor entry BEFORE building SQL. It is the
-    // projection allowlist: the SELECT clause expands to `"id"` plus one
-    // term per declared field, with a masked column read through its
-    // sibling (`"<col>_masked" AS "<col>"`) so the ciphertext column never
-    // leaves the database on a default read. A collection this deploy does
-    // not declare is refused here.
+    // Resolve the deployment's descriptor before compiling its projection.
+    // Default reads use visible value columns; raw storage requires unmask access.
     let schema_hint = crate::descriptor::collection_schema(&binding, &coll)?;
     // Soft-delete auto-filter gate.
     let filter_soft_deleted = system_fields_pass::should_filter_soft_deleted(plan.include_deleted);
@@ -1191,23 +1164,8 @@ pub fn plan_aggregate(
     })
 }
 
-/// The ENGINE half of `distinct`: no `scope`, no `v8::`, no `ResolveValue`.
-///
-/// Returns a PAIR, like [`plan_aggregate`] and unlike the other seven plans in
-/// this file. The second element is `distinct_reads_masked_sibling`, which the
-/// adapter cannot recompute: it is derived from the descriptor `schema_hint`,
-/// and the hint dies with this function.
-///
-/// The schema resolution that `dispatch_distinct` used to do inline, with its own
-/// `reject_op` and an early `return promise`, is now the `?` below. That is
-/// behaviour-preserving rather than a rewrite: `run_op`'s error arm at
-/// `crud/mod.rs:191` is literally `return reject_op(resolver, request_id, e)`,
-/// the same call the hand-rolled branch made, and both push one future onto
-/// `spawned_ops`. Verified by reading `run_op`, not by test.
-///
-/// NOTE for anyone extending this: `distinct` does NOT `record_read_set`, though
-/// [`plan_count`] and most siblings do. That asymmetry is transcribed from the
-/// original body, not an omission - do not "restore" it.
+/// Prepare a distinct query using the descriptor's visible value column.
+/// The result metadata identifies masked values for the caller's read pipeline.
 pub fn plan_distinct(
     binding: &DbBinding,
     route: &crate::tx_route::CapturedRoute,
@@ -1718,7 +1676,7 @@ pub async fn run_near(
 // Transparent column encryption hooks
 // ===========================================================================
 /// `keys` and `dialect` are parameters for the same reason they are ones on
-/// [`write_pipeline::apply`]: this prep encrypts and lowers, and neither the
+/// `write_pipeline::apply`: this prep encrypts and lowers, and neither the
 /// key store nor the dialect is a routing decision. The production caller takes
 /// both off the route the insert will run on.
 ///

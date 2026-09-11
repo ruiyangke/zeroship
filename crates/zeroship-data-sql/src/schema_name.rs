@@ -1,41 +1,8 @@
-//! [`SchemaName`] - the physical database schema an app's tables live in.
+//! Validated physical schema identity, separate from the app's tenant identity.
 //!
-//! # Why this is a type and not a `&str`
-//!
-//! One string is presently the tenant identity AND the physical schema name AND
-//! the role-name stem AND the encryption salt AND the publication key AND the
-//! replication-slot key AND the SQLite `ATTACH` alias AND the transaction-lane
-//! key AND the broker routing key AND the CDC event stamp. Every one of those
-//! sites compiles with *either* meaning, so the day the schema becomes
-//! `db_<dbsid>` while the tenant stays the app uuid, a site that kept the wrong
-//! one is silently wrong rather than broken.
-//!
-//! The failure that motivated this type is not hypothetical. The migration
-//! service composes the runtime role from the SCHEMA it created
-//! (`zeroship_migrate_server::apply::runtime_role_provisioning_sql`) while the
-//! data plane's `SET LOCAL ROLE` composes it from whatever its caller happened
-//! to be holding (`zeroship_data_orm::backend::postgres::pg_session_sql::tx_session_setup_sql`).
-//! Both took `&str`. Diverge the two identities and every transaction fails at
-//! session setup, and - worse - the classifier that turns that failure into an
-//! actionable `SCHEMA_NOT_PROVISIONED` also derives its expected role from a
-//! `&str`, so it stops matching and the creator gets a generic failure with no
-//! instruction to run `zeroship migrate`.
-//!
-//! # What this type deliberately does NOT have
-//!
-//! No `Deref`, no `From<&str>`, no `AsRef<str>`, no public inner field, and no
-//! `new_unchecked`. Each of those is precisely a route by which a tenant id
-//! reaches a parameter that wants a schema without anyone deciding that it
-//! should. Construction is only [`SchemaName::new`], which is fallible, and
-//! extraction is only the two named accessors below.
-//!
-//! # The validation is the existing one, unchanged
-//!
-//! [`SchemaName::new`] delegates to [`crate::compile::validate_schema`] - the same
-//! predicate every `build_*` function called per operation before this type
-//! existed - and returns the same [`QueryError`] values byte for byte. This
-//! moves *when* an illegal name is refused (once, at construction) without
-//! changing *what* is refused or what the refusal says.
+//! Database qualification and PostgreSQL role setup use this type. Construction
+//! through `SchemaName::new` checks identifier syntax and limits before execution;
+//! explicit accessors make conversion back to text visible at call sites.
 
 use crate::compile::{QueryError, quote_ident, validate_schema};
 
@@ -52,7 +19,7 @@ impl SchemaName {
     /// # Errors
     ///
     /// Returns the same [`QueryError::InvalidCollection`] value that
-    /// [`crate::compile::validate_schema`] has always produced for an empty name
+    /// `crate::compile::validate_schema` has always produced for an empty name
     /// or one carrying a character outside `[A-Za-z0-9_-]`.
     pub fn new(name: &str) -> Result<Self, QueryError> {
         validate_schema(name)?;

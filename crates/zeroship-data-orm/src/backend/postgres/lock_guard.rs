@@ -1,69 +1,8 @@
-//! RAII-ish guard returned by [`zeroship_data_orm::storage::LockManager`] for
-//! session-scoped advisory locks.
+//! Guard a session-scoped PostgreSQL advisory lock on an owned pool lease.
 //!
-//! Renamed from the prior orchestrator-internal guard type and
-//! moved out of the old orchestration wrapper into `backend/` (see
-//! `docs/archive/p0-implementation-plan.md` §"PR 6") — the guard is the
-//! canonical RAII return shape for the
-//! [`zeroship_data_orm::storage::LockManager`] capability, not an
-//! orchestrator-internal detail. Construction goes through
-//! [`LockGuard::acquire`] taking a [`zeroship_data_orm::capability::LockScope`] (the
-//! typed classifier introduced alongside it).
-//!
-//! Snapshot and restore hold a session-scoped
-//! `pg_advisory_lock(hashtext('<app_id>:snapshot_restore'),
-//!  hashtext('snapshot_restore'))` on a single pooled client (key
-//! derivation via [`zeroship_data_orm::capability::LockScope::to_keys`]). The
-//! invariant is: *every* exit path from the locked region — Ok, Err,
-//! panic — must either explicitly issue `pg_advisory_unlock` before
-//! parking the `PoolConnection` back into the pool, OR transfer
-//! ownership of the still-locked client to the next stage that will
-//! release it.
-//!
-//! Before this guard existed, that invariant was open-coded at several schema
-//! and backup sites. What remains is `backend/postgres.rs`, which acquires
-//! around its schema-pending work and releases on every exit arm, and
-//! `lib.rs`'s probe. One invariant, open-coded unlock sequences at each
-//! exit: this module centralises the pattern so an early return cannot skip
-//! the unlock.
-//!
-//! # Why not full RAII?
-//!
-//! `Drop::drop` is sync; the unlock SQL is async. The guard therefore
-//! has two exit modes:
-//!
-//! 1. **Normal release** — `let client = guard.release().await?;`
-//!    Issues `pg_advisory_unlock` and hands the now-unlocked client
-//!    back to the caller (so it can be parked or reused).
-//! 2. **Panic / catastrophic propagation** — `Drop` runs, logs an
-//!    error, and consumes the pooled lease with `discard()`. That closes the
-//!    physical connection and frees its pool capacity immediately. It tears
-//!    down the session-scoped advisory lock even
-//!    though `Drop` cannot await `pg_advisory_unlock`. This is still a
-//!    fallback only; production code should always reach `release()`.
-//!
-//! # There was a third exit mode, and what it was for still applies
-//!
-//! `into_held()` was a HAND-OFF: it took the client out and flipped
-//! `released` without unlocking, so the lock stayed held and the next
-//! stage owned the release. It was deleted on 2026-09-04 with zero
-//! callers in any cfg - not even a test called it; the test named after
-//! it hand-wrote the two field assignments instead, because the return
-//! type cannot be constructed off a live pool.
-//!
-//! ITS RATIONALE IS KEPT BECAUSE IT IS A RULE FOR THE NEXT PERSON, not a
-//! description of code: a caller that needs to thread the still-locked
-//! client into an API which does not accept `LockGuard` should add the
-//! hand-off back HERE, at the guard boundary, so the release obligation
-//! stays codified in one place - rather than open-coding another unlock
-//! sequence at the call site, which is what this module exists to stop.
-//!
-//! # Internal representation
-//!
-//! The guard stores the client as `Option<PoolConnection>` so
-//! `release()` can move it out without `mem::replace` / `ManuallyDrop`
-//! gymnastics. After that call the `Option` is `None` and `released` is
-//! `true`, so subsequent `Drop` is a no-op (idempotent).
+//! `release().await` unlocks and returns the client. Dropping an unreleased guard
+//! discards its physical connection because `Drop` cannot await unlock SQL. A
+//! connection with an outstanding lock must never return to the pool.
 
 use compio_postgres::PoolConnection;
 

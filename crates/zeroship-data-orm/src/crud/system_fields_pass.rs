@@ -1,91 +1,12 @@
-//! The write-time assignment pass: the platform's own columns, computed by the
-//! platform.
+//! Apply runtime assignments from the system-shape charter.
 //!
-//! **This module names no platform column on the write side.** It iterates the
-//! operator charter (`policies/confined-system-shape.inject.toml`, compiled into
-//! the worker and projected by [`crate::system_shape_charter::AssignmentPlan`])
-//! and invokes the generator each column declares.
+//! The assignment plan determines which columns are computed on insert, write or
+//! delete. Rust supplies typed IDs and request actors; database expressions supply
+//! time, counters and identity values.
 //!
-//! # What that does NOT mean, measured 2026-09-01
-//!
-//! An eighth charter column is a charter line for THIS pass, and for the DDL
-//! (the migration engine resolves the same fragment). It is **not** a charter
-//! line for the whole system, and the boundary is worth stating exactly because
-//! the next person to add one will trust this comment.
-//!
-//! The READ projection still holds a second, hand-maintained list:
-//! `zeroship_data_sql::compile::SYSTEM_FIELD_NAMES` (`crates/zeroship-data-sql/src/compile.rs:756`),
-//! walked by `implicit_read_projection_parts` (`:3644`) - which builds the
-//! SELECT list for every read builder AND the `RETURNING` list for every write
-//! (`build_returning_expr`, `:3685`) - and by `read_surface_columns` (`:3746`),
-//! the predicate that narrows every row reaching a creator. Nothing binds that
-//! list to this charter; the two agree because both were written to the same
-//! seven names.
-//!
-//! What that costs is NOT that an eighth column becomes unreadable. Measured on
-//! `build_find_with_schema`: a descriptor declaring `tenant_id` projects
-//! `..., "version", "deleted_at", "title", "tenant_id"`, because the same
-//! function's second loop projects every readable descriptor key. Real
-//! descriptors carry the injected columns as ordinary fields
-//! (`examples/db-todos/generated/zeroship/schema.runtime.json:6-45`, all
-//! `readable: true`), and they are generated from this same charter fragment
-//! (`sdks/vite-plugin/src/gen-types/index.ts:322`).
-//!
-//! What it costs is that the seven are projected UNCONDITIONALLY from the const
-//! while an eighth would be projected only through the descriptor - and the
-//! descriptor is creator-authored (`zeroship-migrate-server`'s `apply.rs:61-65`).
-//! So `created_at` cannot be hidden by a hand-edited descriptor and an eighth
-//! column could be, by dropping the key or marking it `readable: false`
-//! (measured: `readable: false` removes it from the SELECT while the seven stay).
-//! An eighth charter column would not inherit that unhideability until the read
-//! projection reads the charter too.
-//!
-//! # The shape it reads
-//!
-//! Every charter column carries one property, `assign = { by, on }`: WHO
-//! computes the value and WHEN. `on` is `insert` | `write` | `delete`, and
-//! `write` covers insert - `updated_by` is `on = "write"` and must still be
-//! stamped when the row is created.
-//!
-//! # What the pass emits, and what it leaves to the database
-//!
-//! The runtime emits a value only for the generators the DATABASE cannot
-//! compute:
-//!
-//! * `typedId` - minted here via [`zeroship_core::typed_id::generate`] with the
-//!   [`prefix_for_collection`]-resolved prefix, because the prefix is
-//!   per-collection creator data the charter deliberately does not carry.
-//! * `actor` - the request's authenticated user, or **`null`** when there is
-//!   none. The generator runs on every write; stale attribution is a false
-//!   claim about who touched a row.
-//!
-//! `now`, `increment(n)` and `identity` emit NOTHING. Their value is produced by
-//! the column's own DDL - `DEFAULT NOW()` / `DEFAULT CURRENT_TIMESTAMP`,
-//! `DEFAULT 1`, and the identity sequence - which is the same authority
-//! rendering the same expression the UPDATE auto-bump uses. That is not a gap:
-//! it is what keeps ONE writer and ONE spelling per dialect. A Rust-side
-//! timestamp formatter would be a third spelling on SQLite, where the DDL
-//! default is space-separated `CURRENT_TIMESTAMP` and a creator value arrives
-//! `T`-separated, and TEXT comparison is bytewise.
-//!
-//! # A supplied value is REMOVED, not refused
-//!
-//! `assign` is not overridable, so a value the creator supplied for an assigned
-//! column is dropped before the SQL builder sees it. Removal, not refusal,
-//! because this pass is documented and tested as IDEMPOTENT: a check keyed on a
-//! field being PRESENT cannot tell a creator's value from one an earlier call
-//! minted. The refusal that needs provenance lives at the document boundary
-//! (`write_pipeline::refuse_platform_assigned_id`), which runs on the raw
-//! document before any pass.
-//!
-//! `id` is the one column this pass does not remove: it MINTS when absent and
-//! leaves a present value alone, precisely so a second call cannot re-mint. Its
-//! creator-supplied case is the boundary's to refuse.
-//!
-//! Rust-side assignment (rather than SDK-side) is the design choice so non-SDK
-//! deploys (raw `default = { fetch }` apps that call `zeroship.db.*` directly)
-//! are assigned too. The SDK reads the values back from the INSERT's
-//! `RETURNING` row.
+//! Assigned input values are removed before SQL compilation. An already assigned
+//! ID is retained to make the pass idempotent; the document boundary separately
+//! rejects creator-supplied IDs. Read projection rules live in the SQL compiler.
 
 use std::rc::Rc;
 

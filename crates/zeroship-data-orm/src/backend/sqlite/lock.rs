@@ -1,39 +1,13 @@
-//! In-process advisory-lock registry.
+//! Advisory-lock registry shared by callers of a SQLite backend instance.
 //!
-//! This module wires the body of the [`InProcessLockRegistry`] —
-//! the single-process HashMap [`super::SqliteBackend`]'s
-//! [`zeroship_data_orm::storage::LockManager`] impl routes through. Per design §8.5,
-//! SQLite is in-process by definition; both
-//! [`zeroship_data_orm::capability::LockScope::GlobalApp`] and
-//! [`zeroship_data_orm::capability::LockScope::LocalApp`] route through this registry —
-//! cross-process serialisation (BEGIN IMMEDIATE / sentinel table) is
-//! deferred future work.
-//!
-//! **Storage shape** (design §8.5):
-//! `RefCell<HashMap<(String, String), Rc<Cell<bool>>>>` — the
-//! `(key1, key2)` pair is the [`zeroship_data_orm::capability::LockScope::to_keys`]
-//! derivation; the inner `Cell<bool>` tracks "currently held". The
-//! outer `Rc<Cell<…>>` is deliberate: a later `SqliteLockGuard` sibling
-//! can clone the `Rc` at acquisition time and release on drop without
-//! re-walking the map. This module only exercises the primitive surface
-//! (`try_acquire` / `release`); the guard sibling lands separately.
-//!
-//! **Cell-borrow discipline**: every `try_acquire` / `release` call
-//! must complete the `RefCell::borrow_mut()` scope synchronously —
-//! NEVER hold the borrow across an `.await`. The [`super::SqliteBackend`]
-//! [`zeroship_data_orm::storage::LockManager`] impl calls these primitives inside
-//! a single statement so the borrow lifetime is the statement scope,
-//! and any sleep / backoff happens *outside* the borrow.
+//! This registry does not coordinate separate backend instances or processes.
+//! Borrow the registry synchronously; release the borrow before awaiting retries.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 
-/// `(key1, key2) -> Rc<Cell<bool>>` slot map — keyed on the
-/// [`zeroship_data_orm::capability::LockScope::to_keys`] derivation; the bool
-/// records "currently held". `Rc<Cell<…>>` so a future
-/// `SqliteLockGuard` can clone the slot at acquire time and release
-/// on drop without re-walking the map.
+/// Lock state keyed by the app and scope name.
 type LockSlots = HashMap<(String, String), Rc<Cell<bool>>>;
 
 /// Per-process advisory-lock registry. One instance per
@@ -49,19 +23,7 @@ impl InProcessLockRegistry {
         Self::default()
     }
 
-    /// Try to acquire the slot keyed by `(key1, key2)`.
-    ///
-    /// Returns `true` on the first acquire (and on every re-acquire
-    /// after a [`Self::release`]); returns `false` if the slot is
-    /// currently held. **Synchronous** — borrows the `RefCell` for the
-    /// scope of the call only, never holds the borrow across an
-    /// `.await`.
-    ///
-    /// Idempotency note: the registry creates a slot on first sight of
-    /// a key pair. Calls that find an absent slot insert a fresh
-    /// `Rc<Cell<true>>` and return `true`; calls that find a present
-    /// slot read its `bool` and flip false→true (returning `true`) or
-    /// leave it true (returning `false`).
+    /// Acquire an unheld slot without waiting. The registry borrow ends on return.
     pub(crate) fn try_acquire(&self, key: (String, String)) -> bool {
         let mut slots = self.slots.borrow_mut();
         let slot = slots
@@ -76,15 +38,7 @@ impl InProcessLockRegistry {
         }
     }
 
-    /// Release the slot keyed by `(key1, key2)`.
-    ///
-    /// Releasing an unheld slot is a no-op + a `tracing::warn` (same
-    /// shape as the F1-family release-on-unheld trace on the PG side
-    /// — see the PG `LockManager::release_advisory_lock`'s logging).
-    /// Never panics; the design accepts a redundant release at the
-    /// observability layer because the alternative (a typed error)
-    /// would force every `release` call site to handle a "wasn't held
-    /// anyway" branch with no semantic difference.
+    /// Release the slot. An unknown or unheld slot logs a warning and does nothing.
     pub(crate) fn release(&self, key: (String, String)) {
         let mut slots = self.slots.borrow_mut();
         match slots.get(&key).cloned() {
@@ -142,7 +96,7 @@ impl Drop for SqliteLockGuard {
 #[cfg(test)]
 mod tests {
     //! Unit tests for the in-process advisory-lock registry. Each test
-    //! exercises one of the four [`InProcessLockRegistry`] state
+    //! exercises one of the four `InProcessLockRegistry` state
     //! transitions: first acquire / contended acquire / release-unblocks /
     //! release-on-unheld no-panic. The borrow-across-await discipline is
     //! not testable at unit level (it's a compile-time property of the

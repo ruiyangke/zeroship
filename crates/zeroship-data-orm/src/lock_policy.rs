@@ -1,49 +1,7 @@
-//! Bounded-retry acquisition policy for advisory locks.
+//! Bounded advisory-lock acquisition over `LockManager`.
 //!
-//! # Why this is a separate module from the trait it extends
-//!
-//! [`LockManager`](crate::storage::LockManager) is a CONTRACT: an associated
-//! client type, three string-key primitives every backend must supply, and two
-//! typed wrappers that do nothing but derive `(key1, key2)` from a
-//! [`LockScope`]. Nothing in it reaches for a runtime. That makes it rank-0
-//! vocabulary, bound for `zeroship-data-core` under
-//! `docs/proposals/2026-08-31-data-crate-shape.md`.
-//!
-//! The bounded-retry loop is not vocabulary. It is POLICY - a wall-clock
-//! schedule, `compio::time::sleep` between attempts, and `tracing` warns per
-//! retry - and it used to live in a DEFAULT METHOD BODY on that trait. A
-//! default body travels with the trait, so `LockManager` could not keep it:
-//! every consumer of the contract would have linked an executor just to reach
-//! the three string-key primitives. Splitting it into this extension trait is
-//! what let the contract move down clean, and THAT half of the decision stands.
-//!
-//! # This module moved, and its first address was wrong
-//!
-//! It lived in `zeroship-data-v8` until 2026-09-02, on the argument that a
-//! crate whose manifest says it "names no database driver, no V8, and no
-//! runtime" may not host a `compio::time::sleep`. Extracting
-//! `zeroship-data-postgres` supplied the fact that argument was missing: BOTH
-//! vendors call this. `LockGuard::acquire` needs it and `LockGuard` travels
-//! with the PostgreSQL backend by the orphan rule; and
-//! `crates/zeroship-data-v8/tests/sqlite_integration.rs` needs it on the
-//! other side. A policy both vendors need cannot live in the crate ABOVE them
-//! without making each vendor depend on the adapter that depends on it.
-//!
-//! The manifest line was the thing that had to give, and it was imprecise
-//! rather than load-bearing: `xtask/tests/data_architecture.rs` pins
-//! `compio-postgres`, `rusqlite`, `zeroship-runtime` and `v8`, and `compio` is
-//! none of those. The fence that matters - no DRIVER, no V8 - is untouched.
-//! What this crate gives up is the claim to name no executor, which it could
-//! not honestly make while defining `async fn` in trait position anyway.
-//!
-//! Corroborating detail: `storage.rs` already spelled four intra-doc links
-//! `crate::lock_policy::BoundedLockAcquire`. Every one was broken while this
-//! module lived elsewhere; the move repairs them rather than repointing them.
-//!
-//! # Using it
-//!
-//! The blanket impl covers every `LockManager`, so a call site only needs the
-//! trait in scope:
+//! The extension trait applies retry timing and cancellation through compio while
+//! the storage contract supplies backend lock operations.
 //!
 //! ```ignore
 //! use zeroship_data_orm::lock_policy::BoundedLockAcquire;
@@ -97,7 +55,7 @@ pub trait BoundedLockAcquire: LockManager {
     }
 
     /// The retry loop itself. Loops on
-    /// [`LockManager::try_acquire_advisory_lock`] over [`SCHEDULE`], returning
+    /// [`LockManager::try_acquire_advisory_lock`] over `SCHEDULE`, returning
     /// [`DbError::LockContention`] on exhaustion.
     ///
     /// A SQL-level failure - connection drop, server error - is surfaced

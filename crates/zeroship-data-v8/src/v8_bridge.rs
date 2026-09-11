@@ -89,50 +89,7 @@ pub(crate) fn ensure_read_set_capture() {
 // V8 value walker
 // ---------------------------------------------------------------------------
 
-/// Walk a `v8::Local<v8::Value>` directly into a `zeroship_data_sql::value::Value`,
-/// skipping the JSON.stringify / serde_json::from_str round trip used by
-/// `read_native_arg`. Used by the v8_class `Collection` methods on the
-/// hot path so we don't pay two parse costs per CRUD call.
-///
-/// Mirrors the small walker in `runtime/src/rpc/superjson.rs`. We
-/// duplicate rather than re-export because plugin-db must not pull in
-/// the entire `rpc` subtree (cyclic dep risk).
-///
-/// The mirror is NOT faithful on non-finite numbers, and the divergence is
-/// undecided rather than intended. `superjson`'s `encode_number` tags NaN and
-/// +/-Infinity and sends them as sentinel strings, so RPC round-trips them
-/// losslessly - that is a documented contract in its module table and is covered
-/// by `runtime/tests/rpc_superjson.rs::special_floats_round_trip`. This walker
-/// now REFUSES them (see `non_finite_numbers_are_refused_not_coerced`).
-///
-/// The two boundaries still differ, but deliberately and in the safe direction:
-/// RPC preserves non-finite values via sentinels, `env.db` REFUSES them. What is
-/// no longer true is the old third option - silently coercing to `Value::Null` -
-/// which turned a filter value into `IS NULL` and stored NULL for a number the
-/// app supplied.
-///
-/// Mapping:
-/// - `undefined` / `null` → `Value::Null`
-/// - boolean → `Value::Bool`
-/// - number → `Value::Number` (lossless integer when representable,
-///   otherwise f64)
-/// - string → `Value::String`
-/// - array → `Value::Array` (recurse on each element)
-/// - object → `Value::Object` (recurse on each enumerable own property)
-/// - anything else (functions, symbols) → REFUSED, never coerced
-///
-/// The decode is TOTAL: it yields the whole value or an error. It never returns
-/// a strict subset of its input, because callers build SQL predicates from the
-/// result.
-///
-/// DB-6: max nesting depth the V8→serde walker will descend. A malicious
-/// deeply-nested argument (tens of thousands of `[[[…]]]` / `{a:{a:…}}` levels)
-/// would otherwise overflow the worker thread's native stack inside the
-/// recursion — an **end-user-reachable** abort, since apps routinely forward
-/// untrusted end-user JSON straight into a filter/document. 256 is far above
-/// any legitimate document nesting yet far below the stack limit. Structure past
-/// the cap is REFUSED: truncating it to `Value::Null` would hand the caller a
-/// document that is not the one they passed.
+/// Maximum argument nesting depth, bounded to prevent stack exhaustion.
 pub(crate) const MAX_DECODE_DEPTH: usize = 256;
 
 /// Total number of decoded nodes one argument may produce.
@@ -194,6 +151,8 @@ impl DecodeBudget {
     }
 }
 
+/// Capture JavaScript arguments as native ORM values before asynchronous execution.
+/// Unsupported values or exhausted budgets fail the whole decode.
 pub(crate) fn decode_native(
     scope: &mut v8::PinScope<'_, '_>,
     v: v8::Local<v8::Value>,
@@ -416,23 +375,7 @@ pub(crate) fn setup_js_promise<'s>(
     (global_resolver, request_id, promise)
 }
 
-// ---------------------------------------------------------------------------
-// Result lowering: engine value -> runtime ResolveValue
-// ---------------------------------------------------------------------------
-//
-// Moved out of `crud/mod.rs` on 2026-08-31. Every one of these returns a
-// `zeroship_runtime::state::ResolveValue`, so they were already adapter work
-// filed in the engine - but `maybe_rehydrate` was the one that mattered: it
-// selected `crate::v8_classes::masked_value::rehydrate_masked_values`, an
-// ADAPTER function pointer whose type is
-// `fn(&mut v8::PinScope, v8::Local<Value>) -> Option<v8::Local<Value>>`, on a
-// data predicate (`has_masked`). An engine module was choosing V8 behaviour
-// while spelling no `v8::` token, which is invisible to every marker-based
-// instrument in this repository.
-//
-// It sits on the masked read path - reached from twelve dispatch bodies - so
-// every masked read routed through it. The adapter now picks its own callback,
-// and the engine says only whether the result carries masked columns.
+// Native result conversion and masked-value wrappers belong to this adapter.
 
 /// Materialize the first native row and rehydrate masked fields when present.
 pub(crate) fn first_row_or_null_masked(rows: Vec<Value>, has_masked: bool) -> ResolveValue {
@@ -456,21 +399,8 @@ mod tests {
     use super::*;
     use zeroship_runtime::init_v8;
 
-    // -----------------------------------------------------------------
-    // The read-set kind gate.
-    //
-    // These three arms came from `read_set.rs`'s own test module on
-    // 2026-09-03, when that module moved to `zeroship-data-core` and could no
-    // longer name `zeroship_runtime`. They belong here on the merits, not just
-    // by exclusion: the mapping from procedure kind to `recording` is made
-    // HERE, in `ensure_read_set_capture`, and nowhere else. The versions they
-    // replace called `Active::begin(recording_for_current_kind())` - a
-    // test-local copy of that mapping, which would still have passed with the
-    // production mapping inverted.
-    //
-    // `libtest` runs each test on its own thread, so the thread-local capture
-    // buffer starts empty in every arm and needs no teardown.
-    // -----------------------------------------------------------------
+    // Exercise procedure-kind capture through the production adapter entry point.
+    // Each test receives a fresh thread-local capture buffer.
 
     #[test]
     fn capture_records_in_query_kind() {
