@@ -3357,8 +3357,8 @@ async fn postgis_extension_missing_reports_typed_error() {
 //
 // These tests exercise the full PG round-trip for `t.encrypted(...)`-
 // declared columns: BYTEA emit on DDL, decode($N, 'base64')::bytea on
-// insert, encode-as-hex on read, AAD-bound decrypt. The Camp A fence
-// (row_pk in AAD for Randomised) is the load-bearing assertion in
+// insert, encode-as-hex on read, AAD-bound decrypt. Authentication of
+// the row primary key is the load-bearing assertion in
 // `encrypted_randomised_row_swap_rejected` -- copying ciphertext from
 // row A into row B's slot must surface `encryption_aead_failed` rather
 // than leak row A's plaintext through row B's read API.
@@ -3697,10 +3697,10 @@ CREATE TABLE "{app}"."people" ({PG_SYSTEM_COLUMNS},
     // ----- WRITE (real pipeline, introspected metadata) -----
     // No `id`: the write pipeline refuses a creator-supplied one and mints a
     // typed id in `system_fields_pass`. The raw INSERT below MUST then carry
-    // THAT MINTED ID and nothing else: `ssn` is a `randomised` encrypted
-    // column, and randomised mode binds the row primary key into the AEAD's
+    // THAT MINTED ID and nothing else: encryption binds the row primary key
+    // into the AEAD's
     // additional data (`canonical_aad(collection, column, row_pk_bytes)` in
-    // zeroship-data-core's `encryption::aad`, stamped on write by
+    // zeroship-data-orm's `encryption::aad`, stamped on write by
     // `protection::encryption_pass` and reconstructed on read from the row's `id`).
     // Storing this ciphertext under a DIFFERENT id and reading it back is a
     // ciphertext-relocation attack, and the AEAD refuses it with
@@ -5505,8 +5505,7 @@ async fn unmask_encrypted_column_on_pg_reads_bytea_raw_sibling() {
     admin_pool.batch_execute(&create_table).await.unwrap();
 
     // Real ciphertext from the platform's own encryptor, under the AAD the read
-    // path recomputes: canonical_aad(collection, column, row_pk) for the
-    // randomised mode (crud/unmask.rs:503-510).
+    // path recomputes: canonical_aad(collection, column, row_pk).
     let backend = zeroship_data_orm::backend::PostgresBackend::new(
         admin_pool.clone(),
         url.clone(),

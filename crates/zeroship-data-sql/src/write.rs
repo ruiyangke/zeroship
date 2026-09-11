@@ -599,25 +599,8 @@ impl InsertBuilder {
 ///
 /// # There is no unbounded update
 ///
-/// [`RowLimit`] is not optional and has no "all rows" value, exactly as it is
-/// not optional on [`crate::Select`]. That closes a hole that is open today in
-/// two independent places:
-///
-/// * `build_update_many_with_system_fields` emits the `WHERE` clause only when
-///   the filter is non-empty and never emits a bound, so `updateMany({}, ...)`
-///   renders `UPDATE "app"."t" SET ... RETURNING <cols>` - a whole-table
-///   rewrite that also materialises every row. (The clause names its columns
-///   since 2026-08-28 and was `RETURNING *` before; the hole is the missing
-///   bound, which neither spelling closes.)
-/// * the `MAX_QUERY_LIMIT` cap that does exist is enforced by the **caller**,
-///   and only on one of two branches. `dispatch_update_many` probes the target
-///   ids and refuses above the cap at `crud/mod.rs:1249`, but that check sits
-///   inside `if per_row_encrypted_update` (`:1233`). An update that touches no
-///   randomised-encrypted column falls through to `:1353-1385`, which builds the
-///   statement straight from the caller's filter with no probe and no cap.
-///
-/// A bound that lives in a caller is a bound one branch can miss. Here it is a
-/// field with no absent value.
+/// [`RowLimit`] is required, as it is on [`crate::Select`]. Keeping the bound
+/// in the statement ensures callers cannot accidentally omit it on a write path.
 ///
 /// # The lowering is one statement, and it holds a lock
 ///

@@ -1115,7 +1115,7 @@ async fn goodie_sentinels_survive_rebuild() {
             FieldDescriptor {
                 name: "secret".into(),
                 ty: "bytes".into(),
-                encrypted: Some(serde_json::json!({ "mode": "randomized", "keyId": "k1" })),
+                encrypted: Some(serde_json::json!({ "keyId": "k1" })),
                 ..Default::default()
             },
         ],

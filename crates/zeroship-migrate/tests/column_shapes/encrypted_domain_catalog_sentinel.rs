@@ -2,12 +2,12 @@
 //!
 //! A `t.encrypted({ of: t.domain("positive_number") })` column stores ciphertext in
 //! `BYTEA`/`BLOB`, and the ONLY record of what the plaintext is shaped like is the
-//! `zero-migrate:enc:<mode>:<keyId>:<wraps>` sentinel the lower stamps into the catalog:
+//! `zero-migrate:enc:<keyId>:<wraps>` sentinel the lower stamps into the catalog:
 //!
 //! ```text
-//!   postgres  "amount" bytea /* zero-migrate:enc:randomised:default:string */ NOT NULL
+//!   postgres  "amount" bytea /* zero-migrate:enc:default:string */ NOT NULL
 //!             COMMENT ON COLUMN "app"."amounts"."amount" IS 'zero-migrate:enc:…:string'
-//!   sqlite    "amount" BLOB  /* zero-migrate:enc:randomised:default:string */ NOT NULL
+//!   sqlite    "amount" BLOB  /* zero-migrate:enc:default:string */ NOT NULL
 //! ```
 //!
 //! `string` — for a domain over `int`. `wraps` is not decoration: it selects which
@@ -159,7 +159,7 @@ fn an_encrypted_domain_columns_catalog_sentinel_names_the_base_type() {
         );
         for sentinel in &sentinels {
             assert_eq!(
-                sentinel, "zero-migrate:enc:randomised:default:number",
+                sentinel, "zero-migrate:enc:default:number",
                 "{label}: the sentinel must name the DOMAIN's base type, not \"string\":\n{sql}"
             );
         }
@@ -185,7 +185,7 @@ fn an_added_encrypted_domain_columns_sentinel_names_the_base_type() {
         );
         for sentinel in &sentinels {
             assert_eq!(
-                sentinel, "zero-migrate:enc:randomised:default:number",
+                sentinel, "zero-migrate:enc:default:number",
                 "{label}: an ADD COLUMN sentinel must resolve the domain too:\n{sql}"
             );
         }
@@ -233,7 +233,7 @@ fn an_encrypted_domain_over_a_text_base_still_says_string() {
         );
         for sentinel in enc_sentinels(&sql) {
             assert_eq!(
-                sentinel, "zero-migrate:enc:randomised:default:string",
+                sentinel, "zero-migrate:enc:default:string",
                 "{label}: a domain over varchar must still wrap a string:\n{sql}"
             );
         }
@@ -259,7 +259,7 @@ fn an_undeclared_domain_leaves_the_sentinel_unchanged() {
         let sql = rendered_sql(ops, dialect);
         for sentinel in enc_sentinels(&sql) {
             assert_eq!(
-                sentinel, "zero-migrate:enc:randomised:default:string",
+                sentinel, "zero-migrate:enc:default:string",
                 "{label}: an undeclared domain must leave the sentinel alone:\n{sql}"
             );
         }
@@ -379,7 +379,7 @@ fn an_unrelated_rename_carries_the_encrypted_domain_columns_sentinel_unchanged()
         if let Some(sentinel) = after {
             if sentinel.contains("zero-migrate:enc:") {
                 assert!(
-                    sentinel.contains("randomised:default:number"),
+                    sentinel.contains("zero-migrate:enc:default:number"),
                     "{label}: and it must be the resolved base type: {sentinel:?}"
                 );
             }
@@ -406,7 +406,7 @@ fn the_lower_the_snapshot_fold_and_the_field_defs_agree_on_wraps() {
         let sql = rendered_sql(ops.clone(), dialect);
         for sentinel in enc_sentinels(&sql) {
             assert_eq!(
-                sentinel, "zero-migrate:enc:randomised:default:number",
+                sentinel, "zero-migrate:enc:default:number",
                 "{label}: lower:\n{sql}"
             );
         }
@@ -433,7 +433,7 @@ fn the_lower_the_snapshot_fold_and_the_field_defs_agree_on_wraps() {
             .filter(|s| s.contains("zero-migrate:enc:"))
         {
             assert!(
-                sentinel.contains("randomised:default:number"),
+                sentinel.contains("zero-migrate:enc:default:number"),
                 "{label}: snapshot fold disagrees with the lower: {sentinel:?}"
             );
         }

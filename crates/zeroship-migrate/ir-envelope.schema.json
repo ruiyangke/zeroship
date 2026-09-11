@@ -3239,7 +3239,7 @@
           "additionalProperties": false
         },
         {
-          "description": "Application-level encrypted column wrapping an inner type.\n\nCARRIES THE INNER TYPE ONLY. There is deliberately no `mode` and no\n`keyId` here, so `t.encrypted({ of })` is the only form a migration can\nexpress, and the render stamps the kernel defaults (`randomised`,\n`default`) when it builds the column's encrypted facet. That keeps the\nvariant fail-closed: a migration cannot assert an encryption posture it\nhas no way to name.\n\nThe cost is a ONE-WAY DOOR at the authoring surface, and it is silent. A\ndeclarative schema may declare `mode` and `keyId`; re-authoring that\ncolumn as a migration drops both, and nothing diagnoses it - the\nmigration records, the descriptor generates, and the first symptom is a\nruntime failure naming a key nobody chose. By the time a migration\nreaches the engine the intent is already gone, so no layer downstream of\nhere can warn. Migration-first authoring supports default-mode\nencryption only.",
+          "description": "Application-level encrypted column wrapping an inner type.\n\nCarries the plaintext type. Encryption is always randomised; the\nruntime authenticates each value's collection, column and row identity.",
           "type": "object",
           "properties": {
             "encrypted": {
@@ -7290,7 +7290,7 @@
           "additionalProperties": false
         },
         {
-          "description": "Changing the TYPE of `column` on project-schema table `table` has no\nblocking dependents.\n\nNOT the same question as [`Precondition::ColumnHasNoBlockingDependents`],\nand the difference was measured against a live server rather than reasoned\nabout. A column another table's FOREIGN KEY points at blocks a DROP and does\nNOT block a RETYPE, so reusing the drop assertion here would refuse a\nmigration PostgreSQL honours. Conversely a retype is blocked by things a\ndrop is not: partition-key membership and column inheritance, neither of\nwhich is a dependency at all.\n\nEvaluated by\n`MigrationBackend::column_type_change_blockers`, whose\nPostgreSQL predicate `tests/pg_column_retype_dependency_oracle.rs` measures\nagainst the server's own verdict one shape at a time.",
+          "description": "Changing the TYPE of `column` on project-schema table `table` has no\nblocking dependents.\n\nNOT the same question as [`Precondition::ColumnHasNoBlockingDependents`],\nand the difference was measured against a live server rather than reasoned\nabout. A column another table's FOREIGN KEY points at blocks a DROP and does\nNOT block a RETYPE, so reusing the drop assertion here would refuse a\nmigration PostgreSQL honours. Conversely a retype is blocked by things a\ndrop is not: partition-key membership and column inheritance, neither of\nwhich is a dependency at all.\n\nEvaluated by\n`MigrationBackend::column_type_change_blockers`, whose\nPostgreSQL predicate `crates/zeroship-migrate/tests/column_shapes/pg_column_retype_dependency_oracle.rs` measures\nagainst the server's own verdict one shape at a time.",
           "type": "object",
           "properties": {
             "ColumnTypeChangeHasNoBlockers": {

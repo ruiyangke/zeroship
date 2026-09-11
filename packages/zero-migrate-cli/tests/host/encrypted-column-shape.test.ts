@@ -8,7 +8,7 @@
 //
 //   authored   secret: t.encrypted({ of: t.text() })
 //
-//   PostgreSQL   secret         bytea          COMMENT zero-migrate:enc:randomised:default:string
+//   PostgreSQL   secret         bytea          COMMENT zero-migrate:enc:default:string
 //                secret_masked  text           COMMENT zero-migrate:mask:kind=full,classification=pii
 //   SQLite       secret         BLOB           /* … enc sentinel … */ inline in the DDL
 //                secret_masked  TEXT           /* … mask sentinel … */ inline

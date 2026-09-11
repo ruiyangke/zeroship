@@ -9562,10 +9562,8 @@ pub(crate) fn ir_column_to_field(c: &IrColumn) -> FieldDescriptor {
     // facet - the shared builder reads the facet to pick BYTEA + the `zero-migrate:enc`
     // sentinel (built by the shared kernel, never re-spelled here).
     //
-    // The op.* `ColType::Encrypted`
-    // is the DEFAULT-mode encrypted shape (no mode/keyId on the carrier - the DDL
-    // note: non-default encrypted-via-op.* stays fail-closed). Recovery therefore
-    // restores the KERNEL DEFAULTS the SDK's `t.encrypted()` stamps
+    // The op.* `ColType::Encrypted` carries the wrapped type. Recovery
+    // restores the key and mask defaults the SDK's `t.encrypted()` stamps
     // (`{ keyId: "default", wraps: <inner> }`) and the FAIL-SAFE
     // AUTO-MASK (`{ kind: "full", classification: "pii" }`) - BYTE-IDENTICAL to what
     // `descriptor_to_sdk_schema` emits for an authored `t.encrypted()` and to what the

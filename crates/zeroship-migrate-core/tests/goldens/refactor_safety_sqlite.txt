@@ -16,10 +16,10 @@ TableSnapshot {
             case_sensitive: None,
             collation: None,
             encryption_sentinel: Some(
-                "/* zero-migrate:enc:randomised:default:string */",
+                "/* zero-migrate:enc:default:string */",
             ),
             comment_sentinel: Some(
-                "zero-migrate:enc:randomised:default:string",
+                "zero-migrate:enc:default:string",
             ),
             comment: None,
         },
