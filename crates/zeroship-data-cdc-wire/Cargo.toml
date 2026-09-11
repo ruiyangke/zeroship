@@ -1,0 +1,11 @@
+[package]
+name = "zeroship-data-cdc-wire"
+version = "0.1.0"
+edition = "2021"
+description = "Bounded CDC invalidation protocol shared by the relay and ORM client."
+
+# Pure framing: no I/O, database, ORM, or V8 dependency.
+[dependencies]
+
+[lints]
+workspace = true

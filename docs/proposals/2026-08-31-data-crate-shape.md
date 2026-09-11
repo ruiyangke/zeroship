@@ -41,7 +41,7 @@ zeroship-data-postgres          impl of the core contract.   -> data-core, compi
 zeroship-data-sqlite            impl of the core contract.   -> data-core, rusqlite
 zeroship-data-cdc-server        service tier: WAL stream, slot authority. A BINARY, peer of
                                 zeroship-migrate-server. NOTHING DEPENDS ON IT.
-                                -> compio-postgres, zeroship-cdc-wire, zeroship-core, and MAY ->
+                                -> compio-postgres, zeroship-data-cdc-wire, zeroship-core, and MAY ->
                                 data-core. NOT data-postgres.
 zeroship-data-orm            the data plane's logic: crud pipeline, transactions, exec.
                                 -> data-core, AND -> data-postgres + data-sqlite, because it owns
@@ -69,7 +69,7 @@ The relay's line said "NOT data-core, NOT data-postgres". The `NOT data-core` ha
 homes they live in, so the relay may depend on it. The permission is not a recommendation -
 `cargo tree -p zeroship-data-core -e normal` reaches `cyper` 3 times and `tokio` 2 times through
 `zeroship-core` - and it is specifically **not** a licence to route the WIRE contract there.
-`crates/zeroship-cdc-wire/Cargo.toml` refuses `zeroship-core` by name for exactly that closure, and
+`crates/zeroship-data-cdc-wire/Cargo.toml` refuses `zeroship-core` by name for exactly that closure, and
 `data-core` is the floor of the WORKER's data plane, so relocating the relay's wire types into it
 would put the worker's whole data plane in the relay's closure - the coupling the binary shape
 exists to prevent. `NOT data-postgres` survives on its own merits.
@@ -459,7 +459,7 @@ nobody runs is a census with a stricter name.
    `crates/zeroship-data-orm/src/cdc/broker.rs`, so a `wal_consumer.rs` in a second process publishes
    into a broker with no subscribers and suppresses nothing in the worker - and it COMPILES.
    `cdc_lifecycle.rs` is ADAPTER and stays put. What is actually buildable here is the pgoutput
-   decode algorithm being REWRITTEN in the relay with a `zeroship-cdc-wire` frame emit where
+   decode algorithm being REWRITTEN in the relay with a `zeroship-data-cdc-wire` frame emit where
    `broker::publish` is today, and that is blocked on the entities, not on these edges.
 
 4. **Decision 4's wording. THE CONTRADICTION THIS ITEM REPORTED IS REFUTED, AND THE WORDING IT

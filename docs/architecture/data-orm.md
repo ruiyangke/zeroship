@@ -78,7 +78,7 @@ Shared CDC contracts live in `zeroship_data_orm::cdc`: `ChangeEvent`, `ChangeOp`
 `ChangeSink`, `ChangeStream`, and subscription messages. The broker and read-set
 matching live under that module. SQLite capture feeds these contracts beside its
 file-backed writer; worker PostgreSQL capture feeds the same broker today.
-The relay protocol remains in `zeroship-cdc-wire`, independent of the ORM.
+The relay protocol remains in `zeroship-data-cdc-wire`, independent of the ORM.
 V8 owns JavaScript subscription wrappers and isolate cleanup. Its existing
 PostgreSQL consumer, slot management, and consumer leases still await the relay
 transport; moving the shared contracts does not relocate replication authority.

@@ -2311,11 +2311,9 @@ real file.
 draft asserted that `cluster_id` lives on the `Datastore` entity. MEASURED:
 `grep -rn "struct Datastore\b" crates/ --include='*.rs'` returns nothing, and
 `grep -rln datastore db/migrations-ts/` returns nothing. `DatastoreId` and
-`ClusterId` exist only as wire types in `crates/zeroship-cdc-wire`
-(`src/ids.rs`, consumed in `src/frame.rs` and `src/request.rs`). Both spellings
-are open questions - issue #178 records that `ds_` contradicts its own proposal
-and `clu_` is an invention. A design that placed zone or cluster identity on a
-datastore entity would have been building on a type that does not exist.
+`ClusterId` were proposed as wire types. The relay extraction removed those
+unused contracts. A design that places zone or cluster identity on a datastore
+must introduce the entity that owns that authority.
 
 **3. Gossip was dismissed for the wrong reason, then adopted for a different
 one.** The first pass rejected gossip as "a distributed system added only to

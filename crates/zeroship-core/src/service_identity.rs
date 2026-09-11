@@ -426,6 +426,9 @@ impl ServiceEndpoint {
 pub mod endpoints {
     use super::ServiceEndpoint;
 
+    pub const CDC_SUBSCRIBE: ServiceEndpoint =
+        ServiceEndpoint::new("cdc", "GET", "/internal/v1/cdc/subscribe");
+
     pub const GATEWAY_BACKCHANNEL_LOGOUT: ServiceEndpoint =
         ServiceEndpoint::new("gateway", "POST", "/oidc/backchannel-logout");
     pub const GATEWAY_WORKFLOW_ADVANCE: ServiceEndpoint = ServiceEndpoint::new(
@@ -547,6 +550,7 @@ pub fn service_allowlist() -> &'static [ServiceAuthorization] {
                 principal("svc/worker"),
                 &[
                     endpoints::CONTROL_VERSIONS,
+                    endpoints::CDC_SUBSCRIBE,
                     // NO APP SCOPE NARROWS THESE TWO TODAY, and this comment
                     // claimed one until 2026-09-07. `get_app_env` and
                     // `get_app_version` verify the assertion, DISCARD the

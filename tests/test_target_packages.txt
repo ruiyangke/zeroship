@@ -50,7 +50,7 @@
 # before it was pasted: 3 rows REMOVED that named things which are not packages
 # (`zeroship`, `zeroship-migrate-adapter`, `zeroship-migrated`) and 17 members
 # ADDED (`zeroship-cli`, the `zeroship-data-*` family, every `zeroship-migrate*`
-# including `zeroship-migrate-node`, `zeroship-cdc-wire`).
+# including `zeroship-migrate-node`, `zeroship-data-cdc-wire`).
 #
 # To regenerate after a deliberate change:
 #   cargo test --workspace --no-run --message-format=json > /tmp/t.json
@@ -65,7 +65,7 @@ zeroship-auth
 zeroship-authn
 zeroship-authz
 zeroship-bundle
-zeroship-cdc-wire
+zeroship-data-cdc-wire
 zeroship-cli
 zeroship-config-contract
 zeroship-config-macros
