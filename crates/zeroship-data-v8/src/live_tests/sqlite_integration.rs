@@ -1416,7 +1416,6 @@ use zeroship_data_orm::protection::Catalog;
 
 #[cfg(test)]
 #[allow(unused_imports)]
-#[allow(unused_imports)]
 use zeroship_data_orm::search::Search;
 
 #[test]
