@@ -34,6 +34,7 @@ pub enum TestEnvKey {
     ///
     /// Prefixed because, unlike `PG_TEST_URL`, it names no shared service and
     /// exists only inside one test's re-exec.
+    #[allow(dead_code, reason = "Only the descriptor-budget test uses this shared key.")]
     FdProbeChild,
 }
 

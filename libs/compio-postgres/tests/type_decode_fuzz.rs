@@ -46,6 +46,7 @@ fn body(rng: &mut Rng) -> Vec<u8> {
 /// probe panic in the decoder body, 62000 random inputs reached it zero times.
 /// The fields are therefore chosen from plausible values, with room to be
 /// wrong, so the body runs and its count arithmetic is what gets swept.
+#[cfg(feature = "array-impls")]
 fn structured_array(rng: &mut Rng) -> Vec<u8> {
     const NDIMS: &[i32] = &[0, 1, 1, 1, 2, 3, -1, 7, i32::MAX];
     const LENS: &[i32] = &[0, 1, 2, 3, -1, i32::MAX];
@@ -79,6 +80,7 @@ fn structured_array(rng: &mut Rng) -> Vec<u8> {
 /// A `varbit` body: a bit length, then ceil(len/8) bytes. Random bytes never
 /// satisfy that relation - a probe panic in the decoder body went unhit by the
 /// whole random sweep, so this pair swept nothing until the generator existed.
+#[cfg(feature = "with-bit-vec-0_9")]
 fn structured_varbit(rng: &mut Rng) -> Vec<u8> {
     const BITS: &[i32] = &[0, 1, 7, 8, 9, 16, 31, 64, -1, i32::MAX];
     let bits = BITS[rng.below(BITS.len())];
@@ -103,6 +105,7 @@ fn structured_varbit(rng: &mut Rng) -> Vec<u8> {
 /// An `inet`/`cidr` body: address family, netmask bits, a cidr flag, the
 /// address length, then that many address bytes. Also never reached by random
 /// input - same probe, same result.
+#[cfg(feature = "with-cidr-0_3")]
 fn structured_inet(rng: &mut Rng) -> Vec<u8> {
     const FAMILY: &[u8] = &[2, 3, 0, 255];
     const NB: &[u8] = &[4, 16, 0, 8];
@@ -139,8 +142,14 @@ macro_rules! sweep {
 fn hostile_value_bytes_are_refused_rather_than_panicking() {
     let mut rng = Rng(0x7A11_C0DE_5EED_0001);
     let (mut ok, mut err) = (0u32, 0u32);
+    #[cfg(feature = "array-impls")]
     let mut array_ok = 0u32;
+    #[cfg(not(feature = "array-impls"))]
+    let array_ok = 0u32;
+    #[cfg(any(feature = "with-bit-vec-0_9", feature = "with-cidr-0_3"))]
     let mut structured_ok = 0u32;
+    #[cfg(not(any(feature = "with-bit-vec-0_9", feature = "with-cidr-0_3")))]
+    let structured_ok = 0u32;
 
     sweep!(
         &mut rng, ok, err,

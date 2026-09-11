@@ -48,7 +48,7 @@ async fn client() -> Client {
 /// transaction, so four DML statements yield one Begin/Commit pair around
 /// them, not four - and a count that guesses high simply waits forever.
 async fn decoded_stream(slot: &str, publication: &str) -> Vec<PgOutputMessage> {
-    let mut replication = compio_postgres::replication::connect_replication(
+    let replication = compio_postgres::replication::connect_replication(
         common::suite_tls(),
         &common::replication_config("cpg_pgoutput_live"),
     )
