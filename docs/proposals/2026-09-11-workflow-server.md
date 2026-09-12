@@ -65,6 +65,11 @@ isolates through a trusted host adapter. A monotonic watchdog interrupts app
 execution at the confirmed lease or execution deadline, including synchronous
 module initialization and timer callbacks. Deadline renewal cannot revive an
 expired execution. Native dispatch failures now produce journal outcome batches.
+Embedded and remote service clients now adapt to the app binding through the
+same Rust backend. Named step output reads resolve the current generation under
+the restart fence, with bounded buffering and verified content. The service V8
+binding checks its app scope against the host's immutable runtime identity
+before evaluating creator modules; environment variables confer no authority.
 The worker polling loop, public HTTP ingress, retention of
 completed run graphs and interpreter cutover remain in progress. The
 current runtime still uses Control and the local mini-engine.

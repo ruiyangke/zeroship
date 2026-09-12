@@ -15,6 +15,17 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
+pub(crate) struct RuntimeAppIdentity(pub Option<uuid::Uuid>);
+
+/// Read the immutable app identity supplied by `RuntimeBuilder::app_id`.
+/// Environment variables and app code cannot replace this host-owned identity.
+#[must_use]
+pub fn runtime_app_uuid(scope: &v8::PinScope<'_, '_>) -> Option<uuid::Uuid> {
+    scope
+        .get_slot::<RuntimeAppIdentity>()
+        .and_then(|identity| identity.0)
+}
+
 /// A native extension that registers functions on `env.{namespace}.*`.
 ///
 /// Plugins are the extension mechanism for the runtime. Each plugin:

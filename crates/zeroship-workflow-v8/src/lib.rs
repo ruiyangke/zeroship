@@ -1,9 +1,9 @@
 //! Durable workflow V8 binding — `env.workflows`.
 //!
 //! `WorkflowBinding::build_instance` mints a native `env.workflows` namespace
-//! per isolate. The namespace carries only an app-scoped bearer token derived
-//! in Rust as `HMAC-SHA256(control_key, app_id)`; the raw control key never
-//! enters V8.
+//! per isolate. Each namespace owns an app-scoped Rust backend; credentials
+//! remain in the host. Service bindings validate the immutable runtime identity
+//! before evaluating app code.
 
 mod dev;
 mod error;
@@ -25,6 +25,9 @@ pub use v8_class::{is_excluded_workflow_property, mint_workflows};
 
 #[derive(Clone, Debug)]
 enum WorkflowBackendFactory {
+    Service {
+        backend: Arc<zeroship_workflow::service::AppBackend>,
+    },
     Http {
         control_url: String,
         control_key: String,
@@ -40,6 +43,16 @@ pub struct WorkflowBinding {
 }
 
 impl WorkflowBinding {
+    /// Bind an embedded or remote shared service to its authorized app.
+    #[must_use]
+    pub fn service(backend: zeroship_workflow::service::AppBackend) -> Self {
+        Self {
+            backend: WorkflowBackendFactory::Service {
+                backend: Arc::new(backend),
+            },
+        }
+    }
+
     #[must_use]
     pub fn new(control_url: impl Into<String>, control_key: impl Into<String>) -> Self {
         Self {
@@ -72,6 +85,7 @@ impl WorkflowBinding {
 
     fn build_backend(&self, app_id: &str) -> SharedWorkflowBackend {
         match &self.backend {
+            WorkflowBackendFactory::Service { backend } => backend.clone(),
             WorkflowBackendFactory::Http {
                 control_url,
                 control_key,
@@ -92,6 +106,20 @@ impl WorkflowBinding {
 }
 
 impl NativePlugin for WorkflowBinding {
+    fn bind_runtime_descriptor(
+        &self,
+        scope: &mut v8::PinScope<'_, '_>,
+        _app_id: &str,
+        _descriptor: Option<&serde_json::Value>,
+    ) -> Result<(), String> {
+        if let WorkflowBackendFactory::Service { backend } = &self.backend {
+            if zeroship_runtime::plugin::runtime_app_uuid(scope) != Some(backend.app_id().uuid()) {
+                return Err("workflow binding does not match runtime app identity".into());
+            }
+        }
+        Ok(())
+    }
+
     fn namespace(&self) -> &str {
         "workflows"
     }
