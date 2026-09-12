@@ -1,5 +1,0 @@
-error[E0599]: no variant or associated item named `Mysql` found for enum `SqlDialect` in the current scope
- --> tests/sql/ui/unimplemented_runtime_dialect.rs:4:25
-  |
-4 |     let _ = SqlDialect::Mysql;
-  |                         ^^^^^ variant or associated item not found in `SqlDialect`

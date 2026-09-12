@@ -44,8 +44,13 @@ impl SqlStorageCodecs for PostgresCodecs {
         })
     }
 
-    fn decode(&self, _: StorageType, value: Value) -> Result<Value, CompileError> {
-        Ok(value)
+    fn decode(&self, storage: StorageType, value: Value) -> Result<Value, CompileError> {
+        match (storage, value) {
+            (StorageType::Json, Value::Json(encoded)) => {
+                serde_json::from_str(&encoded).map_err(|_| invalid_json())
+            }
+            (_, value) => Ok(value),
+        }
     }
 }
 
@@ -55,4 +60,8 @@ fn unsupported_type() -> CompileError {
 
 fn invalid_timestamp() -> CompileError {
     CompileError::InvalidStatement("invalid PostgreSQL timestamp storage value".into())
+}
+
+fn invalid_json() -> CompileError {
+    CompileError::InvalidStatement("invalid PostgreSQL JSON storage value".into())
 }

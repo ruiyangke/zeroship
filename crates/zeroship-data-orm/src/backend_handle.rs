@@ -23,17 +23,17 @@ pub struct BackendHandle(
 );
 impl BackendHandle {
     pub fn new<B: Backend>(backend: Rc<B>) -> Self {
-        let registration = crate::sql::registration::SqlRegistration::builtin(backend.dialect());
+        let registration = backend.sql_registration();
         Self(backend, Rc::new(()), Arc::new(registration), None)
     }
     pub fn with_sql<B: Backend>(
         backend: Rc<B>,
         registration: crate::sql::registration::SqlRegistration,
     ) -> Result<Self, DbError> {
-        if backend.dialect() != registration.dialect() {
+        if backend.sql_registration().family() != registration.family() {
             return Err(DbError::config(
                 "backend_sql_mismatch",
-                "backend execution and SQL registration use different dialects",
+                "backend execution and SQL registration use different SQL families",
             ));
         }
         Ok(Self(backend, Rc::new(()), Arc::new(registration), None))
@@ -305,7 +305,10 @@ mod routed_read_tests {
 
             // CONTROL: a pool-lane read cannot see the uncommitted row.
             let outside = read_raw_column_value(
-                &CapturedRoute::pool_for_tests(app, crate::sql::compile::SqlDialect::Sqlite)
+                &CapturedRoute::pool_for_tests(
+                    app,
+                    crate::sql::registration::SqlRegistration::sqlite(),
+                )
                     .bind(handle.clone())
                     .unwrap(),
                 "people",
@@ -323,7 +326,10 @@ mod routed_read_tests {
 
             // SUBJECT: the same read, routed onto the transaction.
             let inside = read_raw_column_value(
-                &CapturedRoute::tx_for_tests(app, crate::sql::compile::SqlDialect::Sqlite)
+                &CapturedRoute::tx_for_tests(
+                    app,
+                    crate::sql::registration::SqlRegistration::sqlite(),
+                )
                     .bind(handle.clone())
                     .unwrap(),
                 "people",

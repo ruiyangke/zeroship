@@ -34,21 +34,20 @@
 //! Run: `cargo xtask test data --filter 'test(unmask_tx_lane::)'`
 
 use crate::tests::fixtures;
-use crate::tests::fixtures::Host;
 #[allow(unused_imports)]
-use crate::tests::fixtures::schema::{fixture_table_sql, fixture_table_sql_for};
+use crate::tests::fixtures::schema::fixture_table_sql;
+use crate::tests::fixtures::Host;
 #[allow(unused_imports)]
 use zeroship_migrate::schema::query::FkEmission;
 
 use std::rc::Rc;
 
+use crate::value::{value, Value};
 use compio_postgres::{NoTls, Pool};
 use zeroship_data_orm::binding::DbBinding;
 use zeroship_data_orm::error::DbError;
 use zeroship_data_orm::protection::mask_policy::install_mask_policy;
 use zeroship_data_orm::tx_route::{CapturedRoute, TxRoute};
-use crate::sql::compile::SqlDialect;
-use crate::value::{Value, value};
 
 /// Connect, or fail the test. Deliberately NOT a skip: a skipping run of a
 /// masking suite is indistinguishable from a passing one.
@@ -150,12 +149,16 @@ async fn backend(host: &Host) -> zeroship_data_orm::backend::BackendHandle {
 /// and was wrong on every SQLite harness. This target is live-PostgreSQL only
 /// (`require_pg`), so `Postgres` is the answer its connection actually speaks.
 async fn tx_route(host: &Host, app: &str) -> TxRoute {
-    CapturedRoute::tx_for_tests(app, SqlDialect::Postgres).bind(backend(host).await).unwrap()
+    CapturedRoute::tx_for_tests(app, crate::sql::registration::SqlRegistration::postgres())
+        .bind(backend(host).await)
+        .unwrap()
 }
 
 /// A route outside any transaction. Dialect stated, as in [`tx_route`].
 async fn pool_route(host: &Host, app: &str) -> TxRoute {
-    CapturedRoute::pool_for_tests(app, SqlDialect::Postgres).bind(backend(host).await).unwrap()
+    CapturedRoute::pool_for_tests(app, crate::sql::registration::SqlRegistration::postgres())
+        .bind(backend(host).await)
+        .unwrap()
 }
 
 /// Insert one document through the real `run_insert` on `route`, returning the

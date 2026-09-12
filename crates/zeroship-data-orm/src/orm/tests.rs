@@ -23,11 +23,11 @@ mod protected_updates;
 mod schema_updates;
 mod sql_registration;
 mod timestamp;
-mod upsert_contract;
 mod typed_arrays;
 mod typed_updates;
 mod update_operators;
 mod update_validation;
+mod upsert_contract;
 
 #[derive(Debug, FromRow)]
 #[orm(entity = posts)]
@@ -578,13 +578,11 @@ async fn mapped_models_use_the_migration_schema_and_orm_lifecycle() {
         .await
         .unwrap()
         .unwrap();
-    assert!(
-        posts
-            .find::<Post>(Filter::all(), FindOptions::default())
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    assert!(posts
+        .find::<Post>(Filter::all(), FindOptions::default())
+        .await
+        .unwrap()
+        .is_empty());
     let collection = db.collection("posts").unwrap();
     assert_eq!(
         count(
@@ -623,14 +621,12 @@ async fn transactions_commit_rollback_and_expire_escaped_collections() {
         })
         .await
         .unwrap();
-    assert!(
-        escaped
-            .find(value!({}), value!({}))
-            .await
-            .unwrap_err()
-            .to_string()
-            .contains("settled")
-    );
+    assert!(escaped
+        .find(value!({}), value!({}))
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("settled"));
     let result: Result<(), DbError> = db
         .transaction(|tx| async move {
             tx.collection("posts")?
@@ -723,8 +719,10 @@ async fn caught_statement_failure_cannot_commit_a_poisoned_transaction() {
 #[compio::test]
 async fn preparation_rejects_a_route_for_another_database() {
     let (db, _directory) = database().await;
-    let route =
-        CapturedRoute::pool_for_tests("another_app", crate::sql::compile::SqlDialect::Sqlite);
+    let route = CapturedRoute::pool_for_tests(
+        "another_app",
+        crate::sql::registration::SqlRegistration::sqlite(),
+    );
     let result = PreparedOperation::new(
         db.binding.clone(),
         "posts",
@@ -773,9 +771,6 @@ struct RegisteredBackend {
 }
 #[async_trait::async_trait(?Send)]
 impl crate::executor::ScopedExecutor for RegisteredBackend {
-    fn dialect(&self) -> crate::sql::compile::SqlDialect {
-        self.inner.dialect()
-    }
     async fn prepare_for_app(&self, app_id: &str) -> Result<(), DbError> {
         self.inner.prepare_for_app(app_id).await
     }
@@ -841,6 +836,10 @@ impl crate::protection::Protection for RegisteredBackend {
 }
 
 impl crate::backend::Backend for RegisteredBackend {
+    fn sql_registration(&self) -> crate::sql::registration::SqlRegistration {
+        self.inner.sql_registration().clone()
+    }
+
     fn publishes_committed_changes(&self) -> bool {
         self.inner.publishes_committed_changes()
     }
@@ -893,16 +892,14 @@ async fn exercise_registered_backend(mut db: Database) {
         .await
         .unwrap();
     assert_eq!(found.len(), 1);
-    assert!(
-        posts
-            .find::<Post>(
-                posts::title.eq("registered savepoint").unwrap(),
-                Default::default()
-            )
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    assert!(posts
+        .find::<Post>(
+            posts::title.eq("registered savepoint").unwrap(),
+            Default::default()
+        )
+        .await
+        .unwrap()
+        .is_empty());
     let rolled_back: Result<(), DbError> = db
         .transaction(|tx| async move {
             let _: Post = tx
@@ -915,16 +912,14 @@ async fn exercise_registered_backend(mut db: Database) {
         })
         .await;
     assert!(rolled_back.is_err());
-    assert!(
-        posts
-            .find::<Post>(
-                posts::title.eq("registered rollback").unwrap(),
-                Default::default()
-            )
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    assert!(posts
+        .find::<Post>(
+            posts::title.eq("registered rollback").unwrap(),
+            Default::default()
+        )
+        .await
+        .unwrap()
+        .is_empty());
     assert!(
         queries.get() > 0,
         "autocommit must use the registered driver"
@@ -955,14 +950,13 @@ async fn changing_backend_registration_refuses_an_open_transaction() {
         })
         .await;
     assert!(result.is_err());
-    assert!(
-        db.entity::<posts::Entity>()
-            .unwrap()
-            .find::<Post>(Filter::all(), Default::default())
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    assert!(db
+        .entity::<posts::Entity>()
+        .unwrap()
+        .find::<Post>(Filter::all(), Default::default())
+        .await
+        .unwrap()
+        .is_empty());
 }
 
 #[cfg(test)]
@@ -1021,15 +1015,13 @@ async fn independent_databases_keep_schema_policy_and_transactions_isolated() {
     .await
     .expect("independent transaction admission must not block");
     assert!(result.is_err());
-    assert!(
-        first
-            .entity::<posts::Entity>()
-            .unwrap()
-            .find::<Post>(Filter::all(), Default::default())
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    assert!(first
+        .entity::<posts::Entity>()
+        .unwrap()
+        .find::<Post>(Filter::all(), Default::default())
+        .await
+        .unwrap()
+        .is_empty());
     let rows = second
         .entity::<posts::Entity>()
         .unwrap()
@@ -1082,12 +1074,11 @@ async fn cancelled_transaction_cleans_up_its_own_context() {
     compio::time::timeout(
         std::time::Duration::from_secs(10),
         first.transaction(|tx| async move {
-            assert!(
-                tx.entity::<posts::Entity>()?
-                    .find::<Post>(Filter::all(), Default::default())
-                    .await?
-                    .is_empty()
-            );
+            assert!(tx
+                .entity::<posts::Entity>()?
+                .find::<Post>(Filter::all(), Default::default())
+                .await?
+                .is_empty());
             Ok(())
         }),
     )

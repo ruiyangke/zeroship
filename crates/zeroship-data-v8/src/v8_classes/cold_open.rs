@@ -8,7 +8,7 @@ use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
 use zeroship_data_orm::binding::DbBinding;
 use zeroship_runtime::state::{OpErrorKind, OpResult, ResolveValue};
-use zeroship_runtime::{RuntimeState, SharedState, init_v8};
+use zeroship_runtime::{init_v8, RuntimeState, SharedState};
 
 macro_rules! cold_isolate {
     (let $scope:ident, let $state:ident) => {
@@ -142,8 +142,12 @@ fn cold_collection<'s>(
     app_id: &str,
     name: &str,
 ) -> v8::Local<'s, v8::Object> {
-    super::collection::mint_collection(scope, name.to_string(), crate::tests::fixtures::binding(app_id))
-        .expect("mint_collection")
+    super::collection::mint_collection(
+        scope,
+        name.to_string(),
+        crate::tests::fixtures::binding(app_id),
+    )
+    .expect("mint_collection")
 }
 
 /// `dispatch_unmask_field`, entered at `collection.unmaskField(pk, column)`.
@@ -316,8 +320,8 @@ fn a_query_hint_carrying_find_opens_the_cold_isolates_backend() {
 #[test]
 fn collection_dispatch_uses_the_injected_orm_factory() {
     use std::sync::{
-        Arc,
         atomic::{AtomicUsize, Ordering},
+        Arc,
     };
     use zeroship_data_orm::{
         backend::BackendHandle,
@@ -327,8 +331,8 @@ fn collection_dispatch_uses_the_injected_orm_factory() {
     };
     struct HostFactory(Arc<AtomicUsize>);
     impl BackendFactory for HostFactory {
-        fn dialect(&self) -> zeroship_data_orm::sql::compile::SqlDialect {
-            zeroship_data_orm::sql::compile::SqlDialect::Sqlite
+        fn sql_registration(&self) -> zeroship_data_orm::sql::registration::SqlRegistration {
+            zeroship_data_orm::sql::registration::SqlRegistration::sqlite()
         }
         fn connect(
             &self,

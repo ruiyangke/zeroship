@@ -172,9 +172,7 @@ fn gap_b_end_to_end_insert_inside_tx_defers_emit_until_commit() {
                 "users",
                 &schema,
                 crate::value!({ "name": "alice" }),
-                &crate::sql::registration::SqlRegistration::builtin(
-                    crate::sql::compile::SqlDialect::Postgres,
-                ),
+                &crate::sql::registration::SqlRegistration::postgres(),
             )
             .expect("compile insert");
             let _ = host.exec_mutation_with_emit(

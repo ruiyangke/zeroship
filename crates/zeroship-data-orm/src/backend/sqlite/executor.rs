@@ -1,13 +1,13 @@
 //! Host database routing and transaction authority setup.
 use super::SqliteBackend;
+use crate::sql::SchemaName;
+use crate::value::Value;
 use crate::{
     driver::{Driver, LeaseKind, Session},
     error::*,
     executor::ScopedExecutor,
 };
 use async_trait::async_trait;
-use crate::value::Value;
-use crate::sql::{SchemaName, compile::SqlDialect};
 
 #[async_trait(?Send)]
 impl ScopedExecutor for SqliteBackend {
@@ -15,9 +15,6 @@ impl ScopedExecutor for SqliteBackend {
         app_id
     }
 
-    fn dialect(&self) -> SqlDialect {
-        SqlDialect::Sqlite
-    }
     async fn prepare_for_app(&self, app_id: &str) -> Result<(), DbError> {
         self.attach_app_file(app_id).await
     }

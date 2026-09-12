@@ -1,5 +1,4 @@
-use super::{BackendUrl, backend_for_url};
-use crate::sql::compile::SqlDialect;
+use super::{backend_for_url, BackendUrl};
 use crate::{
     backend::{BackendHandle, PostgresBackend},
     encryption::ProjectKeySource,
@@ -12,9 +11,9 @@ use std::{cell::Cell, fmt, num::NonZeroUsize, rc::Rc, sync::Arc};
 /// Host-defined backend construction. Configuration crosses worker threads;
 /// opening happens on the destination compio thread and returns a local handle.
 pub trait BackendFactory: Send + Sync + 'static {
-    fn dialect(&self) -> SqlDialect;
+    fn sql_registration(&self) -> crate::sql::registration::SqlRegistration;
     fn connect(&self, keys: ProjectKeySource)
-    -> LocalBoxFuture<'_, Result<BackendHandle, DbError>>;
+        -> LocalBoxFuture<'_, Result<BackendHandle, DbError>>;
 }
 
 /// Opaque identity for configuration that may share a local backend.
@@ -51,7 +50,7 @@ impl fmt::Debug for ConnectionFactory {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ConnectionFactory")
             .field("identity", &self.identity)
-            .field("dialect", &self.dialect())
+            .field("sql", &self.registration)
             .finish_non_exhaustive()
     }
 }
@@ -59,9 +58,9 @@ impl ConnectionFactory {
     /// Register a custom factory. The identity must distinguish configurations
     /// that cannot safely share a backend, including credentials and routing.
     pub fn new(identity: &str, factory: impl BackendFactory) -> Self {
-        let registration = crate::sql::registration::SqlRegistration::builtin(factory.dialect());
+        let registration = factory.sql_registration();
         Self::with_sql(identity, factory, registration)
-            .expect("built-in SQL registration matches the factory dialect")
+            .expect("factory SQL registration matches its execution family")
     }
     /// Register compiler and storage codecs with a custom connection factory.
     pub fn with_sql(
@@ -69,10 +68,10 @@ impl ConnectionFactory {
         factory: impl BackendFactory,
         registration: crate::sql::registration::SqlRegistration,
     ) -> Result<Self, DbError> {
-        if factory.dialect() != registration.dialect() {
+        if factory.sql_registration().family() != registration.family() {
             return Err(DbError::config(
                 "factory_sql_mismatch",
-                "connection factory and SQL registration use different dialects",
+                "connection factory and SQL registration use different SQL families",
             ));
         }
         Ok(Self {
@@ -95,11 +94,10 @@ impl ConnectionFactory {
     ) -> Result<Self, DbError> {
         let selection = backend_for_url(url)?;
         let url = url.trim().to_owned();
-        let dialect = match &selection {
-            BackendUrl::Postgres => SqlDialect::Postgres,
-            BackendUrl::Sqlite { .. } => SqlDialect::Sqlite,
+        let registration = match &selection {
+            BackendUrl::Postgres => crate::sql::registration::SqlRegistration::postgres(),
+            BackendUrl::Sqlite { .. } => crate::sql::registration::SqlRegistration::sqlite(),
         };
-        let registration = crate::sql::registration::SqlRegistration::builtin(dialect);
         let capacity = limit
             .map(NonZeroUsize::get)
             .unwrap_or_else(crate::backend::postgres::default_pool_capacity);
@@ -120,9 +118,6 @@ impl ConnectionFactory {
     pub fn identity(&self) -> ConnectionIdentity {
         self.identity
     }
-    pub fn dialect(&self) -> SqlDialect {
-        self.registration.dialect()
-    }
     pub fn sql_registration(&self) -> &crate::sql::registration::SqlRegistration {
         &self.registration
     }
@@ -133,12 +128,6 @@ impl ConnectionFactory {
     }
     pub async fn connect(&self, keys: ProjectKeySource) -> Result<BackendHandle, DbError> {
         let backend = self.factory.connect(keys).await?;
-        if backend.dialect() != self.dialect() {
-            return Err(DbError::config(
-                "backend_dialect_mismatch",
-                "factory returned a backend with a different dialect",
-            ));
-        }
         if backend.sql_registration().identity() != self.registration.identity() {
             return Err(DbError::config(
                 "backend_sql_mismatch",
@@ -165,10 +154,10 @@ struct BuiltinFactory {
     capacity: usize,
 }
 impl BackendFactory for BuiltinFactory {
-    fn dialect(&self) -> SqlDialect {
+    fn sql_registration(&self) -> crate::sql::registration::SqlRegistration {
         match self.selection {
-            BackendUrl::Postgres => SqlDialect::Postgres,
-            BackendUrl::Sqlite { .. } => SqlDialect::Sqlite,
+            BackendUrl::Postgres => crate::sql::registration::SqlRegistration::postgres(),
+            BackendUrl::Sqlite { .. } => crate::sql::registration::SqlRegistration::sqlite(),
         }
     }
     fn connect(

@@ -6,20 +6,19 @@
 //! PostgreSQL and its required extensions come from an owned testcontainer.
 
 use crate::tests::fixtures;
-use crate::tests::fixtures::Host;
 #[allow(unused_imports)]
-use crate::tests::fixtures::schema::{fixture_table_sql, fixture_table_sql_for};
+use crate::tests::fixtures::schema::fixture_table_sql;
+use crate::tests::fixtures::Host;
 #[allow(unused_imports)]
 use zeroship_migrate::schema::query::FkEmission;
 
 use std::rc::Rc;
 
+use crate::value::{value, Value};
 use compio_postgres::{NoTls, Pool};
 use zeroship_data_orm::binding::DbBinding;
 use zeroship_data_orm::error::DbError;
 use zeroship_data_orm::tx_route::{CapturedRoute, TxRoute};
-use crate::sql::compile::SqlDialect;
-use crate::value::{Value, value};
 
 /// Connect, or fail the test. Deliberately NOT a skip, for the reason in the
 /// module header.
@@ -111,12 +110,16 @@ async fn backend(host: &Host) -> zeroship_data_orm::backend::BackendHandle {
 /// A route that claims the app's open transaction — what `CapturedRoute::capture`
 /// produces for a dispatch issued inside `db.transaction(fn)`.
 async fn tx_route(host: &Host, app: &str) -> TxRoute {
-    CapturedRoute::tx_for_tests(app, SqlDialect::Postgres).bind(backend(host).await).unwrap()
+    CapturedRoute::tx_for_tests(app, crate::sql::registration::SqlRegistration::postgres())
+        .bind(backend(host).await)
+        .unwrap()
 }
 
 /// A route outside any transaction.
 async fn pool_route(host: &Host, app: &str) -> TxRoute {
-    CapturedRoute::pool_for_tests(app, SqlDialect::Postgres).bind(backend(host).await).unwrap()
+    CapturedRoute::pool_for_tests(app, crate::sql::registration::SqlRegistration::postgres())
+        .bind(backend(host).await)
+        .unwrap()
 }
 
 /// Run the real `plan_find` + `run_find` pair on `route`.
@@ -141,15 +144,8 @@ async fn search_on(
     args: Value,
 ) -> Result<Vec<Value>, DbError> {
     let binding = DbBinding::cold_start(app);
-    let registration = zeroship_data_orm::sql::registration::SqlRegistration::builtin(
-        SqlDialect::Postgres,
-    );
-    let plan = zeroship_data_orm::crud::plan_search(
-        &binding,
-        &registration,
-        collection,
-        &args,
-    )?;
+    let registration = zeroship_data_orm::sql::registration::SqlRegistration::postgres();
+    let plan = zeroship_data_orm::crud::plan_search(&binding, &registration, collection, &args)?;
     zeroship_data_orm::crud::run_search(&route, binding, collection.to_string(), plan)
         .await
         .map(|r| r.rows)
@@ -163,15 +159,8 @@ async fn near_on(
     args: Value,
 ) -> Result<Vec<Value>, DbError> {
     let binding = DbBinding::cold_start(app);
-    let registration = zeroship_data_orm::sql::registration::SqlRegistration::builtin(
-        SqlDialect::Postgres,
-    );
-    let plan = zeroship_data_orm::crud::plan_near(
-        &binding,
-        &registration,
-        collection,
-        &args,
-    )?;
+    let registration = zeroship_data_orm::sql::registration::SqlRegistration::postgres();
+    let plan = zeroship_data_orm::crud::plan_near(&binding, &registration, collection, &args)?;
     zeroship_data_orm::crud::run_near(&route, binding, collection.to_string(), plan)
         .await
         .map(|r| r.rows)

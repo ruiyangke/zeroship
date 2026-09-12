@@ -43,36 +43,6 @@ impl std::fmt::Display for QueryError {
 
 impl std::error::Error for QueryError {}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SqlDialect {
-    Postgres,
-    Sqlite,
-}
-
-const SQLITE_NOW_EXPR: &str = "(strftime('%Y-%m-%dT%H:%M:%fZ','now'))";
-
-impl SqlDialect {
-    pub fn binary_bind_placeholder(self, slot: usize) -> String {
-        format!("${slot}")
-    }
-
-    pub fn encode_binary_param(self, value: Value) -> Result<Value, QueryError> {
-        match value {
-            Value::Bytes(_) | Value::Null => Ok(value),
-            _ => Err(QueryError::InvalidFilter(
-                "binary field requires native bytes".into(),
-            )),
-        }
-    }
-
-    pub fn current_timestamp_expr(self) -> &'static str {
-        match self {
-            Self::Postgres => "NOW()",
-            Self::Sqlite => SQLITE_NOW_EXPR,
-        }
-    }
-}
-
 pub const MAX_QUERY_LIMIT: i64 = 500;
 pub const MAX_QUERY_OFFSET: i64 = 10_000;
 pub const MAX_INSERT_MANY_BATCH: usize = 1_000;

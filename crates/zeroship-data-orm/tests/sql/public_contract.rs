@@ -2,7 +2,6 @@ use zeroship_core::schema_name::SchemaName;
 use zeroship_data_orm::{
     error::DbError,
     sql::{
-        compile::SqlDialect,
         compiler::{CompiledQuery, ParameterType},
         registration::SqlRegistration,
         statement::{
@@ -34,12 +33,12 @@ fn table(namespace: &str) -> Table {
     .unwrap()
 }
 
-fn compile_insert(dialect: SqlDialect, title: Value, payload: Value) -> CompiledQuery {
+fn compile_insert(registration: &SqlRegistration, title: Value, payload: Value) -> CompiledQuery {
     let table = table("app-demo");
     let id = table.column("id").unwrap();
     let title_column = table.column("title").unwrap();
     let payload_column = table.column("payload").unwrap();
-    SqlRegistration::builtin(dialect)
+    registration
         .compile(Statement::Insert(
             Insert::new(InsertParts {
                 table,
@@ -69,8 +68,8 @@ fn compile_insert(dialect: SqlDialect, title: Value, payload: Value) -> Compiled
 #[test]
 fn compilers_share_schema_identity_and_keep_values_out_of_sql() {
     let hostile = "'); DROP TABLE entries; --";
-    for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite] {
-        let query = compile_insert(dialect, value!(hostile), Value::Bytes(vec![251, 252]));
+    for registration in [SqlRegistration::postgres(), SqlRegistration::sqlite()] {
+        let query = compile_insert(&registration, value!(hostile), Value::Bytes(vec![251, 252]));
         assert!(query.sql().contains("\"app-demo\".\"entries\""));
         assert!(!query.sql().contains(hostile));
         assert_eq!(
@@ -124,7 +123,7 @@ fn compiled_output_exposes_types_and_transfers_owned_buffers() {
     assert_eq!(values[0].as_bytes().unwrap().as_ptr(), pointer);
 }
 
-fn compile_upsert(dialect: SqlDialect, reverse: bool) -> CompiledQuery {
+fn compile_upsert(registration: &SqlRegistration, reverse: bool) -> CompiledQuery {
     let table = table("app_upsert");
     let id = table.column("id").unwrap();
     let title = table.column("title").unwrap();
@@ -141,7 +140,7 @@ fn compile_upsert(dialect: SqlDialect, reverse: bool) -> CompiledQuery {
     if reverse {
         insert.reverse();
     }
-    SqlRegistration::builtin(dialect)
+    registration
         .compile(Statement::Upsert(
             Upsert::new(UpsertParts {
                 table,
@@ -162,9 +161,9 @@ fn compile_upsert(dialect: SqlDialect, reverse: bool) -> CompiledQuery {
 
 #[test]
 fn upsert_normalizes_unordered_insert_assignments() {
-    for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite] {
-        let forward = compile_upsert(dialect, false);
-        let reverse = compile_upsert(dialect, true);
+    for registration in [SqlRegistration::postgres(), SqlRegistration::sqlite()] {
+        let forward = compile_upsert(&registration, false);
+        let reverse = compile_upsert(&registration, true);
         assert_eq!(forward.sql(), reverse.sql());
         assert_eq!(forward.params(), reverse.params());
     }

@@ -216,7 +216,6 @@ fn cold_unmask_with_auto_actor_attaches_before_read() {
                 .expect("CREATE TABLE");
 
             // Encrypt + insert one row inline.
-            use crate::sql::compile::SqlDialect;
             use zeroship_data_orm::protection::encryption_pass::encrypt_row_on_write;
             let row_pk = "usr_auto_01";
             let plaintext = "123-45-6789";
@@ -251,7 +250,6 @@ fn cold_unmask_with_auto_actor_attaches_before_read() {
                 collection,
                 &schema,
                 &doc,
-                SqlDialect::Sqlite,
             )
             .expect("build_insert_with_dialect");
             let client = backend
@@ -644,7 +642,6 @@ fn unmask_with_user_role_in_policy_returns_plaintext() {
                 .expect("CREATE TABLE");
 
             // Encrypt + insert one row.
-            use crate::sql::compile::SqlDialect;
             use zeroship_data_orm::protection::encryption_pass::encrypt_row_on_write;
             let row_pk = "usr_grant_01";
             let plaintext = "alice@example.com";
@@ -679,7 +676,6 @@ fn unmask_with_user_role_in_policy_returns_plaintext() {
                 collection,
                 &schema,
                 &doc,
-                SqlDialect::Sqlite,
             )
             .expect("build_insert_with_dialect");
             let client = backend

@@ -6,7 +6,6 @@ use std::time::Duration;
 use criterion::{black_box, criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
 use zeroship_data_orm::{
     sql::{
-        compile::SqlDialect,
         registration::SqlRegistration,
         statement::{
             Expression, Insert, InsertParts, ResolvedOperand, ResolvedPredicate,
@@ -174,7 +173,7 @@ fn insert_statement() -> Statement {
 }
 
 fn bench_compile_read(c: &mut Criterion) {
-    let registration = SqlRegistration::builtin(SqlDialect::Postgres);
+    let registration = SqlRegistration::postgres();
     let mut group = c.benchmark_group("compile_read");
     group.measurement_time(Duration::from_secs(3));
     group.warm_up_time(Duration::from_secs(1));
@@ -227,7 +226,7 @@ fn bench_decode_sdk_filter(c: &mut Criterion) {
 }
 
 fn bench_compile_insert(c: &mut Criterion) {
-    let registration = SqlRegistration::builtin(SqlDialect::Postgres);
+    let registration = SqlRegistration::postgres();
     let mut group = c.benchmark_group("compile_insert");
     group.measurement_time(Duration::from_secs(3));
     group.warm_up_time(Duration::from_secs(1));

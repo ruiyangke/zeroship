@@ -47,10 +47,10 @@ impl LocalConnection {
         factory: ConnectionFactory,
         backend: BackendHandle,
     ) -> Result<Self, DbError> {
-        if factory.dialect() != backend.dialect() {
+        if factory.sql_registration().identity() != backend.sql_registration().identity() {
             return Err(DbError::config(
-                "backend_dialect_mismatch",
-                "installed backend does not match its factory dialect",
+                "backend_sql_mismatch",
+                "installed backend does not match its factory SQL registration",
             ));
         }
         Ok(Self {

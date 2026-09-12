@@ -3,7 +3,7 @@
 use super::resolved::ResolvedTable;
 use crate::{
     sql::{
-        compile::{self, QueryError, SqlDialect},
+        compile::{self, QueryError},
         compiler::{CompiledQuery, Requirements},
         lifecycle::{AssignedValue, WriteAssignments},
         statement::{
@@ -14,66 +14,6 @@ use crate::{
     value::Value,
 };
 use std::collections::HashSet;
-
-pub fn build_upsert(
-    namespace: &SchemaName,
-    collection: &str,
-    schema: &Value,
-    document: Value,
-    conflict: &Value,
-) -> Result<CompiledQuery, QueryError> {
-    build_upsert_with_dialect(
-        namespace,
-        collection,
-        schema,
-        document,
-        conflict,
-        SqlDialect::Postgres,
-    )
-}
-
-pub fn build_upsert_with_dialect(
-    namespace: &SchemaName,
-    collection: &str,
-    schema: &Value,
-    document: Value,
-    conflict: &Value,
-    dialect: SqlDialect,
-) -> Result<CompiledQuery, QueryError> {
-    build_upsert_with_assignments(
-        namespace,
-        collection,
-        schema,
-        document,
-        conflict,
-        dialect,
-        &WriteAssignments::default(),
-        None,
-    )
-}
-
-pub fn build_upsert_with_assignments(
-    namespace: &SchemaName,
-    collection: &str,
-    schema: &Value,
-    document: Value,
-    conflict: &Value,
-    dialect: SqlDialect,
-    assignments: &WriteAssignments,
-    expected_id: Option<Value>,
-) -> Result<CompiledQuery, QueryError> {
-    let registration = crate::sql::registration::SqlRegistration::builtin(dialect);
-    build_upsert_with_registration(
-        namespace,
-        collection,
-        schema,
-        document,
-        conflict,
-        assignments,
-        expected_id,
-        &registration,
-    )
-}
 
 pub(crate) fn build_upsert_with_registration(
     namespace: &SchemaName,

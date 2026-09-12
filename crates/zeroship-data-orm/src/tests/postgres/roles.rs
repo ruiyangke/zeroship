@@ -9,7 +9,7 @@ use compio_postgres::{NoTls, Pool};
 
 use zeroship_data_orm::binding::DbBinding;
 
-use crate::value::{Value, value};
+use crate::value::{value, Value};
 
 /// Walk a compio-postgres Error's `source()` chain into one string —
 /// without this, top-level Display is just "db error" and the
@@ -475,9 +475,7 @@ fn vector_search_runs_under_per_app_role_via_rls() {
             let binding = DbBinding::cold_start(app);
             let schema = zeroship_data_orm::descriptor::collection_schema(&binding, coll)
                 .expect("descriptor slice for the search fixture");
-            let registration = zeroship_data_orm::sql::registration::SqlRegistration::builtin(
-                zeroship_data_orm::sql::compile::SqlDialect::Postgres,
-            );
+            let registration = zeroship_data_orm::sql::registration::SqlRegistration::postgres();
             let rows = zeroship_data_orm::search::Search::vector_search(
                 &backend,
                 None,
@@ -589,9 +587,7 @@ fn spatial_near_runs_under_per_app_role_via_rls() {
             );
             let binding = DbBinding::cold_start(app);
             let schema = zeroship_data_orm::descriptor::collection_schema(&binding, coll).unwrap();
-            let registration = zeroship_data_orm::sql::registration::SqlRegistration::builtin(
-                zeroship_data_orm::sql::compile::SqlDialect::Postgres,
-            );
+            let registration = zeroship_data_orm::sql::registration::SqlRegistration::postgres();
             let rows = zeroship_data_orm::search::Search::spatial_near(
                 &backend,
                 None,

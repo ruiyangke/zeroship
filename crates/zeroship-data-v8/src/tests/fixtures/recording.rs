@@ -2,6 +2,8 @@
 use async_trait::async_trait;
 use futures::future::LocalBoxFuture;
 use std::{cell::RefCell, rc::Rc};
+use zeroship_data_orm::sql::{catalog::LiveSchema, SchemaName};
+use zeroship_data_orm::value::Value;
 use zeroship_data_orm::{
     backend::{Backend, BackendHandle},
     connection::{BackendFactory, ConnectionFactory},
@@ -12,8 +14,6 @@ use zeroship_data_orm::{
     protection::{Catalog, Protection},
     search::{Search, SpatialSearch, VectorSearch},
 };
-use zeroship_data_orm::value::Value;
-use zeroship_data_orm::sql::{SchemaName, catalog::LiveSchema, compile::SqlDialect};
 
 thread_local! {
     static QUERIES: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
@@ -50,8 +50,8 @@ pub(crate) fn connection(url: &str) -> ConnectionFactory {
 }
 struct RecordingFactory(ConnectionFactory);
 impl BackendFactory for RecordingFactory {
-    fn dialect(&self) -> SqlDialect {
-        self.0.dialect()
+    fn sql_registration(&self) -> zeroship_data_orm::sql::registration::SqlRegistration {
+        self.0.sql_registration().clone()
     }
     fn connect(
         &self,
@@ -67,6 +67,10 @@ impl BackendFactory for RecordingFactory {
 #[derive(Debug)]
 struct RecordingBackend(BackendHandle);
 impl Backend for RecordingBackend {
+    fn sql_registration(&self) -> zeroship_data_orm::sql::registration::SqlRegistration {
+        self.0.sql_registration().clone()
+    }
+
     fn publishes_committed_changes(&self) -> bool {
         self.0.publishes_committed_changes()
     }
@@ -75,9 +79,6 @@ impl Backend for RecordingBackend {
 impl ScopedExecutor for RecordingBackend {
     fn namespace<'a>(&self, app_id: &'a str, schema: &'a SchemaName) -> &'a str {
         self.0.namespace(app_id, schema)
-    }
-    fn dialect(&self) -> SqlDialect {
-        self.0.dialect()
     }
     fn pool_counts(&self) -> Option<(usize, usize, usize)> {
         self.0.pool_counts()

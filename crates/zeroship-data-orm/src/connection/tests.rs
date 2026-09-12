@@ -1,9 +1,8 @@
 use super::*;
-use crate::sql::compile::SqlDialect;
-use futures::{FutureExt, future::LocalBoxFuture};
+use futures::{future::LocalBoxFuture, FutureExt};
 use std::sync::{
-    Arc,
     atomic::{AtomicUsize, Ordering},
+    Arc,
 };
 
 struct ControlledFactory {
@@ -13,8 +12,8 @@ struct ControlledFactory {
     fail_first: bool,
 }
 impl BackendFactory for ControlledFactory {
-    fn dialect(&self) -> SqlDialect {
-        self.inner.dialect()
+    fn sql_registration(&self) -> crate::sql::registration::SqlRegistration {
+        self.inner.sql_registration().clone()
     }
     fn connect(
         &self,
@@ -173,7 +172,7 @@ fn configuration_identity_and_debug_follow_the_connection_contract() {
 
 mod url_selection {
 
-    use super::{BackendUrl, backend_for_url};
+    use super::{backend_for_url, BackendUrl};
     use std::path::PathBuf;
 
     #[test]
