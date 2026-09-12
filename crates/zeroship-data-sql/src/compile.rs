@@ -614,7 +614,7 @@ pub fn build_write_target_probe(
     limit: i64,
     dialect: SqlDialect,
 ) -> Result<BuiltQuery, QueryError> {
-    let select = crate::value!(["id"]);
+    let select = project_read_field("id", schema_hint, None);
     let mut built =
         build_find_with_schema_and_unmask_and_soft_delete_with_dialect_and_limit_ceiling(
             schema_name,
@@ -623,9 +623,8 @@ pub fn build_write_target_probe(
             Some(limit),
             None,
             None,
-            Some(&select),
+            &select,
             schema_hint,
-            &[],
             false,
             dialect,
             MAX_QUERY_LIMIT + 1,
@@ -780,6 +779,8 @@ pub fn build_find_with_schema_and_unmask_and_soft_delete_with_dialect(
     filter_soft_deleted: bool,
     dialect: SqlDialect,
 ) -> Result<BuiltQuery, QueryError> {
+    let select_expr =
+        build_masked_aware_select_expr_with_unmask(select, schema_hint, unmask_columns)?;
     build_find_with_schema_and_unmask_and_soft_delete_with_dialect_and_limit_ceiling(
         schema_name,
         collection,
@@ -787,9 +788,8 @@ pub fn build_find_with_schema_and_unmask_and_soft_delete_with_dialect(
         limit,
         offset,
         order_by,
-        select,
+        &select_expr,
         schema_hint,
-        unmask_columns,
         filter_soft_deleted,
         dialect,
         MAX_QUERY_LIMIT,
@@ -804,9 +804,8 @@ fn build_find_with_schema_and_unmask_and_soft_delete_with_dialect_and_limit_ceil
     limit: Option<i64>,
     offset: Option<i64>,
     order_by: Option<&Value>,
-    select: Option<&Value>,
+    select_expr: &str,
     schema_hint: &Value,
-    unmask_columns: &[String],
     filter_soft_deleted: bool,
     dialect: SqlDialect,
     limit_ceiling: i64,
@@ -824,9 +823,6 @@ fn build_find_with_schema_and_unmask_and_soft_delete_with_dialect_and_limit_ceil
     if let Some(off) = offset {
         validate_limit_bound("find.offset", off, MAX_QUERY_OFFSET)?;
     }
-
-    let select_expr =
-        build_masked_aware_select_expr_with_unmask(select, schema_hint, unmask_columns)?;
 
     let mut sql = format!("SELECT {select_expr} FROM {schema}.{table}");
     let composed_where =
@@ -959,11 +955,11 @@ pub fn build_masked_aware_select_expr_for_table_alias(
 }
 
 /// Project explicit fields or expand the descriptor's readable field set.
-/// Unmasking runs later; its hint does not change the physical read projection.
+/// Protection retains identity internally; the ORM restores the public projection.
 fn build_masked_aware_select_expr_with_unmask(
     select: Option<&Value>,
     schema_hint: &Value,
-    _unmask_columns: &[String],
+    unmask_columns: &[String],
 ) -> Result<String, QueryError> {
     // Case 1: explicit projection.
     if let Some(Value::Array(arr)) = select {
@@ -975,6 +971,15 @@ fn build_masked_aware_select_expr_with_unmask(
                 })?;
                 validate_read_identifier(name, schema_hint)?;
                 cols.push(project_read_field(name, schema_hint, None));
+            }
+            if !arr.iter().any(|field| field.as_str() == Some("id"))
+                && (!unmask_columns.is_empty()
+                    || arr
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .any(|name| field_needs_identity(&schema_hint[name])))
+            {
+                cols.push(project_read_field("id", schema_hint, None));
             }
             return Ok(cols.join(", "));
         }
@@ -994,6 +999,10 @@ fn qualified_read_field(table_alias: Option<&str>, field: &str) -> String {
 fn field_is_readable(def: &Value) -> bool {
     def.get("readable").and_then(Value::as_bool) != Some(false)
         && def.get("projectable").and_then(Value::as_bool) != Some(false)
+}
+
+fn field_needs_identity(def: &Value) -> bool {
+    crate::descriptors::is_encrypted(def) || crate::descriptors::effective_mask(def).is_some()
 }
 
 /// Resolve the physical value column from field storage metadata.
@@ -1043,6 +1052,15 @@ fn implicit_read_projection_parts(
             continue;
         }
         parts.push(project_read_field(field, schema_hint, table_alias));
+    }
+    if schema_obj
+        .get("id")
+        .is_some_and(|id| !field_is_readable(id))
+        && schema_obj
+            .values()
+            .any(|def| field_is_readable(def) && field_needs_identity(def))
+    {
+        parts.push(project_read_field("id", schema_hint, table_alias));
     }
     if parts.is_empty() {
         return Err(QueryError::InvalidFilter(
@@ -1251,7 +1269,8 @@ pub fn build_insert_with_dialect(
         }
     }
 
-    let overriding = crate::identity::overriding_clause(schema_hint, dialect, obj.contains_key("id"));
+    let overriding =
+        crate::identity::overriding_clause(schema_hint, dialect, obj.contains_key("id"));
     let sql = format!(
         "INSERT INTO {schema}.{table} ({}){overriding} VALUES ({}) RETURNING {returning}",
         columns.join(", "),
@@ -1600,7 +1619,11 @@ pub fn build_insert_many_with_dialect(
         value_groups.push(format!("({})", placeholders.join(", ")));
     }
 
-    let overriding = crate::identity::overriding_clause(schema_hint, dialect, arr.iter().any(|doc| doc.get("id").is_some()));
+    let overriding = crate::identity::overriding_clause(
+        schema_hint,
+        dialect,
+        arr.iter().any(|doc| doc.get("id").is_some()),
+    );
     let sql = format!(
         "INSERT INTO {schema}.{table} ({}){overriding} VALUES {} RETURNING {returning}",
         columns.join(", "),
@@ -3080,9 +3103,11 @@ pub fn build_upsert_with_dialect(
         conflict_fields,
         dialect,
         &WriteAssignments::default(),
+        None,
     )
 }
 
+/// `expected_id` guards a conflict update whose values depend on row identity.
 pub fn build_upsert_with_assignments(
     schema_name: &SchemaName,
     collection: &str,
@@ -3091,6 +3116,7 @@ pub fn build_upsert_with_assignments(
     conflict_fields: &Value,
     dialect: SqlDialect,
     assignments: &WriteAssignments,
+    expected_id: Option<&Value>,
 ) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
     let returning = build_returning_expr(schema_hint)?;
@@ -3182,9 +3208,17 @@ pub fn build_upsert_with_assignments(
         }
     }
 
-    let overriding = crate::identity::overriding_clause(schema_hint, dialect, obj.contains_key("id"));
+    let overriding =
+        crate::identity::overriding_clause(schema_hint, dialect, obj.contains_key("id"));
+    let identity_guard = if let Some(id) = expected_id {
+        let key = quote_ident(&value_column_for_field("id", schema_hint));
+        let bound = push_field_value_bind(&mut params, id, "id", schema_hint, dialect)?;
+        format!(" WHERE {schema}.{table}.{key} = {bound}")
+    } else {
+        String::new()
+    };
     let sql = format!(
-        "INSERT INTO {schema}.{table} ({}){overriding} VALUES ({}) ON CONFLICT ({}) DO UPDATE SET {} RETURNING {returning}",
+        "INSERT INTO {schema}.{table} ({}){overriding} VALUES ({}) ON CONFLICT ({}) DO UPDATE SET {}{identity_guard} RETURNING {returning}",
         columns.join(", "),
         placeholders.join(", "),
         conflict_cols.join(", "),
@@ -5233,6 +5267,7 @@ mod tests {
             &conflict,
             SqlDialect::Sqlite,
             &lifecycle_assignments(false),
+            None,
         )
         .unwrap();
         assert!(
@@ -8545,6 +8580,7 @@ mod tests {
                 &conflict,
                 dialect,
                 &lifecycle_assignments(false),
+                None,
             )
             .unwrap();
             assert!(

@@ -307,24 +307,6 @@ pub async fn run_find(
                 .map(str::to_owned)
                 .collect::<Vec<_>>()
         });
-    let mut select = plan.select.clone();
-    if let Some(fields) = projected.as_ref() {
-        let needs_identity = !plan.unmask_columns.is_empty()
-            || fields.iter().any(|field| {
-                schema_hint.get(field).is_some_and(|definition| {
-                    definition["encrypted"].as_bool() == Some(true)
-                        || zeroship_data_sql::descriptors::effective_mask(definition).is_some()
-                })
-            });
-        if needs_identity && !fields.iter().any(|field| field == "id") {
-            // Protection uses identity internally; the read surface restores the caller's projection.
-            select
-                .as_mut()
-                .and_then(Value::as_array_mut)
-                .expect("explicit projection")
-                .push(Value::from("id"));
-        }
-    }
     // Soft-delete auto-filter gate.
     let filter_soft_deleted = assignment_pass::should_filter_soft_deleted(plan.include_deleted);
     let mut sql_filter = filter;
@@ -336,7 +318,7 @@ pub async fn run_find(
         plan.limit,
         plan.offset,
         plan.order_by.as_ref(),
-        select.as_ref(),
+        plan.select.as_ref(),
         &schema_hint,
         &plan.unmask_columns,
         filter_soft_deleted,
@@ -1219,8 +1201,9 @@ pub async fn run_upsert(
     actor_id: Option<String>,
 ) -> Result<read_pipeline::ApplyResult, DbError> {
     let schema = crate::descriptor::collection_schema(&binding, &coll)?;
+    let guard_identity = write_pipeline::upsert_requires_conflict_probe(&schema, &doc);
     let frame;
-    let route = if write_pipeline::upsert_requires_conflict_probe(&schema, &doc) {
+    let route = if guard_identity {
         frame = Some(crate::transaction::AtomicWriteFrame::begin(route).await?);
         frame.as_ref().expect("opened write frame").route()
     } else {
@@ -1228,53 +1211,72 @@ pub async fn run_upsert(
         &route
     };
     let result = async {
+        let mut retry = guard_identity.then(|| doc.clone());
         let mut doc = doc;
-        prepare_upsert_doc_for_write(
-            &mut doc,
-            &binding,
-            route,
-            &coll,
-            actor_id.as_deref(),
-            &conflict_fields,
-        )
-        .await?;
-        lower_document(route.dialect(), &schema, &mut doc);
-        let bq = compile::build_upsert_with_assignments(
-            binding.schema(),
-            &coll,
+        let assignments = AssignmentPlan::from_schema(&schema)?.write_assignments(
             &schema,
-            &doc,
-            &conflict_fields,
-            route.dialect(),
-            &AssignmentPlan::from_schema(&schema)?.write_assignments(
-                &schema,
+            actor_id.as_deref(),
+            false,
+            false,
+        );
+        loop {
+            prepare_upsert_doc_for_write(
+                &mut doc,
+                &binding,
+                route,
+                &coll,
                 actor_id.as_deref(),
-                false,
-                false,
-            ),
-        )
-        .map_err(DbError::from)?;
-        // Upsert can be either INSERT (new row) or UPDATE (existing).
-        // We tag as Update because the subscriber's reaction is the
-        // same -- re-fetch. Finer-grained read-set narrowing could
-        // distinguish INSERT from UPDATE; this coarser tagging
-        // doesn't need to.
-        let rows = exec_mutation_with_emit(
-            bq,
-            route,
-            &coll,
-            zeroship_data_orm::cdc::ChangeOp::Update,
-            &binding,
-        )
-        .await?;
-        read_pipeline::apply(
-            route,
-            &binding,
-            &coll,
-            rows,
-            read_pipeline::ApplyOptions::default(),
-        )
-        .await
+                &conflict_fields,
+            )
+            .await?;
+            lower_document(route.dialect(), &schema, &mut doc);
+            let expected_id =
+                if guard_identity {
+                    Some(doc.get("id").ok_or_else(|| {
+                        DbError::internal("encrypted upsert requires an identity")
+                    })?)
+                } else {
+                    None
+                };
+            let bq = compile::build_upsert_with_assignments(
+                binding.schema(),
+                &coll,
+                &schema,
+                &doc,
+                &conflict_fields,
+                route.dialect(),
+                &assignments,
+                expected_id,
+            )
+            .map_err(DbError::from)?;
+            let rows = exec_mutation_with_emit(
+                bq,
+                route,
+                &coll,
+                zeroship_data_orm::cdc::ChangeOp::Update,
+                &binding,
+            )
+            .await?;
+            if guard_identity && rows.is_empty() {
+                // The rejected conflict update holds the winning row's lock.
+                // Resolve its identity and encrypt the original input again.
+                doc = retry.take().ok_or_else(|| {
+                    DbError::validation(
+                        "upsert_identity_changed",
+                        "upsert could not establish the conflicting row identity",
+                    )
+                })?;
+                continue;
+            }
+            return read_pipeline::apply(
+                route,
+                &binding,
+                &coll,
+                rows,
+                read_pipeline::ApplyOptions::default(),
+            )
+            .await;
+        }
     }
     .await;
     match frame {
