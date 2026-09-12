@@ -203,10 +203,13 @@ impl Harness {
         service
             .register_app(
                 &app,
-                &AppPolicy {
-                    lease_ms: 600,
-                    ..AppPolicy::default()
-                },
+                super::configured_policy(
+                    2,
+                    AppPolicy {
+                        lease_ms: 600,
+                        ..AppPolicy::default()
+                    },
+                ),
             )
             .await
             .unwrap();

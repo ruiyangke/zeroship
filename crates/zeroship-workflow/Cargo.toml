@@ -10,6 +10,7 @@ base64 = { workspace = true }
 ed25519-dalek = { workspace = true }
 futures = { workspace = true }
 zeroship-core = { workspace = true }
+zeroship-data-sql = { workspace = true }
 zeroship-storage = { workspace = true }
 async-trait = { workspace = true }
 chrono = { version = "0.4", default-features = false, features = ["std", "serde", "clock"] }

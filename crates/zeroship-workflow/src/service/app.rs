@@ -17,6 +17,7 @@ use zeroship_core::{app_id::AppId, typed_id};
 #[derive(Clone)]
 pub struct WorkflowService {
     pub(crate) store: Arc<dyn WorkflowStore>,
+    pub(crate) policies: Arc<super::HostPolicies>,
     pub(crate) signal_authority: Option<Arc<super::SignalAuthority>>,
     pub(crate) payload_storage: Option<zeroship_storage::Storage>,
 }
@@ -35,10 +36,18 @@ impl WorkflowService {
     pub async fn verify(&self) -> Result<(), WorkflowServiceError> {
         self.store.verify().await
     }
-    pub async fn open(store: Arc<dyn WorkflowStore>) -> Result<Self, WorkflowServiceError> {
+    /// Open an already provisioned customer journal with trusted host policy.
+    ///
+    /// # Errors
+    /// Refuses unavailable or incompatible journal storage.
+    pub async fn open(
+        store: Arc<dyn WorkflowStore>,
+        policies: Arc<super::HostPolicies>,
+    ) -> Result<Self, WorkflowServiceError> {
         store.verify().await?;
         Ok(Self {
             store,
+            policies,
             signal_authority: None,
             payload_storage: None,
         })
@@ -57,23 +66,33 @@ impl WorkflowService {
         }
     }
 
-    /// Install host policy. This is a trusted composition operation, never an app API.
+    #[expect(
+        clippy::future_not_send,
+        reason = "Compio drives the journal on its owning runtime thread"
+    )]
+    pub(crate) async fn begin(&self) -> Result<Transaction, WorkflowServiceError> {
+        let mut tx = self.store.begin().await?;
+        tx.policies = Some(self.policies.clone());
+        Ok(tx)
+    }
+
+    /// Register an app using policy already authorized by the trusted host.
+    ///
+    /// Policy installation takes effect before the journal transaction, including
+    /// when that transaction fails. Storage failure cannot roll back revocation.
+    ///
+    /// # Errors
+    /// Rejects stale or conflicting policy and reports journal storage failures.
     pub async fn register_app(
         &self,
         app: &AppId,
-        policy: &AppPolicy,
+        policy: super::PolicySnapshot,
     ) -> Result<(), WorkflowServiceError> {
-        policy.validate()?;
-        let mut tx = self.store.begin().await?;
-        if tx.platform_policy.is_some() {
-            return Err(WorkflowServiceError::InvalidRequest(
-                "platform workflow policy is owned by Control".into(),
-            ));
-        }
+        self.policies.install(app, policy)?;
+        let mut tx = self.begin().await?;
         let table = tx.table("app_state");
-        tx.execute(&format!("INSERT INTO {table} (app_id,revision,policy,signal_epoch) VALUES ($1,0,$2,0) \
-            ON CONFLICT (app_id) DO UPDATE SET revision = {table}.revision + 1, policy = excluded.policy"),
-            &[app.as_str().into(), encode(policy)?.into()]).await?;
+        tx.execute(&format!("INSERT INTO {table} (app_id,signal_epoch) VALUES ($1,0) ON CONFLICT (app_id) DO NOTHING"),
+            &[app.as_str().into()]).await?;
         tx.commit().await
     }
 }
@@ -93,7 +112,7 @@ impl AppWorkflows {
         validation::workflow_name(name)?;
         validation::start(&options)?;
         let digest = digest(&(name, &options))?;
-        let mut tx = self.service.store.begin().await?;
+        let mut tx = self.service.begin().await?;
         let policy = lock_app(&mut tx, &self.app).await?;
         let now = tx.now().await?;
         if let Some(receipt) =
@@ -105,7 +124,7 @@ impl AppWorkflows {
         if encode(&options.input)?.len() > policy.max_input_bytes {
             return Err(WorkflowServiceError::PayloadTooLarge);
         }
-        let deploy = active_deploy(&mut tx, &self.app, &policy).await?;
+        let deploy = active_deploy(&mut tx, &self.app).await?;
         if !deploy.workflows.contains(name) {
             return Err(not_found("workflow"));
         }
@@ -169,7 +188,7 @@ impl AppWorkflows {
 
     pub async fn status(&self, run_id: &str) -> Result<RunStatus, WorkflowServiceError> {
         validate_run(run_id)?;
-        let mut tx = self.service.store.begin().await?;
+        let mut tx = self.service.begin().await?;
         let runs = tx.table("runs");
         let generations = tx.table("generations");
         let rows=tx.query(&format!("SELECT r.state,g.output,g.output_ref,g.error FROM {runs} r JOIN {generations} g ON g.app_id=r.app_id AND g.run_id=r.id AND g.generation=r.generation WHERE r.app_id=$1 AND r.id=$2"), &[self.app.as_str().into(),run_id.into()]).await?;
@@ -204,7 +223,7 @@ impl AppWorkflows {
         validate_run(run_id)?;
         validation::signal_type(&options.signal_type)?;
         let digest = digest(&(run_id, &options))?;
-        let mut tx = self.service.store.begin().await?;
+        let mut tx = self.service.begin().await?;
         let policy = lock_app(&mut tx, &self.app).await?;
         let now = tx.now().await?;
         if let Some(receipt) =
@@ -236,35 +255,21 @@ pub(crate) async fn lock_app(
     tx: &mut Transaction,
     app: &AppId,
 ) -> Result<AppPolicy, WorkflowServiceError> {
-    let platform = if let Some(source) = tx.platform_policy.clone() {
-        let policy = source.lock(tx, app).await?;
-        tx.execute(
-            &format!("INSERT INTO {} (app_id,revision,signal_epoch,platform_app_id) VALUES ($1,0,0,$2) ON CONFLICT (app_id) DO NOTHING", tx.table("app_state")),
-            &[app.as_str().into(),app.uuid().to_string().into()],
-        ).await?;
-        Some(policy)
-    } else {
-        None
-    };
     let sql = format!(
-        "SELECT policy,platform_app_id FROM {} WHERE app_id=$1{}",
+        "SELECT app_id FROM {} WHERE app_id=$1{}",
         tx.table("app_state"),
         tx.lock_clause()
     );
     let rows = tx.query(&sql, &[app.as_str().into()]).await?;
-    let row = rows.first().ok_or_else(|| not_found("workflow app"))?;
-    match platform {
-        Some(policy) => {
-            if row.optional_text("platform_app_id")?.as_deref() != Some(&app.uuid().to_string()) {
-                return Err(WorkflowServiceError::Unavailable(
-                    "invalid workflow platform app mapping".into(),
-                ));
-            }
-            Ok(policy)
-        }
-        None => decode(&row.text("policy")?),
+    if rows.is_empty() {
+        return Err(not_found("workflow app"));
     }
+    tx.policies
+        .as_ref()
+        .ok_or_else(|| WorkflowServiceError::Unavailable("workflow host policy not bound".into()))?
+        .resolve(app)
 }
+
 pub(crate) async fn lock_run(
     tx: &mut Transaction,
     app: &AppId,
@@ -284,9 +289,7 @@ pub(crate) async fn lock_run(
 pub(crate) async fn active_deploy(
     tx: &mut Transaction,
     app: &AppId,
-    policy: &AppPolicy,
 ) -> Result<DeployRegistration, WorkflowServiceError> {
-    super::deploys::reconcile_platform(tx, app, policy).await?;
     let table = tx.table("deploys");
     let rows = tx
         .query(

@@ -12,8 +12,8 @@ use zeroship_runtime::{
 use zeroship_workflow::{
     operations::{RunState, StartOptions},
     service::{
-        schema, store::SqliteStore, AppPolicy, AppWorkflows, DeployRegistration, RequestId,
-        WorkerIdentity, WorkflowService,
+        schema, store::SqliteStore, AppPolicy, AppWorkflows, DeployRegistration, HostPolicies,
+        PolicySnapshot, RequestId, WorkerIdentity, WorkflowService,
     },
     WorkflowExecution,
 };
@@ -30,14 +30,21 @@ impl Fixture {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("workflow.sqlite");
         schema::initialize_sqlite(&path).unwrap();
-        let service = WorkflowService::open(Arc::new(SqliteStore::new(path)))
-            .await
-            .unwrap();
+        let service = WorkflowService::open(
+            Arc::new(SqliteStore::new(path)),
+            Arc::new(HostPolicies::default()),
+        )
+        .await
+        .unwrap();
         let app = AppId::mint();
         let other = AppId::mint();
         for id in [&app, &other] {
             service
-                .register_app(id, &AppPolicy::default())
+                .register_app(
+                    id,
+                    PolicySnapshot::configuration(1.try_into().unwrap(), AppPolicy::default())
+                        .unwrap(),
+                )
                 .await
                 .unwrap();
             service

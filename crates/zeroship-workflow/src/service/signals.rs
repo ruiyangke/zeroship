@@ -37,7 +37,7 @@ impl AppWorkflows {
         validate_topic(topic)?;
         validation::signal_type(&options.signal_type)?;
         let digest = digest(&(topic, &options))?;
-        let mut tx = self.service.store.begin().await?;
+        let mut tx = self.service.begin().await?;
         let policy = lock_app(&mut tx, &self.app).await?;
         let now = tx.now().await?;
         if let Some(receipt) =
@@ -139,7 +139,7 @@ impl WorkflowService {
     /// Resume durable fanout from its recipient cursor. A publication includes
     /// subscriptions accepted before it, even when the host restarts mid-fanout.
     pub async fn tick_broadcasts(&self) -> Result<usize, WorkflowServiceError> {
-        let mut tx = self.store.begin().await?;
+        let mut tx = self.begin().await?;
         let broadcasts = tx.table("broadcasts");
         let pending=tx.query(&format!("SELECT app_id,id FROM {broadcasts} WHERE finished=0 ORDER BY created_at,app_id,id LIMIT 128"), &[]).await?;
         tx.commit().await?;
@@ -149,7 +149,7 @@ impl WorkflowService {
                 WorkflowServiceError::Internal("invalid persisted workflow app identity".into())
             })?;
             let id = candidate.text("id")?;
-            let mut tx = self.store.begin().await?;
+            let mut tx = self.begin().await?;
             lock_app(&mut tx, &app).await?;
             let now = tx.now().await?;
             let rows = tx

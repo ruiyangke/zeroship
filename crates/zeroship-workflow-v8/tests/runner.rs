@@ -15,8 +15,9 @@ use zeroship_workflow::{
         runner::{EmbeddedTasks, RunnerOutcome, RunnerSlot, TaskPayloadLimits, TaskPayloads},
         schema,
         store::SqliteStore,
-        AppPolicy, AppWorkflows, CompletionReceipt, DeployRegistration, PayloadRead, PayloadSlot,
-        RequestId, StagedPayload, TaskAssignment, TaskToken, WorkerIdentity, WorkflowService,
+        AppPolicy, AppWorkflows, CompletionReceipt, DeployRegistration, HostPolicies, PayloadRead,
+        PayloadSlot, PolicySnapshot, RequestId, StagedPayload, TaskAssignment, TaskToken,
+        WorkerIdentity, WorkflowService,
     },
     WorkflowServiceError,
 };
@@ -125,15 +126,24 @@ impl Fixture {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("workflow.sqlite");
         schema::initialize_sqlite(&path).unwrap();
-        let service = WorkflowService::open(Arc::new(SqliteStore::new(path)))
-            .await
-            .unwrap()
-            .with_payload_storage(zeroship_storage::StorageStore::from_backend(Arc::new(
-                zeroship_storage::LocalFs::new(dir.path().join("payloads")),
-            )))
-            .unwrap();
+        let service = WorkflowService::open(
+            Arc::new(SqliteStore::new(path)),
+            Arc::new(HostPolicies::default()),
+        )
+        .await
+        .unwrap()
+        .with_payload_storage(zeroship_storage::StorageStore::from_backend(Arc::new(
+            zeroship_storage::LocalFs::new(dir.path().join("payloads")),
+        )))
+        .unwrap();
         let app = AppId::mint();
-        service.register_app(&app, &policy).await.unwrap();
+        service
+            .register_app(
+                &app,
+                PolicySnapshot::configuration(1.try_into().unwrap(), policy).unwrap(),
+            )
+            .await
+            .unwrap();
         service
             .activate_deploy(
                 &app,

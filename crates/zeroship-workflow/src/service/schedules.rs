@@ -203,7 +203,7 @@ pub(crate) async fn reconcile(
 impl WorkflowService {
     /// Invoked by the host maintenance loop; occurrences and runs commit together.
     pub async fn tick_schedules(&self) -> Result<usize, WorkflowServiceError> {
-        let mut tx = self.store.begin().await?;
+        let mut tx = self.begin().await?;
         let now = tx.now().await?;
         let schedules = tx.table("schedules");
         let due=tx.query(&format!("SELECT app_id,id FROM {schedules} WHERE next_at <= $1 ORDER BY last_checked_at,next_at,app_id,id LIMIT 128"), &[now.into()]).await?;
@@ -214,9 +214,8 @@ impl WorkflowService {
                 WorkflowServiceError::Internal("invalid persisted workflow app identity".into())
             })?;
             let id = candidate.text("id")?;
-            let mut tx = self.store.begin().await?;
+            let mut tx = self.begin().await?;
             let policy = lock_app(&mut tx, &app).await?;
-            super::deploys::reconcile_platform(&mut tx, &app, &policy).await?;
             let now = tx.now().await?;
             tx.execute(
                 &format!("UPDATE {schedules} SET last_checked_at=$3 WHERE app_id=$1 AND id=$2"),
