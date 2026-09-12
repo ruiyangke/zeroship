@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use testcontainers::{
-    core::{CmdWaitFor, ExecCommand, IntoContainerPort, WaitFor},
+    core::{CmdWaitFor, ExecCommand, IntoContainerPort, Mount, WaitFor},
     runners::SyncRunner,
     Container, GenericImage, ImageExt,
 };
@@ -11,6 +11,7 @@ use testcontainers::{
 const ACCESS: &str = "minioadmin";
 const SECRET: &str = "minioadmin";
 const BUCKET: &str = "storage-fixture";
+const DATA_CAPACITY: i64 = 1024 * 1024 * 1024;
 
 pub struct Minio {
     _container: Container<GenericImage>,
@@ -24,6 +25,9 @@ impl Minio {
             .with_wait_for(WaitFor::message_on_stderr("API:"))
             .with_env_var("MINIO_ROOT_USER", ACCESS)
             .with_env_var("MINIO_ROOT_PASSWORD", SECRET)
+            // Disposable fixture data must not share MinIO's free-space
+            // threshold with the host's build cache.
+            .with_mount(Mount::tmpfs_mount("/data").with_size_bytes(DATA_CAPACITY))
             .with_cmd(["server", "/data"])
             .with_startup_timeout(Duration::from_secs(90))
             .start()
