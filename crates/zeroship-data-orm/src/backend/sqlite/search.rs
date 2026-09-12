@@ -47,10 +47,13 @@ impl SqliteBackend {
     ) -> Result<Vec<crate::value::Value>, DbError> {
         let rows = session.query(query.sql(), query.params()).await?;
         let mut scored = Vec::new();
-        for row in rows {
-            if !matches!(row.get("id"), Some(Value::String(_)))
-                && !row.get("id").is_some_and(|value| value.as_i64().is_some())
-            {
+        for mut row in rows {
+            let identity = row
+                .as_object_mut()
+                .ok_or_else(|| DbError::internal("spatial search returned a non-record"))?
+                .shift_remove(crate::sql::compiler::SQLITE_SPATIAL_IDENTITY_ALIAS)
+                .ok_or_else(|| DbError::internal("spatial search returned no ranking identity"))?;
+            if !matches!(identity, Value::String(_)) && identity.as_i64().is_none() {
                 return Err(DbError::row_decode(
                     "id",
                     "spatial search requires a text or integer identity",
@@ -69,7 +72,7 @@ impl SqliteBackend {
             let row_point = spatial::blob_to_point(blob)?;
             let distance = spatial::haversine_m(point, row_point);
             if distance <= radius_m {
-                scored.push((distance, row));
+                scored.push((distance, identity, row));
             }
         }
         scored.sort_by(|a, b| {
@@ -78,7 +81,7 @@ impl SqliteBackend {
         });
         scored.truncate(limit);
         let mut out = Vec::with_capacity(scored.len());
-        for (distance, mut row) in scored {
+        for (distance, _, mut row) in scored {
             row.as_object_mut()
                 .ok_or_else(|| DbError::internal("spatial search returned a non-record"))?
                 .insert(
@@ -92,15 +95,14 @@ impl SqliteBackend {
 }
 
 fn compare_identity(left: &Value, right: &Value) -> std::cmp::Ordering {
-    match (left.get("id"), right.get("id")) {
-        (Some(Value::String(left)), Some(Value::String(right))) => left.cmp(right),
-        (Some(Value::String(_)), Some(_)) => std::cmp::Ordering::Greater,
-        (Some(_), Some(Value::String(_))) => std::cmp::Ordering::Less,
-        (Some(left), Some(right)) => left
+    match (left, right) {
+        (Value::String(left), Value::String(right)) => left.cmp(right),
+        (Value::String(_), _) => std::cmp::Ordering::Greater,
+        (_, Value::String(_)) => std::cmp::Ordering::Less,
+        (left, right) => left
             .as_i64()
             .expect("validated spatial identity")
             .cmp(&right.as_i64().expect("validated spatial identity")),
-        _ => unreachable!("validated spatial identity"),
     }
 }
 
@@ -111,7 +113,7 @@ mod tests {
 
     #[test]
     fn equal_spatial_distances_use_identity_order() {
-        assert!(compare_identity(&value!({"id":2}), &value!({"id":10})).is_lt());
-        assert!(compare_identity(&value!({"id":"b"}), &value!({"id":"c"})).is_lt());
+        assert!(compare_identity(&value!(2), &value!(10)).is_lt());
+        assert!(compare_identity(&value!("b"), &value!("c")).is_lt());
     }
 }
