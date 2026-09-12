@@ -602,7 +602,6 @@ pub(crate) async fn run_update_one(
         None
     };
 
-    let mut update = update;
     let row_pk = target_row.as_ref().map_or("", |row| row.row_pk.as_str());
     // Key store off the route, for the reason given on [`run_insert`].
     write_pipeline::apply(
@@ -822,7 +821,6 @@ pub(crate) async fn run_update_many(
         return frame.finish(work_result).await;
     }
 
-    let mut update = update;
     // The non-per-row arm never moved the route into a frame, so it is still
     // here to supply the key store.
     write_pipeline::apply(

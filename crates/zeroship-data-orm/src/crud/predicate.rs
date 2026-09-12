@@ -369,7 +369,7 @@ fn encode(
 }
 
 fn sort_predicates(predicates: &mut [ResolvedPredicate]) {
-    predicates.sort_by_key(shape);
+    predicates.sort_by_cached_key(shape);
 }
 
 fn shape(predicate: &ResolvedPredicate) -> String {
