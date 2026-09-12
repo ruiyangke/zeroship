@@ -23,9 +23,10 @@ metadata store, HTTP host and platform migration now use the metadata-only
 contract. Native PostgreSQL and real-process tests cover scoped authority,
 replica retries, startup privileges and restart recovery. The CLI now composes
 the shared engine and background runner. Production composition remains
-unfinished. The branch's separate workflow archive feed and customer executable
-snapshot copies are superseded by the app-deployment contract below and must
-be removed together with their callers.
+unfinished. The CLI and Vite now supply the normal app archive without a
+workflow-specific artifact argument. The engine's customer executable snapshot
+copies are superseded by the app-deployment contract below and must be removed
+together with their callers.
 
 This design supersedes the older
 [control-plane design](2026-07-05-durable-workflows-design.md),
@@ -344,8 +345,22 @@ with different lifecycle or replay semantics.
 
 ## Local development
 
-`zeroship serve` embeds the same Rust engine and task runner with SQLite and local
-payload files. Local development builds the normal app deployment and retains
+`zeroship serve` embeds the same Rust engine and task runner. Its journal belongs
+in the app's resolved database, alongside business tables under the reserved
+workflow table prefix. SQLite development uses the app's existing SQLite file;
+the host supplies the database binding instead of a workflow-specific database
+path or environment variable. The branch's separate local journal is being
+replaced with this shared-database binding. The workflow-specific CLI reset,
+filesystem deletion protocol and reset locks have been removed.
+
+The CLI remains a single-app host. It resolves the normal app code, database and
+storage configuration, then initializes the shared workflow engine and runtime
+binding. Worker lifecycle, durable execution and retention belong to the shared
+worker implementation. Do not add workflow-specific deployment management or
+file polling to the CLI. Supporting multiple app deployments in the CLI is a
+separate design question and is outside this work.
+
+Local development builds the normal app deployment and retains
 its manifests and content-addressed blobs locally. HTTP and workflow execution
 derive from the same app build; creators do not supply a workflow-only entry or
 archive. The CLI persists a trusted
@@ -354,9 +369,9 @@ Separate projects receive separate storage and identities by default.
 
 Stopping the CLI preserves journals and retained app deployments. Startup discovers due work
 and expired leases. Hot reload installs a new immutable active deployment while
-old runs retain their original code. An explicit workflow reset removes only
-workflow-owned state and payloads, leaving app deployment artifacts, business DB,
-KV and storage data untouched. App deployment collection applies its own
+old runs retain their original code. Any cleanup through the shared engine must
+preserve business tables, app deployment artifacts, KV and storage data.
+App deployment collection applies its own
 reference checks before reclaiming bundles no longer needed by any local consumer.
 
 Programmatic Rust construction and TOML resolve to the same validated host

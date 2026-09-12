@@ -26,9 +26,11 @@ pub(crate) fn fingerprint(dialect: &str) -> Result<String, WorkflowServiceError>
         .ok_or_else(|| WorkflowServiceError::Internal("unsupported workflow schema dialect".into()))
 }
 
-/// Initialize workflow tables in the app's local database using the shared
-/// migration definition. Existing workflow tables are verified without altering
-/// or resetting their schema. Business tables can already exist in the database.
+/// Initialize workflow tables in the app's local database.
+///
+/// Uses the shared migration definition. Existing workflow tables are verified
+/// without altering or resetting their schema. Business tables can already
+/// exist in the database.
 ///
 /// # Errors
 /// Refuses incompatible journals and reports filesystem or database failures.

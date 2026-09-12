@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { WorkflowPublisher } from "../src/workflow-publisher.js";
+import { DevPublisher } from "../src/dev-publisher.js";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -13,12 +13,12 @@ function deferred<T>() {
 
 test("source changes during a build discard its image before publication", async () => {
   const root = await fs.mkdtemp(join(tmpdir(), "zs-workflow-publisher-"));
-  const path = join(root, "workflows.zship");
+  const path = join(root, "app.zship");
   const started = deferred<void>();
   const stale = deferred<void>();
   const seen: string[][] = [];
   let builds = 0;
-  const publisher = new WorkflowPublisher(path, async () => {
+  const publisher = new DevPublisher(path, async () => {
     builds += 1;
     if (builds === 1) {
       started.resolve();
@@ -38,7 +38,7 @@ test("source changes during a build discard its image before publication", async
     assert.equal(builds, 2);
     assert.equal(await fs.readFile(path, "utf8"), "current");
     assert.deepEqual(seen.at(-1), ["new.ts"]);
-    assert.deepEqual(await fs.readdir(root), ["workflows.zship"]);
+    assert.deepEqual(await fs.readdir(root), ["app.zship"]);
   } finally {
     await publisher.close();
     await fs.rm(root, { recursive: true, force: true });
@@ -47,9 +47,9 @@ test("source changes during a build discard its image before publication", async
 
 test("build failure preserves the archive and a correction can publish", async () => {
   const root = await fs.mkdtemp(join(tmpdir(), "zs-workflow-publisher-"));
-  const path = join(root, "workflows.zship");
+  const path = join(root, "app.zship");
   let fail = true;
-  const publisher = new WorkflowPublisher(path, async () => {
+  const publisher = new DevPublisher(path, async () => {
     if (fail) throw new Error("invalid source");
     return { archive: Buffer.from("corrected"), dependencies: [] };
   }, () => {});
@@ -68,9 +68,9 @@ test("build failure preserves the archive and a correction can publish", async (
 
 test("closing during a build prevents publication and waits for cleanup", async () => {
   const root = await fs.mkdtemp(join(tmpdir(), "zs-workflow-publisher-"));
-  const path = join(root, "workflows.zship");
+  const path = join(root, "app.zship");
   const pending = deferred<void>();
-  const publisher = new WorkflowPublisher(path, async () => {
+  const publisher = new DevPublisher(path, async () => {
     await pending.promise;
     return { archive: Buffer.from("late"), dependencies: [] };
   }, () => {});

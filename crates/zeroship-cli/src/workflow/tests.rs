@@ -1,5 +1,6 @@
 use super::*;
 use serde_json::json;
+use std::time::Duration;
 use zeroship_workflow::{
     operations::{RunState, SignalOptions, StartOptions},
     service::{AppWorkflows, RequestId},
@@ -28,11 +29,12 @@ fn project_identity_survives_restart_and_concurrent_initialization() {
 #[test]
 fn local_configuration_rejects_unknown_and_invalid_limits() {
     assert!(toml::from_str::<LocalConfig>("unknown = true").is_err());
+    assert!(toml::from_str::<LocalConfig>("bundle = 'built.zship'").is_err());
     let valid: LocalConfig =
-        toml::from_str("bundle = 'built.zship'\n[worker]\ntask_slots = 2").unwrap();
+        toml::from_str("journal = 'custom.sqlite'\n[worker]\ntask_slots = 2").unwrap();
     let root = tempfile::tempdir().unwrap();
     let valid = valid.resolve(root.path()).unwrap();
-    assert_eq!(valid.bundle, Some(root.path().join("built.zship")));
+    assert_eq!(valid.journal, root.path().join("custom.sqlite"));
     assert_eq!(valid.worker.task_slots, 2);
     let invalid = LocalConfig {
         max_source_bytes: 0,
@@ -47,7 +49,7 @@ fn publish(path: &Path, version: &str) {
     let output = std::process::Command::new("pnpm")
         .current_dir(workspace.join("sdks/vite-plugin"))
         .args(["exec", "tsx"])
-        .arg(manifest.join("tests/fixtures/workflow-bundle.ts"))
+        .arg(manifest.join("tests/fixtures/app-bundle.ts"))
         .arg(path.parent().unwrap())
         .arg(version)
         .output()
@@ -98,26 +100,23 @@ async fn await_state(
 }
 
 #[compio::test]
-async fn local_worker_retains_code_through_hot_reload_and_restart_without_http() {
+async fn local_worker_retains_code_across_app_rebuild_and_restart_without_http() {
     let root = tempfile::tempdir().unwrap();
-    let bundle = root.path().join("workflows.zship");
+    let bundle = root.path().join("app.zship");
     publish(&bundle, "original");
-    let config = LocalConfig {
-        bundle: Some(bundle.clone()),
-        bundle_poll_ms: 10,
-        ..LocalConfig::default()
-    };
+    let config = LocalConfig::default();
     let env = [("APP_ID".into(), "untrusted-variable".into())].into();
     let host = LocalHost::start(
         root.path(),
         config.clone(),
+        Some(bundle.clone()),
         env,
         vec![],
         RuntimeLimits::default(),
     )
     .unwrap();
     let app = host.app.clone();
-    let (service, api) = client(root.path(), &config, &app).await;
+    let (_service, api) = client(root.path(), &config, &app).await;
     let old = api
         .start(&RequestId::mint(), "Example", StartOptions::default())
         .await
@@ -125,34 +124,13 @@ async fn local_worker_retains_code_through_hot_reload_and_restart_without_http()
     await_state(&api, &old.id, RunState::Waiting).await;
 
     publish(&bundle, "replacement");
-    let path = tempfile::tempdir().unwrap();
-    let blobs: Arc<dyn BlobStore> = Arc::new(LocalDiskBlobStore::new(path.path().into()).unwrap());
-    let archive = std::fs::read(&bundle).unwrap();
-    let ingested = zeroship_bundle::ingest(&blobs, &app.uuid(), &archive)
-        .await
-        .unwrap();
-    let manifest = serde_json::from_str(&ingested.manifest_json).unwrap();
-    let executable = BundleExecutable::load(&manifest, blobs.as_ref(), config.max_source_bytes)
-        .await
-        .unwrap();
-    compio::time::timeout(Duration::from_secs(15), async {
-        while service
-            .deployment_by_hash(&app, executable.content_hash())
-            .await
-            .unwrap()
-            .is_none()
-        {
-            compio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap();
     // Startup repairs/reselects the same immutable deploy without replacing old runs.
     drop(host);
     std::fs::remove_dir_all(root.path().join("src")).unwrap();
     let host = LocalHost::start(
         root.path(),
         config,
+        Some(bundle),
         HashMap::new(),
         vec![],
         RuntimeLimits::default(),

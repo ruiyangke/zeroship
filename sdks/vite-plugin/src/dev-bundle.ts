@@ -7,27 +7,27 @@ import type { ResolvedProjectConfig } from "./project-config/index.js";
 import { RUNTIME_DESCRIPTOR_FILE } from "./gen-types/index.js";
 import { emitZship } from "./zship.js";
 
-/** A built local executable, ready for the customer host to retain. */
-export interface WorkflowBundle {
+/** The local app deployment, ready for the host to ingest. */
+export interface DevBundle {
   archive: Buffer;
   /** Sources observed by the build, used to invalidate local snapshots. */
   dependencies: string[];
 }
 
 /**
- * Freeze the app's workflow graph using the deployment compiler and archive
- * format. The caller owns publication ordering when sources change during a
- * build. Runtime environment variables and host credentials stay outside it.
+ * Build the app's server graph and declarations with the deployment compiler.
+ * Vite serves client assets during development. The caller owns publication
+ * ordering when sources change during a build. Host credentials stay outside it.
  */
-export async function buildWorkflowBundle(opts: {
+export async function buildDevBundle(opts: {
   root: string;
   entry: string;
   project: ResolvedProjectConfig;
   runtimeDescriptor: string | undefined;
-}): Promise<WorkflowBundle> {
+}): Promise<DevBundle> {
   const stateDir = join(opts.root, ".zeroship");
   await fs.mkdir(stateDir, { recursive: true });
-  const staging = await fs.mkdtemp(join(stateDir, "workflow-build-"));
+  const staging = await fs.mkdtemp(join(stateDir, "app-build-"));
   try {
     const dist = join(staging, "dist");
     const generated = join(staging, "generated");
@@ -61,7 +61,7 @@ export async function buildWorkflowBundle(opts: {
       root: opts.root,
       runtimeDate: opts.project.runtime_date,
       distDir: dist,
-      outputPath: join(staging, "workflows.zship"),
+      outputPath: join(staging, "app.zship"),
       silent: true,
       precompress: { brotli: false, gzip: false },
       rpcExtras: extras,

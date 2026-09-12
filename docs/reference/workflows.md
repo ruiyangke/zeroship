@@ -57,10 +57,13 @@ durable deployment holds so platform bundle collection needs no customer SQL
 access. It also requires local development to use the same app build and local
 artifact retention.
 
-The refactor branch currently runs background work on the CLI's dedicated
-workflow thread, independently of HTTP requests. Its separate workflow archive
-feed and customer executable snapshot copies are implementation work being
-replaced; they are not the intended deployment interface.
+The CLI runs background work on a dedicated workflow thread, independently of
+HTTP requests. `zeroship serve dist/app.zship` loads the app's server modules for
+HTTP and workflow execution. Vite builds and publishes the local app artifact
+automatically while serving client assets and live modules through its dev
+bridge. There is no workflow-only archive argument or TOML bundle setting.
+The engine's customer executable snapshot copies are still being replaced with
+reads from the retained app bundle store.
 
 The CLI persists its trusted app identity in `.zeroship/app-id`, the customer
 journal in `.zeroship/workflows.sqlite`, and payloads and executable snapshots
@@ -75,12 +78,12 @@ journal = ".zeroship/workflows.sqlite"
 objects = ".zeroship/workflow-objects"
 ```
 
-Paths resolve against the project working directory.
-`ZEROSHIP_WORKFLOW_SQLITE_PATH` overrides the journal path. The optional `worker`
+Paths resolve against the project working directory. The optional `worker`
 and `payloads` tables configure `WorkerOptions` and `TaskPayloadLimits`.
-`zeroship workflows reset` resets local workflow state while preserving project
-identity and other stores. Stop local workers first; an interrupted reset must
-be resumed with the same configuration before the host can start.
+The CLI has no dedicated workflow reset command. Its remaining local setup is
+being reduced to binding the shared engine to the app's existing database and
+runtime configuration, as described in the worker design. A workflow journal
+does not require a separate SQLite file.
 
 ## Testing
 

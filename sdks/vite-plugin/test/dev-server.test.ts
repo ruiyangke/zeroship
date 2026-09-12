@@ -258,12 +258,12 @@ describe("devServerPlugin", () => {
       assert.equal(runtime.env.ZEROSHIP_DIE_WITH_PARENT, String(process.pid));
       assert.deepEqual(runtime.argv.slice(0, 4), [
         "serve",
-        BOOTSTRAP_SHIM_PATH,
+        resolve(harness.root, ".zeroship/app.zship"),
         "--port=3901",
         "--workers=1",
       ]);
-      const archive = resolve(harness.root, ".zeroship/workflows.zship");
-      assert.equal(runtime.argv[4], `--workflow-bundle=${archive}`);
+      const archive = resolve(harness.root, ".zeroship/app.zship");
+      assert.equal(runtime.argv[4], `--dev-bootstrap=${BOOTSTRAP_SHIM_PATH}`);
       assert.ok((await fs.stat(archive)).size > 0);
     } finally {
       await harness.close();
@@ -274,19 +274,21 @@ describe("devServerPlugin", () => {
     assert.equal(process.listenerCount("SIGTERM"), beforeSigtermListeners);
   });
 
-  test("publishes changed workflow dependencies without restarting the request runtime", async () => {
+  test("restarts the app runtime after publishing changed dependencies", async () => {
     const harness = await startHarness();
     try {
       const before = await harness.runtimeLog();
       const { zstdDecompressSync } = await import("node:zlib");
-      const path = resolve(harness.root, ".zeroship/workflows.zship");
+      const path = resolve(harness.root, ".zeroship/app.zship");
       await fs.writeFile(resolve(harness.root, "src/value.ts"), 'export const answer = "updated-from-dependency";');
       await waitFor(async () => {
         assert.match(zstdDecompressSync(await fs.readFile(path)).toString(), /updated-from-dependency/);
       });
-      const after = await harness.runtimeLog();
-      assert.equal(after.pid, before.pid);
-      assert.equal(after.spawnCount, before.spawnCount);
+      await waitFor(async () => {
+        const after = await harness.runtimeLog();
+        assert.notEqual(after.pid, before.pid);
+        assert.ok(after.spawnCount > before.spawnCount);
+      });
     } finally {
       await harness.close();
     }
@@ -295,7 +297,7 @@ describe("devServerPlugin", () => {
   test("runtime recovery keeps the retained workflow archive when current sources do not build", async () => {
     const harness = await startHarness();
     try {
-      const path = resolve(harness.root, ".zeroship/workflows.zship");
+      const path = resolve(harness.root, ".zeroship/app.zship");
       const retained = await fs.readFile(path);
       const before = await harness.runtimeLog();
       await fs.writeFile(resolve(harness.root, "src/value.ts"), 'import "./missing-dependency.js";');
