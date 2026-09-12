@@ -80,7 +80,7 @@
 # only the four colliding modules in both processes instead -
 #
 #   cargo test -p zeroship-auth --test main --no-fail-fast -- --test-threads 1 \
-#     magic_link_test:: password_reset_test:: verification_test:: \
+#     magic_link_test:: password_reset_test:: store::email_verification:: \
 #     signup_forgot_ratelimit_test::
 #
 # - twice at once, and the collisions concentrate. Five such pairs before the
