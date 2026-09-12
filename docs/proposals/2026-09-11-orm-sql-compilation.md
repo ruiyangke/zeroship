@@ -382,6 +382,14 @@ Typed-plan rendering uses the shared writer for identifier quoting, native bind
 allocation, and statement-wide parameter limits. Collection builders still own
 their parameter collection until their operation cutovers. Production upsert
 orders input columns by name so equivalent input maps share SQL and bind order.
+Upsert now resolves descriptor fields into source-bound physical columns and
+compiles through the shared writer; its previous SQL renderer is deleted. The
+statement distinguishes SQL null, database default, incoming values, current
+values, and native binds. Compilation enforces effective capabilities and a
+statement-wide bind budget. It consumes the native document and transfers byte,
+text, and encoded JSON buffers into bindings. Only the guarded strategy retains
+input for its retry. Backend registration and early strategy preflight remain
+part of the in-progress cutover.
 
 ## Implementation checklist
 

@@ -25,6 +25,7 @@ mod identity;
 pub mod read_pipeline;
 mod update_validation;
 mod write_pipeline;
+pub mod upsert;
 
 #[cfg(test)]
 pub use write_pipeline::{
@@ -1232,17 +1233,17 @@ pub async fn run_upsert(
             lower_document(route.dialect(), &schema, &mut doc);
             let expected_id =
                 if guard_identity {
-                    Some(doc.get("id").ok_or_else(|| {
+                    Some(doc.get("id").cloned().ok_or_else(|| {
                         DbError::internal("encrypted upsert requires an identity")
                     })?)
                 } else {
                     None
                 };
-            let bq = compile::build_upsert_with_assignments(
+            let bq = upsert::build_upsert_with_assignments(
                 binding.schema(),
                 &coll,
                 &schema,
-                &doc,
+                std::mem::take(&mut doc),
                 &conflict_fields,
                 route.dialect(),
                 &assignments,
