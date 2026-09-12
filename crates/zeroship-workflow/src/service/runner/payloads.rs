@@ -1,4 +1,4 @@
-//! Payload reads bound to a trusted task assignment and its replay journal.
+//! Payload authority bound to a trusted task assignment and its replay journal.
 
 #![allow(
     clippy::future_not_send,
@@ -8,7 +8,7 @@
 use super::{EmbeddedTasks, RemoteTasks};
 use crate::{
     engine::{JournalStep, WorkflowOutputRef},
-    service::{PayloadRead, TaskAssignment, TaskToken},
+    service::{PayloadRead, RequestId, StagedPayload, TaskAssignment, TaskToken},
     validation, WorkflowServiceError,
 };
 use async_trait::async_trait;
@@ -19,10 +19,19 @@ use std::{
     task::{Poll, Waker},
 };
 use zeroship_core::app_id::AppId;
+use zeroship_storage::backend::BoxChunkSource;
 
 /// Host-only payload authority; task credentials never enter the app isolate.
 #[async_trait(?Send)]
 pub trait TaskPayloads {
+    async fn stage(
+        &self,
+        task: &str,
+        token: &TaskToken,
+        request: &RequestId,
+        reference: WorkflowOutputRef,
+        body: BoxChunkSource,
+    ) -> Result<StagedPayload, WorkflowServiceError>;
     async fn read(
         &self,
         task: &str,
@@ -33,6 +42,18 @@ pub trait TaskPayloads {
 
 #[async_trait(?Send)]
 impl TaskPayloads for EmbeddedTasks {
+    async fn stage(
+        &self,
+        task: &str,
+        token: &TaskToken,
+        request: &RequestId,
+        reference: WorkflowOutputRef,
+        body: BoxChunkSource,
+    ) -> Result<StagedPayload, WorkflowServiceError> {
+        self.service
+            .stage_payload(&self.worker, task, token, request, reference, body)
+            .await
+    }
     async fn read(
         &self,
         task: &str,
@@ -47,6 +68,17 @@ impl TaskPayloads for EmbeddedTasks {
 
 #[async_trait(?Send)]
 impl TaskPayloads for RemoteTasks {
+    async fn stage(
+        &self,
+        task: &str,
+        token: &TaskToken,
+        request: &RequestId,
+        reference: WorkflowOutputRef,
+        body: BoxChunkSource,
+    ) -> Result<StagedPayload, WorkflowServiceError> {
+        self.stage_payload(task, token, request, reference, body)
+            .await
+    }
     async fn read(
         &self,
         task: &str,

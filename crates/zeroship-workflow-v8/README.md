@@ -22,6 +22,12 @@ Losing a required replay payload interrupts the isolate and wakes the host
 independently of JavaScript promise settlement. The runner releases the task
 without committing app outcomes, and a fresh attempt can retry the read. App
 code cannot catch that infrastructure failure and continue producing effects.
+After receiving a result, the shared executor disposes the isolate and joins
+native work before preparing or uploading payloads. Background app work cannot
+continue during storage I/O. Transient upload failures retry the prepared bytes
+and request identities within the live task budget, without repeating the step
+callback. The service stores the payload and commits its history reference;
+storage credentials never enter V8.
 
 The worker uses `WorkflowBinding::new` for control-plane-backed workflows.
 The CLI uses `WorkflowBinding::dev_sqlite` for the local development engine.

@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use serde_json::json;
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     rc::Rc,
     sync::{Arc, Mutex},
     time::Duration,
@@ -12,11 +12,11 @@ use zeroship_runtime::{runtime::InnerProbe, EnvSnapshot, ModuleEntry, Runtime};
 use zeroship_workflow::{
     operations::{RunOperation, RunState, SignalOptions, StartOptions},
     service::{
-        runner::{RunnerOutcome, RunnerSlot},
+        runner::{EmbeddedTasks, RunnerOutcome, RunnerSlot, TaskPayloadLimits, TaskPayloads},
         schema,
         store::SqliteStore,
-        AppPolicy, AppWorkflows, CompletionReceipt, DeployRegistration, RequestId, TaskAssignment,
-        WorkerIdentity, WorkflowService,
+        AppPolicy, AppWorkflows, CompletionReceipt, DeployRegistration, PayloadRead, PayloadSlot,
+        RequestId, StagedPayload, TaskAssignment, TaskToken, WorkerIdentity, WorkflowService,
     },
     WorkflowServiceError,
 };
@@ -163,13 +163,27 @@ impl Fixture {
         self.runner_with_payload_limit(timeout, 1024 * 1024)
     }
     fn runner_with_payload_limit(&self, timeout: Duration, max_payload_bytes: usize) -> RunnerSlot {
+        self.runner_with_output_limits(
+            timeout,
+            TaskPayloadLimits {
+                max_inline_bytes: max_payload_bytes,
+                max_payload_bytes,
+                ..TaskPayloadLimits::default()
+            },
+        )
+    }
+    fn runner_with_output_limits(
+        &self,
+        timeout: Duration,
+        limits: TaskPayloadLimits,
+    ) -> RunnerSlot {
         let tasks = Rc::new(
             self.service
                 .tasks(WorkerIdentity::new("local-v8-worker".into()).unwrap()),
         );
         RunnerSlot::new(
             tasks.clone(),
-            Rc::new(V8TaskExecutor::new(self.loader.clone(), tasks, max_payload_bytes).unwrap()),
+            Rc::new(V8TaskExecutor::new(self.loader.clone(), tasks, limits).unwrap()),
             timeout,
         )
         .unwrap()
@@ -297,6 +311,18 @@ async fn oversized_input_never_initializes_the_creator_module() {
 struct UnavailablePayloads;
 #[async_trait(?Send)]
 impl zeroship_workflow::service::runner::TaskPayloads for UnavailablePayloads {
+    async fn stage(
+        &self,
+        _task: &str,
+        _token: &zeroship_workflow::service::TaskToken,
+        _request: &RequestId,
+        _reference: zeroship_workflow::engine::WorkflowOutputRef,
+        _body: zeroship_storage::backend::BoxChunkSource,
+    ) -> Result<zeroship_workflow::service::StagedPayload, WorkflowServiceError> {
+        Err(WorkflowServiceError::Unavailable(
+            "fixture payload outage".into(),
+        ))
+    }
     async fn read(
         &self,
         _task: &str,
@@ -334,7 +360,12 @@ async fn payload_outage_interrupts_app_code_and_leaves_the_frontier_retryable() 
             .tasks(WorkerIdentity::new("local-v8-worker".into()).unwrap()),
     );
     let executor = Rc::new(
-        V8TaskExecutor::new(fixture.loader.clone(), Rc::new(UnavailablePayloads), 1024).unwrap(),
+        V8TaskExecutor::new(
+            fixture.loader.clone(),
+            Rc::new(UnavailablePayloads),
+            TaskPayloadLimits::default(),
+        )
+        .unwrap(),
     );
     let mut runner = RunnerSlot::new(tasks, executor, Duration::from_secs(5)).unwrap();
     let result = runner.run_once().await;
@@ -351,6 +382,239 @@ async fn payload_outage_interrupts_app_code_and_leaves_the_frontier_retryable() 
         fixture.app.status(&run).await.unwrap().output,
         Some(json!({"secret":"retained"}))
     );
+    fixture.assert_disposed().await;
+}
+
+const OUTPUT_LIMITS: TaskPayloadLimits = TaskPayloadLimits {
+    max_inline_bytes: 32,
+    max_payload_bytes: 256,
+    max_result_bytes: 4096,
+};
+
+struct UploadProbe {
+    tasks: EmbeddedTasks,
+    loader: Rc<Loader>,
+    requests: RefCell<Vec<String>>,
+    lose_receipt: Cell<bool>,
+    unavailable: bool,
+}
+#[async_trait(?Send)]
+impl TaskPayloads for UploadProbe {
+    async fn stage(
+        &self,
+        task: &str,
+        token: &TaskToken,
+        request: &RequestId,
+        reference: zeroship_workflow::engine::WorkflowOutputRef,
+        body: zeroship_storage::backend::BoxChunkSource,
+    ) -> Result<StagedPayload, WorkflowServiceError> {
+        assert!(!self.loader.probes.borrow().is_empty());
+        assert!(
+            self.loader
+                .probes
+                .borrow()
+                .iter()
+                .all(|probe| probe.strong_count() == 0),
+            "app isolates must be disposed before uploading results"
+        );
+        self.requests.borrow_mut().push(request.as_str().to_owned());
+        compio::time::sleep(Duration::from_millis(50)).await;
+        if self.unavailable {
+            return Err(WorkflowServiceError::Unavailable(
+                "fixture upload outage".into(),
+            ));
+        }
+        let receipt = self
+            .tasks
+            .stage(task, token, request, reference, body)
+            .await?;
+        if self.lose_receipt.replace(false) {
+            Err(WorkflowServiceError::Unavailable(
+                "lost upload response".into(),
+            ))
+        } else {
+            Ok(receipt)
+        }
+    }
+    async fn read(
+        &self,
+        task: &str,
+        token: &TaskToken,
+        reference: &zeroship_workflow::engine::WorkflowOutputRef,
+    ) -> Result<PayloadRead, WorkflowServiceError> {
+        self.tasks.read(task, token, reference).await
+    }
+}
+
+#[compio::test]
+async fn output_upload_retry_preserves_the_callback_and_stops_background_app_work() {
+    let fixture = Fixture::new(r"
+        import { env } from 'zeroship';
+        export class Example {
+            async run(_trigger, step) {
+                const saved = await step.run('saved', {output:{as:'blob', contentType:'application/json'}}, () => {
+                    env.probe.mark('callback');
+                    setTimeout(() => env.probe.mark('escaped'), 20);
+                    return {value:'x'.repeat(64)};
+                });
+                return (await saved.json()).value.length;
+            }
+        }
+    ").await;
+    let run = fixture
+        .app
+        .start(&RequestId::mint(), "Example", StartOptions::default())
+        .await
+        .unwrap();
+    let tasks = Rc::new(
+        fixture
+            .service
+            .tasks(WorkerIdentity::new("upload-worker".into()).unwrap()),
+    );
+    let upload = Rc::new(UploadProbe {
+        tasks: tasks.as_ref().clone(),
+        loader: fixture.loader.clone(),
+        requests: RefCell::default(),
+        lose_receipt: Cell::new(true),
+        unavailable: false,
+    });
+    let executor = Rc::new(
+        V8TaskExecutor::new(fixture.loader.clone(), upload.clone(), OUTPUT_LIMITS).unwrap(),
+    );
+    let mut runner = RunnerSlot::new(tasks, executor, Duration::from_secs(5)).unwrap();
+    let done = advance_until_suspended(&mut runner).await;
+    assert_eq!(done.state, RunState::Completed);
+    assert_eq!(
+        fixture.app.status(&run.id).await.unwrap().output,
+        Some(json!(64))
+    );
+    assert_eq!(*fixture.loader.markers.0.lock().unwrap(), ["callback"]);
+    {
+        let requests = upload.requests.borrow();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0], requests[1]);
+    }
+    let bytes = fixture
+        .app
+        .read_step_output(&run.id, "saved", 0)
+        .await
+        .unwrap()
+        .into_bytes(256)
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(),
+        json!({"value":"x".repeat(64)})
+    );
+    fixture.assert_disposed().await;
+}
+
+#[compio::test]
+async fn upload_outage_is_bounded_after_disposing_the_app() {
+    let fixture = Fixture::new(
+        r"
+        import { env } from 'zeroship';
+        export class Example {
+            run() { env.probe.mark('callback'); return 'x'.repeat(64); }
+        }
+    ",
+    )
+    .await;
+    let run = fixture
+        .app
+        .start(&RequestId::mint(), "Example", StartOptions::default())
+        .await
+        .unwrap();
+    let tasks = Rc::new(
+        fixture
+            .service
+            .tasks(WorkerIdentity::new("upload-worker".into()).unwrap()),
+    );
+    let upload = Rc::new(UploadProbe {
+        tasks: tasks.as_ref().clone(),
+        loader: fixture.loader.clone(),
+        requests: RefCell::default(),
+        lose_receipt: Cell::new(false),
+        unavailable: true,
+    });
+    let executor = Rc::new(
+        V8TaskExecutor::new(fixture.loader.clone(), upload.clone(), OUTPUT_LIMITS).unwrap(),
+    );
+    let mut runner = RunnerSlot::new(tasks, executor, Duration::from_millis(500)).unwrap();
+    assert!(matches!(
+        runner.run_once().await,
+        Err(WorkflowServiceError::Timeout)
+    ));
+    assert!(!fixture
+        .app
+        .status(&run.id)
+        .await
+        .unwrap()
+        .state
+        .is_terminal());
+    assert_eq!(*fixture.loader.markers.0.lock().unwrap(), ["callback"]);
+    assert!(upload.requests.borrow().len() > 1);
+    assert!(upload
+        .requests
+        .borrow()
+        .windows(2)
+        .all(|pair| pair[0] == pair[1]));
+    fixture.assert_disposed().await;
+}
+
+#[compio::test]
+async fn native_runner_stores_large_root_results_in_service_owned_payloads() {
+    let fixture = Fixture::new("export class Example { run() { return 'x'.repeat(64); } }").await;
+    let run = fixture
+        .app
+        .start(&RequestId::mint(), "Example", StartOptions::default())
+        .await
+        .unwrap();
+    let mut runner = fixture.runner_with_output_limits(Duration::from_secs(5), OUTPUT_LIMITS);
+    assert_eq!(
+        advance_until_suspended(&mut runner).await.state,
+        RunState::Completed
+    );
+    let bytes = fixture
+        .app
+        .read_payload(&run.id, 0, PayloadSlot::Output)
+        .await
+        .unwrap()
+        .into_bytes(256)
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<String>(&bytes).unwrap(),
+        "x".repeat(64)
+    );
+    fixture.assert_disposed().await;
+}
+
+#[compio::test]
+async fn inline_output_limit_commits_a_terminal_workflow_failure() {
+    let fixture = Fixture::new(
+        r"
+        export class Example {
+            async run(_trigger,step) {
+                return await step.run('large',{output:'inline'},()=>'x'.repeat(64));
+            }
+        }
+    ",
+    )
+    .await;
+    let run = fixture
+        .app
+        .start(&RequestId::mint(), "Example", StartOptions::default())
+        .await
+        .unwrap();
+    let mut runner = fixture.runner_with_output_limits(Duration::from_secs(5), OUTPUT_LIMITS);
+    assert_eq!(
+        advance_until_suspended(&mut runner).await.state,
+        RunState::Failed
+    );
+    let error = fixture.app.status(&run.id).await.unwrap().error.unwrap();
+    assert_eq!(error["type"], "LimitExceededError");
+    assert_eq!(error["retryable"], false);
     fixture.assert_disposed().await;
 }
 
