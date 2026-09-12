@@ -378,7 +378,9 @@ Native collection builders and typed-plan rendering now return
 `sql::compiler::CompiledQuery`. Its Debug output reports SQL and native parameter
 types; execution can borrow bindings or consume the output to transfer its
 buffers. Typed-plan database tests use the production native parameter encoder.
-Shared writer and statement cutovers remain in progress.
+Typed-plan rendering uses the shared writer for identifier quoting, native bind
+allocation, and statement-wide parameter limits. Collection builders still own
+their parameter collection until their operation cutovers.
 
 ## Implementation checklist
 
