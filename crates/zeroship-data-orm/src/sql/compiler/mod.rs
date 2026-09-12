@@ -1,10 +1,14 @@
 //! SQL compiler contracts and native execution output.
 
 mod query;
+mod postgres;
+mod sqlite;
 mod upsert;
 mod writer;
 pub use query::{CompiledQuery, ParameterType};
-pub use upsert::{PostgresCompiler, Requirements, SqlCompiler, SqlSupport, SqliteCompiler};
+pub use postgres::PostgresCompiler;
+pub use sqlite::SqliteCompiler;
+pub use upsert::{Requirements, SqlCompiler, SqlSupport};
 pub(crate) use writer::{ParameterSlot, SqlWriter};
 
 #[derive(Clone, Debug, PartialEq, Eq)]

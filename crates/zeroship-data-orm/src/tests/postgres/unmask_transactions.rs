@@ -150,12 +150,12 @@ async fn backend(host: &Host) -> zeroship_data_orm::backend::BackendHandle {
 /// and was wrong on every SQLite harness. This target is live-PostgreSQL only
 /// (`require_pg`), so `Postgres` is the answer its connection actually speaks.
 async fn tx_route(host: &Host, app: &str) -> TxRoute {
-    CapturedRoute::tx_for_tests(app, SqlDialect::Postgres).bind(backend(host).await)
+    CapturedRoute::tx_for_tests(app, SqlDialect::Postgres).bind(backend(host).await).unwrap()
 }
 
 /// A route outside any transaction. Dialect stated, as in [`tx_route`].
 async fn pool_route(host: &Host, app: &str) -> TxRoute {
-    CapturedRoute::pool_for_tests(app, SqlDialect::Postgres).bind(backend(host).await)
+    CapturedRoute::pool_for_tests(app, SqlDialect::Postgres).bind(backend(host).await).unwrap()
 }
 
 /// Insert one document through the real `run_insert` on `route`, returning the

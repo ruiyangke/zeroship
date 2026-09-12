@@ -8,13 +8,13 @@
 use crate::value::Value;
 
 use crate::assignments::AssignmentPlan;
-use crate::sql::compile;
 use crate::exec::{exec_mutation_count_with_emit, exec_mutation_with_emit, exec_query};
+use crate::sql::codecs::{lower_document, lower_documents, lower_filter, lower_update};
+use crate::sql::compile;
+use crate::sql::lifecycle::{concurrency_column, soft_delete_column};
 use crate::tx_route::TxRoute;
 use zeroship_data_orm::binding::DbBinding;
 use zeroship_data_orm::error::DbError;
-use crate::sql::codecs::{lower_document, lower_documents, lower_filter, lower_update};
-use crate::sql::lifecycle::{concurrency_column, soft_delete_column};
 
 use crate::protection::{mask_pass, protection_floor, unmask};
 
@@ -24,8 +24,8 @@ mod bytes_pass;
 mod identity;
 pub mod read_pipeline;
 mod update_validation;
-mod write_pipeline;
 pub mod upsert;
+mod write_pipeline;
 
 #[cfg(test)]
 pub use write_pipeline::{
@@ -1203,6 +1203,10 @@ pub async fn run_upsert(
 ) -> Result<read_pipeline::ApplyResult, DbError> {
     let schema = crate::descriptor::collection_schema(&binding, &coll)?;
     let guard_identity = write_pipeline::upsert_requires_conflict_probe(&schema, &doc);
+    route
+        .sql_registration()
+        .check(&upsert::requirements(&schema, guard_identity))
+        .map_err(compile::QueryError::from)?;
     let frame;
     let route = if guard_identity {
         frame = Some(crate::transaction::AtomicWriteFrame::begin(route).await?);
@@ -1239,15 +1243,15 @@ pub async fn run_upsert(
                 } else {
                     None
                 };
-            let bq = upsert::build_upsert_with_assignments(
+            let bq = upsert::build_upsert_with_registration(
                 binding.schema(),
                 &coll,
                 &schema,
                 std::mem::take(&mut doc),
                 &conflict_fields,
-                route.dialect(),
                 &assignments,
                 expected_id,
+                route.sql_registration(),
             )
             .map_err(DbError::from)?;
             let rows = exec_mutation_with_emit(

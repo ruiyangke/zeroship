@@ -1,4 +1,9 @@
 //! Runtime registration and routed backend extensions for the shared ORM.
+use crate::sql::{
+    SchemaName,
+    descriptors::{GeoPoint, VectorMetric},
+};
+use crate::value::Value;
 use crate::{
     backend::Backend,
     binding::DbBinding,
@@ -7,18 +12,47 @@ use crate::{
     search::{SpatialSearch, VectorSearch},
     tx_route::TxRoute,
 };
-use std::{any::Any, ops::Deref, rc::Rc};
-use crate::value::Value;
-use crate::sql::{SchemaName, descriptors::{GeoPoint, VectorMetric}};
+use std::{any::Any, ops::Deref, rc::Rc, sync::Arc};
 
 pub use crate::sql::internal::AUDIT_UNMASK_TABLE;
 
 /// A registered backend, erased once at the host boundary. Models never name it.
 #[derive(Clone, Debug)]
-pub struct BackendHandle(Rc<dyn Backend>, Rc<()>);
+pub struct BackendHandle(
+    Rc<dyn Backend>,
+    Rc<()>,
+    Arc<crate::sql::registration::SqlRegistration>,
+    Option<crate::connection::ConnectionIdentity>,
+);
 impl BackendHandle {
     pub fn new<B: Backend>(backend: Rc<B>) -> Self {
-        Self(backend, Rc::new(()))
+        let registration = crate::sql::registration::SqlRegistration::builtin(backend.dialect());
+        Self(backend, Rc::new(()), Arc::new(registration), None)
+    }
+    pub fn with_sql<B: Backend>(
+        backend: Rc<B>,
+        registration: crate::sql::registration::SqlRegistration,
+    ) -> Result<Self, DbError> {
+        if backend.dialect() != registration.dialect() {
+            return Err(DbError::config(
+                "backend_sql_mismatch",
+                "backend execution and SQL registration use different dialects",
+            ));
+        }
+        Ok(Self(backend, Rc::new(()), Arc::new(registration), None))
+    }
+    pub fn sql_registration(&self) -> &crate::sql::registration::SqlRegistration {
+        &self.2
+    }
+    pub fn connection_identity(&self) -> Option<crate::connection::ConnectionIdentity> {
+        self.3
+    }
+    pub(crate) fn bind_connection_identity(
+        mut self,
+        identity: crate::connection::ConnectionIdentity,
+    ) -> Self {
+        self.3 = Some(identity);
+        self
     }
     pub async fn open_tx_session(
         &self,
@@ -294,7 +328,8 @@ mod routed_read_tests {
             // CONTROL: a pool-lane read cannot see the uncommitted row.
             let outside = read_raw_column_value(
                 &CapturedRoute::pool_for_tests(app, crate::sql::compile::SqlDialect::Sqlite)
-                    .bind(handle.clone()),
+                    .bind(handle.clone())
+                    .unwrap(),
                 "people",
                 "__zs_raw__ssn",
                 "p1",
@@ -311,7 +346,8 @@ mod routed_read_tests {
             // SUBJECT: the same read, routed onto the transaction.
             let inside = read_raw_column_value(
                 &CapturedRoute::tx_for_tests(app, crate::sql::compile::SqlDialect::Sqlite)
-                    .bind(handle.clone()),
+                    .bind(handle.clone())
+                    .unwrap(),
                 "people",
                 "__zs_raw__ssn",
                 "p1",

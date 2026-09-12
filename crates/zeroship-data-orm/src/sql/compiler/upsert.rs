@@ -1,6 +1,6 @@
 use super::{CompileError, CompiledQuery, SqlWriter};
 use crate::sql::{
-    BindBudget, CompareOp,
+    CompareOp,
     statement::{Column, Expression, Statement, StorageType, Table},
 };
 use crate::value::Value;
@@ -61,37 +61,19 @@ pub trait SqlCompiler: Send + Sync {
     ) -> Result<CompiledQuery, CompileError>;
 }
 
-#[derive(Debug)]
-pub struct PostgresCompiler;
-#[derive(Debug)]
-pub struct SqliteCompiler;
-
 #[derive(Clone, Copy)]
-enum Syntax {
-    Postgres,
-    Sqlite,
+pub(crate) struct Syntax {
+    pub(crate) current_timestamp: &'static str,
+    pub(crate) generated_identity_override: Option<&'static str>,
+    pub(crate) timestamp_cast: &'static str,
+    pub(crate) vector_cast: &'static str,
 }
 
-fn support(syntax: Syntax) -> SqlSupport {
-    SqlSupport {
-        explicit_conflict_target: true,
-        conditional_conflict_update: true,
-        returning: true,
-        insert_generated_identity: true,
-        default_expression: matches!(syntax, Syntax::Postgres),
-        max_bind_parameters: match syntax {
-            Syntax::Postgres => BindBudget::POSTGRES.max(),
-            Syntax::Sqlite => BindBudget::SQLITE.max(),
-        },
-    }
-}
-
-fn check(
-    syntax: Syntax,
+pub(crate) fn check(
+    implemented: SqlSupport,
     required: &Requirements,
     effective: &SqlSupport,
 ) -> Result<(), CompileError> {
-    let implemented = support(syntax);
     for (requirement, available, implementation, name) in [
         (
             required.explicit_conflict_target,
@@ -146,52 +128,17 @@ fn check(
     Ok(())
 }
 
-impl SqlCompiler for PostgresCompiler {
-    fn support(&self) -> SqlSupport {
-        support(Syntax::Postgres)
-    }
-    fn check(
-        &self,
-        requirements: &Requirements,
-        effective: &SqlSupport,
-    ) -> Result<(), CompileError> {
-        check(Syntax::Postgres, requirements, effective)
-    }
-    fn compile(
-        &self,
-        statement: Statement,
-        effective: &SqlSupport,
-    ) -> Result<CompiledQuery, CompileError> {
-        compile(Syntax::Postgres, statement, effective)
-    }
-}
-
-impl SqlCompiler for SqliteCompiler {
-    fn support(&self) -> SqlSupport {
-        support(Syntax::Sqlite)
-    }
-    fn check(
-        &self,
-        requirements: &Requirements,
-        effective: &SqlSupport,
-    ) -> Result<(), CompileError> {
-        check(Syntax::Sqlite, requirements, effective)
-    }
-    fn compile(
-        &self,
-        statement: Statement,
-        effective: &SqlSupport,
-    ) -> Result<CompiledQuery, CompileError> {
-        compile(Syntax::Sqlite, statement, effective)
-    }
-}
-
-fn compile(
+pub(crate) fn compile(
     syntax: Syntax,
+    implemented: SqlSupport,
     statement: Statement,
     effective: &SqlSupport,
 ) -> Result<CompiledQuery, CompileError> {
-    check(syntax, &Requirements::for_statement(&statement), effective)?;
+    check(
+        implemented,
+        &Requirements::for_statement(&statement),
+        effective,
+    )?;
     match statement {
         Statement::Upsert(upsert) => {
             upsert.validate()?;
@@ -205,8 +152,10 @@ fn compile(
                 writer.identifier(assignment.column.name().as_str());
             }
             writer.sql.push(')');
-            if parts.insert_generated_identity && matches!(syntax, Syntax::Postgres) {
-                writer.sql.push_str(" OVERRIDING SYSTEM VALUE");
+            if parts.insert_generated_identity {
+                if let Some(clause) = syntax.generated_identity_override {
+                    writer.sql.push_str(clause);
+                }
             }
             writer.sql.push_str(" VALUES (");
             for (index, assignment) in parts.insert.into_iter().enumerate() {
@@ -294,8 +243,10 @@ fn write_bind(
     value: Value,
 ) -> Result<(), CompileError> {
     writer.write_param(value)?;
-    if storage == StorageType::Timestamp && matches!(syntax, Syntax::Postgres) {
-        writer.sql.push_str("::timestamptz");
+    match storage {
+        StorageType::Timestamp => writer.sql.push_str(syntax.timestamp_cast),
+        StorageType::Vector => writer.sql.push_str(syntax.vector_cast),
+        _ => {}
     }
     Ok(())
 }
@@ -320,10 +271,7 @@ fn write_expression(
             writer.sql.push_str(" + ");
             writer.write_param(Value::from(step))?;
         }
-        Expression::CurrentTimestamp => writer.sql.push_str(match syntax {
-            Syntax::Postgres => "NOW()",
-            Syntax::Sqlite => "(strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
-        }),
+        Expression::CurrentTimestamp => writer.sql.push_str(syntax.current_timestamp),
     }
     Ok(())
 }

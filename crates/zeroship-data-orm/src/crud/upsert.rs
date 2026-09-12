@@ -4,7 +4,7 @@ use crate::{
     sql::{
         CompareOp, Ident, IdentRole, SchemaName,
         compile::{self, QueryError, SqlDialect},
-        compiler::{CompiledQuery, PostgresCompiler, SqlCompiler, SqliteCompiler},
+        compiler::{CompiledQuery, Requirements},
         lifecycle::{AssignedValue, WriteAssignments},
         statement::{
             Assignment, Comparison, Expression, ReturnedColumn, Statement, StorageType, Table,
@@ -62,34 +62,62 @@ pub fn build_upsert_with_assignments(
     assignments: &WriteAssignments,
     expected_id: Option<Value>,
 ) -> Result<CompiledQuery, QueryError> {
+    let registration = crate::sql::registration::SqlRegistration::builtin(dialect);
+    build_upsert_with_registration(
+        namespace,
+        collection,
+        schema,
+        document,
+        conflict,
+        assignments,
+        expected_id,
+        &registration,
+    )
+}
+
+pub(crate) fn build_upsert_with_registration(
+    namespace: &SchemaName,
+    collection: &str,
+    schema: &Value,
+    document: Value,
+    conflict: &Value,
+    assignments: &WriteAssignments,
+    expected_id: Option<Value>,
+    registration: &crate::sql::registration::SqlRegistration,
+) -> Result<CompiledQuery, QueryError> {
     let statement = resolve(
         namespace,
         collection,
         schema,
         document,
         conflict,
-        dialect,
         assignments,
         expected_id,
+        registration,
     )?;
-    let compiler: &dyn SqlCompiler = match dialect {
-        SqlDialect::Postgres => &PostgresCompiler,
-        SqlDialect::Sqlite => &SqliteCompiler,
-    };
-    compiler
-        .compile(statement, &compiler.support())
-        .map_err(Into::into)
+    registration.compile(statement).map_err(Into::into)
 }
 
-pub fn resolve(
+pub(crate) fn requirements(schema: &Value, guard_identity: bool) -> Requirements {
+    Requirements {
+        explicit_conflict_target: true,
+        conditional_conflict_update: guard_identity,
+        returning: true,
+        insert_generated_identity: crate::sql::identity::is_generated(schema),
+        default_expression: false,
+        bind_parameters: 0,
+    }
+}
+
+fn resolve(
     namespace: &SchemaName,
     collection: &str,
     schema: &Value,
     document: Value,
     conflict: &Value,
-    dialect: SqlDialect,
     assignments: &WriteAssignments,
     expected_id: Option<Value>,
+    registration: &crate::sql::registration::SqlRegistration,
 ) -> Result<Statement, QueryError> {
     compile::validate_collection(collection)?;
     let fields = schema
@@ -114,13 +142,13 @@ pub fn resolve(
         let storage = if masked {
             StorageType::Text
         } else {
-            storage_type(definition, dialect)?
+            registration.storage_type(definition)?
         };
         physical.push((stored_ident(&stored)?, storage));
         let insert_only = name == "id" || definition["assign"]["on"].as_str() == Some("insert");
         inputs.insert(name.clone(), (stored.clone(), storage, insert_only));
         if let Some(raw) = compile::declared_raw_column(name, definition)? {
-            let raw_storage = storage_type(definition, dialect)?;
+            let raw_storage = registration.storage_type(definition)?;
             physical.push((stored_ident(&raw)?, raw_storage));
             inputs.insert(raw.clone(), (raw, raw_storage, insert_only));
         }
@@ -166,7 +194,7 @@ pub fn resolve(
         }
         insert.push(Assignment {
             column,
-            value: expression(*storage, value, dialect)?,
+            value: expression(*storage, value, registration)?,
         });
     }
     for assignment in &assignments.columns {
@@ -178,7 +206,7 @@ pub fn resolve(
                 step: *step,
             },
             AssignedValue::Bound(value) => {
-                Expression::Bind(encode(column.storage(), value.clone(), dialect)?)
+                Expression::Bind(registration.encode(column.storage(), value.clone())?)
             }
         };
         update.push(Assignment { column, value });
@@ -194,7 +222,7 @@ pub fn resolve(
     let condition = expected_id
         .map(|value| {
             let column = table.column(&compile::value_column_for_field("id", schema))?;
-            let value = encode(column.storage(), value, dialect)?;
+            let value = registration.encode(column.storage(), value)?;
             Ok::<_, QueryError>(Comparison {
                 column,
                 op: CompareOp::Eq,
@@ -242,69 +270,13 @@ fn invalid(message: &str) -> QueryError {
     QueryError::InvalidFilter(message.into())
 }
 
-fn storage_type(definition: &Value, dialect: SqlDialect) -> Result<StorageType, QueryError> {
-    if crate::sql::descriptors::is_encrypted(definition) {
-        return Ok(StorageType::Bytes);
-    }
-    Ok(match definition["type"].as_str() {
-        Some("string" | "text" | "id" | "calendarDate") => StorageType::Text,
-        Some("boolean" | "bool") if dialect == SqlDialect::Sqlite => StorageType::Integer,
-        Some("boolean" | "bool") => StorageType::Boolean,
-        Some("integer" | "int" | "bigint" | "bigInt") => StorageType::Integer,
-        Some("number" | "float" | "double") => StorageType::Real,
-        Some("decimal") => StorageType::Decimal,
-        Some("bytes") => StorageType::Bytes,
-        Some("date" | "timestamp" | "timestamptz") => StorageType::Timestamp,
-        Some("json" | "object" | "array" | "union") => StorageType::Json,
-        Some("vector" | "geoPoint") if dialect == SqlDialect::Sqlite => StorageType::Bytes,
-        Some("vector") => StorageType::Vector,
-        Some("geoPoint") => StorageType::GeoPoint,
-        _ => return Err(invalid("descriptor has no supported storage type")),
-    })
-}
-
 fn expression(
     storage: StorageType,
     value: Value,
-    dialect: SqlDialect,
+    registration: &crate::sql::registration::SqlRegistration,
 ) -> Result<Expression, QueryError> {
     if value.is_null() {
         return Ok(Expression::Null);
     }
-    Ok(Expression::Bind(encode(storage, value, dialect)?))
-}
-
-fn encode(storage: StorageType, value: Value, dialect: SqlDialect) -> Result<Value, QueryError> {
-    if value.is_null() {
-        return Ok(value);
-    }
-    Ok(match (storage, value) {
-        (StorageType::Timestamp, value) => {
-            let millis = crate::sql::temporal::timestamp_millis(&value)
-                .ok_or_else(|| invalid("invalid timestamp storage value"))?;
-            if dialect == SqlDialect::Sqlite {
-                Value::String(
-                    crate::sql::temporal::format_timestamp_millis(millis)
-                        .expect("validated timestamp"),
-                )
-            } else {
-                Value::Timestamp(millis)
-            }
-        }
-        (StorageType::Integer, Value::Bool(value)) if dialect == SqlDialect::Sqlite => {
-            Value::from(i64::from(value))
-        }
-        (StorageType::Text, Value::Timestamp(value)) if dialect == SqlDialect::Sqlite => {
-            Value::String(
-                crate::sql::temporal::format_timestamp_millis(value)
-                    .ok_or_else(|| invalid("invalid timestamp storage value"))?,
-            )
-        }
-        (StorageType::Json, value)
-            if !matches!(value, Value::Json(_) | Value::Array(_) | Value::Object(_)) =>
-        {
-            Value::Json(value.to_string())
-        }
-        (_, value) => value,
-    })
+    Ok(Expression::Bind(registration.encode(storage, value)?))
 }
