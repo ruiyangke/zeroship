@@ -2,7 +2,7 @@ use super::fixtures::CollectionFixture;
 use super::*;
 
 fn fields() -> Value {
-    value!({"balance":{"type":"number"},"payload":{"type":"json"}})
+    value!({"balance":{"type":"number"},"units":{"type":"integer"},"payload":{"type":"json"}})
 }
 
 #[compio::test]
@@ -21,7 +21,10 @@ async fn postgres_arithmetic_refuses_invalid_operands_before_mutation() {
 
 async fn exercise_arithmetic_validation(db: &Database) {
     let accounts = db.collection("accounts").unwrap();
-    accounts.insert(value!({"balance":10})).await.unwrap();
+    accounts
+        .insert(value!({"balance":10,"units":10}))
+        .await
+        .unwrap();
     let before = accounts.find(value!({}), value!({})).await.unwrap();
     for operand in [
         value!("2"),
@@ -55,6 +58,24 @@ async fn exercise_arithmetic_validation(db: &Database) {
                 "{error:?}"
             );
             assert!(!error.message_str().contains("private_not_a_number"));
+        }
+    }
+    for operand in [value!(1.5), Value::Decimal("1.5".into())] {
+        for operation in ["$inc", "$dec", "$mul"] {
+            let error = accounts
+                .update(
+                    value!({}),
+                    Value::Object(
+                        [(
+                            "units".into(),
+                            Value::Object([(operation.into(), operand.clone())].into()),
+                        )]
+                        .into(),
+                    ),
+                )
+                .await
+                .unwrap_err();
+            assert!(error.message_str().contains("numeric column and operand"));
         }
     }
     let Output::Rows { rows: before, .. } = before else {
