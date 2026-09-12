@@ -2,7 +2,7 @@ use super::*;
 use crate::driver::{CancellationHandle, DriverSession};
 use futures::{FutureExt, channel::oneshot};
 use std::{cell::Cell, cell::RefCell, future::Future, rc::Rc, task::Poll};
-use zeroship_data_sql::value::Value;
+use crate::value::Value;
 
 type TerminalAnswer = (TerminalResult, Option<DbError>);
 

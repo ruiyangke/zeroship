@@ -153,10 +153,10 @@ impl PostgresBackend {
     /// Propagates pool checkout, session setup, statement and COMMIT failures.
     pub async fn query_roled_values(
         &self,
-        schema: &zeroship_data_sql::SchemaName,
+        schema: &crate::sql::SchemaName,
         sql: &str,
-        params: &[zeroship_data_sql::value::Value],
-    ) -> Result<Vec<zeroship_data_sql::value::Value>, DbError> {
+        params: &[crate::value::Value],
+    ) -> Result<Vec<crate::value::Value>, DbError> {
         pg_autocommit::roled_json(&self.pool, schema, sql, params).await
     }
 
@@ -168,9 +168,9 @@ impl PostgresBackend {
     /// byte-typed.
     pub async fn read_roled_scalar_bytes(
         &self,
-        schema: &zeroship_data_sql::SchemaName,
+        schema: &crate::sql::SchemaName,
         sql: &str,
-        params: &[zeroship_data_sql::value::Value],
+        params: &[crate::value::Value],
     ) -> Result<pg_autocommit::ScalarRead<Vec<u8>>, DbError> {
         pg_autocommit::roled_scalar_bytes(&self.pool, schema, sql, params).await
     }
@@ -184,9 +184,9 @@ impl PostgresBackend {
     /// [`Self::read_roled_scalar_bytes`].
     pub async fn read_roled_scalar_text(
         &self,
-        schema: &zeroship_data_sql::SchemaName,
+        schema: &crate::sql::SchemaName,
         sql: &str,
-        params: &[zeroship_data_sql::value::Value],
+        params: &[crate::value::Value],
     ) -> Result<pg_autocommit::ScalarRead<String>, DbError> {
         pg_autocommit::roled_scalar_text(&self.pool, schema, sql, params).await
     }
@@ -198,9 +198,9 @@ impl PostgresBackend {
     /// As [`Self::query_roled_values`].
     pub async fn execute_roled(
         &self,
-        schema: &zeroship_data_sql::SchemaName,
+        schema: &crate::sql::SchemaName,
         sql: &str,
-        params: &[zeroship_data_sql::value::Value],
+        params: &[crate::value::Value],
     ) -> Result<(), DbError> {
         pg_autocommit::roled_statement(&self.pool, schema, sql, params).await
     }
@@ -224,10 +224,10 @@ impl PostgresBackend {
     /// As [`Self::query_roled_values`].
     pub async fn query_roled_rows_as_json(
         &self,
-        schema: &zeroship_data_sql::SchemaName,
+        schema: &crate::sql::SchemaName,
         sql: &str,
-        params: &[zeroship_data_sql::value::Value],
-    ) -> Result<Vec<zeroship_data_sql::value::Value>, DbError> {
+        params: &[crate::value::Value],
+    ) -> Result<Vec<crate::value::Value>, DbError> {
         let rows = pg_autocommit::roled_rows(&self.pool, schema, sql, params).await?;
         super::pg_row_json::rows_to_values(&rows)
     }
@@ -427,7 +427,7 @@ pub fn render_begin(intent: BeginIntent) -> String {
 /// `compio_postgres`.
 pub async fn apply_per_app_role(
     client: &compio_postgres::Client,
-    schema: &zeroship_data_sql::SchemaName,
+    schema: &crate::sql::SchemaName,
 ) -> Result<(), zeroship_data_orm::error::SessionSetupError> {
     // SET LOCAL ROLE + the DB-1 timeout guards (statement / idle-in-tx / lock)
     // in one simple-query batch - all SET LOCAL, so they revert at the tx end.
@@ -561,7 +561,7 @@ mod tests {
     //!    tightening a lifetime, swapping an associated type) fails
     //!    compilation here, not at a distant call site.
     //! 2. Associated-type identities — pin `Client = compio_postgres::PoolConnection`
-    //!    and `LiveSchema = zeroship_data_sql::catalog::LiveSchema` so a refactor that
+    //!    and `LiveSchema = crate::sql::catalog::LiveSchema` so a refactor that
     //!    accidentally swaps either is caught here.
     //! 3. The `Backend: 'static` bound on the trait — re-asserted at
     //!    the impl site.
@@ -795,4 +795,4 @@ mod terminal_projection_tests {
 }
 
 #[cfg(test)]
-use zeroship_data_sql::value::Value;
+use crate::value::Value;

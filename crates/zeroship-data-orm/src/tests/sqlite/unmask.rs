@@ -9,7 +9,7 @@ use zeroship_data_orm::backend::sqlite::SqliteBackend;
 
 use zeroship_data_orm::binding::DbBinding;
 
-use zeroship_data_sql::compile::raw_column_name;
+use crate::sql::compile::raw_column_name;
 
 use zeroship_data_orm::protection::unmask;
 
@@ -47,8 +47,8 @@ fn configure_cold_sqlite_unmask_fixture(
     dir: &tempfile::TempDir,
     app_id: &str,
     collection: &str,
-    schema: zeroship_data_sql::value::Value,
-    policy: zeroship_data_sql::value::Value,
+    schema: crate::value::Value,
+    policy: crate::value::Value,
 ) {
     host.reset();
     let url = format!("sqlite:{}", dir.path().join("zs-control.sqlite").display());
@@ -112,7 +112,7 @@ async fn read_audit_rows(backend: &SqliteBackend, app_id: &str) -> Vec<(String, 
     // reservation. Asking for the transaction lane here contends with whatever
     // the unmask dispatch itself is holding.
     let client = backend.autocommit_client();
-    let q_app = zeroship_data_sql::compile::quote_ident(app_id);
+    let q_app = crate::sql::compile::quote_ident(app_id);
     let sql = format!(
         r#"SELECT outcome, actor_role, classification
            FROM {q_app}."__zeroship_audit_unmask"
@@ -141,7 +141,7 @@ async fn read_audit_rows(backend: &SqliteBackend, app_id: &str) -> Vec<(String, 
 #[test]
 fn cold_unmask_open_comes_from_ensure_backend_not_the_fixture() {
     Host::test(|host| {
-        let schema = zeroship_data_sql::value!({
+        let schema = crate::value!({
             "id":  { "type": "string" },
             "ssn": {
                 "type": "string",
@@ -162,7 +162,7 @@ fn cold_unmask_open_comes_from_ensure_backend_not_the_fixture() {
                 app_id,
                 collection,
                 schema,
-                zeroship_data_sql::value!({}),
+                crate::value!({}),
             );
             assert_cold_open_installs_a_fresh_backend(host, fixture.as_ref()).await;
         });
@@ -179,7 +179,7 @@ fn cold_unmask_open_comes_from_ensure_backend_not_the_fixture() {
 fn cold_unmask_with_auto_actor_attaches_before_read() {
     Host::test(|host| {
         let _keys = host.supply_project_key(&["app_unmask_auto"], &"a".repeat(64));
-        let schema = zeroship_data_sql::value!({
+        let schema = crate::value!({
             "id": { "type": "string" },
             "ssn": {
                 "type": "string",
@@ -217,10 +217,10 @@ fn cold_unmask_with_auto_actor_attaches_before_read() {
 
             // Encrypt + insert one row inline.
             use zeroship_data_orm::protection::encryption_pass::encrypt_row_on_write;
-            use zeroship_data_sql::compile::{SqlDialect, build_insert_with_dialect};
+            use crate::sql::compile::{SqlDialect, build_insert_with_dialect};
             let row_pk = "usr_auto_01";
             let plaintext = "123-45-6789";
-            let mut doc = zeroship_data_sql::value!({
+            let mut doc = crate::value!({
                 "id": row_pk,
                 "ssn": plaintext,
             });
@@ -244,10 +244,10 @@ fn cold_unmask_with_auto_actor_attaches_before_read() {
             {
                 let obj = doc.as_object_mut().expect("doc object");
                 obj.insert(raw_ssn.clone(), ciphertext);
-                obj.insert("ssn".to_string(), zeroship_data_sql::value!("***-**-6789"));
+                obj.insert("ssn".to_string(), crate::value!("***-**-6789"));
             }
             let bq = build_insert_with_dialect(
-                &zeroship_data_sql::SchemaName::new(app_id).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(app_id).expect("fixture schema name"),
                 collection,
                 &schema,
                 &doc,
@@ -275,7 +275,7 @@ fn cold_unmask_with_auto_actor_attaches_before_read() {
                 app_id,
                 collection,
                 schema.clone(),
-                zeroship_data_sql::value!({}),
+                crate::value!({}),
             );
             let _cold_keys = host.supply_project_key(&["app_unmask_auto"], &"a".repeat(64));
 
@@ -284,7 +284,7 @@ fn cold_unmask_with_auto_actor_attaches_before_read() {
                 collection: collection.to_string(),
                 row_pk: row_pk.to_string(),
                 column: "ssn".to_string(),
-                actor: Some(zeroship_data_sql::value!({ "kind": "auto", "id": null })),
+                actor: Some(crate::value!({ "kind": "auto", "id": null })),
                 reason: Some("integration test".to_string()),
                 rejected_claim: None,
             };
@@ -342,7 +342,7 @@ fn cold_unmask_with_auto_actor_attaches_before_read() {
 fn unmask_with_user_actor_returns_forbidden_audit_logged() {
     Host::test(|host| {
         let _keys = host.supply_project_key(&["app_unmask_user"], &"b".repeat(64));
-        let schema = zeroship_data_sql::value!({
+        let schema = crate::value!({
             "id": { "type": "string" },
             "ssn": {
                 "type": "string",
@@ -376,7 +376,7 @@ fn unmask_with_user_actor_returns_forbidden_audit_logged() {
                 collection: collection.to_string(),
                 row_pk: "usr_anywhere".to_string(),
                 column: "ssn".to_string(),
-                actor: Some(zeroship_data_sql::value!({ "kind": "user", "id": "usr_xyz" })),
+                actor: Some(crate::value!({ "kind": "user", "id": "usr_xyz" })),
                 reason: None,
                 rejected_claim: None,
             };
@@ -415,7 +415,7 @@ fn unmask_with_user_actor_returns_forbidden_audit_logged() {
 fn unmask_column_not_masked_returns_typed_error() {
     Host::test(|host| {
         // Schema declares `name` as a bare string — no mask block.
-        let schema = zeroship_data_sql::value!({
+        let schema = crate::value!({
             "id":   { "type": "string" },
             "name": { "type": "string" },
         });
@@ -428,7 +428,7 @@ fn unmask_column_not_masked_returns_typed_error() {
                 collection: collection.to_string(),
                 row_pk: "any_pk".to_string(),
                 column: "name".to_string(),
-                actor: Some(zeroship_data_sql::value!({ "kind": "auto" })),
+                actor: Some(crate::value!({ "kind": "auto" })),
                 reason: None,
                 rejected_claim: None,
             };
@@ -458,7 +458,7 @@ fn unmask_column_not_masked_returns_typed_error() {
 #[test]
 fn unmask_writes_audit_row_with_correct_classification() {
     Host::test(|host| {
-        let schema = zeroship_data_sql::value!({
+        let schema = crate::value!({
             "id":      { "type": "string" },
             "diag":    {
                 "type": "string",
@@ -478,7 +478,7 @@ fn unmask_writes_audit_row_with_correct_classification() {
                 collection: collection.to_string(),
                 row_pk: "pat_01".to_string(),
                 column: "diag".to_string(),
-                actor: Some(zeroship_data_sql::value!({ "kind": "user", "id": "doctor_x" })),
+                actor: Some(crate::value!({ "kind": "user", "id": "doctor_x" })),
                 reason: Some("chart review".to_string()),
                 rejected_claim: None,
             };
@@ -503,7 +503,7 @@ fn unmask_writes_audit_row_with_correct_classification() {
 
 /// The unmask SELECT names the raw column the DESCRIPTOR declares.
 ///
-/// The end-to-end half of the change `zeroship_data_sql::compile::declared_raw_column`
+/// The end-to-end half of the change `crate::sql::compile::declared_raw_column`
 /// carries. The unit tests in `zeroship-data-orm`'s `protection::mask_pass` bind the
 /// WRITE side - which column the plaintext is relocated INTO - in the engine's
 /// default-feature build. Nothing there rules on the READ, because the read is a
@@ -522,7 +522,7 @@ fn unmask_writes_audit_row_with_correct_classification() {
 fn unmask_reads_the_raw_column_the_descriptor_declares() {
     Host::test(|host| {
         let declared_raw = "__zs_raw2__ssn";
-        let schema = zeroship_data_sql::value!({
+        let schema = crate::value!({
             "id": { "type": "string" },
             "ssn": {
                 "type": "string",
@@ -566,7 +566,7 @@ fn unmask_reads_the_raw_column_the_descriptor_declares() {
                 collection: collection.to_string(),
                 row_pk: "per_01".to_string(),
                 column: "ssn".to_string(),
-                actor: Some(zeroship_data_sql::value!({ "kind": "auto", "id": null })),
+                actor: Some(crate::value!({ "kind": "auto", "id": null })),
                 reason: Some("integration test".to_string()),
                 rejected_claim: None,
             };
@@ -590,7 +590,7 @@ async fn policy_setup(
     host: &Host,
     app_id: &str,
     collection: &str,
-    schema: zeroship_data_sql::value::Value,
+    schema: crate::value::Value,
 ) -> (Rc<SqliteBackend>, tempfile::TempDir) {
     let (backend, dir) = unmask_setup_with_schema(host, app_id, collection, schema).await;
     host.clear_mask_policy_cache(app_id);
@@ -603,7 +603,7 @@ async fn policy_setup(
 fn unmask_with_user_role_in_policy_returns_plaintext() {
     Host::test(|host| {
         let _keys = host.supply_project_key(&["app_unmask_policy_grant"], &"c".repeat(64));
-        let schema = zeroship_data_sql::value!({
+        let schema = crate::value!({
             "id": { "type": "string" },
             "email": {
                 "type": "string",
@@ -618,7 +618,7 @@ fn unmask_with_user_role_in_policy_returns_plaintext() {
             let (backend, _dir) = policy_setup(host, app_id, collection, schema.clone()).await;
 
             // Define the policy: `user` can unmask `pii`.
-            let policy_v = zeroship_data_sql::value!({
+            let policy_v = crate::value!({
                 "user": ["public", "pii"],
             });
             mask_policy::install_mask_policy(&DbBinding::cold_start(app_id), policy_v)
@@ -645,10 +645,10 @@ fn unmask_with_user_role_in_policy_returns_plaintext() {
 
             // Encrypt + insert one row.
             use zeroship_data_orm::protection::encryption_pass::encrypt_row_on_write;
-            use zeroship_data_sql::compile::{SqlDialect, build_insert_with_dialect};
+            use crate::sql::compile::{SqlDialect, build_insert_with_dialect};
             let row_pk = "usr_grant_01";
             let plaintext = "alice@example.com";
-            let mut doc = zeroship_data_sql::value!({
+            let mut doc = crate::value!({
                 "id": row_pk,
                 "email": plaintext,
             });
@@ -674,11 +674,11 @@ fn unmask_with_user_role_in_policy_returns_plaintext() {
                 obj.insert(raw_email.clone(), ciphertext);
                 obj.insert(
                     "email".to_string(),
-                    zeroship_data_sql::value!("a****@example.com"),
+                    crate::value!("a****@example.com"),
                 );
             }
             let bq = build_insert_with_dialect(
-                &zeroship_data_sql::SchemaName::new(app_id).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(app_id).expect("fixture schema name"),
                 collection,
                 &schema,
                 &doc,
@@ -700,7 +700,7 @@ fn unmask_with_user_role_in_policy_returns_plaintext() {
                 collection: collection.to_string(),
                 row_pk: row_pk.to_string(),
                 column: "email".to_string(),
-                actor: Some(zeroship_data_sql::value!({ "kind": "user", "id": "usr_xyz" })),
+                actor: Some(crate::value!({ "kind": "user", "id": "usr_xyz" })),
                 reason: Some("user requested own data".to_string()),
                 rejected_claim: None,
             };
@@ -749,7 +749,7 @@ fn unmask_with_user_role_in_policy_returns_plaintext() {
 #[test]
 fn unmask_with_user_role_not_in_policy_denied() {
     Host::test(|host| {
-        let schema = zeroship_data_sql::value!({
+        let schema = crate::value!({
             "id": { "type": "string" },
             "ssn": {
                 "type": "string",
@@ -763,7 +763,7 @@ fn unmask_with_user_role_not_in_policy_denied() {
             let (backend, _dir) = policy_setup(host, app_id, collection, schema.clone()).await;
 
             // Policy: `user` can only unmask `public`.
-            let policy_v = zeroship_data_sql::value!({
+            let policy_v = crate::value!({
                 "user": ["public"],
             });
             mask_policy::install_mask_policy(&DbBinding::cold_start(app_id), policy_v)
@@ -773,7 +773,7 @@ fn unmask_with_user_role_not_in_policy_denied() {
                 collection: collection.to_string(),
                 row_pk: "usr_anywhere".to_string(),
                 column: "ssn".to_string(),
-                actor: Some(zeroship_data_sql::value!({ "kind": "user", "id": "usr_xyz" })),
+                actor: Some(crate::value!({ "kind": "user", "id": "usr_xyz" })),
                 reason: None,
                 rejected_claim: None,
             };
@@ -807,7 +807,7 @@ fn unmask_with_user_role_not_in_policy_denied() {
 #[test]
 fn unmask_default_deny_when_no_policy() {
     Host::test(|host| {
-        let schema = zeroship_data_sql::value!({
+        let schema = crate::value!({
             "id": { "type": "string" },
             "name": {
                 "type": "string",
@@ -825,7 +825,7 @@ fn unmask_default_deny_when_no_policy() {
                 collection: collection.to_string(),
                 row_pk: "usr_anywhere".to_string(),
                 column: "name".to_string(),
-                actor: Some(zeroship_data_sql::value!({ "kind": "user", "id": "usr_xyz" })),
+                actor: Some(crate::value!({ "kind": "user", "id": "usr_xyz" })),
                 reason: None,
                 rejected_claim: None,
             };
@@ -858,14 +858,14 @@ fn unmask_default_deny_when_no_policy() {
 #[test]
 fn unmask_invalid_classification_rejected_at_dispatch_time() {
     Host::test(|host| {
-        let schema = zeroship_data_sql::value!({ "id": { "type": "string" } });
+        let schema = crate::value!({ "id": { "type": "string" } });
         let app_id = "app_unmask_invalid_classification";
         let collection = "users";
 
         host.run(async {
             let (_backend, _dir) = policy_setup(host, app_id, collection, schema).await;
 
-            let bad_policy = zeroship_data_sql::value!({
+            let bad_policy = crate::value!({
                 "admin": ["public", "badclass"],
             });
             let err = mask_policy::install_mask_policy(&DbBinding::cold_start(app_id), bad_policy)
@@ -889,21 +889,21 @@ fn policy_cannot_change_after_startup() {
         let app_id = "app_unmask_policy_fixed";
         let collection = "items";
         host.run(async {
-            let (backend, dir) = policy_setup(host, app_id, collection, zeroship_data_sql::value!({
+            let (backend, dir) = policy_setup(host, app_id, collection, crate::value!({
             "id": { "type": "string" },
             "data": { "type": "string", "mask": { "kind": "full", "classification": "internal" } },
         })).await;
             let binding = DbBinding::cold_start(app_id);
             mask_policy::install_mask_policy(
                 &binding,
-                zeroship_data_sql::value!({ "support": ["public"] }),
+                crate::value!({ "support": ["public"] }),
             )
             .unwrap();
             let args = unmask::UnmaskFieldArgs {
                 collection: collection.to_string(),
                 row_pk: "any".to_string(),
                 column: "data".to_string(),
-                actor: Some(zeroship_data_sql::value!({ "kind": "support", "id": "sup_1" })),
+                actor: Some(crate::value!({ "kind": "support", "id": "sup_1" })),
                 reason: None,
                 rejected_claim: None,
             };
@@ -911,7 +911,7 @@ fn policy_cannot_change_after_startup() {
                 if attempt > 0 {
                     let error = mask_policy::install_mask_policy(
                         &binding,
-                        zeroship_data_sql::value!({ "support": ["internal"] }),
+                        crate::value!({ "support": ["internal"] }),
                     )
                     .unwrap_err();
                     assert!(matches!(
@@ -956,7 +956,7 @@ fn unmask_ignores_policy_sidecar_files() {
                 ),
                 ("app_sidecar_corrupt", "invalid JSON"),
             ] {
-                let (backend, dir) = policy_setup(host, app_id, "items", zeroship_data_sql::value!({
+                let (backend, dir) = policy_setup(host, app_id, "items", crate::value!({
                 "id": { "type": "string" },
                 "data": { "type": "string", "mask": { "kind": "full", "classification": "internal" } },
             })).await;
@@ -970,7 +970,7 @@ fn unmask_ignores_policy_sidecar_files() {
                         row_pk: "any".into(),
                         column: "data".into(),
                         actor: Some(
-                            zeroship_data_sql::value!({ "kind": "support", "id": "sup_1" }),
+                            crate::value!({ "kind": "support", "id": "sup_1" }),
                         ),
                         reason: None,
                         rejected_claim: None,
@@ -1045,7 +1045,7 @@ fn malformed_mask_sentinel_skipped_on_sqlite() {
 #[test]
 fn cold_bulk_unmask_open_comes_from_ensure_backend_not_the_fixture() {
     Host::test(|host| {
-        let schema = zeroship_data_sql::value!({
+        let schema = crate::value!({
             "id":    { "type": "string" },
             "email": {
                 "type": "string",
@@ -1063,7 +1063,7 @@ fn cold_bulk_unmask_open_comes_from_ensure_backend_not_the_fixture() {
             host.clear_mask_policy_cache(app_id);
             mask_policy::install_mask_policy(
                 &DbBinding::cold_start(app_id),
-                zeroship_data_sql::value!({ "user": ["pii"] }),
+                crate::value!({ "user": ["pii"] }),
             )
             .expect("set_mask_policy");
             configure_cold_sqlite_unmask_fixture(
@@ -1072,7 +1072,7 @@ fn cold_bulk_unmask_open_comes_from_ensure_backend_not_the_fixture() {
                 app_id,
                 collection,
                 schema,
-                zeroship_data_sql::value!({ "user": ["pii"] }),
+                crate::value!({ "user": ["pii"] }),
             );
             assert_cold_open_installs_a_fresh_backend(host, fixture.as_ref()).await;
         });
@@ -1088,7 +1088,7 @@ fn cold_bulk_unmask_open_comes_from_ensure_backend_not_the_fixture() {
 #[test]
 fn cold_bulk_unmask_attaches_before_read() {
     Host::test(|host| {
-        let schema = zeroship_data_sql::value!({
+        let schema = crate::value!({
             "id":    { "type": "string" },
             "email": {
                 "type": "string",
@@ -1140,7 +1140,7 @@ fn cold_bulk_unmask_attaches_before_read() {
             }
 
             // Policy: `user` can unmask pii AND spi.
-            let policy_v = zeroship_data_sql::value!({ "user": ["pii", "spi"] });
+            let policy_v = crate::value!({ "user": ["pii", "spi"] });
             mask_policy::install_mask_policy(&DbBinding::cold_start(app_id), policy_v.clone())
                 .expect("set_mask_policy");
 
@@ -1161,7 +1161,7 @@ fn cold_bulk_unmask_attaches_before_read() {
                         columns: vec!["email".into()],
                     },
                 ],
-                actor: Some(zeroship_data_sql::value!({ "kind": "user", "id": "actor_x" })),
+                actor: Some(crate::value!({ "kind": "user", "id": "actor_x" })),
                 reason: Some("ops dashboard".into()),
                 rejected_claim: None,
             };
@@ -1176,18 +1176,18 @@ fn cold_bulk_unmask_attaches_before_read() {
             let u1 = result.results.get("u1").expect("u1 row");
             assert_eq!(
                 u1.get("email")
-                    .and_then(zeroship_data_sql::value::Value::as_str),
+                    .and_then(crate::value::Value::as_str),
                 Some("alice@example.com")
             );
             assert_eq!(
                 u1.get("ssn")
-                    .and_then(zeroship_data_sql::value::Value::as_str),
+                    .and_then(crate::value::Value::as_str),
                 Some("123-45-6789")
             );
             let u2 = result.results.get("u2").expect("u2 row");
             assert_eq!(
                 u2.get("email")
-                    .and_then(zeroship_data_sql::value::Value::as_str),
+                    .and_then(crate::value::Value::as_str),
                 Some("bob@example.com")
             );
 
@@ -1225,7 +1225,7 @@ fn cold_bulk_unmask_attaches_before_read() {
 #[test]
 fn bulk_unmask_authorization_atomic_one_unauthorized_fails_all() {
     Host::test(|host| {
-        let schema = zeroship_data_sql::value!({
+        let schema = crate::value!({
             "id":    { "type": "string" },
             "email": {
                 "type": "string",
@@ -1257,7 +1257,7 @@ fn bulk_unmask_authorization_atomic_one_unauthorized_fails_all() {
                 .expect("CREATE TABLE");
 
             // Policy: `user` can ONLY unmask pii; spi is forbidden.
-            let policy_v = zeroship_data_sql::value!({ "user": ["pii"] });
+            let policy_v = crate::value!({ "user": ["pii"] });
             mask_policy::install_mask_policy(&DbBinding::cold_start(app_id), policy_v)
                 .expect("set_mask_policy");
 
@@ -1269,7 +1269,7 @@ fn bulk_unmask_authorization_atomic_one_unauthorized_fails_all() {
                     row_pk: "u1".into(),
                     columns: vec!["email".into(), "ssn".into()],
                 }],
-                actor: Some(zeroship_data_sql::value!({ "kind": "user", "id": "actor_x" })),
+                actor: Some(crate::value!({ "kind": "user", "id": "actor_x" })),
                 reason: None,
                 rejected_claim: None,
             };
@@ -1304,7 +1304,7 @@ fn bulk_unmask_authorization_atomic_one_unauthorized_fails_all() {
 #[test]
 fn bulk_unmask_unknown_column_returns_typed_error_e2e() {
     Host::test(|host| {
-        let schema = zeroship_data_sql::value!({
+        let schema = crate::value!({
             "id":  { "type": "string" },
             "ssn": {
                 "type": "string",
@@ -1323,7 +1323,7 @@ fn bulk_unmask_unknown_column_returns_typed_error_e2e() {
                     row_pk: "u1".into(),
                     columns: vec!["does_not_exist".into()],
                 }],
-                actor: Some(zeroship_data_sql::value!({ "kind": "auto" })),
+                actor: Some(crate::value!({ "kind": "auto" })),
                 reason: None,
                 rejected_claim: None,
             };
@@ -1356,7 +1356,7 @@ fn bulk_unmask_unknown_column_returns_typed_error_e2e() {
 #[test]
 fn cold_query_unmask_hint_open_comes_from_ensure_backend_not_the_fixture() {
     Host::test(|host| {
-        let schema = zeroship_data_sql::value!({
+        let schema = crate::value!({
             "id":  { "type": "string" },
             "ssn": {
                 "type": "string",
@@ -1374,7 +1374,7 @@ fn cold_query_unmask_hint_open_comes_from_ensure_backend_not_the_fixture() {
             host.clear_mask_policy_cache(app_id);
             mask_policy::install_mask_policy(
                 &DbBinding::cold_start(app_id),
-                zeroship_data_sql::value!({ "user": ["spi"] }),
+                crate::value!({ "user": ["spi"] }),
             )
             .expect("set_mask_policy");
             configure_cold_sqlite_unmask_fixture(
@@ -1383,7 +1383,7 @@ fn cold_query_unmask_hint_open_comes_from_ensure_backend_not_the_fixture() {
                 app_id,
                 collection,
                 schema,
-                zeroship_data_sql::value!({ "user": ["spi"] }),
+                crate::value!({ "user": ["spi"] }),
             );
             assert_cold_open_installs_a_fresh_backend(host, fixture.as_ref()).await;
         });
@@ -1399,7 +1399,7 @@ fn cold_query_unmask_hint_open_comes_from_ensure_backend_not_the_fixture() {
 #[test]
 fn cold_query_unmask_hint_attaches_before_read() {
     Host::test(|host| {
-        let schema = zeroship_data_sql::value!({
+        let schema = crate::value!({
             "id":    { "type": "string" },
             "email": {
                 "type": "string",
@@ -1451,7 +1451,7 @@ fn cold_query_unmask_hint_attaches_before_read() {
                 .expect("INSERT");
 
             // Policy: `user` can unmask both pii and spi.
-            let policy_v = zeroship_data_sql::value!({ "user": ["pii", "spi"] });
+            let policy_v = crate::value!({ "user": ["pii", "spi"] });
             mask_policy::install_mask_policy(&DbBinding::cold_start(app_id), policy_v.clone())
                 .expect("set_mask_policy");
 
@@ -1465,7 +1465,7 @@ fn cold_query_unmask_hint_attaches_before_read() {
             // columns. We're driving `dispatch_unmask_for_query` directly
             // since the full V8 round-trip is out of scope for this
             // integration test.
-            let actor = Some(zeroship_data_sql::value!({ "kind": "user", "id": "actor_x" }));
+            let actor = Some(crate::value!({ "kind": "user", "id": "actor_x" }));
             let reason = Some("dashboard view".to_string());
 
             // Step 1 — upfront auth fence.
@@ -1482,7 +1482,7 @@ fn cold_query_unmask_hint_attaches_before_read() {
             .expect("authorize_query_hint must succeed");
 
             // Step 2 — simulate post-wrap row + run unmask-for-query.
-            let mut rows = vec![zeroship_data_sql::value!({
+            let mut rows = vec![crate::value!({
                 "id": "u1",
                 "email": {
                     "sentinel": "__zsmask__",
@@ -1569,7 +1569,7 @@ fn cold_query_unmask_hint_attaches_before_read() {
 #[test]
 fn per_query_unmask_hint_rejects_unauthorized_actor() {
     Host::test(|host| {
-        let schema = zeroship_data_sql::value!({
+        let schema = crate::value!({
             "id":  { "type": "string" },
             "ssn": {
                 "type": "string",
@@ -1583,11 +1583,11 @@ fn per_query_unmask_hint_rejects_unauthorized_actor() {
             let (backend, _dir) = unmask_setup_with_schema(host, app_id, collection, schema).await;
             host.clear_mask_policy_cache(app_id);
             // Policy: `user` can only unmask `pii`, NOT `spi`.
-            let policy_v = zeroship_data_sql::value!({ "user": ["pii"] });
+            let policy_v = crate::value!({ "user": ["pii"] });
             mask_policy::install_mask_policy(&DbBinding::cold_start(app_id), policy_v)
                 .expect("set_mask_policy");
 
-            let actor = Some(zeroship_data_sql::value!({ "kind": "user", "id": "actor_x" }));
+            let actor = Some(crate::value!({ "kind": "user", "id": "actor_x" }));
             let err = authorize_query_hint(
                 &unmask_backend(host).await,
                 &DbBinding::cold_start(app_id),
@@ -1619,7 +1619,7 @@ fn per_query_unmask_hint_rejects_unauthorized_actor() {
 #[test]
 fn per_query_unmask_hint_unknown_column_returns_typed_error() {
     Host::test(|host| {
-        let schema = zeroship_data_sql::value!({
+        let schema = crate::value!({
             "id":  { "type": "string" },
             "ssn": {
                 "type": "string",
@@ -1632,7 +1632,7 @@ fn per_query_unmask_hint_unknown_column_returns_typed_error() {
         host.run(async {
             let (_backend, _dir) = unmask_setup_with_schema(host, app_id, collection, schema).await;
             host.clear_mask_policy_cache(app_id);
-            let actor = Some(zeroship_data_sql::value!({ "kind": "auto" }));
+            let actor = Some(crate::value!({ "kind": "auto" }));
             let err = authorize_query_hint(
                 &unmask_backend(host).await,
                 &DbBinding::cold_start(app_id),

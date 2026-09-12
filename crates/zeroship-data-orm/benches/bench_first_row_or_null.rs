@@ -210,9 +210,9 @@ criterion_main!(benches);
 
 fn first_row_or_null_for_bench(
     rows: &[Row],
-) -> Result<zeroship_data_sql::value::Value, error::DbError> {
+) -> Result<zeroship_data_orm::value::Value, error::DbError> {
     rows.first()
         .map(pg_row_json::row_to_value)
         .transpose()
-        .map(|row| row.unwrap_or(zeroship_data_sql::value::Value::Null))
+        .map(|row| row.unwrap_or(zeroship_data_orm::value::Value::Null))
 }

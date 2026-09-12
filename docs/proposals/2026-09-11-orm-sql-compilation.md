@@ -1,6 +1,6 @@
 # Shared ORM SQL compilation
 
-**Status: Crate consolidation accepted and implementation in progress. The shared compiler redesign remains proposed.**
+**Status: Crate consolidation implemented; full validation in progress. The shared compiler redesign remains proposed.**
 
 Consolidate runtime SQL construction around a shared statement representation,
 dialect compilation, and ORM-owned execution strategies. Rust and TypeScript
@@ -28,11 +28,11 @@ These are observations of the current code, not descriptions of the proposal:
 
 | Current path | Consequence |
 | --- | --- |
-| [Runtime CRUD compilation](../../crates/zeroship-data-sql/src/compile.rs) constructs statements from native records. [Typed plan rendering](../../crates/zeroship-data-sql/src/render/postgres.rs) separately renders reads and writes. | Expressions, statement construction, and compiler guarantees have overlapping implementations. |
-| [Rust filters](../../crates/zeroship-data-orm/src/orm/model.rs) first become dynamic native records; [filter decoding](../../crates/zeroship-data-sql/src/filter.rs) subsequently constructs predicates. | Rust pays for an intermediate filter vocabulary even when the input was typed. This is allocation and conversion, not JSON text serialization. |
+| [Runtime CRUD compilation](../../crates/zeroship-data-orm/src/sql/compile.rs) constructs statements from native records. [Typed plan rendering](../../crates/zeroship-data-orm/src/sql/render/postgres.rs) separately renders reads and writes. | Expressions, statement construction, and compiler guarantees have overlapping implementations. |
+| [Rust filters](../../crates/zeroship-data-orm/src/orm/model.rs) first become dynamic native records; [filter decoding](../../crates/zeroship-data-orm/src/sql/filter.rs) subsequently constructs predicates. | Rust pays for an intermediate filter vocabulary even when the input was typed. This is allocation and conversion, not JSON text serialization. |
 | `build_upsert_with_assignments` accepts `SqlDialect::Mysql` but emits `ON CONFLICT` and `RETURNING` unconditionally. | The runtime compiler exposes an incomplete dialect contract. There is no MySQL runtime adapter. |
-| Ordinary find compilation interpolates validated pagination values; [relational compilation](../../crates/zeroship-data-sql/src/compile/read.rs) binds them. | Statement shape varies differently between paths. |
-| [Determinism tests](../../crates/zeroship-data-sql/tests/determinism.rs) exercise the standalone renderer. | They do not establish the same property for runtime CRUD compilation. |
+| Ordinary find compilation interpolates validated pagination values; [relational compilation](../../crates/zeroship-data-orm/src/sql/compile/read.rs) binds them. | Statement shape varies differently between paths. |
+| [Determinism tests](../../crates/zeroship-data-orm/tests/sql/determinism.rs) exercise the standalone renderer. | They do not establish the same property for runtime CRUD compilation. |
 
 Keep the existing strengths: native parameters, validated identifiers, mandatory
 database tests, source-aware projections, and the encrypted-upsert identity guard.

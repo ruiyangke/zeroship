@@ -21,7 +21,7 @@ use zeroship_data_orm::error::DbError;
 // Private imports used to compose ORM operations with isolate state.
 use zeroship_data_orm::cdc::{broker, read_set};
 use zeroship_data_orm::{backend, descriptor, metrics, transaction, tx_route};
-use zeroship_data_sql::compile;
+use zeroship_data_orm::sql::compile;
 
 pub(crate) mod context;
 pub mod op_error;
@@ -126,7 +126,7 @@ impl NativePlugin for DbPlugin {
 
 fn descriptor_schemas(
     descriptor: Option<&serde_json::Value>,
-) -> Result<Vec<(String, zeroship_data_sql::value::Value)>, String> {
+) -> Result<Vec<(String, zeroship_data_orm::value::Value)>, String> {
     let Some(descriptor) = descriptor else {
         return Ok(Vec::new());
     };
@@ -146,7 +146,7 @@ fn descriptor_schemas(
                 })?;
             Ok((
                 name.clone(),
-                zeroship_data_sql::value::to_value(fields).map_err(|e| e.to_string())?,
+                zeroship_data_orm::value::to_value(fields).map_err(|e| e.to_string())?,
             ))
         })
         .collect()
@@ -157,7 +157,7 @@ mod runtime_descriptor_binding_tests {
     use std::cell::RefCell;
     use std::collections::HashMap;
 
-    use zeroship_data_sql::value;
+    use zeroship_data_orm::value;
     use zeroship_runtime::{RuntimeState, SharedState, init_v8};
 
     use super::*;
@@ -225,7 +225,7 @@ mod runtime_descriptor_binding_tests {
         let binding = zeroship_data_orm::binding::DbBinding::new(
             APP,
             DEPLOY,
-            zeroship_data_sql::SchemaName::new(APP).unwrap(),
+            zeroship_data_orm::sql::SchemaName::new(APP).unwrap(),
         );
         let schema = descriptor::collection_schema(&binding, "users")
             .expect("declared collection must resolve before any read");
@@ -283,7 +283,7 @@ mod runtime_descriptor_binding_tests {
         let binding = zeroship_data_orm::binding::DbBinding::new(
             APP,
             DEPLOY,
-            zeroship_data_sql::SchemaName::new(APP).unwrap(),
+            zeroship_data_orm::sql::SchemaName::new(APP).unwrap(),
         );
         let error = descriptor::collection_schema(&binding, "stale")
             .expect_err("schema-less binding must declare no collection");

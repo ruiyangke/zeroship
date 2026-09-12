@@ -12,9 +12,9 @@ use compio_postgres::Pool;
 
 use zeroship_data_orm::binding::DbBinding;
 
-use zeroship_data_sql::value::value;
+use crate::value::value;
 
-use zeroship_data_sql::compile::*;
+use crate::sql::compile::*;
 
 use zeroship_data_orm::encryption;
 
@@ -68,7 +68,7 @@ fn unmask_fetch_runs_under_per_app_role_via_rls() {
             // cannot drift from the runtime's DDL shape: `ssn` gets the bare-TEXT mask
             // column and `__zs_raw__ssn` gets the declared type for the real value.
             let create_table = fixture_table_sql(
-                &zeroship_data_sql::SchemaName::new(app).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(app).expect("fixture schema name"),
                 coll,
                 &schema,
                 &FkEmission::Inline,
@@ -205,7 +205,7 @@ fn unmask_encrypted_column_on_pg_reads_bytea_raw_sibling() {
             // is BYTEA, which is the whole point of this test - so build the DDL rather
             // than hand-spelling it, or the fixture proves nothing about the runtime.
             let create_table = fixture_table_sql(
-                &zeroship_data_sql::SchemaName::new(app).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(app).expect("fixture schema name"),
                 coll,
                 &schema,
                 &FkEmission::Inline,
@@ -333,7 +333,7 @@ fn unmask_audit_insert_runs_under_the_per_app_role_not_the_login_role() {
             // cannot drift from the runtime's DDL shape: `ssn` gets the bare-TEXT mask
             // column and `__zs_raw__ssn` gets the declared type for the real value.
             let create_table = fixture_table_sql(
-                &zeroship_data_sql::SchemaName::new(app).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(app).expect("fixture schema name"),
                 coll,
                 &schema,
                 &FkEmission::Inline,
@@ -487,7 +487,7 @@ fn pg_declared_mask_policy_authorizes_unmask_without_durable_store() {
             // cannot drift from the runtime's DDL shape: `ssn` gets the bare-TEXT mask
             // column and `__zs_raw__ssn` gets the declared type for the real value.
             let create_table = fixture_table_sql(
-                &zeroship_data_sql::SchemaName::new(app).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(app).expect("fixture schema name"),
                 coll,
                 &schema,
                 &FkEmission::Inline,

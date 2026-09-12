@@ -615,7 +615,7 @@ measurements under it were wrong, and each was wrong in a different way.
 
 **Evidence, and the corrected forms.**
 
-1. **"34 `RETURNING *` sites in `crates/zeroship-schema/src/query.rs`."** That is (DELETED; runtime compilation now lives in `crates/zeroship-data-sql/src/compile.rs`, and migration DDL in `crates/zeroship-migrate-core/src/schema/query.rs`.)
+1. **"34 `RETURNING *` sites in `crates/zeroship-schema/src/query.rs`."** That is (DELETED; runtime compilation now lives in `crates/zeroship-data-orm/src/sql/compile.rs`, and migration DDL in `crates/zeroship-migrate-core/src/schema/query.rs`.)
    the raw `grep -c`. **The corrected derivation, with its boundaries, is stated
    once - in the design, section 6** - and deliberately not repeated here, since
    one fact fully stated in two documents is the failure class collected at the
@@ -664,7 +664,7 @@ measurements under it were wrong, and each was wrong in a different way.
 
    **The same defect IS production on PostgreSQL, and the note did not mention
    it.** `read_live_schema` filters on the suffix at
-   `crates/zeroship-schema/src/diff.rs:671` - (DELETED; runtime compilation now lives in `crates/zeroship-data-sql/src/compile.rs`, and migration DDL in `crates/zeroship-migrate-core/src/schema/query.rs`.)
+   `crates/zeroship-schema/src/diff.rs:671` - (DELETED; runtime compilation now lives in `crates/zeroship-data-orm/src/sql/compile.rs`, and migration DDL in `crates/zeroship-migrate-core/src/schema/query.rs`.)
    `if comment.starts_with("__zsmask:") && column.ends_with("_masked")` - and
    strips it at `:716`. A `__zsmask:` sentinel on a column not ending `_masked`
    falls through both `if`s and is discarded with no warning, while the
@@ -1301,7 +1301,7 @@ key_version)`. There is no key table and no getter, so the constraint is moot.
 separation more tightly than per-column keys ever did, that `SECURITY DEFINER`
 is a query-time boundary against a bytes-at-rest threat, and that `key_id`
 defaults to the literal `"default"` in both producers
-(`crates/zeroship-schema/src/query.rs:2295`, `diff.rs:1636`) so per-column (DELETED; runtime compilation now lives in `crates/zeroship-data-sql/src/compile.rs`, and migration DDL in `crates/zeroship-migrate-core/src/schema/query.rs`.)
+(`crates/zeroship-schema/src/query.rs:2295`, `diff.rs:1636`) so per-column (DELETED; runtime compilation now lives in `crates/zeroship-data-orm/src/sql/compile.rs`, and migration DDL in `crates/zeroship-migrate-core/src/schema/query.rs`.)
 keying was already nominal - is in the design under "Key custody", because it is
 current rather than historical.
 
@@ -1452,7 +1452,7 @@ cached **only that slice**
 `WHERE n.nspname = $1`, no table predicate - over `pg_attribute` joined to
 `pg_class` and `pg_namespace`, `LEFT JOIN`ed to `pg_attrdef` and
 `pg_description`, with a correlated subquery over `pg_depend`/`pg_proc` per
-column (`crates/zeroship-schema/src/diff.rs:606-640`). An app with N collections (DELETED; runtime compilation now lives in `crates/zeroship-data-sql/src/compile.rs`, and migration DDL in `crates/zeroship-migrate-core/src/schema/query.rs`.)
+column (`crates/zeroship-schema/src/diff.rs:606-640`). An app with N collections (DELETED; runtime compilation now lives in `crates/zeroship-data-orm/src/sql/compile.rs`, and migration DDL in `crates/zeroship-migrate-core/src/schema/query.rs`.)
 paid **N whole-schema catalog reads** where one would populate all N. *(This is
 the cost that dominates at millions of apps, because the long tail is
 rarely-hit apps, so a large fraction of requests are cold starts - and it is
@@ -1879,7 +1879,7 @@ known item".
 The reachability of the third is in the design under step 5c, because it is
 current: `db.collection(name)` mints a collection for any non-empty string
 (`v8_classes/db.rs:119-139`) and `schema = None` yields `SELECT *`
-(`crates/zeroship-schema/src/query.rs:3000-3012`). (DELETED; runtime compilation now lives in `crates/zeroship-data-sql/src/compile.rs`, and migration DDL in `crates/zeroship-migrate-core/src/schema/query.rs`.)
+(`crates/zeroship-schema/src/query.rs:3000-3012`). (DELETED; runtime compilation now lives in `crates/zeroship-data-orm/src/sql/compile.rs`, and migration DDL in `crates/zeroship-migrate-core/src/schema/query.rs`.)
 
 ### The command-tag obligation, and where it was being dropped
 
@@ -1903,7 +1903,7 @@ are invisible at the call site.)*
 
 **True.** Neither is supportable, and what is measurable was stated instead:
 `read_live_schema` and `estimate_row_count`
-(`crates/zeroship-schema/src/lib.rs:22-23`) lost their only consumer; the other (DELETED; runtime compilation now lives in `crates/zeroship-data-sql/src/compile.rs`, and migration DDL in `crates/zeroship-migrate-core/src/schema/query.rs`.)
+(`crates/zeroship-schema/src/lib.rs:22-23`) lost their only consumer; the other (DELETED; runtime compilation now lives in `crates/zeroship-data-orm/src/sql/compile.rs`, and migration DDL in `crates/zeroship-migrate-core/src/schema/query.rs`.)
 five modules still have plugin-db callers nobody has audited. **The crate is
 15,034 lines across 7 modules** and this document set does not claim it is
 retired.

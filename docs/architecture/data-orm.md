@@ -16,7 +16,7 @@ Rust models                         Worker TypeScript
                         |
              CRUD + protection + search
                         |
-                zeroship-data-sql
+                data-orm::sql
                 SQL + native parameters
                         |
                 ScopedExecutor
@@ -39,8 +39,7 @@ Host Backend = scoped executor + catalog + protection + search
 
 | Crate | Responsibility |
 | --- | --- |
-| `zeroship-data-orm` | Public database API, model codecs, protection, transaction protocol, runtime state, driver contracts, and built-in backend adapters. |
-| `zeroship-data-sql` | Native values and records, identifiers, runtime schema metadata, query plans, predicates, and SQL compilation. Its normal dependencies contain no database driver or runtime. |
+| `zeroship-data-orm` | Public database API, native values, model codecs, SQL compilation, protection, transaction protocol, runtime state, driver contracts, and built-in backend adapters. |
 | `zeroship-data-macros` | Migration-derived collection metadata and Rust model derives. It performs no database I/O. |
 | `zeroship-data-v8` | V8 capture and result encoding, isolate composition, and worker lifecycle integration. |
 
@@ -48,6 +47,8 @@ Host Backend = scoped executor + catalog + protection + search
 crates/
   zeroship-data-orm/
     src/orm/                 Rust models and codecs
+    src/value.rs             native values shared with drivers and V8
+    src/sql/                 query grammar, storage codecs, SQL compilation
     src/connection/          backend factories and shared local initialization
     src/driver.rs            physical acquisition and session contracts
     src/executor.rs          scoped execution contract
@@ -58,7 +59,6 @@ crates/
     src/backend/sqlite/      SQLite adapter
     src/crud/                CRUD orchestration and read/write pipelines
     src/transaction/         shared transaction protocol
-  zeroship-data-sql/          plans, native values, SQL dialects
   zeroship-data-macros/       schema and mapping derives
   zeroship-data-v8/           V8 adapter
 libs/
@@ -67,6 +67,11 @@ libs/
 
 PostgreSQL and SQLite implementations live under the ORM’s `backend` module.
 `compio-postgres` is a standalone library with no dependency on the ORM.
+
+The SQL module does no database I/O and receives no application policy or keys.
+Native values live in `zeroship_data_orm::value`. The physical schema identity
+is `zeroship_core::schema_name::SchemaName`; migration services share that type
+without depending on ORM execution. SQL consumers own identifier quoting.
 
 Migration services and the CDC relay retain their process boundaries. The ORM
 registration contract grants no DDL, backup, replication, or provisioning power.
@@ -198,7 +203,7 @@ captures the transaction route and records collection read dependencies before
 execution yields. Field types and access flags come from the descriptor;
 column names do not select a codec.
 
-The SQL crate renders qualified expressions and native parameters for PostgreSQL
+The SQL module renders qualified expressions and native parameters for PostgreSQL
 and SQLite. The ORM restores each projected row's source identity before the
 protection and codec passes. An unmatched optional row becomes `None` in Rust
 and `null` in TypeScript, including when the selected fields are nullable.
@@ -300,9 +305,9 @@ as a complete element; `$pull` removes every structurally equal element;
 `$addToSet` appends only when no equal element exists. Objects compare without
 key order, arrays retain order, and numbers compare by exact decimal value.
 JSON null is an element when used as an operand; null columns remain null.
-The dialect renderer lives in `zeroship-data-sql`.
+The dialect renderer lives in `zeroship_data_orm::sql`.
 
-The SQL crate also owns the shared update grammar. It validates assignments
+The SQL module also owns the shared update grammar. It validates assignments
 before system-field and protection transforms, rejecting conflicting writes and
 nonnumeric arithmetic operands. Normalization moves literal values under `$set`
 so every assigned field passes through the same encryption and masking path.
@@ -313,7 +318,7 @@ document operators or overwriting colliding assignments.
 
 PostgreSQL uses native JSONB equality. SQLite connection setup registers the
 deterministic `zeroship_json_equal` SQL function on ordinary and transaction
-connections, including replacements after recovery. It uses the SQL crate's
+connections, including replacements after recovery. It uses the SQL module's
 `json::comparison_key` and caches the bound operand during an element scan.
 This helper receives only JSON text and knows no schema, policy, or application.
 A custom SQLite backend using this renderer must install the same function;
@@ -384,7 +389,7 @@ Adding another SQL language extends the SQL compiler; it does not require
 rewriting application models or shared transaction policy.
 
 Portable behavior is established by tests, including native types, null/default
-handling, projections, commits, rollback, and nested callbacks. SQLite vector SQL is compiled in `zeroship-data-sql` with a native byte
+handling, projections, commits, rollback, and nested callbacks. SQLite vector SQL is compiled in `zeroship_data_orm::sql` with a native byte
 parameter. Search strategies
 retain their documented differences in `docs/reference/sqlite-divergences.md`.
 Database versions and installed extensions can make a requested feature
@@ -431,7 +436,7 @@ transaction API.
 
 ## Physical representations
 
-`zeroship-data-sql::codecs` owns schema-aware boolean lowering, SQLite vector
+`zeroship_data_orm::sql::codecs` owns schema-aware boolean lowering, SQLite vector
 and geography encoding, and normalization of native result values. The shared
 CRUD pipeline invokes these conversions at the appropriate points around
 protection transforms without choosing a concrete backend. Namespace selection

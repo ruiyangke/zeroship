@@ -1,6 +1,6 @@
 //! SQLite vector capability validation; SQL compilation lives in data-sql.
 use zeroship_data_orm::error::DbError;
-use zeroship_data_sql::descriptors::VectorMetric;
+use crate::sql::descriptors::VectorMetric;
 
 /// Reject [`VectorMetric::InnerProduct`] with a typed `DbError` on
 /// SQLite. The PG arm continues to support all three metrics via
@@ -24,7 +24,7 @@ pub(crate) fn reject_inner_product(metric: VectorMetric) -> Result<(), DbError> 
 }
 
 #[cfg(test)]
-use zeroship_data_sql::sqlite_values::vec_to_le_bytes;
+use crate::sql::sqlite_values::vec_to_le_bytes;
 
 #[cfg(test)]
 mod tests {

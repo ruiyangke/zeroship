@@ -20,7 +20,7 @@
 //!
 //! [`schema`]: DbBinding::schema
 
-use zeroship_data_sql::SchemaName;
+use crate::sql::SchemaName;
 
 /// Deploy token used when a host does not inject `ZEROSHIP_DEPLOY_ID` (local
 /// dev, raw-JS deploys, and narrow test harnesses).

@@ -5,16 +5,16 @@
 //! for ordinary queries and search, then applies result protection and decoding.
 //! V8 promise creation and delivery belong to the adapter.
 
-use zeroship_data_sql::value::Value;
+use crate::value::Value;
 
 use crate::assignments::AssignmentPlan;
-use crate::compile;
+use crate::sql::compile;
 use crate::exec::{exec_mutation_count_with_emit, exec_mutation_with_emit, exec_query};
 use crate::tx_route::TxRoute;
 use zeroship_data_orm::binding::DbBinding;
 use zeroship_data_orm::error::DbError;
-use zeroship_data_sql::codecs::{lower_document, lower_documents, lower_filter, lower_update};
-use zeroship_data_sql::lifecycle::{concurrency_column, soft_delete_column};
+use crate::sql::codecs::{lower_document, lower_documents, lower_filter, lower_update};
+use crate::sql::lifecycle::{concurrency_column, soft_delete_column};
 
 use crate::protection::{mask_pass, protection_floor, unmask};
 
@@ -541,7 +541,7 @@ pub async fn run_update_one(
     }
 
     update_validation::validate(&schema, &update)?;
-    zeroship_data_sql::codecs::prepare_update(&schema, &mut update)?;
+    crate::sql::codecs::prepare_update(&schema, &mut update)?;
     let per_row_encrypted_update =
         write_pipeline::update_requires_per_row_encryption(&schema, &update);
     let target_row = if per_row_encrypted_update {
@@ -585,7 +585,7 @@ pub async fn run_update_one(
     .await?;
     lower_update(route.dialect(), &schema, &mut update);
     let sql_filter = if let Some(target_row) = target_row {
-        let mut sql_filter = zeroship_data_sql::value!({ "id": target_row.id_value });
+        let mut sql_filter = crate::value!({ "id": target_row.id_value });
         if let Some(expected_version) = cas_version {
             sql_filter[concurrency_column(&schema)?.expect("CAS column")] =
                 Value::from(expected_version);
@@ -685,7 +685,7 @@ pub async fn run_update_many(
     }
 
     update_validation::validate(&schema, &update)?;
-    zeroship_data_sql::codecs::prepare_update(&schema, &mut update)?;
+    crate::sql::codecs::prepare_update(&schema, &mut update)?;
     let per_row_encrypted_update =
         write_pipeline::update_requires_per_row_encryption(&schema, &update);
     // No `skip_*` knob is set: the pass stripped every column the
@@ -756,7 +756,7 @@ pub async fn run_update_many(
                 )
                 .await?;
                 lower_update(dialect, &schema, &mut row_update);
-                let mut row_filter = zeroship_data_sql::value!({ "id": row_id });
+                let mut row_filter = crate::value!({ "id": row_id });
                 if let Some(expected_version) = cas_version {
                     row_filter[concurrency_column(&schema)?.expect("CAS column")] =
                         Value::from(expected_version);
@@ -1063,7 +1063,7 @@ pub fn plan_aggregate(
             .and_then(|stages| stages.first())
             .and_then(|stage| stage.get("$match"))
             .cloned()
-            .unwrap_or_else(|| Value::Object(zeroship_data_sql::value::Map::new()));
+            .unwrap_or_else(|| Value::Object(crate::value::Map::new()));
         record_read_set(binding, collection, &captured_filter);
     }
 
@@ -1377,7 +1377,7 @@ pub fn plan_search(
     let mut filter = args
         .get("filter")
         .cloned()
-        .unwrap_or_else(|| Value::Object(zeroship_data_sql::value::Map::new()));
+        .unwrap_or_else(|| Value::Object(crate::value::Map::new()));
     // The backend arms resolve the same entry for their projection; this one is
     // for the SQLite boolean lowering of the caller's filter.
     //
@@ -1522,7 +1522,7 @@ pub fn plan_near(
     let mut filter = args
         .get("filter")
         .cloned()
-        .unwrap_or_else(|| Value::Object(zeroship_data_sql::value::Map::new()));
+        .unwrap_or_else(|| Value::Object(crate::value::Map::new()));
 
     // Same as `plan_search`: the backend arm resolves the entry again for its
     // own projection; this one lowers the caller's filter, and `dialect` is a
@@ -1672,7 +1672,7 @@ async fn encryption_pass_dispatch(
 fn schema_has_encrypted_columns(schema: &Value) -> bool {
     schema
         .as_object()
-        .is_some_and(|o| o.values().any(zeroship_data_sql::descriptors::is_encrypted))
+        .is_some_and(|o| o.values().any(crate::sql::descriptors::is_encrypted))
 }
 
 /// Cheap walk: does any field def on `schema` carry a

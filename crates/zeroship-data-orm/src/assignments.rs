@@ -1,7 +1,7 @@
 //! Resolve lifecycle generators from a collection's immutable descriptor.
 
 use crate::error::DbError;
-use zeroship_data_sql::value::Value;
+use crate::value::Value;
 use zeroship_migrate_policy::{AssignmentEvent, AssignmentGenerator};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -18,7 +18,7 @@ pub struct AssignmentPlan {
 
 impl AssignmentPlan {
     /// Resolve the generators declared by one collection's immutable descriptor.
-    pub fn from_schema(schema: &zeroship_data_sql::value::Value) -> Result<Self, DbError> {
+    pub fn from_schema(schema: &crate::value::Value) -> Result<Self, DbError> {
         let mut columns = Vec::new();
         for (name, definition) in schema
             .as_object()
@@ -77,15 +77,13 @@ impl AssignmentPlan {
 
     pub fn write_assignments(
         &self,
-        schema: &zeroship_data_sql::value::Value,
+        schema: &crate::value::Value,
         actor: Option<&str>,
         deleting: bool,
         restoring: bool,
-    ) -> zeroship_data_sql::lifecycle::WriteAssignments {
-        use zeroship_data_sql::{
-            lifecycle::{AssignedValue, ColumnAssignment, WriteAssignments},
-            value::Value,
-        };
+    ) -> crate::sql::lifecycle::WriteAssignments {
+        use crate::value::Value;
+        use crate::sql::{lifecycle::{AssignedValue, ColumnAssignment, WriteAssignments}};
         let columns = self
             .columns
             .iter()

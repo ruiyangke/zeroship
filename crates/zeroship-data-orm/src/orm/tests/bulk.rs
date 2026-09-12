@@ -18,7 +18,7 @@ async fn bulk_counts(mut fixture: CollectionFixture) {
         .await;
     let db = fixture.database.clone();
     let entries = db.collection("entries").unwrap();
-    let total = crate::compile::MAX_QUERY_LIMIT + 17;
+    let total = crate::sql::compile::MAX_QUERY_LIMIT + 17;
     let documents: Vec<_> = (0..total)
         .map(|n| value!({"label":format!("entry-{n}"), "status":"new"}))
         .collect();
@@ -270,8 +270,8 @@ async fn postgres_bulk_counts_do_not_require_unrelated_column_reads() {
         .backend
         .get::<crate::backend::postgres::PostgresBackend>()
         .unwrap();
-    let table = format!("{}.\"entries\"", db.binding.schema().quoted());
-    let role = crate::compile::quote_ident(
+    let table = format!("{}.\"entries\"", crate::sql::compile::quote_ident(db.binding.schema().as_str()));
+    let role = crate::sql::compile::quote_ident(
         &zeroship_core::database_role::per_app_role_name(db.binding.schema().as_str()).unwrap(),
     );
     backend.pool().batch_execute(&format!(

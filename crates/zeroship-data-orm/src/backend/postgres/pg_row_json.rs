@@ -8,7 +8,7 @@ use compio_postgres::{
     Row,
     types::{FromSql, Kind, Type},
 };
-use zeroship_data_sql::value::{Map, Value};
+use crate::value::{Map, Value};
 
 pub fn rows_to_values(rows: &[Row]) -> Result<Vec<Value>, DbError> {
     rows.iter().map(row_to_value).collect()
@@ -82,7 +82,7 @@ fn decode_value(ty: &Type, bytes: &[u8]) -> Result<Value, String> {
                 return Err("infinite dates are unsupported".into());
             }
             days.checked_add(10957)
-                .and_then(zeroship_data_sql::temporal::format_calendar_date)
+                .and_then(crate::sql::temporal::format_calendar_date)
                 .map(Value::String)
                 .ok_or_else(|| "calendar date is outside the supported range".into())
         }
@@ -293,7 +293,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             decode_vector(&vector).unwrap(),
-            zeroship_data_sql::value!([1.0, -0.5])
+            crate::value!([1.0, -0.5])
         );
         for length in 0..vector.len() {
             assert!(decode_vector(&vector[..length]).is_err());
@@ -329,7 +329,7 @@ mod tests {
                 .collect::<Vec<_>>();
             assert_eq!(
                 decode_geography(&point).unwrap(),
-                zeroship_data_sql::value!({"lat":37.0, "lng":-122.0})
+                crate::value!({"lat":37.0, "lng":-122.0})
             );
             for length in 0..point.len() {
                 assert!(decode_geography(&point[..length]).is_err());

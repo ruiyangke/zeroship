@@ -1,5 +1,6 @@
 use super::fixtures::*;
-use zeroship_data_sql::{value, value::Value};
+use zeroship_data_orm::value;
+use zeroship_data_orm::value::Value;
 
 #[test]
 fn sdk_join_executes_through_v8_and_preserves_transaction_scope() {

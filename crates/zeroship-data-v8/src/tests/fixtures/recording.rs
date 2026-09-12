@@ -12,7 +12,8 @@ use zeroship_data_orm::{
     protection::{Catalog, Protection},
     search::{Search, SpatialSearch, VectorSearch},
 };
-use zeroship_data_sql::{SchemaName, catalog::LiveSchema, compile::SqlDialect, value::Value};
+use zeroship_data_orm::value::Value;
+use zeroship_data_orm::sql::{SchemaName, catalog::LiveSchema, compile::SqlDialect};
 
 thread_local! {
     static QUERIES: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };

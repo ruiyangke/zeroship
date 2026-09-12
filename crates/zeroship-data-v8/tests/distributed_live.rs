@@ -729,7 +729,7 @@ async fn slot_state(pool: &Pool, slot: &str) -> Result<Option<bool>, String> {
 ///
 /// This is not belt-and-braces. The data plane BELIEVES the descriptor: it
 /// projects `SELECT` lists straight out of the declared field map
-/// (`crates/zeroship-data-sql/src/compile.rs:3344-3365`) and reads no catalog at
+/// (`crates/zeroship-data-orm/src/sql/compile.rs`) and reads no catalog at
 /// all, so a field the table lacks is a Postgres `42703` in the middle of the
 /// stream and a column the descriptor lacks is data silently never read. Either
 /// way the failure lands as a stalled or empty SSE frame, which is exactly what

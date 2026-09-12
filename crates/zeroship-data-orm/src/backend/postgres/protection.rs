@@ -8,7 +8,7 @@ impl crate::protection::Catalog for PostgresBackend {
     async fn introspect_schema(
         &self,
         app_id: &str,
-    ) -> Result<zeroship_data_sql::catalog::LiveSchema, DbError> {
+    ) -> Result<crate::sql::catalog::LiveSchema, DbError> {
         // The PG-tier reader returns its local `SchemaError`; the sibling
         // translator re-creates the exact `coded_sql("diff: …", e)` shape, so
         // SQLSTATE classification and the operator-facing message stay

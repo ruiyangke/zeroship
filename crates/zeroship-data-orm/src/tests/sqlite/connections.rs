@@ -276,10 +276,10 @@ fn p6c_data_plane_reaches_the_app_file_on_demand() {
             crate::tests::fixtures::cache_schema(
                 app,
                 collection,
-                zeroship_data_sql::value!({"body":{"type":"string"}}),
+                crate::value!({"body":{"type":"string"}}),
             );
             host.exec_mutation_with_emit(
-                zeroship_data_sql::compile::BuiltQuery {
+                crate::sql::compile::BuiltQuery {
                     sql: format!(
                         r#"INSERT INTO "{app}"."{collection}" (id, body)
                        VALUES ('note_1', 'hello')"#
@@ -296,7 +296,7 @@ fn p6c_data_plane_reaches_the_app_file_on_demand() {
             let rows = host
                 .exec_query(
                     app,
-                    zeroship_data_sql::compile::BuiltQuery {
+                    crate::sql::compile::BuiltQuery {
                         sql: format!(
                             r#"SELECT body FROM "{app}"."{collection}" WHERE id = 'note_1'"#
                         ),

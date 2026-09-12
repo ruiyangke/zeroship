@@ -1,7 +1,7 @@
 //! Protection services supplied by the host, independent of connection drivers.
 use crate::{encryption::KeyStore, error::DbError};
 use async_trait::async_trait;
-use zeroship_data_sql::catalog::LiveSchema;
+use crate::sql::catalog::LiveSchema;
 
 /// Live catalog evidence supplies a protection floor; descriptors own model shape.
 #[async_trait(?Send)]

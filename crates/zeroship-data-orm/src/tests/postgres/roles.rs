@@ -9,7 +9,7 @@ use compio_postgres::{NoTls, Pool};
 
 use zeroship_data_orm::binding::DbBinding;
 
-use zeroship_data_sql::value::{Value, value};
+use crate::value::{Value, value};
 
 /// Walk a compio-postgres Error's `source()` chain into one string —
 /// without this, top-level Display is just "db error" and the
@@ -364,7 +364,7 @@ fn exec_autocommit_query_runs_under_per_app_role() {
             let rows = host
                 .exec_query(
                     app,
-                    zeroship_data_sql::compile::BuiltQuery {
+                    crate::sql::compile::BuiltQuery {
                         sql: "SELECT current_user AS u".to_string(),
                         params: vec![],
                     },

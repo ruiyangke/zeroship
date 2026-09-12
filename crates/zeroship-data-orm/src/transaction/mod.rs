@@ -284,7 +284,7 @@ pub async fn exec_begin_or_savepoint(
     nested: bool,
     isolation_level: Option<zeroship_data_orm::error::IsolationLevel>,
     app_id: &str,
-    schema: zeroship_data_sql::SchemaName,
+    schema: crate::sql::SchemaName,
     backend: crate::backend::BackendHandle,
 ) -> Result<Option<reducer::frames::FrameId>, DbError> {
     if nested {
@@ -543,8 +543,8 @@ thread_local! {
 /// tenant it names - which is the shape this typing change exists to make
 /// visible.
 #[cfg(test)]
-fn test_schema() -> zeroship_data_sql::SchemaName {
-    zeroship_data_sql::SchemaName::new("app_sqlite").expect("fixture schema name")
+fn test_schema() -> crate::sql::SchemaName {
+    crate::sql::SchemaName::new("app_sqlite").expect("fixture schema name")
 }
 
 #[cfg(test)]

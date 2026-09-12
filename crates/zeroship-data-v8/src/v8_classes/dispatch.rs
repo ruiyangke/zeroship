@@ -2,7 +2,7 @@
 
 use std::future::Future;
 
-use zeroship_data_sql::value::Value;
+use zeroship_data_orm::value::Value;
 use zeroship_runtime::state::{OpResult, ResolveValue, SharedState};
 
 use zeroship_data_orm::binding::DbBinding;
@@ -472,7 +472,7 @@ pub(crate) fn dispatch_unmask_field<'s>(
                 // `result.plaintext` directly; for `type = bytes` the
                 // SDK base64-decodes on its side.
                 crate::v8_values::resolve(
-                    zeroship_data_sql::value!({ "plaintext": result.plaintext }),
+                    zeroship_data_orm::value!({ "plaintext": result.plaintext }),
                     false,
                 )
             },
@@ -522,16 +522,16 @@ pub(crate) fn dispatch_bulk_unmask_field<'s>(
                 // `BTreeMap` serialises as a JSON object with sorted
                 // keys — deterministic for golden-snapshot tests. The reshaping is
                 // JS-wire lowering, so it belongs on this side of the boundary.
-                let mut obj = zeroship_data_sql::value::Map::new();
+                let mut obj = zeroship_data_orm::value::Map::new();
                 for (row_pk, cols) in result.results {
-                    let mut col_obj = zeroship_data_sql::value::Map::new();
+                    let mut col_obj = zeroship_data_orm::value::Map::new();
                     for (c, pt) in cols {
                         col_obj.insert(c, pt);
                     }
                     obj.insert(row_pk, Value::Object(col_obj));
                 }
                 crate::v8_values::resolve(
-                    zeroship_data_sql::value!({ "results": Value::Object(obj) }),
+                    zeroship_data_orm::value!({ "results": Value::Object(obj) }),
                     false,
                 )
             },

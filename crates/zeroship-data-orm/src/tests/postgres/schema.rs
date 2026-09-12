@@ -10,9 +10,9 @@ use zeroship_migrate::schema::query::FkEmission;
 
 use compio_postgres::Pool;
 
-use zeroship_data_sql::value::{Value, value};
+use crate::value::{Value, value};
 
-use zeroship_data_sql::compile::*;
+use crate::sql::compile::*;
 
 /// Stamp a unique text `id` onto a seed insert document. The platform `id`
 /// system field is `TEXT PRIMARY KEY` with NO DB default
@@ -46,7 +46,7 @@ fn a1_unique_index_actually_enforces_uniqueness() {
                 .unwrap();
             pool.execute(
                 &schema::fixture_schema_sql(
-                    &zeroship_data_sql::SchemaName::new(app).expect("fixture schema name"),
+                    &crate::sql::SchemaName::new(app).expect("fixture schema name"),
                 ),
                 &[],
             )
@@ -59,7 +59,7 @@ fn a1_unique_index_actually_enforces_uniqueness() {
             });
 
             let create_table = fixture_table_sql(
-                &zeroship_data_sql::SchemaName::new(app).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(app).expect("fixture schema name"),
                 collection,
                 &schema,
                 &FkEmission::Inline,
@@ -75,7 +75,7 @@ fn a1_unique_index_actually_enforces_uniqueness() {
 
             // Generate and execute the new index DDL.
             let indexes = schema::fixture_indexes(
-                &zeroship_data_sql::SchemaName::new(app).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(app).expect("fixture schema name"),
                 collection,
                 &schema,
             )
@@ -133,7 +133,7 @@ fn a1_unique_index_actually_enforces_uniqueness() {
             // assert the second one fails with SQLSTATE 23505.
             // -----------------------------------------------------------------------
             let ins1 = build_insert(
-                &zeroship_data_sql::SchemaName::new(app).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(app).expect("fixture schema name"),
                 collection,
                 &schema,
                 &with_seed_id(value!({"email": "a@x.com"})),
@@ -151,7 +151,7 @@ fn a1_unique_index_actually_enforces_uniqueness() {
             // Distinct `id` so the second insert is rejected for the DUPLICATE EMAIL
             // (the unique index under test), not an incidental duplicate PK.
             let ins2 = build_insert(
-                &zeroship_data_sql::SchemaName::new(app).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(app).expect("fixture schema name"),
                 collection,
                 &schema,
                 &with_seed_id(value!({"email": "a@x.com"})),
@@ -257,7 +257,7 @@ SELECT con.conname AS name,
             // deferred. That is the contract settled in docs/reference/db.md:362-364
             // ("the database's own defaults apply: NO ACTION for both actions, and
             // immediate (non-deferred) checking") and implemented at
-            // crates/zeroship-data-sql/src/compile.rs:1607, which OMITS the ON DELETE
+            // crates/zeroship-data-orm/src/sql/compile.rs, which OMITS the ON DELETE
             // clause when the action is NO ACTION.
             //
             // These three assertions read `r`/`r`/`true` until 2026-08-12 -- the

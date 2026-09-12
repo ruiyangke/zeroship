@@ -25,7 +25,7 @@ pub struct ProbeOutcome {
 /// Returns the error reported by transaction admission or session setup.
 pub async fn begin(
     app_id: &str,
-    schema: zeroship_data_sql::SchemaName,
+    schema: crate::sql::SchemaName,
     isolation_level: Option<zeroship_data_orm::error::IsolationLevel>,
     backend: BackendHandle,
 ) -> Result<(), DbError> {
