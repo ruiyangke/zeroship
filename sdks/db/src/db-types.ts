@@ -54,6 +54,8 @@ import type {
   Row,
   RowId,
   RowInput,
+  SelectableField,
+  SelectSpec,
   SortSpec,
   SortInput,
   UpsertOptions,
@@ -165,8 +167,11 @@ export type TxQuery<
   sort(s: SortInput<S>): TxQuery<S, P, AllSchemas>;
   limit(n: number): TxQuery<S, P, AllSchemas>;
   skip(n: number): TxQuery<S, P, AllSchemas>;
-  select<K extends keyof Row<S> & string>(fields: K[]): TxQuery<S, Pick<Row<S>, K>, AllSchemas>;
-  select(s: string | string[] | Record<string, number | boolean>): TxQuery<S, P, AllSchemas>;
+  select<K extends SelectableField<S>>(field: K): TxQuery<S, Pick<Row<S>, K>, AllSchemas>;
+  select<K extends SelectableField<S>>(fields: readonly K[]): TxQuery<S, Pick<Row<S>, K>, AllSchemas>;
+  select<const Selection extends SelectSpec<S>>(
+    fields: Selection,
+  ): TxQuery<S, Pick<Row<S>, keyof Selection & keyof Row<S>>, AllSchemas>;
   after(id: RowId<S>): TxQuery<S, P, AllSchemas>;
   with<W extends WithSpec>(spec: W): TxQuery<S, Omit<P, keyof W> & WithRelations<S, W, AllSchemas>, AllSchemas>;
   paginate(opts: {

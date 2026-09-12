@@ -18,6 +18,9 @@ import {
   type Actor,
   type IdValue,
   type RowId,
+  type SelectableField,
+  type SelectInput,
+  type SelectSpec,
   type SortInput,
   type WithRelations,
   type WithSpec,
@@ -279,18 +282,22 @@ export class Query<
 
   /**
    * Restricts the returned fields.
-   * String: `"name email"` (space-separated).
+   * String: `"name"`.
    * Array: `["name", "email"]`.
    * Object: `{ name: 1, email: 1 }` (Mongoose style — keys with truthy values).
+   * Untyped direct queries also accept a space-separated string.
    *
    * When called with a typed array of literal field names, the return type narrows
    * to `Query<S, Pick<Row<S>, K>>` so that awaited results only contain those fields.
    */
-  select<K extends keyof Row<S> & string>(fields: K[]): Query<S, Pick<Row<S>, K>, AllSchemas>;
-  select(s: string | string[] | Record<string, number | boolean>): Query<S, P, AllSchemas>;
-  select(s: string | string[] | Record<string, number | boolean>): Query<S, any, AllSchemas> {
+  select<K extends SelectableField<S>>(field: K): Query<S, Pick<Row<S>, K>, AllSchemas>;
+  select<K extends SelectableField<S>>(fields: readonly K[]): Query<S, Pick<Row<S>, K>, AllSchemas>;
+  select<const Selection extends SelectSpec<S>>(
+    fields: Selection,
+  ): Query<S, Pick<Row<S>, keyof Selection & keyof Row<S>>, AllSchemas>;
+  select(s: SelectInput<S>): Query<S, any, AllSchemas> {
     if (Array.isArray(s)) {
-      this._select = s;
+      this._select = [...s];
     } else if (typeof s === "string") {
       this._select = s.split(" ").filter((f) => f.length > 0);
     } else {
