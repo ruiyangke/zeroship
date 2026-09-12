@@ -1,7 +1,10 @@
 /** Coalesce key lookups while preserving the transaction scope at enqueue time. */
 
-interface QueuedLoad<R> {
-  id: string;
+import type { IdValue } from "./types.js";
+import { identityKey } from "./identity.js";
+
+interface QueuedLoad<R, K extends IdValue> {
+  id: K;
   resolve: (row: R | null) => void;
   reject: (err: unknown) => void;
   txDepthAtEnqueue: number;
@@ -14,8 +17,8 @@ import { MAX_ID_BATCH } from "./membership-cap.js";
  * fetch. Construct one per Collection and reuse — it's stateless across
  * batches.
  */
-export class IdLoader<R> {
-  private queue: QueuedLoad<R>[] = [];
+export class IdLoader<R, K extends IdValue = string> {
+  private queue: QueuedLoad<R, K>[] = [];
   private scheduled = false;
 
   /**
@@ -28,7 +31,7 @@ export class IdLoader<R> {
    *                    time so we can detect a tx opening mid-batch.
    */
   constructor(
-    private flush: (ids: string[]) => Promise<Map<string, R>>,
+    private flush: (ids: K[]) => Promise<Map<K, R>>,
     private getTxDepth: () => number = () => 0,
   ) {}
 
@@ -40,7 +43,7 @@ export class IdLoader<R> {
    * the entry will be rejected with a clear race error instead of being
    * silently routed onto the tx connection.
    */
-  load(id: string, txDepthSnapshot: number = 0): Promise<R | null> {
+  load(id: K, txDepthSnapshot: number = 0): Promise<R | null> {
     return new Promise<R | null>((resolve, reject) => {
       this.queue.push({ id, resolve, reject, txDepthAtEnqueue: txDepthSnapshot });
       if (!this.scheduled) {
@@ -73,7 +76,7 @@ export class IdLoader<R> {
     // intent: if the tx already ended, that's the caller's bug, not
     // ours.
     const currentTxDepth = this.getTxDepth();
-    const liveBatch: QueuedLoad<R>[] = [];
+    const liveBatch: QueuedLoad<R, K>[] = [];
     for (const q of batch) {
       if (q.txDepthAtEnqueue === 0 && currentTxDepth > 0) {
         q.reject(
@@ -94,11 +97,11 @@ export class IdLoader<R> {
 
     // Dedupe ids before the underlying call — N concurrent `get("post_X")`
     // calls resolve from the same row without N copies on the wire.
-    const ids: string[] = [];
+    const ids: K[] = [];
     const seen = new Set<string>();
     for (const q of liveBatch) {
-      if (!seen.has(q.id)) {
-        seen.add(q.id);
+      if (!seen.has(identityKey(q.id))) {
+        seen.add(identityKey(q.id));
         ids.push(q.id);
       }
     }
@@ -116,7 +119,7 @@ export class IdLoader<R> {
       const map = new Map<string, R>();
       for (let i = 0; i < ids.length; i += MAX_ID_BATCH) {
         const part = await this.flush(ids.slice(i, i + MAX_ID_BATCH));
-        for (const [k, v] of part) map.set(k, v);
+        for (const [k, v] of part) map.set(identityKey(k), v);
       }
       for (const q of liveBatch) resolve(q, map);
     } catch (e) {
@@ -125,10 +128,10 @@ export class IdLoader<R> {
   }
 }
 
-function resolve<R>(
-  q: QueuedLoad<R>,
+function resolve<R, K extends IdValue>(
+  q: QueuedLoad<R, K>,
   map: Map<string, R>,
 ): void {
-  const row = map.get(q.id);
+  const row = map.get(identityKey(q.id));
   q.resolve(row === undefined ? null : row);
 }

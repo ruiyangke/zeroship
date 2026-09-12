@@ -1,3 +1,4 @@
+import { isIdValue } from "../identity.js";
 import {
   ValidationError,
   OptimisticLockError,
@@ -28,7 +29,8 @@ import {
   type Actor,
   type Filter,
   type FieldDef,
-  type Id,
+  type IdValue,
+  type RowId,
   type NamedIndexSpec,
   type PlainObject,
   type Result,
@@ -55,11 +57,11 @@ export interface CrudCollectionInternals<
   _versioning: boolean;
   _indexes: readonly NamedIndexSpec[];
   _knownFields: Set<string>;
-  _idLoader: IdLoader<Row<S>> | null;
+  _idLoader: IdLoader<Row<S>, IdValue> | null;
   _txDepth: number;
   _run<T>(fn: () => Promise<T>): Promise<Result<T>>;
   _toResultError(e: unknown): Error;
-  _loadById(id: string, txDepthAtCall: number): Promise<Row<S> | null>;
+  _loadById(id: IdValue, txDepthAtCall: number): Promise<Row<S> | null>;
   _nativeCollection(): NativeCollection;
   _toColumn(field: string): string;
   _toField(column: string): string;
@@ -188,7 +190,7 @@ export function getCollection<
   AllSchemas extends Record<string, unknown>,
 >(
   self: CrudCollectionInternals<S, N, AllSchemas>,
-  idOrFilter: string | Id<N> | Filter<S>,
+  idOrFilter: RowId<S> | Filter<S>,
   opts: {
     actor?: Actor;
     select?: (string & keyof Row<S>)[];
@@ -200,7 +202,7 @@ export function getCollection<
 ): Promise<Result<Row<S> | null>> {
   trackCollectionAccess(self._name);
   const txDepthAtCall = self._txDepth;
-  const isBareId = typeof idOrFilter === "string";
+  const isBareId = isIdValue(idOrFilter);
   if (
     isBareId &&
     opts.select === undefined &&
@@ -261,21 +263,22 @@ export async function loadByIdCollection<
   AllSchemas extends Record<string, unknown>,
 >(
   self: CrudCollectionInternals<S, N, AllSchemas>,
-  id: string,
+  id: IdValue,
   txDepthAtCall: number,
 ): Promise<Row<S> | null> {
   if (self._idLoader === null) {
-    self._idLoader = new IdLoader<Row<S>>(
+    self._idLoader = new IdLoader<Row<S>, IdValue>(
       async (ids) => {
         const filter: ZeroshipDbFilter = mapFilterOutbound(
             { id: { $in: ids } } as unknown as ZeroshipDbFilter,
             self._toColumn,
           );
         const rows = (await self._nativeCollection().find(filter, {})) ?? [];
-        const map = new Map<string, Row<S>>();
+        const map = new Map<IdValue, Row<S>>();
         for (const r of rows) {
           const mapped = mapResultDoc(r as PlainObject, self._toField) as Row<S>;
-          map.set(String((mapped as PlainObject)["id"]), mapped);
+          const rowId = (mapped as PlainObject)["id"];
+          if (isIdValue(rowId)) map.set(rowId, mapped);
         }
         return map;
       },
@@ -391,11 +394,11 @@ export function upsertCollection<S, N extends string, AllSchemas extends Record<
 
 export function updateCollection<S, N extends string, AllSchemas extends Record<string, unknown>>(
   self: CrudCollectionInternals<S, N, AllSchemas>,
-  idOrFilter: string | Filter<S>,
+  idOrFilter: RowId<S> | Filter<S>,
   patch: UpdateExpression<S>,
 ): Promise<Result<Row<S> | null>> {
   return self._run(async () => {
-    const isBareId = typeof idOrFilter === "string";
+    const isBareId = isIdValue(idOrFilter);
     const filter = isBareId ? ({ id: idOrFilter } as unknown as Filter<S>) : idOrFilter;
     if (!isBareId) {
       validateEncryptedFieldsInFilter(filter as PlainObject, self._schema);
@@ -464,10 +467,10 @@ export function updateManyCollection<S, N extends string, AllSchemas extends Rec
 
 export function deleteCollection<S, N extends string, AllSchemas extends Record<string, unknown>>(
   self: CrudCollectionInternals<S, N, AllSchemas>,
-  idOrFilter: string | Filter<S>,
+  idOrFilter: RowId<S> | Filter<S>,
 ): Promise<Result<Row<S> | null>> {
   return self._run(async () => {
-    const isBareId = typeof idOrFilter === "string";
+    const isBareId = isIdValue(idOrFilter);
     const filter = isBareId ? ({ id: idOrFilter } as unknown as Filter<S>) : idOrFilter;
     if (!isBareId) {
       validateEncryptedFieldsInFilter(filter as PlainObject, self._schema);
@@ -509,10 +512,10 @@ export function deleteManyCollection<S, N extends string, AllSchemas extends Rec
 
 export function purgeCollection<S, N extends string, AllSchemas extends Record<string, unknown>>(
   self: CrudCollectionInternals<S, N, AllSchemas>,
-  idOrFilter: string | Filter<S>,
+  idOrFilter: RowId<S> | Filter<S>,
 ): Promise<Result<Row<S> | null>> {
   return self._run(async () => {
-    const isBareId = typeof idOrFilter === "string";
+    const isBareId = isIdValue(idOrFilter);
     const filter = isBareId ? ({ id: idOrFilter } as unknown as Filter<S>) : idOrFilter;
     if (!isBareId) {
       validateEncryptedFieldsInFilter(filter as PlainObject, self._schema);
@@ -560,10 +563,10 @@ export function purgeManyCollection<S, N extends string, AllSchemas extends Reco
 
 export function restoreCollection<S, N extends string, AllSchemas extends Record<string, unknown>>(
   self: CrudCollectionInternals<S, N, AllSchemas>,
-  idOrFilter: string | Filter<S>,
+  idOrFilter: RowId<S> | Filter<S>,
 ): Promise<Result<Row<S> | null>> {
   return self._run(async () => {
-    const isBareId = typeof idOrFilter === "string";
+    const isBareId = isIdValue(idOrFilter);
     const filter = isBareId ? ({ id: idOrFilter } as unknown as Filter<S>) : idOrFilter;
     if (!isBareId) {
       validateEncryptedFieldsInFilter(filter as PlainObject, self._schema);

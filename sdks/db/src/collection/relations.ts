@@ -1,6 +1,7 @@
 import type { NormalizedSchema } from "../schema";
-import type { Filter, PlainObject, Result, WithSpec } from "../types";
+import type { Filter, IdValue, PlainObject, Result, WithSpec } from "../types";
 import { readTransactionDepth } from "../tx-state.js";
+import { identityKey, isIdentityForField } from "../identity.js";
 import { MAX_ID_BATCH } from "../membership-cap.js";
 
 interface RelationTargetCollection {
@@ -16,25 +17,7 @@ export interface RelationsCollectionInternals {
     | null;
 }
 
-/**
- * @internal — eager-load referenced rows for each `with` key onto every
- * parent row. Mutates the rows in place. Used by both the `get` and
- * `find` paths so the relation-loading logic lives in one place.
- *
- * Per `with` key:
- *   1. Walk the schema; the key must carry a `refTarget` — set either by
- *      `t.ref(...)` or by a migration's `t.text().references(...)`.
- *   2. Resolve the target Collection via the planted `_resolveCollection`.
- *   3. Dedupe foreign ids across the parent rows.
- *   4. Fire ONE `find({id: {$in: [...]}})` against the target.
- *   5. Build an id→row map; the joined row replaces the FK number at
- *      the same key (null for null FK or missing target row).
- *
- * v1 limitation: the joined row overwrites the FK number at the same
- * key. To keep both, declare the FK on a separate field — e.g.
- * `user: t.ref("users")` instead of `userId: t.ref("users")` — and the
- * number lives on the joined row as `user.id`.
- */
+/** Eager-load declared references in bounded batches, preserving transaction routing. */
 export async function loadRelations(
   self: RelationsCollectionInternals,
   rows: PlainObject[],
@@ -50,24 +33,6 @@ export async function loadRelations(
         { code: "WITH_UNSUPPORTED_VALUE" as const },
       );
     }
-    // A relation is identified by its relation METADATA (`refTarget`), not
-    // by the `type` token, which describes storage.
-    //
-    // This used to require `fieldDef.type === "ref"`, and that made `with`
-    // unusable on the migration-first pipeline — the platform's only schema
-    // path. A committed migration declares a foreign key as
-    // `t.text().references("users", "id")` (the vendored engine DSL has no
-    // `t.ref()`), and the engine's descriptor reports it honestly as
-    // `{ type: "string", refTarget: "users", refColumn: "id" }`. The FK is
-    // created in the database and enforced — measured on
-    // examples/db-todos: an orphan insert fails with `FOREIGN KEY constraint
-    // failed` / `FOREIGN_KEY_VIOLATION` — but `with: { userId: true }` threw
-    //
-    //     "userId" is not a t.ref field on "todos"
-    //
-    // so every eager-load against a migration-declared FK was dead. Only a
-    // hand-written `defineSchema` using `t.ref()` could ever satisfy the old
-    // gate, and that is not how creator schemas are authored.
     const fieldDef = self._schema[field];
     if (!fieldDef || typeof fieldDef.refTarget !== "string" || fieldDef.refTarget.length === 0) {
       throw Object.assign(
@@ -100,22 +65,22 @@ export async function loadRelations(
         { code: "WITH_TARGET_NOT_FOUND" as const },
       );
     }
-    const ids: string[] = [];
+    const ids: IdValue[] = [];
     const seen = new Set<string>();
     for (const r of rows) {
       const v = r[field];
       if (v === null || v === undefined) continue;
-      if (typeof v !== "string") {
+      if (!isIdentityForField(v, fieldDef)) {
         throw Object.assign(
           new TypeError(
-            `_loadRelations: FK value for field '${field}' must be a string id (got ${typeof v})`,
+            `_loadRelations: FK value for field '${field}' must match the declared identity type (got ${typeof v})`,
           ),
           { code: "WITH_FK_NOT_ID_SHAPED" as const },
         );
       }
-      if (v.length === 0) continue;
-      if (!seen.has(v)) {
-        seen.add(v);
+      if (v === "") continue;
+      if (!seen.has(identityKey(v))) {
+        seen.add(identityKey(v));
         ids.push(v);
       }
     }
@@ -143,8 +108,8 @@ export async function loadRelations(
       if (error) throw error;
       for (const tr of (targetRows ?? []) as PlainObject[]) {
         const tid = tr[targetKey];
-        if (typeof tid === "string") {
-          byId.set(tid, tr);
+        if (isIdentityForField(tid, targetCol._schema[targetKey])) {
+          byId.set(identityKey(tid), tr);
         }
       }
     }
@@ -155,7 +120,7 @@ export async function loadRelations(
         continue;
       }
       r[field] =
-        typeof v === "string" && v.length > 0 ? (byId.get(v) ?? null) : null;
+        isIdentityForField(v, fieldDef) && v !== "" ? (byId.get(identityKey(v)) ?? null) : null;
     }
   };
   const entries = Object.entries(withSpec);
