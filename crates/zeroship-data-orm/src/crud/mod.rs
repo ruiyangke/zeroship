@@ -194,33 +194,6 @@ fn parse_unmask_opt(opt: Option<&Value>) -> Vec<String> {
         .collect()
 }
 
-fn validate_unmask_projection(
-    select: Option<&Value>,
-    unmask_columns: &[String],
-) -> Result<(), DbError> {
-    if unmask_columns.is_empty() {
-        return Ok(());
-    }
-    let Some(Value::Array(arr)) = select else {
-        return Ok(());
-    };
-    if arr.is_empty() {
-        return Ok(());
-    }
-    if arr.iter().any(|v| v.as_str() == Some("id")) {
-        return Ok(());
-    }
-    Err(DbError::ValidationFailed {
-        code: "unmask_requires_id_projection",
-        message: "find: `opts.unmask` requires explicit `select` projections to include `id`"
-            .to_string(),
-        hint: Some(
-            "Add `id` to `opts.select` or drop the explicit projection when using `opts.unmask`."
-                .to_string(),
-        ),
-    })
-}
-
 /// The eagerly-evaluated inputs of a `find`, produced by [`plan_find`] and
 /// consumed by [`run_find`].
 ///
@@ -302,8 +275,6 @@ pub async fn run_find(
     filter: Value,
     plan: FindPlan,
 ) -> Result<read_pipeline::ApplyResult, DbError> {
-    validate_unmask_projection(plan.select.as_ref(), &plan.unmask_columns)?;
-
     // Unmask reads follow this operation's transaction route. Authorization and
     // audit writes use the backend separately so creator rollback cannot erase
     // an attempt's audit record.
@@ -323,6 +294,36 @@ pub async fn run_find(
     // Resolve the deployment's descriptor before compiling its projection.
     // Default reads use visible value columns; raw storage requires unmask access.
     let schema_hint = crate::descriptor::collection_schema(&binding, &coll)?;
+    let projected = plan
+        .select
+        .as_ref()
+        .and_then(Value::as_array)
+        .filter(|fields| !fields.is_empty())
+        .map(|fields| {
+            fields
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        });
+    let mut select = plan.select.clone();
+    if let Some(fields) = projected.as_ref() {
+        let needs_identity = !plan.unmask_columns.is_empty()
+            || fields.iter().any(|field| {
+                schema_hint.get(field).is_some_and(|definition| {
+                    definition["encrypted"].as_bool() == Some(true)
+                        || zeroship_data_sql::descriptors::effective_mask(definition).is_some()
+                })
+            });
+        if needs_identity && !fields.iter().any(|field| field == "id") {
+            // Protection uses identity internally; the read surface restores the caller's projection.
+            select
+                .as_mut()
+                .and_then(Value::as_array_mut)
+                .expect("explicit projection")
+                .push(Value::from("id"));
+        }
+    }
     // Soft-delete auto-filter gate.
     let filter_soft_deleted = assignment_pass::should_filter_soft_deleted(plan.include_deleted);
     let mut sql_filter = filter;
@@ -334,7 +335,7 @@ pub async fn run_find(
         plan.limit,
         plan.offset,
         plan.order_by.as_ref(),
-        plan.select.as_ref(),
+        select.as_ref(),
         &schema_hint,
         &plan.unmask_columns,
         filter_soft_deleted,
@@ -350,6 +351,11 @@ pub async fn run_find(
         read_pipeline::ApplyOptions {
             unmask_columns: &plan.unmask_columns,
             schema_field_scope: read_pipeline::SchemaFieldScope::All,
+            row_surface: projected
+                .as_ref()
+                .map_or(read_pipeline::RowSurface::Declared, |fields| {
+                    read_pipeline::RowSurface::Projected(fields)
+                }),
             ..read_pipeline::ApplyOptions::default()
         },
     )
@@ -1640,46 +1646,4 @@ fn schema_has_masked_columns(schema: &Value) -> bool {
             })
         })
         .unwrap_or(false)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // `configured_sqlite_dialect_does_not_require_an_open_backend` MOVED to
-    // `crate::tx_route`'s test module (2026-09-03), as
-    // `a_configured_sqlite_dialect_is_captured_without_an_open_backend`. It
-    // pinned `current_sql_dialect()`, which is deleted; the property it pins -
-    // the dialect is knowable before any backend is opened - is what permits
-    // the stamp that replaced it, so it rules on the captured route instead.
-
-    #[test]
-    fn validate_unmask_projection_rejects_explicit_select_without_id() {
-        let err = validate_unmask_projection(
-            Some(&zeroship_data_sql::value!(["ssn", "email"])),
-            &["ssn".to_string()],
-        )
-        .expect_err("explicit unmask projection without id must be refused");
-
-        match err {
-            DbError::ValidationFailed { code, message, .. } => {
-                assert_eq!(code, "unmask_requires_id_projection");
-                assert!(
-                    message.contains("include `id`"),
-                    "error should explain the missing id requirement: {message}"
-                );
-            }
-            other => panic!("expected ValidationFailed, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn validate_unmask_projection_accepts_implicit_or_id_inclusive_select() {
-        validate_unmask_projection(None, &["ssn".to_string()]).expect("implicit select ok");
-        validate_unmask_projection(
-            Some(&zeroship_data_sql::value!(["id", "ssn"])),
-            &["ssn".to_string()],
-        )
-        .expect("id-inclusive projection ok");
-    }
 }

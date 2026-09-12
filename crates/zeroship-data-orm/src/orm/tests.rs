@@ -15,6 +15,7 @@ mod json;
 mod lifecycle;
 mod nested_temporal;
 mod protected_updates;
+mod protected_projections;
 mod schema_updates;
 mod timestamp;
 mod typed_arrays;

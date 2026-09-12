@@ -20,11 +20,9 @@ pub enum SchemaFieldScope<'a> {
 /// surface filter because there is nothing to opt out to.
 #[derive(Debug)]
 pub enum RowSurface<'a> {
-    /// Declared fields + the seven system fields + the closed set of synthetic
-    /// result columns. The default.
+    /// Readable declared fields and permitted synthetic result columns.
     Declared,
-    /// An explicit name list. Aggregate result sets only: their keys are
-    /// accumulator aliases, which no descriptor declares.
+    /// Requested fields or aggregate result aliases.
     Projected(&'a [String]),
 }
 
