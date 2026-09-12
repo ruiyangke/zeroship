@@ -8,6 +8,7 @@ pub use backend::AppBackend;
 pub mod capability;
 mod control;
 mod deploys;
+mod deployment_retention;
 mod frontier;
 mod ingress;
 pub use ingress::{IngressReceipt, RevokedSignals, SignalAuthority, SignalTokenRequest};

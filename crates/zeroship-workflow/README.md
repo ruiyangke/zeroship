@@ -41,8 +41,12 @@ server coordinates metadata and does not own the journal or payloads.
 `DeploymentHolds` accepts an authorized platform ORM database. Holds survive
 reconnection, and generation checks reject stale releases. The collector helpers
 run inside a host-owned transaction that also fences routing and other deployment
-consumers. Worker hold intents and production host composition remain unfinished;
-the existing journal-reading collector has not yet been replaced.
+consumers. `service::WorkflowService` records customer-side acquisition and release
+intents and reconciles them through `DeploymentHoldClient`. A release closes
+deployment admission under the app lock and checks retained journal dependencies
+before contacting the platform. Lost responses and host cancellation leave
+durable work to retry. Production host composition and automatic reconciliation
+remain unfinished; the existing journal-reading collector has not yet been replaced.
 `OrmStore::new` accepts the host's `OrmContext`, `DbBinding` and `BackendHandle`.
 The ORM owns database selection, native values and transaction settlement;
 the workflow service has no separate PostgreSQL or SQLite runtime adapter.

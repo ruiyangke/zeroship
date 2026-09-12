@@ -38,8 +38,16 @@ from the normal deployment migration. Acquisition, release and reclamation
 serialize on the deployment record; generations fence stale retries and released
 rows remain as tombstones. Native PostgreSQL and SQLite tests cover retries,
 reconnection, scope and reclamation, including a concurrent PostgreSQL collector.
-Worker-side durable hold intents, the production retention cutover and
-replacement of executable snapshot persistence remain pending.
+The customer journal now records acquisition and release intents through ORM
+models. Scoped clients reconcile lost replies and cancelled calls; acknowledgements
+must match the full intent identity and its current generation. Release closes
+deployment admission under the app lock and refuses retained runs, generations
+or schedules. Executable preparation fences retirement across storage I/O.
+Native PostgreSQL and SQLite tests exercise these transitions against the real
+metadata ledger, including stale acknowledgements and foreign app references.
+Host client composition, mandatory holds for normal app artifact loading, the
+production retention cutover and replacement of executable snapshot persistence
+remain pending.
 
 Active, reloaded and pinned production worker isolates now load the complete
 module graph through the shared bundle loader. Pinned manifest reads verify

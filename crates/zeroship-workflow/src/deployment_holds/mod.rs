@@ -51,12 +51,71 @@ pub struct HoldScope {
     holder: String,
 }
 impl HoldScope {
+    #[must_use]
+    pub fn app(&self) -> &AppId {
+        &self.app
+    }
+
+    #[must_use]
+    pub fn holder(&self) -> &str {
+        &self.holder
+    }
+
     /// The host obtains these identities from its authenticated app assignment.
     pub fn new(app: AppId, holder: String) -> Result<Self, WorkflowServiceError> {
         typed_id::parse_with_prefix(&holder, "dhl").map_err(|_| {
             WorkflowServiceError::InvalidRequest("invalid deployment holder".into())
         })?;
         Ok(Self { app, holder })
+    }
+}
+
+/// Host-authenticated access to deployment metadata for a single app journal.
+/// A customer worker receives this client, never the platform database.
+#[async_trait::async_trait(?Send)]
+pub trait DeploymentHoldClient {
+    fn scope(&self) -> &HoldScope;
+    async fn acquire(
+        &self,
+        deployment: &str,
+        generation: HoldGeneration,
+    ) -> Result<HoldReceipt, WorkflowServiceError>;
+    async fn release(
+        &self,
+        deployment: &str,
+        generation: HoldGeneration,
+    ) -> Result<HoldReceipt, WorkflowServiceError>;
+}
+
+/// Native metadata host binding. Remote customer workers use the same scoped
+/// client contract over authenticated transport.
+#[derive(Clone, Debug)]
+pub struct ScopedDeploymentHolds {
+    ledger: DeploymentHolds,
+    scope: HoldScope,
+}
+#[async_trait::async_trait(?Send)]
+impl DeploymentHoldClient for ScopedDeploymentHolds {
+    fn scope(&self) -> &HoldScope {
+        &self.scope
+    }
+    async fn acquire(
+        &self,
+        deployment: &str,
+        generation: HoldGeneration,
+    ) -> Result<HoldReceipt, WorkflowServiceError> {
+        self.ledger
+            .acquire(&self.scope, deployment, generation)
+            .await
+    }
+    async fn release(
+        &self,
+        deployment: &str,
+        generation: HoldGeneration,
+    ) -> Result<HoldReceipt, WorkflowServiceError> {
+        self.ledger
+            .release(&self.scope, deployment, generation)
+            .await
     }
 }
 
@@ -135,6 +194,13 @@ pub struct DeploymentHolds {
     database: Database,
 }
 impl DeploymentHolds {
+    #[must_use]
+    pub fn for_scope(&self, scope: HoldScope) -> ScopedDeploymentHolds {
+        ScopedDeploymentHolds {
+            ledger: self.clone(),
+            scope,
+        }
+    }
     pub fn new(database: Database) -> Result<Self, WorkflowServiceError> {
         database.entity::<deploys::Entity>()?;
         database.entity::<holds::Entity>()?;
