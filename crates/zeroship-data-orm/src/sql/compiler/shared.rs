@@ -176,7 +176,7 @@ fn expression_binds(expression: &Expression) -> usize {
     ))
 }
 
-fn predicate_binds(predicate: &ResolvedPredicate) -> usize {
+pub(crate) fn predicate_binds(predicate: &ResolvedPredicate) -> usize {
     match predicate {
         ResolvedPredicate::And(children) | ResolvedPredicate::Or(children) => {
             children.iter().map(predicate_binds).sum()
@@ -193,6 +193,9 @@ fn predicate_binds(predicate: &ResolvedPredicate) -> usize {
 
 pub trait SqlCompiler: Send + Sync {
     fn support(&self) -> SqlSupport;
+    fn requirements(&self, statement: &Statement) -> Requirements {
+        Requirements::for_statement(statement)
+    }
     fn check(
         &self,
         requirements: &Requirements,
