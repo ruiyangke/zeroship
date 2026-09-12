@@ -158,6 +158,9 @@ export function workflowSchema(namespace) {
     ...identity(), request_id: text(), operation: text(), digest: text(), result: text(), expires_at: integer(),
   }, ["app_id", "request_id"], [appFk("requests")]);
   index("requests", "expiry", ["expires_at"]);
+  create("management_receipts", {
+    ...identity(), request_id: text(), digest: text(), outcome: text(), created_at: integer(),
+  }, ["app_id", "request_id"], [appFk("management_receipts")]);
   create("occurrences", {
     ...identity(), schedule_id: text(), at: integer(), run_id: t.text(),
   }, ["app_id", "schedule_id", "at"], [

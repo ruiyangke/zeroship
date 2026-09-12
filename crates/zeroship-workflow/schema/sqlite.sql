@@ -115,6 +115,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS "__zeroship_workflow_requests_scope_key" ON "_
 
 CREATE INDEX IF NOT EXISTS "__zeroship_workflow_requests_expiry_idx" ON "__zeroship_workflow_requests" ("expires_at");
 
+CREATE TABLE "__zeroship_workflow_management_receipts" ("id" TEXT PRIMARY KEY NOT NULL, "app_id" TEXT NOT NULL, "request_id" TEXT NOT NULL, "digest" TEXT NOT NULL, "outcome" TEXT NOT NULL, "created_at" INTEGER NOT NULL, CONSTRAINT "__zeroship_workflow_management_receipts_app" FOREIGN KEY (app_id) REFERENCES "__zeroship_workflow_app_state"(app_id) ON DELETE RESTRICT);
+
+CREATE UNIQUE INDEX IF NOT EXISTS "__zeroship_workflow_management_receipts_scope_key" ON "__zeroship_workflow_management_receipts" ("app_id", "request_id");
+
 CREATE TABLE "__zeroship_workflow_occurrences" ("id" TEXT PRIMARY KEY NOT NULL, "app_id" TEXT NOT NULL, "schedule_id" TEXT NOT NULL, "at" INTEGER NOT NULL, "run_id" TEXT, CONSTRAINT "__zeroship_workflow_occurrence_run" FOREIGN KEY (app_id, run_id) REFERENCES "__zeroship_workflow_runs"(app_id, id) ON DELETE RESTRICT, CONSTRAINT "__zeroship_workflow_occurrence_schedule" FOREIGN KEY (app_id, schedule_id) REFERENCES "__zeroship_workflow_schedules"(app_id, id) ON DELETE RESTRICT);
 
 CREATE INDEX IF NOT EXISTS "__zeroship_workflow_occurrence_run_idx" ON "__zeroship_workflow_occurrences" ("app_id", "run_id");
@@ -144,4 +148,4 @@ CREATE TABLE "__zeroship_workflow_outbox" ("id" TEXT PRIMARY KEY NOT NULL, "app_
 CREATE UNIQUE INDEX IF NOT EXISTS "__zeroship_workflow_outbox_scope_key" ON "__zeroship_workflow_outbox" ("app_id", "id");
 
 CREATE INDEX IF NOT EXISTS "__zeroship_workflow_outbox_delivery_idx" ON "__zeroship_workflow_outbox" ("delivered_at", "created_at");
-INSERT INTO "main".__zeroship_workflow_schema_version (id, fingerprint) VALUES ('workflow', 'fcc977c9608e6b9920c212152a1cb13e19f7e6edf55ec40792c63c18cb2604f4');
+INSERT INTO "main".__zeroship_workflow_schema_version (id, fingerprint) VALUES ('workflow', '8fc19ae3577c6e9fd4b503d90dac5b41b8ceb4ed71681bc394731860bebc79c2');
