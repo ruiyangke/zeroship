@@ -147,13 +147,13 @@ impl SqlCompiler for SqliteCompiler {
         SUPPORT
     }
 
-    fn requirements(&self, statement: &Statement) -> Requirements {
-        let mut requirements = Requirements::for_statement(statement);
-        if let Statement::SpatialNear(search) = statement {
-            requirements.bind_parameters =
-                super::shared::predicate_binds(&search.parts().predicate);
+    fn bind_parameters(&self, statement: &Statement) -> usize {
+        match statement {
+            Statement::SpatialNear(search) => {
+                super::shared::predicate_binds(&search.parts().predicate)
+            }
+            _ => Requirements::for_statement(statement).bind_parameters,
         }
-        requirements
     }
 
     fn check(
@@ -169,7 +169,10 @@ impl SqlCompiler for SqliteCompiler {
         statement: Statement,
         effective: &SqlSupport,
     ) -> Result<CompiledQuery, CompileError> {
-        self.check(&self.requirements(&statement), effective)?;
+        self.check(
+            &super::shared::compiler_requirements(self, &statement),
+            effective,
+        )?;
         match statement {
             Statement::Select(statement) => {
                 super::shared::compile_select(SYNTAX, effective, statement)

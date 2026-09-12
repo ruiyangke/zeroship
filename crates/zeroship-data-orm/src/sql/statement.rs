@@ -712,6 +712,9 @@ impl Upsert {
         parts
             .insert
             .sort_by(|a, b| a.column.name().cmp(b.column.name()));
+        parts
+            .update
+            .sort_by(|a, b| a.column.name().cmp(b.column.name()));
         Ok(Self(parts))
     }
 
@@ -1162,6 +1165,11 @@ fn validate_predicate_for_tables(
             return Err(invalid("predicate exceeds its complexity budget"));
         }
         match predicate {
+            ResolvedPredicate::And(children) | ResolvedPredicate::Or(children)
+                if children.is_empty() =>
+            {
+                return Err(invalid("predicate connective cannot be empty"));
+            }
             ResolvedPredicate::And(children) | ResolvedPredicate::Or(children) => {
                 pending.extend(children.iter().map(|child| (child, depth + 1)));
             }

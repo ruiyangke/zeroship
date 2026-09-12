@@ -193,8 +193,8 @@ pub(crate) fn predicate_binds(predicate: &ResolvedPredicate) -> usize {
 
 pub trait SqlCompiler: Send + Sync {
     fn support(&self) -> SqlSupport;
-    fn requirements(&self, statement: &Statement) -> Requirements {
-        Requirements::for_statement(statement)
+    fn bind_parameters(&self, statement: &Statement) -> usize {
+        Requirements::for_statement(statement).bind_parameters
     }
     fn check(
         &self,
@@ -211,6 +211,15 @@ pub trait SqlCompiler: Send + Sync {
         request: crate::sql::statement::IdentityRequest,
         effective: &SqlSupport,
     ) -> Result<IdentityPlan, CompileError>;
+}
+
+pub(crate) fn compiler_requirements(
+    compiler: &dyn SqlCompiler,
+    statement: &Statement,
+) -> Requirements {
+    let mut requirements = Requirements::for_statement(statement);
+    requirements.bind_parameters = compiler.bind_parameters(statement);
+    requirements
 }
 
 #[derive(Debug)]
