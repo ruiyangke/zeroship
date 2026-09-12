@@ -20,6 +20,8 @@ use zeroship_auth::session_store::{
 };
 use zeroship_auth::store::users;
 
+mod liveness;
+
 const IDLE_DAYS: i64 = 7;
 const ABSOLUTE_DAYS: i64 = 30;
 const IDEM_WINDOW_SECS: i64 = 30;
@@ -83,7 +85,7 @@ async fn seed(db: &Client, tag: &str) -> (Uuid, String, String) {
     (person_id, client_id, grant_id)
 }
 
-fn new_session<'a>(
+const fn new_session<'a>(
     person_id: Uuid,
     grant_id: &'a str,
     subject: &'a str,
