@@ -236,12 +236,12 @@ mod runtime_descriptor_binding_tests {
         );
         let mut invalid = runtime_descriptor.clone();
         invalid["collections"]["users"]["fields"] = value!({
-            "key": { "type": "string", "required": true, "primaryKey": true }
+            "key": { "type": "string", "required": false, "primaryKey": true }
         });
         let error = plugin()
             .bind_runtime_descriptor(scope, APP, Some(&serde_json::to_value(&invalid).unwrap()))
-            .expect_err("renamed identity must fail at native installation");
-        assert!(error.contains("id"), "{error}");
+            .expect_err("nullable identity must fail at native installation");
+        assert!(error.contains("required and non-null"), "{error}");
         assert_eq!(
             descriptor::collection_schema(&binding, "users").unwrap(),
             schema
