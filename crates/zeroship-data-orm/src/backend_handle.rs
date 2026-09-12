@@ -179,7 +179,7 @@ async fn read_on_route<T>(
     }
 }
 
-pub async fn read_raw_column_value(
+pub(crate) async fn read_raw_column_value(
     route: &TxRoute,
     collection: &str,
     raw_column: &str,
@@ -208,7 +208,7 @@ pub async fn read_raw_column_value(
     let rows = crate::exec::run_sql(route, &query.sql, &query.params).await?;
     Ok(native_scalar(rows, "_raw"))
 }
-pub async fn read_raw_column_bytes(
+pub(crate) async fn read_raw_column_bytes(
     route: &TxRoute,
     collection: &str,
     raw_column: &str,
