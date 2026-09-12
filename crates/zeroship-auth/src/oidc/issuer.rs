@@ -439,7 +439,6 @@ impl Issuer {
         self.register_signed_token(db, signed).await
     }
 
-
     /// Issue an RFC 9068 access token for a platform principal. This is used by
     /// first-party resource servers such as control where `sub` is the global
     /// principal UUID, not an end-user pairwise app subject.
@@ -464,7 +463,6 @@ impl Issuer {
         )?;
         self.register_signed_token(db, signed).await
     }
-
 
     fn build_access_token_with_subject(
         &self,
@@ -542,7 +540,6 @@ impl Issuer {
         )?;
         self.register_signed_token(db, signed).await
     }
-
 
     /// Issue an OIDC Core ID token for a platform principal. This is used only
     /// by gateway-brokered login after the broker secret has authenticated the
@@ -673,7 +670,6 @@ impl Issuer {
         let signed = self.build_logout_token(mint)?;
         self.register_signed_token(db, signed).await
     }
-
 
     fn build_logout_token(&self, mint: &LogoutTokenMint<'_>) -> Result<SignedJwt> {
         if mint.client_id.trim().is_empty() {

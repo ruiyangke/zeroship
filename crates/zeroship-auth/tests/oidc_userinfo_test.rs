@@ -652,10 +652,11 @@ fn access_token_with_scopes(
 }
 
 fn tamper_token(token: &str) -> String {
-    let mut tampered = token.to_string();
-    let last = tampered.pop().expect("non-empty token");
-    tampered.push(if last == 'a' { 'b' } else { 'a' });
-    tampered
+    let (prefix, signature) = token.rsplit_once('.').expect("signed JWT");
+    let mut signature = signature.to_owned();
+    let replacement = if signature.starts_with('a') { "b" } else { "a" };
+    signature.replace_range(..1, replacement);
+    format!("{prefix}.{signature}")
 }
 
 fn unix_timestamp() -> i64 {
