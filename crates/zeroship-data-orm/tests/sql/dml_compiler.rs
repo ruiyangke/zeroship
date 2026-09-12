@@ -542,6 +542,19 @@ fn insert_rejects_foreign_columns_and_invalid_row_shapes() {
 }
 
 #[test]
+fn integer_storage_rejects_values_outside_the_portable_database_range() {
+    let table = table();
+    let mut input = insert_parts(&table);
+    input.rows[0][1] = Expression::Bind(Value::from(u64::MAX));
+    assert_eq!(
+        Insert::new(input).unwrap_err(),
+        CompileError::InvalidStatement(
+            "bound value does not match its physical storage type".into()
+        )
+    );
+}
+
+#[test]
 fn returning_projection_rejects_duplicate_output_names() {
     let table = table();
     let id = table.column("id").unwrap();

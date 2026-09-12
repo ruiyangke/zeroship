@@ -29,7 +29,7 @@ impl StorageType {
     fn accepts(self, value: &Value) -> bool {
         match self {
             Self::Boolean => matches!(value, Value::Bool(_)),
-            Self::Integer => value.as_i64().is_some() || value.as_u64().is_some(),
+            Self::Integer => value.as_i64().is_some(),
             Self::Real => matches!(value, Value::Number(_)),
             Self::Text => matches!(value, Value::String(_)),
             Self::Bytes => matches!(value, Value::Bytes(_)),
