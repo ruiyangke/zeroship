@@ -36,7 +36,7 @@ async fn postgres_continuation_retargets_every_parent_wait_across_pages() {
 }
 
 async fn compensation_contract(store: Rc<OrmStore>) {
-    let (service, local, foreign) = registered_service(store).await;
+    let (service, local, foreign, _deployments) = registered_service(store).await;
     let run_id = typed_id::new_workflow_run_id();
     let count = i32::try_from(RowLimit::default().get()).unwrap() + 1;
     let mut tx = service.begin().await.unwrap();
@@ -117,7 +117,7 @@ async fn compensation_contract(store: Rc<OrmStore>) {
 }
 
 async fn continuation_contract(store: Rc<OrmStore>) {
-    let (service, local, foreign) = registered_service(store).await;
+    let (service, local, foreign, _deployments) = registered_service(store).await;
     let child = typed_id::new_workflow_run_id();
     let parent = typed_id::new_workflow_run_id();
     let other_parent = typed_id::new_workflow_run_id();

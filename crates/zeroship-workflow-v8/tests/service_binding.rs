@@ -12,8 +12,8 @@ use zeroship_runtime::{
 use zeroship_workflow::{
     operations::{RunState, StartOptions},
     service::{
-        AppPolicy, AppWorkflows, DeployRegistration, ExecutableSnapshot, HostPolicies,
-        PolicySnapshot, RequestId, SnapshotStore, WorkerIdentity, WorkflowService,
+        AppPolicy, AppWorkflows, DeployRegistration, HostPolicies, PolicySnapshot, RequestId,
+        WorkerIdentity, WorkflowService,
     },
     WorkflowExecution,
 };
@@ -34,17 +34,10 @@ impl Fixture {
         )
         .await
         .unwrap();
-        let service = service.with_snapshots(
-            SnapshotStore::new(
-                &zeroship_storage::StorageStore::from_backend(Arc::new(
-                    zeroship_storage::LocalFs::new(directory.path().join("snapshots")),
-                )),
-                1024 * 1024,
-            )
-            .unwrap(),
-        );
+        let deployments = deployment_fixture::Deployments::new().await;
         let app = AppId::mint();
         let other = AppId::mint();
+        let service = service.with_deployments(deployments.binding(&[&app, &other]));
         for id in [&app, &other] {
             service
                 .register_app(
@@ -54,8 +47,9 @@ impl Fixture {
                 )
                 .await
                 .unwrap();
-            service
-                .activate_deploy(
+            deployments
+                .activate(
+                    &service,
                     id,
                     &DeployRegistration {
                         id: typed_id::generate("dep"),
@@ -63,12 +57,6 @@ impl Fixture {
                         workflows: ["Example".into()].into(),
                         schedules: Vec::new(),
                     },
-                    &ExecutableSnapshot::new(
-                        "index.js".into(),
-                        [("index.js".into(), "export default {};".into())].into(),
-                        None,
-                    )
-                    .unwrap(),
                 )
                 .await
                 .unwrap();
@@ -240,3 +228,6 @@ async fn mismatched_or_missing_host_identity_rejects_before_creator_evaluation()
 
 #[path = "support/orm.rs"]
 mod orm_fixture;
+
+#[path = "../../../tests/fixtures/workflow_deployments.rs"]
+mod deployment_fixture;

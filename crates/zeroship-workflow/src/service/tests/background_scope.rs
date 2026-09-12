@@ -29,9 +29,15 @@ async fn postgres_background_work_uses_only_host_assigned_apps() {
     background_contract(Rc::new(fixture.store.clone()), dir.path()).await;
 }
 
-async fn seed_app(service: &WorkflowService, app: &AppId, worker: &WorkerIdentity) -> String {
-    service
-        .activate_deploy(
+async fn seed_app(
+    deployments: &Deployments,
+    service: &WorkflowService,
+    app: &AppId,
+    worker: &WorkerIdentity,
+) -> String {
+    deployments
+        .activate(
+            service,
             app,
             &DeployRegistration {
                 id: typed_id::generate("dep"),
@@ -49,7 +55,6 @@ async fn seed_app(service: &WorkflowService, app: &AppId, worker: &WorkerIdentit
                     catch_up: ScheduleCatchUp::default(),
                 }],
             },
-            &test_snapshot(),
         )
         .await
         .unwrap();
@@ -104,7 +109,7 @@ async fn seed_unassigned_backlog(service: &WorkflowService, source: &AppId) {
         )
         .await
         .unwrap();
-        tx.execute(&format!("INSERT INTO {deploys} (app_id,id,hash,manifest,created_at,active,state,snapshot_hash,snapshot_size,snapshot_epoch) SELECT $1,id,hash,manifest,created_at,active,state,snapshot_hash,snapshot_size,snapshot_epoch FROM {deploys} WHERE app_id=$2 AND active=1"), &[app.as_str().into(),source.as_str().into()]).await.unwrap();
+        tx.execute(&format!("INSERT INTO {deploys} (app_id,id,hash,manifest,created_at,active,state,availability_epoch) SELECT $1,id,hash,manifest,created_at,active,state,availability_epoch FROM {deploys} WHERE app_id=$2 AND active=1"), &[app.as_str().into(),source.as_str().into()]).await.unwrap();
         crate::service::app::insert_root_run(
             &mut tx,
             &app,
@@ -139,12 +144,12 @@ async fn seed_unassigned_backlog(service: &WorkflowService, source: &AppId) {
     reason = "the restart contract checks selection, isolation and expiry recovery together"
 )]
 async fn background_contract(store: Rc<OrmStore>, path: &Path) {
-    let (service, assigned, foreign) = registered_service(store.clone()).await;
+    let (service, assigned, foreign, deployments) = registered_service(store.clone()).await;
     let storage = StorageStore::from_backend(Arc::new(LocalFs::new(path.join("objects"))));
     let service = service.with_payload_storage(storage.clone()).unwrap();
     let worker = WorkerIdentity::new("customer-worker".into()).unwrap();
-    let assigned_payload = seed_app(&service, &assigned, &worker).await;
-    let foreign_payload = seed_app(&service, &foreign, &worker).await;
+    let assigned_payload = seed_app(&deployments, &service, &assigned, &worker).await;
+    let foreign_payload = seed_app(&deployments, &service, &foreign, &worker).await;
     seed_unassigned_backlog(&service, &foreign).await;
     let assigned_broadcast = service
         .for_app(assigned.clone())

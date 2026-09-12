@@ -291,7 +291,7 @@ async fn close_admission(
             || record.active != 0
             || !matches!(
                 record.state.as_str(),
-                "available" | "unavailable" | "staging" | "retiring"
+                "available" | "unavailable" | "retiring"
             )
         {
             return Err(conflict(
@@ -355,14 +355,17 @@ pub(super) async fn admission_generation(
     app: &AppId,
     deployment: &str,
     hash: &str,
-) -> Result<Option<i64>, WorkflowServiceError> {
-    let Some(intent) = read_intent(tx, app, deployment).await? else {
-        return Ok(None);
-    };
+    scope: &HoldScope,
+) -> Result<i64, WorkflowServiceError> {
+    validate_scope(app, deployment, scope)?;
+    let intent = read_intent(tx, app, deployment)
+        .await?
+        .ok_or_else(|| conflict("deployment hold is missing"))?;
+    intent.validate(scope)?;
     if intent.state != "held" || intent.generation <= 0 || intent.deploy_hash != hash {
         return Err(conflict("deployment hold has not opened admission"));
     }
-    Ok(Some(intent.generation))
+    Ok(intent.generation)
 }
 fn identity(app: &AppId, deployment: &str) -> zeroship_data_orm::Value {
     value!({"app_id":app.as_str(), "deploy_id":deployment})

@@ -41,7 +41,7 @@ async fn postgres_named_outputs_follow_the_current_generation_without_object_sto
 }
 
 async fn output_contract(store: Rc<OrmStore>) {
-    let (service, app, other) = registered_service(store).await;
+    let (service, app, other, _deployments) = registered_service(store).await;
     let app = service.for_app(app);
     let other = service.for_app(other);
     let backend = app.clone().into_backend(1024).unwrap();

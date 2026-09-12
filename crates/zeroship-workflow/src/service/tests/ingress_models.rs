@@ -20,7 +20,7 @@ async fn postgres_signal_revocation_preserves_foreign_and_other_target_authority
 }
 
 async fn revocation_contract(store: Rc<OrmStore>) {
-    let (service, local, foreign) = registered_service(store).await;
+    let (service, local, foreign, _deployments) = registered_service(store).await;
     let service = service.with_signal_authority(Arc::new(
         SignalAuthority::new(
             Arc::new(ServiceSigningKey::generate()),

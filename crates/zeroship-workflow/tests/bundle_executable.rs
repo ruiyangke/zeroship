@@ -4,10 +4,11 @@
 )]
 
 use serde_json::json;
+use zeroship_bundle::ExecutableError;
 use zeroship_bundle::{
     sha256_hex, BlobStore, LocalDiskBlobStore, Manifest, RuntimeDescriptorEntry, WorkerCode,
 };
-use zeroship_workflow::{service::BundleExecutable, WorkflowServiceError};
+use zeroship_workflow::service::BundleExecutable;
 
 async fn fixture(store: &dyn BlobStore) -> Manifest {
     let mut modules = std::collections::HashMap::new();
@@ -45,11 +46,11 @@ async fn executable_loading_preserves_code_schema_and_declarations() {
         .await
         .unwrap();
     assert_eq!(
-        original.snapshot().modules()["part.js"],
+        original.executable().modules()["part.js"],
         "export default 'retained';"
     );
     assert_eq!(
-        original.snapshot().runtime_descriptor(),
+        original.executable().runtime_descriptor(),
         Some(&json!({"version":2,"collections":{}}))
     );
     let mut declarations = manifest.clone();
@@ -79,8 +80,8 @@ async fn executable_loading_preserves_code_schema_and_declarations() {
             BundleExecutable::load(&changed, &store, 4096)
                 .await
                 .unwrap()
-                .snapshot(),
-            original.snapshot()
+                .executable(),
+            original.executable()
         );
     }
 }
@@ -92,7 +93,7 @@ async fn executable_reads_refuse_missing_corrupt_and_over_budget_sources() {
     let manifest = fixture(&store).await;
     assert!(matches!(
         BundleExecutable::load(&manifest, &store, 1).await,
-        Err(WorkflowServiceError::PayloadTooLarge)
+        Err(ExecutableError::TooLarge)
     ));
     let hash = &manifest.worker.as_ref().unwrap().modules["part.js"];
     let blob_path = dir.path().join("blobs").join(&hash[..2]).join(&hash[2..]);
@@ -109,6 +110,6 @@ async fn executable_reads_refuse_missing_corrupt_and_over_budget_sources() {
     invalid.workflows = Some(json!({"Example": true}));
     assert!(matches!(
         BundleExecutable::load(&invalid, &store, 4096).await,
-        Err(WorkflowServiceError::InvalidRequest(_))
+        Err(ExecutableError::InvalidManifest)
     ));
 }

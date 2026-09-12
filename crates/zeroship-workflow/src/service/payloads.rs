@@ -208,7 +208,7 @@ impl WorkflowService {
         let claim = authorized_task(&mut tx, worker, task_id, token).await?;
         claim.validate_live()?;
         claim.policy.admit()?;
-        let row = payload(&mut tx, &claim.app, &id).await?;
+        let row = payload(&tx, &claim.app, &id).await?;
         match row.state.as_str() {
             "staged" | "referenced" => {
                 tx.commit().await?;
@@ -305,7 +305,7 @@ impl WorkflowService {
             let mut tx = self.begin().await?;
             lock_app(&mut tx, &app).await?;
             let now = tx.now().await?;
-            let row = payload(&mut tx, &app, &id).await?;
+            let row = payload(&tx, &app, &id).await?;
             if !matches!(
                 row.state.as_str(),
                 "uploading" | "staged" | "deleting" | "deleted"

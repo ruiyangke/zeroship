@@ -81,7 +81,7 @@ async fn schedule(tx: &Transaction, app: &AppId, name: &str) -> models::Schedule
 }
 
 async fn history_contract(store: Rc<OrmStore>) {
-    let (service, local, foreign) = registered_service(store).await;
+    let (service, local, foreign, deployments) = registered_service(store).await;
     let count = RowLimit::default().get() as usize + 1;
     let mut ids: Vec<_> = (0..count)
         .map(|_| typed_id::new_workflow_schedule_id())
@@ -120,8 +120,8 @@ async fn history_contract(store: Rc<OrmStore>) {
     tx.commit().await.unwrap();
     let selected = registration(&format!("historical-{}", count - 1));
     let deploy = deployment(vec![selected.clone()]);
-    service
-        .activate_deploy(&local, &deploy, &test_snapshot())
+    deployments
+        .activate(&service, &local, &deploy)
         .await
         .unwrap();
     let tx = service.begin().await.unwrap();
@@ -154,8 +154,8 @@ async fn history_contract(store: Rc<OrmStore>) {
     assert_eq!(other.revision, 0);
     assert!(other.next_at.is_none());
     tx.commit().await.unwrap();
-    service
-        .activate_deploy(&local, &deploy, &test_snapshot())
+    deployments
+        .activate(&service, &local, &deploy)
         .await
         .unwrap();
     let tx = service.begin().await.unwrap();
@@ -167,10 +167,10 @@ async fn history_contract(store: Rc<OrmStore>) {
 }
 
 async fn overflow_contract(store: Rc<OrmStore>) {
-    let (service, app_id, _) = registered_service(store).await;
+    let (service, app_id, _, deployments) = registered_service(store).await;
     let original = deployment(vec![registration("billing"), registration("removed")]);
-    service
-        .activate_deploy(&app_id, &original, &test_snapshot())
+    deployments
+        .activate(&service, &app_id, &original)
         .await
         .unwrap();
     let mut tx = service.begin().await.unwrap();
@@ -188,9 +188,7 @@ async fn overflow_contract(store: Rc<OrmStore>) {
         .unwrap();
     tx.commit().await.unwrap();
     let replacement = deployment(vec![registration("billing")]);
-    let result = service
-        .activate_deploy(&app_id, &replacement, &test_snapshot())
-        .await;
+    let result = deployments.activate(&service, &app_id, &replacement).await;
     assert!(
         matches!(&result, Err(WorkflowServiceError::Internal(message))
         if message == "workflow schedule revision overflow"),

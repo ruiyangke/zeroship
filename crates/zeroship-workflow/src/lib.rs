@@ -3,6 +3,9 @@
 //! This crate has no dependency on V8. Customer hosts compose the shared engine
 //! with their journal, retained executables and task executor.
 
+#[cfg(test)]
+extern crate self as zeroship_workflow;
+
 pub mod advance;
 pub mod apply;
 pub mod backend;

@@ -23,10 +23,9 @@ metadata store, HTTP host and platform migration now use the metadata-only
 contract. Native PostgreSQL and real-process tests cover scoped authority,
 replica retries, startup privileges and restart recovery. The CLI now composes
 the shared engine and background runner. Production composition remains
-unfinished. The CLI and Vite now supply the normal app archive without a
-workflow-specific artifact argument. The engine's customer executable snapshot
-copies are superseded by the app-deployment contract below and must be removed
-together with their callers.
+unfinished. The CLI and Vite supply the normal app archive. The engine and V8
+runner load its manifest and content-addressed blobs; workflow executable
+snapshot persistence and its separate size limit have been removed.
 
 The normal bundle crate now owns executable loading and manifest-identity
 verification. Ingest preserves the manifest fields used to compute deployment
@@ -49,9 +48,12 @@ The local host now registers normal app deployments in an ORM-backed catalog
 beside their manifests and blobs. Deployment identities survive journal
 replacement, and activation acquires a durable hold using the local journal's
 stable host identity. Repeated publication preserves reclamation tombstones.
-Background host client composition, mandatory holds for normal app artifact
-loading, the production retention cutover and replacement of executable snapshot
-persistence remain pending.
+Engine activation now acquires or reconciles a hold through a host-bound client
+before verifying the normal app artifact. Both activation and task reads check
+the held generation across artifact I/O. Missing or corrupt artifacts park
+their deployment, and an availability epoch protects concurrent repairs.
+Background hold reconciliation and the production retention cutover remain
+pending.
 
 Active, reloaded and pinned production worker isolates now load the complete
 module graph through the shared bundle loader. Pinned manifest reads verify

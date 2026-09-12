@@ -36,7 +36,7 @@ export function workflowSchema(namespace) {
   create("deploys", {
     ...identity(), id: text(), hash: text(), manifest: text(), created_at: integer(),
     active: integer(), state: text(),
-    snapshot_hash: text(), snapshot_size: integer(), snapshot_epoch: integer(),
+    availability_epoch: integer(),
   }, ["app_id", "id"], [appFk("deploys")], [
     { name: "deploy_hash_identity", columns: ["app_id", "hash"] },
   ]);

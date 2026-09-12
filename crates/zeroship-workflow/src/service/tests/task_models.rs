@@ -19,7 +19,7 @@ async fn postgres_recovery_refuses_a_foreign_task_reference() {
 }
 
 async fn foreign_reference(store: Rc<OrmStore>) {
-    let (service, app, foreign) = registered_service(store.clone()).await;
+    let (service, app, foreign, _deployments) = registered_service(store.clone()).await;
     let worker = WorkerIdentity::new("task-model-worker".into()).unwrap();
     let mut assignments = Vec::new();
     for app_id in [&app, &foreign] {

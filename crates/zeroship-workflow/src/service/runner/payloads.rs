@@ -8,9 +8,7 @@
 use super::WorkerTasks;
 use crate::{
     engine::{JournalStep, WorkflowOutputRef},
-    service::{
-        ExecutableSnapshot, PayloadRead, RequestId, StagedPayload, TaskAssignment, TaskToken,
-    },
+    service::{PayloadRead, RequestId, StagedPayload, TaskAssignment, TaskToken},
     validation, WorkflowServiceError,
 };
 use async_trait::async_trait;
@@ -20,17 +18,18 @@ use std::{
     rc::Rc,
     task::{Poll, Waker},
 };
+use zeroship_bundle::LoadedWorker;
 use zeroship_core::app_id::AppId;
 use zeroship_storage::backend::BoxChunkSource;
 
 /// Host-only payload authority; task credentials never enter the app isolate.
 #[async_trait(?Send)]
 pub trait TaskPayloads {
-    async fn snapshot(
+    async fn executable(
         &self,
         task: &str,
         token: &TaskToken,
-    ) -> Result<ExecutableSnapshot, WorkflowServiceError>;
+    ) -> Result<LoadedWorker, WorkflowServiceError>;
     async fn stage(
         &self,
         task: &str,
@@ -49,12 +48,14 @@ pub trait TaskPayloads {
 
 #[async_trait(?Send)]
 impl TaskPayloads for WorkerTasks {
-    async fn snapshot(
+    async fn executable(
         &self,
         task: &str,
         token: &TaskToken,
-    ) -> Result<ExecutableSnapshot, WorkflowServiceError> {
-        self.service.task_snapshot(&self.worker, task, token).await
+    ) -> Result<LoadedWorker, WorkflowServiceError> {
+        self.service
+            .task_executable(&self.worker, task, token)
+            .await
     }
     async fn stage(
         &self,
@@ -107,9 +108,9 @@ impl TaskPayloadReader {
     /// Load the immutable executable under the captured task authority.
     ///
     /// # Errors
-    /// Rejects expired claims, missing snapshots and integrity failures.
-    pub async fn snapshot(&self) -> Result<ExecutableSnapshot, WorkflowServiceError> {
-        self.transport.snapshot(&self.task, &self.token).await
+    /// Rejects expired claims, missing artifacts and integrity failures.
+    pub async fn executable(&self) -> Result<LoadedWorker, WorkflowServiceError> {
+        self.transport.executable(&self.task, &self.token).await
     }
     /// Capture the replay journal and read budget from a host assignment.
     ///

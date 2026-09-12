@@ -61,18 +61,20 @@ or nonces returned by JavaScript do not select the mutation target.
 
 Workflows belong to the app's normal `.zship` deployment. Runs pin that app
 deployment and load its code and runtime descriptor through the app bundle
-loader. The [worker design](../proposals/2026-09-11-workflow-worker.md) specifies
-durable deployment holds so platform bundle collection needs no customer SQL
-access. It also requires local development to use the same app build and local
-artifact retention.
+loader. Activation acquires a durable deployment hold before selecting code;
+replay verifies the held app manifest and its referenced blobs. Local development
+uses the same app build and retains normal deployment metadata beside the
+artifacts. The [worker design](../proposals/2026-09-11-workflow-worker.md) describes
+the remaining production retention cutover, which keeps platform bundle
+collection independent of customer SQL.
 
 The CLI runs background work on a dedicated workflow thread, independently of
 HTTP requests. `zeroship serve dist/app.zship` loads the app's server modules for
 HTTP and workflow execution. Vite builds and publishes the local app artifact
 automatically while serving client assets and live modules through its dev
 bridge. There is no workflow-only archive argument or TOML bundle setting.
-The engine's customer executable snapshot copies are still being replaced with
-reads from the retained app bundle store.
+Workflow execution reads from the retained app bundle store without making
+separate executable copies.
 
 The CLI persists its trusted workflow app identity in `.zeroship/app-id`. The
 journal uses the app database selected by `DATABASE_URL`, and payloads use the

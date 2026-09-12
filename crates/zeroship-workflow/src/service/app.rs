@@ -25,7 +25,7 @@ use zeroship_data_orm::{
 pub struct WorkflowService {
     pub(crate) store: Rc<OrmStore>,
     pub(crate) policies: Arc<super::HostPolicies>,
-    pub(crate) snapshots: Option<super::SnapshotStore>,
+    pub(crate) deployments: Option<super::AppDeployments>,
     pub(crate) signal_authority: Option<Arc<super::SignalAuthority>>,
     pub(crate) payload_storage: Option<zeroship_storage::Storage>,
 }
@@ -56,7 +56,7 @@ impl WorkflowService {
         Ok(Self {
             store,
             policies,
-            snapshots: None,
+            deployments: None,
             signal_authority: None,
             payload_storage: None,
         })

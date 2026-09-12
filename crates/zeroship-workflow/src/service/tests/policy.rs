@@ -46,7 +46,7 @@ fn host_policy_revisions_reject_conflicting_limits_and_accept_authorized_refresh
 #[compio::test]
 async fn policy_revocation_while_waiting_for_customer_lock_prevents_admission() {
     let fixture = PostgresFixture::start().await;
-    let (service, app, _) = registered_service(Rc::new(fixture.store.clone())).await;
+    let (service, app, _, _deployments) = registered_service(Rc::new(fixture.store.clone())).await;
     let blocker = connect(&fixture.admin_url).await;
     blocker.batch_execute("BEGIN").await.unwrap();
     blocker
@@ -123,7 +123,7 @@ async fn postgres_host_policy_needs_no_platform_database() {
     reason = "The fixture drives a thread-local compio journal"
 )]
 async fn host_policy_contract(store: Rc<OrmStore>) {
-    let (service, app, other) = registered_service(store.clone()).await;
+    let (service, app, other, _deployments) = registered_service(store.clone()).await;
     let scope = service.for_app(app.clone());
     let request = RequestId::mint();
     let run = scope
@@ -230,7 +230,8 @@ async fn metadata_lease_bounds_grants_and_duplicate_delivery_keeps_its_deadline(
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("zs-workflow.sqlite");
     schema::initialize_sqlite(&path).unwrap();
-    let (service, app, _) = registered_service(Rc::new(sqlite_store(&path).await)).await;
+    let (service, app, _, _deployments) =
+        registered_service(Rc::new(sqlite_store(&path).await)).await;
     let lifetime = Duration::from_millis(250);
     let until = Instant::now() + lifetime;
     let snapshot =
@@ -262,7 +263,7 @@ async fn metadata_lease_bounds_grants_and_duplicate_delivery_keeps_its_deadline(
 #[compio::test]
 async fn customer_schema_binding_is_explicit_and_independent_of_app_identity() {
     let fixture = PostgresFixture::start().await;
-    let (first, app, _) = registered_service(Rc::new(fixture.store.clone())).await;
+    let (first, app, _, deployments) = registered_service(Rc::new(fixture.store.clone())).await;
     let admin = connect(&fixture.admin_url).await;
     let other = super::super::store::SchemaName::new("customer-other").unwrap();
     admin.batch_execute("CREATE SCHEMA \"customer-other\" AUTHORIZATION customer_migrator; CREATE ROLE other_customer_worker LOGIN; CREATE ROLE \"app_customer-other_role\" NOLOGIN; GRANT \"app_customer-other_role\" TO other_customer_worker; SET ROLE customer_migrator;").await.unwrap();
@@ -297,13 +298,14 @@ async fn customer_schema_binding_is_explicit_and_independent_of_app_identity() {
     )
     .await
     .unwrap();
-    let second = second.with_snapshots(fixture_snapshot_store());
+    let second = second.with_deployments(deployments.binding(&[&app]));
     second
         .register_app(&app, configured_policy(1, AppPolicy::default()))
         .await
         .unwrap();
-    second
-        .activate_deploy(
+    deployments
+        .activate(
+            &second,
             &app,
             &DeployRegistration {
                 id: typed_id::generate("dep"),
@@ -311,7 +313,6 @@ async fn customer_schema_binding_is_explicit_and_independent_of_app_identity() {
                 workflows: ["Example".into()].into(),
                 schedules: Vec::new(),
             },
-            &test_snapshot(),
         )
         .await
         .unwrap();

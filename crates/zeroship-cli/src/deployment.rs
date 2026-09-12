@@ -11,7 +11,7 @@ use zeroship_bundle::{verify_deployment_manifest, BlobStore, LocalDiskBlobStore}
 use zeroship_core::app_id::AppId;
 use zeroship_workflow::{
     deployment_holds::DeploymentHolds,
-    service::{BundleExecutable, DeployRegistration},
+    service::{AppDeployments, BundleExecutable, DeployRegistration},
     WorkflowServiceError,
 };
 
@@ -42,6 +42,13 @@ impl AppDeployment {
 
     pub async fn catalog(&self) -> Result<DeploymentHolds, WorkflowServiceError> {
         DeploymentHolds::open_local(&self.index).await
+    }
+
+    pub fn artifacts(
+        &self,
+        max_source_bytes: usize,
+    ) -> Result<AppDeployments, WorkflowServiceError> {
+        AppDeployments::new(self.blobs.clone(), max_source_bytes)
     }
 
     pub async fn load(

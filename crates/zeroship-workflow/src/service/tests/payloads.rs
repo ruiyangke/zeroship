@@ -66,7 +66,7 @@ async fn delayed_payload_write(operation: &str) {
     let fixture = PostgresFixture::start().await;
     let dir = tempfile::tempdir().unwrap();
     let store: Rc<OrmStore> = Rc::new(fixture.store.clone());
-    let (service, app, _) = registered_service(store.clone()).await;
+    let (service, app, _, _deployments) = registered_service(store.clone()).await;
     let service = service.with_payload_storage(local(dir.path())).unwrap();
     service
         .for_app(app.clone())
@@ -151,7 +151,7 @@ async fn s3_payload_ownership_and_retention() {
 }
 
 async fn payload_contract(store: Rc<OrmStore>, storage: StorageStore) {
-    let (service, a, b) = registered_service(store.clone()).await;
+    let (service, a, b, _deployments) = registered_service(store.clone()).await;
     let service = service.with_payload_storage(storage.clone()).unwrap();
     let scope = service.for_app(a.clone());
     let foreign = service.for_app(b);
@@ -723,7 +723,7 @@ async fn deletion_failure_recovers_without_reopening_payload_authority() {
     let path = dir.path().join("zs-workflow.sqlite");
     schema::initialize_sqlite(&path).unwrap();
     let store: Rc<OrmStore> = Rc::new(sqlite_store(&path).await);
-    let (service, app, _) = registered_service(store.clone()).await;
+    let (service, app, _, _deployments) = registered_service(store.clone()).await;
     let backend = Arc::new(FailingDelete {
         inner: LocalFs::new(dir.path().join("objects")),
         fail: true.into(),
@@ -802,7 +802,7 @@ async fn postgres_collection_rechecks_references_after_waiting_for_completion() 
     let fixture = PostgresFixture::start().await;
     let dir = tempfile::tempdir().unwrap();
     let store: Rc<OrmStore> = Rc::new(fixture.store.clone());
-    let (service, app, _) = registered_service(store.clone()).await;
+    let (service, app, _, _deployments) = registered_service(store.clone()).await;
     let service = service.with_payload_storage(local(dir.path())).unwrap();
     let scope = service.for_app(app.clone());
     let run = scope

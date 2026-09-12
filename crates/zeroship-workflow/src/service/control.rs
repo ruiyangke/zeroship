@@ -147,12 +147,12 @@ impl AppWorkflows {
             .database()
             .collection(models::tasks::Entity::COLLECTION)?;
         let runs = tx.table("runs");
-        if parse_state(&run.text("state")?)?.is_terminal() {
-            if live_runs(&tx, &self.app).await? >= policy.max_live_runs {
-                return Err(WorkflowServiceError::ResourceExhausted(
-                    "workflow live-run limit reached".into(),
-                ));
-            }
+        if parse_state(&run.text("state")?)?.is_terminal()
+            && live_runs(&tx, &self.app).await? >= policy.max_live_runs
+        {
+            return Err(WorkflowServiceError::ResourceExhausted(
+                "workflow live-run limit reached".into(),
+            ));
         }
         let Output::Count(live) = tasks
             .count(

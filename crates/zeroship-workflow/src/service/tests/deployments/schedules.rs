@@ -1,6 +1,6 @@
 #![expect(
     clippy::future_not_send,
-    reason = "snapshot scheduling tests use customer storage on their compio thread"
+    reason = "artifact scheduling tests use customer storage on their compio thread"
 )]
 
 use super::*;
@@ -28,30 +28,30 @@ fn scheduled_deployment(count: usize) -> DeployRegistration {
 }
 
 #[compio::test]
-async fn sqlite_schedules_wait_for_snapshot_repair_without_blocking_other_apps() {
+async fn sqlite_schedules_wait_for_artifact_repair_without_blocking_other_apps() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("zs-workflow.sqlite");
     schema::initialize_sqlite(&path).unwrap();
-    scheduled_snapshot_contract(Rc::new(sqlite_store(&path).await), dir.path()).await;
+    scheduled_artifact_contract(Rc::new(sqlite_store(&path).await)).await;
 }
 
 #[compio::test]
-async fn postgres_schedules_wait_for_snapshot_repair_without_blocking_other_apps() {
+async fn postgres_schedules_wait_for_artifact_repair_without_blocking_other_apps() {
     let fixture = PostgresFixture::start().await;
-    let dir = tempfile::tempdir().unwrap();
-    scheduled_snapshot_contract(Rc::new(fixture.store.clone()), dir.path()).await;
+    scheduled_artifact_contract(Rc::new(fixture.store.clone())).await;
 }
 
 #[expect(
     clippy::too_many_lines,
     reason = "the contract follows executable loss through schedule deferral and repair"
 )]
-async fn scheduled_snapshot_contract(store: Rc<OrmStore>, path: &Path) {
-    let storage = StorageStore::from_backend(Arc::new(LocalFs::new(path.join("objects"))));
-    let snapshots = SnapshotStore::new(&storage, 1024 * 1024).unwrap();
-    let (service, app, other) = registered_with_snapshots(store, snapshots).await;
+async fn scheduled_artifact_contract(store: Rc<OrmStore>) {
+    let (service, app, other, deployments) = registered_service(store).await;
     // An unavailable deployment's due backlog exceeds the selection budget.
-    let deploy = scheduled_deployment(140);
+    let deploy = deployments
+        .publish(&app, &scheduled_deployment(140), &Sources::default())
+        .await
+        .unwrap();
     service
         .register_app(
             &app,
@@ -65,13 +65,9 @@ async fn scheduled_snapshot_contract(store: Rc<OrmStore>, path: &Path) {
         )
         .await
         .unwrap();
-    let snapshot = test_snapshot();
-    service
-        .activate_deploy(&app, &deploy, &snapshot)
-        .await
-        .unwrap();
-    service
-        .activate_deploy(&other, &scheduled_deployment(1), &snapshot)
+    service.activate_deploy(&app, &deploy).await.unwrap();
+    deployments
+        .activate(&service, &other, &scheduled_deployment(1))
         .await
         .unwrap();
     service
@@ -79,13 +75,21 @@ async fn scheduled_snapshot_contract(store: Rc<OrmStore>, path: &Path) {
         .start(&RequestId::mint(), "Example", StartOptions::default())
         .await
         .unwrap();
-    let worker = WorkerIdentity::new("snapshot-worker".into()).unwrap();
+    let worker = WorkerIdentity::new("artifact-worker".into()).unwrap();
     let task = service.poll(&worker).await.unwrap().unwrap();
-    let objects =
-        storage.namespace(zeroship_storage::Namespace::platform("workflow-snapshots").unwrap());
-    objects.delete(app.as_str(), &deploy.id).await.unwrap();
+    let objects = &deployments.source;
+    let bytes = objects
+        .get_manifest(&app.uuid(), &deploy.hash)
+        .await
+        .unwrap();
+    objects
+        .delete_manifest(&app.uuid(), &deploy.hash)
+        .await
+        .unwrap();
     assert!(matches!(
-        service.task_snapshot(&worker, &task.id, &task.token).await,
+        service
+            .task_executable(&worker, &task.id, &task.token)
+            .await,
         Err(WorkflowServiceError::Unavailable(_))
     ));
     service
@@ -135,10 +139,11 @@ async fn scheduled_snapshot_contract(store: Rc<OrmStore>, path: &Path) {
     assert_eq!(admitted[0].integer("total").unwrap(), 0);
     tx.commit().await.unwrap();
 
-    service
-        .retain_deploy(&app, &deploy, &snapshot)
+    objects
+        .put_manifest(&app.uuid(), &deploy.hash, &bytes)
         .await
         .unwrap();
+    service.retain_deploy(&app, &deploy).await.unwrap();
     let mut fired = 0;
     loop {
         let next = service.tick_schedules().await.unwrap();
@@ -168,12 +173,12 @@ async fn scheduled_snapshot_contract(store: Rc<OrmStore>, path: &Path) {
 }
 
 #[compio::test]
-async fn postgres_schedule_rechecks_snapshot_after_waiting_for_app_lock() {
+async fn postgres_schedule_rechecks_artifact_after_waiting_for_app_lock() {
     use std::time::Duration;
     let fixture = PostgresFixture::start().await;
-    let (service, app, _) = registered_service(Rc::new(fixture.store.clone())).await;
-    service
-        .activate_deploy(&app, &scheduled_deployment(1), &test_snapshot())
+    let (service, app, _, deployments) = registered_service(Rc::new(fixture.store.clone())).await;
+    deployments
+        .activate(&service, &app, &scheduled_deployment(1))
         .await
         .unwrap();
     let mut tx = service.begin().await.unwrap();
