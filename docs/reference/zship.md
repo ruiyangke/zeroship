@@ -61,6 +61,15 @@ contains timing only: `kind: "cron"` with `cron_expr` and `tz`, or
 `kind: "interval"` with `interval_ms` and `anchor`. Scheduling policies appear
 on the registration and are not duplicated inside the timing object.
 
+## Deployment identity
+
+`deploy_hash` is the SHA-256 of the original manifest with that field omitted,
+object keys sorted recursively and insignificant whitespace removed. Ingestion
+stores those same fields in canonical JSON with the computed hash inserted.
+Field presence and extension metadata are preserved, so the stored manifest can
+be verified against its deployment identity. Typed consumers still validate and
+interpret the fields their manifest contract defines.
+
 ## Network Requests
 
 `net.requests` is a non-authoritative review hint for creator outbound egress:
