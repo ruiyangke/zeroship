@@ -3,8 +3,8 @@
 use super::resolved::ResolvedTable;
 use crate::{
     sql::{
-        mapping::QueryError,
         compiler::{CompiledQuery, Requirements},
+        mapping::QueryError,
         registration::SqlRegistration,
         statement::{Expression, Insert, InsertParts, Statement},
         SchemaName,
@@ -13,11 +13,11 @@ use crate::{
 };
 use std::collections::BTreeSet;
 
-pub(crate) fn requirements(schema: &Value) -> Requirements {
+pub(crate) fn requirements(allocates_identity: bool) -> Requirements {
     Requirements {
         returning: true,
-        insert_generated_identity: super::identity::is_generated(schema),
-        identity_allocation: super::identity::is_generated(schema),
+        insert_generated_identity: allocates_identity,
+        identity_allocation: allocates_identity,
         ..Requirements::default()
     }
 }
