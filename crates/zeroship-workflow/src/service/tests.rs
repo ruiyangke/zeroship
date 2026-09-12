@@ -25,6 +25,10 @@ mod output_writes;
 mod policy;
 mod runner;
 mod schema_binding;
+mod snapshots;
+#[path = "../../../../tests/fixtures/s3.rs"]
+mod s3_fixture;
+use snapshots::{fixture_snapshot_store, test_snapshot};
 
 #[compio::test]
 async fn sqlite_app_operations_are_scoped_and_retryable() {
@@ -41,9 +45,17 @@ async fn postgres_app_operations_are_scoped_and_retryable() {
 }
 
 async fn registered_service(store: Arc<dyn WorkflowStore>) -> (WorkflowService, AppId, AppId) {
+    registered_with_snapshots(store, fixture_snapshot_store()).await
+}
+
+async fn registered_with_snapshots(
+    store: Arc<dyn WorkflowStore>,
+    snapshots: super::SnapshotStore,
+) -> (WorkflowService, AppId, AppId) {
     let service = WorkflowService::open(store, Arc::new(HostPolicies::default()))
         .await
-        .unwrap();
+        .unwrap()
+        .with_snapshots(snapshots);
     let a = AppId::mint();
     let b = AppId::mint();
     for app in [&a, &b] {
@@ -64,6 +76,7 @@ async fn registered_service(store: Arc<dyn WorkflowStore>) -> (WorkflowService, 
                     workflows: ["Example".into(), "Child".into()].into(),
                     schedules: Vec::new(),
                 },
+                &test_snapshot(),
             )
             .await
             .unwrap();
@@ -250,7 +263,7 @@ async fn storage_contract(store: &dyn WorkflowStore) {
     for app in ["app_a", "app_b"] {
         tx.execute(&format!("INSERT INTO {apps} (app_id, signal_epoch) VALUES ($1,0)"), &[app.into()]).await.unwrap();
         let deploys = tx.table("deploys");
-        tx.execute(&format!("INSERT INTO {deploys} (app_id,id,hash,manifest,created_at,active,state) VALUES ($1,$2,$2,'{{}}',0,1,'available')"), &[app.into(), format!("deploy_{app}").into()]).await.unwrap();
+        tx.execute(&format!("INSERT INTO {deploys} (app_id,id,hash,manifest,created_at,active,state,snapshot_hash,snapshot_size,snapshot_epoch) VALUES ($1,$2,$2,'{{}}',0,1,'available','fixture',1,0)"), &[app.into(), format!("deploy_{app}").into()]).await.unwrap();
     }
     let runs = tx.table("runs");
     insert_run(&mut tx, "app_a", "run_a", "deploy_app_a", None)
@@ -738,7 +751,7 @@ async fn behavior_contract(store: Arc<dyn WorkflowStore>) {
         workflows: ["Example".into(), "Child".into()].into(),
         schedules: Vec::new(),
     };
-    service.activate_deploy(&app, &new_deploy).await.unwrap();
+    service.activate_deploy(&app, &new_deploy, &test_snapshot()).await.unwrap();
     let invalid = execution(json!([
         {"kind":"Child","ordinal":0,"name":"child","childWorkflowName":"Child","input":{"task":true}},
         {"kind":"StepCompleted","ordinal":9,"name":"invalid"}
@@ -1245,7 +1258,7 @@ async fn schedule_contract(store: Arc<dyn WorkflowStore>) {
             catch_up: ScheduleCatchUp::Backfill { max: 3 },
         }],
     };
-    service.activate_deploy(&app, &deploy).await.unwrap();
+    service.activate_deploy(&app, &deploy, &test_snapshot()).await.unwrap();
     assert_eq!(service.tick_schedules().await.unwrap(), 0);
     let mut tx = store.begin().await.unwrap();
     let now = tx.now().await.unwrap();
@@ -1259,7 +1272,7 @@ async fn schedule_contract(store: Arc<dyn WorkflowStore>) {
     .unwrap();
     tx.commit().await.unwrap();
     // Activation notification retries must not move a persisted due frontier.
-    service.activate_deploy(&app, &deploy).await.unwrap();
+    service.activate_deploy(&app, &deploy, &test_snapshot()).await.unwrap();
     let mut ticks = Vec::new();
     for _ in 0..3 {
         let service = service.clone();
@@ -1310,7 +1323,7 @@ async fn schedule_contract(store: Arc<dyn WorkflowStore>) {
     skip.id = typed_id::generate("dep");
     skip.hash = "d".repeat(64);
     skip.schedules[0].overlap = ScheduleOverlap::SkipIfRunning;
-    service.activate_deploy(&app, &skip).await.unwrap();
+    service.activate_deploy(&app, &skip, &test_snapshot()).await.unwrap();
     let mut tx = store.begin().await.unwrap();
     let later = tx.now().await.unwrap();
     let first = at + 180_000 + 10;
@@ -1374,7 +1387,7 @@ async fn schedule_contract(store: Arc<dyn WorkflowStore>) {
     disabled.id = typed_id::generate("dep");
     disabled.hash = "e".repeat(64);
     disabled.schedules.clear();
-    service.activate_deploy(&app, &disabled).await.unwrap();
+    service.activate_deploy(&app, &disabled, &test_snapshot()).await.unwrap();
     let mut tx = store.begin().await.unwrap();
     assert!(tx
         .query(

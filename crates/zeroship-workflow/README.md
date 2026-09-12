@@ -56,6 +56,25 @@ extending an existing task lease. History and completion under an already live
 claim remain available. Deploy selection also comes from the trusted host,
 through `activate_deploy`, without querying platform tables.
 
+`activate_deploy` requires an `ExecutableSnapshot`: the built entry module,
+dependency sources and runtime schema descriptor. `with_snapshots` binds a
+`SnapshotStore` in customer object storage. Activation verifies the retained
+bytes before selecting the deployment; upload failure preserves the previous
+selection. A deployment identity cannot change its executable contents. The
+host serializes deployment selection updates. `retain_deploy` repairs retained
+code independently, preserving which deployment new runs and schedules select.
+
+Task snapshot reads resolve the deployment from the live customer journal claim,
+verify its recorded content hash and size, and recheck the lease after storage
+I/O. Missing or corrupt code parks that deployment; ordinary storage outages
+remain retryable. Repair advances a journal epoch so a stale failed read cannot
+revoke the repair. Snapshot I/O releases the app lock, allowing concurrent
+heartbeats and lifecycle operations. Missing code also leaves cancellation and
+expired-lease cleanup available; compensation execution still needs its code.
+Native contracts cover these boundaries against SQLite, PostgreSQL and S3.
+Worker and Vite snapshot producers, snapshot collection and the worker/CLI
+composition remain unfinished.
+
 The obsolete central task transport has been removed. The engine's
 native contracts exercise app isolation, retry receipts, expired leases,
 lifecycle changes, child execution, retained restart

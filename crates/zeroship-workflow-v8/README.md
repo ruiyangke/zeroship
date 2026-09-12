@@ -14,6 +14,12 @@ executor installs the runner's deadline interrupt before module initialization;
 app code receives replay inputs without task credentials. Shutdown quarantines
 the isolate and joins native work before the slot can be reused. The local
 executor also uses this lifecycle.
+The shared executor reads the retained executable through its live task claim
+before calling `WorkflowRuntimeLoader`. The loader receives the verified module
+graph and runtime descriptor and supplies the customer's native bindings and
+runtime variables. Missing executable bytes fail before constructing an app
+isolate. The replay contract resumes a waiting run from its retained dependency
+sources after redeployment and engine restart.
 The shared executor hydrates referenced input within its payload budget before
 module initialization. Lazy output reads use the assignment's captured journal
 and live task credentials, so replay never resolves through the app's current

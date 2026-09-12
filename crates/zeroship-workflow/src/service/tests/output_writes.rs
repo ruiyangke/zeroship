@@ -32,6 +32,13 @@ struct LostReceipt {
 }
 #[async_trait(?Send)]
 impl TaskPayloads for LostReceipt {
+    async fn snapshot(
+        &self,
+        task: &str,
+        token: &TaskToken,
+    ) -> Result<crate::service::ExecutableSnapshot, WorkflowServiceError> {
+        TaskPayloads::snapshot(&self.inner, task, token).await
+    }
     async fn stage(
         &self,
         task: &str,

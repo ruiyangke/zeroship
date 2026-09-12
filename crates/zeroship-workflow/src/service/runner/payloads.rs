@@ -8,7 +8,9 @@
 use super::EmbeddedTasks;
 use crate::{
     engine::{JournalStep, WorkflowOutputRef},
-    service::{PayloadRead, RequestId, StagedPayload, TaskAssignment, TaskToken},
+    service::{
+        ExecutableSnapshot, PayloadRead, RequestId, StagedPayload, TaskAssignment, TaskToken,
+    },
     validation, WorkflowServiceError,
 };
 use async_trait::async_trait;
@@ -24,6 +26,11 @@ use zeroship_storage::backend::BoxChunkSource;
 /// Host-only payload authority; task credentials never enter the app isolate.
 #[async_trait(?Send)]
 pub trait TaskPayloads {
+    async fn snapshot(
+        &self,
+        task: &str,
+        token: &TaskToken,
+    ) -> Result<ExecutableSnapshot, WorkflowServiceError>;
     async fn stage(
         &self,
         task: &str,
@@ -42,6 +49,13 @@ pub trait TaskPayloads {
 
 #[async_trait(?Send)]
 impl TaskPayloads for EmbeddedTasks {
+    async fn snapshot(
+        &self,
+        task: &str,
+        token: &TaskToken,
+    ) -> Result<ExecutableSnapshot, WorkflowServiceError> {
+        self.service.task_snapshot(&self.worker, task, token).await
+    }
     async fn stage(
         &self,
         task: &str,
@@ -90,6 +104,13 @@ impl std::fmt::Debug for TaskPayloadReader {
     }
 }
 impl TaskPayloadReader {
+    /// Load the immutable executable under the captured task authority.
+    ///
+    /// # Errors
+    /// Rejects expired claims, missing snapshots and integrity failures.
+    pub async fn snapshot(&self) -> Result<ExecutableSnapshot, WorkflowServiceError> {
+        self.transport.snapshot(&self.task, &self.token).await
+    }
     /// Capture the replay journal and read budget from a host assignment.
     ///
     /// # Errors

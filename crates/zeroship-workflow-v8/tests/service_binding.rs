@@ -12,8 +12,9 @@ use zeroship_runtime::{
 use zeroship_workflow::{
     operations::{RunState, StartOptions},
     service::{
-        schema, store::SqliteStore, AppPolicy, AppWorkflows, DeployRegistration, HostPolicies,
-        PolicySnapshot, RequestId, WorkerIdentity, WorkflowService,
+        schema, store::SqliteStore, AppPolicy, AppWorkflows, DeployRegistration,
+        ExecutableSnapshot, HostPolicies, PolicySnapshot, RequestId, SnapshotStore, WorkerIdentity,
+        WorkflowService,
     },
     WorkflowExecution,
 };
@@ -36,6 +37,15 @@ impl Fixture {
         )
         .await
         .unwrap();
+        let service = service.with_snapshots(
+            SnapshotStore::new(
+                &zeroship_storage::StorageStore::from_backend(Arc::new(
+                    zeroship_storage::LocalFs::new(directory.path().join("snapshots")),
+                )),
+                1024 * 1024,
+            )
+            .unwrap(),
+        );
         let app = AppId::mint();
         let other = AppId::mint();
         for id in [&app, &other] {
@@ -56,6 +66,12 @@ impl Fixture {
                         workflows: ["Example".into()].into(),
                         schedules: Vec::new(),
                     },
+                    &ExecutableSnapshot::new(
+                        "index.js".into(),
+                        [("index.js".into(), "export default {};".into())].into(),
+                        None,
+                    )
+                    .unwrap(),
                 )
                 .await
                 .unwrap();
