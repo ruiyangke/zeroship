@@ -5,20 +5,19 @@
 //! remain in the host. Service bindings validate the immutable runtime identity
 //! before evaluating app code.
 
-mod dev;
 mod error;
 mod executor;
+mod loader;
 pub mod v8_class;
 
 pub use executor::{LoadedWorkflow, V8TaskExecutor, WorkflowRuntimeLoader};
+pub use loader::AppRuntimeLoader;
 
-use std::path::Path;
 use std::sync::Arc;
 
 use zeroship_runtime::plugin::{NativePlugin, NativeRegistrar};
 use zeroship_workflow::backend::{HttpWorkflowBackend, SharedWorkflowBackend};
 
-use zeroship_workflow::DevWorkflowEngine;
 use zeroship_workflow::WorkflowClientConfig;
 
 pub use v8_class::{is_excluded_workflow_property, mint_workflows};
@@ -32,9 +31,6 @@ enum WorkflowBackendFactory {
         control_url: String,
         control_key: String,
     },
-    DevSqlite {
-        engine: Arc<DevWorkflowEngine>,
-    },
 }
 
 #[derive(Clone, Debug)]
@@ -43,7 +39,7 @@ pub struct WorkflowBinding {
 }
 
 impl WorkflowBinding {
-    /// Bind the embedded workflow engine to its authorized app.
+    /// Bind the customer's workflow engine to its authorized app.
     #[must_use]
     pub fn service(backend: zeroship_workflow::service::AppBackend) -> Self {
         Self {
@@ -63,26 +59,6 @@ impl WorkflowBinding {
         }
     }
 
-    /// Construct the local dev-tier workflow backend.
-    ///
-    /// This constructor is only called by `zeroship serve`. The production
-    /// worker keeps using [`Self::new`], so the in-process engine is
-    /// dev-only by construction.
-    pub fn dev_sqlite(
-        db_path: impl AsRef<Path>,
-        modules: Vec<zeroship_runtime::ModuleEntry>,
-        env_vars: std::collections::HashMap<String, String>,
-        plugins: Vec<Arc<dyn NativePlugin>>,
-    ) -> Result<Self, String> {
-        let engine = DevWorkflowEngine::open(
-            db_path,
-            Arc::new(dev::V8WorkflowExecutor::new(modules, env_vars, plugins)),
-        )?;
-        Ok(Self {
-            backend: WorkflowBackendFactory::DevSqlite { engine },
-        })
-    }
-
     fn build_backend(&self, app_id: &str) -> SharedWorkflowBackend {
         match &self.backend {
             WorkflowBackendFactory::Service { backend } => backend.clone(),
@@ -96,10 +72,6 @@ impl WorkflowBinding {
                     app_id.to_string(),
                     token,
                 )))
-            }
-            WorkflowBackendFactory::DevSqlite { engine } => {
-                engine.ensure_scheduler();
-                Arc::new(engine.backend_for_app(app_id))
             }
         }
     }

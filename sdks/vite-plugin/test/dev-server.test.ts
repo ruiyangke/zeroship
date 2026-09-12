@@ -262,6 +262,9 @@ describe("devServerPlugin", () => {
         "--port=3901",
         "--workers=1",
       ]);
+      const archive = resolve(harness.root, ".zeroship/workflows.zship");
+      assert.equal(runtime.argv[4], `--workflow-bundle=${archive}`);
+      assert.ok((await fs.stat(archive)).size > 0);
     } finally {
       await harness.close();
     }
@@ -269,6 +272,41 @@ describe("devServerPlugin", () => {
     assert.equal(process.listenerCount("exit"), beforeExitListeners);
     assert.equal(process.listenerCount("SIGINT"), beforeSigintListeners);
     assert.equal(process.listenerCount("SIGTERM"), beforeSigtermListeners);
+  });
+
+  test("publishes changed workflow dependencies without restarting the request runtime", async () => {
+    const harness = await startHarness();
+    try {
+      const before = await harness.runtimeLog();
+      const { zstdDecompressSync } = await import("node:zlib");
+      const path = resolve(harness.root, ".zeroship/workflows.zship");
+      await fs.writeFile(resolve(harness.root, "src/value.ts"), 'export const answer = "updated-from-dependency";');
+      await waitFor(async () => {
+        assert.match(zstdDecompressSync(await fs.readFile(path)).toString(), /updated-from-dependency/);
+      });
+      const after = await harness.runtimeLog();
+      assert.equal(after.pid, before.pid);
+      assert.equal(after.spawnCount, before.spawnCount);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  test("runtime recovery keeps the retained workflow archive when current sources do not build", async () => {
+    const harness = await startHarness();
+    try {
+      const path = resolve(harness.root, ".zeroship/workflows.zship");
+      const retained = await fs.readFile(path);
+      const before = await harness.runtimeLog();
+      await fs.writeFile(resolve(harness.root, "src/value.ts"), 'import "./missing-dependency.js";');
+      await harness.triggerUnexpectedExit();
+      await waitFor(async () => {
+        assert.ok((await harness.runtimeLog()).spawnCount > before.spawnCount);
+      });
+      assert.deepEqual(await fs.readFile(path), retained);
+    } finally {
+      await harness.close();
+    }
   });
 
   test("injects the in-process generated runtime descriptor into the spawned dev runtime", async () => {

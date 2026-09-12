@@ -3,7 +3,6 @@
 //! Claims and lease credentials stay with the host. An executor receives replay
 //! data and returns outcomes; the host attaches the claim when applying them.
 
-use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -113,19 +112,6 @@ pub(crate) fn decode_runtime_outcomes(mut value: Value) -> Result<Vec<Value>, Wo
         ));
     };
     normalize_workflow_outcomes(outcomes, error).map_err(WorkflowServiceError::InvalidRequest)
-}
-
-/// The host owns code loading; the service owns the journal.
-#[async_trait(?Send)]
-pub trait WorkflowExecutor: Send + Sync {
-    /// Execute the replay input in the host's code environment.
-    ///
-    /// # Errors
-    /// Reports code loading, execution or result decoding failures.
-    async fn dispatch(
-        &self,
-        invocation: &WorkflowInvocation,
-    ) -> Result<WorkflowExecution, WorkflowServiceError>;
 }
 
 fn workflow_step_kind_or_run(value: &Value) -> Result<Value, String> {

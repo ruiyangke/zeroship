@@ -15,6 +15,7 @@ use zeroship_workflow::{
 };
 
 /// A trusted host binds the retained executable and the assignment's app context.
+///
 /// The module graph and runtime descriptor must come from the supplied snapshot;
 /// runtime variables and native handles come from the host's trusted app binding.
 #[async_trait(?Send)]
@@ -90,48 +91,30 @@ impl TaskExecutor for V8TaskExecutor {
     ) -> Result<Box<dyn TaskExecution>, WorkflowServiceError> {
         Ok(Box::new(V8Execution {
             invocation: assignment.invocation.clone(),
-            loader: Some((self.loader.clone(), assignment.clone())),
+            loader: (self.loader.clone(), assignment.clone()),
             loaded: None,
             cancel: CancelFlag::new(),
             started: false,
             budget,
-            payloads: Some(Rc::new(TaskPayloadReader::new(
+            payloads: Rc::new(TaskPayloadReader::new(
                 self.payloads.clone(),
                 assignment,
                 self.payload_limits.max_payload_bytes,
-            )?)),
-            output: Some((self.payloads.clone(), self.payload_limits)),
+            )?),
+            output: (self.payloads.clone(), self.payload_limits),
         }))
     }
 }
 
-pub(crate) struct V8Execution {
+struct V8Execution {
     invocation: WorkflowInvocation,
-    loader: Option<(Rc<dyn WorkflowRuntimeLoader>, TaskAssignment)>,
+    loader: (Rc<dyn WorkflowRuntimeLoader>, TaskAssignment),
     loaded: Option<LoadedWorkflow>,
     cancel: CancelFlag,
     started: bool,
     budget: ExecutionBudget,
-    payloads: Option<Rc<TaskPayloadReader>>,
-    output: Option<(Rc<dyn TaskPayloads>, TaskPayloadLimits)>,
-}
-impl V8Execution {
-    pub(crate) fn loaded(
-        invocation: WorkflowInvocation,
-        loaded: LoadedWorkflow,
-        budget: ExecutionBudget,
-    ) -> Self {
-        Self {
-            invocation,
-            loader: None,
-            loaded: Some(loaded),
-            cancel: CancelFlag::new(),
-            started: false,
-            budget,
-            payloads: None,
-            output: None,
-        }
-    }
+    payloads: Rc<TaskPayloadReader>,
+    output: (Rc<dyn TaskPayloads>, TaskPayloadLimits),
 }
 #[async_trait(?Send)]
 impl TaskExecution for V8Execution {
@@ -143,45 +126,30 @@ impl TaskExecution for V8Execution {
         }
         self.started = true;
         self.budget.check()?;
-        if let Some(payloads) = &self.payloads {
-            if let Some(input) = payloads.input().await? {
-                self.invocation.trigger.input = Some(input);
-                self.invocation.trigger.input_ref = None;
-            }
+        if let Some(input) = self.payloads.input().await? {
+            self.invocation.trigger.input = Some(input);
+            self.invocation.trigger.input_ref = None;
         }
-        if self.loaded.is_none() {
-            let (loader, assignment) = self.loader.as_ref().ok_or_else(|| {
-                WorkflowServiceError::Internal("workflow runtime loader is absent".into())
-            })?;
-            let snapshot = self
-                .payloads
-                .as_ref()
-                .ok_or_else(|| {
-                    WorkflowServiceError::Internal("workflow snapshot authority is absent".into())
-                })?
-                .snapshot()
-                .await?;
-            self.budget.check()?;
-            self.loaded = Some(loader.load(assignment, &snapshot).await?);
-        }
+        let (factory, assignment) = &self.loader;
+        let snapshot = self.payloads.snapshot().await?;
+        self.budget.check()?;
+        self.loaded = Some(factory.load(assignment, &snapshot).await?);
         let loaded = self.loaded.as_ref().expect("loaded workflow runtime");
         let interrupt = loaded.runtime.interrupt_handle();
         self.budget.on_interrupt(move || interrupt.cancel())?;
         self.budget.check()?;
-        if let Some(payloads) = &self.payloads {
-            if loaded.runtime.app_id() != Some(payloads.app_id().uuid()) {
-                return Err(WorkflowServiceError::InvalidRequest(
-                    "workflow loader returned another app's runtime".into(),
-                ));
-            }
-            let interrupt = loaded.runtime.interrupt_handle();
-            loaded.runtime.with_scope(|scope| {
-                scope.set_slot(crate::v8_class::TaskOutputReader {
-                    reader: payloads.clone(),
-                    interrupt,
-                });
-            });
+        if loaded.runtime.app_id() != Some(self.payloads.app_id().uuid()) {
+            return Err(WorkflowServiceError::InvalidRequest(
+                "workflow loader returned another app's runtime".into(),
+            ));
         }
+        let interrupt = loaded.runtime.interrupt_handle();
+        loaded.runtime.with_scope(|scope| {
+            scope.set_slot(crate::v8_class::TaskOutputReader {
+                reader: self.payloads.clone(),
+                interrupt,
+            });
+        });
         let envelope = serde_json::to_string(&self.invocation)
             .map_err(|_| WorkflowServiceError::Internal("invalid workflow invocation".into()))?;
         loaded.runtime.start_pump();
@@ -197,13 +165,7 @@ impl TaskExecution for V8Execution {
             WorkflowOutcome::Pending { rx, .. } => {
                 loaded.runtime.notify_pump();
                 let mut received = std::pin::pin!(rx.recv());
-                let mut failed = std::pin::pin!(async {
-                    if let Some(payloads) = &self.payloads {
-                        payloads.failed().await
-                    } else {
-                        std::future::pending().await
-                    }
-                });
+                let mut failed = std::pin::pin!(self.payloads.failed());
                 let result = std::future::poll_fn(|cx| {
                     if let Poll::Ready(error) = failed.as_mut().poll(cx) {
                         return Poll::Ready(Err(error));
@@ -214,27 +176,18 @@ impl TaskExecution for V8Execution {
                 })
                 .await;
                 self.budget.check()?;
-                if let Some(payloads) = &self.payloads {
-                    payloads.check()?;
-                }
+                self.payloads.check()?;
                 result?.json
             }
         };
         self.budget.check()?;
-        if let Some(payloads) = &self.payloads {
-            payloads.check()?;
-        }
+        self.payloads.check()?;
         // Freeze app effects before any host upload can yield. The task lease
         // remains active while staging; app code has finished its frontier.
         self.stop().await;
         self.budget.check()?;
-        let Some((transport, limits)) = &self.output else {
-            return WorkflowExecution::from_runtime_json(&json);
-        };
-        let (_, assignment) = self
-            .loader
-            .as_ref()
-            .expect("task output requires an assignment");
+        let (transport, limits) = &self.output;
+        let (_, assignment) = &self.loader;
         let prepared = PreparedExecution::from_runtime_json(assignment, &json, *limits)?;
         drop(json);
         loop {

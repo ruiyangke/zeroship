@@ -29,6 +29,7 @@ mod parent_death;
 mod project_config;
 mod project_keys;
 mod secrets;
+mod workflow;
 
 zeroship_core::declare_env_consumer!(
     /// The creator CLI's own environment surface.
@@ -327,46 +328,48 @@ fn cmd_serve(args: &[String]) {
         Some(Arc::clone(&dev_meter)),
     )));
 
-    let workflow_db_path: PathBuf = zeroship_core::declared_env_os!(
+    let config_path = parse_flag(args, "--workflow-config").map(PathBuf::from);
+    let mut workflow_config = workflow::LocalConfig::read(config_path.as_deref())
+        .unwrap_or_else(|error| {
+            eprintln!("[zeroship] workflows: {error}");
+            std::process::exit(1);
+        });
+    if let Some(path) = zeroship_core::declared_env_os!(
         cli,
         "ZEROSHIP_WORKFLOW_SQLITE_PATH",
         crate::ZeroshipCliConsumer
-    )
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(".zeroship/workflows.sqlite"));
-    if let Some(parent) = workflow_db_path.parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            eprintln!(
-                "[zeroship] workflows: failed to create dir '{}': {e}",
-                parent.display()
-            );
-            std::process::exit(1);
-        }
+    ) {
+        workflow_config.journal = path.into();
     }
-    let workflow_peer_plugins = plugins.clone();
-    let workflow_binding = zeroship_workflow_v8::WorkflowBinding::dev_sqlite(
-        &workflow_db_path,
-        modules.clone(),
+    if let Some(path) = parse_flag(args, "--workflow-bundle") {
+        workflow_config.bundle = Some(path.into());
+    }
+    let workflow_host = workflow::LocalHost::start(
+        &std::env::current_dir().expect("project directory"),
+        workflow_config,
         env_vars.clone(),
-        workflow_peer_plugins,
+        plugins.clone(),
+        zeroship_runtime::RuntimeLimits {
+            cpu_limit,
+            wall_timeout,
+            heap_limit_bytes,
+        },
     )
-    .unwrap_or_else(|e| {
-        eprintln!(
-            "[zeroship] workflows: failed to open sqlite at '{}': {e}",
-            workflow_db_path.display()
-        );
+    .unwrap_or_else(|error| {
+        eprintln!("[zeroship] workflows: {error}");
         std::process::exit(1);
     });
-    plugins.push(Arc::new(workflow_binding));
+    plugins.push(Arc::new(workflow_host.binding.clone()));
     eprintln!(
-        "[zeroship] workflows binding registered (sqlite; path={})",
-        workflow_db_path.display()
+        "[zeroship] workflow worker ready (app={})",
+        workflow_host.app.as_str()
     );
 
     zeroship_runtime::serve::start_server(
         modules,
         zeroship_runtime::serve::ServerOptions {
             port,
+            app_id: Some(workflow_host.app.uuid()),
             workers,
             cpu_limit,
             wall_timeout,
@@ -1134,6 +1137,7 @@ fn print_usage() {
     eprintln!();
     eprintln!("Usage:");
     eprintln!("  zeroship serve    <file> [--port=3000] [--workers=0]");
+    eprintln!("                   [--workflow-config=PATH] [--workflow-bundle=PATH]");
     eprintln!("                   Run a single JS file with the V8 runtime.");
     eprintln!("  zeroship deploy   [<path-to-.zship>] [--app=<id>] [--app-name=<name>] [--control=URL] [--token=TOKEN] [--no-create] [--config=PATH] [--env=NAME]");
     eprintln!("                   Upload a pre-built .zship to the control plane.");
@@ -1219,6 +1223,8 @@ const SERVE_KNOWN_FLAGS: &[&str] = &[
     "--cpu-limit",
     "--wall-timeout",
     "--heap-limit-mb",
+    "--workflow-config",
+    "--workflow-bundle",
 ];
 
 /// Return `Err` if any `--flag` argument in `args[2..]` is not a known `serve` flag.

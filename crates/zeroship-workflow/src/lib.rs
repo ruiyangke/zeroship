@@ -1,15 +1,14 @@
 //! Durable workflow journal, dispatch protocol, and app-scoped Rust backends.
 //!
-//! This crate has no dependency on V8. Hosts provide a workflow executor for
-//! local SQLite runs; deployed runs use the control-plane HTTP backend.
+//! This crate has no dependency on V8. Customer hosts compose the shared engine
+//! with their journal, retained executables and task executor.
 
 pub mod advance;
 pub mod apply;
-pub mod calendar;
 pub mod backend;
+pub mod calendar;
 pub mod claim;
 pub mod client;
-pub mod dev;
 pub mod engine;
 pub mod errors;
 pub mod execution;
@@ -21,6 +20,5 @@ pub mod validation;
 
 pub use backend::{HttpWorkflowBackend, SharedWorkflowBackend, WorkflowBackend};
 pub use client::{app_scoped_token, WorkflowClientConfig, WorkflowHttpMethod, WorkflowHttpRequest};
-pub use dev::DevWorkflowEngine;
 pub use errors::WorkflowServiceError;
-pub use execution::{WorkflowExecution, WorkflowExecutor, WorkflowInvocation, WorkflowTrigger};
+pub use execution::{WorkflowExecution, WorkflowInvocation, WorkflowTrigger};

@@ -13,8 +13,8 @@ This reference describes the current implementation. The revised
 [workflow coordination design](../proposals/2026-09-11-workflow-worker.md) keeps
 history and payloads in customer storage, processed by the customer's worker.
 A lightweight server handles registry, placement and high-level management;
-the worker owns durable execution and journal writes. The shared local engine
-and production cutover are in progress; the limitations and provisioning
+the worker owns durable execution and journal writes. Local development uses
+the shared engine; production cutover remains in progress. The provisioning
 instructions below still apply today.
 
 ## Rust integration
@@ -47,6 +47,41 @@ outcomes. Local development and deployed workers use the same replay input,
 journal types and outcome decoder. The invocation carries no lease credential;
 the Rust host binds outcomes to its claimed run before applying them. Run IDs
 or nonces returned by JavaScript do not select the mutation target.
+
+## Local development
+
+The Vite plugin builds a workflow `.zship` archive and passes it to
+`zeroship serve`. Source changes publish a complete replacement archive;
+existing runs keep their retained executable and runtime descriptor. Failed
+builds leave the last valid archive available. Background work runs on the
+CLI's dedicated workflow thread, independently of HTTP requests.
+
+The CLI persists its trusted app identity in `.zeroship/app-id`, the customer
+journal in `.zeroship/workflows.sqlite`, and payloads and executable snapshots
+under `.zeroship/workflow-objects`. `APP_ID` does not authorize workflow access.
+Restart preserves that identity and rediscovers durable work. Incompatible
+journals are refused without silently resetting them.
+
+For a manually started runtime, supply a built archive explicitly:
+
+```sh
+zeroship serve app.js --workflow-bundle=dist/app.zship
+```
+
+`--workflow-config=workflow.toml` configures the same native host:
+
+```toml
+journal = ".zeroship/workflows.sqlite"
+objects = ".zeroship/workflow-objects"
+bundle = "dist/app.zship"
+```
+
+Paths resolve against the project working directory. `--workflow-bundle`
+overrides the TOML bundle path; `ZEROSHIP_WORKFLOW_SQLITE_PATH` overrides its
+journal path. The optional `worker` and `payloads` tables configure
+`WorkerOptions` and `TaskPayloadLimits`. An existing project can resume retained
+work without the archive feed; a fresh project needs a deployment before it can
+accept workflows. A scoped reset command and snapshot collection remain unfinished.
 
 ## Testing
 

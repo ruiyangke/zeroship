@@ -2,7 +2,7 @@
 
 The Rust workflow engine and client. This crate owns the journal protocol,
 claim and apply logic, PostgreSQL journal storage, app-scoped HTTP backend,
-and the local SQLite engine. It does not depend on V8 or the worker runtime.
+and customer-bound PostgreSQL and SQLite execution. It does not depend on V8.
 
 - `engine.rs`: dispatch envelopes, outcomes, and journal folding.
 - `execution.rs`: typed replay inputs, executor outcomes and runtime decoding.
@@ -10,7 +10,6 @@ and the local SQLite engine. It does not depend on V8 or the worker runtime.
 - `claim.rs`, `apply.rs`, `advance.rs`: claims, fencing, and durable advancement.
 - `store/`: journal storage and its PostgreSQL implementation.
 - `backend.rs`, `client.rs`: app-scoped control-plane operations for Rust hosts.
-- `dev.rs`: SQLite persistence and scheduling through a host-owned `WorkflowExecutor`.
 - `service/`: replacement shared service, app handles, transactional lifecycle and
   worker task protocol over PostgreSQL or SQLite.
 - `schema/`: customer journal recorded through the canonical migration DSL
@@ -27,13 +26,13 @@ access remains subject to the database roles provisioned by the migration
 service. The separate `zeroship-workflow-v8` crate installs `env.workflows`
 and supplies a V8 executor for local development.
 
-`WorkflowExecutor` accepts `WorkflowInvocation` and returns `WorkflowExecution`.
+The shared runner supplies `WorkflowInvocation` and receives `WorkflowExecution`.
 Local and deployed hosts share journal types and outcome decoding. The host
 keeps lease credentials outside the invocation and binds returned outcomes to
 its claim before applying them.
 
-The replacement engine is under construction and is not yet composed into the
-worker, Control or CLI. The [revised ownership design](../../docs/proposals/2026-09-11-workflow-worker.md)
+The shared engine is composed into the CLI; production worker and Control
+integration remain unfinished. The [revised ownership design](../../docs/proposals/2026-09-11-workflow-worker.md)
 embeds it in the customer's worker with customer-bound persistence; a lightweight
 server coordinates metadata and does not own the journal or payloads.
 `PostgresStore::new` requires an explicit validated `SchemaName`; app identity
@@ -78,8 +77,9 @@ Native contracts cover these boundaries against SQLite, PostgreSQL and S3.
 The Vite plugin's `workflow-bundle.ts` builds local workflow archives through
 the deployment compiler and `.zship` packer, retaining static and dynamic module
 dependencies and the captured runtime descriptor. Each build discovers fresh
-declarations. Dev-server publication, worker/CLI ingestion and snapshot
-collection remain unfinished.
+declarations. The dev server publishes complete archives atomically; the CLI
+ingests them and retains executable bytes before activation. Production worker
+ingestion and journal-aware snapshot collection remain unfinished.
 
 The obsolete central task transport has been removed. The engine's
 native contracts exercise app isolation, retry receipts, expired leases,
@@ -115,8 +115,9 @@ request isolate, retries failed attempts with a delay, and bounds task polling
 and maintenance I/O. Shutdown cancels active execution and waits for it to stop
 before releasing claims. A cancelled host future must be drained before its
 slots are discarded or reused. `WorkerOptions` supplies the host limits, and
-construction requires customer payload and executable storage. Worker and CLI
-entrypoints are not yet connected to this loop.
+construction requires customer payload and executable storage. The CLI starts
+this loop on a dedicated thread and supplies a persisted project identity.
+Production worker composition remains unfinished.
 `runner::PreparedExecution` decodes runtime outcomes, leaves small values inline
 and prepares task-scoped uploads for large or explicitly referenced results.
 It retains upload request identities across retries, checks returned descriptors

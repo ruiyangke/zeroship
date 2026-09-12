@@ -4,9 +4,9 @@ The V8 adapter for `zeroship-workflow`. `WorkflowBinding` installs the native
 `env.workflows` namespace, captures the host's app identity, translates errors,
 and exposes workflow and run handles to JavaScript.
 
-`v8_class.rs` owns argument validation and native handles. `dev.rs` implements
-the Rust engine's `WorkflowExecutor` with the worker runtime. PostgreSQL journal
-logic and the HTTP client belong to `zeroship-workflow`.
+`v8_class.rs` owns argument validation and native handles. `AppRuntimeLoader`
+binds the customer's native plugins and runtime identity to retained code.
+PostgreSQL journal logic and the HTTP client belong to `zeroship-workflow`.
 
 `executor.rs` implements the shared service runner's `TaskExecutor`. A trusted
 loader supplies a fresh runtime for the assignment's immutable deployment. The
@@ -36,9 +36,8 @@ callback. The service stores the payload and commits its history reference;
 storage credentials never enter V8.
 
 The worker uses `WorkflowBinding::new` for control-plane-backed workflows.
-The CLI uses `WorkflowBinding::dev_sqlite` for the local development engine.
-The replacement shared service binds through `WorkflowBinding::service`, using
-an embedded `AppBackend`. Before evaluating app code, the binding
+The CLI uses the shared engine through `WorkflowBinding::service`, using
+an app-scoped `AppBackend`. Before evaluating app code, the binding
 checks its scope against `RuntimeBuilder::app_id`; an environment variable
 cannot supply or override that identity. Native binding tests cover lifecycle
 operations, output reads and rejection of foreign app access.
