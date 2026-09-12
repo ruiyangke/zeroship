@@ -64,6 +64,26 @@ fn sqlite_registration_owns_boolean_vector_and_geographic_storage() {
 }
 
 #[test]
+fn registrations_derive_exact_decimal_storage_from_numeric_facets() {
+    for registration in [SqlRegistration::postgres(), SqlRegistration::sqlite()] {
+        let storage = registration
+            .storage_type(&value!({"type":"number","precision":30,"scale":2}))
+            .unwrap();
+        let decimal = storage.decimal().unwrap();
+        assert_eq!((decimal.precision(), decimal.scale()), (30, 2));
+        assert_eq!(
+            registration
+                .storage_type(&value!({"type":"number"}))
+                .unwrap(),
+            StorageType::Real
+        );
+        assert!(registration
+            .storage_type(&value!({"type":"number","precision":2,"scale":3}))
+            .is_err());
+    }
+}
+
+#[test]
 fn sqlite_registration_rejects_malformed_encoded_spatial_values() {
     let registration = SqlRegistration::sqlite();
     let vector = registration

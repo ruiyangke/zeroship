@@ -200,7 +200,7 @@ async fn dynamic_reads_reject_non_portable_value_semantics() {
     let owner = CollectionFixture::sqlite(
         "records",
         value!({
-            "amount":{"type":"decimal", "precision":18, "scale":2},
+            "amount":{"type":"number", "precision":18, "scale":2},
             "document":{"type":"json"},
             "enabled":{"type":"boolean"},
             "secret":{"type":"string", "filterable":false}

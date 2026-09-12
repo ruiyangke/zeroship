@@ -98,6 +98,11 @@ pub(crate) enum PredicateOperator {
     Pattern,
 }
 
+pub(crate) fn is_exact_decimal(field: &crate::value::Value) -> bool {
+    field.get("type").and_then(crate::value::Value::as_str) == Some("number")
+        && field.get("precision").is_some()
+}
+
 pub(crate) fn supports_predicate_operator(
     field: &crate::value::Value,
     operator: PredicateOperator,
@@ -121,7 +126,6 @@ pub(crate) fn supports_predicate_operator(
                     | "number"
                     | "float"
                     | "double"
-                    | "decimal"
                     | "bytes"
                     | "date"
                     | "timestamp"
@@ -143,7 +147,8 @@ pub(crate) fn supports_predicate_operator(
 
 pub(crate) fn supports_sorting(field: &crate::value::Value) -> bool {
     effective_mask(field).is_some()
-        || matches!(
+        || (!is_exact_decimal(field)
+            && matches!(
             field.get("type").and_then(crate::value::Value::as_str),
             Some(
                 "string"
@@ -164,12 +169,13 @@ pub(crate) fn supports_sorting(field: &crate::value::Value) -> bool {
                     | "calendarDate"
                     | "time"
             )
-        )
+        ))
 }
 
 pub(crate) fn supports_grouping(field: &crate::value::Value) -> bool {
     effective_mask(field).is_some()
-        || matches!(
+        || (!is_exact_decimal(field)
+            && matches!(
             field.get("type").and_then(crate::value::Value::as_str),
             Some(
                 "string"
@@ -193,7 +199,7 @@ pub(crate) fn supports_grouping(field: &crate::value::Value) -> bool {
                     | "calendarDate"
                     | "time"
             )
-        )
+        ))
 }
 
 /// Distance metric selected by a vector field descriptor.
@@ -233,11 +239,14 @@ mod tests {
         ] {
             assert!(supports_sorting(&crate::value!({"type": kind})), "{kind}");
         }
-        for kind in ["boolean", "decimal", "bytes", "json", "vector", "geoPoint"] {
+        for kind in ["boolean", "bytes", "json", "vector", "geoPoint"] {
             assert!(!supports_sorting(&crate::value!({"type": kind})), "{kind}");
         }
+        assert!(!supports_sorting(
+            &crate::value!({"type":"number", "precision":18, "scale":2})
+        ));
         assert!(supports_sorting(
-            &crate::value!({"type":"decimal", "mask":{"kind":"full"}})
+            &crate::value!({"type":"number", "precision":18, "scale":2, "mask":{"kind":"full"}})
         ));
     }
 
@@ -258,11 +267,12 @@ mod tests {
         ] {
             assert!(supports_grouping(&crate::value!({"type": kind})), "{kind}");
         }
-        for kind in [
-            "decimal", "json", "object", "array", "union", "vector", "geoPoint",
-        ] {
+        for kind in ["json", "object", "array", "union", "vector", "geoPoint"] {
             assert!(!supports_grouping(&crate::value!({"type": kind})), "{kind}");
         }
+        assert!(!supports_grouping(
+            &crate::value!({"type":"number", "precision":18, "scale":2})
+        ));
         assert!(supports_grouping(
             &crate::value!({"type":"json", "mask":{"kind":"full"}})
         ));

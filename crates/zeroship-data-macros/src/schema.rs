@@ -239,7 +239,7 @@ fn logical_type(def: &Value, orm: &syn::Path, span: proc_macro2::Span) -> syn::R
         "string" | "text" | "id" | "ref" | "actor" => "Text",
         "int" | "integer" => "Integer",
         "bigInt" => "BigInt",
-        "number" | "float" | "decimal" | "numeric" => "Number",
+        "number" | "float" => "Number",
         "boolean" => "Boolean",
         "bytes" => "Bytes",
         "date" | "timestamp" => "Timestamp",

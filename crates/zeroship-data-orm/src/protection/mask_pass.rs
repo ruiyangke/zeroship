@@ -113,6 +113,8 @@ pub fn apply_mask_on_write(
             if value.is_null() {
                 // null → no sibling write (Q-MASK-L)
                 None
+            } else if let Value::Decimal(decimal) = value {
+                Some(Zeroizing::new(decimal.clone()))
             } else if let Some(s) = value.as_str() {
                 Some(Zeroizing::new(s.to_string()))
             } else if let Some(n) = value.as_i64() {
@@ -554,6 +556,29 @@ mod tests {
                 Some(plaintext),
             );
         }
+    }
+
+    #[test]
+    fn apply_mask_on_write_accepts_exact_decimal_plaintext() {
+        let schema = value!({
+            "amount": {
+                "type": "number",
+                "precision": 30,
+                "scale": 2,
+                "mask": { "kind": "full", "classification": "spi" }
+            }
+        });
+        let mut row = Value::Object(
+            [("amount".into(), Value::Decimal("9007199254740993.01".into()))].into(),
+        );
+
+        derive_and_relocate(&schema, &MaskPlaintextSidechannel::new(), &mut row);
+
+        assert_eq!(row["amount"], value!("***"));
+        assert_eq!(
+            row[&crate::sql::mapping::raw_column_name("amount")],
+            Value::Decimal("9007199254740993.01".into())
+        );
     }
 
     #[test]

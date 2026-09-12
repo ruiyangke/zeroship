@@ -8082,6 +8082,7 @@ dependencies = [
  "futures",
  "hmac 0.12.1",
  "indexmap 2.14.0",
+ "num-bigint",
  "rusqlite",
  "rustls",
  "scoped-tls",

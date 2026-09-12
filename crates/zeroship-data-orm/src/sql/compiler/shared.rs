@@ -251,6 +251,7 @@ pub(crate) struct Syntax {
     pub(crate) average_suffix: &'static str,
     pub(crate) offset_without_limit: &'static str,
     pub(crate) structural_json_equality: bool,
+    pub(crate) exact_decimal_functions: bool,
     pub(crate) vector_distance: fn(
         &mut SqlWriter,
         &Column,
@@ -711,6 +712,13 @@ pub(crate) fn write_predicate(
                 write_structural_json_equality(writer, syntax, &lhs, rhs, op == CompareOp::Ne)?;
                 return Ok(());
             }
+            if lhs.storage()?.decimal().is_some()
+                && syntax.exact_decimal_functions
+                && matches!(op, CompareOp::Eq | CompareOp::Ne)
+            {
+                write_exact_decimal_equality(writer, syntax, &lhs, rhs, op == CompareOp::Ne)?;
+                return Ok(());
+            }
             write_operand(writer, syntax, &lhs);
             writer.sql.push_str(match op {
                 CompareOp::Eq => " = ",
@@ -740,6 +748,27 @@ pub(crate) fn write_predicate(
                         });
                     }
                     write_structural_json_equality(
+                        writer,
+                        syntax,
+                        &lhs,
+                        ResolvedPredicateValue::Bind { storage, value },
+                        op == MembershipOp::NotIn,
+                    )?;
+                }
+                writer.sql.push(')');
+                return Ok(());
+            }
+            if storage.decimal().is_some() && syntax.exact_decimal_functions {
+                writer.sql.push('(');
+                for (index, value) in values.into_iter().enumerate() {
+                    if index > 0 {
+                        writer.sql.push_str(if op == MembershipOp::In {
+                            " OR "
+                        } else {
+                            " AND "
+                        });
+                    }
+                    write_exact_decimal_equality(
                         writer,
                         syntax,
                         &lhs,
@@ -797,6 +826,29 @@ pub(crate) fn write_predicate(
                 .push_str(if negated { " IS NOT NULL" } else { " IS NULL" });
         }
     }
+    Ok(())
+}
+
+fn write_exact_decimal_equality(
+    writer: &mut SqlWriter,
+    syntax: Syntax,
+    lhs: &ResolvedOperand,
+    rhs: ResolvedPredicateValue,
+    negated: bool,
+) -> Result<(), CompileError> {
+    if negated {
+        writer.sql.push_str("NOT ");
+    }
+    writer.sql.push_str("zeroship_decimal_equal(");
+    write_operand(writer, syntax, lhs);
+    writer.sql.push_str(", ");
+    match rhs {
+        ResolvedPredicateValue::Operand(rhs) => write_operand(writer, syntax, &rhs),
+        ResolvedPredicateValue::Bind { storage, value } => {
+            write_bind(writer, syntax, storage, value)?;
+        }
+    }
+    writer.sql.push(')');
     Ok(())
 }
 
@@ -888,6 +940,26 @@ fn write_update_expression(
             operator,
             operand,
         } => {
+            if let Some(storage) = column
+                .storage()
+                .decimal()
+                .filter(|_| syntax.exact_decimal_functions)
+            {
+                writer.sql.push_str(match operator {
+                    ArithmeticOperator::Add => "zeroship_decimal_add(",
+                    ArithmeticOperator::Subtract => "zeroship_decimal_subtract(",
+                    ArithmeticOperator::Multiply => "zeroship_decimal_multiply(",
+                });
+                writer.identifier(column.name().as_str());
+                writer.sql.push_str(", ");
+                writer.write_param(operand)?;
+                writer.sql.push_str(", ");
+                writer.sql.push_str(&storage.precision().to_string());
+                writer.sql.push_str(", ");
+                writer.sql.push_str(&storage.scale().to_string());
+                writer.sql.push(')');
+                return Ok(());
+            }
             writer.identifier(column.name().as_str());
             writer.sql.push_str(match operator {
                 ArithmeticOperator::Add => " + ",
@@ -953,6 +1025,7 @@ fn write_bind(
     match storage {
         StorageType::Timestamp => writer.sql.push_str(syntax.timestamp_cast),
         StorageType::Vector => writer.sql.push_str(syntax.vector_cast),
+        StorageType::ExactDecimal(_) => writer.sql.push_str(syntax.numeric_cast),
         _ => {}
     }
     Ok(())
@@ -965,7 +1038,19 @@ fn write_expression(
     expression: Expression,
 ) -> Result<(), CompileError> {
     match expression {
-        Expression::Bind(value) => write_bind(writer, syntax, storage, value)?,
+        Expression::Bind(value) => {
+            if let Some(decimal) = storage.decimal().filter(|_| syntax.exact_decimal_functions) {
+                writer.sql.push_str("zeroship_decimal_quantize(");
+                writer.write_param(value)?;
+                writer.sql.push_str(", ");
+                writer.sql.push_str(&decimal.precision().to_string());
+                writer.sql.push_str(", ");
+                writer.sql.push_str(&decimal.scale().to_string());
+                writer.sql.push(')');
+            } else {
+                write_bind(writer, syntax, storage, value)?;
+            }
+        }
         Expression::Null => writer.sql.push_str("NULL"),
         Expression::Default => writer.sql.push_str("DEFAULT"),
         Expression::Current(column) => write_current(writer, &column),

@@ -87,6 +87,7 @@ percent-encoding = "2"
 rusqlite = { version = "0.39", features = ["bundled", "preupdate_hook"] }
 # The SQLite vector extension is linked into the ORM backend.
 sqlite-vec = "0.1"
+num-bigint = "0.4"
 
 # IDs
 uuid = { version = "1", features = ["v4", "v7", "serde"] }

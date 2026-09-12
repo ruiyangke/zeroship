@@ -3,7 +3,7 @@
 use super::*;
 use crate::sql::statement::{
     ResolvedJoin, ResolvedOperand, ResolvedOrder, ResolvedPredicate, ResolvedPredicateValue,
-    SelectParts, SelectStatement, SelectedExpression, Statement, StorageType,
+    SelectParts, SelectStatement, SelectedExpression, Statement,
 };
 use crate::sql::{
     FieldPath, Ident, IdentRole, JoinKind, Operand, OrderKey, Predicate, RowLimit, RowOffset,
@@ -646,7 +646,7 @@ fn encode_literal(
         crate::sql::Literal::Float(value) => {
             Value::try_from(value.get()).map_err(|_| invalid("non-finite filter value"))?
         }
-        crate::sql::Literal::Text(value) if storage == StorageType::Decimal => {
+        crate::sql::Literal::Text(value) if storage.decimal().is_some() => {
             Value::Decimal(value.clone())
         }
         crate::sql::Literal::Text(value) => Value::String(value.clone()),
@@ -857,7 +857,7 @@ fn scalar_kind<'a>(path: &FieldPath, sources: &'a [SourceLayout]) -> Result<&'a 
         "integer" | "int" | "bigInt" => Ok("integer"),
         "number" | "float" | "double" => Ok("number"),
         "boolean" | "bool" => Ok("boolean"),
-        "decimal" | "bytes" | "calendarDate" | "time" => Ok(kind),
+        "bytes" | "calendarDate" | "time" => Ok(kind),
         _ => Err(invalid("join keys must be scalar columns")),
     }
 }
@@ -874,15 +874,19 @@ fn scalar_definition(expression: &Operand, sources: &[SourceLayout]) -> Result<V
                 .argument()
                 .ok_or_else(|| invalid("aggregate requires a column"))?;
             let kind = scalar_kind(path, sources)?;
+            let definition = &source_for(path, sources)?.schema[path.root().as_str()];
+            let exact_decimal = crate::sql::descriptors::is_exact_decimal(definition);
             if matches!(aggregate.func(), AggregateFunc::Sum | AggregateFunc::Avg) {
-                if !matches!(kind, "integer" | "number") {
-                    return Err(invalid("sum and avg require an integer or number column"));
+                if !matches!(kind, "integer" | "number") || exact_decimal {
+                    return Err(invalid(
+                        "sum and avg require an integer or floating point number column",
+                    ));
                 }
                 return Ok(
                     crate::value!({"type": if aggregate.func() == AggregateFunc::Avg || kind == "number" { "number" } else { "bigInt" }}),
                 );
             }
-            if matches!(kind, "boolean" | "bytes" | "decimal") {
+            if matches!(kind, "boolean" | "bytes") || exact_decimal {
                 return Err(invalid(
                     "min and max require an ordered portable scalar column",
                 ));
@@ -996,7 +1000,7 @@ mod tests {
         let sources = vec![source(value!({
             "id": {"type":"string"},
             "enabled": {"type":"boolean"},
-            "amount": {"type":"decimal"},
+            "amount": {"type":"number", "precision":18, "scale":2},
             "payload": {"type":"json"},
             "embedding": {"type":"vector", "vectorDims":2},
             "location": {"type":"geoPoint"}
@@ -1034,7 +1038,7 @@ mod tests {
         let sources = vec![source(value!({
             "id": {"type":"string"},
             "enabled": {"type":"boolean"},
-            "amount": {"type":"decimal"},
+            "amount": {"type":"number", "precision":18, "scale":2},
             "payload": {"type":"json"},
             "bytes": {"type":"bytes"},
             "score": {"type":"number"}
