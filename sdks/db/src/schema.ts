@@ -12,6 +12,8 @@ export function validateCollectionIdentity(schema: NormalizedSchema): void {
     message = "collection requires 'id' declared as its primary key";
   } else if (id.required !== true) {
     message = "collection 'id' must be required and non-null";
+  } else if (id.assign !== undefined && id.assign?.on !== "insert") {
+    message = "collection 'id' can only be assigned on insertion";
   } else if (Object.entries(schema).some(([name, field]) => name !== "id" && field.primaryKey === true)) {
     message = "collection 'id' must be its sole primary key";
   }

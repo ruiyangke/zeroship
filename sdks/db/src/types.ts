@@ -148,7 +148,9 @@ export type Row<S> = InferSchema<S>;
 
 export type IdValue = string | number | bigint;
 /** The identity type declared by the collection schema. */
-export type RowId<S> = "id" extends keyof Row<S> ? Extract<Row<S>["id"], IdValue> : IdValue;
+export type RowId<S> = "id" extends keyof Row<S>
+  ? unknown extends Row<S>["id"] ? IdValue : Extract<Row<S>["id"], IdValue>
+  : IdValue;
 
 export type AssignedKeys<S> = {
   [K in keyof S]: S[K] extends { readonly _assigned: true } ? K : never

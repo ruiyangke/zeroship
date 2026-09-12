@@ -15,6 +15,12 @@ pub fn validate_collection_identity(schema: &crate::value::Value) -> Result<(), 
     if id.get("required").and_then(Value::as_bool) != Some(true) {
         return Err("collection 'id' must be required and non-null");
     }
+    if id
+        .get("assign")
+        .is_some_and(|assignment| assignment.get("on").and_then(Value::as_str) != Some("insert"))
+    {
+        return Err("collection 'id' can only be assigned on insertion");
+    }
     if fields.iter().any(|(name, def)| {
         name != "id" && def.get("primaryKey").and_then(Value::as_bool) == Some(true)
     }) {

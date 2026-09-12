@@ -96,3 +96,9 @@ function contracts(collection: Collection<typeof fields, "records">) {
   void numeric;
 }
 void contracts;
+
+function untypedContracts(collection: Collection) {
+  void collection.get("manual");
+  void collection.get(7);
+}
+void untypedContracts;
