@@ -44,7 +44,7 @@ pub struct SpatialSearch<'a> {
     pub column: &'a str,
     pub point: GeoPoint,
     pub radius_m: f64,
-    pub limit: Option<usize>,
+    pub limit: usize,
 }
 impl<'a> SpatialSearch<'a> {
     #[allow(clippy::too_many_arguments)]
@@ -59,6 +59,7 @@ impl<'a> SpatialSearch<'a> {
         schema: &Value,
         registration: &crate::sql::registration::SqlRegistration,
     ) -> Result<Self, DbError> {
+        let limit = crate::crud::search::spatial_limit(limit)?;
         Ok(Self {
             binding,
             query: crate::crud::search::spatial(
@@ -104,5 +105,33 @@ pub trait Search {
             "backend_unsupported",
             "the backend does not support spatial search",
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::value;
+
+    #[test]
+    fn spatial_search_materializes_its_default_limit() {
+        let binding = DbBinding::cold_start("spatial_limit");
+        let schema = value!({
+            "id":{"type":"integer","required":true,"primaryKey":true},
+            "location":{"type":"geoPoint"}
+        });
+        let request = SpatialSearch::compile(
+            &binding,
+            "places",
+            "location",
+            GeoPoint { lat: 0.0, lng: 0.0 },
+            1.0,
+            &Value::Null,
+            None,
+            &schema,
+            &crate::sql::registration::SqlRegistration::sqlite(),
+        )
+        .unwrap();
+        assert_eq!(request.limit, 100);
     }
 }

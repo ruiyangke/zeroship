@@ -15,6 +15,7 @@ use crate::{
 };
 
 const MAX_SEARCH_LIMIT: usize = 500;
+const DEFAULT_SPATIAL_LIMIT: usize = 100;
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn vector(
@@ -108,7 +109,7 @@ pub(crate) fn spatial(
     point: GeoPoint,
     radius_m: f64,
     filter: Value,
-    limit: Option<usize>,
+    limit: usize,
     registration: &SqlRegistration,
 ) -> Result<CompiledQuery, crate::error::DbError> {
     spatial_query(
@@ -134,11 +135,10 @@ fn spatial_query(
     point: GeoPoint,
     radius_m: f64,
     filter: Value,
-    limit: Option<usize>,
+    limit: usize,
     registration: &SqlRegistration,
 ) -> Result<CompiledQuery, QueryError> {
     validate_read_field(field, schema)?;
-    let limit = limit.unwrap_or(100);
     validate_limit("near.limit", limit)?;
     let resolved = ResolvedTable::aliased(namespace, collection, "source", schema, registration)?;
     let input = resolved
@@ -166,6 +166,12 @@ fn spatial_query(
         table: resolved.table,
     })?);
     registration.compile(statement).map_err(Into::into)
+}
+
+pub(crate) fn spatial_limit(limit: Option<usize>) -> Result<usize, crate::error::DbError> {
+    let limit = limit.unwrap_or(DEFAULT_SPATIAL_LIMIT);
+    validate_limit("near.limit", limit)?;
+    Ok(limit)
 }
 
 fn validate_limit(name: &str, value: usize) -> Result<(), QueryError> {

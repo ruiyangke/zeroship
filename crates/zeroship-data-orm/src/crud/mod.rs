@@ -1438,7 +1438,7 @@ pub struct NearPlan {
     field: String,
     point: crate::backend::GeoPoint,
     radius_m: f64,
-    limit: Option<usize>,
+    limit: usize,
     query: crate::sql::compiler::CompiledQuery,
 }
 
@@ -1502,6 +1502,7 @@ pub fn plan_near(
                 })?,
         ),
     };
+    let limit = search::spatial_limit(limit)?;
     let filter = args
         .get("filter")
         .cloned()

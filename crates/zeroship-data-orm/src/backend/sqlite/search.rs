@@ -72,7 +72,7 @@ impl SqliteBackend {
         column: &str,
         point: crate::sql::descriptors::GeoPoint,
         radius_m: f64,
-        limit: Option<usize>,
+        limit: usize,
     ) -> Result<Vec<crate::value::Value>, DbError> {
         // Build the WHERE clause via the same machinery `dispatch_find`
         // uses (the SQLite-on-PG-SQL path; `$N` placeholders bind
@@ -109,9 +109,7 @@ impl SqliteBackend {
             a.0.total_cmp(&b.0)
                 .then_with(|| compare_identity(&a.1, &b.1))
         });
-        if let Some(limit) = limit {
-            scored.truncate(limit);
-        }
+        scored.truncate(limit);
         let mut out = Vec::with_capacity(scored.len());
         for (distance, mut row) in scored {
             row.as_object_mut()
