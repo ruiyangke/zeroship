@@ -216,11 +216,22 @@ impl SqlRegistration {
     }
 
     pub fn encode(&self, storage: StorageType, value: Value) -> Result<Value, CompileError> {
-        self.codecs.encode(storage, value)
+        if storage == StorageType::Json {
+            validate_json(&value)?;
+        }
+        let encoded = self.codecs.encode(storage, value)?;
+        if storage == StorageType::Json {
+            validate_json(&encoded)?;
+        }
+        Ok(encoded)
     }
 
     pub fn decode(&self, storage: StorageType, value: Value) -> Result<Value, CompileError> {
-        self.codecs.decode(storage, value)
+        let decoded = self.codecs.decode(storage, value)?;
+        if storage == StorageType::Json {
+            validate_json(&decoded)?;
+        }
+        Ok(decoded)
     }
 
     pub fn decode_rows(
@@ -241,6 +252,11 @@ impl SqlRegistration {
     }
 }
 
+fn validate_json(value: &Value) -> Result<(), CompileError> {
+    crate::sql::codecs::validate_json_value("JSON value", value)
+        .map_err(|_| CompileError::InvalidStatement("invalid JSON storage value".into()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -253,5 +269,35 @@ mod tests {
         let second =
             RegistrationIdentity::new("ab", "c", "d", SqlFamily::new("e"), support, support);
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn registrations_reject_invalid_and_excessively_nested_json() {
+        for registration in [SqlRegistration::postgres(), SqlRegistration::sqlite()] {
+            assert!(registration
+                .encode(StorageType::Json, Value::Json("not json".into()))
+                .is_err());
+
+            let mut nested = Value::Null;
+            for _ in 0..=crate::sql::codecs::MAX_JSON_DEPTH {
+                nested = Value::Array(vec![nested]);
+            }
+            assert!(registration.encode(StorageType::Json, nested).is_err());
+
+            let encoded = format!(
+                "{}null{}",
+                "[".repeat(crate::sql::codecs::MAX_JSON_DEPTH + 1),
+                "]".repeat(crate::sql::codecs::MAX_JSON_DEPTH + 1)
+            );
+            assert!(registration
+                .encode(StorageType::Json, Value::Json(encoded))
+                .is_err());
+            assert!(registration
+                .encode(
+                    StorageType::Json,
+                    Value::Json(r#""[{\"nested\":true}]""#.into())
+                )
+                .is_ok());
+        }
     }
 }

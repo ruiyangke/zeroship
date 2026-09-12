@@ -1,7 +1,7 @@
 //! Descriptor-directed temporal values and typed JSON containers.
 use super::{CodecError, Value};
 
-const MAX_TYPED_DEPTH: usize = 128;
+const MAX_TYPED_DEPTH: usize = super::MAX_JSON_DEPTH;
 
 fn invalid(field: &str, expected: &str) -> CodecError {
     CodecError::validation(
@@ -113,6 +113,9 @@ fn prepare_array_element(field: &str, item: &str, value: &mut Value) -> Result<(
     if !valid {
         return Err(invalid_element(field, item));
     }
+    if item == "json" {
+        super::validate_json_value(field, value)?;
+    }
     Ok(())
 }
 
@@ -142,6 +145,9 @@ fn prepare_value_at(
     }
     if matches!(kind, Some("boolean" | "bool")) && !value.is_boolean() {
         return Err(invalid(field, "a boolean"));
+    }
+    if kind == Some("json") {
+        return super::validate_json_value(field, value);
     }
     if !matches!(kind, Some("array" | "object" | "union")) {
         return Ok(());
