@@ -19,12 +19,13 @@ pub struct BackendHandle(
     Rc<dyn Backend>,
     Rc<()>,
     Arc<crate::sql::registration::SqlRegistration>,
-    Option<crate::connection::ConnectionIdentity>,
+    crate::connection::ConnectionIdentity,
 );
 impl BackendHandle {
     pub fn new<B: Backend>(backend: Rc<B>) -> Self {
         let registration = backend.sql_registration();
-        Self(backend, Rc::new(()), Arc::new(registration), None)
+        let identity = crate::connection::ConnectionIdentity::for_backend(registration.identity());
+        Self(backend, Rc::new(()), Arc::new(registration), identity)
     }
     pub fn with_sql<B: Backend>(
         backend: Rc<B>,
@@ -36,19 +37,20 @@ impl BackendHandle {
                 "backend execution and SQL registration use different SQL families",
             ));
         }
-        Ok(Self(backend, Rc::new(()), Arc::new(registration), None))
+        let identity = crate::connection::ConnectionIdentity::for_backend(registration.identity());
+        Ok(Self(backend, Rc::new(()), Arc::new(registration), identity))
     }
     pub fn sql_registration(&self) -> &crate::sql::registration::SqlRegistration {
         &self.2
     }
-    pub fn connection_identity(&self) -> Option<crate::connection::ConnectionIdentity> {
+    pub fn connection_identity(&self) -> crate::connection::ConnectionIdentity {
         self.3
     }
     pub(crate) fn bind_connection_identity(
         mut self,
         identity: crate::connection::ConnectionIdentity,
     ) -> Self {
-        self.3 = Some(identity);
+        self.3 = identity;
         self
     }
     pub async fn open_tx_session(
