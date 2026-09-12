@@ -30,7 +30,11 @@ impl StorageType {
         match self {
             Self::Boolean => matches!(value, Value::Bool(_)),
             Self::Integer => value.as_i64().is_some(),
-            Self::Real => matches!(value, Value::Number(_)),
+            Self::Real | Self::Decimal => match value {
+                Value::Number(_) => true,
+                Value::Decimal(value) => valid_decimal(value),
+                _ => false,
+            },
             Self::Text => matches!(value, Value::String(_)),
             Self::Bytes => matches!(value, Value::Bytes(_)),
             Self::Timestamp => {
@@ -38,7 +42,6 @@ impl StorageType {
                     || matches!(value, Value::String(_))
                         && crate::sql::temporal::timestamp_millis(value).is_some()
             }
-            Self::Decimal => matches!(value, Value::Decimal(_)),
             Self::Json => matches!(value, Value::Json(_) | Value::Array(_) | Value::Object(_)),
             Self::Vector => matches!(value, Value::Array(_) | Value::Bytes(_)),
             Self::GeoPoint => matches!(value, Value::Object(_) | Value::Bytes(_)),
@@ -48,6 +51,18 @@ impl StorageType {
     fn numeric(self) -> bool {
         matches!(self, Self::Integer | Self::Real | Self::Decimal)
     }
+
+    fn accepts_arithmetic(self, value: &Value) -> bool {
+        self.numeric() && self.accepts(value)
+    }
+}
+
+fn valid_decimal(value: &str) -> bool {
+    serde_json::from_str::<&serde_json::value::RawValue>(value).is_ok_and(|value| {
+        value
+            .get()
+            .starts_with(|ch: char| ch == '-' || ch.is_ascii_digit())
+    })
 }
 
 #[derive(Debug)]
@@ -1069,10 +1084,7 @@ fn validate_update_expression(
             column, operand, ..
         } => {
             table.check_column(column)?;
-            if column.index != assigned.index
-                || !storage.numeric()
-                || !matches!(operand, Value::Number(_) | Value::Decimal(_))
-            {
+            if column.index != assigned.index || !storage.accepts_arithmetic(operand) {
                 return Err(invalid(
                     "arithmetic requires its assigned numeric column and operand",
                 ));

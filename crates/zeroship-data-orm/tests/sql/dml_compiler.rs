@@ -6,12 +6,12 @@ use zeroship_data_orm::{
         },
         registration::{SqlFamily, SqlRegistration, SqlStorageCodecs},
         statement::{
-            ArrayOperator, Assignment, Comparison, Delete, DeleteParts, Expression,
-            IdentityRequest, Insert, InsertParts, MutationScope, ResolvedJoin, ResolvedOperand,
-            ResolvedPredicate, ResolvedPredicateValue, ReturnedColumn, SelectParts,
-            SelectStatement, SelectedExpression, SpatialNearParts, SpatialNearStatement, Statement,
-            StorageType, Table, Update, UpdateParts, Upsert, UpsertParts, VectorSearchParts,
-            VectorSearchStatement,
+            ArithmeticOperator, ArrayOperator, Assignment, Comparison, Delete, DeleteParts,
+            Expression, IdentityRequest, Insert, InsertParts, MutationScope, ResolvedJoin,
+            ResolvedOperand, ResolvedPredicate, ResolvedPredicateValue, ReturnedColumn,
+            SelectParts, SelectStatement, SelectedExpression, SpatialNearParts,
+            SpatialNearStatement, Statement, StorageType, Table, Update, UpdateParts, Upsert,
+            UpsertParts, VectorSearchParts, VectorSearchStatement,
         },
         CompareOp, Ident, IdentRole, JoinKind, SchemaName,
     },
@@ -591,6 +591,57 @@ fn integer_storage_rejects_values_outside_the_portable_database_range() {
             "bound value does not match its physical storage type".into()
         )
     );
+}
+
+#[test]
+fn numeric_storage_rejects_lossy_integer_arithmetic_and_invalid_decimals() {
+    let table = Table::new(
+        SchemaName::new("app-numeric").unwrap(),
+        Ident::parse_as("accounts", IdentRole::Collection).unwrap(),
+        [
+            ("id", StorageType::Integer),
+            ("balance", StorageType::Integer),
+            ("ratio", StorageType::Real),
+            ("amount", StorageType::Decimal),
+        ]
+        .map(|(name, storage)| {
+            (
+                Ident::parse_as(name, IdentRole::StoredColumn).unwrap(),
+                storage,
+            )
+        }),
+    )
+    .unwrap();
+    let balance = table.column("balance").unwrap();
+    assert!(Update::new(UpdateParts {
+        table: table.clone(),
+        assignments: vec![Assignment {
+            column: balance.clone(),
+            value: Expression::Arithmetic {
+                column: balance,
+                operator: ArithmeticOperator::Add,
+                operand: zeroship_data_orm::value!(1.5),
+            },
+        }],
+        predicate: ResolvedPredicate::Const(true),
+        scope: MutationScope::Matching,
+        returning: Vec::new(),
+    })
+    .is_err());
+
+    for column in ["ratio", "amount"] {
+        let column = table.column(column).unwrap();
+        assert!(Insert::new(InsertParts {
+            table: table.clone(),
+            columns: vec![column],
+            rows: vec![vec![Expression::Bind(Value::Decimal(
+                "not-a-decimal".into(),
+            ))]],
+            returning: Vec::new(),
+            insert_generated_identity: false,
+        })
+        .is_err());
+    }
 }
 
 #[test]
