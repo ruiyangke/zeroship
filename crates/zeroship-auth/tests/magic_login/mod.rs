@@ -1,5 +1,8 @@
 //! Magic-login HTTP handoffs through the production router in an owned database.
 
+mod fixtures;
+mod native;
+
 use crate::common::{self, auth_server::AuthServer, database::Database};
 use zeroship_auth::identity::magic_link;
 
