@@ -2715,10 +2715,14 @@ statement, so the token cannot be spent without cancelling. The session-based
 handler and the by-id `cancel_deletion` store function are DELETED rather than
 kept as a fallback that could never run.
 
-`crates/zeroship-auth/tests/account_deletion_test.rs` drives the real route
-table over HTTP with no cookie, paired with a forged-token control, and
-`tests/user_erasure_reachability_gate.sh` rules on the two route registrations,
-the email link and the absence of a by-id back door.
+`crates/zeroship-auth/tests/account_deletion/http.rs` requests deletion through
+the real route table, follows the rendered email's undo link without a session,
+and checks forged-token and replay refusals. Preflight refusal cases verify
+that the account and session remain active and no undo token or email is issued.
+The store and reaper tests in `crates/zeroship-auth/tests/account_deletion_test.rs`
+also exercise erasure under the real auth database role. Platform foreign-key
+contracts are checked against migrated PostgreSQL in
+`crates/zeroship-migrate-node/tests/platform_corpus/user_erasure.rs`.
 
 ### 24. MEDIUM: OP discards authentication provenance before minting ID tokens
 
