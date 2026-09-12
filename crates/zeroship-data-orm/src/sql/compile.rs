@@ -39,6 +39,12 @@ pub enum QueryError {
     ImmutableAssignedField(String),
 }
 
+impl From<crate::sql::compiler::CompileError> for QueryError {
+    fn from(error: crate::sql::compiler::CompileError) -> Self {
+        Self::InvalidFilter(error.to_string())
+    }
+}
+
 impl std::fmt::Display for QueryError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -359,7 +365,7 @@ fn validate_read_identifier(name: &str, schema_hint: &Value) -> Result<(), Query
     )))
 }
 
-fn validate_value_operation(field: &str, schema: &Value) -> Result<(), QueryError> {
+pub(crate) fn validate_value_operation(field: &str, schema: &Value) -> Result<(), QueryError> {
     if schema
         .get(field)
         .is_some_and(crate::sql::descriptors::is_encrypted)
@@ -1003,18 +1009,23 @@ fn implicit_read_projection_parts(
     schema_hint: &Value,
     table_alias: Option<&str>,
 ) -> Result<Vec<String>, QueryError> {
+    Ok(implicit_read_fields(schema_hint)?.into_iter()
+        .map(|field| project_read_field(field, schema_hint, table_alias)).collect())
+}
+
+pub(crate) fn implicit_read_fields(schema_hint: &Value) -> Result<Vec<&str>, QueryError> {
     let schema_obj = schema_hint.as_object().ok_or_else(|| {
         QueryError::InvalidFilter(
             "read schema must be a field-map object; a read cannot be projected without one"
                 .to_string(),
         )
     })?;
-    let mut parts = Vec::new();
+    let mut fields = Vec::new();
     for (field, def) in schema_obj {
         if is_schema_metadata_key(field) || !field_is_readable(def) {
             continue;
         }
-        parts.push(project_read_field(field, schema_hint, table_alias));
+        fields.push(field.as_str());
     }
     if schema_obj
         .get("id")
@@ -1023,15 +1034,15 @@ fn implicit_read_projection_parts(
             .values()
             .any(|def| field_is_readable(def) && field_needs_identity(def))
     {
-        parts.push(project_read_field("id", schema_hint, table_alias));
+        fields.push("id");
     }
-    if parts.is_empty() {
+    if fields.is_empty() {
         return Err(QueryError::InvalidFilter(
             "read requires a declared projection".into(),
         ));
     }
 
-    Ok(parts)
+    Ok(fields)
 }
 
 /// Project readable fields and the identity required by protection after a mutation.
@@ -2988,24 +2999,6 @@ pub fn value_to_param(value: &Value) -> Value {
     value.clone()
 }
 
-/// Compile an owned document with an explicit conflict target.
-pub fn build_upsert(
-    schema_name: &SchemaName,
-    collection: &str,
-    schema_hint: &Value,
-    doc: Value,
-    conflict_fields: &Value,
-) -> Result<CompiledQuery, QueryError> {
-    build_upsert_with_dialect(
-        schema_name,
-        collection,
-        schema_hint,
-        doc,
-        conflict_fields,
-        SqlDialect::Postgres,
-    )
-}
-
 /// Parse an explicit conflict target without dropping or duplicating columns.
 pub fn parse_conflict_fields(value: &Value) -> Result<Vec<&str>, QueryError> {
     let fields = value
@@ -3034,149 +3027,7 @@ pub fn parse_conflict_fields(value: &Value) -> Result<Vec<&str>, QueryError> {
         .collect()
 }
 
-/// Dialect-aware UPSERT builder.
-pub fn build_upsert_with_dialect(
-    schema_name: &SchemaName,
-    collection: &str,
-    schema_hint: &Value,
-    doc: Value,
-    conflict_fields: &Value,
-    dialect: SqlDialect,
-) -> Result<CompiledQuery, QueryError> {
-    build_upsert_with_assignments(
-        schema_name,
-        collection,
-        schema_hint,
-        doc,
-        conflict_fields,
-        dialect,
-        &WriteAssignments::default(),
-        None,
-    )
-}
-
-/// `expected_id` guards a conflict update whose values depend on row identity.
-pub fn build_upsert_with_assignments(
-    schema_name: &SchemaName,
-    collection: &str,
-    schema_hint: &Value,
-    doc: Value,
-    conflict_fields: &Value,
-    dialect: SqlDialect,
-    assignments: &WriteAssignments,
-    expected_id: Option<Value>,
-) -> Result<CompiledQuery, QueryError> {
-    validate_collection(collection)?;
-    let returning = build_returning_expr(schema_hint)?;
-
-    let Value::Object(mut obj) = doc else {
-        return Err(QueryError::InvalidFilter(
-            "upsert document must be an object".into(),
-        ));
-    };
-
-    if obj.is_empty() {
-        return Err(QueryError::InvalidFilter(
-            "upsert document cannot be empty".to_string(),
-        ));
-    }
-
-    let conflict_arr = parse_conflict_fields(conflict_fields)?;
-    for field in &conflict_arr {
-        validate_value_operation(field, schema_hint)?;
-    }
-    let conflict_set: std::collections::HashSet<&str> = conflict_arr.iter().copied().collect();
-
-    let schema = crate::sql::compile::quote_ident(schema_name.as_str());
-    let table = quote_ident(collection);
-    let has_id = obj.contains_key("id");
-
-    let mut columns = Vec::new();
-    let mut placeholders = Vec::new();
-    let mut params: Vec<Value> = Vec::new();
-    let mut update_clauses = Vec::new();
-
-    obj.sort_keys();
-    for (key, value) in obj {
-        columns.push(quote_ident(&key));
-
-        if value.is_null() {
-            placeholders.push("NULL".to_string());
-        } else {
-            let is_binary_bind = matches!(&value, Value::Bytes(_));
-            if is_binary_bind {
-                params.push(dialect.encode_binary_param(value)?);
-                placeholders.push(dialect.binary_bind_placeholder(params.len()));
-            } else {
-                placeholders.push(push_field_parameter(
-                    &mut params,
-                    Cow::Owned(value),
-                    &key,
-                    schema_hint,
-                    dialect,
-                )?);
-            }
-        }
-
-        // Non-conflict columns get updated to the EXCLUDED value
-        if key != "id"
-            && !conflict_set.contains(key.as_str())
-            && schema_hint[&key]["assign"]["on"].as_str() != Some("insert")
-            && !assignments
-                .columns
-                .iter()
-                .any(|assignment| assignment.column == key)
-        {
-            update_clauses.push(format!(
-                "{} = EXCLUDED.{}",
-                quote_ident(&key),
-                quote_ident(&key)
-            ));
-        }
-    }
-
-    let conflict_cols: Vec<String> = conflict_arr
-        .iter()
-        .map(|field| quote_ident(field))
-        .collect();
-
-    update_clauses.extend(assignments.render(
-        dialect,
-        &mut params,
-        Some(&format!("{schema}.{table}")),
-    )?);
-
-    // Self-assignment preserves the returning row and database-trigger behavior.
-    if update_clauses.is_empty() {
-        if let Some(first) = conflict_arr.first() {
-            update_clauses.push(format!(
-                "{} = EXCLUDED.{}",
-                quote_ident(first),
-                quote_ident(first)
-            ));
-        }
-    }
-
-    let overriding = crate::sql::identity::overriding_clause(schema_hint, dialect, has_id);
-    let identity_guard = if let Some(id) = expected_id {
-        let key = quote_ident(&value_column_for_field("id", schema_hint));
-        let bound = push_field_parameter(&mut params, Cow::Owned(id), "id", schema_hint, dialect)?;
-        format!(" WHERE {schema}.{table}.{key} = {bound}")
-    } else {
-        String::new()
-    };
-    let sql = format!(
-        "INSERT INTO {schema}.{table} ({}){overriding} VALUES ({}) ON CONFLICT ({}) DO UPDATE SET {}{identity_guard} RETURNING {returning}",
-        columns.join(", "),
-        placeholders.join(", "),
-        conflict_cols.join(", "),
-        update_clauses.join(", ")
-    );
-
-    Ok(CompiledQuery { sql, params })
-}
-
-/// Build a findOrCreate query. Same shape as [`build_upsert`] but the
+/// Build a findOrCreate query. Same conflict shape as upsert but the
 /// ON CONFLICT branch is a no-op self-assignment on the conflict column
 /// (the existing row is returned untouched) and the RETURNING list
 /// appends `(xmax = 0) AS __created` so the caller can tell whether
@@ -3260,6 +3111,7 @@ pub fn build_find_or_create(
 
 #[cfg(test)]
 mod tests {
+    use crate::crud::upsert::{build_upsert, build_upsert_with_dialect, build_upsert_with_assignments};
     const FIXTURE_GENERATED_COLUMNS: &[&str] = &[
         "id",
         "created_at",
@@ -9163,6 +9015,7 @@ pub(crate) fn validate_filter_budget(filter: &Value) -> Result<(), QueryError> {
 
 #[cfg(test)]
 mod binary_expression_tests {
+    use crate::crud::upsert::build_upsert_with_dialect;
     use super::*;
     use crate::value;
 
