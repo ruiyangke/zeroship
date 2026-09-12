@@ -12,32 +12,11 @@ use uuid::Uuid;
 use zeroship_auth::config::AuthConfig;
 use zeroship_core::config::{Secret, SourceKind};
 
-/// The database every live test in this target uses, or no run at all.
+/// Require the configured platform database for fixtures that do not yet own one.
 ///
-/// THIS IS THE ONE PLACE THE DECISION IS MADE. Every module here used to open
-/// with its own `let Some(dsn) = test_database_url_opt() else { skip(); return; }`,
-/// and a skip is a pass: an unconfigured machine reported a green auth suite
-/// having exercised no login, no token exchange and no OIDC flow. `skip` is
-/// gone from the workspace and there is no environment variable that brings it
-/// back. A database this target cannot reach is a failed run, not a green one.
-///
-/// IT REFUSES ONCE FOR THE WHOLE PROCESS RATHER THAN PANICKING PER TEST.
-/// `tests/main.rs` is a single binary over every module in this directory, so a
-/// panicking helper would print one FAILED line per live test - hundreds of
-/// verdicts about code that never executed, which is the presentation
-/// `platform_fixture::live_db` exists to remove. `require_configured` prints
-/// one block naming what was missing and `tests/provision_test_backends.sh`,
-/// then leaves the process with `live_db::REFUSED_EXIT_CODE`, which cargo
-/// reports as a failed run and which no test can be mistaken for.
-///
-/// The schema list is [`platform_fixture::live_db::PLATFORM_SCHEMAS`], the same
-/// pair this crate's own lib tests require (`src/oidc/authorization_code.rs`).
-/// Reachable is not sufficient here: these fixtures read `zeroship.signing_keys`
-/// and `zeroship.oauth_clients` on their first statement, so a database that
-/// answers but was never migrated turns every module in this target red with a
-/// missing-relation error that reads exactly like a regression.
-///
-/// Memoised, so the preflight dials once however many modules ask.
+/// Missing or unmigrated databases fail the run. The connection preflight is
+/// memoized for these shared-database callers; owned fixtures use [`database`]
+/// instead and manage their own server lifecycle.
 #[must_use]
 pub fn test_database_url() -> String {
     static DSN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
@@ -50,43 +29,11 @@ pub fn test_database_url() -> String {
     .clone()
 }
 
-/// The OP signing key belonging to this test PROCESS, and to no other.
+/// A stable process-specific signing key for fixtures using the shared database.
 ///
-/// Every integration test binary in this crate shares ONE suite database.
-/// `Issuer::publish_active_key` retires every other active row in
-/// `zeroship.signing_keys` and then refuses to reactivate a `retiring` row
-/// (`crates/zeroship-auth/src/oidc/issuer.rs:388-408`), and the kid is a pure
-/// thumbprint of the public key (`issuer.rs:273`). So two issuers built from
-/// the same seed publish the SAME kid, and whichever publishes second dies on
-/// a key something between them retired. That is production behaving
-/// correctly - a retiring signer must not come back - against fixtures wrong
-/// to share one OP identity.
-///
-/// THE SEED WAS `CARGO_CRATE_NAME` ALONE, WHICH SCOPES IT TO THE BINARY AND
-/// NOT TO THE RUN. That was enough while every run had a private database. It
-/// is not enough now that runs on one migration set share one, because the
-/// crate name is identical in both: run A's `oidc_userinfo_test` and run B's
-/// build the same kid, and each retires the other's.
-///
-/// MEASURED 2026-08-20, two auth suites started together against one shared
-/// database: 168 passed / 97 failed and 168 passed / 103 failed, of which 96
-/// were one message -
-///     publish active OP key: Config("signing key rrH3djpczx84e4EPasp7tvEcuv8a2ifSc4p0VT5Q5Go
-///                                   has non-activatable status \"retiring\"")
-/// - the same kid in both logs, which is the collision stated as a fact.
-///
-/// So the seed carries a per-PROCESS token as well. Distinctness then holds by
-/// construction in both directions: two binaries of one run differ (different
-/// processes), and two runs of one binary differ (different processes again).
-/// Memoized, because the key must be stable for the life of the process - an
-/// issuer that re-derived it would publish a second kid and retire its own.
-///
-/// A key this process published and something else has since retired stays
-/// usable here, which is what makes per-process seeds sufficient rather than
-/// merely different: `publish_active_key`'s own doc says an already-running
-/// retiring signer remains safe, because every token it returns advances the
-/// row's maximum issued expiry. Only REPUBLISHING a retired kid fails, and
-/// nothing republishes a kid no other process can derive.
+/// Distinct processes need distinct issuers so a peer cannot retire a key before
+/// its owner publishes it. Memoization keeps the key stable across this process's
+/// fixtures; key-retention tests construct their own issuers in owned databases.
 pub fn op_signing_key() -> ed25519_dalek::SigningKey {
     static SEED: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
     let seed = SEED.get_or_init(|| {
@@ -418,47 +365,10 @@ pub async fn cleanup_rate_limits_like(pg: &compio_postgres::Client, patterns: &[
     }
 }
 
-/// Publish this process's OP signing key, once, however many fixtures ask.
+/// Publish this process's key for fixtures using the configured shared database.
 ///
-/// WHY ONCE. `zeroship.signing_keys` holds at most one `active` row per
-/// DATABASE: `publish_active_key` retires every other active row
-/// (`crates/zeroship-auth/src/oidc/issuer.rs:396-403`) and refuses to reactivate a
-/// `retiring` one (`:380-392`). That is production behaving correctly - a
-/// retired signer must not come back - and it makes "the active OP key" a
-/// database-level singleton, which two concurrent suite runs on one shared
-/// database both need to be.
-///
-/// Per-process KEYS are not enough on their own, and the measurement says so.
-/// Two auth binaries run together on one database, after `op_signing_key`
-/// became per-process:
-///     A: 161 passed; 93 failed        B: 254 passed; 0 failed
-/// and 93 of A's 93 were `publish active OP key: ... has non-activatable
-/// status "retiring"`, naming A's OWN kid. Distinct keys stopped the two runs
-/// from colliding on one identity; what remained is that each REPUBLISHED its
-/// key per fixture boot, and B's publish had retired A's row in between.
-///
-/// Publishing once removes the republish, which is the only operation that can
-/// fail. A key another run has since retired stays usable here: `retiring` rows
-/// remain in the JWKS (`crates/zeroship-auth/src/oidc/metadata.rs:71-84` selects
-/// `status IN ('active','next','retiring')`), and every JWKS assertion in this
-/// crate looks its key up BY KID rather than asserting how many there are, so a
-/// peer's key sitting beside this one changes nothing.
-///
-/// NOT for `signing_key_retention_test`, which is the lifecycle's own test and
-/// must drive the real `publish_active_key` directly.
-///
-/// LOAD-THEN-STORE, NOT `swap`: the flag records that a publish SUCCEEDED, not
-/// that one was attempted. With `swap` the flag is already set when the publish
-/// returns an error, so the first caller reports the real failure and every
-/// later caller in the process gets `Ok(())` with nothing published and fails
-/// somewhere downstream on a key that was never registered - one real failure
-/// wearing fifty unrelated faces.
-///
-/// The race `swap` was buying is not worth having. This suite runs
-/// `--test-threads 1`, and even threaded the worst case is republishing our own
-/// still-ACTIVE kid, which succeeds: `publish_active_key` refuses only
-/// `retiring` and `retired` rows. Skipping the publish is the outcome nothing
-/// downstream can recover from.
+/// Only successful publication sets the process flag. Owned database fixtures
+/// call the issuer directly because this flag does not identify a database.
 pub async fn publish_op_key_once(
     issuer: &zeroship_auth::oidc::Issuer,
     db: &compio_postgres::Client,
