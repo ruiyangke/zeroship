@@ -117,6 +117,40 @@ fn db_collection_caches_by_name() {
 }
 
 #[test]
+fn collection_exposes_direct_lookup_helpers() {
+    init_v8();
+    let mut isolate = v8::Isolate::new(v8::CreateParams::default());
+    v8::scope!(let handle_scope, &mut isolate);
+    let context = v8::Context::new(handle_scope, Default::default());
+    let scope = &mut v8::ContextScope::new(handle_scope, context);
+    install_runtime_state(scope);
+
+    let db = mint_db(scope, "test_app").expect("mint_db");
+    let collection_key = v8::String::new(scope, "collection").unwrap();
+    let collection_fn: v8::Local<v8::Function> = db
+        .get(scope, collection_key.into())
+        .expect("collection prop")
+        .try_into()
+        .expect("collection is not a function");
+    let name = v8::String::new(scope, "users").unwrap();
+    let collection: v8::Local<v8::Object> = collection_fn
+        .call(scope, db.into(), &[name.into()])
+        .expect("collection call")
+        .try_into()
+        .expect("collection result");
+
+    for method in ["get", "exists"] {
+        let key = v8::String::new(scope, method).unwrap();
+        assert!(
+            collection
+                .get(scope, key.into())
+                .is_some_and(|value| value.is_function()),
+            "Collection.{method} must be a native method"
+        );
+    }
+}
+
+#[test]
 fn collection_brand_check_rejects_non_collection() {
     init_v8();
     let mut isolate = v8::Isolate::new(v8::CreateParams::default());

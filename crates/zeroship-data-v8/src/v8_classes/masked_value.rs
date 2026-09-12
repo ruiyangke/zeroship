@@ -332,8 +332,11 @@ impl MaskedValue {
             // returning early, so the `probe` branch keeps deciding what a
             // rejection means: `not_configured` is not `unmask_not_permitted`,
             // so `canUnmask()` still re-throws it instead of answering `false`.
-            let outcome = match crate::tx_scope::bind_route(route).await {
-                Ok(route) => dispatch_unmask(&route, &binding, args).await,
+            let outcome = match route {
+                Ok(route) => match crate::tx_scope::bind_route(route).await {
+                    Ok(route) => dispatch_unmask(&route, &binding, args).await,
+                    Err(e) => Err(e),
+                },
                 Err(e) => Err(e),
             };
             match outcome {
@@ -445,8 +448,11 @@ impl MaskedValue {
         state.borrow_mut().spawned_ops.push(Box::pin(async move {
             // Bound adapter-side and folded into the error arm, exactly as
             // in [`MaskedValue::dispatch_unmask_single`] above.
-            let outcome = match crate::tx_scope::bind_route(route).await {
-                Ok(route) => dispatch_bulk_unmask(&route, &binding, args).await,
+            let outcome = match route {
+                Ok(route) => match crate::tx_scope::bind_route(route).await {
+                    Ok(route) => dispatch_bulk_unmask(&route, &binding, args).await,
+                    Err(e) => Err(e),
+                },
                 Err(e) => Err(e),
             };
             match outcome {
