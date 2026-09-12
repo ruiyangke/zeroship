@@ -6,7 +6,16 @@ use crate::{
 };
 use futures::future::LocalBoxFuture;
 use sha2::{Digest, Sha256};
-use std::{cell::Cell, fmt, num::NonZeroUsize, rc::Rc, sync::Arc};
+use std::{
+    cell::Cell,
+    fmt,
+    num::NonZeroUsize,
+    rc::Rc,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+};
 
 /// Host-defined backend construction. Configuration crosses worker threads;
 /// opening happens on the destination compio thread and returns a local handle.
@@ -27,6 +36,22 @@ impl ConnectionIdentity {
         let mut hash = Sha256::new();
         hash.update(b"zeroship.orm.connection\0");
         hash.update(configuration.as_bytes());
+        registration.contribute_to(&mut hash);
+        Self(hash.finalize().into())
+    }
+
+    pub(crate) fn for_backend(
+        registration: crate::sql::registration::RegistrationIdentity,
+    ) -> Self {
+        static NEXT_BACKEND: AtomicU64 = AtomicU64::new(0);
+        let sequence = NEXT_BACKEND
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+                value.checked_add(1)
+            })
+            .expect("backend identity space exhausted");
+        let mut hash = Sha256::new();
+        hash.update(b"zeroship.orm.backend\0");
+        hash.update(sequence.to_le_bytes());
         registration.contribute_to(&mut hash);
         Self(hash.finalize().into())
     }

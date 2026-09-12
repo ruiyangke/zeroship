@@ -1,5 +1,6 @@
 use super::*;
 use futures::{future::LocalBoxFuture, FutureExt};
+use std::rc::Rc;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
@@ -32,6 +33,55 @@ fn connection_factory_captures_the_sql_registration_once() {
         },
     );
     assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[compio::test]
+async fn direct_backend_handles_have_stable_distinct_connection_identities() {
+    let first_directory = tempfile::tempdir().unwrap();
+    let second_directory = tempfile::tempdir().unwrap();
+    let open = |directory: &tempfile::TempDir| {
+        BackendHandle::new(Rc::new(
+            crate::backend_selection::new_sqlite_backend(
+                directory.path().to_owned(),
+                ProjectKeySource::unavailable(),
+            )
+            .unwrap(),
+        ))
+    };
+    let first = open(&first_directory);
+    let first_clone = first.clone();
+    let second = BackendHandle::with_sql(
+        Rc::new(
+            crate::backend_selection::new_sqlite_backend(
+                second_directory.path().to_owned(),
+                ProjectKeySource::unavailable(),
+            )
+            .unwrap(),
+        ),
+        crate::sql::registration::SqlRegistration::sqlite(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        first.connection_identity(),
+        first_clone.connection_identity()
+    );
+    assert_ne!(first.connection_identity(), second.connection_identity());
+
+    let captured = crate::tx_route::CapturedRoute::capture(
+        None,
+        "app_direct_backend_route",
+        crate::sql::SchemaName::new("app_direct_backend_route").unwrap(),
+        first.sql_registration().clone(),
+        first.connection_identity(),
+    );
+    assert!(matches!(
+        captured.bind(second),
+        Err(DbError::Configuration {
+            code: "backend_connection_mismatch",
+            ..
+        })
+    ));
 }
 
 struct ControlledFactory {
@@ -111,7 +161,7 @@ async fn a_captured_route_refuses_a_replacement_connection_with_the_same_sql_bun
         "app_route_connection",
         crate::sql::SchemaName::new("app_route_connection").unwrap(),
         first.sql_registration().clone(),
-        Some(first.identity()),
+        first.identity(),
     );
     let replacement = second
         .connect(ProjectKeySource::unavailable())
