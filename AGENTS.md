@@ -269,9 +269,12 @@ These don't change. If you're about to violate one, stop and ask.
   Privileged schema changes, replication ownership and key management belong to
   the migration service, CDC relay and control plane respectively.
 
-  Preserve reserved system names: they protect migration, audit and workflow
-  tables in app schemas. Any future shared system schema must hold state written
-  by a separate service that workers cannot forge.
+  Customer schemas are transparent to Rust and creator ORM access, including
+  migration, audit and workflow table names. Table prefixes do not authorize or
+  deny access; the host's schema binding and database permissions do. Migration
+  naming rules and column protection remain separate contracts. Any future
+  shared system schema must hold state written by a separate service that workers
+  cannot forge.
 
   Runtime descriptors define an isolate's schema. Catalog protection markers
   prevent descriptors from removing masking or encryption. Transaction identity

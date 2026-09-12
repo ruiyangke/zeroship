@@ -254,6 +254,36 @@ impl CollectionFixture {
         .unwrap();
     }
 
+    pub async fn rename_collection(&mut self, original: &str, renamed: &str) {
+        crate::sql::compile::validate_collection(renamed).unwrap();
+        let fields = self.database.context.with(|| {
+            crate::descriptor::collection_schema(&self.database.binding, original).unwrap()
+        });
+        let original = crate::sql::compile::quote_ident(original);
+        let target = crate::sql::compile::quote_ident(renamed);
+        if let Some(file) = &self.sqlite_file {
+            rusqlite::Connection::open(file)
+                .unwrap()
+                .execute_batch(&format!("ALTER TABLE {original} RENAME TO {target}"))
+                .unwrap();
+        } else {
+            let (backend, namespace, _) = self.postgres.as_ref().unwrap();
+            backend
+                .execute_fixture(
+                    &format!("ALTER TABLE {namespace}.{original} RENAME TO {target}"),
+                    &[],
+                )
+                .await
+                .unwrap();
+        }
+        self.database = Database::from_schema(
+            self.database.binding.clone(),
+            self.database.backend.clone(),
+            vec![(renamed.into(), fields.as_ref().clone())],
+        )
+        .unwrap();
+    }
+
     pub async fn close(self) {
         let Self {
             database,

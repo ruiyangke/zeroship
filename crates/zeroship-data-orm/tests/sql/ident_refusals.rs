@@ -128,53 +128,15 @@ fn the_length_fence_is_inclusive_at_63() {
     println!("ruled on 2 lengths");
 }
 
-/// TABLE half of the pair. The shared platform prefixes and the runtime copy of
-/// each shipping backend's catalog prefix are both checked before rendering.
+/// A table prefix cannot restrict access within a customer's bound schema.
 #[test]
-fn the_table_fence_holds() {
-    let refused = [
-        "pg_class",
-        "PG_CLASS",
-        "pg_",
-        "__zeroship_migrations",
-        "__ZEROSHIP_x",
-        "sqlite_master",
-        "sqlite_sequence",
-    ];
-    let mut ruled_on = 0_usize;
-    for name in refused {
-        let outcome = Ident::parse_as(name, IdentRole::Collection);
-        assert!(
-            matches!(outcome, Err(IdentError::Reserved { .. })),
-            "the table fence let {name:?} through: {outcome:?}"
-        );
+fn table_references_accept_all_identifier_prefixes() {
+    let names = ["pg_class", "PG_CLASS", "pg_", "__zeroship_migrations", "__ZEROSHIP_x", "sqlite_master", "sqlite_sequence", "page_views", "zeroship_apps", "__zs_internal", "sqlited", "pgx", "__zero_migrate_journal", "__ZERO_MIGRATE_x"];
+    let mut ruled_on = 0;
+    for name in names {
+        assert!(Ident::parse_as(name, IdentRole::Collection).is_ok(), "{name}");
         ruled_on += 1;
     }
-    // The control: a name that merely resembles a reserved one must pass, or
-    // the fence is a blanket refusal wearing a table's clothes.
-    //
-    // The two `__zero_migrate` witnesses are ACCEPTED on purpose, and are here
-    // rather than absent so this test rules in both directions. That prefix
-    // fences an empty namespace: the engine's journal tables are
-    // `__zeroship_schema_*`, and the one live object carrying the token is the
-    // rebuild table, named `{table}__zero_migrate_rebuild` - a SUFFIX, which a
-    // prefix list cannot cover.
-    for name in [
-        "page_views",
-        "zeroship_apps",
-        "__zs_internal",
-        "sqlited",
-        "pgx",
-        "__zero_migrate_journal",
-        "__ZERO_MIGRATE_x",
-    ] {
-        assert!(
-            Ident::parse_as(name, IdentRole::Collection).is_ok(),
-            "the table fence over-matched {name:?}"
-        );
-        ruled_on += 1;
-    }
-    assert_eq!(ruled_on, 14);
     assert!(ruled_on >= 10, "ruled on {ruled_on} names");
     println!("ruled on {ruled_on} table names");
 }

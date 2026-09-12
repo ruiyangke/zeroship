@@ -31,9 +31,6 @@ use core::fmt;
 /// creator-selected identifiers. Migration code separately caps generated names.
 pub const MAX_IDENT_BYTES: usize = 63;
 
-/// Platform collection prefixes checked against migration validation by parity tests.
-pub const PLATFORM_RESERVED_COLLECTION_PREFIXES: &[&str] = &["__zeroship"];
-
 /// Where an identifier is about to be used. The fences differ per role, so the
 /// role is a required argument to [`Ident::parse_as`] rather than something a
 /// caller may leave to a default.
@@ -41,7 +38,7 @@ pub const PLATFORM_RESERVED_COLLECTION_PREFIXES: &[&str] = &["__zeroship"];
 pub enum IdentRole {
     /// A schema name (the app's own schema).
     Namespace,
-    /// A table name.
+    /// A physical table reference within the bound database schema.
     Collection,
     /// A column name being *referenced*. Not a column being declared: this
     /// crate plans no DDL.
@@ -348,27 +345,6 @@ impl Ident {
                 character: bad,
             });
         }
-        if role == IdentRole::Collection {
-            for reservation in BACKEND_CATALOG_RESERVATIONS {
-                if reservation.matches(raw) {
-                    return Err(IdentError::Reserved {
-                        role,
-                        name: raw.to_string(),
-                        reservation: reservation.describe(),
-                    });
-                }
-            }
-            for prefix in PLATFORM_RESERVED_COLLECTION_PREFIXES {
-                let reservation = Reservation::Prefix(prefix);
-                if reservation.matches(raw) {
-                    return Err(IdentError::Reserved {
-                        role,
-                        name: raw.to_string(),
-                        reservation: reservation.describe(),
-                    });
-                }
-            }
-        }
         for reservation in role.reservations() {
             if reservation.matches(raw) {
                 return Err(IdentError::Reserved {
@@ -438,15 +414,14 @@ mod tests {
         assert!(!Reservation::Suffix("_masked").matches("s"));
     }
 
-    /// Every role must have deliberate reservation behavior. Collection and
-    /// column consult the backend catalog table in addition to their neutral
-    /// role-specific fences; `Constraint`/`Index` intentionally accept the
-    /// witnesses because they name only platform-derived identifiers.
+    /// Every role must have deliberate reservation behavior. Table references
+    /// permit all prefixes within the bound schema; column, namespace and alias
+    /// roles retain their own protection rules.
     #[test]
     fn every_role_has_deliberate_reservation_behavior() {
         let cases = [
             (IdentRole::Namespace, "__zeroship_reserved", false),
-            (IdentRole::Collection, "pg_class", false),
+            (IdentRole::Collection, "__zeroship_workflow_runs", true),
             (IdentRole::Column, "pg_attribute", false),
             // Accepted, and that IS the deliberate behaviour: this role exists
             // so the platform can name its own stored columns. The refusal half

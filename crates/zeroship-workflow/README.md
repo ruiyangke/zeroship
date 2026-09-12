@@ -38,15 +38,16 @@ server coordinates metadata and does not own the journal or payloads.
 `OrmStore::new` accepts the host's `OrmContext`, `DbBinding` and `BackendHandle`.
 The ORM owns database selection, native values and transaction settlement;
 the workflow service has no separate PostgreSQL or SQLite runtime adapter.
-Reserved-table validation currently prevents native collection operations on the
-journal, so these operations use the ORM's scoped SQL execution interface.
+Journal operations currently use the ORM's scoped SQL execution interface while
+model conversion proceeds. Both Rust and creator code may reference workflow
+tables within their bound schema through the normal ORM.
 `schema::postgres_sql` binds the generated
 DDL for a provisioning host with authorized migration credentials. Runtime
 operations only verify the journal fingerprint and use ordinary DML.
 PostgreSQL and SQLite use reserved `__zeroship_workflow_*` tables. The generator
 compiles the canonical logical definition, then binds owned table, constraint
-and index identifiers for the provisioning artifact. Creator migration and
-query validators continue refusing reserved collections.
+and index identifiers for the provisioning artifact. Table prefixes do not
+restrict ORM access; schema binding and database permissions determine access.
 
 `HostStorage` carries the app's resolved connection factory, keys, binding and
 object store to its workflow thread. Local setup initializes the journal in the

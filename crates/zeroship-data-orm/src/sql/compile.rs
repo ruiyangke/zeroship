@@ -113,9 +113,6 @@ pub fn effective_query_limit(explicit: Option<i64>) -> i64 {
     explicit.unwrap_or(MAX_QUERY_LIMIT)
 }
 
-/// Platform-owned collection prefixes mirrored by every collection validator.
-pub(crate) const PLATFORM_RESERVED_COLLECTION_PREFIXES: &[&str] = &["__zeroship"];
-
 /// Catalog prefixes owned by the backends the runtime can address.
 ///
 /// Keep these outside `RESERVED_NAMES`: they are backend conventions, not
@@ -136,14 +133,10 @@ fn reserved_backend_catalog_prefix(name: &str) -> Option<(&'static str, &'static
 
 /// Validate a collection name: alphanumeric + underscores only.
 ///
-/// Additional security constraints (beyond character allowlist):
-/// - Must not be empty.
-/// - Must not exceed 63 bytes (Postgres `NAMEDATALEN` limit).
-/// - Must not contain a null byte.
-/// - Must not start with a shipping backend's catalog prefix
-///   (case-insensitive).
-/// - Must not start with a platform-owned prefix (case-insensitive):
-///   `__zeroship`.
+/// Reject empty, overlong and NUL-containing identifiers.
+///
+/// Table prefixes do not grant or restrict access. The bound schema and database
+/// role determine which physical tables the caller can reach.
 pub fn validate_collection(name: &str) -> Result<(), QueryError> {
     if name.is_empty() {
         return Err(QueryError::InvalidCollection(
@@ -159,23 +152,6 @@ pub fn validate_collection(name: &str) -> Result<(), QueryError> {
         return Err(QueryError::InvalidCollection(format!(
             "collection name exceeds 63-byte Postgres identifier limit: {name}"
         )));
-    }
-    // Reserved-prefix checks via byte-slice equality avoid an allocating
-    // .to_ascii_lowercase() per CRUD dispatch. The union is deliberate: a
-    // creator schema may be retargeted, and SQLite refuses sqlite_* table names.
-    let bytes = name.as_bytes();
-    if let Some((prefix, owner)) = reserved_backend_catalog_prefix(name) {
-        return Err(QueryError::InvalidCollection(format!(
-            "collection name '{name}' uses reserved prefix '{prefix}' ({owner} system catalog)"
-        )));
-    }
-    for prefix in PLATFORM_RESERVED_COLLECTION_PREFIXES {
-        let claimed = prefix.as_bytes();
-        if bytes.len() >= claimed.len() && bytes[..claimed.len()].eq_ignore_ascii_case(claimed) {
-            return Err(QueryError::InvalidCollection(format!(
-                "collection name '{name}' uses reserved prefix '{prefix}' (platform internal)"
-            )));
-        }
     }
     if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
         return Err(QueryError::InvalidCollection(format!(
@@ -232,8 +208,7 @@ pub(crate) const RESERVED_NAMES: &[ReservedName] = &[
     // on vector search). Reserved so creator-declared
     // columns can't shadow them.
     ReservedName::Prefix("_"),
-    // Platform bookkeeping table prefixes. Mirrors the
-    // `validate_collection` reservations for table-name shape.
+    // Platform column shapes remain protected independently of table access.
     ReservedName::Prefix("__zs_"),
     ReservedName::Prefix("__zeroship_"),
     // Platform-reserved suffix.
@@ -6239,91 +6214,6 @@ mod tests {
         }
     }
 
-    /// Names starting with `pg_` (any case) must be rejected.
-    #[test]
-    fn validate_collection_rejects_pg_prefix() {
-        for name in &["pg_indexes", "PG_stat", "Pg_Class"] {
-            let err = validate_collection(name).unwrap_err();
-            match err {
-                QueryError::InvalidCollection(msg) => assert!(
-                    msg.contains("pg_") || msg.contains("reserved"),
-                    "for '{name}': {msg}"
-                ),
-                other => panic!("expected InvalidCollection for '{name}', got {other:?}"),
-            }
-        }
-    }
-
-    /// Names starting with `__zeroship` (any case) must be rejected.
-    #[test]
-    fn validate_collection_rejects_zeroship_prefix() {
-        for name in &["__zeroship_migrations", "__ZEROSHIP_audit", "__zeroship"] {
-            let err = validate_collection(name).unwrap_err();
-            match err {
-                QueryError::InvalidCollection(msg) => assert!(
-                    msg.contains("__zeroship") || msg.contains("reserved"),
-                    "for '{name}': {msg}"
-                ),
-                other => panic!("expected InvalidCollection for '{name}', got {other:?}"),
-            }
-        }
-    }
-
-    /// `__zero_migrate` is NOT reserved, and `__zeroship` is. Both halves,
-    /// because either alone reads as an accident.
-    ///
-    /// This asserted the opposite until 2026-09-07. The prefix was fencing an
-    /// empty namespace: the engine's journal tables are `__zeroship_schema_*`,
-    /// and the one live object carrying the token is the SQLite rebuild table,
-    /// named `{table}__zero_migrate_rebuild` - a SUFFIX, which a prefix list
-    /// cannot cover.
-    #[test]
-    fn the_collection_fence_reserves_zeroship_and_not_zero_migrate() {
-        let mut ruled_on = 0_usize;
-        for name in [
-            "__zero_migrate_migrations",
-            "__ZERO_MIGRATE_audit",
-            "__zero_migrate",
-        ] {
-            assert!(
-                validate_collection(name).is_ok(),
-                "'{name}' is refused, but nothing is named with that prefix"
-            );
-            ruled_on += 1;
-        }
-        for name in [
-            "__zeroship_schema_migrations",
-            "__ZEROSHIP_audit",
-            "__zeroship",
-        ] {
-            let err = validate_collection(name).unwrap_err();
-            match err {
-                QueryError::InvalidCollection(msg) => assert!(
-                    msg.contains("__zeroship") || msg.contains("reserved"),
-                    "for '{name}': {msg}"
-                ),
-                other => panic!("expected InvalidCollection for '{name}', got {other:?}"),
-            }
-            ruled_on += 1;
-        }
-        assert_eq!(ruled_on, 6);
-        println!("ruled on {ruled_on} collection names");
-    }
-
-    #[test]
-    fn reserved_collection_prefixes_match_migration_engine() {
-        assert_eq!(
-            PLATFORM_RESERVED_COLLECTION_PREFIXES,
-            zeroship_migrate_core::schema::query::PLATFORM_RESERVED_COLLECTION_PREFIXES,
-            "data-plane and migration-engine collection prefixes diverged"
-        );
-        assert_eq!(
-            PLATFORM_RESERVED_COLLECTION_PREFIXES,
-            crate::sql::ident::PLATFORM_RESERVED_COLLECTION_PREFIXES,
-            "data-plane and runtime-plan collection prefixes diverged"
-        );
-    }
-
     fn shipping_catalog_reservation_witnesses() -> Vec<String> {
         zeroship_migrate::shipping_vendors()
             .as_slice()
@@ -6344,29 +6234,17 @@ mod tests {
             .collect()
     }
 
-    fn assert_reserved_identifier_behavior_matches(
-        role: crate::sql::ident::IdentRole,
-        names: &[String],
-    ) {
+    fn assert_reserved_column_behavior_matches(names: &[String]) {
         let vendors = zeroship_migrate::shipping_vendors();
         let mut mismatches = Vec::new();
 
         for name in names {
-            let engine_accepts = match role {
-                crate::sql::ident::IdentRole::Collection => {
-                    zeroship_migrate_core::schema::query::validate_collection(vendors, name).is_ok()
-                }
-                crate::sql::ident::IdentRole::Column => {
-                    zeroship_migrate_core::schema::query::validate_field_name(vendors, name).is_ok()
-                }
-                other => panic!("parity corpus does not cover {other:?}"),
-            };
-            let schema_accepts = match role {
-                crate::sql::ident::IdentRole::Collection => validate_collection(name).is_ok(),
-                crate::sql::ident::IdentRole::Column => validate_field_name(name).is_ok(),
-                other => panic!("parity corpus does not cover {other:?}"),
-            };
-            let plan_accepts = crate::sql::ident::Ident::parse_as(name, role).is_ok();
+            let engine_accepts =
+                zeroship_migrate_core::schema::query::validate_field_name(vendors, name).is_ok();
+            let schema_accepts = validate_field_name(name).is_ok();
+            let plan_accepts = crate::sql::ident::Ident::parse_as(
+                name, crate::sql::ident::IdentRole::Column,
+            ).is_ok();
 
             if engine_accepts != schema_accepts || engine_accepts != plan_accepts {
                 mismatches.push(format!(
@@ -6377,31 +6255,25 @@ mod tests {
 
         assert!(
             mismatches.is_empty(),
-            "{} reservation verdicts diverged:\n{}",
-            role,
+            "column reservation verdicts diverged:\n{}",
             mismatches.join("\n")
         );
     }
 
     #[test]
-    fn reserved_collection_behavior_matches_migration_engine() {
+    fn table_references_accept_all_prefixes_in_the_bound_schema() {
         let mut names = [
-            "users",
-            "_distance",
-            "__zero_migrate_state",
-            "__ZERO_MIGRATE_STATE",
-            "__zeroship_state",
-            "__ZEROSHIP_STATE",
-            "__zs_internal",
-            "ssn_masked",
-            "pgx",
-            "sqlitex",
-        ]
-        .map(str::to_string)
-        .to_vec();
+            "users", "__zeroship_workflow_runs", "__ZEROSHIP_STATE",
+            "__zero_migrate_state", "__zs_internal",
+        ].map(str::to_owned).to_vec();
         names.extend(shipping_catalog_reservation_witnesses());
-
-        assert_reserved_identifier_behavior_matches(crate::sql::ident::IdentRole::Collection, &names);
+        for name in names {
+            assert!(validate_collection(&name).is_ok(), "{name}");
+            assert!(
+                crate::sql::Ident::parse_as(&name, crate::sql::IdentRole::Collection).is_ok(),
+                "{name}"
+            );
+        }
     }
 
     #[test]
@@ -6430,7 +6302,7 @@ mod tests {
         .to_vec();
         names.extend(shipping_catalog_reservation_witnesses());
 
-        assert_reserved_identifier_behavior_matches(crate::sql::ident::IdentRole::Column, &names);
+        assert_reserved_column_behavior_matches(&names);
     }
 
     /// Names longer than 63 bytes must be rejected.
