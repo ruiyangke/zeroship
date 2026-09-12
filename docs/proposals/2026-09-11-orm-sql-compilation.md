@@ -1,6 +1,6 @@
 # Shared ORM SQL compilation
 
-**Status: Proposed; revised after design self-review. Implementation has not started.**
+**Status: Crate consolidation accepted and implementation in progress. The shared compiler redesign remains proposed.**
 
 Consolidate runtime SQL construction around a shared statement representation,
 dialect compilation, and ORM-owned execution strategies. Rust and TypeScript
@@ -9,10 +9,12 @@ file-backed SQLite remains the local development backend.
 
 ## Scope and constraints
 
-Keep the existing data crates. This proposal changes runtime query construction,
-not migration DDL, the deploy artifact, connection pooling, or the transaction
-reducer. The migration crates and the separate feature roadmap are outside this
-change. Preserve the native value path, required `id` contract, descriptor-driven
+Merge `zeroship-data-sql` into `zeroship-data-orm::sql`. Keep the macro, V8
+adapter, CDC wire, and CDC server crates separate. The shared physical schema
+identity moves to `zeroship-core`; the migration service changes its dependency
+and import to that owner. Migration DDL and execution behavior, the deploy
+artifact, connection pooling, the transaction reducer, and the separate feature
+roadmap remain outside this change. Preserve the native value path, required `id` contract, descriptor-driven
 generators, fixed application mask policy, and project-owned encryption keys.
 
 The physical driver continues to acquire sessions, bind parameters, execute,
@@ -63,7 +65,7 @@ Rust typed builders                 TypeScript / V8
                            |
                   resolved SQL statement
                            |
-                   zeroship-data-sql
+                   data-orm::sql
                   expressions + bindings
                     dialect compilation
                      /              \
@@ -96,14 +98,33 @@ typed expressions directly. `data-v8` captures native inputs and invokes the
 shared ORM decoder; it does not implement schema resolution or SQL compilation.
 Validation remains mandatory for both callers after decoding.
 
-Proposed module ownership within the existing crates:
+The SQL module remains pure: statements, compilation, and storage codecs do no
+I/O and receive no application policy or encryption keys. Moving modules removes
+the Cargo dependency fence around that code; it does not change the compiler's
+responsibilities. Backend extension contracts remain public, while compiler
+implementation helpers stay private.
+
+Native values live in `data-orm::value`, shared by SQL, drivers, models, and V8.
+`SchemaName` lives in `zeroship-core::schema_name` with its validation and typed
+error. SQL quoting remains with the respective SQL consumers. The migration
+service must not acquire an ORM dependency for that identity type.
+
+`data-macros` retains no ORM implementation dependency. `data-v8` depends on the
+ORM for native values and operations. The CDC relay continues to share only its
+wire crate with the ORM in shipped code.
+
+Crate consolidation moves existing SQL behavior, tests, and benchmarks together
+and deletes the old package and every active dependency on it. It precedes the
+compiler redesign below; moving code alone does not consolidate its renderers.
+
+Proposed module ownership:
 
 | Location | Responsibility |
 | --- | --- |
 | `data-orm::orm` and `crud` | Operation preparation, descriptor resolution, result layouts, and write orchestration. |
-| `data-sql::statement` | Consolidated statement nodes and typed physical references, replacing overlapping plan and collection-builder representations. |
-| `data-sql::compiler` | Shared writer and dialect implementations, consolidating the current `compile` and `render` paths. |
-| `data-sql::codecs` | Shared logical validation and registered SQL storage codecs. |
+| `data-orm::sql::statement` | Consolidated statement nodes and typed physical references, replacing overlapping plan and collection-builder representations. |
+| `data-orm::sql::compiler` | Shared writer and dialect implementations, consolidating the current `compile` and `render` paths. |
+| `data-orm::sql::codecs` | Shared logical validation and registered SQL storage codecs. |
 | `data-orm::backend` | Registration, live support checks, scoped execution, and identity-allocation strategies. |
 
 These are target module names. Retained identifiers, temporal validation, catalog
@@ -151,7 +172,7 @@ expressions or deduplicate volatile operations to improve cache hits.
 
 The host registers an immutable SQL dialect bundle alongside the scoped executor.
 It contains a compiler, storage codecs, and a description of implemented SQL
-features. Built-in implementations live in `data-sql`; runtime probing and
+features. Built-in implementations live in `data-orm::sql`; runtime probing and
 database I/O stay in the ORM backend adapter. Shared configuration is thread-safe;
 sessions and execution remain local to their compio thread.
 
@@ -159,9 +180,9 @@ The proposed extension surface separates pure work from execution:
 
 | Contract | Input and result | Owner |
 | --- | --- | --- |
-| `SqlCompiler::check` | Statement requirements and effective SQL support; returns a structural/capability error or acceptance. | Pure `data-sql` implementation. |
-| `SqlCompiler::compile` | Owned resolved statement and effective SQL support; returns `CompiledQuery` or a typed error. Revalidates the actual statement. | Pure `data-sql` implementation. |
-| SQL storage codec | Storage type and owned value; returns an encoded or decoded native value. | Pure `data-sql` implementation. |
+| `SqlCompiler::check` | Statement requirements and effective SQL support; returns a structural/capability error or acceptance. | Pure `data-orm::sql` implementation. |
+| `SqlCompiler::compile` | Owned resolved statement and effective SQL support; returns `CompiledQuery` or a typed error. Revalidates the actual statement. | Pure `data-orm::sql` implementation. |
+| SQL storage codec | Storage type and owned value; returns an encoded or decoded native value. | Pure `data-orm::sql` implementation. |
 | Identity allocation service | Resolved allocation request and the operation's scoped session access; returns native IDs or a typed error. | ORM backend implementation with local async I/O. |
 
 These contracts have no success-by-default implementation. Requirement extraction
@@ -353,6 +374,7 @@ replaced renderer. No compatibility aliases or alternate runtime switches remain
 
 | Cut | RED evidence | GREEN implementation and removal |
 | --- | --- | --- |
+| Crate consolidation | The workspace still exposes a standalone SQL package; the shared schema identity and ORM SQL entry point are unavailable. | Move shared identity to core, SQL into the ORM, and native values to the ORM value module; update consumers, tests, benchmarks, and documentation; delete the SQL package. |
 | Compiler foundation | Unsupported operations fail before mutation; runtime SQL shape and bind ordering expose the current inconsistencies. | Shared writer, statement output, and registered dialect path. |
 | Upsert | Production-path tests cover key preservation, guarded conflicts, native value binding, and capability refusal. | Route ordinary and encrypted upserts through the new statement; delete the old upsert renderer. |
 | Other writes | Insert/default/null, assignment, bulk count, encrypted atomicity, and rollback cases exercise the actual ORM path. | Move inserts, updates, deletes, and lifecycle operations; remove duplicate write builders. |
@@ -422,6 +444,7 @@ above, not an independent external review. The draft was revised as follows:
 | Full canonicalization or a new cache could change expression semantics and grow scope. | Limit normalization to safe structural ordering; keep existing driver caching and benchmark production compilation. | Shape, ordering, and allocation measurements on actual operation paths. |
 | Moving every SQL string into the query AST would mix infrastructure with creator operations. | Define a family-by-family completion boundary and preserve trusted infrastructure ownership. | Runtime caller cutovers plus existing architecture and authority suites. |
 
-The revised decision is to implement the upsert cut first, including its dialect,
-codec, identity, and result contracts. Adding another database vendor, a new ORM
+The revised crate decision is to consolidate SQL into the ORM first. The
+subsequent compiler redesign starts with upsert, including its dialect, codec,
+identity, and result contracts. Adding another database vendor, a new ORM
 cache, or a broader expression language requires a separate proposal.
