@@ -264,13 +264,18 @@ Migration policy can supply columns with assignment generators. The resulting
 lifecycle roles. Rust and TypeScript use that same descriptor; `Row<S>` contains
 only fields declared by `S`.
 
-Every ORM collection must declare a required `id` field as its sole primary key.
-The descriptor must include it explicitly; collection setup never injects it.
-Generation remains optional and uses the field's assignment metadata. Composite
-business keys use unique constraints. Once inserted, `id` cannot change through
-updates, upsert conflicts, or lifecycle generators. ID generators run on insertion.
-Projections and aggregate results may omit `id`; protected reads retain it internally
-for decryption and unmasking.
+Every ORM collection must declare its primary key explicitly. Named and composite
+keys are supported; every component must be required and non-null. Key columns
+cannot be masked or encrypted. Once inserted, key values cannot change through
+updates, upsert conflicts or lifecycle assignments. Generation remains optional
+and runs on insertion. A non-key column named `id` is an ordinary column.
+Projections and aggregate results may omit key fields; protected reads retain the
+complete key internally for decryption and unmasking.
+
+Scalar helpers such as `get(key)`, `find().after(key)` and `paginate()` resolve
+the collection's sole declared key. For composite keys, pass an explicit filter
+containing the key components; pagination requires an explicit seek filter.
+Revision checks require equality on every key component.
 
 An assignment names a generator (`typedId`, `actor`, `now`, `increment(N)` or
 `identity`) and an event (`insert`, `write` or `delete`). The ORM supplies typed
@@ -536,7 +541,7 @@ const { data: admins } = await db.users
   .limit(20)
   .skip(40);
 
-// Cursor pagination — id-only seek helper
+// Cursor pagination through the sole declared key
 const { data: next } = await db.users.find({}).sort({ id: 1 }).after(lastId);
 
 // Cursor pagination — full envelope (recommended)
@@ -1250,15 +1255,16 @@ neither read nor override it. `env.db` is frozen.
 The migration renderer preserves effective policy assignments in
 `schema.runtime.json`. The ORM resolves them per collection, without a global
 field-name list or runtime policy copy. Lifecycle columns can be renamed with
-their assignments and roles; the primary key remains `id`.
+their assignments and roles; key identity follows `primaryKey` metadata.
 
 | Descriptor metadata | Runtime behavior |
 | --- | --- |
 | `assign: { by: "typedId", on: "insert" }` | Generate an identifier on insertion. |
+| `assign: { by: "identity", on: "insert" }` | Reserve a database-generated key before encryption. The migration renderer derives this from identity columns, including author-defined tables. |
 | `assign: { by: "actor", on: "write" }` | Stamp the request actor on insertion and writes. |
 | `assign: { by: "now", on: "write" }` | Use the database clock on insertion and writes. |
 | `assign: { by: "increment(N)", on: "write" }` | Initialize from the database default, then increment on writes. |
-| `primaryKey: true` | Required on `id`, the collection's sole primary key. |
+| `primaryKey: true` | Marks a required, immutable component of the collection key. |
 | `concurrency: true` | Interpret the field's equality predicate as a revision check. |
 | `softDelete: true` | Use the field as the deletion marker and read-visibility filter. |
 

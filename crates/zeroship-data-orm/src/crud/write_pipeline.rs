@@ -202,13 +202,8 @@ pub async fn apply(
             super::assignment_pass::apply_assignments_on_insert(
                 payload, &schema, collection, actor_id,
             )?;
-            if super::identity::requires_allocation(&schema, payload) {
-                super::identity::reserve_writer(route, collection, &schema).await?;
-                payload["id"] = super::identity::allocate(route, collection, &schema, 1)
-                    .await?
-                    .remove(0);
-            }
-            let row_pk = row_pk_from_doc(payload);
+            super::identity::assign(route, collection, &schema, payload).await?;
+            let row_pk = row_pk_from_doc(&schema, payload);
             stages
                 .apply_to_doc(keys, dialect, app_id, collection, &row_pk, payload)
                 .await?;
@@ -218,30 +213,12 @@ pub async fn apply(
             super::assignment_pass::apply_assignments_on_insert_many(
                 payload, &schema, collection, actor_id,
             )?;
-            let identities = if super::identity::requires_allocation(&schema, payload) {
-                super::identity::reserve_writer(route, collection, &schema).await?;
-                Some(
-                    super::identity::allocate(
-                        route,
-                        collection,
-                        &schema,
-                        payload.as_array().expect("batch").len(),
-                    )
-                    .await?,
-                )
-            } else {
-                None
-            };
+            super::identity::assign(route, collection, &schema, payload).await?;
             let Some(docs) = payload.as_array_mut() else {
                 return Ok(());
             };
-            if let Some(identities) = identities {
-                for (doc, id) in docs.iter_mut().zip(identities) {
-                    doc["id"] = id;
-                }
-            }
             for doc in docs.iter_mut() {
-                let row_pk = row_pk_from_doc(doc);
+                let row_pk = row_pk_from_doc(&schema, doc);
                 stages
                     .apply_to_doc(keys, dialect, app_id, collection, &row_pk, doc)
                     .await?;
@@ -265,7 +242,7 @@ pub async fn apply(
             if allocate_identity {
                 super::identity::reserve_writer(route, collection, &schema).await?;
             }
-            rewrite_upsert_doc_id_to_existing_row_id(
+            rewrite_upsert_key_to_existing_row(
                 dialect,
                 payload,
                 route,
@@ -274,12 +251,8 @@ pub async fn apply(
                 &schema,
             )
             .await?;
-            if allocate_identity && payload.get("id").is_none_or(Value::is_null) {
-                payload["id"] = super::identity::allocate(route, collection, &schema, 1)
-                    .await?
-                    .remove(0);
-            }
-            let row_pk = row_pk_from_doc(payload);
+            super::identity::assign(route, collection, &schema, payload).await?;
+            let row_pk = row_pk_from_doc(&schema, payload);
             stages
                 .apply_to_doc(keys, dialect, app_id, collection, &row_pk, payload)
                 .await?;
@@ -417,25 +390,19 @@ impl<'a> WriteStages<'a> {
     }
 }
 
-fn row_pk_from_doc(doc: &Value) -> String {
-    row_pk_from_value(doc.get("id"))
-}
-
-fn row_pk_from_value(value: Option<&Value>) -> String {
-    match value {
-        Some(Value::String(s)) => s.clone(),
-        Some(Value::Number(n)) => n.to_string(),
-        _ => String::new(),
-    }
+fn row_pk_from_doc(schema: &Value, doc: &Value) -> String {
+    doc.as_object()
+        .and_then(|fields| crate::row_identity::token(schema, fields))
+        .unwrap_or_default()
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct TargetRowId {
-    pub id_value: Value,
+pub struct TargetRowIdentity {
+    pub key: crate::value::Record,
     pub row_pk: String,
 }
 
-/// Resolve the ids the pending write will touch.
+/// Resolve the complete keys the pending write will touch.
 ///
 /// Takes the dispatch's [`TxRoute`] rather than an `app_id`: this read
 /// MUST see the rows the same transaction is about to update, so it has
@@ -444,22 +411,21 @@ pub struct TargetRowId {
 /// ids.
 ///
 /// `schema` is the caller's already-resolved descriptor entry. The probe still
-/// selects only `id`; the declared fields are carried solely so its filter can
-/// lower SQLite booleans and numeric timestamp binds by field type.
+/// selects every declared key column and decodes its logical value.
 ///
 /// `dialect` is the caller's too, and passed in even though this function holds
 /// a [`TxRoute`] it could read one off - the same shape, and the same reason, as
-/// `keys` on [`rewrite_upsert_doc_id_to_existing_row_id`]. The probe and the
+/// `keys` on [`rewrite_upsert_key_to_existing_row`]. The probe and the
 /// UPDATE it precedes must be written in ONE dialect, and that is the one the
 /// caller resolved for the whole operation, not a second derivation here.
-pub async fn resolve_target_row_ids(
+pub async fn resolve_target_rows(
     route: &TxRoute,
     dialect: compile::SqlDialect,
     collection: &str,
     filter: &Value,
     limit: i64,
     schema: &Value,
-) -> Result<Vec<TargetRowId>, DbError> {
+) -> Result<Vec<TargetRowIdentity>, DbError> {
     note_target_row_resolution_for_tests();
     let mut sql_filter = filter.clone();
     crate::sql::codecs::lower_filter(dialect, schema, &mut sql_filter);
@@ -473,23 +439,26 @@ pub async fn resolve_target_row_ids(
     )
     .map_err(DbError::from)?;
     note_target_row_resolution_sql_for_tests(&built.sql);
-    let rows = exec_query(route, built).await?;
-    Ok(rows
-        .into_iter()
-        .filter_map(|row| {
-            let id_value = row.get("id")?.clone();
-            Some(TargetRowId {
-                row_pk: row_pk_from_value(Some(&id_value)),
-                id_value,
+    let mut rows = exec_query(route, built).await?;
+    crate::sql::codecs::decode_rows(dialect, schema, &mut rows)?;
+    rows.into_iter()
+        .map(|row| {
+            let fields = row
+                .as_object()
+                .ok_or_else(|| DbError::internal("write probe returned a non-record"))?;
+            Ok(TargetRowIdentity {
+                key: crate::row_identity::key(schema, fields)?,
+                row_pk: crate::row_identity::token(schema, fields)
+                    .ok_or_else(|| DbError::internal("write probe returned an incomplete identity"))?,
             })
         })
-        .collect())
+        .collect()
 }
 
 /// Does this UPDATE touch a randomised-encrypted column?
 ///
 /// The answer decides whether the dispatcher fans the update out per row (each
-/// row's ciphertext is bound to its own id through the AAD) or issues one
+/// row's ciphertext is bound to its complete key through the AAD) or issues one
 /// multi-row statement. It reads THE DESCRIPTOR, which the caller resolved for
 /// the whole operation: a collection with no entry never reaches here, because
 /// `collection_schema` already refused it. Returning `false` on a missing
@@ -568,7 +537,7 @@ fn update_target(patch: &mut Value) -> &mut Value {
 
 /// Resolve a candidate identity before encryption. The upsert's SQL guard
 /// handles conflicts that become visible after this probe.
-async fn rewrite_upsert_doc_id_to_existing_row_id(
+async fn rewrite_upsert_key_to_existing_row(
     dialect: compile::SqlDialect,
     doc: &mut Value,
     route: &TxRoute,
@@ -611,14 +580,15 @@ async fn rewrite_upsert_doc_id_to_existing_row_id(
         dialect,
     )
     .map_err(DbError::from)?;
-    let rows = exec_query(route, built).await?;
-    let key = "id";
-    if let Some(existing_id) = rows
-        .first()
-        .and_then(|row| row.get(key))
-        .filter(|value| !value.is_null())
-    {
-        obj.insert(key.to_owned(), existing_id.clone());
+    let mut rows = exec_query(route, built).await?;
+    crate::sql::codecs::decode_rows(dialect, schema, &mut rows)?;
+    if let Some(existing) = rows.first() {
+        let fields = existing
+            .as_object()
+            .ok_or_else(|| DbError::internal("conflict probe returned a non-record"))?;
+        for (name, value) in crate::row_identity::key(schema, fields)? {
+            obj.insert(name, value);
+        }
     }
     Ok(())
 }
@@ -1131,8 +1101,8 @@ mod tests {
             )
             .await;
 
-            // `schema` was moved into `cache_schema`; `ddl_schema` is
-            // its byte-identical twin and is still owned here.
+            // Query builders consume the complete generated descriptor.
+            let ddl_schema = schema.clone();
             let insert_built = build_insert_with_dialect(
                 &crate::sql::SchemaName::new(app_id).expect("fixture schema name"),
                 collection,

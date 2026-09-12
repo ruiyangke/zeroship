@@ -254,7 +254,7 @@ fn production_upsert_budget_includes_generated_assignments_and_guard() {
     use zeroship_data_orm::sql::lifecycle::{AssignedValue, ColumnAssignment, WriteAssignments};
     let limit = zeroship_data_orm::sql::BindBudget::SQLITE.max();
     let namespace = SchemaName::new("app_upsert_budget").unwrap();
-    let mut schema = value!({"id": {"type": "integer"}, "revision": {"type": "integer"}});
+    let mut schema = value!({"id": {"type": "integer", "primaryKey":true}, "revision": {"type": "integer"}});
     let mut input = value!({"id": 1});
     for i in 1..limit - 1 {
         let field = format!("field_{i}");
@@ -280,8 +280,8 @@ fn production_upsert_budget_includes_generated_assignments_and_guard() {
         )
     };
     assert_eq!(build(None).unwrap().params().len(), limit);
-    assert!(
-        build(Some(Value::from(1))).is_err(),
-        "identity guard exceeded the statement bind budget"
+    assert_eq!(
+        build(Some([("id".into(), Value::from(1))].into())).unwrap_err(),
+        compile::QueryError::from(zeroship_data_orm::sql::compiler::CompileError::BindLimitExceeded { limit }),
     );
 }

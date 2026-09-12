@@ -821,6 +821,7 @@ mod tests {
     #[test]
     fn spatial_near_base_query_reads_masked_sibling_when_schema_cached() {
         let schema = crate::value!({
+            "id": { "type": "string", "required": true, "primaryKey": true },
             "ssn": {
                 "type": "string",
                 "mask": { "kind": "last4", "classification": "spi" }

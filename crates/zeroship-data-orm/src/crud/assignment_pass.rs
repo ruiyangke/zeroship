@@ -154,10 +154,12 @@ fn inject_into_object(
 // ---------------------------------------------------------------------------
 
 pub fn apply_assignments_on_update(patch: &mut Value, schema: &Value) -> Result<(), DbError> {
-    if patch.get("id").is_some()
-        || ["$set", "$inc", "$dec", "$mul"]
-            .iter()
-            .any(|op| patch.get(*op).is_some_and(|fields| fields.get("id").is_some()))
+    if schema.as_object().into_iter().flat_map(|fields| fields.iter())
+        .filter(|(_, definition)| definition["primaryKey"].as_bool() == Some(true))
+        .map(|(name, _)| name.as_str()).any(|key| patch.get(key).is_some()
+            || ["$set", "$inc", "$dec", "$mul"]
+                .iter()
+                .any(|op| patch.get(*op).is_some_and(|fields| fields.get(key).is_some())))
     {
         return Err(DbError::validation(
             "immutable_primary_key",
@@ -234,8 +236,13 @@ pub fn extract_cas_version(
 }
 
 /// Whether the filter constrains the entity to one non-null identity.
-pub fn filter_has_id_predicate(filter: &Value) -> bool {
-    let Some(mut id) = filter.get("id") else {
+pub fn filter_has_key_predicate(filter: &Value, schema: &Value) -> bool {
+    let Ok(keys) = crate::sql::descriptors::primary_key_fields(schema) else { return false; };
+    keys.into_iter().all(|key| scalar_key_predicate(filter.get(key)))
+}
+
+fn scalar_key_predicate(value: Option<&Value>) -> bool {
+    let Some(mut id) = value else {
         return false;
     };
     if let Some(operators) = id.as_object() {
@@ -247,7 +254,7 @@ pub fn filter_has_id_predicate(filter: &Value) -> bool {
         };
         id = value;
     }
-    matches!(id, Value::String(_) | Value::Number(_) | Value::Decimal(_))
+    !id.is_null()
 }
 
 fn filter_has_nested_version_predicate(filter: &Value, column: &str) -> bool {
@@ -288,6 +295,19 @@ pub fn should_filter_soft_deleted(include_deleted: bool) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn concurrency_filters_require_every_declared_key() {
+        let schema = crate::value!({"app":{"type":"string","primaryKey":true}, "run":{"type":"string","primaryKey":true}, "generation":{"type":"bigInt","primaryKey":true}});
+        let complete = crate::value!({"app":"a", "run":"r", "generation":{"$eq":7}});
+        assert!(super::filter_has_key_predicate(&complete, &schema));
+        for field in ["app", "run", "generation"] {
+            let mut filter = complete.clone();
+            filter.as_object_mut().unwrap().shift_remove(field);
+            assert!(!super::filter_has_key_predicate(&filter, &schema));
+            filter[field] = crate::value!({"$in":["a", "b"]});
+            assert!(!super::filter_has_key_predicate(&filter, &schema));
+        }
+    }
     use super::*;
     use crate::value;
     use crate::sql::{SchemaName, compile::{SqlDialect, build_insert_many_with_dialect}};
@@ -409,7 +429,7 @@ mod tests {
     }
 
     #[test]
-    fn concurrency_predicates_follow_roles_and_identity_uses_id() {
+    fn concurrency_predicates_follow_roles_and_declared_keys() {
         let fields = schema();
         assert_eq!(
             extract_cas_version(&value!({"revision":7}), "notes", &fields).unwrap(),
@@ -435,8 +455,8 @@ mod tests {
             )
             .is_err()
         );
-        assert!(filter_has_id_predicate(&value!({"id":"note_x"})));
-        assert!(!filter_has_id_predicate(&value!({"key":"note_x"})));
+        assert!(filter_has_key_predicate(&value!({"key":"note_x"}), &fields));
+        assert!(!filter_has_key_predicate(&value!({"id":"note_x"}), &fields));
         assert_eq!(
             extract_cas_version(&value!({"version":7}), "notes", &value!({})).unwrap(),
             None

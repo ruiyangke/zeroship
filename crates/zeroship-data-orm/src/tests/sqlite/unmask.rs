@@ -180,7 +180,7 @@ fn cold_unmask_with_auto_actor_attaches_before_read() {
     Host::test(|host| {
         let _keys = host.supply_project_key(&["app_unmask_auto"], &"a".repeat(64));
         let schema = crate::value!({
-            "id": { "type": "string" },
+            "id": { "type": "string", "primaryKey":true, "required":true },
             "ssn": {
                 "type": "string",
                 "encrypted": true,
@@ -604,7 +604,7 @@ fn unmask_with_user_role_in_policy_returns_plaintext() {
     Host::test(|host| {
         let _keys = host.supply_project_key(&["app_unmask_policy_grant"], &"c".repeat(64));
         let schema = crate::value!({
-            "id": { "type": "string" },
+            "id": { "type": "string", "primaryKey":true, "required":true },
             "email": {
                 "type": "string",
                 "encrypted": true,

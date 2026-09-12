@@ -180,7 +180,7 @@ fn scope_schema(schema: Arc<Value>, scope: &SchemaFieldScope<'_>) -> Arc<Value> 
             let Some(obj) = owned.as_object_mut() else {
                 return schema;
             };
-            obj.retain(|key, _| key.starts_with('_') || fields.iter().any(|field| field == key));
+            obj.retain(|key, definition| key.starts_with('_') || definition["primaryKey"].as_bool() == Some(true) || fields.iter().any(|field| field == key));
             Arc::new(owned)
         }
     }

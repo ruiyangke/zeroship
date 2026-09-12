@@ -591,24 +591,23 @@ impl DbError {
         }
     }
 
-    /// UPDATE filter carried `version: N` but no `id`
-    /// predicate. The CAS semantics don't generalise cleanly to
+    /// UPDATE filter carried a revision check without the complete row key.
+    /// The CAS semantics don't generalise cleanly to
     /// multi-row UPDATEs (the affected-rows count conflates "row
     /// missing", "version mismatched", and "filter matched but version
     /// matched" — there's no clean per-row mismatch report). This
     /// refuses the shape eagerly with a typed code so the SDK can
-    /// guide the creator toward an explicit per-id loop.
+    /// guide the creator toward an explicit per-row update.
     pub fn multi_row_version_filter_unsupported(collection: &str) -> Self {
         DbError::ValidationFailed {
             code: "multi_row_version_filter_unsupported",
             message: format!(
-                "UPDATE on `{collection}` with `version` in the filter requires \
-                 an `id` predicate; optimistic concurrency is per-row only."
+                "UPDATE on `{collection}` with a revision check requires equality \
+                 on every primary-key column; optimistic concurrency is per-row only."
             ),
             hint: Some(
-                "Either remove `version` from the filter (last-writer-wins \
-                 bulk update) or scope the UPDATE to a single row with \
-                 `{ id: ..., version: N }`."
+                "Remove the revision predicate for a bulk update, or supply \
+                 the complete declared key together with the expected revision."
                     .to_string(),
             ),
         }

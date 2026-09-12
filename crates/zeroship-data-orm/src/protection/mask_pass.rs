@@ -239,14 +239,7 @@ pub fn wrap_row_on_read(schema: &Value, collection: &str, row: &mut Value) -> Re
     };
 
     // Unmasking requires the originating row's identity.
-    let row_pk = obj
-        .get("id")
-        .map(|v| match v {
-            Value::String(s) => s.clone(),
-            Value::Number(n) => n.to_string(),
-            _ => String::new(),
-        })
-        .unwrap_or_default();
+    let row_pk = crate::row_identity::token(schema, obj).unwrap_or_default();
 
     // Collect replacements first so we don't hold a mutable borrow on
     // `obj` while iterating the schema.

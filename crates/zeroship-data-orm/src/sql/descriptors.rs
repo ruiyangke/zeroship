@@ -1,51 +1,63 @@
 //! Value descriptors shared by runtime catalog readers and storage backends.
 
+pub(crate) fn declared_primary_key_fields(
+    schema: &crate::value::Value,
+) -> impl Iterator<Item = &str> {
+    schema
+        .as_object()
+        .into_iter()
+        .flat_map(|fields| fields.iter())
+        .filter(|(_, field)| field["primaryKey"].as_bool() == Some(true))
+        .map(|(name, _)| name.as_str())
+}
+
 /// Every declared component of a collection's physical primary key.
 /// Returns logical field names; the compiler resolves their storage columns.
 ///
 /// # Errors
 /// Refuses missing field maps and collections without declared key columns.
 pub fn primary_key_fields(schema: &crate::value::Value) -> Result<Vec<&str>, &'static str> {
-    use crate::value::Value;
-    let fields = schema
+    schema
         .as_object()
         .ok_or("collection fields must be an object")?;
-    let keys: Vec<_> = fields
-        .iter()
-        .filter(|(_, field)| field.get("primaryKey").and_then(Value::as_bool) == Some(true))
-        .map(|(name, _)| name.as_str())
-        .collect();
+    let keys: Vec<_> = declared_primary_key_fields(schema).collect();
     if keys.is_empty() {
         return Err("collection requires a declared primary key");
     }
     Ok(keys)
 }
 
-/// ORM collections declare a non-null `id` as their sole primary key.
+/// Every declared primary-key component is non-null and immutable after insertion.
 pub fn validate_collection_identity(schema: &crate::value::Value) -> Result<(), &'static str> {
     use crate::value::Value;
     let fields = schema
         .as_object()
         .ok_or("collection fields must be an object")?;
-    let id = fields
-        .get("id")
-        .ok_or("collection requires an 'id' primary key")?;
-    if id.get("primaryKey").and_then(Value::as_bool) != Some(true) {
-        return Err("collection 'id' must be declared as its primary key");
+    let keys: Vec<_> = fields
+        .iter()
+        .filter(|(_, definition)| {
+            definition.get("primaryKey").and_then(Value::as_bool) == Some(true)
+        })
+        .collect();
+    if keys.is_empty() {
+        return Err("collection requires a declared primary key");
     }
-    if id.get("required").and_then(Value::as_bool) != Some(true) {
-        return Err("collection 'id' must be required and non-null");
-    }
-    if id
-        .get("assign")
-        .is_some_and(|assignment| assignment.get("on").and_then(Value::as_str) != Some("insert"))
-    {
-        return Err("collection 'id' can only be assigned on insertion");
-    }
-    if fields.iter().any(|(name, def)| {
-        name != "id" && def.get("primaryKey").and_then(Value::as_bool) == Some(true)
-    }) {
-        return Err("collection 'id' must be its sole primary key");
+    for (_, key) in keys {
+        if key.get("required").and_then(Value::as_bool) != Some(true) {
+            return Err("primary key columns must be required and non-null");
+        }
+        if key.get("assign").is_some_and(|assignment| {
+            assignment.get("on").and_then(Value::as_str) != Some("insert")
+        }) {
+            return Err("primary key columns can only be assigned on insertion");
+        }
+        if key.get("encrypted").and_then(Value::as_bool) == Some(true)
+            || key
+                .get("mask")
+                .is_some_and(|mask| mask.get("kind").and_then(Value::as_str) != Some("none"))
+        {
+            return Err("primary key columns cannot be masked or encrypted");
+        }
     }
     Ok(())
 }

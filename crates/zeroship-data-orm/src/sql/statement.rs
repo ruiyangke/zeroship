@@ -167,7 +167,7 @@ pub struct UpsertParts {
     pub insert: Vec<Assignment>,
     pub conflict: Vec<Column>,
     pub update: Vec<Assignment>,
-    pub condition: Option<Comparison>,
+    pub conditions: Vec<Comparison>,
     pub returning: Vec<ReturnedColumn>,
     pub insert_generated_identity: bool,
 }
@@ -256,7 +256,7 @@ fn validate(parts: &UpsertParts) -> Result<(), CompileError> {
             return Err(invalid("duplicate conflict target column"));
         }
     }
-    if let Some(condition) = &parts.condition {
+    for condition in &parts.conditions {
         parts.table.check_column(&condition.column)?;
         if condition.value.is_null() || !condition.column.storage().accepts(&condition.value) {
             return Err(invalid(

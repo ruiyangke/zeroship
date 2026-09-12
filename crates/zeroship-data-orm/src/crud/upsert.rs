@@ -60,7 +60,7 @@ pub fn build_upsert_with_assignments(
     conflict: &Value,
     dialect: SqlDialect,
     assignments: &WriteAssignments,
-    expected_id: Option<Value>,
+    expected_key: Option<crate::value::Record>,
 ) -> Result<CompiledQuery, QueryError> {
     let statement = resolve(
         namespace,
@@ -70,7 +70,7 @@ pub fn build_upsert_with_assignments(
         conflict,
         dialect,
         assignments,
-        expected_id,
+        expected_key,
     )?;
     let compiler: &dyn SqlCompiler = match dialect {
         SqlDialect::Postgres => &PostgresCompiler,
@@ -89,7 +89,7 @@ pub fn resolve(
     conflict: &Value,
     dialect: SqlDialect,
     assignments: &WriteAssignments,
-    expected_id: Option<Value>,
+    expected_key: Option<crate::value::Record>,
 ) -> Result<Statement, QueryError> {
     compile::validate_collection(collection)?;
     let fields = schema
@@ -117,7 +117,8 @@ pub fn resolve(
             storage_type(definition, dialect)?
         };
         physical.push((stored_ident(&stored)?, storage));
-        let insert_only = name == "id" || definition["assign"]["on"].as_str() == Some("insert");
+        let insert_only = definition["primaryKey"].as_bool() == Some(true)
+            || definition["assign"]["on"].as_str() == Some("insert");
         inputs.insert(name.clone(), (stored.clone(), storage, insert_only));
         if let Some(raw) = compile::declared_raw_column(name, definition)? {
             let raw_storage = storage_type(definition, dialect)?;
@@ -145,8 +146,9 @@ pub fn resolve(
         .iter()
         .map(|c| c.column.as_str())
         .collect();
-    let insert_generated_identity =
-        crate::sql::identity::is_generated(schema) && document.contains_key("id");
+    let insert_generated_identity = crate::sql::identity::generated_fields(schema)
+        .iter()
+        .any(|key| document.contains_key(*key));
     let mut insert = Vec::new();
     let mut update = Vec::new();
     document.sort_keys();
@@ -191,17 +193,20 @@ pub fn resolve(
             value: Expression::Incoming(column),
         });
     }
-    let condition = expected_id
-        .map(|value| {
-            let column = table.column(&compile::value_column_for_field("id", schema))?;
-            let value = encode(column.storage(), value, dialect)?;
-            Ok::<_, QueryError>(Comparison {
-                column,
-                op: CompareOp::Eq,
-                value,
-            })
+    let conditions = expected_key
+        .map(|values| {
+            let key = crate::row_identity::key(schema, &values)
+                .map_err(|_| invalid("upsert guard requires a complete identity"))?;
+            key.into_iter()
+                .map(|(name, value)| {
+                    let column = table.column(&compile::value_column_for_field(&name, schema))?;
+                    let value = encode(column.storage(), value, dialect)?;
+                    Ok(Comparison { column, op: CompareOp::Eq, value })
+                })
+                .collect::<Result<Vec<_>, QueryError>>()
         })
-        .transpose()?;
+        .transpose()?
+        .unwrap_or_default();
     let returning = compile::implicit_read_fields(schema)?
         .into_iter()
         .map(|name| returned(&table, name, schema))
@@ -211,7 +216,7 @@ pub fn resolve(
         insert,
         conflict,
         update,
-        condition,
+        conditions,
         returning,
         insert_generated_identity,
     })?))

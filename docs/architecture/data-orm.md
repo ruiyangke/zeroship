@@ -123,11 +123,13 @@ Connection configuration contains credentials and is excluded from Debug output.
 Connection setup does not create application tables.
 Migration artifacts supply the descriptor and the physical schema.
 
-Every ORM collection declares a required `id` as its sole primary key. Artifact
-packing, runtime installation and Rust schema generation validate this contract.
-ID values come from the declared generator or explicit input; the ORM injects neither columns
-nor generators. Other column names and lifecycle assignments remain
-schema-driven. Projections and aggregate results may omit `id`.
+Every ORM collection declares its primary key explicitly. Keys may use named or
+composite columns; each component is required and immutable after insertion.
+Artifact packing, runtime installation and Rust schema generation validate this
+contract. Key values come from declared generators or explicit input; the ORM
+injects neither columns nor generators. Joined reads, concurrency checks and
+encryption use the complete key. Protected projections retain the key internally
+and omit it from the public result when it was not selected.
 
 Worker hosts supply the ORM factory to the V8 service:
 

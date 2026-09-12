@@ -1,0 +1,25 @@
+{
+  "ir_version": 1,
+  "name": "composite_identity",
+  "ops": [
+    {
+      "op": "createTable",
+      "name": "records",
+      "columns": [
+        {"name":"app_key", "type":"text", "nullable":false},
+        {"name":"run_key", "type":"text", "nullable":false},
+        {"name":"generation", "type":"bigInt", "nullable":false},
+        {"name":"id", "type":"text"},
+        {"name":"label", "type":"text", "nullable":false},
+        {"name":"parent", "type":"text"},
+        {"name":"secret", "type":{"encrypted":{"of":"text"}}, "mask":{"kind":"none", "classification":"pii"}},
+        {"name":"masked", "type":{"encrypted":{"of":"text"}}, "mask":{"kind":"last4", "classification":"pii"}}
+      ],
+      "primaryKey": ["app_key", "run_key", "generation"]
+    },
+    {
+      "op":"createIndex", "table":"records", "name":"records_label_key",
+      "columns":[{"kind":"column", "name":"label"}], "unique":true
+    }
+  ]
+}

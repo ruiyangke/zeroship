@@ -5,11 +5,11 @@ error[E0277]: the trait bound `bool: DecodeValue<zeroship_data_orm::orm::sql_typ
   |          ^^^^^^^ the trait `DecodeValue<zeroship_data_orm::orm::sql_types::Text>` is not implemented for `bool`
   |
 help: the trait `DecodeValue<zeroship_data_orm::orm::sql_types::Text>` is not implemented for `bool`
-      but trait `DecodeValue<Boolean>` is implemented for it
+      but trait `DecodeValue<zeroship_data_orm::orm::sql_types::Boolean>` is implemented for it
  --> src/orm/codecs.rs
   |
   | impl DecodeValue<Boolean> for bool {
   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  = help: for that trait implementation, expected `Boolean`, found `zeroship_data_orm::orm::sql_types::Text`
+  = help: for that trait implementation, expected `zeroship_data_orm::orm::sql_types::Boolean`, found `zeroship_data_orm::orm::sql_types::Text`
   = help: see issue #48214
   = note: this error originates in the derive macro `FromRow` (in Nightly builds, run with -Z macro-backtrace for more info)

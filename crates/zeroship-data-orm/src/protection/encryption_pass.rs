@@ -87,8 +87,8 @@ pub async fn encrypt_row_on_write_with_sidechannel(
 
     for (col, plaintext, sidechannel_str) in to_encrypt {
         let key = keys.resolve(app_id).await?;
-        let aad =
-            crate::encryption::aad::canonical_aad(app_id, collection, &col, row_pk.as_bytes());
+        let identity = crate::row_identity::aad(schema, row_pk)?;
+        let aad = crate::encryption::aad::canonical_aad(app_id, collection, &col, &identity);
         let ciphertext = crate::encryption::aead::encrypt(&key, &plaintext, &aad)?;
         sidechannel.insert(col.clone(), sidechannel_str);
         let obj = row.as_object_mut().expect("checked above");
@@ -99,7 +99,7 @@ pub async fn encrypt_row_on_write_with_sidechannel(
 
 /// Decrypt every `t.encrypted(...)`-declared column on `row` in place.
 ///
-/// `row_pk` is read from `row["id"]` and authenticated on every decrypt.
+/// The complete declared row key is authenticated on every decrypt.
 ///
 /// On a tag-verification failure (tampered ciphertext, wrong AAD,
 /// wrong key) the function surfaces
@@ -119,11 +119,7 @@ pub async fn decrypt_row_on_read(
         return Ok(());
     };
 
-    let row_pk = match obj.get("id") {
-        Some(Value::String(s)) => s.clone(),
-        Some(Value::Number(n)) => n.to_string(),
-        _ => String::new(),
-    };
+    let row_pk = crate::row_identity::token(schema, obj).unwrap_or_default();
 
     // Same async-borrow shuffle as the write path.
     let mut to_decrypt: Vec<(String, PlaintextType, Vec<u8>)> = Vec::new();
@@ -163,8 +159,8 @@ pub async fn decrypt_row_on_read(
 
     for (col, plaintext_type, blob) in to_decrypt {
         let key = keys.resolve(app_id).await?;
-        let aad =
-            crate::encryption::aad::canonical_aad(app_id, collection, &col, row_pk.as_bytes());
+        let identity = crate::row_identity::aad(schema, &row_pk)?;
+        let aad = crate::encryption::aad::canonical_aad(app_id, collection, &col, &identity);
         let plaintext = Zeroizing::new(crate::encryption::aead::decrypt(&key, &blob, &aad)?);
         let value = plaintext_type.decode(&plaintext)?;
         let obj = row.as_object_mut().expect("checked above");
@@ -291,6 +287,7 @@ mod tests {
         let keys = test_key_store();
 
         let schema = crate::value!({
+            "id": {"type":"string", "primaryKey":true},
             "ssn": { "type": "string", "encrypted": true },
         });
 
@@ -308,5 +305,39 @@ mod tests {
         });
 
         assert_ne!(row_a["ssn"], row_b["ssn"]);
+    }
+
+    #[compio::test]
+    async fn every_compound_key_component_is_authenticated() {
+        let keys = test_key_store();
+        let schema = crate::value!({
+            "app":{"type":"string","primaryKey":true},
+            "run":{"type":"string","primaryKey":true},
+            "generation":{"type":"bigInt","primaryKey":true},
+            "secret":{"type":"string","encrypted":true}
+        });
+        let mut original = crate::value!({"app":"a", "run":"r", "generation":1, "secret":"private"});
+        let token = crate::row_identity::token(&schema, original.as_object().unwrap()).unwrap();
+        encrypt_row_on_write(&keys, "app1", "records", &schema, &token, &mut original)
+            .await
+            .unwrap();
+        for (field, value) in [
+            ("app", crate::value!("b")),
+            ("run", crate::value!("s")),
+            ("generation", crate::value!(2)),
+        ] {
+            let mut swapped = original.clone();
+            swapped[field] = value;
+            let error = decrypt_row_on_read(&keys, "app1", "records", &schema, &mut swapped)
+                .await
+                .unwrap_err();
+            assert!(matches!(error, DbError::ValidationFailed {
+                code: "encryption_aead_failed", ..
+            }));
+        }
+        decrypt_row_on_read(&keys, "app1", "records", &schema, &mut original)
+            .await
+            .unwrap();
+        assert_eq!(original["secret"], crate::value!("private"));
     }
 }
