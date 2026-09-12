@@ -37,17 +37,17 @@ describe("assignment builders", () => {
 
   test("renamed assignments survive builder chains and remain read-only in inputs", () => {
     const schema = {
-      key: t.string().assigned({ by: "typedId", on: "insert" }).required().primaryKey(),
+      id: t.string().assigned({ by: "typedId", on: "insert" }).required().primaryKey(),
       born: t.timestamp().auto_now().required(),
       editor: t.actor().nullable().required(),
       title: t.string().required(),
     };
     const input: RowInput<typeof schema> = { title: "hello" };
     // @ts-expect-error Assigned fields are supplied by the ORM.
-    const invalid: RowInput<typeof schema> = { title: "hello", key: "chosen" };
+    const invalid: RowInput<typeof schema> = { title: "hello", id: "chosen" };
     void invalid;
-    const row: Row<typeof schema> = { ...input, key: "post_a", born: 1, editor: null };
-    assert.equal(row.key, "post_a");
-    assert.equal(normalizeSchema(schema).key.primaryKey, true);
+    const row: Row<typeof schema> = { ...input, id: "post_a", born: 1, editor: null };
+    assert.equal(row.id, "post_a");
+    assert.equal(normalizeSchema(schema).id.primaryKey, true);
   });
 });

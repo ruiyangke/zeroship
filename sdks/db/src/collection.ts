@@ -16,7 +16,7 @@ import {
   ValidationError,
 } from "./errors";
 import type { Query } from "./query";
-import type { NormalizedSchema } from "./schema";
+import { validateCollectionIdentity, type NormalizedSchema } from "./schema";
 import type {
   Actor,
   Filter,
@@ -193,6 +193,7 @@ export class Collection<
       indexes?: readonly NamedIndexSpec[];
     },
   ) {
+    validateCollectionIdentity(schema);
     this._name = name;
     this._schema = schema;
     this._native = native;

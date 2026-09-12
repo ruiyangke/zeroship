@@ -1,4 +1,3 @@
-import { primaryKey } from "../column-roles";
 import {
   ValidationError,
   OptimisticLockError,
@@ -215,7 +214,7 @@ export function getCollection<
     return self._run(() => self._loadById(idOrFilter, txDepthAtCall));
   }
   return self._run(async () => {
-    const filter = isBareId ? ({ [primaryKey(self._schema)]: idOrFilter } as Filter<S>) : idOrFilter;
+    const filter = isBareId ? ({ id: idOrFilter } as unknown as Filter<S>) : idOrFilter;
     if (!isBareId) {
       validateEncryptedFieldsInFilter(filter as PlainObject, self._schema);
       _maybeWarnUnindexedFilter(
@@ -269,14 +268,14 @@ export async function loadByIdCollection<
     self._idLoader = new IdLoader<Row<S>>(
       async (ids) => {
         const filter: ZeroshipDbFilter = mapFilterOutbound(
-            { [primaryKey(self._schema)]: { $in: ids } } as unknown as ZeroshipDbFilter,
+            { id: { $in: ids } } as unknown as ZeroshipDbFilter,
             self._toColumn,
           );
         const rows = (await self._nativeCollection().find(filter, {})) ?? [];
         const map = new Map<string, Row<S>>();
         for (const r of rows) {
           const mapped = mapResultDoc(r as PlainObject, self._toField) as Row<S>;
-          map.set(String((mapped as PlainObject)[primaryKey(self._schema)]), mapped);
+          map.set(String((mapped as PlainObject)["id"]), mapped);
         }
         return map;
       },
@@ -397,7 +396,7 @@ export function updateCollection<S, N extends string, AllSchemas extends Record<
 ): Promise<Result<Row<S> | null>> {
   return self._run(async () => {
     const isBareId = typeof idOrFilter === "string";
-    const filter = isBareId ? ({ [primaryKey(self._schema)]: idOrFilter } as Filter<S>) : idOrFilter;
+    const filter = isBareId ? ({ id: idOrFilter } as unknown as Filter<S>) : idOrFilter;
     if (!isBareId) {
       validateEncryptedFieldsInFilter(filter as PlainObject, self._schema);
     }
@@ -469,7 +468,7 @@ export function deleteCollection<S, N extends string, AllSchemas extends Record<
 ): Promise<Result<Row<S> | null>> {
   return self._run(async () => {
     const isBareId = typeof idOrFilter === "string";
-    const filter = isBareId ? ({ [primaryKey(self._schema)]: idOrFilter } as Filter<S>) : idOrFilter;
+    const filter = isBareId ? ({ id: idOrFilter } as unknown as Filter<S>) : idOrFilter;
     if (!isBareId) {
       validateEncryptedFieldsInFilter(filter as PlainObject, self._schema);
     }
@@ -514,7 +513,7 @@ export function purgeCollection<S, N extends string, AllSchemas extends Record<s
 ): Promise<Result<Row<S> | null>> {
   return self._run(async () => {
     const isBareId = typeof idOrFilter === "string";
-    const filter = isBareId ? ({ [primaryKey(self._schema)]: idOrFilter } as Filter<S>) : idOrFilter;
+    const filter = isBareId ? ({ id: idOrFilter } as unknown as Filter<S>) : idOrFilter;
     if (!isBareId) {
       validateEncryptedFieldsInFilter(filter as PlainObject, self._schema);
     }
@@ -565,7 +564,7 @@ export function restoreCollection<S, N extends string, AllSchemas extends Record
 ): Promise<Result<Row<S> | null>> {
   return self._run(async () => {
     const isBareId = typeof idOrFilter === "string";
-    const filter = isBareId ? ({ [primaryKey(self._schema)]: idOrFilter } as Filter<S>) : idOrFilter;
+    const filter = isBareId ? ({ id: idOrFilter } as unknown as Filter<S>) : idOrFilter;
     if (!isBareId) {
       validateEncryptedFieldsInFilter(filter as PlainObject, self._schema);
     }

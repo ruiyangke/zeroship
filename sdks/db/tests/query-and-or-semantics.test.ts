@@ -43,6 +43,7 @@ describe("Filter AND/OR semantics (Mongo-compatible)", () => {
     const Users = model(
       "users",
       {
+        id: t.string().required().primaryKey(),
         email: t.string().required().unique(),
         active: t.boolean(),
       },
@@ -72,6 +73,7 @@ describe("Filter AND/OR semantics (Mongo-compatible)", () => {
     const Users = model(
       "users",
       {
+        id: t.string().required().primaryKey(),
         name: t.string().required(),
         age: t.number(),
         role: t.string(),
@@ -97,7 +99,7 @@ describe("Filter AND/OR semantics (Mongo-compatible)", () => {
     const { native, calls } = makeMockNative();
     const Users = model(
       "users",
-      { active: t.boolean() },
+      { id: t.string().required().primaryKey(), active: t.boolean() },
       native,
       naming.asIs,
     );

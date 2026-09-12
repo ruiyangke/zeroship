@@ -55,6 +55,7 @@ export type {
   FieldDef,
 } from "./types";
 export type { NormalizedSchema } from "./schema";
+export { validateCollectionIdentity } from "./schema";
 
 // Test-only hooks — exposed here (subpath, not public ./) so tests
 // reaching into Collection's warning state hit the SAME module

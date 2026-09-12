@@ -261,6 +261,12 @@ Migration policy can supply columns with assignment generators. The resulting
 lifecycle roles. Rust and TypeScript use that same descriptor; `Row<S>` contains
 only fields declared by `S`.
 
+Every ORM collection must declare a required `id` field as its sole primary key.
+The descriptor must include it explicitly; collection setup never injects it.
+Generation remains optional and uses the field's assignment metadata. Composite
+business keys use unique constraints. Projections and aggregate results may
+omit `id`.
+
 An assignment names a generator (`typedId`, `actor`, `now`, `increment(N)` or
 `identity`) and an event (`insert`, `write` or `delete`). The ORM supplies typed
 IDs and request actors. Database defaults initialize timestamps, counters and
@@ -405,7 +411,7 @@ The accessors are type-only — at runtime they return `null`.
 For a manual schema, declare the foreign-key target column explicitly:
 `t.ref("users", { column: "account_key" })`. Migration-generated builders carry
 the target column from `schema.runtime.json`. Relation loading without an
-explicit column resolves the target collection's declared primary key.
+explicit column uses the target collection's `id`.
 
 By default, the builder emits a same-app FK without `ON DELETE`, `ON UPDATE`,
 or `DEFERRABLE` clauses,
@@ -1233,8 +1239,8 @@ neither read nor override it. `env.db` is frozen.
 
 The migration renderer preserves effective policy assignments in
 `schema.runtime.json`. The ORM resolves them per collection, without a global
-field-name list or runtime policy copy. Renaming an assigned column preserves
-its behavior because the assignment and role move with the column.
+field-name list or runtime policy copy. Lifecycle columns can be renamed with
+their assignments and roles; the primary key remains `id`.
 
 | Descriptor metadata | Runtime behavior |
 | --- | --- |
@@ -1242,23 +1248,23 @@ its behavior because the assignment and role move with the column.
 | `assign: { by: "actor", on: "write" }` | Stamp the request actor on insertion and writes. |
 | `assign: { by: "now", on: "write" }` | Use the database clock on insertion and writes. |
 | `assign: { by: "increment(N)", on: "write" }` | Initialize from the database default, then increment on writes. |
-| `primaryKey: true` | Select the key used by row operations and references. |
+| `primaryKey: true` | Required on `id`, the collection's sole primary key. |
 | `concurrency: true` | Interpret the field's equality predicate as a revision check. |
 | `softDelete: true` | Use the field as the deletion marker and read-visibility filter. |
 
-For a descriptor that names its key `recordKey`, revision `revision` and deletion
-marker `removed`, the TypeScript API uses those names:
+For a descriptor with revision `revision` and deletion marker `removed`,
+identity stays `id` while lifecycle operations follow the declared roles:
 
 ```ts
 const { data: post } = await db.posts.insert({ title: "First post" });
 if (!post) throw new Error("insert failed");
 await db.posts.update(
-  { recordKey: post.recordKey, revision: post.revision },
+  { id: post.id, revision: post.revision },
   { title: "Edited" },
 );
-await db.posts.delete(post.recordKey);
-await db.posts.restore(post.recordKey);
-await db.posts.purge(post.recordKey);
+await db.posts.delete(post.id);
+await db.posts.restore(post.id);
+await db.posts.purge(post.id);
 ```
 
 A stale revision returns an optimistic-concurrency error. Omitting the revision
