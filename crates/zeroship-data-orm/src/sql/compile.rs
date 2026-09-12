@@ -94,7 +94,6 @@ impl SqlDialect {
 
 pub const MAX_QUERY_LIMIT: i64 = 500;
 pub const MAX_QUERY_OFFSET: i64 = 10_000;
-pub const MAX_SEARCH_LIMIT: usize = 500;
 /// DB-11: max documents in a single `insertMany`. Bounds the multi-row SQL
 /// string and row bookkeeping materialized in the worker. Bind parameters are
 /// capped separately because this document count says nothing about row width.
@@ -384,15 +383,6 @@ fn validate_limit_bound(name: &str, value: i64, max: i64) -> Result<(), QueryErr
     if value > max {
         return Err(QueryError::InvalidFilter(format!(
             "{name} exceeds the maximum of {max}, got {value}"
-        )));
-    }
-    Ok(())
-}
-
-fn validate_search_limit_bound(name: &str, value: usize) -> Result<(), QueryError> {
-    if value > MAX_SEARCH_LIMIT {
-        return Err(QueryError::InvalidFilter(format!(
-            "{name} exceeds the maximum of {MAX_SEARCH_LIMIT}, got {value}"
         )));
     }
     Ok(())
@@ -1056,10 +1046,9 @@ pub fn build_returning_expr(schema_hint: &Value) -> Result<String, QueryError> {
 /// synthetic column means adding it here; forgetting to means the column is
 /// dropped from the row - a visible failure, not a leak.
 pub const SYNTHETIC_RESULT_COLUMNS: &[&str] = &[
-    // `build_vector_search` (`{col} {op} $1::vector AS _distance`) and the
-    // SQLite arm's `v.distance AS _distance`.
+    // Vector search distance.
     "_distance",
-    // `build_spatial_near` (`ST_Distance(...) AS _distance_m`).
+    // Geographic distance in metres.
     "_distance_m",
     // `build_find_or_create` (`RETURNING <cols>, (xmax = 0) AS __created`).
     // NOT `build_upsert_with_dialect`, which this comment named until 2026-08-28
@@ -2182,182 +2171,6 @@ pub fn build_distinct_with_soft_delete_with_dialect(
 
 /// Build a pgvector nearest-neighbour search query.
 ///
-/// Emits the canonical pgvector shape (plan §3.1):
-///
-/// ```sql
-/// SELECT "id", "created_at", ..., "<col>" <op> $1::vector AS _distance
-///   FROM "<app>"."<coll>"
-///  [WHERE <filter-lowered>]
-///  ORDER BY "<col>" <op> $1::vector
-///  LIMIT $2
-/// ```
-///
-/// `<op>` is the pgvector operator per metric: `<->` L2, `<=>` Cosine,
-/// `<#>` InnerProduct (negated). The query vector is bound as a text
-/// literal `[1,2,3,...]` cast `::vector` — pgvector parses the text on
-/// cast, sidestepping the binary-protocol type-discovery handshake
-/// (the `vector` type's OID is allocated at extension-install time and
-/// not known to the driver at compile time).
-///
-/// `k` is bound as the second parameter (the LIMIT), keyed to JS-side
-/// validation; impls may want to clamp before calling, but this builder
-/// is permissive.
-///
-/// The filter is composed by the standard [`build_where`] helper — the
-/// same machinery `build_find` uses. `$1` is reserved for the query
-/// vector and `$2` for `k`; the filter's own placeholders start from
-/// `$3` because [`build_where`] always allocates fresh numbers from
-/// the `params` length.
-#[allow(
-    clippy::too_many_arguments,
-    reason = "the backend search contract supplies each typed search operand"
-)]
-pub fn build_vector_search(
-    schema_name: &SchemaName,
-    collection: &str,
-    column: &str,
-    query: &[f32],
-    k: usize,
-    metric: crate::sql::descriptors::VectorMetric,
-    filter: &Value,
-    schema_hint: &Value,
-) -> Result<CompiledQuery, QueryError> {
-    validate_collection(collection)?;
-    validate_read_identifier(column, schema_hint)?;
-    validate_search_limit_bound("search.k", k)?;
-
-    let schema = crate::sql::compile::quote_ident(schema_name.as_str());
-    let table = quote_ident(collection);
-    let col = quote_ident(column);
-
-    // pgvector operator per metric — see `crate::sql::descriptors::VectorMetric`
-    // doc-comment for the operator/opclass mapping.
-    let op = match metric {
-        crate::sql::descriptors::VectorMetric::Cosine => "<=>",
-        crate::sql::descriptors::VectorMetric::L2 => "<->",
-        crate::sql::descriptors::VectorMetric::InnerProduct => "<#>",
-    };
-
-    // Render the query vector as a pgvector text literal: `[1,2,3,...]`.
-    // We bind it as `$1` and cast to `::vector` on both the SELECT and
-    // ORDER BY sides so pgvector parses once. Float formatting uses
-    // Rust's `{}` (shortest-round-trip) — pgvector's text parser
-    // accepts the same form Postgres' float8 input does.
-    let mut vec_lit = String::with_capacity(query.len() * 8 + 2);
-    vec_lit.push('[');
-    for (i, v) in query.iter().enumerate() {
-        if i > 0 {
-            vec_lit.push(',');
-        }
-        // Use shortest-round-trip f32 → string. f32 has 24 bits of
-        // mantissa, so 9 significant digits round-trip exactly; the
-        // default Display impl picks the shortest unambiguous form.
-        vec_lit.push_str(&v.to_string());
-    }
-    vec_lit.push(']');
-
-    // Param 1: vector literal. Param 2: k. The filter's own params
-    // (rendered into `build_where`'s `params` vec) start at $3 because
-    // we pre-push two entries before invoking the helper.
-    let mut params: Vec<Value> = Vec::with_capacity(2 + 4);
-    params.push(vec_lit.into());
-    params.push((k).into());
-
-    let where_clause = build_where(filter, &mut params, schema_hint)?;
-
-    let select_expr = build_masked_aware_select_expr(None, schema_hint)?;
-    let mut sql =
-        format!("SELECT {select_expr}, {col} {op} $1::vector AS _distance FROM {schema}.{table}");
-    if !where_clause.is_empty() {
-        sql.push_str(" WHERE ");
-        sql.push_str(&where_clause);
-    }
-    sql.push_str(&format!(" ORDER BY {col} {op} $1::vector LIMIT $2"));
-
-    Ok(CompiledQuery { sql, params })
-}
-
-/// Build the SQL + bind parameters for a spatial within-radius search
-/// (PostGIS arm).
-///
-/// Shape:
-/// ```sql
-/// SELECT "id", "created_at", ..., ST_Distance("col", ST_MakePoint($1, $2)::geography) AS _distance_m
-/// FROM "<app>"."<coll>"
-/// WHERE ST_DWithin("col", ST_MakePoint($1, $2)::geography, $3) AND <filter>
-/// ORDER BY _distance_m
-/// LIMIT $4
-/// ```
-///
-/// **Parameter order**: `$1 = lng`, `$2 = lat` — `ST_MakePoint(x, y)` is
-/// `(lng, lat)` in PostGIS, the inverse of the SDK's `{lat, lng}` shape.
-/// The Rust trait surface ([`crate::sql::descriptors::GeoPoint`]) keeps the
-/// `{lat, lng}` shape; the swap happens here at the SQL boundary so the
-/// JS/Rust contract stays in `(lat, lng)` order. `$3 = radius_m`,
-/// `$4 = limit`. Filter parameters start at `$5`.
-///
-/// **Column type**: the indexed column must be
-/// `geography(POINT, 4326)`. The migration engine's PostgreSQL DDL emitter
-/// wires this when the schema field type is `geoPoint`.
-#[allow(
-    clippy::too_many_arguments,
-    reason = "the backend search contract supplies each typed search operand"
-)]
-pub fn build_spatial_near(
-    schema_name: &SchemaName,
-    collection: &str,
-    column: &str,
-    point: crate::sql::descriptors::GeoPoint,
-    radius_m: f64,
-    filter: &Value,
-    limit: Option<usize>,
-    schema_hint: &Value,
-) -> Result<CompiledQuery, QueryError> {
-    validate_collection(collection)?;
-    validate_read_identifier(column, schema_hint)?;
-
-    let schema = crate::sql::compile::quote_ident(schema_name.as_str());
-    let table = quote_ident(collection);
-    let col = quote_ident(column);
-
-    let limit = limit.unwrap_or(100);
-    validate_search_limit_bound("near.limit", limit)?;
-
-    // Bind order: (lng, lat, radius_m, limit). Note the swap: ST_MakePoint
-    // takes (x, y) = (lng, lat), the inverse of the SDK's {lat, lng}
-    // input shape.
-    let mut params: Vec<Value> = Vec::with_capacity(4 + 4);
-    params.push(Value::Number(
-        crate::value::Number::from_f64(point.lng)
-            .ok_or_else(|| QueryError::InvalidFilter("non-finite spatial operand".into()))?,
-    ));
-    params.push(Value::Number(
-        crate::value::Number::from_f64(point.lat)
-            .ok_or_else(|| QueryError::InvalidFilter("non-finite spatial operand".into()))?,
-    ));
-    params.push(Value::Number(
-        crate::value::Number::from_f64(radius_m)
-            .ok_or_else(|| QueryError::InvalidFilter("non-finite spatial operand".into()))?,
-    ));
-    params.push((limit).into());
-
-    let where_clause = build_where(filter, &mut params, schema_hint)?;
-
-    let select_expr = build_masked_aware_select_expr(None, schema_hint)?;
-    let mut sql = format!(
-        "SELECT {select_expr}, ST_Distance({col}, ST_MakePoint($1, $2)::geography) AS _distance_m \
-         FROM {schema}.{table} \
-         WHERE ST_DWithin({col}, ST_MakePoint($1, $2)::geography, $3)"
-    );
-    if !where_clause.is_empty() {
-        sql.push_str(" AND ");
-        sql.push_str(&where_clause);
-    }
-    sql.push_str(" ORDER BY _distance_m LIMIT $4");
-
-    Ok(CompiledQuery { sql, params })
-}
-
 // ---------------------------------------------------------------------------
 // HAVING clause builder (resolves aliases to aggregate expressions)
 // ---------------------------------------------------------------------------
@@ -7138,87 +6951,6 @@ mod tests {
         );
     }
 
-    /// Vector search's projection expands to an explicit list when the
-    /// schema carries a masked column - the masked column rides through
-    /// under its own name (it already holds the mask) and the raw column
-    /// must never appear.
-    #[test]
-    fn vector_search_expands_masked_projection_when_schema_cached() {
-        let schema = crate::value!({
-            "ssn": { "type": "string",
-                     "mask": { "kind": "last4", "classification": "spi" } },
-            "embedding": { "type": "vector" },
-        });
-        let q = build_vector_search(
-            &s("app1"),
-            "users",
-            "embedding",
-            &[0.1, 0.2],
-            5,
-            crate::sql::descriptors::VectorMetric::Cosine,
-            &crate::value!({}),
-            &schema,
-        )
-        .expect("vector search sql");
-        assert!(
-            !q.sql.starts_with("SELECT *"),
-            "vector search must not fall back to SELECT * when masked columns exist: {}",
-            q.sql,
-        );
-        assert!(
-            q.sql.contains("\"ssn\""),
-            "vector search must read the field's own (masked) column: {}",
-            q.sql,
-        );
-        assert!(
-            !q.sql.contains(&raw_column_name("ssn")),
-            "vector search must never name the raw column: {}",
-            q.sql,
-        );
-    }
-
-    /// Spatial search's projection expands to an explicit list when the
-    /// schema carries a masked column - the masked column rides through
-    /// under its own name (it already holds the mask) and the raw column
-    /// must never appear.
-    #[test]
-    fn spatial_near_expands_masked_projection_when_schema_cached() {
-        let schema = crate::value!({
-            "ssn": { "type": "string",
-                     "mask": { "kind": "last4", "classification": "spi" } },
-            "location": { "type": "geoPoint" },
-        });
-        let q = build_spatial_near(
-            &s("app1"),
-            "users",
-            "location",
-            crate::sql::descriptors::GeoPoint {
-                lat: 37.7,
-                lng: -122.4,
-            },
-            1000.0,
-            &crate::value!({}),
-            Some(10),
-            &schema,
-        )
-        .expect("spatial search sql");
-        assert!(
-            !q.sql.starts_with("SELECT *"),
-            "spatial search must not fall back to SELECT * when masked columns exist: {}",
-            q.sql,
-        );
-        assert!(
-            q.sql.contains("\"ssn\""),
-            "spatial search must read the field's own (masked) column: {}",
-            q.sql,
-        );
-        assert!(
-            !q.sql.contains(&raw_column_name("ssn")),
-            "spatial search must never name the raw column: {}",
-            q.sql,
-        );
-    }
-
     #[test]
     fn implicit_find_projection_with_schema_uses_allowlist() {
         let schema = crate::value!({
@@ -7330,29 +7062,6 @@ mod tests {
         assert!(
             err.to_string().contains("find.limit"),
             "limit error must name the bounded option: {err}"
-        );
-    }
-
-    #[test]
-    fn vector_search_k_over_max_is_rejected() {
-        let schema = crate::value!({
-            "embedding": { "type": "vector" },
-        });
-        let err = build_vector_search(
-            &s("app1"),
-            "users",
-            "embedding",
-            &[0.1, 0.2],
-            MAX_SEARCH_LIMIT + 1,
-            crate::sql::descriptors::VectorMetric::Cosine,
-            &crate::value!({}),
-            &schema,
-        )
-        .expect_err("search.k over the cap must be rejected");
-        assert!(matches!(err, QueryError::InvalidFilter(_)));
-        assert!(
-            err.to_string().contains("search.k"),
-            "vector search error must name the bounded option: {err}"
         );
     }
 

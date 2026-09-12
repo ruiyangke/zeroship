@@ -102,6 +102,9 @@ pub(crate) fn requirements(schema: &Value, guard_identity: bool) -> Requirements
     Requirements {
         relational_reads: false,
         aggregate_reads: false,
+        vector_search: false,
+        inner_product_vector_search: false,
+        spatial_search: false,
         explicit_conflict_target: true,
         conditional_conflict_update: guard_identity,
         returning: true,

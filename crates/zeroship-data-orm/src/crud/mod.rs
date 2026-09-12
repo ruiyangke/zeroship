@@ -9,7 +9,6 @@ use crate::value::Value;
 
 use crate::assignments::AssignmentPlan;
 use crate::exec::{exec_mutation_count_with_emit, exec_mutation_with_emit, exec_query};
-use crate::sql::codecs::lower_filter;
 use crate::sql::compile;
 use crate::sql::lifecycle::{concurrency_column, soft_delete_column};
 use crate::tx_route::TxRoute;
@@ -27,6 +26,7 @@ mod identity;
 pub(crate) mod insert;
 pub(crate) mod predicate;
 mod read;
+pub(crate) mod search;
 pub mod read_pipeline;
 pub(crate) mod resolved;
 mod update;
@@ -1333,18 +1333,14 @@ pub async fn run_upsert(
 /// and consumed by [`run_search`].
 #[derive(Debug)]
 pub struct SearchPlan {
-    vector: Vec<f32>,
-    k: usize,
-    metric: crate::backend::VectorMetric,
-    column: String,
-    filter: Value,
+    query: crate::sql::compiler::CompiledQuery,
 }
 
 /// Decode search arguments and lower filters using the deployment descriptor
 /// before asynchronous execution.
 pub fn plan_search(
     binding: &DbBinding,
-    dialect: compile::SqlDialect,
+    registration: &crate::sql::registration::SqlRegistration,
     collection: &str,
     args: &Value,
 ) -> Result<SearchPlan, DbError> {
@@ -1403,28 +1399,23 @@ pub fn plan_search(
         .and_then(Value::as_str)
         .unwrap_or("embedding")
         .to_string();
-    let mut filter = args
+    let filter = args
         .get("filter")
         .cloned()
         .unwrap_or_else(|| Value::Object(crate::value::Map::new()));
-    // The backend arms resolve the same entry for their projection; this one is
-    // for the SQLite boolean lowering of the caller's filter.
-    //
-    // `dialect` is a bare parameter rather than something taken off a route,
-    // because `dispatch_search` captures none: the search family never reaches
-    // `crate::exec::run_sql`, so an `in_tx` bit would be frozen and discarded.
-    // The adapter reads the dialect for it, from the same
-    // `crate::tx_scope::configured_dialect` a capture would have stamped.
     let schema = crate::descriptor::collection_schema(binding, collection)?;
-    lower_filter(dialect, &schema, &mut filter);
-
-    Ok(SearchPlan {
+    let query = search::vector(
+        binding.schema(),
+        collection,
+        &schema,
+        &column,
         vector,
         k,
         metric,
-        column,
         filter,
-    })
+        registration,
+    )?;
+    Ok(SearchPlan { query })
 }
 
 /// Run vector search on the captured transaction route and process the result.
@@ -1434,21 +1425,7 @@ pub async fn run_search(
     coll: String,
     plan: SearchPlan,
 ) -> Result<read_pipeline::ApplyResult, DbError> {
-    let SearchPlan {
-        vector,
-        k,
-        metric,
-        column,
-        filter,
-    } = plan;
-
-    // Pass the deployment descriptor and captured route to the search backend so
-    // transactional searches can see their own writes.
-    let schema = crate::descriptor::collection_schema(&binding, &coll)?;
-    let rows = crate::backend_handle::routed_vector_search(
-        route, &binding, &coll, &column, &vector, k, metric, &filter, &schema,
-    )
-    .await?;
+    let rows = crate::backend_handle::routed_vector_search(route, &binding, plan.query).await?;
 
     // Count the successful database read even if later result decoding fails.
     crate::metrics::emit_db_metric(binding.app_id(), crate::metrics::DB_READS, 1);
@@ -1486,7 +1463,7 @@ pub struct NearPlan {
     point: crate::backend::GeoPoint,
     radius_m: f64,
     limit: Option<usize>,
-    filter: Value,
+    query: crate::sql::compiler::CompiledQuery,
 }
 
 /// The EAGER half of `near`. Same rejection-folding as [`plan_search`]: the five
@@ -1498,7 +1475,7 @@ pub struct NearPlan {
 /// tidied - the SDK branches on the code.
 pub fn plan_near(
     binding: &DbBinding,
-    dialect: compile::SqlDialect,
+    registration: &crate::sql::registration::SqlRegistration,
     collection: &str,
     args: &Value,
 ) -> Result<NearPlan, DbError> {
@@ -1548,23 +1525,31 @@ pub fn plan_near(
         .get("limit")
         .and_then(Value::as_u64)
         .map(|n| n as usize);
-    let mut filter = args
+    let filter = args
         .get("filter")
         .cloned()
         .unwrap_or_else(|| Value::Object(crate::value::Map::new()));
 
-    // Same as `plan_search`: the backend arm resolves the entry again for its
-    // own projection; this one lowers the caller's filter, and `dialect` is a
-    // bare parameter for the reason given there.
     let schema = crate::descriptor::collection_schema(binding, collection)?;
-    lower_filter(dialect, &schema, &mut filter);
+    let point = crate::backend::GeoPoint { lat, lng };
+    let query = search::spatial(
+        binding.schema(),
+        collection,
+        &schema,
+        &field,
+        point,
+        radius_m,
+        filter,
+        limit,
+        registration,
+    )?;
 
     Ok(NearPlan {
         field,
-        point: crate::backend::GeoPoint { lat, lng },
+        point,
         radius_m,
         limit,
-        filter,
+        query,
     })
 }
 
@@ -1580,13 +1565,11 @@ pub async fn run_near(
         point,
         radius_m,
         limit,
-        filter,
+        query,
     } = plan;
 
-    // Use the captured route so the search sees this transaction’s writes.
-    let schema = crate::descriptor::collection_schema(&binding, &coll)?;
     let rows = crate::backend_handle::routed_spatial_near(
-        route, &binding, &coll, &field, point, radius_m, &filter, limit, &schema,
+        route, &binding, query, &field, point, radius_m, limit,
     )
     .await?;
 

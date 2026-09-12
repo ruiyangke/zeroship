@@ -376,6 +376,73 @@ impl SelectStatement {
 }
 
 #[derive(Debug)]
+pub struct VectorSearchParts {
+    pub table: Table,
+    pub projection: Vec<ReturnedColumn>,
+    pub identity: Column,
+    pub vector: Column,
+    pub query: Value,
+    pub metric: super::descriptors::VectorMetric,
+    pub predicate: ResolvedPredicate,
+    pub limit: i64,
+}
+
+#[derive(Debug)]
+pub struct VectorSearchStatement(VectorSearchParts);
+
+impl VectorSearchStatement {
+    pub fn new(parts: VectorSearchParts) -> Result<Self, CompileError> {
+        validate_vector_search(&parts)?;
+        Ok(Self(parts))
+    }
+
+    pub fn parts(&self) -> &VectorSearchParts {
+        &self.0
+    }
+
+    pub fn into_parts(self) -> VectorSearchParts {
+        self.0
+    }
+
+    pub fn validate(&self) -> Result<(), CompileError> {
+        validate_vector_search(&self.0)
+    }
+}
+
+#[derive(Debug)]
+pub struct SpatialNearParts {
+    pub table: Table,
+    pub projection: Vec<ReturnedColumn>,
+    pub spatial: Column,
+    pub point: Value,
+    pub radius_m: f64,
+    pub predicate: ResolvedPredicate,
+    pub limit: i64,
+}
+
+#[derive(Debug)]
+pub struct SpatialNearStatement(SpatialNearParts);
+
+impl SpatialNearStatement {
+    pub fn new(parts: SpatialNearParts) -> Result<Self, CompileError> {
+        validate_spatial_near(&parts)?;
+        Ok(Self(parts))
+    }
+
+    pub fn parts(&self) -> &SpatialNearParts {
+        &self.0
+    }
+
+    pub fn into_parts(self) -> SpatialNearParts {
+        self.0
+    }
+
+    pub fn validate(&self) -> Result<(), CompileError> {
+        validate_spatial_near(&self.0)
+    }
+}
+
+#[derive(Debug)]
 pub struct IdentityRequest {
     table: Table,
     column: Column,
@@ -571,10 +638,47 @@ impl Upsert {
 #[derive(Debug)]
 pub enum Statement {
     Select(SelectStatement),
+    VectorSearch(VectorSearchStatement),
+    SpatialNear(SpatialNearStatement),
     Insert(Insert),
     Upsert(Upsert),
     Update(Update),
     Delete(Delete),
+}
+
+fn validate_vector_search(parts: &VectorSearchParts) -> Result<(), CompileError> {
+    parts.table.check_column(&parts.identity)?;
+    parts.table.check_column(&parts.vector)?;
+    if parts.vector.storage() != StorageType::Vector || !StorageType::Vector.accepts(&parts.query) {
+        return Err(invalid("vector search requires a vector column and query"));
+    }
+    if parts.limit < 0 {
+        return Err(invalid("vector search limit cannot be negative"));
+    }
+    if parts.projection.is_empty() {
+        return Err(invalid("vector search requires a projection"));
+    }
+    validate_returning(&parts.table, &parts.projection)?;
+    validate_predicate_for_tables(&[&parts.table], &parts.predicate, false)
+}
+
+fn validate_spatial_near(parts: &SpatialNearParts) -> Result<(), CompileError> {
+    parts.table.check_column(&parts.spatial)?;
+    if parts.spatial.storage() != StorageType::GeoPoint
+        || !StorageType::GeoPoint.accepts(&parts.point)
+    {
+        return Err(invalid(
+            "spatial search requires a geographic column and point",
+        ));
+    }
+    if !parts.radius_m.is_finite() || parts.radius_m <= 0.0 || parts.limit < 0 {
+        return Err(invalid("spatial search bounds are invalid"));
+    }
+    if parts.projection.is_empty() {
+        return Err(invalid("spatial search requires a projection"));
+    }
+    validate_returning(&parts.table, &parts.projection)?;
+    validate_predicate_for_tables(&[&parts.table], &parts.predicate, false)
 }
 
 fn validate_select(parts: &SelectParts) -> Result<(), CompileError> {

@@ -340,27 +340,6 @@ impl LockManager for PostgresBackend {
     }
 }
 
-// ---------------------------------------------------------------------------
-// VectorIndex — pgvector adapter
-// ---------------------------------------------------------------------------
-//
-// One method: `vector_search` — `SELECT *, col <op> $1::vector AS _distance
-// FROM ... ORDER BY col <op> $1::vector LIMIT $2` via `build_vector_search`.
-//
-// The ivfflat index it reads is NOT created here. `zeroship-migrate` authors
-// it from the declared `t.vector(dims, { metric })` field
-// (`zeroship-migrate-core/src/render/declarative.rs::vector_index_snapshot`,
-// emitted by `zeroship-migrate-postgres/src/ddl.rs::create_index` as
-// `USING ivfflat ("col" vector_<metric>_ops) WITH (lists = 100)`), and the
-// engine's drift pass compares `access_method` so it round-trips. A search
-// against a table whose migration has not been applied is a missing-index
-// sequential scan, not a correctness failure.
-//
-// The probe of `pg_extension WHERE extname='vector'` runs on first call and
-// caches on `pgvector_available`. Absence surfaces as
-// `DbError::Configuration { code: "vector_extension_missing", ... }`.
-// ---------------------------------------------------------------------------
-
 #[cfg(test)]
 impl PgLockManager for PostgresBackend {
     async fn acquire_pooled_client_for_lock(

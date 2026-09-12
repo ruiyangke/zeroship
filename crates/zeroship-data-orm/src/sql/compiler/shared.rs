@@ -12,6 +12,9 @@ use crate::value::Value;
 pub struct SqlSupport {
     pub relational_reads: bool,
     pub aggregate_reads: bool,
+    pub vector_search: bool,
+    pub inner_product_vector_search: bool,
+    pub spatial_search: bool,
     pub explicit_conflict_target: bool,
     pub conditional_conflict_update: bool,
     pub returning: bool,
@@ -25,6 +28,9 @@ pub struct SqlSupport {
 pub struct Requirements {
     pub relational_reads: bool,
     pub aggregate_reads: bool,
+    pub vector_search: bool,
+    pub inner_product_vector_search: bool,
+    pub spatial_search: bool,
     pub explicit_conflict_target: bool,
     pub conditional_conflict_update: bool,
     pub returning: bool,
@@ -57,6 +63,24 @@ impl Requirements {
                     ..Self::default()
                 }
             }
+            Statement::VectorSearch(search) => {
+                let parts = search.parts();
+                Self {
+                    vector_search: true,
+                    inner_product_vector_search: parts.metric
+                        == crate::sql::descriptors::VectorMetric::InnerProduct,
+                    bind_parameters: predicate_binds(&parts.predicate) + 2,
+                    ..Self::default()
+                }
+            }
+            Statement::SpatialNear(search) => {
+                let parts = search.parts();
+                Self {
+                    spatial_search: true,
+                    bind_parameters: predicate_binds(&parts.predicate) + 3,
+                    ..Self::default()
+                }
+            }
             Statement::Insert(insert) => {
                 let parts = insert.parts();
                 let values = parts.rows.iter().flatten();
@@ -79,6 +103,9 @@ impl Requirements {
                 Self {
                     relational_reads: false,
                     aggregate_reads: false,
+                    vector_search: false,
+                    inner_product_vector_search: false,
+                    spatial_search: false,
                     explicit_conflict_target: true,
                     conditional_conflict_update: parts.condition.is_some(),
                     returning: !parts.returning.is_empty(),
@@ -209,6 +236,16 @@ pub(crate) struct Syntax {
     pub(crate) insensitive_like: &'static str,
     pub(crate) insensitive_like_suffix: &'static str,
     pub(crate) average_suffix: &'static str,
+    pub(crate) vector_distance: fn(
+        &mut SqlWriter,
+        &Column,
+        crate::sql::descriptors::VectorMetric,
+        super::ParameterSlot,
+    ) -> Result<(), CompileError>,
+    pub(crate) spatial_near: fn(
+        crate::sql::statement::SpatialNearStatement,
+        &SqlSupport,
+    ) -> Result<CompiledQuery, CompileError>,
     pub(crate) array_mutation: fn(
         &mut SqlWriter,
         &Column,
@@ -234,6 +271,24 @@ pub(crate) fn check(
             effective.aggregate_reads,
             implemented.aggregate_reads,
             "aggregate reads",
+        ),
+        (
+            required.vector_search,
+            effective.vector_search,
+            implemented.vector_search,
+            "vector search",
+        ),
+        (
+            required.inner_product_vector_search,
+            effective.inner_product_vector_search,
+            implemented.inner_product_vector_search,
+            "inner-product vector search",
+        ),
+        (
+            required.spatial_search,
+            effective.spatial_search,
+            implemented.spatial_search,
+            "spatial search",
         ),
         (
             required.explicit_conflict_target,
@@ -307,6 +362,8 @@ pub(crate) fn compile(
     )?;
     match statement {
         Statement::Select(select) => compile_select(syntax, effective, select),
+        Statement::VectorSearch(search) => compile_vector_search(syntax, effective, search),
+        Statement::SpatialNear(search) => (syntax.spatial_near)(search, effective),
         Statement::Insert(insert) => {
             insert.validate()?;
             let parts = insert.into_parts();
@@ -444,6 +501,57 @@ pub(crate) fn compile(
     }
 }
 
+fn compile_vector_search(
+    syntax: Syntax,
+    effective: &SqlSupport,
+    search: crate::sql::statement::VectorSearchStatement,
+) -> Result<CompiledQuery, CompileError> {
+    search.validate()?;
+    let parts = search.into_parts();
+    let mut writer = SqlWriter::new(effective.max_bind_parameters);
+    let query = writer.bind(parts.query)?;
+    writer.sql.push_str("SELECT ");
+    write_search_projection(&mut writer, &parts.projection);
+    writer.sql.push_str(", ");
+    (syntax.vector_distance)(&mut writer, &parts.vector, parts.metric, query)?;
+    writer.sql.push_str(" AS ");
+    writer.identifier("_distance");
+    writer.sql.push_str(" FROM ");
+    write_table_reference(&mut writer, &parts.table);
+    if !matches!(parts.predicate, ResolvedPredicate::Const(true)) {
+        writer.sql.push_str(" WHERE ");
+        write_predicate(&mut writer, syntax, parts.predicate)?;
+    }
+    writer.sql.push_str(" ORDER BY ");
+    (syntax.vector_distance)(&mut writer, &parts.vector, parts.metric, query)?;
+    writer.sql.push_str(", ");
+    write_operand(
+        &mut writer,
+        syntax,
+        &ResolvedOperand::Column(parts.identity),
+    );
+    writer.sql.push_str(" LIMIT ");
+    writer.write_param(Value::from(parts.limit))?;
+    Ok(writer.finish())
+}
+
+pub(crate) fn write_search_projection(
+    writer: &mut SqlWriter,
+    projection: &[crate::sql::statement::ReturnedColumn],
+) {
+    for (index, selected) in projection.iter().enumerate() {
+        comma(writer, index);
+        write_column_reference(writer, &selected.column);
+        writer.sql.push_str(" AS ");
+        writer.identifier(
+            selected
+                .alias
+                .as_ref()
+                .map_or_else(|| selected.column.name().as_str(), |alias| alias.as_str()),
+        );
+    }
+}
+
 fn compile_select(
     syntax: Syntax,
     effective: &SqlSupport,
@@ -514,7 +622,7 @@ fn compile_select(
     Ok(writer.finish())
 }
 
-fn write_table_reference(writer: &mut SqlWriter, table: &Table) {
+pub(crate) fn write_table_reference(writer: &mut SqlWriter, table: &Table) {
     write_table(writer, table);
     if let Some(alias) = table.alias() {
         writer.sql.push_str(" AS ");
@@ -555,7 +663,7 @@ fn write_mutation_predicate(
     Ok(())
 }
 
-fn write_predicate(
+pub(crate) fn write_predicate(
     writer: &mut SqlWriter,
     syntax: Syntax,
     predicate: ResolvedPredicate,
@@ -644,15 +752,9 @@ fn write_predicate(
     Ok(())
 }
 
-fn write_operand(writer: &mut SqlWriter, syntax: Syntax, operand: &ResolvedOperand) {
+pub(crate) fn write_operand(writer: &mut SqlWriter, syntax: Syntax, operand: &ResolvedOperand) {
     match operand {
-        ResolvedOperand::Column(column) => {
-            if let Some(alias) = column.table().alias() {
-                writer.identifier(alias.as_str());
-                writer.sql.push('.');
-            }
-            writer.identifier(column.name().as_str());
-        }
+        ResolvedOperand::Column(column) => write_column_reference(writer, column),
         ResolvedOperand::Aggregate {
             function,
             column,
@@ -674,6 +776,14 @@ fn write_operand(writer: &mut SqlWriter, syntax: Syntax, operand: &ResolvedOpera
             }
         }
     }
+}
+
+pub(crate) fn write_column_reference(writer: &mut SqlWriter, column: &Column) {
+    if let Some(alias) = column.table().alias() {
+        writer.identifier(alias.as_str());
+        writer.sql.push('.');
+    }
+    writer.identifier(column.name().as_str());
 }
 
 fn write_connective(

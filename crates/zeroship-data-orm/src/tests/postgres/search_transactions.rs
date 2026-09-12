@@ -141,8 +141,15 @@ async fn search_on(
     args: Value,
 ) -> Result<Vec<Value>, DbError> {
     let binding = DbBinding::cold_start(app);
-    let plan =
-        zeroship_data_orm::crud::plan_search(&binding, SqlDialect::Postgres, collection, &args)?;
+    let registration = zeroship_data_orm::sql::registration::SqlRegistration::builtin(
+        SqlDialect::Postgres,
+    );
+    let plan = zeroship_data_orm::crud::plan_search(
+        &binding,
+        &registration,
+        collection,
+        &args,
+    )?;
     zeroship_data_orm::crud::run_search(&route, binding, collection.to_string(), plan)
         .await
         .map(|r| r.rows)
@@ -156,8 +163,15 @@ async fn near_on(
     args: Value,
 ) -> Result<Vec<Value>, DbError> {
     let binding = DbBinding::cold_start(app);
-    let plan =
-        zeroship_data_orm::crud::plan_near(&binding, SqlDialect::Postgres, collection, &args)?;
+    let registration = zeroship_data_orm::sql::registration::SqlRegistration::builtin(
+        SqlDialect::Postgres,
+    );
+    let plan = zeroship_data_orm::crud::plan_near(
+        &binding,
+        &registration,
+        collection,
+        &args,
+    )?;
     zeroship_data_orm::crud::run_near(&route, binding, collection.to_string(), plan)
         .await
         .map(|r| r.rows)
