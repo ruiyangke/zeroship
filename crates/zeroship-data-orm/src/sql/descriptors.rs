@@ -165,48 +165,20 @@ pub(crate) fn supports_predicate_operator(
     }
 }
 
-/// Distance metric for a vector index. The three metrics map 1:1 to
-/// pgvector's operator class set (`vector_cosine_ops`,
-/// `vector_l2_ops`, `vector_ip_ops`) and the SQLite Rust-side distance
-/// functions (`cosine_distance`, `l2_distance`, `neg_inner_product`).
-///
-/// **Why an enum, not a string** (plan §2): the SDK validates against
-/// a closed three-element set; carrying it through the Rust surface
-/// as an enum trips the rustc exhaustiveness checker if a future PR
-/// adds a fourth metric — every match arm in the impl flags rather
-/// than the new metric silently routing to a default branch.
+/// Distance metric selected by a vector field descriptor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VectorMetric {
-    /// Cosine distance: `1 - (a · b) / (||a|| · ||b||)`. PG operator
-    /// `<=>`, opclass `vector_cosine_ops`. The default for embedding
-    /// models that produce L2-normalised vectors.
+    /// Cosine distance.
     Cosine,
-    /// Euclidean (L2) distance: `sqrt(Σ (a_i - b_i)^2)`. PG operator
-    /// `<->`, opclass `vector_l2_ops`.
+    /// Euclidean distance.
     L2,
-    /// Negative inner product: `- (a · b)`. PG operator `<#>`,
-    /// opclass `vector_ip_ops`. The "negative" framing makes "smaller
-    /// is better" hold across all three metrics, so a single ORDER BY
-    /// clause works.
+    /// Negative inner product.
     InnerProduct,
 }
 
-/// A geographic point in WGS84 (EPSG:4326). Used by the spatial index
-/// surface for query input and by the `geoPoint` DDL emitter.
-///
-/// **Field order**: `lat` then `lng` — matches the SDK shape
-/// (`{ lat: number, lng: number }`) and the GeoJSON convention.
-/// Note that PostGIS `ST_MakePoint` takes `(lng, lat)`; the PG impl
-/// reorders at the SQL boundary.
-///
-/// `Copy` because it's two `f64`s — passing by value is cheaper than
-/// borrowing.
+/// A geographic point in WGS84 coordinates.
 #[derive(Debug, Clone, Copy)]
 pub struct GeoPoint {
-    /// Latitude in degrees, range `[-90, 90]`. SDK validate rejects
-    /// out-of-range values before the trait method is called.
     pub lat: f64,
-    /// Longitude in degrees, range `[-180, 180]`. SDK validate
-    /// rejects out-of-range values before the trait method is called.
     pub lng: f64,
 }

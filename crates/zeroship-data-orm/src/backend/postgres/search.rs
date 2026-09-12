@@ -48,17 +48,8 @@ impl Search for PostgresBackend {
     }
 }
 impl PostgresBackend {
-    /// Check (and cache) whether the `vector` extension is installed on
-    /// the connected database. The probe runs at most once per backend
-    /// instance — pgvector is provisioned at admin time and stays present
-    /// for the life of the process.
-    ///
-    /// Returns `Ok(())` when present; `Err(DbError::Configuration)` with
-    /// code `vector_extension_missing` otherwise. Connection failures
-    /// during the probe surface as `DbError::Transient` so callers can
-    /// distinguish "extension missing" from "database unreachable".
+    /// Cache whether the connected database provides pgvector.
     async fn ensure_pgvector_available(&self) -> Result<(), DbError> {
-        // Fast path: cached result.
         if let Some(present) = *self.pgvector_available.borrow() {
             if present {
                 return Ok(());
@@ -94,28 +85,8 @@ impl PostgresBackend {
     }
 }
 
-// ---------------------------------------------------------------------------
-// SpatialIndex — PostGIS adapter
-// ---------------------------------------------------------------------------
-//
-// One method: `spatial_near` — `WHERE ST_DWithin(col, ST_MakePoint(lng, lat)::
-// geography, radius) ORDER BY ST_Distance(...) LIMIT $4`.
-//
-// The GiST index it reads is NOT created here. `zeroship-migrate` authors it
-// from the declared `t.geoPoint()` field
-// (`zeroship-migrate-core/src/render/declarative.rs::geo_index_snapshot`,
-// emitted as `USING gist ("col")`).
-//
-// Both probe `pg_extension WHERE extname='postgis'` on first call and
-// cache on `postgis_available`. Absence surfaces as
-// `DbError::Configuration { code: "postgis_extension_missing", ... }`.
-// ---------------------------------------------------------------------------
-
 impl PostgresBackend {
-    /// Check (and cache) whether the `postgis` extension is installed on
-    /// the connected database. Mirrors [`Self::ensure_pgvector_available`]
-    /// — the probe runs at most once per backend; PostGIS is
-    /// provisioned at admin time and stays present.
+    /// Cache whether the connected database provides PostGIS.
     async fn ensure_postgis_available(&self) -> Result<(), DbError> {
         if let Some(present) = *self.postgis_available.borrow() {
             if present {
