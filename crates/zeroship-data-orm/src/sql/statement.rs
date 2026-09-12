@@ -1068,7 +1068,7 @@ fn validate_update_expression(
             table.check_column(column)?;
             if column.index != assigned.index
                 || storage != StorageType::Json
-                || !matches!(operand, Value::Json(_))
+                || !StorageType::Json.accepts(operand)
             {
                 return Err(invalid(
                     "array mutation requires its assigned JSON column and encoded operand",

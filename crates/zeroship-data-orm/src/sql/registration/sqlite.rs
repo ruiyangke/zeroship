@@ -29,6 +29,9 @@ impl SqlStorageCodecs for SqliteCodecs {
     }
 
     fn encode(&self, storage: StorageType, value: Value) -> Result<Value, CompileError> {
+        if storage == StorageType::Json && value.is_null() {
+            return Ok(Value::Json("null".into()));
+        }
         if value.is_null() {
             return Ok(value);
         }
