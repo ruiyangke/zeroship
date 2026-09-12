@@ -212,8 +212,17 @@ impl AtomicWriteFrame {
     /// On rollback, the original row error remains the creator-visible error;
     /// a savepoint settle failure wins because the enclosing transaction state
     /// is then no longer trustworthy.
-    pub async fn finish<T>(mut self, body: Result<T, DbError>) -> Result<T, DbError> {
-        let success = body.is_ok();
+    pub async fn finish<T>(self, body: Result<T, DbError>) -> Result<T, DbError> {
+        self.settle(body.is_ok()).await?;
+        body
+    }
+
+    /// Roll back this frame without manufacturing a body error.
+    pub async fn rollback(self) -> Result<(), DbError> {
+        self.settle(false).await
+    }
+
+    async fn settle(mut self, success: bool) -> Result<(), DbError> {
         // The reducer owns the admission release from here: every path it takes
         // to `Settled` emits `ReleaseAdmission`.
         if let Some(admission) = self.admission.take() {
@@ -222,13 +231,12 @@ impl AtomicWriteFrame {
         self.state = AtomicWriteFrameState::Settling;
         let outcome = exec_settle(self.route.app_id(), success, self.frame).await;
         self.state = AtomicWriteFrameState::Settled;
-        match (body, outcome) {
-            (Ok(value), SettleOutcome::Ok) => Ok(value),
-            (Err(error), SettleOutcome::Ok) => Err(error),
-            (_, SettleOutcome::CommitIndeterminate(error)) => {
+        match outcome {
+            SettleOutcome::Ok => Ok(()),
+            SettleOutcome::CommitIndeterminate(error) => {
                 Err(commit_failed_indeterminate(error))
             }
-            (_, SettleOutcome::SettleErr(error)) => Err(error),
+            SettleOutcome::SettleErr(error) => Err(error),
         }
     }
 }

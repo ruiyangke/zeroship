@@ -350,6 +350,17 @@ requires no new backend enum variant in those paths.
 
 ## Session ownership and transactions
 
+Rust callers can use `Database::transaction` for a callback or
+`Database::begin_transaction` for an owned `orm::Transaction`. Its `database()`
+provides scoped model and collection handles; `commit`, `rollback`, and drop
+expire those handles. Nested transactions use savepoints, and a parent cannot
+settle while its child is open. Cancellation cleans up in the originating ORM
+context even if another context is active when the handle is dropped.
+
+`Transaction::query_sql` and `execute_sql` run a `CompiledQuery` on that same
+frame for operations the model API cannot express. These low-level methods do
+not apply model protection or CDC; ordinary records use collection operations.
+
 ```text
 ordinary operation                 explicit transaction
        |                                   |
