@@ -10,12 +10,12 @@ starts and controls runs from app code, and the control client exposes the
 token and topic broadcast helpers used by systems outside the app.
 
 This reference describes the current implementation. The revised
-[workflow coordination design](../proposals/2026-09-11-workflow-worker.md) keeps
-history and payloads in customer storage, processed by the customer's worker.
-A lightweight server handles registry, placement and high-level management;
-the worker owns durable execution and journal writes. Local development uses
-the shared engine; production cutover remains in progress. The provisioning
-instructions below still apply today.
+[manager and job queue design](../proposals/2026-09-11-workflow-worker.md) assigns
+cron, timers and durable job delivery to the workflow server. Workers consume
+jobs and keep execution history and payloads in creator storage. That scheduling
+and production cutover is not complete; the current local host uses the shared
+journal engine and its worker-side scheduling loop. The provisioning instructions
+below still apply today.
 
 ## Rust integration
 

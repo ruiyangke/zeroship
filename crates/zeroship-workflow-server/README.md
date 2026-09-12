@@ -1,15 +1,16 @@
 # zeroship-workflow-server
 
-A lightweight coordinator for worker registration, app placement, wake-up hints
-and high-level workflow management. Customer workers own execution, task leases,
-scheduling, history and payload storage. The server does not construct an
+A coordinator currently implementing worker registration, app placement,
+wake-up hints and high-level workflow management. Customer workers own execution,
+task leases, scheduling, history and payload storage. The server does not construct an
 execution engine or payload store. Its HTTP contract contains metadata operations
 and exposes no task-completion, input, signal-body or output-upload endpoint.
 
-The [ownership design](../../docs/proposals/2026-09-11-workflow-worker.md) describes
-the complete target. The metadata HTTP host and platform migration implement this
-boundary; composing the replacement engine into the customer worker and CLI is
-still in progress.
+The [manager and job queue design](../../docs/proposals/2026-09-11-workflow-worker.md)
+changes the target: this server will own cron, durable timers and a metadata job
+queue. Workers will pull jobs, execute against creator storage and acknowledge
+committed outcomes. That cutover is not implemented. The descriptions below
+document the current coordinator; they do not define the new role split.
 
 Control authorizes placement and queues typed pause, resume, cancellation or
 restart commands. Workers authenticate with their enrolled instance key, then
