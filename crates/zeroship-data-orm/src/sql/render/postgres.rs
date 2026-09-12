@@ -2,6 +2,7 @@
 //! Production collection compilation also lives in `sql::compile`; their shared
 //! compiler replacement is described in the ORM SQL compilation proposal.
 
+use crate::sql::compiler::{CompileError, CompiledQuery, ParameterSlot, SqlWriter};
 use crate::sql::ident::Ident;
 use crate::sql::literal::Literal;
 use crate::sql::path::FieldPath;
@@ -10,16 +11,18 @@ use crate::sql::predicate::{
     AggregateRef, CompareOp, MembershipOp, Operand, PatternOp, Predicate, TextPattern,
 };
 use crate::sql::projection::{ProjectedField, ProjectionSource, SearchScalarKind};
-use crate::sql::render::ValueFormat;
-use crate::sql::compiler::CompiledQuery;
-use crate::value::Value;
 use crate::sql::search::{Search, SearchCriterion, VectorMetric};
-use crate::sql::write::{Assignment, ColumnAssignment, Delete, Insert, Returning, Update, WriteValue};
+use crate::sql::write::BindBudget;
+use crate::sql::write::{
+    Assignment, ColumnAssignment, Delete, Insert, Returning, Update, WriteValue,
+};
+use crate::value::Value;
 use core::fmt;
 
 /// Why this backend refused a node.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RenderError {
+    Compilation(CompileError),
     /// The node is well-formed but this backend has no lowering for it.
     Unsupported {
         node: &'static str,
@@ -30,6 +33,7 @@ pub enum RenderError {
 impl fmt::Display for RenderError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Compilation(error) => std::fmt::Display::fmt(error, f),
             Self::Unsupported { node, reason } => {
                 write!(f, "the postgres backend cannot serve {node}: {reason}")
             }
@@ -38,6 +42,12 @@ impl fmt::Display for RenderError {
 }
 
 impl std::error::Error for RenderError {}
+
+impl From<CompileError> for RenderError {
+    fn from(error: CompileError) -> Self {
+        Self::Compilation(error)
+    }
+}
 
 /// Lower a plan.
 ///
@@ -60,7 +70,7 @@ pub fn render(plan: &DbPlan) -> Result<CompiledQuery, RenderError> {
 ///
 /// [`RenderError`] if the plan carries a node this backend does not serve.
 pub fn render_select(plan: &Select) -> Result<CompiledQuery, RenderError> {
-    let mut out = Writer::default();
+    let mut out = SqlWriter::new(BindBudget::POSTGRES.max());
     out.sql.push_str("SELECT ");
     if plan.is_distinct() {
         out.sql.push_str("DISTINCT ");
@@ -84,7 +94,7 @@ pub fn render_select(plan: &Select) -> Result<CompiledQuery, RenderError> {
     write_qualified_table(&mut out, plan.namespace(), plan.collection());
     if let Some(alias) = plan.alias() {
         out.sql.push_str(" AS ");
-        out.sql.push_str(&quote(alias));
+        out.identifier(alias.as_str());
     }
     for join in plan.joins() {
         out.sql.push_str(match join.kind {
@@ -93,7 +103,7 @@ pub fn render_select(plan: &Select) -> Result<CompiledQuery, RenderError> {
         });
         write_qualified_table(&mut out, plan.namespace(), &join.collection);
         out.sql.push_str(" AS ");
-        out.sql.push_str(&quote(&join.alias));
+        out.identifier(join.alias.as_str());
         out.sql.push_str(" ON ");
         write_predicate(&mut out, &join.on)?;
     }
@@ -139,11 +149,11 @@ pub fn render_select(plan: &Select) -> Result<CompiledQuery, RenderError> {
     // binding them means one prepared statement serves every page of a
     // paginated read instead of one per offset.
     out.sql.push_str(" LIMIT ");
-    out.write_param(Literal::Int(plan.limit().get()));
+    write_literal(&mut out, Literal::Int(plan.limit().get()))?;
     out.sql.push_str(" OFFSET ");
-    out.write_param(Literal::Int(plan.offset().get()));
+    write_literal(&mut out, Literal::Int(plan.offset().get()))?;
 
-    Ok(CompiledQuery::new(out.sql, out.params.into_iter().map(native_value).collect()))
+    Ok(out.finish())
 }
 
 /// Lower an insert of one or more rows.
@@ -165,7 +175,7 @@ pub fn render_select(plan: &Select) -> Result<CompiledQuery, RenderError> {
 /// [`RenderError`] if the `RETURNING` list carries a node this backend does not
 /// serve.
 pub fn render_insert(plan: &Insert) -> Result<CompiledQuery, RenderError> {
-    let mut out = Writer::default();
+    let mut out = SqlWriter::new(BindBudget::POSTGRES.max());
     out.sql.push_str("INSERT INTO ");
     write_qualified_table(&mut out, plan.namespace(), plan.collection());
     out.sql.push_str(" (");
@@ -185,13 +195,13 @@ pub fn render_insert(plan: &Insert) -> Result<CompiledQuery, RenderError> {
                 out.sql.push_str(", ");
             }
             first = false;
-            write_write_value(&mut out, value);
+            write_write_value(&mut out, value)?;
         }
         out.sql.push(')');
     }
 
     write_returning(&mut out, plan.returning())?;
-    Ok(CompiledQuery::new(out.sql, out.params.into_iter().map(native_value).collect()))
+    Ok(out.finish())
 }
 
 /// Lower a bounded update using the plan's declared row key.
@@ -200,11 +210,11 @@ pub fn render_insert(plan: &Insert) -> Result<CompiledQuery, RenderError> {
 /// # Errors
 /// Returns a render error for unsupported filter or projection expressions.
 pub fn render_update(plan: &Update) -> Result<CompiledQuery, RenderError> {
-    let mut out = Writer::default();
+    let mut out = SqlWriter::new(BindBudget::POSTGRES.max());
     out.sql.push_str("UPDATE ");
     write_qualified_table(&mut out, plan.namespace(), plan.collection());
     out.sql.push_str(" SET ");
-    write_assignments(&mut out, plan.assignments());
+    write_assignments(&mut out, plan.assignments())?;
     write_bounded_target(
         &mut out,
         plan.namespace(),
@@ -214,7 +224,7 @@ pub fn render_update(plan: &Update) -> Result<CompiledQuery, RenderError> {
         plan.row_key(),
     )?;
     write_returning(&mut out, plan.returning())?;
-    Ok(CompiledQuery::new(out.sql, out.params.into_iter().map(native_value).collect()))
+    Ok(out.finish())
 }
 
 /// Lower a bounded delete. Same bound, same lock, same argument as
@@ -225,7 +235,7 @@ pub fn render_update(plan: &Update) -> Result<CompiledQuery, RenderError> {
 /// [`RenderError`] if the filter or the `RETURNING` list carries a node this
 /// backend does not serve.
 pub fn render_delete(plan: &Delete) -> Result<CompiledQuery, RenderError> {
-    let mut out = Writer::default();
+    let mut out = SqlWriter::new(BindBudget::POSTGRES.max());
     out.sql.push_str("DELETE FROM ");
     write_qualified_table(&mut out, plan.namespace(), plan.collection());
     write_bounded_target(
@@ -237,7 +247,7 @@ pub fn render_delete(plan: &Delete) -> Result<CompiledQuery, RenderError> {
         plan.row_key(),
     )?;
     write_returning(&mut out, plan.returning())?;
-    Ok(CompiledQuery::new(out.sql, out.params.into_iter().map(native_value).collect()))
+    Ok(out.finish())
 }
 
 /// Lower a ranked search.
@@ -282,14 +292,14 @@ pub fn render_delete(plan: &Delete) -> Result<CompiledQuery, RenderError> {
 /// serves all three, and the one a backend cannot serve is refused by *that*
 /// backend - see [`crate::sql::search`].
 pub fn render_search(plan: &Search) -> Result<CompiledQuery, RenderError> {
-    let mut out = Writer::default();
+    let mut out = SqlWriter::new(BindBudget::POSTGRES.max());
 
     // The criterion's operands are bound FIRST, before the projection is
     // written, because the scalar in the select list is the first thing that
     // needs them and a slot must exist before it can be referenced. Binding
     // ahead of the walk also fixes the parameter order as a function of the
     // plan rather than of where in the projection the scalar happened to sort.
-    let slots = bind_criterion(&mut out, plan.criterion());
+    let slots = bind_criterion(&mut out, plan.criterion())?;
 
     out.sql.push_str("SELECT ");
     let mut first = true;
@@ -340,9 +350,9 @@ pub fn render_search(plan: &Search) -> Result<CompiledQuery, RenderError> {
     // one before: `build_vector_search` and `build_spatial_near` emit LIMIT and
     // nothing else. See the note in `crate::sql::search` on what that costs.
     out.sql.push_str(" LIMIT ");
-    out.write_param(Literal::Int(plan.limit().get()));
+    write_literal(&mut out, Literal::Int(plan.limit().get()))?;
 
-    Ok(CompiledQuery::new(out.sql, out.params.into_iter().map(native_value).collect()))
+    Ok(out.finish())
 }
 
 /// The parameter slots a criterion's operands occupy.
@@ -356,19 +366,22 @@ enum CriterionSlots {
     Vector {
         column: Ident,
         metric: VectorMetric,
-        query: usize,
+        query: ParameterSlot,
     },
     Geo {
         column: Ident,
-        longitude: usize,
-        latitude: usize,
-        radius: usize,
+        longitude: ParameterSlot,
+        latitude: ParameterSlot,
+        radius: ParameterSlot,
     },
 }
 
 /// Bind a criterion's operands, writing nothing.
-fn bind_criterion(out: &mut Writer, criterion: &SearchCriterion) -> CriterionSlots {
-    match criterion {
+fn bind_criterion(
+    out: &mut SqlWriter,
+    criterion: &SearchCriterion,
+) -> Result<CriterionSlots, RenderError> {
+    Ok(match criterion {
         SearchCriterion::Vector {
             column,
             query,
@@ -376,7 +389,7 @@ fn bind_criterion(out: &mut Writer, criterion: &SearchCriterion) -> CriterionSlo
         } => CriterionSlots::Vector {
             column: column.clone(),
             metric: *metric,
-            query: out.bind(Literal::Vector(query.clone())),
+            query: out.bind(native_value(Literal::Vector(query.clone())))?,
         },
         SearchCriterion::Geo {
             column,
@@ -388,15 +401,15 @@ fn bind_criterion(out: &mut Writer, criterion: &SearchCriterion) -> CriterionSlo
             // `(longitude, latitude)` - the inverse of the `{lat, lng}` order
             // every layer above uses. The accessors are spelled in full at both
             // ends so the transposition has to be written to happen.
-            longitude: out.bind(Literal::Float(point.longitude())),
-            latitude: out.bind(Literal::Float(point.latitude())),
-            radius: out.bind(Literal::Float(radius.get())),
+            longitude: out.bind(native_value(Literal::Float(point.longitude())))?,
+            latitude: out.bind(native_value(Literal::Float(point.latitude())))?,
+            radius: out.bind(native_value(Literal::Float(radius.get())))?,
         },
-    }
+    })
 }
 
 /// `ST_MakePoint($lng, $lat)::geography`.
-fn write_geography_point(out: &mut Writer, longitude: usize, latitude: usize) {
+fn write_geography_point(out: &mut SqlWriter, longitude: ParameterSlot, latitude: ParameterSlot) {
     out.sql.push_str("ST_MakePoint(");
     out.write_bound(longitude);
     out.sql.push_str(", ");
@@ -414,7 +427,7 @@ fn write_geography_point(out: &mut Writer, longitude: usize, latitude: usize) {
 /// and reading `v.distance`, which is not this expression with a different
 /// operator.
 fn write_distance_expr(
-    out: &mut Writer,
+    out: &mut SqlWriter,
     slots: &CriterionSlots,
     kind: SearchScalarKind,
 ) -> Result<(), RenderError> {
@@ -427,7 +440,7 @@ fn write_distance_expr(
             },
             SearchScalarKind::VectorDistance,
         ) => {
-            out.sql.push_str(&quote(column));
+            out.identifier(column.as_str());
             // The operator/opclass pairing is `pgvector`'s:
             // `<=>`/`vector_cosine_ops`, `<->`/`vector_l2_ops`,
             // `<#>`/`vector_ip_ops`. `<#>` returns the NEGATIVE inner product,
@@ -438,6 +451,7 @@ fn write_distance_expr(
                 VectorMetric::InnerProduct => " <#> ",
             });
             out.write_bound(*query);
+            out.sql.push_str("::vector");
             Ok(())
         }
         (
@@ -450,7 +464,7 @@ fn write_distance_expr(
             SearchScalarKind::GeoDistanceMetres,
         ) => {
             out.sql.push_str("ST_Distance(");
-            out.sql.push_str(&quote(column));
+            out.identifier(column.as_str());
             out.sql.push_str(", ");
             write_geography_point(out, *longitude, *latitude);
             out.sql.push(')');
@@ -468,7 +482,7 @@ fn write_distance_expr(
 }
 
 /// `ST_DWithin("col", ST_MakePoint($lng, $lat)::geography, $radius)`.
-fn write_within_radius(out: &mut Writer, slots: &CriterionSlots) {
+fn write_within_radius(out: &mut SqlWriter, slots: &CriterionSlots) {
     let CriterionSlots::Geo {
         column,
         longitude,
@@ -481,7 +495,7 @@ fn write_within_radius(out: &mut Writer, slots: &CriterionSlots) {
         return;
     };
     out.sql.push_str("ST_DWithin(");
-    out.sql.push_str(&quote(column));
+    out.identifier(column.as_str());
     out.sql.push_str(", ");
     write_geography_point(out, *longitude, *latitude);
     out.sql.push_str(", ");
@@ -497,134 +511,32 @@ fn native_value(value: Literal) -> Value {
         Literal::Text(value) => Value::String(value),
         Literal::Json(value) => Value::Json(value),
         Literal::Bytes(value) => Value::Bytes(value),
-        Literal::Vector(value) => Value::Array(value.elements().iter().map(|element| {
-            Value::try_from(element.get()).expect("finite vector component")
-        }).collect()),
+        Literal::Vector(value) => Value::Array(
+            value
+                .elements()
+                .iter()
+                .map(|element| Value::try_from(element.get()).expect("finite vector component"))
+                .collect(),
+        ),
     }
 }
 
-/// Statement text under construction, plus the parameters bound so far.
-///
-/// One structure for both so a placeholder number can never be written without
-/// the value it refers to having been pushed - the two are updated by the same
-/// call.
-#[derive(Debug, Default)]
-struct Writer {
-    sql: String,
-    params: Vec<Literal>,
-}
-
-impl Writer {
-    /// Bind a value and write its placeholder.
-    ///
-    /// The spelling comes from [`ValueFormat`] via the single exhaustive
-    /// dispatch in the parent module, so the *type* of the value decides it and
-    /// no call site gets to spell one itself.
-    fn write_param(&mut self, value: Literal) {
-        let slot = self.bind(value);
-        self.write_bound(slot);
+fn write_literal(out: &mut SqlWriter, value: Literal) -> Result<(), RenderError> {
+    let vector = matches!(value, Literal::Vector(_));
+    out.write_param(native_value(value))?;
+    if vector {
+        out.sql.push_str("::vector");
     }
-
-    /// Bind a value without rendering its placeholder. Reusing the slot avoids
-    /// sending duplicate search operands for projection and ordering.
-    fn bind(&mut self, value: Literal) -> usize {
-        self.params.push(value);
-        self.params.len()
-    }
-
-    /// Write the placeholder for a slot `Writer::bind` already took.
-    ///
-    /// The spelling is read back off the bound value, so it goes through the
-    /// same exhaustive dispatch as a first occurrence and a re-use cannot spell
-    /// a cast the first occurrence did not.
-    ///
-    /// # Panics
-    ///
-    /// Only if `slot` was never bound, which no caller here can arrange: every
-    /// slot comes from a `Writer::bind` on the same `Writer`, and the vector
-    /// only grows.
-    fn write_bound(&mut self, slot: usize) {
-        let value = self
-            .params
-            .get(slot - 1)
-            .expect("a slot is only ever written after bind() returned it");
-        let placeholder = crate::sql::render::placeholder_for(&PostgresValueFormat, slot, value);
-        self.sql.push_str(&placeholder);
-    }
-}
-
-/// PostgreSQL parameter spelling for native values. Bytes bind directly; vector
-/// parameters require a cast to the extension type.
-#[derive(Debug, Clone, Copy)]
-pub struct PostgresValueFormat;
-
-impl ValueFormat for PostgresValueFormat {
-    fn dialect_name(&self) -> &'static str {
-        "postgres"
-    }
-
-    fn bool_placeholder(&self, slot: usize) -> String {
-        format!("${slot}")
-    }
-
-    fn int_placeholder(&self, slot: usize) -> String {
-        format!("${slot}")
-    }
-
-    fn float_placeholder(&self, slot: usize) -> String {
-        format!("${slot}")
-    }
-
-    fn text_placeholder(&self, slot: usize) -> String {
-        format!("${slot}")
-    }
-
-    fn bytes_placeholder(&self, slot: usize) -> String {
-        format!("${slot}")
-    }
-
-    /// Cast the text-bound vector because its extension-defined type identity
-    /// varies by database.
-    fn vector_placeholder(&self, slot: usize) -> String {
-        format!("${slot}::vector")
-    }
-
-    fn current_timestamp_expr(&self) -> &'static str {
-        "NOW()"
-    }
-}
-
-/// Quote an identifier.
-///
-/// The doubling is defence in depth rather than the fence: [`Ident`] refuses
-/// every character outside `[A-Za-z0-9_]`, so a quote can never be present.
-/// `quoting_is_unreachable_because_the_charset_forbids_it` asserts that pairing
-/// holds, so if the charset is ever widened this stops being decorative.
-fn quote(ident: &Ident) -> String {
-    quote_raw(ident.as_str())
-}
-
-/// Escape an identifier already validated by the typed plan.
-fn quote_raw(name: &str) -> String {
-    let mut out = String::with_capacity(name.len() + 2);
-    out.push('"');
-    for ch in name.chars() {
-        if ch == '"' {
-            out.push('"');
-        }
-        out.push(ch);
-    }
-    out.push('"');
-    out
+    Ok(())
 }
 
 /// `"namespace"."collection"`, or `"collection"` when there is no namespace.
-fn write_qualified_table(out: &mut Writer, namespace: Option<&Ident>, collection: &Ident) {
+fn write_qualified_table(out: &mut SqlWriter, namespace: Option<&Ident>, collection: &Ident) {
     if let Some(namespace) = namespace {
-        out.sql.push_str(&quote(namespace));
+        out.identifier(namespace.as_str());
         out.sql.push('.');
     }
-    out.sql.push_str(&quote(collection));
+    out.identifier(collection.as_str());
 }
 
 /// A comma-separated list of quoted identifiers.
@@ -632,61 +544,65 @@ fn write_qualified_table(out: &mut Writer, namespace: Option<&Ident>, collection
 /// Taken as a slice rather than read off the plan so the determinism mutation
 /// arm can hand it an un-canonicalised list - the same reason
 /// `write_predicate` is reachable from the tests here.
-fn write_column_list(out: &mut Writer, columns: &[Ident]) {
+fn write_column_list(out: &mut SqlWriter, columns: &[Ident]) {
     let mut first = true;
     for column in columns {
         if !first {
             out.sql.push_str(", ");
         }
         first = false;
-        out.sql.push_str(&quote(column));
+        out.identifier(column.as_str());
     }
 }
 
 /// `$n`, or the `NULL` keyword.
-fn write_write_value(out: &mut Writer, value: &WriteValue) {
+fn write_write_value(out: &mut SqlWriter, value: &WriteValue) -> Result<(), RenderError> {
     match value {
-        WriteValue::Bind(literal) => out.write_param(literal.clone()),
+        WriteValue::Bind(literal) => write_literal(out, literal.clone())?,
         // The keyword, not a parameter. `Literal` has no null variant and must
         // not gain one; see `crate::sql::write`.
         WriteValue::Null => out.sql.push_str("NULL"),
     }
+    Ok(())
 }
 
 /// The `SET` list.
 ///
 /// Taken as a slice for the same reason as [`write_column_list`].
-fn write_assignments(out: &mut Writer, assignments: &[ColumnAssignment]) {
+fn write_assignments(
+    out: &mut SqlWriter,
+    assignments: &[ColumnAssignment],
+) -> Result<(), RenderError> {
     let mut first = true;
     for assignment in assignments {
         if !first {
             out.sql.push_str(", ");
         }
         first = false;
-        let column = quote(&assignment.column);
-        out.sql.push_str(&column);
+        let column = &assignment.column;
+        out.identifier(column.as_str());
         out.sql.push_str(" = ");
         match &assignment.value {
-            Assignment::Set(value) => write_write_value(out, value),
+            Assignment::Set(value) => write_write_value(out, value)?,
             Assignment::Arithmetic(arithmetic) => {
                 // The left operand is the column being assigned. It is written
                 // from the same `Ident`, not from a second one a caller could
                 // supply, which is what keeps `a = b + 1` unrepresentable.
-                out.sql.push_str(&column);
+                out.identifier(column.as_str());
                 out.sql.push(' ');
                 out.sql.push_str(arithmetic.op().as_sql());
                 out.sql.push(' ');
                 // No `::numeric` cast: the shipped lowering needs one
                 // (`query.rs:3816`) because its parameter is a `String`. A typed
                 // integer or float parameter has nothing to cast.
-                out.write_param(arithmetic.operand().clone());
+                write_literal(out, arithmetic.operand().clone())?;
             }
             Assignment::CurrentTimestamp => {
-                out.sql
-                    .push_str(PostgresValueFormat.current_timestamp_expr());
+                out.sql.push_str("NOW()");
             }
         }
     }
+    Ok(())
 }
 
 /// Restrict a write to the declared key values selected under the row limit.
@@ -695,18 +611,18 @@ fn write_assignments(out: &mut Writer, assignments: &[ColumnAssignment]) {
 /// unrepresentable: the filter may simplify to `TRUE` and vanish, but the bound
 /// and its clause cannot.
 fn write_bounded_target(
-    out: &mut Writer,
+    out: &mut SqlWriter,
     namespace: Option<&Ident>,
     collection: &Ident,
     filter: &Predicate,
     limit: RowLimit,
     row_key: &Ident,
 ) -> Result<(), RenderError> {
-    let identity = quote(row_key);
+    let identity = row_key.as_str();
     out.sql.push_str(" WHERE ");
-    out.sql.push_str(&identity);
+    out.identifier(identity);
     out.sql.push_str(" IN (SELECT ");
-    out.sql.push_str(&identity);
+    out.identifier(identity);
     out.sql.push_str(" FROM ");
     write_qualified_table(out, namespace, collection);
     if filter != &Predicate::always() {
@@ -716,7 +632,7 @@ fn write_bounded_target(
     // Bound, then lock. `LIMIT` before a locking clause is the order
     // PostgreSQL's SELECT grammar requires.
     out.sql.push_str(" LIMIT ");
-    out.write_param(Literal::Int(limit.get()));
+    write_literal(out, Literal::Int(limit.get()))?;
     out.sql.push_str(" FOR UPDATE)");
     Ok(())
 }
@@ -725,7 +641,7 @@ fn write_bounded_target(
 ///
 /// There is no arm that emits `*`: the only two shapes a [`Returning`] has are
 /// an explicit [`crate::sql::Projection`] and absence.
-fn write_returning(out: &mut Writer, returning: &Returning) -> Result<(), RenderError> {
+fn write_returning(out: &mut SqlWriter, returning: &Returning) -> Result<(), RenderError> {
     let Some(projection) = returning.projection() else {
         return Ok(());
     };
@@ -745,17 +661,17 @@ fn write_returning(out: &mut Writer, returning: &Returning) -> Result<(), Render
 /// ranking scalar in the select list re-uses them instead of re-binding. It is
 /// `None` for every family that has no criterion.
 fn write_projected_field(
-    out: &mut Writer,
+    out: &mut SqlWriter,
     field: &ProjectedField,
     slots: Option<&CriterionSlots>,
 ) -> Result<(), RenderError> {
     match &field.source {
-        ProjectionSource::Column(column) => out.sql.push_str(&quote(column)),
+        ProjectionSource::Column(column) => out.identifier(column.as_str()),
         ProjectionSource::Path(path) => write_path(out, path)?,
         // The logical name is deliberately NOT read: the physical column is
         // selected and aliased back to it, so `row[col]` holds the stored form
         // and there is no second key for a caller to find.
-        ProjectionSource::Stored { physical } => out.sql.push_str(&quote(physical)),
+        ProjectionSource::Stored { physical } => out.identifier(physical.as_str()),
         ProjectionSource::Aggregate(aggregate) => write_aggregate(out, aggregate)?,
         ProjectionSource::SearchScalar(kind) => {
             let Some(slots) = slots else {
@@ -773,11 +689,11 @@ fn write_projected_field(
     // happened to match, which is one more thing that has to be identical for
     // two equivalent plans to share a prepared statement.
     out.sql.push_str(" AS ");
-    out.sql.push_str(&quote(&field.alias));
+    out.identifier(field.alias.as_str());
     Ok(())
 }
 
-fn write_aggregate(out: &mut Writer, aggregate: &AggregateRef) -> Result<(), RenderError> {
+fn write_aggregate(out: &mut SqlWriter, aggregate: &AggregateRef) -> Result<(), RenderError> {
     out.sql.push_str(aggregate.func().as_sql());
     out.sql.push('(');
     if aggregate.is_distinct() {
@@ -791,7 +707,7 @@ fn write_aggregate(out: &mut Writer, aggregate: &AggregateRef) -> Result<(), Ren
     Ok(())
 }
 
-fn write_path(out: &mut Writer, path: &FieldPath) -> Result<(), RenderError> {
+fn write_path(out: &mut SqlWriter, path: &FieldPath) -> Result<(), RenderError> {
     if path.is_nested() {
         // The shape is pinned by SC-3's shared grammar; the lowering is not
         // written. See `crate::sql::path` for why guessing at it would mean settling
@@ -804,14 +720,14 @@ fn write_path(out: &mut Writer, path: &FieldPath) -> Result<(), RenderError> {
         });
     }
     if let Some(alias) = path.source() {
-        out.sql.push_str(&quote(alias));
+        out.identifier(alias.as_str());
         out.sql.push('.');
     }
-    out.sql.push_str(&quote(path.root()));
+    out.identifier(path.root().as_str());
     Ok(())
 }
 
-fn write_order_key(out: &mut Writer, key: &OrderKey) -> Result<(), RenderError> {
+fn write_order_key(out: &mut SqlWriter, key: &OrderKey) -> Result<(), RenderError> {
     write_path(out, &key.path)?;
     out.sql.push_str(match key.direction {
         Direction::Ascending => " ASC",
@@ -828,11 +744,11 @@ fn write_order_key(out: &mut Writer, key: &OrderKey) -> Result<(), RenderError> 
     Ok(())
 }
 
-fn write_operand(out: &mut Writer, operand: &Operand) -> Result<(), RenderError> {
+fn write_operand(out: &mut SqlWriter, operand: &Operand) -> Result<(), RenderError> {
     match operand {
         Operand::Path(path) => write_path(out, path),
         Operand::Lit(value) => {
-            out.write_param(value.clone());
+            write_literal(out, value.clone())?;
             Ok(())
         }
         Operand::Aggregate(aggregate) => {
@@ -842,14 +758,14 @@ fn write_operand(out: &mut Writer, operand: &Operand) -> Result<(), RenderError>
     }
 }
 
-fn write_pattern_operand(out: &mut Writer, pattern: &TextPattern) {
+fn write_pattern_operand(out: &mut SqlWriter, pattern: &TextPattern) -> Result<(), RenderError> {
     // A pattern is a value. It is bound, never interpolated, so a caller's
     // wildcards stay data and a caller's quote character is not a syntax
     // question.
-    out.write_param(Literal::Text(pattern.as_str().to_string()));
+    write_literal(out, Literal::Text(pattern.as_str().to_string()))
 }
 
-fn write_predicate(out: &mut Writer, predicate: &Predicate) -> Result<(), RenderError> {
+fn write_predicate(out: &mut SqlWriter, predicate: &Predicate) -> Result<(), RenderError> {
     match predicate {
         Predicate::Const(true) => {
             out.sql.push_str("TRUE");
@@ -891,7 +807,7 @@ fn write_predicate(out: &mut Writer, predicate: &Predicate) -> Result<(), Render
                     out.sql.push_str(", ");
                 }
                 first = false;
-                out.write_param(value.clone());
+                write_literal(out, value.clone())?;
             }
             out.sql.push(')');
             Ok(())
@@ -909,10 +825,10 @@ fn write_predicate(out: &mut Writer, predicate: &Predicate) -> Result<(), Render
                 PatternOp::ILike => " ILIKE ",
                 PatternOp::NotILike => " NOT ILIKE ",
             });
-            write_pattern_operand(out, pattern);
+            write_pattern_operand(out, pattern)?;
             if let Some(escape) = escape {
                 out.sql.push_str(" ESCAPE ");
-                out.write_param(Literal::Text(escape.get().to_string()));
+                write_literal(out, Literal::Text(escape.get().to_string()))?;
             }
             Ok(())
         }
@@ -926,7 +842,7 @@ fn write_predicate(out: &mut Writer, predicate: &Predicate) -> Result<(), Render
 }
 
 fn write_connective(
-    out: &mut Writer,
+    out: &mut SqlWriter,
     children: &[Predicate],
     joiner: &str,
 ) -> Result<(), RenderError> {
@@ -961,21 +877,21 @@ mod tests {
     }
 
     fn render_raw(predicate: &Predicate) -> String {
-        let mut out = Writer::default();
+        let mut out = SqlWriter::new(BindBudget::POSTGRES.max());
         write_predicate(&mut out, predicate).expect("renderable");
         out.sql
     }
 
     fn render_columns_raw(columns: &[Ident]) -> String {
-        let mut out = Writer::default();
+        let mut out = SqlWriter::new(BindBudget::POSTGRES.max());
         write_column_list(&mut out, columns);
         out.sql
     }
 
-    fn render_assignments_raw(assignments: &[ColumnAssignment]) -> (String, Vec<Literal>) {
-        let mut out = Writer::default();
-        write_assignments(&mut out, assignments);
-        (out.sql, out.params)
+    fn render_assignments_raw(assignments: &[ColumnAssignment]) -> (String, Vec<Value>) {
+        let mut out = SqlWriter::new(BindBudget::POSTGRES.max());
+        write_assignments(&mut out, assignments).unwrap();
+        out.finish().into_parts()
     }
 
     /// THE MUTATION ARM.
@@ -1099,6 +1015,8 @@ mod tests {
             assert!(Ident::parse_as("a'b", role).is_err());
             assert!(Ident::parse_as("a b", role).is_err());
         }
-        assert_eq!(quote(&column("users")), "\"users\"");
+        let mut writer = SqlWriter::new(0);
+        writer.identifier(column("users").as_str());
+        assert_eq!(writer.finish().sql(), "\"users\"");
     }
 }

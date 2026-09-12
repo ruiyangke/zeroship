@@ -200,17 +200,7 @@ pub enum Assignment {
     Set(WriteValue),
     /// `col = col <op> $n`.
     Arithmetic(Arithmetic),
-    /// `col = NOW()` - **the server's** clock, not the worker's.
-    ///
-    /// A named node rather than a general function call, and it earns its place
-    /// twice over. `query.rs:3910-3917` stamps `updated_at` on every `UPDATE`
-    /// through `renderer(dialect).current_timestamp_expr()`, so the shape is
-    /// mandatory; and the value must come from the database, because a worker
-    /// with a skewed clock would otherwise write a timestamp that disagrees with
-    /// every other worker's.
-    ///
-    /// The spelling belongs to the backend ([`crate::sql::render::ValueFormat`]) -
-    /// `NOW()` on `PostgreSQL`, `CURRENT_TIMESTAMP` on `SQLite`.
+    /// Assign the database clock using the selected compiler's expression.
     CurrentTimestamp,
 }
 
