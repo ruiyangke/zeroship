@@ -15,6 +15,15 @@ pub fn validate_collection_identity(schema: &crate::value::Value) -> Result<(), 
     if id.get("required").and_then(Value::as_bool) != Some(true) {
         return Err("collection 'id' must be required and non-null");
     }
+    if !matches!(
+        id.get("type").and_then(Value::as_str),
+        Some("string" | "text" | "id" | "integer" | "int" | "bigint" | "bigInt")
+    ) {
+        return Err("collection 'id' must use text or integer storage");
+    }
+    if is_encrypted(id) || effective_mask(id).is_some() {
+        return Err("collection 'id' cannot be encrypted or masked");
+    }
     if id
         .get("assign")
         .is_some_and(|assignment| assignment.get("on").and_then(Value::as_str) != Some("insert"))

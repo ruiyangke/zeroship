@@ -21,6 +21,9 @@ test("invalid identities fail before collections are published", () => {
     { id: { type: "string" as const, primaryKey: true } },
     { id: { ...id, required: false } },
     { id, tenant: id },
+    { id: { type: "json", required: true, primaryKey: true } },
+    { id: { ...id, encrypted: true } },
+    { id: { ...id, mask: { kind: "full", classification: "pii" } } },
     { id: { ...id, assign: { by: "actor", on: "write" } } },
     { id: { ...id, assign: { by: "actor", on: "delete" } } },
   ];
