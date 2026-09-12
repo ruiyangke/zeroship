@@ -206,7 +206,8 @@ impl WorkflowService {
         let mut tx = self.begin().await?;
         let now = tx.now().await?;
         let schedules = tx.table("schedules");
-        let due=tx.query(&format!("SELECT app_id,id FROM {schedules} WHERE next_at <= $1 ORDER BY last_checked_at,next_at,app_id,id LIMIT 128"), &[now.into()]).await?;
+        let (scope, app_ids) = tx.host_app_scope()?;
+        let due=tx.query(&format!("SELECT app_id,id FROM {schedules} WHERE app_id IN ({scope}) AND next_at <= $2 ORDER BY last_checked_at,next_at,app_id,id LIMIT 128"), &[app_ids,now.into()]).await?;
         tx.commit().await?;
         let mut fired = 0;
         for candidate in due {

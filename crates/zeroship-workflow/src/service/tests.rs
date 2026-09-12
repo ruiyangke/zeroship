@@ -23,6 +23,7 @@ mod payloads;
 mod output_reads;
 mod output_writes;
 mod policy;
+mod background_scope;
 mod runner;
 mod schema_binding;
 mod snapshots;

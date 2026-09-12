@@ -25,7 +25,8 @@ impl WorkflowService {
             let tasks = tx.table("tasks");
             let apps = tx.table("app_state");
             let deploys = tx.table("deploys");
-            let candidates = tx.query(&format!("WITH candidates AS (SELECT app_id,id,due_at,ROW_NUMBER() OVER (PARTITION BY app_id ORDER BY due_at,id) AS position FROM {runs} r WHERE due_at <= $1 AND (r.task_id IS NOT NULL OR r.control <> 'none' OR EXISTS (SELECT 1 FROM {deploys} d WHERE d.app_id=r.app_id AND d.id=r.deploy_id AND d.state='available'))) SELECT c.app_id,c.id FROM candidates c JOIN {apps} a ON a.app_id=c.app_id WHERE c.position=1 ORDER BY a.last_polled_at,c.due_at,c.app_id LIMIT $2"), &[now.into(),remaining.into()]).await?;
+            let (scope, app_ids) = tx.host_app_scope()?;
+            let candidates = tx.query(&format!("WITH candidates AS (SELECT app_id,id,due_at,ROW_NUMBER() OVER (PARTITION BY app_id ORDER BY due_at,id) AS position FROM {runs} r WHERE r.app_id IN ({scope}) AND due_at <= $2 AND (r.task_id IS NOT NULL OR r.control <> 'none' OR EXISTS (SELECT 1 FROM {deploys} d WHERE d.app_id=r.app_id AND d.id=r.deploy_id AND d.state='available'))) SELECT c.app_id,c.id FROM candidates c JOIN {apps} a ON a.app_id=c.app_id WHERE c.position=1 ORDER BY a.last_polled_at,c.due_at,c.app_id LIMIT $3"), &[app_ids,now.into(),remaining.into()]).await?;
             tx.commit().await?;
             if candidates.is_empty() {
                 return Ok(None);
