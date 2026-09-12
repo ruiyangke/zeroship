@@ -111,9 +111,11 @@ in ordinary `cargo test -p zeroship-migrate-node`; missing prerequisites fail
 instead of skipping database verification. Their private fixture is in
 `crates/zeroship-migrate-node/tests/platform_corpus/fixture.rs`. Each database test
 owns its container and waits for its Rust connection to close before teardown.
-The tests cover
-the host CLI and database contract; it does not build the deployment image or
-invoke the operator's shell wrapper.
+The tests cover the host CLI and database contract, including organization
+authority and user-erasure foreign keys. The erasure checks inspect the migrated
+catalog and compare rejection controls with actual PostgreSQL deletes.
+The suite does not build the deployment image or invoke the operator's shell
+wrapper.
 
 The loader picks the file up by its timestamp order - no master file to edit.
 While the platform remains pre-launch, the repository `AGENTS.md` policy is the

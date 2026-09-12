@@ -319,13 +319,6 @@ jobs:
         run: tests/deleted_app_write_fence_gate.sh
       - name: A credential is minted only from a validating read of its row
         run: tests/mint_reads_row_gate.sh
-      # Account erasure has to stay REACHABLE: a users foreign key that blocks
-      # the delete, or an auth statement naming a table zeroship_auth holds no
-      # grant on, both surface only when a real due user is reaped under the
-      # real role - which no unit test does, because they all connect as
-      # postgres.
-      - name: A due user can actually be erased
-        run: tests/user_erasure_reachability_gate.sh
       # A control-plane fixture assembled an AuthConfig in Rust and set every
       # secret except the refresh keyring, so its token exchange answered
       # "refresh hash key is not configured" and the one end-to-end proof that
