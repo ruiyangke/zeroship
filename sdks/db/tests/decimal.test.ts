@@ -66,5 +66,12 @@ const rangeFilter: Filter<typeof fields> = { amount: { $gt: amount } };
 const sort: SortSpec<typeof fields> = { amount: 1 };
 void [lossyInput, rangeFilter, sort];
 
+const exactOnlyFields = {
+  amount: t.numeric({ precision: 30, scale: 2 }).required(),
+};
+// @ts-expect-error a schema with no sortable fields cannot accept an arbitrary sort key
+const exactOnlySort: SortSpec<typeof exactOnlyFields> = { missing: 1 };
+void exactOnlySort;
+
 const typed: Decimal = amount;
 void typed;
