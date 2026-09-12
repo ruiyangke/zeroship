@@ -340,18 +340,11 @@ pub fn zs_platform_private<'s>(scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s
 ///
 /// ## Security (P9 §8)
 ///
-/// The `DbPlatform` handle lives in a `v8::Private` slot — invisible to
-/// `Object.keys` / `getOwnPropertyNames` / `getOwnPropertySymbols` /
-/// `for..in` / JSON, and unreadable from JS (a `v8::Private` is NOT a
-/// `v8::Symbol` and cannot be used as a property key). The ONLY JS path
-/// to the handle is this resolver. `runtime-entry` invokes it once
-/// during module evaluation, threads the handle into `installSchema`,
-/// and then **deletes `globalThis.__zsDbPlatform`** — so by the time any
-/// creator `fetch` / `rpc` handler runs, the resolver is gone. Creator
-/// code cannot import `@zeroship/bootstrap` (an existing invariant), so
-/// it has no other carrier. `env.db.__platform` (string access) is
-/// actively refused by a getter trap on the `Db` class
-/// (`platform_internal_only`).
+/// The `DbPlatform` handle lives in a `v8::Private` slot and is unreadable from
+/// creator JavaScript. The internal bridge captures this resolver and deletes
+/// the global before the creator module evaluates. It exposes only the mask
+/// policy installation operation to the bootstrap module. Dev uses the same
+/// ordering before its module runner loads creator code.
 fn zs_db_platform_callback(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,
@@ -390,11 +383,8 @@ pub(crate) const DB_INIT_JS: &str =
 
 /// Internal capability bridge module source.
 ///
-/// This module is imported before `./__user__.js`, so it captures the native
-/// kind callbacks and deletes their string-named globals before creator code
-/// can observe or retain them. The import specifier is generated once per
-/// process (see [`BOOTSTRAP_KIND_BRIDGE_SPEC`]) and is not part of the creator
-/// module graph contract.
+/// This module captures native capabilities before `./__user__.js` evaluates.
+/// Creator code receives neither the callbacks nor the `DbPlatform` handle.
 const KIND_BRIDGE_JS: &str = r##"
 import { AsyncLocalStorage } from "node:async_hooks";
 
@@ -406,10 +396,27 @@ const ZS_WORKFLOW_BODY_TIMER_ERROR =
 const enterKind = globalThis.__zsEnterKind;
 const exitKind = globalThis.__zsExitKind;
 const zsWorkflowRealFetch = globalThis.fetch;
+const zsDbPlatformResolver = globalThis.__zsDbPlatform;
+const zsEnvDb = typeof globalThis.__zs_env === "function"
+    ? globalThis.__zs_env()?.db
+    : undefined;
+const zsDbPlatform = typeof zsDbPlatformResolver === "function" && zsEnvDb != null
+    ? zsDbPlatformResolver(zsEnvDb)
+    : undefined;
 
 try { delete globalThis.__zsEnterKind; } catch (_e) {}
 try { delete globalThis.__zsExitKind; } catch (_e) {}
 try { delete globalThis.__zsClearKind; } catch (_e) {}
+if (__zsHideDbPlatform) {
+    try { delete globalThis.__zsDbPlatform; } catch (_e) {}
+}
+
+export async function __zsInstallDbMaskPolicy(policy) {
+    const setter = zsDbPlatform?.setMaskPolicy;
+    if (typeof setter === "function") {
+        await setter.call(zsDbPlatform, policy);
+    }
+}
 
 class ZsNondeterministicError extends Error {
     constructor(message = "workflow replay is nondeterministic") {
@@ -1592,8 +1599,8 @@ pub(crate) static BOOTSTRAP_KIND_BRIDGE_SPEC: LazyLock<String> =
 /// The template is split into prefix (imports the internal kind bridge before
 /// `./__user__.js`) and main so the init script runs AFTER `user` is bound but
 /// BEFORE the `default.fetch` / `default.rpc` resolution. Order matters:
-///   1. The internal kind bridge evaluates before creator code and removes the
-///      forgeable string-named kind callbacks from `globalThis`.
+///   1. The internal bridge evaluates before creator code, removes forgeable
+///      globals, and retains only the exact database policy operation.
 ///   2. [`DB_INIT_JS`] runs next. Its top-level await imports the framework
 ///      installer through V8's microtask checkpoint and plants typed Collection
 ///      wrappers on `env.db`. Native plugins already received the validated
@@ -1615,7 +1622,7 @@ pub(crate) static BOOTSTRAP_JS: LazyLock<String> = LazyLock::new(|| {
 fn bootstrap_prefix_js() -> String {
     format!(
         r#"
-import {{ __zsDispatchRpc, __zsWorkflowDispatch }} from "./{}";
+import {{ __zsDispatchRpc, __zsInstallDbMaskPolicy, __zsWorkflowDispatch }} from "./{}";
 import * as user from "./__user__.js";
 
 "#,
@@ -2395,6 +2402,7 @@ fn wrap_with_bootstrap(
     }
 
     let mut out: Vec<ModuleEntry> = Vec::with_capacity(modules.len() + 3);
+    let allow_deferred_schema_install = crate::transport::ssrf::dev_mode_enabled();
 
     // entry 0: bootstrap becomes the new entrypoint under "index.js".
     out.push(ModuleEntry {
@@ -2403,17 +2411,17 @@ fn wrap_with_bootstrap(
         // an app-controlled global must not suppress production policy sealing.
         source: format!(
             "const __zsAllowDeferredSchemaInstall = {};\n{}",
-            crate::transport::ssrf::dev_mode_enabled(),
-            &*BOOTSTRAP_JS,
+            allow_deferred_schema_install, &*BOOTSTRAP_JS,
         ),
     });
 
-    // entry 1: internal kind bridge. The bootstrap imports this before
-    // "__user__.js" so it can remove forgeable kind globals before creator
-    // code evaluates.
+    // entry 1: capture native capabilities before creator code evaluates.
     out.push(ModuleEntry {
         specifier: BOOTSTRAP_KIND_BRIDGE_SPEC.clone(),
-        source: KIND_BRIDGE_JS.into(),
+        source: format!(
+            "const __zsHideDbPlatform = {};\n{}",
+            !allow_deferred_schema_install, KIND_BRIDGE_JS,
+        ),
     });
 
     // entry 2: user's original entry, renamed to "__user__.js". Its own

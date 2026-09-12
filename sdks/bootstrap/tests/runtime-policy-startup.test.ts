@@ -23,11 +23,23 @@ function fixture() {
   const db = {};
   global.__zs_env = () => ({ db });
   global.__zsDbPlatform = () => ({ setMaskPolicy: async (value: unknown) => { installed.push(value); } });
+  const platformResolver = global.__zsDbPlatform as (
+    db: unknown,
+  ) => { setMaskPolicy?: (value: unknown) => Promise<void> };
   const installSchema = () => ({ collections: {} });
   const load = async (name: string) => name === "@zeroship/db/internal"
     ? { _flushPendingMaskPolicy } : { installSchema };
+  const installDbMaskPolicy = async (policy: Record<string, readonly string[]>) => {
+    const platform = platformResolver(db);
+    await platform?.setMaskPolicy?.(policy);
+  };
   return { installed, db, installSchema, wrapper: (devMode = false) =>
-    new AsyncFunction("load", "__zsAllowDeferredSchemaInstall", source)(load, devMode) };
+    new AsyncFunction(
+      "load",
+      "__zsAllowDeferredSchemaInstall",
+      "__zsInstallDbMaskPolicy",
+      source,
+    )(load, devMode, installDbMaskPolicy) };
 }
 
 test("the runtime wrapper leaves lazy app policy initialization to devEntry", async () => {
