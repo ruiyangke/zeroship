@@ -29,6 +29,9 @@ use zeroship_core::device_grant::{
 
 use crate::common;
 
+#[path = "authz_guard_oauth/organizations.rs"]
+mod organization_routes;
+
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
 const PLATFORM_ISSUER: &str = "https://auth.zeroship.test";
 const PLATFORM_OP_ISSUER: &str = "https://auth.zeroship.test/oauth2";

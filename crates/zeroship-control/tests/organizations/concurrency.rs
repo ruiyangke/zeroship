@@ -37,8 +37,9 @@ async fn concurrent_owner_departures_preserve_the_last_owner() {
     .await
     .unwrap();
 
-    let (queued, (first_result, second_result)) =
-        compio::time::timeout(Duration::from_secs(60), async {
+    let (queued, (first_result, second_result)) = compio::time::timeout(
+        Duration::from_secs(60),
+        Box::pin(async {
             futures::join!(
                 async {
                     let queued = wait_for_departures(&fx.pg, blocker_pid).await;
@@ -52,9 +53,10 @@ async fn concurrent_owner_departures_preserve_the_last_owner() {
                     )
                 },
             )
-        })
-        .await
-        .expect("concurrent departures must finish after the fixture releases its lock");
+        }),
+    )
+    .await
+    .expect("concurrent departures must finish after the fixture releases its lock");
     let owners = org.owner_count(&fx).await;
     let first_role = org.role_of(&fx, org.owner).await;
     let second_role = org.role_of(&fx, second).await;
