@@ -13,7 +13,6 @@ quote = { workspace = true }
 syn = { workspace = true }
 serde_json = { workspace = true }
 proc-macro-crate = "3.5"
-zeroship-data-sql = { workspace = true }
 
 [lints]
 workspace = true

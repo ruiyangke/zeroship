@@ -111,38 +111,43 @@ mod tests {
     use super::*;
     use zeroship_data_sql::value;
 
+    fn identity_corpus() -> serde_json::Value {
+        serde_json::from_str(include_str!(
+            "../../../tests/fixtures/data/collection-identity.json"
+        ))
+        .unwrap()
+    }
+
     #[test]
     fn invalid_identity_cannot_replace_installed_collections() {
         crate::tests::fixtures::reset_engine();
         let binding = DbBinding::cold_start("app_identity_contract");
         let valid = value!({"id":{"type":"string", "required":true, "primaryKey":true}});
         install_collections(&binding, vec![("entries".into(), valid.clone())]).unwrap();
-        for invalid in [
-            value!({}),
-            value!({"key":{"type":"string", "required":true, "primaryKey":true}}),
-            value!({"id":{"type":"string", "required":true}}),
-            value!({"id":{"type":"string", "primaryKey":true}}),
-            value!({"id":{"type":"string", "required":false, "primaryKey":true}}),
-            value!({
-                "id":{"type":"string", "required":true, "primaryKey":true},
-                "tenant":{"type":"string", "required":true, "primaryKey":true}
-            }),
-        ] {
+        let corpus = identity_corpus();
+        let cases = corpus["invalid"].as_object().unwrap();
+        assert!(!cases.is_empty(), "invalid fixtures must not be empty");
+        for (name, case) in cases {
             let err = install_collections(
                 &binding,
                 vec![
                     ("replacement".into(), valid.clone()),
-                    ("invalid".into(), invalid),
+                    ("invalid".into(), Value::from(case["fields"].clone())),
                 ],
             )
             .unwrap_err();
-            assert!(matches!(
-                err,
+            match err {
                 DbError::ValidationFailed {
                     code: "invalid_collection_identity",
+                    message,
                     ..
-                }
-            ));
+                } => assert_eq!(
+                    message,
+                    format!("invalid: {}", case["error"].as_str().unwrap()),
+                    "{name}"
+                ),
+                error => panic!("{name}: expected invalid_collection_identity, got {error:?}"),
+            }
             assert_eq!(
                 collection_schema(&binding, "entries").unwrap().as_ref(),
                 &valid
@@ -153,19 +158,20 @@ mod tests {
     }
 
     #[test]
-    fn declared_id_does_not_require_or_invent_a_generator() {
+    fn valid_identity_descriptors_are_installed_unchanged() {
         crate::tests::fixtures::reset_engine();
         let binding = DbBinding::cold_start("app_explicit_identity");
-        for id in [
-            value!({"type":"string", "required":true, "primaryKey":true}),
-            value!({"type":"string", "required":true, "primaryKey":true,
-                "assign":{"by":"typedId", "on":"insert"}}),
-        ] {
-            let fields = value!({"id":id, "slug":{"type":"string", "unique":true}});
-            install_collections(&binding, vec![("entries".into(), fields.clone())]).unwrap();
+        let corpus = identity_corpus();
+        let cases = corpus["valid"].as_object().unwrap();
+        assert!(!cases.is_empty(), "valid fixtures must not be empty");
+        for (name, case) in cases {
+            let fields = Value::from(case["fields"].clone());
+            install_collections(&binding, vec![("entries".into(), fields.clone())])
+                .unwrap_or_else(|error| panic!("{name}: {error}"));
             assert_eq!(
                 collection_schema(&binding, "entries").unwrap().as_ref(),
-                &fields
+                &fields,
+                "{name}"
             );
         }
     }

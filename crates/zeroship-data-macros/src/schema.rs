@@ -82,6 +82,24 @@ fn flag(def: &Value, name: &str, fallback: bool, span: proc_macro2::Span) -> syn
     }
 }
 
+fn validate_identity(fields: &serde_json::Map<String, Value>) -> Result<(), &'static str> {
+    let id = fields
+        .get("id")
+        .ok_or("collection requires an 'id' primary key")?;
+    if id.get("primaryKey").and_then(Value::as_bool) != Some(true) {
+        return Err("collection 'id' must be declared as its primary key");
+    }
+    if id.get("required").and_then(Value::as_bool) != Some(true) {
+        return Err("collection 'id' must be required and non-null");
+    }
+    if fields.iter().any(|(name, def)| {
+        name != "id" && def.get("primaryKey").and_then(Value::as_bool) == Some(true)
+    }) {
+        return Err("collection 'id' must be its sole primary key");
+    }
+    Ok(())
+}
+
 fn generate(
     descriptor: &Value,
     orm: &syn::Path,
@@ -111,10 +129,8 @@ fn generate(
                 syn::Error::new(span, format!("collection '{name}' has no field map"))
             })?;
         let schema = serde_json::to_string(fields).map_err(|error| syn::Error::new(span, error))?;
-        zeroship_data_sql::descriptors::validate_collection_identity(
-            &zeroship_data_sql::value::Value::from(Value::Object(fields.clone())),
-        )
-        .map_err(|message| syn::Error::new(span, format!("{name}: {message}")))?;
+        validate_identity(fields)
+            .map_err(|message| syn::Error::new(span, format!("{name}: {message}")))?;
         let mut columns = Vec::new();
         let mut constants = Vec::new();
         let mut required = Vec::new();
@@ -224,4 +240,40 @@ fn logical_type(def: &Value, orm: &syn::Path, span: proc_macro2::Span) -> syn::R
     } else {
         quote!(#orm::sql_types::Nullable<#ty>)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn schema_generation_obeys_shared_identity_contract() {
+        let corpus: Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/data/collection-identity.json"
+        ))
+        .unwrap();
+        let orm = syn::parse_quote!(::zeroship_data_orm::orm);
+        for group in ["valid", "invalid"] {
+            let cases = corpus[group].as_object().unwrap();
+            assert!(!cases.is_empty(), "{group} fixtures must not be empty");
+            for (name, case) in cases {
+                let descriptor = serde_json::json!({
+                    "version": 2,
+                    "collections": {"entries": {"fields": case["fields"]}}
+                });
+                let result = generate(&descriptor, &orm, proc_macro2::Span::call_site());
+                if group == "valid" {
+                    assert!(!result
+                        .unwrap_or_else(|error| panic!("{name}: {error}"))
+                        .is_empty());
+                } else {
+                    assert_eq!(
+                        result.expect_err(name).to_string(),
+                        format!("entries: {}", case["error"].as_str().unwrap()),
+                        "{name}"
+                    );
+                }
+            }
+        }
+    }
 }
