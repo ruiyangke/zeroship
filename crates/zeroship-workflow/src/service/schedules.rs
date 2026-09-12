@@ -1,5 +1,6 @@
 use super::{
-    app::{decode, encode, insert_root_run, lock_app},
+    app::{decode, encode, insert_root_run, live_runs, lock_app},
+    models,
     store::Transaction,
     AppPolicy, DeployRegistration, WorkflowService,
 };
@@ -8,6 +9,11 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use zeroship_core::{app_id::AppId, typed_id};
+use zeroship_data_orm::{
+    orm::{Entity, FindOptions, Output},
+    sql::{Predicate, RowLimit},
+    value,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -156,45 +162,70 @@ pub(crate) async fn reconcile(
             ));
         }
     }
-    let schedules = tx.table("schedules");
-    let existing = tx
-        .query(
-            &format!(
-                "SELECT id,name,deploy_id,definition,next_at FROM {schedules} WHERE app_id=$1"
-            ),
-            &[app.as_str().into()],
-        )
-        .await?;
-    for row in &existing {
-        if !names.contains(&row.text("name")?) {
-            tx.execute(
-                &format!("UPDATE {schedules} SET next_at=NULL WHERE app_id=$1 AND id=$2"),
-                &[app.as_str().into(), row.text("id")?.into()],
-            )
+    let db = tx.database();
+    let schedules = db.collection(models::schedules::Entity::COLLECTION)?;
+    let source = db.entity::<models::schedules::Entity>()?.alias("s")?;
+    let page_limit = RowLimit::default().get();
+    let mut after: Option<String> = None;
+    let mut existing = std::collections::BTreeMap::new();
+    loop {
+        let mut filter = vec![source.column(models::schedules::app_id).eq(app.as_str())?];
+        if let Some(after) = &after {
+            filter.push(source.column(models::schedules::id).gt(after.as_str())?);
+        }
+        let page = db
+            .from(&source)
+            .filter(Predicate::And(filter))
+            .order_by(source.column(models::schedules::id).asc())
+            .select(source.row::<models::ScheduleRecord>())?
+            .limit(page_limit)?
+            .all()
             .await?;
+        let count = page.len();
+        for row in page {
+            after = Some(row.id.clone());
+            if names.contains(&row.name) {
+                existing.insert(row.name.clone(), row);
+            } else if row.next_at.is_some() {
+                schedules
+                    .update(
+                        value!({"app_id":app.as_str(), "id":row.id}),
+                        value!({"next_at":null}),
+                    )
+                    .await?;
+            }
+        }
+        if count < page_limit as usize {
+            break;
         }
     }
     for registration in &deploy.schedules {
         let encoded = encode(registration)?;
-        let mut id = None;
-        let mut unchanged = false;
-        for row in &existing {
-            if row.text("name")? == registration.name {
-                id = Some(row.text("id")?);
-                unchanged = row.optional_integer("next_at")?.is_some()
-                    && row.text("deploy_id")? == deploy.id
-                    && decode::<ScheduleRegistration>(&row.text("definition")?)? == *registration;
-                break;
+        let row = existing.get(&registration.name);
+        if let Some(row) = row {
+            if row.next_at.is_some()
+                && row.deploy_id == deploy.id
+                && decode::<ScheduleRegistration>(&row.definition)? == *registration
+            {
+                continue;
             }
         }
-        if unchanged {
-            continue;
-        }
         let next = registration.schedule.next_after(now, now)?;
-        if let Some(id) = id {
-            tx.execute(&format!("UPDATE {schedules} SET workflow_name=$3,deploy_id=$4,definition=$5,next_at=$6,anchor_at=$7,revision=revision+1 WHERE app_id=$1 AND id=$2"), &[app.as_str().into(),id.into(),registration.workflow_name.clone().into(),deploy.id.clone().into(),encoded.into(),next.into(),now.into()]).await?;
+        if let Some(row) = row {
+            let revision = row.revision.checked_add(1).ok_or_else(|| {
+                WorkflowServiceError::Internal("workflow schedule revision overflow".into())
+            })?;
+            schedules.update(
+                value!({"app_id":app.as_str(), "id":row.id.clone()}),
+                value!({"workflow_name":registration.workflow_name.clone(), "deploy_id":deploy.id.clone(),
+                    "definition":encoded, "next_at":next, "anchor_at":now, "revision":revision}),
+            ).await?;
         } else {
-            tx.execute(&format!("INSERT INTO {schedules} (app_id,id,name,workflow_name,deploy_id,definition,next_at,anchor_at,revision,last_checked_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,0,0)"), &[app.as_str().into(),typed_id::new_workflow_schedule_id().into(),registration.name.clone().into(),registration.workflow_name.clone().into(),deploy.id.clone().into(),encoded.into(),next.into(),now.into()]).await?;
+            schedules.insert(value!({
+                "app_id":app.as_str(), "id":typed_id::new_workflow_schedule_id(), "name":registration.name.clone(),
+                "workflow_name":registration.workflow_name.clone(), "deploy_id":deploy.id.clone(),
+                "definition":encoded, "next_at":next, "anchor_at":now, "revision":0, "last_checked_at":0,
+            })).await?;
         }
     }
     Ok(())
@@ -219,25 +250,34 @@ impl WorkflowService {
             let mut tx = self.begin().await?;
             let policy = lock_app(&mut tx, &app).await?;
             let now = tx.now().await?;
-            tx.execute(
-                &format!("UPDATE {schedules} SET last_checked_at=$3 WHERE app_id=$1 AND id=$2"),
-                &[app.as_str().into(), id.clone().into(), now.into()],
-            )
-            .await?;
+            let schedules = tx
+                .database()
+                .collection(models::schedules::Entity::COLLECTION)?;
+            // This write holds the schedule row lock through occurrence persistence.
+            schedules
+                .update(
+                    value!({"app_id":app.as_str(), "id":id.clone()}),
+                    value!({"last_checked_at":now}),
+                )
+                .await?;
             let rows = tx
-                .query(
-                    &format!(
-                        "SELECT * FROM {schedules} WHERE app_id=$1 AND id=$2{}",
-                        tx.lock_clause()
-                    ),
-                    &[app.as_str().into(), id.clone().into()],
+                .database()
+                .entity::<models::schedules::Entity>()?
+                .find::<models::ScheduleRecord>(
+                    models::schedules::app_id
+                        .eq(app.as_str())?
+                        .and(models::schedules::id.eq(id.as_str())?),
+                    FindOptions {
+                        limit: Some(1),
+                        ..Default::default()
+                    },
                 )
                 .await?;
             let Some(row) = rows.first() else {
                 tx.commit().await?;
                 continue;
             };
-            let Some(mut at) = row.optional_integer("next_at")?.filter(|at| *at <= now) else {
+            let Some(mut at) = row.next_at.filter(|at| *at <= now) else {
                 tx.commit().await?;
                 continue;
             };
@@ -248,36 +288,73 @@ impl WorkflowService {
             // Candidate discovery can race executable loss or schedule updates.
             // Keep the due frontier intact until its current deployment is ready.
             let available = tx
-                .query(
-                    &format!(
-                        "SELECT id FROM {deploys} WHERE app_id=$1 AND id=$2 AND state='available'"
-                    ),
-                    &[app.as_str().into(), row.text("deploy_id")?.into()],
+                .database()
+                .entity::<models::deploys::Entity>()?
+                .find::<models::DeploymentHash>(
+                    models::deploys::app_id
+                        .eq(app.as_str())?
+                        .and(models::deploys::id.eq(row.deploy_id.as_str())?)
+                        .and(models::deploys::state.eq("available")?),
+                    FindOptions {
+                        limit: Some(1),
+                        ..Default::default()
+                    },
                 )
                 .await?;
             if available.is_empty() {
                 tx.commit().await?;
                 continue;
             }
-            let registration: ScheduleRegistration = decode(&row.text("definition")?)?;
-            let anchor = row.integer("anchor_at")?;
+            let registration: ScheduleRegistration = decode(&row.definition)?;
+            let anchor = row.anchor_at;
             let cap = match registration.catch_up {
                 ScheduleCatchUp::Skip => 1,
                 ScheduleCatchUp::Backfill { max } => max.min(policy.max_schedule_backfill),
             };
-            let runs = tx.table("runs");
-            let occurrences = tx.table("occurrences");
+            let runs = tx.database().collection(models::runs::Entity::COLLECTION)?;
+            let occurrences = tx
+                .database()
+                .collection(models::occurrences::Entity::COLLECTION)?;
             for index in 0..cap {
-                let duplicate=tx.query(&format!("SELECT at FROM {occurrences} WHERE app_id=$1 AND schedule_id=$2 AND at=$3"), &[app.as_str().into(),id.clone().into(),at.into()]).await?;
-                if duplicate.is_empty() {
-                    let overlapping=tx.query(&format!("SELECT id FROM {runs} WHERE app_id=$1 AND schedule_id=$2 AND state NOT IN ('completed','failed','cancelled') LIMIT 1"), &[app.as_str().into(),id.clone().into()]).await?;
-                    let skip = registration.overlap == ScheduleOverlap::SkipIfRunning
-                        && !overlapping.is_empty();
+                let Output::Count(duplicate) = occurrences
+                    .count(
+                        value!({"app_id":app.as_str(), "schedule_id":id.clone(), "at":at}),
+                        value!({}),
+                    )
+                    .await?
+                else {
+                    return Err(WorkflowServiceError::Internal(
+                        "workflow occurrence count returned rows".into(),
+                    ));
+                };
+                if duplicate == 0 {
+                    let skip = if registration.overlap == ScheduleOverlap::SkipIfRunning {
+                        let source = tx.database().entity::<models::runs::Entity>()?.alias("r")?;
+                        !tx.database()
+                            .from(&source)
+                            .filter(Predicate::And(vec![
+                                source.column(models::runs::app_id).eq(app.as_str())?,
+                                source
+                                    .column(models::runs::schedule_id)
+                                    .eq(Some(id.as_str()))?,
+                                Predicate::Not(Box::new(Predicate::Or(vec![
+                                    source.column(models::runs::state).eq("completed")?,
+                                    source.column(models::runs::state).eq("failed")?,
+                                    source.column(models::runs::state).eq("cancelled")?,
+                                ]))),
+                            ]))
+                            .select(source.row::<models::KeyedRun>())?
+                            .limit(1)?
+                            .all()
+                            .await?
+                            .is_empty()
+                    } else {
+                        false
+                    };
                     let run_id = if skip {
                         None
                     } else {
-                        let live=tx.query(&format!("SELECT COUNT(*) AS total FROM {runs} WHERE app_id=$1 AND state NOT IN ('completed','failed','cancelled')"), &[app.as_str().into()]).await?;
-                        if live[0].integer("total")? >= policy.max_live_runs {
+                        if live_runs(&tx, &app).await? >= policy.max_live_runs {
                             break;
                         }
                         let run_id = typed_id::new_workflow_run_id();
@@ -286,7 +363,7 @@ impl WorkflowService {
                             &app,
                             &run_id,
                             &registration.workflow_name,
-                            &row.text("deploy_id")?,
+                            &row.deploy_id,
                             &StartOptions {
                                 input: registration.input.clone(),
                                 ..Default::default()
@@ -294,19 +371,15 @@ impl WorkflowService {
                             now,
                         )
                         .await?;
-                        tx.execute(
-                            &format!("UPDATE {runs} SET schedule_id=$3 WHERE app_id=$1 AND id=$2"),
-                            &[
-                                app.as_str().into(),
-                                run_id.clone().into(),
-                                id.clone().into(),
-                            ],
+                        runs.update(
+                            value!({"app_id":app.as_str(), "id":run_id.clone()}),
+                            value!({"schedule_id":id.clone()}),
                         )
                         .await?;
                         fired += 1;
                         Some(run_id)
                     };
-                    tx.execute(&format!("INSERT INTO {occurrences} (app_id,schedule_id,at,run_id) VALUES ($1,$2,$3,$4)"), &[app.as_str().into(),id.clone().into(),at.into(),run_id.into()]).await?;
+                    occurrences.insert(value!({"app_id":app.as_str(), "schedule_id":id.clone(), "at":at, "run_id":run_id})).await?;
                 }
                 at = registration.schedule.next_after(at, anchor)?;
                 if at > now {
@@ -316,11 +389,12 @@ impl WorkflowService {
                     at = registration.schedule.next_after(now, anchor)?;
                 }
             }
-            tx.execute(
-                &format!("UPDATE {schedules} SET next_at=$3 WHERE app_id=$1 AND id=$2"),
-                &[app.as_str().into(), id.into(), at.into()],
-            )
-            .await?;
+            schedules
+                .update(
+                    value!({"app_id":app.as_str(), "id":id}),
+                    value!({"next_at":at}),
+                )
+                .await?;
             tx.commit().await?;
         }
         Ok(fired)

@@ -30,6 +30,7 @@ mod output_writes;
 mod payloads;
 mod policy;
 mod runner;
+mod schedule_models;
 #[path = "../../../../tests/fixtures/s3.rs"]
 mod s3_fixture;
 mod schema_binding;
