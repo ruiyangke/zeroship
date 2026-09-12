@@ -32,8 +32,9 @@ The replacement service now uses a shared `OrmStore`; its workflow-owned
 PostgreSQL and SQLite adapters have been removed. The CLI supplies its normal
 database binding and object storage. Transaction ownership stays on the engine's
 compio thread, with a bounded app-scoped client for V8 and other Rust threads.
-Journal operations still use the ORM's explicit SQL interface while model and
-collection conversion proceeds. ORM table references permit every table prefix
+Journal fingerprint and deployment reads, root-run creation and request receipts
+use ORM models and collections. The remaining journal operations use the ORM's
+explicit SQL interface while conversion proceeds. ORM table references permit every table prefix
 for Rust and creator code within the bound customer schema. The existing Control
 store's removal remains pending.
 
@@ -248,13 +249,18 @@ inputs, and `Changeset` defines explicit partial updates. Do not maintain anothe
 handwritten schema in Rust or JSON. The workflow generator emits DDL,
 fingerprints and the runtime descriptor from the canonical migration. Native
 PostgreSQL and SQLite contracts compare descriptor columns and keys with the
-migrated catalog. Model adoption remains unfinished.
+migrated catalog. The engine installs these models alongside the app's existing
+descriptors, refusing conflicting entries before publication. Fingerprint and
+deployment reads, root-run creation and request receipts use that metadata.
+The remaining journal conversion is unfinished.
 The public Rust and TypeScript ORM accepts declared named and composite keys.
 Bounded mutations, joined row projections, immutable-field checks, concurrency
 predicates and encrypted-row identity use every key component. Live database
 tests cover composite encrypted writes, unmasking, rollback and conflicting
-upserts across generations. Workflow model adoption remains unfinished; preserve
-conditional updates when converting journal operations.
+upserts across generations. Workflow models and remaining SQL share an owned
+`orm::Transaction`; model operations use its scoped `Database`. Cancellation,
+rollback and commit settle through the shared protocol. Preserve conditional
+updates when converting the remaining journal operations.
 
 Extend the shared ORM where workflow models need a general table capability.
 Do not introduce workflow-specific database adapters or another query builder.
