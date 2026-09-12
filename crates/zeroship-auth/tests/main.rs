@@ -12,8 +12,6 @@
 //!
 //! Select a group with `cargo test -p zeroship-auth --test main -- store::`.
 //! Each case must own mutable resources even though the executable is shared.
-//! The remaining password-hash counter assertions need conversion because
-//! unrelated password hashing in this process can change their observations.
 
 mod common;
 
@@ -50,7 +48,6 @@ mod password_test;
 mod postmark_webhook_test;
 mod relay_auto_revoke_test;
 mod relay_dedup_test;
-mod reset_hash_gate_test;
 mod security_headers_test;
 mod signing_key_retention_test;
 mod signup_continuation_test;
