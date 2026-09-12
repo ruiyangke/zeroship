@@ -114,11 +114,8 @@ fn introspect_after_create_table_round_trip() {
                 cols.keys().collect::<Vec<_>>()
             );
 
-            // Type strings: SQLite returns the declared affinity uppercase
-            // ("INTEGER" / "TEXT"). The diff classifier reads these
-            // stringly — the PG impl populates `format_type(...)` results
-            // here; SQLite populates the affinity name directly per plan
-            // §3.4 ("populate `pg_type` with SQLite affinity names").
+            // SQLite reports declared affinity names where PostgreSQL reports
+            // `format_type(...)`; the shared catalog model stores either form.
             let id_col = cols.get("id").expect("id column");
             assert_eq!(id_col.pg_type, "INTEGER");
             // `id INTEGER PRIMARY KEY` is a special SQLite case — it's an

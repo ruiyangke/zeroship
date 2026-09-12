@@ -80,15 +80,8 @@ fn lock_release_unblocks() {
 #[test]
 fn lock_acquire_with_backoff_exhausts_into_contention_error() {
     Host::test(|host| {
-        // Per plan §2.4 + spec: hold a slot, then call the typed
-        // `try_acquire_with_backoff` against the same scope. The
-        // five-attempt schedule (0/50/200/500/1000ms = ~1.75s) must
-        // exhaust and surface `DbError::LockContention`, which `to_op_error`
-        // maps to the wire-code `lock_not_available`.
-        //
-        // We use `LockScope::GlobalApp` (the only production-shaped variant) so
-        // the key derivation matches snapshot/restore. `LockScope::LocalApp`
-        // derives identical keys; visibility does not alter their shape.
+        // Holding the same app lock must exhaust the configured backoff and
+        // surface the portable lock-contention error.
         host.run(async {
             let (backend, _dir) = fresh_backend(host);
             let client = backend
@@ -110,11 +103,8 @@ fn lock_acquire_with_backoff_exhausts_into_contention_error() {
                 .expect("hold slot via try_acquire_advisory_lock");
             assert!(got, "initial hold must succeed");
 
-            // Now exercise the typed surface — it loops 5 times on
-            // try_acquire_advisory_lock (which observes the held slot →
-            // Ok(false)), then surfaces LockContention. The whole call
-            // takes ~1.75s in the worst case; the test budget is fine
-            // with that.
+            // The typed surface exhausts its configured schedule and reports
+            // lock contention while the slot remains held.
             let err = backend
                 .try_acquire_with_backoff(&client, &scope)
                 .await

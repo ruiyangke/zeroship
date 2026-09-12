@@ -36,11 +36,8 @@ fn vector_search_returns_k_nearest() {
 
             let app = app.as_str();
             let coll = "docs";
-            // Provision the per-app ROLE, not just the schema. `vector_search` resolves
-            // the binding before it plans, and a schema without its role fails closed
-            // with `schema_not_provisioned` - which is what this test did from the day
-            // it was written until 2026-09-01. It never surfaced because the test was
-            // statically `#[ignore]`d, so a setup gap looked like a missing extension.
+            // Search resolves the app binding before planning, so provision its
+            // role as well as its schema.
             let _role = provision_app_with_role(&pool, app).await;
             crate::tests::fixtures::roles::ensure_per_app_role(&pool, app)
                 .await
@@ -193,12 +190,6 @@ fn vector_search_returns_k_nearest() {
 /// extension still installed the typed-error arm is never reached, so a pass
 /// there would report a contract nobody checked.
 ///
-/// THIS COMMENT DESCRIBED THE OPPOSITE UNTIL 2026-09-08, AND IT DESCRIBED
-/// NEITHER THE CODE BELOW NOR ITS OWN REASONING. It said the test would
-/// "silently re-skip" and that "we don't fail the suite in that case because
-/// the typed-error assertion is the load-bearing part of the contract" - which
-/// is the argument FOR failing, since a re-skip is precisely the case where
-/// that load-bearing assertion did not run.
 #[test]
 fn pgvector_extension_missing_reports_typed_error() {
     Host::test(|host| {

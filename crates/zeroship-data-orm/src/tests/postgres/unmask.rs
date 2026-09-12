@@ -18,13 +18,7 @@ use crate::sql::mapping::*;
 
 use zeroship_data_orm::encryption;
 
-/// The backend handle the unmask entry points now take as a parameter.
-///
-/// They resolved one themselves, from the isolate's context, until 2026-09-03.
-/// That read is the ADAPTER's and `protection::unmask` is ENGINE, so the resolution
-/// moved to the V8 dispatcher and the value is passed down. These tests drive
-/// the engine directly, with no V8 frame above them, so they make the same call
-/// the dispatcher makes on their behalf in production.
+/// Resolve the backend at the same boundary as the V8 dispatcher.
 async fn unmask_backend(host: &Host) -> zeroship_data_orm::backend::BackendHandle {
     host.backend()
         .await
@@ -302,9 +296,6 @@ fn unmask_encrypted_column_on_pg_reads_bytea_raw_sibling() {
 /// table: fetch, decrypt-or-plaintext, and audit all have to narrow or the
 /// call fails.
 ///
-/// FAILS BEFORE THE FIX with `permission denied for table
-/// __zeroship_audit_unmask`, because `write_audit_unmask_row` took
-/// `pg.pool_handle()` and issued the INSERT on a bare checkout.
 #[test]
 fn unmask_audit_insert_runs_under_the_per_app_role_not_the_login_role() {
     Host::test(|host| {
@@ -509,9 +500,7 @@ fn pg_declared_mask_policy_authorizes_unmask_without_durable_store() {
             crate::tests::fixtures::cache_schema(app, coll, schema);
             host.clear_mask_policy_cache(app);
 
-            // The boot-time install `installSchema` performs. Before the fix
-            // this issued `SELECT set_mask_policy(...)` against the platform-owned
-            // system schema and failed here on every database.
+            // Install the app-provided policy as the isolate does at boot.
             mask_policy::install_mask_policy(
                 &DbBinding::cold_start(app),
                 value!({ "support": ["spi"] }),
