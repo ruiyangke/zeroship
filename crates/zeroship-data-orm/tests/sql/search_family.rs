@@ -1,6 +1,8 @@
 //! Search grammar and PostgreSQL rendering contracts. Database execution is
 //! covered by the ORM PostgreSQL search suites.
 
+use zeroship_data_orm::Value;
+use crate::NumberedParameters;
 use zeroship_data_orm::sql::render::postgres::{RenderError, render, render_search};
 use zeroship_data_orm::sql::{
     CompareOp, DbPlan, Direction, GeoPoint, Ident, IdentRole, Literal, LiteralError,
@@ -114,8 +116,8 @@ fn a_vector_search_binds_the_query_once_and_orders_by_the_expression() {
         "one vector and one limit, not two vectors: {:?}",
         sql.params()
     );
-    assert!(matches!(sql.params()[0], Literal::Vector(_)));
-    assert_eq!(sql.params()[1], Literal::Int(10));
+    assert!(matches!(sql.params()[0], Value::Array(_)));
+    assert_eq!(sql.params()[1], Value::from(10));
 }
 
 /// The geo lowering, pinned whole.
@@ -157,12 +159,12 @@ fn a_geo_search_bounds_by_st_dwithin_and_ranks_by_st_distance() {
     // different place on Earth, so the order is asserted against the values.
     assert_eq!(
         sql.params()[0],
-        Literal::float(-0.12).expect("finite"),
+        Value::try_from(-0.12).expect("finite"),
         "ST_MakePoint takes (x, y) = (longitude, latitude); $1 must be the longitude"
     );
-    assert_eq!(sql.params()[1], Literal::float(51.5).expect("finite"));
-    assert_eq!(sql.params()[2], Literal::float(1_000.0).expect("finite"));
-    assert_eq!(sql.params()[3], Literal::Int(25));
+    assert_eq!(sql.params()[1], Value::try_from(51.5).expect("finite"));
+    assert_eq!(sql.params()[2], Value::try_from(1_000.0).expect("finite"));
+    assert_eq!(sql.params()[3], Value::from(25));
 }
 
 /// The radius clause is emitted whether or not there is a filter, which is what

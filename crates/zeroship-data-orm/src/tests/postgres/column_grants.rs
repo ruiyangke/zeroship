@@ -422,7 +422,7 @@ fn single_row_statements(app: &str, schema: &Value) -> Vec<Statement> {
 
 /// Render the replacement data-plan's two bounded PostgreSQL writes against
 /// the same physical fixture as the shipped builders.
-fn bounded_data_plan_statements(app: &str) -> Vec<(&'static str, crate::sql::RenderedSql)> {
+fn bounded_data_plan_statements(app: &str) -> Vec<(&'static str, crate::sql::compiler::CompiledQuery)> {
     let namespace = PlanIdent::parse_as(app, PlanIdentRole::Namespace).expect("namespace");
     let collection =
         PlanIdent::parse_as(COLLECTION, PlanIdentRole::Collection).expect("collection");
@@ -488,19 +488,6 @@ fn bounded_data_plan_statements(app: &str) -> Vec<(&'static str, crate::sql::Ren
             render_delete(&delete).expect("render bounded delete"),
         ),
     ]
-}
-
-/// Convert the two literal kinds this fixture emits to the shipped driver's
-/// text-inference channel. An unexpected kind is a test construction error.
-fn bounded_data_plan_params(params: &[PlanLiteral]) -> Vec<String> {
-    params
-        .iter()
-        .map(|value| match value {
-            PlanLiteral::Int(value) => value.to_string(),
-            PlanLiteral::Text(value) | PlanLiteral::Json(value) => value.clone(),
-            unexpected => panic!("unexpected bounded-write literal: {unexpected:?}"),
-        })
-        .collect()
 }
 
 /// Seven of the twelve builders reach the server in the projection test.
@@ -827,10 +814,9 @@ fn bounded_data_plan_writes_succeed_with_column_scoped_reads() {
             );
             let mut ruled_on = 0usize;
             for (verb, rendered) in statements {
-                let owned = bounded_data_plan_params(rendered.params());
-                let params: Vec<&str> = owned.iter().map(String::as_str).collect();
-                let rows = session
-                    .query_text_params(rendered.sql(), &params)
+                let rows = crate::backend::postgres::params::query(
+                    &session, rendered.sql(), rendered.params(),
+                )
                     .await
                     .unwrap_or_else(|e| {
                         panic!(

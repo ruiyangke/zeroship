@@ -1,4 +1,5 @@
 use zeroship_data_orm::sql::*;
+use crate::NumberedParameters;
 use zeroship_data_orm::value;
 
 #[test]
