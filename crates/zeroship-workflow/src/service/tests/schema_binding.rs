@@ -28,6 +28,14 @@ async fn workflow_tables_share_the_app_database_without_changing_business_data()
         .insert(zeroship_data_orm::value!({"id":"native", "body":"native ORM data"}))
         .await
         .unwrap();
+    let store = Rc::new(
+        OrmStore::new(
+            database.context().clone(),
+            store.binding.clone(),
+            store.backend.clone(),
+        )
+        .unwrap(),
+    );
     let (service, app, _) = registered_service(store).await;
     let started = service
         .for_app(app.clone())
@@ -90,6 +98,35 @@ async fn workflow_tables_share_the_app_database_without_changing_business_data()
             .unwrap(),
         "customer data"
     );
+}
+
+#[compio::test]
+async fn conflicting_journal_metadata_cannot_replace_the_app_descriptor() {
+    use zeroship_data_orm::{descriptor, orm::Database, value};
+    let directory = tempfile::tempdir().unwrap();
+    let store = sqlite_store(&directory.path().join("zs-workflow.sqlite")).await;
+    let table = "__zeroship_workflow_schema_version";
+    let fields = value!({
+        "id":{"type":"string", "primaryKey":true, "required":true},
+        "fingerprint":{"type":"string"},
+    });
+    let database = Database::from_schema(
+        store.binding.clone(),
+        store.backend.clone(),
+        vec![(table.into(), fields.clone())],
+    )
+    .unwrap();
+    assert!(OrmStore::new(
+        database.context().clone(),
+        store.binding.clone(),
+        store.backend.clone(),
+    )
+    .is_err());
+    let retained = database
+        .context()
+        .with(|| descriptor::collection_schema(&store.binding, table).unwrap());
+    assert_eq!(retained.as_ref(), &fields);
+    assert!(database.collection("__zeroship_workflow_requests").is_err());
 }
 
 #[test]

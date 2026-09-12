@@ -1,0 +1,59 @@
+//! Journal model metadata comes from the canonical migration artifact.
+
+use super::{schema, store::database_error};
+use crate::WorkflowServiceError;
+use zeroship_data_orm::{binding::DbBinding, descriptor, orm::FromRow, Value};
+
+zeroship_data_orm::orm::schema!(pub journal = "../../schema/schema.runtime.json");
+pub use journal::{
+    __zeroship_workflow_deploys as deploys, __zeroship_workflow_generations as generations,
+    __zeroship_workflow_requests as requests, __zeroship_workflow_runs as runs,
+    __zeroship_workflow_schema_version as schema_version,
+};
+
+#[derive(FromRow)]
+#[orm(entity = schema_version)]
+pub struct Fingerprint {
+    pub fingerprint: String,
+}
+
+#[derive(FromRow)]
+#[orm(entity = deploys)]
+pub struct DeploymentManifest {
+    pub manifest: String,
+}
+
+#[derive(FromRow)]
+#[orm(entity = requests)]
+pub struct RequestResult {
+    pub operation: String,
+    pub digest: String,
+    pub result: String,
+}
+
+/// Compose the journal with the app's existing descriptors in one publication.
+/// A conflicting host descriptor fails without replacing the previous binding.
+pub fn install(binding: &DbBinding) -> Result<(), WorkflowServiceError> {
+    let artifact: Value =
+        serde_json::from_str(schema::RUNTIME_DESCRIPTOR).map_err(|_| schema::incompatible())?;
+    let tables = artifact["collections"]
+        .as_object()
+        .ok_or_else(schema::incompatible)?;
+    let mut collections: std::collections::BTreeMap<_, _> =
+        descriptor::declared_collections(binding)
+            .into_iter()
+            .map(|(name, fields)| (name, fields.as_ref().clone()))
+            .collect();
+    for (name, table) in tables {
+        let fields = table.get("fields").ok_or_else(schema::incompatible)?;
+        if let Some(existing) = collections.get(name) {
+            if existing != fields {
+                return Err(schema::incompatible());
+            }
+        } else {
+            collections.insert(name.clone(), fields.clone());
+        }
+    }
+    descriptor::install_collections(binding, collections.into_iter().collect())
+        .map_err(database_error)
+}

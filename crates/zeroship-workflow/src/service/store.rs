@@ -1,11 +1,18 @@
 //! Customer-bound journal execution through the shared Rust ORM.
 
-use crate::{service::schema, WorkflowServiceError};
+use crate::{
+    service::{models, schema},
+    WorkflowServiceError,
+};
 pub use zeroship_core::schema_name::SchemaName;
 pub(crate) use zeroship_data_orm::Value;
 use zeroship_data_orm::{
-    backend::BackendHandle, binding::DbBinding, error::DbError, exec, sql::compile::SqlDialect,
-    transaction::AtomicWriteFrame, tx_route::CapturedRoute, ConnectOptions, OrmContext,
+    backend::BackendHandle,
+    binding::DbBinding,
+    error::DbError,
+    orm::{Database, FindOptions},
+    sql::{compile::SqlDialect, compiler::CompiledQuery},
+    ConnectOptions, OrmContext,
 };
 
 /// Resolved app services that a host may pass to its workflow thread.
@@ -69,7 +76,7 @@ fn invalid_row(key: &str) -> WorkflowServiceError {
 /// Connections and transactions stay on the host's compio thread.
 #[derive(Clone, Debug)]
 pub struct OrmStore {
-    pub(crate) context: OrmContext,
+    database: Database,
     pub(crate) binding: DbBinding,
     pub(crate) backend: BackendHandle,
     namespace: String,
@@ -86,8 +93,9 @@ impl OrmStore {
                 WorkflowServiceError::InvalidRequest("invalid workflow database binding".into())
             })?;
         let namespace = zeroship_data_orm::sql::compile::quote_ident(namespace.as_str());
+        context.with(|| models::install(&binding))?;
         Ok(Self {
-            context,
+            database: Database::new(context, binding.clone(), backend.clone()),
             binding,
             backend,
             namespace,
@@ -104,21 +112,8 @@ impl OrmStore {
     }
 
     pub async fn begin(&self) -> Result<Transaction, WorkflowServiceError> {
-        let route = CapturedRoute::capture(
-            None,
-            self.binding.app_id(),
-            self.binding.schema().clone(),
-            self.backend.dialect(),
-        )
-        .bind(self.backend.clone());
-        let frame = self
-            .context
-            .scope(AtomicWriteFrame::begin(route))
-            .await
-            .map_err(database_error)?;
         let mut tx = Transaction {
-            frame: Some(frame),
-            context: self.context.clone(),
+            transaction: self.database.begin_transaction().await?,
             namespace: self.namespace.clone(),
             dialect: self.backend.dialect(),
             policies: None,
@@ -140,16 +135,17 @@ impl OrmStore {
     }
 
     pub async fn verify(&self) -> Result<(), WorkflowServiceError> {
-        let mut tx = self.begin().await?;
-        let query = format!(
-            "SELECT fingerprint FROM {} WHERE id = 'workflow'",
-            tx.table("schema_version")
-        );
-        let row = tx
-            .query(&query, &[])
+        let tx = self.begin().await?;
+        let rows = tx
+            .database()
+            .entity::<models::schema_version::Entity>()?
+            .find::<models::Fingerprint>(
+                models::schema_version::id.eq("workflow")?,
+                FindOptions::default(),
+            )
             .await
             .map_err(|_| schema::incompatible())?;
-        if row.len() != 1 || row[0].text("fingerprint")? != schema::fingerprint(tx.dialect())? {
+        if rows.len() != 1 || rows[0].fingerprint != schema::fingerprint(tx.dialect())? {
             return Err(schema::incompatible());
         }
         tx.commit().await
@@ -158,8 +154,7 @@ impl OrmStore {
 
 /// A journal transaction owned and settled by the ORM transaction protocol.
 pub struct Transaction {
-    frame: Option<AtomicWriteFrame>,
-    context: OrmContext,
+    transaction: zeroship_data_orm::orm::Transaction,
     namespace: String,
     dialect: SqlDialect,
     pub(crate) policies: Option<std::sync::Arc<super::HostPolicies>>,
@@ -172,6 +167,9 @@ impl std::fmt::Debug for Transaction {
     }
 }
 impl Transaction {
+    pub(crate) fn database(&self) -> &Database {
+        self.transaction.database()
+    }
     /// Filter assigned apps before limiting background candidate scans.
     pub(crate) fn host_app_scope(&self) -> Result<(&'static str, Value), WorkflowServiceError> {
         let apps = self
@@ -227,12 +225,8 @@ impl Transaction {
         params: &[Value],
     ) -> Result<u64, WorkflowServiceError> {
         let sql = self.sql(sql);
-        self.context
-            .scope(exec::run_statement(
-                self.frame.as_ref().expect("open transaction").route(),
-                &sql,
-                params,
-            ))
+        self.transaction
+            .execute_sql(&CompiledQuery::new(sql.into_owned(), params.to_vec()))
             .await
             .map_err(database_error)
     }
@@ -242,12 +236,8 @@ impl Transaction {
         params: &[Value],
     ) -> Result<Vec<Row>, WorkflowServiceError> {
         let sql = self.sql(sql);
-        self.context
-            .scope(exec::run_sql(
-                self.frame.as_ref().expect("open transaction").route(),
-                &sql,
-                params,
-            ))
+        self.transaction
+            .query_sql(&CompiledQuery::new(sql.into_owned(), params.to_vec()))
             .await
             .map(|rows| rows.into_iter().map(Row).collect())
             .map_err(database_error)
@@ -258,17 +248,14 @@ impl Transaction {
             SqlDialect::Sqlite => sqlite_placeholders(sql).into(),
         }
     }
-    pub async fn commit(mut self) -> Result<(), WorkflowServiceError> {
-        let frame = self.frame.take().expect("open transaction");
-        self.context
-            .scope(frame.finish(Ok(())))
-            .await
-            .map_err(database_error)
+    pub async fn commit(self) -> Result<(), WorkflowServiceError> {
+        self.transaction.commit().await.map_err(database_error)
     }
 }
-impl Drop for Transaction {
-    fn drop(&mut self) {
-        self.context.with(|| drop(self.frame.take()));
+
+impl From<DbError> for WorkflowServiceError {
+    fn from(error: DbError) -> Self {
+        database_error(error)
     }
 }
 

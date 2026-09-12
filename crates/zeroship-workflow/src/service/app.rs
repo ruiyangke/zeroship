@@ -1,4 +1,5 @@
 use super::{
+    models,
     store::{OrmStore, Row, Transaction},
     types::{digest, AppPolicy, DeployRegistration, RequestId},
 };
@@ -14,6 +15,10 @@ use serde_json::json;
 use std::rc::Rc;
 use std::sync::Arc;
 use zeroship_core::{app_id::AppId, typed_id};
+use zeroship_data_orm::{
+    orm::{Entity, FindOptions, Operation},
+    value,
+};
 
 #[derive(Clone)]
 pub struct WorkflowService {
@@ -293,13 +298,18 @@ pub(crate) async fn active_deploy(
     tx: &mut Transaction,
     app: &AppId,
 ) -> Result<DeployRegistration, WorkflowServiceError> {
-    let table = tx.table("deploys");
     let rows = tx
-        .query(
-            &format!(
-                "SELECT manifest FROM {table} WHERE app_id=$1 AND active=1 AND state='available'"
-            ),
-            &[app.as_str().into()],
+        .database()
+        .entity::<models::deploys::Entity>()?
+        .find::<models::DeploymentManifest>(
+            models::deploys::app_id
+                .eq(app.as_str())?
+                .and(models::deploys::active.eq(1_i64)?)
+                .and(models::deploys::state.eq("available")?),
+            FindOptions {
+                limit: Some(2),
+                ..Default::default()
+            },
         )
         .await?;
     if rows.len() != 1 {
@@ -307,7 +317,7 @@ pub(crate) async fn active_deploy(
             "workflow app has no active executable deployment".into(),
         ));
     }
-    decode(&rows[0].text("manifest")?)
+    decode(&rows[0].manifest)
 }
 pub(crate) async fn insert_root_run(
     tx: &mut Transaction,
@@ -318,13 +328,22 @@ pub(crate) async fn insert_root_run(
     options: &StartOptions,
     now: i64,
 ) -> Result<(), WorkflowServiceError> {
-    let runs = tx.table("runs");
-    let generations = tx.table("generations");
-    tx.execute(&format!("INSERT INTO {runs} (app_id,id,workflow_name,deploy_id,generation,state,control,due_at,lease_epoch,key,cascade,depth,created_at,signal_epoch) \
-        VALUES ($1,$2,$3,$4,0,'queued','none',$5,0,$6,0,0,$5,0)"),
-        &[app.as_str().into(),id.into(),name.into(),deploy.into(),now.into(),options.key.clone().into()]).await?;
-    tx.execute(&format!("INSERT INTO {generations} (app_id,run_id,generation,deploy_id,input,state,started_at) VALUES ($1,$2,0,$3,$4,'queued',$5)"),
-        &[app.as_str().into(),id.into(),deploy.into(),encode(&options.input)?.into(),now.into()]).await?;
+    tx.database()
+        .collection(models::runs::Entity::COLLECTION)?
+        .insert(value!({
+            "app_id":app.as_str(), "id":id, "workflow_name":name, "deploy_id":deploy,
+            "generation":0, "state":"queued", "control":"none", "due_at":now,
+            "lease_epoch":0, "key":options.key.clone(), "cascade":0, "depth":0,
+            "created_at":now, "signal_epoch":0,
+        }))
+        .await?;
+    tx.database()
+        .collection(models::generations::Entity::COLLECTION)?
+        .insert(value!({
+            "app_id":app.as_str(), "run_id":id, "generation":0, "deploy_id":deploy,
+            "input":encode(&options.input)?, "state":"queued", "started_at":now,
+        }))
+        .await?;
     emit(
         tx,
         app,
@@ -343,27 +362,35 @@ pub(crate) async fn request_result<T: DeserializeOwned>(
     digest: &str,
     now: i64,
 ) -> Result<Option<T>, WorkflowServiceError> {
-    let table = tx.table("requests");
-    tx.execute(
-        &format!("DELETE FROM {table} WHERE app_id=$1 AND id=$2 AND expires_at <= $3"),
-        &[app.as_str().into(), id.as_str().into(), now.into()],
-    )
-    .await?;
+    tx.database()
+        .collection(models::requests::Entity::COLLECTION)?
+        .execute(Operation::Purge {
+            filter: value!({"app_id":app.as_str(), "id":id.as_str(), "expires_at":{"$lte":now}}),
+            many: false,
+        })
+        .await?;
     let rows = tx
-        .query(
-            &format!("SELECT operation,digest,result FROM {table} WHERE app_id=$1 AND id=$2"),
-            &[app.as_str().into(), id.as_str().into()],
+        .database()
+        .entity::<models::requests::Entity>()?
+        .find::<models::RequestResult>(
+            models::requests::app_id
+                .eq(app.as_str())?
+                .and(models::requests::id.eq(id.as_str())?),
+            FindOptions {
+                limit: Some(1),
+                ..Default::default()
+            },
         )
         .await?;
     let Some(row) = rows.first() else {
         return Ok(None);
     };
-    if row.text("operation")? != operation || row.text("digest")? != digest {
+    if row.operation != operation || row.digest != digest {
         return Err(WorkflowServiceError::Conflict(
             "workflow request identity was reused with another operation or body".into(),
         ));
     }
-    Ok(Some(decode(&row.text("result")?)?))
+    Ok(Some(decode(&row.result)?))
 }
 pub(crate) async fn store_request<T: Serialize>(
     tx: &mut Transaction,
@@ -374,9 +401,13 @@ pub(crate) async fn store_request<T: Serialize>(
     result: &T,
     expires_at: i64,
 ) -> Result<(), WorkflowServiceError> {
-    let table = tx.table("requests");
-    tx.execute(&format!("INSERT INTO {table} (app_id,id,operation,digest,result,expires_at) VALUES ($1,$2,$3,$4,$5,$6)"),
-        &[app.as_str().into(),id.as_str().into(),operation.into(),digest.into(),encode(result)?.into(),expires_at.into()]).await?;
+    tx.database()
+        .collection(models::requests::Entity::COLLECTION)?
+        .insert(value!({
+            "app_id":app.as_str(), "id":id.as_str(), "operation":operation, "digest":digest,
+            "result":encode(result)?, "expires_at":expires_at,
+        }))
+        .await?;
     Ok(())
 }
 pub(crate) async fn emit(

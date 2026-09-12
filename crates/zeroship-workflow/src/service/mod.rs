@@ -12,6 +12,7 @@ mod frontier;
 mod ingress;
 pub use ingress::{IngressReceipt, RevokedSignals, SignalAuthority, SignalTokenRequest};
 mod journal;
+mod models;
 mod payloads;
 mod policy;
 pub use payloads::{PayloadRead, PayloadSlot, StagedPayload};
