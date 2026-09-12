@@ -125,7 +125,7 @@ fn resolve(
                 step: *step,
             },
             AssignedValue::Bound(value) => {
-                Expression::Bind(registration.encode(column.storage(), value.clone())?)
+                expression(column.storage(), value.clone(), registration)?
             }
         };
         update.push(Assignment { column, value });
