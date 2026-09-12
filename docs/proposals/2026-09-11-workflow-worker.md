@@ -52,6 +52,11 @@ ORM updates and check the affected row count. Native contracts cover stale
 completion, expired leases and a corrupt run reference to another app's task.
 Task, schedule and broadcast discovery filter host-assigned apps before their
 batch limits, so a foreign backlog cannot starve the assigned scope.
+Signal delivery, subscription sequencing, broadcast publication and recipient
+joins now use generated ORM models and collections. Mailbox reads retain their
+inclusive time bounds and generation targets; consumption checks the affected
+row count before committing the checkpoint. Broadcast recovery keeps its durable
+recipient cursor and publication cutoff across batches and restarts.
 
 This design supersedes the older
 [control-plane design](2026-07-05-durable-workflows-design.md),

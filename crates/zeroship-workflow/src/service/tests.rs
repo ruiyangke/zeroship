@@ -33,6 +33,7 @@ mod runner;
 mod s3_fixture;
 mod schema_binding;
 mod schema_metadata;
+mod signal_models;
 mod snapshots;
 mod task_models;
 mod worker;
