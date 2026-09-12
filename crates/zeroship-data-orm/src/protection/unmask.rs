@@ -1472,7 +1472,7 @@ mod tests {
             assert!(
                 !check_unmask_authorization(&DbBinding::cold_start(&app_id), &actor, "pii")
                     .unwrap(),
-                "kind={kind} must be denied by the PR 4 stub"
+                "kind={kind} must be denied by the declared policy"
             );
         }
     }

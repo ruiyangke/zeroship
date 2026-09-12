@@ -607,13 +607,8 @@ pub(crate) fn build_settle_resolve_value(
 mod tests {
     //! Shape guards for the `Db.transaction(fn)` callback argument.
     //!
-    //! The proposal (Q-P9-C, §4.4) fixes the tx-view as **collections
-    //! only** — no `commit` / `rollback` / `collection` / `transaction` /
-    //! `live` method. These tests mint a view directly (no DB needed —
-    //! the per-thread schema cache is empty in this test context, so the
-    //! view is a bare object) and assert no tx-lifecycle method leaked
-    //! onto it. If a future change re-introduces a `commit`/`rollback`
-    //! method on the view, these fail.
+    //! The transaction view exposes collections without transaction lifecycle
+    //! or subscription methods.
     #![allow(unsafe_code)]
 
     use zeroship_runtime::init_v8;
