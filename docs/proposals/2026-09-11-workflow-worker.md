@@ -53,6 +53,10 @@ completion, expired leases and a corrupt run reference to another app's task.
 Heartbeat and completion recheck database time after their final mutation;
 delayed-write tests prove an expired lease rolls back its receipt, history and
 deadline changes before another worker recovers the run.
+Payload admission and upload confirmation also recheck the lease after their
+database writes. A delayed admission leaves no upload record; a delayed
+confirmation leaves the original upload collectible instead of acknowledging
+staged content under expired authority.
 Task, schedule and broadcast discovery filter host-assigned apps before their
 batch limits, so a foreign backlog cannot starve the assigned scope.
 Signal delivery, subscription sequencing, broadcast publication and recipient

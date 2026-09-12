@@ -53,6 +53,91 @@ async fn postgres_payload_ownership_and_retention() {
 }
 
 #[compio::test]
+async fn postgres_payload_record_write_that_outlives_its_lease_rolls_back() {
+    delayed_payload_write("INSERT").await;
+}
+
+#[compio::test]
+async fn postgres_payload_confirmation_write_that_outlives_its_lease_rolls_back() {
+    delayed_payload_write("UPDATE").await;
+}
+
+async fn delayed_payload_write(operation: &str) {
+    let fixture = PostgresFixture::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let store: Rc<OrmStore> = Rc::new(fixture.store.clone());
+    let (service, app, _) = registered_service(store.clone()).await;
+    let service = service.with_payload_storage(local(dir.path())).unwrap();
+    service
+        .for_app(app.clone())
+        .start(&RequestId::mint(), "Example", StartOptions::default())
+        .await
+        .unwrap();
+    service
+        .register_app(
+            &app,
+            configured_policy(
+                2,
+                AppPolicy {
+                    lease_ms: 300,
+                    ..Default::default()
+                },
+            ),
+        )
+        .await
+        .unwrap();
+    let admin = connect(&fixture.admin_url).await;
+    admin.batch_execute(&format!("CREATE SEQUENCE customer.delayed_payload_writes; GRANT USAGE ON SEQUENCE customer.delayed_payload_writes TO app_customer_role; CREATE FUNCTION customer.delay_payload_write() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM nextval('customer.delayed_payload_writes'); PERFORM pg_sleep(0.5); RETURN NEW; END $$; CREATE TRIGGER delay_payload_write BEFORE {operation} ON customer.__zeroship_workflow_payloads FOR EACH ROW EXECUTE FUNCTION customer.delay_payload_write();")).await.unwrap();
+    let worker = WorkerIdentity::new("payload-worker".into()).unwrap();
+    let task = service.poll(&worker).await.unwrap().unwrap();
+    let result = service
+        .stage_payload(
+            &worker,
+            &task.id,
+            &task.token,
+            &RequestId::mint(),
+            reference(b"delayed"),
+            body(b"delayed"),
+        )
+        .await;
+    assert!(
+        matches!(result, Err(WorkflowServiceError::Conflict(_))),
+        "{result:?}"
+    );
+    assert!(admin
+        .query_one("SELECT is_called FROM customer.delayed_payload_writes", &[])
+        .await
+        .unwrap()
+        .get::<_, bool>(0));
+    let mut tx = store.begin().await.unwrap();
+    let rows = tx
+        .query(
+            &format!(
+                "SELECT state FROM {} WHERE app_id=$1 AND task_id=$2",
+                tx.table("payloads")
+            ),
+            &[app.as_str().into(), task.id.clone().into()],
+        )
+        .await
+        .unwrap();
+    if operation == "INSERT" {
+        assert!(
+            rows.is_empty(),
+            "expired upload admission must roll back its record"
+        );
+    } else {
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].text("state").unwrap(), "uploading");
+    }
+    tx.commit().await.unwrap();
+    admin.batch_execute("DROP TRIGGER delay_payload_write ON customer.__zeroship_workflow_payloads; UPDATE customer.__zeroship_workflow_payloads SET expires_at=0;").await.unwrap();
+    assert_eq!(
+        service.collect_payloads(1).await.unwrap(),
+        usize::from(operation == "UPDATE")
+    );
+}
+
+#[compio::test]
 async fn s3_payload_ownership_and_retention() {
     let fixture = s3_fixture::Minio::start();
     let dir = tempfile::tempdir().unwrap();

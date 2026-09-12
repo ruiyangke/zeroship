@@ -187,6 +187,7 @@ impl WorkflowService {
                 &[claim.app.as_str().into(),claim.run.text("id")?.into(),claim.run.integer("generation")?.into(),id.clone().into(),task_id.into(),request.as_str().into(),reference.hash.clone().into(),reference.size.into(),reference.content_type.clone().into(),claim.now.into(),deadline(claim.now,claim.policy.payload_staging_retention_ms)?.into()]).await?;
             id
         };
+        claim.validate_at(tx.now().await?)?;
         tx.commit().await?;
 
         // Lock in the same order as completion and GC. A bounded upload holds
@@ -245,6 +246,7 @@ impl WorkflowService {
             &[claim.app.as_str().into(), id.clone().into()],
         )
         .await?;
+        claim.validate_at(tx.now().await?)?;
         tx.commit().await?;
         Ok(StagedPayload { id, reference })
     }
