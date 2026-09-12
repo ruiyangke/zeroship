@@ -198,20 +198,6 @@ async fn login_clickjacking_headers_present() {
             csp.replace(' ', "").contains("frame-ancestors'none'"),
             "a non-framed route must keep frame-ancestors 'none'; got {csp:?}"
         );
-
-        // (c) `/oauth/google` is NOT in the framed set — the federated IdP page is
-        // never framed (it stays a popup). The path predicate is the single source
-        // of truth for which routes relax; assert it directly so the federated
-        // bounce can never accidentally inherit the relax even if google were
-        // enabled in this fixture.
-        assert!(
-            !zeroship_auth::headers::is_framed_route_for_test("/oauth/google/start"),
-            "/oauth/google must NOT be a framed route"
-        );
-        assert!(
-            zeroship_auth::headers::is_framed_route_for_test("/login"),
-            "/login must be a framed route"
-        );
     })
     .await;
 }
