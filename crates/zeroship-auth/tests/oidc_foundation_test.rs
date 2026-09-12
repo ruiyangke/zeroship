@@ -363,7 +363,7 @@ async fn id_token_has_nonce_and_correct_at_hash() {
 fn alg_pin_rejects_alg_none_and_wrong_alg_tokens() {
     let issuer = test_issuer();
     let user_id = Uuid::new_v4().to_string();
-    let now = 1_900_000_000_i64;
+    let now = chrono::Utc::now().timestamp();
     let claims = json!({
         "iss": issuer.issuer(),
         "sub": issuer.pairwise_subject(&user_id, SECTOR_A),
@@ -374,17 +374,27 @@ fn alg_pin_rejects_alg_none_and_wrong_alg_tokens() {
         "client_id": CLIENT_ID,
         "scope": "openid",
     });
-    let jwks = local_jwks(&issuer);
+    use ed25519_dalek::pkcs8::EncodePrivateKey;
+    let signing = ed25519_dalek::SigningKey::from_bytes(&[7; 32]);
+    let key = signing.to_pkcs8_der().expect("fixture signing key");
+    let mut header = Header::new(Algorithm::EdDSA);
+    header.typ = Some(ACCESS_TOKEN_TYP.into());
+    header.kid = Some(issuer.kid().into());
+    let accepted = encode(&header, &claims, &EncodingKey::from_ed_der(key.as_bytes()))
+        .expect("sign accepted claims");
+    issuer
+        .verify_access_token(&accepted)
+        .expect("production verifier accepts EdDSA");
 
     let alg_none = unsigned_none_token(&claims, issuer.kid());
     assert!(
-        verify_access_with_jwks(&jwks, &alg_none, issuer.issuer(), RESOURCE_AUD).is_err(),
+        issuer.verify_access_token(&alg_none).is_err(),
         "alg:none token must be rejected"
     );
 
     let wrong_alg = wrong_alg_hs256_token(&claims, issuer.kid());
     assert!(
-        verify_access_with_jwks(&jwks, &wrong_alg, issuer.issuer(), RESOURCE_AUD).is_err(),
+        issuer.verify_access_token(&wrong_alg).is_err(),
         "wrong-alg token must be rejected"
     );
 }
