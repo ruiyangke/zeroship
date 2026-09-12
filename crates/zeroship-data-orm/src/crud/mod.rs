@@ -97,10 +97,7 @@ pub async fn exec_aggregate_read(
     .await
 }
 
-/// The ENGINE composition behind `distinct`. Also non-default `ApplyOptions`,
-/// and different ones again from [`exec_aggregate_read`]: a DISTINCT over a
-/// masked column selects the column holding the MASK, so the decrypt stage has
-/// nothing to do and would be handed a mask string where it expects native ciphertext.
+/// Apply distinct-result decoding without decrypting a masked display value.
 pub async fn exec_distinct_read(
     binding: DbBinding,
     coll: String,
@@ -405,18 +402,7 @@ pub async fn run_find(
 // insert / insertMany — write paths returning the row(s)
 // ---------------------------------------------------------------------------
 
-/// Shared dispatch for `insert`. The capability gate is the caller's
-/// responsibility — `Collection::insert` calls
-/// `refuse_if_query_capability` before reaching here.
-/// The ENGINE half of `insert`: no `scope`, no `v8::`, no `ResolveValue`.
-///
-/// `actor_id` is a PARAMETER rather than something this function looks up, and
-/// that is load-bearing. `assignment_pass::current_actor_id` reads
-/// `executing_request_id` off the runtime state, which is only guaranteed-set
-/// on the pump turn that initiates the dispatch. This function awaits before it
-/// writes (the encryption pass's `resolve_key` round-trip), so resolving the
-/// actor in here would attribute the row to whichever request happens to be
-/// current at first poll. `v8_classes::dispatch::dispatch_insert` reads it eagerly and passes it in.
+/// Insert a document using the route and actor captured before async execution.
 pub async fn run_insert(
     binding: DbBinding,
     coll: String,
@@ -487,11 +473,7 @@ pub async fn run_insert(
     }
 }
 
-/// Shared dispatch for `insertMany`. See `v8_classes::dispatch::dispatch_insert` for the
-/// capability-gate contract.
-/// The ENGINE half of `insertMany`. `actor_id` is eager for the reason given on
-/// [`run_insert`]; it reaches the docs through
-/// `prepare_insert_many_docs_for_binding`, not `write_pipeline::apply`.
+/// Insert documents atomically using the captured actor for assignments.
 pub async fn run_insert_many(
     binding: DbBinding,
     coll: String,
@@ -556,13 +538,7 @@ pub async fn run_insert_many(
 // updateOne / updateMany — write paths
 // ---------------------------------------------------------------------------
 
-/// The ENGINE half of `updateOne`.
-///
-/// Returns a `(rows, has_masked)` PAIR rather than the [`read_pipeline::ApplyResult`]
-/// the insert halves return. That is not a stylistic difference: the
-/// probe-found-nothing arm below returns `(Vec::new(), false)`, a shape no
-/// `ApplyResult` produces, and the `false` is load-bearing - see the comment at
-/// that return. `actor_id` is eager for the reason given on [`run_insert`].
+/// Update one row and retain whether its result contains masked fields.
 pub(crate) async fn run_update_one(
     binding: DbBinding,
     coll: String,
@@ -919,10 +895,7 @@ pub(crate) fn plan_delete_one_input(
     })
 }
 
-/// Shared dispatch for `deleteMany`. Resolves with the count of
-/// affected rows as a JS `number`.
-/// The ENGINE half of `delete_many`. Identical in shape to [`plan_delete_one`];
-/// only the builder differs.
+/// Compile a bulk soft delete, or a hard delete when no lifecycle marker exists.
 pub fn plan_delete_many(
     binding: &DbBinding,
     route: &crate::tx_route::CapturedRoute,
@@ -979,9 +952,7 @@ pub fn plan_purge_one(
     })
 }
 
-/// Bulk-purge entry point.
-/// The ENGINE half of `purge_many`. Peer of [`plan_purge_one`]: a hard delete,
-/// so no `actor_id`.
+/// Compile a bulk hard delete.
 pub fn plan_purge_many(
     binding: &DbBinding,
     route: &crate::tx_route::CapturedRoute,
@@ -1001,12 +972,7 @@ pub fn plan_purge_many(
     })
 }
 
-/// Restore a soft-deleted row.
-/// The ENGINE half of `restore_one`.
-///
-/// NOT a copy of [`plan_delete_one`]: the autobump here also sets
-/// `dispatch_write: true`. Templating this family from a sibling would drop that
-/// flag silently, so each plan is transcribed from its own dispatch.
+/// Compile restoration of one soft-deleted row and its declared assignments.
 pub fn plan_restore_one(
     binding: &DbBinding,
     route: &crate::tx_route::CapturedRoute,
@@ -1038,9 +1004,7 @@ pub fn plan_restore_one(
     })
 }
 
-/// Bulk-restore entry point.
-/// The ENGINE half of `restore_many`. Like [`plan_restore_one`], the autobump
-/// sets `dispatch_write: true`; only the builder differs.
+/// Compile restoration of matching soft-deleted rows and declared assignments.
 pub fn plan_restore_many(
     binding: &DbBinding,
     route: &crate::tx_route::CapturedRoute,
@@ -1076,22 +1040,7 @@ pub fn plan_restore_many(
 // aggregate / distinct / count — read paths
 // ---------------------------------------------------------------------------
 
-/// Shared dispatch for `aggregate`. Pipeline is a JSON array of stage
-/// objects.
-///
-/// `opts.include_deleted: true` opts out of the auto
-/// soft-delete `$match` (per Q-SF-J -- every read-side
-/// method auto-filters for consistency).
-/// The ENGINE half of `aggregate`.
-///
-/// Returns a PAIR, unlike the seven single-`CompiledQuery` plans in this file:
-/// `build_aggregate_with_result_columns` yields the result-column list alongside
-/// the query, and the adapter needs it to shape the response. `distinct` is the
-/// other pair-returning member of this group.
-///
-/// `aggregate_group_fields(&pipeline)` deliberately stays on the adapter side for
-/// now. It is pipeline analysis and belongs here, but moving it would make this a
-/// three-value return; it travels with the outstanding second cut instead.
+/// Compile an aggregate and return its result-column layout with the query.
 pub fn plan_aggregate(
     binding: &DbBinding,
     route: &crate::tx_route::CapturedRoute,
@@ -1205,8 +1154,7 @@ pub fn plan_count(
 // upsert — INSERT … ON CONFLICT path
 // ---------------------------------------------------------------------------
 
-/// The ENGINE half of `upsert`. `actor_id` is eager for the reason given on
-/// [`run_insert`]; `route` is borrowed twice here, so it is taken by value.
+/// Execute an upsert using the captured route and actor.
 pub async fn run_upsert(
     binding: DbBinding,
     coll: String,
@@ -1490,13 +1438,7 @@ pub struct NearPlan {
     query: crate::sql::compiler::CompiledQuery,
 }
 
-/// The EAGER half of `near`. Same rejection-folding as [`plan_search`]: the five
-/// eagerly-spawned rejections are plain `Err`s, and `settle`'s error arm makes
-/// the same `reject_op` call they did.
-///
-/// All four argument refusals share the `invalid_near_args` code; only the
-/// message distinguishes them. That is transcribed from the original, not
-/// tidied - the SDK branches on the code.
+/// Validate spatial arguments and compile the broad database query.
 pub fn plan_near(
     binding: &DbBinding,
     registration: &crate::sql::registration::SqlRegistration,

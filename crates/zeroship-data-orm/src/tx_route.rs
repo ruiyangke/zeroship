@@ -83,11 +83,7 @@ impl CapturedRoute {
         &self.app_id
     }
 
-    /// The decision itself, before a backend is attached.
-    ///
-    /// Readable here because the SEC-1 comparison happens in [`Self::capture`],
-    /// so this is the value that comparison produced - the tests below assert
-    /// on it directly rather than having to bind a backend first.
+    /// Whether the captured dispatch belongs to a transaction callback.
     pub fn in_tx(&self) -> bool {
         self.in_tx
     }
@@ -102,10 +98,7 @@ impl CapturedRoute {
 
     /// Bind the frozen decision to the backend its SQL will run on.
     ///
-    /// Consuming, and the ONLY way to build a [`TxRoute`]. The adapter calls
-    /// it once per dispatch from the async body, because that is the first
-    /// point at which a backend can be opened; see
-    /// the adapter tier's `tx_scope::bind_route`.
+    /// Binding consumes the captured route so it cannot be attached twice.
     pub fn bind(self, backend: BackendHandle) -> Result<TxRoute, crate::error::DbError> {
         if self.registration.identity() != backend.sql_registration().identity() {
             return Err(crate::error::DbError::config(
@@ -182,9 +175,7 @@ impl TxRoute {
 
     /// The backend this dispatch's SQL runs on.
     ///
-    /// Bound at [`CapturedRoute::bind`], so it is the handle the adapter
-    /// resolved for THIS dispatch rather than whatever the thread's context
-    /// holds by the time the statement finally runs.
+    /// This is the handle frozen by [`CapturedRoute::bind`].
     pub fn backend(&self) -> &BackendHandle {
         &self.backend
     }
@@ -217,14 +208,3 @@ impl TxRoute {
         Ok(self)
     }
 }
-
-// THE `#[cfg(test)] mod tests` THAT SAT HERE MOVED to `zeroship-data-v8`'s
-// `tx_scope.rs` with the data-engine cut, unchanged in substance.
-//
-// All five arms drive `tx_scope::capture_route` inside a live `v8::PinScope`,
-// and three of the four names they use - `tx_scope`, `context`,
-// `set_db_url_for_tests`, plus `v8` and `zeroship_runtime::init_v8` - are the
-// adapter's. What they establish is a property OF the capture, not of the value
-// it produces: that `capture` reads the async-scope marker and is provably not
-// the ambient `tx_lanes::has_tx_for` answer. Reverting `capture` to the pre-fix
-// ambient test still fails three of them, in their new home.
