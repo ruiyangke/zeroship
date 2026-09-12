@@ -43,21 +43,31 @@ impl RegistrationIdentity {
         compiler: &str,
         codecs: &str,
         family: SqlFamily,
-        support: SqlSupport,
+        implemented: SqlSupport,
+        effective: SqlSupport,
     ) -> Self {
         let mut hash = Sha256::new();
         hash.update(b"zeroship.orm.sql-registration\0");
-        hash.update(configuration.as_bytes());
-        hash.update(compiler.as_bytes());
-        hash.update(codecs.as_bytes());
-        hash.update(family.name().as_bytes());
-        hash.update(format!("\0{support:?}").as_bytes());
+        hash_component(&mut hash, configuration.as_bytes());
+        hash_component(&mut hash, compiler.as_bytes());
+        hash_component(&mut hash, codecs.as_bytes());
+        hash_component(&mut hash, family.name().as_bytes());
+        hash_component(
+            &mut hash,
+            format!("{implemented:?}\0{effective:?}").as_bytes(),
+        );
         Self(hash.finalize().into())
     }
 
     pub(crate) fn contribute_to(self, hash: &mut Sha256) {
         hash.update(self.0);
     }
+}
+
+fn hash_component(hash: &mut Sha256, value: &[u8]) {
+    let length = u64::try_from(value.len()).expect("registration identity component length");
+    hash.update(length.to_le_bytes());
+    hash.update(value);
 }
 
 impl fmt::Debug for RegistrationIdentity {
@@ -78,6 +88,7 @@ pub struct SqlRegistration {
     family: SqlFamily,
     compiler: Arc<dyn SqlCompiler>,
     codecs: Arc<dyn SqlStorageCodecs>,
+    implemented: SqlSupport,
     effective: SqlSupport,
 }
 
@@ -103,6 +114,8 @@ impl SqlRegistration {
         C: SqlCompiler + 'static,
         K: SqlStorageCodecs + 'static,
     {
+        let implemented = compiler.support();
+        super::compiler::enforce_support(implemented, &Requirements::default(), &effective)?;
         compiler.check(&Requirements::default(), &effective)?;
         Ok(Self {
             identity: RegistrationIdentity::new(
@@ -110,11 +123,13 @@ impl SqlRegistration {
                 std::any::type_name::<C>(),
                 std::any::type_name::<K>(),
                 family,
+                implemented,
                 effective,
             ),
             family,
             compiler: Arc::new(compiler),
             codecs: Arc::new(codecs),
+            implemented,
             effective,
         })
     }
@@ -156,10 +171,12 @@ impl SqlRegistration {
     }
 
     pub fn check(&self, requirements: &Requirements) -> Result<(), CompileError> {
+        super::compiler::enforce_support(self.implemented, requirements, &self.effective)?;
         self.compiler.check(requirements, &self.effective)
     }
 
     pub fn compile(&self, statement: Statement) -> Result<CompiledQuery, CompileError> {
+        self.check(&Requirements::for_statement(&statement))?;
         self.compiler.compile(statement, &self.effective)
     }
 
@@ -193,5 +210,20 @@ impl SqlRegistration {
         rows: &mut [Value],
     ) -> Result<(), crate::sql::codecs::CodecError> {
         crate::sql::codecs::decode_rows(self, schema, rows)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn registration_identity_delimits_each_component() {
+        let support = PostgresCompiler.support();
+        let first =
+            RegistrationIdentity::new("a", "bc", "d", SqlFamily::new("e"), support, support);
+        let second =
+            RegistrationIdentity::new("ab", "c", "d", SqlFamily::new("e"), support, support);
+        assert_ne!(first, second);
     }
 }

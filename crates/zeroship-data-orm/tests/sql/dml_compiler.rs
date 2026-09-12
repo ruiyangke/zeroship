@@ -1,12 +1,16 @@
 use zeroship_data_orm::{
     sql::{
-        compiler::{CompileError, PostgresCompiler, Requirements, SqlCompiler, SqliteCompiler},
+        compiler::{
+            CompileError, CompiledQuery, IdentityPlan, PostgresCompiler, Requirements, SqlCompiler,
+            SqlSupport, SqliteCompiler,
+        },
         registration::{SqlFamily, SqlRegistration, SqlStorageCodecs},
         statement::{
-            Assignment, Comparison, Expression, Insert, InsertParts, ResolvedJoin, ResolvedOperand,
-            ResolvedPredicate, ResolvedPredicateValue, ReturnedColumn, SelectParts,
-            SelectStatement, SelectedExpression, SpatialNearParts, SpatialNearStatement, Statement,
-            StorageType, Table, Upsert, UpsertParts, VectorSearchParts, VectorSearchStatement,
+            Assignment, Comparison, Expression, IdentityRequest, Insert, InsertParts, ResolvedJoin,
+            ResolvedOperand, ResolvedPredicate, ResolvedPredicateValue, ReturnedColumn,
+            SelectParts, SelectStatement, SelectedExpression, SpatialNearParts,
+            SpatialNearStatement, Statement, StorageType, Table, Upsert, UpsertParts,
+            VectorSearchParts, VectorSearchStatement,
         },
         CompareOp, Ident, IdentRole, JoinKind, SchemaName,
     },
@@ -578,6 +582,31 @@ impl SqlCompiler for DownstreamCompiler {
 }
 
 #[derive(Clone, Copy)]
+struct PermissiveCompiler(SqlSupport);
+
+impl SqlCompiler for PermissiveCompiler {
+    fn support(&self) -> SqlSupport {
+        self.0
+    }
+
+    fn check(&self, _: &Requirements, _: &SqlSupport) -> Result<(), CompileError> {
+        Ok(())
+    }
+
+    fn compile(&self, statement: Statement, _: &SqlSupport) -> Result<CompiledQuery, CompileError> {
+        PostgresCompiler.compile(statement, &PostgresCompiler.support())
+    }
+
+    fn compile_identity_allocation(
+        &self,
+        request: IdentityRequest,
+        _: &SqlSupport,
+    ) -> Result<IdentityPlan, CompileError> {
+        PostgresCompiler.compile_identity_allocation(request, &PostgresCompiler.support())
+    }
+}
+
+#[derive(Clone, Copy)]
 struct DownstreamCodecs;
 
 impl SqlStorageCodecs for DownstreamCodecs {
@@ -616,6 +645,39 @@ fn a_downstream_compiler_and_codecs_register_without_a_vendor_enum_arm() {
             .len(),
         3
     );
+}
+
+#[test]
+fn registration_enforces_common_support_even_when_a_compiler_check_is_permissive() {
+    let mut limited = PostgresCompiler.support();
+    limited.returning = false;
+    let compiler = PermissiveCompiler(limited);
+
+    let registration = SqlRegistration::new(
+        "limited-sql",
+        SqlFamily::new("example.limited-sql"),
+        compiler,
+        DownstreamCodecs,
+        limited,
+    )
+    .unwrap();
+    assert!(matches!(
+        registration.compile(Statement::Insert(
+            Insert::new(insert_parts(&table())).unwrap()
+        )),
+        Err(CompileError::Unsupported("returning projections"))
+    ));
+
+    let mut overclaimed = limited;
+    overclaimed.returning = true;
+    assert!(SqlRegistration::new(
+        "overclaimed-sql",
+        SqlFamily::new("example.overclaimed-sql"),
+        compiler,
+        DownstreamCodecs,
+        overclaimed,
+    )
+    .is_err());
 }
 
 #[test]
