@@ -20,6 +20,8 @@ use std::{
     time::Duration,
 };
 
+mod deployment_holds;
+
 #[derive(Default)]
 struct Probe {
     active: Cell<usize>,
@@ -29,6 +31,8 @@ struct Probe {
     pending: Cell<bool>,
     gate_stop: Cell<bool>,
     stops: RefCell<Vec<oneshot::Sender<()>>>,
+    gate_execution: Cell<bool>,
+    releases: RefCell<Vec<oneshot::Sender<()>>>,
 }
 struct Executor(Rc<Probe>);
 impl TaskExecutor for Executor {
@@ -50,10 +54,16 @@ impl TaskExecutor for Executor {
         self.0
             .maximum
             .set(self.0.maximum.get().max(self.0.active.get()));
+        let release = self.0.gate_execution.get().then(|| {
+            let (send, receive) = oneshot::channel();
+            self.0.releases.borrow_mut().push(send);
+            receive
+        });
         Ok(Box::new(Execution {
             probe: self.0.clone(),
             stopped: false,
             stop: None,
+            release,
         }))
     }
 }
@@ -61,10 +71,14 @@ struct Execution {
     probe: Rc<Probe>,
     stopped: bool,
     stop: Option<oneshot::Receiver<()>>,
+    release: Option<oneshot::Receiver<()>>,
 }
 #[async_trait(?Send)]
 impl TaskExecution for Execution {
     async fn wait(&mut self) -> Result<WorkflowExecution, WorkflowServiceError> {
+        if let Some(release) = self.release.take() {
+            release.await.unwrap();
+        }
         if self.probe.pending.get() {
             std::future::pending::<()>().await;
         }
@@ -159,9 +173,17 @@ async fn capacity_contract(store: Rc<OrmStore>, dir: &Path) {
         );
     }
     probe.fail_first.set(true);
+    probe.gate_execution.set(true);
     compio::time::timeout(
         Duration::from_secs(5),
         worker.run_until(async {
+            // Hold executions until the worker fills its capacity; database
+            // latency must not decide whether their lifetimes overlap.
+            wait_for(|| probe.active.get() == options().task_slots).await;
+            probe.gate_execution.set(false);
+            for release in probe.releases.borrow_mut().drain(..) {
+                release.send(()).unwrap();
+            }
             loop {
                 let mut complete = true;
                 for run in &runs {
@@ -406,7 +428,7 @@ async fn worker_refuses_missing_storage_and_invalid_capacity_before_claiming() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("zs-workflow.sqlite");
     schema::initialize_sqlite(&path).unwrap();
-    let (service, app, _, _deployments) =
+    let (service, app, _, deployments) =
         registered_service(Rc::new(sqlite_store(&path).await)).await;
     let identity = WorkerIdentity::new("invalid-host".into()).unwrap();
     let executor = Rc::new(Executor(Rc::new(Probe::default())));
@@ -421,6 +443,17 @@ async fn worker_refuses_missing_storage_and_invalid_capacity_before_claiming() {
             zeroship_storage::LocalFs::new(dir.path()),
         )))
         .unwrap();
+    let incomplete = service
+        .clone()
+        .with_deployments(deployments.binding(&[&app]));
+    assert!(matches!(
+        WorkflowWorker::new(
+            Rc::new(incomplete.tasks(identity.clone())),
+            executor.clone(),
+            options(),
+        ),
+        Err(WorkflowServiceError::PermissionDenied)
+    ));
     let tasks = Rc::new(service.tasks(identity));
     for options in [
         WorkerOptions {
