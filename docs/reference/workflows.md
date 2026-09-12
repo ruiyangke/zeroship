@@ -26,8 +26,9 @@ used by the local engine. The control plane uses the Rust engine directly.
 
 The replacement service accepts an `OrmStore` built from the host's `OrmContext`,
 `DbBinding` and `BackendHandle`. The ORM selects the configured database and owns
-transactions. Reserved journal operations use its scoped SQL interface because
-the current collection API rejects those table names for native callers too.
+transactions. Journal operations currently use its scoped SQL interface while
+model conversion proceeds. Rust and creator ORM access permits workflow table
+names within the bound customer schema; prefixes are not an authorization check.
 `AppWorkflows::into_backend` exposes a bounded client for V8 and Rust callers on
 other runtime threads; database operations remain on the engine's owning thread.
 The existing Control PostgreSQL store remains until production cutover.

@@ -32,9 +32,10 @@ The replacement service now uses a shared `OrmStore`; its workflow-owned
 PostgreSQL and SQLite adapters have been removed. The CLI supplies its normal
 database binding and object storage. Transaction ownership stays on the engine's
 compio thread, with a bounded app-scoped client for V8 and other Rust threads.
-Reserved journal operations still use the ORM's explicit SQL interface because
-the existing collection API rejects those names. Collection conversion and the
-existing Control store's removal remain pending.
+Journal operations still use the ORM's explicit SQL interface while model and
+collection conversion proceeds. ORM table references permit every table prefix
+for Rust and creator code within the bound customer schema. The existing Control
+store's removal remains pending.
 
 This design supersedes the older
 [control-plane design](2026-07-05-durable-workflows-design.md),
@@ -194,11 +195,12 @@ The physical schema is resolved independently of app identity, following the
 [data-system contract](../architecture/data-system.md); it is not inferred by
 concatenating an app ID into a database URL or schema name.
 
-Database roles restrict a customer's worker to its authorized storage. Where
-apps share a customer database, journal predicates, keys, foreign keys and
-native handles also carry app identity. Sharing a database does not authorize
-an app to inspect or modify another app's workflow. Reserved journal tables
-remain inaccessible through creator collection and raw-query surfaces.
+Database roles restrict a customer's worker to its authorized storage. Workflow
+handles, journal predicates, keys and foreign keys carry app identity. Direct
+ORM access is transparent within the authorized customer schema, including
+workflow tables. Table prefixes communicate ownership and are not an access
+boundary. Apps granted the same schema share its data; separate schema bindings
+and database permissions enforce separation where required.
 
 Worker-owned workflow writes are not privileged platform operations. They use
 ordinary parameterized SQL in the customer's resolved schema, consistent with
@@ -231,15 +233,12 @@ database-time lease checks, affected-row compare-and-set decisions, app locking,
 generation fencing and atomic history/reference updates during the conversion.
 A read followed by an unconditional write is not a substitute for an atomic claim.
 
-The current collection API applies reserved-name validation to Rust callers as
-well as V8 callers. It also enforces descriptor-defined identity and mutation
-rules. Platform use of the Rust ORM is supported, but it does not implicitly
-grant collection access to reserved workflow tables. Keep these tables reserved;
-do not rename them into creator-visible collections, rewrite compiled table names
-or add a parallel query builder in workflow to evade validation. Use the existing
-host-scoped ORM execution/session interface for operations that cannot yet use
-collection APIs, and keep the remaining SQL explicit and reviewable. This is
-backend reuse, not a claim that collection migration is complete.
+The ORM permits all table prefixes within the host-bound schema for both Rust
+and creator code. It validates identifier syntax and uses normal schema binding
+and database permissions; no special internal collection role or prefix allowlist
+is needed. Descriptor-defined identity and mutation rules still apply. Use the
+existing scoped ORM execution interface for operations not yet represented by
+model operations, keeping remaining SQL explicit and reviewable.
 
 Rust models follow the ORM's existing migration-derived model contract. Emit a
 runtime descriptor for the physical reserved table names from the same canonical
@@ -247,14 +246,12 @@ migration definition, then use `orm::schema!` to generate entity and column
 metadata. `FromRow` defines typed read projections, `Insertable` defines creation
 inputs, and `Changeset` defines explicit partial updates. Do not maintain another
 handwritten schema in Rust or JSON. The workflow generator currently emits DDL
-and fingerprints; descriptor generation and model adoption remain pending the
-native reserved-collection contract. Composite app/run/generation keys and
+and fingerprints; descriptor generation and model adoption remain unfinished.
+Composite app/run/generation keys and
 conditional updates must remain expressible before converting those operations.
 
-Do not modify `zeroship-data-orm` as part of this workflow work. Missing ORM
-capabilities are recorded as dependencies rather than implemented as workflow
-database adapters. Reconcile with the existing ORM API on the development base
-before introducing a consumer; inherited ORM changes remain owned by that work.
+Extend the shared ORM where workflow models need a general table capability.
+Do not introduce workflow-specific database adapters or another query builder.
 
 The conversion must preserve ordinary customer-role permissions, native app
 isolation, rollback after cancellation, and refusal of indeterminate commits.
@@ -501,7 +498,7 @@ centralized history and payload ownership are not a temporary production mode.
   through the canonical migration DSL for PostgreSQL and SQLite.
 - Replace workflow-owned database adapters with the shared Rust ORM. Convert
   supported journal operations to ORM operations and retain explicit SQL only
-  for concrete public-API gaps, without changing ORM source in this work.
+  for concrete public-API gaps. Shared ORM changes apply equally to Rust and V8.
 - Replace the server's data-owning task transport with registry, placement,
   wake-up and management contracts. Remove the platform workflow journal and
   its roles, remote payload uploads and workflow-specific Control journal SQL.

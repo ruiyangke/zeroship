@@ -17,6 +17,7 @@ mod joins;
 mod json;
 mod lifecycle;
 mod nested_temporal;
+mod native_tables;
 mod protected_updates;
 mod protected_projections;
 mod schema_updates;

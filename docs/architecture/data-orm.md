@@ -4,6 +4,12 @@ Rust applications and worker TypeScript use the same ORM behavior. Application
 models, collection operations, and transaction callbacks do not carry a backend
 type parameter. The host chooses the database during setup.
 
+The customer schema is transparent to both Rust and creator code. ORM collection
+references accept all table prefixes, including `__zeroship_workflow_*`.
+Identifier validation prevents malformed or schema-qualified collection names;
+the host's bound schema and database role determine access. Runtime descriptors
+still supply model metadata, and normal field protection applies to operations.
+
 ```text
 Rust models                         Worker TypeScript
      |                                     |
