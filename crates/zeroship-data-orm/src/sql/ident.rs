@@ -50,17 +50,8 @@ pub enum IdentRole {
     Column,
     /// A column the platform references rather than one a creator declared.
     ///
-    /// It exists for the same reason [`Self::Alias`] does. The platform's stored
-    /// forms are spelled with the very prefixes `COLUMN_RESERVATIONS` refuses,
-    /// because refusing them is what stops a creator declaring one; the platform
-    /// still has to name them. Splitting the role is how that is expressed
-    /// without weakening the creator-facing fence.
-    ///
-    /// This replaced a `pub(crate)` constructor that built the name by
-    /// `format!` and skipped `parse_as` entirely, so a stored name went through
-    /// no charset check and no catalog fence at all. A role is strictly
-    /// stronger: it still refuses `pg_` and `sqlite_`, the classification names,
-    /// quote injection and NUL.
+    /// This role permits platform prefixes while retaining identifier and
+    /// database-catalog validation.
     StoredColumn,
     /// An output name in a projection, including the platform's own synthetic
     /// result columns.
@@ -137,17 +128,8 @@ impl Reservation {
 
 /// Schema-name fences.
 ///
-/// `__zeroship` is refused here, and it guards two distinct things. The first is
-/// live: `__zeroship_` is the prefix of tables that exist in every app schema
-/// today - the migration journal, the unmask audit table, the workflow journal -
-/// and a creator-named collection colliding with one of them is a corruption
-/// rather than a name clash. The second is a reservation: this crate builds
-/// plans the *worker* executes, and the worker executes creator code, so per the
-/// platform invariant, state a separate service writes and the worker only reads
-/// must not be nameable from a worker-built plan. No such platform-owned schema
-/// exists at the time of writing; the fence holds the namespace open for one and
-/// protects the live tables meanwhile. Do not narrow it on the grounds that the
-/// schema is absent.
+/// Platform prefixes protect stored application-schema objects and reserve
+/// namespaces that creator-built statements must not address.
 const NAMESPACE_RESERVATIONS: &[Reservation] = &[
     Reservation::Prefix("pg_"),
     Reservation::Exact("information_schema"),
@@ -158,28 +140,20 @@ const NAMESPACE_RESERVATIONS: &[Reservation] = &[
 
 /// Catalog prefixes owned by the backends the runtime can address.
 ///
-/// These are separate from the neutral platform tables. SQLite refuses
-/// `sqlite_*` table names outright, while PostgreSQL does not reliably refuse
-/// every `pg_*` object. Both prefixes apply to columns because the migration
-/// engine fences the union from every registered backend against later
-/// retargeting. The behavioral parity suite derives the real shipping set and
-/// fails when runtime reservations drifts.
+/// These prefixes are fenced consistently so a schema can move between the
+/// supported databases without gaining access to catalog names.
 const BACKEND_CATALOG_RESERVATIONS: &[Reservation] =
     &[Reservation::Prefix("pg_"), Reservation::Prefix("sqlite_")];
 
-/// Column-name fences, in `RESERVED_NAMES` order so the error a given name
-/// produces is the same one it produces today.
-///
-/// `Prefix("_")` subsumes the platform prefixes. They remain explicit so the
-/// reserved platform namespaces are visible in this table.
+/// Column-name fences. Platform prefixes remain explicit for auditability even
+/// though the leading-underscore rule also matches them.
 const COLUMN_RESERVATIONS: &[Reservation] = &[
     // Synthetic result columns the runtime emits, e.g. `_distance` on vector
     // search. Reserved so a creator column cannot shadow one.
     Reservation::Prefix("_"),
     Reservation::Prefix("__zs_"),
     Reservation::Prefix("__zeroship_"),
-    // The six default classifications, reserved at column level so a creator
-    // schema cannot collide with the taxonomy authorization and audit use.
+    // Classification names are reserved for authorization and audit metadata.
     Reservation::Exact("public"),
     Reservation::Exact("pii"),
     Reservation::Exact("spi"),
@@ -191,13 +165,8 @@ const COLUMN_RESERVATIONS: &[Reservation] = &[
 /// Fences for a column the platform references rather than one a creator
 /// declared.
 ///
-/// This omits the platform prefixes that creator columns cannot use because
-/// this role is the platform naming those columns. The
-/// classification names stay: nothing the platform stores is called `pii`, and
-/// keeping them costs nothing while preserving the taxonomy fence in both roles.
-///
-/// The backend catalog fences (`pg_`, `sqlite_`) apply to this role too, wired
-/// beside [`IdentRole::Column`] in `parse_as`.
+/// Platform prefixes are permitted here; classification and backend catalog
+/// names remain reserved.
 const STORED_COLUMN_RESERVATIONS: &[Reservation] = &[
     Reservation::Exact("public"),
     Reservation::Exact("pii"),
@@ -209,45 +178,31 @@ const STORED_COLUMN_RESERVATIONS: &[Reservation] = &[
 
 /// Output-name fences.
 ///
-/// An alias is **allowed** a single leading `_`, which a column is not, and the
-/// asymmetry is the reason the role exists. The platform's own synthetic result
-/// columns are spelled that way - `_distance` on a vector search - and they are
-/// emitted as aliases, never declared as columns. The `_` fence on
-/// `COLUMN_RESERVATIONS` is what stops a creator column shadowing one; the
-/// alias side is the platform's to spell.
+/// Aliases may use a leading underscore for synthetic result fields. Creator
+/// columns cannot use that prefix, so they cannot shadow those fields.
 const ALIAS_RESERVATIONS: &[Reservation] = &[
     Reservation::Prefix("__zs_"),
     Reservation::Prefix("__zeroship"),
     Reservation::Prefix("sqlite_"),
 ];
 
-/// Fences for names the platform derives (constraints, indexes). No creator
-/// reservation applies - a creator does not choose these - so only the shared
-/// shape rules (charset, length, no NUL) run.
+/// Derived constraint and index names use the shared shape rules.
 const DERIVED_NAME_RESERVATIONS: &[Reservation] = &[];
 
 /// Why an identifier was refused.
 ///
-/// Every variant names the role, because the same text is legal in one position
-/// and refused in another and an error that does not say which is being tested
-/// sends the reader to the wrong fence.
+/// Every variant names the identifier role that rejected the input.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IdentError {
     /// The name was empty.
     Empty { role: IdentRole },
-    /// The name contained a NUL byte. Kept as its own variant rather than
-    /// folded into [`IdentError::IllegalCharacter`]: a NUL is how a truncating
-    /// C-string consumer is attacked, not a typo.
+    /// The name contained a NUL byte.
     NulByte { role: IdentRole },
     /// The name exceeded [`MAX_IDENT_BYTES`].
     TooLong { role: IdentRole, len: usize },
     /// The name contained something outside `[A-Za-z0-9_]`.
     ///
-    /// The offending character is reported escaped, and the *name* is not
-    /// echoed at all. This is a deliberate departure from
-    /// `validate_field_name`, whose message interpolates the raw name and so
-    /// can carry control characters or a broken escape into whatever reads the
-    /// error.
+    /// The error reports the escaped character without echoing the whole name.
     IllegalCharacter { role: IdentRole, character: char },
     /// The name hit the role's reservation table. Safe to echo: the charset
     /// check runs first, so `name` here is always `[A-Za-z0-9_]`.

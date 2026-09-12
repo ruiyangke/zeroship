@@ -82,13 +82,7 @@ impl core::hash::Hash for Finite {
 
 /// A finite `f32`, for the elements of a [`QueryVector`].
 ///
-/// The same argument as [`Finite`] and the same hand-written impls, at the
-/// width the value actually has. An embedding is `f32` at every layer that
-/// carries it - `VectorIndex::vector_search` takes `&[f32]`
-/// (`crates/zeroship-data-orm/src/backend/mod.rs`) and `vec0` reads a
-/// buffer of `f32` (`backend/sqlite/vector.rs:127`) - so widening to `f64` here
-/// and narrowing again at the driver would make the plan's value and the bound
-/// value different numbers for no gain.
+/// Embeddings remain `f32` through query construction and backend binding.
 #[derive(Debug, Clone, Copy)]
 pub struct Finite32(f32);
 
