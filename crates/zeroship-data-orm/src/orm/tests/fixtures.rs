@@ -14,6 +14,21 @@ pub(super) struct CollectionFixture {
 }
 
 impl CollectionFixture {
+    pub async fn wait_for_upsert_conflict(&self) {
+        let backend = &self.postgres.as_ref().expect("PostgreSQL fixture").0;
+        let app = self.database.binding.app_id();
+        compio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let rows = backend.pool().query(
+                    "SELECT EXISTS(SELECT FROM pg_stat_activity WHERE wait_event = 'transactionid' AND query LIKE '%ON CONFLICT%' AND query LIKE '%' || $1 || '%')",
+                    &[&app],
+                ).await.unwrap();
+                if rows[0].get::<_, bool>(0) { break; }
+                compio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }).await.expect("upsert must wait for the uncommitted conflicting row");
+    }
+
     pub async fn sqlite(collection: &str, fields: Value) -> Self {
         Self::sqlite_with_keys(collection, fields, ProjectKeySource::unavailable()).await
     }

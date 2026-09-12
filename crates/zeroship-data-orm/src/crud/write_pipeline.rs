@@ -566,8 +566,8 @@ fn update_target(patch: &mut Value) -> &mut Value {
     }
 }
 
-/// The probe uses the write's route and dialect to see the existing row in
-/// the same transaction before producing ciphertext bound to its identity.
+/// Resolve a candidate identity before encryption. The upsert's SQL guard
+/// handles conflicts that become visible after this probe.
 async fn rewrite_upsert_doc_id_to_existing_row_id(
     dialect: compile::SqlDialect,
     doc: &mut Value,

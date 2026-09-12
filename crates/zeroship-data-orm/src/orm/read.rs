@@ -225,12 +225,13 @@ impl PreparedRead {
                     if selected.is_empty() || selected.len() > MAX_READ_FIELDS {
                         return Err(invalid("row projection exceeds its field budget"));
                     }
-                    for field in selected.into_iter().chain(std::iter::once("id".into())) {
+                    for field in selected {
                         if !allowed.contains(&field) {
                             return Err(invalid(format!("unreadable projection field '{field}'")));
                         }
                         add_field(layout, &field, &mut projected)?;
                     }
+                    add_field(layout, "id", &mut projected)?;
                 }
                 ReadProjection::Scalar { expression, .. } => {
                     if !aggregating {

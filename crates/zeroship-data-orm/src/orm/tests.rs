@@ -11,6 +11,8 @@ mod fixtures;
 mod generated_identity;
 mod identity;
 mod identity_contract;
+mod identity_visibility;
+mod encrypted_upsert;
 mod joins;
 mod json;
 mod lifecycle;
