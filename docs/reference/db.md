@@ -128,6 +128,10 @@ app-level `Env.db` augmentation moved to generated code.
 
 ### Collection names
 
+Creators address collections such as `env.db.orders`; the host resolves their
+physical schema. Creator queries do not supply a PostgreSQL schema name or a
+schema-qualified table path.
+
 ORM access is transparent within the bound customer schema for both Rust and
 creator code. Table prefixes, including `__zeroship_workflow_*`, do not restrict
 queries. Collection references must be valid ASCII identifiers and cannot name
