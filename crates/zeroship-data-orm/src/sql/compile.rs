@@ -1371,8 +1371,8 @@ pub fn build_update_one(
 /// Dialect-aware `updateOne` builder. Encrypted-column
 /// binds follow the dialect's
 /// [`SqlDialect::binary_bind_placeholder`]. PostgreSQL narrows through
-/// the platform primary key and locks the selected row. SQLite keeps its
-/// `rowid` target because it has no column-grant boundary.
+/// the declared primary key and locks the selected row. SQLite uses the same
+/// complete key to select its target.
 pub fn build_update_one_with_dialect(
     schema_name: &SchemaName,
     collection: &str,
@@ -1419,9 +1419,9 @@ pub fn build_update_one_with_assignments(
     } else {
         format!(" WHERE {where_clause}")
     };
-    let (target_col, lock_clause) = single_row_write_target(dialect, schema_hint);
+    let (target_col, selected_cols, lock_clause) = single_row_write_target(dialect, schema_hint)?;
     let sql = format!(
-        "UPDATE {schema}.{table} SET {} WHERE {target_col} = (SELECT {target_col} FROM {schema}.{table}{inner_where} LIMIT 1{lock_clause}) RETURNING {returning}",
+        "UPDATE {schema}.{table} SET {} WHERE {target_col} = (SELECT {selected_cols} FROM {schema}.{table}{inner_where} LIMIT 1{lock_clause}) RETURNING {returning}",
         set_clauses.join(", "),
     );
 
@@ -1713,9 +1713,9 @@ pub fn build_delete_one_with_dialect(
     let mut params: Vec<Value> = Vec::new();
     let where_clause = build_where_with_dialect(filter, &mut params, schema_hint, dialect)?;
 
-    let (target_col, lock_clause) = single_row_write_target(dialect, schema_hint);
+    let (target_col, selected_cols, lock_clause) = single_row_write_target(dialect, schema_hint)?;
     let sql = format!(
-        "DELETE FROM {schema}.{table} WHERE {target_col} = (SELECT {target_col} FROM {schema}.{table}{} LIMIT 1{lock_clause}) RETURNING {returning}",
+        "DELETE FROM {schema}.{table} WHERE {target_col} = (SELECT {selected_cols} FROM {schema}.{table}{} LIMIT 1{lock_clause}) RETURNING {returning}",
         if where_clause.is_empty() {
             String::new()
         } else {
@@ -1728,16 +1728,32 @@ pub fn build_delete_one_with_dialect(
 
 // Lifecycle mutations use assignments prepared by the ORM.
 
-/// Select and lock an entity by its id.
-fn single_row_write_target(dialect: SqlDialect, schema: &Value) -> (String, &'static str) {
-    (
-        quote_ident(&value_column_for_field("id", schema)),
+/// Select and lock an entity using every component of its declared key.
+fn single_row_write_target(
+    dialect: SqlDialect,
+    schema: &Value,
+) -> Result<(String, String, &'static str), QueryError> {
+    let keys = crate::sql::descriptors::primary_key_fields(schema)
+        .map_err(|message| QueryError::InvalidFilter(message.into()))?;
+    let selected = keys
+        .iter()
+        .map(|name| quote_ident(&value_column_for_field(name, schema)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let target = if keys.len() == 1 {
+        selected.clone()
+    } else {
+        format!("({selected})")
+    };
+    Ok((
+        target,
+        selected,
         if dialect == SqlDialect::Postgres {
             " FOR UPDATE"
         } else {
             ""
         },
-    )
+    ))
 }
 
 fn deleted_predicate(schema: &Value, deleted: bool) -> Result<String, QueryError> {
@@ -1801,9 +1817,9 @@ pub fn build_soft_delete_one_with_assignments(
         )
     };
 
-    let (target_col, lock_clause) = single_row_write_target(dialect, schema_hint);
+    let (target_col, selected_cols, lock_clause) = single_row_write_target(dialect, schema_hint)?;
     let sql = format!(
-        "UPDATE {schema}.{table} SET {} WHERE {target_col} = (SELECT {target_col} FROM {schema}.{table}{inner_where} LIMIT 1{lock_clause}) RETURNING {returning}",
+        "UPDATE {schema}.{table} SET {} WHERE {target_col} = (SELECT {selected_cols} FROM {schema}.{table}{inner_where} LIMIT 1{lock_clause}) RETURNING {returning}",
         set_clauses.join(", "),
     );
 
@@ -1878,9 +1894,9 @@ pub fn build_restore_one_with_assignments(
         )
     };
 
-    let (target_col, lock_clause) = single_row_write_target(dialect, schema_hint);
+    let (target_col, selected_cols, lock_clause) = single_row_write_target(dialect, schema_hint)?;
     let sql = format!(
-        "UPDATE {schema}.{table} SET {} WHERE {target_col} = (SELECT {target_col} FROM {schema}.{table}{inner_where} LIMIT 1{lock_clause}) RETURNING {returning}",
+        "UPDATE {schema}.{table} SET {} WHERE {target_col} = (SELECT {selected_cols} FROM {schema}.{table}{inner_where} LIMIT 1{lock_clause}) RETURNING {returning}",
         set_clauses.join(", "),
     );
 
@@ -3131,6 +3147,59 @@ mod tests {
                     },
                 },
             ],
+        }
+    }
+
+    #[test]
+    fn bounded_mutations_require_a_declared_key() {
+        let fields = value!({"id":{"type":"string"}, "label":{"type":"string"}});
+        for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite] {
+            for result in [
+                build_update_one_with_dialect(
+                    &s("customer"),
+                    "records",
+                    &fields,
+                    &value!({}),
+                    &value!({"label":"changed"}),
+                    dialect,
+                ),
+                build_delete_one_with_dialect(
+                    &s("customer"),
+                    "records",
+                    &fields,
+                    &value!({}),
+                    dialect,
+                ),
+            ] {
+                assert!(matches!(result, Err(QueryError::InvalidFilter(message))
+                    if message == "collection requires a declared primary key"));
+            }
+        }
+    }
+
+    #[test]
+    fn compound_write_keys_follow_physical_column_metadata() {
+        let fields = value!({
+            "scope":{"type":"string", "primaryKey":true, "storage":{"valueColumn":"scope_key"}},
+            "sequence":{"type":"integer", "primaryKey":true, "storage":{"valueColumn":"sequence_key"}},
+            "label":{"type":"string"},
+        });
+        for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite] {
+            let query = build_update_one_with_dialect(
+                &s("customer"),
+                "records",
+                &fields,
+                &value!({"label":"old"}),
+                &value!({"label":"new"}),
+                dialect,
+            )
+            .unwrap();
+            assert!(query.sql.contains("WHERE (\"scope_key\", \"sequence_key\") = (SELECT \"scope_key\", \"sequence_key\" FROM"));
+            assert_eq!(
+                query.sql.contains("FOR UPDATE"),
+                dialect == SqlDialect::Postgres
+            );
+            assert_eq!(query.params, vec![Value::from("new"), Value::from("old")]);
         }
     }
 

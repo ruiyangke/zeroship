@@ -1,5 +1,26 @@
 //! Value descriptors shared by runtime catalog readers and storage backends.
 
+/// Every declared component of a collection's physical primary key.
+/// Returns logical field names; the compiler resolves their storage columns.
+///
+/// # Errors
+/// Refuses missing field maps and collections without declared key columns.
+pub fn primary_key_fields(schema: &crate::value::Value) -> Result<Vec<&str>, &'static str> {
+    use crate::value::Value;
+    let fields = schema
+        .as_object()
+        .ok_or("collection fields must be an object")?;
+    let keys: Vec<_> = fields
+        .iter()
+        .filter(|(_, field)| field.get("primaryKey").and_then(Value::as_bool) == Some(true))
+        .map(|(name, _)| name.as_str())
+        .collect();
+    if keys.is_empty() {
+        return Err("collection requires a declared primary key");
+    }
+    Ok(keys)
+}
+
 /// ORM collections declare a non-null `id` as their sole primary key.
 pub fn validate_collection_identity(schema: &crate::value::Value) -> Result<(), &'static str> {
     use crate::value::Value;
