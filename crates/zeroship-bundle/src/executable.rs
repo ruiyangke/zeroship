@@ -25,6 +25,17 @@ pub enum ExecutableError {
     Io(#[from] std::io::Error),
 }
 
+/// Compute the normal deployment identity, preserving manifest extensions and
+/// excluding the embedded `deploy_hash` field just as archive ingestion does.
+///
+/// # Errors
+/// Rejects a manifest that is not a JSON object.
+pub fn deployment_manifest_hash(bytes: &[u8]) -> Result<String, ExecutableError> {
+    let canonical = crate::unpack::canonical_manifest_for_hash(bytes)
+        .map_err(|_| ExecutableError::InvalidManifest)?;
+    Ok(sha256_hex(&canonical))
+}
+
 /// Verify the stored manifest against the deployment identity selected by its host.
 /// Hash raw JSON so field presence and extension metadata retain ingest semantics.
 ///
@@ -37,9 +48,7 @@ pub fn verify_deployment_manifest(
     if !validate_hash_format(expected_hash) {
         return Err(ExecutableError::ManifestIdentity);
     }
-    let canonical = crate::unpack::canonical_manifest_for_hash(bytes)
-        .map_err(|_| ExecutableError::InvalidManifest)?;
-    if sha256_hex(&canonical) != expected_hash {
+    if deployment_manifest_hash(bytes)? != expected_hash {
         return Err(ExecutableError::ManifestIdentity);
     }
     let manifest: Manifest =

@@ -9,35 +9,52 @@ use std::{
 };
 use zeroship_bundle::{verify_deployment_manifest, BlobStore, LocalDiskBlobStore};
 use zeroship_core::app_id::AppId;
-use zeroship_workflow::{service::BundleExecutable, WorkflowServiceError};
+use zeroship_workflow::{
+    deployment_holds::DeploymentHolds,
+    service::{BundleExecutable, DeployRegistration},
+    WorkflowServiceError,
+};
 
 pub struct AppDeployment {
-    archive: PathBuf,
+    archive: Option<PathBuf>,
+    index: PathBuf,
     blobs: Arc<dyn BlobStore>,
 }
 pub struct LoadedApp {
-    pub deploy_hash: String,
+    pub registration: DeployRegistration,
     pub executable: BundleExecutable,
 }
 impl AppDeployment {
-    pub fn new(root: &Path, archive: &Path) -> Result<Self, String> {
-        let archive = std::fs::canonicalize(root.join(archive))
+    pub fn new(root: &Path, archive: Option<&Path>) -> Result<Self, String> {
+        let archive = archive
+            .map(|archive| std::fs::canonicalize(root.join(archive)))
+            .transpose()
             .map_err(|error| format!("resolve app archive: {error}"))?;
-        let blobs = LocalDiskBlobStore::new(root.join(".zeroship/deployments"))
+        let directory = root.join(".zeroship/deployments");
+        let blobs = LocalDiskBlobStore::new(directory.clone())
             .map_err(|error| format!("open local app deployments: {error}"))?;
         Ok(Self {
             archive,
+            index: directory.join("index.sqlite"),
             blobs: Arc::new(blobs),
         })
+    }
+
+    pub async fn catalog(&self) -> Result<DeploymentHolds, WorkflowServiceError> {
+        DeploymentHolds::open_local(&self.index).await
     }
 
     pub async fn load(
         &self,
         app: &AppId,
+        catalog: &DeploymentHolds,
         max_archive_bytes: usize,
         max_source_bytes: usize,
-    ) -> Result<LoadedApp, WorkflowServiceError> {
-        let file = compio::fs::File::open(&self.archive)
+    ) -> Result<Option<LoadedApp>, WorkflowServiceError> {
+        let Some(archive) = &self.archive else {
+            return Ok(None);
+        };
+        let file = compio::fs::File::open(archive)
             .await
             .map_err(|_| unavailable())?;
         let size = usize::try_from(file.metadata().await.map_err(|_| unavailable())?.len())
@@ -55,10 +72,13 @@ impl AppDeployment {
             .map_err(|_| unavailable())?;
         let executable =
             BundleExecutable::load(&manifest, self.blobs.as_ref(), max_source_bytes).await?;
-        Ok(LoadedApp {
-            deploy_hash,
+        let id = catalog
+            .record_deployment(app, &deploy_hash, &ingested.manifest_json)
+            .await?;
+        Ok(Some(LoadedApp {
+            registration: executable.registration(id, deploy_hash),
             executable,
-        })
+        }))
     }
 }
 
