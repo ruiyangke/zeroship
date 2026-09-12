@@ -35,10 +35,12 @@ compio thread, with a bounded app-scoped client for V8 and other Rust threads.
 Journal fingerprint and deployment reads, root-run creation, request receipts,
 checkpoint persistence, wait cleanup and lifecycle transitions use ORM models
 and collections. History reads seek through ordered pages, and status joins each
-run to its current generation using the complete app-scoped key. Restart checks
+run to its current generation using the complete app-scoped key. Invocation and
+restart load generation inputs through the same generated model. Restart checks
 live leases and waiting children through the ORM, then atomically expires tasks,
 cleans up waits and signals, and advances the generation. Its recursive graph
-check and set-copy statements remain explicit SQL while conversion proceeds.
+check and statements that copy checkpoints and payload references remain
+explicit SQL while conversion proceeds.
 The remaining journal operations use the ORM's explicit SQL interface. ORM table
 references permit every table prefix for Rust and creator code within the bound
 customer schema. The existing Control store's removal remains pending.

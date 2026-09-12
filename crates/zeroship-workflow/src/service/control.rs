@@ -16,7 +16,7 @@ use crate::{
 };
 use serde_json::json;
 use zeroship_data_orm::{
-    orm::{Entity, Operation, Output},
+    orm::{Entity, FindOptions, Operation, Output},
     sql::Predicate,
     value,
 };
@@ -233,7 +233,25 @@ impl AppWorkflows {
         let signal_epoch = run.integer("signal_epoch")?.checked_add(1).ok_or_else(|| {
             WorkflowServiceError::ResourceExhausted("workflow signal epoch exhausted".into())
         })?;
-        let generations = tx.table("generations");
+        let previous = tx
+            .database()
+            .entity::<models::generations::Entity>()?
+            .find::<models::GenerationInput>(
+                models::generations::app_id
+                    .eq(self.app.as_str())?
+                    .and(models::generations::run_id.eq(run_id)?)
+                    .and(models::generations::generation.eq(current)?),
+                FindOptions {
+                    limit: Some(1),
+                    ..Default::default()
+                },
+            )
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| {
+                WorkflowServiceError::Internal("workflow current generation is missing".into())
+            })?;
         tasks.execute(Operation::Update {
             filter:value!({"app_id":self.app.as_str(), "run_id":run_id, "generation":current, "state":"leased"}),
             patch:value!({"state":"expired", "finished_at":now}), many:true,
@@ -271,8 +289,14 @@ impl AppWorkflows {
             value!({"app_id":self.app.as_str(), "run_id":run_id, "generation":current, "terminal_at":null}),
             value!({"state":"restarted", "terminal_at":now}),
         ).await?;
-        tx.execute(&format!("INSERT INTO {generations} (app_id,run_id,generation,deploy_id,input,input_ref,state,started_at) SELECT app_id,run_id,$4,$5,input,input_ref,'queued',$6 FROM {generations} WHERE app_id=$1 AND run_id=$2 AND generation=$3"),
-            &[self.app.as_str().into(),run_id.into(),current.into(),generation.into(),deploy.clone().into(),now.into()]).await?;
+        tx.database()
+            .collection(models::generations::Entity::COLLECTION)?
+            .insert(value!({
+                "app_id":self.app.as_str(), "run_id":run_id, "generation":generation,
+                "deploy_id":deploy.clone(), "input":previous.input, "input_ref":previous.input_ref,
+                "state":"queued", "started_at":now,
+            }))
+            .await?;
         let steps_table = tx.table("steps");
         tx.execute(&format!("INSERT INTO {steps_table} (app_id,run_id,generation,ordinal,name,occurrence,origin_generation,kind,state,record,compensation_attempts,compensation_due_at,compensation_error,compensation_retry_ms) SELECT app_id,run_id,$4,ordinal,name,occurrence,origin_generation,kind,state,record,compensation_attempts,compensation_due_at,compensation_error,compensation_retry_ms FROM {steps_table} WHERE app_id=$1 AND run_id=$2 AND generation=$3 AND ordinal<$5"),
             &[self.app.as_str().into(),run_id.into(),current.into(),generation.into(),i64::from(prefix).into()]).await?;

@@ -1,6 +1,6 @@
 use super::{
     app::{active_deploy, deadline, decode, emit, encode, insert_root_run, parse_state},
-    journal,
+    journal, models,
     store::{Row, Transaction},
     AppPolicy, ControlIntent,
 };
@@ -12,6 +12,7 @@ use crate::{
 use chrono::DateTime;
 use serde_json::{json, Value};
 use zeroship_core::{app_id::AppId, typed_id};
+use zeroship_data_orm::sql::Predicate;
 
 pub(crate) async fn invocation(
     tx: &mut Transaction,
@@ -19,17 +20,51 @@ pub(crate) async fn invocation(
     run: &Row,
 ) -> Result<WorkflowInvocation, WorkflowServiceError> {
     let id = run.text("id")?;
-    let generations = tx.table("generations");
-    let deploys = tx.table("deploys");
-    let rows=tx.query(&format!("SELECT g.input,g.input_ref,g.started_at,d.hash FROM {generations} g JOIN {deploys} d ON d.app_id=g.app_id AND d.id=g.deploy_id WHERE g.app_id=$1 AND g.run_id=$2 AND g.generation=$3 AND d.state='available'"), &[app.as_str().into(),id.clone().into(),run.integer("generation")?.into()]).await?;
-    let row = rows.first().ok_or_else(|| {
-        WorkflowServiceError::Unavailable("workflow pinned executable is unavailable".into())
-    })?;
+    let db = tx.database();
+    let generation = db.entity::<models::generations::Entity>()?.alias("g")?;
+    let deployment = db.entity::<models::deploys::Entity>()?.alias("d")?;
+    let (input, deployment) = db
+        .from(&generation)
+        .inner_join(
+            &deployment,
+            Predicate::And(vec![
+                generation
+                    .column(models::generations::app_id)
+                    .eq_column(deployment.column(models::deploys::app_id))?,
+                generation
+                    .column(models::generations::deploy_id)
+                    .eq_column(deployment.column(models::deploys::id))?,
+            ]),
+        )?
+        .filter(Predicate::And(vec![
+            generation
+                .column(models::generations::app_id)
+                .eq(app.as_str())?,
+            generation
+                .column(models::generations::run_id)
+                .eq(id.as_str())?,
+            generation
+                .column(models::generations::generation)
+                .eq(run.integer("generation")?)?,
+            deployment.column(models::deploys::state).eq("available")?,
+        ]))
+        .select((
+            generation.row::<models::GenerationInput>(),
+            deployment.row::<models::DeploymentHash>(),
+        ))?
+        .limit(1)?
+        .all()
+        .await?
+        .into_iter()
+        .next()
+        .ok_or_else(|| {
+            WorkflowServiceError::Unavailable("workflow pinned executable is unavailable".into())
+        })?;
     let workflow_name = run.text("workflow_name")?;
     Ok(WorkflowInvocation {
         app_id: app.as_str().into(),
         deploy_id: run.text("deploy_id")?,
-        deploy_hash: row.text("hash")?,
+        deploy_hash: deployment.hash,
         run_id: id.clone(),
         workflow_name: workflow_name.clone(),
         phase: if run.text("state")? == "compensating" {
@@ -39,14 +74,11 @@ pub(crate) async fn invocation(
         }
         .into(),
         trigger: WorkflowTrigger {
-            input: Some(decode(&row.text("input")?)?),
-            input_ref: row
-                .optional_text("input_ref")?
-                .map(|value| decode(&value))
-                .transpose()?,
-            started_at: DateTime::from_timestamp_millis(row.integer("started_at")?).ok_or_else(
-                || WorkflowServiceError::Internal("invalid workflow start time".into()),
-            )?,
+            input: Some(decode(&input.input)?),
+            input_ref: input.input_ref.map(|value| decode(&value)).transpose()?,
+            started_at: DateTime::from_timestamp_millis(input.started_at).ok_or_else(|| {
+                WorkflowServiceError::Internal("invalid workflow start time".into())
+            })?,
             run_id: id.clone(),
             workflow_name,
         },
