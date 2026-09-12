@@ -550,8 +550,7 @@ pub(crate) async fn run_update_one(
     let mut update = update;
     let schema = crate::descriptor::collection_schema(&binding, &coll)?;
     write_pipeline::inspect_update(&schema, &mut update)?;
-    // Detect creator-supplied CAS version + reject
-    // the unsupported "version filter without id" shape eagerly.
+    // A concurrency predicate must identify one row.
     let cas_version = extract_cas_version(&filter, &coll, &schema)?;
     if cas_version.is_some() && !filter.has_non_null_equality("id") {
         return Err(DbError::multi_row_version_filter_unsupported(&coll));
@@ -599,12 +598,8 @@ pub(crate) async fn run_update_one(
     } else {
         filter.clone()
     };
-    // Compile the descriptor's write assignments.
-    // Actor flows into the `updated_by` bind; the `hints` from the
-    // pre-pass tell the builder which auto-bumps to suppress.
-    // No `skip_*` knob is set: the pass stripped every column the
-    // charter re-assigns on write, so the patch cannot carry a
-    // competing assignment for the builder to defer to.
+    // Compile descriptor-declared write assignments after supplied values for
+    // those fields have been removed.
     let autobump = AssignmentPlan::from_schema(&schema)?.write_assignments(
         &schema,
         actor_id.as_deref(),
@@ -637,19 +632,13 @@ pub(crate) async fn run_update_one(
         read_pipeline::ApplyOptions::default(),
     )
     .await?;
-    // Optimistic-concurrency check. When the
-    // creator supplied a `version: N` predicate AND the
-    // RETURNING set is empty, classify as a CAS failure
-    // (the row exists at a different version, or the row
-    // is missing — the SDK consumer retries either way).
+    // An empty result with a concurrency predicate is a CAS failure.
     if let Some(expected_version) = cas_version {
         if result.rows.is_empty() {
             let row_id = filter.conjunctive_value("id").and_then(Value::as_str);
             return Err(DbError::version_mismatch(&coll, row_id, expected_version));
         }
-        // The `id` PK ensures at most one row matches
-        // `{ id: ..., version: N }`; a result set >1 is
-        // a regression in the dispatcher contract.
+        // The required `id` primary key bounds this update to one row.
         if result.rows.len() > 1 {
             tracing::error!(
                 collection = %coll,
