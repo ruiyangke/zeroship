@@ -89,7 +89,7 @@ Replay generations, child results and continuation inputs retain explicit
 reference edges. Collection fences uploads and retries failed deletions;
 tombstones remain discoverable when an interrupted remote write arrives late.
 Payload contracts run against local storage and Testcontainers S3.
-Embedded app handles expose `read_step_output` for a completed
+App handles expose `read_step_output` for a completed
 named occurrence in the run's current generation. The service resolves that
 generation under the restart fence and checks reference ownership before
 opening storage. `PayloadRead::into_bytes` verifies the stream within a host
@@ -97,7 +97,7 @@ memory limit. `into_backend` adapts the app handle to `WorkflowBackend`;
 its bound identity cannot change between operations.
 Task hosts instead use `runner::TaskPayloadReader`: it captures the assignment's
 journal, resolves named occurrences in that snapshot and reads referenced
-objects through the live task lease. `EmbeddedTasks` implements the
+objects through the live task lease. `WorkerTasks` implements the
 payload read/write contract alongside the local task protocol.
 `runner::PreparedExecution` decodes runtime outcomes, leaves small values inline
 and prepares task-scoped uploads for large or explicitly referenced results.

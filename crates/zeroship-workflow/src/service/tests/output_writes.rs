@@ -4,8 +4,8 @@ use crate::{
     operations::RunState,
     service::{
         runner::{
-            EmbeddedTasks, PreparedExecution, TaskPayloadLimits, TaskPayloadReader, TaskPayloads,
-            TaskTransport,
+            PreparedExecution, TaskPayloadLimits, TaskPayloadReader, TaskPayloads, TaskTransport,
+            WorkerTasks,
         },
         AppWorkflows, PayloadRead, PayloadSlot, StagedPayload, TaskAssignment, TaskToken,
         WorkerIdentity,
@@ -26,7 +26,7 @@ const LIMITS: TaskPayloadLimits = TaskPayloadLimits {
 };
 
 struct LostReceipt {
-    inner: EmbeddedTasks,
+    inner: WorkerTasks,
     lose: Cell<bool>,
     requests: RefCell<Vec<String>>,
 }
@@ -70,7 +70,7 @@ impl TaskPayloads for LostReceipt {
     }
 }
 
-async fn claim(app: &AppWorkflows, tasks: &EmbeddedTasks) -> TaskAssignment {
+async fn claim(app: &AppWorkflows, tasks: &WorkerTasks) -> TaskAssignment {
     let run = app
         .start(&RequestId::mint(), "Example", StartOptions::default())
         .await

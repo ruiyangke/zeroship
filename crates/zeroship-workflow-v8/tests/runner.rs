@@ -12,7 +12,7 @@ use zeroship_runtime::{runtime::InnerProbe, EnvSnapshot, ModuleEntry, Runtime};
 use zeroship_workflow::{
     operations::{RunOperation, RunState, SignalOptions, StartOptions},
     service::{
-        runner::{EmbeddedTasks, RunnerOutcome, RunnerSlot, TaskPayloadLimits, TaskPayloads},
+        runner::{RunnerOutcome, RunnerSlot, TaskPayloadLimits, TaskPayloads, WorkerTasks},
         schema,
         store::SqliteStore,
         AppPolicy, AppWorkflows, CompletionReceipt, DeployRegistration, ExecutableSnapshot,
@@ -342,7 +342,7 @@ async fn oversized_input_never_initializes_the_creator_module() {
     assert!(fixture.loader.probes.borrow().is_empty());
 }
 
-struct UnavailablePayloads(Rc<EmbeddedTasks>);
+struct UnavailablePayloads(Rc<WorkerTasks>);
 #[async_trait(?Send)]
 impl zeroship_workflow::service::runner::TaskPayloads for UnavailablePayloads {
     async fn snapshot(
@@ -433,7 +433,7 @@ const OUTPUT_LIMITS: TaskPayloadLimits = TaskPayloadLimits {
 };
 
 struct UploadProbe {
-    tasks: EmbeddedTasks,
+    tasks: WorkerTasks,
     loader: Rc<Loader>,
     requests: RefCell<Vec<String>>,
     lose_receipt: Cell<bool>,
