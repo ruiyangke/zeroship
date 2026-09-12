@@ -34,7 +34,7 @@ export function _validateK(value: number, paramName: string): void {
   }
 }
 
-/** **P4** - vector-nearest-neighbour search. */
+/** Vector nearest-neighbour search. */
 export function searchCollection<S>(
   self: VectorGeoCollectionInternals<S>,
   args: {
@@ -93,9 +93,7 @@ export function searchCollection<S>(
   });
 }
 
-/**
- * **P4 PR 3** — spatial within-radius search.
- */
+/** Spatial within-radius search. */
 export function nearCollection<S>(
   self: VectorGeoCollectionInternals<S>,
   args: {

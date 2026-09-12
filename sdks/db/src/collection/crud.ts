@@ -7,11 +7,7 @@ import {
 } from "../errors";
 import { trackCollectionAccess } from "../live";
 import { IdLoader } from "../loader";
-import {
-  requireBoundNativeCapability,
-  requireNativeCapability,
-  type NativeCollection,
-} from "../native";
+import type { NativeCollection } from "../native";
 import { Query } from "../query";
 import type { NormalizedSchema } from "../schema";
 import {
@@ -28,6 +24,7 @@ import {
 } from "../validate";
 import {
   type Actor,
+  type DistinctField,
   type Filter,
   type FieldDef,
   type IdValue,
@@ -37,6 +34,7 @@ import {
   type Result,
   type Row,
   type RowInput,
+  type SortSpec,
   type UpsertOptions,
   type UpdateExpression,
   type WithRelations,
@@ -190,7 +188,7 @@ export function getCollection<
   opts: {
     actor?: Actor;
     select?: (string & keyof Row<S>)[];
-    orderBy?: Record<string, 1 | -1>;
+    orderBy?: SortSpec<S>;
     unmask?: (string & keyof Row<S>)[];
     unmaskReason?: string;
     with?: WithSpec;
@@ -517,13 +515,7 @@ export function purgeCollection<S, N extends string, AllSchemas extends Record<s
       validateEncryptedFieldsInFilter(filter as PlainObject, self._schema);
     }
     const mapped = mapFilterOutbound(filter as ZeroshipDbFilter, self._toColumn);
-    const purge = requireBoundNativeCapability(self._nativeCollection(), "purge", {
-      code: "PURGE_NOT_AVAILABLE",
-      message:
-        "@zeroship/db: env.db.<collection>.purge not available — " +
-        "runtime is missing the P7 PR 5 purge surface.",
-    });
-    const result = await purge(mapped);
+    const result = await self._nativeCollection().purge(mapped);
     if (result === null) return null;
     return mapResultDoc(result as PlainObject, self._toField) as Row<S>;
   });
@@ -542,17 +534,7 @@ export function purgeManyCollection<S, N extends string, AllSchemas extends Reco
   );
   return self._run(async () => {
     const mapped = mapFilterOutbound(filter as ZeroshipDbFilter, self._toColumn);
-    const purgeMany = requireBoundNativeCapability(
-      self._nativeCollection(),
-      "purgeMany",
-      {
-        code: "PURGE_NOT_AVAILABLE",
-        message:
-          "@zeroship/db: env.db.<collection>.purgeMany not available — " +
-          "runtime is missing the P7 PR 5 purge surface.",
-      },
-    );
-    const n = await purgeMany(mapped);
+    const n = await self._nativeCollection().purgeMany(mapped);
     return { purgedCount: n };
   });
 }
@@ -568,13 +550,7 @@ export function restoreCollection<S, N extends string, AllSchemas extends Record
       validateEncryptedFieldsInFilter(filter as PlainObject, self._schema);
     }
     const mapped = mapFilterOutbound(filter as ZeroshipDbFilter, self._toColumn);
-    const restore = requireBoundNativeCapability(self._nativeCollection(), "restore", {
-      code: "RESTORE_NOT_AVAILABLE",
-      message:
-        "@zeroship/db: env.db.<collection>.restore not available — " +
-        "runtime is missing the P7 PR 5 restore surface.",
-    });
-    const result = await restore(mapped);
+    const result = await self._nativeCollection().restore(mapped);
     if (result === null) return null;
     return mapResultDoc(result as PlainObject, self._toField) as Row<S>;
   });
@@ -593,17 +569,7 @@ export function restoreManyCollection<S, N extends string, AllSchemas extends Re
   );
   return self._run(async () => {
     const mapped = mapFilterOutbound(filter as ZeroshipDbFilter, self._toColumn);
-    const restoreMany = requireBoundNativeCapability(
-      self._nativeCollection(),
-      "restoreMany",
-      {
-        code: "RESTORE_NOT_AVAILABLE",
-        message:
-          "@zeroship/db: env.db.<collection>.restoreMany not available — " +
-          "runtime is missing the P7 PR 5 restore surface.",
-      },
-    );
-    const n = await restoreMany(mapped);
+    const n = await self._nativeCollection().restoreMany(mapped);
     return { restoredCount: n };
   });
 }
@@ -621,11 +587,16 @@ export function countCollection<S, N extends string, AllSchemas extends Record<s
   });
 }
 
-export function distinctCollection<S, N extends string, AllSchemas extends Record<string, unknown>>(
+export function distinctCollection<
+  S,
+  N extends string,
+  AllSchemas extends Record<string, unknown>,
+  K extends DistinctField<S> & keyof Row<S>,
+>(
   self: CrudCollectionInternals<S, N, AllSchemas>,
-  field: string & keyof Row<S>,
+  field: K,
   filter: Filter<S> = {} as Filter<S>,
-): Promise<Result<(string | number | boolean | null)[]>> {
+): Promise<Result<Exclude<Row<S>[K], undefined>[]>> {
   trackCollectionAccess(self._name);
   validateEncryptedFieldsInFilter(filter as PlainObject, self._schema);
   {
@@ -648,7 +619,7 @@ export function distinctCollection<S, N extends string, AllSchemas extends Recor
     const mapped = mapFilterOutbound(filter as ZeroshipDbFilter, self._toColumn);
     const column = self._toColumn(field);
     const result = await self._nativeCollection().distinct(mapped, { field: column });
-    return result ?? [];
+    return (result ?? []) as Exclude<Row<S>[K], undefined>[];
   });
 }
 

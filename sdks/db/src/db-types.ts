@@ -3,13 +3,8 @@
  * to annotate handlers (`env.db.users` is a `Collection<...>`, the
  * transaction callback receives a `TxCollection`, etc).
  *
- * Stage 7 of the refactor moved the runtime helpers (`installSchema`,
- * `model`, `normalizeSchema`, `validateRefTargets`)
- * into `@zeroship/bootstrap`. Only the types stay here — `@zeroship/db`
- * is now purely user-facing. The bootstrap package consumes these
- * types via `@zeroship/db/internal` (one-way dependency: bootstrap →
- * db) so the API users see in autocomplete is decoupled from the
- * coordination internals.
+ * Runtime installation belongs to `@zeroship/bootstrap`; this package
+ * exposes the creator-facing database API and types.
  *
  * Usage in user code (typical):
  *   import { t, schema } from "@zeroship/db";
@@ -54,10 +49,12 @@ import type { LiveOptions, LiveQuery } from "./live";
 import type { PaginationResult } from "./query";
 import type {
   PlainObject,
+  DistinctField,
   Result,
   Row,
   RowId,
   RowInput,
+  SortSpec,
   UpsertOptions,
   UpdateExpression,
   Filter,
@@ -108,15 +105,15 @@ export type TxCollection<S = PlainObject, AllSchemas extends Record<string, unkn
   insertMany(rows: RowInput<S>[]): Promise<Row<S>[]>;
   get<K extends string & keyof Row<S>>(
     idOrFilter: RowId<S> | Filter<S>,
-    opts: { select: K[]; orderBy?: Record<string, 1 | -1> },
+    opts: { select: K[]; orderBy?: SortSpec<S> },
   ): Promise<Pick<Row<S>, K> | null>;
   get<W extends WithSpec>(
     idOrFilter: RowId<S> | Filter<S>,
-    opts: { with: W; orderBy?: Record<string, 1 | -1> },
+    opts: { with: W; orderBy?: SortSpec<S> },
   ): Promise<(Omit<Row<S>, keyof W> & WithRelations<S, W, AllSchemas>) | null>;
   get(
     idOrFilter: RowId<S> | Filter<S>,
-    opts?: { orderBy?: Record<string, 1 | -1> },
+    opts?: { orderBy?: SortSpec<S> },
   ): Promise<Row<S> | null>;
   exists(filter: Filter<S>): Promise<boolean>;
   find<W extends WithSpec>(filter: Filter<S>, opts: { with: W }): TxQuery<S, Omit<Row<S>, keyof W> & WithRelations<S, W, AllSchemas>, AllSchemas>;
@@ -131,7 +128,7 @@ export type TxCollection<S = PlainObject, AllSchemas extends Record<string, unkn
   restore(idOrFilter: RowId<S> | Filter<S>): Promise<Row<S> | null>;
   restoreMany(filter?: Filter<S>): Promise<{ restoredCount: number }>;
   count(filter?: Filter<S>): Promise<number>;
-  distinct(field: string & keyof Row<S>, filter?: Filter<S>): Promise<(string | number | boolean | null)[]>;
+  distinct<K extends DistinctField<S> & keyof Row<S>>(field: K, filter?: Filter<S>): Promise<Exclude<Row<S>[K], undefined>[]>;
   aggregate(pipeline: ZeroshipDbAggregateStage[]): Promise<PlainObject[]>;
   bulkUnmask(
     items: ReadonlyArray<{
@@ -164,7 +161,7 @@ export type TxQuery<
   P = Row<S>,
   AllSchemas extends Record<string, unknown> = Record<string, unknown>,
 > = {
-  sort(s: Record<string, number> | string): TxQuery<S, P, AllSchemas>;
+  sort(s: SortSpec<S> | string): TxQuery<S, P, AllSchemas>;
   limit(n: number): TxQuery<S, P, AllSchemas>;
   skip(n: number): TxQuery<S, P, AllSchemas>;
   select<K extends keyof Row<S> & string>(fields: K[]): TxQuery<S, Pick<Row<S>, K>, AllSchemas>;
@@ -175,14 +172,11 @@ export type TxQuery<
     cursor?: string | null;
     numItems: number;
   }): Promise<PaginationResult<P>>;
-  /** **P9 PR 1** — terminal: first matching row or `null`. Throws inside
-   *  the tx callback on a native error (tx unwraps Result). */
+  /** First matching row or `null`. */
   first(): Promise<P | null>;
-  /** **P9 PR 1** — strict terminal: exactly one match. Throws
-   *  `NotFoundError` on 0 matches and `NotUniqueError` on >1. */
+  /** Exactly one match; throws when none or multiple rows match. */
   unique(): Promise<P>;
-  /** **P9 PR 1** — last matching row in the current sort, or `null`.
-   *  Throws `InvalidOperationError` if no sort was set. */
+  /** Last matching row in the current sort, or `null`. */
   last(): Promise<P | null>;
   then<TResult1 = P[], TResult2 = never>(
     resolve?: ((value: P[]) => TResult1 | PromiseLike<TResult1>) | null,
@@ -235,9 +229,8 @@ export type Collections<T extends Record<string, SchemaInput>> = {
 /**
  * The shape `installSchema` plants on `env.db` (the native handle) on
  * top of the per-collection wrappers. `transaction` is a thin
- * `Result`-wrapping shim over the native `env.db.transaction(fn)`
- * orchestrator (begin / commit / rollback / nested-savepoint all live in
- * Rust as of P9 PR 3); `live` wraps the subscription primitives.
+ * `Result`-wrapping shim over the native transaction orchestrator;
+ * `live` wraps the subscription primitives.
  */
 export type DbExtensions<T extends Record<string, SchemaInput>> = {
   from: ReadFrom;
@@ -247,8 +240,7 @@ export type DbExtensions<T extends Record<string, SchemaInput>> = {
    * then re-runs and yields a fresh result on every change to any
    * table the `queryFn` reads.
    *
-   * v1 is coarse-grained: every change to a watched table fires a
-   * rerun (no row-level filter narrowing). The tables are auto-detected
+   * Every change to a watched table fires a rerun. The tables are auto-detected
    * by observing which `Collection.find/get/...` methods the
    * `queryFn` calls during its first execution. Pass `{ tables: [...] }`
    * to bypass auto-detection (e.g. when the queryFn doesn't go through

@@ -3,8 +3,7 @@
  *
  * Re-exports the SDK innards needed by `@zeroship/bootstrap` (the
  * coordination package the runtime crate + Vite plugin consume). User
- * code MUST NOT import from this subpath — symbols here have no
- * back-compat guarantee.
+ * code must not import from this subpath; it is not public API.
  *
  * The dependency direction is bootstrap → db: bootstrap owns
  * `installSchema`, the `__zsDispatch` dispatcher, and dev/runtime
@@ -84,8 +83,6 @@ export { validateDoc, checkPartial } from "./validate";
 // drive the dedup state the matching internal getter inspects.
 export { translateAggregatePipeline } from "./utils";
 
-// P5.5 PR 5 — defineMaskPolicy() pending-slot drain. The bootstrap
-// runtime-entry calls `_flushPendingMaskPolicy()` once at app init and
-// flushes the returned policy through `__platform.setMaskPolicy`.
+// Mask-policy startup handoff consumed by the bootstrap package.
 export { _flushPendingMaskPolicy, _peekPendingMaskPolicy } from "./policy";
 export type { MaskPolicy } from "./policy";
