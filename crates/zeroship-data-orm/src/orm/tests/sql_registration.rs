@@ -516,3 +516,47 @@ async fn dynamic_aggregate_uses_the_registered_compiler() {
     assert_eq!(calls.load(Ordering::Relaxed), 1);
     owner.close().await;
 }
+
+#[compio::test]
+async fn search_is_refused_by_the_registered_compiler() {
+    let owner = CollectionFixture::sqlite(
+        "records",
+        value!({"embedding":{"type":"vector","vectorDims":2}}),
+    )
+    .await;
+    let constrained = constrained_database(&owner, "fixture-without-vector-search", |support| {
+        support.vector_search = false
+    })
+    .await;
+
+    let error = constrained
+        .collection("records")
+        .unwrap()
+        .execute(Operation::Search {
+            arguments: value!({"vector":[1.0,0.0]}),
+        })
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("vector search"), "{error}");
+    owner.close().await;
+}
+
+#[compio::test]
+async fn search_limit_is_checked_during_preparation() {
+    let owner = CollectionFixture::sqlite(
+        "records",
+        value!({"embedding":{"type":"vector","vectorDims":2}}),
+    )
+    .await;
+    let error = owner
+        .database
+        .collection("records")
+        .unwrap()
+        .execute(Operation::Search {
+            arguments: value!({"vector":[1.0,0.0],"k":501}),
+        })
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("search.k"), "{error}");
+    owner.close().await;
+}

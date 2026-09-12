@@ -682,13 +682,13 @@ impl PreparedOperation {
             }
             Operation::Search { arguments } => Plan::Search(crud::plan_search(
                 &binding,
-                route.dialect(),
+                route.sql_registration(),
                 collection,
                 &arguments,
             )?),
             Operation::Near { arguments } => Plan::Near(crud::plan_near(
                 &binding,
-                route.dialect(),
+                route.sql_registration(),
                 collection,
                 &arguments,
             )?),

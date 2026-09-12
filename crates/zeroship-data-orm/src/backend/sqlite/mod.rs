@@ -62,7 +62,6 @@ pub mod session;
 // stay unit-testable in `spatial.rs`.
 pub mod spatial;
 // SQLite vector metric validation.
-pub mod vector;
 
 use cdc::CommitPacket;
 use lock::InProcessLockRegistry;
@@ -816,42 +815,6 @@ mod tests {
                 "{error:?}",
             );
         }
-    }
-
-    #[test]
-    fn spatial_near_base_query_reads_masked_sibling_when_schema_cached() {
-        let schema = crate::value!({
-            "ssn": {
-                "type": "string",
-                "mask": { "kind": "last4", "classification": "spi" }
-            },
-            "location": { "type": "geoPoint" }
-        });
-        let bq = search::build_spatial_near_base_query(
-            &crate::sql::SchemaName::new("app1").expect("fixture schema name"),
-            "places",
-            &crate::value!({}),
-            &schema,
-        )
-        .expect("spatial base query");
-        assert!(
-            !bq.sql.starts_with("SELECT *"),
-            "spatial base query must not use SELECT * when masked columns exist: {}",
-            bq.sql,
-        );
-        // A masked column reads its OWN column (the mask); the raw column must
-        // not appear — see the twin assertion in `backend::sqlite::vector`.
-        assert!(
-            bq.sql.contains("\"ssn\""),
-            "spatial base query must project the masked column: {}",
-            bq.sql,
-        );
-        assert!(
-            !bq.sql
-                .contains(&crate::sql::compile::raw_column_name("ssn")),
-            "spatial base query must never name the raw column: {}",
-            bq.sql,
-        );
     }
 
     /// `Backend` composition marker now lands on

@@ -472,23 +472,27 @@ fn vector_search_runs_under_per_app_role_via_rls() {
                 login_url,
                 host.key_source(),
             );
+            let binding = DbBinding::cold_start(app);
+            let schema = zeroship_data_orm::descriptor::collection_schema(&binding, coll)
+                .expect("descriptor slice for the search fixture");
+            let registration = zeroship_data_orm::sql::registration::SqlRegistration::builtin(
+                zeroship_data_orm::sql::compile::SqlDialect::Postgres,
+            );
             let rows = zeroship_data_orm::search::Search::vector_search(
                 &backend,
                 None,
-                zeroship_data_orm::search::VectorSearch {
-                    binding: &DbBinding::cold_start(app),
-                    collection: coll,
-                    column: "embedding",
-                    query: &[1.0, 0.0],
-                    k: 1,
-                    metric: VectorMetric::Cosine,
-                    filter: &Value::Null,
-                    schema: &zeroship_data_orm::descriptor::collection_schema(
-                        &DbBinding::cold_start(app),
-                        coll,
-                    )
-                    .expect("descriptor slice for the search fixture"),
-                },
+                zeroship_data_orm::search::VectorSearch::compile(
+                    &binding,
+                    coll,
+                    "embedding",
+                    &[1.0, 0.0],
+                    1,
+                    VectorMetric::Cosine,
+                    &Value::Null,
+                    &schema,
+                    &registration,
+                )
+                .unwrap(),
             )
             .await
             .unwrap_or_else(|e| panic!("vector_search failed: {e:?}"));
@@ -583,26 +587,29 @@ fn spatial_near_runs_under_per_app_role_via_rls() {
                 login_url,
                 host.key_source(),
             );
+            let binding = DbBinding::cold_start(app);
+            let schema = zeroship_data_orm::descriptor::collection_schema(&binding, coll).unwrap();
+            let registration = zeroship_data_orm::sql::registration::SqlRegistration::builtin(
+                zeroship_data_orm::sql::compile::SqlDialect::Postgres,
+            );
             let rows = zeroship_data_orm::search::Search::spatial_near(
                 &backend,
                 None,
-                zeroship_data_orm::search::SpatialSearch {
-                    binding: &DbBinding::cold_start(app),
-                    collection: coll,
-                    column: "location",
-                    point: GeoPoint {
+                zeroship_data_orm::search::SpatialSearch::compile(
+                    &binding,
+                    coll,
+                    "location",
+                    GeoPoint {
                         lat: 51.5074,
                         lng: -0.1278,
                     },
-                    radius_m: 1000.0,
-                    filter: &Value::Null,
-                    limit: Some(1),
-                    schema: &zeroship_data_orm::descriptor::collection_schema(
-                        &DbBinding::cold_start(app),
-                        coll,
-                    )
-                    .unwrap(),
-                },
+                    1000.0,
+                    &Value::Null,
+                    Some(1),
+                    &schema,
+                    &registration,
+                )
+                .unwrap(),
             )
             .await
             .unwrap_or_else(|e| panic!("spatial_near failed: {e:?}"));

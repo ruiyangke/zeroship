@@ -1,42 +1,5 @@
-//! The `DbPlan` search family, executed against a real server.
-//!
-//! # Why this target exists separately from the IR's own tests
-//!
-//! `zeroship-data-orm::sql` declares no dependencies at all, so its tests can
-//! compare the SQL it renders against a fixture string and nothing more. A
-//! string comparison cannot tell whether `"embedding" <=> $1::vector` is
-//! syntax `pgvector` accepts, whether `ST_DWithin` over a `geography` column
-//! uses the operand order the plan claims, or whether the ranking the plan
-//! promises is the ranking the server produces.
-//!
-//! Everything here therefore executes. Nothing asserts on SQL text.
-//!
-//! # Run it
-//!
-//! `cargo xtask test data --filter 'test(search_ir_live::)'`
-//! PostgreSQL comes from an owned testcontainer; Docker is required.
-//!
-//! The server needs **both** `vector` and `postgis`; the tests create the
-//! extensions themselves and fail loudly, naming the extension, if the server
-//! cannot supply one. They do not skip: a skipped extension check is a green
-//! run that measured nothing, and the divergence this family is about is
-//! invisible without a server that has both.
-//!
-//! Tests share a schema and serialize its lifetime through the runtime entry.
-//!
-//! # What these arms do NOT establish
-//!
-//! **The shipped product path does not use the IR.** No crate outside
-//! `zeroship-data-orm::sql` depends on it - the dependency this target adds is a
-//! `[dev-dependencies]` one, declared for these tests. `env.db.<coll>.search()`
-//! still reaches `crate::sql::compile::build_vector_search`
-//! (`crates/zeroship-data-orm/src/backend/postgres/implementation.rs`).
-//!
-//! That is why `the_ir_and_the_shipped_builder_rank_identically` is here. It is
-//! the only arm that ties the two together, and it does it the one way that is
-//! available without rewiring: both builders are asked for the same search,
-//! both statements are executed against the same rows, and the two orderings
-//! are compared. It rules on behaviour, not on a call graph.
+//! Cross-checks the relational search grammar against the ORM compiler on live PostgreSQL.
+//! The same fixtures exercise compiler output and independent relational plans.
 
 #![allow(clippy::items_after_statements)]
 
@@ -359,8 +322,12 @@ fn the_ir_and_the_shipped_builder_rank_identically() {
                 "tenant_id": { "type": "number" },
                 "embedding": { "type": "vector", "vectorDims": DIMS },
             });
-            let shipped = crate::sql::compile::build_vector_search(
-                &crate::sql::SchemaName::new(SCHEMA).expect("fixture schema name"),
+            let binding = zeroship_data_orm::binding::DbBinding::cold_start(SCHEMA);
+            let registration = zeroship_data_orm::sql::registration::SqlRegistration::builtin(
+                crate::sql::compile::SqlDialect::Postgres,
+            );
+            let shipped = zeroship_data_orm::search::VectorSearch::compile(
+                &binding,
                 "docs",
                 "embedding",
                 &query,
@@ -368,8 +335,10 @@ fn the_ir_and_the_shipped_builder_rank_identically() {
                 crate::sql::descriptors::VectorMetric::Cosine,
                 &value!({ "tenant_id": 1 }),
                 &schema_hint,
+                &registration,
             )
-            .expect("the shipped builder accepts this search");
+            .expect("the ORM compiler accepts this search")
+            .query;
             let shipped_params = &shipped.params;
             let shipped_rows = zeroship_data_orm::backend::postgres::params::query(
                 &pool.acquire().await.unwrap(),
@@ -418,24 +387,7 @@ fn the_ir_and_the_shipped_builder_rank_identically() {
     })
 }
 
-/// THE DIVERGENCE ARM, executed on both sides.
-///
-/// `pgvector` serves inner product; `vec0` does not. The IR represents the
-/// metric either way, and the two backends are asserted to **differ**: the same
-/// metric that Postgres ranks by here is refused by the SQLite backend with
-/// `vector_unsupported_metric`.
-///
-/// The **control** is what makes this more than a pair of unrelated
-/// assertions. `SqliteBackend::vector_search` is called twice on one backend
-/// with one fixture - no table, no vec0 relation - changing exactly one
-/// variable, the metric:
-///
-/// * with `InnerProduct` it must fail with `vector_unsupported_metric`;
-/// * with `Cosine` it must fail with something ELSE.
-///
-/// Without the second call, the first would pass just as well if the refusal
-/// came from the missing table, and the arm would be reporting a fixture gap as
-/// a designed divergence.
+/// PostgreSQL executes inner-product search; SQLite refuses it during preparation.
 #[test]
 fn postgres_serves_the_inner_product_that_sqlite_refuses() {
     Host::test(|host| {
@@ -444,7 +396,6 @@ fn postgres_serves_the_inner_product_that_sqlite_refuses() {
             setup(&pool).await;
             seed_vectors(&pool, 20).await;
 
-            // The Postgres half: it executes and it ranks.
             let plan = docs_search(
                 SearchCriterion::Vector {
                     column: column("embedding"),
@@ -460,7 +411,6 @@ fn postgres_serves_the_inner_product_that_sqlite_refuses() {
                 "pgvector serves inner product through vector_ip_ops"
             );
 
-            // The SQLite half: the same metric, refused.
             use zeroship_data_orm::backend::VectorMetric as BackendMetric;
             use zeroship_data_orm::binding::DbBinding;
             let dir = tempfile::tempdir().expect("tempdir");
@@ -469,46 +419,48 @@ fn postgres_serves_the_inner_product_that_sqlite_refuses() {
                 host.key_source(),
             )
             .expect("open SqliteBackend");
-
-            let refused = sqlite
-                .vector_search(
-                    None,
-                    zeroship_data_orm::search::VectorSearch {
-                        binding: &DbBinding::cold_start("search_ir_live"),
-                        collection: "docs",
-                        column: "embedding",
-                        query: &unit_vector(3),
-                        k: 5,
-                        metric: BackendMetric::InnerProduct,
-                        filter: &crate::value::Value::Null,
-                        schema: &crate::value::Value::Null,
-                    },
-                )
-                .await
-                .expect_err("vec0 has no inner-product metric");
+            let binding = DbBinding::cold_start("search_ir_live");
+            let schema = crate::value!({
+                "id":{"type":"integer","primaryKey":true,"required":true},
+                "embedding":{"type":"vector","vectorDims":3}
+            });
+            let registration = zeroship_data_orm::sql::registration::SqlRegistration::builtin(
+                zeroship_data_orm::sql::compile::SqlDialect::Sqlite,
+            );
+            let refused = zeroship_data_orm::search::VectorSearch::compile(
+                &binding,
+                "docs",
+                "embedding",
+                &unit_vector(3),
+                5,
+                BackendMetric::InnerProduct,
+                &crate::value::Value::Null,
+                &schema,
+                &registration,
+            )
+            .expect_err("SQLite has no inner-product metric");
             let refused_code = match &refused {
                 zeroship_data_orm::error::DbError::Configuration { code, .. } => *code,
                 other => panic!("expected a typed Configuration refusal, got {other:?}"),
             };
             assert_eq!(refused_code, "vector_unsupported_metric");
 
-            // THE CONTROL: one variable changed. A supported metric on the same
-            // backend with the same (absent) fixture must fail differently, which is
-            // what proves the refusal above is keyed to the METRIC and not to the
-            // missing relation.
+            // A supported metric reaches execution on the same missing fixture.
             let other = sqlite
                 .vector_search(
                     None,
-                    zeroship_data_orm::search::VectorSearch {
-                        binding: &DbBinding::cold_start("search_ir_live"),
-                        collection: "docs",
-                        column: "embedding",
-                        query: &unit_vector(3),
-                        k: 5,
-                        metric: BackendMetric::Cosine,
-                        filter: &crate::value::Value::Null,
-                        schema: &crate::value::Value::Null,
-                    },
+                    zeroship_data_orm::search::VectorSearch::compile(
+                        &binding,
+                        "docs",
+                        "embedding",
+                        &unit_vector(3),
+                        5,
+                        BackendMetric::Cosine,
+                        &crate::value::Value::Null,
+                        &schema,
+                        &registration,
+                    )
+                    .unwrap(),
                 )
                 .await
                 .expect_err("there is no table, so this fails too - but for another reason");
@@ -523,27 +475,15 @@ fn postgres_serves_the_inner_product_that_sqlite_refuses() {
              missing fixture rather than the divergence: {other:?}"
             );
 
-            // Recorded on the PASSING path, not only in a failure message. What the
-            // control produced is the evidence that the refusal above is keyed to
-            // the metric, and a reader of a green run should be able to see it
-            // without re-deriving it.
             println!(
-                "ruled on 1 metric across 2 backends: postgres ranked {} rows by inner \
-             product; sqlite refused it as `{refused_code}`; the cosine control on the \
-             same backend failed differently ({other_code:?})",
-                ids.len()
+                "postgres executed inner-product search; sqlite refused it as \
+                 `{refused_code}` and admitted cosine to execution ({other_code:?})"
             );
         });
     })
 }
 
-/// The geo lowering runs against real PostGIS, and the coordinate order is the
-/// one the plan claims.
-///
-/// The fixture is what makes this an arm about `ST_MakePoint`'s `(x, y)` order
-/// rather than about SQL syntax: the rows are placed so that a **transposed**
-/// query point lands in the Southern Ocean and matches nothing. A lowering that
-/// wrote latitude first would return zero rows here, not a different ranking.
+/// The relational geo lowering runs against real PostGIS.
 #[test]
 fn a_geo_search_finds_the_near_rows_and_the_coordinate_order_is_load_bearing() {
     Host::test(|host| {

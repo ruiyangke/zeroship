@@ -16,6 +16,9 @@ pub struct SqliteCompiler;
 const SUPPORT: SqlSupport = SqlSupport {
     relational_reads: true,
     aggregate_reads: true,
+    vector_search: true,
+    inner_product_vector_search: false,
+    spatial_search: true,
     explicit_conflict_target: true,
     conditional_conflict_update: true,
     returning: true,
@@ -35,8 +38,52 @@ const SYNTAX: super::shared::Syntax = super::shared::Syntax {
     insensitive_like: "LIKE",
     insensitive_like_suffix: " COLLATE NOCASE",
     average_suffix: "",
+    vector_distance: write_vector_distance,
+    spatial_near: compile_spatial_near,
     array_mutation: write_array_mutation,
 };
+
+fn write_vector_distance(
+    writer: &mut SqlWriter,
+    column: &Column,
+    metric: crate::sql::descriptors::VectorMetric,
+    query: super::ParameterSlot,
+) -> Result<(), CompileError> {
+    if metric == crate::sql::descriptors::VectorMetric::InnerProduct {
+        return Err(CompileError::Unsupported("inner-product vector search"));
+    }
+    writer.sql.push_str(match metric {
+        crate::sql::descriptors::VectorMetric::Cosine => "vec_distance_cosine(",
+        crate::sql::descriptors::VectorMetric::L2 => "vec_distance_l2(",
+        crate::sql::descriptors::VectorMetric::InnerProduct => unreachable!("refused above"),
+    });
+    super::shared::write_column_reference(writer, column);
+    writer.sql.push_str(", ");
+    writer.write_bound(query);
+    writer.sql.push(')');
+    Ok(())
+}
+
+fn compile_spatial_near(
+    search: crate::sql::statement::SpatialNearStatement,
+    effective: &SqlSupport,
+) -> Result<CompiledQuery, CompileError> {
+    search.validate()?;
+    let parts = search.into_parts();
+    let mut writer = SqlWriter::new(effective.max_bind_parameters);
+    writer.sql.push_str("SELECT ");
+    super::shared::write_search_projection(&mut writer, &parts.projection);
+    writer.sql.push_str(" FROM ");
+    super::shared::write_table_reference(&mut writer, &parts.table);
+    if !matches!(
+        &parts.predicate,
+        crate::sql::statement::ResolvedPredicate::Const(true)
+    ) {
+        writer.sql.push_str(" WHERE ");
+        super::shared::write_predicate(&mut writer, SYNTAX, parts.predicate)?;
+    }
+    Ok(writer.finish())
+}
 
 fn write_column(writer: &mut SqlWriter, column: &Column) {
     writer.identifier(column.name().as_str());

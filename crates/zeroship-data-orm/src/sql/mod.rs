@@ -70,7 +70,6 @@ pub mod internal;
 
 pub mod sqlite_values;
 
-pub mod sqlite_search;
 
 mod array_update;
 pub mod codecs;

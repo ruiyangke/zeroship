@@ -1,12 +1,12 @@
 //! ORM search planning and execution on the captured route.
-use super::{SqliteBackend, spatial, vector};
+use super::{spatial, SqliteBackend};
+use crate::value::Value;
 use crate::{
     driver::{DriverSession, Session},
     error::DbError,
     search::*,
 };
 use async_trait::async_trait;
-use crate::value::Value;
 
 #[async_trait(?Send)]
 impl Search for SqliteBackend {
@@ -18,18 +18,7 @@ impl Search for SqliteBackend {
         self.attach_app_file(r.binding.app_id()).await?;
         let auto = self.autocommit_client();
         let session: &dyn DriverSession = session.map_or(&auto as &dyn DriverSession, |s| &**s);
-        self.vector_search_on(
-            session,
-            r.binding,
-            r.collection,
-            r.column,
-            r.query,
-            r.k,
-            r.metric,
-            r.filter,
-            r.schema,
-        )
-        .await
+        session.query(r.query.sql(), r.query.params()).await
     }
     async fn spatial_near(
         &self,
@@ -39,76 +28,9 @@ impl Search for SqliteBackend {
         self.attach_app_file(r.binding.app_id()).await?;
         let auto = self.autocommit_client();
         let session: &dyn DriverSession = session.map_or(&auto as &dyn DriverSession, |s| &**s);
-        self.spatial_near_on(
-            session,
-            r.binding,
-            r.collection,
-            r.column,
-            r.point,
-            r.radius_m,
-            r.filter,
-            r.limit,
-            r.schema,
-        )
-        .await
+        self.spatial_near_on(session, r.query, r.column, r.point, r.radius_m, r.limit)
+            .await
     }
-}
-
-impl SqliteBackend {
-    /// Exact vector ranking on the captured session. SQLite development reads
-    /// the migrated base column, applies the query filter, and then ranks rows
-    /// with sqlite-vec's scalar distance function. No index table is required.
-    ///
-    /// # Errors
-    /// Returns the unsupported-metric error, a compiler refusal, or a SQL error.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn vector_search_on(
-        &self,
-        session: &dyn crate::driver::DriverSession,
-        binding: &zeroship_data_orm::binding::DbBinding,
-        collection: &str,
-        column: &str,
-        query: &[f32],
-        k: usize,
-        metric: crate::sql::descriptors::VectorMetric,
-        filter: &crate::value::Value,
-        schema: &crate::value::Value,
-    ) -> Result<Vec<crate::value::Value>, DbError> {
-        let app_id = binding.app_id();
-        vector::reject_inner_product(metric)?;
-
-        let query = crate::sql::sqlite_search::build_vector_search(
-            app_id, collection, column, query, k, metric, filter, schema,
-        )?;
-        session.query(&query.sql, &query.params).await
-    }
-}
-
-/// SCHEMA, not tenant: this qualifies the table the query reads.
-///
-/// On SQLite the two are the same string today because the ATTACH alias IS
-/// the app id - see `attach_app_file`. The parameter states which of the two
-/// meanings the query builder is being handed.
-pub(super) fn build_spatial_near_base_query(
-    schema_name: &crate::sql::SchemaName,
-    collection: &str,
-    filter: &crate::value::Value,
-    schema_hint: &crate::value::Value,
-) -> Result<crate::sql::compiler::CompiledQuery, DbError> {
-    crate::sql::compile::build_find_with_schema_and_unmask_and_soft_delete_with_dialect(
-        schema_name,
-        collection,
-        filter,
-        /* limit  */ None,
-        /* offset */ None,
-        /* order_by */ None,
-        /* select   */ None,
-        schema_hint,
-        /* unmask_columns */ &[],
-        /* filter_soft_deleted */ false,
-        crate::sql::compile::SqlDialect::Sqlite,
-    )
-    .map_err(DbError::from)
 }
 
 // ---------------------------------------------------------------------------
@@ -146,23 +68,17 @@ impl SqliteBackend {
     pub async fn spatial_near_on(
         &self,
         session: &dyn crate::driver::DriverSession,
-        binding: &zeroship_data_orm::binding::DbBinding,
-        collection: &str,
+        query: crate::sql::compiler::CompiledQuery,
         column: &str,
         point: crate::sql::descriptors::GeoPoint,
         radius_m: f64,
-        filter: &crate::value::Value,
         limit: Option<usize>,
-        schema: &crate::value::Value,
     ) -> Result<Vec<crate::value::Value>, DbError> {
         // Build the WHERE clause via the same machinery `dispatch_find`
         // uses (the SQLite-on-PG-SQL path; `$N` placeholders bind
         // positionally on rusqlite). No ORDER BY at the SQL layer —
         // we sort in Rust by computed distance.
-        let schema_hint = schema;
-        let bq = build_spatial_near_base_query(binding.schema(), collection, filter, schema_hint)?;
-        let param_refs = &bq.params;
-        let rows = session.query(&bq.sql, param_refs).await?;
+        let rows = session.query(query.sql(), query.params()).await?;
         let mut scored = Vec::new();
         for row in rows {
             let blob = match row.get(column) {
@@ -191,8 +107,7 @@ impl SqliteBackend {
                 .ok_or_else(|| DbError::internal("spatial search returned a non-record"))?
                 .insert(
                     "_distance_m".into(),
-                    crate::value::Number::from_f64(distance)
-                        .map_or(Value::Null, Value::Number),
+                    crate::value::Number::from_f64(distance).map_or(Value::Null, Value::Number),
                 );
             out.push(row);
         }

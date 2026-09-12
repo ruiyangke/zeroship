@@ -1,8 +1,5 @@
 //! Runtime registration and routed backend extensions for the shared ORM.
-use crate::sql::{
-    SchemaName,
-    descriptors::{GeoPoint, VectorMetric},
-};
+use crate::sql::{descriptors::GeoPoint, SchemaName};
 use crate::value::Value;
 use crate::{
     backend::Backend,
@@ -111,13 +108,7 @@ impl Deref for BackendHandle {
 pub async fn routed_vector_search(
     route: &TxRoute,
     binding: &DbBinding,
-    collection: &str,
-    column: &str,
-    query: &[f32],
-    k: usize,
-    metric: VectorMetric,
-    filter: &Value,
-    schema: &Value,
+    query: crate::sql::compiler::CompiledQuery,
 ) -> Result<Vec<Value>, DbError> {
     read_on_route(route, async {
         let lane = if route.in_tx() {
@@ -132,16 +123,7 @@ pub async fn routed_vector_search(
             .backend()
             .vector_search(
                 lane.as_ref().map(|l| l.client()),
-                VectorSearch {
-                    binding,
-                    collection,
-                    column,
-                    query,
-                    k,
-                    metric,
-                    filter,
-                    schema,
-                },
+                VectorSearch { binding, query },
             )
             .await
     })
@@ -151,13 +133,11 @@ pub async fn routed_vector_search(
 pub async fn routed_spatial_near(
     route: &TxRoute,
     binding: &DbBinding,
-    collection: &str,
+    query: crate::sql::compiler::CompiledQuery,
     column: &str,
     point: GeoPoint,
     radius_m: f64,
-    filter: &Value,
     limit: Option<usize>,
-    schema: &Value,
 ) -> Result<Vec<Value>, DbError> {
     read_on_route(route, async {
         let lane = if route.in_tx() {
@@ -174,13 +154,11 @@ pub async fn routed_spatial_near(
                 lane.as_ref().map(|l| l.client()),
                 SpatialSearch {
                     binding,
-                    collection,
+                    query,
                     column,
                     point,
                     radius_m,
-                    filter,
                     limit,
-                    schema,
                 },
             )
             .await

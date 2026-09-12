@@ -5,8 +5,8 @@ use zeroship_data_orm::{
         statement::{
             Assignment, Comparison, Expression, Insert, InsertParts, ResolvedJoin, ResolvedOperand,
             ResolvedPredicate, ResolvedPredicateValue, ReturnedColumn, SelectParts,
-            SelectStatement, SelectedExpression, Statement, StorageType, Table, Upsert,
-            UpsertParts,
+            SelectStatement, SelectedExpression, SpatialNearParts, SpatialNearStatement, Statement,
+            StorageType, Table, Upsert, UpsertParts, VectorSearchParts, VectorSearchStatement,
         },
         CompareOp, Ident, IdentRole, JoinKind, SchemaName,
     },
@@ -31,6 +31,122 @@ fn table() -> Table {
         }),
     )
     .unwrap()
+}
+
+fn search_table() -> Table {
+    Table::aliased(
+        SchemaName::new("app-search").unwrap(),
+        Ident::parse_as("places", IdentRole::Collection).unwrap(),
+        Ident::parse_as("source", IdentRole::Alias).unwrap(),
+        [
+            ("id", StorageType::Text),
+            ("label", StorageType::Text),
+            ("embedding", StorageType::Vector),
+            ("location", StorageType::GeoPoint),
+        ]
+        .map(|(name, storage)| {
+            (
+                Ident::parse_as(name, IdentRole::StoredColumn).unwrap(),
+                storage,
+            )
+        }),
+    )
+    .unwrap()
+}
+
+#[test]
+fn registered_compilers_own_vector_search_syntax() {
+    let statement = |query| {
+        let table = search_table();
+        Statement::VectorSearch(
+            VectorSearchStatement::new(VectorSearchParts {
+                projection: vec![ReturnedColumn {
+                    column: table.column("id").unwrap(),
+                    alias: None,
+                }],
+                identity: table.column("id").unwrap(),
+                vector: table.column("embedding").unwrap(),
+                query,
+                metric: zeroship_data_orm::sql::descriptors::VectorMetric::Cosine,
+                predicate: ResolvedPredicate::Compare {
+                    lhs: ResolvedOperand::Column(table.column("label").unwrap()),
+                    op: CompareOp::Eq,
+                    rhs: ResolvedPredicateValue::Bind {
+                        storage: StorageType::Text,
+                        value: Value::from("open"),
+                    },
+                },
+                limit: 5,
+                table,
+            })
+            .unwrap(),
+        )
+    };
+
+    let postgres = PostgresCompiler
+        .compile(
+            statement(zeroship_data_orm::value!([1.0, 2.0])),
+            &PostgresCompiler.support(),
+        )
+        .unwrap();
+    assert!(postgres.sql().contains(" <=> $1::vector AS \"_distance\""));
+    assert!(postgres
+        .sql()
+        .contains("ORDER BY \"source\".\"embedding\" <=> $1::vector"));
+    assert_eq!(
+        postgres.params(),
+        &[
+            zeroship_data_orm::value!([1.0, 2.0]),
+            Value::from("open"),
+            Value::from(5)
+        ]
+    );
+
+    let sqlite = SqliteCompiler
+        .compile(
+            statement(Value::Bytes(vec![0; 8])),
+            &SqliteCompiler.support(),
+        )
+        .unwrap();
+    assert!(sqlite
+        .sql()
+        .contains("vec_distance_cosine(\"source\".\"embedding\", $1)"));
+    assert_eq!(sqlite.params().len(), 3);
+}
+
+#[test]
+fn registered_compilers_choose_the_spatial_execution_statement() {
+    let statement = || {
+        let table = search_table();
+        Statement::SpatialNear(
+            SpatialNearStatement::new(SpatialNearParts {
+                projection: vec![ReturnedColumn {
+                    column: table.column("id").unwrap(),
+                    alias: None,
+                }],
+                spatial: table.column("location").unwrap(),
+                point: zeroship_data_orm::value!({"lat":51.5,"lng":-0.1}),
+                radius_m: 1000.0,
+                predicate: ResolvedPredicate::Const(true),
+                limit: 5,
+                table,
+            })
+            .unwrap(),
+        )
+    };
+
+    let postgres = PostgresCompiler
+        .compile(statement(), &PostgresCompiler.support())
+        .unwrap();
+    assert!(postgres.sql().contains("ST_DWithin"));
+    assert!(postgres.sql().contains("ST_Distance"));
+
+    let sqlite = SqliteCompiler
+        .compile(statement(), &SqliteCompiler.support())
+        .unwrap();
+    assert!(!sqlite.sql().contains("ST_DWithin"));
+    assert!(!sqlite.sql().contains("LIMIT"));
+    assert!(sqlite.sql().starts_with("SELECT \"source\".\"id\""));
 }
 
 fn insert_parts(table: &Table) -> InsertParts {
