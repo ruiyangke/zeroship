@@ -176,7 +176,7 @@ impl SqlRegistration {
     }
 
     pub fn compile(&self, statement: Statement) -> Result<CompiledQuery, CompileError> {
-        self.check(&Requirements::for_statement(&statement))?;
+        self.check(&self.compiler.requirements(&statement))?;
         let query = self.compiler.compile(statement, &self.effective)?;
         self.check_output(&query)?;
         Ok(query)

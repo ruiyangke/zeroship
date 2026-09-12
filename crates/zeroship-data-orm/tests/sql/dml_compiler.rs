@@ -423,6 +423,49 @@ fn registered_compilers_choose_the_spatial_execution_statement() {
 }
 
 #[test]
+fn spatial_bind_preflight_follows_the_registered_compiler() {
+    let statement = || {
+        let table = search_table();
+        Statement::SpatialNear(
+            SpatialNearStatement::new(SpatialNearParts {
+                projection: vec![ReturnedColumn {
+                    column: table.column("id").unwrap(),
+                    alias: None,
+                }],
+                identity: table.column("id").unwrap(),
+                spatial: table.column("location").unwrap(),
+                point: zeroship_data_orm::value!({"lat":51.5,"lng":-0.1}),
+                radius_m: 1000.0,
+                predicate: ResolvedPredicate::Const(true),
+                limit: 5,
+                table,
+            })
+            .unwrap(),
+        )
+    };
+
+    let mut sqlite_support = SqliteCompiler.support();
+    sqlite_support.max_bind_parameters = 0;
+    assert!(SqliteCompiler.compile(statement(), &sqlite_support).is_ok());
+    let sqlite_registration = SqlRegistration::new(
+        "sqlite-spatial-bind-accounting",
+        SqlFamily::new("example.sqlite-spatial-bind-accounting"),
+        SqliteCompiler,
+        DownstreamCodecs,
+        sqlite_support,
+    )
+    .unwrap();
+    assert!(sqlite_registration.compile(statement()).is_ok());
+
+    let mut postgres_support = PostgresCompiler.support();
+    postgres_support.max_bind_parameters = 2;
+    assert!(matches!(
+        PostgresCompiler.compile(statement(), &postgres_support),
+        Err(CompileError::BindLimitExceeded { limit: 2 })
+    ));
+}
+
+#[test]
 fn search_statements_require_a_positive_limit() {
     let table = search_table();
     assert!(VectorSearchStatement::new(VectorSearchParts {
