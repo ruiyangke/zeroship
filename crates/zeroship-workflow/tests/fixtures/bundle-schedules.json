@@ -1,0 +1,26 @@
+[
+  {
+    "name": "nightly-report",
+    "workflowName": "Report",
+    "schedule": {
+      "kind": "cron",
+      "cron_expr": "30 2 * * *",
+      "tz": "America/New_York"
+    },
+    "input": { "region": "us" },
+    "overlap": "skipIfRunning",
+    "catchUp": { "mode": "backfill", "max": 3 }
+  },
+  {
+    "name": "periodic-report",
+    "workflowName": "Report",
+    "schedule": {
+      "kind": "interval",
+      "interval_ms": 60000,
+      "anchor": "deploy"
+    },
+    "input": {},
+    "overlap": "allow",
+    "catchUp": { "mode": "skip" }
+  }
+]

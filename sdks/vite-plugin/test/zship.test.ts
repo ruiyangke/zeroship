@@ -344,8 +344,6 @@ describe("emitZship", () => {
                 kind: "cron",
                 cron_expr: "30 2 * * *",
                 tz: "America/New_York",
-                overlap: "skipIfRunning",
-                catchUp: { mode: "backfill", max: 3 },
               },
             },
           ],
@@ -363,8 +361,6 @@ describe("emitZship", () => {
             kind: "cron",
             cron_expr: "30 2 * * *",
             tz: "America/New_York",
-            overlap: "skipIfRunning",
-            catchUp: { mode: "backfill", max: 3 },
           },
         },
       ]);
