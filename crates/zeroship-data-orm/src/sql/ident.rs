@@ -5,23 +5,23 @@
 //! belong to migration validation so queries can still address those fields.
 //!
 //! ```
-//! use crate::sql::{Ident, IdentRole};
+//! use zeroship_data_orm::sql::{Ident, IdentRole};
 //! let id = Ident::parse_as("users", IdentRole::Collection).expect("valid");
 //! assert_eq!(id.as_str(), "users");
 //! assert!(Ident::parse_as("users\"; DROP TABLE users; --", IdentRole::Collection).is_err());
 //! ```
 //! ```compile_fail
 //! // The private field means the newtype cannot be forged.
-//! let forged = crate::sql::Ident("users\"; DROP TABLE users; --".to_string());
+//! let forged = zeroship_data_orm::sql::Ident("users\"; DROP TABLE users; --".to_string());
 //! ```
 //! ```compile_fail
 //! // ... and it cannot be opened up either.
-//! let id = crate::sql::Ident::parse_as("users", crate::sql::IdentRole::Collection).unwrap();
+//! let id = zeroship_data_orm::sql::Ident::parse_as("users", zeroship_data_orm::sql::IdentRole::Collection).unwrap();
 //! let raw: String = id.0;
 //! ```
 //! ```compile_fail
 //! // There is no blanket conversion from text.
-//! let id: crate::sql::Ident = "users".to_string().into();
+//! let id: zeroship_data_orm::sql::Ident = "users".to_string().into();
 //! ```
 
 use core::fmt;
@@ -47,7 +47,7 @@ pub enum IdentRole {
     /// crate plans no DDL.
     Column,
     /// A column the PLATFORM references, not one a creator declared: the
-    /// physical side of a [`crate::sql::ProjectionSource::Stored`].
+    /// physical side of a [`zeroship_data_orm::sql::ProjectionSource::Stored`].
     ///
     /// It exists for the same reason [`Self::Alias`] does. The platform's stored
     /// forms are spelled with the very prefixes `COLUMN_RESERVATIONS` refuses,

@@ -4847,18 +4847,13 @@ mod tests {
         assert!(msg.contains("invalid collection"), "msg: {msg}");
     }
 
-    /// The refusal MOVED; it did not disappear.
-    ///
-    /// `build_find` used to take a `&str` and refuse a schema carrying a
-    /// semicolon on every call. It now takes a `SchemaName`, so the illegal
-    /// name cannot reach it at all - the refusal is at construction, once,
-    /// and the same `QueryError` value comes out.
+    /// Invalid schema names cannot reach a query builder.
     #[test]
     fn test_schema_sql_injection() {
         let err = SchemaName::new("app1; DROP TABLE")
             .expect_err("a semicolon must not survive into a schema name");
         assert!(
-            matches!(err, QueryError::InvalidCollection(_)),
+            matches!(err, zeroship_core::schema_name::SchemaNameError::Invalid(_)),
             "unexpected refusal: {err}"
         );
         let msg = err.to_string();
@@ -6344,7 +6339,7 @@ mod tests {
     #[test]
     fn test_build_indexes_rejects_bad_schema() {
         let err = SchemaName::new("app; --").unwrap_err();
-        assert!(matches!(err, QueryError::InvalidCollection(_)));
+        assert!(matches!(err, zeroship_core::schema_name::SchemaNameError::Invalid(_)));
     }
 
     // -----------------------------------------------------------------------

@@ -1,6 +1,6 @@
 # Shared ORM SQL compilation
 
-**Status: Crate consolidation implemented; full validation in progress. The shared compiler redesign remains proposed.**
+**Status: Crate consolidation implemented and validated. The shared compiler redesign remains proposed.**
 
 Consolidate runtime SQL construction around a shared statement representation,
 dialect compilation, and ORM-owned execution strategies. Rust and TypeScript
@@ -14,8 +14,9 @@ adapter, CDC wire, and CDC server crates separate. The shared physical schema
 identity moves to `zeroship-core`; the migration service changes its dependency
 and import to that owner. Migration DDL and execution behavior, the deploy
 artifact, connection pooling, the transaction reducer, and the separate feature
-roadmap remain outside this change. Preserve the native value path, required `id` contract, descriptor-driven
-generators, fixed application mask policy, and project-owned encryption keys.
+roadmap remain outside this change. Preserve the native value path, required
+`id` contract, descriptor-driven generators, fixed application mask policy, and
+project-owned encryption keys.
 
 The physical driver continues to acquire sessions, bind parameters, execute,
 cancel, and settle. It acquires no collection, policy, search, or upsert API.
@@ -116,6 +117,12 @@ wire crate with the ORM in shipped code.
 Crate consolidation moves existing SQL behavior, tests, and benchmarks together
 and deletes the old package and every active dependency on it. It precedes the
 compiler redesign below; moving code alone does not consolidate its renderers.
+
+The crate consolidation passed `cargo xtask test data`, the core schema-identity
+tests and documentation contract, migration-service provisioning tests, CLI and
+ORM benchmark compilation, and DB SDK/bootstrap tests and type checks. The SQL
+integration tests now run from the ORM package; native values and their macros
+use the ORM public path.
 
 Proposed module ownership:
 
