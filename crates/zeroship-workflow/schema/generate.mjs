@@ -1,5 +1,7 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
+import { genArtifacts } from "../../../crates/zeroship-migrate-node/index.js";
 import { workflowSchema } from "./schema.ts";
 import { bindOwnedNames } from "./names.mjs";
 import { buildEnvelope } from "../../../packages/zero-migrate/dist/internal/recorder.js";
@@ -8,6 +10,7 @@ import { currentIrVersion, previewSql } from "../../../packages/zero-migrate-cli
 const check = process.argv.includes("--check");
 const fingerprints = {};
 const outputs = [];
+let runtimeDescriptor;
 for (const dialect of ["postgres", "sqlite"]) {
   const namespace = dialect === "postgres" ? "__zeroship_workflow_schema" : "main";
   let identifiers;
@@ -24,6 +27,22 @@ value = true
 scope = { include = ["${namespace}"] }
 `;
   const statements = previewSql({ envelopes: [JSON.stringify(envelope)], dialect, defaultSchema: namespace, ownerApp: "workflow", charterLayers: [charter] });
+  const artifacts = genArtifacts({ envelopes: [envelope], dialect, projectSchema: namespace, charterLayers: [charter] });
+  if (!artifacts.ok) throw new Error(artifacts.error);
+  const descriptor = JSON.parse(artifacts.runtimeJson);
+  if (!Object.keys(descriptor.collections).length) throw new Error("workflow descriptor is empty");
+  descriptor.collections = Object.fromEntries(Object.entries(descriptor.collections).map(([name, collection]) => {
+    if (!identifiers.identifiers.has(name)) throw new Error(`unexpected workflow collection ${name}`);
+    const indexes = collection.indexes.map(index => {
+      if (!identifiers.identifiers.has(index.name)) throw new Error(`unexpected workflow index ${index.name}`);
+      return { ...index, name: `__zeroship_workflow_${index.name}` };
+    });
+    return [`__zeroship_workflow_${name}`, { ...collection, indexes }];
+  }));
+  if (runtimeDescriptor && !isDeepStrictEqual(runtimeDescriptor, descriptor)) {
+    throw new Error("workflow model metadata differs between database dialects");
+  }
+  runtimeDescriptor = descriptor;
   const emitted = statements.join("\n");
   if (emitted.includes("[runtime-resolved]")) throw new Error("workflow schema must lower completely");
   // Preview annotations contain measured tallies; shipped SQL retains statements.
@@ -36,6 +55,7 @@ scope = { include = ["${namespace}"] }
 }
 
 outputs.push({ path: new URL("./fingerprints.json", import.meta.url), content: JSON.stringify(fingerprints, null, 2) + "\n" });
+outputs.push({ path: new URL("./schema.runtime.json", import.meta.url), content: JSON.stringify(runtimeDescriptor, null, 2) + "\n" });
 // Finish compiling every dialect before changing any generated artifact.
 for (const { path, content } of outputs) {
   if (check) {

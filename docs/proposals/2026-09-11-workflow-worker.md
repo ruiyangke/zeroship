@@ -245,8 +245,10 @@ runtime descriptor for the physical reserved table names from the same canonical
 migration definition, then use `orm::schema!` to generate entity and column
 metadata. `FromRow` defines typed read projections, `Insertable` defines creation
 inputs, and `Changeset` defines explicit partial updates. Do not maintain another
-handwritten schema in Rust or JSON. The workflow generator currently emits DDL
-and fingerprints; descriptor generation and model adoption remain unfinished.
+handwritten schema in Rust or JSON. The workflow generator emits DDL,
+fingerprints and the runtime descriptor from the canonical migration. Native
+PostgreSQL and SQLite contracts compare descriptor columns and keys with the
+migrated catalog. Model adoption remains unfinished.
 Composite app/run/generation keys and
 conditional updates must remain expressible before converting those operations.
 
