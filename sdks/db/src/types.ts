@@ -253,18 +253,20 @@ type UpdateFieldValue<T> =
   (NonNullable<T> extends number | bigint ? NumericUpdateOps<NonNullable<T>> : never) |
   (NonNullable<T> extends readonly unknown[] ? ArrayUpdateOps<NonNullable<T>[number]> : never);
 
+type UpdateKeys<S> = Exclude<keyof InferSchema<S>, AssignedKeys<S> | "id">;
+
 /** Typed update expression — per-field operators. */
 export type UpdateExpression<S> = {
-  [K in Exclude<keyof InferSchema<S>, AssignedKeys<S>>]?: UpdateFieldValue<InferSchema<S>[K]>
+  [K in UpdateKeys<S>]?: UpdateFieldValue<InferSchema<S>[K]>
 } & {
   // Document operators share the ORM's assignment grammar.
-  $set?: Partial<Omit<InferSchema<S>, AssignedKeys<S>>>;
-  $inc?: { [K in Exclude<keyof InferSchema<S>, AssignedKeys<S>>]?: NonNullable<InferSchema<S>[K]> extends number | bigint ? NonNullable<InferSchema<S>[K]> : never };
-  $dec?: { [K in Exclude<keyof InferSchema<S>, AssignedKeys<S>>]?: NonNullable<InferSchema<S>[K]> extends number | bigint ? NonNullable<InferSchema<S>[K]> : never };
-  $mul?: { [K in Exclude<keyof InferSchema<S>, AssignedKeys<S>>]?: NonNullable<InferSchema<S>[K]> extends number | bigint ? NonNullable<InferSchema<S>[K]> : never };
-  $push?: { [K in Exclude<keyof InferSchema<S>, AssignedKeys<S>>]?: NonNullable<InferSchema<S>[K]> extends readonly unknown[] ? NonNullable<InferSchema<S>[K]>[number] : never };
-  $pull?: { [K in Exclude<keyof InferSchema<S>, AssignedKeys<S>>]?: NonNullable<InferSchema<S>[K]> extends readonly unknown[] ? NonNullable<InferSchema<S>[K]>[number] : never };
-  $addToSet?: { [K in Exclude<keyof InferSchema<S>, AssignedKeys<S>>]?: NonNullable<InferSchema<S>[K]> extends readonly unknown[] ? NonNullable<InferSchema<S>[K]>[number] : never };
+  $set?: Partial<Pick<InferSchema<S>, UpdateKeys<S>>>;
+  $inc?: { [K in UpdateKeys<S>]?: NonNullable<InferSchema<S>[K]> extends number | bigint ? NonNullable<InferSchema<S>[K]> : never };
+  $dec?: { [K in UpdateKeys<S>]?: NonNullable<InferSchema<S>[K]> extends number | bigint ? NonNullable<InferSchema<S>[K]> : never };
+  $mul?: { [K in UpdateKeys<S>]?: NonNullable<InferSchema<S>[K]> extends number | bigint ? NonNullable<InferSchema<S>[K]> : never };
+  $push?: { [K in UpdateKeys<S>]?: NonNullable<InferSchema<S>[K]> extends readonly unknown[] ? NonNullable<InferSchema<S>[K]>[number] : never };
+  $pull?: { [K in UpdateKeys<S>]?: NonNullable<InferSchema<S>[K]> extends readonly unknown[] ? NonNullable<InferSchema<S>[K]>[number] : never };
+  $addToSet?: { [K in UpdateKeys<S>]?: NonNullable<InferSchema<S>[K]> extends readonly unknown[] ? NonNullable<InferSchema<S>[K]>[number] : never };
 };
 
 // ---------------------------------------------------------------------------

@@ -9,6 +9,7 @@ mod bulk;
 mod calendar_date;
 mod fixtures;
 mod identity;
+mod identity_contract;
 mod joins;
 mod json;
 mod lifecycle;

@@ -3140,7 +3140,8 @@ pub fn build_upsert_with_assignments(
         }
 
         // Non-conflict columns get updated to the EXCLUDED value
-        if !conflict_set.contains(key.as_str())
+        if key != "id"
+            && !conflict_set.contains(key.as_str())
             && schema_hint[key]["assign"]["on"].as_str() != Some("insert")
             && !assignments
                 .columns

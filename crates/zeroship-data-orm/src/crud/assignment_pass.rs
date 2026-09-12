@@ -154,6 +154,16 @@ fn inject_into_object(
 // ---------------------------------------------------------------------------
 
 pub fn apply_assignments_on_update(patch: &mut Value, schema: &Value) -> Result<(), DbError> {
+    if patch.get("id").is_some()
+        || ["$set", "$inc", "$dec", "$mul"]
+            .iter()
+            .any(|op| patch.get(*op).is_some_and(|fields| fields.get("id").is_some()))
+    {
+        return Err(DbError::validation(
+            "immutable_primary_key",
+            "the collection identity cannot be changed after insertion",
+        ));
+    }
     let plan = AssignmentPlan::from_schema(schema)?;
     let immutable: Vec<String> = plan.immutable_after_insert().map(str::to_string).collect();
     let reassigned: Vec<String> = plan.reassigned_on_write().map(str::to_string).collect();
@@ -223,11 +233,21 @@ pub fn extract_cas_version(
     Ok(v.as_i64())
 }
 
-/// Whether the filter directly constrains the entity's identity.
+/// Whether the filter constrains the entity to one non-null identity.
 pub fn filter_has_id_predicate(filter: &Value) -> bool {
-    filter
-        .as_object()
-        .is_some_and(|object| object.contains_key("id"))
+    let Some(mut id) = filter.get("id") else {
+        return false;
+    };
+    if let Some(operators) = id.as_object() {
+        if operators.len() != 1 {
+            return false;
+        }
+        let Some(value) = operators.get("$eq") else {
+            return false;
+        };
+        id = value;
+    }
+    matches!(id, Value::String(_) | Value::Number(_) | Value::Decimal(_))
 }
 
 fn filter_has_nested_version_predicate(filter: &Value, column: &str) -> bool {
