@@ -157,3 +157,33 @@ fn postgres_compiler_counts_pagination_in_statement_bind_limit() {
         "pagination exceeded the statement bind limit without a compiler error"
     );
 }
+
+#[test]
+fn production_upsert_normalizes_unordered_column_input() {
+    let namespace = SchemaName::new("app_upsert_shape").unwrap();
+    let schema = value!({
+        "id": {"type": "string", "primaryKey": true},
+        "email": {"type": "string"},
+        "title": {"type": "string"},
+        "payload": {"type": "bytes"},
+    });
+    let forwards = value!({"id": "entry", "email": "key", "title": "text", "payload": Value::Bytes(vec![255])});
+    let backwards = value!({"payload": Value::Bytes(vec![255]), "title": "text", "email": "key", "id": "entry"});
+    let conflict = value!(["email"]);
+    for dialect in [compile::SqlDialect::Postgres, compile::SqlDialect::Sqlite] {
+        let build = |input| {
+            compile::build_upsert_with_dialect(
+                &namespace, "entries", &schema, input, &conflict, dialect,
+            )
+            .unwrap()
+        };
+        let first = build(&forwards);
+        let second = build(&backwards);
+        assert_eq!(
+            first.sql(),
+            second.sql(),
+            "input map order changed upsert SQL"
+        );
+        assert_eq!(first.params(), second.params());
+    }
+}
