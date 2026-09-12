@@ -117,6 +117,19 @@ async fn seed_unassigned_backlog(service: &WorkflowService, source: &AppId) {
         .await
         .unwrap();
         tx.execute(&format!("INSERT INTO {schedules} (app_id,id,name,workflow_name,deploy_id,definition,next_at,revision,anchor_at,last_checked_at) SELECT $1,id,name,workflow_name,deploy_id,definition,0,revision,anchor_at,-1 FROM {schedules} WHERE app_id=$2"), &[app.as_str().into(),source.as_str().into()]).await.unwrap();
+        crate::service::signals::publish(
+            &mut tx,
+            &app,
+            "updates",
+            &SignalOptions {
+                signal_type: "ready".into(),
+                payload: json!(null),
+            },
+            "app",
+            0,
+        )
+        .await
+        .unwrap();
     }
     tx.commit().await.unwrap();
 }
@@ -133,6 +146,18 @@ async fn background_contract(store: Rc<OrmStore>, path: &Path) {
     let assigned_payload = seed_app(&service, &assigned, &worker).await;
     let foreign_payload = seed_app(&service, &foreign, &worker).await;
     seed_unassigned_backlog(&service, &foreign).await;
+    let assigned_broadcast = service
+        .for_app(assigned.clone())
+        .broadcast(
+            &RequestId::mint(),
+            "updates",
+            SignalOptions {
+                signal_type: "ready".into(),
+                payload: json!(null),
+            },
+        )
+        .await
+        .unwrap();
     let mut tx = service.begin().await.unwrap();
     for (table, column) in [
         ("tasks", "deadline"),
@@ -162,6 +187,7 @@ async fn background_contract(store: Rc<OrmStore>, path: &Path) {
         .unwrap();
     assert!(reopened.poll(&worker).await.unwrap().is_none());
     assert_eq!(reopened.tick_schedules().await.unwrap(), 0);
+    assert_eq!(reopened.tick_broadcasts().await.unwrap(), 0);
     assert_eq!(reopened.collect_payloads(1).await.unwrap(), 0);
     reopened
         .register_app(&assigned, configured_policy(1, AppPolicy::default()))
@@ -170,6 +196,28 @@ async fn background_contract(store: Rc<OrmStore>, path: &Path) {
     let task = reopened.poll(&worker).await.unwrap().unwrap();
     assert_eq!(task.invocation.app_id, assigned.as_str());
     assert_eq!(reopened.tick_schedules().await.unwrap(), 1);
+    assert_eq!(reopened.tick_broadcasts().await.unwrap(), 0);
+    let mut tx = service.begin().await.unwrap();
+    let broadcasts = tx.table("broadcasts");
+    let completed = tx
+        .query(
+            &format!("SELECT app_id,id FROM {broadcasts} WHERE finished=1"),
+            &[],
+        )
+        .await
+        .unwrap();
+    assert_eq!(completed.len(), 1);
+    assert_eq!(completed[0].text("app_id").unwrap(), assigned.as_str());
+    assert_eq!(completed[0].text("id").unwrap(), assigned_broadcast.id);
+    let pending = tx
+        .query(
+            &format!("SELECT COUNT(*) AS total FROM {broadcasts} WHERE app_id<>$1 AND finished=0"),
+            &[assigned.as_str().into()],
+        )
+        .await
+        .unwrap();
+    assert!(pending[0].integer("total").unwrap() > 128);
+    tx.commit().await.unwrap();
 
     reopened
         .register_app(

@@ -141,7 +141,8 @@ impl WorkflowService {
     pub async fn tick_broadcasts(&self) -> Result<usize, WorkflowServiceError> {
         let mut tx = self.begin().await?;
         let broadcasts = tx.table("broadcasts");
-        let pending=tx.query(&format!("SELECT app_id,id FROM {broadcasts} WHERE finished=0 ORDER BY created_at,app_id,id LIMIT 128"), &[]).await?;
+        let (scope, app_ids) = tx.host_app_scope()?;
+        let pending=tx.query(&format!("SELECT app_id,id FROM {broadcasts} WHERE app_id IN ({scope}) AND finished=0 ORDER BY created_at,app_id,id LIMIT 128"), &[app_ids]).await?;
         tx.commit().await?;
         let mut delivered = 0;
         for candidate in pending {
