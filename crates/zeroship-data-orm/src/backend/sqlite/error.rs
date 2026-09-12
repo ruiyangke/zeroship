@@ -103,7 +103,7 @@ pub(crate) fn from_sqlite(e: rusqlite::Error) -> DbError {
         // existing PG-side unique-violation parser sees a uniform
         // wire payload across backends. The envelope mirrors the
         // `cic_failed` shape the PG IndexBuilder emits at
-        // `crates/zeroship-data-orm/src/backend/postgres/implementation.rs:442`.
+        // `crates/zeroship-data-orm/src/backend/postgres/implementation.rs`.
         rusqlite::Error::SqliteFailure(ffi_err, _)
             if ffi_err.extended_code == SQLITE_CONSTRAINT_UNIQUE =>
         {
@@ -172,10 +172,10 @@ pub(crate) fn from_sqlite(e: rusqlite::Error) -> DbError {
 
 /// Build the wire envelope for the four SchemaRefused constraint
 /// codes. Matches the PG IndexBuilder's `cic_failed` envelope shape
-/// at `crates/zeroship-data-orm/src/backend/postgres/implementation.rs:442` so the SDK's
+/// at `crates/zeroship-data-orm/src/backend/postgres/implementation.rs` so the SDK's
 /// existing PG-side parser handles the SQLite arm unchanged.
 fn build_constraint_envelope(code: &str, message: &str) -> String {
-    serde_json::to_string(&zeroship_data_sql::value!({
+    serde_json::to_string(&crate::value!({
         "code": code,
         "message": message,
     }))
@@ -229,7 +229,7 @@ mod tests {
                 envelope_json,
             } => {
                 assert_eq!(code, "unique_violation");
-                let v: zeroship_data_sql::value::Value =
+                let v: crate::value::Value =
                     serde_json::from_str(&envelope_json).expect("envelope must be valid JSON");
                 assert_eq!(v["code"], "unique_violation");
             }

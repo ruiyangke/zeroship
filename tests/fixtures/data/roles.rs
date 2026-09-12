@@ -20,7 +20,7 @@ pub(crate) const RESERVED_SYSTEM_TABLE_PREFIX: &str = "__zeroship_";
 /// Reserved table whose grants permit the runtime to append unmask audit rows.
 /// The dedicated grant recipe excludes mutation and deletion of existing evidence.
 pub(crate) const WORKER_WRITABLE_RESERVED_TABLE: &str =
-    zeroship_data_sql::internal::AUDIT_UNMASK_TABLE;
+    zeroship_data_orm::sql::internal::AUDIT_UNMASK_TABLE;
 
 /// Wrap a `compio_postgres::Error` in [`DbError`] with a context phrase
 /// so operators see *what* the bootstrap layer was doing when the SQL
@@ -82,7 +82,7 @@ pub fn set_local_role_sql(app_id: &str) -> Result<String, DbError> {
     let role = per_app_role_name(app_id)?;
     Ok(format!(
         "SET LOCAL ROLE {}",
-        zeroship_data_sql::compile::quote_ident(&role)
+        zeroship_data_orm::sql::compile::quote_ident(&role)
     ))
 }
 
@@ -122,7 +122,7 @@ pub struct PerAppRoleOutcome {
 /// (bootstrap) role — a superuser or CREATEROLE principal.
 pub async fn ensure_per_app_role(pool: &Pool, app_id: &str) -> Result<PerAppRoleOutcome, DbError> {
     let role = per_app_role_name(app_id)?;
-    let schema = zeroship_data_sql::compile::quote_ident(app_id);
+    let schema = zeroship_data_orm::sql::compile::quote_ident(app_id);
     let qrole = format!("\"{role}\"");
 
     // 0. Ensure the app-role template anchor exists. The per-app role's

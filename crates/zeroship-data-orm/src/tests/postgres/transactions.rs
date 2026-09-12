@@ -18,8 +18,8 @@ use zeroship_data_orm::transaction::reducer::{
 /// Derived from the app id here because these fixtures still mint one
 /// string for both identities - the same thing production does today. The
 /// point of the parameter is that the CALL now states which it means.
-fn app_schema(app_id: &str) -> zeroship_data_sql::SchemaName {
-    zeroship_data_sql::SchemaName::new(app_id).expect("fixture schema name")
+fn app_schema(app_id: &str) -> crate::sql::SchemaName {
+    crate::sql::SchemaName::new(app_id).expect("fixture schema name")
 }
 
 async fn probe_backend(host: &Host) -> zeroship_data_orm::backend::BackendHandle {

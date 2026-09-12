@@ -89,7 +89,7 @@ export async function loadRelations(
       return;
     }
     // Chunked, because the native builder REJECTS a membership list longer
-    // than MAX_MEMBERSHIP_LIST_LEN (`zeroship-data-sql/src/compile.rs`). Sending
+    // than MAX_MEMBERSHIP_LIST_LEN (`zeroship-data-orm::sql/src/compile.rs`). Sending
     // the whole deduplicated set failed outright for any page carrying more
     // than that many DISTINCT foreign keys - which an unpaginated find()
     // reaches easily, so a documented feature broke on ordinary data.

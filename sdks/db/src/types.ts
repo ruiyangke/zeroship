@@ -462,7 +462,7 @@ export type MaskKind =
  * - `internal` — platform-internal metadata, system-field overrides.
  *
  * The six names are also reserved as column names by
- * `crates/zeroship-data-sql/src/compile.rs::validate_field_name` so creator
+ * `crates/zeroship-data-orm/src/sql/compile.rs::validate_field_name` so creator
  * schemas cannot accidentally collide with the taxonomy.
  */
 export type Classification =

@@ -47,8 +47,8 @@ use zeroship_data_orm::binding::DbBinding;
 use zeroship_data_orm::error::DbError;
 use zeroship_data_orm::protection::mask_policy::install_mask_policy;
 use zeroship_data_orm::tx_route::{CapturedRoute, TxRoute};
-use zeroship_data_sql::compile::SqlDialect;
-use zeroship_data_sql::value::{Value, value};
+use crate::sql::compile::SqlDialect;
+use crate::value::{Value, value};
 
 /// Connect, or fail the test. Deliberately NOT a skip: a skipping run of a
 /// masking suite is indistinguishable from a passing one.
@@ -109,7 +109,7 @@ async fn fixture_with_schema(host: &Host, pool: &Rc<Pool>, url: &str, app: &str,
         .await
         .unwrap();
     let ddl = fixture_table_sql(
-        &zeroship_data_sql::SchemaName::new(app).expect("fixture schema name"),
+        &crate::sql::SchemaName::new(app).expect("fixture schema name"),
         "people",
         &schema,
         &FkEmission::Inline,
@@ -541,7 +541,7 @@ async fn audit_rows(pool: &Rc<Pool>, app: &str) -> Vec<Value> {
         .unwrap();
     rows.iter()
         .map(|row| {
-            let mut map = zeroship_data_sql::value::Map::new();
+            let mut map = crate::value::Map::new();
             for (i, column) in row.columns().iter().enumerate() {
                 let value: Option<String> = row.try_get(i).unwrap_or(None);
                 map.insert(

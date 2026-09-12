@@ -11,10 +11,10 @@ pub(super) fn register(connection: &Connection) -> rusqlite::Result<()> {
         |context| {
             let left: String = context.get(0)?;
             let right = context.get_or_create_aux(1, |value| {
-                zeroship_data_sql::json::comparison_key(value.as_str()?)
+                crate::sql::json::comparison_key(value.as_str()?)
                     .map_err(|error| Box::new(error) as Box<dyn std::error::Error + Send + Sync>)
             })?;
-            let left = zeroship_data_sql::json::comparison_key(&left)
+            let left = crate::sql::json::comparison_key(&left)
                 .map_err(|error| rusqlite::Error::UserFunctionError(Box::new(error)))?;
             Ok(left == *right)
         },

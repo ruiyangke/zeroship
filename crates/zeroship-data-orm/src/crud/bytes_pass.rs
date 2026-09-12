@@ -1,6 +1,6 @@
 //! Validate native binary fields before they reach the SQL compiler.
 use zeroship_data_orm::error::DbError;
-use zeroship_data_sql::value::Value;
+use crate::value::Value;
 
 pub fn schema_has_plain_bytes_columns(schema: &Value) -> bool {
     schema
@@ -8,7 +8,7 @@ pub fn schema_has_plain_bytes_columns(schema: &Value) -> bool {
         .is_some_and(|fields| fields.values().any(is_plain_bytes))
 }
 fn is_plain_bytes(def: &Value) -> bool {
-    !zeroship_data_sql::descriptors::is_encrypted(def) && def.get("type").and_then(Value::as_str) == Some("bytes")
+    !crate::sql::descriptors::is_encrypted(def) && def.get("type").and_then(Value::as_str) == Some("bytes")
 }
 pub fn validate_bytes_on_write(schema: &Value, doc: &mut Value) -> Result<(), DbError> {
     let Some(fields) = schema.as_object() else {
@@ -52,7 +52,7 @@ fn validate_scalar(field: &str, value: &Value) -> Result<(), DbError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zeroship_data_sql::value;
+    use crate::value;
     fn schema() -> Value {
         value!({ "payload": { "type": "bytes" }, "title": { "type": "string" } })
     }

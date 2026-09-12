@@ -24,11 +24,11 @@ use zeroship_data_orm::protection::unmask::{
     authorize_query_hint, dispatch_bulk_unmask, dispatch_unmask, dispatch_unmask_for_query,
     parse_args, parse_bulk_args,
 };
-use zeroship_data_sql::compile::{
+use crate::sql::compile::{
     build_aggregate, build_distinct, build_find_with_schema, build_insert, build_where,
     raw_column_name, read_surface_columns, validate_field_name,
 };
-use zeroship_data_sql::value::{Value, value};
+use crate::value::{Value, value};
 
 /// Use the backend already installed by the fixture; this helper does not test cold startup.
 async fn unmask_backend(host: &Host) -> zeroship_data_orm::backend::BackendHandle {
@@ -139,7 +139,7 @@ async fn fixture(
         .await
         .unwrap();
     let ddl = fixture_table_sql(
-        &zeroship_data_sql::SchemaName::new(app).expect("fixture schema name"),
+        &crate::sql::SchemaName::new(app).expect("fixture schema name"),
         collection,
         schema,
         &FkEmission::Inline,
@@ -199,7 +199,7 @@ async fn insert_through_the_pipeline(
         .to_string();
     let schema = &crate::tests::fixtures::schema::generated_fields(schema.clone());
     let bq = build_insert(
-        &zeroship_data_sql::SchemaName::new(app).expect("fixture schema name"),
+        &crate::sql::SchemaName::new(app).expect("fixture schema name"),
         collection,
         schema,
         &docs[0],
@@ -226,7 +226,7 @@ async fn insert_through_the_pipeline(
 
 /// Every column of a returned row as a JSON string value, keyed by column name.
 fn row_to_value(row: &compio_postgres::Row) -> Value {
-    let mut map = zeroship_data_sql::value::Map::new();
+    let mut map = crate::value::Map::new();
     for (i, column) in row.columns().iter().enumerate() {
         let value: Option<String> = row.try_get(i).unwrap_or(None);
         map.insert(
@@ -240,7 +240,7 @@ fn row_to_value(row: &compio_postgres::Row) -> Value {
 async fn run_find(pool: &Rc<Pool>, app: &str, filter: &Value, schema: &Value) -> Vec<Value> {
     let schema = &crate::tests::fixtures::schema::generated_fields(schema.clone());
     let bq = build_find_with_schema(
-        &zeroship_data_sql::SchemaName::new(app).expect("fixture schema name"),
+        &crate::sql::SchemaName::new(app).expect("fixture schema name"),
         "people",
         filter,
         Some(50),
@@ -424,7 +424,7 @@ fn a_range_filter_on_a_masked_column_cannot_narrow_the_plaintext() {
             // column sorts by the mask, so a `limit 1` cannot name the largest SSN.
             let ordered = {
                 let bq = build_find_with_schema(
-                    &zeroship_data_sql::SchemaName::new(app).expect("fixture schema name"),
+                    &crate::sql::SchemaName::new(app).expect("fixture schema name"),
                     "people",
                     &value!({}),
                     Some(1),
@@ -1692,7 +1692,7 @@ fn a_bulk_unmask_batch_with_one_forbidden_column_is_refused_whole() {
 /// The all-or-nothing decision is the same `if !unauthorized.is_empty()` shape
 /// as the batch, at `crates/zeroship-data-orm/src/protection/unmask.rs`.
 /// `dispatch_find` calls this at
-/// `crates/zeroship-data-orm/src/crud/mod.rs:686`, before
+/// `crates/zeroship-data-orm/src/crud/mod.rs`, before
 /// `build_find_with_schema_and_unmask_and_soft_delete_with_dialect`, so a
 /// refusal here means the unmasking SELECT is never issued at all.
 ///
@@ -1991,7 +1991,7 @@ fn a_query_hint_reads_the_column_its_alias_resolved_to() {
 
 /// **Outward.** No row-returning write verb may hand back the raw column.
 ///
-/// The twelve write sites in `zeroship-data-sql` emitted `RETURNING *` - every
+/// The twelve write sites in `zeroship-data-orm::sql` emitted `RETURNING *` - every
 /// physical column, never passing through the projection allowlist, which was
 /// SELECT-side only. Without the read pipeline's row-surface stage, `insert`
 /// returned the real value under a key the generated `Row<S>` type does not
@@ -2058,7 +2058,7 @@ fn no_write_verb_hands_back_a_column_the_descriptor_does_not_declare() {
                 .query_text_params(
                     &format!(
                         r#"SELECT {} AS raw FROM "{app}"."people" WHERE "id" = $1"#,
-                        zeroship_data_sql::compile::quote_ident(&raw_column_name("ssn")),
+                        crate::sql::compile::quote_ident(&raw_column_name("ssn")),
                     ),
                     &[minted_id.as_str()],
                 )
@@ -2164,7 +2164,7 @@ fn the_raw_column_is_refused_on_every_inbound_surface() {
                 // against the same declared shape.
                 "aggregate $match",
                 build_aggregate(
-                    &zeroship_data_sql::SchemaName::new("app1").expect("fixture schema name"),
+                    &crate::sql::SchemaName::new("app1").expect("fixture schema name"),
                     "people",
                     &value!([{ "$match": { (raw.clone()): "x" } }]),
                     &schema,
@@ -2174,7 +2174,7 @@ fn the_raw_column_is_refused_on_every_inbound_surface() {
             (
                 "select",
                 build_find_with_schema(
-                    &zeroship_data_sql::SchemaName::new("app1").expect("fixture schema name"),
+                    &crate::sql::SchemaName::new("app1").expect("fixture schema name"),
                     "people",
                     &value!({}),
                     Some(1),
@@ -2188,7 +2188,7 @@ fn the_raw_column_is_refused_on_every_inbound_surface() {
             (
                 "orderBy",
                 build_find_with_schema(
-                    &zeroship_data_sql::SchemaName::new("app1").expect("fixture schema name"),
+                    &crate::sql::SchemaName::new("app1").expect("fixture schema name"),
                     "people",
                     &value!({}),
                     Some(1),
@@ -2202,7 +2202,7 @@ fn the_raw_column_is_refused_on_every_inbound_surface() {
             (
                 "$group.by",
                 build_aggregate(
-                    &zeroship_data_sql::SchemaName::new("app1").expect("fixture schema name"),
+                    &crate::sql::SchemaName::new("app1").expect("fixture schema name"),
                     "people",
                     &value!([{ "$group": { "by": [raw.clone()] } }]),
                     &schema,
@@ -2212,7 +2212,7 @@ fn the_raw_column_is_refused_on_every_inbound_surface() {
             (
                 "distinct",
                 build_distinct(
-                    &zeroship_data_sql::SchemaName::new("app1").expect("fixture schema name"),
+                    &crate::sql::SchemaName::new("app1").expect("fixture schema name"),
                     "people",
                     &raw,
                     &value!({}),
@@ -2238,7 +2238,7 @@ fn the_raw_column_is_refused_on_every_inbound_surface() {
         assert!(build_where(&value!({ "ssn": "x" }), &mut Vec::new(), &schema).is_ok());
         assert!(
             build_distinct(
-                &zeroship_data_sql::SchemaName::new("app1").expect("fixture schema name"),
+                &crate::sql::SchemaName::new("app1").expect("fixture schema name"),
                 "people",
                 "ssn",
                 &value!({}),
@@ -2249,7 +2249,7 @@ fn the_raw_column_is_refused_on_every_inbound_surface() {
         assert!(validate_field_name("ssn").is_ok());
         assert!(
             build_find_with_schema(
-                &zeroship_data_sql::SchemaName::new("app1").expect("fixture schema name"),
+                &crate::sql::SchemaName::new("app1").expect("fixture schema name"),
                 "people",
                 &value!({}),
                 Some(1),
@@ -2462,7 +2462,7 @@ fn a_unique_masked_field_admits_rows_that_share_a_mask() {
             // implicit transaction `batch_execute` uses, so the fixture's DDL carries
             // the table alone. Apply the index the platform would build.
             for spec in schema::fixture_indexes(
-                &zeroship_data_sql::SchemaName::new(app).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(app).expect("fixture schema name"),
                 "people",
                 &schema,
             )
@@ -2535,7 +2535,7 @@ fn a_unique_masked_field_admits_rows_that_share_a_mask() {
                 .await
                 .expect("write pipeline");
             let bq = build_insert(
-                &zeroship_data_sql::SchemaName::new(app).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(app).expect("fixture schema name"),
                 "people",
                 &schema,
                 &docs[0],
@@ -2836,7 +2836,7 @@ fn confined_ceiling_for(app_uuid: &uuid::Uuid) -> zeroship_migrate_policy::Effec
 /// Create `<app>.<collection>` the way PRODUCTION creates a creator table.
 ///
 /// [`fixture`] renders its DDL with the DATA PLANE's emitter,
-/// `zeroship_data_sql::compile::build_create_table_with_fks`, whose only callers are
+/// `crate::sql::compile::build_create_table_with_fks`, whose only callers are
 /// tests (measured 2026-09-04: no `src` call site outside its own module in any
 /// crate). Every creator table that exists on the platform is instead rendered by
 /// the MIGRATION ENGINE and applied by `zeroship-migrate-server`. A protection
@@ -2958,9 +2958,9 @@ fn a_migration_engine_built_table_refuses_a_mask_downgrade() {
                 .expect("the engine must attach a mask sentinel to the masked column");
             assert_eq!(
                 stored,
-                zeroship_data_sql::mask_codec::build_mask_sentinel(
-                    zeroship_data_sql::catalog::MaskKind::Full,
-                    zeroship_data_sql::catalog::Classification::Pci,
+                crate::sql::mask_codec::build_mask_sentinel(
+                    crate::sql::catalog::MaskKind::Full,
+                    crate::sql::catalog::Classification::Pci,
                 ),
                 "the migration engine writes the protection record and the data plane \
          reads it; a spelling only one of them knows is a fence with no input",
@@ -3078,9 +3078,9 @@ fn a_migration_engine_built_table_refuses_an_encryption_downgrade() {
                 .expect("the engine must attach an encryption sentinel to the encrypted column");
             assert_eq!(
                 stored,
-                zeroship_data_sql::mask_codec::build_encryption_sentinel(
-                    &zeroship_data_sql::catalog::EncryptionMeta {
-                        wraps: zeroship_data_sql::catalog::WrappedType::String,
+                crate::sql::mask_codec::build_encryption_sentinel(
+                    &crate::sql::catalog::EncryptionMeta {
+                        wraps: crate::sql::catalog::WrappedType::String,
                     }
                 ),
                 "the migration engine writes the protection record and the data plane \

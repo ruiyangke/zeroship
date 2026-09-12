@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use zeroship_data_sql::value::Value;
+use crate::value::Value;
 
 use zeroship_data_orm::binding::DbBinding;
 use zeroship_data_orm::error::DbError;
@@ -126,7 +126,7 @@ pub async fn apply(
         crate::descriptor::collection_schema(binding, collection)?,
         &opts.schema_field_scope,
     );
-    zeroship_data_sql::codecs::decode_rows(route.dialect(), &schema, &mut rows)?;
+    crate::sql::codecs::decode_rows(route.dialect(), &schema, &mut rows)?;
 
     if opts.apply_decrypt && super::schema_has_encrypted_columns(&schema) {
         // The key store comes off the handle this read ran on, not off a
@@ -210,7 +210,7 @@ async fn decrypt_rows_on_read(
 /// Restrict the public result after protection consumes internal identity and storage.
 fn restrict_rows_to_surface(schema: &Value, surface: &RowSurface<'_>, rows: &mut [Value]) {
     let allowed = match surface {
-        RowSurface::Declared => crate::compile::read_surface_columns(schema),
+        RowSurface::Declared => crate::sql::compile::read_surface_columns(schema),
         RowSurface::Projected(names) => names.iter().cloned().collect(),
     };
     for row in rows.iter_mut() {
@@ -249,7 +249,7 @@ mod tests {
         crate::tests::fixtures::cache_schema(
             "app_aggregate_scope",
             "users",
-            zeroship_data_sql::value!({
+            crate::value!({
                 "secret": {
                     "type": "string",
                     "encrypted": true,
@@ -261,7 +261,7 @@ mod tests {
             }),
         );
 
-        let rows = vec![zeroship_data_sql::value!({
+        let rows = vec![crate::value!({
             "secret": 3
         })];
 
@@ -298,7 +298,7 @@ mod tests {
 
         assert_eq!(
             result.rows,
-            vec![zeroship_data_sql::value!({ "secret": 3 })]
+            vec![crate::value!({ "secret": 3 })]
         );
         assert!(!result.has_masked);
 
@@ -319,7 +319,7 @@ mod tests {
                 },
             ))
             .expect("apply");
-        assert_eq!(defaulted.rows, vec![zeroship_data_sql::value!({})]);
+        assert_eq!(defaulted.rows, vec![crate::value!({})]);
 
         // Drop route-then-directory explicitly. `unit_route` returns
         // `(TxRoute, TempDir)` and the route owns the backend; scope exit drops
@@ -336,7 +336,7 @@ mod tests {
         crate::tests::fixtures::cache_schema(
             "app_distinct_masked",
             "users",
-            zeroship_data_sql::value!({
+            crate::value!({
                 "email": {
                     "type": "string",
                     "mask": { "kind": "email", "classification": "pii" }
@@ -344,7 +344,7 @@ mod tests {
             }),
         );
 
-        let rows = vec![zeroship_data_sql::value!({
+        let rows = vec![crate::value!({
             "email": "a***@example.com"
         })];
 
@@ -373,7 +373,7 @@ mod tests {
 
         assert_eq!(
             result.rows,
-            vec![zeroship_data_sql::value!({ "email": "a***@example.com" })]
+            vec![crate::value!({ "email": "a***@example.com" })]
         );
         assert!(!result.has_masked);
 

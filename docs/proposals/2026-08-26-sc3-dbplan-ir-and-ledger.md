@@ -4,12 +4,12 @@
 `crates/zeroship-data-sql` - 6,282 lines, zero dependencies, carrying
 the shared normative core plus the read, write and search families and a
 PostgreSQL renderer
-(`crates/zeroship-data-sql/src/render/postgres.rs`).
+(`crates/zeroship-data-orm/src/sql/render/postgres.rs`).
 **No shipped binary links it.**
 `zeroship-data-v8` declares it under `[dev-dependencies]` only, and
 `grep -rn data_query_builder crates/zeroship-data-v8/src/` returns zero hits.
 The runtime still executes SQL built by string concatenation in
-`crates/zeroship-schema/src/query.rs`. The **source ledger does not exist**; (DELETED; runtime compilation now lives in `crates/zeroship-data-sql/src/compile.rs`, and migration DDL in `crates/zeroship-migrate-core/src/schema/query.rs`.)
+`crates/zeroship-schema/src/query.rs`. The **source ledger does not exist**; (DELETED; runtime compilation now lives in `crates/zeroship-data-orm/src/sql/compile.rs`, and migration DDL in `crates/zeroship-migrate-core/src/schema/query.rs`.)
 `grep -rn source_symbol tests/ crates/` is empty.
 
 Live defects cited by number (L11, L12, L16, L29, L31) live in
@@ -27,7 +27,7 @@ ledger that counts what is left.
 
 ### The scope
 
-Measured at HEAD `a3706db6f`: `crates/zeroship-schema/src/query.rs` is 14,309 (DELETED; runtime compilation now lives in `crates/zeroship-data-sql/src/compile.rs`, and migration DDL in `crates/zeroship-migrate-core/src/schema/query.rs`.)
+Measured at HEAD `a3706db6f`: `crates/zeroship-schema/src/query.rs` is 14,309 (DELETED; runtime compilation now lives in `crates/zeroship-data-orm/src/sql/compile.rs`, and migration DDL in `crates/zeroship-migrate-core/src/schema/query.rs`.)
 lines and exposes **87** `pub` / `pub(crate)` function items at any indentation.
 They do not share a destination, and that is what makes the port tractable:
 
@@ -56,7 +56,7 @@ fences *column* names (`_`, `__zs_`, `__zeroship_`, `sqlite_`, the `_masked`
 suffix, the six classification names). Moving one without the other is the more
 dangerous half of a bulk move, because the survivor makes the namespace look
 defended. Both move together, each with its own gate arm and its own vectors.
-The IR's `crates/zeroship-data-sql/src/ident.rs` already states both,
+The IR's `crates/zeroship-data-orm/src/sql/ident.rs` already states both,
 as `PLATFORM_RESERVED_COLLECTION_PREFIXES` plus `BACKEND_CATALOG_RESERVATIONS`
 on the table side and `COLUMN_RESERVATIONS` on the column side; when the port
 lands, one of the two copies is deleted rather than both maintained.
@@ -612,7 +612,7 @@ migration side, or `deleted-with-<feature>`. `status` is `ported` or `unported`.
   would drag a live PostgreSQL driver into a crate whose whole claim is that it
   builds and tests without a database, a runtime or an isolate. The identifier
   fences are re-stated in the IR's own
-  `crates/zeroship-data-sql/src/ident.rs`, not wrapped, and the
+  `crates/zeroship-data-orm/src/sql/ident.rs`, not wrapped, and the
   duplication is temporary by contract: when the port lands, one of the two
   copies is deleted.
 - **A ledger's instrument must see all of its source.** A count taken by a
@@ -731,7 +731,7 @@ already taken and abandoned:
 - **Do not re-adopt "render the same plan twice and assert the SQL matches" as
   the determinism arm.** It was specified that way, and it is probabilistic
   rather than discriminating;
-  `crates/zeroship-data-sql/src/render/mod.rs` records the
+  `crates/zeroship-data-orm/src/sql/render/mod.rs` records the
   supersession in the code.
 - **Do not re-open full-text search as a plan family.** It was deleted (L11)
   because it had no producer anywhere in the tree.
@@ -739,5 +739,5 @@ already taken and abandoned:
   the obvious dependency and was refused: it declares `compio-postgres`, which
   would put a live PostgreSQL driver inside a crate whose value is needing none.
   The fences are re-stated in
-  `crates/zeroship-data-sql/src/ident.rs` instead, and the
+  `crates/zeroship-data-orm/src/sql/ident.rs` instead, and the
   duplication is retired by the port rather than maintained.

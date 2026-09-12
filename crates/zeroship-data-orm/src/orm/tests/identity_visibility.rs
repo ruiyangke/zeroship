@@ -60,10 +60,10 @@ async fn hidden_id(postgres: bool) {
         );
         let source = ReadSource::new("records", "r");
         let mut read = ReadQuery::new(source.clone());
-        read.filter = zeroship_data_sql::Predicate::compare(
-            zeroship_data_sql::Operand::Path(source.column("label").unwrap()),
-            zeroship_data_sql::CompareOp::Eq,
-            zeroship_data_sql::Operand::Lit(zeroship_data_sql::Literal::Text(flag.into())),
+        read.filter = crate::sql::Predicate::compare(
+            crate::sql::Operand::Path(source.column("label").unwrap()),
+            crate::sql::CompareOp::Eq,
+            crate::sql::Operand::Lit(crate::sql::Literal::Text(flag.into())),
         );
         for fields in [None, Some(vec!["secret".into()])] {
             read.projection = vec![ReadProjection::Row {

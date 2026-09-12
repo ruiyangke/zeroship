@@ -161,18 +161,18 @@ fn gap_b_end_to_end_insert_inside_tx_defers_emit_until_commit() {
             let role = zeroship_core::database_role::per_app_role_name(app).unwrap();
             pool.batch_execute(&format!(r#"GRANT SELECT, INSERT ON "{app}"."users" TO "{role}"; GRANT USAGE ON ALL SEQUENCES IN SCHEMA "{app}" TO "{role}""#)).await.unwrap();
 
-            let schema = crate::tests::fixtures::schema::generated_fields(zeroship_data_sql::value!({
+            let schema = crate::tests::fixtures::schema::generated_fields(crate::value!({
                 "id": {"type":"bigInt", "assign":{"by":"identity", "on":"insert"}},
                 "name": {"type":"string", "required":true}
             }));
             crate::tests::fixtures::cache_schema(app, "users", schema.clone());
             // Insert via the production helper.
-            let bq = zeroship_data_sql::compile::build_insert(
-                &zeroship_data_sql::SchemaName::new(app).expect("fixture schema name"),
+            let bq = crate::sql::compile::build_insert(
+                &crate::sql::SchemaName::new(app).expect("fixture schema name"),
                 "users",
                 // The descriptor entry for the fixture table above: one declared field.
                 &schema,
-                &zeroship_data_sql::value!({ "name": "alice" }),
+                &crate::value!({ "name": "alice" }),
             )
             .expect("build_insert");
             let _ = host.exec_mutation_with_emit(

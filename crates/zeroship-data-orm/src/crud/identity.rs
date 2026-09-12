@@ -3,11 +3,8 @@ use crate::{
     exec::{exec_mutation, exec_query},
     tx_route::TxRoute,
 };
-use zeroship_data_sql::{
-    compile::SqlDialect,
-    identity::{self, Allocation},
-    value::Value,
-};
+use crate::value::Value;
+use crate::sql::{compile::SqlDialect, identity::{self, Allocation}};
 
 pub(super) fn requires_allocation(schema: &Value, payload: &Value) -> bool {
     identity::is_generated(schema)

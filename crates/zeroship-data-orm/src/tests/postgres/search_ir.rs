@@ -2,7 +2,7 @@
 //!
 //! # Why this target exists separately from the IR's own tests
 //!
-//! `zeroship-data-sql` declares no dependencies at all, so its tests can
+//! `zeroship-data-orm::sql` declares no dependencies at all, so its tests can
 //! compare the SQL it renders against a fixture string and nothing more. A
 //! string comparison cannot tell whether `"embedding" <=> $1::vector` is
 //! syntax `pgvector` accepts, whether `ST_DWithin` over a `geography` column
@@ -27,10 +27,10 @@
 //! # What these arms do NOT establish
 //!
 //! **The shipped product path does not use the IR.** No crate outside
-//! `zeroship-data-sql` depends on it - the dependency this target adds is a
+//! `zeroship-data-orm::sql` depends on it - the dependency this target adds is a
 //! `[dev-dependencies]` one, declared for these tests. `env.db.<coll>.search()`
-//! still reaches `zeroship_data_sql::compile::build_vector_search`
-//! (`crates/zeroship-data-orm/src/backend/postgres/implementation.rs:456`).
+//! still reaches `crate::sql::compile::build_vector_search`
+//! (`crates/zeroship-data-orm/src/backend/postgres/implementation.rs`).
 //!
 //! That is why `the_ir_and_the_shipped_builder_rank_identically` is here. It is
 //! the only arm that ties the two together, and it does it the one way that is
@@ -43,9 +43,9 @@
 use crate::tests::fixtures::Host;
 
 use compio_postgres::Pool;
-use zeroship_data_sql::render::postgres::render_search;
-use zeroship_data_sql::value;
-use zeroship_data_sql::{
+use crate::sql::render::postgres::render_search;
+use crate::value;
+use crate::sql::{
     CompareOp, GeoPoint, Ident, IdentRole, Literal, Operand, Predicate, ProjectedField, Projection,
     QueryVector, RadiusMetres, RowLimit, Search, SearchCriterion, VectorMetric,
 };
@@ -172,7 +172,7 @@ fn vector_text(values: &[f32]) -> String {
     out
 }
 
-/// The seam a consumer of [`zeroship_data_sql::RenderedSql`] must implement:
+/// The seam a consumer of [`crate::sql::RenderedSql`] must implement:
 /// a typed parameter to whatever the driver takes.
 ///
 /// It is written **here** rather than in the IR because it is the driver's
@@ -260,7 +260,7 @@ async fn ranked_ids(pool: &Pool, plan: &Search) -> Vec<String> {
 /// server - so no `ToSql` impl can be written against it in advance.
 ///
 /// That is precisely the constraint
-/// [`zeroship_data_sql::render::ValueFormat::vector_placeholder`] documents,
+/// [`crate::sql::render::ValueFormat::vector_placeholder`] documents,
 /// observed rather than quoted, and it is why `query_text_params` (an empty OID
 /// list, server-side inference) is the channel both this fixture and the
 /// shipped path use.
@@ -391,13 +391,13 @@ fn the_ir_and_the_shipped_builder_rank_identically() {
                 "tenant_id": { "type": "number" },
                 "embedding": { "type": "vector", "vectorDims": DIMS },
             });
-            let shipped = zeroship_data_sql::compile::build_vector_search(
-                &zeroship_data_sql::SchemaName::new(SCHEMA).expect("fixture schema name"),
+            let shipped = crate::sql::compile::build_vector_search(
+                &crate::sql::SchemaName::new(SCHEMA).expect("fixture schema name"),
                 "docs",
                 "embedding",
                 &query,
                 10,
-                zeroship_data_sql::descriptors::VectorMetric::Cosine,
+                crate::sql::descriptors::VectorMetric::Cosine,
                 &value!({ "tenant_id": 1 }),
                 &schema_hint,
             )
@@ -512,8 +512,8 @@ fn postgres_serves_the_inner_product_that_sqlite_refuses() {
                         query: &unit_vector(3),
                         k: 5,
                         metric: BackendMetric::InnerProduct,
-                        filter: &zeroship_data_sql::value::Value::Null,
-                        schema: &zeroship_data_sql::value::Value::Null,
+                        filter: &crate::value::Value::Null,
+                        schema: &crate::value::Value::Null,
                     },
                 )
                 .await
@@ -538,8 +538,8 @@ fn postgres_serves_the_inner_product_that_sqlite_refuses() {
                         query: &unit_vector(3),
                         k: 5,
                         metric: BackendMetric::Cosine,
-                        filter: &zeroship_data_sql::value::Value::Null,
-                        schema: &zeroship_data_sql::value::Value::Null,
+                        filter: &crate::value::Value::Null,
+                        schema: &crate::value::Value::Null,
                     },
                 )
                 .await
@@ -657,7 +657,7 @@ fn a_geo_search_finds_the_near_rows_and_the_coordinate_order_is_load_bearing() {
 /// Asserted by executing the **same SQL string** twice with different arguments
 /// and getting different row counts - which is the property the shipped SQLite
 /// arm does not have, formatting `k` into the statement
-/// (`crates/zeroship-data-orm/src/backend/sqlite/vector.rs:117`) so every `k`
+/// (`crates/zeroship-data-orm/src/backend/sqlite/vector.rs`) so every `k`
 /// is a distinct statement and a distinct cache entry.
 #[test]
 fn one_statement_serves_every_k() {

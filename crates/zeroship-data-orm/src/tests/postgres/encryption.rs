@@ -5,9 +5,9 @@ use crate::tests::fixtures::Host;
 
 use compio_postgres::Pool;
 
-use zeroship_data_sql::value::{Value, value};
+use crate::value::{Value, value};
 
-use zeroship_data_sql::compile::*;
+use crate::sql::compile::*;
 
 use zeroship_data_orm::error::DbError;
 

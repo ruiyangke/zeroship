@@ -11,9 +11,9 @@
 //! the physical schema and dialect used by query preparation.
 
 use crate::backend::BackendHandle;
-use crate::compile::SqlDialect;
+use crate::sql::compile::SqlDialect;
 use crate::transaction::scope::TransactionScope;
-use zeroship_data_sql::SchemaName;
+use crate::sql::SchemaName;
 
 /// A synchronous routing decision awaiting backend binding.
 /// Capture callback identity before asynchronous connection setup can yield.

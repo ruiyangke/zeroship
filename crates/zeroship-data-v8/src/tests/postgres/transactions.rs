@@ -1993,7 +1993,7 @@ const _procedures = { seed, failBulk };
     );
     let expected_probe_suffix = format!(
         " LIMIT {} FOR UPDATE",
-        zeroship_data_sql::compile::MAX_QUERY_LIMIT + 1
+        zeroship_data_orm::sql::compile::MAX_QUERY_LIMIT + 1
     );
     assert!(
         counters[0].ends_with(&expected_probe_suffix),

@@ -10,7 +10,7 @@ Architecture and ownership: `docs/architecture/data-orm.md`.
 `cdc` owns change events, capture and delivery contracts, subscription messages,
 the process broker, and read-set matching. Database adapters and the V8 bridge
 use these shared contracts. The relay wire protocol remains a separate crate;
-PostgreSQL replication still runs through the worker's existing CDC integration.
+PostgreSQL replication runs in the separate CDC relay service.
 
 Use the `bench_row_decode` and `bench_first_row_or_null` targets with
 `cargo bench -p zeroship-data-orm`. They exercise the row codec without
@@ -94,7 +94,7 @@ metadata. Nullable columns require nullable decoders. Missing fields in an actua
 result remain errors, rather than being silently filled with Rust defaults.
 
 An entity accepts any `Insertable<Entity>` and `Changeset<Entity>`. Insert derives
-check that required fields without database defaults are supplied. System fields
+check that required fields without database defaults are supplied. Descriptor-assigned fields
 are generated as read-only columns. The runtime still validates every operation,
 including operations from handwritten trait implementations.
 
@@ -179,7 +179,10 @@ cleanup retain their originating context across asynchronous work and drop.
 The V8 host shares a thread context across its dispatches. Schema and policy
 entries are keyed by the complete app/deploy/schema binding.
 
-Physical value codecs live with SQL compilation in `zeroship-data-sql`.
+Native values live in `value`; query grammar, physical codecs, and SQL compilation
+live in `sql`. The SQL module performs no database I/O. Its integration contracts
+live in `tests/sql`; run them with `cargo test -p zeroship-data-orm --test sql`.
+The `bench_query_build` benchmark exercises query construction.
 `Catalog` and `Search` are the runtime service contracts. Database contracts
 live in `src/tests/postgres/` and `src/tests/sqlite/`, grouped by behavior.
 `tests::fixtures::Host::test` passes an explicit fixture owner to the test body;

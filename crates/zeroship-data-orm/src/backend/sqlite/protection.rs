@@ -12,7 +12,7 @@ impl crate::protection::Catalog for SqliteBackend {
     // teaching about the new vocabulary follows in a later PR.
 
     /// Walk the SQLite catalog for `app_id`'s attached database and
-    /// produce a [`zeroship_data_sql::catalog::LiveSchema`] in the same shape the PG
+    /// produce a [`crate::sql::catalog::LiveSchema`] in the same shape the PG
     /// impl emits — populated via four PRAGMA round-trips per table:
     ///
     /// 1. `SELECT name FROM "<app_id>".sqlite_master WHERE type='table'`
@@ -47,15 +47,15 @@ impl crate::protection::Catalog for SqliteBackend {
     async fn introspect_schema(
         &self,
         app_id: &str,
-    ) -> Result<zeroship_data_sql::catalog::LiveSchema, DbError> {
+    ) -> Result<crate::sql::catalog::LiveSchema, DbError> {
         self.attach_app_file(app_id).await?;
-        let mut out = zeroship_data_sql::catalog::LiveSchema::default();
+        let mut out = crate::sql::catalog::LiveSchema::default();
 
         // 1. Table list. The `app_id` is interpolated as a quoted
         //    identifier — the dialect's `quote_ident` doubles embedded
         //    `"`s; PRAGMA / sqlite_master both accept the dotted form
         //    `"app_id".sqlite_master`.
-        let q_app = zeroship_data_sql::compile::quote_ident(app_id);
+        let q_app = crate::sql::compile::quote_ident(app_id);
         let tables_sql =
             format!("SELECT name FROM {q_app}.sqlite_master WHERE type = 'table' ORDER BY name");
         let table_rows = self.session.query(&tables_sql, &[]).await?;
@@ -70,7 +70,7 @@ impl crate::protection::Catalog for SqliteBackend {
         }
 
         for collection in &user_tables {
-            let q_coll = zeroship_data_sql::compile::quote_ident(collection);
+            let q_coll = crate::sql::compile::quote_ident(collection);
 
             // 2. Columns via `PRAGMA table_info`.
             //
@@ -115,7 +115,7 @@ impl crate::protection::Catalog for SqliteBackend {
                 let mask = mask_by_parent.get(&name).cloned();
                 col_map.insert(
                     name,
-                    zeroship_data_sql::catalog::ColumnInfo {
+                    crate::sql::catalog::ColumnInfo {
                         pg_type,
                         not_null,
                         default_expr,
@@ -170,7 +170,7 @@ impl crate::protection::Catalog for SqliteBackend {
 
                 // 4. Columns for this index via `PRAGMA index_info`.
                 //    Returns: 0=seqno, 1=cid, 2=name.
-                let q_idx = zeroship_data_sql::compile::quote_ident(&idx_name);
+                let q_idx = crate::sql::compile::quote_ident(&idx_name);
                 let index_info_sql = format!("PRAGMA {q_app}.index_info({q_idx})");
                 let info_rows = self.session.query(&index_info_sql, &[]).await?;
                 let mut columns = Vec::with_capacity(info_rows.len());
@@ -181,7 +181,7 @@ impl crate::protection::Catalog for SqliteBackend {
 
                 idx_map.insert(
                     idx_name,
-                    zeroship_data_sql::catalog::IndexInfo {
+                    crate::sql::catalog::IndexInfo {
                         is_unique,
                         columns,
                         // SQLite indexes are always considered valid
@@ -221,7 +221,7 @@ impl crate::protection::Catalog for SqliteBackend {
                 let constraint_name = format!("fk_{fk_id}_{from_col}");
                 fk_map.insert(
                     from_col.clone(),
-                    zeroship_data_sql::catalog::ForeignKeyInfo {
+                    crate::sql::catalog::ForeignKeyInfo {
                         constraint_name,
                         column: from_col,
                         target_table,
@@ -258,8 +258,8 @@ impl Protection for SqliteBackend {
 
 impl SqliteBackend {
     pub async fn estimate_row_count(&self, app_id: &str, collection: &str) -> Result<i64, DbError> {
-        let q_app = zeroship_data_sql::compile::quote_ident(app_id);
-        let q_coll = zeroship_data_sql::compile::quote_ident(collection);
+        let q_app = crate::sql::compile::quote_ident(app_id);
+        let q_coll = crate::sql::compile::quote_ident(collection);
         let sql = format!("SELECT COUNT(*) FROM {q_app}.{q_coll}");
         let rows = match self.session.query(&sql, &[]).await {
             Ok(rows) => rows,

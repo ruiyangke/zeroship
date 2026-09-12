@@ -8,13 +8,10 @@ use crate::{
     tx_route::TxRoute,
 };
 use std::{any::Any, ops::Deref, rc::Rc};
-use zeroship_data_sql::{
-    SchemaName,
-    descriptors::{GeoPoint, VectorMetric},
-    value::Value,
-};
+use crate::value::Value;
+use crate::sql::{SchemaName, descriptors::{GeoPoint, VectorMetric}};
 
-pub use zeroship_data_sql::internal::AUDIT_UNMASK_TABLE;
+pub use crate::sql::internal::AUDIT_UNMASK_TABLE;
 
 /// A registered backend, erased once at the host boundary. Models never name it.
 #[derive(Clone, Debug)]
@@ -63,7 +60,7 @@ impl BackendHandle {
             row.reason.into(),
             row.outcome.into(),
         ];
-        let query = zeroship_data_sql::internal::unmask_audit(namespace, self.dialect(), params);
+        let query = crate::sql::internal::unmask_audit(namespace, self.dialect(), params);
         self.query(attach_alias, schema, &query.sql, &query.params)
             .await?;
         Ok(())
@@ -188,7 +185,7 @@ pub async fn read_raw_column_value(
     let physical_key = schema[key_column]["storage"]["valueColumn"]
         .as_str()
         .unwrap_or(key_column);
-    let query = zeroship_data_sql::internal::raw_column(
+    let query = crate::sql::internal::raw_column(
         namespace,
         collection,
         raw_column,
@@ -288,7 +285,7 @@ mod routed_read_tests {
 
             let admission = crate::transaction::TxAdmission::acquire(app.to_owned()).await;
             crate::transaction::exec_begin_or_savepoint(false, None, app,
-                zeroship_data_sql::SchemaName::new(app).unwrap(), handle.clone()).await.unwrap();
+                crate::sql::SchemaName::new(app).unwrap(), handle.clone()).await.unwrap();
             admission.handed_to_reducer();
             crate::transaction::driver::run_operation(app,
                 &format!(r#"INSERT INTO "{app}"."people" (id, ssn, "__zs_raw__ssn") VALUES ('p1', '***', '123-45-6789')"#), &[])
@@ -296,12 +293,12 @@ mod routed_read_tests {
 
             // CONTROL: a pool-lane read cannot see the uncommitted row.
             let outside = read_raw_column_value(
-                &CapturedRoute::pool_for_tests(app, crate::compile::SqlDialect::Sqlite)
+                &CapturedRoute::pool_for_tests(app, crate::sql::compile::SqlDialect::Sqlite)
                     .bind(handle.clone()),
                 "people",
                 "__zs_raw__ssn",
                 "p1",
-                &zeroship_data_sql::value!({"id":{"type":"string", "primaryKey":true}}),
+                &crate::value!({"id":{"type":"string", "primaryKey":true}}),
             )
             .await
             .expect("the pooled read itself must succeed");
@@ -313,12 +310,12 @@ mod routed_read_tests {
 
             // SUBJECT: the same read, routed onto the transaction.
             let inside = read_raw_column_value(
-                &CapturedRoute::tx_for_tests(app, crate::compile::SqlDialect::Sqlite)
+                &CapturedRoute::tx_for_tests(app, crate::sql::compile::SqlDialect::Sqlite)
                     .bind(handle.clone()),
                 "people",
                 "__zs_raw__ssn",
                 "p1",
-                &zeroship_data_sql::value!({"id":{"type":"string", "primaryKey":true}}),
+                &crate::value!({"id":{"type":"string", "primaryKey":true}}),
             )
             .await
             .expect("a routed read inside the transaction must reach the row");

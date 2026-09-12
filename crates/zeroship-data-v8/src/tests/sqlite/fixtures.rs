@@ -2,7 +2,7 @@
 
 use crate::tests::fixtures::parity;
 
-use zeroship_data_sql::compile::raw_column_name;
+use zeroship_data_orm::sql::compile::raw_column_name;
 
 /// Drive a future to completion on a fresh compio runtime. The
 /// integration target has no global runtime — each `#[test]` builds
@@ -61,8 +61,8 @@ export default { fetch: _zsFetch, rpc: _shimRpc };
 "#;
 
 /// `email` unique + plaintext, `ssn` randomised-encrypted with a `last4` mask.
-pub(super) fn users_encrypted_ssn_schema() -> zeroship_data_sql::value::Value {
-    zeroship_data_sql::value!({
+pub(super) fn users_encrypted_ssn_schema() -> zeroship_data_orm::value::Value {
+    zeroship_data_orm::value!({
         "email": {"type": "string", "required": true, "unique": true},
         "name": {"type": "string", "required": true},
         "ssn": {
@@ -123,7 +123,7 @@ pub(super) struct SqliteRuntimeSource {
 
 pub(super) fn sqlite_runtime_source(
     collection: &str,
-    schema: &zeroship_data_sql::value::Value,
+    schema: &zeroship_data_orm::value::Value,
     body: &str,
 ) -> SqliteRuntimeSource {
     let source = format!(
@@ -145,7 +145,7 @@ pub(super) fn dispatch_sqlite_runtime(
     dir: &tempfile::TempDir,
     source: &SqliteRuntimeSource,
     name: &str,
-) -> zeroship_data_sql::value::Value {
+) -> zeroship_data_orm::value::Value {
     let url = parity::sqlite_url(dir);
     let (status, body) = parity::dispatch_zs_with_descriptor(
         &url,

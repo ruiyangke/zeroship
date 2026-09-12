@@ -15,14 +15,14 @@
 
 use std::collections::{HashMap, HashSet};
 
-use zeroship_data_sql::value::Value;
+use crate::value::Value;
 
 use zeroship_data_orm::error::DbError;
 
 use crate::binding::DbBinding;
 
 /// The six canonical classification values. Mirrors the SDK's
-/// `Classification` type (`sdks/db/src/types.ts`) and `crate::catalog::Classification`.
+/// `Classification` type (`sdks/db/src/types.ts`) and `crate::sql::catalog::Classification`.
 pub const VALID_CLASSIFICATIONS: &[&str] = &["public", "pii", "spi", "phi", "pci", "internal"];
 
 /// Actor roles and the classifications they may explicitly unmask.
@@ -206,7 +206,7 @@ pub fn reset_for_tests() {
 mod tests {
     use super::*;
 
-    use zeroship_data_sql::value;
+    use crate::value;
 
     #[test]
     fn installed_policy_is_immutable() {
@@ -227,7 +227,7 @@ mod tests {
 
     #[test]
     fn redeploy_does_not_change_an_older_isolates_policy() {
-        let schema = zeroship_data_sql::SchemaName::new("app_policy_deploys").unwrap();
+        let schema = crate::sql::SchemaName::new("app_policy_deploys").unwrap();
         let old = DbBinding::new("app_policy_deploys", "old", schema.clone());
         let new = DbBinding::new("app_policy_deploys", "new", schema);
         install_mask_policy(&old, value!({ "support": ["public"] })).unwrap();

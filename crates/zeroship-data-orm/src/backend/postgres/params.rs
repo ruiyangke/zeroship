@@ -1,6 +1,6 @@
 //! Encode native database values at the PostgreSQL protocol boundary.
 use compio_postgres::types::{Format, IsNull, ToSql, Type, private::BytesMut};
-use zeroship_data_sql::value::Value;
+use crate::value::Value;
 type EncodeError = Box<dyn std::error::Error + Send + Sync>;
 
 #[derive(Debug)]
@@ -166,12 +166,12 @@ mod tests {
             compio_postgres::types::Kind::Simple,
             "public".into(),
         );
-        let value = zeroship_data_sql::value!([1.0, 0.5]);
+        let value = crate::value!([1.0, 0.5]);
         let mut bytes = BytesMut::new();
         Parameter(&value).to_sql(&vector, &mut bytes).unwrap();
         assert_eq!(bytes.as_ref(), b"[1,0.5]");
         for value in [
-            zeroship_data_sql::value!(["1"]),
+            crate::value!(["1"]),
             Value::Array(vec![Value::try_from(f64::MAX).unwrap()]),
         ] {
             assert!(
@@ -229,7 +229,7 @@ mod tests {
             Value::Bool(true),
             Value::Null,
             Value::from("text"),
-            zeroship_data_sql::value!({"nested":[1, false]}),
+            crate::value!({"nested":[1, false]}),
             Value::Decimal("12345678901234567890.12345678901234567890".into()),
             Value::try_from(1.25).unwrap(),
             Value::Timestamp(-1),
@@ -248,7 +248,8 @@ mod tests {
     #[compio::test]
     async fn json_filter_literals_are_not_encoded_as_strings() {
         let postgres = crate::tests::fixtures::postgres::Postgres::start();
-        use zeroship_data_sql::{compile, value};
+        use crate::value;
+        use crate::sql::compile;
         let (client, connection) = compio_postgres::connect(
             &postgres.url(),
             compio_postgres::NoTls,

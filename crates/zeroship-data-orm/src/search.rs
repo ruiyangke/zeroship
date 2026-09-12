@@ -1,10 +1,8 @@
 //! ORM search extensions, including dialect planning and protected projections.
 use crate::{binding::DbBinding, driver::Session, error::DbError};
 use async_trait::async_trait;
-use zeroship_data_sql::{
-    descriptors::{GeoPoint, VectorMetric},
-    value::Value,
-};
+use crate::value::Value;
+use crate::sql::{descriptors::{GeoPoint, VectorMetric}};
 
 #[derive(Debug)]
 pub struct VectorSearch<'a> {

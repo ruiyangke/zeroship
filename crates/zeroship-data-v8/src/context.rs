@@ -72,11 +72,11 @@ impl ThreadDbContext {
         }
         self.supplied_project_keys = keys;
     }
-    pub(crate) fn sql_dialect(&self) -> zeroship_data_sql::compile::SqlDialect {
+    pub(crate) fn sql_dialect(&self) -> zeroship_data_orm::sql::compile::SqlDialect {
         self.connection
             .as_ref()
             .map(|connection| connection.factory().dialect())
-            .unwrap_or(zeroship_data_sql::compile::SqlDialect::Postgres)
+            .unwrap_or(zeroship_data_orm::sql::compile::SqlDialect::Postgres)
     }
     pub(crate) fn cdc_relay(&self) -> Option<zeroship_data_orm::cdc::relay::RelayConfig> {
         self.cdc_relay.clone()
@@ -129,7 +129,7 @@ mod tests {
         use zeroship_data_orm::{connection::BackendFactory, error::DbError};
         struct DelayedFactory(ConnectionFactory, flume::Receiver<()>);
         impl BackendFactory for DelayedFactory {
-            fn dialect(&self) -> zeroship_data_sql::compile::SqlDialect {
+            fn dialect(&self) -> zeroship_data_orm::sql::compile::SqlDialect {
                 self.0.dialect()
             }
             fn connect(

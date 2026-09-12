@@ -6,7 +6,7 @@ use crate::{
     search::*,
 };
 use async_trait::async_trait;
-use zeroship_data_sql::value::Value;
+use crate::value::Value;
 
 #[async_trait(?Send)]
 impl Search for SqliteBackend {
@@ -70,14 +70,14 @@ impl SqliteBackend {
         column: &str,
         query: &[f32],
         k: usize,
-        metric: zeroship_data_sql::descriptors::VectorMetric,
-        filter: &zeroship_data_sql::value::Value,
-        schema: &zeroship_data_sql::value::Value,
-    ) -> Result<Vec<zeroship_data_sql::value::Value>, DbError> {
+        metric: crate::sql::descriptors::VectorMetric,
+        filter: &crate::value::Value,
+        schema: &crate::value::Value,
+    ) -> Result<Vec<crate::value::Value>, DbError> {
         let app_id = binding.app_id();
         vector::reject_inner_product(metric)?;
 
-        let query = zeroship_data_sql::sqlite_search::build_vector_search(
+        let query = crate::sql::sqlite_search::build_vector_search(
             app_id, collection, column, query, k, metric, filter, schema,
         )?;
         session.query(&query.sql, &query.params).await
@@ -90,12 +90,12 @@ impl SqliteBackend {
 /// the app id - see `attach_app_file`. The parameter states which of the two
 /// meanings the query builder is being handed.
 pub(super) fn build_spatial_near_base_query(
-    schema_name: &zeroship_data_sql::SchemaName,
+    schema_name: &crate::sql::SchemaName,
     collection: &str,
-    filter: &zeroship_data_sql::value::Value,
-    schema_hint: &zeroship_data_sql::value::Value,
-) -> Result<zeroship_data_sql::compile::BuiltQuery, DbError> {
-    zeroship_data_sql::compile::build_find_with_schema_and_unmask_and_soft_delete_with_dialect(
+    filter: &crate::value::Value,
+    schema_hint: &crate::value::Value,
+) -> Result<crate::sql::compile::BuiltQuery, DbError> {
+    crate::sql::compile::build_find_with_schema_and_unmask_and_soft_delete_with_dialect(
         schema_name,
         collection,
         filter,
@@ -106,7 +106,7 @@ pub(super) fn build_spatial_near_base_query(
         schema_hint,
         /* unmask_columns */ &[],
         /* filter_soft_deleted */ false,
-        zeroship_data_sql::compile::SqlDialect::Sqlite,
+        crate::sql::compile::SqlDialect::Sqlite,
     )
     .map_err(DbError::from)
 }
@@ -149,12 +149,12 @@ impl SqliteBackend {
         binding: &zeroship_data_orm::binding::DbBinding,
         collection: &str,
         column: &str,
-        point: zeroship_data_sql::descriptors::GeoPoint,
+        point: crate::sql::descriptors::GeoPoint,
         radius_m: f64,
-        filter: &zeroship_data_sql::value::Value,
+        filter: &crate::value::Value,
         limit: Option<usize>,
-        schema: &zeroship_data_sql::value::Value,
-    ) -> Result<Vec<zeroship_data_sql::value::Value>, DbError> {
+        schema: &crate::value::Value,
+    ) -> Result<Vec<crate::value::Value>, DbError> {
         // Build the WHERE clause via the same machinery `dispatch_find`
         // uses (the SQLite-on-PG-SQL path; `$N` placeholders bind
         // positionally on rusqlite). No ORDER BY at the SQL layer —
@@ -191,7 +191,7 @@ impl SqliteBackend {
                 .ok_or_else(|| DbError::internal("spatial search returned a non-record"))?
                 .insert(
                     "_distance_m".into(),
-                    zeroship_data_sql::value::Number::from_f64(distance)
+                    crate::value::Number::from_f64(distance)
                         .map_or(Value::Null, Value::Number),
                 );
             out.push(row);

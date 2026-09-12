@@ -156,12 +156,11 @@ ORM structure and driver contracts: `docs/architecture/data-orm.md`.
 crates/
 ├── zeroship-core/    Inter-service wire types (RouteEntry, AppRecord, UsageReport, ControlEvent), typed_id, auth utils, observability
 ├── zeroship-bundle/  .zship deploy artifact: Manifest types, BlobStore, BundleStore, tar.zst pack/unpack
-├── zeroship-data-sql/ Runtime query grammar and compilation, SchemaName, catalog metadata, sentinel codec. No drivers or V8. DDL and schema differencing belong to the migration engine.
 ├── zeroship-migrate-server/ Managed-policy creator migration *service* — applies app migrations under the operator-ceiling ⊓ creator-draft trust profile. Its `session.rs` also carries `CompioPgSession`, the newtype bridging the `zeroship-migrate-*` engine crates to compio-postgres over their `SqlSession` seam. PostgreSQL only — it applies pure DDL and REFUSES anything else, including the SQLite rebuild step. The engine is multi-dialect; this host is not, and nothing here drives its MySQL or SQLite backends.
 ├── zeroship-runtime/ V8 + compio event loop + fetch + WebSocket + crypto + auth context
 ├── zeroship-runtime-macros/ #[v8_class] proc macro (V8 ObjectTemplate-backed classes)
 ├── zeroship-data-v8/      env.db.* ADAPTER: V8 classes, per-isolate composition, service lifecycle and CDC. CRUD dispatch prepares and executes the engine's ORM operations, then encodes results for V8.
-├── zeroship-data-orm/    ORM: bound Database and Collection handles, Rust model mapping, CRUD protection passes, transaction protocol, routed execution, transaction lanes and per-app role provisioning. The shared driver interface registers backend adapters. No V8 or adapter dependency.
+├── zeroship-data-orm/    ORM: bound Database and Collection handles, Rust model mapping, native values, SQL compilation, CRUD protection passes, transaction protocol, routed execution, transaction lanes and per-app role provisioning. The shared driver interface registers backend adapters. No V8 or adapter dependency.
 ├── zeroship-data-macros/    Migration-derived Rust collection metadata and FromRow, Insertable, Changeset derives. Re-exported through data-orm::orm; no runtime or driver dependency.
 ├── zeroship-kv/         App-scoped KV contract, errors, and Redis/redb backends; no V8
 ├── zeroship-kv-v8/      env.kv binding: V8 conversion, isolate state, dispatch, metering

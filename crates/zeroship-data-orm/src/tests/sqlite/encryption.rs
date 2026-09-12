@@ -8,7 +8,7 @@ use zeroship_migrate::schema::query::FkEmission;
 
 use zeroship_data_orm::error::DbError;
 
-use zeroship_data_sql::compile::raw_column_name;
+use crate::sql::compile::raw_column_name;
 
 #[cfg(test)]
 use crate::tests::fixtures::DatabaseFixture;
@@ -37,12 +37,12 @@ fn insert_many_encrypts_ciphertext_before_sqlite_storage() {
 
             use zeroship_data_orm::backend::sqlite::session::TypedCell;
             use zeroship_data_orm::encryption;
-            use zeroship_data_sql::compile::{SqlDialect, build_insert_many_with_dialect};
+            use crate::sql::compile::{SqlDialect, build_insert_many_with_dialect};
 
             let _keys = host.supply_project_key(&["app_demo"], &"d".repeat(64));
             let app_id = "app_demo";
             let collection = "bulk_people";
-            let schema = zeroship_data_sql::value!({
+            let schema = crate::value!({
                 "name": { "type": "string" },
                 "ssn": {
                     "type": "string",
@@ -53,7 +53,7 @@ fn insert_many_encrypts_ciphertext_before_sqlite_storage() {
             let (backend, _dir) =
                 unmask_setup_with_schema(host, app_id, collection, schema.clone()).await;
             let ddl = fixture_table_sql_for(
-                &zeroship_data_sql::SchemaName::new(app_id).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(app_id).expect("fixture schema name"),
                 collection,
                 &schema,
                 &FkEmission::Inline,
@@ -71,7 +71,7 @@ fn insert_many_encrypts_ciphertext_before_sqlite_storage() {
                     .expect("DDL exec");
             }
 
-            let mut docs = zeroship_data_sql::value!([
+            let mut docs = crate::value!([
                 { "name": "Alice", "ssn": "123-45-6789" },
                 { "name": "Bob", "ssn": "987-65-4321" }
             ]);
@@ -105,7 +105,7 @@ fn insert_many_encrypts_ciphertext_before_sqlite_storage() {
                 .collect();
 
             let built = build_insert_many_with_dialect(
-                &zeroship_data_sql::SchemaName::new(app_id).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(app_id).expect("fixture schema name"),
                 collection,
                 &schema,
                 &docs,
@@ -406,7 +406,7 @@ fn encrypted_column_e2e_crud_round_trip_sqlite() {
         use zeroship_data_orm::protection::encryption_pass::{
             decrypt_row_on_read, encrypt_row_on_write,
         };
-        use zeroship_data_sql::compile::{SqlDialect, build_insert_with_dialect};
+        use crate::sql::compile::{SqlDialect, build_insert_with_dialect};
 
         let _keys = host.supply_project_key(&["app_demo"], &"c".repeat(64));
         host.run(async {
@@ -428,7 +428,7 @@ fn encrypted_column_e2e_crud_round_trip_sqlite() {
                 .expect("CREATE TABLE users");
 
             // The field descriptor selects encryption; the host supplies the project key.
-            let schema = zeroship_data_sql::value!({
+            let schema = crate::value!({
                 "id": {"type":"string", "primaryKey":true},
                 "ssn": {
                     "type": "string",
@@ -438,7 +438,7 @@ fn encrypted_column_e2e_crud_round_trip_sqlite() {
 
             let plaintext = "123-45-6789";
             let row_pk = "row_e2e";
-            let mut doc = zeroship_data_sql::value!({
+            let mut doc = crate::value!({
                 "id": row_pk,
                 "ssn": plaintext,
             });
@@ -458,7 +458,7 @@ fn encrypted_column_e2e_crud_round_trip_sqlite() {
 
             // Bind the ciphertext directly.
             let bq = build_insert_with_dialect(
-                &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
+                &crate::sql::SchemaName::new("app_demo").expect("fixture schema name"),
                 "users",
                 &schema,
                 &doc,
@@ -520,9 +520,9 @@ fn encrypted_column_e2e_crud_round_trip_sqlite() {
                 ssn_bytes, ciphertext,
                 "stored ciphertext must match the protection pass"
             );
-            let mut row_value = zeroship_data_sql::value!({
+            let mut row_value = crate::value!({
                 "id": id_text,
-                "ssn": zeroship_data_sql::value::Value::Bytes(ssn_bytes),
+                "ssn": crate::value::Value::Bytes(ssn_bytes),
             });
 
             decrypt_row_on_read(

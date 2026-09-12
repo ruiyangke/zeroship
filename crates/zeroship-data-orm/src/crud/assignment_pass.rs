@@ -1,7 +1,7 @@
 //! Apply the collection descriptor's assignments before SQL compilation.
 
-use zeroship_data_sql::value::Map;
-use zeroship_data_sql::value::Value;
+use crate::value::Map;
+use crate::value::Value;
 use zeroship_migrate_policy::{AssignmentEvent, AssignmentGenerator};
 
 use crate::assignments::AssignmentPlan;
@@ -49,7 +49,7 @@ pub fn prefix_for_collection(
         .and_then(|p| p.as_str())
         .map(str::to_string)
         .unwrap_or_else(|| derive_prefix_from_collection_name(collection));
-    crate::compile::validate_id_prefix(&prefix)?;
+    crate::sql::compile::validate_id_prefix(&prefix)?;
     Ok(prefix)
 }
 
@@ -197,7 +197,7 @@ fn refuse_and_strip(
     for name in immutable {
         if obj.contains_key(name) {
             let where_ = under.map_or_else(String::new, |op| format!(" under `{op}`"));
-            return Err(crate::compile::QueryError::ImmutableAssignedField(format!(
+            return Err(crate::sql::compile::QueryError::ImmutableAssignedField(format!(
                 "UPDATE patch attempted to overwrite immutable assigned field `{name}`{where_}"
             ))
             .into());
@@ -215,7 +215,7 @@ pub fn extract_cas_version(
     collection: &str,
     schema: &Value,
 ) -> Result<Option<i64>, DbError> {
-    let Some(column) = zeroship_data_sql::lifecycle::concurrency_column(schema)? else {
+    let Some(column) = crate::sql::lifecycle::concurrency_column(schema)? else {
         return Ok(None);
     };
     if filter_has_nested_version_predicate(filter, column) {
@@ -289,11 +289,8 @@ pub fn should_filter_soft_deleted(include_deleted: bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zeroship_data_sql::{
-        SchemaName,
-        compile::{SqlDialect, build_insert_many_with_dialect},
-        value,
-    };
+    use crate::value;
+    use crate::sql::{SchemaName, compile::{SqlDialect, build_insert_many_with_dialect}};
 
     fn schema() -> Value {
         value!({

@@ -7,7 +7,7 @@ use crate::{
 use futures::future::LocalBoxFuture;
 use sha2::{Digest, Sha256};
 use std::{cell::Cell, fmt, num::NonZeroUsize, rc::Rc, sync::Arc};
-use zeroship_data_sql::compile::SqlDialect;
+use crate::sql::compile::SqlDialect;
 
 /// Host-defined backend construction. Configuration crosses worker threads;
 /// opening happens on the destination compio thread and returns a local handle.

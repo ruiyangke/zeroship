@@ -1,7 +1,7 @@
 //! Pure mask transforms shared by protection passes and subscription predicates.
-//! Descriptor interpretation and mask-kind parsing belong to `zeroship-data-sql`.
+//! Descriptor interpretation and mask-kind parsing belong to `zeroship-data-orm::sql`.
 
-use zeroship_data_sql::catalog::MaskKind;
+use crate::sql::catalog::MaskKind;
 
 /// Apply a single mask transform.
 ///

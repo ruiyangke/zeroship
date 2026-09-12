@@ -5,7 +5,7 @@ use crate::tests::fixtures::parity;
 
 use compio_postgres::NoTls;
 
-use zeroship_data_sql::value::value;
+use zeroship_data_orm::value::value;
 
 /// A `t.bytes()` value written through `env.db` must reach Postgres AS BYTES.
 ///
