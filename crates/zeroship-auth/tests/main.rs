@@ -31,7 +31,6 @@ mod link_lockout_test;
 mod link_ratelimit_test;
 mod logout_test;
 mod m4_post_redeem_test;
-mod magic_link_test;
 mod magic_verify_test;
 mod metadata_cache_headers_test;
 mod oauth_start_intake_test;

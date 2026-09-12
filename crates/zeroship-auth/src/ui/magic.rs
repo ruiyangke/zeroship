@@ -58,7 +58,7 @@ use zeroship_authn::rate_limit::{self, Quota, RateLimitDecision};
 use crate::return_to;
 use crate::sessions::login as session_cookie;
 use crate::sessions::totp_challenge::{self, FirstFactor, TotpChallenge};
-use crate::store::{sessions, totp as totp_store, users};
+use crate::store::{magic_completions, sessions, totp as totp_store, users};
 use crate::ui::login::render_challenge;
 use crate::ui::{
     render_token_interstitial, ErrorPage, MagicAwaitCodePage, MagicCheckEmailPage,
@@ -910,7 +910,7 @@ async fn cross_device_show_code(
     let store_target = target.encode_store();
     // 5-minute window — short, since the user is actively typing.
     if let Err(e) =
-        completions_store::create(db, csrf_nonce, &code, email, &store_target, 300).await
+        magic_completions::create(db, csrf_nonce, &code, email, &store_target, 300).await
     {
         tracing::error!(error = %e, "magic_completions insert failed");
         if let Err(e) = magic_link::clear_consume_pending(db, token_hash, Some(reserved_at)).await {
@@ -1024,9 +1024,9 @@ pub async fn complete(
     // 3. Reserve the completion row atomically. It is finalized only
     //    after the selected continuation succeeds.
     let completion =
-        match completions_store::consume_pending(db.as_ref(), &form.csrf_nonce, &form.code).await {
+        match magic_completions::consume_pending(db.as_ref(), &form.csrf_nonce, &form.code).await {
             Ok(c) => c,
-            Err(completions_store::ConsumeError::WrongCode) => {
+            Err(magic_completions::ConsumeError::WrongCode) => {
                 audit::emit(
                     db.as_ref(),
                     &AuditEvent {
@@ -1040,11 +1040,11 @@ pub async fn complete(
                 .await;
                 return render_error_page(PublicErrorMessage::SessionExpired);
             }
-            Err(completions_store::ConsumeError::Store(e)) => {
+            Err(magic_completions::ConsumeError::Store(e)) => {
                 tracing::error!(error = %e, "magic_completions consume failed");
                 return render_error_page(PublicErrorMessage::ContactSupport);
             }
-            Err(completions_store::ConsumeError::InFlight) => {
+            Err(magic_completions::ConsumeError::InFlight) => {
                 audit::emit(
                     db.as_ref(),
                     &AuditEvent {
@@ -1074,7 +1074,7 @@ pub async fn complete(
                 },
             )
             .await;
-            if let Err(e) = completions_store::clear_consume_pending(
+            if let Err(e) = magic_completions::clear_consume_pending(
                 db.as_ref(),
                 &form.csrf_nonce,
                 Some(&completion.reserved_at),
@@ -1102,7 +1102,7 @@ pub async fn complete(
             },
         )
         .await;
-        if let Err(e) = completions_store::clear_consume_pending(
+        if let Err(e) = magic_completions::clear_consume_pending(
             db.as_ref(),
             &form.csrf_nonce,
             Some(&completion.reserved_at),
@@ -1120,7 +1120,7 @@ pub async fn complete(
         Ok(id) => id,
         Err(e) => {
             tracing::error!(error = %e, "magic complete find-or-create failed");
-            if let Err(e) = completions_store::clear_consume_pending(
+            if let Err(e) = magic_completions::clear_consume_pending(
                 db.as_ref(),
                 &form.csrf_nonce,
                 Some(&completion.reserved_at),
@@ -1142,7 +1142,7 @@ pub async fn complete(
     }
     if let Err(e) = eligibility::check_user_eligible(db.as_ref(), user_id).await {
         if let Err(clear_err) =
-            completions_store::clear_consume_pending(db.as_ref(), &form.csrf_nonce, None).await
+            magic_completions::clear_consume_pending(db.as_ref(), &form.csrf_nonce, None).await
         {
             tracing::warn!(error = %clear_err, "magic_completions clear pending after eligibility failure failed");
         }
@@ -1169,7 +1169,7 @@ pub async fn complete(
     //    row first so an abandoned challenge cannot leave a replayable code.
     match totp_store::is_enabled(db.as_ref(), user_id).await {
         Ok(true) => {
-            match completions_store::finalize_consume(
+            match magic_completions::finalize_consume(
                 db.as_ref(),
                 &form.csrf_nonce,
                 &completion.reserved_at,
@@ -1204,7 +1204,7 @@ pub async fn complete(
         Ok(false) => {}
         Err(e) => {
             tracing::error!(error = %e, user_id = %user_id, "magic complete totp is_enabled check failed");
-            if let Err(e) = completions_store::clear_consume_pending(
+            if let Err(e) = magic_completions::clear_consume_pending(
                 db.as_ref(),
                 &form.csrf_nonce,
                 Some(&completion.reserved_at),
@@ -1235,7 +1235,7 @@ pub async fn complete(
         Ok(s) => s,
         Err(e) => {
             tracing::error!(error = %e, "magic complete sessions::create failed");
-            if let Err(e) = completions_store::clear_consume_pending(
+            if let Err(e) = magic_completions::clear_consume_pending(
                 db.as_ref(),
                 &form.csrf_nonce,
                 Some(&completion.reserved_at),
@@ -1252,7 +1252,7 @@ pub async fn complete(
         tracing::warn!(error = %e, user_id = %user_id, "magic touch_last_login failed");
     }
 
-    match completions_store::finalize_consume(
+    match magic_completions::finalize_consume(
         db.as_ref(),
         &form.csrf_nonce,
         &completion.reserved_at,
@@ -1345,210 +1345,6 @@ async fn find_or_create_magic_user(db: &compio_postgres::Client, email: &str) ->
     .await
     .map_err(|e| AuthError::Db(format!("set email_verified_at: {e}")))?;
     Ok(user.id)
-}
-
-// ─── zeroship.magic_completions store ────────────────────────────────────
-
-pub mod completions_store {
-    use compio_postgres::Client;
-
-    use crate::error::AuthError;
-
-    #[derive(Debug, Clone)]
-    pub struct Completion {
-        pub email: String,
-        pub target: String,
-        pub reserved_at: chrono::DateTime<chrono::Utc>,
-    }
-
-    #[derive(Debug)]
-    pub enum ConsumeError {
-        InFlight,
-        WrongCode,
-        Store(AuthError),
-    }
-
-    /// Insert a fresh completion row. `expires_secs` is the lifetime
-    /// from now until the code expires (5 minutes at the caller).
-    ///
-    /// `csrf_nonce` is the PRIMARY KEY — at most one outstanding
-    /// completion per magic-link issue. The single-use redeem in
-    /// `identity::magic_link::redeem_pending` makes a second insert impossible
-    /// in practice; `ON CONFLICT … DO UPDATE` is defence-in-depth so
-    /// re-running the test suite (which short-circuits the single-use
-    /// invariant by tweaking the row directly) still works.
-    pub async fn create(
-        db: &Client,
-        csrf_nonce: &str,
-        code: &str,
-        email: &str,
-        target: &str,
-        expires_secs: i64,
-    ) -> crate::error::Result<()> {
-        super::email_validation::validate_email(email)
-            .map_err(|_| AuthError::Internal("invalid email".into()))?;
-
-        db.execute(
-            "INSERT INTO zeroship.magic_completions \
-                (csrf_nonce, code, email, login_challenge, expires_at) \
-             VALUES ($1, $2, $3::citext, $4, NOW() + ($5::text || ' seconds')::interval) \
-             ON CONFLICT (csrf_nonce) DO UPDATE SET \
-                code = EXCLUDED.code, \
-                email = EXCLUDED.email, \
-                login_challenge = EXCLUDED.login_challenge, \
-                expires_at = EXCLUDED.expires_at, \
-                attempts = 0, \
-                consumed_pending_at = NULL, \
-                consumed_at = NULL",
-            &[
-                &csrf_nonce,
-                &code,
-                &email,
-                &target,
-                &expires_secs.to_string(),
-            ],
-        )
-        .await
-        .map_err(|e| AuthError::Db(format!("magic_completions insert: {e}")))?;
-        Ok(())
-    }
-
-    /// Atomically reserve a completion row, invalidating it after five
-    /// failed code attempts. A second correct-code consume within 60
-    /// seconds of an existing reservation reports `InFlight`; stale
-    /// reservations can be retried.
-    pub async fn consume_pending(
-        db: &Client,
-        csrf_nonce: &str,
-        code: &str,
-    ) -> std::result::Result<Completion, ConsumeError> {
-        let rows = db
-            .query(
-                "UPDATE zeroship.magic_completions \
-                 SET attempts = (attempts + 1)::SMALLINT, \
-                     consumed_pending_at = NOW() \
-                 WHERE csrf_nonce = $1 \
-                   AND code = $2 \
-                   AND attempts < 5 \
-                   AND consumed_at IS NULL \
-                   AND (consumed_pending_at IS NULL \
-                        OR consumed_pending_at <= NOW() - INTERVAL '60 seconds') \
-                   AND expires_at > NOW() \
-                 RETURNING email::text, login_challenge, consumed_pending_at",
-                &[&csrf_nonce, &code],
-            )
-            .await
-            .map_err(|e| {
-                ConsumeError::Store(AuthError::Db(format!("magic_completions consume: {e}")))
-            })?;
-
-        if let Some(row) = rows.first() {
-            return Ok(Completion {
-                email: row.get("email"),
-                target: row.get("login_challenge"),
-                reserved_at: row.get("consumed_pending_at"),
-            });
-        }
-
-        let in_flight = db
-            .query(
-                "SELECT TRUE AS in_flight \
-                 FROM zeroship.magic_completions \
-                 WHERE csrf_nonce = $1 \
-                   AND consumed_at IS NULL \
-                   AND consumed_pending_at > NOW() - INTERVAL '60 seconds' \
-                   AND expires_at > NOW()",
-                &[&csrf_nonce],
-            )
-            .await
-            .map_err(|e| {
-                ConsumeError::Store(AuthError::Db(format!(
-                    "magic_completions consume in-flight: {e}"
-                )))
-            })?;
-        if !in_flight.is_empty() {
-            return Err(ConsumeError::InFlight);
-        }
-
-        let wrong_rows = db
-            .query(
-                "UPDATE zeroship.magic_completions \
-                 SET attempts = (attempts + 1)::SMALLINT, \
-                     consumed_at = CASE \
-                         WHEN attempts + 1 >= 5 THEN NOW() \
-                         ELSE consumed_at \
-                     END \
-                 WHERE csrf_nonce = $1 \
-                   AND code <> $2 \
-                   AND attempts < 5 \
-                   AND consumed_at IS NULL \
-                   AND consumed_pending_at IS NULL \
-                   AND expires_at > NOW() \
-                 RETURNING attempts",
-                &[&csrf_nonce, &code],
-            )
-            .await
-            .map_err(|e| {
-                ConsumeError::Store(AuthError::Db(format!(
-                    "magic_completions wrong-code consume: {e}"
-                )))
-            })?;
-
-        if wrong_rows.is_empty() {
-            return Err(ConsumeError::WrongCode);
-        }
-
-        Err(ConsumeError::WrongCode)
-    }
-
-    pub async fn finalize_consume(
-        db: &Client,
-        csrf_nonce: &str,
-        reserved_at: &chrono::DateTime<chrono::Utc>,
-    ) -> crate::error::Result<bool> {
-        let updated = db
-            .execute(
-                "UPDATE zeroship.magic_completions \
-                 SET consumed_at = NOW() \
-                 WHERE csrf_nonce = $1 \
-                   AND consumed_pending_at = $2 \
-                   AND consumed_at IS NULL",
-                &[&csrf_nonce, reserved_at],
-            )
-            .await
-            .map_err(|e| AuthError::Db(format!("magic_completions finalize consume: {e}")))?;
-        Ok(updated > 0)
-    }
-
-    pub async fn clear_consume_pending(
-        db: &Client,
-        csrf_nonce: &str,
-        reserved_at: Option<&chrono::DateTime<chrono::Utc>>,
-    ) -> crate::error::Result<bool> {
-        let result = if let Some(ts) = reserved_at {
-            db.execute(
-                "UPDATE zeroship.magic_completions \
-                 SET consumed_pending_at = NULL \
-                 WHERE csrf_nonce = $1 \
-                   AND consumed_pending_at = $2 \
-                   AND consumed_at IS NULL",
-                &[&csrf_nonce, ts],
-            )
-            .await
-        } else {
-            db.execute(
-                "UPDATE zeroship.magic_completions \
-                 SET consumed_pending_at = NULL \
-                 WHERE csrf_nonce = $1 \
-                   AND consumed_at IS NULL",
-                &[&csrf_nonce],
-            )
-            .await
-        };
-        let updated = result
-            .map_err(|e| AuthError::Db(format!("magic_completions clear consume pending: {e}")))?;
-        Ok(updated > 0)
-    }
 }
 
 // ─── Email-related helpers (start-only) ──────────────────────────────
