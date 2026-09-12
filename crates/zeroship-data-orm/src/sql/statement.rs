@@ -1072,8 +1072,8 @@ fn validate_upsert(parts: &UpsertParts) -> Result<(), CompileError> {
                 }
                 Expression::Increment { column, .. } => {
                     parts.table.check_column(column)?;
-                    if column.index != assignment.column.index || !storage.numeric() {
-                        return Err(invalid("increment requires its assigned numeric column"));
+                    if column.index != assignment.column.index || storage != StorageType::Integer {
+                        return Err(invalid("increment requires its assigned integer column"));
                     }
                 }
                 Expression::Arithmetic { .. } | Expression::ArrayMutation { .. } => {
@@ -1155,8 +1155,8 @@ fn validate_update_expression(
         Expression::CurrentTimestamp if storage == StorageType::Timestamp => Ok(()),
         Expression::Increment { column, .. } => {
             table.check_column(column)?;
-            if column.index != assigned.index || !storage.numeric() {
-                return Err(invalid("increment requires its assigned numeric column"));
+            if column.index != assigned.index || storage != StorageType::Integer {
+                return Err(invalid("increment requires its assigned integer column"));
             }
             Ok(())
         }

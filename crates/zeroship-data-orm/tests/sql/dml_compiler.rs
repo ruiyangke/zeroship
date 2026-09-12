@@ -994,6 +994,66 @@ fn numeric_storage_rejects_lossy_integer_arithmetic_and_invalid_decimals() {
 }
 
 #[test]
+fn generated_increment_only_accepts_integer_storage() {
+    let table = Table::new(
+        SchemaName::new("app-generated").unwrap(),
+        Ident::parse_as("entries", IdentRole::Collection).unwrap(),
+        [
+            ("id", StorageType::Integer),
+            ("version", StorageType::Integer),
+            ("ratio", StorageType::Real),
+            ("amount", StorageType::exact_decimal(30, 2).unwrap()),
+        ]
+        .map(|(name, storage)| {
+            (
+                Ident::parse_as(name, IdentRole::StoredColumn).unwrap(),
+                storage,
+            )
+        }),
+    )
+    .unwrap();
+
+    let update = |name: &str| {
+        let column = table.column(name).unwrap();
+        Update::new(UpdateParts {
+            table: table.clone(),
+            assignments: vec![Assignment {
+                column: column.clone(),
+                value: Expression::Increment { column, step: 1 },
+            }],
+            predicate: ResolvedPredicate::Const(true),
+            scope: MutationScope::Matching,
+            returning: Vec::new(),
+        })
+    };
+    let upsert = |name: &str| {
+        let column = table.column(name).unwrap();
+        Upsert::new(UpsertParts {
+            table: table.clone(),
+            insert: vec![Assignment {
+                column: table.column("id").unwrap(),
+                value: Expression::Bind(Value::from(1)),
+            }],
+            conflict: vec![table.column("id").unwrap()],
+            update: vec![Assignment {
+                column: column.clone(),
+                value: Expression::Increment { column, step: 1 },
+            }],
+            condition: None,
+            returning: Vec::new(),
+            insert_generated_identity: false,
+        })
+    };
+
+    assert!(update("version").is_ok());
+    assert!(upsert("version").is_ok());
+    for name in ["ratio", "amount"] {
+        assert!(update(name).is_err(), "update accepted {name}");
+        assert!(upsert(name).is_err(), "upsert accepted {name}");
+    }
+}
+
+#[test]
 fn dialects_compile_exact_decimal_storage_without_floating_point() {
     let table = Table::new(
         SchemaName::new("app-ledger").unwrap(),
