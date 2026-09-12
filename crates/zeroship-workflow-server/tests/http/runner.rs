@@ -1,7 +1,7 @@
 use super::*;
 use std::{cell::Cell, rc::Rc, time::Duration};
 use zeroship_workflow::service::{
-    runner::{RunnerOutcome, RunnerSlot, TaskExecution, TaskExecutor},
+    runner::{ExecutionBudget, RunnerOutcome, RunnerSlot, TaskExecution, TaskExecutor},
     RemoteTasks, TaskAssignment,
 };
 
@@ -10,6 +10,7 @@ impl TaskExecutor for Executor {
     fn start(
         &self,
         assignment: &TaskAssignment,
+        _: ExecutionBudget,
     ) -> Result<Box<dyn TaskExecution>, WorkflowServiceError> {
         Ok(Box::new(Execution {
             stopped: self.0.clone(),

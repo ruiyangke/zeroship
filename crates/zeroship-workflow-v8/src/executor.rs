@@ -5,7 +5,7 @@ use std::rc::Rc;
 use zeroship_runtime::{CancelFlag, EnvSnapshot, RequestCtx, Runtime, WorkflowOutcome};
 use zeroship_workflow::{
     service::{
-        runner::{TaskExecution, TaskExecutor},
+        runner::{ExecutionBudget, TaskExecution, TaskExecutor},
         TaskAssignment,
     },
     WorkflowExecution, WorkflowInvocation, WorkflowServiceError,
@@ -20,8 +20,11 @@ pub trait WorkflowRuntimeLoader {
     ) -> Result<LoadedWorkflow, WorkflowServiceError>;
 }
 
-/// Owns an exclusive workflow isolate. Its pump must not have been started and
-/// the runtime must be newly built, with its initial isolate entry still active.
+/// Owns an exclusive workflow isolate.
+///
+/// Its pump must not have been started and the runtime must be newly built,
+/// with its initial isolate entry still active.
+/// The loader must not initialize modules or evaluate app code before returning.
 pub struct LoadedWorkflow {
     runtime: Runtime,
     env: EnvSnapshot,
@@ -63,6 +66,7 @@ impl TaskExecutor for V8TaskExecutor {
     fn start(
         &self,
         assignment: &TaskAssignment,
+        budget: ExecutionBudget,
     ) -> Result<Box<dyn TaskExecution>, WorkflowServiceError> {
         Ok(Box::new(V8Execution {
             invocation: assignment.invocation.clone(),
@@ -70,6 +74,7 @@ impl TaskExecutor for V8TaskExecutor {
             loaded: None,
             cancel: CancelFlag::new(),
             started: false,
+            budget,
         }))
     }
 }
@@ -80,15 +85,21 @@ pub(crate) struct V8Execution {
     loaded: Option<LoadedWorkflow>,
     cancel: CancelFlag,
     started: bool,
+    budget: ExecutionBudget,
 }
 impl V8Execution {
-    pub(crate) fn loaded(invocation: WorkflowInvocation, loaded: LoadedWorkflow) -> Self {
+    pub(crate) fn loaded(
+        invocation: WorkflowInvocation,
+        loaded: LoadedWorkflow,
+        budget: ExecutionBudget,
+    ) -> Self {
         Self {
             invocation,
             loader: None,
             loaded: Some(loaded),
             cancel: CancelFlag::new(),
             started: false,
+            budget,
         }
     }
 }
@@ -101,6 +112,7 @@ impl TaskExecution for V8Execution {
             ));
         }
         self.started = true;
+        self.budget.check()?;
         if self.loaded.is_none() {
             let (loader, assignment) = self.loader.as_ref().ok_or_else(|| {
                 WorkflowServiceError::Internal("workflow runtime loader is absent".into())
@@ -108,6 +120,9 @@ impl TaskExecution for V8Execution {
             self.loaded = Some(loader.load(assignment).await?);
         }
         let loaded = self.loaded.as_ref().expect("loaded workflow runtime");
+        let interrupt = loaded.runtime.interrupt_handle();
+        self.budget.on_interrupt(move || interrupt.cancel())?;
+        self.budget.check()?;
         let envelope = serde_json::to_string(&self.invocation)
             .map_err(|_| WorkflowServiceError::Internal("invalid workflow invocation".into()))?;
         loaded.runtime.start_pump();
@@ -122,12 +137,14 @@ impl TaskExecution for V8Execution {
             WorkflowOutcome::Response { json, .. } => json,
             WorkflowOutcome::Pending { rx, .. } => {
                 loaded.runtime.notify_pump();
-                rx.recv()
-                    .await
+                let result = rx.recv().await;
+                self.budget.check()?;
+                result
                     .map_err(|error| WorkflowServiceError::Unavailable(error.message))?
                     .json
             }
         };
+        self.budget.check()?;
         WorkflowExecution::from_runtime_json(&json)
     }
 

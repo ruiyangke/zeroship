@@ -3,7 +3,8 @@ use crate::{
     operations::{RunOperation, RunState},
     service::{
         runner::{
-            EmbeddedTasks, RunnerOutcome, RunnerSlot, TaskExecution, TaskExecutor, TaskTransport,
+            EmbeddedTasks, ExecutionBudget, RunnerOutcome, RunnerSlot, TaskExecution, TaskExecutor,
+            TaskTransport,
         },
         CompletionReceipt, ControlIntent, Heartbeat, TaskAssignment, TaskToken, WorkerIdentity,
     },
@@ -57,7 +58,11 @@ impl Probe {
 }
 struct Executor(Rc<Probe>);
 impl TaskExecutor for Executor {
-    fn start(&self, _: &TaskAssignment) -> Result<Box<dyn TaskExecution>, WorkflowServiceError> {
+    fn start(
+        &self,
+        _: &TaskAssignment,
+        _: ExecutionBudget,
+    ) -> Result<Box<dyn TaskExecution>, WorkflowServiceError> {
         self.0.record("start");
         self.0.stopped.set(false);
         Ok(Box::new(Execution {

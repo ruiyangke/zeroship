@@ -83,7 +83,10 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::{Rc, Weak};
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::time::{Duration, Instant};
 
 use futures::stream::FuturesUnordered;
@@ -164,6 +167,25 @@ impl From<String> for DispatchError {
 impl From<&str> for DispatchError {
     fn from(s: &str) -> Self {
         Self { message: s.into(), status: 500 }
+    }
+}
+
+/// Thread-safe, permanent interruption of an exclusive runtime. The owning
+/// thread must still quarantine and join native work through `Runtime::shutdown`.
+#[derive(Clone)]
+pub struct RuntimeInterrupt {
+    handle: v8::IsolateHandle,
+    cancelled: Arc<AtomicBool>,
+}
+impl std::fmt::Debug for RuntimeInterrupt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RuntimeInterrupt").finish_non_exhaustive()
+    }
+}
+impl RuntimeInterrupt {
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+        self.handle.terminate_execution();
     }
 }
 
@@ -341,6 +363,17 @@ impl Runtime {
     /// Per-request CPU time limit, if configured.
     pub fn cpu_limit(&self) -> Option<Duration> {
         self.limits.cpu_limit
+    }
+
+    /// Obtain a permanent interrupt for a trusted host's deadline watchdog.
+    /// This does not grant another thread access to the isolate or its state.
+    #[must_use]
+    pub fn interrupt_handle(&self) -> RuntimeInterrupt {
+        let inner = self.inner.borrow();
+        RuntimeInterrupt {
+            handle: inner.isolate.thread_safe_handle(),
+            cancelled: inner.host_interrupt.clone(),
+        }
     }
 
     /// Module list this runtime was built with.
@@ -975,6 +1008,9 @@ pub(crate) struct RuntimeInner {
     /// here, so an unset value with the note set means the heap callback.
     cpu_note: Arc<std::sync::atomic::AtomicBool>,
 
+    /// Host interruption is permanent; limit recovery cannot resume app code.
+    host_interrupt: Arc<AtomicBool>,
+
     /// Cause of the most recent detected termination, set by
     /// `check_v8_terminated` so call sites report the right limit.
     last_termination_was_heap: bool,
@@ -1269,6 +1305,7 @@ impl RuntimeInner {
             wall_timeout,
             terminated_note: heap_terminated,
             cpu_note: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            host_interrupt: Arc::new(AtomicBool::new(false)),
             last_termination_was_heap: false,
             #[cfg(target_os = "linux")]
             cpu_timer: None,
@@ -1452,6 +1489,10 @@ impl RuntimeInner {
             // the inner immediately rather than waiting for the next event.
             {
                 let Some(runtime) = runtime.upgrade() else { return; };
+
+                if runtime.borrow().host_interrupt.load(Ordering::Acquire) {
+                    return;
+                }
 
                 // PHASE 1 — drain new spawned ops/timers/fetches + flush
                 // outbound streams. Only enter the V8 isolate if there's
@@ -1659,6 +1700,9 @@ impl RuntimeInner {
                     let mut rt = runtime.borrow_mut();
                     rt.enter_isolate();
                     for ev in batch {
+                        if rt.host_interrupt.load(Ordering::Acquire) {
+                            break;
+                        }
                         rt.handle_async_event(ev, &mut work);
                     }
                     rt.exit_isolate();
@@ -1916,8 +1960,14 @@ impl RuntimeInner {
         modules: &[ModuleEntry],
         env: &crate::EnvSnapshot,
     ) -> Result<(), String> {
+        if self.host_interrupt.load(Ordering::Acquire) {
+            return Err("runtime execution interrupted".into());
+        }
         self.state.borrow_mut().set_env_snapshot(env);
         self.ensure_initialized(modules);
+        if self.host_interrupt.load(Ordering::Acquire) {
+            return Err("runtime execution interrupted".into());
+        }
         match &self.init_error {
             Some(err) => Err(format!("module init failed: {err}")),
             None => Ok(()),
@@ -1948,35 +1998,12 @@ impl RuntimeInner {
         }
     }
 
-    /// Check whether V8 execution was terminated. If so, cancel the
-    /// termination so the isolate can continue serving other requests, disarm
-    /// the CPU timer if one is armed, and return true.
-    ///
-    /// Does NOT drain pending requests — the caller decides which request
-    /// to error (only the one that was executing when termination fired).
-    ///
-    /// TWO things terminate execution, not one:
-    ///
-    ///   the CPU timer (`cpu_timer.rs`), Linux-only, and
-    ///   `near_heap_limit_callback`, on every platform, once an isolate has
-    ///   hit its heap cap `MAX_HEAP_LIMIT_HITS` times.
-    ///
-    /// This used to return early unless a CPU timer was configured, on the
-    /// stated grounds that "other code paths never call terminate_execution".
-    /// The heap-limit callback does, and an app can carry a heap cap with no
-    /// CPU limit at all - so a heap-terminated isolate went undetected, the
-    /// dispatch never settled, and the request hung indefinitely rather than
-    /// failing. The same reasoning made the whole check compile to `false` off
-    /// Linux, where the heap callback still fires.
-    ///
-    /// There is no timer-shaped fast path to keep: whether the isolate is
-    /// terminating is exactly the question, and `is_execution_terminating` is
-    /// a plain isolate flag read.
-    /// Message for the limit that caused the most recent detected
-    /// termination. Only meaningful right after `check_v8_terminated`
-    /// returned true.
+    /// Report the detected termination cause. Host interruption is permanent;
+    /// CPU and heap terminations can be recovered for an ordinary cached runtime.
     fn termination_message(&self) -> &'static str {
-        if self.last_termination_was_heap {
+        if self.host_interrupt.load(Ordering::Acquire) {
+            "runtime execution interrupted"
+        } else if self.last_termination_was_heap {
             "memory limit exceeded"
         } else {
             "CPU time limit exceeded"
@@ -1995,14 +2022,15 @@ impl RuntimeInner {
             .swap(false, std::sync::atomic::Ordering::Relaxed);
 
         let v8_terminating = self.isolate.is_execution_terminating();
-        if !heap_terminated && !cpu_terminated && !v8_terminating {
+        let host_interrupted = self.host_interrupt.load(Ordering::Acquire);
+        if !host_interrupted && !heap_terminated && !cpu_terminated && !v8_terminating {
             return false;
         }
         // Recorded so the call sites can name the actual cause. They all used
         // to say "CPU time limit exceeded", which is now reachable by a second
         // route and would misreport a heap kill as a CPU kill.
         self.last_termination_was_heap = heap_terminated && !cpu_terminated;
-        if v8_terminating {
+        if v8_terminating && !host_interrupted {
             self.isolate.cancel_terminate_execution();
         }
         #[cfg(target_os = "linux")]
@@ -2034,7 +2062,7 @@ impl RuntimeInner {
         crate::node::net::state::reset_dispatch_egress(&self.state);
 
         let init_result = self.initialize_modules(modules, env);
-        if self.workflow_fn.is_none() {
+        if self.workflow_fn.is_none() || self.host_interrupt.load(Ordering::Acquire) {
             let msg = match init_result {
                 Err(err) => err,
                 Ok(()) => "No default.workflow handler exported".to_string(),
@@ -2154,7 +2182,7 @@ impl RuntimeInner {
         // which shouldn't happen under the normal dispatch flow).
         let init_result = self.initialize_modules(modules, env);
 
-        if self.fetch_handler_fn.is_none() {
+        if self.fetch_handler_fn.is_none() || self.host_interrupt.load(Ordering::Acquire) {
             // If module init failed (parse/runtime error) we have a real
             // diagnostic; surface it as 500 so the deployer sees the cause
             // rather than the symptom. Fall through to 404 only when the
@@ -2672,6 +2700,9 @@ impl RuntimeInner {
     /// Drain newly spawned ops/timers from RuntimeState into the external
     /// `AsyncWork` (for the pump task).
     pub fn drain_new_tasks_into(&mut self, work: &mut AsyncWork) {
+        if self.host_interrupt.load(Ordering::Acquire) {
+            return;
+        }
         // Fast path
         {
             let s = self.state.borrow();
@@ -2709,6 +2740,9 @@ impl RuntimeInner {
     /// `resume_read` needs a scope to call `reader.read()`. Called from the
     /// pump's PHASE 1 with the isolate already entered.
     fn service_forwarder_resumes(&mut self) {
+        if self.host_interrupt.load(Ordering::Acquire) {
+            return;
+        }
         let pending: Vec<u32> = {
             let mut s = self.state.borrow_mut();
             if s.forwarder_resumes.is_empty() {
@@ -2730,6 +2764,9 @@ impl RuntimeInner {
     /// creator runtimes leave `RuntimeState::js_driver` empty, so this hook is a
     /// no-op and the associated globals are never installed.
     fn service_js_driver_commands(&mut self, work: &mut AsyncWork) {
+        if self.host_interrupt.load(Ordering::Acquire) {
+            return;
+        }
         loop {
             let next = {
                 let mut s = self.state.borrow_mut();
@@ -2770,6 +2807,9 @@ impl RuntimeInner {
     /// Enters V8 briefly to resolve the op/timer, checks settled promises,
     /// and sends results via oneshot channels.
     pub fn handle_async_event(&mut self, event: AsyncEvent, work: &mut AsyncWork) {
+        if self.host_interrupt.load(Ordering::Acquire) {
+            return;
+        }
         // Pump-driven activity counts — a long-running async procedure
         // resetting the idle clock keeps the GC ticker from firing while
         // user JS is making forward progress.

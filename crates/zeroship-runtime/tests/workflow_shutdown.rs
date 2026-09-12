@@ -30,6 +30,37 @@ fn runtime() -> Runtime {
         .build()
 }
 
+#[compio::test]
+async fn host_interrupt_is_permanent_and_safe_after_isolate_disposal() {
+    let runtime = runtime();
+    runtime.initialize(&EnvSnapshot::empty()).unwrap();
+    let interrupt = runtime.interrupt_handle();
+    let remote = interrupt.clone();
+    std::thread::spawn(move || remote.cancel()).join().unwrap();
+    assert!(runtime
+        .initialize(&EnvSnapshot::empty())
+        .unwrap_err()
+        .contains("interrupted"));
+    for _ in 0..2 {
+        let FetchOutcome::Response { status, body, .. } = runtime.call_fetch_handler(
+            "GET",
+            "http://local/",
+            &[],
+            [],
+            &EnvSnapshot::empty(),
+            RequestCtx::new(CancelFlag::new()),
+        ) else {
+            panic!("interrupted runtime must reject dispatch synchronously");
+        };
+        assert_eq!(status, 500);
+        assert!(String::from_utf8(body).unwrap().contains("interrupted"));
+    }
+    runtime.exit_isolate();
+    runtime.shutdown().await;
+    drop(runtime);
+    interrupt.cancel();
+}
+
 async fn native_operation(runtime: &Runtime) -> (Rc<Cell<bool>>, Rc<InnerProbe>) {
     let started = Rc::new(Cell::new(false));
     let ready = started.clone();

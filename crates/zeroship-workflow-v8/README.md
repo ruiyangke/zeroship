@@ -8,5 +8,12 @@ and exposes workflow and run handles to JavaScript.
 the Rust engine's `WorkflowExecutor` with the worker runtime. PostgreSQL journal
 logic and the HTTP client belong to `zeroship-workflow`.
 
+`executor.rs` implements the shared service runner's `TaskExecutor`. A trusted
+loader supplies a fresh runtime for the assignment's immutable deployment. The
+executor installs the runner's deadline interrupt before module initialization;
+app code receives replay inputs without task credentials. Shutdown quarantines
+the isolate and joins native work before the slot can be reused. The local
+executor also uses this lifecycle.
+
 The worker uses `WorkflowBinding::new` for control-plane-backed workflows.
 The CLI uses `WorkflowBinding::dev_sqlite` for the local development engine.

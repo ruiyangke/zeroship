@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use zeroship_runtime::plugin::NativePlugin;
 use zeroship_runtime::{EnvSnapshot, ModuleEntry, Runtime};
-use zeroship_workflow::service::runner::TaskExecution;
+use zeroship_workflow::service::runner::{ExecutionGuard, TaskExecution};
 
 use zeroship_workflow::{
     WorkflowExecution, WorkflowExecutor, WorkflowInvocation, WorkflowServiceError,
@@ -43,14 +43,18 @@ impl WorkflowExecutor for V8WorkflowExecutor {
         invocation: &WorkflowInvocation,
     ) -> Result<WorkflowExecution, WorkflowServiceError> {
         zeroship_runtime::init_v8();
+        let guard = ExecutionGuard::new(DEV_DISPATCH_TIMEOUT)?;
         let runtime = Runtime::builder()
             .modules(self.modules.clone())
             .env_vars(self.env_vars.clone())
             .plugins(self.plugins.clone())
             .build();
         let env = env_snapshot_from_prefixed_vars(&self.env_vars);
-        let mut execution =
-            V8Execution::loaded(invocation.clone(), LoadedWorkflow::new(runtime, env));
+        let mut execution = V8Execution::loaded(
+            invocation.clone(),
+            LoadedWorkflow::new(runtime, env),
+            guard.budget(),
+        );
         let result = compio::time::timeout(DEV_DISPATCH_TIMEOUT, execution.wait())
             .await
             .map_err(|_| WorkflowServiceError::Timeout)

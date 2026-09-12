@@ -203,7 +203,7 @@ pub use state::{SharedState, RuntimeState, OpResult, SpawnedTimer, WebSocketStat
 pub use storage::AppStorage;
 pub use runtime::{
     heap_limit_callback_hits, heap_used_and_limit, AsyncEvent, AsyncWork, Runtime, RuntimeBuilder, RuntimeLease,
-    RuntimeLimits,
+    RuntimeLimits, RuntimeInterrupt,
 };
 pub use fetch_outcome::{
     EnvSnapshot, FetchOutcome, RequestCtx, SettledFetch, SettledWorkflow, WorkflowOutcome,
