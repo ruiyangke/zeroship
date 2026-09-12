@@ -51,6 +51,10 @@ import {
   type UpsertOptions,
   type UpdateExpression,
   type Filter,
+  type DistinctField,
+  type SelectInput,
+  type SortInput,
+  type SortSpec,
   type WithSpec,
   type PlainObject,
   type FieldDef,
@@ -577,12 +581,12 @@ async function unwrap<T>(result: Result<T>): Promise<T> {
 function createTxCollection<S>(collection: Collection<S>): TxCollection<S> {
   async function getImpl(
     idOrFilter: RowId<S> | Filter<S>,
-    opts?: { select?: (string & keyof Row<S>)[]; orderBy?: Record<string, 1 | -1> },
+    opts?: { select?: (string & keyof Row<S>)[]; orderBy?: SortSpec<S> },
   ): Promise<unknown> {
     const colAny = collection as unknown as {
       get(
         idOrFilter: RowId<S> | Filter<S>,
-        opts?: { select?: (string & keyof Row<S>)[]; orderBy?: Record<string, 1 | -1> },
+        opts?: { select?: (string & keyof Row<S>)[]; orderBy?: SortSpec<S> },
       ): Promise<Result<Row<S> | null>>;
     };
     return unwrap(await colAny.get(idOrFilter, opts));
@@ -600,10 +604,10 @@ function createTxCollection<S>(collection: Collection<S>): TxCollection<S> {
     async exists(filter: Filter<S>) {
       return unwrap(await collection.exists(filter));
     },
-    find: ((filter: Filter<S> = {} as Filter<S>, opts?: { with?: WithSpec }): TxQuery<S, Row<S>> => {
+    find: ((filter: Filter<S> = {} as Filter<S>, opts?: { with?: WithSpec<S> }): TxQuery<S, Row<S>> => {
       const query = (opts?.with !== undefined
         ? (collection as unknown as {
-            find(f: Filter<S>, o: { with: WithSpec }): Query<S, Row<S>>;
+            find(f: Filter<S>, o: { with: WithSpec<S> }): Query<S, Row<S>>;
           }).find(filter, { with: opts.with })
         : collection.find(filter));
       return createTxQuery<S>(query);
@@ -638,7 +642,10 @@ function createTxCollection<S>(collection: Collection<S>): TxCollection<S> {
     async count(filter: Filter<S> = {} as Filter<S>) {
       return unwrap(await collection.count(filter));
     },
-    async distinct(field: string & keyof Row<S>, filter: Filter<S> = {} as Filter<S>) {
+    async distinct<K extends DistinctField<S> & keyof Row<S>>(
+      field: K,
+      filter: Filter<S> = {} as Filter<S>,
+    ): Promise<Exclude<Row<S>[K], undefined>[]> {
       return unwrap(await collection.distinct(field, filter));
     },
     async aggregate(pipeline: ZeroshipDbAggregateStage[]) {
@@ -664,20 +671,18 @@ function createTxCollection<S>(collection: Collection<S>): TxCollection<S> {
 }
 
 function createTxQuery<S>(query: Query<S, Row<S>>): TxQuery<S, Row<S>> {
-  function selectImpl(
-    s: string | string[] | Record<string, number | boolean>,
-  ): unknown {
+  function selectImpl(s: SelectInput<S>): unknown {
     (query.select as (arg: unknown) => unknown)(s);
     return wrapped;
   }
   const wrapped: TxQuery<S, Row<S>> = {
-    sort(s: Record<string, number> | string) { query.sort(s); return wrapped; },
+    sort(s: SortInput<S>) { query.sort(s); return wrapped; },
     limit(n: number) { query.limit(n); return wrapped; },
     skip(n: number) { query.skip(n); return wrapped; },
     select: selectImpl as TxQuery<S, Row<S>>["select"],
     after(id: RowId<S>) { query.after(id); return wrapped; },
-    with: ((spec: WithSpec) => {
-      (query as unknown as { with(s: WithSpec): unknown }).with(spec);
+    with: ((spec: WithSpec<S>) => {
+      (query as unknown as { with(s: WithSpec<S>): unknown }).with(spec);
       return wrapped;
     }) as TxQuery<S, Row<S>>["with"],
     async paginate(
