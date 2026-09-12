@@ -71,6 +71,9 @@ remain retryable. Repair advances a journal epoch so a stale failed read cannot
 revoke the repair. Snapshot I/O releases the app lock, allowing concurrent
 heartbeats and lifecycle operations. Missing code also leaves cancellation and
 expired-lease cleanup available; compensation execution still needs its code.
+Schedules for unavailable code keep their due frontier without admitting runs
+or consuming occurrences. Repair resumes the configured catch-up behavior;
+unavailable deployments do not occupy the schedule discovery budget.
 Native contracts cover these boundaries against SQLite, PostgreSQL and S3.
 Worker and Vite snapshot producers, snapshot collection and the worker/CLI
 composition remain unfinished.

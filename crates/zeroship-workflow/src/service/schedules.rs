@@ -206,8 +206,9 @@ impl WorkflowService {
         let mut tx = self.begin().await?;
         let now = tx.now().await?;
         let schedules = tx.table("schedules");
+        let deploys = tx.table("deploys");
         let (scope, app_ids) = tx.host_app_scope()?;
-        let due=tx.query(&format!("SELECT app_id,id FROM {schedules} WHERE app_id IN ({scope}) AND next_at <= $2 ORDER BY last_checked_at,next_at,app_id,id LIMIT 128"), &[app_ids,now.into()]).await?;
+        let due=tx.query(&format!("SELECT s.app_id,s.id FROM {schedules} s WHERE s.app_id IN ({scope}) AND next_at <= $2 AND EXISTS (SELECT 1 FROM {deploys} d WHERE d.app_id=s.app_id AND d.id=s.deploy_id AND d.state='available') ORDER BY last_checked_at,next_at,s.app_id,s.id LIMIT 128"), &[app_ids,now.into()]).await?;
         tx.commit().await?;
         let mut fired = 0;
         for candidate in due {
@@ -241,6 +242,20 @@ impl WorkflowService {
                 continue;
             };
             if !policy.admission {
+                tx.commit().await?;
+                continue;
+            }
+            // Candidate discovery can race executable loss or schedule updates.
+            // Keep the due frontier intact until its current deployment is ready.
+            let available = tx
+                .query(
+                    &format!(
+                        "SELECT id FROM {deploys} WHERE app_id=$1 AND id=$2 AND state='available'"
+                    ),
+                    &[app.as_str().into(), row.text("deploy_id")?.into()],
+                )
+                .await?;
+            if available.is_empty() {
                 tx.commit().await?;
                 continue;
             }
