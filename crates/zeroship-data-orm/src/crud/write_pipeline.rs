@@ -1061,12 +1061,12 @@ mod tests {
             assert_eq!(
                 row.get("created_by").and_then(Value::as_str),
                 Some(actor),
-                "created_by should be populated by the system-field stage",
+                "the declared insert actor field should be populated",
             );
             assert_eq!(
                 row.get("updated_by").and_then(Value::as_str),
                 Some(actor),
-                "updated_by should be populated by the system-field stage",
+                "the declared update actor field should be populated",
             );
         }
         assert_eq!(

@@ -269,8 +269,8 @@ impl Collection {
         dispatch_purge_many(scope, self.binding.clone(), &self.name, filter_v).into()
     }
 
-    /// `collection.restore(filter)` — clear `deleted_at`
-    /// on the first matching soft-deleted row.
+    /// `collection.restore(filter)` — clear the declared soft-delete field on
+    /// the first matching row.
     #[v8_method]
     fn restore<'s>(
         &self,
@@ -358,8 +358,8 @@ impl Collection {
 
     /// `collection.count(filter, opts?)` — count matching rows.
     ///
-    /// `opts.include_deleted: true` opts out of the
-    /// auto `AND deleted_at IS NULL` filter.
+    /// `opts.include_deleted: true` includes rows marked by the descriptor's
+    /// soft-delete field.
     #[v8_method]
     fn count<'s>(
         &self,
@@ -382,8 +382,8 @@ impl Collection {
     /// of `opts.field` across rows matching `filter`. Filter-first to
     /// match the rest of the read surface.
     ///
-    /// `opts.include_deleted: true` opts out of the
-    /// auto `AND deleted_at IS NULL` filter.
+    /// `opts.include_deleted: true` includes rows marked by the descriptor's
+    /// soft-delete field.
     #[v8_method]
     fn distinct<'s>(
         &self,
@@ -419,8 +419,8 @@ impl Collection {
     /// `collection.aggregate(pipeline, opts?)` — run an aggregation
     /// pipeline.
     ///
-    /// `opts.include_deleted: true` opts out of the
-    /// auto-prepended soft-delete `$match`.
+    /// `opts.include_deleted: true` includes rows marked by the descriptor's
+    /// soft-delete field.
     #[v8_method]
     fn aggregate<'s>(
         &self,
