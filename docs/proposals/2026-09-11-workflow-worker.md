@@ -71,6 +71,12 @@ schedule identity and unchanged due times across activation retries. Occurrences
 overlap checks and run creation use the shared ORM transaction. Revision overflow
 refuses activation and rolls back schedule changes on either backend. Scoped due
 schedule discovery retains its relational SQL query.
+Signal-token authorization reads app and topic epochs through generated models;
+revocation writes the scoped app, run or topic collection under the existing
+locks. Native tests preserve foreign-app and unaffected-target authority,
+idempotent revocation and epoch exhaustion behavior. Topic initialization keeps
+its explicit insert-on-conflict statement so issuing another token cannot reset
+a previously revoked epoch.
 
 This design supersedes the older
 [control-plane design](2026-07-05-durable-workflows-design.md),
