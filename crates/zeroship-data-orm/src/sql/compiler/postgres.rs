@@ -4,7 +4,7 @@ use super::{
 };
 use crate::{
     sql::{
-        statement::{IdentityRequest, Statement},
+        statement::{ArrayOperator, Column, IdentityRequest, Statement},
         BindBudget,
     },
     value::Value,
@@ -28,7 +28,70 @@ const SYNTAX: super::shared::Syntax = super::shared::Syntax {
     generated_identity_override: Some(" OVERRIDING SYSTEM VALUE"),
     timestamp_cast: "::timestamptz",
     vector_cast: "::vector",
+    numeric_cast: "::numeric",
+    first_row_lock: " FOR UPDATE",
+    insensitive_like: "ILIKE",
+    insensitive_like_suffix: "",
+    array_mutation: write_array_mutation,
 };
+
+fn write_column(writer: &mut SqlWriter, column: &Column) {
+    writer.identifier(column.name().as_str());
+}
+
+fn write_array_mutation(
+    writer: &mut SqlWriter,
+    column: &Column,
+    operator: ArrayOperator,
+    operand: super::ParameterSlot,
+) -> Result<(), CompileError> {
+    writer.sql.push_str("CASE WHEN ");
+    write_column(writer, column);
+    writer.sql.push_str(" IS NULL OR jsonb_typeof(");
+    write_column(writer, column);
+    writer.sql.push_str(") = 'null' THEN ");
+    write_column(writer, column);
+    writer.sql.push_str(" ELSE ");
+    match operator {
+        ArrayOperator::Push => write_append(writer, column, operand),
+        ArrayOperator::Pull => {
+            writer.sql.push_str("(SELECT COALESCE(jsonb_agg(__zs_array.element ORDER BY __zs_array.position), '[]'::jsonb) FROM jsonb_array_elements(");
+            write_column(writer, column);
+            writer.sql.push_str(
+                ") WITH ORDINALITY AS __zs_array(element, position) WHERE __zs_array.element != ",
+            );
+            writer.write_bound(operand);
+            writer.sql.push_str("::jsonb)");
+        }
+        ArrayOperator::AddToSet => {
+            writer
+                .sql
+                .push_str("CASE WHEN EXISTS (SELECT 1 FROM jsonb_array_elements(");
+            write_column(writer, column);
+            writer
+                .sql
+                .push_str(") AS __zs_array(element) WHERE __zs_array.element = ");
+            writer.write_bound(operand);
+            writer.sql.push_str("::jsonb) THEN ");
+            write_column(writer, column);
+            writer.sql.push_str(" ELSE ");
+            write_append(writer, column, operand);
+            writer.sql.push_str(" END");
+        }
+    }
+    writer.sql.push_str(" END");
+    Ok(())
+}
+
+fn write_append(writer: &mut SqlWriter, column: &Column, operand: super::ParameterSlot) {
+    writer.sql.push_str("jsonb_insert(");
+    write_column(writer, column);
+    writer.sql.push_str(", ARRAY[jsonb_array_length(");
+    write_column(writer, column);
+    writer.sql.push_str(")::text], ");
+    writer.write_bound(operand);
+    writer.sql.push_str("::jsonb)");
+}
 
 impl SqlCompiler for PostgresCompiler {
     fn support(&self) -> SqlSupport {

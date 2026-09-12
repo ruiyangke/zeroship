@@ -9,7 +9,7 @@ use crate::value::Value;
 
 use crate::assignments::AssignmentPlan;
 use crate::exec::{exec_mutation_count_with_emit, exec_mutation_with_emit, exec_query};
-use crate::sql::codecs::{lower_filter, lower_update};
+use crate::sql::codecs::lower_filter;
 use crate::sql::compile;
 use crate::sql::lifecycle::{concurrency_column, soft_delete_column};
 use crate::tx_route::TxRoute;
@@ -21,11 +21,14 @@ use crate::protection::{mask_pass, protection_floor, unmask};
 pub(crate) mod assignment_pass;
 
 mod bytes_pass;
+mod delete;
 mod identity;
 pub(crate) mod insert;
+mod predicate;
 pub mod read_pipeline;
 mod resolved;
 mod update_validation;
+mod update;
 pub mod upsert;
 mod write_pipeline;
 
@@ -591,7 +594,6 @@ pub async fn run_update_one(
         write_pipeline::ApplyMode::Update { row_pk },
     )
     .await?;
-    lower_update(route.dialect(), &schema, &mut update);
     let sql_filter = if let Some(target_row) = target_row {
         let mut sql_filter = crate::value!({ "id": target_row.id_value });
         if let Some(expected_version) = cas_version {
@@ -600,9 +602,7 @@ pub async fn run_update_one(
         }
         sql_filter
     } else {
-        let mut sql_filter = filter.clone();
-        lower_filter(route.dialect(), &schema, &mut sql_filter);
-        sql_filter
+        filter.clone()
     };
     // Compile the descriptor's write assignments.
     // Actor flows into the `updated_by` bind; the `hints` from the
@@ -616,14 +616,14 @@ pub async fn run_update_one(
         false,
         false,
     );
-    let built = compile::build_update_one_with_assignments(
+    let built = update::build_one(
         binding.schema(),
         &coll,
         &schema,
-        &sql_filter,
-        &update,
-        route.dialect(),
+        sql_filter,
+        update,
         &autobump,
+        route.sql_registration(),
     );
     let bq = built.map_err(DbError::from)?;
     let rows = exec_mutation_with_emit(
@@ -763,7 +763,6 @@ pub async fn run_update_many(
                     write_pipeline::ApplyMode::Update { row_pk: &row_pk },
                 )
                 .await?;
-                lower_update(dialect, &schema, &mut row_update);
                 let mut row_filter = crate::value!({ "id": row_id });
                 if let Some(expected_version) = cas_version {
                     row_filter[concurrency_column(&schema)?.expect("CAS column")] =
@@ -775,14 +774,14 @@ pub async fn run_update_many(
                 // ordinary column-grant surface while the primary key still
                 // bounds the statement to this exact row.
                 row_queries.push(
-                    compile::build_update_many_with_assignments(
+                    update::build_many(
                         binding.schema(),
                         &coll,
                         &schema,
-                        &row_filter,
-                        &row_update,
-                        dialect,
+                        row_filter,
+                        row_update,
                         &autobump,
+                        frame.route().sql_registration(),
                     )
                     .map_err(DbError::from)?,
                 );
@@ -828,17 +827,14 @@ pub async fn run_update_many(
         write_pipeline::ApplyMode::Update { row_pk: "" },
     )
     .await?;
-    lower_update(dialect, &schema, &mut update);
-    let mut sql_filter = filter.clone();
-    lower_filter(dialect, &schema, &mut sql_filter);
-    let bq = compile::build_update_many_with_assignments(
+    let bq = update::build_many(
         binding.schema(),
         &coll,
         &schema,
-        &sql_filter,
-        &update,
-        dialect,
+        filter.clone(),
+        update,
         &autobump,
+        route.sql_registration(),
     )
     .map_err(DbError::from)?;
     let affected =
@@ -872,24 +868,26 @@ pub fn plan_delete_one(
         let autobump =
             AssignmentPlan::from_schema(&schema)?.write_assignments(&schema, actor_id, true, false);
         if soft_delete_column(&schema)?.is_none() {
-            return compile::build_delete_one_with_dialect(
+            return delete::build_hard(
                 binding.schema(),
                 collection,
                 &schema,
-                &filter,
-                route.dialect(),
+                filter,
+                true,
+                route.sql_registration(),
             )
             .map_err(DbError::from);
         }
-        let mut filter = filter;
-        lower_filter(route.dialect(), &schema, &mut filter);
-        compile::build_soft_delete_one_with_assignments(
+        delete::build_lifecycle(
             binding.schema(),
             collection,
             &schema,
-            &filter,
-            route.dialect(),
+            filter,
+            soft_delete_column(&schema)?.expect("soft-delete column was resolved"),
+            false,
             &autobump,
+            true,
+            route.sql_registration(),
         )
         .map_err(DbError::from)
     })
@@ -910,24 +908,26 @@ pub fn plan_delete_many(
         let autobump =
             AssignmentPlan::from_schema(&schema)?.write_assignments(&schema, actor_id, true, false);
         if soft_delete_column(&schema)?.is_none() {
-            return compile::build_delete_many(
+            return delete::build_hard(
                 binding.schema(),
                 collection,
                 &schema,
-                &filter,
-                route.dialect(),
+                filter,
+                false,
+                route.sql_registration(),
             )
             .map_err(DbError::from);
         }
-        let mut filter = filter;
-        lower_filter(route.dialect(), &schema, &mut filter);
-        compile::build_soft_delete_many_with_assignments(
+        delete::build_lifecycle(
             binding.schema(),
             collection,
             &schema,
-            &filter,
-            route.dialect(),
+            filter,
+            soft_delete_column(&schema)?.expect("soft-delete column was resolved"),
+            false,
             &autobump,
+            false,
+            route.sql_registration(),
         )
         .map_err(DbError::from)
     })
@@ -941,14 +941,13 @@ pub fn plan_purge_one(
     filter: Value,
 ) -> Result<crate::sql::compiler::CompiledQuery, DbError> {
     crate::descriptor::collection_schema(binding, collection).and_then(|schema| {
-        let mut filter = filter;
-        lower_filter(route.dialect(), &schema, &mut filter);
-        compile::build_delete_one_with_dialect(
+        delete::build_hard(
             binding.schema(),
             collection,
             &schema,
-            &filter,
-            route.dialect(),
+            filter,
+            true,
+            route.sql_registration(),
         )
         .map_err(DbError::from)
     })
@@ -964,14 +963,13 @@ pub fn plan_purge_many(
     filter: Value,
 ) -> Result<crate::sql::compiler::CompiledQuery, DbError> {
     crate::descriptor::collection_schema(binding, collection).and_then(|schema| {
-        let mut filter = filter;
-        lower_filter(route.dialect(), &schema, &mut filter);
-        compile::build_delete_many(
+        delete::build_hard(
             binding.schema(),
             collection,
             &schema,
-            &filter,
-            route.dialect(),
+            filter,
+            false,
+            route.sql_registration(),
         )
         .map_err(DbError::from)
     })
@@ -993,15 +991,18 @@ pub fn plan_restore_one(
     crate::descriptor::collection_schema(binding, collection).and_then(|schema| {
         let autobump =
             AssignmentPlan::from_schema(&schema)?.write_assignments(&schema, actor_id, false, true);
-        let mut filter = filter;
-        lower_filter(route.dialect(), &schema, &mut filter);
-        compile::build_restore_one_with_assignments(
+        let marker = soft_delete_column(&schema)?
+            .ok_or_else(|| DbError::validation("restore_not_supported", "collection has no soft-delete column"))?;
+        delete::build_lifecycle(
             binding.schema(),
             collection,
             &schema,
-            &filter,
-            route.dialect(),
+            filter,
+            marker,
+            true,
             &autobump,
+            true,
+            route.sql_registration(),
         )
         .map_err(DbError::from)
     })
@@ -1020,15 +1021,18 @@ pub fn plan_restore_many(
     crate::descriptor::collection_schema(binding, collection).and_then(|schema| {
         let autobump =
             AssignmentPlan::from_schema(&schema)?.write_assignments(&schema, actor_id, false, true);
-        let mut filter = filter;
-        lower_filter(route.dialect(), &schema, &mut filter);
-        compile::build_restore_many_with_assignments(
+        let marker = soft_delete_column(&schema)?
+            .ok_or_else(|| DbError::validation("restore_not_supported", "collection has no soft-delete column"))?;
+        delete::build_lifecycle(
             binding.schema(),
             collection,
             &schema,
-            &filter,
-            route.dialect(),
+            filter,
+            marker,
+            true,
             &autobump,
+            false,
+            route.sql_registration(),
         )
         .map_err(DbError::from)
     })
