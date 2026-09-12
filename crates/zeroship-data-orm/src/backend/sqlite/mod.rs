@@ -454,11 +454,8 @@ impl LockManager for SqliteBackend {
         key1: &str,
         key2: &str,
     ) -> Result<(), DbError> {
-        // `release` is infallible at the registry layer — unheld /
-        // unknown slots emit a `tracing::warn` and no-op. Returning
-        // `Ok(())` unconditionally matches the legacy PG-arm contract:
-        // a release on a session whose lock has already auto-released
-        // (because the connection died) is also benign there.
+        // Releasing an unknown slot is benign, matching PostgreSQL after a
+        // session has already released its advisory locks.
         self.lock_registry
             .release((key1.to_string(), key2.to_string()));
         Ok(())

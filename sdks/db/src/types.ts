@@ -1724,7 +1724,7 @@ export type InferUnion<V extends readonly TypeBuilder<any, any, any, any, any>[]
  *   at module-init time so the app fails fast.
  * - `lenient` — log violations but allow the push (warning only).
  * - `off`     — skip validation entirely (equivalent of Convex's
- *   `schemaValidation: false`); intended for legacy/imported data.
+ *   `schemaValidation: false`); intended for externally managed data.
  */
 export type Strictness = "strict" | "lenient" | "off";
 

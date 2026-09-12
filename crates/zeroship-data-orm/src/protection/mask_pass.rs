@@ -733,8 +733,8 @@ mod tests {
 
     #[test]
     fn wrap_row_on_read_handles_numeric_id() {
-        // typed_id collections use string `id`, but legacy collections
-        // can carry numeric PK — `row_pk` must stringify either.
+        // Mask metadata uses a textual row identity for every descriptor
+        // supported by the ORM.
         let schema = value!({
             "id": { "type": "integer", "primaryKey": true },
             "ssn": {

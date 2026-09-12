@@ -16,7 +16,7 @@ pub struct ChangeEvent {
     /// Operation kind: `"insert"`, `"update"`, or `"delete"`.
     pub op: ChangeOp,
     /// Logical row id of the affected row, if known. Serialized as text so
-    /// typed ids and legacy numeric ids share one shape.
+    /// string and numeric identities share one wire shape.
     pub pk: Option<String>,
     /// Columns the mutation touched. Inserts report every declared column,
     /// updates report the SET-side, and deletes report an empty list.

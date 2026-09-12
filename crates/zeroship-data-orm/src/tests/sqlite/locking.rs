@@ -21,9 +21,7 @@ fn lock_try_acquire_blocks_second() {
                 .fixture_session("default")
                 .await
                 .expect("acquire client");
-            // First acquire on a fresh registry must succeed — the legacy
-            // primitive returns Ok(()) per the `acquire_advisory_lock`
-            // contract.
+            // First acquisition on a fresh registry succeeds.
             backend
                 .acquire_advisory_lock(&client, "key1", "key2")
                 .await
