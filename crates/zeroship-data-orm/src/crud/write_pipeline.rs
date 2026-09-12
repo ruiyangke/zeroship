@@ -202,6 +202,12 @@ pub async fn apply(
             super::assignment_pass::apply_assignments_on_insert(
                 payload, &schema, collection, actor_id,
             )?;
+            if super::identity::requires_allocation(&schema, payload) {
+                super::identity::reserve_writer(route, collection, &schema).await?;
+                payload["id"] = super::identity::allocate(route, collection, &schema, 1)
+                    .await?
+                    .remove(0);
+            }
             let row_pk = row_pk_from_doc(payload);
             stages
                 .apply_to_doc(keys, dialect, app_id, collection, &row_pk, payload)
@@ -212,9 +218,28 @@ pub async fn apply(
             super::assignment_pass::apply_assignments_on_insert_many(
                 payload, &schema, collection, actor_id,
             )?;
+            let identities = if super::identity::requires_allocation(&schema, payload) {
+                super::identity::reserve_writer(route, collection, &schema).await?;
+                Some(
+                    super::identity::allocate(
+                        route,
+                        collection,
+                        &schema,
+                        payload.as_array().expect("batch").len(),
+                    )
+                    .await?,
+                )
+            } else {
+                None
+            };
             let Some(docs) = payload.as_array_mut() else {
                 return Ok(());
             };
+            if let Some(identities) = identities {
+                for (doc, id) in docs.iter_mut().zip(identities) {
+                    doc["id"] = id;
+                }
+            }
             for doc in docs.iter_mut() {
                 let row_pk = row_pk_from_doc(doc);
                 stages
@@ -236,6 +261,10 @@ pub async fn apply(
             super::assignment_pass::apply_assignments_on_insert(
                 payload, &schema, collection, actor_id,
             )?;
+            let allocate_identity = super::identity::requires_allocation(&schema, payload);
+            if allocate_identity {
+                super::identity::reserve_writer(route, collection, &schema).await?;
+            }
             rewrite_upsert_doc_id_to_existing_row_id(
                 dialect,
                 payload,
@@ -245,6 +274,11 @@ pub async fn apply(
                 &schema,
             )
             .await?;
+            if allocate_identity && payload.get("id").is_none_or(Value::is_null) {
+                payload["id"] = super::identity::allocate(route, collection, &schema, 1)
+                    .await?
+                    .remove(0);
+            }
             let row_pk = row_pk_from_doc(payload);
             stages
                 .apply_to_doc(keys, dialect, app_id, collection, &row_pk, payload)

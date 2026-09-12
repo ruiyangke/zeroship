@@ -21,6 +21,7 @@ use crate::protection::{mask_pass, protection_floor, unmask};
 pub(crate) mod assignment_pass;
 
 mod bytes_pass;
+mod identity;
 pub mod read_pipeline;
 mod update_validation;
 mod write_pipeline;
@@ -401,47 +402,64 @@ pub async fn run_insert(
     doc: Value,
     actor_id: Option<String>,
 ) -> Result<read_pipeline::ApplyResult, DbError> {
-    let mut doc = doc;
-    // The write pipeline's encryption stage takes a key store, not a backend:
-    // it issues no SQL of its own, so it has no routing decision to make. The
-    // store comes off the route this insert will run on, which is the handle
-    // that will store the ciphertext.
-    write_pipeline::apply(
-        route.backend().key_store(),
-        route.dialect(),
-        &route,
-        &binding,
-        &coll,
-        &mut doc,
-        write_pipeline::ApplyMode::Insert {
-            actor_id: actor_id.as_deref(),
-        },
-    )
-    .await?;
-    // `write_pipeline::apply` already refused an undeclared collection, so
-    // this resolution cannot fail here; it re-reads the same store entry
-    // rather than threading the schema back out through `apply`'s result.
     let schema = crate::descriptor::collection_schema(&binding, &coll)?;
-    lower_document(route.dialect(), &schema, &mut doc);
-    let bq =
-        compile::build_insert_with_dialect(binding.schema(), &coll, &schema, &doc, route.dialect())
-            .map_err(DbError::from)?;
-    let rows = exec_mutation_with_emit(
-        bq,
-        &route,
-        &coll,
-        zeroship_data_orm::cdc::ChangeOp::Insert,
-        &binding,
-    )
-    .await?;
-    read_pipeline::apply(
-        &route,
-        &binding,
-        &coll,
-        rows,
-        read_pipeline::ApplyOptions::default(),
-    )
-    .await
+    let frame;
+    let route = if identity::requires_allocation(&schema, &doc) {
+        frame = Some(crate::transaction::AtomicWriteFrame::begin(route).await?);
+        frame.as_ref().expect("opened write frame").route()
+    } else {
+        frame = None;
+        &route
+    };
+    let result = async {
+        let mut doc = doc;
+        // The write pipeline's encryption stage takes a key store, not a backend:
+        // it issues no SQL of its own, so it has no routing decision to make. The
+        // store comes off the route this insert will run on, which is the handle
+        // that will store the ciphertext.
+        write_pipeline::apply(
+            route.backend().key_store(),
+            route.dialect(),
+            route,
+            &binding,
+            &coll,
+            &mut doc,
+            write_pipeline::ApplyMode::Insert {
+                actor_id: actor_id.as_deref(),
+            },
+        )
+        .await?;
+        lower_document(route.dialect(), &schema, &mut doc);
+        let bq = compile::build_insert_with_dialect(
+            binding.schema(),
+            &coll,
+            &schema,
+            &doc,
+            route.dialect(),
+        )
+        .map_err(DbError::from)?;
+        let rows = exec_mutation_with_emit(
+            bq,
+            route,
+            &coll,
+            zeroship_data_orm::cdc::ChangeOp::Insert,
+            &binding,
+        )
+        .await?;
+        read_pipeline::apply(
+            route,
+            &binding,
+            &coll,
+            rows,
+            read_pipeline::ApplyOptions::default(),
+        )
+        .await
+    }
+    .await;
+    match frame {
+        Some(frame) => frame.finish(result).await,
+        None => result,
+    }
 }
 
 /// Shared dispatch for `insertMany`. See `v8_classes::dispatch::dispatch_insert` for the
@@ -456,44 +474,59 @@ pub async fn run_insert_many(
     docs: Value,
     actor_id: Option<String>,
 ) -> Result<read_pipeline::ApplyResult, DbError> {
-    let mut docs = docs;
-    prepare_insert_many_docs_for_binding(
-        route.backend().key_store(),
-        route.dialect(),
-        &route,
-        &mut docs,
-        &binding,
-        &coll,
-        actor_id.as_deref(),
-    )
-    .await?;
     let schema = crate::descriptor::collection_schema(&binding, &coll)?;
-    lower_documents(route.dialect(), &schema, &mut docs);
+    let frame;
+    let route = if identity::requires_allocation(&schema, &docs) {
+        frame = Some(crate::transaction::AtomicWriteFrame::begin(route).await?);
+        frame.as_ref().expect("opened write frame").route()
+    } else {
+        frame = None;
+        &route
+    };
+    let result = async {
+        let mut docs = docs;
+        prepare_insert_many_docs_for_binding(
+            route.backend().key_store(),
+            route.dialect(),
+            route,
+            &mut docs,
+            &binding,
+            &coll,
+            actor_id.as_deref(),
+        )
+        .await?;
+        lower_documents(route.dialect(), &schema, &mut docs);
 
-    let bq = compile::build_insert_many_with_dialect(
-        binding.schema(),
-        &coll,
-        &schema,
-        &docs,
-        route.dialect(),
-    )
-    .map_err(DbError::from)?;
-    let rows = exec_mutation_with_emit(
-        bq,
-        &route,
-        &coll,
-        zeroship_data_orm::cdc::ChangeOp::Insert,
-        &binding,
-    )
-    .await?;
-    read_pipeline::apply(
-        &route,
-        &binding,
-        &coll,
-        rows,
-        read_pipeline::ApplyOptions::default(),
-    )
-    .await
+        let bq = compile::build_insert_many_with_dialect(
+            binding.schema(),
+            &coll,
+            &schema,
+            &docs,
+            route.dialect(),
+        )
+        .map_err(DbError::from)?;
+        let rows = exec_mutation_with_emit(
+            bq,
+            route,
+            &coll,
+            zeroship_data_orm::cdc::ChangeOp::Insert,
+            &binding,
+        )
+        .await?;
+        read_pipeline::apply(
+            route,
+            &binding,
+            &coll,
+            rows,
+            read_pipeline::ApplyOptions::default(),
+        )
+        .await
+    }
+    .await;
+    match frame {
+        Some(frame) => frame.finish(result).await,
+        None => result,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1185,54 +1218,69 @@ pub async fn run_upsert(
     conflict_fields: Value,
     actor_id: Option<String>,
 ) -> Result<read_pipeline::ApplyResult, DbError> {
-    let mut doc = doc;
-    prepare_upsert_doc_for_write(
-        &mut doc,
-        &binding,
-        &route,
-        &coll,
-        actor_id.as_deref(),
-        &conflict_fields,
-    )
-    .await?;
     let schema = crate::descriptor::collection_schema(&binding, &coll)?;
-    lower_document(route.dialect(), &schema, &mut doc);
-    let bq = compile::build_upsert_with_assignments(
-        binding.schema(),
-        &coll,
-        &schema,
-        &doc,
-        &conflict_fields,
-        route.dialect(),
-        &AssignmentPlan::from_schema(&schema)?.write_assignments(
-            &schema,
+    let frame;
+    let route = if write_pipeline::upsert_requires_conflict_probe(&schema, &doc) {
+        frame = Some(crate::transaction::AtomicWriteFrame::begin(route).await?);
+        frame.as_ref().expect("opened write frame").route()
+    } else {
+        frame = None;
+        &route
+    };
+    let result = async {
+        let mut doc = doc;
+        prepare_upsert_doc_for_write(
+            &mut doc,
+            &binding,
+            route,
+            &coll,
             actor_id.as_deref(),
-            false,
-            false,
-        ),
-    )
-    .map_err(DbError::from)?;
-    // Upsert can be either INSERT (new row) or UPDATE (existing).
-    // We tag as Update because the subscriber's reaction is the
-    // same -- re-fetch. Finer-grained read-set narrowing could
-    // distinguish INSERT from UPDATE; this coarser tagging
-    // doesn't need to.
-    let rows = exec_mutation_with_emit(
-        bq,
-        &route,
-        &coll,
-        zeroship_data_orm::cdc::ChangeOp::Update,
-        &binding,
-    )
-    .await?;
-    read_pipeline::apply(
-        &route,
-        &binding,
-        &coll,
-        rows,
-        read_pipeline::ApplyOptions::default(),
-    )
-    .await
+            &conflict_fields,
+        )
+        .await?;
+        lower_document(route.dialect(), &schema, &mut doc);
+        let bq = compile::build_upsert_with_assignments(
+            binding.schema(),
+            &coll,
+            &schema,
+            &doc,
+            &conflict_fields,
+            route.dialect(),
+            &AssignmentPlan::from_schema(&schema)?.write_assignments(
+                &schema,
+                actor_id.as_deref(),
+                false,
+                false,
+            ),
+        )
+        .map_err(DbError::from)?;
+        // Upsert can be either INSERT (new row) or UPDATE (existing).
+        // We tag as Update because the subscriber's reaction is the
+        // same -- re-fetch. Finer-grained read-set narrowing could
+        // distinguish INSERT from UPDATE; this coarser tagging
+        // doesn't need to.
+        let rows = exec_mutation_with_emit(
+            bq,
+            route,
+            &coll,
+            zeroship_data_orm::cdc::ChangeOp::Update,
+            &binding,
+        )
+        .await?;
+        read_pipeline::apply(
+            route,
+            &binding,
+            &coll,
+            rows,
+            read_pipeline::ApplyOptions::default(),
+        )
+        .await
+    }
+    .await;
+    match frame {
+        Some(frame) => frame.finish(result).await,
+        None => result,
+    }
 }
 
 // ---------------------------------------------------------------------------
