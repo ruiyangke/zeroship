@@ -5,7 +5,7 @@
     reason = "task payload I/O runs on its compio host thread"
 )]
 
-use super::EmbeddedTasks;
+use super::WorkerTasks;
 use crate::{
     engine::{JournalStep, WorkflowOutputRef},
     service::{
@@ -48,7 +48,7 @@ pub trait TaskPayloads {
 }
 
 #[async_trait(?Send)]
-impl TaskPayloads for EmbeddedTasks {
+impl TaskPayloads for WorkerTasks {
     async fn snapshot(
         &self,
         task: &str,

@@ -3,8 +3,8 @@ use crate::{
     operations::{RunOperation, RunState},
     service::{
         runner::{
-            EmbeddedTasks, ExecutionBudget, RunnerOutcome, RunnerSlot, TaskExecution, TaskExecutor,
-            TaskTransport,
+            ExecutionBudget, RunnerOutcome, RunnerSlot, TaskExecution, TaskExecutor, TaskTransport,
+            WorkerTasks,
         },
         CompletionReceipt, ControlIntent, Heartbeat, TaskAssignment, TaskToken, WorkerIdentity,
     },
@@ -107,7 +107,7 @@ impl TaskExecution for Execution {
     }
 }
 struct ObservedTasks {
-    inner: EmbeddedTasks,
+    inner: WorkerTasks,
     app: crate::service::AppWorkflows,
     probe: Rc<Probe>,
     control: Cell<Option<RunOperation>>,

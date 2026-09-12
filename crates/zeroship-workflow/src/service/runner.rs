@@ -38,13 +38,14 @@ pub trait TaskTransport {
     async fn release(&self, task: &str, token: &TaskToken) -> Result<(), WorkflowServiceError>;
 }
 
-/// The worker or CLI supplies its trusted identity to the embedded engine.
+/// Task operations bound to the worker identity supplied by the trusted host.
+/// The CLI acts as a local worker and uses this same handle.
 #[derive(Debug, Clone)]
-pub struct EmbeddedTasks {
+pub struct WorkerTasks {
     service: WorkflowService,
     worker: WorkerIdentity,
 }
-impl EmbeddedTasks {
+impl WorkerTasks {
     /// Read the deployment retained for this task's live execution claim.
     ///
     /// # Errors
@@ -64,15 +65,15 @@ impl EmbeddedTasks {
 }
 impl WorkflowService {
     #[must_use]
-    pub fn tasks(&self, worker: WorkerIdentity) -> EmbeddedTasks {
-        EmbeddedTasks {
+    pub fn tasks(&self, worker: WorkerIdentity) -> WorkerTasks {
+        WorkerTasks {
             service: self.clone(),
             worker,
         }
     }
 }
 #[async_trait(?Send)]
-impl TaskTransport for EmbeddedTasks {
+impl TaskTransport for WorkerTasks {
     async fn poll(&self) -> Result<Option<TaskAssignment>, WorkflowServiceError> {
         self.service.poll(&self.worker).await
     }
