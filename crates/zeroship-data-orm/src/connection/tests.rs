@@ -192,9 +192,20 @@ fn configuration_identity_and_debug_follow_the_connection_contract() {
     assert_eq!(first.identity(), same.identity());
     assert_ne!(first.identity(), other.identity());
     assert!(!format!("{first:?}").contains("secret"));
-    let limit =
-        ConnectionFactory::for_url_with_limit(first.url().unwrap(), NonZeroUsize::new(1)).unwrap();
+    let limit = ConnectionFactory::for_url_with_limit(
+        first.url().unwrap(),
+        NonZeroUsize::new(1),
+        SessionAuthority::PerAppRole,
+    )
+    .unwrap();
     assert_ne!(first.identity(), limit.identity());
+    let service = ConnectionFactory::for_url_with_limit(
+        first.url().unwrap(),
+        None,
+        SessionAuthority::Connection,
+    )
+    .unwrap();
+    assert_ne!(first.identity(), service.identity());
     fn thread_safe<T: Send + Sync>() {}
     thread_safe::<ConnectionFactory>();
 }

@@ -1,37 +1,5 @@
-//! Which CONNECTION a `find({ unmask })` uses, inside `db.transaction(fn)`.
-//!
-//! # The claim these tests exist to rule on
-//!
-//! `run_find` takes ONE `TxRoute` and reads its backend once, so the fence, the
-//! SELECT, the unmask fetch and the audit row all name the same
-//! `BackendHandle`. A handle is not a connection. Only the SELECT goes through
-//! `exec_query`, which honours `route.in_tx()` and issues on the app's parked
-//! transaction client; the other three call the handle directly, and every
-//! `BackendHandle` read lowers to `pg_autocommit::roled_rows`, which does its
-//! own `pool.acquire()` + `BEGIN` + `COMMIT`.
-//!
-//! Two consequences follow, and they are INDEPENDENT - each has its own test
-//! here and each can reproduce without the other:
-//!
-//! 1. a `find({ unmask })` over a row the SAME transaction inserted cannot
-//!    reach the ciphertext, because the pooled connection cannot see an
-//!    uncommitted row;
-//! 2. the audit row for a DENIED unmask commits on its own connection, so it
-//!    survives the rollback of the transaction the attempt was made inside.
-//!
-//! # Why each test carries a control that differs in ONE variable
-//!
-//! "The unmask failed" and "the fixture wrote nothing" are the same observation
-//! from the outside. Test 1 therefore runs the SAME find, on the SAME route,
-//! over the SAME row, with and without `opts.unmask` - so the only difference
-//! between the passing arm and the failing arm is which lane the unmask fetch
-//! took. Test 2 makes an ordinary write inside the same transaction that gets
-//! rolled back: "the audit row survived" means nothing unless something else
-//! that shared its transaction did not.
-//!
-//! PostgreSQL comes from an owned testcontainer with vector and PostGIS.
-//! Docker and successful fixture startup are required.
-//! Run: `cargo xtask test data --filter 'test(unmask_tx_lane::)'`
+//! Transaction routing contracts for unmask reads and their audit writes.
+//! PostgreSQL comes from the mandatory owned testcontainer.
 
 use crate::tests::fixtures;
 #[allow(unused_imports)]
@@ -203,10 +171,8 @@ fn code_of(err: &DbError) -> String {
 /// **CONSEQUENCE 1.** A `find({ unmask })` inside `db.transaction(fn)` must
 /// reach a row that same transaction inserted.
 ///
-/// The row exists only on the transaction connection. `exec_query` honours
-/// `route.in_tx()` and sees it; the unmask fetch calls `BackendHandle` directly
-/// and lands on `pg_autocommit::roled_rows`, a fresh pooled checkout that
-/// cannot.
+/// The row exists only on the transaction connection, so both the record read
+/// and its protected-column read must remain on that lane.
 ///
 /// **The control differs in exactly one token: `opts.unmask`.** Same route,
 /// same filter, same row, same transaction. The arm without the hint must

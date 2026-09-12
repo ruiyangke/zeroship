@@ -1,10 +1,11 @@
-//! Render PostgreSQL role and resource-budget setup for app sessions.
+//! Render PostgreSQL authority and resource-budget setup for ORM sessions.
 //!
 //! Role names derive from the physical schema provisioned by the migration service.
 //! Timeout policy comes from `crate::budgets`; this module supplies SQL spelling.
 
-use zeroship_core::database_role::per_app_role_name;
+use crate::connection::SessionAuthority;
 use crate::sql::SchemaName;
+use zeroship_core::database_role::per_app_role_name;
 
 use zeroship_data_orm::budgets::{
     DB_IDLE_IN_TX_TIMEOUT_MS, DB_LOCK_TIMEOUT_MS, DB_STATEMENT_TIMEOUT_MS,
@@ -32,50 +33,50 @@ fn quoted_per_app_role(schema: &SchemaName) -> Result<String, DbError> {
     )?))
 }
 
-/// Combined per-transaction client setup: `SET LOCAL ROLE` + the DB-1 timeout
-/// guards, as one simple-query batch run right after `BEGIN`. All `SET LOCAL`,
-/// so every value (role + timeouts) auto-reverts at COMMIT/ROLLBACK and can
-/// never leak to a later checkout of the (dedicated, but defensively reset)
-/// connection.
+/// Compose transaction-local authority and resource limits after `BEGIN`.
 ///
 /// # Errors
 ///
-/// Returns a typed database error if the complete role name exceeds
-/// PostgreSQL's identifier limit.
-pub fn tx_session_setup_sql(schema: &SchemaName) -> Result<String, DbError> {
-    let role = quoted_per_app_role(schema)?;
-    Ok(format!(
-        "SET LOCAL ROLE {role}; \
-         SET LOCAL statement_timeout = {DB_STATEMENT_TIMEOUT_MS}; \
-         SET LOCAL idle_in_transaction_session_timeout = {DB_IDLE_IN_TX_TIMEOUT_MS}; \
-         SET LOCAL lock_timeout = {DB_LOCK_TIMEOUT_MS}"
-    ))
+/// Returns a typed error if a selected per-app role name is invalid.
+pub(crate) fn tx_session_setup_sql(
+    schema: &SchemaName,
+    authority: SessionAuthority,
+) -> Result<String, DbError> {
+    session_setup_sql(schema, authority, true)
 }
 
-/// Combined autocommit (pooled) client setup, run inside a short-lived
-/// explicit transaction: `SET LOCAL ROLE` + statement/lock timeout guards.
-///
-/// Every value is `SET LOCAL`, so role + timeouts auto-revert at
-/// COMMIT/ROLLBACK — including the implicit rollback-on-drop the
-/// `compio_postgres::Transaction` performs when the future is cancelled
-/// mid-flight. This makes the pooled (autocommit) path leak-proof on
-/// EVERY return-to-pool path, matching the explicit-transaction path's
-/// guarantee. No `idle_in_transaction` guard — the wrapping transaction
-/// is opened and committed around a single statement, so it never sits
-/// idle in transaction (the per-statement `statement_timeout` already
-/// bounds the work).
+/// Compose setup for one statement in a short transaction. All settings are
+/// local, so commit, rollback, and cancellation restore the pooled session.
 ///
 /// # Errors
 ///
-/// Returns a typed database error if the complete role name exceeds
-/// PostgreSQL's identifier limit.
-pub(crate) fn autocommit_local_session_setup_sql(schema: &SchemaName) -> Result<String, DbError> {
-    let role = quoted_per_app_role(schema)?;
-    Ok(format!(
-        "SET LOCAL ROLE {role}; \
-         SET LOCAL statement_timeout = {DB_STATEMENT_TIMEOUT_MS}; \
-         SET LOCAL lock_timeout = {DB_LOCK_TIMEOUT_MS}"
-    ))
+/// Returns a typed error if a selected per-app role name is invalid.
+pub(crate) fn autocommit_local_session_setup_sql(
+    schema: &SchemaName,
+    authority: SessionAuthority,
+) -> Result<String, DbError> {
+    session_setup_sql(schema, authority, false)
+}
+
+fn session_setup_sql(
+    schema: &SchemaName,
+    authority: SessionAuthority,
+    include_idle_timeout: bool,
+) -> Result<String, DbError> {
+    let mut statements = Vec::with_capacity(4);
+    if authority == SessionAuthority::PerAppRole {
+        statements.push(format!("SET LOCAL ROLE {}", quoted_per_app_role(schema)?));
+    }
+    statements.push(format!(
+        "SET LOCAL statement_timeout = {DB_STATEMENT_TIMEOUT_MS}"
+    ));
+    if include_idle_timeout {
+        statements.push(format!(
+            "SET LOCAL idle_in_transaction_session_timeout = {DB_IDLE_IN_TX_TIMEOUT_MS}"
+        ));
+    }
+    statements.push(format!("SET LOCAL lock_timeout = {DB_LOCK_TIMEOUT_MS}"));
+    Ok(statements.join("; "))
 }
 
 #[cfg(test)]
@@ -93,7 +94,7 @@ mod tests {
         // long a statement may run — the defense against one tenant exhausting
         // the shared Postgres connection pool fleet-wide. SET LOCAL so they
         // revert at COMMIT/ROLLBACK.
-        let sql = tx_session_setup_sql(&demo_schema()).unwrap();
+        let sql = tx_session_setup_sql(&demo_schema(), SessionAuthority::PerAppRole).unwrap();
         assert!(
             sql.contains(r#"SET LOCAL ROLE "app_app_demo_role""#),
             "{sql}"
@@ -110,7 +111,9 @@ mod tests {
     fn autocommit_local_session_setup_bounds_statement_time_via_set_local() {
         // The short transaction bounds the statement and keeps every setting
         // scoped to this pool lease.
-        let setup = autocommit_local_session_setup_sql(&demo_schema()).unwrap();
+        let setup =
+            autocommit_local_session_setup_sql(&demo_schema(), SessionAuthority::PerAppRole)
+                .unwrap();
         assert!(
             setup.contains(r#"SET LOCAL ROLE "app_app_demo_role""#),
             "{setup}"
@@ -130,6 +133,22 @@ mod tests {
     }
 
     #[test]
+    fn connection_authority_keeps_the_login_role_and_applies_transaction_limits() {
+        let setup = tx_session_setup_sql(
+            &demo_schema(),
+            crate::connection::SessionAuthority::Connection,
+        )
+        .unwrap();
+        assert!(!setup.contains("ROLE"), "{setup}");
+        assert!(setup.contains("SET LOCAL statement_timeout ="), "{setup}");
+        assert!(
+            setup.contains("SET LOCAL idle_in_transaction_session_timeout ="),
+            "{setup}"
+        );
+        assert!(setup.contains("SET LOCAL lock_timeout ="), "{setup}");
+    }
+
+    #[test]
     fn both_session_setup_batches_refuse_overlong_role_names() {
         // 55 characters of `a` is a legal schema name and an ILLEGAL role name:
         // `app_` + 55 + `_role` is 64 bytes, one over PostgreSQL's limit. The
@@ -137,8 +156,8 @@ mod tests {
         // is not the composer accepting it.
         let schema = SchemaName::new(&"a".repeat(55)).expect("55 chars is a legal schema name");
         for result in [
-            tx_session_setup_sql(&schema),
-            autocommit_local_session_setup_sql(&schema),
+            tx_session_setup_sql(&schema, SessionAuthority::PerAppRole),
+            autocommit_local_session_setup_sql(&schema, SessionAuthority::PerAppRole),
         ] {
             let error = result.expect_err("64-byte role names must be refused");
             assert!(
@@ -152,8 +171,9 @@ mod tests {
     #[test]
     fn every_setting_is_transaction_scoped() {
         for sql in [
-            tx_session_setup_sql(&demo_schema()).unwrap(),
-            autocommit_local_session_setup_sql(&demo_schema()).unwrap(),
+            tx_session_setup_sql(&demo_schema(), SessionAuthority::PerAppRole).unwrap(),
+            autocommit_local_session_setup_sql(&demo_schema(), SessionAuthority::PerAppRole)
+                .unwrap(),
         ] {
             for stmt in sql.split(';') {
                 let stmt = stmt.trim();

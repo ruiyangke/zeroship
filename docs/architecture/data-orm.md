@@ -113,6 +113,39 @@ registered backend, allowing a host-defined implementation or instrumentation
 wrapper. Rust models continue using `schema!`, `FromRow`, `Insertable`, and
 `Changeset`. TypeScript continues using `env.db`.
 
+Native platform services use the same `Database` API without a V8 adapter. The
+service database URL authenticates as the service role already provisioned by
+the platform schema. `connection_authority` keeps that login authority instead
+of deriving a creator role from the bound schema:
+
+```rust,ignore
+use zeroship_data_orm::{binding::DbBinding, sql::SchemaName, ConnectOptions, Database};
+
+let db = Database::connect(
+    DbBinding::new(
+        "zeroship_control",
+        schema_revision,
+        SchemaName::new("zeroship")?,
+    ),
+    ConnectOptions::new(control_database_url, project_keys)
+        .connection_authority(),
+    control_collections,
+).await?;
+```
+
+The option accepts no role name and grants no privilege. PostgreSQL permissions
+come from the URL's login role, such as `zeroship_control`. The ORM still applies
+transaction-local statement, lock, and idle limits. Both pooled operations and
+explicit transactions use the authority fixed when the backend opens, and that
+choice participates in connection identity. A route captured from one backend
+therefore cannot settle on a backend opened with another authority.
+
+`DbBinding` remains role-free. For a platform service, its logical id scopes
+transactions and in-memory metadata, its deploy token identifies the installed
+descriptor revision, and its schema names the qualified SQL namespace. Control
+owns access to platform tables. Workers retain the default per-app role path and
+reach Control-owned metadata through authenticated service APIs.
+
 Connection configuration contains credentials and is excluded from Debug output.
 Connection setup does not create application tables.
 Migration artifacts supply the descriptor and the physical schema.

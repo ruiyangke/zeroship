@@ -183,9 +183,8 @@ fn code_of(err: &DbError) -> String {
 /// same transaction inserted.
 ///
 /// The insert goes through the real write pipeline on the transaction route, so
-/// the row exists only on the parked transaction connection. `run_search` calls
-/// `VectorIndex::vector_search`, which lowered to `pg_autocommit::roled_json` -
-/// a fresh pooled checkout that cannot see it.
+/// the row exists only on the parked transaction connection. This guards search
+/// routing against accidentally falling back to a pooled checkout.
 #[test]
 fn a_vector_search_inside_a_transaction_sees_the_row_that_transaction_inserted() {
     Host::test(|host| {

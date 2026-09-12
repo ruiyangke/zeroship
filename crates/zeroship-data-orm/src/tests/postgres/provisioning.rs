@@ -249,7 +249,10 @@ mod live_reserved_sweep_tests {
         admin.batch_execute("BEGIN").await?;
         let scoped = async {
             admin
-                .batch_execute(&tx_session_setup_sql(&schema).expect("scratch app role name"))
+                .batch_execute(
+                    &tx_session_setup_sql(&schema, crate::connection::SessionAuthority::PerAppRole)
+                        .expect("scratch app role name"),
+                )
                 .await?;
             admin.batch_execute(sql).await
         }
