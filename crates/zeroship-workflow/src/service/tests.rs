@@ -34,6 +34,7 @@ mod s3_fixture;
 mod schema_binding;
 mod schema_metadata;
 mod snapshots;
+mod task_models;
 mod worker;
 use snapshots::{fixture_snapshot_store, test_snapshot};
 

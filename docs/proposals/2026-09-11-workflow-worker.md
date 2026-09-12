@@ -45,6 +45,14 @@ The remaining journal operations use the ORM's explicit SQL interface. ORM table
 references permit every table prefix for Rust and creator code within the bound
 customer schema. The existing Control store's removal remains pending.
 
+Task authorization re-reads the generated task model after acquiring the app
+and run locks, retaining the original scope and generation identity. Lease
+recovery, claims, heartbeats, completion receipts and release use conditional
+ORM updates and check the affected row count. Native contracts cover stale
+completion, expired leases and a corrupt run reference to another app's task.
+Task, schedule and broadcast discovery filter host-assigned apps before their
+batch limits, so a foreign backlog cannot starve the assigned scope.
+
 This design supersedes the older
 [control-plane design](2026-07-05-durable-workflows-design.md),
 [scheduler registration design](2026-07-08-durable-workflows-scheduler-worker-design.md)

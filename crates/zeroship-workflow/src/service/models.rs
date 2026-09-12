@@ -6,11 +6,12 @@ use zeroship_data_orm::{binding::DbBinding, descriptor, orm::FromRow, Value};
 
 zeroship_data_orm::orm::schema!(pub journal = "../../schema/schema.runtime.json");
 pub use journal::{
-    __zeroship_workflow_deploys as deploys, __zeroship_workflow_generations as generations,
-    __zeroship_workflow_requests as requests, __zeroship_workflow_runs as runs,
-    __zeroship_workflow_schema_version as schema_version, __zeroship_workflow_signals as signals,
-    __zeroship_workflow_steps as steps, __zeroship_workflow_subscriptions as subscriptions,
-    __zeroship_workflow_tasks as tasks, __zeroship_workflow_waits as waits,
+    __zeroship_workflow_app_state as app_state, __zeroship_workflow_deploys as deploys,
+    __zeroship_workflow_generations as generations, __zeroship_workflow_requests as requests,
+    __zeroship_workflow_runs as runs, __zeroship_workflow_schema_version as schema_version,
+    __zeroship_workflow_signals as signals, __zeroship_workflow_steps as steps,
+    __zeroship_workflow_subscriptions as subscriptions, __zeroship_workflow_tasks as tasks,
+    __zeroship_workflow_waits as waits,
 };
 
 #[derive(FromRow)]
@@ -74,6 +75,20 @@ pub struct GenerationInput {
 pub struct StoredStep {
     pub ordinal: i64,
     pub record: String,
+}
+
+#[derive(FromRow)]
+#[orm(entity = tasks)]
+pub struct TaskRecord {
+    pub id: String,
+    pub app_id: String,
+    pub run_id: String,
+    pub generation: i64,
+    pub epoch: i64,
+    pub deadline: i64,
+    pub state: String,
+    pub completion_digest: Option<String>,
+    pub receipt: Option<String>,
 }
 
 /// Compose the journal with the app's existing descriptors in one publication.

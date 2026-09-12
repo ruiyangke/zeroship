@@ -1,6 +1,6 @@
 use super::{
     app::{deadline, decode, encode, lock_app, lock_run, not_found, parse_state},
-    frontier,
+    frontier, models,
     store::{Row, Transaction},
     types::{
         digest, AppPolicy, CompletionReceipt, ControlIntent, Heartbeat, TaskAssignment, TaskToken,
@@ -10,6 +10,10 @@ use super::{
 };
 use crate::{WorkflowExecution, WorkflowServiceError};
 use zeroship_core::{app_id::AppId, typed_id};
+use zeroship_data_orm::{
+    orm::{Entity, FindOptions, Operation, Output},
+    value, Value,
+};
 
 impl WorkflowService {
     /// Claim service-selected work for an authenticated worker with free capacity.
@@ -22,7 +26,6 @@ impl WorkflowService {
             let mut tx = self.begin().await?;
             let now = tx.now().await?;
             let runs = tx.table("runs");
-            let tasks = tx.table("tasks");
             let apps = tx.table("app_state");
             let deploys = tx.table("deploys");
             let (scope, app_ids) = tx.host_app_scope()?;
@@ -42,11 +45,17 @@ impl WorkflowService {
                 let policy = lock_app(&mut tx, &app).await?;
                 let mut run = lock_run(&mut tx, &app, &id).await?;
                 let now = tx.now().await?;
-                tx.execute(
-                    &format!("UPDATE {apps} SET last_polled_at=$2 WHERE app_id=$1"),
-                    &[app.as_str().into(), now.into()],
-                )
-                .await?;
+                let task_rows = tx
+                    .database()
+                    .collection(models::tasks::Entity::COLLECTION)?;
+                let run_rows = tx.database().collection(models::runs::Entity::COLLECTION)?;
+                tx.database()
+                    .collection(models::app_state::Entity::COLLECTION)?
+                    .update(
+                        value!({"app_id":app.as_str()}),
+                        value!({"last_polled_at":now}),
+                    )
+                    .await?;
                 if run.optional_integer("due_at")?.is_none_or(|due| due > now)
                     || parse_state(&run.text("state")?)?.is_terminal()
                 {
@@ -55,17 +64,23 @@ impl WorkflowService {
                     continue;
                 }
                 if let Some(task) = run.optional_text("task_id")? {
-                    let changed = tx.execute(&format!("UPDATE {tasks} SET state='expired',finished_at=$2 WHERE id=$1 AND state='leased' AND deadline <= $2"), &[task.into(),now.into()]).await?;
-                    if changed != 1 {
+                    let changed = task_rows.execute(Operation::Update {
+                        filter:value!({"id":task, "app_id":app.as_str(), "run_id":id.clone(),
+                            "generation":run.integer("generation")?, "epoch":run.integer("lease_epoch")?,
+                            "state":"leased", "deadline":{"$lte":now}}),
+                        patch:value!({"state":"expired", "finished_at":now}), many:true,
+                    }).await?;
+                    if !matches!(changed, Output::Count(1)) {
                         return Err(WorkflowServiceError::Internal(
                             "workflow lease frontier disagrees with its task".into(),
                         ));
                     }
-                    tx.execute(
-                        &format!("UPDATE {runs} SET task_id=NULL WHERE app_id=$1 AND id=$2"),
-                        &[app.as_str().into(), id.clone().into()],
-                    )
-                    .await?;
+                    run_rows
+                        .update(
+                            value!({"app_id":app.as_str(), "id":id.clone()}),
+                            value!({"task_id":null}),
+                        )
+                        .await?;
                     run = lock_run(&mut tx, &app, &id).await?;
                     advanced = true;
                 }
@@ -77,9 +92,17 @@ impl WorkflowService {
                 // Missing code blocks execution, not lease recovery or control.
                 // Recheck under the app lock after any deployment-state race.
                 let available = tx
-                    .query(
-                        &format!("SELECT id FROM {deploys} WHERE app_id=$1 AND id=$2 AND state='available'"),
-                        &[app.as_str().into(), run.text("deploy_id")?.into()],
+                    .database()
+                    .entity::<models::deploys::Entity>()?
+                    .find::<models::DeploymentHash>(
+                        models::deploys::app_id
+                            .eq(app.as_str())?
+                            .and(models::deploys::id.eq(run.text("deploy_id")?)?)
+                            .and(models::deploys::state.eq("available")?),
+                        FindOptions {
+                            limit: Some(1),
+                            ..Default::default()
+                        },
                     )
                     .await?;
                 if available.is_empty() {
@@ -91,8 +114,18 @@ impl WorkflowService {
                     tx.commit().await?;
                     continue;
                 }
-                let running = tx.query(&format!("SELECT COUNT(*) AS total FROM {tasks} WHERE app_id=$1 AND state='leased' AND deadline > $2"), &[app.as_str().into(),now.into()]).await?;
-                if running[0].integer("total")? >= policy.max_running {
+                let Output::Count(running) = task_rows
+                    .count(
+                        value!({"app_id":app.as_str(), "state":"leased", "deadline":{"$gt":now}}),
+                        value!({}),
+                    )
+                    .await?
+                else {
+                    return Err(WorkflowServiceError::Internal(
+                        "workflow count returned rows".into(),
+                    ));
+                };
+                if running >= policy.max_running {
                     tx.commit().await?;
                     continue;
                 }
@@ -105,10 +138,25 @@ impl WorkflowService {
                     WorkflowServiceError::ResourceExhausted("workflow lease epoch exhausted".into())
                 })?;
                 let expires = deadline(now, policy.lease_ms)?;
-                tx.execute(&format!("INSERT INTO {tasks} (id,app_id,run_id,generation,worker,epoch,token_hash,deadline,state,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'leased',$9)"),
-                &[task_id.clone().into(),app.as_str().into(),id.clone().into(),generation.into(),worker.as_str().into(),epoch.into(),token.hash().into(),expires.into(),now.into()]).await?;
-                tx.execute(&format!("UPDATE {runs} SET task_id=$3,lease_epoch=$4,due_at=$5,state=CASE WHEN state='compensating' THEN state ELSE 'running' END WHERE app_id=$1 AND id=$2"),
-                &[app.as_str().into(),id.into(),task_id.clone().into(),epoch.into(),expires.into()]).await?;
+                task_rows.insert(value!({
+                    "id":task_id.clone(), "app_id":app.as_str(), "run_id":id.clone(), "generation":generation,
+                    "worker":worker.as_str(), "epoch":epoch, "token_hash":token.hash(), "deadline":expires,
+                    "state":"leased", "created_at":now,
+                })).await?;
+                let state = if run.text("state")? == "compensating" {
+                    "compensating"
+                } else {
+                    "running"
+                };
+                let claimed = run_rows.execute(Operation::Update {
+                    filter:value!({"app_id":app.as_str(), "id":id, "generation":generation,
+                        "lease_epoch":run.integer("lease_epoch")?, "task_id":null}),
+                    patch:value!({"task_id":task_id.clone(), "lease_epoch":epoch, "due_at":expires, "state":state}),
+                    many:true,
+                }).await?;
+                if !matches!(claimed, Output::Count(1)) {
+                    return Err(stale_lease());
+                }
                 tx.commit().await?;
                 return Ok(Some(TaskAssignment {
                     id: task_id,
@@ -137,7 +185,7 @@ impl WorkflowService {
         let claim = authorized_task(&mut tx, worker, task_id, token).await?;
         claim.validate_live()?;
         if !claim.policy.admission || !claim.policy.dispatch {
-            let deadline = claim.task.integer("deadline")?;
+            let deadline = claim.task.deadline;
             let control = match ControlIntent::parse(&claim.run.text("control")?)? {
                 ControlIntent::None => ControlIntent::Pause,
                 requested => requested,
@@ -150,22 +198,8 @@ impl WorkflowService {
             });
         }
         let expires = deadline(claim.now, claim.policy.lease_ms)?;
-        let tasks = tx.table("tasks");
-        let runs = tx.table("runs");
-        tx.execute(
-            &format!("UPDATE {tasks} SET deadline=$2 WHERE id=$1"),
-            &[task_id.into(), expires.into()],
-        )
-        .await?;
-        tx.execute(
-            &format!("UPDATE {runs} SET due_at=$3 WHERE app_id=$1 AND id=$2"),
-            &[
-                claim.app.as_str().into(),
-                claim.run.text("id")?.into(),
-                expires.into(),
-            ],
-        )
-        .await?;
+        claim.update_task(&tx, value!({"deadline":expires})).await?;
+        claim.update_run(&tx, value!({"due_at":expires})).await?;
         let control = ControlIntent::parse(&claim.run.text("control")?)?;
         tx.commit().await?;
         Ok(Heartbeat {
@@ -186,13 +220,15 @@ impl WorkflowService {
         let body_digest = digest(&execution)?;
         let mut tx = self.begin().await?;
         let claim = authorized_task(&mut tx, worker, task_id, token).await?;
-        if claim.task.text("state")? == "completed" {
-            if claim.task.optional_text("completion_digest")?.as_deref() != Some(&body_digest) {
+        if claim.task.state == "completed" {
+            if claim.task.completion_digest.as_deref() != Some(&body_digest) {
                 return Err(WorkflowServiceError::Conflict(
                     "workflow task was completed with another result".into(),
                 ));
             }
-            let receipt = decode(&claim.task.text("receipt")?)?;
+            let receipt = decode(claim.task.receipt.as_deref().ok_or_else(|| {
+                WorkflowServiceError::Internal("completed workflow task has no receipt".into())
+            })?)?;
             tx.commit().await?;
             return Ok(receipt);
         }
@@ -211,12 +247,17 @@ impl WorkflowService {
             task_id: task_id.into(),
             app_id: claim.app.clone(),
             run_id: claim.run.text("id")?,
-            generation: claim.task.integer("generation")?,
+            generation: claim.task.generation,
             state,
             committed_at: claim.now,
         };
-        let tasks = tx.table("tasks");
-        tx.execute(&format!("UPDATE {tasks} SET state='completed',completion_digest=$2,receipt=$3,finished_at=$4 WHERE id=$1"), &[task_id.into(),body_digest.into(),encode(&receipt)?.into(),claim.now.into()]).await?;
+        claim
+            .update_task(
+                &tx,
+                value!({"state":"completed", "completion_digest":body_digest,
+            "receipt":encode(&receipt)?, "finished_at":claim.now}),
+            )
+            .await?;
         tx.commit().await?;
         Ok(receipt)
     }
@@ -230,26 +271,16 @@ impl WorkflowService {
     ) -> Result<(), WorkflowServiceError> {
         let mut tx = self.begin().await?;
         let claim = authorized_task(&mut tx, worker, task_id, token).await?;
-        if claim.task.text("state")? == "released" {
+        if claim.task.state == "released" {
             return Ok(());
         }
         claim.validate_live()?;
-        let tasks = tx.table("tasks");
-        let runs = tx.table("runs");
-        tx.execute(
-            &format!("UPDATE {tasks} SET state='released',finished_at=$2 WHERE id=$1"),
-            &[task_id.into(), claim.now.into()],
-        )
-        .await?;
-        tx.execute(
-            &format!("UPDATE {runs} SET task_id=NULL,due_at=$3 WHERE app_id=$1 AND id=$2"),
-            &[
-                claim.app.as_str().into(),
-                claim.run.text("id")?.into(),
-                claim.now.into(),
-            ],
-        )
-        .await?;
+        claim
+            .update_task(&tx, value!({"state":"released", "finished_at":claim.now}))
+            .await?;
+        claim
+            .update_run(&tx, value!({"task_id":null, "due_at":claim.now}))
+            .await?;
         tx.commit().await
     }
 }
@@ -257,7 +288,7 @@ impl WorkflowService {
 pub(crate) struct AuthorizedTask {
     pub(crate) app: AppId,
     pub(crate) policy: AppPolicy,
-    pub(crate) task: Row,
+    pub(crate) task: models::TaskRecord,
     pub(crate) run: Row,
     pub(crate) now: i64,
 }
@@ -266,18 +297,50 @@ impl AuthorizedTask {
         self.validate_at(self.now)
     }
     pub(crate) fn validate_at(&self, now: i64) -> Result<(), WorkflowServiceError> {
-        if self.task.text("state")? != "leased"
-            || self.task.integer("deadline")? <= now
-            || self.run.optional_text("task_id")?.as_deref() != Some(self.task.text("id")?.as_str())
-            || self.run.integer("generation")? != self.task.integer("generation")?
-            || self.run.integer("lease_epoch")? != self.task.integer("epoch")?
+        if self.task.state != "leased"
+            || self.task.deadline <= now
+            || self.run.optional_text("task_id")?.as_deref() != Some(self.task.id.as_str())
+            || self.run.integer("generation")? != self.task.generation
+            || self.run.integer("lease_epoch")? != self.task.epoch
+            || self.run.text("id")? != self.task.run_id
+            || self.app.as_str() != self.task.app_id
         {
-            return Err(WorkflowServiceError::Conflict(
-                "workflow task lease is no longer current".into(),
-            ));
+            return Err(stale_lease());
         }
         Ok(())
     }
+
+    async fn update_task(
+        &self,
+        tx: &Transaction,
+        patch: Value,
+    ) -> Result<(), WorkflowServiceError> {
+        let changed = tx.database().collection(models::tasks::Entity::COLLECTION)?.execute(Operation::Update {
+            filter:value!({"id":self.task.id.clone(), "app_id":self.app.as_str(), "run_id":self.task.run_id.clone(),
+                "generation":self.task.generation, "epoch":self.task.epoch, "deadline":self.task.deadline, "state":"leased"}),
+            patch, many:true,
+        }).await?;
+        if !matches!(changed, Output::Count(1)) {
+            return Err(stale_lease());
+        }
+        Ok(())
+    }
+
+    async fn update_run(&self, tx: &Transaction, patch: Value) -> Result<(), WorkflowServiceError> {
+        let changed = tx.database().collection(models::runs::Entity::COLLECTION)?.execute(Operation::Update {
+            filter:value!({"app_id":self.app.as_str(), "id":self.task.run_id.clone(),
+                "generation":self.task.generation, "lease_epoch":self.task.epoch, "task_id":self.task.id.clone()}),
+            patch, many:true,
+        }).await?;
+        if !matches!(changed, Output::Count(1)) {
+            return Err(stale_lease());
+        }
+        Ok(())
+    }
+}
+
+fn stale_lease() -> WorkflowServiceError {
+    WorkflowServiceError::Conflict("workflow task lease is no longer current".into())
 }
 pub(crate) async fn authorized_task(
     tx: &mut Transaction,
@@ -287,24 +350,39 @@ pub(crate) async fn authorized_task(
 ) -> Result<AuthorizedTask, WorkflowServiceError> {
     typed_id::parse_with_prefix(task_id, typed_id::WORKFLOW_DISPATCH_PREFIX)
         .map_err(|_| not_found("workflow task"))?;
-    let tasks = tx.table("tasks");
-    let lookup = format!("SELECT * FROM {tasks} WHERE id=$1 AND worker=$2 AND token_hash=$3");
-    let params = [task_id.into(), worker.as_str().into(), token.hash().into()];
-    let task = tx
-        .query(&lookup, &params)
+    let tasks = tx.database().entity::<models::tasks::Entity>()?;
+    let lookup = || -> Result<_, WorkflowServiceError> {
+        Ok(models::tasks::id
+            .eq(task_id)?
+            .and(models::tasks::worker.eq(worker.as_str())?)
+            .and(models::tasks::token_hash.eq(token.hash())?))
+    };
+    let options = || FindOptions {
+        limit: Some(1),
+        ..Default::default()
+    };
+    let initial = tasks
+        .find::<models::TaskRecord>(lookup()?, options())
         .await?
         .into_iter()
         .next()
         .ok_or_else(|| not_found("workflow task"))?;
-    let app = AppId::parse(&task.text("app_id")?).map_err(|_| {
+    let app = AppId::parse(&initial.app_id).map_err(|_| {
         WorkflowServiceError::Internal("invalid persisted workflow app identity".into())
     })?;
     let policy = lock_app(tx, &app).await?;
-    let run = lock_run(tx, &app, &task.text("run_id")?).await?;
+    let run = lock_run(tx, &app, &initial.run_id).await?;
     // The initial lookup establishes scope only. Re-read after taking the app
     // lock so concurrent completion, release and reclaim cannot evade fencing.
-    let task = tx
-        .query(&lookup, &params)
+    let task = tasks
+        .find::<models::TaskRecord>(
+            lookup()?
+                .and(models::tasks::app_id.eq(app.as_str())?)
+                .and(models::tasks::run_id.eq(initial.run_id)?)
+                .and(models::tasks::generation.eq(initial.generation)?)
+                .and(models::tasks::epoch.eq(initial.epoch)?),
+            options(),
+        )
         .await?
         .into_iter()
         .next()
