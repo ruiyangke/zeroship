@@ -470,6 +470,7 @@ impl VectorSearchStatement {
 pub struct SpatialNearParts {
     pub table: Table,
     pub projection: Vec<ReturnedColumn>,
+    pub identity: Column,
     pub spatial: Column,
     pub point: Value,
     pub radius_m: f64,
@@ -706,6 +707,9 @@ pub enum Statement {
 fn validate_vector_search(parts: &VectorSearchParts) -> Result<(), CompileError> {
     parts.table.check_column(&parts.identity)?;
     parts.table.check_column(&parts.vector)?;
+    if parts.identity.name().as_str() != "id" {
+        return Err(invalid("vector search requires the collection identity"));
+    }
     if parts.vector.storage() != StorageType::Vector || !StorageType::Vector.accepts(&parts.query) {
         return Err(invalid("vector search requires a vector column and query"));
     }
@@ -720,7 +724,11 @@ fn validate_vector_search(parts: &VectorSearchParts) -> Result<(), CompileError>
 }
 
 fn validate_spatial_near(parts: &SpatialNearParts) -> Result<(), CompileError> {
+    parts.table.check_column(&parts.identity)?;
     parts.table.check_column(&parts.spatial)?;
+    if parts.identity.name().as_str() != "id" {
+        return Err(invalid("spatial search requires the collection identity"));
+    }
     if parts.spatial.storage() != StorageType::GeoPoint
         || !StorageType::GeoPoint.accepts(&parts.point)
     {

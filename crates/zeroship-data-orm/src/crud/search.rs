@@ -146,6 +146,10 @@ fn spatial_query(
         .get(field)
         .ok_or_else(|| invalid(format!("spatial field has no physical column: {field}")))?;
     let spatial = resolved.table.column(&input.column)?;
+    let identity = resolved
+        .inputs
+        .get("id")
+        .ok_or_else(|| invalid("collection descriptor omitted id"))?;
     let point = registration.encode(
         input.storage,
         crate::value!({"lat":point.lat,"lng":point.lng}),
@@ -153,6 +157,7 @@ fn spatial_query(
     let predicate = predicate::Input::Dynamic(filter).resolve(schema, &resolved, registration)?;
     let statement = Statement::SpatialNear(SpatialNearStatement::new(SpatialNearParts {
         projection: resolved.returning(schema)?,
+        identity: resolved.table.column(&identity.column)?,
         spatial,
         point,
         radius_m,

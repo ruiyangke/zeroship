@@ -94,6 +94,8 @@ fn compile_spatial_near(
     }
     writer.sql.push_str(" ORDER BY ");
     writer.identifier("_distance_m");
+    writer.sql.push_str(", ");
+    super::shared::write_column_reference(&mut writer, &parts.identity);
     writer.sql.push_str(" LIMIT ");
     writer.write_param(Value::from(parts.limit))?;
     Ok(writer.finish())
