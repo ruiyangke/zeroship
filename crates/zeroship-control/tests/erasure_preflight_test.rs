@@ -25,6 +25,7 @@ use zeroship_control::organizations::{
     self, AddMemberBody, CreateOrganizationBody, TransferOwnershipBody,
 };
 use zeroship_control::Registry;
+use zeroship_core::UserId;
 
 use crate::common;
 
@@ -55,14 +56,14 @@ impl Fx {
         Self { registry, pg }
     }
 
-    async fn seed_user(&self, label: &str) -> Uuid {
-        let id = Uuid::new_v4();
-        let email = format!("{label}-{}@zeroship.test", id.simple());
+    async fn seed_user(&self, label: &str) -> UserId {
+        let id = UserId::mint();
+        let email = format!("{label}-{}@zeroship.test", id.as_str());
         self.pg
             .execute(
                 "INSERT INTO zeroship.users (id, email, name, email_verified_at) \
                  VALUES ($1, $2::citext, $3, NOW())",
-                &[&id, &email, &label],
+                &[&id.as_str(), &email, &label],
             )
             .await
             .expect("insert user");
@@ -73,7 +74,7 @@ impl Fx {
     /// product cannot disagree about what a fresh one looks like. A fresh
     /// organization carries a default project, which is why the no-colleague
     /// remedy below is `DeleteProjects` rather than `Dissolve`.
-    async fn organization(&self, owner: Uuid, label: &str) -> String {
+    async fn organization(&self, owner: &UserId, label: &str) -> String {
         organizations::create_organization(
             &self.registry,
             owner,
@@ -99,7 +100,7 @@ impl Fx {
             .expect("drop projects");
     }
 
-    async fn cleanup(&self, organizations: &[&str], users: &[Uuid]) {
+    async fn cleanup(&self, organizations: &[&str], users: &[&UserId]) {
         for organization in organizations {
             let _ = self
                 .pg
@@ -119,7 +120,10 @@ impl Fx {
         for user in users {
             let _ = self
                 .pg
-                .execute("DELETE FROM zeroship.users WHERE id = $1", &[user])
+                .execute(
+                    "DELETE FROM zeroship.users WHERE id = $1",
+                    &[&user.as_str()],
+                )
                 .await;
         }
     }
@@ -131,14 +135,19 @@ impl Fx {
 async fn a_sole_owner_is_blocked_and_told_what_to_do() {
     let fx = Fx::new().await;
     let owner = fx.seed_user("erasure-sole").await;
-    let organization = fx.organization(owner, "erasure-sole").await;
+    let organization = fx.organization(&owner, "erasure-sole").await;
 
-    let report = preflight(&fx.pg, owner, LocalInvoicing::Yes).await.expect("preflight");
+    let report = preflight(&fx.pg, &owner, LocalInvoicing::Yes)
+        .await
+        .expect("preflight");
     assert_eq!(report.blockers.len(), 1, "{report:?}");
     let blocker = &report.blockers[0];
     assert_eq!(blocker.organization_id, organization);
     assert_eq!(blocker.other_member_count, 0);
-    assert!(blocker.project_count > 0, "a fresh organization has a project");
+    assert!(
+        blocker.project_count > 0,
+        "a fresh organization has a project"
+    );
     assert_eq!(
         blocker.remedy,
         ErasureRemedy::DeleteProjects,
@@ -147,10 +156,12 @@ async fn a_sole_owner_is_blocked_and_told_what_to_do() {
 
     // Empty it and the remedy becomes the one the creator can actually run.
     fx.drop_projects(&organization).await;
-    let report = preflight(&fx.pg, owner, LocalInvoicing::Yes).await.expect("preflight");
+    let report = preflight(&fx.pg, &owner, LocalInvoicing::Yes)
+        .await
+        .expect("preflight");
     assert_eq!(report.blockers[0].remedy, ErasureRemedy::Dissolve);
 
-    fx.cleanup(&[&organization], &[owner]).await;
+    fx.cleanup(&[&organization], &[&owner]).await;
 }
 
 /// Transfer is the remedy, so it has to actually clear the blocker: after it,
@@ -160,14 +171,14 @@ async fn a_sole_owner_is_blocked_and_told_what_to_do() {
 async fn transferring_ownership_moves_the_blocker_to_the_successor() {
     let fx = Fx::new().await;
     let owner = fx.seed_user("erasure-xfer").await;
-    let organization = fx.organization(owner, "erasure-xfer").await;
+    let organization = fx.organization(&owner, "erasure-xfer").await;
     let successor = fx.seed_user("erasure-heir").await;
     organizations::add_member(
         &fx.registry,
-        owner,
+        &owner,
         &organization,
         &AddMemberBody {
-            user_id: successor,
+            user_id: successor.clone(),
             role: "admin".to_string(),
         },
         None,
@@ -177,22 +188,33 @@ async fn transferring_ownership_moves_the_blocker_to_the_successor() {
 
     organizations::transfer_ownership(
         &fx.registry,
-        owner,
+        &owner,
         &organization,
-        &TransferOwnershipBody { user_id: successor },
+        &TransferOwnershipBody {
+            user_id: successor.clone(),
+        },
         None,
     )
     .await
     .expect("transfer");
 
     assert!(
-        preflight(&fx.pg, owner, LocalInvoicing::Yes).await.expect("preflight").is_clear(),
+        preflight(&fx.pg, &owner, LocalInvoicing::Yes)
+            .await
+            .expect("preflight")
+            .is_clear(),
         "the remedy the blocker names must clear the blocker"
     );
-    let heir = preflight(&fx.pg, successor, LocalInvoicing::Yes).await.expect("preflight");
-    assert_eq!(heir.blockers.len(), 1, "the successor inherits it: {heir:?}");
+    let heir = preflight(&fx.pg, &successor, LocalInvoicing::Yes)
+        .await
+        .expect("preflight");
+    assert_eq!(
+        heir.blockers.len(),
+        1,
+        "the successor inherits it: {heir:?}"
+    );
 
-    fx.cleanup(&[&organization], &[owner, successor]).await;
+    fx.cleanup(&[&organization], &[&owner, &successor]).await;
 }
 
 /// The sole-ownership test is `NOT EXISTS(a second owner)`, and this is what
@@ -210,25 +232,31 @@ async fn transferring_ownership_moves_the_blocker_to_the_successor() {
 async fn a_second_owner_row_clears_the_blocker_for_both() {
     let fx = Fx::new().await;
     let owner = fx.seed_user("erasure-co").await;
-    let organization = fx.organization(owner, "erasure-co").await;
+    let organization = fx.organization(&owner, "erasure-co").await;
     let peer = fx.seed_user("erasure-peer").await;
     fx.pg
         .execute(
             "INSERT INTO zeroship.organization_members \
                 (organization_id, user_id, role, added_by, changed_by) \
              SELECT $1, $2, 'owner', NULL, NULL",
-            &[&organization, &peer],
+            &[&organization, &peer.as_str()],
         )
         .await
         .expect("seed a second owner row");
 
     assert!(
-        preflight(&fx.pg, owner, LocalInvoicing::Yes).await.expect("preflight").is_clear(),
+        preflight(&fx.pg, &owner, LocalInvoicing::Yes)
+            .await
+            .expect("preflight")
+            .is_clear(),
         "two owners means neither is the last one"
     );
-    assert!(preflight(&fx.pg, peer, LocalInvoicing::Yes).await.expect("preflight").is_clear());
+    assert!(preflight(&fx.pg, &peer, LocalInvoicing::Yes)
+        .await
+        .expect("preflight")
+        .is_clear());
 
-    fx.cleanup(&[&organization], &[owner, peer]).await;
+    fx.cleanup(&[&organization], &[&owner, &peer]).await;
 }
 
 /// A member below `owner` is never a blocker - and this is the control for the
@@ -238,14 +266,14 @@ async fn a_second_owner_row_clears_the_blocker_for_both() {
 async fn a_non_owner_seat_is_never_a_blocker_and_the_owner_still_is() {
     let fx = Fx::new().await;
     let owner = fx.seed_user("erasure-owner").await;
-    let organization = fx.organization(owner, "erasure-member").await;
+    let organization = fx.organization(&owner, "erasure-member").await;
     let member = fx.seed_user("erasure-dev").await;
     organizations::add_member(
         &fx.registry,
-        owner,
+        &owner,
         &organization,
         &AddMemberBody {
-            user_id: member,
+            user_id: member.clone(),
             role: "developer".to_string(),
         },
         None,
@@ -254,10 +282,15 @@ async fn a_non_owner_seat_is_never_a_blocker_and_the_owner_still_is() {
     .expect("seat a developer");
 
     assert!(
-        preflight(&fx.pg, member, LocalInvoicing::Yes).await.expect("preflight").is_clear(),
+        preflight(&fx.pg, &member, LocalInvoicing::Yes)
+            .await
+            .expect("preflight")
+            .is_clear(),
         "a developer's departure strands nothing"
     );
-    let report = preflight(&fx.pg, owner, LocalInvoicing::Yes).await.expect("preflight");
+    let report = preflight(&fx.pg, &owner, LocalInvoicing::Yes)
+        .await
+        .expect("preflight");
     assert_eq!(report.blockers.len(), 1);
     assert_eq!(
         report.blockers[0].remedy,
@@ -266,7 +299,7 @@ async fn a_non_owner_seat_is_never_a_blocker_and_the_owner_still_is() {
     );
     assert_eq!(report.blockers[0].other_member_count, 1);
 
-    fx.cleanup(&[&organization], &[owner, member]).await;
+    fx.cleanup(&[&organization], &[&owner, &member]).await;
 }
 
 /// A DISSOLVED organization is not a blocker. It is closed, its ledger is
@@ -276,7 +309,7 @@ async fn a_non_owner_seat_is_never_a_blocker_and_the_owner_still_is() {
 async fn a_dissolved_organization_is_not_a_blocker() {
     let fx = Fx::new().await;
     let owner = fx.seed_user("erasure-closed").await;
-    let organization = fx.organization(owner, "erasure-closed").await;
+    let organization = fx.organization(&owner, "erasure-closed").await;
     fx.drop_projects(&organization).await;
     fx.pg
         .execute(
@@ -287,11 +320,14 @@ async fn a_dissolved_organization_is_not_a_blocker() {
         .expect("close the organization");
 
     assert!(
-        preflight(&fx.pg, owner, LocalInvoicing::Yes).await.expect("preflight").is_clear(),
+        preflight(&fx.pg, &owner, LocalInvoicing::Yes)
+            .await
+            .expect("preflight")
+            .is_clear(),
         "a closed organization needs no successor"
     );
 
-    fx.cleanup(&[&organization], &[owner]).await;
+    fx.cleanup(&[&organization], &[&owner]).await;
 }
 
 /// A principal with no seat anywhere is clear. Without this the suite could
@@ -300,6 +336,9 @@ async fn a_dissolved_organization_is_not_a_blocker() {
 async fn a_principal_with_no_seat_is_clear() {
     let fx = Fx::new().await;
     let nobody = fx.seed_user("erasure-nobody").await;
-    assert!(preflight(&fx.pg, nobody, LocalInvoicing::Yes).await.expect("preflight").is_clear());
-    fx.cleanup(&[], &[nobody]).await;
+    assert!(preflight(&fx.pg, &nobody, LocalInvoicing::Yes)
+        .await
+        .expect("preflight")
+        .is_clear());
+    fx.cleanup(&[], &[&nobody]).await;
 }

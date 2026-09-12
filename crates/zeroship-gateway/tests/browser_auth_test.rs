@@ -26,6 +26,7 @@ use std::sync::Arc;
 use ed25519_dalek::SigningKey;
 use ntex::web::{self, test};
 use uuid::Uuid;
+use zeroship_core::UserId;
 
 use zeroship_gateway::{
     anchors,
@@ -115,10 +116,7 @@ impl zeroship_bundle::BlobStore for StubBlobStore {
     ) -> Result<bool, zeroship_bundle::BlobError> {
         Ok(false)
     }
-    async fn delete_app_manifests(
-        &self,
-        _a: &Uuid,
-    ) -> Result<(), zeroship_bundle::BlobError> {
+    async fn delete_app_manifests(&self, _a: &Uuid) -> Result<(), zeroship_bundle::BlobError> {
         Ok(())
     }
 }
@@ -302,7 +300,10 @@ async fn authorize_redirects_to_op_with_browser_pkce() {
     assert_eq!(resp.status().as_u16(), 302, "authorize must 302 to OP");
     let loc = header_str(&resp, "location").expect("Location header");
     // Cross-site hop to the OP's /oauth2/authorize.
-    assert!(loc.starts_with("http://127.0.0.1:1/oauth2/authorize?"), "{loc}");
+    assert!(
+        loc.starts_with("http://127.0.0.1:1/oauth2/authorize?"),
+        "{loc}"
+    );
     // PER-APP public client_id (never the gateway confidential client).
     assert!(loc.contains("client_id=oac_myapp"), "{loc}");
     assert!(!loc.contains("client_id=gateway"), "{loc}");
@@ -312,16 +313,24 @@ async fn authorize_redirects_to_op_with_browser_pkce() {
     assert!(loc.contains("code_challenge_method=S256"), "{loc}");
     assert!(loc.contains("state=ST_x"), "{loc}");
     assert!(loc.contains("nonce=NO_y"), "{loc}");
-    assert!(loc.contains("scope=openid+profile+read%3Abilling+offline_access"), "{loc}");
+    assert!(
+        loc.contains("scope=openid+profile+read%3Abilling+offline_access"),
+        "{loc}"
+    );
     // redirect_uri defaults to THIS app's own popup-callback.
     assert!(
-        loc.contains("redirect_uri=https%3A%2F%2Fmyapp.zeroship.ai%2F__zeroship%2Fauth%2Fpopup-callback"),
+        loc.contains(
+            "redirect_uri=https%3A%2F%2Fmyapp.zeroship.ai%2F__zeroship%2Fauth%2Fpopup-callback"
+        ),
         "{loc}"
     );
     // No prompt in the common case (so OP SSO skip fires).
     assert!(!loc.contains("prompt="), "default omits prompt: {loc}");
     // no-store on the redirect.
-    assert_eq!(header_str(&resp, "cache-control").as_deref(), Some("no-store"));
+    assert_eq!(
+        header_str(&resp, "cache-control").as_deref(),
+        Some("no-store")
+    );
 }
 
 #[ntex::test]
@@ -341,7 +350,10 @@ async fn authorize_passes_prompt_through() {
 #[ntex::test]
 async fn authorize_503_when_client_not_provisioned() {
     // Un-provisioned route (oauth_client_id == None) ⇒ 503 client_not_provisioned.
-    let state = build_state(StateOpts { provisioned: false, ..Default::default() });
+    let state = build_state(StateOpts {
+        provisioned: false,
+        ..Default::default()
+    });
     let app = test::init_service(browser_app!(state)).await;
 
     let req = test::TestRequest::get()
@@ -416,7 +428,10 @@ async fn popup_callback_relays_to_own_origin_and_never_reflects_query() {
     assert!(csp.contains("script-src 'nonce-"), "{csp}");
     assert!(csp.contains("frame-ancestors 'self'"), "{csp}");
     assert!(!csp.contains("unsafe-inline"), "no unsafe-inline: {csp}");
-    assert_eq!(header_str(&resp, "referrer-policy").as_deref(), Some("no-referrer"));
+    assert_eq!(
+        header_str(&resp, "referrer-policy").as_deref(),
+        Some("no-referrer")
+    );
     assert_eq!(
         header_str(&resp, "cross-origin-opener-policy").as_deref(),
         Some("same-origin")
@@ -449,7 +464,10 @@ async fn popup_callback_relays_to_own_origin_and_never_reflects_query() {
     );
     assert!(!body.contains(", '*')"), "never postMessage to '*': {body}");
     // The XSS payload from the query is NEVER reflected into the DOM.
-    assert!(!body.contains(xss), "raw query must NOT be reflected: {body}");
+    assert!(
+        !body.contains(xss),
+        "raw query must NOT be reflected: {body}"
+    );
     assert!(!body.contains("alert(1)"), "no reflected script: {body}");
     assert!(!body.contains("code=abc"), "no reflected code: {body}");
     // COOP fallbacks present.
@@ -544,7 +562,10 @@ async fn signout_with_no_anchor_is_204_and_clears_cookies() {
     let crumb_clear = set_cookie_with_prefix(&resp, &format!("zs.{APP_HOST}.is.authenticated="))
         .expect("breadcrumb clear cookie");
     assert!(crumb_clear.contains("Max-Age=0"), "{crumb_clear}");
-    assert_eq!(header_str(&resp, "cache-control").as_deref(), Some("no-store"));
+    assert_eq!(
+        header_str(&resp, "cache-control").as_deref(),
+        Some("no-store")
+    );
 }
 
 /// DB-gated: seed an anchor, sign out, and assert (a) the per-app family
@@ -570,13 +591,13 @@ async fn signout_local_revokes_family_marker_deletes_anchor_and_hits_op_revoke()
 
     // Seed the GLOBAL user first — app_session_anchors.global_user_id has a
     // FK to zeroship.users(id) (ON DELETE CASCADE).
-    let global_user_id = Uuid::new_v4();
-    seed_user(&dsn, global_user_id).await;
+    let global_user_id = UserId::mint();
+    seed_user(&dsn, &global_user_id).await;
 
     // Seed an anchor row with an encrypted refresh family (encrypted with
     // the SAME AAD the gateway uses, so signout can decrypt + OP-revoke).
     let refresh_plain = "rt_seeded_family_secret";
-    let aad = format!("zs-anchor-refresh:{CLIENT_ID}:{global_user_id}").into_bytes();
+    let aad = format!("zs-anchor-refresh:{CLIENT_ID}:{}", global_user_id.as_str()).into_bytes();
     let refresh_enc =
         zeroship_core::crypto::encrypt(&state.anchor_enc_key, &aad, refresh_plain.as_bytes())
             .expect("encrypt");
@@ -589,7 +610,7 @@ async fn signout_local_revokes_family_marker_deletes_anchor_and_hits_op_revoke()
             &anchors::NewAnchor {
                 app_id: Uuid::parse_str(APP_UUID).expect("valid APP_UUID"),
                 client_id: CLIENT_ID,
-                global_user_id,
+                global_user_id: &global_user_id,
                 refresh_token_enc: &refresh_enc,
                 refresh_family_id: "rfam_test",
                 granted_scopes: &["openid".to_string()],
@@ -603,7 +624,7 @@ async fn signout_local_revokes_family_marker_deletes_anchor_and_hits_op_revoke()
     // The pws_ subject the family marker should be keyed on.
     let pws_sub = zeroship_core::auth::derive_pairwise(
         &state.pairwise_salt,
-        &global_user_id.to_string(),
+        &global_user_id,
         &format!("https://{APP_HOST}"),
     );
 
@@ -635,10 +656,13 @@ async fn signout_local_revokes_family_marker_deletes_anchor_and_hits_op_revoke()
     {
         let pool = zeroship_gateway::db::checkout(&db).await.expect("pool");
         let mut conn = pool.acquire().await.expect("conn");
-        let still =
-            anchors::read_live(&mut conn, Uuid::parse_str(APP_UUID).expect("valid APP_UUID"), anchor_id)
-                .await
-                .expect("read");
+        let still = anchors::read_live(
+            &mut conn,
+            Uuid::parse_str(APP_UUID).expect("valid APP_UUID"),
+            anchor_id,
+        )
+        .await
+        .expect("read");
         assert!(still.is_none(), "anchor row must be deleted after signout");
 
         // (a) family marker set for (client_id, pws_sub) — assert a token
@@ -655,7 +679,10 @@ async fn signout_local_revokes_family_marker_deletes_anchor_and_hits_op_revoke()
         )
         .await
         .expect("family check");
-        assert!(revoked, "family marker (client_id, pws_) must be set by signout");
+        assert!(
+            revoked,
+            "family marker (client_id, pws_) must be set by signout"
+        );
 
         // cleanup the marker.
         conn.execute(
@@ -673,13 +700,13 @@ async fn signout_local_revokes_family_marker_deletes_anchor_and_hits_op_revoke()
         "signout must best-effort revoke the family at OP exactly once"
     );
     drop(mock);
-    cleanup_user(&dsn, global_user_id).await;
+    cleanup_user(&dsn, &global_user_id).await;
 }
 
 // ─── helpers ─────────────────────────────────────────────────────────────
 
 /// Seed the GLOBAL user row the anchor FK requires (`zeroship.users(id)`).
-async fn seed_user(dsn: &str, user_id: Uuid) {
+async fn seed_user(dsn: &str, user_id: &UserId) {
     let (client, conn) = compio_postgres::connect(dsn, compio_postgres::NoTls)
         .await
         .expect("connect");
@@ -710,24 +737,24 @@ async fn seed_user(dsn: &str, user_id: Uuid) {
             &[
                 &Uuid::parse_str(APP_UUID).expect("valid APP_UUID"),
                 &format!("browser-auth-{APP_NAME}"),
-                &project_id
+                &project_id,
             ],
         )
         .await
         .expect("seed app");
-    let email = format!("signout-{}@zeroship.test", user_id.simple());
+    let email = format!("signout-{}@zeroship.test", Uuid::new_v4().simple());
     client
         .execute(
             "INSERT INTO zeroship.users (id, email, name, email_verified_at) \
              VALUES ($1, $2::citext, $3, NOW()) ON CONFLICT (id) DO NOTHING",
-            &[&user_id, &email, &"Signout Test"],
+            &[&user_id.as_str(), &email, &"Signout Test"],
         )
         .await
         .expect("seed user");
 }
 
 /// Cascade-delete the seeded user (anchors cascade via the FK).
-async fn cleanup_user(dsn: &str, user_id: Uuid) {
+async fn cleanup_user(dsn: &str, user_id: &UserId) {
     let (client, conn) = compio_postgres::connect(dsn, compio_postgres::NoTls)
         .await
         .expect("connect");
@@ -738,11 +765,14 @@ async fn cleanup_user(dsn: &str, user_id: Uuid) {
     let _ = client
         .execute(
             "DELETE FROM zeroship.app_session_anchors WHERE global_user_id = $1",
-            &[&user_id],
+            &[&user_id.as_str()],
         )
         .await;
     let _ = client
-        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user_id])
+        .execute(
+            "DELETE FROM zeroship.users WHERE id = $1",
+            &[&user_id.as_str()],
+        )
         .await;
 }
 
@@ -766,14 +796,14 @@ async fn start_mock_revoke(counter: Arc<AtomicU32>) -> test::TestServer {
     test::server(move || {
         let counter = counter.clone();
         async move {
-            web::App::new().state(counter).service(
-                web::resource("/oauth2/revoke").route(web::post().to(
+            web::App::new()
+                .state(counter)
+                .service(web::resource("/oauth2/revoke").route(web::post().to(
                     |c: web::types::State<Arc<AtomicU32>>| async move {
                         c.fetch_add(1, Ordering::SeqCst);
                         web::HttpResponse::Ok().finish()
                     },
-                )),
-            )
+                )))
         }
     })
     .await

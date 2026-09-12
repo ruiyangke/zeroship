@@ -22,7 +22,10 @@ use uuid::Uuid;
 
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
 use zeroship_control::cron::orphaned_app_reaper;
-use zeroship_control::{AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore};
+use zeroship_control::{
+    AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore,
+};
+use zeroship_core::UserId;
 
 use crate::common;
 
@@ -47,7 +50,9 @@ static REAPER_TEST_LOCK: Mutex<()> = Mutex::new(());
 /// to take every other case in the module with it through the poisoned lock, and
 /// none of them said which verdict it would have reached.
 fn reaper_test_lock() -> std::sync::MutexGuard<'static, ()> {
-    REAPER_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    REAPER_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 fn tmpdir(label: &str) -> PathBuf {
@@ -74,7 +79,9 @@ async fn build_state(db_url: &str, label: &str) -> Fixture {
     let blob_root = tmpdir(&format!("blob-{label}"));
     let deploy_tmp_dir = tmpdir(&format!("dtmp-{label}"));
     let registry = Registry::new(db_url).await.expect("registry");
-    zeroship_control::plan_catalog::seed_plans(&registry).await.expect("seed built-in plans");
+    zeroship_control::plan_catalog::seed_plans(&registry)
+        .await
+        .expect("seed built-in plans");
     let env_store = EnvStore::new(registry.clone(), TEST_MASTER_KEY).expect("env store");
     let stripe_store = StripeStore::new(registry.clone());
 
@@ -101,7 +108,7 @@ async fn build_state(db_url: &str, label: &str) -> Fixture {
         env_store,
         stripe_store,
         blob_store,
-            workflow_blob_store,
+        workflow_blob_store,
         control_key: SecretString::new("test-control-key".to_string()),
         master_key: SecretString::new(TEST_MASTER_KEY.to_string()),
         stripe_webhook_secret: SecretString::new(String::new()),
@@ -123,7 +130,10 @@ async fn build_state(db_url: &str, label: &str) -> Fixture {
         expected_oauth_audience: "control.zeroship.ai".to_string(),
         static_policies: zeroship_authz::load_platform_policies()
             .expect("bundled authz policies parse"),
-        auth_provider: zeroship_control::platform_auth_provider("https://auth.zeroship.test/oauth2", Some(common::platform_jwks_url())),
+        auth_provider: zeroship_control::platform_auth_provider(
+            "https://auth.zeroship.test/oauth2",
+            Some(common::platform_jwks_url()),
+        ),
         // No platform deploy-token mint here: that is control's OUTBOUND
         // destination for the device flow, and no fixture below drives one.
         provider_registry: zeroship_control::metering::provider::builtin_registry(),
@@ -151,13 +161,7 @@ async fn build_state(db_url: &str, label: &str) -> Fixture {
 /// Insert an apps row directly (bypassing `create_app`, which would also seed an
 /// owner member). `created_at` is back-dated so the row is past the reaper grace
 /// unless the caller overrides. `system` defaults false.
-async fn insert_app(
-    state: &AppState,
-    id: &Uuid,
-    name: &str,
-    system: bool,
-    created_age: &str,
-) {
+async fn insert_app(state: &AppState, id: &Uuid, name: &str, system: bool, created_age: &str) {
     // plan_id is an FK into zeroship.plans — use the built-in free-plan
     // catalog id (seeded by `seed_plans` in the test setup).
     let free = zeroship_control::plan_catalog::free_plan_id();
@@ -207,10 +211,7 @@ async fn app_is_archived(state: &AppState, id: &Uuid) -> bool {
 /// Read so idempotence can be asserted about THIS APP rather than about the
 /// reaper's fleet-wide count. See
 /// `reaper_archives_ownerless_app_and_retains_its_bundle`.
-async fn app_archived_at(
-    state: &AppState,
-    id: &Uuid,
-) -> Option<chrono::DateTime<chrono::Utc>> {
+async fn app_archived_at(state: &AppState, id: &Uuid) -> Option<chrono::DateTime<chrono::Utc>> {
     state
         .control_pg
         .query("SELECT archived_at FROM zeroship.apps WHERE id = $1", &[id])
@@ -228,15 +229,15 @@ async fn cleanup_app_row(state: &AppState, id: &Uuid) {
         .expect("test cleanup app");
 }
 
-async fn seed_owner_user(state: &AppState) -> Uuid {
-    let user_id = Uuid::new_v4();
+async fn seed_owner_user(state: &AppState) -> UserId {
+    let user_id = UserId::mint();
     state
         .control_pg
         .execute(
             "INSERT INTO zeroship.users (id, email, name) VALUES ($1, $2::citext, $3)",
             &[
-                &user_id,
-                &format!("reaper-owner-{user_id}@zeroship.test"),
+                &user_id.as_str(),
+                &format!("reaper-owner-{}@zeroship.test", user_id.as_str()),
                 &"reaper-owner",
             ],
         )
@@ -272,7 +273,11 @@ async fn reaper_archives_ownerless_app_and_retains_its_bundle() {
         .await
         .expect("put manifest");
     assert!(
-        state.blob_store.get_manifest(&app_id, "deployone").await.is_ok(),
+        state
+            .blob_store
+            .get_manifest(&app_id, "deployone")
+            .await
+            .is_ok(),
         "precondition: manifest exists"
     );
 
@@ -288,7 +293,11 @@ async fn reaper_archives_ownerless_app_and_retains_its_bundle() {
         "owner-less app row must be retained and archived"
     );
     assert!(
-        state.blob_store.get_manifest(&app_id, "deployone").await.is_ok(),
+        state
+            .blob_store
+            .get_manifest(&app_id, "deployone")
+            .await
+            .is_ok(),
         "archive must retain the app's manifests"
     );
     // IDEMPOTENCE IS ABOUT THIS APP, NOT ABOUT THE REPORT'S COUNT.
@@ -319,7 +328,10 @@ async fn reaper_archives_ownerless_app_and_retains_its_bundle() {
     // returns `Ok(Some(_))`, incrementing `archived`. Selection is the only
     // place the defect would show.
     let archived_at = app_archived_at(state, &app_id).await;
-    assert!(archived_at.is_some(), "precondition: the orphan is archived");
+    assert!(
+        archived_at.is_some(),
+        "precondition: the orphan is archived"
+    );
     let still_selected = orphaned_app_reaper::find_orphaned_apps(state)
         .await
         .expect("re-run the detection query");
@@ -329,7 +341,9 @@ async fn reaper_archives_ownerless_app_and_retains_its_bundle() {
          candidate set ({} candidate(s) total)",
         still_selected.len()
     );
-    let retry = orphaned_app_reaper::tick(state).await.expect("retry reaper tick");
+    let retry = orphaned_app_reaper::tick(state)
+        .await
+        .expect("retry reaper tick");
     assert_eq!(
         app_archived_at(state, &app_id).await,
         archived_at,
@@ -366,7 +380,12 @@ async fn reaper_leaves_owned_app_untouched() {
     // create_app seeds the owner membership atomically.
     let app = state
         .registry
-        .create_app(&name, &zeroship_control::plan_catalog::free_plan_id(), &owner, None)
+        .create_app(
+            &name,
+            &zeroship_control::plan_catalog::free_plan_id(),
+            &owner,
+            None,
+        )
         .await
         .expect("create_app")
         .id;
@@ -382,7 +401,10 @@ async fn reaper_leaves_owned_app_untouched() {
     cleanup_app_row(state, &app).await;
     let _ = state
         .control_pg
-        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&owner])
+        .execute(
+            "DELETE FROM zeroship.users WHERE id = $1",
+            &[&owner.as_str()],
+        )
         .await;
 
     drop(fx);
@@ -487,7 +509,11 @@ async fn direct_archive_retains_db_row_and_vfs_blob() {
         "archive retains the DB row"
     );
     assert!(
-        state.blob_store.get_manifest(&app_id, "deployone").await.is_ok(),
+        state
+            .blob_store
+            .get_manifest(&app_id, "deployone")
+            .await
+            .is_ok(),
         "archive retains the app's manifests"
     );
 
