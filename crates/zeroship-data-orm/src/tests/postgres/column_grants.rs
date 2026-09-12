@@ -305,7 +305,7 @@ fn column_grant_ready_statements(app: &str, schema: &Value) -> Vec<Statement> {
                 &crate::sql::SchemaName::new(app).expect("fixture schema name"),
                 COLLECTION,
                 schema,
-                &value!({ "id": "psn_up", "nickname": "d" }),
+                value!({ "id": "psn_up", "nickname": "d" }),
                 &value!(["id"]),
             )
             .unwrap(),

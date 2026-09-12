@@ -177,13 +177,74 @@ fn production_upsert_normalizes_unordered_column_input() {
             )
             .unwrap()
         };
-        let first = build(&forwards);
-        let second = build(&backwards);
+        let first = build(forwards.clone());
+        let second = build(backwards.clone());
         assert_eq!(
             first.sql(),
             second.sql(),
             "input map order changed upsert SQL"
         );
         assert_eq!(first.params(), second.params());
+    }
+}
+
+#[test]
+fn production_upsert_transfers_native_buffers_into_bindings() {
+    let namespace = SchemaName::new("app_upsert_buffers").unwrap();
+    let schema = value!({
+        "id": {"type": "string", "primaryKey": true},
+        "payload": {"type": "bytes"},
+        "title": {"type": "string"},
+        "document": {"type": "json"},
+    });
+    for dialect in [compile::SqlDialect::Postgres, compile::SqlDialect::Sqlite] {
+        let bytes = vec![0, 255, 128];
+        let pointer = bytes.as_ptr();
+        let title = String::from("owned text");
+        let title_pointer = title.as_ptr();
+        let document = String::from("{\"key\":true}");
+        let document_pointer = document.as_ptr();
+        let input = Value::Object(
+            [
+                ("id".into(), Value::from("entry")),
+                ("payload".into(), Value::Bytes(bytes)),
+                ("title".into(), Value::String(title)),
+                ("document".into(), Value::Json(document)),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        assert_eq!(input["payload"].as_bytes().unwrap().as_ptr(), pointer);
+        let query = compile::build_upsert_with_dialect(
+            &namespace,
+            "entries",
+            &schema,
+            input,
+            &value!(["id"]),
+            dialect,
+        )
+        .unwrap();
+        let bound = query.params().iter().find_map(Value::as_bytes).unwrap();
+        assert_eq!(
+            bound.as_ptr(),
+            pointer,
+            "upsert copied its native binary input"
+        );
+        let text = query
+            .params()
+            .iter()
+            .filter_map(Value::as_str)
+            .find(|value| *value == "owned text")
+            .unwrap();
+        assert_eq!(text.as_ptr(), title_pointer);
+        let json = query
+            .params()
+            .iter()
+            .find_map(|value| match value {
+                Value::Json(value) => Some(value),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(json.as_ptr(), document_pointer);
     }
 }

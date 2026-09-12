@@ -1232,7 +1232,7 @@ pub async fn run_upsert(
             lower_document(route.dialect(), &schema, &mut doc);
             let expected_id =
                 if guard_identity {
-                    Some(doc.get("id").ok_or_else(|| {
+                    Some(doc.get("id").cloned().ok_or_else(|| {
                         DbError::internal("encrypted upsert requires an identity")
                     })?)
                 } else {
@@ -1242,7 +1242,7 @@ pub async fn run_upsert(
                 binding.schema(),
                 &coll,
                 &schema,
-                &doc,
+                std::mem::take(&mut doc),
                 &conflict_fields,
                 route.dialect(),
                 &assignments,

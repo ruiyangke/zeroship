@@ -20,6 +20,7 @@ use crate::sql::compiler::CompiledQuery;
 pub use crate::sql::lifecycle::WriteAssignments;
 use crate::sql::lifecycle::soft_delete_column;
 use crate::value::Value;
+use std::borrow::Cow;
 
 use zeroship_core::schema_name::SchemaName;
 
@@ -490,6 +491,16 @@ fn push_field_value_bind(
     schema_hint: &Value,
     dialect: SqlDialect,
 ) -> Result<String, QueryError> {
+    push_field_parameter(params, Cow::Borrowed(value), field, schema_hint, dialect)
+}
+
+fn push_field_parameter(
+    params: &mut Vec<Value>,
+    value: Cow<'_, Value>,
+    field: &str,
+    schema_hint: &Value,
+    dialect: SqlDialect,
+) -> Result<String, QueryError> {
     let definition = schema_hint.get(field);
     let kind = definition
         .and_then(|field| field.get("type"))
@@ -498,7 +509,7 @@ fn push_field_value_bind(
         || column_is_masked(field, schema_hint);
     let timestamp = !protected && matches!(kind, Some("date" | "timestamp"));
     if timestamp && !value.is_null() {
-        let millis = crate::sql::temporal::timestamp_millis(value).ok_or_else(|| {
+        let millis = crate::sql::temporal::timestamp_millis(value.as_ref()).ok_or_else(|| {
             QueryError::InvalidFilter(format!(
                 "column '{field}' requires a portable timestamp or integral Unix milliseconds"
             ))
@@ -517,10 +528,12 @@ fn push_field_value_bind(
     }
     let json_column = matches!(kind, Some("json" | "object" | "array" | "union"));
     let mut parameter =
-        if json_column && !matches!(value, Value::Json(_) | Value::Array(_) | Value::Object(_)) {
+        if json_column
+            && !matches!(value.as_ref(), Value::Json(_) | Value::Array(_) | Value::Object(_))
+        {
             Value::Json(value.to_string())
         } else {
-            value_to_param(value)
+            value.into_owned()
         };
     if !protected && matches!(kind, Some("object" | "array" | "union")) {
         crate::sql::codecs::prepare_value(field, definition.unwrap(), &mut parameter)
@@ -2975,21 +2988,12 @@ pub fn value_to_param(value: &Value) -> Value {
     value.clone()
 }
 
-/// Build an UPSERT (INSERT ... ON CONFLICT DO UPDATE) query:
-/// ```sql
-/// INSERT INTO "schema_name"."collection" ("col1", "col2") VALUES ($1, $2)
-/// ON CONFLICT ("conflict_col") DO UPDATE SET "col2" = EXCLUDED."col2"
-/// RETURNING "id", "created_at", ...
-/// ```
-///
-/// `doc` is the full document to insert (as a JSON object).
-/// `conflict_fields` is an array of column names that form the conflict target.
-/// Non-conflict columns are set to `EXCLUDED."col"` in the DO UPDATE SET clause.
+/// Compile an owned document with an explicit conflict target.
 pub fn build_upsert(
     schema_name: &SchemaName,
     collection: &str,
     schema_hint: &Value,
-    doc: &Value,
+    doc: Value,
     conflict_fields: &Value,
 ) -> Result<CompiledQuery, QueryError> {
     build_upsert_with_dialect(
@@ -3035,7 +3039,7 @@ pub fn build_upsert_with_dialect(
     schema_name: &SchemaName,
     collection: &str,
     schema_hint: &Value,
-    doc: &Value,
+    doc: Value,
     conflict_fields: &Value,
     dialect: SqlDialect,
 ) -> Result<CompiledQuery, QueryError> {
@@ -3056,18 +3060,20 @@ pub fn build_upsert_with_assignments(
     schema_name: &SchemaName,
     collection: &str,
     schema_hint: &Value,
-    doc: &Value,
+    doc: Value,
     conflict_fields: &Value,
     dialect: SqlDialect,
     assignments: &WriteAssignments,
-    expected_id: Option<&Value>,
+    expected_id: Option<Value>,
 ) -> Result<CompiledQuery, QueryError> {
     validate_collection(collection)?;
     let returning = build_returning_expr(schema_hint)?;
 
-    let obj = doc.as_object().ok_or_else(|| {
-        QueryError::InvalidFilter("upsert document must be an object".to_string())
-    })?;
+    let Value::Object(mut obj) = doc else {
+        return Err(QueryError::InvalidFilter(
+            "upsert document must be an object".into(),
+        ));
+    };
 
     if obj.is_empty() {
         return Err(QueryError::InvalidFilter(
@@ -3083,30 +3089,29 @@ pub fn build_upsert_with_assignments(
 
     let schema = crate::sql::compile::quote_ident(schema_name.as_str());
     let table = quote_ident(collection);
-    let binary_bind_cols = collect_binary_bind_cols(obj);
+    let has_id = obj.contains_key("id");
 
     let mut columns = Vec::new();
     let mut placeholders = Vec::new();
     let mut params: Vec<Value> = Vec::new();
     let mut update_clauses = Vec::new();
 
-    let mut fields: Vec<_> = obj.iter().collect();
-    fields.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
-    for (key, value) in fields {
-        columns.push(quote_ident(key));
+    obj.sort_keys();
+    for (key, value) in obj {
+        columns.push(quote_ident(&key));
 
         if value.is_null() {
             placeholders.push("NULL".to_string());
         } else {
-            let is_binary_bind = binary_bind_cols.contains(key.as_str());
+            let is_binary_bind = matches!(&value, Value::Bytes(_));
             if is_binary_bind {
-                params.push(dialect.encode_binary_param(value_to_param(value))?);
+                params.push(dialect.encode_binary_param(value)?);
                 placeholders.push(dialect.binary_bind_placeholder(params.len()));
             } else {
-                placeholders.push(push_field_value_bind(
+                placeholders.push(push_field_parameter(
                     &mut params,
-                    value,
-                    key,
+                    Cow::Owned(value),
+                    &key,
                     schema_hint,
                     dialect,
                 )?);
@@ -3116,16 +3121,16 @@ pub fn build_upsert_with_assignments(
         // Non-conflict columns get updated to the EXCLUDED value
         if key != "id"
             && !conflict_set.contains(key.as_str())
-            && schema_hint[key]["assign"]["on"].as_str() != Some("insert")
+            && schema_hint[&key]["assign"]["on"].as_str() != Some("insert")
             && !assignments
                 .columns
                 .iter()
-                .any(|assignment| assignment.column == *key)
+                .any(|assignment| assignment.column == key)
         {
             update_clauses.push(format!(
                 "{} = EXCLUDED.{}",
-                quote_ident(key),
-                quote_ident(key)
+                quote_ident(&key),
+                quote_ident(&key)
             ));
         }
     }
@@ -3141,10 +3146,8 @@ pub fn build_upsert_with_assignments(
         Some(&format!("{schema}.{table}")),
     )?);
 
-    // If all columns are conflict columns, use DO UPDATE SET for the first non-id conflict col
-    // to make it a true upsert (otherwise Postgres treats it as DO NOTHING).
+    // Self-assignment preserves the returning row and database-trigger behavior.
     if update_clauses.is_empty() {
-        // All columns are conflict columns — set the first one to itself
         if let Some(first) = conflict_arr.first() {
             update_clauses.push(format!(
                 "{} = EXCLUDED.{}",
@@ -3154,11 +3157,10 @@ pub fn build_upsert_with_assignments(
         }
     }
 
-    let overriding =
-        crate::sql::identity::overriding_clause(schema_hint, dialect, obj.contains_key("id"));
+    let overriding = crate::sql::identity::overriding_clause(schema_hint, dialect, has_id);
     let identity_guard = if let Some(id) = expected_id {
         let key = quote_ident(&value_column_for_field("id", schema_hint));
-        let bound = push_field_value_bind(&mut params, id, "id", schema_hint, dialect)?;
+        let bound = push_field_parameter(&mut params, Cow::Owned(id), "id", schema_hint, dialect)?;
         format!(" WHERE {schema}.{table}.{key} = {bound}")
     } else {
         String::new()
@@ -5103,7 +5105,7 @@ mod tests {
     fn test_upsert_basic() {
         let doc = value!({"name": "alice", "age": 30});
         let conflict = value!(["name"]);
-        let q = build_upsert(&s("app1"), "users", &tschema(), &doc, &conflict).unwrap();
+        let q = build_upsert(&s("app1"), "users", &tschema(), doc, &conflict).unwrap();
         assert!(q.sql.contains("INSERT INTO"), "sql: {}", q.sql);
         assert!(q.sql.contains("ON CONFLICT"), "sql: {}", q.sql);
         assert!(q.sql.contains("DO UPDATE SET"), "sql: {}", q.sql);
@@ -5122,7 +5124,7 @@ mod tests {
     fn test_upsert_multiple_conflict_fields() {
         let doc = value!({"email": "a@b.com", "name": "alice", "age": 30});
         let conflict = value!(["email", "name"]);
-        let q = build_upsert(&s("app1"), "users", &tschema(), &doc, &conflict).unwrap();
+        let q = build_upsert(&s("app1"), "users", &tschema(), doc, &conflict).unwrap();
         assert!(
             q.sql.contains(r#"ON CONFLICT ("email", "name")"#),
             "sql: {}",
@@ -5152,7 +5154,7 @@ mod tests {
         // When all columns are conflict columns, we still produce a valid DO UPDATE SET
         let doc = value!({"email": "a@b.com"});
         let conflict = value!(["email"]);
-        let q = build_upsert(&s("app1"), "users", &tschema(), &doc, &conflict).unwrap();
+        let q = build_upsert(&s("app1"), "users", &tschema(), doc, &conflict).unwrap();
         assert!(q.sql.contains("DO UPDATE SET"), "sql: {}", q.sql);
         assert!(q.sql.contains(&treturning()), "sql: {}", q.sql);
     }
@@ -5168,7 +5170,7 @@ mod tests {
             "name": "alice"
         });
         let conflict = value!(["email"]);
-        let q = build_upsert(&s("app1"), "users", &tschema(), &doc, &conflict).unwrap();
+        let q = build_upsert(&s("app1"), "users", &tschema(), doc, &conflict).unwrap();
         assert!(
             !q.sql.contains(r#""id" = EXCLUDED."id""#),
             "upsert must not overwrite id on conflict: {}",
@@ -5204,7 +5206,7 @@ mod tests {
             &s("app1"),
             "users",
             &tschema(),
-            &doc,
+            doc,
             &conflict,
             SqlDialect::Sqlite,
             &lifecycle_assignments(false),
@@ -5238,7 +5240,7 @@ mod tests {
             &s("app1"),
             "users",
             &tschema(),
-            &doc,
+            doc,
             &conflict,
             SqlDialect::Postgres,
         )
@@ -5269,7 +5271,7 @@ mod tests {
     fn test_upsert_empty_doc_error() {
         let doc = value!({});
         let conflict = value!(["name"]);
-        let result = build_upsert(&s("app1"), "users", &tschema(), &doc, &conflict);
+        let result = build_upsert(&s("app1"), "users", &tschema(), doc, &conflict);
         assert!(result.is_err());
     }
 
@@ -5277,7 +5279,7 @@ mod tests {
     fn test_upsert_empty_conflict_fields_error() {
         let doc = value!({"name": "alice"});
         let conflict = value!([]);
-        let result = build_upsert(&s("app1"), "users", &tschema(), &doc, &conflict);
+        let result = build_upsert(&s("app1"), "users", &tschema(), doc, &conflict);
         assert!(result.is_err());
     }
 
@@ -5298,7 +5300,7 @@ mod tests {
                         &s("app1"),
                         "users",
                         &tschema(),
-                        &doc,
+                        doc.clone(),
                         &conflict,
                         dialect
                     )
@@ -5321,7 +5323,7 @@ mod tests {
     fn test_upsert_invalid_collection_error() {
         let doc = value!({"name": "alice"});
         let conflict = value!(["name"]);
-        let result = build_upsert(&s("app1"), "users; DROP TABLE", &tschema(), &doc, &conflict);
+        let result = build_upsert(&s("app1"), "users; DROP TABLE", &tschema(), doc, &conflict);
         assert!(result.is_err());
     }
 
@@ -8268,7 +8270,7 @@ mod tests {
             ),
             (
                 "upsert",
-                build_upsert_with_dialect(&s("app1"), "users", schema, &doc, &conflict, d).unwrap(),
+                build_upsert_with_dialect(&s("app1"), "users", schema, doc.clone(), &conflict, d).unwrap(),
             ),
             (
                 "findOrCreate",
@@ -8429,7 +8431,7 @@ mod tests {
             &s("app1"),
             "users",
             &schema,
-            &doc,
+            doc.clone(),
             &conflict,
             SqlDialect::Postgres,
         )
@@ -8511,7 +8513,7 @@ mod tests {
                 &s("app1"),
                 "users",
                 &schema,
-                &doc,
+                doc.clone(),
                 &conflict,
                 dialect,
                 &lifecycle_assignments(false),
@@ -9193,7 +9195,7 @@ mod binary_expression_tests {
                     &schema,
                     "files",
                     &fields,
-                    &document,
+                    document.clone(),
                     &value!(["id"]),
                     dialect,
                 )
