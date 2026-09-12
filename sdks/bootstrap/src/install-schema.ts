@@ -15,8 +15,9 @@
  *     natively before this JavaScript installer runs.
  *
  * Re-entrancy: a second call with overlapping names re-installs the
- * Collection wrappers (`configurable: true` on the descriptors).
- * Reserved native names throw at boot rather than silently shadowing.
+ * Collection wrappers (`configurable: true` on the descriptors). Collections
+ * colliding with native method names remain available through
+ * `env.db.collection(name)`.
  */
 import {
   drainCollectionLoaders,
@@ -28,6 +29,7 @@ import {
   type ReadFrom,
   type AliasedCollection,
   type NativeDb,
+  type NativeCollection,
   type NativeTransactionFn,
   Query,
   createLive,
@@ -43,6 +45,7 @@ import {
   type Result,
   type Row,
   type RowId,
+  type TransactionDb,
   type TxCollection,
   type TxQuery,
   type TransactionOptions,
@@ -60,7 +63,7 @@ import {
   type Actor,
   type FieldDef,
 } from "@zeroship/db/internal";
-export type { TxCollection, TxQuery, TransactionOptions } from "@zeroship/db/internal";
+export type { TransactionDb, TxCollection, TxQuery, TransactionOptions } from "@zeroship/db/internal";
 
 type AsyncLocalStorageLike<T> = {
   getStore(): T | undefined;
@@ -204,7 +207,7 @@ function runtimeDescriptorFields(
 ): Record<string, Record<string, FieldDef>> | null {
   const v2 = assertRuntimeDescriptorV2(descriptor);
   if (v2 !== null) {
-    const out: Record<string, Record<string, FieldDef>> = {};
+    const out = Object.create(null) as Record<string, Record<string, FieldDef>>;
     for (const [name, collection] of Object.entries(v2.collections)) {
       out[name] = collection.fields;
     }
@@ -573,13 +576,26 @@ export type Collections<T extends Record<string, SchemaInput>> = {
   [K in keyof T]: Collection<UnwrapSchema<T[K]>, K & string, T>;
 };
 
+type DbMethodName = keyof Object
+  | "__platform"
+  | "__proto__"
+  | "collection"
+  | "from"
+  | "live"
+  | "transaction";
+
+type DirectCollections<T extends Record<string, SchemaInput>> = {
+  [K in keyof T as K extends DbMethodName ? never : K]: Collection<UnwrapSchema<T[K]>, K & string, T>;
+};
+
 export type DbExtensions<T extends Record<string, SchemaInput>> = {
+  collection<K extends string & keyof T>(name: K): NativeCollection;
   from: ReadFrom;
-  transaction: <R>(fn: (tx: { [K in keyof T]: TxCollection<UnwrapSchema<T[K]>, T> } & { from: ReadFrom<true> }) => Promise<R>, options?: TransactionOptions) => Promise<Result<R>>;
+  transaction: <R>(fn: (tx: TransactionDb<T>) => Promise<R>, options?: TransactionOptions) => Promise<Result<R>>;
   live: <R>(queryFn: () => Promise<R[]> | { then(onFulfilled: (value: unknown) => unknown, onRejected?: (reason: unknown) => unknown): unknown }, options?: LiveOptions) => LiveQuery<R>;
 };
 
-export type Db<T extends Record<string, SchemaInput>> = Collections<T> & DbExtensions<T>;
+export type Db<T extends Record<string, SchemaInput>> = DirectCollections<T> & DbExtensions<T>;
 
 // ---------------------------------------------------------------------------
 // TxCollection — wraps a Collection, throws on error
@@ -835,13 +851,14 @@ export interface InstallSchemaOptions {
 }
 
 const RESERVED_ENV_DB_NAMES = new Set<string>([
+  "__platform",
+  "__proto__",
   "collection",
-  "migrations",
+  "constructor",
   // **P9 PR 3** — `beginTransaction` removed: the native primitive was
   // deleted entirely (transaction orchestration moved into Rust). The
   // creator-facing `transaction` (below) is now a native method on
   // `env.db`, so it stays reserved.
-  "openSubscription",
   "transaction",
   "live",
   "from",
@@ -904,29 +921,15 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
       ? (descriptorFields as unknown as T)
       : ({} as T);
 
-  const collections = {} as { [K in keyof T]: Collection<UnwrapSchema<T[K]>, K & string, T> };
+  const collections = Object.create(null) as {
+    [K in keyof T]: Collection<UnwrapSchema<T[K]>, K & string, T>;
+  };
 
-  // **P9 PR 3** — capture the *native* `Db.transaction(callback, opts)`
-  // method BEFORE the install loop overwrites `env.db.transaction` with
-  // the bootstrap `transactionImpl` wrapper.
-  //
-  // The hazard: the install loop does `Object.defineProperty(native,
-  // "transaction", transactionImpl)`, planting an OWN property that
-  // shadows the native prototype method. A naive `native.transaction`
-  // read on a *re-install* would then resolve to the previously-installed
-  // `transactionImpl` (own property) — and `transactionImpl` calling
-  // itself recurses forever.
-  //
-  // Fix: stash the captured native method under a non-enumerable hidden
-  // key the first time, and reuse it on every subsequent install. The
-  // first capture reads `native.transaction` before any own property is
-  // planted, so it picks up the real native orchestrator (in production a
-  // `Db.prototype` method; in tests a mock's own `transaction`). Bound to
-  // `native` so the v8_class receiver check passes.
-  const NATIVE_TX_KEY = "__zsNativeTransaction";
+  // Capture the native orchestrator before installing the SDK wrapper.
+  // The weak-map capture remains stable across repeated installs and cannot
+  // collide with a creator table name.
   const nativeTransaction = captureNativeTransaction(
     native as unknown as object,
-    NATIVE_TX_KEY,
   ) as NativeTransactionFn | undefined;
 
   validateRefTargets(source);
@@ -1002,13 +1005,11 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
   //
   // The `txCollections` (SDK collections wrapped `Result`→throw) route
   // through the tx connection automatically, since the native CRUD path
-  // consults the `tx_conn` slot the orchestrator set. We therefore pass
-  // `txCollections` to the creator callback and ignore the native
-  // `rawTxView` (its collections are the same connection; the SDK
-  // wrappers add the field-mapping + throwing contract the callback
-  // expects).
+  // consults the `tx_conn` slot the orchestrator set. The native raw view
+  // serves plain-JS callers; this wrapper exposes the same name lookup over
+  // SDK handles with field mapping and the throwing transaction contract.
   async function transactionImpl<R>(
-    fn: (tx: { [K in keyof T]: TxCollection<UnwrapSchema<T[K]>, T> } & { from: ReadFrom<true> }) => Promise<R>,
+    fn: (tx: TransactionDb<T>) => Promise<R>,
     txOptions?: TransactionOptions,
   ): Promise<Result<R>> {
     if (nativeTransaction === undefined) {
@@ -1050,19 +1051,32 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
         ? { isolationLevel: txOptions.isolationLevel }
         : undefined;
       const bodyResult = (await nativeTransaction(
-        // The native view's collections share the tx connection, so we
-        // hand the creator our SDK-wrapped `txCollections` (Result→throw
-        // + field mapping). `rawTxView` is intentionally unused.
+        // The native view and SDK handles share the active tx connection.
         async (_rawTxView: unknown) => {
           let active = true;
           const from: ReadFrom<true> = source => readFrom(native, source, true, () => active);
-          const txCollections = {} as { [K in keyof T]: TxCollection<UnwrapSchema<T[K]>, T> };
+          const txCollections = Object.create(null) as {
+            [K in keyof T]: TxCollection<UnwrapSchema<T[K]>, T>;
+          };
           for (const [name, col] of Object.entries(collections)) {
             (txCollections as Record<string, unknown>)[name] =
               createTxCollection(col as Collection<unknown>, () => active);
           }
+          const collection = <K extends string & keyof T>(name: K) => {
+            requireActiveTransaction(() => active);
+            const txCollection = txCollections[name];
+            if (txCollection === undefined) {
+              throw Object.assign(
+                new Error(`@zeroship/db: collection "${name}" is not declared`),
+                { code: "COLLECTION_NOT_DECLARED" as const },
+              );
+            }
+            return txCollection;
+          };
           return transactionContext.run(true, async () => {
-            try { return await fn({ ...txCollections, from }); }
+            try {
+              return await fn({ ...txCollections, collection, from } as TransactionDb<T>);
+            }
             finally { active = false; }
           });
         },
@@ -1097,14 +1111,11 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
       }
     }
     for (const [name, col] of Object.entries(collections)) {
-      if (RESERVED_ENV_DB_NAMES.has(name)) {
-        throw Object.assign(
-          new Error(
-            `@zeroship/bootstrap: schema name "${name}" collides with a native env.db method — ` +
-              `rename the collection. Reserved: ${[...RESERVED_ENV_DB_NAMES].join(", ")}.`,
-          ),
-          { code: "RESERVED_ENV_DB_NAME" as const },
-        );
+      if (
+        RESERVED_ENV_DB_NAMES.has(name) ||
+        (!Object.hasOwn(target, name) && name in target)
+      ) {
+        continue;
       }
       Object.defineProperty(target, name, {
         value: col,

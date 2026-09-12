@@ -426,13 +426,10 @@ fn value_to_string(v: ValueRef<'_>) -> Option<String> {
     }
 }
 
-/// Exclude platform and SQLite bookkeeping relations from CDC.
+/// SQLite owns its catalog relations. Every table in an attached creator
+/// schema participates in CDC regardless of its name.
 fn is_filtered_relation(table: &str) -> bool {
-    table.starts_with("__zeroship_mv_")
-        || table.starts_with("__zeroship_audit_")
-        || table == "__zeroship_migrations"
-        || table.starts_with("__zs_")
-        || table.starts_with("sqlite_")
+    table.starts_with("sqlite_")
 }
 
 // ---------------------------------------------------------------------------
@@ -849,24 +846,22 @@ mod tests {
     }
 
     #[test]
-    fn is_filtered_relation_excludes_system_tables() {
+    fn only_sqlite_catalog_relations_are_filtered() {
         assert!(is_filtered_relation("sqlite_master"));
         assert!(is_filtered_relation("sqlite_sequence"));
         assert!(is_filtered_relation("sqlite_autoindex_users_1"));
-        assert!(is_filtered_relation("__zs_migrations"));
-        assert!(is_filtered_relation("__zeroship_migrations"));
-        assert!(is_filtered_relation("__zeroship_audit_users"));
-        assert!(is_filtered_relation("__zeroship_mv_orders_shadow"));
-    }
-
-    #[test]
-    fn is_filtered_relation_includes_user_tables() {
-        assert!(!is_filtered_relation("users"));
-        assert!(!is_filtered_relation("orders"));
-        // Edge case: a user table whose name happens to start with
-        // `__zs` (not `__zs_`) must NOT be filtered — the underscore
-        // is the discriminator.
-        assert!(!is_filtered_relation("__zsales"));
+        for table in [
+            "users",
+            "__zs_migrations",
+            "__zeroship_migrations",
+            "__zeroship_audit_users",
+            "__zeroship_mv_orders_shadow",
+        ] {
+            assert!(
+                !is_filtered_relation(table),
+                "creator-schema table {table} must reach CDC"
+            );
+        }
     }
 
     #[test]

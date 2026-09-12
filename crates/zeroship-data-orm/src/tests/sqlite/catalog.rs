@@ -165,3 +165,37 @@ fn introspect_after_create_table_round_trip() {
         });
     })
 }
+
+#[test]
+fn introspection_includes_prefixed_creator_schema_tables() {
+    Host::test(|host| {
+        host.run(async {
+            let (backend, _dir) = fresh_backend(host);
+            backend
+                .attach_app_file("app_demo")
+                .await
+                .expect("attach creator database");
+            backend
+                .execute_fixture(
+                    "CREATE TABLE \"app_demo\".\"__zs_workflow_state\" (\
+                     id TEXT PRIMARY KEY, \
+                     \"secret\" TEXT /* zero-migrate:mask:kind=full,classification=pii */\
+                     )",
+                    &[],
+                )
+                .await
+                .expect("create prefixed table");
+
+            let live = backend
+                .introspect_schema("app_demo")
+                .await
+                .expect("introspect prefixed table");
+            let secret = live
+                .tables
+                .get("__zs_workflow_state")
+                .and_then(|columns| columns.get("secret"))
+                .expect("prefixed table protection metadata");
+            assert!(secret.mask.is_some(), "stored mask metadata was skipped");
+        });
+    })
+}

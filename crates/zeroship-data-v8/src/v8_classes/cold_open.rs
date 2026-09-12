@@ -8,7 +8,7 @@ use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
 use zeroship_data_orm::binding::DbBinding;
 use zeroship_runtime::state::{OpErrorKind, OpResult, ResolveValue};
-use zeroship_runtime::{init_v8, RuntimeState, SharedState};
+use zeroship_runtime::{RuntimeState, SharedState, init_v8};
 
 macro_rules! cold_isolate {
     (let $scope:ident, let $state:ident) => {
@@ -146,6 +146,7 @@ fn cold_collection<'s>(
         scope,
         name.to_string(),
         crate::tests::fixtures::binding(app_id),
+        None,
     )
     .expect("mint_collection")
 }
@@ -320,8 +321,8 @@ fn a_query_hint_carrying_find_opens_the_cold_isolates_backend() {
 #[test]
 fn collection_dispatch_uses_the_injected_orm_factory() {
     use std::sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicUsize, Ordering},
     };
     use zeroship_data_orm::{
         backend::BackendHandle,

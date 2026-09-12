@@ -1,96 +1,134 @@
 use super::{predicate, resolved::ResolvedTable, update};
 use crate::{
     sql::{
-        mapping::QueryError,
         lifecycle::WriteAssignments,
+        mapping::QueryError,
         registration::SqlRegistration,
         statement::{
-            Delete, DeleteParts, MutationScope, ResolvedOperand, ResolvedPredicate, Statement,
-            Update, UpdateParts,
+            Delete, DeleteParts, MutationScope, ResolvedOperand, ResolvedPredicate, ReturnedColumn,
+            Statement, Update, UpdateParts,
         },
         SchemaName,
     },
     value::Value,
 };
 
-pub(crate) fn build_hard(
-    namespace: &SchemaName,
-    collection: &str,
-    schema: &Value,
-    filter: predicate::Input,
-    first: bool,
-    registration: &SqlRegistration,
-) -> Result<crate::sql::compiler::CompiledQuery, QueryError> {
-    let resolved = ResolvedTable::new(namespace, collection, schema, registration)?;
-    let predicate = filter.resolve(schema, &resolved, registration)?;
-    let scope = scope(first, schema, &resolved)?;
-    let returning = if first {
-        resolved.returning(schema)?
-    } else {
-        Vec::new()
-    };
-    registration
-        .compile(Statement::Delete(Delete::new(DeleteParts {
-            table: resolved.table,
-            predicate,
-            scope,
-            returning,
-        })?))
-        .map_err(Into::into)
+#[derive(Clone, Copy)]
+pub(crate) enum Cardinality {
+    One,
+    Many,
 }
 
-pub(crate) fn build_lifecycle(
-    namespace: &SchemaName,
-    collection: &str,
-    schema: &Value,
-    filter: predicate::Input,
-    marker: &str,
-    match_deleted: bool,
-    generated: &WriteAssignments,
-    first: bool,
-    registration: &SqlRegistration,
-) -> Result<crate::sql::compiler::CompiledQuery, QueryError> {
-    let resolved = ResolvedTable::new(namespace, collection, schema, registration)?;
-    let marker = resolved
-        .table
-        .column(&crate::sql::mapping::value_column_for_field(marker, schema))?;
-    let predicate = ResolvedPredicate::and(vec![
-        filter.resolve(schema, &resolved, registration)?,
-        ResolvedPredicate::IsNull {
-            operand: ResolvedOperand::Column(marker),
-            negated: match_deleted,
-        },
-    ]);
-    let assignments = update::resolve_generated(generated, &resolved, registration)?;
-    let scope = scope(first, schema, &resolved)?;
-    let returning = if first {
-        resolved.returning(schema)?
-    } else {
-        Vec::new()
-    };
-    registration
-        .compile(Statement::Update(Update::new(UpdateParts {
-            table: resolved.table,
-            assignments,
-            predicate,
-            scope,
-            returning,
-        })?))
-        .map_err(Into::into)
+pub(crate) struct Builder<'a> {
+    namespace: &'a SchemaName,
+    collection: &'a str,
+    schema: &'a Value,
+    registration: &'a SqlRegistration,
+}
+
+impl<'a> Builder<'a> {
+    pub(crate) const fn new(
+        namespace: &'a SchemaName,
+        collection: &'a str,
+        schema: &'a Value,
+        registration: &'a SqlRegistration,
+    ) -> Self {
+        Self {
+            namespace,
+            collection,
+            schema,
+            registration,
+        }
+    }
+
+    pub(crate) fn hard(
+        &self,
+        filter: predicate::Input,
+        cardinality: Cardinality,
+    ) -> Result<crate::sql::compiler::CompiledQuery, QueryError> {
+        let resolved = ResolvedTable::new(
+            self.namespace,
+            self.collection,
+            self.schema,
+            self.registration,
+        )?;
+        let predicate = filter.resolve(self.schema, &resolved, self.registration)?;
+        let scope = scope(cardinality, self.schema, &resolved)?;
+        let returning = returning(cardinality, self.schema, &resolved)?;
+        self.registration
+            .compile(Statement::Delete(Delete::new(DeleteParts {
+                table: resolved.table,
+                predicate,
+                scope,
+                returning,
+            })?))
+            .map_err(Into::into)
+    }
+
+    pub(crate) fn lifecycle(
+        &self,
+        filter: predicate::Input,
+        marker: &str,
+        match_deleted: bool,
+        generated: &WriteAssignments,
+        cardinality: Cardinality,
+    ) -> Result<crate::sql::compiler::CompiledQuery, QueryError> {
+        let resolved = ResolvedTable::new(
+            self.namespace,
+            self.collection,
+            self.schema,
+            self.registration,
+        )?;
+        let marker = resolved
+            .table
+            .column(&crate::sql::mapping::value_column_for_field(
+                marker,
+                self.schema,
+            ))?;
+        let predicate = ResolvedPredicate::and(vec![
+            filter.resolve(self.schema, &resolved, self.registration)?,
+            ResolvedPredicate::IsNull {
+                operand: ResolvedOperand::Column(marker),
+                negated: match_deleted,
+            },
+        ]);
+        let assignments = update::resolve_generated(generated, &resolved, self.registration)?;
+        let scope = scope(cardinality, self.schema, &resolved)?;
+        let returning = returning(cardinality, self.schema, &resolved)?;
+        self.registration
+            .compile(Statement::Update(Update::new(UpdateParts {
+                table: resolved.table,
+                assignments,
+                predicate,
+                scope,
+                returning,
+            })?))
+            .map_err(Into::into)
+    }
 }
 
 fn scope(
-    first: bool,
+    cardinality: Cardinality,
     schema: &Value,
     resolved: &ResolvedTable,
 ) -> Result<MutationScope, QueryError> {
-    Ok(if first {
-        MutationScope::First {
+    Ok(match cardinality {
+        Cardinality::One => MutationScope::First {
             target: resolved
                 .table
                 .column(&crate::sql::mapping::value_column_for_field("id", schema))?,
-        }
-    } else {
-        MutationScope::Matching
+        },
+        Cardinality::Many => MutationScope::Matching,
     })
+}
+
+fn returning(
+    cardinality: Cardinality,
+    schema: &Value,
+    resolved: &ResolvedTable,
+) -> Result<Vec<ReturnedColumn>, QueryError> {
+    match cardinality {
+        Cardinality::One => resolved.returning(schema),
+        Cardinality::Many => Ok(Vec::new()),
+    }
 }

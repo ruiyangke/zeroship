@@ -107,36 +107,70 @@ async fn capture(
         })
         .await?;
     let mut transactions = TransactionBuffer::new(max_bytes, max_changes);
-    let mut relations: HashMap<u32, Option<String>> = HashMap::new();
+    let mut relations: HashMap<u32, String> = HashMap::new();
     hub.ready(app, generation);
     while let Some(message) = stream.next().await? {
         match message {
             ReplicationMessage::XLogData { body, .. } => {
-                let message = pgoutput::decode(&body)?;
+                use pgoutput::PgOutputMessage as M;
+                let message = match pgoutput::decode(&body)? {
+                    M::Relation {
+                        xid: None,
+                        rel_id,
+                        namespace,
+                        name,
+                        ..
+                    } => {
+                        if namespace == app {
+                            if !relations.contains_key(&rel_id) && relations.len() >= max_relations
+                            {
+                                return Err("relation cache capacity exhausted".into());
+                            }
+                            relations.insert(rel_id, name);
+                        }
+                        continue;
+                    }
+                    message @ (M::Insert {
+                        xid: None, rel_id, ..
+                    }
+                    | M::Update {
+                        xid: None, rel_id, ..
+                    }
+                    | M::Delete {
+                        xid: None, rel_id, ..
+                    }) => {
+                        if !relations.contains_key(&rel_id) {
+                            continue;
+                        }
+                        message
+                    }
+                    M::Truncate {
+                        xid: None,
+                        options,
+                        mut relation_ids,
+                    } => {
+                        relation_ids.retain(|rel_id| relations.contains_key(rel_id));
+                        if relation_ids.is_empty() {
+                            continue;
+                        }
+                        M::Truncate {
+                            xid: None,
+                            options,
+                            relation_ids,
+                        }
+                    }
+                    message => message,
+                };
                 match transactions
                     .push(message)
                     .map_err(|_| "invalid transaction sequence")?
                 {
                     Action::Pending => {}
-                    Action::Metadata(pgoutput::PgOutputMessage::Relation {
-                        rel_id,
-                        namespace,
-                        name,
-                        ..
-                    }) => {
-                        if !relations.contains_key(&rel_id) && relations.len() >= max_relations {
-                            return Err("relation cache capacity exhausted".into());
-                        }
-                        let name = (namespace == app && !name.starts_with("__")).then_some(name);
-                        relations.insert(rel_id, name);
-                    }
-                    Action::Metadata(_) => return Err("unexpected transaction metadata".into()),
                     Action::Commit(batch) => {
                         if batch.needs_resync {
                             hub.publish(app, generation, Event::Resync);
                         } else {
                             for message in batch.changes {
-                                use pgoutput::PgOutputMessage as M;
                                 let (rel_id, operation) = match message {
                                     M::Insert { rel_id, .. } => (rel_id, Operation::Insert),
                                     M::Update { rel_id, .. } => (rel_id, Operation::Update),
@@ -148,7 +182,7 @@ async fn capture(
                                     _ => return Err("unexpected buffered message".into()),
                                 };
                                 match relations.get(&rel_id) {
-                                    Some(Some(collection)) => hub.publish(
+                                    Some(collection) => hub.publish(
                                         app,
                                         generation,
                                         Event::Change {
@@ -156,7 +190,6 @@ async fn capture(
                                             operation,
                                         },
                                     ),
-                                    Some(None) => {}
                                     None => return Err("relation metadata missing".into()),
                                 }
                             }
@@ -197,8 +230,20 @@ mod tests {
         let url = postgres.url();
         let pool = Pool::connect(&url, 4).await.expect("required PostgreSQL");
         let app = zeroship_core::typed_id::generate(zeroship_core::typed_id::APP_PREFIX);
+        let sibling = zeroship_core::typed_id::generate(zeroship_core::typed_id::APP_PREFIX);
         let publication = zeroship_core::replication_names::publication_name(&app).unwrap();
-        let ddl = format!("CREATE SCHEMA \"{app}\"; CREATE TABLE \"{app}\".orders (id int PRIMARY KEY, secret text); CREATE TABLE \"{app}\".rolled_back (id int); CREATE PUBLICATION \"{publication}\" FOR TABLES IN SCHEMA \"{app}\"");
+        let ddl = format!(
+            "CREATE SCHEMA \"{app}\";
+             CREATE SCHEMA \"{sibling}\";
+             CREATE TABLE \"{app}\".orders (id int PRIMARY KEY, secret text);
+             CREATE TABLE \"{app}\".rolled_back (id int);
+             CREATE TABLE \"{app}\".__zeroship_events (id int PRIMARY KEY);
+             CREATE TABLE \"{app}\".partitioned_events (id int, bucket int) PARTITION BY LIST (bucket);
+             CREATE TABLE \"{app}\".partitioned_events_default PARTITION OF \"{app}\".partitioned_events DEFAULT;
+             CREATE TABLE \"{sibling}\".noise (id int PRIMARY KEY);
+             CREATE PUBLICATION \"{publication}\" FOR TABLES IN SCHEMA \"{app}\" WITH (publish_via_partition_root = true);
+             ALTER PUBLICATION \"{publication}\" ADD TABLE \"{sibling}\".noise;"
+        );
         pool.batch_execute(&ddl)
             .await
             .expect("logical WAL and publication required");
@@ -215,12 +260,18 @@ mod tests {
             Limits {
                 max_bytes: 1024 * 1024,
                 max_changes: 100,
-                max_relations: 100,
+                max_relations: 4,
             },
         ));
         assert_eq!(event(&first).await, Event::Ready);
         assert_eq!(event(&second).await, Event::Ready);
         let writer = pool.acquire().await.unwrap();
+        writer
+            .batch_execute(&format!(
+                "INSERT INTO \"{sibling}\".noise VALUES (1); TRUNCATE \"{sibling}\".noise"
+            ))
+            .await
+            .unwrap();
         writer.batch_execute(&format!("BEGIN; INSERT INTO \"{app}\".rolled_back VALUES (1); ROLLBACK; BEGIN; INSERT INTO \"{app}\".orders VALUES (1, 'must-never-reach-a-worker')")).await.unwrap();
         assert!(first.events.is_empty(), "uncommitted changes escaped");
         writer.batch_execute("COMMIT").await.unwrap();
@@ -236,6 +287,36 @@ mod tests {
             assert!(!String::from_utf8(change.encode().unwrap())
                 .unwrap()
                 .contains("must-never"));
+        }
+        writer
+            .batch_execute(&format!(
+                "INSERT INTO \"{app}\".__zeroship_events VALUES (1)"
+            ))
+            .await
+            .unwrap();
+        for lease in [&first, &second] {
+            assert_eq!(
+                event(lease).await,
+                Event::Change {
+                    collection: "__zeroship_events".into(),
+                    operation: Operation::Insert,
+                }
+            );
+        }
+        writer
+            .batch_execute(&format!(
+                "INSERT INTO \"{app}\".partitioned_events VALUES (1, 7)"
+            ))
+            .await
+            .unwrap();
+        for lease in [&first, &second] {
+            assert_eq!(
+                event(lease).await,
+                Event::Change {
+                    collection: "partitioned_events".into(),
+                    operation: Operation::Insert,
+                }
+            );
         }
         writer
             .batch_execute(&format!("TRUNCATE \"{app}\".orders"))
@@ -259,7 +340,7 @@ mod tests {
             .unwrap()
             .is_empty());
         pool.batch_execute(&format!(
-            "DROP PUBLICATION \"{publication}\"; DROP SCHEMA \"{app}\" CASCADE"
+            "DROP PUBLICATION \"{publication}\"; DROP SCHEMA \"{app}\" CASCADE; DROP SCHEMA \"{sibling}\" CASCADE"
         ))
         .await
         .unwrap();

@@ -303,7 +303,8 @@ mod tests {
     #[test]
     fn identifier_validation_uses_the_typed_identifier_boundary() {
         assert!(validate_collection("records").is_ok());
-        assert!(validate_collection("pg_catalog").is_err());
+        assert!(validate_collection("__zeroship_workflow_app_state").is_ok());
+        assert!(validate_collection("pg_catalog").is_ok());
         assert!(validate_field_name("created_at").is_ok());
         assert!(validate_field_name("__zs_raw__secret").is_err());
     }

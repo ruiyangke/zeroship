@@ -225,15 +225,13 @@ fn registered_writes_obey_column_scoped_read_grants() {
             )
             .expect("compile update");
             assert_eq!(execute(&session, update).await.len(), 1);
-            let delete = crate::crud::delete::build_hard(
-                &namespace,
-                COLLECTION,
-                &schema,
-                value!({"id":"person_seed"}).into(),
-                true,
-                &registration,
-            )
-            .expect("compile delete");
+            let delete =
+                crate::crud::delete::Builder::new(&namespace, COLLECTION, &schema, &registration)
+                    .hard(
+                        value!({"id":"person_seed"}).into(),
+                        crate::crud::delete::Cardinality::One,
+                    )
+                    .expect("compile delete");
             assert_eq!(execute(&session, delete).await.len(), 1);
             session.batch_execute("COMMIT").await.unwrap();
 

@@ -31,9 +31,6 @@ use core::fmt;
 /// creator-selected identifiers. Migration code separately caps generated names.
 pub const MAX_IDENT_BYTES: usize = 63;
 
-/// Platform collection prefixes checked against migration validation by parity tests.
-pub const PLATFORM_RESERVED_COLLECTION_PREFIXES: &[&str] = &["__zeroship"];
-
 /// Where an identifier is about to be used. The fences differ per role, so the
 /// role is a required argument to [`Ident::parse_as`] rather than something a
 /// caller may leave to a default.
@@ -43,8 +40,6 @@ pub enum IdentRole {
     Namespace,
     /// A table name.
     Collection,
-    /// A platform-owned table inside an application schema.
-    StoredCollection,
     /// A column name being *referenced*. Not a column being declared: this
     /// crate plans no DDL.
     Column,
@@ -67,7 +62,7 @@ impl IdentRole {
     const fn reservations(self) -> &'static [Reservation] {
         match self {
             Self::Namespace => NAMESPACE_RESERVATIONS,
-            Self::Collection | Self::StoredCollection => &[],
+            Self::Collection => &[],
             Self::Column => COLUMN_RESERVATIONS,
             Self::StoredColumn => STORED_COLUMN_RESERVATIONS,
             Self::Alias => ALIAS_RESERVATIONS,
@@ -80,7 +75,6 @@ impl IdentRole {
         match self {
             Self::Namespace => "namespace",
             Self::Collection => "collection",
-            Self::StoredCollection => "stored collection",
             Self::Column => "column",
             Self::StoredColumn => "stored column",
             Self::Alias => "alias",
@@ -128,8 +122,8 @@ impl Reservation {
 
 /// Schema-name fences.
 ///
-/// Platform prefixes protect stored application-schema objects and reserve
-/// namespaces that creator-built statements must not address.
+/// These reservations prevent qualified access to backend catalogs and
+/// platform-owned schemas. Collection names are checked separately.
 const NAMESPACE_RESERVATIONS: &[Reservation] = &[
     Reservation::Prefix("pg_"),
     Reservation::Exact("information_schema"),
@@ -138,10 +132,11 @@ const NAMESPACE_RESERVATIONS: &[Reservation] = &[
     Reservation::Prefix("sqlite_"),
 ];
 
-/// Catalog prefixes owned by the backends the runtime can address.
-///
-/// These prefixes are fenced consistently so a schema can move between the
-/// supported databases without gaining access to catalog names.
+/// SQLite catalog tables live inside each attached database. PostgreSQL
+/// catalogs live in a separate schema, so a schema-qualified `pg_*` table in
+/// the bound creator schema is an ordinary table.
+const COLLECTION_RESERVATIONS: &[Reservation] = &[Reservation::Prefix("sqlite_")];
+
 const BACKEND_CATALOG_RESERVATIONS: &[Reservation] =
     &[Reservation::Prefix("pg_"), Reservation::Prefix("sqlite_")];
 
@@ -283,26 +278,14 @@ impl Ident {
                 character: bad,
             });
         }
-        if matches!(role, IdentRole::Collection | IdentRole::StoredCollection) {
-            for reservation in BACKEND_CATALOG_RESERVATIONS {
+        if role == IdentRole::Collection {
+            for reservation in COLLECTION_RESERVATIONS {
                 if reservation.matches(raw) {
                     return Err(IdentError::Reserved {
                         role,
                         name: raw.to_string(),
                         reservation: reservation.describe(),
                     });
-                }
-            }
-            if role == IdentRole::Collection {
-                for prefix in PLATFORM_RESERVED_COLLECTION_PREFIXES {
-                    let reservation = Reservation::Prefix(prefix);
-                    if reservation.matches(raw) {
-                        return Err(IdentError::Reserved {
-                            role,
-                            name: raw.to_string(),
-                            reservation: reservation.describe(),
-                        });
-                    }
                 }
             }
         }
@@ -380,14 +363,11 @@ mod tests {
     fn every_role_has_deliberate_reservation_behavior() {
         let cases = [
             (IdentRole::Namespace, "__zeroship_reserved", false),
-            (IdentRole::Collection, "pg_class", false),
-            (IdentRole::StoredCollection, "__zeroship_audit_unmask", true),
+            (IdentRole::Collection, "pg_class", true),
+            (IdentRole::Collection, "__zeroship_audit_unmask", true),
             (IdentRole::Column, "pg_attribute", false),
-            // Accepted, and that IS the deliberate behaviour: this role exists
-            // so the platform can name its own stored columns. The refusal half
-            // is `the_stored_prefix_is_reserved_against_creators_and_nameable_
-            // by_the_platform` in `tests/ident_refusals.rs`, which pins that
-            // `pg_`, `sqlite_` and the classification names still fail here.
+            // Stored physical columns use a separate role; backend catalog and
+            // classification names remain invalid for it.
             (IdentRole::StoredColumn, "__zs_raw__ssn", true),
             (IdentRole::Alias, "__zeroship_internal", false),
             (IdentRole::Constraint, "pg_constraint", true),
@@ -408,7 +388,6 @@ mod tests {
             match role {
                 IdentRole::Namespace
                 | IdentRole::Collection
-                | IdentRole::StoredCollection
                 | IdentRole::Column
                 | IdentRole::StoredColumn
                 | IdentRole::Alias
@@ -419,10 +398,10 @@ mod tests {
     }
 
     #[test]
-    fn a_platform_table_is_nameable_only_through_the_stored_collection_role() {
-        assert!(Ident::parse_as("__zeroship_audit_unmask", IdentRole::StoredCollection).is_ok());
-        assert!(Ident::parse_as("__zeroship_audit_unmask", IdentRole::Collection).is_err());
-        assert!(Ident::parse_as("pg_class", IdentRole::StoredCollection).is_err());
-        assert!(Ident::parse_as("sqlite_schema", IdentRole::StoredCollection).is_err());
+    fn app_schema_tables_share_one_collection_role() {
+        assert!(Ident::parse_as("__zeroship_audit_unmask", IdentRole::Collection).is_ok());
+        assert!(Ident::parse_as("__zeroship_migrations", IdentRole::Collection).is_ok());
+        assert!(Ident::parse_as("pg_class", IdentRole::Collection).is_ok());
+        assert!(Ident::parse_as("sqlite_schema", IdentRole::Collection).is_err());
     }
 }

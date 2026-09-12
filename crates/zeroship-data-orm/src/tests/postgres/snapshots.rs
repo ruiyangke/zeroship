@@ -50,8 +50,9 @@ fn require_pg_client_tool(tool: &str) {
          \x20 pg_dump --version\n\
          \x20 pg_restore --version\n\
          \n\
-         A major version at or above the server's is the safe direction; an\n\
-         older `pg_dump` refuses a newer server outright.\n\
+         Use client tools matching the server major version. Older dump tools\n\
+         refuse newer servers, while newer dumps may emit settings an older\n\
+         restore server does not recognize.\n\
          \n\
          There is no environment variable and no attribute that makes this a\n\
          skip."

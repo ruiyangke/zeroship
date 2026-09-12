@@ -21,11 +21,12 @@ export type { MaskPolicy } from "./policy";
 
 // Reactive queries.
 export type { LiveQuery, LiveOptions } from "./live";
+export type { NativeCollection } from "./native";
 
 // Types — `Db`, `TxCollection`, `TxQuery`, `Collections`, `DbExtensions`,
 // `TransactionOptions`, `SchemaInput` are user-facing. Bootstrap-only
 // installation and normalization helpers live in @zeroship/bootstrap.
-export type { Db, Collections, DbExtensions, TxCollection, TxQuery, TransactionOptions, SchemaInput, SchemaShape, RowOf, RowInputOf } from "./db-types";
+export type { Db, Collections, TransactionDb, DbExtensions, TxCollection, TxQuery, TransactionOptions, SchemaInput, SchemaShape, RowOf, RowInputOf } from "./db-types";
 export type { PaginationResult } from "./query";
 export type { Decimal, FieldDef, FieldStorage, FieldDefaultValue, PlainObject, Result, Row, RowInput, UpsertOptions, ColumnAssignment, UpdateExpression, Filter, SortableField, DistinctField, VectorField, GeoField, SortSpec, SortInput, SelectableField, SelectSpec, SelectInput, NamingStrategy, SchemaOptions, InferSchema, InferUnion, InferFieldDef, IsolationLevel, Id, IdValue, RowId, FkAction, RefOptions, InferRow, InferRowInput, InferId, MaskKind, Classification, MaskOpts, MaskedValueRepr, MaskedValue, Actor, NamedIndexSpec, RelationField, ExactWithSpec, WithRelations, WithSpec } from "./types";
 export type { NormalizedSchema } from "./schema";

@@ -269,9 +269,11 @@ These don't change. If you're about to violate one, stop and ask.
   Privileged schema changes, replication ownership and key management belong to
   the migration service, CDC relay and control plane respectively.
 
-  Preserve reserved system names: they protect migration, audit and workflow
-  tables in app schemas. Any future shared system schema must hold state written
-  by a separate service that workers cannot forge.
+  Every table in a bound creator schema is visible through the ORM and V8
+  adapter. A table-name prefix does not change access, role grants or CDC
+  publication. Schema binding remains the tenant boundary, and runtime code
+  still cannot create schema objects. Any future shared system schema must hold
+  state written by a separate service that workers cannot forge.
 
   Runtime descriptors define an isolate's schema. Catalog protection markers
   prevent descriptors from removing masking or encryption. Transaction identity

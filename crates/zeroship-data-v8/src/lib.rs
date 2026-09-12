@@ -106,7 +106,6 @@ impl NativePlugin for DbPlugin {
         // context anyway, so a future validator change cannot publish a
         // partial schema on error.
         let schemas = descriptor_schemas(descriptor)?;
-        validate_native_collection_names(scope, namespace, &schemas)?;
         let collection_names = schemas
             .iter()
             .map(|(name, _)| name.clone())
@@ -132,36 +131,20 @@ impl NativePlugin for DbPlugin {
     }
 }
 
-fn validate_native_collection_names(
-    scope: &mut v8::PinScope<'_, '_>,
-    namespace: v8::Local<'_, v8::Object>,
-    schemas: &[(String, zeroship_data_orm::value::Value)],
-) -> Result<(), String> {
-    for (name, _) in schemas {
-        let key = v8::String::new(scope, name)
-            .ok_or_else(|| format!("could not allocate collection name {name:?}"))?;
-        match namespace.has(scope, key.into()) {
-            Some(true) => {
-                return Err(format!(
-                    "collection {name:?} collides with the native env.db API"
-                ));
-            }
-            Some(false) => {}
-            None => return Err(format!("could not inspect collection name {name:?}")),
-        }
-    }
-    Ok(())
-}
-
 fn install_native_collection_properties<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     namespace: v8::Local<'s, v8::Object>,
     collection_names: &[String],
 ) -> Result<(), String> {
     for name in collection_names {
-        let collection = v8_classes::db::collection_for_namespace(scope, namespace, name)?;
         let key = v8::String::new(scope, name)
             .ok_or_else(|| format!("could not allocate collection name {name:?}"))?;
+        match namespace.has(scope, key.into()) {
+            Some(true) => continue,
+            Some(false) => {}
+            None => return Err(format!("could not inspect collection name {name:?}")),
+        }
+        let collection = v8_classes::db::collection_for_namespace(scope, namespace, name)?;
         let installed = namespace.define_own_property(
             scope,
             key.into(),
@@ -241,22 +224,33 @@ mod runtime_descriptor_binding_tests {
     }
 
     fn runtime_descriptor(collection: &str) -> String {
+        runtime_descriptor_for(&[collection])
+    }
+
+    fn runtime_descriptor_for(collections: &[&str]) -> String {
+        let collections = collections
+            .iter()
+            .map(|collection| {
+                (
+                    (*collection).to_string(),
+                    serde_json::json!({
+                        "fields": {
+                            "id": { "type": "string", "required": true, "primaryKey": true },
+                            "title": { "type": "string", "required": true }
+                        },
+                        "options": {
+                            "softDelete": false,
+                            "versioning": false,
+                            "strictness": "strict"
+                        },
+                        "indexes": []
+                    }),
+                )
+            })
+            .collect::<serde_json::Map<_, _>>();
         serde_json::json!({
             "version": 2,
-            "collections": {
-                collection: {
-                    "fields": {
-                        "id": { "type": "string", "required": true, "primaryKey": true },
-                        "title": { "type": "string", "required": true }
-                    },
-                    "options": {
-                        "softDelete": false,
-                        "versioning": false,
-                        "strictness": "strict"
-                    },
-                    "indexes": []
-                }
-            }
+            "collections": collections
         })
         .to_string()
     }
@@ -269,12 +263,12 @@ mod runtime_descriptor_binding_tests {
             specifier: "index.js".into(),
             source: r#"
 import { env } from "zeroship";
-const direct = env.db.todos;
-const property = Object.getOwnPropertyDescriptor(env.db, "todos");
+const direct = env.db.__zeroship_workflow_app_state;
+const property = Object.getOwnPropertyDescriptor(env.db, "__zeroship_workflow_app_state");
 globalThis.__nativeCollectionAtEvaluation = JSON.stringify({
     visible: direct != null,
     hasFind: typeof direct?.find === "function",
-    sameIdentity: direct === env.db.collection("todos"),
+    sameIdentity: direct === env.db.collection("__zeroship_workflow_app_state"),
     enumerable: property?.enumerable === true,
     readOnly: property?.writable === false,
 });
@@ -286,7 +280,7 @@ export default { fetch() { return new Response("ok"); } };
             .modules(modules)
             .env_vars(HashMap::from([("APP_ID".to_string(), APP.to_string())]))
             .plugins(vec![plugin() as std::sync::Arc<dyn NativePlugin>])
-            .runtime_descriptor(Some(runtime_descriptor("todos")))
+            .runtime_descriptor(Some(runtime_descriptor("__zeroship_workflow_app_state")))
             .build();
 
         runtime
@@ -313,14 +307,22 @@ export default { fetch() { return new Response("ok"); } };
     }
 
     #[test]
-    fn descriptor_name_collision_rejects_before_creator_module_evaluation() {
+    fn descriptor_name_collisions_remain_available_through_collection_lookup() {
         crate::tests::fixtures::reset_context();
         init_v8();
         let modules = vec![ModuleEntry {
             specifier: "index.js".into(),
             source: r#"
-globalThis.__creatorEvaluatedAfterDbCollision = true;
-export default { fetch() { return new Response("unreachable"); } };
+import { env } from "zeroship";
+const names = ["transaction", "constructor", "__platform"];
+globalThis.__dbCollisionCollections = JSON.stringify({
+    nativeTransactionSurvives: typeof env.db.transaction === "function",
+    collections: names.map((name) => ({
+        name,
+        hasFind: typeof env.db.collection(name).find === "function",
+    })),
+});
+export default { fetch() { return new Response("ok"); } };
 "#
             .into(),
         }];
@@ -328,24 +330,34 @@ export default { fetch() { return new Response("unreachable"); } };
             .modules(modules)
             .env_vars(HashMap::from([("APP_ID".to_string(), APP.to_string())]))
             .plugins(vec![plugin() as std::sync::Arc<dyn NativePlugin>])
-            .runtime_descriptor(Some(runtime_descriptor("transaction")))
+            .runtime_descriptor(Some(runtime_descriptor_for(&[
+                "transaction",
+                "constructor",
+                "__platform",
+            ])))
             .build();
 
-        let error = runtime
+        runtime
             .initialize(&EnvSnapshot::empty())
-            .expect_err("native Db API collision must reject runtime initialization");
-        assert!(error.contains("transaction"), "{error}");
-        assert!(error.contains("collides"), "{error}");
-        let creator_evaluated = runtime.with_scope(|scope| {
+            .expect("name collisions must not block descriptor installation");
+        let observed = runtime.with_scope(|scope| {
             let global = scope.get_current_context().global(scope);
-            let key = v8::String::new(scope, "__creatorEvaluatedAfterDbCollision").unwrap();
+            let key = v8::String::new(scope, "__dbCollisionCollections").unwrap();
             global
                 .get(scope, key.into())
-                .is_some_and(|value| value.is_true())
+                .expect("creator module observation")
+                .to_rust_string_lossy(scope)
         });
-        assert!(
-            !creator_evaluated,
-            "descriptor collisions must fail before creator code can publish state"
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&observed).unwrap(),
+            serde_json::json!({
+                "nativeTransactionSurvives": true,
+                "collections": [
+                    {"name": "transaction", "hasFind": true},
+                    {"name": "constructor", "hasFind": true},
+                    {"name": "__platform", "hasFind": true},
+                ],
+            })
         );
     }
 

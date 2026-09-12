@@ -232,11 +232,8 @@ export class Collection<
 
   /**
    * Resolve the Collection v8_class instance for this collection name.
-   * Cached on first call so subsequent CRUD ops are a single property
-   * read. The native runtime exposes `env.db.collection(name)` as a
-   * Db v8_method that returns a typed Collection wrapper; calling it
-   * twice with the same `name` returns the same JS object (identity is
-   * cached on the Db wrapper).
+   * Cached on first call so subsequent CRUD ops are a single property read.
+   * The native runtime caches the V8 wrapper by collection name.
    */
   private _nativeCollection(): NativeCollection {
     if (this._nativeCol) return this._nativeCol;

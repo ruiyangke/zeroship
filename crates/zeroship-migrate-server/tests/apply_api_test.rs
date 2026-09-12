@@ -349,7 +349,10 @@ async fn seed_app(conn: &Client, app_id: Uuid, owner_id: Uuid) {
     conn.execute(
         "INSERT INTO zeroship.organizations (id, slug, name, billing_email) \
          VALUES ($1, $2, 'Migrate Fixture', 'fixture@zeroship.test')",
-        &[&organization_id, &format!("migrated-org-{}", Uuid::new_v4().simple())],
+        &[
+            &organization_id,
+            &format!("migrated-org-{}", Uuid::new_v4().simple()),
+        ],
     )
     .await
     .expect("seed organization");
@@ -1489,6 +1492,24 @@ async fn a_created_then_migrated_database_is_usable_by_the_runtime_role_pg() {
         schema_privileges[0].get::<_, bool>(0),
         schema_privileges[0].get::<_, bool>(1),
     );
+    let publication =
+        zeroship_core::replication_names::publication_name(&schema).expect("test publication name");
+    let published_tables = conn
+        .query(
+            "SELECT c.relname
+               FROM pg_publication_rel AS pr
+               JOIN pg_publication AS p ON p.oid = pr.prpubid
+               JOIN pg_class AS c ON c.oid = pr.prrelid
+               JOIN pg_namespace AS n ON n.oid = c.relnamespace
+              WHERE p.pubname = $1 AND n.nspname = $2
+              ORDER BY c.relname",
+            &[&publication, &schema],
+        )
+        .await
+        .expect("read publication membership")
+        .iter()
+        .map(|row| row.get::<_, String>(0))
+        .collect::<Vec<_>>();
     println!(
         "information_schema.table_privileges for {runtime_role}.notes: \
          {app_table_privileges:?}"
@@ -1529,66 +1550,35 @@ async fn a_created_then_migrated_database_is_usable_by_the_runtime_role_pg() {
     );
     assert_eq!(
         audit_table_privileges,
-        vec!["INSERT"],
-        "the interim table grant must still leave the audit table INSERT-only"
+        vec!["DELETE", "INSERT", "SELECT", "UPDATE"],
+        "every table in the app schema must receive ordinary DML"
     );
     assert_eq!(
         sequence_privileges,
-        (true, false, false),
-        "the audit serial sequence must grant only USAGE"
+        (true, true, false),
+        "the app role must be able to use and read its schema sequences"
     );
     assert_eq!(
         schema_privileges,
         (true, false),
         "the runtime role must enter its schema but cannot author objects"
     );
+    for required in [
+        "notes",
+        zeroship_migrate_server::provisioning::AUDIT_UNMASK_TABLE,
+        "__zeroship_schema_migrations",
+    ] {
+        assert!(
+            published_tables.iter().any(|table| table == required),
+            "successful apply omitted {required} from publication {publication}: {published_tables:?}"
+        );
+    }
 }
 
-/// THE APPLY PATH'S OWN CALL ORDER, BOUND - not the constraint re-proved.
+/// A real apply leaves the audit writer operational through the runtime role.
 ///
-/// `provision_audit_unmask_table` has to run BEFORE THE LAST
-/// `apply::provision_runtime_app_role`, because that function explicitly finds
-/// the table and its `BIGSERIAL` sequence before granting only INSERT and USAGE.
-/// Get it wrong and both lookups are no-ops, so every `unmask()` answers
-/// `permission denied` and the record of who read plaintext is lost.
-///
-/// WHY THIS CASE EXISTS AT ALL. `apply::live_audit_unmask_provisioning::
-/// the_audit_table_must_be_provisioned_before_the_runtime_role` already proves
-/// the CONSTRAINT is real, by calling the two functions itself in three orders.
-/// It cannot see `apply.rs`. Swap the audit-table creation with the last
-/// `provision_runtime_app_role` in `apply_ir_request` and that case stays green,
-/// because it never asks what order production uses. This one runs a real apply
-/// through the HTTP surface and then reaches the table the way the worker does,
-/// so the order under test is the order that ships. Measured both ways on
-/// `PostgreSQL` 17.11 (`server_version_num=170011`): green as written, and
-/// `permission denied for table __zeroship_audit_unmask` with the two calls
-/// swapped.
-///
-/// IF THE CREATION WERE DELETED OUTRIGHT rather than moved, this fails one
-/// assertion earlier and says so: `to_regclass` resolves nothing, so the
-/// existence assertion goes first and names deletion. That ordering is
-/// deliberate - `has_table_privilege` ERRORS on a missing relation, and a probe
-/// that panics inside the driver would report a reordering hazard as a malformed
-/// query.
-///
-/// THE REAL INSERT IS THE DECISIVE ASSERTION, and the two catalog probes above
-/// it are only for diagnosis. `has_table_privilege` is blind to schema `USAGE`:
-/// measured on the same server, a role with `INSERT` on a table but no `USAGE`
-/// on its schema probes `t` and still fails the write with `permission denied
-/// for schema`. Only executing the statement covers schema USAGE, the table ACL
-/// and the sequence ACL at once - which is all three objects the ordering hazard
-/// can cost.
-///
-/// WHAT IT DOES NOT BIND. Any position that satisfies the constraint stays green,
-/// including moving the creation down beside the second `provision_runtime_app_role`
-/// - correctly, since the resulting privileges are identical. It also rules only
-/// on the SUCCESS path: a creation moved into the `Ok` arm would leave an app
-/// whose apply was refused with a schema and no audit table, and this case would
-/// not see it. The COLUMNS are the DDL's own NOT NULL set, not a copy of the data
-/// plane's INSERT list, so a column added on the plugin-db side cannot make this
-/// a false red - that pairing is held by
-/// `zeroship-data-v8/tests/integration.rs`, which drives the real
-/// `write_audit_unmask_row` against this same production DDL.
+/// The catalog probes diagnose missing table or sequence grants. The write uses
+/// the worker-to-app identity chain and is the binding correctness check.
 #[ntex::test]
 async fn a_real_apply_leaves_the_runtime_role_able_to_write_the_unmask_audit_row_pg() {
     let conn = admin_conn().await;
@@ -1621,15 +1611,11 @@ async fn a_real_apply_leaves_the_runtime_role_able_to_write_the_unmask_audit_row
     let runtime_role =
         zeroship_core::database_role::per_app_role_name(&schema).expect("test app role name");
 
-    // DELETION, not reordering: say which one before touching any privilege.
     assert!(
         relation_exists(&conn, &audit).await,
-        "a successful apply must leave {audit} in place - the apply path is the \
-         ONLY creator of the unmask audit table since the DDL left the worker, \
-         so if this is absent the creation is gone rather than misplaced"
+        "a successful apply must leave {audit} in place"
     );
 
-    // Diagnosis: which half of the explicit append recipe was missed.
     let lit = |s: &str| s.replace('\'', "''");
     assert!(
         probe_bool(
@@ -1641,9 +1627,7 @@ async fn a_real_apply_leaves_the_runtime_role_able_to_write_the_unmask_audit_row
             ),
         )
         .await,
-        "the runtime role must hold INSERT on {audit}; this is false when \
-         apply_ir_request creates the table after its last \
-         provision_runtime_app_role"
+        "the runtime role must hold INSERT on {audit}"
     );
     assert!(
         probe_bool(
@@ -1655,12 +1639,9 @@ async fn a_real_apply_leaves_the_runtime_role_able_to_write_the_unmask_audit_row
             ),
         )
         .await,
-        "the runtime role must hold USAGE on the BIGSERIAL sequence behind \
-         {audit} - the second object the same ordering mistake costs, and the \
-         one that would still fail if the table grant alone were repaired"
+        "the runtime role must hold USAGE on the BIGSERIAL sequence behind {audit}"
     );
 
-    // The write itself, as the worker, by the production identity chain.
     let write = as_app_runtime_identity(
         &conn,
         &schema,
@@ -1672,14 +1653,9 @@ async fn a_real_apply_leaves_the_runtime_role_able_to_write_the_unmask_audit_row
     .await;
     assert!(
         write.is_ok(),
-        "the worker must be able to write an unmask audit row after a real \
-         apply; this is the statement crud/unmask.rs issues on every plaintext \
-         read, and a failure here is every unmask() in the app returning \
-         permission denied: {write:?}"
+        "the worker must be able to write an unmask audit row after apply: {write:?}"
     );
 
-    // And it landed - an INSERT that silently affected nothing would pass the
-    // line above.
     let rows: i64 = conn
         .query(&format!("SELECT count(*)::int8 FROM {audit}"), &[])
         .await
