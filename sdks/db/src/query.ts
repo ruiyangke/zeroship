@@ -5,6 +5,7 @@ import type { FieldDef } from "./types";
  * executes the native find call only when awaited or .then() is called.
  */
 import { mapResultDoc } from "./utils";
+import { isIdValue } from "./identity.js";
 import {
   InvalidOperationError,
   NotFoundError,
@@ -15,6 +16,8 @@ import {
   Result,
   Row,
   type Actor,
+  type IdValue,
+  type RowId,
   type WithRelations,
   type WithSpec,
   ok,
@@ -35,18 +38,9 @@ type NativeFn = (
  */
 type CursorState = {
   orderBy: Record<string, 1 | -1>;
-  /**
-   * The last row's value for EVERY ordering key, not just the first.
-   *
-   * An earlier shape carried a single `lastValue` taken from
-   * `Object.keys(orderBy)[0]`, which made the seek predicate assume the
-   * emitted order was `(firstKey, id)`. It is not: the order is the caller's
-   * sort verbatim with no primary-key tiebreak appended, so on any multi-key
-   * sort the seek and the order disagreed and rows between them were skipped
-   * permanently. Seeking lexicographically requires every key's value.
-   */
+  /** Values for every ordering key in the last returned row. */
   lastValues: Record<string, unknown>;
-  lastId: string;
+  lastId: IdValue;
 };
 
 /** Page envelope returned by `Query.paginate()`. Matches Convex's shape so
@@ -60,7 +54,29 @@ export type PaginationResult<R> = {
 /** Base64-encode a CursorState using `btoa` so the cursor is a plain
  *  opaque string callers can round-trip through query params / URLs. */
 function encodeCursor(state: CursorState): string {
-  return btoa(JSON.stringify(state));
+  const json = JSON.stringify({
+    orderBy: state.orderBy,
+    lastValues: Object.fromEntries(Object.entries(state.lastValues).map(([key, value]) => [key, encodeCursorValue(value)])),
+    lastId: encodeCursorValue(state.lastId),
+  });
+  return btoa(Array.from(new TextEncoder().encode(json), byte => String.fromCharCode(byte)).join(""));
+}
+
+function encodeCursorValue(value: unknown): unknown {
+  if (typeof value === "bigint") return { bigint: value.toString() };
+  // Wrap JSON values so their keys cannot be mistaken for scalar type tags.
+  return value !== null && typeof value === "object" ? { json: value } : value;
+}
+
+function decodeCursorValue(value: unknown): unknown {
+  if (value === null || typeof value !== "object") return value;
+  if (Object.keys(value).length === 1) {
+    if ("json" in value) return value.json;
+    if ("bigint" in value && typeof value.bigint === "string" && /^-?(0|[1-9]\d*)$/.test(value.bigint)) {
+      return BigInt(value.bigint);
+    }
+  }
+  throw new TypeError("invalid cursor value");
 }
 
 /** Decode and shape-check a base64-JSON cursor string. Throws with
@@ -73,7 +89,7 @@ function decodeCursor(cursor: string): CursorState {
     });
   let decoded: string;
   try {
-    decoded = atob(cursor);
+    decoded = new TextDecoder("utf-8", { fatal: true }).decode(Uint8Array.from(atob(cursor), char => char.charCodeAt(0)));
   } catch {
     throw invalid();
   }
@@ -89,12 +105,25 @@ function decodeCursor(cursor: string): CursorState {
     Array.isArray(parsed) ||
     typeof (parsed as CursorState).orderBy !== "object" ||
     (parsed as CursorState).orderBy === null ||
-    typeof (parsed as CursorState).lastId !== "string" ||
-    (parsed as CursorState).lastId.length === 0
+    Array.isArray((parsed as CursorState).orderBy) ||
+    typeof (parsed as CursorState).lastValues !== "object" ||
+    (parsed as CursorState).lastValues === null ||
+    Array.isArray((parsed as CursorState).lastValues)
   ) {
     throw invalid();
   }
-  return parsed as CursorState;
+  const state = parsed as CursorState;
+  try {
+    const lastId = decodeCursorValue(state.lastId);
+    if (!isIdValue(lastId) || lastId === "") throw invalid();
+    const lastValues = Object.fromEntries(Object.entries(state.lastValues).map(([key, value]) => [key, decodeCursorValue(value)]));
+    for (const [key, direction] of Object.entries(state.orderBy)) {
+      if ((direction !== 1 && direction !== -1) || !Object.hasOwn(lastValues, key)) throw invalid();
+    }
+    return { orderBy: state.orderBy, lastValues, lastId };
+  } catch {
+    throw invalid();
+  }
 }
 
 /** Compare two `{ field: 1 | -1 }` orderBy objects key-set and direction.
@@ -141,7 +170,7 @@ export class Query<
   private _limit: number | undefined;
   private _skip: number | undefined;
   private _select: string[] | undefined;
-  private _afterId: string | undefined;
+  private _afterId: RowId<S> | undefined;
   private _with: WithSpec | undefined;
   private _unmask: string[] | undefined;
   private _actor: Actor | undefined;
@@ -211,7 +240,7 @@ export class Query<
    * Cursor-based pagination: returns documents with `id > afterId`.
    * Merges an `{ id: { $gt: afterId } }` condition into the filter at execution time.
    */
-  after(id: string): this {
+  after(id: RowId<S>): this {
     this._afterId = id;
     return this;
   }
@@ -388,10 +417,10 @@ export class Query<
       if (!isDone && kept.length > 0) {
         const last = page[page.length - 1] as PlainObject;
         const lastId = last[key];
-        if (typeof lastId !== "string" || lastId.length === 0) {
+        if (!isIdValue(lastId) || lastId === "") {
           return err(
             Object.assign(
-              new TypeError(`paginate: row id must be a non-empty string (got ${typeof last[key]})`),
+              new TypeError("paginate: row id must be text or a finite numeric value"),
               { code: "PAGINATE_INVALID_ID" as const },
             ),
           );

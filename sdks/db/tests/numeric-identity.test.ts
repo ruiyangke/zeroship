@@ -4,6 +4,7 @@ import { Collection } from "../src/collection.js";
 import { loadRelations } from "../src/collection/relations.js";
 import { t, type InferId, type PlainObject } from "../src/types.js";
 import type { NativeDb } from "../src/native.js";
+import type { TxCollection } from "../src/db-types.js";
 
 const fields = { id: t.bigInt().required().primaryKey(), label: t.string() };
 
@@ -102,3 +103,25 @@ function untypedContracts(collection: Collection) {
   void collection.get(7);
 }
 void untypedContracts;
+
+async function transactionContracts(tx: TxCollection<typeof fields>) {
+  for (const id of [0, 9007199254740993n]) {
+    await tx.get(id);
+    await tx.get(id, {select:["id"]});
+    await tx.update(id, {label:"changed"});
+    await tx.delete(id);
+    await tx.purge(id);
+    await tx.restore(id);
+    const unmasked = await tx.bulkUnmask([{id,columns:["label"]}], {actor:{kind:"support",id:"usr_reader"}});
+    const key: number | bigint = [...unmasked.keys()][0];
+    await tx.find().after(id);
+    void key;
+  }
+  // @ts-expect-error Transaction identities follow the numeric schema.
+  await tx.get("7");
+  // @ts-expect-error Mutation shorthand follows the numeric schema.
+  await tx.update("7", {label:"changed"});
+  // @ts-expect-error Cursor shorthand follows the numeric schema.
+  await tx.find().after("7");
+}
+void transactionContracts;
