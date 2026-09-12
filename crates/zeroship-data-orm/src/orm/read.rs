@@ -852,9 +852,9 @@ fn scalar_kind<'a>(path: &FieldPath, sources: &'a [SourceLayout]) -> Result<&'a 
         .and_then(Value::as_str)
         .ok_or_else(|| invalid(format!("field '{field}' has no declared type")))?;
     match kind {
-        "string" | "text" | "ref" | "enum" => Ok("string"),
-        "date" | "timestamp" => Ok("timestamp"),
-        "integer" | "int" | "bigInt" => Ok("integer"),
+        "string" | "text" | "id" | "ref" | "enum" => Ok("string"),
+        "date" | "timestamp" | "timestamptz" => Ok("timestamp"),
+        "integer" | "int" | "bigint" | "bigInt" => Ok("integer"),
         "number" | "float" | "double" => Ok("number"),
         "boolean" | "bool" => Ok("boolean"),
         "bytes" | "calendarDate" | "time" => Ok(kind),
@@ -875,21 +875,15 @@ fn scalar_definition(expression: &Operand, sources: &[SourceLayout]) -> Result<V
                 .ok_or_else(|| invalid("aggregate requires a column"))?;
             let kind = scalar_kind(path, sources)?;
             let definition = &source_for(path, sources)?.schema[path.root().as_str()];
-            let exact_decimal = crate::sql::descriptors::is_exact_decimal(definition);
+            if !crate::sql::descriptors::supports_aggregate(definition, aggregate.func()) {
+                return Err(invalid(
+                    "aggregate requires a compatible portable scalar column",
+                ));
+            }
             if matches!(aggregate.func(), AggregateFunc::Sum | AggregateFunc::Avg) {
-                if !matches!(kind, "integer" | "number") || exact_decimal {
-                    return Err(invalid(
-                        "sum and avg require an integer or floating point number column",
-                    ));
-                }
                 return Ok(
                     crate::value!({"type": if aggregate.func() == AggregateFunc::Avg || kind == "number" { "number" } else { "bigInt" }}),
                 );
-            }
-            if matches!(kind, "boolean" | "bytes") || exact_decimal {
-                return Err(invalid(
-                    "min and max require an ordered portable scalar column",
-                ));
             }
             path
         }
@@ -898,7 +892,7 @@ fn scalar_definition(expression: &Operand, sources: &[SourceLayout]) -> Result<V
     Ok(source_for(path, sources)?.schema[path.root().as_str()].clone())
 }
 
-fn decode_scalars(
+pub(crate) fn decode_scalars(
     registration: &crate::sql::registration::SqlRegistration,
     schema: &Value,
     rows: &mut [Value],
@@ -909,21 +903,20 @@ fn decode_scalars(
         };
         for (slot, value) in fields {
             if let Value::Decimal(decimal) = value {
-                *value =
-                    match schema[slot]["type"].as_str() {
-                        Some("int" | "integer" | "bigInt") => decimal
-                            .parse::<i64>()
-                            .map(Value::from)
-                            .map_err(|_| invalid("aggregate integer is out of range"))?,
-                        Some("number") => {
-                            let number = decimal
-                                .parse::<f64>()
-                                .map_err(|_| invalid("invalid numeric aggregate"))?;
-                            Value::try_from(number)
-                                .map_err(|_| invalid("aggregate number is out of range"))?
-                        }
-                        _ => continue,
-                    };
+                *value = match schema[slot]["type"].as_str() {
+                    Some("int" | "integer" | "bigint" | "bigInt") => decimal
+                        .parse::<i64>()
+                        .map(Value::from)
+                        .map_err(|_| invalid("aggregate integer is out of range"))?,
+                    Some("number") => {
+                        let number = decimal
+                            .parse::<f64>()
+                            .map_err(|_| invalid("invalid numeric aggregate"))?;
+                        Value::try_from(number)
+                            .map_err(|_| invalid("aggregate number is out of range"))?
+                    }
+                    _ => continue,
+                };
             }
         }
     }

@@ -37,7 +37,7 @@ mod write_pipeline;
 
 #[cfg(test)]
 pub use write_pipeline::{
-    reset_write_path_counters_for_tests, write_path_counters_for_tests, WritePathCounters,
+    WritePathCounters, reset_write_path_counters_for_tests, write_path_counters_for_tests,
 };
 
 /// Execute a row-returning mutation, emit its change event and process the result.
@@ -72,9 +72,7 @@ pub(crate) async fn exec_aggregate_read(
 ) -> Result<read_pipeline::ApplyResult, DbError> {
     let mut rows = exec_query(&route, bq).await?;
     if let Some(projection) = &result_projection {
-        route
-            .sql_registration()
-            .decode_rows(&projection.schema, &mut rows)?;
+        crate::orm::read::decode_scalars(route.sql_registration(), &projection.schema, &mut rows)?;
     }
     read_pipeline::apply(
         &route,
@@ -83,10 +81,9 @@ pub(crate) async fn exec_aggregate_read(
         rows,
         read_pipeline::ApplyOptions {
             unmask_columns: &[],
-            schema_field_scope: if group_fields.is_empty() {
-                read_pipeline::SchemaFieldScope::All
-            } else {
-                read_pipeline::SchemaFieldScope::Only(group_fields.as_slice())
+            schema_field_scope: match &result_projection {
+                Some(_) => read_pipeline::SchemaFieldScope::Only(group_fields.as_slice()),
+                None => read_pipeline::SchemaFieldScope::All,
             },
             // A `$group` result's keys are accumulator aliases, which no
             // descriptor declares, so the declared surface would drop

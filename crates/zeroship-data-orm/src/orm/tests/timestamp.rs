@@ -168,6 +168,18 @@ async fn exercise_timestamp_extrema(postgres: bool) {
         rows[0]["latest"],
         Value::Timestamp(1_767_398_400_000)
     ));
+
+    let Output::Rows { rows, .. } = events
+        .execute(Operation::Aggregate {
+            pipeline: value!([{"$group":{"instant":{"$count":true}}}]),
+            options: value!({}),
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("aggregate must return rows")
+    };
+    assert_eq!(rows, vec![value!({"instant":2})]);
     owner.close().await;
 }
 
