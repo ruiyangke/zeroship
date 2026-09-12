@@ -41,72 +41,13 @@
 # it in; an ambient variable that silently redirects a gate is how gates get
 # silently disabled.
 #
-# TWO RUNS AT ONCE ARE GREEN, AND HERE IS WHAT IT TOOK.
-# A shared database shares DATABASE-SCOPED SINGLETONS, which no migration hash
-# can see (tests/lib/suite_db.sh says why). Running two suites together is the
-# only instrument that finds them, and it found these:
-#
-#   the active OP signing key   3 fixtures published a constant-seed key per
-#                               test; a peer run retired it and the republish
-#                               died. 96 failures -> 0.
-#   5 rate-limit bucket keys    a shared client ip, or none at all, so a peer
-#                               drained the bucket and a 429 arrived where the
-#                               test asserts 401 / 303 / 200 / 302. The last of
-#                               them was `reset_ip:0.0.0.0`, shared by the three
-#                               /reset POSTs in password_reset_test.
-#   4 globally-named DDL        triggers and a CHECK constraint installed on
-#     objects on shared tables  zeroship.{users,magic_links,magic_completions,
-#                               email_verifications}. Per-run NAMES and a WHEN
-#                               clause (or predicate) naming the run's own row;
-#                               the model is signing_key_retention_test.rs:643,
-#                               which has done both since it was written.
-#
-# MEASURED 2026-08-20 on this cluster, THREE pairs run one after another, each
-# pair two whole gates started together on the ONE shared database:
-#
-#   pair 1   641/0 and 641/0    277s of 279s overlapping
-#   pair 2   641/0 and 641/0    286s of 303s
-#   pair 3   641/0 and 641/0    304s of 316s
-#
-# and the one-variable control, the same two runs against a database EACH:
-#
-#   641/0 and 641/0             265s of 281s
-#
-# so the concurrency cost on a shared database is now zero tests, not "a few".
-#
-# WHAT THE INSTRUMENT LOOKS LIKE WHEN IT IS WORKING, because a green whole-gate
-# pair is a weak signal: 641 tests dilute a handful of colliding ones, and a
-# pre-fix pair of whole gates ALSO reported 641/0 twice on this cluster. Run
-# only the four colliding modules in both processes instead -
-#
-#   cargo test -p zeroship-auth --test main --no-fail-fast -- --test-threads 1 \
-#     magic_link_test:: password_reset_test:: store::email_verification:: \
-#     signup_forgot_ratelimit_test::
-#
-# - twice at once, and the collisions concentrate. Five such pairs before the
-# fixes: 9 of 10 runs red. Five after: 0 of 10.
-#
-# AND THE PART THAT WAS WORSE THAN "CONCURRENT RUNS GO RED": one of those tests
-# POISONED THE SHARED DATABASE FOR EVERY LATER RUN, INCLUDING SINGLE ONES.
-# `signup_forgot_ratelimit_test` inserts a user named `M3_FAIL` and used to add
-# `CHECK (name <> 'M3_FAIL')` to zeroship.users under a fixed name. Lose the
-# race, panic between the insert and the cleanup, and the row stays - and
-# because nothing ever drops this database, it stayed forever:
-#     add test constraint: ... check constraint
-#     "auth_users_signup_m3_name_check" of relation "users" is violated by
-#     some row      (SqlState 23514)
-# on ONE row left by a concurrent run that died mid-test. No concurrency was
-# involved in that failure; the residue was. The constraint now names one
-# email, so a leaked one can never match another row.
-#
-# RECOVERY IS ONE COMMAND, and it is the thing to reach for whenever this gate
-# fails in a way that looks like state rather than code:
-#
-#     psql -c 'DROP DATABASE zeroship_auth_test_<hash>'
-#
-# The next run recreates and re-migrates it in about a minute. That is the
-# whole point of deriving the name - the database is reproducible, so throwing
-# it away costs nothing and no one has to decide whether it was still wanted.
+# Auth fixtures are being moved to owned PostgreSQL containers. Store tests
+# and password-reset HTTP tests manage their own servers, roles and teardown;
+# the password_reset:: filter selects the reset storage and HTTP groups.
+# Other auth and mailer cases still need the configured backends below.
+# A configured database does not establish test isolation: shared signing
+# keys, rate-limit buckets and test DDL remain fixture concerns until those
+# cases also own their mutable resources.
 #
 # PROVISION FIRST. This script creates and migrates a DATABASE; it does not
 # create a SERVER, and it refuses rather than guessing if none is listening.

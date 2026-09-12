@@ -43,7 +43,7 @@ mod oidc_login_consent_test;
 mod oidc_refresh_token_test;
 mod oidc_token_client_auth_test;
 mod oidc_userinfo_test;
-mod password_reset_test;
+mod password_reset;
 mod password_test;
 mod postmark_webhook_test;
 mod relay_auto_revoke_test;
