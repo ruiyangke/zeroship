@@ -585,9 +585,7 @@ async function compileSchedules(
           `in ${registration.filePath}: ${message}`,
       );
     }
-    const schedule = JSON.parse(JSON.stringify(compiled)) as Record<string, unknown>;
-    const overlap = schedule.overlap;
-    const catchUp = schedule.catchUp;
+    const { overlap, catchUp, ...schedule } = JSON.parse(JSON.stringify(compiled)) as Record<string, unknown>;
     if (overlap !== "allow" && overlap !== "skipIfRunning") {
       throw new Error(
         `[zeroship:manifest] invalid workflow schedule ${JSON.stringify(registration.name)}: ` +

@@ -55,7 +55,11 @@ select compatibility semantics from it.
 `workflows` carries the build-discovered workflow declarations. Control and
 worker-side workflow apply use it to reject starts or continue-as-new successors
 for workflows that are not declared by the active deploy. `schedules` carries
-build-discovered workflow schedule registrations.
+build-discovered workflow schedule registrations. Each registration carries
+`name`, `workflowName`, `input`, `overlap` and `catchUp`. Its `schedule` object
+contains timing only: `kind: "cron"` with `cron_expr` and `tz`, or
+`kind: "interval"` with `interval_ms` and `anchor`. Scheduling policies appear
+on the registration and are not duplicated inside the timing object.
 
 ## Network Requests
 
