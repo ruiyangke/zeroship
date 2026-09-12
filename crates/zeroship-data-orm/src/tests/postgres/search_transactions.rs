@@ -111,12 +111,12 @@ async fn backend(host: &Host) -> zeroship_data_orm::backend::BackendHandle {
 /// A route that claims the app's open transaction — what `CapturedRoute::capture`
 /// produces for a dispatch issued inside `db.transaction(fn)`.
 async fn tx_route(host: &Host, app: &str) -> TxRoute {
-    CapturedRoute::tx_for_tests(app, SqlDialect::Postgres).bind(backend(host).await)
+    CapturedRoute::tx_for_tests(app, SqlDialect::Postgres).bind(backend(host).await).unwrap()
 }
 
 /// A route outside any transaction.
 async fn pool_route(host: &Host, app: &str) -> TxRoute {
-    CapturedRoute::pool_for_tests(app, SqlDialect::Postgres).bind(backend(host).await)
+    CapturedRoute::pool_for_tests(app, SqlDialect::Postgres).bind(backend(host).await).unwrap()
 }
 
 /// Run the real `plan_find` + `run_find` pair on `route`.

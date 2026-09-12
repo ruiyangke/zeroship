@@ -21,6 +21,7 @@ use zeroship_data_orm::error::DbError;
 // Private imports used to compose ORM operations with isolate state.
 use zeroship_data_orm::cdc::{broker, read_set};
 use zeroship_data_orm::{backend, descriptor, metrics, transaction, tx_route};
+#[cfg(test)]
 use zeroship_data_orm::sql::compile;
 
 pub(crate) mod context;

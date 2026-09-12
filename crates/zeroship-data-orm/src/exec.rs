@@ -445,7 +445,7 @@ pub fn ambient_route_for_tests(app_id: &str, backend: crate::backend::BackendHan
     // Sync, and it can be: only the COLD path needs to await, and a harness
     // driving exec directly has already opened a backend. Production binds
     // through `tx_scope::bind_route`, which owns the cold arm.
-    captured.bind(backend)
+    captured.bind(backend).expect("test route registration matches backend")
 }
 
 #[cfg(test)]
@@ -577,21 +577,9 @@ mod tests {
     /// `CapturedRoute::pool_for_tests` hardcoded. Every SQLite harness that
     /// reaches this helper - `tests::fixtures::unit_route` and the whole of
     /// `crates/zeroship-data-orm/src/tests/sqlite/` - therefore carried a route claiming
-    /// PostgreSQL over a rusqlite connection. It did no damage only because no
-    /// path those fixtures take reads the dialect off the route; the 34
-    /// `route.dialect()` reads in `crud/mod.rs` are one fixture away.
-    ///
-    /// **There is no PostgreSQL arm here and that is not an omission**: a
-    /// `BackendHandle::Postgres` needs a live server, which no unit in this
-    /// module opens. `crates/zeroship-data-orm/src/tests/postgres/unmask_transactions.rs` is the Postgres-side harness, and
-    /// it now names its dialect at the two `CapturedRoute` constructors rather
-    /// than inheriting one. What stands in for that arm below is a control that
-    /// needs no server: the same SQLite handle, bound to a route captured with
-    /// `Postgres` explicitly, must still answer `Postgres` - so the SQLite
-    /// answer above came from the derivation in [`ambient_route_for_tests`] and
-    /// not from `bind` quietly inspecting the handle.
+    /// A captured compiler registration cannot be rebound to another backend.
     #[test]
-    fn an_ambient_test_route_speaks_the_dialect_of_the_backend_it_was_handed() {
+    fn an_ambient_route_captures_and_verifies_the_sql_registration() {
         run(async {
             let dir = tempfile::tempdir().expect("tempdir");
             let sqlite = Rc::new(
@@ -611,17 +599,12 @@ mod tests {
                  every builder it reaches would emit the wrong SQL",
             );
 
-            let stated = crate::tx_route::CapturedRoute::pool_for_tests(
+            let mismatch = crate::tx_route::CapturedRoute::pool_for_tests(
                 "app_route_dialect",
                 crate::sql::compile::SqlDialect::Postgres,
             )
             .bind(handle);
-            assert_eq!(
-                stated.dialect(),
-                crate::sql::compile::SqlDialect::Postgres,
-                "the dialect is the constructor's input; `bind` must not \
-                 re-derive it from the handle",
-            );
+            assert!(mismatch.is_err());
         });
     }
 
