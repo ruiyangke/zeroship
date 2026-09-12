@@ -4,6 +4,8 @@ mod budget;
 pub use budget::{ExecutionBudget, ExecutionGuard};
 mod payloads;
 pub use payloads::{TaskPayloadReader, TaskPayloads};
+mod outputs;
+pub use outputs::{PreparedExecution, TaskPayloadLimits};
 
 use super::{
     CompletionReceipt, ControlIntent, Heartbeat, RemoteTasks, TaskAssignment, TaskToken,

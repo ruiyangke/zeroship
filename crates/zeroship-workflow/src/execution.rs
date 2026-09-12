@@ -78,16 +78,7 @@ impl WorkflowExecution {
     /// # Errors
     /// Rejects malformed or empty outcome batches.
     pub fn from_runtime_value(value: Value) -> Result<Self, WorkflowServiceError> {
-        let outcomes = value
-            .get("outcomes")
-            .and_then(Value::as_array)
-            .ok_or_else(|| {
-                WorkflowServiceError::InvalidRequest(
-                    "workflow execution requires an outcome batch".into(),
-                )
-            })?;
-        let outcomes = normalize_workflow_outcomes(outcomes.clone(), value.get("error").cloned())
-            .map_err(WorkflowServiceError::InvalidRequest)?;
+        let outcomes = decode_runtime_outcomes(value)?;
         let outcomes = serde_json::from_value(Value::Array(outcomes)).map_err(|e| {
             WorkflowServiceError::InvalidRequest(format!("invalid workflow outcomes: {e}"))
         })?;
@@ -111,6 +102,17 @@ impl WorkflowExecution {
         StepResult::from_outcomes(run_id, dispatch_nonce, self.outcomes)
             .map_err(WorkflowServiceError::InvalidRequest)
     }
+}
+
+pub(crate) fn decode_runtime_outcomes(mut value: Value) -> Result<Vec<Value>, WorkflowServiceError> {
+    let error = value.get_mut("error").map(Value::take);
+    let outcomes = value.get_mut("outcomes").map(Value::take);
+    let Some(Value::Array(outcomes)) = outcomes else {
+        return Err(WorkflowServiceError::InvalidRequest(
+            "workflow execution requires an outcome batch".into(),
+        ));
+    };
+    normalize_workflow_outcomes(outcomes, error).map_err(WorkflowServiceError::InvalidRequest)
 }
 
 /// The host owns code loading; the service owns the journal.

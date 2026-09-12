@@ -55,7 +55,15 @@ its bound identity cannot change between operations.
 Task hosts instead use `runner::TaskPayloadReader`: it captures the assignment's
 journal, resolves named occurrences in that snapshot and reads referenced
 objects through the live task lease. `EmbeddedTasks` and `RemoteTasks` implement
-the same payload-read contract alongside their shared task protocol.
+the same payload read/write contract alongside their shared task protocol.
+`runner::PreparedExecution` decodes runtime outcomes, leaves small values inline
+and prepares task-scoped uploads for large or explicitly referenced results.
+It retains upload request identities across retries, checks returned descriptors
+and returns journal-ready outcomes only after uploads are confirmed. Host limits
+come from `TaskPayloadLimits`; the service enforces its app policy independently.
+An exceeded payload limit becomes a terminal failure while retaining the valid
+preceding outcomes. Object references still require service ownership validation
+when the task completes.
 The schema check uses the built `@zeroship/migrate` and `zero-migrate-cli`
 packages and their native migration addon; regenerate with
 `node crates/zeroship-workflow/schema/generate.mjs` from the repository root.

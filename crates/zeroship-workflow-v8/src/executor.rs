@@ -1,11 +1,14 @@
 //! V8 lifecycle adapter for the shared workflow runner.
 
 use async_trait::async_trait;
-use std::{future::Future, rc::Rc, task::Poll};
+use std::{future::Future, rc::Rc, task::Poll, time::Duration};
 use zeroship_runtime::{CancelFlag, EnvSnapshot, RequestCtx, Runtime, WorkflowOutcome};
 use zeroship_workflow::{
     service::{
-        runner::{ExecutionBudget, TaskExecution, TaskExecutor, TaskPayloadReader, TaskPayloads},
+        runner::{
+            ExecutionBudget, PreparedExecution, TaskExecution, TaskExecutor, TaskPayloadLimits,
+            TaskPayloadReader, TaskPayloads,
+        },
         TaskAssignment,
     },
     WorkflowExecution, WorkflowInvocation, WorkflowServiceError,
@@ -51,7 +54,7 @@ impl Drop for LoadedWorkflow {
 pub struct V8TaskExecutor {
     loader: Rc<dyn WorkflowRuntimeLoader>,
     payloads: Rc<dyn TaskPayloads>,
-    max_payload_bytes: usize,
+    payload_limits: TaskPayloadLimits,
 }
 impl std::fmt::Debug for V8TaskExecutor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -59,24 +62,20 @@ impl std::fmt::Debug for V8TaskExecutor {
     }
 }
 impl V8TaskExecutor {
-    /// Construct a host with bounded task-scoped payload reads.
+    /// Construct a host with bounded task-scoped payload reads and writes.
     ///
     /// # Errors
-    /// Rejects an empty payload read limit.
+    /// Rejects invalid payload limits.
     pub fn new(
         loader: Rc<dyn WorkflowRuntimeLoader>,
         payloads: Rc<dyn TaskPayloads>,
-        max_payload_bytes: usize,
+        payload_limits: TaskPayloadLimits,
     ) -> Result<Self, WorkflowServiceError> {
-        if max_payload_bytes == 0 {
-            return Err(WorkflowServiceError::InvalidRequest(
-                "workflow payload read limit must be positive".into(),
-            ));
-        }
+        payload_limits.validate()?;
         Ok(Self {
             loader,
             payloads,
-            max_payload_bytes,
+            payload_limits,
         })
     }
 }
@@ -96,8 +95,9 @@ impl TaskExecutor for V8TaskExecutor {
             payloads: Some(Rc::new(TaskPayloadReader::new(
                 self.payloads.clone(),
                 assignment,
-                self.max_payload_bytes,
+                self.payload_limits.max_payload_bytes,
             )?)),
+            output: Some((self.payloads.clone(), self.payload_limits)),
         }))
     }
 }
@@ -110,6 +110,7 @@ pub(crate) struct V8Execution {
     started: bool,
     budget: ExecutionBudget,
     payloads: Option<Rc<TaskPayloadReader>>,
+    output: Option<(Rc<dyn TaskPayloads>, TaskPayloadLimits)>,
 }
 impl V8Execution {
     pub(crate) fn loaded(
@@ -125,6 +126,7 @@ impl V8Execution {
             started: false,
             budget,
             payloads: None,
+            output: None,
         }
     }
 }
@@ -210,7 +212,33 @@ impl TaskExecution for V8Execution {
         if let Some(payloads) = &self.payloads {
             payloads.check()?;
         }
-        WorkflowExecution::from_runtime_json(&json)
+        // Freeze app effects before any host upload can yield. The task lease
+        // remains active while staging; app code has finished its frontier.
+        self.stop().await;
+        self.budget.check()?;
+        let Some((transport, limits)) = &self.output else {
+            return WorkflowExecution::from_runtime_json(&json);
+        };
+        let (_, assignment) = self
+            .loader
+            .as_ref()
+            .expect("task output requires an assignment");
+        let prepared = PreparedExecution::from_runtime_json(assignment, &json, *limits)?;
+        drop(json);
+        loop {
+            self.budget.check()?;
+            let staged = prepared.stage(transport.as_ref()).await;
+            self.budget.check()?;
+            match staged {
+                Err(WorkflowServiceError::Unavailable(_) | WorkflowServiceError::Timeout) => {
+                    // Retain the prepared bytes and request IDs when the upload
+                    // response is lost. The runner bounds retries by its lease
+                    // and execution timeout without invoking app code again.
+                    compio::time::sleep(Duration::from_millis(100)).await;
+                }
+                result => return result,
+            }
+        }
     }
 
     fn cancel(&mut self) {
