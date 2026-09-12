@@ -35,6 +35,7 @@
 //! isolated from other tests and released with the server.
 //! Run: `cargo xtask test data --filter 'test(column_grants::)'`
 
+use crate::crud::upsert::build_upsert;
 use crate::tests::fixtures::Host;
 #[allow(unused_imports)]
 use crate::tests::fixtures::schema::{fixture_table_sql, fixture_table_sql_for};
@@ -49,7 +50,7 @@ use crate::sql::compile::{
     build_insert_many, build_restore_many_with_assignments, build_restore_one_with_assignments,
     build_returning_expr, build_soft_delete_many_with_assignments,
     build_soft_delete_one_with_assignments, build_update_many_with_assignments,
-    build_update_one_with_assignments, build_upsert, quote_ident, raw_column_name,
+    build_update_one_with_assignments, quote_ident, raw_column_name,
 };
 use crate::sql::render::postgres::{render_delete, render_update};
 use crate::value::{Value, value};

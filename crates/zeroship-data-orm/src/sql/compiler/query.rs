@@ -17,7 +17,7 @@ pub enum ParameterType {
 }
 
 impl ParameterType {
-    fn of(value: &Value) -> Self {
+    pub(crate) fn of(value: &Value) -> Self {
         match value {
             Value::Null => Self::Null,
             Value::Bool(_) => Self::Bool,

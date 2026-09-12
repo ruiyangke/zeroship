@@ -25,6 +25,7 @@ mod identity;
 pub mod read_pipeline;
 mod update_validation;
 mod write_pipeline;
+pub mod upsert;
 
 #[cfg(test)]
 pub use write_pipeline::{
@@ -1238,7 +1239,7 @@ pub async fn run_upsert(
                 } else {
                     None
                 };
-            let bq = compile::build_upsert_with_assignments(
+            let bq = upsert::build_upsert_with_assignments(
                 binding.schema(),
                 &coll,
                 &schema,

@@ -22,6 +22,8 @@ mod public_contract;
 mod search_family;
 #[path = "sql/write_family.rs"]
 mod write_family;
+#[path = "sql/upsert_compiler.rs"]
+mod upsert_compiler;
 
 trait NumberedParameters {
     fn placeholder_count(&self) -> usize;
